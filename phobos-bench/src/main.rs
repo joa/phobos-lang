@@ -91,7 +91,7 @@ impl Options {
                 "--help" | "-h" => {
                     println!(
                         "usage: phobos-bench [--bench NAME] [--autotune \"DIM=VAL ...\"] \
-                         [--csv [PATH]] [--peak-fp32 TFLOPS] [--peak-fp16 TFLOPS]\n\
+                         [--csv [PATH]] [--peak-fp32 TFLOPS] [--peak-fp16tc TFLOPS] [--peak-fp16tcf32acc TFLOPS]\n\
                          \n  --bench NAME                run only one benchmark: {}\
                          \n  --autotune SPEC             pin autotune dims (skips the search), e.g.\
                          \n                              --bench gemm_fp16 --autotune \"TILE_M=256 TILE_N=128 TILE_K=16\"\
