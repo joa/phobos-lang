@@ -6,18 +6,21 @@
 @cluster(TILE_M in [16384, 65536], TILE_N in [16384, 65536], TILE_K in [16384, 65536])
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel gemm(A: tensor<f32>[M, K],
-             B: tensor<f32>[K, N],
-             C: tensor<f32>[M, N],
-             alpha: f32,
-             beta: f32) {
+            B: tensor<f32>[K, N],
+            C: tensor<f32>[M, N],
+            alpha: f32,
+            beta: f32) {
   let pm = program_id(0)
   let pn = program_id(1)
+
   var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+  
   for kt in range(0, K, TILE_K) {
     var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
     var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
     acc += dot(a, b)
   }
+  
   let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
   C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
 }
@@ -29,7 +32,7 @@ SGEMM performance is at 75% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPE
 
 ## Language
 
-See [SPEC](./SPEC.md) for details or checkout the [`examples/`](./examples).
+See [SPEC](./SPEC.md) for details or check out the [`examples/`](./examples).
 
 ## Autotuning
 
@@ -42,7 +45,7 @@ Phobos supports autotuning for finding the optimal configuration.
 Phobos supports Hierarchical AMT with lineage recovery out of the box given the language is scale-free.
 
 - **`phobos-sched`**: A central resource manager creates the global DAG and assigns sub-DAGs to specific nodes.
-- **`phobos-pod`**: A node-level runtime takes she sub-DAG and schedules the fine-grained operations (threads, network fetches, memory allocations) dynamically and out-of-order.
+- **`phobos-pod`**: A node-level runtime takes the sub-DAG and schedules the fine-grained operations (threads, network fetches, memory allocations) dynamically and out-of-order.
 - Communication via gRPC (see `phobos-cluster/proto`).
 
 ### Job Definition
@@ -59,7 +62,7 @@ dim N = 16384
 dim K = 16384
 tensor A = read  f32 16384x16384 file:///data/A.bin
 tensor B = read  f32 16384x16384 file:///data/B.bin
-tensor C = write f32 16384x16384 file:///data/C.bin
+tensor C = rmw   f32 16384x16384 file:///data/C.bin
 scalar alpha = f32 0.125
 scalar beta  = f32 1.5
 ```
@@ -72,7 +75,7 @@ Reduce VRAM to 4 GiB per pod.
 1. **Start scheduler**: `cargo run -p phobos-sched -- --listen 0.0.0.0:8881 --nodes 2 --job .\examples\matmul_cluster_job.txt --autotune --vram 4294967296`
 2. **Start pod 0**: `cargo run -p phobos-pod -- --id 0 --sched 127.0.0.1:8881 --listen 0.0.0.0:8882 --arena 4294967296`
 3. **Start pod 1**: `cargo run -p phobos-pod -- --id 1 --sched 127.0.0.1:8881 --listen 0.0.0.0:8883 --arena 4294967296`
-4. Output will be written to `C.bin`
+4. Output will be written to the job's `tensor C` URI (`file:///data/C.bin` in the example above)
 
 ```plain
 $ cargo run -p phobos-sched --            \
@@ -92,7 +95,7 @@ phobos-sched: listening on 0.0.0.0:8881, waiting for 2 node(s)
 [ 56.593s  INFO] sched: -> node1 issue segment 1 (92 instrs: 24 ALLOC, 20 LOAD, 20 COMPUTE, 4 STORE, 24 FREE; incr 704MiB)
 [ 71.059s  INFO] sched: all 184 instructions accounted (184 retired, 0 abandoned)
 [ 71.061s  INFO] job done; outputs:
-[ 71.062s  INFO]   file:///tmp/c.tensor
+[ 71.062s  INFO]   file:///data/C.bin
 ```
 
 ## Command-Line Tools
@@ -105,7 +108,7 @@ Sample kernels (`.ph`) and job files live in [`examples/`](./examples).
 cargo run -p phobos-bench --release
 ```
 
-Compiles and autotunes the bundled kernels at 4096^3 and prints throughput (against cuBLAS where a shim exists). Covers `saxpy_fp32`, `gemm_fp32`, `gemm_fp16tc_fp32acc` (tensor-core, f16 inputs with f32 accumulation), `gemm_fp16` (f16 inputs, output, and accumulation), `flash_fp32`, and `flash_fp16` (f16 Q/K/V/O with an f32 online-softmax state). Runs all of them by default; pass `--bench NAME` to run a single one, or `--help` for the full flag list. `--autotune "DIM=VAL ..."` pins the autotune dims (skipping the search) for the selected `--bench`; `--csv [PATH]` writes achieved throughput; `--peak-fp32`/`--peak-fp16 TFLOPS` override the detected roofline peaks.
+Compiles and autotunes the bundled kernels at 4096^3 and prints throughput (against cuBLAS where a shim exists). Covers `saxpy_fp32`, `gemm_fp32`, `gemm_fp16tc_fp32acc` (tensor-core, f16 inputs with f32 accumulation), `gemm_fp16` (f16 inputs, output, and accumulation), `flash_fp32`, and `flash_fp16` (f16 Q/K/V/O with an f32 online-softmax state). Runs all of them by default; pass `--bench NAME` to run a single one, or `--help` for the full flag list. `--autotune "DIM=VAL ..."` pins the autotune dims (skipping the search) for the selected `--bench`; `--csv [PATH]` writes achieved throughput; `--peak-fp32`/`--peak-fp16tc`/`--peak-fp16tcf32acc TFLOPS` override the detected roofline peaks.
 
 ### `phobos-sched`
 
