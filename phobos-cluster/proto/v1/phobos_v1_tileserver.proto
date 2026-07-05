@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package phobos.v1;
+
+message TileRequest {
+  uint64 tile = 1;
+  uint64 deadline_ms = 2;
+}
+
+message TileChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+}
+
+message KernelHash {
+  string hash = 1;
+}
+
+message KernelBlob {
+  string ptx = 1;
+}
+
+service TileServer {
+  rpc FetchTile(TileRequest) returns (stream TileChunk);
+  rpc GetKernel(KernelHash) returns (KernelBlob);
+}

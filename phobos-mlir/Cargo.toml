@@ -1,0 +1,18 @@
+[package]
+name = "phobos-mlir"
+version = "0.1.0"
+edition.workspace = true
+description = "The Phobos kernel language"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+phobos-base = { path = "../phobos-base" }
+anyhow = "1"
+melior.workspace = true
+mlir-sys.workspace = true
+inkwell.workspace = true
+llvm-sys.workspace = true

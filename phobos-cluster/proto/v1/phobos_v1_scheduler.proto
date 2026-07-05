@@ -1,0 +1,152 @@
+syntax = "proto3";
+
+package phobos.v1;
+
+import "v1/phobos_v1_isa.proto";
+
+// Node -> Scheduler
+
+message Register {
+  uint32 node_id = 1;          // assigned by the harness/launcher
+  string address = 2;          // this node's TileServer endpoint (host:port)
+  string sm_architecture = 3;
+  uint64 vram = 4;
+  double link_bandwidth = 5;
+}
+
+message CompleteItem {
+  uint64 iid = 1;
+  uint32 status = 2;           // 0 = ok
+  uint64 elapsed_ns = 3;
+}
+
+message Complete {
+  repeated CompleteItem batch = 1;
+}
+
+message Failed {
+  uint64 iid = 1;
+  string error = 2;
+}
+
+message MemoryWatermark {
+  uint64 bytes_used = 1;
+  uint64 bytes_budget = 2;
+}
+
+message Heartbeat {
+  uint32 node_id = 1;
+}
+
+message NodeMessage {
+  oneof payload {
+    Register register = 1;
+    Complete complete = 2;
+    Failed failed = 3;
+    MemoryWatermark memory_watermark = 4;
+    Heartbeat heartbeat = 5;
+  }
+}
+
+// Scheduler -> Node
+
+message TensorEntry {
+  uint32 index = 1;
+  string uri = 2;
+  DataType data_type = 3;
+  repeated uint64 shape = 4;
+  AccessMode mode = 5;
+}
+
+message KernelEntry {
+  uint32 index = 1;
+  string hash = 2;
+  string name = 3; // ptx entry-point
+}
+
+message KernelHolder {
+  string hash = 1;
+  uint32 node_id = 2;
+}
+
+message JobManifest {
+  repeated TensorEntry tensors = 1;
+  repeated KernelEntry kernels = 2;
+  repeated KernelHolder kernel_holders = 3;
+}
+
+message Kernel {
+  string hash = 1;
+  string ptx = 2;
+}
+
+message IssueSegment {
+  Segment segment = 1;
+}
+
+message TileLocation {
+  uint64 tile = 1;
+  uint32 node_id = 2;
+  string address = 3;
+}
+
+message Manifest {
+  repeated TileLocation tiles = 1;
+}
+
+message Cancel {
+  repeated uint64 iids = 1;
+}
+
+message SchedulerMessage {
+  oneof payload {
+    JobManifest job_manifest = 1;
+    Kernel kernel = 2;
+    IssueSegment issue_segment = 3;
+    Manifest manifest = 4;
+    Cancel cancel = 5;
+  }
+}
+
+// Client -> Scheduler
+
+message DimensionBinding {
+  string name = 1;
+  int64 value = 2;
+}
+
+message TensorInput {
+  string name = 1;
+  DataType data_type = 2;
+  repeated uint64 shape = 3;
+  AccessMode mode = 4;
+  string uri = 5;
+}
+
+message ScalarBinding {
+  string name = 1;
+  ScalarValue value = 2;
+}
+
+message Job {
+  string source = 1;
+  repeated DimensionBinding dimensions = 2;
+  repeated TensorInput tensors = 3;
+  repeated ScalarBinding scalars = 4;
+}
+
+message JobDone {
+  repeated string output_uris = 1;
+}
+
+message JobEvent {
+  oneof kind {
+    string progress = 1;
+    JobDone done = 2;
+  }
+}
+
+service Scheduler {
+  rpc Attach(stream NodeMessage) returns (stream SchedulerMessage);
+  rpc Submit(Job) returns (stream JobEvent);
+}

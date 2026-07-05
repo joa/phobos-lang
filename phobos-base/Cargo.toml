@@ -1,0 +1,13 @@
+[package]
+name = "phobos-base"
+version = "0.1.0"
+edition.workspace = true
+description = "The Phobos kernel language"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow = "1"

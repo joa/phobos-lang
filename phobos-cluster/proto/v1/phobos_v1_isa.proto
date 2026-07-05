@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package phobos.v1;
+
+enum DataType {
+  DATA_TYPE_UNSPECIFIED = 0;
+  DATA_TYPE_F16 = 1;
+  DATA_TYPE_F32 = 2;
+  DATA_TYPE_F64 = 3;
+  DATA_TYPE_I8 = 4;
+  DATA_TYPE_I32 = 5;
+  DATA_TYPE_I64 = 6;
+  DATA_TYPE_BOOL = 7;
+}
+
+enum AccessMode {
+  ACCESS_MODE_UNSPECIFIED = 0;
+  ACCESS_MODE_READ = 1;
+  ACCESS_MODE_WRITE = 2;
+  ACCESS_MODE_RMW = 3;
+}
+
+message Region {
+  repeated uint64 offset = 1;
+  repeated uint64 shape = 2;
+}
+
+message StorageReference {
+  uint32 tensor = 1;
+  Region region = 2;
+}
+
+message Dim3 {
+  uint32 x = 1;
+  uint32 y = 2;
+  uint32 z = 3;
+}
+
+message ComputeArgument {
+  uint64 tile = 1;
+  AccessMode mode = 2;
+}
+
+message ScalarValue {
+  oneof value {
+    float f32 = 1;
+    double f64 = 2;
+    int32 i32 = 3;
+    int64 i64 = 4;
+    bool boolean = 5;
+  }
+}
+
+message ScalarArgument {
+  uint32 position = 1;
+  ScalarValue value = 2;
+}
+
+message Allocate {
+  uint64 tile = 1;
+  repeated uint64 shape = 2;
+  DataType data_type = 3;
+}
+
+message Load {
+  uint64 tile = 1;
+  StorageReference source = 2;
+}
+
+message Fetch {
+  uint64 tile = 1;
+  uint32 from = 2;
+}
+
+message Compute {
+  uint32 kernel = 1;
+  repeated ComputeArgument arguments = 2;
+  Dim3 grid = 3;
+  Dim3 cta = 4;
+  repeated ScalarArgument scalars = 5;
+}
+
+message Store {
+  uint64 tile = 1;
+  StorageReference destination = 2;
+}
+
+message Free {
+  uint64 tile = 1;
+  uint32 expected_serves = 2;
+}
+
+message Operation {
+  oneof kind {
+    Allocate allocate = 1;
+    Load load = 2;
+    Fetch fetch = 3;
+    Compute compute = 4;
+    Store store = 5;
+    Free free = 6;
+  }
+}
+
+message Instruction {
+  uint64 iid = 1;
+  repeated uint64 dependencies = 2;
+  Operation operation = 3;
+}
+
+message Segment {
+  uint64 id = 1;
+  repeated Instruction instructions = 2;
+}

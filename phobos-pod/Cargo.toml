@@ -1,0 +1,26 @@
+[package]
+name = "phobos-pod"
+version = "0.1.0"
+edition.workspace = true
+description = "Executes scheduler instructions on one GPU"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+cust = "0.3.2"
+phobos-base = { path = "../phobos-base" }
+phobos-cluster = { path = "../phobos-cluster" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+prost.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+phobos-lang = { path = "../phobos-lang" }
+phobos-mlir = { path = "../phobos-mlir" }
+phobos-sched = { path = "../phobos-sched" }

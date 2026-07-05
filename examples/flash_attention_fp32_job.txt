@@ -1,0 +1,9 @@
+source = examples/flash_attention_fp32.ph
+dim Nq = 16384
+dim Nk = 16384
+dim D = 64
+tensor Q = read  f32 16384x64 file://C:\Users\joaeb\q.tensor
+tensor K = read  f32 16384x64 file://C:\Users\joaeb\k.tensor
+tensor V = read  f32 16384x64 file://C:\Users\joaeb\v.tensor
+tensor O = write f32 16384x64 file://C:\Users\joaeb\o.tensor
+scalar scale = f32 0.125

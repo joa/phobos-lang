@@ -1,0 +1,23 @@
+[package]
+name = "phobos-sched"
+version = "0.1.0"
+edition.workspace = true
+description = "Global scheduler: instantiate, place, lower, dispatch"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+phobos-cluster = { path = "../phobos-cluster" }
+phobos-lang = { path = "../phobos-lang" }
+phobos-base = { path = "../phobos-base" }
+phobos-mlir = { path = "../phobos-mlir" }
+tokio.workspace = true
+tokio-stream.workspace = true
+tonic.workspace = true
+prost.workspace = true
+futures.workspace = true
+sha2.workspace = true
