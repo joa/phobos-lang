@@ -23,7 +23,7 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-SGEMM performance is at 75% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1].
+SGEMM performance is at 75% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
 
 ![Phobos benchmark results](results/bench.svg)
 
