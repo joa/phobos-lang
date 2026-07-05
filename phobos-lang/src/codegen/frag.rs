@@ -361,10 +361,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         self.check_shapes(&b.shape, &[kk, fa.n], "fragment dot rhs")?;
         let (fm, fnn) = fa.warp_frags();
 
-        let a_buf = self.alloc_tile_swizzled(block, self.f16_t, &[fa.m, kk])?;
-        let b_buf = self.alloc_tile_swizzled(block, self.f16_t, &b.shape)?;
-        self.stage_to_f16(block, a, &a_buf, false)?;
-        self.stage_to_f16(block, b, &b_buf, false)?;
+        let (a_buf, a_hoisted) = self.dot_stage(block, a, &[fa.m, kk], true)?;
+        let (b_buf, b_hoisted) = self.dot_stage(block, b, &b.shape.clone(), true)?;
         self.barrier(block)?;
 
         let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
@@ -372,10 +370,15 @@ impl<'p, 'c> Codegen<'p, 'c> {
             self.mma_sync_mac(block, &a_buf, &b_buf, (kk, fm, fnn), m0, n0, &fa.frags, false)?;
 
         // No shared output to publish, but the barrier still orders the
-        // ldmatrix reads before the released staging is reused.
+        // ldmatrix reads before the released staging is reused. Hoisted
+        // buffers outlive the loop.
         self.barrier(block)?;
-        self.release(&a_buf);
-        self.release(&b_buf);
+        if !a_hoisted {
+            self.release(&a_buf);
+        }
+        if !b_hoisted {
+            self.release(&b_buf);
+        }
 
         self.update_binding(
             name,

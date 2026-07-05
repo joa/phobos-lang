@@ -1408,10 +1408,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // reads stride consecutive rows, which alias shared banks when unpadded.
         // The swizzle permutes the column per row, the same way on store and
         // load, so it spreads the banks out for free.
-        let a_buf = self.alloc_tile_swizzled(block, self.f16_t, &[m, kk])?;
-        let b_buf = self.alloc_tile_swizzled(block, self.f16_t, &b.shape)?;
-        self.stage_to_f16(block, a, &a_buf, false)?;
-        self.stage_to_f16(block, b, &b_buf, false)?;
+        let (a_buf, a_hoisted) = self.dot_stage(block, a, &[m, kk], true)?;
+        let (b_buf, b_hoisted) = self.dot_stage(block, b, &b.shape.clone(), true)?;
         self.barrier(block)?;
 
         // The warp's fragment-block origin; surplus warps clamp onto the last.
@@ -1434,9 +1432,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         self.barrier(block)?;
 
         // The staging is dead past the MAC; the closing barrier orders its
-        // reads before any pooled reuse.
-        self.release(&a_buf);
-        self.release(&b_buf);
+        // reads before any pooled reuse. Hoisted buffers outlive the loop.
+        if !a_hoisted {
+            self.release(&a_buf);
+        }
+        if !b_hoisted {
+            self.release(&b_buf);
+        }
 
         Ok(true)
     }
@@ -1591,10 +1593,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // f16 staging buffers, mirroring each operand's natural layout: a as
         // [m, k], b as [k, n] (NN) or [n, k] (NT). No transposing copy; the
         // NT B fragment is transposed in the wmma load instead.
-        let a_buf = self.alloc_tile_shaped(block, self.f16_t, &[m, kk])?;
-        let b_buf = self.alloc_tile_shaped(block, self.f16_t, &b.shape)?;
-        self.stage_to_f16(block, a, &a_buf, false)?;
-        self.stage_to_f16(block, b, &b_buf, false)?;
+        let (a_buf, a_hoisted) = self.dot_stage(block, a, &[m, kk], false)?;
+        let (b_buf, b_hoisted) = self.dot_stage(block, b, &b.shape.clone(), false)?;
         self.barrier(block)?;
 
         // The warp's fragment-block origin; surplus warps clamp onto the
@@ -1642,10 +1642,38 @@ impl<'p, 'c> Codegen<'p, 'c> {
         self.barrier(block)?;
 
         // The staging is dead past the MAC; the closing barrier orders its
-        // reads before any pooled reuse.
-        self.release(&a_buf);
-        self.release(&b_buf);
+        // reads before any pooled reuse. Hoisted buffers outlive the loop.
+        if !a_hoisted {
+            self.release(&a_buf);
+        }
+        if !b_hoisted {
+            self.release(&b_buf);
+        }
         Ok(true)
+    }
+
+    /// Returns the staged f16 shared buffer for one tile-dot operand: the
+    /// preheader copy when an enclosing loop hoisted this operand (see
+    /// codegen/hoist.rs), else a fresh pooled buffer staged here without a
+    /// barrier. The flag is true for the hoisted case, where the caller
+    /// must skip the release; the loop epilogue owns that buffer.
+    pub(super) fn dot_stage(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        shape: &[i64],
+        swizzled: bool,
+    ) -> Result<(MemVal<'c>, bool)> {
+        if let Some(buf) = self.hoisted_stage(src) {
+            return Ok((buf, true));
+        }
+        let buf = if swizzled {
+            self.alloc_tile_swizzled(block, self.f16_t, shape)?
+        } else {
+            self.alloc_tile_shaped(block, self.f16_t, shape)?
+        };
+        self.stage_to_f16(block, src, &buf, false)?;
+        Ok((buf, false))
     }
 
     /// Stages one iteration's a and b slices into shared as f16, without a

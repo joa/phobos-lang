@@ -363,6 +363,29 @@ impl<'p, 'c> Codegen<'p, 'c> {
         step: Option<&Expr>,
         body: &[Stmt],
     ) -> Result<()> {
+        // Stage loop-invariant dot operands into the preheader once instead
+        // of every iteration (see codegen/hoist.rs); the frame is popped and
+        // its buffers pooled after the loop, whose in-body dot barriers
+        // order the last reads before any reuse.
+        let frame = self.hoist_dot_staging(block, body)?;
+        self.hoisted_stages.push(frame);
+        let result = self.emit_for_inner(block, var, start, end, step, body);
+        for (_, buf) in self.hoisted_stages.pop().expect("hoist frame") {
+            self.release(&buf);
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_for_inner(
+        &mut self,
+        block: &Block<'c>,
+        var: &str,
+        start: &Expr,
+        end: &Expr,
+        step: Option<&Expr>,
+        body: &[Stmt],
+    ) -> Result<()> {
         // Fragment accumulators the body assigns must ride the loop as
         // iter_args (SSA values, unlike memref-backed tiles), which neither
         // the pipelined nor the plain paths can carry.

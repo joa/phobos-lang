@@ -22,6 +22,7 @@ use crate::ast::{
 
 mod expr;
 mod frag;
+mod hoist;
 mod kernel;
 mod matmul;
 mod pipeline;
@@ -199,6 +200,11 @@ struct Codegen<'p, 'c> {
     // later allocations so temps don't each grow the CTA's static shared
     // footprint (which caps occupancy). See Codegen::release.
     tile_pool: HashMap<(String, Vec<i64>), Vec<String>>,
+    // Loop-invariant dot operands staged into shared f16 in a loop's
+    // preheader, one frame per active for loop: (source view's memref
+    // value, staged buffer). The dot staging sites consult this instead of
+    // re-staging per iteration. See codegen/hoist.rs.
+    hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
     pipeline: bool,   // whether to double-buffer staged tiles in for loops
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
@@ -261,6 +267,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             shared_globals: Vec::new(),
             tile_count: 0,
             tile_pool: HashMap::new(),
+            hoisted_stages: Vec::new(),
             pipeline: kernel.attrs.iter().any(|a| a.name == "pipeline"),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
             mma_sync: kernel.wants_mma_sync(),
@@ -1555,6 +1562,98 @@ mod tests {
         assert_eq!(
             s_bufs, 1,
             "expected the score tile to stay a single in-place buffer:\n{mlir}"
+        );
+    }
+
+    /// Splits emitted IR at the flash kt loop (the only loop bounded by a
+    /// dynamic %dim) into (preheader, body) for staging-placement asserts.
+    fn split_at_kt_loop(mlir: &str) -> (&str, &str) {
+        let pos = mlir
+            .find(" to %dim")
+            .expect("no dynamically-bounded loop in module");
+        mlir.split_at(pos)
+    }
+
+    #[test]
+    fn flash_q_staging_hoists_to_the_loop_preheader() {
+        // q in dot_t(q, k) is a let-bound Q slice defined outside the kt
+        // loop and nothing in the body stores to global memory, so its
+        // global-to-shared f16 staging copy runs once in the preheader
+        // instead of every iteration. q's subview is the first in the
+        // kernel, so its loads print as "%subview[" exactly.
+        let src = "@autotune(D in [64], BR in [32], BC in [32])
+            @tensorcore
+            @launch(128)
+            kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
+                                   V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
+                let pid = program_id(0)
+                let row = pid * BR
+                let q = Q[row :+ BR, :]
+                var acc: tile<f32>[BR, D] = 0.0
+                var m: tile<f32>[BR, 1] = -65504.0
+                var l: tile<f32>[BR, 1] = 0.0
+                for kt in range(0, Nk, BC) {
+                    let k = K[kt :+ BC, :]
+                    let v = V[kt :+ BC, :]
+                    var s: tile<f32>[BR, BC] = dot_t(q, k)
+                    s = s * scale
+                    var mnew: tile<f32>[BR, 1] = rowmax(s)
+                    mnew = tmax(m, mnew)
+                    s = exp(s - mnew)
+                    var corr: tile<f32>[BR, 1] = exp(m - mnew)
+                    l = l * corr
+                    l += rowsum(s)
+                    acc = acc * corr
+                    acc += dot(s, v)
+                    m = mnew
+                }
+                acc = acc / l
+                O[row :+ BR, :] = acc
+            }";
+        // Both tensor-core paths hoist: mma.sync (frag-carried kt loop) and
+        // the legacy WMMA fallback (plain kt loop).
+        for mlir in [emit_mlir_sync(src, "sm_75"), emit_mlir(src)] {
+            let (preheader, body) = split_at_kt_loop(&mlir);
+            assert!(
+                preheader.contains("load %subview["),
+                "q staging not hoisted to the preheader:\n{mlir}"
+            );
+            assert!(
+                !body.contains("load %subview["),
+                "q still re-staged inside the kt loop:\n{mlir}"
+            );
+        }
+    }
+
+    #[test]
+    fn dot_staging_stays_in_loop_when_body_stores_global() {
+        // The body stores s to O each iteration: a staged copy of q could
+        // not see global writes, so the hoist must stand down and q stages
+        // inside the loop as before.
+        let mlir = emit_mlir_sync(
+            "@autotune(D in [64], BR in [32], BC in [32])
+            @tensorcore
+            @launch(128)
+            kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], O: tensor<f32>[Nq, BC]) {
+                let pid = program_id(0)
+                let row = pid * BR
+                let q = Q[row :+ BR, :]
+                for kt in range(0, Nk, BC) {
+                    let k = K[kt :+ BC, :]
+                    var s: tile<f32>[BR, BC] = dot_t(q, k)
+                    O[row :+ BR, :] = s
+                }
+            }",
+            "sm_75",
+        );
+        let (preheader, body) = split_at_kt_loop(&mlir);
+        assert!(
+            !preheader.contains("load %subview["),
+            "q staging hoisted past a global store:\n{mlir}"
+        );
+        assert!(
+            body.contains("load %subview["),
+            "q staging missing from the loop body:\n{mlir}"
         );
     }
 

@@ -96,7 +96,11 @@ float       = digit { digit } "." { digit } ;
      ops are pointer-width; the bench widens it automatically), so below sm_75
      or when `index` lowers at 32 bits it falls back to the legacy
      warp-collective WMMA API (m16n16k16). Tile-level `dot`/`dot_t` (flash
-     attention) take the same `mma.sync` path under the same gate.
+     attention) take the same `mma.sync` path under the same gate. A dot
+     operand that is a `let`-bound tensor slice defined outside an enclosing
+     loop (the flash `q`) is staged into shared memory once before the loop
+     instead of every iteration, as long as the loop body stores to no
+     tensor.
   - `@tensorcore(wmma)`: forces the legacy warp-collective WMMA m16n16k16 matmul
      back on (the pre-`mma.sync` path), e.g. for comparison or rollback.
      `@tensorcore(sync)` is accepted as a now-redundant explicit opt-in to the
