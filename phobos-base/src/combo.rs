@@ -30,7 +30,9 @@ mod tests {
     fn counts_the_full_product() {
         let space = [dim("A", &[1, 2, 3]), dim("B", &[10, 20]), dim("C", &[0])];
         let all = cartesian_product(&space);
-        assert_eq!(all.len(), 3 * 2 * 1);
+        #[allow(clippy::identity_op)]
+        let want = 3 * 2 * 1;
+        assert_eq!(all.len(), want);
         for combo in &all {
             assert_eq!(
                 combo.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),

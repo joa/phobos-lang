@@ -66,6 +66,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             swizzle: None,
             global: Some(name),
             owned: true,
+            mask: Vec::new(),
         })
     }
 
@@ -265,6 +266,104 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
 // thread-distributed loops
 impl<'p, 'c> Codegen<'p, 'c> {
+    /// Conjunction of `offset + idx[d] < extent` over the masked dims of a
+    /// tensor slice, or None when the mask is empty (every dim in bounds).
+    /// The offset and extent values were materialized where the slice was
+    /// taken, so they dominate the distributed loop body that calls this.
+    pub(super) fn bounds_pred(
+        &self,
+        block: &Block<'c>,
+        mask: &[Option<(Value<'c, 'c>, Value<'c, 'c>)>],
+        idx: &[Value<'c, 'c>],
+    ) -> Result<Option<Value<'c, 'c>>> {
+        let mut pred: Option<Value<'c, 'c>> = None;
+
+        for (d, entry) in mask.iter().enumerate() {
+            let Some((off, extent)) = entry else { continue };
+            let global = self.addi(block, *off, idx[d])?;
+            let in_bounds = self.push(
+                block,
+                arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, global, *extent, self.loc),
+            )?;
+
+            pred = Some(match pred {
+                Some(p) => self.push(block, arith::andi(p, in_bounds, self.loc))?,
+                None => in_bounds,
+            });
+        }
+
+        Ok(pred)
+    }
+
+    /// Stages a partially out-of-bounds slice into a fresh, fully in-bounds
+    /// tile: in-bounds elements are copied, out-of-bounds ones read as zero.
+    /// The load index is clamped to 0 on any masked dim that overflows, so no
+    /// access ever leaves the tensor, then a select substitutes zero for the
+    /// clamped reads. Downstream ops then treat the result as an ordinary
+    /// dense tile.
+    pub(super) fn materialize_masked(
+        &mut self,
+        block: &Block<'c>,
+        view: &MemVal<'c>,
+    ) -> Result<MemVal<'c>> {
+        if view.shape.contains(&DYN) {
+            bail!("a masked tensor slice needs a static shape");
+        }
+
+        let dst = self.alloc_tile_shaped(block, view.elem, &view.shape)?;
+        let mask = view.mask.clone();
+        let src = view.mem;
+        let dst_mem = dst.mem;
+        let elem = view.elem;
+        
+        self.distribute(block, &dst, 1, true, |cg, blk, idx| {
+            let zero_idx = cg.const_index(blk, 0)?;
+            let mut safe = idx.to_vec();
+            let mut pred: Option<Value<'c, 'c>> = None;
+
+            for (d, entry) in mask.iter().enumerate() {
+                let Some((off, extent)) = entry else { continue };
+                let global = cg.addi(blk, *off, idx[d])?;
+                let in_bounds = cg.push(
+                    blk,
+                    arith::cmpi(cg.ctx, arith::CmpiPredicate::Ult, global, *extent, cg.loc),
+                )?;
+            
+                safe[d] = cg.select(blk, in_bounds, idx[d], zero_idx)?;
+                pred = Some(match pred {
+                    Some(p) => cg.push(blk, arith::andi(p, in_bounds, cg.loc))?,
+                    None => in_bounds,
+                });
+            }
+            
+            let loaded = cg.push(blk, memref::load(src, &safe, cg.loc))?;
+            let val = match pred {
+                Some(p) => {
+                    let zero = cg.zero_scalar(blk, elem)?;
+                    cg.select(blk, p, loaded, zero)?
+                }
+                None => loaded,
+            };
+
+            blk.append_operation(memref::store(val, dst_mem, idx, cg.loc));
+            
+            Ok(())
+        })?;
+        
+        Ok(dst)
+    }
+
+    /// arith.select(cond, a, b): a when cond is true, else b.
+    pub(super) fn select(
+        &self,
+        block: &Block<'c>,
+        cond: Value<'c, 'c>,
+        a: Value<'c, 'c>,
+        b: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.push(block, arith::select(cond, a, b, self.loc))
+    }
+
     /// Emits body once per element of out, or once per width-element innermost
     /// segment when width > 1 (the caller guarantees a static, width-divisible
     /// innermost extent), distributed across the CTA.
@@ -317,7 +416,28 @@ impl<'p, 'c> Codegen<'p, 'c> {
             idx[rank - 1] = self.muli(&body_block, idx[rank - 1], w)?;
         }
 
-        body(self, &body_block, &idx)?;
+        // A masked output writes only the in-bounds elements: the whole body
+        // (its loads and its store) runs under an scf.if guarding offset +
+        // local index < extent. Callers scalarize masked writes
+        // (elementwise_width and tile_copy return width 1), so the guard is
+        // exact per element. The trailing barrier stays outside the guard: it
+        // is CTA-uniform, while the guard is a per-element (non-uniform) test.
+        if let Some(pred) = self.bounds_pred(&body_block, &out.mask, &idx)? {
+            let then = Block::new(&[]);
+            body(self, &then, &idx)?;
+            then.append_operation(scf::r#yield(&[], self.loc));
+            let then_region = Region::new();
+            then_region.append_block(then);
+            body_block.append_operation(scf::r#if(
+                pred,
+                &[],
+                then_region,
+                Region::new(),
+                self.loc,
+            ));
+        } else {
+            body(self, &body_block, &idx)?;
+        }
 
         body_block.append_operation(scf::r#yield(&[], self.loc));
 
@@ -359,6 +479,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
     /// buffer has f32 elements, provably 16B-aligned rows, and a static
     /// innermost extent divisible by 4; otherwise 1 (scalar).
     pub(super) fn elementwise_width(&self, mvs: &[&MemVal<'c>]) -> i64 {
+        // A masked buffer is scalarized so the per-element store guard is
+        // exact (a partial vector could straddle the bounds).
+        if mvs.iter().any(|m| m.is_masked()) {
+            return 1;
+        }
         let ok = mvs.iter().all(|m| {
             let last = *m.shape.last().expect("tile values are not rank-0");
             m.elem == self.f32_t && m.aligned && last != DYN && last % 4 == 0
@@ -472,6 +597,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let last = *dst.shape.last().expect("tile values are not rank-0");
         let vec_ok = src.aligned
             && dst.aligned
+            && !src.is_masked()
+            && !dst.is_masked()
             && last != DYN
             && last % 4 == 0
             && (dst.elem == self.f32_t || dst.elem == self.f16_t);
@@ -481,8 +608,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // src/dst element types must match, as checked above): f32 qualifies at
         // any width (4B scalar or 16B vector), f16 only vectorized (4 elems =
         // 8B; a scalar 2B f16 is below cp.async's minimum).
-        let use_async =
-            async_copy && (dst.elem == self.f32_t || (dst.elem == self.f16_t && width == 4));
+        let use_async = async_copy
+            && !dst.is_masked()
+            && (dst.elem == self.f32_t || (dst.elem == self.f16_t && width == 4));
         let vec_t = Type::vector(&[4], dst.elem);
         let align = if dst.elem == self.f16_t { 8 } else { 16 };
 

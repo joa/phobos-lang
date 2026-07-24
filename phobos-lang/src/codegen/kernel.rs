@@ -40,6 +40,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         swizzle: None,
                         global: None,
                         owned: false,
+                        mask: Vec::new(),
                     })
                 }
                 AstType::Tile(..) => bail!(

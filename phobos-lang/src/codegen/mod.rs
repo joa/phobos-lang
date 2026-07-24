@@ -131,6 +131,21 @@ struct MemVal<'c> {
     /// once all reads of it have been emitted. [`Codegen::bind`] clears
     /// this, so named buffers are never pooled.
     owned: bool,
+
+    /// Per-dimension bounds mask for a tensor slice that may reach past the
+    /// source extent (a partially out-of-bounds tile). Some((offset, extent))
+    /// records the slice's global offset and the source dim extent so a load
+    /// can zero-fill and a store can skip the elements where offset + local
+    /// index >= extent; None means the dim is provably in bounds. Empty for
+    /// tile buffers and fully in-bounds slices (see [`Codegen::emit_subview`]).
+    mask: Vec<Option<(Value<'c, 'c>, Value<'c, 'c>)>>,
+}
+
+impl<'c> MemVal<'c> {
+    /// Whether any dimension carries a bounds mask (a partial tile).
+    fn is_masked(&self) -> bool {
+        self.mask.iter().any(Option::is_some)
+    }
 }
 
 /// The result of evaluating an expression.
@@ -315,6 +330,23 @@ fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
 
 fn mult4(divisor: i64) -> bool {
     divisor % 4 == 0
+}
+
+/// Whether a slice dimension provably never reaches past the source extent,
+/// so it needs no bounds mask. `size` is the slice's static extent along the
+/// dim, `off_div` the largest known divisor of the slice offset (see
+/// [`Codegen::expr_div`]). A dynamic source extent is assumed aligned by the
+/// row-pitch ABI (SPEC: tensor sizes are a multiple of the tile), matching the
+/// existing fast paths; masking only kicks in for a statically known extent
+/// that a static, aligned tile cannot tile evenly.
+fn dim_in_bounds(extent: i64, size: i64, off_div: i64) -> bool {
+    if extent == DYN {
+        return true;
+    }
+    if size == DYN {
+        return false;
+    }
+    extent % size == 0 && off_div % size == 0
 }
 
 /// row-major strides for a shape ([`DYN`] propagates outward).
@@ -2228,6 +2260,88 @@ mod tests {
         assert!(
             !mlir.contains("subgroup_mma"),
             "WMMA emitted without @tensorcore:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn partial_static_slice_is_masked() {
+        // A 32-wide tile does not tile a 100-element tensor evenly, so the
+        // last tile runs past the end. The read stages through a zero-filled
+        // buffer (select) and the write skips the out-of-bounds lanes (scf.if
+        // guarded by offset + index < extent).
+        let mlir = emit_mlir(
+            "kernel copy(A: tensor<f32>[100], B: tensor<f32>[100]) {
+                let p = program_id(0)
+                B[p * 32 :+ 32] = A[p * 32 :+ 32]
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "memref.subview",
+                "arith.cmpi ult", // offset + index < extent
+                "arith.select",   // out-of-bounds reads fold to zero
+                "scf.if",         // the store runs only in bounds
+            ],
+        );
+    }
+
+    #[test]
+    fn aligned_static_slice_is_not_masked() {
+        // A 32-wide tile tiles a 128-element tensor evenly, so no lane ever
+        // leaves the tensor: no bounds mask, and the copy still vectorizes.
+        let mlir = emit_mlir(
+            "kernel copy(A: tensor<f32>[128], B: tensor<f32>[128]) {
+                let p = program_id(0)
+                B[p * 32 :+ 32] = A[p * 32 :+ 32]
+            }",
+        );
+        assert_contains(&mlir, &["memref.subview", "vector<4xf32>"]);
+        assert!(
+            !mlir.contains("scf.if") && !mlir.contains("arith.select"),
+            "unexpected bounds mask for an evenly tiled tensor:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn partial_matmul_epilogue_is_masked() {
+        // N = 100 is not a multiple of TILE_N = 32, so the fused register
+        // matmul declines (its blocking has no bounds guard) and the generic
+        // tiled path runs with a masked epilogue store into C.
+        let mlir = emit_mlir(
+            "@autotune(TILE_M in [32], TILE_N in [32], TILE_K in [32])
+            kernel matmul(A: tensor<f32>[96, 64], B: tensor<f32>[64, 100], C: tensor<f32>[96, 100]) {
+                let pm = program_id(0)
+                let pn = program_id(1)
+                var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+                for kt in range(0, 64, TILE_K) {
+                    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                    acc += dot(a, b)
+                }
+                C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+            }",
+        );
+        assert_contains(&mlir, &["memref.subview", "arith.cmpi ult", "scf.if"]);
+    }
+
+    #[test]
+    fn dot_directly_into_partial_slice_is_rejected() {
+        // A dot result written straight into a partially out-of-bounds slice
+        // has no accumulator tile to carry the bounds guard, so it is a
+        // compile error rather than an out-of-bounds store.
+        let err = emit_err(
+            "kernel matmul(A: tensor<f32>[100, 64], B: tensor<f32>[64, 100], C: tensor<f32>[100, 100]) {
+                let pm = program_id(0)
+                let pn = program_id(1)
+                var a = A[pm * 32 :+ 32, 0 :+ 64]
+                var b = B[0 :+ 64, pn * 32 :+ 32]
+                C[pm * 32 :+ 32, pn * 32 :+ 32] = dot(a, b)
+            }",
+        );
+        assert!(
+            err.contains("partially out-of-bounds"),
+            "unexpected error: {err}"
         );
     }
 }
