@@ -59,12 +59,20 @@ float       = digit { digit } "." { digit } ;
 
 ## Notes
 - **Keywords:** `kernel let var if else for in while true false`.
-- **Tensor size**: Assumed to be a multiple of `4`. A tensor dimension whose
-  size is a compile-time constant need not be a multiple of the tile: a slice
-  that would run off the end is masked, so the last (partial) tile reads
-  out-of-bounds elements as zero and skips their stores. This falls back from
-  the specialized register/tensor-core matmul paths to the generic tiled path.
-  Dynamic (runtime) sizes are still assumed to tile evenly.
+- **Tensor size**: Assumed to be a multiple of `4`. A tensor dimension need not
+  be a multiple of the tile: a slice that would run off the end is masked, so
+  the out-of-bounds elements read as zero and their stores are skipped.
+  - A compile-time constant size is masked in place, which falls back from the
+    specialized register/tensor-core matmul paths to the generic tiled path.
+  - A dynamic (runtime) size is handled by splitting the loop that walks it:
+    the loop is trimmed to `(extent / tile) * tile`, so its slices are whole by
+    construction and keep the vectorized, tensor-core and `cp.async` fast
+    paths, and the ragged remainder replays the body once under a runtime mask
+    against the tensor's own extent. Only spans with a static length split;
+    loops carrying `mma.sync` fragment accumulators or driven by `@pipeline`
+    do not split yet and still assume a dynamic size tiles evenly.
+  - Zero is the fill value, so a reduction that is not zero-identity (a softmax
+    denominator, for instance) still needs its own masking in the kernel.
 - **`f16`**: half precision (IEEE binary16). Float literals are written in f32 and
   rounded to f16 on store, and arithmetic that mixes f16 with a wider float widens
   to the wider type (so `f16 + f32 -> f32`). The heavy compute paths run f16 inputs
@@ -78,7 +86,7 @@ float       = digit { digit } "." { digit } ;
   - **Full**: `A[:]` selects the entire dimension.
   - **Open-Ended**: `A[i:]`, `A[:j]` are not supported. A `:` after an expression requires an end, and a `:+` requires a length.
 - **Broadcasting**: binary tile ops broadcast a NumPy-style axis of extent 1 (so `[R, C] x [R, 1]` stretches the column vector), and `tile x scalar` (either order) broadcasts the scalar over the tile.
-- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id` and the tile builtins (`dot`, `dot_t`, `exp`, `rowmax`, `rowsum`, `tmax`) are ordinary
+- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id` and the tile builtins (`dot`, `dot_t`, `exp`, `rowmax`, `rowsum`, `tmax`, `cumsum`, `tril`, `transpose`) are ordinary
   identifiers, not keywords. `range` is recognized positionally inside `for ... in range(...)`.
 - **Built-Ins**:
   - `dot(a, b)`: `a @ b` (contracts `a`'s last dim with `b`'s first).
@@ -86,6 +94,9 @@ float       = digit { digit } "." { digit } ;
   - `exp(t)`: element-wise `e^x` (lowers to the hardware `ex2.approx`).
   - `rowmax(t)` / `rowsum(t)`: reduce a rank-2 tile over its last (column) dim to a `[rows, 1]` column vector.
   - `tmax(a, b)`: elementwise maximum (broadcasting).
+  - `cumsum(t)`: inclusive prefix sum of a rank-2 tile down its first (row) dim, so `out[i, j] = sum_{r <= i} t[r, j]`. The scan runs along the sequence axis (the leading dim of a `[seq, feat]` tile), producing the running gate cumulant that chunkwise linear attention needs. Same shape as the input.
+  - `tril(t)`: causal lower-triangular mask of a rank-2 tile, keeping `t[i, j]` when `j <= i` and zeroing the strict upper triangle. Same shape as the input.
+  - `transpose(t)`: rank-2 tile transpose, `out[i, j] = t[j, i]` (a `[R, C]` tile becomes `[C, R]`). Lets a contraction run over the leading (sequence) axis, which `dot`/`dot_t` cannot reach on their own.
 - **Attributes**:
   - `@autotune(X in [..], ...)`: local search space; the first choice seeds the shape env. Two values are inclusive bounds searched in doubling steps (`X in [16, 256]` -> 16, 32, 64, 128, 256); three or more are an explicit list of choices. `[256, 16]` is two values (when x > y)
   - `@cluster(X in [..], ...)`: super tile dimensions and search space for cluster tuning.
@@ -186,5 +197,46 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
 
   acc = acc / l                                // normalize (broadcast divide)
   O[row :+ BR, :] = acc
+}
+```
+
+Gated Linear Attention (the KDA backbone)
+
+Chunkwise gated linear attention, the first building block for Kimi Delta
+Attention. It streams a head's sequence in chunks of `C`, carrying an `[D, D]`
+recurrent state across chunks, and exercises `cumsum` (the running gate), `tril`
+(intra-chunk causal masking), and `transpose` (the `K^T V` state update). See
+[`examples/kda_fp32.ph`](./examples/kda_fp32.ph) for the fully commented kernel.
+
+```plain
+@autotune(D in [64], C in [32, 128])
+kernel kda(Q: tensor<f32>[N, D], K: tensor<f32>[N, D], V: tensor<f32>[N, D],
+           G: tensor<f32>[N, 1], O: tensor<f32>[N, D], scale: f32) {
+  var S: tile<f32>[D, D] = 0.0                 // recurrent state (keys x values)
+  for c in range(0, N, C) {
+    let q = Q[c :+ C, :]
+    let k = K[c :+ C, :]
+    let v = V[c :+ C, :]
+    let g = G[c :+ C, :]                        // [C, 1] per-token log-gates
+
+    var b: tile<f32>[C, 1] = cumsum(g)          // cumulative in-chunk decay
+    var negb = b * -1.0
+    var qd: tile<f32>[C, D] = q * exp(b)        // decay-folded queries
+    qd = qd * scale
+    var kd: tile<f32>[C, D] = k * exp(negb)     // decay-folded keys
+
+    var p: tile<f32>[C, C] = dot_t(qd, kd)      // intra-chunk scores
+    p = tril(p)                                 // causal mask
+    var o: tile<f32>[C, D] = dot(p, v)
+    o += dot(qd, S)                             // inter-chunk (carried state)
+    O[c :+ C, :] = o
+
+    var gt = transpose(g)
+    var total: tile<f32>[1, 1] = rowsum(gt)     // chunk-total decay
+    var kfin = k * exp(total - b)
+    var kt = transpose(kfin)                    // [D, C]
+    var kv: tile<f32>[D, D] = dot(kt, v)        // sum_j kfin_j^T v_j
+    S = S * exp(total) + kv                     // decay state, add K^T V
+  }
 }
 ```

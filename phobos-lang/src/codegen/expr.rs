@@ -224,6 +224,30 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 self.release(&t);
                 Ok(Rv::Tile(out))
             }
+            // cumsum(t): inclusive prefix sum down the rows (the sequence
+            // axis), the running gate cumulant chunkwise linear attention
+            // needs.
+            "cumsum" => {
+                let t = self.reduce_arg(block, args, "cumsum")?;
+                let out = self.tile_cumsum(block, &t)?;
+                self.release(&t);
+                Ok(Rv::Tile(out))
+            }
+            // tril(t): causal lower-triangular mask (zero the strict upper
+            // triangle). May rewrite t in place, so t is not released here.
+            "tril" => {
+                let t = self.reduce_arg(block, args, "tril")?;
+                let out = self.tile_tril(block, &t)?;
+                Ok(Rv::Tile(out))
+            }
+            // transpose(t): rank-2 tile transpose, for contracting over the
+            // sequence axis (K.T @ V) in the chunk recurrence.
+            "transpose" => {
+                let t = self.reduce_arg(block, args, "transpose")?;
+                let out = self.tile_transpose(block, &t)?;
+                self.release(&t);
+                Ok(Rv::Tile(out))
+            }
             other => bail!("unknown function '{other}'"),
         }
     }
@@ -463,6 +487,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let mut off_divs = Vec::with_capacity(rank);
         let mut dyn_sizes = Vec::new();
         let mut static_sizes = Vec::with_capacity(rank);
+        // Dims whose offset rides the ragged remainder chunk's induction
+        // variable, and so may run past a dynamic extent (see ragged_iv).
+        let mut ragged = vec![false; rank];
+        let rides_ragged = |cg: &Self, start: &Expr| {
+            cg.ragged_iv
+                .as_deref()
+                .is_some_and(|iv| start.uses_name(iv))
+        };
         for (i, sub) in subs.iter().enumerate() {
             match sub {
                 Sub::Point(_) => {
@@ -470,6 +502,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 }
                 // A[start :+ len]
                 Sub::Span { start, len } => {
+                    ragged[i] = rides_ragged(self, start);
                     offsets.push(self.emit_index(block, start, "slice start")?);
                     off_divs.push(self.expr_div(start));
                     match self.const_fold(len) {
@@ -482,6 +515,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 }
                 // A[start : end]: size is end - start.
                 Sub::Range { start, end } => {
+                    ragged[i] = rides_ragged(self, start);
                     let off = self.emit_index(block, start, "slice start")?;
                     offsets.push(off);
                     off_divs.push(self.expr_div(start));
@@ -535,14 +569,22 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // Bounds mask: a dim whose (statically known) source extent an aligned
         // tile cannot tile evenly may reach past the end on the last tile, so
         // record its offset and extent for the masked load/store epilogue.
-        // Dynamic extents are assumed aligned (see dim_in_bounds), so they mask
-        // nothing and the fast paths are untouched.
+        //
+        // A dynamic extent carries no static proof, so it masks only inside a
+        // ragged remainder chunk, and then against the tensor's runtime
+        // memref.dim. The trimmed main loop stays unmasked and keeps the
+        // vector / WMMA / cp.async fast paths (see Codegen::emit_split_for).
         let mut mask = vec![None; rank];
         for i in 0..rank {
-            if !dim_in_bounds(src.shape[i], static_sizes[i], off_divs[i]) {
-                let extent = self.const_index(block, src.shape[i])?;
-                mask[i] = Some((offsets[i], extent));
-            }
+            let extent = if !dim_in_bounds(src.shape[i], static_sizes[i], off_divs[i]) {
+                self.const_index(block, src.shape[i])?
+            } else if src.shape[i] == DYN && ragged[i] && static_sizes[i] != DYN {
+                let pos = self.const_index(block, i as i64)?;
+                self.push(block, memref::dim(src.mem, pos, self.loc))?
+            } else {
+                continue;
+            };
+            mask[i] = Some((offsets[i], extent));
         }
 
         let result_type = self.subview_type(src, &static_sizes)?;

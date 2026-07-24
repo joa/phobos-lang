@@ -80,7 +80,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
     ) -> Result<MemVal<'c>> {
         let unfused = matches!(
             value,
-            Expr::Call { callee, .. } if matches!(callee.as_str(), "exp" | "tmax" | "rowmax" | "rowsum")
+            Expr::Call { callee, .. } if matches!(callee.as_str(),
+                "exp" | "tmax" | "rowmax" | "rowsum" | "cumsum" | "tril" | "transpose")
         );
         if !unfused {
             let tile = self.alloc_tile(block, scalar, dims)?;
@@ -424,6 +425,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
         // Dynamic bounds or step: scf.for.
         let (lo, hi, st, iv_div) = self.loop_bounds(block, start, end, step)?;
+
+        if self.needs_ragged_epilogue(body, var) {
+            return self.emit_split_for(block, var, lo, hi, st, iv_div, body);
+        }
+
         let body_block = Block::new(&[(self.index_t, self.loc)]);
         let iv = detach(body_block.argument(0)?.into());
         let binding = Binding::Let {
@@ -436,6 +442,98 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let region = Region::new();
         region.append_block(body_block);
         block.append_operation(scf::r#for(lo, hi, st, region, self.loc));
+        Ok(())
+    }
+
+    /// Whether some slice in this loop body rides `var` into a dynamic tensor
+    /// extent, so the last chunk can overrun the tensor and the loop needs the
+    /// trimmed-main-loop / masked-remainder split.
+    ///
+    /// Only a span with a static length qualifies: a dynamically sized slice
+    /// has no static tile shape for the masked staging buffer to take.
+    fn needs_ragged_epilogue(&self, body: &[Stmt], var: &str) -> bool {
+        let mut found = false;
+        for stmt in body {
+            stmt.walk_exprs(&mut |e| {
+                let Expr::Index { base, subs } = e else {
+                    return;
+                };
+                let Expr::Var(name) = &**base else {
+                    return;
+                };
+                let Some(Binding::Tensor(src)) = self.lookup(name) else {
+                    return;
+                };
+                if subs.len() != src.shape.len() {
+                    return;
+                }
+                found |= subs.iter().enumerate().any(|(d, sub)| {
+                    src.shape[d] == DYN
+                        && matches!(sub, Sub::Span { start, len }
+                            if start.uses_name(var) && self.const_fold(len).is_some())
+                });
+            });
+        }
+        found
+    }
+
+    /// Splits a loop whose trip count may be ragged into the chunks that are
+    /// provably whole plus a single masked remainder.
+    ///
+    /// The main loop runs to `lo + ((hi - lo) / st) * st`, so every slice it
+    /// takes is in bounds by construction and keeps the unmasked fast paths
+    /// (vectorized copies, WMMA, cp.async). The remainder replays the body
+    /// once at that index with `ragged_iv` set, which makes emit_subview guard
+    /// the affected dims against the tensor's runtime extent. Tiles live in
+    /// memrefs, so loop-carried state flows into the remainder unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn emit_split_for(
+        &mut self,
+        block: &Block<'c>,
+        var: &str,
+        lo: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        st: Value<'c, 'c>,
+        iv_div: i64,
+        body: &[Stmt],
+    ) -> Result<()> {
+        let span = self.subi(block, hi, lo)?;
+        let chunks = self.divui(block, span, st)?;
+        let covered = self.muli(block, chunks, st)?;
+        let full = self.addi(block, lo, covered)?;
+
+        let body_block = Block::new(&[(self.index_t, self.loc)]);
+        let iv = detach(body_block.argument(0)?.into());
+        let binding = Binding::Let {
+            value: iv,
+            div: iv_div,
+        };
+        self.emit_scope(&body_block, &[(var, binding)], body)?;
+        body_block.append_operation(scf::r#yield(&[], self.loc));
+
+        let region = Region::new();
+        region.append_block(body_block);
+        block.append_operation(scf::r#for(lo, full, st, region, self.loc));
+
+        let ragged = self.push(
+            block,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, full, hi, self.loc),
+        )?;
+
+        let then_block = Block::new(&[]);
+        let binding = Binding::Let {
+            value: full,
+            div: iv_div,
+        };
+        let outer = self.ragged_iv.replace(var.to_string());
+        let emitted = self.emit_scope(&then_block, &[(var, binding)], body);
+        self.ragged_iv = outer;
+        emitted?;
+        then_block.append_operation(scf::r#yield(&[], self.loc));
+
+        let region = Region::new();
+        region.append_block(then_block);
+        block.append_operation(scf::r#if(ragged, &[], region, Region::new(), self.loc));
         Ok(())
     }
 

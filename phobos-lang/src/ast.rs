@@ -364,6 +364,46 @@ impl Stmt {
         }
     }
 
+    /// pre-order over every expression in this statement and its nested blocks
+    pub fn walk_exprs(&self, f: &mut impl FnMut(&Expr)) {
+        match self {
+            Stmt::Let { value, .. } | Stmt::Var { value, .. } => value.walk(f),
+            Stmt::Assign { target, value, .. } => {
+                target.walk(f);
+                value.walk(f);
+            }
+            Stmt::For {
+                start,
+                end,
+                step,
+                body,
+                ..
+            } => {
+                start.walk(f);
+                end.walk(f);
+                if let Some(step) = step {
+                    step.walk(f);
+                }
+                for stmt in body {
+                    stmt.walk_exprs(f);
+                }
+            }
+            Stmt::While { cond, body } => {
+                cond.walk(f);
+                for stmt in body {
+                    stmt.walk_exprs(f);
+                }
+            }
+            Stmt::If { cond, then, r#else } => {
+                cond.walk(f);
+                for stmt in then.iter().chain(r#else.iter().flatten()) {
+                    stmt.walk_exprs(f);
+                }
+            }
+            Stmt::Expr(e) => e.walk(f),
+        }
+    }
+
     /// Whether this statement writes or binds any of the given names (assignment target, let, var).
     pub fn writes_any(&self, names: &[&str]) -> bool {
         let hits = |n: &str| names.contains(&n);

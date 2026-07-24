@@ -220,6 +220,12 @@ struct Codegen<'p, 'c> {
     // value, staged buffer). The dot staging sites consult this instead of
     // re-staging per iteration. See codegen/hoist.rs.
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
+    // Induction variable of the ragged remainder chunk currently being
+    // emitted, if any. A slice offset by this variable can run past a dynamic
+    // tensor extent, so emit_subview guards it against the runtime dim. The
+    // trimmed main loop leaves it None and keeps the unmasked fast paths.
+    // See Codegen::emit_split_for.
+    ragged_iv: Option<String>,
     pipeline: bool,   // whether to double-buffer staged tiles in for loops
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
@@ -283,6 +289,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             tile_count: 0,
             tile_pool: HashMap::new(),
             hoisted_stages: Vec::new(),
+            ragged_iv: None,
             pipeline: kernel.attrs.iter().any(|a| a.name == "pipeline"),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
             mma_sync: kernel.wants_mma_sync(),
@@ -335,10 +342,14 @@ fn mult4(divisor: i64) -> bool {
 /// Whether a slice dimension provably never reaches past the source extent,
 /// so it needs no bounds mask. `size` is the slice's static extent along the
 /// dim, `off_div` the largest known divisor of the slice offset (see
-/// [`Codegen::expr_div`]). A dynamic source extent is assumed aligned by the
-/// row-pitch ABI (SPEC: tensor sizes are a multiple of the tile), matching the
-/// existing fast paths; masking only kicks in for a statically known extent
-/// that a static, aligned tile cannot tile evenly.
+/// [`Codegen::expr_div`]). Masking kicks in for a statically known extent that
+/// a static, aligned tile cannot tile evenly.
+///
+/// A dynamic source extent has no static proof either way, so it is handled
+/// one level up: [`Codegen::emit_split_for`] trims the loop to the chunks that
+/// are provably whole (which reach here and stay unmasked, keeping the vector,
+/// WMMA and cp.async fast paths) and replays the remainder under a runtime
+/// mask against the tensor's own `memref.dim`.
 fn dim_in_bounds(extent: i64, size: i64, off_div: i64) -> bool {
     if extent == DYN {
         return true;
@@ -1599,9 +1610,15 @@ mod tests {
 
     /// Splits emitted IR at the flash kt loop (the only loop bounded by a
     /// dynamic %dim) into (preheader, body) for staging-placement asserts.
+    ///
+    /// A ragged-split loop is trimmed to whole chunks first, so it is bounded
+    /// by that arithmetic rather than by %dim directly; the frag-carried path
+    /// does not split and still reads `to %dim`. Take whichever comes first.
     fn split_at_kt_loop(mlir: &str) -> (&str, &str) {
-        let pos = mlir
-            .find(" to %dim")
+        let pos = [" = arith.subi %dim", " to %dim"]
+            .iter()
+            .filter_map(|pat| mlir.find(pat))
+            .min()
             .expect("no dynamically-bounded loop in module");
         mlir.split_at(pos)
     }
@@ -2342,6 +2359,178 @@ mod tests {
         assert!(
             err.contains("partially out-of-bounds"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn dynamic_extent_loop_splits_off_a_masked_remainder() {
+        // N is dynamic, so nothing statically proves C tiles it evenly. The
+        // loop is trimmed to (N / C) * C and the ragged remainder replays the
+        // body once, guarded against the tensor's runtime memref.dim.
+        let mlir = emit_mlir(
+            "@autotune(D in [32], C in [32])
+            kernel scale(X: tensor<f32>[N, D], O: tensor<f32>[N, D]) {
+                for c in range(0, N, C) {
+                    var t: tile<f32>[C, D] = X[c :+ C, :]
+                    t = t * 2.0
+                    O[c :+ C, :] = t
+                }
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "memref.dim",     // the runtime extent
+                "arith.divui",    // (N - 0) / C whole chunks
+                "arith.cmpi ult", // offset + index < N inside the remainder
+                "arith.select",   // out-of-bounds reads fold to zero
+                "scf.if",         // the remainder runs only when N is ragged
+            ],
+        );
+    }
+
+    #[test]
+    fn static_extent_loop_does_not_split() {
+        // A static extent the tile divides evenly is provably whole, so the
+        // loop keeps its single unguarded form.
+        let mlir = emit_mlir(
+            "@autotune(D in [32], C in [32])
+            kernel scale(X: tensor<f32>[128, D], O: tensor<f32>[128, D]) {
+                for c in range(0, 128, C) {
+                    var t: tile<f32>[C, D] = X[c :+ C, :]
+                    t = t * 2.0
+                    O[c :+ C, :] = t
+                }
+            }",
+        );
+        assert!(
+            !mlir.contains("arith.cmpi ult") && !mlir.contains("memref.dim"),
+            "unexpected ragged split for an evenly tiled static extent:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn split_main_loop_keeps_wmma_and_needs_no_mask() {
+        // The trimmed main loop's slices are in bounds by construction, so it
+        // keeps the tensor-core path and takes no bounds mask; only the
+        // remainder pays for the guard.
+        let mlir = emit_mlir(
+            "@autotune(D in [64], BR in [32], BC in [32])
+            @tensorcore
+            @launch(128)
+            kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], O: tensor<f32>[Nq, BC]) {
+                let pid = program_id(0)
+                let q = Q[pid * BR :+ BR, :]
+                var acc: tile<f32>[BR, BC] = 0.0
+                for kt in range(0, Nk, BC) {
+                    let k = K[kt :+ BC, :]
+                    acc += dot_t(q, k)
+                }
+                O[pid * BR :+ BR, :] = acc
+            }",
+        );
+
+        let (_, loops) = split_at_kt_loop(&mlir);
+        let at_remainder = loops
+            .find("\n      scf.if ")
+            .expect("no ragged remainder in module");
+        let (main, remainder) = loops.split_at(at_remainder);
+        // The remainder's `trim < extent` guard is emitted just before the
+        // scf.if, so drop it before asserting the main loop carries no mask.
+        let main = main.rfind("arith.cmpi ult").map_or(main, |at| &main[..at]);
+
+        assert!(
+            main.contains("gpu.subgroup_mma_compute"),
+            "the trimmed main loop lost WMMA:\n{mlir}"
+        );
+        assert!(
+            !main.contains("arith.cmpi ult"),
+            "the trimmed main loop should need no bounds mask:\n{mlir}"
+        );
+        assert!(
+            remainder.contains("arith.cmpi ult"),
+            "the ragged remainder is unguarded:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn cumsum_tril_transpose_lower_and_verify() {
+        // The linear-attention primitives: cumsum scans the sequence axis,
+        // tril masks the strict upper triangle (a compare plus select), and
+        // transpose mirrors a rank-2 tile so a contraction can run over the
+        // leading axis.
+        let mlir = emit_mlir(
+            "@autotune(D in [32], C in [32])
+            kernel prim(G: tensor<f32>[N, 1], X: tensor<f32>[N, D], O: tensor<f32>[N, D]) {
+                let c = program_id(0)
+                let g = G[c :+ C, :]
+                var b: tile<f32>[C, 1] = cumsum(g)
+                let x = X[c :+ C, :]
+                var xb: tile<f32>[C, D] = x * b
+                var p: tile<f32>[C, C] = dot_t(xb, xb)
+                p = tril(p)
+                var xt = transpose(xb)               // [D, C]
+                var kv: tile<f32>[C, C] = dot(xb, xt) // [C,D] @ [D,C] -> [C,C]
+                var o: tile<f32>[C, D] = dot(p, x)
+                O[c :+ C, :] = o
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "gpu.func @prim",
+                "arith.cmpi sle",  // tril's j <= i predicate
+                "arith.select",    // tril keeps or zeroes each element
+                "vector.contract", // the dot / dot_t matmuls
+            ],
+        );
+    }
+
+    #[test]
+    fn kda_chunkwise_gated_linear_attention_lowers() {
+        // The KDA backbone (examples/kda_fp32.ph): chunkwise gated linear
+        // attention carrying an [D, D] recurrent state, exercising cumsum
+        // (the gate), tril (causal mask), transpose (K^T V), exp, and the
+        // intra/inter dot products.
+        let mlir = emit_mlir(
+            "@autotune(D in [64], C in [32, 128])
+            kernel kda(Q: tensor<f32>[N, D], K: tensor<f32>[N, D], V: tensor<f32>[N, D],
+                       G: tensor<f32>[N, 1], O: tensor<f32>[N, D], scale: f32) {
+                var S: tile<f32>[D, D] = 0.0
+                for c in range(0, N, C) {
+                    let q = Q[c :+ C, :]
+                    let k = K[c :+ C, :]
+                    let v = V[c :+ C, :]
+                    let g = G[c :+ C, :]
+                    var b: tile<f32>[C, 1] = cumsum(g)
+                    var db = exp(b)
+                    var negb = b * -1.0
+                    var dbi = exp(negb)
+                    var qd: tile<f32>[C, D] = q * db
+                    qd = qd * scale
+                    var kd: tile<f32>[C, D] = k * dbi
+                    var p: tile<f32>[C, C] = dot_t(qd, kd)
+                    p = tril(p)
+                    var o: tile<f32>[C, D] = dot(p, v)
+                    o += dot(qd, S)
+                    O[c :+ C, :] = o
+                    var gt = transpose(g)
+                    var total: tile<f32>[1, 1] = rowsum(gt)
+                    var kfin = k * exp(total - b)
+                    var kt = transpose(kfin)
+                    var kv: tile<f32>[D, D] = dot(kt, v)
+                    S = S * exp(total) + kv
+                }
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "gpu.func @kda",
+                "ex2.approx.ftz.f32", // exp on the gates
+                "arith.select",       // tril causal mask
+                "vector.contract",    // the chunk matmuls
+            ],
         );
     }
 }

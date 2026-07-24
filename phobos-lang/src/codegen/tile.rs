@@ -1311,6 +1311,154 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })
     }
 
+    /// out[i, j] = sum_{r <= i} src[r, j]: an inclusive prefix sum down the
+    /// rows (the sequence axis) of a rank-2 tile, the running gate cumulant
+    /// gated linear attention needs. One thread owns each column and sweeps
+    /// its rows in order, carrying the partial in a register (an scf.for
+    /// iter_arg); the sequential row dependence keeps this off the warp
+    /// path.
+    pub(super) fn tile_cumsum(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+    ) -> Result<MemVal<'c>> {
+        if src.shape.len() != 2 {
+            bail!("cumsum expects a rank-2 tile");
+        }
+
+        let (rows, cols) = (src.shape[0], src.shape[1]);
+        if rows == DYN || cols == DYN {
+            bail!("cumsum needs a static tile shape");
+        }
+        
+        let elem = src.elem;
+        if !self.is_float(elem) {
+            bail!("cumsum needs a float element type");
+        }
+        
+        let out = self.alloc_tile_shaped(block, elem, &[rows, cols])?;
+
+        let total = self.const_index(block, cols)?;
+        let tid = self.gpu_index(block, "gpu.thread_id", "x")?;
+        let bdim = self.gpu_index(block, "gpu.block_dim", "x")?;
+
+        let body = Block::new(&[(self.index_t, self.loc)]);
+        let j = detach(body.argument(0)?.into());
+
+        let init = self.zero_scalar(&body, elem)?;
+        let lo = self.const_index(&body, 0)?;
+        let hi = self.const_index(&body, rows)?;
+        let st = self.const_index(&body, 1)?;
+        let rb = Block::new(&[(self.index_t, self.loc), (elem, self.loc)]);
+        let i = detach(rb.argument(0)?.into());
+        let acc = detach(rb.argument(1)?.into());
+        let v = self.push(&rb, memref::load(src.mem, &[i, j], self.loc))?;
+        let nacc = self.push(&rb, arith::addf(acc, v, self.loc))?;
+        
+        rb.append_operation(memref::store(nacc, out.mem, &[i, j], self.loc));
+        rb.append_operation(scf::r#yield(&[nacc], self.loc));
+        
+        let rr = Region::new();
+        rr.append_block(rb);
+        
+        body.append_operation(
+            OperationBuilder::new("scf.for", self.loc)
+                .add_operands(&[lo, hi, st, init])
+                .add_results(&[elem])
+                .add_regions([rr])
+                .build()?,
+        );
+
+        body.append_operation(scf::r#yield(&[], self.loc));
+        
+        let region = Region::new();
+        region.append_block(body);
+        
+        block.append_operation(scf::r#for(tid, total, bdim, region, self.loc));
+        self.barrier(block)?;
+        
+        Ok(out)
+    }
+
+    /// out[i, j] = src[i, j] when j <= i, else 0: the causal (lower-
+    /// triangular) mask for intra-chunk attention. Rewrites src in place
+    /// when it owns an unswizzled buffer (each thread reads and writes one
+    /// element), otherwise writes a fresh tile.
+    pub(super) fn tile_tril(&mut self, block: &Block<'c>, src: &MemVal<'c>) -> Result<MemVal<'c>> {
+        if src.shape.len() != 2 {
+            bail!("tril expects a rank-2 tile");
+        }
+
+        if src.shape.contains(&DYN) {
+            bail!("tril needs a static tile shape");
+        }
+        
+        if !self.is_float(src.elem) {
+            bail!("tril needs a float element type");
+        }
+        
+        let out = if src.owned && src.swizzle.is_none() {
+            src.clone()
+        } else {
+            self.alloc_tile_shaped(block, src.elem, &src.shape)?
+        };
+        
+        let zero = self.zero_scalar(block, src.elem)?;
+        
+        self.distribute(block, &out, 1, true, |cg, blk, idx| {
+            let (i, j) = (idx[0], idx[1]);
+            let keep = cg.push(
+                blk,
+                arith::cmpi(cg.ctx, arith::CmpiPredicate::Sle, j, i, cg.loc),
+            )?;
+
+            let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
+            let r = cg.push(
+                blk,
+                OperationBuilder::new("arith.select", cg.loc)
+                    .add_operands(&[keep, v, zero])
+                    .add_results(&[src.elem])
+                    .build()?,
+            )?;
+            
+            blk.append_operation(memref::store(r, out.mem, idx, cg.loc));
+            
+            Ok(())
+        })?;
+
+        Ok(out)
+    }
+
+    /// out[i, j] = src[j, i]: the rank-2 tile transpose. Each output element
+    /// is owned by one thread that reads the mirrored source element. Needed
+    /// to contract over the sequence axis (the K.T @ V state update) since
+    /// dot / dot_t only contract the last axes.
+    pub(super) fn tile_transpose(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+    ) -> Result<MemVal<'c>> {
+        if src.shape.len() != 2 {
+            bail!("transpose expects a rank-2 tile");
+        }
+
+        let (rows, cols) = (src.shape[0], src.shape[1]);
+        if rows == DYN || cols == DYN {
+            bail!("transpose needs a static tile shape");
+        }
+        
+        let out = self.alloc_tile_shaped(block, src.elem, &[cols, rows])?;
+        
+        self.distribute(block, &out, 1, true, |cg, blk, idx| {
+            let (i, j) = (idx[0], idx[1]);
+            let v = cg.push(blk, memref::load(src.mem, &[j, i], cg.loc))?;
+            blk.append_operation(memref::store(v, out.mem, idx, cg.loc));
+            Ok(())
+        })?;
+        
+        Ok(out)
+    }
+
     /// out[m, n] += sum_k(a[m, k] * b[k, n]): accumulates into out.
     ///
     /// Register-blocked when out has a static shape: the CTA's threads stride over
