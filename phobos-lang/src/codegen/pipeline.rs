@@ -114,7 +114,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
         let body_block = Block::new(&[(self.index_t, self.loc)]);
         let iv = detach(body_block.argument(0)?.into());
-        let next = self.push(&body_block, arith::addi(iv, st, self.loc))?;
+        let next = self.addi(&body_block, iv, st)?;
 
         // Half A: compute iteration iv from bufs0, prefetch iv+st -> bufs1.
         self.emit_pipeline_stage(
@@ -138,7 +138,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, next, hi, self.loc),
         )?;
         let half_b = Block::new(&[]);
-        let next2 = self.push(&half_b, arith::addi(next, st, self.loc))?;
+        let next2 = self.addi(&half_b, next, st)?;
         self.emit_pipeline_stage(
             &half_b, var, iv_div, next, next2, hi, staged, &bufs1, &bufs0, rest,
         )?;

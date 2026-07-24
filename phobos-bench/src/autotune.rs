@@ -1,4 +1,5 @@
 use cust::module::Module;
+use phobos_base::combo::cartesian_product;
 use phobos_base::{phdebug, phinfo};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -56,24 +57,6 @@ pub fn pin(
         .collect())
 }
 
-/// All combinations of the search space (Cartesian product).
-pub fn configs(space: &[(String, Vec<i64>)]) -> Vec<Vec<Setting>> {
-    let mut out: Vec<Vec<Setting>> = vec![Vec::new()];
-    for (name, choices) in space {
-        out = out
-            .iter()
-            .flat_map(|cfg| {
-                choices.iter().map(move |&choice| {
-                    let mut cfg = cfg.clone();
-                    cfg.push((name.clone(), choice));
-                    cfg
-                })
-            })
-            .collect();
-    }
-    out
-}
-
 pub fn cfg_value(cfg: &[Setting], name: &str) -> anyhow::Result<i64> {
     cfg.iter()
         .find(|(n, _)| n == name)
@@ -113,7 +96,7 @@ where
     V: FnMut() -> anyhow::Result<()>,
 {
     pub fn run(&mut self, space: &[(String, Vec<i64>)]) -> anyhow::Result<Winner> {
-        let all = configs(space);
+        let all = cartesian_product(space);
         phinfo!("autotune: {} configs", all.len());
 
         // Stage 1: compile and short-probe every config. We rank by the fastest observed launch

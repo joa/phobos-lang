@@ -305,8 +305,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
             let mut rem = li;
 
             for i in (1..rank).rev() {
-                idx[i] = self.push(&body_block, arith::remui(rem, sizes[i], self.loc))?;
-                rem = self.push(&body_block, arith::divui(rem, sizes[i], self.loc))?;
+                idx[i] = self.remui(&body_block, rem, sizes[i])?;
+                rem = self.divui(&body_block, rem, sizes[i])?;
             }
 
             idx[0] = rem;
@@ -314,7 +314,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
         if width > 1 {
             let w = self.const_index(&body_block, width)?;
-            idx[rank - 1] = self.push(&body_block, arith::muli(idx[rank - 1], w, self.loc))?;
+            idx[rank - 1] = self.muli(&body_block, idx[rank - 1], w)?;
         }
 
         body(self, &body_block, &idx)?;
@@ -1257,38 +1257,32 @@ impl<'p, 'c> Codegen<'p, 'c> {
             // Warp-tile origin: wt -> (wt / wtiles_n * WM, wt % wtiles_n * WN),
             // plus the lane's offset within the warp tile.
             let wtiles_n_v = self.const_index(&body, tiles_n / ln)?;
-            let q = self.push(&body, arith::divui(st, wtiles_n_v, self.loc))?;
-            let r = self.push(&body, arith::remui(st, wtiles_n_v, self.loc))?;
+            let q = self.divui(&body, st, wtiles_n_v)?;
+            let r = self.remui(&body, st, wtiles_n_v)?;
             let wm_v = self.const_index(&body, lm * tm)?;
             let wn_v = self.const_index(&body, ln * tn)?;
-            let wm0 = self.push(&body, arith::muli(q, wm_v, self.loc))?;
-            let wn0 = self.push(&body, arith::muli(r, wn_v, self.loc))?;
-            (
-                self.push(&body, arith::addi(wm0, off_m, self.loc))?,
-                self.push(&body, arith::addi(wn0, off_n, self.loc))?,
-            )
+            let wm0 = self.muli(&body, q, wm_v)?;
+            let wn0 = self.muli(&body, r, wn_v)?;
+            (self.addi(&body, wm0, off_m)?, self.addi(&body, wn0, off_n)?)
         } else {
             // Flat sub-tile origin: st -> (st / tiles_n * TM, st % tiles_n * TN).
             // tiles_n is a constant, so the div/rem strength-reduce.
             let tiles_n_v = self.const_index(&body, tiles_n)?;
-            let q = self.push(&body, arith::divui(st, tiles_n_v, self.loc))?;
-            let r = self.push(&body, arith::remui(st, tiles_n_v, self.loc))?;
+            let q = self.divui(&body, st, tiles_n_v)?;
+            let r = self.remui(&body, st, tiles_n_v)?;
             let tm_v = self.const_index(&body, tm)?;
             let tn_v = self.const_index(&body, tn)?;
-            (
-                self.push(&body, arith::muli(q, tm_v, self.loc))?,
-                self.push(&body, arith::muli(r, tn_v, self.loc))?,
-            )
+            (self.muli(&body, q, tm_v)?, self.muli(&body, r, tn_v)?)
         };
         let mut ms = Vec::with_capacity(tm as usize);
         for i in 0..tm {
             let c = self.const_index(&body, i)?;
-            ms.push(self.push(&body, arith::addi(m0, c, self.loc))?);
+            ms.push(self.addi(&body, m0, c)?);
         }
         let mut ns = Vec::with_capacity(tn as usize);
         for j in 0..tn {
             let c = self.const_index(&body, j)?;
-            ns.push(self.push(&body, arith::addi(n0, c, self.loc))?);
+            ns.push(self.addi(&body, n0, c)?);
         }
 
         // Row segments become single vector accesses when the buffer's base

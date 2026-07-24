@@ -23,15 +23,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
     C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
 }"#;
 
-fn randoms(n: usize, mut seed: u64) -> Vec<f32> {
-    (0..n)
-        .map(|_| {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            ((seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0
-        })
-        .collect()
+fn randoms(n: usize, seed: u64) -> Vec<f32> {
+    phobos_base::rng::Lcg::new(seed).unit_f32s(n)
 }
 
 fn tensor(name: &str, n: usize, mode: AccessMode, uri: String) -> TensorInput {

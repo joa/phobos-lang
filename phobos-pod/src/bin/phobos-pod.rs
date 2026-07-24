@@ -1,4 +1,5 @@
-use anyhow::{Context, Result, bail};
+use anyhow::Result;
+use phobos_base::cli::Args;
 
 const USAGE: &str = "\
 usage: phobos-pod --id <node-id> --sched <host:port> [--listen <host:port>] [--advertise <host:port>] [--arena <bytes>]
@@ -12,23 +13,19 @@ usage: phobos-pod --id <node-id> --sched <host:port> [--listen <host:port>] [--a
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    let args = Args::from_env();
+    if args.wants_help() {
         println!("{USAGE}");
         return Ok(());
     }
 
-    let id: u16 = arg(&args, "--id")?
-        .context("missing --id")?
-        .parse()
-        .context("--id must be a u16")?;
-    let sched = arg(&args, "--sched")?.context("missing --sched")?;
-    let listen = arg(&args, "--listen")?.unwrap_or_else(|| "0.0.0.0:0".to_string());
-    let advertise = arg(&args, "--advertise")?;
-    let arena = match arg(&args, "--arena")? {
-        Some(v) => v.parse::<usize>().context("--arena must be a byte count")?,
-        None => phobos_pod::DEFAULT_ARENA_BYTES,
-    };
+    let id: u16 = args.parse_required("--id")?;
+    let sched = args.required("--sched")?.to_string();
+    let listen = args.value("--listen")?.unwrap_or("0.0.0.0:0").to_string();
+    let advertise = args.value("--advertise")?.map(str::to_string);
+    let arena = args
+        .parse("--arena")?
+        .unwrap_or(phobos_pod::DEFAULT_ARENA_BYTES);
 
     eprintln!(
         "phobos-pod {id}: arena {} MiB, listen {listen}{}, scheduler {sched}",
@@ -39,14 +36,4 @@ async fn main() -> Result<()> {
             .unwrap_or_default(),
     );
     phobos_pod::serve(id, sched, listen, advertise, arena).await
-}
-
-fn arg(args: &[String], flag: &str) -> Result<Option<String>> {
-    match args.iter().position(|a| a == flag) {
-        Some(i) => match args.get(i + 1) {
-            Some(v) => Ok(Some(v.clone())),
-            None => bail!("{flag} expects a value\n{USAGE}"),
-        },
-        None => Ok(None),
-    }
 }

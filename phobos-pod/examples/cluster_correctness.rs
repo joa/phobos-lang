@@ -44,7 +44,7 @@ fn fmt_bytes(b: u64) -> String {
 
 /// Stream n f32 in [-1, 1] to a fresh file:// tensor in chunks, never
 /// holding more than one chunk in RAM. Returns the wall time.
-fn seed_tensor(uri: &str, n: usize, mut seed: u64) -> Result<Duration> {
+fn seed_tensor(uri: &str, n: usize, seed: u64) -> Result<Duration> {
     const CHUNK: usize = 1 << 22; // 16 MiB of f32
     let start = Instant::now();
     let file = OpenOptions::new()
@@ -54,14 +54,12 @@ fn seed_tensor(uri: &str, n: usize, mut seed: u64) -> Result<Duration> {
         .open(storage::file_path(uri)?)?;
     let mut w = BufWriter::with_capacity(1 << 22, file);
     let mut buf = vec![0f32; CHUNK];
+    let mut lcg = phobos_base::rng::Lcg::new(seed);
     let mut left = n;
     while left > 0 {
         let m = left.min(CHUNK);
         for x in buf[..m].iter_mut() {
-            seed = seed
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            *x = ((seed >> 33) as f32 / (1u64 << 31) as f32) - 1.0;
+            *x = lcg.next_unit_f32();
         }
         let bytes = unsafe { std::slice::from_raw_parts(buf.as_ptr() as *const u8, m * 4) };
         w.write_all(bytes)?;

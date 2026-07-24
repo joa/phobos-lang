@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
+use phobos_base::combo::cartesian_product;
 use phobos_cluster::ir::ClusterProgram;
 use phobos_cluster::isa::Op;
 use phobos_cluster::tile::{AccessMode, DataType, ScalarValue};
@@ -191,17 +192,15 @@ fn busiest_comm_sec(p: &ClusterProgram, pl: &Plan, fp: ClusterFingerprint) -> f6
 }
 
 fn configs(p: &ClusterProgram) -> Vec<HashMap<String, i64>> {
-    p.super_dims.iter().fold(vec![HashMap::new()], |acc, d| {
-        acc.iter()
-            .flat_map(|base| {
-                d.choices.iter().map(|&c| {
-                    let mut m = base.clone();
-                    m.insert(d.name.clone(), c);
-                    m
-                })
-            })
-            .collect()
-    })
+    let dims: Vec<(String, Vec<i64>)> = p
+        .super_dims
+        .iter()
+        .map(|d| (d.name.clone(), d.choices.clone()))
+        .collect();
+    cartesian_product(&dims)
+        .into_iter()
+        .map(|combo| combo.into_iter().collect())
+        .collect()
 }
 
 #[cfg(test)]
