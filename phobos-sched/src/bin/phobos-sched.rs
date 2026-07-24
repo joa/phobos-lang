@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, bail};
+use phobos_base::cli::Args;
 use phobos_base::phinfo;
 use phobos_sched::IngestPolicy;
 use phobos_sched::autotune::ClusterFingerprint;
@@ -24,44 +25,38 @@ usage: phobos-sched --listen <host:port> --nodes <n> --job <file> [--budget <byt
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if args.iter().any(|a| a == "-h" || a == "--help") {
+    let args = Args::from_env();
+    if args.wants_help() {
         println!("{USAGE}");
         return Ok(());
     }
 
-    let listen = arg(&args, "--listen")?.unwrap_or_else(|| "0.0.0.0:7000".to_string());
-    let nodes: u16 = arg(&args, "--nodes")?
-        .context("missing --nodes")?
-        .parse()
-        .context("--nodes must be a u16")?;
-    let job_path = arg(&args, "--job")?.context("missing --job")?;
-    let budget_bytes = match arg(&args, "--budget")? {
-        Some(v) => Some(v.parse::<u64>().context("--budget must be a byte count")?),
-        None => None,
-    };
-    let autotune = args.iter().any(|a| a == "--autotune");
-    let ingest = match arg(&args, "--ingest")?.as_deref() {
+    let listen = args.value("--listen")?.unwrap_or("0.0.0.0:7000");
+    let nodes: u16 = args.parse_required("--nodes")?;
+    let job_path = args.required("--job")?;
+    let budget_bytes = args.parse::<u64>("--budget")?;
+    let autotune = args.has("--autotune");
+    let ingest = match args.value("--ingest")? {
         None | Some("direct") => IngestPolicy::DirectLoad,
         Some("home-fetch") => IngestPolicy::HomeLoadPeerFetch,
         Some(other) => bail!("unknown --ingest '{other}' (direct|home-fetch)"),
     };
 
     let mut fp = ClusterFingerprint::default();
-    if let Some(v) = arg(&args, "--vram")? {
-        fp.vram_bytes = v.parse().context("--vram must be a byte count")?;
+    if let Some(v) = args.parse("--vram")? {
+        fp.vram_bytes = v;
     }
-    if let Some(v) = arg(&args, "--link-bw")? {
-        fp.link_bytes_per_sec = v.parse().context("--link-bw must be a number")?;
+    if let Some(v) = args.parse("--link-bw")? {
+        fp.link_bytes_per_sec = v;
     }
-    if let Some(v) = arg(&args, "--leaf-flops")? {
-        fp.leaf_flops_per_sec = v.parse().context("--leaf-flops must be a number")?;
+    if let Some(v) = args.parse("--leaf-flops")? {
+        fp.leaf_flops_per_sec = v;
     }
 
-    let job = parse_job(&job_path)?;
+    let job = parse_job(job_path)?;
 
     let sched = Scheduler::new();
-    let listener = tokio::net::TcpListener::bind(&listen)
+    let listener = tokio::net::TcpListener::bind(listen)
         .await
         .with_context(|| format!("binding scheduler to {listen}"))?;
     let bound = listener.local_addr()?;
@@ -91,14 +86,4 @@ async fn main() -> Result<()> {
         phinfo!("  {uri}");
     }
     Ok(())
-}
-
-fn arg(args: &[String], flag: &str) -> Result<Option<String>> {
-    match args.iter().position(|a| a == flag) {
-        Some(i) => match args.get(i + 1) {
-            Some(v) => Ok(Some(v.clone())),
-            None => bail!("{flag} expects a value\n{USAGE}"),
-        },
-        None => Ok(None),
-    }
 }

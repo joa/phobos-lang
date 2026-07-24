@@ -54,7 +54,7 @@ pub fn parse_job(path: &str) -> Result<Job> {
                 data_type: proto::data_type_to_i32(
                     parse_data_type(data_type).map_err(|m| err(&m))?,
                 ),
-                shape: parse_shape(shape).map_err(|m| err(&m))?,
+                shape: phobos_base::shape::parse(shape).map_err(|e| err(&e.to_string()))?,
                 mode: proto::am_to_i32(parse_mode(mode).map_err(|m| err(&m))?),
                 uri: uri.to_string(),
             });
@@ -121,12 +121,3 @@ fn parse_data_type(s: &str) -> std::result::Result<DataType, String> {
     }
 }
 
-fn parse_shape(s: &str) -> std::result::Result<Vec<u64>, String> {
-    s.split('x')
-        .map(|d| {
-            d.trim()
-                .parse::<u64>()
-                .map_err(|_| format!("bad shape extent '{d}'"))
-        })
-        .collect()
-}

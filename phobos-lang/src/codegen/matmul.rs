@@ -468,7 +468,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 arith::cmpi(cg.ctx, arith::CmpiPredicate::Slt, next, hi, cg.loc),
             )?;
             let then_block = Block::new(&[]);
-            let next2 = cg.push(&then_block, arith::addi(next, st, cg.loc))?;
+            let next2 = cg.addi(&then_block, next, st)?;
             let half_b = half(
                 cg,
                 &then_block,
