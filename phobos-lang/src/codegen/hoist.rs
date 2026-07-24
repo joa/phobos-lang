@@ -83,16 +83,18 @@ impl<'p, 'c> Codegen<'p, 'c> {
     fn hoist_candidates(&self, body: &[Stmt]) -> Option<Vec<MemVal<'c>>> {
         let mut scan = HoistScan::default();
         let mut cands = Vec::new();
-        self.hoist_scan(body, &mut scan, &mut cands)?;
-        Some(cands)
+        self.hoist_scan(body, &mut scan, &mut cands)
+            .then_some(cands)
     }
 
+    /// Collects hoistable operands into cands, returning false as soon as a
+    /// global store makes the whole body ineligible.
     fn hoist_scan(
         &self,
         stmts: &[Stmt],
         scan: &mut HoistScan,
         cands: &mut Vec<MemVal<'c>>,
-    ) -> Option<()> {
+    ) -> bool {
         for stmt in stmts {
             match stmt {
                 Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
@@ -115,7 +117,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 }
                 Stmt::Assign { target, value, .. } => {
                     if self.is_global_store(target) {
-                        return None;
+                        return false;
                     }
                     if let Expr::Call { callee, args } = value
                         && (callee == "dot" || callee == "dot_t")
@@ -137,25 +139,29 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         self.hoist_consider(scan, cands, callee == "dot_t", args, out_f32);
                     }
                 }
-                Stmt::For { body, .. } => self.hoist_scan(body, scan, cands)?,
+                Stmt::For { body, .. } => {
+                    if !self.hoist_scan(body, scan, cands) {
+                        return false;
+                    }
+                }
                 // Dots inside if/while are not worth speculative staging,
                 // but their bodies must still be write-free.
                 Stmt::If { then, r#else, .. } => {
                     if self.writes_global(then)
                         || r#else.as_deref().is_some_and(|e| self.writes_global(e))
                     {
-                        return None;
+                        return false;
                     }
                 }
                 Stmt::While { body, .. } => {
                     if self.writes_global(body) {
-                        return None;
+                        return false;
                     }
                 }
                 Stmt::Expr(_) => {}
             }
         }
-        Some(())
+        true
     }
 
     /// Checks one dot against the tensor-core gates and collects any

@@ -59,7 +59,12 @@ float       = digit { digit } "." { digit } ;
 
 ## Notes
 - **Keywords:** `kernel let var if else for in while true false`.
-- **Tensor size**: Assumed to be a multiple of `4`
+- **Tensor size**: Assumed to be a multiple of `4`. A tensor dimension whose
+  size is a compile-time constant need not be a multiple of the tile: a slice
+  that would run off the end is masked, so the last (partial) tile reads
+  out-of-bounds elements as zero and skips their stores. This falls back from
+  the specialized register/tensor-core matmul paths to the generic tiled path.
+  Dynamic (runtime) sizes are still assumed to tile evenly.
 - **`f16`**: half precision (IEEE binary16). Float literals are written in f32 and
   rounded to f16 on store, and arithmetic that mixes f16 with a wider float widens
   to the wider type (so `f16 + f32 -> f32`). The heavy compute paths run f16 inputs

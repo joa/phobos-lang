@@ -321,6 +321,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return None;
         }
 
+        if self.slice_is_partial(a_slice)
+            || self.slice_is_partial(b_slice)
+            || self.slice_is_partial(target)
+        {
+            return None;
+        }
+
         Some(MatmulFusion {
             dims,
             acc_scalar,
@@ -568,6 +575,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let view = self.emit_subview(block, &cmv, p.out_subs)?;
 
         self.check_shapes(&view.shape, shape, "matmul epilogue store")?;
+
+        // matmul_candidate declines partial output tiles, so the register/WMMA
+        // drains (which have no per-element bounds guard) never reach here.
+        if view.is_masked() {
+            bail!("internal: register matmul epilogue reached a partial output tile");
+        }
 
         Ok(view)
     }

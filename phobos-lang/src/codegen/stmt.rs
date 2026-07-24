@@ -230,6 +230,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if let Expr::Call { callee, args } = value
             && (callee == "dot" || callee == "dot_t")
         {
+            // The matmul kernels write the target in place (register/fragment
+            // blocking or a strided sub-tile sweep), none of which carry the
+            // per-element store guard a partial tile needs. Route such stores
+            // through an accumulator tile instead.
+            if target.is_masked() {
+                bail!(
+                    "writing a dot result directly into a partially out-of-bounds \
+                     tensor slice is unsupported; accumulate into a tile first"
+                );
+            }
             let transpose = callee == "dot_t";
             let (a, b) = self.dot_operands(block, args)?;
             if transpose {

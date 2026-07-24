@@ -26,8 +26,54 @@ impl<'p, 'c> Codegen<'p, 'c> {
             staged.push((name.as_str(), value));
             rest = tail;
         }
+
         let names: Vec<&str> = staged.iter().map(|(n, _)| *n).collect();
-        (!staged.is_empty() && !rest.iter().any(|s| s.writes_any(&names))).then_some((staged, rest))
+
+        (!staged.is_empty()
+            && !staged.iter().any(|(_, v)| self.slice_is_partial(v))
+            && !rest.iter().any(|s| s.writes_any(&names)))
+        .then_some((staged, rest))
+    }
+
+    /// Whether a tensor-slice expression can reach past its source on the last
+    /// tile (a statically known extent an aligned tile cannot tile evenly).
+    /// 
+    /// The specialized matmul/fragment/pipeline paths bail on such a slice so
+    /// the generic masked load/store path handles it (see [`dim_in_bounds`]).
+    pub(super) fn slice_is_partial(&self, expr: &Expr) -> bool {
+        let Expr::Index { base, subs } = expr else {
+            return false;
+        };
+
+        let Expr::Var(name) = &**base else {
+            return false;
+        };
+        
+        let mv = match self.lookup(name) {
+            Some(Binding::Tensor(mv) | Binding::View(mv) | Binding::Tile(mv)) => mv,
+            _ => return false,
+        };
+        
+        if subs.len() != mv.shape.len() {
+            return false;
+        }
+        
+        subs.iter().enumerate().any(|(d, s)| {
+            let (size, off_div) = match s {
+                Sub::Full | Sub::Point(_) => return false,
+                Sub::Span { start, len } => {
+                    (self.const_fold(len).unwrap_or(DYN), self.expr_div(start))
+                }
+                Sub::Range { start, end } => {
+                    let size = match (self.const_fold(start), self.const_fold(end)) {
+                        (Some(a), Some(b)) => b - a,
+                        _ => DYN,
+                    };
+                    (size, self.expr_div(start))
+                }
+            };
+            !dim_in_bounds(mv.shape[d], size, off_div)
+        })
     }
 
     /// The static shape of a tensor-slice expression, if it has one.

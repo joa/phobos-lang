@@ -54,7 +54,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let &[m, n] = &shape[..] else { return None };
 
         let mut scan = FragScan::default();
-        self.frag_uses_ok(name, m, n, rest, &mut scan)?;
+        if !self.frag_uses_ok(name, m, n, rest, &mut scan) {
+            return None;
+        }
 
         // At least one dot pins the contraction extent the plan gate needs;
         // an accumulator that is never dotted has no business in fragments.
@@ -70,7 +72,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })
     }
 
-    /// Walks stmts checking every appearance of name is a sanctioned
+    /// Walks statements checking every appearance of name is a sanctioned
     /// fragment form, collecting resolvable shapes along the way.
     fn frag_uses_ok(
         &self,
@@ -79,7 +81,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         n: i64,
         stmts: &[Stmt],
         scan: &mut FragScan,
-    ) -> Option<()> {
+    ) -> bool {
         for stmt in stmts {
             match stmt {
                 Stmt::Let {
@@ -94,8 +96,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 } => {
                     // A redeclaration would shadow the accumulator mid-scan.
                     if n2 == name || value.uses_name(name) {
-                        return None;
+                        return false;
                     }
+
+                    if self.slice_is_partial(value) {
+                        return false;
+                    }
+
                     self.frag_scan_decl(n2, ty.as_ref(), value, scan);
                 }
                 Stmt::Assign {
@@ -103,7 +110,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     op,
                     value,
                 } if t == name => {
-                    self.frag_form_ok(name, m, n, *op, value, scan)?;
+                    if !self.frag_form_ok(name, m, n, *op, value, scan) {
+                        return false;
+                    }
                 }
                 // <tensor slice> = acc: the fragment scatter store.
                 Stmt::Assign {
@@ -111,20 +120,29 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     op: AssignOp::Set,
                     value: Expr::Var(v),
                 } if v == name => {
-                    let Expr::Var(t) = &**base else { return None };
+                    let Expr::Var(t) = &**base else { return false };
                     let Some(Binding::Tensor(c)) = self.lookup(t) else {
-                        return None;
+                        return false;
                     };
+
                     if !self.is_f16_or_f32(c.elem) || subs.iter().any(|s| s.uses_name(name)) {
-                        return None;
+                        return false;
                     }
-                    if self.slice_static_shape(target)? != [m, n] {
-                        return None;
+
+                    let Some(shape) = self.slice_static_shape(target) else {
+                        return false;
+                    };
+                    if shape != [m, n] {
+                        return false;
+                    }
+
+                    if self.slice_is_partial(target) {
+                        return false;
                     }
                 }
                 Stmt::Assign { target, value, .. } => {
                     if target.uses_name(name) || value.uses_name(name) {
-                        return None;
+                        return false;
                     }
                 }
                 Stmt::For {
@@ -139,25 +157,27 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         || end.uses_name(name)
                         || step.as_ref().is_some_and(|e| e.uses_name(name))
                     {
-                        return None;
+                        return false;
                     }
-                    self.frag_uses_ok(name, m, n, body, scan)?;
+                    if !self.frag_uses_ok(name, m, n, body, scan) {
+                        return false;
+                    }
                 }
                 // if/while regions cannot thread iter_args, so the
                 // accumulator must not appear inside them at all.
                 s @ (Stmt::While { .. } | Stmt::If { .. }) => {
                     if s.uses_name(name) {
-                        return None;
+                        return false;
                     }
                 }
                 Stmt::Expr(e) => {
                     if e.uses_name(name) {
-                        return None;
+                        return false;
                     }
                 }
             }
         }
-        Some(())
+        true
     }
 
     /// Records a declared tile or let-bound static tensor slice the later
@@ -204,7 +224,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         op: AssignOp,
         value: &Expr,
         scan: &mut FragScan,
-    ) -> Option<()> {
+    ) -> bool {
         match (op, value) {
             // acc = acc {*, /} <[m, 1] f32 column>
             (
@@ -216,34 +236,39 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 },
             ) => {
                 let (Expr::Var(l), Expr::Var(col)) = (lhs.as_ref(), rhs.as_ref()) else {
-                    return None;
+                    return false;
                 };
                 if l != name || col == name {
-                    return None;
+                    return false;
                 }
-                let (is_f32, shape) = self.frag_operand(scan, col)?;
-                (is_f32 && shape == [m, 1]).then_some(())
+                let Some((is_f32, shape)) = self.frag_operand(scan, col) else {
+                    return false;
+                };
+                is_f32 && shape == [m, 1]
             }
             // acc += dot(<[m, k]>, <[k, n]>) with f16/f32 operands
             (AssignOp::Add, Expr::Call { callee, args }) if callee == "dot" => {
                 let [Expr::Var(a), Expr::Var(b)] = &args[..] else {
-                    return None;
+                    return false;
                 };
                 if a == name || b == name {
-                    return None;
+                    return false;
                 }
-                let (_, ash) = self.frag_operand(scan, a)?;
-                let (_, bsh) = self.frag_operand(scan, b)?;
+                let (Some((_, ash)), Some((_, bsh))) =
+                    (self.frag_operand(scan, a), self.frag_operand(scan, b))
+                else {
+                    return false;
+                };
                 let (&[am, ak], &[bk, bn]) = (&ash[..], &bsh[..]) else {
-                    return None;
+                    return false;
                 };
                 if am != m || bn != n || ak != bk || ak % 16 != 0 {
-                    return None;
+                    return false;
                 }
                 scan.kk.get_or_insert(ak);
-                Some(())
+                true
             }
-            _ => None,
+            _ => false,
         }
     }
 }

@@ -78,7 +78,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     if !matches!(binding, Binding::Tensor(_)) {
                         bail!("only tensors can be sliced");
                     }
-                    Ok(Rv::Tile(self.emit_subview(block, &mv, subs)?))
+                    
+                    let view = self.emit_subview(block, &mv, subs)?;
+
+                    if view.is_masked() {
+                        Ok(Rv::Tile(self.materialize_masked(block, &view)?))
+                    } else {
+                        Ok(Rv::Tile(view))
+                    }
                 }
             }
             Expr::Call { callee, args } => self.emit_call(block, callee, args),
@@ -525,6 +532,19 @@ impl<'p, 'c> Codegen<'p, 'c> {
         });
         let aligned = mult4(base_div) && strides[..rank - 1].iter().all(|&s| mult4(stride_div(s)));
 
+        // Bounds mask: a dim whose (statically known) source extent an aligned
+        // tile cannot tile evenly may reach past the end on the last tile, so
+        // record its offset and extent for the masked load/store epilogue.
+        // Dynamic extents are assumed aligned (see dim_in_bounds), so they mask
+        // nothing and the fast paths are untouched.
+        let mut mask = vec![None; rank];
+        for i in 0..rank {
+            if !dim_in_bounds(src.shape[i], static_sizes[i], off_divs[i]) {
+                let extent = self.const_index(block, src.shape[i])?;
+                mask[i] = Some((offsets[i], extent));
+            }
+        }
+
         let result_type = self.subview_type(src, &static_sizes)?;
         let mut operands = vec![src.mem];
         operands.extend_from_slice(&offsets);
@@ -554,6 +574,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             swizzle: None,
             global: None,
             owned: false,
+            mask,
         })
     }
 
