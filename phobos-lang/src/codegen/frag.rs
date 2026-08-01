@@ -184,11 +184,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
     /// form checks can resolve shapes against.
     fn frag_scan_decl(&self, name: &str, ty: Option<&AstType>, value: &Expr, scan: &mut FragScan) {
         let entry = match ty {
-            Some(AstType::Tile(sc @ (Scalar::F16 | Scalar::F32), dims)) => self
-                .tile_shape(dims)
-                .ok()
-                .map(|s| (*sc == Scalar::F32, s)),
-            None => match (self.slice_static_shape(value), self.slice_tensor_elem(value)) {
+            Some(AstType::Tile(sc @ (Scalar::F16 | Scalar::F32), dims)) => {
+                self.tile_shape(dims).ok().map(|s| (*sc == Scalar::F32, s))
+            }
+            None => match (
+                self.slice_static_shape(value),
+                self.slice_tensor_elem(value),
+            ) {
                 (Some(s), Some(e)) if self.is_f16_or_f32(e) => Some((e == self.f32_t, s)),
                 _ => None,
             },
@@ -365,7 +367,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
             }
             Ok(())
         })?;
-        self.update_binding(name, Binding::Frags(FragAcc { frags, ..fa.clone() }));
+        self.update_binding(
+            name,
+            Binding::Frags(FragAcc {
+                frags,
+                ..fa.clone()
+            }),
+        );
         Ok(())
     }
 
@@ -391,8 +399,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
         self.barrier(block)?;
 
         let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
-        let finals =
-            self.mma_sync_mac(block, &a_buf, &b_buf, (kk, fm, fnn), m0, n0, &fa.frags, false)?;
+        let finals = self.mma_sync_mac(
+            block,
+            &a_buf,
+            &b_buf,
+            (kk, fm, fnn),
+            m0,
+            n0,
+            &fa.frags,
+            false,
+        )?;
 
         // No shared output to publish, but the barrier still orders the
         // ldmatrix reads before the released staging is reused. Hoisted
@@ -511,7 +527,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 frags.push(detach(body_block.argument(off + k)?.into()));
             }
             off += fa.frags.len();
-            self.bind(name, Binding::Frags(FragAcc { frags, ..fa.clone() }));
+            self.bind(
+                name,
+                Binding::Frags(FragAcc {
+                    frags,
+                    ..fa.clone()
+                }),
+            );
         }
 
         // Collect the loop-carried finals before the scope pops.
@@ -549,7 +571,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 frags.push(detach(op.result(off + k)?.into()));
             }
             off += fa.frags.len();
-            self.update_binding(name, Binding::Frags(FragAcc { frags, ..fa.clone() }));
+            self.update_binding(
+                name,
+                Binding::Frags(FragAcc {
+                    frags,
+                    ..fa.clone()
+                }),
+            );
         }
         Ok(())
     }

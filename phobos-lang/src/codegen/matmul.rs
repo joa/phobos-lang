@@ -9,13 +9,13 @@ const HALF_VEC: i64 = 4;
 ///
 /// ```plain
 /// var acc: tile<f32>[M, N] = <scalar>
-/// 
+///
 /// for kt in range(lo, hi, st) {
 ///     var a = A[<static f32 slice>] // let works too
 ///     var b = B[<static f32 slice>]
 ///     acc += dot(a, b)
 /// }
-/// 
+///
 /// // Optional GEMM epilogue (alpha/beta scaling with prev_load load):
 /// [let prev_load = C[<slice>]] // same slice as store target
 /// C[<slice>] = [alpha *] acc [+ beta * prev_load] // acc's last use

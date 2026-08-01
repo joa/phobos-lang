@@ -167,9 +167,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     /// Stores value into the tile target (= or +=).
-    /// 
+    ///
     /// This is where tile-level patterns get matched:
-    /// 
+    ///
     /// - t += dot(a, b) -> accumulating matmul loop into target
     /// - t = dot(a, b)  -> zero-fill plus that accumulating loop
     /// - t = s1*t1 + s2*t2 -> GEMM epilogue (single loop, no temp tiles)

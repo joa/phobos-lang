@@ -131,9 +131,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                                     _ => false,
                                 },
                             },
-                            t @ Expr::Index { .. } => {
-                                self.slice_tensor_elem(t) == Some(self.f32_t)
-                            }
+                            t @ Expr::Index { .. } => self.slice_tensor_elem(t) == Some(self.f32_t),
                             _ => false,
                         };
                         self.hoist_consider(scan, cands, callee == "dot_t", args, out_f32);
@@ -209,14 +207,22 @@ impl<'p, 'c> Codegen<'p, 'c> {
     /// Records an in-body declaration: its name (loop-variant, never
     /// hoistable) and, when resolvable, its element class and static shape
     /// for the dot gate checks.
-    fn hoist_record_decl(&self, scan: &mut HoistScan, name: &str, ty: Option<&AstType>, value: &Expr) {
+    fn hoist_record_decl(
+        &self,
+        scan: &mut HoistScan,
+        name: &str,
+        ty: Option<&AstType>,
+        value: &Expr,
+    ) {
         scan.declared.insert(name.to_string());
         let entry = match ty {
-            Some(AstType::Tile(sc @ (Scalar::F16 | Scalar::F32), dims)) => self
-                .tile_shape(dims)
-                .ok()
-                .map(|s| (*sc == Scalar::F32, s)),
-            None => match (self.slice_static_shape(value), self.slice_tensor_elem(value)) {
+            Some(AstType::Tile(sc @ (Scalar::F16 | Scalar::F32), dims)) => {
+                self.tile_shape(dims).ok().map(|s| (*sc == Scalar::F32, s))
+            }
+            None => match (
+                self.slice_static_shape(value),
+                self.slice_tensor_elem(value),
+            ) {
                 (Some(s), Some(e)) if self.is_f16_or_f32(e) => Some((e == self.f32_t, s)),
                 _ => None,
             },
@@ -263,8 +269,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             Stmt::Assign { target, .. } => self.is_global_store(target),
             Stmt::For { body, .. } | Stmt::While { body, .. } => self.writes_global(body),
             Stmt::If { then, r#else, .. } => {
-                self.writes_global(then)
-                    || r#else.as_deref().is_some_and(|e| self.writes_global(e))
+                self.writes_global(then) || r#else.as_deref().is_some_and(|e| self.writes_global(e))
             }
             _ => false,
         })

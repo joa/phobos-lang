@@ -283,7 +283,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
             let global = self.addi(block, *off, idx[d])?;
             let in_bounds = self.push(
                 block,
-                arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, global, *extent, self.loc),
+                arith::cmpi(
+                    self.ctx,
+                    arith::CmpiPredicate::Ult,
+                    global,
+                    *extent,
+                    self.loc,
+                ),
             )?;
 
             pred = Some(match pred {
@@ -315,7 +321,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let src = view.mem;
         let dst_mem = dst.mem;
         let elem = view.elem;
-        
+
         self.distribute(block, &dst, 1, true, |cg, blk, idx| {
             let zero_idx = cg.const_index(blk, 0)?;
             let mut safe = idx.to_vec();
@@ -328,14 +334,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     blk,
                     arith::cmpi(cg.ctx, arith::CmpiPredicate::Ult, global, *extent, cg.loc),
                 )?;
-            
+
                 safe[d] = cg.select(blk, in_bounds, idx[d], zero_idx)?;
                 pred = Some(match pred {
                     Some(p) => cg.push(blk, arith::andi(p, in_bounds, cg.loc))?,
                     None => in_bounds,
                 });
             }
-            
+
             let loaded = cg.push(blk, memref::load(src, &safe, cg.loc))?;
             let val = match pred {
                 Some(p) => {
@@ -346,10 +352,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
             };
 
             blk.append_operation(memref::store(val, dst_mem, idx, cg.loc));
-            
+
             Ok(())
         })?;
-        
+
         Ok(dst)
     }
 
@@ -428,13 +434,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             then.append_operation(scf::r#yield(&[], self.loc));
             let then_region = Region::new();
             then_region.append_block(then);
-            body_block.append_operation(scf::r#if(
-                pred,
-                &[],
-                then_region,
-                Region::new(),
-                self.loc,
-            ));
+            body_block.append_operation(scf::r#if(pred, &[], then_region, Region::new(), self.loc));
         } else {
             body(self, &body_block, &idx)?;
         }
@@ -1104,7 +1104,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
         match kind {
             Reduce::Sum => self.zero_scalar(block, elem),
             Reduce::Max => {
-                let floor = if elem == self.f16_t { -65504.0 } else { -3.0e38 };
+                let floor = if elem == self.f16_t {
+                    -65504.0
+                } else {
+                    -3.0e38
+                };
                 self.push(
                     block,
                     arith::constant(

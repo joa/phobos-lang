@@ -1,16 +1,17 @@
 pub fn cartesian_product(dims: &[(String, Vec<i64>)]) -> Vec<Vec<(String, i64)>> {
-    dims.iter().fold(vec![Vec::new()], |combos, (name, choices)| {
-        combos
-            .into_iter()
-            .flat_map(|combo| {
-                choices.iter().map(move |&choice| {
-                    let mut combo = combo.clone();
-                    combo.push((name.clone(), choice));
-                    combo
+    dims.iter()
+        .fold(vec![Vec::new()], |combos, (name, choices)| {
+            combos
+                .into_iter()
+                .flat_map(|combo| {
+                    choices.iter().map(move |&choice| {
+                        let mut combo = combo.clone();
+                        combo.push((name.clone(), choice));
+                        combo
+                    })
                 })
-            })
-            .collect()
-    })
+                .collect()
+        })
 }
 
 #[cfg(test)]

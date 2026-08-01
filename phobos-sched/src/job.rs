@@ -120,4 +120,3 @@ fn parse_data_type(s: &str) -> std::result::Result<DataType, String> {
         _ => Err(format!("unknown data type '{s}'")),
     }
 }
-

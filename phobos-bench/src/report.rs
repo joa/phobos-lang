@@ -147,7 +147,8 @@ impl Peaks {
         // Overrides are given in TFLOP/s; store GFLOP/s.
         let fp32_gflops = peak_fp32_tflops.map_or(derived_fp32, |t| t * 1e3);
         let fp16_tc_gflops = peak_fp16_tc_tflops.map_or(derived_fp16_tc, |t| t * 1e3);
-        let fp16_tc_f32_acc_gflops = peak_fp16_tc_f32_acc_tflops.map_or(derived_fp16_tc_f32_acc, |t| t * 1e3);
+        let fp16_tc_f32_acc_gflops =
+            peak_fp16_tc_f32_acc_tflops.map_or(derived_fp16_tc_f32_acc, |t| t * 1e3);
 
         phinfo!(
             "gpu: {} ({:.0} SMs @ {:.2} GHz, sm_{cc})",

@@ -37,7 +37,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
     /// Whether a tensor-slice expression can reach past its source on the last
     /// tile (a statically known extent an aligned tile cannot tile evenly).
-    /// 
+    ///
     /// The specialized matmul/fragment/pipeline paths bail on such a slice so
     /// the generic masked load/store path handles it (see [`dim_in_bounds`]).
     pub(super) fn slice_is_partial(&self, expr: &Expr) -> bool {
@@ -48,16 +48,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let Expr::Var(name) = &**base else {
             return false;
         };
-        
+
         let mv = match self.lookup(name) {
             Some(Binding::Tensor(mv) | Binding::View(mv) | Binding::Tile(mv)) => mv,
             _ => return false,
         };
-        
+
         if subs.len() != mv.shape.len() {
             return false;
         }
-        
+
         subs.iter().enumerate().any(|(d, s)| {
             let (size, off_div) = match s {
                 Sub::Full | Sub::Point(_) => return false,

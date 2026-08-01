@@ -220,7 +220,8 @@ fn main() -> anyhow::Result<()> {
     }
 
     if let Some(path) = &opts.csv {
-        let peaks = report::Peaks::detect(opts.peak_fp32, opts.peak_fp16tc, opts.peak_fp16tcf32acc)?;
+        let peaks =
+            report::Peaks::detect(opts.peak_fp32, opts.peak_fp16tc, opts.peak_fp16tcf32acc)?;
         results.write_csv(path, &peaks)?;
     }
 

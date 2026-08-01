@@ -78,7 +78,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     if !matches!(binding, Binding::Tensor(_)) {
                         bail!("only tensors can be sliced");
                     }
-                    
+
                     let view = self.emit_subview(block, &mv, subs)?;
 
                     if view.is_masked() {

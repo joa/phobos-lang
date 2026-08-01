@@ -128,4 +128,3 @@ fn peek(args: &Args) -> Result<()> {
     }
     Ok(())
 }
-
