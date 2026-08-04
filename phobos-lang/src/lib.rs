@@ -75,7 +75,7 @@ fn extern_dynamic_shared(ptx: &str) -> String {
 
     let mut declarations = Vec::new();
     let mut body = String::with_capacity(ptx.len());
-    
+
     for line in ptx.lines() {
         let trimmed = line.trim();
         let demoted = trimmed
@@ -102,7 +102,7 @@ fn extern_dynamic_shared(ptx: &str) -> String {
     if declarations.is_empty() {
         return body;
     }
-    
+
     let at = body
         .find(".address_size")
         .and_then(|i| body[i..].find(NEWLINE).map(|j| i + j + 1))
@@ -111,12 +111,12 @@ fn extern_dynamic_shared(ptx: &str) -> String {
     let mut out = String::with_capacity(body.len() + 64);
 
     out.push_str(&body[..at]);
-    
+
     for declaration in &declarations {
         out.push_str(declaration);
         out.push(NEWLINE);
     }
-    
+
     out.push_str(&body[at..]);
     out
 }

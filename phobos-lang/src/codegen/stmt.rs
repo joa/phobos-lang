@@ -232,7 +232,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // t = qmma_t(..) writes the accumulators where they are wanted rather
         // than through a tile.
         //
-        // The accumulators are registers already, and a `[128, 64]` f32 tile 
+        // The accumulators are registers already, and a `[128, 64]` f32 tile
         // on the way out is 32 KB, which holds the kernel to one CTA per SM.
         if op == AssignOp::Set
             && let Expr::Call { callee, args } = value
@@ -241,13 +241,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
             && target.elem == self.f32_t
         {
             let [a, asc, w, wsc] = self.qmma_operands(block, args)?;
-            
+
             self.qmma_t_into(block, &a, &asc, &w, &wsc, target)?;
 
             for t in [&a, &asc, &w, &wsc] {
                 self.release(t);
             }
-            
+
             return Ok(());
         }
 
@@ -267,11 +267,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
             let transpose = callee == "dot_t";
             let (a, b) = self.dot_operands(block, args)?;
-            
+
             // `p = dot(p, p)` is routed through a tmp since we create garbage otherwise.
             if target.global.is_some() && (target.global == a.global || target.global == b.global) {
                 let temp = self.alloc_tile_shaped(block, target.elem, &target.shape)?;
-                
+
                 if transpose {
                     self.tile_matmul_t(block, &a, &b, &temp)?;
                 } else {
@@ -282,14 +282,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
                 self.release(&a);
                 self.release(&b);
-                
+
                 match op {
                     AssignOp::Set => self.tile_copy(block, &temp, target, true, false)?,
                     AssignOp::Add => self.tile_binary(block, BinOp::Add, target, &temp, target)?,
                 }
-                
+
                 self.release(&temp);
-                
+
                 return Ok(());
             }
 
@@ -558,7 +558,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             value: iv,
             div: iv_div,
         };
-        
+
         self.trimmed_ivs.push(var.to_string());
         let emitted = self.emit_scope(&body_block, &[(var, binding)], body);
         self.trimmed_ivs.pop();
@@ -753,9 +753,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if mv.global.is_none() {
             return;
         }
-        
+
         mv.owned = true;
-        
+
         self.release(&mv);
     }
 }

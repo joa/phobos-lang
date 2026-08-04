@@ -83,7 +83,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     (start, size)
                 }
             };
-            
+
             if mv.shape[d] == DYN {
                 return size != DYN && !self.dyn_in_bounds(start, size, mv.div_of(d), ivs);
             }
