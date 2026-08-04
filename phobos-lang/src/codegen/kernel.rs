@@ -127,7 +127,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     /// per-dimension divisors promised by `@aligned(NAME = tile)`
-    /// - NAME is a symbolic tensor dimension 
+    /// - NAME is a symbolic tensor dimension
     /// - tile is an integer or an autotune constant.
     fn declared_divs(&self, kernel: &Kernel, dims: &[Dim]) -> Result<Vec<i64>> {
         let Some(attr) = kernel.attrs.iter().find(|a| a.name == "aligned") else {

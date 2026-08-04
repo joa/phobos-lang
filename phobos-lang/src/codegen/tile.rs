@@ -47,9 +47,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     let width = self
                         .elem_bytes(elem)
                         .with_context(|| format!("tile element {elem} has no known width"))?;
-                    
+
                     let bytes = i64::from(width) * shape.iter().product::<i64>();
-                    
+
                     self.tile_offsets.insert(name.clone(), self.shared_bytes);
 
                     self.shared_bytes += (bytes + 15) & !15;
@@ -279,7 +279,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // the same kind.
         //
         // equal width is not enough since f16 and bf16 are both 16b and neither holds the other.
-        // 
+        //
         // int8 contraction accumulates into i32.
         let holds = self.numeric_join(a.elem, b.elem).is_some_and(|join| {
             if join == out.elem {
@@ -851,7 +851,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         let numeric = |t| self.is_float(t) || self.is_int(t);
-        
+
         if !(numeric(a.elem) && numeric(b.elem) && numeric(out.elem)) {
             bail!(
                 "elementwise tile op with non-numeric element types ({}, {} into {})",
@@ -977,7 +977,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
 
         self.check_shapes(&tile.shape, &out.shape, "tile * scalar")?;
-        
+
         let scalar = self.coerce(block, scalar, out.elem)?;
 
         self.distribute(block, out, 1, true, |cg, blk, idx| {
@@ -1094,7 +1094,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         };
 
         self.tile_sqrt_into(block, src, &out)?;
-        
+
         Ok(out)
     }
 
@@ -1114,14 +1114,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
 
         let out = self.alloc_tile_shaped(block, want, &src.shape)?;
-        
+
         self.distribute(block, &out, 1, true, |cg, blk, idx| {
             let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
             let c = cg.numeric_cast(blk, v, want)?;
             blk.append_operation(memref::store(c, out.mem, idx, cg.loc));
             Ok(())
         })?;
-        
+
         Ok(out)
     }
 
@@ -1140,7 +1140,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if src.shape.contains(&DYN) {
             bail!("sqrt needs a static tile shape");
         }
-        
+
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
             let vf = cg.float_cast(blk, v, cg.f32_t)?;
@@ -1223,7 +1223,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         };
 
         self.tile_log_into(block, src, &out)?;
-        
+
         Ok(out)
     }
 
@@ -1241,7 +1241,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if src.shape.contains(&DYN) {
             bail!("log needs a static tile shape");
         }
-        
+
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
             let vf = cg.float_cast(blk, v, cg.f32_t)?;
@@ -1283,7 +1283,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 self.loc,
             ),
         )?;
-        
+
         self.push(block, arith::mulf(lg2, ln2, self.loc))
     }
 
@@ -1788,8 +1788,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
     /// elements to apply it, and `dot_t` puts one thread on each output and
     /// walks `k` in that thread. A warp then reads 32 rows four bytes apart,
     /// which is 32 sectors fetched to use 128 bytes of them, and the block
-    /// pays five barriers per 32 elements of `k`. 
-    /// 
+    /// pays five barriers per 32 elements of `k`.
+    ///
     /// Folding the scales in is what lets the mapping turn around: a warp owns
     /// one output and its lanes divide `k`, so the 32 lanes read 512
     /// contiguous bytes of one weight row. Nothing is staged, the accumulator
@@ -1973,11 +1973,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
     /// one per cycle, and the quantized matmul does one per accumulator per
     /// block: at a patch's size that is 128 of them against the same block's
     /// 128 tensor instructions, which run one per four cycles.
-    fn small_int_to_f32(
-        &self,
-        block: &Block<'c>,
-        value: Value<'c, 'c>,
-    ) -> Result<Value<'c, 'c>> {
+    fn small_int_to_f32(&self, block: &Block<'c>, value: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         const MAGIC_BITS: i64 = 0x4B40_0000;
         const MAGIC: f64 = 12_582_912.0;
         let bias = self.push(
@@ -2407,7 +2403,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if kd == DYN {
             bail!("dot_t needs a static contraction dim");
         }
-        
+
         if self.tile_matmul_t_imma(block, a, b, out, kd)?
             || self.tile_matmul_t_dp4a(block, a, b, out, kd)?
         {

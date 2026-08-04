@@ -2,6 +2,7 @@
 @launch(256)
 @pipeline
 @tensorcore
+@aligned(M = TILE_M, N = TILE_N, K = TILE_K)
 kernel gemm(A: tensor<f32>[M, K],
             B: tensor<f32>[K, N],
             C: tensor<f32>[M, N],

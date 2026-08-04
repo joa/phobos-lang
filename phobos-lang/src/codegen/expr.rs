@@ -473,7 +473,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })?;
         if shape.contains(&DYN) {
             bail!("elementwise tile result shape must be static");
-        }        
+        }
         // - same types: noop
         // - mixed types: widen
         let (wa, wb) = self.widen_pair(block, a, b)?;
@@ -504,7 +504,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 b.elem
             )
         })?;
-        
+
         let widen = |cg: &mut Self, t: &MemVal<'c>| -> Result<MemVal<'c>> {
             if t.elem == want {
                 return Ok(t.clone());
@@ -513,10 +513,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
             cg.release(t);
             Ok(out)
         };
-        
+
         let wa = widen(self, a)?;
         let wb = widen(self, b)?;
-        
+
         Ok((wa, wb))
     }
 
@@ -545,7 +545,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if lt == rt {
             return Ok((lhs, rhs));
         }
-        
+
         // mixed float types widen to their join (f16 and bf16 meet at f32)
         if let Some(want) = self.float_join(lt, rt) {
             return Ok((
@@ -649,11 +649,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let mut off_divs = Vec::with_capacity(rank);
         let mut dyn_sizes = Vec::new();
         let mut static_sizes = Vec::with_capacity(rank);
-        
+
         // Dims whose offset rides the ragged remainder chunk's induction
         // variable, and so may run past a dynamic extent (see ragged_iv).
         let mut ragged = vec![false; rank];
-        
+
         // Dims that provably stay inside a dynamic extent: see dyn_in_bounds.
         let mut proven = vec![false; rank];
         let rides_ragged = |cg: &Self, start: &Expr| {
