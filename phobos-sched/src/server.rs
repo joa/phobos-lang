@@ -702,7 +702,7 @@ fn compile_leaves(
         .iter()
         .map(|l| {
             let ptx = phobos_mlir::gen_ptx(&base, |b, c, m| {
-                phobos_lang::codegen::emit(b, std::slice::from_ref(&l.kernel), c, m)
+                phobos_lang::codegen::emit(b, std::slice::from_ref(&l.kernel), c, m).map(|_| ())
             })?;
             let mut h = Sha256::new();
             h.update(ptx.as_bytes());

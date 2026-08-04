@@ -7,9 +7,10 @@ use phobos_sched::job::parse_job;
 use phobos_sched::server::{DispatchConfig, Scheduler};
 
 const USAGE: &str = "\
-usage: phobos-sched --listen <host:port> --nodes <n> --job <file> [--budget <bytes>]
+usage: phobos-sched --nodes <n> --job <file> [--listen <host:port>] [--budget <bytes>]
+                    [--ingest direct|home-fetch]
                     [--autotune [--vram <bytes>] [--link-bw <bytes/s>] [--leaf-flops <flop/s>]]
-  --listen      Attach/Submit bind address (host:port)
+  --listen      Attach/Submit bind address (host:port, default 0.0.0.0:7000)
   --nodes       number of nodes to wait for before dispatching
   --job         path to the job-file (see the binary docs)
   --budget      per-node memory budget in bytes (enables segmentation)

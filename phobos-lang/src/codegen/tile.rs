@@ -21,32 +21,75 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if shape.contains(&DYN) {
             bail!("tile buffers must have a static shape");
         }
-        let space: Attribute = IntegerAttribute::new(self.i64_t, MEM_SHARED).into();
+
+        // a dynamic buffer names its address space symbolically and a view of
+        // it has to agree; a static global uses the integer form.
+        let space: Attribute = if self.dynamic_shared {
+            Attribute::parse(self.ctx, MEM_SHARED_SYM).context("workgroup address space")?
+        } else {
+            IntegerAttribute::new(self.i64_t, MEM_SHARED).into()
+        };
+
         let t = MemRefType::new(elem, shape, None, Some(space));
 
         // Reuse a released buffer of the same type when one is free (see
-        // release); otherwise mint a new global.
+        // release); otherwise mint a new one.
         let key = (elem.to_string(), shape.to_vec());
         let name = match self.tile_pool.get_mut(&key).and_then(Vec::pop) {
             Some(name) => name,
             None => {
                 let name = format!("__{}_tile{}", self.kernel_name, self.tile_count);
                 self.tile_count += 1;
-                self.shared_globals.push(memref::global(
-                    self.ctx,
-                    &name,
-                    Some("private"),
-                    t,
-                    None, // uninitialized
-                    false,
-                    Some(IntegerAttribute::new(self.i64_t, 16)), // 128-bit vector access
-                    self.loc,
-                ));
+
+                if self.dynamic_shared {
+                    // each tile is a window of the one allocation and 16-byte
+                    // aligned so a four-element vector access stays legal.
+                    let width = self
+                        .elem_bytes(elem)
+                        .with_context(|| format!("tile element {elem} has no known width"))?;
+                    
+                    let bytes = i64::from(width) * shape.iter().product::<i64>();
+                    
+                    self.tile_offsets.insert(name.clone(), self.shared_bytes);
+
+                    self.shared_bytes += (bytes + 15) & !15;
+                } else {
+                    self.shared_globals.push(memref::global(
+                        self.ctx,
+                        &name,
+                        Some("private"),
+                        t,
+                        None, // uninitialized
+                        false,
+                        Some(IntegerAttribute::new(self.i64_t, 16)), // 128-bit vector access
+                        self.loc,
+                    ));
+                }
                 name
             }
         };
 
-        let mem = self.push(block, memref::get_global(self.ctx, &name, t, self.loc))?;
+        let mem = if self.dynamic_shared {
+            let offset = self.tile_offsets[&name];
+            let byte_t = MemRefType::new(self.i8_t, &[DYN], None, Some(space));
+            let base = self.push(
+                block,
+                OperationBuilder::new("gpu.dynamic_shared_memory", self.loc)
+                    .add_results(&[byte_t.into()])
+                    .build()?,
+            )?;
+            let at = self.const_index(block, offset)?;
+
+            self.push(
+                block,
+                OperationBuilder::new("memref.view", self.loc)
+                    .add_operands(&[base, at])
+                    .add_results(&[t.into()])
+                    .build()?,
+            )?
+        } else {
+            self.push(block, memref::get_global(self.ctx, &name, t, self.loc))?
+        };
 
         let mem = self.assume_align(block, mem, 16)?; // be safe
 
@@ -67,6 +110,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             global: Some(name),
             owned: true,
             mask: Vec::new(),
+            dim_div: Vec::new(),
         })
     }
 
@@ -231,18 +275,34 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return Ok(());
         }
 
-        match (
-            self.float_rank(a.elem),
-            self.float_rank(b.elem),
-            self.float_rank(out.elem),
-        ) {
-            (Some(ra), Some(rb), Some(ro)) if ro >= ra && ro >= rb => Ok(()),
-            _ => bail!(
+        // the acc has to hold both operands. specifically their join, or wider of
+        // the same kind.
+        //
+        // equal width is not enough since f16 and bf16 are both 16b and neither holds the other.
+        // 
+        // int8 contraction accumulates into i32.
+        let holds = self.numeric_join(a.elem, b.elem).is_some_and(|join| {
+            if join == out.elem {
+                return true;
+            }
+            match (self.is_float(join), self.is_float(out.elem)) {
+                (true, true) => self.float_bits(out.elem) > self.float_bits(join),
+                (false, false) => self.elem_bytes(out.elem) > self.elem_bytes(join),
+                // nn integer contraction into a float accumulator, or the
+                // reverse, would silently change what the sum means
+                _ => false,
+            }
+        });
+
+        if holds {
+            Ok(())
+        } else {
+            bail!(
                 "{what}: cannot accumulate {} and {} operands into {}",
                 a.elem,
                 b.elem,
                 out.elem
-            ),
+            )
         }
     }
 
@@ -590,10 +650,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
             );
         }
 
-        // Vectorize aligned copies at 4 elements: 16B/4xf32 or 8B/4xf16 (the
-        // src and dst element types match, checked above). The row-pitch ABI's
-        // multiple-of-4-elements guarantee is exactly the byte alignment a
-        // 4-element vector of either type needs.
+        // Vectorize aligned copies at 4 elements: 16B/4xf32, 8B/4xf16 or
+        // 4xbf16, 4B/4xi8 (the src and dst element types match, checked
+        // above). The row-pitch ABI's multiple-of-4-elements guarantee is
+        // exactly the byte alignment a 4-element vector of any of them needs.
+        let elem_bytes = self.elem_bytes(dst.elem);
         let last = *dst.shape.last().expect("tile values are not rank-0");
         let vec_ok = src.aligned
             && dst.aligned
@@ -601,18 +662,19 @@ impl<'p, 'c> Codegen<'p, 'c> {
             && !dst.is_masked()
             && last != DYN
             && last % 4 == 0
-            && (dst.elem == self.f32_t || dst.elem == self.f16_t);
+            && elem_bytes.is_some();
         let width = if vec_ok { 4 } else { 1 };
+        let align = i64::from(elem_bytes.unwrap_or(4)) * 4;
 
         // cp.async needs a 4/8/16-byte transfer and can't convert (so the
-        // src/dst element types must match, as checked above): f32 qualifies at
-        // any width (4B scalar or 16B vector), f16 only vectorized (4 elems =
-        // 8B; a scalar 2B f16 is below cp.async's minimum).
+        // src/dst element types must match, as checked above): f32 qualifies
+        // at any width (4B scalar or 16B vector), the narrower types only
+        // vectorized, since a scalar 1B or 2B element is below cp.async's
+        // minimum.
         let use_async = async_copy
             && !dst.is_masked()
-            && (dst.elem == self.f32_t || (dst.elem == self.f16_t && width == 4));
+            && (dst.elem == self.f32_t || (width == 4 && matches!(align, 4 | 8 | 16)));
         let vec_t = Type::vector(&[4], dst.elem);
-        let align = if dst.elem == self.f16_t { 8 } else { 16 };
 
         self.distribute(block, dst, width, sync, |cg, blk, idx| {
             // Read from the (unswizzled) source, store to the swizzled column.
@@ -632,15 +694,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
     /// dst[...] = cast(src[...]) for every element.
     ///
-    /// Float-casts between the source and destination element types, e.g. an
-    /// f32 accumulator stored into an f16 output tensor. Not vectorized.
+    /// Converts between the source and destination element types, e.g. an f32
+    /// accumulator stored into an f16 or i8 output tensor. Not vectorized.
     pub(super) fn tile_convert(
         &mut self,
         block: &Block<'c>,
         src: &MemVal<'c>,
         dst: &MemVal<'c>,
     ) -> Result<()> {
-        if !(self.is_float(src.elem) && self.is_float(dst.elem)) {
+        let numeric = |t| self.is_float(t) || self.is_int(t);
+        if !(numeric(src.elem) && numeric(dst.elem)) {
             bail!(
                 "tile copy with mismatched element types ({} vs {})",
                 src.elem,
@@ -787,10 +850,19 @@ impl<'p, 'c> Codegen<'p, 'c> {
         b: &MemVal<'c>,
         out: &MemVal<'c>,
     ) -> Result<()> {
-        if a.elem != out.elem || b.elem != out.elem {
-            bail!("elementwise tile op with mismatched element types");
+        let numeric = |t| self.is_float(t) || self.is_int(t);
+        
+        if !(numeric(a.elem) && numeric(b.elem) && numeric(out.elem)) {
+            bail!(
+                "elementwise tile op with non-numeric element types ({}, {} into {})",
+                a.elem,
+                b.elem,
+                out.elem
+            );
         }
-        if a.shape == out.shape && b.shape == out.shape {
+
+        if a.elem == out.elem && b.elem == out.elem && a.shape == out.shape && b.shape == out.shape
+        {
             self.tile_binary(block, op, a, b, out)
         } else {
             self.tile_binary_bc(block, op, a, b, out)
@@ -815,8 +887,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let ai = cg.bc_index(blk, idx, &out.shape, &a.shape)?;
             let bi = cg.bc_index(blk, idx, &out.shape, &b.shape)?;
-            let x = cg.push(blk, memref::load(a.mem, &ai, cg.loc))?;
-            let y = cg.push(blk, memref::load(b.mem, &bi, cg.loc))?;
+            let x = cg.load_as(blk, a.mem, &ai, out.elem)?;
+            let y = cg.load_as(blk, b.mem, &bi, out.elem)?;
             let r = cg.elem_arith(op, out.elem, x, y)?;
             let r = cg.push(blk, r)?;
             blk.append_operation(memref::store(r, out.mem, idx, cg.loc));
@@ -894,13 +966,22 @@ impl<'p, 'c> Codegen<'p, 'c> {
         scalar_left: bool,
         out: &MemVal<'c>,
     ) -> Result<()> {
-        if tile.elem != out.elem {
-            bail!("tile * scalar with mismatched element types");
+        let numeric = |t| self.is_float(t) || self.is_int(t);
+
+        if !(numeric(tile.elem) && numeric(out.elem)) {
+            bail!(
+                "tile * scalar with non-numeric element types ({} into {})",
+                tile.elem,
+                out.elem
+            );
         }
+
         self.check_shapes(&tile.shape, &out.shape, "tile * scalar")?;
+        
         let scalar = self.coerce(block, scalar, out.elem)?;
+
         self.distribute(block, out, 1, true, |cg, blk, idx| {
-            let v = cg.push(blk, memref::load(tile.mem, idx, cg.loc))?;
+            let v = cg.load_as(blk, tile.mem, idx, out.elem)?;
             let (x, y) = if scalar_left {
                 (scalar, v)
             } else {
@@ -1000,6 +1081,76 @@ impl<'p, 'c> Codegen<'p, 'c> {
         Ok(out)
     }
 
+    /// out = sqrt(src), element-wise. Mirrors [`Self::tile_exp`]: an owned temp
+    /// is rewritten in place, otherwise a fresh tile is allocated.
+    pub(super) fn tile_sqrt(&mut self, block: &Block<'c>, src: &MemVal<'c>) -> Result<MemVal<'c>> {
+        let out = if src.owned && src.swizzle.is_none() {
+            src.clone()
+        } else {
+            if src.shape.contains(&DYN) {
+                bail!("sqrt needs a static tile shape");
+            }
+            self.alloc_tile_shaped(block, src.elem, &src.shape)?
+        };
+
+        self.tile_sqrt_into(block, src, &out)?;
+        
+        Ok(out)
+    }
+
+    /// out = convert(src) elementwise, to a tile of `want` element type.
+    ///
+    /// Always a fresh tile: unlike exp or sqrt, the result has a different
+    /// element type (and so a different physical size) than the source, so
+    /// there is nothing to rewrite in place.
+    pub(super) fn tile_cast(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        want: Type<'c>,
+    ) -> Result<MemVal<'c>> {
+        if src.shape.contains(&DYN) {
+            bail!("a tile conversion needs a static tile shape");
+        }
+
+        let out = self.alloc_tile_shaped(block, want, &src.shape)?;
+        
+        self.distribute(block, &out, 1, true, |cg, blk, idx| {
+            let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
+            let c = cg.numeric_cast(blk, v, want)?;
+            blk.append_operation(memref::store(c, out.mem, idx, cg.loc));
+            Ok(())
+        })?;
+        
+        Ok(out)
+    }
+
+    /// out[...] = sqrt(src[...]); out may be src itself (each thread reads and
+    /// writes the same element, so the in-place rewrite is race-free).
+    pub(super) fn tile_sqrt_into(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        out: &MemVal<'c>,
+    ) -> Result<()> {
+        if !self.is_float(src.elem) {
+            bail!("sqrt needs a float tile, got {}", src.elem);
+        }
+
+        if src.shape.contains(&DYN) {
+            bail!("sqrt needs a static tile shape");
+        }
+        
+        self.distribute(block, out, 1, true, |cg, blk, idx| {
+            let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
+            let vf = cg.float_cast(blk, v, cg.f32_t)?;
+            let e = cg.approx_sqrt(blk, vf)?;
+            let e = cg.float_cast(blk, e, out.elem)?;
+            blk.append_operation(memref::store(e, out.mem, idx, cg.loc));
+            Ok(())
+        })
+    }
+
     /// out[...] = exp(src[...]); out may be src itself (each thread reads and
     /// writes the same element, so the in-place rewrite is race-free).
     pub(super) fn tile_exp_into(
@@ -1048,6 +1199,228 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     (
                         self.id("asm_string"),
                         StringAttribute::new(self.ctx, "ex2.approx.ftz.f32 $0, $1;").into(),
+                    ),
+                    (
+                        self.id("constraints"),
+                        StringAttribute::new(self.ctx, "=f,f").into(),
+                    ),
+                    (self.id("has_side_effects"), Attribute::unit(self.ctx)),
+                ])
+                .add_results(&[self.f32_t])
+                .build()?,
+        )
+    }
+
+    /// out = log(src), element-wise. Mirrors [`Self::tile_exp`].
+    pub(super) fn tile_log(&mut self, block: &Block<'c>, src: &MemVal<'c>) -> Result<MemVal<'c>> {
+        let out = if src.owned && src.swizzle.is_none() {
+            src.clone()
+        } else {
+            if src.shape.contains(&DYN) {
+                bail!("log needs a static tile shape");
+            }
+            self.alloc_tile_shaped(block, src.elem, &src.shape)?
+        };
+
+        self.tile_log_into(block, src, &out)?;
+        
+        Ok(out)
+    }
+
+    /// out[...] = log(src[...]); out may be src itself (race-free per element).
+    pub(super) fn tile_log_into(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        out: &MemVal<'c>,
+    ) -> Result<()> {
+        if !self.is_float(src.elem) {
+            bail!("log needs a float tile, got {}", src.elem);
+        }
+
+        if src.shape.contains(&DYN) {
+            bail!("log needs a static tile shape");
+        }
+        
+        self.distribute(block, out, 1, true, |cg, blk, idx| {
+            let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
+            let vf = cg.float_cast(blk, v, cg.f32_t)?;
+            let e = cg.approx_log(blk, vf)?;
+            let e = cg.float_cast(blk, e, out.elem)?;
+            blk.append_operation(memref::store(e, out.mem, idx, cg.loc));
+            Ok(())
+        })
+    }
+
+    /// ln(x) for an f32 scalar as lg2(x) * ln2, the mirror of
+    /// [`Self::approx_exp`]: the hardware primitive is base two, so the change
+    /// of base rides on the outside.
+    pub(super) fn approx_log(&self, block: &Block<'c>, x: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
+        let lg2 = self.push(
+            block,
+            OperationBuilder::new("llvm.inline_asm", self.loc)
+                .add_operands(&[x])
+                .add_attributes(&[
+                    (
+                        self.id("asm_string"),
+                        StringAttribute::new(self.ctx, "lg2.approx.ftz.f32 $0, $1;").into(),
+                    ),
+                    (
+                        self.id("constraints"),
+                        StringAttribute::new(self.ctx, "=f,f").into(),
+                    ),
+                    (self.id("has_side_effects"), Attribute::unit(self.ctx)),
+                ])
+                .add_results(&[self.f32_t])
+                .build()?,
+        )?;
+
+        let ln2 = self.push(
+            block,
+            arith::constant(
+                self.ctx,
+                FloatAttribute::new(self.ctx, self.f32_t, std::f64::consts::LN_2).into(),
+                self.loc,
+            ),
+        )?;
+        
+        self.push(block, arith::mulf(lg2, ln2, self.loc))
+    }
+
+    /// out = round(src), element-wise. Mirrors [`Self::tile_exp`].
+    pub(super) fn tile_round(&mut self, block: &Block<'c>, src: &MemVal<'c>) -> Result<MemVal<'c>> {
+        let out = if src.owned && src.swizzle.is_none() {
+            src.clone()
+        } else {
+            if src.shape.contains(&DYN) {
+                bail!("round needs a static tile shape");
+            }
+            self.alloc_tile_shaped(block, src.elem, &src.shape)?
+        };
+        self.tile_round_into(block, src, &out)?;
+        Ok(out)
+    }
+
+    /// out[...] = round(src[...]); out may be src itself (race-free per element).
+    pub(super) fn tile_round_into(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        out: &MemVal<'c>,
+    ) -> Result<()> {
+        if !self.is_float(src.elem) {
+            bail!("round needs a float tile, got {}", src.elem);
+        }
+        if src.shape.contains(&DYN) {
+            bail!("round needs a static tile shape");
+        }
+        self.distribute(block, out, 1, true, |cg, blk, idx| {
+            let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
+            let vf = cg.float_cast(blk, v, cg.f32_t)?;
+            let e = cg.round_even(blk, vf)?;
+            let e = cg.float_cast(blk, e, out.elem)?;
+            blk.append_operation(memref::store(e, out.mem, idx, cg.loc));
+            Ok(())
+        })
+    }
+
+    /// The nearest integer to an f32, ties to even, as an f32.
+    ///
+    /// This is the hardware's own rounding, so unlike biasing into a positive
+    /// range and truncating it loses nothing: adding a bias large enough to
+    /// cover the range costs the low mantissa bits, which at the top of an
+    /// int8 quantization range is enough to move a value across a rounding
+    /// boundary.
+    pub(super) fn round_even(&self, block: &Block<'c>, x: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("llvm.inline_asm", self.loc)
+                .add_operands(&[x])
+                .add_attributes(&[
+                    (
+                        self.id("asm_string"),
+                        StringAttribute::new(self.ctx, "cvt.rni.f32.f32 $0, $1;").into(),
+                    ),
+                    (
+                        self.id("constraints"),
+                        StringAttribute::new(self.ctx, "=f,f").into(),
+                    ),
+                    (self.id("has_side_effects"), Attribute::unit(self.ctx)),
+                ])
+                .add_results(&[self.f32_t])
+                .build()?,
+        )
+    }
+
+    pub(super) fn approx_sqrt(&self, block: &Block<'c>, x: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("llvm.inline_asm", self.loc)
+                .add_operands(&[x])
+                .add_attributes(&[
+                    (
+                        self.id("asm_string"),
+                        StringAttribute::new(self.ctx, "sqrt.approx.f32 $0, $1;").into(),
+                    ),
+                    (
+                        self.id("constraints"),
+                        StringAttribute::new(self.ctx, "=f,f").into(),
+                    ),
+                    (self.id("has_side_effects"), Attribute::unit(self.ctx)),
+                ])
+                .add_results(&[self.f32_t])
+                .build()?,
+        )
+    }
+
+    /// out = tanh(src), element-wise. Mirrors [`Self::tile_sqrt`].
+    pub(super) fn tile_tanh(&mut self, block: &Block<'c>, src: &MemVal<'c>) -> Result<MemVal<'c>> {
+        let out = if src.owned && src.swizzle.is_none() {
+            src.clone()
+        } else {
+            if src.shape.contains(&DYN) {
+                bail!("tanh needs a static tile shape");
+            }
+            self.alloc_tile_shaped(block, src.elem, &src.shape)?
+        };
+        self.tile_tanh_into(block, src, &out)?;
+        Ok(out)
+    }
+
+    /// out[...] = tanh(src[...]); out may be src itself (race-free per element).
+    pub(super) fn tile_tanh_into(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        out: &MemVal<'c>,
+    ) -> Result<()> {
+        if !self.is_float(src.elem) {
+            bail!("tanh needs a float tile, got {}", src.elem);
+        }
+        if src.shape.contains(&DYN) {
+            bail!("tanh needs a static tile shape");
+        }
+        self.distribute(block, out, 1, true, |cg, blk, idx| {
+            let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
+            let vf = cg.float_cast(blk, v, cg.f32_t)?;
+            let e = cg.approx_tanh(blk, vf)?;
+            let e = cg.float_cast(blk, e, out.elem)?;
+            blk.append_operation(memref::store(e, out.mem, idx, cg.loc));
+            Ok(())
+        })
+    }
+
+    /// tanh(x) for an f32 scalar via the PTX tanh.approx.f32 intrinsic (sm_75+),
+    /// same inline-asm approach as [`Self::approx_exp`] / [`Self::approx_sqrt`].
+    pub(super) fn approx_tanh(&self, block: &Block<'c>, x: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("llvm.inline_asm", self.loc)
+                .add_operands(&[x])
+                .add_attributes(&[
+                    (
+                        self.id("asm_string"),
+                        StringAttribute::new(self.ctx, "tanh.approx.f32 $0, $1;").into(),
                     ),
                     (
                         self.id("constraints"),
@@ -1264,11 +1637,764 @@ impl<'p, 'c> Codegen<'p, 'c> {
         Ok(())
     }
 
-    /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind dot_t
-    /// (contracts the last dim of both operands). A plain thread-per-output
-    /// scalar reduction; the heavily-tuned [`tile_matmul`] has
-    /// no transposed-b variant, and the attention S = Q @ K.T tile is small
-    /// relative to the kernel's other costs.
+    /// `dot_t` over int8 operands on the integer tensor cores.
+    ///
+    /// Unlike the f16 tensor-core path there is no staging buffer and no
+    /// ldmatrix: the m8n8k16 fragment layout is already what `dot_t` holds in
+    /// memory. A lane's A register is four contiguous bytes of row `lane / 4`,
+    /// its B register is four contiguous bytes of row `lane / 4` of the [n, k]
+    /// operand, and both are exactly the four bytes `dp4a` would have read.
+    /// One `mma.sync` folds sixteen products per lane where `dp4a` folds four.
+    ///
+    /// Returns false when it does not apply, leaving the caller on the dp4a
+    /// path: the tensor core issues whole 8x8 output tiles over a k that is a
+    /// multiple of 16, and there are no integer tensor cores before Turing. A
+    /// masked output would need the store guarded per element, which is what
+    /// the generic paths already do.
+    fn tile_matmul_t_imma(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        b: &MemVal<'c>,
+        out: &MemVal<'c>,
+        kd: i64,
+    ) -> Result<bool> {
+        let (md, nd) = (out.shape[0], out.shape[1]);
+        let applies = a.elem == self.i8_t
+            && b.elem == self.i8_t
+            && out.elem == self.i32_t
+            // Positive as well as divisible: DYN is i64::MIN, which every one
+            // of these divides.
+            && md > 0
+            && nd > 0
+            && md % 8 == 0
+            && nd % 8 == 0
+            && kd % 16 == 0
+            && a.swizzle.is_none()
+            && b.swizzle.is_none()
+            && !a.is_masked()
+            && !b.is_masked()
+            && !out.is_masked()
+            && self.base.gpu_config.supports_int8_mma();
+        if !applies {
+            return Ok(false);
+        }
+
+        let i32_t = self.i32_t;
+        let vec4_i8 = Type::vector(&[4], self.i8_t);
+        let frag_t = Type::vector(&[1, 4], self.i8_t);
+        let acc_t = Type::vector(&[1, 2], i32_t);
+
+        let tid = self.gpu_index(block, "gpu.thread_id", "x")?;
+        let bdim = self.gpu_index(block, "gpu.block_dim", "x")?;
+        let warp_size = self.const_index(block, 32)?;
+        let warp = self.divui(block, tid, warp_size)?;
+        let warps = self.divui(block, bdim, warp_size)?;
+        let lane = self.remui(block, tid, warp_size)?;
+
+        // The lane's place in the fragments: both operands are read from row
+        // lane / 4, four bytes starting at column 4 * (lane % 4), and the two
+        // accumulator elements land in columns 2 * (lane % 4) and one past.
+        let four = self.const_index(block, 4)?;
+        let quad = self.divui(block, lane, four)?;
+        let in_quad = self.remui(block, lane, four)?;
+        let k_off = self.muli(block, in_quad, four)?;
+        let two = self.const_index(block, 2)?;
+        let d_col = self.muli(block, in_quad, two)?;
+
+        // One 8x8 output tile per warp, row-major so neighbouring warps share
+        // the A rows they read.
+        let eight = self.const_index(block, 8)?;
+        let n_tiles = self.const_index(block, nd / 8)?;
+        let total = self.const_index(block, (md / 8) * (nd / 8))?;
+
+        let tb = Block::new(&[(self.index_t, self.loc)]);
+        let t = detach(tb.argument(0)?.into());
+        let ti = self.divui(&tb, t, n_tiles)?;
+        let tj = self.remui(&tb, t, n_tiles)?;
+        let i0 = self.muli(&tb, ti, eight)?;
+        let j0 = self.muli(&tb, tj, eight)?;
+        let a_row = self.addi(&tb, i0, quad)?;
+        let b_row = self.addi(&tb, j0, quad)?;
+
+        let zero = self.zero_scalar(&tb, i32_t)?;
+        let init = self.vec_broadcast(&tb, zero, acc_t)?;
+        let lo = self.const_index(&tb, 0)?;
+        let hi = self.const_index(&tb, kd)?;
+        let st = self.const_index(&tb, 16)?;
+
+        let kb = Block::new(&[(self.index_t, self.loc), (acc_t, self.loc)]);
+        let k = detach(kb.argument(0)?.into());
+        let acc = detach(kb.argument(1)?.into());
+        let k_col = self.addi(&kb, k, k_off)?;
+        let va = self.vec_load_al(&kb, a.mem, &[a_row, k_col], vec4_i8, 4)?;
+        let vb = self.vec_load_al(&kb, b.mem, &[b_row, k_col], vec4_i8, 4)?;
+        let va = self.vec_shape_cast(&kb, va, frag_t)?;
+        let vb = self.vec_shape_cast(&kb, vb, frag_t)?;
+        let shape = self.parse_attr("[8, 8, 16]")?;
+        let next = self.push(
+            &kb,
+            OperationBuilder::new("nvgpu.mma.sync", self.loc)
+                .add_operands(&[va, vb, acc])
+                .add_attributes(&[(self.id("mmaShape"), shape)])
+                .add_results(&[acc_t])
+                .build()?,
+        )?;
+        kb.append_operation(scf::r#yield(&[next], self.loc));
+        let k_region = Region::new();
+        k_region.append_block(kb);
+        let fin = self.push(
+            &tb,
+            OperationBuilder::new("scf.for", self.loc)
+                .add_operands(&[lo, hi, st, init])
+                .add_results(&[acc_t])
+                .add_regions([k_region])
+                .build()?,
+        )?;
+
+        let out_col = self.addi(&tb, j0, d_col)?;
+        for dj in 0..2 {
+            let e = self.vec_extract(&tb, fin, &[0, dj], i32_t)?;
+            let off = self.const_index(&tb, dj)?;
+            let col = self.addi(&tb, out_col, off)?;
+            tb.append_operation(memref::store(e, out.mem, &[a_row, col], self.loc));
+        }
+        tb.append_operation(scf::r#yield(&[], self.loc));
+
+        let region = Region::new();
+        region.append_block(tb);
+        block.append_operation(scf::r#for(warp, total, warps, region, self.loc));
+        self.barrier(block)?;
+        Ok(true)
+    }
+
+    /// `dot_t` over int8 operands using the hardware four-way byte dot product.
+    ///
+    /// `dp4a` multiplies four int8 pairs and accumulates into an i32 in one
+    /// instruction, so this replaces four loads, four multiplies and four adds
+    /// per step with one vector load per operand and one instruction. It needs
+    /// the four bytes of each operand contiguous, which is why it lands on
+    /// `dot_t` and not `dot`: `dot_t` contracts the last axis of both operands,
+    /// so both walk memory contiguously.
+    ///
+    /// Returns false when it does not apply, leaving the caller on the generic
+    /// path: below Pascal there is no `dp4a`, and a contraction that is not a
+    /// multiple of four bytes has a remainder this does not handle.
+    /// out[i, j] = sum_b (sum_{k in block b} a[i, k] * w[j, k]) * asc[i, b] * wsc[j, b]:
+    /// the whole Q8_0 contraction, block scales included, as one operation.
+    ///
+    /// This exists because `dot_t` cannot be given enough of `k` at a time. A
+    /// Q8_0 block carries its own scale, so a plain dot has to stop every 32
+    /// elements to apply it, and `dot_t` puts one thread on each output and
+    /// walks `k` in that thread. A warp then reads 32 rows four bytes apart,
+    /// which is 32 sectors fetched to use 128 bytes of them, and the block
+    /// pays five barriers per 32 elements of `k`. 
+    /// 
+    /// Folding the scales in is what lets the mapping turn around: a warp owns
+    /// one output and its lanes divide `k`, so the 32 lanes read 512
+    /// contiguous bytes of one weight row. Nothing is staged, the accumulator
+    /// is a register, and the only synchronization is the closing butterfly
+    /// shuffle. Each lane takes 16 bytes, which is four `dp4a` under one scale
+    /// pair, since 16 divides the 32-element block.
+    ///
+    /// The scales are indexed `[row, block]` so a lane's scale load is
+    /// contiguous with its neighbours'. Reading them `[block, row]`, the
+    /// layout the tensor-core kernel wants, would cost one sector per lane and
+    /// double the traffic.
+    pub(super) fn tile_qdot_t(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        asc: &MemVal<'c>,
+        w: &MemVal<'c>,
+        wsc: &MemVal<'c>,
+    ) -> Result<MemVal<'c>> {
+        for (v, what) in [
+            (a, "qdot_t a"),
+            (asc, "qdot_t a scales"),
+            (w, "qdot_t w"),
+            (wsc, "qdot_t w scales"),
+        ] {
+            if v.shape.len() != 2 {
+                bail!("{what} must be a rank-2 tile");
+            }
+            if v.is_masked() {
+                bail!("{what} must be a fully in-bounds slice");
+            }
+        }
+        if a.elem != self.i8_t || w.elem != self.i8_t {
+            bail!("qdot_t contracts int8 operands");
+        }
+        if asc.elem != self.f32_t || wsc.elem != self.f32_t {
+            bail!("qdot_t scales must be f32");
+        }
+        if !self.base.gpu_config.supports_dp4a() {
+            bail!("qdot_t needs dp4a (sm_61 or later)");
+        }
+        let (rows, cols) = (a.shape[0], w.shape[0]);
+        if rows == DYN || cols == DYN {
+            bail!("qdot_t needs a static output shape");
+        }
+        self.check_shapes(&[rows], &[asc.shape[0]], "qdot_t a scale rows")?;
+        self.check_shapes(&[cols], &[wsc.shape[0]], "qdot_t w scale rows")?;
+        if self.cta_threads % WARP != 0 {
+            bail!("qdot_t needs a CTA that is a whole number of warps");
+        }
+
+        let out = self.alloc_tile_shaped(block, self.f32_t, &[rows, cols])?;
+        let (i32_t, f32_t, vec4_i8) = (self.i32_t, self.f32_t, Type::vector(&[4], self.i8_t));
+
+        // The contraction length: static when the slice pinned it, otherwise
+        // the operand's own extent.
+        let one = self.const_index(block, 1)?;
+        let kd = if a.shape[1] == DYN {
+            self.push(block, memref::dim(a.mem, one, self.loc))?
+        } else {
+            self.const_index(block, a.shape[1])?
+        };
+
+        let lane_w = self.const_index(block, WARP)?;
+        let total = self.const_index(block, rows * cols * WARP)?;
+        let tid = self.gpu_index(block, "gpu.thread_id", "x")?;
+        let bdim = self.gpu_index(block, "gpu.block_dim", "x")?;
+
+        // A warp per output element: the CTA size is a warp multiple and so is
+        // `total`, so a warp is either wholly inside this loop or wholly
+        // outside it and every lane reaches the shuffle.
+        let body = Block::new(&[(self.index_t, self.loc)]);
+        let li = detach(body.argument(0)?.into());
+        let unit = self.divui(&body, li, lane_w)?;
+        let lane = self.remui(&body, li, lane_w)?;
+        let ncols = self.const_index(&body, cols)?;
+        let i = self.divui(&body, unit, ncols)?;
+        let j = self.remui(&body, unit, ncols)?;
+
+        let step = self.const_index(&body, QDOT_STEP)?;
+        let lane_bytes = self.const_index(&body, QDOT_LANE)?;
+        let lane_off = self.muli(&body, lane, lane_bytes)?;
+        let zero_k = self.const_index(&body, 0)?;
+        let init = self.zero_scalar(&body, f32_t)?;
+
+        let kb = Block::new(&[(self.index_t, self.loc), (f32_t, self.loc)]);
+        let base = detach(kb.argument(0)?.into());
+        let carry = detach(kb.argument(1)?.into());
+        let koff = self.addi(&kb, base, lane_off)?;
+        // A lane's chunk divides the Q8_0 block, so it is wholly in or wholly
+        // out and one predicate covers it.
+        let live = self.push(
+            &kb,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, koff, kd, self.loc),
+        )?;
+
+        let then = Block::new(&[]);
+        let mut dots = self.zero_scalar(&then, i32_t)?;
+        let signed = self.parse_attr("#nvvm.dot_accumulate_type<signed>")?;
+        for c in 0..QDOT_LANE / 4 {
+            let at = self.const_index(&then, c * 4)?;
+            let k = self.addi(&then, koff, at)?;
+            let va = self.vec_load_al(&then, a.mem, &[i, k], vec4_i8, 4)?;
+            let vb = self.vec_load_al(&then, w.mem, &[j, k], vec4_i8, 4)?;
+            dots = self.push(
+                &then,
+                OperationBuilder::new("nvvm.dot.accumulate.4way", self.loc)
+                    .add_operands(&[va, vb, dots])
+                    .add_attributes(&[(self.id("a_type"), signed), (self.id("b_type"), signed)])
+                    .add_results(&[i32_t])
+                    .build()?,
+            )?;
+        }
+        let blk_w = self.const_index(&then, Q8_BLOCK)?;
+        let b = self.divui(&then, koff, blk_w)?;
+        let sa = self.push(&then, memref::load(asc.mem, &[i, b], self.loc))?;
+        let sw = self.push(&then, memref::load(wsc.mem, &[j, b], self.loc))?;
+        let as_f = self.numeric_cast(&then, dots, f32_t)?;
+        let scaled = self.push(&then, arith::mulf(as_f, sa, self.loc))?;
+        let scaled = self.push(&then, arith::mulf(scaled, sw, self.loc))?;
+        let summed = self.push(&then, arith::addf(carry, scaled, self.loc))?;
+        then.append_operation(scf::r#yield(&[summed], self.loc));
+
+        let otherwise = Block::new(&[]);
+        otherwise.append_operation(scf::r#yield(&[carry], self.loc));
+
+        let (tr, er) = (Region::new(), Region::new());
+        tr.append_block(then);
+        er.append_block(otherwise);
+        let next = self.push(&kb, scf::r#if(live, &[f32_t], tr, er, self.loc))?;
+        kb.append_operation(scf::r#yield(&[next], self.loc));
+
+        let kr = Region::new();
+        kr.append_block(kb);
+        let mut acc = self.push(
+            &body,
+            OperationBuilder::new("scf.for", self.loc)
+                .add_operands(&[zero_k, kd, step, init])
+                .add_results(&[f32_t])
+                .add_regions([kr])
+                .build()?,
+        )?;
+
+        let mut mask = WARP / 2;
+        while mask >= 1 {
+            let other = self.shfl_xor_f32(&body, acc, mask)?;
+            acc = self.push(&body, arith::addf(acc, other, self.loc))?;
+            mask /= 2;
+        }
+
+        let zero = self.const_index(&body, 0)?;
+        let is_lead = self.push(
+            &body,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lane, zero, self.loc),
+        )?;
+        let store = Block::new(&[]);
+        store.append_operation(memref::store(acc, out.mem, &[i, j], self.loc));
+        store.append_operation(scf::r#yield(&[], self.loc));
+        let sr = Region::new();
+        sr.append_block(store);
+        body.append_operation(scf::r#if(is_lead, &[], sr, Region::new(), self.loc));
+        body.append_operation(scf::r#yield(&[], self.loc));
+
+        let region = Region::new();
+        region.append_block(body);
+        block.append_operation(scf::r#for(tid, total, bdim, region, self.loc));
+        self.barrier(block)?;
+        Ok(out)
+    }
+
+    /// A small signed integer as an f32, without the conversion instruction.
+    ///
+    /// Adding 1.5 * 2^23 to `value` as an integer lands it in the mantissa of
+    /// that float, so the bits are already the f32 of `1.5 * 2^23 + value` and
+    /// subtracting the constant back off leaves the value exactly. It holds for
+    /// `|value| < 2^22`, which a Q8_0 block guarantees: 32 products of two
+    /// int8s cannot exceed 32 * 127 * 127, about an eighth of the room.
+    ///
+    /// This is worth doing rather than a `cvt` because on Turing conversions
+    /// issue at a quarter of the arithmetic rate, one per eight cycles against
+    /// one per cycle, and the quantized matmul does one per accumulator per
+    /// block: at a patch's size that is 128 of them against the same block's
+    /// 128 tensor instructions, which run one per four cycles.
+    fn small_int_to_f32(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        const MAGIC_BITS: i64 = 0x4B40_0000;
+        const MAGIC: f64 = 12_582_912.0;
+        let bias = self.push(
+            block,
+            arith::constant(
+                self.ctx,
+                IntegerAttribute::new(self.i32_t, MAGIC_BITS).into(),
+                self.loc,
+            ),
+        )?;
+        let shifted = self.addi(block, value, bias)?;
+        let bits = self.push(block, arith::bitcast(shifted, self.f32_t, self.loc))?;
+        let magic = self.push(
+            block,
+            arith::constant(
+                self.ctx,
+                FloatAttribute::new(self.ctx, self.f32_t, MAGIC).into(),
+                self.loc,
+            ),
+        )?;
+        self.push(block, arith::subf(bits, magic, self.loc))
+    }
+
+    /// The warp's patch of `m8n8k16` tiles: how many down, how many across.
+    ///
+    /// Grown from one tile a side, alternating so the patch stays square, and
+    /// stopped when the patch would leave warps of the CTA with nothing to do.
+    /// A square patch is what makes the operand loads pay: `rm` by `rn` tiles
+    /// issue `2 * rm * rn` tensor instructions against `2 * (rm + rn)` loads.
+    fn qmma_patch(&self, rt: i64, ct: i64) -> (i64, i64) {
+        let warps = self.cta_threads / WARP;
+        let (mut rm, mut rn) = (1, 1);
+        while rm * rn < QMMA_TILES {
+            let grow_rows = rm < rn;
+            let (try_m, try_n) = if grow_rows {
+                (rm * 2, rn)
+            } else {
+                (rm, rn * 2)
+            };
+            let fits = rt % try_m == 0 && ct % try_n == 0;
+            if !fits || (rt / try_m) * (ct / try_n) < warps {
+                // The other direction may still have room.
+                let (alt_m, alt_n) = if grow_rows {
+                    (rm, rn * 2)
+                } else {
+                    (rm * 2, rn)
+                };
+                if alt_m * alt_n <= QMMA_TILES
+                    && rt % alt_m == 0
+                    && ct % alt_n == 0
+                    && (rt / alt_m) * (ct / alt_n) >= warps
+                {
+                    (rm, rn) = (alt_m, alt_n);
+                    continue;
+                }
+                break;
+            }
+            (rm, rn) = (try_m, try_n);
+        }
+        (rm, rn)
+    }
+
+    /// out[i, j] = sum_b (sum_{k in block b} a[i, k] * w[j, k]) * asc[i, b] * wsc[b, j]:
+    /// the batched Q8_0 contraction on the integer tensor cores, block scales
+    /// included, as one operation.
+    ///
+    /// This is to a prompt pass what [`Self::tile_qdot_t`] is to a decode step,
+    /// and it exists for the same reason. Written in the tile language the
+    /// contraction has to stop every 32 elements of `k` to apply the scales,
+    /// which puts the accumulator in shared memory and stages both operands
+    /// there per block: for a `[64, 64]` tile the accumulator alone is 16 KB,
+    /// so the tile cannot even be built.
+    ///
+    /// Folding the scales in lets the whole of `k` stay inside one operation,
+    /// so the accumulators are registers and live across it, both operands are
+    /// read straight from global memory in the layout the `m8n8k16` fragments
+    /// already want, and there is no barrier in the loop at all.
+    ///
+    /// The weight scales are indexed `[block, out]` here and `[out, block]` in
+    /// `qdot_t`, which is not an inconsistency: a lane of this kernel holds two
+    /// neighbouring output columns of one block, so `[block, out]` puts its two
+    /// scales next to each other and a warp's eight columns in one sector.
+    ///
+    /// Like `qdot_t` this assumes `k` is a whole number of Q8_0 blocks, which
+    /// is what the format guarantees.
+    pub(super) fn tile_qmma_t(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        asc: &MemVal<'c>,
+        w: &MemVal<'c>,
+        wsc: &MemVal<'c>,
+    ) -> Result<MemVal<'c>> {
+        let (md, nd) = (a.shape[0], w.shape[0]);
+        if md == DYN || nd == DYN {
+            bail!("qmma_t needs a static output shape");
+        }
+        let out = self.alloc_tile_shaped(block, self.f32_t, &[md, nd])?;
+        self.qmma_t_into(block, a, asc, w, wsc, &out)?;
+        Ok(out)
+    }
+
+    /// [`Self::tile_qmma_t`] writing an existing destination rather than a
+    /// fresh tile.
+    ///
+    /// The destination is normally a slice of the output tensor, which is what
+    /// makes this worth having: the accumulators are already in registers, and
+    /// going through a shared tile on the way out costs a `[128, 64]` f32
+    /// buffer, which is 32 KB and holds the kernel to one CTA per
+    /// multiprocessor. Writing global directly leaves the occupancy to the
+    /// register file.
+    pub(super) fn qmma_t_into(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        asc: &MemVal<'c>,
+        w: &MemVal<'c>,
+        wsc: &MemVal<'c>,
+        out: &MemVal<'c>,
+    ) -> Result<()> {
+        if out.elem != self.f32_t {
+            bail!("qmma_t produces f32");
+        }
+        if out.is_masked() {
+            bail!("qmma_t needs a fully in-bounds destination");
+        }
+        for (v, what) in [
+            (a, "qmma_t a"),
+            (asc, "qmma_t a scales"),
+            (w, "qmma_t w"),
+            (wsc, "qmma_t w scales"),
+        ] {
+            if v.shape.len() != 2 {
+                bail!("{what} must be a rank-2 tile");
+            }
+            if v.is_masked() {
+                bail!("{what} must be a fully in-bounds slice");
+            }
+            if v.swizzle.is_some() {
+                bail!("{what} must not be swizzled");
+            }
+        }
+        if a.elem != self.i8_t || w.elem != self.i8_t {
+            bail!("qmma_t contracts int8 operands");
+        }
+        if asc.elem != self.f32_t || wsc.elem != self.f32_t {
+            bail!("qmma_t scales must be f32");
+        }
+        if !self.base.gpu_config.supports_int8_mma() {
+            bail!("qmma_t needs the integer tensor cores (sm_75 or later)");
+        }
+        let (md, nd) = (a.shape[0], w.shape[0]);
+        if md == DYN || nd == DYN {
+            bail!("qmma_t needs a static output shape");
+        }
+        self.check_shapes(&[md, nd], &out.shape, "qmma_t destination")?;
+        if md % IMMA_TILE != 0 || nd % IMMA_TILE != 0 {
+            bail!("qmma_t needs an output tile that is a multiple of {IMMA_TILE} both ways");
+        }
+        self.check_shapes(&[md], &[asc.shape[0]], "qmma_t a scale rows")?;
+        self.check_shapes(&[nd], &[wsc.shape[1]], "qmma_t w scale columns")?;
+        if self.cta_threads % WARP != 0 {
+            bail!("qmma_t needs a CTA that is a whole number of warps");
+        }
+
+        let (i32_t, f32_t) = (self.i32_t, self.f32_t);
+        let vec4_i8 = Type::vector(&[4], self.i8_t);
+        let frag_t = Type::vector(&[1, 4], self.i8_t);
+        let acc_t = Type::vector(&[1, 2], i32_t);
+
+        let one = self.const_index(block, 1)?;
+        let kd = if a.shape[1] == DYN {
+            self.push(block, memref::dim(a.mem, one, self.loc))?
+        } else {
+            self.const_index(block, a.shape[1])?
+        };
+
+        // The lane's place in the fragments, as in [`Self::tile_matmul_t_imma`]:
+        // both operands are read from row lane / 4 four bytes on, and the two
+        // accumulator elements land in columns 2 * (lane % 4) and one past.
+        let tid = self.gpu_index(block, "gpu.thread_id", "x")?;
+        let warp_w = self.const_index(block, WARP)?;
+        let warp = self.divui(block, tid, warp_w)?;
+        let lane = self.remui(block, tid, warp_w)?;
+        let four = self.const_index(block, 4)?;
+        let quad = self.divui(block, lane, four)?;
+        let in_quad = self.remui(block, lane, four)?;
+        let k_off = self.muli(block, in_quad, four)?;
+        let two = self.const_index(block, 2)?;
+        let d_col = self.muli(block, in_quad, two)?;
+
+        let (rt, ct) = (md / IMMA_TILE, nd / IMMA_TILE);
+        let (rm, rn) = self.qmma_patch(rt, ct);
+        let patches = (rt / rm) * (ct / rn);
+        let warps = self.const_index(block, self.cta_threads / WARP)?;
+        let total = self.const_index(block, patches)?;
+        let across = self.const_index(block, ct / rn)?;
+
+        let tb = Block::new(&[(self.index_t, self.loc)]);
+        let u = detach(tb.argument(0)?.into());
+        let ui = self.divui(&tb, u, across)?;
+        let uj = self.remui(&tb, u, across)?;
+        let patch_m = self.const_index(&tb, rm * IMMA_TILE)?;
+        let patch_n = self.const_index(&tb, rn * IMMA_TILE)?;
+        let i0 = self.muli(&tb, ui, patch_m)?;
+        let j0 = self.muli(&tb, uj, patch_n)?;
+        let row_base = self.addi(&tb, i0, quad)?;
+        let col_base = self.addi(&tb, j0, d_col)?;
+        let frag_base = self.addi(&tb, j0, quad)?;
+
+        // Row of A and of the accumulator, row of W, and output column, one per
+        // tile of the patch. All are loop-invariant, so they are built once.
+        let mut a_rows = Vec::with_capacity(rm as usize);
+        for r in 0..rm {
+            let off = self.const_index(&tb, r * IMMA_TILE)?;
+            a_rows.push(self.addi(&tb, row_base, off)?);
+        }
+        let (mut w_rows, mut out_cols) = (Vec::new(), Vec::new());
+        for c in 0..rn {
+            let off = self.const_index(&tb, c * IMMA_TILE)?;
+            w_rows.push(self.addi(&tb, frag_base, off)?);
+            out_cols.push(self.addi(&tb, col_base, off)?);
+        }
+
+        let lanes = (rm * rn * 2) as usize;
+        let mut args = vec![(self.index_t, self.loc)];
+        args.extend(std::iter::repeat_n((f32_t, self.loc), lanes));
+        let kb = Block::new(&args);
+        let k = detach(kb.argument(0)?.into());
+        let mut accs = Vec::with_capacity(lanes);
+        for slot in 0..lanes {
+            accs.push(detach(kb.argument(slot + 1)?.into()));
+        }
+
+        let blk_w = self.const_index(&kb, Q8_BLOCK)?;
+        let b = self.divui(&kb, k, blk_w)?;
+        let k_from = self.addi(&kb, k, k_off)?;
+        let halves = Q8_BLOCK / IMMA_K;
+        let mut k_cols = Vec::with_capacity(halves as usize);
+        for h in 0..halves {
+            let off = self.const_index(&kb, h * IMMA_K)?;
+            k_cols.push(self.addi(&kb, k_from, off)?);
+        }
+
+        let mut a_frags = Vec::new();
+        for row in &a_rows {
+            for col in &k_cols {
+                let v = self.vec_load_al(&kb, a.mem, &[*row, *col], vec4_i8, 4)?;
+                a_frags.push(self.vec_shape_cast(&kb, v, frag_t)?);
+            }
+        }
+        let mut w_frags = Vec::new();
+        for row in &w_rows {
+            for col in &k_cols {
+                let v = self.vec_load_al(&kb, w.mem, &[*row, *col], vec4_i8, 4)?;
+                w_frags.push(self.vec_shape_cast(&kb, v, frag_t)?);
+            }
+        }
+
+        let zero_i = self.zero_scalar(&kb, i32_t)?;
+        let empty = self.vec_broadcast(&kb, zero_i, acc_t)?;
+        let shape = self.parse_attr("[8, 8, 16]")?;
+
+        // A weight scale belongs to an output column, not to a row of the
+        // patch, so loading it inside the row loop would fetch each one `rm`
+        // times. The patch is square and square is where the tensor work pays,
+        // so that is eight redundant loads out of every nine.
+        let mut w_scales = Vec::with_capacity(rn as usize * 2);
+        for out_col in &out_cols {
+            for dj in 0..2 {
+                let off = self.const_index(&kb, dj)?;
+                let col = self.addi(&kb, *out_col, off)?;
+                w_scales.push(self.push(&kb, memref::load(wsc.mem, &[b, col], self.loc))?);
+            }
+        }
+
+        let mut next = Vec::with_capacity(lanes);
+        for r in 0..rm as usize {
+            let sa = self.push(&kb, memref::load(asc.mem, &[a_rows[r], b], self.loc))?;
+            for c in 0..rn as usize {
+                let mut sum = empty;
+                for h in 0..halves as usize {
+                    sum = self.push(
+                        &kb,
+                        OperationBuilder::new("nvgpu.mma.sync", self.loc)
+                            .add_operands(&[
+                                a_frags[r * halves as usize + h],
+                                w_frags[c * halves as usize + h],
+                                sum,
+                            ])
+                            .add_attributes(&[(self.id("mmaShape"), shape)])
+                            .add_results(&[acc_t])
+                            .build()?,
+                    )?;
+                }
+                for dj in 0..2 {
+                    let sw = w_scales[c * 2 + dj as usize];
+                    let scale = self.push(&kb, arith::mulf(sa, sw, self.loc))?;
+                    let raw = self.vec_extract(&kb, sum, &[0, dj], i32_t)?;
+                    let as_f = self.small_int_to_f32(&kb, raw)?;
+                    let slot = (r * rn as usize + c) * 2 + dj as usize;
+                    // A mul and an add here are mul.rn and add.rn, which ptxas
+                    // may not contract; at a patch's size that is 128 wasted
+                    // instructions against the same block's 128 tensor ones.
+                    next.push(self.elem_mac(&kb, f32_t, as_f, scale, accs[slot])?);
+                }
+            }
+        }
+        kb.append_operation(scf::r#yield(&next, self.loc));
+
+        let zero_k = self.const_index(&tb, 0)?;
+        let step = self.const_index(&tb, Q8_BLOCK)?;
+        let init = self.zero_scalar(&tb, f32_t)?;
+        let mut operands = vec![zero_k, kd, step];
+        operands.extend(std::iter::repeat_n(init, lanes));
+        let kr = Region::new();
+        kr.append_block(kb);
+        let loop_op = tb.append_operation(
+            OperationBuilder::new("scf.for", self.loc)
+                .add_operands(&operands)
+                .add_results(&vec![f32_t; lanes])
+                .add_regions([kr])
+                .build()?,
+        );
+
+        for (r, row) in a_rows.iter().enumerate() {
+            for (c, out_col) in out_cols.iter().enumerate() {
+                for dj in 0..2 {
+                    let off = self.const_index(&tb, dj)?;
+                    let col = self.addi(&tb, *out_col, off)?;
+                    let slot = (r * rn as usize + c) * 2 + dj as usize;
+                    let value = detach(loop_op.result(slot)?.into());
+                    tb.append_operation(memref::store(value, out.mem, &[*row, col], self.loc));
+                }
+            }
+        }
+        tb.append_operation(scf::r#yield(&[], self.loc));
+
+        let region = Region::new();
+        region.append_block(tb);
+        block.append_operation(scf::r#for(warp, total, warps, region, self.loc));
+        self.barrier(block)?;
+        Ok(())
+    }
+
+    fn tile_matmul_t_dp4a(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        b: &MemVal<'c>,
+        out: &MemVal<'c>,
+        kd: i64,
+    ) -> Result<bool> {
+        let applies = a.elem == self.i8_t
+            && b.elem == self.i8_t
+            && out.elem == self.i32_t
+            && kd % 4 == 0
+            && a.swizzle.is_none()
+            && b.swizzle.is_none()
+            && !a.is_masked()
+            && !b.is_masked()
+            && self.base.gpu_config.supports_dp4a();
+        if !applies {
+            return Ok(false);
+        }
+
+        let i32_t = self.i32_t;
+        let vec4_i8 = Type::vector(&[4], self.i8_t);
+        self.distribute(block, out, 1, true, |cg, blk, idx| {
+            let (i, j) = (idx[0], idx[1]);
+            let slot_t = MemRefType::new(i32_t, &[], None, None);
+            let slot = cg.push(blk, memref::alloca(cg.ctx, slot_t, &[], &[], None, cg.loc))?;
+            let zero = cg.zero_scalar(blk, i32_t)?;
+            blk.append_operation(memref::store(zero, slot, &[], cg.loc));
+
+            // One iteration per group of four bytes.
+            let lo = cg.const_index(blk, 0)?;
+            let hi = cg.const_index(blk, kd / 4)?;
+            let st = cg.const_index(blk, 1)?;
+            let kb = Block::new(&[(cg.index_t, cg.loc)]);
+            let group = detach(kb.argument(0)?.into());
+            let four = cg.const_index(&kb, 4)?;
+            let k = cg.push(&kb, arith::muli(group, four, cg.loc))?;
+
+            let va = cg.vec_load_al(&kb, a.mem, &[i, k], vec4_i8, 4)?;
+            let vb = cg.vec_load_al(&kb, b.mem, &[j, k], vec4_i8, 4)?;
+            let cur = cg.push(&kb, memref::load(slot, &[], cg.loc))?;
+            let signed = cg.parse_attr("#nvvm.dot_accumulate_type<signed>")?;
+            let acc = cg.push(
+                &kb,
+                OperationBuilder::new("nvvm.dot.accumulate.4way", cg.loc)
+                    .add_operands(&[va, vb, cur])
+                    .add_attributes(&[(cg.id("a_type"), signed), (cg.id("b_type"), signed)])
+                    .add_results(&[i32_t])
+                    .build()?,
+            )?;
+            kb.append_operation(memref::store(acc, slot, &[], cg.loc));
+            kb.append_operation(scf::r#yield(&[], cg.loc));
+            let region = Region::new();
+            region.append_block(kb);
+            blk.append_operation(scf::r#for(lo, hi, st, region, cg.loc));
+
+            let fin = cg.push(blk, memref::load(slot, &[], cg.loc))?;
+            blk.append_operation(memref::store(fin, out.mem, idx, cg.loc));
+            Ok(())
+        })?;
+        Ok(true)
+    }
+
+    /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind
+    /// `dot_t` (contracts the last dim of both operands).
+    ///
+    /// The int8 operands take the tensor cores first and `dp4a` second. The
+    /// generic fallback is a plain thread-per-output scalar reduction: the
+    /// heavily-tuned [`Self::tile_matmul`] has no transposed-b variant, and the
+    /// attention S = Q @ K.T tile is small relative to the kernel's other
+    /// costs.
     pub(super) fn tile_matmul_t(
         &mut self,
         block: &Block<'c>,
@@ -1281,6 +2407,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if kd == DYN {
             bail!("dot_t needs a static contraction dim");
         }
+        
+        if self.tile_matmul_t_imma(block, a, b, out, kd)?
+            || self.tile_matmul_t_dp4a(block, a, b, out, kd)?
+        {
+            return Ok(());
+        }
+
         let elem = out.elem;
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let (i, j) = (idx[0], idx[1]);
@@ -1330,12 +2463,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if rows == DYN || cols == DYN {
             bail!("cumsum needs a static tile shape");
         }
-        
+
         let elem = src.elem;
         if !self.is_float(elem) {
             bail!("cumsum needs a float element type");
         }
-        
+
         let out = self.alloc_tile_shaped(block, elem, &[rows, cols])?;
 
         let total = self.const_index(block, cols)?;
@@ -1354,13 +2487,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let acc = detach(rb.argument(1)?.into());
         let v = self.push(&rb, memref::load(src.mem, &[i, j], self.loc))?;
         let nacc = self.push(&rb, arith::addf(acc, v, self.loc))?;
-        
+
         rb.append_operation(memref::store(nacc, out.mem, &[i, j], self.loc));
         rb.append_operation(scf::r#yield(&[nacc], self.loc));
-        
+
         let rr = Region::new();
         rr.append_block(rb);
-        
+
         body.append_operation(
             OperationBuilder::new("scf.for", self.loc)
                 .add_operands(&[lo, hi, st, init])
@@ -1370,13 +2503,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         );
 
         body.append_operation(scf::r#yield(&[], self.loc));
-        
+
         let region = Region::new();
         region.append_block(body);
-        
+
         block.append_operation(scf::r#for(tid, total, bdim, region, self.loc));
         self.barrier(block)?;
-        
+
         Ok(out)
     }
 
@@ -1392,19 +2525,19 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if src.shape.contains(&DYN) {
             bail!("tril needs a static tile shape");
         }
-        
+
         if !self.is_float(src.elem) {
             bail!("tril needs a float element type");
         }
-        
+
         let out = if src.owned && src.swizzle.is_none() {
             src.clone()
         } else {
             self.alloc_tile_shaped(block, src.elem, &src.shape)?
         };
-        
+
         let zero = self.zero_scalar(block, src.elem)?;
-        
+
         self.distribute(block, &out, 1, true, |cg, blk, idx| {
             let (i, j) = (idx[0], idx[1]);
             let keep = cg.push(
@@ -1420,9 +2553,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     .add_results(&[src.elem])
                     .build()?,
             )?;
-            
+
             blk.append_operation(memref::store(r, out.mem, idx, cg.loc));
-            
+
             Ok(())
         })?;
 
@@ -1446,16 +2579,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if rows == DYN || cols == DYN {
             bail!("transpose needs a static tile shape");
         }
-        
+
         let out = self.alloc_tile_shaped(block, src.elem, &[cols, rows])?;
-        
+
         self.distribute(block, &out, 1, true, |cg, blk, idx| {
             let (i, j) = (idx[0], idx[1]);
             let v = cg.push(blk, memref::load(src.mem, &[j, i], cg.loc))?;
             blk.append_operation(memref::store(v, out.mem, idx, cg.loc));
             Ok(())
         })?;
-        
+
         Ok(out)
     }
 
@@ -1933,7 +3066,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         want: Type<'c>,
     ) -> Result<Value<'c, 'c>> {
         let v = self.push(block, memref::load(mem, idx, self.loc))?;
-        self.float_cast(block, v, want)
+        self.numeric_cast(block, v, want)
     }
 
     /// Loads a scalar (width == 1) or a width-vector from mem[idx], matching
@@ -1981,6 +3114,21 @@ impl<'p, 'c> Codegen<'p, 'c> {
             OperationBuilder::new("vector.broadcast", self.loc)
                 .add_operands(&[scalar])
                 .add_results(&[vec_t])
+                .build()?,
+        )
+    }
+
+    pub(super) fn vec_shape_cast(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+        want: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("vector.shape_cast", self.loc)
+                .add_operands(&[value])
+                .add_results(&[want])
                 .build()?,
         )
     }

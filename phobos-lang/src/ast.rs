@@ -1,8 +1,10 @@
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scalar {
     F16,
+    BF16,
     F32,
     F64,
+    I8,
     I32,
     I64,
     Bool,
@@ -12,13 +14,28 @@ impl Scalar {
     pub fn from_name(s: &str) -> Option<Scalar> {
         Some(match s {
             "f16" => Scalar::F16,
+            "bf16" => Scalar::BF16,
             "f32" => Scalar::F32,
             "f64" => Scalar::F64,
+            "i8" => Scalar::I8,
             "i32" => Scalar::I32,
             "i64" => Scalar::I64,
             "bool" => Scalar::Bool,
             _ => return None,
         })
+    }
+
+    pub fn name(&self) -> &'static str {
+        match self {
+            Scalar::F16 => "f16",
+            Scalar::BF16 => "bf16",
+            Scalar::F32 => "f32",
+            Scalar::F64 => "f64",
+            Scalar::I8 => "i8",
+            Scalar::I32 => "i32",
+            Scalar::I64 => "i64",
+            Scalar::Bool => "bool",
+        }
     }
 }
 
@@ -163,6 +180,10 @@ impl Kernel {
         Ok(self
             .launch()?
             .map_or(DEFAULT_CTA_THREADS, |l| l.max_threads))
+    }
+
+    pub fn wants_dynamic_shared(&self) -> bool {
+        self.attrs.iter().any(|a| a.name == "dynshared")
     }
 
     // force legacy WMMA

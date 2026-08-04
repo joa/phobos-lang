@@ -87,7 +87,7 @@ pub fn best(
 }
 fn zero_scalar(d: DataType) -> ScalarValue {
     match d {
-        DataType::F32 | DataType::F16 => ScalarValue::F32(0.0),
+        DataType::F32 | DataType::F16 | DataType::BF16 => ScalarValue::F32(0.0),
         DataType::F64 => ScalarValue::F64(0.0),
         DataType::I32 | DataType::I8 => ScalarValue::I32(0),
         DataType::I64 => ScalarValue::I64(0),

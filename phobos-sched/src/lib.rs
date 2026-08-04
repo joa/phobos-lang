@@ -1341,6 +1341,7 @@ kernel attn(Q: tensor<f32>[Nq, D],
         let base = phobos_base::context::Context::default();
         let ptx = phobos_mlir::gen_ptx(&base, |b, c, m| {
             phobos_lang::codegen::emit(b, std::slice::from_ref(&p.leaves[0].kernel), c, m)
+                .map(|_| ())
         })
         .unwrap();
         assert!(

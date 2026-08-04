@@ -32,6 +32,7 @@ impl TileId {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DataType {
     F16,
+    BF16,
     F32,
     F64,
     I8,
@@ -44,7 +45,7 @@ impl DataType {
     pub fn bytes(self) -> usize {
         match self {
             DataType::I8 | DataType::Bool => 1,
-            DataType::F16 => 2,
+            DataType::F16 | DataType::BF16 => 2,
             DataType::F32 | DataType::I32 => 4,
             DataType::F64 | DataType::I64 => 8,
         }

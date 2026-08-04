@@ -321,8 +321,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return None;
         }
 
-        if self.slice_is_partial(a_slice)
-            || self.slice_is_partial(b_slice)
+        // operand slices sit inside the k loop, which is not emitted yet.
+        if self.slice_is_partial_within(a_slice, &[kt.as_str()])
+            || self.slice_is_partial_within(b_slice, &[kt.as_str()])
             || self.slice_is_partial(target)
         {
             return None;

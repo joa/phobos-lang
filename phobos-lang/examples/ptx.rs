@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let src = std::fs::read_to_string(path)?;
     let kernels = phobos_lang::parse(&src)?;
     let ptx = phobos_mlir::gen_ptx(&ctx, |base, context, module| {
-        phobos_lang::codegen::emit(base, &kernels, context, module)
+        phobos_lang::codegen::emit(base, &kernels, context, module).map(|_| ())
     })?;
     println!("{ptx}");
     Ok(())

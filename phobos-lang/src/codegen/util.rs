@@ -1,6 +1,49 @@
 use super::*;
 
 impl<'p, 'c> Codegen<'p, 'c> {
+    /// Whether a slice of `size` elements starting at `start` provably stays
+    /// inside a *dynamic* tensor extent whose known divisor is `extent_div`, so
+    /// it needs no runtime bounds mask.
+    ///
+    /// Three offsets qualify. One riding a trimmed main loop's induction
+    /// variable is covered by that loop's rounded-down trip count (see
+    /// [`Codegen::emit_split_for`]). A single element at a literal zero is
+    /// inside any tensor that has elements at all, and a kernel launched over
+    /// an empty one has nothing to do; this is what keeps the leading
+    /// `[0 :+ 1]` of a row-vector kernel off the masked path. Last, a
+    /// tile-aligned offset into an extent the host declared a whole number of
+    /// tiles: every program id then addresses a whole tile, since the grid runs
+    /// to the extent (see `@aligned` in [`Codegen::declared_divs`]).
+    ///
+    /// Anything else, an undeclared program id above all, is unbounded from
+    /// inside the kernel: the grid is the host's business, and a kernel that
+    /// assumed otherwise would write through the end of a row and into the next
+    /// one.
+    /// `pending` names loop variables whose loop has not been emitted yet but
+    /// will be trimmed once it is, which is what lets a prescan reason about a
+    /// slice inside a loop body (see [`Codegen::slice_is_partial_within`]).
+    pub(super) fn dyn_in_bounds(
+        &self,
+        start: &Expr,
+        size: i64,
+        extent_div: i64,
+        pending: &[&str],
+    ) -> bool {
+        if self
+            .trimmed_ivs
+            .iter()
+            .map(String::as_str)
+            .chain(pending.iter().copied())
+            .any(|iv| start.uses_name(iv))
+        {
+            return true;
+        }
+        if size <= 1 && self.const_fold(start) == Some(0) {
+            return true;
+        }
+        size > 0 && extent_div % size == 0 && self.expr_div(start) % size == 0
+    }
+
     pub(super) fn expr_div(&self, expr: &Expr) -> i64 {
         const CAP: i64 = 1 << 20;
         match expr {
@@ -230,7 +273,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     pub(super) fn is_float(&self, t: Type<'c>) -> bool {
-        t == self.f16_t || t == self.f32_t || t == self.f64_t
+        t == self.f16_t || t == self.bf16_t || t == self.f32_t || t == self.f64_t
     }
 
     /// The tensor-core operand element types: f16, or f32 rounded down on stage.
@@ -238,16 +281,75 @@ impl<'p, 'c> Codegen<'p, 'c> {
         t == self.f16_t || t == self.f32_t
     }
 
-    pub(super) fn float_rank(&self, t: Type<'c>) -> Option<u8> {
-        if t == self.f16_t {
-            Some(0)
+    /// Width in bits of a float type, which orders the widening conversions.
+    ///
+    /// f16 and bf16 are both 16 bits and neither contains the other: bf16 has
+    /// f32's exponent range with 8 fewer mantissa bits. Width alone therefore
+    /// does not decide a conversion between them; see [`Self::float_join`].
+    pub(super) fn float_bits(&self, t: Type<'c>) -> Option<u32> {
+        if t == self.f16_t || t == self.bf16_t {
+            Some(16)
         } else if t == self.f32_t {
-            Some(1)
+            Some(32)
         } else if t == self.f64_t {
-            Some(2)
+            Some(64)
         } else {
             None
         }
+    }
+
+    /// The narrowest float type both operands convert into without loss.
+    ///
+    /// Equal types join to themselves and a wider type absorbs a narrower one,
+    /// but f16 and bf16 join to f32: each has bits the other cannot hold, so
+    /// f32 is their only common supertype.
+    pub(super) fn float_join(&self, a: Type<'c>, b: Type<'c>) -> Option<Type<'c>> {
+        if a == b {
+            return self.is_float(a).then_some(a);
+        }
+        let (ab, bb) = (self.float_bits(a)?, self.float_bits(b)?);
+        Some(match ab.cmp(&bb) {
+            std::cmp::Ordering::Greater => a,
+            std::cmp::Ordering::Less => b,
+            // same width, different types: f16 vs bf16.
+            std::cmp::Ordering::Equal => self.f32_t,
+        })
+    }
+
+    /// The element type a mixed-type pair computes in: [`Self::float_join`]
+    /// between floats, the wider of two integers, and the float side when an
+    /// integer meets a float.
+    pub(super) fn numeric_join(&self, a: Type<'c>, b: Type<'c>) -> Option<Type<'c>> {
+        match (self.is_float(a), self.is_float(b)) {
+            (true, true) => self.float_join(a, b),
+            (true, false) if self.is_int(b) => Some(a),
+            (false, true) if self.is_int(a) => Some(b),
+            (false, false) if self.is_int(a) && self.is_int(b) => {
+                Some(if self.int_bits(a).ok()? >= self.int_bits(b).ok()? {
+                    a
+                } else {
+                    b
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// The element type a contraction of `a` and `b` accumulates in.
+    ///
+    /// Floats accumulate in their join. Integers accumulate in i32 rather than
+    /// the operand type: a dot product of bytes overflows i8 almost at once,
+    /// and i32 is what the hardware's integer dot product accumulates in
+    /// anyway.
+    pub(super) fn accumulator_elem(&self, a: Type<'c>, b: Type<'c>) -> Result<Type<'c>> {
+        let join = self
+            .numeric_join(a, b)
+            .ok_or_else(|| anyhow!("no common type for a contraction of {a} and {b}"))?;
+        Ok(if self.is_int(join) && join != self.i64_t {
+            self.i32_t
+        } else {
+            join
+        })
     }
 
     pub(super) fn float_cast(
@@ -261,11 +363,17 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return Ok(value);
         }
         let (lo, hi) = (
-            self.float_rank(from)
+            self.float_bits(from)
                 .ok_or_else(|| anyhow!("float_cast from non-float {from}"))?,
-            self.float_rank(want)
+            self.float_bits(want)
                 .ok_or_else(|| anyhow!("float_cast to non-float {want}"))?,
         );
+        // f16 <-> bf16 is neither a widening nor a narrowing, and arith has no
+        // op for it. Round-trip through f32, which holds either exactly.
+        if lo == hi {
+            let wide = self.float_cast(block, value, self.f32_t)?;
+            return self.float_cast(block, wide, want);
+        }
         let op = if hi > lo {
             "arith.extf"
         } else {
@@ -281,7 +389,79 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     pub(super) fn is_int(&self, t: Type<'c>) -> bool {
-        t == self.i32_t || t == self.i64_t
+        t == self.i8_t || t == self.i32_t || t == self.i64_t
+    }
+
+    /// Convert between any two numeric element types, float or signed integer.
+    ///
+    /// Integers are signed throughout, so the widening and float conversions
+    /// are the sign-extending ones.
+    pub(super) fn numeric_cast(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+        want: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let from = value.r#type();
+        if from == want {
+            return Ok(value);
+        }
+        let (from_float, want_float) = (self.is_float(from), self.is_float(want));
+        if from_float && want_float {
+            return self.float_cast(block, value, want);
+        }
+        // index is its own world; route it through i32/i64 on the way in.
+        if from == self.index_t {
+            let as_int = self.push(block, arith::index_cast(value, self.i64_t, self.loc))?;
+            return self.numeric_cast(block, as_int, want);
+        }
+        if want == self.index_t {
+            let as_int = self.numeric_cast(block, value, self.i64_t)?;
+            return self.push(block, arith::index_cast(as_int, self.index_t, self.loc));
+        }
+        let op = match (from_float, want_float) {
+            (true, false) => "arith.fptosi",
+            (false, true) => "arith.sitofp",
+            (false, false) => {
+                let (lo, hi) = (self.int_bits(from)?, self.int_bits(want)?);
+                if hi > lo {
+                    "arith.extsi"
+                } else {
+                    "arith.trunci"
+                }
+            }
+            (true, true) => unreachable!("handled above"),
+        };
+        self.push(
+            block,
+            OperationBuilder::new(op, self.loc)
+                .add_operands(&[value])
+                .add_results(&[want])
+                .build()?,
+        )
+    }
+
+    /// Size in bytes of a numeric element type.
+    pub(super) fn elem_bytes(&self, t: Type<'c>) -> Option<u32> {
+        let bits = match self.float_bits(t) {
+            Some(bits) => bits,
+            None => self.int_bits(t).ok()?,
+        };
+        (bits >= 8).then_some(bits / 8)
+    }
+
+    fn int_bits(&self, t: Type<'c>) -> Result<u32> {
+        if t == self.bool_t {
+            Ok(1)
+        } else if t == self.i8_t {
+            Ok(8)
+        } else if t == self.i32_t {
+            Ok(32)
+        } else if t == self.i64_t {
+            Ok(64)
+        } else {
+            bail!("not an integer type: {t}")
+        }
     }
 
     pub(super) fn id(&self, name: &str) -> Identifier<'c> {

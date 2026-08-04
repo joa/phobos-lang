@@ -24,9 +24,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 AstType::Scalar(_) => Binding::Let { value: arg, div: 1 },
                 AstType::Tensor(scalar, dims) => {
                     let elem = self.scalar_type(*scalar);
-                    // float tensor base pointers are assumed 16-byte aligned
-                    // (the host allocator returns aligned buffers).
-                    let mem = if matches!(scalar, Scalar::F32 | Scalar::F16) {
+                    // narrow-element tensor base pointers are assumed 16-byte
+                    // aligned (the host allocator returns aligned buffers),
+                    // which is what lets their rows vectorize.
+                    let mem = if matches!(
+                        scalar,
+                        Scalar::F32 | Scalar::F16 | Scalar::BF16 | Scalar::I8
+                    ) {
                         self.assume_align(&entry, arg, 16)?
                     } else {
                         arg
@@ -41,6 +45,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         global: None,
                         owned: false,
                         mask: Vec::new(),
+                        dim_div: self.declared_divs(kernel, dims)?,
                     })
                 }
                 AstType::Tile(..) => bail!(
@@ -120,6 +125,42 @@ impl<'p, 'c> Codegen<'p, 'c> {
             .add_regions([fn_region])
             .build()?)
     }
+
+    /// per-dimension divisors promised by `@aligned(NAME = tile)`
+    /// - NAME is a symbolic tensor dimension 
+    /// - tile is an integer or an autotune constant.
+    fn declared_divs(&self, kernel: &Kernel, dims: &[Dim]) -> Result<Vec<i64>> {
+        let Some(attr) = kernel.attrs.iter().find(|a| a.name == "aligned") else {
+            return Ok(vec![1; dims.len()]);
+        };
+
+        dims.iter()
+            .map(|dim| {
+                let Dim::Sym(name) = dim else {
+                    return Ok(1);
+                };
+                let Some(arg) = attr.args.iter().find(|a| match a {
+                    AttrArg::KeyValue { key, .. } => key == name,
+                    _ => false,
+                }) else {
+                    return Ok(1);
+                };
+                let AttrArg::KeyValue { value, .. } = arg else {
+                    unreachable!("matched a key-value argument")
+                };
+                let div = match value {
+                    Literal::Int(n) => *n,
+                    Literal::Ident(sym) => *self
+                        .shape_env
+                        .get(sym)
+                        .with_context(|| format!("@aligned({name} = {sym}): unknown constant"))?,
+                    other => bail!("@aligned({name}): expected an integer, found {other:?}"),
+                };
+                ensure!(div > 0, "@aligned({name}): the divisor must be positive");
+                Ok(div)
+            })
+            .collect()
+    }
 }
 
 // types
@@ -127,8 +168,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
     pub(super) fn scalar_type(&self, scalar: Scalar) -> Type<'c> {
         match scalar {
             Scalar::F16 => self.f16_t,
+            Scalar::BF16 => self.bf16_t,
             Scalar::F32 => self.f32_t,
             Scalar::F64 => self.f64_t,
+            Scalar::I8 => self.i8_t,
             Scalar::I32 => self.i32_t,
             Scalar::I64 => self.i64_t,
             Scalar::Bool => self.bool_t,
