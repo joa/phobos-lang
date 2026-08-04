@@ -54,7 +54,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let &[m, n] = &shape[..] else { return None };
 
         let mut scan = FragScan::default();
-        if !self.frag_uses_ok(name, m, n, rest, &mut scan) {
+        if !self.frag_uses_ok(name, m, n, rest, &mut scan, &[]) {
             return None;
         }
 
@@ -81,6 +81,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         n: i64,
         stmts: &[Stmt],
         scan: &mut FragScan,
+        ivs: &[&str],
     ) -> bool {
         for stmt in stmts {
             match stmt {
@@ -99,7 +100,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         return false;
                     }
 
-                    if self.slice_is_partial(value) {
+                    if self.slice_is_partial_within(value, ivs) {
                         return false;
                     }
 
@@ -136,7 +137,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         return false;
                     }
 
-                    if self.slice_is_partial(target) {
+                    if self.slice_is_partial_within(target, ivs) {
                         return false;
                     }
                 }
@@ -159,7 +160,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     {
                         return false;
                     }
-                    if !self.frag_uses_ok(name, m, n, body, scan) {
+                    let mut inner: Vec<&str> = ivs.to_vec();
+                    inner.push(var.as_str());
+                    if !self.frag_uses_ok(name, m, n, body, scan, &inner) {
                         return false;
                     }
                 }

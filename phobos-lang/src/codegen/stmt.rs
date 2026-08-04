@@ -81,7 +81,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let unfused = matches!(
             value,
             Expr::Call { callee, .. } if matches!(callee.as_str(),
-                "exp" | "tmax" | "rowmax" | "rowsum" | "cumsum" | "tril" | "transpose")
+                "exp" | "log" | "round" | "sqrt" | "tanh" | "tmax" | "rowmax" | "rowsum" | "cumsum"
+                | "tril" | "transpose")
         );
         if !unfused {
             let tile = self.alloc_tile(block, scalar, dims)?;
@@ -228,6 +229,28 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return self.tile_exp_into(block, &src, target);
         }
 
+        // t = qmma_t(..) writes the accumulators where they are wanted rather
+        // than through a tile.
+        //
+        // The accumulators are registers already, and a `[128, 64]` f32 tile 
+        // on the way out is 32 KB, which holds the kernel to one CTA per SM.
+        if op == AssignOp::Set
+            && let Expr::Call { callee, args } = value
+            && callee == "qmma_t"
+            && !target.is_masked()
+            && target.elem == self.f32_t
+        {
+            let [a, asc, w, wsc] = self.qmma_operands(block, args)?;
+            
+            self.qmma_t_into(block, &a, &asc, &w, &wsc, target)?;
+
+            for t in [&a, &asc, &w, &wsc] {
+                self.release(t);
+            }
+            
+            return Ok(());
+        }
+
         if let Expr::Call { callee, args } = value
             && (callee == "dot" || callee == "dot_t")
         {
@@ -241,8 +264,35 @@ impl<'p, 'c> Codegen<'p, 'c> {
                      tensor slice is unsupported; accumulate into a tile first"
                 );
             }
+
             let transpose = callee == "dot_t";
             let (a, b) = self.dot_operands(block, args)?;
+            
+            // `p = dot(p, p)` is routed through a tmp since we create garbage otherwise.
+            if target.global.is_some() && (target.global == a.global || target.global == b.global) {
+                let temp = self.alloc_tile_shaped(block, target.elem, &target.shape)?;
+                
+                if transpose {
+                    self.tile_matmul_t(block, &a, &b, &temp)?;
+                } else {
+                    let zero = self.zero_scalar(block, temp.elem)?;
+                    self.tile_fill(block, zero, &temp)?;
+                    self.tile_matmul(block, &a, &b, &temp)?;
+                }
+
+                self.release(&a);
+                self.release(&b);
+                
+                match op {
+                    AssignOp::Set => self.tile_copy(block, &temp, target, true, false)?,
+                    AssignOp::Add => self.tile_binary(block, BinOp::Add, target, &temp, target)?,
+                }
+                
+                self.release(&temp);
+                
+                return Ok(());
+            }
+
             if transpose {
                 if a.shape.len() != 2 || b.shape.len() != 2 {
                     bail!("dot_t expects rank-2 tiles");
@@ -508,7 +558,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
             value: iv,
             div: iv_div,
         };
-        self.emit_scope(&body_block, &[(var, binding)], body)?;
+        
+        self.trimmed_ivs.push(var.to_string());
+        let emitted = self.emit_scope(&body_block, &[(var, binding)], body);
+        self.trimmed_ivs.pop();
+        emitted?;
+
         body_block.append_operation(scf::r#yield(&[], self.loc));
 
         let region = Region::new();
@@ -654,20 +709,53 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     pub(super) fn emit_stmts(&mut self, block: &Block<'c>, stmts: &[Stmt]) -> Result<()> {
+        let last = super::hoist::last_uses(stmts);
+        let declared: Vec<&str> = stmts
+            .iter()
+            .filter_map(|s| match s {
+                Stmt::Let { name, .. } | Stmt::Var { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+
         let mut i = 0;
+
         while i < stmts.len() {
-            if let Some(p) = self.matmul_candidate(&stmts[i..]) {
+            let consumed = if let Some(p) = self.matmul_candidate(&stmts[i..]) {
                 let consumed = p.consumed;
                 self.emit_register_matmul(block, &p)?;
-                i += consumed;
+                consumed
             } else if let Some(plan) = self.frag_acc_candidate(&stmts[i..]) {
                 self.bind_frag_acc(block, &plan)?;
-                i += 1;
+                1
             } else {
                 self.emit_stmt(block, &stmts[i])?;
-                i += 1;
+                1
+            };
+
+            i += consumed;
+
+            for name in &declared {
+                if last.get(*name) == Some(&(i - 1)) {
+                    self.release_named(name);
+                }
             }
         }
         Ok(())
+    }
+
+    /// Returns a dead named tile buffer to the pool.
+    fn release_named(&mut self, name: &str) {
+        let Some(Binding::Tile(mut mv)) = self.lookup(name) else {
+            return;
+        };
+
+        if mv.global.is_none() {
+            return;
+        }
+        
+        mv.owned = true;
+        
+        self.release(&mv);
     }
 }

@@ -5,12 +5,13 @@ package phobos.v1;
 enum DataType {
   DATA_TYPE_UNSPECIFIED = 0;
   DATA_TYPE_F16 = 1;
-  DATA_TYPE_F32 = 2;
-  DATA_TYPE_F64 = 3;
-  DATA_TYPE_I8 = 4;
-  DATA_TYPE_I32 = 5;
-  DATA_TYPE_I64 = 6;
-  DATA_TYPE_BOOL = 7;
+  DATA_TYPE_BF16 = 2;
+  DATA_TYPE_F32 = 3;
+  DATA_TYPE_F64 = 4;
+  DATA_TYPE_I8 = 5;
+  DATA_TYPE_I32 = 6;
+  DATA_TYPE_I64 = 7;
+  DATA_TYPE_BOOL = 8;
 }
 
 enum AccessMode {

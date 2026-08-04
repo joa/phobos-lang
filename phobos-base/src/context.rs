@@ -83,6 +83,18 @@ impl GpuConfig {
         self.compute_capability() >= 80
     }
 
+    pub fn supports_bf16_native(&self) -> bool {
+        self.compute_capability() >= 80
+    }
+
+    pub fn supports_dp4a(&self) -> bool {
+        self.compute_capability() >= 61
+    }
+
+    pub fn supports_int8_mma(&self) -> bool {
+        self.compute_capability() >= 75
+    }
+
     /// The k-dimension of the native f16 mma.sync
     pub fn mma_sync_k(&self) -> Option<u32> {
         match self.compute_capability() {

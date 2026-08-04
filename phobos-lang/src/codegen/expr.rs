@@ -1,6 +1,25 @@
 use super::*;
 
 impl<'p, 'c> Codegen<'p, 'c> {
+    pub(super) fn qmma_operands(
+        &mut self,
+        block: &Block<'c>,
+        args: &[Expr],
+    ) -> Result<[MemVal<'c>; 4]> {
+        let [a, asc, w, wsc] = args else {
+            bail!("qmma_t expects (a, a_scales, w, w_scales)");
+        };
+        let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+            Rv::Tile(t) => Ok(t),
+            Rv::Scalar(_) => bail!("qmma_t expects tile operands"),
+        };
+        let a = operand(self, a)?;
+        let asc = operand(self, asc)?;
+        let w = operand(self, w)?;
+        let wsc = operand(self, wsc)?;
+        Ok([a, asc, w, wsc])
+    }
+
     pub(super) fn emit_expr(&mut self, block: &Block<'c>, expr: &Expr) -> Result<Rv<'c>> {
         match expr {
             Expr::Int(n) => Ok(Rv::Scalar(self.const_index(block, *n)?)),
@@ -33,7 +52,23 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 },
             },
             Expr::Unary { op, rhs } => {
-                let v = self.emit_scalar(block, rhs)?;
+                let v = match (op, self.emit_expr(block, rhs)?) {
+                    // -t becomes 0 - t
+                    (UnOp::Neg, Rv::Tile(t)) => {
+                        let zero = self.push(
+                            block,
+                            arith::constant(
+                                self.ctx,
+                                FloatAttribute::new(self.ctx, self.f32_t, 0.0).into(),
+                                self.loc,
+                            ),
+                        )?;
+                        let out = self.emit_tile_scalar(block, BinOp::Sub, &t, zero, true)?;
+                        return Ok(Rv::Tile(out));
+                    }
+                    (UnOp::Not, Rv::Tile(_)) => bail!("`!` needs a bool operand, got a tile"),
+                    (_, Rv::Scalar(v)) => v,
+                };
                 let t = v.r#type();
                 let v = match op {
                     UnOp::Neg if self.is_float(t) => self.push(block, arith::negf(v, self.loc))?,
@@ -148,7 +183,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 if shape.contains(&DYN) {
                     bail!("dot result shape must be static; assign to a tile-typed var instead");
                 }
-                let out = self.alloc_tile_shaped(block, a.elem, &shape)?;
+                let acc_elem = self.accumulator_elem(a.elem, b.elem)?;
+                let out = self.alloc_tile_shaped(block, acc_elem, &shape)?;
                 self.check_matmul_shapes(&a, &b, &out)?;
                 if !self.wmma_dot(block, &a, &b, &out, false, false)? {
                     let zero = self.zero_scalar(block, out.elem)?;
@@ -171,12 +207,42 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 if shape.contains(&DYN) {
                     bail!("dot_t result shape must be static");
                 }
-                let out = self.alloc_tile_shaped(block, a.elem, &shape)?;
+                let acc_elem = self.accumulator_elem(a.elem, b.elem)?;
+                let out = self.alloc_tile_shaped(block, acc_elem, &shape)?;
                 if !self.wmma_dot(block, &a, &b, &out, true, false)? {
                     self.tile_matmul_t(block, &a, &b, &out)?;
                 }
                 self.release(&a);
                 self.release(&b);
+                Ok(Rv::Tile(out))
+            }
+            // qdot_t(a, a_scales, w, w_scales): the Q8_0 contraction with its
+            // block scales folded in
+            "qdot_t" => {
+                let [a, asc, w, wsc] = args else {
+                    bail!("qdot_t expects (a, a_scales, w, w_scales)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("qdot_t expects tile operands"),
+                };
+                let (a, asc) = (operand(self, a)?, operand(self, asc)?);
+                let (w, wsc) = (operand(self, w)?, operand(self, wsc)?);
+                let out = self.tile_qdot_t(block, &a, &asc, &w, &wsc)?;
+                for t in [&a, &asc, &w, &wsc] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            // qmma_t(a, a_scales, w, w_scales): the Q8_0 contraction batched
+            // over rows, on the integer tensor cores. The weight scales are
+            // [block, out] here where qdot_t wants [out, block].
+            "qmma_t" => {
+                let [a, asc, w, wsc] = self.qmma_operands(block, args)?;
+                let out = self.tile_qmma_t(block, &a, &asc, &w, &wsc)?;
+                for t in [&a, &asc, &w, &wsc] {
+                    self.release(t);
+                }
                 Ok(Rv::Tile(out))
             }
             // exp(t): element-wise e^x over a tile.
@@ -188,6 +254,46 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     bail!("exp expects a tile argument");
                 };
                 Ok(Rv::Tile(self.tile_exp(block, &t)?))
+            }
+            // log(t): element-wise natural logarithm over a tile.
+            "log" => {
+                let [arg] = args else {
+                    bail!("log expects one tile argument");
+                };
+                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
+                    bail!("log expects a tile argument");
+                };
+                Ok(Rv::Tile(self.tile_log(block, &t)?))
+            }
+            // round(t): element-wise nearest integer.
+            "round" => {
+                let [arg] = args else {
+                    bail!("round expects one tile argument");
+                };
+                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
+                    bail!("round expects a tile argument");
+                };
+                Ok(Rv::Tile(self.tile_round(block, &t)?))
+            }
+            // sqrt(t): element-wise square root over a tile.
+            "sqrt" => {
+                let [arg] = args else {
+                    bail!("sqrt expects one tile argument");
+                };
+                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
+                    bail!("sqrt expects a tile argument");
+                };
+                Ok(Rv::Tile(self.tile_sqrt(block, &t)?))
+            }
+            // tanh(t): element-wise hyperbolic tangent over a tile.
+            "tanh" => {
+                let [arg] = args else {
+                    bail!("tanh expects one tile argument");
+                };
+                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
+                    bail!("tanh expects a tile argument");
+                };
+                Ok(Rv::Tile(self.tile_tanh(block, &t)?))
             }
             // tmax(a, b): element-wise maximum (broadcasting).
             "tmax" => {
@@ -247,6 +353,22 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 let out = self.tile_transpose(block, &t)?;
                 self.release(&t);
                 Ok(Rv::Tile(out))
+            }
+            // f32(x), bf16(x), i8(x), ...: convert a tile or a scalar to the
+            // named element type.
+            other if Scalar::from_name(other).is_some_and(|s| s != Scalar::Bool) => {
+                let want = self.scalar_type(Scalar::from_name(other).expect("matched above"));
+                let [arg] = args else {
+                    bail!("{other} expects one argument to convert");
+                };
+                match self.emit_expr(block, arg)? {
+                    Rv::Tile(t) => {
+                        let out = self.tile_cast(block, &t, want)?;
+                        self.release(&t);
+                        Ok(Rv::Tile(out))
+                    }
+                    Rv::Scalar(v) => Ok(Rv::Scalar(self.numeric_cast(block, v, want)?)),
+                }
             }
             other => bail!("unknown function '{other}'"),
         }
@@ -351,12 +473,51 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })?;
         if shape.contains(&DYN) {
             bail!("elementwise tile result shape must be static");
-        }
-        let out = self.alloc_tile_shaped(block, a.elem, &shape)?;
-        self.tile_binary_dispatch(block, op, a, b, &out)?;
-        self.release(a);
-        self.release(b);
+        }        
+        // - same types: noop
+        // - mixed types: widen
+        let (wa, wb) = self.widen_pair(block, a, b)?;
+        let out = self.alloc_tile_shaped(block, wa.elem, &shape)?;
+        self.tile_binary_dispatch(block, op, &wa, &wb, &out)?;
+        self.release(&wa);
+        self.release(&wb);
         Ok(out)
+    }
+
+    /// Widen two tiles to their common type.
+    /// Noop when the type is equal.
+    /// Tiles we replace here with a widened type are being released.
+    fn widen_pair(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        b: &MemVal<'c>,
+    ) -> Result<(MemVal<'c>, MemVal<'c>)> {
+        if a.elem == b.elem {
+            return Ok((a.clone(), b.clone()));
+        }
+
+        let want = self.numeric_join(a.elem, b.elem).ok_or_else(|| {
+            anyhow!(
+                "elementwise tile op: no common type for {} and {} operands",
+                a.elem,
+                b.elem
+            )
+        })?;
+        
+        let widen = |cg: &mut Self, t: &MemVal<'c>| -> Result<MemVal<'c>> {
+            if t.elem == want {
+                return Ok(t.clone());
+            }
+            let out = cg.tile_cast(block, t, want)?;
+            cg.release(t);
+            Ok(out)
+        };
+        
+        let wa = widen(self, a)?;
+        let wb = widen(self, b)?;
+        
+        Ok((wa, wb))
     }
 
     /// Element-wise tile*scalar (or scalar*tile) into a fresh buffer.
@@ -384,14 +545,15 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if lt == rt {
             return Ok((lhs, rhs));
         }
-        // mixed float widths widen to the wider type (f16 < f32 < f64)
-        if let (Some(lr), Some(rr)) = (self.float_rank(lt), self.float_rank(rt)) {
-            let want = if lr >= rr { lt } else { rt };
+        
+        // mixed float types widen to their join (f16 and bf16 meet at f32)
+        if let Some(want) = self.float_join(lt, rt) {
             return Ok((
                 self.float_cast(block, lhs, want)?,
                 self.float_cast(block, rhs, want)?,
             ));
         }
+
         bail!("mismatched operand types: {lt} vs {rt}")
     }
 
@@ -405,7 +567,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let t = value.r#type();
         if t == want {
             Ok(value)
-        } else if self.float_rank(t).is_some() && self.float_rank(want).is_some() {
+        } else if self.is_float(t) && self.is_float(want) {
             // any float-to-float store rounds/widens to the target type
             // (e.g. an fp32 literal stored into an fp16 tile or tensor).
             self.float_cast(block, value, want)
@@ -487,9 +649,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let mut off_divs = Vec::with_capacity(rank);
         let mut dyn_sizes = Vec::new();
         let mut static_sizes = Vec::with_capacity(rank);
+        
         // Dims whose offset rides the ragged remainder chunk's induction
         // variable, and so may run past a dynamic extent (see ragged_iv).
         let mut ragged = vec![false; rank];
+        
+        // Dims that provably stay inside a dynamic extent: see dyn_in_bounds.
+        let mut proven = vec![false; rank];
         let rides_ragged = |cg: &Self, start: &Expr| {
             cg.ragged_iv
                 .as_deref()
@@ -506,7 +672,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     offsets.push(self.emit_index(block, start, "slice start")?);
                     off_divs.push(self.expr_div(start));
                     match self.const_fold(len) {
-                        Some(n) => static_sizes.push(n),
+                        Some(n) => {
+                            proven[i] = self.dyn_in_bounds(start, n, src.div_of(i), &[]);
+                            static_sizes.push(n)
+                        }
                         None => {
                             dyn_sizes.push(self.emit_index(block, len, "slice length")?);
                             static_sizes.push(DYN);
@@ -520,7 +689,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     offsets.push(off);
                     off_divs.push(self.expr_div(start));
                     match (self.const_fold(start), self.const_fold(end)) {
-                        (Some(a), Some(b)) => static_sizes.push(b - a),
+                        (Some(a), Some(b)) => {
+                            proven[i] = self.dyn_in_bounds(start, b - a, src.div_of(i), &[]);
+                            static_sizes.push(b - a)
+                        }
                         _ => {
                             let end_v = self.emit_index(block, end, "slice end")?;
                             dyn_sizes.push(self.subi(block, end_v, off)?);
@@ -566,23 +738,31 @@ impl<'p, 'c> Codegen<'p, 'c> {
         });
         let aligned = mult4(base_div) && strides[..rank - 1].iter().all(|&s| mult4(stride_div(s)));
 
-        // Bounds mask: a dim whose (statically known) source extent an aligned
-        // tile cannot tile evenly may reach past the end on the last tile, so
-        // record its offset and extent for the masked load/store epilogue.
+        // Bounds mask: a dim that may reach past the source extent records its
+        // offset and extent for the masked load/store epilogue.
         //
-        // A dynamic extent carries no static proof, so it masks only inside a
-        // ragged remainder chunk, and then against the tensor's runtime
-        // memref.dim. The trimmed main loop stays unmasked and keeps the
-        // vector / WMMA / cp.async fast paths (see Codegen::emit_split_for).
+        // A statically known extent that an aligned tile cannot tile evenly
+        // masks against that constant. A dynamic extent carries no static
+        // proof, so it masks against the tensor's runtime memref.dim unless
+        // dyn_in_bounds can account for the offset: a trimmed main loop's
+        // induction variable stays unmasked and keeps the vector / WMMA /
+        // cp.async fast paths (see Codegen::emit_split_for). An offset that is
+        // none of those -- a program id above all -- is unbounded from inside
+        // the kernel and must be masked, or the last tile of a grid writes
+        // through the end of a row and into the next one.
         let mut mask = vec![None; rank];
         for i in 0..rank {
-            let extent = if !dim_in_bounds(src.shape[i], static_sizes[i], off_divs[i]) {
+            let extent = if src.shape[i] != DYN {
+                if dim_in_bounds(src.shape[i], static_sizes[i], off_divs[i]) {
+                    continue;
+                }
                 self.const_index(block, src.shape[i])?
-            } else if src.shape[i] == DYN && ragged[i] && static_sizes[i] != DYN {
+            } else {
+                if static_sizes[i] == DYN || (proven[i] && !ragged[i]) {
+                    continue;
+                }
                 let pos = self.const_index(block, i as i64)?;
                 self.push(block, memref::dim(src.mem, pos, self.loc))?
-            } else {
-                continue;
             };
             mask[i] = Some((offsets[i], extent));
         }
@@ -617,6 +797,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
             global: None,
             owned: false,
             mask,
+            dim_div: subs
+                .iter()
+                .enumerate()
+                .map(|(i, s)| match s {
+                    Sub::Full => src.div_of(i),
+                    _ => 1,
+                })
+                .collect(),
         })
     }
 
