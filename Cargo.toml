@@ -3,12 +3,20 @@ resolver = "3"
 members = [
     "phobos-base",
     "phobos-bench",
+    "phobos-cli",
     "phobos-cluster",
+    "phobos-gguf",
+    "phobos-inference",
+    "phobos-kernels",
     "phobos-lang",
     "phobos-mlir",
+    "phobos-onnx",
     "phobos-pod",
     "phobos-sched",
 ]
+
+[profile.release.package.phobos-gguf]
+codegen-units = 1
 
 [workspace.package]
 edition = "2024"

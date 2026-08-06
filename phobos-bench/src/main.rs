@@ -228,13 +228,11 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// bench returns (rms, stddev).
-/// Times launch and reports the fastest of N runs (with the spread as a
-/// noise indicator). A kernel's compute time is fixed; run-to-run variance is
-/// external noise (clock ramp, scheduling, background driver work) that only
-/// slows a sample, so the minimum is the truest measure and the right basis for
-/// the cuBLAS ratio. This matches the autotuner's ranking metric, so the winner
-/// it picks is the one reported here (see autotune::Autotuner::run).
+/// Times `launch` and returns the fastest of N runs with the spread beside it.
+/// Run-to-run variance is external noise (clock ramp, scheduling, driver work)
+/// that only ever slows a sample, so the minimum is the truest measure. This is
+/// also the autotuner's ranking metric, so the winner it picks is the one
+/// reported here.
 fn bench(
     name: &str,
     mut launch: impl FnMut() -> anyhow::Result<()>,
@@ -261,9 +259,7 @@ fn bench(
     Ok((d, s))
 }
 
-/// Zeroes bytes of device memory at ptr (a byte memset to 0, which is +0.0
-/// for both f32 and fp16). Centralizes the cuMemset* error check shared by the
-/// GEMM launch and cuBLAS comparison loops.
+/// Zeroes `bytes` at `ptr`. A byte memset to 0 is +0.0 for both f32 and fp16.
 fn zero_device_async(
     ptr: cust::sys::CUdeviceptr,
     bytes: usize,
@@ -278,13 +274,11 @@ fn zero_device_async(
     Ok(())
 }
 
-/// Launches a matmul kernel over C[M,N] = A[M,K] @ B[K,N] (plus alpha/beta),
-/// dispatching on wide so the memref descriptor's offset/size/stride fields
-/// match the kernel's index width (i64 for the default @tensorcore mma.sync
-/// path, i32 otherwise). The host metadata must match the kernel's ABI or every
-/// field after the first pointer shifts; keeping the two layouts here is what
-/// guarantees the fp32 and fp16 benches stay in sync. Pointers are raw device
-/// addresses (8 bytes either way), so this is element-type agnostic.
+/// Launches a matmul kernel over C[M,N] = A[M,K] @ B[K,N], dispatching on `wide`
+/// so the memref descriptor's offset/size/stride fields match the kernel's index
+/// width: i64 for the default @tensorcore mma.sync path, i32 otherwise. Get that
+/// wrong and every field after the first pointer shifts. Pointers are raw device
+/// addresses either way, so this is element-type agnostic.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 fn launch_gemm(

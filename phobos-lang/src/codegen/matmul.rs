@@ -143,7 +143,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
             _ => return None,
         };
 
-        // epilogue target: a slice of an f32 tensor, not mentioning acc. The slice's shape must be statically known and equal to acc.
+        // The epilogue target: a slice of an f32 tensor, not mentioning acc,
+        // whose shape is statically known and equal to acc's.
         let Expr::Index { base, subs } = target else {
             return None;
         };
@@ -218,7 +219,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return None;
         }
 
-        // loop body: exactly two tensor slices, then one accumulating dot of exactly those two names
+        // The loop body: exactly two tensor slices, then one accumulating dot of
+        // exactly those two names.
         let staged = |s: &'a Stmt| -> Option<(&'a str, &'a Expr)> {
             let (Stmt::Let {
                 name,
@@ -287,9 +289,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
 
         if self.wmma() && self.wmma_plan(m, n, ak).is_some() {
-            // tensor-core path: f16 or f32 operands, accumulator, and C.
+            // The tensor-core path: f16 or f32 operands, accumulator and C.
         } else {
-            // vector path: f32 throughout (an f16 accumulator needs the tensor cores; otherwise fall back to the generic tile matmul).
+            // The vector path is f32 throughout; an f16 accumulator needs the
+            // tensor cores, so anything else falls back to the generic matmul.
             let a_elem = self.slice_tensor_elem(a_slice);
             let b_elem = self.slice_tensor_elem(b_slice);
 

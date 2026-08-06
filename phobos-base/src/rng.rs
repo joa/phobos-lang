@@ -1,3 +1,33 @@
+/// SplitMix64, which keeps a run reproducible without an RNG dependency.
+///
+/// [`Lcg`] is the older of the two and fills test tensors; this one has the
+/// better distribution and is what sampling draws from.
+#[derive(Clone, Debug)]
+pub struct SplitMix64(u64);
+
+impl SplitMix64 {
+    pub fn new(seed: u64) -> SplitMix64 {
+        // An all-zero state degenerates.
+        SplitMix64(seed ^ 0x9E37_79B9_7F4A_7C15)
+    }
+
+    pub fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// The next value uniformly in `[0.0, 1.0)`.
+    pub fn next_f32(&mut self) -> f32 {
+        // The top 24 bits give a uniform float without bias.
+        (self.next_u64() >> 40) as f32 / (1u32 << 24) as f32
+    }
+}
+
+/// A linear congruential generator, used to fill tensors with reproducible
+/// values. See [`SplitMix64`] for the better-distributed one.
 #[derive(Clone, Debug)]
 pub struct Lcg(u64);
 
@@ -27,7 +57,26 @@ impl Lcg {
 
 #[cfg(test)]
 mod tests {
-    use super::Lcg;
+    use super::{Lcg, SplitMix64};
+
+    #[test]
+    fn splitmix_is_seed_reproducible() {
+        let draw = |seed| {
+            let mut rng = SplitMix64::new(seed);
+            (0..16).map(|_| rng.next_u64()).collect::<Vec<_>>()
+        };
+        assert_eq!(draw(7), draw(7));
+        assert_ne!(draw(7), draw(8));
+    }
+
+    #[test]
+    fn splitmix_floats_are_unit_interval() {
+        let mut rng = SplitMix64::new(0);
+        for _ in 0..4096 {
+            let x = rng.next_f32();
+            assert!((0.0..1.0).contains(&x), "out of range: {x}");
+        }
+    }
 
     #[test]
     fn equal_seeds_are_reproducible() {

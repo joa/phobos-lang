@@ -21,6 +21,7 @@ use crate::ast::{
     Type as AstType, UnOp,
 };
 
+mod elemwise;
 mod expr;
 mod frag;
 mod hoist;
@@ -28,6 +29,7 @@ mod kernel;
 mod matmul;
 mod pipeline;
 mod stmt;
+mod sync;
 mod tile;
 mod util;
 
@@ -128,46 +130,38 @@ struct MemVal<'c> {
     elem: Type<'c>,
     /// Static dims, with [`DYN`] for dynamic ones.
     shape: Vec<i64>,
-    /// None means contiguous, otherwise the stride when the buffer is padded.
-    ///
-    /// See [`Codegen::alloc_tile_padded`]
+    /// None means contiguous, otherwise the padded stride. See
+    /// [`Codegen::alloc_tile_padded`]
     row_stride: Option<i64>,
-    /// Base is 16-byte aligned (tile buffers and subviews have unproven dynamic offsets; tensor params unknown strides).
-    ///
-    /// Required for vectorization.
+    /// Base is 16-byte aligned, which vectorization requires. Tile buffers and
+    /// subviews have unproven dynamic offsets, tensor params unknown strides.
     aligned: bool,
 
-    /// XOR column swizzle for ldmatrix staging buffers.
-    ///
-    /// Every access (staging store and ldmatrix load) must permute the column
-    /// index.
-    ///
-    /// See [`Swizzle`]
+    /// XOR column swizzle for ldmatrix staging buffers. Every access, staging
+    /// store and ldmatrix load alike, must permute the column index. See
+    /// [`Swizzle`]
     swizzle: Option<Swizzle>,
 
-    /// The memref.global symbol backing a whole tile buffer (None for
-    /// subviews and tensor params); what [`Codegen::release`] returns to
-    /// the buffer pool.
+    /// The memref.global symbol backing a whole tile buffer (None for subviews
+    /// and tensor params); what [`Codegen::release`] returns to the pool.
     global: Option<String>,
 
-    /// A fresh unnamed temp whose buffer may be released back to the pool
-    /// once all reads of it have been emitted. [`Codegen::bind`] clears
-    /// this, so named buffers are never pooled.
+    /// A fresh unnamed temp whose buffer may be released back to the pool once
+    /// all reads of it have been emitted. [`Codegen::bind`] clears this, so
+    /// named buffers are never pooled.
     owned: bool,
 
-    /// Per-dimension bounds mask for a tensor slice that may reach past the
-    /// source extent (a partially out-of-bounds tile). Some((offset, extent))
-    /// records the slice's global offset and the source dim extent so a load
-    /// can zero-fill and a store can skip the elements where offset + local
-    /// index >= extent; None means the dim is provably in bounds. Empty for
-    /// tile buffers and fully in-bounds slices (see [`Codegen::emit_subview`]).
+    /// Per-dimension bounds mask for a slice that may reach past the source
+    /// extent. Some((offset, extent)) lets a load zero-fill and a store skip
+    /// where offset + local index >= extent; None means provably in bounds.
+    /// Empty for tile buffers and whole slices, see [`Codegen::emit_subview`].
     mask: Vec<Option<(Value<'c, 'c>, Value<'c, 'c>)>>,
 
-    /// Known divisor of each dynamic extent, 1 when nothing is known. Only a
-    /// kernel's `@aligned` attribute raises it, and only for tensor params: it
-    /// is the host's promise that the extent is a whole number of tiles, which
-    /// is what lets a program-id-offset slice skip its bounds mask. Empty means
-    /// nothing is known about any dim. See [`Codegen::dyn_in_bounds`].
+    /// Known divisor of each dynamic extent, 1 when nothing is known and empty
+    /// when nothing is known about any dim. Only `@aligned` raises it, and only
+    /// for tensor params: it is the host's promise that the extent is a whole
+    /// number of tiles, which lets a program-id-offset slice skip its bounds
+    /// mask. See [`Codegen::dyn_in_bounds`].
     dim_div: Vec<i64>,
 }
 
@@ -248,9 +242,9 @@ struct Codegen<'p, 'c> {
     kernel_name: String,
     shared_globals: Vec<Operation<'c>>, // shared-memory tiles (memref.global)
     tile_count: usize,
-    // Released tile buffers by (element type, physical shape), reused by
-    // later allocations so temps don't each grow the CTA's static shared
-    // footprint (which caps occupancy). See Codegen::release.
+    // Released tile buffers by (element type, physical shape), reused so temps
+    // don't each grow the CTA's static shared footprint, which caps occupancy.
+    // See Codegen::release.
     tile_pool: HashMap<(String, Vec<i64>), Vec<String>>,
     /// Tiles live in one dynamic allocation rather than a global apiece, sized
     /// at launch. See [`Kernel::wants_dynamic_shared`].
@@ -259,21 +253,19 @@ struct Codegen<'p, 'c> {
     /// reaches: what the host has to pass at launch.
     tile_offsets: HashMap<String, i64>,
     shared_bytes: i64,
-    // Loop-invariant dot operands staged into shared f16 in a loop's
-    // preheader, one frame per active for loop: (source view's memref
-    // value, staged buffer). The dot staging sites consult this instead of
-    // re-staging per iteration. See codegen/hoist.rs.
+    // Loop-invariant dot operands staged into shared f16 in a loop's preheader,
+    // one frame per active for loop: (source view's memref value, staged
+    // buffer). The staging sites consult this instead of re-staging per
+    // iteration. See codegen/hoist.rs.
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
-    // Induction variable of the ragged remainder chunk currently being
-    // emitted, if any. A slice offset by this variable can run past a dynamic
-    // tensor extent, so emit_subview guards it against the runtime dim. The
-    // trimmed main loop leaves it None and keeps the unmasked fast paths.
-    // See Codegen::emit_split_for.
+    // Induction variable of the ragged remainder chunk being emitted, if any. A
+    // slice offset by it can run past a dynamic tensor extent, so emit_subview
+    // guards it against the runtime dim; the trimmed main loop leaves it None
+    // and keeps the unmasked fast paths. See Codegen::emit_split_for.
     ragged_iv: Option<String>,
-    // Induction variables of the trimmed main loops enclosing the code being
-    // emitted. Their trip count was rounded down to whole chunks, so a slice
-    // offset by one of them is in bounds of a dynamic extent by construction
-    // and needs no mask. See Codegen::emit_split_for.
+    // Induction variables of the enclosing trimmed main loops. Their trip count
+    // was rounded down to whole chunks, so a slice offset by one of them is in
+    // bounds by construction and needs no mask.
     trimmed_ivs: Vec<String>,
     pipeline: bool,   // whether to double-buffer staged tiles in for loops
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
@@ -282,10 +274,10 @@ struct Codegen<'p, 'c> {
     cta_threads: i64,
 }
 
-/// Widens a value's borrow to the context lifetime. Values borrow the block
-/// they were created in, but every block here is appended to a region owned
-/// (transitively) by the module, so the underlying MlirValue stays valid
-/// for the whole build; only the borrow is too conservative.
+/// Widens a value's borrow to the context lifetime. Values borrow the block they
+/// were created in, but every block here is appended to a region the module
+/// transitively owns, so the MlirValue stays valid for the whole build; only the
+/// borrow is too conservative.
 fn detach<'c>(value: Value<'c, '_>) -> Value<'c, 'c> {
     unsafe { Value::from_raw(value.to_raw()) }
 }
@@ -1259,14 +1251,12 @@ mod tests {
 
     #[test]
     fn tensorcore_f16_pipeline_register_stages_on_sm75() {
-        // Without cp.async (sm_75), the f16-input WMMA pipeline register-stages:
+        // Without cp.async (sm_75) the f16-input WMMA pipeline register-stages:
         // the next tile's global loads are hoisted into registers and held
         // across the WMMA compute, with the shared store deferred past it, so
-        // the global latency overlaps the tensor-core math instead of stalling
-        // the store. The load is unconditional with a clamped index (the
-        // arith.subi/minsi below), the store guarded. (The load-before-
-        // compute ordering is verified in the emitted PTX; here we lock the
-        // path is taken and stays cp.async-free.)
+        // the global latency overlaps the math. The load is unconditional with a
+        // clamped index, the store guarded. This locks in that the path is taken
+        // and stays cp.async-free; the ordering is checked in the emitted PTX.
         let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @pipeline
             @tensorcore
@@ -1286,9 +1276,8 @@ mod tests {
         assert_contains(
             &mlir,
             &[
-                // unconditional global loads (from the strided slice), held in
-                // registers; the in-bounds clamp distinguishes this from the
-                // synchronous path (which has no arith.subi)
+                // Unconditional global loads held in registers; the in-bounds
+                // clamp is what the synchronous path lacks.
                 "vector.load",
                 "arith.subi",
                 "arith.minsi",
@@ -1303,9 +1292,8 @@ mod tests {
             "cp.async leaked into the sm_75 register-staged path:\n{mlir}"
         );
         // The synchronous fallback applies when the staging tile does not divide
-        // evenly across the CTA: a 16x16 A-tile is only 256 elements (< one
-        // 4-wide vector per thread for the 256-thread CTA), so no arith.subi
-        // clamp is emitted.
+        // evenly across the CTA: a 16x16 A-tile is 256 elements, under one
+        // 4-wide vector per thread, so no clamp is emitted.
         let small = src.replace("TILE_M in [64]", "TILE_M in [16]");
         let small = small.replace("TILE_N in [64]", "TILE_N in [128]");
         let plain = emit_mlir(&small);
@@ -2028,15 +2016,12 @@ mod tests {
 
     #[test]
     fn flash_accumulator_rides_in_fragments() {
-        // The canonical fp16 flash kernel (examples/flash_attention_fp16.ph):
-        // acc's every use is fragment-representable (scale by a column, +=
-        // dot, final store), so it never exists in shared memory. Its
-        // per-lane vector<2x2xf32> fragments ride the kt loop as scf.for
-        // iter_args, the scale/normalize passes become register math, and
-        // the epilogue scatters straight to O. Together with buffer pooling,
-        // the fused in-place s = exp(s - mnew), and temp adoption, the
-        // kernel carries 9 shared globals / ~15KB (down from 18 / 40KB), so
-        // four CTAs fit an sm_75 SM instead of one.
+        // The canonical fp16 flash kernel (examples/flash_attention_fp16.ph).
+        // Every use of acc is fragment-representable, so it never exists in
+        // shared memory: its per-lane fragments ride the kt loop as iter_args
+        // and the epilogue scatters straight to O. With buffer pooling and the
+        // fused in-place exp, the kernel carries 9 shared globals / ~15KB down
+        // from 18 / 40KB, so four CTAs fit an sm_75 SM instead of one.
         let mlir = emit_mlir_sync(
             "@autotune(D in [64], BR in [32], BC in [32])
             @tensorcore
@@ -3110,5 +3095,151 @@ mod tests {
                 "vector.contract",    // the chunk matmuls
             ],
         );
+    }
+
+    #[test]
+    fn atomic_add_lowers_to_an_rmw() {
+        let mlir = emit_mlir(
+            "kernel tally(BAR: tensor<i32>[2], OUT: tensor<i32>[N]) {
+                let i = program_id(0)
+                OUT[i] = atomic_add(BAR, 0, 1)
+            }",
+        );
+        assert_contains(&mlir, &["memref.atomic_rmw", "addi"]);
+    }
+
+    #[test]
+    fn atomic_add_rejects_a_float_tensor() {
+        let err = std::panic::catch_unwind(|| {
+            emit_mlir(
+                "kernel tally(BAR: tensor<f32>[2], OUT: tensor<i32>[N]) {
+                    let i = program_id(0)
+                    OUT[i] = atomic_add(BAR, 0, 1)
+                }",
+            )
+        });
+        assert!(err.is_err(), "an f32 barrier tensor should not compile");
+    }
+
+    /// The two-phase barrier: a generation read, an arrival, a reset, a release
+    /// and a spin, bracketed by the CTA barriers that carry the release to the
+    /// rest of the block. See codegen/sync.rs.
+    #[test]
+    fn grid_barrier_lowers_to_arrive_and_spin() {
+        let mlir = emit_mlir(
+            "kernel staged(X: tensor<f32>[N], BAR: tensor<i32>[2]) {
+                let i = program_id(0)
+                X[i] = X[i] + 1.0
+                grid_barrier(BAR)
+                X[i] = X[i] * 2.0
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "memref.atomic_rmw", // arrive, release and spin all go through it
+                "scf.while",         // the spin
+                "gpu.barrier",       // the CTA brackets
+                "gpu.grid_dim",      // how many arrivals make a full barrier
+            ],
+        );
+        // Five atomics: the generation read, the arrival, the counter reset, the
+        // release, and the spin's read.
+        assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5);
+    }
+
+    /// The same barrier as a `[2, 1]` column, which is how a host whose launch
+    /// ABI passes rank-2 descriptors spells it. The slot indexes the leading
+    /// dimension and the atomic takes a second subscript, which the verifier
+    /// checks against the memref rank.
+    #[test]
+    fn grid_barrier_takes_a_rank_two_column() {
+        let mlir = emit_mlir(
+            "kernel staged(X: tensor<f32>[N], BAR: tensor<i32>[2, 1]) {
+                let i = program_id(0)
+                X[i] = X[i] + 1.0
+                grid_barrier(BAR)
+            }",
+        );
+        assert_contains(&mlir, &["memref.atomic_rmw", "scf.while"]);
+        assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5);
+    }
+
+    /// A nested per-element chain becomes one sweep. Before this, every call in
+    /// `i8(i32(round(a)))` staged a shared tile of its own, so a kernel doing
+    /// nothing else allocated four. See codegen/elemwise.rs.
+    #[test]
+    fn elementwise_chain_fuses_into_one_sweep() {
+        let mlir = emit_mlir(
+            "@launch(256)
+            @autotune(NB in [32])
+            kernel narrow(A: tensor<f32>[RB, 32], Q: tensor<i8>[RB, 32]) {
+                let r = program_id(0)
+                var a = A[r * NB :+ NB, 0 :+ 32]
+                Q[r * NB :+ NB, 0 :+ 32] = i8(i32(round(a)))
+            }",
+        );
+        // Only the operand is staged; the rounding, the i32 and the i8 are all
+        // register steps of the one store sweep.
+        assert_eq!(
+            mlir.matches("memref.global").count(),
+            1,
+            "the chain should stage one tile, not one per call, in:\n{mlir}"
+        );
+        assert!(
+            !mlir.contains("xi32, 3>") && !mlir.contains("xi8, 3>"),
+            "no integer tile should be staged in:\n{mlir}"
+        );
+        assert_contains(&mlir, &["cvt.rni", "arith.fptosi"]);
+    }
+
+    /// The chain must not swallow a store whose operand it cannot index safely:
+    /// a masked operand would be read out of bounds by a target-indexed sweep,
+    /// so such a store keeps the old tile-per-call path and still verifies.
+    #[test]
+    fn elementwise_chain_leaves_a_masked_operand_alone() {
+        let mlir = emit_mlir(
+            "@launch(256)
+            kernel narrow(A: tensor<f32>[M, 24], Q: tensor<i8>[M, 24]) {
+                let r = program_id(0)
+                var a = A[r :+ 1, 0 :+ 24]
+                Q[r :+ 1, 0 :+ 24] = i8(i32(round(a)))
+            }",
+        );
+        assert!(module_verifies(&mlir));
+    }
+
+    /// A float step after a conversion away from float is a type error, not a
+    /// silent reinterpretation.
+    #[test]
+    fn elementwise_chain_rejects_rounding_an_integer() {
+        let err = std::panic::catch_unwind(|| {
+            emit_mlir(
+                "@launch(256)
+                @autotune(NB in [32])
+                kernel narrow(A: tensor<f32>[RB, 32], O: tensor<f32>[RB, 32]) {
+                    let r = program_id(0)
+                    var a = A[r * NB :+ NB, 0 :+ 32]
+                    O[r * NB :+ NB, 0 :+ 32] = round(i32(a))
+                }",
+            )
+        });
+        assert!(
+            err.is_err(),
+            "round of an i32 chain step should not compile"
+        );
+    }
+
+    #[test]
+    fn grid_barrier_rejects_a_non_tensor() {
+        let err = std::panic::catch_unwind(|| {
+            emit_mlir(
+                "kernel staged(X: tensor<f32>[N]) {
+                    var t: tile<i32>[1, 2] = 0
+                    grid_barrier(t)
+                }",
+            )
+        });
+        assert!(err.is_err(), "a tile barrier should not compile");
     }
 }

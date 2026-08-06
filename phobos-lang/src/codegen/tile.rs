@@ -91,11 +91,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
             self.push(block, memref::get_global(self.ctx, &name, t, self.loc))?
         };
 
-        let mem = self.assume_align(block, mem, 16)?; // be safe
+        let mem = self.assume_align(block, mem, 16)?;
 
-        // the buffer is always 16-byte aligned! the rows are if every outer
-        // stride is a multiple of 4 elements, which is exactly the byte alignment
-        // a 4-element vector of the element type needs (16b for f32, 8b for f16).
+        // The buffer is always 16-byte aligned; the rows are if every outer
+        // stride is a multiple of 4 elements, which is what a 4-element vector
+        // of the element type needs (16b for f32, 8b for f16).
         let aligned = row_major_strides(shape)[..shape.len() - 1]
             .iter()
             .all(|&s| mult4(s));
@@ -114,17 +114,15 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })
     }
 
-    /// Returns an owned temp's shared buffer to the pool so a later
-    /// allocation of the same element type and physical shape reuses it
-    /// instead of growing the CTA's static shared footprint (each distinct
-    /// global costs occupancy). No-op for views, params, and named tiles
-    /// (bind clears owned).
+    /// Returns an owned temp's shared buffer to the pool, so a later allocation
+    /// of the same element type and physical shape reuses it instead of growing
+    /// the CTA's static shared footprint. No-op for views, params and named
+    /// tiles (bind clears owned).
     ///
-    /// Only call after every op reading the buffer has been emitted. Reuse
-    /// is race-free because each tile op ends in a CTA barrier: the reusing
-    /// op's writes are ordered after the previous consumer's reads. Reused
-    /// buffers hold garbage, which is fine since every producing op fully
-    /// writes its output before it is read.
+    /// Only call after every op reading the buffer has been emitted. Reuse is
+    /// race-free because each tile op ends in a CTA barrier, so the reusing op's
+    /// writes are ordered after the previous consumer's reads; the garbage a
+    /// reused buffer holds is fine, every producing op fully writes its output.
     pub(super) fn release(&mut self, mv: &MemVal<'c>) {
         if !mv.owned {
             return;
@@ -147,13 +145,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
     }
 
-    /// Allocates a plain (unpadded) shared staging tile with an XOR column
-    /// swizzle (see [`Swizzle`]) so ldmatrix reads avoid bank conflicts without
-    /// paying for the WMMA path's padding. The swizzle permutes 8-element column
-    /// blocks (elem_log = 3, the ldmatrix row granule) by the low row bits, and
-    /// the block count caps the permutation at the bank period. The buffer keeps
-    /// its logical shape and contiguous layout; only the column index each access
-    /// uses gets transformed, the same way on store and load.
+    /// Allocates an unpadded shared staging tile with an XOR column swizzle (see
+    /// [`Swizzle`]), so ldmatrix reads avoid bank conflicts without paying for
+    /// the WMMA path's padding. Shape and layout are unchanged; only the column
+    /// index each access uses is permuted, the same way on store and load.
     pub(super) fn alloc_tile_swizzled(
         &mut self,
         block: &Block<'c>,
@@ -178,9 +173,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     /// Permutes a column index through a buffer's [`Swizzle`], or returns it
-    /// unchanged when the buffer is unswizzled: col ^ (((row >> shift) &
-    /// ((1<<bits)-1)) << elem_log). Every staging store and ldmatrix load goes
-    /// through the same call, so the data round-trips whatever the params are.
+    /// unchanged when the buffer is unswizzled. Every staging store and ldmatrix
+    /// load goes through here, so the data round-trips whatever the params are.
     pub(super) fn swizzle_col(
         &self,
         block: &Block<'c>,
@@ -226,10 +220,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
     /// Allocates a shared WMMA staging tile whose innermost dimension is padded
     /// by [`WMMA_SMEM_PAD`] elements, spreading consecutive rows across distinct
-    /// shared-memory banks (see that constant). The returned tile keeps its
-    /// logical shape (so iteration and fragment indexing are unchanged); the
-    /// padding lives only in the physical allocation and the row_stride the WMMA
-    /// leadDimension reads.
+    /// banks. The tile keeps its logical shape, so iteration and fragment
+    /// indexing are unchanged; the padding lives only in the physical allocation
+    /// and the row_stride the WMMA leadDimension reads.
     pub(super) fn alloc_tile_padded(
         &mut self,
         block: &Block<'c>,
@@ -275,12 +268,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return Ok(());
         }
 
-        // the acc has to hold both operands. specifically their join, or wider of
-        // the same kind.
-        //
-        // equal width is not enough since f16 and bf16 are both 16b and neither holds the other.
-        //
-        // int8 contraction accumulates into i32.
+        // The accumulator has to hold both operands: their join, or something
+        // wider of the same kind. Equal width is not enough, since f16 and bf16
+        // are both 16b and neither holds the other.
         let holds = self.numeric_join(a.elem, b.elem).is_some_and(|join| {
             if join == out.elem {
                 return true;
@@ -288,8 +278,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
             match (self.is_float(join), self.is_float(out.elem)) {
                 (true, true) => self.float_bits(out.elem) > self.float_bits(join),
                 (false, false) => self.elem_bytes(out.elem) > self.elem_bytes(join),
-                // nn integer contraction into a float accumulator, or the
-                // reverse, would silently change what the sum means
+                // An integer contraction into a float accumulator, or the
+                // reverse, would silently change what the sum means.
                 _ => false,
             }
         });
@@ -463,7 +453,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let body_block = Block::new(&[(self.index_t, self.loc)]);
         let li = detach(body_block.argument(0)?.into());
 
-        // last dim varies fastest, so adjacent threads touch adjacent elements for coalescing
+        // Last dim varies fastest, so adjacent threads touch adjacent elements.
         let mut idx = vec![li; rank];
 
         if rank > 1 {
@@ -483,11 +473,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
 
         // A masked output writes only the in-bounds elements: the whole body
-        // (its loads and its store) runs under an scf.if guarding offset +
-        // local index < extent. Callers scalarize masked writes
-        // (elementwise_width and tile_copy return width 1), so the guard is
-        // exact per element. The trailing barrier stays outside the guard: it
-        // is CTA-uniform, while the guard is a per-element (non-uniform) test.
+        // runs under an scf.if guarding offset + local index < extent. Callers
+        // scalarize masked writes, so the guard is exact per element. The
+        // trailing barrier stays outside it, being CTA-uniform where the guard
+        // is not.
         if let Some(pred) = self.bounds_pred(&body_block, &out.mask, &idx)? {
             let then = Block::new(&[]);
             body(self, &then, &idx)?;
@@ -505,9 +494,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         region.append_block(body_block);
         block.append_operation(scf::r#for(tid, total, bdim, region, self.loc));
 
-        // barriers can't deadlock here: the language never exposes thread
-        // ids, so every scalar value, and therefore all control flow, is
-        // uniform across the CTA.
+        // Barriers cannot deadlock here: the language never exposes thread ids,
+        // so every scalar value, and so all control flow, is CTA-uniform.
         if sync {
             self.barrier(block)?;
         }
@@ -650,10 +638,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
             );
         }
 
-        // Vectorize aligned copies at 4 elements: 16B/4xf32, 8B/4xf16 or
-        // 4xbf16, 4B/4xi8 (the src and dst element types match, checked
-        // above). The row-pitch ABI's multiple-of-4-elements guarantee is
-        // exactly the byte alignment a 4-element vector of any of them needs.
+        // Vectorize aligned copies at 4 elements. The row-pitch ABI's
+        // multiple-of-4-elements guarantee is exactly the byte alignment a
+        // 4-element vector of any element type needs.
         let elem_bytes = self.elem_bytes(dst.elem);
         let last = *dst.shape.last().expect("tile values are not rank-0");
         let vec_ok = src.aligned
@@ -666,11 +653,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let width = if vec_ok { 4 } else { 1 };
         let align = i64::from(elem_bytes.unwrap_or(4)) * 4;
 
-        // cp.async needs a 4/8/16-byte transfer and can't convert (so the
-        // src/dst element types must match, as checked above): f32 qualifies
-        // at any width (4B scalar or 16B vector), the narrower types only
-        // vectorized, since a scalar 1B or 2B element is below cp.async's
-        // minimum.
+        // cp.async needs a 4/8/16-byte transfer and cannot convert: f32
+        // qualifies at any width, the narrower types only vectorized, a scalar
+        // 1B or 2B element being below cp.async's minimum.
         let use_async = async_copy
             && !dst.is_masked()
             && (dst.elem == self.f32_t || (width == 4 && matches!(align, 4 | 8 | 16)));
@@ -749,10 +734,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
             ),
         ];
 
-        // Only 16-byte copies can skip L1 (cp.async.cg): staged tiles are
-        // consumed from shared memory, not re-read through L1. A vectorized f32
-        // copy is 16B (width 4), but a vectorized f16 copy is only 8B, so gate
-        // on the byte size rather than the element count.
+        // Only 16-byte copies can skip L1 (cp.async.cg), and staged tiles are
+        // consumed from shared memory rather than re-read through it. A
+        // vectorized f16 copy is only 8B, so gate on bytes, not elements.
         let elem_bytes = if dst.elem == self.f16_t { 2 } else { 4 };
         if width * elem_bytes == 16 {
             attributes.push((self.id("bypassL1"), Attribute::unit(self.ctx)));
@@ -767,14 +751,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         Ok(())
     }
 
-    /// dst[k, m] = src[m, k]: stages a tile k-major (transposed), so a row of
-    /// dst holds one k-slice and fragment loads vectorize. The distribution
-    /// iterates the source (the map is a bijection, so ownership still partitions
-    /// the output): each thread reads a vector row segment (coalesced) and
-    /// scatters 4 scalar column writes. With async_copy the elements move as
-    /// 4-byte cp.async transfers instead, which can't vectorize since the
-    /// destination is strided, but don't stall. Never emits a barrier; the caller
-    /// owns synchronization.
+    /// dst[k, m] = src[m, k]: stages a tile k-major, so a row of dst holds one
+    /// k-slice and fragment loads vectorize. The distribution iterates the
+    /// source, the map being a bijection: each thread reads a coalesced vector
+    /// row segment and scatters 4 scalar column writes. With async_copy the
+    /// elements move as 4-byte cp.async transfers, which cannot vectorize
+    /// against a strided destination but do not stall. Never emits a barrier;
+    /// the caller owns synchronization.
     pub(super) fn tile_copy_transposed(
         &mut self,
         block: &Block<'c>,
@@ -1175,12 +1158,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })
     }
 
-    /// e^x for an f32 scalar as ex2(x * log2e), emitting the PTX ex2.approx.ftz.f32
-    /// directly via llvm.inline_asm. The MLIR math.exp route doesn't work here:
-    /// convert-math-to-llvm (which runs before the gpu->nvvm libdevice patterns,
-    /// so that math.fma becomes the fma.rn intrinsic) would rewrite it to
-    /// llvm.intr.exp, which the NVPTX backend can't select. The hardware
-    /// approximation is also what Triton emits for softmax.
+    /// e^x for an f32 scalar as ex2(x * log2e), emitting PTX ex2.approx.ftz.f32
+    /// through llvm.inline_asm. math.exp does not work here: convert-math-to-llvm
+    /// runs before the gpu-to-nvvm libdevice patterns and rewrites it to
+    /// llvm.intr.exp, which the NVPTX backend cannot select.
     pub(super) fn approx_exp(&self, block: &Block<'c>, x: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         let log2e = self.push(
             block,
@@ -1324,13 +1305,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
         })
     }
 
-    /// The nearest integer to an f32, ties to even, as an f32.
-    ///
-    /// This is the hardware's own rounding, so unlike biasing into a positive
-    /// range and truncating it loses nothing: adding a bias large enough to
-    /// cover the range costs the low mantissa bits, which at the top of an
-    /// int8 quantization range is enough to move a value across a rounding
-    /// boundary.
+    /// The nearest integer to an f32, ties to even, as an f32. The hardware's
+    /// own rounding, so unlike biasing into a positive range and truncating it
+    /// loses nothing: a bias large enough to cover the range costs the low
+    /// mantissa bits, enough at the top of an int8 range to cross a boundary.
     pub(super) fn round_even(&self, block: &Block<'c>, x: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         self.push(
             block,
