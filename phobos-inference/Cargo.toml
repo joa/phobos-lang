@@ -1,0 +1,67 @@
+[package]
+name = "phobos-inference"
+version = "0.1.0"
+edition.workspace = true
+description = "Phobos inference runtime (REPL/server)"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+
+[[bin]]
+name = "phobos-inference"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+phobos-onnx = { path = "../phobos-onnx" }
+phobos-gguf = { path = "../phobos-gguf" }
+fancy-regex = "0.13"
+serde_json = "1"
+axum = "0.8.9"
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros"] }
+serde = { version = "1.0.229", features = ["derive"] }
+async-stream = "0.3.6"
+
+cust = { version = "0.3.2", optional = true }
+phobos-base = { path = "../phobos-base", optional = true }
+phobos-lang = { path = "../phobos-lang", optional = true }
+
+[features]
+cuda = ["phobos-onnx/cuda", "dep:cust", "dep:phobos-base", "dep:phobos-lang"]
+
+[[example]]
+name = "backend_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "model_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "q8diag"
+required-features = ["cuda"]
+
+[[example]]
+name = "q8sweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "ppsweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "attnsweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "attncheck"
+required-features = ["cuda"]
+
+[[example]]
+name = "deltasweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "dotform"
+required-features = ["cuda"]

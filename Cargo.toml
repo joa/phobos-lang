@@ -4,8 +4,11 @@ members = [
     "phobos-base",
     "phobos-bench",
     "phobos-cluster",
+    "phobos-gguf",
+    "phobos-inference",
     "phobos-lang",
     "phobos-mlir",
+    "phobos-onnx",
     "phobos-pod",
     "phobos-sched",
 ]

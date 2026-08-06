@@ -27,6 +27,7 @@ kernel gemm(A: tensor<f32>[M, K],
 ```
 
 SGEMM performance is at 75% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
+The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at llama.cpp's rate on that card. See [Inference](#inference).
 
 ![Phobos benchmark results](results/bench.svg)
 
@@ -39,6 +40,82 @@ See [SPEC](./SPEC.md) for details or check out the [`examples/`](./examples).
 Phobos supports autotuning for finding the optimal configuration. 
 
 ![Running the gemm_fp32 benchmark](results/autotune.gif)
+
+## Inference
+
+Frontends for ONNX and GGUF sit atop the language and `phobos-inference` executes them.
+
+Inference has been tested with:
+
+- [MiniCPM5-1B-Q8_0](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF)
+- [Qwen3.5-0.8B-Q8_0](https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF)
+- [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
+
+**Note:**
+* The host backend is used for verification and *very* slow. Always build with `--features=cuda` unless you need to verify against the host oracle. Always build with `--release` if the host backend is used.
+* ONNX has not seen a lot of love (as in: it runs the OG GPT-2, but it's slow).
+
+Two model front ends:
+
+- **`phobos-gguf`**: This has been verified against llama.cpp (token for token where greedy decoding is stable, 
+  and by next-token logit gaps where it is not).
+- **`phobos-onnx`**: ONNX protobuf to a graph IR, then shape inference, constant folding, LayerNorm
+  and epilogue fusion. GPT-2 runs end to end and has been verified against its bundled reference, with a KV-cache path.
+
+Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, tokens per second over ten repetitions:
+
+| test   | llama.cpp CUDA[^2]  | Phobos GPU          |
+| ------ | ------------------: | ------------------: |
+| pp128  |  6280.82 +/- 812.25 |  4940.30 +/- 287.79 |
+| pp512  | 10145.46 +/- 958.31 |  8951.88 +/- 154.39 |
+| tg32   |   237.08 +/-   1.01 |   267.31 +/-   3.28 |
+| tg128  |   255.87 +/-   0.57 |   261.67 +/-   1.08 |
+| tg512  |   259.58 +/-   0.44 |   254.11 +/-   0.25 |
+
+<details>
+  <summary>Invocation Details</summary>
+  
+```plain
+# running llama.cpp
+llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
+
+# running phobos
+cargo run --features cuda --release -p phobos-inference --example bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
+```
+</details>
+
+#### Running Locally
+
+1. Download [minicpm5-1b-Q8_0.gguf](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF) from HuggingFace.
+2. Start the inference server with recommended model settings for temp etc.
+  ```plain
+  cargo run --features cuda -r -p phobos-inference -- --serve 127.0.0.1:8080 --gguf ~\models\minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
+  ```
+3. [pi.dev](https://pi.dev) `~/.pi/agent/models.json` entry:
+  ```json
+  {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://127.0.0.1:8080/v1",
+        "api": "openai-completions",
+        "apiKey": "phobos",
+        "models": [
+          {
+            "id": "minicpm5-1b-Q8_0",
+            "input": ["text"],
+            "compat": {
+              "supportsDeveloperRole": false,
+            },
+            "contextWindow": 65536,
+            "maxTokens": 32768,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+          }
+        ]
+      }
+    }
+  }
+  ```
+4. Happy hacking!
 
 ## Clustering
 
@@ -102,10 +179,32 @@ phobos-sched: listening on 0.0.0.0:8881, waiting for 2 node(s)
 
 Sample kernels (`.ph`) and job files live in [`examples/`](./examples).
 
+### `phobos-inference` (optional GPU)
+
+```plain
+cargo run [--features cuda] -r -p phobos-inference -- [--gguf <file.gguf>] [-m|--model <dir>] [--kv <dir>]
+                                                      [-n|--num <tokens>] [--show <int>] [--listen <host:port>]
+                                                      [-t|--temp <float>] [-k|--top-k <int>] [-p|--top-p <float>]
+                                                      [--min-p <float>]
+                                                      [--presence-penalty <float>] [--repetition-penalty <float>]
+                                                      [--seed <int>]
+                                                      [prompt]
+```
+
+Perform inference. `--gguf` loads a GGUF model and dispatches on the architecture the file declares;
+without it the exported ONNX engines load (`--kv` when that directory is present, else `--model`).
+Uses the host backend when CUDA is not selected as a build feature; both backends produce the same logits.
+
+Given a prompt it prints the continuation and exits. Without one it starts a REPL that keeps the model warm.
+
+`--listen` runs a minimal OpenAI-compatible server (`/v1/completions`, `/v1/chat/completions`, `/v1/models`)
+with SSE streaming, rendering conversations and tool definitions through the model's own
+`tokenizer.chat_template`. The sampling flags above become defaults unless specified otherwise in the query.
+
 ### `phobos-bench` (needs a GPU)
 
 ```plain
-cargo run -p phobos-bench --release
+cargo run -r -p phobos-bench
 ```
 
 Compiles and autotunes the bundled kernels at 4096^3 and prints throughput (against cuBLAS where a shim exists). Covers `saxpy_fp32`, `gemm_fp32`, `gemm_fp16tc_fp32acc` (tensor-core, f16 inputs with f32 accumulation), `gemm_fp16` (f16 inputs, output, and accumulation), `flash_fp32`, and `flash_fp16` (f16 Q/K/V/O with an f32 online-softmax state). Runs all of them by default; pass `--bench NAME` to run a single one, or `--help` for the full flag list. `--autotune "DIM=VAL ..."` pins the autotune dims (skipping the search) for the selected `--bench`; `--csv [PATH]` writes achieved throughput; `--peak-fp32`/`--peak-fp16tc`/`--peak-fp16tcf32acc TFLOPS` override the detected roofline peaks.
@@ -113,9 +212,9 @@ Compiles and autotunes the bundled kernels at 4096^3 and prints throughput (agai
 ### `phobos-sched`
 
 ```plain
-cargo run -p phobos-sched -- --listen <host:port> --nodes <n> --job <file>
-                             [--budget <bytes>] [--ingest direct|home-fetch]
-                             [--autotune [--vram <bytes>] [--link-bw <bytes/s>] [--leaf-flops <flop/s>]]
+cargo run -r -p phobos-sched -- --listen <host:port> --nodes <n> --job <file>
+                                [--budget <bytes>] [--ingest direct|home-fetch]
+                                [--autotune [--vram <bytes>] [--link-bw <bytes/s>] [--leaf-flops <flop/s>]]
 ```
 
 The global scheduler daemon: waits for `--nodes` pods to register, plans and dispatches the job, and prints the output tensor URIs. `--budget` enables per-node memory-budgeted segmentation; `--autotune` picks the supertile config from a cost model (overridable via `--vram`/`--link-bw`/`--leaf-flops`).
@@ -123,8 +222,8 @@ The global scheduler daemon: waits for `--nodes` pods to register, plans and dis
 ### `phobos-pod` (needs a GPU)
 
 ```plain
-cargo run -p phobos-pod -- --id <node-id> --sched <host:port>
-                           [--listen <host:port>] [--advertise <host:port>] [--arena <bytes>]
+cargo run -r -p phobos-pod -- --id <node-id> --sched <host:port>
+                               [--listen <host:port>] [--advertise <host:port>] [--arena <bytes>]
 ```
 
 The node runtime daemon (one process = one GPU). Attaches to the scheduler and executes the segments it is given. Use `--listen host:0` (the default) to let the OS pick a port; `--advertise` overrides the address peers FETCH from for a multi-host cluster. `--arena` sets the device arena size (default 512 MiB).
@@ -132,9 +231,9 @@ The node runtime daemon (one process = one GPU). Attaches to the scheduler and e
 ### `phobos-tensor`
 
 ```plain
-cargo run -p phobos-cluster --bin phobos-tensor -- init --uri <file://...> --shape <RxC|N>
-                                                        [--fill zero|random|const|iota] [--value <f>] [--seed <s>]
-cargo run -p phobos-cluster --bin phobos-tensor -- peek --uri <file://...> --shape <RxC|N>
+cargo run -r -p phobos-cluster --bin phobos-tensor -- init --uri <file://...> --shape <RxC|N>
+                                                           [--fill zero|random|const|iota] [--value <f>] [--seed <s>]
+cargo run -r -p phobos-cluster --bin phobos-tensor -- peek --uri <file://...> --shape <RxC|N>
 ```
 Seeds and inspects the `file://` f32 tensor blobs a job reads and writes. `init` creates a blob at full size (use `--fill zero` to pre-allocate an output tensor, since STORE seeks into an existing file); `peek` prints a few well-spread elements. Shapes are row-major `RxC` (rank-2) or `N` (rank-1).
 
@@ -157,7 +256,26 @@ Run with `cargo run -p <crate> --example <name> -- <args>`.
 
 Render a DOT graph with Graphviz, e.g. `cargo run -p phobos-cluster --example dag_dot -- examples/matmul_cluster_fp32.ph | dot -Tsvg -o dag.svg`.
 
-  
+The model path has its own set. Build these `--release`, and the ones needing a GPU also `--features cuda`.
+
+| Example | Crate | Syntax | What it does |
+| --- | --- | --- | --- |
+| `inspect` | `phobos-gguf` | `inspect -- MODEL.gguf [--tensors] [--dump TENSOR]` | Metadata, tensor directory by shape, quantization histogram. No GPU. |
+| `generate` | `phobos-gguf` | `generate -- MODEL.gguf -n 40 "prompt"` | Host-backend generation, dispatching on the file's architecture. This is the reference path. No GPU. |
+| `encode` | `phobos-gguf` | `encode -- MODEL.gguf "text"` | Token ids from the file's own tokenizer, or JSON for a JSON array of prompts. No GPU. |
+| `diagnose` | `phobos-gguf` | `diagnose -- MODEL.gguf` | Per-position NLL on a repeated phrase: a flat profile means no context is reaching the current position. No GPU. |
+| `inspect` | `phobos-onnx` | `inspect -- model.onnx` | Opset, inputs/outputs, op-type histogram. No GPU. |
+| `run_gpt2` | `phobos-onnx` | `run_gpt2` | A real exported GPT-2 through load, fold and the host interpreter, against its bundled reference. No GPU. |
+| `run_gpt2_gpu` | `phobos-onnx` | `run_gpt2_gpu` | The same model with the Gemm projections and all 25 LayerNorms on Phobos kernels. Needs a GPU. |
+| `kv_check` | `phobos-onnx` | `kv_check` | A single with-past step against the last row of a full recompute. No GPU. |
+| `bench` | `phobos-inference` | `bench -- -m MODEL.gguf -p 512 -n 128 -r 5` | The two numbers `llama-bench` reports, in the same units. Needs a GPU. |
+| `backend_check` | `phobos-inference` | `backend_check` | Every device op against the host reference. Needs a GPU. |
+| `batch_check` | `phobos-inference` | `batch_check -- MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one. Needs a GPU. |
+| `model_check` | `phobos-inference` | `model_check -- MODEL.gguf` | Whole-model logits, device against host. Needs a GPU. |
+
+`phobos-inference/examples` also holds the kernel sweeps each optimization was decided by (`q8sweep`,
+`ppsweep`, `attnsweep`, `deltasweep`, `dotform`); `docs/GGUF.md` says what each one answered.
+
 ```
                                              ::::
                             ::-=====++++*********+-
@@ -198,4 +316,10 @@ Render a DOT graph with Graphviz, e.g. `cargo run -p phobos-cluster --example da
   P          H                O              B            O            S
 ```
 
+## AI Disclaimer
+
+Claude Code was used, among the Gemini and Codex free tiers, when building
+this project.
+
 [^1]: [Table 2. GeForce RTX 3080 vs GeForce RTX 2080 / 2080 Super; P.14](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf)
+[^2]: build: c629da565 (10219)
