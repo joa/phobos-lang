@@ -66,7 +66,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         let pos = self.const_index(&entry, d as i64)?;
                         let size = self.push(&entry, memref::dim(arg, pos, self.loc))?;
 
-                        // dynamic dims are assumed multiples of 4 elements (the 16-byte row-pitch ABI; see module memref docs).
+                        // Dynamic dims are assumed multiples of 4 elements, the
+                        // 16-byte row-pitch ABI; see the module's memref docs.
                         // TODO(joa): check fp64
                         self.bind(
                             name,

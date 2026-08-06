@@ -36,14 +36,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     /// Whether a tensor-slice expression can reach past its source on the last
-    /// tile: a statically known extent an aligned tile cannot tile evenly, or a
-    /// dynamic extent the offset cannot be accounted for against.
+    /// tile: a static extent an aligned tile cannot tile evenly, or a dynamic
+    /// extent the offset cannot be accounted for against.
     ///
-    /// The specialized matmul/fragment/pipeline paths bail on such a slice so
-    /// the generic masked load/store path handles it. This has to agree with
-    /// the mask [`Codegen::emit_subview`] builds, or a drain with no
-    /// per-element guard reaches a partial tile (see [`dim_in_bounds`] and
-    /// [`Codegen::dyn_in_bounds`]).
+    /// The specialized matmul, fragment and pipeline paths bail on such a slice
+    /// so the generic masked path handles it. This has to agree with the mask
+    /// [`Codegen::emit_subview`] builds, or a drain with no per-element guard
+    /// reaches a partial tile.
     pub(super) fn slice_is_partial(&self, expr: &Expr) -> bool {
         self.slice_is_partial_within(expr, &[])
     }
@@ -131,14 +130,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
     }
 
-    /// Double-buffered loop: each staged slice gets two shared buffers, and
-    /// the loop is unrolled by two so each half references its buffers
-    /// statically (a runtime select between buffers would force dynamic
-    /// shared addressing through the hot loop). Per original iteration: the
-    /// next tiles are prefetched (without a barrier) into the inactive buffers
-    /// before the compute reads the active ones (global loads fly while
-    /// the CTA does FMA work), and one closing barrier publishes the
-    /// prefetch and retires reads of the buffer the next prefetch overwrites.
+    /// Double-buffered loop: each staged slice gets two shared buffers, and the
+    /// loop is unrolled by two so each half references its buffers statically, a
+    /// runtime select forcing dynamic shared addressing through the hot loop.
+    /// Per original iteration the next tiles are prefetched without a barrier
+    /// into the inactive buffers before the compute reads the active ones, so
+    /// global loads fly while the CTA does FMA work, and one closing barrier
+    /// publishes the prefetch and retires reads of the buffer it overwrites.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_pipelined_for(
         &mut self,
@@ -224,9 +222,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
         Ok(())
     }
 
-    /// if guard_iv < hi { prefetch(...) }, a CTA-uniform guard around a
-    /// prefetch of one more iteration that runs without a barrier. The guard
-    /// is uniform (no thread ids leak into it), so a barrier inside would be safe.
+    /// if guard_iv < hi { prefetch(...) }: a guard around a barrier-free
+    /// prefetch of one more iteration. No thread ids leak into it, so it stays
+    /// CTA-uniform and a barrier inside would be safe.
     pub(super) fn guarded_prefetch(
         &mut self,
         block: &Block<'c>,

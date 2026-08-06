@@ -1,2 +1,4 @@
 /target
-/models
+/models/*
+!/models/README.md
+!/models/export_kv.py

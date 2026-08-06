@@ -175,6 +175,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 let dim = ["x", "y", "z"][*d as usize];
                 Ok(Rv::Scalar(self.gpu_index(block, "gpu.block_id", dim)?))
             }
+            // Grid-wide synchronization, for kernels spanning several stages of
+            // a pass. See codegen/sync.rs.
+            "atomic_add" => self.emit_atomic_add(block, args),
+            "grid_barrier" => self.emit_grid_barrier(block, args),
             // dot outside an assignment: materialize into a fresh buffer.
             // acc += dot(a, b) is handled in store_tile.
             "dot" => {

@@ -169,24 +169,21 @@ pub fn plan_budgeted_with(
     lower(p, &inst, &cfg, scalars)
 }
 
-/// Re-plan the work lost when dead fails, for redispatch onto the survivors.
+/// Re-plan the work lost when `dead` fails, for redispatch onto the survivors.
 ///
-/// Lineage recovery for owner-computes: every output supertile dead owned but
-/// had not yet STOREd is recomputed from scratch on a surviving node. Its
-/// operands are durable inputs (re-LOADed from storage), and the chain is
-/// self-contained, so the lost subgraph is just those chains placed over the
-/// survivor set. Deterministic TileIds keep the rest of the DAG valid; the
-/// reissued tiles carry a bumped version so they can't collide with tiles still
-/// resident on the survivor that adopts them, and iids start at iid_base (use
-/// the original plan's [`Plan::max_iid`] + 1, advanced across successive
-/// failures) so they never alias instructions still in a survivor's table.
+/// Lineage recovery for owner-computes: every output supertile a dead node owned
+/// but had not yet STOREd is recomputed from scratch on a survivor. Its operands
+/// are durable inputs re-LOADed from storage, so each chain is self-contained
+/// and the lost subgraph is just those chains placed over the survivor set.
+/// Deterministic TileIds keep the rest of the DAG valid; reissued tiles carry a
+/// bumped version so they cannot collide with tiles still resident on the
+/// survivor that adopts them, and iids start at `iid_base` so they never alias
+/// instructions still in a survivor's table.
 ///
-/// width is the original cluster size (max node id + 1); dead is every node
-/// that has failed so far (so survivors exclude them all, and chains a prior
-/// recovery placed on a now-dead node are re-recovered); durable is the set of
-/// output supertiles (tensor, linear coord) the dispatcher should not
-/// recompute: those already STOREd, plus those an outstanding recovery is
-/// already redoing. Returns an empty plan (no segments) when nothing is lost.
+/// `width` is the original cluster size, `dead` every node that has failed so
+/// far, and `durable` the output supertiles the dispatcher must not recompute:
+/// those already STOREd, plus those an outstanding recovery is redoing. Returns
+/// an empty plan when nothing is lost.
 #[allow(clippy::too_many_arguments)]
 pub fn recover_plan(
     p: &ClusterProgram,

@@ -186,6 +186,14 @@ impl Kernel {
         self.attrs.iter().any(|a| a.name == "dynshared")
     }
 
+    /// Whether the kernel spans several stages of a pass and synchronizes them
+    /// with `grid_barrier`, so every block must be resident at once or the
+    /// barrier deadlocks. The launcher, not the compiler, has to honour it: see
+    /// `phobos_kernels::launch::persistent_grid` and `docs/megakernel.md`.
+    pub fn wants_persistent(&self) -> bool {
+        self.attrs.iter().any(|a| a.name == "persistent")
+    }
+
     // force legacy WMMA
     pub fn wants_mma_sync(&self) -> bool {
         self.attrs.iter().any(|a| {
@@ -425,7 +433,8 @@ impl Stmt {
         }
     }
 
-    /// Whether this statement writes or binds any of the given names (assignment target, let, var).
+    /// Whether this statement writes or binds any of `names`, whether as an
+    /// assignment target, a let or a var.
     pub fn writes_any(&self, names: &[&str]) -> bool {
         let hits = |n: &str| names.contains(&n);
         let block = |b: &[Stmt]| b.iter().any(|s| s.writes_any(names));

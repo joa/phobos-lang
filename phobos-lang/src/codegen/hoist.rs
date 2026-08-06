@@ -4,31 +4,27 @@ use super::*;
 
 /// Loop-invariant dot staging hoisted to the loop preheader.
 ///
-/// The tensor-core dot paths (mma_sync_dot, the legacy wmma_dot body, and
-/// frag_dot) stage both operands from global into shared f16 buffers on
-/// every call. When the dot sits in a loop and an operand is a let-bound
-/// slice of a global tensor defined outside it (the flash-attention q in
-/// `dot_t(q, k)`), that copy is identical every iteration. emit_for scans
-/// the body up front, stages such operands once into the block containing
-/// the loop, and records (source value, buffer) on a per-loop stack frame;
-/// the staging sites then reuse the buffer via [`Codegen::hoisted_stage`]
-/// and skip their release (the loop epilogue returns it to the pool).
+/// The tensor-core dot paths stage both operands from global into shared f16
+/// buffers on every call. When the dot sits in a loop and an operand is a
+/// let-bound slice of a global tensor defined outside it, the flash-attention q
+/// in `dot_t(q, k)` for one, that copy is identical every iteration. emit_for
+/// scans the body up front, stages such operands once into the block containing
+/// the loop, and records (source value, buffer) on a per-loop stack frame; the
+/// staging sites then reuse the buffer via [`Codegen::hoisted_stage`] and skip
+/// their release, the loop epilogue returning it to the pool.
 ///
 /// Correctness rests on three checks:
-/// - The operand resolves to a Binding::View of global memory that is
-///   already in scope when the loop is entered, so its subview (and every
-///   index feeding it) dominates the loop.
-/// - The body stores to no global memory at all (checked recursively,
-///   including if/while), so nothing can invalidate the staged copy. Tile
-///   writes cannot alias a tensor.
-/// - Consumers match on the source's SSA value, not its name, so a body
-///   that shadows the name simply misses the cache and stages in-loop.
+/// - The operand resolves to a Binding::View of global memory already in scope
+///   when the loop is entered, so its subview dominates the loop.
+/// - The body stores to no global memory at all, checked recursively, so nothing
+///   can invalidate the staged copy. Tile writes cannot alias a tensor.
+/// - Consumers match on the source's SSA value, not its name, so a body that
+///   shadows the name simply misses the cache and stages in-loop.
 ///
-/// The prescan mirrors the wmma_dot gates (wmma_plan on the dot's m/n/kk,
-/// f32 output, f16/f32 operands) so a hoisted buffer is only ever emitted
-/// for a dot that will actually run on the tensor cores; a gate drift only
-/// wastes the preheader copy, never miscompiles, since the fallback paths
-/// keep reading the original operand.
+/// The prescan mirrors the wmma_dot gates, so a hoisted buffer is only emitted
+/// for a dot that will actually run on the tensor cores. Gate drift wastes the
+/// preheader copy but never miscompiles, the fallback paths still reading the
+/// original operand.
 impl<'p, 'c> Codegen<'p, 'c> {
     /// Stages the body's hoistable dot operands into `block` (the loop's
     /// preheader) and returns the frame emit_for pushes for the loop. The

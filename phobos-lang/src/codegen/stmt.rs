@@ -327,6 +327,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
             return Ok(());
         }
 
+        // target = i8(i32(round(t))) and its like: one sweep for the whole chain
+        // rather than a shared tile per conversion. See codegen/elemwise.rs.
+        if op == AssignOp::Set && self.store_elem_chain(block, target, value)? {
+            return Ok(());
+        }
+
         // Fused GEMM epilogue: target = s1 * t1 + s2 * t2 in one loop.
         // Avoids allocating two intermediate shared-memory tiles.
         if op == AssignOp::Set
