@@ -33,11 +33,21 @@ fn main() -> Result<()> {
 
     println!("\ninputs:");
     for vi in &g.inputs {
-        println!("  {:<24} {:?} {}", vi.name, vi.data_type, fmt_shape(&vi.shape));
+        println!(
+            "  {:<24} {:?} {}",
+            vi.name,
+            vi.data_type,
+            fmt_shape(&vi.shape)
+        );
     }
     println!("outputs:");
     for vi in &g.outputs {
-        println!("  {:<24} {:?} {}", vi.name, vi.data_type, fmt_shape(&vi.shape));
+        println!(
+            "  {:<24} {:?} {}",
+            vi.name,
+            vi.data_type,
+            fmt_shape(&vi.shape)
+        );
     }
 
     let mut hist: BTreeMap<&str, usize> = BTreeMap::new();

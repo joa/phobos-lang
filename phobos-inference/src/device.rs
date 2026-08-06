@@ -46,7 +46,7 @@ const QUANT_TB: usize = 4;
 /// spends more dispatching the block than running it: a 512-token activation is
 /// 16384 rows, so 4096 blocks. Sixteen rows is four times fewer and still two
 /// CTAs deep in shared memory, which 64 is not, since the tile chain is six
-/// `[TB, 32]` f32 buffers. 
+/// `[TB, 32]` f32 buffers.
 const QUANT_TB_WIDE: usize = 16;
 
 /// Elements per block for the pointwise kernels.
@@ -77,7 +77,7 @@ fn cuda_ok(status: cust::sys::CUresult, what: &str) -> Result<()> {
 /// Appends the exploded-memref descriptor for a row-major rank-2 tensor as
 /// argument words: both pointers, the offset, the extents, then the strides. On
 /// a little-endian host a four-byte field reads from the low end of its word.
-/// 
+///
 /// Launch ABI
 fn push_descriptor(slots: &mut Vec<u64>, ptr: u64, dims: [i64; 2]) {
     let word = |v: i64| v as i32 as u32 as u64;
@@ -86,7 +86,7 @@ fn push_descriptor(slots: &mut Vec<u64>, ptr: u64, dims: [i64; 2]) {
 
 /// Shared memory a kernel can declare statically on every architecture. Past
 /// this the launch has to allocate it dynamically and say so.
-/// 
+///
 /// It's 48KiB
 const STATIC_SHARED_LIMIT: usize = 48 * 1024;
 
@@ -193,7 +193,7 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 ";
 
 /// The single-row specialization decoding needs.
-/// 
+///
 /// NOTE: Always reads row zero: a caller wanting row `r` offsets the operand pointers,
 /// which keeps the kernel free of scalar arguments.
 const MATVEC_SRC: &str = "\
@@ -613,7 +613,7 @@ fn delta_wy_src(heads: usize, head_dim: usize, chunk: usize) -> String {
         } else {
             ("p1", "p0")
         };
-        
+
         invert.push_str(&format!("  t = t + dot(t, {this})\n"));
 
         if round + 1 < rounds {
@@ -628,7 +628,7 @@ fn delta_wy_src(heads: usize, head_dim: usize, chunk: usize) -> String {
             } else {
                 format!("{next} = ")
             };
-            
+
             invert.push_str(&format!("  {decl}{assign}dot({this}, {this})\n"));
         }
     }

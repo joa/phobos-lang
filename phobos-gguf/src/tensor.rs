@@ -372,7 +372,7 @@ fn dequantize_q5_1(bytes: &[u8], out: &mut [f32]) {
 
 pub fn f16_to_f32(bits: u16) -> f32 {
     // Widen an IEEE binary16 bit pattern, subnormals and non-finites included.
-    
+
     let sign = u32::from(bits >> 15) << 31;
     let exp = u32::from((bits >> 10) & 0x1f);
     let mant = u32::from(bits & 0x03ff);

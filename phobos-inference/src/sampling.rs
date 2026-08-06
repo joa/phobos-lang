@@ -41,7 +41,7 @@ impl<'a> History<'a> {
 
 pub struct SampleConfig {
     /// Softmax temperature.
-    /// 
+    ///
     /// At or below 0 this is greedy argmax.
     pub temperature: f32,
 
@@ -85,7 +85,7 @@ impl SampleConfig {
     }
 
     /// Whether the penalties would move any logit.
-    /// 
+    ///
     /// Checked per half so the first generated token does not pay for a vocab-sized copy just because
     /// a presence penalty is set.
     fn penalizes(&self, history: History) -> bool {
@@ -192,7 +192,7 @@ pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rn
             return ranked[i].0 as i64;
         }
     }
-    
+
     ranked.last().map(|&(i, _)| i as i64).unwrap_or(0)
 }
 

@@ -171,7 +171,11 @@ fn tensor_from_proto(t: proto::TensorProto) -> Result<Tensor> {
         _ => TensorData::Raw(t.raw_data.unwrap_or_default()),
     };
 
-    Ok(Tensor { data_type, dims, data })
+    Ok(Tensor {
+        data_type,
+        dims,
+        data,
+    })
 }
 
 /// Decode a little-endian byte buffer into a vector of fixed-width values.

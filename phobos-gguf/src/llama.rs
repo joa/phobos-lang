@@ -15,7 +15,7 @@ pub struct Config {
 
     pub n_head: usize,
     pub n_head_kv: usize,
-    
+
     pub head_dim: usize, // width of one attention head. not necessarily d_model / n_head
     pub rope_dim: usize,
     pub rope_freq_base: f32,
@@ -38,7 +38,7 @@ impl Config {
 
         let head_dim = match m.arch_get("attention.key_length") {
             Some(_) => m.arch_count("attention.key_length")?, // use if specified
-            None => d_model / n_head, // fallback otherwise
+            None => d_model / n_head,                         // fallback otherwise
         };
         let vocab = gguf
             .tensor("token_embd.weight")
@@ -84,13 +84,13 @@ fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
             );
         }
     }
-    
+
     ensure!(
         gguf.tensor("rope_freqs.weight").is_none()
             && gguf.tensor("blk.0.rope_freqs.weight").is_none(),
         "model carries a rope_freqs table; rope scaling is not implemented for the llama architecture"
     );
-    
+
     Ok(())
 }
 
@@ -460,7 +460,7 @@ impl State {
     }
 
     /// Hands every device allocation the state holds back to the backend.
-    /// 
+    ///
     /// Dropping a state instead strands its caches: a [`Buf`] is a handle, not
     /// an owner.
     pub fn release(&mut self, backend: &dyn Backend) {

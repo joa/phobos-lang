@@ -118,7 +118,7 @@ impl GgufRuntime {
     }
 
     /// Returns a finished generation's caches to the device.
-    /// 
+    ///
     /// Dropping the/ state instead leaks them; see [`GgufState::release`].
     pub fn finish(&self, mut state: GgufState) {
         state.release(self.backend.as_ref());

@@ -60,7 +60,7 @@ impl Decoder {
     }
 
     /// Perform a forward pass.
-    /// 
+    ///
     /// Run `tokens`, advancing `state`, and return the final position's logits.
     pub fn forward(
         &self,
@@ -90,7 +90,7 @@ impl State {
     }
 
     /// Hands every device allocation the state holds back to the backend.
-    /// 
+    ///
     /// Dropping a state instead strands its caches: a [`crate::compute::Buf`]
     /// is a handle, not an owner.
     pub fn release(&mut self, backend: &dyn Backend) {

@@ -210,7 +210,7 @@ impl Runtime {
     }
 
     /// Returns a finished generation's device allocations.
-    /// 
+    ///
     /// Dropping the state does not.
     fn finish(&self, state: RunState) {
         if let (Runtime::Gguf(rt), RunState::Gguf(s)) = (self, state) {

@@ -21,8 +21,8 @@ const LLAMA3_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL
 /// The markers that end an assistant turn, by name.
 ///
 /// `tokenizer.ggml.eos_token_id` names one token, which on some models is not
-/// the one the chat template closes turns with. 
-/// 
+/// the one the chat template closes turns with.
+///
 /// I've seen MiniCPM5 declares `</s>` but ends every turn with `<|im_end|>`
 /// so we simply brute-force this.
 const END_OF_TURN: &[&str] = &[
@@ -276,7 +276,7 @@ impl Bpe {
             }
 
             word = merged;
-            
+
             if word.len() < 2 {
                 break;
             }
@@ -305,7 +305,7 @@ fn byte_char_maps() -> ([char; 256], HashMap<char, u8>) {
             extra += 1;
             c
         };
-        
+
         byte_to_char[b] = ch;
         char_to_byte.insert(ch, b as u8);
     }

@@ -93,7 +93,7 @@ impl Config {
 /// Points where the tensor extents alone do not pin the architecture down.
 ///
 /// [`Variants::REFERENCE`] is llama.cpp's `qwen35` impl and our default.
-/// 
+///
 /// The alternatives are kept because the same ambiguities
 /// recur in every GGUF architecture, and sweeping them (`examples/sweep.rs`)
 /// against a repeated-phrase probe is faster than reading a graph builder.
@@ -138,7 +138,7 @@ impl Variants {
     };
 
     /// The combinations the sweep explores.
-    /// 
+    ///
     /// The query/gate split, the decay formula and the delta-rule contraction axis are settled and held fixed;
     /// the gated-norm order, the L2 normalization, the convolution tap order and the fused-projection layout
     /// are worth re-checking against a new checkpoint.
@@ -222,7 +222,7 @@ struct DeltaNet {
 
     /// Log-space decay rate per head.
     a_log: Gain,
-    
+
     dt_bias: Gain,
     norm: Gain,
     out: Linear,
@@ -293,7 +293,7 @@ impl DeltaNet {
             let src = (kernel - 1 - k) * channels;
             flipped[k * channels..][..channels].copy_from_slice(&taps[src..][..channels]);
         }
-        
+
         Gain::derived(format!("{}.reversed", self.conv_taps.key), flipped).buf(backend)
     }
 
@@ -576,7 +576,7 @@ impl Model {
         } else {
             (0, block)
         };
-        
+
         let q = backend.alloc(rows * width)?;
         let gate = backend.alloc(rows * width)?;
         for (offset, dst) in [(q_at, q), (gate_at, gate)] {
@@ -899,7 +899,7 @@ impl State {
     }
 
     /// Hands every device allocation the state holds back to the backend.
-    /// 
+    ///
     /// Dropping a state instead strands its caches, since a [`Buf`] is a
     /// handle, not an owner.
     pub fn release(&mut self, backend: &dyn Backend) {

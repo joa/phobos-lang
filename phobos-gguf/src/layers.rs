@@ -66,7 +66,7 @@ impl Linear {
                     dense[i * out_dim + o] = v;
                 }
             }
-            
+
             Weights::Dense(dense)
         };
 
@@ -146,7 +146,7 @@ impl Linear {
     pub(crate) fn fuse(parts: &[&Linear]) -> Result<Linear> {
         let (first, rest) = parts.split_first().context("fusing needs a weight")?;
         let in_dim = first.in_dim;
-        
+
         ensure!(
             rest.iter().all(|p| p.in_dim == in_dim),
             "fused projections must share their input width"
