@@ -1,0 +1,68 @@
+[package]
+name = "phobos-gguf"
+version = "0.1.0"
+edition.workspace = true
+description = "GGUF front end: parse quantized model files into metadata, tensors, and vocabulary"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+memmap2 = "0.9"
+fancy-regex = "0.13"
+phobos-kernels = { path = "../phobos-kernels" }
+phobos-inference = { path = "../phobos-inference" }
+cust = { version = "0.3.2", optional = true }
+
+[dev-dependencies]
+serde_json = "1"
+
+[features]
+cuda = ["dep:cust", "phobos-kernels/cuda"]
+
+[[example]]
+name = "attncheck"
+required-features = ["cuda"]
+
+[[example]]
+name = "attnsweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "backend_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "batch_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "bench"
+required-features = ["cuda"]
+
+[[example]]
+name = "deltasweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "dotform"
+required-features = ["cuda"]
+
+[[example]]
+name = "model_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "ppsweep"
+required-features = ["cuda"]
+
+[[example]]
+name = "q8diag"
+required-features = ["cuda"]
+
+[[example]]
+name = "q8sweep"
+required-features = ["cuda"]

@@ -1,0 +1,59 @@
+[package]
+name = "phobos-onnx"
+version = "0.1.0"
+edition.workspace = true
+description = "ONNX front end: parse models into a Phobos graph IR"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+prost.workspace = true
+phobos-kernels = { path = "../phobos-kernels" }
+phobos-inference = { path = "../phobos-inference" }
+fancy-regex = "0.13"
+serde_json = "1"
+cust = { version = "0.3.2", optional = true }
+phobos-base = { path = "../phobos-base", optional = true }
+
+[build-dependencies]
+tonic-build.workspace = true
+protoc-bin-vendored = "3"
+
+[features]
+cuda = ["dep:cust", "dep:phobos-base", "phobos-kernels/cuda"]
+
+[[example]]
+name = "run_mlp"
+required-features = ["cuda"]
+
+[[example]]
+name = "run_transformer_ffn"
+required-features = ["cuda"]
+
+[[example]]
+name = "run_layout"
+required-features = ["cuda"]
+
+[[example]]
+name = "run_fusion"
+required-features = ["cuda"]
+
+[[example]]
+name = "run_gpt2_gpu"
+required-features = ["cuda"]
+
+[[example]]
+name = "chain_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "chain_gpt2"
+required-features = ["cuda"]
+
+[[example]]
+name = "mm_check"
+required-features = ["cuda"]

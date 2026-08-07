@@ -5,6 +5,7 @@
 @tensorcore
 @launch(128)
 @autotune(D in [64], BR in [4, 128], BC in [4, 128])
+@aligned(Nq = BR, Nk = BC)
 kernel flash_attention(Q: tensor<f32>[Nq, D],
                        K: tensor<f32>[Nk, D],
                        V: tensor<f32>[Nk, D],

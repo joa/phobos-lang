@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::*;
 
@@ -296,4 +296,92 @@ struct HoistScan {
     declared: HashSet<String>,
     /// Resolvable in-body decls as (is_f32, static shape).
     decls: HashMap<String, (bool, Vec<i64>)>,
+}
+
+/// The last statement index at which each name is mentioned over a basic block.
+pub(super) fn last_uses(stmts: &[Stmt]) -> HashMap<String, usize> {
+    let mut last = HashMap::new();
+    for (i, stmt) in stmts.iter().enumerate() {
+        mark_stmt(stmt, i, &mut last);
+    }
+    last
+}
+
+fn mark_stmt(stmt: &Stmt, at: usize, last: &mut HashMap<String, usize>) {
+    match stmt {
+        Stmt::Let { name, value, .. } | Stmt::Var { name, value, .. } => {
+            mark_expr(value, at, last);
+            last.insert(name.clone(), at);
+        }
+        Stmt::Assign { target, value, .. } => {
+            mark_expr(target, at, last);
+            mark_expr(value, at, last);
+        }
+        Stmt::For {
+            var,
+            start,
+            end,
+            step,
+            body,
+        } => {
+            mark_expr(start, at, last);
+            mark_expr(end, at, last);
+            if let Some(step) = step {
+                mark_expr(step, at, last);
+            }
+            last.insert(var.clone(), at);
+            for s in body {
+                mark_stmt(s, at, last);
+            }
+        }
+        Stmt::While { cond, body } => {
+            mark_expr(cond, at, last);
+            for s in body {
+                mark_stmt(s, at, last);
+            }
+        }
+        Stmt::If { cond, then, r#else } => {
+            mark_expr(cond, at, last);
+            for s in then.iter().chain(r#else.iter().flatten()) {
+                mark_stmt(s, at, last);
+            }
+        }
+        Stmt::Expr(e) => mark_expr(e, at, last),
+    }
+}
+
+fn mark_expr(expr: &Expr, at: usize, last: &mut HashMap<String, usize>) {
+    match expr {
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => {}
+        Expr::Var(name) => {
+            last.insert(name.clone(), at);
+        }
+        Expr::Unary { rhs, .. } => mark_expr(rhs, at, last),
+        Expr::Binary { lhs, rhs, .. } => {
+            mark_expr(lhs, at, last);
+            mark_expr(rhs, at, last);
+        }
+        Expr::Index { base, subs } => {
+            mark_expr(base, at, last);
+            for sub in subs {
+                match sub {
+                    Sub::Point(e) => mark_expr(e, at, last),
+                    Sub::Range { start, end } => {
+                        mark_expr(start, at, last);
+                        mark_expr(end, at, last);
+                    }
+                    Sub::Span { start, len } => {
+                        mark_expr(start, at, last);
+                        mark_expr(len, at, last);
+                    }
+                    Sub::Full => {}
+                }
+            }
+        }
+        Expr::Call { args, .. } => {
+            for a in args {
+                mark_expr(a, at, last);
+            }
+        }
+    }
 }

@@ -1,0 +1,22 @@
+[package]
+name = "phobos-cli"
+version = "0.1.0"
+edition.workspace = true
+description = "Command line and server entry point for the Phobos inference runtime"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+
+[[bin]]
+name = "phobos-cli"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+phobos-inference = { path = "../phobos-inference" }
+phobos-gguf = { path = "../phobos-gguf" }
+phobos-onnx = { path = "../phobos-onnx" }
+
+[features]
+cuda = ["phobos-gguf/cuda", "phobos-onnx/cuda"]

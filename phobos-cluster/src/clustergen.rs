@@ -19,8 +19,10 @@ pub fn compile(kernel: &Kernel) -> Result<ClusterProgram> {
 fn data_type(s: Scalar) -> DataType {
     match s {
         Scalar::F16 => DataType::F16,
+        Scalar::BF16 => DataType::BF16,
         Scalar::F32 => DataType::F32,
         Scalar::F64 => DataType::F64,
+        Scalar::I8 => DataType::I8,
         Scalar::I32 => DataType::I32,
         Scalar::I64 => DataType::I64,
         Scalar::Bool => DataType::Bool,

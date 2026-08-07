@@ -9,12 +9,13 @@ pub fn data_type_to_i32(d: tile::DataType) -> i32 {
     use tile::DataType::*;
     match d {
         F16 => 1,
-        F32 => 2,
-        F64 => 3,
-        I8 => 4,
-        I32 => 5,
-        I64 => 6,
-        Bool => 7,
+        BF16 => 2,
+        F32 => 3,
+        F64 => 4,
+        I8 => 5,
+        I32 => 6,
+        I64 => 7,
+        Bool => 8,
     }
 }
 
@@ -22,12 +23,13 @@ pub fn data_type_from_i32(v: i32) -> Result<tile::DataType> {
     use tile::DataType::*;
     Ok(match v {
         1 => F16,
-        2 => F32,
-        3 => F64,
-        4 => I8,
-        5 => I32,
-        6 => I64,
-        7 => Bool,
+        2 => BF16,
+        3 => F32,
+        4 => F64,
+        5 => I8,
+        6 => I32,
+        7 => I64,
+        8 => Bool,
         _ => bail!("unknown DataType {v}"),
     })
 }

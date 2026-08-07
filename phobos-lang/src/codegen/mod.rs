@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use melior::{
     Context,
     dialect::{arith, memref, scf},
@@ -17,7 +17,8 @@ use melior::{
 };
 
 use crate::ast::{
-    AssignOp, AttrArg, BinOp, Dim, Expr, Kernel, Launch, Scalar, Stmt, Sub, Type as AstType, UnOp,
+    AssignOp, AttrArg, BinOp, Dim, Expr, Kernel, Launch, Literal, Scalar, Stmt, Sub,
+    Type as AstType, UnOp,
 };
 
 mod expr;
@@ -43,8 +44,26 @@ enum Reduce {
 /// Address space of tensor parameters -> GPU global memory.
 const MEM_GLOBAL: i64 = 1;
 
-/// Address space of tile buffers -> GPU shared memory (one per CTA)
+/// Address space of tile buffers -> GPU shared memory (one per CTA).
 const MEM_SHARED: i64 = 3;
+
+/// Address space of dynamic tile buffers.
+const MEM_SHARED_SYM: &str = "#gpu.address_space<workgroup>";
+
+/// Lanes in a warp.
+const WARP: i64 = 32;
+
+/// Values in a Q8_0 block.
+/// This is the granularity `qdot_t` scales at.
+const Q8_BLOCK: i64 = 32;
+
+const QDOT_LANE: i64 = 16;
+const QDOT_STEP: i64 = WARP * QDOT_LANE;
+
+const IMMA_TILE: i64 = 8;
+const IMMA_K: i64 = 16;
+
+const QMMA_TILES: i64 = 64;
 
 const WMMA_A: &str = "!gpu.mma_matrix<16x16xf16, \"AOp\">";
 const WMMA_B: &str = "!gpu.mma_matrix<16x16xf16, \"BOp\">";
@@ -57,13 +76,17 @@ pub fn emit<'c>(
     kernels: &[Kernel],
     context: &'c Context,
     module: &Module<'c>,
-) -> Result<()> {
+) -> Result<Vec<(String, usize)>> {
     let loc = Location::unknown(context);
     let gpu_block = Block::new(&[]);
+    let mut shared = Vec::new();
 
     for kernel in kernels {
         let mut cg = Codegen::new(base, context, kernel)?;
         let func = cg.emit_kernel(kernel)?;
+        if cg.dynamic_shared {
+            shared.push((kernel.name.clone(), cg.shared_bytes as usize));
+        }
 
         // shared-memory tile buffers are module-level globals
         for global in cg.shared_globals.drain(..) {
@@ -85,7 +108,7 @@ pub fn emit<'c>(
 
     module.body().append_operation(gpu_module);
 
-    Ok(())
+    Ok(shared)
 }
 
 /// XOR column swizzle for mma.sync staging buffers
@@ -139,12 +162,24 @@ struct MemVal<'c> {
     /// index >= extent; None means the dim is provably in bounds. Empty for
     /// tile buffers and fully in-bounds slices (see [`Codegen::emit_subview`]).
     mask: Vec<Option<(Value<'c, 'c>, Value<'c, 'c>)>>,
+
+    /// Known divisor of each dynamic extent, 1 when nothing is known. Only a
+    /// kernel's `@aligned` attribute raises it, and only for tensor params: it
+    /// is the host's promise that the extent is a whole number of tiles, which
+    /// is what lets a program-id-offset slice skip its bounds mask. Empty means
+    /// nothing is known about any dim. See [`Codegen::dyn_in_bounds`].
+    dim_div: Vec<i64>,
 }
 
 impl<'c> MemVal<'c> {
     /// Whether any dimension carries a bounds mask (a partial tile).
     fn is_masked(&self) -> bool {
         self.mask.iter().any(Option::is_some)
+    }
+
+    /// The promised divisor of dim `d`, 1 when nothing was promised.
+    fn div_of(&self, d: usize) -> i64 {
+        self.dim_div.get(d).copied().unwrap_or(1)
     }
 }
 
@@ -201,8 +236,10 @@ struct Codegen<'p, 'c> {
     loc: Location<'c>,
     index_t: Type<'c>,
     f16_t: Type<'c>,
+    bf16_t: Type<'c>,
     f32_t: Type<'c>,
     f64_t: Type<'c>,
+    i8_t: Type<'c>,
     i32_t: Type<'c>,
     i64_t: Type<'c>,
     bool_t: Type<'c>,
@@ -215,6 +252,13 @@ struct Codegen<'p, 'c> {
     // later allocations so temps don't each grow the CTA's static shared
     // footprint (which caps occupancy). See Codegen::release.
     tile_pool: HashMap<(String, Vec<i64>), Vec<String>>,
+    /// Tiles live in one dynamic allocation rather than a global apiece, sized
+    /// at launch. See [`Kernel::wants_dynamic_shared`].
+    dynamic_shared: bool,
+    /// Byte offset of each named tile within that allocation, and how far it
+    /// reaches: what the host has to pass at launch.
+    tile_offsets: HashMap<String, i64>,
+    shared_bytes: i64,
     // Loop-invariant dot operands staged into shared f16 in a loop's
     // preheader, one frame per active for loop: (source view's memref
     // value, staged buffer). The dot staging sites consult this instead of
@@ -226,6 +270,11 @@ struct Codegen<'p, 'c> {
     // trimmed main loop leaves it None and keeps the unmasked fast paths.
     // See Codegen::emit_split_for.
     ragged_iv: Option<String>,
+    // Induction variables of the trimmed main loops enclosing the code being
+    // emitted. Their trip count was rounded down to whole chunks, so a slice
+    // offset by one of them is in bounds of a dynamic extent by construction
+    // and needs no mask. See Codegen::emit_split_for.
+    trimmed_ivs: Vec<String>,
     pipeline: bool,   // whether to double-buffer staged tiles in for loops
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
@@ -277,8 +326,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
             loc: Location::unknown(ctx),
             index_t: Type::index(ctx),
             f16_t: Type::float16(ctx),
+            bf16_t: Type::bfloat16(ctx),
             f32_t: Type::float32(ctx),
             f64_t: Type::float64(ctx),
+            i8_t: IntegerType::new(ctx, 8).into(),
             i32_t: IntegerType::new(ctx, 32).into(),
             i64_t: IntegerType::new(ctx, 64).into(),
             bool_t: IntegerType::new(ctx, 1).into(),
@@ -288,8 +339,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
             shared_globals: Vec::new(),
             tile_count: 0,
             tile_pool: HashMap::new(),
+            dynamic_shared: kernel.wants_dynamic_shared(),
+            tile_offsets: HashMap::new(),
+            shared_bytes: 0,
             hoisted_stages: Vec::new(),
             ragged_iv: None,
+            trimmed_ivs: Vec::new(),
             pipeline: kernel.attrs.iter().any(|a| a.name == "pipeline"),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
             mma_sync: kernel.wants_mma_sync(),
@@ -451,6 +506,12 @@ mod tests {
         text
     }
 
+    /// emit_mlir already verifies; this just makes the intent of a test that
+    /// only cares about validity readable.
+    fn module_verifies(mlir: &str) -> bool {
+        !mlir.is_empty()
+    }
+
     fn assert_contains(mlir: &str, needles: &[&str]) {
         for needle in needles {
             assert!(mlir.contains(needle), "missing `{needle}` in:\n{mlir}");
@@ -531,6 +592,7 @@ mod tests {
         // The SPEC example, verbatim.
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64, 128], TILE_N in [64, 128], TILE_K in [16, 32])
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -586,6 +648,7 @@ mod tests {
         // straight to the C subview.
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -615,6 +678,7 @@ mod tests {
         // but acc lives in shared memory and round-trips per kt).
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -642,6 +706,7 @@ mod tests {
         // giving (16/4)*(16/8) = 8 warp tiles.
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -675,6 +740,7 @@ mod tests {
         let src = |tile_m: &str| {
             format!(
                 "@autotune(TILE_M in [{tile_m}], TILE_N in [64], TILE_K in [16])
+                @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
                 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {{
                     let pm = program_id(0)
                     let pn = program_id(1)
@@ -706,6 +772,7 @@ mod tests {
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @pipeline
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -761,6 +828,7 @@ mod tests {
     fn pipeline_uses_cp_async_on_supporting_targets() {
         let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @pipeline
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -813,6 +881,7 @@ mod tests {
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -864,6 +933,7 @@ mod tests {
         let mlir = emit_mlir_sync(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -922,6 +992,7 @@ mod tests {
         let mlir = emit_mlir_sync(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore(sync)
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -955,6 +1026,7 @@ mod tests {
         let mlir = emit_mlir_sync(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore(sync)
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -993,6 +1065,7 @@ mod tests {
         let mlir = emit_mlir_sync(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore(wmma)
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1021,6 +1094,7 @@ mod tests {
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1045,6 +1119,7 @@ mod tests {
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [32])
             @pipeline
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1089,6 +1164,7 @@ mod tests {
             @LAUNCH
             @pipeline
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1135,6 +1211,7 @@ mod tests {
         let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [32])
             @pipeline
             @tensorcore(wmma)
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1193,6 +1270,7 @@ mod tests {
         let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @pipeline
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1243,6 +1321,7 @@ mod tests {
         // register-accumulator vector path must run instead.
         let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [8])
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -1300,6 +1379,7 @@ mod tests {
     fn fused_slice_binary_has_no_temp_buffer() {
         let mlir = emit_mlir(
             "@autotune(BLOCK in [1024])
+            @aligned(N = BLOCK)
             kernel add(a: tensor<f32>[N], b: tensor<f32>[N], c: tensor<f32>[N]) {
                 let base = program_id(0) * BLOCK
                 c[base :+ BLOCK] = a[base :+ BLOCK] + b[base :+ BLOCK]
@@ -1449,6 +1529,7 @@ mod tests {
         // rowsum, tmax, broadcast subtract/divide, and tile-scalar scaling.
         let mlir = emit_mlir(
             "@autotune(D in [64], BR in [32], BC in [32])
+            @aligned(Nq = BR, Nk = BC)
             kernel flash_attention(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D],
                                    V: tensor<f32>[Nk, D], O: tensor<f32>[Nq, D], scale: f32) {
                 let pid = program_id(0)
@@ -1486,6 +1567,418 @@ mod tests {
                 "arith.divf",         // the broadcast normalize divide
                 "arith.subf",         // broadcast subtraction inside exp
             ],
+        );
+    }
+
+    #[test]
+    fn layernorm_lowers_sqrt_to_ptx_intrinsic() {
+        // A LayerNorm-shaped body: mean and variance via rowsum, an
+        // inverse-stddev via sqrt, and broadcast center/scale. sqrt must lower
+        // to the PTX sqrt.approx intrinsic (like exp -> ex2.approx).
+        let mlir = emit_mlir(
+            "@launch(128)
+            @autotune(BR in [32], W in [64])
+            kernel layernorm(X: tensor<f32>[N, W], Y: tensor<f32>[N, W]) {
+                let row = program_id(0) * BR
+                var x: tile<f32>[BR, W] = 0.0
+                x += X[row :+ BR, :]
+                var s: tile<f32>[BR, 1] = rowsum(x)
+                var mu: tile<f32>[BR, 1] = s / 64.0
+                var xc: tile<f32>[BR, W] = x - mu
+                var v: tile<f32>[BR, 1] = rowsum(xc * xc)
+                var sd: tile<f32>[BR, 1] = sqrt(v / 64.0 + 0.00001)
+                Y[row :+ BR, :] = xc / sd
+            }",
+        );
+        assert_contains(&mlir, &["sqrt.approx.f32", "arith.divf", "arith.subf"]);
+    }
+
+    #[test]
+    fn log_lowers_to_the_ptx_base_two_intrinsic() {
+        // softplus is the reason log exists: the GatedDeltaNet decay is
+        // exp(rate * log(1 + exp(x))), so the gates cannot be computed on the
+        // device without it. The hardware primitive is base two, so a natural
+        // log is lg2 with the change of base folded in.
+        let mlir = emit_mlir(
+            "@launch(256)
+            @autotune(TILE in [64])
+            kernel softplus(X: tensor<f32>[M, N], Y: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                var x = X[0 :+ 1, p * TILE :+ TILE]
+                Y[0 :+ 1, p * TILE :+ TILE] = log(1.0 + exp(x))
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &["lg2.approx.ftz.f32", "ex2.approx.ftz.f32", "arith.mulf"],
+        );
+    }
+
+    #[test]
+    fn unary_minus_negates_a_tile() {
+        // `-t` on a tile lowers through the scalar-broadcast path as `0 - t`,
+        // so a sigmoid written the obvious way compiles.
+        let mlir = emit_mlir(
+            "@launch(256)
+            @autotune(TILE in [64])
+            kernel neg(X: tensor<f32>[M, N], Y: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                var x = X[0 :+ 1, p * TILE :+ TILE]
+                Y[0 :+ 1, p * TILE :+ TILE] = x / (1.0 + exp(-x))
+            }",
+        );
+        assert_contains(&mlir, &["arith.subf", "arith.divf", "ex2.approx"]);
+    }
+
+    #[test]
+    fn narrow_types_convert_on_load_and_store() {
+        // An i8 tensor sign-extends into f32 and a bf16 result rounds back
+        // down: the two halves of a dequantizing weight load.
+        let mlir = emit_mlir(
+            "@launch(256)
+            kernel narrow(W: tensor<i8>[M, N], S: tensor<f32>[M, N], C: tensor<bf16>[M, N]) {
+                let p = program_id(0)
+                let w = W[0 :+ 32, p * 32 :+ 32]
+                let s = S[0 :+ 32, p * 32 :+ 32]
+                var out: tile<f32>[32, 32] = f32(w) * s
+                C[0 :+ 32, p * 32 :+ 32] = bf16(out)
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &["memref<?x?xi8, 1>", "arith.sitofp", "arith.truncf", "bf16"],
+        );
+    }
+
+    #[test]
+    fn f16_and_bf16_operands_meet_at_f32() {
+        // Neither 16-bit float contains the other, so mixing them widens to
+        // f32 rather than picking a side. Two extf, no truncf.
+        let mlir = emit_mlir(
+            "@launch(256)
+            kernel meet(A: tensor<f16>[M, N], B: tensor<bf16>[M, N], C: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                let a = A[0 :+ 32, p * 32 :+ 32]
+                let b = B[0 :+ 32, p * 32 :+ 32]
+                C[0 :+ 32, p * 32 :+ 32] = a + b
+            }",
+        );
+        assert_contains(&mlir, &["arith.extf", "f16 to f32", "bf16 to f32"]);
+        assert!(
+            !mlir.contains("arith.truncf"),
+            "the join is f32, so nothing should round down:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn bf16_is_emulated_below_ampere_and_native_from_ampere() {
+        // The type is available on every target; only the instruction count
+        // changes. sm_75 has no bf16 unit, so NVPTX emits the shift and
+        // round-to-nearest-even sequence, while sm_80 has cvt.rn.bf16.f32.
+        let src = "@launch(256)
+            kernel round(A: tensor<f32>[M, N], C: tensor<bf16>[M, N]) {
+                let p = program_id(0)
+                var a = A[0 :+ 32, p * 32 :+ 32]
+                C[0 :+ 32, p * 32 :+ 32] = a * 2.0
+            }";
+        for chip in ["sm_75", "sm_80"] {
+            assert_contains(&emit_mlir_on(src, chip), &["arith.truncf", "bf16"]);
+        }
+        // Capability, not availability: both compile, and phobos-base is what
+        // codegen consults when it has to choose an instruction itself.
+        use phobos_base::context::{GpuConfig, NvidiaGpuConfig};
+        assert!(!GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_75")).supports_bf16_native());
+        assert!(GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")).supports_bf16_native());
+    }
+
+    const I8_DOT_T: &str = "@launch(256)
+            @autotune(TN in [32])
+            @aligned(K = 32, N = TN)
+            kernel i8dot(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<i32>[M, N]) {
+                let pn = program_id(0)
+                let a = A[0 :+ 1, 0 :+ 32]
+                let w = W[pn * TN :+ TN, 0 :+ 32]
+                C[0 :+ 1, pn * TN :+ TN] = dot_t(a, w)
+            }";
+
+    #[test]
+    fn i8_dot_t_uses_the_hardware_four_way_dot() {
+        // dp4a needs four contiguous bytes from each operand, which is why this
+        // lands on dot_t: it contracts the last axis of both, so both walk
+        // memory contiguously. One vector<4xi8> load per operand per step.
+        let mlir = emit_mlir(I8_DOT_T);
+        assert_contains(
+            &mlir,
+            &[
+                "nvvm.dot.accumulate.4way",
+                "vector<4xi8>",
+                "<signed>",
+                "memref<?x?xi8, 1>",
+            ],
+        );
+    }
+
+    #[test]
+    fn i8_dot_t_falls_back_below_pascal() {
+        // dp4a arrived with Pascal. Older targets still compile, on the generic
+        // integer path.
+        let mlir = emit_mlir_on(I8_DOT_T, "sm_50");
+        assert!(
+            !mlir.contains("nvvm.dot.accumulate.4way"),
+            "sm_50 has no dp4a:\n{mlir}"
+        );
+        assert_contains(&mlir, &["arith.muli", "arith.addi"]);
+
+        use phobos_base::context::{GpuConfig, NvidiaGpuConfig};
+        assert!(!GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_50")).supports_dp4a());
+        assert!(GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_61")).supports_dp4a());
+    }
+
+    const I8_DOT_T_TILED: &str = "@launch(256)
+            @autotune(TM in [16], TN in [32])
+            @aligned(M = TM, K = 32, N = TN)
+            kernel i8mma(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<i32>[M, N]) {
+                let pm = program_id(0)
+                let pn = program_id(1)
+                let a = A[pm * TM :+ TM, 0 :+ 32]
+                let w = W[pn * TN :+ TN, 0 :+ 32]
+                C[pm * TM :+ TM, pn * TN :+ TN] = dot_t(a, w)
+            }";
+
+    #[test]
+    fn i8_dot_t_uses_the_integer_tensor_cores() {
+        // With whole 8x8 output tiles the contraction goes to mma.sync instead
+        // of dp4a: same four bytes per operand per lane, sixteen times the
+        // products per issue. The m8n8k16 fragments are vector<1x4xi8> operands
+        // into a vector<1x2xi32> accumulator.
+        let mlir = emit_mlir(I8_DOT_T_TILED);
+        assert_contains(
+            &mlir,
+            &[
+                "nvgpu.mma.sync",
+                "mmaShape = [8, 8, 16]",
+                "vector<1x4xi8>",
+                "vector<1x2xi32>",
+            ],
+        );
+        assert!(
+            !mlir.contains("nvvm.dot.accumulate.4way"),
+            "dp4a left on the tensor-core path:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn a_single_row_i8_dot_t_stays_on_dp4a() {
+        // The tensor core's smallest output tile is 8 rows, so decoding one
+        // token would do eight times the arithmetic to keep one row of it.
+        let mlir = emit_mlir(I8_DOT_T);
+        assert!(
+            !mlir.contains("nvgpu.mma.sync"),
+            "one row does not fill an m8 tile:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn i8_dot_t_falls_back_below_turing() {
+        // The integer tensor cores arrived with Turing; Pascal and Volta still
+        // compile, on dp4a.
+        let mlir = emit_mlir_on(I8_DOT_T_TILED, "sm_70");
+        assert!(
+            !mlir.contains("nvgpu.mma.sync"),
+            "sm_70 has no integer tensor cores:\n{mlir}"
+        );
+        assert_contains(&mlir, &["nvvm.dot.accumulate.4way"]);
+
+        use phobos_base::context::{GpuConfig, NvidiaGpuConfig};
+        assert!(!GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_70")).supports_int8_mma());
+        assert!(GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_75")).supports_int8_mma());
+    }
+
+    const Q8_QMMA: &str = "            @launch(256)
+            @autotune(TM in [64], TN in [64])
+            @aligned(M = TM, N = TN, K = 32)
+            kernel qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                        W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
+                        C: tensor<f32>[M, N]) {
+                let pm = program_id(0)
+                let pn = program_id(1)
+                C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                         W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
+            }";
+
+    #[test]
+    fn qmma_t_keeps_its_accumulators_in_registers() {
+        // Written as a tile-language loop the block scales have to be applied
+        // every 32 elements of k, which puts the accumulator in shared memory
+        // and stages both operands there. Folding them into the operation
+        // leaves the accumulators as loop-carried f32 values and the operands
+        // as plain loads.
+        let mlir = emit_mlir(Q8_QMMA);
+        assert_contains(
+            &mlir,
+            &[
+                "nvgpu.mma.sync",
+                "mmaShape = [8, 8, 16]",
+                "vector<1x4xi8>",
+                "vector<1x2xi32>",
+                // The accumulator becomes an f32 by landing in the mantissa of
+                // 1.5 * 2^23, not by a quarter-rate conversion instruction.
+                "arith.bitcast",
+                "arith.constant 0x4B400000 : f32",
+            ],
+        );
+        assert!(
+            !mlir.contains("arith.sitofp"),
+            "the block accumulator still converts the slow way in:
+{mlir}"
+        );
+        // Eight tiles a warp, two f32 accumulators each, carried across k.
+        assert_contains(&mlir, &["iter_args"]);
+        let carried = mlir
+            .matches("%cst = arith.constant 0.000000e+00 : f32")
+            .count();
+        assert!(
+            carried > 0,
+            "no f32 accumulator initializer in:
+{mlir}"
+        );
+    }
+
+    #[test]
+    fn qmma_t_needs_whole_tensor_core_tiles() {
+        // The integer tensor core issues 8x8 outputs, so a tile that is not a
+        // multiple of eight both ways has no fragment layout to sit in.
+        let src = Q8_QMMA.replace("TN in [64]", "TN in [12]");
+        let registry = DialectRegistry::new();
+        register_all_dialects(&registry);
+        let context = Context::new();
+        context.append_dialect_registry(&registry);
+        context.load_all_available_dialects();
+        let module = Module::new(Location::unknown(&context));
+        let kernels = crate::parse(&src).unwrap();
+        let base = phobos_base::context::Context::default();
+        let err = super::emit(&base, &kernels, &context, &module).unwrap_err();
+        assert!(
+            err.to_string().contains("multiple of 8"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn a_dead_named_tile_returns_its_buffer_to_the_pool() {
+        // A named tile used to hold its shared buffer for the whole kernel,
+        // because bind cannot see where the name stops being read. A block's
+        // own declarations are the case where it can: the last statement
+        // mentioning the name ends its life, so the next allocation in the
+        // block reuses the buffer instead of minting another global.
+        let mlir = emit_mlir(
+            "@launch(256)
+            kernel chain(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
+                var a: tile<f32>[16, 64] = X[0 :+ 16, 0 :+ 64]
+                var b: tile<f32>[16, 64] = a + 1.0
+                var c: tile<f32>[16, 64] = b * 2.0
+                var d: tile<f32>[16, 64] = c - 3.0
+                O[0 :+ 16, 0 :+ 64] = d
+            }",
+        );
+        let buffers = mlir.matches("memref.global").count();
+        assert!(
+            buffers <= 2,
+            "four dead-on-arrival tiles want at most two buffers, got {buffers}:
+{mlir}"
+        );
+    }
+
+    #[test]
+    fn a_tile_read_after_a_loop_keeps_its_buffer() {
+        // The last mention is what ends a name's life, and a nested body is
+        // part of the statement that contains it: `keep` is read inside the
+        // loop and again after it, so neither point may release it.
+        let mlir = emit_mlir(
+            "@launch(256)
+            kernel later(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
+                var keep: tile<f32>[16, 64] = X[0 :+ 16, 0 :+ 64]
+                var acc: tile<f32>[16, 64] = 0.0
+                for i in range(0, 4, 1) {
+                    acc = acc + keep
+                }
+                O[0 :+ 16, 0 :+ 64] = acc + keep
+            }",
+        );
+        assert!(module_verifies(&mlir), "{mlir}");
+    }
+
+    #[test]
+    fn a_matmul_into_one_of_its_own_operands_uses_a_temp() {
+        // Every matmul path writes the target as it goes, so an operand that
+        // is the target would be read after it had been partly overwritten.
+        // Squaring a matrix in place is the shape this takes in practice, and
+        // it produced a plausible wrong answer rather than a failure: the
+        // first four rows of a 16-row triangular inverse were right and the
+        // rest were not.
+        let mlir = emit_mlir(
+            "@launch(256)
+            kernel square(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
+                var p: tile<f32>[16, 16] = X[0 :+ 16, 0 :+ 16]
+                p = dot(p, p)
+                O[0 :+ 16, 0 :+ 16] = p
+            }",
+        );
+        // The temp is the tell: two 16x16 buffers rather than one.
+        let buffers = mlir.matches("memref<16x16xf32, 3>").count();
+        assert!(
+            buffers >= 2,
+            "in-place square wants a temp, got {buffers} buffers:
+{mlir}"
+        );
+    }
+
+    #[test]
+    fn i8_contraction_accumulates_in_i32() {
+        // A dot product of bytes overflows i8 almost immediately, so the
+        // accumulator widens even when the result type is not written down.
+        let mlir = emit_mlir(
+            "@launch(256)
+            @aligned(K = 32, N = 32)
+            kernel acc(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<f32>[M, N]) {
+                let a = A[0 :+ 1, 0 :+ 32]
+                let w = W[0 :+ 32, 0 :+ 32]
+                C[0 :+ 1, 0 :+ 32] = f32(dot_t(a, w))
+            }",
+        );
+        assert_contains(&mlir, &["i32", "arith.sitofp"]);
+    }
+
+    #[test]
+    fn a_ragged_contraction_stays_off_the_dp4a_path() {
+        // 30 bytes is not a whole number of four-byte groups; the generic path
+        // handles the remainder correctly and dp4a would not.
+        let mlir = emit_mlir(
+            "@launch(256)
+            @aligned(K = 30, N = 32)
+            kernel ragged(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<i32>[M, N]) {
+                let a = A[0 :+ 1, 0 :+ 30]
+                let w = W[0 :+ 32, 0 :+ 30]
+                C[0 :+ 1, 0 :+ 32] = dot_t(a, w)
+            }",
+        );
+        assert!(
+            !mlir.contains("nvvm.dot.accumulate.4way"),
+            "30 is not a multiple of 4:\n{mlir}"
+        );
+    }
+
+    #[test]
+    fn converting_to_a_non_numeric_type_is_an_error() {
+        let err = emit_err(
+            "kernel bad(A: tensor<f32>[M, N], C: tensor<f32>[M, N]) {
+                let a = A[0 :+ 32, 0 :+ 32]
+                C[0 :+ 32, 0 :+ 32] = bool(a)
+            }",
+        );
+        assert!(
+            err.contains("unknown function 'bool'"),
+            "unexpected error: {err}"
         );
     }
 
@@ -1548,6 +2041,7 @@ mod tests {
             "@autotune(D in [64], BR in [32], BC in [32])
             @tensorcore
             @launch(128)
+            @aligned(Nq = BR, Nk = BC)
             kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                    V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
                 let pid = program_id(0)
@@ -1633,6 +2127,7 @@ mod tests {
         let src = "@autotune(D in [64], BR in [32], BC in [32])
             @tensorcore
             @launch(128)
+            @aligned(Nq = BR, Nk = BC)
             kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                    V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
                 let pid = program_id(0)
@@ -1683,6 +2178,7 @@ mod tests {
             "@autotune(D in [64], BR in [32], BC in [32])
             @tensorcore
             @launch(128)
+            @aligned(Nq = BR, Nk = BC)
             kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], O: tensor<f32>[Nq, BC]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -1714,6 +2210,7 @@ mod tests {
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel pv(P: tensor<f16>[Nq, Nk], V: tensor<f16>[Nk, D],
                       O: tensor<f32>[Nq, D], R: tensor<f32>[Nq, 1]) {
                 let pid = program_id(0)
@@ -1741,6 +2238,7 @@ mod tests {
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel qk(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D], S: tensor<f32>[Nq, Nk]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -1781,6 +2279,7 @@ mod tests {
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], S: tensor<f32>[Nq, Nk]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -1817,6 +2316,7 @@ mod tests {
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel pv(P: tensor<f32>[Nq, Nk], V: tensor<f32>[Nk, D], O: tensor<f32>[Nq, D]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -1854,6 +2354,7 @@ mod tests {
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], S: tensor<f32>[Nq, Nk]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -1894,6 +2395,7 @@ mod tests {
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel pv(P: tensor<f16>[Nq, Nk], V: tensor<f16>[Nk, D], O: tensor<f32>[Nq, D]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -1931,6 +2433,7 @@ mod tests {
         let mlir = emit_mlir(
             "@autotune(D in [64], BR in [64], BC in [64])
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel qk(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D], S: tensor<f32>[Nq, Nk]) {
                 let pid = program_id(0)
                 let row = pid * BR
@@ -2084,6 +2587,7 @@ mod tests {
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -2123,6 +2627,7 @@ mod tests {
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
             @tensorcore
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -2160,6 +2665,7 @@ mod tests {
         // contracts in f16 (no fusion, no WMMA).
         let mlir = emit_mlir(
             "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+            @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
                 let pm = program_id(0)
                 let pn = program_id(1)
@@ -2189,6 +2695,7 @@ mod tests {
             @tensorcore
             @pipeline
             @launch(256)
+            @aligned(Nq = BR, Nk = BC)
             kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                    V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
                 let pid = program_id(0)
@@ -2239,6 +2746,7 @@ mod tests {
         // each f16 operand to f32 (arith.extf) on load.
         let mlir = emit_mlir(
             "@autotune(D in [8], BR in [8], BC in [8])
+            @aligned(Nq = BR, Nk = BC)
             kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                    V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
                 let pid = program_id(0)
@@ -2301,6 +2809,75 @@ mod tests {
                 "scf.if",         // the store runs only in bounds
             ],
         );
+    }
+
+    #[test]
+    fn a_program_id_slice_of_a_dynamic_extent_is_masked() {
+        // The extent is a runtime value, so nothing inside the kernel bounds
+        // the grid: the last program id can address a tile that runs off the
+        // end. Left unmasked this writes through the end of a row and into the
+        // next one, which is a whole-tensor corruption rather than a bad tail.
+        let mlir = emit_mlir(
+            "kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "memref.dim",     // the extent is only known at runtime
+                "arith.cmpi ult", // offset + index < extent
+                "arith.select",   // out-of-bounds reads fold to zero
+                "scf.if",         // the store runs only in bounds
+            ],
+        );
+    }
+
+    #[test]
+    fn an_aligned_declaration_drops_the_dynamic_bounds_mask() {
+        // @aligned is the host promising the extent is a whole number of tiles,
+        // which is what a general GEMM needs to keep the register-blocked and
+        // tensor-core drains: those have no per-element store guard, so without
+        // the promise they decline and the kernel falls back.
+        let mlir = emit_mlir(
+            "@aligned(N = 32)
+            kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
+            }",
+        );
+        assert!(
+            !mlir.contains("scf.if"),
+            "unexpected bounds guard for a declared-aligned extent:
+{mlir}"
+        );
+    }
+
+    #[test]
+    fn an_aligned_declaration_must_cover_the_tile() {
+        // Promising a coarser tiling than the slice takes proves nothing: 32
+        // does not divide a multiple of 24, so the mask stays.
+        let mlir = emit_mlir(
+            "@aligned(N = 24)
+            kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
+            }",
+        );
+        assert_contains(&mlir, &["arith.cmpi ult", "scf.if"]);
+    }
+
+    #[test]
+    fn an_unknown_aligned_constant_is_rejected() {
+        let err = emit_err(
+            "@aligned(N = TILE)
+            kernel copy(A: tensor<f32>[M, N]) {
+                let p = program_id(0)
+                A[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
+            }",
+        );
+        assert!(err.contains("unknown constant"), "unexpected error: {err}");
     }
 
     #[test]
@@ -2418,6 +2995,7 @@ mod tests {
             "@autotune(D in [64], BR in [32], BC in [32])
             @tensorcore
             @launch(128)
+            @aligned(Nq = BR, Nk = BC)
             kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], O: tensor<f32>[Nq, BC]) {
                 let pid = program_id(0)
                 let q = Q[pid * BR :+ BR, :]

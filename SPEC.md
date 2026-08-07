@@ -19,7 +19,7 @@ param       = ident ":" type ;
 type        = scalar
             | "tensor" "<" scalar ">" "[" dims "]"
             | "tile"   "<" scalar ">" "[" dims "]" ;
-scalar      = "f16" | "f32" | "f64" | "i32" | "i64" | "bool" ;
+scalar      = "f16" | "bf16" | "f32" | "f64" | "i8" | "i32" | "i64" | "bool" ;
 dims        = dim { "," dim } ;
 dim         = ident | int ;                            (* symbolic size (M, TILE_K) or literal *)
 
@@ -64,13 +64,24 @@ float       = digit { digit } "." { digit } ;
   the out-of-bounds elements read as zero and their stores are skipped.
   - A compile-time constant size is masked in place, which falls back from the
     specialized register/tensor-core matmul paths to the generic tiled path.
-  - A dynamic (runtime) size is handled by splitting the loop that walks it:
-    the loop is trimmed to `(extent / tile) * tile`, so its slices are whole by
+  - A dynamic (runtime) size walked by a **loop** is handled by splitting that
+    loop: it is trimmed to `(extent / tile) * tile`, so its slices are whole by
     construction and keep the vectorized, tensor-core and `cp.async` fast
     paths, and the ragged remainder replays the body once under a runtime mask
     against the tensor's own extent. Only spans with a static length split;
     loops carrying `mma.sync` fragment accumulators or driven by `@pipeline`
-    do not split yet and still assume a dynamic size tiles evenly.
+    do not split yet, so their slices are masked unless `@aligned` covers the
+    dimension they walk.
+  - A dynamic size indexed by a **program id** cannot be trimmed the same way:
+    the grid is the host's, and nothing inside the kernel bounds it. Such a
+    slice is masked against the tensor's runtime extent, which costs the
+    specialized paths, since their drains have no per-element store guard.
+    `@aligned(DIM = tile)` is how a caller that knows better says so: it
+    promises the extent is a whole number of tiles, so every program id
+    addresses a whole tile and the mask drops. The promise is unchecked, and
+    breaking it writes past the tensor -- through the end of one row and into
+    the next, not merely off the end. A caller that cannot guarantee the shape
+    should leave it off, or compile the kernel both ways and pick per launch.
   - Zero is the fill value, so a reduction that is not zero-identity (a softmax
     denominator, for instance) still needs its own masking in the kernel.
 - **`f16`**: half precision (IEEE binary16). Float literals are written in f32 and
@@ -78,6 +89,73 @@ float       = digit { digit } "." { digit } ;
   to the wider type (so `f16 + f32 -> f32`). The heavy compute paths run f16 inputs
   through the tensor cores with f32 accumulation (see `@tensorcore`); without it,
   f16 tiles use the generic element/vector paths and accumulate in f16.
+- **`bf16`**: brain float. Same width as `f16` but with f32's exponent range and 8
+  fewer mantissa bits, so **neither 16-bit float contains the other**: mixing them
+  widens to `f32` rather than picking a side, and a direct `f16`/`bf16` conversion
+  round-trips through f32. The type is available on every target; what changes with
+  the target is the instruction count. From sm_80 a conversion is one
+  `cvt.rn.bf16.f32`, and below it the NVPTX backend emulates it with the
+  shift-and-round-to-nearest-even integer sequence. Nothing in phobos gates on
+  this, so a bf16 kernel compiles and runs everywhere; `GpuConfig::supports_bf16_native`
+  reports which of the two a target gets.
+- **`i8`**: signed byte, the quantized-weight element type. Loads sign-extend
+  (`ld.global.s8`) and `f32(w)` converts, so a dequantizing weight load costs a
+  quarter of the memory traffic of the same weights in f32. Integers are signed
+  throughout; there is no `u8` yet.
+- **Integer contraction**: `dot`/`dot_t` over `i8` operands accumulate in `i32`,
+  not in the operand type, since a dot product of bytes overflows a byte almost
+  at once. Both hardware paths hang off `dot_t` rather than `dot`, because both
+  want the bytes of each operand contiguous, and `dot_t` contracts the last axis
+  of both operands so both walk memory that way. From widest to narrowest:
+  - the **integer tensor cores** (`mma.sync.m8n8k16.s8.s8.s32`) when the target
+    has them (Turing onwards, `GpuConfig::supports_int8_mma`), the output tile is
+    a whole number of 8x8 blocks, and the contraction is a multiple of 16. This
+    needs no staging buffer and no `ldmatrix`: the fragment layout is already
+    what `dot_t` holds, a lane reading four contiguous bytes of one row per
+    operand. One warp owns each 8x8 output tile.
+  - the **four-way byte dot product** (`dp4a`, one instruction for four
+    multiplies and four adds) on Pascal onwards, `GpuConfig::supports_dp4a`,
+    when the contraction is a multiple of 4. This is where a single-row
+    contraction lands, since one row cannot fill an 8-row tensor-core tile.
+  - the **generic integer path**, with the same result, for anything else: a
+    ragged contraction, a pre-Pascal target, or a masked operand.
+- **Quantized contraction**: `qdot_t` is the Q8_0 contraction with the block
+  scales folded in, so the whole of `k` is one operation. `dot` and `dot_t`
+  cannot be given enough of `k` at a time here: a Q8_0 block carries its own
+  scale, so a plain dot has to stop every 32 elements to apply it, and with one
+  thread per output walking `k`, a warp reads 32 rows four bytes apart and the
+  block pays several barriers per 32 elements. Folding the scales in is what
+  lets the mapping turn around: a **warp owns one output and its lanes divide
+  `k`**, so 32 lanes read 512 contiguous bytes of one weight row, nothing is
+  staged, and the only synchronization is the closing butterfly shuffle. Each
+  lane takes 16 bytes, four `dp4a` under one scale pair, which is the widest
+  chunk that still sits inside a single block.
+
+  `qmma_t` is the same contraction batched over rows, on the integer tensor
+  cores, and it exists for the same reason at the other end: writing it in the
+  tile language puts the accumulator in shared memory, so a `[64, 64]` tile is
+  16 KB of accumulator alone and cannot be built at all. Folding the scales in
+  keeps the accumulators in registers across the whole of `k`, reads both
+  operands straight from global memory in the layout the `m8n8k16` fragments
+  already want, and leaves no barrier in the loop. A warp takes a square patch
+  of tensor-core tiles, since `rm` by `rn` tiles issue `2 * rm * rn` tensor
+  instructions against `2 * (rm + rn)` operand loads.
+- **Mixed element types**: a binary op whose operands differ converts both to their
+  join before computing. Between floats the join is the wider type, except that
+  `f16` and `bf16` join at `f32`; an integer meeting a float joins at the float.
+  Matching types keep the vectorized path, and a converting op falls back to the
+  scalar element path.
+- **Conversions**: every numeric scalar type names a conversion builtin that takes
+  a tile or a scalar: `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`,
+  `i64(x)`. Float-to-float rounds, integer-to-float sign-converts, float-to-integer
+  truncates toward zero. There is no `bool(x)`.
+- **Tile buffers are pooled by liveness**: a tile lives in shared memory, and the
+  buffer of a tile a block declares goes back to the pool after the last
+  statement of that block mentioning its name, so a later declaration reuses it.
+  A nested body counts as part of the statement containing it, so a name read
+  inside a loop stays live until after the loop. This is what keeps a long chain
+  of named intermediates from costing a static allocation each: static shared
+  memory is capped at 48 KB on every architecture.
 - **Statements end at newlines**: Similar to how Golang is doing it
 - **`else` must follow `}` on the same line**: a newline after the `}` of the then-block ends the `if` statement.
 - Tiles
@@ -85,21 +163,31 @@ float       = digit { digit } "." { digit } ;
   - **Spans**: `A[start :+ length]` is `length` elements starting at `start`; same as `A[start : start + length]`.
   - **Full**: `A[:]` selects the entire dimension.
   - **Open-Ended**: `A[i:]`, `A[:j]` are not supported. A `:` after an expression requires an end, and a `:+` requires a length.
+- **Unary minus on a tile**: `-t` negates elementwise, lowering as `0 - t`. `!` stays scalar-only.
 - **Broadcasting**: binary tile ops broadcast a NumPy-style axis of extent 1 (so `[R, C] x [R, 1]` stretches the column vector), and `tile x scalar` (either order) broadcasts the scalar over the tile.
-- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id` and the tile builtins (`dot`, `dot_t`, `exp`, `rowmax`, `rowsum`, `tmax`, `cumsum`, `tril`, `transpose`) are ordinary
+- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `cumsum`, `tril`, `transpose`) and the
+  conversion builtins named after the scalar types are ordinary
   identifiers, not keywords. `range` is recognized positionally inside `for ... in range(...)`.
 - **Built-Ins**:
   - `dot(a, b)`: `a @ b` (contracts `a`'s last dim with `b`'s first).
-  - `dot_t(a, b)`: `a @ b.t` (contracting the last dim of both: `[M, K] x [N, K] -> [M, N]`).
+  - `dot_t(a, b)`: `a @ b.t` (contracting the last dim of both: `[M, K] x [N, K] -> [M, N]`). Over `i8` operands this is the integer tensor-core and `dp4a` path; see **Integer contraction**.
+  - `qdot_t(a, a_scales, w, w_scales)`: the Q8_0 contraction with its block scales, `[M, K] i8 x [N, K] i8 -> [M, N] f32`, where the scales are `[M, K/32]` and `[N, K/32]` f32 and element `[i, j]` is `sum_b (sum_{k in block b} a[i, k] * w[j, k]) * a_scales[i, b] * w_scales[j, b]`. The contraction axis may be dynamic, since it is not tiled. The scales are indexed `[row, block]` so a lane's scale load is contiguous with its neighbours'. See **Quantized contraction**.
+  - `qmma_t(a, a_scales, w, w_scales)`: the same contraction batched over rows, `[M, K] i8 x [N, K] i8 -> [M, N] f32` with `M` and `N` multiples of 8, where `a_scales` is `[M, K/32]` and `w_scales` is `[K/32, N]`. The weight scales are indexed `[block, out]`, the opposite of `qdot_t`: a lane here holds two neighbouring output columns of one block, so that order puts its two scales next to each other. See **Quantized contraction**.
   - `exp(t)`: element-wise `e^x` (lowers to the hardware `ex2.approx`).
+  - `log(t)`: element-wise natural logarithm (lowers to the hardware `lg2.approx`, with the change of base folded in).
+  - `round(t)`: element-wise nearest integer, ties to even (lowers to the hardware `cvt.rni.f32.f32`). Rounding by biasing into a positive range and truncating instead costs the low mantissa bits, which is enough to move a value across a boundary at the top of a quantization range.
+  - `sqrt(t)`: element-wise square root (lowers to the hardware `sqrt.approx.f32`).
+  - `tanh(t)`: element-wise hyperbolic tangent (lowers to the hardware `tanh.approx.f32`).
   - `rowmax(t)` / `rowsum(t)`: reduce a rank-2 tile over its last (column) dim to a `[rows, 1]` column vector.
   - `tmax(a, b)`: elementwise maximum (broadcasting).
   - `cumsum(t)`: inclusive prefix sum of a rank-2 tile down its first (row) dim, so `out[i, j] = sum_{r <= i} t[r, j]`. The scan runs along the sequence axis (the leading dim of a `[seq, feat]` tile), producing the running gate cumulant that chunkwise linear attention needs. Same shape as the input.
   - `tril(t)`: causal lower-triangular mask of a rank-2 tile, keeping `t[i, j]` when `j <= i` and zeroing the strict upper triangle. Same shape as the input.
   - `transpose(t)`: rank-2 tile transpose, `out[i, j] = t[j, i]` (a `[R, C]` tile becomes `[C, R]`). Lets a contraction run over the leading (sequence) axis, which `dot`/`dot_t` cannot reach on their own.
+  - `f16(x)` / `bf16(x)` / `f32(x)` / `f64(x)` / `i8(x)` / `i32(x)` / `i64(x)`: element type conversion of a tile or a scalar (see **Conversions** above).
 - **Attributes**:
   - `@autotune(X in [..], ...)`: local search space; the first choice seeds the shape env. Two values are inclusive bounds searched in doubling steps (`X in [16, 256]` -> 16, 32, 64, 128, 256); three or more are an explicit list of choices. `[256, 16]` is two values (when x > y)
   - `@cluster(X in [..], ...)`: super tile dimensions and search space for cluster tuning.
+  - `@aligned(DIM = tile, ...)`: promises that a symbolic tensor dimension is a whole number of `tile` elements, where `tile` is an integer or an `@autotune` constant. 
   - `@launch(maxThreads[, minBlocks[, maxRegs]])`: specifies CTA thread assumption (default: 256); maps to PTX `.maxntid` / `.minnctapersm` / `.maxnreg` at codegen. `maxRegs` (16..255) hard-caps registers per thread, forcing ptxas to fit the budget (spilling if needed) where `minBlocks`'s `.minnctapersm` is only advisory.
   - `@pipeline`: selects the double-buffered (ping-pong shared buffer) MLIR GEMM backend.
   - `@tensorcore`: runs the matmul on tensor cores (sm_70+).
@@ -121,9 +209,10 @@ float       = digit { digit } "." { digit } ;
      back on (the pre-`mma.sync` path), e.g. for comparison or rollback.
      `@tensorcore(sync)` is accepted as a now-redundant explicit opt-in to the
      default `mma.sync` path.
+  - `@dynshared`: Use dynamically shared memory (instead of the static 48KB); must change launch config respectively.
   - tile sizes for the MLIR GEMM (`TILE_M/N/K`, `WARP_M/N`, `TILE_TM/TN`) come from `@autotune` / the shape env.
   - Unknown attributes parse but are ignored (with a note)
-  - **TODO**: Param- and loop-level attributes (`@align`, `@readonly`, `@unroll`)
+  - **TODO**: Param- and loop-level attributes (`@readonly`, `@unroll`)
   - **TODO**: `@fast_math`: enables fast-math flags at codegen.
   - **TODO**: `@assert_coalesced`: build fails if any global access is strided (a broadcast is fine).
 - **Comments:** `// ...` to end of line.

@@ -1,0 +1,20 @@
+[package]
+name = "phobos-kernels"
+version = "0.1.0"
+edition.workspace = true
+description = "Kernels and launch plumbing shared by model front ends"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[dependencies]
+anyhow = "1"
+cust = { version = "0.3.2", optional = true }
+phobos-base = { path = "../phobos-base", optional = true }
+phobos-lang = { path = "../phobos-lang", optional = true }
+phobos-mlir = { path = "../phobos-mlir", optional = true }
+
+[features]
+cuda = ["dep:cust", "dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir"]

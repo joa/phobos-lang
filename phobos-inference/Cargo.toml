@@ -1,0 +1,20 @@
+[package]
+name = "phobos-inference"
+version = "0.1.0"
+edition.workspace = true
+description = "Inference runtime: the model traits, sampling, chat and an OpenAI-compatible server"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+
+# A library only. It defines the traits `phobos-gguf` and `phobos-onnx`
+# implement, so it must not depend on either; the binary that picks between them
+# is `phobos-cli`.
+[dependencies]
+anyhow = "1"
+serde_json = "1"
+axum = "0.8.9"
+tokio = { workspace = true, features = ["full", "rt-multi-thread", "macros"] }
+serde = { version = "1.0.229", features = ["derive"] }
+async-stream = "0.3.6"

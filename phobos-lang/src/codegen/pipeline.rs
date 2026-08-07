@@ -36,11 +36,24 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     /// Whether a tensor-slice expression can reach past its source on the last
-    /// tile (a statically known extent an aligned tile cannot tile evenly).
+    /// tile: a statically known extent an aligned tile cannot tile evenly, or a
+    /// dynamic extent the offset cannot be accounted for against.
     ///
     /// The specialized matmul/fragment/pipeline paths bail on such a slice so
-    /// the generic masked load/store path handles it (see [`dim_in_bounds`]).
+    /// the generic masked load/store path handles it. This has to agree with
+    /// the mask [`Codegen::emit_subview`] builds, or a drain with no
+    /// per-element guard reaches a partial tile (see [`dim_in_bounds`] and
+    /// [`Codegen::dyn_in_bounds`]).
     pub(super) fn slice_is_partial(&self, expr: &Expr) -> bool {
+        self.slice_is_partial_within(expr, &[])
+    }
+
+    /// [`Codegen::slice_is_partial`] for a slice that sits inside loops whose
+    /// induction variables are `ivs` and whose bodies have not been emitted yet.
+    /// A prescan runs at the enclosing scope, where those variables are not yet
+    /// bound, so without naming them every loop-offset slice would look
+    /// unprovable and the fast paths would never be taken.
+    pub(super) fn slice_is_partial_within(&self, expr: &Expr, ivs: &[&str]) -> bool {
         let Expr::Index { base, subs } = expr else {
             return false;
         };
@@ -59,20 +72,23 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
 
         subs.iter().enumerate().any(|(d, s)| {
-            let (size, off_div) = match s {
+            let (start, size) = match s {
                 Sub::Full | Sub::Point(_) => return false,
-                Sub::Span { start, len } => {
-                    (self.const_fold(len).unwrap_or(DYN), self.expr_div(start))
-                }
+                Sub::Span { start, len } => (start, self.const_fold(len).unwrap_or(DYN)),
                 Sub::Range { start, end } => {
                     let size = match (self.const_fold(start), self.const_fold(end)) {
                         (Some(a), Some(b)) => b - a,
                         _ => DYN,
                     };
-                    (size, self.expr_div(start))
+                    (start, size)
                 }
             };
-            !dim_in_bounds(mv.shape[d], size, off_div)
+
+            if mv.shape[d] == DYN {
+                return size != DYN && !self.dyn_in_bounds(start, size, mv.div_of(d), ivs);
+            }
+
+            !dim_in_bounds(mv.shape[d], size, self.expr_div(start))
         })
     }
 
