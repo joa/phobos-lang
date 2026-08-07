@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 
 use anyhow::{Result, bail};
-use phobos_onnx::chain::ChainExec;
+use phobos_onnx::backend::chain::ChainExec;
+use phobos_onnx::backend::{Tensor, host};
 use phobos_onnx::eval::fold_graph;
-use phobos_onnx::interp::{self, Tensor};
 use phobos_onnx::load_model;
 use phobos_onnx::transform;
 
@@ -33,7 +33,7 @@ fn main() -> Result<()> {
         &decoder,
         &HashMap::from([("input_ids".to_string(), vec![1, n as i64])]),
     )?;
-    let out = interp::run(
+    let out = host::run(
         &folded,
         &HashMap::from([("input_ids".to_string(), Tensor::i64(vec![1, n as i64], ids))]),
     )?;
@@ -54,7 +54,7 @@ fn main() -> Result<()> {
     println!("step graph: {} nodes", step.nodes.len());
 
     // Oracle (host interp) vs ChainExec (device-resident).
-    let want = interp::run(&step, &inputs)?;
+    let want = host::run(&step, &inputs)?;
     let mut exec = ChainExec::new()?;
     let got = exec.run(&step, &inputs)?;
 

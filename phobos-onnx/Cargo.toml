@@ -12,20 +12,19 @@ categories = ["compilers", "development-tools"]
 [dependencies]
 anyhow = "1"
 prost.workspace = true
-# GPU execution (feature "cuda"): compile IR to Phobos kernels and launch them.
+phobos-kernels = { path = "../phobos-kernels" }
+phobos-inference = { path = "../phobos-inference" }
+fancy-regex = "0.13"
+serde_json = "1"
 cust = { version = "0.3.2", optional = true }
 phobos-base = { path = "../phobos-base", optional = true }
-phobos-lang = { path = "../phobos-lang", optional = true }
-phobos-mlir = { path = "../phobos-mlir", optional = true }
 
 [build-dependencies]
 tonic-build.workspace = true
 protoc-bin-vendored = "3"
 
 [features]
-# The pure front end (parse -> IR -> lowering) needs no GPU or MLIR toolchain.
-# The runner does; keep it opt-in so `cargo test` stays light.
-cuda = ["dep:cust", "dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir"]
+cuda = ["dep:cust", "dep:phobos-base", "phobos-kernels/cuda"]
 
 [[example]]
 name = "run_mlp"

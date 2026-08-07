@@ -1,11 +1,12 @@
+pub mod backend;
 pub mod bpe;
-pub mod compute;
 mod layers;
 pub mod llama;
 pub mod meta;
 pub mod model;
 pub mod qwen35;
 pub mod read;
+pub mod runtime;
 pub mod tensor;
 pub mod vocab;
 
@@ -16,10 +17,11 @@ use std::path::Path;
 use anyhow::{Context, Result, ensure};
 use memmap2::Mmap;
 
+pub use backend::{Backend, Buf, HostBackend};
 pub use bpe::Bpe;
-pub use compute::{Backend, Buf, HostBackend};
 pub use meta::{Array, Metadata, Value, ValueType};
 pub use model::Decoder;
+pub use runtime::GgufModel;
 pub use tensor::{GgmlType, TensorInfo, dequantize_into, f16_to_f32};
 pub use vocab::{TokenType, Vocab};
 

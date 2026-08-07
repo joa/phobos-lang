@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use phobos_onnx::backend::{Tensor, host};
 use phobos_onnx::eval::fold_graph;
-use phobos_onnx::interp::{self, Tensor};
 use phobos_onnx::load_model;
 use phobos_onnx::proto::{TensorProto, tensor_proto::DataType};
 use phobos_onnx::transform;
@@ -48,7 +48,7 @@ fn main() -> Result<()> {
 
     let inputs = HashMap::from([(input_name, Tensor::i64(dims, ids))]);
     let start = std::time::Instant::now();
-    let outputs = interp::run(&folded, &inputs)?;
+    let outputs = host::run(&folded, &inputs)?;
     println!("interp ran in {:.2?}\n", start.elapsed());
 
     // Compare each graph output (in order) to output_{i}.pb.

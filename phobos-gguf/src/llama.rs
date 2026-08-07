@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 
 use crate::Gguf;
-use crate::compute::{Attn, Backend, Buf, Plane, QAct, Rope, read_vec};
+use crate::backend::{Attn, Backend, Buf, Plane, QAct, Rope, read_vec};
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable};
 
 #[derive(Clone, Debug)]

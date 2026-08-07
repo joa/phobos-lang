@@ -1160,6 +1160,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "phobos-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "phobos-gguf",
+ "phobos-inference",
+ "phobos-onnx",
+]
+
+[[package]]
 name = "phobos-cluster"
 version = "0.1.0"
 dependencies = [
@@ -1178,8 +1188,11 @@ name = "phobos-gguf"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cust",
  "fancy-regex",
  "memmap2",
+ "phobos-inference",
+ "phobos-kernels",
  "serde_json",
 ]
 
@@ -1190,15 +1203,20 @@ dependencies = [
  "anyhow",
  "async-stream",
  "axum 0.8.9",
- "cust",
- "fancy-regex",
- "phobos-base",
- "phobos-gguf",
- "phobos-lang",
- "phobos-onnx",
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "phobos-kernels"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cust",
+ "phobos-base",
+ "phobos-lang",
+ "phobos-mlir",
 ]
 
 [[package]]
@@ -1229,11 +1247,13 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "cust",
+ "fancy-regex",
  "phobos-base",
- "phobos-lang",
- "phobos-mlir",
+ "phobos-inference",
+ "phobos-kernels",
  "prost",
  "protoc-bin-vendored",
+ "serde_json",
  "tonic-build",
 ]
 

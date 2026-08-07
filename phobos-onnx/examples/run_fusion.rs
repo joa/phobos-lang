@@ -13,9 +13,10 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
+use phobos_onnx::backend::device as runner;
+use phobos_onnx::load_model;
 use phobos_onnx::proto::{self, tensor_proto::DataType};
 use phobos_onnx::transform::{self, FLASH_ATTENTION, FUSED_LINEAR};
-use phobos_onnx::{load_model, runner};
 use prost::Message;
 
 fn main() -> Result<()> {

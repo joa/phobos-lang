@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 
-use crate::compute::Backend;
+use crate::backend::Backend;
 use crate::{Gguf, llama, qwen35};
 
 pub enum Decoder {
@@ -91,7 +91,7 @@ impl State {
 
     /// Hands every device allocation the state holds back to the backend.
     ///
-    /// Dropping a state instead strands its caches: a [`crate::compute::Buf`]
+    /// Dropping a state instead strands its caches: a [`crate::backend::Buf`]
     /// is a handle, not an owner.
     pub fn release(&mut self, backend: &dyn Backend) {
         match self {

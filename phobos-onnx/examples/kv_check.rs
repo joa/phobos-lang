@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use phobos_onnx::backend::{Tensor, host};
 use phobos_onnx::eval::fold_graph;
-use phobos_onnx::interp::{self, Tensor};
 use phobos_onnx::load_model;
 
 const N_LAYER: usize = 12;
@@ -36,7 +36,7 @@ fn main() -> Result<()> {
         "input_ids".to_string(),
         Tensor::i64(vec![1, n as i64], ids.clone()),
     )]);
-    let out = interp::run(&folded, &inputs)?;
+    let out = host::run(&folded, &inputs)?;
 
     let logits = out.get("logits").context("no logits")?.to_f32();
     let next = argmax(&logits[(n - 1) * 50257..n * 50257]) as i64;
@@ -61,7 +61,7 @@ fn main() -> Result<()> {
     let mut shapes = HashMap::from([("input_ids".to_string(), vec![1, 1])]);
     shapes.extend(past_dims);
     let folded_step = fold_graph(&with_past, &shapes)?;
-    let step_out = interp::run(&folded_step, &step_inputs)?;
+    let step_out = host::run(&folded_step, &step_inputs)?;
     let step_logits = step_out.get("logits").context("no step logits")?.to_f32();
 
     // --- oracle: full recompute over n+1 tokens ---
@@ -75,7 +75,7 @@ fn main() -> Result<()> {
         "input_ids".to_string(),
         Tensor::i64(vec![1, (n + 1) as i64], ids2),
     )]);
-    let out2 = interp::run(&folded2, &inputs2)?;
+    let out2 = host::run(&folded2, &inputs2)?;
     let full_logits = out2.get("logits").context("no logits")?.to_f32();
     let full_last = &full_logits[n * 50257..(n + 1) * 50257];
 

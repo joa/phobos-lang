@@ -9,7 +9,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use phobos_gguf::compute::HostBackend;
+use phobos_gguf::backend::HostBackend;
 use phobos_gguf::qwen35::{Model, Variants};
 use phobos_gguf::{Bpe, Gguf};
 

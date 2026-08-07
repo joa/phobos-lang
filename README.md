@@ -43,7 +43,7 @@ Phobos supports autotuning for finding the optimal configuration.
 
 ## Inference
 
-Frontends for ONNX and GGUF sit atop the language and `phobos-inference` executes them.
+Frontends for ONNX and GGUF sit atop the language and `phobos-cli` executes them.
 
 Inference has been tested with:
 
@@ -55,7 +55,7 @@ Inference has been tested with:
 * The host backend is used for verification and *very* slow. Always build with `--features=cuda` unless you need to verify against the host oracle. Always build with `--release` if the host backend is used.
 * ONNX has not seen a lot of love (as in: it runs the OG GPT-2, but it's slow).
 
-Two model front ends:
+Two model front ends, each with a host backend and a GPU one:
 
 - **`phobos-gguf`**: This has been verified against llama.cpp (token for token where greedy decoding is stable, 
   and by next-token logit gaps where it is not).
@@ -80,7 +80,7 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, tokens per second over ten repetitions:
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
 
 # running phobos
-cargo run --features cuda --release -p phobos-inference --example bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
+cargo run --features cuda --release -p phobos-gguf --example bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
 ```
 </details>
 
@@ -89,7 +89,7 @@ cargo run --features cuda --release -p phobos-inference --example bench -- -m ${
 1. Download [minicpm5-1b-Q8_0.gguf](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF) from HuggingFace.
 2. Start the inference server with recommended model settings for temp etc.
   ```plain
-  cargo run --features cuda -r -p phobos-inference -- --serve 127.0.0.1:8080 --gguf ~\models\minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
+  cargo run --features cuda -r -p phobos-cli -- --listen 127.0.0.1:8080 --gguf ~\models\minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
   ```
 3. [pi.dev](https://pi.dev) `~/.pi/agent/models.json` entry:
   ```json
@@ -179,16 +179,16 @@ phobos-sched: listening on 0.0.0.0:8881, waiting for 2 node(s)
 
 Sample kernels (`.ph`) and job files live in [`examples/`](./examples).
 
-### `phobos-inference` (optional GPU)
+### `phobos-cli` (optional GPU)
 
 ```plain
-cargo run [--features cuda] -r -p phobos-inference -- [--gguf <file.gguf>] [-m|--model <dir>] [--kv <dir>]
-                                                      [-n|--num <tokens>] [--show <int>] [--listen <host:port>]
-                                                      [-t|--temp <float>] [-k|--top-k <int>] [-p|--top-p <float>]
-                                                      [--min-p <float>]
-                                                      [--presence-penalty <float>] [--repetition-penalty <float>]
-                                                      [--seed <int>]
-                                                      [prompt]
+cargo run [--features cuda] -r -p phobos-cli -- [--gguf <file.gguf>] [-m|--model <dir>] [--kv <dir>]
+                                                [-n|--num <tokens>] [--show <int>] [--listen <host:port>]
+                                                [-t|--temp <float>] [-k|--top-k <int>] [-p|--top-p <float>]
+                                                [--min-p <float>]
+                                                [--presence-penalty <float>] [--repetition-penalty <float>]
+                                                [--seed <int>]
+                                                [prompt]
 ```
 
 Perform inference. `--gguf` loads a GGUF model and dispatches on the architecture the file declares;
@@ -264,16 +264,16 @@ The model path has its own set. Build these `--release`, and the ones needing a 
 | `generate` | `phobos-gguf` | `generate -- MODEL.gguf -n 40 "prompt"` | Host-backend generation, dispatching on the file's architecture. This is the reference path. No GPU. |
 | `encode` | `phobos-gguf` | `encode -- MODEL.gguf "text"` | Token ids from the file's own tokenizer, or JSON for a JSON array of prompts. No GPU. |
 | `diagnose` | `phobos-gguf` | `diagnose -- MODEL.gguf` | Per-position NLL on a repeated phrase: a flat profile means no context is reaching the current position. No GPU. |
-| `inspect` | `phobos-onnx` | `inspect -- model.onnx` | Opset, inputs/outputs, op-type histogram. No GPU. |
+| `inspect_onnx` | `phobos-onnx` | `inspect_onnx -- model.onnx` | Opset, inputs/outputs, op-type histogram. No GPU. |
 | `run_gpt2` | `phobos-onnx` | `run_gpt2` | A real exported GPT-2 through load, fold and the host interpreter, against its bundled reference. No GPU. |
 | `run_gpt2_gpu` | `phobos-onnx` | `run_gpt2_gpu` | The same model with the Gemm projections and all 25 LayerNorms on Phobos kernels. Needs a GPU. |
 | `kv_check` | `phobos-onnx` | `kv_check` | A single with-past step against the last row of a full recompute. No GPU. |
-| `bench` | `phobos-inference` | `bench -- -m MODEL.gguf -p 512 -n 128 -r 5` | The two numbers `llama-bench` reports, in the same units. Needs a GPU. |
-| `backend_check` | `phobos-inference` | `backend_check` | Every device op against the host reference. Needs a GPU. |
-| `batch_check` | `phobos-inference` | `batch_check -- MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one. Needs a GPU. |
-| `model_check` | `phobos-inference` | `model_check -- MODEL.gguf` | Whole-model logits, device against host. Needs a GPU. |
+| `bench` | `phobos-gguf` | `bench -- -m MODEL.gguf -p 512 -n 128 -r 5` | The two numbers `llama-bench` reports, in the same units. Needs a GPU. |
+| `backend_check` | `phobos-gguf` | `backend_check` | Every device op against the host reference. Needs a GPU. |
+| `batch_check` | `phobos-gguf` | `batch_check -- MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one. Needs a GPU. |
+| `model_check` | `phobos-gguf` | `model_check -- MODEL.gguf` | Whole-model logits, device against host. Needs a GPU. |
 
-`phobos-inference/examples` also holds the kernel sweeps each optimization was decided by (`q8sweep`,
+`phobos-gguf/examples` also holds the kernel sweeps each optimization was decided by (`q8sweep`,
 `ppsweep`, `attnsweep`, `deltasweep`, `dotform`); `docs/GGUF.md` says what each one answered.
 
 ```

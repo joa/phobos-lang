@@ -7,8 +7,8 @@
 // 16-wide delta-net gate projections, and the single-row matvec case.
 
 use anyhow::Result;
-use phobos_onnx::interp::{HostBackend, MatmulBackend};
-use phobos_onnx::runner::GpuBackend;
+use phobos_onnx::backend::device::GpuBackend;
+use phobos_onnx::backend::{HostBackend, MatmulBackend};
 
 fn main() -> Result<()> {
     let gpu = GpuBackend::new()?;

@@ -39,6 +39,7 @@ impl<'a> History<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct SampleConfig {
     /// Softmax temperature.
     ///

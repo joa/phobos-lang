@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Result, bail};
-use phobos_onnx::chain::ChainExec;
-use phobos_onnx::interp::{self, Tensor};
+use phobos_onnx::backend::chain::ChainExec;
+use phobos_onnx::backend::{Tensor, host};
 use phobos_onnx::ir::{Attribute, DataType, Graph, Node, TensorData, ValueInfo};
 
 fn f32_init(dims: &[i64], data: Vec<f32>) -> Arc<phobos_onnx::ir::Tensor> {
@@ -86,7 +86,7 @@ fn main() -> Result<()> {
         Tensor::f32(vec![rows as i64, w as i64], seed(1)),
     )]);
 
-    let want = interp::run(&graph, &inputs)?;
+    let want = host::run(&graph, &inputs)?;
     let mut exec = ChainExec::new()?;
     let got = exec.run(&graph, &inputs)?;
     let stats = exec.stats();

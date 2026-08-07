@@ -3,14 +3,15 @@
 //   cargo run --release -p phobos-gguf --example generate -- \
 //       MODEL.gguf -n 40 "The capital of France is"
 //
-// Greedy, so runs are reproducible. The GPU backend is in phobos-inference.
+// Greedy, so runs are reproducible. This runs the host backend; the GPU one is
+// behind `--features cuda`, see `backend::device`.
 
 use std::io::Write;
 use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
-use phobos_gguf::compute::HostBackend;
+use phobos_gguf::backend::HostBackend;
 use phobos_gguf::{Bpe, Decoder, Gguf};
 
 fn main() -> Result<()> {

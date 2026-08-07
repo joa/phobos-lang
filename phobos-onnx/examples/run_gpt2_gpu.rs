@@ -9,11 +9,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
+use phobos_onnx::backend::device::GpuBackend;
+use phobos_onnx::backend::{HostBackend, MatmulBackend, Tensor, host};
 use phobos_onnx::eval::fold_graph;
-use phobos_onnx::interp::{self, HostBackend, MatmulBackend, Tensor};
 use phobos_onnx::load_model;
 use phobos_onnx::proto::{TensorProto, tensor_proto::DataType};
-use phobos_onnx::runner::GpuBackend;
 use phobos_onnx::transform;
 use prost::Message;
 
@@ -68,7 +68,7 @@ fn main() -> Result<()> {
         dir.display()
     );
     let start = std::time::Instant::now();
-    let outputs = interp::run_with(&folded, &inputs, &gpu)?;
+    let outputs = host::run_with(&folded, &inputs, &gpu)?;
     println!("ran in {:.2?}\n", start.elapsed());
 
     let mut worst = 0.0f32;

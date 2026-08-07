@@ -14,8 +14,9 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
+use phobos_onnx::backend::device as runner;
+use phobos_onnx::load_model;
 use phobos_onnx::proto::{self, tensor_proto::DataType};
-use phobos_onnx::{load_model, runner};
 use prost::Message;
 
 const S: usize = 64; // sequence length (rows)

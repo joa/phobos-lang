@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::compute::{Backend, Buf, Plane, Q8_BLOCK, QAct};
+use crate::backend::{Backend, Buf, Plane, Q8_BLOCK, QAct};
 use crate::tensor::q8_0_blocks;
 use crate::{GgmlType, Gguf, TensorInfo};
 
