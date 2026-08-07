@@ -1,9 +1,3 @@
-//! Rendering a chat request into a prompt, and reading the model's reply back.
-//!
-//! What a model expects around a turn, and what it emits for reasoning and tool
-//! calls, is per-family and comes off the chat template the model file carries;
-//! see [`Dialect`]. Nothing here talks to a model or to the network.
-
 pub mod dialect;
 pub mod stream;
 pub mod tools;
@@ -101,7 +95,6 @@ pub(crate) fn split_reasoning(message: &ChatMessage, content: &str) -> (String, 
     }
 }
 
-/// Render a conversation the way the model's `tokenizer.chat_template` does.
 pub(crate) fn format_chat(
     messages: &[ChatMessage],
     tools: Option<&Value>,

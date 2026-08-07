@@ -1,5 +1,3 @@
-//! Tool definitions into the prompt, and tool calls back out of the reply.
-
 use serde_json::{Value, json};
 
 use super::dialect::{
@@ -23,8 +21,6 @@ pub(crate) fn has_tools(tools: Option<&Value>) -> bool {
     tools.is_some_and(|tools| tools.as_array().is_some_and(|list| !list.is_empty()))
 }
 
-/// The tools the model should see. The template has no notion of
-/// `tool_choice`, but "none" means the caller wants the tool block gone.
 pub(crate) fn selected_tools(tools: Option<&Value>, tool_choice: Option<&Value>) -> Option<Value> {
     if tool_choice.and_then(Value::as_str) == Some("none") {
         return None;
@@ -32,8 +28,6 @@ pub(crate) fn selected_tools(tools: Option<&Value>, tool_choice: Option<&Value>)
     tools.filter(|tools| has_tools(Some(tools))).cloned()
 }
 
-/// What `tool_choice` adds to the system turn when it demands a call. The
-/// template cannot express this, so it is stated in prose.
 pub(crate) fn tool_choice_instruction(tool_choice: Option<&Value>) -> Option<String> {
     match tool_choice? {
         Value::String(choice) if choice == "required" || choice == "any" => Some(

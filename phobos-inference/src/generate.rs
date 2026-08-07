@@ -1,24 +1,12 @@
-//! The generation loop.
-//!
-//! One copy, driven by a sink. The CLI prints what it is handed and the server
-//! sends it as an SSE chunk; the token-by-token bookkeeping, and in particular
-//! the UTF-8 hold-back, is the same either way and used to be written twice.
-
 use anyhow::Result;
 
 use crate::model::{Model, Session};
 use crate::sampling::{Rng, SampleConfig, Sequence, choose};
 
-/// Why a generation ended.
 pub enum Stop {
-    /// The model produced an end-of-turn token.
     Eos,
-    /// The session reached the model's context limit.
     Context(usize),
-    /// The caller's token budget ran out.
     Limit,
-    /// The sink asked to stop, which is how the server notices a client that
-    /// has gone away.
     Cancelled,
 }
 
@@ -33,7 +21,6 @@ impl std::fmt::Display for Stop {
     }
 }
 
-/// The OpenAI `finish_reason` for a stop.
 impl Stop {
     pub fn finish_reason(&self) -> &'static str {
         match self {
@@ -44,7 +31,6 @@ impl Stop {
     }
 }
 
-/// What the sink says after each chunk.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Flow {
     Continue,
@@ -58,12 +44,9 @@ pub struct Config {
 
 pub struct Outcome {
     pub stop: Stop,
-    /// Tokens handed to the sink.
     pub tokens: usize,
 }
 
-/// Run `prompt` through `session` and return the logits for the position after
-/// it.
 pub fn prefill(session: &mut dyn Session, prompt: &[i64]) -> Result<Vec<f32>> {
     session.extend(prompt)
 }

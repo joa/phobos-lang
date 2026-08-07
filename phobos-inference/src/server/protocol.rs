@@ -1,5 +1,3 @@
-//! The OpenAI wire format, and the request defaults a run starts from.
-
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

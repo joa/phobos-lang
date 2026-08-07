@@ -1,9 +1,3 @@
-//! Reading a reply as it arrives.
-//!
-//! The markers that delimit reasoning and tool calls can be split across
-//! tokens, so the parser holds back any tail that could still turn out to be
-//! the start of one; see [`held_back`].
-
 use serde_json::Value;
 
 use super::ToolCall;
@@ -24,10 +18,6 @@ pub(crate) enum Mode {
     ToolCall,
 }
 
-/// Splits a generation into reasoning, prose and tool calls as it arrives.
-/// Incremental because of streaming: a chunk can end halfway through `</think>`
-/// or `<tool_call>`, so the tail that could still become a marker is held back
-/// until the next chunk decides it.
 pub(crate) struct OutputParser {
     pub(crate) tools: Option<Value>,
     pub(crate) dialect: Dialect,
@@ -42,8 +32,6 @@ impl OutputParser {
         OutputParser {
             tools,
             dialect,
-            // The prompt prefills `<think>`, so a thinking pass starts inside
-            // it and the model only ever emits the closing tag.
             mode: if thinking {
                 Mode::Reasoning
             } else {
@@ -60,7 +48,6 @@ impl OutputParser {
         self.drain(false)
     }
 
-    /// Flush what is left, holding nothing back.
     pub(crate) fn finish(&mut self) -> Vec<OutputEvent> {
         self.drain(true)
     }

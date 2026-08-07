@@ -1,5 +1,3 @@
-//! The route handlers.
-
 use axum::{
     Json,
     extract::State,
@@ -201,8 +199,6 @@ pub(crate) async fn handle_chat_completions(
     Json(chat_resp).into_response()
 }
 
-/// Stream the generation as it is produced. Deltas go out token by token
-/// except inside a `<tool_call>`, which means nothing until it is whole.
 pub(crate) fn stream_chat(
     state: AppState,
     req: GenerationRequest,

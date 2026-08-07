@@ -1,9 +1,3 @@
-//! The OpenAI-compatible HTTP server.
-//!
-//! Requests arrive on the async runtime and are handed to a single inference
-//! loop over a channel: a model is not `Send`, and one generation at a time is
-//! what a single GPU wants anyway.
-
 pub mod handlers;
 pub mod protocol;
 
@@ -26,8 +20,6 @@ use handlers::{handle_chat_completions, handle_completions};
 pub use protocol::Defaults;
 use protocol::SampleOverrides;
 
-/// A request as it reaches the inference loop, still unresolved: the loop is
-/// where the server's defaults live.
 pub(crate) struct GenerationRequest {
     pub(crate) prompt: String,
     pub(crate) max_tokens: Option<usize>,
@@ -57,10 +49,7 @@ pub(crate) struct InferenceRequest {
 pub(crate) struct AppState {
     pub(crate) tx: mpsc::SyncSender<InferenceRequest>,
     pub(crate) model: String,
-    /// Resolved once from the loaded model's chat template. Every request
-    /// renders and parses against it.
     pub(crate) dialect: Dialect,
-    /// The token a chat prompt opens with, when the template calls for one.
     pub(crate) bos: Option<String>,
 }
 
@@ -131,8 +120,6 @@ pub fn serve(addr: String, model: Box<dyn Model>, defaults: Defaults) -> Result<
         });
     });
 
-    // Inference loop on the main thread: the model is not Send, and one
-    // generation at a time is what a single GPU wants anyway.
     for inf_req in rx {
         let req = inf_req.req;
         let responder = inf_req.responder;
