@@ -1,20 +1,14 @@
 use anyhow::{Result, ensure};
 
-/// A handle to backend-owned storage. Opaque so the trait stays object-safe and
-/// the bytes can live on a device.
+/// A handle to backend-owned storage, so the bytes can live on a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buf(pub usize);
 
-/// A handle to a Q8_0 weight held in its quantized form. Separate from [`Buf`]
-/// because the storage is a pair, signed bytes plus per-block scales.
+/// A Q8_0 weight held in quantized form: signed bytes plus per-block scales.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QBuf(pub usize);
 
-/// An activation already quantized for the Q8_0 projections.
-///
-/// Several projections in a block read the same activation: the delta net's
-/// four, the two halves of a SwiGLU, the query, key and value of an attention.
-/// Quantizing per projection is a launch apiece for four kilobytes of work.
+/// An activation quantized once for the several projections that read it.
 ///
 /// Valid only inside the pass that produced it, and only while the buffer it
 /// came from still holds what it held.
@@ -25,8 +19,7 @@ pub struct QAct(pub usize);
 pub const Q8_BLOCK: usize = crate::tensor::Q8_0_BLOCK;
 
 /// Guards the L2 normalization the delta rule's queries and keys go through, so
-/// an all-zero row stays zero. Applied under the square root, where it is one
-/// instruction rather than a branch.
+/// an all-zero row stays zero.
 pub const L2_EPS: f32 = 1e-12;
 
 /// One side of a strided copy: a buffer, where the block starts in it, and how
@@ -78,13 +71,9 @@ impl Attn {
 }
 
 /// The shape of one delta-net block's mixing step, and the layout its fused
-/// projection uses.
-///
-/// The planes carry an offset and a stride rather than a flag because both
-/// layouts a GGUF file might use are the same strided read: three contiguous
-/// blocks per position puts head zero's planes `heads * head_dim` apart with
-/// consecutive heads `head_dim` apart, while grouping per head puts the planes
-/// `head_dim` apart with consecutive heads `3 * head_dim` apart.
+/// projection uses. Both layouts a GGUF file might use are the same strided
+/// read, which is why the planes carry an offset and a stride rather than a
+/// flag.
 #[derive(Clone, Copy, Debug)]
 pub struct DeltaMix {
     pub rows: usize,
@@ -143,9 +132,7 @@ type HostQuant = (Vec<i8>, Vec<f32>, usize);
 ///
 /// The unit of exchange is a [`Buf`] handle rather than a slice, so activations
 /// stay wherever the backend computes; a decode step crosses the boundary
-/// twice, to hand in the token's embedding and to take out the logits. Buffers
-/// are explicitly allocated and released, and every operation writes a
-/// caller-provided destination, so nothing is allocated on the hot path.
+/// twice, to hand in the token's embedding and to take out the logits.
 pub trait Backend {
     fn alloc(&self, len: usize) -> Result<Buf>;
     fn release(&self, buf: Buf);
@@ -160,9 +147,8 @@ pub trait Backend {
 
     /// Brackets the device-only part of a forward pass. Nothing in between
     /// reads back, so a backend that batches its work has nothing else to tell
-    /// it where the pass ends. The GPU backend records the pass and replays it
-    /// as one CUDA graph, worth more than half of a decode step; see
-    /// `device.rs`. Backends that issue eagerly ignore both.
+    /// it where the pass ends; the GPU backend replays the bracket as one CUDA
+    /// graph. Backends that issue eagerly ignore both.
     fn begin_pass(&self) -> Result<()> {
         Ok(())
     }
@@ -178,11 +164,10 @@ pub trait Backend {
     /// relative to each other, each for its own access pattern:
     ///
     /// - `qs` is `[n, k]`, so `qs[j * k + p]` is the byte for output `j` and
-    ///   input `p`. The order GGUF already stores, and it puts the contraction
-    ///   axis contiguous for the hardware four-way byte dot product.
+    ///   input `p`, putting the contraction axis contiguous.
     /// - `scales` is `[k / Q8_BLOCK, n]`, so `scales[(p / Q8_BLOCK) * n + j]`
-    ///   scales that byte. One block's scales for a run of outputs are then
-    ///   contiguous, which is how the kernel consumes them.
+    ///   scales that byte, putting one block's scales for a run of outputs
+    ///   contiguous.
     fn constant_q8(&self, key: &str, qs: &[i8], scales: &[f32], k: usize, n: usize)
     -> Result<QBuf>;
 
@@ -192,10 +177,9 @@ pub trait Backend {
     /// [`Backend::matmul`] against a weight left in Q8_0 form.
     ///
     /// The activation is quantized to int8 per block of [`Q8_BLOCK`] too, so
-    /// the contraction is integer throughout. The precision this loses against
-    /// [`Backend::matmul`] is part of the definition, not an implementation
-    /// detail: a backend keeping the activation in f32 computes something else.
-    /// See [`quantize_row`].
+    /// the contraction is integer throughout. That is part of the definition,
+    /// not an implementation detail: a backend keeping the activation in f32
+    /// computes something else. See [`quantize_row`].
     fn matmul_q8(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
         let act = self.quantize_act(a, m, k)?;
         self.matmul_q8_act(act, m, k, w, n, out)
@@ -215,9 +199,8 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()>;
 
-    /// [`Backend::matmul_q8_act`] adding into `out` rather than overwriting it.
-    /// Every block ends by adding a projection into the residual stream, so as
-    /// the projection's epilogue it saves two launches and a buffer per block.
+    /// [`Backend::matmul_q8_act`] adding into `out` rather than overwriting it,
+    /// which is how every block folds a projection into the residual stream.
     fn matmul_q8_add(
         &self,
         act: QAct,
@@ -247,9 +230,7 @@ pub trait Backend {
     ) -> Result<()>;
 
     /// [`Backend::rms_norm`] that also leaves the result quantized, since a
-    /// projection reads every normalization immediately afterwards. The two
-    /// share their tiling: a Q8_0 scale covers 32 values, the same block the
-    /// wide form of the sum folds the row into.
+    /// projection reads every normalization immediately afterwards.
     fn rms_norm_q(
         &self,
         x: Buf,
@@ -279,8 +260,7 @@ pub trait Backend {
     }
 
     /// `out = silu(gate) * rms_norm(x)`, quantized as well: the delta net's
-    /// gated readout and everything the projection after it needs. One launch
-    /// rather than three, all over a few kilobytes.
+    /// gated readout and everything the projection after it needs.
     #[allow(clippy::too_many_arguments)]
     fn rms_norm_gated(
         &self,
@@ -303,9 +283,9 @@ pub trait Backend {
     /// `acc += add`, elementwise.
     fn add_into(&self, acc: Buf, add: Buf) -> Result<()>;
 
-    /// `out = silu(gate) * up` over `len` elements, the SwiGLU join. The two
-    /// operands take an offset because the projection producing them is fused:
-    /// at a single row they are two windows of one buffer.
+    /// `out = silu(gate) * up` over `len` elements. The operands take an offset
+    /// because at a single row a fused projection leaves them as two windows of
+    /// one buffer.
     fn swiglu(
         &self,
         gate: Buf,
@@ -317,12 +297,8 @@ pub trait Backend {
     ) -> Result<()>;
 
     /// [`Backend::swiglu`] where the two operands are planes of a wider buffer,
-    /// which is what a fused gate-and-up projection leaves behind.
-    ///
-    /// Past one row the two halves interleave, so without this they have to be
-    /// pulled apart first: two copies of the whole intermediate per block,
-    /// which at 512 positions is most of a gigabyte across a pass. The default
-    /// is that split, for backends with no strided form.
+    /// which is what a fused gate-and-up projection leaves behind. The default
+    /// pulls them apart into dense copies, for backends with no strided form.
     fn swiglu_planes(
         &self,
         gate: Plane,
@@ -345,17 +321,16 @@ pub trait Backend {
         Ok(())
     }
 
-    /// Copy a `rows` by `width` block between two strided planes: every fused
-    /// projection's split. [`Backend::copy`] is the case where neither side is
-    /// wider than the block.
+    /// Copy a `rows` by `width` block between two strided planes.
+    /// [`Backend::copy`] is the case where neither side is wider than the
+    /// block.
     fn copy_2d(&self, src: Plane, dst: Plane, rows: usize, width: usize) -> Result<()>;
 
     /// Rotary embedding, in place, over `[rows * heads, head_dim]`.
     ///
     /// `table` is `[positions, rope_dim]`, each row the cosines for one
-    /// absolute position followed by its sines, so a rotation is two loads and
-    /// four multiplies. Row `p` must be position `p`, filled out to
-    /// `start_pos + rows`. Pairs are `(i, i + rope_dim / 2)`.
+    /// absolute position followed by its sines. Row `p` must be position `p`,
+    /// filled out to `start_pos + rows`. Pairs are `(i, i + rope_dim / 2)`.
     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()>;
 
     /// Causal softmax attention against the key and value caches, which must
@@ -381,9 +356,8 @@ pub trait Backend {
     /// tap across a run of channels is contiguous.
     ///
     /// The convolution, the SiLU, the split into per-head planes, the L2
-    /// normalization and the query scale are one operation because they share
-    /// a unit: the `head_dim` channels of one position's one head, which is the
-    /// row the delta rule reads and the span the normalization covers.
+    /// normalization and the query scale are one operation because they share a
+    /// unit: the `head_dim` channels of one position's one head.
     fn delta_conv(&self, history: Buf, taps: Buf, mix: DeltaMix, packed: Buf) -> Result<()>;
 
     /// The delta rule's per-head gates, written into `packed` after the planes.
@@ -407,15 +381,13 @@ pub trait Backend {
 
     /// The gated delta rule over a block of positions, advancing `state`.
     ///
-    /// `packed` carries all five operands consecutively: the query, key and
-    /// value planes, each `[rows * heads, head_dim]` with the head varying
-    /// fastest, then the decay and beta vectors, each `[rows * heads]`. They
-    /// are produced together by [`Backend::delta_conv`] and
-    /// [`Backend::delta_gates`], so one buffer makes each a window of an
-    /// allocation the caller already has. `out` is a fourth
-    /// `[rows * heads, head_dim]` plane and `state` is
-    /// `[heads * head_dim, head_dim]`, keys down the rows and values across.
-    /// For each position in order, per head:
+    /// `packed` carries all five operands consecutively, as
+    /// [`Backend::delta_conv`] and [`Backend::delta_gates`] leave them: the
+    /// query, key and value planes, each `[rows * heads, head_dim]` with the
+    /// head varying fastest, then the decay and beta vectors, each
+    /// `[rows * heads]`. `out` is a fourth `[rows * heads, head_dim]` plane and
+    /// `state` is `[heads * head_dim, head_dim]`, keys down the rows and values
+    /// across. For each position in order, per head:
     ///
     /// ```text
     /// S      <- decay * S
@@ -424,10 +396,8 @@ pub trait Backend {
     /// out    <- q @ S
     /// ```
     ///
-    /// The write is the prediction error rather than the value, which makes
-    /// this a delta rule and not plain gated linear attention. Positions are
-    /// sequential by construction, but the state's columns are independent, so
-    /// the work tiles across them.
+    /// Positions are sequential by construction, but the state's columns are
+    /// independent, so the work tiles across them.
     fn delta_rule(
         &self,
         packed: Buf,
@@ -477,10 +447,8 @@ pub fn check_q8_shape(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<(
 /// 127, so the extreme element lands on 127. An all-zero block yields a zero
 /// scale rather than dividing by it.
 ///
-/// The device kernel reproduces this, so the two must round the same way. Ties
-/// go to even because that is what the hardware's rounding instruction does;
-/// rounding away from zero there would mean biasing and truncating, which loses
-/// mantissa bits.
+/// The device kernel reproduces this and has to round the same way. Ties go to
+/// even because that is what the hardware's rounding instruction does.
 pub fn quantize_row(x: &[f32], qs: &mut [i8]) -> f32 {
     let absmax = x.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     let inv = 127.0 / (absmax + 1e-8);
@@ -490,7 +458,6 @@ pub fn quantize_row(x: &[f32], qs: &mut [i8]) -> f32 {
     absmax / 127.0
 }
 
-/// Read a whole buffer into a fresh vector.
 pub fn read_vec(backend: &dyn Backend, buf: Buf, len: usize) -> Result<Vec<f32>> {
     let mut out = vec![0.0; len];
     backend.read(buf, &mut out)?;

@@ -26,14 +26,9 @@ const Q8_TN: usize = 32;
 /// Output tile for the quantized tensor-core matmul. The rows are the depth of
 /// the tensor core's m8 fragment, the smallest tile that reaches it at all, and
 /// the columns give the CTA's eight warps an 8x8 tile each, so no warp reads a
-/// weight byte another warp read.
-///
-/// Deeper row tiles measured the same on this model and raise the row count a
-/// prefill needs to reach the tensor cores at all. They would cut the weight
-/// traffic, since every row block re-reads the whole weight tile, but at 512
-/// tokens that is a few percent of the pass. They also run out of room: four
-/// [TM, TN] f32 temporaries carry the accumulator chain, which at 64 by 64 is
-/// the whole of Turing's 64K of shared memory.
+/// weight byte another warp read. Deeper row tiles measured the same and run
+/// out of shared memory: the accumulator chain is four `[TM, TN]` f32
+/// temporaries.
 const Q8_MMA_TM: usize = 8;
 const Q8_MMA_TN: usize = 64;
 
@@ -41,25 +36,18 @@ const Q8_MMA_TN: usize = 64;
 const QUANT_TB: usize = 4;
 
 /// The same for a prompt, whose activation is thousands of blocks rather than
-/// thirty-two.
-///
-/// Four rows is 128 values on a 256-thread CTA, which idles half of them and
-/// spends more dispatching the block than running it: a 512-token activation is
-/// 16384 rows, so 4096 blocks. Sixteen rows is four times fewer and still two
-/// CTAs deep in shared memory, which 64 is not, since the tile chain is six
-/// `[TB, 32]` f32 buffers.
+/// thirty-two. Four rows is 128 values on a 256-thread CTA, half of them idle;
+/// sixteen is four times fewer blocks and still two CTAs deep in shared memory,
+/// which 64 is not.
 const QUANT_TB_WIDE: usize = 16;
 
 /// Elements per block for the pointwise kernels.
 const ELEM_TILE: usize = 128;
 
-/// Pointwise elements a program takes when there are enough of them.
-///
-/// 128 suits a decode step, where the whole call is a few thousand elements and
-/// what matters is having any blocks at all. A prompt's SwiGLU is 1.8 million,
-/// which at 128 is 14336 blocks each using half a CTA for one tile; at 1024 it
-/// is 1792 and the kernel halves. Shared memory is the ceiling, since `swiglu`
-/// holds about six tiles at once.
+/// Pointwise elements a program takes when there are enough of them. A decode
+/// step wants [`ELEM_TILE`], where what matters is having any blocks at all; a
+/// prompt's 1.8-million-element SwiGLU halves at this one. Shared memory is the
+/// ceiling, since `swiglu` holds about six tiles at once.
 const ELEM_TILE_WIDE: usize = 1024;
 
 /// Below this the narrow tile still wins: enough wide tiles to fill the card
@@ -130,11 +118,10 @@ impl Drop for PassGraph {
 /// orders, and the output width it was uploaded with.
 ///
 /// Both scale copies exist because the two kernels want opposite orders and
-/// neither can cheaply transpose. `q8_mma` reads a row of scales, one per
-/// output, to shade a `[TM, TN]` accumulator by column, so it wants
-/// `[block, out]`. `qdot_t` has a lane per `k` chunk of one output, so it wants
-/// `[out, block]`, and the other order costs it a sector per lane. A scale is
-/// one f32 per 32 weight bytes, so the duplicate is an eighth of a weight.
+/// neither can cheaply transpose. `q8_mma` shades a `[TM, TN]` accumulator by
+/// column, so it wants `[block, out]`; `qdot_t` has a lane per `k` chunk of one
+/// output, so it wants `[out, block]`. A scale is one f32 per 32 weight bytes,
+/// so the duplicate is an eighth of a weight.
 type DeviceQuant = (
     DeviceBuffer<i8>,
     DeviceBuffer<f32>,
@@ -149,10 +136,9 @@ type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
 
 const MATMUL_SRC: &str = matmul::TEMPLATE;
 
-/// The single-row specialization decoding needs.
-///
-/// NOTE: Always reads row zero: a caller wanting row `r` offsets the operand pointers,
-/// which keeps the kernel free of scalar arguments.
+/// The single-row specialization decoding needs. Always reads row zero: a
+/// caller wanting row `r` offsets the operand pointers, which keeps the kernel
+/// free of scalar arguments.
 const MATVEC_SRC: &str = "\
 @launch(256)
 @autotune(TILE_N in [128], TILE_K in [16])
@@ -175,10 +161,9 @@ kernel matvec(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 /// dividing by zero.
 ///
 /// The rounding is the hardware's own, ties to even, matching the host
-/// reference exactly. Biasing into `[1.5, 255.5]` and truncating gets a
-/// round-half-up without a rounding instruction, but adding 128 to a value that
-/// can reach 127 costs seven bits of mantissa, enough at the top of the range
-/// to carry a value across a boundary.
+/// reference exactly. Biasing into `[1.5, 255.5]` and truncating would get
+/// round-half-up without a rounding instruction, but costs seven bits of
+/// mantissa, enough at the top of the range to carry a value across a boundary.
 const QUANTIZE_SRC: &str = "\
 @launch(256)
 @autotune(TB in [8])
@@ -197,10 +182,9 @@ kernel quantize(X: tensor<f32>[R, 32], Q: tensor<i8>[R, 32], S: tensor<f32>[R, D
 ///
 /// `dot_t` contracts the last axis of both operands, so the activation and the
 /// weight row both walk `k` contiguously, which lets four bytes of each pack
-/// into one instruction. Nothing is dequantized into shared memory, so the f32
-/// weight tile is gone and with it the round trip that made the conversion
-/// kernel occupancy bound. The two scales are constant across a block, so they
-/// multiply the integer dot once per block per output.
+/// into one instruction. Nothing is dequantized into shared memory. The two
+/// scales are constant across a block, so they multiply the integer dot once
+/// per block per output.
 const Q8_DP4A_SRC: &str = "\
 @launch(256)
 @autotune(TN in [32])
@@ -226,9 +210,8 @@ kernel q8_dp4a(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 ///
 /// The same contraction as [`Q8_DP4A_SRC`] over an output tile in both
 /// directions rather than one row, which is what lets a prefill batch: the rows
-/// move from a host loop of launches into the grid. Widening the tile is also
-/// what reaches `mma.sync`, whose smallest integer output tile is 8x8, and
-/// `dot_t` hands it the four contiguous bytes per operand it wants.
+/// move from a host loop of launches into the grid. The wider tile is also what
+/// reaches `mma.sync`, whose smallest integer output tile is 8x8.
 const Q8_MMA_SRC: &str = "\
 @launch(256)
 @autotune(TM in [8], TN in [64])
@@ -254,16 +237,11 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 /// The Q8_0 projection as a single `qmma_t`, which is what a prompt pass runs.
 ///
 /// [`Q8_MMA_SRC`] applies the block scales every 32 elements of `k`, which puts
-/// its accumulator in shared memory and stages both operands there per block.
-/// That holds it to a 2.3 TOPS no tile shape moves: a `[64, 64]` accumulator is
-/// 16 KB on its own and does not build, and every shape that does measures
-/// between 2.2 and 2.9.
-///
-/// `qmma_t` folds the scales in, so the whole of `k` is one operation. The
-/// accumulators stay in registers across all of it, the operands are read from
-/// global memory in the layout the `m8n8k16` fragments already want, and no
-/// barrier is left in the loop. On the same shapes that is 12.6 TOPS, 4.9x,
-/// taking the projections of a 512-token pass from 196 ms to 40.
+/// its accumulator in shared memory and stages both operands there per block;
+/// no tile shape moves it off 2.3 TOPS. `qmma_t` folds the scales in, so the
+/// whole of `k` is one operation with the accumulators in registers, the
+/// operands read in the layout the `m8n8k16` fragments want and no barrier in
+/// the loop: 12.6 TOPS on the same shapes.
 fn q8_qmma_src(block: usize) -> String {
     format!(
         "@launch({block})
@@ -286,15 +264,10 @@ kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 ///
 /// What pays for the operand loads and the scale arithmetic is how many tensor
 /// core tiles a warp's patch holds, since both are per output element however
-/// the tiles are arranged. The patch cannot grow past leaving every warp of the
-/// CTA something to do, so the output tile bounds it, and once the result
-/// stopped going through shared memory only the register file did: 128 by 256
-/// measures 28.1 TOPS against 16.5 for 128 by 64 and 12.6 for 64 by 64.
-///
-/// A wider tile also shrinks the grid. At 512 rows and a width of 1024 the
-/// widest tile is sixteen blocks, a third of the card, and measures worse than
-/// the narrow one. [`qmma_width`] picks the width per projection; the depth
-/// stays 128, with a 64-deep kernel for the rows a prompt leaves over.
+/// the tiles are arranged. The output tile bounds the patch, so wider is better
+/// until the register file runs out. [`qmma_width`] picks the width per
+/// projection; the depth stays 128, with a 64-deep kernel for the rows a prompt
+/// leaves over.
 const Q8_QMMA_TM: usize = 128;
 const Q8_QMMA_SHALLOW: usize = 64;
 const Q8_QMMA_WIDTHS: [usize; 2] = [128, 64];
@@ -305,23 +278,16 @@ const Q8_QMMA_TN: usize = 64;
 /// A warp of this one is bounded by the register file rather than the block,
 /// since a patch is 128 live accumulators whatever the CTA, so a narrower block
 /// buys the same warps per multiprocessor on twice the grid. It wins on every
-/// shape a pass runs and moves the best tile from 128 by 256 to 128 by 128:
-/// 24.91 TOPS to 30.64 on the widest projection, 11.96 to 13.20 on the
-/// narrowest.
+/// shape a pass runs, 30.64 TOPS against 24.91 on the widest projection.
 const Q8_QMMA_CTA: usize = 128;
 
 /// The widest column tile that divides `n`, regardless of how many blocks that
 /// leaves.
 ///
-/// At 512 rows a 128-deep tile is four row tiles, so a 1024-wide projection
-/// with a 256-wide tile has sixteen blocks on a 48-multiprocessor card, and it
-/// still wins: 13.55 TOPS against 11.23 for a 64-wide tile at 64 blocks and
-/// 9.87 for 128 wide at 32. The tile buys the warp's patch of tensor-core
-/// tiles, which pays for the operand loads and the scale arithmetic, and that
-/// beats filling the grid. Keeping the grid full was costing the two 1024-wide
-/// projections about a quarter of their throughput.
-///
-/// The depth stays 128 for the same reason: 64 measures worse at every width.
+/// The warp's patch of tensor-core tiles beats filling the grid, even where the
+/// widest tile leaves a third of the card idle: keeping the grid full was
+/// costing the two 1024-wide projections about a quarter of their throughput.
+/// The depth stays 128 for the same reason, 64 measures worse at every width.
 fn qmma_width(n: usize) -> usize {
     Q8_QMMA_WIDTHS
         .iter()
@@ -339,7 +305,7 @@ fn qmma_width(n: usize) -> usize {
 /// folds the scales in so the contraction is one operation, and turns the
 /// mapping around so a warp owns an output and its lanes divide `k`, which puts
 /// a warp's reads on 512 contiguous bytes and leaves nothing to stage. Over the
-/// seven projections a decode step runs that is 2.4x to 7.4x, and it wants no
+/// seven projections a decode step runs that is 2.4x to 7.4x. It wants no
 /// k-split, since 32 lanes per output already fill the machine.
 const Q8_QDOT_SRC: &str = "\
 @launch(256)
@@ -374,15 +340,10 @@ const Q8_QDOT_TN: usize = 8;
 /// The Q8_0 projection with the contraction split across the grid.
 ///
 /// [`Q8_DP4A_SRC`] puts the whole of `k` in one program, so its grid is `n / TN`
-/// blocks and nothing else, which binds at decode. Achieved bandwidth tracks
-/// the block count and little else: 38 GB/s at 32 blocks, 47 at 64, 111 at 112,
-/// 159 at 7760, against roughly 427 the card sustains. Most of a decode step's
-/// projections are 1024 or 2048 wide, so 32 or 64 blocks on 48 SMs.
-///
-/// Widening the tile to do more work per barrier shrinks the grid further and
-/// measures worse everywhere, as does rearranging the weight so a program reads
-/// one contiguous run instead of `TN` scattered pieces. Splitting `k` is the
-/// only one of the three that adds blocks.
+/// blocks and nothing else, which binds at decode: achieved bandwidth tracks
+/// the block count and little else, 38 GB/s at 32 blocks against roughly 427
+/// the card sustains. Of the ways to fix that, splitting `k` is the only one
+/// that adds blocks.
 ///
 /// Program `(pn, ps)` takes output tile `pn` and the `k` slice at `ps` and
 /// writes its partial sum to its own row of `P`, which `q8_reduce` then sums.
@@ -464,8 +425,7 @@ fn q8_splits(n: usize, k: usize) -> usize {
 ///
 /// The rank-one write is a broadcast product, not a `dot` of a `[D, 1]` by a
 /// `[1, TN]`. The two are the same arithmetic and 12% of the kernel apart,
-/// since the contraction is over one element and all `dot` adds is machinery
-/// for a contraction that is not there.
+/// since a contraction over one element is all machinery and no work.
 const DELTA_SRC: &str = "\
 @launch(256)
 @autotune(H in [{H}], D in [{D}], TN in [{TN}])
@@ -524,28 +484,25 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
 ///
 /// with `D[i, j] = exp(b_i - b_j)`.
 ///
-/// It is two kernels because of how the work divides. Everything above that
-/// depends only on the keys, so `N`, its inverse and the intra-chunk attention,
-/// is the same for every column of the state, while the rest has to be walked
-/// chunk by chunk and splits over those columns to fill the grid. As one kernel
-/// the key-only half is recomputed per column slice, and at the chunk shared
-/// memory then allows that measured 77.0 ms a pass against the sequential
-/// kernel's 53.1. Split, the key-only half is a grid of (head, chunk) that runs
-/// once and the scan can take a wider slice.
+/// It is two kernels because of how the work divides. `N`, its inverse and the
+/// intra-chunk attention depend only on the keys, so they are the same for
+/// every column of the state, while the rest has to be walked chunk by chunk
+/// and splits over those columns to fill the grid. As one kernel the key-only
+/// half is recomputed per column slice, which measured worse than the
+/// sequential kernel it replaces.
 ///
 /// Four details are not the obvious spelling:
 ///
-/// - The decay rides as a matrix. Every implementation of this folds it into
-///   the operands as `q_i exp(b_i)` and `k_j exp(-b_j)`, which is one multiply
-///   cheaper and overflows f32 outright, since `exp(-b_j)` grows without bound
-///   as the chunk decays. As `D[i, j] = exp(b_i - b_j)` every entry of the
-///   triangle that is used is at most one. The upper triangle does overflow,
-///   but `tril` selects rather than multiplies, so no infinity reaches an
-///   arithmetic operand.
-/// - `(I + N)^-1` is not solved. `N` is strictly lower triangular and so
-///   nilpotent, and forward substitution is `C` sequential steps, the depth
-///   this exists to remove. `(I - M)^-1 = prod_j (I + M^(2^j))` is
-///   `log2(C) - 1` rounds of two `[C, C]` matmuls and no sequential depth.
+/// - The decay rides as a matrix. Folding it into the operands as
+///   `q_i exp(b_i)` and `k_j exp(-b_j)` is one multiply cheaper and overflows
+///   f32 outright, since `exp(-b_j)` grows without bound as the chunk decays.
+///   As `D[i, j] = exp(b_i - b_j)` every entry of the triangle that is used is
+///   at most one, and `tril` selects rather than multiplies, so the upper
+///   triangle's infinities never reach an arithmetic operand.
+/// - `(I + N)^-1` is not solved. Forward substitution is `C` sequential steps,
+///   the depth this exists to remove, while `N` is nilpotent, so
+///   `(I - M)^-1 = prod_j (I + M^(2^j))` is `log2(C) - 1` rounds of two
+///   `[C, C]` matmuls and no sequential depth.
 /// - `(T diag(exp b) K) S_0` associates to the right. Left to right it builds a
 ///   `[C, head_dim]` intermediate; as `T diag(exp b) (K S_0)` the intermediate
 ///   is `[C, TN]`, smaller and less arithmetic.
@@ -709,15 +666,14 @@ const DELTA_TN: usize = 16;
 ///
 /// The plane rides the grid's third axis rather than being three launches: they
 /// read the same two buffers a fixed stride apart and write the same packed
-/// destination, and one launch of ninety-six blocks beats three of thirty-two
-/// on a forty-eight multiprocessor card. The planes are evenly spaced in both
-/// of the layouts a file might use, so the offset is a multiple, not a table.
+/// destination, and one launch of ninety-six blocks beats three of thirty-two.
+/// The planes are evenly spaced in both of the layouts a file might use, so the
+/// offset is a multiple, not a table.
 ///
 /// The query and key are L2-normalized and the value is not, since it is
 /// written into the state rather than matched against it, and the query carries
-/// the `1/sqrt(d)` softmax scale. Those are the only differences, and they are
-/// a gain the epilogue picks by plane. The tests are on the block index, so
-/// they stay uniform across the CTA.
+/// the `1/sqrt(d)` softmax scale. The epilogue picks those by plane, testing the
+/// block index so the choice stays uniform across the CTA.
 #[allow(clippy::too_many_arguments)]
 fn delta_conv_src(
     heads: usize,
@@ -787,10 +743,9 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
     )
 }
 
-/// Positions one program of [`delta_conv_src`] carries. One position of one
-/// head is 24576 blocks of 256 threads for two multiplies each at a 512-token
-/// prompt, which measured 512 microseconds a call, almost all of it dispatch.
-/// Eight positions at a time is eight times fewer blocks.
+/// Positions one program of [`delta_conv_src`] carries. A position at a time is
+/// 24576 blocks of 256 threads for two multiplies each at a 512-token prompt,
+/// which measured 512 microseconds a call, almost all of it dispatch.
 const DELTA_CONV_ROWS: usize = 8;
 
 /// The positions a call batches. The tile has no remainder, so this is the
@@ -895,13 +850,10 @@ fn attention_tile(head_dim: usize) -> usize {
 /// The blocked kernel carries about ten of them against the row kernel's four:
 /// the query block, the accumulator, the key and value tiles, and one per step
 /// of the rescale chain, since the codegen stages each in shared memory rather
-/// than registers.
-///
-/// Ten at 4 KB apiece is 40 KB, as far as this can go. The ceiling is 48 KB
-/// rather than Turing's 64 because these are `memref.global`s in the shared
-/// address space, so they become statically declared arrays, and static shared
-/// memory caps at 48 KB on every architecture. The rest needs a dynamic
-/// allocation and an opt-in at launch.
+/// than registers. Ten at 4 KB apiece is 40 KB, as far as this can go: these
+/// are `memref.global`s in the shared address space, so they become statically
+/// declared arrays, which cap at 48 KB on every architecture rather than
+/// Turing's 64.
 const ATTN_BLOCK_ELEMS: usize = 1024;
 
 /// Queries one program of [`attention_block_src`] covers: four at a head
@@ -939,27 +891,20 @@ const ATTN_KT_ROWS: usize = 8;
 /// program, which is the right shape at a small head dimension and the wrong
 /// one here. At 256 the query tile, the accumulator and the key and value tiles
 /// are all `[BR, 256]` f32, so 48 KB of shared memory caps `BR` at four and the
-/// score tile is `[4, 4]`: sixteen output elements on a 256-thread CTA, which
-/// measures 0.1 TFLOP/s and 30 ms of a 512-token pass.
-///
-/// Materializing the scores costs a `[rows, keys]` buffer per head and removes
-/// the cap, so both halves become ordinary tiled matmuls at 3.3 and 2.6
-/// TFLOP/s. The score matrix is 1 MB a head here, and the three passes over it
-/// are 480 microseconds against the 26 ms the tiling saves.
-///
-/// The tensor cores are left out. They do reach 6.0 and 4.8 TFLOP/s against 3.3
-/// and 2.6, but by rounding both operands to f16, which costs the call three
-/// digits of accuracy and measures nothing end to end: once attention is off
-/// the critical path the pass is the same 145 ms either way.
+/// score tile is `[4, 4]`: sixteen output elements on a 256-thread CTA, 0.1
+/// TFLOP/s. Materializing the scores costs a `[rows, keys]` buffer per head and
+/// removes the cap, so both halves become ordinary tiled matmuls at 3.3 and 2.6
+/// TFLOP/s, which is 26 ms of a 512-token pass. The tensor cores would roughly
+/// double that again, but only by rounding both operands to f16, and attention
+/// is off the critical path either way.
 ///
 /// Two things have to be arranged for those matmuls to be clean. `dot_t` cannot
 /// accumulate in place and `acc = acc + dot_t(..)` builds a whole tile per step
 /// instead, measuring 0.33 against 3.3 TFLOP/s, so the keys are transposed once
 /// a head and the scores are a plain `dot`. And a head is a column window of a
-/// wider tensor at an offset no promise can bound, so every operand slice would
-/// carry a mask and lose the pipelined path: with the head on the grid's third
-/// axis that measured 74.5 microseconds against 25.4. Each head is gathered
-/// into a buffer of its own first instead.
+/// wider tensor at an offset no promise can bound, so slicing one inside the
+/// kernel puts a mask on every operand and loses the pipelined path. Each head
+/// is gathered into a buffer of its own first instead.
 ///
 /// The three kernels split at the two points a row of scores has to be whole:
 /// the softmax needs its row's maximum before it can exponentiate anything and
@@ -1046,10 +991,9 @@ kernel attn_mix(P: tensor<f32>[R, NK], V: tensor<f32>[NK, DV], L: tensor<f32>[R,
 /// Causal attention over a block of queries at once.
 ///
 /// [`attention_src`] gives each program one query row, the right shape for
-/// decoding and the wrong one for a prompt: the key and value tiles are re-read
-/// per query, and a 512-token pass measured 0.09 TFLOP/s where this card's own
-/// flash-attention kernel does 5.3. Here a program owns `BR` consecutive
-/// positions of one head, so one pass over the cache serves all of them.
+/// decoding and the wrong one for a prompt, where it re-reads the key and value
+/// tiles per query. Here a program owns `BR` consecutive positions of one head,
+/// so one pass over the cache serves all of them.
 ///
 /// The query block needs no rearranging. `Q` is `[rows, n_head * head_dim]`,
 /// the same memory as the `[rows * n_head, head_dim]` the norm and the rotary
@@ -1125,10 +1069,9 @@ kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f32>[NK, KW],
 fn copy_2d_src(width: usize, aligned: bool) -> String {
     // Without the promise the compiler cannot know the declared pitch is at
     // least the width, so every element carries a bounds check and the copy
-    // does not vectorize: seven predicates and no vector access against two and
-    // two. The promise is that both pitches are whole multiples of the width,
-    // which a gather of one head out of a row of them satisfies and a slice of
-    // a fused projection does not, so it compiles both ways.
+    // does not vectorize. It says both pitches are whole multiples of the
+    // width, which a gather of one head out of a row of them satisfies and a
+    // slice of a fused projection does not, so it compiles both ways.
     let claim = if aligned {
         "@aligned(SW = W, DW = W)"
     } else {
@@ -1174,10 +1117,9 @@ kernel swiglu_2d(G: tensor<f32>[R, GW], U: tensor<f32>[R, UW], O: tensor<f32>[R,
 ///
 /// The kernel holds three tiles of this width, the gate, the up half and the
 /// result, in static shared memory, which caps at 48 KB whatever the card has.
-/// A whole row does not always fit: MiniCPM5-1B's 4608-wide feed-forward wants
-/// 54 KB and the JIT refuses the module. So the row splits into the widest tile
-/// that both divides it and fits, and the grid takes a second axis. A width
-/// that already fits stays one tile.
+/// A whole row does not always fit, so the row splits into the widest tile that
+/// both divides it and fits, and the grid takes a second axis. A width that
+/// already fits stays one tile.
 fn swiglu_2d_tile(width: usize) -> usize {
     const OPERANDS: usize = 3;
     let fits = STATIC_SHARED_LIMIT / (OPERANDS * size_of::<f32>());
@@ -1232,21 +1174,18 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
 /// one contiguous copy and a head a column window, so `K` and `V` are indexed
 /// by `col` rather than sliced by row.
 ///
-/// Unsplit, one query row leaves a grid of `n_head` blocks, eight of this
-/// card's forty-eight multiprocessors, each walking the whole cache in turn:
-/// fifty microseconds a call and eight per cent of a decode step for a few
-/// megabytes of reading. A split block covers a slice of the keys and writes
-/// the running maximum, sum and unnormalized accumulator it reached. Merging
-/// those is the same rescaling the online softmax already does between tiles,
-/// so the arithmetic is unchanged and the pieces stop having to be visited in
-/// order.
+/// Unsplit, one query row leaves a grid of `n_head` blocks, a sixth of this
+/// card, each walking the whole cache in turn: eight per cent of a decode step
+/// for a few megabytes of reading. A split block covers a slice of the keys and
+/// writes the running maximum, sum and unnormalized accumulator it reached.
+/// Merging those is the same rescaling the online softmax already does between
+/// tiles, so the arithmetic is unchanged.
 ///
 /// The merge takes the maximum over all the pieces first and then weighs each
-/// once, rather than rescaling what it has at every step: the running form
-/// carries the wide accumulator through a multiply and an add per piece, this
-/// one touches it twice in total and its first pass is over single values. The
-/// split count rides in the partial buffer's extent rather than being compiled
-/// in, so one module serves every cache length.
+/// once, rather than rescaling what it has at every step, which touches the
+/// wide accumulator twice in total. The split count rides in the partial
+/// buffer's extent rather than being compiled in, so one module serves every
+/// cache length.
 fn attention_split_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> String {
     let scale = (head_dim as f32).sqrt().recip();
     format!(
@@ -1330,9 +1269,8 @@ kernel attention_merge(P: tensor<f32>[SH, D], ML: tensor<f32>[SH, 2],
 /// Pieces the key axis is cut into while decoding.
 ///
 /// Fixed rather than chosen from the cache length, which is what it wants to
-/// be: a count growing with the cache changed the pass's shape every few dozen
-/// tokens, and each change costs a graph rebuild and a step issued the slow
-/// way. Eight pieces is 64 blocks at this head count, and a piece with no keys
+/// be: a count growing with the cache changes the pass's shape every few dozen
+/// tokens, and each change costs a graph rebuild. A piece with no keys only
 /// costs a block that exits immediately.
 const ATTN_SPLITS: usize = 8;
 
@@ -1398,9 +1336,6 @@ kernel attention(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
 /// `[width / 32, 32]` it is a row per eight lanes and the partials fold once
 /// more. And blocks of 32 are what a Q8_0 scale covers, so the maximum the
 /// quantization needs is the same row reduction over the same tile.
-///
-/// A projection reads every one of these immediately afterwards, and the
-/// separate quantizing pass was a launch for four kilobytes of work.
 fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
     let blocks = width / RMS_LANE;
     let (gated, quantized) = (form.gated(), form.quantized());
@@ -1463,11 +1398,10 @@ kernel {name}(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
 /// Threads a normalization's CTA carries: one per value of its tile, up to the
 /// usual width.
 ///
-/// The delta net normalizes one head of one position, 128 values, so on a
-/// 256-thread CTA half the block had nothing to do while the grid ran 8192 of
-/// them. Sizing the block to the tile is what walking several groups per
-/// program was reaching for, and it does not lengthen the reduction: the group
-/// still belongs to one program.
+/// The delta net normalizes one head of one position, 128 values, which on a
+/// 256-thread CTA leaves half the block idle across a grid of 8192. Sizing the
+/// block to the tile does not lengthen the reduction, since the group still
+/// belongs to one program.
 fn norm_cta(blocks: usize) -> usize {
     (blocks * RMS_LANE).clamp(WARP_THREADS, CTA_THREADS as usize)
 }
@@ -1777,7 +1711,7 @@ impl DeviceBackend {
     ///
     /// Nothing here allocates. A pass is some seven hundred launches, and a
     /// fresh vector per descriptor cost most of a millisecond a step in host
-    /// code alone, which the card spends idle waiting to be handed the pass.
+    /// code alone, which the card spends idle.
     fn launch(
         &self,
         module: &Module,
@@ -2069,10 +2003,8 @@ impl DeviceBackend {
 
         let f32_bytes = size_of::<f32>() as u64;
 
-        // The rows go through four kernels, deepest tile first, each taking
-        // the whole tiles it can before handing the remainder on. That is the
-        // difference between a prefill walking its rows on the host and one
-        // spending them on the grid.
+        // The rows go through four kernels, deepest tile first, each taking the
+        // whole tiles it can before handing the remainder on.
         //
         // `qmma_t` carries the scales itself, so it needs no bounds mask on the
         // weight and keeps its 64-wide column tile; a width that does not
@@ -2324,9 +2256,7 @@ impl DeviceBackend {
     /// The gathers are what let the matmuls be clean: a head is a column window
     /// of a wider tensor, and slicing one inside the kernel costs every operand
     /// a bounds mask and with it the pipelined path. The keys are transposed on
-    /// the way in for the same reason, since `dot_t` cannot accumulate in
-    /// place. Both are strided copies of half a megabyte, one per head against
-    /// 50 microseconds of matmul.
+    /// the way in because `dot_t` cannot accumulate in place.
     fn attention_gemm(&self, q: Buf, keys: Buf, values: Buf, spec: Attn, out: Buf) -> Result<()> {
         let (rows, dim, nk) = (spec.rows, spec.head_dim, spec.total());
         let (qw, kw) = ((spec.n_head * dim) as i64, spec.kv_width());
@@ -2550,13 +2480,9 @@ impl DeviceBackend {
     /// whether a pass is recording, and the recorder does not allocate. See
     /// [`Pool::take_fresh`] for why reuse is unsafe while recording.
     ///
-    /// Two callers reach this and both were wrong before it existed. A constant
-    /// that grows mid-pass, as the rotary table does when a sequence passes its
-    /// length: on `minicpm5-1b` the new table was exactly the size of the key
-    /// cache the same block had just outgrown, so it landed on it and the copy
-    /// carrying the cache forward read rotary angles instead. And a zero fill,
-    /// which a delta net asks for once per generation, whose memset goes
-    /// straight to the stream while the pass around it is only recorded.
+    /// Two callers need it: a constant that grows mid-pass, as the rotary table
+    /// does when a sequence passes its length, and a zero fill, whose memset
+    /// goes straight to the stream while the pass around it is only recorded.
     fn alloc_written_now(&self, len: usize) -> Result<Buf> {
         if !self.recording.get() {
             return self.alloc(len);
@@ -2693,10 +2619,9 @@ impl Backend for DeviceBackend {
             out.len(),
             buffer.len()
         );
-        // Through page-locked staging. The logits are the one thing a decode
-        // step brings back, a megabyte a token at this vocabulary, and straight
-        // into a Vec the driver bounces it through its own pinned staging a
-        // page at a time, at about a third of the rate.
+        // Through page-locked staging. Straight into a Vec the driver bounces
+        // the copy through its own pinned staging a page at a time, at about a
+        // third of the rate, and the logits are a megabyte a token here.
         let mut staging = self.readback.borrow_mut();
         let too_small = staging.as_ref().is_none_or(|s| s.len() < out.len());
         if too_small {
