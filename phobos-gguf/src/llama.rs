@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 
 use crate::Gguf;
-use crate::backend::{Attn, Backend, Buf, Plane, QAct, Rope, read_vec};
+use crate::backend::{Attn, Backend, Buf, HPlane, Plane, QAct, Rope, read_vec};
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads};
 
 #[derive(Clone, Debug)]
@@ -257,7 +257,7 @@ impl Model {
     /// Device bytes both caches of every block take per position.
     pub fn kv_bytes_per_token(&self) -> usize {
         let width = self.config.n_head_kv * self.config.head_dim;
-        self.config.n_block * 2 * width * size_of::<f32>()
+        self.config.n_block * 2 * width * size_of::<u16>()
     }
 
     /// Fresh generation state.
@@ -414,13 +414,13 @@ impl Model {
         // position is a contiguous row and the value plane goes from the
         // projection straight into the cache.
         let (keys, values) = cache.reserve(backend, spec.total(), kv_width)?;
-        let landing = Plane {
-            buf: values,
+        let landing = |buf| HPlane {
+            buf,
             offset: start_pos * kv_width,
             pitch: kv_width,
         };
 
-        backend.copy_2d(part(width + kv_width), landing, rows, kv_width)?;
+        backend.store_2d(part(width + kv_width), landing(values), rows, kv_width)?;
 
         // A decode step's query is the front of the projection and already
         // contiguous, so it rotates and attends where it lies. Past one row the
@@ -457,7 +457,7 @@ impl Model {
             )?;
         }
 
-        backend.copy(k, 0, keys, start_pos * kv_width, rows * kv_width)?;
+        backend.store_2d(dense_plane(k, kv_width), landing(keys), rows, kv_width)?;
 
         let mixed = backend.alloc(rows * width)?;
         backend.attention(q, keys, values, spec, mixed)?;

@@ -655,11 +655,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if mv.row_stride.is_some() {
             bail!("a padded staging tile cannot be sliced");
         }
-        
+
         if mv.swizzle.is_some() {
             bail!("a swizzled staging tile cannot be sliced");
         }
-        
+
         Ok(())
     }
 
@@ -749,28 +749,42 @@ impl<'p, 'c> Codegen<'p, 'c> {
             }
         }
 
-        // 4-element alignment proof: the flat offset is sum off_i*stride_i, so
-        // its divisibility is the gcd of the per-dim terms. Dynamic strides
-        // count as multiples of 4 elements (the row-pitch ABI; see module
-        // docs). Every row of the slice is aligned iff the base is and all
-        // outer strides are multiples of 4 elements. A multiple-of-4-elements
-        // boundary is exactly the byte alignment a 4-element vector of the
-        // element type needs (16B for f32, 8B for f16), so the proof is
-        // element-type-agnostic; each consumer pairs it with its own element
-        // check before building f32-specific vectors.
+        // Alignment proof: the flat offset is sum off_i*stride_i, so its
+        // divisibility is the gcd of the per-dim terms. Every row of the slice
+        // then lands on that same boundary if each outer stride does too, so
+        // the answer is one gcd over the base and those strides.
+        //
+        // A stride is the product of the extents below it. A static extent
+        // contributes itself; a dynamic one contributes whatever `@aligned`
+        // promised about it, and four elements when nothing was, that being the
+        // row-pitch ABI (see the module docs). Four elements is 16 bytes of f32
+        // and only 8 of f16, which is why the number is carried rather than
+        // reduced to a flag: a promise is what lets a narrow element type reach
+        // a full 16-byte access, and without one it stages at half width.
         //
         // ..thanks Claude!
-        let strides = row_major_strides(&src.shape);
-        let stride_div = |s: i64| if s == DYN { 4 } else { s.abs().max(1) };
-        let base_div = off_divs.iter().zip(&strides).fold(0i64, |acc, (&o, &s)| {
+        let extent_div = |d: usize| {
+            if src.shape[d] == DYN {
+                src.div_of(d).max(4)
+            } else {
+                src.shape[d].abs().max(1)
+            }
+        };
+        let stride_div = |i: usize| {
+            (i + 1..rank)
+                .map(extent_div)
+                .try_fold(1i64, |acc: i64, d| acc.checked_mul(d))
+                .map_or(1 << 20, |d| d.min(1 << 20))
+        };
+        let base_div = off_divs.iter().enumerate().fold(0i64, |acc, (i, &o)| {
             let term = if o == 0 {
                 0
             } else {
-                o.saturating_mul(stride_div(s)).min(1 << 20)
+                o.saturating_mul(stride_div(i)).min(1 << 20)
             };
             gcd(acc, term)
         });
-        let aligned = mult4(base_div) && strides[..rank - 1].iter().all(|&s| mult4(stride_div(s)));
+        let align_div = (0..rank - 1).map(stride_div).fold(base_div, gcd);
 
         // Bounds mask: a dim that may reach past the source extent records its
         // offset and extent for the masked load/store epilogue.
@@ -824,7 +838,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             elem: src.elem,
             shape: static_sizes,
             row_stride: None,
-            aligned,
+            align_div,
             // subviews are never taken of swizzled staging buffers (ldmatrix reads those directly),
             // so the swizzle does not propagate here.
             swizzle: None,

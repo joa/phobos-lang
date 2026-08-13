@@ -7,13 +7,14 @@ use cust::memory::{CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 
+use phobos_base::half::f16_to_f32;
 use phobos_kernels::pool::Pool;
 use phobos_kernels::{Variants, compile, compile_shared, cuda_ok, matmul, push_descriptor};
 
 use super::fuse::{self, Bound, Chain, ChainKey, Plan, Scratch};
 use super::{
-    Attn, Backend, Buf, DeltaMix, Fused, FusedMlp, FusedProject, Plane, Q8_BLOCK, QAct, QBuf, Rope,
-    check_q8_shape,
+    Attn, Backend, Buf, DeltaMix, Fused, FusedMlp, FusedProject, HBuf, HPlane, Plane, Q8_BLOCK,
+    QAct, QBuf, Rope, check_q8_shape,
 };
 
 const FUSED_KERNEL: &str = "fused";
@@ -841,12 +842,26 @@ kernel gate_into(X: tensor<f32>[M, N], G: tensor<f32>[M, N]) {
 /// bounds it, not arithmetic: key and value tiles are `[BC, head_dim]` each and
 /// the codegen allocates a second pair for the masked replay of the loop body,
 /// so four have to fit under the 48K [`ATTN_BLOCK_ELEMS`] explains.
-const ATTN_TILE_ELEMS: usize = 2048;
+///
+/// The caches being f16 halves what those four cost, so the budget doubles and
+/// a head dimension of 256 reaches [`ATTN_TILE_ROWS`] where it used to stop at
+/// half of it.
+const ATTN_TILE_ELEMS: usize = 4096;
+
+/// The other bound on that tile, and usually the tighter one.
+///
+/// Rows are what the scan's remainder costs, which is why this is capped apart
+/// from the budget above. Each of the [`ATTN_SPLITS`] pieces walks its whole
+/// tiles and then picks up what is left one key at a time, so a decode, which
+/// reaches every `NK` rather than the powers of two `attndecode` sweeps, pays
+/// about half a tile of single-key steps per piece. Going to 32 measures 7%
+/// faster there, where no remainder ever runs, and 45% slower on a model.
+const ATTN_TILE_ROWS: usize = 16;
 
 /// Rows of the cache one pass of the scan covers, and the cap on the single-key
 /// remainder that follows it.
 fn attention_tile(head_dim: usize) -> usize {
-    (ATTN_TILE_ELEMS / head_dim).clamp(1, 32)
+    (ATTN_TILE_ELEMS / head_dim).clamp(1, ATTN_TILE_ROWS)
 }
 
 /// Elements of one `[BR, head_dim]` tile in [`attention_block_src`]. The blocked
@@ -900,7 +915,8 @@ const ATTN_KT_ROWS: usize = 8;
 /// scores are a plain `dot`. And a head is a column window at an offset no
 /// promise can bound, so slicing one inside the kernel puts a mask on every
 /// operand and loses the pipelined path; each head is gathered into its own
-/// buffer first.
+/// buffer first. That gather is where the f16 cache widens, once per head
+/// rather than once per tile the matmuls stage.
 ///
 /// The three kernels split at the two points a row of scores has to be whole:
 /// the softmax needs its row's maximum before it can exponentiate and its sum
@@ -916,10 +932,10 @@ pub fn attn_gemm_src(head_dim: usize, tile: usize) -> String {
         "@launch(256)
 @autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], TB in [{ATTN_KT_ROWS}], HD in [{head_dim}])
 @aligned(NK = TN, KW = HD, DK = TB)
-kernel attn_kt(K: tensor<f32>[NK, KW], T: tensor<f32>[DK, NK]) {{
+kernel attn_kt(K: tensor<f16>[NK, KW], T: tensor<f32>[DK, NK]) {{
   let p = program_id(0)
   var t = K[p * TB :+ TB, 0 :+ HD]
-  T[0 :+ HD, p * TB :+ TB] = transpose(t)
+  T[0 :+ HD, p * TB :+ TB] = f32(transpose(t))
 }}
 
 @launch(256)
@@ -987,7 +1003,9 @@ kernel attn_mix(P: tensor<f32>[R, NK], V: tensor<f32>[NK, DV], L: tensor<f32>[R,
 ///
 /// [`attention_src`] gives each program one query row, which re-reads the key
 /// and value tiles per query. Here a program owns `BR` consecutive positions of
-/// one head, so one pass over the cache serves all of them.
+/// one head, so one pass over the cache serves all of them. The caches are f16
+/// and widen as the tiles are read, for the reason [`attention_split_src`]
+/// gives.
 ///
 /// The query block needs no rearranging: `Q` is `[rows, n_head * head_dim]`, the
 /// same memory as the `[rows * n_head, head_dim]` the norm and the rotary want.
@@ -1007,8 +1025,8 @@ fn attention_block_src(n_head: usize, group: usize, head_dim: usize, tile: usize
     format!(
         "@launch(256)
 @autotune(NH in [{n_head}], G in [{group}], D in [{head_dim}], BR in [{tile}])
-kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f32>[NK, KW],
-                       V: tensor<f32>[NK, KW], O: tensor<f32>[R, QW]) {{
+kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
+                       V: tensor<f16>[NK, KW], O: tensor<f32>[R, QW]) {{
   let qt = program_id(0)
   let h = program_id(1)
   let qcol = h * D
@@ -1052,11 +1070,42 @@ kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f32>[NK, KW],
     )
 }
 
-/// A strided block copy, the shape every fused projection's split takes. The
-/// width is baked in rather than tiled, so a row is one tile with no remainder
-/// to mask, and the pitches are the declared extents with the starting corner a
-/// pointer offset.
-fn copy_2d_src(width: usize, aligned: bool) -> String {
+/// What a strided copy moves between. The caches are f16 and everything else is
+/// f32, so a copy into or out of one converts; see [`HBuf`].
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Strided {
+    /// f32 either side, the shape every fused projection's split takes.
+    Dense,
+    /// Narrowing: keys and values landing in a cache.
+    Store,
+    /// Widening: a cached head gathered for the prompt's matmuls.
+    Load,
+}
+
+impl Strided {
+    fn kernel(self) -> &'static str {
+        match self {
+            Strided::Dense => "copy_2d",
+            Strided::Store => "store_2d",
+            Strided::Load => "load_2d",
+        }
+    }
+
+    /// Source type, destination type, and the conversion between them, which
+    /// the language wants written out rather than implied by the store.
+    fn types(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            Strided::Dense => ("f32", "f32", ""),
+            Strided::Store => ("f32", "f16", "f16"),
+            Strided::Load => ("f16", "f32", "f32"),
+        }
+    }
+}
+
+/// A strided block copy. The width is baked in rather than tiled, so a row is
+/// one tile with no remainder to mask, and the pitches are the declared extents
+/// with the starting corner a pointer offset.
+fn copy_2d_src(kind: Strided, width: usize, aligned: bool) -> String {
     // Without the promise every element carries a bounds check and the copy does
     // not vectorize. It says both pitches are whole multiples of the width,
     // which a gather of one head satisfies and a slice of a fused projection
@@ -1066,16 +1115,24 @@ fn copy_2d_src(width: usize, aligned: bool) -> String {
     } else {
         ""
     };
+    let (from, to, convert) = kind.types();
+    let read = "S[r :+ 1, 0 :+ W]";
+    let value = if convert.is_empty() {
+        read.to_string()
+    } else {
+        format!("{convert}({read})")
+    };
 
     format!(
         "@launch(256)
 @autotune(W in [{width}])
 {claim}
-kernel copy_2d(S: tensor<f32>[R, SW], D: tensor<f32>[R, DW]) {{
+kernel {name}(S: tensor<{from}>[R, SW], D: tensor<{to}>[R, DW]) {{
   let r = program_id(0)
-  D[r :+ 1, 0 :+ W] = S[r :+ 1, 0 :+ W]
+  D[r :+ 1, 0 :+ W] = {value}
 }}
-"
+",
+        name = kind.kernel(),
     )
 }
 
@@ -1177,14 +1234,21 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
 /// asks for the staging the mask used to force, and the copy then vectorizes.
 /// Worth 37% of a decode step's attention at a cache of 1024, and 44% of what
 /// each further cached position costs, which is the number that matters.
+///
+/// `K` and `V` are f16 and the query is not. A cached element widens where the
+/// staged tile is read, so the contraction is the same f32 one and only the
+/// halves cross the bus; the staged tiles are f16 as well, which is the shared
+/// memory the tile size above is measured against. Nothing else narrows: the
+/// query, the running maximum and the accumulator all stay f32, and a decode
+/// step is bound by what it reads rather than by what it holds.
 fn attention_split_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> String {
     let scale = (head_dim as f32).sqrt().recip();
     format!(
         "@launch(256)
 @autotune(NH in [{n_head}], G in [{group}], D in [{head_dim}], BC in [{tile}])
 @aligned(KW = D)
-kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
-                       V: tensor<f32>[NK, KW],
+kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
+                       V: tensor<f16>[NK, KW],
                        P: tensor<f32>[SH, D], ML: tensor<f32>[SH, 2]) {{
   let h = program_id(0)
   let s = program_id(1)
@@ -1270,8 +1334,8 @@ fn attention_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> S
         "@launch(256)
 @autotune(NH in [{n_head}], G in [{group}], D in [{head_dim}], BC in [{tile}])
 @aligned(KW = D)
-kernel attention(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
-                 V: tensor<f32>[NK, KW], O: tensor<f32>[R, D]) {{
+kernel attention(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
+                 V: tensor<f16>[NK, KW], O: tensor<f32>[R, D]) {{
   let t = program_id(0)
   let h = program_id(1)
   let col = h / G * D
@@ -1463,7 +1527,7 @@ const FUSED_GRID_TRIES: usize = 4;
 const _: () = assert!(Q8_QDOT_TN == fuse::OUT_TILE);
 
 /// Whether one stage of a decode step goes through the fusion pass.
-/// 
+///
 /// Switch off via `PHOBOS_FUSED=0`.
 fn fused_stage(var: &str) -> bool {
     fn asked(var: &str) -> Option<bool> {
@@ -1555,8 +1619,9 @@ pub struct DeviceBackend {
     convs: RefCell<HashMap<ConvKey, Module>>,
     /// Gate kernels, keyed by head count.
     gates: RefCell<HashMap<usize, Module>>,
-    /// Strided copy kernels, keyed by the width they copy.
-    splits: RefCell<HashMap<(usize, bool), Module>>,
+    /// Strided copy kernels, keyed by direction, the width they copy, and
+    /// whether the pitches let the promise be made.
+    splits: RefCell<HashMap<(Strided, usize, bool), Module>>,
     /// Rotary kernels, keyed by head count and half the rotary width.
     ropes: RefCell<HashMap<(usize, usize), Module>>,
     /// Attention kernels, keyed by query heads, group size and head dimension.
@@ -1757,6 +1822,32 @@ impl DeviceBackend {
             "offset {elements} is past the buffer"
         );
         Ok(buffer.as_device_ptr().as_raw() + (elements * size_of::<f32>()) as u64)
+    }
+
+    /// The same for f16 storage, whose offset is counted in halves.
+    ///
+    /// An [`HBuf`] is a slot of the one table, holding a buffer of half as many
+    /// f32 words: the pool then serves both kinds, and a cache released at the
+    /// end of a sequence comes back as ordinary scratch. Nothing else about the
+    /// two handles is interchangeable, which is why they are separate types
+    /// above; only this file knows they share a table.
+    fn hptr(&self, buf: HBuf, elements: usize) -> Result<u64> {
+        let slots = self.slots.borrow();
+        let buffer = slots
+            .get(buf.0)
+            .and_then(Option::as_ref)
+            .context("use of a released buffer handle")?;
+        ensure!(
+            elements <= 2 * buffer.len(),
+            "offset {elements} is past the buffer"
+        );
+        Ok(buffer.as_device_ptr().as_raw() + (elements * size_of::<u16>()) as u64)
+    }
+
+    /// The f32 words behind f16 storage. Only safe for a whole even run, which
+    /// [`Backend::copy_h`] promises; see [`DeviceBackend::hptr`].
+    fn words(buf: HBuf) -> Buf {
+        Buf(buf.0)
     }
 
     fn len_of(&self, buf: Buf) -> Result<usize> {
@@ -2642,7 +2733,7 @@ impl DeviceBackend {
     /// Causal attention for a prompt, one head at a time, as two matmuls with
     /// the scores materialized in between. The gathers and the key transpose are
     /// what let those matmuls be clean; see [`attn_gemm_src`].
-    fn attention_gemm(&self, q: Buf, keys: Buf, values: Buf, spec: Attn, out: Buf) -> Result<()> {
+    fn attention_gemm(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         let (rows, dim, nk) = (spec.rows, spec.head_dim, spec.total());
         let (qw, kw) = ((spec.n_head * dim) as i64, spec.kv_width());
         let tile = ATTN_GEMM_TILE;
@@ -2670,22 +2761,19 @@ impl DeviceBackend {
                             module,
                             "attn_kt",
                             &[
-                                (self.ptr(keys, at)?, [n, kw as i64]),
+                                (self.hptr(keys, at)?, [n, kw as i64]),
                                 (self.ptr(transposed, 0)?, [d, n]),
                             ],
                             (nk.div_ceil(ATTN_KT_ROWS) as u32, 1, 1),
                         )?;
-                        self.copy_2d(
-                            Plane {
-                                buf: values,
-                                offset: at,
-                                pitch: kw,
-                            },
-                            Plane {
-                                buf: value,
-                                offset: 0,
-                                pitch: dim,
-                            },
+                        // The prompt's two matmuls contract in f32, so the head
+                        // widens once here rather than on every tile the mix
+                        // stages. The transpose above widens for the same
+                        // reason.
+                        self.strided(
+                            Strided::Load,
+                            (self.hptr(values, at)?, kw),
+                            (self.ptr(value, 0)?, dim),
                             nk,
                             dim,
                         )?;
@@ -2906,6 +2994,36 @@ impl DeviceBackend {
             .as_raw())
     }
 
+    /// A strided block copy between two planes already resolved to a pointer
+    /// and a pitch, converting if the two sides differ in width.
+    fn strided(
+        &self,
+        kind: Strided,
+        src: (u64, usize),
+        dst: (u64, usize),
+        rows: usize,
+        width: usize,
+    ) -> Result<()> {
+        let aligned = src.1.is_multiple_of(width) && dst.1.is_multiple_of(width);
+        self.with_kernel(
+            &self.splits,
+            (kind, width, aligned),
+            kind.kernel(),
+            || copy_2d_src(kind, width, aligned),
+            |module| {
+                self.launch(
+                    module,
+                    kind.kernel(),
+                    &[
+                        (src.0, [rows as i64, src.1 as i64]),
+                        (dst.0, [rows as i64, dst.1 as i64]),
+                    ],
+                    (rows as u32, 1, 1),
+                )
+            },
+        )
+    }
+
     /// A pointwise launch over `len` elements of one or more flat buffers. Past
     /// enough of them to fill the card the wide kernel takes over; see
     /// [`ELEM_TILE_WIDE`].
@@ -2942,6 +3060,53 @@ impl Backend for DeviceBackend {
             self.pool.put(buffer);
             self.free_slots.borrow_mut().push(buf.0);
         }
+    }
+
+    fn alloc_h(&self, len: usize) -> Result<HBuf> {
+        Ok(HBuf(self.store(self.pool.take(len.div_ceil(2))?).0))
+    }
+
+    fn release_h(&self, buf: HBuf) {
+        self.release(DeviceBackend::words(buf));
+    }
+
+    fn zeroed_h(&self, len: usize) -> Result<HBuf> {
+        Ok(HBuf(self.zeroed(len.div_ceil(2))?.0))
+    }
+
+    fn read_h(&self, buf: HBuf, out: &mut [f32]) -> Result<()> {
+        // Through the f32 readback: a word is two halves, low one first.
+        let mut words = vec![0.0f32; out.len().div_ceil(2)];
+        self.read(DeviceBackend::words(buf), &mut words)?;
+        for (o, bits) in out.iter_mut().zip(
+            words
+                .iter()
+                .flat_map(|w| [w.to_bits() as u16, (w.to_bits() >> 16) as u16]),
+        ) {
+            *o = f16_to_f32(bits);
+        }
+        Ok(())
+    }
+
+    fn copy_h(
+        &self,
+        src: HBuf,
+        src_offset: usize,
+        dst: HBuf,
+        dst_offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        ensure!(
+            src_offset.is_multiple_of(2) && dst_offset.is_multiple_of(2) && len.is_multiple_of(2),
+            "copy_h moves whole words, so it needs an even run at even offsets"
+        );
+        self.copy(
+            DeviceBackend::words(src),
+            src_offset / 2,
+            DeviceBackend::words(dst),
+            dst_offset / 2,
+            len / 2,
+        )
     }
 
     fn upload(&self, data: &[f32]) -> Result<Buf> {
@@ -3312,30 +3477,15 @@ impl Backend for DeviceBackend {
 
     fn copy_2d(&self, src: Plane, dst: Plane, rows: usize, width: usize) -> Result<()> {
         self.check_distinct("copy_2d", dst.buf, &[src.buf]);
-        let aligned = src.pitch.is_multiple_of(width) && dst.pitch.is_multiple_of(width);
-        self.with_kernel(
-            &self.splits,
-            (width, aligned),
-            "copy_2d",
-            || copy_2d_src(width, aligned),
-            |module| {
-                self.launch(
-                    module,
-                    "copy_2d",
-                    &[
-                        (
-                            self.ptr(src.buf, src.offset)?,
-                            [rows as i64, src.pitch as i64],
-                        ),
-                        (
-                            self.ptr(dst.buf, dst.offset)?,
-                            [rows as i64, dst.pitch as i64],
-                        ),
-                    ],
-                    (rows as u32, 1, 1),
-                )
-            },
-        )
+        let from = (self.ptr(src.buf, src.offset)?, src.pitch);
+        let to = (self.ptr(dst.buf, dst.offset)?, dst.pitch);
+        self.strided(Strided::Dense, from, to, rows, width)
+    }
+
+    fn store_2d(&self, src: Plane, dst: HPlane, rows: usize, width: usize) -> Result<()> {
+        let from = (self.ptr(src.buf, src.offset)?, src.pitch);
+        let to = (self.hptr(dst.buf, dst.offset)?, dst.pitch);
+        self.strided(Strided::Store, from, to, rows, width)
     }
 
     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()> {
@@ -3366,8 +3516,8 @@ impl Backend for DeviceBackend {
         )
     }
 
-    fn attention(&self, q: Buf, keys: Buf, values: Buf, spec: Attn, out: Buf) -> Result<()> {
-        self.check_distinct("attention", out, &[q, keys, values]);
+    fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+        self.check_distinct("attention", out, &[q]);
         let (r, d) = ((spec.rows * spec.n_head) as i64, spec.head_dim as i64);
         let (nk, kw) = (spec.total() as i64, spec.kv_width() as i64);
         let (qw, block) = (
@@ -3405,8 +3555,8 @@ impl Backend for DeviceBackend {
                         "attention_block",
                         &[
                             (self.ptr(q, 0)?, [spec.rows as i64, qw]),
-                            (self.ptr(keys, 0)?, [nk, kw]),
-                            (self.ptr(values, 0)?, [nk, kw]),
+                            (self.hptr(keys, 0)?, [nk, kw]),
+                            (self.hptr(values, 0)?, [nk, kw]),
                             (self.ptr(out, 0)?, [spec.rows as i64, qw]),
                         ],
                         (spec.rows.div_ceil(block) as u32, spec.n_head as u32, 1),
@@ -3438,8 +3588,8 @@ impl Backend for DeviceBackend {
                         "attention_split",
                         &[
                             (self.ptr(q, 0)?, [r, d]),
-                            (self.ptr(keys, 0)?, [nk, kw]),
-                            (self.ptr(values, 0)?, [nk, kw]),
+                            (self.hptr(keys, 0)?, [nk, kw]),
+                            (self.hptr(values, 0)?, [nk, kw]),
                             (part, [rows, d]),
                             (ml, [rows, 2]),
                         ],
@@ -3476,8 +3626,8 @@ impl Backend for DeviceBackend {
                     "attention",
                     &[
                         (self.ptr(q, 0)?, [r, d]),
-                        (self.ptr(keys, 0)?, [nk, kw]),
-                        (self.ptr(values, 0)?, [nk, kw]),
+                        (self.hptr(keys, 0)?, [nk, kw]),
+                        (self.hptr(values, 0)?, [nk, kw]),
                         (self.ptr(out, 0)?, [r, d]),
                     ],
                     (spec.rows as u32, spec.n_head as u32, 1),

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::Gguf;
 use crate::backend::{
-    Attn, Backend, Buf, DeltaMix, FusedMix, Plane, ProjRun, QAct, Rope, read_vec,
+    Attn, Backend, Buf, DeltaMix, FusedMix, HPlane, Plane, ProjRun, QAct, Rope, read_vec,
 };
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads, check_dims};
 
@@ -443,7 +443,7 @@ impl Model {
             .filter(|&index| self.config.is_attention_block(index))
             .count();
         let width = self.config.n_head_kv * self.config.head_dim;
-        attention_blocks * 2 * width * size_of::<f32>()
+        attention_blocks * 2 * width * size_of::<u16>()
     }
 
     /// Fresh generation state.
@@ -689,8 +689,22 @@ impl Model {
         // one contiguous copy rather than one per head, and the kernel reads a
         // head as a column window.
         let (keys, values) = cache.reserve(backend, spec.total(), kv_width)?;
-        backend.copy(k_normed, 0, keys, start_pos * kv_width, rows * kv_width)?;
-        backend.copy(v_buf, 0, values, start_pos * kv_width, rows * kv_width)?;
+        for (src, dst) in [(k_normed, keys), (v_buf, values)] {
+            backend.store_2d(
+                Plane {
+                    buf: src,
+                    offset: 0,
+                    pitch: kv_width,
+                },
+                HPlane {
+                    buf: dst,
+                    offset: start_pos * kv_width,
+                    pitch: kv_width,
+                },
+                rows,
+                kv_width,
+            )?;
+        }
 
         let mixed = backend.alloc(rows * width)?;
         backend.attention(q_normed, keys, values, spec, mixed)?;

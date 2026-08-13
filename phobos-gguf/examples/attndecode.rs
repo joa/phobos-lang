@@ -10,6 +10,13 @@
 // go through a pass, since a bare launch costs more in driver time than the
 // kernel costs on the card.
 //
+// What this cannot see: the lengths below are powers of two, so the cache
+// divides the split count and the tile exactly and the single-key remainder
+// each split walks after its whole tiles never runs. A decode reaches every
+// cache length and pays about half a tile of those per split. A tile change
+// that looks good here can be much worse in a model for that reason alone, so
+// read this against a `bench` run rather than on its own.
+//
 // The last three rows are diagnostic shapes rather than models. Grouped-query
 // attention gives several query heads one key head, and this path gives each
 // query head its own program, so a key head is read once per query that shares
@@ -24,7 +31,7 @@ use std::time::Instant;
 use anyhow::Result;
 
 use phobos_gguf::backend::device::DeviceBackend;
-use phobos_gguf::backend::{Attn, Backend, Buf};
+use phobos_gguf::backend::{Attn, Backend, Buf, HBuf};
 
 struct Shape {
     name: &'static str,
@@ -110,7 +117,13 @@ fn copy_bandwidth(backend: &dyn Backend, warm_secs: f64) -> Result<f64> {
 
 /// One decode step's worth of attention: every block's call, over that block's
 /// own cache, so nothing is served out of L2 that would not be.
-fn step(backend: &dyn Backend, caches: &[(Buf, Buf)], q: Buf, out: Buf, spec: Attn) -> Result<()> {
+fn step(
+    backend: &dyn Backend,
+    caches: &[(HBuf, HBuf)],
+    q: Buf,
+    out: Buf,
+    spec: Attn,
+) -> Result<()> {
     backend.begin_pass()?;
     for &(keys, values) in caches {
         backend.attention(q, keys, values, spec, out)?;
@@ -144,8 +157,8 @@ fn main() -> Result<()> {
             let caches = (0..shape.blocks)
                 .map(|_| {
                     Ok((
-                        backend.zeroed(length * kv_width)?,
-                        backend.zeroed(length * kv_width)?,
+                        backend.zeroed_h(length * kv_width)?,
+                        backend.zeroed_h(length * kv_width)?,
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
@@ -175,8 +188,9 @@ fn main() -> Result<()> {
             }
             let micros = start.elapsed().as_secs_f64() * 1e6 / f64::from(iters);
 
-            // Every cached key and value of every block, counted once.
-            let bytes = shape.blocks * length * kv_width * 2 * size_of::<f32>();
+            // Every cached key and value of every block, counted once. The
+            // caches are f16, so a position is half what it was.
+            let bytes = shape.blocks * length * kv_width * 2 * size_of::<u16>();
             let floor = bytes as f64 / bandwidth * 1e6;
             // The slope against the row above, which drops whatever fixed cost
             // the launches carry and leaves what a position itself is worth.
@@ -192,8 +206,8 @@ fn main() -> Result<()> {
             );
 
             for (keys, values) in caches {
-                backend.release(keys);
-                backend.release(values);
+                backend.release_h(keys);
+                backend.release_h(values);
             }
         }
         for buf in [q, out] {

@@ -205,7 +205,7 @@ float       = digit { digit } "." { digit } ;
 - **Attributes**:
   - `@autotune(X in [..], ...)`: local search space; the first choice seeds the shape env. Two values are inclusive bounds searched in doubling steps (`X in [16, 256]` -> 16, 32, 64, 128, 256); three or more are an explicit list of choices. `[256, 16]` is two values (when x > y)
   - `@cluster(X in [..], ...)`: super tile dimensions and search space for cluster tuning.
-  - `@aligned(DIM = tile, ...)`: promises that a symbolic tensor dimension is a whole number of `tile` elements, where `tile` is an integer or an `@autotune` constant. 
+  - `@aligned(DIM = tile, ...)`: promises that a symbolic tensor dimension is a whole number of `tile` elements, where `tile` is an integer or an `@autotune` constant. It also sets how far into a row a vector access may reach: the assumed multiple of 4 is 16 bytes of `f32` but only 8 of a 16-bit type, so a narrow tensor stages at half width unless a promise carries its row pitch to 16 bytes. 
   - `@launch(maxThreads[, minBlocks[, maxRegs]])`: specifies CTA thread assumption (default: 256); maps to PTX `.maxntid` / `.minnctapersm` / `.maxnreg` at codegen. `maxRegs` (16..255) hard-caps registers per thread, forcing ptxas to fit the budget (spilling if needed) where `minBlocks`'s `.minnctapersm` is only advisory.
   - `@pipeline`: selects the double-buffered (ping-pong shared buffer) MLIR GEMM backend.
   - `@tensorcore`: runs the matmul on tensor cores (sm_70+).

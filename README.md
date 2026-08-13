@@ -62,18 +62,17 @@ Two model front ends, each with a host backend and a GPU one:
 - **`phobos-onnx`**: ONNX protobuf to a graph IR, then shape inference, constant folding, LayerNorm
   and epilogue fusion. GPT-2 runs end to end and has been verified against its bundled reference, with a KV-cache path.
 
-Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 591.86, tokens per second,
-measured 2026-08-12 at `7140a4b`:
+Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 591.86, tokens per second:
 
 | test   | llama.cpp CUDA[^2]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  6765.69 +/-  23.23 |  5320.30 +/-  49.88 |
-| pp512  | 10791.51 +/-  13.04 |  8853.82 +/-  38.75 |
-| tg32   |   239.65 +/-   0.25 |   286.41 +/-   0.17 |
-| tg128  |   258.01 +/-   0.13 |   283.77 +/-   0.22 |
-| tg512  |   261.82 +/-   0.03 |   279.13 +/-   0.18 |
-| tg1024 |   261.37 +/-   0.32 |   273.73 +/-   0.11 |
-| tg2048 |   260.45 +/-   0.07 |   262.91 +/-   0.11 |
+| pp128  |  6812.24 +/-  31.75 |  5401.81 +/-  68.10 |
+| pp512  | 10809.88 +/-  15.58 |  8790.20 +/- 129.65 |
+| tg32   |   240.60 +/-   0.70 |   287.95 +/-   0.44 |
+| tg128  |   259.49 +/-   0.27 |   280.87 +/-   0.26 |
+| tg512  |   262.55 +/-   0.34 |   276.54 +/-   0.25 |
+| tg1024 |   262.90 +/-   0.14 |   271.92 +/-   0.24 |
+| tg2048 |   261.48 +/-   0.20 |   262.26 +/-   0.22 |
 
 <details>
   <summary>Benchmark Details</summary>

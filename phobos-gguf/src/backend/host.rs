@@ -2,9 +2,11 @@ use std::cell::RefCell;
 
 use anyhow::{Result, ensure};
 
+use phobos_base::half::{f16_to_f32, f32_to_f16};
+
 use super::{
-    Attn, Backend, Buf, DeltaMix, HostQuant, L2_EPS, Plane, Q8_BLOCK, QAct, QBuf, Rope,
-    check_q8_shape, quantize_row,
+    Attn, Backend, Buf, DeltaMix, HBuf, HPlane, HostQuant, L2_EPS, Plane, Q8_BLOCK, QAct, QBuf,
+    Rope, check_q8_shape, quantize_row,
 };
 
 /// The reference backend: every buffer is a `Vec<f32>` on the host. Defines the
@@ -15,6 +17,10 @@ pub struct HostBackend {
     slabs: RefCell<Vec<Vec<f32>>>,
     /// Freed handles, reused so a long decode does not grow the slab forever.
     free: RefCell<Vec<usize>>,
+    /// The f16 slabs, in their own table because [`HBuf`] indexes separately.
+    /// The caches are the only thing here; see [`HBuf`].
+    halves: RefCell<Vec<Vec<u16>>>,
+    free_halves: RefCell<Vec<usize>>,
     constants: RefCell<std::collections::HashMap<String, Buf>>,
     /// Q8_0 weights, kept quantized.
     quants: RefCell<Vec<HostQuant>>,
@@ -59,6 +65,81 @@ impl Backend for HostBackend {
 
     fn release(&self, buf: Buf) {
         self.free.borrow_mut().push(buf.0);
+    }
+
+    fn alloc_h(&self, len: usize) -> Result<HBuf> {
+        if let Some(index) = self.free_halves.borrow_mut().pop() {
+            let mut halves = self.halves.borrow_mut();
+            halves[index].clear();
+            halves[index].resize(len, 0);
+            return Ok(HBuf(index));
+        }
+        let mut halves = self.halves.borrow_mut();
+        halves.push(vec![0; len]);
+        Ok(HBuf(halves.len() - 1))
+    }
+
+    fn release_h(&self, buf: HBuf) {
+        self.free_halves.borrow_mut().push(buf.0);
+    }
+
+    fn zeroed_h(&self, len: usize) -> Result<HBuf> {
+        self.alloc_h(len)
+    }
+
+    fn read_h(&self, buf: HBuf, out: &mut [f32]) -> Result<()> {
+        let halves = self.halves.borrow();
+        let src = &halves[buf.0];
+        ensure!(
+            src.len() >= out.len(),
+            "reading {} elements from a {}-element buffer",
+            out.len(),
+            src.len()
+        );
+        for (o, &h) in out.iter_mut().zip(src) {
+            *o = f16_to_f32(h);
+        }
+        Ok(())
+    }
+
+    fn copy_h(
+        &self,
+        src: HBuf,
+        src_offset: usize,
+        dst: HBuf,
+        dst_offset: usize,
+        len: usize,
+    ) -> Result<()> {
+        let mut halves = self.halves.borrow_mut();
+        ensure!(src.0 != dst.0, "copy_h aliases its source");
+        let (from, into) = if src.0 < dst.0 {
+            let (a, b) = halves.split_at_mut(dst.0);
+            (&a[src.0], &mut b[0])
+        } else {
+            let (a, b) = halves.split_at_mut(src.0);
+            (&b[0], &mut a[dst.0])
+        };
+        into[dst_offset..dst_offset + len].copy_from_slice(&from[src_offset..src_offset + len]);
+        Ok(())
+    }
+
+    fn store_2d(&self, src: Plane, dst: HPlane, rows: usize, width: usize) -> Result<()> {
+        let slabs = self.slabs.borrow();
+        let from = &slabs[src.buf.0];
+        let mut halves = self.halves.borrow_mut();
+        let into = &mut halves[dst.buf.0];
+        ensure!(
+            from.len() >= src.offset + (rows - 1) * src.pitch + width
+                && into.len() >= dst.offset + (rows - 1) * dst.pitch + width,
+            "store_2d runs off one of its planes"
+        );
+        for r in 0..rows {
+            let (a, b) = (src.offset + r * src.pitch, dst.offset + r * dst.pitch);
+            for (h, &v) in into[b..b + width].iter_mut().zip(&from[a..a + width]) {
+                *h = f32_to_f16(v);
+            }
+        }
+        Ok(())
     }
 
     fn upload(&self, data: &[f32]) -> Result<Buf> {
@@ -318,11 +399,13 @@ impl Backend for HostBackend {
         })
     }
 
-    fn attention(&self, q: Buf, keys: Buf, values: Buf, spec: Attn, out: Buf) -> Result<()> {
+    fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         let (dim, width) = (spec.head_dim, spec.kv_width());
         let scale = (dim as f32).sqrt().recip();
+        let halves = self.halves.borrow();
+        let (k, v) = (&halves[keys.0], &halves[values.0]);
         self.writing(out, |slabs, dst| {
-            let (queries, k, v) = (&slabs[q.0], &slabs[keys.0], &slabs[values.0]);
+            let queries = &slabs[q.0];
             ensure!(
                 queries.len() >= spec.rows * spec.n_head * dim
                     && k.len() >= spec.total() * width
@@ -338,7 +421,12 @@ impl Backend for HostBackend {
                     let column = (h / spec.group()) * dim;
                     for (j, score) in scores[..visible].iter_mut().enumerate() {
                         let key = &k[j * width + column..][..dim];
-                        *score = query.iter().zip(key).map(|(&a, &b)| a * b).sum::<f32>() * scale;
+                        *score = query
+                            .iter()
+                            .zip(key)
+                            .map(|(&a, &b)| a * f16_to_f32(b))
+                            .sum::<f32>()
+                            * scale;
                     }
                     softmax(&mut scores[..visible]);
                     let row = &mut dst[at..at + dim];
@@ -346,7 +434,7 @@ impl Backend for HostBackend {
                     for (j, &p) in scores[..visible].iter().enumerate() {
                         let value = &v[j * width + column..][..dim];
                         for (o, &val) in row.iter_mut().zip(value) {
-                            *o += p * val;
+                            *o += p * f16_to_f32(val);
                         }
                     }
                 }

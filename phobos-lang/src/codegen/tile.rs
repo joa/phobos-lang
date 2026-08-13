@@ -93,19 +93,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
         let mem = self.assume_align(block, mem, 16)?;
 
-        // The buffer is always 16-byte aligned; the rows are if every outer
-        // stride is a multiple of 4 elements, which is what a 4-element vector
-        // of the element type needs (16b for f32, 8b for f16).
-        let aligned = row_major_strides(shape)[..shape.len() - 1]
+        let align_div = row_major_strides(shape)[..shape.len() - 1]
             .iter()
-            .all(|&s| mult4(s));
+            .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
 
         Ok(MemVal {
             mem,
             elem,
             shape: shape.to_vec(),
             row_stride: None,
-            aligned,
+            align_div,
             swizzle: None,
             global: Some(name),
             shared: true,
@@ -270,16 +267,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if src.global.is_none() {
             bail!("flat expects a declared tile, not a slice of one");
         }
-        
+
         if src.row_stride.is_some() || src.swizzle.is_some() {
             bail!("a padded or swizzled staging tile has no flat view");
         }
-        
+
         let [rows, cols] = [src.shape[0], src.shape[1]];
         if rows == DYN || cols == DYN {
             bail!("flat expects a static tile shape");
         }
-        
+
         let len = rows * cols;
 
         if let Some(name) = &src.global {
@@ -309,7 +306,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             elem: src.elem,
             shape: vec![1, len],
             row_stride: None,
-            aligned: src.aligned,
+            align_div: src.align_div,
             swizzle: None,
             global: None, // it's a view; we don't own the memory and must not release it
             shared: true,
@@ -609,7 +606,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
         let ok = mvs.iter().all(|m| {
             let last = *m.shape.last().expect("tile values are not rank-0");
-            m.elem == self.f32_t && m.aligned && last != DYN && last % 4 == 0
+            m.elem == self.f32_t && m.vectorizes(4) && last != DYN && last % 4 == 0
         });
         if ok { 4 } else { 1 }
     }
@@ -713,28 +710,46 @@ impl<'p, 'c> Codegen<'p, 'c> {
             );
         }
 
-        // Vectorize aligned copies at 4 elements. The row-pitch ABI's
-        // multiple-of-4-elements guarantee is exactly the byte alignment a
-        // 4-element vector of any element type needs.
+        // Vectorize an aligned copy at whatever moves 16 bytes a lane, which is
+        // four f32 or eight f16. A staging copy is bound by the loads it
+        // issues rather than by the bytes they carry, so a narrow element type
+        // vectorized by element count would stage at half the rate an f32 tile
+        // does for no reason. Worth 21% of a decode step's attention against a
+        // deep f16 cache.
+        //
+        // Only f16 goes wide. The 8-byte reach the row-pitch ABI promises on
+        // its own is enough for four elements of any type, and past that a
+        // width needs a divisibility proof that only `@aligned` supplies; the
+        // quantized paths read i8 through their own staging and are not on this
+        // one, so nothing is gained by widening them here.
         let elem_bytes = self.elem_bytes(dst.elem);
         let last = *dst.shape.last().expect("tile values are not rank-0");
-        let vec_ok = src.aligned
-            && dst.aligned
-            && !src.is_masked()
+        let vec_ok = !src.is_masked()
             && !dst.is_masked()
             && last != DYN
-            && last % 4 == 0
-            && elem_bytes.is_some();
-        let width = if vec_ok { 4 } else { 1 };
-        let align = i64::from(elem_bytes.unwrap_or(4)) * 4;
+            && elem_bytes.is_some()
+            && src.vectorizes(4)
+            && dst.vectorizes(4)
+            && last % 4 == 0;
+        // Both sides share an element type, checked above.
+        let wide =
+            dst.elem == self.f16_t && src.vectorizes(8) && dst.vectorizes(8) && last % 8 == 0;
+        let width = match (vec_ok, wide) {
+            (true, true) => 8,
+            (true, false) => 4,
+            _ => 1,
+        };
+        // Four elements even where the copy stays scalar, which is what the
+        // f32 cp.async path below reads.
+        let align = i64::from(elem_bytes.unwrap_or(4)) * width.max(4);
 
         // cp.async needs a 4/8/16-byte transfer and cannot convert: f32
         // qualifies at any width, the narrower types only vectorized, a scalar
         // 1B or 2B element being below cp.async's minimum.
         let use_async = async_copy
             && !dst.is_masked()
-            && (dst.elem == self.f32_t || (width == 4 && matches!(align, 4 | 8 | 16)));
-        let vec_t = Type::vector(&[4], dst.elem);
+            && (dst.elem == self.f32_t || (width > 1 && matches!(align, 4 | 8 | 16)));
+        let vec_t = Type::vector(&[width.max(4) as u64], dst.elem);
 
         self.distribute(block, dst, width, sync, |cg, blk, idx| {
             // Read from the (unswizzled) source, store to the swizzled column.
@@ -2733,9 +2748,9 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 .find(|c| kk % c == 0)
                 .expect("1 divides everything")
         };
-        let vec_a = chunk == 4 && elem == self.f32_t && a.aligned && a.elem == elem;
-        let vec_b = tn % 4 == 0 && elem == self.f32_t && b.aligned && b.elem == elem;
-        let vec_out = tn % 4 == 0 && elem == self.f32_t && out.aligned;
+        let vec_a = chunk == 4 && elem == self.f32_t && a.vectorizes(4) && a.elem == elem;
+        let vec_b = tn % 4 == 0 && elem == self.f32_t && b.vectorizes(4) && b.elem == elem;
+        let vec_out = tn % 4 == 0 && elem == self.f32_t && out.vectorizes(4);
         let acc_t = Type::vector(&[tm as u64, tn as u64], elem);
         let row_t = Type::vector(&[tn as u64], elem);
         let a_row_t = Type::vector(&[chunk as u64], elem);
