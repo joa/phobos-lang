@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::Gguf;
-use crate::backend::{Attn, Backend, Buf, DeltaMix, Plane, QAct, Rope, read_vec};
+use crate::backend::{
+    Attn, Backend, Buf, DeltaMix, FusedMix, Plane, ProjRun, QAct, Rope, read_vec,
+};
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads, check_dims};
 
 #[derive(Clone, Debug)]
@@ -510,26 +512,24 @@ impl Model {
 
         let trace = std::env::var_os("PHOBOS_TRACE").is_some();
         for (index, (block, layer_state)) in self.blocks.iter().zip(&mut state.layers).enumerate() {
-            // The normalization leaves the quantized copy behind too, which the
-            // projections reading it would otherwise redo.
-            let act = backend.rms_norm_q(
-                x,
-                rows,
-                d,
-                block.attn_norm.buf(backend)?,
-                cfg.rms_eps,
-                normed,
-            )?;
-
             // Both mixers end by adding their output projection into the
-            // residual stream, which the projection does itself.
+            // residual stream, which the projection does itself. Their input
+            // normalization is theirs to run, so a backend with a fused
+            // projection owns it.
+            let gain = block.attn_norm.buf(backend)?;
             match (&block.mixer, layer_state) {
-                (Mixer::Attention(attn), LayerState::Attention(cache)) => self.attention(
-                    attn, normed, act, rows, state.pos, cache, backend, variants, x,
-                )?,
+                (Mixer::Attention(attn), LayerState::Attention(cache)) => {
+                    // The normalization leaves the quantized copy behind too,
+                    // which the three projections reading it would otherwise
+                    // redo.
+                    let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
+                    self.attention(
+                        attn, normed, act, rows, state.pos, cache, backend, variants, x,
+                    )?
+                }
                 (Mixer::DeltaNet(delta), LayerState::DeltaNet { carry, recurrent }) => self
                     .delta_net(
-                        delta, normed, act, rows, carry, recurrent, backend, variants, x,
+                        delta, x, normed, gain, rows, carry, recurrent, backend, variants,
                     )?,
                 _ => bail!("generation state does not match the model's block layout"),
             }
@@ -707,14 +707,14 @@ impl Model {
     fn delta_net(
         &self,
         delta: &DeltaNet,
-        x: Buf,
-        act: QAct,
+        resid: Buf,
+        normed: Buf,
+        gain: Buf,
         rows: usize,
         carry: &mut Option<(Buf, usize)>,
         recurrent: &mut Option<Buf>,
         backend: &dyn Backend,
         variants: Variants,
-        dest: Buf,
     ) -> Result<()> {
         let cfg = &self.config;
         let (heads, head_dim) = (cfg.ssm_heads, cfg.ssm_head_dim);
@@ -746,16 +746,135 @@ impl Model {
         };
 
         let (channels, carried) = (mix.channels(), mix.pad() * mix.channels());
-
-        // One projection for all four, off the quantized copy the caller's
-        // normalization left behind. Each part is then a window of the result:
-        // at a single row an offset, past one row a strided copy apiece.
-        let stacked = delta.projections.forward_act(backend, x, act, rows)?;
         let width = delta.projections.out_dim;
+        let stacked = backend.alloc(rows * width)?;
 
-        // The query/key/value plane is not among these: it is the widest of the
-        // four and the convolution's stream is its only reader, so it goes
-        // there directly below.
+        // The convolution reads one padded stream, so the positions carried
+        // from the previous call go in front of this call's projection and the
+        // kernel has no boundary case.
+        //
+        // What is carried is the previous call's whole stream, and this call's
+        // is a fresh allocation. Keeping the tail in a buffer of its own needed
+        // a third copy to refill it, and refilling in place is not open either:
+        // shifting a buffer into itself races a launch's programs against each
+        // other whenever the shift is shorter than the buffer, which is every
+        // decode step.
+        let history = backend.alloc(mix.history_len())?;
+        match *carry {
+            Some((previous, len)) => {
+                // The tail, wherever it falls: the last call may have had a
+                // different number of rows, a prompt followed by decoding.
+                backend.copy(previous, len - carried, history, 0, carried)?;
+                backend.release(previous);
+            }
+            None => {
+                let zeros = backend.zeroed(carried)?;
+                backend.copy(zeros, 0, history, 0, carried)?;
+                backend.release(zeros);
+            }
+        }
+        *carry = Some((history, mix.history_len()));
+
+        // One projection for all four, and its output wanted in two places. The
+        // query/key/value plane is the widest of the four and the convolution's
+        // stream is its only reader, so it goes straight into the stream: pulling
+        // it out afterwards was two passes over it, a quarter of a gigabyte a
+        // pass across the blocks at 512 positions. The other three stay where
+        // they were projected, and are read as windows below.
+        //
+        // Naming the runs also skips [`Linear::fuse`]'s alignment padding, which
+        // the one-launch projection contracts against zero columns.
+        let (qkv_at, _) = delta.parts[0];
+        let (rest_at, rest_end) = (delta.parts[1].0, delta.parts[3].0 + delta.parts[3].1);
+        let runs = [
+            ProjRun {
+                row_off: qkv_at,
+                width: channels,
+                dst: history,
+                dst_off: carried,
+            },
+            ProjRun {
+                row_off: rest_at,
+                width: rest_end - rest_at,
+                dst: stacked,
+                dst_off: rest_at,
+            },
+        ];
+
+        // The delta rule's five operands are one allocation, so each is a
+        // window of it and producing them is two launches writing in place, or
+        // none at all when they join the projection's kernel.
+        let packed = backend.alloc(mix.packed_len())?;
+        let taps = delta.taps(backend, channels, variants.conv_reversed)?;
+
+        // Which of the two gate projections decays and which weights the write
+        // is a layout question, and the same one on both paths below.
+        let gates = |alpha, beta| match variants.swap_alpha_beta {
+            true => (beta, alpha),
+            false => (alpha, beta),
+        };
+
+        // At one row every part of the projection is a window of it rather than
+        // a copy, so the convolution and the gates can be named before the
+        // projection that feeds them has run. Past one row they are strided
+        // copies, and the fused path declines anyway.
+        let fused_mix = match rows == 1 {
+            true => {
+                let (decay, beta) = gates((stacked, delta.parts[2].0), (stacked, delta.parts[3].0));
+                Some(FusedMix {
+                    spec: mix,
+                    history,
+                    taps,
+                    decay,
+                    beta,
+                    rate: delta.rate(backend, variants.decay_from_log)?,
+                    dt_bias: delta.dt_bias.buf(backend)?,
+                    packed,
+                })
+            }
+            false => None,
+        };
+
+        let fused = delta.projections.project_fused(
+            backend,
+            resid,
+            gain,
+            cfg.rms_eps,
+            rows,
+            &runs,
+            fused_mix,
+        )?;
+        if !fused.project {
+            // The normalization leaves the quantized copy behind, which the
+            // projection reading it would otherwise redo.
+            let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+            delta
+                .projections
+                .project_into_act(backend, normed, act, rows, stacked)?;
+            // A decode step's one row is already contiguous, and the strided
+            // kernel is the wrong shape for it.
+            if rows == 1 {
+                backend.copy(stacked, qkv_at, history, carried, channels)?;
+            } else {
+                backend.copy_2d(
+                    Plane {
+                        buf: stacked,
+                        offset: qkv_at,
+                        pitch: width,
+                    },
+                    Plane {
+                        buf: history,
+                        offset: carried,
+                        pitch: channels,
+                    },
+                    rows,
+                    channels,
+                )?;
+            }
+        }
+
+        // Each of the other three parts is a window of the projection: at a
+        // single row an offset, past one row a strided copy apiece.
         let mut planes = [(stacked, 0usize); 3];
         let mut extracted = Vec::new();
         for (plane, &(at, part)) in planes.iter_mut().zip(&delta.parts[1..]) {
@@ -783,78 +902,21 @@ impl Model {
         }
         let [(z_buf, z_at), (alpha_buf, alpha_at), (beta_buf, beta_at)] = planes;
 
-        // The convolution reads one padded stream, so the positions carried
-        // from the previous call go in front of this call's projection and the
-        // kernel has no boundary case.
-        //
-        // What is carried is the previous call's whole stream, and this call's
-        // is a fresh allocation. Keeping the tail in a buffer of its own needed
-        // a third copy to refill it, and refilling in place is not open either:
-        // shifting a buffer into itself races a launch's programs against each
-        // other whenever the shift is shorter than the buffer, which is every
-        // decode step.
-        let history = backend.alloc(mix.history_len())?;
-        match *carry {
-            Some((previous, len)) => {
-                // The tail, wherever it falls: the last call may have had a
-                // different number of rows, a prompt followed by decoding.
-                backend.copy(previous, len - carried, history, 0, carried)?;
-                backend.release(previous);
-            }
-            None => {
-                let zeros = backend.zeroed(carried)?;
-                backend.copy(zeros, 0, history, 0, carried)?;
-                backend.release(zeros);
-            }
-        }
+        if !fused.mix {
+            backend.delta_conv(history, taps, mix, packed)?;
 
-        // Straight from the projection into the stream: pulling the plane out
-        // first was two passes over the widest of the four, a quarter of a
-        // gigabyte a pass across the blocks at 512 positions. A decode step's
-        // one row is already contiguous and the strided kernel is the wrong
-        // shape for it.
-        let (qkv_at, _) = delta.parts[0];
-        if rows == 1 {
-            backend.copy(stacked, qkv_at, history, carried, channels)?;
-        } else {
-            backend.copy_2d(
-                Plane {
-                    buf: stacked,
-                    offset: qkv_at,
-                    pitch: width,
-                },
-                Plane {
-                    buf: history,
-                    offset: carried,
-                    pitch: channels,
-                },
-                rows,
-                channels,
+            let (decay, beta) = gates((alpha_buf, alpha_at), (beta_buf, beta_at));
+            backend.delta_gates(
+                decay.0,
+                decay.1,
+                beta.0,
+                beta.1,
+                delta.rate(backend, variants.decay_from_log)?,
+                delta.dt_bias.buf(backend)?,
+                mix,
+                packed,
             )?;
         }
-        *carry = Some((history, mix.history_len()));
-
-        // The delta rule's five operands are one allocation, so each is a
-        // window of it and producing them is two launches writing in place.
-        let packed = backend.alloc(mix.packed_len())?;
-        let taps = delta.taps(backend, channels, variants.conv_reversed)?;
-        backend.delta_conv(history, taps, mix, packed)?;
-
-        let (decay_in, beta_in) = if variants.swap_alpha_beta {
-            ((beta_buf, beta_at), (alpha_buf, alpha_at))
-        } else {
-            ((alpha_buf, alpha_at), (beta_buf, beta_at))
-        };
-        backend.delta_gates(
-            decay_in.0,
-            decay_in.1,
-            beta_in.0,
-            beta_in.1,
-            delta.rate(backend, variants.decay_from_log)?,
-            delta.dt_bias.buf(backend)?,
-            mix,
-            packed,
-        )?;
 
         // The recurrent state is why this op exists on the backend at all: a
         // [head_dim, head_dim] matrix per head, so keeping it on the host means
@@ -876,7 +938,7 @@ impl Model {
         // Mamba2-style RMSNormGated this architecture inherits. swiglu is
         // silu(gate) * up, the multiply this wants.
         let scratch = backend.alloc(n)?;
-        let gain = delta.norm.buf(backend)?;
+        let readout_gain = delta.norm.buf(backend)?;
         let (gated, gated_act) = if variants.norm_before_gate {
             // Into a destination that is not the source: the gate reads one
             // element per thread, but the norm's reduction reads the whole row.
@@ -884,7 +946,7 @@ impl Model {
                 mixed_buf,
                 rows * heads,
                 head_dim,
-                gain,
+                readout_gain,
                 cfg.rms_eps,
                 z_buf,
                 z_at,
@@ -897,7 +959,7 @@ impl Model {
                 scratch,
                 rows * heads,
                 head_dim,
-                gain,
+                readout_gain,
                 cfg.rms_eps,
                 mixed_buf,
             )?;
@@ -905,8 +967,8 @@ impl Model {
         };
 
         match gated_act {
-            Some(act) => delta.out.add_into_act(backend, act, rows, dest)?,
-            None => delta.out.add_into(backend, gated, rows, dest)?,
+            Some(act) => delta.out.add_into_act(backend, act, rows, resid)?,
+            None => delta.out.add_into(backend, gated, rows, resid)?,
         }
         for buf in [stacked, packed, scratch, mixed_buf]
             .into_iter()

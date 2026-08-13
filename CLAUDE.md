@@ -33,7 +33,16 @@ live in `phobos-gguf/examples`:
 - `backend_check`: every device op against the host reference
 - `batch_check`: a batched pass against the same tokens fed one at a time
 - `model_check`: whole-model logits, device against host
-- `bench`: the two numbers `llama-bench` reports, `pp<N>` and `tg<N>`
+- `fuse_check`: the fused decode path against the launched one, both on the
+  device in one session, since the device-against-host bound is too wide to see
+  a fusion under
+- `bench`: the two numbers `llama-bench` reports, `pp<N>` and `tg<N>`;
+  `python scripts/bench.py` runs it interleaved against llama.cpp on a card it
+  checks for contention first
+- `attndecode`: the decode attention path alone against cache length, over a
+  working set the size of a real model's caches, with the card's measured copy
+  bandwidth beside it. Warms the card itself: an idle GPU sits at 300 MHz and a
+  short benchmark measures the ramp rather than the kernel
 
 The ONNX device path has its own, in `phobos-onnx/examples`: `mm_check`,
 `run_gpt2_gpu` and `chain_gpt2`.
@@ -54,7 +63,7 @@ remembered figure and has to be labelled as such.
 - **phobos-sched**: global scheduler
 - **phobos-pod**: node runtime
 - **phobos-kernels**: what both front ends need to reach a GPU: the launch ABI, the compile step, the launcher, the allocation pool and the plain f32 matmul. The `cuda` feature gates everything that talks to the driver, so the ABI and the kernel sources still compile without one
-- **phobos-gguf**: GGUF container, dequantization, byte-level BPE, the `qwen35` and `llama` forward passes, and `backend/` with the host and device implementations
+- **phobos-gguf**: GGUF container, dequantization, byte-level BPE, the `qwen35` and `llama` forward passes, and `backend/` with the host and device implementations plus `fuse.rs`, the pass that lowers a chain of decode stages into one persistent kernel
 - **phobos-onnx**: ONNX proto -> graph IR -> shape inference, folding, fusion -> Phobos kernels, and `backend/` with the host interpreter as the oracle alongside the device paths
 - **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server
 - **phobos-cli**: Argument parsing, the REPL, and the one `match` that decides GGUF or ONNX

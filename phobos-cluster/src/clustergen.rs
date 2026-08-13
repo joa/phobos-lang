@@ -262,13 +262,17 @@ impl<'a> Analyzer<'a> {
     ) -> Result<()> {
         for stmt in stmts {
             match stmt {
-                Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
+                Stmt::Let { .. } | Stmt::Var { .. } => {
+                    // An unfilled tile buffer reads nothing and is not a scalar.
+                    let Some((name, ty, Some(value))) = stmt.as_decl() else {
+                        continue;
+                    };
                     self.scan_reads(value, refs, reads)?;
                     if matches!(ty, Some(AstType::Tile(..))) {
                         continue;
                     }
                     if let Some(sv) = self.classify_scalar(value)? {
-                        self.symbols.insert(name.clone(), Binding::Scalar(sv));
+                        self.symbols.insert(name.to_string(), Binding::Scalar(sv));
                     }
                 }
                 Stmt::Assign { target, op, value } => {
@@ -597,12 +601,10 @@ impl<'a> Analyzer<'a> {
                         bail!("accumulator tile dim '{s}' is not a @cluster dim");
                     }
                 }
-                if !matches!(value, Expr::Int(_) | Expr::Float(_)) {
+                let Some(init @ (Expr::Int(_) | Expr::Float(_))) = value else {
                     bail!("accumulator tile must be initialized with a literal");
-                }
-                self.scratch = Some(Scratch {
-                    init: value.clone(),
-                });
+                };
+                self.scratch = Some(Scratch { init: init.clone() });
                 self.symbols.insert(name.clone(), Binding::Scratch);
                 Ok(Some(Statement::InitPlaceholder))
             }
@@ -612,14 +614,17 @@ impl<'a> Analyzer<'a> {
             } => bail!("accumulator tiles must be declared with `var`, not `let`"),
 
             // scalar / ref bindings
-            Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
+            Stmt::Let { .. } | Stmt::Var { .. } => {
+                let Some((name, ty, Some(value))) = stmt.as_decl() else {
+                    bail!("a declaration under @cluster needs an initializer");
+                };
                 if let Some(t) = ty
                     && !matches!(t, AstType::Scalar(_))
                 {
                     bail!("unsupported declaration type for '{name}' under @cluster");
                 }
                 if let Some(sv) = self.classify_scalar(value)? {
-                    self.symbols.insert(name.clone(), Binding::Scalar(sv));
+                    self.symbols.insert(name.to_string(), Binding::Scalar(sv));
                     return Ok(None);
                 }
                 if let Expr::Index { base, subs } = value
@@ -627,7 +632,7 @@ impl<'a> Analyzer<'a> {
                     && let Some(&ti) = self.tindex.get(t)
                 {
                     let r = self.classify_ref(ti, subs)?;
-                    self.symbols.insert(name.clone(), Binding::Ref(r));
+                    self.symbols.insert(name.to_string(), Binding::Ref(r));
                     return Ok(None);
                 }
                 bail!(

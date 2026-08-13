@@ -17,9 +17,16 @@ impl<'p, 'c> Codegen<'p, 'c> {
             }
             Stmt::Var { name, ty, value } => {
                 if let Some(AstType::Tile(scalar, dims)) = ty {
-                    let tile = self.emit_tile_decl(block, *scalar, dims, value)?;
+                    let tile = match value {
+                        Some(value) => self.emit_tile_decl(block, *scalar, dims, value)?,
+                        None => self.alloc_tile(block, *scalar, dims)?,
+                    };
                     self.bind(name, Binding::Tile(tile));
                 } else {
+                    let Some(value) = value else {
+                        bail!("'var {name}' without an initializer needs a tile type");
+                    };
+
                     match self.emit_expr(block, value)? {
                         Rv::Scalar(v) => {
                             let elem = v.r#type();
@@ -65,12 +72,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
     }
 
     /// Emits a tile-typed let/var initializer. Initializers store_tile would
-    /// not fuse into the target (the elementwise calls exp/tmax/rowmax/rowsum)
-    /// are evaluated first: when the result is an owned temp of exactly the
+    /// not fuse into the target (the reductions, the masks, the transpose) are
+    /// evaluated first: when the result is an owned temp of exactly the
     /// declared type, its buffer is adopted outright, eliding the copy pass
     /// and its shared allocation. Everything else takes the regular
     /// alloc-then-store_tile path, which fuses dot/binary/scalar initializers
-    /// straight into the target.
+    /// and whole per-element trees straight into the target.
     fn emit_tile_decl(
         &mut self,
         block: &Block<'c>,
@@ -83,7 +90,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             Expr::Call { callee, .. } if matches!(callee.as_str(),
                 "exp" | "log" | "round" | "sqrt" | "tanh" | "tmax" | "rowmax" | "rowsum" | "cumsum"
                 | "tril" | "transpose")
-        );
+        ) && self.fusable_nodes(value).unwrap_or(0) < 1;
         if !unfused {
             let tile = self.alloc_tile(block, scalar, dims)?;
             self.store_tile(block, &tile, AssignOp::Set, value)?;
@@ -156,9 +163,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     let rhs = self.coerce(block, rhs, mv.elem)?;
                     block.append_operation(memref::store(rhs, mv.mem, &indices, self.loc));
                 } else {
-                    if !matches!(binding, Binding::Tensor(_)) {
-                        bail!("only tensors can be sliced");
+                    if matches!(binding, Binding::View(_)) {
+                        bail!("cannot assign through a read-only view");
                     }
+                    
+                    self.check_sliceable(&mv, &binding)?;
                     let view = self.emit_subview(block, &mv, subs)?;
                     self.store_tile(block, &view, op, value)?;
                 }
@@ -195,25 +204,6 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 bail!("fragment accumulator '{n}' cannot be accumulated into a tile");
             }
             return self.frag_store(block, target, &fa);
-        }
-
-        // t = exp(a op b) on float tile operands broadcasting to the target
-        // fuses the binary and the exponential into one sweep and barrier.
-        // t may itself be an operand (the softmax t = exp(t - mnew)): each
-        // thread reads and writes the same element, so it is race-free.
-        if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
-            && callee == "exp"
-            && let [Expr::Binary { op: bop, lhs, rhs }] = &args[..]
-            && let (Expr::Var(ln), Expr::Var(rn)) = (lhs.as_ref(), rhs.as_ref())
-            && let (Some(Binding::Tile(a)), Some(Binding::Tile(b))) =
-                (self.lookup(ln), self.lookup(rn))
-            && self.is_float(target.elem)
-            && a.elem == target.elem
-            && b.elem == target.elem
-            && broadcast_shape(&a.shape, &b.shape).as_deref() == Some(&target.shape[..])
-        {
-            return self.tile_exp_binary_bc(block, *bop, &a, &b, target);
         }
 
         // t = exp(t) rewrites the tile in place: each thread reads and
@@ -357,6 +347,13 @@ impl<'p, 'c> Codegen<'p, 'c> {
             self.tile_scaled_add_into(block, s1, &t1, s2, &t2, target)?;
             self.release(&t1);
             self.release(&t2);
+            return Ok(());
+        }
+
+        // Anything else built out of arithmetic, tmax and the per-element math
+        // calls: the whole tree in one sweep, whatever its depth. See
+        // codegen/elemwise.rs.
+        if self.store_fused(block, target, op, value)? {
             return Ok(());
         }
 

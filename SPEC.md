@@ -28,7 +28,7 @@ stmt        = let_stmt | var_stmt | assign_stmt
             | for_stmt | while_stmt | if_stmt | expr_stmt ;
 
 let_stmt    = "let" ident [ ":" type ] "=" expr terminator ;
-var_stmt    = "var" ident [ ":" type ] "=" expr terminator ;
+var_stmt    = "var" ident ( ":" type [ "=" expr ] | "=" expr ) terminator ;
 assign_stmt = lvalue ( "=" | "+=" ) expr terminator ;
 lvalue      = ident [ "[" subscripts "]" ] ;           (* a name or an indexed name *)
 for_stmt    = "for" ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
@@ -156,16 +156,31 @@ float       = digit { digit } "." { digit } ;
   inside a loop stays live until after the loop. This is what keeps a long chain
   of named intermediates from costing a static allocation each: static shared
   memory is capped at 48 KB on every architecture.
+
+  Since a tile outlives the loops between its declaration and its last use, a
+  tile declared ahead of one loop and read after another is **block-private
+  storage carried across both**, and the barrier that trails every tile store is
+  what makes one thread's write visible to the rest of the CTA.
+- **`var` without an initializer**: `var t: tile<f32>[R, C]` declares a buffer and
+  leaves it alone, for one a following loop overwrites element for element. The
+  type is required, nothing being left to infer one from, and it must be a tile:
+  a scalar with no value would name nothing. `let` always needs its initializer.
 - **Statements end at newlines**: Similar to how Golang is doing it
 - **`else` must follow `}` on the same line**: a newline after the `}` of the then-block ends the `if` statement.
 - Tiles
+  - **Slicing**: a tile is sliced and slice-assigned exactly as a tensor is, so a
+    loop can fill one a few rows at a time rather than only as a whole value. The
+    compiler's own staging buffers are the exception: the WMMA path's padded tile
+    and the `ldmatrix` path's XOR-swizzled one hold their rows somewhere other
+    than row-major says, and neither is reachable from source anyway.
   - **Ranges**:`A[start : end]` is the elements from `start` up to but not including `end`.
   - **Spans**: `A[start :+ length]` is `length` elements starting at `start`; same as `A[start : start + length]`.
   - **Full**: `A[:]` selects the entire dimension.
   - **Open-Ended**: `A[i:]`, `A[:j]` are not supported. A `:` after an expression requires an end, and a `:+` requires a length.
 - **Unary minus on a tile**: `-t` negates elementwise, lowering as `0 - t`. `!` stays scalar-only.
 - **Broadcasting**: binary tile ops broadcast a NumPy-style axis of extent 1 (so `[R, C] x [R, 1]` stretches the column vector), and `tile x scalar` (either order) broadcasts the scalar over the tile.
-- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `cumsum`, `tril`, `transpose`) and the
+- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `cumsum`, `tril`, `transpose`, `flat`), the
+  synchronization builtins (`grid_barrier`, `atomic_add`) and the
   conversion builtins named after the scalar types are ordinary
   identifiers, not keywords. `range` is recognized positionally inside `for ... in range(...)`.
 - **Built-Ins**:
@@ -183,7 +198,10 @@ float       = digit { digit } "." { digit } ;
   - `cumsum(t)`: inclusive prefix sum of a rank-2 tile down its first (row) dim, so `out[i, j] = sum_{r <= i} t[r, j]`. The scan runs along the sequence axis (the leading dim of a `[seq, feat]` tile), producing the running gate cumulant that chunkwise linear attention needs. Same shape as the input.
   - `tril(t)`: causal lower-triangular mask of a rank-2 tile, keeping `t[i, j]` when `j <= i` and zeroing the strict upper triangle. Same shape as the input.
   - `transpose(t)`: rank-2 tile transpose, `out[i, j] = t[j, i]` (a `[R, C]` tile becomes `[C, R]`). Lets a contraction run over the leading (sequence) axis, which `dot`/`dot_t` cannot reach on their own.
+  - `flat(t)`: a declared rank-2 tile viewed as one row, `[1, R * C]`. A **view**, not a copy: a tile is contiguous in shared memory, so the row-major flattening is the same bytes under another type, read-only and allocating nothing. It is for a value whose computed and consumed shapes differ, as quantizing an activation is: `rowmax` reduces the last axis, so the blocks of 32 have to be rows, and the contraction that follows wants one row. Only a tile declared with `var` or `let ... : tile<..>` can be flattened, not a slice of one (whose offset the view would drop) and not a tensor slice (which is not in shared memory).
   - `f16(x)` / `bf16(x)` / `f32(x)` / `f64(x)` / `i8(x)` / `i32(x)` / `i64(x)`: element type conversion of a tile or a scalar (see **Conversions** above).
+  - `grid_barrier(bar)`: every block of the grid waits for every other, so a kernel spanning several stages of a pass can order one against the next. `bar` is an `i32` tensor of at least two elements, slot 0 the arrival counter and slot 1 the release generation (`tensor<i32>[2]` and the rank-2 `tensor<i32>[2, 1]` column both spell it). The caller zeroes it once before the launch and leaves it alone while the kernel runs; the barrier restores both slots, so one pair serves every barrier of every launch. Two things are the caller's to guarantee and neither is checked: that the grid is co-resident, which is what `@persistent` is for, and that no two concurrent kernels share the tensor. The grid must be one-dimensional, since the arrival count comes from `gridDim.x`, and every block has to reach the call, so it must not sit under a branch that only some of them take. See `phobos-lang/src/codegen/sync.rs`.
+  - `atomic_add(t, i, v)`: adds `v` to `t[i]` atomically across the device and returns the previous value. `t` is a named `i32` tensor parameter: a tile is block-private and a slice carries an offset the atomic would have to fold in, so neither is accepted.
 - **Attributes**:
   - `@autotune(X in [..], ...)`: local search space; the first choice seeds the shape env. Two values are inclusive bounds searched in doubling steps (`X in [16, 256]` -> 16, 32, 64, 128, 256); three or more are an explicit list of choices. `[256, 16]` is two values (when x > y)
   - `@cluster(X in [..], ...)`: super tile dimensions and search space for cluster tuning.
@@ -210,6 +228,7 @@ float       = digit { digit } "." { digit } ;
      `@tensorcore(sync)` is accepted as a now-redundant explicit opt-in to the
      default `mma.sync` path.
   - `@dynshared`: Use dynamically shared memory (instead of the static 48KB); must change launch config respectively.
+  - `@persistent`: the kernel spans several stages of a pass and separates them with `grid_barrier`, so the whole grid must be resident at once or the barrier deadlocks. The compiler only records the intent; honouring it is the launcher's, which sizes the grid from the occupancy API (`phobos_kernels::launch::persistent_grid`).
   - tile sizes for the MLIR GEMM (`TILE_M/N/K`, `WARP_M/N`, `TILE_TM/TN`) come from `@autotune` / the shape env.
   - Unknown attributes parse but are ignored (with a note)
   - **TODO**: Param- and loop-level attributes (`@readonly`, `@unroll`)

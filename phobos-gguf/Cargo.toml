@@ -28,6 +28,10 @@ name = "attncheck"
 required-features = ["cuda"]
 
 [[example]]
+name = "attndecode"
+required-features = ["cuda"]
+
+[[example]]
 name = "attnsweep"
 required-features = ["cuda"]
 
@@ -49,6 +53,10 @@ required-features = ["cuda"]
 
 [[example]]
 name = "dotform"
+required-features = ["cuda"]
+
+[[example]]
+name = "fuse_check"
 required-features = ["cuda"]
 
 [[example]]

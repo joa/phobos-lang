@@ -321,15 +321,16 @@ impl Model {
             )?;
             self.attention(&block.attn, normed, act, rows, state.pos, cache, backend, x)?;
 
-            let act = backend.rms_norm_q(
-                x,
-                rows,
-                d,
-                block.ffn_norm.buf(backend)?,
-                cfg.rms_eps,
-                normed,
-            )?;
-            block.ffn.forward(backend, normed, act, rows, x)?;
+            // The normalization is passed along rather than run first, so a
+            // backend with a fused MLP owns the whole of it.
+            let gain = block.ffn_norm.buf(backend)?;
+            if !block
+                .ffn
+                .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
+            {
+                let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
+                block.ffn.forward(backend, normed, act, rows, x)?;
+            }
 
             if trace {
                 let seen = read_vec(backend, x, rows * d)?;

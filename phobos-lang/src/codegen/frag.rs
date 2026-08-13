@@ -40,7 +40,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             Stmt::Var {
                 name,
                 ty: Some(AstType::Tile(Scalar::F32, dims)),
-                value: Expr::Float(init),
+                value: Some(Expr::Float(init)),
             },
             rest @ ..,
         ] = stmts
@@ -85,16 +85,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
     ) -> bool {
         for stmt in stmts {
             match stmt {
-                Stmt::Let {
-                    name: n2,
-                    ty,
-                    value,
-                }
-                | Stmt::Var {
-                    name: n2,
-                    ty,
-                    value,
-                } => {
+                Stmt::Let { .. } | Stmt::Var { .. } => {
+                    let Some((n2, ty, Some(value))) = stmt.as_decl() else {
+                        // An unfilled buffer is a declaration this scan has no
+                        // model for, so it keeps the shared-tile path.
+                        return false;
+                    };
                     // A redeclaration would shadow the accumulator mid-scan.
                     if n2 == name || value.uses_name(name) {
                         return false;
@@ -104,7 +100,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         return false;
                     }
 
-                    self.frag_scan_decl(n2, ty.as_ref(), value, scan);
+                    self.frag_scan_decl(n2, ty, value, scan);
                 }
                 Stmt::Assign {
                     target: Expr::Var(t),

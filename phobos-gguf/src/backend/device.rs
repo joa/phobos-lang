@@ -2,7 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use cust::memory::{CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
@@ -10,9 +10,13 @@ use cust::stream::{Stream, StreamFlags};
 use phobos_kernels::pool::Pool;
 use phobos_kernels::{Variants, compile, compile_shared, cuda_ok, matmul, push_descriptor};
 
+use super::fuse::{self, Bound, Chain, ChainKey, Plan, Scratch};
 use super::{
-    Attn, Backend, Buf, DeltaMix, FusedMlp, Plane, Q8_BLOCK, QAct, QBuf, Rope, check_q8_shape,
+    Attn, Backend, Buf, DeltaMix, Fused, FusedMlp, FusedProject, Plane, Q8_BLOCK, QAct, QBuf, Rope,
+    check_q8_shape,
 };
+
+const FUSED_KERNEL: &str = "fused";
 
 /// Output tile and k-slice for the tiled matmul.
 const TILE_M: usize = matmul::TILE_M;
@@ -95,8 +99,7 @@ impl Recorded {
     }
 }
 
-/// One launch of a recorded pass, kept only while `PHOBOS_PASS_REPORT` asks for
-/// a report. See `report_pass` and `docs/megakernel.md`.
+/// enabled via `PHOBOS_PASS_REPORT`
 struct PassOp {
     name: &'static str,
     func: cust::sys::CUfunction,
@@ -325,17 +328,6 @@ kernel q8_qdot_add(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 /// Outputs per CTA in [`Q8_QDOT_SRC`], one per warp.
 const Q8_QDOT_TN: usize = 8;
 
-/// [`Q8_QDOT_SRC`] on a fixed, card-sized grid walking the output in strides,
-/// which is the shape a persistent megakernel forces on it. Compiled only to
-/// answer whether that shape costs anything: a megakernel cannot give the matvec
-/// a grid as wide as the projection, so if the stride loop is slower than the
-/// launch it replaces, the whole plan in `docs/megakernel.md` is dead.
-///
-/// The iteration count is compiled in rather than looping over the dynamic `N`.
-/// A loop walking a dynamic extent gets split, and the masked remainder needs a
-/// static shape, which the full-range `K` axis is not; a static count with an
-/// explicit guard sidesteps the split and emits the same inner code, four `dp4a`
-/// and five butterfly shuffles, as the launched kernel.
 fn q8_qdot_persist_src(iters: usize, blocks: u32, accumulate: bool) -> String {
     let (name, assign) = if accumulate {
         ("q8_qdot_persist_add", "+=")
@@ -362,130 +354,6 @@ kernel {name}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 ",
         tn = Q8_QDOT_TN
     )
-}
-
-/// Row-blocks of the normalization a fused MLP takes at a time.
-///
-/// The whole row in one tile is what [`rms_norm_src`] does, and at the model
-/// dimension that is four 32x32 f32 tiles, 16 KB, which alone spends the budget
-/// that reaches four blocks per SM. Halving the tile costs one more turn of a
-/// two-turn loop and brings the fused kernel to 7 KB. See `docs/megakernel.md`.
-const FUSED_NORM_BLOCKS: usize = 16;
-
-/// The decode MLP as one persistent kernel: the normalization, the fused
-/// gate/up projection, the SwiGLU and the down projection back into the
-/// residual, with one grid barrier where four launches used to be.
-///
-/// Three things earn the single barrier, and they are the whole argument of
-/// `docs/megakernel.md` in miniature.
-///
-/// The normalization is *redundant*: every block reads the same row and
-/// quantizes its own copy into `AqF`, so nothing has to be published before the
-/// first contraction. It costs a repeated read of 4 KB that L2 serves.
-///
-/// A block owns one run of [`Q8_BLOCK`] inner values and computes both halves
-/// of the projection for it, reading the stacked weight at `at` and at
-/// `FW + at`. So the SwiGLU is block-local, and so is the Q8_0 scale, which
-/// covers exactly that run. Nothing crosses a block until the down projection.
-///
-/// That one barrier is unavoidable: the down projection contracts over the whole
-/// width, so it must see every block's SwiGLU. There is no closing barrier
-/// because the launch boundary is the next layer's.
-///
-/// `AqF`/`Aq` and `HqF`/`Hq` are each two views of one buffer, the folded rows a
-/// normalization writes and the flat row a contraction reads. The trailing CTA
-/// barrier of a tile store is what orders the write before the read.
-fn fused_mlp_src(cfg: FusedMlpKey) -> String {
-    let FusedMlpKey {
-        d_model,
-        d_ff,
-        eps,
-        blocks,
-        unit_iters,
-        out_iters,
-    } = cfg;
-    format!(
-        "@launch({cta})
-@persistent
-@autotune(NB in [{norm_blocks}], SB in [{FUSED_NORM_BLOCKS}], UN in [{units}],
-          TN in [{tn}], BLOCKS in [{blocks}], UITERS in [{unit_iters}],
-          OITERS in [{out_iters}], DM in [{d_model}], FW in [{d_ff}])
-@aligned(RB = SB, PRB = SB, GN = {q8}, DN = TN)
-kernel fused_mlp(X: tensor<f32>[RB, {q8}], G: tensor<f32>[RB, {q8}],
-                 AqF: tensor<i8>[PRB, {q8}], AsF: tensor<f32>[PRB, D1],
-                 Aq: tensor<i8>[PB, K], As: tensor<f32>[PB, KB],
-                 Wgu: tensor<i8>[GN, K], Sgu: tensor<f32>[GN, KB],
-                 HqF: tensor<i8>[UB, {q8}], HsF: tensor<f32>[UB, D1],
-                 Hq: tensor<i8>[HR, F], Hs: tensor<f32>[HR, FB],
-                 Wdn: tensor<i8>[DN, F], Sdn: tensor<f32>[DN, FB],
-                 Y: tensor<f32>[HR, DN],
-                 B: tensor<i32>[BR, D1]) {{
-  let p = program_id(0)
-
-  var acc: tile<f32>[SB, 1] = 0.0
-  for b in range(0, NB, SB) {{
-    let xb = X[b :+ SB, 0 :+ {q8}]
-    acc = acc + rowsum(xb * xb)
-  }}
-  var tot: tile<f32>[1, 1] = rowsum(transpose(acc))
-  var inv: tile<f32>[1, 1] = 1.0 / sqrt(tot / {d_model}.0 + {eps:.12})
-  for b in range(0, NB, SB) {{
-    var y: tile<f32>[SB, {q8}] = X[b :+ SB, 0 :+ {q8}] * inv * G[b :+ SB, 0 :+ {q8}]
-    var mx: tile<f32>[SB, 1] = rowmax(tmax(y, -y))
-    var q = y * (127.0 / (mx + 0.00000001))
-    AqF[p * NB + b :+ SB, 0 :+ {q8}] = i8(i32(round(q)))
-    AsF[p * NB + b :+ SB, 0 :+ 1] = mx / 127.0
-  }}
-
-  for i in range(0, UITERS) {{
-    let unit = p + i * BLOCKS
-    if unit < UN {{
-      let at = unit * {q8}
-      var gv: tile<f32>[1, {q8}] = qdot_t(Aq[p :+ 1, :], As[p :+ 1, :],
-                                          Wgu[at :+ {q8}, :], Sgu[at :+ {q8}, :])
-      var uv: tile<f32>[1, {q8}] = qdot_t(Aq[p :+ 1, :], As[p :+ 1, :],
-                                          Wgu[FW + at :+ {q8}, :],
-                                          Sgu[FW + at :+ {q8}, :])
-      var h: tile<f32>[1, {q8}] = (gv / (1.0 + exp(-gv))) * uv
-      var hm: tile<f32>[1, 1] = rowmax(tmax(h, -h))
-      var hq = h * (127.0 / (hm + 0.00000001))
-      HqF[unit :+ 1, 0 :+ {q8}] = i8(i32(round(hq)))
-      HsF[unit :+ 1, 0 :+ 1] = hm / 127.0
-    }}
-  }}
-
-  grid_barrier(B)
-
-  for j in range(0, OITERS) {{
-    let t = p * TN + j * BLOCKS * TN
-    if t < DM {{
-      Y[0 :+ 1, t :+ TN] += qdot_t(Hq[0 :+ 1, :], Hs[0 :+ 1, :],
-                                   Wdn[t :+ TN, :], Sdn[t :+ TN, :])
-    }}
-  }}
-}}
-",
-        cta = CTA_THREADS,
-        norm_blocks = d_model / Q8_BLOCK,
-        units = d_ff / Q8_BLOCK,
-        tn = Q8_QDOT_TN,
-        q8 = Q8_BLOCK,
-        eps = f32::from_bits(eps),
-    )
-}
-
-/// What a [`fused_mlp_src`] module is compiled for. The dimensions and the
-/// epsilon are tile extents and a literal, and the iteration counts fall out of
-/// the grid the occupancy API allows, so all six are compile-time.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-struct FusedMlpKey {
-    d_model: usize,
-    d_ff: usize,
-    /// The epsilon's bit pattern, so the key can be hashed.
-    eps: u32,
-    blocks: u32,
-    unit_iters: usize,
-    out_iters: usize,
 }
 
 /// The Q8_0 projection with the contraction split across the grid.
@@ -1295,11 +1163,26 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
 /// The merge takes the maximum over all the pieces first and then weighs each
 /// once, touching the wide accumulator twice in total. The split count rides in
 /// the partial buffer's extent, so one module serves every cache length.
+///
+/// Both decode kernels below say `@aligned(KW = D)` and stage their key and
+/// value slices with `var` rather than binding them with `let`, and the two go
+/// together. A head is the column window `[col :+ D]` at `col = h / G * D`, and
+/// without the promise that the cache width is a whole number of head widths,
+/// which it is, `KW` being `n_kv * head_dim`, that window may run past the row
+/// and every element of it is loaded under a bounds compare, one scalar
+/// `ld.global.b32` at a time. The promise alone is worse than the mask: an
+/// unmasked slice is read where it lies instead of being staged, so the
+/// contraction walks global memory in a serial dependent chain and the register
+/// count goes from 75 to 166, which is three blocks per SM down to one. `var`
+/// asks for the staging the mask used to force, and the copy then vectorizes.
+/// Worth 37% of a decode step's attention at a cache of 1024, and 44% of what
+/// each further cached position costs, which is the number that matters.
 fn attention_split_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> String {
     let scale = (head_dim as f32).sqrt().recip();
     format!(
         "@launch(256)
 @autotune(NH in [{n_head}], G in [{group}], D in [{head_dim}], BC in [{tile}])
+@aligned(KW = D)
 kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
                        V: tensor<f32>[NK, KW],
                        P: tensor<f32>[SH, D], ML: tensor<f32>[SH, 2]) {{
@@ -1323,8 +1206,8 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
   }}
   let full = lo + (hi - lo) / BC * BC
   for kt in range(lo, full, BC) {{
-    let k = K[kt :+ BC, col :+ D]
-    let v = V[kt :+ BC, col :+ D]
+    var k = K[kt :+ BC, col :+ D]
+    var v = V[kt :+ BC, col :+ D]
     var sc: tile<f32>[1, BC] = dot_t(q, k)
     sc = sc * {scale:.9}
     var mn: tile<f32>[1, 1] = rowmax(sc)
@@ -1336,8 +1219,8 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
     m = mn
   }}
   for j in range(full, hi, 1) {{
-    let k1 = K[j :+ 1, col :+ D]
-    let v1 = V[j :+ 1, col :+ D]
+    var k1 = K[j :+ 1, col :+ D]
+    var v1 = V[j :+ 1, col :+ D]
     var s1: tile<f32>[1, 1] = dot_t(q, k1)
     s1 = s1 * {scale:.9}
     var mn: tile<f32>[1, 1] = tmax(m, s1)
@@ -1386,6 +1269,7 @@ fn attention_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> S
     format!(
         "@launch(256)
 @autotune(NH in [{n_head}], G in [{group}], D in [{head_dim}], BC in [{tile}])
+@aligned(KW = D)
 kernel attention(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
                  V: tensor<f32>[NK, KW], O: tensor<f32>[R, D]) {{
   let t = program_id(0)
@@ -1401,8 +1285,8 @@ kernel attention(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
   let visible = NK - R / NH + t + 1
   let full = visible / BC * BC
   for kt in range(0, full, BC) {{
-    let k = K[kt :+ BC, col :+ D]
-    let v = V[kt :+ BC, col :+ D]
+    var k = K[kt :+ BC, col :+ D]
+    var v = V[kt :+ BC, col :+ D]
     var s: tile<f32>[1, BC] = dot_t(q, k)
     s = s * {scale:.9}
     var mn: tile<f32>[1, 1] = rowmax(s)
@@ -1414,8 +1298,8 @@ kernel attention(Q: tensor<f32>[R, D], K: tensor<f32>[NK, KW],
     m = mn
   }}
   for j in range(full, visible, 1) {{
-    let k1 = K[j :+ 1, col :+ D]
-    let v1 = V[j :+ 1, col :+ D]
+    var k1 = K[j :+ 1, col :+ D]
+    var v1 = V[j :+ 1, col :+ D]
     var s1: tile<f32>[1, 1] = dot_t(q, k1)
     s1 = s1 * {scale:.9}
     var mn: tile<f32>[1, 1] = tmax(m, s1)
@@ -1568,24 +1452,26 @@ impl NormForm {
     }
 }
 
-/// What a fused MLP hands between its own stages, in place of the buffers the
-/// four launches it replaces would have passed through.
-///
-/// Both pairs are read back at a different rank than they are written: see
-/// [`fused_mlp_src`] on the folded and flat views.
-struct FusedScratch {
-    /// `[blocks, d_model]`: each block's own quantized normalized row.
-    act: DeviceBuffer<i8>,
-    act_scales: DeviceBuffer<f32>,
-    /// `[1, d_ff]`: the SwiGLU, written a run of 32 at a time and read whole.
-    hidden: DeviceBuffer<i8>,
-    hidden_scales: DeviceBuffer<f32>,
-}
-
-/// Times to try settling the fused MLP's grid against the occupancy API. The
+/// Times to try settling a fused kernel's grid against the occupancy API. The
 /// answer depends on the compiled code and the compiled code on the answer, so
 /// it is iterated; two passes is the most that has ever been needed.
 const FUSED_GRID_TRIES: usize = 4;
+
+/// The pass emits a contraction that accumulates in tiles of
+/// [`fuse::OUT_TILE`], which is this backend's own tile under another name
+/// because the pass cannot see it.
+const _: () = assert!(Q8_QDOT_TN == fuse::OUT_TILE);
+
+/// Whether one stage of a decode step goes through the fusion pass.
+/// 
+/// Switch off via `PHOBOS_FUSED=0`.
+fn fused_stage(var: &str) -> bool {
+    fn asked(var: &str) -> Option<bool> {
+        let want = std::env::var(var).ok()?;
+        Some(!matches!(want.trim(), "0" | "off" | "no" | "false"))
+    }
+    asked(var).or_else(|| asked("PHOBOS_FUSED")).unwrap_or(true)
+}
 
 /// A device-resident backend for GGUF models. A whole decode step stays in
 /// device memory: the residual stream, the projections, the pointwise work and
@@ -1609,20 +1495,29 @@ pub struct DeviceBackend {
     /// until the first one is compiled and can be asked about.
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
-    /// The fused decode MLP, by what it was compiled for. Only built when
-    /// `PHOBOS_FUSED_MLP` asks for it; see [`fused_mlp_src`].
-    fused_mlps: RefCell<HashMap<FusedMlpKey, Module>>,
+    /// Fused kernels the pass has emitted, with the plan that says what to bind
+    /// to each. See [`fuse`].
+    fused_plans: RefCell<HashMap<ChainKey, (Module, Plan)>>,
     fused_mlp: bool,
-    /// Blocks the fused MLP is launched with, which unlike [`persist_blocks`]
+    fused_project: bool,
+    /// Whether the delta net's convolution and gates join the projection's
+    /// kernel. Separate from [`Self::fused_project`] because unlike everything
+    /// fused so far this one costs a barrier, so it has to be able to be
+    /// measured against the projection alone.
+    fused_mix: bool,
+    /// Blocks a fused kernel is launched with, which unlike [`persist_blocks`]
     /// has to be exact: a block of the grid that is not resident never reaches
-    /// the barrier. Zero until the kernel exists to be asked about.
+    /// the barrier. Zero until such a kernel exists to be asked about.
     fused_blocks: Cell<u32>,
-    /// Scratch the fused MLP passes between its own stages: the per-block
-    /// quantized activation and the shared quantized SwiGLU, each with scales.
-    fused_scratch: RefCell<Option<FusedScratch>>,
-    /// The fused MLP's arrival counter and release generation, zeroed once. The
-    /// barrier leaves both as it found them, so every launch reuses it.
+    /// Storage for the values a plan found crossing a nest, by the plan's own
+    /// scratch index, each grown to the largest a chain has asked for.
+    fused_scratch: RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>,
+    /// A fused kernel's arrival counter and release generation, zeroed once. The
+    /// barrier leaves both as it found them, so every launch of every layer
+    /// reuses it.
     fused_barrier: RefCell<Option<DeviceBuffer<i32>>>,
+    /// Operands for a fused launch, reused so a fused step allocates nothing.
+    fused_operands: RefCell<Vec<(u64, [i64; 2])>>,
     functions: RefCell<HashMap<(usize, usize), cust::sys::CUfunction>>,
     func_shared: RefCell<HashMap<usize, u32>>,
     /// Per kernel, from its declared maxntid. See `threads_of`.
@@ -1700,6 +1595,17 @@ pub struct DeviceBackend {
 }
 
 impl DeviceBackend {
+    /// Turns every fused stage on or off whatever the environment asked for.
+    /// [`fused_stage`] reads its variables once, at construction, which cannot
+    /// express what the equivalence harness needs: both paths in one process,
+    /// over one upload of the weights and one context. See
+    /// `examples/fuse_check.rs`.
+    pub fn set_fused(&mut self, on: bool) {
+        self.fused_mlp = on;
+        self.fused_project = on;
+        self.fused_mix = on;
+    }
+
     pub fn new() -> Result<DeviceBackend> {
         let _ctx = cust::quick_init().context("initializing CUDA")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -1768,11 +1674,14 @@ impl DeviceBackend {
             q8_qdot_persist: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
             persist_qdot: std::env::var_os("PHOBOS_PERSIST_QDOT").is_some(),
-            fused_mlps: RefCell::new(HashMap::new()),
-            fused_mlp: std::env::var_os("PHOBOS_FUSED_MLP").is_some(),
+            fused_plans: RefCell::new(HashMap::new()),
+            fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),
+            fused_project: fused_stage("PHOBOS_FUSED_PROJ"),
+            fused_mix: fused_stage("PHOBOS_FUSED_MIX"),
             fused_blocks: Cell::new(0),
-            fused_scratch: RefCell::new(None),
+            fused_scratch: RefCell::new(Vec::new()),
             fused_barrier: RefCell::new(None),
+            fused_operands: RefCell::new(Vec::new()),
             functions: RefCell::new(HashMap::new()),
             func_shared: RefCell::new(HashMap::new()),
             func_threads: RefCell::new(HashMap::new()),
@@ -2030,9 +1939,7 @@ impl DeviceBackend {
     }
 
     /// What the pass costs in launches, and what each kernel costs in registers
-    /// and shared memory. Both questions `docs/megakernel.md` turns on: how many
-    /// launch boundaries a step pays for, and how many blocks per SM a fused
-    /// kernel could host if it inherited the widest stage's pressure.
+    /// and shared memory.
     fn print_report(&self) -> Result<()> {
         let ops = self.report.borrow();
         let sms = cust::device::Device::get_device(0)?
@@ -2528,7 +2435,7 @@ impl DeviceBackend {
         if self.persist_blocks.get() == 0 {
             // A narrower grid than the occupancy answer stays co-resident, so
             // PHOBOS_PERSIST_BLOCKS can ask what a matvec loses at a block count
-            // a fused kernel would be stuck with. See docs/megakernel.md.
+            // a fused kernel would be stuck with.
             if let Some(forced) = std::env::var("PHOBOS_PERSIST_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
@@ -2565,8 +2472,9 @@ impl DeviceBackend {
         )
     }
 
-    /// Compiles the fused MLP and settles the grid it must be launched with,
-    /// returning the key its module is cached under.
+    /// Runs the pass over a chain, compiles what it emits, and settles the grid
+    /// the result must be launched with. `None` means the pass declined the
+    /// chain and the caller should run its stages as separate launches.
     ///
     /// A grid barrier makes the block count part of what the kernel means:
     /// `BLOCKS` is compiled in, so the launch has to use exactly it, and every
@@ -2574,20 +2482,12 @@ impl DeviceBackend {
     /// never comes. The occupancy answer is a property of the compiled code and
     /// the compiled code carries the block count, so the two are settled by
     /// starting at the thread ceiling and shrinking to what the driver allows.
-    fn fused_mlp_module(&self, mlp: &FusedMlp) -> Result<FusedMlpKey> {
-        let key_at = |blocks: u32| FusedMlpKey {
-            d_model: mlp.d_model,
-            d_ff: mlp.d_ff,
-            eps: mlp.eps.to_bits(),
-            blocks,
-            unit_iters: (mlp.d_ff / Q8_BLOCK).div_ceil(blocks as usize),
-            out_iters: mlp.d_model.div_ceil(blocks as usize * Q8_QDOT_TN),
-        };
+    fn fused_plan(&self, chain: &Chain) -> Result<Option<ChainKey>> {
         let settled = self.fused_blocks.get();
         if settled != 0 {
-            let key = key_at(settled);
-            if self.fused_mlps.borrow().contains_key(&key) {
-                return Ok(key);
+            let key = chain.key(settled);
+            if self.fused_plans.borrow().contains_key(&key) {
+                return Ok(Some(key));
             }
         }
 
@@ -2599,63 +2499,82 @@ impl DeviceBackend {
             / CTA_THREADS;
         let mut blocks = if settled != 0 { settled } else { per_sm * sms };
         for _ in 0..FUSED_GRID_TRIES {
-            let key = key_at(blocks);
-            let module = self.compile_dynamic(&fused_mlp_src(key), "fused_mlp")?;
-            let func = module.get_function("fused_mlp")?.to_raw();
+            let key = chain.key(blocks);
+            let Some(plan) = key.plan()? else {
+                return Ok(None);
+            };
+            let module = self.compile_dynamic(&plan.source, FUSED_KERNEL)?;
+            let func = module.get_function(FUSED_KERNEL)?.to_raw();
             // SAFETY: the function belongs to a module alive for this call.
             let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, 0)? };
             if allowed >= blocks {
+                // What the fusion collapsed, what it still pays and what it had
+                // to put in memory anyway: the numbers that say whether it was
+                // worth emitting.
+                phobos_base::phdebug!(
+                    "fused kernel: stages={} blocks={blocks} barriers={} published={} held={}",
+                    key.stages(),
+                    plan.barriers,
+                    plan.scratch.len(),
+                    plan.held
+                );
                 self.fused_blocks.set(blocks);
-                self.fused_mlps.borrow_mut().insert(key, module);
-                return Ok(key);
+                self.fused_plans
+                    .borrow_mut()
+                    .insert(key.clone(), (module, plan));
+                return Ok(Some(key));
             }
             blocks = allowed;
         }
-        bail!("no co-resident grid settled for the fused MLP after {FUSED_GRID_TRIES} tries")
+        // Declining costs launches; failing would cost the model. Fusion is what
+        // a step does by default, so a card whose occupancy answer never settles
+        // falls back rather than taking the pass down with it.
+        phobos_base::phinfo!(
+            "fused kernel: no co-resident grid after {FUSED_GRID_TRIES} tries, not fusing"
+        );
+        Ok(None)
     }
 
-    /// Scratch for a fused MLP of these dimensions on this grid, with its device
-    /// pointers in the order [`fused_mlp_src`] takes them.
-    fn fused_slots(
-        &self,
-        blocks: usize,
-        d_model: usize,
-        d_ff: usize,
-    ) -> Result<(u64, u64, u64, u64)> {
-        let act_len = blocks * d_model;
-        let too_small = self
-            .fused_scratch
-            .borrow()
-            .as_ref()
-            .is_none_or(|s| s.act.len() < act_len || s.hidden.len() < d_ff);
-        if too_small {
-            // Growing frees what the recorded launches point at, so the
-            // recording has to be spent first.
-            self.flush_pending()?;
-            // SAFETY: the normalization writes every byte of a block's own row
-            // before that block contracts against it, and the SwiGLU every byte
-            // of the hidden row before the barrier releases the down projection.
-            let grown = unsafe {
-                FusedScratch {
-                    act: DeviceBuffer::uninitialized(act_len)?,
-                    act_scales: DeviceBuffer::uninitialized(act_len / Q8_BLOCK)?,
-                    hidden: DeviceBuffer::uninitialized(d_ff)?,
-                    hidden_scales: DeviceBuffer::uninitialized(d_ff / Q8_BLOCK)?,
-                }
-            };
-            *self.fused_scratch.borrow_mut() = Some(grown);
+    /// Grows the scratch a plan wants for the values it found crossing a nest.
+    fn grow_scratch(&self, need: &[Scratch]) -> Result<()> {
+        let fits = |pool: &[(DeviceBuffer<i8>, DeviceBuffer<f32>)], at: usize, n: &Scratch| {
+            pool.get(at)
+                .is_some_and(|(b, s)| b.len() >= n.bytes && s.len() >= n.scales)
+        };
+        if need
+            .iter()
+            .enumerate()
+            .all(|(at, n)| fits(&self.fused_scratch.borrow(), at, n))
+        {
+            return Ok(());
         }
-        let scratch = self.fused_scratch.borrow();
-        let s = scratch.as_ref().expect("filled above");
-        Ok((
-            s.act.as_device_ptr().as_raw(),
-            s.act_scales.as_device_ptr().as_raw(),
-            s.hidden.as_device_ptr().as_raw(),
-            s.hidden_scales.as_device_ptr().as_raw(),
-        ))
+
+        // Growing frees what the recorded launches point at, so the recording
+        // has to be spent first.
+        self.flush_pending()?;
+        let mut pool = self.fused_scratch.borrow_mut();
+        for (at, n) in need.iter().enumerate() {
+            if fits(&pool, at, n) {
+                continue;
+            }
+            // SAFETY: a plan only publishes a value whose every byte one of its
+            // stages writes before any stage reads it, which is what the nest
+            // and barrier analysis establishes.
+            let fresh = unsafe {
+                (
+                    DeviceBuffer::uninitialized(n.bytes)?,
+                    DeviceBuffer::uninitialized(n.scales)?,
+                )
+            };
+            match pool.get_mut(at) {
+                Some(slot) => *slot = fresh,
+                None => pool.push(fresh),
+            }
+        }
+        Ok(())
     }
 
-    /// The fused MLP's barrier state, zeroed on first use. Every barrier leaves
+    /// A fused kernel's barrier state, zeroed on first use. Every barrier leaves
     /// the counter and the generation as it found them, so one pair serves every
     /// launch of every layer.
     fn fused_bar(&self) -> Result<u64> {
@@ -2665,6 +2584,43 @@ impl DeviceBackend {
         }
         let bar = self.fused_barrier.borrow();
         Ok(bar.as_ref().expect("filled above").as_device_ptr().as_raw())
+    }
+
+    /// Binds a plan's slots and launches it.
+    fn fused_launch(&self, chain: &Chain, key: &ChainKey) -> Result<()> {
+        let plans = self.fused_plans.borrow();
+        let (module, plan) = &plans[key];
+        self.grow_scratch(&plan.scratch)?;
+
+        let quants = self.quants.borrow();
+        let pool = self.fused_scratch.borrow();
+        let mut operands = self.fused_operands.borrow_mut();
+        operands.clear();
+        for slot in &plan.slots {
+            let ptr = match slot.bound {
+                Bound::Given(val) => self.ptr(chain.buf(val)?, 0)?,
+                Bound::WeightQs(val) | Bound::WeightScales(val) => {
+                    let w = chain.weight_of(val)?;
+                    let (qs, _, row_scales, stored_n) = quants
+                        .get(w.0)
+                        .context("use of an unknown quantized weight handle")?;
+                    ensure!(
+                        *stored_n as i64 == slot.dims[0],
+                        "a fused weight went up with n = {stored_n}, used with n = {}",
+                        slot.dims[0]
+                    );
+                    match slot.bound {
+                        Bound::WeightQs(_) => qs.as_device_ptr().as_raw(),
+                        _ => row_scales.as_device_ptr().as_raw(),
+                    }
+                }
+                Bound::ScratchQs(at) => pool[at].0.as_device_ptr().as_raw(),
+                Bound::ScratchScales(at) => pool[at].1.as_device_ptr().as_raw(),
+                Bound::Barrier => self.fused_bar()?,
+            };
+            operands.push((ptr, slot.dims));
+        }
+        self.launch(module, FUSED_KERNEL, &operands, (plan.blocks, 1, 1))
     }
 
     fn with_kernel<K: Copy + Eq + std::hash::Hash>(
@@ -3308,72 +3264,50 @@ impl Backend for DeviceBackend {
     }
 
     fn fused_mlp(&self, mlp: FusedMlp) -> Result<bool> {
-        // The source folds the row into blocks of Q8_BLOCK and sweeps them
-        // FUSED_NORM_BLOCKS at a time, contracts the output in tiles of
-        // Q8_QDOT_TN, and gives one block a whole Q8_0 run of the inner
-        // dimension. A shape that does not divide takes the four launches.
-        let fold = Q8_BLOCK * FUSED_NORM_BLOCKS;
-        if !self.fused_mlp
-            || !mlp.d_model.is_multiple_of(fold)
-            || !mlp.d_model.is_multiple_of(Q8_QDOT_TN)
-            || !mlp.d_ff.is_multiple_of(Q8_BLOCK)
-        {
+        if !self.fused_mlp {
             return Ok(false);
         }
-
-        let key = self.fused_mlp_module(&mlp)?;
-        let blocks = key.blocks as usize;
-        let (rb, units) = (mlp.d_model / Q8_BLOCK, mlp.d_ff / Q8_BLOCK);
-        let (aq, a_scales, hq, h_scales) = self.fused_slots(blocks, mlp.d_model, mlp.d_ff)?;
-        let bar = self.fused_bar()?;
-
-        let quants = self.quants.borrow();
-        let weight = |w: QBuf, expect: usize| -> Result<(u64, u64)> {
-            let (qs, _, row_scales, stored_n) = quants
-                .get(w.0)
-                .context("use of an unknown quantized weight handle")?;
-            ensure!(
-                *stored_n == expect,
-                "fused MLP weight was uploaded with n = {stored_n}, used with n = {expect}"
-            );
-            Ok((
-                qs.as_device_ptr().as_raw(),
-                row_scales.as_device_ptr().as_raw(),
-            ))
+        // The chain is the whole of what this backend says about the MLP. Which
+        // stages share a loop nest, what reaches memory, where the one barrier
+        // goes and whether the shape can be fused at all are the pass's, and a
+        // shape it declines takes the four launches.
+        let chain = fuse::mlp_chain(
+            mlp.x,
+            mlp.gain,
+            mlp.gate_up,
+            mlp.down,
+            mlp.d_model,
+            mlp.d_ff,
+            mlp.eps,
+        );
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(false);
         };
-        let (gu_q, gu_s) = weight(mlp.gate_up, 2 * mlp.d_ff)?;
-        let (dn_q, dn_s) = weight(mlp.down, mlp.d_model)?;
-
-        // X and Y are the same buffer, which the barrier is what makes safe:
-        // every block has read the residual in its own normalization before it
-        // arrives, and the down projection adds into it only after.
-        let x = self.ptr(mlp.x, 0)?;
-        let (q8, tn) = (Q8_BLOCK as i64, mlp.d_model as i64);
-        let modules = self.fused_mlps.borrow();
-        self.launch(
-            &modules[&key],
-            "fused_mlp",
-            &[
-                (x, [rb as i64, q8]),
-                (self.ptr(mlp.gain, 0)?, [rb as i64, q8]),
-                (aq, [(blocks * rb) as i64, q8]),
-                (a_scales, [(blocks * rb) as i64, 1]),
-                (aq, [blocks as i64, mlp.d_model as i64]),
-                (a_scales, [blocks as i64, rb as i64]),
-                (gu_q, [2 * mlp.d_ff as i64, mlp.d_model as i64]),
-                (gu_s, [2 * mlp.d_ff as i64, rb as i64]),
-                (hq, [units as i64, q8]),
-                (h_scales, [units as i64, 1]),
-                (hq, [1, mlp.d_ff as i64]),
-                (h_scales, [1, units as i64]),
-                (dn_q, [tn, mlp.d_ff as i64]),
-                (dn_s, [tn, units as i64]),
-                (x, [1, tn]),
-                (bar, [2, 1]),
-            ],
-            (key.blocks, 1, 1),
-        )?;
+        self.fused_launch(&chain, &key)?;
         Ok(true)
+    }
+
+    fn fused_project(&self, project: FusedProject) -> Result<Fused> {
+        if !self.fused_project {
+            return Ok(Fused::default());
+        }
+        // Dropping the tail here rather than at the frontend keeps the recording
+        // side free of the gate: the chain is what the gate is about.
+        let project = FusedProject {
+            mix: project.mix.filter(|_| self.fused_mix),
+            ..project
+        };
+        let Some(chain) = fuse::project_chain(&project) else {
+            return Ok(Fused::default());
+        };
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(Fused::default());
+        };
+        self.fused_launch(&chain, &key)?;
+        Ok(Fused {
+            project: true,
+            mix: project.mix.is_some(),
+        })
     }
 
     fn copy_2d(&self, src: Plane, dst: Plane, rows: usize, width: usize) -> Result<()> {

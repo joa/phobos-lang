@@ -3,7 +3,9 @@ use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
 
-use crate::backend::{Backend, Buf, FusedMlp, Plane, Q8_BLOCK, QAct, QBuf};
+use crate::backend::{
+    Backend, Buf, Fused, FusedMix, FusedMlp, FusedProject, Plane, ProjRun, Q8_BLOCK, QAct, QBuf,
+};
 use crate::tensor::q8_0_blocks;
 use crate::{GgmlType, Gguf, TensorInfo};
 
@@ -317,6 +319,18 @@ impl Linear {
         self.project_shared(backend, x, None, rows, out)
     }
 
+    /// [`Linear::project_into`] against an activation quantized already.
+    pub(crate) fn project_into_act(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        act: QAct,
+        rows: usize,
+        out: Buf,
+    ) -> Result<()> {
+        self.project_shared(backend, x, Some(act), rows, out)
+    }
+
     /// Project and add into `dest`, the residual connection's epilogue. The
     /// dense fallback has no accumulating form, so it keeps the separate pass.
     pub(crate) fn add_into(
@@ -356,6 +370,40 @@ impl Linear {
         backend
             .matmul_q8_add(act, rows, self.in_dim, w, self.out_dim, dest)
             .with_context(|| format!("residual matmul for '{}'", self.key))
+    }
+
+    /// The normalization ahead of this projection and the projection itself as
+    /// one kernel, each run of the output landing where the caller wants it, and
+    /// `mix` continuing into the delta net's convolution and gates. Whatever
+    /// comes back unset is the caller's to launch.
+    ///
+    /// The normalization belongs to the request for the reason
+    /// [`Ffn::forward_fused`] takes it too: a fused kernel recomputes it per
+    /// block and spends no barrier publishing it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn project_fused(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        gain: Buf,
+        eps: f32,
+        rows: usize,
+        runs: &[ProjRun],
+        mix: Option<FusedMix>,
+    ) -> Result<Fused> {
+        if rows != 1 || !matches!(self.weight, Weights::Q8 { .. }) {
+            return Ok(Fused::default());
+        }
+        backend.fused_project(FusedProject {
+            x,
+            d_model: self.in_dim,
+            gain,
+            eps,
+            w: self.quantized(backend)?,
+            out_dim: self.out_dim,
+            runs,
+            mix,
+        })
     }
 
     /// This weight uploaded in its quantized form, for a caller that contracts
@@ -484,7 +532,7 @@ impl Ffn {
     ///
     /// The normalization belongs to the request rather than happening first,
     /// because that is what lets the fused kernel recompute it per block and
-    /// spend no barrier publishing it. See `docs/megakernel.md`.
+    /// spend no barrier publishing it.
     pub(crate) fn forward_fused(
         &self,
         backend: &dyn Backend,

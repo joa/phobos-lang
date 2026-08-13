@@ -43,6 +43,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         aligned: false,
                         swizzle: None,
                         global: None,
+                        shared: false,
                         owned: false,
                         mask: Vec::new(),
                         dim_div: self.declared_divs(kernel, dims)?,

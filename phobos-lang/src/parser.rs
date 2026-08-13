@@ -333,11 +333,30 @@ impl Parser {
         } else {
             None
         };
+        // A `var` with a type may omit its initializer, which declares a buffer
+        // without filling it. A `let` cannot: it would name nothing.
+        if is_var && ty.is_some() && !self.matches(&Tok::Eq) {
+            // we allow tiles without an init if a type is known
+            // - uninitialized (this) : var foo: tile<f32>[D, D]
+            // - initialized   (below): var bar: tile<f32>[D, D] = 0.0
+            // - illegal              : var baz
+            // - illegal (immutable!) : let eek: tile<f32>[D, D]
+            self.end_stmt()?;
+            return Ok(Stmt::Var {
+                name,
+                ty,
+                value: None,
+            });
+        }
         self.expect(Tok::Eq)?;
         let value = self.parse_expr()?;
         self.end_stmt()?;
         Ok(if is_var {
-            Stmt::Var { name, ty, value }
+            Stmt::Var {
+                name,
+                ty,
+                value: Some(value),
+            }
         } else {
             Stmt::Let { name, ty, value }
         })

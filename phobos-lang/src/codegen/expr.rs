@@ -110,10 +110,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     let indices = self.emit_indices(block, subs, mv.shape.len())?;
                     Ok(Rv::Scalar(self.load_scalar(block, &mv, &indices)?))
                 } else {
-                    if !matches!(binding, Binding::Tensor(_)) {
-                        bail!("only tensors can be sliced");
-                    }
-
+                    self.check_sliceable(&mv, &binding)?;
                     let view = self.emit_subview(block, &mv, subs)?;
 
                     if view.is_masked() {
@@ -248,6 +245,17 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     self.release(t);
                 }
                 Ok(Rv::Tile(out))
+            }
+            // flat(t): a tile viewed as one row. A view, not a copy, so the
+            // result is read-only and the buffer stays the declaration's.
+            "flat" => {
+                let [arg] = args else {
+                    bail!("flat expects one tile argument");
+                };
+                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
+                    bail!("flat expects a tile argument");
+                };
+                Ok(Rv::Tile(self.tile_flat(block, &t)?))
             }
             // exp(t): element-wise e^x over a tile.
             "exp" => {
@@ -633,6 +641,28 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
     }
 
+    /// Whether a slice of this binding is a subview the type system can name.
+    ///
+    /// Tensor parameters and plain tile buffers are. The compiler's own staging
+    /// tiles are not: [`Self::emit_subview`] builds unit strides off the logical
+    /// shape, which addresses the wrong element in a padded or XOR-swizzled
+    /// buffer. Neither is reachable from source, so rejecting them costs nothing.
+    pub(super) fn check_sliceable(&self, mv: &MemVal<'c>, binding: &Binding<'c>) -> Result<()> {
+        if !matches!(binding, Binding::Tensor(_) | Binding::Tile(_)) {
+            bail!("only tensors and tiles can be sliced");
+        }
+
+        if mv.row_stride.is_some() {
+            bail!("a padded staging tile cannot be sliced");
+        }
+        
+        if mv.swizzle.is_some() {
+            bail!("a swizzled staging tile cannot be sliced");
+        }
+        
+        Ok(())
+    }
+
     /// Lowers slice subscripts to a memref.subview of a tensor.
     ///
     /// Offsets are always passed as dynamic operands; sizes are static when
@@ -799,6 +829,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             // so the swizzle does not propagate here.
             swizzle: None,
             global: None,
+            shared: src.shared,
             owned: false,
             mask,
             dim_div: subs
@@ -819,9 +850,10 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let dims: String = sizes.iter().map(|&d| format!("{}x", fmt_dim(d))).collect();
         let strides: Vec<String> = strides.iter().map(|&s| fmt_dim(s)).collect();
         let text = format!(
-            "memref<{dims}{}, strided<[{}], offset: ?>, {MEM_GLOBAL}>",
+            "memref<{dims}{}, strided<[{}], offset: ?>, {}>",
             src.elem,
-            strides.join(", ")
+            strides.join(", "),
+            self.mem_space(src.shared)
         );
         Type::parse(self.ctx, &text).ok_or_else(|| anyhow!("failed to parse type '{text}'"))
     }

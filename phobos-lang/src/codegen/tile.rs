@@ -108,6 +108,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             aligned,
             swizzle: None,
             global: Some(name),
+            shared: true,
             owned: true,
             mask: Vec::new(),
             dim_div: Vec::new(),
@@ -127,9 +128,15 @@ impl<'p, 'c> Codegen<'p, 'c> {
         if !mv.owned {
             return;
         }
+
         let Some(name) = &mv.global else {
             return;
         };
+
+        if self.aliased.contains(name) {
+            return;
+        }
+
         // Pool by the physical allocation shape (padded buffers carry a
         // logical shape narrower than the backing global).
         let mut shape = mv.shape.clone();
@@ -242,6 +249,74 @@ impl<'p, 'c> Codegen<'p, 'c> {
         mv.shape = shape.to_vec();
 
         Ok(mv)
+    }
+
+    pub(super) fn mem_space(&self, shared: bool) -> String {
+        match shared {
+            true if self.dynamic_shared => MEM_SHARED_SYM.to_string(),
+            true => MEM_SHARED.to_string(),
+            false => MEM_GLOBAL.to_string(),
+        }
+    }
+
+    /// tile_flat aliases a tile as one row [1, rows * cols].
+    ///
+    /// Nothing is allocated and no data moves!
+    pub(super) fn tile_flat(&mut self, block: &Block<'c>, src: &MemVal<'c>) -> Result<MemVal<'c>> {
+        if src.shape.len() != 2 {
+            bail!("flat expects a rank-2 tile");
+        }
+
+        if src.global.is_none() {
+            bail!("flat expects a declared tile, not a slice of one");
+        }
+        
+        if src.row_stride.is_some() || src.swizzle.is_some() {
+            bail!("a padded or swizzled staging tile has no flat view");
+        }
+        
+        let [rows, cols] = [src.shape[0], src.shape[1]];
+        if rows == DYN || cols == DYN {
+            bail!("flat expects a static tile shape");
+        }
+        
+        let len = rows * cols;
+
+        if let Some(name) = &src.global {
+            self.aliased.insert(name.clone());
+        }
+
+        let text = format!("memref<1x{len}x{}, {}>", src.elem, self.mem_space(true));
+        let result =
+            Type::parse(self.ctx, &text).ok_or_else(|| anyhow!("failed to parse type '{text}'"))?;
+
+        let op = OperationBuilder::new("memref.reinterpret_cast", self.loc)
+            .add_operands(&[src.mem])
+            .add_attributes(&[
+                (self.id("static_offsets"), self.i64_array(&[0])?),
+                (self.id("static_sizes"), self.i64_array(&[1, len])?),
+                (self.id("static_strides"), self.i64_array(&[len, 1])?),
+                (
+                    self.id("operandSegmentSizes"),
+                    self.i32_array(&[1, 0, 0, 0])?,
+                ),
+            ])
+            .add_results(&[result])
+            .build()?;
+
+        Ok(MemVal {
+            mem: self.push(block, op)?,
+            elem: src.elem,
+            shape: vec![1, len],
+            row_stride: None,
+            aligned: src.aligned,
+            swizzle: None,
+            global: None, // it's a view; we don't own the memory and must not release it
+            shared: true,
+            owned: false,
+            mask: Vec::new(),
+            dim_div: Vec::new(),
+        })
     }
 
     pub(super) fn check_matmul_shapes(
@@ -875,38 +950,6 @@ impl<'p, 'c> Codegen<'p, 'c> {
             let r = cg.elem_arith(op, out.elem, x, y)?;
             let r = cg.push(blk, r)?;
             blk.append_operation(memref::store(r, out.mem, idx, cg.loc));
-            Ok(())
-        })
-    }
-
-    /// out[...] = exp(a[...] op b[...]) with broadcasting: the softmax
-    /// probability form t = exp(t - mnew) in a single sweep and barrier,
-    /// instead of one for the subtract and one for the exp. out may be an
-    /// operand (each thread reads and writes the same element).
-    pub(super) fn tile_exp_binary_bc(
-        &mut self,
-        block: &Block<'c>,
-        op: BinOp,
-        a: &MemVal<'c>,
-        b: &MemVal<'c>,
-        out: &MemVal<'c>,
-    ) -> Result<()> {
-        if a.elem != out.elem || b.elem != out.elem {
-            bail!("elementwise tile op with mismatched element types");
-        }
-        if out.shape.contains(&DYN) {
-            bail!("broadcast elementwise op needs a static result shape");
-        }
-        self.distribute(block, out, 1, true, |cg, blk, idx| {
-            let ai = cg.bc_index(blk, idx, &out.shape, &a.shape)?;
-            let bi = cg.bc_index(blk, idx, &out.shape, &b.shape)?;
-            let x = cg.push(blk, memref::load(a.mem, &ai, cg.loc))?;
-            let y = cg.push(blk, memref::load(b.mem, &bi, cg.loc))?;
-            let r = cg.push(blk, cg.elem_arith(op, out.elem, x, y)?)?;
-            let rf = cg.float_cast(blk, r, cg.f32_t)?;
-            let e = cg.approx_exp(blk, rf)?;
-            let e = cg.float_cast(blk, e, out.elem)?;
-            blk.append_operation(memref::store(e, out.mem, idx, cg.loc));
             Ok(())
         })
     }

@@ -189,7 +189,7 @@ impl Kernel {
     /// Whether the kernel spans several stages of a pass and synchronizes them
     /// with `grid_barrier`, so every block must be resident at once or the
     /// barrier deadlocks. The launcher, not the compiler, has to honour it: see
-    /// `phobos_kernels::launch::persistent_grid` and `docs/megakernel.md`.
+    /// `phobos_kernels::launch::persistent_grid`.
     pub fn wants_persistent(&self) -> bool {
         self.attrs.iter().any(|a| a.name == "persistent")
     }
@@ -222,7 +222,7 @@ pub enum Stmt {
     Var {
         name: String,
         ty: Option<Type>,
-        value: Expr,
+        value: Option<Expr>,
     },
     Assign {
         target: Expr,
@@ -364,12 +364,20 @@ impl Expr {
 }
 
 impl Stmt {
-    /// Whether this statement uses the given name anywhere (read, write, rebinding)
+    pub fn as_decl(&self) -> Option<(&str, Option<&Type>, Option<&Expr>)> {
+        match self {
+            Stmt::Let { name, ty, value } => Some((name, ty.as_ref(), Some(value))),
+            Stmt::Var { name, ty, value } => Some((name, ty.as_ref(), value.as_ref())),
+            _ => None,
+        }
+    }
+
     pub fn uses_name(&self, name: &str) -> bool {
         let block = |b: &[Stmt]| b.iter().any(|s| s.uses_name(name));
         match self {
-            Stmt::Let { name: n, value, .. } | Stmt::Var { name: n, value, .. } => {
-                n == name || value.uses_name(name)
+            Stmt::Let { name: n, value, .. } => n == name || value.uses_name(name),
+            Stmt::Var { name: n, value, .. } => {
+                n == name || value.as_ref().is_some_and(|v| v.uses_name(name))
             }
             Stmt::Assign { target, value, .. } => target.uses_name(name) || value.uses_name(name),
             Stmt::For {
@@ -396,7 +404,12 @@ impl Stmt {
     /// pre-order over every expression in this statement and its nested blocks
     pub fn walk_exprs(&self, f: &mut impl FnMut(&Expr)) {
         match self {
-            Stmt::Let { value, .. } | Stmt::Var { value, .. } => value.walk(f),
+            Stmt::Let { value, .. } => value.walk(f),
+            Stmt::Var { value, .. } => {
+                if let Some(value) = value {
+                    value.walk(f);
+                }
+            }
             Stmt::Assign { target, value, .. } => {
                 target.walk(f);
                 value.walk(f);

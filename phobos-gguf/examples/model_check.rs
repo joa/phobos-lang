@@ -1,7 +1,7 @@
 // One forward pass on both backends, logits compared:
 //
 //   cargo run --release -p phobos-gguf --features cuda \
-//       --example model_check -- MODEL.gguf [--single]
+//       --example model_check -- MODEL.gguf [-p PROMPT] [--single]
 //
 // The individual ops agreeing does not prove the sequence does: buffer reuse,
 // aliasing and stream ordering only show up once a whole block runs.
@@ -17,13 +17,21 @@ use phobos_gguf::backend::device;
 
 fn main() -> Result<()> {
     let Some(path) = std::env::args().nth(1) else {
-        bail!("usage: model_check MODEL.gguf [--single]");
+        bail!("usage: model_check MODEL.gguf [-p PROMPT] [--single]");
     };
     let gguf = Gguf::open(path.as_ref())?;
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
     let model = Decoder::load(&gguf)?;
-    let mut tokens = bpe.encode("The capital of France is")?;
-    if std::env::args().any(|a| a == "--single") {
+    let args: Vec<String> = std::env::args().collect();
+    // A prompt of one's own, because how much of the bound below a model spends
+    // on quantization alone varies with the prompt, and a model that spends most
+    // of it cannot be used to judge anything else.
+    let prompt = match args.iter().position(|a| a == "-p") {
+        Some(at) => args.get(at + 1).cloned().unwrap_or_default(),
+        None => "The capital of France is".to_string(),
+    };
+    let mut tokens = bpe.encode(&prompt)?;
+    if args.iter().any(|a| a == "--single") {
         tokens.truncate(1);
     }
 

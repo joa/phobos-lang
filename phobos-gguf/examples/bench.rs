@@ -1,9 +1,10 @@
 // Throughput benchmark for the GGUF path, shaped like `llama-bench`:
 //
 //   cargo run --release -p phobos-gguf --features cuda --example bench -- \
-//       -m MODEL.gguf -p 128 -n 32 -r 3
+//       -m MODEL.gguf -p 128,512 -n 32,128,512 -r 3
 //
-// Reports the same two numbers llama-bench does, in the same units:
+// Reports the same numbers llama-bench does, in the same units, one row per
+// size given:
 //
 //   pp<N>  prompt processing, N tokens fed into a fresh state
 //   tg<N>  text generation, N tokens produced one at a time
@@ -27,8 +28,8 @@ const DEFAULT_MODEL: &str = "models/Qwen3.5-0.8B-Q8_0.gguf";
 
 struct Args {
     model: PathBuf,
-    prompt_tokens: usize,
-    gen_tokens: usize,
+    prompt_tokens: Vec<usize>,
+    gen_tokens: Vec<usize>,
     repetitions: usize,
     warmup: bool,
 }
@@ -40,20 +41,38 @@ usage: bench [OPTIONS]
 
 OPTIONS:
   -m, --model FILE      the GGUF file to run (default: {DEFAULT_MODEL})
-  -p, --n-prompt N      prompt-processing tokens, the pp<N> row (default: 128)
-  -n, --n-gen N         generated tokens, the tg<N> row (default: 32)
+  -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
+  -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
   -r, --repetitions N   timed repetitions per row (default: 3)
       --no-warmup       skip the warmup pass, which leaves each kernel's first
                         compile inside the repetition it lands in
-  -h, --help            print this message"
+  -h, --help            print this message
+
+  -p and -n take a comma-separated list, and repeat, so -p 128,512 and
+  -p 128 -p 512 both ask for the same two rows."
     );
+}
+
+/// One size, or a comma-separated list of them. A zero drops the row, which is
+/// how a caller asks for prompt passes alone or decode steps alone.
+fn parse_sizes(value: &str) -> Result<Vec<usize>> {
+    value
+        .split(',')
+        .filter(|piece| !piece.trim().is_empty())
+        .map(|piece| {
+            piece
+                .trim()
+                .parse::<usize>()
+                .with_context(|| format!("{piece:?} is not a token count"))
+        })
+        .collect()
 }
 
 fn parse_args() -> Result<Args> {
     let mut args = Args {
         model: PathBuf::from(DEFAULT_MODEL),
-        prompt_tokens: 128,
-        gen_tokens: 32,
+        prompt_tokens: Vec::new(),
+        gen_tokens: Vec::new(),
         repetitions: 3,
         warmup: true,
     };
@@ -62,8 +81,8 @@ fn parse_args() -> Result<Args> {
         let mut next = |flag: &str| it.next().with_context(|| format!("{flag} needs a value"));
         match arg.as_str() {
             "-m" | "--model" => args.model = next("--model")?.into(),
-            "-p" | "--n-prompt" => args.prompt_tokens = next("-p")?.parse().context("-p")?,
-            "-n" | "--n-gen" => args.gen_tokens = next("-n")?.parse().context("-n")?,
+            "-p" | "--n-prompt" => args.prompt_tokens.extend(parse_sizes(&next("-p")?)?),
+            "-n" | "--n-gen" => args.gen_tokens.extend(parse_sizes(&next("-n")?)?),
             "-r" | "--repetitions" => args.repetitions = next("-r")?.parse().context("-r")?,
             "--no-warmup" => args.warmup = false,
             "-h" | "--help" => {
@@ -73,6 +92,16 @@ fn parse_args() -> Result<Args> {
             other => anyhow::bail!("unknown argument {other:?} (try --help)"),
         }
     }
+    // Only when the flag never appeared: -p 0 is a request for no prompt row,
+    // not a request for the default one.
+    if !std::env::args().any(|a| a == "-p" || a == "--n-prompt") {
+        args.prompt_tokens.push(128);
+    }
+    if !std::env::args().any(|a| a == "-n" || a == "--n-gen") {
+        args.gen_tokens.push(32);
+    }
+    args.prompt_tokens.retain(|&n| n > 0);
+    args.gen_tokens.retain(|&n| n > 0);
     Ok(args)
 }
 
@@ -127,11 +156,17 @@ fn main() -> Result<()> {
 
     // llama-bench feeds pseudorandom token ids rather than real text: the cost
     // of a position does not depend on which token sits there.
-    let tokens = synthetic_tokens(args.prompt_tokens.max(args.gen_tokens) + 1, vocab);
+    let longest = args
+        .prompt_tokens
+        .iter()
+        .chain(args.gen_tokens.iter())
+        .copied()
+        .max()
+        .unwrap_or(0);
+    let tokens = synthetic_tokens(longest.max(128) + 1, vocab);
 
     if args.warmup {
         eprint!("warmup... ");
-        let mut state = model.new_state();
         // A batch and then single steps, because the two take different kernels
         // and a backend may compile each on first use. Warming only one leaves
         // the other's compile inside the first timed repetition, where it is
@@ -141,8 +176,19 @@ fn main() -> Result<()> {
         // the 64 rows its matmul path needs. Past that it is the prompt itself,
         // which is what llama-bench warms with: it runs each test once before
         // timing it, and the first pass at a new shape also builds the graph.
-        let batch = tokens.len().min(args.prompt_tokens.max(128));
-        model.forward(&mut state, &tokens[..batch], backend.as_ref())?;
+        // Hence one pass per prompt size rather than one at the largest: a
+        // shape that was never run is a graph that gets built inside the
+        // repetition that first asks for it.
+        let mut shapes: Vec<usize> = args.prompt_tokens.iter().map(|&n| n.max(128)).collect();
+        shapes.push(128);
+        shapes.sort_unstable();
+        shapes.dedup();
+        for batch in shapes {
+            let mut state = model.new_state();
+            model.forward(&mut state, &tokens[..tokens.len().min(batch)], backend.as_ref())?;
+            state.release(backend.as_ref());
+        }
+        let mut state = model.new_state();
         for &token in tokens.iter().take(4) {
             model.forward(&mut state, &[token], backend.as_ref())?;
         }
@@ -151,7 +197,7 @@ fn main() -> Result<()> {
     }
 
     let mut rows = Vec::new();
-    if args.prompt_tokens > 0 {
+    for &prompt_tokens in &args.prompt_tokens {
         let mut rates = Vec::new();
         for rep in 0..args.repetitions {
             let mut state = model.new_state();
@@ -159,21 +205,19 @@ fn main() -> Result<()> {
             // The whole prompt in one pass, which is what makes pp a different
             // measurement from tg: the projections become real matmuls instead
             // of a matvec per position.
-            model.forward(&mut state, &tokens[..args.prompt_tokens], backend.as_ref())?;
+            model.forward(&mut state, &tokens[..prompt_tokens], backend.as_ref())?;
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
-            rates.push(args.prompt_tokens as f64 / secs);
+            rates.push(prompt_tokens as f64 / secs);
             eprintln!(
-                "  pp{} rep {}/{}: {:.3} s",
-                args.prompt_tokens,
+                "  pp{prompt_tokens} rep {}/{}: {secs:.3} s",
                 rep + 1,
                 args.repetitions,
-                secs
             );
         }
-        rows.push((format!("pp{}", args.prompt_tokens), rates));
+        rows.push((format!("pp{prompt_tokens}"), rates));
     }
-    if args.gen_tokens > 0 {
+    for &gen_tokens in &args.gen_tokens {
         let mut rates = Vec::new();
         for rep in 0..args.repetitions {
             let mut state = model.new_state();
@@ -181,21 +225,19 @@ fn main() -> Result<()> {
             // same split llama-bench uses.
             model.forward(&mut state, &tokens[..1], backend.as_ref())?;
             let start = Instant::now();
-            for &token in tokens.iter().skip(1).take(args.gen_tokens) {
+            for &token in tokens.iter().skip(1).take(gen_tokens) {
                 model.forward(&mut state, &[token], backend.as_ref())?;
             }
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
-            rates.push(args.gen_tokens as f64 / secs);
+            rates.push(gen_tokens as f64 / secs);
             eprintln!(
-                "  tg{} rep {}/{}: {:.3} s",
-                args.gen_tokens,
+                "  tg{gen_tokens} rep {}/{}: {secs:.3} s",
                 rep + 1,
                 args.repetitions,
-                secs
             );
         }
-        rows.push((format!("tg{}", args.gen_tokens), rates));
+        rows.push((format!("tg{gen_tokens}"), rates));
     }
 
     println!("\n| model | backend | test | t/s |");

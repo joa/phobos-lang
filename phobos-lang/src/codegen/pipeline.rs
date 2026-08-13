@@ -15,7 +15,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             Stmt::Var {
                 name,
                 ty: None,
-                value,
+                value: Some(value),
             },
             tail @ ..,
         ] = rest

@@ -70,7 +70,7 @@ impl Attn {
 /// `x` is the residual row and the destination both, since the down projection
 /// adds into it, and the normalization is part of the request rather than a step
 /// the caller has already taken: a fused kernel recomputes it per block instead
-/// of paying a barrier to share it. See `docs/megakernel.md`.
+/// of paying a barrier to share it.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedMlp {
     pub x: Buf,
@@ -83,6 +83,78 @@ pub struct FusedMlp {
     pub gate_up: QBuf,
     /// `[d_model, d_ff]`.
     pub down: QBuf,
+}
+
+/// One contiguous run of a projection's outputs, and where the caller wants it.
+///
+/// A stacked projection's consumers each read a window of it, and some want that
+/// window elsewhere: the delta net's convolution reads its query/key/value plane
+/// as the tail of a padded stream. Naming the destination per run is what lets
+/// the projection write there rather than be copied out afterwards.
+#[derive(Clone, Copy, Debug)]
+pub struct ProjRun {
+    /// First output of the weight this run covers.
+    pub row_off: usize,
+    pub width: usize,
+    pub dst: Buf,
+    pub dst_off: usize,
+}
+
+/// A normalization and the projection reading it, for a backend that can run
+/// them as one kernel.
+///
+/// `x` is the residual row, normalized per block rather than published, for the
+/// reason [`FusedMlp`] gives.
+#[derive(Clone, Copy, Debug)]
+pub struct FusedProject<'a> {
+    pub x: Buf,
+    pub d_model: usize,
+    /// Gain of the normalization ahead of the projection.
+    pub gain: Buf,
+    pub eps: f32,
+    /// `[out_dim, d_model]`, the runs being windows of its outputs.
+    pub w: QBuf,
+    pub out_dim: usize,
+    pub runs: &'a [ProjRun],
+    /// The delta net's convolution and gates, for a chain continuing past the
+    /// projection into them.
+    pub mix: Option<FusedMix>,
+}
+
+/// Which halves of a [`FusedProject`] a backend ran, so the caller knows what it
+/// still has to launch itself. The two are separate because the tail is gated on
+/// its own and a backend may cover the projection without it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Fused {
+    /// The normalization, the projection and its runs.
+    pub project: bool,
+    /// The convolution and the gates behind them.
+    pub mix: bool,
+}
+
+/// The delta net's convolution and per-head gates as the tail of a fused
+/// projection: [`Backend::delta_conv`] and [`Backend::delta_gates`] with the
+/// same operands, run in the kernel that produced their input.
+///
+/// Only the convolution costs a barrier, because it reads a head's whole row of
+/// the position the projection just wrote and four blocks contributed to that.
+/// The gates read a window the same barrier already published, so they ride in
+/// the convolution's nest for nothing.
+#[derive(Clone, Copy, Debug)]
+pub struct FusedMix {
+    pub spec: DeltaMix,
+    /// `[pad + rows, channels]`, whose last position the projection writes.
+    pub history: Buf,
+    /// `[kernel, channels]`.
+    pub taps: Buf,
+    /// The raw decay and write-strength projections, as
+    /// [`Backend::delta_gates`] takes them.
+    pub decay: (Buf, usize),
+    pub beta: (Buf, usize),
+    pub rate: Buf,
+    pub dt_bias: Buf,
+    /// The five operands [`Backend::delta_rule`] reads.
+    pub packed: Buf,
 }
 
 /// One delta-net mixing step, and the layout its fused projection uses.
@@ -264,6 +336,18 @@ pub trait Backend {
     /// stages itself, which is the only thing a host backend does.
     fn fused_mlp(&self, _mlp: FusedMlp) -> Result<bool> {
         Ok(false)
+    }
+
+    /// The normalization ahead of a mixer and the projection reading it as one
+    /// kernel, each run of the projection's outputs landing where the caller
+    /// asked for it, and optionally the delta net's convolution and gates behind
+    /// them.
+    ///
+    /// What comes back says which halves ran; the caller launches the rest. A
+    /// backend with no fused form leaves both unset, which is the only thing a
+    /// host backend does.
+    fn fused_project(&self, _project: FusedProject) -> Result<Fused> {
+        Ok(Fused::default())
     }
 
     /// [`Backend::swiglu`] that also leaves the result quantized for the
@@ -476,6 +560,13 @@ pub fn read_vec(backend: &dyn Backend, buf: Buf, len: usize) -> Result<Vec<f32>>
 }
 
 pub mod host;
+
+/// The fusion pass. Only the device backend consumes it, but what it emits is
+/// checked without a device, so the tests build it too; there the half that
+/// binds operands has no caller.
+#[cfg(any(feature = "cuda", test))]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub(crate) mod fuse;
 
 #[cfg(feature = "cuda")]
 pub mod device;
