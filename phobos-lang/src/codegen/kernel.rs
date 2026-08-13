@@ -40,7 +40,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         elem,
                         shape: self.tensor_shape(dims),
                         row_stride: None,
-                        aligned: false,
+                        align_div: 1,
                         swizzle: None,
                         global: None,
                         shared: false,

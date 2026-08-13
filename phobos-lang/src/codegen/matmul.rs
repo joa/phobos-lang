@@ -705,14 +705,14 @@ impl<'p, 'c> Codegen<'p, 'c> {
         let row_t = Type::vector(&[tn as u64], self.f32_t);
 
         // pre-compute alpha/beta broadcasts once
-        let (alpha_row, beta_row) = self.epilogue_scaling(block, p, row_t, view.aligned)?;
+        let (alpha_row, beta_row) = self.epilogue_scaling(block, p, row_t, view.vectorizes(4))?;
 
         for i in 0..tm {
             let ci = self.const_index(block, i)?;
             let mi = self.addi(block, m0, ci)?;
             let row = self.vec_extract(block, finals[0], &[i], row_t)?;
 
-            if view.aligned {
+            if view.vectorizes(4) {
                 let out_row = self.apply_scaling(block, row, alpha_row, beta_row, |cg| {
                     cg.vec_load(block, view.mem, &[mi, n0], row_t)
                 })?;
@@ -1178,7 +1178,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // The 128-bit vector drain needs an f32 slab and a 16B-aligned f32 C
         // row (aligned on its own is element-agnostic: an f16 C is 8B-aligned
         // but takes the scalar, rounding store).
-        let vec_drain = slab_f32 && view.elem == self.f32_t && view.aligned;
+        let vec_drain = slab_f32 && view.elem == self.f32_t && view.vectorizes(4);
 
         // pre-compute alpha/beta broadcasts once
         let (alpha, beta) = self.epilogue_scaling(block, p, row_t, vec_drain)?;
@@ -1313,8 +1313,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // need an aligned (multiple-of-4 row pitch) output, otherwise we drain
         // scalar. The scaling vectors are f32 either way (the f16 path scales
         // after extf).
-        let vec_f32 = slab_f32 && view.elem == self.f32_t && view.aligned;
-        let vec_f16 = !slab_f32 && view.elem == self.f16_t && view.aligned;
+        let vec_f32 = slab_f32 && view.elem == self.f32_t && view.vectorizes(4);
+        let vec_f16 = !slab_f32 && view.elem == self.f16_t && view.vectorizes(4);
         let (alpha, beta) = self.epilogue_scaling(block, p, row_t, vec_f32 || vec_f16)?;
         let drain = SlabDrain {
             slab: slab.clone(),
@@ -2197,7 +2197,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         }
 
         let last = *dst.shape.last().expect("tile values are not rank-0");
-        let width = if src.aligned && last != DYN && last % 4 == 0 {
+        let width = if src.vectorizes(4) && last != DYN && last % 4 == 0 {
             4
         } else {
             1

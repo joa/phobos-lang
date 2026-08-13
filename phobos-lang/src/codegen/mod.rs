@@ -133,9 +133,13 @@ struct MemVal<'c> {
     /// None means contiguous, otherwise the padded stride. See
     /// [`Codegen::alloc_tile_padded`]
     row_stride: Option<i64>,
-    /// Base is 16-byte aligned, which vectorization requires. Tile buffers and
-    /// subviews have unproven dynamic offsets, tensor params unknown strides.
-    aligned: bool,
+    /// Proven divisor, in elements, of the base offset and of every stride
+    /// above the innermost: how far into a row a vector access may reach and
+    /// still land on a boundary the hardware accepts. Four elements is what the
+    /// row-pitch ABI promises on its own, which is 16 bytes of f32 and 8 of
+    /// f16; `@aligned` raising a dynamic extent is what lets a narrow element
+    /// type reach 16 bytes too. Zero means no offset at all, so any width goes.
+    align_div: i64,
 
     /// XOR column swizzle for ldmatrix staging buffers. Every access, staging
     /// store and ldmatrix load alike, must permute the column index. See
@@ -178,6 +182,12 @@ impl<'c> MemVal<'c> {
     /// The promised divisor of dim `d`, 1 when nothing was promised.
     fn div_of(&self, d: usize) -> i64 {
         self.dim_div.get(d).copied().unwrap_or(1)
+    }
+
+    /// Whether a `width`-element vector access stays on a legal boundary. A
+    /// zero divisor is an unoffset base, which every width clears.
+    fn vectorizes(&self, width: i64) -> bool {
+        self.align_div % width == 0
     }
 }
 
@@ -388,10 +398,6 @@ fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
             _ => None,
         })
         .collect()
-}
-
-fn mult4(divisor: i64) -> bool {
-    divisor % 4 == 0
 }
 
 /// Whether a slice dimension provably never reaches past the source extent,
@@ -1240,11 +1246,12 @@ mod tests {
                 "gpu.subgroup_mma_compute",
             ],
         );
-        // The f16 transfers are 8 bytes (4xf16), below cp.async.cg's 16-byte
-        // requirement, so unlike the f32 register path they must not bypass L1.
+        // The promise on K makes the f16 transfers 8xf16, so they reach
+        // cp.async.cg's 16 bytes and skip L1 as the f32 path does: a staged
+        // tile is consumed from shared memory and never re-read through L1.
         assert!(
-            !mlir.contains("bypassL1"),
-            "8-byte f16 cp.async must not set bypassL1:\n{mlir}"
+            mlir.contains("bypassL1"),
+            "16-byte f16 cp.async should bypass L1:\n{mlir}"
         );
         // Capability-gated: sm_75 and the 32-bit-index ABI stay on plain copies.
         assert!(
@@ -2264,10 +2271,10 @@ mod tests {
     #[test]
     fn tensorcore_f16_dot_stages_vectorized() {
         // With f16 operands the WMMA staging is a plain copy (no truncf), and
-        // it vectorizes as 4xf16 (8-byte) accesses: the row-pitch ABI's
-        // multiple-of-4-elements guarantee is exactly 8B for f16. Without this
-        // the f16 staging would be scalar, costing it the 4x it loses to the
-        // f32 path's 4xf32 staging.
+        // it vectorizes as 8xf16, the same 16 bytes a lane an f32 tile moves
+        // as 4xf32. Eight needs a 16-byte reach that the row-pitch ABI does not
+        // promise on its own; here the head dimension is a static 64, so the
+        // row pitch is 128 bytes and the proof comes from the shape.
         let mlir = emit_mlir(
             "@autotune(D in [64], BR in [64], BC in [64])
             @tensorcore
@@ -2286,11 +2293,11 @@ mod tests {
             &mlir,
             &[
                 "memref<64x64xf16, 3>",
-                // 8-byte 4xf16 staging loads and stores, not scalar
+                // 16-byte 8xf16 staging loads and stores, not scalar
                 "vector.load",
                 "vector.store",
-                "vector<4xf16>",
-                "alignment = 8",
+                "vector<8xf16>",
+                "alignment = 16",
                 "gpu.subgroup_mma_compute",
             ],
         );

@@ -6,7 +6,9 @@
 // differently by more than f32 reduction noise is a bug.
 
 use anyhow::Result;
-use phobos_gguf::backend::{Attn, Backend, Buf, DeltaMix, HostBackend, Plane, Rope, read_vec};
+use phobos_gguf::backend::{
+    Attn, Backend, Buf, DeltaMix, HBuf, HPlane, HostBackend, Plane, Rope, read_vec,
+};
 
 use phobos_gguf::backend::device;
 
@@ -445,8 +447,32 @@ fn main() -> Result<()> {
         let q: Vec<f32> = (0..rows * n_head * head_dim).map(|_| next()).collect();
         let k: Vec<f32> = (0..cached).map(|_| next()).collect();
         let v: Vec<f32> = (0..cached).map(|_| next()).collect();
+        // The caches go up the way a block fills one, through the projection's
+        // f32 landing and the narrowing store, so both backends round the same
+        // values the same way and what is left to compare is the arithmetic.
+        let cache = |b: &dyn Backend, data: &[f32]| -> Result<HBuf> {
+            let width = spec.kv_width();
+            let dense = b.upload(data)?;
+            let into = b.alloc_h(data.len())?;
+            b.store_2d(
+                Plane {
+                    buf: dense,
+                    offset: 0,
+                    pitch: width,
+                },
+                HPlane {
+                    buf: into,
+                    offset: 0,
+                    pitch: width,
+                },
+                spec.total(),
+                width,
+            )?;
+            b.release(dense);
+            Ok(into)
+        };
         let run = |b: &dyn Backend| -> Result<Vec<f32>> {
-            let (qb, kb, vb) = (b.upload(&q)?, b.upload(&k)?, b.upload(&v)?);
+            let (qb, kb, vb) = (b.upload(&q)?, cache(b, &k)?, cache(b, &v)?);
             let out = b.alloc(q.len())?;
             b.attention(qb, kb, vb, spec, out)?;
             read_vec(b, out, q.len())
@@ -510,6 +536,41 @@ fn main() -> Result<()> {
             &format!("copy_2d [{rows} x {width} of {pitch}]"),
             &run(&host)?,
             &run(&gpu)?,
+        );
+
+        // The same block into a cache, which rounds it. Checked on its own
+        // rather than only through attention: both backends have to pick the
+        // same half, and a disagreement there would otherwise reach the
+        // comparison looking like arithmetic noise. The bar is equality, since
+        // both round to nearest with ties to even and the result is one of
+        // 65536 values; a tolerance below every subnormal is how that is said
+        // to a checker written for approximate answers.
+        let store = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let sb = b.upload(&src)?;
+            let db = b.alloc_h(rows * width)?;
+            b.store_2d(
+                Plane {
+                    buf: sb,
+                    offset,
+                    pitch,
+                },
+                HPlane {
+                    buf: db,
+                    offset: 0,
+                    pitch: width,
+                },
+                rows,
+                width,
+            )?;
+            let mut out = vec![0.0; rows * width];
+            b.read_h(db, &mut out)?;
+            Ok(out)
+        };
+        check_within(
+            &format!("store_2d [{rows} x {width} of {pitch}]"),
+            f32::MIN_POSITIVE,
+            &store(&host)?,
+            &store(&gpu)?,
         );
     }
 

@@ -4,6 +4,19 @@ use anyhow::{Result, ensure};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buf(pub usize);
 
+/// A handle to backend-owned storage holding f16 rather than f32, its length
+/// still counted in elements.
+///
+/// Only the key and value caches use it. They are the largest thing an
+/// attention block owns past a few hundred positions, and the decode kernel is
+/// bound by the rate it can read them, so what the format buys is bytes moved
+/// rather than bytes held: grouped-query attention gives several query heads one
+/// key head and each reads it separately, so a cached position is fetched once
+/// per query in its group. Everything else stays f32, the queries included, and
+/// the kernels widen a cached element as they load it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HBuf(pub usize);
+
 /// A Q8_0 weight held in quantized form: signed bytes plus per-block scales.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QBuf(pub usize);
@@ -24,6 +37,14 @@ pub const L2_EPS: f32 = 1e-12;
 #[derive(Clone, Copy, Debug)]
 pub struct Plane {
     pub buf: Buf,
+    pub offset: usize,
+    pub pitch: usize,
+}
+
+/// [`Plane`] over f16 storage: the destination [`Backend::store_2d`] writes.
+#[derive(Clone, Copy, Debug)]
+pub struct HPlane {
+    pub buf: HBuf,
     pub offset: usize,
     pub pitch: usize,
 }
@@ -234,6 +255,33 @@ pub trait Backend {
         self.upload(&vec![0.0f32; len])
     }
 
+    /// [`Backend::alloc`] in f16, `len` still counted in elements.
+    fn alloc_h(&self, len: usize) -> Result<HBuf>;
+    fn release_h(&self, buf: HBuf);
+    fn zeroed_h(&self, len: usize) -> Result<HBuf>;
+
+    /// Widen f16 storage back for a caller that has to look at it, which only
+    /// the checks do: nothing in a forward pass reads a cache on the host.
+    fn read_h(&self, buf: HBuf, out: &mut [f32]) -> Result<()>;
+
+    /// [`Backend::copy`] between f16 buffers. Only a cache outgrowing itself
+    /// needs this, so `len` and both offsets are even and a backend may lean on
+    /// that to move whole words.
+    fn copy_h(
+        &self,
+        src: HBuf,
+        src_offset: usize,
+        dst: HBuf,
+        dst_offset: usize,
+        len: usize,
+    ) -> Result<()>;
+
+    /// [`Backend::copy_2d`] rounding f32 into f16 as it goes: the projection's
+    /// keys and values landing in the caches. See [`HBuf`] for why they are held
+    /// narrow, and `phobos_base::half::f32_to_f16` for the rounding both
+    /// backends have to agree on.
+    fn store_2d(&self, src: Plane, dst: HPlane, rows: usize, width: usize) -> Result<()>;
+
     /// Brackets the device-only part of a forward pass; nothing in between
     /// reads back. The GPU backend replays the bracket as one CUDA graph,
     /// backends that issue eagerly ignore both.
@@ -442,11 +490,12 @@ pub trait Backend {
     /// already carry this call's rows.
     ///
     /// `q` is `[rows * n_head, head_dim]` with the head varying fastest, and
-    /// the caches are `[positions, n_kv * head_dim]`, so one cached position is
-    /// a contiguous row and one head of it a column window. Row `t` attends to
-    /// cache positions `0 ..= start_pos + t`, with `group` query heads sharing
-    /// each key head. `out` matches `q`.
-    fn attention(&self, q: Buf, keys: Buf, values: Buf, spec: Attn, out: Buf) -> Result<()>;
+    /// the caches are `[positions, n_kv * head_dim]` in f16, so one cached
+    /// position is a contiguous row and one head of it a column window. Row `t`
+    /// attends to cache positions `0 ..= start_pos + t`, with `group` query
+    /// heads sharing each key head. `out` matches `q` and stays f32, as does the
+    /// arithmetic: a cached element widens on load.
+    fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()>;
 
     /// `x *= sigmoid(gate)`, elementwise. The attention output gate.
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()>;

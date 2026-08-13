@@ -4,7 +4,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
-    Backend, Buf, Fused, FusedMix, FusedMlp, FusedProject, Plane, ProjRun, Q8_BLOCK, QAct, QBuf,
+    Backend, Buf, Fused, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun, Q8_BLOCK, QAct,
+    QBuf,
 };
 use crate::tensor::q8_0_blocks;
 use crate::{GgmlType, Gguf, TensorInfo};
@@ -594,12 +595,12 @@ impl Ffn {
 }
 
 /// An attention block's key and value caches, `[capacity, n_kv * head_dim]`
-/// each. Backend-resident: at a few thousand positions the cache is the largest
-/// thing in the block.
+/// each, in f16. Backend-resident: at a few thousand positions the cache is the
+/// largest thing in the block, and see [`HBuf`] for why it is held narrow.
 #[derive(Default)]
 pub(crate) struct KvCache {
-    keys: Option<Buf>,
-    values: Option<Buf>,
+    keys: Option<HBuf>,
+    values: Option<HBuf>,
     /// Positions the pair currently has room for.
     capacity: usize,
 }
@@ -613,14 +614,14 @@ impl KvCache {
         backend: &dyn Backend,
         total: usize,
         width: usize,
-    ) -> Result<(Buf, Buf)> {
+    ) -> Result<(HBuf, HBuf)> {
         if self.capacity < total {
             let want = total.next_power_of_two().max(64);
             for slot in [&mut self.keys, &mut self.values] {
-                let grown = backend.alloc(want * width)?;
+                let grown = backend.alloc_h(want * width)?;
                 if let Some(old) = slot.replace(grown) {
-                    backend.copy(old, 0, grown, 0, self.capacity * width)?;
-                    backend.release(old);
+                    backend.copy_h(old, 0, grown, 0, self.capacity * width)?;
+                    backend.release_h(old);
                 }
             }
             self.capacity = want;
@@ -636,7 +637,7 @@ impl KvCache {
     pub(crate) fn release(&mut self, backend: &dyn Backend) {
         for slot in [&mut self.keys, &mut self.values] {
             if let Some(buf) = slot.take() {
-                backend.release(buf);
+                backend.release_h(buf);
             }
         }
         self.capacity = 0;
