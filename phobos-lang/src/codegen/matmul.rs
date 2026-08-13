@@ -87,7 +87,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             Stmt::Var {
                 name: acc,
                 ty: Some(AstType::Tile(acc_scalar, dims)),
-                value: init,
+                value: Some(init),
             },
             Stmt::For {
                 var: kt,
@@ -222,17 +222,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // The loop body: exactly two tensor slices, then one accumulating dot of
         // exactly those two names.
         let staged = |s: &'a Stmt| -> Option<(&'a str, &'a Expr)> {
-            let (Stmt::Let {
-                name,
-                ty: None,
-                value,
-            }
-            | Stmt::Var {
-                name,
-                ty: None,
-                value,
-            }) = s
-            else {
+            let (name, None, Some(value)) = s.as_decl()? else {
                 return None;
             };
             let Expr::Index { base, .. } = value else {
@@ -243,7 +233,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                 return None;
             };
             // TODO(joa): f16 operands are only valid on the tensor-core path
-            (self.is_f16_or_f32(t.elem) && !value.uses_name(acc)).then_some((name.as_str(), value))
+            (self.is_f16_or_f32(t.elem) && !value.uses_name(acc)).then_some((name, value))
         };
 
         let [

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use melior::{
@@ -146,6 +146,10 @@ struct MemVal<'c> {
     /// and tensor params); what [`Codegen::release`] returns to the pool.
     global: Option<String>,
 
+    /// Whether the bytes are in shared memory rather than global.
+    /// Unlike [`Self::global`] this survives a subview.
+    shared: bool,
+
     /// A fresh unnamed temp whose buffer may be released back to the pool once
     /// all reads of it have been emitted. [`Codegen::bind`] clears this, so
     /// named buffers are never pooled.
@@ -246,6 +250,9 @@ struct Codegen<'p, 'c> {
     // don't each grow the CTA's static shared footprint, which caps occupancy.
     // See Codegen::release.
     tile_pool: HashMap<(String, Vec<i64>), Vec<String>>,
+    /// Tile buffers a view still aliases, which never go back to the pool.
+    /// See [`Codegen::tile_flat`].
+    aliased: HashSet<String>,
     /// Tiles live in one dynamic allocation rather than a global apiece, sized
     /// at launch. See [`Kernel::wants_dynamic_shared`].
     dynamic_shared: bool,
@@ -331,6 +338,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             shared_globals: Vec::new(),
             tile_count: 0,
             tile_pool: HashMap::new(),
+            aliased: HashSet::new(),
             dynamic_shared: kernel.wants_dynamic_shared(),
             tile_offsets: HashMap::new(),
             shared_bytes: 0,
@@ -3163,6 +3171,154 @@ mod tests {
         );
         assert_contains(&mlir, &["memref.atomic_rmw", "scf.while"]);
         assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5);
+    }
+
+    /// A tile is shared memory, so a slice of one has to name that address
+    /// space, which is why the space travels on the [`MemVal`].
+    #[test]
+    fn a_tile_slice_stays_in_shared_memory() {
+        let mlir = emit_mlir(
+            "kernel fill(X: tensor<f32>[32, 32], O: tensor<f32>[32, 32]) {
+                var A: tile<f32>[32, 32] = 0.0
+                for b in range(0, 32, 16) {
+                    A[b :+ 16, 0 :+ 32] = X[b :+ 16, 0 :+ 32] * 2.0
+                }
+                O[0 :+ 32, 0 :+ 32] = A
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                // the tile's own slice, in shared
+                "memref<16x32xf32, strided<[32, 1], offset: ?>, 3>",
+                // the tensor's, in global, from the same code path
+                "memref<16x32xf32, strided<[32, 1], offset: ?>, 1>",
+            ],
+        );
+    }
+
+    /// Declaring a buffer a following loop fills entirely should not emit the
+    /// fill an initializer would, since every element of it is overwritten.
+    #[test]
+    fn an_uninitialized_tile_emits_no_fill() {
+        let filled = emit_mlir(
+            "kernel decl(X: tensor<f32>[16, 32], O: tensor<f32>[16, 32]) {
+                var A: tile<f32>[16, 32] = 0.0
+                A[0 :+ 16, 0 :+ 32] = X[0 :+ 16, 0 :+ 32]
+                O[0 :+ 16, 0 :+ 32] = A
+            }",
+        );
+        let bare = emit_mlir(
+            "kernel decl(X: tensor<f32>[16, 32], O: tensor<f32>[16, 32]) {
+                var A: tile<f32>[16, 32]
+                A[0 :+ 16, 0 :+ 32] = X[0 :+ 16, 0 :+ 32]
+                O[0 :+ 16, 0 :+ 32] = A
+            }",
+        );
+        // Same buffers either way, one fewer sweep over one of them.
+        assert_eq!(
+            filled.matches("memref.global").count(),
+            bare.matches("memref.global").count()
+        );
+        assert!(
+            bare.matches("scf.for").count() < filled.matches("scf.for").count(),
+            "the fill loop should be gone"
+        );
+    }
+
+    /// `var` without an initializer needs the type, since nothing is left to
+    /// infer one from, and `let` cannot omit it at all: it would name nothing.
+    #[test]
+    fn an_uninitialized_declaration_needs_a_tile_type() {
+        for src in [
+            "kernel decl(O: tensor<f32>[4]) { var a\n O[0] = 1.0 }",
+            "kernel decl(O: tensor<f32>[4]) { var a: f32\n O[0] = a }",
+            "kernel decl(O: tensor<f32>[4]) { let a: f32\n O[0] = a }",
+        ] {
+            let err = std::panic::catch_unwind(|| emit_mlir(src));
+            assert!(err.is_err(), "should not compile: {src}");
+        }
+    }
+
+    /// The flat view is the same bytes under another type, still in shared
+    /// memory: what lets a value reduced per block of 32 be contracted over as
+    /// one row.
+    #[test]
+    fn flat_views_a_tile_as_one_row() {
+        let mlir = emit_mlir(
+            "kernel quant(X: tensor<f32>[32, 32],
+                          Wq: tensor<i8>[32, 1024],
+                          Ws: tensor<f32>[32, 32],
+                          O: tensor<f32>[1, 32]) {
+                var Aq: tile<i8>[32, 32]
+                var As: tile<f32>[32, 1]
+                for b in range(0, 32, 16) {
+                    var y: tile<f32>[16, 32] = X[b :+ 16, 0 :+ 32]
+                    var mx: tile<f32>[16, 1] = rowmax(tmax(y, -y))
+                    var q = y * (127.0 / (mx + 0.00000001))
+                    Aq[b :+ 16, 0 :+ 32] = i8(i32(round(q)))
+                    As[b :+ 16, 0 :+ 1] = mx / 127.0
+                }
+                O[0 :+ 1, 0 :+ 32] = qdot_t(flat(Aq), flat(As),
+                                            Wq[0 :+ 32, :], Ws[0 :+ 32, :])
+            }",
+        );
+        assert_contains(
+            &mlir,
+            &[
+                "memref.reinterpret_cast",
+                // the quantized row and its scales, both one row, both shared
+                "memref<32x32xi8, 3> to memref<1x1024xi8, 3>",
+                "memref<32x1xf32, 3> to memref<1x32xf32, 3>",
+                // and the contraction reads them there rather than from global
+                "vector<4xi8>",
+            ],
+        );
+    }
+
+    /// A flattened tile's buffer must leave the pool: the view is bound to a
+    /// name of its own, so the second declaration below would otherwise be
+    /// handed the bytes the view still reads, and compile to a wrong answer.
+    #[test]
+    fn a_flattened_tile_is_not_recycled() {
+        let mlir = emit_mlir(
+            "kernel alias(X: tensor<f32>[8, 4], O: tensor<f32>[1, 32], P: tensor<f32>[8, 4]) {
+                var A: tile<f32>[8, 4] = 0.0
+                A[0 :+ 8, 0 :+ 4] = X[0 :+ 8, 0 :+ 4]
+                let flatA = flat(A)
+                var B: tile<f32>[8, 4] = 1.0
+                P[0 :+ 8, 0 :+ 4] = B
+                O[0 :+ 1, 0 :+ 32] = flatA
+            }",
+        );
+        // Two declarations of the same shape, and so two buffers rather than one
+        // reused: the reuse is what would corrupt the view.
+        assert_eq!(
+            mlir.matches("memref<8x4xf32, 3> = uninitialized").count(),
+            2,
+            "the flattened buffer was handed out again"
+        );
+    }
+
+    /// A view is not a buffer, so it cannot be flattened again, and neither can
+    /// the staging tiles whose rows are not where row-major says they are.
+    #[test]
+    fn flat_rejects_what_is_not_a_declared_tile() {
+        for src in [
+            // a slice of a tile, whose offset the cast would drop
+            "kernel v(X: tensor<f32>[32, 32], O: tensor<f32>[1, 32]) {
+                var A: tile<f32>[32, 32] = 0.0
+                let s = A[0 :+ 16, 0 :+ 32]
+                O[0 :+ 1, 0 :+ 32] = flat(s)
+            }",
+            // a tensor slice, which is not in shared memory at all
+            "kernel v(X: tensor<f32>[32, 32], O: tensor<f32>[1, 32]) {
+                O[0 :+ 1, 0 :+ 32] = flat(X[0 :+ 16, 0 :+ 32])
+            }",
+        ] {
+            let err = std::panic::catch_unwind(|| emit_mlir(src));
+            assert!(err.is_err(), "should not compile: {src}");
+        }
     }
 
     /// A nested per-element chain becomes one sweep. Before this, every call in

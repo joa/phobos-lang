@@ -5,7 +5,7 @@ use super::*;
 /// A decode step is a deep, narrow chain of tiny kernels, and a launch boundary
 /// costs about twice what an in-kernel grid barrier does, so a kernel that spans
 /// several stages and separates them with a barrier pays less than the same
-/// stages launched one at a time. See `docs/megakernel.md` for the measurements.
+/// stages launched one at a time.
 ///
 /// `grid_barrier(bar)` takes an `i32` tensor of at least two elements: slot 0 is
 /// the arrival counter and slot 1 the release generation. `tensor<i32>[2]` and

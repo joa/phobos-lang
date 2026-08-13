@@ -27,7 +27,7 @@ kernel gemm(A: tensor<f32>[M, K],
 ```
 
 SGEMM performance is at 75% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
-The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at llama.cpp's rate on that card. See [Inference](#inference).
+The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card. See [Inference](#inference).
 
 ![Phobos benchmark results](results/bench.svg)
 
@@ -62,24 +62,32 @@ Two model front ends, each with a host backend and a GPU one:
 - **`phobos-onnx`**: ONNX protobuf to a graph IR, then shape inference, constant folding, LayerNorm
   and epilogue fusion. GPT-2 runs end to end and has been verified against its bundled reference, with a KV-cache path.
 
-Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, tokens per second over ten repetitions:
+Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 591.86, tokens per second,
+measured 2026-08-12 at `7140a4b`:
 
 | test   | llama.cpp CUDA[^2]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  6280.82 +/- 812.25 |  4940.30 +/- 287.79 |
-| pp512  | 10145.46 +/- 958.31 |  8951.88 +/- 154.39 |
-| tg32   |   237.08 +/-   1.01 |   267.31 +/-   3.28 |
-| tg128  |   255.87 +/-   0.57 |   261.67 +/-   1.08 |
-| tg512  |   259.58 +/-   0.44 |   254.11 +/-   0.25 |
+| pp128  |  6765.69 +/-  23.23 |  5320.30 +/-  49.88 |
+| pp512  | 10791.51 +/-  13.04 |  8853.82 +/-  38.75 |
+| tg32   |   239.65 +/-   0.25 |   286.41 +/-   0.17 |
+| tg128  |   258.01 +/-   0.13 |   283.77 +/-   0.22 |
+| tg512  |   261.82 +/-   0.03 |   279.13 +/-   0.18 |
+| tg1024 |   261.37 +/-   0.32 |   273.73 +/-   0.11 |
+| tg2048 |   260.45 +/-   0.07 |   262.91 +/-   0.11 |
 
 <details>
-  <summary>Invocation Details</summary>
+  <summary>Benchmark Details</summary>
   
 ```plain
-# running llama.cpp
-llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
+# both engines, interleaved on a card checked for contention, which is what a
+# comparison between the two columns has to be measured with. One invocation
+# covers every row above; the table is its Qwen half, the plot is both models.
+python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
+  --csv results/bench.csv --json results/bench.json
+python scripts/plot.py results/bench.json -o results/bench.svg
 
-# running phobos
+# either engine on its own, which measures one column and not a comparison
+llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
 cargo run --features cuda --release -p phobos-gguf --example bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
 ```
 </details>
@@ -271,7 +279,8 @@ The model path has its own set. Build these `--release`, and the ones needing a 
 | `bench` | `phobos-gguf` | `bench -- -m MODEL.gguf -p 512 -n 128 -r 5` | The two numbers `llama-bench` reports, in the same units. Needs a GPU. |
 | `backend_check` | `phobos-gguf` | `backend_check` | Every device op against the host reference. Needs a GPU. |
 | `batch_check` | `phobos-gguf` | `batch_check -- MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one. Needs a GPU. |
-| `model_check` | `phobos-gguf` | `model_check -- MODEL.gguf` | Whole-model logits, device against host. Needs a GPU. |
+| `model_check` | `phobos-gguf` | `model_check -- MODEL.gguf [-p PROMPT]` | Whole-model logits, device against host. Needs a GPU. |
+| `fuse_check` | `phobos-gguf` | `fuse_check -- MODEL.gguf [-n STEPS]` | The fused decode path against the launched one, both on the device in one session. Needs a GPU. |
 | `footprint` | `phobos-gguf` | `footprint -- MODEL.gguf` | What the model will occupy on the backend: weights, how much of that is f32, and the cache per token. Reports what the card has free under `--features cuda`. |
 
 `phobos-gguf/examples` also holds the kernel sweeps each optimization was decided by (`q8sweep`,

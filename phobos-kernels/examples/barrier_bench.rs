@@ -2,11 +2,10 @@
 //
 //   cargo run --release -p phobos-kernels --features cuda --example barrier_bench
 //
-// This is the measurement docs/megakernel.md turns on. A decode step is a deep,
-// narrow chain of tiny kernels, so the question is whether a kernel spanning
-// several stages and separating them with `grid_barrier` beats the same stages
-// launched one at a time. Both rows below do the same arithmetic on the same
-// buffer the same number of times; only the boundary differs.
+// A decode step is a deep, narrow chain of tiny kernels, so the question is
+// whether a kernel spanning several stages and separating them with `grid_barrier`
+// beats the same stages launched one at a time. Both rows below do the same 
+// arithmetic on the same buffer the same number of times; only the boundary differs.
 //
 // The launch row goes through a CUDA graph, not plain launches, because that is
 // what the GGUF backend records a pass as.

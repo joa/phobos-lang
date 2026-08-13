@@ -93,7 +93,12 @@ impl<'p, 'c> Codegen<'p, 'c> {
     ) -> bool {
         for stmt in stmts {
             match stmt {
-                Stmt::Let { name, ty, value } | Stmt::Var { name, ty, value } => {
+                Stmt::Let { .. } | Stmt::Var { .. } => {
+                    // An unfilled buffer declares storage and reads nothing, so
+                    // there is no operand here to hoist and nothing to record.
+                    let Some((name, ty, Some(value))) = stmt.as_decl() else {
+                        continue;
+                    };
                     if let Expr::Call { callee, args } = value
                         && (callee == "dot" || callee == "dot_t")
                     {
@@ -109,7 +114,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                         };
                         self.hoist_consider(scan, cands, callee == "dot_t", args, out_f32);
                     }
-                    self.hoist_record_decl(scan, name, ty.as_ref(), value);
+                    self.hoist_record_decl(scan, name, ty, value);
                 }
                 Stmt::Assign { target, value, .. } => {
                     if self.is_global_store(target) {
@@ -305,8 +310,14 @@ pub(super) fn last_uses(stmts: &[Stmt]) -> HashMap<String, usize> {
 
 fn mark_stmt(stmt: &Stmt, at: usize, last: &mut HashMap<String, usize>) {
     match stmt {
-        Stmt::Let { name, value, .. } | Stmt::Var { name, value, .. } => {
+        Stmt::Let { name, value, .. } => {
             mark_expr(value, at, last);
+            last.insert(name.clone(), at);
+        }
+        Stmt::Var { name, value, .. } => {
+            if let Some(value) = value {
+                mark_expr(value, at, last);
+            }
             last.insert(name.clone(), at);
         }
         Stmt::Assign { target, value, .. } => {

@@ -27,7 +27,7 @@ pub const WARP_THREADS: usize = 32;
 /// Asked of the driver rather than assumed, because the answer is a property of
 /// the compiled kernel: shared memory, not registers, is what bounds it in
 /// practice, and it is the widest fused stage that sets the figure. Returns the
-/// block count and the blocks per SM behind it. See `docs/megakernel.md`.
+/// block count and the blocks per SM behind it.
 ///
 /// # Safety
 ///
