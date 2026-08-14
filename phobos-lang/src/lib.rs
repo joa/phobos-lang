@@ -45,80 +45,23 @@ pub fn compile_shared(
     }
 
     let shared = std::cell::RefCell::new(Vec::new());
-    let ptx = phobos_mlir::gen_ptx(context, |base, context, module| {
+    let code = phobos_mlir::gen_code(context, |base, context, module| {
         *shared.borrow_mut() = codegen::emit(base, &kernels, context, module)?;
         Ok(())
     })?;
 
     let shared = shared.into_inner();
-    let ptx = if shared.is_empty() {
-        ptx
-    } else {
-        extern_dynamic_shared(&ptx)
-    };
+    let backend = context.gpu_config.backend();
+    let code = backend.post_process(code, !shared.is_empty());
 
     if context.print_phases {
-        println!("=== PTX ===========================");
-        println!("{ptx}");
+        let name = backend.code_name();
+        println!("=== {name} ===========================");
+        println!("{code}");
         println!("===================================");
     }
 
-    Ok((ptx, shared))
-}
-
-/// Patch the demoted dynamic-shared declaration into an external one.
-///
-/// This is an issue with MLIR and the NVPTX backend we don't really care
-/// about.
-fn extern_dynamic_shared(ptx: &str) -> String {
-    const NEWLINE: char = '\n';
-
-    let mut declarations = Vec::new();
-    let mut body = String::with_capacity(ptx.len());
-
-    for line in ptx.lines() {
-        let trimmed = line.trim();
-        let demoted = trimmed
-            .strip_prefix(".shared .align ")
-            .filter(|rest| rest.contains("__dynamic_shmem__"));
-
-        match demoted {
-            Some(rest) => {
-                let (align, name) = rest.split_once(" .b8 ").unwrap_or(("16", rest));
-                let name = name.trim_end_matches(';');
-                let declaration = format!(".extern .shared .align {align} .b8 {name}[];");
-
-                if !declarations.contains(&declaration) {
-                    declarations.push(declaration);
-                }
-            }
-            None => {
-                body.push_str(line);
-                body.push(NEWLINE);
-            }
-        }
-    }
-
-    if declarations.is_empty() {
-        return body;
-    }
-
-    let at = body
-        .find(".address_size")
-        .and_then(|i| body[i..].find(NEWLINE).map(|j| i + j + 1))
-        .unwrap_or(0);
-
-    let mut out = String::with_capacity(body.len() + 64);
-
-    out.push_str(&body[..at]);
-
-    for declaration in &declarations {
-        out.push_str(declaration);
-        out.push(NEWLINE);
-    }
-
-    out.push_str(&body[at..]);
-    out
+    Ok((code, shared))
 }
 
 pub fn requires_wide_index(kernels: &[ast::Kernel]) -> bool {
@@ -143,51 +86,6 @@ pub fn search_space(kernel: &ast::Kernel) -> Vec<(String, Vec<i64>)> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn dynamic_shared_is_declared_external_at_module_scope() {
-        // The back end demotes the allocation into the kernel as a one-byte
-        // static object; a launch-time size attaches only to the module-scope
-        // external form.
-        let ptx = concat!(
-            ".version 9.0
-.target sm_75
-.address_size 64
-",
-            "// __dynamic_shmem__0 has been demoted
-",
-            ".visible .entry k(
-)
-{
-",
-            "	// demoted variable
-",
-            "	.shared .align 16 .b8 __dynamic_shmem__0;
-",
-            "	ret;
-}
-"
-        );
-        let out = super::extern_dynamic_shared(ptx);
-        assert!(
-            out.contains(".extern .shared .align 16 .b8 __dynamic_shmem__0[];"),
-            "no external declaration in:
-{out}"
-        );
-        assert!(
-            !out.contains("	.shared .align 16 .b8 __dynamic_shmem__0;"),
-            "the demoted definition survived:
-{out}"
-        );
-        // Module scope: before the kernel that uses it.
-        let declared = out.find(".extern .shared").expect("declaration");
-        let entry = out.find(".visible .entry").expect("kernel");
-        assert!(
-            declared < entry,
-            "declared after the kernel:
-{out}"
-        );
-    }
-
     use crate::{
         ast::{Scalar, Type},
         parse,

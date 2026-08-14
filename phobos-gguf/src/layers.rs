@@ -1,14 +1,14 @@
+use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
-    Backend, Buf, Fused, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun, Q8_BLOCK, QAct,
-    QBuf,
+    Backend, Buf, Fused, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun, QAct, QBuf,
 };
-use crate::tensor::q8_0_blocks;
-use crate::{GgmlType, Gguf, TensorInfo};
+use crate::quant::Packed;
+use crate::{Gguf, TensorInfo};
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the
 /// batched projection has. 8224 becomes 8448, 2.7% more arithmetic against a
@@ -68,12 +68,10 @@ pub(crate) struct Linear {
 
 /// How a projection's weights are held between load and upload.
 enum Weights {
+    /// Transposed to `[in, out]` at load, whatever the file held.
     Dense(Vec<f32>),
-    /// Q8_0 kept quantized: signed bytes plus one scale per block of `in_dim`.
-    Q8 {
-        qs: Vec<i8>,
-        scales: Vec<f32>,
-    },
+    /// Left in the file's blocks, `[out, in]`. See [`Packed`].
+    Quant(Packed),
 }
 
 impl Linear {
@@ -83,23 +81,19 @@ impl Linear {
             .with_context(|| format!("missing tensor '{name}'"))?;
         check_dims(info, &[in_dim as u64, out_dim as u64])?;
 
-        // The quantized bytes need no rearrangement: GGUF already stores them
-        // [out, in] with `in` contiguous, which is what the four-way byte dot
-        // product wants. Only the scales are transposed, and nothing is
-        // requantized.
-        let weight = if info.ggml_type == GgmlType::Q8_0 && in_dim.is_multiple_of(Q8_BLOCK) {
-            let numel = in_dim * out_dim;
-            let (qs, src_scales) = q8_0_blocks(gguf.tensor_bytes(info)?, numel)?;
-            let blocks = in_dim / Q8_BLOCK;
-            let mut scales = vec![0.0f32; blocks * out_dim];
+        // The file's blocks are kept as they are: GGUF already stores them
+        // [out, in] with `in` contiguous, which is what every operation here
+        // and the four-way byte dot product both want. Nothing is requantized,
+        // and a format whose block does not divide the input width falls
+        // through to the dense path rather than being split across rows.
+        let quant = info
+            .ggml_type
+            .quant()
+            .filter(|q| in_dim.is_multiple_of(q.spec().block));
 
-            for o in 0..out_dim {
-                for b in 0..blocks {
-                    scales[b * out_dim + o] = src_scales[o * blocks + b];
-                }
-            }
-
-            Weights::Q8 { qs, scales }
+        let weight = if let Some(quant) = quant {
+            let bytes = gguf.tensor_bytes(info)?;
+            Weights::Quant(Packed::from_bytes(quant, bytes, in_dim, out_dim)?)
         } else {
             let source = gguf.dequantize(name)?;
             let mut dense = vec![0.0f32; source.len()];
@@ -124,24 +118,25 @@ impl Linear {
 
     /// What [`Linear::project_shared`] will upload for this weight.
     ///
-    /// A Q8_0 weight goes up as its bytes plus its scales twice, once per block
-    /// and once transposed per row, the two layouts the quantized kernels read.
-    /// A dense one goes up as f32 whatever the file held.
+    /// A weight a kernel unpacks goes up as one quant per element plus its
+    /// scales twice, once per block and once transposed per row, the two
+    /// layouts the quantized kernels read. Anything else goes up as f32,
+    /// whatever the file held.
     pub(crate) fn footprint(&self, into: &mut Uploads) {
+        let elems = self.in_dim * self.out_dim;
         let (bytes, dense) = match &self.weight {
-            Weights::Q8 { qs, scales } => (
-                qs.len() * size_of::<i8>() + 2 * scales.len() * size_of::<f32>(),
-                false,
-            ),
-            Weights::Dense(data) => (data.len() * size_of::<f32>(), true),
+            Weights::Quant(packed) if packed.has_planes() => {
+                let scales = elems / packed.spec().scale_run;
+                (elems + 2 * scales * size_of::<f32>(), false)
+            }
+            _ => (elems * size_of::<f32>(), true),
         };
         into.add(&self.key, bytes, dense);
     }
 
     /// The same projection with its output channels permuted: output `j` of the
-    /// result is output `order[j]` of this one. Nothing is requantized, a Q8_0
-    /// block covering 32 inputs of one output, so a row moves as whole bytes and
-    /// whole scales.
+    /// result is output `order[j]` of this one. Nothing is requantized, a block
+    /// covering inputs of one output, so a row moves whole.
     ///
     /// The rotary layout wants this. ggml rotates either consecutive pairs or
     /// pairs half a head apart and the backend implements only the second, so an
@@ -156,22 +151,7 @@ impl Linear {
 
         let (in_dim, out_dim) = (self.in_dim, self.out_dim);
         let weight = match &self.weight {
-            Weights::Q8 { qs, scales } => {
-                let blocks = in_dim / Q8_BLOCK;
-                let mut moved = vec![0i8; qs.len()];
-                let mut moved_scales = vec![0.0f32; scales.len()];
-                for (j, &from) in order.iter().enumerate() {
-                    moved[j * in_dim..(j + 1) * in_dim]
-                        .copy_from_slice(&qs[from * in_dim..(from + 1) * in_dim]);
-                    for b in 0..blocks {
-                        moved_scales[b * out_dim + j] = scales[b * out_dim + from];
-                    }
-                }
-                Weights::Q8 {
-                    qs: moved,
-                    scales: moved_scales,
-                }
-            }
+            Weights::Quant(packed) => Weights::Quant(packed.select_outputs(order)?),
             // Dense weights are held [in, out], so an output is a column.
             Weights::Dense(data) => {
                 let mut moved = vec![0.0f32; data.len()];
@@ -200,9 +180,9 @@ impl Linear {
     /// delta net's decay and beta are sixteen wide, two blocks of a forty-eight
     /// block card.
     ///
-    /// Stacking along the output axis appends the quantized bytes and
-    /// requantizes nothing. The scales are held `[block, out]`, so those
-    /// interleave rather than append.
+    /// Stacking along the output axis appends whole blocks and requantizes
+    /// nothing, because a weight is held the way its file stores it: one
+    /// output's inputs contiguous.
     pub(crate) fn fuse(parts: &[&Linear]) -> Result<Linear> {
         let (first, rest) = parts.split_first().context("fusing needs a weight")?;
         let in_dim = first.in_dim;
@@ -227,38 +207,41 @@ impl Linear {
             .collect::<Vec<_>>()
             .join("+");
 
-        let quantized = parts.iter().all(|p| matches!(p.weight, Weights::Q8 { .. }));
-        let weight = if quantized {
-            let blocks = in_dim / Q8_BLOCK;
-            let mut qs = Vec::with_capacity(in_dim * out_dim);
-            let mut scales = vec![0.0f32; blocks * out_dim];
-            let mut at = 0;
-            for part in parts {
-                let Weights::Q8 { qs: pq, scales: ps } = &part.weight else {
-                    unreachable!("checked above");
-                };
-                qs.extend_from_slice(pq);
-                for b in 0..blocks {
-                    let row = &ps[b * part.out_dim..(b + 1) * part.out_dim];
-                    scales[b * out_dim + at..b * out_dim + at + part.out_dim].copy_from_slice(row);
-                }
-                at += part.out_dim;
-            }
-            qs.resize(in_dim * out_dim, 0);
-            Weights::Q8 { qs, scales }
+        // Blocks only stack if every part is in the same format. A K-quant file
+        // is routinely mixed, leaving its more sensitive tensors wider, and
+        // there the fused weight has to go dense.
+        let packed: Option<Vec<&Packed>> = parts
+            .iter()
+            .map(|p| match &p.weight {
+                Weights::Quant(packed) => Some(packed),
+                Weights::Dense(_) => None,
+            })
+            .collect();
+        let uniform = packed
+            .as_ref()
+            .is_some_and(|ps| ps.iter().all(|p| p.quant() == ps[0].quant()));
+
+        let weight = if uniform {
+            Weights::Quant(Packed::stack(
+                &packed.expect("uniform implies packed"),
+                out_dim,
+            )?)
         } else {
             // Dense weights are held [in, out], so a row of the fused weight is
             // each part's row end to end.
+            let materialized: Vec<Cow<[f32]>> = parts
+                .iter()
+                .map(|p| match &p.weight {
+                    Weights::Dense(data) => Cow::Borrowed(data.as_slice()),
+                    Weights::Quant(packed) => Cow::Owned(packed.dense()),
+                })
+                .collect();
+
             let mut dense = vec![0.0f32; in_dim * out_dim];
             for i in 0..in_dim {
                 let mut at = 0;
-                for part in parts {
-                    let row = match &part.weight {
-                        Weights::Dense(data) => &data[i * part.out_dim..(i + 1) * part.out_dim],
-                        Weights::Q8 { .. } => {
-                            bail!("cannot fuse a dense weight with a quantized one")
-                        }
-                    };
+                for (part, data) in parts.iter().zip(&materialized) {
+                    let row = &data[i * part.out_dim..(i + 1) * part.out_dim];
                     dense[i * out_dim + at..i * out_dim + at + part.out_dim].copy_from_slice(row);
                     at += part.out_dim;
                 }
@@ -299,12 +282,7 @@ impl Linear {
                     *v = data[j * self.out_dim + index];
                 }
             }
-            Weights::Q8 { qs, scales } => {
-                let row = &qs[index * self.in_dim..][..self.in_dim];
-                for (j, (v, &q)) in out.iter_mut().zip(row).enumerate() {
-                    *v = f32::from(q) * scales[(j / Q8_BLOCK) * self.out_dim + index];
-                }
-            }
+            Weights::Quant(packed) => packed.row_into(index, out)?,
         }
         Ok(())
     }
@@ -341,36 +319,39 @@ impl Linear {
         rows: usize,
         dest: Buf,
     ) -> Result<()> {
-        match &self.weight {
-            Weights::Q8 { .. } => {
-                let act = backend.quantize_act(x, rows, self.in_dim)?;
-                self.add_into_act(backend, act, rows, dest)
-            }
-            Weights::Dense(_) => {
-                let out = self.forward(backend, x, rows)?;
-                backend.add_into(dest, out)?;
-                backend.release(out);
-                Ok(())
-            }
+        if self.is_quantized() {
+            let act = backend.quantize_act(x, rows, self.in_dim)?;
+            return self.add_into_act(backend, x, act, rows, dest);
         }
-        .with_context(|| format!("residual matmul for '{}'", self.key))
+        self.add_dense(backend, x, rows, dest)
     }
 
-    /// [`Linear::add_into`] against an activation quantized already.
+    /// [`Linear::add_into`] against an activation quantized already. `x` is
+    /// what `act` quantizes, for a weight that has to be contracted densely.
     pub(crate) fn add_into_act(
         &self,
         backend: &dyn Backend,
+        x: Buf,
         act: QAct,
         rows: usize,
         dest: Buf,
     ) -> Result<()> {
-        let Weights::Q8 { qs, scales } = &self.weight else {
-            bail!("a dense weight has no accumulating form");
-        };
-        let w = backend.constant_q8(&self.key, qs, scales, self.in_dim, self.out_dim)?;
+        if !self.is_quantized() {
+            return self.add_dense(backend, x, rows, dest);
+        }
+        let w = self.quantized(backend)?;
         backend
-            .matmul_q8_add(act, rows, self.in_dim, w, self.out_dim, dest)
+            .matmul_quant_add(act, rows, self.in_dim, w, self.out_dim, dest)
             .with_context(|| format!("residual matmul for '{}'", self.key))
+    }
+
+    /// The accumulating projection as a separate pass, which is all a dense
+    /// weight has: [`Backend::matmul`] does not add into its destination.
+    fn add_dense(&self, backend: &dyn Backend, x: Buf, rows: usize, dest: Buf) -> Result<()> {
+        let out = self.forward(backend, x, rows)?;
+        backend.add_into(dest, out)?;
+        backend.release(out);
+        Ok(())
     }
 
     /// The normalization ahead of this projection and the projection itself as
@@ -392,7 +373,7 @@ impl Linear {
         runs: &[ProjRun],
         mix: Option<FusedMix>,
     ) -> Result<Fused> {
-        if rows != 1 || !matches!(self.weight, Weights::Q8 { .. }) {
+        if rows != 1 || !self.is_quantized() {
             return Ok(Fused::default());
         }
         backend.fused_project(FusedProject {
@@ -407,13 +388,19 @@ impl Linear {
         })
     }
 
+    /// Whether the quantized contraction applies, which needs both a quantized
+    /// weight and a kernel that unpacks its format.
+    fn is_quantized(&self) -> bool {
+        matches!(&self.weight, Weights::Quant(packed) if packed.has_planes())
+    }
+
     /// This weight uploaded in its quantized form, for a caller that contracts
     /// against it itself rather than through one of the projections here.
     pub(crate) fn quantized(&self, backend: &dyn Backend) -> Result<QBuf> {
-        let Weights::Q8 { qs, scales } = &self.weight else {
+        let Weights::Quant(packed) = &self.weight else {
             bail!("'{}' is not held in quantized form", self.key);
         };
-        backend.constant_q8(&self.key, qs, scales, self.in_dim, self.out_dim)
+        backend.constant_quant(&self.key, packed)
     }
 
     /// [`Linear::forward`] against an activation quantized already. `act` must
@@ -438,22 +425,24 @@ impl Linear {
         rows: usize,
         out: Buf,
     ) -> Result<()> {
-        match &self.weight {
-            Weights::Dense(data) => {
-                let w = backend.constant(&self.key, data)?;
-                backend.matmul(x, rows, self.in_dim, w, self.out_dim, out)
+        if self.is_quantized() {
+            let w = self.quantized(backend)?;
+            return match act {
+                Some(act) => backend.matmul_quant_act(act, rows, self.in_dim, w, self.out_dim, out),
+                None => backend.matmul_quant(x, rows, self.in_dim, w, self.out_dim, out),
             }
-            Weights::Q8 { qs, scales } => {
-                let w = backend.constant_q8(&self.key, qs, scales, self.in_dim, self.out_dim)?;
-                match act {
-                    Some(act) => {
-                        backend.matmul_q8_act(act, rows, self.in_dim, w, self.out_dim, out)
-                    }
-                    None => backend.matmul_q8(x, rows, self.in_dim, w, self.out_dim, out),
-                }
-            }
+            .with_context(|| format!("matmul for '{}'", self.key));
         }
-        .with_context(|| format!("matmul for '{}'", self.key))
+
+        // Either the file was dense or no kernel unpacks its format, in which
+        // case the weight is decoded once at upload and contracted densely.
+        let w = match &self.weight {
+            Weights::Dense(data) => backend.constant(&self.key, data)?,
+            Weights::Quant(packed) => backend.constant_lazy(&self.key, &|| Ok(packed.dense()))?,
+        };
+        backend
+            .matmul(x, rows, self.in_dim, w, self.out_dim, out)
+            .with_context(|| format!("matmul for '{}'", self.key))
     }
 }
 
@@ -542,7 +531,7 @@ impl Ffn {
         eps: f32,
         rows: usize,
     ) -> Result<bool> {
-        if rows != 1 {
+        if rows != 1 || !self.gate_up.is_quantized() || !self.down.is_quantized() {
             return Ok(false);
         }
         backend.fused_mlp(FusedMlp {
@@ -575,7 +564,7 @@ impl Ffn {
             // One launch for the gate, the product, and the quantized copy.
             let act = backend.swiglu_q(both, 0, both, width, joined, width)?;
             backend.release(both);
-            self.down.add_into_act(backend, act, rows, dest)?;
+            self.down.add_into_act(backend, joined, act, rows, dest)?;
             backend.release(joined);
             return Ok(());
         }

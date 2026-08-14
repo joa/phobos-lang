@@ -11,6 +11,7 @@ use phobos_gguf::backend::{
 };
 
 use phobos_gguf::backend::device;
+use phobos_gguf::quant::pack_q8_0;
 
 fn main() -> Result<()> {
     let gpu = device::DeviceBackend::new()?;
@@ -254,7 +255,7 @@ fn main() -> Result<()> {
         );
     }
 
-    // matmul_q8 at the same shapes, against the host reference. The quantized
+    // matmul_quant at the same shapes, against the host reference. The quantized
     // kernel is the one decoding actually runs, so it carries the model.
     for (m, k, n) in [
         (1usize, 1024usize, 2048usize),
@@ -287,11 +288,12 @@ fn main() -> Result<()> {
         let qs: Vec<i8> = (0..k * n).map(|_| (next() * 127.0) as i8).collect();
         let scales: Vec<f32> = (0..(k / 32) * n).map(|_| next().abs() + 0.01).collect();
         let a: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let packed = pack_q8_0(&qs, &scales, k, n)?;
         let run = |b: &dyn Backend| -> Result<Vec<f32>> {
             let ab = b.upload(&a)?;
-            let wb = b.constant_q8(&format!("q{m}x{k}x{n}"), &qs, &scales, k, n)?;
+            let wb = b.constant_quant(&format!("q{m}x{k}x{n}"), &packed)?;
             let out = b.alloc(m * n)?;
-            b.matmul_q8(ab, m, k, wb, n, out)?;
+            b.matmul_quant(ab, m, k, wb, n, out)?;
             read_vec(b, out, m * n)
         };
         // Looser than the dense ops on purpose. Quantized values reach 127, so
@@ -301,7 +303,7 @@ fn main() -> Result<()> {
         // the kernel is the more accurate of the two, so matching the
         // reference more tightly than this would be the wrong thing to ask.
         check_within(
-            &format!("matmul_q8 [{m} x {k} x {n}]"),
+            &format!("matmul_quant [{m} x {k} x {n}]"),
             1e-3,
             &run(&host)?,
             &run(&gpu)?,

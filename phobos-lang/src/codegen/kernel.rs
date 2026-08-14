@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     pub(super) fn emit_kernel(&mut self, kernel: &Kernel) -> Result<Operation<'c>> {
         let param_types = kernel
             .params
@@ -86,8 +86,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
         self.scopes.pop();
 
-        // phobos has no return :)
-        entry.append_operation(OperationBuilder::new("gpu.return", self.loc).build()?);
+        self.kernel_return(&entry)?;
 
         let fn_region = Region::new();
         fn_region.append_block(entry);
@@ -102,24 +101,8 @@ impl<'p, 'c> Codegen<'p, 'c> {
             (self.id("gpu.kernel"), Attribute::unit(self.ctx)),
         ];
 
-        // @launch
         if let Some(launch) = self.launch {
-            attrs.push((
-                self.id("nvvm.maxntid"),
-                DenseI32ArrayAttribute::new(self.ctx, &[launch.max_threads as i32]).into(),
-            ));
-            if let Some(min_blocks) = launch.min_blocks {
-                attrs.push((
-                    self.id("nvvm.minctasm"),
-                    IntegerAttribute::new(self.i32_t, min_blocks).into(),
-                ));
-            }
-            if let Some(max_nreg) = launch.max_nreg {
-                attrs.push((
-                    self.id("nvvm.maxnreg"),
-                    IntegerAttribute::new(self.i32_t, max_nreg).into(),
-                ));
-            }
+            attrs.extend(self.launch_attrs(launch));
         }
 
         Ok(OperationBuilder::new("gpu.func", self.loc)
@@ -166,7 +149,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 }
 
 // types
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     pub(super) fn scalar_type(&self, scalar: Scalar) -> Type<'c> {
         match scalar {
             Scalar::F16 => self.f16_t,
@@ -194,12 +177,11 @@ impl<'p, 'c> Codegen<'p, 'c> {
         Ok(match ty {
             AstType::Scalar(s) => self.scalar_type(*s),
             AstType::Tensor(s, dims) => {
-                let mem_space: Attribute = IntegerAttribute::new(self.i64_t, MEM_GLOBAL).into();
                 MemRefType::new(
                     self.scalar_type(*s),
                     &self.tensor_shape(dims),
                     None,
-                    Some(mem_space),
+                    Some(self.global_space()),
                 )
                 .into()
             }

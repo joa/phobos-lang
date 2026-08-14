@@ -4,6 +4,7 @@ use melior::{
     ir::{Location, Module, operation::OperationLike},
     utility::register_all_dialects,
 };
+use phobos_base::context::{GpuConfig, NvidiaGpuConfig};
 
 const MATMUL: &str = "\
 @autotune(TILE_M in [64, 128], TILE_N in [64, 128], TILE_K in [16, 32])
@@ -34,12 +35,25 @@ fn main() -> anyhow::Result<()> {
 
     let module = Module::new(Location::unknown(&context));
     let kernels = phobos_lang::parse(&src)?;
-    let base = phobos_base::context::Context::default();
-    phobos_lang::codegen::emit(&base, &kernels, &context, &module)?;
+    phobos_lang::codegen::emit(&target()?, &kernels, &context, &module)?;
 
     if !module.as_operation().verify() {
         anyhow::bail!("emitted module failed verification");
     }
     println!("{}", module.as_operation());
     Ok(())
+}
+
+/// The chip and index width to emit for, overridable so one invocation can
+/// cover a path the default never reaches: mma.sync and cp.async both want
+/// 64-bit indices, and the two diverge again between sm_75 and sm_80.
+fn target() -> anyhow::Result<phobos_base::context::Context> {
+    let mut base = phobos_base::context::Context::default();
+    if let Ok(chip) = std::env::var("PHOBOS_CHIP") {
+        base.gpu_config = GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip));
+    }
+    if let Ok(bits) = std::env::var("PHOBOS_INDEX_BITS") {
+        base.index_bitwidth = bits.parse()?;
+    }
+    Ok(base)
 }

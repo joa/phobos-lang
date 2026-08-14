@@ -1,5 +1,6 @@
 extern crate self as phobos_base;
 
+pub mod backend;
 pub mod cli;
 pub mod combo;
 pub mod context;

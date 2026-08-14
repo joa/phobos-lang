@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     pub(super) fn emit_stmt(&mut self, block: &Block<'c>, stmt: &Stmt) -> Result<()> {
         match stmt {
             Stmt::Let { name, ty, value } => {

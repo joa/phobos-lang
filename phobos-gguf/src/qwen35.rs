@@ -981,7 +981,7 @@ impl Model {
         };
 
         match gated_act {
-            Some(act) => delta.out.add_into_act(backend, act, rows, resid)?,
+            Some(act) => delta.out.add_into_act(backend, gated, act, rows, resid)?,
             None => delta.out.add_into(backend, gated, rows, resid)?,
         }
         for buf in [stacked, packed, scratch, mixed_buf]

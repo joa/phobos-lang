@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     pub(super) fn qmma_operands(
         &mut self,
         block: &Block<'c>,
@@ -170,7 +170,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
                     bail!("program_id expects one literal dimension argument 0..=2");
                 };
                 let dim = ["x", "y", "z"][*d as usize];
-                Ok(Rv::Scalar(self.gpu_index(block, "gpu.block_id", dim)?))
+                Ok(Rv::Scalar(self.block_id(block, dim)?))
             }
             // Grid-wide synchronization, for kernels spanning several stages of
             // a pass. See codegen/sync.rs.
@@ -592,7 +592,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 }
 
 // memrefs
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Resolves the base of an A[...] expression to a memref binding.
     pub(super) fn mem_base(&self, base: &Expr) -> Result<(MemVal<'c>, Binding<'c>)> {
         let Expr::Var(name) = base else {
@@ -874,7 +874,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 }
 
 // expression classifiers
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     pub(super) fn as_scale_mul<'a>(&self, expr: &'a Expr) -> Option<(&'a Expr, &'a Expr)> {
         let Expr::Binary {
             op: BinOp::Mul,

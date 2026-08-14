@@ -32,36 +32,12 @@ pub enum GpuConfig {
 }
 
 impl GpuConfig {
-    pub fn mlir_target_pass(&self) -> String {
-        match self {
-            GpuConfig::Nvidia(nv) => format!(
-                "nvvm-attach-target{{chip={} features={} O=3}}",
-                nv.chip, nv.features
-            ),
-        }
-    }
-
-    pub fn llvm_cpu(&self) -> &str {
-        match self {
-            GpuConfig::Nvidia(nv) => &nv.chip,
-        }
-    }
-
-    pub fn llvm_features(&self) -> &str {
-        match self {
-            GpuConfig::Nvidia(nv) => &nv.features,
-        }
-    }
-
-    pub fn llvm_target_triple(&self) -> &str {
-        match self {
-            GpuConfig::Nvidia(nv) => &nv.target_triple,
-        }
-    }
-
     /// Chip's compute capability as a number
     ///
     /// Example: sm_75 is 75, sm_90a is 90.
+    ///
+    /// This is what selects a target's instruction vocabulary; everything the
+    /// number then decides lives behind that vocabulary rather than here.
     ///
     /// TODO(joa): how to map this across vendors
     pub fn compute_capability(&self) -> u32 {
@@ -74,59 +50,6 @@ impl GpuConfig {
                 .collect::<String>()
                 .parse()
                 .unwrap_or(0),
-        }
-    }
-
-    /// Whether the chip supports cp.async
-    pub fn supports_cp_async(&self) -> bool {
-        // 80 is Ampere
-        self.compute_capability() >= 80
-    }
-
-    pub fn supports_bf16_native(&self) -> bool {
-        self.compute_capability() >= 80
-    }
-
-    pub fn supports_dp4a(&self) -> bool {
-        self.compute_capability() >= 61
-    }
-
-    pub fn supports_int8_mma(&self) -> bool {
-        self.compute_capability() >= 75
-    }
-
-    /// The k-dimension of the native f16 mma.sync
-    pub fn mma_sync_k(&self) -> Option<u32> {
-        match self.compute_capability() {
-            cc if cc >= 80 => Some(16), // Ampere and later -> m16n8k16
-            cc if cc >= 75 => Some(8),  // Turing's op is m16n8k8
-            _ => None,
-        }
-    }
-
-    /// Bytes of shared memory an SM can hand out across its resident CTAs.
-    pub fn smem_per_sm(&self) -> u32 {
-        (match self.compute_capability() {
-            cc if cc >= 90 => 228, // Hopper
-            87 => 164,             // Orin
-            cc if cc >= 86 => 100, // Ada / GA10x
-            cc if cc >= 80 => 164, // A100
-            cc if cc >= 75 => 64,  // Turing
-            cc if cc >= 70 => 96,  // Volta
-            _ => 48,
-        }) * 1024
-    }
-
-    /// 32-bit registers in an SM.
-    pub fn regs_per_sm(&self) -> u32 {
-        64 * 1024 // 64K on every CUDA arch since Kepler
-    }
-
-    pub fn max_warps_per_sm(&self) -> u32 {
-        match self.compute_capability() {
-            75 => 32,           // Turing
-            86 | 87 | 89 => 48, // Ada / GA10x / Orin
-            _ => 64,            // Volta, A100, Hopper
         }
     }
 }
@@ -145,6 +68,18 @@ impl NvidiaGpuConfig {
             ..Default::default()
         }
     }
+
+    pub fn chip(&self) -> &str {
+        &self.chip
+    }
+
+    pub fn features(&self) -> &str {
+        &self.features
+    }
+
+    pub fn target_triple(&self) -> &str {
+        &self.target_triple
+    }
 }
 
 impl Default for NvidiaGpuConfig {
@@ -162,20 +97,10 @@ mod tests {
     use crate::context::{GpuConfig, NvidiaGpuConfig};
 
     #[test]
-    fn nvgpuconfig_mlir_target_pass() {
-        let cfg = GpuConfig::Nvidia(NvidiaGpuConfig::default());
-        assert_eq!(
-            cfg.mlir_target_pass(),
-            "nvvm-attach-target{chip=sm_75 features=+ptx90 O=3}"
-        )
-    }
-
-    #[test]
-    fn nvgpuconfig_supports_cp_async() {
-        let cfg = GpuConfig::Nvidia(NvidiaGpuConfig::default());
-        assert!(
-            !cfg.supports_cp_async(),
-            "the default config does not support cp.async (Turing)"
-        )
+    fn a_chip_name_reads_as_a_compute_capability() {
+        for (chip, cc) in [("sm_75", 75), ("sm_90a", 90), ("sm_61", 61)] {
+            let cfg = GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip));
+            assert_eq!(cfg.compute_capability(), cc, "{chip}");
+        }
     }
 }

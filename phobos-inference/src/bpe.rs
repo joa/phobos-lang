@@ -1,10 +1,10 @@
-//! Byte-level BPE, the part that is the same whatever supplied the vocabulary.
-//!
-//! A GGUF file carries its tokens and merges as metadata and an ONNX export
-//! carries none at all, so the two front ends build their vocabularies from
-//! different places. What happens after that is identical: split the text on a
-//! pre-tokenizer pattern, map each byte to a visible character, and merge
-//! adjacent pairs by rank. That much lives here.
+// Byte-level BPE, the part that is the same whatever supplied the vocabulary.
+//
+// A GGUF file carries its tokens and merges as metadata and an ONNX export
+// carries none at all, so the two front ends build their vocabularies from
+// different places. What happens after that is identical: split the text on a
+// pre-tokenizer pattern, map each byte to a visible character, and merge
+// adjacent pairs by rank. That much lives here.
 
 use std::collections::HashMap;
 
