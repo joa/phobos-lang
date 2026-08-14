@@ -1,7 +1,7 @@
-//! Byte-level BPE for ONNX exports.
-//!
-//! An ONNX file carries no vocabulary, so the tokenizer is a pair of files
-//! sitting beside the model and loaded at run time.
+// Byte-level BPE for ONNX exports.
+//
+// An ONNX file carries no vocabulary, so the tokenizer is a pair of files
+// sitting beside the model and loaded at run time.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

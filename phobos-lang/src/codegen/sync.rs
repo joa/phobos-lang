@@ -41,7 +41,7 @@ use super::*;
 /// than a plain load: an ordinary load is free to be hoisted out of the spin
 /// loop or served from a stale cache line, and the atomic is ordered against
 /// the releasing block's writes.
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// `atomic_add(t, i, v) -> old`: adds `v` to `t[i]` and returns the previous
     /// value, atomically across the whole device. `t` must be an `i32` tensor.
     pub(super) fn emit_atomic_add(&mut self, block: &Block<'c>, args: &[Expr]) -> Result<Rv<'c>> {
@@ -130,7 +130,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         // thread of it is still working when thread 0 arrives.
         self.barrier(block)?;
 
-        let tid = self.gpu_index(block, "gpu.thread_id", "x")?;
+        let tid = self.thread_id(block)?;
         let zero_i = self.const_index(block, 0)?;
         let is_leader = self.push(
             block,
@@ -170,7 +170,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 
         // gridDim.x, as an i32, is how many arrivals make a full barrier. A
         // kernel whose grid is not one-dimensional cannot use this.
-        let blocks = self.gpu_index(block, "gpu.grid_dim", "x")?;
+        let blocks = self.grid_dim(block)?;
         let blocks = self.push(
             block,
             arith::index_cast(blocks, IntegerType::new(self.ctx, 32).into(), self.loc),

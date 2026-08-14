@@ -12,7 +12,7 @@ use super::*;
 /// This recognizes such a chain on the right of a store and emits a single
 /// `distribute`: load the operand once, apply the conversions in registers, store
 /// the result.
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// One step of a chain, as peeled from the outside in.
     fn elem_step(&self, callee: &str) -> Option<ElemStep<'c>> {
         Some(match callee {
@@ -192,7 +192,7 @@ fn is_arith(op: BinOp) -> bool {
 /// This recognizes the whole tree at once: the operands that have to be
 /// materialized anyway (a `dot`, a row reduction) are emitted first and become
 /// leaves, and everything above them is evaluated per element in registers.
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Interior nodes of a fusable tree, or None when `value` is not one.
     ///
     /// Leaves are named tiles, scalars, and the calls whose result has to be

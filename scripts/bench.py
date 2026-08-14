@@ -619,7 +619,7 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
         print(f"{engine}: {backends[engine]}, {paths[engine]}")
     for model in models:
         told = labels.get((engines[0], model), "?")
-        print(f"{Path(model).stem}: {told}")
+        print(f"{model}: {told}")
     overrides = {k: v for k, v in os.environ.items() if k.startswith("PHOBOS_")}
     print(f"phobos env: {overrides or 'nothing set, so every default is in force'}")
 
@@ -633,7 +633,7 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
                 mean, err, count = got
                 fine = tight.get((engine, model, test))
                 row = [
-                    Path(model).stem,
+                    model,
                     f"{engine} ({backends[engine]})",
                     test,
                     f"{mean:.2f}",
@@ -688,7 +688,7 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
                     mixed = backends[base] != backends[engine]
                     rows.append(
                         [
-                            Path(model).stem,
+                            model,
                             test,
                             f"{mine[0]:.2f}",
                             f"{theirs[0]:.2f}",
@@ -896,8 +896,10 @@ def main():
                 print(f"  {engine.name} {Path(model).stem}: FAILED, {err}")
                 continue
             clock = statistics.fmean(run.clocks) if run.clocks else float("nan")
-            cell_clocks[(rnd, engine.name, model)] = clock
-            labels[(engine.name, model)] = run.label
+            # Recorded by name, not by path: the results are published.
+            name = Path(model).stem
+            cell_clocks[(rnd, engine.name, name)] = clock
+            labels[(engine.name, name)] = run.label
             shown = []
             for test, rates in sorted(run.rates.items()):
                 for rep, rate in enumerate(rates):
@@ -907,7 +909,7 @@ def main():
                             "slot": slot,
                             "engine": engine.name,
                             "backend": run.backend,
-                            "model": model,
+                            "model": name,
                             "test": test,
                             "rep": rep,
                             "rate": rate,
@@ -915,10 +917,7 @@ def main():
                         }
                     )
                 shown.append(f"{test} {statistics.fmean(rates):.2f} t/s")
-            print(
-                f"  {engine.name:<16} {Path(model).stem:<22}"
-                f" {'  '.join(shown)}   [{clock:.0f} MHz]"
-            )
+            print(f"  {engine.name:<16} {name:<22} {'  '.join(shown)}   [{clock:.0f} MHz]")
         health[rnd] = gap_scan()
         why = busy(health[rnd], args)
         if why:
@@ -945,13 +944,20 @@ def main():
     if args.csv:
         write_csv(args.csv, samples)
     if args.json:
+        # Same reason as the samples: names, not the paths they were read from.
+        recorded = dict(
+            vars(args),
+            models=[Path(m).stem for m in args.models],
+            llama_bench=[Path(p).name for p in args.llama_bench],
+            cuda_lib=[Path(p).name for p in args.cuda_lib],
+        )
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(
                 {
                     "meta": meta,
-                    "args": {k: str(v) for k, v in vars(args).items()},
+                    "args": {k: str(v) for k, v in recorded.items()},
                     "backends": backends,
-                    "labels": {f"{e}/{Path(m).stem}": v for (e, m), v in labels.items()},
+                    "labels": {f"{e}/{m}": v for (e, m), v in labels.items()},
                     "summary": summary,
                     "health": {str(k): v for k, v in health.items()},
                     "samples": samples,

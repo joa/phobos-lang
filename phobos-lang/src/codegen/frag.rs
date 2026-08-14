@@ -20,7 +20,7 @@ struct FragScan {
     kk: Option<i64>,
 }
 
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Matches var acc: tile<f32>[m, n] = <float> whose every later use is
     /// one of the fragment-representable forms:
     ///
@@ -47,7 +47,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         else {
             return None;
         };
-        if !self.mma_sync() {
+        if !self.has_mma_sync() {
             return None;
         }
         let shape = self.tile_shape(dims).ok()?;
@@ -275,7 +275,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
 }
 
 // emission
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Seeds the fragment binding for a validated accumulator declaration.
     pub(super) fn bind_frag_acc(&mut self, block: &Block<'c>, plan: &FragAccPlan) -> Result<()> {
         let acc_t = Type::vector(&[2, 2], self.f32_t);

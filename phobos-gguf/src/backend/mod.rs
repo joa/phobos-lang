@@ -1,4 +1,7 @@
-use anyhow::{Result, ensure};
+use anyhow::Result;
+
+use crate::quant::Packed;
+pub use crate::quant::quantize_row;
 
 /// A handle to backend-owned storage, so the bytes can live on a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,7 +20,8 @@ pub struct Buf(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HBuf(pub usize);
 
-/// A Q8_0 weight held in quantized form: signed bytes plus per-block scales.
+/// A weight left quantized, held in the planes its kernels index. See
+/// [`crate::quant::Spec::planes`] for what those are.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QBuf(pub usize);
 
@@ -27,8 +31,13 @@ pub struct QBuf(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QAct(pub usize);
 
-/// Elements sharing one Q8_0 scale.
-pub const Q8_BLOCK: usize = crate::tensor::Q8_0_BLOCK;
+/// Elements sharing one activation scale.
+///
+/// Activations are quantized to Q8_0 whatever format the weight is held in, so
+/// this is the block every quantized contraction here runs on. A weight's own
+/// block size comes from its [`crate::quant::Spec`] and only coincides with
+/// this one because Q8_0 is the single format a kernel unpacks today.
+pub const Q8_BLOCK: usize = crate::quant::Q8_0_BLOCK;
 
 /// Guards the delta rule's L2 normalization, so an all-zero row stays zero.
 pub const L2_EPS: f32 = 1e-12;
@@ -229,8 +238,8 @@ impl DeltaMix {
     }
 }
 
-/// A host-held Q8_0 weight: signed bytes, per-block scales, and the output
-/// width it was uploaded with.
+/// A host-held quantized weight: its two planes and the output width it was
+/// uploaded with. See [`crate::quant::Spec::planes`].
 type HostQuant = (Vec<i8>, Vec<f32>, usize);
 
 /// Where a GGUF model's arithmetic happens. The unit of exchange is a [`Buf`]
@@ -296,34 +305,35 @@ pub trait Backend {
     /// owns it for its lifetime; it is never released.
     fn constant(&self, key: &str, data: &[f32]) -> Result<Buf>;
 
-    /// A Q8_0 weight uploaded once under `key`. The two halves are transposed
-    /// relative to each other, each for its own access pattern:
+    /// [`Backend::constant`] whose data costs something to produce: `fill` runs
+    /// only if `key` is not resident already.
     ///
-    /// - `qs` is `[n, k]`, so `qs[j * k + p]` is the byte for output `j` and
-    ///   input `p`, putting the contraction axis contiguous.
-    /// - `scales` is `[k / Q8_BLOCK, n]`, so `scales[(p / Q8_BLOCK) * n + j]`
-    ///   scales that byte, putting one block's scales for a run of outputs
-    ///   contiguous.
-    fn constant_q8(&self, key: &str, qs: &[i8], scales: &[f32], k: usize, n: usize)
-    -> Result<QBuf>;
+    /// A weight in a format no kernel unpacks goes up this way, dequantized
+    /// once at upload rather than once per token.
+    fn constant_lazy(&self, key: &str, fill: &dyn Fn() -> Result<Vec<f32>>) -> Result<Buf>;
+
+    /// A quantized weight uploaded once under `key`, split into the planes its
+    /// kernels index. Only a format with [`crate::quant::Spec::planes`] can go
+    /// up this way; the rest dequantize through [`Backend::constant_lazy`].
+    fn constant_quant(&self, key: &str, packed: &Packed) -> Result<QBuf>;
 
     /// `out[m, n] = a[m, k] @ w[k, n]`, all row-major.
     fn matmul(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()>;
 
-    /// [`Backend::matmul`] against a weight left in Q8_0 form. The activation is
-    /// quantized per block of [`Q8_BLOCK`] too, so the contraction is integer
-    /// throughout; a backend that keeps it in f32 computes something else. See
-    /// [`quantize_row`].
-    fn matmul_q8(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
+    /// [`Backend::matmul`] against a weight left quantized. The activation is
+    /// quantized to Q8_0 whatever the weight's format is, so the contraction is
+    /// integer throughout; a backend that keeps it in f32 computes something
+    /// else. See [`quantize_row`].
+    fn matmul_quant(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
         let act = self.quantize_act(a, m, k)?;
-        self.matmul_q8_act(act, m, k, w, n, out)
+        self.matmul_quant_act(act, m, k, w, n, out)
     }
 
     /// Quantizes `a[m, k]` once, for the projections that share it.
     fn quantize_act(&self, a: Buf, m: usize, k: usize) -> Result<QAct>;
 
-    /// [`Backend::matmul_q8`] against an activation quantized already.
-    fn matmul_q8_act(
+    /// [`Backend::matmul_quant`] against an activation quantized already.
+    fn matmul_quant_act(
         &self,
         act: QAct,
         m: usize,
@@ -333,8 +343,9 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()>;
 
-    /// [`Backend::matmul_q8_act`] adding into `out` rather than overwriting it.
-    fn matmul_q8_add(
+    /// [`Backend::matmul_quant_act`] adding into `out` rather than overwriting
+    /// it.
+    fn matmul_quant_add(
         &self,
         act: QAct,
         m: usize,
@@ -344,7 +355,7 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()> {
         let temp = self.alloc(m * n)?;
-        self.matmul_q8_act(act, m, k, w, n, temp)?;
+        self.matmul_quant_act(act, m, k, w, n, temp)?;
         self.add_into(out, temp)?;
         self.release(temp);
         Ok(())
@@ -564,42 +575,6 @@ pub trait Backend {
         dst_offset: usize,
         len: usize,
     ) -> Result<()>;
-}
-
-/// One byte per element, one scale per block of rows. The blocks run down `k`,
-/// so `k` has to tile evenly.
-pub fn check_q8_shape(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<()> {
-    ensure!(
-        k.is_multiple_of(Q8_BLOCK),
-        "a Q8_0 weight needs k ({k}) to be a multiple of {Q8_BLOCK}"
-    );
-    ensure!(
-        qs.len() == k * n,
-        "a [{k}, {n}] Q8_0 weight needs {} bytes, got {}",
-        k * n,
-        qs.len()
-    );
-    ensure!(
-        scales.len() == (k / Q8_BLOCK) * n,
-        "a [{k}, {n}] Q8_0 weight needs {} scales, got {}",
-        (k / Q8_BLOCK) * n,
-        scales.len()
-    );
-    Ok(())
-}
-
-/// Quantize one block of [`Q8_BLOCK`] activations to int8 with a shared scale:
-/// symmetric, round to nearest, the extreme element landing on 127.
-///
-/// The device kernel reproduces this and has to round the same way. Ties go to
-/// even because that is what the hardware's rounding instruction does.
-pub fn quantize_row(x: &[f32], qs: &mut [i8]) -> f32 {
-    let absmax = x.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
-    let inv = 127.0 / (absmax + 1e-8);
-    for (q, &v) in qs.iter_mut().zip(x) {
-        *q = (v * inv).round_ties_even() as i8;
-    }
-    absmax / 127.0
 }
 
 pub fn read_vec(backend: &dyn Backend, buf: Buf, len: usize) -> Result<Vec<f32>> {

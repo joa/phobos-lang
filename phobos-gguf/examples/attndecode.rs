@@ -10,12 +10,12 @@
 // go through a pass, since a bare launch costs more in driver time than the
 // kernel costs on the card.
 //
-// What this cannot see: the lengths below are powers of two, so the cache
-// divides the split count and the tile exactly and the single-key remainder
-// each split walks after its whole tiles never runs. A decode reaches every
-// cache length and pays about half a tile of those per split. A tile change
-// that looks good here can be much worse in a model for that reason alone, so
-// read this against a `bench` run rather than on its own.
+// The lengths below are primes, and that is the point of them. They used to be
+// powers of two, at which the cache divides both the split count and the tile,
+// so the single-key steps that finish a split never ran: a tile size measured 7%
+// faster here and 45% slower in a model. A decode reaches every cache length.
+// Keep these off the round numbers, and still read this against a `bench` run
+// rather than on its own.
 //
 // The last three rows are diagnostic shapes rather than models. Grouped-query
 // attention gives several query heads one key head, and this path gives each
@@ -82,32 +82,43 @@ const SHAPES: [Shape; 5] = [
     },
 ];
 
-const LENGTHS: [usize; 7] = [32, 64, 128, 256, 512, 1024, 2048];
+/// Primes, spaced like the powers of two they sit next to. See the note above.
+const LENGTHS: [usize; 7] = [37, 67, 131, 257, 521, 1031, 2053];
+
+/// Repeat `batch` until `secs` have passed and return the mean seconds an
+/// iteration took. `batch` reports how many iterations it ran, and has to leave
+/// the device drained: the calls are asynchronous, so a batch that has not been
+/// read back is not work the clock has seen.
+fn repeat_for(secs: f64, mut batch: impl FnMut() -> Result<usize>) -> Result<f64> {
+    let start = Instant::now();
+    let mut iters = 0;
+    while start.elapsed().as_secs_f64() < secs {
+        iters += batch()?;
+    }
+    Ok(start.elapsed().as_secs_f64() / iters as f64)
+}
 
 /// Device-to-device copy bandwidth, measured rather than assumed: the point of
 /// the comparison is what this card does, not what the box claims.
 ///
 /// The copy runs for `warm_secs` before anything is timed. A card sitting at
-/// its idle 300 MHz needs seconds of work to reach boost, and a measurement
+/// its idle clock needs seconds of work to reach boost, and a measurement
 /// taken across the ramp says more about the clock than about the kernel.
 fn copy_bandwidth(backend: &dyn Backend, warm_secs: f64) -> Result<f64> {
     let elems = 32 << 20;
     let src = backend.zeroed(elems)?;
     let dst = backend.alloc(elems)?;
     let mut sink = [0.0f32; 1];
-    let warm = Instant::now();
-    while warm.elapsed().as_secs_f64() < warm_secs {
-        for _ in 0..64 {
+    let mut copies = |passes: usize| -> Result<usize> {
+        for _ in 0..passes {
             backend.copy(src, 0, dst, 0, elems)?;
         }
         backend.read(dst, &mut sink)?;
-    }
+        Ok(passes)
+    };
+    repeat_for(warm_secs, || copies(64))?;
     let start = Instant::now();
-    let passes = 200;
-    for _ in 0..passes {
-        backend.copy(src, 0, dst, 0, elems)?;
-    }
-    backend.read(dst, &mut sink)?;
+    let passes = copies(200)?;
     let secs = start.elapsed().as_secs_f64();
     for buf in [src, dst] {
         backend.release(buf);
@@ -172,21 +183,15 @@ fn main() -> Result<()> {
 
             // Timed by wall clock rather than by a fixed count, so a cheap
             // shape gets as many passes as an expensive one gets seconds.
-            let warm = Instant::now();
-            while warm.elapsed().as_secs_f64() < 0.25 {
-                step(&backend, &caches, q, out, spec)?;
-                backend.read(out, &mut sink)?;
-            }
-            let start = Instant::now();
-            let mut iters = 0;
-            while start.elapsed().as_secs_f64() < 0.5 {
-                for _ in 0..32 {
+            let mut steps = |count: usize| -> Result<usize> {
+                for _ in 0..count {
                     step(&backend, &caches, q, out, spec)?;
                 }
                 backend.read(out, &mut sink)?;
-                iters += 32;
-            }
-            let micros = start.elapsed().as_secs_f64() * 1e6 / f64::from(iters);
+                Ok(count)
+            };
+            repeat_for(0.25, || steps(1))?;
+            let micros = repeat_for(0.5, || steps(32))? * 1e6;
 
             // Every cached key and value of every block, counted once. The
             // caches are f16, so a position is half what it was.

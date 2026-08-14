@@ -9,7 +9,9 @@
 // over all of k. So the disagreement is summation order, and `backend_check`'s
 // tolerance has to allow for it rather than the kernel matching bit for bit.
 use anyhow::Result;
+use phobos_base::half::{f16_to_f32, f32_to_f16};
 use phobos_gguf::backend::{Backend, HostBackend, quantize_row, read_vec};
+use phobos_gguf::quant::pack_q8_0;
 
 use phobos_gguf::backend::device;
 
@@ -26,7 +28,11 @@ fn main() -> Result<()> {
 
     for (k, n) in [(1024usize, 6144usize), (3584, 1024)] {
         let qs: Vec<i8> = (0..k * n).map(|_| (next() * 127.0) as i8).collect();
-        let scales: Vec<f32> = (0..(k / 32) * n).map(|_| next().abs() + 0.01).collect();
+        // Rounded through a half, which is how a packed weight stores a
+        // scale, so the f64 truth below is of the sum the backends really run.
+        let scales: Vec<f32> = (0..(k / 32) * n)
+            .map(|_| f16_to_f32(f32_to_f16(next().abs() + 0.01)))
+            .collect();
         let a: Vec<f32> = (0..k).map(|_| next()).collect();
 
         // The f64 truth of the sum both backends are actually computing, which
@@ -50,11 +56,12 @@ fn main() -> Result<()> {
             }
         }
 
+        let packed = pack_q8_0(&qs, &scales, k, n)?;
         let run = |b: &dyn Backend| -> Result<Vec<f32>> {
             let ab = b.upload(&a)?;
-            let wb = b.constant_q8(&format!("q{k}x{n}"), &qs, &scales, k, n)?;
+            let wb = b.constant_quant(&format!("q{k}x{n}"), &packed)?;
             let out = b.alloc(n)?;
-            b.matmul_q8(ab, 1, k, wb, n, out)?;
+            b.matmul_quant(ab, 1, k, wb, n, out)?;
             read_vec(b, out, n)
         };
         let h = run(&host)?;

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 /// Block scales are stored as halves throughout the GGUF quantizations.
 pub use phobos_base::half::f16_to_f32;
@@ -158,22 +158,26 @@ impl GgmlType {
     }
 
     pub fn is_dequantizable(self) -> bool {
-        matches!(
-            self,
-            GgmlType::F32
-                | GgmlType::F16
-                | GgmlType::BF16
-                | GgmlType::F64
-                | GgmlType::I8
-                | GgmlType::I16
-                | GgmlType::I32
-                | GgmlType::Q4_0
-                | GgmlType::Q4_1
-                | GgmlType::Q5_0
-                | GgmlType::Q5_1
-                | GgmlType::Q8_0
-                | GgmlType::Q8_1
-        )
+        self.scalar_decode().is_some() || self.quant().is_some()
+    }
+
+    /// How to widen one element of a type that is not blocked at all, which
+    /// are the types [`dequantize_into`] handles without the quant registry.
+    fn scalar_decode(self) -> Option<ScalarDecode> {
+        Some(match self {
+            GgmlType::F32 => (4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),
+            GgmlType::F64 => (8, |b| {
+                f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
+            }),
+            GgmlType::F16 => (2, |b| f16_to_f32(u16::from_le_bytes([b[0], b[1]]))),
+            GgmlType::BF16 => (2, |b| {
+                f32::from_bits(u32::from(u16::from_le_bytes([b[0], b[1]])) << 16)
+            }),
+            GgmlType::I8 => (1, |b| b[0] as i8 as f32),
+            GgmlType::I16 => (2, |b| i16::from_le_bytes([b[0], b[1]]) as f32),
+            GgmlType::I32 => (4, |b| i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32),
+            _ => return None,
+        })
     }
 
     pub fn storage_bytes(self, numel: usize) -> Result<usize> {
@@ -186,6 +190,9 @@ impl GgmlType {
         Ok(numel / block * self.type_size())
     }
 }
+
+/// Bytes one element of an unblocked type occupies, and how to widen it.
+type ScalarDecode = (usize, fn(&[u8]) -> f32);
 
 #[derive(Clone, Debug)]
 pub struct TensorInfo {
@@ -226,151 +233,22 @@ pub fn dequantize_into(ggml_type: GgmlType, bytes: &[u8], out: &mut [f32]) -> Re
         bytes.len()
     );
 
-    match ggml_type {
-        GgmlType::F32 => copy_scalars(bytes, out, 4, |b| {
-            f32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        }),
-        GgmlType::F64 => copy_scalars(bytes, out, 8, |b| {
-            f64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]) as f32
-        }),
-        GgmlType::F16 => copy_scalars(bytes, out, 2, |b| {
-            f16_to_f32(u16::from_le_bytes([b[0], b[1]]))
-        }),
-        GgmlType::BF16 => copy_scalars(bytes, out, 2, |b| {
-            f32::from_bits(u32::from(u16::from_le_bytes([b[0], b[1]])) << 16)
-        }),
-        GgmlType::I8 => copy_scalars(bytes, out, 1, |b| b[0] as i8 as f32),
-        GgmlType::I16 => copy_scalars(bytes, out, 2, |b| i16::from_le_bytes([b[0], b[1]]) as f32),
-        GgmlType::I32 => copy_scalars(bytes, out, 4, |b| {
-            i32::from_le_bytes([b[0], b[1], b[2], b[3]]) as f32
-        }),
-        GgmlType::Q4_0 => dequantize_q4_0(bytes, out),
-        GgmlType::Q4_1 => dequantize_q4_1(bytes, out),
-        GgmlType::Q5_0 => dequantize_q5_0(bytes, out),
-        GgmlType::Q5_1 => dequantize_q5_1(bytes, out),
-        GgmlType::Q8_0 => dequantize_q8_0(bytes, out),
-        GgmlType::Q8_1 => dequantize_q8_1(bytes, out),
-        other => bail!(
-            "dequantizing {} is not implemented; re-quantize the model to Q8_0 or a legacy Q4/Q5 type",
-            other.name()
-        ),
+    if let Some(quant) = ggml_type.quant() {
+        (quant.spec().dequantize)(bytes, out);
+        return Ok(());
     }
 
-    Ok(())
-}
-
-fn copy_scalars(bytes: &[u8], out: &mut [f32], width: usize, decode: fn(&[u8]) -> f32) {
+    let (width, decode) = ggml_type.scalar_decode().with_context(|| {
+        format!(
+            "dequantizing {} is not implemented; re-quantize the model to Q8_0, Q4_K or a legacy Q4/Q5 type",
+            ggml_type.name()
+        )
+    })?;
     for (dst, src) in out.iter_mut().zip(bytes.chunks_exact(width)) {
         *dst = decode(src);
     }
-}
 
-fn dequantize_q8_0(bytes: &[u8], out: &mut [f32]) {
-    // `{ f16 d; int8 qs[32]; }`: every element is `d * qs[i]`.
-    for (block, dst) in bytes.chunks_exact(34).zip(out.chunks_mut(32)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        for (y, &q) in dst.iter_mut().zip(&block[2..]) {
-            *y = d * (q as i8) as f32;
-        }
-    }
-}
-
-pub const Q8_0_BLOCK: usize = 32;
-
-/// The signed bytes and per-block scales of a Q8_0 tensor, without decoding.
-///
-/// Returns `(qs, scales)` in storage order, so element `i` dequantizes to
-/// `qs[i] as f32 * scales[i / Q8_0_BLOCK]`. Keeping the two apart lets a backend
-/// upload a quarter of the bytes and do the multiply in the kernel.
-pub fn q8_0_blocks(bytes: &[u8], numel: usize) -> Result<(Vec<i8>, Vec<f32>)> {
-    ensure!(
-        numel.is_multiple_of(Q8_0_BLOCK),
-        "a Q8_0 tensor has {numel} elements, which is not a multiple of {Q8_0_BLOCK}"
-    );
-    let blocks = numel / Q8_0_BLOCK;
-    ensure!(
-        bytes.len() >= blocks * 34,
-        "a Q8_0 tensor of {numel} elements needs {} bytes, got {}",
-        blocks * 34,
-        bytes.len()
-    );
-    let mut qs = vec![0i8; numel];
-    let mut scales = vec![0.0f32; blocks];
-    for (b, block) in bytes.chunks_exact(34).take(blocks).enumerate() {
-        scales[b] = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        for (dst, &q) in qs[b * Q8_0_BLOCK..(b + 1) * Q8_0_BLOCK]
-            .iter_mut()
-            .zip(&block[2..])
-        {
-            *dst = q as i8;
-        }
-    }
-    Ok((qs, scales))
-}
-
-/// `{ f16 d; f16 s; int8 qs[32]; }`: `s` is the block sum, unused when decoding.
-fn dequantize_q8_1(bytes: &[u8], out: &mut [f32]) {
-    for (block, dst) in bytes.chunks_exact(36).zip(out.chunks_mut(32)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        for (y, &q) in dst.iter_mut().zip(&block[4..]) {
-            *y = d * (q as i8) as f32;
-        }
-    }
-}
-
-/// `{ f16 d; uint8 qs[16]; }`. The two nibbles of `qs[j]` are elements `j` and
-/// `j + 16`, not `2j` and `2j + 1`.
-fn dequantize_q4_0(bytes: &[u8], out: &mut [f32]) {
-    for (block, dst) in bytes.chunks_exact(18).zip(out.chunks_mut(32)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        for (j, &q) in block[2..].iter().enumerate() {
-            dst[j] = d * (i32::from(q & 0x0f) - 8) as f32;
-            dst[j + 16] = d * (i32::from(q >> 4) - 8) as f32;
-        }
-    }
-}
-
-/// `{ f16 d; f16 m; uint8 qs[16]; }`: quants are unsigned with an offset `m`.
-fn dequantize_q4_1(bytes: &[u8], out: &mut [f32]) {
-    for (block, dst) in bytes.chunks_exact(20).zip(out.chunks_mut(32)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        let m = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
-        for (j, &q) in block[4..].iter().enumerate() {
-            dst[j] = d * f32::from(q & 0x0f) + m;
-            dst[j + 16] = d * f32::from(q >> 4) + m;
-        }
-    }
-}
-
-/// `{ f16 d; uint8 qh[4]; uint8 qs[16]; }`: `qh` supplies a fifth bit per quant,
-/// bit `j` for the low nibble and bit `j + 16` for the high one.
-fn dequantize_q5_0(bytes: &[u8], out: &mut [f32]) {
-    for (block, dst) in bytes.chunks_exact(22).zip(out.chunks_mut(32)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        let qh = u32::from_le_bytes([block[2], block[3], block[4], block[5]]);
-        for (j, &q) in block[6..].iter().enumerate() {
-            let hi_lo = ((qh >> j) << 4) & 0x10;
-            let hi_hi = (qh >> (j + 12)) & 0x10;
-            dst[j] = d * ((i32::from(q & 0x0f) | hi_lo as i32) - 16) as f32;
-            dst[j + 16] = d * ((i32::from(q >> 4) | hi_hi as i32) - 16) as f32;
-        }
-    }
-}
-
-/// `{ f16 d; f16 m; uint8 qh[4]; uint8 qs[16]; }`: Q5_0's fifth bit with Q4_1's
-/// offset.
-fn dequantize_q5_1(bytes: &[u8], out: &mut [f32]) {
-    for (block, dst) in bytes.chunks_exact(24).zip(out.chunks_mut(32)) {
-        let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
-        let m = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
-        let qh = u32::from_le_bytes([block[4], block[5], block[6], block[7]]);
-        for (j, &q) in block[8..].iter().enumerate() {
-            let hi_lo = ((qh >> j) << 4) & 0x10;
-            let hi_hi = (qh >> (j + 12)) & 0x10;
-            dst[j] = d * (u32::from(q & 0x0f) | hi_lo) as f32 + m;
-            dst[j + 16] = d * (u32::from(q >> 4) | hi_hi) as f32 + m;
-        }
-    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -410,7 +288,10 @@ mod tests {
     fn rejects_short_buffers_and_unsupported_types() {
         let mut out = vec![0.0; 32];
         assert!(dequantize_into(GgmlType::Q8_0, &[0; 33], &mut out).is_err());
-        assert!(dequantize_into(GgmlType::Q4_K, &[0; 144], &mut vec![0.0; 256]).is_err());
+        // The K-quants a Q4_K_M file holds are in the registry; Q5_K is not.
+        assert!(dequantize_into(GgmlType::Q4_K, &[0; 144], &mut vec![0.0; 256]).is_ok());
+        assert!(dequantize_into(GgmlType::Q6_K, &[0; 210], &mut vec![0.0; 256]).is_ok());
+        assert!(dequantize_into(GgmlType::Q5_K, &[0; 176], &mut vec![0.0; 256]).is_err());
     }
 
     #[test]

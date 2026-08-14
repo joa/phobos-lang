@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Whether a slice of `size` elements starting at `start` provably stays
     /// inside a *dynamic* tensor extent whose known divisor is `extent_div`, so
     /// it needs no runtime bounds mask.
@@ -102,33 +102,6 @@ impl<'p, 'c> Codegen<'p, 'c> {
     pub(super) fn push(&self, block: &Block<'c>, op: Operation<'c>) -> Result<Value<'c, 'c>> {
         let result = block.append_operation(op).result(0)?;
         Ok(detach(result.into()))
-    }
-
-    pub(super) fn barrier(&self, block: &Block<'c>) -> Result<()> {
-        block.append_operation(OperationBuilder::new("gpu.barrier", self.loc).build()?);
-        Ok(())
-    }
-
-    /// Open a cp.async group.
-    ///
-    /// The token must be used with [`Self::async_wait`].
-    pub(super) fn async_create_group(&self, block: &Block<'c>) -> Result<Value<'c, 'c>> {
-        let token_t = self.parse_type("!nvgpu.device.async.token")?;
-        self.push(
-            block,
-            OperationBuilder::new("nvgpu.device_async_create_group", self.loc)
-                .add_results(&[token_t])
-                .build()?,
-        )
-    }
-
-    pub(super) fn async_wait(&self, block: &Block<'c>, group: Value<'c, 'c>) -> Result<()> {
-        block.append_operation(
-            OperationBuilder::new("nvgpu.device_async_wait", self.loc)
-                .add_operands(&[group])
-                .build()?,
-        );
-        Ok(())
     }
 
     pub(super) fn assume_align(

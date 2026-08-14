@@ -1,6 +1,6 @@
 use super::*;
 
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Matches a loop body of the form "var t = <static tensor slice>; ..."
     /// whose remaining statements never write the staged names. Returns the
     /// staged (name, slice expr) pairs and the compute statements.
@@ -262,7 +262,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         dst: &[MemVal<'c>],
         rest: &[Stmt],
     ) -> Result<()> {
-        let use_async = self.cp_async();
+        let use_async = self.has_cp_async();
         self.guarded_prefetch(block, prefetch_iv, hi, |cg, then| {
             cg.scopes.push(HashMap::new());
             cg.bind(

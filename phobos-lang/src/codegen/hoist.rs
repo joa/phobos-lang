@@ -25,7 +25,7 @@ use super::*;
 /// for a dot that will actually run on the tensor cores. Gate drift wastes the
 /// preheader copy but never miscompiles, the fallback paths still reading the
 /// original operand.
-impl<'p, 'c> Codegen<'p, 'c> {
+impl<'c> Codegen<'c> {
     /// Stages the body's hoistable dot operands into `block` (the loop's
     /// preheader) and returns the frame emit_for pushes for the loop. The
     /// closing barrier orders the staged writes before any tile-op write
@@ -36,7 +36,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         body: &[Stmt],
     ) -> Result<Vec<(Value<'c, 'c>, MemVal<'c>)>> {
         let mut frame = Vec::new();
-        if !self.wmma() {
+        if !self.has_wmma() {
             return Ok(frame);
         }
         let Some(cands) = self.hoist_candidates(body) else {
@@ -47,7 +47,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
             if self.hoisted_stage(&src).is_some() {
                 continue;
             }
-            let buf = if self.mma_sync() {
+            let buf = if self.has_mma_sync() {
                 self.alloc_tile_swizzled(block, self.f16_t, &src.shape)?
             } else {
                 self.alloc_tile_shaped(block, self.f16_t, &src.shape)?
@@ -283,10 +283,7 @@ impl<'p, 'c> Codegen<'p, 'c> {
         MemRefType::try_from(mv.mem.r#type())
             .ok()
             .and_then(|t| t.memory_space())
-            .is_some_and(|s| {
-                let global: Attribute = IntegerAttribute::new(self.i64_t, MEM_GLOBAL).into();
-                s == global
-            })
+            .is_some_and(|s| s == self.global_space())
     }
 }
 
