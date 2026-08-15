@@ -3,4 +3,5 @@
 !/models/README.md
 !/models/export_kv.py
 /.cargo/
+/scripts/__pycache__
 *.pyc
