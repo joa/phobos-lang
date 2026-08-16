@@ -227,7 +227,7 @@ float       = digit { digit } "." { digit } ;
      back on (the pre-`mma.sync` path), e.g. for comparison or rollback.
      `@tensorcore(sync)` is accepted as a now-redundant explicit opt-in to the
      default `mma.sync` path.
-  - `@dynshared`: Use dynamically shared memory (instead of the static 48KB); must change launch config respectively.
+  - `@dynshared`: Use dynamically shared memory (instead of the static 48KB); must change launch config respectively. Tiles pool by (element type, shape) as usual, but when every live tile has been released the byte cursor also resets to 0, so a later, differently-shaped tile can reuse a dead region's bytes instead of appending past it -- this is what lets a barrier-separated kernel's two phases share one footprint sized to the wider phase rather than their sum.
   - `@persistent`: the kernel spans several stages of a pass and separates them with `grid_barrier`, so the whole grid must be resident at once or the barrier deadlocks. The compiler only records the intent; honouring it is the launcher's, which sizes the grid from the occupancy API (`phobos_kernels::launch::persistent_grid`).
   - tile sizes for the MLIR GEMM (`TILE_M/N/K`, `WARP_M/N`, `TILE_TM/TN`) come from `@autotune` / the shape env.
   - Unknown attributes parse but are ignored (with a note)

@@ -1,0 +1,13 @@
+device copy bandwidth 422 GB/s
+
+minicpm5-1b : 24 blocks, 16 heads over 2 kv heads (group 8), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      290.4u      0.87M     2.2u    134.7x       NaN
+    67      255.9u      1.57M     3.9u     65.6x   -1148.9
+   131      257.7u      3.07M     7.6u     33.8x      28.1
+   257      353.4u      6.02M    15.0u     23.6x     759.5
+   521      717.7u     12.21M    30.3u     23.7x    1380.2
+  1031      894.0u     24.16M    60.1u     14.9x     345.6
+  2053     1209.2u     48.12M   119.6u     10.1x     308.4
+  4099     2109.6u     96.07M   238.7u      8.8x     440.1
+

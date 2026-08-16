@@ -34,6 +34,23 @@ impl<'c> Codegen<'c> {
         let name = match self.tile_pool.get_mut(&key).and_then(Vec::pop) {
             Some(name) => name,
             None => {
+                // Nothing from an earlier phase is still live: a kernel
+                // whose phases are separated by a barrier (see
+                // attention_persist_src) fully drains one phase's tiles
+                // before the next phase declares its own shapes, so the
+                // allocation can restart at offset 0 instead of growing to
+                // fit both phases' tiles at once. shared_bytes_peak already
+                // has the high-water mark, so this only ever shrinks what
+                // gets requested from the driver, never grows it: every
+                // live reference to a name cleared here has already gone
+                // through release() (or is still counted live and this
+                // branch is unreached), so nothing dangles.
+                if self.dynamic_shared && self.dynamic_live == 0 && self.shared_bytes > 0 {
+                    self.tile_pool.clear();
+                    self.tile_offsets.clear();
+                    self.shared_bytes = 0;
+                }
+
                 let name = format!("__{}_tile{}", self.kernel_name, self.tile_count);
                 self.tile_count += 1;
 
@@ -49,6 +66,7 @@ impl<'c> Codegen<'c> {
                     self.tile_offsets.insert(name.clone(), self.shared_bytes);
 
                     self.shared_bytes += (bytes + 15) & !15;
+                    self.shared_bytes_peak = self.shared_bytes_peak.max(self.shared_bytes);
                 } else {
                     self.shared_globals.push(memref::global(
                         self.ctx,
@@ -88,6 +106,10 @@ impl<'c> Codegen<'c> {
             .iter()
             .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
 
+        if self.dynamic_shared {
+            self.dynamic_live += 1;
+        }
+
         Ok(MemVal {
             mem,
             elem,
@@ -123,6 +145,10 @@ impl<'c> Codegen<'c> {
 
         if self.aliased.contains(name) {
             return;
+        }
+
+        if self.dynamic_shared {
+            self.dynamic_live -= 1;
         }
 
         // Pool by the physical allocation shape (padded buffers carry a

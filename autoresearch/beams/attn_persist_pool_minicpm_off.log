@@ -1,0 +1,59 @@
+card NVIDIA GeForce RTX 2080 SUPER, driver 610.88, max SM clock 2145 MHz
+idle: 300 MHz, 1% util, 21 W, 32 C, 12 compute apps
+building phobos bench...
+
+probing engines:
+  phobos [examples]: backend CUDA
+  llama.cpp [llama.cpp]: backend CUDA, runtime from C:\Users\joaeb\AppData\Local\Programs\Ollama\lib\ollama\cuda_v12
+  llama.cpp [llama.cpp13]: backend CUDA
+    same backend as a build already kept, skipped
+warming the card (1650 MHz now)...
+  clock 1650 -> 2040 MHz (peak 2040) over 10 s, plateau
+
+round 1/3
+  llama.cpp CUDA   minicpm5-1b-Q8_0       pp128 8591.95 t/s  tg1024 275.49 t/s  tg2048 271.46 t/s  tg4096 267.21 t/s   [2040 MHz]
+  phobos           minicpm5-1b-Q8_0       pp128 3422.10 t/s  tg1024 243.17 t/s  tg2048 232.17 t/s  tg4096 211.96 t/s   [2031 MHz]
+
+round 2/3
+  phobos           minicpm5-1b-Q8_0       pp128 3443.65 t/s  tg1024 242.62 t/s  tg2048 232.62 t/s  tg4096 211.16 t/s   [2010 MHz]
+  llama.cpp CUDA   minicpm5-1b-Q8_0       pp128 8630.77 t/s  tg1024 276.07 t/s  tg2048 272.51 t/s  tg4096 266.56 t/s   [2031 MHz]
+
+round 3/3
+  llama.cpp CUDA   minicpm5-1b-Q8_0       pp128 8004.44 t/s  tg1024 275.84 t/s  tg2048 272.44 t/s  tg4096 267.22 t/s   [2026 MHz]
+  phobos           minicpm5-1b-Q8_0       pp128 3502.05 t/s  tg1024 241.91 t/s  tg2048 232.24 t/s  tg4096 209.70 t/s   [2031 MHz]
+
+==============================================================================
+NVIDIA GeForce RTX 2080 SUPER, driver 610.88, phobos f0778f2
+3 rounds x 3 repetitions, pp128, tg1024, tg2048, tg4096
+SM clock under GPU work: median 2031 MHz, 2010 to 2040
+rounds with the card to ourselves between them: 3 of 3
+phobos: CUDA, C:\Users\joaeb\code\phobos\target\release\examples\bench.exe
+llama.cpp CUDA: CUDA, C:\Users\joaeb\code\llama.cpp\llama-bench.exe (runtime cuda_v12)
+minicpm5-1b-Q8_0: llama 1.1B Q8_0
+phobos env: nothing set, so every default is in force
+
+| model            | engine                | test   | t/s     | stderr     | rounds |
+| ---------------- | --------------------- | ------ | ------- | ---------- | ------ |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | pp128  | 3455.93 | +/- 23.88  | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | pp128  | 8409.05 | +/- 202.62 | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg1024 | 242.57  | +/- 0.36   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg1024 | 275.80  | +/- 0.17   | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg2048 | 232.34  | +/- 0.14   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg2048 | 272.13  | +/- 0.34   | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg4096 | 210.94  | +/- 0.66   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg4096 | 267.00  | +/- 0.22   | 3      |
+
+per round, against each row's own median (a diagnostic, not a filter):
+| round | GPU rows | SM MHz | util between | note |
+| ----- | -------- | ------ | ------------ | ---- |
+| 1     | -0.07%   | 2036   | 0%           |      |
+| 2     | +0.06%   | 2020   | 0%           |      |
+| 3     | -0.77%   | 2029   | 0%           |      |
+
+phobos against llama.cpp CUDA:
+| model            | test   | phobos  | other   | ratio | not comparable |
+| ---------------- | ------ | ------- | ------- | ----- | -------------- |
+| minicpm5-1b-Q8_0 | pp128  | 3455.93 | 8409.05 | 0.41x |                |
+| minicpm5-1b-Q8_0 | tg1024 | 242.57  | 275.80  | 0.88x |                |
+| minicpm5-1b-Q8_0 | tg2048 | 232.34  | 272.13  | 0.85x |                |
+| minicpm5-1b-Q8_0 | tg4096 | 210.94  | 267.00  | 0.79x |                |

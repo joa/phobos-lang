@@ -1,0 +1,24 @@
+model models/minicpm5-1b-Q8_0.gguf (llama 1.1B Q8_0, 130560 vocab), backend Phobos GPU, load 2023 ms
+warmup... done
+  pp8 rep 1/1: 0.288 s
+=== pass report, replay 9: 268 launches, 48 SMs ===
+kernel                n  blocks    thr  regs shared blk/SM   waves
+store_2d             48      48    256    14    512      4    0.02
+q8_qdot              25   24000    256    41     32      4   20.00
+quantize             25     396    256    20   1584      4    0.33
+rms_norm_q           24      24    256    23  19232      3    0.02
+copy_2d              24      24    256    18      0      4    0.02
+rope                 24     384    256    18   1024      4    0.33
+rope                 24      48    256    18   1024      4    0.04
+attention_persist    24    4608    256    63  11984      4    4.00
+q8_qdot_add          24    4608    256    41     32      4    4.00
+fused                24    4608    256    46   8848      4    4.00
+rms_norm              1       1    256    20  18848      3    0.02
+copy                  1      12    256    14    512      4    0.25
+total 268 launches, 38761 blocks, 144.6 blocks per launch
+  tg8 rep 1/1: 0.043 s
+
+| model | backend | test | t/s |
+| ----- | ------- | ---- | --- |
+| llama 1.1B Q8_0 | Phobos GPU | pp8 | 27.81 +/- 0.00 |
+| llama 1.1B Q8_0 | Phobos GPU | tg8 | 185.41 +/- 0.00 |

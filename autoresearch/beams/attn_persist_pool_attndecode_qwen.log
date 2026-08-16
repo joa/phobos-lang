@@ -1,0 +1,13 @@
+device copy bandwidth 422 GB/s
+
+Qwen3.5-0.8B : 6 blocks, 8 heads over 2 kv heads (group 4), head dim 256
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37       92.7u      0.43M     1.1u     86.0x       NaN
+    67       71.8u      0.79M     2.0u     36.8x    -695.1
+   131       72.1u      1.54M     3.8u     18.9x       4.8
+   257      100.4u      3.01M     7.5u     13.4x     223.9
+   521      216.0u      6.11M    15.2u     14.2x     437.9
+  1031      261.2u     12.08M    30.0u      8.7x      88.7
+  2053      358.7u     24.06M    59.8u      6.0x      95.4
+  4099      642.4u     48.04M   119.4u      5.4x     138.6
+

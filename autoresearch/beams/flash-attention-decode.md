@@ -1,6 +1,6 @@
 ---
 parent: fcfdf8b / 80204d5 (HEAD, autoresearch branch)
-status: implemented, opt-in -- genuine partial win on minicpm (+1.0-1.4% tg, all rows positive), shape-gated to avoid a measured Qwen regression, open, combine with [[launch-bound-headroom]]
+status: implemented, opt-in -- shared-memory pooling fix removes the Qwen regression this beam's gate was built around (now flat, +0.1-0.4%); minicpm stays flat, not clearly positive; gate logic unchanged (no longer needs to be, since it reads the driver fresh and the driver's answer improved), PHOBOS_ATTN_PERSIST stays opt-in pending a third shape; combine with [[launch-bound-headroom]]
 ---
 
 # Beam: flash-attention-shaped decode attention
@@ -617,3 +617,236 @@ itself (wider `BC`, fewer serial steps, or a less sequential reduction
 structure), not adding more grid parallelism -- a materially different
 design direction than anything tried in this session so far. Not yet
 tested; handed to the redesign round in progress as of this note.
+
+### The shared-memory pooling gap, closed: Qwen's regression is gone
+
+Picked up the highest-value follow-up this beam's own file named ("What is
+not chased this round," above): the combined persist kernel's shared
+footprint summing its two phases (~41KB at Qwen's shape) instead of pooling
+to the wider phase's own (~24KB) the way `docs/megakernel.md`'s
+redundant-stage fix does for the fused MLP.
+
+**Root cause, found by reading `phobos-lang`'s tile allocator
+(`phobos-lang/src/codegen/tile/alloc.rs`), not guessed at.** A released tile
+buffer only returns to a pool keyed by `(element type, exact shape)`
+(`alloc_tile_shaped`'s `key = (elem.to_string(), shape.to_vec())`), so reuse
+only ever happens when a *later* declaration asks for the identical shape a
+*released* one had. `attention_persist_src`'s two phases never do: phase
+one's tiles are `[QG, D]`/`[QG, BC]`/`[QG, 1]`-shaped (the split body's `q`,
+`acc`, `sc`, ...), phase two's are `[1, S]`/`[1, 1]`/`[1, D]`-shaped (the
+merge body's `mv`, `mm`, `c`, `ll`, `oacc`). Every phase-one tile is dead
+(released) before `grid_barrier()` -- their last read is the `P`/`ML` store
+that precedes it -- but since none of phase two's shapes match any of
+phase one's, every phase-two declaration takes the "mint a new global" path,
+and in the pre-`@dynshared` static mode (`memref.global` per tile, a
+compile-time-fixed symbol per shape) there is no way for two *different*
+global symbols to share physical bytes at all. The measured 41376 bytes is
+exactly 23760 + 17616, phase one's and phase two's own standalone
+footprints summed to the byte -- not an approximation, the literal sum,
+confirming zero cross-phase reuse was happening.
+
+This is squarely the kind of gap AGENT.md's directive says not to treat as
+a stopping point: `phobos-lang`'s tile model doesn't support cross-shape
+aliasing, so the primitive got built, following the `grid_barrier()`/
+`@persistent`/`atomic_add` precedent. Consulted the advisor before writing
+code; its diagnosis (byte-level, cross-dtype reuse needs `@dynshared`'s
+offset-view substrate, not `static`-mode `reinterpret_cast`/`flat()`, which
+preserves element type and can't back a new symbol) was correct and is what
+got built.
+
+**The fix, entirely in `phobos-lang`, no new syntax.** `attention_persist_src`
+gained `@dynshared` (already a real, shipped attribute -- `delta_scan_src`
+in `phobos-gguf/src/backend/device/kernels/delta.rs` has used it since
+before this beam). The allocator (`Codegen::alloc_tile_shaped`/`release` in
+`phobos-lang/src/codegen/tile/alloc.rs`) gained two fields: `dynamic_live`
+(count of currently-allocated, not-yet-released dynamic tiles) and
+`shared_bytes_peak` (the high-water mark, since the reset below can make
+the *current* cursor non-monotonic). Whenever a genuinely new `(type,
+shape)` key is about to mint a fresh offset and `dynamic_live == 0` (nothing
+outstanding), the byte cursor and the pool/offset bookkeeping reset to zero
+before minting. A reset can only ever *shrink* what a kernel requests from
+the driver, never grow it or dangle a reference: everything it clears has
+already gone through `release()`, and anything still live keeps
+`dynamic_live > 0`, so the branch simply isn't reached. An aliased
+(`flat()`-viewed) tile's `release()` is already a documented no-op
+(`Codegen::release`'s own early return, `self.aliased.contains(name)`), so
+a kernel that ever `flat()`s something can never reach `dynamic_live == 0`
+again and the reset never fires for it -- safe by the same mechanism that
+was already there, not a new hazard category.
+
+**Blast radius: this changes every `@dynshared` kernel's allocator, not
+just `attention_persist`.** The only other kernel using the attribute is
+`delta_scan` (`phobos-gguf/src/backend/device/kernels/delta.rs`), and the
+pass report after this change shows its footprint moved slightly too (the
+`fused` rows read 8272/9812 bytes against the previously-documented
+8288/9812 in `docs/megakernel.md` -- a handful of bytes shaved off a kernel
+this beam never touched, from the same reset firing wherever a dynamic
+kernel's own dead-tile-then-new-shape pattern already existed). Correctness
+for that path is covered the same way as everything else here:
+`model_check`/`batch_check` exercise it every run and the digits match the
+documented baseline, so nothing broke, but the commit is a `phobos-lang`
+codegen change with reach beyond this one kernel, and should be described
+that way rather than as "attention-only."
+
+**A companion fix the pooling change exposed.** `attn_persist_plan`
+(`phobos-gguf/src/backend/device/attn.rs`) already compiles
+`attention_persist_src` through `compile_dynamic`, which is `@dynshared`-aware,
+but its occupancy query, `persistent_grid(func, CTA_THREADS, 0)`, hardcoded
+zero dynamic shared bytes -- correct before this change (the kernel had none,
+its whole footprint was static and the driver already knew it from the
+compiled function's attributes) and silently wrong after (the real footprint
+is now a launch-time dynamic count the occupancy query never saw, which
+would have *undercounted* the kernel and settled a grid too wide for what
+the shared allocation can actually hold at once -- the co-residency
+precondition `docs/megakernel.md` names, and exactly the kind of thing that
+does not crash, it deadlocks `grid_barrier` under load). Fixed by reading
+`self.shared_of(func)` (already populated as a side effect of the
+`compile_dynamic` call two lines above) and passing that to
+`persistent_grid`. No other `persistent_grid` call site in the tree needed
+this (the fused MLP and `q8_qdot_persist` are both static-shared kernels,
+correctly passing 0), so this one call site is the only one touched.
+
+**Measured: the footprint collapses to (approximately) the wider phase, as
+predicted.** Qwen's shape (`n_head=8, group=4, head_dim=256, qgroup=2,
+splits=16`), read directly from `attn_persist_plan`'s occupancy query:
+
+| | before | after |
+| --- | --- | --- |
+| dynamic/static shared bytes | 41376 | **23760** |
+| blocks/SM | 1 | **2** |
+| settled grid | 48 | **96** |
+| gate (needs >= 64 units) | declines | **passes** |
+
+23760 is exactly phase one's own standalone footprint (matches the launched
+`attention_split` kernel's own 23760 exactly, per the pass report at
+`autoresearch/beams/attn_persist_pool_pass_report_qwen.log`) -- phase two's
+tiles now land entirely inside phase one's dead bytes rather than past them.
+minicpm's shape, which was already passing the gate before this change,
+dropped further: 20896 -> **11984** bytes, 3 -> **4** blocks/SM (the
+thread-count ceiling at 256 threads/block on this card, so occupancy cannot
+go higher regardless of further shared-memory headroom). Confirmed by direct
+MLIR inspection too, not just the runtime query: a hand-reconstructed
+`attention_persist_src` output at Qwen's shape, run through
+`cargo run -p phobos-lang --example emit`, shows phase two's first tile
+(`mv`, `[1, 16]`) landing at `memref.view %N[%c0]`, offset 0 -- the exact
+byte range phase one's tiles occupied.
+
+**Correctness gates, all four, both models, `PHOBOS_ATTN_PERSIST=1` forced
+on** (exercises the persist path on both shapes now, since Qwen passes the
+gate too):
+
+- `backend_check`: worst relative error 2.902e-4, unchanged from the
+  documented baseline.
+- `model_check`, both models: Qwen 1.019e-2/9.839e-3/8.416e-3, minicpm
+  1.258e-2/1.335e-2/1.294e-2, both "backends agree," matching the documented
+  baseline to the digit.
+- `batch_check`, both models: "batched and sequential agree." Qwen spread
+  7.61e-3 to 1.551e-2, minicpm 1.057e-2 to 1.35e-2, both inside the
+  documented bands.
+- `fuse_check`, both models (Qwen was missing from the original round's
+  gate battery; run here): minicpm worst 1.244e-2/avg 1.010e-2/1 tied flip,
+  matching the documented baseline exactly; Qwen worst 1.189e-2/avg
+  8.706e-3/0 flips, clean.
+- `cargo test -p phobos-lang`: 148 pass, including a new pinning test,
+  `dynamic_shared_resets_its_cursor_between_dead_phases`
+  (`phobos-lang/src/codegen/tests/tile.rs`), which builds a small
+  `@dynshared` kernel with two dead-before-a-third-shape-appears tiles and
+  greps the emitted MLIR for the smoking gun this round found by hand (a
+  later shape minting past the earlier ones' combined footprint instead of
+  reusing it). Nothing else pinned this behavior; without the test a future
+  refactor could silently re-inflate the footprint and re-regress Qwen, and
+  no correctness gate would catch it -- only a benchmark would, much later.
+- `cargo test -p phobos-gguf -p phobos-onnx -p phobos-inference
+  -p phobos-kernels`: all pass. `phobos-base`'s `source_size` ratchet:
+  passes, every touched file well under the 900-line cap (largest,
+  `kernels/attn.rs`, at 663 lines).
+- `cargo clippy -p phobos-gguf -p phobos-lang --features cuda -- -D
+  warnings`: clean.
+
+**Benchmark, same session, interleaved against llama.cpp, 3 rounds x 3
+reps, uncontended, `tg1024/2048/4096` per the standing directive**
+(`autoresearch/beams/attn_persist_pool_{qwen,minicpm}_{on,off}.log`):
+
+Qwen3.5-0.8B-Q8_0, off (default, gate previously declined this shape
+regardless) vs on (gate now passes, pooled footprint):
+
+| test | off | on | delta |
+| --- | --- | --- | --- |
+| tg1024 | 271.41 | 271.74 | +0.12% |
+| tg2048 | 267.26 | 267.50 | +0.09% |
+| tg4096 | 258.00 | 258.97 | +0.38% |
+
+Every row flat-to-positive, inside session noise (`+/-0.05` to `+/-0.40`
+stderr on these rows) -- **the -2 to -3% regression this beam's gate was
+built to route around is gone.** Pass report confirms the mechanism:
+Qwen's decode step drops from 220 to **214** launches with `attention_persist`
+active (6 calls, 23760 bytes, 2 blocks/SM), replacing the 12 combined
+`attention_split`+`attention_merge` launches it used to fall back to.
+
+minicpm5-1b-Q8_0, off vs on, same protocol:
+
+| test | off | on | delta |
+| --- | --- | --- | --- |
+| tg1024 | 242.57 | 243.44 | +0.36% |
+| tg2048 | 232.34 | 232.27 | -0.03% |
+| tg4096 | 210.94 | 210.45 | -0.23% |
+
+**Flat, not a regression, but also not clearly the +1.0-1.4% this beam
+originally recorded for minicpm's persist path.** Read honestly rather than
+rounded to either story: minicpm's original win was ~flat in *absolute*
+t/s (roughly +2.6 to +3.7 t/s per row, from the original landing's own
+"win size" section above), which at these longer cache lengths predicts a
+small but real positive delta -- not the wash actually measured. The
+mechanism this round changed for minicpm is real (footprint 20896 -> 11984,
+occupancy 3 -> 4 blocks/SM, hitting the thread-count ceiling) but so is a
+plausible cost: `attndecode`'s own per-call numbers for minicpm before vs
+after this change (`autoresearch/beams/attn_persist_pool_attndecode_minicpm.log`
+against the original landing's recorded figures) show some cache lengths
+2-9% slower per call, not faster, alongside others flat or slightly
+better. The likely mechanism is dynamic shared memory's offset-view
+addressing (`memref.view` off a runtime base pointer) costing a little more
+per access than a compile-time-fixed `memref.global` did, which the
+occupancy gain from going 3 -> 4 blocks/SM offsets for Qwen (where 1 -> 2
+blocks/SM removes a whole second grid-strided pass, a structural win) but
+merely cancels for minicpm (already single-pass before this change, so the
+occupancy headroom bought nothing structural, only marginal warp
+availability against an already-adequate 3 blocks/SM). Recorded as
+**unresolved but not a regression** -- not worth a further bench round to
+pin down precisely: the effect size (~1%) sits inside this session's own
+pp128 control drift (~0.8%) at the `tg >= 1024` lengths the standing
+directive scopes benchmarking to, the shorter lengths that would show it
+more clearly are out of scope, and the answer doesn't change any decision
+here -- pooling stays regardless, since without it Qwen regresses, which is
+the more important row.
+
+**Gate and default recommendation.** `attn_persist_plan`'s occupancy check
+itself needed no logic change -- it already reads the driver fresh every
+time and compares against the shape's own arithmetic, architecture-blind by
+construction; fixing the *input* (the kernel's real footprint) was enough
+to fix the *output* (the decision) for Qwen. Both known shapes are now
+flat-to-positive under the gate, which is the concrete thing this round set
+out to determine. Per the original beam's own stated bar ("shipped as
+opt-in... the gate's predicate is validated only at two shapes' endpoints
+on one card"), that bar is unchanged by this round -- still two shapes, one
+card -- so `PHOBOS_ATTN_PERSIST` stays opt-in rather than flipping to
+default-on. Recommendation for the user: **default-on is now defensible**
+(both shapes flat-to-positive, no known-regressing case left), pending
+either a third shape or a second card to actually clear that bar, which is
+a decision call rather than a further engineering step.
+
+**A working-tree hazard worth recording for whoever works this shared tree
+next.** Partway through this round, `kernels/attn.rs` was found reverted to
+its pre-round committed state (`5753f8e`) -- not by this agent -- which
+silently discarded this round's first attempt at the `@dynshared` edit
+along with (evidently) a concurrent agent's own in-progress rewrite of
+`attention_split_src`'s core loop (out of this beam's territory, not
+touched here). Two agents sharing one working tree means either one's
+`git checkout`/`git restore` on a file the other has uncommitted changes in
+silently destroys those changes with no error and no diff to notice by --
+this cost one debugging cycle here (a first correctness-adjacent-looking
+"gate still declines, footprint zero" result that was actually a stale
+binary built from a reverted source file, not a bug in the fix). Caught by
+habitually running `git diff --stat` on the target file immediately before
+and after every build/run in this round, which is worth doing as standard
+practice whenever a task brief says another agent is concurrently touching
+the same file.

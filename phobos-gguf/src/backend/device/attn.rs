@@ -355,8 +355,16 @@ impl DeviceBackend {
             );
             let module = self.compile_dynamic(&src, "attention_persist")?;
             let func = module.get_function("attention_persist")?.to_raw();
+            // attention_persist_src is now `@dynshared`, so its shared
+            // footprint is a launch-time byte count rather than baked into
+            // the compiled function's static attribute; the occupancy query
+            // needs that count or it undercounts the kernel's real
+            // footprint and settles a grid wider than actually fits,
+            // deadlocking grid_barrier. compile_dynamic already recorded it
+            // in func_shared as a side effect of compiling above.
+            let dynamic_shared = self.shared_of(func) as usize;
             // SAFETY: func belongs to a module alive for this call.
-            let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, 0)? };
+            let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, dynamic_shared)? };
             if allowed >= blocks {
                 settled = Some((module, blocks));
                 break;

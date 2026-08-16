@@ -75,7 +75,7 @@ pub fn emit<'c>(
         let mut cg = Codegen::new(base, context, kernel)?;
         let func = cg.emit_kernel(kernel)?;
         if cg.dynamic_shared {
-            shared.push((kernel.name.clone(), cg.shared_bytes as usize));
+            shared.push((kernel.name.clone(), cg.shared_bytes_peak as usize));
         }
 
         // shared-memory tile buffers are module-level globals
@@ -262,6 +262,19 @@ struct Codegen<'c> {
     /// reaches: what the host has to pass at launch.
     tile_offsets: HashMap<String, i64>,
     shared_bytes: i64,
+    /// The high-water mark `shared_bytes` ever reached, which is what the
+    /// host must actually reserve: a barrier-separated kernel (see
+    /// `attention_persist_src`) can let `shared_bytes` fall back to zero
+    /// between phases (see `dynamic_live`), but the allocation still has to
+    /// cover whichever phase asked for the most at once.
+    shared_bytes_peak: i64,
+    /// Count of dynamic tiles currently allocated and not yet released.
+    /// Reaching zero between two phases of a barrier-separated kernel means
+    /// nothing from the first phase is still live, so the next distinct
+    /// shape mint can restart the dynamic allocation at offset 0 instead of
+    /// growing to fit both phases' tiles at once. See `alloc_tile_shaped`
+    /// and `release`.
+    dynamic_live: i64,
     // Loop-invariant dot operands staged into shared f16 in a loop's preheader,
     // one frame per active for loop: (source view's memref value, staged
     // buffer). The staging sites consult this instead of re-staging per
@@ -344,6 +357,8 @@ impl<'c> Codegen<'c> {
             dynamic_shared: kernel.wants_dynamic_shared(),
             tile_offsets: HashMap::new(),
             shared_bytes: 0,
+            shared_bytes_peak: 0,
+            dynamic_live: 0,
             hoisted_stages: Vec::new(),
             ragged_iv: None,
             trimmed_ivs: Vec::new(),

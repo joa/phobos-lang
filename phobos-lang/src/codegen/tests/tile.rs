@@ -28,6 +28,37 @@ fn a_dead_named_tile_returns_its_buffer_to_the_pool() {
 }
 
 #[test]
+fn dynamic_shared_resets_its_cursor_between_dead_phases() {
+    // `@dynshared` tiles live at byte offsets in one allocation rather than
+    // one `memref.global` apiece, so two distinct shapes used to just sum:
+    // this is the bug behind attention_persist_src's 41KB combined
+    // footprint before the fix, since its two barrier-separated phases
+    // never share a shape. `a` ([16, 64], 4096 bytes) and `b` ([8, 4], 128
+    // bytes) are both read and therefore released before `c` ([1, 8], a
+    // shape neither of them is) is ever declared, so nothing is live when
+    // `c` mints: the allocator should restart at offset 0 rather than
+    // append past `a` and `b`'s combined 4224 bytes.
+    let mlir = emit_mlir(
+        "@dynshared
+        kernel chain(X: tensor<f32>[16, 64], Y: tensor<f32>[8, 4],
+                     O: tensor<f32>[16, 64], Q: tensor<f32>[8, 4],
+                     P: tensor<f32>[1, 8]) {
+            var a: tile<f32>[16, 64] = X[0 :+ 16, 0 :+ 64]
+            O[0 :+ 16, 0 :+ 64] = a
+            var b: tile<f32>[8, 4] = Y[0 :+ 8, 0 :+ 4]
+            Q[0 :+ 8, 0 :+ 4] = b
+            var c: tile<f32>[1, 8] = P[0 :+ 1, 0 :+ 8]
+            P[0 :+ 1, 0 :+ 8] = c
+        }",
+    );
+    assert!(
+        !mlir.contains("c4224"),
+        "c minted past a and b's combined footprint instead of reusing it, \
+         the allocator did not reset when nothing was live:\n{mlir}"
+    );
+}
+
+#[test]
 fn a_tile_read_after_a_loop_keeps_its_buffer() {
     // The last mention is what ends a name's life, and a nested body is
     // part of the statement that contains it: `keep` is read inside the
