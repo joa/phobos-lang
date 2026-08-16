@@ -18,3 +18,4 @@ mod qdot;
 mod qmma;
 mod reduce;
 mod vector;
+mod warp_attn;

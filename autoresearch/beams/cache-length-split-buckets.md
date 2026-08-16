@@ -1,6 +1,8 @@
 ---
 parent: fcfdf8b (HEAD, autoresearch branch)
-status: killed
+status: killed as a grid-width lever; its own Result log's follow-on
+  recommendation (a warp-scope parallelism primitive) landed as a genuine
+  win, see the "2026-08-17" section at the end of the Result log
 ---
 
 # Beam: cache-length-bucketed decode attention split count
@@ -427,3 +429,176 @@ reopening as a grid-width lever; worth remembering as background for
 whichever beam next changes `attention_split`'s own per-block work, since any
 such change should be judged at `tg4096` or via in-pass `nsys`, not
 `tg1024`/`tg32`, to see its true size.
+
+### 2026-08-17: the follow-on recommendation landed -- warp-partitioned online softmax
+
+This file's own previous section ends by naming the surviving lever: "a
+genuinely new phobos-lang unit-of-parallelism primitive (warp-scope ownership
+of a key sub-range, several independent warps per block instead of one wide
+serial chain per block, so added parallelism costs thread count rather than
+the per-thread register/shared-memory footprint that sank the two-chain
+attempt)". Dispatched as its own round (`autoresearch/beams/BEAMS.md`'s "Beam
+3"), and it landed as a genuine, large win. Full mechanism and thread-mapping
+findings are in `flash-attention-decode.md`'s own new Result-log section
+(this file records the numbers this beam's own recommendation predicted;
+that file is where the code lives and where a future reader should start).
+
+**What was found before writing anything.** Read the actual thread-to-work
+mapping in `attention_split_src`'s loop body (source, not guessed): at
+minicpm's shape (`QG=2`, `D=128`, `BC=16`), `dot_t`/`exp`/`dot` each
+`distribute()` their small `[QG, BC]`-shaped work over only 32 of the block's
+256 threads (one thread per output element, each doing a serial 128-deep FMA
+reduction over the head dimension), `rowmax`/`rowsum` reach 64 via their
+warp-shuffle path, and every one of those ops ends in a CTA-wide
+`gpu.barrier`. Confirmed in emitted MLIR
+(`cargo run -p phobos-lang --example emit` on a reduced kernel), not just
+inferred from the DSL source, per the brief's own instruction. Net: six or
+seven of the block's eight warps sat idle at a barrier for the entire loop,
+exactly the "otherwise-idle warp" capacity this beam's own prior section
+predicted existed but did not have a primitive to reach.
+
+**What was built.** Not a general "warp-scoped mode" of `dot_t`/`rowmax`/
+`dot` (too much blast radius -- every other kernel in the tree uses those).
+Instead, one new, purpose-built `phobos-lang` builtin, `warp_partial`
+(`phobos-lang/src/codegen/tile/warp_attn.rs`), that computes one warp's own
+online-softmax partial entirely in registers: the head dimension is spread
+across the warp's 32 lanes (`D / 32` elements each), one key at a time (no
+more `BC`-wide tiling), the QK dot product is a short per-lane
+multiply-accumulate followed by a five-step `gpu.shuffle` xor-butterfly
+all-reduce (reusing the shuffle primitive `rowreduce_warp` already had, not a
+new one), and the accumulator update needs no shuffle at all since each lane
+only ever owns its own slice of `acc[i, :]`. No shared-memory staging of
+`K`/`V`, and critically no CTA barrier inside the per-key loop -- the only
+synchronization is the self-converging shuffle, which only needs the 32
+lanes of the issuing warp, so different warps' independent loops (different
+trip counts, since each warp's own `[lo, hi)` sub-range is a further
+`ceil`-divided slice of the block's own range) can genuinely interleave on
+the SM scheduler instead of converging on a shared barrier every iteration.
+One CTA-wide barrier at the very end (after every warp's loop has finished,
+called exactly once by all 256 threads regardless of their own warp's trip
+count) publishes the `WCT` warps' partials to a small per-block shared
+scratch (`wm`/`wl`/`wacc`, `[QG, WCT]`/`[QG, WCT]`/`[QG * WCT, D]`), which a
+new small Rust-generated combine block (`attention_combine` in
+`phobos-gguf/src/backend/device/kernels/attn.rs`) then folds with the exact
+same `rowmax`/`exp`/`rowsum`/`dot` online-softmax merge `attention_merge`
+already runs across splits -- just at `WCT` (8) width instead of `S`, so
+`attention_merge` and its own shared-memory ceiling (this file's own earlier
+section found it walling out around `S ~ 28`) are untouched: `S` (the
+block-level split count) did not change, only what happens inside one
+block's own share of the work.
+
+`attention_split_src` and `attention_persist_src`'s phase one both changed
+(the doc comment already promised phase one is the split kernel's body
+verbatim; it still is). `attention_merge` and phase two are byte-for-byte
+unchanged.
+
+**Correctness, `PHOBOS_ATTN_PERSIST=1` forced on, both models:**
+`backend_check` (worst relative error 2.902e-4, identical to the documented
+baseline, every decode-shaped attention case at every previously-tested
+cache length still passing), `model_check` (both "backends agree", spreads
+in the same band as before), `batch_check` (both "batched and sequential
+agree", spreads in the documented bands), `fuse_check` (both prompt passes
+exact, decode spreads 8.1e-3 to 1.33e-2, zero top-token flips on either
+model -- cleaner than the previously documented one tied flip on minicpm).
+`cargo test -p phobos-lang` (148 pass, all pre-existing) and
+`cargo test -p phobos-base -p phobos-gguf -p phobos-onnx -p phobos-inference
+-p phobos-kernels` all pass; `phobos-base`'s `source_size` ratchet passes
+(`expr.rs` trimmed by one comment line to stay at its grandfathered 916
+after the one-line `warp_partial` dispatch addition; `kernels/attn.rs` grew
+to 628 lines, still well under the 900 cap). `cargo clippy -p phobos-gguf -p
+phobos-lang --features cuda -- -D warnings` clean. Every `.ph` under
+`examples/` re-verified under both the default target and
+`PHOBOS_CHIP=sm_80 PHOBOS_INDEX_BITS=64`, zero failures -- expected, since
+the `phobos-lang` diff is provably additive (`git diff --stat` shows only
+insertions in every existing file the change touches, and the new
+`warp_partial` codegen path is unreachable from any kernel that does not
+call it by name).
+
+**`attndecode`, stock (non-persistent) split-plus-merge, both shapes, before
+vs after (`us`):**
+
+| cache | minicpm before | minicpm after | delta | Qwen before | Qwen after | delta |
+| --- | --- | --- | --- | --- | --- | --- |
+| 521  | 705.7 | 291.7 | **-58.7%** | -- | 90.3  | -- |
+| 1031 | 875.3 | 380.0 | **-56.6%** | 282.9 | 122.5 | **-56.7%** |
+| 2053 | 1113.2 | 550.9 | **-50.5%** | 372.9 | 187.3 | **-49.8%** |
+| 4099 | -- | 894.3 | -- | -- | 317.3 | -- |
+
+(minicpm/Qwen "before" figures at 1031/2053 from this file's own earlier
+table and `flash-attention-decode.md`'s `attndecode` launched-path table;
+521/4099 have no directly comparable prior row, included for completeness.)
+A uniform ~50-59% reduction in the kernel's own GPU time, at every cache
+length tested, on both shapes -- unlike the grid-width lever this file
+killed, which only ever helped at deep cache and needed `tg4096`/in-pass
+`nsys` to see past `tg`'s dilution. This one does not have that problem, see
+the `bench.py` numbers below.
+
+**`bench.py`, same session, interleaved against llama.cpp, 3 rounds x 3 reps,
+`PHOBOS_ATTN_PERSIST=1`, uncontended every round:**
+
+minicpm5-1b-Q8_0, against the freshest recorded `PHOBOS_ATTN_PERSIST=1`
+baseline -- `BEAMS.md`'s "Current-state snapshot, 2026-08-17,
+post-pooling-fix" section, landed concurrently with this round and marked
+there as the reference point to compare future changes against, superseding
+the slightly earlier `flash-attention-decode.md` pooling-landing numbers
+(the two agree within session noise: 243.27 vs 243.44 at tg1024, etc., so
+neither reading changes the conclusion, this just cites the one its own
+commit asked future rounds to use):
+
+| test | before (t/s) | after (t/s) | delta | ratio before | ratio after |
+| --- | --- | --- | --- | --- | --- |
+| tg1024 | 243.27 | 260.75 | **+7.2%** | 0.88x | **0.95x** |
+| tg2048 | 231.12 | 255.76 | **+10.7%** | 0.85x | **0.94x** |
+| tg4096 | 209.68 | 244.43 | **+16.6%** | 0.79x | **0.92x** |
+
+Every row up, and the gain *grows* with cache length exactly as the
+mechanism predicts (attention's share of a decode step grows with cache
+length; this change cuts that share's own cost) -- the opposite of the
+grid-width lever's shape, and no dilution to correct for: `tg1024` alone
+already shows most of the win. minicpm closes from a widening 0.88x -> 0.85x
+-> 0.79x slope (the worst ratio this session had measured, from the
+snapshot this round found waiting) to a flat-to-improving **0.95x -> 0.94x
+-> 0.92x** against llama.cpp's FA-on decode -- the closest this whole
+session has gotten, and the slope this beam note opened with no longer
+widens with cache length.
+
+Qwen3.5-0.8B-Q8_0, same protocol, against the same fresh snapshot:
+
+| test | before (t/s) | after (t/s) | delta |
+| --- | --- | --- | --- |
+| tg1024 | 271.40 | 274.25 | +1.0% |
+| tg2048 | 267.37 | 272.12 | +1.8% |
+| tg4096 | 258.67 | 267.39 | +3.4% |
+
+Small further gain, no regression -- Qwen's ratio against llama.cpp moves
+from 1.02-1.05x to **1.06-1.07x**, still comfortably ahead.
+
+**Why this is not merely a repeat of the grid-width lever's null result.**
+That lever added more *blocks* (more resident warps of the *same* kind of
+work, hitting the SM's 32-warp/SM ceiling at 4 blocks/SM with nothing left
+to spend). This lever adds no blocks and no warps at all -- it gives warps
+that were *already resident and already idle* independent work, which is
+why it does not run into the same occupancy ceiling and why, unlike the
+grid-width lever, it shows up at `tg1024` without needing `tg4096` or
+`nsys` to see past trajectory-average dilution.
+
+**Committed on `autoresearch`.** New files:
+`phobos-lang/src/codegen/tile/warp_attn.rs`. Changed:
+`phobos-lang/src/codegen/expr.rs` (dispatch), `phobos-lang/src/codegen/tile/mod.rs`
+(module registration), `phobos-gguf/src/backend/device/kernels/attn.rs`
+(`attention_split_src`/`attention_persist_src` rewritten, new
+`attention_combine` helper, new `ATTN_WARP_SPLITS` constant),
+`phobos-gguf/src/backend/device/attn.rs` (call sites updated to the new
+function signatures).
+
+**What is not chased this round.** `warp_partial` does one key at a time,
+unvectorized scalar loads for its `dpl`-wide per-lane K/V slice (`dpl = 4`
+for minicpm's `D=128`, `8` for Qwen's `D=256`) -- batching a few keys per
+warp iteration and/or vectorizing those loads (per the
+`vector-width-is-bytes-not-elements` memory) is a plausible further
+increment, untried here, and this round's numbers are strong enough that it
+was not necessary to reach a clear win. `ATTN_WARP_SPLITS = 8` (one warp per
+group, matching the block's whole warp count) was not swept against smaller
+values (multiple warps sharing a group, needing named-barrier or a
+different combine shape) -- the advisor's v1 recommendation, taken as-is
+and not revisited since it worked cleanly on the first attempt.

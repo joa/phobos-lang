@@ -584,5 +584,92 @@ not spun up just to pad the count. One focused beam (warp-scope primitive)
 plus this snapshot is the honest state of available, well-evidenced work
 right now.
 
+## Beam 3 landed, 2026-08-17: warp-partitioned decode attention -- the session's largest win
+
+Dispatched as above; landed clean. Full mechanism, thread-mapping evidence
+and both models' numbers are in `cache-length-split-buckets.md`'s new
+Result-log section (that is where the recommendation for this beam always
+lived, per the dispatch note); `flash-attention-decode.md` has a short
+cross-reference on what changed underneath its own `@persistent` mechanism
+and what did not.
+
+**What it is, briefly.** A new `phobos-lang` builtin, `warp_partial`
+(`phobos-lang/src/codegen/tile/warp_attn.rs`), lets `attention_split`'s
+block divide its own key sub-range across its eight warps instead of
+running one shared, barrier-synchronized chain that left six or seven of
+them idle the whole time (confirmed in emitted MLIR, not guessed: at
+minicpm's shape, `dot_t`/`exp`/`dot` were already only ever using 32 of the
+block's 256 threads). Each warp computes its own `(m, l, acc)` in
+registers, head dimension spread across its 32 lanes, combined via a
+`gpu.shuffle` xor-butterfly (reusing the existing warp-reduce primitive)
+rather than shared memory, so no CTA barrier sits inside the loop and the
+eight warps run genuinely independently. One barrier at the very end
+publishes all eight partials to a small shared scratch tile, which a new
+Rust-generated combine block folds with the same online-softmax merge
+`attention_merge` already runs across splits -- so `attention_merge` and
+the block-level split count `S` are both untouched, only what one block
+does with its own share of work changed.
+
+**Numbers.** `attndecode` (isolated kernel time): 50-59% reduction across
+every cache length tested, both models, both the launched and
+`@persistent` paths. `bench.py`, same session, interleaved against
+llama.cpp, `PHOBOS_ATTN_PERSIST=1`:
+
+"before" is the current-state snapshot above (landed concurrently with this
+beam, both agents' numbers agree within session noise against the slightly
+earlier pooling-landing figures):
+
+| model | test | before | after | delta |
+| --- | --- | --- | --- | --- |
+| minicpm5-1b-Q8_0 | tg1024 | 243.27 | 260.75 | +7.2% |
+| minicpm5-1b-Q8_0 | tg2048 | 231.12 | 255.76 | +10.7% |
+| minicpm5-1b-Q8_0 | tg4096 | 209.68 | 244.43 | +16.6% |
+| Qwen3.5-0.8B-Q8_0 | tg1024 | 271.40 | 274.25 | +1.0% |
+| Qwen3.5-0.8B-Q8_0 | tg2048 | 267.37 | 272.12 | +1.8% |
+| Qwen3.5-0.8B-Q8_0 | tg4096 | 258.67 | 267.39 | +3.4% |
+
+minicpm's ratio against llama.cpp's FA-on baseline moves from a widening
+0.88x/0.85x/0.79x slope (the worst this session had measured, per the
+snapshot above) to a flat-to-improving **0.95x/0.94x/0.92x**, the closest
+this whole session has gotten -- and unlike the grid-width lever this
+beam's own prior round killed, the gain shows up fully at `tg1024` already,
+growing (not shrinking) with cache length, so none of `tg`'s
+trajectory-average dilution applies here. Qwen improves too (1.02-1.05x ->
+1.06-1.07x), no regression on either model.
+
+**Correctness.** All four gates (`backend_check`, `model_check`,
+`batch_check`, `fuse_check`) pass on both models with
+`PHOBOS_ATTN_PERSIST=1` forced on, matching documented error bands to the
+same order of magnitude (`backend_check`'s worst relative error is
+identical to the pre-change baseline, 2.902e-4). `cargo test` across every
+non-CUDA crate and `phobos-lang`'s own 148 codegen/parser tests all pass;
+every `.ph` example re-verifies under both the default target and
+`PHOBOS_CHIP=sm_80 PHOBOS_INDEX_BITS=64`, unsurprising since the
+`phobos-lang` diff is provably additive (new builtin, unreachable from any
+existing kernel). `source_size` ratchet passes. Committed on `autoresearch`.
+
+**Where minicpm's decode throughput stands now.** 0.92-0.95x of llama.cpp's
+FA-on baseline, up from a widening 0.79-0.88x at the start of this round
+(the deepest-cache snapshot found the slope still worsening past tg2048)
+and from 0.89-0.92x at the very start of the session's decode-attention
+work. This
+is the first change all session to move `tg1024` by a double-digit
+percentage without any dilution caveat attached. It does not yet clear the
+goal (beating llama.cpp outright), but it closes most of the remaining gap
+by itself, further than any combination of the session's other beams did.
+
+**What is left, for whoever picks this up next.** `warp_partial` processes
+one key at a time with unvectorized scalar K/V loads -- batching a few keys
+per warp step and/or vectorizing those loads is untried and plausible
+further headroom, not attempted because this round's numbers already
+cleared a clear win without it. `ATTN_WARP_SPLITS = 8` (one warp per group)
+was taken as the advisor's v1 recommendation and not swept against smaller
+values sharing multiple warps per group. And `[[launch-bound-headroom]]`'s
+remaining unfused per-layer launches (`store_2d`, `quantize`,
+`q8_qdot_add`) are still on the table as a separate, independent lever,
+unaffected by this round's kernel rewrite. A fresh same-session baseline
+capture (this round's own numbers, not the superseded 2026-08-16 one) is
+the right starting point for whoever runs that next round.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.

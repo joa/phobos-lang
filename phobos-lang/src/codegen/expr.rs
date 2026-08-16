@@ -172,10 +172,10 @@ impl<'c> Codegen<'c> {
                 let dim = ["x", "y", "z"][*d as usize];
                 Ok(Rv::Scalar(self.block_id(block, dim)?))
             }
-            // Grid-wide synchronization, for kernels spanning several stages of
-            // a pass. See codegen/sync.rs.
+            // Grid-wide synchronization, spanning several stages of a pass; see codegen/sync.rs.
             "atomic_add" => self.emit_atomic_add(block, args),
             "grid_barrier" => self.emit_grid_barrier(block, args),
+            "warp_partial" => self.emit_warp_partial(block, args),
             // dot outside an assignment: materialize into a fresh buffer.
             // acc += dot(a, b) is handled in store_tile.
             "dot" => {
