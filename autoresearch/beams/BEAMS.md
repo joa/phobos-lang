@@ -516,5 +516,31 @@ every build in this round. Worth doing as standard practice whenever two
 agents are dispatched into the same working tree rather than separate
 worktrees.
 
+Process lesson banked from that incident: this session dispatches concurrent
+agents into one shared working tree rather than separate git worktrees. That
+has been manageable when beams touch different files, but a beam that
+recovers a failed attempt via a blanket `git checkout -- <file>` can destroy
+a concurrent beam's uncommitted edits to the *same* file with no error and
+no diff to notice by. The `Agent` tool supports `isolation: "worktree"`,
+which would have prevented this entirely. Use it for the next pair of beams
+dispatched concurrently into files either one might revert wholesale, rather
+than relying on both agents remembering to `git diff --stat` defensively.
+
+## Beam 3 dispatched, 2026-08-17: the warp-scope parallelism primitive
+
+Now that `phobos-lang/src/codegen/mod.rs`/`tile/alloc.rs` are free (beam 2
+landed), dispatching the next step `[[cache-length-split-buckets]]`'s
+Result log identified: shorten `attention_split`'s per-block serial
+critical path by giving several independent warps within one block their
+own disjoint key sub-range (so parallelism costs thread count, which this
+kernel is not short of -- `attention_split` sits at 63.8% occupancy against
+sm_75's 32-warp/SM ceiling, per the `ncu` counters -- rather than the
+per-thread register/shared-memory footprint that sank the prior round's
+two-independent-chain attempt), combined by a fast intra-block reduce
+(warp shuffle or a small shared-memory tree) instead of widening the grid
+further (provably exhausted, same evidence). This is the "invent something
+else" the user's directive asked for, now that grid-width and register-ILP
+tuning have both been tried and both closed.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
