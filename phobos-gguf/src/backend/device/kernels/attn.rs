@@ -300,85 +300,68 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
 }
 
 /// Causal softmax attention over the whole cache, one group of query rows per
-/// program, with the key axis split across the grid and a pass folding the
-/// pieces back together.
+/// program, with the key axis split across the grid and, inside each split's
+/// own block, split *again* across the block's eight warps.
 ///
-/// FlashAttention's online softmax at one query row: the running maximum and
-/// denominator rescale the carried output as each key tile arrives, so the
-/// scores are never materialized and the cache is read once. Causality is a loop
-/// bound rather than a mask, since the keys a row may see are a prefix: the tiled
-/// loop runs over that prefix's whole tiles and picks up the last few keys one at
-/// a time, at most `BC - 1` narrow steps and no triangular mask or padding.
+/// The previous design gave one block's whole 256 threads one shared, serial
+/// chain of key tiles: `dot_t`/`rowmax`/`exp`/`rowsum`/`dot` each distribute
+/// their small `[QG, BC]`-shaped work over as many threads as the tile has
+/// elements (32-64 of the block's 256 at this shape) and end in a CTA-wide
+/// barrier, so the other six or seven warps sat idle at that barrier for the
+/// whole loop rather than doing anything. `ncu` measured the result:
+/// `attention_split` latency-bound (38% memory throughput, 14% compute, at
+/// 63.8% achieved occupancy this launch shape cannot exceed on this card),
+/// and two follow-on attempts to shorten the chain within that same
+/// one-active-warp design (`@pipeline`, a manual two-chain restructuring)
+/// both measured flat or worse (`autoresearch/beams/cache-length-split-buckets.md`).
+/// Widening the grid further (more blocks) was independently found
+/// exhausted: this launch configuration hits sm_75's 32-warp/SM ceiling at
+/// exactly four blocks per SM already.
 ///
-/// `SP` is not passed: the key extent is `start_pos + rows` and the query extent
-/// is `rows * n_head`, so the kernel recovers the position from the two. The
-/// caches keep every head of one position together, so `K` and `V` are indexed
-/// by `col` rather than sliced by row.
+/// [`warp_partial`] (a `phobos-lang` builtin; `phobos-lang/src/codegen/tile/warp_attn.rs`
+/// has the mechanism) spends those otherwise-idle warps instead of asking for
+/// more blocks: it divides one block's `[lo, hi)` key range into `WCT` further
+/// pieces, one per warp, and has each warp compute its own `(m, l, acc)` over
+/// its own piece independently -- register-resident, the head dimension
+/// spread across the warp's 32 lanes for the QK dot product (a per-lane
+/// partial plus a `gpu.shuffle` xor-butterfly, not one thread's `D`-deep
+/// serial reduction), no shared-memory staging of `K`/`V`, and no per-tile
+/// CTA barrier, only the self-synchronizing shuffles. Warps therefore run
+/// genuinely independently rather than converging on a barrier every
+/// iteration, which is what lets the SM's scheduler interleave one warp's
+/// memory stall with another's compute instead of exposing every stall on
+/// its own.
 ///
-/// Unsplit, one query row leaves a grid of `n_head` blocks, a sixth of this card,
-/// each walking the whole cache: eight per cent of a decode step for a few
-/// megabytes of reading. A split block covers a slice of the keys and writes the
-/// running maximum, sum and unnormalized accumulator it reached; merging those is
-/// the same rescaling the online softmax already does between tiles.
+/// A block still writes exactly one `(m, l, acc)` triple per query row to
+/// `P`/`ML`, unchanged from before: [`attention_combine`] folds the `WCT`
+/// warps' own partials together once, right here, with the same
+/// rowmax/exp/rowsum/dot online-softmax merge [`attention_merge`] below
+/// already runs across splits, just at `WCT` width instead of `S`. Combining
+/// here rather than widening `S` by `WCT` keeps `attention_merge`'s own
+/// reduction tile the size it already is: [`cache-length-split-buckets`]'s
+/// beam file found that tile fails to compile past a `head_dim`-dependent
+/// shared-memory wall well short of `S * WCT` for any `WCT` worth having.
 ///
-/// A program carries `QG` query rows, the ones sharing a key head: grouped-query
-/// attention gives `G` queries one key head, so single-row programs read that
-/// head once per query and the L2 does not absorb it. `group 1, same grid` in
-/// the `attndecode` example is the measurement, eight times the distinct bytes
-/// at the same block count for ten per cent more time. Carrying the group reads
-/// a key tile once and contracts it against `QG` queries, the same tiled loop
-/// with a taller first operand. It divides the grid, so the split count
-/// multiplies by `QG` to leave the block count the tile size was tuned against.
-///
-/// The keys are cut into pieces of whole tiles rather than into equal parts, so
-/// the single-key steps that finish a piece run once for the whole cache instead
-/// of once per piece: cutting evenly costs about `BC / 2` of them per piece at a
-/// length that does not divide, which is around 64 against the 128 tiled steps a
-/// cache of 2048 takes. The price is that a cache with fewer tiles than pieces
-/// idles the last blocks, and those are the caches whose attention is too cheap
-/// to matter.
-///
-/// The merge folds a head's pieces in one shot rather than walking them, which
-/// would cost a dependent global load each, about 0.3 us with nothing to overlap
-/// it. The two buffers are one memory under two shapes: the partials are written
-/// `[S * NH, D]` at row `s * NH + h` and read `[S, NH * D]` sliced at column
-/// `h * D`, so a head's pieces are a plain `[S, D]` tile. The maxima and sums are
-/// `[NH, 2 * S]` for the same reason, a head's contiguous, written as a column
-/// and reduced as a row.
-///
-/// Both decode kernels below say `@aligned(KW = D)` and stage their key and
-/// value slices with `var` rather than binding them with `let`, and the two go
-/// together. A head is the column window `[col :+ D]` at `col = h / G * D`, and
-/// without the promise that the cache width is a whole number of head widths,
-/// which it is, `KW` being `n_kv * head_dim`, that window may run past the row
-/// and every element of it is loaded under a bounds compare, one scalar
-/// `ld.global.b32` at a time. The promise alone is worse than the mask: an
-/// unmasked slice is read where it lies instead of being staged, so the
-/// contraction walks global memory in a serial dependent chain and the register
-/// count goes from 75 to 166, which is three blocks per SM down to one. `var`
-/// asks for the staging the mask used to force, and the copy then vectorizes.
-/// Worth 37% of a decode step's attention at a cache of 1024, and 44% of what
-/// each further cached position costs, which is the number that matters.
-///
-/// `K` and `V` are f16 and the query is not. A cached element widens where the
-/// staged tile is read, so the contraction is the same f32 one and only the
-/// halves cross the bus; the staged tiles are f16 as well, which is the shared
-/// memory the tile size above is measured against. Nothing else narrows: the
-/// query, the running maximum and the accumulator all stay f32, and a decode
-/// step is bound by what it reads rather than by what it holds.
+/// There is no tiled-plus-remainder split any more: nothing here batches
+/// keys into `BC`-wide chunks, so every key in a warp's own range is handled
+/// by the same one-key-at-a-time step and there is no partial tile left to
+/// mop up separately. `K`/`V` stay f16 and widen on load, same as before;
+/// the query, running maximum and accumulator stay f32.
 pub(crate) fn attention_split_src(
     n_head: usize,
     group: usize,
     head_dim: usize,
-    tile: usize,
     qgroup: usize,
     splits: usize,
+    wct: usize,
 ) -> String {
     let scale = (head_dim as f32).sqrt().recip();
+    let qw = qgroup * wct;
+    let combine = attention_combine(qgroup, "");
     format!(
         "@launch(256)
-@autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}], BC in [{tile}],
-          S in [{splits}])
+@autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}], S in [{splits}],
+          WCT in [{wct}], QW in [{qw}])
 @aligned(KW = D)
 kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
                        V: tensor<f16>[NK, KW],
@@ -389,12 +372,7 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
   let col = h / G * D
   var q = Q[h :+ QG, 0 :+ D]
 
-  var acc: tile<f32>[QG, D] = 0.0
-  var m: tile<f32>[QG, 1] = -300000000.0
-  var l: tile<f32>[QG, 1] = 0.0
-
-  let tiles = (NK + BC - 1) / BC
-  let per = (tiles + S - 1) / S * BC
+  let per = (NK + S - 1) / S
   var lo = s * per
   if lo > NK {{
     lo = NK
@@ -403,36 +381,12 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
   if hi > NK {{
     hi = NK
   }}
-  let full = lo + (hi - lo) / BC * BC
-  for kt in range(lo, full, BC) {{
-    var k = K[kt :+ BC, col :+ D]
-    var v = V[kt :+ BC, col :+ D]
-    var sc: tile<f32>[QG, BC] = dot_t(q, k)
-    sc = sc * {scale:.9}
-    var mn: tile<f32>[QG, 1] = rowmax(sc)
-    mn = tmax(m, mn)
-    sc = exp(sc - mn)
-    var corr: tile<f32>[QG, 1] = exp(m - mn)
-    l = l * corr + rowsum(sc)
-    acc = acc * corr + dot(sc, v)
-    m = mn
-  }}
-  for j in range(full, hi, 1) {{
-    var k1 = K[j :+ 1, col :+ D]
-    var v1 = V[j :+ 1, col :+ D]
-    var s1: tile<f32>[QG, 1] = dot_t(q, k1)
-    s1 = s1 * {scale:.9}
-    var mn: tile<f32>[QG, 1] = tmax(m, s1)
-    var p: tile<f32>[QG, 1] = exp(s1 - mn)
-    var corr: tile<f32>[QG, 1] = exp(m - mn)
-    l = l * corr + p
-    acc = acc * corr + dot(p, v1)
-    m = mn
-  }}
-  P[s * NH + h :+ QG, 0 :+ D] = acc
-  ML[h :+ QG, s :+ 1] = m
-  ML[h :+ QG, S + s :+ 1] = l
-}}
+
+  var wm: tile<f32>[QG, WCT] = -300000000.0
+  var wl: tile<f32>[QG, WCT] = 0.0
+  var wacc: tile<f32>[QW, D] = 0.0
+  warp_partial(q, K, V, lo, hi, col, wm, wl, wacc, {scale:.9})
+{combine}}}
 
 @launch(256)
 @autotune(NH in [{n_head}], D in [{head_dim}], S in [{splits}])
@@ -450,14 +404,42 @@ kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
     )
 }
 
+/// The `WCT`-way combine [`attention_split_src`] and [`attention_persist_src`]
+/// both need once their `WCT` warps have each written their own column of
+/// `wm`/`wl` and row-group of `wacc`: one `rowmax`/`exp`/`rowsum`/`dot`
+/// online-softmax merge per query row of the group, the same shape
+/// `attention_merge` already runs across splits, run here across warps
+/// instead. `indent` is the leading whitespace every generated line gets past
+/// its own two spaces, so the same text reads correctly whether it lands at a
+/// kernel's top level (`attention_split_src`) or nested inside a `for`/`if`
+/// (`attention_persist_src`'s phase one).
+fn attention_combine(qgroup: usize, indent: &str) -> String {
+    let mut out = String::new();
+    for i in 0..qgroup {
+        out.push_str(&format!(
+            "{indent}  var mv{i} = wm[{i} :+ 1, 0 :+ WCT]
+{indent}  var mx{i}: tile<f32>[1, 1] = rowmax(mv{i})
+{indent}  var c{i}: tile<f32>[1, WCT] = exp(mv{i} - mx{i})
+{indent}  var ll{i}: tile<f32>[1, 1] = rowsum(c{i} * wl[{i} :+ 1, 0 :+ WCT])
+{indent}  var ac{i}: tile<f32>[1, D] = dot(c{i}, wacc[{i} * WCT :+ WCT, 0 :+ D])
+{indent}  P[s * NH + h + {i} :+ 1, 0 :+ D] = ac{i}
+{indent}  ML[h + {i} :+ 1, s :+ 1] = mx{i}
+{indent}  ML[h + {i} :+ 1, S + s :+ 1] = ll{i}
+"
+        ));
+    }
+    out
+}
+
 /// [`attention_split_src`]'s two kernels, `attention_split` and
 /// `attention_merge`, folded into one `@persistent` kernel via
 /// `grid_barrier()` instead of a launch and a scratch round-trip. Phase one is
-/// the split kernel's body verbatim, over a grid-strided range of `(group,
-/// split)` units instead of one per block; phase two is the merge kernel's
-/// body, over a grid-strided range of heads. The two phases share nothing but
-/// the barrier and the scratch, so neither changed a line of the
-/// online-softmax math both already had.
+/// the split kernel's body verbatim (the same [`warp_partial`] call and
+/// [`attention_combine`] this file's split kernel uses), over a grid-strided
+/// range of `(group, split)` units instead of one per block; phase two is the
+/// merge kernel's body, over a grid-strided range of heads. The two phases
+/// share nothing but the barrier and the scratch, so neither changed a line
+/// of the online-softmax math both already had.
 ///
 /// The scratch buffer the two phases round-trip through is a parameter
 /// twice, `P` and `PM`, one pointer under the two shapes the two phases read
@@ -478,34 +460,34 @@ kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
 /// `cuOccupancyMaxActiveBlocksPerMultiprocessor` before compiling this, the
 /// same precondition `docs/megakernel.md` names for the wider megakernel.
 ///
-/// `@dynshared`: phase one's tiles (the split body's `q`, `acc`, `m`, `l`,
-/// staged `k`/`v`, ...) are all released -- their last read is the `P`/`ML`
-/// store before `grid_barrier()` -- before phase two's tiles (`mv`, `mm`,
-/// `c`, `ll`, `oacc`) are ever declared, but the two phases' tiles are
-/// different shapes, so the static `memref.global`-per-tile allocation this
-/// kernel used before `@dynshared` could not tell that apart: each shape got
-/// its own permanent global, and the compiled footprint was the *sum* of
-/// both phases' tiles rather than the max, since nothing physically aliases
-/// two distinct global symbols. The dynamic allocator's tile pool now resets
-/// its byte cursor whenever the live-tile count returns to zero ahead of a
-/// brand-new shape (`Codegen::alloc_tile_shaped`/`dynamic_live` in
-/// `phobos-lang`), which for this kernel happens right at the phase
-/// boundary: phase two's tiles land in the same bytes phase one's occupied,
-/// instead of past them. No shared value crosses the barrier through shared
-/// memory (the barrier's whole job is to publish phase one's `P`/`ML` to
-/// global first), so this aliasing has the same race-freedom argument
-/// `Codegen::release`'s doc already gives same-shape reuse: a CTA barrier
-/// separates every producer's writes from the next consumer's, and here the
-/// grid barrier plus phase two reading only global `PM`/`ML` (never a phase
-/// one shared tile) makes the reuse trivially safe rather than merely
+/// `@dynshared`: phase one's tiles (the split body's `q`, `wm`, `wl`, `wacc`,
+/// and [`warp_partial`]'s own internal ones) are all released -- their last
+/// read is the `P`/`ML` store before `grid_barrier()` -- before phase two's
+/// tiles (`mv`, `mm`, `c`, `ll`, `oacc`) are ever declared, but the two
+/// phases' tiles are different shapes, so the static `memref.global`-per-tile
+/// allocation this kernel used before `@dynshared` could not tell that apart:
+/// each shape got its own permanent global, and the compiled footprint was
+/// the *sum* of both phases' tiles rather than the max, since nothing
+/// physically aliases two distinct global symbols. The dynamic allocator's
+/// tile pool now resets its byte cursor whenever the live-tile count returns
+/// to zero ahead of a brand-new shape (`Codegen::alloc_tile_shaped`/
+/// `dynamic_live` in `phobos-lang`), which for this kernel happens right at
+/// the phase boundary: phase two's tiles land in the same bytes phase one's
+/// occupied, instead of past them. No shared value crosses the barrier
+/// through shared memory (the barrier's whole job is to publish phase one's
+/// `P`/`ML` to global first), so this aliasing has the same race-freedom
+/// argument `Codegen::release`'s doc already gives same-shape reuse: a CTA
+/// barrier separates every producer's writes from the next consumer's, and
+/// here the grid barrier plus phase two reading only global `PM`/`ML` (never
+/// a phase one shared tile) makes the reuse trivially safe rather than merely
 /// barrier-ordered.
 pub(crate) fn attention_persist_src(
     n_head: usize,
     group: usize,
     head_dim: usize,
-    tile: usize,
     qgroup: usize,
     splits: usize,
+    wct: usize,
     blocks: u32,
 ) -> String {
     let scale = (head_dim as f32).sqrt().recip();
@@ -513,12 +495,15 @@ pub(crate) fn attention_persist_src(
     let units1 = groups * splits;
     let it1 = (units1 as u32).div_ceil(blocks);
     let it2 = (n_head as u32).div_ceil(blocks);
+    let qw = qgroup * wct;
+    let combine = attention_combine(qgroup, "    ");
     format!(
         "@launch(256)
 @persistent
 @dynshared
-@autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}], BC in [{tile}],
-          S in [{splits}], U1 in [{units1}], IT1 in [{it1}], IT2 in [{it2}], BLOCKS in [{blocks}])
+@autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}],
+          S in [{splits}], WCT in [{wct}], QW in [{qw}], U1 in [{units1}], IT1 in [{it1}],
+          IT2 in [{it2}], BLOCKS in [{blocks}])
 @aligned(KW = D)
 kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
                        V: tensor<f16>[NK, KW],
@@ -536,12 +521,7 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
       let col = h / G * D
       var q = Q[h :+ QG, 0 :+ D]
 
-      var acc: tile<f32>[QG, D] = 0.0
-      var m: tile<f32>[QG, 1] = -300000000.0
-      var l: tile<f32>[QG, 1] = 0.0
-
-      let tiles = (NK + BC - 1) / BC
-      let per = (tiles + S - 1) / S * BC
+      let per = (NK + S - 1) / S
       var lo = s * per
       if lo > NK {{
         lo = NK
@@ -550,36 +530,12 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
       if hi > NK {{
         hi = NK
       }}
-      let full = lo + (hi - lo) / BC * BC
-      for kt in range(lo, full, BC) {{
-        var k = K[kt :+ BC, col :+ D]
-        var v = V[kt :+ BC, col :+ D]
-        var sc: tile<f32>[QG, BC] = dot_t(q, k)
-        sc = sc * {scale:.9}
-        var mn: tile<f32>[QG, 1] = rowmax(sc)
-        mn = tmax(m, mn)
-        sc = exp(sc - mn)
-        var corr: tile<f32>[QG, 1] = exp(m - mn)
-        l = l * corr + rowsum(sc)
-        acc = acc * corr + dot(sc, v)
-        m = mn
-      }}
-      for j in range(full, hi, 1) {{
-        var k1 = K[j :+ 1, col :+ D]
-        var v1 = V[j :+ 1, col :+ D]
-        var s1: tile<f32>[QG, 1] = dot_t(q, k1)
-        s1 = s1 * {scale:.9}
-        var mn: tile<f32>[QG, 1] = tmax(m, s1)
-        var prob: tile<f32>[QG, 1] = exp(s1 - mn)
-        var corr: tile<f32>[QG, 1] = exp(m - mn)
-        l = l * corr + prob
-        acc = acc * corr + dot(prob, v1)
-        m = mn
-      }}
-      P[s * NH + h :+ QG, 0 :+ D] = acc
-      ML[h :+ QG, s :+ 1] = m
-      ML[h :+ QG, S + s :+ 1] = l
-    }}
+
+      var wm: tile<f32>[QG, WCT] = -300000000.0
+      var wl: tile<f32>[QG, WCT] = 0.0
+      var wacc: tile<f32>[QW, D] = 0.0
+      warp_partial(q, K, V, lo, hi, col, wm, wl, wacc, {scale:.9})
+{combine}    }}
   }}
 
   grid_barrier(BAR)
@@ -610,6 +566,15 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
 /// [`ATTN_QGROUP`] is bounded by shared memory: 16 pieces at a head dimension of
 /// 256 is a 16 KB tile, and 64 would not compile.
 pub(crate) const ATTN_SPLITS: usize = 8;
+
+/// Warps one block of [`attention_split_src`]/[`attention_persist_src`]
+/// divides its own `[lo, hi)` key range across, one warp per piece. Fixed at
+/// the block's whole warp count (`@launch(256)` is eight warps) rather than
+/// swept: the point is to give the block's already-resident, otherwise-idle
+/// warps independent work, not to add more of them, so there is no headroom
+/// above this to sweep into and no reason to go below it and leave warps
+/// idle again.
+pub(crate) const ATTN_WARP_SPLITS: usize = 8;
 
 pub(crate) fn attention_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> String {
     let scale = (head_dim as f32).sqrt().recip();

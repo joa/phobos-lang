@@ -219,9 +219,9 @@ impl DeviceBackend {
                     spec.n_head,
                     spec.group(),
                     spec.head_dim,
-                    attention_tile(spec.head_dim),
                     qgroup,
                     splits,
+                    ATTN_WARP_SPLITS,
                 )
             },
             |module| {
@@ -341,16 +341,15 @@ impl DeviceBackend {
             as u32
             / CTA_THREADS;
         let mut blocks = per_sm * sms;
-        let tile = attention_tile(spec.head_dim);
         let mut settled = None;
         for _ in 0..FUSED_GRID_TRIES {
             let src = attention_persist_src(
                 spec.n_head,
                 spec.group(),
                 spec.head_dim,
-                tile,
                 qgroup,
                 splits,
+                ATTN_WARP_SPLITS,
                 blocks,
             );
             let module = self.compile_dynamic(&src, "attention_persist")?;
@@ -378,9 +377,9 @@ impl DeviceBackend {
                     spec.n_head,
                     spec.group(),
                     spec.head_dim,
-                    tile,
                     qgroup,
                     splits,
+                    ATTN_WARP_SPLITS,
                     blocks,
                 );
                 (self.compile_dynamic(&src, "attention_persist")?, blocks)

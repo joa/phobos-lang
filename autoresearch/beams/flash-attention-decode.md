@@ -1,6 +1,6 @@
 ---
 parent: fcfdf8b / 80204d5 (HEAD, autoresearch branch)
-status: implemented, opt-in -- shared-memory pooling fix removes the Qwen regression this beam's gate was built around (now flat, +0.1-0.4%); minicpm stays flat, not clearly positive; gate logic unchanged (no longer needs to be, since it reads the driver fresh and the driver's answer improved), PHOBOS_ATTN_PERSIST stays opt-in pending a third shape; combine with [[launch-bound-headroom]]
+status: implemented, opt-in -- shared-memory pooling fix removes the Qwen regression this beam's gate was built around (now flat, +0.1-0.4%); minicpm stays flat, not clearly positive; gate logic unchanged (no longer needs to be, since it reads the driver fresh and the driver's answer improved), PHOBOS_ATTN_PERSIST stays opt-in pending a third shape; combine with [[launch-bound-headroom]]. Superseded on the "minicpm stays flat" point: [[cache-length-split-buckets]]'s 2026-08-17 warp-partitioning round rewrote what both phases do internally (still the same split/merge structure and the same @persistent/grid_barrier mechanism this file built), and minicpm is no longer flat under persist -- see that file's own Result log for the numbers, and the short note at the end of this file's Result log for what stayed the same here.
 ---
 
 # Beam: flash-attention-shaped decode attention
@@ -850,3 +850,42 @@ habitually running `git diff --stat` on the target file immediately before
 and after every build/run in this round, which is worth doing as standard
 practice whenever a task brief says another agent is concurrently touching
 the same file.
+
+### 2026-08-17: the split kernel underneath both phases got warp-partitioned; the persist mechanism this file built did not change
+
+`[[cache-length-split-buckets]]`'s own follow-on recommendation (a
+warp-scope parallelism primitive, named in that file's Result log) landed
+this round as a new `phobos-lang` builtin, `warp_partial`
+(`phobos-lang/src/codegen/tile/warp_attn.rs`), and both
+`attention_split_src` and `attention_persist_src`'s phase one were rewritten
+to use it -- full mechanism, correctness gates and both models' numbers are
+in `cache-length-split-buckets.md`'s own new Result-log section; this note
+only says what changed and did not change from *this* file's point of view.
+
+**Unchanged**: the `@persistent`/`grid_barrier()` fold of split-plus-merge
+into one kernel, the `attn_persist_plan` occupancy gate and its
+`PHOBOS_ATTN_PERSIST` opt-in flag, the `@dynshared` cross-phase pooling this
+file's own previous round landed, and `attention_merge`/phase two's code
+(byte-for-byte identical). None of this round's work touched any of that --
+`attention_persist_src`'s phase one is still, as the doc comment already
+said, "the split kernel's body verbatim," it is just that the split
+kernel's body is a different (faster) piece of code now.
+
+**Changed**: what phase one (and the standalone `attention_split` kernel)
+actually compute per block. The shared-memory footprint this file's own
+pooling round measured (Qwen 23760 bytes, minicpm 11984) changes again under
+the new tiles (`wm`/`wl`/`wacc` replacing `acc`/`m`/`l`/`sc`/staged `k`/`v`)
+-- not re-measured by this note; whoever next touches `attn_persist_plan`'s
+gate should read the settled grid fresh rather than trust either file's old
+numbers, per that gate's own "reads the driver fresh" design.
+
+**Both persist paths benefit.** Run with `PHOBOS_ATTN_PERSIST=1` forced on
+(this beam's flag), `cache-length-split-buckets.md`'s `bench.py` numbers are
+for the persistent kernel specifically (minicpm passes the gate, so does
+Qwen, per this file's own earlier landing) -- minicpm's ratio against
+llama.cpp's FA-on baseline moved from 0.86-0.94x to 0.92-0.95x, and Qwen's
+from 1.05-1.07x to 1.06-1.07x, both clean improvements with no regression on
+either model, all four correctness gates passing on both. minicpm's original
+"stays flat, not clearly positive" verdict from the pooling round is now
+moot -- the kernel underneath it is different code, and it is unambiguously
+faster.
