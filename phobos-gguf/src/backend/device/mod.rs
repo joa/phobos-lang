@@ -53,6 +53,11 @@ type DeviceQuant = (
 /// rows per program: everything [`delta_conv_src`] bakes in.
 type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
 
+/// Head count, group size, head dimension, query group and split count:
+/// everything [`attention_persist_src`] bakes in, and the settled block count
+/// alongside the module it compiled to.
+type AttnPersistKey = (usize, usize, usize, usize, usize);
+
 #[derive(Default)]
 struct Recorded {
     func: cust::sys::CUfunction,
@@ -210,6 +215,17 @@ pub struct DeviceBackend {
     /// Attention kernels, keyed by query heads, group size and head dimension.
     attentions: RefCell<HashMap<(usize, usize, usize), Module>>,
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
+    /// Whether [`DeviceBackend::attention_decode`] takes the persistent
+    /// split-plus-merge path. `PHOBOS_ATTN_PERSIST`, unset by default: see
+    /// that function's doc comment for why this is opt-in rather than a
+    /// `fused_stage`-style default-on switch.
+    attn_persist: bool,
+    /// The persistent attention kernel, keyed by head count, group size, head
+    /// dimension, query group and split count, with the block count it was
+    /// settled at. `None` means the shape's occupancy could not fit the split
+    /// phase in one grid-strided pass and the persistent path is declined for
+    /// it. See `DeviceBackend::attn_persist_plan` in `attn.rs`.
+    attn_persist_modules: RefCell<HashMap<AttnPersistKey, Option<(Module, u32)>>>,
     /// Per-split partial accumulators, and their running maxima and sums.
     attn_partials: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// Page-locked staging for the one readback a pass makes.
@@ -366,6 +382,8 @@ impl DeviceBackend {
             ropes: RefCell::new(HashMap::new()),
             attentions: RefCell::new(HashMap::new()),
             split_attn: RefCell::new(HashMap::new()),
+            attn_persist: std::env::var_os("PHOBOS_ATTN_PERSIST").is_some(),
+            attn_persist_modules: RefCell::new(HashMap::new()),
             attn_partials: RefCell::new(None),
             readback: RefCell::new(None),
             blocked: RefCell::new(HashMap::new()),

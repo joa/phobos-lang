@@ -450,6 +450,133 @@ kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
     )
 }
 
+/// [`attention_split_src`]'s two kernels, `attention_split` and
+/// `attention_merge`, folded into one `@persistent` kernel via
+/// `grid_barrier()` instead of a launch and a scratch round-trip. Phase one is
+/// the split kernel's body verbatim, over a grid-strided range of `(group,
+/// split)` units instead of one per block; phase two is the merge kernel's
+/// body, over a grid-strided range of heads. The two phases share nothing but
+/// the barrier and the scratch, so neither changed a line of the
+/// online-softmax math both already had.
+///
+/// The scratch buffer the two phases round-trip through is a parameter
+/// twice, `P` and `PM`, one pointer under the two shapes the two phases read
+/// and write, exactly as [`DeviceBackend::attention_decode`] (see
+/// `phobos-gguf/src/backend/device/attn.rs`) already passes it to two
+/// separate kernels; a persistent kernel can bind the same device pointer to
+/// two parameter names in one launch just as easily as two launches could.
+///
+/// `IT1` and `IT2` are the grid-strided loop counts, compiled in rather than
+/// derived from a dynamic tensor extent: `docs/megakernel.md`'s own step 1
+/// found that the natural spelling of a strided loop over a dynamic bound
+/// gets split, and the masked remainder then wants a static shape neither
+/// loop has. Compiling the trip count in and guarding with `if unit < total`
+/// sidesteps that, the same fix the fused MLP's own unit loops use.
+///
+/// Both phases assume every block of `BLOCKS` is resident at once, since
+/// `grid_barrier` deadlocks otherwise; the caller settles `BLOCKS` from
+/// `cuOccupancyMaxActiveBlocksPerMultiprocessor` before compiling this, the
+/// same precondition `docs/megakernel.md` names for the wider megakernel.
+pub(crate) fn attention_persist_src(
+    n_head: usize,
+    group: usize,
+    head_dim: usize,
+    tile: usize,
+    qgroup: usize,
+    splits: usize,
+    blocks: u32,
+) -> String {
+    let scale = (head_dim as f32).sqrt().recip();
+    let groups = n_head / qgroup;
+    let units1 = groups * splits;
+    let it1 = (units1 as u32).div_ceil(blocks);
+    let it2 = (n_head as u32).div_ceil(blocks);
+    format!(
+        "@launch(256)
+@persistent
+@autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}], BC in [{tile}],
+          S in [{splits}], U1 in [{units1}], IT1 in [{it1}], IT2 in [{it2}], BLOCKS in [{blocks}])
+@aligned(KW = D)
+kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
+                       V: tensor<f16>[NK, KW],
+                       P: tensor<f32>[SH, D], PM: tensor<f32>[S, PW],
+                       ML: tensor<f32>[NH, MW], O: tensor<f32>[R, D],
+                       BAR: tensor<i32>[2, 1]) {{
+  let pid = program_id(0)
+
+  for i1 in range(0, IT1) {{
+    let u = pid + i1 * BLOCKS
+    if u < U1 {{
+      let g = u / S
+      let s = u % S
+      let h = g * QG
+      let col = h / G * D
+      var q = Q[h :+ QG, 0 :+ D]
+
+      var acc: tile<f32>[QG, D] = 0.0
+      var m: tile<f32>[QG, 1] = -300000000.0
+      var l: tile<f32>[QG, 1] = 0.0
+
+      let tiles = (NK + BC - 1) / BC
+      let per = (tiles + S - 1) / S * BC
+      var lo = s * per
+      if lo > NK {{
+        lo = NK
+      }}
+      var hi = lo + per
+      if hi > NK {{
+        hi = NK
+      }}
+      let full = lo + (hi - lo) / BC * BC
+      for kt in range(lo, full, BC) {{
+        var k = K[kt :+ BC, col :+ D]
+        var v = V[kt :+ BC, col :+ D]
+        var sc: tile<f32>[QG, BC] = dot_t(q, k)
+        sc = sc * {scale:.9}
+        var mn: tile<f32>[QG, 1] = rowmax(sc)
+        mn = tmax(m, mn)
+        sc = exp(sc - mn)
+        var corr: tile<f32>[QG, 1] = exp(m - mn)
+        l = l * corr + rowsum(sc)
+        acc = acc * corr + dot(sc, v)
+        m = mn
+      }}
+      for j in range(full, hi, 1) {{
+        var k1 = K[j :+ 1, col :+ D]
+        var v1 = V[j :+ 1, col :+ D]
+        var s1: tile<f32>[QG, 1] = dot_t(q, k1)
+        s1 = s1 * {scale:.9}
+        var mn: tile<f32>[QG, 1] = tmax(m, s1)
+        var prob: tile<f32>[QG, 1] = exp(s1 - mn)
+        var corr: tile<f32>[QG, 1] = exp(m - mn)
+        l = l * corr + prob
+        acc = acc * corr + dot(prob, v1)
+        m = mn
+      }}
+      P[s * NH + h :+ QG, 0 :+ D] = acc
+      ML[h :+ QG, s :+ 1] = m
+      ML[h :+ QG, S + s :+ 1] = l
+    }}
+  }}
+
+  grid_barrier(BAR)
+
+  for i2 in range(0, IT2) {{
+    let u2 = pid + i2 * BLOCKS
+    if u2 < NH {{
+      var mv = ML[u2 :+ 1, 0 :+ S]
+      var mm: tile<f32>[1, 1] = rowmax(mv)
+      var c: tile<f32>[1, S] = exp(mv - mm)
+      var ll: tile<f32>[1, 1] = rowsum(c * ML[u2 :+ 1, S :+ S])
+      var oacc: tile<f32>[1, D] = dot(c, PM[0 :+ S, u2 * D :+ D])
+      O[u2 :+ 1, 0 :+ D] = oacc / ll
+    }}
+  }}
+}}
+"
+    )
+}
+
 /// Pieces the key axis is cut into while decoding, per query head a program
 /// carries. Fixed rather than chosen from the cache length, which is what it
 /// wants to be: a count that grows with the cache reshapes the pass every few
