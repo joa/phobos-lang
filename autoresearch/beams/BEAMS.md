@@ -188,15 +188,32 @@ single-pass online-softmax kernel.
 
 Turning flash attention off drops llama.cpp's own tg1024/tg2048 by 10-11% (its
 FA advantage grows with cache length, same shape as the slope beam 1 chased)
-and phobos lands at **essential parity (0.94-1.00x) against llama.cpp's own
-non-FA decode path at every cache length**. This is the cleanest result of
-the session: the entire session's ~8-14% deficit is explained by llama.cpp
-having a flash-attention decode kernel and phobos not having one, not by any
-of the three mechanisms beams 1-3 tested. It also explains beam 1's null
-result in hindsight: widening the split-and-merge kernel's own grid cannot
-close a gap that comes from a different kernel design entirely (single fused
-pass vs. two kernels plus a scratch round-trip), so there was never a grid
-width that would have fixed it.
+and phobos closes most but not all of the gap against llama.cpp's own non-FA
+decode path: dead heats at tg512/tg1024, but still -4.0% at tg32, -2.9%
+tg128, -5.5% tg2048 (corrected from this note's first pass, which
+overstated this as full parity -- see [[flash-attention-decode]]'s own
+correction section for the exact numbers). It explains beam 1's null result
+in hindsight regardless: widening the split-and-merge kernel's own grid
+cannot close a gap that comes from a different kernel design (a fused
+online-softmax pass vs. two kernels plus a scratch round-trip), so there was
+never a grid width that would have fixed it. And note `-fa 0` also changes
+llama.cpp's V-cache layout, not only its kernel choice, so this is "phobos
+vs. llama.cpp's non-FA path," not a single-variable kernel swap -- still the
+right experiment, just labelled honestly.
+
+**Bound on this beam, from the already-committed nsys trace**: attention
+(`attention_split` + `attention_merge` combined) is ~15-18% of a minicpm
+decode step (four steady-state windows measured, [[flash-attention-decode]]
+has the numbers). Even a zero-cost attention kernel only reaches ~281 t/s at
+tg2048 against llama.cpp's 275 -- enough to clear the goal, but with no
+margin, and a real fix will not remove 100% of that share. This beam has to
+combine with [[launch-bound-headroom]]'s remaining unfused launches to have
+a realistic shot at the actual goal (beating FA-on llama.cpp), not just
+closing to parity with FA-off. phobos also already has a working
+FlashAttention-2 kernel in `examples/flash_attention_fp32.ph` (prefill-shaped,
+not wired to decode) -- this beam is an adaptation of its online-softmax
+recurrence into `attention_split` via `grid_barrier()`/`@persistent` (already
+built for `docs/megakernel.md`), not a from-scratch design.
 
 ## New primary beam
 

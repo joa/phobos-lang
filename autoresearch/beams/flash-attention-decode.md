@@ -5,6 +5,111 @@ status: new, not started -- scoping
 
 # Beam: flash-attention-shaped decode attention
 
+## Correction to the first pass of this beam note
+
+The claim below that `-fa 0` "explains the whole session's deficit" was
+overstated -- checked against the same table it was drawn from. `-fa 0`
+closes the *slope* (tg512/tg1024 are dead heats) and about half of the flat
+tg32 deficit, but a real gap remains at every length: -4.0% at tg32, -2.9%
+tg128, 0% tg512, -0.5% tg1024, **-5.5% at tg2048**. Also: `-fa 0` in
+llama.cpp is not a pure kernel swap in isolation -- the non-FA path also uses
+a different V-cache layout than the FA path -- so this experiment is
+correctly described as "phobos vs. llama.cpp's non-FA decode path," not
+"same everything, one kernel toggled." The conclusion (attention kernel
+design is most of the gap) still holds; the size claim needed fixing.
+
+**The bigger correction: the goal is not parity with non-FA llama.cpp, it is
+beating FA-on llama.cpp** (270-275 t/s flat, the actual baseline this whole
+session measures against). At tg2048 that needs **+18%** over phobos's
+current 233.54 t/s. Bounding what's achievable:
+
+`autoresearch/beams/lmhead_profile_cuda_gpu_trace.csv` (already-committed
+nsys trace from the [[wide-vocab-lm-head]] round) has every GPU event with
+durations for a steady-state minicpm decode step. Summing
+`attention_split` + `attention_merge` durations inside four different
+steady-state step windows (bounded by consecutive lm_head launches, same
+method the bubble measurement used):
+
+| window | attention ns | wall ns | % of step |
+| --- | --- | --- | --- |
+| 1 | 764,882 | 4,724,486 | 16.2% |
+| 2 | 674,616 | 4,602,734 | 14.7% |
+| 3 | 812,301 | 4,745,606 | 17.1% |
+| 4 | 857,005 | 4,808,225 | 17.8% |
+
+**Attention (both kernels combined) is ~15-18% of a decode step.** That is
+the hard ceiling on this beam even in the impossible case of a zero-cost
+attention kernel: 233.54 t/s * 1/(1-0.17) ~ 281 t/s, just clears 275, with
+no margin and assuming perfection. A real implementation will not remove
+100% of that 15-18% -- of the two kernels, `attention_split` is 6-8x
+`attention_merge`'s share in every window above (e.g. window 1: 661,271 ns
+split vs. 103,611 ns merge), meaning most of attention's cost is the split
+kernel's own compute/bandwidth against the KV cache, not the merge or the
+scratch round-trip between them. **This beam alone is unlikely to clear the
+goal; it has to combine with [[launch-bound-headroom]]'s remaining
+unfused launches (`store_2d`, `quantize`, `q8_qdot_add`, still ~untried) to
+have a realistic shot**, per AGENT.md's combine-before-retiring discipline.
+Whoever runs this beam should say so plainly rather than promising a win it
+cannot deliver alone.
+
+## phobos already has a working FlashAttention-2 kernel -- this is an
+## adaptation, not a from-scratch design
+
+`out.csv` (read at the start of this session): `flash_fp32` and `flash_fp16`
+rows are `phobos-bench`'s existing benchmark of a real, working, single-pass
+online-softmax attention kernel. Source: `examples/flash_attention_fp32.ph`
+(also `_fp16.ph`), a complete FlashAttention-2 implementation already in the
+tree:
+
+    @cluster(BR in [1024, 4096])
+    @pipeline
+    @tensorcore
+    @launch(128)
+    @autotune(D in [64], BR in [4, 128], BC in [4, 128])
+    @aligned(Nq = BR, Nk = BC)
+    kernel flash_attention(Q, K, V, O, scale) {
+      var acc, m, l = 0, -inf, 0
+      for kt in range(0, Nk, BC) {
+        var s = dot_t(q, k) * scale
+        var mnew = tmax(m, rowmax(s))
+        s = exp(s - mnew)
+        var corr = exp(m - mnew)
+        l = l * corr + rowsum(s)
+        acc = acc * corr + dot(s, v)
+        m = mnew
+      }
+      O[row :+ BR, :] = acc / l
+    }
+
+This is prefill-shaped (`BR` query rows tiled, no causal mask visible here,
+not wired into the GGUF decode path), but the online-softmax recurrence
+inside the `for kt` loop is exactly the merge logic `attention_merge`
+currently does as a *second, separate kernel* reading scratch (`P`/`ML`)
+another kernel wrote. **Decode's `M=1` shape also means FlashAttention's
+actual namesake trick -- avoiding materializing the `[Nq, Nk]` score matrix
+-- buys nothing here**, since a single query row's score is `[1, Nk]` and
+was never tiled for that reason in the current design either. What plausibly
+pays is folding the online-softmax combine (this kernel's `for kt` loop
+body) into `attention_split` itself, so the split-across-grid decode kernel
+keeps its parallelism (each block still owns a slice of the key axis, for
+the same reason `attention_decode`'s split exists at all -- one program per
+head would leave a grid a sixth of the card wide) but combines its own
+partial `(m, l, acc)` in-kernel via a device-scope reduction instead of
+writing them to global scratch for a second kernel to read back.
+
+`docs/megakernel.md` already built the primitives this needs: `grid_barrier()`
+(measured 0.88-1.09us, "half a launch") and `@persistent` (grid sized from
+`cuOccupancyMaxActiveBlocksPerMultiprocessor`, not a constant -- the doc's
+own "hard correctness precondition: co-residency" section applies directly
+here). A `@persistent` `attention_decode` that computes its split's partial
+in phase one, `grid_barrier()`s, then does the reduction across resident
+blocks in phase two removes both a kernel launch (244 -> 220-ish, folding
+into [[launch-bound-headroom]]'s count) and the `P`/`ML` global round-trip,
+without giving up the split-for-grid-width design or the
+[[decode-attention-splits-and-query-grouping]] GQA lessons, which stay
+valid: the split-per-key-range and `QG` grouping logic do not change, only
+where the combine happens.
+
 ## Evidence this beam is real (not inferred, measured)
 
 `python scripts/bench.py -m models/minicpm5-1b-Q8_0.gguf -p 128 -n 32 128 512
