@@ -542,5 +542,47 @@ further (provably exhausted, same evidence). This is the "invent something
 else" the user's directive asked for, now that grid-width and register-ILP
 tuning have both been tried and both closed.
 
+## Current-state snapshot, 2026-08-17, post-pooling-fix, `PHOBOS_ATTN_PERSIST=1`
+
+Fresh, comprehensive, same-session comparison at the now-focused `tg
+1024/2048/4096`, both models, 3 rounds x 3 reps, 3 of 3 uncontended
+(`autoresearch/beams/current_state_snapshot.{csv,json,log}`), `ac86bfd`:
+
+| model | test | phobos | llama.cpp CUDA | ratio |
+| --- | --- | --- | --- | --- |
+| Qwen3.5-0.8B | tg1024 | 271.40 | 258.99 | 1.05x |
+| Qwen3.5-0.8B | tg2048 | 267.37 | 256.90 | 1.04x |
+| Qwen3.5-0.8B | tg4096 | 258.67 | 254.77 | 1.02x |
+| minicpm5-1b | tg1024 | 243.27 | 275.47 | 0.88x |
+| minicpm5-1b | tg2048 | 231.12 | 272.01 | 0.85x |
+| minicpm5-1b | tg4096 | 209.68 | 266.63 | **0.79x** |
+
+This is the deepest cache this session has benchmarked end-to-end (4096).
+minicpm's ratio keeps degrading past tg2048 (0.86x in the original baseline
+-> 0.85x here at tg2048, consistent; 0.79x at tg4096 is new data and the
+worst ratio measured this session) -- the slope this whole beam note opened
+with has not flattened, it continues past 2048. Qwen remains solidly ahead
+throughout, though its own ratio compresses toward 1.0x as cache grows too
+(1.05x -> 1.02x), worth watching but not yet a regression. **This is now
+the reference point for judging any future decode-attention change**;
+compare against it rather than the pre-pooling-fix baseline further up this
+file.
+
+## Beam count note
+
+Restoring a third active beam was assessed and found not viable right now
+with available assets: no GGUF model in `models/` presents a genuinely
+different attention shape from the two already tested (`Qwen3.5-0.8B-Q4_K`
+is the same architecture as the already-tested Q8_0, just a different
+quant format that doesn't touch the persist gate's occupancy math; `GPT2`
+goes through the separate ONNX backend where `PHOBOS_ATTN_PERSIST` doesn't
+apply at all), so the pooling beam's own recommended next validation step
+(a third shape or a second card, before considering a default-on flip) has
+no cheap path forward and was not forced. `store_2d`/`row_scales` fusions
+remain assessed low-probability given the latency-bound finding and were
+not spun up just to pad the count. One focused beam (warp-scope primitive)
+plus this snapshot is the honest state of available, well-evidenced work
+right now.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
