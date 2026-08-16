@@ -309,5 +309,39 @@ found, which could turn `[[flash-attention-decode]]`'s Qwen regression into a
 second win and make default-on defensible. Both outrank starting a fifth beam
 from scratch, per AGENT.md's combine-before-retiring discipline.
 
+## Ranking after the output-fusion round -- option (a) is now closed too
+
+Tried option (a): fused `quantize`+`q8_qdot_add` (attention's output
+projection) using the correct wide tile (`ProjAdd`'s `OUT_TILE` over
+`out_dim`, not the narrow tile that sank the earlier QKV attempt). Correctly
+implemented, architecturally sound, and **a clean wash** -- flat to within
+stderr on every tg row, same session, `PHOBOS_ATTN_PERSIST=1` held constant
+both sides. Reverted, nothing committed. Full numbers in
+`[[launch-bound-headroom]]`'s Result log.
+
+Two fusion attempts around attention (QKV, then output) now agree on the
+same underlying picture from different failure modes: QKV lost because a
+narrow tile starved parallelism; output-side didn't move at all because
+attention's cost is dominated by `attention_split` itself (~15-18% of a
+step, 6-8x the merge kernel's share per `[[flash-attention-decode]]`'s own
+measurement), not by the couple of launches around it. **Option (a) is
+closed** -- `store_2d` remains technically untried but the pattern across
+both attempts makes it a low-probability follow-up, not a promising one; do
+not spend a third round on it without new evidence that store_2d's cost
+differs qualitatively from quantize/q8_qdot_add's.
+
+That leaves **option (b), the shared-memory pooling gap, as the only
+concretely-scoped remaining lever** this session has identified. It has not
+been attempted (both subagents that reached this beam ran out of round
+budget on option (a) first, per the brief's own ordering). Whether it is
+worth a further round depends on its ceiling: it would not move minicpm's
+absolute numbers (it only removes `PHOBOS_ATTN_PERSIST`'s Qwen regression,
+letting the flag default on), so its value is making an already-landed win
+safe-by-default rather than closing more of the gap. The gap itself, per
+`[[flash-attention-decode]]`'s ceiling math, may not be closeable by any
+further attention/launch work alone at this session's measured 15-18%
+ceiling -- worth an explicit checkpoint with the user before spending
+another large round chasing it.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
