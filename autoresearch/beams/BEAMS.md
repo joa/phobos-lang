@@ -343,5 +343,52 @@ further attention/launch work alone at this session's measured 15-18%
 ceiling -- worth an explicit checkpoint with the user before spending
 another large round chasing it.
 
+## Directives from the user, 2026-08-16, apply to every round from here
+
+1. **Benchmark scope narrows to `tg >= 1024`** (1024, 2048, 4096). Shorter
+   lengths (32/128/512) were useful for isolating the flat-vs-slope shape of
+   the gap earlier in the session, but that diagnosis is done; don't spend
+   further `bench.py` rounds sweeping them. `attndecode.rs`'s `LENGTHS` grew
+   an 8th entry, 4099 (prime near 4096), to cover the new floor.
+2. **The ~9x-of-floor headroom in decode attention needs real profiling,
+   not the coarse `attndecode` floor check.** `attndecode.rs` now supports
+   `PHOBOS_ATTNDECODE_SHAPE`/`PHOBOS_ATTNDECODE_LENGTH` to isolate a single
+   kernel launch for `ncu` (Nsight Compute). `ncu` needs an elevated shell on
+   this box (`ncu-needs-elevation` memory: `ERR_NVGPUCTRPERM` from a normal
+   one) -- the user runs it, not an agent. See the request left for them
+   below this section.
+3. **Existing beams stayed inside phobos-lang's current primitive set.** No
+   beam this session proposed a new codegen primitive, tile shape, or
+   scheduling construct `phobos-lang` doesn't already have. The user wants
+   the theoretical maximum pursued, which may mean it needs one. Do not treat
+   "phobos-lang doesn't have X" as a beam-ending constraint without first
+   asking whether X is a reasonable thing to add (see `docs/megakernel.md`'s
+   own history: `grid_barrier()`, `@persistent` and `atomic_add` were all
+   added mid-project for exactly this reason).
+4. **If adapting FlashAttention's structure to decode is not enough to close
+   the gap, invent something else.** The mandate is not "match llama.cpp's
+   mechanism," it is "beat llama.cpp's number." A different decode-attention
+   design (different KV cache layout, a different reduction structure, a
+   different division of work between grid and block) is in scope if the
+   adapted-FlashAttention direction tops out short of the goal.
+
+### Open action: waiting on the user's `ncu` run
+
+Gave the user this to run themselves, elevated PowerShell (`ncu` is on PATH
+there, not in Git Bash, per the `ncu-needs-elevation` memory):
+
+    $env:PHOBOS_ATTNDECODE_SHAPE = "minicpm"
+    $env:PHOBOS_ATTNDECODE_LENGTH = "4099"
+    & "C:\Program Files\NVIDIA Corporation\Nsight Compute 2026.2.0\ncu.bat" --set full --launch-skip 5 --launch-count 10 -o attndecode_ncu_minicpm_4099 -f "C:\Users\joaeb\code\phobos\target\release\examples\attndecode.exe"
+
+Stock (non-persistent) split-plus-merge path, since that's what the 9x
+figure was measured against; `$env:PHOBOS_ATTN_PERSIST = "1"` before the
+`ncu` call profiles the persistent kernel instead, for comparison. Key
+numbers to read out of the report once it lands: DRAM/Memory Throughput
+percentage of peak (confirms or corrects the coarse floor check's claim of
+non-bandwidth-bound headroom), Compute (SM) Throughput, and Achieved
+Occupancy (distinguishes "not enough parallelism" from "enough parallelism,
+stalled on something else" -- the two have different fixes).
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
