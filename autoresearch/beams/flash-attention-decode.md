@@ -519,3 +519,59 @@ multiple could be larger, not smaller. Either way the qualitative
 conclusion (large, GQA-redundancy-independent headroom) holds; the exact
 multiple needs a proper profiling pass to pin down before it drives an
 implementation decision.
+
+### The caveat resolved: real `ncu` hardware counters say latency-bound, not bandwidth-bound
+
+The user ran `ncu` (elevated PowerShell, `ncu` needs elevation for live
+collection on this box) on the stock split-plus-merge kernels in isolation,
+minicpm shape, cache 4099, via the new `PHOBOS_ATTNDECODE_SHAPE`/
+`PHOBOS_ATTNDECODE_LENGTH` isolation added to `attndecode.rs`
+(`-k regex:attention_split -c 5` / `-k regex:attention_merge -c 5`, `--set
+full`; reports at `autoresearch/beams/ncu_split_4099.ncu-rep` and
+`ncu_merge_4099.ncu-rep`, importable and readable from a normal, non-elevated
+shell with `ncu --import <file> --page details --csv --metrics <names>` --
+only live counter collection needs elevation, not reading a saved report).
+
+**`attention_split`** (the dominant kernel, ~86us/call at this cache length,
+one call per layer, averaged over 5 profiled launches):
+
+| metric | value |
+| --- | --- |
+| Memory Throughput | 38% of peak |
+| Compute (SM) Throughput | 14% of peak |
+| Achieved Occupancy | 63.8% |
+| Grid | (8, 16, 1) = 128 blocks, 256 threads/block |
+| Registers/thread | 64 (block limit: 4 blocks/SM on registers, 4 on warps, 5 on shared mem) |
+
+**`attention_merge`** (~7us/call, ~8% of the pair's total time, confirmed
+not the bottleneck): Memory Throughput 5-13%, Compute ~1.5%, Achieved
+Occupancy 25%, grid only 16 blocks (=`n_head`), badly underfilling the card.
+
+**Neither Memory nor Compute Throughput is anywhere near saturated (38% and
+14%), while Achieved Occupancy sits in the middle (64%, not near 0% or
+100%). This is the textbook signature of a latency-bound kernel**, not a
+bandwidth-bound one -- the earlier "9x the bandwidth floor" framing was
+built on the right instinct (real headroom) but the wrong mechanism
+(bandwidth). The likely cause: `attention_split_src`'s `for kt in range(lo,
+full, BC)` loop carries `m`/`l`/`acc` as a serial dependency chain across
+iterations (`rowmax` -> `tmax` -> `exp` -> `rowsum`/`dot`, each iteration
+waiting on the last), and `BC` (16 for minicpm's head_dim=128, from
+`attention_tile`) being small means many sequential iterations at cache
+4099, each paying that chain's latency. 64% occupancy is not enough
+independent warps to fully hide it.
+
+**This also gives the isolated-vs-real-pass puzzle
+([[cache-length-split-buckets]]'s unexplained result -- a real isolated
+speedup from widening the grid that vanished in the real benchmark) a
+concrete candidate explanation**: a real decode step already has ~290 other
+kernels'/layers' worth of independent work for the SM scheduler to
+interleave with `attention_split`'s stalls, so *more blocks of the same
+kernel* is redundant with parallelism the scheduler already had available
+from neighboring launches. `attndecode`'s isolated sweep has nothing else
+running, so added intra-kernel parallelism is the only thing available to
+hide the latency there, which is why it helped in isolation and not in the
+real pass. If this holds, the fix is shortening the per-block critical path
+itself (wider `BC`, fewer serial steps, or a less sequential reduction
+structure), not adding more grid parallelism -- a materially different
+design direction than anything tried in this session so far. Not yet
+tested; handed to the redesign round in progress as of this note.
