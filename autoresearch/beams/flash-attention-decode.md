@@ -1,6 +1,6 @@
 ---
 parent: fcfdf8b / 80204d5 (HEAD, autoresearch branch)
-status: new, not started -- scoping
+status: implemented, opt-in -- genuine partial win on minicpm (+1.0-1.4% tg, all rows positive), shape-gated to avoid a measured Qwen regression, open, combine with [[launch-bound-headroom]]
 ---
 
 # Beam: flash-attention-shaped decode attention
@@ -206,4 +206,243 @@ Same as every attention change this session: `backend_check`, `fuse_check`,
 
 ## Result log
 
-(not started)
+### Implemented: the fallback from "What to build", not the full grid-barrier redesign -- and it turned out to need one more piece than the brief anticipated
+
+Built the smaller fallback the brief allowed as legitimate ("reduce what the
+merge kernel and the scratch round-trip cost without removing the second
+launch entirely"), except it *did* remove the second launch: `attention_split`
+and `attention_merge` (`phobos-gguf/src/backend/device/kernels/attn.rs`) are
+folded into one `@persistent` kernel, `attention_persist_src`. Phase one is
+the split kernel's body verbatim, over a grid-strided range of `(group,
+split)` units instead of one program per unit; `grid_barrier()`; phase two is
+the merge kernel's body, over a grid-strided range of heads. Neither phase's
+math changed by a line -- this is `flash_attention_fp32.ph`'s online-softmax
+recurrence, already present twice (once per phase, since the split kernel
+already carries it across key tiles and the merge kernel across splits), just
+moved from two kernel launches into one kernel and a barrier. `P`/`ML`
+scratch stay exactly as they were (`attn_scratch`, `mem.rs`), passed to the
+combined kernel under both shapes the two phases need (`P` and `PM`, one
+pointer, two parameter declarations) rather than round-tripped through two
+launches.
+
+What the brief did not anticipate, found only by measuring: **the persistent
+kernel is not simply "the same kernels, one less launch."** Its combined
+shared-memory footprint does not collapse to the wider of the two phases the
+way `docs/megakernel.md`'s redundant-stage tiles do (see that doc's step 3a,
+"a redundant stage is only free if its result never leaves the block") --
+measured at Qwen's shape, the combined kernel takes 41376 bytes of shared
+against the launched split kernel's own 23760 (merge alone is 17616), nearly
+the *sum* of the two rather than the max. That halves occupancy from 2 blocks
+per SM to 1, and since the split phase's own unit count (`groups * splits`)
+does not shrink, a halved resident grid means the grid-strided phase-one loop
+needs a *second* pass over the whole key axis where the launched kernel needed
+one. This is a genuine phobos-lang codegen finding, not a design flaw in the
+phase split: the tile pool's liveness tracking, which correctly reuses a
+redundant stage's storage across a barrier when [`docs/megakernel.md`]'s fused
+MLP does it, is not doing the same across this kernel's two phases. Fixing
+that pooling gap is the highest-value follow-up this round found and did not
+have time to chase (see "What is not chased" below) -- if it collapses the way
+the MLP's does, Qwen's shape stops declining and the whole beam's win widens.
+
+### Why this predicts (and produces) a per-model split, and the gate that routes around it
+
+The mechanism above means the persistent kernel is **slower per call than the
+launched pair at both shapes measured**, and the `tg` win, where there is one,
+comes entirely from removed launches outrunning that per-call cost --
+`docs/megakernel.md`'s own launch-arithmetic-vs-kernel-cost lesson from step
+3b ("cost the kernels, not the boundaries") landing on a third mechanism.
+`attndecode` (`cargo run --release -p phobos-gguf --features cuda --example
+attndecode`), launched vs. persistent, `attn/step` in microseconds, primes as
+the harness already sweeps
+(`autoresearch/beams/attn_persist_attndecode_{baseline,persist}.log`):
+
+| cache | minicpm launched | minicpm persist | delta | Qwen launched | Qwen persist | delta |
+| --- | --- | --- | --- | --- | --- | --- |
+| 37 | 305.4u | 295.6u | -3.2% | 93.3u | 141.8u | **+52.0%** |
+| 67 | 235.2u | 252.6u | +7.4% | 72.9u | 103.2u | **+41.6%** |
+| 131 | 251.1u | 256.9u | +2.3% | 73.9u | 102.9u | **+39.2%** |
+| 257 | 317.6u | 324.9u | +2.3% | 95.6u | 152.6u | **+59.6%** |
+| 521 | 703.4u | 717.7u | +2.0% | 211.6u | 348.6u | **+64.8%** |
+| 1031 | 873.2u | 882.7u | +1.1% | 282.9u | 418.0u | **+47.8%** |
+| 2053 | 1114.7u | 1195.3u | +7.2% | 372.9u | 567.8u | **+52.3%** |
+
+minicpm's kernel itself is 1-7% *slower* per call, and Qwen's is 40-65%
+slower. minicpm's `tg` win happens anyway because it pays this cost on all 24
+of its layers and removes 24 launches + 24 scratch round-trips a step; Qwen
+pays a much larger per-call penalty on only 6 of its 25 layers and removes
+only 6. **This beam's payoff scales with full-attention layer count**, which
+is exactly what predicts where it helps next (a model with more full-attention
+layers than Qwen's 6-of-25) and where it would need the shared-memory fix
+above before it helps at all.
+
+The pass report (`PHOBOS_PASS_REPORT=9`, full text in
+`autoresearch/beams/attn_persist_pass_report.log`) says why directly: at
+Qwen's shape (`n_head=8, n_kv=2, head_dim=256`, `qgroup=2`, `splits=16`), the
+split phase's own unit count is `groups * splits = 4 * 16 = 64`, and the
+persistent kernel's occupancy-settled grid is only 48 blocks (1 block/SM x 48
+SMs, from the 41376-byte footprint) -- 48 < 64, so phase one needs two
+grid-strided passes. At minicpm's shape (`n_head=16, n_kv=2, head_dim=128`,
+same `qgroup`/`splits`), the unit count is `8 * 16 = 128` and the settled grid
+is 144 blocks (3/SM, 20896 bytes) -- 144 >= 128, one pass, no penalty.
+
+**The gate**: `attn_persist_plan` (`phobos-gguf/src/backend/device/attn.rs`)
+declines a shape whose settled grid cannot fit the split phase's own unit
+count in one pass, the same architecture-blind way `fuse::ChainKey::plan`
+declines a chain it cannot fuse -- no model name anywhere, just the driver's
+occupancy answer against the shape's own arithmetic, cached per shape
+(`AttnPersistKey = (n_head, group, head_dim, qgroup, splits)`) so a declined
+shape is not recompiled or reprobed every call. A decline falls straight
+through to the unmodified launched `attention_split`/`attention_merge` pair in
+the same function, so a declined shape's behavior is bit-for-bit the
+pre-existing path.
+
+**This predicate's evidence is two shapes on one card, validated only at its
+endpoints (144 vs 128, a 12.5% margin; 48 vs 64, a 25% shortfall), not in the
+middle.** A shape where the settled grid sits just above its own unit count
+(say 5-10% of margin rather than minicpm's ~12%) would pass this gate while
+still paying most of Qwen's per-call penalty, since the penalty comes from the
+shared-memory-driven occupancy hit, not from the pass count alone once phase
+one is already single-pass. What would close that gap: a third shape nearer
+the boundary, or a second card whose occupancy answer differs (the gate reads
+the driver fresh each time, so it is architecture-portable by construction,
+but architecture-*validated* only here). Until then this stays a hypothesis
+about the predicate's shape, not a proven one -- named honestly rather than
+generalized past what was measured.
+
+### Correctness gates, all with `PHOBOS_ATTN_PERSIST=1` forced on (exercises both the persistent path on minicpm's shape and the decline-and-fallback path on Qwen's in the same run, since `backend_check`'s own attention sweep covers both)
+
+- `backend_check`: every op passes, worst relative error 2.902e-4 (unchanged
+  from the documented baseline), including every `rows=1` decode-shaped
+  attention case across GQA shapes from 16/8x128 to 8/4x256, at cache lengths
+  through split-tile boundaries (63, 64, 300, 511, 3, 512, 600).
+- `model_check`, both models: "backends agree". minicpm spread errors
+  1.258e-2/1.335e-2/1.294e-2, in the same band as the doc's own fused-MLP-only
+  baseline (1.259e-2/1.273e-2/1.232e-2); Qwen 1.019e-2/9.839e-3/8.416e-2, tied
+  at two of three steps.
+- `batch_check`, both models: "batched and sequential agree" over 600 decode
+  steps in batches of 512/100/64. minicpm spread 1.057e-2 to 1.35e-2 (doc's
+  own band: 1.03e-2 to 1.19e-2); Qwen 7.61e-3 to 1.551e-2. This is the
+  strongest gate here, since the batched path never touches decode attention
+  at all and is an independent computation of the same logits across the same
+  600 steps the persistent kernel ran on minicpm.
+- `fuse_check`, minicpm: prompt pass agrees exactly, 32 decode steps at most
+  1.244e-2 of the logit spread apart (1.010e-2 average), one tied (undecided)
+  flip -- same order of magnitude as the doc's own recorded number for
+  minicpm's existing MLP fusion alone (1.07e-2 average, worst 1.5e-2), so the
+  persistent attention kernel is not adding drift beyond what fusion already
+  costs.
+- `cargo test -p phobos-gguf -p phobos-onnx -p phobos-inference -p
+  phobos-kernels`: all pass. `phobos-base`'s `source_size` ratchet test:
+  passes (`kernels/attn.rs` 578 lines, `device/attn.rs` 425 lines, `mod.rs`
+  404 lines, all under the 900 cap with no grandfathering needed).
+  `cargo clippy -p phobos-gguf --features cuda -- -D warnings`: clean.
+
+### The benchmark, same session, interleaved against llama.cpp, 3 rounds x 3 reps, uncontended every round
+
+minicpm5-1b-Q8_0
+(`autoresearch/beams/attn_persist_{baseline,minicpm}_minicpm.{csv,json}`):
+
+| test | baseline t/s | persist t/s | delta | ratio baseline | ratio persist |
+| --- | --- | --- | --- | --- | --- |
+| tg32 | 256.97 +/- 1.37 | 259.60 +/- 1.55 | +1.02% | 0.94x | 0.94x |
+| tg128 | 256.52 +/- 0.36 | 260.22 +/- 0.26 | +1.44% | 0.92x | 0.93x |
+| tg512 | 252.81 +/- 0.17 | 256.03 +/- 0.14 | +1.27% | 0.92x | 0.92x |
+| tg1024 | 247.12 +/- 0.10 | 250.20 +/- 0.09 | +1.25% | 0.90x | 0.90x |
+| tg2048 | 235.57 +/- 0.36 | 238.51 +/- 0.09 | +1.25% | 0.86x | 0.87x |
+
+All five rows positive, a repeatable ~1.0-1.4% gain that is roughly *flat in
+absolute t/s* across cache lengths (2.6-3.7 t/s at every row) rather than
+proportional to it -- consistent with the mechanism (a fixed per-layer launch
+and round-trip removed, not a bandwidth effect that would scale with cache
+length). Reconfirmed after adding the shape gate
+(`attn_persist_minicpm.csv`, gate active, minicpm still takes the persistent
+path since it passes the gate): tg32 257.77, tg128 259.01, tg512 255.89,
+tg1024 250.37, tg2048 238.48 -- same result within session noise.
+
+Qwen3.5-0.8B-Q8_0, **before** the shape gate existed (attn_persist forced on
+for every shape,
+`autoresearch/beams/attn_persist_{baseline_qwen,qwen_ungated}.{csv,json}`):
+
+| test | baseline t/s | persist (ungated) t/s | delta | ratio baseline | ratio ungated |
+| --- | --- | --- | --- | --- | --- |
+| tg32 | 274.75 +/- 2.11 | 274.70 +/- 1.64 | -0.02% | 1.17x | 1.15x |
+| tg128 | 281.67 +/- 0.38 | 276.20 +/- 0.37 | **-1.94%** | 1.10x | 1.08x |
+| tg512 | 281.22 +/- 0.62 | 275.68 +/- 0.53 | **-1.97%** | 1.08x | 1.06x |
+| tg1024 | 278.81 +/- 0.52 | 272.93 +/- 0.61 | **-2.11%** | 1.07x | 1.05x |
+| tg2048 | 274.43 +/- 0.69 | 266.11 +/- 0.50 | **-3.03%** | 1.06x | 1.03x |
+
+A clean regression growing with cache length -- exactly the shape the
+mechanism above predicts (more decode steps, more times the double-pass
+penalty pays out). This is what motivated the gate.
+
+Qwen3.5-0.8B-Q8_0, **after** the shape gate
+(`autoresearch/beams/attn_persist_qwen_gated.{csv,json}`), same env var set
+but `attn_persist_plan` now declines this shape and falls back:
+
+| test | baseline t/s | persist (gated) t/s | delta |
+| --- | --- | --- | --- |
+| tg32 | 274.75 | 277.68 | +1.07% |
+| tg128 | 281.67 | 282.77 | +0.39% |
+| tg512 | 281.22 | 282.28 | +0.38% |
+| tg1024 | 278.81 | 280.09 | +0.46% |
+| tg2048 | 274.43 | 275.62 | +0.43% |
+
+All within normal session noise of the baseline (the small positive drift
+matches the direction of noise seen elsewhere in this session, e.g. the
+round-level diagnostics in the raw JSON), confirming the gate routes Qwen back
+to the unmodified launched path: the pass report confirms 220 launches, the
+doc's own documented default count, with `attention_split`/`attention_merge`
+both present and `attention_persist` absent.
+
+### Against the actual goal
+
+**This does not clear llama.cpp's FA-on baseline**, exactly as flagged before
+starting: minicpm's ratio moves from 0.86-0.94x to 0.87-0.94x, roughly +0.01 at
+every cache length. The beam file's own ceiling math said a *zero-cost*
+attention kernel would only reach ~281 t/s against llama.cpp's ~275-278 (this
+session's numbers), no margin, and this is a partial removal of one of
+attention's two kernels' overhead, not a zero-cost kernel. tg2048 moved
+235.57 -> 238.51 t/s; llama.cpp CUDA sits at ~274-278 t/s in the same session.
+The gap remaining is dominated by attention's own compute/bandwidth cost
+(`attention_split`'s share was already documented as 6-8x `attention_merge`'s
+in every profiled window), which this round did not touch, plus the
+[[launch-bound-headroom]] launches this beam does not reach (`store_2d`,
+`quantize`, `q8_qdot_add` per layer, still unfused per that beam's own open
+items).
+
+### What is not chased this round
+
+- **The shared-memory pooling gap** (combined kernel ~41KB vs the launched
+  split kernel's ~24KB, not collapsing to the max of the two phases the way
+  `docs/megakernel.md`'s redundant-stage fix does for the fused MLP) is a
+  phobos-lang codegen investigation of its own, out of this round's budget.
+  If fixed, Qwen's shape likely stops declining and the whole beam's win
+  widens closer to the ~15-18% ceiling; this is the single highest-value
+  follow-up either for this beam or for `docs/megakernel.md` generally, since
+  the same pooling gap would affect any future two-phase persistent kernel.
+- **Reducing `attention_split`'s own per-call cost** (documented as most of
+  attention's share, 6-8x the merge kernel's) is untouched; this round only
+  removed the launch/round-trip between two otherwise-unchanged kernel bodies.
+
+### Beam status: kept open, not killed, one genuine partial win landed
+
+Per AGENT.md's kill criteria, none apply: no correctness failure, no
+across-the-board regression (the regression found was diagnosed and gated
+around, not repeated), and the targeted cost (a launch + scratch round-trip
+per full-attention layer) is real and partially removed, not shown immaterial.
+Shipped as **opt-in** (`PHOBOS_ATTN_PERSIST=1`, unset means off) rather than
+flipping the default: the gate's predicate is validated only at two shapes'
+endpoints on one card (see above), and a shipped default should not
+extrapolate past that on a change touching grid barriers. Whoever revisits
+this: the next increment is either the pooling fix (widens which shapes win)
+or a third shape/card to firm up the gate's predicate before proposing
+default-on.
+
+Combine-with-[[launch-bound-headroom]] verdict: **yes, still needed, and this
+round adds evidence for it rather than replacing it.** This beam's own ceiling
+math already said 15-18% attention share bounds a zero-cost kernel at ~281
+t/s with no margin; a real (non-zero-cost, launch-count-only) implementation
+reaching +1.2% on minicpm is consistent with that bound and nowhere near
+closing it alone. `launch-bound-headroom`'s remaining unfused launches
+(`store_2d`, `quantize`, `q8_qdot_add`) are untouched by this round and stay
+the next lever.

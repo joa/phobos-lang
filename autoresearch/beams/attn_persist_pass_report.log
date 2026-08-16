@@ -1,0 +1,12 @@
+=== Qwen3.5-0.8B-Q8_0, PHOBOS_ATTN_PERSIST=1, before the shape gate (attn_persist forced on for every shape) ===
+PHOBOS_PASS_REPORT=9 cargo run --release -p phobos-gguf --features cuda --example bench -- -m models/Qwen3.5-0.8B-Q8_0.gguf -p 8 -n 8 -r 1
+total launches 214 (down from 220 default), attention_persist: n=6 blocks=288 (48/call) regs=82 shared=41376 blk/SM=1
+(compare launched: attention_split shared=23760 blk/SM=2, attention_merge shared=17616 blk/SM=3)
+units1 = groups*splits = (8/2)*16 = 64 > 48 settled blocks -> two grid-strided passes over the key axis
+
+=== minicpm5-1b-Q8_0, PHOBOS_ATTN_PERSIST=1 ===
+attention_persist: n=24 blocks=3456 (144/call) regs=75 shared=20896 blk/SM=3, total launches 268 (down from 292 default)
+units1 = groups*splits = (16/2)*16 = 128 <= 144 settled blocks -> one grid-strided pass, no penalty
+
+=== Qwen3.5-0.8B-Q8_0, PHOBOS_ATTN_PERSIST=1, after the shape gate (attn_persist_plan declines this shape) ===
+total launches 220, identical to default: attention_split (n=6 blk/SM=2) + attention_merge (n=6 blk/SM=3) both present, attention_persist absent

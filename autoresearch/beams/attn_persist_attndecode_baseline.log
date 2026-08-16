@@ -1,0 +1,55 @@
+   Compiling phobos-gguf v0.1.0 (C:\Users\joaeb\code\phobos\phobos-gguf)
+    Finished `release` profile [optimized] target(s) in 9.77s
+     Running `target\release\examples\attndecode.exe`
+device copy bandwidth 415 GB/s
+
+minicpm5-1b : 24 blocks, 16 heads over 2 kv heads (group 8), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      305.4u      0.87M     2.2u    139.3x       NaN
+    67      235.2u      1.57M     4.0u     59.2x   -2339.5
+   131      251.1u      3.07M     7.8u     32.3x     248.7
+   257      317.6u      6.02M    15.2u     20.9x     527.4
+   521      703.4u     12.21M    30.9u     22.8x    1461.5
+  1031      873.2u     24.16M    61.1u     14.3x     332.9
+  2053     1114.7u     48.12M   121.7u      9.2x     236.4
+
+Qwen3.5-0.8B : 6 blocks, 8 heads over 2 kv heads (group 4), head dim 256
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37       93.3u      0.43M     1.1u     85.1x       NaN
+    67       72.9u      0.79M     2.0u     36.7x    -681.4
+   131       73.9u      1.54M     3.9u     19.0x      15.8
+   257       95.6u      3.01M     7.6u     12.6x     172.6
+   521      211.6u      6.11M    15.4u     13.7x     439.3
+  1031      282.9u     12.08M    30.6u      9.3x     139.9
+  2053      372.9u     24.06M    60.8u      6.1x      88.1
+
+group 1, same grid : 24 blocks, 16 heads over 16 kv heads (group 1), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      317.2u      6.94M    17.5u     18.1x       NaN
+    67      268.9u     12.56M    31.8u      8.5x   -1609.5
+   131      280.3u     24.56M    62.1u      4.5x     178.1
+   257      374.9u     48.19M   121.8u      3.1x     750.6
+   521      714.6u     97.69M   247.0u      2.9x    1286.8
+  1031      900.3u    193.31M   488.8u      1.8x     364.2
+  2053     1556.1u    384.94M   973.3u      1.6x     641.6
+
+group 1, same cache : 24 blocks, 2 heads over 2 kv heads (group 1), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      267.7u      0.87M     2.2u    122.1x       NaN
+    67      204.6u      1.57M     4.0u     51.5x   -2104.2
+   131      216.6u      3.07M     7.8u     27.9x     187.6
+   257      298.6u      6.02M    15.2u     19.6x     650.5
+   521      573.9u     12.21M    30.9u     18.6x    1043.0
+  1031      648.5u     24.16M    61.1u     10.6x     146.2
+  2053     1105.6u     48.12M   121.7u      9.1x     447.2
+
+group 2 : 24 blocks, 16 heads over 8 kv heads (group 2), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      314.5u      3.47M     8.8u     35.9x       NaN
+    67      264.6u      6.28M    15.9u     16.7x   -1664.0
+   131      290.5u     12.28M    31.1u      9.4x     403.9
+   257      331.9u     24.09M    60.9u      5.4x     328.9
+   521      742.4u     48.84M   123.5u      6.0x    1554.8
+  1031      926.5u     96.66M   244.4u      3.8x     361.0
+  2053     1183.5u    192.47M   486.7u      2.4x     251.5
+

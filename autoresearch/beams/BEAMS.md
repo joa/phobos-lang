@@ -217,16 +217,33 @@ built for `docs/megakernel.md`), not a from-scratch design.
 
 ## New primary beam
 
-4. [[flash-attention-decode]] -- structural, high-risk, high-ceiling. Shape
-   phobos's decode attention as a single-pass online-softmax kernel closer to
-   FlashAttention's design, replacing (or sitting alongside, model-gated)
-   `attention_decode`'s current split-plus-merge two-kernel path. This is now
-   the best-evidenced lead in the session by a wide margin -- see the table
-   above -- and is a substantially larger piece of work than beams 1-3, so it
-   gets its own beam file rather than a quick increment. Not yet implemented;
-   see the beam file for what to preserve from `attn.rs`'s existing GQA/split
-   lessons ([[decode-attention-splits-and-query-grouping]] memory) versus
-   what a single-pass design needs to change.
+4. [[flash-attention-decode]] -- structural, high-risk, high-ceiling.
+   **Implemented, opt-in.** Not the full FlashAttention single-pass redesign:
+   `attention_split` and `attention_merge` folded into one `@persistent`
+   kernel via `grid_barrier()`, same online-softmax math, one launch and one
+   scratch round-trip removed per full-attention layer per decode step.
+   Genuine win on minicpm (+1.0 to +1.4% `tg`, all rows positive, same-session
+   A/B against llama.cpp interleaved), but the persistent kernel is measured
+   *slower per call* than the launched pair at both shapes tried (minicpm
+   +1-7%, Qwen +40-65%, from `attndecode`) -- the win is the removed-launch
+   arithmetic outrunning that per-call cost, which it only does on a model
+   with enough full-attention layers to pay for it (minicpm: 24 of 24; Qwen:
+   6 of 25, where it is a clean regression, -2 to -3% at longer cache).
+   Root cause: the combined kernel's shared-memory footprint does not pool
+   down to the wider of its two phases the way `docs/megakernel.md`'s
+   redundant-stage tiles do (measured ~41KB against the launched split
+   kernel's own ~24KB at Qwen's shape), which halves occupancy and forces a
+   second grid-strided pass. Shipped behind `PHOBOS_ATTN_PERSIST` (unset =
+   off) with a shape gate (`attn_persist_plan`, architecture-blind, keyed off
+   the driver's own occupancy answer) that declines any shape whose settled
+   grid cannot cover the split phase in one pass and falls through to the
+   unmodified launched path -- Qwen reproduces its pre-existing numbers
+   exactly once gated. All correctness gates (`backend_check`, `model_check`,
+   `batch_check` x2 models, `fuse_check`) pass. Full mechanism, both models'
+   `tg` tables, the `attndecode` per-call numbers and the pass-report evidence
+   in the beam file's Result log. Does not clear llama.cpp's FA-on baseline
+   (0.86-0.94x, +0.01 in ratio) -- combine with [[launch-bound-headroom]]
+   stays the live next step, unchanged from before this round.
 
 ## Ranking after this round
 
@@ -268,6 +285,29 @@ numbers almost exactly. `[[wide-vocab-lm-head]]` and
 AGENT.md (history, not deleted); both of their null results are now
 explained rather than merely observed -- neither targeted mechanism was ever
 going to close a gap that comes from a different kernel design entirely.
+
+## Ranking after the flash-attention-decode round
+
+`[[flash-attention-decode]]` is no longer "not yet implemented": it shipped a
+genuine, gated, opt-in win (see above), the first positive result among the
+four attention/launch beams this session has tried. It stays open rather than
+closing, for two reasons. First, it does not clear the actual goal
+(llama.cpp's FA-on baseline) alone, which the beam file predicted going in and
+the result confirms -- `[[launch-bound-headroom]]`'s remaining unfused
+launches (`store_2d`, `quantize`, `q8_qdot_add`) are still the next lever to
+combine it with. Second, the round surfaced a specific, actionable phobos-lang
+codegen gap (shared-memory pooling not collapsing across a persistent
+kernel's two phases the way it does across `docs/megakernel.md`'s
+redundant-stage barrier) that would widen this beam's own reach if fixed --
+named in the beam file as the highest-value follow-up, ahead of chasing a
+third shape to firm up the shape gate's predicate.
+
+Priority for the next round: either (a) `[[launch-bound-headroom]]`'s
+remaining unfused per-layer launches, now the most direct path to actually
+closing the gap on minicpm, or (b) the shared-memory pooling gap this round
+found, which could turn `[[flash-attention-decode]]`'s Qwen regression into a
+second win and make default-on defensible. Both outrank starting a fifth beam
+from scratch, per AGENT.md's combine-before-retiring discipline.
 
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
