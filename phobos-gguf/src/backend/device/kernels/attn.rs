@@ -477,6 +477,28 @@ kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
 /// `grid_barrier` deadlocks otherwise; the caller settles `BLOCKS` from
 /// `cuOccupancyMaxActiveBlocksPerMultiprocessor` before compiling this, the
 /// same precondition `docs/megakernel.md` names for the wider megakernel.
+///
+/// `@dynshared`: phase one's tiles (the split body's `q`, `acc`, `m`, `l`,
+/// staged `k`/`v`, ...) are all released -- their last read is the `P`/`ML`
+/// store before `grid_barrier()` -- before phase two's tiles (`mv`, `mm`,
+/// `c`, `ll`, `oacc`) are ever declared, but the two phases' tiles are
+/// different shapes, so the static `memref.global`-per-tile allocation this
+/// kernel used before `@dynshared` could not tell that apart: each shape got
+/// its own permanent global, and the compiled footprint was the *sum* of
+/// both phases' tiles rather than the max, since nothing physically aliases
+/// two distinct global symbols. The dynamic allocator's tile pool now resets
+/// its byte cursor whenever the live-tile count returns to zero ahead of a
+/// brand-new shape (`Codegen::alloc_tile_shaped`/`dynamic_live` in
+/// `phobos-lang`), which for this kernel happens right at the phase
+/// boundary: phase two's tiles land in the same bytes phase one's occupied,
+/// instead of past them. No shared value crosses the barrier through shared
+/// memory (the barrier's whole job is to publish phase one's `P`/`ML` to
+/// global first), so this aliasing has the same race-freedom argument
+/// `Codegen::release`'s doc already gives same-shape reuse: a CTA barrier
+/// separates every producer's writes from the next consumer's, and here the
+/// grid barrier plus phase two reading only global `PM`/`ML` (never a phase
+/// one shared tile) makes the reuse trivially safe rather than merely
+/// barrier-ordered.
 pub(crate) fn attention_persist_src(
     n_head: usize,
     group: usize,
@@ -494,6 +516,7 @@ pub(crate) fn attention_persist_src(
     format!(
         "@launch(256)
 @persistent
+@dynshared
 @autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}], BC in [{tile}],
           S in [{splits}], U1 in [{units1}], IT1 in [{it1}], IT2 in [{it2}], BLOCKS in [{blocks}])
 @aligned(KW = D)

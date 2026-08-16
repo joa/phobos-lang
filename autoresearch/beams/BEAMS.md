@@ -466,5 +466,55 @@ beams 1 and 2 (which touched different files). Wait for beam 2 to land,
 then dispatch the warp-scope primitive as the new beam 1 on a clean base,
 restoring the 3-beam minimum.
 
+**Beam 2 (the shared-memory pooling gap) landed, 2026-08-17.** Full
+mechanism, gate numbers and both models' benchmarks in
+`flash-attention-decode.md`'s new Result log section. Short version: found
+the root cause by reading `phobos-lang`'s tile allocator (a released tile
+only pools back for reuse by a *later, identically-shaped* request; the
+persistent kernel's two phases never share a shape, so the static
+`memref.global`-per-tile mode had no way to alias them at all), fixed it by
+adding `@dynshared` to `attention_persist_src` (already a real, shipped
+attribute -- `delta_scan` has used it since before this beam) plus a small
+allocator change (`dynamic_live` tracking + a byte-cursor reset when nothing
+is live ahead of a new shape, in `phobos-lang/src/codegen/tile/alloc.rs`
+and `mod.rs`), and a companion fix in `attn_persist_plan`
+(`phobos-gguf/src/backend/device/attn.rs`) whose occupancy query was
+hardcoding zero dynamic shared bytes -- correct before `@dynshared`, silently
+wrong after, since it would have undercounted the kernel and could have
+settled a grid too wide for co-residency. Qwen's footprint dropped
+41376 -> 23760 bytes (1 -> 2 blocks/SM, 48 -> 96 settled grid), which clears
+the gate's own 64-unit threshold; minicpm's dropped further, 20896 -> 11984
+(3 -> 4 blocks/SM, the thread-count ceiling). All four correctness gates
+pass on both models (`backend_check`, `model_check`, `batch_check`,
+`fuse_check` -- Qwen's `fuse_check` was missing from the original round's
+battery and is now included), matching documented baselines to the digit.
+Benchmarked same-session, off vs on, `tg1024/2048/4096`: **Qwen's
+previously-measured -2 to -3% regression is gone**, now +0.1 to +0.4%,
+inside session noise -- Qwen passes the gate cleanly for the first time.
+minicpm reads flat (-0.2% to +0.4%), not clearly still the beam's original
++1.0-1.4%, honestly recorded as unresolved-but-not-a-regression rather than
+rounded either direction (full reasoning in the Result log). Added a
+codegen test (`dynamic_shared_resets_its_cursor_between_dead_phases`,
+`phobos-lang/src/codegen/tests/tile.rs`) pinning the reset behavior, since
+no correctness gate would catch a future refactor silently re-inflating the
+footprint and re-regressing Qwen. `attn_persist_plan`'s gate logic itself
+needed no change (it already reads the driver fresh); fixing the footprint
+fed it a better answer. Recommendation left for the user: default-on is now
+defensible (both known shapes flat-to-positive) but the beam's own bar for
+that (a third shape or a second card) is unchanged, so `PHOBOS_ATTN_PERSIST`
+stays opt-in. Committed on `autoresearch`. **`phobos-lang/src/codegen/mod.rs`
+and `tile/alloc.rs` are now free** for the queued warp-scope primitive beam.
+
+Also worth flagging for whoever works this shared tree next: partway
+through this round `phobos-gguf/src/backend/device/kernels/attn.rs` was
+found reverted to its pre-round committed state by another process, which
+silently destroyed this beam's first attempt at the `@dynshared` edit along
+with (evidently) a concurrent rewrite of `attention_split_src` that was
+in-progress at the time. No error, no diff to notice by -- caught only by
+habitually running `git diff --stat` on the shared file before and after
+every build in this round. Worth doing as standard practice whenever two
+agents are dispatched into the same working tree rather than separate
+worktrees.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.

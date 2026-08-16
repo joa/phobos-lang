@@ -1,0 +1,29 @@
+model models/Qwen3.5-0.8B-Q8_0.gguf (qwen35 0.8B Q8_0, 248320 vocab), backend Phobos GPU, load 1822 ms
+warmup... done
+  pp8 rep 1/1: 0.370 s
+=== pass report, replay 9: 214 launches, 48 SMs ===
+kernel                n  blocks    thr  regs shared blk/SM   waves
+q8_qdot_add          24    3072    256    41     32      4    2.67
+fused                24    4608    256    46   8272      4    4.00
+copy                 19    2600    256    14    512      4    2.85
+q8_qdot              19   34880    256    41     32      4   38.25
+fused                18    3456    256    61   9812      4    4.00
+delta_rule           18    2304    256    64   9888      4    2.67
+rms_norm_gated       18     288    128    31   2656      8    0.33
+copy_2d              12      96    256    18      0      4    0.17
+rms_norm             12      60    256    20   3168      4    0.10
+store_2d             12      12    256    14   1024      4    0.02
+quantize              7     104    256    20   1584      4    0.31
+rms_norm_q            6       6    256    20  12832      4    0.02
+rope                  6      48    256    18    512      4    0.17
+rope                  6      12    256    18    512      4    0.04
+attention_persist     6     576    256    64  23760      2    2.00
+gate_into             6      96    256    21   2048      4    0.33
+rms_norm              1       1    256    20  12576      4    0.02
+total 214 launches, 52219 blocks, 244.0 blocks per launch
+  tg8 rep 1/1: 0.039 s
+
+| model | backend | test | t/s |
+| ----- | ------- | ---- | --- |
+| qwen35 0.8B Q8_0 | Phobos GPU | pp8 | 21.60 +/- 0.00 |
+| qwen35 0.8B Q8_0 | Phobos GPU | tg8 | 204.81 +/- 0.00 |
