@@ -1,0 +1,51 @@
+card NVIDIA GeForce RTX 2080 SUPER, driver 610.88, max SM clock 2145 MHz
+idle: 465 MHz, 21% util, 21 W, 29 C, 23 compute apps
+building phobos bench...
+
+probing engines:
+  phobos [examples]: backend CUDA
+  llama.cpp [llama.cpp]: unusable, skipped (error: invalid parameter for argument: -ctk)
+  llama.cpp [llama.cpp13]: unusable, skipped (error: invalid parameter for argument: -ctk)
+
+only phobos is usable, so this run measures phobos alone rather than comparing
+anything. Pass --llama-bench to point at a build, and --cuda-lib at the CUDA
+runtime it needs.
+warming the card (540 MHz now)...
+  clock 540 -> 2040 MHz (peak 2040) over 10 s, plateau
+
+round 1/3
+  phobos           minicpm5-1b-Q8_0       pp128 3525.68 t/s  tg1024 247.78 t/s  tg128 256.51 t/s  tg2048 235.87 t/s  tg32 254.17 t/s  tg512 253.51 t/s   [2023 MHz]
+
+round 2/3
+  phobos           minicpm5-1b-Q8_0       pp128 3601.73 t/s  tg1024 248.42 t/s  tg128 257.20 t/s  tg2048 237.17 t/s  tg32 253.55 t/s  tg512 254.14 t/s   [1980 MHz]
+
+round 3/3
+  phobos           minicpm5-1b-Q8_0       pp128 3540.08 t/s  tg1024 248.73 t/s  tg128 257.72 t/s  tg2048 237.68 t/s  tg32 257.49 t/s  tg512 254.60 t/s   [1980 MHz]
+
+==============================================================================
+NVIDIA GeForce RTX 2080 SUPER, driver 610.88, phobos 80204d5
+3 rounds x 3 repetitions, pp128, tg1024, tg128, tg2048, tg32, tg512
+SM clock under GPU work: median 1980 MHz, 1980 to 2023
+rounds with the card to ourselves between them: 3 of 3
+phobos: CUDA, C:\Users\joaeb\code\phobos\target\release\examples\bench.exe
+minicpm5-1b-Q8_0: llama 1.1B Q8_0
+phobos env: nothing set, so every default is in force
+
+| model            | engine        | test   | t/s     | stderr    | rounds |
+| ---------------- | ------------- | ------ | ------- | --------- | ------ |
+| minicpm5-1b-Q8_0 | phobos (CUDA) | pp128  | 3555.83 | +/- 23.32 | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA) | tg1024 | 248.31  | +/- 0.28  | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA) | tg128  | 257.15  | +/- 0.35  | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA) | tg2048 | 236.90  | +/- 0.54  | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA) | tg32   | 255.07  | +/- 1.22  | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA) | tg512  | 254.08  | +/- 0.32  | 3      |
+
+per round, against each row's own median (a diagnostic, not a filter):
+| round | GPU rows | SM MHz | util between | note |
+| ----- | -------- | ------ | ------------ | ---- |
+| 1     | -0.29%   | 2023   | 0%           |      |
+| 2     | +0.25%   | 1980   | 0%           |      |
+| 3     | +0.34%   | 1980   | 0%           |      |
+
+samples written to autoresearch/beams/f32kv_noFA_bench.csv
+run written to autoresearch/beams/f32kv_noFA_bench.json
