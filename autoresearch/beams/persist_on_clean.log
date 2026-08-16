@@ -1,0 +1,68 @@
+card NVIDIA GeForce RTX 2080 SUPER, driver 610.88, max SM clock 2145 MHz
+idle: 375 MHz, 2% util, 39 W, 33 C, 25 compute apps
+building phobos bench...
+
+probing engines:
+  phobos [examples]: backend CUDA
+  llama.cpp [llama.cpp]: backend CUDA, runtime from C:\Users\joaeb\AppData\Local\Programs\Ollama\lib\ollama\cuda_v12
+  llama.cpp [llama.cpp13]: backend CUDA
+    same backend as a build already kept, skipped
+warming the card (1650 MHz now)...
+  clock 1650 -> 2040 MHz (peak 2040) over 10 s, plateau
+
+round 1/3
+  llama.cpp CUDA   minicpm5-1b-Q8_0       pp128 8622.57 t/s  tg1024 274.73 t/s  tg128 279.35 t/s  tg2048 272.11 t/s  tg32 277.17 t/s  tg512 277.56 t/s   [2040 MHz]
+  phobos           minicpm5-1b-Q8_0       pp128 3525.68 t/s  tg1024 249.59 t/s  tg128 260.52 t/s  tg2048 238.07 t/s  tg32 257.01 t/s  tg512 254.40 t/s   [2018 MHz]
+
+round 2/3
+  phobos           minicpm5-1b-Q8_0       pp128 3502.05 t/s  tg1024 250.02 t/s  tg128 259.29 t/s  tg2048 237.28 t/s  tg32 261.61 t/s  tg512 254.40 t/s   [1980 MHz]
+  llama.cpp CUDA   minicpm5-1b-Q8_0       pp128 8533.36 t/s  tg1024 273.75 t/s  tg128 278.42 t/s  tg2048 270.18 t/s  tg32 277.62 t/s  tg512 275.89 t/s   [2040 MHz]
+
+round 3/3
+  llama.cpp CUDA   minicpm5-1b-Q8_0       pp128 7869.89 t/s  tg1024 276.54 t/s  tg128 276.96 t/s  tg2048 274.17 t/s  tg32 268.67 t/s  tg512 277.14 t/s   [2013 MHz]
+  phobos           minicpm5-1b-Q8_0       pp128 3502.05 t/s  tg1024 249.31 t/s  tg128 259.11 t/s  tg2048 237.62 t/s  tg32 254.79 t/s  tg512 255.11 t/s   [2018 MHz]
+
+==============================================================================
+NVIDIA GeForce RTX 2080 SUPER, driver 610.88, phobos a719351
+3 rounds x 3 repetitions, pp128, tg1024, tg128, tg2048, tg32, tg512
+SM clock under GPU work: median 2018 MHz, 1980 to 2040
+rounds with the card to ourselves between them: 3 of 3
+phobos: CUDA, C:\Users\joaeb\code\phobos\target\release\examples\bench.exe
+llama.cpp CUDA: CUDA, C:\Users\joaeb\code\llama.cpp\llama-bench.exe (runtime cuda_v12)
+minicpm5-1b-Q8_0: llama 1.1B Q8_0
+phobos env: {'PHOBOS_ATTN_PERSIST': '1'}
+
+| model            | engine                | test   | t/s     | stderr     | rounds |
+| ---------------- | --------------------- | ------ | ------- | ---------- | ------ |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | pp128  | 3509.93 | +/- 7.87   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | pp128  | 8341.94 | +/- 237.43 | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg1024 | 249.64  | +/- 0.21   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg1024 | 275.01  | +/- 0.82   | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg128  | 259.64  | +/- 0.44   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg128  | 278.25  | +/- 0.70   | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg2048 | 237.66  | +/- 0.23   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg2048 | 272.15  | +/- 1.15   | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg32   | 257.80  | +/- 2.01   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg32   | 274.49  | +/- 2.91   | 3      |
+| minicpm5-1b-Q8_0 | phobos (CUDA)         | tg512  | 254.63  | +/- 0.24   | 3      |
+| minicpm5-1b-Q8_0 | llama.cpp CUDA (CUDA) | tg512  | 276.87  | +/- 0.50   | 3      |
+
+per round, against each row's own median (a diagnostic, not a filter):
+| round | GPU rows | SM MHz | util between | note |
+| ----- | -------- | ------ | ------------ | ---- |
+| 1     | +0.24%   | 2029   | 0%           |      |
+| 2     | +0.04%   | 2010   | 1%           |      |
+| 3     | -0.89%   | 2015   | 0%           |      |
+
+phobos against llama.cpp CUDA:
+| model            | test   | phobos  | other   | ratio | not comparable |
+| ---------------- | ------ | ------- | ------- | ----- | -------------- |
+| minicpm5-1b-Q8_0 | pp128  | 3509.93 | 8341.94 | 0.42x |                |
+| minicpm5-1b-Q8_0 | tg1024 | 249.64  | 275.01  | 0.91x |                |
+| minicpm5-1b-Q8_0 | tg128  | 259.64  | 278.25  | 0.93x |                |
+| minicpm5-1b-Q8_0 | tg2048 | 237.66  | 272.15  | 0.87x |                |
+| minicpm5-1b-Q8_0 | tg32   | 257.80  | 274.49  | 0.94x |                |
+| minicpm5-1b-Q8_0 | tg512  | 254.63  | 276.87  | 0.92x |                |
+
+samples written to autoresearch/beams/persist_on_clean.csv
+run written to autoresearch/beams/persist_on_clean.json
