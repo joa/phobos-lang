@@ -215,3 +215,215 @@ own grid does not move `tg`, the step's cost is very likely concentrated in
 launch/dispatch overhead or in the other kernels a step runs, not in
 attention's occupancy. That beam's residual-launch-count question is now the
 more promising next shot at minicpm's slope.
+
+### 2026-08-16, later round: the isolated-vs-real contradiction, resolved
+
+The user asked this round to resolve, before designing anything, why this
+beam's own `attndecode` sweep found a real ~15% isolated gain from widening
+`ATTN_SPLITS` (8->12, i.e. `S` 16->24) at cache 1031/2053, while the real
+`bench.py` run above showed nothing at the same cache lengths. Rebuilt the
+exact global (unbucketed) `ATTN_SPLITS=12` change this file already swept in
+isolation, and instead of trusting `attndecode` or `bench.py` alone, measured
+the same kernel inside a real, full-model, CUDA-graph-replayed decode step
+with `nsys profile --trace cuda --cuda-graph-trace=node` (same method
+`wide-vocab-lm-head.md` used), comparing `attention_split`'s own GPU-measured
+duration baseline-vs-wide at the *same absolute cache depth* `attndecode`
+tested.
+
+**Method.** `cargo run --release -p phobos-gguf --features cuda --example
+bench -- -m models/minicpm5-1b-Q8_0.gguf -p 0 -n 1024 -r 1 --no-warmup` run
+under `nsys` for both `ATTN_SPLITS=8` (S=16, shipped baseline) and
+`ATTN_SPLITS=12` (S=24, this beam's own "wide-from-start" build) trees, back
+to back, same session, same card, uncontended
+(`autoresearch/beams/attn_puzzle_{baseline,wide}_tg1024*`). `-n 1024` alone
+(no `-p`, `--no-warmup`) decodes 1024 steps from a fresh 1-token prime, so
+cache grows 1 -> 1024 across the run; the last 20 of 1025 captured steps
+(cache ~1004-1024) are the steady-state window this beam's own isolated sweep
+predicted a gain at (its own cache-1031 row). Per-step kernel-busy time
+summed from `attention_split`/`attention_merge`'s own `Duration (ns)`
+column, 24 layers per step; wall time from consecutive `rms_norm` (the
+output norm, once/step) launch timestamps.
+
+**Result 1: the kernel-level gain is real and reproduces inside the actual
+CUDA-graph replay, at almost exactly the magnitude `attndecode` predicted.**
+
+| | baseline (S=16) | wide (S=24) | delta |
+| --- | --- | --- | --- |
+| `attention_split`/step (24 calls) | 805,433 ns | 661,060 ns | **-17.9%** |
+| `attention_merge`/step (24 calls) | 88,916 ns | 101,889 ns | +14.6% |
+| combined (split+merge)/step | 894,349 ns | 762,949 ns | **-14.7%** |
+| step wall time (avg, 19 steady steps) | 4,613,377 ns | 4,471,119 ns | -3.08% |
+| combined share of step wall | 19.4% | 17.1% | |
+
+`attndecode`'s own isolated prediction at cache 1031 was -14.99% combined
+(875.3us -> 745.3us, per this file's earlier table) to -15.06% (re-measured
+this round, 875.3 baseline vs 743.5 rebuilt-wide, same session as this
+table). The in-pass measurement (-14.7% combined) lands inside a percentage
+point of that. **This rules out both of the brief's leading candidate
+explanations**: L2 cache pressure differing between an isolated repeated-call
+benchmark and a real pass sharing L2 with ~290 other kernels, and CUDA graph
+replay overlapping/serializing differently than a bare launch loop. Neither
+would produce a real-pass kernel-duration delta this close to the isolated
+prediction. `attndecode` is a trustworthy proxy for a kernel's own GPU
+execution time and for the sign and rough magnitude of a code change's effect
+on it, confirmed by measuring inside an actual graph-replayed pass rather than
+assumed.
+
+(Caveat on the wall-time row: it comes from two separate `nsys`-profiled runs,
+not a single back-to-back session, so cross-run drift of a percent or two is
+possible on that specific number the way `[[flash-attention-decode]]`'s own
+"win size re-verified" section found; take "kernel-level delta confirmed
+in-pass" as the solid claim and "-3.08% wall" as directionally right but not
+pinned tighter than that by these two runs alone.)
+
+**Result 2: the same two trees, timed cleanly (no `nsys`, no prefill,
+back-to-back same session) at the actual benchmark's own tg1024/tg2048,
+reproduce this beam's original null finding.**
+
+| test | baseline (S=16) | wide (S=24) | delta |
+| --- | --- | --- | --- |
+| tg1024 | 239.43 +/- 0.95 | 240.57 +/- 0.64 | +0.48% (noise) |
+| tg2048 | 231.74 +/- 1.94 | 229.12 +/- 0.48 | -1.13% (noise) |
+
+(`autoresearch/beams/attn_puzzle_{baseline,wide}_bench.log`.) Both deltas sit
+inside stderr. This is the same "identical to three decimal places" result
+this file's kill decision already recorded, now reproduced in a fresh,
+isolated A/B rather than inferred from the original bucketed/wide-from-start
+runs.
+
+**Result 3: reconciling 1 and 2 -- `tg` is a whole-trajectory average, and the
+gain is real but concentrated where the trajectory barely visits.** `tg1024`
+averages throughput over decode steps at *every* cache depth from 1 to 1024,
+weighted by each step's own duration in the sum, not just the deep end
+`attndecode` and the nsys window above measured. Attention is the one
+per-step cost that scales with cache length (`BEAMS.md`'s own architectural
+note): its share of a decode step is close to zero at cache ~1 and ~19% at
+cache ~1024 (measured above), so the wide split's real ~15% kernel-level
+saving is worth a genuine, measured ~3% of step wall time at the *deep* end of
+the trajectory, but worth close to nothing at the shallow end, where most of
+attention's own cost is fixed per-call overhead rather than data volume (this
+file's own doc-comment evidence: "a cache with fewer tiles than pieces idles
+the last blocks, and those are the caches whose attention is too cheap to
+matter") and where the wider `attention_merge`'s own +14.6% cost has nothing
+large to offset it against. Averaged over the whole 1..1024 (or 1..2048)
+trajectory, this nets out to a fraction of a percent -- inside `bench.py`'s
+own normal run-to-run stderr band, which is exactly what "ratio identical to
+three decimal places" and this round's fresh "+0.48%/-1.13%, both noise"
+look like empirically. **The tool is not broken; the metric is an average
+that dilutes a deep-cache-only win.** A future decode-attention change with
+the same shape (bigger at longer cache, small-to-negative at short cache)
+needs `tg4096` or a direct in-pass nsys measurement at the cache length it
+targets to be judged fairly -- averaging it into `tg1024` will understate it,
+and `tg32/128/512` would nearly erase it.
+
+**Real hardware counters, landed mid-round via the user's own elevated-shell
+`ncu` run** (`ncu --set full -k regex:attention_split -c 5` /
+`regex:attention_merge`, stock split+merge, minicpm shape, cache 4099, 5
+launches averaged; reports at `autoresearch/beams/ncu_split_4099.ncu-rep` and
+`ncu_merge_4099.ncu-rep`, readable from a normal shell with `ncu --import
+<file> --page details`): `attention_split` (~86us/call, the dominant cost)
+measures 38% of peak Memory Throughput, 14% of peak Compute (SM) Throughput,
+63.8% Achieved Occupancy, grid (8,16,1) = 128 blocks, 256 threads/block, 64
+registers/thread, Block Limit Registers = 4, Block Limit Warps = 4.
+`attention_merge` (~7us/call) measures 5-13% Memory, ~1.5% Compute, 25%
+Occupancy, grid = 16 blocks only.
+
+Neither throughput number saturated alongside a mid-range occupancy is the
+signature of a latency-bound kernel: enough warps resident to do real work,
+mostly stalled rather than issuing at a high rate. The likely serializer is
+`attention_split_src`'s per-tile online-softmax recurrence -- `rowmax` needs
+the previous `m`, `exp` needs the new max, the rescale needs the `exp` --
+which chains one key-tile's compute to the next with no independent work to
+overlap it against. **This also explains this beam's own S=24 plateau and
+S=32 cliff precisely**: sm_75 caps at 32 resident warps/SM; this kernel's
+256-thread (8-warp) blocks hit that ceiling at exactly 4 blocks/SM, which is
+*both* the register limit ncu reports *and* the architecture's absolute
+maximum for this launch configuration, not merely a resource-driven ceiling
+below 100%. S=24 (192 blocks / 48 SMs = 4.0 exactly) already reaches 100% of
+the occupancy this launch shape can ever have on this card; S=32 (256 blocks
+= 5.33/SM) cannot fit and forces a second grid-strided wave, which is why it
+is a cliff and not a diminishing slope. **Widening the grid further is
+therefore not merely unpromising, it is provably exhausted** -- there is no
+more occupancy-driven latency-hiding left to buy with this kernel's current
+per-block resource footprint.
+
+### Two follow-on experiments this round, both negative, both reverted
+
+Per the ncu diagnosis, the remaining lever (since occupancy is maxed) is
+shortening the per-block *serial critical path itself* rather than adding
+more resident blocks. Two cheap, in-language ways to do that were tried on
+`attention_split` and measured in isolation (`attndecode`, minicpm shape)
+before touching anything else:
+
+1. **`@pipeline` on `attention_split`.** Already a supported phobos-lang
+   attribute (`phobos-lang/src/codegen/pipeline.rs`), already used by
+   `examples/flash_attention_fp32.ph` on a for-loop of exactly the same
+   shape (leading `var`-staged static tensor slices, `dot_t`/`rowmax`/`exp`
+   accumulate after). `attention_split`'s own `for kt in range(lo, full,
+   BC) { var k = ...; var v = ...; ... }` loop already stages `k`/`v` with
+   `var` (the doc comment above `attention_split_src` explains why, for a
+   different reason -- vectorized loads), which happens to be exactly what
+   `pipeline_candidate` wants, so this was a one-line attribute add. Result:
+   flat, within noise, at every cache length (cache 1031: 867.3us vs the
+   committed baseline's 873.2us, -0.7%; cache 37: 305.9 vs 305.4, +0.2%).
+   Reverted, not committed. Consistent with the occupancy math above: sm_75
+   has no `cp.async`, so `@pipeline` here can only double-buffer through
+   registers/shared memory rather than overlap with real async-copy
+   hardware, and the kernel is already at this card's occupancy ceiling, so
+   there is no slack left for the extra live state to spend.
+2. **Manual 2-way independent online-softmax chain inside one block.** Each
+   block splits its own per-block key range into two disjoint halves,
+   each carried by an independent `(m, l, acc)` triple, interleaved in one
+   loop stepping `2*BC` per iteration (chain A's tile and chain B's tile
+   both touched in the same iteration, so their loads/compute sit adjacent
+   in the instruction stream), combined once after the loop via the same
+   two-term online-softmax merge `attention_merge` already does across
+   splits, before falling through to the existing single-key remainder loop
+   and the existing `P`/`ML` writes -- fully expressible in today's
+   language, no new primitive, the external split/merge interface and
+   `attn.rs` call site untouched. Result: a clean **regression** at every
+   cache length (cache 1031: 903.6us vs 873.2us baseline, +3.5%; cache 67:
+   262.7us vs 235.2us, +11.7%; cache 4099: 2020.9us, no directly comparable
+   baseline row but the same direction). Reverted, not committed. Diagnosed
+   (from the occupancy math above, not separately re-profiled under this
+   round's remaining budget): doubling the block's live `(m, l, acc)` state
+   and doubling the simultaneously-staged K/V tiles (four live at once
+   instead of two) raises register/shared-memory pressure on a kernel that
+   is *already* sitting at this card's absolute 4-blocks/SM occupancy
+   ceiling (32 warps/SM, the sm_75 maximum) -- any increase in per-block
+   footprint can only push occupancy *below* that ceiling, and the added
+   instruction-level parallelism was not enough to offset losing resident
+   warps that were already hiding the same class of dependency-chain
+   latency.
+
+Net: two straightforward ways to shorten the per-block critical path without
+a new phobos-lang primitive both failed to find headroom this round. Given
+occupancy is provably maxed at 256 threads/block, the surviving unexplored
+lever is a genuinely different unit of parallelism that buys independence
+with *thread count* rather than *per-thread register/shared-memory
+footprint* -- multiple warps per block, each owning a disjoint key
+sub-range and its own accumulator, combined by a fast intra-block reduce at
+the end, so the added parallelism costs occupancy nothing (this
+architecture is warp-count-limited via block residency, not raw
+thread-count) the way the register-heavy two-chain attempt above did. That
+is a genuine new phobos-lang construct (warp-scope tile ownership /
+block-thread-partitioning), not expressible in today's language without one,
+and this round's remaining budget did not reach implementing it -- see
+`autoresearch/beams/BEAMS.md`'s ranking update for how it stacks against the
+concurrent shared-memory-pooling fix this round also found in progress on
+`phobos-gguf/src/backend/device/attn.rs` /
+`phobos-lang/src/codegen/{mod,tile/alloc}.rs` (not this beam's work; noted
+here only so the next agent knows those files were mid-edit by another
+process during this round and should be checked fresh rather than assumed
+from this snapshot).
+
+### Beam status: still killed as a standalone lever, but the puzzle behind its kill is now understood
+
+The original kill verdict stands -- widening `ATTN_SPLITS` alone does not
+move `tg`, and this round adds the reason why (trajectory-average dilution
+of a real but cache-deep-concentrated gain, plus an occupancy ceiling this
+card has already reached at the plateau this file found). Not worth
+reopening as a grid-width lever; worth remembering as background for
+whichever beam next changes `attention_split`'s own per-block work, since any
+such change should be judged at `tg4096` or via in-pass `nsys`, not
+`tg1024`/`tg32`, to see its true size.

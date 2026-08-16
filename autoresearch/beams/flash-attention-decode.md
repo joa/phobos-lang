@@ -520,6 +520,48 @@ conclusion (large, GQA-redundancy-independent headroom) holds; the exact
 multiple needs a proper profiling pass to pin down before it drives an
 implementation decision.
 
+### 2026-08-16, later round: the isolated-vs-real puzzle, resolved, and why `attndecode` numbers here are trustworthy
+
+The user's next-round brief flagged a real contradiction as unexplained:
+[[cache-length-split-buckets]]'s own `attndecode` sweep found a ~15%
+isolated gain from widening `ATTN_SPLITS`, but the same change moved `tg` by
+nothing in a real `bench.py` run. That beam's file now has the full
+resolution (in-pass `nsys` measurement, `ncu` hardware counters, two
+follow-on kernel experiments); short version for readers of this file:
+**`attndecode`'s kernel-duration numbers are trustworthy** -- a ~15%
+isolated gain reproduces as a ~14.7% real, in-CUDA-graph-replay reduction in
+`attention_split`+`attention_merge`'s own measured GPU duration at the same
+cache depth -- **but `tg` is a whole-trajectory average from cache=1, and
+attention's share of a step (and therefore any change concentrated in that
+kernel) grows from near-zero to ~19% only by cache ~1024**, so a real,
+deep-cache kernel win is diluted below `bench.py`'s own noise floor when
+averaged into `tg1024`/`tg2048`. This matters directly for this beam's own
+"combine with [[launch-bound-headroom]]" framing and its ceiling math above:
+any future win in `attention_split`'s own per-call cost should be confirmed
+at `tg4096` (where attention's trajectory-average share is largest) or via
+the same in-pass `nsys` method, not read off `tg1024` alone, or a real win
+can look like nothing the way this round's isolated-vs-real check did.
+
+`ncu` hardware counters also landed this round (user's own elevated-shell
+run, `autoresearch/beams/ncu_split_4099.ncu-rep`/`ncu_merge_4099.ncu-rep`,
+minicpm shape, cache 4099): `attention_split` is latency-bound, not
+bandwidth- or compute-bound (38% Memory Throughput, 14% Compute Throughput,
+63.8% Achieved Occupancy) -- and that 63.8% is not a resource shortfall to
+tune away, it is this launch configuration's *actual ceiling*: 256-thread
+(8-warp) blocks hit sm_75's 32-warps/SM architectural maximum at exactly 4
+blocks/SM, which is both `ncu`'s reported register limit and the hardware's
+absolute cap, explaining precisely why [[cache-length-split-buckets]]'s own
+S=24 was a plateau (192 blocks/48 SMs = 4.0, exactly this ceiling) and S=32
+a cliff (can't fit, forces a second wave) rather than a diminishing slope.
+Grid-width tuning on this kernel is therefore provably exhausted, not merely
+unpromising. Two follow-on attempts to shorten the per-block serial
+critical path instead (`@pipeline`, and a manual two-chain in-block
+redesign) were both tried and both negative -- full numbers, mechanism, and
+the reverted code in [[cache-length-split-buckets]]'s Result log. The
+surviving lever per that investigation is a genuinely new phobos-lang
+unit-of-parallelism primitive (warp-scope, not per-thread-register,
+independence), not attempted this round.
+
 ### The caveat resolved: real `ncu` hardware counters say latency-bound, not bandwidth-bound
 
 The user ran `ncu` (elevated PowerShell, `ncu` needs elevation for live
