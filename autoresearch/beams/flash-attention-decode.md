@@ -446,3 +446,76 @@ reaching +1.2% on minicpm is consistent with that bound and nowhere near
 closing it alone. `launch-bound-headroom`'s remaining unfused launches
 (`store_2d`, `quantize`, `q8_qdot_add`) are untouched by this round and stay
 the next lever.
+
+### Win size, re-verified with a clean back-to-back run
+
+A cross-session comparison (this beam's landed control run vs. the much
+earlier `autoresearch_baseline.csv`) briefly suggested the win was actually
++2.1-3.7%, larger than the +1.0-1.4% recorded above. Before editing the
+number, re-ran it properly: one `bench.py` invocation with
+`PHOBOS_ATTN_PERSIST` unset immediately followed by one with it set to `1`,
+same session, minimal gap, same card
+(`autoresearch/beams/persist_{off,on}_clean.{csv,json,log}`):
+
+| test | off | on | delta |
+| --- | --- | --- | --- |
+| tg32 | 255.01 | 257.80 | +1.09% |
+| tg128 | 254.89 | 259.64 | +1.86% |
+| tg512 | 251.96 | 254.63 | +1.06% |
+| tg1024 | 245.45 | 249.64 | +1.71% |
+| tg2048 | 234.91 | 237.66 | +1.17% |
+
++1.06% to +1.86%, matching the originally recorded +1.0-1.4% closely. **The
+cross-session number was noise, not a bigger real win** -- confirmed by the
+`off` run's own llama.cpp column showing a round-1 contention/clock blip
+(-5.29% off that row's median, tg1024 stderr +/-36.73) despite passing
+`bench.py`'s own contention gate, evidence that even an "uncontended" run
+can carry session-level drift large enough to produce a false +2x reading if
+the two sides being compared aren't measured back-to-back. **Lesson for
+future rounds in this project: CLAUDE.md's "a performance number is only
+comparable to one measured in the same session" is not satisfied by two
+different sessions both being individually clean -- it needs one session,
+both sides, minimal gap.** The beam's recorded number stands: +1.0-1.4% on
+minicpm, unchanged.
+
+### A bigger, separate finding: decode attention is far from its own bandwidth floor
+
+Independent of the win-size question above, ran `attndecode`'s built-in
+bandwidth-floor comparison (`autoresearch/beams/attndecode_roofline.log`) --
+a tool this session had run for split-count sweeps but never read the
+`floor`/`vs floor` columns of, which divide the *distinct* KV bytes a shape
+must move by a measured device-copy bandwidth to get a lower bound, then
+compare against the measured `attn/step` time. Stock (non-persistent)
+split-plus-merge, minicpm shape, at the longest cache tested:
+
+| cache | attn/step | distinct bytes | floor | vs floor |
+| --- | --- | --- | --- | --- |
+| 2053 | 3218.0us | 48.12 MB | 354.6us | **9.1x** |
+
+The `group 1, same cache` diagnostic shape (2 heads instead of 16, `qgroup`
+irrelevant since there is no group to share a read across -- isolates
+whether GQA's redundant re-read explains the gap) still shows **8.1x** at
+the same cache length. Since removing all redundant re-reads barely moves
+the ratio, **the split-plus-merge kernel's inefficiency is not primarily the
+GQA re-read this session's earlier `ATTN_QGROUP` tuning already addressed --
+it is something else in the kernel/algorithm**, unexplored by any beam this
+session tried. This is a fundamentally different situation from
+[[wide-vocab-lm-head]]'s `q8_qdot` kernel, independently roofline-checked in
+that beam at 92.8% of peak (nothing left to find). Decode attention has
+real, unclaimed headroom -- how much of the session's 15-18%-of-a-step
+attention cost is recoverable is unknown without deeper profiling (ncu, not
+just this coarse floor check), but "far from its own floor" is a much
+stronger starting position than "already near peak, nothing to find" for
+justifying further work here.
+
+Caveat: the `floor` figure depends on `attndecode`'s own device-copy
+bandwidth probe (142 GB/s measured at the top of its run), which is well
+below what a warmed, well-tuned kernel demonstrably achieves on this card
+(`q8_qdot` measured 460.5 GB/s in [[wide-vocab-lm-head]]'s roofline). If the
+probe under-measures true achievable bandwidth (plausible: `attndecode` has
+no explicit card-warming step the way `bench.py` does), the true floor is
+lower and the `vs floor` ratios above are *conservative* -- the real
+multiple could be larger, not smaller. Either way the qualitative
+conclusion (large, GQA-redundancy-independent headroom) holds; the exact
+multiple needs a proper profiling pass to pin down before it drives an
+implementation decision.
