@@ -451,5 +451,20 @@ to one after the last round of kills, caught and corrected):
    under a separate process from beam 1's -- not touched by beam 1's own
    round, check their state fresh rather than trust this snapshot).
 
+Beam 1 above closed (2026-08-16 23:06, `13ad004`) with a clear next step:
+**[[cache-length-split-buckets]]'s Result log now recommends a new
+phobos-lang warp-scope parallelism primitive** (independent warps per block
+each owning a disjoint key sub-range, combined by a fast intra-block reduce,
+so added parallelism costs thread count rather than the per-thread
+register/shared-memory footprint that sank this round's two-chain attempt).
+**Queued, not yet dispatched**: it would also touch
+`phobos-lang/src/codegen/mod.rs`, which beam 2 above is actively editing
+right now. Dispatching a third agent into the same core-compiler file while
+beam 2 is mid-edit risks an uncoordinated conflict in fragile codegen
+internals, worse than the file-ownership risk already being managed between
+beams 1 and 2 (which touched different files). Wait for beam 2 to land,
+then dispatch the warp-scope primitive as the new beam 1 on a clean base,
+restoring the 3-beam minimum.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
