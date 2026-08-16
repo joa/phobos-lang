@@ -390,5 +390,31 @@ non-bandwidth-bound headroom), Compute (SM) Throughput, and Achieved
 Occupancy (distinguishes "not enough parallelism" from "enough parallelism,
 stalled on something else" -- the two have different fixes).
 
+## Active beams roster, 2026-08-16 evening
+
+The `ncu` result above landed (see `flash-attention-decode.md`'s "resolved:
+real ncu hardware counters" section): decode attention is latency-bound
+(38% memory throughput, 14% compute throughput, 64% occupancy on
+`attention_split`), not bandwidth-bound. Two beams running in parallel from
+that finding, per AGENT.md's minimum-3-active-beams discipline (had dropped
+to one after the last round of kills, caught and corrected):
+
+1. **Exploit/structural** -- redesign `attention_split`'s core loop to
+   shorten its serial critical path (the online-softmax `m`/`l`/`acc` chain
+   across many small-`BC` iterations at long cache), informed by the
+   isolated-vs-real-pass puzzle's likely resolution (a real decode step
+   already has ~290 other kernels' worth of independent work to interleave
+   with `attention_split`'s stalls, so more grid width is redundant there in
+   a way it isn't in `attndecode`'s isolated sweep). In progress.
+2. **Near-miss** -- the shared-memory pooling gap flagged when
+   `PHOBOS_ATTN_PERSIST` landed: phase one and phase two of the persistent
+   kernel sum their shared-memory footprints (~41KB) instead of pooling to
+   the wider phase's own (~24KB), which is the occupancy cost that makes the
+   flag regress Qwen and forces the opt-in gate. Fixing it could widen or
+   remove the gate, turning an opt-in win into a default-on one -- lower
+   ceiling than beam 1 (doesn't move minicpm's absolute numbers) but lower
+   risk and independent territory (a different kernel function in the same
+   file). In progress, coordinating file ownership with beam 1 explicitly.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
