@@ -602,3 +602,22 @@ group, matching the block's whole warp count) was not swept against smaller
 values (multiple warps sharing a group, needing named-barrier or a
 different combine shape) -- the advisor's v1 recommendation, taken as-is
 and not revisited since it worked cleanly on the first attempt.
+`emit_warp_partial` bails at compile time if `WM`/`WL`/`WACC` are ever sized
+for a warp count that does not match the launching CTA's actual warp count
+(`cta_threads / 32`), so a future attempt at fewer, wider warp groups is
+caught as a build error rather than a silent out-of-bounds shared-memory
+write from the extra warps' unaccounted-for final stores.
+
+**Post-commit gate check.** The advisor's one open question after this
+landed -- does `attn_persist_plan`'s occupancy gate still *accept* both
+shapes under the new footprint, or did they silently fall back to the
+(also-faster) launched path, making the "both persist" framing above
+unverified -- was checked directly rather than left inferred:
+`PHOBOS_PASS_REPORT=9 PHOBOS_ATTN_PERSIST=1`, `bench -m <model> -p 0 -n 12
+-r 1 --no-warmup`, both models. minicpm: `attention_persist`, shared 9952
+bytes, 4 blocks/SM, 4.00 waves (clean single pass). Qwen: `attention_persist`,
+shared 19680 bytes, 3 blocks/SM, 3.00 waves (clean single pass, total 214
+launches -- an exact match to the previously documented count from before
+this round's kernel rewrite). Both shapes confirmed live on the persistent
+path with no second grid-strided pass, so the bench numbers above are what
+they claim to be.

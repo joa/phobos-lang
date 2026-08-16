@@ -92,6 +92,21 @@ impl<'c> Codegen<'c> {
         if wacc_mv.shape != [qg * wct, d] {
             bail!("warp_partial WACC must be [QG * W, D]");
         }
+        // warp_id ranges over every warp the CTA launches (0..cta_threads/32)
+        // regardless of what WM/WL/WACC were sized for: a narrower W would
+        // have the extra warps' final stores land past WM/WL's own column
+        // extent and WACC's own row extent -- an out-of-bounds shared-memory
+        // write, not a caught error, since nothing else in this function's
+        // control flow depends on W. Catch it here instead.
+        if wct != self.cta_threads / WARP {
+            bail!(
+                "warp_partial's WM/WL/WACC are sized for {wct} warps, but this kernel launches \
+                 {} ({}-thread CTA / {WARP}); every launched warp writes its own row, so the two \
+                 must match",
+                self.cta_threads / WARP,
+                self.cta_threads
+            );
+        }
 
         let scale_v = self.emit_scalar(block, scale)?;
         let lo_v = self.emit_index(block, lo, "warp_partial lo")?;
