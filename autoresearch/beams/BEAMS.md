@@ -671,5 +671,24 @@ unaffected by this round's kernel rewrite. A fresh same-session baseline
 capture (this round's own numbers, not the superseded 2026-08-16 one) is
 the right starting point for whoever runs that next round.
 
+## Two beams dispatched, 2026-08-17, pushing on `warp_partial`'s momentum
+
+minicpm sits at 0.92-0.95x against llama.cpp's FA-on baseline, closest this
+session has gotten. Two independent follow-ups dispatched in parallel,
+file-separated per the worktree-isolation lesson above (not using actual
+worktrees this time -- file overlap is genuinely minimal and both were
+briefed explicitly on the prior incident and told to scope any revert
+precisely):
+
+1. **Vectorize `warp_partial`'s K/V loads + sweep `ATTN_WARP_SPLITS`.**
+   Territory: `phobos-lang/src/codegen/tile/warp_attn.rs`,
+   `phobos-gguf/src/backend/device/kernels/attn.rs`.
+2. **Re-examine `[[launch-bound-headroom]]`'s remaining unfused launches
+   under the new, post-`warp_partial` cost structure.** `store_2d` was
+   never actually tried in either prior round (only `quantize`+
+   `q8_qdot_add` were, and that was a wash *before* attention's own cost
+   dropped 50%+) -- primary target. Territory: `phobos-gguf/src/llama.rs`,
+   `phobos-gguf/src/backend/fuse/*.rs`, `phobos-gguf/src/layers.rs`.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
