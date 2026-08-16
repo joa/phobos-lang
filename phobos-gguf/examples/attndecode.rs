@@ -83,7 +83,7 @@ const SHAPES: [Shape; 5] = [
 ];
 
 /// Primes, spaced like the powers of two they sit next to. See the note above.
-const LENGTHS: [usize; 7] = [37, 67, 131, 257, 521, 1031, 2053];
+const LENGTHS: [usize; 8] = [37, 67, 131, 257, 521, 1031, 2053, 4099];
 
 /// Repeat `batch` until `secs` have passed and return the mean seconds an
 /// iteration took. `batch` reports how many iterations it ran, and has to leave
@@ -142,12 +142,27 @@ fn step(
     backend.end_pass()
 }
 
+/// Restricts the sweep to one cache length, for an external profiler (ncu)
+/// that needs to isolate a single kernel launch rather than see the whole
+/// sweep. Unset by default, which is every prior invocation of this example.
+fn length_wanted(length: usize) -> bool {
+    std::env::var("PHOBOS_ATTNDECODE_LENGTH")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .is_none_or(|want| want == length)
+}
+
 fn main() -> Result<()> {
     let backend = DeviceBackend::new()?;
     let bandwidth = copy_bandwidth(&backend, 6.0)?;
     println!("device copy bandwidth {:.0} GB/s\n", bandwidth / 1e9);
 
     for shape in &SHAPES {
+        // Same restriction, by shape name substring: an external profiler
+        // isolating one kernel launch wants one shape as well as one length.
+        if std::env::var("PHOBOS_ATTNDECODE_SHAPE").is_ok_and(|s| !shape.name.contains(&s)) {
+            continue;
+        }
         let group = shape.n_head / shape.n_kv;
         let kv_width = shape.n_kv * shape.head_dim;
         println!(
@@ -165,6 +180,9 @@ fn main() -> Result<()> {
         let mut previous: Option<(usize, f64)> = None;
 
         for &length in &LENGTHS {
+            if !length_wanted(length) {
+                continue;
+            }
             let caches = (0..shape.blocks)
                 .map(|_| {
                     Ok((
