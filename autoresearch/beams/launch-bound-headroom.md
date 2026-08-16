@@ -1,6 +1,6 @@
 ---
 parent: fcfdf8b (HEAD, autoresearch branch)
-status: tried, reverted -- one increment measured a real loss, mechanism diagnosed, no code change survives on this branch
+status: tried twice, reverted both times -- combining with [[flash-attention-decode]] on the output side was a wash, not a loss; the launch-count lever appears exhausted for this cost, see final round below
 ---
 
 # Beam: residual launch-count headroom (cleanup/near-miss)
@@ -266,3 +266,63 @@ but the specific "fuse attention's QKV projection" idea is closed with a
 diagnosed, non-noise reason, and the next increment (if anyone picks this up)
 should start from the tiling-granularity fix above rather than repeating
 this one as-is.
+
+### Second round: the output side, combined with [[flash-attention-decode]] -- a clean wash
+
+After `[[flash-attention-decode]]` landed `PHOBOS_ATTN_PERSIST` (opt-in,
+folds `attention_split`+`attention_merge` into one kernel), tried the
+*output* side this beam's first round left untried: `quantize` (the mixed
+attention output's activation) + `q8_qdot_add` (the output projection back
+into the residual), 2 launches/layer. Unlike the QKV attempt, this correctly
+used `Stage::ProjAdd`'s `OUT_TILE`-wide tiling over `out_dim` (the model's
+full embedding width, the same shape the fused MLP's own down-projection
+already takes), not `ProjF`'s `Q8_BLOCK`-wide tiling over the narrow
+key/value width that sank the QKV attempt -- so this was not the same
+mistake repeated. New code: `attn_out_chain` in
+`phobos-gguf/src/backend/fuse/chains.rs`, gated behind
+`PHOBOS_FUSED_ATTN_OUT`, wired into `llama.rs`'s `Model::attention` via
+`attn.output.add_projected(...)` (previously `add_into`).
+
+**Same-session, same-card, interleaved-vs-llama.cpp, `PHOBOS_ATTN_PERSIST=1`
+held constant both runs** (`autoresearch/beams/attn_out_minicpm.{csv,json,log}`
+= fusion on, `attn_out_minicpm_control.{csv,json,log}` = fusion off, 3
+rounds x 3 reps each, 3 of 3 uncontended):
+
+| test | control (persist only) | treatment (persist + attn_out fusion) | delta |
+| --- | --- | --- | --- |
+| tg32 | 259.35 | 256.68 | -1.0% |
+| tg128 | 259.17 | 259.70 | +0.2% |
+| tg512 | 254.95 | 255.18 | +0.1% |
+| tg1024 | 249.36 | 249.30 | -0.02% |
+| tg2048 | 237.52 | 237.77 | +0.1% |
+
+Flat, inside the stderr bands on every row (control stderr ranges 0.15-1.23,
+treatment 0.25-2.37) -- **a wash, not a regression and not a win.** Removing
+2 more launches/layer (48/step) on top of the already-fused attention
+kernel did not move `tg` in either direction. Correctness gates were not
+run to completion before this was recognized as a wash (not needed --
+nothing here was going to be promoted regardless of correctness once the
+benchmark came back flat), so this is a timing-only result; the mechanism
+was architecturally sound (right tile, right chain type) and the failure
+mode is different from the QKV attempt's (that one actively lost from
+starved parallelism; this one just didn't matter). Reverted
+(`git checkout --` on all nine touched files), nothing committed, tree
+confirmed clean and building at `5753f8e`.
+
+**What this means for the beam.** Two fusion attempts around attention now
+give a consistent picture: launch count is not the lever once
+`attention_split` itself (the compute/bandwidth-bound kernel, not the
+overhead around it -- see [[flash-attention-decode]]'s ceiling math, ~15-18%
+of a step and dominated by the split kernel 6-8x over the merge) is the
+larger cost. Shaving 2 more launches/layer off an already-small overhead
+share does not register. `store_2d` (writing K/V into the cache, 2/layer)
+remains untried and is the last item on the original list, but given this
+result, expect it to be similarly flat rather than assume it is still
+worth a dedicated round -- the pattern across both attempts now suggests the
+remaining ~14% launch bubble this beam originally measured is mostly *not*
+concentrated in launches this beam can remove; it may simply be what ~290
+kernel calls cost on this WDDM driver regardless of which ones they are,
+which would make further fusion work here low-value relative to
+[[flash-attention-decode]]'s own remaining lever (the shared-memory pooling
+gap, which could turn `PHOBOS_ATTN_PERSIST` into a safe default rather than
+opt-in, a different kind of win than more fusion would give).
