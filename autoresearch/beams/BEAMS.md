@@ -401,11 +401,43 @@ to one after the last round of kills, caught and corrected):
 
 1. **Exploit/structural** -- redesign `attention_split`'s core loop to
    shorten its serial critical path (the online-softmax `m`/`l`/`acc` chain
-   across many small-`BC` iterations at long cache), informed by the
-   isolated-vs-real-pass puzzle's likely resolution (a real decode step
-   already has ~290 other kernels' worth of independent work to interleave
-   with `attention_split`'s stalls, so more grid width is redundant there in
-   a way it isn't in `attndecode`'s isolated sweep). In progress.
+   across many small-`BC` iterations at long cache). **Update: the
+   isolated-vs-real-pass puzzle's guessed resolution above ("~290 other
+   kernels' worth of independent work to interleave with, so more grid
+   width is redundant in a real pass") does not hold up** -- CUDA kernels on
+   one stream execute one at a time, so a neighboring kernel's own warps are
+   never resident to interleave with `attention_split`'s while it runs; there
+   is no mechanism for that theory to work through. Measured instead
+   (`[[cache-length-split-buckets]]`'s Result log has the full method and
+   numbers): the wider-split kernel change *does* reproduce its isolated
+   `attndecode` gain almost exactly inside a real CUDA-graph-replayed pass
+   (14.7% real reduction in `attention_split`+`attention_merge`'s own
+   measured GPU duration at cache ~1024, vs `attndecode`'s ~15% isolated
+   prediction at cache 1031) -- `attndecode` is trustworthy. What actually
+   swallows the gain is that `tg` averages throughput over the *whole*
+   decode trajectory from cache=1, and attention's share of a step grows
+   from near-zero to ~19% only by cache ~1024, so a real deep-cache win
+   dilutes below `bench.py`'s own noise floor by the time it is averaged
+   into `tg1024`/`tg2048`. Also landed: the `ncu` counters confirm
+   `attention_split` is latency-bound (38% memory, 14% compute throughput)
+   and that its 63.8% occupancy is not a resource shortfall to tune away --
+   256-thread blocks hit sm_75's 32-warps/SM architectural ceiling at
+   exactly 4 blocks/SM, which `[[cache-length-split-buckets]]`'s own S=24
+   plateau already reaches exactly (192 blocks/48 SMs = 4.0). **Grid-width
+   tuning on this kernel is provably exhausted, not merely unpromising.**
+   Two follow-on attempts to shorten the per-block critical path instead
+   (`@pipeline`; a manual two-independent-chain in-block redesign, no new
+   primitive needed) were both tried this round and both came back
+   negative -- flat and a clean regression respectively, both reverted,
+   full mechanism in `[[cache-length-split-buckets]]`'s Result log. Beam
+   stays open: the one lever this round's evidence points at and did not
+   reach is a genuinely new phobos-lang unit-of-parallelism primitive
+   (warp-scope ownership of a key sub-range, several independent warps per
+   block instead of one wide serial chain per block, so added parallelism
+   costs thread count rather than the per-thread register/shared-memory
+   footprint that sank the two-chain attempt) -- the actual "invent
+   something else" the user's directive asked for once grid/register-level
+   tuning tops out, which this round's evidence now shows it has.
 2. **Near-miss** -- the shared-memory pooling gap flagged when
    `PHOBOS_ATTN_PERSIST` landed: phase one and phase two of the persistent
    kernel sum their shared-memory footprints (~41KB) instead of pooling to
@@ -414,7 +446,10 @@ to one after the last round of kills, caught and corrected):
    remove the gate, turning an opt-in win into a default-on one -- lower
    ceiling than beam 1 (doesn't move minicpm's absolute numbers) but lower
    risk and independent territory (a different kernel function in the same
-   file). In progress, coordinating file ownership with beam 1 explicitly.
+   file). In progress as of this note (`phobos-gguf/src/backend/device/attn.rs`
+   and `phobos-lang/src/codegen/{mod.rs,tile/alloc.rs}` mid-edit, uncommitted,
+   under a separate process from beam 1's -- not touched by beam 1's own
+   round, check their state fresh rather than trust this snapshot).
 
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.

@@ -1,0 +1,9 @@
+build,metric,ns_per_step
+baseline (ATTN_SPLITS=8, S=16),attention_split (24 calls),805433.05
+baseline (ATTN_SPLITS=8, S=16),attention_merge (24 calls),88916.5
+baseline (ATTN_SPLITS=8, S=16),combined split+merge,894349.55
+baseline (ATTN_SPLITS=8, S=16),step wall (19 steady steps avg),4613377
+wide (ATTN_SPLITS=12, S=24),attention_split (24 calls),661060.55
+wide (ATTN_SPLITS=12, S=24),attention_merge (24 calls),101889.15
+wide (ATTN_SPLITS=12, S=24),combined split+merge,762949.7
+wide (ATTN_SPLITS=12, S=24),step wall (19 steady steps avg),4471119

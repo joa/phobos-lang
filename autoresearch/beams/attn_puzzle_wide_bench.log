@@ -1,0 +1,13 @@
+model models/minicpm5-1b-Q8_0.gguf (llama 1.1B Q8_0, 130560 vocab), backend Phobos GPU, load 2051 ms
+warmup... done
+  tg1024 rep 1/3: 4.270 s
+  tg1024 rep 2/3: 4.249 s
+  tg1024 rep 3/3: 4.252 s
+  tg2048 rep 1/3: 8.953 s
+  tg2048 rep 2/3: 8.918 s
+  tg2048 rep 3/3: 8.945 s
+
+| model | backend | test | t/s |
+| ----- | ------- | ---- | --- |
+| llama 1.1B Q8_0 | Phobos GPU | tg1024 | 240.57 +/- 0.64 |
+| llama 1.1B Q8_0 | Phobos GPU | tg2048 | 229.12 +/- 0.48 |
