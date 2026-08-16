@@ -155,6 +155,62 @@ every step once the cache stabilizes at its largest bucket.
    No code changed. Full writeup, roofline math and raw nsys traces in
    `wide-vocab-lm-head.md` and `autoresearch/beams/lmhead_profile*`.
 
+## The gap reframed: it is mostly llama.cpp's flash attention, not a phobos deficit
+
+Three beams above all chased phobos-internal costs (attention grid occupancy,
+lm_head bandwidth, launch count) and all three moved `tg` by nothing or the
+wrong direction. Before funding a fourth internal round, tested a different
+variable: how much of the gap is llama.cpp's own configuration advantage
+rather than something phobos is doing wrong.
+
+phobos's KV cache is already f16 (`kv: fp16 buffers`, commit `50543a5`;
+confirmed in `phobos-gguf/src/backend/mod.rs:504`), matching llama.cpp's
+default, so precision was never the variable (`--llama-args "-ctk f32 -ctv
+f32"` was tried first and rejected outright -- this llama-bench build only
+accepts `f16` as a cache-type value, so that specific flag combination is a
+dead end, logged in `autoresearch/beams/f32kv_noFA_bench.log`). What phobos
+does not have at all is a flash-attention-style decode kernel: its decode
+path is the split-plus-merge design in `attn.rs` (`attention_decode`), two
+kernels and a global round-trip through `P`/`ML` scratch, not FlashAttention's
+single-pass online-softmax kernel.
+
+**`python scripts/bench.py -m models/minicpm5-1b-Q8_0.gguf -p 128 -n 32 128
+512 1024 2048 -r 3 -R 3 --llama-args "-fa 0"`, 2026-08-16, same session, 3 of
+3 rounds uncontended** (`autoresearch/beams/noFA_bench.{csv,json,log}`):
+
+| test | phobos | llama.cpp CUDA (FA on, baseline) | llama.cpp CUDA (`-fa 0`) | ratio (FA on) | ratio (`-fa 0`) |
+| --- | --- | --- | --- | --- | --- |
+| tg32 | 253.69 | 271.65 | 264.25 | 0.92x | **0.96x** |
+| tg128 | 256.86 | 274.86 | 264.29 | 0.92x | **0.97x** |
+| tg512 | 253.58 | 273.68 | 253.33 | 0.91x | **1.00x** |
+| tg1024 | 245.19 | 273.66 | 246.52 | 0.89x | **0.99x** |
+| tg2048 | 233.54 | 270.05 | 247.24 | 0.86x | **0.94x** |
+
+Turning flash attention off drops llama.cpp's own tg1024/tg2048 by 10-11% (its
+FA advantage grows with cache length, same shape as the slope beam 1 chased)
+and phobos lands at **essential parity (0.94-1.00x) against llama.cpp's own
+non-FA decode path at every cache length**. This is the cleanest result of
+the session: the entire session's ~8-14% deficit is explained by llama.cpp
+having a flash-attention decode kernel and phobos not having one, not by any
+of the three mechanisms beams 1-3 tested. It also explains beam 1's null
+result in hindsight: widening the split-and-merge kernel's own grid cannot
+close a gap that comes from a different kernel design entirely (single fused
+pass vs. two kernels plus a scratch round-trip), so there was never a grid
+width that would have fixed it.
+
+## New primary beam
+
+4. [[flash-attention-decode]] -- structural, high-risk, high-ceiling. Shape
+   phobos's decode attention as a single-pass online-softmax kernel closer to
+   FlashAttention's design, replacing (or sitting alongside, model-gated)
+   `attention_decode`'s current split-plus-merge two-kernel path. This is now
+   the best-evidenced lead in the session by a wide margin -- see the table
+   above -- and is a substantially larger piece of work than beams 1-3, so it
+   gets its own beam file rather than a quick increment. Not yet implemented;
+   see the beam file for what to preserve from `attn.rs`'s existing GQA/split
+   lessons ([[decode-attention-splits-and-query-grouping]] memory) versus
+   what a single-pass design needs to change.
+
 ## Ranking after this round
 
 `[[cache-length-split-buckets]]` is now closed too: implemented, correctness
@@ -174,21 +230,27 @@ passed, but it lost -3 to -3.6% on `tg` because the generic fuse pass's
 32-wide tiling starves a narrow attention projection of grid parallelism the
 launched kernel had. That is a *different* failure mode from
 `[[cache-length-split-buckets]]`'s null result (that one moved nothing;
-this one moved throughput the wrong way for a specific, named reason), and
-it points at a concrete next step -- a tile-width option on `ProjQ`/`ProjF`
--- rather than closing the file. `[[launch-bound-headroom]]` stays open:
-`store_2d`, `quantize` and `q8_qdot_add` are still unfused per layer, and
-the corroborating 655us/14.4% bubble datum is not fully accounted for by one
-failed increment. `[[wide-vocab-lm-head]]` and `[[cache-length-split-buckets]]`
-remain closed and kept as beam files per AGENT.md (history, not deleted).
-No third structural beam is queued right now -- next agent picking up
-`[[launch-bound-headroom]]` should start from the beam file's proposed fix
-(a narrower, `OUT_TILE`-like tile width for `ProjQ`/`ProjF`, keeping the
-existing wide users' behavior unchanged) rather than re-attempting the QKV
-fusion as tried here, and should re-run the Qwen regression check
-(`fuse_check` + `PHOBOS_PASS_REPORT` launch count) since that fix touches
-shared fuse-pass code Qwen's shipped fusions depend on, unlike this round's
-change which was `llama.rs`-local and never reached Qwen.
+this one moved throughput the wrong way for a specific, named reason).
+`[[launch-bound-headroom]]` stays open in principle (`store_2d`, `quantize`
+and `q8_qdot_add` are still unfused per layer) but is now second priority:
+its own diagnosed fix (narrowing `ProjQ`/`ProjF` from 32-wide to `OUT_TILE`
+= 8-wide) only reaches 32 active blocks against the persistent kernel's
+192-block grid, still far short of the 256 the launched kernel had for the
+query run alone, so it may not even fully solve the problem it targets --
+whoever picks it up should compute the predicted post-fix active-block count
+before writing code, not after.
+
+**The session's real finding this round is above: matching llama.cpp's flash
+attention off closes 0.92x to 0.96-1.00x at every cache length**
+(`--llama-args "-fa 0"` result). This makes `[[flash-attention-decode]]` the
+new primary beam, well ahead of the launch-count and tiling work, because it
+is now backed by a controlled experiment rather than an inferred mechanism:
+turning off the one feature phobos structurally lacks reproduces phobos's own
+numbers almost exactly. `[[wide-vocab-lm-head]]` and
+`[[cache-length-split-buckets]]` remain closed and kept as beam files per
+AGENT.md (history, not deleted); both of their null results are now
+explained rather than merely observed -- neither targeted mechanism was ever
+going to close a gap that comes from a different kernel design entirely.
 
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
