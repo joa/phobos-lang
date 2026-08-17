@@ -53,10 +53,18 @@ type DeviceQuant = (
 /// rows per program: everything [`delta_conv_src`] bakes in.
 type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
 
-/// Head count, group size, head dimension, query group and split count:
-/// everything [`attention_persist_src`] bakes in, and the settled block count
-/// alongside the module it compiled to.
-type AttnPersistKey = (usize, usize, usize, usize, usize);
+/// Head count, group size, head dimension and query group: the shape
+/// [`DeviceBackend::attn_persist_plan`] settles a grid and a split count for.
+/// The split count is not part of the key: it is derived from the settled
+/// grid (as many whole units as the grid holds exactly), not chosen by the
+/// caller, so it is already a function of the other four fields plus the
+/// device's own occupancy answer.
+type AttnPersistKey = (usize, usize, usize, usize);
+
+/// The compiled module for one [`AttnPersistKey`], with the block count and
+/// the persist-specific split count [`DeviceBackend::attn_persist_plan`]
+/// settled on.
+type AttnPersistEntry = (Module, u32, usize);
 
 #[derive(Default)]
 struct Recorded {
@@ -235,12 +243,12 @@ pub struct DeviceBackend {
     /// that function's doc comment for why this is opt-in rather than a
     /// `fused_stage`-style default-on switch.
     attn_persist: bool,
-    /// The persistent attention kernel, keyed by head count, group size, head
-    /// dimension, query group and split count, with the block count it was
-    /// settled at. `None` means the shape's occupancy could not fit the split
-    /// phase in one grid-strided pass and the persistent path is declined for
-    /// it. See `DeviceBackend::attn_persist_plan` in `attn.rs`.
-    attn_persist_modules: RefCell<HashMap<AttnPersistKey, Option<(Module, u32)>>>,
+    /// The persistent attention kernel, keyed by [`AttnPersistKey`], with the
+    /// block count and the persist-specific split count it was settled at.
+    /// `None` means the shape's occupancy could not fit the split phase in
+    /// one grid-strided pass and the persistent path is declined for it. See
+    /// `DeviceBackend::attn_persist_plan` in `attn.rs`.
+    attn_persist_modules: RefCell<HashMap<AttnPersistKey, Option<AttnPersistEntry>>>,
     /// Per-split partial accumulators, and their running maxima and sums.
     attn_partials: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// Page-locked staging for the one readback a pass makes.

@@ -835,6 +835,45 @@ cost is (graph submission itself? the WDDM batch boundary? something
 `nsys`'s own instrumentation inflates that a clean, unprofiled measurement
 would not show?) -- not "how many launches remain."
 
+## Barrier-imbalance beam landed, 2026-08-17: the grid_barrier stall was a real work-assignment bug, not latency noise
+
+Picked up the previous round's open question (`ncu` found 42.7% of
+`attention_persist`'s stall cycles at `grid_barrier()`) and diagnosed it
+before touching anything: `attn_persist_plan` settles the persistent
+kernel's resident grid from live occupancy, but `attention_decode` handed
+it the *launched* kernel's own `ATTN_SPLITS`-derived split count, which
+has no relationship to that settled grid. Confirmed with a fresh pass
+report: minicpm's shape assigns `groups * splits = 128` real units of
+phase-one work into a 192-block resident grid (a third of the blocks idle
+at the barrier from the start of the kernel), Qwen's assigns 64 into 144
+(56% idle). Fixed by having `attn_persist_plan` settle its own split count
+(`blocks / groups`, floored) so every resident block gets a unit -- full
+mechanism, a real feedback-loop bug found and fixed along the way (a naive
+one-stage version of this settled a non-deterministic, 3x-too-narrow grid
+for Qwen and intermittently corrupted an unrelated later kernel launch via
+a stale pointer-keyed cache), and complete numbers are in
+`[[cache-length-split-buckets]]`'s "Round 3" section.
+
+**Result**: minicpm's isolated `attndecode` time at cache 4099 dropped
+9.4% (690.8us -> 626.0us), and `ncu` confirms the mechanism directly --
+barrier stall's absolute cost fell 58% (9.09 -> 3.77 cycles/instruction)
+with occupancy unchanged at its ceiling. Qwen's wall-clock stayed flat
+(217.8us -> 217.4us, noise), though `ncu` shows Qwen trades the
+under-assignment problem for a different one (over-fragmentation at
+`splits = 36`, still ~60% barrier stall) -- documented honestly as an open
+secondary finding rather than chased further, since it does not regress
+Qwen and minicpm (the task's target) is the real win.
+
+All four correctness gates pass on both models with `PHOBOS_ATTN_PERSIST=1`
+forced, matching every documented baseline to the digit, verified twice
+(once in the shared tree, once in an isolated worktree after a concurrent
+agent's in-progress argmax feature landed mid-round and left the shared
+tree non-building for unrelated reasons -- see the beam file's process
+note on why a plain `git diff` was not safe to use for that isolation
+check). **Nothing committed this round**: per the task's brief, the
+confirmation `bench.py` run and the commit are the orchestrator's next
+step, not this round's.
+
 ## Process lesson: subagents can produce real, correct work and still never send a final report
 
 Both beams this round independently exhibited the same failure mode this

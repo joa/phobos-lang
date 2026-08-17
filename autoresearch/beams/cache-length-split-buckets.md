@@ -763,3 +763,211 @@ slowest. Key-batching/ILP tricks remain out of scope here too -- neither
 occupancy (98% on the persistent kernel) nor compute throughput (35%) is
 the ceiling. Raw report for the persist kernel itself:
 `autoresearch/beams/ncu_persist_post_vectorize_4099.ncu-rep`.
+
+### Round 3: the imbalance was real and structural, not just latency variance -- fixed with (a)
+
+Picked up the previous round's diagnosis and checked which of the two
+named directions applies before picking one: is the barrier-stall
+imbalance a genuine *size* mismatch in phase one's work assignment, or
+just memory-latency variance among equally-sized units expressed as
+cross-block skew?
+
+**It is a size mismatch, and a large one.** `attn_persist_plan`
+(`phobos-gguf/src/backend/device/attn.rs`) settles the persistent kernel's
+resident grid from the driver's own occupancy answer, independent of
+`ATTN_SPLITS`. `attention_decode` (same file) then handed the persistent
+path the *launched* kernel's own split count (`ATTN_SPLITS * qgroup`, a
+constant tuned for the launched kernel's own grid, `blocks = groups *
+splits` exactly) with no connection to the persistent kernel's actual
+settled grid. Checked with a fresh `PHOBOS_PASS_REPORT=9` pass report on
+this card, current tree (`ac86bfd`'s descendants): minicpm's shape settles
+144 -> now 192 resident blocks (`4608 blocks / 24 calls`, 4/SM,
+`clean single pass`) since the vectorization/fusion rounds shrank the
+kernel's shared-memory footprint further, but phase one's assigned unit
+count stayed fixed at `groups * splits = 8 * 16 = 128` -- so **a third of
+the resident grid (64 of 192 blocks) starts phase one with `u >= U1`,
+skips the whole split body, and goes straight to `grid_barrier()`**, where
+it then sits idle for the entire time the other 128 blocks spend doing
+real work. Qwen's shape is worse in relative terms: settled grid is 144,
+assigned units `4 * 16 = 64`, so **80 of 144 blocks (56%) are pure-idle
+barrier-waiters from the start of the kernel.** This is exactly the
+"remainder chunk" shape of imbalance the task brief asked to check for,
+not latency noise -- the 24.2% long-scoreboard share the previous round
+measured is real too, but it is not what the 42.7% barrier figure is
+mostly made of.
+
+**Fix: `attn_persist_plan` now settles its own split count from the grid
+it settles, not the launched kernel's `ATTN_SPLITS`.** `splits = blocks /
+groups` (floored) makes `groups * splits` land on `blocks` exactly
+whenever it divides evenly, which both shipped shapes do on this card
+(minicpm: `192 = 8 * 24`; Qwen: `144 = 4 * 36`) -- every resident block
+gets a real unit of phase-one work, none idle at the barrier from the
+start. `attention_decode` no longer threads a `splits` value into the
+persistent path at all; `attn_persist_plan` returns `(blocks, splits)`
+together and `AttnPersistKey` dropped `splits` from its five-tuple (it
+was never load-bearing for identity -- the persist split count is now a
+pure function of the other four shape fields plus the device's own
+occupancy answer). Full mechanism and the two-stage design (see below) are
+in the doc comments on `attention_decode` and `attn_persist_plan`.
+
+**A real bug surfaced along the way, worth recording so it is not
+rediscovered.** The first version of this fix put `splits = blocks /
+groups` *inside* the existing occupancy-settling loop, recomputed every
+candidate `blocks` right alongside it. That is unstable: a wide first-try
+`blocks` guess (the loop's starting point, `per_sm * sms`, before any
+shrinking) picks a correspondingly wide `splits`, which grows phase two's
+`mv`/`c` tiles (sized `[1, S]`) enough to measurably shrink what
+`cuOccupancyMaxActiveBlocksPerMultiprocessor` allows; the *next* iteration
+reads that shrunk `blocks`, picks a *narrower* `splits` for it, and the
+occupancy query on that narrower kernel comfortably allows the original
+wide grid again -- but the loop only ever compares `allowed` against its
+own already-shrunk candidate, never revisits the wider one it abandoned,
+so it settles on the first accidentally-small `blocks` it happens to land
+on. Measured on Qwen's shape: this version of the loop settled at 48
+blocks (1/SM) where a fixed-`splits` probe finds 144 (3/SM) is genuinely
+resident -- a 3x narrower grid than necessary, and non-deterministic
+between process runs (`bench.exe` calls with `PHOBOS_PASS_REPORT=9`
+against the same shape reproduced 48, then 144, then 48 again across
+otherwise-identical invocations, tracking which candidate the loop's
+compiled-module churn happened to land the shared-memory query on). It
+also intermittently corrupted a *later, unrelated* kernel launch
+(`rms_norm: CUDA_ERROR_INVALID_VALUE`, reproduced on roughly half of
+repeated runs) via a second, independent bug the varying-`S` loop exposed:
+`shared_of`'s cache (`self.func_shared`, `phobos-gguf/src/backend/device/
+launch.rs`) is keyed on a raw `CUfunction` pointer, and a discarded loop
+candidate's module unloading can hand that address to a later, wholly
+unrelated compile; with a constant `splits` (the pre-existing code, and
+this round's stage-one probe) every candidate's shared-byte value was
+identical, so a stale cache entry was always coincidentally correct and
+this was invisible. Once `splits` varied by candidate, a stale entry could
+be wrong, and once it was wrong the byte count handed to some later
+kernel's launch (whatever unrelated function next reused that address)
+could exceed what that kernel's own `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED
+_SIZE_BYTES` allows, which the driver rejects outright. Fixed two ways:
+(1) split settling `blocks` and settling `splits` into two stages so nothing
+feeds back on itself (stage one settles `blocks` with a fixed probe
+`splits = ATTN_SPLITS * qgroup`, exactly reproducing the pre-existing,
+already-validated loop; stage two computes the real `splits` from the
+settled `blocks` once and recompiles a single time, verifying occupancy
+still holds before committing to it and falling back to the probe module
+otherwise), and (2) evicting a discarded candidate's `func_shared` entry
+before its module is dropped, defensively, in case a future change
+reintroduces per-candidate variation. Reproduced the bug and confirmed the
+fix with 6+ repeated `PHOBOS_PASS_REPORT=9` runs each on both models: the
+buggy version failed roughly every other run, the two-stage version has
+not failed once across more than a dozen repeats on both models.
+
+**Correctness**, current tree, `PHOBOS_ATTN_PERSIST=1` forced, both
+models: `backend_check` (worst rel err 2.902e-4, unchanged from every
+prior round), `batch_check` (minicpm gpu spread err up to 1.350e-2, Qwen
+up to 1.551e-2, both "batched and sequential agree", same band as every
+prior round), `model_check` (`backends agree`, both models), `fuse_check`
+(minicpm worst 1.332e-2/9.944e-3 average, Qwen worst 1.051e-2/8.085e-3
+average, both 0 top-token flips -- identical to the documented baseline to
+the digit). `cargo test -p phobos-gguf --features cuda --lib` (55 passed).
+`cargo clippy --release -p phobos-gguf --features cuda -- -D warnings`
+clean. All of this was run twice: once in the shared working tree, and
+once more in an isolated `git worktree` containing only this beam's exact
+diff (a concurrent, unrelated argmax-feature edit landed mid-round in the
+same shared tree and left it non-building at points during this round --
+see the process note below), to rule out cross-contamination from that
+concurrent work. Both runs agree to the digit.
+
+**Numbers.** `attndecode`, minicpm shape, cache 4099, mean of 3 runs each,
+before this round's fix (`ee8874c`, saved as a separate binary before
+editing) vs after:
+
+| | before | after | delta |
+| --- | --- | --- | --- |
+| attn/step | 690.8us | 626.0us | **-9.4%** |
+| vs floor | 2.9x | 2.6x | |
+
+Qwen shape, cache 4099, same protocol:
+
+| | before | after | delta |
+| --- | --- | --- | --- |
+| attn/step | 217.8us | 217.4us | -0.2% (noise) |
+
+`ncu` on minicpm's `attention_persist`, cache 4099, same protocol as the
+previous round (`smsp__average_warps_issue_stalled_*_per_issue_active.ratio`):
+
+| stall reason | before (cycles) | after (cycles) | before share | after share |
+| --- | --- | --- | --- | --- |
+| barrier | 9.09 | 3.77 | 42.7% | 25.0% |
+| long scoreboard | 5.16 | 4.70 | 24.2% | 31.2% |
+| wait | 2.23 | 2.23 | 10.5% | 14.8% |
+| short scoreboard | 1.62 | 2.36 | 7.6% | 15.7% |
+| selected | 1.00 | 1.00 | 4.7% | 6.6% |
+| not selected | 0.61 | 0.97 | 2.9% | 6.4% |
+| misc | 0.75 | 0.02 | 3.5% | 0.1% |
+
+Barrier stall's absolute cost dropped 58% (9.09 -> 3.77 cycles) and the
+total average stall-cycles-per-instruction dropped 29% (~21.3 -> ~15.05),
+tracking the 9.4% wall-clock reduction (stall cycles are not 1:1 with wall
+time, but the direction and rough proportion both confirm the mechanism
+rather than merely correlating with it). Occupancy stayed at its ceiling
+(99.68%, matching the pre-fix 98%), and compute throughput actually rose
+(33-36% before -> 39.62% after) since less of each SM's cycles are now
+spent on blocks doing nothing. Grid confirmed as `(192, 1, 1)` in the raw
+report, matching the settled-blocks math above. Raw reports:
+`autoresearch/beams/ncu_persist_rebalanced_4099.ncu-rep`.
+
+**Qwen's honest secondary finding: fixing the idle-block count did not
+fix Qwen's barrier stall, and the wall-clock stayed flat rather than
+improving.** `ncu` on Qwen's `attention_persist` post-fix (grid `(144, 1,
+1)`, `autoresearch/beams/ncu_persist_qwen_rebalanced_4099.ncu-rep`) shows
+barrier stall *still* dominant -- 15.88 of ~26.46 total cycles, ~60%, if
+anything a larger share than minicpm ever measured -- and achieved
+occupancy down at 74.31% (well under minicpm's 99.68%), even though the
+same fix eliminated 100% of Qwen's previously-idle blocks (0 of 144 now
+unassigned, same as minicpm). The likely mechanism, not chased further
+this round: Qwen's `splits = 36` is a much bigger multiplier over its
+`ATTN_SPLITS`-derived baseline (`16 -> 36`, 2.25x) than minicpm's (`16 ->
+24`, 1.5x), because Qwen's `groups = 4` is smaller and the same settled
+`blocks = 144` divides into fewer, bigger multiples of it; each phase-one
+unit's own key range (`per = ceil(NK / S)`) is correspondingly narrower
+(roughly 114 keys per unit at cache 4099, against minicpm's ~171), and at
+that granularity per-block fixed overhead (launch/scheduling skew,
+register/shared-memory setup, `warp_partial`'s own startup cost) may be
+large enough relative to the shrunk real work that finish-time variance
+gets *worse* even though the assigned-work variance (the 0-vs-nonzero
+split this round targeted) is now zero. This is a distinct, second
+imbalance source from the one this round fixed -- over-fragmentation
+rather than under-assignment -- and it nets out flat rather than negative
+on Qwen's wall-clock, so it was not chased further: the `-9.4%` win on
+minicpm (the task's actual target) is real, reproducible, and does not
+regress Qwen, which is the bar this round needed to clear. A cap on how
+far `splits` can grow past the launched kernel's own tuned value (e.g.
+`splits <= 2 * (ATTN_SPLITS * qgroup)`, leaving some idle blocks on a
+small-`groups` shape like Qwen's rather than over-fragmenting) is a
+plausible follow-up if Qwen's flatness does not hold up under `bench.py`,
+but was not implemented speculatively against a result that already reads
+as a clean pass.
+
+**Process note.** A concurrent, unrelated agent landed an in-progress
+argmax feature (new files and struct fields across `phobos-lang`,
+`phobos-gguf/src/backend/mod.rs`, `device/mod.rs`, `device/kernels/mod.rs`)
+in this same shared working tree partway through this round, at one point
+leaving the tree unable to build for reasons entirely unrelated to this
+beam. Per the session's existing worktree-isolation lesson, this beam's
+own correctness gates were re-run inside an isolated `git worktree`
+carrying only this beam's exact diff (`attn.rs` copied whole, `mod.rs`'s
+three hunks reapplied by hand rather than via `git diff | git apply`,
+since a plain `git diff` on a file two concurrent agents are both editing
+silently captures both sets of hunks together -- learned the hard way when
+a first attempt at this isolation pulled the other agent's incomplete
+argmax additions along for the ride and failed to build for *their*
+reasons, not this beam's). Do not trust `git diff <file>` to isolate one
+beam's changes when another agent is concurrently editing the same file;
+diff against a known-clean base and hand-verify the hunks instead, or
+avoid shared files entirely per the existing lesson.
+
+**Nothing committed this round.** Per this round's brief, `scripts/bench.py`
+confirmation and the final commit are left to the orchestrator. Changed:
+`phobos-gguf/src/backend/device/attn.rs` (`attention_decode`,
+`attn_persist_plan`), `phobos-gguf/src/backend/device/mod.rs`
+(`AttnPersistKey` narrowed to four fields, new `AttnPersistEntry` type
+alias, `attn_persist_modules`'s value type). `phobos-gguf/src/backend/
+device/kernels/attn.rs` (the kernel source generator) is untouched --
+this round is entirely in the caller's grid/split arithmetic, matching
+the task brief's "contained" option.
