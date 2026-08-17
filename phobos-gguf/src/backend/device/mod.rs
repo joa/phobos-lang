@@ -50,6 +50,10 @@ type DeviceQuant = (
     usize,
 );
 
+/// Output width, `k`, and split count: what [`kernels::q8_qmma_split_src`]'s
+/// generated text is a function of.
+type QmmaSplitKey = (usize, usize, usize);
+
 /// Heads, head dimension, taps, head stride, normalize, query scale, rows, and
 /// rows per program: everything [`delta_conv_src`] bakes in.
 type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
@@ -145,6 +149,12 @@ pub struct DeviceBackend {
     q8_mma: Variants,
     q8_qmma: Module,
     q8_qmma_deep: HashMap<usize, Module>,
+    /// The split-K variant of the deep tile and its reduction, keyed by
+    /// output width, `k` and the split count. Compiled lazily: a shape only
+    /// pays for this when [`kernels::q8_qmma_splits`] declines the unsplit
+    /// grid. See `matmul.rs`'s `project_q8` and
+    /// `kernels::q8_qmma_split_src`'s doc comment.
+    q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
     q8_split: Variants,
     q8_qdot: Module,
     q8_qdot_add: Module,
@@ -156,6 +166,15 @@ pub struct DeviceBackend {
     /// until the first one is compiled and can be asked about.
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
+    /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved
+    /// grid. Default OFF: the per-kernel win is real (see
+    /// `autoresearch/beams/q8-qmma-split-k.md`) but the extra graph node
+    /// per routed projection (write, then reduce, where there was one
+    /// launch) costs more in aggregate wall clock than the kernels save on
+    /// this platform, end to end -- a graph-level cost the isolated ncu
+    /// measurements never saw. `PHOBOS_QMMA_SPLIT=1` opts in for anyone
+    /// revisiting this at a different node-count/model shape mix.
+    qmma_split: bool,
     /// Fused kernels the pass has emitted, with the plan that says what to bind
     /// to each. See [`fuse`].
     fused_plans: RefCell<HashMap<ChainKey, (Module, Plan)>>,
@@ -380,12 +399,17 @@ impl DeviceBackend {
             q8_mma,
             q8_qmma,
             q8_qmma_deep,
+            q8_qmma_split: RefCell::new(HashMap::new()),
             q8_split,
             q8_qdot,
             q8_qdot_add,
             q8_qdot_persist: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
             persist_qdot: std::env::var_os("PHOBOS_PERSIST_QDOT").is_some(),
+            qmma_split: matches!(
+                std::env::var("PHOBOS_QMMA_SPLIT").as_deref(),
+                Ok("1" | "on" | "yes" | "true")
+            ),
             fused_plans: RefCell::new(HashMap::new()),
             fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),
             fused_project: fused_stage("PHOBOS_FUSED_PROJ"),

@@ -1,0 +1,206 @@
+{
+  "meta": {
+    "card": "NVIDIA GeForce RTX 2080 SUPER",
+    "driver": "610.88",
+    "clock_max": "2145",
+    "commit": "e2a692f"
+  },
+  "args": {
+    "models": "['minicpm5-1b-Q8_0']",
+    "prompt_tokens": "[128]",
+    "gen_tokens": "[0]",
+    "reps": "3",
+    "rounds": "4",
+    "llama_bench": "[]",
+    "cuda_lib": "[]",
+    "llama_args": "",
+    "no_llama": "True",
+    "no_build": "True",
+    "warm_secs": "45.0",
+    "max_idle_util": "45.0",
+    "max_idle_power": "120.0",
+    "poll": "0.5",
+    "force": "False",
+    "csv": "autoresearch/beams/qmma_splitk_on.csv",
+    "json": "autoresearch/beams/qmma_splitk_on.json"
+  },
+  "backends": {
+    "phobos": "CUDA"
+  },
+  "labels": {
+    "phobos/minicpm5-1b-Q8_0": "llama 1.1B Q8_0"
+  },
+  "summary": {
+    "median_clock": 1440.0,
+    "uncontended_rounds": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "rounds": [
+      1,
+      2,
+      3,
+      4
+    ],
+    "drift": {
+      "1": 0.25711460934096286,
+      "2": -0.004276217117425096,
+      "3": 0.004276217117425096,
+      "4": -0.013345510723275944
+    }
+  },
+  "health": {
+    "1": {
+      "util": 4.5,
+      "power": 21.925
+    },
+    "2": {
+      "util": 5.0,
+      "power": 21.175
+    },
+    "3": {
+      "util": 4.0,
+      "power": 27.9
+    },
+    "4": {
+      "util": 4.5,
+      "power": 21.064999999999998
+    }
+  },
+  "samples": [
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 5333.333333333333,
+      "clock": 1631.25
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 5818.181818181819,
+      "clock": 1631.25
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 5818.181818181819,
+      "clock": 1631.25
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 4129.032258064516,
+      "clock": 1323.75
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 4571.428571428572,
+      "clock": 1323.75
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 4740.740740740741,
+      "clock": 1323.75
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 4571.428571428572,
+      "clock": 1448.4375
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 4571.428571428572,
+      "clock": 1448.4375
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 4413.793103448275,
+      "clock": 1448.4375
+    },
+    {
+      "round": 4,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 4129.032258064516,
+      "clock": 1431.5625
+    },
+    {
+      "round": 4,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 4266.666666666667,
+      "clock": 1431.5625
+    },
+    {
+      "round": 4,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 4923.076923076923,
+      "clock": 1431.5625
+    }
+  ]
+}

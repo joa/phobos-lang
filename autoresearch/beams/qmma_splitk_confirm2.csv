@@ -1,0 +1,31 @@
+round,slot,engine,backend,model,test,rep,rate,clock
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6879.8,2045.0
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,9236.88,2045.0
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8782.34,2045.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,1391.304347826087,1691.25
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,1488.372093023256,1691.25
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6736.842105263158,1691.25
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4129.032258064516,1303.125
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,4571.428571428572,1303.125
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,4413.793103448275,1303.125
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,7076.95,1630.0
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8342.02,1630.0
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8834.41,1630.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6457.7,1230.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7806.69,1230.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8262.06,1230.0
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4129.032258064516,1597.5
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,4571.428571428572,1597.5
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,4923.076923076923,1597.5
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4413.793103448275,1419.375
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,4740.740740740741,1419.375
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,4740.740740740741,1419.375
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6436.56,1460.0
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8538.29,1460.0
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8621.79,1460.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6527.28,1250.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8465.78,1250.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8173.8,1250.0
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4266.666666666667,1592.8125
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,4740.740740740741,1592.8125
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,4266.666666666667,1592.8125
