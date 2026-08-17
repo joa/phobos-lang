@@ -1,7 +1,6 @@
 // FlashAttention-2 implementation (fp32)
 // see https://tridao.me/publications/flash2/flash2.pdf
 @cluster(BR in [1024, 4096])
-@pipeline
 @tensorcore
 @launch(128)
 @autotune(D in [64], BR in [4, 128], BC in [4, 128])

@@ -61,21 +61,42 @@ const QMMA_TILES: i64 = 64;
 
 const WMMA_SMEM_PAD: i64 = 8;
 
+/// What `emit` learned across every kernel in the module: the dynamic
+/// shared-memory sideband `compile_shared` already reported, plus, for any
+/// kernel that wrote `@pipeline`, whether that assertion held. A non-empty
+/// `pipeline_failures` entry is `(kernel name, decline reasons)`; a caller
+/// that wants the "fail to compile" behavior by default converts a non-empty
+/// list into an error (see `phobos_lang::compile_shared`). A caller that
+/// needs to aggregate several compiles of the same kernel source before
+/// deciding (see `phobos_kernels::compile::Variants::compile`, which
+/// compiles an aligned and a masked-fallback variant separately and treats
+/// the assertion as satisfied if either pipelines) reads this directly
+/// instead.
+#[derive(Debug)]
+pub struct EmitOutput {
+    pub shared: Vec<(String, usize)>,
+    pub pipeline_failures: Vec<(String, Vec<String>)>,
+}
+
 pub fn emit<'c>(
     base: &phobos_base::context::Context,
     kernels: &[Kernel],
     context: &'c Context,
     module: &Module<'c>,
-) -> Result<Vec<(String, usize)>> {
+) -> Result<EmitOutput> {
     let loc = Location::unknown(context);
     let gpu_block = Block::new(&[]);
     let mut shared = Vec::new();
+    let mut pipeline_failures = Vec::new();
 
     for kernel in kernels {
         let mut cg = Codegen::new(base, context, kernel)?;
         let func = cg.emit_kernel(kernel)?;
         if cg.dynamic_shared {
             shared.push((kernel.name.clone(), cg.shared_bytes_peak as usize));
+        }
+        if cg.pipeline_assert && !cg.pipelined_any {
+            pipeline_failures.push((kernel.name.clone(), cg.pipeline_declines));
         }
 
         // shared-memory tile buffers are module-level globals
@@ -98,7 +119,10 @@ pub fn emit<'c>(
 
     module.body().append_operation(gpu_module);
 
-    Ok(shared)
+    Ok(EmitOutput {
+        shared,
+        pipeline_failures,
+    })
 }
 
 /// XOR column swizzle for mma.sync staging buffers
@@ -289,7 +313,26 @@ struct Codegen<'c> {
     // was rounded down to whole chunks, so a slice offset by one of them is in
     // bounds by construction and needs no mask.
     trimmed_ivs: Vec<String>,
-    pipeline: bool,   // whether to double-buffer staged tiles in for loops
+    /// Whether `@pipeline` was written on this kernel. The generic loop path
+    /// (see `pipeline.rs`) no longer reads this to decide whether to
+    /// *attempt* double-buffering -- every eligible loop is auto-attempted
+    /// regardless. It still gates the fused-GEMM backend's own,
+    /// independent double-buffering (`matmul::{plan,reg,wmma}.rs`'s
+    /// `pairs`), which has no legality/budget check of its own and is left
+    /// exactly as attribute-gated as before: see `pipeline.rs`'s beam notes
+    /// for why that backend was not brought under auto-attempt in this
+    /// pass. What `@pipeline` now means kernel-wide is an assertion: at
+    /// least one loop (or fused-GEMM dispatch) in this kernel must actually
+    /// pipeline, checked via `pipelined_any` once the kernel is done.
+    pipeline_assert: bool,
+    /// Set whenever some loop in the kernel currently being emitted actually
+    /// pipelined, through either mechanism `pipeline_assert` gates. Checked
+    /// against `pipeline_assert` once per kernel in `emit`.
+    pipelined_any: bool,
+    /// Decline reasons collected while `pipeline_assert` is true, so a
+    /// failed assertion can report why every loop it saw declined instead of
+    /// a bare "could not pipeline this kernel".
+    pipeline_declines: Vec<String>,
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
     launch: Option<Launch>,
@@ -362,7 +405,9 @@ impl<'c> Codegen<'c> {
             hoisted_stages: Vec::new(),
             ragged_iv: None,
             trimmed_ivs: Vec::new(),
-            pipeline: kernel.attrs.iter().any(|a| a.name == "pipeline"),
+            pipeline_assert: kernel.attrs.iter().any(|a| a.name == "pipeline"),
+            pipelined_any: false,
+            pipeline_declines: Vec::new(),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
             mma_sync: kernel.wants_mma_sync(),
             launch,

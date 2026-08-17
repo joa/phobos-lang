@@ -458,11 +458,25 @@ impl<'c> Codegen<'c> {
             return self.emit_frag_for(block, var, start, end, step, body, &carried);
         }
 
-        // @pipeline: double-buffer leading staged slices in this loop.
-        if self.pipeline
-            && let Some((staged, rest)) = self.pipeline_candidate(body)
-        {
-            return self.emit_pipelined_for(block, var, start, end, step, &staged, rest);
+        // Auto-attempt: every loop shaped for it pipelines whether or not
+        // `@pipeline` was written (see pipeline_candidate's doc comment for
+        // "shaped for it", and the block comment at the end of pipeline.rs
+        // for why no CTA-uniformity check is needed here: every `.ph`-level
+        // loop bound is uniform by construction in this language).
+        // `@pipeline` itself is now an assertion -- "at least one loop (or
+        // fused-GEMM dispatch; see `pipeline_assert`'s doc comment) in this
+        // kernel pipelines" -- enforced once per kernel in `emit`, using
+        // `pipelined_any` and the decline reasons collected below.
+        match self.pipeline_candidate(body) {
+            Ok((staged, rest)) => {
+                self.pipelined_any = true;
+                return self.emit_pipelined_for(block, var, start, end, step, &staged, rest);
+            }
+            Err(decline) => {
+                if self.pipeline_assert {
+                    self.pipeline_declines.push(format!("loop `{var}`: {decline}"));
+                }
+            }
         }
 
         let const_step = match step {
@@ -726,6 +740,16 @@ impl<'c> Codegen<'c> {
         while i < stmts.len() {
             let consumed = if let Some(p) = self.matmul_candidate(&stmts[i..]) {
                 let consumed = p.consumed;
+                // The fused-GEMM backend (matmul/{plan,reg,wmma}.rs) still
+                // reads `pipeline_assert` directly to double its own staging
+                // buffers (`pairs`), unchanged from before this pass; see
+                // `pipeline_assert`'s doc comment for why that backend was
+                // left attribute-gated. Whenever it is set, that doubling
+                // unconditionally happens for every fused dispatch, so this
+                // is a real "did the kernel pipeline something" signal.
+                if self.pipeline_assert {
+                    self.pipelined_any = true;
+                }
                 self.emit_register_matmul(block, &p)?;
                 consumed
             } else if let Some(plan) = self.frag_acc_candidate(&stmts[i..]) {

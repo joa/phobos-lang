@@ -26,10 +26,41 @@ pub fn compile(context: &phobos_base::context::Context, code: &str) -> anyhow::R
 /// Note: Must use `@dynshared` for this to have any effect. Kernels not annotated
 ///       with dynamic shared memory will use static globals with a cap at 48 KB.
 ///       Shared memory must be respected in the launch ABI.
+///
+/// Enforces every kernel's `@pipeline` assertion (see `codegen::EmitOutput`):
+/// fails if a kernel wrote `@pipeline` and nothing in it pipelined. A caller
+/// that compiles several textual variants of one kernel source and wants the
+/// assertion satisfied if *any* variant pipelines (see
+/// `phobos_kernels::compile::Variants::compile`) should call `compile_raw`
+/// directly instead and aggregate `pipeline_failures` itself.
 pub fn compile_shared(
     context: &phobos_base::context::Context,
     code: &str,
 ) -> anyhow::Result<(String, Vec<(String, usize)>)> {
+    let out = compile_raw(context, code)?;
+    if let Some((name, reasons)) = out.pipeline_failures.first() {
+        let why = if reasons.is_empty() {
+            "no loop in the kernel is shaped for pipelining".to_string()
+        } else {
+            reasons.join("; ")
+        };
+        anyhow::bail!(
+            "kernel `{name}`: @pipeline asserts this kernel can be pipelined, but nothing in it \
+             did: {why}"
+        );
+    }
+    Ok((out.code, out.shared))
+}
+
+/// `compile_shared` without the `@pipeline`-assertion enforcement: returns
+/// every kernel's raw outcome instead of failing on the first unsatisfied
+/// one, for a caller that needs to combine outcomes across more than one
+/// compile of related sources before deciding (see `compile_shared`'s doc
+/// comment).
+pub fn compile_raw(
+    context: &phobos_base::context::Context,
+    code: &str,
+) -> anyhow::Result<CompileOutput> {
     if context.print_phases {
         println!("=== SOURCE ========================");
         println!("{code}");
@@ -44,15 +75,15 @@ pub fn compile_shared(
         println!("===================================");
     }
 
-    let shared = std::cell::RefCell::new(Vec::new());
+    let out = std::cell::RefCell::new(None);
     let code = phobos_mlir::gen_code(context, |base, context, module| {
-        *shared.borrow_mut() = codegen::emit(base, &kernels, context, module)?;
+        *out.borrow_mut() = Some(codegen::emit(base, &kernels, context, module)?);
         Ok(())
     })?;
 
-    let shared = shared.into_inner();
+    let out = out.into_inner().expect("gen_code's closure always runs");
     let backend = context.gpu_config.backend();
-    let code = backend.post_process(code, !shared.is_empty());
+    let code = backend.post_process(code, !out.shared.is_empty());
 
     if context.print_phases {
         let name = backend.code_name();
@@ -61,7 +92,20 @@ pub fn compile_shared(
         println!("===================================");
     }
 
-    Ok((code, shared))
+    Ok(CompileOutput {
+        code,
+        shared: out.shared,
+        pipeline_failures: out.pipeline_failures,
+    })
+}
+
+/// Raw result of `compile_raw`: the generated code, the dynamic
+/// shared-memory sideband, and, per kernel that wrote `@pipeline`, whether
+/// the assertion held (see `codegen::EmitOutput`, which this wraps).
+pub struct CompileOutput {
+    pub code: String,
+    pub shared: Vec<(String, usize)>,
+    pub pipeline_failures: Vec<(String, Vec<String>)>,
 }
 
 pub fn requires_wide_index(kernels: &[ast::Kernel]) -> bool {

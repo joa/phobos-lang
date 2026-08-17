@@ -82,7 +82,7 @@ impl<'c> Codegen<'c> {
         }
 
         // f16 staging, padded against bank conflicts when the CTA budget allows
-        let pairs = if self.pipeline { 2 } else { 1 };
+        let pairs = if self.pipeline_assert { 2 } else { 1 };
         let pad = self.wmma_should_pad(m, kk, n, acc_elem, pairs as i64);
         let alloc = if pad {
             Self::alloc_tile_padded
@@ -187,7 +187,7 @@ impl<'c> Codegen<'c> {
         let origin = self.warp_block_origin(block, wm, wn, fm * 16, fnn * 16)?;
         let (_, _, _, m0, n0) = origin;
 
-        let pairs = if self.pipeline { 2 } else { 1 };
+        let pairs = if self.pipeline_assert { 2 } else { 1 };
         let (a_bufs, b_bufs) = self.alloc_staging_pairs(pairs, |cg| {
             Ok((alloc(cg, block, &[m, kk])?, alloc(cg, block, &[kk, n])?))
         })?;
