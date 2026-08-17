@@ -776,13 +776,33 @@ consult that opened this round: attention's remaining ~3x-over-floor gap
 (ncu on the current, post-vectorization `attention_persist` kernel shows
 occupancy now at ~98% -- up from 63.8% before vectorization -- but memory
 throughput 37%, compute throughput 35%, and the stall breakdown is
-barrier-dominated: 42.7% of stall cycles are warps waiting at the intra-CTA
-combine barrier for sibling warps, 24.2% more is global-memory latency,
-everything else under 11%. Full counters and reproduction command in
-[[cache-length-split-buckets]]. This argues against more ILP/ key-batching
-(occupancy is already maxed) and toward reducing the combine barrier's
-cost or the memory-latency variance across warps that staggers arrival at
-it -- a different lever than anything tried on this kernel so far.
+barrier-dominated: 42.7% of stall cycles are warps waiting at a barrier,
+24.2% more is global-memory latency, everything else under 11%. A
+discriminating measurement against the launched `attention_split` kernel
+(same `warp_partial` combine, no `grid_barrier`) found barrier stall
+collapses to ~12% there -- so the cost is `attention_persist`'s
+`grid_barrier()` cross-block sync, not `warp_partial`'s own combine.
+Full counters and both reproduction commands in
+[[cache-length-split-buckets]]. This argues against more ILP/key-batching
+(occupancy is already maxed, and `attention_split`'s own profile shows
+compute throughput is not the ceiling either) and toward reducing
+`grid_barrier`'s cost or the cross-block work-imbalance that staggers
+arrival at it -- a different lever, and a different kernel region, than
+anything tried so far.
+
+## Open question, not yet resolved: `PHOBOS_ATTN_PERSIST` itself is still opt-in
+
+Every benchmark this session forces `PHOBOS_ATTN_PERSIST=1`; the 0.97x
+above is not what a default `phobos-cli` invocation gets. Its stated
+opt-in reason (`attn.rs`'s doc comment: a `grid_barrier` deadlocks if
+co-residency doesn't hold) is real but now looks more mitigated than the
+comment implies -- `attn_persist_plan` already queries the driver's actual
+occupancy via `persistent_grid` and declines any shape that doesn't fit
+(which is why Qwen never takes this path at all), rather than assuming a
+block count. Not flipped this round: unlike the two fusion flags, a wrong
+call here fails as a hang, not a slow number, and CLAUDE.md's guidance is
+to check before taking actions with that failure mode. Flagged to the user
+directly instead of decided unilaterally.
 
 ## Process lesson: subagents can produce real, correct work and still never send a final report
 

@@ -723,25 +723,43 @@ per-instruction average of ~21.3 cycles):
 | math pipe / MIO throttle | 0.75 | 3.5% |
 
 Barrier stall alone is the single largest cost, ahead of raw memory
-latency. Mechanism: `warp_partial`'s 8 warps each do independent
-register-resident online-softmax work over their key sub-range, then hit a
-`syncthreads()`-style barrier before the shared-memory combine into the
-final output. A warp that finishes early (or whose K/V loads happened to
-hit cache better) idles at that barrier waiting for the slowest sibling,
-and that idle time is exactly what `stalled_barrier` counts. This is
-consistent with the long-scoreboard share (24.2%) being the likely root
-cause of *why* warps arrive staggered in the first place -- the two
-numbers are not independent.
+latency. **Correction, discriminating measurement below: this is not
+`warp_partial`'s intra-CTA combine sync.** Initial writeup guessed the
+8-warp combine barrier; the actual source is `attention_persist`'s
+`grid_barrier()`, the cross-block sync between the persistent kernel's
+split and merge phases.
 
-**What this means for the next round.** With occupancy already maxed,
-adding more independent work per warp (e.g. key-batching, processing
-kb>1 keys per loop iteration for more ILP) mostly attacks the 15% "wait" +
-"selected" bucket, not the dominant 43% barrier cost -- a materially
-different bet than it would have been pre-vectorization, when occupancy
-itself was the ceiling. The more promising unexplored lever is reducing
-either the combine barrier's cost directly (fewer syncs, or a
-shuffle-only combine that avoids the shared-memory round trip for some
-subset of the reduction) or the memory-latency variance across warps that
-staggers their arrival at it (e.g. software-pipelined/prefetched K/V loads
-so a warp has useful work queued rather than idling). Raw report kept:
+Ran the identical profile against the *launched* `attention_split` kernel
+(same shape/length, `PHOBOS_ATTN_PERSIST` unset) -- it contains
+`warp_partial`'s combine barrier but no `grid_barrier()`:
+
+    ncu -k "regex:attention_split" -c 5 --set full -f \
+      -o autoresearch/beams/ncu_split_post_vectorize_4099 -- \
+      target/release/examples/attndecode.exe
+    (PHOBOS_ATTNDECODE_SHAPE=minicpm PHOBOS_ATTNDECODE_LENGTH=4099)
+
+Barrier stall on `attention_split`: **1.43 cycles, ~12% of ~11.5 total**
+(vs 9.09 cycles, 42.7%, on `attention_persist`). The dominant cost there
+is long-scoreboard memory latency (4.82 cycles, ~42%) plus fixed-latency
+wait (2.15, ~19%) -- an ordinary latency-bound profile, not
+barrier-dominated. Occupancy on `attention_split` is 64.9% (unchanged from
+this beam's pre-vectorization baseline; vectorization's occupancy gain was
+specific to `attention_persist`'s launch shape, not `warp_partial` itself).
+Raw report: `autoresearch/beams/ncu_split_post_vectorize_4099.ncu-rep`.
+
+**What this means for the next round.** The barrier cost is a
+`grid_barrier()` / cross-block problem, not a `warp_partial` one: some of
+the persistent kernel's 144 resident blocks finish their grid-strided
+split-phase work later than others (plausibly the same memory-latency
+variance the long-scoreboard share hints at, now expressed as cross-block
+skew rather than cross-warp skew) and every block idles at the barrier for
+the slowest one before the merge phase can start. Two fixes worth trying,
+in the persistent kernel's structure rather than `warp_partial`: (a)
+better-balanced work assignment across the grid-strided split so blocks
+finish closer together, or (b) replace the full grid barrier with an
+atomic arrival-counter-gated merge that lets early-finishing blocks start
+merging as data becomes available rather than all waiting on the
+slowest. Key-batching/ILP tricks remain out of scope here too -- neither
+occupancy (98% on the persistent kernel) nor compute throughput (35%) is
+the ceiling. Raw report for the persist kernel itself:
 `autoresearch/beams/ncu_persist_post_vectorize_4099.ncu-rep`.
