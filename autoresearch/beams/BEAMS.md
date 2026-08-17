@@ -956,3 +956,57 @@ runtime.rs,backend/mod.rs,backend/device/{mod.rs,backend.rs,argmax.rs,
 kernels/{mod.rs,argmax.rs}},examples/{bench.rs,argmax_check.rs},Cargo.toml`,
 `phobos-inference/src/{model.rs,sampling.rs,generate.rs}`,
 `phobos-base/tests/source_size.rs`.
+
+## Both beams landed by direct takeover, 2026-08-17: the session's goal is crossed
+
+Both agents' work sat in one shared, actively-being-edited tree with
+genuine file overlap (`phobos-gguf/src/backend/device/mod.rs`, touched by
+both). Verified each independently rather than trusting either report at
+face value: `git diff` showed the overlap was cleanly separable into
+non-overlapping hunks (confirmed by reading both diffs side by side, not
+assumed), so each beam was split out, built, gated, and benchmarked on its
+own before being combined.
+
+The attention-side beam was verified twice -- once in the shared tree, and
+a second time in a fully isolated `git worktree` (its own
+`CARGO_TARGET_DIR`, hardlinked model files) after a `--no-build`
+confirmation run against a target directory shared with the still-running
+argmax agent came back with intermittent, non-deterministic parse
+failures on 5 of 8 rows. Not a bug in the grid_barrier fix: a second,
+fully isolated run was clean on all 8. **Lesson for the worktree-vs-shared-
+tree question this session kept deferring**: a shared `CARGO_TARGET_DIR`
+between two concurrently active trees is not safe even when the source
+trees themselves have zero content conflict -- cargo's build outputs
+raced. A worktree only earns its cost (model files needing a hardlink,
+`.cargo/config.toml` needing a copy since it is gitignored, and a full
+from-scratch build unless `CARGO_TARGET_DIR` is deliberately kept separate
+too) when a confirmation run needs to be trusted while another agent is
+still actively building in the same tree -- which is exactly what
+happened here. Committed separately: `fc7de8b` (grid_barrier),
+`adbe187` (argmax).
+
+**Combined confirmation, both beams landed, `PHOBOS_ATTN_PERSIST=1`,
+same session, same card, interleaved against llama.cpp:**
+
+| model | tg1024 | tg2048 | tg4096 |
+| --- | --- | --- | --- |
+| minicpm5-1b | 1.00x | 1.00x | 0.996x |
+| Qwen3.5-0.8B | 1.16x | 1.16x | 1.16x |
+
+minicpm crosses parity on tg1024/tg2048 for the first time this session
+(276.86 vs 275.99 t/s, 273.29 vs 273.19 t/s) and sits a fraction under on
+tg4096 (266.17 vs 267.15, -0.4%) -- from the session's opening 0.86-0.92x.
+Qwen, not the target but regression-watched throughout, gained
+independently from the argmax beam (its much larger vocabulary means the
+readback it skips is proportionally larger) and now leads at 1.16x, up
+from 1.08-1.09x.
+
+The user's directive was to beat llama.cpp's number, not stop at a
+specific mechanism, and to push past any "good enough" stopping point
+("Push further. Easy is for the weak") -- tg4096 not yet crossing 1.0x
+means this is not fully, unconditionally done. Two honest open items:
+Qwen's `attention_persist` path still shows ~60% barrier stall from a
+different mechanism (over-fragmentation, not under-assignment -- see
+[[cache-length-split-buckets]]'s Round 3), untouched because it does not
+regress Qwen; and `PHOBOS_ATTN_PERSIST` itself remains opt-in pending the
+user's call on the open question above.
