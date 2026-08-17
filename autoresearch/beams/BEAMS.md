@@ -690,5 +690,36 @@ precisely):
    dropped 50%+) -- primary target. Territory: `phobos-gguf/src/llama.rs`,
    `phobos-gguf/src/backend/fuse/*.rs`, `phobos-gguf/src/layers.rs`.
 
+## Process lesson: two concurrent `bench.py` runs can corrupt each other silently
+
+The two beams dispatched above ran their own `bench.py` invocations at
+roughly the same time and corrupted each other's numbers.
+`autoresearch/beams/vectorize_minicpm_bench.log` is the evidence: both
+engines read at roughly half this session's established baseline (~100-150
+t/s vs the normal ~230-280 t/s), in **every** round including the one
+`bench.py` itself labeled "0% util between rounds, uncontended." Why the
+label didn't catch it: `bench.py`'s contention check samples GPU state
+*between* rounds via `nvidia-smi`; it has no way to detect a sibling
+process's GPU work if that work overlaps the *timed measurement itself*
+rather than the gap between rounds. Two `bench.py` processes running
+concurrently -- as opposed to one `bench.py` process correctly detecting
+some unrelated third-party GPU load -- can defeat this check entirely,
+because the interference isn't confined to the gaps it samples.
+
+**Lesson for every future round in this session**: dispatching two beams
+that will each run their own `bench.py` confirmation concurrently is not
+safe by default, unlike file-ownership conflicts (which `git status`/`git
+diff --stat` catch) -- GPU contention between sibling agents' benchmarks
+produces *plausible-looking, self-labeled-clean* bad data with no error and
+no obvious tell beyond checking absolute numbers against a known baseline.
+Before trusting or reporting any `bench.py` result from a round that ran
+concurrently with another, verify the absolute numbers (not just the
+ratio) against this file's own current-state snapshot, and check `tasklist
+| grep -i "bench\|python"` for a sibling process, not only `bench.py`'s own
+between-round label. When dispatching concurrent beams going forward,
+either stagger their benchmark phases explicitly in the brief, or accept
+the risk and mandate the absolute-number sanity check as a standing
+instruction (done retroactively for the two beams above via `SendMessage`).
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
