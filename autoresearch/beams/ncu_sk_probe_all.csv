@@ -1,0 +1,5 @@
+﻿"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","Section Name","Metric Name","Metric Unit","Metric Value"
+"0","52540","backend_check.exe","127.0.0.1","q8_qmma_sk_lo","1","13","(128, 1, 1)","(1, 16, 1)","0","7.5","Command line profiler metrics","dram__bytes_read.sum","Mbyte","1.27"
+"0","52540","backend_check.exe","127.0.0.1","q8_qmma_sk_lo","1","13","(128, 1, 1)","(1, 16, 1)","0","7.5","Command line profiler metrics","dram__bytes_write.sum","Mbyte","1.45"
+"1","52540","backend_check.exe","127.0.0.1","q8_qmma_sk_hi","1","13","(128, 1, 1)","(1, 32, 1)","0","7.5","Command line profiler metrics","dram__bytes_read.sum","Mbyte","2.45"
+"1","52540","backend_check.exe","127.0.0.1","q8_qmma_sk_hi","1","13","(128, 1, 1)","(1, 32, 1)","0","7.5","Command line profiler metrics","dram__bytes_write.sum","Mbyte","1.74"

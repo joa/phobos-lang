@@ -60,7 +60,20 @@ impl DeviceBackend {
                 } else {
                     1
                 };
-                if splits > 1 {
+                // The probe's literal K = k / 2 has to stay a whole number of
+                // Q8_0 blocks, same requirement q8_qmma_splits's halving loop
+                // enforces for the older split path: `q8_qmma_sk_hi_src`'s
+                // `hb = half / Q8_BLOCK` would otherwise truncate and the
+                // kernel's own `@aligned(KB = hb)` claim would be silently
+                // wrong rather than merely declined. No routed shape hits
+                // this today (every k here is a multiple of 64), but falling
+                // back to the unsplit path is one check, not a proof.
+                if depth == Q8_QMMA_TM && self.qmma_streamk && (k / 2).is_multiple_of(Q8_BLOCK) {
+                    self.launch_qmma_streamk(
+                        rows, qmma_rows, k, blocks, n, wide, qa_ptr, das_ptr, w_ptr, s_ptr,
+                        out_ptr, f32_bytes,
+                    )?;
+                } else if splits > 1 {
                     self.launch_qmma_split(
                         rows, qmma_rows, k, blocks, n, wide, splits, qa_ptr, das_ptr, w_ptr,
                         s_ptr, out_ptr, f32_bytes,
@@ -280,5 +293,82 @@ impl DeviceBackend {
             &reduce_operands,
             (rows as u32, (n / wide) as u32, 1),
         )
+    }
+
+    /// Stream-K DRAM-traffic probe (see `kernels::q8_qmma_sk_lo_src`'s doc
+    /// comment and `autoresearch/beams/q8-qmma-streamk.md`): every deep-tile
+    /// output tile splits its own `k` in half unconditionally, two launches,
+    /// no scratch buffer -- the second reads and writes the same region of
+    /// `out` the first one wrote. This exists to measure the boundary-fixup
+    /// mechanism's own DRAM cost in isolation, before building the full
+    /// work-assignment scheme that would only split the tiles an
+    /// assignment's boundaries actually cross.
+    ///
+    /// The low half keeps `qmma_t`'s direct-to-global write (no shared tile
+    /// at all, see the emit sweep in the beam's writeup), so it can run at
+    /// the caller's own column width. The high half cannot: `+=` routes
+    /// through a fresh shared accumulator tile (see `q8_qmma_sk_hi_src`'s
+    /// doc comment), and at `wide = 128` that tile is 64 KB, over the 48 KB
+    /// static ceiling -- confirmed the hard way, `Module::from_ptx` rejects
+    /// it exactly like the split-K beam's own second compiler-proof bug (see
+    /// `autoresearch/beams/q8-qmma-split-k.md`). So the high half always
+    /// runs at `Q8_QMMA_TN` (64, a 32 KB tile), its own grid over `n`,
+    /// regardless of what column width the low half used; `Q8_QMMA_TN`
+    /// divides every width `qmma_width` ever returns.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_qmma_streamk(
+        &self,
+        rows: usize,
+        row_off: usize,
+        k: usize,
+        blocks: usize,
+        n: usize,
+        wide: usize,
+        qa_ptr: u64,
+        das_ptr: u64,
+        w_ptr: u64,
+        s_ptr: u64,
+        out_ptr: u64,
+        f32_bytes: u64,
+    ) -> Result<()> {
+        let half = k / 2;
+        let key = (wide, half);
+        if !self.q8_qmma_streamk.borrow().contains_key(&key) {
+            let lo_src = q8_qmma_sk_lo_src(Q8_QMMA_CTA, Q8_QMMA_TM, wide, half);
+            let hi_src = q8_qmma_sk_hi_src(Q8_QMMA_CTA, Q8_QMMA_TM, Q8_QMMA_TN, half);
+            let lo_mod = compile(
+                &lo_src,
+                &[("TM", Q8_QMMA_TM), ("TN", wide)],
+                "q8_qmma_sk_lo",
+            )?;
+            let hi_mod = compile(
+                &hi_src,
+                &[("TM", Q8_QMMA_TM), ("TN", Q8_QMMA_TN)],
+                "q8_qmma_sk_hi",
+            )?;
+            self.q8_qmma_streamk
+                .borrow_mut()
+                .insert(key, (lo_mod, hi_mod));
+        }
+        let cache = self.q8_qmma_streamk.borrow();
+        let (lo_mod, hi_mod) = &cache[&key];
+
+        let operands = [
+            (qa_ptr + (row_off * k) as u64, [rows as i64, k as i64]),
+            (
+                das_ptr + (row_off * blocks) as u64 * f32_bytes,
+                [rows as i64, blocks as i64],
+            ),
+            (w_ptr, [n as i64, k as i64]),
+            (s_ptr, [blocks as i64, n as i64]),
+            (
+                out_ptr + (row_off * n) as u64 * f32_bytes,
+                [rows as i64, n as i64],
+            ),
+        ];
+        let lo_grid = ((rows / Q8_QMMA_TM) as u32, (n / wide) as u32, 1);
+        let hi_grid = ((rows / Q8_QMMA_TM) as u32, (n / Q8_QMMA_TN) as u32, 1);
+        self.launch(lo_mod, "q8_qmma_sk_lo", &operands, lo_grid)?;
+        self.launch(hi_mod, "q8_qmma_sk_hi", &operands, hi_grid)
     }
 }
