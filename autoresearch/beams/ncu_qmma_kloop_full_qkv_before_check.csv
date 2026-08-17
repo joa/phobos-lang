@@ -1,0 +1,3 @@
+﻿"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","gpu__time_duration.sum","launch__grid_size","launch__registers_per_thread","sm__warps_active.avg.pct_of_peak_sustained_active","smsp__average_warps_issue_stalled_barrier_per_issue_active.ratio","smsp__average_warps_issue_stalled_long_scoreboard_per_issue_active.ratio","smsp__average_warps_issue_stalled_short_scoreboard_per_issue_active.ratio"
+"","","","","","","","","","","","us","","register/thread","%","inst","inst","inst"
+"0","49476","bench.exe","127.0.0.1","q8_qmma","1","13","(128, 1, 1)","(1, 20, 1)","0","7.5","71.904000","20","238","12.440172","0.020433","0.750326","0"
