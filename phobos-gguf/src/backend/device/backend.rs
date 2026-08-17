@@ -151,6 +151,10 @@ impl Backend for DeviceBackend {
         Ok(())
     }
 
+    fn argmax(&self, buf: Buf, len: usize) -> Result<i64> {
+        self.device_argmax(buf, len)
+    }
+
     fn constant(&self, key: &str, data: &[f32]) -> Result<Buf> {
         if let Some(&buf) = self.constants.borrow().get(key) {
             return Ok(buf);

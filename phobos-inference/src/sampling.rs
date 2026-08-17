@@ -85,6 +85,16 @@ impl SampleConfig {
         self.temperature <= 0.0
     }
 
+    /// Whether [`choose`]'s result depends on nothing but which logit is
+    /// largest: greedy, and with both penalties off so [`penalize`] would be
+    /// a no-op regardless of history. A caller with a device-side argmax
+    /// (see `phobos-gguf`'s `Backend::argmax`) can use it in place of
+    /// [`choose`] exactly when this holds -- penalized greedy still needs the
+    /// full, rewritten logits vector, so it stays on the ordinary path.
+    pub fn is_greedy_unpenalized(&self) -> bool {
+        self.is_greedy() && self.repetition_penalty == 1.0 && self.presence_penalty == 0.0
+    }
+
     /// Whether the penalties would move any logit. Checked per half so the first
     /// generated token does not pay for a vocab-sized copy just because a
     /// presence penalty is set.

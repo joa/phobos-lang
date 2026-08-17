@@ -340,6 +340,95 @@ impl<'c> Codegen<'c> {
         })
     }
 
+    /// `argsel(va, vb, ia, ib)`: select(va >= vb, ia, ib), the index side of
+    /// a (value, index) fold `tmax` alone cannot carry. The call-site glue
+    /// for [`Self::tile_argsel_bc`], kept out of `expr.rs`'s `emit_call` for
+    /// the same reason `tmax`'s own handling stays inline there while this
+    /// one moved: shape-count against the workspace's line cap.
+    pub(in crate::codegen) fn emit_argsel(
+        &mut self,
+        block: &Block<'c>,
+        args: &[Expr],
+    ) -> Result<Rv<'c>> {
+        let [va, vb, ia, ib] = args else {
+            bail!("argsel expects four tile arguments (value, value, index, index)");
+        };
+        let (Rv::Tile(va), Rv::Tile(vb), Rv::Tile(ia), Rv::Tile(ib)) = (
+            self.emit_expr(block, va)?,
+            self.emit_expr(block, vb)?,
+            self.emit_expr(block, ia)?,
+            self.emit_expr(block, ib)?,
+        ) else {
+            bail!("argsel expects tile arguments");
+        };
+        let vshape = broadcast_shape(&va.shape, &vb.shape)
+            .ok_or_else(|| anyhow!("argsel value operands are not broadcast-compatible"))?;
+        let ishape = broadcast_shape(&ia.shape, &ib.shape)
+            .ok_or_else(|| anyhow!("argsel index operands are not broadcast-compatible"))?;
+        ensure!(
+            va.elem == vb.elem && ia.elem == ib.elem && vshape == ishape,
+            "argsel: value and index operands must each share an element type, and both \
+             pairs must broadcast to the same shape"
+        );
+        let out = self.alloc_tile_shaped(block, ia.elem, &ishape)?;
+        self.tile_argsel_bc(block, &va, &vb, &ia, &ib, &out)?;
+        for t in [&va, &vb, &ia, &ib] {
+            self.release(t);
+        }
+        Ok(Rv::Tile(out))
+    }
+
+    /// out[...] = select(va[...] >= vb[...], ia[...], ib[...]) with
+    /// broadcasting: which of two indexed candidates carries the winning
+    /// value, so a fold that tracks a (value, index) pair can carry the
+    /// index alongside `tmax`'s own value-only fold (`argmax` has no reduction
+    /// primitive of its own; this is the one piece `tmax` cannot express).
+    /// `>=` rather than `>`, so a caller that always passes the later
+    /// candidate as `(va, ia)` gets a deterministic, reproducible winner on an
+    /// exact tie.
+    pub(in crate::codegen) fn tile_argsel_bc(
+        &mut self,
+        block: &Block<'c>,
+        va: &MemVal<'c>,
+        vb: &MemVal<'c>,
+        ia: &MemVal<'c>,
+        ib: &MemVal<'c>,
+        out: &MemVal<'c>,
+    ) -> Result<()> {
+        if va.elem != vb.elem {
+            bail!("argsel value operands must share an element type");
+        }
+        if ia.elem != out.elem || ib.elem != out.elem {
+            bail!("argsel index operands must match the result element type");
+        }
+        if out.shape.contains(&DYN) {
+            bail!("argsel needs a static result shape");
+        }
+        self.distribute(block, out, 1, true, |cg, blk, idx| {
+            let vai = cg.bc_index(blk, idx, &out.shape, &va.shape)?;
+            let vbi = cg.bc_index(blk, idx, &out.shape, &vb.shape)?;
+            let iai = cg.bc_index(blk, idx, &out.shape, &ia.shape)?;
+            let ibi = cg.bc_index(blk, idx, &out.shape, &ib.shape)?;
+            let x = cg.push(blk, memref::load(va.mem, &vai, cg.loc))?;
+            let y = cg.push(blk, memref::load(vb.mem, &vbi, cg.loc))?;
+            let cond = cg.push(
+                blk,
+                arith::cmpf(cg.ctx, arith::CmpfPredicate::Oge, x, y, cg.loc),
+            )?;
+            let m = cg.push(blk, memref::load(ia.mem, &iai, cg.loc))?;
+            let n = cg.push(blk, memref::load(ib.mem, &ibi, cg.loc))?;
+            let r = cg.push(
+                blk,
+                OperationBuilder::new("arith.select", cg.loc)
+                    .add_operands(&[cond, m, n])
+                    .add_results(&[m.r#type()])
+                    .build()?,
+            )?;
+            blk.append_operation(memref::store(r, out.mem, idx, cg.loc));
+            Ok(())
+        })
+    }
+
     /// out[...] = tile[...] * scalar (or scalar * tile[...]). The scalar is
     /// coerced to the output element type and broadcast over every element.
     pub(in crate::codegen) fn tile_scalar_into(

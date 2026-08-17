@@ -190,7 +190,10 @@ fn main() -> Result<()> {
         }
         let mut state = model.new_state();
         for &token in tokens.iter().take(4) {
-            model.forward(&mut state, &[token], backend.as_ref())?;
+            // Warms the same greedy fast path the timed tg loop below takes,
+            // so its kernels' first compile lands here rather than in a
+            // timed repetition.
+            model.forward_greedy(&mut state, &[token], backend.as_ref())?;
         }
         state.release(backend.as_ref());
         eprintln!("done");
@@ -225,8 +228,12 @@ fn main() -> Result<()> {
             // same split llama-bench uses.
             model.forward(&mut state, &tokens[..1], backend.as_ref())?;
             let start = Instant::now();
+            // The greedy fast path: a real deployment serving temperature-0
+            // decoding takes this route, and this loop re-feeds a fixed
+            // token regardless of what comes back either way, so timing it
+            // instead of `forward` measures what actually ships.
             for &token in tokens.iter().skip(1).take(gen_tokens) {
-                model.forward(&mut state, &[token], backend.as_ref())?;
+                model.forward_greedy(&mut state, &[token], backend.as_ref())?;
             }
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());

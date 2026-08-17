@@ -1,10 +1,12 @@
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 
 use crate::Gguf;
 use crate::backend::{
-    Attn, Backend, Buf, DeltaMix, FusedMix, HPlane, Plane, ProjRun, QAct, Rope, read_vec,
+    Attn, Backend, Buf, DeltaMix, FusedMix, HPlane, Plane, ProjRun, QAct, Rope,
 };
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads, check_dims};
+
+mod forward;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -464,128 +466,10 @@ impl Model {
         State { pos: 0, layers }
     }
 
-    /// Run `tokens`, advancing `state`, and return the final position's logits.
-    /// Only the last row is projected through the LM head.
-    pub fn forward(
-        &self,
-        state: &mut State,
-        tokens: &[u32],
-        backend: &dyn Backend,
-    ) -> Result<Vec<f32>> {
-        self.forward_with(state, tokens, backend, Variants::REFERENCE)
-    }
-
-    /// [`Model::forward`] with the architecture choices spelled out, for the
-    /// sweep that resolves them.
-    pub fn forward_with(
-        &self,
-        state: &mut State,
-        tokens: &[u32],
-        backend: &dyn Backend,
-        variants: Variants,
-    ) -> Result<Vec<f32>> {
-        ensure!(
-            !tokens.is_empty(),
-            "cannot run a forward pass over zero tokens"
-        );
-        let cfg = &self.config;
-        let d = cfg.d_model;
-        let rows = tokens.len();
-
-        let mut host_x = vec![0.0f32; rows * d];
-        for (t, &token) in tokens.iter().enumerate() {
-            let id = token as usize;
-            ensure!(
-                id < cfg.vocab,
-                "token id {id} is outside the {}-entry vocabulary",
-                cfg.vocab
-            );
-            self.head.row_into(id, &mut host_x[t * d..(t + 1) * d])?;
-        }
-
-        let x = backend.upload(&host_x)?;
-        let normed = backend.alloc(rows * d)?;
-
-        // Everything from here to the logits is device-only, which lets a
-        // backend take the whole pass as one unit.
-        backend.begin_pass()?;
-
-        let trace = std::env::var_os("PHOBOS_TRACE").is_some();
-        for (index, (block, layer_state)) in self.blocks.iter().zip(&mut state.layers).enumerate() {
-            // Both mixers end by adding their output projection into the
-            // residual stream, which the projection does itself. Their input
-            // normalization is theirs to run, so a backend with a fused
-            // projection owns it.
-            let gain = block.attn_norm.buf(backend)?;
-            match (&block.mixer, layer_state) {
-                (Mixer::Attention(attn), LayerState::Attention(cache)) => {
-                    // The normalization leaves the quantized copy behind too,
-                    // which the three projections reading it would otherwise
-                    // redo.
-                    let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
-                    self.attention(
-                        attn, normed, act, rows, state.pos, cache, backend, variants, x,
-                    )?
-                }
-                (Mixer::DeltaNet(delta), LayerState::DeltaNet { carry, recurrent }) => self
-                    .delta_net(
-                        delta, x, normed, gain, rows, carry, recurrent, backend, variants,
-                    )?,
-                _ => bail!("generation state does not match the model's block layout"),
-            }
-
-            // The normalization is passed along rather than run first, so a
-            // backend with a fused MLP owns the whole of it.
-            let gain = block.post_attn_norm.buf(backend)?;
-            if !block
-                .ffn
-                .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
-            {
-                let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
-                block.ffn.forward(backend, normed, act, rows, x)?;
-            }
-
-            if trace {
-                let seen = read_vec(backend, x, rows * d)?;
-                let per_row: Vec<String> = seen
-                    .chunks_exact(d)
-                    .map(|r| {
-                        format!(
-                            "{:>10.6}",
-                            (r.iter().map(|&v| v * v).sum::<f32>() / d as f32).sqrt()
-                        )
-                    })
-                    .collect();
-                eprintln!("  blk {index:>2} rows [{}]", per_row.join(" "));
-            }
-        }
-
-        state.pos += rows;
-
-        backend.rms_norm(
-            x,
-            rows,
-            d,
-            self.output_norm.buf(backend)?,
-            cfg.rms_eps,
-            normed,
-        )?;
-
-        // Only the final position goes through the LM head, the largest weight
-        // in the model; the other normalized rows are dead.
-        let last = backend.alloc(d)?;
-        backend.copy(normed, (rows - 1) * d, last, 0, d)?;
-        let logits = backend.alloc(cfg.vocab)?;
-        self.head.project_into(backend, last, 1, logits)?;
-
-        backend.end_pass()?;
-
-        let out = read_vec(backend, logits, cfg.vocab)?;
-        for buf in [x, normed, last, logits] {
-            backend.release(buf);
-        }
-        Ok(out)
-    }
+    // `forward`, `forward_greedy`, `forward_with` and `forward_to_logits`
+    // live in `qwen35/forward.rs`, split out to stay under the line-count
+    // cap; a descendant module of this one, so nothing here changed
+    // visibility to make that split possible.
 
     #[allow(clippy::too_many_arguments)]
     fn attention(

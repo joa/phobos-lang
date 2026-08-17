@@ -891,3 +891,68 @@ passes the correctness gates, and benchmarks as claimed.
 
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.
+
+## New beam landed, 2026-08-17: device-side argmax for greedy decode
+
+Separate from the attention-side work above (the "concurrent argmax
+feature" a couple of the notes above mention colliding with in the shared
+tree -- confirmed no actual file overlap; see that beam file's own process
+note). Targets [[wide-vocab-lm-head]]'s one untried lever: that beam killed
+the `q8_qdot` matmul-tuning angle on the logits projection but explicitly
+named "not computing the full logits vector at all" as a separate,
+out-of-scope-for-that-beam idea. This beam is that idea, scoped to greedy
+decoding (temperature 0, no penalties) where the sampler only ever needs
+the argmax, not the full distribution.
+
+**What it is.** A new phobos-lang builtin, `argsel(va, vb, ia, ib)` =
+`select(va >= vb, ia, ib)`, the index-carrying sibling `tmax` cannot
+express (indices travel as f32, exact up to 2^24, well past either
+vocabulary). Two small eager kernels
+(`phobos-gguf/src/backend/device/kernels/argmax.rs`) grid-stride the
+logits row and fold a running `(value, index)` pair with `tmax`/`argsel`,
+then an unrolled halving tree collapses each block's partial, and a tiny
+serial finish kernel folds the partials -- both launched after `end_pass`
+(outside the CUDA graph). `Backend::argmax` (default: host reduction,
+free for `HostBackend`) is the new trait surface;
+`Decoder::forward_greedy`/`Session::extend_greedy` (default falls back to
+`extend` + host argmax, so ONNX and any future backend get it for free)
+wire it into the real generation loop
+(`phobos_inference::generate::continue_from`) behind
+`SampleConfig::is_greedy_unpenalized()`, not just the benchmark.
+`bench.py`'s `tg` loop now calls `forward_greedy` too, since that is what a
+real greedy-serving deployment does.
+
+**Ceiling, stated honestly**: [[wide-vocab-lm-head]] measured the readback
+`Backend::argmax` replaces at 1.7-1.9% of a decode step (the `q8_qdot`
+kernel producing the logits is untouched, still runs). Net of the new
+kernels' own small cost, closer to 1.3-1.6%, and that shrinks further at
+longer cache lengths where a decode step itself is more expensive. Not a
+big enough lever by itself to be a new primary beam; it is a genuine,
+verified capability landed opportunistically because it was asked for.
+
+**Correctness**: a new example, `argmax_check` (device argmax vs. a host
+reduction of the *same device backend's* logits, deliberately not
+cross-backend), agrees on 32/32 real decode steps with zero float ties on
+both minicpm5-1b-Q8_0 and Qwen3.5-0.8B-Q8_0, plus three synthetic edge
+cases (all-negative logits, winner at index 0, winner at the last index)
+all agree. All four standing gates (`backend_check`, `batch_check`,
+`model_check`, `fuse_check`) pass on both models with
+`PHOBOS_ATTN_PERSIST=1`, matching documented error bands. Full mechanism,
+two small language-level snags found and fixed along the way (an
+index-to-float gap in `coerce`, and a reminder that phobos-lang float
+literals have no exponent form), and the source-size-ratchet fallout (two
+files were sitting exactly at their grandfathered cap; fixed by splitting
+`qwen35.rs`'s forward family into a new `qwen35/forward.rs` descendant
+module and extracting `argsel`'s call-site glue out of `expr.rs`, not by
+trimming comments) are in
+[[greedy-argmax-readback]] (`autoresearch/beams/greedy-argmax-readback.md`).
+
+**Nothing committed.** Per the task's brief, `scripts/bench.py`
+confirmation and the commit are the orchestrator's own next step, same as
+the attention-side beam above. Changed, beyond the beam-file-documented
+list: `phobos-lang/src/codegen/{expr.rs,tile/elem.rs,tests/math.rs}`,
+`SPEC.md`, `phobos-gguf/src/{llama.rs,qwen35.rs,qwen35/forward.rs,model.rs,
+runtime.rs,backend/mod.rs,backend/device/{mod.rs,backend.rs,argmax.rs,
+kernels/{mod.rs,argmax.rs}},examples/{bench.rs,argmax_check.rs},Cargo.toml`,
+`phobos-inference/src/{model.rs,sampling.rs,generate.rs}`,
+`phobos-base/tests/source_size.rs`.

@@ -328,6 +328,7 @@ impl<'c> Codegen<'c> {
                 self.release(&b);
                 Ok(Rv::Tile(out))
             }
+            "argsel" => self.emit_argsel(block, args), // a tmax-shaped fold's index side
             // rowmax(t) / rowsum(t): reduce a rank-2 tile over its last
             // column dim, producing a [rows, 1] column vector.
             "rowmax" => {
@@ -580,12 +581,10 @@ impl<'c> Codegen<'c> {
         if t == want {
             Ok(value)
         } else if self.is_float(t) && self.is_float(want) {
-            // any float-to-float store rounds/widens to the target type
-            // (e.g. an fp32 literal stored into an fp16 tile or tensor).
-            self.float_cast(block, value, want)
+            self.float_cast(block, value, want) // rounds/widens, e.g. an f32 literal into an f16 tile
         } else if t == self.index_t && self.is_int(want) {
             self.push(block, arith::index_cast(value, want, self.loc))
-        } else {
+        } else if t == self.index_t && self.is_float(want) { self.numeric_cast(block, value, want) } else {
             bail!("type mismatch: cannot store {t} where {want} is expected")
         }
     }

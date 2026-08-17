@@ -3,6 +3,7 @@ use anyhow::{Context, Result, ensure};
 use crate::Gguf;
 use crate::backend::{Attn, Backend, Buf, HPlane, Plane, QAct, Rope, read_vec};
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads};
+use crate::model::ForwardBufs;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -278,6 +279,38 @@ impl Model {
         tokens: &[u32],
         backend: &dyn Backend,
     ) -> Result<Vec<f32>> {
+        let (bufs, cfg) = self.forward_to_logits(state, tokens, backend)?;
+        let out = read_vec(backend, bufs.logits, cfg.vocab)?;
+        bufs.release(backend);
+        Ok(out)
+    }
+
+    /// [`Model::forward`] for a caller that only wants the winning token id,
+    /// as greedy decoding does: the LM head still runs (it is what the
+    /// prediction is), only the vocab-wide readback that follows it is
+    /// skipped. See [`Backend::argmax`].
+    pub fn forward_greedy(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        backend: &dyn Backend,
+    ) -> Result<i64> {
+        let (bufs, cfg) = self.forward_to_logits(state, tokens, backend)?;
+        let id = backend.argmax(bufs.logits, cfg.vocab)?;
+        bufs.release(backend);
+        Ok(id)
+    }
+
+    /// The shared body of [`Model::forward`] and [`Model::forward_greedy`]:
+    /// everything through the LM head projection and the pass's own
+    /// `end_pass`, leaving only "how much of the result to read back" to the
+    /// two callers above.
+    fn forward_to_logits(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        backend: &dyn Backend,
+    ) -> Result<(ForwardBufs, &Config)> {
         ensure!(
             !tokens.is_empty(),
             "cannot run a forward pass over zero tokens"
@@ -369,12 +402,15 @@ impl Model {
 
         backend.end_pass()?;
 
-        let out = read_vec(backend, logits, cfg.vocab)?;
-        for buf in [x, normed, last, logits] {
-            backend.release(buf);
-        }
-
-        Ok(out)
+        Ok((
+            ForwardBufs {
+                x,
+                normed,
+                last,
+                logits,
+            },
+            cfg,
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]

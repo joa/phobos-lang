@@ -165,6 +165,22 @@ impl Session for GgufSession<'_> {
         Ok(logits)
     }
 
+    fn extend_greedy(&mut self, ids: &[i64]) -> Result<i64> {
+        let ids = to_u32(ids);
+        let mut id = 0i64;
+        // Same split as `extend`: a prompt is batched, a single generated
+        // token never is. Only the last batch's result is the caller's;
+        // greedy decoding only ever calls this with one token, so in
+        // practice this loop runs once.
+        for batch in ids.chunks(PROMPT_BATCH) {
+            id = self
+                .model
+                .decoder
+                .forward_greedy(&mut self.state, batch, self.model.backend.as_ref())?;
+        }
+        Ok(id)
+    }
+
     fn len(&self) -> usize {
         self.state.len()
     }

@@ -5,6 +5,7 @@
 // so a change is visible with `cargo run -p phobos-lang --example emit`
 // without a GPU in the machine.
 
+mod argmax;
 mod attn;
 mod delta;
 mod elem;
@@ -12,6 +13,7 @@ mod matmul;
 mod norm;
 mod quant;
 
+pub(crate) use argmax::*;
 pub(crate) use attn::*;
 // The attention checks in `examples/` compile these themselves, so they stay
 // reachable at `backend::device::` where they have always been.

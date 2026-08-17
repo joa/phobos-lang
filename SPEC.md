@@ -179,7 +179,7 @@ float       = digit { digit } "." { digit } ;
   - **Open-Ended**: `A[i:]`, `A[:j]` are not supported. A `:` after an expression requires an end, and a `:+` requires a length.
 - **Unary minus on a tile**: `-t` negates elementwise, lowering as `0 - t`. `!` stays scalar-only.
 - **Broadcasting**: binary tile ops broadcast a NumPy-style axis of extent 1 (so `[R, C] x [R, 1]` stretches the column vector), and `tile x scalar` (either order) broadcasts the scalar over the tile.
-- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `cumsum`, `tril`, `transpose`, `flat`), the
+- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `argsel`, `cumsum`, `tril`, `transpose`, `flat`), the
   synchronization builtins (`grid_barrier`, `atomic_add`) and the
   conversion builtins named after the scalar types are ordinary
   identifiers, not keywords. `range` is recognized positionally inside `for ... in range(...)`.
@@ -195,6 +195,7 @@ float       = digit { digit } "." { digit } ;
   - `tanh(t)`: element-wise hyperbolic tangent (lowers to the hardware `tanh.approx.f32`).
   - `rowmax(t)` / `rowsum(t)`: reduce a rank-2 tile over its last (column) dim to a `[rows, 1]` column vector.
   - `tmax(a, b)`: elementwise maximum (broadcasting).
+  - `argsel(va, vb, ia, ib)`: elementwise `select(va >= vb, ia, ib)` (broadcasting): whichever of two indexed candidates carries the winning value, `>=` so a caller that always passes the more-recent candidate as `(va, ia)` gets a reproducible winner on an exact tie. `va`/`vb` share a float element type and `ia`/`ib` share the result's; there is no reduction primitive of its own (no `rowargmax`), so a caller folds it alongside `tmax` across a loop or a halving tree to build one, carrying an index as a tile of the same float type as the value it accompanies (safe up to 2^24, i.e. any array the memory to hold fits well under).
   - `cumsum(t)`: inclusive prefix sum of a rank-2 tile down its first (row) dim, so `out[i, j] = sum_{r <= i} t[r, j]`. The scan runs along the sequence axis (the leading dim of a `[seq, feat]` tile), producing the running gate cumulant that chunkwise linear attention needs. Same shape as the input.
   - `tril(t)`: causal lower-triangular mask of a rank-2 tile, keeping `t[i, j]` when `j <= i` and zeroing the strict upper triangle. Same shape as the input.
   - `transpose(t)`: rank-2 tile transpose, `out[i, j] = t[j, i]` (a `[R, C]` tile becomes `[C, R]`). Lets a contraction run over the leading (sequence) axis, which `dot`/`dot_t` cannot reach on their own.
