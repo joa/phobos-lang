@@ -790,19 +790,41 @@ compute throughput is not the ceiling either) and toward reducing
 arrival at it -- a different lever, and a different kernel region, than
 anything tried so far.
 
-## Open question, not yet resolved: `PHOBOS_ATTN_PERSIST` itself is still opt-in
+## Resolved: `PHOBOS_ATTN_PERSIST` is now default on
 
-Every benchmark this session forces `PHOBOS_ATTN_PERSIST=1`; the 0.97x
-above is not what a default `phobos-cli` invocation gets. Its stated
-opt-in reason (`attn.rs`'s doc comment: a `grid_barrier` deadlocks if
-co-residency doesn't hold) is real but now looks more mitigated than the
-comment implies -- `attn_persist_plan` already queries the driver's actual
-occupancy via `persistent_grid` and declines any shape that doesn't fit
-(which is why Qwen never takes this path at all), rather than assuming a
-block count. Not flipped this round: unlike the two fusion flags, a wrong
-call here fails as a hang, not a slow number, and CLAUDE.md's guidance is
-to check before taking actions with that failure mode. Flagged to the user
-directly instead of decided unilaterally.
+The open question above was flagged to the user rather than decided
+unilaterally, since a wrong call here fails as a hang, not a slow number.
+User's answer: flip it on, but keep `attn_persist_plan`'s own decline as
+the actual safety net -- which is exactly the existing structure, since
+the flag only ever gated whether `attention_decode` *asks*
+`attn_persist_plan` the question, never whether the answer is trusted
+blindly. Flipped `DeviceBackend::attn_persist`'s initializer from
+`std::env::var_os("PHOBOS_ATTN_PERSIST").is_some()` (unset = off) to
+default-true with `PHOBOS_ATTN_PERSIST=0` as the opt-out, not folded into
+`fused_stage`'s shared `PHOBOS_FUSED` fallback since this gates a
+different mechanism (a persistent kernel and its `grid_barrier`, not a
+fused launch chain) and a blanket `PHOBOS_FUSED=0` should not silently
+touch it too.
+
+All four correctness gates re-run with **no env vars set at all**
+(confirming the true default, not the forced-on config every prior round
+used): identical to every documented baseline, including the
+`PHOBOS_ATTN_PERSIST=0` opt-out path checked separately and landing in the
+same error bands. Confirmation `bench.py`, also with nothing set
+(`phobos env: nothing set, so every default is in force`):
+
+| model | tg1024 | tg2048 | tg4096 | pp128 |
+| --- | --- | --- | --- | --- |
+| minicpm5-1b | 1.05x | 1.04x | 0.96x | 0.82x |
+| Qwen3.5-0.8B | 1.17x | 1.22x | 1.23x | 0.84x |
+
+At or above every established baseline (some rows noisier than usual --
+desktop GPU contention on this interactive machine, not a code issue; see
+the note in [[pipeline-default-on]]'s commit history for the same failure
+mode hit and resolved earlier the same session). From this commit
+forward, a plain `phobos-cli` invocation gets everything this session's
+`tg`/`pp` numbers measured -- no env var needed. Committed:
+`phobos-gguf/src/backend/device/{mod.rs,attn.rs}` only.
 
 ## Bubble recapture on the current tree: megakernel not funded as a third beam
 

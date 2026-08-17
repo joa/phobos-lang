@@ -166,13 +166,19 @@ impl DeviceBackend {
     /// The row kernel would leave this a grid of `n_head` blocks, a sixth of
     /// this card, each walking the whole cache. Splitting the keys fills it.
     ///
-    /// `PHOBOS_ATTN_PERSIST` tries [`Self::attention_persist`] first, which
-    /// does the same split and merge inside one `@persistent` kernel and a
+    /// Default on: tries [`Self::attention_persist`] first, which does the
+    /// same split and merge inside one `@persistent` kernel and a
     /// `grid_barrier()` rather than two launches; see that function,
-    /// [`Self::attn_persist_plan`] and [`attention_persist_src`]. Opt-in
-    /// rather than the default while it is new: a grid barrier deadlocks if
-    /// co-residency does not hold, which is asked of the driver rather than
-    /// assumed but is still a sharper failure mode than a launched kernel's.
+    /// [`Self::attn_persist_plan`] and [`attention_persist_src`].
+    /// `PHOBOS_ATTN_PERSIST=0` bails out to the launched path below
+    /// unconditionally. Short of that, every call still goes through
+    /// `attn_persist_plan`'s own decline below -- a grid barrier deadlocks
+    /// if co-residency does not hold, so that check queries the driver's
+    /// actual occupancy answer rather than assuming a shape fits, and this
+    /// function never reaches `attention_persist` for one it declines. That
+    /// per-shape bail is what made this flag safe enough to default on: the
+    /// flag only chooses whether to *ask* the question, not whether the
+    /// answer is trusted blindly.
     ///
     /// The split count handed to the persistent path is not this function's
     /// `ATTN_SPLITS`-derived one -- see [`Self::attn_persist_plan`], which

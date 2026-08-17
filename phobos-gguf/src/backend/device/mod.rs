@@ -240,9 +240,15 @@ pub struct DeviceBackend {
     attentions: RefCell<HashMap<(usize, usize, usize), Module>>,
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
     /// Whether [`DeviceBackend::attention_decode`] takes the persistent
-    /// split-plus-merge path. `PHOBOS_ATTN_PERSIST`, unset by default: see
-    /// that function's doc comment for why this is opt-in rather than a
-    /// `fused_stage`-style default-on switch.
+    /// split-plus-merge path. Default on; `PHOBOS_ATTN_PERSIST=0` switches
+    /// it off. Not folded into [`fused_stage`]'s shared `PHOBOS_FUSED`
+    /// fallback: this gates a different mechanism (a persistent kernel and
+    /// its `grid_barrier`, not a fused launch chain), so a blanket
+    /// `PHOBOS_FUSED=0` should not silently touch it too. See
+    /// `DeviceBackend::attention_decode`'s doc comment for why a hang, not
+    /// a slow number, was this flag's failure mode when it was opt-in, and
+    /// why `attn_persist_plan`'s own occupancy-queried decline (not this
+    /// flag) is what actually keeps that safe now that it defaults on.
     attn_persist: bool,
     /// The persistent attention kernel, keyed by [`AttnPersistKey`], with the
     /// block count and the persist-specific split count it was settled at.
@@ -427,7 +433,10 @@ impl DeviceBackend {
             ropes: RefCell::new(HashMap::new()),
             attentions: RefCell::new(HashMap::new()),
             split_attn: RefCell::new(HashMap::new()),
-            attn_persist: std::env::var_os("PHOBOS_ATTN_PERSIST").is_some(),
+            attn_persist: !matches!(
+                std::env::var("PHOBOS_ATTN_PERSIST").as_deref(),
+                Ok("0" | "off" | "no" | "false")
+            ),
             attn_persist_modules: RefCell::new(HashMap::new()),
             attn_partials: RefCell::new(None),
             readback: RefCell::new(None),
