@@ -804,6 +804,37 @@ call here fails as a hang, not a slow number, and CLAUDE.md's guidance is
 to check before taking actions with that failure mode. Flagged to the user
 directly instead of decided unilaterally.
 
+## Bubble recapture on the current tree: megakernel not funded as a third beam
+
+Per the advisor consult's gate before funding a megakernel beam: recaptured
+the launch bubble on the current, fusion-defaults-on tree
+(`nsys profile --trace cuda --cuda-graph-trace=node`, minicpm, n=512,
+`PHOBOS_ATTN_PERSIST=1`, `autoresearch/beams/bubble_current.nsys-rep` +
+`_cuda_gpu_kern_sum.csv`). Launch count dropped materially --
+`store_2d_pair` shows one call per layer per step (12,432 over the run)
+where the pre-fusion tree showed two separate `store_2d` calls (49,440,
+i.e. 2/layer/step); `quantize`+`q8_qdot_add` folded into the generic
+`fused` chain kernel alongside the MLP's own fusion. Overall per-step
+launch count is down from ~272 (pre-this-session's-final-round) to ~227.
+
+**But the gap percentage barely moved.** Steady-state window (1001
+consecutive kernel events, mid-trace, same method as
+[[wide-vocab-lm-head]]'s original 14.4% figure): gap is **15.06%** of
+wall time now, against that round's 14.4% pre-fusion. A ~16% cut in
+launch count produced no measurable cut in the bubble it was expected to
+shrink. This matches [[launch-bound-headroom]]'s own suspicion from its
+second round: the remaining gap looks like it is not per-launch overhead
+that scales with kernel count, but something closer to a fixed
+per-graph-replay cost under this WDDM driver, paid regardless of how many
+nodes are inside the graph. **Not funding a megakernel beam on this
+evidence** -- the pool advisor flagged as an ~11% ceiling does not appear
+to actually be there once launch count is properly reduced; retiring the
+idea with this diagnosed reason rather than leaving it open. If someone
+revisits this, the discriminating question is what specifically the fixed
+cost is (graph submission itself? the WDDM batch boundary? something
+`nsys`'s own instrumentation inflates that a clean, unprofiled measurement
+would not show?) -- not "how many launches remain."
+
 ## Process lesson: subagents can produce real, correct work and still never send a final report
 
 Both beams this round independently exhibited the same failure mode this
