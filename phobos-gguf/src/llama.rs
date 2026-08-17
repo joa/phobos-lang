@@ -420,8 +420,6 @@ impl Model {
             pitch: kv_width,
         };
 
-        backend.store_2d(part(width + kv_width), landing(values), rows, kv_width)?;
-
         // A decode step's query is the front of the projection and already
         // contiguous, so it rotates and attends where it lies. Past one row the
         // three parts interleave and it has to be pulled out.
@@ -457,11 +455,20 @@ impl Model {
             )?;
         }
 
-        backend.store_2d(dense_plane(k, kv_width), landing(keys), rows, kv_width)?;
+        // The value store waits for the key's rope to land here too, one
+        // launch instead of two: nothing reads either cache before the
+        // attention call below, so nothing depends on the value arriving
+        // sooner.
+        backend.store_2d_pair(
+            (part(width + kv_width), landing(values)),
+            (dense_plane(k, kv_width), landing(keys)),
+            rows,
+            kv_width,
+        )?;
 
         let mixed = backend.alloc(rows * width)?;
         backend.attention(q, keys, values, spec, mixed)?;
-        attn.output.add_into(backend, mixed, rows, dest)?;
+        attn.output.add_projected(backend, mixed, rows, dest)?;
 
         for buf in [qkv, mixed].into_iter().chain(scratch) {
             backend.release(buf);

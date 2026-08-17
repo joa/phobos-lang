@@ -181,3 +181,43 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
     }
     Some(chain)
 }
+
+/// Attention's output epilogue as a chain: quantize the mixed heads, one
+/// scale per Q8_0 block, then the output projection accumulating into the
+/// residual.
+///
+/// Unlike [`project_chain`] there is no upstream normalization to fold in --
+/// `x` is already the value the attention kernel produced, not a row this
+/// pass would otherwise normalize itself. The quantization tiles in
+/// [`Q8_BLOCK`]-wide units (Q8_0's own per-block scale, not a tunable width)
+/// while the projection tiles in [`OUT_TILE`]-wide ones over `d_model`, so
+/// the two land in separate nests with a barrier between rather than one --
+/// the same shape [`mlp_chain`]'s SwiGLU-then-quantize pair already forces,
+/// just reading a value the caller handed in rather than one a nest here
+/// computed.
+///
+/// `None` means `width` does not divide into whole Q8_0 blocks, which no
+/// architecture this crate loads produces but a chain should decline rather
+/// than assume.
+pub(crate) fn attn_out_chain(x: Buf, w: QBuf, dest: Buf, width: usize, d_model: usize) -> Option<Chain> {
+    if !width.is_multiple_of(Q8_BLOCK) {
+        return None;
+    }
+    let mut chain = Chain::default();
+    let xv = chain.given(x, width);
+    let hq = chain.quant(width);
+    chain.push(Stage::QuantQ {
+        h: xv,
+        out: hq,
+        units: width / Q8_BLOCK,
+    });
+    let wv = chain.weight(w, d_model, width);
+    let yv = chain.given(dest, d_model);
+    chain.push(Stage::ProjAdd {
+        a: hq,
+        w: wv,
+        y: yv,
+        width: d_model,
+    });
+    Some(chain)
+}

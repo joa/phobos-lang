@@ -1,6 +1,8 @@
 // Attention kernel sources, the split and blocked decode variants,
 // and rope.
 
+use phobos_kernels::launch::WARP_THREADS;
+
 use crate::backend::Attn;
 
 /// Elements of one `[BC, head_dim]` tile in [`attention_src`]. Shared memory
@@ -358,8 +360,15 @@ pub(crate) fn attention_split_src(
     let scale = (head_dim as f32).sqrt().recip();
     let qw = qgroup * wct;
     let combine = attention_combine(qgroup, "");
+    // Block width follows wct directly (wct is a warp count, WARP lanes
+    // each): warp_partial's own bail check already requires the two to
+    // match (`self.cta_threads / WARP`), so this keeps the template
+    // self-consistent instead of hardcoding the launch width and letting a
+    // future wct sweep silently mismatch it. At the shipped ATTN_WARP_SPLITS
+    // this is 256, unchanged from before wct was a parameter here.
+    let cta = wct * WARP_THREADS;
     format!(
-        "@launch(256)
+        "@launch({cta})
 @autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}], S in [{splits}],
           WCT in [{wct}], QW in [{qw}])
 @aligned(KW = D)

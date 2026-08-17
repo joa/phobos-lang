@@ -115,6 +115,22 @@ pub struct FusedMlp {
     pub down: QBuf,
 }
 
+/// Attention's output epilogue for a backend that can run it as one kernel:
+/// quantize the mixed heads, then the output projection accumulating into the
+/// residual. Unlike [`FusedProject`] there is no normalization ahead of it --
+/// `x` is already what the attention kernel produced.
+#[derive(Clone, Copy, Debug)]
+pub struct FusedAttnOut {
+    /// The mixed heads, one row, `width` wide.
+    pub x: Buf,
+    pub width: usize,
+    /// `[d_model, width]`.
+    pub w: QBuf,
+    pub d_model: usize,
+    /// The residual row, accumulated into.
+    pub dest: Buf,
+}
+
 /// One contiguous run of a projection's outputs, and where the caller wants it.
 ///
 /// A stacked projection's consumers each read a window of it, and some want that
@@ -290,6 +306,34 @@ pub trait Backend {
     /// narrow, and `phobos_base::half::f32_to_f16` for the rounding both
     /// backends have to agree on.
     fn store_2d(&self, src: Plane, dst: HPlane, rows: usize, width: usize) -> Result<()>;
+
+    /// [`Backend::store_2d`] applied to two independent plane pairs in one
+    /// launch: attention's value (ready as soon as the projection is) and its
+    /// key (ready once rope has rotated it) landing in the same cache row.
+    /// Value moves to wherever the caller makes this call, which only costs
+    /// something if a reader reaches the cache before that point, and nothing
+    /// does: the pass's one reader is the attention kernel, after both.
+    ///
+    /// A backend with no combined kernel calls [`Backend::store_2d`] twice,
+    /// which is exactly what issuing them separately would have done.
+    fn store_2d_pair(
+        &self,
+        a: (Plane, HPlane),
+        b: (Plane, HPlane),
+        rows: usize,
+        width: usize,
+    ) -> Result<()> {
+        self.store_2d(a.0, a.1, rows, width)?;
+        self.store_2d(b.0, b.1, rows, width)
+    }
+
+    /// Attention's output epilogue -- quantizing the mixed heads and the
+    /// output projection reading them -- as one kernel. `false` means the
+    /// backend has no fused form and the caller runs the two stages itself,
+    /// which is the only thing a host backend does.
+    fn fused_attn_out(&self, _out: FusedAttnOut) -> Result<bool> {
+        Ok(false)
+    }
 
     /// Brackets the device-only part of a forward pass; nothing in between
     /// reads back. The GPU backend replays the bracket as one CUDA graph,

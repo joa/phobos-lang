@@ -324,7 +324,19 @@ impl Emit {
                 );
             }
             Stage::QuantQ { h, out, .. } => {
-                let hn = self.reg_of(h)?;
+                // A register when `h` is a nest-computed temp (the MLP's own
+                // SwiGLU output), a window of a caller buffer when it is not
+                // (attention's mixed heads, already resident before this
+                // chain runs): the two storage classes read differently, and
+                // this is the one place a stage has to tell them apart itself
+                // rather than through `quant_row`'s [`View`].
+                let hn = match self.regs.get(&h) {
+                    Some(reg) => reg.clone(),
+                    None => {
+                        let flat = self.given(h, key.len_of(h), View::Flat);
+                        format!("{flat}[0 :+ 1, {unit} * {q8} :+ {q8}]")
+                    }
+                };
                 let (qs, sc) = self.quant_rows(out, key.len_of(out));
                 // The scale has to be bound before the store so the elementwise
                 // chain fuses into one sweep: the fusion fires on a named tile

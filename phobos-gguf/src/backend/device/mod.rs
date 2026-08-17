@@ -15,8 +15,8 @@ use super::fuse::{self, Bound, Chain, ChainKey, Plan, Scratch};
 use phobos_kernels::launch::{CTA_THREADS, STATIC_SHARED_LIMIT, persistent_grid};
 
 use super::{
-    Attn, Backend, Buf, DeltaMix, Fused, FusedMlp, FusedProject, HBuf, HPlane, Packed, Plane,
-    Q8_BLOCK, QAct, QBuf, Rope,
+    Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedProject, HBuf, HPlane,
+    Packed, Plane, Q8_BLOCK, QAct, QBuf, Rope,
 };
 
 mod attn;
@@ -157,6 +157,17 @@ pub struct DeviceBackend {
     /// fused so far this one costs a barrier, so it has to be able to be
     /// measured against the projection alone.
     fused_mix: bool,
+    /// Whether attention's output epilogue (quantizing the mixed heads, then
+    /// the output projection) joins the fused-chain path. `PHOBOS_FUSED_ATTN_OUT`,
+    /// unset by default: an earlier round measured this a wash against the
+    /// launched pair before `warp_partial` cut attention's own share of a
+    /// step, so it stays opt-in until re-measured under the new cost
+    /// structure rather than joining the default-on `fused_stage` trio above.
+    fused_attn_out: bool,
+    /// Whether attention's key and value writes into the cache land in one
+    /// launch instead of two. `PHOBOS_FUSED_STORE2D`, unset by default for the
+    /// same reason as [`Self::fused_attn_out`].
+    fused_store2d: bool,
     /// Blocks a fused kernel is launched with, which unlike [`persist_blocks`]
     /// has to be exact: a block of the grid that is not resident never reaches
     /// the barrier. Zero until such a kernel exists to be asked about.
@@ -210,6 +221,9 @@ pub struct DeviceBackend {
     /// Strided copy kernels, keyed by direction, the width they copy, and
     /// whether the pitches let the promise be made.
     splits: RefCell<HashMap<(Strided, usize, bool), Module>>,
+    /// [`Backend::store_2d_pair`] kernels, keyed by the width both windows
+    /// share and whether the pitches let the alignment promise be made.
+    store_pairs: RefCell<HashMap<(usize, bool), Module>>,
     /// Rotary kernels, keyed by head count and half the rotary width.
     ropes: RefCell<HashMap<(usize, usize), Module>>,
     /// Attention kernels, keyed by query heads, group size and head dimension.
@@ -268,6 +282,8 @@ impl DeviceBackend {
         self.fused_mlp = on;
         self.fused_project = on;
         self.fused_mix = on;
+        self.fused_attn_out = on;
+        self.fused_store2d = on;
     }
 
     pub fn new() -> Result<DeviceBackend> {
@@ -342,6 +358,8 @@ impl DeviceBackend {
             fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),
             fused_project: fused_stage("PHOBOS_FUSED_PROJ"),
             fused_mix: fused_stage("PHOBOS_FUSED_MIX"),
+            fused_attn_out: std::env::var_os("PHOBOS_FUSED_ATTN_OUT").is_some(),
+            fused_store2d: std::env::var_os("PHOBOS_FUSED_STORE2D").is_some(),
             fused_blocks: Cell::new(0),
             fused_scratch: RefCell::new(Vec::new()),
             fused_barrier: RefCell::new(None),
@@ -379,6 +397,7 @@ impl DeviceBackend {
             convs: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             splits: RefCell::new(HashMap::new()),
+            store_pairs: RefCell::new(HashMap::new()),
             ropes: RefCell::new(HashMap::new()),
             attentions: RefCell::new(HashMap::new()),
             split_attn: RefCell::new(HashMap::new()),

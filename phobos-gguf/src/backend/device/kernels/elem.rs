@@ -120,6 +120,29 @@ kernel {name}(S: tensor<{from}>[R, SW], D: tensor<{to}>[R, DW]) {{
     )
 }
 
+/// Two independent [`Strided::Store`] copies in one launch: attention's value
+/// and key, both narrowing f32 into the f16 cache at the same row. Both windows
+/// share `width` (the two writes always do -- one query group's worth of key
+/// or value), so one autotune constant covers both.
+pub(crate) fn store_2d_pair_src(width: usize, aligned: bool) -> String {
+    let claim = if aligned {
+        "@aligned(SW0 = W, DW0 = W, SW1 = W, DW1 = W)"
+    } else {
+        ""
+    };
+    format!(
+        "@launch(256)
+@autotune(W in [{width}])
+{claim}
+kernel store_2d_pair(S0: tensor<f32>[R, SW0], S1: tensor<f32>[R, SW1], D0: tensor<f16>[R, DW0], D1: tensor<f16>[R, DW1]) {{
+  let r = program_id(0)
+  D0[r :+ 1, 0 :+ W] = f16(S0[r :+ 1, 0 :+ W])
+  D1[r :+ 1, 0 :+ W] = f16(S1[r :+ 1, 0 :+ W])
+}}
+"
+    )
+}
+
 /// A SwiGLU whose two operands are planes of a wider buffer. Shaped like
 /// [`copy_2d_src`], but taking a column tile rather than a whole row since it
 /// holds three at once; see [`swiglu_2d_tile`]. The promise is that every pitch

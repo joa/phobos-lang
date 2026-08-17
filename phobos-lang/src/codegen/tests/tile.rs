@@ -224,3 +224,45 @@ fn flat_rejects_what_is_not_a_declared_tile() {
         assert!(err.is_err(), "should not compile: {src}");
     }
 }
+
+/// `warp_partial`'s K/V loads at minicpm's shape (D = 128, dpl = 4) come out
+/// as one 4xf16 vector load per key per lane, not four scalar ones: `align_div`
+/// grounds this on `col` (a multiple of `D`) plus `lane * dpl` (a multiple of
+/// `dpl`) always landing on a `2 * dpl`-byte boundary, the same reasoning
+/// `stage.rs`'s `DrainMode::VecF16` already relies on for its own 4xf16
+/// staging loads (8-byte alignment).
+#[test]
+fn warp_partial_vectorizes_kv_loads_at_dpl_4() {
+    let mlir = emit_mlir(&warp_partial_probe(128, 8, 8));
+    assert_contains(&mlir, &["vector.load", "vector<4xf16>", "alignment = 8"]);
+}
+
+/// Same shape family at Qwen's D = 256 (dpl = 8): a whole lane's slice in one
+/// 8xf16 (16-byte) vector load, the same width `tensorcore_f16_dot_stages_vectorized`
+/// already proves this compiler lowers correctly for WMMA staging.
+#[test]
+fn warp_partial_vectorizes_kv_loads_at_dpl_8() {
+    let mlir = emit_mlir(&warp_partial_probe(256, 8, 8));
+    assert_contains(&mlir, &["vector.load", "vector<8xf16>", "alignment = 16"]);
+}
+
+/// A minimal kernel calling `warp_partial` directly, mirroring how
+/// `attention_split_src` (`phobos-gguf`) uses it: one program, one warp
+/// group's worth of query rows, the whole cache as its `[lo, hi)` range.
+fn warp_partial_probe(d: i64, wct: i64, qw: i64) -> String {
+    format!(
+        "@autotune(D in [{d}], WCT in [{wct}], QG in [1], QW in [{qw}])
+        @launch(256)
+        @aligned(KW = D)
+        kernel wp(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW], V: tensor<f16>[NK, KW],
+                  O: tensor<f32>[QW, D]) {{
+            var q = Q[0 :+ QG, 0 :+ D]
+            var wm: tile<f32>[QG, WCT] = -300000000.0
+            var wl: tile<f32>[QG, WCT] = 0.0
+            var wacc: tile<f32>[QW, D] = 0.0
+            warp_partial(q, K, V, 0, NK, 0, wm, wl, wacc, 0.088388347648)
+            O[0 :+ QW, 0 :+ D] = wacc
+        }}"
+    )
+}
+
