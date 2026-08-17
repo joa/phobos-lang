@@ -177,40 +177,111 @@ impl<'c> Codegen<'c> {
         let f32_vec_t = Type::vector(&[vw as u64], self.f32_t);
         let vec_align = vw * 2; // f16 element size in bytes
 
-        let finals = self.carry_loop(block, glo, ghi, one, &inits, |cg, lblk, kt, accs| {
-            let k_col = cg.addi(lblk, col_v, lane_off)?;
-            // This warp's own dpl-wide slice of k[kt, :] and v[kt, :], loaded
-            // `vw` elements at a time (a single wide load when `vw == dpl`,
-            // which both shapes this kernel ships today hit exactly) and
-            // widened to f32 once, reused across every query row.
-            let mut k_vals = Vec::with_capacity(dpl as usize);
-            let mut v_vals = Vec::with_capacity(dpl as usize);
+        // Software-pipelined K/V load: iteration kt issues the load for
+        // kt+1 before it consumes kt's own already-loaded values, so the
+        // load's latency overlaps this iteration's QK dot / shuffle /
+        // softmax-update compute instead of sitting in front of it. This
+        // card has no cp.async (Turing, sm_75) -- past 98% achieved
+        // occupancy (the ceiling; Block Limit Registers already binds it at
+        // this kernel's 64 registers/thread), the only remaining lever
+        // against long-scoreboard stall is more independent in-flight loads
+        // per warp, which register-level double buffering is.
+        //
+        // Only the raw f16 vector is carried across iterations (2 packed
+        // registers per tensor at this kernel's dpl=4/vw=4 shape), not the
+        // widened f32 slice (4 registers each): widening happens once per
+        // iteration, on the value that just became "current", not stored in
+        // the loop-carried state. A double buffer of the f32 slices would
+        // cost +8 registers against a budget with no headroom to give;
+        // this costs +4.
+        //
+        // A load's address is always clamped into this warp's own valid
+        // range, never `kt` or `kt + 1` directly: a warp can be handed an
+        // empty range (`glo == ghi`, "runs zero iterations", see above), and
+        // even a real range's last iteration has no real `kt + 1` to load.
+        // `minsi(_, ghi - 1)` lands the address on the range's own last
+        // valid row in both cases -- always in-bounds (`ghi <= hi <= NK` and
+        // NK >= 1 for any call this kernel gets, the same assumption the
+        // rest of this function already makes) -- and in the empty-range
+        // case the loaded value is never read, since `scf.for` with
+        // `glo == ghi` never runs its body at all.
+        let ghi_m1 = self.subi(block, ghi, one)?;
+        let first_row = self.minsi(block, glo, ghi_m1)?;
+
+        // Shared by the prologue load (outside the loop, `self`/`block`)
+        // and the in-loop prefetch (`cg`/`lblk`): both just need some row
+        // index, so the closure takes it as a plain parameter.
+        let load_raw = |cg: &mut Self,
+                         blk: &Block<'c>,
+                         row: Value<'c, 'c>|
+         -> Result<(Vec<Value<'c, 'c>>, Vec<Value<'c, 'c>>)> {
+            let k_col = cg.addi(blk, col_v, lane_off)?;
+            let mut k_raw = Vec::with_capacity((dpl / vw) as usize);
+            let mut v_raw = Vec::with_capacity((dpl / vw) as usize);
             let mut off = 0;
             while off < dpl {
-                let jc = cg.const_index(lblk, off)?;
-                let kc = cg.addi(lblk, k_col, jc)?;
+                let jc = cg.const_index(blk, off)?;
+                let kc = cg.addi(blk, k_col, jc)?;
                 if vw > 1 {
-                    let raw_k = cg.vec_load_al(lblk, k_mv.mem, &[kt, kc], k16_vec_t, vec_align)?;
-                    let raw_v = cg.vec_load_al(lblk, v_mv.mem, &[kt, kc], k16_vec_t, vec_align)?;
-                    let fk = cg.vec_extf(lblk, raw_k, f32_vec_t)?;
-                    let fv = cg.vec_extf(lblk, raw_v, f32_vec_t)?;
-                    for e in 0..vw {
-                        k_vals.push(cg.vec_extract(lblk, fk, &[e], cg.f32_t)?);
-                        v_vals.push(cg.vec_extract(lblk, fv, &[e], cg.f32_t)?);
-                    }
+                    k_raw.push(cg.vec_load_al(blk, k_mv.mem, &[row, kc], k16_vec_t, vec_align)?);
+                    v_raw.push(cg.vec_load_al(blk, v_mv.mem, &[row, kc], k16_vec_t, vec_align)?);
                 } else {
-                    k_vals.push(cg.load_as(lblk, k_mv.mem, &[kt, kc], cg.f32_t)?);
-                    v_vals.push(cg.load_as(lblk, v_mv.mem, &[kt, kc], cg.f32_t)?);
+                    k_raw.push(cg.load_as(blk, k_mv.mem, &[row, kc], cg.f32_t)?);
+                    v_raw.push(cg.load_as(blk, v_mv.mem, &[row, kc], cg.f32_t)?);
                 }
                 off += vw;
+            }
+            Ok((k_raw, v_raw))
+        };
+
+        let (k_raw0, v_raw0) = load_raw(self, block, first_row)?;
+        let chunks = k_raw0.len();
+        let old_len = qg as usize * per_row;
+
+        let mut full_inits = inits;
+        full_inits.extend_from_slice(&k_raw0);
+        full_inits.extend_from_slice(&v_raw0);
+
+        let finals_all = self.carry_loop(block, glo, ghi, one, &full_inits, |cg, lblk, kt, accs| {
+            let row_accs = &accs[..old_len];
+            let cur_k = &accs[old_len..old_len + chunks];
+            let cur_v = &accs[old_len + chunks..old_len + 2 * chunks];
+
+            // Issue next iteration's load before this iteration touches the
+            // carried-in "current" values below.
+            let kt_plus1 = cg.addi(lblk, kt, one)?;
+            let next_row = cg.minsi(lblk, kt_plus1, ghi_m1)?;
+            let (next_k, next_v) = load_raw(cg, lblk, next_row)?;
+
+            // Widen this iteration's carried-in raw K/V once, here (a no-op
+            // copy in the scalar fallback, where `load_raw` already
+            // produced f32).
+            let mut k_vals = Vec::with_capacity(dpl as usize);
+            let mut v_vals = Vec::with_capacity(dpl as usize);
+            if vw > 1 {
+                for &raw_k in cur_k {
+                    let fk = cg.vec_extf(lblk, raw_k, f32_vec_t)?;
+                    for e in 0..vw {
+                        k_vals.push(cg.vec_extract(lblk, fk, &[e], cg.f32_t)?);
+                    }
+                }
+                for &raw_v in cur_v {
+                    let fv = cg.vec_extf(lblk, raw_v, f32_vec_t)?;
+                    for e in 0..vw {
+                        v_vals.push(cg.vec_extract(lblk, fv, &[e], cg.f32_t)?);
+                    }
+                }
+            } else {
+                k_vals.extend_from_slice(cur_k);
+                v_vals.extend_from_slice(cur_v);
             }
 
             let mut next = Vec::with_capacity(accs.len());
             for i in 0..qg {
                 let base = i as usize * per_row;
-                let m_old = accs[base];
-                let l_old = accs[base + 1];
-                let acc_old = &accs[base + 2..base + 2 + dpl as usize];
+                let m_old = row_accs[base];
+                let l_old = row_accs[base + 1];
+                let acc_old = &row_accs[base + 2..base + 2 + dpl as usize];
 
                 let i_idx = cg.const_index(lblk, i)?;
                 let mut partial = zero_f;
@@ -245,8 +316,11 @@ impl<'c> Codegen<'c> {
                     next.push(cg.elem_mac(lblk, cg.f32_t, a_old, corr, pv)?);
                 }
             }
+            next.extend_from_slice(&next_k);
+            next.extend_from_slice(&next_v);
             Ok(next)
         })?;
+        let finals = &finals_all[..old_len];
 
         let lane_zero = self.const_index(block, 0)?;
         let is_lead = self.push(
