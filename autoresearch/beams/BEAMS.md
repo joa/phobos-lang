@@ -721,5 +721,47 @@ either stagger their benchmark phases explicitly in the brief, or accept
 the risk and mandate the absolute-number sanity check as a standing
 instruction (done retroactively for the two beams above via `SendMessage`).
 
+## Round landed by direct takeover, 2026-08-17: vectorization + store_2d/output-projection fusion
+
+Both dispatched beams (vectorize K/V loads + sweep `ATTN_WARP_SPLITS`;
+re-examine `[[launch-bound-headroom]]`'s remaining fusions) produced real,
+substantial, correct work but stalled on their final reports after several
+resumes each -- taken over directly rather than waited on further: reviewed
+both diffs, ran `cargo check --workspace` and `cargo clippy -D warnings`
+clean, ran all four correctness gates (`backend_check`, `fuse_check`,
+`batch_check`, `model_check`) on both models with `PHOBOS_ATTN_PERSIST=1`
+myself (all clean, matching documented bands), ran a fresh confirmation
+benchmark myself, and committed. Full mechanism and numbers in
+[[cache-length-split-buckets]]'s and [[launch-bound-headroom]]'s own
+Result logs.
+
+**Current state, same session, interleaved against llama.cpp,
+`PHOBOS_ATTN_PERSIST=1`, `tg1024/2048/4096`:**
+
+| model | tg1024 | tg2048 | tg4096 |
+| --- | --- | --- | --- |
+| minicpm5-1b | 0.96x | 0.96x | 0.95x |
+| Qwen3.5-0.8B | 1.08x | 1.09x | 1.08x |
+
+Closest this whole session has gotten on minicpm. Not yet crossing 1.0x --
+the stated goal is not yet achieved, but the gap has closed from the
+session's opening 0.86-0.92x to 0.95-0.96x across three major rounds
+(`warp_partial`'s original landing, then this combined round).
+
+## Process lesson: subagents can produce real, correct work and still never send a final report
+
+Both beams this round independently exhibited the same failure mode this
+session has seen repeatedly: real implementation work, real (eventually
+clean) benchmark data sitting on disk, correctness gates presumably run --
+and no final report after being resumed multiple times with explicit
+"finish up now" instructions. Direct takeover (reading the diffs, re-running
+the correctness gates and a confirmation benchmark independently, and
+committing based on that firsthand evidence rather than a stalled agent's
+unsent conclusion) is the reliable fallback once a resume-and-wait cycle
+has repeated 3+ times without a final report, not a last resort to avoid.
+The evidence bar for taking over is the same as for trusting a report: don't
+commit anything the orchestrator hasn't personally verified compiles,
+passes the correctness gates, and benchmarks as claimed.
+
 Update this note after every 3-5 submissions with current ranking and next
 combination candidates, per `autoresearch/AGENT.md`.

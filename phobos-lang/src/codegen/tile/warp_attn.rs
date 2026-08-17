@@ -156,17 +156,53 @@ impl<'c> Codegen<'c> {
             }
         }
 
+        // The widest f16 vector load this lane's dpl-wide slice divides
+        // evenly into: 8 (16 bytes) covers Qwen's dpl=4 head-halves... no,
+        // covers a whole dpl=8 slice in one shot; 4 (8 bytes) covers
+        // minicpm's dpl=4. Both widths are proven elsewhere in this tree
+        // (`stage.rs`'s `DrainMode::VecF16`, `alignment = 16` /
+        // `vector<8xf16>` in the WMMA f16 staging test) and both are safe
+        // here on the same grounds `elem.rs`'s `vectorizes()` check codifies
+        // generally: the byte offset into a row is `(col + lane * dpl) * 2`,
+        // and `col` is always a multiple of `D = 32 * dpl` (a query/key head
+        // never starts mid-lane-slice) while `lane * dpl` is trivially a
+        // multiple of `dpl`, so every lane's own slice starts on a
+        // `2 * dpl`-byte boundary regardless of which lane or which key row;
+        // the row pitch itself (`KW`) is a multiple of `D` by the kernel's
+        // own `@aligned(KW = D)`, so successive rows stay on that boundary
+        // too. Falls back to scalar for a `dpl` this ladder does not evenly
+        // divide (not reached by either shape this kernel ships today).
+        let vw = [8, 4, 2, 1].into_iter().find(|w| dpl % w == 0).unwrap_or(1);
+        let k16_vec_t = Type::vector(&[vw as u64], self.f16_t);
+        let f32_vec_t = Type::vector(&[vw as u64], self.f32_t);
+        let vec_align = vw * 2; // f16 element size in bytes
+
         let finals = self.carry_loop(block, glo, ghi, one, &inits, |cg, lblk, kt, accs| {
             let k_col = cg.addi(lblk, col_v, lane_off)?;
-            // This warp's own dpl-wide slice of k[kt, :] and v[kt, :],
-            // widened to f32 once and reused across every query row.
+            // This warp's own dpl-wide slice of k[kt, :] and v[kt, :], loaded
+            // `vw` elements at a time (a single wide load when `vw == dpl`,
+            // which both shapes this kernel ships today hit exactly) and
+            // widened to f32 once, reused across every query row.
             let mut k_vals = Vec::with_capacity(dpl as usize);
             let mut v_vals = Vec::with_capacity(dpl as usize);
-            for j in 0..dpl {
-                let jc = cg.const_index(lblk, j)?;
+            let mut off = 0;
+            while off < dpl {
+                let jc = cg.const_index(lblk, off)?;
                 let kc = cg.addi(lblk, k_col, jc)?;
-                k_vals.push(cg.load_as(lblk, k_mv.mem, &[kt, kc], cg.f32_t)?);
-                v_vals.push(cg.load_as(lblk, v_mv.mem, &[kt, kc], cg.f32_t)?);
+                if vw > 1 {
+                    let raw_k = cg.vec_load_al(lblk, k_mv.mem, &[kt, kc], k16_vec_t, vec_align)?;
+                    let raw_v = cg.vec_load_al(lblk, v_mv.mem, &[kt, kc], k16_vec_t, vec_align)?;
+                    let fk = cg.vec_extf(lblk, raw_k, f32_vec_t)?;
+                    let fv = cg.vec_extf(lblk, raw_v, f32_vec_t)?;
+                    for e in 0..vw {
+                        k_vals.push(cg.vec_extract(lblk, fk, &[e], cg.f32_t)?);
+                        v_vals.push(cg.vec_extract(lblk, fv, &[e], cg.f32_t)?);
+                    }
+                } else {
+                    k_vals.push(cg.load_as(lblk, k_mv.mem, &[kt, kc], cg.f32_t)?);
+                    v_vals.push(cg.load_as(lblk, v_mv.mem, &[kt, kc], cg.f32_t)?);
+                }
+                off += vw;
             }
 
             let mut next = Vec::with_capacity(accs.len());

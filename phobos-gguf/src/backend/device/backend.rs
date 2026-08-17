@@ -441,6 +441,39 @@ impl Backend for DeviceBackend {
         })
     }
 
+    fn fused_attn_out(&self, out: FusedAttnOut) -> Result<bool> {
+        if !self.fused_attn_out {
+            return Ok(false);
+        }
+        let Some(chain) = fuse::attn_out_chain(out.x, out.w, out.dest, out.width, out.d_model)
+        else {
+            return Ok(false);
+        };
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(false);
+        };
+        self.fused_launch(&chain, &key)?;
+        Ok(true)
+    }
+
+    fn store_2d_pair(
+        &self,
+        a: (Plane, HPlane),
+        b: (Plane, HPlane),
+        rows: usize,
+        width: usize,
+    ) -> Result<()> {
+        if !self.fused_store2d {
+            self.store_2d(a.0, a.1, rows, width)?;
+            return self.store_2d(b.0, b.1, rows, width);
+        }
+        let from_a = (self.ptr(a.0.buf, a.0.offset)?, a.0.pitch);
+        let to_a = (self.hptr(a.1.buf, a.1.offset)?, a.1.pitch);
+        let from_b = (self.ptr(b.0.buf, b.0.offset)?, b.0.pitch);
+        let to_b = (self.hptr(b.1.buf, b.1.offset)?, b.1.pitch);
+        self.strided_pair(from_a, to_a, from_b, to_b, rows, width)
+    }
+
     fn copy_2d(&self, src: Plane, dst: Plane, rows: usize, width: usize) -> Result<()> {
         self.check_distinct("copy_2d", dst.buf, &[src.buf]);
         let from = (self.ptr(src.buf, src.offset)?, src.pitch);

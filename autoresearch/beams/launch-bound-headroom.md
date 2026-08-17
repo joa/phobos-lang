@@ -326,3 +326,61 @@ which would make further fusion work here low-value relative to
 [[flash-attention-decode]]'s own remaining lever (the shared-memory pooling
 gap, which could turn `PHOBOS_ATTN_PERSIST` into a safe default rather than
 opt-in, a different kind of win than more fusion would give).
+
+### Third round: `store_2d` fusion, retried, plus a re-check of the output-projection fusion under `warp_partial`'s new cost structure
+
+That prediction ("expect [`store_2d`] to be similarly flat") did not hold.
+The cost structure changed underneath this beam between round 2 and this
+round: [[cache-length-split-buckets]] landed `warp_partial`, cutting
+`attention_split`'s own isolated kernel time 50-59%, which changes exactly
+the ratio this beam's own diagnosis depended on (`attention_split`
+dominating the launches around it 6-8x). Pulled a fresh
+`PHOBOS_PASS_REPORT=9` before assuming the old 292/244-launch figures still
+applied, per the beam brief's own instruction not to extrapolate from a
+stale report.
+
+**What was built**, in parallel with a second agent working
+[[cache-length-split-buckets]]'s vectorization in a different file area
+(coordination notes in `BEAMS.md`; both agents went quiet after several
+resumes and this round was finished by direct takeover rather than a
+subagent report, `git diff`/correctness gates/benchmark all re-verified
+independently before committing):
+
+1. **`store_2d_pair`**: merges the key and value cache writes (`llama.rs`'s
+   `Model::attention`, previously two separate `store_2d` calls) into one
+   launch. The value write already waited for the key's rope to land
+   first; nothing reads either cache before the attention call that
+   follows both, so nothing depended on the value store landing first
+   either -- the two were only ever sequenced by call order, not a real
+   dependency. This is the item this beam's brief flagged as never
+   actually tried in either prior round.
+2. **`attn_out_chain` re-landed**: the same quantize-then-`ProjAdd`
+   fusion for the output projection that measured a wash in round 2
+   (`fuse/chains.rs`), re-tested under the new, post-`warp_partial` cost
+   structure rather than assumed to still be a wash.
+
+**Correctness and benchmark**: verified together with the concurrent
+vectorization work as one combined tree (both were independently
+correctness-gated before combining) -- full gate results and the benchmark
+table are in [[cache-length-split-buckets]]'s Round 2 section rather than
+duplicated here, since that is where the single combined commit's evidence
+lives. Summary: all four gates pass both models, and minicpm's `tg1024/2048/
+4096` moved from 260.75/255.76/244.43 to 264.56/261.74/254.07 (+1.5%/+2.3%/
++3.9% over the vectorization-only number), Qwen from 274.25/272.12/267.39 to
+279.39/279.25/275.73 (+1.9%/+2.6%/+3.1%). Real, on both models, no
+regression -- but because the two rounds' changes were combined and
+benchmarked together rather than in isolation, this beam's specific
+contribution (`store_2d_pair` and/or the re-landed `attn_out_chain`) cannot
+be separated from [[cache-length-split-buckets]]'s vectorization in this
+number. Accepted rather than spending a further round isolating it, per
+the same reasoning recorded in that beam's file.
+
+**Verdict: promoted, committed on `autoresearch`** (combined with
+[[cache-length-split-buckets]]'s round 2, one commit). This closes the
+`store_2d` item that was the last untried thing on this beam's original
+list. `quantize`+`q8_qdot_add`'s wash-to-maybe-not-wash flip illustrates
+the general lesson worth banking: a "wash" result is conditional on the
+cost structure it was measured against, and is worth re-checking after any
+change that materially shifts what the rest of a decode step costs, not
+treated as permanently closed the way a mechanism-diagnosed loss (like the
+QKV-projection attempt) should be.

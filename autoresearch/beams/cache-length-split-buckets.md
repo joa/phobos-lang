@@ -621,3 +621,73 @@ launches -- an exact match to the previously documented count from before
 this round's kernel rewrite). Both shapes confirmed live on the persistent
 path with no second grid-strided pass, so the bench numbers above are what
 they claim to be.
+
+### Round 2: vectorized K/V loads + a warp-count sweep
+
+Picked up the round's own "what is not chased" list. Two agents ran this
+round in parallel (this beam's vectorization + sweep, and
+`[[launch-bound-headroom]]`'s independent re-examination of the fusion
+levers below it); both went quiet after several resumes and were finished
+by direct takeover rather than a subagent report -- see `BEAMS.md`'s
+process-lesson entries for what that involved.
+
+**Vectorization.** `warp_partial`'s per-lane K/V loads now issue as a
+single wide vector load (`vector<8xf16>` for Qwen's `dpl=8`, `vector<4xf16>`
+for minicpm's `dpl=4`) instead of `dpl` separate scalar loads, widened to
+f32 in one `vec_extf` and unpacked with `vec_extract`. Safety argument
+(alignment holds for every lane and every row, not just the common case)
+is in the code comment above the change in `warp_attn.rs`; falls back to
+scalar for a `dpl` the `[8,4,2,1]` ladder doesn't evenly divide, not
+reached by either shipped shape. `attention_split_src`'s `@launch(...)`
+width changed from a hardcoded `256` to `wct * WARP_THREADS`, so a future
+warp-count change can't silently desync the launch width from the
+kernel's own warp count.
+
+**Warp-count sweep.** Swept `ATTN_WARP_SPLITS` at 4, 6, and 8 (the shipped
+default) via `attndecode`, minicpm shape, cache 4099: 964.0us / 776.0us /
+708.9us respectively (4.0x / 3.2x / 3.0x the bandwidth floor, `device copy
+bandwidth` now reading a properly-warmed 422 GB/s rather than the original
+run's cold 142 GB/s). **8 wins outright** -- fewer, wider-working warps
+each pay a longer critical path than the combine overhead they save.
+Confirms the shipped default rather than finding a better one; no code
+change from this half of the round.
+
+**Correctness**, on the combined tree (this round's vectorization plus
+`[[launch-bound-headroom]]`'s concurrent fusion work, verified together
+since that is the tree that actually shipped): `backend_check` (worst rel
+err 2.902e-4, unchanged), `fuse_check` both models (minicpm 9.703e-3
+average/1.325e-2 worst, Qwen 8.085e-3 average/1.051e-2 worst, 0 top-token
+flips either model), `batch_check` both models ("batched and sequential
+agree", spread errors in the same 0.7e-2-1.6e-2 band this session has seen
+throughout), `model_check` both models ("backends agree"). `cargo check
+--workspace` and `cargo clippy -p phobos-gguf -p phobos-lang --features
+cuda -- -D warnings` both clean.
+
+**Benchmark**, same session, interleaved against llama.cpp,
+`PHOBOS_ATTN_PERSIST=1`, combined tree
+(`autoresearch/beams/takeover_combined_bench.{csv,json,log}`), 3 of 3
+rounds uncontended:
+
+| model | test | before (round 1) | after (round 2, combined) | ratio |
+| --- | --- | --- | --- | --- |
+| minicpm5-1b | tg1024 | 260.75 | 264.56 | 0.96x |
+| minicpm5-1b | tg2048 | 255.76 | 261.74 | 0.96x |
+| minicpm5-1b | tg4096 | 244.43 | 254.07 | 0.95x |
+| Qwen3.5-0.8B | tg1024 | 274.25 | 279.39 | 1.08x |
+| Qwen3.5-0.8B | tg2048 | 272.12 | 279.25 | 1.09x |
+| Qwen3.5-0.8B | tg4096 | 267.39 | 275.73 | 1.08x |
+
+A further small, real improvement over round 1's already-large win, on both
+models, no regression -- but the vectorization and the concurrent
+`[[launch-bound-headroom]]` fusion work landed together and were verified
+and benchmarked as one combined tree, so this table cannot separate their
+individual contributions. Given both were independently correctness-gated
+before combining and the combined result strictly improves on round 1's
+number, that ambiguity was accepted rather than spending a further round
+isolating it. **minicpm still has not crossed 1.0x** (0.95-0.96x) -- closest
+this session has gotten, not yet the stated goal.
+
+**Committed on `autoresearch`** (both this round's and
+`[[launch-bound-headroom]]`'s changes, one commit, since they were verified
+together as one tree and splitting the commit after the fact would not
+reflect what was actually tested).

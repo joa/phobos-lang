@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
-    Backend, Buf, Fused, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun, QAct, QBuf,
+    Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun,
+    QAct, QBuf,
 };
 use crate::quant::Packed;
 use crate::{Gguf, TensorInfo};
@@ -324,6 +325,38 @@ impl Linear {
             return self.add_into_act(backend, x, act, rows, dest);
         }
         self.add_dense(backend, x, rows, dest)
+    }
+
+    /// [`Linear::add_into`], but letting a backend fuse the activation's
+    /// quantization into the accumulating contraction itself, one kernel
+    /// instead of two. `x` is unquantized, `width`-wide, and not yet reduced
+    /// the way [`Linear::add_into`]'s own `quantize_act` call would reduce
+    /// it -- the backend does that inside the fused kernel if it takes this
+    /// at all.
+    ///
+    /// Declines to the unfused pair exactly where [`Linear::add_into`] would
+    /// take its dense fallback, or where the backend itself declines (off by
+    /// default, or a shape its chain has no stage for).
+    pub(crate) fn add_projected(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        rows: usize,
+        dest: Buf,
+    ) -> Result<()> {
+        if rows == 1 && self.is_quantized() {
+            let fused = backend.fused_attn_out(FusedAttnOut {
+                x,
+                width: self.in_dim,
+                w: self.quantized(backend)?,
+                d_model: self.out_dim,
+                dest,
+            })?;
+            if fused {
+                return Ok(());
+            }
+        }
+        self.add_into(backend, x, rows, dest)
     }
 
     /// [`Linear::add_into`] against an activation quantized already. `x` is

@@ -10,7 +10,7 @@ mod emit;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use chains::{mlp_chain, project_chain};
+pub(crate) use chains::{attn_out_chain, mlp_chain, project_chain};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;

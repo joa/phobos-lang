@@ -1,0 +1,57 @@
+device copy bandwidth 422 GB/s
+
+minicpm5-1b : 24 blocks, 16 heads over 2 kv heads (group 8), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      188.7u      0.87M     2.2u     87.5x       NaN
+    67      194.3u      1.57M     3.9u     49.8x     188.1
+   131      203.9u      3.07M     7.6u     26.7x     150.4
+   257      241.3u      6.02M    15.0u     16.1x     296.6
+   521      280.4u     12.21M    30.4u      9.2x     148.0
+  1031      349.7u     24.16M    60.1u      5.8x     135.9
+  2053      491.9u     48.12M   119.6u      4.1x     139.1
+  4099      776.0u     96.07M   238.8u      3.2x     138.9
+
+Qwen3.5-0.8B : 6 blocks, 8 heads over 2 kv heads (group 4), head dim 256
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37       54.4u      0.43M     1.1u     50.5x       NaN
+    67       56.1u      0.79M     2.0u     28.8x      56.7
+   131       58.6u      1.54M     3.8u     15.4x      38.8
+   257       63.4u      3.01M     7.5u      8.5x      38.2
+   521       78.8u      6.11M    15.2u      5.2x      58.2
+  1031       99.7u     12.08M    30.0u      3.3x      41.1
+  2053      146.4u     24.06M    59.8u      2.4x      45.7
+  4099      232.8u     48.04M   119.4u      1.9x      42.2
+
+group 1, same grid : 24 blocks, 16 heads over 16 kv heads (group 1), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      166.7u      6.94M    17.2u      9.7x       NaN
+    67      179.5u     12.56M    31.2u      5.7x     427.1
+   131      206.4u     24.56M    61.1u      3.4x     420.3
+   257      259.5u     48.19M   119.8u      2.2x     421.7
+   521      385.8u     97.69M   242.9u      1.6x     478.4
+  1031      608.1u    193.31M   480.6u      1.3x     435.7
+  2053     1049.9u    384.94M   957.0u      1.1x     432.3
+  4099     1922.7u    768.56M  1910.7u      1.0x     426.6
+
+group 1, same cache : 24 blocks, 2 heads over 2 kv heads (group 1), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      152.8u      0.87M     2.2u     70.9x       NaN
+    67      155.9u      1.57M     3.9u     39.9x     103.2
+   131      158.2u      3.07M     7.6u     20.7x      37.0
+   257      199.3u      6.02M    15.0u     13.3x     325.7
+   521      253.3u     12.21M    30.4u      8.3x     204.8
+  1031      368.2u     24.16M    60.1u      6.1x     225.3
+  2053      583.8u     48.12M   119.6u      4.9x     211.0
+  4099     1025.0u     96.07M   238.8u      4.3x     215.7
+
+group 2 : 24 blocks, 16 heads over 8 kv heads (group 2), head dim 128
+ cache   attn/step   distinct    floor  vs floor us/1k pos
+    37      194.1u      3.47M     8.6u     22.5x       NaN
+    67      220.2u      6.28M    15.6u     14.1x     871.3
+   131      234.7u     12.28M    30.5u      7.7x     226.8
+   257      262.6u     24.09M    59.9u      4.4x     221.2
+   521      320.3u     48.84M   121.4u      2.6x     218.7
+  1031      447.5u     96.66M   240.3u      1.9x     249.4
+  2053      682.0u    192.47M   478.5u      1.4x     229.4
+  4099     1141.4u    384.28M   955.3u      1.2x     224.6
+
