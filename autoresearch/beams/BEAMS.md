@@ -1434,3 +1434,108 @@ whole-pass bandwidth contention, and this K-loop prefetch's register gate
 passing doesn't mean the timing wins. `q8_qmma` stays on its original,
 unmodified deep/shallow dispatch (`de5ebf7`'s prefill-attention rebuild is
 the only surviving prefill lever from this stretch of the session).
+
+## Full pass mapped, 2026-08-17: no hidden fusion opportunity left
+
+Before ranking another lever, reconciled the whole prefill pass against
+wall clock rather than just the kernels already known by name -- every
+prior `cuda_gpu_kern_sum` pull this session had been filtered through a
+`Select-String` on known kernel names. Unfiltered `nsys` report on the
+corrected `--cuda-graph-trace=node` OFF trace (`nsys_qmma_nodetrace_off.nsys-rep`):
+summing every kernel category (including `fused`, `rms_norm_q`, `rope`,
+`quantize`, `add_into`, `copy_2d`, `store_2d_pair` -- none of which had
+been summed before) gives ~22.8ms/pass against the ~23.2ms/pass observed
+via `bench.py`, ~98% itemized. The activation-quantize kernels (real work,
+0.62ms/pass, the prefill-side analog of the decode-side quantize-launch
+lesson in [[decode-step-is-launch-bound]]) are real but well under any
+reasonable bar for a dedicated beam. No multi-millisecond gap hiding
+outside the kernels already profiled this session.
+
+Also corrected in passing: the [[delta-rule-prefill-bottleneck]] memory
+("43% of a prompt pass") is about Qwen's architecture (SSM/delta-rule
+layers), not applicable to minicpm -- `bench.py` labels minicpm5-1b as
+"llama 1.1B", standard attention every layer, no delta-rule path at all.
+Chasing that lead against minicpm specifically would have been a dead end;
+worth remembering the model-scope on that memory entry.
+
+## New beam, 2026-08-17, a negative result caught before it started:
+`BR=32` tensor-core prefill attention, killed at the shared-memory gate
+
+User's explicit choice of lever after the pass-mapping above found nothing
+else and both `q8_qmma` follow-ups above were exhausted: retry
+[[prefill-attention-tensorcore]]'s reverted `BR=16` kernel at `BR=32`, its
+own postmortem's top-ranked untried follow-up (`BR=16` is the WMMA
+fragment floor, never swept upward; the loss was consistent with small
+matmuls never amortizing fixed WMMA fragment load/store overhead).
+
+Never reached the tree. The task's own step-zero gate -- measure the
+kernel's shared-memory footprint from real emitted MLIR before writing
+correctness or timing code -- killed it immediately: `BR=32` at `D=128`
+needs 106.6 KiB in the form that mirrors the shipped f32 kernel, 67% over
+Turing's 64 KiB hard per-block shared-memory ceiling (not the 48 KiB
+static default `@dynshared` can lift past -- `@dynshared` moves the
+addressable ceiling to 64 KiB, it cannot create room past the hardware
+wall, confirmed by reproducing the identical 106.6 KiB peak under
+`@dynshared` on the same source). The best variant tried (automatic
+`@pipeline` staging of K/V, a design change from what was asked but tried
+anyway on the chance it helped) still missed by 17% (76.4 KiB vs 64 KiB).
+`BR=64` was not attempted -- the mechanism found (below) predicts it would
+be worse, not better, and confirming that arithmetically was judged not
+worth a kill-check run.
+
+Mechanism, found by measuring rather than assuming: `wmma_dot`'s operand
+staging restages every operand into a fresh shared f16 tile on every call
+site regardless of whether a shared f16 tile of the right shape already
+exists, and this codegen never pools a named `var` tile across a different
+source-level name even when lifetimes never overlap -- both real,
+pre-existing properties of the tile codegen (not new bugs this kernel
+introduced), which is why the shipped f32 `attention_block_src` already
+carries "about ten" distinct tiles at its own smaller scale. The
+consequence for tile-width scaling: the `[BR,D]`-shaped tiles (accumulator,
+Q/K/V staging) scale linearly with `BR` and roughly double from `BR=16` to
+`BR=32`, but the `[BR,BR]`-shaped ones (the score matrix and its own f16
+restage) scale with `BR^2` and roughly quadruple -- so total footprint
+growth is not the ~2x a uniform doubling would suggest, and an initial
+hand-trace that predicted ~39 KiB (comfortably fitting) before the probe
+kernel was actually built and measured was wrong for exactly this reason.
+Worth its own note: even `BR=16`'s original "comfortably under the 48 KB
+cap" framing turns out to have been generous -- re-measured this round at
+46.8 KiB against 48 KiB, 2.5% headroom, not a lot of room.
+
+Nothing to gate or benchmark -- the kernel never reaches a state that
+compiles within this card's shared-memory budget, so no correctness run,
+no precision-floor tolerance carve-out, and no timing A/B against the
+freshly re-measured 4.47ms `attention_block` baseline were attempted, per
+this session's standing discipline against reporting a speculative number
+for a kernel that cannot run. Most promising remaining lever, unmeasured:
+folding the diagonal tile into the loop's own path (removing one of two
+separately-named tile identities), roughly estimated at 10-15 KiB saved,
+which would not obviously clear the wall even combined with the pipelined
+form's lower baseline -- flagged for a future round, not attempted here.
+
+**Nothing committed to the dispatcher or the kernel tree; only the beam
+file itself** (`32f49db`). Both tile widths tried on this lever now (`16`,
+reverted for losing on speed; `32`, killed for not fitting) point the same
+direction: the WMMA legacy path on `sm_75` is a poor fit for this kernel's
+shape at any tile width this card's shared memory can hold, absent a
+restructuring bigger than a tile-width retune.
+
+## Where prefill stands after four negative results in a row on its two
+largest kernels
+
+`q8_qmma` (13.29ms/pass, 57% of the pass) and `attention_block`
+(4.47ms/pass, 19%) are the two largest remaining levers, and this session
+tried and killed two designs on each: split-K and K-loop prefetch on
+`q8_qmma`, `BR=16` and `BR=32` tensor cores on attention. Every one had a
+real, confirmed mechanism for why it lost or didn't fit -- none were
+noise, near-misses, or measurement artifacts. The prefill-attention
+dispatch reorder (`de5ebf7`, -28.5% total kernel time, the round before
+this stretch) remains the only surviving prefill-specific win; `pp128`
+sits at roughly 0.73-0.76x of llama.cpp CUDA on this card, same
+neighborhood as before this stretch of the session started. What's left
+unexplored: stream-K for `q8_qmma` (the only surviving GEMM lever, but the
+split-K postmortem sets its acceptance bar high -- near-zero extra DRAM
+traffic, harder than either GEMM beam this round attempted) and the
+diagonal-tile-fold restructuring for attention (speculative, unmeasured,
+may not clear the shared-memory wall even if built). Both are bigger
+design lifts than anything tried this round, not incremental retunes.
