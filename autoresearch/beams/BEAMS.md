@@ -1316,24 +1316,26 @@ to isolate the change from cross-process noise: `PHOBOS_QMMA_SPLIT=0`
 averages 5524 t/s at minicpm `pp128`, on averages 4480-4774 t/s -- a
 reproducible 14-19% end-to-end loss, matching two full `bench.py` runs
 against llama.cpp where the established 0.76x baseline dropped to 0.61x
-and 0.54x. An `nsys --trace=cuda` whole-pass trace (`cuda_api_sum`,
-`cuda_gpu_kern_sum`) ruled out the two obvious explanations: in-context
-kernel durations roughly match the isolated `ncu` numbers (no cache
-interaction between the write and reduce kernels), and `cuGraphInstantiate_v2`
-fires exactly twice in both the on and off traces (a pre-existing
-prefill/decode single-slot cache-eviction pattern in `graph.rs`, unrelated
-to split-K) -- ruling out repeated graph rebuilds too. What's left: every
-split-routed projection replaces one graph node with two (write, then
-reduce), and `graph.rs` builds a pass as "a chain rather than a dependency
-analysis... these launches shared one stream, so serial order is the
-ordering they already relied on" -- a strictly serial dependency chain, no
-parallelism between nodes. The 48 extra serialized nodes (2 shapes x 24
-layers) cost more in aggregate wall clock on this platform than the
-kernels save, even though no individual kernel got slower. This is the
-same "op that matches in isolation can still be wrong" rule this project
-already holds, one level up: at the graph/pass level instead of the
-allocation level, and it took a whole-pass A/B, not a kernel-level one, to
-see it.
+and 0.54x. A first `nsys --trace=cuda` whole-pass trace pointed at
+"serialized graph nodes cost WDDM dispatch overhead" -- wrong, and
+corrected same-session: that trace lacked `--cuda-graph-trace=node`, so it
+silently under-decomposed the replayed graph (48 instances reported where
+4 real passes predict 192), and both of its supporting claims ("kernels
+match isolated ncu," "graph rebuild count is unaffected") were true only
+of the wrong subset of the data. Re-run with the correct flag, the real
+mechanism is memory-bandwidth/L2 contention, not node dispatch: *every*
+kernel in the ON pass runs slower in context, including ones split-K never
+touches (`attention_block` +35%, the untouched unsplit `q8_qmma` calls
++25-57%), because the split path's 6.3 MB-per-shape partials round trip
+(write, then the reduce kernel's separate read) competes for the same
+DRAM/L2 budget as everything else in the pass. Recomputed GEMM total per
+pass from the corrected trace is actually *higher* with split-K on
+(14.36ms vs 13.29ms) -- the isolated per-kernel savings are real but don't
+survive contact with the rest of the pass. This is the same "op that
+matches in isolation can still be wrong" rule this project already holds,
+one level up, and it took a *second*, more careful whole-pass trace, not
+just a whole-pass trace, to see it correctly -- the first attempt already
+looked like a legitimate mechanism and was wrong anyway.
 
 **Shipped default off.** `PHOBOS_QMMA_SPLIT` is opt-in (`=1`/`on`/`yes`/
 `true`; unset or anything else stays off, unlike this session's other
