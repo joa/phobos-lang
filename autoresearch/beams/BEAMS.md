@@ -748,6 +748,42 @@ the stated goal is not yet achieved, but the gap has closed from the
 session's opening 0.86-0.92x to 0.95-0.96x across three major rounds
 (`warp_partial`'s original landing, then this combined round).
 
+## Superseded immediately: the round above never shipped with its own fusions active
+
+The table right above this note is stale as of the same day it was
+written. Audit found `store_2d_pair`/`attn_out_chain` (landed in the
+combined commit `6a7b6ae`) were gated behind env vars defaulting *off*,
+and no confirmation benchmark on record -- including the one that produced
+the table above -- ever set them. Re-benchmarked with them on: real,
+reproducible gain. Per the user's standing instruction that a probable
+improvement must ship on by default, flipped both to the repo's existing
+default-on/opt-out convention. Full mechanism, nsys evidence and gate
+results in [[launch-bound-headroom]]'s fourth round.
+
+**Current state, same session, interleaved against llama.cpp,
+`PHOBOS_ATTN_PERSIST=1` (only flag still forced -- both fusion flags now
+default on), `tg1024/2048/4096`:**
+
+| model | tg1024 | tg2048 | tg4096 |
+| --- | --- | --- | --- |
+| minicpm5-1b | 0.97x | 0.97x | 0.97x |
+| Qwen3.5-0.8B | 1.08x | 1.09x | 1.08x |
+
+Flat 0.97x across all three tracked lengths on minicpm -- the most stable
+result this session has produced, and closer to 1.0x than any prior
+snapshot. Still not crossing the goal. Next candidates per the advisor
+consult that opened this round: attention's remaining ~3x-over-floor gap
+(ncu on the current, post-vectorization `attention_persist` kernel shows
+occupancy now at ~98% -- up from 63.8% before vectorization -- but memory
+throughput 37%, compute throughput 35%, and the stall breakdown is
+barrier-dominated: 42.7% of stall cycles are warps waiting at the intra-CTA
+combine barrier for sibling warps, 24.2% more is global-memory latency,
+everything else under 11%. Full counters and reproduction command in
+[[cache-length-split-buckets]]. This argues against more ILP/ key-batching
+(occupancy is already maxed) and toward reducing the combine barrier's
+cost or the memory-latency variance across warps that staggers arrival at
+it -- a different lever than anything tried on this kernel so far.
+
 ## Process lesson: subagents can produce real, correct work and still never send a final report
 
 Both beams this round independently exhibited the same failure mode this
