@@ -1010,3 +1010,97 @@ different mechanism (over-fragmentation, not under-assignment -- see
 [[cache-length-split-buckets]]'s Round 3), untouched because it does not
 regress Qwen; and `PHOBOS_ATTN_PERSIST` itself remains opt-in pending the
 user's call on the open question above.
+
+## New beam, 2026-08-17: prefill (`pp128`), never previously a target this session
+
+With `tg` at parity, the user asked to also look at prefill: `pp128` sat at
+0.40-0.41x of llama.cpp CUDA in every recorded baseline, and it had never
+been benchmarked or profiled as a target before this round. Full mechanism,
+A/B numbers, the tensor-core kernel that was built, correctness-verified,
+benchmarked and then reverted (a real measured loss, not a null result),
+and the precision finding that came out of debugging it, in
+[[prefill-attention-tensorcore]] (`autoresearch/beams/prefill-attention-tensorcore.md`).
+
+**Shipped**: `DeviceBackend::attention` (`phobos-gguf/src/backend/device/backend.rs`)
+now tries the already-existing, already-proven `attention_blocked` kernel
+(single-pass online-softmax, no materialized score matrix) ahead of the
+three-launch `attn_gemm_src` path it used to prefer whenever the shape
+tiled evenly by 64. A real `nsys` trace found attention tied with the
+projection GEMM at 37.5-37.9% of a minicpm pp128 pass, not the minor cost
+`attn_gemm_src`'s own doc comment assumed (corrected in place) -- and the
+kernel it was skipping already did the same work 66% cheaper. Same-session
+trace, minicpm pp128, 3 reps: total prefill kernel time 33.04ms -> 23.62ms
+(-28.5%), attention's own share 12.53ms -> 4.25ms (-66.1%), `q8_qmma`
+(the GEMM, untouched by this change) unaffected. All four correctness
+gates pass on both models, `PHOBOS_ATTN_PERSIST=1`, matching documented
+baselines to the digit (`backend_check` worst error 2.902e-4, identical to
+the pre-existing figure).
+
+**Tried and reverted**: a tensor-core (`@tensorcore`/`@pipeline`, f16 Q/K/V,
+WMMA legacy path -- confirmed engaged before building, `sm_75` + 32-bit
+index means `has_mma_sync` is false but `has_wmma` isn't) version of the
+same kernel, modeled on `examples/flash_attention_fp16.ph`. Correctness-verified
+(a real bug hunt resolved to a precision finding -- f16 rounding in the PV
+product, full strength at a from-scratch prompt's first block where no
+prior loop dilutes it, still within a justified `1e-3` bound since
+llama.cpp's own prefill kernel is f16 too) and all four gates passed with
+it active. But measured **27-40% slower than the plain-f32 kernel it was
+meant to replace** at two launch widths tried (`nsys`, same shape): the
+matmuls here (`16x16x128`/`16x128x16`) are too small for WMMA's per-launch
+fixed cost (fragment load/store through a shared-memory epilogue slab,
+plus a query f32->f16 cast) to amortize. Reverted cleanly; only the
+dispatch-reorder and a doc-comment fix remain in the tree. Concrete next
+steps (wider `BR`, folding the diagonal tile into the pipelined loop, a
+wider query group) are in the beam file for whoever picks this back up --
+none attempted this round given the clear, repeated loss at the one tile
+size tried.
+
+**Not yet run: the `bench.py` confirmation.** Per this session's standing
+rule, that and the resulting commit are the orchestrator's own next step,
+same as every other round this session. The remaining gap after the
+reorder (from the same trace): phobos's total prefill kernel time is now
+1.84x llama.cpp's (down from 2.58x); the GEMM projection (1.29x) is the
+largest absolute per-kernel gap, attention (5.74x) the largest relative
+one and the one the tensor-core attempt tried and failed to close at
+`BR=16`.
+
+## Orchestrator diagnostics, 2026-08-17: why tensor cores are the wrong lever for decode, and one q8_qmma occupancy datum
+
+Gathered while scoping the prefill investigation above, before dispatching
+it -- kept here since they were reported to the user directly but not yet
+on record.
+
+**Decode attention (`attention_persist`, post grid-barrier-rebalance and
+argmax) genuinely does not want tensor cores.** Direct `ncu` measurement at
+cache 4099, minicpm shape (`autoresearch/beams/ncu_persist_post_argmax_4099.ncu-rep`):
+`sm__pipe_tensor_op_hmma_cycles_active` is 0.22% of peak -- essentially
+zero, and correctly so. The kernel does ~34 MFLOP/step while streaming
+4.36MB of K/V cache (`dram__bytes_read.sum`, matching the ~4.2MB
+theoretical distinct almost exactly -- traffic is not redundant, ruling out
+a qgroup-restructuring lever). Under 1% of this card's FMA capacity; this
+is a bandwidth-streaming kernel, not a FLOP-bound one, so tensor cores
+(which accelerate FLOPs) cannot be the lever regardless of how they are
+wired in. `sm__inst_executed_pipe_fma` sits at 35.48% of peak, matching
+`ncu`'s own Compute (SM) Throughput reading (39.61%) -- the kernel is
+latency-bound (barrier + long-scoreboard stalls, see the grid-barrier-
+rebalance beam above), not compute-bound, so there is no idle FMA capacity
+tensor cores would be racing against either.
+
+**Swizzling is a closed question for this kernel too**: shared-memory bank
+conflicts (`l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_{ld,st}`) sum
+to 498 against 284,855 load wavefronts, ~0.17% -- negligible. No swizzle
+work is warranted here.
+
+**One `q8_qmma` (prefill GEMM) datum, not yet generalized**: `ncu` on a
+single call captured mid-prefill (`autoresearch/beams/ncu_qmma_prefill.ncu-rep`)
+showed **12.45% achieved occupancy against a 25% theoretical ceiling** --
+grid `(1, 20, 1)`, only 20 of this card's 48 SMs had any work at all. Int8
+tensor-core utilization on that call was a real 19.61% of peak (not zero,
+unlike decode), and L2 hit rate was high (79.97%), so redundant global
+fetches across warps are not the story. This is one shape, not
+representative of every projection minicpm calls (the file's own comment,
+`"keeping the grid full was costing the two 1024-wide projections about a
+quarter of their throughput"`, already documents this exact width-vs-grid-
+fill tradeoff as known) -- flagged, not chased, since the same round's
+kernel-time breakdown found attention tied with the GEMM for prefill's
+dominant cost, and the prefill beam above went after that first.
