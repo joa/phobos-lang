@@ -18,11 +18,14 @@ throughput**: `PHOBOS_QMMA_SPLIT` off averages 5524 t/s, on averages
 4480-4774 t/s. Two full `bench.py` runs against llama.cpp confirm the same
 direction: the established pre-split ratio of 0.76x dropped to 0.61x and
 0.54x with split-K on. See "End-to-end result and the graph-node mechanism"
-below for the numbers and the nsys trace that explains them: every
-split-routed projection replaces one launch with two (write, then reduce),
-and those extra serialized graph nodes cost more in aggregate wall clock on
-this platform than the kernels save, even though no individual kernel got
-slower. **`qmma_split` now defaults off** (`PHOBOS_QMMA_SPLIT=1` opts in).
+below for the numbers and the corrected `nsys` trace that explains them
+(`--cuda-graph-trace=node`; an earlier trace pass without that flag
+under-decomposed the replayed graph and pointed at the wrong mechanism,
+corrected in that section): the split path's 6.3 MB-per-shape partials
+round trip competes for memory bandwidth with everything else running in
+the same pass, slowing down the routed kernels *and* the untouched ones
+(attention, the unsplit `q8_qmma` calls) together. **`qmma_split` now
+defaults off** (`PHOBOS_QMMA_SPLIT=1` opts in).
 Everything below the per-shape kernel numbers -- the mechanism, the two
 compiler-proof bugs, the correctness verification -- is kept as documentation
 of real, working code that just doesn't pay for itself end to end on this
@@ -310,47 +313,66 @@ against llama.cpp confirm the same direction at the whole-comparison level:
 the established pre-split ratio of 0.76x dropped to 0.61x and 0.54x with
 split-K on.
 
-The coordinator traced the mechanism with `nsys --trace=cuda` (both traces
-captured and exported to sqlite: `nsys_qmma_split_on.nsys-rep`/`.sqlite`,
-`nsys_qmma_split_off.nsys-rep`/`.sqlite`), and ruled out the two most likely
-explanations before landing on the real one:
+The coordinator traced the mechanism with `nsys --trace=cuda` (`nsys_qmma_split_on.nsys-rep`/`.sqlite`,
+`nsys_qmma_split_off.nsys-rep`/`.sqlite`). **That first trace pass produced a
+wrong mechanism, corrected below -- keeping the wrong version on record
+briefly since the correction is itself the lesson.** Without
+`--cuda-graph-trace=node`, `cuda_gpu_kern_sum` silently under-decomposed the
+replayed graph: it reported 48 instances of each split-routed kernel where
+4 real passes (1 warmup + 3 timed) predict 192, meaning the numbers it did
+show were dominated by the one *flushed, non-replayed* warmup pass, not the
+timed graph replays that actually matter. That led to two wrong conclusions:
+that per-kernel durations "roughly matched" isolated `ncu`, and that
+`cuGraphInstantiate_v2` firing twice in both traces ruled out graph-rebuild
+cost -- both true statements about the wrong subset of the data. The
+"serialized graph nodes cost WDDM dispatch overhead" mechanism built on top
+of that was consequently a placeholder, not a confirmed finding, flagged
+honestly at the time ("further precision here has diminishing returns") but
+still wrong enough to warrant redoing.
 
-- **Not the kernels themselves.** `cuda_gpu_kern_sum`'s in-context durations
-  roughly match the isolated `ncu` numbers above (e.g. `q8_qmma_reduce`
-  averaged 18.7 us in-context vs 18.5-19.4 us isolated). Total raw GEMM
-  kernel time is genuinely lower with split-K on in this trace, consistent
-  with the per-shape savings measured above. The kernels are not lying, and
-  are not the problem.
-- **Not graph-rebuild frequency.** `cuGraphInstantiate_v2` fires exactly
-  twice in both traces (`cuda_api_sum`), a pre-existing prefill/decode
-  cache-eviction pattern in `graph.rs`'s single-slot `self.pass` cache,
-  unrelated to split-K. ON's two instantiate calls do cost more on average
-  (1.46 ms vs 1.06 ms -- presumably a bigger graph takes longer to
-  instantiate) but that's at most ~0.8 ms total, nowhere near the gap.
-- **What's left**: `launch_qmma_split` replaces one launch with two (write,
-  then reduce) for every split-routed projection -- net +1 graph node each.
-  With 2 routed shapes x however many layers, that's dozens of extra
-  serialized nodes added to a graph built, per `graph.rs`'s own doc comment,
-  as "a chain rather than a dependency analysis: these launches shared one
-  stream, so serial order is the ordering they already relied on" -- every
-  node has a hard dependency edge on the previous one, no parallelism
-  between nodes. Per-kernel durations aren't inflated, but aggregate wall
-  clock still grows, which points at inter-node dispatch/sync overhead on
-  this platform (WDDM) scaling with node count rather than with kernel
-  content. The coordinator was not able to isolate the exact per-node cost
-  with the reports pulled so far (instance-count accounting in the
-  graph-replay case didn't cleanly decompose across passes); further
-  precision here has diminishing returns for the decision that actually
-  matters, which is the default.
+**Re-run with `--cuda-graph-trace=node`** (`nsys_qmma_nodetrace_on.nsys-rep`,
+`nsys_qmma_nodetrace_off.nsys-rep`), instance counts now decompose correctly
+(192 for every split-routed kernel, 384 for `q8_qmma` off -- both exactly
+4 passes' worth) and the real mechanism is different, and worse, than the
+first pass suggested:
 
-**This is a structural cost, not a bug with a cheap fix.** `qmma_split` now
-defaults off; the code, the two compiler-proof bugs it took to get here, and
-the correctness verification all stay, since the diagnosis and the mechanism
-are real and the tradeoff could tip differently at a different node-count or
-model shape mix -- Qwen's per-kernel wins (-37% to -47%) were larger than
-minicpm's, which is the kind of thing worth another look if this comes up
-again with a model whose split-routed projection count or shape differs
-enough to change the graph-node-count-vs-kernel-savings balance.
+- **Every kernel in the ON pass runs slower in context, including kernels
+  split-K never touches.** `attention_block` -- nothing to do with `q8_qmma`
+  -- averages 251.5 us/instance in the ON trace against 186.4 us in the OFF
+  trace, +35%. The untouched *unsplit* `q8_qmma` calls (qkv, gate/up, the two
+  shapes split-K doesn't route) average 168.5 us in ON's trace against an
+  isolated/OFF baseline of ~107-138 us, +25-57%. The split and reduce kernels
+  themselves also run 35-50% slower in context than their own isolated `ncu`
+  numbers (`q8_qmma_split` 105.1 us in-context vs 70.2 us isolated average;
+  `q8_qmma_reduce` 25.6 us vs 19.0 us).
+- **This rules the previous "kernels aren't the problem" claim out
+  completely**, and replaces "serialized graph-node dispatch overhead" with
+  memory-bandwidth/L2 contention: `q8_qmma_split`'s partials buffer is a
+  6.3 MB round trip per routed shape (write, then the reduce kernel's
+  separate read), and that traffic competes for the same DRAM/L2 that every
+  *other* kernel in the same pass -- routed or not, GEMM or attention -- also
+  needs, slowing all of them down together. Recomputed per-pass GEMM total
+  from the corrected trace: ON 14.36 ms (`q8_qmma` 8.09 ms + `q8_qmma_split`
+  5.05 ms + `q8_qmma_reduce` 1.23 ms) against OFF's 13.29 ms -- split-K's
+  *raw in-context GEMM time is higher*, not lower, once measured correctly.
+  The per-shape `ncu` savings in "Result summary" above are real in
+  isolation; they just don't survive contact with everything else running in
+  the same pass.
+
+**This is a structural cost, not a bug with a cheap fix**, and the
+corrected mechanism is a stronger reason to leave it off than the original
+one: this isn't a fixed per-node tax that a smarter graph topology could
+amortize away, it's a shared-resource cost that scales with how much
+scratch traffic the split path moves, and gets worse the more of the pass's
+own bandwidth budget it has to compete for. `qmma_split` stays off by
+default; the code, the two compiler-proof bugs it took to get here, and the
+correctness verification all stay, since the diagnosis and the kernels
+themselves are real and the tradeoff could tip differently at a different
+node-count or model shape mix -- Qwen's per-kernel wins (-37% to -47%) were
+larger than minicpm's. But any future revisit needs a bandwidth-reduction
+angle (e.g. avoiding the reduce kernel's separate read-back via
+accumulate-in-place, which was proposed and explicitly deferred pending this
+exact correction) rather than a node-count angle.
 
 ## Files
 
@@ -359,7 +381,8 @@ enough to change the graph-node-count-vs-kernel-savings balance.
 - `ncu_qmma_splitk_full_oproj.ncu-rep`, `_full_downproj.ncu-rep`, `_full_qkv.ncu-rep`, `_full_oproj_reduce.ncu-rep` -- `--set full` mechanism confirmation, one launch each (plus their `_check.csv` exports).
 - `ncu_qmma_splitk_qwen_baseline.ncu-rep` / `.csv`, `ncu_qmma_splitk_qwen_split.ncu-rep` / `.csv` -- same light-metrics comparison on Qwen3.5-0.8B-Q8_0.
 - `ncu_qmma_splitk_gatefix.ncu-rep` / `.csv` -- minicpm, post-gate-fix, confirms qkv now takes the plain unsplit `q8_qmma` path and o_proj/down_proj/gate-up are unaffected.
-- `nsys_qmma_split_on.nsys-rep` / `.sqlite`, `nsys_qmma_split_off.nsys-rep` / `.sqlite` -- the coordinator's whole-pass traces (`nsys --trace=cuda`) that found the graph-node mechanism behind the end-to-end regression; see "End-to-end result and the graph-node mechanism" above.
+- `nsys_qmma_split_on.nsys-rep` / `.sqlite`, `nsys_qmma_split_off.nsys-rep` / `.sqlite` -- the coordinator's first whole-pass traces (`nsys --trace=cuda`, no `--cuda-graph-trace=node`), which under-decomposed the replayed graph and produced the superseded "graph-node dispatch overhead" mechanism; kept for the record of the correction, not as evidence of the real mechanism.
+- `nsys_qmma_nodetrace_on.nsys-rep`, `nsys_qmma_nodetrace_off.nsys-rep` -- the corrected traces (`--cuda-graph-trace=node`), instance counts now match 4 real passes, and this is what "End-to-end result and the graph-node mechanism" above is actually built on: memory-bandwidth/L2 contention from the split path's partials traffic, slowing every kernel in the pass, not just the routed ones.
 - `qmma_splitk_off.csv`/`.json`, `qmma_splitk_on.csv`/`.json` -- the coordinator's phobos-only `bench.py --no-llama` A/B (minicpm, pp128) that first isolated the regression from cross-process noise: off 5524 t/s, on 4480-4774 t/s.
 - `qmma_splitk_confirm.csv`/`.json`, `qmma_splitk_confirm2.csv`/`.json` -- the coordinator's two full `bench.py` runs against llama.cpp with split-K still on by default, before the fix: 0.61x, 0.54x against the established 0.76x baseline.
 - `qmma_splitk_final_confirm.csv`/`.json` -- the coordinator's confirmation run after the default flip to off: pp128 5732.69 t/s, ratio 0.73x against llama.cpp, back in the neighborhood of the pre-split 0.76x baseline (within this session's observed clock-noise band on this card).
