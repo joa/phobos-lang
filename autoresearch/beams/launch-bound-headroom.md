@@ -384,3 +384,60 @@ cost structure it was measured against, and is worth re-checking after any
 change that materially shifts what the rest of a decode step costs, not
 treated as permanently closed the way a mechanism-diagnosed loss (like the
 QKV-projection attempt) should be.
+
+### Fourth round: the round-3 win never actually shipped active -- flipped the defaults
+
+Auditing the committed state (`6a7b6ae`) against BEAMS.md's own "current
+state" table found a gap: `store_2d_pair` and the re-landed `attn_out_chain`
+both went in gated behind `PHOBOS_FUSED_STORE2D`/`PHOBOS_FUSED_ATTN_OUT`,
+env vars that default to *off* (`std::env::var_os(..).is_some()`). Every
+confirmation benchmark on record for this beam, including the one that
+reported the round-3 "+1.5%/+2.3%/+3.9%" gain and the one behind BEAMS.md's
+headline 0.95-0.96x snapshot, only set `PHOBOS_ATTN_PERSIST=1` -- neither
+fusion flag. `nsys` on the current tree confirmed it directly:
+`store_2d` fires 49,440 times over a 1024-token minicpm decode (2/layer/step,
+the unfused count), not the ~24,720 a real fusion would produce.
+
+Re-benchmarked with both flags forced on, same session, same card, 3x3,
+uncontended: minicpm moved from the tracked 0.95-0.96x to **0.96-0.98x**
+(tg1024 0.98x, tg2048 0.97x, tg4096 0.96x,
+`autoresearch/beams/fused_flags_on_minicpm.{csv,json}`) -- a real,
+reproducible gain, matching round 3's original finding. Ran all four
+correctness gates with both flags on: `backend_check` clean (worst rel err
+2.9e-4), `batch_check`/`model_check`/`fuse_check` on both models in the same
+error bands already documented (fuse_check ~9.7e-3 avg minicpm, ~8.1e-3
+Qwen, 0 top-token flips on either).
+
+Per the user's explicit standing instruction ("if we make an improvement
+and it's probably better, it must be on by default"): flipped both to the
+existing `fused_stage` convention (default true, `_=0` opts out) that
+`fused_mlp`/`fused_project`/`fused_mix` already use, rather than leaving a
+proven win sitting opt-in. `PHOBOS_ATTN_PERSIST` was deliberately *not*
+touched here -- its opt-in reason is a distinct, still-live one (a grid
+barrier that can deadlock if co-residency doesn't hold, not a performance
+question), out of scope for this change.
+
+Re-ran correctness gates with **no** fusion env vars set (defaults only,
+`PHOBOS_ATTN_PERSIST=1` still forced) -- identical numbers to the
+explicit-flags run, confirming the defaults are live. Fresh confirmation
+benchmark, both models, defaults only:
+
+| model | tg1024 | tg2048 | tg4096 |
+| --- | --- | --- | --- |
+| minicpm5-1b | 0.97x | 0.97x | 0.97x |
+| Qwen3.5-0.8B | 1.08x | 1.09x | 1.08x |
+
+(`autoresearch/beams/fused_defaults_on_both.{csv,json}`.) Qwen unchanged
+within noise, as expected -- `qwen35.rs` has its own `Attention` struct and
+never reaches `llama.rs::Model::attention`, so neither flag's code path is
+reachable for that model. minicpm now flat at 0.97x across all three
+tracked lengths, the closest and most stable this session has gotten.
+Committed: `phobos-gguf/src/backend/device/mod.rs` only (the two `bool`
+initializers and their doc comments).
+
+**Lesson for the beam-tracking process itself**: a beam's own "promoted and
+committed" note is not sufficient evidence that a win is live in the
+default build -- if a change lands behind an opt-in flag, the tracked
+"current state" table has to either say so explicitly or get re-measured
+against the default config, or the session's own headline number silently
+understates what is actually sitting in the tree.

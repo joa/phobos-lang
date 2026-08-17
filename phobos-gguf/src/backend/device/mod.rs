@@ -158,15 +158,16 @@ pub struct DeviceBackend {
     /// measured against the projection alone.
     fused_mix: bool,
     /// Whether attention's output epilogue (quantizing the mixed heads, then
-    /// the output projection) joins the fused-chain path. `PHOBOS_FUSED_ATTN_OUT`,
-    /// unset by default: an earlier round measured this a wash against the
-    /// launched pair before `warp_partial` cut attention's own share of a
-    /// step, so it stays opt-in until re-measured under the new cost
-    /// structure rather than joining the default-on `fused_stage` trio above.
+    /// the output projection) joins the fused-chain path. Measured a wash
+    /// against the launched pair before `warp_partial` cut attention's own
+    /// share of a step; re-measured after and a clean win
+    /// (`autoresearch/beams/launch-bound-headroom.md`), so this now joins
+    /// the default-on `fused_stage` trio above. `PHOBOS_FUSED_ATTN_OUT=0`
+    /// switches it off.
     fused_attn_out: bool,
     /// Whether attention's key and value writes into the cache land in one
-    /// launch instead of two. `PHOBOS_FUSED_STORE2D`, unset by default for the
-    /// same reason as [`Self::fused_attn_out`].
+    /// launch instead of two. Same history as [`Self::fused_attn_out`]:
+    /// default on, `PHOBOS_FUSED_STORE2D=0` switches it off.
     fused_store2d: bool,
     /// Blocks a fused kernel is launched with, which unlike [`persist_blocks`]
     /// has to be exact: a block of the grid that is not resident never reaches
@@ -358,8 +359,8 @@ impl DeviceBackend {
             fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),
             fused_project: fused_stage("PHOBOS_FUSED_PROJ"),
             fused_mix: fused_stage("PHOBOS_FUSED_MIX"),
-            fused_attn_out: std::env::var_os("PHOBOS_FUSED_ATTN_OUT").is_some(),
-            fused_store2d: std::env::var_os("PHOBOS_FUSED_STORE2D").is_some(),
+            fused_attn_out: fused_stage("PHOBOS_FUSED_ATTN_OUT"),
+            fused_store2d: fused_stage("PHOBOS_FUSED_STORE2D"),
             fused_blocks: Cell::new(0),
             fused_scratch: RefCell::new(Vec::new()),
             fused_barrier: RefCell::new(None),

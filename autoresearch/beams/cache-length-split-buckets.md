@@ -691,3 +691,57 @@ this session has gotten, not yet the stated goal.
 `[[launch-bound-headroom]]`'s changes, one commit, since they were verified
 together as one tree and splitting the commit after the fact would not
 reflect what was actually tested).
+
+### ncu on the post-vectorization `attention_persist` kernel
+
+Re-profiled `attention_persist` (the committed, vectorized kernel, not the
+pre-`warp_partial` one the session's earlier ncu data is from) at cache
+length 4099, minicpm's shape:
+
+    ncu -k "regex:attention_persist" -c 5 --set full -f \
+      -o autoresearch/beams/ncu_persist_post_vectorize_4099 -- \
+      target/release/examples/attndecode.exe
+    (PHOBOS_ATTNDECODE_SHAPE=minicpm PHOBOS_ATTNDECODE_LENGTH=4099 PHOBOS_ATTN_PERSIST=1)
+
+Occupancy is no longer the story: **Achieved Occupancy ~98%** (up from the
+pre-vectorization 63.8% this beam's own earlier round measured), 31.5-31.8
+of 32 theoretical warps active per SM. But throughput is still low --
+Memory Throughput 36-38%, Compute (SM) Throughput 33-36% -- so the kernel
+is latency-bound with occupancy already at its ceiling, not thread-starved.
+
+Warp-stall breakdown (raw `smsp__average_warps_issue_stalled_*` counters,
+per-instruction average of ~21.3 cycles):
+
+| stall reason | cycles | share |
+| --- | --- | --- |
+| barrier (waiting on sibling warps at the intra-CTA combine sync) | 9.09 | 42.7% |
+| long scoreboard (global memory latency) | 5.16 | 24.2% |
+| wait (fixed-latency, e.g. arithmetic pipe) | 2.23 | 10.5% |
+| short scoreboard (shared memory latency) | 1.62 | 7.6% |
+| selected (issuing) | 1.00 | 4.7% |
+| not selected | 0.61 | 2.9% |
+| math pipe / MIO throttle | 0.75 | 3.5% |
+
+Barrier stall alone is the single largest cost, ahead of raw memory
+latency. Mechanism: `warp_partial`'s 8 warps each do independent
+register-resident online-softmax work over their key sub-range, then hit a
+`syncthreads()`-style barrier before the shared-memory combine into the
+final output. A warp that finishes early (or whose K/V loads happened to
+hit cache better) idles at that barrier waiting for the slowest sibling,
+and that idle time is exactly what `stalled_barrier` counts. This is
+consistent with the long-scoreboard share (24.2%) being the likely root
+cause of *why* warps arrive staggered in the first place -- the two
+numbers are not independent.
+
+**What this means for the next round.** With occupancy already maxed,
+adding more independent work per warp (e.g. key-batching, processing
+kb>1 keys per loop iteration for more ILP) mostly attacks the 15% "wait" +
+"selected" bucket, not the dominant 43% barrier cost -- a materially
+different bet than it would have been pre-vectorization, when occupancy
+itself was the ceiling. The more promising unexplored lever is reducing
+either the combine barrier's cost directly (fewer syncs, or a
+shuffle-only combine that avoids the shared-memory round trip for some
+subset of the reduction) or the memory-latency variance across warps that
+staggers their arrival at it (e.g. software-pipelined/prefetched K/V loads
+so a warp has useful work queued rather than idling). Raw report kept:
+`autoresearch/beams/ncu_persist_post_vectorize_4099.ncu-rep`.

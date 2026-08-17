@@ -1,0 +1,663 @@
+{
+  "meta": {
+    "card": "NVIDIA GeForce RTX 2080 SUPER",
+    "driver": "610.88",
+    "clock_max": "2145",
+    "commit": "6a7b6ae"
+  },
+  "args": {
+    "models": "['minicpm5-1b-Q8_0']",
+    "prompt_tokens": "[0]",
+    "gen_tokens": "[1024, 2048, 4096]",
+    "reps": "3",
+    "rounds": "3",
+    "llama_bench": "[]",
+    "cuda_lib": "[]",
+    "llama_args": "",
+    "no_llama": "False",
+    "no_build": "False",
+    "warm_secs": "45.0",
+    "max_idle_util": "45.0",
+    "max_idle_power": "120.0",
+    "poll": "0.5",
+    "force": "False",
+    "csv": "autoresearch\\beams\\fused_flags_on_minicpm.csv",
+    "json": "autoresearch\\beams\\fused_flags_on_minicpm.json"
+  },
+  "backends": {
+    "phobos": "CUDA",
+    "llama.cpp CUDA": "CUDA"
+  },
+  "labels": {
+    "llama.cpp CUDA/minicpm5-1b-Q8_0": "llama ?B Q8_0",
+    "phobos/minicpm5-1b-Q8_0": "llama 1.1B Q8_0"
+  },
+  "summary": {
+    "median_clock": 2031.0967741935483,
+    "uncontended_rounds": [
+      1,
+      2,
+      3
+    ],
+    "rounds": [
+      1,
+      2,
+      3
+    ],
+    "drift": {
+      "1": -0.00244864425788488,
+      "2": -0.004408418795871967,
+      "3": 0.0019353345575136387
+    }
+  },
+  "health": {
+    "1": {
+      "util": 1.5,
+      "power": 44.260000000000005
+    },
+    "2": {
+      "util": 1.5,
+      "power": 39.055
+    },
+    "3": {
+      "util": 1.0,
+      "power": 38.875
+    }
+  },
+  "samples": [
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 0,
+      "rate": 274.043,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 1,
+      "rate": 271.043,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 2,
+      "rate": 270.912,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 0,
+      "rate": 268.338,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 1,
+      "rate": 268.621,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 2,
+      "rate": 268.324,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 0,
+      "rate": 262.84,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 1,
+      "rate": 262.31,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 2,
+      "rate": 262.839,
+      "clock": 2040.0
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 0,
+      "rate": 264.0536358947911,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 1,
+      "rate": 265.0789541806886,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 2,
+      "rate": 265.62905317769133,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 0,
+      "rate": 259.8984771573604,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 1,
+      "rate": 261.7921513485875,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 2,
+      "rate": 259.96445798426,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 0,
+      "rate": 252.35660156490664,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 1,
+      "rate": 252.34105470675212,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 2,
+      "rate": 249.11811215180634,
+      "clock": 2032.1612903225807
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 0,
+      "rate": 264.1217436161981,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 1,
+      "rate": 265.83592938733125,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 2,
+      "rate": 265.4224987039917,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 0,
+      "rate": 259.7995686921223,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 1,
+      "rate": 261.2244897959184,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 2,
+      "rate": 257.9669983625142,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 0,
+      "rate": 253.5594899096199,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 1,
+      "rate": 254.7422103364637,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 2,
+      "rate": 255.61657513729403,
+      "clock": 2005.5483870967741
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 0,
+      "rate": 252.347,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 1,
+      "rate": 271.277,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 2,
+      "rate": 271.013,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 0,
+      "rate": 268.028,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 1,
+      "rate": 269.476,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 2,
+      "rate": 269.265,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 0,
+      "rate": 263.12,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 1,
+      "rate": 263.2,
+      "clock": 2040.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 2,
+      "rate": 263.202,
+      "clock": 2040.0
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 0,
+      "rate": 273.968,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 1,
+      "rate": 271.446,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 2,
+      "rate": 271.168,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 0,
+      "rate": 268.783,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 1,
+      "rate": 268.986,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 2,
+      "rate": 269.226,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 0,
+      "rate": 263.349,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 1,
+      "rate": 263.321,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 2,
+      "rate": 263.302,
+      "clock": 2025.9310344827586
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 0,
+      "rate": 264.73629782833507,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 1,
+      "rate": 265.97402597402595,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg1024",
+      "rep": 2,
+      "rate": 267.78242677824267,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 0,
+      "rate": 262.2950819672131,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 1,
+      "rate": 262.0601407549584,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg2048",
+      "rep": 2,
+      "rate": 262.0936780138213,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 0,
+      "rate": 253.16768650720073,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 1,
+      "rate": 253.8580725131701,
+      "clock": 2030.032258064516
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "minicpm5-1b-Q8_0",
+      "test": "tg4096",
+      "rep": 2,
+      "rate": 254.50478439169876,
+      "clock": 2030.032258064516
+    }
+  ]
+}
