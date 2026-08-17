@@ -174,14 +174,13 @@ impl DeviceBackend {
     /// co-residency does not hold, which is asked of the driver rather than
     /// assumed but is still a sharper failure mode than a launched kernel's.
     ///
-    /// `attn_persist_plan` declines a shape whose occupancy cannot fit the
-    /// split phase in one grid-strided pass, and the fallthrough below is
-    /// what a decline reaches: measured on this card, minicpm's shape (128
-    /// units, settles at 144 resident blocks, one pass) is a clean win on
-    /// `tg`, and Qwen's (64 units, settles at only 48, two passes) is a clean
-    /// loss that grows with cache length -- the second pass costs more than
-    /// the launch and the scratch round-trip it removed. See
-    /// `autoresearch/beams/flash-attention-decode.md` for both tables.
+    /// The split count handed to the persistent path is not this function's
+    /// `ATTN_SPLITS`-derived one -- see [`Self::attn_persist_plan`], which
+    /// picks its own so the split phase's `groups * splits` units land
+    /// exactly on the settled grid rather than leaving a remainder of
+    /// resident blocks with nothing assigned. `attn_persist_plan` declines a
+    /// shape only if the settled grid cannot even hold one unit per group
+    /// (`blocks < groups`), which neither model's shape reaches on this card.
     pub(super) fn attention_decode(
         &self,
         q: Buf,
@@ -193,13 +192,13 @@ impl DeviceBackend {
         // Carrying `qgroup` heads to a program divides the grid, so the split
         // count multiplies by it to leave the block count unchanged.
         let qgroup = attention_qgroup(spec.group());
-        let splits = ATTN_SPLITS * qgroup;
         if self.attn_persist {
-            let key = (spec.n_head, spec.group(), spec.head_dim, qgroup, splits);
-            if let Some(blocks) = self.attn_persist_plan(key, spec, qgroup, splits)? {
+            let key = (spec.n_head, spec.group(), spec.head_dim, qgroup);
+            if let Some((blocks, splits)) = self.attn_persist_plan(key, spec, qgroup)? {
                 return self.attention_persist(q, keys, values, spec, out, splits, key, blocks);
             }
         }
+        let splits = ATTN_SPLITS * qgroup;
         // One query row, so the query and the output are a head to a row.
         let (r, d) = (spec.n_head as i64, spec.head_dim as i64);
         let (nk, kw) = (spec.total() as i64, spec.kv_width() as i64);
@@ -299,9 +298,10 @@ impl DeviceBackend {
         )
     }
 
-    /// Settles the block count and compiles [`attention_persist_src`] for one
-    /// attention shape, on first use, caching the decision either way so a
-    /// declined shape is not recompiled every call.
+    /// Settles the block count and the persist-specific split count, and
+    /// compiles [`attention_persist_src`] for one attention shape, on first
+    /// use, caching the decision either way so a declined shape is not
+    /// recompiled every call.
     ///
     /// A grid barrier deadlocks unless every block of the launch is resident
     /// at once, so the grid comes from
@@ -311,29 +311,74 @@ impl DeviceBackend {
     /// principle change what the driver allows, so the answer is asked again
     /// at whatever the driver returned until it stops shrinking.
     ///
-    /// `None` means the settled grid cannot fit the split phase's `groups *
-    /// splits` units in one grid-strided pass, architecture-blind the same
-    /// way [`fuse::ChainKey::plan`] declines a chain: measured, this is
-    /// exactly the line between the shapes this beam helps and the one it
-    /// hurts. Qwen's merge tile does not collapse into the split phase's
-    /// footprint the way the megakernel's redundant-stage tiles do (its
-    /// combined kernel measures 41376 bytes of shared against the launched
-    /// split kernel's own 22656, not the same or less), which halves
-    /// occupancy from 2 blocks per SM to 1 and forces a second grid-strided
-    /// pass over the whole key axis -- a real cost this function is built to
-    /// notice and route around rather than a constant to retune.
+    /// The split count is settled here too, not carried in from
+    /// [`Self::attention_decode`]'s `ATTN_SPLITS`: that constant is tuned for
+    /// the *launched* kernel's own grid (blocks = groups * splits exactly),
+    /// which has no reason to land on this kernel's occupancy-settled grid,
+    /// and measurably did not -- `ncu` on minicpm's shape found 42.7% of
+    /// stall cycles at `grid_barrier()`, and a discriminating profile against
+    /// the launched kernel (same combine, no grid barrier) pinned the cost to
+    /// the barrier itself rather than the combine. The mechanism: phase one
+    /// hands one unit of `[lo, hi)` key range to each of `groups * splits`
+    /// blocks, grid-strided over the settled `blocks`; with `ATTN_SPLITS`
+    /// fixed at 8 regardless of the settled grid, minicpm's shape measured
+    /// 128 units against a settled 192 blocks (a third of the grid idle,
+    /// nothing assigned, arriving at the barrier immediately and stalling
+    /// there for the entire split-phase duration) and Qwen's measured 64
+    /// against 144 (over half idle). Picking `splits = blocks / groups`
+    /// (floored) instead makes `groups * splits` land on `blocks` exactly
+    /// whenever it divides evenly -- both shapes do on this card (192 = 8 *
+    /// 24, 144 = 4 * 36) -- so every resident block gets a unit and none
+    /// idles at the barrier from the very start of the phase.
+    ///
+    /// Settling blocks and picking splits are kept as two separate stages
+    /// rather than one loop that resettles both together every candidate.
+    /// The first version of this function did that and it back-fired: a
+    /// wide first-try `blocks` guess picks a wide `splits` too (`blocks /
+    /// groups`), which grows phase two's `mv`/`c` tiles enough to shrink
+    /// what the driver allows back down; the *next* candidate then reads
+    /// that shrunk `blocks`, picks a *narrower* `splits` for it, and the
+    /// occupancy query on that narrower kernel comfortably allows the
+    /// original wide grid again -- but the loop only ever compares `allowed`
+    /// against its own shrunk candidate, never revisits the wider one, so it
+    /// settles on the first accidentally-small `blocks` it lands on instead
+    /// of the true ceiling. Measured on Qwen's shape: the loop version
+    /// settled at 48 blocks (1/SM) where the fixed-splits probe below still
+    /// finds 144 (3/SM) is genuinely resident. Splitting the two stages
+    /// removes the feedback path: stage one's probe `splits` never depends
+    /// on the `blocks` candidate it is helping to settle, so there is
+    /// nothing for a candidate to spiral against.
+    ///
+    /// Stage one settles `blocks` exactly as before this beam (the loop
+    /// `[[flash-attention-decode]]`'s pooling fix already validated), using
+    /// `ATTN_SPLITS * qgroup` as a stand-in `splits` purely to measure
+    /// phase one's footprint, which is what the shared-memory budget is
+    /// actually dominated by (`wacc` alone is `QW * D` f32s; phase two's
+    /// `mv`/`c` are `S` f32s each, negligible next to it at any `S` either
+    /// stage picks). Stage two, once `blocks` is stable, computes the real
+    /// `splits = blocks / groups` (floored) and recompiles once more at that
+    /// `S` -- if the small `mv`/`c` growth this causes ever does push the
+    /// kernel's real footprint over what the settled `blocks` needs, the
+    /// occupancy check below still verifies it and falls back to the probe
+    /// module rather than risk a barrier deadlock from an unverified grid.
+    ///
+    /// `None` means the settled grid cannot hold even one unit per group
+    /// (`blocks < groups`), which would need a second grid-strided pass over
+    /// the whole key axis -- measured worse than the launch and scratch
+    /// round-trip it would have removed, back when a fixed `ATTN_SPLITS`
+    /// could actually produce that case (Qwen's pre-`@dynshared`-fix shape).
+    /// Neither shipped model shape reaches it any more.
     fn attn_persist_plan(
         &self,
         key: AttnPersistKey,
         spec: Attn,
         qgroup: usize,
-        splits: usize,
-    ) -> Result<Option<u32>> {
+    ) -> Result<Option<(u32, usize)>> {
         if let Some(cached) = self.attn_persist_modules.borrow().get(&key) {
-            return Ok(cached.as_ref().map(|&(_, blocks)| blocks));
+            return Ok(cached.as_ref().map(|&(_, blocks, splits)| (blocks, splits)));
         }
         let groups = spec.n_head / qgroup;
-        let units1 = (groups * splits) as u32;
+        let probe_splits = ATTN_SPLITS * qgroup;
         let device = cust::device::Device::get_device(0)?;
         let sms = device.get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)? as u32;
         let per_sm = device
@@ -348,7 +393,7 @@ impl DeviceBackend {
                 spec.group(),
                 spec.head_dim,
                 qgroup,
-                splits,
+                probe_splits,
                 ATTN_WARP_SPLITS,
                 blocks,
             );
@@ -368,9 +413,19 @@ impl DeviceBackend {
                 settled = Some((module, blocks));
                 break;
             }
+            // This candidate is being discarded and its module is about to
+            // unload, which can hand its CUfunction's address to a later,
+            // wholly unrelated compile -- shared_of's cache is keyed on that
+            // address, so a stale entry left behind would hand the next
+            // kernel to reuse someone else's dynamic-shared byte count. Not
+            // reachable in practice with a fixed probe_splits (this stage's
+            // footprint no longer varies candidate to candidate), kept as a
+            // defensive habit rather than removed with the mechanism that
+            // made it necessary.
+            self.func_shared.borrow_mut().remove(&(func as usize));
             blocks = allowed;
         }
-        let (module, blocks) = match settled {
+        let (probe_module, blocks) = match settled {
             Some(pair) => pair,
             None => {
                 let src = attention_persist_src(
@@ -378,18 +433,59 @@ impl DeviceBackend {
                     spec.group(),
                     spec.head_dim,
                     qgroup,
-                    splits,
+                    probe_splits,
                     ATTN_WARP_SPLITS,
                     blocks,
                 );
                 (self.compile_dynamic(&src, "attention_persist")?, blocks)
             }
         };
-        // A settled grid narrower than the split phase's own unit count needs
-        // a second grid-strided pass over the whole key axis, which measured
-        // worse than the launch and scratch round-trip it would have removed.
-        let decision = (blocks >= units1).then_some((module, blocks));
-        let result = decision.as_ref().map(|&(_, blocks)| blocks);
+        // Stage two: as many whole units as the settled grid holds exactly,
+        // so no resident block starts phase one with nothing assigned.
+        let splits = ((blocks as usize) / groups).max(1);
+        let units1 = (groups * splits) as u32;
+        if blocks < units1 {
+            // blocks < groups: not reached by either shipped shape, kept as
+            // the same decline path the pre-existing code used.
+            self.attn_persist_modules.borrow_mut().insert(key, None);
+            return Ok(None);
+        }
+        let (module, splits) = if splits == probe_splits {
+            (probe_module, splits)
+        } else {
+            let src = attention_persist_src(
+                spec.n_head,
+                spec.group(),
+                spec.head_dim,
+                qgroup,
+                splits,
+                ATTN_WARP_SPLITS,
+                blocks,
+            );
+            let module = self.compile_dynamic(&src, "attention_persist")?;
+            let func = module.get_function("attention_persist")?.to_raw();
+            let dynamic_shared = self.shared_of(func) as usize;
+            // SAFETY: func belongs to a module alive for this call.
+            let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, dynamic_shared)? };
+            if allowed >= blocks {
+                self.func_shared
+                    .borrow_mut()
+                    .remove(&(probe_module.get_function("attention_persist")?.to_raw() as usize));
+                (module, splits)
+            } else {
+                // The wider S's mv/c growth pushed this shape's footprint
+                // past what the settled grid allows -- fall back to the
+                // probe module verbatim rather than risk an unverified
+                // grid; that leaves some idle blocks in phase one but stays
+                // provably safe against grid_barrier's co-residency need.
+                self.func_shared.borrow_mut().remove(&(func as usize));
+                (probe_module, probe_splits)
+            }
+        };
+        let decision = Some((module, blocks, splits));
+        let result = decision
+            .as_ref()
+            .map(|&(_, blocks, splits)| (blocks, splits));
         self.attn_persist_modules.borrow_mut().insert(key, decision);
         Ok(result)
     }
