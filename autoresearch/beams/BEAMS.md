@@ -1261,3 +1261,93 @@ matmul/{plan.rs,reg.rs,wmma.rs},tests/pipeline.rs}}`,
 `phobos-kernels/src/compile.rs`, `SPEC.md`, and three example files with
 stale `@pipeline` removed: `examples/flash_attention_fp16.ph`,
 `examples/flash_attention_fp32.ph`, `examples/gemm_fp16.ph`.
+
+## New beam landed by direct review, 2026-08-17: `q8_qmma` split-K -- real per-kernel win, real end-to-end loss, shipped default off
+
+Fourth item in the "prefill rebuild, `@pipeline` default-on, decode
+prefetch, revisit `q8_qmma`" sequence, per the user's explicit "q8_qmma,
+yes". Diagnosis (`ncu -c 20 --set full` across a real minicpm prefill,
+generalized from an earlier single-shape datum in
+[[orchestrator-diagnostics-q8-qmma]]): `q8_qmma`'s deep tile launches
+`(rows/128) * (n/wide)` blocks and nothing else, a constant 12, 20 or 72
+against 48 SMs on `pp128`, landing 12.4-19.7% achieved occupancy against a
+25% register-bound ceiling (128 live accumulators/patch caps a CTA to 2
+resident blocks/SM). Stall breakdown on both a starved and a fuller shape:
+`long_scoreboard` dominates overwhelmingly. A live probe (temporary
+dispatch-order swap, reverted) confirmed shrinking `TM`/`TN` is not the
+fix: IMMA utilization collapses (19-21% -> 5.5-9.2%) because arithmetic
+intensity is `TM*TN/(TM+TN)`, and per-shape timing showed it only wins on
+badly starved shapes and actively loses on an already-fed one (+57% on the
+grid-72 shape). Split-K (`k` sliced across `program_id(2)`, same `TM`/`TN`,
+same intensity) was the fix that adds blocks without paying that cost --
+mirroring the existing `q8_split`/`q8_reduce` decode-path pattern.
+
+An implementation agent (`a00876fdabe5e3de2`) built it and found two real
+compiler-proof bugs before either one produced a wrong answer or a slow
+number silently: folding the split index into the destination offset
+compiles clean but silently declines `qmma_t`'s direct-to-global write
+(a dynamic tensor-shape symbol like `M` is only ever assumed a divisor of
+4 regardless of what `@aligned` promises about it, so the bounds proof
+never clears) -- caught by reading emitted MLIR, not by an error. Fixed by
+giving each split its own output operand and literal-offset `k`-slice
+bounds instead. The reduce kernel's first version (`[TM,TN]`-tile add)
+blew the 48 KB static shared-memory limit at the real `TM=128` shape --
+passed MLIR verification *and* PTX codegen, only failed at driver-level
+`Module::from_ptx`, which neither `emit` nor `ptx` would ever catch. Fixed
+by reducing one row at a time, matching `q8_reduce`'s own pattern. Both
+failure modes are now documented in the kernel source and the beam file
+for the next person who reaches for this shape of fix.
+
+**Per-kernel, the win is real.** On minicpm's routed shapes: o_proj
+-22.5%, down_proj -43.7% (`ncu` `gpu__time_duration.sum`, write+reduce
+pair against the unsplit baseline). Qwen's routed shapes win by more
+(-37.3%, -46.5%). A first cut of the gate (split whenever the unsplit grid
+is below a 48-block threshold) also caught a real regression on one shape
+(qkv, +4.5%, `S=4` only) with a mechanism that checked out numerically
+(predicted reduce-pass bandwidth cost ~15.3us against a measured 16.0us) --
+fixed by requiring the halving loop land exactly on the target split
+factor (`S=8`), grounded in the pattern that every winning shape, both
+models, reached that same factor and the one losing shape didn't.
+
+**End to end, on this platform, it is a net loss, caught only by
+questioning a benchmark number that looked too good.** The orchestrator's
+final review ran a `scripts/bench.py --no-llama` phobos-only A/B specifically
+to isolate the change from cross-process noise: `PHOBOS_QMMA_SPLIT=0`
+averages 5524 t/s at minicpm `pp128`, on averages 4480-4774 t/s -- a
+reproducible 14-19% end-to-end loss, matching two full `bench.py` runs
+against llama.cpp where the established 0.76x baseline dropped to 0.61x
+and 0.54x. An `nsys --trace=cuda` whole-pass trace (`cuda_api_sum`,
+`cuda_gpu_kern_sum`) ruled out the two obvious explanations: in-context
+kernel durations roughly match the isolated `ncu` numbers (no cache
+interaction between the write and reduce kernels), and `cuGraphInstantiate_v2`
+fires exactly twice in both the on and off traces (a pre-existing
+prefill/decode single-slot cache-eviction pattern in `graph.rs`, unrelated
+to split-K) -- ruling out repeated graph rebuilds too. What's left: every
+split-routed projection replaces one graph node with two (write, then
+reduce), and `graph.rs` builds a pass as "a chain rather than a dependency
+analysis... these launches shared one stream, so serial order is the
+ordering they already relied on" -- a strictly serial dependency chain, no
+parallelism between nodes. The 48 extra serialized nodes (2 shapes x 24
+layers) cost more in aggregate wall clock on this platform than the
+kernels save, even though no individual kernel got slower. This is the
+same "op that matches in isolation can still be wrong" rule this project
+already holds, one level up: at the graph/pass level instead of the
+allocation level, and it took a whole-pass A/B, not a kernel-level one, to
+see it.
+
+**Shipped default off.** `PHOBOS_QMMA_SPLIT` is opt-in (`=1`/`on`/`yes`/
+`true`; unset or anything else stays off, unlike this session's other
+opt-out-style flags, since the default behavior here is a regression, not
+a safe fallback). All four standing gates and both models' 128-token
+`model_check` pass with the new default (the well-tested existing unsplit
+path) and with the flag explicitly on (confirming the opt-in path still
+matches the host reference for anyone revisiting this at a different
+node-count or model shape mix -- Qwen's larger per-kernel margins are the
+reason this might be worth another look rather than deleting). Final
+confirmation `bench.py` against llama.cpp with the new default: 0.73x,
+back in the neighborhood of the pre-split 0.76x baseline.
+
+**Committed** (`56982fe`): `phobos-gguf/src/backend/device/{kernels/quant.rs,
+matmul.rs,mod.rs}`, full writeup and raw evidence (`ncu`, `nsys`, and the
+orchestrator's `bench.py` A/B files) in
+`autoresearch/beams/q8-qmma-split-k.md` and its accompanying files.
