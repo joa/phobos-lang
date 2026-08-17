@@ -82,6 +82,11 @@ pub fn continue_from(
     let tokenizer = model.tokenizer();
     let context_limit = model.info().context_limit;
 
+    // Greedy with no penalty active needs nothing from a step but the
+    // winning token id, which a backend may be able to produce without
+    // moving the whole logits vector; see `Session::extend_greedy`.
+    let fast_greedy = config.sample.is_greedy_unpenalized();
+
     // Bytes short of a complete UTF-8 character; a token can split one.
     let mut pending: Vec<u8> = Vec::new();
     let mut next = choose(logits, &config.sample, sequence.history(), rng);
@@ -105,8 +110,12 @@ pub fn continue_from(
         }
 
         sequence.push(next);
-        let logits = session.extend(&[next])?;
-        next = choose(&logits, &config.sample, sequence.history(), rng);
+        next = if fast_greedy {
+            session.extend_greedy(&[next])?
+        } else {
+            let logits = session.extend(&[next])?;
+            choose(&logits, &config.sample, sequence.history(), rng)
+        };
         produced += 1;
         if produced >= config.max_tokens {
             break Stop::Limit;

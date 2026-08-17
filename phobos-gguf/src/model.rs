@@ -1,11 +1,30 @@
 use anyhow::{Result, bail};
 
-use crate::backend::Backend;
+use crate::backend::{Backend, Buf};
 use crate::{Gguf, llama, qwen35};
 
 pub enum Decoder {
     Llama(Box<llama::Model>),
     Qwen35(Box<qwen35::Model>),
+}
+
+/// The device-only buffers one architecture's `forward_to_logits` leaves
+/// live, shared by `llama` and `qwen35` since both end a pass the same way:
+/// residual stream, normalized copy, the last row split off it, and the
+/// logits the LM head projected it into.
+pub(crate) struct ForwardBufs {
+    pub(crate) x: Buf,
+    pub(crate) normed: Buf,
+    pub(crate) last: Buf,
+    pub(crate) logits: Buf,
+}
+
+impl ForwardBufs {
+    pub(crate) fn release(self, backend: &dyn Backend) {
+        for buf in [self.x, self.normed, self.last, self.logits] {
+            backend.release(buf);
+        }
+    }
 }
 
 /// What a loaded model will ask of a backend, so a device path can decide
@@ -108,6 +127,21 @@ impl Decoder {
         match (self, state) {
             (Decoder::Llama(m), State::Llama(s)) => m.forward(s, tokens, backend),
             (Decoder::Qwen35(m), State::Qwen35(s)) => m.forward(s, tokens, backend),
+            _ => bail!("generation state does not belong to the loaded architecture"),
+        }
+    }
+
+    /// [`Decoder::forward`] for a caller that only wants the winning token
+    /// id, as greedy decoding does. See [`Backend::argmax`].
+    pub fn forward_greedy(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        backend: &dyn Backend,
+    ) -> Result<i64> {
+        match (self, state) {
+            (Decoder::Llama(m), State::Llama(s)) => m.forward_greedy(s, tokens, backend),
+            (Decoder::Qwen35(m), State::Qwen35(s)) => m.forward_greedy(s, tokens, backend),
             _ => bail!("generation state does not belong to the loaded architecture"),
         }
     }

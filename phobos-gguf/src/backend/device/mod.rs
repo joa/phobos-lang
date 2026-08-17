@@ -19,6 +19,7 @@ use super::{
     Packed, Plane, Q8_BLOCK, QAct, QBuf, Rope,
 };
 
+mod argmax;
 mod attn;
 mod backend;
 mod delta;
@@ -253,6 +254,21 @@ pub struct DeviceBackend {
     attn_partials: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// Page-locked staging for the one readback a pass makes.
     readback: RefCell<Option<LockedBuffer<f32>>>,
+    /// [`DeviceBackend::argmax`]'s reduction kernel, keyed by chunk width
+    /// ([`argmax_chunk_width`]): every model uses one width for the life of
+    /// the backend, since a vocabulary's size does not change, so this stays
+    /// a single entry in practice.
+    argmax_reduce: RefCell<HashMap<usize, Module>>,
+    /// [`argmax_reduce`]'s partial-value column, one per lane, `[0, W)`;
+    /// uploaded once per chunk width and added to each chunk's own base
+    /// index to map a lane back to a vocabulary position.
+    argmax_iota: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
+    /// [`ARGMAX_FINISH_SRC`], compiled once: it takes no shape baked in.
+    argmax_finish: Module,
+    /// [`argmax_reduce`]'s per-block partials and [`argmax_finish`]'s answer.
+    /// Both are a handful of floats; reused across calls rather than
+    /// allocated fresh, since [`Backend::argmax`] is on the hot decode path.
+    argmax_scratch: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// The blocked attention kernels, keyed the same way.
     blocked: RefCell<HashMap<(usize, usize, usize), Module>>,
     attn_gemm: RefCell<HashMap<usize, Module>>,
@@ -348,6 +364,7 @@ impl DeviceBackend {
         let quantize_wide = compile(QUANTIZE_SRC, &[("TB", QUANT_TB_WIDE)], "quantize")?;
         let pointwise = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE)], "pointwise")?;
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
+        let argmax_finish = compile(ARGMAX_FINISH_SRC, &[], "argmax_finish")?;
 
         Ok(DeviceBackend {
             stream,
@@ -414,6 +431,10 @@ impl DeviceBackend {
             attn_persist_modules: RefCell::new(HashMap::new()),
             attn_partials: RefCell::new(None),
             readback: RefCell::new(None),
+            argmax_reduce: RefCell::new(HashMap::new()),
+            argmax_iota: RefCell::new(HashMap::new()),
+            argmax_finish,
+            argmax_scratch: RefCell::new(None),
             blocked: RefCell::new(HashMap::new()),
             attn_gemm: RefCell::new(HashMap::new()),
             slots: RefCell::new(Vec::new()),

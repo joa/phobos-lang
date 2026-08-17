@@ -109,6 +109,33 @@ fn flash_attention_lowers_softmax_builtins() {
 }
 
 #[test]
+fn argsel_folds_a_value_index_pair_alongside_tmax() {
+    // The greedy-argmax reduction's own shape: a running (value, index) pair
+    // folded against a freshly loaded chunk and its own index tile, argsel
+    // carrying the index side of what tmax alone can only do for the value.
+    let mlir = emit_mlir(
+        "@autotune(W in [8])
+        kernel argmax_step(X: tensor<f32>[M, W], IDX: tensor<f32>[M, W]) {
+            var v: tile<f32>[1, W] = -300000000.0
+            var i: tile<f32>[1, W] = -1.0
+            let x = X[0 :+ 1, :]
+            let idx = IDX[0 :+ 1, :]
+            i = argsel(x, v, idx, i)
+            v = tmax(x, v)
+        }",
+    );
+    assert_contains(
+        &mlir,
+        &[
+            "gpu.func @argmax_step",
+            "arith.cmpf oge", // argsel's own comparison
+            "arith.select",   // argsel picks the winning index
+            "arith.cmpf ogt", // tmax's comparison, unaffected by argsel
+        ],
+    );
+}
+
+#[test]
 fn layernorm_lowers_sqrt_to_ptx_intrinsic() {
     // A LayerNorm-shaped body: mean and variance via rowsum, an
     // inverse-stddev via sqrt, and broadcast center/scale. sqrt must lower

@@ -276,6 +276,23 @@ pub trait Backend {
     fn upload(&self, data: &[f32]) -> Result<Buf>;
     fn read(&self, buf: Buf, out: &mut [f32]) -> Result<()>;
 
+    /// The index of the largest of `buf`'s first `len` elements, without
+    /// reading the rest of them back. Greedy decoding is the one caller that
+    /// wants a token id and nothing else; every other reader (the server,
+    /// top-k/top-p/penalized sampling, logprobs) still wants the full vector
+    /// and calls [`Backend::read`].
+    ///
+    /// The default reads the whole thing and reduces on the host, so a
+    /// backend earns nothing by skipping this; a device backend overrides it
+    /// with a reduction that never leaves the card. Ties break the same way
+    /// [`phobos_inference::sampling::argmax`] does: the last of equal maxima
+    /// wins, since that is what this delegates to.
+    fn argmax(&self, buf: Buf, len: usize) -> Result<i64> {
+        let mut out = vec![0.0f32; len];
+        self.read(buf, &mut out)?;
+        Ok(phobos_inference::sampling::argmax(&out))
+    }
+
     fn zeroed(&self, len: usize) -> Result<Buf> {
         self.upload(&vec![0.0f32; len])
     }

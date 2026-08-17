@@ -24,6 +24,10 @@ serde_json = "1"
 cuda = ["dep:cust", "phobos-kernels/cuda"]
 
 [[example]]
+name = "argmax_check"
+required-features = ["cuda"]
+
+[[example]]
 name = "attncheck"
 required-features = ["cuda"]
 
