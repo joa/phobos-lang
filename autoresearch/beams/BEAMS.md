@@ -1104,3 +1104,31 @@ quarter of their throughput"`, already documents this exact width-vs-grid-
 fill tradeoff as known) -- flagged, not chased, since the same round's
 kernel-time breakdown found attention tied with the GEMM for prefill's
 dominant cost, and the prefill beam above went after that first.
+
+## New beam, 2026-08-17: warp_partial register-level K/V prefetch
+
+Third beam in the "prefill rebuild, then @pipeline default-on, then decode
+prefetch" sequence the user asked for. Full mechanism, register/occupancy/
+spill evidence, and the honest twist in the result, in
+[[warp-partial-prefetch]] (`autoresearch/beams/warp-partial-prefetch.md`).
+
+**Summary**: one-deep register software pipeline for `warp_partial`'s K/V
+loop (issue next iteration's raw f16 load before consuming the current
+one), landed at zero register/occupancy/spill cost (64 registers/thread,
+98.4% occupancy, 0 bytes local-memory traffic, all unchanged). The
+`long_scoreboard` stall it targeted dropped as predicted (~31.6% -> ~7.5%
+share on `attention_persist`), but wall-clock on that specific kernel
+stayed flat -- `attention_persist`'s critical path turned out to be
+`grid_barrier` cross-block skew (already diagnosed, a different
+bottleneck), which absorbed the freed-up stall budget instead of shortening
+the kernel. Real, honest, mechanism-confirmed result, not the clean win
+hoped for on the kernel it targeted.
+
+**But a genuine free win landed anyway**: `attention_split` -- minicpm's
+fallback path and **Qwen's only decode-attention path, always** (its shape
+declines the persistent kernel unconditionally) -- improved 6-9% on both
+models' isolated `attndecode` timing, zero cost. `bench.py` confirms no
+regression (minicpm flat as predicted, Qwen positive though noisy at this
+sample size given only 6 of 25 layers do full attention).
+
+Committed: `phobos-lang/src/codegen/tile/warp_attn.rs` only.
