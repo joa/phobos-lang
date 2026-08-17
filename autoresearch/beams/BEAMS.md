@@ -1353,3 +1353,84 @@ back in the neighborhood of the pre-split 0.76x baseline.
 matmul.rs,mod.rs}`, full writeup and raw evidence (`ncu`, `nsys`, and the
 orchestrator's `bench.py` A/B files) in
 `autoresearch/beams/q8-qmma-split-k.md` and its accompanying files.
+
+**Correction landed same session** (`ce0a1f5`): the first `nsys` trace
+above lacked `--cuda-graph-trace=node` and silently under-decomposed the
+replayed graph (48 instances reported where 4 real passes predict 192),
+producing a wrong mechanism ("serialized graph nodes cost WDDM dispatch
+overhead") built on the wrong subset of the data. Re-traced correctly:
+every kernel in the split-K pass runs slower in context, including ones
+split-K never touches (`attention_block` +35%, the untouched unsplit
+`q8_qmma` calls +25-57%) -- memory-bandwidth/L2 contention from the split
+path's 6.3 MB-per-shape partials traffic, not per-node dispatch overhead.
+The default-off decision was already correct; only the reasoning behind it
+needed fixing. Worth banking as its own lesson: `nsys --trace=cuda` without
+`--cuda-graph-trace=node` under-decomposes a CUDA-graph-replayed pass and
+can produce a mechanism that looks confirmed and is not -- this project's
+`llamacpp_cuda_broken` and `gpu_contention_invalidates_benchmarks` memories
+already cover "the number looked plausible and was wrong"; this is the
+same trap one layer deeper, inside a trace tool's own default flags.
+
+## New beam, 2026-08-17, a negative result: `q8_qmma` K-loop software
+pipeline -- `ptxas` was already hiding the latency this beam tried to hide
+
+Third lever on `q8_qmma`'s occupancy problem this session (after the
+prefill-attention rebuild and split-K), and the only one of the three that
+touches `phobos-lang` directly rather than the GGUF backend: software-
+pipeline `qmma_t`'s K-loop (`phobos-lang/src/codegen/tile/qmma.rs`),
+mirroring the `warp_partial` fix from earlier this session, since the same
+"no barrier in the loop, `long_scoreboard`-dominated stalls" signature
+applies here too -- but unlike `warp_partial` (64 regs/thread, real slack),
+`q8_qmma` sits at 238 regs/thread against a 256-register occupancy cliff
+(65536 regs/SM / 128 threads / 2 blocks), so the task brief front-loaded a
+register kill-check derived by hand-tracing `qmma_patch`'s actual patch
+size for these real shapes (`rm=rn=8`, confirmed, not assumed) before any
+correctness work: an A-only raw-fragment prefetch (the cheapest variant,
+matching `warp_partial`'s "raw vectors, widen once consumed" approach)
+predicted +16 registers, landing at 254, just under the cliff.
+
+The gate passed exactly as predicted (238 -> 254 regs/thread, occupancy
+unchanged at 12.5%/19.1%, zero local-memory spill) -- and the change
+regressed anyway, on every one of the four real shapes, by 8.8% to 42%, in
+tight non-overlapping distributions across 24-48 launches each (worst on
+`down_proj`, the deepest K-loop and lowest-occupancy shape; smallest on
+`gate/up`, the highest-occupancy one -- a gradient that itself supports the
+mechanism). `--set full` on one shape showed why: `long_scoreboard` stall
+rose from 0.750 to 1.231 at *identical* occupancy (12.44% vs 12.54%,
+ruling out the "more resident warps mechanically raises this metric" caveat
+the split-K beam had to invoke) -- a genuine worsening of exposed memory
+latency, not a measurement artifact. The likely story: the unmodified
+loop's operand loads carry no cross-iteration dependency, leaving `ptxas`
+free to hoist and interleave them using the 16 registers of slack it had
+(240/256 allocated before this change); the explicit one-deep pipeline
+consumed exactly that slack (256/256 after, zero headroom) and added a
+real address-computation dependency to the loop's critical path -- a
+worse, hand-scheduled substitute for scheduling the compiler backend may
+already have been doing on its own.
+
+Correctness held throughout on both models (all four standing gates,
+including a ~180-token prompt confirmed to exercise the M=128 deep tile,
+spread errors in this session's existing noise band) -- this is purely a
+performance regression, not a correctness one, and the register/occupancy
+gate this beam was built to respect passed on its own terms, which is
+exactly why real timing evidence rather than the register count is what
+decided it. Reverted (`319163c`); the writeup and raw `ncu` evidence stay
+committed as a documented negative result -- both the mechanism (a kernel
+that's already compiler-scheduled well doesn't need, and can be actively
+hurt by, a hand-rolled pipeline layered on top with no register headroom
+to spare) and the discipline (a gate built to prevent one failure mode
+does not certify the change against a different one) are worth having on
+record for the next `phobos-lang` codegen change that reaches for this
+pattern.
+
+**Reverted, nothing shipped.** `phobos-lang/src/codegen/tile/qmma.rs` is
+back to its pre-beam state. Full writeup and evidence in
+`autoresearch/beams/q8-qmma-kloop-prefetch.md` and its accompanying
+`ncu_qmma_kloop_*` files, committed at `319163c`.
+
+Both attempted follow-ups to `q8_qmma`'s occupancy problem this session
+now have a settled outcome: split-K's per-kernel win doesn't survive
+whole-pass bandwidth contention, and this K-loop prefetch's register gate
+passing doesn't mean the timing wins. `q8_qmma` stays on its original,
+unmodified deep/shallow dispatch (`de5ebf7`'s prefill-attention rebuild is
+the only surviving prefill lever from this stretch of the session).
