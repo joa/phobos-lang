@@ -291,3 +291,131 @@ pub(crate) fn q8_splits(n: usize, k: usize) -> usize {
 
     splits.max(1)
 }
+
+/// The `q8_qmma` deep tile's grid is `(rows / TM) * (n / TN)`, nothing else:
+/// a prompt short enough, or a projection narrow enough, leaves most of the
+/// card with no block at all (12 or 20 against 48 SMs measures 12.4-12.6%
+/// achieved occupancy against a 25% register-bound ceiling, see
+/// `autoresearch/beams/q8-qmma-split-k.md`). Below this many blocks, the
+/// unsplit launch is declined in favor of [`q8_qmma_split_src`]. Above it,
+/// splitting only adds a reduction pass to a shape that was already filling
+/// the grid reasonably (72 blocks measures 79-80% of its own ceiling
+/// already, and the tile-shrink probe that beam ran showed adding blocks
+/// there costs tensor-core efficiency for no occupancy left to buy).
+pub(crate) const Q8_QMMA_SPLIT_THRESHOLD: usize = 48;
+
+/// Blocks a split aims to reach: two per SM at the register-bound ceiling
+/// this card's `q8_qmma` patch has (128 accumulators per patch, 48 SMs).
+pub(crate) const Q8_QMMA_SPLIT_TARGET: usize = 96;
+
+/// The widest a split kernel's branch chain gets. Each split is a whole
+/// `if ps == i` arm plus its own output operand (see [`q8_qmma_split_src`]),
+/// so this also bounds how many extra kernel parameters and compiled
+/// variants a shape can cost.
+pub(crate) const Q8_QMMA_SPLIT_MAX: usize = 8;
+
+/// Splits for `q8_qmma`'s deep tile at rows x n x k, 1 meaning the unsplit
+/// path stays. See [`Q8_QMMA_SPLIT_THRESHOLD`] for why only a starved grid
+/// takes this at all.
+pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> usize {
+    let unsplit = (rows / Q8_QMMA_TM) * (n / wide);
+    if unsplit == 0 || unsplit >= Q8_QMMA_SPLIT_THRESHOLD {
+        return 1;
+    }
+    let blocks = k / Q8_BLOCK;
+    let mut splits = (Q8_QMMA_SPLIT_TARGET / unsplit).min(Q8_QMMA_SPLIT_MAX).min(blocks);
+    while splits > 1 && !blocks.is_multiple_of(splits) {
+        splits /= 2;
+    }
+    // A split short of the max halves an already roughly-fixed reduce cost's
+    // worth of compute-time savings without shrinking that cost, so it can
+    // cost more than it buys (see autoresearch/beams/q8-qmma-split-k.md's
+    // qkv case, measured a net regression at S=4). Below the max, the
+    // unsplit path stays.
+    if splits == Q8_QMMA_SPLIT_MAX { splits } else { 1 }
+}
+
+/// The split-K variant of [`q8_qmma_src`], for the shapes
+/// [`q8_qmma_splits`] declines to leave at one program per output tile.
+///
+/// `qmma_t`'s direct-to-global write (no shared-memory round trip, no cap to
+/// one CTA per SM, see [`q8_qmma_src`]'s doc comment) only fires when the
+/// destination slice is provably in bounds from the offset expression alone,
+/// and a dynamic tensor dimension like `M` is only ever assumed a multiple of
+/// 4 elements regardless of what `@aligned` promises about it (the row-pitch
+/// ABI, not a tile fact) -- so an offset built from `program_id(2) * M` can
+/// never clear that proof. Folding the split index into the destination
+/// address is what a reduction-only kernel does safely; this one instead
+/// gives each split its own output operand and its own `if ps == i` arm, so
+/// every write keeps the exact `pm * TM, pn * TN` shape the unsplit kernel
+/// already proves unmasked. The branches are mutually exclusive on a value
+/// uniform across the whole CTA (a grid coordinate), so this is a predicated
+/// dispatch, not warp divergence.
+///
+/// `k`'s slice bounds (`from`, `slice`) are baked in as literals rather than
+/// computed from `program_id(2)` at run time, for the same reason: a literal
+/// offset's own divisor is itself, so `@aligned(K = slice, KB = slice / 32)`
+/// clears the bounds proof on `A`, `AS`, `W` and `WS` too, with no dependency
+/// on what any program id resolves to.
+pub(crate) fn q8_qmma_split_src(block: usize, k: usize, s: usize) -> String {
+    let slice = k / s;
+    let sb = slice / Q8_BLOCK;
+    let mut params = String::new();
+    let mut body = String::new();
+    for i in 0..s {
+        let from = i * slice;
+        let fb = from / Q8_BLOCK;
+        params.push_str(&format!(", P{i}: tensor<f32>[M, N]"));
+        body.push_str(&format!(
+            "  if ps == {i} {{
+    P{i}[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, {from} :+ {slice}], AS[pm * TM :+ TM, {fb} :+ {sb}],
+                                             W[pn * TN :+ TN, {from} :+ {slice}], WS[{fb} :+ {sb}, pn * TN :+ TN])
+  }}
+"
+        ));
+    }
+    format!(
+        "@launch({block})
+@autotune(TM in [64], TN in [64])
+@aligned(M = TM, N = TN, K = {slice}, KB = {sb})
+kernel q8_qmma_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N]{params}) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  let ps = program_id(2)
+{body}}}
+"
+    )
+}
+
+/// Sums [`q8_qmma_split_src`]'s `S` output tiles into one, one row at a time
+/// rather than a `[TM, TN]` tile at a time: a plain tile add is not
+/// `qmma_t`, so it always stages through shared memory, and at `TM = 128`
+/// that tile is a 64 KB round trip, over the 48 KB static ceiling this
+/// kernel is compiled under (measured directly: `Module::from_ptx` rejects
+/// it). A one-element span on a dimension is unmasked regardless of what
+/// produced its offset (`dyn_in_bounds`'s size-1 case divides by 1 either
+/// way), so the row index needs no `@aligned` promise at all, matching
+/// [`Q8_SPLIT_SRC`]'s own row-at-a-time reduction.
+pub(crate) fn q8_qmma_reduce_src(block: usize, s: usize) -> String {
+    let mut params = String::new();
+    let mut sum = String::new();
+    for i in 0..s {
+        params.push_str(&format!("P{i}: tensor<f32>[M, N], "));
+        if i > 0 {
+            sum.push_str(" + ");
+        }
+        sum.push_str(&format!("P{i}[pm :+ 1, pn * TN :+ TN]"));
+    }
+    format!(
+        "@launch({block})
+@autotune(TN in [64])
+@aligned(N = TN)
+kernel q8_qmma_reduce({params}C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm :+ 1, pn * TN :+ TN] = {sum}
+}}
+"
+    )
+}

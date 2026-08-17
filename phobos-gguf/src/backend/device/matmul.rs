@@ -53,24 +53,38 @@ impl DeviceBackend {
                 if rows == 0 {
                     continue;
                 }
-                self.launch(
-                    module,
-                    "q8_qmma",
-                    &[
-                        (qa_ptr + (qmma_rows * k) as u64, [rows as i64, k as i64]),
-                        (
-                            das_ptr + (qmma_rows * blocks) as u64 * f32_bytes,
-                            [rows as i64, blocks as i64],
-                        ),
-                        (w_ptr, [n as i64, k as i64]),
-                        (s_ptr, [blocks as i64, n as i64]),
-                        (
-                            out_ptr + (qmma_rows * n) as u64 * f32_bytes,
-                            [rows as i64, n as i64],
-                        ),
-                    ],
-                    ((rows / depth) as u32, (n / tn) as u32, 1),
-                )?;
+                // Only the deep tile ever leaves the grid starved enough for
+                // this to fire: see Q8_QMMA_SPLIT_THRESHOLD.
+                let splits = if depth == Q8_QMMA_TM && self.qmma_split {
+                    q8_qmma_splits(rows, n, k, wide)
+                } else {
+                    1
+                };
+                if splits > 1 {
+                    self.launch_qmma_split(
+                        rows, qmma_rows, k, blocks, n, wide, splits, qa_ptr, das_ptr, w_ptr,
+                        s_ptr, out_ptr, f32_bytes,
+                    )?;
+                } else {
+                    self.launch(
+                        module,
+                        "q8_qmma",
+                        &[
+                            (qa_ptr + (qmma_rows * k) as u64, [rows as i64, k as i64]),
+                            (
+                                das_ptr + (qmma_rows * blocks) as u64 * f32_bytes,
+                                [rows as i64, blocks as i64],
+                            ),
+                            (w_ptr, [n as i64, k as i64]),
+                            (s_ptr, [blocks as i64, n as i64]),
+                            (
+                                out_ptr + (qmma_rows * n) as u64 * f32_bytes,
+                                [rows as i64, n as i64],
+                            ),
+                        ],
+                        ((rows / depth) as u32, (n / tn) as u32, 1),
+                    )?;
+                }
                 qmma_rows += rows;
             }
         }
@@ -186,5 +200,85 @@ impl DeviceBackend {
             )?;
         }
         Ok(())
+    }
+
+    /// The starved-grid path for `q8_qmma`'s deep tile: `splits` copies of the
+    /// same `[Q8_QMMA_TM, wide]` patch, one per slice of `k`, landing in a
+    /// `splits * rows * n` scratch that a second launch reduces into `out`.
+    /// See `kernels::q8_qmma_split_src`'s doc comment for why the split index
+    /// gets its own output operand instead of an offset computed from it.
+    #[allow(clippy::too_many_arguments)]
+    fn launch_qmma_split(
+        &self,
+        rows: usize,
+        row_off: usize,
+        k: usize,
+        blocks: usize,
+        n: usize,
+        wide: usize,
+        splits: usize,
+        qa_ptr: u64,
+        das_ptr: u64,
+        w_ptr: u64,
+        s_ptr: u64,
+        out_ptr: u64,
+        f32_bytes: u64,
+    ) -> Result<()> {
+        let key = (wide, k, splits);
+        if !self.q8_qmma_split.borrow().contains_key(&key) {
+            let split_src = q8_qmma_split_src(Q8_QMMA_CTA, k, splits);
+            let reduce_src = q8_qmma_reduce_src(Q8_QMMA_CTA, splits);
+            let split_mod = compile(
+                &split_src,
+                &[("TM", Q8_QMMA_TM), ("TN", wide)],
+                "q8_qmma_split",
+            )?;
+            let reduce_mod = compile(&reduce_src, &[("TN", wide)], "q8_qmma_reduce")?;
+            self.q8_qmma_split
+                .borrow_mut()
+                .insert(key, (split_mod, reduce_mod));
+        }
+        let cache = self.q8_qmma_split.borrow();
+        let (split_mod, reduce_mod) = &cache[&key];
+
+        let partials = self.split_partials(splits * rows * n)?;
+        let plane_bytes = (rows * n) as u64 * f32_bytes;
+
+        let mut operands = vec![
+            (qa_ptr + (row_off * k) as u64, [rows as i64, k as i64]),
+            (
+                das_ptr + (row_off * blocks) as u64 * f32_bytes,
+                [rows as i64, blocks as i64],
+            ),
+            (w_ptr, [n as i64, k as i64]),
+            (s_ptr, [blocks as i64, n as i64]),
+        ];
+        for i in 0..splits {
+            operands.push((partials + i as u64 * plane_bytes, [rows as i64, n as i64]));
+        }
+        self.launch(
+            split_mod,
+            "q8_qmma_split",
+            &operands,
+            (
+                (rows / Q8_QMMA_TM) as u32,
+                (n / wide) as u32,
+                splits as u32,
+            ),
+        )?;
+
+        let mut reduce_operands: Vec<(u64, [i64; 2])> = (0..splits)
+            .map(|i| (partials + i as u64 * plane_bytes, [rows as i64, n as i64]))
+            .collect();
+        reduce_operands.push((
+            out_ptr + (row_off * n) as u64 * f32_bytes,
+            [rows as i64, n as i64],
+        ));
+        self.launch(
+            reduce_mod,
+            "q8_qmma_reduce",
+            &reduce_operands,
+            (rows as u32, (n / wide) as u32, 1),
+        )
     }
 }
