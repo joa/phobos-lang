@@ -105,8 +105,17 @@ pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
 /// tile is `[4, 4]`: sixteen output elements on a 256-thread CTA, 0.1 TFLOP/s.
 /// Materializing the scores costs a `[rows, keys]` buffer per head and removes
 /// the cap, leaving two ordinary tiled matmuls at 3.3 and 2.6 TFLOP/s, 26 ms of
-/// a 512-token pass. The tensor cores would roughly double that again, but only
-/// by rounding both operands to f16, and attention is off the critical path.
+/// a 512-token pass.
+///
+/// That comparison undersold [`attention_block_src`], which the dispatcher
+/// (`DeviceBackend::attention`) now tries first for exactly this reason: a
+/// real prefill trace (minicpm pp128, `nsys`) found the three launches here
+/// tied with the projection GEMM at 37.5% of a pass, not a minor cost, and
+/// the blocked kernel does the same work in a third of the time by never
+/// writing the score matrix to global memory at all -- see
+/// `autoresearch/beams/prefill-attention-tensorcore.md`. This kernel remains
+/// the fallback for shapes the blocked one declines (a head dimension whose
+/// block tile does not divide 64, or a misaligned continuation).
 ///
 /// Two things have to be arranged for those matmuls to be clean. `dot_t` cannot
 /// accumulate in place and `acc = acc + dot_t(..)` builds a whole tile per step,

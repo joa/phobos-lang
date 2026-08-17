@@ -521,23 +521,45 @@ impl Backend for DeviceBackend {
 
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         self.check_distinct("attention", out, &[q]);
-        // A prompt whose query block, cache and head dimension all tile evenly
-        // goes through the two matmuls, 26 ms of a 512-token pass; see
-        // `attn_gemm_src`.
-        if attn_gemm_fits(spec) {
-            return self.attention_gemm(q, keys, values, spec, out);
-        }
+        // A tensor-core, f16, pipelined version of the blocked kernel below
+        // was tried here first and measured a net loss against it (5.3-5.9ms
+        // vs 4.25ms in the same trace this comment cites, both tile sizes
+        // tried): the WMMA legacy path's fixed per-launch cost (fragment
+        // load/store through a shared-memory epilogue slab, plus the f32 ->
+        // f16 query cast) outweighs the tensor cores' own throughput
+        // advantage at this kernel's shape (a 16-row query tile against a
+        // 128-wide head is a small matmul, dominated by that overhead rather
+        // than compute). Reverted; full numbers, the two things ruled out
+        // (a codegen bug, and under-occupancy from the launch width) and the
+        // precision finding that came out of chasing it are in
+        // `autoresearch/beams/prefill-attention-tensorcore.md`.
+        //
         // The blocked kernel masks its one diagonal tile with `tril`, which is
         // the causal mask only when that tile starts where the query block
         // does. A prompt into an empty cache always does; a continuation whose
         // cache is not a whole number of blocks deep does not, and takes the
         // row kernel, which needs no alignment.
+        //
+        // Tried ahead of the gemm path below: one online-softmax pass that
+        // never materializes the score matrix measures 3x cheaper than the
+        // three-launch, global-round-trip gemm path at the one shape both
+        // can take (minicpm pp128, real `nsys` kernel-sum trace,
+        // `autoresearch/beams/prefill-attention-tensorcore.md`) -- attention
+        // was tied with the projection GEMM at 37.5% of a prefill pass before
+        // this reorder, not the minor cost `attention_gemm`'s own doc comment
+        // assumed when it called attention "off the critical path".
         let block = attention_block_tile(spec.head_dim);
+        if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
+            return self.attention_blocked(q, keys, values, spec, block, out);
+        }
+        // Whatever the blocked kernel declined (a misaligned continuation, or
+        // a head dimension whose block tile does not divide 64) still goes
+        // through the two matmuls if it tiles evenly; see `attn_gemm_src`.
+        if attn_gemm_fits(spec) {
+            return self.attention_gemm(q, keys, values, spec, out);
+        }
         match spec.rows {
             1 => self.attention_decode(q, keys, values, spec, out),
-            rows if rows > 1 && spec.start_pos.is_multiple_of(block) => {
-                self.attention_blocked(q, keys, values, spec, block, out)
-            }
             _ => self.attention_rows(q, keys, values, spec, out),
         }
     }
