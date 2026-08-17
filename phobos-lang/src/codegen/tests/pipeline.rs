@@ -203,9 +203,20 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
 
 #[test]
 fn generic_pipeline_double_buffers_a_non_matmul_loop() {
-    // a @pipeline loop that stages a slice but is not the fused matmul
-    // template, so it exercises the generic software-pipelining path
-    // (double buffers + guarded prefetch) rather than the GEMM backend.
+    // Despite its name and the `@pipeline` attribute, this loop's slice is
+    // partial (K is dynamic, unaligned, and offset by the loop's own
+    // induction variable -- see the block comment at the end of pipeline.rs
+    // on why an unbound loop var's divisor defaults to 1, which no `@aligned`
+    // promise on the *tensor* side can satisfy): `pipeline_candidate`
+    // declines it, and what this test actually locks in is
+    // `emit_split_for`'s pre-existing main-loop-plus-masked-remainder
+    // structure, which happens to also mint two same-shaped buffers for the
+    // same staged name. `bare_kernel_auto_pipelines_without_the_attribute`
+    // below is the real generic-pipeline-path test (verified via a distinct
+    // third buffer, which this shape never reaches). Kept as-is: it still
+    // exercises real codegen and still passes, just not for the reason its
+    // name implies -- retitling it belongs with whoever next touches
+    // `emit_split_for`, not this change.
     let mlir = emit_mlir(
         "@pipeline
         @autotune(T in [16])
@@ -229,5 +240,142 @@ fn generic_pipeline_double_buffers_a_non_matmul_loop() {
             "scf.if",      // the guarded prefetch of the next tile
             "gpu.barrier", // publish/consume barriers around staging
         ],
+    );
+}
+
+#[test]
+fn bare_kernel_auto_pipelines_without_the_attribute() {
+    // A row-at-a-time loop: dimension 0's size-1 span is provably in bounds
+    // regardless of alignment (any dynamic extent has room for one more
+    // element wherever the loop var points), and `@aligned(K = T)` covers
+    // dimension 1, so the slice is not partial -- eligible, and pipelined
+    // with no `@pipeline` written at all.
+    let mlir = emit_mlir(
+        "@autotune(T in [16])
+        @aligned(K = T)
+        kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K]) {
+            let pm = program_id(0)
+            var acc: tile<f32>[1, T] = 0.0
+            for kt in range(0, M, 1) {
+                var a = A[kt :+ 1, 0 :+ T]
+                acc += a
+            }
+            C[0 :+ 1, 0 :+ T] = acc
+        }",
+    );
+    // tile0 is `acc` (declared once, outside the loop); tile1 and tile2 are
+    // `a`'s two ping-pong buffers -- three globals total is what tells this
+    // apart from the ordinary single-buffered path, which would only ever
+    // mint tile0 and tile1.
+    assert_contains(
+        &mlir,
+        &[
+            "@__stage_tile0 : memref<1x16xf32, 3>",
+            "@__stage_tile1 : memref<1x16xf32, 3>",
+            "@__stage_tile2 : memref<1x16xf32, 3>",
+            "scf.if",
+        ],
+    );
+}
+
+#[test]
+fn pipeline_assertion_fails_with_the_decline_reason() {
+    // `@pipeline` on a kernel with no loop shaped for pipelining (here: no
+    // for loop at all) is now an assertion, not an opt-in, so it has to fail
+    // to compile -- and name why, not just that it failed. `codegen::emit`
+    // itself does not error (see `EmitOutput::pipeline_failures`, which
+    // `Variants::compile` needs raw); the assertion is enforced by
+    // `phobos_lang::compile_shared`, the entry point an ordinary single-
+    // kernel caller uses.
+    let err = crate::compile_shared(
+        &phobos_base::context::Context::default(),
+        "@pipeline
+        kernel flat(A: tensor<f32>[N], C: tensor<f32>[N]) {
+            let i = program_id(0)
+            C[i :+ 1] = A[i :+ 1] * 2.0
+        }",
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("flat"), "should name the kernel: {err}");
+    assert!(
+        err.contains("@pipeline"),
+        "should say this was an assertion: {err}"
+    );
+}
+
+#[test]
+fn shared_memory_budget_declines_silently_without_the_attribute() {
+    // Same eligible row-at-a-time shape as
+    // `bare_kernel_auto_pipelines_without_the_attribute`, but T = 8192: one
+    // staged buffer is 32768 bytes, doubled 65536 -- over the 48 KiB
+    // ceiling. No `@pipeline` here, so this is a bare auto-attempt: declining
+    // must fall back to the plain loop quietly, not error. A literal row
+    // count (64, not the symbolic M the other tests use) keeps the bound
+    // affine, so a decline here falls to the plain unmasked loop instead of
+    // `emit_split_for`'s ragged-remainder split, whose own main+remainder
+    // structure would otherwise mint a second buffer for an unrelated
+    // reason and defeat this assertion.
+    let mlir = emit_mlir(
+        "@autotune(T in [8192])
+        @aligned(K = T)
+        kernel stage(A: tensor<f32>[64, K], C: tensor<f32>[64, K]) {
+            let pm = program_id(0)
+            var acc: tile<f32>[1, T] = 0.0
+            for kt in range(0, 64, 1) {
+                var a = A[kt :+ 1, 0 :+ T]
+                acc += a
+            }
+            C[0 :+ 1, 0 :+ T] = acc
+        }",
+    );
+    // tile0 is `acc`, tile1 is `a`'s single (non-doubled) buffer; a
+    // pipelined form would additionally mint tile2 for `a`'s second buffer.
+    assert!(
+        !mlir.contains("__stage_tile2"),
+        "a loop over the shared-memory budget should not get a second buffer:\n{mlir}"
+    );
+}
+
+#[test]
+fn atomic_add_cannot_reach_a_loop_bound() {
+    // Not a pipelining test: a tripwire for the CTA-uniformity proof at the
+    // end of pipeline.rs, which argues no `.ph` expression can put a
+    // data-dependent value (an atomic's return, a tensor load, ...) into a
+    // loop bound, because `Codegen::coerce` has no int-to-index arm and
+    // `Codegen::unify` bails on an int/index mismatch rather than promoting
+    // it. That argument is why `pipeline_candidate`'s callers run no runtime
+    // divergence check: every bound is CTA-uniform by construction, so a
+    // lane-divergent one (which would turn `emit_pipelined_for`'s
+    // barrier-in-`scf.if` guard into a hang) is not a case pipelining has to
+    // defend against. If a future change adds an int-to-index conversion,
+    // this stops failing and the assertions below catch it -- which is
+    // exactly when that proof, and this loop, need a second look.
+    let err = emit_err(
+        "kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K], BAR: tensor<i32>[2]) {
+            let n = atomic_add(BAR, 0, 1)
+            for kt in range(0, n, 1) {
+                C[kt :+ 1, 0 :+ 1] = A[kt :+ 1, 0 :+ 1]
+            }
+        }",
+    );
+    assert!(
+        err.contains("loop end must be an integer, got i32"),
+        "atomic_add's i32 result should not typecheck as a loop bound: {err}"
+    );
+
+    // The same holds combined with an index-typed value through arithmetic:
+    // `unify` bails on the mismatch rather than promoting the i32 side.
+    let err = emit_err(
+        "kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K], BAR: tensor<i32>[2]) {
+            let n = atomic_add(BAR, 0, 1)
+            for kt in range(0, n * 1, 1) {
+                C[kt :+ 1, 0 :+ 1] = A[kt :+ 1, 0 :+ 1]
+            }
+        }",
+    );
+    assert!(
+        err.contains("mismatched operand types"),
+        "an i32/index binary op should not silently promote to index: {err}"
     );
 }

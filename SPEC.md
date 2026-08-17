@@ -69,9 +69,9 @@ float       = digit { digit } "." { digit } ;
     construction and keep the vectorized, tensor-core and `cp.async` fast
     paths, and the ragged remainder replays the body once under a runtime mask
     against the tensor's own extent. Only spans with a static length split;
-    loops carrying `mma.sync` fragment accumulators or driven by `@pipeline`
-    do not split yet, so their slices are masked unless `@aligned` covers the
-    dimension they walk.
+    loops carrying `mma.sync` fragment accumulators, or that the compiler
+    pipelines (see `@pipeline` below), do not split yet, so their slices are
+    masked unless `@aligned` covers the dimension they walk.
   - A dynamic size indexed by a **program id** cannot be trimmed the same way:
     the grid is the host's, and nothing inside the kernel bounds it. Such a
     slice is masked against the tensor's runtime extent, which costs the
@@ -208,7 +208,7 @@ float       = digit { digit } "." { digit } ;
   - `@cluster(X in [..], ...)`: super tile dimensions and search space for cluster tuning.
   - `@aligned(DIM = tile, ...)`: promises that a symbolic tensor dimension is a whole number of `tile` elements, where `tile` is an integer or an `@autotune` constant. It also sets how far into a row a vector access may reach: the assumed multiple of 4 is 16 bytes of `f32` but only 8 of a 16-bit type, so a narrow tensor stages at half width unless a promise carries its row pitch to 16 bytes. 
   - `@launch(maxThreads[, minBlocks[, maxRegs]])`: specifies CTA thread assumption (default: 256); maps to PTX `.maxntid` / `.minnctapersm` / `.maxnreg` at codegen. `maxRegs` (16..255) hard-caps registers per thread, forcing ptxas to fit the budget (spilling if needed) where `minBlocks`'s `.minnctapersm` is only advisory.
-  - `@pipeline`: selects the double-buffered (ping-pong shared buffer) MLIR GEMM backend.
+  - `@pipeline`: double-buffered (ping-pong shared buffer) staging is now attempted on every eligible loop by default, with no attribute needed -- a leading run of `var name = <static tensor slice>` statements whose names are never written again, whose slices are not partial, and whose doubled footprint still fits shared memory (see `phobos-lang/src/codegen/pipeline.rs`'s `pipeline_candidate`). Writing `@pipeline` now asserts that promise instead of requesting it: the kernel fails to compile, naming why, if nothing in it ends up pipelined. It still separately selects double-buffered staging for the fused-GEMM backend's own operand pairs (`matmul`/`reg`/`wmma.rs`'s `pairs`), which has no legality check of its own and stays attribute-gated exactly as before, since flipping it on by default would double every such kernel's staging footprint unconditionally -- a separate, unaudited change this pass did not make.
   - `@tensorcore`: runs the matmul on tensor cores (sm_70+).
      Operands are rounded to **f16** when staged (accumulation stays f32).
      Tile dims and the k-slice must be multiples of 16 and the CTA's warps must tile the 16x16-fragment grid;

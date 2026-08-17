@@ -1,6 +1,5 @@
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [16, 64])
 @launch(256, 2)
-@pipeline
 @tensorcore
 @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
 kernel gemm(A: tensor<f16>[M, K],

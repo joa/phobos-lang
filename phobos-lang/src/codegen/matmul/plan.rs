@@ -314,7 +314,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Vec<Value<'c, 'c>>> {
         let (lo, hi, st) = bounds;
 
-        if !self.pipeline {
+        if !self.pipeline_assert {
             return self.carry_loop(block, lo, hi, st, regs, |cg, body, kt, accs| {
                 stage(cg, body, kt, &a_bufs[0], &b_bufs[0])?;
 

@@ -1132,3 +1132,110 @@ regression (minicpm flat as predicted, Qwen positive though noisy at this
 sample size given only 6 of 25 layers do full attention).
 
 Committed: `phobos-lang/src/codegen/tile/warp_attn.rs` only.
+
+## New beam, 2026-08-17: `@pipeline` becomes an assertion, pipelining becomes the default -- a language-design change the user requested directly
+
+Not a performance beam: the user asked, mid-session, why `@pipeline` should
+ever need to be written when the compiler could just identify eligible
+loops itself. Full mechanism, the two correctness gaps auto-attempt exposed
+(CTA-uniformity of loop bounds, shared-memory budget) and how each was
+closed, the `Variants`/masked-fallback resolution, and the full emit-diff
+sweep's findings in [[pipeline-default-on]]
+(`autoresearch/beams/pipeline-default-on.md`).
+
+**Headline finding**: across every `.ph` file in the tree and 36
+representative Rust-embedded kernel-source instantiations (47 compiles
+total, `.ph` and `PHOBOS_CHIP=sm_80 PHOBOS_INDEX_BITS=64`, before/after,
+diffed), exactly **one** loop newly pipelines under the default --
+`attention_src`'s single-key remainder tail in the rare misaligned-multi-
+row-continuation fallback (`DeviceBackend::attention_rows`), off both
+`pp128` and `tg1024`'s hot paths. The reason so few loops qualify is
+structural and is the real finding: `pipeline_candidate` prescans a loop
+body *before* its own induction variable is bound, so `expr_div` of an
+unbound loop var defaults to 1, and no `@aligned` promise on the tensor
+side alone can clear the eligibility check's `&&` for the canonical
+`var k = K[kt :+ BC, ...]` shape this mechanism targets. A modest-effort
+follow-up (threading the loop var's own provable divisor into the prescan,
+machinery for which -- `slice_is_partial_within`'s `ivs`/`pending` --
+already exists for `emit_split_for`) would make `@aligned` k-loops
+genuinely eligible; noted in the beam file, not chased here.
+
+**Mid-task correction worth flagging**: the first design added real taint-
+tracking machinery (a `HashSet` populated on every scalar binding) to guard
+against `atomic_add`'s return value reaching a loop bound and hanging a
+barrier-in-`scf.if` guard. Building the test for it proved the scenario
+does not compile in this language at all -- `atomic_add` returns `i32`,
+loop bounds require MLIR `index`, and neither `Codegen::coerce` nor
+`Codegen::unify` has any path from one to the other. The machinery was
+removed as provably-dead code and replaced with a proof comment plus a
+regression test pinning both failure modes as a tripwire against a future
+language change reopening the hole.
+
+**Second correction, caught by review before this report went out, not by
+my own testing**: the emit-diff sweep above verifies MLIR text via
+`phobos_lang::codegen::emit` directly (what `cargo run -p phobos-lang
+--example emit` calls), which bypasses `compile_shared` entirely --
+exactly the function that enforces `@pipeline`'s new assertion. That sweep
+is structurally blind to assertion failures. Checked every `@pipeline` site
+in the tree against `compile_shared` directly and found three stale
+annotations that now hard-fail: `examples/flash_attention_fp16.ph` and
+`flash_attention_fp32.ph` (fragment-carried loop, `let`-not-`var` staged
+values, `@pipeline` has always been inert there) and `examples/gemm_fp16.ph`
+(an f16-accumulator GEMM that `matmul_candidate`'s tensor-core/vector-path
+branches both miss on this codebase's default chip, so it falls to the
+generic path and declines the same way the headline finding describes).
+The flash break is not hypothetical: `phobos-bench/src/flash.rs` loads
+both files through `autotune::compile` -> `phobos_lang::compile` ->
+`compile_shared`, so `cargo run -p phobos-bench`'s flash benchmarks would
+have hard-failed. All three fixed by removing the stale `@pipeline`
+(verified byte-identical MLIR before/after on both targets, verified
+`compile_shared` now succeeds on all nine `examples/*.ph` files on both
+targets). `phobos-onnx` carries no `@pipeline` anywhere and was checked
+separately (inspected, and its two loop-bearing kernel shapes verified
+against the same before/after diff as above).
+
+**Fourth file, left open, not fixed**: `examples/gemm_fp32.ph` still
+carries `@pipeline`, and enumerating its full `@autotune` search space
+(64 configs, `TILE_M`/`TILE_N` each doubling `32->256`, `TILE_K` doubling
+`4->32`) through `compile_shared` found 12 failures, all the asymmetric
+`TILE_M=128,TILE_N=256` / `TILE_M=256,TILE_N=128` tile shapes crossed with
+every `TILE_K` -- `matmul_candidate`'s `sub_tile`/`lane_grid` split has no
+answer there, so those 12 fall to the generic path and decline the same
+way as everywhere else in this sweep. Confirmed pre-existing (same before/
+after-stash proof as the other three), and confirmed the other 52 configs
+genuinely do pipeline, so stripping the attribute would be the wrong fix
+here -- it would discard a real assertion holding for 52 of 64 points.
+`phobos-bench`'s autotuner tolerates per-config compile failures during
+its unpinned search (catches and logs `"skipped"`, keeps going), but a
+`--autotune` pin landing on one of the 12 fails hard
+(`"autotune: no config works"`). Left as-is and surfaced in
+[[pipeline-default-on]] as an explicit open decision -- whether `@pipeline`
+should mean "pipelines for some config in its own search space" (true
+here) or "pipelines for whatever config a caller picks" (false for these
+12) is a semantics question this task's brief did not anticipate for an
+autotuned kernel, and is not resolved unilaterally.
+
+**Correctness**: all four standing gates (`backend_check`, `batch_check`,
+`model_check`, `fuse_check`) pass on both models with
+`PHOBOS_ATTN_PERSIST=1`, matching documented error bands to the digit
+(`backend_check` worst error 2.902e-4). `backend_check`'s own shape sweep
+happens to exercise the one newly-pipelined kernel directly (`5 rows @ 31,
+16/2 heads, head_dim 64` dispatches to `attention_rows`) and it agrees at
+rel err 1.043e-7. `cargo test -p phobos-lang`: 155/155 (4 new tests).
+`cargo test --workspace`: clean. Release build + clippy on
+`phobos-gguf --features cuda`: clean.
+
+**Not run**: `scripts/bench.py`, per this session's standing rule --
+orchestrator's next step, same as every other round. This task's own quick
+nsys/isolated-timing obligation was assessed and not exercised: the one
+kernel that changed is a size-1-slice tail loop unreachable from `pp128`
+or `tg1024`'s shapes, so there is nothing on the hot path for a timing
+check to catch either way; correctness on the exact changed path is
+already confirmed via `backend_check`.
+
+**Nothing committed.** Changed:
+`phobos-lang/src/{lib.rs,codegen/{mod.rs,pipeline.rs,stmt.rs,
+matmul/{plan.rs,reg.rs,wmma.rs},tests/pipeline.rs}}`,
+`phobos-kernels/src/compile.rs`, `SPEC.md`, and three example files with
+stale `@pipeline` removed: `examples/flash_attention_fp16.ph`,
+`examples/flash_attention_fp32.ph`, `examples/gemm_fp16.ph`.
