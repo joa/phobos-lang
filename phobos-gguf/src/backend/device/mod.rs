@@ -54,10 +54,6 @@ type DeviceQuant = (
 /// generated text is a function of.
 type QmmaSplitKey = (usize, usize, usize);
 
-/// Output width and the low half's `k`: what [`kernels::q8_qmma_sk_lo_src`]
-/// and [`kernels::q8_qmma_sk_hi_src`]'s generated text is a function of.
-type QmmaStreamKKey = (usize, usize);
-
 /// Heads, head dimension, taps, head stride, normalize, query scale, rows, and
 /// rows per program: everything [`delta_conv_src`] bakes in.
 type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
@@ -159,11 +155,6 @@ pub struct DeviceBackend {
     /// grid. See `matmul.rs`'s `project_q8` and
     /// `kernels::q8_qmma_split_src`'s doc comment.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
-    /// The stream-K DRAM-traffic probe (see `matmul.rs`'s
-    /// `launch_qmma_streamk` and `autoresearch/beams/q8-qmma-streamk.md`),
-    /// keyed by output width and the low half's `k`. Compiled lazily, only
-    /// when [`Self::qmma_streamk`] asks for it.
-    q8_qmma_streamk: RefCell<HashMap<QmmaStreamKKey, (Module, Module)>>,
     /// The narrow-CTA variant of the deep tile (see
     /// `kernels::q8_qmma_narrow_eligible`'s doc comment and
     /// `autoresearch/beams/q8-qmma-grid-starve.md`): same `qmma_t` kernel,
@@ -190,17 +181,10 @@ pub struct DeviceBackend {
     /// measurements never saw. `PHOBOS_QMMA_SPLIT=1` opts in for anyone
     /// revisiting this at a different node-count/model shape mix.
     qmma_split: bool,
-    /// Whether `q8_qmma`'s deep tile takes the stream-K DRAM-traffic probe
-    /// instead of the unsplit launch, unconditionally 50/50 regardless of
-    /// grid size (this is a measurement probe, not a tuned dispatch rule --
-    /// see `autoresearch/beams/q8-qmma-streamk.md`). `PHOBOS_QMMA_STREAMK=1`
-    /// opts in; mutually exclusive with [`Self::qmma_split`] in
-    /// `matmul.rs`'s `project_q8`, checked first.
-    qmma_streamk: bool,
     /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path (see
     /// `kernels::q8_qmma_narrow_eligible`) on a starved grid instead of the
-    /// unsplit launch. Default OFF like [`Self::qmma_split`] and
-    /// [`Self::qmma_streamk`], checked ahead of both in `matmul.rs`'s
+    /// unsplit launch. Default OFF like [`Self::qmma_split`], and checked
+    /// ahead of it in `matmul.rs`'s
     /// `project_q8` since it targets the same starved shapes by a different,
     /// non-bandwidth-adding mechanism (more disjoint-output blocks at the
     /// same per-warp tensor-core intensity, not a reduction pass). See
@@ -436,7 +420,6 @@ impl DeviceBackend {
             q8_qmma,
             q8_qmma_deep,
             q8_qmma_split: RefCell::new(HashMap::new()),
-            q8_qmma_streamk: RefCell::new(HashMap::new()),
             q8_qmma_narrow: RefCell::new(None),
             q8_split,
             q8_qdot,
@@ -446,10 +429,6 @@ impl DeviceBackend {
             persist_qdot: std::env::var_os("PHOBOS_PERSIST_QDOT").is_some(),
             qmma_split: matches!(
                 std::env::var("PHOBOS_QMMA_SPLIT").as_deref(),
-                Ok("1" | "on" | "yes" | "true")
-            ),
-            qmma_streamk: matches!(
-                std::env::var("PHOBOS_QMMA_STREAMK").as_deref(),
                 Ok("1" | "on" | "yes" | "true")
             ),
             qmma_narrow: matches!(

@@ -1,0 +1,239 @@
+diff --git b/phobos-gguf/src/backend/device/kernels/quant.rs a/phobos-gguf/src/backend/device/kernels/quant.rs
+index acdf64c..f595dd8 100644
+--- b/phobos-gguf/src/backend/device/kernels/quant.rs
++++ a/phobos-gguf/src/backend/device/kernels/quant.rs
+@@ -429,6 +429,60 @@ kernel q8_qmma_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+     )
+ }
+ 
++/// Stream-K probe (see `autoresearch/beams/q8-qmma-streamk.md`): a two-way
++/// split of the deep tile's own `k`, low half writing directly like the
++/// unsplit kernel, high half accumulating in place with no scratch buffer
++/// at all. This is the smallest instance of the boundary-fixup mechanism a
++/// full stream-K work assignment needs -- most output tiles in a real
++/// assignment would stay on the unsplit path (whole `k`, one write); only a
++/// tile the assignment's boundaries actually cross would take this pair,
++/// at that tile's own literal `k` bounds. Two kernels, not one launch with
++/// a branch: the accumulate has to see the low half's write, and that only
++/// holds across a kernel boundary on the same stream, not across
++/// concurrently scheduled blocks of one launch.
++pub(crate) fn q8_qmma_sk_lo_src(block: usize, tm: usize, tn: usize, half: usize) -> String {
++    let hb = half / Q8_BLOCK;
++    format!(
++        "@launch({block})
++@autotune(TM in [{tm}], TN in [{tn}])
++@aligned(M = TM, N = TN, K = {half}, KB = {hb})
++kernel q8_qmma_sk_lo(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
++               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
++               C: tensor<f32>[M, N]) {{
++  let pm = program_id(0)
++  let pn = program_id(1)
++  C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, 0 :+ {half}], AS[pm * TM :+ TM, 0 :+ {hb}],
++                                           W[pn * TN :+ TN, 0 :+ {half}], WS[0 :+ {hb}, pn * TN :+ TN])
++}}
++"
++    )
++}
++
++/// [`q8_qmma_sk_lo_src`]'s high half: the same tile's remaining `k`,
++/// accumulated into the destination the low half already wrote. `+=` with
++/// `qmma_t` on the right does not take the direct-write path (that is only
++/// wired for a plain `=`, see `phobos-lang/src/codegen/stmt.rs`'s
++/// `store_tile`), so this computes into a fresh shared tile and folds it
++/// into the destination slice with a load-add-store -- the read that adds
++/// is exactly the DRAM cost this probe exists to measure.
++pub(crate) fn q8_qmma_sk_hi_src(block: usize, tm: usize, tn: usize, half: usize) -> String {
++    let hb = half / Q8_BLOCK;
++    format!(
++        "@launch({block})
++@autotune(TM in [{tm}], TN in [{tn}])
++@aligned(M = TM, N = TN, K = {half}, KB = {hb})
++kernel q8_qmma_sk_hi(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
++               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
++               C: tensor<f32>[M, N]) {{
++  let pm = program_id(0)
++  let pn = program_id(1)
++  C[pm * TM :+ TM, pn * TN :+ TN] += qmma_t(A[pm * TM :+ TM, {half} :+ {half}], AS[pm * TM :+ TM, {hb} :+ {hb}],
++                                            W[pn * TN :+ TN, {half} :+ {half}], WS[{hb} :+ {hb}, pn * TN :+ TN])
++}}
++"
++    )
++}
++
+ /// Sums [`q8_qmma_split_src`]'s `S` output tiles into one, one row at a time
+ /// rather than a `[TM, TN]` tile at a time: a plain tile add is not
+ /// `qmma_t`, so it always stages through shared memory, and at `TM = 128`
+diff --git b/phobos-gguf/src/backend/device/matmul.rs a/phobos-gguf/src/backend/device/matmul.rs
+index df568fb..8032846 100644
+--- b/phobos-gguf/src/backend/device/matmul.rs
++++ a/phobos-gguf/src/backend/device/matmul.rs
+@@ -60,7 +60,20 @@ impl DeviceBackend {
+                 } else {
+                     1
+                 };
+-                if depth == Q8_QMMA_TM
++                // The probe's literal K = k / 2 has to stay a whole number of
++                // Q8_0 blocks, same requirement q8_qmma_splits's halving loop
++                // enforces for the older split path: `q8_qmma_sk_hi_src`'s
++                // `hb = half / Q8_BLOCK` would otherwise truncate and the
++                // kernel's own `@aligned(KB = hb)` claim would be silently
++                // wrong rather than merely declined. No routed shape hits
++                // this today (every k here is a multiple of 64), but falling
++                // back to the unsplit path is one check, not a proof.
++                if depth == Q8_QMMA_TM && self.qmma_streamk && (k / 2).is_multiple_of(Q8_BLOCK) {
++                    self.launch_qmma_streamk(
++                        rows, qmma_rows, k, blocks, n, wide, qa_ptr, das_ptr, w_ptr, s_ptr,
++                        out_ptr, f32_bytes,
++                    )?;
++                } else if depth == Q8_QMMA_TM
+                     && self.qmma_narrow
+                     && q8_qmma_narrow_eligible(rows, n, wide)
+                 {
+@@ -346,4 +359,81 @@ impl DeviceBackend {
+             ),
+         )
+     }
++
++    /// Stream-K DRAM-traffic probe (see `kernels::q8_qmma_sk_lo_src`'s doc
++    /// comment and `autoresearch/beams/q8-qmma-streamk.md`): every deep-tile
++    /// output tile splits its own `k` in half unconditionally, two launches,
++    /// no scratch buffer -- the second reads and writes the same region of
++    /// `out` the first one wrote. This exists to measure the boundary-fixup
++    /// mechanism's own DRAM cost in isolation, before building the full
++    /// work-assignment scheme that would only split the tiles an
++    /// assignment's boundaries actually cross.
++    ///
++    /// The low half keeps `qmma_t`'s direct-to-global write (no shared tile
++    /// at all, see the emit sweep in the beam's writeup), so it can run at
++    /// the caller's own column width. The high half cannot: `+=` routes
++    /// through a fresh shared accumulator tile (see `q8_qmma_sk_hi_src`'s
++    /// doc comment), and at `wide = 128` that tile is 64 KB, over the 48 KB
++    /// static ceiling -- confirmed the hard way, `Module::from_ptx` rejects
++    /// it exactly like the split-K beam's own second compiler-proof bug (see
++    /// `autoresearch/beams/q8-qmma-split-k.md`). So the high half always
++    /// runs at `Q8_QMMA_TN` (64, a 32 KB tile), its own grid over `n`,
++    /// regardless of what column width the low half used; `Q8_QMMA_TN`
++    /// divides every width `qmma_width` ever returns.
++    #[allow(clippy::too_many_arguments)]
++    fn launch_qmma_streamk(
++        &self,
++        rows: usize,
++        row_off: usize,
++        k: usize,
++        blocks: usize,
++        n: usize,
++        wide: usize,
++        qa_ptr: u64,
++        das_ptr: u64,
++        w_ptr: u64,
++        s_ptr: u64,
++        out_ptr: u64,
++        f32_bytes: u64,
++    ) -> Result<()> {
++        let half = k / 2;
++        let key = (wide, half);
++        if !self.q8_qmma_streamk.borrow().contains_key(&key) {
++            let lo_src = q8_qmma_sk_lo_src(Q8_QMMA_CTA, Q8_QMMA_TM, wide, half);
++            let hi_src = q8_qmma_sk_hi_src(Q8_QMMA_CTA, Q8_QMMA_TM, Q8_QMMA_TN, half);
++            let lo_mod = compile(
++                &lo_src,
++                &[("TM", Q8_QMMA_TM), ("TN", wide)],
++                "q8_qmma_sk_lo",
++            )?;
++            let hi_mod = compile(
++                &hi_src,
++                &[("TM", Q8_QMMA_TM), ("TN", Q8_QMMA_TN)],
++                "q8_qmma_sk_hi",
++            )?;
++            self.q8_qmma_streamk
++                .borrow_mut()
++                .insert(key, (lo_mod, hi_mod));
++        }
++        let cache = self.q8_qmma_streamk.borrow();
++        let (lo_mod, hi_mod) = &cache[&key];
++
++        let operands = [
++            (qa_ptr + (row_off * k) as u64, [rows as i64, k as i64]),
++            (
++                das_ptr + (row_off * blocks) as u64 * f32_bytes,
++                [rows as i64, blocks as i64],
++            ),
++            (w_ptr, [n as i64, k as i64]),
++            (s_ptr, [blocks as i64, n as i64]),
++            (
++                out_ptr + (row_off * n) as u64 * f32_bytes,
++                [rows as i64, n as i64],
++            ),
++        ];
++        let lo_grid = ((rows / Q8_QMMA_TM) as u32, (n / wide) as u32, 1);
++        let hi_grid = ((rows / Q8_QMMA_TM) as u32, (n / Q8_QMMA_TN) as u32, 1);
++        self.launch(lo_mod, "q8_qmma_sk_lo", &operands, lo_grid)?;
++        self.launch(hi_mod, "q8_qmma_sk_hi", &operands, hi_grid)
++    }
+ }
+diff --git b/phobos-gguf/src/backend/device/mod.rs a/phobos-gguf/src/backend/device/mod.rs
+index cbc9932..962d307 100644
+--- b/phobos-gguf/src/backend/device/mod.rs
++++ a/phobos-gguf/src/backend/device/mod.rs
+@@ -54,6 +54,10 @@ type DeviceQuant = (
+ /// generated text is a function of.
+ type QmmaSplitKey = (usize, usize, usize);
+ 
++/// Output width and the low half's `k`: what [`kernels::q8_qmma_sk_lo_src`]
++/// and [`kernels::q8_qmma_sk_hi_src`]'s generated text is a function of.
++type QmmaStreamKKey = (usize, usize);
++
+ /// Heads, head dimension, taps, head stride, normalize, query scale, rows, and
+ /// rows per program: everything [`delta_conv_src`] bakes in.
+ type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
+@@ -155,6 +159,11 @@ pub struct DeviceBackend {
+     /// grid. See `matmul.rs`'s `project_q8` and
+     /// `kernels::q8_qmma_split_src`'s doc comment.
+     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
++    /// The stream-K DRAM-traffic probe (see `matmul.rs`'s
++    /// `launch_qmma_streamk` and `autoresearch/beams/q8-qmma-streamk.md`),
++    /// keyed by output width and the low half's `k`. Compiled lazily, only
++    /// when [`Self::qmma_streamk`] asks for it.
++    q8_qmma_streamk: RefCell<HashMap<QmmaStreamKKey, (Module, Module)>>,
+     /// The narrow-CTA variant of the deep tile (see
+     /// `kernels::q8_qmma_narrow_eligible`'s doc comment and
+     /// `autoresearch/beams/q8-qmma-grid-starve.md`): same `qmma_t` kernel,
+@@ -181,10 +190,17 @@ pub struct DeviceBackend {
+     /// measurements never saw. `PHOBOS_QMMA_SPLIT=1` opts in for anyone
+     /// revisiting this at a different node-count/model shape mix.
+     qmma_split: bool,
++    /// Whether `q8_qmma`'s deep tile takes the stream-K DRAM-traffic probe
++    /// instead of the unsplit launch, unconditionally 50/50 regardless of
++    /// grid size (this is a measurement probe, not a tuned dispatch rule --
++    /// see `autoresearch/beams/q8-qmma-streamk.md`). `PHOBOS_QMMA_STREAMK=1`
++    /// opts in; mutually exclusive with [`Self::qmma_split`] in
++    /// `matmul.rs`'s `project_q8`, checked first.
++    qmma_streamk: bool,
+     /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path (see
+     /// `kernels::q8_qmma_narrow_eligible`) on a starved grid instead of the
+-    /// unsplit launch. Default OFF like [`Self::qmma_split`], and checked
+-    /// ahead of it in `matmul.rs`'s
++    /// unsplit launch. Default OFF like [`Self::qmma_split`] and
++    /// [`Self::qmma_streamk`], checked ahead of both in `matmul.rs`'s
+     /// `project_q8` since it targets the same starved shapes by a different,
+     /// non-bandwidth-adding mechanism (more disjoint-output blocks at the
+     /// same per-warp tensor-core intensity, not a reduction pass). See
+@@ -420,6 +436,7 @@ impl DeviceBackend {
+             q8_qmma,
+             q8_qmma_deep,
+             q8_qmma_split: RefCell::new(HashMap::new()),
++            q8_qmma_streamk: RefCell::new(HashMap::new()),
+             q8_qmma_narrow: RefCell::new(None),
+             q8_split,
+             q8_qdot,
+@@ -431,6 +448,10 @@ impl DeviceBackend {
+                 std::env::var("PHOBOS_QMMA_SPLIT").as_deref(),
+                 Ok("1" | "on" | "yes" | "true")
+             ),
++            qmma_streamk: matches!(
++                std::env::var("PHOBOS_QMMA_STREAMK").as_deref(),
++                Ok("1" | "on" | "yes" | "true")
++            ),
+             qmma_narrow: matches!(
+                 std::env::var("PHOBOS_QMMA_NARROW").as_deref(),
+                 Ok("1" | "on" | "yes" | "true")
