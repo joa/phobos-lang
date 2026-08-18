@@ -2,6 +2,47 @@
 
 use super::*;
 
+/// The five buffers every batched Q8_0 kernel here contracts over, and the
+/// shape they share: activation bytes and scales, weight bytes and scales,
+/// output. The weight pair is whole for every launch; the three row-major
+/// buffers are offset to whichever band of rows a launch covers.
+struct Q8Tiles {
+    qa_ptr: u64,
+    das_ptr: u64,
+    w_ptr: u64,
+    s_ptr: u64,
+    out_ptr: u64,
+    k: usize,
+    blocks: usize,
+    n: usize,
+}
+
+impl Q8Tiles {
+    /// Operands for a launch covering `rows` rows from `row_off`.
+    fn band(&self, row_off: usize, rows: usize) -> [(u64, [i64; 2]); 5] {
+        let f32_bytes = size_of::<f32>() as u64;
+        let (rows, k, blocks, n) = (
+            rows as i64,
+            self.k as i64,
+            self.blocks as i64,
+            self.n as i64,
+        );
+        [
+            (self.qa_ptr + (row_off * self.k) as u64, [rows, k]),
+            (
+                self.das_ptr + (row_off * self.blocks) as u64 * f32_bytes,
+                [rows, blocks],
+            ),
+            (self.w_ptr, [n, k]),
+            (self.s_ptr, [blocks, n]),
+            (
+                self.out_ptr + (row_off * self.n) as u64 * f32_bytes,
+                [rows, n],
+            ),
+        ]
+    }
+}
+
 impl DeviceBackend {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn project_q8(
@@ -31,8 +72,17 @@ impl DeviceBackend {
         let out_ptr = self.ptr(out, 0)?;
         let blocks = k / Q8_BLOCK;
         let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
-
         let f32_bytes = size_of::<f32>() as u64;
+        let tiles = Q8Tiles {
+            qa_ptr,
+            das_ptr,
+            w_ptr,
+            s_ptr,
+            out_ptr,
+            k,
+            blocks,
+            n,
+        };
 
         // Four kernels, deepest tile first, each taking the whole tiles it can
         // before handing the remainder on. `qmma_t` carries the scales itself,
@@ -64,32 +114,14 @@ impl DeviceBackend {
                     && self.qmma_narrow
                     && q8_qmma_narrow_eligible(rows, n, wide)
                 {
-                    self.launch_qmma_narrow(
-                        rows, qmma_rows, k, blocks, n, qa_ptr, das_ptr, w_ptr, s_ptr, out_ptr,
-                        f32_bytes,
-                    )?;
+                    self.launch_qmma_narrow(&tiles, qmma_rows, rows)?;
                 } else if splits > 1 {
-                    self.launch_qmma_split(
-                        rows, qmma_rows, k, blocks, n, wide, splits, qa_ptr, das_ptr, w_ptr,
-                        s_ptr, out_ptr, f32_bytes,
-                    )?;
+                    self.launch_qmma_split(&tiles, qmma_rows, rows, wide, splits)?;
                 } else {
                     self.launch(
                         module,
                         "q8_qmma",
-                        &[
-                            (qa_ptr + (qmma_rows * k) as u64, [rows as i64, k as i64]),
-                            (
-                                das_ptr + (qmma_rows * blocks) as u64 * f32_bytes,
-                                [rows as i64, blocks as i64],
-                            ),
-                            (w_ptr, [n as i64, k as i64]),
-                            (s_ptr, [blocks as i64, n as i64]),
-                            (
-                                out_ptr + (qmma_rows * n) as u64 * f32_bytes,
-                                [rows as i64, n as i64],
-                            ),
-                        ],
+                        &tiles.band(qmma_rows, rows),
                         ((rows / depth) as u32, (n / tn) as u32, 1),
                     )?;
                 }
@@ -105,19 +137,7 @@ impl DeviceBackend {
                 // The rows tile evenly by construction; only n can be ragged.
                 self.q8_mma.pick(n.is_multiple_of(Q8_MMA_TN)),
                 "q8_mma",
-                &[
-                    (qa_ptr + (qmma_rows * k) as u64, [rows as i64, k as i64]),
-                    (
-                        das_ptr + (qmma_rows * blocks) as u64 * f32_bytes,
-                        [rows as i64, blocks as i64],
-                    ),
-                    (w_ptr, [n as i64, k as i64]),
-                    (s_ptr, [blocks as i64, n as i64]),
-                    (
-                        out_ptr + (qmma_rows * n) as u64 * f32_bytes,
-                        [rows as i64, n as i64],
-                    ),
-                ],
+                &tiles.band(qmma_rows, rows),
                 ((rows / Q8_MMA_TM) as u32, n.div_ceil(Q8_MMA_TN) as u32, 1),
             )?;
         }
@@ -213,35 +233,29 @@ impl DeviceBackend {
     /// The starved-grid path for `q8_qmma`'s deep tile: `splits` copies of the
     /// same `[Q8_QMMA_TM, wide]` patch, one per slice of `k`, landing in a
     /// `splits * rows * n` scratch that a second launch reduces into `out`.
-    /// See `kernels::q8_qmma_split_src`'s doc comment for why the split index
-    /// gets its own output operand instead of an offset computed from it.
-    #[allow(clippy::too_many_arguments)]
+    /// See [`q8_qmma_split_src`] for why the split index gets its own output
+    /// operand instead of an offset computed from it.
     fn launch_qmma_split(
         &self,
-        rows: usize,
+        tiles: &Q8Tiles,
         row_off: usize,
-        k: usize,
-        blocks: usize,
-        n: usize,
+        rows: usize,
         wide: usize,
         splits: usize,
-        qa_ptr: u64,
-        das_ptr: u64,
-        w_ptr: u64,
-        s_ptr: u64,
-        out_ptr: u64,
-        f32_bytes: u64,
     ) -> Result<()> {
+        let (k, n) = (tiles.k, tiles.n);
         let key = (wide, k, splits);
         if !self.q8_qmma_split.borrow().contains_key(&key) {
-            let split_src = q8_qmma_split_src(Q8_QMMA_CTA, k, splits);
-            let reduce_src = q8_qmma_reduce_src(Q8_QMMA_CTA, splits);
             let split_mod = compile(
-                &split_src,
+                &q8_qmma_split_src(Q8_QMMA_CTA, k, splits),
                 &[("TM", Q8_QMMA_TM), ("TN", wide)],
                 "q8_qmma_split",
             )?;
-            let reduce_mod = compile(&reduce_src, &[("TN", wide)], "q8_qmma_reduce")?;
+            let reduce_mod = compile(
+                &q8_qmma_reduce_src(Q8_QMMA_CTA, splits),
+                &[("TN", wide)],
+                "q8_qmma_reduce",
+            )?;
             self.q8_qmma_split
                 .borrow_mut()
                 .insert(key, (split_mod, reduce_mod));
@@ -249,39 +263,23 @@ impl DeviceBackend {
         let cache = self.q8_qmma_split.borrow();
         let (split_mod, reduce_mod) = &cache[&key];
 
+        let band = tiles.band(row_off, rows);
         let partials = self.split_partials(splits * rows * n)?;
-        let plane_bytes = (rows * n) as u64 * f32_bytes;
+        let plane_bytes = (rows * n) as u64 * size_of::<f32>() as u64;
+        let plane = |i: usize| (partials + i as u64 * plane_bytes, [rows as i64, n as i64]);
 
-        let mut operands = vec![
-            (qa_ptr + (row_off * k) as u64, [rows as i64, k as i64]),
-            (
-                das_ptr + (row_off * blocks) as u64 * f32_bytes,
-                [rows as i64, blocks as i64],
-            ),
-            (w_ptr, [n as i64, k as i64]),
-            (s_ptr, [blocks as i64, n as i64]),
-        ];
-        for i in 0..splits {
-            operands.push((partials + i as u64 * plane_bytes, [rows as i64, n as i64]));
-        }
+        // The four inputs, then one output plane per split.
+        let mut operands = band[..4].to_vec();
+        operands.extend((0..splits).map(plane));
         self.launch(
             split_mod,
             "q8_qmma_split",
             &operands,
-            (
-                (rows / Q8_QMMA_TM) as u32,
-                (n / wide) as u32,
-                splits as u32,
-            ),
+            ((rows / Q8_QMMA_TM) as u32, (n / wide) as u32, splits as u32),
         )?;
 
-        let mut reduce_operands: Vec<(u64, [i64; 2])> = (0..splits)
-            .map(|i| (partials + i as u64 * plane_bytes, [rows as i64, n as i64]))
-            .collect();
-        reduce_operands.push((
-            out_ptr + (row_off * n) as u64 * f32_bytes,
-            [rows as i64, n as i64],
-        ));
+        let mut reduce_operands: Vec<_> = (0..splits).map(plane).collect();
+        reduce_operands.push(band[4]);
         self.launch(
             reduce_mod,
             "q8_qmma_reduce",
@@ -290,32 +288,16 @@ impl DeviceBackend {
         )
     }
 
-    /// The narrow-CTA path for `q8_qmma`'s deep tile: the same `qmma_t`
-    /// kernel at half the threads and half the column tile
-    /// ([`Q8_QMMA_NARROW_CTA`], [`Q8_QMMA_NARROW_TN`]), which `qmma_patch`
-    /// resolves to the *same* per-warp patch as the shipped 128-wide config
-    /// (see that constant's doc comment) -- so this doubles the grid on a
-    /// starved shape at unchanged tensor-core intensity, one launch, no
-    /// reduction pass and no scratch buffer, unlike [`Self::launch_qmma_split`].
-    #[allow(clippy::too_many_arguments)]
-    fn launch_qmma_narrow(
-        &self,
-        rows: usize,
-        row_off: usize,
-        k: usize,
-        blocks: usize,
-        n: usize,
-        qa_ptr: u64,
-        das_ptr: u64,
-        w_ptr: u64,
-        s_ptr: u64,
-        out_ptr: u64,
-        f32_bytes: u64,
-    ) -> Result<()> {
+    /// The narrow-CTA path for `q8_qmma`'s deep tile: the same `qmma_t` kernel
+    /// at half the threads and half the column tile ([`Q8_QMMA_NARROW_CTA`],
+    /// [`Q8_QMMA_NARROW_TN`]), which resolves to the same per-warp patch as the
+    /// shipped 128-wide config. So this doubles the grid on a starved shape at
+    /// unchanged tensor-core intensity: one launch, no reduction pass and no
+    /// scratch buffer, unlike [`Self::launch_qmma_split`].
+    fn launch_qmma_narrow(&self, tiles: &Q8Tiles, row_off: usize, rows: usize) -> Result<()> {
         if self.q8_qmma_narrow.borrow().is_none() {
-            let src = q8_qmma_src(Q8_QMMA_NARROW_CTA);
             let module = compile(
-                &src,
+                &q8_qmma_src(Q8_QMMA_NARROW_CTA),
                 &[("TM", Q8_QMMA_TM), ("TN", Q8_QMMA_NARROW_TN)],
                 "q8_qmma",
             )?;
@@ -326,22 +308,10 @@ impl DeviceBackend {
         self.launch(
             module,
             "q8_qmma",
-            &[
-                (qa_ptr + (row_off * k) as u64, [rows as i64, k as i64]),
-                (
-                    das_ptr + (row_off * blocks) as u64 * f32_bytes,
-                    [rows as i64, blocks as i64],
-                ),
-                (w_ptr, [n as i64, k as i64]),
-                (s_ptr, [blocks as i64, n as i64]),
-                (
-                    out_ptr + (row_off * n) as u64 * f32_bytes,
-                    [rows as i64, n as i64],
-                ),
-            ],
+            &tiles.band(row_off, rows),
             (
                 (rows / Q8_QMMA_TM) as u32,
-                (n / Q8_QMMA_NARROW_TN) as u32,
+                (tiles.n / Q8_QMMA_NARROW_TN) as u32,
                 1,
             ),
         )

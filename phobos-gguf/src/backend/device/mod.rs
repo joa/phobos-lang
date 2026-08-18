@@ -39,6 +39,15 @@ use kernels::*;
 
 pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 
+/// Whether an opt-in `PHOBOS_*` toggle is set. Opt-out toggles (a default-on
+/// mechanism) negate the complementary spelling instead; see `attn_persist`.
+fn env_flag(name: &str) -> bool {
+    matches!(
+        std::env::var(name).as_deref(),
+        Ok("1" | "on" | "yes" | "true")
+    )
+}
+
 /// A device-resident Q8_0 weight: signed bytes, per-block scales in both
 /// orders, and the output width it was uploaded with. `q8_mma` wants
 /// `[block, out]` and `qdot_t` wants `[out, block]`, neither can cheaply
@@ -152,14 +161,12 @@ pub struct DeviceBackend {
     /// The split-K variant of the deep tile and its reduction, keyed by
     /// output width, `k` and the split count. Compiled lazily: a shape only
     /// pays for this when [`kernels::q8_qmma_splits`] declines the unsplit
-    /// grid. See `matmul.rs`'s `project_q8` and
-    /// `kernels::q8_qmma_split_src`'s doc comment.
+    /// grid.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
-    /// The narrow-CTA variant of the deep tile (see
-    /// `kernels::q8_qmma_narrow_eligible`'s doc comment and
-    /// `autoresearch/beams/q8-qmma-grid-starve.md`): same `qmma_t` kernel,
-    /// half the threads and half the column tile, same per-warp patch.
-    /// Compiled lazily, only when [`Self::qmma_narrow`] asks for it.
+    /// The narrow-CTA variant of the deep tile: the same `qmma_t` kernel at
+    /// half the threads and half the column tile, same per-warp patch. See
+    /// [`kernels::q8_qmma_narrow_eligible`]. Compiled lazily, only when
+    /// [`Self::qmma_narrow`] asks for it.
     q8_qmma_narrow: RefCell<Option<Module>>,
     q8_split: Variants,
     q8_qdot: Module,
@@ -173,23 +180,18 @@ pub struct DeviceBackend {
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
     /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved
-    /// grid. Default OFF: the per-kernel win is real (see
-    /// `autoresearch/beams/q8-qmma-split-k.md`) but the extra graph node
-    /// per routed projection (write, then reduce, where there was one
-    /// launch) costs more in aggregate wall clock than the kernels save on
-    /// this platform, end to end -- a graph-level cost the isolated ncu
-    /// measurements never saw. `PHOBOS_QMMA_SPLIT=1` opts in for anyone
-    /// revisiting this at a different node-count/model shape mix.
+    /// grid. `PHOBOS_QMMA_SPLIT=1` opts in. Default OFF: the per-kernel win
+    /// is real, but the extra graph node per routed projection (write, then
+    /// reduce, where there was one launch) costs more in aggregate wall
+    /// clock than the kernels save, a graph-level cost isolated per-kernel
+    /// measurements do not see.
     qmma_split: bool,
-    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path (see
-    /// `kernels::q8_qmma_narrow_eligible`) on a starved grid instead of the
-    /// unsplit launch. Default OFF like [`Self::qmma_split`], and checked
-    /// ahead of it in `matmul.rs`'s
-    /// `project_q8` since it targets the same starved shapes by a different,
-    /// non-bandwidth-adding mechanism (more disjoint-output blocks at the
-    /// same per-warp tensor-core intensity, not a reduction pass). See
-    /// `autoresearch/beams/q8-qmma-grid-starve.md`. `PHOBOS_QMMA_NARROW=1`
-    /// opts in.
+    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path on a starved
+    /// grid instead of the unsplit launch. `PHOBOS_QMMA_NARROW=1` opts in.
+    /// Checked ahead of [`Self::qmma_split`]: it targets the same shapes
+    /// with more disjoint-output blocks at unchanged per-warp intensity,
+    /// rather than a reduction pass. Default OFF for the row-count caveat
+    /// [`kernels::q8_qmma_narrow_eligible`] documents.
     qmma_narrow: bool,
     /// Fused kernels the pass has emitted, with the plan that says what to bind
     /// to each. See [`fuse`].
@@ -202,16 +204,12 @@ pub struct DeviceBackend {
     /// measured against the projection alone.
     fused_mix: bool,
     /// Whether attention's output epilogue (quantizing the mixed heads, then
-    /// the output projection) joins the fused-chain path. Measured a wash
-    /// against the launched pair before `warp_partial` cut attention's own
-    /// share of a step; re-measured after and a clean win
-    /// (`autoresearch/beams/launch-bound-headroom.md`), so this now joins
-    /// the default-on `fused_stage` trio above. `PHOBOS_FUSED_ATTN_OUT=0`
-    /// switches it off.
+    /// the output projection) joins the fused-chain path. Default on;
+    /// `PHOBOS_FUSED_ATTN_OUT=0` switches it off.
     fused_attn_out: bool,
     /// Whether attention's key and value writes into the cache land in one
-    /// launch instead of two. Same history as [`Self::fused_attn_out`]:
-    /// default on, `PHOBOS_FUSED_STORE2D=0` switches it off.
+    /// launch instead of two. Default on; `PHOBOS_FUSED_STORE2D=0` switches
+    /// it off.
     fused_store2d: bool,
     /// Blocks a fused kernel is launched with, which unlike [`persist_blocks`]
     /// has to be exact: a block of the grid that is not resident never reaches
@@ -280,14 +278,12 @@ pub struct DeviceBackend {
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
     /// Whether [`DeviceBackend::attention_decode`] takes the persistent
     /// split-plus-merge path. Default on; `PHOBOS_ATTN_PERSIST=0` switches
-    /// it off. Not folded into [`fused_stage`]'s shared `PHOBOS_FUSED`
-    /// fallback: this gates a different mechanism (a persistent kernel and
-    /// its `grid_barrier`, not a fused launch chain), so a blanket
-    /// `PHOBOS_FUSED=0` should not silently touch it too. See
-    /// `DeviceBackend::attention_decode`'s doc comment for why a hang, not
-    /// a slow number, was this flag's failure mode when it was opt-in, and
-    /// why `attn_persist_plan`'s own occupancy-queried decline (not this
-    /// flag) is what actually keeps that safe now that it defaults on.
+    /// it off. Deliberately outside [`fused_stage`]'s shared `PHOBOS_FUSED`
+    /// fallback: this gates a persistent kernel and its `grid_barrier`, not
+    /// a fused launch chain, so a blanket `PHOBOS_FUSED=0` must not reach
+    /// it. A grid this flag alone let through would hang rather than run
+    /// slow; `attn_persist_plan`'s occupancy-queried decline, not the flag,
+    /// is what keeps that safe.
     attn_persist: bool,
     /// The persistent attention kernel, keyed by [`AttnPersistKey`], with the
     /// block count and the persist-specific split count it was settled at.
@@ -427,14 +423,8 @@ impl DeviceBackend {
             q8_qdot_persist: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
             persist_qdot: std::env::var_os("PHOBOS_PERSIST_QDOT").is_some(),
-            qmma_split: matches!(
-                std::env::var("PHOBOS_QMMA_SPLIT").as_deref(),
-                Ok("1" | "on" | "yes" | "true")
-            ),
-            qmma_narrow: matches!(
-                std::env::var("PHOBOS_QMMA_NARROW").as_deref(),
-                Ok("1" | "on" | "yes" | "true")
-            ),
+            qmma_split: env_flag("PHOBOS_QMMA_SPLIT"),
+            qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),
             fused_plans: RefCell::new(HashMap::new()),
             fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),
             fused_project: fused_stage("PHOBOS_FUSED_PROJ"),

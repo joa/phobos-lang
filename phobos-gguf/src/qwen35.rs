@@ -466,10 +466,8 @@ impl Model {
         State { pos: 0, layers }
     }
 
-    // `forward`, `forward_greedy`, `forward_with` and `forward_to_logits`
-    // live in `qwen35/forward.rs`, split out to stay under the line-count
-    // cap; a descendant module of this one, so nothing here changed
-    // visibility to make that split possible.
+    // The `forward` family lives in `qwen35/forward.rs`, a descendant module
+    // split out to stay under the line-count cap.
 
     #[allow(clippy::too_many_arguments)]
     fn attention(

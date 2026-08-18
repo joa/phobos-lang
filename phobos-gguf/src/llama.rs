@@ -336,9 +336,7 @@ impl Model {
         // Everything from here to the logits is device-only
         backend.begin_pass()?;
 
-        // For debugging purposes; prints rms magnitude
-        // of activation vectors per token at the end
-        // of each transformer block
+        // Prints each block's per-token activation RMS.
         let trace = std::env::var_os("PHOBOS_TRACE").is_some();
 
         for (index, (block, cache)) in self.blocks.iter().zip(&mut state.caches).enumerate() {

@@ -1,6 +1,6 @@
 // Greedy decode's fast path: a device-side argmax over the logits row, so a
 // caller that only wants the winning token id reads a couple of floats back
-// instead of the whole vocab. See `autoresearch/beams/greedy-argmax-readback.md`.
+// instead of the whole vocab.
 //
 // Two kernels. `argmax_reduce` grid-strides the row in chunks of `W`, folding
 // a running `[1, W]` (value, index) pair per lane with `tmax`/`argsel`, then
@@ -13,9 +13,8 @@
 // float select with no integer reduction path to add alongside it.
 
 /// Columns one program of [`argmax_reduce_src`] folds per grid-stride step.
-/// Picked to divide both this session's vocabularies (130,560 and 248,320)
-/// exactly; see [`argmax_chunk_width`] for what a vocabulary that does not
-/// falls back to.
+/// Picked to divide the vocabularies both bench models use (130,560 and
+/// 248,320) exactly; [`argmax_chunk_width`] handles one that does not.
 pub(crate) const ARGMAX_CHUNK: usize = 512;
 
 /// Blocks [`argmax_reduce_src`] launches with, and so partials
@@ -56,11 +55,10 @@ pub(crate) fn argmax_splits(n: usize, w: usize) -> usize {
 /// the lower with `argsel` (the index side) then `tmax` (the value side), in
 /// that order, since `argsel` needs both halves' values intact. The upper
 /// half goes in `argsel`/`tmax`'s first operand throughout, so a value tie
-/// resolves toward the higher lane deterministically -- not a proof of
-/// agreement with the host's own "last of equal maxima" rule (the lane a
-/// given index lands in does not correlate with index order once the
-/// grid-stride loop has folded several chunks into it), only a fixed,
-/// reproducible choice for the rare case for real logits are exactly tied.
+/// resolves toward the higher lane. That is a fixed, reproducible choice for
+/// the rare exact tie, not agreement with the host's "last of equal maxima"
+/// rule: once the grid-stride loop has folded several chunks into a lane, the
+/// lane an index lands in no longer tracks index order.
 fn halving_tree(width: usize) -> String {
     let mut tree = String::new();
     let mut half = width / 2;

@@ -26,13 +26,10 @@ pub trait Session {
     fn extend(&mut self, ids: &[i64]) -> Result<Vec<f32>>;
 
     /// [`Session::extend`] for a caller that only wants the winning token id,
-    /// as greedy decoding does: the sampler's `choose` over a one-element
-    /// argmax is the identity, so skipping the full logits vector changes
-    /// nothing about the result, only how much of it a backend has to move.
-    ///
-    /// The default falls back to [`Session::extend`] plus a host-side argmax,
-    /// so this is additive: a backend earns nothing by leaving it
-    /// unimplemented, and one with no faster path does not have to know that.
+    /// as greedy decoding does: `choose` over a one-element argmax is the
+    /// identity, so skipping the full logits vector changes only how much a
+    /// backend has to move, not the result. Purely additive, since the
+    /// default is [`Session::extend`] plus a host-side argmax.
     fn extend_greedy(&mut self, ids: &[i64]) -> Result<i64> {
         Ok(crate::sampling::argmax(&self.extend(ids)?))
     }
