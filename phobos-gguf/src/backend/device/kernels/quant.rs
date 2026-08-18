@@ -335,6 +335,47 @@ pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> us
     if splits == Q8_QMMA_SPLIT_MAX { splits } else { 1 }
 }
 
+/// Threads the narrow-CTA variant of the deep tile carries: half of
+/// [`Q8_QMMA_CTA`]. Paired with [`Q8_QMMA_NARROW_TN`] (half of
+/// [`Q8_QMMA_WIDTHS`]'s widest column tile), `qmma_patch`
+/// (`phobos-lang/src/codegen/tile/qmma.rs`) resolves the *same* per-warp
+/// patch either way -- checked against the emitted MLIR, not assumed:
+/// `qmma_patch(rt=16, ct=16, warps=4)` (the shipped 128-wide config) and
+/// `qmma_patch(rt=16, ct=8, warps=2)` (this one) both settle on `(rm=8,
+/// rn=8)`, the same register-bound 64-tile patch, same 238 regs/thread.
+/// Halving `TN` and the CTA together, rather than `TN` alone at the
+/// unchanged 128-thread CTA (which is what [`Q8_QMMA_WIDTHS`]'s existing
+/// 64-wide fallback already does, and what this session's tile-shrink
+/// probe measured as a loss -- that config's patch collapses to `(rm=4,
+/// rn=8)`, a worse-intensity tile, not this one), doubles the grid on a
+/// starved shape without touching per-warp tensor-core efficiency at all.
+/// See `autoresearch/beams/q8-qmma-grid-starve.md`.
+pub(crate) const Q8_QMMA_NARROW_CTA: usize = 64;
+
+/// Column tile for the narrow-CTA deep-tile variant: half of
+/// [`Q8_QMMA_WIDTHS`]'s widest entry. See [`Q8_QMMA_NARROW_CTA`]'s doc
+/// comment for why it is paired with a halved CTA rather than used alone.
+pub(crate) const Q8_QMMA_NARROW_TN: usize = 64;
+
+/// Whether `q8_qmma`'s deep tile at `rows x n`, already resolved to
+/// [`qmma_width`]'s widest option, should take the narrow-CTA path instead.
+/// Gated the same way [`q8_qmma_splits`] gates split-K -- fewer blocks than
+/// this card's SM count (see [`Q8_QMMA_SPLIT_THRESHOLD`]) -- since a grid
+/// already at or above the SM count has no idle multiprocessor left for
+/// more blocks to reach (`Q8_QMMA_SPLIT_THRESHOLD`'s own doc comment: the
+/// 72-block shape already measures 79-80% of its own ceiling). Declines
+/// whenever `wide` is not the widest tile: a shape landing on
+/// [`Q8_QMMA_WIDTHS`]'s narrower entry already lost the intensity this path
+/// exists to preserve, and doubling *that* grid would be the already-
+/// rejected tile-shrink lever, not this one.
+pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> bool {
+    if wide != Q8_QMMA_WIDTHS[0] || !n.is_multiple_of(Q8_QMMA_NARROW_TN) {
+        return false;
+    }
+    let unsplit = (rows / Q8_QMMA_TM) * (n / wide);
+    unsplit > 0 && unsplit < Q8_QMMA_SPLIT_THRESHOLD
+}
+
 /// The split-K variant of [`q8_qmma_src`], for the shapes
 /// [`q8_qmma_splits`] declines to leave at one program per output tile.
 ///
