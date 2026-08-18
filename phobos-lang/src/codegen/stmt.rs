@@ -64,11 +64,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The `Rv::Tile(src)` half of `var name = <tile expr>`: adopt a fresh
-    /// temp's buffer outright, or stage a borrowed view (a tensor slice, most
-    /// commonly) into a fresh tile of its own. `sync` gates the staging
-    /// copy's trailing barrier -- see [`Self::stage_run`], the only caller
-    /// that ever passes `false`; every other call site keeps the copy's own
-    /// barrier, exactly as before this parameter existed.
+    /// temp's buffer outright, or stage a borrowed view (usually a tensor
+    /// slice) into a fresh tile. `sync` gates the staging copy's trailing
+    /// barrier; only [`Self::emit_staging_run`] ever passes `false`.
     fn bind_staged_tile(
         &mut self,
         block: &Block<'c>,
@@ -91,25 +89,17 @@ impl<'c> Codegen<'c> {
     }
 
     /// Length of the maximal run at the front of `stmts` of `var name =
-    /// <tensor slice>` statements: no tile type, a plain `Index` initializer
-    /// resolving to a named tensor parameter (`slice_static_shape`), proven
-    /// in bounds (`!slice_is_partial`) so the slice's own materialization
-    /// reads only global memory (see `Rv::Tile(src).owned` in
-    /// `bind_staged_tile`: a masked slice comes back already materialized,
-    /// with its own unconditional barrier this run never touches).
+    /// <tensor slice>` statements: no tile type, a plain `Index` on a named
+    /// tensor parameter (`slice_static_shape`), proven in bounds
+    /// (`!slice_is_partial`).
     ///
-    /// A statement matching this shape reads no shared tile, only the named
-    /// tensor: a `let`/`var`'s value expression allows tile names in
-    /// arithmetic (`s * scale`, `dot(s, v)`, ...), but `slice_static_shape`
-    /// only accepts a bare `Index` on a `Tensor` binding, so every statement
-    /// counted here is provably a pure producer -- nothing it reads could
-    /// race a sibling's write. That is what makes eliding every barrier but
-    /// the run's last one safe: each copy's own barrier exists only to make
-    /// its write visible before the next read of it, and the next read of
-    /// any of these lands after the whole run (the run's own statements
-    /// never read each other, and whatever follows the run reads through
-    /// `emit_stmts`'s ordinary path, guarded by the barrier the run's last
-    /// statement still emits).
+    /// The narrowness of that match is what makes [`Self::emit_staging_run`]
+    /// eliding barriers safe, and must stay that way. A `var`'s value may in
+    /// general name tiles (`s * scale`, `dot(s, v)`, ...), but
+    /// `slice_static_shape` accepts only a bare index on a `Tensor` binding,
+    /// so a matched statement reads no shared tile at all and cannot race a
+    /// sibling's write. Widening this to statements that merely avoid reading
+    /// the specific writes being elided would reintroduce that race.
     fn stage_run(&self, stmts: &[Stmt]) -> usize {
         stmts
             .iter()
@@ -120,16 +110,22 @@ impl<'c> Codegen<'c> {
             .count()
     }
 
-    /// Emits a `stage_run`-matched prefix, deferring every barrier but the
-    /// last: the pool-reuse race `Codegen::release`'s own doc warns about
-    /// (a later op handed a buffer this run's write hasn't published yet)
-    /// cannot arise here, since none of these buffers are ever `release`d
-    /// until well past the run (each is a fresh `var`, read later by
-    /// whatever follows).
+    /// Emits a [`Self::stage_run`]-matched prefix, deferring every barrier but
+    /// the last. Each copy's barrier only has to publish its write before the
+    /// next read of it, and no read of any of these lands before the run ends:
+    /// the run's statements never read each other (see `stage_run`), and
+    /// whatever follows is guarded by the last statement's barrier. Nor can
+    /// the pool-reuse race `Codegen::release` warns about arise, since these
+    /// buffers are fresh `var`s, released well past the run.
     fn emit_staging_run(&mut self, block: &Block<'c>, stmts: &[Stmt]) -> Result<()> {
         let last = stmts.len() - 1;
         for (j, s) in stmts.iter().enumerate() {
-            let Stmt::Var { name, value: Some(value), .. } = s else {
+            let Stmt::Var {
+                name,
+                value: Some(value),
+                ..
+            } = s
+            else {
                 bail!("stage_run matched a statement emit_staging_run cannot emit");
             };
             match self.emit_expr(block, value)? {
@@ -235,7 +231,7 @@ impl<'c> Codegen<'c> {
                     if matches!(binding, Binding::View(_)) {
                         bail!("cannot assign through a read-only view");
                     }
-                    
+
                     self.check_sliceable(&mv, &binding)?;
                     let view = self.emit_subview(block, &mv, subs)?;
                     self.store_tile(block, &view, op, value)?;
@@ -527,15 +523,10 @@ impl<'c> Codegen<'c> {
             return self.emit_frag_for(block, var, start, end, step, body, &carried);
         }
 
-        // Auto-attempt: every loop shaped for it pipelines whether or not
-        // `@pipeline` was written (see pipeline_candidate's doc comment for
-        // "shaped for it", and the block comment at the end of pipeline.rs
-        // for why no CTA-uniformity check is needed here: every `.ph`-level
-        // loop bound is uniform by construction in this language).
-        // `@pipeline` itself is now an assertion -- "at least one loop (or
-        // fused-GEMM dispatch; see `pipeline_assert`'s doc comment) in this
-        // kernel pipelines" -- enforced once per kernel in `emit`, using
-        // `pipelined_any` and the decline reasons collected below.
+        // Every loop shaped for it pipelines whether or not `@pipeline` was
+        // written; the attribute is only the assertion that some loop in the
+        // kernel did, enforced in `emit` from `pipelined_any` and the decline
+        // reasons collected here.
         match self.pipeline_candidate(body) {
             Ok((staged, rest)) => {
                 self.pipelined_any = true;
@@ -543,7 +534,8 @@ impl<'c> Codegen<'c> {
             }
             Err(decline) => {
                 if self.pipeline_assert {
-                    self.pipeline_declines.push(format!("loop `{var}`: {decline}"));
+                    self.pipeline_declines
+                        .push(format!("loop `{var}`: {decline}"));
                 }
             }
         }
@@ -809,13 +801,9 @@ impl<'c> Codegen<'c> {
         while i < stmts.len() {
             let consumed = if let Some(p) = self.matmul_candidate(&stmts[i..]) {
                 let consumed = p.consumed;
-                // The fused-GEMM backend (matmul/{plan,reg,wmma}.rs) still
-                // reads `pipeline_assert` directly to double its own staging
-                // buffers (`pairs`), unchanged from before this pass; see
-                // `pipeline_assert`'s doc comment for why that backend was
-                // left attribute-gated. Whenever it is set, that doubling
-                // unconditionally happens for every fused dispatch, so this
-                // is a real "did the kernel pipeline something" signal.
+                // The fused-GEMM backend stays attribute-gated (see
+                // `staging_pairs`), and doubles its buffers unconditionally
+                // when the attribute is on, so this really did pipeline.
                 if self.pipeline_assert {
                     self.pipelined_any = true;
                 }

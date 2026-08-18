@@ -27,12 +27,10 @@ pub fn compile(context: &phobos_base::context::Context, code: &str) -> anyhow::R
 ///       with dynamic shared memory will use static globals with a cap at 48 KB.
 ///       Shared memory must be respected in the launch ABI.
 ///
-/// Enforces every kernel's `@pipeline` assertion (see `codegen::EmitOutput`):
-/// fails if a kernel wrote `@pipeline` and nothing in it pipelined. A caller
-/// that compiles several textual variants of one kernel source and wants the
-/// assertion satisfied if *any* variant pipelines (see
-/// `phobos_kernels::compile::Variants::compile`) should call `compile_raw`
-/// directly instead and aggregate `pipeline_failures` itself.
+/// Enforces every kernel's `@pipeline` assertion: fails if a kernel wrote the
+/// attribute and nothing in it pipelined. A caller that compiles several
+/// variants of one source and accepts the assertion if any of them pipelines
+/// should use [`compile_raw`] and aggregate `pipeline_failures` itself.
 pub fn compile_shared(
     context: &phobos_base::context::Context,
     code: &str,
@@ -52,11 +50,8 @@ pub fn compile_shared(
     Ok((out.code, out.shared))
 }
 
-/// `compile_shared` without the `@pipeline`-assertion enforcement: returns
-/// every kernel's raw outcome instead of failing on the first unsatisfied
-/// one, for a caller that needs to combine outcomes across more than one
-/// compile of related sources before deciding (see `compile_shared`'s doc
-/// comment).
+/// [`compile_shared`] without its `@pipeline`-assertion enforcement: reports
+/// every kernel's outcome instead of failing on the first unsatisfied one.
 pub fn compile_raw(
     context: &phobos_base::context::Context,
     code: &str,
@@ -99,9 +94,8 @@ pub fn compile_raw(
     })
 }
 
-/// Raw result of `compile_raw`: the generated code, the dynamic
-/// shared-memory sideband, and, per kernel that wrote `@pipeline`, whether
-/// the assertion held (see `codegen::EmitOutput`, which this wraps).
+/// Result of [`compile_raw`]: the generated code plus the sidebands
+/// `codegen::EmitOutput` carries.
 pub struct CompileOutput {
     pub code: String,
     pub shared: Vec<(String, usize)>,

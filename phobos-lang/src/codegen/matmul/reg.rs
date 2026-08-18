@@ -50,7 +50,7 @@ impl<'c> Codegen<'c> {
         let n0 = self.addi(block, wn0, off_n)?;
 
         // staging buffers; a k-major (kk x m).
-        let pairs = if self.pipeline_assert { 2 } else { 1 };
+        let pairs = self.staging_pairs();
         let (a_bufs, b_bufs) = self.alloc_staging_pairs(pairs, |cg| {
             Ok((
                 cg.alloc_tile_shaped(block, cg.f32_t, &[kk, m])?,

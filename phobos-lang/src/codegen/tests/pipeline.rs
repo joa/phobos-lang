@@ -203,20 +203,13 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
 
 #[test]
 fn generic_pipeline_double_buffers_a_non_matmul_loop() {
-    // Despite its name and the `@pipeline` attribute, this loop's slice is
-    // partial (K is dynamic, unaligned, and offset by the loop's own
-    // induction variable -- see the block comment at the end of pipeline.rs
-    // on why an unbound loop var's divisor defaults to 1, which no `@aligned`
-    // promise on the *tensor* side can satisfy): `pipeline_candidate`
-    // declines it, and what this test actually locks in is
-    // `emit_split_for`'s pre-existing main-loop-plus-masked-remainder
-    // structure, which happens to also mint two same-shaped buffers for the
-    // same staged name. `bare_kernel_auto_pipelines_without_the_attribute`
-    // below is the real generic-pipeline-path test (verified via a distinct
-    // third buffer, which this shape never reaches). Kept as-is: it still
-    // exercises real codegen and still passes, just not for the reason its
-    // name implies -- retitling it belongs with whoever next touches
-    // `emit_split_for`, not this change.
+    // Misnamed: this loop's slice is partial (K is dynamic and offset by the
+    // induction variable), so `pipeline_candidate` declines it and what is
+    // actually pinned here is `emit_split_for`'s main-loop-plus-masked-
+    // remainder structure, which mints two same-shaped buffers of its own.
+    // `bare_kernel_auto_pipelines_without_the_attribute` is the real
+    // generic-pipeline test; retitling this one belongs with whoever next
+    // touches `emit_split_for`.
     let mlir = emit_mlir(
         "@pipeline
         @autotune(T in [16])
@@ -280,13 +273,9 @@ fn bare_kernel_auto_pipelines_without_the_attribute() {
 
 #[test]
 fn pipeline_assertion_fails_with_the_decline_reason() {
-    // `@pipeline` on a kernel with no loop shaped for pipelining (here: no
-    // for loop at all) is now an assertion, not an opt-in, so it has to fail
-    // to compile -- and name why, not just that it failed. `codegen::emit`
-    // itself does not error (see `EmitOutput::pipeline_failures`, which
-    // `Variants::compile` needs raw); the assertion is enforced by
-    // `phobos_lang::compile_shared`, the entry point an ordinary single-
-    // kernel caller uses.
+    // `@pipeline` on a kernel with no loop shaped for it (here: no loop at
+    // all) is an assertion, so it must fail to compile and name why.
+    // `codegen::emit` reports rather than errors; `compile_shared` enforces.
     let err = crate::compile_shared(
         &phobos_base::context::Context::default(),
         "@pipeline
@@ -306,16 +295,12 @@ fn pipeline_assertion_fails_with_the_decline_reason() {
 
 #[test]
 fn shared_memory_budget_declines_silently_without_the_attribute() {
-    // Same eligible row-at-a-time shape as
-    // `bare_kernel_auto_pipelines_without_the_attribute`, but T = 8192: one
-    // staged buffer is 32768 bytes, doubled 65536 -- over the 48 KiB
-    // ceiling. No `@pipeline` here, so this is a bare auto-attempt: declining
-    // must fall back to the plain loop quietly, not error. A literal row
-    // count (64, not the symbolic M the other tests use) keeps the bound
-    // affine, so a decline here falls to the plain unmasked loop instead of
-    // `emit_split_for`'s ragged-remainder split, whose own main+remainder
-    // structure would otherwise mint a second buffer for an unrelated
-    // reason and defeat this assertion.
+    // The eligible shape above at T = 8192: one staged buffer is 32768 bytes,
+    // 65536 doubled, over the 48 KiB ceiling. No `@pipeline`, so declining
+    // must fall back to the plain loop quietly rather than error. The literal
+    // row count keeps the bound affine, so the fallback is the plain unmasked
+    // loop and not `emit_split_for`'s split, whose own remainder would mint a
+    // second buffer and defeat the assertion below.
     let mlir = emit_mlir(
         "@autotune(T in [8192])
         @aligned(K = T)
@@ -339,18 +324,10 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
 
 #[test]
 fn atomic_add_cannot_reach_a_loop_bound() {
-    // Not a pipelining test: a tripwire for the CTA-uniformity proof at the
-    // end of pipeline.rs, which argues no `.ph` expression can put a
-    // data-dependent value (an atomic's return, a tensor load, ...) into a
-    // loop bound, because `Codegen::coerce` has no int-to-index arm and
-    // `Codegen::unify` bails on an int/index mismatch rather than promoting
-    // it. That argument is why `pipeline_candidate`'s callers run no runtime
-    // divergence check: every bound is CTA-uniform by construction, so a
-    // lane-divergent one (which would turn `emit_pipelined_for`'s
-    // barrier-in-`scf.if` guard into a hang) is not a case pipelining has to
-    // defend against. If a future change adds an int-to-index conversion,
-    // this stops failing and the assertions below catch it -- which is
-    // exactly when that proof, and this loop, need a second look.
+    // Not a pipelining test: the tripwire for the CTA-uniformity argument at
+    // the end of pipeline.rs, that no `.ph` expression can put a
+    // data-dependent value into a loop bound. If a future change adds an
+    // int-to-index conversion, these assertions are what catch it.
     let err = emit_err(
         "kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K], BAR: tensor<i32>[2]) {
             let n = atomic_add(BAR, 0, 1)

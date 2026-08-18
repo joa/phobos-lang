@@ -110,9 +110,8 @@ fn flash_attention_lowers_softmax_builtins() {
 
 #[test]
 fn argsel_folds_a_value_index_pair_alongside_tmax() {
-    // The greedy-argmax reduction's own shape: a running (value, index) pair
-    // folded against a freshly loaded chunk and its own index tile, argsel
-    // carrying the index side of what tmax alone can only do for the value.
+    // The greedy-argmax reduction's shape: a running (value, index) pair
+    // folded against a fresh chunk, argsel carrying the index side.
     let mlir = emit_mlir(
         "@autotune(W in [8])
         kernel argmax_step(X: tensor<f32>[M, W], IDX: tensor<f32>[M, W]) {

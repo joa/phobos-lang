@@ -225,32 +225,23 @@ fn flat_rejects_what_is_not_a_declared_tile() {
     }
 }
 
-/// `warp_partial`'s K/V loads at minicpm's shape (D = 128, dpl = 4) come out
-/// as one 4xf16 vector load per key per lane, not four scalar ones: `align_div`
-/// grounds this on `col` (a multiple of `D`) plus `lane * dpl` (a multiple of
-/// `dpl`) always landing on a `2 * dpl`-byte boundary, the same reasoning
-/// `stage.rs`'s `DrainMode::VecF16` already relies on for its own 4xf16
-/// staging loads (8-byte alignment).
+/// `warp_partial`'s K/V loads at D = 128 (dpl = 4) come out as one 4xf16
+/// vector load per key per lane, not four scalar ones.
 #[test]
 fn warp_partial_vectorizes_kv_loads_at_dpl_4() {
     let mlir = emit_mlir(&warp_partial_probe(128, 8, 8));
     assert_contains(&mlir, &["vector.load", "vector<4xf16>", "alignment = 8"]);
 }
 
-/// Same shape family at Qwen's D = 256 (dpl = 8): a whole lane's slice in one
-/// 8xf16 (16-byte) vector load, the same width `tensorcore_f16_dot_stages_vectorized`
-/// already proves this compiler lowers correctly for WMMA staging.
+/// The same at D = 256 (dpl = 8): a whole lane's slice in one 16-byte load.
 #[test]
 fn warp_partial_vectorizes_kv_loads_at_dpl_8() {
     let mlir = emit_mlir(&warp_partial_probe(256, 8, 8));
     assert_contains(&mlir, &["vector.load", "vector<8xf16>", "alignment = 16"]);
 }
 
-/// `@padstage` routes a `var k = <tensor slice>` staging tile through
-/// `alloc_tile_padded` when its row pitch lands on an exact shared-memory
-/// bank-period multiple (128 bytes): `attention_block`'s real K/V tile is
-/// `[8, 128]` f16, 256 bytes/row, which is what this mirrors. See
-/// `Codegen::should_pad_stage`.
+/// `@padstage` routes a staging tile whose row pitch is a bank-period
+/// multiple through `alloc_tile_padded`. See `Codegen::should_pad_stage`.
 #[test]
 fn padstage_pads_a_bank_period_pitch_tile() {
     let mlir = emit_mlir(
@@ -263,9 +254,8 @@ fn padstage_pads_a_bank_period_pitch_tile() {
     assert_contains(&mlir, &["memref<8x136xf16, 3>"]);
 }
 
-/// The same staging statement without `@padstage` stays unpadded: the
-/// attribute is opt-in per kernel, not a default the compiler chooses on
-/// its own.
+/// The same statement without `@padstage` stays unpadded: opt-in per kernel,
+/// not a default.
 #[test]
 fn without_padstage_the_same_tile_stays_unpadded() {
     let mlir = emit_mlir(
@@ -278,11 +268,8 @@ fn without_padstage_the_same_tile_stays_unpadded() {
     assert!(!mlir.contains("136"), "should not have padded:\n{mlir}");
 }
 
-/// `@padstage` only pads the tiles whose pitch is the actual defect: a
-/// narrower tile (32 elements, 64 bytes/row for f16, well under the
-/// 128-byte bank period) is left alone even with the attribute on, the
-/// same reasoning that excludes `attention_block`'s own `[BR, BR]` f32
-/// score tile.
+/// A pitch under the bank period (32 f16 elements, 64 bytes/row) is left
+/// alone even with the attribute on.
 #[test]
 fn padstage_leaves_a_sub_period_pitch_tile_alone() {
     let mlir = emit_mlir(
@@ -295,11 +282,9 @@ fn padstage_leaves_a_sub_period_pitch_tile_alone() {
     assert_contains(&mlir, &["memref<8x32xf16, 3>"]);
 }
 
-/// Two consecutive `var name = <tensor slice>` staging statements (the
-/// `attention_block`/`gemm` K/V-and-A/B pattern) read only global memory, so
-/// neither's write can race the other: the first's own trailing barrier is
-/// redundant, since the second's still fires before either is ever read.
-/// One barrier for the pair, not two -- plus the final store's own.
+/// Two consecutive staging statements read only global memory, so neither's
+/// write can race the other and the first's trailing barrier is redundant:
+/// one barrier for the pair, plus the final store's own.
 #[test]
 fn consecutive_staged_slices_share_one_barrier() {
     let mlir = emit_mlir(
@@ -324,9 +309,8 @@ fn consecutive_staged_slices_share_one_barrier() {
     );
 }
 
-/// A single staging statement, with no adjacent partner to share a barrier
-/// with, keeps its own -- the merge only applies to a genuine run of two or
-/// more.
+/// A lone staging statement keeps its own barrier: the merge needs a run of
+/// two or more.
 #[test]
 fn a_lone_staged_slice_keeps_its_own_barrier() {
     let mlir = emit_mlir(
@@ -343,11 +327,8 @@ fn a_lone_staged_slice_keeps_its_own_barrier() {
     );
 }
 
-/// A staging statement immediately followed by a statement that is *not*
-/// itself another bare `var name = <tensor slice>` (here, one that reads the
-/// just-staged tile through `+`) never joins the run: `stage_run` only ever
-/// matches statements whose value is a plain tensor index, so nothing it
-/// merges can read a sibling's write. Three statements, three barriers.
+/// A statement that reads a just-staged tile is not a bare tensor slice, so
+/// `stage_run` stops before it rather than merging away a barrier it needs.
 #[test]
 fn staging_run_stops_before_a_non_slice_statement() {
     let mlir = emit_mlir(
@@ -366,9 +347,9 @@ fn staging_run_stops_before_a_non_slice_statement() {
     );
 }
 
-/// A minimal kernel calling `warp_partial` directly, mirroring how
-/// `attention_split_src` (`phobos-gguf`) uses it: one program, one warp
-/// group's worth of query rows, the whole cache as its `[lo, hi)` range.
+/// A minimal kernel calling `warp_partial` the way `attention_split_src`
+/// does: one program, one warp group of query rows, the whole cache as
+/// `[lo, hi)`.
 fn warp_partial_probe(d: i64, wct: i64, qw: i64) -> String {
     format!(
         "@autotune(D in [{d}], WCT in [{wct}], QG in [1], QW in [{qw}])

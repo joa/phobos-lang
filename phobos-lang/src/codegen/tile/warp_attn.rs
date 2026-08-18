@@ -1,45 +1,26 @@
-// A warp-partitioned online-softmax accumulation, the register-resident
-// counterpart to `attention_split_src`'s old one-chain-per-block loop.
+// A warp-partitioned online-softmax accumulation: each warp of the CTA owns
+// an independent key sub-range.
 //
-// `distribute`'s CTA-collective tile ops (`dot_t`, `rowmax`, `exp`, `dot`, ...)
-// all end in a CTA-wide `gpu.barrier`, which every one of the block's 256
-// threads must reach the same number of times. That is fine when the whole
-// block marches through one shared loop together, which is what every other
-// kernel in this file does -- but it is exactly what stands in the way of
-// giving the block's eight warps eight *independent* key sub-ranges: warps
-// with different trip counts would call that barrier a different number of
-// times, which hangs rather than merely slows down.
+// That partition is why nothing here goes through `distribute`. Its
+// CTA-collective tile ops all end in a CTA-wide `gpu.barrier`, which every
+// thread of the block must reach the same number of times, and warps with
+// different trip counts would not. Everything per-key stays in registers
+// instead, with `gpu.shuffle` as the only cross-lane communication: a shuffle
+// synchronizes the issuing warp's 32 lanes and nothing more, and a warp's
+// trip count is a function of its own `warp_id`, hence uniform across those
+// lanes. The one barrier emitted sits after every warp's loop, reached once
+// by every thread whatever its warp's iteration count was.
 //
-// `warp_partial` sidesteps the barrier question instead of solving it: the
-// whole per-key computation lives in registers, and the only cross-lane
-// communication is `gpu.shuffle`, which synchronizes exactly the 32 lanes of
-// the issuing warp and nothing more. A warp's own loop trip count is a
-// function of its own warp id and is uniform across its 32 lanes (every lane
-// of one warp computes the same `warp_id`), so the shuffles inside it are
-// always issued in convergence; different warps finishing at different
-// iteration counts is ordinary, unproblematic SIMT divergence, the same kind
-// `distribute` already relies on when a tile is smaller than the CTA. The one
-// barrier this function does emit sits after every warp's loop has ended,
-// reached by all 256 threads exactly once regardless of how many iterations
-// their own warp took -- safe by the same "same call count for every thread"
-// rule the rest of this compiler's barriers already follow.
+// The head dimension is spread across a warp's 32 lanes (`D / 32` each), so a
+// key's QK dot is a per-lane multiply-accumulate plus an xor-shuffle
+// butterfly. The accumulator rides the same split, so each lane's store into
+// `WACC` is lane-local. `m`/`l` are all-reduced, so every lane holds the same
+// value and only lane 0 commits them.
 //
-// The head dimension is spread across a warp's 32 lanes (`D / 32` elements
-// each), so one key's QK dot product is a short per-lane multiply-accumulate
-// followed by a five-step xor-shuffle butterfly, not the single thread's
-// `D`-deep serial reduction `dot_t` uses today. The accumulator rides the
-// same split: each lane only ever holds its own slice of `acc[i, :]`, so the
-// final store back to the caller's `WACC` tile is one lane-local write with
-// no shuffle at all. `m`/`l` are scalars every lane ends up holding an
-// identical copy of (the butterfly is an all-reduce, not a reduce-to-lane-0),
-// so only lane 0 commits them, to avoid every lane redundantly storing the
-// same word.
-//
-// This is deliberately its own primitive rather than a warp-scoped mode of
-// `dot_t`/`rowmax`/`dot`: those are used by every other kernel in the tree,
-// and giving them a second, thread-range-virtualized code path would risk
-// every one of them for the sake of this one caller. `warp_partial` touches
-// nothing outside this file and `expr.rs`'s dispatch table.
+// Deliberately its own primitive rather than a warp-scoped mode of
+// `dot_t`/`rowmax`/`dot`: those serve every other kernel in the tree, and a
+// second thread-range-virtualized path through them would put all of those at
+// risk for this one caller.
 
 use super::*;
 
@@ -47,19 +28,14 @@ impl<'c> Codegen<'c> {
     /// `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)`.
     ///
     /// `q` is the caller's already-staged `[QG, D]` query tile. `K`/`V` are
-    /// the raw `[NK, KW]` f16 cache tensors; `col` is the byte-free column
-    /// offset of this call's key head within them (`h / G * D`, already
-    /// computed by the caller exactly as the old design's `dot_t` calls
-    /// wanted it). `lo`/`hi` bound the *block's* key range, same as before;
-    /// this function further divides `[lo, hi)` into one piece per warp.
+    /// the raw `[NK, KW]` f16 cache tensors and `col` the column offset of
+    /// this call's key head within them (`h / G * D`). `lo`/`hi` bound the
+    /// block's key range, which this divides into one piece per warp.
     ///
-    /// `WM`/`WL` are `[QG, W]` and `WACC` is `[QG * W, D]`, all freshly
-    /// `var`-declared by the caller (`W` is a new `@autotune` symbol, not
-    /// derived from anything here) -- this function only ever writes warp
-    /// `w`'s own column/row range of them, so no two warps ever address the
-    /// same byte, and a plain CTA barrier at the end (not a per-iteration
-    /// one) is enough to publish the result to whatever combine step reads
-    /// these tiles next.
+    /// `WM`/`WL` are `[QG, W]` and `WACC` is `[QG * W, D]`, all `var`-declared
+    /// by the caller. A warp only ever writes its own column of `WM`/`WL` and
+    /// its own row of `WACC`, so no two warps address the same byte and the
+    /// single CTA barrier at the end suffices to publish them.
     pub(in crate::codegen) fn emit_warp_partial(
         &mut self,
         block: &Block<'c>,
@@ -92,12 +68,10 @@ impl<'c> Codegen<'c> {
         if wacc_mv.shape != [qg * wct, d] {
             bail!("warp_partial WACC must be [QG * W, D]");
         }
-        // warp_id ranges over every warp the CTA launches (0..cta_threads/32)
-        // regardless of what WM/WL/WACC were sized for: a narrower W would
-        // have the extra warps' final stores land past WM/WL's own column
-        // extent and WACC's own row extent -- an out-of-bounds shared-memory
-        // write, not a caught error, since nothing else in this function's
-        // control flow depends on W. Catch it here instead.
+        // warp_id ranges over every warp the CTA launches, whatever W was
+        // sized for, and nothing else here depends on W: a narrower W would
+        // silently put the extra warps' final stores past WM/WL/WACC rather
+        // than raise anything, so check it up front.
         if wct != self.cta_threads / WARP {
             bail!(
                 "warp_partial's WM/WL/WACC are sized for {wct} warps, but this kernel launches \
@@ -147,73 +121,45 @@ impl<'c> Codegen<'c> {
         // iter_args, one row of QG at a time: m, l, then dpl accumulator
         // elements (the lane's own slice of acc[i, :]).
         let per_row = 2 + dpl as usize;
-        let mut inits = Vec::with_capacity(qg as usize * per_row);
+        let acc_len = qg as usize * per_row;
+        let mut inits = Vec::with_capacity(acc_len);
         for _ in 0..qg {
             inits.push(neg_inf);
-            inits.push(zero_f);
-            for _ in 0..dpl {
-                inits.push(zero_f);
-            }
+            inits.extend(std::iter::repeat_n(zero_f, per_row - 1));
         }
 
-        // The widest f16 vector load this lane's dpl-wide slice divides
-        // evenly into: 8 (16 bytes) covers Qwen's dpl=4 head-halves... no,
-        // covers a whole dpl=8 slice in one shot; 4 (8 bytes) covers
-        // minicpm's dpl=4. Both widths are proven elsewhere in this tree
-        // (`stage.rs`'s `DrainMode::VecF16`, `alignment = 16` /
-        // `vector<8xf16>` in the WMMA f16 staging test) and both are safe
-        // here on the same grounds `elem.rs`'s `vectorizes()` check codifies
-        // generally: the byte offset into a row is `(col + lane * dpl) * 2`,
-        // and `col` is always a multiple of `D = 32 * dpl` (a query/key head
-        // never starts mid-lane-slice) while `lane * dpl` is trivially a
-        // multiple of `dpl`, so every lane's own slice starts on a
-        // `2 * dpl`-byte boundary regardless of which lane or which key row;
-        // the row pitch itself (`KW`) is a multiple of `D` by the kernel's
-        // own `@aligned(KW = D)`, so successive rows stay on that boundary
-        // too. Falls back to scalar for a `dpl` this ladder does not evenly
-        // divide (not reached by either shape this kernel ships today).
+        // Widest f16 vector load a lane's dpl-wide slice divides evenly into.
+        // Every such load is `2 * dpl`-byte aligned: the byte offset into a
+        // row is `(col + lane * dpl) * 2`, `col` is a multiple of
+        // `D = 32 * dpl` (a head never starts mid-lane-slice) and `lane * dpl`
+        // of `dpl`, while the row pitch `KW` is a multiple of `D` by the
+        // kernel's own `@aligned(KW = D)`. Falls back to scalar for a `dpl`
+        // this ladder does not divide.
         let vw = [8, 4, 2, 1].into_iter().find(|w| dpl % w == 0).unwrap_or(1);
         let k16_vec_t = Type::vector(&[vw as u64], self.f16_t);
         let f32_vec_t = Type::vector(&[vw as u64], self.f32_t);
         let vec_align = vw * 2; // f16 element size in bytes
 
-        // Software-pipelined K/V load: iteration kt issues the load for
-        // kt+1 before it consumes kt's own already-loaded values, so the
-        // load's latency overlaps this iteration's QK dot / shuffle /
-        // softmax-update compute instead of sitting in front of it. This
-        // card has no cp.async (Turing, sm_75) -- past 98% achieved
-        // occupancy (the ceiling; Block Limit Registers already binds it at
-        // this kernel's 64 registers/thread), the only remaining lever
-        // against long-scoreboard stall is more independent in-flight loads
-        // per warp, which register-level double buffering is.
+        // Software-pipelined K/V load: iteration kt issues kt+1's load before
+        // consuming its own carried-in values, so the load latency overlaps
+        // the QK dot / shuffle / softmax update. Only the raw f16 vector is
+        // loop-carried, not the widened f32 slice, which costs half the
+        // registers and is why the widening below happens per iteration.
         //
-        // Only the raw f16 vector is carried across iterations (2 packed
-        // registers per tensor at this kernel's dpl=4/vw=4 shape), not the
-        // widened f32 slice (4 registers each): widening happens once per
-        // iteration, on the value that just became "current", not stored in
-        // the loop-carried state. A double buffer of the f32 slices would
-        // cost +8 registers against a budget with no headroom to give;
-        // this costs +4.
-        //
-        // A load's address is always clamped into this warp's own valid
-        // range, never `kt` or `kt + 1` directly: a warp can be handed an
-        // empty range (`glo == ghi`, "runs zero iterations", see above), and
-        // even a real range's last iteration has no real `kt + 1` to load.
-        // `minsi(_, ghi - 1)` lands the address on the range's own last
-        // valid row in both cases -- always in-bounds (`ghi <= hi <= NK` and
-        // NK >= 1 for any call this kernel gets, the same assumption the
-        // rest of this function already makes) -- and in the empty-range
-        // case the loaded value is never read, since `scf.for` with
-        // `glo == ghi` never runs its body at all.
+        // A load's address is clamped to `ghi - 1`, never `kt + 1` directly:
+        // a warp can be handed an empty range (`glo == ghi`) and a real
+        // range's last iteration has no `kt + 1` to load. The clamp lands on
+        // the range's last valid row in both cases, in bounds since
+        // `ghi <= hi <= NK`, and an empty range never runs the body that
+        // would read it.
         let ghi_m1 = self.subi(block, ghi, one)?;
         let first_row = self.minsi(block, glo, ghi_m1)?;
 
-        // Shared by the prologue load (outside the loop, `self`/`block`)
-        // and the in-loop prefetch (`cg`/`lblk`): both just need some row
-        // index, so the closure takes it as a plain parameter.
+        // Shared by the prologue load (`self`/`block`) and the in-loop
+        // prefetch (`cg`/`lblk`), hence the explicit receiver parameters.
         let load_raw = |cg: &mut Self,
-                         blk: &Block<'c>,
-                         row: Value<'c, 'c>|
+                        blk: &Block<'c>,
+                        row: Value<'c, 'c>|
          -> Result<(Vec<Value<'c, 'c>>, Vec<Value<'c, 'c>>)> {
             let k_col = cg.addi(blk, col_v, lane_off)?;
             let mut k_raw = Vec::with_capacity((dpl / vw) as usize);
@@ -236,16 +182,13 @@ impl<'c> Codegen<'c> {
 
         let (k_raw0, v_raw0) = load_raw(self, block, first_row)?;
         let chunks = k_raw0.len();
-        let old_len = qg as usize * per_row;
+        inits.extend_from_slice(&k_raw0);
+        inits.extend_from_slice(&v_raw0);
 
-        let mut full_inits = inits;
-        full_inits.extend_from_slice(&k_raw0);
-        full_inits.extend_from_slice(&v_raw0);
-
-        let finals_all = self.carry_loop(block, glo, ghi, one, &full_inits, |cg, lblk, kt, accs| {
-            let row_accs = &accs[..old_len];
-            let cur_k = &accs[old_len..old_len + chunks];
-            let cur_v = &accs[old_len + chunks..old_len + 2 * chunks];
+        let finals_all = self.carry_loop(block, glo, ghi, one, &inits, |cg, lblk, kt, accs| {
+            let row_accs = &accs[..acc_len];
+            let cur_k = &accs[acc_len..acc_len + chunks];
+            let cur_v = &accs[acc_len + chunks..acc_len + 2 * chunks];
 
             // Issue next iteration's load before this iteration touches the
             // carried-in "current" values below.
@@ -320,12 +263,18 @@ impl<'c> Codegen<'c> {
             next.extend_from_slice(&next_v);
             Ok(next)
         })?;
-        let finals = &finals_all[..old_len];
+        let finals = &finals_all[..acc_len];
 
         let lane_zero = self.const_index(block, 0)?;
         let is_lead = self.push(
             block,
-            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lane, lane_zero, self.loc),
+            arith::cmpi(
+                self.ctx,
+                arith::CmpiPredicate::Eq,
+                lane,
+                lane_zero,
+                self.loc,
+            ),
         )?;
 
         for i in 0..qg {
@@ -361,12 +310,11 @@ impl<'c> Codegen<'c> {
         Ok(Rv::Scalar(self.const_index(block, 0)?))
     }
 
-    /// Resolves a named, already-bound tile (`var`-declared): the arguments
-    /// this call and [`Self::named_tensor`] accept are always a bare
-    /// identifier, the same restriction `atomic_add`/`grid_barrier` place on
-    /// their own state operands, and for the same reason -- these read the
-    /// buffer's own memref directly rather than going through the general
-    /// slice/subview machinery, so there is no offset to fold in.
+    /// Resolves a named, already-bound tile. This and [`Self::named_tensor`]
+    /// accept only a bare identifier, the same restriction
+    /// `atomic_add`/`grid_barrier` place on their state operands and for the
+    /// same reason: they read the buffer's memref directly instead of going
+    /// through the slice/subview machinery, so there is no offset to fold in.
     fn named_tile(&self, e: &Expr, what: &str) -> Result<MemVal<'c>> {
         let Expr::Var(name) = e else {
             bail!("{what} expects a named tile variable");
