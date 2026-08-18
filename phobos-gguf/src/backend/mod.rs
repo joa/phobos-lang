@@ -282,11 +282,10 @@ pub trait Backend {
     /// top-k/top-p/penalized sampling, logprobs) still wants the full vector
     /// and calls [`Backend::read`].
     ///
-    /// The default reads the whole thing and reduces on the host, so a
-    /// backend earns nothing by skipping this; a device backend overrides it
-    /// with a reduction that never leaves the card. Ties break the same way
-    /// [`phobos_inference::sampling::argmax`] does: the last of equal maxima
-    /// wins, since that is what this delegates to.
+    /// The default reads the whole vector and reduces on the host; a device
+    /// backend overrides it with a reduction that never leaves the card. Ties
+    /// go to the last of equal maxima, matching
+    /// [`phobos_inference::sampling::argmax`], which this delegates to.
     fn argmax(&self, buf: Buf, len: usize) -> Result<i64> {
         let mut out = vec![0.0f32; len];
         self.read(buf, &mut out)?;

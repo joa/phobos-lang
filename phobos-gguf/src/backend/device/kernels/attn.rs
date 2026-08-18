@@ -107,15 +107,12 @@ pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
 /// the cap, leaving two ordinary tiled matmuls at 3.3 and 2.6 TFLOP/s, 26 ms of
 /// a 512-token pass.
 ///
-/// That comparison undersold [`attention_block_src`], which the dispatcher
-/// (`DeviceBackend::attention`) now tries first for exactly this reason: a
-/// real prefill trace (minicpm pp128, `nsys`) found the three launches here
-/// tied with the projection GEMM at 37.5% of a pass, not a minor cost, and
-/// the blocked kernel does the same work in a third of the time by never
-/// writing the score matrix to global memory at all -- see
-/// `autoresearch/beams/prefill-attention-tensorcore.md`. This kernel remains
-/// the fallback for shapes the blocked one declines (a head dimension whose
-/// block tile does not divide 64, or a misaligned continuation).
+/// That comparison undersold [`attention_block_src`], which
+/// `DeviceBackend::attention` now tries first: it does the same work in a
+/// third of the time by never writing the score matrix to global memory. This
+/// kernel is the fallback for shapes the blocked one declines, a head
+/// dimension whose block tile does not divide 64 or a misaligned
+/// continuation.
 ///
 /// Two things have to be arranged for those matmuls to be clean. `dot_t` cannot
 /// accumulate in place and `acc = acc + dot_t(..)` builds a whole tile per step,
@@ -363,50 +360,33 @@ kernel rope_gather(S: tensor<f32>[RS, {head_dim}], T: tensor<f32>[P, RD], D: ten
 /// program, with the key axis split across the grid and, inside each split's
 /// own block, split *again* across the block's eight warps.
 ///
-/// The previous design gave one block's whole 256 threads one shared, serial
-/// chain of key tiles: `dot_t`/`rowmax`/`exp`/`rowsum`/`dot` each distribute
-/// their small `[QG, BC]`-shaped work over as many threads as the tile has
-/// elements (32-64 of the block's 256 at this shape) and end in a CTA-wide
-/// barrier, so the other six or seven warps sat idle at that barrier for the
-/// whole loop rather than doing anything. `ncu` measured the result:
-/// `attention_split` latency-bound (38% memory throughput, 14% compute, at
-/// 63.8% achieved occupancy this launch shape cannot exceed on this card),
-/// and two follow-on attempts to shorten the chain within that same
-/// one-active-warp design (`@pipeline`, a manual two-chain restructuring)
-/// both measured flat or worse (`autoresearch/beams/cache-length-split-buckets.md`).
-/// Widening the grid further (more blocks) was independently found
-/// exhausted: this launch configuration hits sm_75's 32-warp/SM ceiling at
-/// exactly four blocks per SM already.
+/// A block used to run one shared, serial chain of key tiles: each of
+/// `dot_t`/`rowmax`/`exp`/`rowsum`/`dot` spreads its small `[QG, BC]` work
+/// over only as many threads as the tile has elements and ends in a CTA-wide
+/// barrier, leaving six or seven of the block's eight warps idle at that
+/// barrier for the whole loop. More blocks is not the fix: this launch
+/// configuration already hits sm_75's 32-warp/SM ceiling at four blocks per
+/// SM.
 ///
-/// [`warp_partial`] (a `phobos-lang` builtin; `phobos-lang/src/codegen/tile/warp_attn.rs`
-/// has the mechanism) spends those otherwise-idle warps instead of asking for
-/// more blocks: it divides one block's `[lo, hi)` key range into `WCT` further
-/// pieces, one per warp, and has each warp compute its own `(m, l, acc)` over
-/// its own piece independently -- register-resident, the head dimension
-/// spread across the warp's 32 lanes for the QK dot product (a per-lane
-/// partial plus a `gpu.shuffle` xor-butterfly, not one thread's `D`-deep
-/// serial reduction), no shared-memory staging of `K`/`V`, and no per-tile
-/// CTA barrier, only the self-synchronizing shuffles. Warps therefore run
-/// genuinely independently rather than converging on a barrier every
-/// iteration, which is what lets the SM's scheduler interleave one warp's
-/// memory stall with another's compute instead of exposing every stall on
-/// its own.
+/// [`warp_partial`] (a `phobos-lang` builtin, mechanism in
+/// `phobos-lang/src/codegen/tile/warp_attn.rs`) spends those idle warps
+/// instead: it cuts the block's `[lo, hi)` key range into `WCT` pieces, one
+/// per warp, and each warp computes its own `(m, l, acc)` register-resident,
+/// the head dimension spread across its 32 lanes and reduced by shuffle. No
+/// shared staging of `K`/`V` and no per-tile CTA barrier, so warps run
+/// independently and the scheduler can hide one warp's memory stall behind
+/// another's compute.
 ///
-/// A block still writes exactly one `(m, l, acc)` triple per query row to
-/// `P`/`ML`, unchanged from before: [`attention_combine`] folds the `WCT`
-/// warps' own partials together once, right here, with the same
-/// rowmax/exp/rowsum/dot online-softmax merge [`attention_merge`] below
-/// already runs across splits, just at `WCT` width instead of `S`. Combining
-/// here rather than widening `S` by `WCT` keeps `attention_merge`'s own
-/// reduction tile the size it already is: [`cache-length-split-buckets`]'s
-/// beam file found that tile fails to compile past a `head_dim`-dependent
-/// shared-memory wall well short of `S * WCT` for any `WCT` worth having.
+/// A block still publishes exactly one `(m, l, acc)` triple per query row:
+/// [`attention_combine`] folds the `WCT` partials here, with the same
+/// online-softmax merge [`attention_merge`] runs across splits. Combining
+/// here rather than widening `S` to `S * WCT` is load-bearing, not a
+/// preference: the merge's reduction tile stops compiling past a
+/// head-dimension-dependent shared-memory wall well short of that.
 ///
-/// There is no tiled-plus-remainder split any more: nothing here batches
-/// keys into `BC`-wide chunks, so every key in a warp's own range is handled
-/// by the same one-key-at-a-time step and there is no partial tile left to
-/// mop up separately. `K`/`V` stay f16 and widen on load, same as before;
-/// the query, running maximum and accumulator stay f32.
+/// Every key in a warp's range takes the same one-at-a-time step, so there is
+/// no tiled-plus-remainder split to mop up. `K`/`V` stay f16 and widen on
+/// load; the query, running maximum and accumulator stay f32.
 pub(crate) fn attention_split_src(
     n_head: usize,
     group: usize,
@@ -418,12 +398,9 @@ pub(crate) fn attention_split_src(
     let scale = (head_dim as f32).sqrt().recip();
     let qw = qgroup * wct;
     let combine = attention_combine(qgroup, "");
-    // Block width follows wct directly (wct is a warp count, WARP lanes
-    // each): warp_partial's own bail check already requires the two to
-    // match (`self.cta_threads / WARP`), so this keeps the template
-    // self-consistent instead of hardcoding the launch width and letting a
-    // future wct sweep silently mismatch it. At the shipped ATTN_WARP_SPLITS
-    // this is 256, unchanged from before wct was a parameter here.
+    // Derived, not hardcoded: `warp_partial` bails unless the launch width is
+    // exactly `wct` warps, so a future sweep of `wct` must not leave a literal
+    // 256 behind. At the shipped ATTN_WARP_SPLITS this is 256.
     let cta = wct * WARP_THREADS;
     format!(
         "@launch({cta})
@@ -508,46 +485,30 @@ fn attention_combine(qgroup: usize, indent: &str) -> String {
 /// share nothing but the barrier and the scratch, so neither changed a line
 /// of the online-softmax math both already had.
 ///
-/// The scratch buffer the two phases round-trip through is a parameter
-/// twice, `P` and `PM`, one pointer under the two shapes the two phases read
-/// and write, exactly as [`DeviceBackend::attention_decode`] (see
-/// `phobos-gguf/src/backend/device/attn.rs`) already passes it to two
-/// separate kernels; a persistent kernel can bind the same device pointer to
-/// two parameter names in one launch just as easily as two launches could.
+/// The scratch the two phases round-trip through is one pointer bound to two
+/// parameters, `P` and `PM`, under the two shapes the phases read and write
+/// it at, the same pair [`DeviceBackend::attention_decode`] already hands to
+/// two separate kernels.
 ///
-/// `IT1` and `IT2` are the grid-strided loop counts, compiled in rather than
-/// derived from a dynamic tensor extent: `docs/megakernel.md`'s own step 1
-/// found that the natural spelling of a strided loop over a dynamic bound
-/// gets split, and the masked remainder then wants a static shape neither
-/// loop has. Compiling the trip count in and guarding with `if unit < total`
-/// sidesteps that, the same fix the fused MLP's own unit loops use.
+/// `IT1` and `IT2` are the grid-strided trip counts, compiled in rather than
+/// derived from a dynamic extent: a strided loop over a dynamic bound gets
+/// split, and the masked remainder then wants a static shape neither half
+/// has. Compiling the count in and guarding with `if unit < total` sidesteps
+/// that, the same fix the fused MLP's unit loops use.
 ///
-/// Both phases assume every block of `BLOCKS` is resident at once, since
-/// `grid_barrier` deadlocks otherwise; the caller settles `BLOCKS` from
-/// `cuOccupancyMaxActiveBlocksPerMultiprocessor` before compiling this, the
-/// same precondition `docs/megakernel.md` names for the wider megakernel.
+/// Both phases require every block of `BLOCKS` to be resident at once, since
+/// `grid_barrier` deadlocks otherwise; the caller settles `BLOCKS` from the
+/// occupancy API before compiling this.
 ///
-/// `@dynshared`: phase one's tiles (the split body's `q`, `wm`, `wl`, `wacc`,
-/// and [`warp_partial`]'s own internal ones) are all released -- their last
-/// read is the `P`/`ML` store before `grid_barrier()` -- before phase two's
-/// tiles (`mv`, `mm`, `c`, `ll`, `oacc`) are ever declared, but the two
-/// phases' tiles are different shapes, so the static `memref.global`-per-tile
-/// allocation this kernel used before `@dynshared` could not tell that apart:
-/// each shape got its own permanent global, and the compiled footprint was
-/// the *sum* of both phases' tiles rather than the max, since nothing
-/// physically aliases two distinct global symbols. The dynamic allocator's
-/// tile pool now resets its byte cursor whenever the live-tile count returns
-/// to zero ahead of a brand-new shape (`Codegen::alloc_tile_shaped`/
-/// `dynamic_live` in `phobos-lang`), which for this kernel happens right at
-/// the phase boundary: phase two's tiles land in the same bytes phase one's
-/// occupied, instead of past them. No shared value crosses the barrier
-/// through shared memory (the barrier's whole job is to publish phase one's
-/// `P`/`ML` to global first), so this aliasing has the same race-freedom
-/// argument `Codegen::release`'s doc already gives same-shape reuse: a CTA
-/// barrier separates every producer's writes from the next consumer's, and
-/// here the grid barrier plus phase two reading only global `PM`/`ML` (never
-/// a phase one shared tile) makes the reuse trivially safe rather than merely
-/// barrier-ordered.
+/// `@dynshared` is what keeps the shared-memory footprint the max of the two
+/// phases rather than their sum. Phase one's tiles are all released at the
+/// `P`/`ML` store before the barrier, but they are shaped differently from
+/// phase two's, and static per-tile allocation gives each shape its own
+/// permanent global that nothing can alias. The dynamic allocator instead
+/// resets its byte cursor once the live-tile count returns to zero, which
+/// here happens exactly at the phase boundary. The reuse is safe outright,
+/// not merely barrier-ordered: nothing crosses the barrier through shared
+/// memory, phase two reads only global `PM`/`ML`.
 pub(crate) fn attention_persist_src(
     n_head: usize,
     group: usize,

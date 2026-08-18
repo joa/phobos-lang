@@ -294,14 +294,12 @@ pub(crate) fn q8_splits(n: usize, k: usize) -> usize {
 
 /// The `q8_qmma` deep tile's grid is `(rows / TM) * (n / TN)`, nothing else:
 /// a prompt short enough, or a projection narrow enough, leaves most of the
-/// card with no block at all (12 or 20 against 48 SMs measures 12.4-12.6%
-/// achieved occupancy against a 25% register-bound ceiling, see
-/// `autoresearch/beams/q8-qmma-split-k.md`). Below this many blocks, the
+/// card with no block at all, 12 or 20 blocks against 48 SMs measuring around
+/// half the register-bound occupancy ceiling. Below this many blocks the
 /// unsplit launch is declined in favor of [`q8_qmma_split_src`]. Above it,
-/// splitting only adds a reduction pass to a shape that was already filling
-/// the grid reasonably (72 blocks measures 79-80% of its own ceiling
-/// already, and the tile-shrink probe that beam ran showed adding blocks
-/// there costs tensor-core efficiency for no occupancy left to buy).
+/// splitting only adds a reduction pass to a shape already filling the grid
+/// reasonably: 72 blocks reaches 79-80% of its own ceiling, with no occupancy
+/// left for more blocks to buy.
 pub(crate) const Q8_QMMA_SPLIT_THRESHOLD: usize = 48;
 
 /// Blocks a split aims to reach: two per SM at the register-bound ceiling
@@ -323,51 +321,47 @@ pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> us
         return 1;
     }
     let blocks = k / Q8_BLOCK;
-    let mut splits = (Q8_QMMA_SPLIT_TARGET / unsplit).min(Q8_QMMA_SPLIT_MAX).min(blocks);
+    let mut splits = (Q8_QMMA_SPLIT_TARGET / unsplit)
+        .min(Q8_QMMA_SPLIT_MAX)
+        .min(blocks);
     while splits > 1 && !blocks.is_multiple_of(splits) {
         splits /= 2;
     }
-    // A split short of the max halves an already roughly-fixed reduce cost's
-    // worth of compute-time savings without shrinking that cost, so it can
-    // cost more than it buys (see autoresearch/beams/q8-qmma-split-k.md's
-    // qkv case, measured a net regression at S=4). Below the max, the
+    // The reduce pass costs roughly the same whatever the split count, so a
+    // split short of the max halves the compute-time saving without shrinking
+    // what pays for it, and can cost more than it buys. Below the max, the
     // unsplit path stays.
     if splits == Q8_QMMA_SPLIT_MAX { splits } else { 1 }
 }
 
-/// Threads the narrow-CTA variant of the deep tile carries: half of
-/// [`Q8_QMMA_CTA`]. Paired with [`Q8_QMMA_NARROW_TN`] (half of
-/// [`Q8_QMMA_WIDTHS`]'s widest column tile), `qmma_patch`
-/// (`phobos-lang/src/codegen/tile/qmma.rs`) resolves the *same* per-warp
-/// patch either way -- checked against the emitted MLIR, not assumed:
-/// `qmma_patch(rt=16, ct=16, warps=4)` (the shipped 128-wide config) and
-/// `qmma_patch(rt=16, ct=8, warps=2)` (this one) both settle on `(rm=8,
-/// rn=8)`, the same register-bound 64-tile patch, same 238 regs/thread.
-/// Halving `TN` and the CTA together, rather than `TN` alone at the
-/// unchanged 128-thread CTA (which is what [`Q8_QMMA_WIDTHS`]'s existing
-/// 64-wide fallback already does, and what this session's tile-shrink
-/// probe measured as a loss -- that config's patch collapses to `(rm=4,
-/// rn=8)`, a worse-intensity tile, not this one), doubles the grid on a
-/// starved shape without touching per-warp tensor-core efficiency at all.
-/// See `autoresearch/beams/q8-qmma-grid-starve.md`.
+/// Threads the narrow-CTA variant of the deep tile carries, and its column
+/// tile: half of [`Q8_QMMA_CTA`] and half of [`Q8_QMMA_WIDTHS`]'s widest
+/// entry. The two must be halved *together* or the variant loses its whole
+/// point: `qmma_patch` resolves the pair to the same register-bound `(rm=8,
+/// rn=8)` per-warp patch as the shipped 128-wide config, so the grid doubles
+/// on a starved shape at unchanged tensor-core intensity, while halving `TN`
+/// alone at the full CTA collapses the patch to a worse-intensity `(rm=4,
+/// rn=8)`. That narrower-tile-alone lever is what [`Q8_QMMA_WIDTHS`]'s 64-wide
+/// fallback already is, and it measured a loss.
 pub(crate) const Q8_QMMA_NARROW_CTA: usize = 64;
 
-/// Column tile for the narrow-CTA deep-tile variant: half of
-/// [`Q8_QMMA_WIDTHS`]'s widest entry. See [`Q8_QMMA_NARROW_CTA`]'s doc
-/// comment for why it is paired with a halved CTA rather than used alone.
 pub(crate) const Q8_QMMA_NARROW_TN: usize = 64;
 
 /// Whether `q8_qmma`'s deep tile at `rows x n`, already resolved to
 /// [`qmma_width`]'s widest option, should take the narrow-CTA path instead.
-/// Gated the same way [`q8_qmma_splits`] gates split-K -- fewer blocks than
-/// this card's SM count (see [`Q8_QMMA_SPLIT_THRESHOLD`]) -- since a grid
-/// already at or above the SM count has no idle multiprocessor left for
-/// more blocks to reach (`Q8_QMMA_SPLIT_THRESHOLD`'s own doc comment: the
-/// 72-block shape already measures 79-80% of its own ceiling). Declines
-/// whenever `wide` is not the widest tile: a shape landing on
-/// [`Q8_QMMA_WIDTHS`]'s narrower entry already lost the intensity this path
-/// exists to preserve, and doubling *that* grid would be the already-
-/// rejected tile-shrink lever, not this one.
+/// Gated on block count the same way [`q8_qmma_splits`] gates split-K: a grid
+/// already at this card's SM count has no idle multiprocessor left for more
+/// blocks to reach. Declines whenever `wide` is not the widest tile, since a
+/// shape on the narrower entry already lost the intensity this path exists to
+/// preserve.
+///
+/// Known limit, and why the caller ships default-off: the threshold is a flat
+/// block count, so it does not scale with `rows`. A shape approaching it from
+/// below rather than sitting far under it can regress, halving warps per CTA
+/// costing more than the extra SM coverage buys back. Measured at `pp512`,
+/// where `rows` is 4x `pp128`'s: `n = 1024` still passes the gate and loses.
+/// Tighten the gate relative to how starved the grid actually is, or make it
+/// row-count-aware, before loosening it or flipping the default.
 pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> bool {
     if wide != Q8_QMMA_WIDTHS[0] || !n.is_multiple_of(Q8_QMMA_NARROW_TN) {
         return false;
@@ -376,28 +370,20 @@ pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> boo
     unsplit > 0 && unsplit < Q8_QMMA_SPLIT_THRESHOLD
 }
 
-/// The split-K variant of [`q8_qmma_src`], for the shapes
-/// [`q8_qmma_splits`] declines to leave at one program per output tile.
+/// The split-K variant of [`q8_qmma_src`], for the shapes [`q8_qmma_splits`]
+/// declines to leave at one program per output tile.
 ///
-/// `qmma_t`'s direct-to-global write (no shared-memory round trip, no cap to
-/// one CTA per SM, see [`q8_qmma_src`]'s doc comment) only fires when the
-/// destination slice is provably in bounds from the offset expression alone,
-/// and a dynamic tensor dimension like `M` is only ever assumed a multiple of
-/// 4 elements regardless of what `@aligned` promises about it (the row-pitch
-/// ABI, not a tile fact) -- so an offset built from `program_id(2) * M` can
-/// never clear that proof. Folding the split index into the destination
-/// address is what a reduction-only kernel does safely; this one instead
-/// gives each split its own output operand and its own `if ps == i` arm, so
-/// every write keeps the exact `pm * TM, pn * TN` shape the unsplit kernel
-/// already proves unmasked. The branches are mutually exclusive on a value
-/// uniform across the whole CTA (a grid coordinate), so this is a predicated
-/// dispatch, not warp divergence.
-///
-/// `k`'s slice bounds (`from`, `slice`) are baked in as literals rather than
-/// computed from `program_id(2)` at run time, for the same reason: a literal
-/// offset's own divisor is itself, so `@aligned(K = slice, KB = slice / 32)`
-/// clears the bounds proof on `A`, `AS`, `W` and `WS` too, with no dependency
-/// on what any program id resolves to.
+/// Two things here look like they could be simplified and cannot, both for
+/// the same reason: `qmma_t`'s direct-to-global write only fires when a slice
+/// is provably in bounds from its offset expression alone, and a dynamic
+/// tensor dimension is only ever assumed a multiple of 4 elements whatever
+/// `@aligned` claims. So an offset built from `program_id(2)` can never clear
+/// that proof. Each split therefore gets its own output operand and its own
+/// `if ps == i` arm, keeping the exact `pm * TM, pn * TN` write shape the
+/// unsplit kernel already proves; and `k`'s slice bounds are baked in as
+/// literals, since a literal's own divisor is itself and `@aligned` can then
+/// cover `A`, `AS`, `W` and `WS` too. The arms are mutually exclusive on a
+/// CTA-uniform grid coordinate, so this is predication, not divergence.
 pub(crate) fn q8_qmma_split_src(block: usize, k: usize, s: usize) -> String {
     let slice = k / s;
     let sb = slice / Q8_BLOCK;
@@ -429,14 +415,12 @@ kernel q8_qmma_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// Sums [`q8_qmma_split_src`]'s `S` output tiles into one, one row at a time
-/// rather than a `[TM, TN]` tile at a time: a plain tile add is not
-/// `qmma_t`, so it always stages through shared memory, and at `TM = 128`
-/// that tile is a 64 KB round trip, over the 48 KB static ceiling this
-/// kernel is compiled under (measured directly: `Module::from_ptx` rejects
-/// it). A one-element span on a dimension is unmasked regardless of what
-/// produced its offset (`dyn_in_bounds`'s size-1 case divides by 1 either
-/// way), so the row index needs no `@aligned` promise at all, matching
+/// Sums [`q8_qmma_split_src`]'s `S` output tiles into one, a row at a time
+/// rather than a `[TM, TN]` tile at a time: a plain tile add is not `qmma_t`,
+/// so it always stages through shared memory, and at `TM = 128` that tile is
+/// a 64 KB round trip past the 48 KB static ceiling, which `Module::from_ptx`
+/// rejects outright. A one-element span is unmasked whatever produced its
+/// offset, so the row index needs no `@aligned` promise, matching
 /// [`Q8_SPLIT_SRC`]'s own row-at-a-time reduction.
 pub(crate) fn q8_qmma_reduce_src(block: usize, s: usize) -> String {
     let mut params = String::new();

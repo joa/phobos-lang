@@ -1,8 +1,6 @@
-// Split out of `qwen35.rs` to keep it under the workspace's line-count cap
-// (see `phobos-base/tests/source_size.rs`): the `forward`/`forward_greedy`
-// family. A descendant module of `qwen35`, so `Model`'s private fields and
-// the `attention`/`delta_net` methods it calls stay exactly as visible here
-// as they were in the parent file; nothing moved to `pub(crate)` for this.
+// The `forward` family, split out of `qwen35.rs` to keep it under the
+// workspace's line-count cap. A descendant module, so `Model`'s private
+// fields and the methods it calls stay as visible here as in the parent.
 
 use anyhow::{Result, bail, ensure};
 
