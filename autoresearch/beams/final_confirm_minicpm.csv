@@ -1,0 +1,31 @@
+round,slot,engine,backend,model,test,rep,rate,clock
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6273.49,2050.0
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7890.76,2050.0
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8266.06,2050.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5818.181818181819,1925.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6400.0,1925.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6736.842105263158,1925.0
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5120.0,1546.5
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,5818.181818181819,1546.5
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,5565.217391304348,1546.5
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6436.07,1910.0
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8277.5,1910.0
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8642.52,1910.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,5983.8,1340.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7095.93,1340.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,7739.42,1340.0
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4923.076923076923,1693.5
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,5818.181818181819,1693.5
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,5333.333333333333,1693.5
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5120.0,1473.0
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,5565.217391304348,1473.0
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,5565.217391304348,1473.0
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,7050.24,1833.75
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7681.18,1833.75
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8199.19,1833.75
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6202.72,1390.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7770.72,1390.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,7886.73,1390.0
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4923.076923076923,1748.3333333333333
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6095.2380952380945,1748.3333333333333
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,5565.217391304348,1748.3333333333333

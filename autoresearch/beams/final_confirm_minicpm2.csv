@@ -1,0 +1,49 @@
+round,slot,engine,backend,model,test,rep,rate,clock
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6816.09,2050.0
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8006.86,2050.0
+1,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8115.55,2050.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5565.217391304348,1872.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6400.0,1872.0
+1,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6400.0,1872.0
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5333.333333333333,1456.5
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,5818.181818181819,1456.5
+2,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,5818.181818181819,1456.5
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6208.62,1680.0
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7760.87,1680.0
+2,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,7665.59,1680.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6323.55,1330.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7854.78,1330.0
+3,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,7867.39,1330.0
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,4923.076923076923,1766.6666666666667
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,5818.181818181819,1766.6666666666667
+3,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,5565.217391304348,1766.6666666666667
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5565.217391304348,1423.3333333333333
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6400.0,1423.3333333333333
+4,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6400.0,1423.3333333333333
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,7125.56,1920.0
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8101.62,1920.0
+4,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,7977.91,1920.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6073.92,1370.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,7837.9,1370.0
+5,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,7652.3,1370.0
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5818.181818181819,1773.75
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6736.842105263158,1773.75
+5,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6400.0,1773.75
+6,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5333.333333333333,1715.0
+6,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6400.0,1715.0
+6,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6400.0,1715.0
+6,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6423.03,1755.0
+6,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8133.54,1755.0
+6,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8334.42,1755.0
+7,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6051.01,1350.0
+7,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8010.91,1350.0
+7,0,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8262.49,1350.0
+7,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5565.217391304348,1815.0
+7,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,5565.217391304348,1815.0
+7,1,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6400.0,1815.0
+8,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,0,5333.333333333333,1496.6666666666667
+8,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,1,6095.2380952380945,1496.6666666666667
+8,0,phobos,CUDA,minicpm5-1b-Q8_0,pp128,2,6095.2380952380945,1496.6666666666667
+8,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,0,6334.13,1975.0
+8,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,1,8152.3,1975.0
+8,1,llama.cpp CUDA,CUDA,minicpm5-1b-Q8_0,pp128,2,8230.98,1975.0
