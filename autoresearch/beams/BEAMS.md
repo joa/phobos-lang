@@ -1539,3 +1539,117 @@ traffic, harder than either GEMM beam this round attempted) and the
 diagonal-tile-fold restructuring for attention (speculative, unmeasured,
 may not clear the shared-memory wall even if built). Both are bigger
 design lifts than anything tried this round, not incremental retunes.
+
+## Process correction, 2026-08-17: the user pushed back on single-threaded
+hill-climbing, and four genuinely parallel beams followed
+
+After the fourth negative result in a row (all on the same two kernels,
+each a variation on register/tile-size tuning), the user gave direct,
+important process feedback: this session had been running one sequential
+beam at a time -- tune, fail, tune again -- instead of the parallel,
+creative search this process exists for, and had not exhausted compiler-
+level optimizations (the original three-part question -- tensor cores,
+redundant barriers, pipelining -- had only really been chased on (a) and
+(c); (b), barriers, and the swizzling half of (c) had never been
+systematically audited). Consulted the advisor for a genuinely diverse
+portfolio rather than a fourth guess at the same two kernels, and it
+reframed the whole picture: the pass decomposes into **three roughly
+comparable gaps against llama.cpp**, not one dominant one -- GEMM (~3.4ms),
+attention (~3.7ms), and a small-kernel tail that had never been examined
+(~2.85ms by the advisor's own bucket arithmetic, later found to be
+overstated by contaminated warmup-window data, see the tail-fusion beam
+below). Four beams dispatched in parallel, each in its own isolated git
+worktree (`../phobos-wt-{tailfuse,streamk,audit,attnfix}`), each with its
+own kill-check so a failing beam costs nothing to the others -- the
+"keep multiple alive" property the user asked for directly.
+
+**SASS/PTX compiler audit** (`7198cd7`, no code, measurement + design
+report): finally answered the barrier/bank-conflict/vectorization
+questions with real PTX/SASS/`ncu` measurement instead of another
+architecture guess. Four findings: `attention_block` had **no `@aligned`
+at all**, so its K/V staging was fully scalar the entire session up to
+this point, never even reaching the narrow vectorized path, let alone a
+wide one; its shared K/V tile's 256-byte row pitch collides exactly with
+the 128-byte bank period, 5.0-way average conflict, `ncu`'s own estimated
+36.56% speedup available; 14 barriers per causal-loop iteration against
+~9 truly necessary sync points, but every one maps to a real per-statement
+tile-phase boundary (compiler statement-fusion work, not a kernel edit,
+to close); `q8_qmma`'s K-loop loads confirmed 4-byte at both PTX and SASS
+level with the exact address-gap reason `ptxas` can't merge them
+identified. This report is what turned "try another attention redesign"
+into "implement two specific, already-measured fixes," directly below.
+
+**`attention_block` vectorize + pad, landed** (`3f093db`): implemented
+both of the audit's `attention_block` findings together. `@aligned(KW=D)`
+plus `let`->`var` staging vectorizes 88% of K/V tile-copy trips
+(`vector<8xf16>`, 16-byte, up from fully scalar 2-byte); a new, carefully
+double-gated `@padstage` attribute (opt-in per kernel, and even then only
+when a tile's own row pitch is an exact bank-period multiple) breaks the
+bank-conflict pattern for K/V's main-loop tiles, dropping the average
+conflict from 5.0-way to 2.4-way. Occupancy kill-check held on the card
+(`Block Limit Shared Mem` unchanged at 3 blocks/SM across both fixes).
+Same-session, same-card, non-overlapping timing across all three states:
+**175.9us baseline -> 138.4us (vectorize alone, -21.3%) -> 92.5us (both
+fixes, -47.4% from baseline)**. Bonus finding along the way, not chased
+further: switching `let` to `var` also fixed a real pool-release defect
+(masked `let`-bound tiles never return to the buffer pool, `Binding::View`
+skips `release()`) that was independently inflating this kernel's static
+shared-memory footprint by about a third -- most of why the vectorize-alone
+number is bigger than the staging story alone predicts, and a pattern
+likely present in other masked-tile kernels in the tree, flagged as a
+follow-up. This is the session's single largest per-kernel win.
+
+**`q8_qmma` proper stream-K, a negative result** (`c405cbd`): built the
+boundary-fixup mechanism the split-K postmortem asked for (direct-write
+low half, load-add-store high half, no full-plane scratch buffer --
+cheaper per split than the original design, exactly as intended) and
+still failed its own DRAM-traffic bar: ~172KB extra per output tile
+against a ~100KB target, confirmed real via a `--cache-control none`
+cross-check (L2 provides no absorption -- the kernel's own weight
+streaming evicts the small output-region write before the accumulate step
+reads it back). Worse: the starved shapes this exists to help can't even
+use the cheap 2-way split measured here -- a 48-SM work assignment on a
+12-tile/64-k-block-deep shape needs at least 4-way coverage per tile, and
+per-tile extra traffic scales up with more splits, not down. The tile
+size itself, not the work-assignment scheme layered on top of it, is the
+binding constraint. `PHOBOS_QMMA_STREAMK` stays opt-in, off by default;
+code kept as the boundary-fixup mechanism's working template.
+
+**Prefill tail fusion, landed** (`bf3467a`): the beam that caught its own
+task brief's numbers being contaminated -- `bench.rs`'s warmup mixes one
+prefill pass with four decode-shaped passes in the same trace a per-pass
+average was drawn from, so the tail's real genuine-prefill total is
+~2.72ms/pass, not the 5.03ms this round's own pass-mapping reported, and
+the true addressable gap against llama.cpp is ~0.54ms, not ~2.85ms --
+reported plainly the moment it was found, changing this beam's own
+expected value mid-flight. Two fusions attempted: `rope_gather` (reads a
+fused QKV projection's strided Q/K window directly, writing a dense
+rotated destination in one launch, replacing a `copy_2d`-then-`rope` pair)
+measured a genuine ~0.10-0.14ms/pass win two independent ways and shipped;
+a quantizing epilogue on `swiglu_planes` was built, gated clean, then
+**measured as a wash-to-small-loss and reverted** once real timing showed
+the tile codegen's per-`var` staged-shared-memory cost (a mechanism the
+`BR=32` attention beam found independently) dominates at prefill scale,
+unlike the decode-scale precedent it was modeled on where launch overhead
+dominates instead and hides that cost. Diff kept as a reference patch,
+not shipped -- this session's second negative result this round with a
+clean, load-bearing mechanism rather than a shrug.
+
+**A near-miss worth recording**: merging these four beams back into the
+main tree by copying whole files from each worktree silently clobbered
+two already-landed beams' changes twice (stream-K's `device/mod.rs` field
+and the attention-fix's `kernels/attn.rs` kernel source, both overwritten
+by a later worktree's stale pre-merge version of the same file) -- caught
+immediately by grepping for a distinctive symbol from each prior beam
+right after every multi-file copy, before running gates or committing,
+not by any tool refusing the operation. Fixed by reconciling by hand
+(extract just the new beam's own addition, apply it on top of the
+already-merged file) rather than re-copying. Banked as
+[[parallel-beam-merge-collision]] since this is a real, repeatable risk
+of the parallel-worktree pattern this round leaned on, not a one-off
+mistake.
+
+**Where prefill stands now**: two real wins landed this round
+(attention_block -47.4%, rope_gather ~0.10-0.14ms/pass) on top of the
+prefill-attention dispatch reorder from before this stretch. Confirmation
+`bench.py` against llama.cpp is the coordinator's next step.
