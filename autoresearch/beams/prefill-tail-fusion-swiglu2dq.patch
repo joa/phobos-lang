@@ -1,0 +1,390 @@
+diff --git a/phobos-gguf/examples/backend_check.rs b/phobos-gguf/examples/backend_check.rs
+index 2d0de9c..2876286 100644
+--- a/phobos-gguf/examples/backend_check.rs
++++ b/phobos-gguf/examples/backend_check.rs
+@@ -139,6 +139,35 @@ fn main() -> Result<()> {
+         );
+     }
+ 
++    // swiglu_planes_q: the same two shapes, but through the quantizing form
++    // `Ffn::forward` actually calls. Only the dense `O` half is checked here
++    // (the quantized activation has no public readback); the quantization
++    // itself is covered end to end by `model_check`/`fuse_check`, since both
++    // shapes land in a real forward pass on the two models this session
++    // tracks. This is still worth having on its own: it is what would have
++    // caught the shared-memory budget this kernel needed past
++    // `swiglu_2d_tile`'s, before it surfaced as a PTX load failure two gates
++    // downstream.
++    for ffn in [3584usize, 4608] {
++        let both: Vec<f32> = (0..rows * 2 * ffn).map(|_| next()).collect();
++        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
++            let src = b.upload(&both)?;
++            let out = b.alloc(rows * ffn)?;
++            let half = |offset| Plane {
++                buf: src,
++                offset,
++                pitch: 2 * ffn,
++            };
++            b.swiglu_planes_q(half(0), half(ffn), out, rows, ffn)?;
++            read_vec(b, out, rows * ffn)
++        };
++        check(
++            &format!("swiglu_planes_q [{rows} x {ffn}]"),
++            &run(&host)?,
++            &run(&gpu)?,
++        );
++    }
++
+     // copy, offset on both sides
+     let run_copy = |b: &dyn Backend| -> Result<Vec<f32>> {
+         let src = b.upload(&x)?;
+@@ -511,6 +540,53 @@ fn main() -> Result<()> {
+         );
+     }
+ 
++    // rope_gather: a strided window of a fused QKV buffer, offset past other
++    // heads sharing the same physical row, exactly what `llama.rs::attention`
++    // hands this op for K (any row count) and for Q past one row. One shape
++    // has no passthrough range (rope_dim == head_dim, minicpm's shape); the
++    // other does (rope_dim < head_dim, Qwen's shape) -- Qwen's own forward
++    // pass never calls this op (its rope runs on already-dense, already
++    // QK-normed buffers in `qwen35.rs`), so this is the only place the
++    // passthrough range and the nonzero-offset stride reshape are checked.
++    for (rows, heads, head_dim, rope_dim, stride_heads, slot, start_pos) in [
++        (5usize, 2usize, 32usize, 32usize, 8usize, 4usize, 10usize),
++        (9, 4, 64, 32, 8, 4, 0),
++    ] {
++        let table: Vec<f32> = (0..(start_pos + rows) * rope_dim).map(|_| next()).collect();
++        let src: Vec<f32> = (0..rows * stride_heads * head_dim)
++            .map(|_| next())
++            .collect();
++        let spec = Rope {
++            heads,
++            head_dim,
++            rope_dim,
++            start_pos,
++        };
++        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
++            let (sb, tb) = (b.upload(&src)?, b.upload(&table)?);
++            let dest = b.alloc(rows * heads * head_dim)?;
++            b.rope_gather(
++                Plane {
++                    buf: sb,
++                    offset: slot * head_dim,
++                    pitch: stride_heads * head_dim,
++                },
++                rows,
++                tb,
++                spec,
++                dest,
++            )?;
++            read_vec(b, dest, rows * heads * head_dim)
++        };
++        check(
++            &format!(
++                "rope_gather [{rows} x {heads} x {head_dim}/{rope_dim} @ slot {slot} of {stride_heads}]"
++            ),
++            &run(&host)?,
++            &run(&gpu)?,
++        );
++    }
++
+     for (rows, width, pitch, offset) in
+         [(64usize, 128usize, 256usize, 128usize), (5, 2048, 4096, 0)]
+     {
+diff --git a/phobos-gguf/src/backend/device/backend.rs b/phobos-gguf/src/backend/device/backend.rs
+index 4fb87d8..9c8b250 100644
+--- a/phobos-gguf/src/backend/device/backend.rs
++++ b/phobos-gguf/src/backend/device/backend.rs
+@@ -519,6 +519,17 @@ impl Backend for DeviceBackend {
+         )
+     }
+ 
++    fn rope_gather(
++        &self,
++        src: Plane,
++        rows: usize,
++        table: Buf,
++        spec: Rope,
++        dest: Buf,
++    ) -> Result<()> {
++        self.rope_gather_impl(src, rows, table, spec, dest)
++    }
++
+     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+         self.check_distinct("attention", out, &[q]);
+         // A tensor-core, f16, pipelined version of the blocked kernel below
+@@ -828,4 +839,15 @@ impl Backend for DeviceBackend {
+         self.check_distinct("copy", dst, &[src]);
+         self.pointwise("copy", &[(src, src_offset), (dst, dst_offset)], len)
+     }
++
++    fn swiglu_planes_q(
++        &self,
++        gate: Plane,
++        up: Plane,
++        out: Buf,
++        rows: usize,
++        width: usize,
++    ) -> Result<QAct> {
++        self.swiglu_planes_quantized(gate, up, out, rows, width)
++    }
+ }
+diff --git a/phobos-gguf/src/backend/device/elem.rs b/phobos-gguf/src/backend/device/elem.rs
+index 8e1e07c..a212b03 100644
+--- a/phobos-gguf/src/backend/device/elem.rs
++++ b/phobos-gguf/src/backend/device/elem.rs
+@@ -89,4 +89,53 @@ impl DeviceBackend {
+         };
+         self.launch(module, name, &operands, (len.div_ceil(tile) as u32, 1, 1))
+     }
++
++    /// [`Backend::swiglu_planes_q`]'s fused form, keeping [`Backend`]'s own
++    /// impl block a thin call layer.
++    pub(super) fn swiglu_planes_quantized(
++        &self,
++        gate: Plane,
++        up: Plane,
++        out: Buf,
++        rows: usize,
++        width: usize,
++    ) -> Result<QAct> {
++        self.check_distinct("swiglu_planes_q", out, &[gate.buf, up.buf]);
++        let tile = swiglu_2d_q_tile(width);
++        // The reshaped kernel addresses both planes in whole Q8_0 blocks, so it
++        // needs a tile that divides evenly into one and a pitch the two planes
++        // agree on; whatever declines takes the unfused pair, which is exactly
++        // the trait's default for this method.
++        if !tile.is_multiple_of(Q8_BLOCK) || gate.pitch != 2 * width || up.pitch != 2 * width {
++            self.swiglu_planes(gate, up, out, rows, width)?;
++            return self.quantize_act(out, rows, width);
++        }
++        let (act, qa_ptr, das_ptr) = self.act_slot(rows, width)?;
++        let blocks = width / Q8_BLOCK;
++        let (rb, qb) = (Q8_BLOCK as i64, blocks as i64);
++        self.with_kernel(
++            &self.swiglu_planes_q,
++            width,
++            "swiglu_2d_q",
++            || swiglu_2d_q_src(width, tile),
++            |module| {
++                self.launch(
++                    module,
++                    "swiglu_2d_q",
++                    &[
++                        (
++                            self.ptr(gate.buf, gate.offset)?,
++                            [(rows as i64) * 2 * qb, rb],
++                        ),
++                        (self.ptr(up.buf, up.offset)?, [(rows as i64) * 2 * qb, rb]),
++                        (self.ptr(out, 0)?, [(rows as i64) * qb, rb]),
++                        (qa_ptr, [(rows as i64) * qb, rb]),
++                        (das_ptr, [(rows as i64) * qb, 1]),
++                    ],
++                    (rows as u32, (width / tile) as u32, 1),
++                )
++            },
++        )?;
++        Ok(act)
++    }
+ }
+diff --git a/phobos-gguf/src/backend/device/kernels/elem.rs b/phobos-gguf/src/backend/device/kernels/elem.rs
+index 3c58537..c201539 100644
+--- a/phobos-gguf/src/backend/device/kernels/elem.rs
++++ b/phobos-gguf/src/backend/device/kernels/elem.rs
+@@ -1,5 +1,6 @@
+ // Pointwise, strided copy and swiglu kernel sources.
+ 
++use crate::backend::Q8_BLOCK;
+ use phobos_kernels::launch::STATIC_SHARED_LIMIT;
+ 
+ /// Elements per block for the pointwise kernels.
+@@ -174,3 +175,60 @@ pub(crate) fn swiglu_2d_tile(width: usize) -> usize {
+         .find(|t| width.is_multiple_of(*t))
+         .unwrap_or(width)
+ }
++
++/// [`swiglu_2d_q_src`]'s column tile. Wider than [`swiglu_2d_src`]'s own
++/// tiles hold: that kernel keeps three operands (`G`, `U`, `O`) live at once,
++/// this one keeps six (`G`, `U`, the SwiGLU product, the scaled-for-rounding
++/// copy, and `O`'s and `Q`'s own staging), so the same 48 KB static ceiling
++/// fits a narrower tile. Measured, not derived: a whole-row tile at 3584 (one
++/// of `swiglu_2d_tile`'s own shapes) compiled and JIT-loaded for the plain
++/// kernel and failed to load for this one, over the static shared-memory
++/// ceiling.
++pub(crate) fn swiglu_2d_q_tile(width: usize) -> usize {
++    const OPERANDS: usize = 4;
++    let fits = STATIC_SHARED_LIMIT / (OPERANDS * size_of::<f32>());
++    (1..=width.min(fits))
++        .rev()
++        .find(|t| width.is_multiple_of(*t))
++        .unwrap_or(width)
++}
++
++/// [`swiglu_2d_src`], with the epilogue [`swiglu_q_src`] adds to the flat
++/// SwiGLU: a quantized copy behind the down projection that reads this, one
++/// scale per [`Q8_BLOCK`].
++///
++/// Reshaped the same way [`rms_norm_src`] reshapes its row: every tensor here
++/// is addressed in whole blocks of [`Q8_BLOCK`] rather than elements, so
++/// `rowmax` sees the same run a Q8_0 scale covers without a cross-program
++/// reduction. This only typechecks when a program's column tile divides into
++/// whole blocks, which the caller has to check -- see [`swiglu_2d_q_tile`]'s
++/// doc comment for why a tile can come out narrower than a block on an
++/// unusual `width`.
++///
++/// The gate and up planes share one pitch (`2 * width`, the fused
++/// gate-and-up projection's output width) which the caller asserts; the
++/// output is dense at `width`, half that.
++pub(crate) fn swiglu_2d_q_src(width: usize, tile: usize) -> String {
++    let nb = tile / Q8_BLOCK;
++    let pb = (2 * width) / Q8_BLOCK;
++    let ob = width / Q8_BLOCK;
++    format!(
++        "@launch(256)
++@autotune(NB in [{nb}])
++kernel swiglu_2d_q(G: tensor<f32>[RG, {Q8_BLOCK}], U: tensor<f32>[RU, {Q8_BLOCK}],
++                    O: tensor<f32>[RO, {Q8_BLOCK}], Q: tensor<i8>[RO, {Q8_BLOCK}],
++                    S: tensor<f32>[RO, D1]) {{
++  let r = program_id(0)
++  let c = program_id(1) * NB
++  var g = G[r * {pb} + c :+ NB, 0 :+ {Q8_BLOCK}]
++  var u = U[r * {pb} + c :+ NB, 0 :+ {Q8_BLOCK}]
++  var y: tile<f32>[NB, {Q8_BLOCK}] = (g / (1.0 + exp(-g))) * u
++  O[r * {ob} + c :+ NB, 0 :+ {Q8_BLOCK}] = y
++  var mx: tile<f32>[NB, 1] = rowmax(tmax(y, -y))
++  var q = y * (127.0 / (mx + 0.00000001))
++  Q[r * {ob} + c :+ NB, 0 :+ {Q8_BLOCK}] = i8(i32(round(q)))
++  S[r * {ob} + c :+ NB, 0 :+ 1] = mx / 127.0
++}}
++"
++    )
++}
+diff --git a/phobos-gguf/src/backend/device/mod.rs b/phobos-gguf/src/backend/device/mod.rs
+index e2f52fd..0172022 100644
+--- a/phobos-gguf/src/backend/device/mod.rs
++++ b/phobos-gguf/src/backend/device/mod.rs
+@@ -237,6 +237,12 @@ pub struct DeviceBackend {
+     gated_swiglu: RefCell<HashMap<usize, Module>>,
+     /// A SwiGLU reading its two operands as planes of a wider buffer, by width.
+     swiglu_planes: RefCell<HashMap<usize, Module>>,
++    /// [`Backend::swiglu_planes_q`]'s quantizing form. Keyed by width alone
++    /// (unlike `swiglu_planes`, keyed by tile): the block counts baked into
++    /// this kernel's source are a function of width, and `swiglu_2d_tile`
++    /// derives the tile from width deterministically, so width alone pins
++    /// the source down.
++    swiglu_planes_q: RefCell<HashMap<usize, Module>>,
+     /// Keyed by head count and head dimension. Both are tile extents, so both
+     /// have to be compile-time constants; a model only ever uses one pair.
+     deltas: RefCell<HashMap<(usize, usize), Module>>,
+@@ -255,6 +261,10 @@ pub struct DeviceBackend {
+     store_pairs: RefCell<HashMap<(usize, bool), Module>>,
+     /// Rotary kernels, keyed by head count and half the rotary width.
+     ropes: RefCell<HashMap<(usize, usize), Module>>,
++    /// [`Backend::rope_gather`] kernels, keyed by head count, half the
++    /// rotary width, the source's heads-per-physical-row stride and the head
++    /// dimension (the passthrough tail's width follows from the last two).
++    rope_gathers: RefCell<HashMap<(usize, usize, usize, usize), Module>>,
+     /// Attention kernels, keyed by query heads, group size and head dimension.
+     attentions: RefCell<HashMap<(usize, usize, usize), Module>>,
+     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
+@@ -447,6 +457,7 @@ impl DeviceBackend {
+             gated_norms: RefCell::new(HashMap::new()),
+             gated_swiglu: RefCell::new(HashMap::new()),
+             swiglu_planes: RefCell::new(HashMap::new()),
++            swiglu_planes_q: RefCell::new(HashMap::new()),
+             deltas: RefCell::new(HashMap::new()),
+             chunks: RefCell::new(HashMap::new()),
+             identities: RefCell::new(HashMap::new()),
+@@ -455,6 +466,7 @@ impl DeviceBackend {
+             splits: RefCell::new(HashMap::new()),
+             store_pairs: RefCell::new(HashMap::new()),
+             ropes: RefCell::new(HashMap::new()),
++            rope_gathers: RefCell::new(HashMap::new()),
+             attentions: RefCell::new(HashMap::new()),
+             split_attn: RefCell::new(HashMap::new()),
+             attn_persist: !matches!(
+diff --git a/phobos-gguf/src/backend/mod.rs b/phobos-gguf/src/backend/mod.rs
+index baf2662..e33c859 100644
+--- a/phobos-gguf/src/backend/mod.rs
++++ b/phobos-gguf/src/backend/mod.rs
+@@ -546,6 +546,21 @@ pub trait Backend {
+         Ok(())
+     }
+ 
++    /// [`Backend::swiglu_planes`] that also leaves the result quantized for
++    /// the down projection that reads it, the way [`Backend::swiglu_q`] does
++    /// for the flat, single-row form.
++    fn swiglu_planes_q(
++        &self,
++        gate: Plane,
++        up: Plane,
++        out: Buf,
++        rows: usize,
++        width: usize,
++    ) -> Result<QAct> {
++        self.swiglu_planes(gate, up, out, rows, width)?;
++        self.quantize_act(out, rows, width)
++    }
++
+     /// Copy a `rows` by `width` block between two strided planes.
+     /// [`Backend::copy`] is the case where neither side is wider than the
+     /// block.
+@@ -558,6 +573,34 @@ pub trait Backend {
+     /// filled out to `start_pos + rows`. Pairs are `(i, i + rope_dim / 2)`.
+     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()>;
+ 
++    /// [`Backend::rope`] against a strided window of a wider buffer, writing
++    /// a dense `dest` instead of rotating in place: what a fused QKV
++    /// projection's query and key both want past one row, where the three
++    /// parts interleave and a caller used to pull one out with
++    /// [`Backend::copy_2d`] before rotating it. The default is exactly that
++    /// pair, unfused.
++    fn rope_gather(
++        &self,
++        src: Plane,
++        rows: usize,
++        table: Buf,
++        spec: Rope,
++        dest: Buf,
++    ) -> Result<()> {
++        let width = spec.heads * spec.head_dim;
++        self.copy_2d(
++            src,
++            Plane {
++                buf: dest,
++                offset: 0,
++                pitch: width,
++            },
++            rows,
++            width,
++        )?;
++        self.rope(dest, rows, table, spec)
++    }
++
+     /// Causal softmax attention against the key and value caches, which must
+     /// already carry this call's rows.
+     ///
+diff --git a/phobos-gguf/src/layers.rs b/phobos-gguf/src/layers.rs
+index 88e7d0f..8b6d970 100644
+--- a/phobos-gguf/src/layers.rs
++++ b/phobos-gguf/src/layers.rs
+@@ -608,6 +608,18 @@ impl Ffn {
+             offset,
+             pitch: 2 * width,
+         };
++        // A quantized down projection wants the SwiGLU's output quantized
++        // too, and a backend can fold that into the same launch; see
++        // `Backend::swiglu_planes_q`. A dense weight has no accumulating
++        // form ([`Linear::add_into`]'s own dense fallback), so quantizing
++        // here would only be thrown away.
++        if self.down.is_quantized() {
++            let act = backend.swiglu_planes_q(stacked(0), stacked(width), joined, rows, width)?;
++            backend.release(both);
++            self.down.add_into_act(backend, joined, act, rows, dest)?;
++            backend.release(joined);
++            return Ok(());
++        }
+         backend.swiglu_planes(stacked(0), stacked(width), joined, rows, width)?;
+         backend.release(both);
+         self.down.add_into(backend, joined, rows, dest)?;
