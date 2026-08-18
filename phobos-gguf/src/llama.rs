@@ -456,40 +456,47 @@ impl Model {
             pitch: kv_width,
         };
 
+        let table = self.rope.buf(backend, spec.total())?;
+
         // A decode step's query is the front of the projection and already
-        // contiguous, so it rotates and attends where it lies. Past one row the
-        // three parts interleave and it has to be pulled out.
+        // contiguous, so it rotates where it lies. Past one row the three
+        // parts interleave, so `rope_gather` reads its own strided window
+        // directly instead of a caller pulling it out with `copy_2d` first.
+        let q_rope = Rope {
+            heads: cfg.n_head,
+            head_dim: cfg.head_dim,
+            rope_dim: cfg.rope_dim,
+            start_pos,
+        };
         let mut scratch = Vec::new();
         let q = if rows == 1 {
+            backend.rope(qkv, rows, table, q_rope)?;
             qkv
         } else {
             let buf = backend.alloc(rows * width)?;
-            backend.copy_2d(part(0), dense_plane(buf, width), rows, width)?;
+            backend.rope_gather(part(0), rows, table, q_rope, buf)?;
             scratch.push(buf);
             buf
         };
 
-        // The key never can: the rotation is in place and takes no offset, so
-        // it needs a buffer starting at its own first element.
+        // The key never can alias `qkv`: it starts at a nonzero offset of the
+        // fused projection and `rope` only ever rotates from the front of the
+        // buffer it's given. `rope_gather` reads that offset directly, so
+        // this needs no `copy_2d` ahead of it either, at any row count.
         let k = backend.alloc(rows * kv_width)?;
-        backend.copy_2d(part(width), dense_plane(k, kv_width), rows, kv_width)?;
+        backend.rope_gather(
+            part(width),
+            rows,
+            table,
+            Rope {
+                heads: cfg.n_head_kv,
+                head_dim: cfg.head_dim,
+                rope_dim: cfg.rope_dim,
+                start_pos,
+            },
+            k,
+        )?;
         scratch.push(k);
-
-        let table = self.rope.buf(backend, spec.total())?;
-
-        for (buf, heads) in [(q, cfg.n_head), (k, cfg.n_head_kv)] {
-            backend.rope(
-                buf,
-                rows,
-                table,
-                Rope {
-                    heads,
-                    head_dim: cfg.head_dim,
-                    rope_dim: cfg.rope_dim,
-                    start_pos,
-                },
-            )?;
-        }
 
         // The value store waits for the key's rope to land here too, one
         // launch instead of two: nothing reads either cache before the

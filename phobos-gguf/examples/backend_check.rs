@@ -511,6 +511,53 @@ fn main() -> Result<()> {
         );
     }
 
+    // rope_gather: a strided window of a fused QKV buffer, offset past other
+    // heads sharing the same physical row, exactly what `llama.rs::attention`
+    // hands this op for K (any row count) and for Q past one row. One shape
+    // has no passthrough range (rope_dim == head_dim, minicpm's shape); the
+    // other does (rope_dim < head_dim, Qwen's shape) -- Qwen's own forward
+    // pass never calls this op (its rope runs on already-dense, already
+    // QK-normed buffers in `qwen35.rs`), so this is the only place the
+    // passthrough range and the nonzero-offset stride reshape are checked.
+    for (rows, heads, head_dim, rope_dim, stride_heads, slot, start_pos) in [
+        (5usize, 2usize, 32usize, 32usize, 8usize, 4usize, 10usize),
+        (9, 4, 64, 32, 8, 4, 0),
+    ] {
+        let table: Vec<f32> = (0..(start_pos + rows) * rope_dim).map(|_| next()).collect();
+        let src: Vec<f32> = (0..rows * stride_heads * head_dim)
+            .map(|_| next())
+            .collect();
+        let spec = Rope {
+            heads,
+            head_dim,
+            rope_dim,
+            start_pos,
+        };
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let (sb, tb) = (b.upload(&src)?, b.upload(&table)?);
+            let dest = b.alloc(rows * heads * head_dim)?;
+            b.rope_gather(
+                Plane {
+                    buf: sb,
+                    offset: slot * head_dim,
+                    pitch: stride_heads * head_dim,
+                },
+                rows,
+                tb,
+                spec,
+                dest,
+            )?;
+            read_vec(b, dest, rows * heads * head_dim)
+        };
+        check(
+            &format!(
+                "rope_gather [{rows} x {heads} x {head_dim}/{rope_dim} @ slot {slot} of {stride_heads}]"
+            ),
+            &run(&host)?,
+            &run(&gpu)?,
+        );
+    }
+
     for (rows, width, pitch, offset) in
         [(64usize, 128usize, 256usize, 128usize), (5, 2048, 4096, 0)]
     {

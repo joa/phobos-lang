@@ -271,6 +271,10 @@ pub struct DeviceBackend {
     store_pairs: RefCell<HashMap<(usize, bool), Module>>,
     /// Rotary kernels, keyed by head count and half the rotary width.
     ropes: RefCell<HashMap<(usize, usize), Module>>,
+    /// [`Backend::rope_gather`] kernels, keyed by head count, half the
+    /// rotary width, the source's heads-per-physical-row stride and the head
+    /// dimension (the passthrough tail's width follows from the last two).
+    rope_gathers: RefCell<HashMap<(usize, usize, usize, usize), Module>>,
     /// Attention kernels, keyed by query heads, group size and head dimension.
     attentions: RefCell<HashMap<(usize, usize, usize), Module>>,
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
@@ -476,6 +480,7 @@ impl DeviceBackend {
             splits: RefCell::new(HashMap::new()),
             store_pairs: RefCell::new(HashMap::new()),
             ropes: RefCell::new(HashMap::new()),
+            rope_gathers: RefCell::new(HashMap::new()),
             attentions: RefCell::new(HashMap::new()),
             split_attn: RefCell::new(HashMap::new()),
             attn_persist: !matches!(

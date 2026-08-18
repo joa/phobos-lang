@@ -536,4 +536,61 @@ impl DeviceBackend {
             },
         )
     }
+
+    /// [`Backend::rope_gather`]'s fused form, keeping [`Backend`]'s own impl
+    /// block a thin call layer.
+    pub(super) fn rope_gather_impl(
+        &self,
+        src: Plane,
+        rows: usize,
+        table: Buf,
+        spec: Rope,
+        dest: Buf,
+    ) -> Result<()> {
+        self.check_distinct("rope_gather", dest, &[src.buf]);
+        // The reshaped source needs a pitch that is a whole number of heads;
+        // every fused QKV projection this codebase builds satisfies it, but a
+        // caller that does not takes the unfused pair.
+        if !src.pitch.is_multiple_of(spec.head_dim) {
+            let width = spec.heads * spec.head_dim;
+            self.copy_2d(
+                src,
+                Plane {
+                    buf: dest,
+                    offset: 0,
+                    pitch: width,
+                },
+                rows,
+                width,
+            )?;
+            return self.rope(dest, rows, table, spec);
+        }
+        let stride_heads = src.pitch / spec.head_dim;
+        let half = spec.rope_dim / 2;
+        let (r, d) = ((rows * spec.heads) as i64, spec.head_dim as i64);
+        self.with_kernel(
+            &self.rope_gathers,
+            (spec.heads, half, stride_heads, spec.head_dim),
+            "rope_gather",
+            || rope_gather_src(spec.heads, half, stride_heads, spec.head_dim),
+            |module| {
+                self.launch(
+                    module,
+                    "rope_gather",
+                    &[
+                        (
+                            self.ptr(src.buf, src.offset)?,
+                            [(rows as i64) * stride_heads as i64, d],
+                        ),
+                        (
+                            self.ptr(table, spec.start_pos * spec.rope_dim)?,
+                            [rows as i64, spec.rope_dim as i64],
+                        ),
+                        (self.ptr(dest, 0)?, [r, d]),
+                    ],
+                    (r as u32, 1, 1),
+                )
+            },
+        )
+    }
 }

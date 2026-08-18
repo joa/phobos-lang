@@ -519,6 +519,17 @@ impl Backend for DeviceBackend {
         )
     }
 
+    fn rope_gather(
+        &self,
+        src: Plane,
+        rows: usize,
+        table: Buf,
+        spec: Rope,
+        dest: Buf,
+    ) -> Result<()> {
+        self.rope_gather_impl(src, rows, table, spec, dest)
+    }
+
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         self.check_distinct("attention", out, &[q]);
         // A tensor-core, f16, pipelined version of the blocked kernel below

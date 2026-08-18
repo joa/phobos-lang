@@ -558,6 +558,34 @@ pub trait Backend {
     /// filled out to `start_pos + rows`. Pairs are `(i, i + rope_dim / 2)`.
     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()>;
 
+    /// [`Backend::rope`] against a strided window of a wider buffer, writing
+    /// a dense `dest` instead of rotating in place: what a fused QKV
+    /// projection's query and key both want past one row, where the three
+    /// parts interleave and a caller used to pull one out with
+    /// [`Backend::copy_2d`] before rotating it. The default is exactly that
+    /// pair, unfused.
+    fn rope_gather(
+        &self,
+        src: Plane,
+        rows: usize,
+        table: Buf,
+        spec: Rope,
+        dest: Buf,
+    ) -> Result<()> {
+        let width = spec.heads * spec.head_dim;
+        self.copy_2d(
+            src,
+            Plane {
+                buf: dest,
+                offset: 0,
+                pitch: width,
+            },
+            rows,
+            width,
+        )?;
+        self.rope(dest, rows, table, spec)
+    }
+
     /// Causal softmax attention against the key and value caches, which must
     /// already carry this call's rows.
     ///

@@ -312,6 +312,53 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
     )
 }
 
+/// [`rope_src`], reading a strided window of a fused QKV projection instead
+/// of rotating in place, and writing a dense destination -- what a prompt's
+/// query and key both want, since past one row the three parts of the
+/// projection interleave and the caller used to pull one out with `copy_2d`
+/// before rope ever ran.
+///
+/// `S` is addressed the way a fused epilogue kernel addresses its planes: the
+/// whole fused row is `stride_heads` heads wide, and a program only ever
+/// touches the `heads` of them this call's window starts at (the caller's
+/// pointer offset does that shift; see [`Backend::rope_gather`]). Channels
+/// past `rope_dim` pass through unrotated, same as [`rope_src`], except this
+/// kernel has no prior copy to leave them for, so it copies them itself when
+/// `half * 2 < head_dim`.
+pub(crate) fn rope_gather_src(
+    heads: usize,
+    half: usize,
+    stride_heads: usize,
+    head_dim: usize,
+) -> String {
+    let tail = head_dim - 2 * half;
+    let passthrough = if tail > 0 {
+        format!(
+            "  D[r :+ 1, {rope_dim} :+ {tail}] = S[row :+ 1, {rope_dim} :+ {tail}]\n",
+            rope_dim = 2 * half,
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "@launch(256)
+@autotune(H in [{heads}])
+kernel rope_gather(S: tensor<f32>[RS, {head_dim}], T: tensor<f32>[P, RD], D: tensor<f32>[RD, {head_dim}]) {{
+  let r = program_id(0)
+  let p = r / H
+  let h = r - p * H
+  let row = p * {stride_heads} + h
+  var a = S[row :+ 1, 0 :+ {half}]
+  var b = S[row :+ 1, {half} :+ {half}]
+  var c = T[p :+ 1, 0 :+ {half}]
+  var s = T[p :+ 1, {half} :+ {half}]
+  D[r :+ 1, 0 :+ {half}] = a * c - b * s
+  D[r :+ 1, {half} :+ {half}] = a * s + b * c
+{passthrough}}}
+"
+    )
+}
+
 /// Causal softmax attention over the whole cache, one group of query rows per
 /// program, with the key axis split across the grid and, inside each split's
 /// own block, split *again* across the block's eight warps.
