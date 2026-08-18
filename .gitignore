@@ -5,3 +5,4 @@
 /.cargo/
 /scripts/__pycache__
 *.pyc
+/.claude/
