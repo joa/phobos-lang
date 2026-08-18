@@ -164,6 +164,12 @@ pub struct DeviceBackend {
     /// keyed by output width and the low half's `k`. Compiled lazily, only
     /// when [`Self::qmma_streamk`] asks for it.
     q8_qmma_streamk: RefCell<HashMap<QmmaStreamKKey, (Module, Module)>>,
+    /// The narrow-CTA variant of the deep tile (see
+    /// `kernels::q8_qmma_narrow_eligible`'s doc comment and
+    /// `autoresearch/beams/q8-qmma-grid-starve.md`): same `qmma_t` kernel,
+    /// half the threads and half the column tile, same per-warp patch.
+    /// Compiled lazily, only when [`Self::qmma_narrow`] asks for it.
+    q8_qmma_narrow: RefCell<Option<Module>>,
     q8_split: Variants,
     q8_qdot: Module,
     q8_qdot_add: Module,
@@ -191,6 +197,16 @@ pub struct DeviceBackend {
     /// opts in; mutually exclusive with [`Self::qmma_split`] in
     /// `matmul.rs`'s `project_q8`, checked first.
     qmma_streamk: bool,
+    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path (see
+    /// `kernels::q8_qmma_narrow_eligible`) on a starved grid instead of the
+    /// unsplit launch. Default OFF like [`Self::qmma_split`] and
+    /// [`Self::qmma_streamk`], checked ahead of both in `matmul.rs`'s
+    /// `project_q8` since it targets the same starved shapes by a different,
+    /// non-bandwidth-adding mechanism (more disjoint-output blocks at the
+    /// same per-warp tensor-core intensity, not a reduction pass). See
+    /// `autoresearch/beams/q8-qmma-grid-starve.md`. `PHOBOS_QMMA_NARROW=1`
+    /// opts in.
+    qmma_narrow: bool,
     /// Fused kernels the pass has emitted, with the plan that says what to bind
     /// to each. See [`fuse`].
     fused_plans: RefCell<HashMap<ChainKey, (Module, Plan)>>,
@@ -421,6 +437,7 @@ impl DeviceBackend {
             q8_qmma_deep,
             q8_qmma_split: RefCell::new(HashMap::new()),
             q8_qmma_streamk: RefCell::new(HashMap::new()),
+            q8_qmma_narrow: RefCell::new(None),
             q8_split,
             q8_qdot,
             q8_qdot_add,
@@ -433,6 +450,10 @@ impl DeviceBackend {
             ),
             qmma_streamk: matches!(
                 std::env::var("PHOBOS_QMMA_STREAMK").as_deref(),
+                Ok("1" | "on" | "yes" | "true")
+            ),
+            qmma_narrow: matches!(
+                std::env::var("PHOBOS_QMMA_NARROW").as_deref(),
                 Ok("1" | "on" | "yes" | "true")
             ),
             fused_plans: RefCell::new(HashMap::new()),

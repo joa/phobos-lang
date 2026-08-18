@@ -73,6 +73,14 @@ impl DeviceBackend {
                         rows, qmma_rows, k, blocks, n, wide, qa_ptr, das_ptr, w_ptr, s_ptr,
                         out_ptr, f32_bytes,
                     )?;
+                } else if depth == Q8_QMMA_TM
+                    && self.qmma_narrow
+                    && q8_qmma_narrow_eligible(rows, n, wide)
+                {
+                    self.launch_qmma_narrow(
+                        rows, qmma_rows, k, blocks, n, qa_ptr, das_ptr, w_ptr, s_ptr, out_ptr,
+                        f32_bytes,
+                    )?;
                 } else if splits > 1 {
                     self.launch_qmma_split(
                         rows, qmma_rows, k, blocks, n, wide, splits, qa_ptr, das_ptr, w_ptr,
@@ -292,6 +300,63 @@ impl DeviceBackend {
             "q8_qmma_reduce",
             &reduce_operands,
             (rows as u32, (n / wide) as u32, 1),
+        )
+    }
+
+    /// The narrow-CTA path for `q8_qmma`'s deep tile: the same `qmma_t`
+    /// kernel at half the threads and half the column tile
+    /// ([`Q8_QMMA_NARROW_CTA`], [`Q8_QMMA_NARROW_TN`]), which `qmma_patch`
+    /// resolves to the *same* per-warp patch as the shipped 128-wide config
+    /// (see that constant's doc comment) -- so this doubles the grid on a
+    /// starved shape at unchanged tensor-core intensity, one launch, no
+    /// reduction pass and no scratch buffer, unlike [`Self::launch_qmma_split`].
+    #[allow(clippy::too_many_arguments)]
+    fn launch_qmma_narrow(
+        &self,
+        rows: usize,
+        row_off: usize,
+        k: usize,
+        blocks: usize,
+        n: usize,
+        qa_ptr: u64,
+        das_ptr: u64,
+        w_ptr: u64,
+        s_ptr: u64,
+        out_ptr: u64,
+        f32_bytes: u64,
+    ) -> Result<()> {
+        if self.q8_qmma_narrow.borrow().is_none() {
+            let src = q8_qmma_src(Q8_QMMA_NARROW_CTA);
+            let module = compile(
+                &src,
+                &[("TM", Q8_QMMA_TM), ("TN", Q8_QMMA_NARROW_TN)],
+                "q8_qmma",
+            )?;
+            *self.q8_qmma_narrow.borrow_mut() = Some(module);
+        }
+        let cache = self.q8_qmma_narrow.borrow();
+        let module = cache.as_ref().expect("just compiled above");
+        self.launch(
+            module,
+            "q8_qmma",
+            &[
+                (qa_ptr + (row_off * k) as u64, [rows as i64, k as i64]),
+                (
+                    das_ptr + (row_off * blocks) as u64 * f32_bytes,
+                    [rows as i64, blocks as i64],
+                ),
+                (w_ptr, [n as i64, k as i64]),
+                (s_ptr, [blocks as i64, n as i64]),
+                (
+                    out_ptr + (row_off * n) as u64 * f32_bytes,
+                    [rows as i64, n as i64],
+                ),
+            ],
+            (
+                (rows / Q8_QMMA_TM) as u32,
+                (n / Q8_QMMA_NARROW_TN) as u32,
+                1,
+            ),
         )
     }
 
