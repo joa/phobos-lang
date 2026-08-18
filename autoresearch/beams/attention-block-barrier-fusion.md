@@ -245,39 +245,75 @@ change removes a redundant synchronization point rather than altering any
 computed value, and the match is itself a data point that nothing was
 silently reordered into a race.
 
-## Not yet done: `ncu` timing
+## `ncu` timing
 
-Per the standing protocol, no `ncu`/`nsys` capture was run. The predicted
-effect is small and worth setting expectations on before spending a slot:
-barrier stalls are 44.0% of the *average issue-to-issue gap*, and one fewer
-barrier out of 13-14 per iteration is roughly a 7% reduction in sync
-*points*, not necessarily 7% of that 44% -- the removed barrier's own stall
-cost depended on how long the CTA's slowest warp was already going to make
-every other warp wait at the next one anyway, which this static count can't
-predict. On the vectorize-pad beam's own numbers (91.49-96.13us across 5
-launches, about 8% peak-to-peak spread), a real win here plausibly lands
-inside that noise band and needs the same 5-launch averaging to see past
-it. **Requesting a GPU slot** to capture `ncu --set full -k
-"regex:attention_block" -c 5` on the real `pp128` shape against this
-worktree's rebuilt `bench.exe`, compared to the existing
-`ncu_attnblock_fixAB_pp128_details.txt` baseline already in the tree
-(barrier-stall percentage and `gpu__time_duration.sum`), same protocol as
-the vectorize-pad beam's three-point capture (idle-card check immediately
-before, `Set-Location` into this worktree explicitly to avoid the process-
-path mixup that beam's own report documents).
+GPU-slot granted after code review; card verified idle immediately before
+capture (`nvidia-smi` polled four times: 3-25% transient util, 375-840MHz,
+the same desktop-compositor-blip pattern the vectorize-pad beam's own
+baseline capture called idle, no other `bench`/`check`/`ncu` process
+running). `ncu --set full -k "regex:attention_block" -c 5` against this
+worktree's rebuilt `target\release\examples\bench.exe -m
+models\minicpm5-1b-Q8_0.gguf -p 128 -n 0 -r 1 --no-warmup`,
+`PHOBOS_ATTN_PERSIST=1`, `Set-Location`'d into the worktree explicitly
+first (the vectorize-pad beam's own mixup-avoidance step). Confirmed
+profiling `C:\Users\joaeb\code\phobos-wt-barrierfuse\target\...` from the
+`==PROF== Connected to process` line. 5 launches, same `pp128` shape/grid
+`(16,16,1)`/block `(256,1,1)` as every prior capture in this session.
+Evidence: `ncu_attnblock_barrierfix_pp128.ncu-rep` / `_details.txt` / `.csv`.
+
+| | before (`fixAB`, this session's standing baseline) | after (this beam) |
+| --- | --- | --- |
+| duration, 5 launches | 91.488, 91.968, 92.992, 90.016, 96.128 us | 93.024, 94.400, 93.568, 87.520, 92.704 us |
+| duration avg | 92.518 us | 92.243 us |
+| barrier stall % of issue gap | 44.0% (single launch exported in the baseline `_details.txt`) | 43.6%, 43.5%, 43.7%, 43.8%, 43.3% (avg 43.58%) |
+| warp cycles / issued instr | 15.38 | 15.42, 15.44, 15.36, 15.42, 15.44 (avg 15.42) |
+| bank conflicts (`..._op_ld.sum`) | 508,874 | 509,080 / 508,841 / 508,898 / 509,002 / 508,929 (unchanged, as expected) |
+| `Block Limit Shared Mem` | 3 | 3 (unchanged, as expected) |
+| Achieved Occupancy | 65.31% | 65.39% / 64.00% / 63.71% / 65.38% / 65.24% (avg 64.74%) |
+
+**Duration: statistically flat, -0.275us / -0.30% on the 5-launch average,
+inside both distributions' own peak-to-peak spread** (before: 90.02-96.13,
+a 6.1us/6.6% range; after: 87.52-94.40, a 6.9us/7.5% range -- the two
+ranges overlap almost entirely). This confirms the expectation set before
+the capture: removing 1 of 13-14 barriers is not a measurable
+launch-duration win at this kernel's size, and no honest reading of these
+five numbers claims one.
+
+**Barrier-stall share: a small, real, directionally consistent drop** --
+44.0% -> 43.58% average, about 0.4 percentage points, roughly 1% relative.
+Every one of the 5 new-capture launches lands between 43.3% and 43.8%,
+consistently *below* the single baseline launch's 44.0%, which is a
+tighter, more one-sided pattern than duration's overlapping noise band
+shows -- so this is more likely a real (if small) effect than noise, but it
+is nowhere near proportional to "1 barrier removed / 13-14 total = ~7%,"
+confirming the other expectation set before the capture: the removed
+barrier's own stall cost is whatever the slowest warp was already going to
+make everyone wait at the *next* barrier for, not a uniform 1/14th share of
+the total. Bank conflicts and `Block Limit Shared Mem` are unchanged, as
+they should be for a change that touches only synchronization, not layout
+or footprint -- a clean sanity check that nothing else moved.
 
 ## Recommendation
 
-Land the mechanism -- it is a genuine, narrow, general codegen correctness-
-preserving change (not gated to `attention_block`, verified tree-wide, both
-targets, all gates), with a small but real and provably safe win. Do not
-expect it to close the audit's 44%-of-issue-gap barrier-stall finding on its
-own; that finding's actual next steps are the three specific fusion
-opportunities named above (`rowsum` into its combine, `dot(s,v)`'s zero-init
-away, `m = mn` eliminated or folded into `tmax`'s own store), each a
-separate, kernel-aware or op-aware design task now that this beam has
-pinned exactly where the barriers actually are and are not removable by a
-context-free rule.
+**Land the mechanism; do not expect it to move `pp128` throughput on its
+own.** It is a genuine, narrow, general codegen correctness-preserving
+change (not gated to `attention_block`, verified tree-wide at both targets,
+all four gates pass on both models, matching the pre-existing baseline to
+the last digit) with a small, real, measured effect: barrier-stall share
+drops about 0.4 percentage points (44.0% -> 43.58% average, a tight,
+one-sided 5-launch spread against a single baseline point, more likely real
+than noise) and launch duration is statistically flat (-0.30% average,
+entirely inside both captures' own peak-to-peak spread -- not a claimed
+win). The value of this beam is the negative result and the map it leaves
+behind, not the barrier count: it closes off "make the barrier
+call conditional on the next statement's mapping" as a lever (proven to
+recover nothing on this kernel, and the general form of that check is the
+kind of dataflow/alias analysis this codegen doesn't have), and it pins the
+audit's real 44%-of-issue-gap finding to three specific, named,
+still-open materializations -- `rowsum(s)`'s own temp before the `l`
+combine, `dot(s,v)`'s zero-init before the accumulate, and the bare `m =
+mn` copy -- each its own op-aware fusion design, not a context-free rule,
+and each a plausible next beam now that this one has done the tracing.
 
 ## Files touched
 
