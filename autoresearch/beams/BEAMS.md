@@ -1653,3 +1653,37 @@ mistake.
 (attention_block -47.4%, rope_gather ~0.10-0.14ms/pass) on top of the
 prefill-attention dispatch reorder from before this stretch. Confirmation
 `bench.py` against llama.cpp is the coordinator's next step.
+
+## q8_qmma load-width interleave, killed at census (2026-08-18)
+
+Direct follow-up to the SASS audit's item 1 (4-byte, non-coalescable K-loop
+operand loads, a genuine data-layout problem distinct from either prior
+`q8_qmma` beam's failure mode). Full writeup:
+`autoresearch/beams/q8-qmma-load-width-interleave.md`.
+
+The proposed fix -- permute Q8_0 bytes within each 32-byte block identically
+on A and W so a lane's two K-halves become adjacent, halving operand-load
+count -- has a provably sound invariance argument (every consumer computes a
+block-local dot, invariant under a shared within-block permutation) but was
+killed by the producer census the task brief required as a hard gate before
+any code: A's quantized buffer is shared across `qmma_t`/`qdot_t`/`dot_t`
+within one `project_q8` call, and two of its five producers (`rms_norm_q`,
+`swiglu_q`) run on every decode step, not just prefill. Permuting them risks
+a decode regression -- a path this session spent multiple beams winning to
+parity with llama.cpp -- for an unproven prefill-only win. The reader-only
+fallback (shuffle-based reassembly confined to `qmma_t`) was also assessed
+and rejected: the two chunks a lane needs are 12 bytes apart, not 8, so
+covering them needs a cross-lane `shfl`/`prmt` exchange, which re-creates the
+exact new-dependency-chain trade that killed the K-loop prefetch beam, and
+needs an ISA instruction (`prmt`/`shfl.idx`) `phobos-lang`'s codegen target
+doesn't emit yet.
+
+**No code was written, no GPU time was used** -- the census alone was
+sufficient to kill it, which is the ladder working as designed: an
+architecturally cheap step catching a real problem before any expensive one
+runs. Third q8_qmma dead end this session
+([[q8_qmma_occupancy_dead_ends]] now covers all three); the audit's own
+occupancy number (12.45% achieved against a 25% register-bound ceiling)
+still points at grid starvation as the kernel's real remaining lever, a
+bandwidth-reduction angle at the current grid shape neither this beam nor
+split-K actually tried.
