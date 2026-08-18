@@ -295,6 +295,77 @@ fn padstage_leaves_a_sub_period_pitch_tile_alone() {
     assert_contains(&mlir, &["memref<8x32xf16, 3>"]);
 }
 
+/// Two consecutive `var name = <tensor slice>` staging statements (the
+/// `attention_block`/`gemm` K/V-and-A/B pattern) read only global memory, so
+/// neither's write can race the other: the first's own trailing barrier is
+/// redundant, since the second's still fires before either is ever read.
+/// One barrier for the pair, not two -- plus the final store's own.
+#[test]
+fn consecutive_staged_slices_share_one_barrier() {
+    let mlir = emit_mlir(
+        "kernel stage2(A: tensor<f16>[8, 128], B: tensor<f16>[8, 128], O: tensor<f16>[8, 128]) {
+            var a = A[0 :+ 8, 0 :+ 128]
+            var b = B[0 :+ 8, 0 :+ 128]
+            O[0 :+ 8, 0 :+ 128] = a + b
+        }",
+    );
+    let barriers = mlir.matches("gpu.barrier").count();
+    assert_eq!(
+        barriers, 2,
+        "expected one barrier for the merged a/b pair plus one for the \
+         store, got {barriers}:\n{mlir}"
+    );
+    let a_pos = mlir.find("__stage2_tile0").expect("a's tile");
+    let b_pos = mlir.find("__stage2_tile1").expect("b's tile");
+    let first_barrier = mlir.find("gpu.barrier").expect("a barrier");
+    assert!(
+        a_pos < b_pos && b_pos < first_barrier,
+        "the barrier must land after both copies, not between them:\n{mlir}"
+    );
+}
+
+/// A single staging statement, with no adjacent partner to share a barrier
+/// with, keeps its own -- the merge only applies to a genuine run of two or
+/// more.
+#[test]
+fn a_lone_staged_slice_keeps_its_own_barrier() {
+    let mlir = emit_mlir(
+        "kernel stage1(A: tensor<f16>[8, 128], O: tensor<f16>[8, 128]) {
+            var a = A[0 :+ 8, 0 :+ 128]
+            O[0 :+ 8, 0 :+ 128] = a
+        }",
+    );
+    let barriers = mlir.matches("gpu.barrier").count();
+    assert_eq!(
+        barriers, 2,
+        "a lone staging copy plus the store should keep two barriers, got \
+         {barriers}:\n{mlir}"
+    );
+}
+
+/// A staging statement immediately followed by a statement that is *not*
+/// itself another bare `var name = <tensor slice>` (here, one that reads the
+/// just-staged tile through `+`) never joins the run: `stage_run` only ever
+/// matches statements whose value is a plain tensor index, so nothing it
+/// merges can read a sibling's write. Three statements, three barriers.
+#[test]
+fn staging_run_stops_before_a_non_slice_statement() {
+    let mlir = emit_mlir(
+        "kernel stagec(A: tensor<f16>[8, 128], B: tensor<f16>[8, 128], O: tensor<f16>[8, 128]) {
+            var a = A[0 :+ 8, 0 :+ 128]
+            var b = B[0 :+ 8, 0 :+ 128]
+            var c = a
+            O[0 :+ 8, 0 :+ 128] = c + b
+        }",
+    );
+    let barriers = mlir.matches("gpu.barrier").count();
+    assert_eq!(
+        barriers, 3,
+        "a and b still merge (1), but c is not a bare tensor slice and \
+         starts a new run (1), plus the store (1), got {barriers}:\n{mlir}"
+    );
+}
+
 /// A minimal kernel calling `warp_partial` directly, mirroring how
 /// `attention_split_src` (`phobos-gguf`) uses it: one program, one warp
 /// group's worth of query rows, the whole cache as its `[lo, hi)` range.
