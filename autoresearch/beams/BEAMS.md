@@ -1715,3 +1715,46 @@ those are also `Binding::View`s and releasing them early could corrupt
 the pipeline. Central lesson: validate staging-pattern changes against
 real generated chains (the `fused_source` test harness), not hand-built
 probes -- they can disagree.
+
+## attention_block barrier fusion, landed (2026-08-18)
+
+Direct follow-up to the SASS audit's item 3 (barrier stalls, 44.0% of
+issue latency post-fix-A+B, the single largest measured stall anywhere in
+this session's whole audit). Full writeup:
+`autoresearch/beams/attention-block-barrier-fusion.md`.
+
+The general mechanism the task asked for -- make barrier emission
+conditional on whether the next statement's thread-to-data mapping
+actually reads this write -- **recovers nothing** on this kernel: every
+op-lowering function invents its own thread mapping inline, with no
+comparable representation across ops, so every adjacent statement pair in
+the loop genuinely differs. Correctly killed at that scope per the beam's
+own hard rules (would need either a new reified access-pattern type
+tree-wide or a deferred-barrier scheme touching every shared-memory read
+site).
+
+A narrower, provably-safe special case survived: a run of two or more
+adjacent `var name = <tensor slice>` statements (proven statically shaped,
+not masked) reads only global memory, never a shared tile, so nothing in
+the run can race a sibling's write -- one barrier for the whole run
+instead of one per statement. Implemented in `phobos-lang/src/codegen/
+stmt.rs` as `stage_run`/`emit_staging_run`, restricted (after an advisor
+review caught a WAR hole in a broader first draft) to statements that read
+no shared tile at all, not just statements that don't read *this*
+particular write. `attention_block` drops 14 -> 13 barriers per loop
+iteration, 48 -> 47 static total. Tree-wide emit-diff sweep clean (20/22
+identical, the only 2 diffs a single-line barrier removal on
+`gemm_fp16`'s identical pattern, verified safe by hand); 161 `phobos-lang`
+tests pass (158 + 3 new); all four gates on both models match the
+existing baseline to the last digit.
+
+**ncu confirmation: duration flat (-0.3%, inside both captures' own
+peak-to-peak spread), barrier-stall share down a small but consistent
+0.4 points (44.0% -> 43.58% avg, all 5 new-capture launches below the
+single baseline point).** Landed anyway, explicitly not on a throughput
+claim: its value is ruling out the general lever (proven to recover
+nothing) and pinning the remaining 43.58% down to three specific, still-
+open materializations -- `rowsum(s)`'s own temp, `dot(s,v)`'s zero-init,
+the bare `m = mn` copy -- each a separate, now well-specified op-aware
+fusion task for a future beam, rather than an open-ended "barriers are
+39.6%(->44%->43.6%) of something" finding.
