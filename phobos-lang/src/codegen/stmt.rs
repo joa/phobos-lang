@@ -40,19 +40,7 @@ impl<'c> Codegen<'c> {
                         }
                         // var t = <tile expr> -> a writable copy of the value
                         // (a fresh temp is already private: adopt its buffer)
-                        Rv::Tile(src) => {
-                            if src.owned {
-                                self.bind(name, Binding::Tile(src));
-                            } else {
-                                let tile = if self.should_pad_stage(src.elem, &src.shape) {
-                                    self.alloc_tile_padded(block, src.elem, &src.shape)?
-                                } else {
-                                    self.alloc_tile_shaped(block, src.elem, &src.shape)?
-                                };
-                                self.tile_copy(block, &src, &tile, true, false)?;
-                                self.bind(name, Binding::Tile(tile));
-                            }
-                        }
+                        Rv::Tile(src) => self.bind_staged_tile(block, name, src, true)?,
                     }
                 }
             }
@@ -70,6 +58,83 @@ impl<'c> Codegen<'c> {
             }
             Stmt::Expr(e) => {
                 self.emit_expr(block, e)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// The `Rv::Tile(src)` half of `var name = <tile expr>`: adopt a fresh
+    /// temp's buffer outright, or stage a borrowed view (a tensor slice, most
+    /// commonly) into a fresh tile of its own. `sync` gates the staging
+    /// copy's trailing barrier -- see [`Self::stage_run`], the only caller
+    /// that ever passes `false`; every other call site keeps the copy's own
+    /// barrier, exactly as before this parameter existed.
+    fn bind_staged_tile(
+        &mut self,
+        block: &Block<'c>,
+        name: &str,
+        src: MemVal<'c>,
+        sync: bool,
+    ) -> Result<()> {
+        if src.owned {
+            self.bind(name, Binding::Tile(src));
+        } else {
+            let tile = if self.should_pad_stage(src.elem, &src.shape) {
+                self.alloc_tile_padded(block, src.elem, &src.shape)?
+            } else {
+                self.alloc_tile_shaped(block, src.elem, &src.shape)?
+            };
+            self.tile_copy(block, &src, &tile, sync, false)?;
+            self.bind(name, Binding::Tile(tile));
+        }
+        Ok(())
+    }
+
+    /// Length of the maximal run at the front of `stmts` of `var name =
+    /// <tensor slice>` statements: no tile type, a plain `Index` initializer
+    /// resolving to a named tensor parameter (`slice_static_shape`), proven
+    /// in bounds (`!slice_is_partial`) so the slice's own materialization
+    /// reads only global memory (see `Rv::Tile(src).owned` in
+    /// `bind_staged_tile`: a masked slice comes back already materialized,
+    /// with its own unconditional barrier this run never touches).
+    ///
+    /// A statement matching this shape reads no shared tile, only the named
+    /// tensor: a `let`/`var`'s value expression allows tile names in
+    /// arithmetic (`s * scale`, `dot(s, v)`, ...), but `slice_static_shape`
+    /// only accepts a bare `Index` on a `Tensor` binding, so every statement
+    /// counted here is provably a pure producer -- nothing it reads could
+    /// race a sibling's write. That is what makes eliding every barrier but
+    /// the run's last one safe: each copy's own barrier exists only to make
+    /// its write visible before the next read of it, and the next read of
+    /// any of these lands after the whole run (the run's own statements
+    /// never read each other, and whatever follows the run reads through
+    /// `emit_stmts`'s ordinary path, guarded by the barrier the run's last
+    /// statement still emits).
+    fn stage_run(&self, stmts: &[Stmt]) -> usize {
+        stmts
+            .iter()
+            .take_while(|s| {
+                matches!(s, Stmt::Var { ty: None, value: Some(v), .. }
+                    if self.slice_static_shape(v).is_some() && !self.slice_is_partial(v))
+            })
+            .count()
+    }
+
+    /// Emits a `stage_run`-matched prefix, deferring every barrier but the
+    /// last: the pool-reuse race `Codegen::release`'s own doc warns about
+    /// (a later op handed a buffer this run's write hasn't published yet)
+    /// cannot arise here, since none of these buffers are ever `release`d
+    /// until well past the run (each is a fresh `var`, read later by
+    /// whatever follows).
+    fn emit_staging_run(&mut self, block: &Block<'c>, stmts: &[Stmt]) -> Result<()> {
+        let last = stmts.len() - 1;
+        for (j, s) in stmts.iter().enumerate() {
+            let Stmt::Var { name, value: Some(value), .. } = s else {
+                bail!("stage_run matched a statement emit_staging_run cannot emit");
+            };
+            match self.emit_expr(block, value)? {
+                Rv::Tile(src) => self.bind_staged_tile(block, name, src, j == last)?,
+                Rv::Scalar(_) => bail!("stage_run matched a scalar-valued statement"),
             }
         }
         Ok(())
@@ -760,8 +825,14 @@ impl<'c> Codegen<'c> {
                 self.bind_frag_acc(block, &plan)?;
                 1
             } else {
-                self.emit_stmt(block, &stmts[i])?;
-                1
+                let run = self.stage_run(&stmts[i..]);
+                if run >= 2 {
+                    self.emit_staging_run(block, &stmts[i..i + run])?;
+                    run
+                } else {
+                    self.emit_stmt(block, &stmts[i])?;
+                    1
+                }
             };
 
             i += consumed;
