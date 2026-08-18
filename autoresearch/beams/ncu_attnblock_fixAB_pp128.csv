@@ -1,0 +1,7 @@
+﻿"ID","Process ID","Process Name","Host Name","Kernel Name","Context","Stream","Block Size","Grid Size","Device","CC","gpu__time_duration.sum","l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum","launch__occupancy_limit_blocks","launch__occupancy_limit_registers","launch__occupancy_limit_warps","sm__warps_active.avg.pct_of_peak_sustained_active"
+"","","","","","","","","","","","us","","block","block","block","%"
+"0","35368","bench.exe","127.0.0.1","attention_block","1","13","(256, 1, 1)","(16, 16, 1)","0","7.5","91.488000","508,874","16.000000","3.000000","4.000000","65.310907"
+"1","35368","bench.exe","127.0.0.1","attention_block","1","13","(256, 1, 1)","(16, 16, 1)","0","7.5","91.968000","508,946","16.000000","3.000000","4.000000","64.475406"
+"2","35368","bench.exe","127.0.0.1","attention_block","1","13","(256, 1, 1)","(16, 16, 1)","0","7.5","92.992000","509,008","16.000000","3.000000","4.000000","64.700285"
+"3","35368","bench.exe","127.0.0.1","attention_block","1","13","(256, 1, 1)","(16, 16, 1)","0","7.5","90.016000","508,846","16.000000","3.000000","4.000000","64.967977"
+"4","35368","bench.exe","127.0.0.1","attention_block","1","13","(256, 1, 1)","(16, 16, 1)","0","7.5","96.128000","508,874","16.000000","3.000000","4.000000","65.808391"

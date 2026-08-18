@@ -186,6 +186,17 @@ impl Kernel {
         self.attrs.iter().any(|a| a.name == "dynshared")
     }
 
+    /// Whether `@padstage` was written on this kernel: a `var x = <tensor
+    /// slice>` staging tile whose physical row pitch lands on an exact
+    /// shared-memory bank-period multiple (128 bytes on every architecture
+    /// this compiler targets) allocates through `alloc_tile_padded` instead
+    /// of `alloc_tile_shaped`, breaking the same-bank collision every row of
+    /// such a tile would otherwise share. See `Codegen::pad_stage` and
+    /// `stmt.rs`'s `Stmt::Var` staging branch.
+    pub fn wants_padded_stage(&self) -> bool {
+        self.attrs.iter().any(|a| a.name == "padstage")
+    }
+
     /// Whether the kernel spans several stages of a pass and synchronizes them
     /// with `grid_barrier`, so every block must be resident at once or the
     /// barrier deadlocks. The launcher, not the compiler, has to honour it: see

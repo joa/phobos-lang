@@ -238,6 +238,8 @@ pub(crate) fn attention_block_src(
     format!(
         "@launch(256)
 @autotune(NH in [{n_head}], G in [{group}], D in [{head_dim}], BR in [{tile}])
+@aligned(KW = D)
+@padstage
 kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
                        V: tensor<f16>[NK, KW], O: tensor<f32>[R, QW]) {{
   let qt = program_id(0)
@@ -252,8 +254,8 @@ kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
 
   let base = NK - R + qt * BR
   for kt in range(0, base, BR) {{
-    let k = K[kt :+ BR, kcol :+ D]
-    let v = V[kt :+ BR, kcol :+ D]
+    var k = K[kt :+ BR, kcol :+ D]
+    var v = V[kt :+ BR, kcol :+ D]
     var s: tile<f32>[BR, BR] = dot_t(q, k)
     s = s * {scale:.9}
     var mn: tile<f32>[BR, 1] = rowmax(s)
@@ -265,8 +267,8 @@ kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
     m = mn
   }}
 
-  let dk = K[base :+ BR, kcol :+ D]
-  let dv = V[base :+ BR, kcol :+ D]
+  var dk = K[base :+ BR, kcol :+ D]
+  var dv = V[base :+ BR, kcol :+ D]
   var ds: tile<f32>[BR, BR] = dot_t(q, dk)
   ds = ds * {scale:.9}
   var dm: tile<f32>[BR, 1] = rowmax(ds)

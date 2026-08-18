@@ -61,6 +61,13 @@ const QMMA_TILES: i64 = 64;
 
 const WMMA_SMEM_PAD: i64 = 8;
 
+/// Shared-memory bank period on every architecture this compiler targets: 32
+/// banks, 4 bytes addressed per bank per cycle. A row-major tile whose row
+/// pitch is an exact multiple of this lands every row on the same bank at a
+/// fixed column, which is what `Codegen::should_pad_stage` checks for and
+/// `alloc_tile_padded` breaks.
+const SHARED_BANK_BYTES: i64 = 128;
+
 /// What `emit` learned across every kernel in the module: the dynamic
 /// shared-memory sideband `compile_shared` already reported, plus, for any
 /// kernel that wrote `@pipeline`, whether that assertion held. A non-empty
@@ -337,6 +344,12 @@ struct Codegen<'c> {
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
     launch: Option<Launch>,
     cta_threads: i64,
+    /// Whether `@padstage` was written on this kernel; see
+    /// [`Kernel::wants_padded_stage`]. Consulted only by the `Stmt::Var`
+    /// tensor-slice staging branch (`stmt.rs`), and only when the staged
+    /// tile's row pitch is itself an exact bank-period multiple, so this
+    /// never changes a tile whose layout was not the defect it targets.
+    pad_stage: bool,
 }
 
 /// Widens a value's borrow to the context lifetime. Values borrow the block they
@@ -412,6 +425,7 @@ impl<'c> Codegen<'c> {
             mma_sync: kernel.wants_mma_sync(),
             launch,
             cta_threads,
+            pad_stage: kernel.wants_padded_stage(),
         })
     }
 

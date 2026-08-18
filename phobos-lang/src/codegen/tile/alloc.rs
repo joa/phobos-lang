@@ -265,6 +265,38 @@ impl<'c> Codegen<'c> {
         Ok(mv)
     }
 
+    /// Whether a `var x = <tensor slice>` staging tile (`stmt.rs`'s
+    /// `Stmt::Var` branch, the one `let k = .../var k = ...` K/V staging in
+    /// `attention_block` goes through) should allocate through
+    /// [`Self::alloc_tile_padded`] instead of [`Self::alloc_tile_shaped`].
+    /// Gated by `@padstage` (`self.pad_stage`) and, even then, only when the
+    /// tile's own row pitch is itself an exact multiple of
+    /// [`SHARED_BANK_BYTES`] -- the one layout where every row of the tile
+    /// collides on the same bank at a fixed column, the defect
+    /// `alloc_tile_padded` breaks. A tile whose pitch already misses that
+    /// multiple is left alone: padding it would grow the CTA's shared
+    /// footprint for no bank-conflict benefit (the `[BR, BR]` f32 score tile
+    /// this kernel also carries is the case in point -- `s`'s own staging
+    /// never reaches this path since it is a computed value, not a tensor
+    /// slice, but the same arithmetic is why it would not qualify if it
+    /// did).
+    pub(in crate::codegen) fn should_pad_stage(&self, elem: Type<'c>, shape: &[i64]) -> bool {
+        if !self.pad_stage {
+            return false;
+        }
+        let Some(&cols) = shape.last() else {
+            return false;
+        };
+        if cols == DYN {
+            return false;
+        }
+        let Some(width) = self.elem_bytes(elem) else {
+            return false;
+        };
+        let pitch_bytes = cols * i64::from(width);
+        pitch_bytes > 0 && pitch_bytes % SHARED_BANK_BYTES == 0
+    }
+
     /// tile_flat aliases a tile as one row [1, rows * cols].
     ///
     /// Nothing is allocated and no data moves!
