@@ -297,6 +297,60 @@ better than split-K did. It is not proof. The orchestrator's own
 `scripts/bench.py` whole-pass confirmation is the actual arbiter here, more
 than usual for this specific kernel.
 
+## Orchestrator whole-pass confirmation (2026-08-18)
+
+Merged (`cef45aa`/`eb2c813`/`c302f74` cherry-picked onto main), all four
+gates re-verified on both models in both toggle states after merging on
+top of the barrier-fusion beam (also landed the same session, first time
+the two were tested together) -- identical to the documented baselines to
+the last digit, `model_check` re-run with a genuinely 140-token prompt
+after catching my own first attempt silently falling back to the 5-token
+default (wrong flag, `--prompt` instead of `-p`; caught before trusting
+the result, not after).
+
+`scripts/bench.py`, two clean-window pairs (`util between` 0-2% every
+round both sides, this session's own diagnostic column, not just my
+`nvidia-smi` polling), toggle off vs `PHOBOS_QMMA_NARROW=1`:
+
+| model | test | off | on | delta |
+| --- | --- | --- | --- | --- |
+| minicpm5-1b-Q8_0 | pp128 | 0.80x | 0.91x | **+0.11** |
+| minicpm5-1b-Q8_0 | pp512 | 0.58x | 0.59x | +0.01 (flat) |
+| Qwen3.5-0.8B-Q8_0 | pp128 | 0.83x | 0.87x | **+0.04** |
+| Qwen3.5-0.8B-Q8_0 | pp512 | 0.78x | 0.73x | **-0.05** |
+
+**pp128, the beam's actual target, is a real win on both models**,
+confirming the whole-pass survival this beam's own reliability caveat
+called out as unproven -- unlike split-K, this design's whole-pass number
+moves the same direction as its per-kernel numbers.
+
+**pp512 surfaces a real regression on Qwen the beam's own kill-check
+ladder never tested** (it profiled only the four `pp128`-shaped launches).
+The mechanism traces to the eligibility gate itself:
+`q8_qmma_narrow_eligible`'s `unsplit < Q8_QMMA_SPLIT_THRESHOLD` check
+computes `unsplit` from `rows`, and `pp512`'s `rows=512` (4x `pp128`'s 128)
+multiplies every shape's block count by 4x before the gate is checked.
+Minicpm's o_proj/down_proj-sized shapes (`n=1536`) land at
+`unsplit = 4 * (1536/128) = 48`, exactly at `Q8_QMMA_SPLIT_THRESHOLD`
+(the gate is a strict `<`, so this declines -- flat result, correctly).
+Qwen's smaller `n=1024` shapes land at `unsplit = 4 * (1024/128) = 32`,
+still under the threshold, so narrow still engages -- but at a grid this
+much less starved, halving warps/CTA (the mechanism's actual cost, per
+the beam's own named alternative hypothesis) apparently costs more than
+doubling SM coverage still buys back. The fixed SM-count threshold that
+works well for genuinely starved `pp128`-scale grids does not degrade
+gracefully as a shape approaches it from below.
+
+**Decision: keep opt-in only, do not promote to default-on.** The
+toggle-off path is untouched by any of this (confirmed identical to
+baseline above), so nothing shipped regresses by landing this beam. But
+the current fixed threshold is not yet safe to flip on by default across
+both `pp128` and `pp512` scales on every model. A follow-up beam should
+either tighten the threshold (a smaller cutoff than the SM count, or a
+ratio-based check relative to how starved the grid actually is rather
+than a flat `< SM count`) or make the gate row-count-aware directly,
+before this is reconsidered for default-on.
+
 ## Files
 
 - `ncu_narrow_off_light.ncu-rep` / `ncu_narrow_on_light.ncu-rep` -- light

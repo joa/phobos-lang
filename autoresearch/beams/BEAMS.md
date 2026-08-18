@@ -1758,3 +1758,48 @@ open materializations -- `rowsum(s)`'s own temp, `dot(s,v)`'s zero-init,
 the bare `m = mn` copy -- each a separate, now well-specified op-aware
 fusion task for a future beam, rather than an open-ended "barriers are
 39.6%(->44%->43.6%) of something" finding.
+
+## q8_qmma narrow-CTA grid-starvation path, landed opt-in (2026-08-18)
+
+Fifth beam on `q8_qmma` this session, the one that finally survives
+whole-pass contact. Full writeup:
+`autoresearch/beams/q8-qmma-grid-starve.md`. Halves the deep tile's CTA
+thread count together with its column tile (`Q8_QMMA_NARROW_CTA=64`,
+`Q8_QMMA_NARROW_TN=64`), which `qmma_patch` resolves to the *same*
+per-warp tensor-core patch as the shipped 128-wide config -- verified
+against emitted MLIR, not assumed -- so a starved grid gets twice the CTAs
+at unchanged registers/thread and unchanged per-warp intensity. No
+reduction pass, no scratch buffer: each added CTA re-reads the same small,
+already L2-resident A operand a sibling CTA already reads. Distinct from
+the already-rejected tile-shrink lever (which shrinks the per-warp patch
+itself, at an unchanged CTA size, losing tensor-core intensity) and from
+split-K (which splits the reduction dimension, requiring a merge pass --
+this splits the output N-extent instead, disjoint outputs, no merge).
+
+Kill-check ladder: paper DRAM-delta accounting cleared, the empirical
+`--cache-control all` vs `none` cross-check came back byte-identical
+across all four conditions (not just small), register/Block-Limit moved
+exactly as predicted (2->4 blocks/SM, regs/thread unchanged), and
+per-shape duration on the three starved shapes moved 17-21% with the
+already-well-fed shape correctly declining and staying flat.
+
+**Orchestrator whole-pass confirmation** (re-verified all four gates on
+both models in both toggle states after merging on top of the same-session
+barrier-fusion beam, the first time the two were tested together; two
+clean-window `scripts/bench.py` pairs, `util between` 0-2% every round
+both sides): **pp128, the beam's actual target, is a real win on both
+models** (minicpm 0.80x -> 0.91x, Qwen 0.83x -> 0.87x) -- the first
+`q8_qmma` beam this session whose whole-pass number moves the same
+direction as its per-kernel numbers, unlike split-K. But **pp512 surfaces
+a real regression on Qwen** (0.78x -> 0.73x) the beam's own ladder never
+tested (it only profiled `pp128`-shaped launches): the eligibility gate's
+`unsplit < Q8_QMMA_SPLIT_THRESHOLD` check multiplies by `rows/TM`, so
+`pp512`'s 4x row count pushes Qwen's smaller-`n` shapes into a
+less-starved regime where halving warps/CTA apparently costs more than
+the extra SM coverage buys back, while minicpm's larger-`n` shapes happen
+to land exactly at the threshold and correctly decline. **Landed opt-in
+only** (`PHOBOS_QMMA_NARROW=1`), not promoted to default-on -- the
+toggle-off path is untouched and verified identical to baseline, but the
+fixed SM-count threshold needs to become row-count-aware (or the cutoff
+tightened) before this is safe to flip on by default. A concrete,
+well-specified task for a future beam, not an open question.
