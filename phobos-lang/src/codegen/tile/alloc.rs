@@ -265,21 +265,13 @@ impl<'c> Codegen<'c> {
         Ok(mv)
     }
 
-    /// Whether a `var x = <tensor slice>` staging tile (`stmt.rs`'s
-    /// `Stmt::Var` branch, the one `let k = .../var k = ...` K/V staging in
-    /// `attention_block` goes through) should allocate through
-    /// [`Self::alloc_tile_padded`] instead of [`Self::alloc_tile_shaped`].
-    /// Gated by `@padstage` (`self.pad_stage`) and, even then, only when the
-    /// tile's own row pitch is itself an exact multiple of
-    /// [`SHARED_BANK_BYTES`] -- the one layout where every row of the tile
-    /// collides on the same bank at a fixed column, the defect
-    /// `alloc_tile_padded` breaks. A tile whose pitch already misses that
-    /// multiple is left alone: padding it would grow the CTA's shared
-    /// footprint for no bank-conflict benefit (the `[BR, BR]` f32 score tile
-    /// this kernel also carries is the case in point -- `s`'s own staging
-    /// never reaches this path since it is a computed value, not a tensor
-    /// slice, but the same arithmetic is why it would not qualify if it
-    /// did).
+    /// Whether a `var x = <tensor slice>` staging tile should allocate through
+    /// [`Self::alloc_tile_padded`] rather than [`Self::alloc_tile_shaped`].
+    ///
+    /// Gated by `@padstage`, and even then only for a row pitch that is an
+    /// exact multiple of [`SHARED_BANK_BYTES`], the one layout where every row
+    /// collides on the same bank at a fixed column. Padding any other tile
+    /// would grow the CTA's shared footprint for nothing.
     pub(in crate::codegen) fn should_pad_stage(&self, elem: Type<'c>, shape: &[i64]) -> bool {
         if !self.pad_stage {
             return false;

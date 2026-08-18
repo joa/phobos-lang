@@ -340,11 +340,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// `argsel(va, vb, ia, ib)`: select(va >= vb, ia, ib), the index side of
-    /// a (value, index) fold `tmax` alone cannot carry. The call-site glue
-    /// for [`Self::tile_argsel_bc`], kept out of `expr.rs`'s `emit_call` for
-    /// the same reason `tmax`'s own handling stays inline there while this
-    /// one moved: shape-count against the workspace's line cap.
+    /// `argsel(va, vb, ia, ib)`: the call-site glue for
+    /// [`Self::tile_argsel_bc`].
     pub(in crate::codegen) fn emit_argsel(
         &mut self,
         block: &Block<'c>,
@@ -378,14 +375,10 @@ impl<'c> Codegen<'c> {
         Ok(Rv::Tile(out))
     }
 
-    /// out[...] = select(va[...] >= vb[...], ia[...], ib[...]) with
-    /// broadcasting: which of two indexed candidates carries the winning
-    /// value, so a fold that tracks a (value, index) pair can carry the
-    /// index alongside `tmax`'s own value-only fold (`argmax` has no reduction
-    /// primitive of its own; this is the one piece `tmax` cannot express).
-    /// `>=` rather than `>`, so a caller that always passes the later
-    /// candidate as `(va, ia)` gets a deterministic, reproducible winner on an
-    /// exact tie.
+    /// out[...] = select(va[...] >= vb[...], ia[...], ib[...]), broadcasting:
+    /// the index side of a (value, index) fold, which `tmax` alone cannot
+    /// carry. `>=` rather than `>` so a caller that always passes the later
+    /// candidate as `(va, ia)` breaks an exact tie reproducibly.
     pub(in crate::codegen) fn tile_argsel_bc(
         &mut self,
         block: &Block<'c>,

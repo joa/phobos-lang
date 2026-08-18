@@ -1,26 +1,18 @@
 use super::*;
 
-/// Conservative ceiling used only to decide whether doubling a staged tile's
-/// buffers would still fit, before committing a bare/auto-attempted loop to
-/// pipelining. Mirrors `phobos_kernels::launch::STATIC_SHARED_LIMIT` (48
-/// KiB): phobos-lang cannot depend on phobos-kernels (phobos-kernels depends
-/// on phobos-lang), so this is a plain literal kept in sync by hand rather
-/// than a shared constant. It is the CUDA *static* (non-dynamic-shared)
-/// per-block ceiling every target this codebase compiles for shares; a
-/// kernel that opts into `@dynshared` can be raised past this at launch (see
-/// `phobos-gguf`'s `compile_dynamic`), but pipelining eligibility is decided
-/// here, at compile time, before that opt-in is visible, so staying with the
-/// conservative static bound is the safe default even for a dynamic-shared
-/// kernel.
+/// Ceiling for the "would the doubled buffers still fit" check below. Mirrors
+/// `phobos_kernels::launch::STATIC_SHARED_LIMIT`, duplicated by hand because
+/// phobos-kernels depends on phobos-lang and not the other way round. A
+/// `@dynshared` kernel can be raised past this at launch, but eligibility is
+/// decided here, before that opt-in is visible, so the static bound is the
+/// safe default for every kernel.
 const PIPELINE_SHARED_LIMIT_BYTES: i64 = 48 * 1024;
 
-/// Why an eligible-looking loop body was not turned into a pipelined
-/// (double-buffered) loop. Every variant is a decline, not an error: a bare,
-/// auto-attempted loop that declines just falls through to the ordinary
-/// codegen path (see `emit_for_inner`). The only place one of these turns
-/// into a hard failure is an explicit `@pipeline` on the kernel finding zero
-/// eligible loops anywhere in its body -- see `Codegen::pipelined_any` and
-/// `emit`'s check of it.
+/// Why a loop body was not turned into a pipelined (double-buffered) loop.
+/// Every variant is a decline, not an error: the loop just falls through to
+/// the ordinary codegen path. Only an explicit `@pipeline` finding zero
+/// eligible loops in the whole kernel is a hard failure, checked in `emit`
+/// via `Codegen::pipelined_any`.
 pub(super) enum PipelineDecline {
     /// The body has no leading run of `var t = <static tensor slice>; ...`
     /// statements at all: a loop that opens with ordinary compute, or a
@@ -31,37 +23,31 @@ pub(super) enum PipelineDecline {
     /// source on the last tile the same way the plain unmasked path would.
     PartialSlice,
     /// A statement after the staged prefix writes one of the staged names,
-    /// so the value read at prefetch time would not be the one the compute
-    /// half expects.
+    /// so prefetching would read a value the compute half does not expect.
     StagedNameWritten,
-    /// A staged slice's element type has no known byte width, so its
-    /// footprint cannot be proven to fit even conservatively. Declining here
-    /// (rather than assuming a width) keeps this check fail-safe.
+    /// A staged slice's element type has no known byte width, so the budget
+    /// below cannot be computed; declining keeps that check fail-safe.
     UnknownElementWidth,
-    /// Doubling every staged slice's shared buffer would not fit the
-    /// target's shared-memory ceiling.
+    /// Doubling every staged slice's shared buffer would not fit.
     SharedMemoryBudget { needed_bytes: i64, limit_bytes: i64 },
 }
 
 impl std::fmt::Display for PipelineDecline {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            PipelineDecline::NoStagedPrefix => {
-                write!(f, "no leading run of staged tensor-slice `var` statements")
+            Self::NoStagedPrefix => {
+                f.write_str("no leading run of staged tensor-slice `var` statements")
             }
-            PipelineDecline::PartialSlice => write!(
-                f,
-                "a staged slice's shape cannot be proven to tile evenly (partial slice)"
+            Self::PartialSlice => f.write_str(
+                "a staged slice's shape cannot be proven to tile evenly (partial slice)",
             ),
-            PipelineDecline::StagedNameWritten => write!(
-                f,
-                "a staged name is written again later in the loop body"
-            ),
-            PipelineDecline::UnknownElementWidth => write!(
-                f,
-                "a staged slice's element type has no known byte width"
-            ),
-            PipelineDecline::SharedMemoryBudget {
+            Self::StagedNameWritten => {
+                f.write_str("a staged name is written again later in the loop body")
+            }
+            Self::UnknownElementWidth => {
+                f.write_str("a staged slice's element type has no known byte width")
+            }
+            Self::SharedMemoryBudget {
                 needed_bytes,
                 limit_bytes,
             } => write!(
@@ -80,13 +66,10 @@ impl<'c> Codegen<'c> {
     /// staged (name, slice expr) pairs and the compute statements, or the
     /// reason the loop is not (yet) pipelined.
     ///
-    /// Deliberately does not check whether the loop's own bounds could be
-    /// lane-divergent (which would make `emit_pipelined_for`'s barrier-in-
-    /// an-`scf.if` guard a hang instead of a miscompute): every `.ph`-level
-    /// loop bound is CTA-uniform by construction in this language, a
-    /// structural property with no runtime check needed. See the block
-    /// comment at the end of this file for the proof and what would have to
-    /// change in this codegen for that to stop being true.
+    /// Deliberately does not check the loop bounds for lane divergence, which
+    /// would turn `emit_pipelined_for`'s barrier-in-an-`scf.if` guard into a
+    /// hang: every `.ph`-level bound is CTA-uniform by construction. See the
+    /// block comment at the end of this file for why.
     #[allow(clippy::type_complexity)]
     pub(super) fn pipeline_candidate<'a>(
         &self,
@@ -121,18 +104,13 @@ impl<'c> Codegen<'c> {
             return Err(PipelineDecline::StagedNameWritten);
         }
 
-        // Gap 2 (shared-memory budget): double-buffering doubles every
-        // staged slice's footprint. An opt-in `@pipeline` author was
-        // implicitly asserting they had checked this fits; an auto-attempt
-        // cannot make that assumption, so it is checked here. Conservative
-        // on two axes: it ignores that a released buffer can be reused from
-        // the pool (so it can decline a loop that would in fact fit), and it
-        // is blind to static (non-`@dynshared`) globals this codegen never
-        // tracks in `shared_bytes` at all (so a kernel already heavy on
-        // static shared can still be pipelined past the real ceiling here --
-        // that degrades to ptxas's own "uses too much shared data" compile
-        // error, not a hang, so the blind spot is safe, just not caught
-        // early with a good message).
+        // Double-buffering doubles every staged slice's footprint, which an
+        // auto-attempted loop has nobody to vouch for. Conservative both
+        // ways: it ignores pool reuse of released buffers, so it can decline
+        // a loop that would fit, and it does not see static globals absent
+        // from `shared_bytes`, so it can admit one that does not. The latter
+        // degrades to ptxas's own "uses too much shared data" error, not a
+        // hang.
         let mut needed_bytes = 0i64;
         for (_, expr) in &staged {
             let shape = self
@@ -461,52 +439,25 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    // CTA-uniformity of a loop's bounds (why `pipeline_candidate`'s caller
-    // needs no runtime divergence check of its own):
+    // Why a loop bound is CTA-uniform by construction, and so needs no
+    // runtime divergence check before pipelining it.
     //
-    // `emit_pipelined_for`'s guards wrap a `gpu.barrier` in an `scf.if`,
-    // which hangs rather than miscomputes if a CTA's threads take different
-    // branches -- so a loop bound has to be provably the same value on
-    // every thread of the block before it is safe to pipeline at all.
+    // `emit_pipelined_for` wraps a `gpu.barrier` in an `scf.if`, which hangs
+    // if a CTA's threads take different branches, so a bound has to hold the
+    // same value on every thread of the block.
     //
-    // A `.ph`-level loop bound (`start`/`end`/`step` in `for x in
-    // range(...)`) always lowers through `Codegen::emit_index`, which
-    // requires the emitted value to already carry MLIR's `index` type
-    // (`expect_index` rejects anything else outright). Tracing every way an
-    // `index` value can be produced in this codegen accounts for all of
-    // them: integer literals (lower straight to `index`), `program_id` /
-    // `Codegen::block_id` (the grid's block id, the same for every thread
-    // in it by definition), a tensor's shape via `memref.dim` (host-set
-    // before the launch, not a per-thread quantity), `warp_partial` and
-    // `grid_barrier`'s nominal return values (both literally
-    // `Rv::Scalar(self.const_index(block, 0))`, a compile-time constant,
-    // never data-dependent), and arithmetic over any of those. What is
-    // conspicuously absent from that list is anything that reads program
-    // DATA: a tensor element load, a reduction result, or an atomic's
-    // return value (`atomic_add`'s `Rv::Scalar(old)` is exactly such a
-    // value -- the whole point of an RMW is that distinct threads racing
-    // the same slot see distinct "previous" values).
+    // Every `.ph`-level bound lowers through `emit_index`, which demands an
+    // already-`index`-typed value. The only producers of one are integer
+    // literals, `program_id`, a tensor's shape via `memref.dim`, the constant
+    // zero `warp_partial`/`grid_barrier` nominally return, and arithmetic
+    // over those -- all block-uniform. Nothing that reads program data is on
+    // that list, and nothing can join it: `coerce` casts `index` to an
+    // integer but has no arm the other way, and `unify` bails on an
+    // int/index mismatch instead of promoting. So `atomic_add`'s i32, or a
+    // tensor load, can never reach a bound.
     //
-    // That absence is not a gap the compiler happens not to hit today; it
-    // is structurally enforced. `Codegen::coerce` converts `index` to an
-    // integer type (`index_cast`) but has no arm the other way, and
-    // `Codegen::unify` (the join two binary operands go through) only
-    // widens between float types, `bail!`ing on any int/index mismatch --
-    // so an i32 value coming out of `atomic_add`, or a tensor load, can
-    // never become `index`-typed by any expression this language can
-    // write, whether alone or arithmetic-combined with something that is.
-    // Concretely: `let n = atomic_add(BAR, 0, 1); for i in range(0, n) {}`
-    // fails to parse-then-typecheck with "loop end must be an integer, got
-    // i32" before codegen ever reaches a loop; `range(0, n * 1, 1)` fails
-    // the same way one step earlier, in `unify`, with "mismatched operand
-    // types: i32 vs index". See
-    // `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` --
-    // both failures are pinned there as a tripwire, not asserted only here:
-    // if a future language feature adds an int-to-index conversion, or
-    // changes `warp_partial`/`grid_barrier` to return something other than
-    // a literal constant zero (a real risk, since those two live in
-    // `tile/warp_attn.rs` and `sync.rs`, files this pipelining code does
-    // not own), that test goes red and is what forces a second look at
-    // this comment and at whether `pipeline_candidate`'s callers still need
-    // no divergence check of their own.
+    // `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` pins
+    // both failure modes. It goes red if some future change adds an
+    // int-to-index conversion, or makes `warp_partial`/`grid_barrier` return
+    // something data-dependent, which is when this argument needs revisiting.
 }

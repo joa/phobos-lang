@@ -62,23 +62,15 @@ const QMMA_TILES: i64 = 64;
 const WMMA_SMEM_PAD: i64 = 8;
 
 /// Shared-memory bank period on every architecture this compiler targets: 32
-/// banks, 4 bytes addressed per bank per cycle. A row-major tile whose row
-/// pitch is an exact multiple of this lands every row on the same bank at a
-/// fixed column, which is what `Codegen::should_pad_stage` checks for and
-/// `alloc_tile_padded` breaks.
+/// banks, 4 bytes each. See [`Codegen::should_pad_stage`].
 const SHARED_BANK_BYTES: i64 = 128;
 
-/// What `emit` learned across every kernel in the module: the dynamic
-/// shared-memory sideband `compile_shared` already reported, plus, for any
-/// kernel that wrote `@pipeline`, whether that assertion held. A non-empty
-/// `pipeline_failures` entry is `(kernel name, decline reasons)`; a caller
-/// that wants the "fail to compile" behavior by default converts a non-empty
-/// list into an error (see `phobos_lang::compile_shared`). A caller that
-/// needs to aggregate several compiles of the same kernel source before
-/// deciding (see `phobos_kernels::compile::Variants::compile`, which
-/// compiles an aligned and a masked-fallback variant separately and treats
-/// the assertion as satisfied if either pipelines) reads this directly
-/// instead.
+/// What `emit` learned across the module: the dynamic shared-memory sideband,
+/// plus `(kernel name, decline reasons)` for every kernel whose `@pipeline`
+/// assertion did not hold. `phobos_lang::compile_shared` turns a non-empty
+/// `pipeline_failures` into an error; a caller that compiles several variants
+/// of one source and accepts the assertion if any of them pipelines (see
+/// `phobos_kernels::compile::Variants::compile`) reads it directly.
 #[derive(Debug)]
 pub struct EmitOutput {
     pub shared: Vec<(String, usize)>,
@@ -321,34 +313,24 @@ struct Codegen<'c> {
     // bounds by construction and needs no mask.
     trimmed_ivs: Vec<String>,
     /// Whether `@pipeline` was written on this kernel. The generic loop path
-    /// (see `pipeline.rs`) no longer reads this to decide whether to
-    /// *attempt* double-buffering -- every eligible loop is auto-attempted
-    /// regardless. It still gates the fused-GEMM backend's own,
-    /// independent double-buffering (`matmul::{plan,reg,wmma}.rs`'s
-    /// `pairs`), which has no legality/budget check of its own and is left
-    /// exactly as attribute-gated as before: see `pipeline.rs`'s beam notes
-    /// for why that backend was not brought under auto-attempt in this
-    /// pass. What `@pipeline` now means kernel-wide is an assertion: at
-    /// least one loop (or fused-GEMM dispatch) in this kernel must actually
-    /// pipeline, checked via `pipelined_any` once the kernel is done.
+    /// no longer consults it, auto-attempting every eligible loop instead; it
+    /// still gates the fused-GEMM backend's own double-buffering (see
+    /// [`Self::staging_pairs`], which has no legality or budget check of its
+    /// own). Kernel-wide the attribute is now an assertion: at least one loop
+    /// or fused dispatch must pipeline, checked in `emit` via `pipelined_any`.
     pipeline_assert: bool,
-    /// Set whenever some loop in the kernel currently being emitted actually
-    /// pipelined, through either mechanism `pipeline_assert` gates. Checked
-    /// against `pipeline_assert` once per kernel in `emit`.
+    /// Whether some loop in the kernel being emitted did pipeline, through
+    /// either mechanism `pipeline_assert` gates.
     pipelined_any: bool,
-    /// Decline reasons collected while `pipeline_assert` is true, so a
-    /// failed assertion can report why every loop it saw declined instead of
-    /// a bare "could not pipeline this kernel".
+    /// Why each loop declined, collected while `pipeline_assert` is set so a
+    /// failed assertion can say more than that it failed.
     pipeline_declines: Vec<String>,
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
     launch: Option<Launch>,
     cta_threads: i64,
     /// Whether `@padstage` was written on this kernel; see
-    /// [`Kernel::wants_padded_stage`]. Consulted only by the `Stmt::Var`
-    /// tensor-slice staging branch (`stmt.rs`), and only when the staged
-    /// tile's row pitch is itself an exact bank-period multiple, so this
-    /// never changes a tile whose layout was not the defect it targets.
+    /// [`Codegen::should_pad_stage`], its only reader.
     pad_stage: bool,
 }
 
@@ -429,6 +411,13 @@ impl<'c> Codegen<'c> {
         })
     }
 
+    /// How many staging buffers per operand the fused-GEMM backend allocates:
+    /// two to double-buffer the k loop, one otherwise. Unlike the generic loop
+    /// path, this backend has no legality or budget check of its own, so it
+    /// stays gated on `@pipeline` rather than auto-attempted.
+    fn staging_pairs(&self) -> usize {
+        if self.pipeline_assert { 2 } else { 1 }
+    }
 }
 
 fn gcd(a: i64, b: i64) -> i64 {

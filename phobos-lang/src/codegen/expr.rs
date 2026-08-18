@@ -257,55 +257,22 @@ impl<'c> Codegen<'c> {
                 };
                 Ok(Rv::Tile(self.tile_flat(block, &t)?))
             }
-            // exp(t): element-wise e^x over a tile.
-            "exp" => {
+            // element-wise unary math over a tile.
+            "exp" | "log" | "round" | "sqrt" | "tanh" => {
                 let [arg] = args else {
-                    bail!("exp expects one tile argument");
+                    bail!("{callee} expects one tile argument");
                 };
                 let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("exp expects a tile argument");
+                    bail!("{callee} expects a tile argument");
                 };
-                Ok(Rv::Tile(self.tile_exp(block, &t)?))
-            }
-            // log(t): element-wise natural logarithm over a tile.
-            "log" => {
-                let [arg] = args else {
-                    bail!("log expects one tile argument");
+                let out = match callee {
+                    "exp" => self.tile_exp(block, &t)?,
+                    "log" => self.tile_log(block, &t)?,
+                    "round" => self.tile_round(block, &t)?,
+                    "sqrt" => self.tile_sqrt(block, &t)?,
+                    _ => self.tile_tanh(block, &t)?,
                 };
-                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("log expects a tile argument");
-                };
-                Ok(Rv::Tile(self.tile_log(block, &t)?))
-            }
-            // round(t): element-wise nearest integer.
-            "round" => {
-                let [arg] = args else {
-                    bail!("round expects one tile argument");
-                };
-                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("round expects a tile argument");
-                };
-                Ok(Rv::Tile(self.tile_round(block, &t)?))
-            }
-            // sqrt(t): element-wise square root over a tile.
-            "sqrt" => {
-                let [arg] = args else {
-                    bail!("sqrt expects one tile argument");
-                };
-                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("sqrt expects a tile argument");
-                };
-                Ok(Rv::Tile(self.tile_sqrt(block, &t)?))
-            }
-            // tanh(t): element-wise hyperbolic tangent over a tile.
-            "tanh" => {
-                let [arg] = args else {
-                    bail!("tanh expects one tile argument");
-                };
-                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("tanh expects a tile argument");
-                };
-                Ok(Rv::Tile(self.tile_tanh(block, &t)?))
+                Ok(Rv::Tile(out))
             }
             // tmax(a, b): element-wise maximum (broadcasting).
             "tmax" => {
@@ -331,15 +298,14 @@ impl<'c> Codegen<'c> {
             "argsel" => self.emit_argsel(block, args), // a tmax-shaped fold's index side
             // rowmax(t) / rowsum(t): reduce a rank-2 tile over its last
             // column dim, producing a [rows, 1] column vector.
-            "rowmax" => {
-                let t = self.reduce_arg(block, args, "rowmax")?;
-                let out = self.tile_rowreduce(block, &t, Reduce::Max)?;
-                self.release(&t);
-                Ok(Rv::Tile(out))
-            }
-            "rowsum" => {
-                let t = self.reduce_arg(block, args, "rowsum")?;
-                let out = self.tile_rowreduce(block, &t, Reduce::Sum)?;
+            "rowmax" | "rowsum" => {
+                let how = if callee == "rowmax" {
+                    Reduce::Max
+                } else {
+                    Reduce::Sum
+                };
+                let t = self.reduce_arg(block, args, callee)?;
+                let out = self.tile_rowreduce(block, &t, how)?;
                 self.release(&t);
                 Ok(Rv::Tile(out))
             }
@@ -581,10 +547,13 @@ impl<'c> Codegen<'c> {
         if t == want {
             Ok(value)
         } else if self.is_float(t) && self.is_float(want) {
-            self.float_cast(block, value, want) // rounds/widens, e.g. an f32 literal into an f16 tile
+            // rounds or widens, e.g. an f32 literal into an f16 tile
+            self.float_cast(block, value, want)
         } else if t == self.index_t && self.is_int(want) {
             self.push(block, arith::index_cast(value, want, self.loc))
-        } else if t == self.index_t && self.is_float(want) { self.numeric_cast(block, value, want) } else {
+        } else if t == self.index_t && self.is_float(want) {
+            self.numeric_cast(block, value, want)
+        } else {
             bail!("type mismatch: cannot store {t} where {want} is expected")
         }
     }

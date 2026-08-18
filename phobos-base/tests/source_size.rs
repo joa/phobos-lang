@@ -25,7 +25,6 @@ const MAX_INLINE_TEST_LINES: usize = 150;
 /// gets shorter, and when it is empty the cap drops to 700.
 const GRANDFATHERED: &[(&str, usize)] = &[
     ("phobos-gguf/src/qwen35.rs", 933),
-    ("phobos-lang/src/codegen/expr.rs", 915),
     ("phobos-onnx/src/backend/chain.rs", 917),
     ("phobos-pod/src/engine.rs", 915),
     ("phobos-sched/src/lib.rs", 970),
