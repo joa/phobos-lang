@@ -150,7 +150,23 @@ none` (real back-to-back-launch L2 state), baseline vs narrow:
 four captures** -- doubling the CTA count added zero measurable extra DRAM
 read traffic, in either cache-control mode. This is a stronger result than
 the paper accounting predicted ("should be small, L2-absorbed"); it came
-back exactly flat. The write-side numbers differ but are not evidence of
+back exactly flat.
+
+o_proj is the paper argument's best case (smallest A, 256KB) and weakest
+generalization -- down_proj has the biggest A (576KB, 2.25x bigger) and the
+biggest `k` (4608, so the W streaming volume that could evict A's L2 lines
+is also 2.25x bigger, which is exactly the eviction mechanism the stream-K
+beam's own cross-check found for a different read pattern). Repeated the
+`--cache-control none` half of the check at down_proj as the harder case:
+
+| config | cache-control | dram reads | dram writes |
+| --- | --- | --- | --- |
+| baseline (grid 1,12,1) | none | 8.65 MB | 188.32 KB |
+| narrow (grid 1,24,1) | none | 8.66 MB | 208.58 KB |
+
+0.01 MB apart (~0.1%), within measurement noise -- the flat result
+generalizes to the bigger-A, bigger-`k` shape, not just o_proj's easier
+case. The write-side numbers differ but are not evidence of
 anything here -- no new buffer is written in this design at all (no scratch,
 no reduce pass), and `--cache-control`'s write-flush-timing artifacts are
 the same effect `q8-qmma-streamk.md`'s own cross-check flagged and set
@@ -203,6 +219,60 @@ substantially despite dropping from 4 to 2 resident warps/SM -- doubling
 SMs touched dominated any loss from thinner per-SM occupancy, on this
 kernel's stall profile (`long_scoreboard`-dominated, per the diagnosis
 this beam started from).
+
+### The 75.75 -> 65.49 t/s line visible in the raw captures, explained
+
+Every `ncu`-wrapped `bench.exe` run above prints `bench.rs`'s own bottom-line
+`pp128` t/s figure, host-timed, unrelated to the per-kernel
+`gpu__time_duration.sum` numbers the table above is built from. Those lines
+show toggle-off at 75.75 t/s and toggle-on at 65.49 t/s -- a 13.5% *slower*
+whole-run number under the very toggle that wins 17-21% per kernel. Worth
+running down rather than leaving in the logs unexplained.
+
+Cause: `launch_qmma_narrow` compiles its module lazily, on first use
+(`RefCell<Option<Module>>`, same pattern as `launch_qmma_split`). Every
+capture above used `--no-warmup -r 1`, so the *first* prefill pass in the
+process is also the *only, timed* one -- the one-time PTX JIT compile
+(hundreds of ms) lands inside the timed region. The rep time in the raw
+logs confirms it: 1.690s (off) vs 1.955s (on), +265ms, in JIT-compile
+territory; model load time was identical either way (2491-2533ms), ruling
+out a load-time confound.
+
+Confirmed by re-running with warmup restored (`bench.exe -p 128 -n 0 -r 3`,
+no `--no-warmup`, so the compile lands in the untimed warmup pass instead):
+
+| toggle | pp128 t/s |
+| --- | --- |
+| off | 6440.38 +/- 361.82 |
+| on | 6882.97 +/- 413.04 |
+
+Narrow wins the whole isolated prefill pass by **+6.9%** once the one-time
+compile is out of the timed region -- consistent with, not contradicting,
+the per-kernel table above. (These are `bench.exe`-only numbers, isolated
+from llama.cpp and from decode -- not a replacement for the orchestrator's
+own `scripts/bench.py` confirmation, just closing out this specific
+discrepancy.)
+
+Checked whether compiling a module while `self.recording.get()` is true is
+safe, rather than assuming it from precedent: `graph.rs` shows this
+backend's "recording" is its own Rust-level `Vec<Recorded>` buffering, not
+a live CUDA `cuStreamBeginCapture` -- the actual `cuGraphCreate`/
+`cuGraphAddKernelNode`/`cuGraphInstantiate_v2` calls only happen later, once
+recording stops. `compile()`'s `cuModuleLoadDataEx` has no interaction with
+CUDA's graph-capture API at all in this design, so a lazy compile mid-pass
+is an ordinary driver call with no capture-state hazard -- confirmed by
+reading, not inferred from the correctness gates passing (though those also
+already exercised this exact path: `model_check`/`fuse_check`'s first
+forward call is the first-ever `q8_qmma_narrow` compile, during a recorded
+pass, and both passed clean).
+
+One real, worth-flagging cost: the first prefill pass on a fresh process
+pays a one-time ~265ms stall the first time a starved shape routes through
+this path. Invisible in steady-state throughput (every later pass reuses
+the cached module) and consistent with `q8_qmma_split`'s and
+`q8_qmma_streamk`'s identical lazy-compile shape, so this is not a new
+category of cost this beam introduces -- flagging it because this specific
+comparison surfaced it clearly, not because it is unique to this design.
 
 ## Recommendation
 
