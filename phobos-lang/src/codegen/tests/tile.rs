@@ -246,6 +246,55 @@ fn warp_partial_vectorizes_kv_loads_at_dpl_8() {
     assert_contains(&mlir, &["vector.load", "vector<8xf16>", "alignment = 16"]);
 }
 
+/// `@padstage` routes a `var k = <tensor slice>` staging tile through
+/// `alloc_tile_padded` when its row pitch lands on an exact shared-memory
+/// bank-period multiple (128 bytes): `attention_block`'s real K/V tile is
+/// `[8, 128]` f16, 256 bytes/row, which is what this mirrors. See
+/// `Codegen::should_pad_stage`.
+#[test]
+fn padstage_pads_a_bank_period_pitch_tile() {
+    let mlir = emit_mlir(
+        "@padstage
+        kernel stage(K: tensor<f16>[64, 128], O: tensor<f16>[8, 128]) {
+            var k = K[0 :+ 8, 0 :+ 128]
+            O[0 :+ 8, 0 :+ 128] = k
+        }",
+    );
+    assert_contains(&mlir, &["memref<8x136xf16, 3>"]);
+}
+
+/// The same staging statement without `@padstage` stays unpadded: the
+/// attribute is opt-in per kernel, not a default the compiler chooses on
+/// its own.
+#[test]
+fn without_padstage_the_same_tile_stays_unpadded() {
+    let mlir = emit_mlir(
+        "kernel stage(K: tensor<f16>[64, 128], O: tensor<f16>[8, 128]) {
+            var k = K[0 :+ 8, 0 :+ 128]
+            O[0 :+ 8, 0 :+ 128] = k
+        }",
+    );
+    assert_contains(&mlir, &["memref<8x128xf16, 3>"]);
+    assert!(!mlir.contains("136"), "should not have padded:\n{mlir}");
+}
+
+/// `@padstage` only pads the tiles whose pitch is the actual defect: a
+/// narrower tile (32 elements, 64 bytes/row for f16, well under the
+/// 128-byte bank period) is left alone even with the attribute on, the
+/// same reasoning that excludes `attention_block`'s own `[BR, BR]` f32
+/// score tile.
+#[test]
+fn padstage_leaves_a_sub_period_pitch_tile_alone() {
+    let mlir = emit_mlir(
+        "@padstage
+        kernel stage(K: tensor<f16>[64, 32], O: tensor<f16>[8, 32]) {
+            var k = K[0 :+ 8, 0 :+ 32]
+            O[0 :+ 8, 0 :+ 32] = k
+        }",
+    );
+    assert_contains(&mlir, &["memref<8x32xf16, 3>"]);
+}
+
 /// A minimal kernel calling `warp_partial` directly, mirroring how
 /// `attention_split_src` (`phobos-gguf`) uses it: one program, one warp
 /// group's worth of query rows, the whole cache as its `[lo, hi)` range.

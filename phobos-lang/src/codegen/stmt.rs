@@ -44,7 +44,11 @@ impl<'c> Codegen<'c> {
                             if src.owned {
                                 self.bind(name, Binding::Tile(src));
                             } else {
-                                let tile = self.alloc_tile_shaped(block, src.elem, &src.shape)?;
+                                let tile = if self.should_pad_stage(src.elem, &src.shape) {
+                                    self.alloc_tile_padded(block, src.elem, &src.shape)?
+                                } else {
+                                    self.alloc_tile_shaped(block, src.elem, &src.shape)?
+                                };
                                 self.tile_copy(block, &src, &tile, true, false)?;
                                 self.bind(name, Binding::Tile(tile));
                             }
