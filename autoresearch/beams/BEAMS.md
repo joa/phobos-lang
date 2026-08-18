@@ -1687,3 +1687,31 @@ occupancy number (12.45% achieved against a 25% register-bound ceiling)
 still points at grid starvation as the kernel's real remaining lever, a
 bandwidth-reduction angle at the current grid shape neither this beam nor
 split-K actually tried.
+
+## Tile-pool view-release sweep, no code ships (2026-08-18)
+
+Follow-up on the attnfix beam's side finding (a masked `let` slice becomes
+a `Binding::View`, whose shared-memory allocation never returns to the
+pool). Full writeup: `autoresearch/beams/tile-pool-view-release-sweep.md`.
+
+Corrected the mechanism from the task brief's framing: `release()` calls
+scattered through the codegen are no-ops for *every* named binding
+(`util.rs`'s `bind()` clears `owned=false` universally); the actual gate is
+`release_named`'s last-use scan, which only ever matches `Binding::Tile`.
+Surveyed every kernel with a masked `let` slice in the tree
+(`q8_dp4a`/`q8_mma`/`q8_split`'s narrow variant, `argmax_reduce`,
+ONNX's `lower_flash_attention`, `fuse/emit.rs`'s NormQ stage) -- real
+defect, real bytes saved on the quant.rs narrow variant, but every site
+either shares a template with a sibling variant that the fix regresses, or
+crosses no occupancy threshold, or (on the one site that looked clean in
+an isolated probe) was measured against the real generated fused-MLP
+kernel and found to save nothing and cost a barrier -- the isolated probe
+only exercised 2 of the kernel's many downstream stages. Reverted.
+
+Root fix identified for a future beam: extend `release_named` to also
+handle `Binding::View`, tree-wide, no per-kernel edits -- gated on
+auditing `pipeline.rs`'s prefetch double-buffering views first, since
+those are also `Binding::View`s and releasing them early could corrupt
+the pipeline. Central lesson: validate staging-pattern changes against
+real generated chains (the `fused_source` test harness), not hand-built
+probes -- they can disagree.
