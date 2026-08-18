@@ -429,60 +429,6 @@ kernel q8_qmma_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// Stream-K probe (see `autoresearch/beams/q8-qmma-streamk.md`): a two-way
-/// split of the deep tile's own `k`, low half writing directly like the
-/// unsplit kernel, high half accumulating in place with no scratch buffer
-/// at all. This is the smallest instance of the boundary-fixup mechanism a
-/// full stream-K work assignment needs -- most output tiles in a real
-/// assignment would stay on the unsplit path (whole `k`, one write); only a
-/// tile the assignment's boundaries actually cross would take this pair,
-/// at that tile's own literal `k` bounds. Two kernels, not one launch with
-/// a branch: the accumulate has to see the low half's write, and that only
-/// holds across a kernel boundary on the same stream, not across
-/// concurrently scheduled blocks of one launch.
-pub(crate) fn q8_qmma_sk_lo_src(block: usize, tm: usize, tn: usize, half: usize) -> String {
-    let hb = half / Q8_BLOCK;
-    format!(
-        "@launch({block})
-@autotune(TM in [{tm}], TN in [{tn}])
-@aligned(M = TM, N = TN, K = {half}, KB = {hb})
-kernel q8_qmma_sk_lo(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
-               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
-               C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
-  C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, 0 :+ {half}], AS[pm * TM :+ TM, 0 :+ {hb}],
-                                           W[pn * TN :+ TN, 0 :+ {half}], WS[0 :+ {hb}, pn * TN :+ TN])
-}}
-"
-    )
-}
-
-/// [`q8_qmma_sk_lo_src`]'s high half: the same tile's remaining `k`,
-/// accumulated into the destination the low half already wrote. `+=` with
-/// `qmma_t` on the right does not take the direct-write path (that is only
-/// wired for a plain `=`, see `phobos-lang/src/codegen/stmt.rs`'s
-/// `store_tile`), so this computes into a fresh shared tile and folds it
-/// into the destination slice with a load-add-store -- the read that adds
-/// is exactly the DRAM cost this probe exists to measure.
-pub(crate) fn q8_qmma_sk_hi_src(block: usize, tm: usize, tn: usize, half: usize) -> String {
-    let hb = half / Q8_BLOCK;
-    format!(
-        "@launch({block})
-@autotune(TM in [{tm}], TN in [{tn}])
-@aligned(M = TM, N = TN, K = {half}, KB = {hb})
-kernel q8_qmma_sk_hi(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
-               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
-               C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
-  C[pm * TM :+ TM, pn * TN :+ TN] += qmma_t(A[pm * TM :+ TM, {half} :+ {half}], AS[pm * TM :+ TM, {hb} :+ {hb}],
-                                            W[pn * TN :+ TN, {half} :+ {half}], WS[{hb} :+ {hb}, pn * TN :+ TN])
-}}
-"
-    )
-}
-
 /// Sums [`q8_qmma_split_src`]'s `S` output tiles into one, one row at a time
 /// rather than a `[TM, TN]` tile at a time: a plain tile add is not
 /// `qmma_t`, so it always stages through shared memory, and at `TM = 128`
