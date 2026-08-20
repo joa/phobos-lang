@@ -26,7 +26,7 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-SGEMM performance is at 75% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
+SGEMM performance is at 74% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
 The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card. See [Inference](#inference).
 
 ![Phobos benchmark results](results/bench.svg)
@@ -62,17 +62,17 @@ Two model front ends, each with a host backend and a GPU one:
 - **`phobos-onnx`**: ONNX protobuf to a graph IR, then shape inference, constant folding, LayerNorm
   and epilogue fusion. GPT-2 runs end to end and has been verified against its bundled reference, with a KV-cache path.
 
-Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 591.86, tokens per second:
+Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test   | llama.cpp CUDA[^2]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  6844.36 +/-  24.81 |  5281.49 +/- 119.59 |
-| pp512  | 10799.11 +/-  26.07 |  8803.51 +/- 105.53 |
-| tg32   |   242.01 +/-   0.19 |   284.22 +/-   0.88 |
-| tg128  |   259.69 +/-   0.22 |   281.57 +/-   0.15 |
-| tg512  |   262.96 +/-   0.12 |   281.45 +/-   0.19 |
-| tg1024 |   262.75 +/-   0.15 |   279.41 +/-   0.11 |
-| tg2048 |   261.62 +/-   0.11 |   274.95 +/-   0.11 |
+| pp128  |  6374.55 +/- 157.95 |  5108.63 +/- 101.97 |
+| pp512  |  9932.18 +/- 283.14 |  7546.91 +/-  95.58 |
+| tg32   |   220.52 +/-   6.59 |   280.89 +/-   8.42 |
+| tg128  |   238.14 +/-   7.17 |   277.98 +/-   7.47 |
+| tg512  |   242.52 +/-   6.31 |   283.49 +/-   7.84 |
+| tg1024 |   242.98 +/-   6.27 |   285.99 +/-   8.39 |
+| tg2048 |   240.68 +/-   6.00 |   285.19 +/-   8.56 |
 
 <details>
   <summary>Benchmark Details</summary>
@@ -83,11 +83,16 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 591.86, tokens per second:
 # covers every row above; the table is its Qwen half, the plot is both models.
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
-python scripts/plot.py results/bench.json -o results/bench.svg
+python scripts/plot.py results/bench.json -o results/inference.svg
 
 # either engine on its own, which measures one column and not a comparison
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
 cargo run --features cuda --release -p phobos-gguf --example bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
+
+# the cuBLAS/gemm chart at the top of this file, a separate measurement:
+# phobos-bench autotunes and times its own kernels once each, no interleaving.
+cargo run -r -p phobos-bench -- --csv results/results.csv
+python scripts/plot_bench.py results/results.csv -o results/bench.svg
 ```
 </details>
 
