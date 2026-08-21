@@ -6,3 +6,6 @@
 /scripts/__pycache__
 *.pyc
 /.claude/
+*.nsys-rep
+*.ncu-rep
+*.sqlite
