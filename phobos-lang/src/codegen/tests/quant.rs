@@ -14,9 +14,7 @@ const I8_DOT_T: &str = "@launch(256)
 
 #[test]
 fn i8_dot_t_uses_the_hardware_four_way_dot() {
-    // dp4a needs four contiguous bytes from each operand, which is why this
-    // lands on dot_t: it contracts the last axis of both, so both walk
-    // memory contiguously. One vector<4xi8> load per operand per step.
+    // dot_t contracts the last axis of both operands, landing on dp4a's four-byte load.
     let mlir = emit_mlir(I8_DOT_T);
     assert_contains(
         &mlir,
@@ -31,8 +29,7 @@ fn i8_dot_t_uses_the_hardware_four_way_dot() {
 
 #[test]
 fn i8_dot_t_falls_back_below_pascal() {
-    // dp4a arrived with Pascal. Older targets still compile, on the generic
-    // integer path.
+    // dp4a arrived with Pascal; older targets fall back to the generic integer path.
     let mlir = emit_mlir_on(I8_DOT_T, "sm_50");
     assert!(
         !mlir.contains("nvvm.dot.accumulate.4way"),
@@ -54,10 +51,8 @@ const I8_DOT_T_TILED: &str = "@launch(256)
 
 #[test]
 fn i8_dot_t_uses_the_integer_tensor_cores() {
-    // With whole 8x8 output tiles the contraction goes to mma.sync instead
-    // of dp4a: same four bytes per operand per lane, sixteen times the
-    // products per issue. The m8n8k16 fragments are vector<1x4xi8> operands
-    // into a vector<1x2xi32> accumulator.
+    // Whole 8x8 output tiles route to mma.sync instead of dp4a; m8n8k16
+    // fragments are vector<1x4xi8> operands into a vector<1x2xi32> accumulator.
     let mlir = emit_mlir(I8_DOT_T_TILED);
     assert_contains(
         &mlir,
@@ -76,8 +71,7 @@ fn i8_dot_t_uses_the_integer_tensor_cores() {
 
 #[test]
 fn a_single_row_i8_dot_t_stays_on_dp4a() {
-    // The tensor core's smallest output tile is 8 rows, so decoding one
-    // token would do eight times the arithmetic to keep one row of it.
+    // A single row can't fill the tensor core's 8-row minimum tile.
     let mlir = emit_mlir(I8_DOT_T);
     assert!(
         !mlir.contains("nvgpu.mma.sync"),
@@ -87,8 +81,7 @@ fn a_single_row_i8_dot_t_stays_on_dp4a() {
 
 #[test]
 fn i8_dot_t_falls_back_below_turing() {
-    // The integer tensor cores arrived with Turing; Pascal and Volta still
-    // compile, on dp4a.
+    // Integer tensor cores arrived with Turing; Pascal/Volta fall back to dp4a.
     let mlir = emit_mlir_on(I8_DOT_T_TILED, "sm_70");
     assert!(
         !mlir.contains("nvgpu.mma.sync"),
@@ -111,11 +104,8 @@ const Q8_QMMA: &str = "            @launch(256)
 
 #[test]
 fn qmma_t_keeps_its_accumulators_in_registers() {
-    // Written as a tile-language loop the block scales have to be applied
-    // every 32 elements of k, which puts the accumulator in shared memory
-    // and stages both operands there. Folding them into the operation
-    // leaves the accumulators as loop-carried f32 values and the operands
-    // as plain loads.
+    // Folding the block scales into qmma_t keeps accumulators as loop-carried
+    // f32 values instead of forcing them into shared memory.
     let mlir = emit_mlir(Q8_QMMA);
     assert_contains(
         &mlir,
@@ -124,8 +114,7 @@ fn qmma_t_keeps_its_accumulators_in_registers() {
             "mmaShape = [8, 8, 16]",
             "vector<1x4xi8>",
             "vector<1x2xi32>",
-            // The accumulator becomes an f32 by landing in the mantissa of
-            // 1.5 * 2^23, not by a quarter-rate conversion instruction.
+            // f32 via the 1.5*2^23 mantissa trick, not a conversion instruction.
             "arith.bitcast",
             "arith.constant 0x4B400000 : f32",
         ],
@@ -149,8 +138,7 @@ fn qmma_t_keeps_its_accumulators_in_registers() {
 
 #[test]
 fn qmma_t_needs_whole_tensor_core_tiles() {
-    // The integer tensor core issues 8x8 outputs, so a tile that is not a
-    // multiple of eight both ways has no fragment layout to sit in.
+    // 8x8 tensor-core outputs need tile dims that are multiples of 8.
     let src = Q8_QMMA.replace("TN in [64]", "TN in [12]");
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
@@ -169,8 +157,7 @@ fn qmma_t_needs_whole_tensor_core_tiles() {
 
 #[test]
 fn i8_contraction_accumulates_in_i32() {
-    // A dot product of bytes overflows i8 almost immediately, so the
-    // accumulator widens even when the result type is not written down.
+    // i8*i8 overflows immediately, so the accumulator widens even when unwritten.
     let mlir = emit_mlir(
         "@launch(256)
         @aligned(K = 32, N = 32)
@@ -185,8 +172,7 @@ fn i8_contraction_accumulates_in_i32() {
 
 #[test]
 fn a_ragged_contraction_stays_off_the_dp4a_path() {
-    // 30 bytes is not a whole number of four-byte groups; the generic path
-    // handles the remainder correctly and dp4a would not.
+    // 30 is not a multiple of 4, so this stays off dp4a.
     let mlir = emit_mlir(
         "@launch(256)
         @aligned(K = 30, N = 32)
@@ -200,4 +186,55 @@ fn a_ragged_contraction_stays_off_the_dp4a_path() {
         !mlir.contains("nvvm.dot.accumulate.4way"),
         "30 is not a multiple of 4:\n{mlir}"
     );
+}
+
+#[test]
+fn gather_indexes_a_table_per_element() {
+    // gather needs one lookup per element inside the distributed loop, not a
+    // single CTA-uniform load.
+    let mlir = emit_mlir(
+        "@launch(256)
+        kernel gather_test(IDX: tensor<i32>[N, 4], TABLE: tensor<i32>[256], OUT: tensor<i32>[N, 4]) {
+            let p = program_id(0)
+            var idx = IDX[p * 32 :+ 32, 0 :+ 4]
+            var val = gather(TABLE[:], idx)
+            OUT[p * 32 :+ 32, 0 :+ 4] = val
+        }",
+    );
+    assert_contains(&mlir, &["arith.index_cast", "scf.for"]);
+    let index_casts = mlir.matches("arith.index_cast").count();
+    assert_eq!(
+        index_casts, 1,
+        "expected exactly one index cast, the gather's own:\n{mlir}"
+    );
+}
+
+#[test]
+fn gather_accepts_a_rank_two_table_with_a_leading_one() {
+    // Kernel params are always rank-2, so a [1, n] table must work like a
+    // rank-1 one: A[0, :] can't get there since point/slice subscripts don't mix.
+    let mlir = emit_mlir(
+        "@launch(256)
+        kernel gather_test(IDX: tensor<i32>[N, 4], TABLE: tensor<i32>[1, 256], OUT: tensor<i32>[N, 4]) {
+            let p = program_id(0)
+            var idx = IDX[p * 32 :+ 32, 0 :+ 4]
+            var val = gather(TABLE[0 :+ 1, :], idx)
+            OUT[p * 32 :+ 32, 0 :+ 4] = val
+        }",
+    );
+    assert_contains(&mlir, &["scf.for"]);
+}
+
+#[test]
+fn gather_rejects_a_non_integer_index() {
+    // A float index has no meaning as a table offset.
+    let src = "@launch(256)
+        kernel gather_test(IDX: tensor<f32>[N, 4], TABLE: tensor<i32>[256], OUT: tensor<i32>[N, 4]) {
+            let p = program_id(0)
+            var idx = IDX[p * 32 :+ 32, 0 :+ 4]
+            var val = gather(TABLE[:], idx)
+            OUT[p * 32 :+ 32, 0 :+ 4] = val
+        }";
+    let err = emit_err(src);
+    assert!(err.contains("integer"), "unexpected error: {err}");
 }

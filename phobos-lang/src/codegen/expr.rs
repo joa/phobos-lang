@@ -1,25 +1,6 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    pub(super) fn qmma_operands(
-        &mut self,
-        block: &Block<'c>,
-        args: &[Expr],
-    ) -> Result<[MemVal<'c>; 4]> {
-        let [a, asc, w, wsc] = args else {
-            bail!("qmma_t expects (a, a_scales, w, w_scales)");
-        };
-        let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
-            Rv::Tile(t) => Ok(t),
-            Rv::Scalar(_) => bail!("qmma_t expects tile operands"),
-        };
-        let a = operand(self, a)?;
-        let asc = operand(self, asc)?;
-        let w = operand(self, w)?;
-        let wsc = operand(self, wsc)?;
-        Ok([a, asc, w, wsc])
-    }
-
     pub(super) fn emit_expr(&mut self, block: &Block<'c>, expr: &Expr) -> Result<Rv<'c>> {
         match expr {
             Expr::Int(n) => Ok(Rv::Scalar(self.const_index(block, *n)?)),
@@ -27,8 +8,7 @@ impl<'c> Codegen<'c> {
                 block,
                 arith::constant(
                     self.ctx,
-                    // The type is coerced to f16 later when necessary.
-                    // We can get away with this for now.
+                    // coerced to f16 later when necessary
                     FloatAttribute::new(self.ctx, self.f32_t, *v).into(),
                     self.loc,
                 ),
@@ -158,233 +138,6 @@ impl<'c> Codegen<'c> {
         Ok((lo, hi, st, iv_div))
     }
 
-    pub(super) fn emit_call(
-        &mut self,
-        block: &Block<'c>,
-        callee: &str,
-        args: &[Expr],
-    ) -> Result<Rv<'c>> {
-        match callee {
-            "program_id" => {
-                let [Expr::Int(d @ 0..=2)] = args else {
-                    bail!("program_id expects one literal dimension argument 0..=2");
-                };
-                let dim = ["x", "y", "z"][*d as usize];
-                Ok(Rv::Scalar(self.block_id(block, dim)?))
-            }
-            // Grid-wide synchronization, spanning several stages of a pass; see codegen/sync.rs.
-            "atomic_add" => self.emit_atomic_add(block, args),
-            "grid_barrier" => self.emit_grid_barrier(block, args),
-            "warp_partial" => self.emit_warp_partial(block, args),
-            // dot outside an assignment: materialize into a fresh buffer.
-            // acc += dot(a, b) is handled in store_tile.
-            "dot" => {
-                let (a, b) = self.dot_operands(block, args)?;
-                let shape = [a.shape[0], b.shape[1]];
-                if shape.contains(&DYN) {
-                    bail!("dot result shape must be static; assign to a tile-typed var instead");
-                }
-                let acc_elem = self.accumulator_elem(a.elem, b.elem)?;
-                let out = self.alloc_tile_shaped(block, acc_elem, &shape)?;
-                self.check_matmul_shapes(&a, &b, &out)?;
-                if !self.wmma_dot(block, &a, &b, &out, false, false)? {
-                    let zero = self.zero_scalar(block, out.elem)?;
-                    self.tile_fill(block, zero, &out)?;
-                    self.tile_matmul(block, &a, &b, &out)?;
-                }
-                self.release(&a);
-                self.release(&b);
-                Ok(Rv::Tile(out))
-            }
-            // dot_t(a, b) = a * b^T: materialize into a fresh buffer.
-            // acc += dot(a, b) has no transposed analogue.
-            "dot_t" => {
-                let (a, b) = self.dot_operands(block, args)?;
-                if a.shape.len() != 2 || b.shape.len() != 2 {
-                    bail!("dot_t expects rank-2 tiles");
-                }
-                self.check_shapes(&[a.shape[1]], &[b.shape[1]], "dot_t contraction dim")?;
-                let shape = [a.shape[0], b.shape[0]];
-                if shape.contains(&DYN) {
-                    bail!("dot_t result shape must be static");
-                }
-                let acc_elem = self.accumulator_elem(a.elem, b.elem)?;
-                let out = self.alloc_tile_shaped(block, acc_elem, &shape)?;
-                if !self.wmma_dot(block, &a, &b, &out, true, false)? {
-                    self.tile_matmul_t(block, &a, &b, &out)?;
-                }
-                self.release(&a);
-                self.release(&b);
-                Ok(Rv::Tile(out))
-            }
-            // qdot_t(a, a_scales, w, w_scales): the Q8_0 contraction with its
-            // block scales folded in
-            "qdot_t" => {
-                let [a, asc, w, wsc] = args else {
-                    bail!("qdot_t expects (a, a_scales, w, w_scales)");
-                };
-                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
-                    Rv::Tile(t) => Ok(t),
-                    Rv::Scalar(_) => bail!("qdot_t expects tile operands"),
-                };
-                let (a, asc) = (operand(self, a)?, operand(self, asc)?);
-                let (w, wsc) = (operand(self, w)?, operand(self, wsc)?);
-                let out = self.tile_qdot_t(block, &a, &asc, &w, &wsc)?;
-                for t in [&a, &asc, &w, &wsc] {
-                    self.release(t);
-                }
-                Ok(Rv::Tile(out))
-            }
-            // qmma_t(a, a_scales, w, w_scales): the Q8_0 contraction batched
-            // over rows, on the integer tensor cores. The weight scales are
-            // [block, out] here where qdot_t wants [out, block].
-            "qmma_t" => {
-                let [a, asc, w, wsc] = self.qmma_operands(block, args)?;
-                let out = self.tile_qmma_t(block, &a, &asc, &w, &wsc)?;
-                for t in [&a, &asc, &w, &wsc] {
-                    self.release(t);
-                }
-                Ok(Rv::Tile(out))
-            }
-            // flat(t): a tile viewed as one row. A view, not a copy, so the
-            // result is read-only and the buffer stays the declaration's.
-            "flat" => {
-                let [arg] = args else {
-                    bail!("flat expects one tile argument");
-                };
-                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("flat expects a tile argument");
-                };
-                Ok(Rv::Tile(self.tile_flat(block, &t)?))
-            }
-            // element-wise unary math over a tile.
-            "exp" | "log" | "round" | "sqrt" | "tanh" => {
-                let [arg] = args else {
-                    bail!("{callee} expects one tile argument");
-                };
-                let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-                    bail!("{callee} expects a tile argument");
-                };
-                let out = match callee {
-                    "exp" => self.tile_exp(block, &t)?,
-                    "log" => self.tile_log(block, &t)?,
-                    "round" => self.tile_round(block, &t)?,
-                    "sqrt" => self.tile_sqrt(block, &t)?,
-                    _ => self.tile_tanh(block, &t)?,
-                };
-                Ok(Rv::Tile(out))
-            }
-            // tmax(a, b): element-wise maximum (broadcasting).
-            "tmax" => {
-                let [x, y] = args else {
-                    bail!("tmax expects two tile arguments");
-                };
-                let (Rv::Tile(a), Rv::Tile(b)) =
-                    (self.emit_expr(block, x)?, self.emit_expr(block, y)?)
-                else {
-                    bail!("tmax expects tile arguments");
-                };
-                if a.elem != b.elem {
-                    bail!("tmax operands must share an element type");
-                }
-                let shape = broadcast_shape(&a.shape, &b.shape)
-                    .ok_or_else(|| anyhow!("tmax operands are not broadcast-compatible"))?;
-                let out = self.alloc_tile_shaped(block, a.elem, &shape)?;
-                self.tile_max_bc(block, &a, &b, &out)?;
-                self.release(&a);
-                self.release(&b);
-                Ok(Rv::Tile(out))
-            }
-            "argsel" => self.emit_argsel(block, args), // a tmax-shaped fold's index side
-            // rowmax(t) / rowsum(t): reduce a rank-2 tile over its last
-            // column dim, producing a [rows, 1] column vector.
-            "rowmax" | "rowsum" => {
-                let how = if callee == "rowmax" {
-                    Reduce::Max
-                } else {
-                    Reduce::Sum
-                };
-                let t = self.reduce_arg(block, args, callee)?;
-                let out = self.tile_rowreduce(block, &t, how)?;
-                self.release(&t);
-                Ok(Rv::Tile(out))
-            }
-            // cumsum(t): inclusive prefix sum down the rows (the sequence
-            // axis), the running gate cumulant chunkwise linear attention
-            // needs.
-            "cumsum" => {
-                let t = self.reduce_arg(block, args, "cumsum")?;
-                let out = self.tile_cumsum(block, &t)?;
-                self.release(&t);
-                Ok(Rv::Tile(out))
-            }
-            // tril(t): causal lower-triangular mask (zero the strict upper
-            // triangle). May rewrite t in place, so t is not released here.
-            "tril" => {
-                let t = self.reduce_arg(block, args, "tril")?;
-                let out = self.tile_tril(block, &t)?;
-                Ok(Rv::Tile(out))
-            }
-            // transpose(t): rank-2 tile transpose, for contracting over the
-            // sequence axis (K.T @ V) in the chunk recurrence.
-            "transpose" => {
-                let t = self.reduce_arg(block, args, "transpose")?;
-                let out = self.tile_transpose(block, &t)?;
-                self.release(&t);
-                Ok(Rv::Tile(out))
-            }
-            // f32(x), bf16(x), i8(x), ...: convert a tile or a scalar to the
-            // named element type.
-            other if Scalar::from_name(other).is_some_and(|s| s != Scalar::Bool) => {
-                let want = self.scalar_type(Scalar::from_name(other).expect("matched above"));
-                let [arg] = args else {
-                    bail!("{other} expects one argument to convert");
-                };
-                match self.emit_expr(block, arg)? {
-                    Rv::Tile(t) => {
-                        let out = self.tile_cast(block, &t, want)?;
-                        self.release(&t);
-                        Ok(Rv::Tile(out))
-                    }
-                    Rv::Scalar(v) => Ok(Rv::Scalar(self.numeric_cast(block, v, want)?)),
-                }
-            }
-            other => bail!("unknown function '{other}'"),
-        }
-    }
-
-    pub(super) fn dot_operands(
-        &mut self,
-        block: &Block<'c>,
-        args: &[Expr],
-    ) -> Result<(MemVal<'c>, MemVal<'c>)> {
-        let [lhs, rhs] = args else {
-            bail!("dot expects two tile arguments");
-        };
-        let Rv::Tile(a) = self.emit_expr(block, lhs)? else {
-            bail!("dot expects tile operands");
-        };
-        let Rv::Tile(b) = self.emit_expr(block, rhs)? else {
-            bail!("dot expects tile operands");
-        };
-        Ok((a, b))
-    }
-
-    pub(super) fn reduce_arg(
-        &mut self,
-        block: &Block<'c>,
-        args: &[Expr],
-        name: &str,
-    ) -> Result<MemVal<'c>> {
-        let [arg] = args else {
-            bail!("{name} expects one tile argument");
-        };
-        let Rv::Tile(t) = self.emit_expr(block, arg)? else {
-            bail!("{name} expects a tile argument");
-        };
-        Ok(t)
-    }
-
     pub(super) fn emit_binop(
         &mut self,
         block: &Block<'c>,
@@ -453,8 +206,7 @@ impl<'c> Codegen<'c> {
         if shape.contains(&DYN) {
             bail!("elementwise tile result shape must be static");
         }
-        // - same types: noop
-        // - mixed types: widen
+        // same types: noop; mixed types: widen
         let (wa, wb) = self.widen_pair(block, a, b)?;
         let out = self.alloc_tile_shaped(block, wa.elem, &shape)?;
         self.tile_binary_dispatch(block, op, &wa, &wb, &out)?;
@@ -463,9 +215,7 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// Widen two tiles to their common type.
-    /// Noop when the type is equal.
-    /// Tiles we replace here with a widened type are being released.
+    /// Widens two tiles to a common type (noop if already equal); replaced tiles are released.
     fn widen_pair(
         &mut self,
         block: &Block<'c>,
@@ -610,11 +360,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// Whether a slice of this binding is a subview the type system can name.
-    ///
-    /// Tensor parameters and plain tile buffers are. The compiler's own staging
-    /// tiles are not: [`Self::emit_subview`] builds unit strides off the logical
-    /// shape, which addresses the wrong element in a padded or XOR-swizzled
-    /// buffer. Neither is reachable from source, so rejecting them costs nothing.
+    /// Staging tiles (padded or swizzled) are rejected: [`Self::emit_subview`]
+    /// assumes unit strides over the logical shape, which is wrong for those.
     pub(super) fn check_sliceable(&self, mv: &MemVal<'c>, binding: &Binding<'c>) -> Result<()> {
         if !matches!(binding, Binding::Tensor(_) | Binding::Tile(_)) {
             bail!("only tensors and tiles can be sliced");
@@ -631,11 +378,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Lowers slice subscripts to a memref.subview of a tensor.
-    ///
-    /// Offsets are always passed as dynamic operands; sizes are static when
-    /// they fold to constants; strides are always 1, so the result keeps the
-    /// source's layout with a dynamic offset.
+    /// Lowers slice subscripts to a memref.subview. Offsets are always dynamic
+    /// operands; sizes are static when they fold to constants; strides are always 1.
     pub(super) fn emit_subview(
         &mut self,
         block: &Block<'c>,
@@ -717,20 +461,10 @@ impl<'c> Codegen<'c> {
             }
         }
 
-        // Alignment proof: the flat offset is sum off_i*stride_i, so its
-        // divisibility is the gcd of the per-dim terms. Every row of the slice
-        // then lands on that same boundary if each outer stride does too, so
-        // the answer is one gcd over the base and those strides.
-        //
-        // A stride is the product of the extents below it. A static extent
-        // contributes itself; a dynamic one contributes whatever `@aligned`
-        // promised about it, and four elements when nothing was, that being the
-        // row-pitch ABI (see the module docs). Four elements is 16 bytes of f32
-        // and only 8 of f16, which is why the number is carried rather than
-        // reduced to a flag: a promise is what lets a narrow element type reach
-        // a full 16-byte access, and without one it stages at half width.
-        //
-        // ..thanks Claude!
+        // Alignment: divisibility of the flat offset is the gcd of each dim's
+        // off*stride. A dynamic extent's stride defaults to 4 elements (the
+        // row-pitch ABI) unless `@aligned` promised more, since that default is
+        // what lets a narrow element type still reach a full 16-byte access.
         let extent_div = |d: usize| {
             if src.shape[d] == DYN {
                 src.div_of(d).max(4)
@@ -754,18 +488,12 @@ impl<'c> Codegen<'c> {
         });
         let align_div = (0..rank - 1).map(stride_div).fold(base_div, gcd);
 
-        // Bounds mask: a dim that may reach past the source extent records its
-        // offset and extent for the masked load/store epilogue.
-        //
-        // A statically known extent that an aligned tile cannot tile evenly
-        // masks against that constant. A dynamic extent carries no static
-        // proof, so it masks against the tensor's runtime memref.dim unless
-        // dyn_in_bounds can account for the offset: a trimmed main loop's
-        // induction variable stays unmasked and keeps the vector / WMMA /
-        // cp.async fast paths (see Codegen::emit_split_for). An offset that is
-        // none of those -- a program id above all -- is unbounded from inside
-        // the kernel and must be masked, or the last tile of a grid writes
-        // through the end of a row and into the next one.
+        // Bounds mask: a dim that may run past the source extent records its
+        // offset and extent for the masked load/store epilogue. A static extent
+        // that doesn't tile evenly masks against that constant; a dynamic one
+        // masks against memref.dim unless dyn_in_bounds proves the offset safe
+        // (e.g. a trimmed loop's induction variable), which keeps the
+        // vector/WMMA/cp.async fast paths (see Codegen::emit_split_for).
         let mut mask = vec![None; rank];
         for i in 0..rank {
             let extent = if src.shape[i] != DYN {
@@ -807,8 +535,7 @@ impl<'c> Codegen<'c> {
             shape: static_sizes,
             row_stride: None,
             align_div,
-            // subviews are never taken of swizzled staging buffers (ldmatrix reads those directly),
-            // so the swizzle does not propagate here.
+            // never taken of swizzled staging buffers (ldmatrix reads those directly)
             swizzle: None,
             global: None,
             shared: src.shared,

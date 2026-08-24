@@ -21,6 +21,7 @@ use crate::ast::{
     Type as AstType, UnOp,
 };
 
+mod call;
 mod elemwise;
 mod expr;
 mod frag;
@@ -68,9 +69,7 @@ const SHARED_BANK_BYTES: i64 = 128;
 /// What `emit` learned across the module: the dynamic shared-memory sideband,
 /// plus `(kernel name, decline reasons)` for every kernel whose `@pipeline`
 /// assertion did not hold. `phobos_lang::compile_shared` turns a non-empty
-/// `pipeline_failures` into an error; a caller that compiles several variants
-/// of one source and accepts the assertion if any of them pipelines (see
-/// `phobos_kernels::compile::Variants::compile`) reads it directly.
+/// `pipeline_failures` into an error.
 #[derive(Debug)]
 pub struct EmitOutput {
     pub shared: Vec<(String, usize)>,
@@ -145,11 +144,9 @@ struct MemVal<'c> {
     /// [`Codegen::alloc_tile_padded`]
     row_stride: Option<i64>,
     /// Proven divisor, in elements, of the base offset and of every stride
-    /// above the innermost: how far into a row a vector access may reach and
-    /// still land on a boundary the hardware accepts. Four elements is what the
-    /// row-pitch ABI promises on its own, which is 16 bytes of f32 and 8 of
-    /// f16; `@aligned` raising a dynamic extent is what lets a narrow element
-    /// type reach 16 bytes too. Zero means no offset at all, so any width goes.
+    /// above the innermost. The row-pitch ABI promises 4 elements on its own
+    /// (16 bytes of f32, 8 of f16); `@aligned` can raise it further. Zero
+    /// means no offset at all, so any width goes.
     align_div: i64,
 
     /// XOR column swizzle for ldmatrix staging buffers. Every access, staging
@@ -176,11 +173,9 @@ struct MemVal<'c> {
     /// Empty for tile buffers and whole slices, see [`Codegen::emit_subview`].
     mask: Vec<Option<(Value<'c, 'c>, Value<'c, 'c>)>>,
 
-    /// Known divisor of each dynamic extent, 1 when nothing is known and empty
-    /// when nothing is known about any dim. Only `@aligned` raises it, and only
-    /// for tensor params: it is the host's promise that the extent is a whole
-    /// number of tiles, which lets a program-id-offset slice skip its bounds
-    /// mask. See [`Codegen::dyn_in_bounds`].
+    /// Known divisor of each dynamic extent, 1 when nothing is known. Only
+    /// `@aligned` raises it, for tensor params only: the host's promise that
+    /// the extent is a whole number of tiles. See [`Codegen::dyn_in_bounds`].
     dim_div: Vec<i64>,
 }
 
@@ -285,39 +280,32 @@ struct Codegen<'c> {
     /// reaches: what the host has to pass at launch.
     tile_offsets: HashMap<String, i64>,
     shared_bytes: i64,
-    /// The high-water mark `shared_bytes` ever reached, which is what the
-    /// host must actually reserve: a barrier-separated kernel (see
-    /// `attention_persist_src`) can let `shared_bytes` fall back to zero
+    /// High-water mark of `shared_bytes`, what the host must actually reserve.
+    /// A barrier-separated kernel can let `shared_bytes` fall back to zero
     /// between phases (see `dynamic_live`), but the allocation still has to
-    /// cover whichever phase asked for the most at once.
+    /// cover whichever phase asked for the most.
     shared_bytes_peak: i64,
-    /// Count of dynamic tiles currently allocated and not yet released.
-    /// Reaching zero between two phases of a barrier-separated kernel means
-    /// nothing from the first phase is still live, so the next distinct
-    /// shape mint can restart the dynamic allocation at offset 0 instead of
-    /// growing to fit both phases' tiles at once. See `alloc_tile_shaped`
-    /// and `release`.
+    /// Count of dynamic tiles allocated and not yet released. Reaching zero
+    /// between two phases of a barrier-separated kernel lets the next shape
+    /// mint restart the allocation at offset 0 instead of growing to fit both
+    /// phases at once. See `alloc_tile_shaped` and `release`.
     dynamic_live: i64,
     // Loop-invariant dot operands staged into shared f16 in a loop's preheader,
     // one frame per active for loop: (source view's memref value, staged
-    // buffer). The staging sites consult this instead of re-staging per
-    // iteration. See codegen/hoist.rs.
+    // buffer). See codegen/hoist.rs.
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
-    // Induction variable of the ragged remainder chunk being emitted, if any. A
-    // slice offset by it can run past a dynamic tensor extent, so emit_subview
-    // guards it against the runtime dim; the trimmed main loop leaves it None
-    // and keeps the unmasked fast paths. See Codegen::emit_split_for.
+    // Induction variable of the ragged remainder chunk being emitted, if any.
+    // emit_subview guards a slice offset by it against the runtime dim; the
+    // trimmed main loop leaves it None and keeps the unmasked fast paths.
     ragged_iv: Option<String>,
     // Induction variables of the enclosing trimmed main loops. Their trip count
     // was rounded down to whole chunks, so a slice offset by one of them is in
     // bounds by construction and needs no mask.
     trimmed_ivs: Vec<String>,
     /// Whether `@pipeline` was written on this kernel. The generic loop path
-    /// no longer consults it, auto-attempting every eligible loop instead; it
-    /// still gates the fused-GEMM backend's own double-buffering (see
-    /// [`Self::staging_pairs`], which has no legality or budget check of its
-    /// own). Kernel-wide the attribute is now an assertion: at least one loop
-    /// or fused dispatch must pipeline, checked in `emit` via `pipelined_any`.
+    /// auto-attempts every eligible loop regardless; this still gates the
+    /// fused-GEMM backend's double-buffering (see [`Self::staging_pairs`]) and
+    /// is checked kernel-wide as an assertion via `pipelined_any` in `emit`.
     pipeline_assert: bool,
     /// Whether some loop in the kernel being emitted did pipeline, through
     /// either mechanism `pipeline_assert` gates.
@@ -443,16 +431,10 @@ fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
 }
 
 /// Whether a slice dimension provably never reaches past the source extent,
-/// so it needs no bounds mask. `size` is the slice's static extent along the
-/// dim, `off_div` the largest known divisor of the slice offset (see
-/// [`Codegen::expr_div`]). Masking kicks in for a statically known extent that
-/// a static, aligned tile cannot tile evenly.
-///
-/// A dynamic source extent has no static proof either way, so it is handled
-/// one level up: [`Codegen::emit_split_for`] trims the loop to the chunks that
-/// are provably whole (which reach here and stay unmasked, keeping the vector,
-/// WMMA and cp.async fast paths) and replays the remainder under a runtime
-/// mask against the tensor's own `memref.dim`.
+/// so it needs no bounds mask. `size` is the slice's static extent, `off_div`
+/// the largest known divisor of the slice offset (see [`Codegen::expr_div`]).
+/// A dynamic source extent is handled one level up, by
+/// [`Codegen::emit_split_for`] trimming the loop to provably-whole chunks.
 fn dim_in_bounds(extent: i64, size: i64, off_div: i64) -> bool {
     if extent == DYN {
         return true;
