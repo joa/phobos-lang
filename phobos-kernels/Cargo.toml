@@ -15,9 +15,10 @@ cust = { version = "0.3.2", optional = true }
 phobos-base = { path = "../phobos-base", optional = true }
 phobos-lang = { path = "../phobos-lang", optional = true }
 phobos-mlir = { path = "../phobos-mlir", optional = true }
+sha2 = { workspace = true, optional = true }
 
 [features]
-cuda = ["dep:cust", "dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir"]
+cuda = ["dep:cust", "dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir", "dep:sha2"]
 
 [[example]]
 name = "barrier_bench"

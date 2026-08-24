@@ -3,6 +3,8 @@ pub mod matmul;
 pub mod util;
 
 #[cfg(feature = "cuda")]
+mod cache;
+#[cfg(feature = "cuda")]
 pub mod compile;
 #[cfg(feature = "cuda")]
 pub mod launch;
@@ -10,7 +12,7 @@ pub mod launch;
 pub mod pool;
 
 #[cfg(feature = "cuda")]
-pub use compile::{Variants, compile, compile_in, compile_shared};
+pub use compile::{Variants, compile, compile_in, compile_parallel, compile_shared};
 #[cfg(feature = "cuda")]
 pub use launch::{cuda_ok, push_descriptor};
 #[cfg(feature = "cuda")]
