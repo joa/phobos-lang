@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Context {
     /// Whether to print the output of different compiler phases.
     pub print_phases: bool,
@@ -26,7 +26,7 @@ impl Default for Context {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GpuConfig {
     Nvidia(NvidiaGpuConfig),
 }
@@ -54,7 +54,7 @@ impl GpuConfig {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NvidiaGpuConfig {
     chip: String,
     features: String,

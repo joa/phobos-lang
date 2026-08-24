@@ -1,3 +1,5 @@
+use std::sync::Once;
+
 use melior::{
     Context,
     dialect::DialectRegistry,
@@ -9,6 +11,18 @@ use melior::{
 use inkwell::targets::{InitializationConfig, Target};
 
 mod mlir_flatten;
+
+/// `register_all_passes` and `Target::initialize_nvptx` write into
+/// process-global LLVM tables and aren't documented safe to race, unlike the
+/// rest of [`gen_code`], which only touches its own `Context`. Run once per
+/// process.
+fn ensure_global_init() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        register_all_passes();
+        Target::initialize_nvptx(&InitializationConfig::default());
+    });
+}
 
 /// Generate PTX for a given function body F.
 ///
@@ -34,6 +48,8 @@ where
         &Module<'c>,
     ) -> anyhow::Result<()>,
 {
+    ensure_global_init();
+
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
 
@@ -41,7 +57,6 @@ where
     context.append_dialect_registry(&registry);
     context.load_all_available_dialects();
     register_all_llvm_translations(&context);
-    register_all_passes();
 
     let loc = Location::unknown(&context);
     let module = Module::new(loc);
@@ -137,8 +152,8 @@ pub fn lower_mlir_to_ptx<'c>(
         println!("===================================");
     }
 
-    // 4) Compile LLVM IR to PTX
-    Target::initialize_nvptx(&InitializationConfig::default());
+    // 4) Compile LLVM IR to PTX. Target registration happened in
+    // `ensure_global_init`, before `gen_code` reached here.
     let target = Target::from_name("nvptx64").ok_or_else(|| {
         anyhow::anyhow!("NVPTX target not found (must compile LLVM with NVPTX support)")
     })?;

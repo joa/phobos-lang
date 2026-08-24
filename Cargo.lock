@@ -1220,6 +1220,7 @@ dependencies = [
  "phobos-base",
  "phobos-lang",
  "phobos-mlir",
+ "sha2",
 ]
 
 [[package]]
