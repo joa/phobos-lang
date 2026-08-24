@@ -43,10 +43,9 @@ fn q8_matmul_matches_the_dequantized_matmul() {
             dense[p * n + j] = qs[j * k + p] as f32 * scales[(p / Q8_BLOCK) * n + j];
         }
     }
-    // Pre-quantize the activation and hand both paths the dequantized
-    // values. matmul_quant quantizes internally, and requantizing an already
-    // quantized row is exact, so this isolates the weight layout from the
-    // activation's precision loss.
+    // Pre-quantize the activation: matmul_quant requantizes internally, and
+    // requantizing an already quantized row is exact, so this isolates the
+    // weight layout from the activation's precision loss.
     let mut a: Vec<f32> = (0..2 * k).map(|_| next()).collect();
     let mut scratch = vec![0i8; Q8_BLOCK];
     for block in a.chunks_exact_mut(Q8_BLOCK) {
@@ -162,6 +161,7 @@ fn delta_conv_leaves_an_all_zero_head_at_zero() {
         rows: 1,
         heads: 2,
         head_dim: 2,
+        kv_heads: 2,
         kernel: 1,
         planes: [0, 4, 8],
         head_stride: 2,
@@ -182,12 +182,59 @@ fn delta_conv_leaves_an_all_zero_head_at_zero() {
 }
 
 #[test]
+fn delta_conv_expands_query_and_key_over_kv_heads() {
+    // Four value heads sharing two key/query heads, the grouped-query
+    // deltanet shape UD-IQ1_M uses. One position, one tap, no normalization,
+    // so this tests only which input column each destination head reads.
+    let backend = HostBackend::new();
+    let mix = DeltaMix {
+        rows: 1,
+        heads: 4,
+        head_dim: 2,
+        kv_heads: 2,
+        kernel: 1,
+        planes: [0, 4, 8],
+        head_stride: 2,
+        normalize: false,
+        query_scale: 1.0,
+    };
+    // [q_h0, q_h1, k_h0, k_h1, v_h0, v_h1, v_h2, v_h3], two elements apiece.
+    let stream: Vec<f32> = (1..=8).flat_map(|h| [h as f32, h as f32]).collect();
+    let history = backend.upload(&stream).unwrap();
+    let taps = backend.upload(&vec![1.0; mix.channels()]).unwrap();
+    let packed = backend.alloc(mix.packed_len()).unwrap();
+    backend.delta_conv(history, taps, mix, packed).unwrap();
+
+    let out = read_vec(&backend, packed, mix.packed_len()).unwrap();
+    let head = |plane: usize, h: usize| &out[plane * mix.span() + h * mix.head_dim..][..2];
+
+    // Upstream's `ggml_repeat_4d` tiles rather than block-repeats, so packed
+    // head `h` of query/key reads physical head `h % kv_heads` back: heads 0
+    // and 2 both read kv-head 0, heads 1 and 3 both read kv-head 1.
+    for plane in [0usize, 1] {
+        assert_eq!(head(plane, 0), head(plane, 2), "plane {plane} head 0 vs 2");
+        assert_eq!(head(plane, 1), head(plane, 3), "plane {plane} head 1 vs 3");
+        assert_ne!(head(plane, 0), head(plane, 1), "plane {plane} head 0 vs 1");
+    }
+
+    // The value plane has a real head for every one of the four destination
+    // slots, so all four stay distinct.
+    let v: Vec<&[f32]> = (0..4).map(|h| head(2, h)).collect();
+    for (i, a) in v.iter().enumerate() {
+        for b in &v[i + 1..] {
+            assert_ne!(a, b, "value heads collapsed that should not have");
+        }
+    }
+}
+
+#[test]
 fn delta_gates_hold_up_where_the_direct_softplus_overflows() {
     let backend = HostBackend::new();
     let mix = DeltaMix {
         rows: 2,
         heads: 1,
         head_dim: 2,
+        kv_heads: 1,
         kernel: 1,
         planes: [0, 2, 4],
         head_stride: 2,

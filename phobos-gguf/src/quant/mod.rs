@@ -2,6 +2,16 @@ use anyhow::{Context, Result, ensure};
 
 use crate::GgmlType;
 
+mod iq1_m;
+mod iq1_s;
+mod iq2_s;
+mod iq2_xs;
+mod iq2_xxs;
+mod iq3_s;
+mod iq3_xxs;
+mod iq4_xs;
+mod q2_k;
+mod q3_k;
 mod q4_0;
 mod q4_1;
 mod q4_k;
@@ -10,8 +20,16 @@ mod q5_1;
 mod q6_k;
 mod q8_0;
 mod q8_1;
+mod tables;
 
 pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
+pub(crate) use iq1_s::flat_grid as iq1s_flat_grid;
+pub(crate) use iq2_s::{flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs};
+pub(crate) use iq2_xs::flat_grid as iq2xs_flat_grid;
+pub(crate) use iq2_xxs::{flat_grid as iq2xxs_flat_grid, flat_signs as iq2xxs_flat_signs};
+pub(crate) use iq3_s::flat_grid as iq3s_flat_grid;
+pub(crate) use iq3_xxs::flat_grid as iq3xxs_flat_grid;
+pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,10 +42,20 @@ pub enum Quant {
     Q8_1,
     Q4_K,
     Q6_K,
+    Q2_K,
+    Q3_K,
+    IQ1_S,
+    IQ1_M,
+    IQ2_XXS,
+    IQ2_XS,
+    IQ2_S,
+    IQ3_XXS,
+    IQ3_S,
+    IQ4_XS,
 }
 
 impl Quant {
-    pub const ALL: [Quant; 8] = [
+    pub const ALL: [Quant; 18] = [
         Quant::Q4_0,
         Quant::Q4_1,
         Quant::Q5_0,
@@ -36,6 +64,16 @@ impl Quant {
         Quant::Q8_1,
         Quant::Q4_K,
         Quant::Q6_K,
+        Quant::Q2_K,
+        Quant::Q3_K,
+        Quant::IQ1_S,
+        Quant::IQ1_M,
+        Quant::IQ2_XXS,
+        Quant::IQ2_XS,
+        Quant::IQ2_S,
+        Quant::IQ3_XXS,
+        Quant::IQ3_S,
+        Quant::IQ4_XS,
     ];
 
     pub fn spec(self) -> &'static Spec {
@@ -48,6 +86,16 @@ impl Quant {
             Quant::Q8_1 => &q8_1::SPEC,
             Quant::Q4_K => &q4_k::SPEC,
             Quant::Q6_K => &q6_k::SPEC,
+            Quant::Q2_K => &q2_k::SPEC,
+            Quant::Q3_K => &q3_k::SPEC,
+            Quant::IQ1_S => &iq1_s::SPEC,
+            Quant::IQ1_M => &iq1_m::SPEC,
+            Quant::IQ2_XXS => &iq2_xxs::SPEC,
+            Quant::IQ2_XS => &iq2_xs::SPEC,
+            Quant::IQ2_S => &iq2_s::SPEC,
+            Quant::IQ3_XXS => &iq3_xxs::SPEC,
+            Quant::IQ3_S => &iq3_s::SPEC,
+            Quant::IQ4_XS => &iq4_xs::SPEC,
         }
     }
 
@@ -74,22 +122,39 @@ pub struct Spec {
     /// block_bytes * block` elements; both are checked before this runs.
     pub dequantize: fn(bytes: &[u8], out: &mut [f32]),
     /// Splits a `[n, k]` weight into the planes the quantized kernels index,
-    /// or `None` for a format no kernel unpacks yet: those dequantize at
-    /// upload and take the dense contraction.
+    /// or `None` for a format no kernel unpacks yet (dequantizes at upload
+    /// instead). The two planes are transposed relative to each other:
     ///
-    /// The two planes are transposed relative to each other, each for its own
-    /// access pattern, and a kernel indexes against exactly this:
-    ///
-    /// - `qs` is `[n, k]`, so `qs[j * k + p]` is the quant for output `j` and
-    ///   input `p`, putting the contraction axis contiguous.
-    /// - `scales` is `[k / scale_run, n]`, so `scales[(p / scale_run) * n + j]`
-    ///   scales that quant, putting one run's scales for a stretch of outputs
-    ///   contiguous.
+    /// - `qs` is `[n, k]`: `qs[j * k + p]` is the quant for output `j`, input `p`.
+    /// - `scales` is `[k / scale_run, n]`: `scales[(p / scale_run) * n + j]`
+    ///   scales that quant.
     pub planes: Option<Split>,
+    /// Pulls this format's per-super-block `d`/`dmin` header fields (raw f16
+    /// bit patterns, [`RawScales`]) out of a `[n, k]` weight's blocks, for a
+    /// kernel that decodes everything else straight from the block bytes
+    /// uploaded verbatim. `None` for a format with no such kernel.
+    ///
+    /// Unlike `planes`, nothing is split apart: a block's bytes stay exactly
+    /// as the file orders them, `[n, k / block * block_bytes]`. Only `d`/`dmin`
+    /// are pulled out into their own `[n, k / block]` planes.
+    pub raw_scales: Option<RawSplit>,
 }
 
 /// What [`Spec::planes`] holds: a `[n, k]` weight's blocks into its planes.
 pub type Split = fn(bytes: &[u8], k: usize, n: usize) -> Planes;
+
+/// What [`Spec::raw_scales`] holds: a `[n, k]` weight's blocks into its
+/// header-field planes.
+pub type RawSplit = fn(bytes: &[u8], k: usize, n: usize) -> RawScales;
+
+/// A quantized weight's per-super-block scale and minimum, pulled out of its
+/// blocks as raw `f16` bit patterns: [`Spec::raw_scales`].
+#[derive(Debug)]
+pub struct RawScales {
+    pub d: Vec<u16>,
+    /// Empty for a format with no minimum ([`Spec::has_min`] false).
+    pub dmin: Vec<u16>,
+}
 
 /// A quantized weight split into the planes [`Spec::planes`] describes.
 #[derive(Debug)]
@@ -217,6 +282,27 @@ impl Packed {
         Ok(planes)
     }
 
+    /// Whether a raw kernel decodes this format from its own bytes.
+    pub fn has_raw_scales(&self) -> bool {
+        self.spec().raw_scales.is_some()
+    }
+
+    /// The block bytes exactly as the file holds them, `[n, k / block *
+    /// block_bytes]`, for a raw kernel to upload verbatim.
+    pub fn blocks(&self) -> &[u8] {
+        &self.blocks
+    }
+
+    /// The header-field planes [`Spec::raw_scales`] describes, for a backend
+    /// uploading this alongside [`Packed::blocks`].
+    pub fn raw_scales(&self) -> Result<RawScales> {
+        let split = self
+            .spec()
+            .raw_scales
+            .with_context(|| format!("no raw kernel decodes {}", self.quant.name()))?;
+        Ok(split(&self.blocks, self.k, self.n))
+    }
+
     /// Output row `j` decoded into `out`, which is `k` elements.
     pub fn row_into(&self, j: usize, out: &mut [f32]) -> Result<()> {
         ensure!(
@@ -314,6 +400,16 @@ impl GgmlType {
             GgmlType::Q8_1 => Quant::Q8_1,
             GgmlType::Q4_K => Quant::Q4_K,
             GgmlType::Q6_K => Quant::Q6_K,
+            GgmlType::Q2_K => Quant::Q2_K,
+            GgmlType::Q3_K => Quant::Q3_K,
+            GgmlType::IQ1_S => Quant::IQ1_S,
+            GgmlType::IQ1_M => Quant::IQ1_M,
+            GgmlType::IQ2_XXS => Quant::IQ2_XXS,
+            GgmlType::IQ2_XS => Quant::IQ2_XS,
+            GgmlType::IQ2_S => Quant::IQ2_S,
+            GgmlType::IQ3_XXS => Quant::IQ3_XXS,
+            GgmlType::IQ3_S => Quant::IQ3_S,
+            GgmlType::IQ4_XS => Quant::IQ4_XS,
             _ => return None,
         })
     }

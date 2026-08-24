@@ -1,10 +1,8 @@
 // Q4_K: `{ f16 d; f16 dmin; uint8 scales[12]; uint8 qs[128]; }`.
 //
-// A 256-element super-block holding eight runs of 32. Each run has its own
-// scale and minimum, but stored as six-bit indices into the super-block's `d`
-// and `dmin` rather than as halves of their own, which is where the format
-// spends less than Q4_1 for the same nibble quants. The twelve scale bytes
-// pack sixteen six-bit values; see [`scale_min`].
+// Eight runs of 32, each with its own scale and minimum stored as 6-bit
+// indices into the super-block's `d`/`dmin` rather than as halves of their
+// own. The twelve scale bytes pack sixteen 6-bit values; see [`scale_min`].
 //
 // Nibble order follows Q4_0: a byte plane of 32 supplies one run from its low
 // nibbles and the next run from its high ones.
@@ -28,6 +26,7 @@ pub static SPEC: Spec = Spec {
     has_min: true,
     dequantize,
     planes: None,
+    raw_scales: None,
 };
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {

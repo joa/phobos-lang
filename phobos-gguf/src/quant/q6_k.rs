@@ -1,12 +1,8 @@
 // Q6_K: `{ uint8 ql[128]; uint8 qh[64]; int8 scales[16]; f16 d; }`.
 //
-// A 256-element super-block of six-bit quants, four low bits in `ql` and two
-// high ones in `qh`, symmetric around 32. The sixteen runs of 16 scale by a
-// signed eight-bit index into the super-block's `d`, so unlike Q4_K there is
-// no minimum to subtract.
-//
-// A Q4_K_M file is mostly Q4_K with its more sensitive tensors left here, so
-// the two formats arrive together.
+// Six-bit quants, four low bits in `ql` and two high ones in `qh`, symmetric
+// around 32. The sixteen runs of 16 scale by a signed 8-bit index into the
+// super-block's `d`; unlike Q4_K there is no minimum to subtract.
 
 use phobos_base::half::f16_to_f32;
 
@@ -35,6 +31,7 @@ pub static SPEC: Spec = Spec {
     has_min: false,
     dequantize,
     planes: None,
+    raw_scales: None,
 };
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {

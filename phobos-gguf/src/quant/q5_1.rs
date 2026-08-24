@@ -17,6 +17,7 @@ pub static SPEC: Spec = Spec {
     has_min: true,
     dequantize,
     planes: None,
+    raw_scales: None,
 };
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {

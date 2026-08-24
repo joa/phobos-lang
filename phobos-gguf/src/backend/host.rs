@@ -36,9 +36,9 @@ impl HostBackend {
     }
 
     /// Move a destination out of the slab so it can be written while other
-    /// buffers stay borrowed, then put it back. Moving rather than copying
-    /// matters: the LM head destination alone is a quarter of a billion floats.
-    /// The destination must not alias a source.
+    /// buffers stay borrowed, then put it back. Moving, not copying: the LM
+    /// head destination alone is a quarter of a billion floats. Must not
+    /// alias a source.
     fn writing<R>(&self, dst: Buf, f: impl FnOnce(&[Vec<f32>], &mut Vec<f32>) -> R) -> R {
         let mut taken = std::mem::take(&mut self.slabs.borrow_mut()[dst.0]);
         let result = {
@@ -472,17 +472,19 @@ impl Backend for HostBackend {
                 "delta_conv operands or destination are too small"
             );
             for (plane, &base) in mix.planes.iter().enumerate() {
-                // Only the query carries the readout scale, and the value is
-                // never normalized: it is written into the state, not matched
-                // against it.
+                // Only the query carries the readout scale; the value is
+                // never normalized, since it's written into the state rather
+                // than matched against it.
                 let scale = if plane == 0 { mix.query_scale } else { 1.0 };
                 let normalize = mix.normalize && plane < 2;
-                // One row per (position, head), head fastest: both the packed
-                // layout and the span the norm covers.
+                // Query/key exist at only kv_heads physical columns; a packed
+                // head beyond that reads back via h % kv_heads, matching
+                // upstream's ggml_repeat_4d.
+                let src_heads = if plane == 2 { heads } else { mix.kv_heads };
                 for t in 0..mix.gates() {
                     let (position, head) = (t / heads, t % heads);
                     let at = plane * mix.span() + t * dim;
-                    let column = base + head * mix.head_stride;
+                    let column = base + (head % src_heads) * mix.head_stride;
                     let row = &mut dst[at..at + dim];
                     for (d, o) in row.iter_mut().enumerate() {
                         let c = column + d;
