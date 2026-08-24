@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
     Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun,
-    QAct, QBuf,
+    QAct, QBuf, RawBuf,
 };
 use crate::quant::Packed;
 use crate::{Gguf, TensorInfo};
@@ -121,14 +121,21 @@ impl Linear {
     ///
     /// A weight a kernel unpacks goes up as one quant per element plus its
     /// scales twice, once per block and once transposed per row, the two
-    /// layouts the quantized kernels read. Anything else goes up as f32,
-    /// whatever the file held.
+    /// layouts the quantized kernels read. A weight a raw kernel decodes goes
+    /// up as its file bytes verbatim plus one `f16` header plane, or two for a
+    /// format with a minimum term. Anything else goes up as f32, whatever the
+    /// file held.
     pub(crate) fn footprint(&self, into: &mut Uploads) {
         let elems = self.in_dim * self.out_dim;
         let (bytes, dense) = match &self.weight {
             Weights::Quant(packed) if packed.has_planes() => {
                 let scales = elems / packed.spec().scale_run;
                 (elems + 2 * scales * size_of::<f32>(), false)
+            }
+            Weights::Quant(packed) if packed.has_raw_scales() => {
+                let blocks = elems / packed.spec().block;
+                let headers = 1 + usize::from(packed.spec().has_min);
+                (packed.byte_len() + headers * blocks * size_of::<u16>(), false)
             }
             _ => (elems * size_of::<f32>(), true),
         };
@@ -173,17 +180,21 @@ impl Linear {
         })
     }
 
-    /// Stacks weights that share an input into one projection.
-    ///
-    /// Attention's query, key and value read the same normalized row, as do the
-    /// two halves of a SwiGLU and the four projections of a delta net. Run
-    /// separately they are a launch each for a narrow slice of the output: a
-    /// delta net's decay and beta are sixteen wide, two blocks of a forty-eight
-    /// block card.
-    ///
-    /// Stacking along the output axis appends whole blocks and requantizes
-    /// nothing, because a weight is held the way its file stores it: one
-    /// output's inputs contiguous.
+    /// Whether [`Linear::fuse`] on these parts stays quantized rather than
+    /// falling back to a dense fusion. Requires the plane-tier format and a
+    /// uniform quant across every part; `Packed::stack` on the raw tier
+    /// (K-quant, IQ) is unexercised, so that tier always declines.
+    pub(crate) fn should_fuse(parts: &[&Linear]) -> bool {
+        match packed_parts(parts) {
+            None => true,
+            Some(ps) => ps[0].has_planes() && ps.iter().all(|p| p.quant() == ps[0].quant()),
+        }
+    }
+
+    /// Stacks weights that share an input into one projection, replacing a
+    /// launch per narrow output (q/k/v, gate/up, a delta net's four parts)
+    /// with one. Stacking along the output axis appends whole blocks and
+    /// requantizes nothing.
     pub(crate) fn fuse(parts: &[&Linear]) -> Result<Linear> {
         let (first, rest) = parts.split_first().context("fusing needs a weight")?;
         let in_dim = first.in_dim;
@@ -211,13 +222,7 @@ impl Linear {
         // Blocks only stack if every part is in the same format. A K-quant file
         // is routinely mixed, leaving its more sensitive tensors wider, and
         // there the fused weight has to go dense.
-        let packed: Option<Vec<&Packed>> = parts
-            .iter()
-            .map(|p| match &p.weight {
-                Weights::Quant(packed) => Some(packed),
-                Weights::Dense(_) => None,
-            })
-            .collect();
+        let packed = packed_parts(parts);
         let uniform = packed
             .as_ref()
             .is_some_and(|ps| ps.iter().all(|p| p.quant() == ps[0].quant()));
@@ -329,14 +334,9 @@ impl Linear {
 
     /// [`Linear::add_into`], but letting a backend fuse the activation's
     /// quantization into the accumulating contraction itself, one kernel
-    /// instead of two. `x` is unquantized, `width`-wide, and not yet reduced
-    /// the way [`Linear::add_into`]'s own `quantize_act` call would reduce
-    /// it -- the backend does that inside the fused kernel if it takes this
-    /// at all.
-    ///
-    /// Declines to the unfused pair exactly where [`Linear::add_into`] would
-    /// take its dense fallback, or where the backend itself declines (off by
-    /// default, or a shape its chain has no stage for).
+    /// instead of two. `x` is unquantized and not yet reduced; the fused
+    /// kernel does that itself if it takes this at all. Falls back to
+    /// [`Linear::add_into`] otherwise.
     pub(crate) fn add_projected(
         &self,
         backend: &dyn Backend,
@@ -387,14 +387,10 @@ impl Linear {
         Ok(())
     }
 
-    /// The normalization ahead of this projection and the projection itself as
-    /// one kernel, each run of the output landing where the caller wants it, and
-    /// `mix` continuing into the delta net's convolution and gates. Whatever
-    /// comes back unset is the caller's to launch.
-    ///
-    /// The normalization belongs to the request for the reason
-    /// [`Ffn::forward_fused`] takes it too: a fused kernel recomputes it per
-    /// block and spends no barrier publishing it.
+    /// The normalization ahead of this projection and the projection itself
+    /// as one kernel, each run of the output landing where the caller wants
+    /// it, and `mix` continuing into the delta net's convolution and gates.
+    /// Whatever comes back unset is the caller's to launch.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn project_fused(
         &self,
@@ -436,6 +432,22 @@ impl Linear {
         backend.constant_quant(&self.key, packed)
     }
 
+    /// Whether the raw-kernel contraction applies: a quantized weight in a
+    /// format [`Backend::constant_quant`] does not unpack, but a raw kernel
+    /// decodes from its own bytes.
+    fn is_raw(&self) -> bool {
+        matches!(&self.weight, Weights::Quant(packed) if packed.has_raw_scales())
+    }
+
+    /// This weight uploaded in its raw block bytes, for a caller that
+    /// contracts against it itself.
+    pub(crate) fn raw(&self, backend: &dyn Backend) -> Result<RawBuf> {
+        let Weights::Quant(packed) = &self.weight else {
+            bail!("'{}' is not held in quantized form", self.key);
+        };
+        backend.constant_raw(&self.key, packed)
+    }
+
     /// [`Linear::forward`] against an activation quantized already. `act` must
     /// be `x` at this weight's input width; a dense weight ignores it.
     pub(crate) fn forward_act(
@@ -467,6 +479,16 @@ impl Linear {
             .with_context(|| format!("matmul for '{}'", self.key));
         }
 
+        if self.is_raw() {
+            // A raw kernel decodes to f32 and multiplies against the
+            // activation directly, so a caller's pre-quantized `act` (built
+            // for the int8 contraction above) has nothing to offer it.
+            let w = self.raw(backend)?;
+            return backend
+                .matmul_raw(x, rows, self.in_dim, w, self.out_dim, out)
+                .with_context(|| format!("matmul for '{}'", self.key));
+        }
+
         // Either the file was dense or no kernel unpacks its format, in which
         // case the weight is decoded once at upload and contracted densely.
         let w = match &self.weight {
@@ -477,6 +499,17 @@ impl Linear {
             .matmul(x, rows, self.in_dim, w, self.out_dim, out)
             .with_context(|| format!("matmul for '{}'", self.key))
     }
+}
+
+/// Each part's [`Packed`] block, or `None` if any part is still dense.
+fn packed_parts<'a>(parts: &[&'a Linear]) -> Option<Vec<&'a Packed>> {
+    parts
+        .iter()
+        .map(|p| match &p.weight {
+            Weights::Quant(packed) => Some(packed),
+            Weights::Dense(_) => None,
+        })
+        .collect()
 }
 
 /// A named one-dimensional weight, uploaded once and referred to by handle.
@@ -527,11 +560,18 @@ pub(crate) fn check_dims(info: &TensorInfo, expected: &[u64]) -> Result<()> {
     Ok(())
 }
 
+/// Gate and up, fused into one launch when [`Linear::should_fuse`] allows it
+/// and run as two ordinary projections otherwise.
+enum GateUp {
+    /// Stacked: they read the same row, so one launch over a doubly wide
+    /// output replaces two over half of it.
+    Fused(Linear),
+    Split { gate: Linear, up: Linear },
+}
+
 /// The SwiGLU feed-forward every architecture here ends a block with.
 pub(crate) struct Ffn {
-    /// Gate and up stacked: they read the same row, so one launch over a doubly
-    /// wide output replaces two over half of it.
-    gate_up: Linear,
+    gate_up: GateUp,
     down: Linear,
 }
 
@@ -539,23 +579,32 @@ impl Ffn {
     pub(crate) fn load(gguf: &Gguf, prefix: &str, d_model: usize, d_ff: usize) -> Result<Ffn> {
         let gate = Linear::load(gguf, &format!("{prefix}.ffn_gate.weight"), d_model, d_ff)?;
         let up = Linear::load(gguf, &format!("{prefix}.ffn_up.weight"), d_model, d_ff)?;
+        let gate_up = if Linear::should_fuse(&[&gate, &up]) {
+            GateUp::Fused(Linear::fuse(&[&gate, &up])?)
+        } else {
+            GateUp::Split { gate, up }
+        };
         Ok(Ffn {
-            gate_up: Linear::fuse(&[&gate, &up])?,
+            gate_up,
             down: Linear::load(gguf, &format!("{prefix}.ffn_down.weight"), d_ff, d_model)?,
         })
     }
 
     pub(crate) fn footprint(&self, into: &mut Uploads) {
-        self.gate_up.footprint(into);
+        match &self.gate_up {
+            GateUp::Fused(gate_up) => gate_up.footprint(into),
+            GateUp::Split { gate, up } => {
+                gate.footprint(into);
+                up.footprint(into);
+            }
+        }
         self.down.footprint(into);
     }
 
-    /// The normalization and the whole of [`Ffn::forward`] as one kernel, if the
-    /// backend has one. `false` leaves the caller to take the usual path.
-    ///
-    /// The normalization belongs to the request rather than happening first,
-    /// because that is what lets the fused kernel recompute it per block and
-    /// spend no barrier publishing it.
+    /// The normalization and the whole of [`Ffn::forward`] as one kernel, if
+    /// the backend has one. `false` leaves the caller to take the usual
+    /// path; a split gate/up always does, having no single weight to hand
+    /// the fused kernel.
     pub(crate) fn forward_fused(
         &self,
         backend: &dyn Backend,
@@ -564,16 +613,19 @@ impl Ffn {
         eps: f32,
         rows: usize,
     ) -> Result<bool> {
-        if rows != 1 || !self.gate_up.is_quantized() || !self.down.is_quantized() {
+        let GateUp::Fused(gate_up) = &self.gate_up else {
+            return Ok(false);
+        };
+        if rows != 1 || !gate_up.is_quantized() || !self.down.is_quantized() {
             return Ok(false);
         }
         backend.fused_mlp(FusedMlp {
             x,
-            d_model: self.gate_up.in_dim,
+            d_model: gate_up.in_dim,
             d_ff: self.down.in_dim,
             gain,
             eps,
-            gate_up: self.gate_up.quantized(backend)?,
+            gate_up: gate_up.quantized(backend)?,
             down: self.down.quantized(backend)?,
         })
     }
@@ -589,30 +641,51 @@ impl Ffn {
         dest: Buf,
     ) -> Result<()> {
         let width = self.down.in_dim;
-        let both = self.gate_up.forward_act(backend, x, act, rows)?;
-        // A separate destination: the host backend moves the destination out of
-        // its slab while the sources stay borrowed, so it must not alias them.
         let joined = backend.alloc(rows * width)?;
+        let dense = |buf| Plane { buf, offset: 0, pitch: width };
+
+        // Either a fused projection's two windows, or two ordinary
+        // projections' own dense buffers -- either way this ends as a
+        // (gate, up) pair of planes and the buffers to release once the
+        // SwiGLU has read them.
+        let (gate_p, up_p, release): (Plane, Plane, [Buf; 2]) = match &self.gate_up {
+            GateUp::Fused(gate_up) => {
+                let both = gate_up.forward_act(backend, x, act, rows)?;
+                // Past one row the two halves interleave, so the SwiGLU reads
+                // them where they lie rather than pulling them apart first.
+                let stacked = |offset| Plane { buf: both, offset, pitch: 2 * width };
+                (stacked(0), stacked(width), [both, both])
+            }
+            GateUp::Split { gate, up } => {
+                let gate_buf = gate.forward_act(backend, x, act, rows)?;
+                let up_buf = up.forward_act(backend, x, act, rows)?;
+                (dense(gate_buf), dense(up_buf), [gate_buf, up_buf])
+            }
+        };
+
         if rows == 1 {
             // One launch for the gate, the product, and the quantized copy.
-            let act = backend.swiglu_q(both, 0, both, width, joined, width)?;
-            backend.release(both);
+            let act =
+                backend.swiglu_q(gate_p.buf, gate_p.offset, up_p.buf, up_p.offset, joined, width)?;
+            release_once(backend, release);
             self.down.add_into_act(backend, joined, act, rows, dest)?;
             backend.release(joined);
             return Ok(());
         }
-        // Past one row the two halves interleave, so the SwiGLU reads them
-        // where they lie rather than pulling them apart first.
-        let stacked = |offset| Plane {
-            buf: both,
-            offset,
-            pitch: 2 * width,
-        };
-        backend.swiglu_planes(stacked(0), stacked(width), joined, rows, width)?;
-        backend.release(both);
+        backend.swiglu_planes(gate_p, up_p, joined, rows, width)?;
+        release_once(backend, release);
         self.down.add_into(backend, joined, rows, dest)?;
         backend.release(joined);
         Ok(())
+    }
+}
+
+/// Releases `[a, b]`, once each even when `a == b` (the fused case, where
+/// gate and up are two windows of the same buffer).
+fn release_once(backend: &dyn Backend, [a, b]: [Buf; 2]) {
+    backend.release(a);
+    if b != a {
+        backend.release(b);
     }
 }
 

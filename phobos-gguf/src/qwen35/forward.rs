@@ -1,6 +1,5 @@
-// The `forward` family, split out of `qwen35.rs` to keep it under the
-// workspace's line-count cap. A descendant module, so `Model`'s private
-// fields and the methods it calls stay as visible here as in the parent.
+// The `forward` family. A descendant module of `qwen35.rs`, so `Model`'s
+// private fields stay visible here.
 
 use anyhow::{Result, bail, ensure};
 
@@ -78,7 +77,7 @@ impl Model {
                 "token id {id} is outside the {}-entry vocabulary",
                 cfg.vocab
             );
-            self.head.row_into(id, &mut host_x[t * d..(t + 1) * d])?;
+            self.embed.row_into(id, &mut host_x[t * d..(t + 1) * d])?;
         }
 
         let x = backend.upload(&host_x)?;
@@ -90,10 +89,9 @@ impl Model {
 
         let trace = std::env::var_os("PHOBOS_TRACE").is_some();
         for (index, (block, layer_state)) in self.blocks.iter().zip(&mut state.layers).enumerate() {
-            // Both mixers end by adding their output projection into the
-            // residual stream, which the projection does itself. Their input
-            // normalization is theirs to run, so a backend with a fused
-            // projection owns it.
+            // Both mixers add their output into the residual stream
+            // themselves and own running their input normalization, so a
+            // fused projection can absorb it.
             let gain = block.attn_norm.buf(backend)?;
             match (&block.mixer, layer_state) {
                 (Mixer::Attention(attn), LayerState::Attention(cache)) => {

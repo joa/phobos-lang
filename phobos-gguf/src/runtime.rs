@@ -26,22 +26,16 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-/// Positions one pass of the prompt covers.
-///
-/// A pass sizes its intermediates per row, so an unbounded one would size them
-/// to the prompt: a feed-forward's two halves alone are 37 KB a position.
-/// Batching also stops paying somewhere above this, since attention's cost per
-/// position grows with the block, and `bench` measures the peak at 512. The
-/// multiple of 64 keeps every batch after the first on the aligned attention
-/// path.
+/// Positions one pass of the prompt covers. A pass sizes its intermediates
+/// per row (a feed-forward's two halves alone are 37 KB a position), and
+/// `bench` measures batching's payoff peaking around here.
 const PROMPT_BATCH: usize = 512;
 
 /// Device bytes [`check_fits`] leaves for everything that is not a weight: a
-/// pass's intermediates at [`PROMPT_BATCH`] rows, the quantized-activation
-/// scratch, the split-K partials, a delta net's recurrent state, and whatever
-/// the driver holds for the context itself. Generous on purpose. The check is
-/// there to turn a model that cannot possibly fit into one clear message, not
-/// to adjudicate the last hundred megabytes.
+/// pass's intermediates, quantized-activation scratch, split-K partials, a
+/// delta net's recurrent state, and the driver's own context. Generous on
+/// purpose, to catch a model that cannot possibly fit rather than adjudicate
+/// the last hundred megabytes.
 const RESERVE_BYTES: usize = 768 << 20;
 
 pub struct GgufModel {
@@ -91,7 +85,10 @@ fn check_fits(backend: &dyn Backend, decoder: &Decoder) -> Result<()> {
         return Ok(());
     };
 
-    let footprint = decoder.footprint(decoder.context_length());
+    // Sized at a pass's row count, not the trained context: the rope table
+    // this folds in grows lazily like the KV cache, so gating on the full
+    // context length would reserve for a table the run may never reach.
+    let footprint = decoder.footprint(PROMPT_BATCH);
     let want_bytes = footprint.weight_bytes + RESERVE_BYTES;
     if want_bytes <= free_bytes {
         return Ok(());
@@ -168,10 +165,9 @@ impl Session for GgufSession<'_> {
     fn extend_greedy(&mut self, ids: &[i64]) -> Result<i64> {
         let ids = to_u32(ids);
         let mut id = 0i64;
-        // Same split as `extend`: a prompt is batched, a single generated
-        // token never is. Only the last batch's result is the caller's;
-        // greedy decoding only ever calls this with one token, so in
-        // practice this loop runs once.
+        // Same split as `extend`. Only the last batch's result is kept;
+        // greedy decoding calls this with one token, so in practice the
+        // loop runs once.
         for batch in ids.chunks(PROMPT_BATCH) {
             id = self
                 .model

@@ -4,9 +4,14 @@ use crate::Gguf;
 use crate::backend::{
     Attn, Backend, Buf, DeltaMix, FusedMix, HPlane, Plane, ProjRun, QAct, Rope,
 };
-use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads, check_dims};
+use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads};
 
+mod delta_net;
 mod forward;
+mod variants;
+
+use delta_net::{DeltaNet, Proj};
+pub use variants::Variants;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -28,9 +33,14 @@ pub struct Config {
     pub rope_dim: usize,
     pub rope_freq_base: f32,
 
+    /// Value heads: `ssm_inner / ssm_head_dim`.
     pub ssm_heads: usize,
     pub ssm_inner: usize,
+    /// Per-head state dimension, `ssm.state_size`.
     pub ssm_head_dim: usize,
+    /// Query/key heads, `ssm.group_count`; equal to `ssm_heads` outside a
+    /// grouped-query deltanet.
+    pub ssm_kv_heads: usize,
     pub conv_kernel: usize,
 }
 
@@ -57,11 +67,24 @@ impl Config {
             .checked_sub(usize::try_from(nextn).unwrap_or(0))
             .context("nextn_predict_layers exceeds block_count")?;
 
-        let ssm_heads = m.arch_count("ssm.group_count")?;
+        let ssm_kv_heads = m.arch_count("ssm.group_count")?;
         let ssm_inner = m.arch_count("ssm.inner_size")?;
+        let ssm_head_dim = m.arch_count("ssm.state_size")?;
         ensure!(
-            ssm_heads > 0 && ssm_inner.is_multiple_of(ssm_heads),
-            "ssm inner size {ssm_inner} does not split into {ssm_heads} heads"
+            ssm_head_dim > 0 && ssm_inner.is_multiple_of(ssm_head_dim),
+            "ssm inner {ssm_inner} does not split into a state size of {ssm_head_dim}"
+        );
+        // Two readings of the value head count, cross-checked: `time_step_rank`
+        // is llama.cpp's, `inner / state_size` derives it. A GQA deltanet's
+        // key/query heads, `group_count`, may be fewer.
+        let ssm_heads = ssm_inner / ssm_head_dim;
+        ensure!(
+            m.arch_count("ssm.time_step_rank")? == ssm_heads,
+            "ssm.time_step_rank disagrees with inner {ssm_inner} / state {ssm_head_dim}"
+        );
+        ensure!(
+            ssm_kv_heads > 0 && ssm_heads.is_multiple_of(ssm_kv_heads),
+            "{ssm_heads} value heads do not group evenly over {ssm_kv_heads} key/query heads"
         );
 
         let vocab = gguf
@@ -84,88 +107,14 @@ impl Config {
             rope_freq_base: m.arch_float("rope.freq_base")?,
             ssm_heads,
             ssm_inner,
-            ssm_head_dim: ssm_inner / ssm_heads,
+            ssm_head_dim,
+            ssm_kv_heads,
             conv_kernel: m.arch_count("ssm.conv_kernel")?,
         })
     }
 
     pub fn is_attention_block(&self, index: usize) -> bool {
         self.full_attention_interval > 0 && (index + 1).is_multiple_of(self.full_attention_interval)
-    }
-}
-
-/// Points where the tensor extents alone do not pin the architecture down.
-/// [`Variants::REFERENCE`] is llama.cpp's `qwen35` impl and our default.
-///
-/// The alternatives are kept because the same ambiguities recur in every GGUF
-/// architecture, and sweeping them (`examples/sweep.rs`) against a
-/// repeated-phrase probe is faster than reading a graph builder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Variants {
-    /// `attn_qkv` groups query/key/value per head rather than as three
-    /// contiguous blocks.
-    pub qkv_interleaved: bool,
-    /// `attn_q` emits all queries then all gates, rather than pairing them
-    /// inside each head's slice.
-    pub attn_gate_contiguous: bool,
-    /// The gate precedes the query wherever they are split.
-    pub attn_gate_first: bool,
-    /// Normalize before applying the output gate rather than after.
-    pub norm_before_gate: bool,
-    /// `ssm_a` holds `log(A)`, as the HuggingFace checkpoint does. The GGUF
-    /// converter instead stores `-exp(A_log)` and llama.cpp multiplies by it
-    /// directly, so this is false for GGUF files.
-    pub decay_from_log: bool,
-    /// L2-normalize delta-rule queries and keys.
-    pub l2_normalize_qk: bool,
-    /// `ssm_alpha` supplies the delta-rule write strength and `ssm_beta` the
-    /// decay, rather than the other way round.
-    pub swap_alpha_beta: bool,
-    /// The convolution's taps run newest-first.
-    pub conv_reversed: bool,
-    /// The delta-rule readout contracts the value axis instead of the key axis.
-    pub query_contracts_value: bool,
-}
-
-impl Variants {
-    pub const REFERENCE: Variants = Variants {
-        qkv_interleaved: false,
-        attn_gate_contiguous: false,
-        attn_gate_first: false,
-        norm_before_gate: true,
-        decay_from_log: false,
-        l2_normalize_qk: true,
-        swap_alpha_beta: false,
-        conv_reversed: false,
-        query_contracts_value: false,
-    };
-
-    /// The combinations the sweep explores.
-    ///
-    /// The query/gate split, the decay formula and the delta-rule contraction
-    /// axis are settled and held fixed. The gated-norm order, the L2
-    /// normalization, the convolution tap order and the fused-projection layout
-    /// are worth re-checking against a new checkpoint.
-    pub fn all() -> Vec<Variants> {
-        (0..16u32)
-            .map(|bits| Variants {
-                qkv_interleaved: bits & 1 != 0,
-                norm_before_gate: bits & 2 != 0,
-                conv_reversed: bits & 4 != 0,
-                attn_gate_contiguous: false,
-                attn_gate_first: false,
-                decay_from_log: false,
-                l2_normalize_qk: bits & 8 == 0,
-                swap_alpha_beta: false,
-                query_contracts_value: false,
-            })
-            .collect()
-    }
-}
-
-impl Default for Variants {
-    fn default() -> Variants {
-        Variants::REFERENCE
     }
 }
 
@@ -207,113 +156,6 @@ impl Attention {
     }
 }
 
-/// A GatedDeltaNet block: a causal depthwise convolution over the fused q/k/v
-/// stream, then the gated delta rule, then a gated RMSNorm.
-struct DeltaNet {
-    /// The query-key-value, gate, decay and beta projections stacked. They read
-    /// the same normalized row, and the decay and beta are sixteen wide apiece.
-    /// See [`Linear::fuse`].
-    projections: Linear,
-
-    /// Where each part starts in the stacked output, and how wide it is.
-    parts: [(usize, usize); 4],
-
-    /// `[kernel, channels]` row-major, transposed from the file so one tap
-    /// across a run of channels is contiguous, which is how both backends read
-    /// it. The file groups each channel's taps instead, making every load of a
-    /// channel tile a stride.
-    conv_taps: Gain,
-
-    /// Log-space decay rate per head.
-    a_log: Gain,
-
-    dt_bias: Gain,
-    norm: Gain,
-    out: Linear,
-}
-
-impl DeltaNet {
-    fn load(gguf: &Gguf, prefix: &str, cfg: &Config) -> Result<DeltaNet> {
-        let d = cfg.d_model;
-        let channels = 3 * cfg.ssm_inner;
-
-        let conv_name = format!("{prefix}.ssm_conv1d.weight");
-        let conv_info = gguf
-            .tensor(&conv_name)
-            .with_context(|| format!("missing tensor '{conv_name}'"))?;
-        check_dims(conv_info, &[cfg.conv_kernel as u64, channels as u64])?;
-        let per_channel = gguf.dequantize(&conv_name)?;
-        let mut taps = vec![0.0f32; per_channel.len()];
-        for c in 0..channels {
-            for k in 0..cfg.conv_kernel {
-                taps[k * channels + c] = per_channel[c * cfg.conv_kernel + k];
-            }
-        }
-
-        let qkv = Linear::load(gguf, &format!("{prefix}.attn_qkv.weight"), d, channels)?;
-        let gate = Linear::load(
-            gguf,
-            &format!("{prefix}.attn_gate.weight"),
-            d,
-            cfg.ssm_inner,
-        )?;
-        let alpha = Linear::load(
-            gguf,
-            &format!("{prefix}.ssm_alpha.weight"),
-            d,
-            cfg.ssm_heads,
-        )?;
-        let beta = Linear::load(gguf, &format!("{prefix}.ssm_beta.weight"), d, cfg.ssm_heads)?;
-        let mut parts = [(0usize, 0usize); 4];
-        let mut at = 0;
-        for (slot, part) in parts.iter_mut().zip([&qkv, &gate, &alpha, &beta]) {
-            *slot = (at, part.out_dim);
-            at += part.out_dim;
-        }
-
-        Ok(DeltaNet {
-            projections: Linear::fuse(&[&qkv, &gate, &alpha, &beta])?,
-            parts,
-            conv_taps: Gain::derived(format!("{conv_name}.taps"), taps),
-            a_log: Gain::load(gguf, &format!("{prefix}.ssm_a"), cfg.ssm_heads)?,
-            dt_bias: Gain::load(gguf, &format!("{prefix}.ssm_dt.bias"), cfg.ssm_heads)?,
-            norm: Gain::load(gguf, &format!("{prefix}.ssm_norm.weight"), cfg.ssm_head_dim)?,
-            out: Linear::load(gguf, &format!("{prefix}.ssm_out.weight"), cfg.ssm_inner, d)?,
-        })
-    }
-
-    /// The convolution taps as the backend reads them, newest-first if the
-    /// architecture runs them that way. The reversal goes up under its own key,
-    /// and only the sweep asks for it: no GGUF file stores them reversed.
-    fn taps(&self, backend: &dyn Backend, channels: usize, reversed: bool) -> Result<Buf> {
-        if !reversed {
-            return self.conv_taps.buf(backend);
-        }
-
-        let taps = &self.conv_taps.data;
-        let kernel = taps.len() / channels;
-        let mut flipped = vec![0.0f32; taps.len()];
-        for k in 0..kernel {
-            let src = (kernel - 1 - k) * channels;
-            flipped[k * channels..][..channels].copy_from_slice(&taps[src..][..channels]);
-        }
-
-        Gain::derived(format!("{}.reversed", self.conv_taps.key), flipped).buf(backend)
-    }
-
-    /// The per-head decay rate. A GGUF file stores `-exp(A_log)` and llama.cpp
-    /// multiplies by it directly; the HuggingFace checkpoint stores `A_log`, so
-    /// that reading has to exponentiate.
-    fn rate(&self, backend: &dyn Backend, from_log: bool) -> Result<Buf> {
-        if !from_log {
-            return self.a_log.buf(backend);
-        }
-
-        let rates = self.a_log.data.iter().map(|&v| -v.exp()).collect();
-        Gain::derived(format!("{}.rate", self.a_log.key), rates).buf(backend)
-    }
-}
-
 enum Mixer {
     Attention(Box<Attention>),
     DeltaNet(Box<DeltaNet>),
@@ -333,7 +175,14 @@ impl Mixer {
                 attn.k_norm.footprint(into);
             }
             Mixer::DeltaNet(delta) => {
-                delta.projections.footprint(into);
+                match &delta.proj {
+                    Proj::Fused { linear, .. } => linear.footprint(into),
+                    Proj::Split { qkv, gate, alpha, beta } => {
+                        for weight in [qkv, gate, alpha, beta] {
+                            weight.footprint(into);
+                        }
+                    }
+                }
                 delta.out.footprint(into);
                 for gain in [&delta.conv_taps, &delta.a_log, &delta.dt_bias, &delta.norm] {
                     gain.footprint(into);
@@ -355,14 +204,36 @@ struct Block {
 // Qwen3.5 Model
 pub struct Model {
     pub config: Config,
-    /// `token_embd.weight`, serving as both the tied LM head and the embedding
-    /// table.
-    ///
-    /// Kept quantized. This way embedding lookup becomes one contiguous row.
+    /// `token_embd.weight`, kept quantized.
+    embed: Linear,
+    /// `output.weight`, or the embedding again when the file ties them.
     head: Linear,
     blocks: Vec<Block>,
     output_norm: Gain,
     rope: RopeTable,
+}
+
+/// Copies a projection's qkv window into the delta net's history cache: a
+/// decode step's one row is already contiguous, and the strided kernel is the
+/// wrong shape for it.
+fn copy_qkv_into_history(
+    backend: &dyn Backend,
+    src: Plane,
+    history: Buf,
+    carried: usize,
+    rows: usize,
+    channels: usize,
+) -> Result<()> {
+    if rows == 1 {
+        backend.copy(src.buf, src.offset, history, carried, channels)
+    } else {
+        backend.copy_2d(
+            src,
+            Plane { buf: history, offset: carried, pitch: channels },
+            rows,
+            channels,
+        )
+    }
 }
 
 impl Model {
@@ -384,7 +255,11 @@ impl Model {
             config.n_head_kv
         );
 
-        let head = Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?;
+        let embed = Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?;
+        let head = match gguf.tensor("output.weight") {
+            Some(_) => Linear::load(gguf, "output.weight", config.d_model, config.vocab)?,
+            None => Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?,
+        };
 
         let mut blocks = Vec::with_capacity(config.n_block);
         for index in 0..config.n_block {
@@ -407,14 +282,11 @@ impl Model {
         }
 
         let output_norm = Gain::load(gguf, "output_norm.weight", config.d_model)?;
-        ensure!(
-            gguf.tensor("output.weight").is_none(),
-            "model carries a separate output.weight; the tied LM head assumed here is wrong for it"
-        );
 
         Ok(Model {
             rope: RopeTable::new(config.rope_dim, config.rope_freq_base),
             config,
+            embed,
             head,
             blocks,
             output_norm,
@@ -422,8 +294,8 @@ impl Model {
     }
 
     /// Every constant the forward pass uploads, at a context of `positions`.
-    /// `head` is the embedding table too, and the pass reads its rows on the
-    /// host, so the one entry covers both readings.
+    /// `embed` is missing on purpose: the pass reads a token's row out of it
+    /// on the host, and only `head` reaches the backend.
     pub(crate) fn footprint(&self, positions: usize) -> Uploads {
         let mut into = Uploads::default();
         self.head.footprint(&mut into);
@@ -466,8 +338,7 @@ impl Model {
         State { pos: 0, layers }
     }
 
-    // The `forward` family lives in `qwen35/forward.rs`, a descendant module
-    // split out to stay under the line-count cap.
+    // forward() and friends live in qwen35/forward.rs.
 
     #[allow(clippy::too_many_arguments)]
     fn attention(
@@ -496,9 +367,8 @@ impl Model {
         let k_buf = attn.k.forward_act(backend, x, act, rows)?;
         let v_buf = attn.v.forward_act(backend, x, act, rows)?;
 
-        // Split the query from its output gate. Pairing the two inside each
-        // head's slice or stacking them as whole blocks changes only where the
-        // copy starts and how far apart its rows are.
+        // Split the query from its output gate; the layout only changes where
+        // the copy starts and how far apart its rows are.
         let (blocks, block) = if variants.attn_gate_contiguous {
             (rows, width)
         } else {
@@ -613,26 +483,33 @@ impl Model {
         variants: Variants,
     ) -> Result<()> {
         let cfg = &self.config;
-        let (heads, head_dim) = (cfg.ssm_heads, cfg.ssm_head_dim);
+        let (heads, head_dim, kv_heads) = (cfg.ssm_heads, cfg.ssm_head_dim, cfg.ssm_kv_heads);
         let inner = cfg.ssm_inner;
 
         ensure!(
             !variants.query_contracts_value,
             "the delta-rule readout that contracts the value axis has no backend op; it is not the reference layout and only the sweep ever asked for it"
         );
+        ensure!(
+            !variants.qkv_interleaved || kv_heads == heads,
+            "the interleaved qkv layout assumes uniform query/key/value heads; it is not the reference layout and only the sweep ever asked for it on a grouped-query deltanet"
+        );
 
-        // Both fused layouts are the same strided read, so which one the file
-        // uses is an offset and a stride, not a case in the kernel.
+        // Both fused layouts are the same strided read, just a different
+        // offset and stride. Query and key are `kv_heads` wide apiece outside
+        // the interleaved layout; value is always the full `inner`.
         let (planes, head_stride) = if variants.qkv_interleaved {
             ([0, head_dim, 2 * head_dim], 3 * head_dim)
         } else {
-            ([0, inner, 2 * inner], head_dim)
+            let kv_width = kv_heads * head_dim;
+            ([0, kv_width, 2 * kv_width], head_dim)
         };
 
         let mix = DeltaMix {
             rows,
             heads,
             head_dim,
+            kv_heads,
             kernel: cfg.conv_kernel,
             planes,
             head_stride,
@@ -642,19 +519,10 @@ impl Model {
         };
 
         let (channels, carried) = (mix.channels(), mix.pad() * mix.channels());
-        let width = delta.projections.out_dim;
-        let stacked = backend.alloc(rows * width)?;
 
-        // The convolution reads one padded stream, so the positions carried
-        // from the previous call go in front of this call's projection and the
-        // kernel has no boundary case.
-        //
-        // What is carried is the previous call's whole stream, and this call's
-        // is a fresh allocation. Keeping the tail in a buffer of its own needed
-        // a third copy to refill it, and refilling in place is not open either:
-        // shifting a buffer into itself races a launch's programs against each
-        // other whenever the shift is shorter than the buffer, which is every
-        // decode step.
+        // History is a fresh alloc each call, with the previous call's tail
+        // copied to the front so the convolution reads one padded stream and
+        // needs no boundary case.
         let history = backend.alloc(mix.history_len())?;
         match *carry {
             Some((previous, len)) => {
@@ -671,137 +539,131 @@ impl Model {
         }
         *carry = Some((history, mix.history_len()));
 
-        // One projection for all four, and its output wanted in two places. The
-        // query/key/value plane is the widest of the four and the convolution's
-        // stream is its only reader, so it goes straight into the stream: pulling
-        // it out afterwards was two passes over it, a quarter of a gigabyte a
-        // pass across the blocks at 512 positions. The other three stay where
-        // they were projected, and are read as windows below.
-        //
-        // Naming the runs also skips [`Linear::fuse`]'s alignment padding, which
-        // the one-launch projection contracts against zero columns.
-        let (qkv_at, _) = delta.parts[0];
-        let (rest_at, rest_end) = (delta.parts[1].0, delta.parts[3].0 + delta.parts[3].1);
-        let runs = [
-            ProjRun {
-                row_off: qkv_at,
-                width: channels,
-                dst: history,
-                dst_off: carried,
-            },
-            ProjRun {
-                row_off: rest_at,
-                width: rest_end - rest_at,
-                dst: stacked,
-                dst_off: rest_at,
-            },
-        ];
-
-        // The delta rule's five operands are one allocation, so each is a
-        // window of it and producing them is two launches writing in place, or
-        // none at all when they join the projection's kernel.
+        // The delta rule's five operands are one allocation; each is a window
+        // of it, written in place by the projection.
         let packed = backend.alloc(mix.packed_len())?;
         let taps = delta.taps(backend, channels, variants.conv_reversed)?;
 
-        // Which of the two gate projections decays and which weights the write
-        // is a layout question, and the same one on both paths below.
+        // Which of the two gate projections decays and which weights the
+        // write is a layout question, shared by both paths below.
         let gates = |alpha, beta| match variants.swap_alpha_beta {
             true => (beta, alpha),
             false => (alpha, beta),
         };
 
-        // At one row every part of the projection is a window of it rather than
-        // a copy, so the convolution and the gates can be named before the
-        // projection that feeds them has run. Past one row they are strided
-        // copies, and the fused path declines anyway.
-        let fused_mix = match rows == 1 {
-            true => {
-                let (decay, beta) = gates((stacked, delta.parts[2].0), (stacked, delta.parts[3].0));
-                Some(FusedMix {
-                    spec: mix,
-                    history,
-                    taps,
-                    decay,
-                    beta,
-                    rate: delta.rate(backend, variants.decay_from_log)?,
-                    dt_bias: delta.dt_bias.buf(backend)?,
-                    packed,
-                })
-            }
-            false => None,
-        };
+        // [`Proj::Fused`] is a single launch producing history, gate, and
+        // gate operands together; [`Proj::Split`] is four ordinary
+        // projections for formats a fused launch can't carry.
+        let (z, alpha_op, beta_op, mix_done, mut release) = match &delta.proj {
+            Proj::Fused { linear, parts } => {
+                let width = linear.out_dim;
+                let stacked = backend.alloc(rows * width)?;
 
-        let fused = delta.projections.project_fused(
-            backend,
-            resid,
-            gain,
-            cfg.rms_eps,
-            rows,
-            &runs,
-            fused_mix,
-        )?;
-        if !fused.project {
-            // The normalization leaves the quantized copy behind, which the
-            // projection reading it would otherwise redo.
-            let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
-            delta
-                .projections
-                .project_into_act(backend, normed, act, rows, stacked)?;
-            // A decode step's one row is already contiguous, and the strided
-            // kernel is the wrong shape for it.
-            if rows == 1 {
-                backend.copy(stacked, qkv_at, history, carried, channels)?;
-            } else {
-                backend.copy_2d(
-                    Plane {
-                        buf: stacked,
-                        offset: qkv_at,
-                        pitch: width,
-                    },
-                    Plane {
-                        buf: history,
-                        offset: carried,
-                        pitch: channels,
-                    },
+                // One projection, output split into two destinations: qkv
+                // goes straight into the convolution's history buffer, the
+                // other three parts stay in `stacked` and are read as windows
+                // below.
+                let (qkv_at, _) = parts[0];
+                let (rest_at, rest_end) = (parts[1].0, parts[3].0 + parts[3].1);
+                let runs = [
+                    ProjRun { row_off: qkv_at, width: channels, dst: history, dst_off: carried },
+                    ProjRun { row_off: rest_at, width: rest_end - rest_at, dst: stacked, dst_off: rest_at },
+                ];
+
+                // The fused kernel bakes in a single head count; a
+                // grouped-query deltanet falls back to the unfused
+                // delta_conv/delta_gates path, which expands `kv_heads` into
+                // `heads`.
+                let fused_mix = match rows == 1 && kv_heads == heads {
+                    true => {
+                        let (decay, beta) = gates((stacked, parts[2].0), (stacked, parts[3].0));
+                        Some(FusedMix {
+                            spec: mix,
+                            history,
+                            taps,
+                            decay,
+                            beta,
+                            rate: delta.rate(backend, variants.decay_from_log)?,
+                            dt_bias: delta.dt_bias.buf(backend)?,
+                            packed,
+                        })
+                    }
+                    false => None,
+                };
+
+                let fused =
+                    linear.project_fused(backend, resid, gain, cfg.rms_eps, rows, &runs, fused_mix)?;
+                if !fused.project {
+                    // The normalization leaves the quantized copy behind,
+                    // which the projection reading it would otherwise redo.
+                    let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+                    linear.project_into_act(backend, normed, act, rows, stacked)?;
+                    copy_qkv_into_history(
+                        backend,
+                        Plane { buf: stacked, offset: qkv_at, pitch: width },
+                        history,
+                        carried,
+                        rows,
+                        channels,
+                    )?;
+                }
+
+                // Each of the other three parts is a window of the
+                // projection: at a single row an offset, past one row a
+                // strided copy apiece.
+                let mut planes = [(stacked, 0usize); 3];
+                let mut extracted = Vec::new();
+                for (plane, &(at, part)) in planes.iter_mut().zip(&parts[1..]) {
+                    *plane = if rows == 1 {
+                        (stacked, at)
+                    } else {
+                        let buf = backend.alloc(rows * part)?;
+                        backend.copy_2d(
+                            Plane { buf: stacked, offset: at, pitch: width },
+                            Plane { buf, offset: 0, pitch: part },
+                            rows,
+                            part,
+                        )?;
+                        extracted.push(buf);
+                        (buf, 0)
+                    };
+                }
+                let [z, alpha_op, beta_op] = planes;
+                extracted.push(stacked);
+                (z, alpha_op, beta_op, fused.mix, extracted)
+            }
+            Proj::Split { qkv, gate, alpha, beta } => {
+                let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+
+                let qkv_buf = qkv.forward_act(backend, normed, act, rows)?;
+                copy_qkv_into_history(
+                    backend,
+                    Plane { buf: qkv_buf, offset: 0, pitch: channels },
+                    history,
+                    carried,
                     rows,
                     channels,
                 )?;
+                backend.release(qkv_buf);
+
+                let gate_buf = gate.forward_act(backend, normed, act, rows)?;
+                let alpha_buf = alpha.forward_act(backend, normed, act, rows)?;
+                let beta_buf = beta.forward_act(backend, normed, act, rows)?;
+                (
+                    (gate_buf, 0),
+                    (alpha_buf, 0),
+                    (beta_buf, 0),
+                    false,
+                    vec![gate_buf, alpha_buf, beta_buf],
+                )
             }
-        }
+        };
+        let (z_buf, z_at) = z;
 
-        // Each of the other three parts is a window of the projection: at a
-        // single row an offset, past one row a strided copy apiece.
-        let mut planes = [(stacked, 0usize); 3];
-        let mut extracted = Vec::new();
-        for (plane, &(at, part)) in planes.iter_mut().zip(&delta.parts[1..]) {
-            *plane = if rows == 1 {
-                (stacked, at)
-            } else {
-                let buf = backend.alloc(rows * part)?;
-                backend.copy_2d(
-                    Plane {
-                        buf: stacked,
-                        offset: at,
-                        pitch: width,
-                    },
-                    Plane {
-                        buf,
-                        offset: 0,
-                        pitch: part,
-                    },
-                    rows,
-                    part,
-                )?;
-                extracted.push(buf);
-                (buf, 0)
-            };
-        }
-        let [(z_buf, z_at), (alpha_buf, alpha_at), (beta_buf, beta_at)] = planes;
-
-        if !fused.mix {
+        if !mix_done {
             backend.delta_conv(history, taps, mix, packed)?;
 
-            let (decay, beta) = gates((alpha_buf, alpha_at), (beta_buf, beta_at));
+            let (decay, beta) = gates(alpha_op, beta_op);
             backend.delta_gates(
                 decay.0,
                 decay.1,
@@ -866,10 +728,8 @@ impl Model {
             Some(act) => delta.out.add_into_act(backend, gated, act, rows, resid)?,
             None => delta.out.add_into(backend, gated, rows, resid)?,
         }
-        for buf in [stacked, packed, scratch, mixed_buf]
-            .into_iter()
-            .chain(extracted)
-        {
+        release.extend([packed, scratch, mixed_buf]);
+        for buf in release {
             backend.release(buf);
         }
         Ok(())
@@ -881,13 +741,9 @@ impl Model {
 enum LayerState {
     Attention(KvCache),
     DeltaNet {
-        /// Both are allocated on first use, since [`Model::new_state`] has no
-        /// backend to allocate from. Zero-filled, the identity for the
-        /// convolution's history and the recurrence alike.
-        ///
-        /// The carry is the previous call's whole convolution stream and its
-        /// length: a prompt and a decode step leave streams of different
-        /// lengths, and only the last few positions of either are wanted.
+        /// Allocated on first use; `carry` is the previous call's whole
+        /// convolution stream plus its length, since a prompt and a decode
+        /// step leave streams of different lengths.
         carry: Option<(Buf, usize)>,
         recurrent: Option<Buf>,
     },
