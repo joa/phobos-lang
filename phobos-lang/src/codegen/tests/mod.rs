@@ -5,12 +5,22 @@
 
 mod basic;
 mod dot;
+mod iq1m_qdot;
+mod iq1s_qdot;
+mod iq2s_qdot;
+mod iq2xs_qdot;
+mod iq2xxs_qdot;
+mod iq3s_qdot;
+mod iq3xxs_qdot;
+mod iq4xs_qdot;
 mod launch;
 mod mask;
 mod math;
 mod matmul;
 mod narrow;
 mod pipeline;
+mod q2k_qdot;
+mod q3k_qdot;
 mod quant;
 mod sync;
 mod tensorcore;
@@ -99,11 +109,9 @@ fn emit_err(src: &str) -> String {
 }
 
 /// Splits emitted IR at the flash kt loop (the only loop bounded by a
-/// dynamic %dim) into (preheader, body) for staging-placement asserts.
-///
-/// A ragged-split loop is trimmed to whole chunks first, so it is bounded
-/// by that arithmetic rather than by %dim directly; the frag-carried path
-/// does not split and still reads `to %dim`. Take whichever comes first.
+/// dynamic %dim) into (preheader, body) for staging-placement asserts. A
+/// ragged-split loop is trimmed first and bounded by that arithmetic rather
+/// than %dim directly, so either pattern is accepted, whichever comes first.
 fn split_at_kt_loop(mlir: &str) -> (&str, &str) {
     let pos = [" = arith.subi %dim", " to %dim"]
         .iter()
