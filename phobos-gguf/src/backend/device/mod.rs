@@ -9,14 +9,16 @@ use cust::stream::{Stream, StreamFlags};
 
 use phobos_base::half::f16_to_f32;
 use phobos_kernels::pool::Pool;
-use phobos_kernels::{Variants, compile, compile_shared, cuda_ok, push_descriptor};
+use phobos_kernels::{Variants, compile, compile_parallel, compile_shared, cuda_ok, push_descriptor};
 
 use super::fuse::{self, Bound, Chain, ChainKey, Plan, Scratch};
 use phobos_kernels::launch::{CTA_THREADS, STATIC_SHARED_LIMIT, persistent_grid};
 
+use crate::quant::Quant;
+
 use super::{
     Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedProject, HBuf, HPlane,
-    Packed, Plane, Q8_BLOCK, QAct, QBuf, Rope,
+    Packed, Plane, Q8_BLOCK, QAct, QBuf, RawBuf, Rope,
 };
 
 mod argmax;
@@ -49,14 +51,26 @@ fn env_flag(name: &str) -> bool {
 }
 
 /// A device-resident Q8_0 weight: signed bytes, per-block scales in both
-/// orders, and the output width it was uploaded with. `q8_mma` wants
-/// `[block, out]` and `qdot_t` wants `[out, block]`, neither can cheaply
-/// transpose, and a scale is one f32 per 32 bytes, so the duplicate is cheap.
+/// orders (`q8_mma` wants `[block, out]`, `qdot_t` wants `[out, block]`),
+/// and the output width it was uploaded with.
 type DeviceQuant = (
     DeviceBuffer<i8>,
     DeviceBuffer<f32>,
     DeviceBuffer<f32>,
     usize,
+);
+
+/// A device-resident raw-block weight: file bytes verbatim, `f16` header
+/// plane(s) as bit patterns (`dmin` absent for a format with no minimum
+/// term), output width, super-blocks per row, and which format's kernel
+/// decodes it.
+type DeviceRaw = (
+    DeviceBuffer<i8>,
+    DeviceBuffer<u16>,
+    Option<DeviceBuffer<u16>>,
+    usize,
+    usize,
+    Quant,
 );
 
 /// Output width, `k`, and split count: what [`kernels::q8_qmma_split_src`]'s
@@ -65,14 +79,11 @@ type QmmaSplitKey = (usize, usize, usize);
 
 /// Heads, head dimension, taps, head stride, normalize, query scale, rows, and
 /// rows per program: everything [`delta_conv_src`] bakes in.
-type ConvKey = (usize, usize, usize, usize, bool, u32, usize, usize);
+type ConvKey = (usize, usize, usize, usize, usize, bool, u32, usize, usize);
 
 /// Head count, group size, head dimension and query group: the shape
-/// [`DeviceBackend::attn_persist_plan`] settles a grid and a split count for.
-/// The split count is not part of the key: it is derived from the settled
-/// grid (as many whole units as the grid holds exactly), not chosen by the
-/// caller, so it is already a function of the other four fields plus the
-/// device's own occupancy answer.
+/// [`DeviceBackend::attn_persist_plan`] settles a grid and split count for.
+/// The split count itself is derived from occupancy, not part of the key.
 type AttnPersistKey = (usize, usize, usize, usize);
 
 /// The compiled module for one [`AttnPersistKey`], with the block count and
@@ -148,25 +159,26 @@ impl Drop for PassGraph {
 }
 
 /// A device-resident backend for GGUF models. A whole decode step stays in
-/// device memory: the residual stream, the projections, the pointwise work and
-/// both mixers. A step synchronizes once, to read the logits.
+/// device memory; it synchronizes once, to read the logits.
 pub struct DeviceBackend {
     stream: Stream,
     matmul: Variants,
+    /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=
+    /// TC_TILE_M`; the plain `matmul` above finishes whatever doesn't fit a
+    /// whole 64x64 tile.
+    matmul_tc: Module,
     matvec: Variants,
     q8_dp4a: Variants,
     q8_mma: Variants,
     q8_qmma: Module,
     q8_qmma_deep: HashMap<usize, Module>,
     /// The split-K variant of the deep tile and its reduction, keyed by
-    /// output width, `k` and the split count. Compiled lazily: a shape only
-    /// pays for this when [`kernels::q8_qmma_splits`] declines the unsplit
-    /// grid.
+    /// output width, `k` and split count. Compiled lazily, when
+    /// [`kernels::q8_qmma_splits`] declines the unsplit grid.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
-    /// The narrow-CTA variant of the deep tile: the same `qmma_t` kernel at
-    /// half the threads and half the column tile, same per-warp patch. See
-    /// [`kernels::q8_qmma_narrow_eligible`]. Compiled lazily, only when
-    /// [`Self::qmma_narrow`] asks for it.
+    /// The narrow-CTA variant of the deep tile: same `qmma_t` kernel, half
+    /// the threads and column tile, same per-warp patch. Compiled lazily,
+    /// only when [`Self::qmma_narrow`] asks for it.
     q8_qmma_narrow: RefCell<Option<Module>>,
     q8_split: Variants,
     q8_qdot: Module,
@@ -180,18 +192,12 @@ pub struct DeviceBackend {
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
     /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved
-    /// grid. `PHOBOS_QMMA_SPLIT=1` opts in. Default OFF: the per-kernel win
-    /// is real, but the extra graph node per routed projection (write, then
-    /// reduce, where there was one launch) costs more in aggregate wall
-    /// clock than the kernels save, a graph-level cost isolated per-kernel
-    /// measurements do not see.
+    /// grid. `PHOBOS_QMMA_SPLIT=1` opts in. Default off: measured a net
+    /// loss in aggregate wall clock despite a real per-kernel win.
     qmma_split: bool,
-    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path on a starved
-    /// grid instead of the unsplit launch. `PHOBOS_QMMA_NARROW=1` opts in.
-    /// Checked ahead of [`Self::qmma_split`]: it targets the same shapes
-    /// with more disjoint-output blocks at unchanged per-warp intensity,
-    /// rather than a reduction pass. Default OFF for the row-count caveat
-    /// [`kernels::q8_qmma_narrow_eligible`] documents.
+    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path instead of
+    /// the unsplit launch. `PHOBOS_QMMA_NARROW=1` opts in; default off, see
+    /// [`kernels::q8_qmma_narrow_eligible`] for the row-count caveat.
     qmma_narrow: bool,
     /// Fused kernels the pass has emitted, with the plan that says what to bind
     /// to each. See [`fuse`].
@@ -199,9 +205,8 @@ pub struct DeviceBackend {
     fused_mlp: bool,
     fused_project: bool,
     /// Whether the delta net's convolution and gates join the projection's
-    /// kernel. Separate from [`Self::fused_project`] because unlike everything
-    /// fused so far this one costs a barrier, so it has to be able to be
-    /// measured against the projection alone.
+    /// kernel. Separate from [`Self::fused_project`] since this one costs a
+    /// barrier and has to be measurable against the projection alone.
     fused_mix: bool,
     /// Whether attention's output epilogue (quantizing the mixed heads, then
     /// the output projection) joins the fused-chain path. Default on;
@@ -278,37 +283,30 @@ pub struct DeviceBackend {
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
     /// Whether [`DeviceBackend::attention_decode`] takes the persistent
     /// split-plus-merge path. Default on; `PHOBOS_ATTN_PERSIST=0` switches
-    /// it off. Deliberately outside [`fused_stage`]'s shared `PHOBOS_FUSED`
-    /// fallback: this gates a persistent kernel and its `grid_barrier`, not
-    /// a fused launch chain, so a blanket `PHOBOS_FUSED=0` must not reach
-    /// it. A grid this flag alone let through would hang rather than run
-    /// slow; `attn_persist_plan`'s occupancy-queried decline, not the flag,
-    /// is what keeps that safe.
+    /// it off. Kept outside [`fused_stage`]'s `PHOBOS_FUSED` fallback since
+    /// this gates a `grid_barrier`, not a launch chain: a grid this flag
+    /// alone let through would hang rather than run slow, so it's
+    /// `attn_persist_plan`'s occupancy check, not the flag, keeping that safe.
     attn_persist: bool,
-    /// The persistent attention kernel, keyed by [`AttnPersistKey`], with the
-    /// block count and the persist-specific split count it was settled at.
-    /// `None` means the shape's occupancy could not fit the split phase in
-    /// one grid-strided pass and the persistent path is declined for it. See
-    /// `DeviceBackend::attn_persist_plan` in `attn.rs`.
+    /// The persistent attention kernel, keyed by [`AttnPersistKey`], with its
+    /// settled block and split count. `None` means occupancy couldn't fit
+    /// the split phase in one pass, so the persistent path is declined.
     attn_persist_modules: RefCell<HashMap<AttnPersistKey, Option<AttnPersistEntry>>>,
     /// Per-split partial accumulators, and their running maxima and sums.
     attn_partials: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// Page-locked staging for the one readback a pass makes.
     readback: RefCell<Option<LockedBuffer<f32>>>,
     /// [`DeviceBackend::argmax`]'s reduction kernel, keyed by chunk width
-    /// ([`argmax_chunk_width`]): every model uses one width for the life of
-    /// the backend, since a vocabulary's size does not change, so this stays
-    /// a single entry in practice.
+    /// ([`argmax_chunk_width`]); stays a single entry in practice, since a
+    /// vocabulary's size never changes for the life of the backend.
     argmax_reduce: RefCell<HashMap<usize, Module>>,
-    /// [`argmax_reduce`]'s partial-value column, one per lane, `[0, W)`;
-    /// uploaded once per chunk width and added to each chunk's own base
-    /// index to map a lane back to a vocabulary position.
+    /// [`argmax_reduce`]'s partial-value column, `[0, W)`, one per lane;
+    /// added to each chunk's base index to recover a vocabulary position.
     argmax_iota: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
     /// [`ARGMAX_FINISH_SRC`], compiled once: it takes no shape baked in.
     argmax_finish: Module,
-    /// [`argmax_reduce`]'s per-block partials and [`argmax_finish`]'s answer.
-    /// Both are a handful of floats; reused across calls rather than
-    /// allocated fresh, since [`Backend::argmax`] is on the hot decode path.
+    /// [`argmax_reduce`]'s per-block partials and [`argmax_finish`]'s
+    /// answer, reused across calls since [`Backend::argmax`] is hot-path.
     argmax_scratch: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// The blocked attention kernels, keyed the same way.
     blocked: RefCell<HashMap<(usize, usize, usize), Module>>,
@@ -324,11 +322,83 @@ pub struct DeviceBackend {
     /// they went up with. Constants, so never released.
     quants: RefCell<Vec<DeviceQuant>>,
     q_constants: RefCell<HashMap<String, QBuf>>,
-    /// One entry per `quantize_act` in a pass, each grown to the largest
-    /// projection it has seen. Slot by slot rather than one shared arena:
-    /// several are live at once, and a pass asks for them in the same order
-    /// every time, which keeps their addresses out of the graph's changing
-    /// nodes.
+    /// Addressed by [`RawBuf`]: raw block bytes, the two header planes, the
+    /// output width and the super-blocks per row they went up with.
+    raw_quants: RefCell<Vec<DeviceRaw>>,
+    raw_constants: RefCell<HashMap<String, RawBuf>>,
+    /// Every raw format's matvec, compiled once in parallel (see
+    /// `compile_parallel`); each shape is a kernel parameter, not baked in.
+    q2k_matvec: Module,
+    q3k_matvec: Module,
+    iq1s_matvec: Module,
+    iq2xxs_matvec: Module,
+    iq1m_matvec: Module,
+    iq2s_matvec: Module,
+    iq2xs_matvec: Module,
+    iq3xxs_matvec: Module,
+    iq3s_matvec: Module,
+    iq4xs_matvec: Module,
+    /// Each format's `m == 1` decode folded into one `*_qdot_t` call, no
+    /// per-lane shared-memory staging. Needs `N` to be a whole number of its
+    /// own `TN`; `project_raw` falls back to the plain matvec otherwise.
+    iq1s_qdot_matvec: Module,
+    iq2xxs_qdot_matvec: Module,
+    iq1m_qdot_matvec: Module,
+    iq2s_qdot_matvec: Module,
+    iq2xs_qdot_matvec: Module,
+    iq3xxs_qdot_matvec: Module,
+    iq3s_qdot_matvec: Module,
+    iq4xs_qdot_matvec: Module,
+    q2k_qdot_matvec: Module,
+    q3k_qdot_matvec: Module,
+    /// Every raw format's own decode minus the per-row reduction: writes a
+    /// `[K, N]` strip of dequantized weight for
+    /// [`DeviceBackend::project_raw_dense`] to run a batched matmul against.
+    /// `m == 1` still uses the matching `_matvec` kernel unchanged.
+    iq1s_dequant: Module,
+    iq2xxs_dequant: Module,
+    iq1m_dequant: Module,
+    iq2s_dequant: Module,
+    iq2xs_dequant: Module,
+    iq3xxs_dequant: Module,
+    iq3s_dequant: Module,
+    iq4xs_dequant: Module,
+    /// Q2_K's own dequant, same purpose as the block above. Q3_K has none:
+    /// it is the LM head, run only at `m == 1`, so it never takes
+    /// `project_raw_dense`'s batched path.
+    q2k_dequant: Module,
+    /// IQ1_S's grid, uploaded once and shared by every IQ1_S weight:
+    /// [`crate::quant::iq1s_flat_grid`] unpacked to one `i32` lane a slot.
+    /// IQ1_M shares this same grid; see `quant/iq1_m.rs`'s module doc.
+    iq1s_grid: DeviceBuffer<i32>,
+    /// IQ2_XXS's magnitude grid and sign table, flattened like IQ1_S's and
+    /// shared by every IQ2_XXS weight.
+    iq2xxs_grid: DeviceBuffer<i32>,
+    iq2xxs_signs: DeviceBuffer<i32>,
+    /// IQ2_S's own magnitude grid and sign table; wider than IQ2_XXS's and
+    /// keyed by raw byte rather than parity index, so not shared with it.
+    iq2s_grid: DeviceBuffer<i32>,
+    iq2s_signs: DeviceBuffer<i32>,
+    /// IQ2_XS's own magnitude grid (wider than IQ2_XXS's), but shares its
+    /// sign mechanism, so it reuses `iq2xxs_signs`.
+    iq2xs_grid: DeviceBuffer<i32>,
+    /// IQ3_XXS's own magnitude grid (four `i32` lanes an entry, `u32`
+    /// entries); its sign field matches IQ2_XXS's `aux32`, so it reuses
+    /// `iq2xxs_signs`.
+    iq3xxs_grid: DeviceBuffer<i32>,
+    /// IQ3_S's own magnitude grid (also four `i32` lanes an entry); its
+    /// sign byte matches IQ2_S's, so it reuses `iq2s_signs`.
+    iq3s_grid: DeviceBuffer<i32>,
+    /// IQ4_XS's fixed sixteen-value codebook every nibble indexes directly
+    /// ([`crate::quant::iq4xs_flat_codebook`]); needs no per-lane unpacking,
+    /// and its `gather` covers a whole run rather than a lane.
+    iq4xs_codebook: DeviceBuffer<i32>,
+    /// `[0, 1, .., 7]`: the row offsets a grid-coded raw kernel's batched
+    /// `gather` broadcasts against, so one call reads a whole eight-wide lane.
+    iota8: DeviceBuffer<i32>,
+    /// One entry per `quantize_act` in a pass, grown to the largest
+    /// projection seen. Slot by slot, not one arena: several are live at
+    /// once, and a pass asks for them in the same order every time.
     act_scratch: RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>,
     act_next: Cell<usize>,
     /// Split-K partial sums, `[splits, n]`, grown to the largest asked for.
@@ -339,11 +409,10 @@ pub struct DeviceBackend {
 }
 
 impl DeviceBackend {
-    /// Turns every fused stage on or off whatever the environment asked for.
-    /// [`fused_stage`] reads its variables once, at construction, which cannot
-    /// express what the equivalence harness needs: both paths in one process,
-    /// over one upload of the weights and one context. See
-    /// `examples/fuse_check.rs`.
+    /// Turns every fused stage on or off, whatever the environment asked
+    /// for. Needed because [`fused_stage`] reads its env vars once at
+    /// construction, but the equivalence harness wants both paths in one
+    /// process; see `examples/fuse_check.rs`.
     pub fn set_fused(&mut self, on: bool) {
         self.fused_mlp = on;
         self.fused_project = on;
@@ -361,6 +430,11 @@ impl DeviceBackend {
             &[("TILE_M", TILE_M), ("TILE_N", TILE_N), ("TILE_K", TILE_K)],
             "matmul",
             ("@aligned(M = TILE_M, N = TILE_N)", ""),
+        )?;
+        let matmul_tc = compile(
+            MATMUL_TC_SRC,
+            &[("TILE_M", TC_TILE_M), ("TILE_N", TC_TILE_N), ("TILE_K", TC_TILE_K)],
+            "matmul_tc",
         )?;
         let matvec = Variants::compile(
             MATVEC_SRC,
@@ -406,10 +480,114 @@ impl DeviceBackend {
         let pointwise = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE)], "pointwise")?;
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
         let argmax_finish = compile(ARGMAX_FINISH_SRC, &[], "argmax_finish")?;
+        // Independent kernels compiled in parallel (`compile_parallel`), so
+        // MLIR-to-PTX lowering runs concurrently. `Vec::remove(0)` keeps the
+        // destructure in the jobs' own order without cloning `Module`s.
+        let q2k_src = q2k_matvec_src(Q2K_TN);
+        let q3k_src = q3k_matvec_src(Q3K_TN);
+        let iq1s_src = iq1s_matvec_src(IQ1S_TN);
+        let iq2xxs_src = iq2xxs_matvec_src(IQ2XXS_TN);
+        let iq1m_src = iq1m_matvec_src(IQ1M_TN);
+        let iq2s_src = iq2s_matvec_src(IQ2S_TN);
+        let iq2xs_src = iq2xs_matvec_src(IQ2XS_TN);
+        let iq3xxs_src = iq3xxs_matvec_src(IQ3XXS_TN);
+        let iq3s_src = iq3s_matvec_src(IQ3S_TN);
+        let iq4xs_src = iq4xs_matvec_src(IQ4XS_TN);
+        let iq1s_dequant_body = iq1s_dequant_src(IQ1S_TN);
+        let iq2xxs_dequant_body = iq2xxs_dequant_src(IQ2XXS_TN);
+        let iq1m_dequant_body = iq1m_dequant_src(IQ1M_TN);
+        let iq2s_dequant_body = iq2s_dequant_src(IQ2S_TN);
+        let iq2xs_dequant_body = iq2xs_dequant_src(IQ2XS_TN);
+        let iq3xxs_dequant_body = iq3xxs_dequant_src(IQ3XXS_TN);
+        let iq3s_dequant_body = iq3s_dequant_src(IQ3S_TN);
+        let iq4xs_dequant_body = iq4xs_dequant_src(IQ4XS_TN);
+        let q2k_dequant_body = q2k_dequant_src(Q2K_TN);
+        let iq1s_qdot_body = iq1s_qdot_matvec_src(IQ1S_TN);
+        let iq2xxs_qdot_body = iq2xxs_qdot_matvec_src(IQ2XXS_TN);
+        let iq1m_qdot_body = iq1m_qdot_matvec_src(IQ1M_TN);
+        let iq2s_qdot_body = iq2s_qdot_matvec_src(IQ2S_TN);
+        let iq2xs_qdot_body = iq2xs_qdot_matvec_src(IQ2XS_TN);
+        let iq3xxs_qdot_body = iq3xxs_qdot_matvec_src(IQ3XXS_TN);
+        let iq3s_qdot_body = iq3s_qdot_matvec_src(IQ3S_TN);
+        let iq4xs_qdot_body = iq4xs_qdot_matvec_src(IQ4XS_TN);
+        let q2k_qdot_body = q2k_qdot_matvec_src(Q2K_TN);
+        let q3k_qdot_body = q3k_qdot_matvec_src(Q3K_TN);
+        let mut raw_matvecs = compile_parallel(&[
+            (q2k_src.as_str(), &[("TN", Q2K_TN)], "q2k_matvec"),
+            (q3k_src.as_str(), &[("TN", Q3K_TN)], "q3k_matvec"),
+            (iq1s_src.as_str(), &[("TN", IQ1S_TN)], "iq1s_matvec"),
+            (iq2xxs_src.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_matvec"),
+            (iq1m_src.as_str(), &[("TN", IQ1M_TN)], "iq1m_matvec"),
+            (iq2s_src.as_str(), &[("TN", IQ2S_TN)], "iq2s_matvec"),
+            (iq2xs_src.as_str(), &[("TN", IQ2XS_TN)], "iq2xs_matvec"),
+            (iq3xxs_src.as_str(), &[("TN", IQ3XXS_TN)], "iq3xxs_matvec"),
+            (iq3s_src.as_str(), &[("TN", IQ3S_TN)], "iq3s_matvec"),
+            (iq4xs_src.as_str(), &[("TN", IQ4XS_TN)], "iq4xs_matvec"),
+            (iq1s_dequant_body.as_str(), &[("TN", IQ1S_TN)], "iq1s_dequant"),
+            (iq2xxs_dequant_body.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_dequant"),
+            (iq1m_dequant_body.as_str(), &[("TN", IQ1M_TN)], "iq1m_dequant"),
+            (iq2s_dequant_body.as_str(), &[("TN", IQ2S_TN)], "iq2s_dequant"),
+            (iq2xs_dequant_body.as_str(), &[("TN", IQ2XS_TN)], "iq2xs_dequant"),
+            (iq3xxs_dequant_body.as_str(), &[("TN", IQ3XXS_TN)], "iq3xxs_dequant"),
+            (iq3s_dequant_body.as_str(), &[("TN", IQ3S_TN)], "iq3s_dequant"),
+            (iq4xs_dequant_body.as_str(), &[("TN", IQ4XS_TN)], "iq4xs_dequant"),
+            (q2k_dequant_body.as_str(), &[("TN", Q2K_TN)], "q2k_dequant"),
+            (iq1s_qdot_body.as_str(), &[("TN", IQ1S_TN)], "iq1s_qdot_matvec"),
+            (iq2xxs_qdot_body.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_qdot_matvec"),
+            (iq1m_qdot_body.as_str(), &[("TN", IQ1M_TN)], "iq1m_qdot_matvec"),
+            (iq2s_qdot_body.as_str(), &[("TN", IQ2S_TN)], "iq2s_qdot_matvec"),
+            (iq2xs_qdot_body.as_str(), &[("TN", IQ2XS_TN)], "iq2xs_qdot_matvec"),
+            (iq3xxs_qdot_body.as_str(), &[("TN", IQ3XXS_TN)], "iq3xxs_qdot_matvec"),
+            (iq3s_qdot_body.as_str(), &[("TN", IQ3S_TN)], "iq3s_qdot_matvec"),
+            (iq4xs_qdot_body.as_str(), &[("TN", IQ4XS_TN)], "iq4xs_qdot_matvec"),
+            (q2k_qdot_body.as_str(), &[("TN", Q2K_TN)], "q2k_qdot_matvec"),
+            (q3k_qdot_body.as_str(), &[("TN", Q3K_TN)], "q3k_qdot_matvec"),
+        ])?;
+        let q2k_matvec = raw_matvecs.remove(0);
+        let q3k_matvec = raw_matvecs.remove(0);
+        let iq1s_matvec = raw_matvecs.remove(0);
+        let iq2xxs_matvec = raw_matvecs.remove(0);
+        let iq1m_matvec = raw_matvecs.remove(0);
+        let iq2s_matvec = raw_matvecs.remove(0);
+        let iq2xs_matvec = raw_matvecs.remove(0);
+        let iq3xxs_matvec = raw_matvecs.remove(0);
+        let iq3s_matvec = raw_matvecs.remove(0);
+        let iq4xs_matvec = raw_matvecs.remove(0);
+        let iq1s_dequant = raw_matvecs.remove(0);
+        let iq2xxs_dequant = raw_matvecs.remove(0);
+        let iq1m_dequant = raw_matvecs.remove(0);
+        let iq2s_dequant = raw_matvecs.remove(0);
+        let iq2xs_dequant = raw_matvecs.remove(0);
+        let iq3xxs_dequant = raw_matvecs.remove(0);
+        let iq3s_dequant = raw_matvecs.remove(0);
+        let iq4xs_dequant = raw_matvecs.remove(0);
+        let q2k_dequant = raw_matvecs.remove(0);
+        let iq1s_qdot_matvec = raw_matvecs.remove(0);
+        let iq2xxs_qdot_matvec = raw_matvecs.remove(0);
+        let iq1m_qdot_matvec = raw_matvecs.remove(0);
+        let iq2s_qdot_matvec = raw_matvecs.remove(0);
+        let iq2xs_qdot_matvec = raw_matvecs.remove(0);
+        let iq3xxs_qdot_matvec = raw_matvecs.remove(0);
+        let iq3s_qdot_matvec = raw_matvecs.remove(0);
+        let iq4xs_qdot_matvec = raw_matvecs.remove(0);
+        let q2k_qdot_matvec = raw_matvecs.remove(0);
+        let q3k_qdot_matvec = raw_matvecs.remove(0);
+        let iq1s_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_flat_grid())?;
+        let iq2xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_grid())?;
+        let iq2xxs_signs = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_signs())?;
+        let iq2s_grid = DeviceBuffer::from_slice(&crate::quant::iq2s_flat_grid())?;
+        let iq2s_signs = DeviceBuffer::from_slice(&crate::quant::iq2s_flat_signs())?;
+        let iq2xs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xs_flat_grid())?;
+        let iq3xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq3xxs_flat_grid())?;
+        let iq3s_grid = DeviceBuffer::from_slice(&crate::quant::iq3s_flat_grid())?;
+        let iq4xs_codebook = DeviceBuffer::from_slice(&crate::quant::iq4xs_flat_codebook())?;
+        let iota: Vec<i32> = (0..8).collect();
+        let iota8 = DeviceBuffer::from_slice(&iota)?;
 
         Ok(DeviceBackend {
             stream,
             matmul,
+            matmul_tc,
             matvec,
             q8_dp4a,
             q8_mma,
@@ -492,6 +670,47 @@ impl DeviceBackend {
             constants: RefCell::new(HashMap::new()),
             quants: RefCell::new(Vec::new()),
             q_constants: RefCell::new(HashMap::new()),
+            raw_quants: RefCell::new(Vec::new()),
+            raw_constants: RefCell::new(HashMap::new()),
+            q2k_matvec,
+            q3k_matvec,
+            iq1s_matvec,
+            iq2xxs_matvec,
+            iq1m_matvec,
+            iq2s_matvec,
+            iq2xs_matvec,
+            iq3xxs_matvec,
+            iq3s_matvec,
+            iq4xs_matvec,
+            iq1s_dequant,
+            iq2xxs_dequant,
+            iq1m_dequant,
+            iq2s_dequant,
+            iq2xs_dequant,
+            iq3xxs_dequant,
+            iq3s_dequant,
+            iq4xs_dequant,
+            q2k_dequant,
+            iq1s_qdot_matvec,
+            iq2xxs_qdot_matvec,
+            iq1m_qdot_matvec,
+            iq2s_qdot_matvec,
+            iq2xs_qdot_matvec,
+            iq3xxs_qdot_matvec,
+            iq3s_qdot_matvec,
+            iq4xs_qdot_matvec,
+            q2k_qdot_matvec,
+            q3k_qdot_matvec,
+            iq1s_grid,
+            iq2xxs_grid,
+            iq2xxs_signs,
+            iq2s_grid,
+            iq2s_signs,
+            iq2xs_grid,
+            iq3xxs_grid,
+            iq3s_grid,
+            iq4xs_codebook,
+            iota8,
             act_scratch: RefCell::new(Vec::new()),
             act_next: Cell::new(0),
             split_scratch: RefCell::new(None),

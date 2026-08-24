@@ -1,6 +1,5 @@
-// The `Backend` implementation. A trait impl cannot be split across
-// files, so this is the whole surface in one place; the work each method
-// does lives in the sibling modules.
+// The `Backend` impl. A trait impl cannot be split across files, so this
+// is the whole surface here; method bodies live in the sibling modules.
 
 use super::*;
 
@@ -86,8 +85,8 @@ impl Backend for DeviceBackend {
     fn zeroed(&self, len: usize) -> Result<Buf> {
         let buf = self.alloc_written_now(len)?;
         let ptr = self.ptr(buf, 0)?;
-        // On the stream, so it orders with the pass rather than forcing the
-        // synchronization an upload's staging copy would.
+        // Async on the stream, so it orders with the pass instead of forcing
+        // a sync the way an upload's staging copy would.
         cuda_ok(
             // SAFETY: the allocation is at least `len` floats and the handle
             // holds it alive for the duration.
@@ -109,9 +108,8 @@ impl Backend for DeviceBackend {
     }
 
     fn end_pass(&self) -> Result<()> {
-        // A pass that had to flush is only partly recorded, so it goes out as
-        // launches and leaves the cached graph alone. The next pass records
-        // whole and replaces it.
+        // A pass that had to flush is only partly recorded: issue the tail as
+        // launches and leave the cached graph for the next whole pass to replace.
         if self.flushed.replace(false) {
             self.recording.set(false);
             return self.issue_recorded("issuing the tail of a flushed pass");
@@ -135,9 +133,9 @@ impl Backend for DeviceBackend {
             out.len(),
             buffer.len()
         );
-        // Through page-locked staging. Straight into a Vec the driver bounces
-        // the copy through its own pinned staging a page at a time, at about a
-        // third of the rate, and the logits are a megabyte a token here.
+        // Through page-locked staging: straight into a Vec the driver bounces
+        // the copy through its own pinned staging a page at a time, at about
+        // a third of the rate, and the logits are a megabyte a token here.
         let mut staging = self.readback.borrow_mut();
         let too_small = staging.as_ref().is_none_or(|s| s.len() < out.len());
         if too_small {
@@ -177,21 +175,52 @@ impl Backend for DeviceBackend {
         self.check_distinct("matmul", out, &[a, w]);
         let (a_ptr, w_ptr, out_ptr) = (self.ptr(a, 0)?, self.ptr(w, 0)?, self.ptr(out, 0)?);
 
-        // The tiled kernel rounds a single row up to a whole TILE_M tile, so
-        // decoding stays on the matvec specialization and anything wider tiles.
-        // Either handles a ragged shape by masking the boundary tile, so the
-        // choice is only which does less arithmetic.
+        // Decoding (m == 1) stays on the matvec specialization; anything
+        // wider tiles. Both handle a ragged shape by masking the boundary tile.
         if m > 1 {
-            let tiles_evenly = m.is_multiple_of(TILE_M) && n.is_multiple_of(TILE_N);
+            let f32_bytes = size_of::<f32>() as u64;
+            // The tensor-core kernel needs whole TC_TILE_M-row bands of a
+            // whole TC_TILE_N-wide output (@aligned demands provably in-bounds
+            // slices). Whatever it can't cover falls to the plain kernel below,
+            // the same deepest-tile-first ladder project_q8 uses for Q8_0.
+            let tc_rows = if n.is_multiple_of(TC_TILE_N) && k.is_multiple_of(TC_TILE_K) {
+                m - m % TC_TILE_M
+            } else {
+                0
+            };
+            if tc_rows > 0 {
+                self.launch(
+                    &self.matmul_tc,
+                    "matmul_tc",
+                    &[
+                        (a_ptr, [tc_rows as i64, k as i64]),
+                        (w_ptr, [k as i64, n as i64]),
+                        (out_ptr, [tc_rows as i64, n as i64]),
+                    ],
+                    (
+                        (tc_rows / TC_TILE_M) as u32,
+                        (n / TC_TILE_N) as u32,
+                        1,
+                    ),
+                )?;
+            }
+
+            let rows = m - tc_rows;
+            if rows == 0 {
+                return Ok(());
+            }
+            let a_row_ptr = a_ptr + (tc_rows * k) as u64 * f32_bytes;
+            let out_row_ptr = out_ptr + (tc_rows * n) as u64 * f32_bytes;
+            let tiles_evenly = rows.is_multiple_of(TILE_M) && n.is_multiple_of(TILE_N);
             return self.launch(
                 self.matmul.pick(tiles_evenly),
                 "matmul",
                 &[
-                    (a_ptr, [m as i64, k as i64]),
+                    (a_row_ptr, [rows as i64, k as i64]),
                     (w_ptr, [k as i64, n as i64]),
-                    (out_ptr, [m as i64, n as i64]),
+                    (out_row_ptr, [rows as i64, n as i64]),
                 ],
-                (m.div_ceil(TILE_M) as u32, n.div_ceil(TILE_N) as u32, 1),
+                (rows.div_ceil(TILE_M) as u32, n.div_ceil(TILE_N) as u32, 1),
             );
         }
 
@@ -232,6 +261,60 @@ impl Backend for DeviceBackend {
         drop(quants);
         self.q_constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
+    }
+
+    fn constant_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
+        if let Some(&buf) = self.raw_constants.borrow().get(key) {
+            return Ok(buf);
+        }
+        let (k, n) = (packed.k(), packed.n());
+        let scales = packed.raw_scales()?;
+        let block = packed.spec().block;
+        let nb = k / block;
+        // The kernel language has no unsigned byte type; a raw block byte
+        // reads as i8 and the kernel corrects it back to 0..255 itself (see
+        // `q2k_matvec_src`), same as every dequantizer here on the host.
+        let bytes: Vec<i8> = packed.blocks().iter().map(|&b| b as i8).collect();
+        let dmin = if scales.dmin.is_empty() {
+            None
+        } else {
+            Some(DeviceBuffer::from_slice(&scales.dmin)?)
+        };
+        let uploaded = (
+            DeviceBuffer::from_slice(&bytes)?,
+            DeviceBuffer::from_slice(&scales.d)?,
+            dmin,
+            n,
+            nb,
+            packed.quant(),
+        );
+        let mut raws = self.raw_quants.borrow_mut();
+        raws.push(uploaded);
+        let buf = RawBuf(raws.len() - 1);
+        drop(raws);
+        self.raw_constants.borrow_mut().insert(key.to_string(), buf);
+        Ok(buf)
+    }
+
+    fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
+        // Batching only pays off once a dequant kernel amortizes the decode
+        // over m rows (project_raw_dense's match table covers every raw
+        // format except Q3_K, the LM head, which never reaches m > 1).
+        const DEQUANT_FORMATS: [Quant; 9] = [
+            Quant::IQ1_S,
+            Quant::IQ2_XXS,
+            Quant::IQ1_M,
+            Quant::IQ2_S,
+            Quant::IQ2_XS,
+            Quant::IQ3_XXS,
+            Quant::IQ3_S,
+            Quant::IQ4_XS,
+            Quant::Q2_K,
+        ];
+        if m > 1 && DEQUANT_FORMATS.iter().any(|&q| self.raw_quant_is(w, q)) {
+            return self.project_raw_dense(a, m, k, w, n, out);
+        }
+        self.project_raw(a, m, k, w, n, out)
     }
 
     fn quantize_act(&self, a: Buf, m: usize, k: usize) -> Result<QAct> {
@@ -278,9 +361,8 @@ impl Backend for DeviceBackend {
         n: usize,
         out: Buf,
     ) -> Result<()> {
-        // Only the single-row kernel accumulates. A prefill goes through the
-        // tensor cores, where the residual add is a rounding error on the pass
-        // rather than a launch that matters.
+        // Only the single-row kernel accumulates; a prefill's tensor-core
+        // path treats the residual add as noise, not a launch that matters.
         if m != 1 || !n.is_multiple_of(Q8_QDOT_TN) {
             let temp = self.alloc(m * n)?;
             self.matmul_quant_act(act, m, k, w, n, temp)?;
@@ -402,10 +484,8 @@ impl Backend for DeviceBackend {
         if !self.fused_mlp {
             return Ok(false);
         }
-        // The chain is the whole of what this backend says about the MLP. Which
-        // stages share a loop nest, what reaches memory, where the one barrier
-        // goes and whether the shape can be fused at all are the pass's, and a
-        // shape it declines takes the four launches.
+        // The chain is all this backend decides; the pass decides fusability,
+        // loop nesting and barrier placement. A declined shape takes four launches.
         let chain = fuse::mlp_chain(
             mlp.x,
             mlp.gain,
@@ -532,26 +612,19 @@ impl Backend for DeviceBackend {
 
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         self.check_distinct("attention", out, &[q]);
-        // The blocked kernel goes first: one online-softmax pass that never
-        // materializes the score matrix measures 3x cheaper than the
-        // three-launch gemm path below at the one shape both can take. A
-        // tensor-core f16 variant of it was tried and reverted, a net loss at
-        // this shape -- a 16-row query tile against a 128-wide head is a small
-        // matmul, dominated by the WMMA path's per-launch fragment staging
-        // rather than by compute.
+        // The blocked kernel's online-softmax pass measures 3x cheaper than
+        // the gemm path below at shapes both can take; a tensor-core variant
+        // was tried and reverted as a net loss here.
         //
-        // It masks its one diagonal tile with `tril`, which is the causal mask
-        // only when that tile starts where the query block does. A prompt into
-        // an empty cache always does; a continuation whose cache is not a
-        // whole number of blocks deep does not, and takes the row kernel,
-        // which needs no alignment.
+        // It masks its diagonal tile with `tril`, the causal mask only when
+        // the tile starts where the query block does; a misaligned
+        // continuation falls to the row kernel instead, which needs no alignment.
         let block = attention_block_tile(spec.head_dim);
         if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
             return self.attention_blocked(q, keys, values, spec, block, out);
         }
-        // Whatever the blocked kernel declined (a misaligned continuation, or
-        // a head dimension whose block tile does not divide 64) still goes
-        // through the two matmuls if it tiles evenly; see `attn_gemm_src`.
+        // Whatever the blocked kernel declined still goes through the two
+        // matmuls if it tiles evenly; see `attn_gemm_src`.
         if attn_gemm_fits(spec) {
             return self.attention_gemm(q, keys, values, spec, out);
         }
@@ -570,14 +643,13 @@ impl Backend for DeviceBackend {
         self.check_distinct("delta_conv", packed, &[history, taps]);
         let channels = mix.channels();
         let (pr, c) = ((mix.pad() + mix.rows) as i64, channels as i64);
-        // The packed destination is one row per (position, head), the same
-        // memory as one row per position with the heads side by side. Read that
-        // way a program's `batch` positions of one head are a column window of
-        // consecutive rows, so the strided store is an ordinary tile.
+        // The packed destination is one row per (position, head): `batch`
+        // positions of one head are then a column window of consecutive rows,
+        // so the strided store is an ordinary tile.
         let batch = delta_conv_batch(mix.rows);
         let (planes, width) = ((3 * mix.rows) as i64, (mix.heads * mix.head_dim) as i64);
-        // Both fused layouts space the planes evenly, so the second's offset is
-        // the whole spacing.
+        // Both fused layouts space the planes evenly, so the second's offset
+        // is the whole spacing.
         let plane_stride = mix.planes[1];
         ensure!(
             mix.planes == [0, plane_stride, 2 * plane_stride],
@@ -585,6 +657,7 @@ impl Backend for DeviceBackend {
         );
         let key = (
             mix.heads,
+            mix.kv_heads,
             mix.head_dim,
             mix.kernel,
             mix.head_stride,
@@ -600,6 +673,7 @@ impl Backend for DeviceBackend {
             || {
                 delta_conv_src(
                     mix.heads,
+                    mix.kv_heads,
                     mix.head_dim,
                     mix.kernel,
                     mix.head_stride,
@@ -678,14 +752,14 @@ impl Backend for DeviceBackend {
             head_dim.is_multiple_of(DELTA_TN),
             "delta_rule needs a head dimension ({head_dim}) that is a multiple of {DELTA_TN}"
         );
-        // The five operands are one allocation, each a descriptor over its own
-        // window of it, which is the point of packing them.
+        // The five operands are one allocation, each a descriptor over its
+        // own window of it.
         let (span, gates) = (rows * heads * head_dim, rows * heads);
         let (r, d) = ((rows * heads) as i64, head_dim as i64);
 
-        // A prompt goes through the chunked form, which needs whole chunks and
-        // a state slice dividing the head. Decoding is a single position, and
-        // every other shape falls through to the sequential kernel.
+        // A prompt goes through the chunked form (whole chunks, a state slice
+        // dividing the head); everything else, including single-position
+        // decode, falls through to the sequential kernel.
         if rows.is_multiple_of(DELTA_CHUNK) && head_dim.is_multiple_of(DELTA_CHUNK_TN) {
             return self.delta_chunked(packed, rows, heads, head_dim, state, out);
         }

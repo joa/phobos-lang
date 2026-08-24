@@ -14,6 +14,16 @@ pub(crate) const MV_TN: usize = 128;
 
 pub(crate) const MATMUL_SRC: &str = matmul::TEMPLATE;
 
+/// Tensor-core tile and source for [`super::DeviceBackend::matmul`]'s deep
+/// band; see [`matmul::TC_TEMPLATE`]'s own doc for the shape reasoning.
+pub(crate) const TC_TILE_M: usize = matmul::TC_TILE_M;
+
+pub(crate) const TC_TILE_N: usize = matmul::TC_TILE_N;
+
+pub(crate) const TC_TILE_K: usize = matmul::TC_TILE_K;
+
+pub(crate) const MATMUL_TC_SRC: &str = matmul::TC_TEMPLATE;
+
 /// The single-row specialization decoding needs. Always reads row zero: a
 /// caller wanting row `r` offsets the operand pointers instead, which keeps the
 /// kernel free of scalar arguments.

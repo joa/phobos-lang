@@ -8,15 +8,10 @@ pub use crate::quant::quantize_row;
 pub struct Buf(pub usize);
 
 /// A handle to backend-owned storage holding f16 rather than f32, its length
-/// still counted in elements.
-///
-/// Only the key and value caches use it. They are the largest thing an
-/// attention block owns past a few hundred positions, and the decode kernel is
-/// bound by the rate it can read them, so what the format buys is bytes moved
-/// rather than bytes held: grouped-query attention gives several query heads one
-/// key head and each reads it separately, so a cached position is fetched once
-/// per query in its group. Everything else stays f32, the queries included, and
-/// the kernels widen a cached element as they load it.
+/// still counted in elements. Only the key and value caches use it: GQA reads
+/// each cached position once per query in its group, and the decode kernel is
+/// bound by the rate it reads them, so halving the format halves bytes moved.
+/// Everything else stays f32; the kernels widen a cached element on load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HBuf(pub usize);
 
@@ -25,18 +20,23 @@ pub struct HBuf(pub usize);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QBuf(pub usize);
 
+/// A weight held in its file's raw block bytes plus the header-field planes
+/// [`crate::quant::Spec::raw_scales`] pulls out of them, for a kernel that
+/// decodes the rest itself. [`Backend::constant_raw`]'s default wraps a plain
+/// dense [`Buf`], so this is safe to read as one whenever a backend has not
+/// overridden that method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RawBuf(pub usize);
+
 /// An activation quantized once for the several projections that read it. Valid
 /// only inside the pass that produced it, and only while its source buffer is
 /// unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QAct(pub usize);
 
-/// Elements sharing one activation scale.
-///
-/// Activations are quantized to Q8_0 whatever format the weight is held in, so
-/// this is the block every quantized contraction here runs on. A weight's own
-/// block size comes from its [`crate::quant::Spec`] and only coincides with
-/// this one because Q8_0 is the single format a kernel unpacks today.
+/// Elements sharing one activation scale. Activations quantize to Q8_0
+/// whatever format the weight is held in, so this is the block every
+/// quantized contraction here runs on.
 pub const Q8_BLOCK: usize = crate::quant::Q8_0_BLOCK;
 
 /// Guards the delta rule's L2 normalization, so an all-zero row stays zero.
@@ -97,10 +97,10 @@ impl Attn {
 
 /// A whole decode MLP, for a backend that can run it as one kernel.
 ///
-/// `x` is the residual row and the destination both, since the down projection
-/// adds into it, and the normalization is part of the request rather than a step
-/// the caller has already taken: a fused kernel recomputes it per block instead
-/// of paying a barrier to share it.
+/// `x` is the residual row and destination both, since the down projection
+/// adds into it. The normalization is part of the request rather than a step
+/// already taken, so a fused kernel recomputes it per block instead of
+/// paying a barrier to share it.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedMlp {
     pub x: Buf,
@@ -131,12 +131,11 @@ pub struct FusedAttnOut {
     pub dest: Buf,
 }
 
-/// One contiguous run of a projection's outputs, and where the caller wants it.
-///
-/// A stacked projection's consumers each read a window of it, and some want that
-/// window elsewhere: the delta net's convolution reads its query/key/value plane
-/// as the tail of a padded stream. Naming the destination per run is what lets
-/// the projection write there rather than be copied out afterwards.
+/// One contiguous run of a projection's outputs, and where the caller wants
+/// it. A stacked projection's consumers can want their window elsewhere (the
+/// delta net's convolution reads its qkv plane as the tail of a padded
+/// stream), so naming the destination per run lets the projection write
+/// there instead of being copied out afterwards.
 #[derive(Clone, Copy, Debug)]
 pub struct ProjRun {
     /// First output of the weight this run covers.
@@ -147,10 +146,8 @@ pub struct ProjRun {
 }
 
 /// A normalization and the projection reading it, for a backend that can run
-/// them as one kernel.
-///
-/// `x` is the residual row, normalized per block rather than published, for the
-/// reason [`FusedMlp`] gives.
+/// them as one kernel. `x` is the residual row, normalized per block rather
+/// than published, for the reason [`FusedMlp`] gives.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedProject<'a> {
     pub x: Buf,
@@ -180,12 +177,9 @@ pub struct Fused {
 
 /// The delta net's convolution and per-head gates as the tail of a fused
 /// projection: [`Backend::delta_conv`] and [`Backend::delta_gates`] with the
-/// same operands, run in the kernel that produced their input.
-///
-/// Only the convolution costs a barrier, because it reads a head's whole row of
-/// the position the projection just wrote and four blocks contributed to that.
-/// The gates read a window the same barrier already published, so they ride in
-/// the convolution's nest for nothing.
+/// same operands, run in the kernel that produced their input. Only the
+/// convolution costs a barrier; the gates read a window it already
+/// published, riding along for free.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedMix {
     pub spec: DeltaMix,
@@ -207,8 +201,14 @@ pub struct FusedMix {
 #[derive(Clone, Copy, Debug)]
 pub struct DeltaMix {
     pub rows: usize,
+    /// Value heads: the packed layout's head count, what the delta rule, the
+    /// gates and the readout norm all run at.
     pub heads: usize,
     pub head_dim: usize,
+    /// Query/key heads. Equal to `heads` outside a grouped-query deltanet;
+    /// otherwise fewer, each repeated `heads / kv_heads` times to match, the
+    /// same repetition [`ggml_repeat_4d`] does upstream.
+    pub kv_heads: usize,
     /// Taps in the causal depthwise convolution.
     pub kernel: usize,
     /// Element offsets of head zero's query, key and value within one position.
@@ -233,9 +233,10 @@ impl DeltaMix {
         self.rows * self.heads
     }
 
-    /// Width of one position of the fused projection.
+    /// Width of one position of the fused projection: query and key at
+    /// `kv_heads` wide apiece, value at the full `heads`.
     pub fn channels(&self) -> usize {
-        3 * self.heads * self.head_dim
+        (2 * self.kv_heads + self.heads) * self.head_dim
     }
 
     /// Positions the convolution carries from one call to the next.
@@ -277,14 +278,9 @@ pub trait Backend {
     fn read(&self, buf: Buf, out: &mut [f32]) -> Result<()>;
 
     /// The index of the largest of `buf`'s first `len` elements, without
-    /// reading the rest of them back. Greedy decoding is the one caller that
-    /// wants a token id and nothing else; every other reader (the server,
-    /// top-k/top-p/penalized sampling, logprobs) still wants the full vector
-    /// and calls [`Backend::read`].
-    ///
-    /// The default reads the whole vector and reduces on the host; a device
-    /// backend overrides it with a reduction that never leaves the card. Ties
-    /// go to the last of equal maxima, matching
+    /// reading the rest back. The default reads the whole vector and reduces
+    /// on the host; a device backend overrides it with a reduction that
+    /// never leaves the card. Ties go to the last of equal maxima, matching
     /// [`phobos_inference::sampling::argmax`], which this delegates to.
     fn argmax(&self, buf: Buf, len: usize) -> Result<i64> {
         let mut out = vec![0.0f32; len];
@@ -324,14 +320,8 @@ pub trait Backend {
     fn store_2d(&self, src: Plane, dst: HPlane, rows: usize, width: usize) -> Result<()>;
 
     /// [`Backend::store_2d`] applied to two independent plane pairs in one
-    /// launch: attention's value (ready as soon as the projection is) and its
-    /// key (ready once rope has rotated it) landing in the same cache row.
-    /// Value moves to wherever the caller makes this call, which only costs
-    /// something if a reader reaches the cache before that point, and nothing
-    /// does: the pass's one reader is the attention kernel, after both.
-    ///
-    /// A backend with no combined kernel calls [`Backend::store_2d`] twice,
-    /// which is exactly what issuing them separately would have done.
+    /// launch: attention's value and key landing in the same cache row. A
+    /// backend with no combined kernel calls [`Backend::store_2d`] twice.
     fn store_2d_pair(
         &self,
         a: (Plane, HPlane),
@@ -343,10 +333,9 @@ pub trait Backend {
         self.store_2d(b.0, b.1, rows, width)
     }
 
-    /// Attention's output epilogue -- quantizing the mixed heads and the
-    /// output projection reading them -- as one kernel. `false` means the
-    /// backend has no fused form and the caller runs the two stages itself,
-    /// which is the only thing a host backend does.
+    /// Attention's output epilogue (quantize the mixed heads, then the
+    /// output projection) as one kernel. `false` means the backend has no
+    /// fused form and the caller runs the two stages itself.
     fn fused_attn_out(&self, _out: FusedAttnOut) -> Result<bool> {
         Ok(false)
     }
@@ -365,11 +354,10 @@ pub trait Backend {
     /// owns it for its lifetime; it is never released.
     fn constant(&self, key: &str, data: &[f32]) -> Result<Buf>;
 
-    /// [`Backend::constant`] whose data costs something to produce: `fill` runs
-    /// only if `key` is not resident already.
-    ///
-    /// A weight in a format no kernel unpacks goes up this way, dequantized
-    /// once at upload rather than once per token.
+    /// [`Backend::constant`] whose data costs something to produce: `fill`
+    /// runs only if `key` is not resident already. A weight in a format no
+    /// kernel unpacks goes up this way, dequantized once at upload rather
+    /// than once per token.
     fn constant_lazy(&self, key: &str, fill: &dyn Fn() -> Result<Vec<f32>>) -> Result<Buf>;
 
     /// A quantized weight uploaded once under `key`, split into the planes its
@@ -377,13 +365,32 @@ pub trait Backend {
     /// up this way; the rest dequantize through [`Backend::constant_lazy`].
     fn constant_quant(&self, key: &str, packed: &Packed) -> Result<QBuf>;
 
+    /// A weight uploaded once under `key` in its raw block bytes, for a
+    /// format with [`crate::quant::Spec::raw_scales`] but no kernel that
+    /// unpacks it into [`Backend::constant_quant`]'s planes. The default
+    /// lands it dense instead, via [`Backend::constant_lazy`]; the handle
+    /// stays valid either way.
+    fn constant_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
+        let buf = self.constant_lazy(key, &|| Ok(packed.dense()))?;
+        Ok(RawBuf(buf.0))
+    }
+
+    /// [`Backend::matmul`] against a weight uploaded through
+    /// [`Backend::constant_raw`]. The activation stays f32: a raw kernel
+    /// decodes its weight to f32 in place rather than needing a quantized
+    /// activation the way [`Backend::matmul_quant`] does. The default
+    /// matches [`Backend::constant_raw`]'s: `w` is a dense buffer in a
+    /// [`RawBuf`] wrapper.
+    fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
+        self.matmul(a, m, k, Buf(w.0), n, out)
+    }
+
     /// `out[m, n] = a[m, k] @ w[k, n]`, all row-major.
     fn matmul(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()>;
 
-    /// [`Backend::matmul`] against a weight left quantized. The activation is
-    /// quantized to Q8_0 whatever the weight's format is, so the contraction is
-    /// integer throughout; a backend that keeps it in f32 computes something
-    /// else. See [`quantize_row`].
+    /// [`Backend::matmul`] against a weight left quantized. The activation
+    /// quantizes to Q8_0 whatever the weight's format is, so the contraction
+    /// is integer throughout. See [`quantize_row`].
     fn matmul_quant(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
         let act = self.quantize_act(a, m, k)?;
         self.matmul_quant_act(act, m, k, w, n, out)
@@ -448,23 +455,17 @@ pub trait Backend {
         self.quantize_act(out, rows, width)
     }
 
-    /// The normalization, both projections and the SwiGLU between them as one
-    /// kernel, for a single-row decode step.
-    ///
-    /// `false` means the backend has no fused form and the caller runs the four
-    /// stages itself, which is the only thing a host backend does.
+    /// The normalization, both projections and the SwiGLU between them as
+    /// one kernel, for a single-row decode step. `false` means the backend
+    /// has no fused form and the caller runs the four stages itself.
     fn fused_mlp(&self, _mlp: FusedMlp) -> Result<bool> {
         Ok(false)
     }
 
-    /// The normalization ahead of a mixer and the projection reading it as one
-    /// kernel, each run of the projection's outputs landing where the caller
-    /// asked for it, and optionally the delta net's convolution and gates behind
-    /// them.
-    ///
-    /// What comes back says which halves ran; the caller launches the rest. A
-    /// backend with no fused form leaves both unset, which is the only thing a
-    /// host backend does.
+    /// The normalization ahead of a mixer and the projection reading it as
+    /// one kernel, each run landing where the caller asked, and optionally
+    /// the delta net's convolution and gates behind them. The result says
+    /// which halves ran; the caller launches the rest.
     fn fused_project(&self, _project: FusedProject) -> Result<Fused> {
         Ok(Fused::default())
     }
@@ -550,19 +551,16 @@ pub trait Backend {
     /// block.
     fn copy_2d(&self, src: Plane, dst: Plane, rows: usize, width: usize) -> Result<()>;
 
-    /// Rotary embedding, in place, over `[rows * heads, head_dim]`.
-    ///
-    /// `table` is `[positions, rope_dim]`, each row the cosines for one
-    /// absolute position followed by its sines. Row `p` must be position `p`,
-    /// filled out to `start_pos + rows`. Pairs are `(i, i + rope_dim / 2)`.
+    /// Rotary embedding, in place, over `[rows * heads, head_dim]`. `table`
+    /// is `[positions, rope_dim]`, each row the cosines for one absolute
+    /// position followed by its sines; row `p` must be position `p`. Pairs
+    /// are `(i, i + rope_dim / 2)`.
     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()>;
 
     /// [`Backend::rope`] against a strided window of a wider buffer, writing
     /// a dense `dest` instead of rotating in place: what a fused QKV
-    /// projection's query and key both want past one row, where the three
-    /// parts interleave and a caller used to pull one out with
-    /// [`Backend::copy_2d`] before rotating it. The default is exactly that
-    /// pair, unfused.
+    /// projection's query and key both want. The default is
+    /// [`Backend::copy_2d`] then [`Backend::rope`], unfused.
     fn rope_gather(
         &self,
         src: Plane,
@@ -586,27 +584,22 @@ pub trait Backend {
     }
 
     /// Causal softmax attention against the key and value caches, which must
-    /// already carry this call's rows.
-    ///
-    /// `q` is `[rows * n_head, head_dim]` with the head varying fastest, and
-    /// the caches are `[positions, n_kv * head_dim]` in f16, so one cached
-    /// position is a contiguous row and one head of it a column window. Row `t`
-    /// attends to cache positions `0 ..= start_pos + t`, with `group` query
-    /// heads sharing each key head. `out` matches `q` and stays f32, as does the
-    /// arithmetic: a cached element widens on load.
+    /// already carry this call's rows. `q` is `[rows * n_head, head_dim]`
+    /// with the head varying fastest; the caches are
+    /// `[positions, n_kv * head_dim]` in f16. Row `t` attends to cache
+    /// positions `0 ..= start_pos + t`, with `group` query heads sharing
+    /// each key head. `out` matches `q` and stays f32.
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()>;
 
     /// `x *= sigmoid(gate)`, elementwise. The attention output gate.
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()>;
 
-    /// The causal depthwise convolution that feeds the delta rule, split into
-    /// the packed planes [`Backend::delta_rule`] reads.
-    ///
-    /// `history` is `[pad + rows, channels]`: the `pad` positions carried from
-    /// the previous call followed by this call's fused projection, so position
-    /// `t` sees inputs `t - pad ..= t` and the kernel has no boundary case.
-    /// `taps` is `[kernel, channels]`, transposed relative to the file so one
-    /// tap across a run of channels is contiguous.
+    /// The causal depthwise convolution that feeds the delta rule, split
+    /// into the packed planes [`Backend::delta_rule`] reads. `history` is
+    /// `[pad + rows, channels]`: the `pad` positions carried from the
+    /// previous call followed by this call's fused projection, so position
+    /// `t` sees inputs `t - pad ..= t`. `taps` is `[kernel, channels]`,
+    /// transposed relative to the file.
     fn delta_conv(&self, history: Buf, taps: Buf, mix: DeltaMix, packed: Buf) -> Result<()>;
 
     /// The delta rule's per-head gates, written into `packed` after the planes.
@@ -629,14 +622,11 @@ pub trait Backend {
     ) -> Result<()>;
 
     /// The gated delta rule over a block of positions, advancing `state`.
-    ///
     /// `packed` carries all five operands consecutively, as
-    /// [`Backend::delta_conv`] and [`Backend::delta_gates`] leave them: the
-    /// query, key and value planes, each `[rows * heads, head_dim]` with the
-    /// head varying fastest, then the decay and beta vectors, each
-    /// `[rows * heads]`. `out` is a fourth `[rows * heads, head_dim]` plane and
-    /// `state` is `[heads * head_dim, head_dim]`, keys down the rows and values
-    /// across. For each position in order, per head:
+    /// [`Backend::delta_conv`] and [`Backend::delta_gates`] leave them:
+    /// query, key and value planes, each `[rows * heads, head_dim]`, then
+    /// decay and beta, each `[rows * heads]`. `out` is a fourth such plane;
+    /// `state` is `[heads * head_dim, head_dim]`. Per position, per head:
     ///
     /// ```text
     /// S      <- decay * S

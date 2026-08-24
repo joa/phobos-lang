@@ -1,11 +1,9 @@
 use super::*;
 use crate::backend::{DeltaMix, FusedMix, ProjRun};
 
-/// Qwen3.5-0.8B's MLP on the grid the card settles at, which is the chain
-/// the hand-written kernel of step 1 covered. The pass has to find one
-/// barrier and put it in one place: after the SwiGLU, because the down
-/// projection contracts over the whole hidden row and a block only wrote a
-/// run of 32 of it.
+/// Qwen3.5-0.8B's MLP on the grid the card settles at. The one barrier
+/// lands after the SwiGLU, since the down projection needs the whole
+/// hidden row and a block only wrote a run of 32 of it.
 fn qwen_plan() -> Plan {
     let chain = mlp_chain(Buf(0), Buf(1), QBuf(0), QBuf(1), 1024, 3584, 1e-6);
     chain
@@ -15,11 +13,9 @@ fn qwen_plan() -> Plan {
         .expect("a shape the pass fuses")
 }
 
-/// Qwen3.5-0.8B's delta-net input: the block normalization and the stacked
-/// projection of the query/key/value stream, the output gate, the decay and
-/// the write strength, with the widest run going straight into the
-/// convolution's padded stream. `mix` continues into the convolution and the
-/// gates reading that projection.
+/// Qwen3.5-0.8B's delta-net input: block normalization plus the stacked
+/// qkv projection, output gate, decay and write strength. `mix` continues
+/// into the convolution and gates reading that projection.
 fn qwen_project_plan(mix: bool) -> Plan {
     let (channels, carried, gates) = (6144, 3 * 6144, 2048 + 2 * 16);
     let runs = [
@@ -40,6 +36,7 @@ fn qwen_project_plan(mix: bool) -> Plan {
         rows: 1,
         heads: 16,
         head_dim: 128,
+        kv_heads: 16,
         kernel: 4,
         planes: [0, 2048, 4096],
         head_stride: 128,
@@ -93,20 +90,17 @@ fn the_mlp_chain_needs_exactly_one_barrier() {
     let plan = qwen_plan();
     assert_eq!(plan.barriers, 1);
     assert_eq!(plan.source.matches("grid_barrier").count(), 1);
-    // And in one place: after the SwiGLU's quantization, because the down
-    // projection contracts over the whole hidden row and a block wrote a run
-    // of 32 of it. The normalization is redundant, so its own output crosses
-    // a nest without one.
+    // And in one place: after the SwiGLU's quantization, since the down
+    // projection needs the whole hidden row. The normalization is
+    // redundant, so its output crosses no barrier.
     let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
     assert!(before.contains("rowsum"), "the normalization comes first");
     assert!(before.contains("exp(-v1)"), "the SwiGLU comes first");
     assert!(after.contains("+= qdot_t"), "the accumulation comes after");
 }
 
-/// What reaches global memory is exactly what crosses a barrier, and nothing
-/// else. Everything between the projections and the quantization stays in
-/// registers; the normalized row is redundant, so the block that reads it is
-/// the block that wrote it and it stays in shared.
+/// What reaches global memory is exactly what crosses a barrier. Everything
+/// else stays in registers or shared memory.
 #[test]
 fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     let plan = qwen_plan();
@@ -124,9 +118,8 @@ fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     );
 }
 
-/// The grid's block count decides how many copies a published value needs, so
-/// a redundant value moving to shared memory is what takes the block count out
-/// of the emitted source. Two grids, one kernel.
+/// The grid's block count decides how many copies a published value needs.
+/// Two grids should still emit the same held row.
 #[test]
 fn the_held_row_does_not_scale_with_the_grid() {
     let at = |blocks: u32| {
@@ -152,8 +145,7 @@ fn the_held_row_does_not_scale_with_the_grid() {
 }
 
 /// The residual is read folded and accumulated into flat, so it is bound
-/// twice under two shapes. Losing that is how the fusion would silently stop
-/// writing where the caller reads.
+/// twice under two shapes.
 #[test]
 fn the_residual_is_bound_under_both_views() {
     let plan = qwen_plan();
@@ -182,8 +174,7 @@ fn the_mixer_projection_needs_no_barrier() {
 }
 
 /// Each run is declared only as far as it writes, and lands at the offset
-/// its consumer reads from. Getting either wrong is how the projection would
-/// quietly write outside the window the convolution walks.
+/// its consumer reads from.
 #[test]
 fn a_run_is_bound_only_as_far_as_it_writes() {
     let plan = qwen_project_plan(false);
@@ -222,12 +213,8 @@ fn the_convolution_costs_one_barrier_and_the_gates_none() {
 }
 
 /// The convolution reads the stream position the projection wrote, and the
-/// pass sees that only because both name one value.
-///
-/// Worth its own test because splitting them is a *latent* miscompile: the
-/// gates read the other projection across blocks too, so the barrier
-/// survives on their account and this chain stays correct. The first chain
-/// with a convolution and no gates would lose it silently.
+/// pass sees that only because both name one value. Splitting them is a
+/// latent miscompile the gates' own barrier happens to mask here.
 #[test]
 fn the_stream_is_one_value_under_two_shapes() {
     let plan = qwen_project_plan(true);
@@ -310,12 +297,11 @@ fn the_gates_land_behind_the_planes() {
     assert_eq!(span, heads * 128);
 }
 
-/// Only the query carries the readout scale and only the query and key are
-/// normalized. The value goes into the recurrent state rather than being
-/// matched against it, so a gain on it is silently wrong arithmetic. The
-/// gain is chosen by testing the plane, which comes from the block index and
-/// so is uniform across the CTA: the normalization reduces the row, and a
-/// CTA-wide reduction under a divergent branch would hang.
+/// Only the query carries the readout scale, and only the query and key are
+/// normalized: the value feeds the recurrent state rather than being
+/// matched against it. The gain branches on the plane, which is uniform
+/// across the CTA, since a divergent branch under the row-wide reduction
+/// would hang.
 #[test]
 fn only_the_query_and_key_are_normalized() {
     let plan = qwen_project_plan(true);
@@ -358,6 +344,7 @@ fn a_prompt_pass_is_not_recorded() {
         rows: 4,
         heads: 16,
         head_dim: 128,
+        kv_heads: 16,
         kernel: 4,
         planes: [0, 2048, 4096],
         head_stride: 128,

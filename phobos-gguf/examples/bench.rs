@@ -9,10 +9,10 @@
 //   pp<N>  prompt processing, N tokens fed into a fresh state
 //   tg<N>  text generation, N tokens produced one at a time
 //
-// pp feeds the whole prompt in one pass, so its projections are real matmuls
-// rather than a matvec per position. The delta-rule recurrence and the softmax
-// attention are still sequential over positions on the host, so the pp-to-tg
-// ratio stays well under llama.cpp's.
+// pp batches over the prompt on the device (delta-rule, attention, Q8_0
+// projection). A raw-quantized weight only joins that batching once its
+// format has a dequant kernel (see `project_raw_dense`); others still
+// redecode per row, which keeps pp-to-tg under llama.cpp's.
 
 use std::path::PathBuf;
 use std::time::Instant;

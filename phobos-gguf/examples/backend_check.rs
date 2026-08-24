@@ -10,8 +10,99 @@ use phobos_gguf::backend::{
     Attn, Backend, Buf, DeltaMix, HBuf, HPlane, HostBackend, Plane, Rope, read_vec,
 };
 
+use phobos_base::half::f32_to_f16;
 use phobos_gguf::backend::device;
-use phobos_gguf::quant::pack_q8_0;
+use phobos_gguf::quant::{Packed, Quant, pack_q8_0};
+
+/// A raw-format super-block: full-range random bytes, with a real (small,
+/// finite) `d`/`dmin` header written at the given offsets afterward.
+fn random_raw_block(
+    next: &mut (impl FnMut() -> f32 + ?Sized),
+    block_bytes: usize,
+    d_off: usize,
+    dmin_off: Option<usize>,
+) -> Vec<u8> {
+    let mut block = vec![0u8; block_bytes];
+    for byte in block.iter_mut() {
+        *byte = (((next() + 1.0) * 127.5) as i32).clamp(0, 255) as u8;
+    }
+    let d = f32_to_f16(0.02 * (next().abs() + 0.1));
+    block[d_off..d_off + 2].copy_from_slice(&d.to_le_bytes());
+    if let Some(off) = dmin_off {
+        let dmin = f32_to_f16(0.02 * (next().abs() + 0.1));
+        block[off..off + 2].copy_from_slice(&dmin.to_le_bytes());
+    }
+    block
+}
+
+/// An IQ1_M super-block: full-range random bytes, then a real `d`'s four
+/// nibbles written into the top nibbles of `scales[1, 3, 5, 7]`, low to
+/// high (see `quant/iq1_m.rs::raw_scales`).
+fn random_iq1m_block(next: &mut (impl FnMut() -> f32 + ?Sized)) -> Vec<u8> {
+    let mut block = vec![0u8; 56];
+    for byte in block.iter_mut() {
+        *byte = (((next() + 1.0) * 127.5) as i32).clamp(0, 255) as u8;
+    }
+    let d = f32_to_f16(0.02 * (next().abs() + 0.1));
+    for (i, off) in [49usize, 51, 53, 55].into_iter().enumerate() {
+        let nibble = (d >> (4 * i)) & 0xf;
+        block[off] = (block[off] & 0x0f) | ((nibble as u8) << 4);
+    }
+    block
+}
+
+/// `m`, `k`, `n`: small and large, single-row and batched, aligned and not.
+/// Shared by every raw-kernel format's check below.
+const RAW_SHAPES: [(usize, usize, usize); 7] = [
+    (1, 256, 32),
+    (1, 256, 64),
+    (1, 512, 96),
+    (1, 1024, 33),
+    (2, 256, 32),
+    (5, 1024, 128),
+    (6, 2048, 5120),
+];
+
+/// `check_within`'s signature, named once since it appears as a parameter
+/// type below and clippy would rather it not be spelled out inline.
+type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
+
+/// A raw-kernel format's device path against the host reference
+/// (`Packed::dense`), across every shape in [`RAW_SHAPES`]. `gen_block`
+/// builds one random super-block.
+fn check_matmul_raw(
+    host: &dyn Backend,
+    gpu: &dyn Backend,
+    check_within: &CheckWithin,
+    next: &mut dyn FnMut() -> f32,
+    quant: Quant,
+    name: &str,
+    mut gen_block: impl FnMut(&mut dyn FnMut() -> f32) -> Vec<u8>,
+) -> Result<()> {
+    for (m, k, n) in RAW_SHAPES {
+        let nb = k / 256;
+        let mut blocks = Vec::new();
+        for _ in 0..n * nb {
+            blocks.extend(gen_block(next));
+        }
+        let packed = Packed::new(quant, blocks, k, n)?;
+        let a: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let ab = b.upload(&a)?;
+            let wb = b.constant_raw(&format!("raw{name}{m}x{k}x{n}"), &packed)?;
+            let out = b.alloc(m * n)?;
+            b.matmul_raw(ab, m, k, wb, n, out)?;
+            read_vec(b, out, m * n)
+        };
+        check_within(
+            &format!("matmul_raw {name} [{m} x {k} x {n}]"),
+            1e-3,
+            &run(host)?,
+            &run(gpu)?,
+        );
+    }
+    Ok(())
+}
 
 fn main() -> Result<()> {
     let gpu = device::DeviceBackend::new()?;
@@ -50,6 +141,27 @@ fn main() -> Result<()> {
     // The everyday tolerance: anything that is not a reordered f32 reduction
     // fails by orders of magnitude more than this.
     let check = |name: &str, want: &[f32], got: &[f32]| check_within(name, 1e-4, want, got);
+
+    // Tensor-core matmul rounds inputs to fp16, so error is relative to the
+    // dot's RMS magnitude sqrt(K)/3 rather than to want (see
+    // phobos-bench/src/gemm.rs's verify_matmul).
+    let check_tc = |name: &str, k: usize, want: &[f32], got: &[f32]| {
+        let floor = (k as f32).sqrt() / 3.0;
+        let error = want
+            .iter()
+            .zip(got)
+            .map(|(w, g)| (w - g).abs() / w.abs().max(floor))
+            .fold(0.0f32, f32::max);
+        worst.set(worst.get().max(error));
+        let ok = error < 1e-2 && want.len() == got.len();
+        if !ok {
+            failures.set(failures.get() + 1);
+        }
+        println!(
+            "{} {name:<34} rel err {error:>10.3e}",
+            if ok { "ok  " } else { "FAIL" }
+        );
+    };
 
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {
@@ -200,6 +312,31 @@ fn main() -> Result<()> {
         );
     }
 
+    // matmul at shapes that reach the tensor-core band (m >= TC_TILE_M, n a
+    // whole number of TC_TILE_N); none of the shapes above do.
+    for (m, k, n) in [
+        (128usize, 1024usize, 2048usize), // whole TC bands, no remainder
+        (100, 1024, 2048),                // one TC band, 36-row remainder
+        (65, 1024, 3584),                 // one TC band, 1-row remainder
+        (128, 1024, 2049),                // n not TC_TILE_N-wide: TC skipped entirely
+    ] {
+        let a: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let w: Vec<f32> = (0..k * n).map(|_| next()).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let ab = b.upload(&a)?;
+            let wb = b.upload(&w)?;
+            let out = b.alloc(m * n)?;
+            b.matmul(ab, m, k, wb, n, out)?;
+            read_vec(b, out, m * n)
+        };
+        check_tc(
+            &format!("matmul_tc [{m} x {k} x {n}]"),
+            k,
+            &run(&host)?,
+            &run(&gpu)?,
+        );
+    }
+
     // The delta rule, which carries eighteen of the model's twenty-four blocks.
     // The state it leaves behind matters as much as the output it returns, so
     // both are compared; a decay that is slightly wrong shows up in the state
@@ -310,31 +447,79 @@ fn main() -> Result<()> {
         );
     }
 
+    // matmul_raw for every raw-kernel format: random weight bytes through
+    // the device's decode-in-kernel path and the host's dense fallback
+    // (`Packed::dense`). `d`/`dmin` are built from small positive floats
+    // rather than random bits to avoid hitting the f16 Inf/NaN exponent.
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::Q2_K, "Q2_K", |n| {
+        random_raw_block(n, 84, 80, Some(82))
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::Q3_K, "Q3_K", |n| {
+        random_raw_block(n, 110, 108, None)
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ1_S, "IQ1_S", |n| {
+        random_raw_block(n, 50, 0, None)
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ2_XXS, "IQ2_XXS", |n| {
+        random_raw_block(n, 66, 0, None)
+    })?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &check_within,
+        &mut next,
+        Quant::IQ1_M,
+        "IQ1_M",
+        |n| random_iq1m_block(n),
+    )?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ2_S, "IQ2_S", |n| {
+        random_raw_block(n, 82, 0, None)
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ2_XS, "IQ2_XS", |n| {
+        random_raw_block(n, 74, 0, None)
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ3_XXS, "IQ3_XXS", |n| {
+        random_raw_block(n, 98, 0, None)
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ3_S, "IQ3_S", |n| {
+        random_raw_block(n, 110, 0, None)
+    })?;
+    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ4_XS, "IQ4_XS", |n| {
+        random_raw_block(n, 136, 0, None)
+    })?;
+
     // The convolution feeding the delta rule, in both fused layouts. The decode
     // shape is the one to watch: at a single row the carried positions are most
     // of the input, so an off-by-one in the padding still produces a plausible
     // number.
-    for (rows, heads, head_dim, interleaved, normalize) in [
-        (1usize, 16usize, 128usize, false, true),
-        (7, 16, 128, false, true),
-        (5, 4, 32, true, true),
-        (3, 4, 32, false, false),
+    for (rows, heads, kv_heads, head_dim, interleaved, normalize) in [
+        (1usize, 16usize, 16usize, 128usize, false, true),
+        (7, 16, 16, 128, false, true),
+        (5, 4, 4, 32, true, true),
+        (3, 4, 4, 32, false, false),
         // A prompt, where a program carries eight positions at once rather than
         // one, and a length that only reaches half of that.
-        (16, 16, 128, false, true),
-        (12, 4, 32, true, true),
-        (8, 4, 32, false, false),
+        (16, 16, 16, 128, false, true),
+        (12, 4, 4, 32, true, true),
+        (8, 4, 4, 32, false, false),
+        // Grouped-query deltanet: 48 value heads sharing 16 key/query heads
+        // (UD-IQ1_M's shape), plus a smaller group.
+        (1, 48, 16, 128, false, true),
+        (9, 48, 16, 128, false, true),
+        (1, 6, 2, 32, false, false),
+        (5, 6, 2, 32, false, true),
     ] {
-        let inner = heads * head_dim;
+        let kv_width = kv_heads * head_dim;
         let (planes, head_stride) = if interleaved {
             ([0, head_dim, 2 * head_dim], 3 * head_dim)
         } else {
-            ([0, inner, 2 * inner], head_dim)
+            ([0, kv_width, 2 * kv_width], head_dim)
         };
         let mix = DeltaMix {
             rows,
             heads,
             head_dim,
+            kv_heads,
             kernel: 4,
             planes,
             head_stride,
@@ -352,7 +537,7 @@ fn main() -> Result<()> {
         };
         let layout = if interleaved { "interleaved" } else { "planar" };
         check(
-            &format!("delta_conv [{rows} x {heads} x {head_dim}] {layout}"),
+            &format!("delta_conv [{rows} x {heads} (kv {kv_heads}) x {head_dim}] {layout}"),
             &run(&host)?,
             &run(&gpu)?,
         );
@@ -365,6 +550,7 @@ fn main() -> Result<()> {
             rows,
             heads,
             head_dim: 32,
+            kv_heads: heads,
             kernel: 4,
             planes: [0, 0, 0],
             head_stride: 32,
