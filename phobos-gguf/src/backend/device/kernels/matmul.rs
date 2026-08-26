@@ -24,6 +24,16 @@ pub(crate) const TC_TILE_K: usize = matmul::TC_TILE_K;
 
 pub(crate) const MATMUL_TC_SRC: &str = matmul::TC_TEMPLATE;
 
+/// The same two kernels reading an f16 weight, for the strip a `_qdecode`
+/// writes. Free on the tensor-core path, which stages to f16 anyway.
+pub(crate) fn matmul_f16w_src() -> String {
+    MATMUL_SRC.replace("B: tensor<f32>[K, N]", "B: tensor<f16>[K, N]")
+}
+
+pub(crate) fn matmul_tc_f16w_src() -> String {
+    MATMUL_TC_SRC.replace("B: tensor<f32>[K, N]", "B: tensor<f16>[K, N]")
+}
+
 /// The single-row specialization decoding needs. Always reads row zero: a
 /// caller wanting row `r` offsets the operand pointers instead, which keeps the
 /// kernel free of scalar arguments.

@@ -374,7 +374,7 @@ impl DeviceBackend {
                 // iq1s_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq1s_matvec's gather-based body.
                 operands.push((
-                    self.iq1s_grid.as_device_ptr().as_raw(),
+                    self.iq1s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ1S_GRID_LEN as i64],
                 ));
             }
@@ -382,7 +382,7 @@ impl DeviceBackend {
                 // iq1m_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq1m_matvec's gather-based body.
                 operands.push((
-                    self.iq1s_grid.as_device_ptr().as_raw(),
+                    self.iq1s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ1S_GRID_LEN as i64],
                 ));
             }
@@ -397,11 +397,11 @@ impl DeviceBackend {
                 // iq2xxs_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq2xxs_matvec's gather-based body.
                 operands.push((
-                    self.iq2xxs_grid.as_device_ptr().as_raw(),
+                    self.iq2xxs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2XXS_GRID_LEN as i64],
                 ));
                 operands.push((
-                    self.iq2xxs_signs.as_device_ptr().as_raw(),
+                    self.iq2xxs_signs_packed.as_device_ptr().as_raw(),
                     [1, IQ2XXS_SIGNS_LEN as i64],
                 ));
             }
@@ -420,11 +420,11 @@ impl DeviceBackend {
                 // iq2s_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq2s_matvec's gather-based body.
                 operands.push((
-                    self.iq2s_grid.as_device_ptr().as_raw(),
+                    self.iq2s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2S_GRID_LEN as i64],
                 ));
                 operands.push((
-                    self.iq2s_signs.as_device_ptr().as_raw(),
+                    self.iq2s_signs_packed.as_device_ptr().as_raw(),
                     [1, IQ2S_SIGNS_LEN as i64],
                 ));
             }
@@ -443,11 +443,11 @@ impl DeviceBackend {
                 // iq2xs_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq2xs_matvec's gather-based body.
                 operands.push((
-                    self.iq2xs_grid.as_device_ptr().as_raw(),
+                    self.iq2xs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2XS_GRID_LEN as i64],
                 ));
                 operands.push((
-                    self.iq2xxs_signs.as_device_ptr().as_raw(),
+                    self.iq2xxs_signs_packed.as_device_ptr().as_raw(),
                     [1, IQ2XXS_SIGNS_LEN as i64],
                 ));
             }
@@ -466,11 +466,11 @@ impl DeviceBackend {
                 // iq3xxs_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq3xxs_matvec's gather-based body.
                 operands.push((
-                    self.iq3xxs_grid.as_device_ptr().as_raw(),
+                    self.iq3xxs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ3XXS_GRID_LEN as i64],
                 ));
                 operands.push((
-                    self.iq2xxs_signs.as_device_ptr().as_raw(),
+                    self.iq2xxs_signs_packed.as_device_ptr().as_raw(),
                     [1, IQ2XXS_SIGNS_LEN as i64],
                 ));
             }
@@ -489,11 +489,11 @@ impl DeviceBackend {
                 // iq3s_qdot_matvec computes its own byte offsets; no iota8
                 // operand, unlike iq3s_matvec's gather-based body.
                 operands.push((
-                    self.iq3s_grid.as_device_ptr().as_raw(),
+                    self.iq3s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ3S_GRID_LEN as i64],
                 ));
                 operands.push((
-                    self.iq2s_signs.as_device_ptr().as_raw(),
+                    self.iq2s_signs_packed.as_device_ptr().as_raw(),
                     [1, IQ2S_SIGNS_LEN as i64],
                 ));
             }
@@ -554,7 +554,7 @@ impl DeviceBackend {
 
         // Byte width, tile size and extra grid/signs/iota operands mirror
         // project_raw's own match table.
-        let (module, name, block_bytes, tn) = match quant {
+        let (dequant, dequant_name, block_bytes, tn) = match quant {
             Quant::IQ1_S => (&self.iq1s_dequant, "iq1s_dequant", 50, IQ1S_TN),
             Quant::IQ2_XXS => (&self.iq2xxs_dequant, "iq2xxs_dequant", 66, IQ2XXS_TN),
             Quant::IQ1_M => (&self.iq1m_dequant, "iq1m_dequant", 56, IQ1M_TN),
@@ -566,15 +566,49 @@ impl DeviceBackend {
             Quant::Q2_K => (&self.q2k_dequant, "q2k_dequant", 84, Q2K_TN),
             other => anyhow::bail!("project_raw_dense has no dequant kernel for {}", other.name()),
         };
+        // `_dequant` above stays the masked fallback, for a ragged last strip
+        // and for the formats with no `_qdecode`. The f16 strip is only sound
+        // where the matmul reading it is entirely tensor-core: the plain tile
+        // contracts in f32, and an f16 weight there costs real precision.
+        let all_tc = m.is_multiple_of(TC_TILE_M) && k.is_multiple_of(TC_TILE_K);
+        let qdecode = match quant {
+            Quant::IQ1_S => Some((&self.iq1s_qdecode, &self.iq1s_qdecode_f16, "iq1s_qdecode")),
+            Quant::IQ2_XXS => {
+                Some((&self.iq2xxs_qdecode, &self.iq2xxs_qdecode_f16, "iq2xxs_qdecode"))
+            }
+            Quant::IQ1_M => Some((&self.iq1m_qdecode, &self.iq1m_qdecode_f16, "iq1m_qdecode")),
+            Quant::IQ2_S => Some((&self.iq2s_qdecode, &self.iq2s_qdecode_f16, "iq2s_qdecode")),
+            Quant::IQ2_XS => Some((&self.iq2xs_qdecode, &self.iq2xs_qdecode_f16, "iq2xs_qdecode")),
+            Quant::IQ3_XXS => {
+                Some((&self.iq3xxs_qdecode, &self.iq3xxs_qdecode_f16, "iq3xxs_qdecode"))
+            }
+            Quant::IQ3_S => Some((&self.iq3s_qdecode, &self.iq3s_qdecode_f16, "iq3s_qdecode")),
+            // Q2_K and IQ4_XS decode on a different lane geometry and are 1%
+            // of a prompt pass between them; they keep `_dequant`.
+            _ => None,
+        };
         let rb = nb * block_bytes;
         let (bytes_ptr, d_ptr) = (bytes.as_device_ptr().as_raw(), d.as_device_ptr().as_raw());
         let f16_bytes = size_of::<u16>() as u64;
 
+        // Rounded to a whole TC_TILE_N: a budget-shaped strip is a multiple of
+        // 64 for no reason, and `Backend::matmul` needs one to reach the
+        // tensor cores. Only the last strip is then ragged.
         let strip = (RAW_DEQUANT_BUDGET_BYTES / (k * size_of::<f32>())).clamp(1, n);
+        let strip = if strip >= TC_TILE_N {
+            strip - strip % TC_TILE_N
+        } else {
+            strip
+        };
         let mut n0 = 0;
         while n0 < n {
             let cur = strip.min(n - n0);
-            let scratch_w = self.alloc(k * cur)?;
+            // Half the bytes when narrow. The pool hands out f32 elements; a
+            // kernel operand is a pointer and a shape, and the signature says
+            // how wide an element is.
+            let expand = qdecode.filter(|_| cur.is_multiple_of(tn));
+            let narrow = expand.is_some() && all_tc && cur.is_multiple_of(TC_TILE_N);
+            let scratch_w = self.alloc(if narrow { (k * cur).div_ceil(2) } else { k * cur })?;
             let mut operands = vec![
                 (bytes_ptr + (n0 * rb) as u64, [cur as i64, rb as i64]),
                 (d_ptr + (n0 * nb) as u64 * f16_bytes, [cur as i64, *nb as i64]),
@@ -587,29 +621,56 @@ impl DeviceBackend {
                     .as_raw();
                 operands.push((dmin_ptr + (n0 * nb) as u64 * f16_bytes, [cur as i64, *nb as i64]));
             }
+            let (module, name) = match expand {
+                Some((wide, half, name)) => (if narrow { half } else { wide }, name),
+                None => (dequant, dequant_name),
+            };
+            // A `_qdecode` indexes its tables itself and reads the packed i8
+            // ones; a `_dequant` gathers against the i32 ones. Same slot count,
+            // so only the pointer changes.
+            let packed = expand.is_some();
+            let table = |i32_buf: &DeviceBuffer<i32>, i8_buf: &DeviceBuffer<i8>, len: usize| {
+                let ptr = if packed {
+                    i8_buf.as_device_ptr().as_raw()
+                } else {
+                    i32_buf.as_device_ptr().as_raw()
+                };
+                (ptr, [1i64, len as i64])
+            };
             match quant {
                 Quant::IQ1_S | Quant::IQ1_M => {
-                    operands.push((self.iq1s_grid.as_device_ptr().as_raw(), [1, IQ1S_GRID_LEN as i64]));
+                    let t = table(&self.iq1s_grid, &self.iq1s_grid_packed, IQ1S_GRID_LEN);
+                    operands.push(t);
                 }
                 Quant::IQ2_XXS => {
-                    operands.push((self.iq2xxs_grid.as_device_ptr().as_raw(), [1, IQ2XXS_GRID_LEN as i64]));
-                    operands.push((self.iq2xxs_signs.as_device_ptr().as_raw(), [1, IQ2XXS_SIGNS_LEN as i64]));
+                    let g = table(&self.iq2xxs_grid, &self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN);
+                    let v = table(&self.iq2xxs_signs, &self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN);
+                    operands.push(g);
+                    operands.push(v);
                 }
                 Quant::IQ2_S => {
-                    operands.push((self.iq2s_grid.as_device_ptr().as_raw(), [1, IQ2S_GRID_LEN as i64]));
-                    operands.push((self.iq2s_signs.as_device_ptr().as_raw(), [1, IQ2S_SIGNS_LEN as i64]));
+                    let g = table(&self.iq2s_grid, &self.iq2s_grid_packed, IQ2S_GRID_LEN);
+                    let v = table(&self.iq2s_signs, &self.iq2s_signs_packed, IQ2S_SIGNS_LEN);
+                    operands.push(g);
+                    operands.push(v);
                 }
                 Quant::IQ2_XS => {
-                    operands.push((self.iq2xs_grid.as_device_ptr().as_raw(), [1, IQ2XS_GRID_LEN as i64]));
-                    operands.push((self.iq2xxs_signs.as_device_ptr().as_raw(), [1, IQ2XXS_SIGNS_LEN as i64]));
+                    let g = table(&self.iq2xs_grid, &self.iq2xs_grid_packed, IQ2XS_GRID_LEN);
+                    let v = table(&self.iq2xxs_signs, &self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN);
+                    operands.push(g);
+                    operands.push(v);
                 }
                 Quant::IQ3_XXS => {
-                    operands.push((self.iq3xxs_grid.as_device_ptr().as_raw(), [1, IQ3XXS_GRID_LEN as i64]));
-                    operands.push((self.iq2xxs_signs.as_device_ptr().as_raw(), [1, IQ2XXS_SIGNS_LEN as i64]));
+                    let g = table(&self.iq3xxs_grid, &self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN);
+                    let v = table(&self.iq2xxs_signs, &self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN);
+                    operands.push(g);
+                    operands.push(v);
                 }
                 Quant::IQ3_S => {
-                    operands.push((self.iq3s_grid.as_device_ptr().as_raw(), [1, IQ3S_GRID_LEN as i64]));
-                    operands.push((self.iq2s_signs.as_device_ptr().as_raw(), [1, IQ2S_SIGNS_LEN as i64]));
+                    let g = table(&self.iq3s_grid, &self.iq3s_grid_packed, IQ3S_GRID_LEN);
+                    let v = table(&self.iq2s_signs, &self.iq2s_signs_packed, IQ2S_SIGNS_LEN);
+                    operands.push(g);
+                    operands.push(v);
                 }
                 Quant::IQ4_XS => {
                     operands.push((
@@ -621,16 +682,26 @@ impl DeviceBackend {
                 Quant::Q2_K => {}
                 _ => unreachable!("checked in the match above"),
             }
-            // IQ4_XS and Q2_K need no gather-index tile (fixed codebook,
-            // static-offset decode); every other kernel here does.
-            if *quant != Quant::IQ4_XS && *quant != Quant::Q2_K {
+            // Only a `gather`-based body needs the iota tile.
+            if expand.is_none() && *quant != Quant::IQ4_XS && *quant != Quant::Q2_K {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             operands.push((self.ptr(scratch_w, 0)?, [k as i64, cur as i64]));
             self.launch(module, name, &operands, (cur.div_ceil(tn) as u32, 1, 1))?;
 
             let scratch_out = self.alloc(m * cur)?;
-            self.matmul(a, m, k, scratch_w, cur, scratch_out)?;
+            if narrow {
+                self.matmul_f16_weight(
+                    self.ptr(a, 0)?,
+                    m,
+                    k,
+                    self.ptr(scratch_w, 0)?,
+                    cur,
+                    self.ptr(scratch_out, 0)?,
+                )?;
+            } else {
+                self.matmul(a, m, k, scratch_w, cur, scratch_out)?;
+            }
             self.copy_2d(
                 Plane { buf: scratch_out, offset: 0, pitch: cur },
                 Plane { buf: out, offset: n0, pitch: n },
@@ -643,6 +714,56 @@ impl DeviceBackend {
             n0 += cur;
         }
         Ok(())
+    }
+
+    /// [`super::DeviceBackend::matmul`]'s ladder over an f16 weight. The
+    /// tensor-core arm is bit-identical to the f32 one, since `stage_to_f16`
+    /// truncates a weight operand either way; callers keep the remainder rows
+    /// off this path (see `narrow` in `project_raw_dense`).
+    fn matmul_f16_weight(
+        &self,
+        a_ptr: u64,
+        m: usize,
+        k: usize,
+        w_ptr: u64,
+        n: usize,
+        out_ptr: u64,
+    ) -> Result<()> {
+        let f32_bytes = size_of::<f32>() as u64;
+        let tc_rows = if n.is_multiple_of(TC_TILE_N) && k.is_multiple_of(TC_TILE_K) {
+            m - m % TC_TILE_M
+        } else {
+            0
+        };
+        if tc_rows > 0 {
+            self.launch(
+                &self.matmul_tc_f16w,
+                "matmul_tc",
+                &[
+                    (a_ptr, [tc_rows as i64, k as i64]),
+                    (w_ptr, [k as i64, n as i64]),
+                    (out_ptr, [tc_rows as i64, n as i64]),
+                ],
+                ((tc_rows / TC_TILE_M) as u32, (n / TC_TILE_N) as u32, 1),
+            )?;
+        }
+        let rows = m - tc_rows;
+        if rows == 0 {
+            return Ok(());
+        }
+        let a_row_ptr = a_ptr + (tc_rows * k) as u64 * f32_bytes;
+        let out_row_ptr = out_ptr + (tc_rows * n) as u64 * f32_bytes;
+        let tiles_evenly = rows.is_multiple_of(TILE_M) && n.is_multiple_of(TILE_N);
+        self.launch(
+            self.matmul_f16w.pick(tiles_evenly),
+            "matmul",
+            &[
+                (a_row_ptr, [rows as i64, k as i64]),
+                (w_ptr, [k as i64, n as i64]),
+                (out_row_ptr, [rows as i64, n as i64]),
+            ],
+            (rows.div_ceil(TILE_M) as u32, n.div_ceil(TILE_N) as u32, 1),
+        )
     }
 
     /// The narrow-CTA path for `q8_qmma`'s deep tile: the same `qmma_t` kernel

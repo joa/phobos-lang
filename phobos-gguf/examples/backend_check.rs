@@ -53,27 +53,44 @@ fn random_iq1m_block(next: &mut (impl FnMut() -> f32 + ?Sized)) -> Vec<u8> {
 
 /// `m`, `k`, `n`: small and large, single-row and batched, aligned and not.
 /// Shared by every raw-kernel format's check below.
-const RAW_SHAPES: [(usize, usize, usize); 7] = [
+const RAW_SHAPES: [(usize, usize, usize); 9] = [
     (1, 256, 32),
     (1, 256, 64),
     (1, 512, 96),
     (1, 1024, 33),
     (2, 256, 32),
+    // m > 1 at a width no format's TN divides: the masked `_dequant`
+    // fallback, where the other m > 1 shapes reach `_qdecode`.
+    (3, 512, 33),
     (5, 1024, 128),
     (6, 2048, 5120),
+    // The only shape `project_raw_dense` hands an f16 strip: every other m
+    // here is under TC_TILE_M. Without it the narrow path goes untested.
+    (64, 512, 128),
 ];
+
+/// Shapes that reach the tensor cores, and so stage their weight to f16.
+/// Judged like every other f16 path here; see `check_tc`.
+fn raw_shape_is_tc(m: usize, k: usize, n: usize) -> bool {
+    m.is_multiple_of(64) && n.is_multiple_of(64) && k.is_multiple_of(16)
+}
 
 /// `check_within`'s signature, named once since it appears as a parameter
 /// type below and clippy would rather it not be spelled out inline.
 type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 
+/// `check_tc`'s signature, named for the same reason.
+type CheckTc<'a> = dyn Fn(&str, usize, &[f32], &[f32]) + 'a;
+
 /// A raw-kernel format's device path against the host reference
 /// (`Packed::dense`), across every shape in [`RAW_SHAPES`]. `gen_block`
 /// builds one random super-block.
+#[allow(clippy::too_many_arguments)]
 fn check_matmul_raw(
     host: &dyn Backend,
     gpu: &dyn Backend,
     check_within: &CheckWithin,
+    check_tc: &CheckTc,
     next: &mut dyn FnMut() -> f32,
     quant: Quant,
     name: &str,
@@ -94,12 +111,13 @@ fn check_matmul_raw(
             b.matmul_raw(ab, m, k, wb, n, out)?;
             read_vec(b, out, m * n)
         };
-        check_within(
-            &format!("matmul_raw {name} [{m} x {k} x {n}]"),
-            1e-3,
-            &run(host)?,
-            &run(gpu)?,
-        );
+        let label = format!("matmul_raw {name} [{m} x {k} x {n}]");
+        let (want, got) = (run(host)?, run(gpu)?);
+        if raw_shape_is_tc(m, k, n) {
+            check_tc(&label, k, &want, &got);
+        } else {
+            check_within(&label, 1e-3, &want, &got);
+        }
     }
     Ok(())
 }
@@ -451,40 +469,41 @@ fn main() -> Result<()> {
     // the device's decode-in-kernel path and the host's dense fallback
     // (`Packed::dense`). `d`/`dmin` are built from small positive floats
     // rather than random bits to avoid hitting the f16 Inf/NaN exponent.
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::Q2_K, "Q2_K", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::Q2_K, "Q2_K", |n| {
         random_raw_block(n, 84, 80, Some(82))
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::Q3_K, "Q3_K", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::Q3_K, "Q3_K", |n| {
         random_raw_block(n, 110, 108, None)
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ1_S, "IQ1_S", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ1_S, "IQ1_S", |n| {
         random_raw_block(n, 50, 0, None)
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ2_XXS, "IQ2_XXS", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ2_XXS, "IQ2_XXS", |n| {
         random_raw_block(n, 66, 0, None)
     })?;
     check_matmul_raw(
         &host,
         &gpu,
         &check_within,
+        &check_tc,
         &mut next,
         Quant::IQ1_M,
         "IQ1_M",
         |n| random_iq1m_block(n),
     )?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ2_S, "IQ2_S", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ2_S, "IQ2_S", |n| {
         random_raw_block(n, 82, 0, None)
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ2_XS, "IQ2_XS", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ2_XS, "IQ2_XS", |n| {
         random_raw_block(n, 74, 0, None)
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ3_XXS, "IQ3_XXS", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ3_XXS, "IQ3_XXS", |n| {
         random_raw_block(n, 98, 0, None)
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ3_S, "IQ3_S", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ3_S, "IQ3_S", |n| {
         random_raw_block(n, 110, 0, None)
     })?;
-    check_matmul_raw(&host, &gpu, &check_within, &mut next, Quant::IQ4_XS, "IQ4_XS", |n| {
+    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ4_XS, "IQ4_XS", |n| {
         random_raw_block(n, 136, 0, None)
     })?;
 
