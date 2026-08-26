@@ -209,6 +209,45 @@ float       = digit { digit } "." { digit } ;
   the raw lane id plus a per-iteration constant outright. Q3_K's six-bit
   signed scale needs two `arith.select`s Q2_K's packed scale/min byte does
   not, for a genuine conditional in its cross-byte unpacking.
+- **Packed tables**: every `<fmt>_qdot_t` and `<fmt>_qdecode_t` reads its
+  lookup tables as one `i8` a slot, not one `i32`. A lane's whole entry is then
+  eight contiguous bytes (four for IQ3_XXS and IQ3_S, whose grid entries are
+  half as wide), so it takes one `vector.load` where the widened layout took
+  one scalar load an element: eight table loads a lane become one, and the
+  table is a quarter the size, which is what gets it into L1. The values fit
+  exactly -- IQ1_S's grid holds `{-1, 0, 1}`, the IQ2/IQ3 magnitudes top out at
+  62, and the sign multipliers are `+-1` -- and they are signed, so they widen
+  with `arith.extsi`, not the zero-extend the unsigned block fields take.
+
+  The `i32` tables stay uploaded beside the packed ones for the fallback
+  `<fmt>_matvec`/`<fmt>_dequant` kernels, which reach them through `gather` a
+  slot at a time. Two copies of every table is a few KB.
+- **Vector activation reads**: in the `<fmt>_qdot_t` contractions whose lane
+  owns a contiguous run of the activation row, the lane reads that run as
+  `vector<4xf32>` rather than one scalar load an element. A warp's 32 lanes are
+  then 1024 contiguous bytes covered by two instructions, where the scalar form
+  issued eight, each spreading the warp across 32 separate sectors because
+  neighbouring lanes sit eight elements apart.
+
+  This does not apply to `iq4xs_qdot_t`, `q2k_qdot_t` or `q3k_qdot_t`: their
+  lane index *is* an element position within a run, so consecutive lanes
+  already read consecutive activations and the scalar form is coalesced.
+- **Grid-decode expansion**: `<fmt>_qdecode_t` runs one of those same decodes
+  and stores the weights into a `[K, N]` scratch instead of contracting them,
+  which is what a prompt pass needs: a batched matmul reads a dequantized
+  strip once for all its rows, where the matvec above reads a row of activation.
+  Only a statement, never a value -- `SCRATCH[:, pn * TN :+ TN] =
+  iq1s_qdecode_t(..)` -- because it writes the destination itself, the way
+  `qmma_t` writes its accumulators into an output slice.
+
+  The decode is shared with the matching `<fmt>_qdot_t` outright, so what
+  differs is only the thread map, and the store sets it. `qdot_t` gives a warp
+  one output column, making its lanes the format's 32 lanes. Here consecutive
+  threads take consecutive output *columns* of the same rows, which puts a
+  warp's 32 stores in four fully covered 32-byte sectors of the scratch, and a
+  thread still owns eight elements of one column so the block bytes are still
+  read once per eight decodes. Nothing is staged in shared memory and there is
+  no barrier at all.
 - **Mixed element types**: a binary op whose operands differ converts both to their
   join before computing. Between floats the join is the wider type, except that
   `f16` and `bf16` join at `f32`; an integer meeting a float joins at the float.
@@ -248,7 +287,7 @@ float       = digit { digit } "." { digit } ;
   - **Open-Ended**: `A[i:]`, `A[:j]` are not supported. A `:` after an expression requires an end, and a `:+` requires a length.
 - **Unary minus on a tile**: `-t` negates elementwise, lowering as `0 - t`. `!` stays scalar-only.
 - **Broadcasting**: binary tile ops broadcast a NumPy-style axis of extent 1 (so `[R, C] x [R, 1]` stretches the column vector), and `tile x scalar` (either order) broadcasts the scalar over the tile.
-- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `iq1s_qdot_t`, `iq2xxs_qdot_t`, `iq1m_qdot_t`, `iq2s_qdot_t`, `iq2xs_qdot_t`, `iq3xxs_qdot_t`, `iq3s_qdot_t`, `iq4xs_qdot_t`, `q2k_qdot_t`, `q3k_qdot_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `argsel`, `cumsum`, `tril`, `transpose`, `flat`), the
+- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `iq1s_qdot_t`, `iq2xxs_qdot_t`, `iq1m_qdot_t`, `iq2s_qdot_t`, `iq2xs_qdot_t`, `iq3xxs_qdot_t`, `iq3s_qdot_t`, `iq4xs_qdot_t`, `q2k_qdot_t`, `q3k_qdot_t`, `iq1s_qdecode_t`, `iq2xxs_qdecode_t`, `iq1m_qdecode_t`, `iq2s_qdecode_t`, `iq2xs_qdecode_t`, `iq3xxs_qdecode_t`, `iq3s_qdecode_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `argsel`, `cumsum`, `tril`, `transpose`, `flat`), the
   synchronization builtins (`grid_barrier`, `atomic_add`) and the
   conversion builtins named after the scalar types are ordinary
   identifiers, not keywords. `range` is recognized positionally inside `for ... in range(...)`.
@@ -257,16 +296,19 @@ float       = digit { digit } "." { digit } ;
   - `dot_t(a, b)`: `a @ b.t` (contracting the last dim of both: `[M, K] x [N, K] -> [M, N]`). Over `i8` operands this is the integer tensor-core and `dp4a` path; see **Integer contraction**.
   - `qdot_t(a, a_scales, w, w_scales)`: the Q8_0 contraction with its block scales, `[M, K] i8 x [N, K] i8 -> [M, N] f32`, where the scales are `[M, K/32]` and `[N, K/32]` f32 and element `[i, j]` is `sum_b (sum_{k in block b} a[i, k] * w[j, k]) * a_scales[i, b] * w_scales[j, b]`. The contraction axis may be dynamic, since it is not tiled. The scales are indexed `[row, block]` so a lane's scale load is contiguous with its neighbours'. See **Quantized contraction**.
   - `qmma_t(a, a_scales, w, w_scales)`: the same contraction batched over rows, `[M, K] i8 x [N, K] i8 -> [M, N] f32` with `M` and `N` multiples of 8, where `a_scales` is `[M, K/32]` and `w_scales` is `[K/32, N]`. The weight scales are indexed `[block, out]`, the opposite of `qdot_t`: a lane here holds two neighbouring output columns of one block, so that order puts its two scales next to each other. See **Quantized contraction**.
-  - `iq1s_qdot_t(a, qb, d, grid)`: IQ1_S's single-row matvec contraction with its grid-table decode folded in, `[1, K] f32 x [N, K/256*50] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 (one block scale a row) and `grid` is the flattened i32-per-slot grid `gather` already uses (`[1, 2048*8]`, `crate::quant::iq1s_flat_grid`). `N` must be a multiple of the CTA's warp count, one warp an output column. See **Grid-decode contraction**.
-  - `iq2xxs_qdot_t(a, qb, d, grid, signs)`: IQ2_XXS's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*66] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid`/`signs` are the flattened i32-per-slot tables `gather` already uses (`crate::quant::iq2xxs_flat_grid`/`iq2xxs_flat_signs`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq1m_qdot_t(a, qb, d, grid)`: IQ1_M's single-row matvec contraction with the decode folded in, `[1, K] f32 x [N, K/256*56] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid` is IQ1_S's own flattened grid (`crate::quant::iq1s_flat_grid`, shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq2s_qdot_t(a, qb, d, grid, signs)`: IQ2_S's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*82] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid`/`signs` are the flattened i32-per-slot tables `gather` already uses (`crate::quant::iq2s_flat_grid`/`iq2s_flat_signs`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq2xs_qdot_t(a, qb, d, grid, signs)`: IQ2_XS's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*74] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq2xs_flat_grid` and `signs` is IQ2_XXS's own flattened sign table (`crate::quant::iq2xxs_flat_signs`, shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq3xxs_qdot_t(a, qb, d, grid, signs)`: IQ3_XXS's single-row matvec contraction with its two four-wide grid lookups and sign-table decode folded in, `[1, K] f32 x [N, K/256*98] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq3xxs_flat_grid` (four `i32` lanes an entry, not eight) and `signs` is IQ2_XXS's own flattened sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq3s_qdot_t(a, qb, d, grid, signs)`: IQ3_S's single-row matvec contraction with its two four-wide grid lookups and sign-table decode folded in, `[1, K] f32 x [N, K/256*110] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq3s_flat_grid` and `signs` is IQ2_S's own flattened sign table (`crate::quant::iq2s_flat_signs`, shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
+  - `iq1s_qdot_t(a, qb, d, grid)`: IQ1_S's single-row matvec contraction with its grid-table decode folded in, `[1, K] f32 x [N, K/256*50] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 (one block scale a row) and `grid` is the packed one-`i8`-per-slot grid (`[1, 2048*8]`, `crate::quant::iq1s_packed_grid`), whose eight bytes for a lane are one vector load. `N` must be a multiple of the CTA's warp count, one warp an output column. See **Grid-decode contraction**.
+  - `iq2xxs_qdot_t(a, qb, d, grid, signs)`: IQ2_XXS's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*66] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid`/`signs` are the packed one-`i8`-per-slot tables (`crate::quant::iq2xxs_packed_grid`/`iq2xxs_packed_signs`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
+  - `iq1m_qdot_t(a, qb, d, grid)`: IQ1_M's single-row matvec contraction with the decode folded in, `[1, K] f32 x [N, K/256*56] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid` is IQ1_S's own packed grid (`crate::quant::iq1s_packed_grid`, shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
+  - `iq2s_qdot_t(a, qb, d, grid, signs)`: IQ2_S's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*82] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid`/`signs` are the packed tables (`crate::quant::iq2s_packed_grid`/`iq2s_packed_signs`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
+  - `iq2xs_qdot_t(a, qb, d, grid, signs)`: IQ2_XS's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*74] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq2xs_packed_grid` and `signs` is IQ2_XXS's own packed sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
+  - `iq3xxs_qdot_t(a, qb, d, grid, signs)`: IQ3_XXS's single-row matvec contraction with its two four-wide grid lookups and sign-table decode folded in, `[1, K] f32 x [N, K/256*98] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq3xxs_packed_grid` (four `i8` lanes an entry, not eight) and `signs` is IQ2_XXS's own packed sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
+  - `iq3s_qdot_t(a, qb, d, grid, signs)`: IQ3_S's single-row matvec contraction with its two four-wide grid lookups and sign-table decode folded in, `[1, K] f32 x [N, K/256*110] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq3s_packed_grid` (four `i8` lanes an entry) and `signs` is IQ2_S's own packed sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
   - `iq4xs_qdot_t(a, qb, d, codebook)`: IQ4_XS's single-row matvec contraction with its fixed 16-entry codebook decode folded in, `[1, K] f32 x [N, K/256*136] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `codebook` is the flattened codebook `gather` already uses (`[1, 16]`, `crate::quant::iq4xs_flat_codebook`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
   - `q2k_qdot_t(a, qb, d, dmin)`: Q2_K's single-row matvec contraction with its static-offset decode folded in, `[1, K] f32 x [N, K/256*84] i8 -> [1, N] f32`, where `K` is a multiple of 256 and `d`/`dmin` are each `[N, K/256]` f16. `N` must be a multiple of the CTA's warp count, one warp an output column. See **Grid-decode contraction**.
   - `q3k_qdot_t(a, qb, d)`: Q3_K's single-row matvec contraction with its static-offset decode folded in, `[1, K] f32 x [N, K/256*110] i8 -> [1, N] f32`, where `K` is a multiple of 256 and `d` is `[N, K/256]` f16 (no minimum term). Same `N` requirement as `q2k_qdot_t`. See **Grid-decode contraction**.
+  - `iq1s_qdecode_t(qb, d, grid)`: IQ1_S's decode written into a dequantized weight strip rather than contracted, `[N, K/256*50] i8 -> [K, N] f32` or `[K, N] f16`, with `d` and the packed `grid` exactly as `iq1s_qdot_t` takes them. The destination's element type picks the width: f16 halves the traffic to the matmul that reads the strip, and the tensor-core ladder truncates a weight operand to f16 before the WMMA regardless, so it costs no accuracy there. Only valid as the whole right-hand side of an assignment to a tensor slice, which it writes itself; there is no value form. `K` must be a multiple of 256 and `N` a multiple of the destination's tile width. See **Grid-decode expansion**.
+  - `iq2xxs_qdecode_t(qb, d, grid, signs)`: the same for IQ2_XXS, `[N, K/256*66] i8 -> [K, N] f32`, with `d`, `grid` and `signs` exactly as `iq2xxs_qdot_t` takes them. See **Grid-decode expansion**.
+  - `iq1m_qdecode_t(qb, d, grid)`, `iq2s_qdecode_t(qb, d, grid, signs)`, `iq2xs_qdecode_t(qb, d, grid, signs)`, `iq3xxs_qdecode_t(qb, d, grid, signs)`, `iq3s_qdecode_t(qb, d, grid, signs)`: the same for the remaining formats whose lane is eight elements of a 256-element block, each taking exactly the operands its `<fmt>_qdot_t` takes and producing `[K, N] f32`. IQ3_XXS and IQ3_S read their eight elements four at a time from two grid entries, which changes nothing outside the intrinsic. Q2_K and IQ4_XS have no expansion: their lane geometry is not this one (sixteen runs of sixteen, and eight runs of thirty-two), and a dense pass spends a fifth of a percent of itself in them. See **Grid-decode expansion**.
   - `exp(t)`: element-wise `e^x` (lowers to the hardware `ex2.approx`).
   - `log(t)`: element-wise natural logarithm (lowers to the hardware `lg2.approx`, with the change of base folded in).
   - `round(t)`: element-wise nearest integer, ties to even (lowers to the hardware `cvt.rni.f32.f32`). Rounding by biasing into a positive range and truncating instead costs the low mantissa bits, which is enough to move a value across a boundary at the top of a quantization range.

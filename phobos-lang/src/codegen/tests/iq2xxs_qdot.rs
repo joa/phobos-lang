@@ -5,8 +5,8 @@ use super::*;
 const SRC: &str = "\
 @launch(256)
 kernel iq2xxs_decode(A: tensor<f32>[1, 256], QB: tensor<i8>[8, 66],
-                     D: tensor<f16>[8, 1], GRID: tensor<i32>[1, 2048],
-                     SIGNS: tensor<i32>[1, 1024], C: tensor<f32>[1, 8]) {
+                     D: tensor<f16>[8, 1], GRID: tensor<i8>[1, 2048],
+                     SIGNS: tensor<i8>[1, 1024], C: tensor<f32>[1, 8]) {
   C[0 :+ 1, 0 :+ 8] = iq2xxs_qdot_t(A[0 :+ 1, :], QB[0 :+ 8, :], D[0 :+ 8, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }";
 
@@ -36,8 +36,8 @@ fn iq2xxs_qdot_t_accepts_a_dynamic_contraction_length() {
         @autotune(TN in [8])
         @aligned(N = TN)
         kernel iq2xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                                  D: tensor<f16>[N, NB], GRID: tensor<i32>[1, 2048],
-                                  SIGNS: tensor<i32>[1, 1024], C: tensor<f32>[M, N]) {
+                                  D: tensor<f16>[N, NB], GRID: tensor<i8>[1, 2048],
+                                  SIGNS: tensor<i8>[1, 1024], C: tensor<f32>[M, N]) {
             let pn = program_id(0)
             C[0 :+ 1, pn * TN :+ TN] = iq2xxs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                                      D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
@@ -58,8 +58,11 @@ fn iq2xxs_qdot_t_rejects_a_ragged_contraction() {
 }
 
 #[test]
-fn iq2xxs_qdot_t_rejects_a_non_i32_signs_table() {
-    let src = SRC.replace("SIGNS: tensor<i32>[1, 1024]", "SIGNS: tensor<i8>[1, 1024]");
+fn iq2xxs_qdot_t_rejects_an_unpacked_signs_table() {
+    let src = SRC.replace("SIGNS: tensor<i8>[1, 1024]", "SIGNS: tensor<i32>[1, 1024]");
     let err = std::panic::catch_unwind(|| emit_mlir(&src));
-    assert!(err.is_err(), "a non-i32 signs table should be rejected");
+    assert!(
+        err.is_err(),
+        "the i32 table the fallback kernels gather against should be rejected"
+    );
 }

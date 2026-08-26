@@ -35,6 +35,8 @@ mod target;
 mod tile;
 mod util;
 
+use tile::QFormat;
+
 /// MLIR's ShapedType::kDynamic
 const DYN: i64 = i64::MIN;
 

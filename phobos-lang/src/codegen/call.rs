@@ -20,6 +20,27 @@ impl<'c> Codegen<'c> {
         Ok([a, asc, w, wsc])
     }
 
+    /// `(qb, d, tables..)` for a `<fmt>_qdecode_t` call.
+    pub(super) fn qdecode_operands(
+        &mut self,
+        block: &Block<'c>,
+        fmt: QFormat,
+        args: &[Expr],
+    ) -> Result<Vec<MemVal<'c>>> {
+        let want = 2 + fmt.tables();
+        if args.len() != want {
+            bail!("{} expects {want} tile operands", fmt.intrinsic());
+        }
+        let mut tiles = Vec::with_capacity(want);
+        for arg in args {
+            match self.emit_expr(block, arg)? {
+                Rv::Tile(t) => tiles.push(t),
+                Rv::Scalar(_) => bail!("{} expects tile operands", fmt.intrinsic()),
+            }
+        }
+        Ok(tiles)
+    }
+
     pub(super) fn emit_call(
         &mut self,
         block: &Block<'c>,
@@ -416,6 +437,13 @@ impl<'c> Codegen<'c> {
                     Rv::Scalar(v) => Ok(Rv::Scalar(self.numeric_cast(block, v, want)?)),
                 }
             }
+            // <fmt>_qdecode_t(qb, d, tables..): a raw format expanded into
+            // the [K, N] scratch a batched matmul reads. It writes the
+            // destination itself (see `Codegen::store_tile`), so it is only
+            // ever the whole right-hand side of a store.
+            other if QFormat::from_intrinsic(other).is_some() => bail!(
+                "{other} writes a tensor slice: use it as the whole right-hand side of an assignment"
+            ),
             other => bail!("unknown function '{other}'"),
         }
     }
