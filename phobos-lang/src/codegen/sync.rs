@@ -230,15 +230,4 @@ impl<'c> Codegen<'c> {
         ));
         Ok(())
     }
-
-    fn const_i32(&self, block: &Block<'c>, value: i64) -> Result<Value<'c, 'c>> {
-        self.push(
-            block,
-            arith::constant(
-                self.ctx,
-                IntegerAttribute::new(IntegerType::new(self.ctx, 32).into(), value).into(),
-                self.loc,
-            ),
-        )
-    }
 }

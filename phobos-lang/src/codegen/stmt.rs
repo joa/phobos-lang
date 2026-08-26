@@ -306,6 +306,23 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
 
+        // t = <fmt>_qdecode_t(..) writes the scratch directly, for the same
+        // reason qmma_t above does: the values are already in registers at the
+        // rows they belong in.
+        if op == AssignOp::Set
+            && let Expr::Call { callee, args } = value
+            && let Some(fmt) = QFormat::from_intrinsic(callee)
+        {
+            let tiles = self.qdecode_operands(block, fmt, args)?;
+            self.qdecode_t_into(block, fmt, &tiles[0], &tiles[1], &tiles[2..], target)?;
+
+            for t in &tiles {
+                self.release(t);
+            }
+
+            return Ok(());
+        }
+
         if let Expr::Call { callee, args } = value
             && (callee == "dot" || callee == "dot_t")
         {

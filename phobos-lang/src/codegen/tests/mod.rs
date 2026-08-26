@@ -21,6 +21,7 @@ mod narrow;
 mod pipeline;
 mod q2k_qdot;
 mod q3k_qdot;
+mod qdecode;
 mod quant;
 mod sync;
 mod tensorcore;

@@ -201,6 +201,49 @@ impl<'c> Codegen<'c> {
         )
     }
 
+    pub(super) fn const_i32(&self, block: &Block<'c>, value: i64) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            arith::constant(
+                self.ctx,
+                IntegerAttribute::new(self.i32_t, value).into(),
+                self.loc,
+            ),
+        )
+    }
+
+    pub(super) fn const_f32(&self, block: &Block<'c>, value: f64) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            arith::constant(
+                self.ctx,
+                FloatAttribute::new(self.ctx, self.f32_t, value).into(),
+                self.loc,
+            ),
+        )
+    }
+
+    /// One raw block byte of `qb`'s row `j`, zero-extended: the block fields
+    /// are unsigned where the tile language's element type is `i8`.
+    pub(super) fn qbyte(
+        &self,
+        block: &Block<'c>,
+        qb: &MemVal<'c>,
+        j: Value<'c, 'c>,
+        blk_off: Value<'c, 'c>,
+        off: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let byte_off = self.addi(block, blk_off, off)?;
+        let byte = self.push(block, memref::load(qb.mem, &[j, byte_off], self.loc))?;
+        self.push(
+            block,
+            OperationBuilder::new("arith.extui", self.loc)
+                .add_operands(&[byte])
+                .add_results(&[self.i32_t])
+                .build()?,
+        )
+    }
+
     pub(super) fn zero_scalar(&self, block: &Block<'c>, elem: Type<'c>) -> Result<Value<'c, 'c>> {
         let attr: Attribute = if self.is_float(elem) {
             FloatAttribute::new(self.ctx, elem, 0.0).into()

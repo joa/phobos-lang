@@ -1,15 +1,8 @@
-// Fused IQ1_S dot: grid-table decode folded into the contraction.
+// Fused IQ1_S dot: grid-table decode folded into the contraction. The decode
+// itself lives in `iq1s.rs`, shared with `qdecode.rs`.
 
+use super::iq1s::{IQ1S_BLOCK_BYTES, IQ1S_LANE};
 use super::*;
-
-// IQ1_S block layout (phobos-gguf/src/quant/iq1_s.rs): 50 bytes, qs at byte
-// 2, qh at byte 34, 32 lanes of 8 elements (a warp's width, so warp lane l
-// decodes format lane l directly).
-const IQ1S_BLOCK_BYTES: i64 = 50;
-const IQ1S_QS_OFF: i64 = 2;
-const IQ1S_QH_OFF: i64 = 34;
-const IQ1S_LANE: i64 = 8;
-const IQ1S_DELTA: f32 = 0.125;
 
 impl<'c> Codegen<'c> {
     /// IQ1_S's matvec contraction with the decode folded in. A warp owns one
@@ -17,7 +10,7 @@ impl<'c> Codegen<'c> {
     /// accumulator, synchronized once via a closing shuffle instead of
     /// staging every intermediate through shared memory with a barrier each.
     /// Each lane reads its own 9-bit grid index and 3-bit group scale from
-    /// the block's qs/qh bytes.
+    /// the block's qs/qh bytes, so warp lane l decodes format lane l directly.
     pub(in crate::codegen) fn tile_iq1s_qdot_t(
         &mut self,
         block: &Block<'c>,
@@ -45,8 +38,8 @@ impl<'c> Codegen<'c> {
         if d.elem != self.f16_t {
             bail!("iq1s_qdot_t's block scale must be f16");
         }
-        if grid.elem != self.i32_t {
-            bail!("iq1s_qdot_t's grid table must hold i32 lanes");
+        if grid.elem != self.i8_t {
+            bail!("iq1s_qdot_t's grid table must hold packed i8 lanes");
         }
         if self.cta_threads % WARP != 0 {
             bail!("iq1s_qdot_t needs a CTA that is a whole number of warps");
@@ -61,7 +54,7 @@ impl<'c> Codegen<'c> {
         self.check_shapes(&[cols], &[d.shape[0]], "iq1s_qdot_t d rows")?;
 
         let out = self.alloc_tile_shaped(block, self.f32_t, &[1, cols])?;
-        let (i32_t, f32_t) = (self.i32_t, self.f32_t);
+        let f32_t = self.f32_t;
 
         let warp_w = self.const_index(block, WARP)?;
         let total = self.const_index(block, cols * WARP)?;
@@ -73,22 +66,7 @@ impl<'c> Codegen<'c> {
         let j = self.divui(&body, li, warp_w)?;
         let lane = self.remui(&body, li, warp_w)?;
 
-        let four = self.const_index(&body, 4)?;
-        let three = self.const_index(&body, 3)?;
-        let two = self.const_index(&body, 2)?;
-        let one = self.const_index(&body, 1)?;
-        let ib = self.divui(&body, lane, four)?;
-        let l = self.remui(&body, lane, four)?;
-        let qs_off = self.addi(&body, self.const_index(&body, IQ1S_QS_OFF)?, lane)?;
-        let qh_lo_off = self.addi(
-            &body,
-            self.const_index(&body, IQ1S_QH_OFF)?,
-            self.muli(&body, ib, two)?,
-        )?;
-        let qh_hi_off = self.addi(&body, qh_lo_off, one)?;
-        let shift = self.muli(&body, l, three)?;
-        let shift = self.numeric_cast(&body, shift, i32_t)?;
-        let k_lane_off = self.muli(&body, lane, self.const_index(&body, IQ1S_LANE)?)?;
+        let geom = self.iq1s_lane(&body, lane)?;
 
         let step = self.const_index(&body, 256)?;
         let zero_k = self.const_index(&body, 0)?;
@@ -107,71 +85,23 @@ impl<'c> Codegen<'c> {
         let blk = self.divui(&kb, kbase, step)?;
         let blk_off = self.muli(&kb, blk, blk_bytes)?;
 
-        let load_u8 = |cg: &mut Self, at: &Block<'c>, off: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
-            let byte_off = cg.addi(at, blk_off, off)?;
-            let byte = cg.push(at, memref::load(qb.mem, &[j, byte_off], cg.loc))?;
-            cg.push(
-                at,
-                OperationBuilder::new("arith.extui", cg.loc)
-                    .add_operands(&[byte])
-                    .add_results(&[i32_t])
-                    .build()?,
-            )
-        };
-        let qs = load_u8(self, &kb, qs_off)?;
-        let qh_lo = load_u8(self, &kb, qh_lo_off)?;
-        let qh_hi = load_u8(self, &kb, qh_hi_off)?;
-        let c256 = self.const_index(&kb, 256)?;
-        let c256_i32 = self.numeric_cast(&kb, c256, i32_t)?;
-        let qh_hi_shifted = self.push(&kb, arith::muli(qh_hi, c256_i32, self.loc))?;
-        let qh = self.push(&kb, arith::addi(qh_lo, qh_hi_shifted, self.loc))?;
-
-        let c8 = self.const_index(&kb, 8)?;
-        let c8_i32 = self.numeric_cast(&kb, c8, i32_t)?;
-        let c4096 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 4096).into(), self.loc))?;
-        let c32768 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 32768).into(), self.loc))?;
-        let c2 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 2).into(), self.loc))?;
-        let c1 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 1).into(), self.loc))?;
-
-        let d_val = self.push(&kb, memref::load(d.mem, &[j, blk], self.loc))?;
-        let d_f32 = self.numeric_cast(&kb, d_val, f32_t)?;
-        let sc = self.push(&kb, arith::divui(qh, c4096, self.loc))?;
-        let sc = self.push(&kb, arith::remui(sc, c8_i32, self.loc))?;
-        let sc = self.push(&kb, arith::muli(sc, c2, self.loc))?;
-        let sc = self.push(&kb, arith::addi(sc, c1, self.loc))?;
-        let sc_f32 = self.numeric_cast(&kb, sc, f32_t)?;
-        let dl = self.push(&kb, arith::mulf(d_f32, sc_f32, self.loc))?;
-
-        let sign_bit = self.push(&kb, arith::divui(qh, c32768, self.loc))?;
-        let sign_bit = self.push(&kb, arith::remui(sign_bit, c2, self.loc))?;
-        let sign_f32 = self.numeric_cast(&kb, sign_bit, f32_t)?;
-        let delta_c = self.push(&kb, arith::constant(self.ctx, FloatAttribute::new(self.ctx, f32_t, f64::from(IQ1S_DELTA)).into(), self.loc))?;
-        let twice_delta_c = self.push(&kb, arith::constant(self.ctx, FloatAttribute::new(self.ctx, f32_t, f64::from(2.0 * IQ1S_DELTA)).into(), self.loc))?;
-        let sign_term = self.push(&kb, arith::mulf(twice_delta_c, sign_f32, self.loc))?;
-        let delta = self.push(&kb, arith::subf(delta_c, sign_term, self.loc))?;
-
-        let shift_div = self.push(&kb, arith::shrui(qh, shift, self.loc))?;
-        let shift_div = self.push(&kb, arith::remui(shift_div, c8_i32, self.loc))?;
-        let shift_term = self.push(&kb, arith::muli(shift_div, c256_i32, self.loc))?;
-        let base_idx = self.push(&kb, arith::addi(qs, shift_term, self.loc))?;
-        let base_idx = self.numeric_cast(&kb, base_idx, self.index_t)?;
-        let base_idx8 = self.push(&kb, arith::muli(base_idx, c8, self.loc))?;
+        let at = BlockAt { j, blk, off: blk_off };
+        let dec = self.iq1s_block(&kb, &geom, qb, d, grid, &at)?;
 
         let mut partial = carry;
-        let k_off = self.addi(&kb, kbase, k_lane_off)?;
-        for y in 0..IQ1S_LANE {
-            let yc = self.const_index(&kb, y)?;
-            let grid_at = self.addi(&kb, base_idx8, yc)?;
-            let zero = self.const_index(&kb, 0)?;
-            let grid_val = self.push(&kb, memref::load(grid.mem, &[zero, grid_at], self.loc))?;
-            let grid_f32 = self.numeric_cast(&kb, grid_val, f32_t)?;
-            let plus_delta = self.push(&kb, arith::addf(grid_f32, delta, self.loc))?;
-            let decoded = self.push(&kb, arith::mulf(dl, plus_delta, self.loc))?;
-            let a_at = self.addi(&kb, k_off, yc)?;
-            let zero_row = self.const_index(&kb, 0)?;
-            let a_val = self.push(&kb, memref::load(a.mem, &[zero_row, a_at], self.loc))?;
-            let prod = self.push(&kb, arith::mulf(decoded, a_val, self.loc))?;
-            partial = self.push(&kb, arith::addf(partial, prod, self.loc))?;
+        let k_off = self.addi(&kb, kbase, geom.k_lane_off)?;
+        let zero_row = self.const_index(&kb, 0)?;
+        let a_t = Type::vector(&[ACT_VEC as u64], f32_t);
+        for g in 0..IQ1S_LANE / ACT_VEC {
+            let goff = self.const_index(&kb, g * ACT_VEC)?;
+            let a_at = self.addi(&kb, k_off, goff)?;
+            let a_v = self.vec_load(&kb, a.mem, &[zero_row, a_at], a_t)?;
+            for i in 0..ACT_VEC {
+                let decoded = self.iq1s_decoded(&kb, &dec, g * ACT_VEC + i)?;
+                let a_val = self.vec_extract(&kb, a_v, &[i], f32_t)?;
+                let prod = self.push(&kb, arith::mulf(decoded, a_val, self.loc))?;
+                partial = self.push(&kb, arith::addf(partial, prod, self.loc))?;
+            }
         }
         kb.append_operation(scf::r#yield(&[partial], self.loc));
 

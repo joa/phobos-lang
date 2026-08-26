@@ -7,7 +7,7 @@ const SRC: &str = "\
 @autotune(TN in [8])
 @aligned(N = TN)
 kernel iq1m_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                        D: tensor<f16>[N, NB], GRID: tensor<i32>[1, 16384],
+                        D: tensor<f16>[N, NB], GRID: tensor<i8>[1, 16384],
                         C: tensor<f32>[M, N]) {
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq1m_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
@@ -46,7 +46,7 @@ fn iq1m_qdot_t_reads_a_dynamic_contraction_length_at_runtime() {
 fn iq1m_qdot_t_rejects_a_ragged_contraction() {
     let src = "@launch(256)
         kernel iq1m_decode(A: tensor<f32>[1, 128], QB: tensor<i8>[8, 28],
-                           D: tensor<f16>[8, 1], GRID: tensor<i32>[1, 16384],
+                           D: tensor<f16>[8, 1], GRID: tensor<i8>[1, 16384],
                            C: tensor<f32>[1, 8]) {
             C[0 :+ 1, 0 :+ 8] = iq1m_qdot_t(A[0 :+ 1, :], QB[0 :+ 8, :], D[0 :+ 8, :], GRID[0 :+ 1, :])
         }";

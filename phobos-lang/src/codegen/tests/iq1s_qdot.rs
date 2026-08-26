@@ -5,7 +5,7 @@ use super::*;
 const SRC: &str = "\
 @launch(256)
 kernel iq1s_decode(A: tensor<f32>[1, 256], QB: tensor<i8>[8, 50],
-                   D: tensor<f16>[8, 1], GRID: tensor<i32>[1, 16384],
+                   D: tensor<f16>[8, 1], GRID: tensor<i8>[1, 16384],
                    C: tensor<f32>[1, 8]) {
   C[0 :+ 1, 0 :+ 8] = iq1s_qdot_t(A[0 :+ 1, :], QB[0 :+ 8, :], D[0 :+ 8, :], GRID[0 :+ 1, :])
 }";
@@ -38,8 +38,8 @@ fn iq1s_qdot_t_rejects_a_ragged_contraction() {
 }
 
 #[test]
-fn iq1s_qdot_t_rejects_a_non_i32_grid() {
-    let src = SRC.replace("GRID: tensor<i32>[1, 16384]", "GRID: tensor<i8>[1, 16384]");
+fn iq1s_qdot_t_rejects_an_unpacked_grid() {
+    let src = SRC.replace("GRID: tensor<i8>[1, 16384]", "GRID: tensor<i32>[1, 16384]");
     let err = std::panic::catch_unwind(|| emit_mlir(&src));
-    assert!(err.is_err(), "a non-i32 grid table should be rejected");
+    assert!(err.is_err(), "the i32 table the fallback kernels gather against should be rejected");
 }

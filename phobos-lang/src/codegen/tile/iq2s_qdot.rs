@@ -1,17 +1,8 @@
 // Fused IQ2_S dot: two grid-table lookups a lane, folded into the
-// contraction. Sign table is keyed by the raw byte, so unlike IQ2_XXS there
-// is no l == 0 branch to fold away.
+// contraction. The decode itself lives in `iq2s.rs`, shared with `qdecode.rs`.
 
+use super::iq2s::{IQ2S_BLOCK_BYTES, IQ2S_LANE};
 use super::*;
-
-// IQ2_S block layout (phobos-gguf/src/quant/iq2_s.rs): 82 bytes, qs at byte
-// 2, signs at byte 34, qh at byte 66, scales at byte 74.
-const IQ2S_BLOCK_BYTES: i64 = 82;
-const IQ2S_QS_OFF: i64 = 2;
-const IQ2S_SIGNS_OFF: i64 = 34;
-const IQ2S_QH_OFF: i64 = 66;
-const IQ2S_SCALES_OFF: i64 = 74;
-const IQ2S_LANE: i64 = 8;
 
 impl<'c> Codegen<'c> {
     /// IQ2_S's matvec contraction with its magnitude-grid and sign-table
@@ -45,8 +36,8 @@ impl<'c> Codegen<'c> {
         if d.elem != self.f16_t {
             bail!("iq2s_qdot_t's block scale must be f16");
         }
-        if grid.elem != self.i32_t || signs.elem != self.i32_t {
-            bail!("iq2s_qdot_t's grid and sign tables must hold i32 lanes");
+        if grid.elem != self.i8_t || signs.elem != self.i8_t {
+            bail!("iq2s_qdot_t's grid and sign tables must hold packed i8 lanes");
         }
         if self.cta_threads % WARP != 0 {
             bail!("iq2s_qdot_t needs a CTA that is a whole number of warps");
@@ -61,7 +52,7 @@ impl<'c> Codegen<'c> {
         self.check_shapes(&[cols], &[d.shape[0]], "iq2s_qdot_t d rows")?;
 
         let out = self.alloc_tile_shaped(block, self.f32_t, &[1, cols])?;
-        let (i32_t, f32_t) = (self.i32_t, self.f32_t);
+        let f32_t = self.f32_t;
 
         let warp_w = self.const_index(block, WARP)?;
         let total = self.const_index(block, cols * WARP)?;
@@ -73,30 +64,7 @@ impl<'c> Codegen<'c> {
         let j = self.divui(&body, li, warp_w)?;
         let lane = self.remui(&body, li, warp_w)?;
 
-        let four = self.const_index(&body, 4)?;
-        let two_idx = self.const_index(&body, 2)?;
-        let ib32 = self.divui(&body, lane, four)?;
-        let l = self.remui(&body, lane, four)?;
-
-        let grid_off = self.addi(&body, self.const_index(&body, IQ2S_QS_OFF)?, lane)?;
-        let sign_off = self.addi(&body, self.const_index(&body, IQ2S_SIGNS_OFF)?, lane)?;
-        let qh_off = self.addi(&body, self.const_index(&body, IQ2S_QH_OFF)?, ib32)?;
-        let scale_off = self.addi(&body, self.const_index(&body, IQ2S_SCALES_OFF)?, ib32)?;
-
-        // qh_div = 1 << (2 * l): 4^l.
-        let l_i32 = self.numeric_cast(&body, l, i32_t)?;
-        let two_i32 = self.push(&body, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 2).into(), self.loc))?;
-        let qh_shift = self.push(&body, arith::muli(l_i32, two_i32, self.loc))?;
-        let one_i32 = self.push(&body, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 1).into(), self.loc))?;
-        let qh_div = self.push(&body, arith::shli(one_i32, qh_shift, self.loc))?;
-
-        // The scale nibble: lane % 4 < 2 takes the low nibble, else the high.
-        let l_lt_2 = self.push(
-            &body,
-            arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, l, two_idx, self.loc),
-        )?;
-
-        let k_lane_off = self.muli(&body, lane, self.const_index(&body, IQ2S_LANE)?)?;
+        let geom = self.iq2s_lane(&body, lane)?;
 
         let step = self.const_index(&body, 256)?;
         let zero_k = self.const_index(&body, 0)?;
@@ -115,64 +83,23 @@ impl<'c> Codegen<'c> {
         let blk = self.divui(&kb, kbase, step)?;
         let blk_off = self.muli(&kb, blk, blk_bytes)?;
 
-        let load_u8 = |cg: &mut Self, at: &Block<'c>, off: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
-            let byte_off = cg.addi(at, blk_off, off)?;
-            let byte = cg.push(at, memref::load(qb.mem, &[j, byte_off], cg.loc))?;
-            cg.push(
-                at,
-                OperationBuilder::new("arith.extui", cg.loc)
-                    .add_operands(&[byte])
-                    .add_results(&[i32_t])
-                    .build()?,
-            )
-        };
-        let grid_byte = load_u8(self, &kb, grid_off)?;
-        let sign_byte = load_u8(self, &kb, sign_off)?;
-        let qh_byte = load_u8(self, &kb, qh_off)?;
-        let scale_byte = load_u8(self, &kb, scale_off)?;
-
-        let c16 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 16).into(), self.loc))?;
-        let lo_nibble = self.push(&kb, arith::remui(scale_byte, c16, self.loc))?;
-        let hi_nibble = self.push(&kb, arith::divui(scale_byte, c16, self.loc))?;
-        let nibble = self.push(&kb, arith::select(l_lt_2, lo_nibble, hi_nibble, self.loc))?;
-        let nibble_f32 = self.numeric_cast(&kb, nibble, f32_t)?;
-        let half = self.push(&kb, arith::constant(self.ctx, FloatAttribute::new(self.ctx, f32_t, 0.5).into(), self.loc))?;
-        let quarter = self.push(&kb, arith::constant(self.ctx, FloatAttribute::new(self.ctx, f32_t, 0.25).into(), self.loc))?;
-        let d_val = self.push(&kb, memref::load(d.mem, &[j, blk], self.loc))?;
-        let d_f32 = self.numeric_cast(&kb, d_val, f32_t)?;
-        let sc = self.push(&kb, arith::addf(half, nibble_f32, self.loc))?;
-        let sc = self.push(&kb, arith::mulf(sc, quarter, self.loc))?;
-        let dl = self.push(&kb, arith::mulf(d_f32, sc, self.loc))?;
-
-        let c4 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 4).into(), self.loc))?;
-        let c256 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 256).into(), self.loc))?;
-        let qh_bits = self.push(&kb, arith::divui(qh_byte, qh_div, self.loc))?;
-        let qh_bits = self.push(&kb, arith::remui(qh_bits, c4, self.loc))?;
-        let qh_bits = self.push(&kb, arith::muli(qh_bits, c256, self.loc))?;
-        let grid_idx = self.push(&kb, arith::addi(grid_byte, qh_bits, self.loc))?;
-        let grid_idx = self.numeric_cast(&kb, grid_idx, self.index_t)?;
-        let eight_idx = self.const_index(&kb, 8)?;
-        let grid_idx8 = self.push(&kb, arith::muli(grid_idx, eight_idx, self.loc))?;
-        let sign_idx = self.numeric_cast(&kb, sign_byte, self.index_t)?;
-        let sign_idx8 = self.push(&kb, arith::muli(sign_idx, eight_idx, self.loc))?;
+        let at = BlockAt { j, blk, off: blk_off };
+        let dec = self.iq2s_block(&kb, &geom, qb, d, &QTables { grid, signs }, &at)?;
 
         let mut partial = carry;
-        let k_off = self.addi(&kb, kbase, k_lane_off)?;
+        let k_off = self.addi(&kb, kbase, geom.k_lane_off)?;
         let zero_idx_kb = self.const_index(&kb, 0)?;
-        for y in 0..IQ2S_LANE {
-            let yc = self.const_index(&kb, y)?;
-            let mag_at = self.addi(&kb, grid_idx8, yc)?;
-            let sign_at = self.addi(&kb, sign_idx8, yc)?;
-            let mag_val = self.push(&kb, memref::load(grid.mem, &[zero_idx_kb, mag_at], self.loc))?;
-            let sign_val = self.push(&kb, memref::load(signs.mem, &[zero_idx_kb, sign_at], self.loc))?;
-            let mag_f32 = self.numeric_cast(&kb, mag_val, f32_t)?;
-            let sign_f32 = self.numeric_cast(&kb, sign_val, f32_t)?;
-            let decoded = self.push(&kb, arith::mulf(dl, mag_f32, self.loc))?;
-            let decoded = self.push(&kb, arith::mulf(decoded, sign_f32, self.loc))?;
-            let a_at = self.addi(&kb, k_off, yc)?;
-            let a_val = self.push(&kb, memref::load(a.mem, &[zero_idx_kb, a_at], self.loc))?;
-            let prod = self.push(&kb, arith::mulf(decoded, a_val, self.loc))?;
-            partial = self.push(&kb, arith::addf(partial, prod, self.loc))?;
+        let a_t = Type::vector(&[ACT_VEC as u64], f32_t);
+        for g in 0..IQ2S_LANE / ACT_VEC {
+            let goff = self.const_index(&kb, g * ACT_VEC)?;
+            let a_at = self.addi(&kb, k_off, goff)?;
+            let a_v = self.vec_load(&kb, a.mem, &[zero_idx_kb, a_at], a_t)?;
+            for i in 0..ACT_VEC {
+                let decoded = self.iq2s_decoded(&kb, &dec, g * ACT_VEC + i)?;
+                let a_val = self.vec_extract(&kb, a_v, &[i], f32_t)?;
+                let prod = self.push(&kb, arith::mulf(decoded, a_val, self.loc))?;
+                partial = self.push(&kb, arith::addf(partial, prod, self.loc))?;
+            }
         }
         kb.append_operation(scf::r#yield(&[partial], self.loc));
 
