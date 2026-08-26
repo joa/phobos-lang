@@ -46,6 +46,18 @@ pub(crate) fn flat_grid() -> Vec<i32> {
         .collect()
 }
 
+/// [`IQ1S_GRID`] as raw signed bytes, the layout `iq1s_qdot_t` reads:
+/// `packed_grid()[i * 8 + j]` is byte `j` of `IQ1S_GRID[i]`, the same value
+/// [`flat_grid`] widens to `i32`. A lane's eight entries are eight contiguous
+/// bytes here, so it takes one 64-bit load instead of eight 32-bit ones, and
+/// the whole table is 16 KB rather than 64.
+pub(crate) fn packed_grid() -> Vec<i8> {
+    IQ1S_GRID
+        .iter()
+        .flat_map(|entry| entry.to_le_bytes().map(|b| b as i8))
+        .collect()
+}
+
 fn dequantize(bytes: &[u8], out: &mut [f32]) {
     for (block, dst) in bytes.chunks_exact(BLOCK_BYTES).zip(out.chunks_mut(BLOCK)) {
         let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));

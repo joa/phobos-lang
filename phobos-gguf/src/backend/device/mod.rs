@@ -167,6 +167,10 @@ pub struct DeviceBackend {
     /// TC_TILE_M`; the plain `matmul` above finishes whatever doesn't fit a
     /// whole 64x64 tile.
     matmul_tc: Module,
+    /// The same ladder over an f16 weight, which is what a `_qdecode` strip
+    /// is. See `kernels/matmul.rs`'s `matmul_f16w_src`.
+    matmul_f16w: Variants,
+    matmul_tc_f16w: Module,
     matvec: Variants,
     q8_dp4a: Variants,
     q8_mma: Variants,
@@ -363,6 +367,25 @@ pub struct DeviceBackend {
     iq3xxs_dequant: Module,
     iq3s_dequant: Module,
     iq4xs_dequant: Module,
+    /// The warp-collective form of the `_dequant` kernels above: one
+    /// `*_qdecode_t` call, nothing staged, no barrier. Needs a strip that is a
+    /// whole number of its own `TN`.
+    iq1s_qdecode: Module,
+    iq2xxs_qdecode: Module,
+    iq1m_qdecode: Module,
+    iq2s_qdecode: Module,
+    iq2xs_qdecode: Module,
+    iq3xxs_qdecode: Module,
+    iq3s_qdecode: Module,
+    /// The same seven writing an f16 strip, launched only where the matmul
+    /// reading it is entirely tensor-core. See `project_raw_dense`.
+    iq1s_qdecode_f16: Module,
+    iq2xxs_qdecode_f16: Module,
+    iq1m_qdecode_f16: Module,
+    iq2s_qdecode_f16: Module,
+    iq2xs_qdecode_f16: Module,
+    iq3xxs_qdecode_f16: Module,
+    iq3s_qdecode_f16: Module,
     /// Q2_K's own dequant, same purpose as the block above. Q3_K has none:
     /// it is the LM head, run only at `m == 1`, so it never takes
     /// `project_raw_dense`'s batched path.
@@ -393,6 +416,17 @@ pub struct DeviceBackend {
     /// ([`crate::quant::iq4xs_flat_codebook`]); needs no per-lane unpacking,
     /// and its `gather` covers a whole run rather than a lane.
     iq4xs_codebook: DeviceBuffer<i32>,
+    /// The same tables at one `i8` a slot, which every `*_qdot_t`/`*_qdecode_t`
+    /// reads: a lane's entry is then one vector load, and the table a quarter
+    /// the size. The i32 copies stay for the `gather`-based fallbacks.
+    iq1s_grid_packed: DeviceBuffer<i8>,
+    iq2xxs_grid_packed: DeviceBuffer<i8>,
+    iq2xxs_signs_packed: DeviceBuffer<i8>,
+    iq2s_grid_packed: DeviceBuffer<i8>,
+    iq2s_signs_packed: DeviceBuffer<i8>,
+    iq2xs_grid_packed: DeviceBuffer<i8>,
+    iq3xxs_grid_packed: DeviceBuffer<i8>,
+    iq3s_grid_packed: DeviceBuffer<i8>,
     /// `[0, 1, .., 7]`: the row offsets a grid-coded raw kernel's batched
     /// `gather` broadcasts against, so one call reads a whole eight-wide lane.
     iota8: DeviceBuffer<i32>,
@@ -433,6 +467,18 @@ impl DeviceBackend {
         )?;
         let matmul_tc = compile(
             MATMUL_TC_SRC,
+            &[("TILE_M", TC_TILE_M), ("TILE_N", TC_TILE_N), ("TILE_K", TC_TILE_K)],
+            "matmul_tc",
+        )?;
+        let matmul_f16w_body = matmul_f16w_src();
+        let matmul_f16w = Variants::compile(
+            &matmul_f16w_body,
+            &[("TILE_M", TILE_M), ("TILE_N", TILE_N), ("TILE_K", TILE_K)],
+            "matmul",
+            ("@aligned(M = TILE_M, N = TILE_N)", ""),
+        )?;
+        let matmul_tc_f16w = compile(
+            &matmul_tc_f16w_src(),
             &[("TILE_M", TC_TILE_M), ("TILE_N", TC_TILE_N), ("TILE_K", TC_TILE_K)],
             "matmul_tc",
         )?;
@@ -502,6 +548,24 @@ impl DeviceBackend {
         let iq3s_dequant_body = iq3s_dequant_src(IQ3S_TN);
         let iq4xs_dequant_body = iq4xs_dequant_src(IQ4XS_TN);
         let q2k_dequant_body = q2k_dequant_src(Q2K_TN);
+        let iq1s_qdecode_body = iq1s_qdecode_src(IQ1S_TN);
+        let iq2xxs_qdecode_body = iq2xxs_qdecode_src(IQ2XXS_TN);
+        let iq1m_qdecode_body = iq1m_qdecode_src(IQ1M_TN);
+        let iq2s_qdecode_body = iq2s_qdecode_src(IQ2S_TN);
+        let iq2xs_qdecode_body = iq2xs_qdecode_src(IQ2XS_TN);
+        let iq3xxs_qdecode_body = iq3xxs_qdecode_src(IQ3XXS_TN);
+        let iq3s_qdecode_body = iq3s_qdecode_src(IQ3S_TN);
+        // The f16 strip is the same kernel with a narrower destination.
+        let f16_scratch = |src: &str| {
+            src.replace("SCRATCH: tensor<f32>[K, N]", "SCRATCH: tensor<f16>[K, N]")
+        };
+        let iq1s_qdecode_f16_body = f16_scratch(&iq1s_qdecode_body);
+        let iq2xxs_qdecode_f16_body = f16_scratch(&iq2xxs_qdecode_body);
+        let iq1m_qdecode_f16_body = f16_scratch(&iq1m_qdecode_body);
+        let iq2s_qdecode_f16_body = f16_scratch(&iq2s_qdecode_body);
+        let iq2xs_qdecode_f16_body = f16_scratch(&iq2xs_qdecode_body);
+        let iq3xxs_qdecode_f16_body = f16_scratch(&iq3xxs_qdecode_body);
+        let iq3s_qdecode_f16_body = f16_scratch(&iq3s_qdecode_body);
         let iq1s_qdot_body = iq1s_qdot_matvec_src(IQ1S_TN);
         let iq2xxs_qdot_body = iq2xxs_qdot_matvec_src(IQ2XXS_TN);
         let iq1m_qdot_body = iq1m_qdot_matvec_src(IQ1M_TN);
@@ -532,6 +596,20 @@ impl DeviceBackend {
             (iq3s_dequant_body.as_str(), &[("TN", IQ3S_TN)], "iq3s_dequant"),
             (iq4xs_dequant_body.as_str(), &[("TN", IQ4XS_TN)], "iq4xs_dequant"),
             (q2k_dequant_body.as_str(), &[("TN", Q2K_TN)], "q2k_dequant"),
+            (iq1s_qdecode_body.as_str(), &[("TN", IQ1S_TN)], "iq1s_qdecode"),
+            (iq2xxs_qdecode_body.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_qdecode"),
+            (iq1m_qdecode_body.as_str(), &[("TN", IQ1M_TN)], "iq1m_qdecode"),
+            (iq2s_qdecode_body.as_str(), &[("TN", IQ2S_TN)], "iq2s_qdecode"),
+            (iq2xs_qdecode_body.as_str(), &[("TN", IQ2XS_TN)], "iq2xs_qdecode"),
+            (iq3xxs_qdecode_body.as_str(), &[("TN", IQ3XXS_TN)], "iq3xxs_qdecode"),
+            (iq3s_qdecode_body.as_str(), &[("TN", IQ3S_TN)], "iq3s_qdecode"),
+            (iq1s_qdecode_f16_body.as_str(), &[("TN", IQ1S_TN)], "iq1s_qdecode"),
+            (iq2xxs_qdecode_f16_body.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_qdecode"),
+            (iq1m_qdecode_f16_body.as_str(), &[("TN", IQ1M_TN)], "iq1m_qdecode"),
+            (iq2s_qdecode_f16_body.as_str(), &[("TN", IQ2S_TN)], "iq2s_qdecode"),
+            (iq2xs_qdecode_f16_body.as_str(), &[("TN", IQ2XS_TN)], "iq2xs_qdecode"),
+            (iq3xxs_qdecode_f16_body.as_str(), &[("TN", IQ3XXS_TN)], "iq3xxs_qdecode"),
+            (iq3s_qdecode_f16_body.as_str(), &[("TN", IQ3S_TN)], "iq3s_qdecode"),
             (iq1s_qdot_body.as_str(), &[("TN", IQ1S_TN)], "iq1s_qdot_matvec"),
             (iq2xxs_qdot_body.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_qdot_matvec"),
             (iq1m_qdot_body.as_str(), &[("TN", IQ1M_TN)], "iq1m_qdot_matvec"),
@@ -562,6 +640,20 @@ impl DeviceBackend {
         let iq3s_dequant = raw_matvecs.remove(0);
         let iq4xs_dequant = raw_matvecs.remove(0);
         let q2k_dequant = raw_matvecs.remove(0);
+        let iq1s_qdecode = raw_matvecs.remove(0);
+        let iq2xxs_qdecode = raw_matvecs.remove(0);
+        let iq1m_qdecode = raw_matvecs.remove(0);
+        let iq2s_qdecode = raw_matvecs.remove(0);
+        let iq2xs_qdecode = raw_matvecs.remove(0);
+        let iq3xxs_qdecode = raw_matvecs.remove(0);
+        let iq3s_qdecode = raw_matvecs.remove(0);
+        let iq1s_qdecode_f16 = raw_matvecs.remove(0);
+        let iq2xxs_qdecode_f16 = raw_matvecs.remove(0);
+        let iq1m_qdecode_f16 = raw_matvecs.remove(0);
+        let iq2s_qdecode_f16 = raw_matvecs.remove(0);
+        let iq2xs_qdecode_f16 = raw_matvecs.remove(0);
+        let iq3xxs_qdecode_f16 = raw_matvecs.remove(0);
+        let iq3s_qdecode_f16 = raw_matvecs.remove(0);
         let iq1s_qdot_matvec = raw_matvecs.remove(0);
         let iq2xxs_qdot_matvec = raw_matvecs.remove(0);
         let iq1m_qdot_matvec = raw_matvecs.remove(0);
@@ -581,6 +673,14 @@ impl DeviceBackend {
         let iq3xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq3xxs_flat_grid())?;
         let iq3s_grid = DeviceBuffer::from_slice(&crate::quant::iq3s_flat_grid())?;
         let iq4xs_codebook = DeviceBuffer::from_slice(&crate::quant::iq4xs_flat_codebook())?;
+        let iq1s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq1s_packed_grid())?;
+        let iq2xxs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2xxs_packed_grid())?;
+        let iq2xxs_signs_packed = DeviceBuffer::from_slice(&crate::quant::iq2xxs_packed_signs())?;
+        let iq2s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2s_packed_grid())?;
+        let iq2s_signs_packed = DeviceBuffer::from_slice(&crate::quant::iq2s_packed_signs())?;
+        let iq2xs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq2xs_packed_grid())?;
+        let iq3xxs_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq3xxs_packed_grid())?;
+        let iq3s_grid_packed = DeviceBuffer::from_slice(&crate::quant::iq3s_packed_grid())?;
         let iota: Vec<i32> = (0..8).collect();
         let iota8 = DeviceBuffer::from_slice(&iota)?;
 
@@ -588,6 +688,8 @@ impl DeviceBackend {
             stream,
             matmul,
             matmul_tc,
+            matmul_f16w,
+            matmul_tc_f16w,
             matvec,
             q8_dp4a,
             q8_mma,
@@ -683,6 +785,20 @@ impl DeviceBackend {
             iq3s_matvec,
             iq4xs_matvec,
             iq1s_dequant,
+            iq1s_qdecode,
+            iq2xxs_qdecode,
+            iq1m_qdecode,
+            iq2s_qdecode,
+            iq2xs_qdecode,
+            iq3xxs_qdecode,
+            iq3s_qdecode,
+            iq1s_qdecode_f16,
+            iq2xxs_qdecode_f16,
+            iq1m_qdecode_f16,
+            iq2s_qdecode_f16,
+            iq2xs_qdecode_f16,
+            iq3xxs_qdecode_f16,
+            iq3s_qdecode_f16,
             iq2xxs_dequant,
             iq1m_dequant,
             iq2s_dequant,
@@ -710,6 +826,14 @@ impl DeviceBackend {
             iq3xxs_grid,
             iq3s_grid,
             iq4xs_codebook,
+            iq1s_grid_packed,
+            iq2xxs_grid_packed,
+            iq2xxs_signs_packed,
+            iq2s_grid_packed,
+            iq2s_signs_packed,
+            iq2xs_grid_packed,
+            iq3xxs_grid_packed,
+            iq3s_grid_packed,
             iota8,
             act_scratch: RefCell::new(Vec::new()),
             act_next: Cell::new(0),

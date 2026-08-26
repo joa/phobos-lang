@@ -104,8 +104,8 @@ pub(crate) fn iq2s_qdot_matvec_src(tn: usize) -> String {
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq2s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                        D: tensor<f16>[N, NB], GRID: tensor<i32>[1, {IQ2S_GRID_LEN}],
-                        SIGNS: tensor<i32>[1, {IQ2S_SIGNS_LEN}], C: tensor<f32>[M, N]) {{
+                        D: tensor<f16>[N, NB], GRID: tensor<i8>[1, {IQ2S_GRID_LEN}],
+                        SIGNS: tensor<i8>[1, {IQ2S_SIGNS_LEN}], C: tensor<f32>[M, N]) {{
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq2s_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                          D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
@@ -141,6 +141,27 @@ kernel iq2s_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]
     let d = D[pn * TN :+ TN, kb :+ 1]
 {body}  }}
+}}
+"
+    )
+}
+
+/// [`iq2s_dequant_src`]'s decode as a single `iq2s_qdecode_t` call; see
+/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ2_S.
+pub(crate) fn iq2s_qdecode_src(tn: usize) -> String {
+    format!(
+        "@launch(256)
+@autotune(TN in [{tn}])
+@aligned(N = TN)
+kernel iq2s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                    GRID: tensor<i8>[1, {IQ2S_GRID_LEN}],
+                    SIGNS: tensor<i8>[1, {IQ2S_SIGNS_LEN}],
+                    SCRATCH: tensor<f32>[K, N]) {{
+  let pn = program_id(0)
+  SCRATCH[:, pn * TN :+ TN] = iq2s_qdecode_t(QB[pn * TN :+ TN, :],
+                                             D[pn * TN :+ TN, :],
+                                             GRID[0 :+ 1, :],
+                                             SIGNS[0 :+ 1, :])
 }}
 "
     )

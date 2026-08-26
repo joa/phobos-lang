@@ -98,7 +98,7 @@ pub(crate) fn iq1s_qdot_matvec_src(tn: usize) -> String {
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq1s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                        D: tensor<f16>[N, NB], GRID: tensor<i32>[1, {IQ1S_GRID_LEN}],
+                        D: tensor<f16>[N, NB], GRID: tensor<i8>[1, {IQ1S_GRID_LEN}],
                         C: tensor<f32>[M, N]) {{
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
@@ -134,6 +134,27 @@ kernel iq1s_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]
     let d = D[pn * TN :+ TN, kb :+ 1]
 {body}  }}
+}}
+"
+    )
+}
+
+/// [`iq1s_dequant_src`]'s decode as a single `iq1s_qdecode_t` call: nothing
+/// staged in shared memory, no barrier, and a thread's eight decoded weights
+/// written straight to the rows they belong in. `@aligned(N = TN)` is required
+/// for the reason [`iq1s_qdot_matvec_src`] needs it, and
+/// [`crate::backend::device::DeviceBackend::project_raw_dense`] keeps
+/// [`iq1s_dequant_src`] for a strip that is not a whole number of `TN`.
+pub(crate) fn iq1s_qdecode_src(tn: usize) -> String {
+    format!(
+        "@launch(256)
+@autotune(TN in [{tn}])
+@aligned(N = TN)
+kernel iq1s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                    GRID: tensor<i8>[1, {IQ1S_GRID_LEN}], SCRATCH: tensor<f32>[K, N]) {{
+  let pn = program_id(0)
+  SCRATCH[:, pn * TN :+ TN] = iq1s_qdecode_t(QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                             GRID[0 :+ 1, :])
 }}
 "
     )

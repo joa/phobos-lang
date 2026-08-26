@@ -43,6 +43,15 @@ pub(crate) fn flat_grid() -> Vec<i32> {
         .collect()
 }
 
+/// [`flat_grid`]'s values as raw bytes; see `iq2_xxs.rs`'s `packed_grid`.
+/// The sign table is IQ2_XXS's own, packed there.
+pub(crate) fn packed_grid() -> Vec<i8> {
+    IQ2XS_GRID
+        .iter()
+        .flat_map(|entry| entry.to_le_bytes().map(|b| b as i8))
+        .collect()
+}
+
 fn dequantize(bytes: &[u8], out: &mut [f32]) {
     for (block, dst) in bytes.chunks_exact(BLOCK_BYTES).zip(out.chunks_mut(BLOCK)) {
         let d = f16_to_f32(u16::from_le_bytes([block[0], block[1]]));
