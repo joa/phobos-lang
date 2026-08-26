@@ -1,0 +1,333 @@
+{
+  "meta": {
+    "card": "NVIDIA GeForce RTX 2080 SUPER",
+    "driver": "610.88",
+    "clock_max": "2145",
+    "commit": "6447ae1"
+  },
+  "args": {
+    "models": "['Qwen3.8-27B-UD-IQ1_M']",
+    "prompt_tokens": "[128, 512]",
+    "gen_tokens": "[32, 128]",
+    "reps": "1",
+    "rounds": "3",
+    "llama_bench": "['llama-bench.exe']",
+    "cuda_lib": "[]",
+    "llama_args": "",
+    "no_llama": "False",
+    "no_build": "False",
+    "warm_secs": "45.0",
+    "max_idle_util": "45.0",
+    "max_idle_power": "120.0",
+    "poll": "0.5",
+    "force": "False",
+    "csv": "results/bench-qwen38.csv",
+    "json": "results/bench-qwen38.json"
+  },
+  "backends": {
+    "phobos": "CUDA",
+    "llama.cpp CUDA": "CUDA"
+  },
+  "labels": {
+    "llama.cpp CUDA/Qwen3.8-27B-UD-IQ1_M": "qwen35 27B IQ1_M - 1.75 bpw",
+    "phobos/Qwen3.8-27B-UD-IQ1_M": "qwen35 26.9B Q2_K"
+  },
+  "summary": {
+    "median_clock": 2038.9926118210863,
+    "uncontended_rounds": [
+      1,
+      2,
+      3
+    ],
+    "rounds": [
+      1,
+      2,
+      3
+    ],
+    "drift": {
+      "1": -0.014476539894446736,
+      "2": 0.3685367251786196,
+      "3": -0.003699454236905972
+    }
+  },
+  "health": {
+    "1": {
+      "util": 4.0,
+      "power": 21.035
+    },
+    "2": {
+      "util": 1.0,
+      "power": 38.86
+    },
+    "3": {
+      "util": 3.0,
+      "power": 20.865000000000002
+    }
+  },
+  "samples": [
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 2.23577,
+      "clock": 2044.0557939914163
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 9.01688,
+      "clock": 2044.0557939914163
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 21.7623,
+      "clock": 2044.0557939914163
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg32",
+      "rep": 0,
+      "rate": 21.4615,
+      "clock": 2044.0557939914163
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 64.90872210953347,
+      "clock": 2038.6102236421725
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 3.715098392058977,
+      "clock": 2038.6102236421725
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 2.3987106930025113,
+      "clock": 2038.6102236421725
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg32",
+      "rep": 0,
+      "rate": 2.39880059970015,
+      "clock": 2038.6102236421725
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 71.9910011248594,
+      "clock": 2037.4759615384614
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 3.716581615987108,
+      "clock": 2037.4759615384614
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 2.3893970505880158,
+      "clock": 2037.4759615384614
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg32",
+      "rep": 0,
+      "rate": 2.434756143954957,
+      "clock": 2037.4759615384614
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 8.83072,
+      "clock": 2039.375
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 9.07836,
+      "clock": 2039.375
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 21.7578,
+      "clock": 2039.375
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg32",
+      "rep": 0,
+      "rate": 21.4218,
+      "clock": 2039.375
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 2.2346,
+      "clock": 2041.7688679245282
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 9.22094,
+      "clock": 2041.7688679245282
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 21.7578,
+      "clock": 2041.7688679245282
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg32",
+      "rep": 0,
+      "rate": 21.495,
+      "clock": 2041.7688679245282
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 72.07207207207207,
+      "clock": 2035.462382445141
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 3.6211383953830487,
+      "clock": 2035.462382445141
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 2.3156942559927636,
+      "clock": 2035.462382445141
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "test": "tg32",
+      "rep": 0,
+      "rate": 2.455871066768995,
+      "clock": 2035.462382445141
+    }
+  ]
+}

@@ -26,8 +26,8 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-SGEMM performance is at 74% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
-The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card. See [Inference](#inference).
+SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
+The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, for a model that fits in its VRAM. One that does not fit is a different story, and [Inference](#inference) gives both.
 
 ![Phobos benchmark results](results/bench.svg)
 
@@ -66,13 +66,36 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test   | llama.cpp CUDA[^2]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  6374.55 +/- 157.95 |  5108.63 +/- 101.97 |
-| pp512  |  9932.18 +/- 283.14 |  7546.91 +/-  95.58 |
-| tg32   |   220.52 +/-   6.59 |   280.89 +/-   8.42 |
-| tg128  |   238.14 +/-   7.17 |   277.98 +/-   7.47 |
-| tg512  |   242.52 +/-   6.31 |   283.49 +/-   7.84 |
-| tg1024 |   242.98 +/-   6.27 |   285.99 +/-   8.39 |
-| tg2048 |   240.68 +/-   6.00 |   285.19 +/-   8.56 |
+| pp128  |  6805.04 +/- 837.26 |  5620.57 +/- 478.34 |
+| pp512  | 10644.28 +/- 480.77 |  8389.52 +/- 343.37 |
+| tg32   |   236.73 +/-   2.68 |   301.34 +/-   2.87 |
+| tg128  |   255.92 +/-   0.88 |   300.19 +/-   1.27 |
+| tg512  |   259.73 +/-   0.72 |   300.13 +/-   0.93 |
+| tg1024 |   259.88 +/-   0.89 |   299.55 +/-   0.80 |
+| tg2048 |   257.66 +/-   2.52 |   297.92 +/-   1.39 |
+
+A model that does not fit is the other half of the picture. Qwen3.8-27B-UD-IQ1_M
+is 6.27 GiB of weights on an 8 GiB card that is also driving the desktop, and
+llama.cpp is roughly nine times faster at generation:
+
+| test   | llama.cpp CUDA[^2] | Phobos GPU     |
+| ------ | -----------------: | -------------: |
+| pp128  |    4.43 +/-   2.20 | 69.66 +/- 2.37 |
+| pp512  |    9.11 +/-   0.06 |  3.68 +/- 0.03 |
+| tg32   |   21.46 +/-   0.02 |  2.43 +/- 0.02 |
+| tg128  |   21.76 +/-   0.00 |  2.37 +/- 0.03 |
+
+Both of phobos's oddities here are reproducible rather than noise, and both are
+the same cause. Generation sits at 2.4 t/s because the weights do not stay
+resident: a prompt pass pushes about a gigabyte of them out to system memory
+(measured on `\GPU Adapter Memory(*)\Shared Usage`, 949 -> 1911 MiB), and the
+decode kernels then read them back across PCIe while the card still reports
+100% busy. The same wall is why `pp512` collapses to a nineteenth of `pp128`:
+512 rows of activations no longer leave room. llama.cpp's `pp128` is the
+erratic column, 2.2 t/s twice and 8.8 once.
+
+Freeing about 500 MiB of desktop VRAM moves generation from 1.5 to 2.4 t/s, so
+the ceiling here is the card, not the kernels. `docs/` carries the analysis.
 
 <details>
   <summary>Benchmark Details</summary>
@@ -84,6 +107,10 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
 python scripts/plot.py results/bench.json -o results/inference.svg
+
+# the 27B, which is slow enough that the sizes and repetitions have to come down
+python scripts/bench.py -m models/Qwen3.8-27B-UD-IQ1_M.gguf -p 128 512 -n 32 128 \
+  -r 1 -R 3 --csv results/bench-qwen38.csv --json results/bench-qwen38.json
 
 # either engine on its own, which measures one column and not a comparison
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
@@ -336,4 +363,4 @@ Claude Code was used, among the Gemini and Codex free tiers, when building
 this project.
 
 [^1]: [Table 2. GeForce RTX 3080 vs GeForce RTX 2080 / 2080 Super; P.14](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf)
-[^2]: build: c629da565 (10219)
+[^2]: build: 4d19b2876 (10636)
