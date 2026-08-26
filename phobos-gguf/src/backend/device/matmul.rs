@@ -600,15 +600,20 @@ impl DeviceBackend {
         } else {
             strip
         };
+        // One buffer for every strip of this weight, sized to the widest, not
+        // one per distinct width. A kernel operand is a pointer and a shape, so
+        // a short last strip simply uses a prefix. Sized per strip instead, a
+        // prompt pass leaves 542 MiB of scratch across seven pool entries where
+        // 127 MiB does; on a card holding 6.27 GiB of weights in 8 GiB that is
+        // the difference between the weights staying resident and not.
+        let widest = k * strip;
+        let scratch_w = self.alloc(widest)?;
+        let scratch_out = self.alloc(m * strip)?;
         let mut n0 = 0;
         while n0 < n {
             let cur = strip.min(n - n0);
-            // Half the bytes when narrow. The pool hands out f32 elements; a
-            // kernel operand is a pointer and a shape, and the signature says
-            // how wide an element is.
             let expand = qdecode.filter(|_| cur.is_multiple_of(tn));
             let narrow = expand.is_some() && all_tc && cur.is_multiple_of(TC_TILE_N);
-            let scratch_w = self.alloc(if narrow { (k * cur).div_ceil(2) } else { k * cur })?;
             let mut operands = vec![
                 (bytes_ptr + (n0 * rb) as u64, [cur as i64, rb as i64]),
                 (d_ptr + (n0 * nb) as u64 * f16_bytes, [cur as i64, *nb as i64]),
@@ -689,7 +694,6 @@ impl DeviceBackend {
             operands.push((self.ptr(scratch_w, 0)?, [k as i64, cur as i64]));
             self.launch(module, name, &operands, (cur.div_ceil(tn) as u32, 1, 1))?;
 
-            let scratch_out = self.alloc(m * cur)?;
             if narrow {
                 self.matmul_f16_weight(
                     self.ptr(a, 0)?,
@@ -709,10 +713,10 @@ impl DeviceBackend {
                 cur,
             )?;
 
-            self.release(scratch_out);
-            self.release(scratch_w);
             n0 += cur;
         }
+        self.release(scratch_out);
+        self.release(scratch_w);
         Ok(())
     }
 
