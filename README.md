@@ -74,28 +74,30 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 | tg1024 |   259.88 +/-   0.89 |   299.55 +/-   0.80 |
 | tg2048 |   257.66 +/-   2.52 |   297.92 +/-   1.39 |
 
-A model that does not fit is the other half of the picture. Qwen3.8-27B-UD-IQ1_M
-is 6.27 GiB of weights on an 8 GiB card that is also driving the desktop, and
-llama.cpp is roughly nine times faster at generation:
+A model that only just fits is the other half of the picture.
+Qwen3.8-27B-UD-IQ1_M is 6.27 GiB of weights on an 8 GiB card that is also
+driving the desktop, and llama.cpp still generates about a fifth faster:
 
-| test   | llama.cpp CUDA[^2] | Phobos GPU     |
-| ------ | -----------------: | -------------: |
-| pp128  |    4.43 +/-   2.20 | 69.66 +/- 2.37 |
-| pp512  |    9.11 +/-   0.06 |  3.68 +/- 0.03 |
-| tg32   |   21.46 +/-   0.02 |  2.43 +/- 0.02 |
-| tg128  |   21.76 +/-   0.00 |  2.37 +/- 0.03 |
+| test  | llama.cpp CUDA[^2] | Phobos GPU     |
+| ----- | -----------------: | -------------: |
+| tg32  |    21.47 +/-  0.06 | 18.24 +/- 0.09 |
 
-Both of phobos's oddities here are reproducible rather than noise, and both are
-the same cause. Generation sits at 2.4 t/s because the weights do not stay
-resident: a prompt pass pushes about a gigabyte of them out to system memory
-(measured on `\GPU Adapter Memory(*)\Shared Usage`, 949 -> 1911 MiB), and the
-decode kernels then read them back across PCIe while the card still reports
-100% busy. The same wall is why `pp512` collapses to a nineteenth of `pp128`:
-512 rows of activations no longer leave room. llama.cpp's `pp128` is the
-erratic column, 2.2 t/s twice and 8.8 once.
+Generation went 9.5 -> 18.2 t/s over one session, and the distance left is not
+bandwidth. Decode contracts an int8-quantized activation with the four-way byte
+dot product, a warp takes several output columns at once so its table gathers
+overlap, and the lookup tables sit in shared memory; the fastest of those
+kernels reads at 666 GMAC/s, above the 549 llama.cpp averages over its whole
+pass. What is left is the other formats catching up with the fastest one.
 
-Freeing about 500 MiB of desktop VRAM moves generation from 1.5 to 2.4 t/s, so
-the ceiling here is the card, not the kernels. `docs/` carries the analysis.
+Prompt processing is left out of the table on purpose: at this size neither
+engine measures repeatably here. Phobos spreads 48 +/- 39 t/s at `pp128` and
+111 +/- 47 at `pp512`, and llama.cpp inverts between the two, 487 at `pp128`
+against 40 at `pp512`. Those are residency artifacts, not throughput.
+
+The card is the reason. A decode pass peaks at 7626 MiB of 8192 with the
+desktop holding about 975, and on a heavier desktop *neither* engine loads the
+model at all: llama.cpp fails at 7240 MiB and phobos at 7286. Freeing desktop
+VRAM is worth more here than any kernel change.
 
 <details>
   <summary>Benchmark Details</summary>
@@ -315,7 +317,7 @@ The model path has its own set. Build these `--release`, and the ones needing a 
 | `footprint` | `phobos-gguf` | `footprint -- MODEL.gguf` | What the model will occupy on the backend: weights, how much of that is f32, and the cache per token. Reports what the card has free under `--features cuda`. |
 
 `phobos-gguf/examples` also holds the kernel sweeps each optimization was decided by (`q8sweep`,
-`ppsweep`, `attnsweep`, `deltasweep`, `dotform`); `docs/GGUF.md` says what each one answered.
+`ppsweep`, `attnsweep`, `deltasweep`, `dotform`).
 
 ```
                                              ::::
