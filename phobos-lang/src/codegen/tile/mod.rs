@@ -23,6 +23,7 @@ mod iq2xs_qdot;
 mod iq2xxs;
 mod iq2xxs_qdot;
 mod qdot_i8_signed;
+mod qdot_i8_split;
 mod iq3s;
 mod iq3s_qdot;
 mod iq3xxs;

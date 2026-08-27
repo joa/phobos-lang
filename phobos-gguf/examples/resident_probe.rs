@@ -140,6 +140,50 @@ kernel iq2xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 ",
 };
 
+const IQ3XXS: Probe = Probe {
+    name: "iq3xxs",
+    kernel: "iq3xxs_qdot_matvec",
+    int8_act: false,
+    block_bytes: 96,
+    tn: 8,
+    table_bytes: 256 * 4,
+    signs_bytes: 128 * 8,
+    src: "@launch(256)
+@autotune(TN in [{TN}])
+@aligned(N = TN)
+kernel iq3xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
+                          D: tensor<f16>[N, NB], GRID: tensor<i8>[1, 1024],
+                          SIGNS: tensor<i8>[1, 1024], C: tensor<f32>[M, N]) {
+  let pn = program_id(0)
+  C[0 :+ 1, pn * TN :+ TN] = iq3xxs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
+                                           D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
+}
+",
+};
+
+const IQ3XXS_I8: Probe = Probe {
+    name: "iq3xxs-i8",
+    kernel: "iq3xxs_qdot_i8_matvec",
+    int8_act: true,
+    block_bytes: 96,
+    tn: 64,
+    table_bytes: 256 * 4,
+    signs_bytes: 128 * 8,
+    src: "@launch(256, 4)
+@autotune(TN in [{TN}])
+@aligned(N = TN)
+kernel iq3xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                             QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                             GRID: tensor<i8>[1, 1024], SIGNS: tensor<i8>[1, 1024],
+                             C: tensor<f32>[M, N]) {
+  let pn = program_id(0)
+  C[0 :+ 1, pn * TN :+ TN] = iq3xxs_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
+                                              QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                              GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
+}
+",
+};
+
 const REPS: usize = 10;
 
 /// One scale for the whole synthetic activation, so the two paths agree.
@@ -202,6 +246,13 @@ fn main() -> Result<()> {
         .fold(0.0f32, f32::max);
     println!("  iq2xxs dp4a against float, worst relative error {worst:.3e}");
     anyhow::ensure!(worst < 1e-3, "the iq2xxs dp4a path disagrees with the float path");
+
+    let want = run(&stream, &IQ3XXS, FFN_K, FFN_N, IQ3XXS.tn, None)?;
+    let got = run(&stream, &IQ3XXS_I8, FFN_K, FFN_N, IQ3XXS_I8.tn, None)?;
+    let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
+    let worst = want.iter().zip(&got).map(|(w, g)| (w - g).abs() / scale).fold(0.0f32, f32::max);
+    println!("  iq3xxs dp4a against float, worst relative error {worst:.3e}");
+    anyhow::ensure!(worst < 1e-3, "the iq3xxs dp4a path disagrees with the float path");
     if ballast_mib > 0 {
         return Ok(());
     }

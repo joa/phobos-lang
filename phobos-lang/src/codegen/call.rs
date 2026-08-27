@@ -184,6 +184,40 @@ impl<'c> Codegen<'c> {
                 }
                 Ok(Rv::Tile(out))
             }
+            "iq3xxs_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid, signs] = args else {
+                    bail!("iq3xxs_qdot_i8_t expects (aq, asc, qb, d, grid, signs)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq3xxs_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let (grid, signs) = (operand(self, grid)?, operand(self, signs)?);
+                let out = self.tile_iq3xxs_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid, &signs)?;
+                for t in [&aq, &asc, &qb, &d, &grid, &signs] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            "iq3s_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid, signs] = args else {
+                    bail!("iq3s_qdot_i8_t expects (aq, asc, qb, d, grid, signs)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq3s_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let (grid, signs) = (operand(self, grid)?, operand(self, signs)?);
+                let out = self.tile_iq3s_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid, &signs)?;
+                for t in [&aq, &asc, &qb, &d, &grid, &signs] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
             "iq2xxs_qdot_i8_t" => {
                 let [aq, asc, qb, d, grid, signs] = args else {
                     bail!("iq2xxs_qdot_i8_t expects (aq, asc, qb, d, grid, signs)");

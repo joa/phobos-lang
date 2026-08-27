@@ -353,7 +353,10 @@ pub struct DeviceBackend {
     /// own `TN`; `project_raw` falls back to the plain matvec otherwise.
     iq1s_qdot_matvec: Module,
     /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
+    /// The dp4a decode matvecs: wide tile, then narrow for a ragged `n`.
     iq1s_qdot_i8: [Module; 2],
+    iq3s_qdot_i8: [Module; 2],
+    iq3xxs_qdot_i8: [Module; 2],
     /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
     iq2xxs_qdot_i8: [Module; 2],
     /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
@@ -585,16 +588,6 @@ impl DeviceBackend {
         let iq3xxs_qdecode_f16_body = f16_scratch(&iq3xxs_qdecode_body);
         let iq3s_qdecode_f16_body = f16_scratch(&iq3s_qdecode_body);
         let iq1s_qdot_body = iq1s_qdot_matvec_src(IQ1S_TN);
-        let iq1s_qdot_i8_body = iq1s_qdot_i8_matvec_src(IQ1S_I8_TN);
-        let iq1s_qdot_i8_narrow_body = iq1s_qdot_i8_matvec_src(IQ1S_I8_NARROW_TN);
-        let iq2xxs_qdot_i8_body = iq2xxs_qdot_i8_matvec_src(IQ2XXS_I8_TN);
-        let iq2xxs_qdot_i8_narrow_body = iq2xxs_qdot_i8_matvec_src(IQ2XXS_I8_NARROW_TN);
-        let iq1m_qdot_i8_body = iq1m_qdot_i8_matvec_src(IQ1M_I8_TN);
-        let iq1m_qdot_i8_narrow_body = iq1m_qdot_i8_matvec_src(IQ1M_I8_NARROW_TN);
-        let iq2xs_qdot_i8_body = iq2xs_qdot_i8_matvec_src(IQ2XS_I8_TN);
-        let iq2xs_qdot_i8_narrow_body = iq2xs_qdot_i8_matvec_src(IQ2XS_I8_NARROW_TN);
-        let iq2s_qdot_i8_body = iq2s_qdot_i8_matvec_src(IQ2S_I8_TN);
-        let iq2s_qdot_i8_narrow_body = iq2s_qdot_i8_matvec_src(IQ2S_I8_NARROW_TN);
         let iq2xxs_qdot_body = iq2xxs_qdot_matvec_src(IQ2XXS_TN);
         let iq1m_qdot_body = iq1m_qdot_matvec_src(IQ1M_TN);
         let iq2s_qdot_body = iq2s_qdot_matvec_src(IQ2S_TN);
@@ -604,7 +597,24 @@ impl DeviceBackend {
         let iq4xs_qdot_body = iq4xs_qdot_matvec_src(IQ4XS_TN);
         let q2k_qdot_body = q2k_qdot_matvec_src(Q2K_TN);
         let q3k_qdot_body = q3k_qdot_matvec_src(Q3K_TN);
-        let mut raw_matvecs = compile_parallel(&[
+        // The dp4a decode matvecs, wide tile then narrow. One table drives the
+        // sources, the compile entries and the `remove`s below, so their order
+        // cannot drift apart.
+        let i8: [(fn(usize) -> String, usize, usize, &str); 7] = [
+            (iq1s_qdot_i8_matvec_src, IQ1S_I8_TN, IQ1S_I8_NARROW_TN, "iq1s_qdot_i8_matvec"),
+            (iq3s_qdot_i8_matvec_src, IQ3S_I8_TN, IQ3S_I8_NARROW_TN, "iq3s_qdot_i8_matvec"),
+            (iq3xxs_qdot_i8_matvec_src, IQ3XXS_I8_TN, IQ3XXS_I8_NARROW_TN, "iq3xxs_qdot_i8_matvec"),
+            (iq2xxs_qdot_i8_matvec_src, IQ2XXS_I8_TN, IQ2XXS_I8_NARROW_TN, "iq2xxs_qdot_i8_matvec"),
+            (iq1m_qdot_i8_matvec_src, IQ1M_I8_TN, IQ1M_I8_NARROW_TN, "iq1m_qdot_i8_matvec"),
+            (iq2xs_qdot_i8_matvec_src, IQ2XS_I8_TN, IQ2XS_I8_NARROW_TN, "iq2xs_qdot_i8_matvec"),
+            (iq2s_qdot_i8_matvec_src, IQ2S_I8_TN, IQ2S_I8_NARROW_TN, "iq2s_qdot_i8_matvec"),
+        ];
+        let i8_srcs: Vec<(String, [(&str, usize); 1], &str)> = i8
+            .iter()
+            .flat_map(|&(src, w, n, name)| [(src(w), [("TN", w)], name), (src(n), [("TN", n)], name)])
+            .collect();
+
+        let mut raw_entries: Vec<(&str, &[(&str, usize)], &str)> = vec![
             (q2k_src.as_str(), &[("TN", Q2K_TN)], "q2k_matvec"),
             (q3k_src.as_str(), &[("TN", Q3K_TN)], "q3k_matvec"),
             (iq1s_src.as_str(), &[("TN", IQ1S_TN)], "iq1s_matvec"),
@@ -639,16 +649,6 @@ impl DeviceBackend {
             (iq3xxs_qdecode_f16_body.as_str(), &[("TN", IQ3XXS_TN)], "iq3xxs_qdecode"),
             (iq3s_qdecode_f16_body.as_str(), &[("TN", IQ3S_TN)], "iq3s_qdecode"),
             (iq1s_qdot_body.as_str(), &[("TN", IQ1S_TN)], "iq1s_qdot_matvec"),
-            (iq1s_qdot_i8_body.as_str(), &[("TN", IQ1S_I8_TN)], "iq1s_qdot_i8_matvec"),
-            (iq1s_qdot_i8_narrow_body.as_str(), &[("TN", IQ1S_I8_NARROW_TN)], "iq1s_qdot_i8_matvec"),
-            (iq2xxs_qdot_i8_body.as_str(), &[("TN", IQ2XXS_I8_TN)], "iq2xxs_qdot_i8_matvec"),
-            (iq2xxs_qdot_i8_narrow_body.as_str(), &[("TN", IQ2XXS_I8_NARROW_TN)], "iq2xxs_qdot_i8_matvec"),
-            (iq1m_qdot_i8_body.as_str(), &[("TN", IQ1M_I8_TN)], "iq1m_qdot_i8_matvec"),
-            (iq1m_qdot_i8_narrow_body.as_str(), &[("TN", IQ1M_I8_NARROW_TN)], "iq1m_qdot_i8_matvec"),
-            (iq2xs_qdot_i8_body.as_str(), &[("TN", IQ2XS_I8_TN)], "iq2xs_qdot_i8_matvec"),
-            (iq2xs_qdot_i8_narrow_body.as_str(), &[("TN", IQ2XS_I8_NARROW_TN)], "iq2xs_qdot_i8_matvec"),
-            (iq2s_qdot_i8_body.as_str(), &[("TN", IQ2S_I8_TN)], "iq2s_qdot_i8_matvec"),
-            (iq2s_qdot_i8_narrow_body.as_str(), &[("TN", IQ2S_I8_NARROW_TN)], "iq2s_qdot_i8_matvec"),
             (iq2xxs_qdot_body.as_str(), &[("TN", IQ2XXS_TN)], "iq2xxs_qdot_matvec"),
             (iq1m_qdot_body.as_str(), &[("TN", IQ1M_TN)], "iq1m_qdot_matvec"),
             (iq2s_qdot_body.as_str(), &[("TN", IQ2S_TN)], "iq2s_qdot_matvec"),
@@ -658,7 +658,9 @@ impl DeviceBackend {
             (iq4xs_qdot_body.as_str(), &[("TN", IQ4XS_TN)], "iq4xs_qdot_matvec"),
             (q2k_qdot_body.as_str(), &[("TN", Q2K_TN)], "q2k_qdot_matvec"),
             (q3k_qdot_body.as_str(), &[("TN", Q3K_TN)], "q3k_qdot_matvec"),
-        ])?;
+        ];
+        raw_entries.extend(i8_srcs.iter().map(|(b, d, n)| (b.as_str(), d.as_slice(), *n)));
+        let mut raw_matvecs = compile_parallel(&raw_entries)?;
         let q2k_matvec = raw_matvecs.remove(0);
         let q3k_matvec = raw_matvecs.remove(0);
         let iq1s_matvec = raw_matvecs.remove(0);
@@ -693,11 +695,6 @@ impl DeviceBackend {
         let iq3xxs_qdecode_f16 = raw_matvecs.remove(0);
         let iq3s_qdecode_f16 = raw_matvecs.remove(0);
         let iq1s_qdot_matvec = raw_matvecs.remove(0);
-        let iq1s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
-        let iq2xxs_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
-        let iq1m_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
-        let iq2xs_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
-        let iq2s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq2xxs_qdot_matvec = raw_matvecs.remove(0);
         let iq1m_qdot_matvec = raw_matvecs.remove(0);
         let iq2s_qdot_matvec = raw_matvecs.remove(0);
@@ -707,6 +704,13 @@ impl DeviceBackend {
         let iq4xs_qdot_matvec = raw_matvecs.remove(0);
         let q2k_qdot_matvec = raw_matvecs.remove(0);
         let q3k_qdot_matvec = raw_matvecs.remove(0);
+        let iq1s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let iq3s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let iq3xxs_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let iq2xxs_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let iq1m_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let iq2xs_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let iq2s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq1s_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_flat_grid())?;
         let iq2xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_grid())?;
         let iq2xxs_signs = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_signs())?;
@@ -853,6 +857,8 @@ impl DeviceBackend {
             q2k_dequant,
             iq1s_qdot_matvec,
             iq1s_qdot_i8,
+            iq3s_qdot_i8,
+            iq3xxs_qdot_i8,
             iq2xxs_qdot_i8,
             iq1m_qdot_i8,
             iq2xs_qdot_i8,

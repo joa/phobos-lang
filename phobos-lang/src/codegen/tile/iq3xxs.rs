@@ -14,6 +14,9 @@ const IQ3XXS_SS_OFF: i64 = 64;
 /// Elements a lane takes from one of its two grid entries.
 pub(super) const IQ3XXS_HALF: i64 = 4;
 
+/// Elements a lane owns: both halves of its grid entry.
+pub(super) const IQ3XXS_LANE: i64 = 2 * IQ3XXS_HALF;
+
 /// Lane geometry: byte offsets within a block, and the lane's element offset.
 /// Scale and sign fields are IQ2_XXS's, byte for byte.
 pub(super) struct Iq3xxsLane<'c> {
@@ -31,10 +34,10 @@ pub(super) struct Iq3xxsLane<'c> {
 /// Per-block state: the scaled magnitude, two four-wide grid entries and one
 /// eight-wide sign entry, each one vector load.
 pub(super) struct Iq3xxsBlock<'c> {
-    db: Value<'c, 'c>,
-    g1_v: Value<'c, 'c>,
-    g2_v: Value<'c, 'c>,
-    signs_v: Value<'c, 'c>,
+    pub(super) db: Value<'c, 'c>,
+    pub(super) g1_v: Value<'c, 'c>,
+    pub(super) g2_v: Value<'c, 'c>,
+    pub(super) signs_v: Value<'c, 'c>,
 }
 
 impl<'c> Codegen<'c> {

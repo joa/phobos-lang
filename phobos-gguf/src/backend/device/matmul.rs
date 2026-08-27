@@ -378,6 +378,24 @@ impl DeviceBackend {
                         mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
                     ],
                 )),
+                Quant::IQ3_XXS if n.is_multiple_of(IQ3XXS_I8_NARROW_TN) => Some((
+                    &self.iq3xxs_qdot_i8[usize::from(!wide_tile(IQ3XXS_I8_TN))],
+                    "iq3xxs_qdot_i8_matvec",
+                    if wide_tile(IQ3XXS_I8_TN) { IQ3XXS_I8_TN } else { IQ3XXS_I8_NARROW_TN },
+                    vec![
+                        grid(&self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN),
+                        mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
+                    ],
+                )),
+                Quant::IQ3_S if n.is_multiple_of(IQ3S_I8_NARROW_TN) => Some((
+                    &self.iq3s_qdot_i8[usize::from(!wide_tile(IQ3S_I8_TN))],
+                    "iq3s_qdot_i8_matvec",
+                    if wide_tile(IQ3S_I8_TN) { IQ3S_I8_TN } else { IQ3S_I8_NARROW_TN },
+                    vec![
+                        grid(&self.iq3s_grid_packed, IQ3S_GRID_LEN),
+                        mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
+                    ],
+                )),
                 _ => None,
             }
         } else {
