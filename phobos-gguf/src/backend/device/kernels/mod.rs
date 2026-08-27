@@ -43,3 +43,14 @@ pub(crate) use norm::*;
 pub(crate) use q2k::*;
 pub(crate) use q3k::*;
 pub(crate) use quant::*;
+
+/// One dp4a decode matvec in the table that drives compilation: the source
+/// builder, its wide and narrow output tiles, and the kernel's name.
+pub(crate) type I8Row = (fn(usize) -> String, usize, usize, &'static str);
+
+/// A built kernel source with the defines it was built for and its name, as
+/// [`phobos_kernels::compile_parallel`] takes them.
+pub(crate) type OwnedEntry = (String, [(&'static str, usize); 1], &'static str);
+
+/// The borrowed form of the same thing.
+pub(crate) type Entry<'a> = (&'a str, &'a [(&'static str, usize)], &'static str);

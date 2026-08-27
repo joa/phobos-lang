@@ -31,6 +31,7 @@ mod graph;
 mod kernels;
 mod launch;
 mod matmul;
+mod residency;
 mod mem;
 
 use fused::*;
@@ -176,9 +177,8 @@ pub struct DeviceBackend {
     q8_mma: Variants,
     q8_qmma: Module,
     q8_qmma_deep: HashMap<usize, Module>,
-    /// The split-K variant of the deep tile and its reduction, keyed by
-    /// output width, `k` and split count. Compiled lazily, when
-    /// [`kernels::q8_qmma_splits`] declines the unsplit grid.
+    /// The split-K variant of the deep tile and its reduction, keyed by output
+    /// width, `k` and split count. Built when the unsplit grid is declined.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
     /// The narrow-CTA variant of the deep tile: same `qmma_t` kernel, half
     /// the threads and column tile, same per-warp patch. Compiled lazily,
@@ -201,9 +201,8 @@ pub struct DeviceBackend {
     /// `m = 1` rows move by the size of an 8-bit activation. `PHOBOS_IQ1S_DP4A=1`
     /// opts in, pending a whole-model quality check.
     iq1s_dp4a: bool,
-    /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved
-    /// grid. `PHOBOS_QMMA_SPLIT=1` opts in. Default off: measured a net
-    /// loss in aggregate wall clock despite a real per-kernel win.
+    /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved grid.
+    /// `PHOBOS_QMMA_SPLIT=1` opts in; off by default, a net wall-clock loss.
     qmma_split: bool,
     /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path instead of
     /// the unsplit launch. `PHOBOS_QMMA_NARROW=1` opts in; default off, see
@@ -219,12 +218,10 @@ pub struct DeviceBackend {
     /// barrier and has to be measurable against the projection alone.
     fused_mix: bool,
     /// Whether attention's output epilogue (quantizing the mixed heads, then
-    /// the output projection) joins the fused-chain path. Default on;
-    /// `PHOBOS_FUSED_ATTN_OUT=0` switches it off.
+    /// the output projection) joins the fused-chain path. Default on.
     fused_attn_out: bool,
     /// Whether attention's key and value writes into the cache land in one
-    /// launch instead of two. Default on; `PHOBOS_FUSED_STORE2D=0` switches
-    /// it off.
+    /// launch instead of two. Default on, `PHOBOS_FUSED_STORE2D=0` off.
     fused_store2d: bool,
     /// Blocks a fused kernel is launched with, which unlike [`persist_blocks`]
     /// has to be exact: a block of the grid that is not resident never reaches
@@ -325,8 +322,11 @@ pub struct DeviceBackend {
     slots: RefCell<Vec<Option<DeviceBuffer<f32>>>>,
     free_slots: RefCell<Vec<usize>>,
     /// Released allocations, handed out again rather than going back to the
-    /// driver. See [`Backend::alloc`] and [`DeviceBackend::alloc_written_now`].
+    /// driver. See [`Backend::alloc`], [`DeviceBackend::alloc_written_now`].
     pool: Pool,
+    /// Set by a pass that dequantized a raw weight, cleared by the trim that
+    /// follows it. See [`DeviceBackend::trim_after_dense`].
+    dense_pass: Cell<bool>,
     constants: RefCell<HashMap<String, Buf>>,
     /// Addressed by [`QBuf`]: bytes, per-block scales, and the output width
     /// they went up with. Constants, so never released.
@@ -600,7 +600,7 @@ impl DeviceBackend {
         // The dp4a decode matvecs, wide tile then narrow. One table drives the
         // sources, the compile entries and the `remove`s below, so their order
         // cannot drift apart.
-        let i8: [(fn(usize) -> String, usize, usize, &str); 7] = [
+        let i8: [I8Row; 7] = [
             (iq1s_qdot_i8_matvec_src, IQ1S_I8_TN, IQ1S_I8_NARROW_TN, "iq1s_qdot_i8_matvec"),
             (iq3s_qdot_i8_matvec_src, IQ3S_I8_TN, IQ3S_I8_NARROW_TN, "iq3s_qdot_i8_matvec"),
             (iq3xxs_qdot_i8_matvec_src, IQ3XXS_I8_TN, IQ3XXS_I8_NARROW_TN, "iq3xxs_qdot_i8_matvec"),
@@ -609,12 +609,12 @@ impl DeviceBackend {
             (iq2xs_qdot_i8_matvec_src, IQ2XS_I8_TN, IQ2XS_I8_NARROW_TN, "iq2xs_qdot_i8_matvec"),
             (iq2s_qdot_i8_matvec_src, IQ2S_I8_TN, IQ2S_I8_NARROW_TN, "iq2s_qdot_i8_matvec"),
         ];
-        let i8_srcs: Vec<(String, [(&str, usize); 1], &str)> = i8
+        let i8_srcs: Vec<OwnedEntry> = i8
             .iter()
             .flat_map(|&(src, w, n, name)| [(src(w), [("TN", w)], name), (src(n), [("TN", n)], name)])
             .collect();
 
-        let mut raw_entries: Vec<(&str, &[(&str, usize)], &str)> = vec![
+        let mut raw_entries: Vec<Entry> = vec![
             (q2k_src.as_str(), &[("TN", Q2K_TN)], "q2k_matvec"),
             (q3k_src.as_str(), &[("TN", Q3K_TN)], "q3k_matvec"),
             (iq1s_src.as_str(), &[("TN", IQ1S_TN)], "iq1s_matvec"),
@@ -817,6 +817,7 @@ impl DeviceBackend {
             slots: RefCell::new(Vec::new()),
             free_slots: RefCell::new(Vec::new()),
             pool: Pool::new(),
+            dense_pass: Cell::new(false),
             constants: RefCell::new(HashMap::new()),
             quants: RefCell::new(Vec::new()),
             q_constants: RefCell::new(HashMap::new()),

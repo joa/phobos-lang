@@ -703,6 +703,7 @@ impl DeviceBackend {
         // 127 MiB does; on a card holding 6.27 GiB of weights in 8 GiB that is
         // the difference between the weights staying resident and not.
         let widest = k * strip;
+        self.note_dense_pass();
         let scratch_w = self.alloc(widest)?;
         let scratch_out = self.alloc(m * strip)?;
         let mut n0 = 0;

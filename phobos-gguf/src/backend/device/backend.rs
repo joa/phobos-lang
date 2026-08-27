@@ -97,6 +97,7 @@ impl Backend for DeviceBackend {
     }
 
     fn begin_pass(&self) -> Result<()> {
+        self.trim_after_dense()?;
         self.act_next.set(0);
         self.recorded_len.set(0);
         self.flushed.set(false);

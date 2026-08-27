@@ -50,4 +50,22 @@ impl Pool {
             .or_default()
             .push(buf);
     }
+
+    /// Give everything held back to the driver, and say how many bytes that
+    /// was. Held buffers are unused by definition, but a caller still has to
+    /// know the stream is idle: one released while a pass was recorded can
+    /// still be read by a launch that has not run.
+    ///
+    /// Worth doing when the pass shape changes, since the pool is keyed on
+    /// exact length and a prompt pass's scratch can never serve a decode step
+    /// anyway. It is then holding memory that only the weights can use.
+    pub fn trim(&self) -> usize {
+        let mut free = self.free.borrow_mut();
+        let bytes = free
+            .iter()
+            .map(|(len, bufs)| len * bufs.len() * size_of::<f32>())
+            .sum();
+        free.clear();
+        bytes
+    }
 }
