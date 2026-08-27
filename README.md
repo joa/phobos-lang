@@ -74,30 +74,19 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 | tg1024 |   259.88 +/-   0.89 |   299.55 +/-   0.80 |
 | tg2048 |   257.66 +/-   2.52 |   297.92 +/-   1.39 |
 
-A model that only just fits is the other half of the picture.
-Qwen3.8-27B-UD-IQ1_M is 6.27 GiB of weights on an 8 GiB card that is also
-driving the desktop, and llama.cpp still generates about a fifth faster:
+Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test  | llama.cpp CUDA[^2] | Phobos GPU     |
 | ----- | -----------------: | -------------: |
 | tg32  |    21.47 +/-  0.06 | 18.24 +/- 0.09 |
 
-Generation went 9.5 -> 18.2 t/s over one session, and the distance left is not
-bandwidth. Decode contracts an int8-quantized activation with the four-way byte
-dot product, a warp takes several output columns at once so its table gathers
-overlap, and the lookup tables sit in shared memory; the fastest of those
-kernels reads at 666 GMAC/s, above the 549 llama.cpp averages over its whole
-pass. What is left is the other formats catching up with the fastest one.
-
-Prompt processing is left out of the table on purpose: at this size neither
-engine measures repeatably here. Phobos spreads 48 +/- 39 t/s at `pp128` and
+Prompt processing is left out of the table on purpose: at this size (6.27 GiB of weights)
+neither engine measures repeatably. Phobos spreads 48 +/- 39 t/s at `pp128` and
 111 +/- 47 at `pp512`, and llama.cpp inverts between the two, 487 at `pp128`
 against 40 at `pp512`. Those are residency artifacts, not throughput.
 
 The card is the reason. A decode pass peaks at 7626 MiB of 8192 with the
-desktop holding about 975, and on a heavier desktop *neither* engine loads the
-model at all: llama.cpp fails at 7240 MiB and phobos at 7286. Freeing desktop
-VRAM is worth more here than any kernel change.
+desktop holding about 975.
 
 <details>
   <summary>Benchmark Details</summary>
