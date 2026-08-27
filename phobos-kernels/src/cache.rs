@@ -1,42 +1,54 @@
 //! Persists compiled PTX to disk, keyed by everything that can change what a
-//! kernel's source compiles to, so a cache hit survives a process restart.
+//! kernel's source compiles to, so a cache hit survives a process restart and
+//! is shared by every binary built from the same compiler.
 //!
 //! Set `PHOBOS_KERNEL_CACHE_DIR` to override the default
 //! (`~/.phobos/kernel-cache`), or to an empty string to disable caching.
 //! Skipped outright under `print_phases`, since a hit has nothing to print.
+//!
+//! `PHOBOS_KERNEL_CACHE_EPOCH` replaces the compiler fingerprint with its own
+//! value. Editing one intrinsic otherwise invalidates every entry, which is
+//! right for correctness and wrong for a benchmarking session that changed a
+//! single kernel: pin the epoch, then evict just the kernels that moved with
+//! `cargo run -p phobos-kernels --example cache -- evict <name>`. Entries are
+//! named `<kernel>-<hash>` so that eviction is a glob rather than a guess.
 
-use std::path::PathBuf;
 use std::sync::OnceLock;
+
+use crate::util::kernel_cache_dir as cache_dir;
 
 use phobos_base::context::{Context, GpuConfig};
 use sha2::{Digest, Sha256};
 
-fn cache_dir() -> Option<PathBuf> {
-    match std::env::var("PHOBOS_KERNEL_CACHE_DIR") {
-        Ok(dir) if dir.is_empty() => None,
-        Ok(dir) => Some(PathBuf::from(dir)),
-        Err(_) => home_dir().map(|home| home.join(".phobos").join("kernel-cache")),
-    }
-}
-
-fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .or_else(|| std::env::var_os("USERPROFILE"))
-        .map(PathBuf::from)
-}
-
-/// Hashes the running binary once. Any change to the compiler -- committed or
-/// not, a dependency bump, an LLVM upgrade -- changes these bytes and
-/// invalidates every entry it produced; a git commit hash would miss all
-/// three.
-fn build_fingerprint() -> &'static [u8; 32] {
-    static FINGERPRINT: OnceLock<[u8; 32]> = OnceLock::new();
+/// Identifies the compiler that produces the PTX: the codegen crates' source
+/// and the MLIR/LLVM versions they call, folded at build time by `build.rs`.
+/// Any change to either -- committed or not, a dependency bump, an LLVM
+/// upgrade -- changes it, where a git commit hash would miss all three.
+///
+/// Deliberately not a hash of the running binary: two examples compiling
+/// identical kernels would then share no entries and each pay a cold
+/// compile.
+fn build_fingerprint() -> &'static str {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
     FINGERPRINT.get_or_init(|| {
-        let bytes = std::env::current_exe()
-            .and_then(std::fs::read)
-            .unwrap_or_default();
-        Sha256::digest(bytes).into()
+        std::env::var("PHOBOS_KERNEL_CACHE_EPOCH")
+            .unwrap_or_else(|_| env!("PHOBOS_COMPILER_FINGERPRINT").to_string())
     })
+}
+
+/// The kernel's own name, so an entry can be found without its hash. The
+/// hash is what makes the file unique, so a miss here is harmless.
+fn kernel_name(source: &str) -> String {
+    let name = source
+        .split_once("kernel ")
+        .and_then(|(_, rest)| rest.split_once('('))
+        .map(|(name, _)| name.trim())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("kernel");
+    name.chars()
+        .take(64)
+        .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' })
+        .collect()
 }
 
 /// Cache key for a `(ctx, texts)` compile: every `Context` field that reaches
@@ -47,7 +59,7 @@ fn hash(ctx: &Context, texts: &[&str]) -> String {
     overrides.sort_unstable_by(|a, b| a.0.cmp(b.0));
 
     let mut hasher = Sha256::new();
-    hasher.update(build_fingerprint());
+    hasher.update(build_fingerprint().as_bytes());
     for part in [nv.chip(), nv.features(), nv.target_triple()] {
         hasher.update(part.as_bytes());
         hasher.update(b"\0");
@@ -61,7 +73,7 @@ fn hash(ctx: &Context, texts: &[&str]) -> String {
         hasher.update(text.as_bytes());
         hasher.update(b"\0");
     }
-    hex(&hasher.finalize())
+    format!("{}-{}", kernel_name(texts[0]), hex(&hasher.finalize()))
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -1,3 +1,19 @@
+use std::path::PathBuf;
+
+/// Where compiled PTX is cached: `PHOBOS_KERNEL_CACHE_DIR`, or
+/// `~/.phobos/kernel-cache`. `None` when the variable is set but empty, which
+/// is how caching is turned off. Lives here rather than in `cache` so the
+/// `cache` example can find the directory without a CUDA build.
+pub fn kernel_cache_dir() -> Option<PathBuf> {
+    match std::env::var("PHOBOS_KERNEL_CACHE_DIR") {
+        Ok(dir) if dir.is_empty() => None,
+        Ok(dir) => Some(PathBuf::from(dir)),
+        Err(_) => std::env::var_os("HOME")
+            .or_else(|| std::env::var_os("USERPROFILE"))
+            .map(|home| PathBuf::from(home).join(".phobos").join("kernel-cache")),
+    }
+}
+
 /// `x` rounded up to a whole number of `tile`s.
 pub fn round_up(x: usize, tile: usize) -> usize {
     x.div_ceil(tile) * tile
