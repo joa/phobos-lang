@@ -11,7 +11,9 @@ pub(crate) const Q3K_TN: usize = 32;
 
 const RUN: usize = 16;
 const RUNS_PER_BLOCK: usize = 256 / RUN;
-const BLOCK_BYTES: usize = 110;
+// The device stride, not the packed 110: `constant_raw` pads Q3_K so its
+// planes land eight-byte aligned. The two trailing bytes are never read.
+const BLOCK_BYTES: usize = 112;
 const QS_OFF: usize = 32;
 const SCALES_OFF: usize = 96;
 

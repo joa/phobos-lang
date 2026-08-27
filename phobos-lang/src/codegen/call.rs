@@ -129,6 +129,95 @@ impl<'c> Codegen<'c> {
                 }
                 Ok(Rv::Tile(out))
             }
+            // iq1s_qdot_i8_t(aq, asc, qb, d, grid): the same contraction
+            // against an int8-quantized activation, in dp4a.
+            // iq2xxs_qdot_i8_t(aq, asc, qb, d, grid, signs): as above, for
+            // the format whose decode is a signed table lookup.
+            "iq2s_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid, signs] = args else {
+                    bail!("iq2s_qdot_i8_t expects (aq, asc, qb, d, grid, signs)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq2s_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let (grid, signs) = (operand(self, grid)?, operand(self, signs)?);
+                let out = self.tile_iq2s_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid, &signs)?;
+                for t in [&aq, &asc, &qb, &d, &grid, &signs] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            "iq2xs_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid, signs] = args else {
+                    bail!("iq2xs_qdot_i8_t expects (aq, asc, qb, d, grid, signs)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq2xs_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let (grid, signs) = (operand(self, grid)?, operand(self, signs)?);
+                let out = self.tile_iq2xs_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid, &signs)?;
+                for t in [&aq, &asc, &qb, &d, &grid, &signs] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            "iq1m_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid] = args else {
+                    bail!("iq1m_qdot_i8_t expects (aq, asc, qb, d, grid)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq1m_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let grid = operand(self, grid)?;
+                let out = self.tile_iq1m_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid)?;
+                for t in [&aq, &asc, &qb, &d, &grid] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            "iq2xxs_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid, signs] = args else {
+                    bail!("iq2xxs_qdot_i8_t expects (aq, asc, qb, d, grid, signs)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq2xxs_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let (grid, signs) = (operand(self, grid)?, operand(self, signs)?);
+                let out = self.tile_iq2xxs_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid, &signs)?;
+                for t in [&aq, &asc, &qb, &d, &grid, &signs] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            "iq1s_qdot_i8_t" => {
+                let [aq, asc, qb, d, grid] = args else {
+                    bail!("iq1s_qdot_i8_t expects (aq, asc, qb, d, grid)");
+                };
+                let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+                    Rv::Tile(t) => Ok(t),
+                    Rv::Scalar(_) => bail!("iq1s_qdot_i8_t expects tile operands"),
+                };
+                let (aq, asc) = (operand(self, aq)?, operand(self, asc)?);
+                let (qb, d) = (operand(self, qb)?, operand(self, d)?);
+                let grid = operand(self, grid)?;
+                let out = self.tile_iq1s_qdot_i8_t(block, &aq, &asc, &qb, &d, &grid)?;
+                for t in [&aq, &asc, &qb, &d, &grid] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
             // iq1s_qdot_t(a, qb, d, grid): IQ1_S's matvec contraction with
             // the grid-table decode folded in, `qdot_t`'s warp-owns-an-output
             // shape without `qdot_t`'s hardware instruction.

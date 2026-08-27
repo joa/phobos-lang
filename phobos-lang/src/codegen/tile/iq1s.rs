@@ -26,9 +26,9 @@ pub(super) struct Iq1sLane<'c> {
 /// Per-block state: the group scale, the offset every grid entry takes, and
 /// the lane's whole grid entry as one `vector<8xi8>`.
 pub(super) struct Iq1sBlock<'c> {
-    dl: Value<'c, 'c>,
-    delta: Value<'c, 'c>,
-    grid_v: Value<'c, 'c>,
+    pub(super) dl: Value<'c, 'c>,
+    pub(super) delta: Value<'c, 'c>,
+    pub(super) grid_v: Value<'c, 'c>,
 }
 
 impl<'c> Codegen<'c> {

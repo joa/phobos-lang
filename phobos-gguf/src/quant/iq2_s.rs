@@ -64,6 +64,13 @@ pub(crate) fn packed_grid() -> Vec<i8> {
 }
 
 /// [`flat_signs`] packed the same way; the multipliers are +-1.
+/// [`packed_signs`] as a bitwise mask; see IQ2_XXS's.
+pub(crate) fn packed_sign_masks() -> Vec<i8> {
+    (0u32..256)
+        .flat_map(|byte| KMASK_IQ2XS.map(move |bit| if byte & u32::from(bit) != 0 { -1i8 } else { 0 }))
+        .collect()
+}
+
 pub(crate) fn packed_signs() -> Vec<i8> {
     (0u32..256)
         .flat_map(|byte| KMASK_IQ2XS.map(move |bit| if byte & u32::from(bit) != 0 { -1i8 } else { 1 }))

@@ -5,9 +5,12 @@
 
 use super::*;
 
-// Q3_K block layout (phobos-gguf/src/quant/q3_k.rs): 110 bytes, hmask at
-// byte 0, qs at byte 32, scales at byte 96. No minimum term, unlike Q2_K.
-const Q3K_BLOCK_BYTES: i64 = 110;
+// Q3_K block layout (phobos-gguf/src/quant/q3_k.rs): hmask at byte 0, qs at
+// byte 32, scales at byte 96. No minimum term, unlike Q2_K. The blocks are
+// 110 bytes on disk and on the host; the device upload pads them to 112 so
+// every block base is a multiple of eight, which is what the two vector loads
+// below need. See `Quant::device_block_bytes`.
+const Q3K_BLOCK_BYTES: i64 = 112;
 const Q3K_QS_OFF: i64 = 32;
 const Q3K_SCALES_OFF: i64 = 96;
 const Q3K_RUN: i64 = 16;
@@ -67,15 +70,81 @@ impl<'c> Codegen<'c> {
         let j = self.divui(&body, li, warp_w)?;
         let lane = self.remui(&body, li, warp_w)?;
 
-        let sixteen_idx = self.const_index(&body, Q3K_RUN)?;
-        let eight_idx = self.const_index(&body, 8)?;
+        // A lane owns eight consecutive elements of one run: run `is`, from
+        // `lane / 2`, and elements `y0 = (lane % 2) * 8` upwards. Sixteen runs
+        // of sixteen over thirty-two lanes covers the whole 256-element block
+        // in a single pass, and eight consecutive elements make the qs bytes,
+        // the hmask bytes and the activations one wide load each. The earlier
+        // map gave a lane one element per run and strided its eight by 32, so
+        // nothing could merge: nineteen load instructions for the same 42
+        // bytes this shape reads in seven, which left the kernel stalled on
+        // `long_scoreboard` at a fiftieth of the bandwidth its siblings reach.
+        //
+        // Every index below comes from `is`, so it is invariant across the
+        // k-loop and computed once here rather than eight times a block.
         let two_idx = self.const_index(&body, 2)?;
         let four_idx = self.const_index(&body, 4)?;
-        let y = self.remui(&body, lane, sixteen_idx)?;
-        let lane_half = self.divui(&body, lane, sixteen_idx)?;
+        let eight_idx = self.const_index(&body, 8)?;
+        let sixteen_idx = self.const_index(&body, Q3K_RUN)?;
+        let zero_idx = self.const_index(&body, 0)?;
+        let lanes_per_run = self.const_index(&body, WARP / Q3K_RUNS)?;
+        let is = self.divui(&body, lane, lanes_per_run)?;
+        let y0 = self.muli(&body, self.remui(&body, lane, lanes_per_run)?, eight_idx)?;
+
+        let h = self.divui(&body, is, eight_idx)?;
+        let rem = self.remui(&body, is, eight_idx)?;
+        let jj = self.divui(&body, rem, two_idx)?;
+        let half2 = self.remui(&body, rem, two_idx)?;
+        let half2_16 = self.muli(&body, half2, sixteen_idx)?;
+
+        // qs_off = QS_OFF + h*32 + half2*16 + y0 and hm_off = half2*16 + y0.
+        // Every term is a multiple of eight, and so is the block stride, which
+        // is what lets the two loads below promise align-8.
+        let thirtytwo = self.const_index(&body, 32)?;
+        let qs_base = self.addi(
+            &body,
+            self.const_index(&body, Q3K_QS_OFF)?,
+            self.muli(&body, h, thirtytwo)?,
+        )?;
+        let qs_off = self.addi(&body, self.addi(&body, qs_base, half2_16)?, y0)?;
+        let hm_off = self.addi(&body, half2_16, y0)?;
+
+        let jj_i32 = self.numeric_cast(&body, jj, i32_t)?;
+        let h_i32 = self.numeric_cast(&body, h, i32_t)?;
+        let two_i32 = self.const_i32(&body, 2)?;
+        let four_i32 = self.const_i32(&body, 4)?;
+        let qs_shift = self.push(&body, arith::muli(jj_i32, two_i32, self.loc))?;
+        let h4 = self.push(&body, arith::muli(h_i32, four_i32, self.loc))?;
+        let hm_shift = self.push(&body, arith::addi(h4, jj_i32, self.loc))?;
+
+        // The run's six-bit scale, a low nibble and two high bits that sit in
+        // separate bytes: `group` picks the pair, `c` the byte within it.
+        let group = self.divui(&body, is, four_idx)?;
+        let c = self.remui(&body, is, four_idx)?;
+        let group_mod2 = self.remui(&body, group, two_idx)?;
+        let group_even = self.push(
+            &body,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, group_mod2, zero_idx, self.loc),
+        )?;
+        let c_plus4 = self.addi(&body, c, four_idx)?;
+        let lo_extra = self.push(&body, arith::select(group_even, c, c_plus4, self.loc))?;
+        let lo_off = self.addi(&body, self.const_index(&body, Q3K_SCALES_OFF)?, lo_extra)?;
+        let hi_off = self.addi(&body, self.const_index(&body, Q3K_SCALES_OFF + 8)?, c)?;
+        let group_lt2 = self.push(
+            &body,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, group, two_idx, self.loc),
+        )?;
+        let zero_i32 = self.const_i32(&body, 0)?;
+        let lo_shift = self.push(&body, arith::select(group_lt2, zero_i32, four_i32, self.loc))?;
+        let group_i32 = self.numeric_cast(&body, group, i32_t)?;
+        let hi_shift = self.push(&body, arith::muli(group_i32, two_i32, self.loc))?;
+
+        // Where the lane's eight activations start. `y0` is 0 or 8, so the
+        // byte address is 0 or 32 past a block boundary: a multiple of sixteen
+        // either way, which is what the two `vector<4xf32>` loads need.
+        let act_off = self.addi(&body, self.muli(&body, is, sixteen_idx)?, y0)?;
 
         let step = self.const_index(&body, 256)?;
-        let zero_k = self.const_index(&body, 0)?;
         let kd = if a.shape[1] == DYN {
             let one = self.const_index(&body, 1)?;
             self.push(&body, memref::dim(a.mem, one, self.loc))?
@@ -90,6 +159,7 @@ impl<'c> Codegen<'c> {
         let carry = detach(kb.argument(1)?.into());
         let blk = self.divui(&kb, kbase, step)?;
         let blk_off = self.muli(&kb, blk, blk_bytes)?;
+        let zero_idx_kb = self.const_index(&kb, 0)?;
 
         let load_u8 = |cg: &mut Self, at: &Block<'c>, off: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
             let byte_off = cg.addi(at, blk_off, off)?;
@@ -106,105 +176,72 @@ impl<'c> Codegen<'c> {
         let d_val = self.push(&kb, memref::load(d.mem, &[j, blk], self.loc))?;
         let d_f32 = self.numeric_cast(&kb, d_val, f32_t)?;
 
+        let c2_i32 = self.const_i32(&kb, 2)?;
+        let c4_i32 = self.const_i32(&kb, 4)?;
+        let c16_i32 = self.const_i32(&kb, 16)?;
+
+        let lo_byte = load_u8(self, &kb, lo_off)?;
+        let lo_val = self.push(&kb, arith::shrui(lo_byte, lo_shift, self.loc))?;
+        let lo_val = self.push(&kb, arith::remui(lo_val, c16_i32, self.loc))?;
+        let hi_byte = load_u8(self, &kb, hi_off)?;
+        let hi_val = self.push(&kb, arith::shrui(hi_byte, hi_shift, self.loc))?;
+        let hi_val = self.push(&kb, arith::remui(hi_val, c4_i32, self.loc))?;
+        let hi_val = self.push(&kb, arith::muli(hi_val, c16_i32, self.loc))?;
+        let scale_word = self.push(&kb, arith::addi(lo_val, hi_val, self.loc))?;
+        let scale_f32 = self.numeric_cast(&kb, scale_word, f32_t)?;
+        let c32f = self.const_f32(&kb, 32.0)?;
+        let scale = self.push(&kb, arith::subf(scale_f32, c32f, self.loc))?;
+        let dscale = self.push(&kb, arith::mulf(d_f32, scale, self.loc))?;
+
+        // The lane's whole share of the block: two eight-byte weight loads and
+        // two sixteen-byte activation loads.
+        let i8_t = self.i8_t;
+        let byte_vec_t = Type::vector(&[8], i8_t);
+        let qs_at = self.addi(&kb, blk_off, qs_off)?;
+        let qs_v = self.vec_load_al(&kb, qb.mem, &[j, qs_at], byte_vec_t, 8)?;
+        let hm_at = self.addi(&kb, blk_off, hm_off)?;
+        let hm_v = self.vec_load_al(&kb, qb.mem, &[j, hm_at], byte_vec_t, 8)?;
+
+        let act_vec_t = Type::vector(&[ACT_VEC as u64], f32_t);
+        let a_at = self.addi(&kb, kbase, act_off)?;
+        let a_lo = self.vec_load(&kb, a.mem, &[zero_idx_kb, a_at], act_vec_t)?;
+        let a_at_hi = self.addi(&kb, a_at, self.const_index(&kb, ACT_VEC)?)?;
+        let a_hi = self.vec_load(&kb, a.mem, &[zero_idx_kb, a_at_hi], act_vec_t)?;
+
+        let c4f = self.const_f32(&kb, 4.0)?;
         let mut partial = carry;
-        let zero_idx_kb = self.const_index(&kb, 0)?;
-        for iter in 0..(Q3K_RUNS / 2) {
-            let iter_c = self.const_index(&kb, iter * 2)?;
-            let is = self.addi(&kb, iter_c, lane_half)?;
-
-            let h = self.divui(&kb, is, eight_idx)?;
-            let rem = self.remui(&kb, is, eight_idx)?;
-            let jj = self.divui(&kb, rem, two_idx)?;
-            let half2 = self.remui(&kb, rem, two_idx)?;
-
-            // qs_off = QS_OFF + h*32 + half2*16; qs_div = 4^j.
-            let thirtytwo = self.const_index(&kb, 32)?;
-            let qs_off = self.addi(
+        for t in 0..(2 * ACT_VEC) {
+            let qs_b = self.vec_extract(&kb, qs_v, &[t], i8_t)?;
+            let qs_i = self.push(
                 &kb,
-                self.addi(&kb, self.const_index(&kb, Q3K_QS_OFF)?, self.muli(&kb, h, thirtytwo)?)?,
-                self.muli(&kb, half2, sixteen_idx)?,
+                OperationBuilder::new("arith.extui", self.loc)
+                    .add_operands(&[qs_b])
+                    .add_results(&[i32_t])
+                    .build()?,
             )?;
-            let jj_i32 = self.numeric_cast(&kb, jj, i32_t)?;
-            let two_i32 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 2).into(), self.loc))?;
-            let one_i32 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 1).into(), self.loc))?;
-            let qs_shift = self.push(&kb, arith::muli(jj_i32, two_i32, self.loc))?;
-            let qs_div = self.push(&kb, arith::shli(one_i32, qs_shift, self.loc))?;
-
-            // hm_off = half2*16; hm_div = 2^(h*4+j).
-            let hm_off = self.muli(&kb, half2, sixteen_idx)?;
-            let h_i32 = self.numeric_cast(&kb, h, i32_t)?;
-            let four_i32 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 4).into(), self.loc))?;
-            let h4 = self.push(&kb, arith::muli(h_i32, four_i32, self.loc))?;
-            let hm_shift = self.push(&kb, arith::addi(h4, jj_i32, self.loc))?;
-            let hm_div = self.push(&kb, arith::shli(one_i32, hm_shift, self.loc))?;
-
-            // group = is/4, c = is%4.
-            let group = self.divui(&kb, is, four_idx)?;
-            let c = self.remui(&kb, is, four_idx)?;
-            let group_mod2 = self.remui(&kb, group, two_idx)?;
-            let zero_idx2 = self.const_index(&kb, 0)?;
-            let group_even = self.push(
-                &kb,
-                arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, group_mod2, zero_idx2, self.loc),
-            )?;
-            // lo_off = SCALES_OFF + (group even ? c : 4 + c).
-            let c_plus4 = self.addi(&kb, c, four_idx)?;
-            let lo_extra = self.push(&kb, arith::select(group_even, c, c_plus4, self.loc))?;
-            let lo_off = self.addi(&kb, self.const_index(&kb, Q3K_SCALES_OFF)?, lo_extra)?;
-            // lo_div = group < 2 ? 1 : 16.
-            let two_idx2 = self.const_index(&kb, 2)?;
-            let group_lt2 = self.push(
-                &kb,
-                arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, group, two_idx2, self.loc),
-            )?;
-            let one_i32b = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 1).into(), self.loc))?;
-            let c16 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 16).into(), self.loc))?;
-            let lo_div = self.push(&kb, arith::select(group_lt2, one_i32b, c16, self.loc))?;
-            // hi_off = SCALES_OFF + 8 + c; hi_div = 4^group.
-            let eight_c = self.const_index(&kb, Q3K_SCALES_OFF + 8)?;
-            let hi_off = self.addi(&kb, eight_c, c)?;
-            let group_i32 = self.numeric_cast(&kb, group, i32_t)?;
-            let hi_shift = self.push(&kb, arith::muli(group_i32, two_i32, self.loc))?;
-            let hi_div = self.push(&kb, arith::shli(one_i32, hi_shift, self.loc))?;
-
-            let lo_byte = load_u8(self, &kb, lo_off)?;
-            let lo_val = self.push(&kb, arith::divui(lo_byte, lo_div, self.loc))?;
-            let c4 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 4).into(), self.loc))?;
-            let lo_val = self.push(&kb, arith::remui(lo_val, c16, self.loc))?;
-            let hi_byte = load_u8(self, &kb, hi_off)?;
-            let hi_val = self.push(&kb, arith::divui(hi_byte, hi_div, self.loc))?;
-            let hi_val = self.push(&kb, arith::remui(hi_val, c4, self.loc))?;
-
-            let hi_val_shifted = self.push(&kb, arith::muli(hi_val, c16, self.loc))?;
-            let scale_word = self.push(&kb, arith::addi(lo_val, hi_val_shifted, self.loc))?;
-            let scale_f32 = self.numeric_cast(&kb, scale_word, f32_t)?;
-            let c32f = self.push(&kb, arith::constant(self.ctx, FloatAttribute::new(self.ctx, f32_t, 32.0).into(), self.loc))?;
-            let scale = self.push(&kb, arith::subf(scale_f32, c32f, self.loc))?;
-
-            let qs_byte_off = self.addi(&kb, qs_off, y)?;
-            let qs_byte = load_u8(self, &kb, qs_byte_off)?;
-            let low2 = self.push(&kb, arith::divui(qs_byte, qs_div, self.loc))?;
-            let low2 = self.push(&kb, arith::remui(low2, c4, self.loc))?;
+            let low2 = self.push(&kb, arith::shrui(qs_i, qs_shift, self.loc))?;
+            let low2 = self.push(&kb, arith::remui(low2, c4_i32, self.loc))?;
             let low2_f32 = self.numeric_cast(&kb, low2, f32_t)?;
 
-            let hm_byte_off = self.addi(&kb, hm_off, y)?;
-            let hm_byte = load_u8(self, &kb, hm_byte_off)?;
-            let bit = self.push(&kb, arith::divui(hm_byte, hm_div, self.loc))?;
-            let c2 = self.push(&kb, arith::constant(self.ctx, IntegerAttribute::new(i32_t, 2).into(), self.loc))?;
-            let bit = self.push(&kb, arith::remui(bit, c2, self.loc))?;
+            let hm_b = self.vec_extract(&kb, hm_v, &[t], i8_t)?;
+            let hm_i = self.push(
+                &kb,
+                OperationBuilder::new("arith.extui", self.loc)
+                    .add_operands(&[hm_b])
+                    .add_results(&[i32_t])
+                    .build()?,
+            )?;
+            let bit = self.push(&kb, arith::shrui(hm_i, hm_shift, self.loc))?;
+            let bit = self.push(&kb, arith::remui(bit, c2_i32, self.loc))?;
             let bit_f32 = self.numeric_cast(&kb, bit, f32_t)?;
 
-            let c4f = self.push(&kb, arith::constant(self.ctx, FloatAttribute::new(self.ctx, f32_t, 4.0).into(), self.loc))?;
             let bit4 = self.push(&kb, arith::mulf(bit_f32, c4f, self.loc))?;
             let low2_minus4 = self.push(&kb, arith::subf(low2_f32, c4f, self.loc))?;
             let quant = self.push(&kb, arith::addf(low2_minus4, bit4, self.loc))?;
-
-            let dscale = self.push(&kb, arith::mulf(d_f32, scale, self.loc))?;
             let decoded = self.push(&kb, arith::mulf(dscale, quant, self.loc))?;
 
-            let local_off = self.const_index(&kb, iter * 32)?;
-            let a_at = self.addi(&kb, self.addi(&kb, kbase, local_off)?, lane)?;
-            let a_val = self.push(&kb, memref::load(a.mem, &[zero_idx_kb, a_at], self.loc))?;
+            let av = if t < ACT_VEC { a_lo } else { a_hi };
+            let a_val = self.vec_extract(&kb, av, &[t % ACT_VEC], f32_t)?;
             let prod = self.push(&kb, arith::mulf(decoded, a_val, self.loc))?;
             partial = self.push(&kb, arith::addf(partial, prod, self.loc))?;
         }
@@ -215,7 +252,7 @@ impl<'c> Codegen<'c> {
         let mut acc = self.push(
             &body,
             OperationBuilder::new("scf.for", self.loc)
-                .add_operands(&[zero_k, kd, step, init])
+                .add_operands(&[zero_idx, kd, step, init])
                 .add_results(&[f32_t])
                 .add_regions([kr])
                 .build()?,
@@ -228,13 +265,12 @@ impl<'c> Codegen<'c> {
             mask /= 2;
         }
 
-        let zero = self.const_index(&body, 0)?;
         let is_lead = self.push(
             &body,
-            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lane, zero, self.loc),
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lane, zero_idx, self.loc),
         )?;
         let store = Block::new(&[]);
-        store.append_operation(memref::store(acc, out.mem, &[zero, j], self.loc));
+        store.append_operation(memref::store(acc, out.mem, &[zero_idx, j], self.loc));
         store.append_operation(scf::r#yield(&[], self.loc));
         let sr = Region::new();
         sr.append_block(store);

@@ -64,6 +64,16 @@ pub(crate) fn packed_grid() -> Vec<i8> {
 }
 
 /// [`flat_signs`] packed the same way; the multipliers are +-1.
+/// [`packed_signs`] as a bitwise mask: `0` where the sign is positive, `-1`
+/// where it is negative. The dp4a decode applies signs with `and`, since an
+/// elementwise i8 multiply has no hardware form and scalarizes.
+pub(crate) fn packed_sign_masks() -> Vec<i8> {
+    KSIGNS_IQ2XS
+        .iter()
+        .flat_map(|&byte| KMASK_IQ2XS.map(move |bit| if byte & bit != 0 { -1i8 } else { 0 }))
+        .collect()
+}
+
 pub(crate) fn packed_signs() -> Vec<i8> {
     KSIGNS_IQ2XS
         .iter()

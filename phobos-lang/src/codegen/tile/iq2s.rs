@@ -28,9 +28,9 @@ pub(super) struct Iq2sLane<'c> {
 /// Per-block state: the scaled magnitude, and the lane's grid and sign
 /// entries as one `vector<8xi8>` apiece.
 pub(super) struct Iq2sBlock<'c> {
-    dl: Value<'c, 'c>,
-    grid_v: Value<'c, 'c>,
-    signs_v: Value<'c, 'c>,
+    pub(super) dl: Value<'c, 'c>,
+    pub(super) grid_v: Value<'c, 'c>,
+    pub(super) signs_v: Value<'c, 'c>,
 }
 
 impl<'c> Codegen<'c> {

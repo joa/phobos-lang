@@ -15,12 +15,14 @@ mod iq1m;
 mod iq1m_qdot;
 mod iq1s;
 mod iq1s_qdot;
+mod qdot_i8_delta;
 mod iq2s;
 mod iq2s_qdot;
 mod iq2xs;
 mod iq2xs_qdot;
 mod iq2xxs;
 mod iq2xxs_qdot;
+mod qdot_i8_signed;
 mod iq3s;
 mod iq3s_qdot;
 mod iq3xxs;
@@ -41,6 +43,15 @@ pub(in crate::codegen) use qdecode::QFormat;
 /// Activations a lane loads at once in the quantized matvecs: a lane owns a
 /// contiguous run, so a warp covers 1024 bytes in two loads instead of eight.
 pub(super) const ACT_VEC: i64 = 4;
+
+/// Elements an int8 activation shares one scale over; the `quantize` kernel
+/// the Q8_0 path already uses emits this layout.
+pub(super) const ACT_SCALE_BLOCK: i64 = 32;
+
+/// Largest lookup table a decode kernel stages into shared memory. 16 KB
+/// still leaves room for three CTAs an SM on Turing.
+pub(super) const MAX_STAGED_TABLE: i64 = 16 * 1024;
+
 
 /// A format's packed lookup tables, one `i8` a slot: a lane's whole entry is
 /// one vector load. `signs` aliases `grid` for the one-table formats.

@@ -26,12 +26,14 @@ pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
 pub(crate) use iq1_s::{flat_grid as iq1s_flat_grid, packed_grid as iq1s_packed_grid};
 pub(crate) use iq2_s::{
     flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs,
-    packed_grid as iq2s_packed_grid, packed_signs as iq2s_packed_signs,
+    packed_grid as iq2s_packed_grid, packed_sign_masks as iq2s_sign_masks,
+    packed_signs as iq2s_packed_signs,
 };
 pub(crate) use iq2_xs::{flat_grid as iq2xs_flat_grid, packed_grid as iq2xs_packed_grid};
 pub(crate) use iq2_xxs::{
     flat_grid as iq2xxs_flat_grid, flat_signs as iq2xxs_flat_signs,
-    packed_grid as iq2xxs_packed_grid, packed_signs as iq2xxs_packed_signs,
+    packed_grid as iq2xxs_packed_grid, packed_sign_masks as iq2xxs_sign_masks,
+    packed_signs as iq2xxs_packed_signs,
 };
 pub(crate) use iq3_s::{flat_grid as iq3s_flat_grid, packed_grid as iq3s_packed_grid};
 pub(crate) use iq3_xxs::{flat_grid as iq3xxs_flat_grid, packed_grid as iq3xxs_packed_grid};
@@ -81,6 +83,18 @@ impl Quant {
         Quant::IQ3_S,
         Quant::IQ4_XS,
     ];
+
+    /// Bytes a block occupies once uploaded, which is `spec().block_bytes`
+    /// for every format but Q3_K. Q3_K's 110 leaves three blocks in four at
+    /// an odd multiple of two, and `q3k_qdot_t` reads its qs and hmask planes
+    /// eight bytes at a time, so the upload pads to 112. Disk and host stay
+    /// at 110; only `constant_raw` and the device kernels see this.
+    pub fn device_block_bytes(self) -> usize {
+        match self {
+            Quant::Q3_K => 112,
+            other => other.spec().block_bytes,
+        }
+    }
 
     pub fn spec(self) -> &'static Spec {
         match self {
@@ -294,6 +308,28 @@ impl Packed {
     }
 
     /// The block bytes exactly as the file holds them, `[n, k / block *
+    /// The blocks as the device wants them, signed because the kernel language
+    /// has no unsigned byte type: a raw block byte reads as i8 and the kernel
+    /// corrects it back to 0..255 itself (see `q2k_matvec_src`), same as every
+    /// dequantizer here on the host. A format whose device stride is wider
+    /// than its packed one gets the difference as zero padding a block, so a
+    /// kernel can read the block at its natural alignment; see
+    /// [`Quant::device_block_bytes`].
+    pub fn device_blocks(&self) -> Vec<i8> {
+        let packed = self.spec().block_bytes;
+        let dev = self.quant().device_block_bytes();
+        if dev == packed {
+            return self.blocks().iter().map(|&b| b as i8).collect();
+        }
+        let mut out = vec![0i8; self.blocks().len() / packed * dev];
+        for (i, blk) in self.blocks().chunks_exact(packed).enumerate() {
+            for (o, &b) in blk.iter().enumerate() {
+                out[i * dev + o] = b as i8;
+            }
+        }
+        out
+    }
+
     /// block_bytes]`, for a raw kernel to upload verbatim.
     pub fn blocks(&self) -> &[u8] {
         &self.blocks

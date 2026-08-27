@@ -12,6 +12,15 @@ use std::fmt::Write as _;
 /// Output columns per CTA.
 pub(crate) const IQ1S_TN: usize = 8;
 
+/// Output tile for the dp4a variant, which gives a warp several columns and
+/// needs a wider tile than `IQ1S_TN` to keep the CTA busy.
+pub(crate) const IQ1S_I8_TN: usize = 64;
+
+/// The tile for an `n` that 64 does not divide. A warp then takes two
+/// columns rather than eight, which is slower but still well ahead of the
+/// float path it would otherwise fall back to.
+pub(crate) const IQ1S_I8_NARROW_TN: usize = 16;
+
 const LANES: usize = 32;
 const LANE: usize = 8;
 const BLOCK_BYTES: usize = 50;
@@ -103,6 +112,27 @@ kernel iq1s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                          D[pn * TN :+ TN, :], GRID[0 :+ 1, :])
+}}
+"
+    )
+}
+
+/// [`iq1s_qdot_matvec_src`] against an activation already quantized to int8
+/// by the `quantize` kernel, contracted in `dp4a`. Same result, a third fewer
+/// instructions a weight, and a quarter of the activation traffic.
+pub(crate) fn iq1s_qdot_i8_matvec_src(tn: usize) -> String {
+    format!(
+        "@launch(256)
+@autotune(TN in [{tn}])
+@aligned(N = TN)
+kernel iq1s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                           GRID: tensor<i8>[1, {IQ1S_GRID_LEN}],
+                           C: tensor<f32>[M, N]) {{
+  let pn = program_id(0)
+  C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
+                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                            GRID[0 :+ 1, :])
 }}
 "
     )

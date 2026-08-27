@@ -271,10 +271,7 @@ impl Backend for DeviceBackend {
         let scales = packed.raw_scales()?;
         let block = packed.spec().block;
         let nb = k / block;
-        // The kernel language has no unsigned byte type; a raw block byte
-        // reads as i8 and the kernel corrects it back to 0..255 itself (see
-        // `q2k_matvec_src`), same as every dequantizer here on the host.
-        let bytes: Vec<i8> = packed.blocks().iter().map(|&b| b as i8).collect();
+        let bytes = packed.device_blocks();
         let dmin = if scales.dmin.is_empty() {
             None
         } else {
