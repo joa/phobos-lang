@@ -337,7 +337,7 @@ float       = digit { digit } "." { digit } ;
      otherwise the kernel silently uses the regular f32 path.
      The matmul lowers through thread-level `mma.sync` + `ldmatrix` (m16n8kK:
      k8 on sm_75, k16 on sm_80+) with unpadded, XOR-swizzled shared staging by
-     default (see `docs/MMA_SYNC.md`). This needs 64-bit `index` (the `nvgpu`
+     default. This needs 64-bit `index` (the `nvgpu`
      ops are pointer-width; the bench widens it automatically), so below sm_75
      or when `index` lowers at 32 bits it falls back to the legacy
      warp-collective WMMA API (m16n16k16). Tile-level `dot`/`dot_t` (flash

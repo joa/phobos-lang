@@ -17,7 +17,7 @@ minicpm's gap to llama.cpp, the same way it already explained a chunk of the
 pre-megakernel deficit.
 
 This is lower priority than the other two active beams: it is cleanup on an
-already-worked area (`docs/megakernel.md` step 3 is "under way," not
+already-worked area (the megakernel work step 3 is "under way," not
 untouched), and its ceiling is bounded by ~220 nodes x 3.3us =~ 0.73ms of a
 ~3.5-4ms decode step, so at most it is a couple percent even if fully
 eliminated. Keep it live per AGENT.md's beam discipline (don't collapse to a
@@ -25,7 +25,7 @@ single-incumbent hill climb) but do not let it consume the whole search.
 
 ## What to check first (before writing any code)
 
-`docs/megakernel.md`'s own per-stage report (`PHOBOS_FUSED` env var and the
+the megakernel work's own per-stage report (`PHOBOS_FUSED` env var and the
 per-stage toggles it documents) against minicpm5-1b specifically -- the
 existing measurements there are keyed to Qwen3.5-0.8B and a llama-arch model's
 node count/mix may differ (minicpm runs the plain llama forward pass in
@@ -36,7 +36,7 @@ assumed).
 ## Correctness gate
 
 Any further fusion needs `fuse_check` (fused vs launched, same session, on
-device) before its timing counts, per `docs/megakernel.md`'s own stated
+device) before its timing counts, per the megakernel work's own stated
 practice and CLAUDE.md's general rule for this codebase.
 
 ## Result log
@@ -79,7 +79,7 @@ speculation alone.
 `PHOBOS_PASS_REPORT=9 cargo run --release -p phobos-gguf --features cuda
 --example bench -- -m models/minicpm5-1b-Q8_0.gguf -p 8 -n 8 -r 1`, replay 9
 (confirmed decode: the table below has no `swiglu_2d`/`q8_mma`, and `fused`
-appears once, the MLP already shipped by `docs/megakernel.md`'s "fusion
+appears once, the MLP already shipped by the megakernel work's "fusion
 becomes the default" section):
 
     === pass report, replay 9: 292 launches, 48 SMs ===
@@ -101,13 +101,13 @@ becomes the default" section):
     total 292 launches, ..., 292 launches
 
 (kernel order edited for readability; the raw report groups by first
-occurrence.) 292 matches `docs/megakernel.md`'s own documented number for
+occurrence.) 292 matches the megakernel work's own documented number for
 minicpm exactly ("`models/minicpm5-1b-Q8_0.gguf`... goes 364 -> 292
 launches"), confirming the fused MLP is the *only* stage that fires for
 minicpm today: `PHOBOS_FUSED_PROJ` and `PHOBOS_FUSED_MIX` are wired only to
 the delta net's chain (`qwen35.rs`), which minicpm's plain llama-arch forward
 pass (`phobos-gguf/src/llama.rs`) never builds. 292 launches / decode step
-at ~1.85us/launch (`docs/megakernel.md`'s own probe number) predicts ~540us
+at ~1.85us/launch (the megakernel work's own probe number) predicts ~540us
 of launch boundary, in the same neighborhood as the corroborating nsys datum
 above (655us/step, 294 events) -- reconciled, no discrepancy.
 
@@ -149,7 +149,7 @@ Launch count landed exactly as predicted: `rms_norm_q`(1) + `q8_qdot`(1) +
 total, **292 -> 244**. Second `fused` row confirmed in the per-stage report,
 8288 bytes shared, still 4 blocks/SM (no occupancy cost from the new stage).
 
-**Correctness gates, all per `docs/megakernel.md`'s and CLAUDE.md's stated
+**Correctness gates, all per the megakernel work's and CLAUDE.md's stated
 practice (`fuse_check`/`backend_check`/`batch_check`, not `model_check`,
 which the doc already documents as unreliable on this specific file):**
 
@@ -216,10 +216,10 @@ and the key/value nest leaves 184 of 192 idle (**4% active**) -- while the
 (8), giving 256 active blocks for query alone and 32 for key or value, an
 order of magnitude more parallelism than the fused nest gets for the exact
 same arithmetic. Two removed launches' worth of savings (~2 x 1.85us x 24
-layers =~ 89us/token by `docs/megakernel.md`'s own probe number) does not
+layers =~ 89us/token by the megakernel work's own probe number) does not
 cover what the key/value nest's collapse from 32-to-8-active-blocks costs a
 memory-bandwidth-bound contraction. This is the same category of mistake
-`docs/megakernel.md`'s own step 3b detour names ("a launched kernel's grid
+the megakernel work's own step 3b detour names ("a launched kernel's grid
 axes are parallelism, and folding one into sequential work inside a nest is
 a regression waiting to happen") -- not a repeat of either of that
 document's two *specific* documented dead ends (global-scratch publication;
@@ -244,13 +244,13 @@ changed for Qwen either way -- `qwen35.rs` never called the touched code
 path), but confirmed *during* the round that the change did not alter
 Qwen's launch count or `fuse_check` numbers at all: `PHOBOS_PASS_REPORT=9`
 on `Qwen3.5-0.8B-Q8_0.gguf` reported 220 launches (unchanged from
-`docs/megakernel.md`'s documented baseline) and `fuse_check` reported 8.706e-3
+the megakernel work's documented baseline) and `fuse_check` reported 8.706e-3
 average apart (doc's own number: 8.5e-3), both while the QKV-fusion change
 was still in the tree, since `qwen35.rs` has its own separate `Attention`
 struct and never reaches `llama.rs::Model::attention`.
 
 **What this leaves for the beam.** The 292-launch floor for minicpm (already
-at the MLP-fusion-only state `docs/megakernel.md` documents) is what ships.
+at the MLP-fusion-only state the megakernel work documents) is what ships.
 The natural next increment identified here -- folding the QKV projection in
 via the existing `project_fused`/`ProjF` path -- is not free the way it was
 for Qwen's wide delta-net projection or the MLP's wide gate/up projection,

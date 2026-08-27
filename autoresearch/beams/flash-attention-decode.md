@@ -97,7 +97,7 @@ head would leave a grid a sixth of the card wide) but combines its own
 partial `(m, l, acc)` in-kernel via a device-scope reduction instead of
 writing them to global scratch for a second kernel to read back.
 
-`docs/megakernel.md` already built the primitives this needs: `grid_barrier()`
+the megakernel work already built the primitives this needs: `grid_barrier()`
 (measured 0.88-1.09us, "half a launch") and `@persistent` (grid sized from
 `cuOccupancyMaxActiveBlocksPerMultiprocessor`, not a constant -- the doc's
 own "hard correctness precondition: co-residency" section applies directly
@@ -171,7 +171,7 @@ art to carry forward rather than rediscover:
   cache per head (long-cache latency) or the key axis is still split with an
   online-softmax merge instead of the current two-pass max/exp/sum merge
   (FlashAttention's actual design, and the more faithful target).
-- **`docs/megakernel.md`'s co-residency and occupancy lessons apply if this
+- **the megakernel work's co-residency and occupancy lessons apply if this
   becomes a persistent-kernel design**: a grid barrier deadlocks if every
   block is not resident at once, so grid size has to come from
   `cuOccupancyMaxActiveBlocksPerMultiprocessor`, not a constant, if this ever
@@ -228,7 +228,7 @@ launches.
 What the brief did not anticipate, found only by measuring: **the persistent
 kernel is not simply "the same kernels, one less launch."** Its combined
 shared-memory footprint does not collapse to the wider of the two phases the
-way `docs/megakernel.md`'s redundant-stage tiles do (see that doc's step 3a,
+way the megakernel work's redundant-stage tiles do (see that doc's step 3a,
 "a redundant stage is only free if its result never leaves the block") --
 measured at Qwen's shape, the combined kernel takes 41376 bytes of shared
 against the launched split kernel's own 23760 (merge alone is 17616), nearly
@@ -238,7 +238,7 @@ does not shrink, a halved resident grid means the grid-strided phase-one loop
 needs a *second* pass over the whole key axis where the launched kernel needed
 one. This is a genuine phobos-lang codegen finding, not a design flaw in the
 phase split: the tile pool's liveness tracking, which correctly reuses a
-redundant stage's storage across a barrier when [`docs/megakernel.md`]'s fused
+redundant stage's storage across a barrier when the megakernel work's fused
 MLP does it, is not doing the same across this kernel's two phases. Fixing
 that pooling gap is the highest-value follow-up this round found and did not
 have time to chase (see "What is not chased" below) -- if it collapses the way
@@ -249,7 +249,7 @@ the MLP's does, Qwen's shape stops declining and the whole beam's win widens.
 The mechanism above means the persistent kernel is **slower per call than the
 launched pair at both shapes measured**, and the `tg` win, where there is one,
 comes entirely from removed launches outrunning that per-call cost --
-`docs/megakernel.md`'s own launch-arithmetic-vs-kernel-cost lesson from step
+the megakernel work's own launch-arithmetic-vs-kernel-cost lesson from step
 3b ("cost the kernels, not the boundaries") landing on a third mechanism.
 `attndecode` (`cargo run --release -p phobos-gguf --features cuda --example
 attndecode`), launched vs. persistent, `attn/step` in microseconds, primes as
@@ -414,11 +414,11 @@ items).
 
 - **The shared-memory pooling gap** (combined kernel ~41KB vs the launched
   split kernel's ~24KB, not collapsing to the max of the two phases the way
-  `docs/megakernel.md`'s redundant-stage fix does for the fused MLP) is a
+  the megakernel work's redundant-stage fix does for the fused MLP) is a
   phobos-lang codegen investigation of its own, out of this round's budget.
   If fixed, Qwen's shape likely stops declining and the whole beam's win
   widens closer to the ~15-18% ceiling; this is the single highest-value
-  follow-up either for this beam or for `docs/megakernel.md` generally, since
+  follow-up either for this beam or for the megakernel work generally, since
   the same pooling gap would affect any future two-phase persistent kernel.
 - **Reducing `attention_split`'s own per-call cost** (documented as most of
   attention's share, 6-8x the merge kernel's) is untouched; this round only
@@ -623,7 +623,7 @@ tested; handed to the redesign round in progress as of this note.
 Picked up the highest-value follow-up this beam's own file named ("What is
 not chased this round," above): the combined persist kernel's shared
 footprint summing its two phases (~41KB at Qwen's shape) instead of pooling
-to the wider phase's own (~24KB) the way `docs/megakernel.md`'s
+to the wider phase's own (~24KB) the way the megakernel work's
 redundant-stage fix does for the fused MLP.
 
 **Root cause, found by reading `phobos-lang`'s tile allocator
@@ -679,7 +679,7 @@ just `attention_persist`.** The only other kernel using the attribute is
 `delta_scan` (`phobos-gguf/src/backend/device/kernels/delta.rs`), and the
 pass report after this change shows its footprint moved slightly too (the
 `fused` rows read 8272/9812 bytes against the previously-documented
-8288/9812 in `docs/megakernel.md` -- a handful of bytes shaved off a kernel
+8288/9812 in the megakernel work -- a handful of bytes shaved off a kernel
 this beam never touched, from the same reset firing wherever a dynamic
 kernel's own dead-tile-then-new-shape pattern already existed). Correctness
 for that path is covered the same way as everything else here:
@@ -698,7 +698,7 @@ compiled function's attributes) and silently wrong after (the real footprint
 is now a launch-time dynamic count the occupancy query never saw, which
 would have *undercounted* the kernel and settled a grid too wide for what
 the shared allocation can actually hold at once -- the co-residency
-precondition `docs/megakernel.md` names, and exactly the kind of thing that
+precondition the megakernel work names, and exactly the kind of thing that
 does not crash, it deadlocks `grid_barrier` under load). Fixed by reading
 `self.shared_of(func)` (already populated as a side effect of the
 `compile_dynamic` call two lines above) and passing that to

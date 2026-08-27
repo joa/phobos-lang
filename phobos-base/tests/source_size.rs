@@ -1,4 +1,4 @@
-// The guardrail from docs/MODULARIZE.md: a tree that was split into modules
+// The modularization guardrail: a tree that was split into modules
 // once grows back unless something objects, so this objects. It runs as part of
 // `cargo test` rather than as a separate task because a check nobody remembers
 // to run is not a guardrail.

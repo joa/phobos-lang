@@ -118,7 +118,7 @@ every step once the cache stabilizes at its largest bucket.
    occupancy -- corroborates beam 2 below rather than competing with it.
 2. [[launch-bound-headroom]] -- **one increment tried and reverted, beam
    stays open.** Pulled minicpm's `PHOBOS_FUSED` per-stage report as scoped:
-   292 launches/decode step (matches `docs/megakernel.md`'s documented
+   292 launches/decode step (matches the megakernel work's documented
    number exactly; only the fused MLP fires for minicpm today, since
    `PHOBOS_FUSED_PROJ`/`_MIX` are wired only to Qwen's delta net). Implemented
    the doc's own named next step, folding attention's query/key/value
@@ -213,7 +213,7 @@ closing to parity with FA-off. phobos also already has a working
 FlashAttention-2 kernel in `examples/flash_attention_fp32.ph` (prefill-shaped,
 not wired to decode) -- this beam is an adaptation of its online-softmax
 recurrence into `attention_split` via `grid_barrier()`/`@persistent` (already
-built for `docs/megakernel.md`), not a from-scratch design.
+built for the megakernel work), not a from-scratch design.
 
 ## New primary beam
 
@@ -230,7 +230,7 @@ built for `docs/megakernel.md`), not a from-scratch design.
    with enough full-attention layers to pay for it (minicpm: 24 of 24; Qwen:
    6 of 25, where it is a clean regression, -2 to -3% at longer cache).
    Root cause: the combined kernel's shared-memory footprint does not pool
-   down to the wider of its two phases the way `docs/megakernel.md`'s
+   down to the wider of its two phases the way the megakernel work's
    redundant-stage tiles do (measured ~41KB against the launched split
    kernel's own ~24KB at Qwen's shape), which halves occupancy and forces a
    second grid-strided pass. Shipped behind `PHOBOS_ATTN_PERSIST` (unset =
@@ -297,7 +297,7 @@ the result confirms -- `[[launch-bound-headroom]]`'s remaining unfused
 launches (`store_2d`, `quantize`, `q8_qdot_add`) are still the next lever to
 combine it with. Second, the round surfaced a specific, actionable phobos-lang
 codegen gap (shared-memory pooling not collapsing across a persistent
-kernel's two phases the way it does across `docs/megakernel.md`'s
+kernel's two phases the way it does across the megakernel work's
 redundant-stage barrier) that would widen this beam's own reach if fixed --
 named in the beam file as the highest-value follow-up, ahead of chasing a
 third shape to firm up the shape gate's predicate.
@@ -362,7 +362,7 @@ another large round chasing it.
    scheduling construct `phobos-lang` doesn't already have. The user wants
    the theoretical maximum pursued, which may mean it needs one. Do not treat
    "phobos-lang doesn't have X" as a beam-ending constraint without first
-   asking whether X is a reasonable thing to add (see `docs/megakernel.md`'s
+   asking whether X is a reasonable thing to add (see the megakernel work's
    own history: `grid_barrier()`, `@persistent` and `atomic_add` were all
    added mid-project for exactly this reason).
 4. **If adapting FlashAttention's structure to decode is not enough to close

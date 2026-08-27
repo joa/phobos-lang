@@ -103,7 +103,7 @@ phases for the allocator's phase-boundary reset to exploit (that reset is
 what lets `attention_persist_src` reuse phase-one's footprint for phase
 two; a single online-softmax pass never returns `dynamic_live` to zero
 mid-kernel). `@dynshared` moves the ceiling from 48 KiB to Turing's 64 KiB
-hardware opt-in maximum (`docs/GGUF.md`'s own "Turing's 64K of shared
+hardware opt-in maximum (the GGUF notes's own "Turing's 64K of shared
 memory", confirmed against `phobos-gguf/src/backend/device/launch.rs`'s
 `compile_dynamic`, which raises `CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES`
 to whatever the kernel needs and lets the driver reject it past the
