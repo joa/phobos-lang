@@ -7,8 +7,8 @@ use super::*;
 
 // IQ2_XXS block layout (phobos-gguf/src/quant/iq2_xxs.rs): 66 bytes, the
 // qs/aux plane at byte 2.
-pub(super) const IQ2XXS_BLOCK_BYTES: i64 = 66;
-const IQ2XXS_QS_OFF: i64 = 2;
+pub(super) const IQ2XXS_BLOCK_BYTES: i64 = 64;
+const IQ2XXS_QS_OFF: i64 = 0;
 pub(super) const IQ2XXS_LANE: i64 = 8;
 
 /// Lane geometry: byte offsets within a block, and the lane's element offset.

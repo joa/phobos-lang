@@ -7,9 +7,9 @@ use super::*;
 
 // IQ1_S block layout (phobos-gguf/src/quant/iq1_s.rs): 50 bytes, qs at byte
 // 2, qh at byte 34, 32 lanes of 8 elements.
-pub(super) const IQ1S_BLOCK_BYTES: i64 = 50;
-const IQ1S_QS_OFF: i64 = 2;
-const IQ1S_QH_OFF: i64 = 34;
+pub(super) const IQ1S_BLOCK_BYTES: i64 = 48;
+const IQ1S_QS_OFF: i64 = 0;
+const IQ1S_QH_OFF: i64 = 32;
 pub(super) const IQ1S_LANE: i64 = 8;
 const IQ1S_DELTA: f32 = 0.125;
 

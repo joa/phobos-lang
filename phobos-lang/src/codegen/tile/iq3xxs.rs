@@ -8,9 +8,9 @@ use super::*;
 
 // IQ3_XXS block layout (phobos-gguf/src/quant/iq3_xxs.rs): 98 bytes, qs at
 // byte 2 (two grid-index bytes a lane), aux32 scale/sign field at byte 66.
-pub(super) const IQ3XXS_BLOCK_BYTES: i64 = 98;
-const IQ3XXS_QS_OFF: i64 = 2;
-const IQ3XXS_SS_OFF: i64 = 66;
+pub(super) const IQ3XXS_BLOCK_BYTES: i64 = 96;
+const IQ3XXS_QS_OFF: i64 = 0;
+const IQ3XXS_SS_OFF: i64 = 64;
 /// Elements a lane takes from one of its two grid entries.
 pub(super) const IQ3XXS_HALF: i64 = 4;
 

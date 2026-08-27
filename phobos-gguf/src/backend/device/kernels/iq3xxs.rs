@@ -15,8 +15,8 @@ pub(crate) const IQ3XXS_TN: usize = 8;
 
 const LANES: usize = 32;
 const HALF: usize = 4;
-const BLOCK_BYTES: usize = 98;
-const QS_OFF: usize = 2;
+const BLOCK_BYTES: usize = 96;
+const QS_OFF: usize = 0;
 const SS_OFF: usize = QS_OFF + 64;
 
 /// [`crate::quant::iq3xxs_flat_grid`]'s length: 256 grid entries, four

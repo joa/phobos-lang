@@ -20,8 +20,8 @@ pub(crate) const IQ2XXS_I8_NARROW_TN: usize = 16;
 
 const LANES: usize = 32;
 const LANE: usize = 8;
-const BLOCK_BYTES: usize = 66;
-const QS_OFF: usize = 2;
+const BLOCK_BYTES: usize = 64;
+const QS_OFF: usize = 0;
 
 /// [`crate::quant::iq2xxs_flat_grid`]'s length: 256 grid entries, eight
 /// `i32` lanes apiece.

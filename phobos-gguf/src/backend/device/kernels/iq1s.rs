@@ -23,9 +23,9 @@ pub(crate) const IQ1S_I8_NARROW_TN: usize = 16;
 
 const LANES: usize = 32;
 const LANE: usize = 8;
-const BLOCK_BYTES: usize = 50;
-const QS_OFF: usize = 2;
-const QH_OFF: usize = 34;
+const BLOCK_BYTES: usize = 48;
+const QS_OFF: usize = 0;
+const QH_OFF: usize = 32;
 const DELTA: f32 = 0.125;
 
 /// [`crate::quant::iq1s_flat_grid`]'s length: 2048 grid entries, eight `i32`

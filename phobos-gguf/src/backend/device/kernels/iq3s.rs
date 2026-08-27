@@ -15,8 +15,8 @@ pub(crate) const IQ3S_TN: usize = 8;
 
 const LANES: usize = 32;
 const HALF: usize = 4;
-const BLOCK_BYTES: usize = 110;
-const QS_OFF: usize = 2;
+const BLOCK_BYTES: usize = 108;
+const QS_OFF: usize = 0;
 const QH_OFF: usize = QS_OFF + 64;
 const SIGNS_OFF: usize = QH_OFF + 8;
 const SCALES_OFF: usize = SIGNS_OFF + 32;

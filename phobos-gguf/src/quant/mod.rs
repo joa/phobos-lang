@@ -90,9 +90,23 @@ impl Quant {
     /// eight bytes at a time, so the upload pads to 112. Disk and host stay
     /// at 110; only `constant_raw` and the device kernels see this.
     pub fn device_block_bytes(self) -> usize {
+        self.device_block().1
+    }
+
+    /// How a block reaches the device: leading bytes dropped, then the stride
+    /// it occupies.
+    ///
+    /// Q3_K pads to 112 so its planes land eight-byte aligned. The IQ formats
+    /// open with an f16 `d` that no device kernel reads -- they take the scale
+    /// from the separate plane `constant_raw` uploads -- so those two bytes
+    /// are dropped, which is about 173 MB across a 27B model.
+    pub fn device_block(self) -> (usize, usize) {
+        let bytes = self.spec().block_bytes;
         match self {
-            Quant::Q3_K => 112,
-            other => other.spec().block_bytes,
+            Quant::Q3_K => (0, 112),
+            Quant::IQ1_S | Quant::IQ2_XXS | Quant::IQ2_S => (2, bytes - 2),
+            Quant::IQ2_XS | Quant::IQ3_XXS | Quant::IQ3_S => (2, bytes - 2),
+            _ => (0, bytes),
         }
     }
 
@@ -317,13 +331,14 @@ impl Packed {
     /// [`Quant::device_block_bytes`].
     pub fn device_blocks(&self) -> Vec<i8> {
         let packed = self.spec().block_bytes;
-        let dev = self.quant().device_block_bytes();
-        if dev == packed {
+        let (skip, dev) = self.quant().device_block();
+        if skip == 0 && dev == packed {
             return self.blocks().iter().map(|&b| b as i8).collect();
         }
         let mut out = vec![0i8; self.blocks().len() / packed * dev];
         for (i, blk) in self.blocks().chunks_exact(packed).enumerate() {
-            for (o, &b) in blk.iter().enumerate() {
+            let src = &blk[skip..packed.min(skip + dev)];
+            for (o, &b) in src.iter().enumerate() {
                 out[i * dev + o] = b as i8;
             }
         }

@@ -6,11 +6,11 @@ use super::*;
 
 // IQ2_S block layout (phobos-gguf/src/quant/iq2_s.rs): 82 bytes, qs at byte
 // 2, signs at byte 34, qh at byte 66, scales at byte 74.
-pub(super) const IQ2S_BLOCK_BYTES: i64 = 82;
-const IQ2S_QS_OFF: i64 = 2;
-const IQ2S_SIGNS_OFF: i64 = 34;
-const IQ2S_QH_OFF: i64 = 66;
-const IQ2S_SCALES_OFF: i64 = 74;
+pub(super) const IQ2S_BLOCK_BYTES: i64 = 80;
+const IQ2S_QS_OFF: i64 = 0;
+const IQ2S_SIGNS_OFF: i64 = 32;
+const IQ2S_QH_OFF: i64 = 64;
+const IQ2S_SCALES_OFF: i64 = 72;
 pub(super) const IQ2S_LANE: i64 = 8;
 
 /// Lane geometry: byte offsets, the divisor picking the lane's two qh bits,
