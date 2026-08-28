@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Plot what scripts/bench.py measured: tokens per second, higher is better.
 
-Reads the CSV that `bench.py --csv` writes, or the JSON that `bench.py --json`
+Reads the CSVs that `bench.py --csv` writes, or the JSONs that `bench.py --json`
 writes, and draws one panel per test with a bar per engine and model. The bars
 carry the same figure the table prints, a mean over rounds of each round's mean,
 with the standard error over rounds as the whisker.
@@ -13,6 +13,14 @@ laid out a row per kind, prompt above decode, and a row shares one scale, so
 pp128 against pp512 is a fair comparison of bar lengths while pp against tg is
 not. Every bar is labelled with its own number regardless.
 
+Several files draw as several blocks, one under the other, each with its own
+rows and its own scale. A file is one invocation of bench.py, which is one visit
+to the card with the engines interleaved against each other, so bars are a fair
+comparison within a block and not across two. The scale is per block for the
+same reason it is per row: a 27B that only just fits generates two orders of
+magnitude slower than a model that does, and on the small models' scale it would
+draw as a sliver.
+
 Given the JSON it plots only the rounds bench.py found the card to itself
 between, which is the same number its "t/s uncontended" column reports, and says
 so under the title. The CSV carries no such record, so everything in it is
@@ -21,6 +29,7 @@ plotted. --all-rounds turns the filter off.
 Usage:
     python scripts/bench.py --json bench.json
     python scripts/plot.py bench.json -o bench.png -o bench.svg
+    python scripts/plot.py bench.json bench-qwen38.json -o inference.svg
     python scripts/plot.py bench.csv --dark -o bench-dark.svg
 
 The format follows each -o extension, so SVG, PDF and PNG all come off the same
@@ -66,8 +75,25 @@ THEMES = {
 }
 
 
+# What comes off a model name to leave the label. Only these: a version is a
+# dot too, and Path.stem would take Qwen3.8-27B-UD-IQ1_M down to Qwen3.
+MODEL_SUFFIXES = (".gguf", ".onnx")
+
+
 # --------------------------------------------------------------------------- #
 # reading
+
+
+def model_name(value):
+    """The model's name without its directory or its format's extension.
+
+    bench.py writes the name already, but a CSV assembled by hand can carry the
+    path the run named."""
+    name = Path(value).name
+    for suffix in MODEL_SUFFIXES:
+        if name.lower().endswith(suffix):
+            return name[: -len(suffix)]
+    return name
 
 
 def load(path):
@@ -108,7 +134,7 @@ def load(path):
                 "round": int(r["round"]),
                 "engine": r["engine"],
                 "backend": r["backend"],
-                "model": Path(r["model"]).stem,
+                "model": model_name(r["model"]),
                 "test": r["test"],
                 "rate": float(r["rate"]),
             }
@@ -116,6 +142,24 @@ def load(path):
     if not samples:
         sys.exit(f"no samples in {path}")
     return samples, meta
+
+
+def keep_uncontended(samples, meta, all_rounds, name):
+    """The rounds bench.py had the card to itself around, and how many went.
+
+    A JSON records which rounds those were; a CSV does not, and neither does a
+    run where the card was busy throughout, so both plot whole."""
+    rounds = {s["round"] for s in samples}
+    clean = meta.get("clean")
+    if not clean or all_rounds:
+        return samples, len(rounds), 0
+    kept = rounds & set(clean)
+    if not kept:
+        print(
+            f"every round in {name} was contended; plotting them all", file=sys.stderr
+        )
+        return samples, len(rounds), 0
+    return [s for s in samples if s["round"] in kept], len(kept), len(rounds - kept)
 
 
 def test_kind(test):
@@ -131,6 +175,14 @@ def test_key(test):
         return (True, 0, test)
     kind, count = found.groups()
     return (kind != "pp", int(count), test)
+
+
+def kinds_of(samples):
+    """The tests one file carries, a list per kind, prompt before decode."""
+    grid = {}
+    for test in sorted({s["test"] for s in samples}, key=test_key):
+        grid.setdefault(test_kind(test), []).append(test)
+    return grid
 
 
 def engine_key(engine):
@@ -167,6 +219,11 @@ def fmt_rate(rate):
     if rate >= 1000:
         return f"{rate:,.0f}"
     return f"{rate:.1f}"
+
+
+def panel_inches(models, engines):
+    """How tall a panel of `models` groups of `engines` bars each wants to be."""
+    return 0.26 * models * engines + 0.34 * models + 0.95
 
 
 def draw_panel(ax, test, models, engines, stats, theme, colors, base, scale_max):
@@ -292,21 +349,46 @@ def widen_for_chrome(fig, chrome):
         fig.set_size_inches(needed + 0.4, height_inches)
 
 
-def subtitle(samples, meta, kept, dropped):
+def plural(count, noun):
+    return f"{count} {noun}{'s' if count != 1 else ''}"
+
+
+def agreed(sources, field, fmt=str):
+    """One rendering of a field per distinct value, in the order the files came.
+
+    Two files are two sessions, so the card and the commit are theirs to agree
+    on rather than the plot's to assume."""
+    seen = [fmt(s["meta"][field]) for s in sources if s["meta"].get(field)]
+    return list(dict.fromkeys(seen))
+
+
+def subtitle(sources):
     """What the numbers rest on, in one line: the card, the commit, how many
-    rounds, and whether any of them were thrown out."""
+    rounds each file carries, and whether any of them were thrown out."""
     bits = []
-    if meta.get("card"):
-        bits.append(meta["card"])
-    if meta.get("median_clock"):
-        bits.append(f"{meta['median_clock']:.0f} MHz median under load")
-    if meta.get("commit"):
-        bits.append(f"phobos {meta['commit']}")
-    reps = len({(s["round"], s["engine"], s["model"], s["test"]) for s in samples})
-    per_cell = len(samples) // max(reps, 1)
-    bits.append(f"{kept} rounds x {per_cell} reps, mean +/- standard error")
-    if dropped:
-        bits.append(f"{dropped} contended round{'s' if dropped > 1 else ''} dropped")
+    for field, fmt, shape in (
+        ("card", str, "{}"),
+        ("median_clock", lambda v: f"{v:.0f}", "{} MHz median under load"),
+        ("commit", str, "phobos {}"),
+    ):
+        values = agreed(sources, field, fmt)
+        if values:
+            bits.append(shape.format("/".join(values)))
+
+    if len(sources) == 1:
+        one = sources[0]
+        counted = f"{plural(one['rounds'], 'round')} x {plural(one['reps'], 'rep')}"
+        bits.append(f"{counted}, mean +/- standard error")
+        if one["dropped"]:
+            bits.append(f"{plural(one['dropped'], 'contended round')} dropped")
+        return ", ".join(bits)
+
+    for source in sources:
+        counted = f"{plural(source['rounds'], 'round')} x {plural(source['reps'], 'rep')}"
+        if source["dropped"]:
+            counted += f", {source['dropped']} contended dropped"
+        bits.append(f"{source['name']} {counted}")
+    bits.append("mean +/- standard error, one scale per file")
     return ", ".join(bits)
 
 
@@ -314,7 +396,11 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("results", help="the CSV or JSON scripts/bench.py wrote")
+    ap.add_argument(
+        "results",
+        nargs="+",
+        help="the CSVs or JSONs scripts/bench.py wrote, a block of rows each",
+    )
     ap.add_argument(
         "-o",
         "--out",
@@ -336,26 +422,29 @@ def main():
     ap.add_argument("--dpi", type=int, default=200)
     args = ap.parse_args()
 
-    samples, meta = load(args.results)
-    all_rounds = {s["round"] for s in samples}
+    sources = []
+    for path in args.results:
+        samples, meta = load(path)
+        samples, rounds, dropped = keep_uncontended(
+            samples, meta, args.all_rounds, path
+        )
+        cells = len({(s["round"], s["engine"], s["model"], s["test"]) for s in samples})
+        sources.append(
+            {
+                "name": Path(path).name,
+                "meta": meta,
+                "samples": samples,
+                "stats": summarize(samples),
+                "models": sorted({s["model"] for s in samples}),
+                "kinds": kinds_of(samples),
+                "rounds": rounds,
+                "dropped": dropped,
+                "reps": len(samples) // max(cells, 1),
+            }
+        )
 
-    clean = meta.get("clean")
-    dropped = 0
-    if clean and not args.all_rounds:
-        kept_rounds = all_rounds & set(clean)
-        if kept_rounds:
-            dropped = len(all_rounds) - len(kept_rounds)
-            samples = [s for s in samples if s["round"] in kept_rounds]
-        else:
-            print("every round was contended; plotting them all", file=sys.stderr)
-            kept_rounds = all_rounds
-    else:
-        kept_rounds = all_rounds
-
-    stats = summarize(samples)
-    engines = sorted({s["engine"] for s in samples}, key=engine_key)
-    models = sorted({s["model"] for s in samples})
-    tests = sorted({s["test"] for s in samples}, key=test_key)
+    drawn = [s for source in sources for s in source["samples"]]
+    engines = sorted({s["engine"] for s in drawn}, key=engine_key)
     base = engines[0]
 
     theme = THEMES["dark" if args.dark else "light"]
@@ -366,41 +455,43 @@ def main():
         )
     colors = dict(zip(engines, theme["series"]))
 
-    # A row per kind of test, so prompt sits above decode and the panels of a
-    # row can share one scale.
-    grid = {}
-    for test in tests:
-        grid.setdefault(test_kind(test), []).append(test)
-    kinds = list(grid)
-    columns = max(len(v) for v in grid.values())
-
-    bars = len(models) * len(engines)
-    panel_inches = 0.26 * bars + 0.34 * len(models) + 0.95
+    # A row per kind of test within a file, so prompt sits above decode and the
+    # panels of a row can share one scale. A file's rows stay together, and a
+    # row is only ever as tall as that file's models need.
+    plan = [
+        (source, kind, tests)
+        for source in sources
+        for kind, tests in source["kinds"].items()
+    ]
+    columns = max(len(tests) for _, _, tests in plan)
+    heights = [panel_inches(len(s["models"]), len(engines)) for s, _, _ in plan]
     fig, axes = plt.subplots(
-        len(kinds),
+        len(plan),
         columns,
-        figsize=(1.2 + 4.3 * columns, panel_inches * len(kinds) + 1.55),
+        figsize=(1.2 + 4.3 * columns, sum(heights) + 1.55),
         squeeze=False,
         sharex="row",
+        gridspec_kw={"height_ratios": heights},
     )
     fig.patch.set_facecolor(theme["surface"])
 
     panels = []
-    for row, kind in enumerate(kinds):
+    for row, (source, kind, tests) in enumerate(plan):
         # One scale for the row, taken from its widest bar, so a longer prompt
         # reading faster than a shorter one is visible as a longer bar.
+        stats = source["stats"]
         scale_max = max(
             (stats[k][0] for k in stats if test_kind(k[2]) == kind), default=1.0
         )
         for column in range(columns):
             ax = axes[row][column]
-            if column >= len(grid[kind]):
+            if column >= len(tests):
                 ax.set_visible(False)
                 continue
             ax.set_facecolor(theme["surface"])
             labels = draw_panel(
-                ax, grid[kind][column], models, engines, stats, theme, colors, base,
-                scale_max,
+                ax, tests[column], source["models"], engines, stats, theme, colors,
+                base, scale_max,
             )
             if column:
                 # The models are the same in every panel of a row, so naming
@@ -426,7 +517,7 @@ def main():
         fig.text(
             0.012,
             1 - 0.58 / height_inches,
-            subtitle(samples, meta, len(kept_rounds), dropped),
+            subtitle(sources),
             fontsize=8,
             color=theme["muted"],
             ha="left",
@@ -438,8 +529,15 @@ def main():
     footer = 0.0
     if len(engines) > 1:
         footer = 0.42
-        backends = {s["engine"]: s["backend"] for s in samples}
-        handles, labels = axes[0][0].get_legend_handles_labels()
+        backends = {s["engine"]: s["backend"] for s in drawn}
+        # Gathered over every panel rather than the first: an engine missing
+        # from the first file still belongs in the legend.
+        handles, labels = [], []
+        for ax, _ in panels:
+            for handle, label in zip(*ax.get_legend_handles_labels()):
+                if label not in labels:
+                    handles.append(handle)
+                    labels.append(label)
         labels = [
             l if backends.get(l, "").lower() in l.lower() else f"{l} ({backends.get(l, '?')})"
             for l in labels

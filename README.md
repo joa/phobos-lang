@@ -94,14 +94,19 @@ desktop holding about 975.
 ```plain
 # both engines, interleaved on a card checked for contention, which is what a
 # comparison between the two columns has to be measured with. One invocation
-# covers every row above; the table is its Qwen half, the plot is both models.
+# covers every row of the first table above; the table is its Qwen half.
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
-python scripts/plot.py results/bench.json -o results/inference.svg
 
 # the 27B, which is slow enough that the sizes and repetitions have to come down
 python scripts/bench.py -m models/Qwen3.8-27B-UD-IQ1_M.gguf -p 128 512 -n 32 128 \
   -r 1 -R 3 --csv results/bench-qwen38.csv --json results/bench-qwen38.json
+
+# the plot carries both runs, a block each: one file is one visit to the card,
+# and the 27B generates two orders of magnitude slower, so the two do not share
+# a scale.
+python scripts/plot.py results/bench.json results/bench-qwen38.json \
+  -o results/inference.svg
 
 # either engine on its own, which measures one column and not a comparison
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
