@@ -122,6 +122,18 @@ pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
     want.clamp(256, tn * 32).min(1024)
 }
 
+/// Columns a `dp4a` decode matvec's tile covers. **64**, or what
+/// `PHOBOS_QDOT_I8_TN` overrides it to, so the tile can be swept against the
+/// CTA rather than one at a time: a warp owns `tn * WARP / threads` columns and
+/// that product, not either half, is what moves these kernels.
+pub(crate) fn qdot_i8_tn(default: usize) -> usize {
+    std::env::var("PHOBOS_QDOT_I8_TN")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&tn| tn.is_power_of_two() && (8..=256).contains(&tn))
+        .unwrap_or(default)
+}
+
 /// The Q8_0 projection as a single `qmma_t`, which is what a prompt pass runs.
 ///
 /// [`Q8_MMA_SRC`] applies the block scales every 32 elements of `k`, which forces

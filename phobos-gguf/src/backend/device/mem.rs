@@ -356,6 +356,7 @@ impl DeviceBackend {
     /// Two callers need it: a constant that grows mid-pass, as the rotary table
     /// does when a sequence passes its length, and a zero fill, whose memset
     /// goes straight to the stream while the pass around it is only recorded.
+    #[track_caller]
     pub(super) fn alloc_written_now(&self, len: usize) -> Result<Buf> {
         if !self.recording.get() {
             return self.alloc(len);
