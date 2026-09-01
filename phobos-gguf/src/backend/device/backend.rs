@@ -358,7 +358,7 @@ impl Backend for DeviceBackend {
         // The fused projection first: it decodes inside the contraction, so it
         // neither writes an expanded weight nor leaves scratch behind. Only the
         // shapes it can take whole, see `raw_qmma_eligible`.
-        if m > 1 && self.raw_qmma && self.raw_qmma_eligible(w, m, k, n) {
+        if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
             return self.project_raw_qmma(None, a, m, k, w, n, out);
         }
         if m > 1 && DEQUANT_FORMATS.iter().any(|&q| self.raw_quant_is(w, q)) {
@@ -377,7 +377,7 @@ impl Backend for DeviceBackend {
         n: usize,
         out: Buf,
     ) -> Result<()> {
-        if m > 1 && self.raw_qmma && self.raw_qmma_eligible(w, m, k, n) {
+        if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
             return self.project_raw_qmma(Some(act), a, m, k, w, n, out);
         }
         self.matmul_raw(a, m, k, w, n, out)

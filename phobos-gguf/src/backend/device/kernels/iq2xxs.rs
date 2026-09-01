@@ -198,3 +198,28 @@ kernel iq2xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 "
     )
 }
+
+/// IQ2_XXS's prompt projection, decode and contraction in one kernel.
+///
+/// The same shape as [`super::iq1s::iq1s_qmma_src`] and the second largest item
+/// in a prompt pass: `iq2xxs_qdecode` is 24.0% of one against `iq1s_qdecode`'s
+/// 25.0%, and the expansion pays the same 11x in bytes that fusing removes.
+pub(crate) fn iq2xxs_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    format!(
+        "@launch({block})
+@autotune(TM in [{tm}], TN in [{tn}])
+@aligned(M = TM, N = TN, K = 256)
+kernel iq2xxs_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                   GRID: tensor<i8>[1, {IQ2XXS_GRID_LEN}],
+                   SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
+                   C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm * TM :+ TM, pn * TN :+ TN] = iq2xxs_qmma_staged_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                         QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                                         GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
+}}
+"
+    )
+}

@@ -345,6 +345,23 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
 
+        if op == AssignOp::Set
+            && let Expr::Call { callee, args } = value
+            && callee == "iq2xxs_qmma_staged_t"
+            && !target.is_masked()
+            && target.elem == self.f32_t
+        {
+            let [a, asc, qb, d, grid, signs] = self.iq2xxs_qmma_operands(block, args)?;
+
+            self.iq2xxs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, target)?;
+
+            for t in [&a, &asc, &qb, &d, &grid, &signs] {
+                self.release(t);
+            }
+
+            return Ok(());
+        }
+
         // t = <fmt>_qdecode_t(..) writes the scratch directly, for the same
         // reason qmma_t above does: the values are already in registers at the
         // rows they belong in.

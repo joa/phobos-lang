@@ -22,6 +22,7 @@ mod iq2xs;
 mod iq2xs_qdot;
 mod iq2xxs;
 mod iq2xxs_qdot;
+mod iq2xxs_qmma;
 mod iq3s;
 mod iq3s_qdot;
 mod iq3xxs;
