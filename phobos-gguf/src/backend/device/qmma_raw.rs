@@ -24,6 +24,9 @@ impl DeviceBackend {
     /// because a lane indexes the block bytes itself. A shape that misses goes
     /// back to `project_raw_dense`, which masks.
     pub(super) fn raw_qmma_eligible(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
+        // IQ2_S and IQ2_XS decode the same way but carry two scales a
+        // 32-element block, which this kernel shape cannot express: see
+        // `qmma_signed.rs`.
         const FUSED: [Quant; 2] = [Quant::IQ1_S, Quant::IQ2_XXS];
         FUSED.iter().any(|&q| self.raw_quant_is(w, q))
             && m.is_multiple_of(IQ1S_QMMA_TM)
