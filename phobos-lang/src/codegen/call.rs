@@ -304,6 +304,18 @@ impl<'c> Codegen<'c> {
                 }
                 Ok(Rv::Tile(out))
             }
+            // iq1s_qmma_staged_t(..): the same projection with the decoded
+            // weight staged through shared memory. Only expressible where one
+            // warp owns one patch; see `iq1s_qmma_staged_into`.
+            "iq1s_qmma_staged_t" => {
+                let [a, asc, qb, d, grid] = self.iq1s_qmma_operands(block, args)?;
+                let out = self.alloc_tile_shaped(block, self.f32_t, &[a.shape[0], qb.shape[0]])?;
+                self.iq1s_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &out)?;
+                for t in [&a, &asc, &qb, &d, &grid] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
             // iq1m_qdot_t(a, qb, d, grid): IQ1_M's matvec contraction with
             // the decode folded in, IQ1_S's shared grid but its own
             // per-group scale pairs.

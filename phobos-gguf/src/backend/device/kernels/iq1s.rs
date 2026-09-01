@@ -234,6 +234,21 @@ pub(crate) const IQ1S_SIGNED_GRID_LEN: usize = 2 * IQ1S_GRID_LEN;
 /// `iq1s_qdot_matvec`: `iq1s_qmma_t` assumes in-bounds slices, and `K = 256`
 /// because a lane indexes the block bytes itself.
 pub(crate) fn iq1s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    // The staged form decodes each column once for the whole CTA instead of
+    // once per warp that needs it: pp128 117.7 against 112.4, reproducible, and
+    // the same answer to four digits in `backend_check`. Chosen here rather
+    // than inside codegen so the two produce different source text, which is
+    // what keeps them apart in the kernel cache; a flag read during codegen
+    // would collide with the entry the other one wrote.
+    //
+    // It needs one patch a warp, which `IQ1S_QMMA_TM`, `IQ1S_QMMA_TN` and
+    // `IQ1S_QMMA_CTA` give it; the intrinsic refuses rather than guesses if a
+    // future tile does not. `PHOBOS_QMMA_STAGE=0` goes back to the register
+    // form.
+    let intrinsic = match std::env::var("PHOBOS_QMMA_STAGE").as_deref() {
+        Ok("0") => "iq1s_qmma_t",
+        _ => "iq1s_qmma_staged_t",
+    };
     format!(
         "@launch({block})
 @autotune(TM in [{tm}], TN in [{tn}])
@@ -244,7 +259,7 @@ kernel iq1s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                  C: tensor<f32>[M, N]) {{
   let pm = program_id(0)
   let pn = program_id(1)
-  C[pm * TM :+ TM, pn * TN :+ TN] = iq1s_qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+  C[pm * TM :+ TM, pn * TN :+ TN] = {intrinsic}(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                 QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                                 GRID[0 :+ 1, :])
 }}
