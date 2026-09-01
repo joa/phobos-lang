@@ -391,26 +391,7 @@ impl Backend for DeviceBackend {
     }
 
     fn quantize_act(&self, a: Buf, m: usize, k: usize) -> Result<QAct> {
-        let (act, qa_ptr, das_ptr) = self.act_slot(m, k)?;
-        let blocks = k / Q8_BLOCK;
-        let a_ptr = self.ptr(a, 0)?;
-        let rows = m * blocks;
-        let (module, tile) = if rows * Q8_BLOCK >= WIDE_FLOOR {
-            (&self.quantize_wide, QUANT_TB_WIDE)
-        } else {
-            (&self.quantize, QUANT_TB)
-        };
-        self.launch(
-            module,
-            "quantize",
-            &[
-                (a_ptr, [rows as i64, Q8_BLOCK as i64]),
-                (qa_ptr, [rows as i64, Q8_BLOCK as i64]),
-                (das_ptr, [rows as i64, 1]),
-            ],
-            (rows.div_ceil(tile) as u32, 1, 1),
-        )?;
-        Ok(act)
+        self.quantize_act_into(self.act_slot(m, k)?, a, m, k)
     }
 
     fn matmul_quant_act(

@@ -11,10 +11,16 @@ use super::*;
 /// 488 live handles on Qwen3.8-27B are constants.
 pub(super) enum Slot {
     Owned(DeviceBuffer<f32>),
-    Const { at: u64, len: usize },
+    Const {
+        at: u64,
+        len: usize,
+    },
     /// A sequence's recurrent state: arena-backed like a constant, but
     /// released when the sequence ends, so the arena is counted and reset.
-    State { at: u64, len: usize },
+    State {
+        at: u64,
+        len: usize,
+    },
 }
 
 impl Slot {
@@ -181,13 +187,81 @@ impl DeviceBackend {
 
     /// This pass's next quantized-activation slot, big enough for `m` rows of
     /// `k`, with its device pointers.
+    /// [`Backend::quantize_act`] into a slot the caller picked.
+    pub(super) fn quantize_act_into(
+        &self,
+        slot: (QAct, u64, u64),
+        a: Buf,
+        m: usize,
+        k: usize,
+    ) -> Result<QAct> {
+        let (act, qa_ptr, das_ptr) = slot;
+        let blocks = k / Q8_BLOCK;
+        let a_ptr = self.ptr(a, 0)?;
+        let rows = m * blocks;
+        let (module, tile) = if rows * Q8_BLOCK >= WIDE_FLOOR {
+            (&self.quantize_wide, QUANT_TB_WIDE)
+        } else {
+            (&self.quantize, QUANT_TB)
+        };
+        self.launch(
+            module,
+            "quantize",
+            &[
+                (a_ptr, [rows as i64, Q8_BLOCK as i64]),
+                (qa_ptr, [rows as i64, Q8_BLOCK as i64]),
+                (das_ptr, [rows as i64, 1]),
+            ],
+            (rows.div_ceil(tile) as u32, 1, 1),
+        )?;
+        Ok(act)
+    }
+
+    /// [`Self::quantize_act_into`] with a slot from the ring, for an
+    /// activation the projection that asked for it is the only reader of.
+    pub(super) fn quantize_act_transient(&self, a: Buf, m: usize, k: usize) -> Result<QAct> {
+        self.quantize_act_into(self.act_slot_transient(m, k)?, a, m, k)
+    }
+
+    /// [`Self::act_slot`] for an activation nothing outlives: quantized, read
+    /// by the one projection that asked for it, and never referred to again.
+    ///
+    /// A pass takes a fresh slot per `quantize_act` because a caller may hold
+    /// a handle across many projections, which is what `rms_norm_q` does for
+    /// QKV and for gate and up. The fused projection has one caller that does
+    /// not -- the down projection, whose input is the SwiGLU output -- and at
+    /// 128 rows of a 17408-wide FFN that is 2.2 MiB a layer, 143 MiB across a
+    /// 64-layer model, which is most of what the fused path costs a decode
+    /// step in residency.
+    ///
+    /// Those can share a handful of slots. A recorded pass is instantiated as
+    /// a chain of kernel nodes, in issue order, so the quantize that overwrites
+    /// a ring slot cannot run before the projection that read it: `RING` only
+    /// has to exceed how many are live at once, which is one.
+    pub(super) fn act_slot_transient(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
+        const RING: usize = 4;
+        let at = self.act_ring.get();
+        self.act_ring.set((at + 1) % RING);
+        let base = self.act_next.get();
+        self.act_next.set(base.max(RING));
+        self.act_slot_at(at, m, k)
+    }
+
     pub(super) fn act_slot(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
+        // The ring reserves the first `RING` slots of every pass, so an
+        // exclusive one starts past them.
+        let at = self.act_next.get().max(4);
+        self.act_next.set(at + 1);
+        self.act_slot_at(at, m, k)
+    }
+
+    /// The slot at `at`, grown to `m` by `k` if it is not already that big.
+    fn act_slot_at(&self, at: usize, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
         ensure!(
             k.is_multiple_of(Q8_BLOCK),
             "a quantized activation needs k ({k}) to be a multiple of {Q8_BLOCK}"
         );
         let blocks = k / Q8_BLOCK;
-        let at = self.act_next.get();
         let too_small = self
             .act_scratch
             .borrow()
@@ -206,13 +280,22 @@ impl DeviceBackend {
                 )
             };
             let mut scratch = self.act_scratch.borrow_mut();
+            while scratch.len() < at {
+                // SAFETY: as above; a gap is only ever written before it is
+                // read, by the `too_small` path that fills it.
+                scratch.push(unsafe {
+                    (
+                        DeviceBuffer::uninitialized(1)?,
+                        DeviceBuffer::uninitialized(1)?,
+                    )
+                });
+            }
             if at == scratch.len() {
                 scratch.push(grown);
             } else {
                 scratch[at] = grown;
             }
         }
-        self.act_next.set(at + 1);
         let (q, s) = self.act_ptrs(QAct(at))?;
         Ok((QAct(at), q, s))
     }
