@@ -1114,3 +1114,40 @@ single item gets there and the desktop's own drift is the same size.
   measurement looks like.
 - Allocation-count granularity: 900 allocations of 72 KiB cost 66 MiB for 64
   asked, so the driver's page is small and the count is not a hidden footprint.
+
+## Correction: llama.cpp's pp128 is bistable, and 470 is its healthy number
+
+The entry above said `pp128` was won at 21.4x. **It is not.** The same
+`scripts/bench.py`, four interleaved rounds, with IQ3_XXS and IQ3_S fused as
+well:
+
+| | phobos | llama.cpp | ratio |
+| --- | ---: | ---: | ---: |
+| pp128 | 214.87 +/- 1.06 | **469.91 +/- 0.50** | **0.46x** |
+| tg128 | 16.46 +/- 0.49 | 21.66 +/- 0.01 | 0.76x |
+
+llama.cpp's `pp128` swings between **9.04 +/- 0.01 and 469.91 +/- 0.50** and is
+four-digit stable inside each state. The desktop is what moves it: 9.04 was read
+at 1066 MiB of desktop VRAM, standalone with nothing else on the card, four
+rounds running; 469.91 at 963. So it falls off the same residency cliff phobos
+does, only in its prompt pass rather than its decode, and 469.91 is its honest
+number. **The 477.11 at the top of this note was right and should be quoted
+again.** The two entries that called it a remembered figure were wrong, and the
+21.4x is an artifact of catching the opponent on the wrong side of its own
+cliff.
+
+What survives from that entry: phobos's `pp128` is stable where llama.cpp's is
+not (+/- 1.06 across four rounds against a 52x swing), and every phobos number
+in this note was measured on the same card in the same session as the llama.cpp
+number beside it.
+
+**So neither half of the goal is met.** `pp128` needs 2.2x and `tg128` 1.32x.
+Where each stands:
+
+- `pp128` 214.87 is 0.596 s a pass, **10.5 TOP/s** against llama.cpp's 22.9.
+  The fused projection is 47% of it at 8.4 instructions an `mma`, and time is
+  linear in that count, so the epilogue rewrite (int32 accumulation inside a
+  256-block, worth about 2.5 instructions an `mma`) is the lever that is
+  already scoped. The rest is the expansion path that is left -- Q2_K, IQ4_XS
+  and Q4_K -- plus the output head, which a prompt pass pays too.
+- `tg128` 16.46 is one evicted allocation and 130 MiB, itemized above.
