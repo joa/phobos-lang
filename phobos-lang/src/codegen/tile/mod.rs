@@ -15,15 +15,13 @@ mod iq1m;
 mod iq1m_qdot;
 mod iq1s;
 mod iq1s_qdot;
-mod qdot_i8_delta;
+mod iq1s_qmma;
 mod iq2s;
 mod iq2s_qdot;
 mod iq2xs;
 mod iq2xs_qdot;
 mod iq2xxs;
 mod iq2xxs_qdot;
-mod qdot_i8_signed;
-mod qdot_i8_split;
 mod iq3s;
 mod iq3s_qdot;
 mod iq3xxs;
@@ -34,6 +32,9 @@ mod q2k_qdot;
 mod q3k_qdot;
 mod qdecode;
 mod qdot;
+mod qdot_i8_delta;
+mod qdot_i8_signed;
+mod qdot_i8_split;
 mod qmma;
 mod reduce;
 mod vector;
@@ -52,7 +53,6 @@ pub(super) const ACT_SCALE_BLOCK: i64 = 32;
 /// Largest lookup table a decode kernel stages into shared memory. 16 KB
 /// still leaves room for three CTAs an SM on Turing.
 pub(super) const MAX_STAGED_TABLE: i64 = 16 * 1024;
-
 
 /// A format's packed lookup tables, one `i8` a slot: a lane's whole entry is
 /// one vector load. `signs` aliases `grid` for the one-table formats.

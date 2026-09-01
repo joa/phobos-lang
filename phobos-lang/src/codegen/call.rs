@@ -20,6 +20,27 @@ impl<'c> Codegen<'c> {
         Ok([a, asc, w, wsc])
     }
 
+    /// `(a, a_scales, qb, d, grid)` for an `iq1s_qmma_t` call.
+    pub(super) fn iq1s_qmma_operands(
+        &mut self,
+        block: &Block<'c>,
+        args: &[Expr],
+    ) -> Result<[MemVal<'c>; 5]> {
+        let [a, asc, qb, d, grid] = args else {
+            bail!("iq1s_qmma_t expects (a, a_scales, qb, d, grid)");
+        };
+        let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+            Rv::Tile(t) => Ok(t),
+            Rv::Scalar(_) => bail!("iq1s_qmma_t expects tile operands"),
+        };
+        let a = operand(self, a)?;
+        let asc = operand(self, asc)?;
+        let qb = operand(self, qb)?;
+        let d = operand(self, d)?;
+        let grid = operand(self, grid)?;
+        Ok([a, asc, qb, d, grid])
+    }
+
     /// `(qb, d, tables..)` for a `<fmt>_qdecode_t` call.
     pub(super) fn qdecode_operands(
         &mut self,
@@ -267,6 +288,18 @@ impl<'c> Codegen<'c> {
                 let (d, grid) = (operand(self, d)?, operand(self, grid)?);
                 let out = self.tile_iq1s_qdot_t(block, &a, &qb, &d, &grid)?;
                 for t in [&a, &qb, &d, &grid] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            // iq1s_qmma_t(a, a_scales, qb, d, grid): the same decode as
+            // `iq1s_qdot_t`, contracted on the integer tensor cores over a
+            // batch of rows instead. What a prompt pass runs, so that the
+            // expanded weight is never written at all.
+            "iq1s_qmma_t" => {
+                let [a, asc, qb, d, grid] = self.iq1s_qmma_operands(block, args)?;
+                let out = self.tile_iq1s_qmma_t(block, &a, &asc, &qb, &d, &grid)?;
+                for t in [&a, &asc, &qb, &d, &grid] {
                     self.release(t);
                 }
                 Ok(Rv::Tile(out))

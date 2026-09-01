@@ -238,3 +238,73 @@ fn gather_rejects_a_non_integer_index() {
     let err = emit_err(src);
     assert!(err.contains("integer"), "unexpected error: {err}");
 }
+
+const IQ1S_QMMA: &str = "            @launch(128)
+        @autotune(TM in [128], TN in [64])
+        @aligned(M = TM, N = TN, K = 256)
+        kernel iq1s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                         QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                         GRID: tensor<i8>[1, 32768],
+                         C: tensor<f32>[M, N]) {
+            let pm = program_id(0)
+            let pn = program_id(1)
+            C[pm * TM :+ TM, pn * TN :+ TN] = iq1s_qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                          QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                                          GRID[0 :+ 1, :])
+        }";
+
+#[test]
+fn iq1s_qmma_t_decodes_into_the_tensor_core_fragments() {
+    // The whole point of the fused projection: the grid entry lands in the
+    // same `vector<1x4xi8>` operand a Q8_0 weight would have been loaded into,
+    // so nothing expanded is ever written.
+    let mlir = emit_mlir(IQ1S_QMMA);
+    assert_contains(
+        &mlir,
+        &[
+            "nvgpu.mma.sync",
+            "mmaShape = [8, 8, 16]",
+            "vector<1x4xi8>",
+            "vector<1x2xi32>",
+        ],
+    );
+    // Accumulators carried across k rather than staged.
+    assert_contains(&mlir, &["iter_args"]);
+}
+
+#[test]
+fn iq1s_qmma_t_writes_no_expanded_weight() {
+    // `_qdecode` is 11.4x `_qdot` on the same bytes purely because it stores
+    // the expanded weight; this path must have no such store, and no barrier
+    // inside the k loop either.
+    let mlir = emit_mlir(IQ1S_QMMA);
+    let stores = mlir.matches("memref.store").count();
+    // Two accumulator halves per tile of the warp's patch, written once after
+    // the loop. Anything more would be an expansion.
+    assert!(
+        stores <= 64,
+        "the fused projection is storing more than its accumulators ({stores}) in:
+{mlir}"
+    );
+}
+
+#[test]
+fn iq1s_qmma_t_needs_whole_tensor_core_tiles() {
+    // 8x8 tensor-core outputs need tile dims that are multiples of 8. `k` is
+    // dynamic in the signature, so the whole-256-block promise is the caller's
+    // instead, made by `raw_qmma_eligible` on the host.
+    let src = IQ1S_QMMA.replace("TN in [64]", "TN in [12]");
+    let registry = DialectRegistry::new();
+    register_all_dialects(&registry);
+    let context = Context::new();
+    context.append_dialect_registry(&registry);
+    context.load_all_available_dialects();
+    let module = Module::new(Location::unknown(&context));
+    let kernels = crate::parse(&src).unwrap();
+    let base = phobos_base::context::Context::default();
+    let err = crate::codegen::emit(&base, &kernels, &context, &module).unwrap_err();
+    assert!(
+        err.to_string().contains("multiple of 8"),
+        "unexpected error: {err}"
+    );
+}
