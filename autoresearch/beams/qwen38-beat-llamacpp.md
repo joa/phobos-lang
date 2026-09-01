@@ -1021,3 +1021,96 @@ roughly the size of the head, so the head is what goes.
 
 Two ways out, and they are the same work: fuse the formats that still need the
 scratch, and put the pool on a diet.
+
+## Where it stands: pp128 won, tg128 is 130 MiB short
+
+`scripts/bench.py`, 4 interleaved rounds, `-p 128 -n 128 -r 1`, every default in
+force:
+
+| | phobos | llama.cpp | ratio |
+| --- | ---: | ---: | ---: |
+| pp128 | 193.28 +/- 0.30 | 9.04 +/- 0.03 | **21.4x** |
+| tg128 | 18.02 +/- 0.01 | 21.66 +/- 0.19 | 0.83x |
+
+llama.cpp's `pp128` is 9.04 in all four rounds, in the round it goes first as
+well, and **9.04 +/- 0.01 run on its own with nothing else on the card** -- so
+it is llama.cpp's number here and not something phobos left behind. The 218.68
+it read once in an earlier session does not reproduce; neither does the 477.11
+at the top of this note. Its `tg128` is rock solid at 21.66 either way.
+
+### The tg deficit, measured
+
+`resident_probe` holds ballast in 44 chunks, the arena's shape, and runs the
+head's matvec against it. It prints what the ballast actually cost now, so the
+knee reads off directly:
+
+| free VRAM | `q3k_qdot_matvec` |
+| ---: | --- |
+| 276 MiB | 2.969 ms, 187.4 GB/s |
+| 186 MiB | 3.020 ms, 184.2 GB/s |
+| 40 MiB | 24.834 ms, 22.4 GB/s |
+| 0 MiB | 58.032 ms, 9.6 GB/s |
+
+The model runs at **0 MiB free**: peak 7844 of 8192 by `nvidia-smi`, of which
+the desktop is 950 to 1070 and drifting. Solving for how much of the head is
+paged from its traced 37 GB/s, against 178 MiB/ms resident and 11.1 paged,
+gives **129.5 MiB**. That is the deficit, and it is the whole remaining gap:
+with the head resident a decode step is 46.1 ms rather than 55.5, which is
+**21.7 tok/s against llama.cpp's 21.66**. Parity, from residency alone.
+
+The desktop proves the sensitivity on its own. Same binary, same defaults:
+
+| desktop VRAM | tg128 |
+| ---: | ---: |
+| 910 MiB | 18.03, 18.03 |
+| 941 MiB | 16.92, 16.69 |
+| 1066 MiB | 12.90, 12.90 |
+
+### What the kernels are worth, standalone
+
+`resident_probe` on an empty card, against what the same kernels read inside the
+model:
+
+| kernel | standalone | in the model |
+| --- | ---: | ---: |
+| `q3k_qdot_matvec` (head) | 182-187 GB/s | **37** |
+| `iq1s_qdot_i8_matvec` | 132-136 | 131 |
+| `iq2xxs_qdot_i8_matvec` | 147 | 135 |
+| `iq3xxs_qdot_i8_matvec` | 168 | 150 |
+
+**Only the head is evicted.** Every other decode kernel runs at its own ceiling,
+so there is no second residency problem hiding behind the first, and the qdot
+family's 131-150 GB/s is a tuning gap rather than a defect. The tile sweep says
+that gap does not open with the tile: see `qdot_i8_tn`.
+
+### The 130 MiB, itemized
+
+`PHOBOS_VRAM=1` now names every allocation over 8 MiB and every constant over 8
+MiB. What is reducible, largest first:
+
+- **72 MiB**: the delta net's 48 recurrent states, 3 MiB each in `f32`. Halving
+  them is a numerics change and wants its own measurement.
+- **29 MiB**: `blk.35.attn_v.weight` and `blk.51.attn_v.weight` are Q4_K, which
+  has no device path at all, so they are dequantized to `f32` at upload and held
+  dense: **40 MiB for 11 MiB of weight**. Either a Q4_K kernel or a
+  requantization to Q8_0 at load gets it back.
+- **23 MiB**: the dequant scratch, once IQ1_M, IQ3_XXS and IQ3_S are fused and
+  only Q2_K and IQ4_XS are left to need one, at which point the budget can drop
+  to 8 MiB for nothing.
+- **28 MiB**: the arena's tails, 6034 MiB held for 6006 handed out.
+
+That is 152 MiB against a 130 MiB deficit, so the target is reachable, but no
+single item gets there and the desktop's own drift is the same size.
+
+### Measured and not kept
+
+- The tile and CTA of the decode matvecs (see `qdot_i8_tn`): standalone gains do
+  not survive the model.
+- Taking the dequant scratch before any weight is uploaded, so the driver never
+  has to place it on a full card: tg128 16.95, 16.99 against 16.92, 16.69.
+- `PHOBOS_SLAB_MIB` at 32, 64 and 256 against the 128 default: 10.03, 11.30 and
+  10.03 against **12.90**, twice each. The default is already the best of the
+  four, and the sweep is unusually reproducible, which is what a clean residency
+  measurement looks like.
+- Allocation-count granularity: 900 allocations of 72 KiB cost 66 MiB for 64
+  asked, so the driver's page is small and the count is not a hidden footprint.
