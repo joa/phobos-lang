@@ -508,10 +508,12 @@ pub struct DeviceBackend {
     iq2xxs_qmma: Module,
     iq2s_qmma: Module,
     iq2xs_qmma: Module,
-    /// Whether that projection is used. Off until it stops costing decode what
-    /// it buys prefill: `PHOBOS_RAW_QMMA=1` measures **pp128 101.8 against
-    /// 82.3 and tg128 6.23 against 8.19**, and the decode side is the
-    /// activation slots it takes, one a projection, not the kernel.
+    /// Whether that projection is used. On now, and `PHOBOS_RAW_QMMA=0` turns
+    /// it off. It was off while it cost decode more than it bought prefill,
+    /// which the activation ring and the 32 MiB dequant scratch between them
+    /// undid: at the current default, each row twice, it measures **pp128
+    /// 192.8, 192.9 against 58.4, 58.2 and tg128 18.05, 18.02 against 18.04,
+    /// 18.03**. Prefill 3.3x, decode unchanged.
     raw_qmma: Cell<bool>,
     /// Which formats it covers. `PHOBOS_RAW_QMMA` takes a comma-separated
     /// list as well as a flag -- `iq1s,iq2xxs` -- so the formats can be
@@ -1222,7 +1224,7 @@ impl DeviceBackend {
             iq2xs_qmma,
             raw_qmma: Cell::new(!matches!(
                 std::env::var("PHOBOS_RAW_QMMA").as_deref(),
-                Err(_) | Ok("0" | "off" | "no" | "false")
+                Ok("0" | "off" | "no" | "false")
             )),
             raw_qmma_formats: qmma_formats(),
             dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),
