@@ -306,6 +306,28 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
 
+        // t = iq1s_qmma_t(..) likewise. Without this the fused projection
+        // allocates its own [128, 64] f32 tile, which ptxas reports as 32 KB of
+        // shared memory and holds the kernel to two CTAs per multiprocessor for
+        // no gain: the accumulators are already registers at the rows they
+        // belong in.
+        if op == AssignOp::Set
+            && let Expr::Call { callee, args } = value
+            && callee == "iq1s_qmma_t"
+            && !target.is_masked()
+            && target.elem == self.f32_t
+        {
+            let [a, asc, qb, d, grid] = self.iq1s_qmma_operands(block, args)?;
+
+            self.iq1s_qmma_t_into(block, &a, &asc, &qb, &d, &grid, target)?;
+
+            for t in [&a, &asc, &qb, &d, &grid] {
+                self.release(t);
+            }
+
+            return Ok(());
+        }
+
         // t = <fmt>_qdecode_t(..) writes the scratch directly, for the same
         // reason qmma_t above does: the values are already in registers at the
         // rows they belong in.
