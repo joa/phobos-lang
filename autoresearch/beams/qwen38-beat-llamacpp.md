@@ -823,3 +823,87 @@ What this predicts for the two expansions still unfused, IQ1_M and IQ3_XXS, is
 the opposite of what the previous entry predicted: their slots are now nearly
 free, so they are worth the arithmetic they save. They are 19.1% of the traced
 prompt pass between them.
+
+## The ceiling, and where the fused kernel spends its issue slots
+
+Arithmetic first, because it decides what is worth trying. The tensor histogram
+of the file, host-only:
+
+| type | tensors | elements | MiB | share |
+| --- | ---: | ---: | ---: | ---: |
+| IQ1_S | 163 | 11.90e9 | 2216.8 | 34.6% |
+| IQ2_XXS | 110 | 6.54e9 | 1607.5 | 25.1% |
+| Q3_K (`output.weight`) | 1 | 1.27e9 | 521.0 | 8.1% |
+| IQ2_S | 25 | 1.65e9 | 504.5 | 7.9% |
+| Q2_K (1.27e9 of it `token_embd`) | 8 | 1.39e9 | 435.6 | 6.8% |
+| IQ1_M | 35 | 2.05e9 | 427.7 | 6.7% |
+| IQ2_XS | 25 | 1.16e9 | 320.9 | 5.0% |
+| IQ3_XXS | 21 | 0.74e9 | 271.8 | 4.2% |
+| IQ3_S | 9 | 0.13e9 | 53.7 | 0.8% |
+| Q8_0, F32, IQ4_XS, Q4_K | 454 | 0.05e9 | 47.6 | 0.7% |
+
+The four fused formats are **72.6% of the bytes and 21.25e9 of the elements.**
+A 128-row pass is 2 x 24.35e9 x 128 = **6.23 TFLOP** of projection, so:
+
+- llama.cpp's 477.11 tok/s is 268 ms, **23.2 TOP/s end to end**.
+- phobos at 188 is 681 ms, **9.1 TOP/s**.
+- `iq1s_qmma` runs at **15.2 TOPS**, from two independent readings: 310.0 ms of
+  trace over the 4.72 TFLOP the two fused formats are, and the 11.3 inst/mma
+  calibration against `q8_qmma`'s 9.9 at 30.6.
+
+So fusing what is left cannot get there on its own. At 15.2 TOPS the fused
+72.6% alone is 358 ms and pp128 caps at 316 even if everything else were free.
+**The fused kernel has to roughly double**, and q8-parity is only borderline:
+5.44 TFLOP at 30.6 is 178 ms, plus ~69 ms of unfused `matmul_tc` plus attention
+and norms and the head, which lands right at the line.
+
+(Inference, not measurement: 23.2 TOP/s is above this card's 22.3 TFLOPS f16
+with f32 accumulate, so llama.cpp is reaching the int8 tensor cores rather than
+dequantizing to f16 and calling cuBLAS.)
+
+### The SASS says the loop body, not occupancy
+
+Host-only, `phobos-lang --example ptx` into `ptxas -arch=sm_75 -O3` and
+`nvdisasm`. Both kernels at TM=128, TN=64, CTA=64, both doing **128
+IMMA.8816.S8 per k iteration**, so the bodies divide straight across:
+
+| | `q8_qmma` | `iq1s_qmma` staged |
+| --- | ---: | ---: |
+| k-loop instructions | 768 | 1074 |
+| per mma | 6.0 | 8.4 |
+| registers | 238 | 239 |
+| memory ops in the loop | 56 | 92 |
+| `LDG.E.U8` | 0 | **28** |
+| `LDG.E.U16` | 0 | 16 |
+| `LDG.E`, `LDG.E.64` | 56 | 24, 4 |
+| `LDS.U`, `STS.64` | 0 | 16, 4 |
+| `FMUL`/`FFMA`/`FADD` | 128/128/128 | 160/128/128 |
+
+Three readings:
+
+- **Occupancy is not a lever.** 239 registers pins the kernel at 65536/239, 8
+  warps a multiprocessor, whatever the CTA is; `q8_qmma` reaches 30.6 TOPS at
+  the same 238. A tile sweep is not worth a GPU run.
+- **The 2x is the body.** 1.4x of it is the instruction count and the rest is
+  stalls, since 92 memory instructions against 56 at 8 warps has nothing to
+  hide behind.
+- **28 byte loads a k step, at `[Rn+0x20]` and `[Rn+0x21]`.** That is the block
+  `d`, an `f16` read as two `LDG.E.U8` and reassembled, and `d` is per 256
+  elements while the loop steps 32: it is read eight times per block it belongs
+  to. `ptxas` drops the macro's unread grid and sign loads, as the comment
+  claims, but it does not common these up.
+
+### The epilogue is the second half
+
+Both kernels spend 384 float operations per 128 mma, three per accumulator
+element per 32-element block: `I2F`, the scale `FMUL`, the `FFMA`. That is the
+same 3:1 against the tensor work in both, and it is why `q8_qmma`'s 30.6 is a
+ceiling rather than a target.
+
+It is breakable. The per-32 weight scale is an **odd integer** in all four fused
+formats (IQ1_S is `2*ls+1` up to 15; IQ2_XXS is `(2s+1)/8` with the eighth
+folded into `d`), so it can be applied by an `IMAD` into an `i32` accumulator
+and the float epilogue moved out to the 256-element block. Headroom: IQ1_S
+reaches 4.4e6 in an `i32` over a 256 block and IQ2_XXS 4.3e7, both fine, and
+IQ2_XXS only 2.4x clear if it were carried over the whole of `k` -- which is
+the reason to stop at 256 rather than go per row.
