@@ -34,7 +34,10 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     for block in bytes.chunks_exact(BLOCK_BYTES) {
         d.push(u16::from_le_bytes([block[0], block[1]]));
     }
-    RawScales { d, dmin: Vec::new() }
+    RawScales {
+        d,
+        dmin: Vec::new(),
+    }
 }
 
 /// [`IQ1S_GRID`] flattened to sign-extended lanes: `flat_grid()[i * 8 + j]`
@@ -56,6 +59,27 @@ pub(crate) fn packed_grid() -> Vec<i8> {
         .iter()
         .flat_map(|entry| entry.to_le_bytes().map(|b| b as i8))
         .collect()
+}
+
+/// [`IQ1S_GRID`] with the delta folded in and both signs laid out, the table
+/// `iq1s_qmma_t` reads: `signed_grid()[(idx * 2 + neg) * 8 + j]` is
+/// `8 * g - 1` when `neg`, `8 * g + 1` otherwise, for byte `j` of
+/// `IQ1S_GRID[idx]` read as `i8`.
+///
+/// A weight is `dl * (g +- 1/8)`, which is `(dl / 8) * (8g +- 1)`, and `g` is
+/// -1, 0 or 1, so `8g +- 1` is an exact `i8` in -9..9. That is what lets the
+/// prompt path contract IQ1_S on the integer tensor cores at all, and folding
+/// the sign into the index keeps the decode to one four-byte load: the sign bit
+/// becomes the table's low index bit instead of arithmetic in the kernel.
+pub(crate) fn signed_grid() -> Vec<i8> {
+    let mut out = Vec::with_capacity(IQ1S_GRID.len() * 2 * 8);
+    for entry in IQ1S_GRID {
+        for neg in [false, true] {
+            let delta = if neg { -1 } else { 1 };
+            out.extend(entry.to_le_bytes().map(|b| 8 * (b as i8) + delta));
+        }
+    }
+    out
 }
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {

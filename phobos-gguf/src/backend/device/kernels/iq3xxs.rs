@@ -75,7 +75,10 @@ pub(crate) fn iq3xxs_matvec_src(tn: usize) -> String {
     for is in 0..LANES {
         for (half, (out_off, decode)) in decoded_lane(is).into_iter().enumerate() {
             let a_half = format!("A[pm :+ 1, kb * 256 + {out_off} :+ {HALF}]");
-            let _ = writeln!(body, "{decode}    acc = acc + dot_t({a_half}, decoded{is}_{half})");
+            let _ = writeln!(
+                body,
+                "{decode}    acc = acc + dot_t({a_half}, decoded{is}_{half})"
+            );
         }
     }
 

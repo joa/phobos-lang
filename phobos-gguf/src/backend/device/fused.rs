@@ -174,17 +174,18 @@ impl DeviceBackend {
                 Bound::Given(val) => self.ptr(chain.buf(val)?, 0)?,
                 Bound::WeightQs(val) | Bound::WeightScales(val) => {
                     let w = chain.weight_of(val)?;
-                    let (qs, _, row_scales, stored_n) = quants
+                    let q = quants
                         .get(w.0)
                         .context("use of an unknown quantized weight handle")?;
                     ensure!(
-                        *stored_n as i64 == slot.dims[0],
-                        "a fused weight went up with n = {stored_n}, used with n = {}",
+                        q.n as i64 == slot.dims[0],
+                        "a fused weight went up with n = {}, used with n = {}",
+                        q.n,
                         slot.dims[0]
                     );
                     match slot.bound {
-                        Bound::WeightQs(_) => qs.as_device_ptr().as_raw(),
-                        _ => row_scales.as_device_ptr().as_raw(),
+                        Bound::WeightQs(_) => q.qs,
+                        _ => q.row_scales,
                     }
                 }
                 Bound::ScratchQs(at) => pool[at].0.as_device_ptr().as_raw(),

@@ -4,6 +4,8 @@
 // `quant/iq1_m.rs::raw_scales` reassembles the equivalent word host-side so
 // `d` here is still a plain per-block read.
 
+use super::quant::qdot_i8_cta;
+
 use std::fmt::Write as _;
 
 use super::IQ1S_GRID_LEN;
@@ -26,7 +28,11 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let l = is % 4;
     let qs4_off = QS_OFF + 4 * ib + l;
     let qh_off = QH_OFF + 2 * ib + usize::from(l >= 2);
-    let (idx_div, bit_div) = if l.is_multiple_of(2) { (1, 8) } else { (16, 128) };
+    let (idx_div, bit_div) = if l.is_multiple_of(2) {
+        (1, 8)
+    } else {
+        (16, 128)
+    };
     (qs4_off, qh_off, idx_div, bit_div)
 }
 
@@ -106,8 +112,9 @@ pub(crate) const IQ1M_I8_NARROW_TN: usize = 16;
 
 /// [`iq1m_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
 pub(crate) fn iq1m_qdot_i8_matvec_src(tn: usize) -> String {
+    let cta = qdot_i8_cta(tn);
     format!(
-        "@launch(256)
+        "@launch({cta})
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq1m_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],

@@ -295,6 +295,13 @@ pub trait Backend {
     /// [`Backend::alloc`] in f16, `len` still counted in elements.
     fn alloc_h(&self, len: usize) -> Result<HBuf>;
     fn release_h(&self, buf: HBuf);
+    /// [`Backend::zeroed`] for a buffer that lives as long as the sequence: a
+    /// backend where residency is per allocation wants those together rather
+    /// than one each. Defaults to an ordinary zeroed buffer.
+    fn zeroed_state(&self, len: usize) -> Result<Buf> {
+        self.zeroed(len)
+    }
+
     fn zeroed_h(&self, len: usize) -> Result<HBuf>;
 
     /// Widen f16 storage back for a caller that has to look at it, which only
@@ -383,6 +390,28 @@ pub trait Backend {
     /// [`RawBuf`] wrapper.
     fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
         self.matmul(a, m, k, Buf(w.0), n, out)
+    }
+
+    /// [`Backend::matmul_raw`] against an activation quantized already, where
+    /// the backend has a path that wants one.
+    ///
+    /// A raw kernel that decodes to f32 has no use for it, which is why this
+    /// defaults to ignoring it. One that contracts on the integer tensor cores
+    /// does, and then quantizing per weight rather than taking the caller's
+    /// copy costs an `m * k` scratch slot a projection -- 163 of them for
+    /// IQ1_S alone on a 27B, which is memory the weights need.
+    #[allow(clippy::too_many_arguments)]
+    fn matmul_raw_act(
+        &self,
+        _act: QAct,
+        a: Buf,
+        m: usize,
+        k: usize,
+        w: RawBuf,
+        n: usize,
+        out: Buf,
+    ) -> Result<()> {
+        self.matmul_raw(a, m, k, w, n, out)
     }
 
     /// `out[m, n] = a[m, k] @ w[k, n]`, all row-major.

@@ -5,6 +5,7 @@ use super::*;
 
 impl Backend for DeviceBackend {
     fn alloc(&self, len: usize) -> Result<Buf> {
+        self.note_alloc(len, 1);
         Ok(self.store(self.pool.take(len)?))
     }
 
@@ -18,8 +19,21 @@ impl Backend for DeviceBackend {
             .borrow_mut()
             .get_mut(buf.0)
             .and_then(Option::take);
-        if let Some(buffer) = taken {
-            self.pool.put(buffer);
+        if let Some(slot) = taken {
+            match slot {
+                mem::Slot::Owned(buffer) => {
+                    self.note_alloc(buffer.len(), -1);
+                    self.pool.put(buffer);
+                }
+                mem::Slot::State { .. } => {
+                    let live = self.state_live.get() - 1;
+                    self.state_live.set(live);
+                    if live == 0 {
+                        self.state_arena.reset();
+                    }
+                }
+                mem::Slot::Const { .. } => {}
+            }
             self.free_slots.borrow_mut().push(buf.0);
         }
     }
@@ -74,11 +88,11 @@ impl Backend for DeviceBackend {
     fn upload(&self, data: &[f32]) -> Result<Buf> {
         let buf = self.alloc_written_now(data.len())?;
         let slots = self.slots.borrow();
-        let buffer = slots
-            .get(buf.0)
-            .and_then(Option::as_ref)
-            .context("upload lost its buffer")?;
+        let Some(mem::Slot::Owned(buffer)) = slots.get(buf.0).and_then(Option::as_ref) else {
+            bail!("upload lost its buffer");
+        };
         buffer.index(0..data.len()).copy_from(data)?;
+        drop(slots);
         Ok(buf)
     }
 
@@ -98,6 +112,7 @@ impl Backend for DeviceBackend {
 
     fn begin_pass(&self) -> Result<()> {
         self.trim_after_dense()?;
+        self.mark_pass_vram();
         self.act_next.set(0);
         self.recorded_len.set(0);
         self.flushed.set(false);
@@ -124,10 +139,9 @@ impl Backend for DeviceBackend {
         // the last read has to land before the host can look at it.
         self.stream.synchronize()?;
         let slots = self.slots.borrow();
-        let buffer = slots
-            .get(buf.0)
-            .and_then(Option::as_ref)
-            .context("use of a released buffer handle")?;
+        let Some(mem::Slot::Owned(buffer)) = slots.get(buf.0).and_then(Option::as_ref) else {
+            bail!("reading a released handle, or a constant, which lives in the arena")
+        };
         ensure!(
             buffer.len() >= out.len(),
             "reading {} elements from a {}-element buffer",
@@ -158,7 +172,7 @@ impl Backend for DeviceBackend {
         if let Some(&buf) = self.constants.borrow().get(key) {
             return Ok(buf);
         }
-        let buf = self.upload(data)?;
+        let buf = self.store_const(data)?;
         self.constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
     }
@@ -167,7 +181,7 @@ impl Backend for DeviceBackend {
         if let Some(&buf) = self.constants.borrow().get(key) {
             return Ok(buf);
         }
-        let buf = self.upload(&fill()?)?;
+        let buf = self.store_const(&fill()?)?;
         self.constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
     }
@@ -198,11 +212,7 @@ impl Backend for DeviceBackend {
                         (w_ptr, [k as i64, n as i64]),
                         (out_ptr, [tc_rows as i64, n as i64]),
                     ],
-                    (
-                        (tc_rows / TC_TILE_M) as u32,
-                        (n / TC_TILE_N) as u32,
-                        1,
-                    ),
+                    ((tc_rows / TC_TILE_M) as u32, (n / TC_TILE_N) as u32, 1),
                 )?;
             }
 
@@ -250,12 +260,28 @@ impl Backend for DeviceBackend {
                 row_scales[j * blocks + b] = s;
             }
         }
-        let uploaded = (
-            DeviceBuffer::from_slice(&planes.qs)?,
-            DeviceBuffer::from_slice(&planes.scales)?,
-            DeviceBuffer::from_slice(&row_scales)?,
-            n,
-        );
+        let uploaded = if self.arena_const {
+            DeviceQuant {
+                qs: self.hot.upload(&planes.qs)?,
+                scales: self.hot.upload(&planes.scales)?,
+                row_scales: self.hot.upload(&row_scales)?,
+                n,
+            }
+        } else {
+            let owned = (
+                DeviceBuffer::from_slice(&planes.qs)?,
+                DeviceBuffer::from_slice(&planes.scales)?,
+                DeviceBuffer::from_slice(&row_scales)?,
+            );
+            let at = DeviceQuant {
+                qs: owned.0.as_device_ptr().as_raw(),
+                scales: owned.1.as_device_ptr().as_raw(),
+                row_scales: owned.2.as_device_ptr().as_raw(),
+                n,
+            };
+            self.owned_quants.borrow_mut().push(owned);
+            at
+        };
         let mut quants = self.quants.borrow_mut();
         quants.push(uploaded);
         let buf = QBuf(quants.len() - 1);
@@ -273,19 +299,39 @@ impl Backend for DeviceBackend {
         let block = packed.spec().block;
         let nb = k / block;
         let bytes = packed.device_blocks();
-        let dmin = if scales.dmin.is_empty() {
-            None
+        let uploaded = if self.arena_weights {
+            let dmin = match scales.dmin.is_empty() {
+                true => None,
+                false => Some(self.arena.upload(&scales.dmin)?),
+            };
+            DeviceRaw {
+                bytes: self.arena.upload(&bytes)?,
+                d: self.arena.upload(&scales.d)?,
+                dmin,
+                n,
+                nb,
+                quant: packed.quant(),
+            }
         } else {
-            Some(DeviceBuffer::from_slice(&scales.dmin)?)
+            let owned = (
+                DeviceBuffer::from_slice(&bytes)?,
+                DeviceBuffer::from_slice(&scales.d)?,
+                match scales.dmin.is_empty() {
+                    true => None,
+                    false => Some(DeviceBuffer::from_slice(&scales.dmin)?),
+                },
+            );
+            let at = DeviceRaw {
+                bytes: owned.0.as_device_ptr().as_raw(),
+                d: owned.1.as_device_ptr().as_raw(),
+                dmin: owned.2.as_ref().map(|m| m.as_device_ptr().as_raw()),
+                n,
+                nb,
+                quant: packed.quant(),
+            };
+            self.owned_raw.borrow_mut().push(owned);
+            at
         };
-        let uploaded = (
-            DeviceBuffer::from_slice(&bytes)?,
-            DeviceBuffer::from_slice(&scales.d)?,
-            dmin,
-            n,
-            nb,
-            packed.quant(),
-        );
         let mut raws = self.raw_quants.borrow_mut();
         raws.push(uploaded);
         let buf = RawBuf(raws.len() - 1);
@@ -309,10 +355,39 @@ impl Backend for DeviceBackend {
             Quant::IQ4_XS,
             Quant::Q2_K,
         ];
+        // The fused projection first: it decodes inside the contraction, so it
+        // neither writes an expanded weight nor leaves scratch behind. Only the
+        // shapes it can take whole, see `raw_qmma_eligible`.
+        if m > 1 && self.raw_qmma && self.raw_qmma_eligible(w, m, k, n) {
+            return self.project_raw_qmma(None, a, m, k, w, n, out);
+        }
         if m > 1 && DEQUANT_FORMATS.iter().any(|&q| self.raw_quant_is(w, q)) {
             return self.project_raw_dense(a, m, k, w, n, out);
         }
         self.project_raw(a, m, k, w, n, out)
+    }
+
+    fn matmul_raw_act(
+        &self,
+        act: QAct,
+        a: Buf,
+        m: usize,
+        k: usize,
+        w: RawBuf,
+        n: usize,
+        out: Buf,
+    ) -> Result<()> {
+        if m > 1 && self.raw_qmma && self.raw_qmma_eligible(w, m, k, n) {
+            return self.project_raw_qmma(Some(act), a, m, k, w, n, out);
+        }
+        self.matmul_raw(a, m, k, w, n, out)
+    }
+
+    fn zeroed_state(&self, len: usize) -> Result<Buf> {
+        match self.state_arena_on {
+            true => self.zeroed_state_buf(len),
+            false => self.zeroed(len),
+        }
     }
 
     fn quantize_act(&self, a: Buf, m: usize, k: usize) -> Result<QAct> {

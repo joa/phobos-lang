@@ -480,13 +480,16 @@ impl Linear {
         }
 
         if self.is_raw() {
-            // A raw kernel decodes to f32 and multiplies against the
-            // activation directly, so a caller's pre-quantized `act` (built
-            // for the int8 contraction above) has nothing to offer it.
+            // A raw kernel that decodes to f32 has no use for a caller's
+            // pre-quantized `act`; one that contracts on the integer tensor
+            // cores does, and it is cheaper to hand it over than to have the
+            // backend quantize the same rows again per weight.
             let w = self.raw(backend)?;
-            return backend
-                .matmul_raw(x, rows, self.in_dim, w, self.out_dim, out)
-                .with_context(|| format!("matmul for '{}'", self.key));
+            return match act {
+                Some(act) => backend.matmul_raw_act(act, x, rows, self.in_dim, w, self.out_dim, out),
+                None => backend.matmul_raw(x, rows, self.in_dim, w, self.out_dim, out),
+            }
+            .with_context(|| format!("matmul for '{}'", self.key));
         }
 
         // Either the file was dense or no kernel unpacks its format, in which

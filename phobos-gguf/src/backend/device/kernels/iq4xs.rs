@@ -38,7 +38,11 @@ fn decoded_run(ib: usize) -> (usize, String) {
     let out_off = ib * RUN;
     let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
     let low = format!("(({} / {scale_l_div}) % 16)", byte(scale_l_off));
-    let scales_h = format!("({} + {} * 256)", byte(SCALES_H_OFF), byte(SCALES_H_OFF + 1));
+    let scales_h = format!(
+        "({} + {} * 256)",
+        byte(SCALES_H_OFF),
+        byte(SCALES_H_OFF + 1)
+    );
     let high = format!("(({scales_h} / {scale_h_div}) % 4)");
     let dl = format!("(f32(d) * f32({low} + {high} * 16 - 32))");
     let half = RUN / 2;

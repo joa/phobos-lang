@@ -68,15 +68,15 @@ impl DeviceBackend {
             "matmul_quant needs k ({k}) to be a multiple of {Q8_BLOCK}"
         );
         let quants = self.quants.borrow();
-        let (qs, scales, row_scales, stored_n) = quants
+        let q = quants
             .get(w.0)
             .context("use of an unknown quantized weight handle")?;
         ensure!(
-            *stored_n == n,
-            "quantized weight was uploaded with n = {stored_n}, used with n = {n}"
+            q.n == n,
+            "quantized weight was uploaded with n = {}, used with n = {n}",
+            q.n
         );
-        let (w_ptr, s_ptr) = (qs.as_device_ptr().as_raw(), scales.as_device_ptr().as_raw());
-        let rs_ptr = row_scales.as_device_ptr().as_raw();
+        let (w_ptr, s_ptr, rs_ptr) = (q.qs, q.scales, q.row_scales);
         let out_ptr = self.ptr(out, 0)?;
         let blocks = k / Q8_BLOCK;
         let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
@@ -115,9 +115,7 @@ impl DeviceBackend {
                 } else {
                     1
                 };
-                if depth == Q8_QMMA_TM
-                    && self.qmma_narrow
-                    && q8_qmma_narrow_eligible(rows, n, wide)
+                if depth == Q8_QMMA_TM && self.qmma_narrow && q8_qmma_narrow_eligible(rows, n, wide)
                 {
                     self.launch_qmma_narrow(&tiles, qmma_rows, rows)?;
                 } else if splits > 1 {
@@ -304,9 +302,10 @@ impl DeviceBackend {
         out: Buf,
     ) -> Result<()> {
         let raws = self.raw_quants.borrow();
-        let (bytes, d, dmin, stored_n, nb, quant) = raws
+        let raw = raws
             .get(w.0)
             .context("use of an unknown raw weight handle")?;
+        let (stored_n, nb, quant) = (&raw.n, &raw.nb, &raw.quant);
         ensure!(
             *stored_n == n,
             "raw weight was uploaded with n = {stored_n}, used with n = {n}"
@@ -334,27 +333,41 @@ impl DeviceBackend {
         // and which lookup tables ride along. Off unless asked, since
         // quantizing the activation is a numerics change the host reference
         // does not make.
-        let i8_pick: Option<I8Kernel<'_>> = if self.iq1s_dp4a && m == 1 {
+        let i8_pick: Option<I8Kernel<'_>> = if self.iq1s_dp4a.get() && m == 1 {
             let grid = |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw(), len as i64);
             // The mask half sits one table past the +/-1 one.
-            let mask = |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw() + len as u64, len as i64);
+            let mask = |b: &DeviceBuffer<i8>, len: usize| {
+                (b.as_device_ptr().as_raw() + len as u64, len as i64)
+            };
             match quant {
                 Quant::IQ1_S if n.is_multiple_of(IQ1S_I8_NARROW_TN) => Some((
                     &self.iq1s_qdot_i8[usize::from(!wide_tile(IQ1S_I8_TN))],
                     "iq1s_qdot_i8_matvec",
-                    if wide_tile(IQ1S_I8_TN) { IQ1S_I8_TN } else { IQ1S_I8_NARROW_TN },
+                    if wide_tile(IQ1S_I8_TN) {
+                        IQ1S_I8_TN
+                    } else {
+                        IQ1S_I8_NARROW_TN
+                    },
                     vec![grid(&self.iq1s_grid_packed, IQ1S_GRID_LEN)],
                 )),
                 Quant::IQ1_M if n.is_multiple_of(IQ1M_I8_NARROW_TN) => Some((
                     &self.iq1m_qdot_i8[usize::from(!wide_tile(IQ1M_I8_TN))],
                     "iq1m_qdot_i8_matvec",
-                    if wide_tile(IQ1M_I8_TN) { IQ1M_I8_TN } else { IQ1M_I8_NARROW_TN },
+                    if wide_tile(IQ1M_I8_TN) {
+                        IQ1M_I8_TN
+                    } else {
+                        IQ1M_I8_NARROW_TN
+                    },
                     vec![grid(&self.iq1s_grid_packed, IQ1S_GRID_LEN)],
                 )),
                 Quant::IQ2_XXS if n.is_multiple_of(IQ2XXS_I8_NARROW_TN) => Some((
                     &self.iq2xxs_qdot_i8[usize::from(!wide_tile(IQ2XXS_I8_TN))],
                     "iq2xxs_qdot_i8_matvec",
-                    if wide_tile(IQ2XXS_I8_TN) { IQ2XXS_I8_TN } else { IQ2XXS_I8_NARROW_TN },
+                    if wide_tile(IQ2XXS_I8_TN) {
+                        IQ2XXS_I8_TN
+                    } else {
+                        IQ2XXS_I8_NARROW_TN
+                    },
                     vec![
                         grid(&self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN),
                         mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
@@ -363,7 +376,11 @@ impl DeviceBackend {
                 Quant::IQ2_S if n.is_multiple_of(IQ2S_I8_NARROW_TN) => Some((
                     &self.iq2s_qdot_i8[usize::from(!wide_tile(IQ2S_I8_TN))],
                     "iq2s_qdot_i8_matvec",
-                    if wide_tile(IQ2S_I8_TN) { IQ2S_I8_TN } else { IQ2S_I8_NARROW_TN },
+                    if wide_tile(IQ2S_I8_TN) {
+                        IQ2S_I8_TN
+                    } else {
+                        IQ2S_I8_NARROW_TN
+                    },
                     vec![
                         grid(&self.iq2s_grid_packed, IQ2S_GRID_LEN),
                         mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
@@ -372,7 +389,11 @@ impl DeviceBackend {
                 Quant::IQ2_XS if n.is_multiple_of(IQ2XS_I8_NARROW_TN) => Some((
                     &self.iq2xs_qdot_i8[usize::from(!wide_tile(IQ2XS_I8_TN))],
                     "iq2xs_qdot_i8_matvec",
-                    if wide_tile(IQ2XS_I8_TN) { IQ2XS_I8_TN } else { IQ2XS_I8_NARROW_TN },
+                    if wide_tile(IQ2XS_I8_TN) {
+                        IQ2XS_I8_TN
+                    } else {
+                        IQ2XS_I8_NARROW_TN
+                    },
                     vec![
                         grid(&self.iq2xs_grid_packed, IQ2XS_GRID_LEN),
                         mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
@@ -381,7 +402,11 @@ impl DeviceBackend {
                 Quant::IQ3_XXS if n.is_multiple_of(IQ3XXS_I8_NARROW_TN) => Some((
                     &self.iq3xxs_qdot_i8[usize::from(!wide_tile(IQ3XXS_I8_TN))],
                     "iq3xxs_qdot_i8_matvec",
-                    if wide_tile(IQ3XXS_I8_TN) { IQ3XXS_I8_TN } else { IQ3XXS_I8_NARROW_TN },
+                    if wide_tile(IQ3XXS_I8_TN) {
+                        IQ3XXS_I8_TN
+                    } else {
+                        IQ3XXS_I8_NARROW_TN
+                    },
                     vec![
                         grid(&self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN),
                         mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
@@ -390,7 +415,11 @@ impl DeviceBackend {
                 Quant::IQ3_S if n.is_multiple_of(IQ3S_I8_NARROW_TN) => Some((
                     &self.iq3s_qdot_i8[usize::from(!wide_tile(IQ3S_I8_TN))],
                     "iq3s_qdot_i8_matvec",
-                    if wide_tile(IQ3S_I8_TN) { IQ3S_I8_TN } else { IQ3S_I8_NARROW_TN },
+                    if wide_tile(IQ3S_I8_TN) {
+                        IQ3S_I8_TN
+                    } else {
+                        IQ3S_I8_NARROW_TN
+                    },
                     vec![
                         grid(&self.iq3s_grid_packed, IQ3S_GRID_LEN),
                         mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
@@ -402,7 +431,7 @@ impl DeviceBackend {
             None
         };
         if let Some((module, name, tn, tables)) = i8_pick {
-            let (bytes_ptr, d_ptr) = (bytes.as_device_ptr().as_raw(), d.as_device_ptr().as_raw());
+            let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
             let rb = *nb * quant.device_block_bytes();
             let (nb, n_blocks) = (*nb as i64, k / Q8_BLOCK);
             drop(raws);
@@ -454,7 +483,7 @@ impl DeviceBackend {
             }
         };
         let rb = nb * quant.device_block_bytes();
-        let (bytes_ptr, d_ptr) = (bytes.as_device_ptr().as_raw(), d.as_device_ptr().as_raw());
+        let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
         let a_ptr = self.ptr(a, 0)?;
         let out_ptr = self.ptr(out, 0)?;
         let mut operands = vec![
@@ -462,8 +491,8 @@ impl DeviceBackend {
             (bytes_ptr, [n as i64, rb as i64]),
             (d_ptr, [n as i64, *nb as i64]),
         ];
-        if let Some(dmin) = dmin {
-            operands.push((dmin.as_device_ptr().as_raw(), [n as i64, *nb as i64]));
+        if let Some(dmin) = raw.dmin {
+            operands.push((dmin, [n as i64, *nb as i64]));
         }
         match quant {
             Quant::IQ1_S if iq1s_qdot_eligible => {
@@ -613,7 +642,12 @@ impl DeviceBackend {
             _ => {}
         }
         operands.push((out_ptr, [m as i64, n as i64]));
-        self.launch(module, name, &operands, (n.div_ceil(tn) as u32, m as u32, 1))
+        self.launch(
+            module,
+            name,
+            &operands,
+            (n.div_ceil(tn) as u32, m as u32, 1),
+        )
     }
 
     /// Whether `w`'s format has a dequant kernel in [`Self::project_raw_dense`].
@@ -621,7 +655,7 @@ impl DeviceBackend {
         self.raw_quants
             .borrow()
             .get(w.0)
-            .is_some_and(|(_, _, _, _, _, q)| *q == quant)
+            .is_some_and(|raw| raw.quant == quant)
     }
 
     /// [`Self::project_raw`], but for `m > 1`: dequantizes each output-column
@@ -640,9 +674,10 @@ impl DeviceBackend {
         out: Buf,
     ) -> Result<()> {
         let raws = self.raw_quants.borrow();
-        let (bytes, d, dmin, stored_n, nb, quant) = raws
+        let raw = raws
             .get(w.0)
             .context("use of an unknown raw weight handle")?;
+        let (stored_n, nb, quant) = (&raw.n, &raw.nb, &raw.quant);
         ensure!(
             *stored_n == n,
             "raw weight was uploaded with n = {stored_n}, used with n = {n}"
@@ -660,7 +695,10 @@ impl DeviceBackend {
             Quant::IQ3_S => (&self.iq3s_dequant, "iq3s_dequant", IQ3S_TN),
             Quant::IQ4_XS => (&self.iq4xs_dequant, "iq4xs_dequant", IQ4XS_TN),
             Quant::Q2_K => (&self.q2k_dequant, "q2k_dequant", Q2K_TN),
-            other => anyhow::bail!("project_raw_dense has no dequant kernel for {}", other.name()),
+            other => anyhow::bail!(
+                "project_raw_dense has no dequant kernel for {}",
+                other.name()
+            ),
         };
         // `_dequant` above stays the masked fallback, for a ragged last strip
         // and for the formats with no `_qdecode`. The f16 strip is only sound
@@ -669,22 +707,30 @@ impl DeviceBackend {
         let all_tc = m.is_multiple_of(TC_TILE_M) && k.is_multiple_of(TC_TILE_K);
         let qdecode = match quant {
             Quant::IQ1_S => Some((&self.iq1s_qdecode, &self.iq1s_qdecode_f16, "iq1s_qdecode")),
-            Quant::IQ2_XXS => {
-                Some((&self.iq2xxs_qdecode, &self.iq2xxs_qdecode_f16, "iq2xxs_qdecode"))
-            }
+            Quant::IQ2_XXS => Some((
+                &self.iq2xxs_qdecode,
+                &self.iq2xxs_qdecode_f16,
+                "iq2xxs_qdecode",
+            )),
             Quant::IQ1_M => Some((&self.iq1m_qdecode, &self.iq1m_qdecode_f16, "iq1m_qdecode")),
             Quant::IQ2_S => Some((&self.iq2s_qdecode, &self.iq2s_qdecode_f16, "iq2s_qdecode")),
-            Quant::IQ2_XS => Some((&self.iq2xs_qdecode, &self.iq2xs_qdecode_f16, "iq2xs_qdecode")),
-            Quant::IQ3_XXS => {
-                Some((&self.iq3xxs_qdecode, &self.iq3xxs_qdecode_f16, "iq3xxs_qdecode"))
-            }
+            Quant::IQ2_XS => Some((
+                &self.iq2xs_qdecode,
+                &self.iq2xs_qdecode_f16,
+                "iq2xs_qdecode",
+            )),
+            Quant::IQ3_XXS => Some((
+                &self.iq3xxs_qdecode,
+                &self.iq3xxs_qdecode_f16,
+                "iq3xxs_qdecode",
+            )),
             Quant::IQ3_S => Some((&self.iq3s_qdecode, &self.iq3s_qdecode_f16, "iq3s_qdecode")),
             // Q2_K and IQ4_XS decode on a different lane geometry and are 1%
             // of a prompt pass between them; they keep `_dequant`.
             _ => None,
         };
         let rb = nb * quant.device_block_bytes();
-        let (bytes_ptr, d_ptr) = (bytes.as_device_ptr().as_raw(), d.as_device_ptr().as_raw());
+        let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
         let f16_bytes = size_of::<u16>() as u64;
 
         // Rounded to a whole TC_TILE_N: a budget-shaped strip is a multiple of
@@ -696,16 +742,17 @@ impl DeviceBackend {
         } else {
             strip
         };
-        // One buffer for every strip of this weight, sized to the widest, not
-        // one per distinct width. A kernel operand is a pointer and a shape, so
-        // a short last strip simply uses a prefix. Sized per strip instead, a
-        // prompt pass leaves 542 MiB of scratch across seven pool entries where
-        // 127 MiB does; on a card holding 6.27 GiB of weights in 8 GiB that is
-        // the difference between the weights staying resident and not.
+        // One buffer for every strip of every weight in the model, not one per
+        // distinct width. A kernel operand is a pointer and a shape, so a
+        // narrower weight simply uses a prefix, and `k * strip` is bounded by
+        // RAW_DEQUANT_BUDGET_BYTES by construction. Taken from the pool per
+        // weight instead, the exact-length keying leaves one entry per shape:
+        // 741 to 886 MiB on the 27B, which is what pages its output head out.
+        // See `residency.rs`.
         let widest = k * strip;
         self.note_dense_pass();
-        let scratch_w = self.alloc(widest)?;
-        let scratch_out = self.alloc(m * strip)?;
+        let scratch_w = self.dense_scratch(0, widest)?;
+        let scratch_out = self.dense_scratch(1, m * strip)?;
         let mut n0 = 0;
         while n0 < n {
             let cur = strip.min(n - n0);
@@ -713,15 +760,19 @@ impl DeviceBackend {
             let narrow = expand.is_some() && all_tc && cur.is_multiple_of(TC_TILE_N);
             let mut operands = vec![
                 (bytes_ptr + (n0 * rb) as u64, [cur as i64, rb as i64]),
-                (d_ptr + (n0 * nb) as u64 * f16_bytes, [cur as i64, *nb as i64]),
+                (
+                    d_ptr + (n0 * nb) as u64 * f16_bytes,
+                    [cur as i64, *nb as i64],
+                ),
             ];
             if *quant == Quant::Q2_K {
-                let dmin_ptr = dmin
-                    .as_ref()
-                    .context("Q2_K raw weight is missing its dmin plane")?
-                    .as_device_ptr()
-                    .as_raw();
-                operands.push((dmin_ptr + (n0 * nb) as u64 * f16_bytes, [cur as i64, *nb as i64]));
+                let dmin_ptr = raw
+                    .dmin
+                    .context("Q2_K raw weight is missing its dmin plane")?;
+                operands.push((
+                    dmin_ptr + (n0 * nb) as u64 * f16_bytes,
+                    [cur as i64, *nb as i64],
+                ));
             }
             let (module, name) = match expand {
                 Some((wide, half, name)) => (if narrow { half } else { wide }, name),
@@ -746,7 +797,11 @@ impl DeviceBackend {
                 }
                 Quant::IQ2_XXS => {
                     let g = table(&self.iq2xxs_grid, &self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN);
-                    let v = table(&self.iq2xxs_signs, &self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN);
+                    let v = table(
+                        &self.iq2xxs_signs,
+                        &self.iq2xxs_signs_packed,
+                        IQ2XXS_SIGNS_LEN,
+                    );
                     operands.push(g);
                     operands.push(v);
                 }
@@ -758,13 +813,21 @@ impl DeviceBackend {
                 }
                 Quant::IQ2_XS => {
                     let g = table(&self.iq2xs_grid, &self.iq2xs_grid_packed, IQ2XS_GRID_LEN);
-                    let v = table(&self.iq2xxs_signs, &self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN);
+                    let v = table(
+                        &self.iq2xxs_signs,
+                        &self.iq2xxs_signs_packed,
+                        IQ2XXS_SIGNS_LEN,
+                    );
                     operands.push(g);
                     operands.push(v);
                 }
                 Quant::IQ3_XXS => {
                     let g = table(&self.iq3xxs_grid, &self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN);
-                    let v = table(&self.iq2xxs_signs, &self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN);
+                    let v = table(
+                        &self.iq2xxs_signs,
+                        &self.iq2xxs_signs_packed,
+                        IQ2XXS_SIGNS_LEN,
+                    );
                     operands.push(g);
                     operands.push(v);
                 }
@@ -804,16 +867,26 @@ impl DeviceBackend {
                 self.matmul(a, m, k, scratch_w, cur, scratch_out)?;
             }
             self.copy_2d(
-                Plane { buf: scratch_out, offset: 0, pitch: cur },
-                Plane { buf: out, offset: n0, pitch: n },
+                Plane {
+                    buf: scratch_out,
+                    offset: 0,
+                    pitch: cur,
+                },
+                Plane {
+                    buf: out,
+                    offset: n0,
+                    pitch: n,
+                },
                 m,
                 cur,
             )?;
 
             n0 += cur;
         }
-        self.release(scratch_out);
-        self.release(scratch_w);
+        if !self.dense_scratch_shared {
+            self.release(scratch_out);
+            self.release(scratch_w);
+        }
         Ok(())
     }
 

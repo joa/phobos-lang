@@ -7,6 +7,8 @@
 // shared-memory pool on first use. `qb`, `d`, `grid`, `iota` are the
 // exception: they're views/staged buffers the pool doesn't own.
 
+use super::quant::qdot_i8_cta;
+
 use std::fmt::Write as _;
 
 /// Output columns per CTA.
@@ -55,7 +57,10 @@ fn decoded_lane(is: usize) -> (usize, String) {
           + ((i32(qb[:, {qh_hi_off} :+ 1]) + 256) % 256) * 256)"
     );
     let dl = format!("(f32(d) * f32((({qh} / 4096) % 8) * 2 + 1))");
-    let delta = format!("({DELTA} - {twice_delta} * f32(({qh} / 32768) % 2))", twice_delta = 2.0 * DELTA);
+    let delta = format!(
+        "({DELTA} - {twice_delta} * f32(({qh} / 32768) % 2))",
+        twice_delta = 2.0 * DELTA
+    );
     let base_idx = format!("({qsb} + (({qh} / {shift_div}) % 8) * 256)");
     let idx8 = format!("({base_idx} * {LANE} + iota)");
     (
@@ -69,10 +74,7 @@ pub(crate) fn iq1s_matvec_src(tn: usize) -> String {
     for is in 0..LANES {
         let (out_off, decode) = decoded_lane(is);
         let a_is = format!("A[pm :+ 1, kb * 256 + {out_off} :+ {LANE}]");
-        let _ = writeln!(
-            body,
-            "{decode}    acc = acc + dot_t({a_is}, decoded{is})"
-        );
+        let _ = writeln!(body, "{decode}    acc = acc + dot_t({a_is}, decoded{is})");
     }
 
     format!(
@@ -121,8 +123,9 @@ kernel iq1s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
 /// by the `quantize` kernel, contracted in `dp4a`. Same result, a third fewer
 /// instructions a weight, and a quarter of the activation traffic.
 pub(crate) fn iq1s_qdot_i8_matvec_src(tn: usize) -> String {
+    let cta = qdot_i8_cta(tn);
     format!(
-        "@launch(256)
+        "@launch({cta})
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq1s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
@@ -185,6 +188,65 @@ kernel iq1s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
   let pn = program_id(0)
   SCRATCH[:, pn * TN :+ TN] = iq1s_qdecode_t(QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                              GRID[0 :+ 1, :])
+}}
+"
+    )
+}
+
+/// Rows and columns of the fused prompt projection's output tile.
+///
+/// The same 128 x 64 the Q8_0 projection settled on, and for the same reason:
+/// operand loads and scale arithmetic are per output element however the tiles
+/// are arranged, so what pays for them is the tensor-core tiles in a warp's
+/// patch, and the output tile bounds the patch.
+pub(crate) const IQ1S_QMMA_TM: usize = 128;
+pub(crate) const IQ1S_QMMA_TN: usize = 64;
+
+/// Threads the fused projection's CTA carries.
+///
+/// Narrower than `q8_qmma`'s because `qmma_patch` will not grow a patch past
+/// the point where it leaves warps of the CTA idle, and the patch is what pays
+/// for the decode: at `rm` row-tiles a weight fragment is decoded once and fed
+/// to `rm` tensor instructions. Four warps hold it to `rm = 4`, two let it
+/// reach 8. Emitted, per k step:
+///
+/// | CTA | registers | mma | global loads |
+/// | ---: | ---: | ---: | ---: |
+/// | 32 | 251 | 128 | 104 |
+/// | **64** | **251** | **128** | **104** |
+/// | 128 | 168 | 64 | 92 |
+/// | 256 | 101 | 32 | 52 |
+///
+/// 1.23 tensor instructions a load against 0.70, and no spill either way.
+pub(crate) const IQ1S_QMMA_CTA: usize = 64;
+
+/// Twice [`IQ1S_GRID_LEN`]: the signed table carries both foldings of every
+/// entry so the group's sign bit is an index bit rather than arithmetic. See
+/// `crate::quant::iq1s_signed_grid`.
+pub(crate) const IQ1S_SIGNED_GRID_LEN: usize = 2 * IQ1S_GRID_LEN;
+
+/// IQ1_S's prompt projection, decode and contraction in one kernel.
+///
+/// What this replaces is `iq1s_qdecode` writing an expanded weight and
+/// `matmul_tc` reading it back: 23.8 GB of traffic against the 2.3 GB the
+/// weights themselves are, plus the scratch to hold it, on a card where the
+/// weights are 6.37 GiB of 8. `@aligned` is required, as it is for
+/// `iq1s_qdot_matvec`: `iq1s_qmma_t` assumes in-bounds slices, and `K = 256`
+/// because a lane indexes the block bytes itself.
+pub(crate) fn iq1s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    format!(
+        "@launch({block})
+@autotune(TM in [{tm}], TN in [{tn}])
+@aligned(M = TM, N = TN, K = 256)
+kernel iq1s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                 QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                 GRID: tensor<i8>[1, {IQ1S_SIGNED_GRID_LEN}],
+                 C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm * TM :+ TM, pn * TN :+ TN] = iq1s_qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                                GRID[0 :+ 1, :])
 }}
 "
     )

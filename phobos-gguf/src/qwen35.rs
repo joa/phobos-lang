@@ -682,7 +682,7 @@ impl Model {
         let state = match *recurrent {
             Some(buf) => buf,
             None => {
-                let buf = backend.zeroed(heads * head_dim * head_dim)?;
+                let buf = backend.zeroed_state(heads * head_dim * head_dim)?;
                 *recurrent = Some(buf);
                 buf
             }
