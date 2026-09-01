@@ -907,3 +907,68 @@ and the float epilogue moved out to the 256-element block. Headroom: IQ1_S
 reaches 4.4e6 in an `i32` over a 256 block and IQ2_XXS 4.3e7, both fine, and
 IQ2_XXS only 2.4x clear if it were carried over the whole of `k` -- which is
 the reason to stop at 256 rather than go per row.
+
+## The tile is not the lever; the instruction count is, exactly
+
+`PHOBOS_QMMA_TILE=TMxTNxCTA` overrides the fused tile, so the host-only
+register and instruction sweep can be checked against the card. Four shapes,
+`-p 128 -n 0 -r 2`, one session, fused path on:
+
+| tile | warps a multiprocessor | inst/mma (host) | pp128 |
+| --- | ---: | ---: | ---: |
+| 128x64x64 (default) | 8 | 8.38 | **187.24** |
+| 128x128x128 | 8 | 8.35 | 186.77 |
+| 128x32x64 | 16 | 9.50 | 176.12 |
+| 64x64x128 | 28 | 13.03 | 146.96 |
+
+Fit `1/pp = T_other + T_k * (inst_per_mma / 8.38)` to the first and third rows
+and the fourth predicts 148.4 against 146.96 measured, **within 1%**. So:
+
+- **Time is linear in the fused kernel's instruction count, slope one.** Every
+  instruction taken out of the k loop is time.
+- **Occupancy does nothing.** Eight warps a multiprocessor and twenty-eight
+  measure the same once the instruction count is divided out. `QMMA_TILES` caps
+  a warp's patch at 64 tiles, which is 128 accumulator registers a lane and is
+  what pins the register count, not the CTA shape.
+- The split is **T_k 323 ms and T_other 361 ms** in a 684 ms pass, so the fused
+  kernel is 47% of it and a free kernel would only reach 355 tok/s.
+
+A correction to the entry above: the four fused formats reach **16.8 TOPS**, not
+15.2, at this card state.
+
+### Two things that did not work
+
+`qh` is read as two `LDG.E.U8` because the tile language sees `tensor<i8>`. Read
+instead as a two-element vector bitcast to `i16`, `ptxas` emits `LDG.E.U16`
+plus a `PRMT` to split the halves back apart and the k loop grows from 1073
+instructions to 1123: four fewer loads for fifty more instructions, which by the
+law above is a loss. A single `u16` operand aliasing the same buffer would get
+it, and is worth trying only after the epilogue.
+
+Shrinking an activation slot when the batch shrinks (a prompt pass sizes every
+slot at 128 rows and the decode steps after it carry that) measured **no change
+at all** in `tg128`. Not committed.
+
+## The opponent's numbers are not 477
+
+`scripts/bench.py`, interleaved, 3 rounds, `-p 128 -n 128 -r 1`, fused path on:
+
+| | phobos | llama.cpp | ratio |
+| --- | ---: | ---: | ---: |
+| pp128 | 196.84 +/- 1.30 | 79.12 +/- 69.78 | 2.49x |
+| tg128 | 8.17 +/- 0.02 | 21.37 +/- 0.19 | 0.38x |
+
+The llama.cpp `pp128` stderr is the whole story: **218.68 in round 1 and 9.52,
+9.17 in rounds 2 and 3.** It has the card to itself in every round -- the
+between-round check found nothing all three times -- so the collapse is what
+running a second 6.4 GiB model on an 8 GiB card leaves behind, and it is not
+something phobos earned. Round one is llama.cpp's honest `pp128` and **196.84
+against 218.68 is 0.90x**, not 2.49x and not the 0.41x the 477.11 at the top of
+this note implies. That 477.11 is a remembered figure from another session and
+does not reproduce here; it should not be quoted again.
+
+**So the goal is now one number.** `pp128` is within 10% and moving, and
+`tg128` at 0.38x is where the work is. Per token that is 122 ms against
+llama.cpp's 46.8, or **52 GB/s of weight against 137**, on a card that can do
+496 and is paging because 6.4 GiB of weights plus 1.2 GiB of desktop do not fit
+in 8.

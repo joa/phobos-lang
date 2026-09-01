@@ -685,10 +685,12 @@ impl DeviceBackend {
         let iq3s_dequant_body = iq3s_dequant_src(IQ3S_TN);
         let iq4xs_dequant_body = iq4xs_dequant_src(IQ4XS_TN);
         let q2k_dequant_body = q2k_dequant_src(Q2K_TN);
-        let iq1s_qmma_body = iq1s_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
-        let iq2xxs_qmma_body = iq2xxs_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
-        let iq2s_qmma_body = iq2s_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
-        let iq2xs_qmma_body = iq2xs_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
+        let (qtm, qtn, qcta) = qmma_tile();
+        let qsubs = [("TM", qtm), ("TN", qtn)];
+        let iq1s_qmma_body = iq1s_qmma_src(qcta, qtm, qtn);
+        let iq2xxs_qmma_body = iq2xxs_qmma_src(qcta, qtm, qtn);
+        let iq2s_qmma_body = iq2s_qmma_src(qcta, qtm, qtn);
+        let iq2xs_qmma_body = iq2xs_qmma_src(qcta, qtm, qtn);
         let iq1s_qdecode_body = iq1s_qdecode_src(IQ1S_TN);
         let iq2xxs_qdecode_body = iq2xxs_qdecode_src(IQ2XXS_TN);
         let iq1m_qdecode_body = iq1m_qdecode_src(IQ1M_TN);
@@ -942,22 +944,22 @@ impl DeviceBackend {
         );
         raw_entries.push((
             iq1s_qmma_body.as_str(),
-            &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
+            &qsubs,
             "iq1s_qmma",
         ));
         raw_entries.push((
             iq2xxs_qmma_body.as_str(),
-            &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
+            &qsubs,
             "iq2xxs_qmma",
         ));
         raw_entries.push((
             iq2s_qmma_body.as_str(),
-            &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
+            &qsubs,
             "iq2s_qmma",
         ));
         raw_entries.push((
             iq2xs_qmma_body.as_str(),
-            &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
+            &qsubs,
             "iq2xs_qmma",
         ));
         let mut raw_matvecs = compile_parallel(&raw_entries)?;

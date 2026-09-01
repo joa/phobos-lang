@@ -199,6 +199,23 @@ kernel iq1s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 /// operand loads and scale arithmetic are per output element however the tiles
 /// are arranged, so what pays for them is the tensor-core tiles in a warp's
 /// patch, and the output tile bounds the patch.
+/// The fused projection's tile, and the CTA that carries it.
+///
+/// `PHOBOS_QMMA_TILE=TMxTNxCTA` overrides all three together, which is how the
+/// shape gets swept without a rebuild. The tile has to divide the batch, so
+/// `TM` above 128 takes the expansion path at `pp128`, and the staged form
+/// needs exactly one warp patch a warp.
+pub(crate) fn qmma_tile() -> (usize, usize, usize) {
+    let Ok(spec) = std::env::var("PHOBOS_QMMA_TILE") else {
+        return (IQ1S_QMMA_TM, IQ1S_QMMA_TN, IQ1S_QMMA_CTA);
+    };
+    let mut parts = spec.split('x').map(str::parse::<usize>);
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(tm)), Some(Ok(tn)), Some(Ok(cta))) => (tm, tn, cta),
+        _ => (IQ1S_QMMA_TM, IQ1S_QMMA_TN, IQ1S_QMMA_CTA),
+    }
+}
+
 pub(crate) const IQ1S_QMMA_TM: usize = 128;
 pub(crate) const IQ1S_QMMA_TN: usize = 64;
 
