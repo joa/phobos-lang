@@ -11,6 +11,30 @@ type I8Kernel<'a> = (&'a Module, &'static str, usize, Vec<(u64, i64)>);
 /// `[K, N]` tensor at once.
 const RAW_DEQUANT_BUDGET_BYTES: usize = 128 * 1024 * 1024;
 
+/// [`RAW_DEQUANT_BUDGET_BYTES`], or what `PHOBOS_DEQUANT_MIB` overrides it to.
+///
+/// The scratch is live for the whole prompt pass, and it is what keeps the
+/// 521 MiB output head paged during one: the head reads 58.1 ms there against
+/// 3.02 in a decode step, the same kernel at the same shape. Shrinking it buys
+/// that back and costs launches, and the trade is steep in both directions --
+/// measured with the fused projection on, each row twice:
+///
+/// | budget | pp128 | tg128 |
+/// | ---: | ---: | ---: |
+/// | **128 MiB** | **117.6** | 8.22 |
+/// | 32 MiB | 91.2 | 9.05 |
+/// | 8 MiB | 27.3 | 10.04 |
+///
+/// So the default stays, and the way out is not a smaller scratch but no
+/// scratch: a format with a fused projection never allocates one.
+fn raw_dequant_budget() -> usize {
+    std::env::var("PHOBOS_DEQUANT_MIB")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&mib| mib > 0)
+        .map_or(RAW_DEQUANT_BUDGET_BYTES, |mib| mib * 1024 * 1024)
+}
+
 /// The five buffers every batched Q8_0 kernel contracts over. The weight
 /// pair is whole for every launch; the rest are offset to the row band
 /// a launch covers.
@@ -736,7 +760,7 @@ impl DeviceBackend {
         // Rounded to a whole TC_TILE_N: a budget-shaped strip is a multiple of
         // 64 for no reason, and `Backend::matmul` needs one to reach the
         // tensor cores. Only the last strip is then ragged.
-        let strip = (RAW_DEQUANT_BUDGET_BYTES / (k * size_of::<f32>())).clamp(1, n);
+        let strip = (raw_dequant_budget() / (k * size_of::<f32>())).clamp(1, n);
         let strip = if strip >= TC_TILE_N {
             strip - strip % TC_TILE_N
         } else {
