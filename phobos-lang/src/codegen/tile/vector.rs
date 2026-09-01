@@ -189,6 +189,27 @@ impl<'c> Codegen<'c> {
         )
     }
 
+    /// `mask` picking elements out of `a` and `b` laid end to end, which is
+    /// what joins two four-wide grid entries into the eight-wide lane the
+    /// staged projection stores: see `qmma_signed.rs`.
+    pub(in crate::codegen) fn vec_shuffle(
+        &self,
+        block: &Block<'c>,
+        a: Value<'c, 'c>,
+        b: Value<'c, 'c>,
+        mask: &[i64],
+        want: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("vector.shuffle", self.loc)
+                .add_operands(&[a, b])
+                .add_attributes(&[(self.id("mask"), self.i64_array(mask)?)])
+                .add_results(&[want])
+                .build()?,
+        )
+    }
+
     pub(in crate::codegen) fn vec_extract(
         &self,
         block: &Block<'c>,

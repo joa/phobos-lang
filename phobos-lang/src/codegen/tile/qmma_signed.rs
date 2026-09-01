@@ -21,13 +21,28 @@
 // rather than an assumption that it pays.
 
 use super::iq2s::{IQ2S_BLOCK_BYTES, IQ2S_LANE};
+use super::iq3s::{IQ3S_BLOCK_BYTES, IQ3S_LANE};
+use super::iq3xxs::{IQ3XXS_BLOCK_BYTES, IQ3XXS_LANE};
 use super::iq2xs::{IQ2XS_BLOCK_BYTES, IQ2XS_LANE};
 use super::iq2xxs::{IQ2XXS_BLOCK_BYTES, IQ2XXS_LANE};
 use super::*;
 
+/// The lane's eight magnitudes: one eight-wide grid entry, or two four-wide
+/// ones joined. IQ2's grid is a `u64` a lane and IQ3's a pair of `u32`, which
+/// is the only thing that differs between them here.
+macro_rules! qmma_grid {
+    ($self:ident, $kb:ident, $dec:ident, $g:ident) => {
+        $dec.$g
+    };
+    ($self:ident, $kb:ident, $dec:ident, $g1:ident, $g2:ident) => {{
+        let want = Type::vector(&[8], $self.i8_t);
+        $self.vec_shuffle(&$kb, $dec.$g1, $dec.$g2, &[0, 1, 2, 3, 4, 5, 6, 7], want)?
+    }};
+}
+
 macro_rules! signed_qmma {
     ($fn:ident, $label:literal, $lane_fn:ident, $block_fn:ident,
-     $bytes:ident, $lane_w:ident, $scale:ident, $split:expr) => {
+     $bytes:ident, $lane_w:ident, $scale:ident, $split:expr, $($grid_f:ident),+) => {
         impl<'c> Codegen<'c> {
             /// out[i, j] = sum_b (sum_{k in group b} a[i, k] * w[j, k]) with
             /// `w` decoded from the format rather than read: the batched
@@ -217,7 +232,8 @@ macro_rules! signed_qmma {
                     // A magnitude times its sign is the weight, and both are
                     // already i8, which is why this family reaches the tensor
                     // cores without a correction term.
-                    let v = self.push(&kb, arith::muli(dec.grid_v, dec.signs_v, self.loc))?;
+                    let mag = qmma_grid!(self, kb, dec, $($grid_f),+);
+                    let v = self.push(&kb, arith::muli(mag, dec.signs_v, self.loc))?;
                     let dst = self.muli(&kb, l, eight)?;
                     self.vec_store_al(&kb, v, stage.mem, &[j, dst], 8)?;
                 }
@@ -384,7 +400,8 @@ signed_qmma!(
     IQ2XXS_BLOCK_BYTES,
     IQ2XXS_LANE,
     db,
-    false
+    false,
+    grid_v
 );
 signed_qmma!(
     iq2s_qmma_staged_into,
@@ -394,7 +411,8 @@ signed_qmma!(
     IQ2S_BLOCK_BYTES,
     IQ2S_LANE,
     dl,
-    true
+    true,
+    grid_v
 );
 signed_qmma!(
     iq2xs_qmma_staged_into,
@@ -404,5 +422,33 @@ signed_qmma!(
     IQ2XS_BLOCK_BYTES,
     IQ2XS_LANE,
     dl,
-    true
+    true,
+    grid_v
+);
+// IQ3's grid entry is four bytes, so a lane joins two of them; its scale is one
+// a 32-element group in IQ3_XXS and one a 64 in IQ3_S, and either is constant
+// across a k step, which is all the unsplit arm needs.
+signed_qmma!(
+    iq3xxs_qmma_staged_into,
+    "iq3xxs_qmma_t",
+    iq3xxs_lane,
+    iq3xxs_block,
+    IQ3XXS_BLOCK_BYTES,
+    IQ3XXS_LANE,
+    db,
+    false,
+    g1_v,
+    g2_v
+);
+signed_qmma!(
+    iq3s_qmma_staged_into,
+    "iq3s_qmma_t",
+    iq3s_lane,
+    iq3s_block,
+    IQ3S_BLOCK_BYTES,
+    IQ3S_LANE,
+    db,
+    false,
+    g1_v,
+    g2_v
 );

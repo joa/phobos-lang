@@ -24,7 +24,14 @@ impl DeviceBackend {
     /// because a lane indexes the block bytes itself. A shape that misses goes
     /// back to `project_raw_dense`, which masks.
     pub(super) fn raw_qmma_eligible(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
-        const FUSED: [Quant; 4] = [Quant::IQ1_S, Quant::IQ2_XXS, Quant::IQ2_S, Quant::IQ2_XS];
+        const FUSED: [Quant; 6] = [
+            Quant::IQ1_S,
+            Quant::IQ2_XXS,
+            Quant::IQ2_S,
+            Quant::IQ2_XS,
+            Quant::IQ3_XXS,
+            Quant::IQ3_S,
+        ];
         FUSED
             .iter()
             .filter(|&&q| self.raw_qmma_formats.contains(&q))
@@ -71,6 +78,8 @@ impl DeviceBackend {
             Quant::IQ2_XXS => (&self.iq2xxs_qmma, "iq2xxs_qmma"),
             Quant::IQ2_S => (&self.iq2s_qmma, "iq2s_qmma"),
             Quant::IQ2_XS => (&self.iq2xs_qmma, "iq2xs_qmma"),
+            Quant::IQ3_XXS => (&self.iq3xxs_qmma, "iq3xxs_qmma"),
+            Quant::IQ3_S => (&self.iq3s_qmma, "iq3s_qmma"),
             other => bail!("project_raw_qmma has no fused kernel for {}", other.name()),
         };
 
@@ -119,6 +128,18 @@ impl DeviceBackend {
                         IQ2XS_GRID_LEN,
                         &self.iq2xxs_signs_packed,
                         IQ2XXS_SIGNS_LEN,
+                    ),
+                    Quant::IQ3_XXS => (
+                        &self.iq3xxs_grid_packed,
+                        IQ3XXS_GRID_LEN,
+                        &self.iq2xxs_signs_packed,
+                        IQ2XXS_SIGNS_LEN,
+                    ),
+                    Quant::IQ3_S => (
+                        &self.iq3s_grid_packed,
+                        IQ3S_GRID_LEN,
+                        &self.iq2s_signs_packed,
+                        IQ2S_SIGNS_LEN,
                     ),
                     _ => (
                         &self.iq2xxs_grid_packed,
