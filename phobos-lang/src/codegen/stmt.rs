@@ -347,13 +347,26 @@ impl<'c> Codegen<'c> {
 
         if op == AssignOp::Set
             && let Expr::Call { callee, args } = value
-            && callee == "iq2xxs_qmma_staged_t"
+            && matches!(
+                callee.as_str(),
+                "iq2xxs_qmma_staged_t" | "iq2s_qmma_staged_t" | "iq2xs_qmma_staged_t"
+            )
             && !target.is_masked()
             && target.elem == self.f32_t
         {
             let [a, asc, qb, d, grid, signs] = self.iq2xxs_qmma_operands(block, args)?;
 
-            self.iq2xxs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, target)?;
+            match callee.as_str() {
+                "iq2s_qmma_staged_t" => {
+                    self.iq2s_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, target)?
+                }
+                "iq2xs_qmma_staged_t" => {
+                    self.iq2xs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, target)?
+                }
+                _ => {
+                    self.iq2xxs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, target)?
+                }
+            }
 
             for t in [&a, &asc, &qb, &d, &grid, &signs] {
                 self.release(t);

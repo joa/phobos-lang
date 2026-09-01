@@ -24,10 +24,7 @@ impl DeviceBackend {
     /// because a lane indexes the block bytes itself. A shape that misses goes
     /// back to `project_raw_dense`, which masks.
     pub(super) fn raw_qmma_eligible(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
-        // IQ2_S and IQ2_XS decode the same way but carry two scales a
-        // 32-element block, which this kernel shape cannot express: see
-        // `qmma_signed.rs`.
-        const FUSED: [Quant; 2] = [Quant::IQ1_S, Quant::IQ2_XXS];
+        const FUSED: [Quant; 4] = [Quant::IQ1_S, Quant::IQ2_XXS, Quant::IQ2_S, Quant::IQ2_XS];
         FUSED.iter().any(|&q| self.raw_quant_is(w, q))
             && m.is_multiple_of(IQ1S_QMMA_TM)
             && n.is_multiple_of(IQ1S_QMMA_TN)
@@ -66,6 +63,8 @@ impl DeviceBackend {
         let (module, name) = match quant {
             Quant::IQ1_S => (&self.iq1s_qmma, "iq1s_qmma"),
             Quant::IQ2_XXS => (&self.iq2xxs_qmma, "iq2xxs_qmma"),
+            Quant::IQ2_S => (&self.iq2s_qmma, "iq2s_qmma"),
+            Quant::IQ2_XS => (&self.iq2xs_qmma, "iq2xs_qmma"),
             other => bail!("project_raw_qmma has no fused kernel for {}", other.name()),
         };
 
@@ -94,15 +93,31 @@ impl DeviceBackend {
                 self.iq1s_signed_grid.as_device_ptr().as_raw(),
                 [1, IQ1S_SIGNED_GRID_LEN as i64],
             )),
-            _ => {
-                operands.push((
-                    self.iq2xxs_grid_packed.as_device_ptr().as_raw(),
-                    [1, IQ2XXS_GRID_LEN as i64],
-                ));
-                operands.push((
-                    self.iq2xxs_signs_packed.as_device_ptr().as_raw(),
-                    [1, IQ2XXS_SIGNS_LEN as i64],
-                ));
+            // IQ2_XS shares IQ2_XXS's sign table, as its decode does
+            // everywhere else in this backend.
+            other => {
+                let (grid, glen, signs, slen) = match other {
+                    Quant::IQ2_S => (
+                        &self.iq2s_grid_packed,
+                        IQ2S_GRID_LEN,
+                        &self.iq2s_signs_packed,
+                        IQ2S_SIGNS_LEN,
+                    ),
+                    Quant::IQ2_XS => (
+                        &self.iq2xs_grid_packed,
+                        IQ2XS_GRID_LEN,
+                        &self.iq2xxs_signs_packed,
+                        IQ2XXS_SIGNS_LEN,
+                    ),
+                    _ => (
+                        &self.iq2xxs_grid_packed,
+                        IQ2XXS_GRID_LEN,
+                        &self.iq2xxs_signs_packed,
+                        IQ2XXS_SIGNS_LEN,
+                    ),
+                };
+                operands.push((grid.as_device_ptr().as_raw(), [1, glen as i64]));
+                operands.push((signs.as_device_ptr().as_raw(), [1, slen as i64]));
             }
         }
         operands.push((self.ptr(out, 0)?, [m as i64, n as i64]));

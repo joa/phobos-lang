@@ -468,8 +468,11 @@ pub struct DeviceBackend {
     /// IQ1_S's prompt projection: the decode contracted on the integer tensor
     /// cores, so no expanded weight is ever written. See `qmma_raw.rs`.
     iq1s_qmma: Module,
-    /// IQ2_XXS's, the second largest item in a prompt pass.
+    /// IQ2_XXS's, the second largest item in a prompt pass, and the two that
+    /// share its decode but scale per sixteen elements.
     iq2xxs_qmma: Module,
+    iq2s_qmma: Module,
+    iq2xs_qmma: Module,
     /// Whether that projection is used. Off until it stops costing decode what
     /// it buys prefill: `PHOBOS_RAW_QMMA=1` measures **pp128 101.8 against
     /// 82.3 and tg128 6.23 against 8.19**, and the decode side is the
@@ -639,6 +642,8 @@ impl DeviceBackend {
         let q2k_dequant_body = q2k_dequant_src(Q2K_TN);
         let iq1s_qmma_body = iq1s_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
         let iq2xxs_qmma_body = iq2xxs_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
+        let iq2s_qmma_body = iq2s_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
+        let iq2xs_qmma_body = iq2xs_qmma_src(IQ1S_QMMA_CTA, IQ1S_QMMA_TM, IQ1S_QMMA_TN);
         let iq1s_qdecode_body = iq1s_qdecode_src(IQ1S_TN);
         let iq2xxs_qdecode_body = iq2xxs_qdecode_src(IQ2XXS_TN);
         let iq1m_qdecode_body = iq1m_qdecode_src(IQ1M_TN);
@@ -900,6 +905,16 @@ impl DeviceBackend {
             &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
             "iq2xxs_qmma",
         ));
+        raw_entries.push((
+            iq2s_qmma_body.as_str(),
+            &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
+            "iq2s_qmma",
+        ));
+        raw_entries.push((
+            iq2xs_qmma_body.as_str(),
+            &[("TM", IQ1S_QMMA_TM), ("TN", IQ1S_QMMA_TN)],
+            "iq2xs_qmma",
+        ));
         let mut raw_matvecs = compile_parallel(&raw_entries)?;
         let q2k_matvec = raw_matvecs.remove(0);
         let q3k_matvec = raw_matvecs.remove(0);
@@ -953,6 +968,8 @@ impl DeviceBackend {
         let iq2s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq1s_qmma = raw_matvecs.remove(0);
         let iq2xxs_qmma = raw_matvecs.remove(0);
+        let iq2s_qmma = raw_matvecs.remove(0);
+        let iq2xs_qmma = raw_matvecs.remove(0);
         let iq1s_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_flat_grid())?;
         let iq2xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_grid())?;
         let iq2xxs_signs = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_signs())?;
@@ -1154,6 +1171,8 @@ impl DeviceBackend {
             iq1s_signed_grid,
             iq1s_qmma,
             iq2xxs_qmma,
+            iq2s_qmma,
+            iq2xs_qmma,
             raw_qmma: Cell::new(env_flag("PHOBOS_RAW_QMMA")),
             dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),
             trim_after_dense: env_flag("PHOBOS_TRIM"),
