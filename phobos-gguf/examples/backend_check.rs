@@ -53,7 +53,7 @@ fn random_iq1m_block(next: &mut (impl FnMut() -> f32 + ?Sized)) -> Vec<u8> {
 
 /// `m`, `k`, `n`: small and large, single-row and batched, aligned and not.
 /// Shared by every raw-kernel format's check below.
-const RAW_SHAPES: [(usize, usize, usize); 9] = [
+const RAW_SHAPES: [(usize, usize, usize); 10] = [
     (1, 256, 32),
     (1, 256, 64),
     (1, 512, 96),
@@ -67,6 +67,10 @@ const RAW_SHAPES: [(usize, usize, usize); 9] = [
     // The only shape `project_raw_dense` hands an f16 strip: every other m
     // here is under TC_TILE_M. Without it the narrow path goes untested.
     (64, 512, 128),
+    // The one shape the fused projection takes: m a multiple of IQ1S_QMMA_TM,
+    // n of IQ1S_QMMA_TN, k a whole number of 256-element blocks. Without it
+    // `project_raw_qmma` goes untested, and it is the prompt path.
+    (128, 512, 128),
 ];
 
 /// Shapes that reach the tensor cores, and so stage their weight to f16.
@@ -82,13 +86,28 @@ type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 /// `check_tc`'s signature, named for the same reason.
 type CheckTc<'a> = dyn Fn(&str, usize, &[f32], &[f32]) + 'a;
 
+/// [`CheckWithin`]'s signature for the spread measure, which carries its own
+/// tolerance because only one comparison uses it.
+type CheckSpread<'a> = dyn Fn(&str, &[f32], &[f32]) + 'a;
+
 /// A raw-kernel format's device path against the host reference
 /// (`Packed::dense`), across every shape in [`RAW_SHAPES`]. `gen_block`
 /// builds one random super-block.
+///
+/// At one row the device has two paths and they need different oracles. The
+/// float matvec is judged against the host, as everything else here is. The
+/// `dp4a` one quantizes its activation, which the host reference does not, so
+/// against the host it disagrees by the size of an 8-bit activation however
+/// right it is -- the same reason `fuse_check` compares the fused decode path
+/// against the launched one rather than against the host. So it is judged
+/// against the float path it replaces, on the device, in this session:
+/// `set_dp4a` runs the same projection both ways.
 #[allow(clippy::too_many_arguments)]
 fn check_matmul_raw(
     host: &dyn Backend,
     gpu: &dyn Backend,
+    set_dp4a: &dyn Fn(bool),
+    check_spread: &CheckSpread,
     check_within: &CheckWithin,
     check_tc: &CheckTc,
     next: &mut dyn FnMut() -> f32,
@@ -112,11 +131,20 @@ fn check_matmul_raw(
             read_vec(b, out, m * n)
         };
         let label = format!("matmul_raw {name} [{m} x {k} x {n}]");
-        let (want, got) = (run(host)?, run(gpu)?);
+        set_dp4a(false);
+        let (want, float_path) = (run(host)?, run(gpu)?);
         if raw_shape_is_tc(m, k, n) {
-            check_tc(&label, k, &want, &got);
+            check_tc(&label, k, &want, &float_path);
         } else {
-            check_within(&label, 1e-3, &want, &got);
+            check_within(&label, 1e-3, &want, &float_path);
+        }
+        // Only one row reaches a `dp4a` matvec at all; anything wider takes the
+        // same path either way and the comparison would be vacuous.
+        if m == 1 {
+            set_dp4a(true);
+            let dp4a = run(gpu)?;
+            set_dp4a(false);
+            check_spread(&format!("{label} dp4a vs float"), &float_path, &dp4a);
         }
     }
     Ok(())
@@ -130,6 +158,43 @@ fn main() -> Result<()> {
     // other one out.
     let worst = std::cell::Cell::new(0.0f32);
     let failures = std::cell::Cell::new(0u32);
+
+    // The one thing device-against-host cannot judge: see `check_matmul_raw`.
+    let set_dp4a = |on: bool| gpu.set_iq_dp4a(on);
+
+    /// The largest gap as a fraction of the output's own spread, which is how
+    /// `batch_check` judges two orderings of the same sum and the right measure
+    /// here for the same reason. On random weights a matvec's outputs cancel to
+    /// near zero, so a per-element relative error says more about the test data
+    /// than about the kernel; the spread does not move with it.
+    fn spread_error(want: &[f32], got: &[f32]) -> f32 {
+        let (lo, hi) = want
+            .iter()
+            .fold((f32::MAX, f32::MIN), |(l, h), &w| (l.min(w), h.max(w)));
+        let gap = want
+            .iter()
+            .zip(got)
+            .map(|(w, g)| (w - g).abs())
+            .fold(0.0f32, f32::max);
+        gap / (hi - lo).max(f32::MIN_POSITIVE)
+    }
+
+    // A quarter of a percent per element from an 8-bit activation, over a `k`
+    // the sum cancels across; loose next to the 1e-3 the float path is held to,
+    // and deliberately, since it bounds a documented approximation rather than
+    // a layout mistake, which would be orders of magnitude worse.
+    let check_spread = |name: &str, want: &[f32], got: &[f32]| {
+        let error = spread_error(want, got);
+        worst.set(worst.get().max(error));
+        let ok = error < 1e-2 && want.len() == got.len();
+        if !ok {
+            failures.set(failures.get() + 1);
+        }
+        println!(
+            "{} {name:<34} spread {error:>10.3e}",
+            if ok { "ok  " } else { "FAIL" }
+        );
+    };
 
     let check_within = |name: &str, tolerance: f32, want: &[f32], got: &[f32]| {
         let error = want
@@ -469,21 +534,59 @@ fn main() -> Result<()> {
     // the device's decode-in-kernel path and the host's dense fallback
     // (`Packed::dense`). `d`/`dmin` are built from small positive floats
     // rather than random bits to avoid hitting the f16 Inf/NaN exponent.
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::Q2_K, "Q2_K", |n| {
-        random_raw_block(n, 84, 80, Some(82))
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::Q3_K, "Q3_K", |n| {
-        random_raw_block(n, 110, 108, None)
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ1_S, "IQ1_S", |n| {
-        random_raw_block(n, 50, 0, None)
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ2_XXS, "IQ2_XXS", |n| {
-        random_raw_block(n, 66, 0, None)
-    })?;
     check_matmul_raw(
         &host,
         &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::Q2_K,
+        "Q2_K",
+        |n| random_raw_block(n, 84, 80, Some(82)),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::Q3_K,
+        "Q3_K",
+        |n| random_raw_block(n, 110, 108, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ1_S,
+        "IQ1_S",
+        |n| random_raw_block(n, 50, 0, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ2_XXS,
+        "IQ2_XXS",
+        |n| random_raw_block(n, 66, 0, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
         &check_within,
         &check_tc,
         &mut next,
@@ -491,21 +594,66 @@ fn main() -> Result<()> {
         "IQ1_M",
         |n| random_iq1m_block(n),
     )?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ2_S, "IQ2_S", |n| {
-        random_raw_block(n, 82, 0, None)
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ2_XS, "IQ2_XS", |n| {
-        random_raw_block(n, 74, 0, None)
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ3_XXS, "IQ3_XXS", |n| {
-        random_raw_block(n, 98, 0, None)
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ3_S, "IQ3_S", |n| {
-        random_raw_block(n, 110, 0, None)
-    })?;
-    check_matmul_raw(&host, &gpu, &check_within, &check_tc, &mut next, Quant::IQ4_XS, "IQ4_XS", |n| {
-        random_raw_block(n, 136, 0, None)
-    })?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ2_S,
+        "IQ2_S",
+        |n| random_raw_block(n, 82, 0, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ2_XS,
+        "IQ2_XS",
+        |n| random_raw_block(n, 74, 0, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ3_XXS,
+        "IQ3_XXS",
+        |n| random_raw_block(n, 98, 0, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ3_S,
+        "IQ3_S",
+        |n| random_raw_block(n, 110, 0, None),
+    )?;
+    check_matmul_raw(
+        &host,
+        &gpu,
+        &set_dp4a,
+        &check_spread,
+        &check_within,
+        &check_tc,
+        &mut next,
+        Quant::IQ4_XS,
+        "IQ4_XS",
+        |n| random_raw_block(n, 136, 0, None),
+    )?;
 
     // The convolution feeding the delta rule, in both fused layouts. The decode
     // shape is the one to watch: at a single row the carried positions are most
