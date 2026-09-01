@@ -756,3 +756,38 @@ IQ2_XXS's geometry outright. The head at 10.1% is still the second largest
 single item and still costs what the dequant scratch keeps it from -- it goes
 resident only when no format needs a scratch at all, which means Q2_K and
 IQ4_XS too, and those have no `_qdecode` to build one from.
+
+## Attributed: two formats pay, two do not
+
+`PHOBOS_RAW_QMMA` takes a list now, which answers the question the previous
+entry left open. One card state, `-p 128 -n 0 -r 1`, each row twice:
+
+| fused | pp128 |
+| --- | ---: |
+| none | 71.8, 79.1 |
+| IQ1_S | 114.3, 110.2 |
+| **IQ1_S, IQ2_XXS** | **149.6, 149.4** |
+| and IQ2_S, IQ2_XS | 135.3, 107.0 |
+
+**Adding the two split-scale formats loses**, and the spread says why: three
+digits of agreement for the pair, 135 against 107 for the four. That is
+residency, not arithmetic. Fusing a format trades its expansion for an
+activation slot a projection, and this card is far enough past its cliff that
+the slots are the expensive half.
+
+So the earlier entry was wrong to imply the split-scale fix would pay once it
+was correct. It is correct -- 1.998e-3 and 1.679e-3 against the dense path, and
+`backend_check` reads 250 ok with all four named against 248 with the default
+two -- and it still loses. Both facts are kept, and the formats stay behind
+their names.
+
+**This also reframes what is left.** IQ1_M and IQ3_XXS are the next two
+expansions by size, and there is now no reason to expect fusing them to pay
+either: IQ1_M has the same nibble pair as the two that lost, and every fused
+format adds slots. The thing that would change that is the activation slot
+itself -- one quantized copy per distinct input rather than per projection --
+which is already on this beam from the decode side and is worth more than any
+further format.
+
+Confirmed at the new default: **pp128 149.08, 149.21 against 79.07, 79.18**,
+1.89x, at 1376 MiB of desktop VRAM. The same pair read 156.7 at 974 MiB.
