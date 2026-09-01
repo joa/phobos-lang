@@ -49,6 +49,44 @@ pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 
 /// Whether an opt-in `PHOBOS_*` toggle is set. Opt-out toggles (a default-on
 /// mechanism) negate the complementary spelling instead; see `attn_persist`.
+/// The formats `PHOBOS_RAW_QMMA` names, or the ones that pay when it is just a
+/// flag.
+///
+/// IQ2_S and IQ2_XS have a fused projection and it is correct, but it loses.
+/// Attributed at one card state, `-p 128 -n 0 -r 1`, each row twice:
+///
+/// | fused | pp128 |
+/// | --- | ---: |
+/// | none | 71.8, 79.1 |
+/// | IQ1_S | 114.3, 110.2 |
+/// | **IQ1_S, IQ2_XXS** | **149.6, 149.4** |
+/// | and IQ2_S, IQ2_XS | 135.3, 107.0 |
+///
+/// Those two scale per sixteen elements, so they carry an accumulator and a
+/// scaling a half and their epilogue is twice the other two's; they also take
+/// an activation slot a projection like every fused format, and on a card past
+/// its residency cliff that is the half that costs. The spread across their two
+/// runs, against three digits of agreement for the pair above, says which.
+/// `PHOBOS_RAW_QMMA=IQ1_S,IQ2_XXS,IQ2_S,IQ2_XS` re-measures them.
+fn qmma_formats() -> Vec<Quant> {
+    const ALL: [Quant; 4] = [Quant::IQ1_S, Quant::IQ2_XXS, Quant::IQ2_S, Quant::IQ2_XS];
+    const PAYS: [Quant; 2] = [Quant::IQ1_S, Quant::IQ2_XXS];
+    let Ok(value) = std::env::var("PHOBOS_RAW_QMMA") else {
+        return PAYS.to_vec();
+    };
+    if !value.contains(',') && ALL.iter().all(|q| !value.eq_ignore_ascii_case(q.name())) {
+        return PAYS.to_vec();
+    }
+    value
+        .split(',')
+        .filter_map(|want| {
+            ALL.iter()
+                .copied()
+                .find(|q| q.name().eq_ignore_ascii_case(want.trim()))
+        })
+        .collect()
+}
+
 fn env_flag(name: &str) -> bool {
     matches!(
         std::env::var(name).as_deref(),
@@ -478,6 +516,13 @@ pub struct DeviceBackend {
     /// 82.3 and tg128 6.23 against 8.19**, and the decode side is the
     /// activation slots it takes, one a projection, not the kernel.
     raw_qmma: Cell<bool>,
+    /// Which formats it covers. `PHOBOS_RAW_QMMA` takes a comma-separated
+    /// list as well as a flag -- `iq1s,iq2xxs` -- so the formats can be
+    /// attributed one at a time. Fusing one trades its expansion for an
+    /// activation slot a projection, and on a card past its residency cliff
+    /// that trade can go either way, so which formats pay is a measurement
+    /// rather than a given.
+    raw_qmma_formats: Vec<Quant>,
     /// `PHOBOS_DENSE_SCRATCH=0` goes back to a pooled pair per weight and
     /// `PHOBOS_TRIM=1` to handing the whole free list back after a dense pass.
     /// Both are what the prompt path used to do, kept so the pair can be
@@ -1173,7 +1218,11 @@ impl DeviceBackend {
             iq2xxs_qmma,
             iq2s_qmma,
             iq2xs_qmma,
-            raw_qmma: Cell::new(env_flag("PHOBOS_RAW_QMMA")),
+            raw_qmma: Cell::new(!matches!(
+                std::env::var("PHOBOS_RAW_QMMA").as_deref(),
+                Err(_) | Ok("0" | "off" | "no" | "false")
+            )),
+            raw_qmma_formats: qmma_formats(),
             dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),
             trim_after_dense: env_flag("PHOBOS_TRIM"),
             iq2xxs_grid_packed,
