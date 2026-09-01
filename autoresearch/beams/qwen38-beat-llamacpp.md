@@ -641,3 +641,33 @@ thing left that can move pp128 by the factor required.**
   (already on), `PHOBOS_FUSED` (Q8_0 only, never engages on an IQ file): all
   within noise of each other, 12.89 to 12.93. `PHOBOS_IQ1S_DP4A` was the only
   flag with a win behind it.
+
+## The shared-staging rewrite: built, and worth 1.05x
+
+Predicted at 1.13x on the kernel from the instruction count, measured 1.047x on
+the whole prompt row, which is more than the count alone accounts for -- a
+column now leaves DRAM once a CTA instead of once a warp, so the loads it saves
+are worth more than their issue slots.
+
+| | mma | global | shared | instructions | inst/mma |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| registers | 128 | 104 | 0 | 1598 | 12.5 |
+| staged | 128 | 72 | 20 | 1452 | 11.3 |
+| `q8_qmma`, decoding nothing | 128 | 88 | 0 | 1268 | 9.9 |
+
+**pp128 117.9, 117.6 against 112.6, 112.5**, each twice, `PHOBOS_QMMA_STAGE`
+the only difference. Decode untouched at 8.22: this kernel never runs at one
+row. `backend_check` gives the same 3.265e-3 to four digits, so the two forms
+agree.
+
+The structural note worth keeping: staging is only expressible where one warp
+owns one patch. The register form carries its accumulators across `k` inside a
+patch loop, and staging needs every warp at the same `k` at once, so the patch
+loop has to go. `qmma_patch` caps a patch at `QMMA_TILES`, so a wider output
+tile would take more patches than warps and the intrinsic refuses. That is the
+same constraint that pins `q8_mma` at 2.3 TOPS against `qmma_t`'s 30.6, met
+from the other side.
+
+It closes about a third of the gap to `q8_qmma` and does not change the
+conclusion above: the remaining two thirds is the epilogue, which both kernels
+pay identically, and the per-group scale, which the format dictates.
