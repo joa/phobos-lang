@@ -791,3 +791,35 @@ further format.
 
 Confirmed at the new default: **pp128 149.08, 149.21 against 79.07, 79.18**,
 1.89x, at 1376 MiB of desktop VRAM. The same pair read 156.7 at 974 MiB.
+
+## Reversed: the slots were the cost, not the kernels
+
+The activation slot was the thing to fix, and fixing it inverts the entry
+above. A pass takes a fresh slot per `quantize_act` because a caller may hold
+the handle across many projections -- `rms_norm_q` does, for QKV and for gate
+and up -- but the fused path has one caller that does not: the down projection,
+whose input is the SwiGLU output and whose only reader is itself. At 128 rows of
+a 17408-wide FFN that is 2.2 MiB a layer, 143 MiB across the model.
+
+A recorded pass is a chain of kernel nodes in issue order, so the quantize that
+overwrites a ring slot cannot run before the projection that read it. The ring
+only has to exceed how many are live at once, which is one; it is four.
+
+Same card, `-p 128 -n 128 -r 1`, each row twice:
+
+| fused | a slot a projection | a ring of four |
+| --- | ---: | ---: |
+| none | 71.8, 79.1 | 79.2, 79.0 |
+| IQ1_S, IQ2_XXS | 149.6, 149.4 | 151.8, 157.9 |
+| **all four** | 135.3, 107.0 | **188.0, 183.8** |
+
+The two split-scale formats went from losing to winning by a wide margin, and
+the four-format spread went from 135-to-107 to three digits of agreement. So the
+negative result was real and was about residency: 143 MiB of slots across the
+model really was more than those kernels were worth. Default goes back to all
+four. **pp128 188.0, 2.38x the expansion path and 0.39x of llama.cpp's 477.11.**
+
+What this predicts for the two expansions still unfused, IQ1_M and IQ3_XXS, is
+the opposite of what the previous entry predicted: their slots are now nearly
+free, so they are worth the arithmetic they save. They are 19.1% of the traced
+prompt pass between them.
