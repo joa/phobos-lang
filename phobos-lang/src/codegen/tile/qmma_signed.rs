@@ -20,12 +20,14 @@
 // this kernel. That is the next thing here, and it wants its own measurement
 // rather than an assumption that it pays.
 
+use super::iq2s::{IQ2S_BLOCK_BYTES, IQ2S_LANE};
+use super::iq2xs::{IQ2XS_BLOCK_BYTES, IQ2XS_LANE};
 use super::iq2xxs::{IQ2XXS_BLOCK_BYTES, IQ2XXS_LANE};
 use super::*;
 
 macro_rules! signed_qmma {
     ($fn:ident, $label:literal, $lane_fn:ident, $block_fn:ident,
-     $bytes:ident, $lane_w:ident, $scale:ident) => {
+     $bytes:ident, $lane_w:ident, $scale:ident, $split:expr) => {
         impl<'c> Codegen<'c> {
             /// out[i, j] = sum_b (sum_{k in group b} a[i, k] * w[j, k]) with
             /// `w` decoded from the format rather than read: the batched
@@ -82,7 +84,10 @@ macro_rules! signed_qmma {
                     ));
                 }
                 if self.cta_threads % WARP != 0 {
-                    bail!(concat!($label, " needs a CTA that is a whole number of warps"));
+                    bail!(concat!(
+                        $label,
+                        " needs a CTA that is a whole number of warps"
+                    ));
                 }
                 let (md, nd) = (aq.shape[0], qb.shape[0]);
                 if md == DYN || nd == DYN {
@@ -96,7 +101,10 @@ macro_rules! signed_qmma {
                     );
                 }
                 if aq.shape[1] != DYN && aq.shape[1] % 256 != 0 {
-                    bail!(concat!($label, " needs a whole number of 256-element blocks"));
+                    bail!(concat!(
+                        $label,
+                        " needs a whole number of 256-element blocks"
+                    ));
                 }
 
                 let (rt, ct) = (md / IMMA_TILE, nd / IMMA_TILE);
@@ -104,11 +112,17 @@ macro_rules! signed_qmma {
                 let patches = (rt / rm) * (ct / rn);
                 let warps = self.cta_threads / WARP;
                 if patches != warps {
-                    bail!("{} needs one patch a warp, got {patches} for {warps}", $label);
+                    bail!(
+                        "{} needs one patch a warp, got {patches} for {warps}",
+                        $label
+                    );
                 }
                 let entries = nd * (Q8_BLOCK / $lane_w);
                 if entries % self.cta_threads != 0 {
-                    bail!("{} needs the CTA to divide its {entries} staging lanes", $label);
+                    bail!(
+                        "{} needs the CTA to divide its {entries} staging lanes",
+                        $label
+                    );
                 }
 
                 let (i32_t, f32_t) = (self.i32_t, self.f32_t);
@@ -194,7 +208,11 @@ macro_rules! signed_qmma {
                     let l = self.remui(&kb, *entry, four)?;
                     let fmt_lane = self.addi(&kb, four_ib, l)?;
                     let geom = self.$lane_fn(&kb, fmt_lane)?;
-                    let at = BlockAt { j, blk, off: blk_off };
+                    let at = BlockAt {
+                        j,
+                        blk,
+                        off: blk_off,
+                    };
                     let dec = self.$block_fn(&kb, &geom, qb, d, &tables, &at)?;
                     // A magnitude times its sign is the weight, and both are
                     // already i8, which is why this family reaches the tensor
@@ -236,16 +254,35 @@ macro_rules! signed_qmma {
                 // The scale belongs to an output column, which is not the
                 // column whose fragment this lane staged, so it decodes that
                 // column's block header for itself. Its grid and sign loads go
-                // unread and `ptxas` drops them.
-                let mut w_scales = Vec::with_capacity(rn as usize * 2);
+                // unread and ptxas drops them: the emitted body is the same
+                // size either way, measured.
+                //
+                // `split` is whether the format carries one scale a 32-element
+                // block or one per sixteen. The two land `halves` apart, and a
+                // k step is already two mma operations divided on exactly that
+                // boundary, so a split format keeps a scale a half.
+                let split = $split;
+                let per_col = if split { halves } else { 1 };
+                let mut w_scales = Vec::with_capacity(rn as usize * 2 * per_col as usize);
                 for out_col in &out_cols {
                     for dj in 0..2 {
                         let off = self.const_index(&kb, dj)?;
                         let col = self.addi(&kb, *out_col, off)?;
-                        let geom = self.$lane_fn(&kb, four_ib)?;
-                        let at = BlockAt { j: col, blk, off: blk_off };
-                        let dec = self.$block_fn(&kb, &geom, qb, d, &tables, &at)?;
-                        w_scales.push(dec.$scale);
+                        for h in 0..per_col {
+                            // Lane 0 of the block for the low scale and lane 2
+                            // for the high one: the same `l < 2` the format's
+                            // own decode selects on.
+                            let l = self.const_index(&kb, 2 * h)?;
+                            let fmt_lane = self.addi(&kb, four_ib, l)?;
+                            let geom = self.$lane_fn(&kb, fmt_lane)?;
+                            let at = BlockAt {
+                                j: col,
+                                blk,
+                                off: blk_off,
+                            };
+                            let dec = self.$block_fn(&kb, &geom, qb, d, &tables, &at)?;
+                            w_scales.push(dec.$scale);
+                        }
                     }
                 }
 
@@ -253,24 +290,47 @@ macro_rules! signed_qmma {
                 for r in 0..rm as usize {
                     let sa = self.push(&kb, memref::load(asc.mem, &[a_rows[r], b], self.loc))?;
                     for c in 0..rn as usize {
-                        let mut sum = empty;
-                        for h in 0..halves as usize {
-                            sum = self.mma_sync(
-                                &kb,
-                                a_frags[r * halves as usize + h],
-                                w_frags[c * halves as usize + h],
-                                sum,
-                                shape,
-                                acc_t,
-                            )?;
+                        // One accumulator a half where the scale changes on
+                        // that boundary, one for the pair where it does not:
+                        // chaining the two mma operations is only sound when
+                        // they share a scale.
+                        let mut sums = Vec::with_capacity(per_col as usize);
+                        if split {
+                            for h in 0..halves as usize {
+                                sums.push(self.mma_sync(
+                                    &kb,
+                                    a_frags[r * halves as usize + h],
+                                    w_frags[c * halves as usize + h],
+                                    empty,
+                                    shape,
+                                    acc_t,
+                                )?);
+                            }
+                        } else {
+                            let mut sum = empty;
+                            for h in 0..halves as usize {
+                                sum = self.mma_sync(
+                                    &kb,
+                                    a_frags[r * halves as usize + h],
+                                    w_frags[c * halves as usize + h],
+                                    sum,
+                                    shape,
+                                    acc_t,
+                                )?;
+                            }
+                            sums.push(sum);
                         }
                         for dj in 0..2 {
-                            let sw = w_scales[c * 2 + dj as usize];
-                            let scale = self.push(&kb, arith::mulf(sa, sw, self.loc))?;
-                            let raw = self.vec_extract(&kb, sum, &[0, dj], i32_t)?;
-                            let as_f = self.small_int_to_f32(&kb, raw)?;
                             let slot = (r * rn as usize + c) * 2 + dj as usize;
-                            next.push(self.elem_mac(&kb, f32_t, as_f, scale, accs[slot])?);
+                            let mut acc = accs[slot];
+                            for (h, sum) in sums.iter().enumerate() {
+                                let sw = w_scales[(c * 2 + dj as usize) * per_col as usize + h];
+                                let scale = self.push(&kb, arith::mulf(sa, sw, self.loc))?;
+                                let raw = self.vec_extract(&kb, *sum, &[0, dj], i32_t)?;
+                                let as_f = self.small_int_to_f32(&kb, raw)?;
+                                acc = self.elem_mac(&kb, f32_t, as_f, scale, acc)?;
+                            }
+                            next.push(acc);
                         }
                     }
                 }
@@ -301,7 +361,10 @@ macro_rules! signed_qmma {
                             let slot = (r * rn as usize + c) * 2 + dj as usize;
                             let value = detach(loop_op.result(slot)?.into());
                             block.append_operation(memref::store(
-                                value, out.mem, &[*row, col], self.loc,
+                                value,
+                                out.mem,
+                                &[*row, col],
+                                self.loc,
                             ));
                         }
                     }
@@ -320,5 +383,26 @@ signed_qmma!(
     iq2xxs_block,
     IQ2XXS_BLOCK_BYTES,
     IQ2XXS_LANE,
-    db
+    db,
+    false
+);
+signed_qmma!(
+    iq2s_qmma_staged_into,
+    "iq2s_qmma_t",
+    iq2s_lane,
+    iq2s_block,
+    IQ2S_BLOCK_BYTES,
+    IQ2S_LANE,
+    dl,
+    true
+);
+signed_qmma!(
+    iq2xs_qmma_staged_into,
+    "iq2xs_qmma_t",
+    iq2xs_lane,
+    iq2xs_block,
+    IQ2XS_BLOCK_BYTES,
+    IQ2XS_LANE,
+    dl,
+    true
 );

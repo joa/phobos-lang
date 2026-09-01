@@ -340,10 +340,20 @@ impl<'c> Codegen<'c> {
             }
             // iq2xxs_qmma_staged_t(..): IQ2_XXS's batched projection, decode
             // staged through shared memory. See `iq2xxs_qmma.rs`.
-            "iq2xxs_qmma_staged_t" => {
+            "iq2xxs_qmma_staged_t" | "iq2s_qmma_staged_t" | "iq2xs_qmma_staged_t" => {
                 let [a, asc, qb, d, grid, signs] = self.iq2xxs_qmma_operands(block, args)?;
                 let out = self.alloc_tile_shaped(block, self.f32_t, &[a.shape[0], qb.shape[0]])?;
-                self.iq2xxs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, &out)?;
+                match callee {
+                    "iq2s_qmma_staged_t" => {
+                        self.iq2s_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, &out)?
+                    }
+                    "iq2xs_qmma_staged_t" => {
+                        self.iq2xs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, &out)?
+                    }
+                    _ => {
+                        self.iq2xxs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, &out)?
+                    }
+                }
                 for t in [&a, &asc, &qb, &d, &grid, &signs] {
                     self.release(t);
                 }

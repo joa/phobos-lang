@@ -6,7 +6,6 @@
 // to IQ2_XXS's, so this reuses [`crate::quant::iq2xxs_flat_signs`] rather
 // than uploading a second copy.
 
-
 use std::fmt::Write as _;
 
 use super::IQ2XXS_SIGNS_LEN;
@@ -184,6 +183,30 @@ kernel iq2xs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                                               D[pn * TN :+ TN, :],
                                               GRID[0 :+ 1, :],
                                               SIGNS[0 :+ 1, :])
+}}
+"
+    )
+}
+
+/// IQ2_XSs prompt projection, decode and contraction in one kernel.
+///
+/// One scale per sixteen elements rather than per thirty-two, so the tile
+/// language keeps an accumulator a half; see `qmma_signed.rs`.
+pub(crate) fn iq2xs_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    format!(
+        "@launch({block})
+@autotune(TM in [{tm}], TN in [{tn}])
+@aligned(M = TM, N = TN, K = 256)
+kernel iq2xs_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                  QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                  GRID: tensor<i8>[1, {IQ2XS_GRID_LEN}],
+                  SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
+                  C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm * TM :+ TM, pn * TN :+ TN] = iq2xs_qmma_staged_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                        QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                                        GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }}
 "
     )
