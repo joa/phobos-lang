@@ -671,3 +671,41 @@ from the other side.
 It closes about a third of the gap to `q8_qmma` and does not change the
 conclusion above: the remaining two thirds is the epilogue, which both kernels
 pay identically, and the per-group scale, which the format dictates.
+
+## Fusing the second format, and the constraint that stops the third
+
+IQ2_XXS fits the tensor cores for the same reason IQ1_S does -- magnitude times
+sign, both already i8, an exact weight in -43..43 with no correction term -- and
+reuses `iq2xxs_qdot_t`'s own decode helpers: `iq2xxs_lane` maps a lane index to
+the geometry and a group's four lanes are `4 * ib + l`, so the staging loop
+calls the same helper the matvec does.
+
+    fused formats        pp128
+    none                 80.6, 81.1
+    IQ1_S                117.7, 117.6
+    IQ1_S and IQ2_XXS    155.9, 156.7
+
+1.33x on top of IQ1_S, 1.93x over the expansion path.
+
+**IQ2_S and IQ2_XS decode identically and cannot use it.** Their scale is a
+nibble, low for lanes 0 and 1 and high for 2 and 3, so they carry **two scales
+per 32-element block** where this kernel shape assumes one -- and that
+assumption is what keeps the accumulators in registers across `k`, which is the
+whole difference between `qmma_t` at 30.6 TOPS and `q8_mma` at 2.3. Generated
+from the macro anyway they read **2.5e-1** against the dense path where IQ2_XXS
+reads 1.8e-3. Backed out.
+
+The fix is available and costed: the two halves of a k step are already
+separate `mma` operations at exactly the boundary the nibble changes on, so
+scaling each half rather than their sum is correct, at the price of doubling an
+epilogue that is a third of the kernel. Those two formats are 7% of a prompt
+pass, so it wants measuring rather than assuming.
+
+**The device oracle is what made this visible at all.** Against the host both
+read about 2.4e-2 -- and so does *correct* IQ2_XXS, because the fused path
+quantizes its activation and the host reference does not. A right kernel and a
+wrong one are indistinguishable there. Against the dense path they replace,
+device to device in one session, they are 1.8e-3 and 2.5e-1. That is the second
+time this session the host has been the wrong oracle, after the `m = 1` dp4a
+rows, and the second time an oracle change was the thing that unblocked a
+measurement rather than a kernel change.
