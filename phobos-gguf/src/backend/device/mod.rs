@@ -49,33 +49,30 @@ pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 
 /// Whether an opt-in `PHOBOS_*` toggle is set. Opt-out toggles (a default-on
 /// mechanism) negate the complementary spelling instead; see `attn_persist`.
-/// The formats `PHOBOS_RAW_QMMA` names, or the ones that pay when it is just a
-/// flag.
+/// The formats `PHOBOS_RAW_QMMA` names, or all of them when it is just a flag.
 ///
-/// IQ2_S and IQ2_XS have a fused projection and it is correct, but it loses.
-/// Attributed at one card state, `-p 128 -n 0 -r 1`, each row twice:
+/// Which formats pay was a real question and the answer moved. Attributed one
+/// card state at a time, `-p 128 -n 128 -r 1`, each row twice:
 ///
-/// | fused | pp128 |
-/// | --- | ---: |
-/// | none | 71.8, 79.1 |
-/// | IQ1_S | 114.3, 110.2 |
-/// | **IQ1_S, IQ2_XXS** | **149.6, 149.4** |
-/// | and IQ2_S, IQ2_XS | 135.3, 107.0 |
+/// | fused | pp128, a slot a projection | pp128, a ring |
+/// | --- | ---: | ---: |
+/// | none | 71.8, 79.1 | 79.2, 79.0 |
+/// | IQ1_S | 114.3, 110.2 | |
+/// | IQ1_S, IQ2_XXS | 149.6, 149.4 | 151.8, 157.9 |
+/// | **all four** | 135.3, 107.0 | **188.0, 183.8** |
 ///
-/// Those two scale per sixteen elements, so they carry an accumulator and a
-/// scaling a half and their epilogue is twice the other two's; they also take
-/// an activation slot a projection like every fused format, and on a card past
-/// its residency cliff that is the half that costs. The spread across their two
-/// runs, against three digits of agreement for the pair above, says which.
-/// `PHOBOS_RAW_QMMA=IQ1_S,IQ2_XXS,IQ2_S,IQ2_XS` re-measures them.
+/// IQ2_S and IQ2_XS *lost* while every fused projection took an activation slot
+/// of its own, and win by a wide margin once those share a ring: 143 MiB of
+/// slots across the model was more than their kernels were worth. See
+/// [`DeviceBackend::act_slot_transient`]. It is worth keeping that the negative
+/// result was real and was about residency, not about the kernels.
 fn qmma_formats() -> Vec<Quant> {
     const ALL: [Quant; 4] = [Quant::IQ1_S, Quant::IQ2_XXS, Quant::IQ2_S, Quant::IQ2_XS];
-    const PAYS: [Quant; 2] = [Quant::IQ1_S, Quant::IQ2_XXS];
     let Ok(value) = std::env::var("PHOBOS_RAW_QMMA") else {
-        return PAYS.to_vec();
+        return ALL.to_vec();
     };
     if !value.contains(',') && ALL.iter().all(|q| !value.eq_ignore_ascii_case(q.name())) {
-        return PAYS.to_vec();
+        return ALL.to_vec();
     }
     value
         .split(',')
@@ -546,6 +543,9 @@ pub struct DeviceBackend {
     /// projection seen. Slot by slot, not one arena: several are live at
     /// once, and a pass asks for them in the same order every time.
     act_scratch: RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>,
+    /// Which of the first few `act_scratch` slots the next transient
+    /// activation takes. See [`DeviceBackend::act_slot_transient`].
+    act_ring: Cell<usize>,
     act_next: Cell<usize>,
     /// Split-K partial sums, `[splits, n]`, grown to the largest asked for.
     split_scratch: RefCell<Option<DeviceBuffer<f32>>>,
@@ -1234,6 +1234,7 @@ impl DeviceBackend {
             iq3s_grid_packed,
             iota8,
             act_scratch: RefCell::new(Vec::new()),
+            act_ring: Cell::new(0),
             act_next: Cell::new(0),
             split_scratch: RefCell::new(None),
             _ctx,

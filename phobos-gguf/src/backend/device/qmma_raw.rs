@@ -78,8 +78,13 @@ impl DeviceBackend {
         let act = match act {
             Some(act) => act,
             None => {
+                // Nothing outlives this one: the down projection is its only
+                // reader, so it takes a ring slot rather than a slot of its
+                // own. At 128 rows of a 17408-wide FFN a slot apiece is 2.2 MiB
+                // a layer and 143 MiB across the model, which is most of what
+                // the fused path costs a decode step.
                 self.note_dense_pass();
-                self.quantize_act(a, m, k)?
+                self.quantize_act_transient(a, m, k)?
             }
         };
         let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
