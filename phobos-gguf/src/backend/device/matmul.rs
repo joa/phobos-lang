@@ -374,30 +374,30 @@ impl DeviceBackend {
             };
             match quant {
                 Quant::IQ1_S if n.is_multiple_of(IQ1S_I8_NARROW_TN) => Some((
-                    &self.iq1s_qdot_i8[usize::from(!wide_tile(IQ1S_I8_TN))],
+                    &self.iq1s_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ1S_I8_TN)))],
                     "iq1s_qdot_i8_matvec",
-                    if wide_tile(IQ1S_I8_TN) {
-                        IQ1S_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ1S_I8_TN)) {
+                        qdot_i8_tn(IQ1S_I8_TN)
                     } else {
                         IQ1S_I8_NARROW_TN
                     },
                     vec![grid(&self.iq1s_grid_packed, IQ1S_GRID_LEN)],
                 )),
                 Quant::IQ1_M if n.is_multiple_of(IQ1M_I8_NARROW_TN) => Some((
-                    &self.iq1m_qdot_i8[usize::from(!wide_tile(IQ1M_I8_TN))],
+                    &self.iq1m_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ1M_I8_TN)))],
                     "iq1m_qdot_i8_matvec",
-                    if wide_tile(IQ1M_I8_TN) {
-                        IQ1M_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ1M_I8_TN)) {
+                        qdot_i8_tn(IQ1M_I8_TN)
                     } else {
                         IQ1M_I8_NARROW_TN
                     },
                     vec![grid(&self.iq1s_grid_packed, IQ1S_GRID_LEN)],
                 )),
                 Quant::IQ2_XXS if n.is_multiple_of(IQ2XXS_I8_NARROW_TN) => Some((
-                    &self.iq2xxs_qdot_i8[usize::from(!wide_tile(IQ2XXS_I8_TN))],
+                    &self.iq2xxs_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ2XXS_I8_TN)))],
                     "iq2xxs_qdot_i8_matvec",
-                    if wide_tile(IQ2XXS_I8_TN) {
-                        IQ2XXS_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ2XXS_I8_TN)) {
+                        qdot_i8_tn(IQ2XXS_I8_TN)
                     } else {
                         IQ2XXS_I8_NARROW_TN
                     },
@@ -407,10 +407,10 @@ impl DeviceBackend {
                     ],
                 )),
                 Quant::IQ2_S if n.is_multiple_of(IQ2S_I8_NARROW_TN) => Some((
-                    &self.iq2s_qdot_i8[usize::from(!wide_tile(IQ2S_I8_TN))],
+                    &self.iq2s_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ2S_I8_TN)))],
                     "iq2s_qdot_i8_matvec",
-                    if wide_tile(IQ2S_I8_TN) {
-                        IQ2S_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ2S_I8_TN)) {
+                        qdot_i8_tn(IQ2S_I8_TN)
                     } else {
                         IQ2S_I8_NARROW_TN
                     },
@@ -420,10 +420,10 @@ impl DeviceBackend {
                     ],
                 )),
                 Quant::IQ2_XS if n.is_multiple_of(IQ2XS_I8_NARROW_TN) => Some((
-                    &self.iq2xs_qdot_i8[usize::from(!wide_tile(IQ2XS_I8_TN))],
+                    &self.iq2xs_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ2XS_I8_TN)))],
                     "iq2xs_qdot_i8_matvec",
-                    if wide_tile(IQ2XS_I8_TN) {
-                        IQ2XS_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ2XS_I8_TN)) {
+                        qdot_i8_tn(IQ2XS_I8_TN)
                     } else {
                         IQ2XS_I8_NARROW_TN
                     },
@@ -433,10 +433,10 @@ impl DeviceBackend {
                     ],
                 )),
                 Quant::IQ3_XXS if n.is_multiple_of(IQ3XXS_I8_NARROW_TN) => Some((
-                    &self.iq3xxs_qdot_i8[usize::from(!wide_tile(IQ3XXS_I8_TN))],
+                    &self.iq3xxs_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ3XXS_I8_TN)))],
                     "iq3xxs_qdot_i8_matvec",
-                    if wide_tile(IQ3XXS_I8_TN) {
-                        IQ3XXS_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ3XXS_I8_TN)) {
+                        qdot_i8_tn(IQ3XXS_I8_TN)
                     } else {
                         IQ3XXS_I8_NARROW_TN
                     },
@@ -446,10 +446,10 @@ impl DeviceBackend {
                     ],
                 )),
                 Quant::IQ3_S if n.is_multiple_of(IQ3S_I8_NARROW_TN) => Some((
-                    &self.iq3s_qdot_i8[usize::from(!wide_tile(IQ3S_I8_TN))],
+                    &self.iq3s_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ3S_I8_TN)))],
                     "iq3s_qdot_i8_matvec",
-                    if wide_tile(IQ3S_I8_TN) {
-                        IQ3S_I8_TN
+                    if wide_tile(qdot_i8_tn(IQ3S_I8_TN)) {
+                        qdot_i8_tn(IQ3S_I8_TN)
                     } else {
                         IQ3S_I8_NARROW_TN
                     },

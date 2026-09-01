@@ -126,6 +126,23 @@ pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
 /// `PHOBOS_QDOT_I8_TN` overrides it to, so the tile can be swept against the
 /// CTA rather than one at a time: a warp owns `tn * WARP / threads` columns and
 /// that product, not either half, is what moves these kernels.
+///
+/// Standalone, `resident_probe` likes both wider: IQ1_S at the FFN shape reads
+/// 132.0 GB/s at 64 and 256 threads, 152.1 at 64 and 1024, and **161.0 at 128
+/// and 1024**. In the model none of it survives. Each row twice,
+/// `-p 128 -n 128 -r 1`:
+///
+/// | TN | `@launch` | tg128 |
+/// | ---: | ---: | ---: |
+/// | **64** | **256** | **16.92, 16.69** |
+/// | 64 | 512 | 16.16, 14.49 |
+/// | 32 | 256 | 16.06, 15.96 |
+/// | 128 | 512 | 10.15, 10.20 |
+/// | 128 | 1024 | 10.06, 10.10 |
+///
+/// The 128-column rows are not a tile effect: 10.1 is what this model reads
+/// whenever its output head is evicted, and a wider tile is a different
+/// compiled kernel, so it is a different footprint. The default stays.
 pub(crate) fn qdot_i8_tn(default: usize) -> usize {
     std::env::var("PHOBOS_QDOT_I8_TN")
         .ok()
