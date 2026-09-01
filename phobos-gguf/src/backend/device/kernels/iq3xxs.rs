@@ -201,3 +201,27 @@ kernel iq3xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 "
     )
 }
+
+/// IQ3_XXS's prompt projection, decode and contraction in one kernel.
+///
+/// A grid entry is four bytes here, so a lane joins two of them; the scale
+/// and sign geometry is IQ2_XXS's byte for byte. See `qmma_signed.rs`.
+pub(crate) fn iq3xxs_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    format!(
+        "@launch({block})
+@autotune(TM in [{tm}], TN in [{tn}])
+@aligned(M = TM, N = TN, K = 256)
+kernel iq3xxs_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                  QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                  GRID: tensor<i8>[1, {IQ3XXS_GRID_LEN}],
+                  SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
+                  C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm * TM :+ TM, pn * TN :+ TN] = iq3xxs_qmma_staged_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                        QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                                        GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
+}}
+"
+    )
+}

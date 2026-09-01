@@ -209,3 +209,27 @@ kernel iq3s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 "
     )
 }
+
+/// IQ3_S's prompt projection, decode and contraction in one kernel.
+///
+/// IQ3_XXS's shape with a wider grid and one scale per sixty-four elements,
+/// which is still constant across a k step. See `qmma_signed.rs`.
+pub(crate) fn iq3s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    format!(
+        "@launch({block})
+@autotune(TM in [{tm}], TN in [{tn}])
+@aligned(M = TM, N = TN, K = 256)
+kernel iq3s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                  QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                  GRID: tensor<i8>[1, {IQ3S_GRID_LEN}],
+                  SIGNS: tensor<i8>[1, {IQ2S_SIGNS_LEN}],
+                  C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm * TM :+ TM, pn * TN :+ TN] = iq3s_qmma_staged_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                        QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
+                                                        GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
+}}
+"
+    )
+}

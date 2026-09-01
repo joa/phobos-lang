@@ -67,7 +67,14 @@ pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 /// [`DeviceBackend::act_slot_transient`]. It is worth keeping that the negative
 /// result was real and was about residency, not about the kernels.
 fn qmma_formats() -> Vec<Quant> {
-    const ALL: [Quant; 4] = [Quant::IQ1_S, Quant::IQ2_XXS, Quant::IQ2_S, Quant::IQ2_XS];
+    const ALL: [Quant; 6] = [
+        Quant::IQ1_S,
+        Quant::IQ2_XXS,
+        Quant::IQ2_S,
+        Quant::IQ2_XS,
+        Quant::IQ3_XXS,
+        Quant::IQ3_S,
+    ];
     let Ok(value) = std::env::var("PHOBOS_RAW_QMMA") else {
         return ALL.to_vec();
     };
@@ -508,6 +515,9 @@ pub struct DeviceBackend {
     iq2xxs_qmma: Module,
     iq2s_qmma: Module,
     iq2xs_qmma: Module,
+    /// The two whose grid entry is four bytes rather than eight.
+    iq3xxs_qmma: Module,
+    iq3s_qmma: Module,
     /// Whether that projection is used. On now, and `PHOBOS_RAW_QMMA=0` turns
     /// it off. It was off while it cost decode more than it bought prefill,
     /// which the activation ring and the 32 MiB dequant scratch between them
@@ -693,6 +703,8 @@ impl DeviceBackend {
         let iq2xxs_qmma_body = iq2xxs_qmma_src(qcta, qtm, qtn);
         let iq2s_qmma_body = iq2s_qmma_src(qcta, qtm, qtn);
         let iq2xs_qmma_body = iq2xs_qmma_src(qcta, qtm, qtn);
+        let iq3xxs_qmma_body = iq3xxs_qmma_src(qcta, qtm, qtn);
+        let iq3s_qmma_body = iq3s_qmma_src(qcta, qtm, qtn);
         let iq1s_qdecode_body = iq1s_qdecode_src(IQ1S_TN);
         let iq2xxs_qdecode_body = iq2xxs_qdecode_src(IQ2XXS_TN);
         let iq1m_qdecode_body = iq1m_qdecode_src(IQ1M_TN);
@@ -965,6 +977,8 @@ impl DeviceBackend {
             &qsubs,
             "iq2xs_qmma",
         ));
+        raw_entries.push((iq3xxs_qmma_body.as_str(), &qsubs, "iq3xxs_qmma"));
+        raw_entries.push((iq3s_qmma_body.as_str(), &qsubs, "iq3s_qmma"));
         let mut raw_matvecs = compile_parallel(&raw_entries)?;
         let q2k_matvec = raw_matvecs.remove(0);
         let q3k_matvec = raw_matvecs.remove(0);
@@ -1020,6 +1034,8 @@ impl DeviceBackend {
         let iq2xxs_qmma = raw_matvecs.remove(0);
         let iq2s_qmma = raw_matvecs.remove(0);
         let iq2xs_qmma = raw_matvecs.remove(0);
+        let iq3xxs_qmma = raw_matvecs.remove(0);
+        let iq3s_qmma = raw_matvecs.remove(0);
         let iq1s_grid = DeviceBuffer::from_slice(&crate::quant::iq1s_flat_grid())?;
         let iq2xxs_grid = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_grid())?;
         let iq2xxs_signs = DeviceBuffer::from_slice(&crate::quant::iq2xxs_flat_signs())?;
@@ -1223,6 +1239,8 @@ impl DeviceBackend {
             iq2xxs_qmma,
             iq2s_qmma,
             iq2xs_qmma,
+            iq3xxs_qmma,
+            iq3s_qmma,
             raw_qmma: Cell::new(!matches!(
                 std::env::var("PHOBOS_RAW_QMMA").as_deref(),
                 Ok("0" | "off" | "no" | "false")
