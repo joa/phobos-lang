@@ -709,3 +709,50 @@ device to device in one session, they are 1.8e-3 and 2.5e-1. That is the second
 time this session the host has been the wrong oracle, after the `m = 1` dp4a
 rows, and the second time an oracle change was the thing that unblocked a
 measurement rather than a kernel change.
+
+## Four formats fused, and one measurement still owed
+
+The nibble scale is expressible after all. A k step is already two `mma`
+operations divided on exactly the boundary the nibble changes on, so a split
+format keeps an accumulator and a scale per half instead of chaining them --
+chaining is only sound when the two halves share a scale, which is what the
+macro's `split` flag now says. All four fused formats verify against the dense
+path they replace:
+
+    IQ1_S    1.984e-3
+    IQ2_XXS  1.802e-3
+    IQ2_S    1.998e-3   (2.529e-1 before the fix)
+    IQ2_XS   1.679e-3   (2.496e-1 before)
+
+250 ok, and the two IQ4_XS rows that fail at the parent commit.
+
+**The speed of the four-format version is not measured, and should not be
+guessed from the two-format one.** The card went from 974 MiB of desktop VRAM
+to 1476 while this was being built, and at 1476 the fused path is *slower*:
+52.4, 54.0, 54.5 against 75.7, 76.8, 76.9 with it off, three interleaved pairs,
+reproducible. Two things changed at once -- the desktop and the format list --
+so that number attributes to neither. The last clean reading, at 974 MiB with
+two formats fused, was 156.7 against 80.6.
+
+What it does suggest, and what the decode rows have said all session, is that
+the fused path trades footprint for arithmetic: it takes an activation slot a
+projection, and on a card this far past its cliff that is the more expensive
+half of the trade. The measurement owed is the four-format A/B on a quiet card,
+and a per-format toggle would make it attributable.
+
+Where the prompt pass stood before this, traced with two formats fused, 932.1
+ms total:
+
+| kernel | ms | share |
+| --- | ---: | ---: |
+| iq1s_qmma + iq2xxs_qmma | 310.0 | 33.3% |
+| matmul_tc | 132.6 | 14.2% |
+| iq2s_qdecode | 99.4 | 10.7% |
+| q3k_qdot_matvec (head, one launch) | 94.3 | 10.1% |
+| iq1m + iq3xxs + iq2xs _qdecode | 178.3 | 19.1% |
+
+IQ1_M has the same nibble pair and can follow the split path; IQ3_XXS has
+IQ2_XXS's geometry outright. The head at 10.1% is still the second largest
+single item and still costs what the dequant scratch keeps it from -- it goes
+resident only when no format needs a scratch at all, which means Q2_K and
+IQ4_XS too, and those have no `_qdecode` to build one from.
