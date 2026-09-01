@@ -25,7 +25,10 @@ impl DeviceBackend {
     /// back to `project_raw_dense`, which masks.
     pub(super) fn raw_qmma_eligible(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
         const FUSED: [Quant; 4] = [Quant::IQ1_S, Quant::IQ2_XXS, Quant::IQ2_S, Quant::IQ2_XS];
-        FUSED.iter().any(|&q| self.raw_quant_is(w, q))
+        FUSED
+            .iter()
+            .filter(|&&q| self.raw_qmma_formats.contains(&q))
+            .any(|&q| self.raw_quant_is(w, q))
             && m.is_multiple_of(IQ1S_QMMA_TM)
             && n.is_multiple_of(IQ1S_QMMA_TN)
             && k.is_multiple_of(256)
