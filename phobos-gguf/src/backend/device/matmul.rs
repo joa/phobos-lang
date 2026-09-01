@@ -9,24 +9,33 @@ type I8Kernel<'a> = (&'a Module, &'static str, usize, Vec<(u64, i64)>);
 /// Scratch cap for [`DeviceBackend::project_raw_dense`]'s dequantized weight
 /// strip, bounded well under card memory instead of dequantizing a whole
 /// `[K, N]` tensor at once.
-const RAW_DEQUANT_BUDGET_BYTES: usize = 128 * 1024 * 1024;
+const RAW_DEQUANT_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
 /// [`RAW_DEQUANT_BUDGET_BYTES`], or what `PHOBOS_DEQUANT_MIB` overrides it to.
 ///
 /// The scratch is live for the whole prompt pass, and it is what keeps the
-/// 521 MiB output head paged during one: the head reads 58.1 ms there against
-/// 3.02 in a decode step, the same kernel at the same shape. Shrinking it buys
-/// that back and costs launches, and the trade is steep in both directions --
-/// measured with the fused projection on, each row twice:
+/// 521 MiB output head paged. Traced, the same kernel at the same shape reads
+/// **3.03 ms a token in a decode that follows no prompt pass and 47.19 ms in
+/// one that does**, which is 50% of a decode step and 11.6 GB/s, the bus
+/// rather than the card.
+///
+/// Shrinking it buys that back and costs launches. The trade was steep when
+/// two formats were fused and most of a pass went through here; with four it
+/// is not, and 32 MiB is where it lands. Each row twice, `-p 128 -n 128 -r 1`:
 ///
 /// | budget | pp128 | tg128 |
 /// | ---: | ---: | ---: |
-/// | **128 MiB** | **117.6** | 8.22 |
-/// | 32 MiB | 91.2 | 9.05 |
-/// | 8 MiB | 27.3 | 10.04 |
+/// | 128 MiB | 204.4, 208.6 | 10.06, 11.33 |
+/// | 64 MiB | 202.2, 206.2 | 11.31, 12.93 |
+/// | **32 MiB** | **192.9, 193.0** | **18.03, 18.03** |
+/// | 16 MiB | 150.7, 2.6 | 15.08, 5.79 |
+/// | 8 MiB | 88.8, 87.1 | 18.03, 12.90 |
 ///
-/// So the default stays, and the way out is not a smaller scratch but no
-/// scratch: a format with a fused projection never allocates one.
+/// Below 32 the strip stops covering a whole tensor in few enough launches and
+/// the prompt pass falls apart; the two rounds at 16 MiB disagree by 58x, which
+/// is the shape of a pass that has started thrashing rather than a measurement.
+/// The way out is still no scratch at all: a format with a fused projection
+/// never allocates one, and IQ1_M, IQ3_XXS and IQ3_S are what is left.
 fn raw_dequant_budget() -> usize {
     std::env::var("PHOBOS_DEQUANT_MIB")
         .ok()
