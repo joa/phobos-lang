@@ -93,6 +93,35 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
 
+/// Threads the `dp4a` decode matvecs carry. **256**, and the wider CTA that
+/// looks better standalone is a whole-pass loss.
+///
+/// The CTA sets occupancy and, because the tile is derived from it, how many
+/// columns a warp owns, so it is the one knob that moves these kernels. On
+/// IQ1_S at the FFN shape `resident_probe` says wider is better, 256 leaving
+/// only 24 of the multiprocessor's 32 warps resident:
+///
+/// | `@launch` | ms | GB/s | tg128 in the model |
+/// | ---: | ---: | ---: | ---: |
+/// | **256** | 0.136 | 128.4 | **12.90, 12.90** |
+/// | 512 | 0.119 | 145.8 | 12.53, 12.54 |
+/// | 1024 | 0.114 | 152.9 | 11.75 |
+///
+/// 1.19x standalone and 0.91x in the model, the same shape as the larger-CTA
+/// result already on file for the float matvecs. A decode step interleaves a
+/// thousand of these and a fatter block leaves fewer of them in flight.
+/// `PHOBOS_QDOT_I8_CTA` re-measures it; the clamp is not optional, since a
+/// warp owns `tn * WARP / threads` columns and the tile has to fill the CTA a
+/// whole number of times, so the 16-column narrow tile will not compile at
+/// 1024.
+pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
+    let want = std::env::var("PHOBOS_QDOT_I8_CTA")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(256);
+    want.clamp(256, tn * 32).min(1024)
+}
+
 /// The Q8_0 projection as a single `qmma_t`, which is what a prompt pass runs.
 ///
 /// [`Q8_MMA_SRC`] applies the block scales every 32 elements of `k`, which forces
@@ -331,7 +360,11 @@ pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> us
     // split short of the max halves the compute-time saving without shrinking
     // what pays for it, and can cost more than it buys. Below the max, the
     // unsplit path stays.
-    if splits == Q8_QMMA_SPLIT_MAX { splits } else { 1 }
+    if splits == Q8_QMMA_SPLIT_MAX {
+        splits
+    } else {
+        1
+    }
 }
 
 /// Threads the narrow-CTA variant of the deep tile carries, and its column

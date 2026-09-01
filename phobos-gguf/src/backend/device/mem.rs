@@ -3,15 +3,87 @@
 
 use super::*;
 
+/// What a [`Buf`] handle points at: scratch this backend owns and can hand
+/// back to the pool, or a constant living in the arena.
+///
+/// A constant is uploaded once and never released, so it does not need its own
+/// allocation, and giving it one costs residency: see `arena.rs`. 356 of the
+/// 488 live handles on Qwen3.8-27B are constants.
+pub(super) enum Slot {
+    Owned(DeviceBuffer<f32>),
+    Const { at: u64, len: usize },
+    /// A sequence's recurrent state: arena-backed like a constant, but
+    /// released when the sequence ends, so the arena is counted and reset.
+    State { at: u64, len: usize },
+}
+
+impl Slot {
+    fn base(&self) -> u64 {
+        match self {
+            Slot::Owned(b) => b.as_device_ptr().as_raw(),
+            Slot::Const { at, .. } | Slot::State { at, .. } => *at,
+        }
+    }
+
+    pub(super) fn len(&self) -> usize {
+        match self {
+            Slot::Owned(b) => b.len(),
+            Slot::Const { len, .. } | Slot::State { len, .. } => *len,
+        }
+    }
+}
+
 impl DeviceBackend {
+    /// A handle onto `data` in the arena, for a constant the model never
+    /// releases and never reads back.
+    pub(super) fn store_const(&self, data: &[f32]) -> Result<Buf> {
+        if !self.arena_const {
+            return self.upload(data);
+        }
+        let at = self.hot.upload(data)?;
+        Ok(self.store_slot(Slot::Const {
+            at,
+            len: data.len(),
+        }))
+    }
+
+    /// A zeroed handle onto the state arena, for a buffer that lives as long as
+    /// the sequence does. 48 of these, three megabytes each, and giving each
+    /// its own allocation is what leaves `delta_rule` reading its state at
+    /// 2 ms a launch where a resident one takes 15 us: see `arena.rs`.
+    pub(super) fn zeroed_state_buf(&self, len: usize) -> Result<Buf> {
+        let at = self.state_arena.upload(&vec![0.0f32; len])?;
+        self.state_live.set(self.state_live.get() + 1);
+        Ok(self.store_slot(Slot::State { at, len }))
+    }
+
     pub(super) fn store(&self, buffer: DeviceBuffer<f32>) -> Buf {
+        self.store_slot(Slot::Owned(buffer))
+    }
+
+    fn store_slot(&self, slot_value: Slot) -> Buf {
         if let Some(slot) = self.free_slots.borrow_mut().pop() {
-            self.slots.borrow_mut()[slot] = Some(buffer);
+            self.slots.borrow_mut()[slot] = Some(slot_value);
             return Buf(slot);
         }
         let mut slots = self.slots.borrow_mut();
-        slots.push(Some(buffer));
+        slots.push(Some(slot_value));
         Buf(slots.len() - 1)
+    }
+
+    /// Give a buffer back to the driver rather than to the pool, so the memory
+    /// becomes the weights' again instead of staying reserved for a shape that
+    /// only a prompt pass asks for. Only safe where [`Pool::trim`] is: see
+    /// `residency.rs`.
+    pub(super) fn discard(&self, buf: Buf) {
+        let taken = self
+            .slots
+            .borrow_mut()
+            .get_mut(buf.0)
+            .and_then(Option::take);
+        if taken.is_some() {
+            self.free_slots.borrow_mut().push(buf.0);
+        }
     }
 
     /// The device pointer behind a handle, offset by `elements`.
@@ -25,7 +97,7 @@ impl DeviceBackend {
             elements <= buffer.len(),
             "offset {elements} is past the buffer"
         );
-        Ok(buffer.as_device_ptr().as_raw() + (elements * size_of::<f32>()) as u64)
+        Ok(buffer.base() + (elements * size_of::<f32>()) as u64)
     }
 
     /// The same for f16 storage, whose offset is counted in halves.
@@ -45,7 +117,7 @@ impl DeviceBackend {
             elements <= 2 * buffer.len(),
             "offset {elements} is past the buffer"
         );
-        Ok(buffer.as_device_ptr().as_raw() + (elements * size_of::<u16>()) as u64)
+        Ok(buffer.base() + (elements * size_of::<u16>()) as u64)
     }
 
     /// The f32 words behind f16 storage. Only safe for a whole even run, which

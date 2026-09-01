@@ -38,7 +38,9 @@ fn decoded_run(is: usize) -> (usize, String) {
     let q2 = format!("(((i32(qb[:, {qs_off} :+ {RUN}]) + 256) % 256 / {shift_div}) % 4)");
     (
         out_off,
-        format!("    let decoded{is} = f32(d) * f32({sc} % 16) * f32({q2}) - f32(dmin) * f32({sc} / 16)\n"),
+        format!(
+            "    let decoded{is} = f32(d) * f32({sc} % 16) * f32({q2}) - f32(dmin) * f32({sc} / 16)\n"
+        ),
     )
 }
 
@@ -121,4 +123,3 @@ kernel q2k_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB], DMIN: tensor<f1
 "
     )
 }
-

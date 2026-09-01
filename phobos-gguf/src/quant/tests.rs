@@ -218,3 +218,43 @@ fn legacy_nibble_formats_split_a_block_in_half() {
 fn f16(v: f32) -> f32 {
     phobos_base::half::f16_to_f32(f32_to_f16(v))
 }
+
+/// The delta fold the fused IQ1_S projection rests on: a weight is
+/// `dl * (g +- 1/8)`, `g` is -1, 0 or 1, so `8g +- 1` is an exact `i8` and the
+/// weight is `(dl / 8)` times it. If this holds, the tensor-core path needs no
+/// activation row sums and no second dot product for the delta.
+#[test]
+fn iq1s_folds_its_delta_into_an_exact_int8() {
+    let grid = iq1s_signed_grid();
+    assert_eq!(grid.len(), 2048 * 2 * 8);
+    assert!(
+        grid.iter().all(|&g| (-9..=9).contains(&g)),
+        "a folded IQ1_S weight left the range an i8 fragment can carry"
+    );
+
+    // A block whose bytes exercise every field, dequantized by the reference
+    // and rebuilt the way the kernel does it.
+    let bytes = block(Quant::IQ1_S, |i| (i * 37 + 11) as u8);
+    let mut reference = [0.0f32; 256];
+    (Quant::IQ1_S.spec().dequantize)(&bytes, &mut reference);
+
+    let d = phobos_base::half::f16_to_f32(u16::from_le_bytes([bytes[0], bytes[1]]));
+    for ib in 0..8 {
+        let qh = u16::from_le_bytes([bytes[34 + 2 * ib], bytes[34 + 2 * ib + 1]]);
+        let dl = d * f32::from(2 * ((qh >> 12) & 7) + 1);
+        let sign = usize::from(qh >> 15);
+        for l in 0..4 {
+            let idx = usize::from(bytes[2 + 4 * ib + l]) | (usize::from((qh >> (3 * l)) & 7) << 8);
+            for y in 0..8 {
+                let folded = grid[(idx * 2 + sign) * 8 + y];
+                let rebuilt = (dl / 8.0) * f32::from(folded);
+                let at = ib * 32 + l * 8 + y;
+                assert_eq!(
+                    rebuilt, reference[at],
+                    "element {at} rebuilt {rebuilt} against reference {}",
+                    reference[at]
+                );
+            }
+        }
+    }
+}

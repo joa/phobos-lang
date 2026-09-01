@@ -22,12 +22,12 @@ mod q8_0;
 mod q8_1;
 mod tables;
 
-pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
-pub(crate) use iq1_s::{flat_grid as iq1s_flat_grid, packed_grid as iq1s_packed_grid};
+pub(crate) use iq1_s::{
+    flat_grid as iq1s_flat_grid, packed_grid as iq1s_packed_grid, signed_grid as iq1s_signed_grid,
+};
 pub(crate) use iq2_s::{
-    flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs,
-    packed_grid as iq2s_packed_grid, packed_sign_masks as iq2s_sign_masks,
-    packed_signs as iq2s_packed_signs,
+    flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs, packed_grid as iq2s_packed_grid,
+    packed_sign_masks as iq2s_sign_masks, packed_signs as iq2s_packed_signs,
 };
 pub(crate) use iq2_xs::{flat_grid as iq2xs_flat_grid, packed_grid as iq2xs_packed_grid};
 pub(crate) use iq2_xxs::{
@@ -38,6 +38,7 @@ pub(crate) use iq2_xxs::{
 pub(crate) use iq3_s::{flat_grid as iq3s_flat_grid, packed_grid as iq3s_packed_grid};
 pub(crate) use iq3_xxs::{flat_grid as iq3xxs_flat_grid, packed_grid as iq3xxs_packed_grid};
 pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
+pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

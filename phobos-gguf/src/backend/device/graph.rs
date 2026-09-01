@@ -2,6 +2,74 @@
 // replayed and reported.
 
 use super::*;
+
+#[derive(Default)]
+pub(super) struct Recorded {
+    pub(super) func: cust::sys::CUfunction,
+    pub(super) grid: (u32, u32, u32),
+    /// Zero for the kernels whose tiles are static globals.
+    pub(super) shared: u32,
+    pub(super) threads: u32,
+    /// The exploded-memref ABI's argument words, one per kernel parameter.
+    /// See [`push_descriptor`]
+    pub(super) slots: Vec<u64>,
+}
+
+impl Recorded {
+    pub(super) fn params(&self, argv: &mut Vec<*mut c_void>) -> cust::sys::CUDA_KERNEL_NODE_PARAMS {
+        // Borrows slots for the pointer array. The driver copies the values out
+        // during the call, so neither outlives it.
+        argv.clear();
+        argv.extend(
+            self.slots
+                .iter()
+                .map(|s| s as *const u64 as *mut u64 as *mut c_void),
+        );
+        cust::sys::CUDA_KERNEL_NODE_PARAMS {
+            func: self.func,
+            gridDimX: self.grid.0,
+            gridDimY: self.grid.1,
+            gridDimZ: self.grid.2,
+            blockDimX: self.threads,
+            blockDimY: 1,
+            blockDimZ: 1,
+            sharedMemBytes: self.shared,
+            kernelParams: argv.as_mut_ptr(),
+            extra: std::ptr::null_mut(),
+        }
+    }
+
+    pub(super) fn same(&self, other: &Recorded) -> bool {
+        self.func == other.func && self.grid == other.grid && self.slots == other.slots
+    }
+}
+
+/// enabled via `PHOBOS_PASS_REPORT`
+pub(super) struct PassOp {
+    pub(super) name: &'static str,
+    pub(super) func: cust::sys::CUfunction,
+    pub(super) blocks: u32,
+    pub(super) threads: u32,
+    pub(super) shared: u32,
+}
+
+pub(super) struct PassGraph {
+    pub(super) graph: cust::sys::CUgraph,
+    pub(super) exec: cust::sys::CUgraphExec,
+    pub(super) nodes: Vec<cust::sys::CUgraphNode>,
+    pub(super) recorded: Vec<Recorded>,
+}
+
+impl Drop for PassGraph {
+    fn drop(&mut self) {
+        // SAFETY: both handles were created by this type and are dropped once.
+        unsafe {
+            cust::sys::cuGraphExecDestroy(self.exec);
+            cust::sys::cuGraphDestroy(self.graph);
+        }
+    }
+}
+
 impl DeviceBackend {
     /// Puts one launch on the stream.
     pub(super) fn issue(&self, launch: &Recorded, name: &'static str) -> Result<()> {
