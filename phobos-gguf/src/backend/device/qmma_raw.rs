@@ -29,8 +29,10 @@ impl DeviceBackend {
             .iter()
             .filter(|&&q| self.raw_qmma_formats.contains(&q))
             .any(|&q| self.raw_quant_is(w, q))
-            && m.is_multiple_of(IQ1S_QMMA_TM)
-            && n.is_multiple_of(IQ1S_QMMA_TN)
+            && {
+                let (tm, tn, _) = qmma_tile();
+                m.is_multiple_of(tm) && n.is_multiple_of(tn)
+            }
             && k.is_multiple_of(256)
     }
 
@@ -51,6 +53,7 @@ impl DeviceBackend {
         n: usize,
         out: Buf,
     ) -> Result<()> {
+        let (qtm, qtn, _) = qmma_tile();
         let raws = self.raw_quants.borrow();
         let raw = raws
             .get(w.0)
@@ -133,7 +136,7 @@ impl DeviceBackend {
             module,
             name,
             &operands,
-            ((m / IQ1S_QMMA_TM) as u32, (n / IQ1S_QMMA_TN) as u32, 1),
+            ((m / qtm) as u32, (n / qtn) as u32, 1),
         )
     }
 }
