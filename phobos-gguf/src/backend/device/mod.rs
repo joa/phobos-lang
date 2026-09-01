@@ -770,6 +770,7 @@ impl DeviceBackend {
         let i8_srcs: Vec<OwnedEntry> = i8
             .iter()
             .flat_map(|&(src, w, n, name)| {
+                let w = qdot_i8_tn(w);
                 [(src(w), [("TN", w)], name), (src(n), [("TN", n)], name)]
             })
             .collect();
