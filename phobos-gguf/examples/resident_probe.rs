@@ -202,30 +202,38 @@ fn main() -> Result<()> {
     // VRAM ballast in MiB, written between launches so the driver has to keep
     // it resident and cannot simply evict what nobody touches.
     let ballast_mib: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(0);
-    let ballast = if ballast_mib > 0 {
-        let held = DeviceBuffer::from_slice(&vec![0.0f32; ballast_mib * 1024 * 1024 / 4])?;
-        println!("holding {ballast_mib} MiB of ballast, written between launches");
-        Some(held)
-    } else {
-        None
-    };
+    // How many allocations that ballast is split across. One is llama.cpp's
+    // shape, a handful of big backend buffers; several hundred is phobos's,
+    // one `cuMemAlloc` per tensor. WDDM manages residency per allocation, so
+    // the two are not the same amount of pressure even at the same total.
+    let chunks: usize = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1);
+    let mut ballast = Vec::new();
+    if ballast_mib > 0 {
+        let per = ballast_mib * 1024 * 1024 / 4 / chunks;
+        for _ in 0..chunks {
+            ballast.push(DeviceBuffer::from_slice(&vec![0.0f32; per])?);
+        }
+        println!(
+            "holding {ballast_mib} MiB of ballast across {chunks} allocation(s),              written between launches"
+        );
+    }
 
     println!(
         "{:>6} {:>8} {:>8} {:>5} {:>9} {:>9} {:>9}",
         "fmt", "k", "n", "TN", "ms", "GB/s", "GMAC/s"
     );
     // The model's two heaviest decode kernels, with room to breathe.
-    run(&stream, &Q3K, HEAD_K, HEAD_N, Q3K.tn, ballast.as_ref())?;
-    run(&stream, &IQ1S, FFN_K, FFN_N, IQ1S.tn, ballast.as_ref())?;
-    run(&stream, &IQ1S, FFN_N, FFN_K, IQ1S.tn, ballast.as_ref())?;
-    run(&stream, &IQ1S_I8, FFN_K, FFN_N, IQ1S_I8.tn, ballast.as_ref())?;
-    run(&stream, &IQ1S_I8, FFN_N, FFN_K, IQ1S_I8.tn, ballast.as_ref())?;
+    run(&stream, &Q3K, HEAD_K, HEAD_N, Q3K.tn, &ballast)?;
+    run(&stream, &IQ1S, FFN_K, FFN_N, IQ1S.tn, &ballast)?;
+    run(&stream, &IQ1S, FFN_N, FFN_K, IQ1S.tn, &ballast)?;
+    run(&stream, &IQ1S_I8, FFN_K, FFN_N, IQ1S_I8.tn, &ballast)?;
+    run(&stream, &IQ1S_I8, FFN_N, FFN_K, IQ1S_I8.tn, &ballast)?;
 
     // The dp4a path has to agree with the float one it replaces. Both read
     // the same weights and the same activation values, so the only difference
     // left is the order the sums are accumulated in.
-    let want = run(&stream, &IQ1S, FFN_K, FFN_N, IQ1S.tn, None)?;
-    let got = run(&stream, &IQ1S_I8, FFN_K, FFN_N, IQ1S_I8.tn, None)?;
+    let want = run(&stream, &IQ1S, FFN_K, FFN_N, IQ1S.tn, &[])?;
+    let got = run(&stream, &IQ1S_I8, FFN_K, FFN_N, IQ1S_I8.tn, &[])?;
     let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
     let worst = want
         .iter()
@@ -236,8 +244,8 @@ fn main() -> Result<()> {
   iq1s  dp4a against float, worst relative error {worst:.3e}");
     anyhow::ensure!(worst < 1e-3, "the iq1s dp4a path disagrees with the float path");
 
-    let want = run(&stream, &IQ2XXS, FFN_K, FFN_N, IQ2XXS.tn, None)?;
-    let got = run(&stream, &IQ2XXS_I8, FFN_K, FFN_N, IQ2XXS_I8.tn, None)?;
+    let want = run(&stream, &IQ2XXS, FFN_K, FFN_N, IQ2XXS.tn, &[])?;
+    let got = run(&stream, &IQ2XXS_I8, FFN_K, FFN_N, IQ2XXS_I8.tn, &[])?;
     let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
     let worst = want
         .iter()
@@ -247,8 +255,8 @@ fn main() -> Result<()> {
     println!("  iq2xxs dp4a against float, worst relative error {worst:.3e}");
     anyhow::ensure!(worst < 1e-3, "the iq2xxs dp4a path disagrees with the float path");
 
-    let want = run(&stream, &IQ3XXS, FFN_K, FFN_N, IQ3XXS.tn, None)?;
-    let got = run(&stream, &IQ3XXS_I8, FFN_K, FFN_N, IQ3XXS_I8.tn, None)?;
+    let want = run(&stream, &IQ3XXS, FFN_K, FFN_N, IQ3XXS.tn, &[])?;
+    let got = run(&stream, &IQ3XXS_I8, FFN_K, FFN_N, IQ3XXS_I8.tn, &[])?;
     let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
     let worst = want.iter().zip(&got).map(|(w, g)| (w - g).abs() / scale).fold(0.0f32, f32::max);
     println!("  iq3xxs dp4a against float, worst relative error {worst:.3e}");
@@ -259,13 +267,13 @@ fn main() -> Result<()> {
     println!();
     // Linear in n, or the cost is not in the contraction.
     for n in [HEAD_N / 8, HEAD_N / 4, HEAD_N / 2, HEAD_N] {
-        run(&stream, &Q3K, HEAD_K, n, Q3K.tn, None)?;
+        run(&stream, &Q3K, HEAD_K, n, Q3K.tn, &[])?;
     }
     println!();
     // The CTA size sets both occupancy and, since it is derived, how many
     // columns a warp owns. 256 threads leaves only 24 of 32 warps resident.
     for threads in [256u32, 512, 1024] {
-        let got = run_at(&stream, &IQ1S_I8, FFN_K, FFN_N, 64, threads, None)?;
+        let got = run_at(&stream, &IQ1S_I8, FFN_K, FFN_N, 64, threads, &[])?;
         let _ = got;
         println!("      ^ @launch({threads})");
     }
@@ -273,13 +281,13 @@ fn main() -> Result<()> {
     // Columns a CTA covers: every column re-reads the activation vector, so a
     // wider tile shares more of it inside one L1.
     for tn in [8, 16, 32] {
-        run(&stream, &IQ1S, FFN_K, FFN_N, tn, None)?;
+        run(&stream, &IQ1S, FFN_K, FFN_N, tn, &[])?;
     }
     println!();
     // The i8 kernel gives a warp two columns, so it needs twice the tile to
     // keep a 256-thread CTA busy.
     for tn in [8, 16, 32, 64] {
-        run(&stream, &IQ1S_I8, FFN_K, FFN_N, tn, None)?;
+        run(&stream, &IQ1S_I8, FFN_K, FFN_N, tn, &[])?;
     }
     Ok(())
 }
@@ -290,7 +298,7 @@ fn run(
     k: usize,
     n: usize,
     tn: usize,
-    ballast: Option<&DeviceBuffer<f32>>,
+    ballast: &[DeviceBuffer<f32>],
 ) -> Result<Vec<f32>> {
     run_at(stream, probe, k, n, tn, 256, ballast)
 }
@@ -303,7 +311,7 @@ fn run_at(
     n: usize,
     tn: usize,
     threads: u32,
-    ballast: Option<&DeviceBuffer<f32>>,
+    ballast: &[DeviceBuffer<f32>],
 ) -> Result<Vec<f32>> {
     let nb = k / 256;
     let rb = nb * probe.block_bytes;
@@ -379,7 +387,7 @@ fn time(
     blocks: u32,
     threads: u32,
     slots: &mut [u64],
-    ballast: Option<&DeviceBuffer<f32>>,
+    ballast: &[DeviceBuffer<f32>],
 ) -> Result<f64> {
     let mut params: Vec<*mut std::ffi::c_void> =
         slots.iter_mut().map(|s| (s as *mut u64).cast()).collect();
@@ -415,7 +423,7 @@ fn time(
     let (begin, end) = (Event::new(EventFlags::DEFAULT)?, Event::new(EventFlags::DEFAULT)?);
     let mut total = 0.0f32;
     for _ in 0..REPS {
-        if let Some(b) = ballast {
+        for b in ballast {
             // SAFETY: the buffer is live and the stream is synchronized below.
             unsafe {
                 cuda_ok(
