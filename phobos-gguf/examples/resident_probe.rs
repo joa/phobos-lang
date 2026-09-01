@@ -17,6 +17,11 @@ use anyhow::Result;
 use cust::prelude::*;
 use phobos_kernels::{compile, cuda_ok, push_descriptor};
 
+thread_local! {
+    /// Free VRAM before the ballast, so its real cost can be read off.
+    static START: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// One format's decode matvec: the production source, its device block
 /// stride, its output tile, and how wide a lookup table it wants.
 struct Probe {
@@ -198,6 +203,7 @@ const FFN_N: usize = 17408;
 fn main() -> Result<()> {
     let _ctx = cust::quick_init()?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+    START.with(|s| s.set(cust::memory::mem_get_info().map_or(0, |(free, _)| free)));
 
     // VRAM ballast in MiB, written between launches so the driver has to keep
     // it resident and cannot simply evict what nobody touches.
@@ -215,6 +221,18 @@ fn main() -> Result<()> {
         }
         println!(
             "holding {ballast_mib} MiB of ballast across {chunks} allocation(s),              written between launches"
+        );
+    }
+    // What the ballast actually took off the card. A `cuMemAlloc` is rounded
+    // up to the driver's page, so many small ones cost far more than the bytes
+    // asked for, and that difference is invisible from inside the process.
+    if let Ok((free, total)) = cust::memory::mem_get_info() {
+        let mib = |b: usize| b as f64 / (1 << 20) as f64;
+        println!(
+            "free {:.0} of {:.0} MiB; the ballast cost {:.0} MiB for {ballast_mib} asked",
+            mib(free),
+            mib(total),
+            mib(START.with(|s| s.get()).saturating_sub(free)),
         );
     }
 
@@ -285,9 +303,31 @@ fn main() -> Result<()> {
     }
     println!();
     // The i8 kernel gives a warp two columns, so it needs twice the tile to
-    // keep a 256-thread CTA busy.
-    for tn in [8, 16, 32, 64] {
+    // keep a 256-thread CTA busy. Past 64 the grid starts running out of
+    // blocks: n / TN at 17408 is 272 at 64 and 68 at 256, against 48
+    // multiprocessors.
+    for tn in [8, 16, 32, 64, 128, 256] {
         run(&stream, &IQ1S_I8, FFN_K, FFN_N, tn, &[])?;
+    }
+    println!();
+    // The tile and the CTA together, at the two shapes the model runs and for
+    // the second-largest format as well: a warp owns `tn * 32 / threads`
+    // columns, and that product is the thing being swept, not either half.
+    for probe in [&IQ1S_I8, &IQ2XXS_I8] {
+        for (k, n) in [(FFN_K, FFN_N), (FFN_N, FFN_K)] {
+            for tn in [64usize, 128, 256] {
+                for threads in [256u32, 512, 1024] {
+                    // A warp owns `tn * WARP / threads` columns and the tile
+                    // has to fill the CTA a whole number of times.
+                    if threads as usize > tn * 32 || !(tn * 32).is_multiple_of(threads as usize) {
+                        continue;
+                    }
+                    let _ = run_at(&stream, probe, k, n, tn, threads, &[])?;
+                    println!("      ^ TN {tn} @launch({threads})");
+                }
+            }
+        }
+        println!();
     }
     Ok(())
 }

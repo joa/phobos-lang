@@ -4,8 +4,10 @@
 use super::*;
 
 impl Backend for DeviceBackend {
+    #[track_caller]
     fn alloc(&self, len: usize) -> Result<Buf> {
         self.note_alloc(len, 1);
+        residency::note_big_alloc(len);
         Ok(self.store(self.pool.take(len)?))
     }
 
@@ -172,6 +174,7 @@ impl Backend for DeviceBackend {
         if let Some(&buf) = self.constants.borrow().get(key) {
             return Ok(buf);
         }
+        residency::note_big_const(key, data.len());
         let buf = self.store_const(data)?;
         self.constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
@@ -181,7 +184,9 @@ impl Backend for DeviceBackend {
         if let Some(&buf) = self.constants.borrow().get(key) {
             return Ok(buf);
         }
-        let buf = self.store_const(&fill()?)?;
+        let data = fill()?;
+        residency::note_big_const(key, data.len());
+        let buf = self.store_const(&data)?;
         self.constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
     }

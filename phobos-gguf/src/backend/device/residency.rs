@@ -190,6 +190,23 @@ impl DeviceBackend {
             mib(big.iter().sum()),
             big.iter().take(6).map(|&b| mib(b) as usize).collect::<Vec<_>>(),
         );
+        let mut named: Vec<(usize, usize)> = self
+            .slots
+            .borrow()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|s| (s.len(), i)))
+            .filter(|&(len, _)| len * 4 >= 8 << 20)
+            .collect();
+        named.sort_unstable_by_key(|&(len, _)| std::cmp::Reverse(len));
+        eprintln!(
+            "[vram]   slots over 8 MiB: {:?}",
+            named
+                .iter()
+                .take(8)
+                .map(|&(len, i)| format!("#{i} {len} f32 = {:.0} MiB", mib(len * 4)))
+                .collect::<Vec<_>>()
+        );
         let (raw, handed) = self.arena.bytes();
         let pair = |v: &RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>| -> usize {
             v.borrow().iter().map(|(b, s)| b.len() + 4 * s.len()).sum()
@@ -204,6 +221,24 @@ impl DeviceBackend {
             self.hot.slabs(),
         );
         let fused = pair(&self.fused_scratch);
+        let (state_held, state_used) = self.state_arena.bytes();
+        let (hot_held, hot_used) = self.hot.bytes();
+        let owned: usize = self
+            .owned_quants
+            .borrow()
+            .iter()
+            .map(|(q, s, r)| q.len() + 4 * s.len() + 4 * r.len())
+            .sum();
+        eprintln!(
+            "[vram]   state {:.0} MiB ({:.0} used) in {} slabs | hot {:.0} ({:.0}) | owned quants {:.0} MiB | accounted {:.0} MiB",
+            mib(state_held),
+            mib(state_used),
+            self.state_arena.slabs(),
+            mib(hot_held),
+            mib(hot_used),
+            mib(owned),
+            mib(raw + state_held + hot_held + owned + act + fused + live),
+        );
         eprintln!(
             "[vram]   live {live_n} bufs {:.0} MiB | arena {:.0} MiB ({:.0} used) in {} slabs (+{} hot) | act {:.0} | fused {:.0} MiB",
             mib(live),
@@ -215,6 +250,33 @@ impl DeviceBackend {
             mib(fused),
         );
     }
+}
+
+/// The same for a named model constant, which is the half that says *what*.
+pub(super) fn note_big_const(key: &str, len: usize) {
+    if len * size_of::<f32>() < (8 << 20) || std::env::var_os("PHOBOS_VRAM").is_none() {
+        return;
+    }
+    eprintln!(
+        "[vram] constant {key:?} {:.0} MiB ({len} f32)",
+        (len * size_of::<f32>()) as f64 / (1 << 20) as f64
+    );
+}
+
+/// Where a large pass buffer is asked for. `PHOBOS_VRAM=1` only: on a card
+/// this close to full, one 20 MiB buffer nobody remembers asking for is the
+/// difference between an output head that stays resident and one that does not,
+/// and the call site is the only thing that names it.
+#[track_caller]
+pub(super) fn note_big_alloc(len: usize) {
+    if len * size_of::<f32>() < (8 << 20) || std::env::var_os("PHOBOS_VRAM").is_none() {
+        return;
+    }
+    eprintln!(
+        "[vram] alloc {:.0} MiB ({len} f32) at {}",
+        (len * size_of::<f32>()) as f64 / (1 << 20) as f64,
+        std::panic::Location::caller()
+    );
 }
 
 /// What the card has free at a named point, and what the step before it cost.
