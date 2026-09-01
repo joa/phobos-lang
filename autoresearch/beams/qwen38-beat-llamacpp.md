@@ -972,3 +972,52 @@ does not reproduce here; it should not be quoted again.
 llama.cpp's 46.8, or **52 GB/s of weight against 137**, on a card that can do
 496 and is paging because 6.4 GiB of weights plus 1.2 GiB of desktop do not fit
 in 8.
+
+## Decode: the output head is half of it, and only after a prompt pass
+
+Two `nsys` traces, `--cuda-graph-trace=node --no-warmup`, both with the fused
+path on, both steady state (the second half of the decode, so the load and the
+first passes are outside the window):
+
+| | `-p 0 -n 16` | `-p 128 -n 32` |
+| --- | ---: | ---: |
+| wall a token | 52.5 ms | 97.6 ms |
+| GPU busy a token | 49.3 ms | 94.3 ms |
+| **utilization** | **93.9%** | **96.6%** |
+| `q3k_qdot_matvec` (the head) | **3.03 ms** | **47.19 ms** |
+| `iq1s_qdot_i8_matvec` | 17.76 | 16.56 |
+| `iq2xxs_qdot_i8_matvec` | 12.50 | 11.61 |
+
+Every other kernel is the same to within a few percent. **The head alone is
+15x, and it is 50% of a decode step.** 521 MiB at 47.19 ms is 11.6 GB/s, which
+is the bus, not the card: the head is read over PCIe every token. With it
+resident a decode step is 53.4 ms, which is **18.7 tok/s**.
+
+So decode is not idle and not launch-bound. The 2.6 ms a token of gap in the
+first trace is one `argmax_finish` to `copy`, the host reading the sampled
+token, and there is nothing else. **The whole tg deficit is one evicted
+allocation.**
+
+### What it is not
+
+- **Allocation count.** The run holds **2126 live `cuMemAlloc_v2`** against a
+  cliff `resident_probe` puts between 256 and 320. Moving 644 of them into
+  slabs (`PHOBOS_ARENA_CONST=1`) measures nothing: three interleaved rounds
+  read 10.02/10.01, 8.21/11.26, 11.26/11.25. At 2126 the curve is flat; only
+  getting under a few hundred could show.
+- **The pool free list.** `PHOBOS_TRIM=1` reads tg128 11.14, 11.19 against
+  11.27, 8.99 and costs pp128 208 -> 3.69 in one round. The free list is 8 MiB;
+  it was never the problem.
+- **Activation slots sized by the prompt.** Shrinking a slot when the batch
+  shrinks: no change. Decode never asks for one, so it never fires.
+
+### What it is
+
+The card has **0 MiB free** from the moment the model is up. The weights are
+6034 MiB of arena, the constants and Q8_0 planes about 200 more, and the live
+pool is **336 MiB with a 127 MiB dequant scratch in it** -- against a desktop
+that drifts around 1200 MiB of the 8192. The working set is over the card by
+roughly the size of the head, so the head is what goes.
+
+Two ways out, and they are the same work: fuse the formats that still need the
+scratch, and put the pool on a diet.
