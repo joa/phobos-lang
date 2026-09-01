@@ -107,6 +107,7 @@ fn check_matmul_raw(
     host: &dyn Backend,
     gpu: &dyn Backend,
     set_dp4a: &dyn Fn(bool),
+    set_qmma: &dyn Fn(bool),
     check_spread: &CheckSpread,
     check_within: &CheckWithin,
     check_tc: &CheckTc,
@@ -132,6 +133,7 @@ fn check_matmul_raw(
         };
         let label = format!("matmul_raw {name} [{m} x {k} x {n}]");
         set_dp4a(false);
+        set_qmma(false);
         let (want, float_path) = (run(host)?, run(gpu)?);
         if raw_shape_is_tc(m, k, n) {
             check_tc(&label, k, &want, &float_path);
@@ -145,6 +147,16 @@ fn check_matmul_raw(
             let dp4a = run(gpu)?;
             set_dp4a(false);
             check_spread(&format!("{label} dp4a vs float"), &float_path, &dp4a);
+        }
+        // The fused projection quantizes its activation as well, so the host
+        // cannot judge it either; the path it replaces can.
+        if m > 1 {
+            set_qmma(true);
+            let fused = run(gpu)?;
+            set_qmma(false);
+            if fused != float_path {
+                check_spread(&format!("{label} fused vs dense"), &float_path, &fused);
+            }
         }
     }
     Ok(())
@@ -161,6 +173,7 @@ fn main() -> Result<()> {
 
     // The one thing device-against-host cannot judge: see `check_matmul_raw`.
     let set_dp4a = |on: bool| gpu.set_iq_dp4a(on);
+    let set_qmma = |on: bool| gpu.set_raw_qmma(on);
 
     /// The largest gap as a fraction of the output's own spread, which is how
     /// `batch_check` judges two orderings of the same sum and the right measure
@@ -538,6 +551,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -550,6 +564,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -562,6 +577,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -574,6 +590,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -586,6 +603,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -598,6 +616,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -610,6 +629,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -622,6 +642,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -634,6 +655,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,
@@ -646,6 +668,7 @@ fn main() -> Result<()> {
         &host,
         &gpu,
         &set_dp4a,
+        &set_qmma,
         &check_spread,
         &check_within,
         &check_tc,

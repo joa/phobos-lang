@@ -41,6 +41,28 @@ impl<'c> Codegen<'c> {
         Ok([a, asc, qb, d, grid])
     }
 
+    /// `(a, a_scales, qb, d, grid, signs)` for an `iq2xxs_qmma_t` call.
+    pub(super) fn iq2xxs_qmma_operands(
+        &mut self,
+        block: &Block<'c>,
+        args: &[Expr],
+    ) -> Result<[MemVal<'c>; 6]> {
+        let [a, asc, qb, d, grid, signs] = args else {
+            bail!("iq2xxs_qmma_t expects (a, a_scales, qb, d, grid, signs)");
+        };
+        let operand = |cg: &mut Self, e: &Expr| match cg.emit_expr(block, e)? {
+            Rv::Tile(t) => Ok(t),
+            Rv::Scalar(_) => bail!("iq2xxs_qmma_t expects tile operands"),
+        };
+        let a = operand(self, a)?;
+        let asc = operand(self, asc)?;
+        let qb = operand(self, qb)?;
+        let d = operand(self, d)?;
+        let grid = operand(self, grid)?;
+        let signs = operand(self, signs)?;
+        Ok([a, asc, qb, d, grid, signs])
+    }
+
     /// `(qb, d, tables..)` for a `<fmt>_qdecode_t` call.
     pub(super) fn qdecode_operands(
         &mut self,
@@ -312,6 +334,17 @@ impl<'c> Codegen<'c> {
                 let out = self.alloc_tile_shaped(block, self.f32_t, &[a.shape[0], qb.shape[0]])?;
                 self.iq1s_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &out)?;
                 for t in [&a, &asc, &qb, &d, &grid] {
+                    self.release(t);
+                }
+                Ok(Rv::Tile(out))
+            }
+            // iq2xxs_qmma_staged_t(..): IQ2_XXS's batched projection, decode
+            // staged through shared memory. See `iq2xxs_qmma.rs`.
+            "iq2xxs_qmma_staged_t" => {
+                let [a, asc, qb, d, grid, signs] = self.iq2xxs_qmma_operands(block, args)?;
+                let out = self.alloc_tile_shaped(block, self.f32_t, &[a.shape[0], qb.shape[0]])?;
+                self.iq2xxs_qmma_staged_into(block, &a, &asc, &qb, &d, &grid, &signs, &out)?;
+                for t in [&a, &asc, &qb, &d, &grid, &signs] {
                     self.release(t);
                 }
                 Ok(Rv::Tile(out))

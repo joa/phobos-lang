@@ -150,7 +150,46 @@ impl<'c> Codegen<'c> {
         let z = geom.zero_idx;
         let grid_v = self.vec_load_al(kb, tables.grid.mem, &[z, grid_idx8], vec_t, 8)?;
         let signs_v = self.vec_load_al(kb, tables.signs.mem, &[z, signs_idx8], vec_t, 8)?;
-        Ok(Iq2xxsBlock { db, grid_v, signs_v })
+        Ok(Iq2xxsBlock {
+            db,
+            grid_v,
+            signs_v,
+        })
+    }
+
+    /// A block's scale for one column, without decoding its magnitudes or
+    /// signs. The staged projection needs it for the output columns, which are
+    /// not the columns whose fragments a lane staged, so it cannot come from
+    /// the [`Iq2xxsBlock`] that lane already built.
+    ///
+    /// The group's scale is the top four bits of the last byte of its eight:
+    /// `chunk + 4` is the aux word and the scale is its own top nibble, so
+    /// `8 * ib + 7`.
+    pub(super) fn iq2xxs_db(
+        &mut self,
+        kb: &Block<'c>,
+        qb: &MemVal<'c>,
+        d: &MemVal<'c>,
+        at: &BlockAt<'c>,
+        ib: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let (j, blk, blk_off) = (at.j, at.blk, at.off);
+        let f32_t = self.f32_t;
+        let eight = self.const_index(kb, 8)?;
+        let seven = self.const_index(kb, 7)?;
+        let at = self.muli(kb, ib, eight)?;
+        let at = self.addi(kb, at, seven)?;
+        let scale = self.qbyte(kb, qb, j, blk_off, at)?;
+        let c16 = self.const_i32(kb, 16)?;
+        let scale = self.push(kb, arith::divui(scale, c16, self.loc))?;
+        let scale = self.numeric_cast(kb, scale, f32_t)?;
+        let half = self.const_f32(kb, 0.5)?;
+        let quarter = self.const_f32(kb, 0.25)?;
+        let d_val = self.push(kb, memref::load(d.mem, &[j, blk], self.loc))?;
+        let d_f32 = self.numeric_cast(kb, d_val, f32_t)?;
+        let sc = self.push(kb, arith::addf(half, scale, self.loc))?;
+        let sc = self.push(kb, arith::mulf(sc, quarter, self.loc))?;
+        self.push(kb, arith::mulf(d_f32, sc, self.loc))
     }
 
     /// The lane's `y`-th decoded weight, from the entries already in

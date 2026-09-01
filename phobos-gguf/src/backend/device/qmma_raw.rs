@@ -12,7 +12,7 @@
 //!
 //! Contracting out of the registers the decode already lands in pays neither.
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 
 use super::*;
 
@@ -24,7 +24,8 @@ impl DeviceBackend {
     /// because a lane indexes the block bytes itself. A shape that misses goes
     /// back to `project_raw_dense`, which masks.
     pub(super) fn raw_qmma_eligible(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
-        self.raw_quant_is(w, Quant::IQ1_S)
+        const FUSED: [Quant; 2] = [Quant::IQ1_S, Quant::IQ2_XXS];
+        FUSED.iter().any(|&q| self.raw_quant_is(w, q))
             && m.is_multiple_of(IQ1S_QMMA_TM)
             && n.is_multiple_of(IQ1S_QMMA_TN)
             && k.is_multiple_of(256)
@@ -56,14 +57,14 @@ impl DeviceBackend {
             "raw weight was uploaded with n = {}, used with n = {n}",
             raw.n
         );
-        ensure!(
-            raw.quant == Quant::IQ1_S,
-            "project_raw_qmma is IQ1_S only, got {}",
-            raw.quant.name()
-        );
         let (nb, rb) = (raw.nb, raw.nb * raw.quant.device_block_bytes());
-        let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
+        let (bytes_ptr, d_ptr, quant) = (raw.bytes, raw.d, raw.quant);
         drop(raws);
+        let (module, name) = match quant {
+            Quant::IQ1_S => (&self.iq1s_qmma, "iq1s_qmma"),
+            Quant::IQ2_XXS => (&self.iq2xxs_qmma, "iq2xxs_qmma"),
+            other => bail!("project_raw_qmma has no fused kernel for {}", other.name()),
+        };
 
         // The caller's copy where there is one: `rms_norm_q` already left the
         // rows quantized, and taking a slot per weight to redo it is what the
@@ -77,20 +78,34 @@ impl DeviceBackend {
             }
         };
         let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
-        let operands = [
+        let mut operands = vec![
             (qa_ptr, [m as i64, k as i64]),
             (das_ptr, [m as i64, (k / Q8_BLOCK) as i64]),
             (bytes_ptr, [n as i64, rb as i64]),
             (d_ptr, [n as i64, nb as i64]),
-            (
+        ];
+        // IQ1_S folds its delta and its sign into one table; IQ2_XXS keeps
+        // magnitudes and signs apart, as its decode does everywhere else.
+        match quant {
+            Quant::IQ1_S => operands.push((
                 self.iq1s_signed_grid.as_device_ptr().as_raw(),
                 [1, IQ1S_SIGNED_GRID_LEN as i64],
-            ),
-            (self.ptr(out, 0)?, [m as i64, n as i64]),
-        ];
+            )),
+            _ => {
+                operands.push((
+                    self.iq2xxs_grid_packed.as_device_ptr().as_raw(),
+                    [1, IQ2XXS_GRID_LEN as i64],
+                ));
+                operands.push((
+                    self.iq2xxs_signs_packed.as_device_ptr().as_raw(),
+                    [1, IQ2XXS_SIGNS_LEN as i64],
+                ));
+            }
+        }
+        operands.push((self.ptr(out, 0)?, [m as i64, n as i64]));
         self.launch(
-            &self.iq1s_qmma,
-            "iq1s_qmma",
+            module,
+            name,
             &operands,
             ((m / IQ1S_QMMA_TM) as u32, (n / IQ1S_QMMA_TN) as u32, 1),
         )
