@@ -28,6 +28,7 @@ mod argmax;
 mod attn;
 mod backend;
 mod delta;
+mod dense;
 mod elem;
 mod fused;
 mod graph;
@@ -37,6 +38,7 @@ mod launch;
 mod matmul;
 mod mem;
 mod qmma_raw;
+mod raw;
 mod residency;
 
 use fused::*;
@@ -128,22 +130,7 @@ struct DeviceQuant {
     n: usize,
 }
 
-/// A device-resident raw-block weight: where its file bytes and `f16` header
-/// plane(s) landed in the [`arena::Arena`] (`dmin` absent for a format with no
-/// minimum term), output width, super-blocks per row, and which format's
-/// kernel decodes it.
-///
-/// Device pointers rather than buffers because the arena owns the allocation:
-/// see `arena.rs` for why the weights share a dozen of those rather than
-/// taking one each.
-struct DeviceRaw {
-    bytes: u64,
-    d: u64,
-    dmin: Option<u64>,
-    n: usize,
-    nb: usize,
-    quant: Quant,
-}
+use raw::DeviceRaw;
 
 /// Output width, `k`, and split count: what [`kernels::q8_qmma_split_src`]'s
 /// generated text is a function of.
@@ -422,13 +409,9 @@ pub struct DeviceBackend {
     iq1s_qdot_i8: [Module; 2],
     iq3s_qdot_i8: [Module; 2],
     iq3xxs_qdot_i8: [Module; 2],
-    /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
     iq2xxs_qdot_i8: [Module; 2],
-    /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
     iq1m_qdot_i8: [Module; 2],
-    /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
     iq2xs_qdot_i8: [Module; 2],
-    /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
     iq2s_qdot_i8: [Module; 2],
     iq2xxs_qdot_matvec: Module,
     iq1m_qdot_matvec: Module,
@@ -532,6 +515,8 @@ pub struct DeviceBackend {
     /// that trade can go either way, so which formats pay is a measurement
     /// rather than a given.
     raw_qmma_formats: Vec<Quant>,
+    /// IQ1_S's staged projection, when asked for. See `qmma_raw.rs`.
+    qgemm: qmma_raw::Qgemm,
     /// `PHOBOS_DENSE_SCRATCH=0` goes back to a pooled pair per weight and
     /// `PHOBOS_TRIM=1` to handing the whole free list back after a dense pass.
     /// Both are what the prompt path used to do, kept so the pair can be
@@ -1246,6 +1231,7 @@ impl DeviceBackend {
                 Ok("0" | "off" | "no" | "false")
             )),
             raw_qmma_formats: qmma_formats(),
+            qgemm: qmma_raw::Qgemm::from_env(),
             dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),
             trim_after_dense: env_flag("PHOBOS_TRIM"),
             iq2xxs_grid_packed,

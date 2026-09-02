@@ -23,7 +23,7 @@ mod q8_1;
 mod tables;
 
 pub(crate) use iq1_s::{
-    flat_grid as iq1s_flat_grid, packed_grid as iq1s_packed_grid, signed_grid as iq1s_signed_grid,
+    flat_grid as iq1s_flat_grid, packed_grid as iq1s_packed_grid, signed_grid as iq1s_signed_grid, grid2 as iq1s_grid2, grid4 as iq1s_grid4,
 };
 pub(crate) use iq2_s::{
     flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs, packed_grid as iq2s_packed_grid,
@@ -41,7 +41,7 @@ pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
 pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
 
 #[allow(non_camel_case_types)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Quant {
     Q4_0,
     Q4_1,
@@ -109,6 +109,23 @@ impl Quant {
             Quant::IQ2_XS | Quant::IQ3_XXS | Quant::IQ3_S => (2, bytes - 2),
             _ => (0, bytes),
         }
+    }
+
+    /// Whether the device holds this format's payload and scale planes
+    /// grouped by eight columns, `[n / 8][nb][8][block]` and
+    /// `[n / 8][nb][8]`, zero-padded; the compiler's `RAW_GROUP` readers
+    /// address them so.
+    pub fn grouped_rows(self) -> bool {
+        matches!(
+            self,
+            Quant::IQ1_S
+                | Quant::IQ1_M
+                | Quant::IQ2_XXS
+                | Quant::IQ2_XS
+                | Quant::IQ2_S
+                | Quant::IQ3_XXS
+                | Quant::IQ3_S
+        )
     }
 
     pub fn spec(self) -> &'static Spec {

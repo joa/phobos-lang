@@ -185,7 +185,12 @@ pub(crate) const Q8_QMMA_TM: usize = 128;
 
 pub(crate) const Q8_QMMA_SHALLOW: usize = 64;
 
-pub(crate) const Q8_QMMA_WIDTHS: [usize; 2] = [128, 64];
+pub(crate) const Q8_QMMA_WIDTHS: [usize; 4] = [128, 64, 48, 32];
+
+/// Whether one of the tiles above divides a projection this wide.
+pub(crate) fn qmma_takes(n: usize) -> bool {
+    Q8_QMMA_WIDTHS.iter().any(|&tn| n.is_multiple_of(tn))
+}
 
 pub(crate) const Q8_QMMA_TN: usize = 64;
 

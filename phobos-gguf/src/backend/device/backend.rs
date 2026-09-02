@@ -296,53 +296,7 @@ impl Backend for DeviceBackend {
     }
 
     fn constant_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
-        if let Some(&buf) = self.raw_constants.borrow().get(key) {
-            return Ok(buf);
-        }
-        let (k, n) = (packed.k(), packed.n());
-        let scales = packed.raw_scales()?;
-        let block = packed.spec().block;
-        let nb = k / block;
-        let bytes = packed.device_blocks();
-        let uploaded = if self.arena_weights {
-            let dmin = match scales.dmin.is_empty() {
-                true => None,
-                false => Some(self.arena.upload(&scales.dmin)?),
-            };
-            DeviceRaw {
-                bytes: self.arena.upload(&bytes)?,
-                d: self.arena.upload(&scales.d)?,
-                dmin,
-                n,
-                nb,
-                quant: packed.quant(),
-            }
-        } else {
-            let owned = (
-                DeviceBuffer::from_slice(&bytes)?,
-                DeviceBuffer::from_slice(&scales.d)?,
-                match scales.dmin.is_empty() {
-                    true => None,
-                    false => Some(DeviceBuffer::from_slice(&scales.dmin)?),
-                },
-            );
-            let at = DeviceRaw {
-                bytes: owned.0.as_device_ptr().as_raw(),
-                d: owned.1.as_device_ptr().as_raw(),
-                dmin: owned.2.as_ref().map(|m| m.as_device_ptr().as_raw()),
-                n,
-                nb,
-                quant: packed.quant(),
-            };
-            self.owned_raw.borrow_mut().push(owned);
-            at
-        };
-        let mut raws = self.raw_quants.borrow_mut();
-        raws.push(uploaded);
-        let buf = RawBuf(raws.len() - 1);
-        drop(raws);
-        self.raw_constants.borrow_mut().insert(key.to_string(), buf);
-        Ok(buf)
+        self.upload_raw(key, packed)
     }
 
     fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
@@ -369,7 +323,7 @@ impl Backend for DeviceBackend {
         if m > 1 && DEQUANT_FORMATS.iter().any(|&q| self.raw_quant_is(w, q)) {
             return self.project_raw_dense(a, m, k, w, n, out);
         }
-        self.project_raw(a, m, k, w, n, out)
+        self.project_raw(None, a, m, k, w, n, out)
     }
 
     fn matmul_raw_act(
@@ -384,6 +338,9 @@ impl Backend for DeviceBackend {
     ) -> Result<()> {
         if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
             return self.project_raw_qmma(Some(act), a, m, k, w, n, out);
+        }
+        if m == 1 {
+            return self.project_raw(Some(act), a, m, k, w, n, out);
         }
         self.matmul_raw(a, m, k, w, n, out)
     }
