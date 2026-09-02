@@ -21,6 +21,7 @@ mod matmul;
 mod norm;
 mod q2k;
 mod q3k;
+mod qgemm;
 mod quant;
 
 pub(crate) use argmax::*;
@@ -31,6 +32,7 @@ pub use attn::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 pub(crate) use delta::*;
 pub(crate) use elem::*;
 pub(crate) use iq1m::*;
+pub(crate) use qgemm::*;
 pub(crate) use iq1s::*;
 pub(crate) use iq2s::*;
 pub(crate) use iq2xs::*;

@@ -109,7 +109,7 @@ pub(crate) const IQ2S_I8_NARROW_TN: usize = 16;
 /// [`iq2s_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
 pub(crate) fn iq2s_qdot_i8_matvec_src(tn: usize) -> String {
     format!(
-        "@launch(256, 4)
+        "@launch(256, 3)
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq2s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],

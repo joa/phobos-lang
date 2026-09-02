@@ -61,6 +61,40 @@ pub(crate) fn packed_grid() -> Vec<i8> {
         .collect()
 }
 
+/// [`IQ1S_GRID`] at two bits a lane, for `iq1s_qgemm_t`: entry `i` is the
+/// little-endian `u16` whose bits `2j, 2j + 1` are byte `j` of
+/// `IQ1S_GRID[i]` masked to two bits (0 for 0, 1 for +1, 3 for -1).
+pub(crate) fn grid2() -> Vec<i8> {
+    IQ1S_GRID
+        .iter()
+        .flat_map(|entry| {
+            let packed = entry
+                .to_le_bytes()
+                .iter()
+                .enumerate()
+                .fold(0u16, |acc, (j, &b)| acc | (u16::from(b & 3) << (2 * j)));
+            packed.to_le_bytes().map(|b| b as i8)
+        })
+        .collect()
+}
+
+/// [`IQ1S_GRID`] at a nibble a lane, for the `dp4a` matvecs: entry `i` is
+/// the little-endian `u32` whose nibble `j` is byte `j` of `IQ1S_GRID[i]`
+/// plus one (0 for -1, 1 for 0, 2 for +1), a `prmt` selector as it is.
+pub(crate) fn grid4() -> Vec<i8> {
+    IQ1S_GRID
+        .iter()
+        .flat_map(|entry| {
+            let packed = entry
+                .to_le_bytes()
+                .iter()
+                .enumerate()
+                .fold(0u32, |acc, (j, &b)| acc | (u32::from((b as i8 + 1) as u8) << (4 * j)));
+            packed.to_le_bytes().map(|b| b as i8)
+        })
+        .collect()
+}
+
 /// [`IQ1S_GRID`] with the delta folded in and both signs laid out, the table
 /// `iq1s_qmma_t` reads: `signed_grid()[(idx * 2 + neg) * 8 + j]` is
 /// `8 * g - 1` when `neg`, `8 * g + 1` otherwise, for byte `j` of

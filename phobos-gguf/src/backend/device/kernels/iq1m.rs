@@ -4,6 +4,7 @@
 // `quant/iq1_m.rs::raw_scales` reassembles the equivalent word host-side so
 // `d` here is still a plain per-block read.
 
+use super::qgemm::IQ1_GRID4_LEN;
 use super::quant::qdot_i8_cta;
 
 use std::fmt::Write as _;
@@ -113,13 +114,15 @@ pub(crate) const IQ1M_I8_NARROW_TN: usize = 16;
 /// [`iq1m_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
 pub(crate) fn iq1m_qdot_i8_matvec_src(tn: usize) -> String {
     let cta = qdot_i8_cta(tn);
+    // Four CTAs of 256 resident: 64 registers a thread.
+    let min_blocks = 1024 / cta;
     format!(
-        "@launch({cta})
+        "@launch({cta}, {min_blocks})
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq1m_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                            QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                           GRID: tensor<i8>[1, {IQ1S_GRID_LEN}],
+                           GRID: tensor<i8>[1, {IQ1_GRID4_LEN}],
                            C: tensor<f32>[M, N]) {{
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq1m_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],

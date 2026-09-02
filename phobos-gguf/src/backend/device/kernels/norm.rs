@@ -11,6 +11,23 @@ use phobos_kernels::launch::{CTA_THREADS, WARP_THREADS};
 pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
     let blocks = width / RMS_LANE;
     let (gated, quantized) = (form.gated(), form.quantized());
+    // The quantized, ungated norm as one `rms_norm_q_t` statement where a
+    // thread can own four elements of every `4 * cta`.
+    let cta = norm_cta(blocks);
+    if quantized && !gated && (blocks * RMS_LANE).is_multiple_of(cta * 4) {
+        return format!(
+            "@launch({cta})
+@autotune(NB in [{blocks}])
+@aligned(RB = NB, MB = NB, D1 = 1)
+kernel rms_norm_q(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
+              O: tensor<f32>[RB, {RMS_LANE}], Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]) {{
+  let r = program_id(0)
+  rms_norm_q_t(X[r * NB :+ NB, 0 :+ {RMS_LANE}], G[0 :+ NB, 0 :+ {RMS_LANE}], {eps:.12},
+               O[r * NB :+ NB, 0 :+ {RMS_LANE}], Q[r * NB :+ NB, 0 :+ {RMS_LANE}], S[r * NB :+ NB, 0 :+ 1])
+}}
+"
+        );
+    }
     let mut params = String::new();
     let mut body = String::new();
 

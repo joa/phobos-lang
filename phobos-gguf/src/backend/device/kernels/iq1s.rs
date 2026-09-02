@@ -7,6 +7,7 @@
 // shared-memory pool on first use. `qb`, `d`, `grid`, `iota` are the
 // exception: they're views/staged buffers the pool doesn't own.
 
+use super::qgemm::IQ1_GRID4_LEN;
 use super::quant::qdot_i8_cta;
 
 use std::fmt::Write as _;
@@ -124,13 +125,15 @@ kernel iq1s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
 /// instructions a weight, and a quarter of the activation traffic.
 pub(crate) fn iq1s_qdot_i8_matvec_src(tn: usize) -> String {
     let cta = qdot_i8_cta(tn);
+    // Four CTAs of 256 resident: 64 registers a thread.
+    let min_blocks = 1024 / cta;
     format!(
-        "@launch({cta})
+        "@launch({cta}, {min_blocks})
 @autotune(TN in [{tn}])
 @aligned(N = TN)
 kernel iq1s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                            QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                           GRID: tensor<i8>[1, {IQ1S_GRID_LEN}],
+                           GRID: tensor<i8>[1, {IQ1_GRID4_LEN}],
                            C: tensor<f32>[M, N]) {{
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
@@ -283,3 +286,4 @@ kernel iq1s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 "
     )
 }
+
