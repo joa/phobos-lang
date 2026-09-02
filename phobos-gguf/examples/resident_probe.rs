@@ -62,7 +62,7 @@ const IQ1S: Probe = Probe {
     kernel: "iq1s_qdot_matvec",
     int8_act: false,
     signs_bytes: 0,
-    block_bytes: 50,
+    block_bytes: 48,
     tn: 8,
     table_bytes: 2048 * 8,
     src: "\
@@ -84,15 +84,15 @@ const IQ1S_I8: Probe = Probe {
     kernel: "iq1s_qdot_i8_matvec",
     int8_act: true,
     signs_bytes: 0,
-    block_bytes: 50,
+    block_bytes: 48,
     tn: 64,
-    table_bytes: 2048 * 8,
-    src: "@launch(256)
+    table_bytes: 2048 * 4,
+    src: "@launch(256, 4)
 @autotune(TN in [{TN}])
 @aligned(N = TN)
 kernel iq1s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                            QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                           GRID: tensor<i8>[1, 16384], C: tensor<f32>[M, N]) {
+                           GRID: tensor<i8>[1, 8192], C: tensor<f32>[M, N]) {
   let pn = program_id(0)
   C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                             QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
@@ -105,7 +105,7 @@ const IQ2XXS: Probe = Probe {
     name: "iq2xxs",
     kernel: "iq2xxs_qdot_matvec",
     int8_act: false,
-    block_bytes: 66,
+    block_bytes: 64,
     tn: 8,
     table_bytes: 256 * 8,
     signs_bytes: 128 * 8,
@@ -126,7 +126,7 @@ const IQ2XXS_I8: Probe = Probe {
     name: "iq2xxs-i8",
     kernel: "iq2xxs_qdot_i8_matvec",
     int8_act: true,
-    block_bytes: 66,
+    block_bytes: 64,
     tn: 64,
     table_bytes: 256 * 8,
     signs_bytes: 128 * 8,
@@ -153,7 +153,7 @@ const IQ3XXS: Probe = Probe {
     tn: 8,
     table_bytes: 256 * 4,
     signs_bytes: 128 * 8,
-    src: "@launch(256)
+    src: "@launch(256, 4)
 @autotune(TN in [{TN}])
 @aligned(N = TN)
 kernel iq3xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
@@ -377,7 +377,27 @@ fn run_at(
     let aqb = DeviceBuffer::from_slice(&aq)?;
     let ascb = DeviceBuffer::from_slice(&asc)?;
     let cb = DeviceBuffer::from_slice(&vec![0.0f32; n])?;
-    let table = DeviceBuffer::from_slice(&vec![0i8; probe.table_bytes.max(1)])?;
+    // The tables both paths read, from one random grid so they agree. A
+    // ternary grid for IQ1_S, as the float path's bytes (`g` in -1..1, eight
+    // an entry) or the int8 path's nibbles (`g + 1`, eight a word); for the
+    // rest, magnitudes of the shape a real grid holds, none of them zero,
+    // since the int8 path negates a masked byte as `(m ^ 0xff) + 1`.
+    let ternary = |i: usize| ((i.wrapping_mul(2654435761) >> 7) % 3) as i8 - 1;
+    let table: Vec<i8> = if probe.name.starts_with("iq1s") {
+        if probe.int8_act {
+            (0..probe.table_bytes / 4)
+                .flat_map(|e| {
+                    let word = (0..8).fold(0u32, |acc, j| acc | (u32::from((ternary(e * 8 + j) + 1) as u8) << (4 * j)));
+                    word.to_le_bytes().map(|b| b as i8)
+                })
+                .collect()
+        } else {
+            (0..probe.table_bytes).map(ternary).collect()
+        }
+    } else {
+        (0..probe.table_bytes.max(1)).map(|i| (i % 7 + 1) as i8).collect()
+    };
+    let table = DeviceBuffer::from_slice(&table)?;
     // Signs are +/-1; a table of zeroes would make every weight vanish and
     // hide a disagreement between the two paths.
     // The float path multiplies by +/-1; the dp4a path masks with 0/-1. Both

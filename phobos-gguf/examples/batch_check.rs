@@ -1,7 +1,7 @@
 // Feed a prompt as one batch and as one token at a time, and compare:
 //
 //   cargo run --release -p phobos-gguf --features cuda \
-//       --example batch_check -- MODEL.gguf
+//       --example batch_check -- [--gpu] MODEL.gguf
 //
 // Both orders run the same sum on the same weights, so a backend that batches
 // correctly returns the same final logits either way. Comparing a backend
@@ -24,8 +24,12 @@ use phobos_gguf::{Bpe, Gguf};
 use phobos_gguf::backend::device;
 
 fn main() -> Result<()> {
-    let Some(path) = std::env::args().nth(1) else {
-        bail!("usage: batch_check MODEL.gguf");
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `--gpu` skips the host reference and compares the device's batched
+    // pass against its own single-token one.
+    let device_only = args.iter().any(|a| a == "--gpu");
+    let Some(path) = args.iter().find(|a| !a.starts_with("--")) else {
+        bail!("usage: batch_check [--gpu] MODEL.gguf");
     };
     let gguf = Gguf::open(path.as_ref())?;
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
@@ -47,7 +51,9 @@ fn main() -> Result<()> {
 
     for prompt in prompts {
         let tokens = bpe.encode(prompt)?;
-        failed |= !compare(&model, &host, "host", &tokens)?;
+        if !device_only {
+            failed |= !compare(&model, &host, "host", &tokens)?;
+        }
 
         #[cfg(feature = "cuda")]
         {
