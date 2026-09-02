@@ -126,39 +126,6 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Copies a lookup table into shared memory, cooperatively; `None` when
-    /// the table is dynamic or too wide to be worth it.
-    ///
-    /// A decode gather is uncoalesced by nature -- a lane picks a random entry,
-    /// so a warp touches as many sectors as it has lanes. Shared memory has no
-    /// sector granularity, and every CTA reads the whole table anyway, so one
-    /// copy and a barrier pay for themselves.
-    pub(in crate::codegen) fn stage_table(
-        &mut self,
-        block: &Block<'c>,
-        table: &MemVal<'c>,
-    ) -> Result<Option<MemVal<'c>>> {
-        let width = table.shape[1];
-        if width == DYN || width > MAX_STAGED_TABLE || table.is_masked() {
-            return Ok(None);
-        }
-        let tile = self.alloc_tile_shaped(block, table.elem, &[1, width])?;
-        let zero = self.const_index(block, 0)?;
-        let len = self.const_index(block, width)?;
-        let from = self.thread_id(block)?;
-        let by = self.block_dim(block)?;
-        let cb = Block::new(&[(self.index_t, self.loc)]);
-        let i = detach(cb.argument(0)?.into());
-        let v = self.push(&cb, memref::load(table.mem, &[zero, i], self.loc))?;
-        cb.append_operation(memref::store(v, tile.mem, &[zero, i], self.loc));
-        cb.append_operation(scf::r#yield(&[], self.loc));
-        let region = Region::new();
-        region.append_block(cb);
-        block.append_operation(scf::r#for(from, len, by, region, self.loc));
-        self.barrier(block)?;
-        Ok(Some(tile))
-    }
-
     pub(in crate::codegen) fn vec_broadcast(
         &self,
         block: &Block<'c>,
@@ -192,6 +159,24 @@ impl<'c> Codegen<'c> {
     /// `mask` picking elements out of `a` and `b` laid end to end, which is
     /// what joins two four-wide grid entries into the eight-wide lane the
     /// staged projection stores: see `qmma_signed.rs`.
+    /// The same bits as another vector shape: `vector<4xi8>` as
+    /// `vector<1xi32>` and back, which `arith.bitcast` refuses because it
+    /// keeps the shape.
+    pub(in crate::codegen) fn vec_bitcast(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+        want: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("vector.bitcast", self.loc)
+                .add_operands(&[value])
+                .add_results(&[want])
+                .build()?,
+        )
+    }
+
     pub(in crate::codegen) fn vec_shuffle(
         &self,
         block: &Block<'c>,

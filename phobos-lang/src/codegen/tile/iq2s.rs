@@ -95,7 +95,7 @@ impl<'c> Codegen<'c> {
         let nibble_f32 = self.numeric_cast(kb, nibble, f32_t)?;
         let half = self.const_f32(kb, 0.5)?;
         let quarter = self.const_f32(kb, 0.25)?;
-        let d_val = self.push(kb, memref::load(d.mem, &[at.j, at.blk], self.loc))?;
+        let d_val = self.push(kb, memref::load(d.mem, &[at.d_row, at.d_col], self.loc))?;
         let d_f32 = self.numeric_cast(kb, d_val, f32_t)?;
         let sc = self.push(kb, arith::addf(half, nibble_f32, self.loc))?;
         let sc = self.push(kb, arith::mulf(sc, quarter, self.loc))?;

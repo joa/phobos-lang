@@ -126,7 +126,7 @@ impl<'c> Codegen<'c> {
         let db_word = self.push(kb, arith::muli(nibble, c2, self.loc))?;
         let db_word = self.push(kb, arith::addi(db_word, c1, self.loc))?;
         let db_f32 = self.numeric_cast(kb, db_word, f32_t)?;
-        let d_val = self.push(kb, memref::load(d.mem, &[at.j, at.blk], self.loc))?;
+        let d_val = self.push(kb, memref::load(d.mem, &[at.d_row, at.d_col], self.loc))?;
         let d_f32 = self.numeric_cast(kb, d_val, f32_t)?;
         let db = self.push(kb, arith::mulf(d_f32, db_f32, self.loc))?;
 

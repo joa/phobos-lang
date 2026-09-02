@@ -228,9 +228,7 @@ impl<'c> Codegen<'c> {
         let kb = Block::new(&[(self.index_t, self.loc)]);
         let kbase = detach(kb.argument(0)?.into());
         let blk = self.divui(&kb, kbase, step)?;
-        let blk_off = self.muli(&kb, blk, blk_bytes)?;
-
-        let at = BlockAt { j, blk, off: blk_off };
+        let at = self.raw_block_at(&kb, j, blk, blk_bytes)?;
         // A one-table format never reads `signs`; aliasing it to the grid
         // keeps one shape for the call below.
         let two = QTables {
