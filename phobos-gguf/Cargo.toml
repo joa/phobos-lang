@@ -82,3 +82,7 @@ required-features = ["cuda"]
 [[example]]
 name = "resident_probe"
 required-features = ["cuda"]
+
+[[example]]
+name = "qmma_probe"
+required-features = ["cuda"]
