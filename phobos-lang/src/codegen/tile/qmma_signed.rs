@@ -209,7 +209,6 @@ macro_rules! signed_qmma {
                 let blk = self.divui(&kb, b, groups)?;
                 let ib = self.remui(&kb, b, groups)?;
                 let blk_bytes = self.const_index(&kb, $bytes)?;
-                let blk_off = self.muli(&kb, blk, blk_bytes)?;
                 let tables = QTables { grid, signs };
                 let eight = self.const_index(&kb, $lane_w)?;
                 let four_ib = self.muli(&kb, ib, four)?;
@@ -223,11 +222,7 @@ macro_rules! signed_qmma {
                     let l = self.remui(&kb, *entry, four)?;
                     let fmt_lane = self.addi(&kb, four_ib, l)?;
                     let geom = self.$lane_fn(&kb, fmt_lane)?;
-                    let at = BlockAt {
-                        j,
-                        blk,
-                        off: blk_off,
-                    };
+                    let at = self.raw_block_at(&kb, j, blk, blk_bytes)?;
                     let dec = self.$block_fn(&kb, &geom, qb, d, &tables, &at)?;
                     // A magnitude times its sign is the weight, and both are
                     // already i8, which is why this family reaches the tensor
@@ -291,11 +286,7 @@ macro_rules! signed_qmma {
                             let l = self.const_index(&kb, 2 * h)?;
                             let fmt_lane = self.addi(&kb, four_ib, l)?;
                             let geom = self.$lane_fn(&kb, fmt_lane)?;
-                            let at = BlockAt {
-                                j: col,
-                                blk,
-                                off: blk_off,
-                            };
+                            let at = self.raw_block_at(&kb, col, blk, blk_bytes)?;
                             let dec = self.$block_fn(&kb, &geom, qb, d, &tables, &at)?;
                             w_scales.push(dec.$scale);
                         }

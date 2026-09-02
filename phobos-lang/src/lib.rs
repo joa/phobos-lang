@@ -64,6 +64,17 @@ pub fn compile_raw(
 
     let kernels = parse(code)?;
 
+    // `Kernel::wants_ldmatrix`: 64-bit indices for the whole module.
+    let mut wide;
+    let context = if context.index_bitwidth < 64 && kernels.iter().any(ast::Kernel::wants_ldmatrix)
+    {
+        wide = context.clone();
+        wide.index_bitwidth = 64;
+        &wide
+    } else {
+        context
+    };
+
     if context.print_phases {
         println!("=== AST ===========================");
         println!("{:?}", kernels.first().unwrap());

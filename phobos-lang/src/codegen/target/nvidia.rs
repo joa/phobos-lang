@@ -587,6 +587,99 @@ impl Isa for Nvidia {
         )
     }
 
+    // ---- prmt ----
+
+    fn byte_permute<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        lo: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        sel: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let mode = cg.parse_attr("#nvvm.permute_mode<default>")?;
+        cg.push(
+            block,
+            OperationBuilder::new("nvvm.prmt", cg.loc)
+                .add_operands(&[lo, hi, sel])
+                .add_attributes(&[(cg.id("mode"), mode)])
+                .add_results(&[cg.i32_t])
+                .build()?,
+        )
+    }
+
+    /// `prefetch.L2` on the byte address of `mem[indices]`, from the
+    /// memref's aligned base, offset and strides. (`memref.prefetch` lowers
+    /// to `llvm.prefetch`, which NVPTX drops.)
+    fn prefetch_read<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<()> {
+        let rank = indices.len();
+        let bytes = cg
+            .elem_bytes(mem.elem)
+            .ok_or_else(|| anyhow!("prefetch of an element of unknown size"))?;
+        let index_t = cg.index_t;
+        let space = MemRefType::try_from(mem.mem.r#type())
+            .ok()
+            .and_then(|t| t.memory_space());
+        let base_t: Type<'c> = MemRefType::new(mem.elem, &[], None, space).into();
+        let mut results = vec![base_t, index_t];
+        results.extend(std::iter::repeat_n(index_t, 2 * rank));
+        let meta = block.append_operation(
+            OperationBuilder::new("memref.extract_strided_metadata", cg.loc)
+                .add_operands(&[mem.mem])
+                .add_results(&results)
+                .build()?,
+        );
+        let result = |k: usize| -> Result<Value<'c, 'c>> { Ok(detach(meta.result(k)?.into())) };
+        let mut elem_off = result(1)?;
+        for (k, &idx) in indices.iter().enumerate() {
+            let stride = result(2 + rank + k)?;
+            let step = cg.muli(block, idx, stride)?;
+            elem_off = cg.addi(block, elem_off, step)?;
+        }
+        let byte_off = if bytes == 1 {
+            elem_off
+        } else {
+            let scale = cg.const_index(block, i64::from(bytes))?;
+            cg.muli(block, elem_off, scale)?
+        };
+        let base = cg.push(
+            block,
+            OperationBuilder::new("memref.extract_aligned_pointer_as_index", cg.loc)
+                .add_operands(&[mem.mem])
+                .add_results(&[index_t])
+                .build()?,
+        )?;
+        let addr = cg.addi(block, base, byte_off)?;
+        let i64_t: Type<'c> = IntegerType::new(cg.ctx, 64).into();
+        let addr = cg.push(block, arith::index_cast(addr, i64_t, cg.loc))?;
+        let ptr_t = cg.parse_type("!llvm.ptr")?;
+        let ptr = cg.push(
+            block,
+            OperationBuilder::new("llvm.inttoptr", cg.loc)
+                .add_operands(&[addr])
+                .add_results(&[ptr_t])
+                .build()?,
+        )?;
+        // Inline PTX: `nvvm.prefetch`'s cache-level attribute has no text form.
+        block.append_operation(
+            OperationBuilder::new("llvm.inline_asm", cg.loc)
+                .add_operands(&[ptr])
+                .add_attributes(&[
+                    (cg.id("asm_string"), cg.parse_attr("\"prefetch.L2 [$0];\"")?),
+                    (cg.id("constraints"), cg.parse_attr("\"l\"")?),
+                    (cg.id("has_side_effects"), cg.parse_attr("unit")?),
+                ])
+                .build()?,
+        );
+        Ok(())
+    }
+
     // ---- dp4a ----
 
     fn dot4_accumulate<'c>(

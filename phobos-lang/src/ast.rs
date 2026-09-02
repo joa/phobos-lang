@@ -201,6 +201,22 @@ impl Kernel {
         self.attrs.iter().any(|a| a.name == "persistent")
     }
 
+    /// Whether the kernel calls an intrinsic that uses `ldmatrix`, which
+    /// needs the module indexed at 64 bits.
+    pub fn wants_ldmatrix(&self) -> bool {
+        let mut found = false;
+        for stmt in &self.body {
+            stmt.walk_exprs(&mut |e| {
+                if let Expr::Call { callee, .. } = e
+                    && callee.ends_with("_qgemm_t")
+                {
+                    found = true;
+                }
+            });
+        }
+        found
+    }
+
     // force legacy WMMA
     pub fn wants_mma_sync(&self) -> bool {
         self.attrs.iter().any(|a| {

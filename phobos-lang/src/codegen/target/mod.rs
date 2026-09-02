@@ -104,6 +104,15 @@ pub(super) trait Isa {
 
     // ---- what a warp can share ----
 
+    /// Prefetches the line holding `mem[indices]` into L2.
+    fn prefetch_read<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<()>;
+
     /// The value of v on the lane whose id differs in the given xor mask bits.
     /// Every lane of the executing warp must reach this.
     fn shfl_xor_f32<'c>(
@@ -298,6 +307,21 @@ pub(super) trait Isa {
         b: Value<'c, 'c>,
         acc: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>>;
+
+    // ---- byte permutation ----
+
+    /// The four bytes of `lo` and `hi` picked by the four low nibbles of
+    /// `sel`, byte `n` of the result being byte `sel[4n..4n+3]` of the pair
+    /// (`lo` is bytes 0 to 3, `hi` 4 to 7). One instruction wherever a
+    /// four-entry byte table has to be applied to four selectors at once.
+    fn byte_permute<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        lo: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        sel: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>>;
 }
 
 /// The target a config selects. The one arm is not an oversight: a second
@@ -419,6 +443,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Value<'c, 'c>> {
         self.isa.shfl_xor_f32(self, block, v, mask)
     }
+
 
     // ---- which math is approximate ----
 
@@ -587,6 +612,15 @@ impl<'c> Codegen<'c> {
 
     // ---- the four-way integer dot ----
 
+    pub(in crate::codegen) fn prefetch_read(
+        &self,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<()> {
+        self.isa.prefetch_read(self, block, mem, indices)
+    }
+
     pub(in crate::codegen) fn dot4_accumulate(
         &self,
         block: &Block<'c>,
@@ -595,5 +629,15 @@ impl<'c> Codegen<'c> {
         acc: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
         self.isa.dot4_accumulate(self, block, a, b, acc)
+    }
+
+    pub(in crate::codegen) fn byte_permute(
+        &self,
+        block: &Block<'c>,
+        lo: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        sel: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.isa.byte_permute(self, block, lo, hi, sel)
     }
 }

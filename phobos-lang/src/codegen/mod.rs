@@ -30,12 +30,13 @@ mod kernel;
 mod matmul;
 mod pipeline;
 mod stmt;
+mod store;
 mod sync;
 mod target;
 mod tile;
 mod util;
 
-use tile::QFormat;
+use tile::{QFormat, QgFormat};
 
 /// MLIR's ShapedType::kDynamic
 const DYN: i64 = i64::MIN;

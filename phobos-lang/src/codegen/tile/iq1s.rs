@@ -90,7 +90,7 @@ impl<'c> Codegen<'c> {
         let c2 = self.const_i32(kb, 2)?;
         let c1 = self.const_i32(kb, 1)?;
 
-        let d_val = self.push(kb, memref::load(d.mem, &[at.j, at.blk], self.loc))?;
+        let d_val = self.push(kb, memref::load(d.mem, &[at.d_row, at.d_col], self.loc))?;
         let d_f32 = self.numeric_cast(kb, d_val, f32_t)?;
         let sc = self.push(kb, arith::divui(qh, c4096, self.loc))?;
         let sc = self.push(kb, arith::remui(sc, c8_i32, self.loc))?;

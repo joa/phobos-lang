@@ -146,7 +146,7 @@ impl<'c> Codegen<'c> {
         let scale_shifted = self.push(kb, arith::divui(scale_byte, c16, self.loc))?;
         let scale_f32 = self.numeric_cast(kb, scale_shifted, f32_t)?;
         let half_c = self.const_f32(kb, 0.5)?;
-        let d_val = self.push(kb, memref::load(d.mem, &[at.j, at.blk], self.loc))?;
+        let d_val = self.push(kb, memref::load(d.mem, &[at.d_row, at.d_col], self.loc))?;
         let d_f32 = self.numeric_cast(kb, d_val, f32_t)?;
         let sc = self.push(kb, arith::addf(half_c, scale_f32, self.loc))?;
         let sc = self.push(kb, arith::mulf(sc, half_c, self.loc))?;

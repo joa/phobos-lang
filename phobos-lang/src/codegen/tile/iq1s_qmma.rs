@@ -217,8 +217,7 @@ impl<'c> Codegen<'c> {
         let blk = self.divui(&kb, b, groups)?;
         let ib = self.remui(&kb, b, groups)?;
         let blk_bytes = self.const_index(&kb, IQ1S_BLOCK_BYTES)?;
-        let blk_off = self.muli(&kb, blk, blk_bytes)?;
-        let qs_group = self.muli(&kb, ib, four)?;
+                let qs_group = self.muli(&kb, ib, four)?;
         let qh_group = {
             let base = self.const_index(&kb, IQ1S_QH_OFF)?;
             let two_ib = self.muli(&kb, ib, two)?;
@@ -253,15 +252,15 @@ impl<'c> Codegen<'c> {
         let grid_t = Type::vector(&[4], self.i8_t);
         let mut w_frags = Vec::new();
         for row in &w_rows {
-            let qh_lo = self.qbyte(&kb, qb, *row, blk_off, qh_group)?;
-            let qh_hi = self.qbyte(&kb, qb, *row, blk_off, qh_group_hi)?;
+            let qh_lo = self.qbyte_grouped(&kb, qb, *row, blk, blk_bytes, qh_group)?;
+            let qh_hi = self.qbyte_grouped(&kb, qb, *row, blk, blk_bytes, qh_group_hi)?;
             let qh_hi = self.push(&kb, arith::muli(qh_hi, c256_i32, self.loc))?;
             let qh = self.push(&kb, arith::addi(qh_lo, qh_hi, self.loc))?;
             let sign = self.push(&kb, arith::divui(qh, c32768, self.loc))?;
             let sign = self.push(&kb, arith::remui(sign, c2_i32, self.loc))?;
             for h in 0..halves as usize {
                 let qs_off = self.addi(&kb, qs_group, fmt_lane[h])?;
-                let qs = self.qbyte(&kb, qb, *row, blk_off, qs_off)?;
+                let qs = self.qbyte_grouped(&kb, qb, *row, blk, blk_bytes, qs_off)?;
                 let hi = self.push(&kb, arith::shrui(qh, fmt_shift[h], self.loc))?;
                 let hi = self.push(&kb, arith::remui(hi, c8_i32, self.loc))?;
                 let hi = self.push(&kb, arith::muli(hi, c256_i32, self.loc))?;
@@ -294,8 +293,8 @@ impl<'c> Codegen<'c> {
             for dj in 0..2 {
                 let off = self.const_index(&kb, dj)?;
                 let col = self.addi(&kb, *out_col, off)?;
-                let lo = self.qbyte(&kb, qb, col, blk_off, qh_group)?;
-                let hi = self.qbyte(&kb, qb, col, blk_off, qh_group_hi)?;
+                let lo = self.qbyte_grouped(&kb, qb, col, blk, blk_bytes, qh_group)?;
+                let hi = self.qbyte_grouped(&kb, qb, col, blk, blk_bytes, qh_group_hi)?;
                 let hi = self.push(&kb, arith::muli(hi, c256_i32, self.loc))?;
                 let qh = self.push(&kb, arith::addi(lo, hi, self.loc))?;
                 let sc = self.push(&kb, arith::divui(qh, c4096, self.loc))?;
@@ -303,7 +302,8 @@ impl<'c> Codegen<'c> {
                 let sc = self.push(&kb, arith::muli(sc, c2_i32, self.loc))?;
                 let sc = self.push(&kb, arith::addi(sc, c1_i32, self.loc))?;
                 let sc = self.numeric_cast(&kb, sc, f32_t)?;
-                let dv = self.push(&kb, memref::load(d.mem, &[col, blk], self.loc))?;
+                let dat = self.raw_block_at(&kb, col, blk, blk_bytes)?;
+                let dv = self.push(&kb, memref::load(d.mem, &[dat.d_row, dat.d_col], self.loc))?;
                 let dv = self.numeric_cast(&kb, dv, f32_t)?;
                 let dl = self.push(&kb, arith::mulf(dv, sc, self.loc))?;
                 w_scales.push(self.push(&kb, arith::mulf(dl, eighth, self.loc))?);
@@ -502,8 +502,7 @@ impl<'c> Codegen<'c> {
         let blk = self.divui(&kb, b, groups)?;
         let ib = self.remui(&kb, b, groups)?;
         let blk_bytes = self.const_index(&kb, IQ1S_BLOCK_BYTES)?;
-        let blk_off = self.muli(&kb, blk, blk_bytes)?;
-        let qs_group = self.muli(&kb, ib, four)?;
+                let qs_group = self.muli(&kb, ib, four)?;
         let qh_group = {
             let base = self.const_index(&kb, IQ1S_QH_OFF)?;
             let two_ib = self.muli(&kb, ib, two)?;
@@ -525,14 +524,14 @@ impl<'c> Codegen<'c> {
         for entry in &mine {
             let j = self.divui(&kb, *entry, four)?;
             let l = self.remui(&kb, *entry, four)?;
-            let qh_lo = self.qbyte(&kb, qb, j, blk_off, qh_group)?;
-            let qh_hi = self.qbyte(&kb, qb, j, blk_off, qh_group_hi)?;
+            let qh_lo = self.qbyte_grouped(&kb, qb, j, blk, blk_bytes, qh_group)?;
+            let qh_hi = self.qbyte_grouped(&kb, qb, j, blk, blk_bytes, qh_group_hi)?;
             let qh_hi = self.push(&kb, arith::muli(qh_hi, c256_i32, self.loc))?;
             let qh = self.push(&kb, arith::addi(qh_lo, qh_hi, self.loc))?;
             let sign = self.push(&kb, arith::divui(qh, c32768, self.loc))?;
             let sign = self.push(&kb, arith::remui(sign, c2_i32, self.loc))?;
             let qs_off = self.addi(&kb, qs_group, l)?;
-            let qs = self.qbyte(&kb, qb, j, blk_off, qs_off)?;
+            let qs = self.qbyte_grouped(&kb, qb, j, blk, blk_bytes, qs_off)?;
             let shift = self.numeric_cast(&kb, l, i32_t)?;
             let shift = self.push(&kb, arith::muli(shift, three_i32, self.loc))?;
             let hi = self.push(&kb, arith::shrui(qh, shift, self.loc))?;
@@ -586,8 +585,8 @@ impl<'c> Codegen<'c> {
             for dj in 0..2 {
                 let off = self.const_index(&kb, dj)?;
                 let col = self.addi(&kb, *out_col, off)?;
-                let lo = self.qbyte(&kb, qb, col, blk_off, qh_group)?;
-                let hi = self.qbyte(&kb, qb, col, blk_off, qh_group_hi)?;
+                let lo = self.qbyte_grouped(&kb, qb, col, blk, blk_bytes, qh_group)?;
+                let hi = self.qbyte_grouped(&kb, qb, col, blk, blk_bytes, qh_group_hi)?;
                 let hi = self.push(&kb, arith::muli(hi, c256_i32, self.loc))?;
                 let qh = self.push(&kb, arith::addi(lo, hi, self.loc))?;
                 let sc = self.push(&kb, arith::divui(qh, c4096, self.loc))?;
@@ -595,7 +594,8 @@ impl<'c> Codegen<'c> {
                 let sc = self.push(&kb, arith::muli(sc, c2_i32, self.loc))?;
                 let sc = self.push(&kb, arith::addi(sc, c1_i32, self.loc))?;
                 let sc = self.numeric_cast(&kb, sc, f32_t)?;
-                let dv = self.push(&kb, memref::load(d.mem, &[col, blk], self.loc))?;
+                let dat = self.raw_block_at(&kb, col, blk, blk_bytes)?;
+                let dv = self.push(&kb, memref::load(d.mem, &[dat.d_row, dat.d_col], self.loc))?;
                 let dv = self.numeric_cast(&kb, dv, f32_t)?;
                 let dl = self.push(&kb, arith::mulf(dv, sc, self.loc))?;
                 w_scales.push(self.push(&kb, arith::mulf(dl, eighth, self.loc))?);

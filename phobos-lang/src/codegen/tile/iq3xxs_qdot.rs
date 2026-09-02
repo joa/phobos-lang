@@ -84,9 +84,7 @@ impl<'c> Codegen<'c> {
         let kbase = detach(kb.argument(0)?.into());
         let carry = detach(kb.argument(1)?.into());
         let blk = self.divui(&kb, kbase, step)?;
-        let blk_off = self.muli(&kb, blk, blk_bytes)?;
-
-        let at = BlockAt { j, blk, off: blk_off };
+        let at = self.raw_block_at(&kb, j, blk, blk_bytes)?;
         let dec = self.iq3xxs_block(&kb, &geom, qb, d, &QTables { grid, signs }, &at)?;
 
         let mut partial = carry;

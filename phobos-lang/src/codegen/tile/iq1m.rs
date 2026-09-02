@@ -146,7 +146,7 @@ impl<'c> Codegen<'c> {
         let dl_word = self.push(kb, arith::muli(dl_word, c2_i32, self.loc))?;
         let dl_word = self.push(kb, arith::addi(dl_word, c1_i32, self.loc))?;
         let dl_f32 = self.numeric_cast(kb, dl_word, f32_t)?;
-        let d_val = self.push(kb, memref::load(d.mem, &[at.j, at.blk], self.loc))?;
+        let d_val = self.push(kb, memref::load(d.mem, &[at.d_row, at.d_col], self.loc))?;
         let d_f32 = self.numeric_cast(kb, d_val, f32_t)?;
         let dl = self.push(kb, arith::mulf(d_f32, dl_f32, self.loc))?;
 
