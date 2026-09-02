@@ -66,27 +66,27 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test   | llama.cpp CUDA[^2]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  6805.04 +/- 837.26 |  5620.57 +/- 478.34 |
-| pp512  | 10644.28 +/- 480.77 |  8389.52 +/- 343.37 |
-| tg32   |   236.73 +/-   2.68 |   301.34 +/-   2.87 |
-| tg128  |   255.92 +/-   0.88 |   300.19 +/-   1.27 |
-| tg512  |   259.73 +/-   0.72 |   300.13 +/-   0.93 |
-| tg1024 |   259.88 +/-   0.89 |   299.55 +/-   0.80 |
-| tg2048 |   257.66 +/-   2.52 |   297.92 +/-   1.39 |
+| pp128  |  6052.22 +/-  198.25 |  5459.93 +/- 198.74 |
+| pp512  |  9383.85 +/- 1044.71 |  8351.91 +/-  74.81 |
+| tg32   |   230.12 +/-    4.57 |   288.20 +/-   4.14 |
+| tg128  |   249.45 +/-    2.23 |   283.63 +/-   3.58 |
+| tg512  |   252.67 +/-    2.32 |   284.70 +/-   3.11 |
+| tg1024 |   255.21 +/-    1.19 |   283.96 +/-   3.08 |
+| tg2048 |   253.45 +/-    1.70 |   281.52 +/-   4.07 |
 
 Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test  | llama.cpp CUDA[^2] | Phobos GPU     |
 | ----- | -----------------: | -------------: |
-| tg32  |    21.47 +/-  0.06 | 18.24 +/- 0.09 |
+| tg128 |    21.74 +/-  0.00 | 29.55 +/- 0.02 |
 
 Prompt processing is left out of the table on purpose: at this size (6.27 GiB of weights)
-neither engine measures repeatably. Phobos spreads 48 +/- 39 t/s at `pp128` and
-111 +/- 47 at `pp512`, and llama.cpp inverts between the two, 487 at `pp128`
-against 40 at `pp512`. Those are residency artifacts, not throughput.
-
-The card is the reason. A decode pass peaks at 7626 MiB of 8192 with the
-desktop holding about 975.
+neither engine measures it repeatably. In the run above Phobos spread 388 +/- 79 t/s
+at `pp128` (246 to 518 across rounds) and llama.cpp 388 +/- 82 (225 to 473); with a
+512-token prompt in the same process llama.cpp reads 9 t/s and Phobos 4. Those are
+residency artifacts, not throughput: a Phobos decode pass peaks at 7883 MiB of 8192
+with the desktop holding about 950, and once the desktop holds a gigabyte the same
+binary pages and generates at 5 to 7 t/s.
 
 <details>
   <summary>Benchmark Details</summary>
@@ -98,8 +98,9 @@ desktop holding about 975.
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
 
-# the 27B, which is slow enough that the sizes and repetitions have to come down
-python scripts/bench.py -m models/Qwen3.8-27B-UD-IQ1_M.gguf -p 128 512 -n 32 128 \
+# the 27B, which is slow enough that the sizes and repetitions have to come down,
+# and close enough to the card's edge that one size a phase is what fits
+python scripts/bench.py -m models/Qwen3.8-27B-UD-IQ1_M.gguf -p 128 -n 128 \
   -r 1 -R 3 --csv results/bench-qwen38.csv --json results/bench-qwen38.json
 
 # the plot carries both runs, a block each: one file is one visit to the card,
