@@ -1,5 +1,5 @@
 use super::*;
-use crate::backend::{DeltaMix, FusedMix, ProjRun};
+use crate::backend::{DeltaMix, FusedMix, ProjRun, ProjWeight};
 
 /// Qwen3.5-0.8B's MLP on the grid the card settles at. The one barrier
 /// lands after the SwiGLU, since the down projection needs the whole
@@ -20,12 +20,14 @@ fn qwen_project_plan(mix: bool) -> Plan {
     let (channels, carried, gates) = (6144, 3 * 6144, 2048 + 2 * 16);
     let runs = [
         ProjRun {
+            weight: 0,
             row_off: 0,
             width: channels,
             dst: Buf(2),
             dst_off: carried,
         },
         ProjRun {
+            weight: 0,
             row_off: channels,
             width: gates,
             dst: Buf(3),
@@ -48,8 +50,7 @@ fn qwen_project_plan(mix: bool) -> Plan {
         d_model: 1024,
         gain: Buf(1),
         eps: 1e-6,
-        w: QBuf(0),
-        out_dim: 8448,
+        weights: &[(ProjWeight::Q8(QBuf(0)), 8448)],
         runs: &runs,
         mix: mix.then_some(FusedMix {
             spec,
@@ -84,6 +85,7 @@ fn fused_source() {
     println!("{}", qwen_project_plan(false).source);
     println!("{}", qwen_project_plan(true).source);
     println!("{}", qwen_4b_plan().source);
+    println!("{}", qwen_4b_project_plan().source);
 }
 
 #[test]
@@ -336,6 +338,7 @@ fn only_the_query_and_key_are_normalized() {
 fn a_prompt_pass_is_not_recorded() {
     let (channels, carried) = (6144, 3 * 6144);
     let runs = [ProjRun {
+        weight: 0,
         row_off: 0,
         width: channels,
         dst: Buf(2),
@@ -357,8 +360,7 @@ fn a_prompt_pass_is_not_recorded() {
         d_model: 1024,
         gain: Buf(1),
         eps: 1e-6,
-        w: QBuf(0),
-        out_dim: 6144,
+        weights: &[(ProjWeight::Q8(QBuf(0)), 6144)],
         runs: &runs,
         mix: Some(FusedMix {
             spec,
@@ -380,6 +382,7 @@ fn a_prompt_pass_is_not_recorded() {
 #[test]
 fn a_ragged_run_is_not_recorded() {
     let runs = [ProjRun {
+        weight: 0,
         row_off: 0,
         width: 48,
         dst: Buf(2),
@@ -390,8 +393,7 @@ fn a_ragged_run_is_not_recorded() {
         d_model: 1024,
         gain: Buf(1),
         eps: 1e-6,
-        w: QBuf(0),
-        out_dim: 48,
+        weights: &[(ProjWeight::Q8(QBuf(0)), 48)],
         runs: &runs,
         mix: None,
     };
@@ -511,4 +513,82 @@ fn the_raw_mlp_is_declined_for_a_format_without_a_fused_decode() {
         1e-6,
     );
     assert!(ragged.is_none());
+}
+
+/// The 4B's delta-net projection: `attn_qkv` Q5_K and `attn_gate` Q4_K as
+/// raw weights, `ssm_alpha` and `ssm_beta` as Q8_0, into the history and
+/// one stacked buffer of gate operands. Its 16 key heads against 32 value
+/// heads keep the convolution and gates launched, so the chain is the
+/// projection alone.
+fn qwen_4b_project_plan() -> Plan {
+    let (channels, carried) = (8192, 3 * 8192);
+    let weights = [
+        (ProjWeight::Raw(RawBuf(0), Quant::Q5_K), channels),
+        (ProjWeight::Raw(RawBuf(1), Quant::Q4_K), 4096),
+        (ProjWeight::Q8(QBuf(0)), 32),
+        (ProjWeight::Q8(QBuf(1)), 32),
+    ];
+    let runs = [
+        ProjRun { weight: 0, row_off: 0, width: channels, dst: Buf(2), dst_off: carried },
+        ProjRun { weight: 1, row_off: 0, width: 4096, dst: Buf(3), dst_off: 0 },
+        ProjRun { weight: 2, row_off: 0, width: 32, dst: Buf(3), dst_off: 4096 },
+        ProjRun { weight: 3, row_off: 0, width: 32, dst: Buf(3), dst_off: 4128 },
+    ];
+    let project = FusedProject {
+        x: Buf(0),
+        d_model: 2560,
+        gain: Buf(1),
+        eps: 1e-6,
+        weights: &weights,
+        runs: &runs,
+        mix: None,
+    };
+    project_chain(&project)
+        .expect("a chain")
+        .key(192)
+        .plan()
+        .expect("a well-formed chain")
+        .expect("a shape the pass fuses")
+}
+
+#[test]
+fn the_split_projection_mixes_raw_and_q8_weights() {
+    let plan = qwen_4b_project_plan();
+    assert_eq!(plan.barriers, 0);
+    let src = &plan.source;
+    assert_eq!(src.matches("= q5k_qdot_i8_t(").count(), 1, "{src}");
+    assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 1, "{src}");
+    assert_eq!(src.matches("= qdot_t(").count(), 2, "{src}");
+    assert!(src.starts_with("@launch(256, 2)"), "{src}");
+    // 128 and 64 units of the raw weights, one block each of the Q8_0 ones.
+    assert!(src.contains("UN1 in [128]"), "{src}");
+    assert!(src.contains("UN2 in [64]"), "{src}");
+}
+
+/// A raw run 64 does not divide finishes with a unit of its remainder,
+/// which decodes a whole unit into the upload's row padding and stores
+/// its head.
+#[test]
+fn a_ragged_raw_run_stores_its_remainder() {
+    let weights = [(ProjWeight::Raw(RawBuf(0), Quant::Q4_K), 96)];
+    let runs = [ProjRun { weight: 0, row_off: 0, width: 96, dst: Buf(2), dst_off: 0 }];
+    let project = FusedProject {
+        x: Buf(0),
+        d_model: 1024,
+        gain: Buf(1),
+        eps: 1e-6,
+        weights: &weights,
+        runs: &runs,
+        mix: None,
+    };
+    let plan = project_chain(&project)
+        .expect("a chain")
+        .key(192)
+        .plan()
+        .expect("a well-formed chain")
+        .expect("a shape the pass fuses");
+    let src = &plan.source;
+    assert!(src.contains("Rq4: tensor<i8>[128, 576]"), "{src}");
+    assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 2, "{src}");
+    assert!(src.contains(":+ 32] = v2[0 :+ 1, 0 :+ 32]"), "{src}");
 }

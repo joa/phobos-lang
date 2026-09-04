@@ -67,6 +67,11 @@ pub(crate) fn mlp_chain(
     chain
 }
 
+/// Whether a raw format has a `<fmt>_qdot_i8_t` the pass can emit.
+fn has_fused_decode(quant: Quant) -> bool {
+    matches!(quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K)
+}
+
 /// [`mlp_chain`] over raw-format weights: gate and up as the two separate
 /// weights a raw file holds (nothing stacks them; a run of [`RAW_UNIT`]
 /// outputs of each is one unit), the down projection likewise. The
@@ -83,8 +88,7 @@ pub(crate) fn mlp_chain_raw(
     d_ff: usize,
     eps: f32,
 ) -> Option<Chain> {
-    let decodes = |q: Quant| matches!(q, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K);
-    if !decodes(gate.1) || !decodes(up.1) || !decodes(down.1) {
+    if ![gate.1, up.1, down.1].into_iter().all(has_fused_decode) {
         return None;
     }
     if !d_ff.is_multiple_of(RAW_UNIT) || !d_model.is_multiple_of(RAW_UNIT) {
@@ -196,19 +200,73 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
     let act = chain.quant(project.d_model);
     chain.push(Stage::norm_q(xv, gv, act, project.d_model, project.eps));
 
-    let w = chain.weight(project.w, project.out_dim, project.d_model);
+    // A weight enters the chain once, on the first run that reads it.
+    let mut weights: Vec<Option<Val>> = vec![None; project.weights.len()];
     for run in project.runs {
-        if !run.width.is_multiple_of(Q8_BLOCK) || !run.row_off.is_multiple_of(Q8_BLOCK) {
-            return None;
+        let &(weight, out_dim) = project.weights.get(run.weight)?;
+        let w = match weights[run.weight] {
+            Some(w) => w,
+            None => {
+                let w = match weight {
+                    ProjWeight::Q8(q) => chain.weight(q, out_dim, project.d_model),
+                    ProjWeight::Raw(r, quant) => {
+                        if !has_fused_decode(quant) {
+                            return None;
+                        }
+                        chain.raw_weight(r, out_dim, project.d_model, quant)
+                    }
+                };
+                weights[run.weight] = Some(w);
+                w
+            }
+        };
+        let out = val_of(run.dst)?;
+        match weight {
+            ProjWeight::Q8(_) => {
+                if !run.width.is_multiple_of(Q8_BLOCK) || !run.row_off.is_multiple_of(Q8_BLOCK) {
+                    return None;
+                }
+                chain.push(Stage::ProjF {
+                    a: act,
+                    w,
+                    out,
+                    out_off: run.dst_off,
+                    units: run.width / Q8_BLOCK,
+                    row_off: run.row_off,
+                });
+            }
+            ProjWeight::Raw(..) => {
+                // Whole units, then the remainder as one unit of its own
+                // width. The upload pads a weight's rows to a whole unit, so
+                // the remainder's decode reads rows that exist.
+                if !run.row_off.is_multiple_of(RAW_UNIT) {
+                    return None;
+                }
+                let (full, rem) = (run.width / RAW_UNIT, run.width % RAW_UNIT);
+                if full > 0 {
+                    chain.push(Stage::ProjRawF {
+                        a: act,
+                        w,
+                        out,
+                        out_off: run.dst_off,
+                        units: full,
+                        width: RAW_UNIT,
+                        row_off: run.row_off,
+                    });
+                }
+                if rem > 0 {
+                    chain.push(Stage::ProjRawF {
+                        a: act,
+                        w,
+                        out,
+                        out_off: run.dst_off + full * RAW_UNIT,
+                        units: 1,
+                        width: rem,
+                        row_off: run.row_off + full * RAW_UNIT,
+                    });
+                }
+            }
         }
-        chain.push(Stage::ProjF {
-            a: act,
-            w,
-            out: val_of(run.dst)?,
-            out_off: run.dst_off,
-            units: run.width / Q8_BLOCK,
-            row_off: run.row_off,
-        });
     }
 
     if let Some(m) = &project.mix {

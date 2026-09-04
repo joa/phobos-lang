@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
     Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedMlpRaw, FusedProject, HBuf, Plane,
-    ProjRun, QAct, QBuf, RawBuf,
+    ProjRun, ProjWeight, QAct, QBuf, RawBuf,
 };
 use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
@@ -402,19 +402,36 @@ impl Linear {
         runs: &[ProjRun],
         mix: Option<FusedMix>,
     ) -> Result<Fused> {
-        if rows != 1 || !self.is_quantized() {
+        if rows != 1 {
             return Ok(Fused::default());
         }
+        let Some(w) = self.proj_weight(backend)? else {
+            return Ok(Fused::default());
+        };
         backend.fused_project(FusedProject {
             x,
             d_model: self.in_dim,
             gain,
             eps,
-            w: self.quantized(backend)?,
-            out_dim: self.out_dim,
+            weights: &[(w, self.out_dim)],
             runs,
             mix,
         })
+    }
+
+    /// This weight in the form a fused projection contracts against, or
+    /// `None` for one held densely.
+    pub(crate) fn proj_weight(&self, backend: &dyn Backend) -> Result<Option<ProjWeight>> {
+        let Weights::Quant(packed) = &self.weight else {
+            return Ok(None);
+        };
+        if packed.has_planes() {
+            return Ok(Some(ProjWeight::Q8(backend.constant_quant(&self.key, packed)?)));
+        }
+        if packed.has_raw_scales() {
+            return Ok(Some(ProjWeight::Raw(backend.constant_raw(&self.key, packed)?, packed.quant())));
+        }
+        Ok(None)
     }
 
     /// Whether the quantized contraction applies, which needs both a quantized
