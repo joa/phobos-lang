@@ -147,7 +147,7 @@ impl DeviceBackend {
         // The dp4a decode matvecs, wide tile then narrow. One table drives the
         // sources, the compile entries and the `remove`s below, so their order
         // cannot drift apart.
-        let i8: [I8Row; 7] = [
+        let i8: [I8Row; 10] = [
             (
                 iq1s_qdot_i8_matvec_src,
                 IQ1S_I8_TN,
@@ -189,6 +189,24 @@ impl DeviceBackend {
                 IQ2S_I8_TN,
                 IQ2S_I8_NARROW_TN,
                 "iq2s_qdot_i8_matvec",
+            ),
+            (
+                q4k_qdot_i8_matvec_src,
+                Q4K_I8_TN,
+                Q4K_I8_NARROW_TN,
+                "q4k_qdot_i8_matvec",
+            ),
+            (
+                q5k_qdot_i8_matvec_src,
+                Q5K_I8_TN,
+                Q5K_I8_NARROW_TN,
+                "q5k_qdot_i8_matvec",
+            ),
+            (
+                q6k_qdot_i8_matvec_src,
+                Q6K_I8_TN,
+                Q6K_I8_NARROW_TN,
+                "q6k_qdot_i8_matvec",
             ),
         ];
         let i8_srcs: Vec<OwnedEntry> = i8
@@ -442,6 +460,9 @@ impl DeviceBackend {
         let iq1m_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq2xs_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq2s_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let q4k_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let q5k_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let q6k_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq1s_qmma = raw_matvecs.remove(0);
         let iq2xxs_qmma = raw_matvecs.remove(0);
         let iq2s_qmma = raw_matvecs.remove(0);
@@ -627,6 +648,9 @@ impl DeviceBackend {
             iq1m_qdot_i8,
             iq2xs_qdot_i8,
             iq2s_qdot_i8,
+            q4k_qdot_i8,
+            q5k_qdot_i8,
+            q6k_qdot_i8,
             iq2xxs_qdot_matvec,
             iq1m_qdot_matvec,
             iq2s_qdot_matvec,

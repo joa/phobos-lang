@@ -97,9 +97,12 @@ impl DeviceBackend {
             Quant::IQ3_XXS,
             Quant::IQ3_S,
         ];
-        // IQ1_M has only the staged kernel; the rest have both.
-        if self.raw_quant_is(w, Quant::IQ1_M) {
-            return self.qgemm.takes(Quant::IQ1_M, m, k, n);
+        // IQ1_M and the K-quants have only the staged kernel; the rest have
+        // both.
+        for staged_only in [Quant::IQ1_M, Quant::Q4_K, Quant::Q5_K, Quant::Q6_K] {
+            if self.raw_quant_is(w, staged_only) {
+                return self.qgemm.takes(staged_only, m, k, n);
+            }
         }
         let Some(&quant) = FUSED.iter().find(|&&q| self.raw_quant_is(w, q)) else {
             return false;
@@ -317,6 +320,8 @@ impl DeviceBackend {
                 raw(&self.iq3s_grid_packed),
                 raw(&self.iq2s_signs_packed) + IQ2S_SIGNS_LEN as u64,
             ],
+            // The K-quants decode from the block bytes alone.
+            Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => Vec::new(),
             other => bail!("no staged kernel for {}", other.name()),
         };
         Ok(ptrs

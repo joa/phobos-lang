@@ -26,6 +26,8 @@ pub(crate) fn qgemm_tables(quant: Quant) -> Option<&'static [usize]> {
         Quant::IQ2_S => &[1024 * 8, 256 * 8],
         Quant::IQ3_XXS => &[256 * 4, 128 * 8],
         Quant::IQ3_S => &[512 * 4, 256 * 8],
+        // The K-quants decode from the block bytes alone.
+        Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => &[],
         _ => return None,
     })
 }
@@ -40,6 +42,9 @@ pub(crate) fn qgemm_name(quant: Quant) -> Option<&'static str> {
         Quant::IQ2_S => "iq2s",
         Quant::IQ3_XXS => "iq3xxs",
         Quant::IQ3_S => "iq3s",
+        Quant::Q4_K => "q4k",
+        Quant::Q5_K => "q5k",
+        Quant::Q6_K => "q6k",
         _ => return None,
     })
 }
@@ -54,6 +59,9 @@ pub(crate) fn qgemm_kernel(quant: Quant) -> Option<&'static str> {
         Quant::IQ2_S => "iq2s_qgemm",
         Quant::IQ3_XXS => "iq3xxs_qgemm",
         Quant::IQ3_S => "iq3s_qgemm",
+        Quant::Q4_K => "q4k_qgemm",
+        Quant::Q5_K => "q5k_qgemm",
+        Quant::Q6_K => "q6k_qgemm",
         _ => return None,
     })
 }
@@ -63,27 +71,28 @@ pub(crate) fn qgemm_kernel(quant: Quant) -> Option<&'static str> {
 pub(crate) fn qgemm_src(quant: Quant) -> Option<String> {
     let name = qgemm_name(quant)?;
     let tables = qgemm_tables(quant)?;
-    let params: Vec<String> = tables
+    // A format with no tables declares none and passes none: the joins
+    // below leave no stray comma behind.
+    let params: String = tables
         .iter()
         .enumerate()
-        .map(|(i, len)| format!("T{i}: tensor<i8>[1, {len}]"))
+        .map(|(i, len)| format!("T{i}: tensor<i8>[1, {len}], "))
         .collect();
-    let args: Vec<String> = (0..tables.len()).map(|i| format!("T{i}[0 :+ 1, :]")).collect();
+    let args: String = (0..tables.len())
+        .map(|i| format!(",\n                                                T{i}[0 :+ 1, :]"))
+        .collect();
     Some(format!(
         "@launch({QGEMM_CTA}, 2)
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
 @aligned(M = TM, N = TN, K = 256)
 kernel {name}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                  {}, C: tensor<f32>[M, N]) {{
+                  {params}C: tensor<f32>[M, N]) {{
   let pm = program_id(0)
   let pn = program_id(1)
   C[pm * TM :+ TM, pn * TN :+ TN] = {name}_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
-                                                QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
-                                                {})
+                                                QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :]{args})
 }}
-",
-        params.join(", "),
-        args.join(", "),
+"
     ))
 }

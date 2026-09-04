@@ -8,6 +8,8 @@
 mod argmax;
 mod attn;
 mod delta;
+#[cfg(test)]
+mod dump;
 mod elem;
 mod iq1m;
 mod iq1s;
@@ -17,6 +19,7 @@ mod iq2xxs;
 mod iq3s;
 mod iq3xxs;
 mod iq4xs;
+mod kquant;
 mod matmul;
 mod norm;
 mod q2k;
@@ -40,6 +43,7 @@ pub(crate) use iq2xxs::*;
 pub(crate) use iq3s::*;
 pub(crate) use iq3xxs::*;
 pub(crate) use iq4xs::*;
+pub(crate) use kquant::*;
 pub(crate) use matmul::*;
 pub(crate) use norm::*;
 pub(crate) use q2k::*;

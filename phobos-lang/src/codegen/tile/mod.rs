@@ -27,6 +27,8 @@ mod iq3s_qdot;
 mod iq3xxs;
 mod iq3xxs_qdot;
 mod iq4xs_qdot;
+mod kquant;
+mod kquant_qdot;
 mod math;
 mod norm;
 mod q2k_qdot;

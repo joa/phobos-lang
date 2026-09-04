@@ -4,6 +4,8 @@
 // bytes ride a two-deep register pipeline and the activations come from
 // L1 at decode time. The decode itself is `qgemm_fmt.rs`'s.
 
+use super::kquant::KQ_GROUP;
+use super::kquant_qdot::KQ_MAX_GROUPS;
 use super::qgemm_fmt::{IQ1_LUT4_MINUS, IQ1_LUT4_PLUS};
 use super::*;
 
@@ -17,9 +19,9 @@ const DEPTH: usize = 2;
 const PREFETCH_BLOCKS: i64 = 1;
 
 /// One load of a lane's quarter: byte offset into the block, and width.
-struct Piece<'c> {
-    off: Value<'c, 'c>,
-    width: i64,
+pub(super) struct Piece<'c> {
+    pub(super) off: Value<'c, 'c>,
+    pub(super) width: i64,
 }
 
 impl<'c> Codegen<'c> {
@@ -97,6 +99,25 @@ impl<'c> Codegen<'c> {
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
 
+        // A format with a minimum needs the activation's sum over every
+        // 32-element run, the same for every column: summed once here into
+        // shared memory, read twice a block by every lane.
+        if fmt.has_min() {
+            if aq.shape[1] != DYN && aq.shape[1] / KQ_GROUP > KQ_MAX_GROUPS {
+                bail!("{label} holds a row of at most {} elements", KQ_MAX_GROUPS * KQ_GROUP);
+            }
+            let sums = self.alloc_tile_shaped(block, self.i32_t, &[1, KQ_MAX_GROUPS])?;
+            let kd = if aq.shape[1] == DYN {
+                let one = self.const_index(block, 1)?;
+                self.push(block, memref::dim(aq.mem, one, self.loc))?
+            } else {
+                self.const_index(block, aq.shape[1])?
+            };
+            self.kq_sum_prologue(block, aq, &sums, kd, tid, bdim)?;
+            self.barrier(block)?;
+            tabs.push(sums);
+        }
+
         // One turn per warp per group of eight columns.
         let body = Block::new(&[(self.index_t, self.loc)]);
         let li = detach(body.argument(0)?.into());
@@ -109,8 +130,7 @@ impl<'c> Codegen<'c> {
         let j = self.addi(&body, base_col, in_warp_col)?;
         let quarter = self.remui(&body, lane, lanes_per_col)?;
         let pieces = self.qr_pieces(&body, fmt, quarter)?;
-        let sixty_four = self.const_index(&body, 64)?;
-        let k_lane_off = self.muli(&body, quarter, sixty_four)?;
+        let k_lane_off = self.kq_lane_k_off(&body, fmt, quarter)?;
         let sixteen = self.const_index(&body, 16)?;
         let pf_lane_off = self.muli(&body, quarter, sixteen)?;
 
@@ -136,7 +156,7 @@ impl<'c> Codegen<'c> {
         for stage in 0..DEPTH {
             let blk = self.const_index(&body, stage as i64)?;
             let blk = self.push(&body, arith::minui(blk, last_blk, self.loc))?;
-            stages.push(self.qr_fetch(&body, &pieces, j, qb, d, blk, blk_bytes)?);
+            stages.push(self.qr_fetch(&body, fmt, &pieces, j, qb, d, blk, blk_bytes)?);
         }
         let per_stage = stages[0].len();
 
@@ -173,7 +193,7 @@ impl<'c> Codegen<'c> {
         for stage in &stage_regs[1..] {
             yields.extend(stage.iter().copied());
         }
-        yields.extend(self.qr_fetch(&kb, &pieces, j, qb, d, ahead_blk, blk_bytes)?);
+        yields.extend(self.qr_fetch(&kb, fmt, &pieces, j, qb, d, ahead_blk, blk_bytes)?);
         kb.append_operation(scf::r#yield(&yields, self.loc));
 
         // `kd - DEPTH * 256`, clamped at zero for a row shorter than that.
@@ -249,6 +269,9 @@ impl<'c> Codegen<'c> {
     /// The loads of a lane's quarter of a block, by format. Layouts are in
     /// `qgemm_fmt.rs`.
     fn qr_pieces(&mut self, body: &Block<'c>, fmt: QgFormat, quarter: Value<'c, 'c>) -> Result<Vec<Piece<'c>>> {
+        if fmt.is_kquant() {
+            return self.kq_pieces(body, fmt, quarter);
+        }
         // `base + mul * quarter`.
         let at = |cg: &mut Self, base: i64, mul: i64| -> Result<Value<'c, 'c>> {
             let mul = cg.const_index(body, mul)?;
@@ -258,6 +281,7 @@ impl<'c> Codegen<'c> {
         };
         let piece = |off, width| Piece { off, width };
         Ok(match fmt {
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => unreachable!("returned above"),
             QgFormat::Iq1s => vec![piece(at(self, 0, 8)?, 8), piece(at(self, 32, 4)?, 4)],
             QgFormat::Iq1m => vec![
                 piece(at(self, 0, 8)?, 8),
@@ -298,6 +322,7 @@ impl<'c> Codegen<'c> {
     fn qr_fetch(
         &mut self,
         block: &Block<'c>,
+        fmt: QgFormat,
         pieces: &[Piece<'c>],
         j: Value<'c, 'c>,
         qb: &MemVal<'c>,
@@ -333,21 +358,27 @@ impl<'c> Codegen<'c> {
                 }
             }
         }
-        regs.push(self.push(block, memref::load(d.mem, &[d_row, d_col], self.loc))?);
+        // A K-quant with its header in the block reads `d` from there.
+        if !fmt.d_in_block() {
+            regs.push(self.push(block, memref::load(d.mem, &[d_row, d_col], self.loc))?);
+        }
         Ok(regs)
     }
 
     /// The lane's 64 activations from `k_off` as `dp4a` words, and their
-    /// two scales.
-    fn qr_act(
+    /// scales: 64 contiguous elements under two scales, or for Q6_K four
+    /// runs of sixteen 32 apart under four (see `kquant_qdot.rs`).
+    pub(super) fn qr_act(
         &mut self,
         block: &Block<'c>,
+        fmt: QgFormat,
         aq: &MemVal<'c>,
         asc: &MemVal<'c>,
         k_off: Value<'c, 'c>,
-    ) -> Result<(Vec<Value<'c, 'c>>, [Value<'c, 'c>; 2])> {
+    ) -> Result<(Vec<Value<'c, 'c>>, Vec<Value<'c, 'c>>)> {
         let zero_row = self.const_index(block, 0)?;
-        let sixteen = self.const_index(block, 16)?;
+        let (stride, scales) = if fmt == QgFormat::Q6k { (32, 4) } else { (16, 2) };
+        let stride = self.const_index(block, stride)?;
         let bytes16 = Type::vector(&[16], self.i8_t);
         let quad_t = Type::vector(&[4], self.i8_t);
         let quads_t = Type::vector(&[4, 4], self.i8_t);
@@ -359,14 +390,14 @@ impl<'c> Codegen<'c> {
             for w in 0..4 {
                 act.push(self.vec_extract(block, v, &[w], quad_t)?);
             }
-            at = self.addi(block, at, sixteen)?;
+            at = self.addi(block, at, stride)?;
         }
         let group = self.divui(block, k_off, self.const_index(block, ACT_SCALE_BLOCK)?)?;
-        let scales = self.vec_load_al(block, asc.mem, &[zero_row, group], Type::vector(&[2], self.f32_t), 8)?;
-        let sa = [
-            self.vec_extract(block, scales, &[0], self.f32_t)?,
-            self.vec_extract(block, scales, &[1], self.f32_t)?,
-        ];
+        let scales_t = Type::vector(&[scales as u64], self.f32_t);
+        let loaded = self.vec_load_al(block, asc.mem, &[zero_row, group], scales_t, 4 * scales)?;
+        let sa = (0..scales)
+            .map(|i| self.vec_extract(block, loaded, &[i], self.f32_t))
+            .collect::<Result<Vec<_>>>()?;
         Ok((act, sa))
     }
 
@@ -384,10 +415,13 @@ impl<'c> Codegen<'c> {
         k_off: Value<'c, 'c>,
         carry: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
+        if fmt.is_kquant() {
+            return self.kq_qdot_block(kb, fmt, tabs, regs, aq, asc, k_off, carry);
+        }
         let (i8_t, i32_t, f32_t) = (self.i8_t, self.i32_t, self.f32_t);
         let words = &regs[..regs.len() - 1];
         let dv = regs[regs.len() - 1];
-        let (act, sa) = self.qr_act(kb, aq, asc, k_off)?;
+        let (act, sa) = self.qr_act(kb, fmt, aq, asc, k_off)?;
 
         let quad_t = Type::vector(&[4], i8_t);
         let one_i32 = Type::vector(&[1], i32_t);
@@ -449,6 +483,9 @@ impl<'c> Codegen<'c> {
         let bits = |cg: &mut Self, word: Value<'c, 'c>, shift: usize, mask: i64| cg.qg_bits(kb, word, shift as i64, mask);
         let mut out = Vec::with_capacity(LANE_OCTETS);
         match fmt {
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
+                bail!("{} decodes in kquant_qdot.rs", fmt.qdot_i8_intrinsic())
+            }
             QgFormat::Iq1s => {
                 let (qs, qh) = (&w[0..2], w[2]);
                 let luts = [self.qr_lut4(kb, qh, 15)?, self.qr_lut4(kb, qh, 31)?];
@@ -539,6 +576,9 @@ impl<'c> Codegen<'c> {
             cg.push(kb, arith::addi(n2, one, cg.loc))
         };
         Ok(match fmt {
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
+                bail!("{} decodes in kquant_qdot.rs", fmt.qdot_i8_intrinsic())
+            }
             QgFormat::Iq1s => vec![odd_at(self, w[2], 12, 3)?, odd_at(self, w[2], 28, 3)?],
             QgFormat::Iq1m => (0..4).map(|g| odd_of(self, w[3], 3 * g, 3)).collect::<Result<_>>()?,
             QgFormat::Iq2xxs => vec![odd_at(self, w[1], 28, 4)?, odd_at(self, w[3], 28, 4)?],
@@ -629,7 +669,8 @@ impl QgFormat {
         match self {
             QgFormat::Iq1s | QgFormat::Iq1m | QgFormat::Iq2xxs | QgFormat::Iq2xs | QgFormat::Iq2s => 0.125,
             QgFormat::Iq3xxs => 0.25,
-            QgFormat::Iq3s => 1.0,
+            // Never consulted: the K-quants decode in kquant_qdot.rs.
+            QgFormat::Iq3s | QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => 1.0,
         }
     }
 
@@ -640,6 +681,7 @@ impl QgFormat {
             QgFormat::Iq2xxs | QgFormat::Iq2xs | QgFormat::Iq2s => 43,
             QgFormat::Iq3xxs => 62,
             QgFormat::Iq3s => 15,
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => 63,
         }
     }
 
