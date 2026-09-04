@@ -336,6 +336,38 @@ impl Emit {
 "
                 );
             }
+            Stage::ProjRawF {
+                a,
+                w,
+                out,
+                out_off,
+                width,
+                row_off,
+                ..
+            } => {
+                let (aq, asc) = self.quant_row(a, key.len_of(a));
+                let (rq, rd, fmt) = self.raw_weight(key, w)?;
+                let dst = self.given(out, key.len_of(out), View::Flat);
+                let at = self.strided(format!("OF{s}"), row_off, unit, RAW_UNIT);
+                let to = self.strided(format!("DO{s}"), out_off, unit, RAW_UNIT);
+                let _ = writeln!(self.body, "      let at{s} = {at}\n      let to{s} = {to}");
+                // A whole unit stores straight from the intrinsic; a run's
+                // remainder decodes the whole unit and stores its head.
+                let head = match width == RAW_UNIT {
+                    true => format!("      {dst}[0 :+ 1, to{s} :+ {RAW_UNIT}] = {fmt}_qdot_i8_t("),
+                    false => format!("      var v{s}: tile<f32>[1, {RAW_UNIT}] = {fmt}_qdot_i8_t("),
+                };
+                let pad = " ".repeat(head.len());
+                let _ = write!(
+                    self.body,
+                    "{head}{aq}, {asc},
+{pad}{rq}[at{s} :+ {RAW_UNIT}, :], {rd}[at{s} :+ {RAW_UNIT}, :])
+"
+                );
+                if width != RAW_UNIT {
+                    let _ = writeln!(self.body, "      {dst}[0 :+ 1, to{s} :+ {width}] = v{s}[0 :+ 1, 0 :+ {width}]");
+                }
+            }
             Stage::Swiglu { g, u, out } => {
                 let (gn, un) = (self.reg_of(g)?, self.reg_of(u)?);
                 let width = key.len_of(out);
@@ -665,7 +697,10 @@ impl Emit {
         if let Some(pair) = self.pairs.get(&(val, View::Flat)) {
             return Ok((pair.0.clone(), pair.1.clone(), fmt));
         }
+        // The upload pads the rows to a whole unit, and a run's remainder
+        // reads into that padding; the binding checks the two agree.
         let nb = k / 256;
+        let rows = rows.next_multiple_of(RAW_UNIT);
         let qs = self.slot(
             format!("Rq{}", val.0),
             "i8",

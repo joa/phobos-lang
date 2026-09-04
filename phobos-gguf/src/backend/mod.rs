@@ -146,6 +146,16 @@ pub struct FusedAttnOut {
     pub dest: Buf,
 }
 
+/// A weight a fused projection contracts against, in a form the pass has a
+/// stage for.
+#[derive(Clone, Copy, Debug)]
+pub enum ProjWeight {
+    /// Q8_0 planes.
+    Q8(QBuf),
+    /// A raw format, decoded in the kernel by its own intrinsic.
+    Raw(RawBuf, Quant),
+}
+
 /// One contiguous run of a projection's outputs, and where the caller wants
 /// it. A stacked projection's consumers can want their window elsewhere (the
 /// delta net's convolution reads its qkv plane as the tail of a padded
@@ -153,6 +163,8 @@ pub struct FusedAttnOut {
 /// there instead of being copied out afterwards.
 #[derive(Clone, Copy, Debug)]
 pub struct ProjRun {
+    /// Which of the projection's weights this run reads.
+    pub weight: usize,
     /// First output of the weight this run covers.
     pub row_off: usize,
     pub width: usize,
@@ -170,9 +182,10 @@ pub struct FusedProject<'a> {
     /// Gain of the normalization ahead of the projection.
     pub gain: Buf,
     pub eps: f32,
-    /// `[out_dim, d_model]`, the runs being windows of its outputs.
-    pub w: QBuf,
-    pub out_dim: usize,
+    /// Each `[out_dim, d_model]`, the runs being windows of their outputs. A
+    /// raw file keeps a stacked projection's parts as separate tensors, so
+    /// one projection reads several weights.
+    pub weights: &'a [(ProjWeight, usize)],
     pub runs: &'a [ProjRun],
     /// The delta net's convolution and gates, for a chain continuing past the
     /// projection into them.

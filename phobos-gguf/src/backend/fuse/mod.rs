@@ -17,7 +17,7 @@ use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 
-use super::{Buf, FusedProject, L2_EPS, Q8_BLOCK, QBuf, RawBuf};
+use super::{Buf, FusedProject, L2_EPS, ProjWeight, Q8_BLOCK, QBuf, RawBuf};
 use crate::quant::Quant;
 
 /// Rows of the folded activation a redundant normalization sweeps at a time.
@@ -127,6 +127,18 @@ pub(crate) enum Stage {
         w: Val,
         out: Val,
         units: usize,
+        row_off: usize,
+    },
+    /// `out[out_off + unit * RAW_UNIT ..] = w[row_off + unit * RAW_UNIT ..] . a`
+    /// for a raw-format weight, `width` outputs a unit: [`RAW_UNIT`], or the
+    /// remainder of a run for the one unit that finishes it.
+    ProjRawF {
+        a: Val,
+        w: Val,
+        out: Val,
+        out_off: usize,
+        units: usize,
+        width: usize,
         row_off: usize,
     },
     /// `out = (g * sigmoid(g)) * u` on a unit's run.
@@ -247,6 +259,7 @@ impl Stage {
             Stage::ProjQ { units, .. }
             | Stage::ProjF { units, .. }
             | Stage::ProjRaw { units, .. }
+            | Stage::ProjRawF { units, .. }
             | Stage::QuantQ { units, .. } => Part::Units(units),
             Stage::Swiglu { .. } => Part::Inherit,
             Stage::ProjAdd { width, .. } => Part::Units(width / OUT_TILE),
@@ -259,9 +272,10 @@ impl Stage {
     fn reads(&self) -> Vec<(Val, Read)> {
         match *self {
             Stage::NormQ { x, gain, .. } => vec![(x, Read::All), (gain, Read::All)],
-            Stage::ProjQ { a, w, .. } | Stage::ProjF { a, w, .. } | Stage::ProjRaw { a, w, .. } => {
-                vec![(a, Read::All), (w, Read::All)]
-            }
+            Stage::ProjQ { a, w, .. }
+            | Stage::ProjF { a, w, .. }
+            | Stage::ProjRaw { a, w, .. }
+            | Stage::ProjRawF { a, w, .. } => vec![(a, Read::All), (w, Read::All)],
             Stage::Swiglu { g, u, .. } => vec![(g, Read::Local), (u, Read::Local)],
             Stage::QuantQ { h, .. } => vec![(h, Read::Local)],
             // `y` is read only where it is written, so the accumulation crosses
@@ -284,6 +298,7 @@ impl Stage {
             | Stage::ProjQ { out, .. }
             | Stage::ProjF { out, .. }
             | Stage::ProjRaw { out, .. }
+            | Stage::ProjRawF { out, .. }
             | Stage::Swiglu { out, .. }
             | Stage::QuantQ { out, .. }
             | Stage::Conv { out, .. }

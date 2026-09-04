@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 
 use crate::Gguf;
 use crate::backend::{
-    Attn, Backend, Buf, DeltaMix, FusedMix, HPlane, Plane, ProjRun, QAct, Rope,
+    Attn, Backend, Buf, DeltaMix, FusedMix, FusedProject, HPlane, Plane, ProjRun, QAct, Rope,
 };
 use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads};
 
@@ -551,9 +551,32 @@ impl Model {
             false => (alpha, beta),
         };
 
+        // The convolution and gates as the tail of a fused projection, given
+        // where the decay and write strength land. The fused kernel bakes in
+        // a single head count; a grouped-query deltanet falls back to the
+        // unfused delta_conv/delta_gates path, which expands `kv_heads` into
+        // `heads`.
+        let fused_mix = |decay_at: (Buf, usize), beta_at: (Buf, usize)| -> Result<Option<FusedMix>> {
+            if rows != 1 || kv_heads != heads {
+                return Ok(None);
+            }
+            let (decay, beta) = gates(decay_at, beta_at);
+            Ok(Some(FusedMix {
+                spec: mix,
+                history,
+                taps,
+                decay,
+                beta,
+                rate: delta.rate(backend, variants.decay_from_log)?,
+                dt_bias: delta.dt_bias.buf(backend)?,
+                packed,
+            }))
+        };
+
         // [`Proj::Fused`] is a single launch producing history, gate, and
-        // gate operands together; [`Proj::Split`] is four ordinary
-        // projections for formats a fused launch can't carry.
+        // gate operands together; [`Proj::Split`] is the four separate
+        // tensors a raw file holds, one fused kernel where the backend has a
+        // stage for each format and four launches where it does not.
         let (z, alpha_op, beta_op, mix_done, mut release) = match &delta.proj {
             Proj::Fused { linear, parts } => {
                 let width = linear.out_dim;
@@ -566,30 +589,16 @@ impl Model {
                 let (qkv_at, _) = parts[0];
                 let (rest_at, rest_end) = (parts[1].0, parts[3].0 + parts[3].1);
                 let runs = [
-                    ProjRun { row_off: qkv_at, width: channels, dst: history, dst_off: carried },
-                    ProjRun { row_off: rest_at, width: rest_end - rest_at, dst: stacked, dst_off: rest_at },
+                    ProjRun { weight: 0, row_off: qkv_at, width: channels, dst: history, dst_off: carried },
+                    ProjRun {
+                        weight: 0,
+                        row_off: rest_at,
+                        width: rest_end - rest_at,
+                        dst: stacked,
+                        dst_off: rest_at,
+                    },
                 ];
-
-                // The fused kernel bakes in a single head count; a
-                // grouped-query deltanet falls back to the unfused
-                // delta_conv/delta_gates path, which expands `kv_heads` into
-                // `heads`.
-                let fused_mix = match rows == 1 && kv_heads == heads {
-                    true => {
-                        let (decay, beta) = gates((stacked, parts[2].0), (stacked, parts[3].0));
-                        Some(FusedMix {
-                            spec: mix,
-                            history,
-                            taps,
-                            decay,
-                            beta,
-                            rate: delta.rate(backend, variants.decay_from_log)?,
-                            dt_bias: delta.dt_bias.buf(backend)?,
-                            packed,
-                        })
-                    }
-                    false => None,
-                };
+                let fused_mix = fused_mix((stacked, parts[2].0), (stacked, parts[3].0))?;
 
                 let fused =
                     linear.project_fused(backend, resid, gain, cfg.rms_eps, rows, &runs, fused_mix)?;
@@ -633,29 +642,69 @@ impl Model {
                 (z, alpha_op, beta_op, fused.mix, extracted)
             }
             Proj::Split { qkv, gate, alpha, beta } => {
-                let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+                // The three gate operands in one buffer, as the fused layout
+                // has them, so the kernel's tail can read them the same way.
+                let (gate_w, alpha_w, beta_w) = (gate.out_dim, alpha.out_dim, beta.out_dim);
+                let (alpha_at, beta_at) = (gate_w, gate_w + alpha_w);
+                let mut fused = None;
+                if rows == 1 {
+                    let parts = [qkv, gate, alpha, beta];
+                    let weights: Option<Vec<_>> = parts
+                        .iter()
+                        .map(|part| Ok(part.proj_weight(backend)?.map(|w| (w, part.out_dim))))
+                        .collect::<Result<_>>()?;
+                    if let Some(weights) = weights {
+                        let stacked = backend.alloc(gate_w + alpha_w + beta_w)?;
+                        let runs = [
+                            ProjRun { weight: 0, row_off: 0, width: channels, dst: history, dst_off: carried },
+                            ProjRun { weight: 1, row_off: 0, width: gate_w, dst: stacked, dst_off: 0 },
+                            ProjRun { weight: 2, row_off: 0, width: alpha_w, dst: stacked, dst_off: alpha_at },
+                            ProjRun { weight: 3, row_off: 0, width: beta_w, dst: stacked, dst_off: beta_at },
+                        ];
+                        let done = backend.fused_project(FusedProject {
+                            x: resid,
+                            d_model: cfg.d_model,
+                            gain,
+                            eps: cfg.rms_eps,
+                            weights: &weights,
+                            runs: &runs,
+                            mix: fused_mix((stacked, alpha_at), (stacked, beta_at))?,
+                        })?;
+                        match done.project {
+                            true => fused = Some((stacked, done.mix)),
+                            false => backend.release(stacked),
+                        }
+                    }
+                }
+                match fused {
+                    Some((stacked, mix_done)) => {
+                        ((stacked, 0), (stacked, alpha_at), (stacked, beta_at), mix_done, vec![stacked])
+                    }
+                    None => {
+                        let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+                        let qkv_buf = qkv.forward_act(backend, normed, act, rows)?;
+                        copy_qkv_into_history(
+                            backend,
+                            Plane { buf: qkv_buf, offset: 0, pitch: channels },
+                            history,
+                            carried,
+                            rows,
+                            channels,
+                        )?;
+                        backend.release(qkv_buf);
 
-                let qkv_buf = qkv.forward_act(backend, normed, act, rows)?;
-                copy_qkv_into_history(
-                    backend,
-                    Plane { buf: qkv_buf, offset: 0, pitch: channels },
-                    history,
-                    carried,
-                    rows,
-                    channels,
-                )?;
-                backend.release(qkv_buf);
-
-                let gate_buf = gate.forward_act(backend, normed, act, rows)?;
-                let alpha_buf = alpha.forward_act(backend, normed, act, rows)?;
-                let beta_buf = beta.forward_act(backend, normed, act, rows)?;
-                (
-                    (gate_buf, 0),
-                    (alpha_buf, 0),
-                    (beta_buf, 0),
-                    false,
-                    vec![gate_buf, alpha_buf, beta_buf],
-                )
+                        let gate_buf = gate.forward_act(backend, normed, act, rows)?;
+                        let alpha_buf = alpha.forward_act(backend, normed, act, rows)?;
+                        let beta_buf = beta.forward_act(backend, normed, act, rows)?;
+                        (
+                            (gate_buf, 0),
+                            (alpha_buf, 0),
+                            (beta_buf, 0),
+                            false,
+                            vec![gate_buf, alpha_buf, beta_buf],
+                        )
+                    }
+                }
             }
         };
         let (z_buf, z_at) = z;
