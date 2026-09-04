@@ -197,3 +197,66 @@ impl DeviceBackend {
         self.launch(module, FUSED_KERNEL, &operands, (plan.blocks, 1, 1))
     }
 }
+
+impl DeviceBackend {
+    // The three `Backend` entry points of the fused path. The chain is all
+    // this backend decides; the pass decides fusability, loop nesting and
+    // barrier placement, and a declined shape takes the launches instead.
+    pub(super) fn launch_fused_mlp(&self, mlp: FusedMlp) -> Result<bool> {
+        if !self.fused_mlp {
+            return Ok(false);
+        }
+        let chain = fuse::mlp_chain(
+            mlp.x,
+            mlp.gain,
+            mlp.gate_up,
+            mlp.down,
+            mlp.d_model,
+            mlp.d_ff,
+            mlp.eps,
+        );
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(false);
+        };
+        self.fused_launch(&chain, &key)?;
+        Ok(true)
+    }
+
+    pub(super) fn launch_fused_project(&self, project: FusedProject) -> Result<Fused> {
+        if !self.fused_project {
+            return Ok(Fused::default());
+        }
+        // Dropping the tail here rather than at the frontend keeps the recording
+        // side free of the gate: the chain is what the gate is about.
+        let project = FusedProject {
+            mix: project.mix.filter(|_| self.fused_mix),
+            ..project
+        };
+        let Some(chain) = fuse::project_chain(&project) else {
+            return Ok(Fused::default());
+        };
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(Fused::default());
+        };
+        self.fused_launch(&chain, &key)?;
+        Ok(Fused {
+            project: true,
+            mix: project.mix.is_some(),
+        })
+    }
+
+    pub(super) fn launch_fused_attn_out(&self, out: FusedAttnOut) -> Result<bool> {
+        if !self.fused_attn_out {
+            return Ok(false);
+        }
+        let Some(chain) = fuse::attn_out_chain(out.x, out.w, out.dest, out.width, out.d_model)
+        else {
+            return Ok(false);
+        };
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(false);
+        };
+        self.fused_launch(&chain, &key)?;
+        Ok(true)
+    }
+}

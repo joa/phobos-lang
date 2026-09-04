@@ -173,6 +173,48 @@ fn q4_k_unpacks_its_six_bit_scales() {
     }
 }
 
+/// Q5_K is Q4_K plus a fifth bit: run `r`'s element `l` reads bit `r` of
+/// `qh[l]`, and `qh` never advances. The high bit here depends on both the
+/// run and the element, so a decoder that advances `qh` with the run, or
+/// reads the wrong bit of it, lands on the wrong value somewhere.
+#[test]
+fn q5_k_takes_its_fifth_bit_from_the_shared_qh_plane() {
+    let (d, dmin) = (0.5f32, 0.25f32);
+    let scales: [u8; 8] = [1, 9, 17, 25, 33, 41, 49, 63];
+    let mins: [u8; 8] = [62, 2, 10, 18, 26, 34, 42, 50];
+    let nibble = |run: usize| (run % 15 + 1) as u8;
+    let high = |run: usize, l: usize| (run + l).is_multiple_of(3);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&f32_to_f16(d).to_le_bytes());
+    bytes.extend_from_slice(&f32_to_f16(dmin).to_le_bytes());
+    bytes.extend_from_slice(&q4_k::pack_scales(&scales, &mins));
+    for l in 0..32 {
+        bytes.push(
+            (0..8)
+                .filter(|&run| high(run, l))
+                .fold(0u8, |acc, run| acc | (1 << run)),
+        );
+    }
+    for plane in 0..4 {
+        let (lo, hi) = (nibble(2 * plane), nibble(2 * plane + 1));
+        bytes.extend(std::iter::repeat_n(lo | (hi << 4), 32));
+    }
+    assert_eq!(bytes.len(), 176);
+
+    let packed = Packed::new(Quant::Q5_K, bytes, 256, 1).unwrap();
+    let mut out = vec![0.0f32; 256];
+    packed.row_into(0, &mut out).unwrap();
+
+    for run in 0..8 {
+        for (l, &got) in out[run * 32..][..32].iter().enumerate() {
+            let q = nibble(run) + if high(run, l) { 16 } else { 0 };
+            let want = d * f32::from(scales[run]) * f32::from(q) - dmin * f32::from(mins[run]);
+            assert_eq!(got, want, "run {run} element {l}");
+        }
+    }
+}
+
 #[test]
 fn q4_k_scale_packing_round_trips_every_index() {
     // Both fields are six bits, so the interesting cases are the ones whose
