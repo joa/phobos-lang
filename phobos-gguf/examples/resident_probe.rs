@@ -321,7 +321,7 @@ fn run_gemm(stream: &Stream, name: &str, block_bytes: usize, m: usize, k: usize,
     let nb = k / 256;
     let rb = nb * block_bytes;
     let module = compile(&kquant_gemm_src(name), &[("TM", 128), ("TN", 64)], &format!("{name}_gemm"))?;
-    let function = module.get_function(&format!("{name}_qgemm"))?.to_raw();
+    let function = module.get_function(format!("{name}_qgemm"))?.to_raw();
     let bytes: Vec<i8> = (0..n * rb).map(|i| (i.wrapping_mul(2654435761) >> 13) as i8).collect();
     let d: Vec<u16> = vec![0x3400u16; n * nb];
     let aq: Vec<i8> = (0..m * k).map(|i| ((i % 17) as i32 - 8) as i8).collect();

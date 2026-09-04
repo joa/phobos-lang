@@ -188,6 +188,21 @@ impl DeviceBackend {
                         _ => q.row_scales,
                     }
                 }
+                Bound::RawBytes(val) | Bound::RawD(val) => {
+                    let w = chain.raw_of(val)?;
+                    let raws = self.raw_quants.borrow();
+                    let r = raws.get(w.0).context("use of an unknown raw weight handle")?;
+                    ensure!(
+                        r.n as i64 == slot.dims[0],
+                        "a fused raw weight went up with n = {}, used with n = {}",
+                        r.n,
+                        slot.dims[0]
+                    );
+                    match slot.bound {
+                        Bound::RawBytes(_) => r.bytes,
+                        _ => r.d,
+                    }
+                }
                 Bound::ScratchQs(at) => pool[at].0.as_device_ptr().as_raw(),
                 Bound::ScratchScales(at) => pool[at].1.as_device_ptr().as_raw(),
                 Bound::Barrier => self.fused_bar()?,
@@ -199,7 +214,7 @@ impl DeviceBackend {
 }
 
 impl DeviceBackend {
-    // The three `Backend` entry points of the fused path. The chain is all
+    // The `Backend` entry points of the fused path. The chain is all
     // this backend decides; the pass decides fusability, loop nesting and
     // barrier placement, and a declined shape takes the launches instead.
     pub(super) fn launch_fused_mlp(&self, mlp: FusedMlp) -> Result<bool> {
@@ -215,6 +230,29 @@ impl DeviceBackend {
             mlp.d_ff,
             mlp.eps,
         );
+        let Some(key) = self.fused_plan(&chain)? else {
+            return Ok(false);
+        };
+        self.fused_launch(&chain, &key)?;
+        Ok(true)
+    }
+
+    pub(super) fn launch_fused_mlp_raw(&self, mlp: FusedMlpRaw) -> Result<bool> {
+        if !self.fused_mlp {
+            return Ok(false);
+        }
+        let Some(chain) = fuse::mlp_chain_raw(
+            mlp.x,
+            mlp.gain,
+            mlp.gate,
+            mlp.up,
+            mlp.down,
+            mlp.d_model,
+            mlp.d_ff,
+            mlp.eps,
+        ) else {
+            return Ok(false);
+        };
         let Some(key) = self.fused_plan(&chain)? else {
             return Ok(false);
         };

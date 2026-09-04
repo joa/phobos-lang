@@ -10,14 +10,15 @@ mod emit;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use chains::{attn_out_chain, mlp_chain, project_chain};
+pub(crate) use chains::{attn_out_chain, mlp_chain, mlp_chain_raw, project_chain};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
 
 use anyhow::{Result, bail};
 
-use super::{Buf, FusedProject, L2_EPS, Q8_BLOCK, QBuf};
+use super::{Buf, FusedProject, L2_EPS, Q8_BLOCK, QBuf, RawBuf};
+use crate::quant::Quant;
 
 /// Rows of the folded activation a redundant normalization sweeps at a time.
 ///
@@ -30,6 +31,12 @@ pub(crate) const NORM_ROWS: usize = 16;
 /// Outputs one block takes of a contraction accumulating into its target.
 /// Mirrors `Q8_QDOT_TN`, which the device backend asserts against.
 pub(crate) const OUT_TILE: usize = 8;
+
+/// Outputs one block takes of a raw-format contraction, both kinds: the
+/// `<fmt>_qdot_i8_t` decode gives a warp eight columns and a CTA of eight
+/// warps wants 64 to keep every warp busy. Two Q8_0 blocks, so a
+/// quantization of a unit's run writes two rows.
+pub(crate) const RAW_UNIT: usize = 64;
 
 /// Threads per block. A grid barrier ties the block count to the compiled code,
 /// so the thread count has to be fixed here too.
@@ -52,6 +59,9 @@ enum Kind {
     Given { len: usize },
     /// A Q8_0 weight of `rows` by `k`, one scale per [`Q8_BLOCK`] of `k`.
     Weight { rows: usize, k: usize },
+    /// A raw-format weight of `rows` by `k`, its block bytes and `d` plane
+    /// as `constant_raw` uploaded them, decoded by `quant`'s own intrinsic.
+    Raw { rows: usize, k: usize, quant: Quant },
     /// A Q8_0 activation the pass gives storage to, `len` elements before any
     /// per-block replication.
     Quant { len: usize },
@@ -66,6 +76,7 @@ enum Kind {
 enum Bind {
     Given(Buf),
     Weight(QBuf),
+    Raw(RawBuf),
     /// Storage the pass allocates, or none at all.
     Internal,
 }
@@ -109,10 +120,27 @@ pub(crate) enum Stage {
         units: usize,
         row_off: usize,
     },
+    /// `out = w[row_off + unit * RAW_UNIT ..] . a` for a raw-format weight,
+    /// contracting the whole of `a`: one [`RAW_UNIT`] run of outputs per unit.
+    ProjRaw {
+        a: Val,
+        w: Val,
+        out: Val,
+        units: usize,
+        row_off: usize,
+    },
     /// `out = (g * sigmoid(g)) * u` on a unit's run.
     Swiglu { g: Val, u: Val, out: Val },
-    /// `out = quantize(h)`, one scale per unit.
-    QuantQ { h: Val, out: Val, units: usize },
+    /// `out = quantize(h)`, `blocks` scales per unit: one where a unit is a
+    /// Q8_0 block, two where it is a raw format's run of [`RAW_UNIT`].
+    QuantQ { h: Val, out: Val, units: usize, blocks: usize },
+    /// `y += w[unit * RAW_UNIT ..] . a` for a raw-format weight.
+    ProjAddRaw {
+        a: Val,
+        w: Val,
+        y: Val,
+        width: usize,
+    },
     /// `y += w[unit * OUT_TILE ..] . a`, contracting the whole of `a`.
     ProjAdd {
         a: Val,
@@ -218,9 +246,11 @@ impl Stage {
             Stage::NormQ { width, .. } => Part::Whole(width),
             Stage::ProjQ { units, .. }
             | Stage::ProjF { units, .. }
+            | Stage::ProjRaw { units, .. }
             | Stage::QuantQ { units, .. } => Part::Units(units),
             Stage::Swiglu { .. } => Part::Inherit,
             Stage::ProjAdd { width, .. } => Part::Units(width / OUT_TILE),
+            Stage::ProjAddRaw { width, .. } => Part::Units(width / RAW_UNIT),
             Stage::Conv { planes, heads, .. } => Part::Units(planes * heads),
             Stage::Gates { units, .. } => Part::Units(units),
         }
@@ -229,14 +259,14 @@ impl Stage {
     fn reads(&self) -> Vec<(Val, Read)> {
         match *self {
             Stage::NormQ { x, gain, .. } => vec![(x, Read::All), (gain, Read::All)],
-            Stage::ProjQ { a, w, .. } | Stage::ProjF { a, w, .. } => {
+            Stage::ProjQ { a, w, .. } | Stage::ProjF { a, w, .. } | Stage::ProjRaw { a, w, .. } => {
                 vec![(a, Read::All), (w, Read::All)]
             }
             Stage::Swiglu { g, u, .. } => vec![(g, Read::Local), (u, Read::Local)],
             Stage::QuantQ { h, .. } => vec![(h, Read::Local)],
             // `y` is read only where it is written, so the accumulation crosses
             // nothing of its own.
-            Stage::ProjAdd { a, w, y, .. } => {
+            Stage::ProjAdd { a, w, y, .. } | Stage::ProjAddRaw { a, w, y, .. } => {
                 vec![(a, Read::All), (w, Read::All), (y, Read::Local)]
             }
             // A head's row spans four of the projection's units, so the stream
@@ -253,11 +283,12 @@ impl Stage {
             Stage::NormQ { out, .. }
             | Stage::ProjQ { out, .. }
             | Stage::ProjF { out, .. }
+            | Stage::ProjRaw { out, .. }
             | Stage::Swiglu { out, .. }
             | Stage::QuantQ { out, .. }
             | Stage::Conv { out, .. }
             | Stage::Gates { out, .. } => out,
-            Stage::ProjAdd { y, .. } => y,
+            Stage::ProjAdd { y, .. } | Stage::ProjAddRaw { y, .. } => y,
         }
     }
 }
@@ -290,6 +321,11 @@ impl Chain {
 
     pub(crate) fn weight(&mut self, w: QBuf, rows: usize, k: usize) -> Val {
         self.add(Kind::Weight { rows, k }, Bind::Weight(w))
+    }
+
+    /// A raw-format weight, decoded inside the kernel by its own intrinsic.
+    pub(crate) fn raw_weight(&mut self, w: RawBuf, rows: usize, k: usize, quant: Quant) -> Val {
+        self.add(Kind::Raw { rows, k, quant }, Bind::Raw(w))
     }
 
     /// A quantized activation passed between stages, which the pass gives
@@ -327,6 +363,13 @@ impl Chain {
         }
     }
 
+    pub(crate) fn raw_of(&self, val: Val) -> Result<RawBuf> {
+        match self.binds[val.0] {
+            Bind::Raw(w) => Ok(w),
+            _ => bail!("value {} is not a raw weight", val.0),
+        }
+    }
+
     /// The chain's shape at this grid, for looking a compiled plan up. Cloning
     /// the shape and leaving the bindings behind is what lets one compiled
     /// kernel serve every layer.
@@ -347,6 +390,9 @@ pub(crate) enum Bound {
     /// A weight's signed bytes, then its per-row scales.
     WeightQs(Val),
     WeightScales(Val),
+    /// A raw weight's block bytes, then its `d` plane.
+    RawBytes(Val),
+    RawD(Val),
     /// Scratch, by index into [`Plan::scratch`].
     ScratchQs(usize),
     ScratchScales(usize),

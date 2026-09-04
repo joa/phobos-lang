@@ -19,7 +19,7 @@ use phobos_kernels::launch::{CTA_THREADS, STATIC_SHARED_LIMIT, persistent_grid};
 use crate::quant::Quant;
 
 use super::{
-    Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedProject, HBuf, HPlane,
+    Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject, HBuf, HPlane,
     Packed, Plane, Q8_BLOCK, QAct, QBuf, RawBuf, Rope,
 };
 

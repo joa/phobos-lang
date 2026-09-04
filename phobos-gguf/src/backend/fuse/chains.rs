@@ -54,6 +54,7 @@ pub(crate) fn mlp_chain(
         h: hidden,
         out: hq,
         units,
+        blocks: 1,
     });
 
     let wdn = chain.weight(down, d_model, d_ff);
@@ -64,6 +65,78 @@ pub(crate) fn mlp_chain(
         width: d_model,
     });
     chain
+}
+
+/// [`mlp_chain`] over raw-format weights: gate and up as the two separate
+/// weights a raw file holds (nothing stacks them; a run of [`RAW_UNIT`]
+/// outputs of each is one unit), the down projection likewise. The
+/// contractions are the formats' own `<fmt>_qdot_i8_t`, so the chain is
+/// declined for a format without one, or a width the unit does not divide.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn mlp_chain_raw(
+    x: Buf,
+    gain: Buf,
+    gate: (RawBuf, Quant),
+    up: (RawBuf, Quant),
+    down: (RawBuf, Quant),
+    d_model: usize,
+    d_ff: usize,
+    eps: f32,
+) -> Option<Chain> {
+    let decodes = |q: Quant| matches!(q, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K);
+    if !decodes(gate.1) || !decodes(up.1) || !decodes(down.1) {
+        return None;
+    }
+    if !d_ff.is_multiple_of(RAW_UNIT) || !d_model.is_multiple_of(RAW_UNIT) {
+        return None;
+    }
+    let mut chain = Chain::default();
+    let xv = chain.given(x, d_model);
+    let gv = chain.given(gain, d_model);
+    let act = chain.quant(d_model);
+    chain.push(Stage::norm_q(xv, gv, act, d_model, eps));
+
+    let units = d_ff / RAW_UNIT;
+    let wg = chain.raw_weight(gate.0, d_ff, d_model, gate.1);
+    let wu = chain.raw_weight(up.0, d_ff, d_model, up.1);
+    let g = chain.temp(RAW_UNIT);
+    let u = chain.temp(RAW_UNIT);
+    chain.push(Stage::ProjRaw {
+        a: act,
+        w: wg,
+        out: g,
+        units,
+        row_off: 0,
+    });
+    chain.push(Stage::ProjRaw {
+        a: act,
+        w: wu,
+        out: u,
+        units,
+        row_off: 0,
+    });
+    let hidden = chain.temp(RAW_UNIT);
+    chain.push(Stage::Swiglu {
+        g,
+        u,
+        out: hidden,
+    });
+    let hq = chain.quant(d_ff);
+    chain.push(Stage::QuantQ {
+        h: hidden,
+        out: hq,
+        units,
+        blocks: RAW_UNIT / Q8_BLOCK,
+    });
+
+    let wd = chain.raw_weight(down.0, d_model, d_ff, down.1);
+    chain.push(Stage::ProjAddRaw {
+        a: hq,
+        w: wd,
+        y: xv,
+        width: d_model,
+    });
+    Some(chain)
 }
 
 /// A mixer's input normalization and the projection reading it as a chain, with
@@ -210,6 +283,7 @@ pub(crate) fn attn_out_chain(x: Buf, w: QBuf, dest: Buf, width: usize, d_model: 
         h: xv,
         out: hq,
         units: width / Q8_BLOCK,
+        blocks: 1,
     });
     let wv = chain.weight(w, d_model, width);
     let yv = chain.given(dest, d_model);

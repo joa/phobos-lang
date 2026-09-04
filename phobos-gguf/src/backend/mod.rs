@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use crate::quant::Packed;
+use crate::quant::{Packed, Quant};
 pub use crate::quant::quantize_row;
 
 /// A handle to backend-owned storage, so the bytes can live on a device.
@@ -113,6 +113,21 @@ pub struct FusedMlp {
     pub gate_up: QBuf,
     /// `[d_model, d_ff]`.
     pub down: QBuf,
+}
+
+/// [`FusedMlp`] over raw-format weights, which a raw file holds as two
+/// separate gate and up tensors. Each carries its format, since a file mixes
+/// them: the 4B's down projection is Q6_K in half its layers and Q4_K in
+/// the rest.
+pub struct FusedMlpRaw {
+    pub x: Buf,
+    pub d_model: usize,
+    pub d_ff: usize,
+    pub gain: Buf,
+    pub eps: f32,
+    pub gate: (RawBuf, Quant),
+    pub up: (RawBuf, Quant),
+    pub down: (RawBuf, Quant),
 }
 
 /// Attention's output epilogue for a backend that can run it as one kernel:
@@ -488,6 +503,12 @@ pub trait Backend {
     /// one kernel, for a single-row decode step. `false` means the backend
     /// has no fused form and the caller runs the four stages itself.
     fn fused_mlp(&self, _mlp: FusedMlp) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// [`Backend::fused_mlp`] over raw-format weights, which a file keeps
+    /// as separate gate and up tensors. `false` by default.
+    fn fused_mlp_raw(&self, _mlp: FusedMlpRaw) -> Result<bool> {
         Ok(false)
     }
 
