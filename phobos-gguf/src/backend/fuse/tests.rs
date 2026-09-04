@@ -83,6 +83,7 @@ fn fused_source() {
     println!("{}", qwen_plan().source);
     println!("{}", qwen_project_plan(false).source);
     println!("{}", qwen_project_plan(true).source);
+    println!("{}", qwen_4b_plan().source);
 }
 
 #[test]
@@ -441,4 +442,73 @@ fn a_register_crossing_a_nest_is_declined() {
         out,
     });
     assert!(chain.key(192).plan().expect("well-formed").is_none());
+}
+
+/// Qwen3.5-4B-Q4_K_M's MLP: gate and up as separate Q4_K weights, the down
+/// projection Q6_K, on the grid the card settles at.
+fn qwen_4b_plan() -> Plan {
+    let chain = mlp_chain_raw(
+        Buf(0),
+        Buf(1),
+        (RawBuf(0), Quant::Q4_K),
+        (RawBuf(1), Quant::Q4_K),
+        (RawBuf(2), Quant::Q6_K),
+        2560,
+        9216,
+        1e-6,
+    )
+    .expect("three formats with a fused decode");
+    chain
+        .key(192)
+        .plan()
+        .expect("a well-formed chain")
+        .expect("a shape the pass fuses")
+}
+
+#[test]
+fn the_raw_mlp_decodes_each_weight_with_its_own_intrinsic() {
+    let plan = qwen_4b_plan();
+    assert_eq!(plan.barriers, 1);
+    let src = &plan.source;
+    assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 2, "gate and up");
+    assert_eq!(src.matches("+= q6k_qdot_i8_t(").count(), 1, "the down projection");
+    // The raw weights come in as their block bytes and `d` plane, the 4B's
+    // 2560-wide row being ten blocks of 144 bytes and 9216 thirty-six of 208.
+    assert!(src.contains("Rq3: tensor<i8>[9216, 1440]"), "{src}");
+    assert!(src.contains("Rd3: tensor<f16>[9216, 10]"), "{src}");
+    assert!(src.contains("Rq9: tensor<i8>[2560, 7488]"), "{src}");
+    assert!(src.contains("Rd9: tensor<f16>[2560, 36]"), "{src}");
+    // A unit is a run of 64 hidden values, two Q8_0 blocks, each quantized
+    // and stored on its own row.
+    assert!(src.contains("[0 :+ 1, 0 :+ 32]"), "{src}");
+    assert!(src.contains("[0 :+ 1, 32 :+ 32]"), "{src}");
+    assert!(src.contains("* 2 + 1 :+ 1, 0 :+ 32]"), "{src}");
+    // Two CTAs an SM: the bound the intrinsics ship at spills here.
+    assert!(src.starts_with("@launch(256, 2)"), "{src}");
+}
+
+#[test]
+fn the_raw_mlp_is_declined_for_a_format_without_a_fused_decode() {
+    let chain = mlp_chain_raw(
+        Buf(0),
+        Buf(1),
+        (RawBuf(0), Quant::IQ1_M),
+        (RawBuf(1), Quant::Q4_K),
+        (RawBuf(2), Quant::Q6_K),
+        2560,
+        9216,
+        1e-6,
+    );
+    assert!(chain.is_none());
+    let ragged = mlp_chain_raw(
+        Buf(0),
+        Buf(1),
+        (RawBuf(0), Quant::Q4_K),
+        (RawBuf(1), Quant::Q4_K),
+        (RawBuf(2), Quant::Q6_K),
+        2560,
+        9216 + 32,
+        1e-6,
+    );
+    assert!(ragged.is_none());
 }

@@ -106,7 +106,7 @@ impl ChainKey {
     fn len_of(&self, val: Val) -> usize {
         match self.vals[val.0] {
             Kind::Given { len } | Kind::Quant { len } | Kind::Temp { len } => len,
-            Kind::Weight { rows, k } => rows * k,
+            Kind::Weight { rows, k } | Kind::Raw { rows, k, .. } => rows * k,
         }
     }
 }
@@ -140,6 +140,9 @@ struct Emit {
     regs: HashMap<Val, String>,
     /// The barrier state's parameter, once some nest has needed one.
     bar: Option<String>,
+    /// Whether a raw-format contraction is in the kernel, which sets its
+    /// launch bound.
+    raw: bool,
 }
 
 /// The shape a value is seen under.
@@ -175,6 +178,7 @@ impl Emit {
             shared: HashSet::new(),
             regs: HashMap::new(),
             bar: None,
+            raw: false,
         }
     }
 
@@ -315,13 +319,50 @@ impl Emit {
 "
                 );
             }
+            Stage::ProjRaw {
+                a, w, out, row_off, ..
+            } => {
+                let (aq, asc) = self.quant_row(a, key.len_of(a));
+                let (rq, rd, fmt) = self.raw_weight(key, w)?;
+                let at = self.strided(format!("OF{s}"), row_off, unit, RAW_UNIT);
+                let name = self.reg(out, s);
+                let head = format!("      var {name}: tile<f32>[1, {RAW_UNIT}] = {fmt}_qdot_i8_t(");
+                let pad = " ".repeat(head.len());
+                let _ = write!(
+                    self.body,
+                    "      let at{s} = {at}
+{head}{aq}, {asc},
+{pad}{rq}[at{s} :+ {RAW_UNIT}, :], {rd}[at{s} :+ {RAW_UNIT}, :])
+"
+                );
+            }
             Stage::Swiglu { g, u, out } => {
                 let (gn, un) = (self.reg_of(g)?, self.reg_of(u)?);
+                let width = key.len_of(out);
                 let name = self.reg(out, s);
                 let _ = writeln!(
                     self.body,
-                    "      var {name}: tile<f32>[1, {q8}] = ({gn} / (1.0 + exp(-{gn}))) * {un}"
+                    "      var {name}: tile<f32>[1, {width}] = ({gn} / (1.0 + exp(-{gn}))) * {un}"
                 );
+            }
+            Stage::QuantQ { h, out, blocks, .. } if blocks > 1 => {
+                // A raw unit's run is several Q8_0 blocks: each is sliced out
+                // of the register tile and quantized on its own, and lands on
+                // its own row of the scratch.
+                let hn = self.reg_of(h)?;
+                let (qs, sc) = self.quant_rows(out, key.len_of(out));
+                for b in 0..blocks {
+                    let (off, row) = (b * q8, format!("{unit} * {blocks} + {b}"));
+                    let _ = write!(
+                        self.body,
+                        "      var h{s}_{b}: tile<f32>[1, {q8}] = {hn}[0 :+ 1, {off} :+ {q8}]
+      var m{s}_{b}: tile<f32>[1, 1] = rowmax(tmax(h{s}_{b}, -h{s}_{b}))
+      var q{s}_{b} = h{s}_{b} * (127.0 / (m{s}_{b} + {QUANT_EPS}))
+      {qs}[{row} :+ 1, 0 :+ {q8}] = i8(i32(round(q{s}_{b})))
+      {sc}[{row} :+ 1, 0 :+ 1] = m{s}_{b} / 127.0
+"
+                    );
+                }
             }
             Stage::QuantQ { h, out, .. } => {
                 // A register when `h` is a nest-computed temp (the MLP's own
@@ -365,6 +406,24 @@ impl Emit {
                     "      let t{s} = {unit} * {tn}
 {head}{aq}, {asc},
 {pad}{wq}[t{s} :+ {tn}, :], {wsc}[t{s} :+ {tn}, :])
+"
+                );
+            }
+            Stage::ProjAddRaw { a, w, y, width } => {
+                if !width.is_multiple_of(RAW_UNIT) {
+                    return Ok(false);
+                }
+                let (aq, asc) = self.quant_row(a, key.len_of(a));
+                let (rq, rd, fmt) = self.raw_weight(key, w)?;
+                let yn = self.given(y, key.len_of(y), View::Flat);
+                let rt = self.tune_const("RT".into(), RAW_UNIT);
+                let head = format!("      {yn}[0 :+ 1, t{s} :+ {rt}] += {fmt}_qdot_i8_t(");
+                let pad = " ".repeat(head.len());
+                let _ = write!(
+                    self.body,
+                    "      let t{s} = {unit} * {rt}
+{head}{aq}, {asc},
+{pad}{rq}[t{s} :+ {rt}, :], {rd}[t{s} :+ {rt}, :])
 "
                 );
             }
@@ -590,6 +649,34 @@ impl Emit {
         Ok(pair)
     }
 
+    /// A raw weight's block bytes and `d` plane, and the intrinsic that
+    /// decodes them.
+    fn raw_weight(&mut self, key: &ChainKey, val: Val) -> Result<(String, String, &'static str)> {
+        let Kind::Raw { rows, k, quant } = key.vals[val.0] else {
+            bail!("value {} is used as a raw weight but was not recorded as one", val.0);
+        };
+        let fmt = match quant {
+            Quant::Q4_K => "q4k",
+            Quant::Q5_K => "q5k",
+            Quant::Q6_K => "q6k",
+            other => bail!("no fused decode for {}", other.name()),
+        };
+        self.raw = true;
+        if let Some(pair) = self.pairs.get(&(val, View::Flat)) {
+            return Ok((pair.0.clone(), pair.1.clone(), fmt));
+        }
+        let nb = k / 256;
+        let qs = self.slot(
+            format!("Rq{}", val.0),
+            "i8",
+            [rows as i64, (nb * quant.device_block_bytes()) as i64],
+            Bound::RawBytes(val),
+        );
+        let d = self.slot(format!("Rd{}", val.0), "f16", [rows as i64, nb as i64], Bound::RawD(val));
+        self.pairs.insert((val, View::Flat), (qs.clone(), d.clone()));
+        Ok((qs, d, fmt))
+    }
+
     /// The bytes and scales of a quantized activation as rows of [`Q8_BLOCK`],
     /// which is the shape a per-block reduction produces and so what a stage
     /// stores through. The caller adds the row subscript.
@@ -700,10 +787,16 @@ impl Emit {
             .collect::<Vec<_>>()
             .join(", ");
         let params = self.params.join(",\n             ");
+        // Two CTAs of 256 an SM with a raw decode in the kernel: the
+        // intrinsics' own bound of three spills there.
+        let launch = match self.raw {
+            true => format!("{CTA}, 2"),
+            false => CTA.to_string(),
+        };
         // The shared declarations go first whatever order the stages wanted them
         // in, since a tile has to be in scope before the loop that fills it.
         let source = format!(
-            "@launch({CTA})\n@persistent\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
+            "@launch({launch})\n@persistent\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
             self.decls, self.body
         );
         Plan {

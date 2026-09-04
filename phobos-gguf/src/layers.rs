@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
-    Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedProject, HBuf, Plane, ProjRun,
-    QAct, QBuf, RawBuf,
+    Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedMlpRaw, FusedProject, HBuf, Plane,
+    ProjRun, QAct, QBuf, RawBuf,
 };
-use crate::quant::Packed;
+use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the
@@ -439,6 +439,14 @@ impl Linear {
         matches!(&self.weight, Weights::Quant(packed) if packed.has_raw_scales())
     }
 
+    /// The raw format this weight is held in, where a raw kernel decodes it.
+    pub(crate) fn raw_quant(&self) -> Option<Quant> {
+        match &self.weight {
+            Weights::Quant(packed) if packed.has_raw_scales() => Some(packed.quant()),
+            _ => None,
+        }
+    }
+
     /// This weight uploaded in its raw block bytes, for a caller that
     /// contracts against it itself.
     pub(crate) fn raw(&self, backend: &dyn Backend) -> Result<RawBuf> {
@@ -606,8 +614,7 @@ impl Ffn {
 
     /// The normalization and the whole of [`Ffn::forward`] as one kernel, if
     /// the backend has one. `false` leaves the caller to take the usual
-    /// path; a split gate/up always does, having no single weight to hand
-    /// the fused kernel.
+    /// path.
     pub(crate) fn forward_fused(
         &self,
         backend: &dyn Backend,
@@ -616,10 +623,29 @@ impl Ffn {
         eps: f32,
         rows: usize,
     ) -> Result<bool> {
+        if rows != 1 {
+            return Ok(false);
+        }
+        // Raw formats keep gate and up apart; a backend with a fused form for
+        // them takes the three weights and their formats.
+        if let (GateUp::Split { gate, up }, Some((gq, uq)), Some(dq)) =
+            (&self.gate_up, self.split_raw_quants(), self.down.raw_quant())
+        {
+            return backend.fused_mlp_raw(FusedMlpRaw {
+                x,
+                d_model: gate.in_dim,
+                d_ff: self.down.in_dim,
+                gain,
+                eps,
+                gate: (gate.raw(backend)?, gq),
+                up: (up.raw(backend)?, uq),
+                down: (self.down.raw(backend)?, dq),
+            });
+        }
         let GateUp::Fused(gate_up) = &self.gate_up else {
             return Ok(false);
         };
-        if rows != 1 || !gate_up.is_quantized() || !self.down.is_quantized() {
+        if !gate_up.is_quantized() || !self.down.is_quantized() {
             return Ok(false);
         }
         backend.fused_mlp(FusedMlp {
@@ -631,6 +657,14 @@ impl Ffn {
             gate_up: gate_up.quantized(backend)?,
             down: self.down.quantized(backend)?,
         })
+    }
+
+    /// The raw formats of a split gate and up, if that is how both are held.
+    fn split_raw_quants(&self) -> Option<(Quant, Quant)> {
+        match &self.gate_up {
+            GateUp::Split { gate, up } => Some((gate.raw_quant()?, up.raw_quant()?)),
+            GateUp::Fused(_) => None,
+        }
     }
 
     /// SwiGLU: `down(silu(gate(x)) * up(x))`, added into `dest`. Nothing leaves

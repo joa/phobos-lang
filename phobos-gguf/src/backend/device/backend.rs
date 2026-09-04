@@ -500,6 +500,10 @@ impl Backend for DeviceBackend {
         self.launch_fused_mlp(mlp)
     }
 
+    fn fused_mlp_raw(&self, mlp: FusedMlpRaw) -> Result<bool> {
+        self.launch_fused_mlp_raw(mlp)
+    }
+
     fn fused_project(&self, project: FusedProject) -> Result<Fused> {
         self.launch_fused_project(project)
     }
