@@ -18,6 +18,7 @@ mod mask;
 mod math;
 mod matmul;
 mod narrow;
+mod norm;
 mod pipeline;
 mod q2k_qdot;
 mod q3k_qdot;

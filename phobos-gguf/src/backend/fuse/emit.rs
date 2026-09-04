@@ -210,39 +210,27 @@ impl Emit {
         else {
             bail!("only a normalization partitions as a whole row");
         };
-        // The row is swept NORM_ROWS rows at a time and a row is Q8_BLOCK wide,
-        // so a width that does not divide takes the unfused path.
-        if !width.is_multiple_of(Q8_BLOCK * NORM_ROWS) {
+        // The row is Q8_BLOCK-wide blocks; one that does not divide takes
+        // the unfused path.
+        if !width.is_multiple_of(Q8_BLOCK) {
             return Ok(false);
         }
 
+        // One statement: `rms_norm_q_t` gives a thread four elements of
+        // every 4 * CTA and reduces through shuffles, no tile passes and no
+        // barriers.
         let rows = width / Q8_BLOCK;
         let nb = self.tune_const(format!("NB{s}"), rows);
-        let sb = self.tune_const("SB".into(), norm_rows(rows));
         let xf = self.given(x, key.len_of(x), View::Folded);
         let gf = self.given(gain, key.len_of(gain), View::Folded);
         let (qs, sc) = self.quant_rows(out, key.len_of(out));
         let eps = f32::from_bits(eps_bits);
         let q8 = Q8_BLOCK;
-
         let _ = write!(
             self.body,
             "
-  var acc{s}: tile<f32>[{sb}, 1] = 0.0
-  for b{s} in range(0, {nb}, {sb}) {{
-    let xb{s} = {xf}[b{s} :+ {sb}, 0 :+ {q8}]
-    acc{s} = acc{s} + rowsum(xb{s} * xb{s})
-  }}
-  var tot{s}: tile<f32>[1, 1] = rowsum(transpose(acc{s}))
-  var inv{s}: tile<f32>[1, 1] = 1.0 / sqrt(tot{s} / {width}.0 + {eps:.12})
-  for b{s} in range(0, {nb}, {sb}) {{
-    var y{s}: tile<f32>[{sb}, {q8}] = {xf}[b{s} :+ {sb}, 0 :+ {q8}] * inv{s} \
-* {gf}[b{s} :+ {sb}, 0 :+ {q8}]
-    var mx{s}: tile<f32>[{sb}, 1] = rowmax(tmax(y{s}, -y{s}))
-    var q{s} = y{s} * (127.0 / (mx{s} + {QUANT_EPS}))
-    {qs}[b{s} :+ {sb}, 0 :+ {q8}] = i8(i32(round(q{s})))
-    {sc}[b{s} :+ {sb}, 0 :+ 1] = mx{s} / 127.0
-  }}
+  rms_norm_q_t({xf}[0 :+ {nb}, 0 :+ {q8}], {gf}[0 :+ {nb}, 0 :+ {q8}], {eps:.12},
+               {qs}[0 :+ {nb}, 0 :+ {q8}], {sc}[0 :+ {nb}, 0 :+ 1])
 "
         );
         Ok(true)
@@ -844,24 +832,3 @@ impl Emit {
         }
     }
 }
-
-/// Rows of [`Q8_BLOCK`] one pass of the normalization prologue takes: the
-/// whole row where it fits, since every block runs the prologue and each
-/// pass costs barriers.
-/// Rows of [`Q8_BLOCK`] one pass of the normalization prologue sweeps: the
-/// largest divisor of the row's block count up to [`NORM_ROWS_MAX`], and at
-/// least [`NORM_ROWS`], which the caller has checked divides. Every block
-/// runs the prologue, and each pass exposes its loads' latency behind a
-/// barrier: on the 4B's 80 blocks, 16 a pass was five passes a loop and 40 is
-/// two, 102.8 -> 104.3 t/s tg128 in one session. 80 would be one pass but
-/// its tiles put the kernel at 39 KB of shared, one block an SM instead of
-/// two, and read no better.
-fn norm_rows(rows: usize) -> usize {
-    (NORM_ROWS..=NORM_ROWS_MAX)
-        .rev()
-        .find(|sb| rows.is_multiple_of(*sb))
-        .unwrap_or(NORM_ROWS)
-}
-
-/// The prologue's tiles at this many rows keep two blocks of 256 an SM.
-const NORM_ROWS_MAX: usize = 40;

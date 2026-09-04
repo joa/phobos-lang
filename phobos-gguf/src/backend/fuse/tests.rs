@@ -97,7 +97,7 @@ fn the_mlp_chain_needs_exactly_one_barrier() {
     // projection needs the whole hidden row. The normalization is
     // redundant, so its output crosses no barrier.
     let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
-    assert!(before.contains("rowsum"), "the normalization comes first");
+    assert!(before.contains("rms_norm_q_t("), "the normalization comes first");
     assert!(before.contains("exp(-v1)"), "the SwiGLU comes first");
     assert!(after.contains("+= qdot_t"), "the accumulation comes after");
 }
@@ -400,11 +400,11 @@ fn a_ragged_run_is_not_recorded() {
     assert!(project_chain(&project).is_none());
 }
 
-/// A shape the sweep cannot fold is declined rather than mis-emitted, which
-/// leaves the caller running the four stages itself.
+/// A row that is not whole Q8_0 blocks is declined rather than mis-emitted,
+/// which leaves the caller running the four stages itself.
 #[test]
 fn an_unfoldable_width_is_declined() {
-    let chain = mlp_chain(Buf(0), Buf(1), QBuf(0), QBuf(1), 480, 3584, 1e-6);
+    let chain = mlp_chain(Buf(0), Buf(1), QBuf(0), QBuf(1), 1040, 3584, 1e-6);
     assert!(chain.key(192).plan().expect("well-formed").is_none());
 }
 

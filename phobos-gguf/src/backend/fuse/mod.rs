@@ -20,14 +20,6 @@ use anyhow::{Result, bail};
 use super::{Buf, FusedProject, L2_EPS, ProjWeight, Q8_BLOCK, QBuf, RawBuf};
 use crate::quant::Quant;
 
-/// Rows of the folded activation a redundant normalization sweeps at a time.
-///
-/// The whole row in one tile is 16 KB at the model dimension, which alone spends
-/// the budget that reaches four blocks per SM; halving it costs one more turn of
-/// a two-turn loop. Occupancy is load-bearing here, because the kernel *is* the
-/// projections.
-pub(crate) const NORM_ROWS: usize = 16;
-
 /// Outputs one block takes of a contraction accumulating into its target.
 /// Mirrors `Q8_QDOT_TN`, which the device backend asserts against.
 pub(crate) const OUT_TILE: usize = 8;
