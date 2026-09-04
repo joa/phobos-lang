@@ -13,8 +13,7 @@ pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
     let (gated, quantized) = (form.gated(), form.quantized());
     // The quantized, ungated norm as one `rms_norm_q_t` statement where a
     // thread can own four elements of every `4 * cta`.
-    let cta = norm_cta(blocks);
-    if quantized && !gated && (blocks * RMS_LANE).is_multiple_of(cta * 4) {
+    if quantized && !gated && let Some(cta) = norm_q_cta(width) {
         return format!(
             "@launch({cta})
 @autotune(NB in [{blocks}])
@@ -86,6 +85,18 @@ kernel {name}(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
 /// usual width; sizing to the tile does not lengthen the reduction.
 pub(crate) fn norm_cta(blocks: usize) -> usize {
     (blocks * RMS_LANE).clamp(WARP_THREADS, CTA_THREADS as usize)
+}
+
+/// The CTA the one-statement quantized norm runs at: the largest whole
+/// number of warps up to [`CTA_THREADS`] whose `4 * cta` divides the row,
+/// since `rms_norm_q_t` gives a thread four elements of every `4 * cta`.
+/// 1024 and 5120 take 256 threads, 2560 takes 160. `None` for a width no
+/// such CTA divides, which takes the tile passes instead.
+pub(crate) fn norm_q_cta(width: usize) -> Option<usize> {
+    (WARP_THREADS..=CTA_THREADS as usize)
+        .rev()
+        .step_by(WARP_THREADS)
+        .find(|cta| width.is_multiple_of(cta * 4))
 }
 
 /// Values per row of the reshaped normalization tile, and of a Q8_0 block.
