@@ -218,7 +218,7 @@ impl Emit {
 
         let rows = width / Q8_BLOCK;
         let nb = self.tune_const(format!("NB{s}"), rows);
-        let sb = self.tune_const("SB".into(), NORM_ROWS);
+        let sb = self.tune_const("SB".into(), norm_rows(rows));
         let xf = self.given(x, key.len_of(x), View::Folded);
         let gf = self.given(gain, key.len_of(gain), View::Folded);
         let (qs, sc) = self.quant_rows(out, key.len_of(out));
@@ -844,3 +844,24 @@ impl Emit {
         }
     }
 }
+
+/// Rows of [`Q8_BLOCK`] one pass of the normalization prologue takes: the
+/// whole row where it fits, since every block runs the prologue and each
+/// pass costs barriers.
+/// Rows of [`Q8_BLOCK`] one pass of the normalization prologue sweeps: the
+/// largest divisor of the row's block count up to [`NORM_ROWS_MAX`], and at
+/// least [`NORM_ROWS`], which the caller has checked divides. Every block
+/// runs the prologue, and each pass exposes its loads' latency behind a
+/// barrier: on the 4B's 80 blocks, 16 a pass was five passes a loop and 40 is
+/// two, 102.8 -> 104.3 t/s tg128 in one session. 80 would be one pass but
+/// its tiles put the kernel at 39 KB of shared, one block an SM instead of
+/// two, and read no better.
+fn norm_rows(rows: usize) -> usize {
+    (NORM_ROWS..=NORM_ROWS_MAX)
+        .rev()
+        .find(|sb| rows.is_multiple_of(*sb))
+        .unwrap_or(NORM_ROWS)
+}
+
+/// The prologue's tiles at this many rows keep two blocks of 256 an SM.
+const NORM_ROWS_MAX: usize = 40;
