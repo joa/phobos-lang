@@ -371,7 +371,7 @@ def probe(engine, model):
     return run.backend, None
 
 
-def warm_card(exe, args):
+def warm_card(engine, args):
     """Sustained work until the SM clock stops climbing. Reports the ramp, since
     a plateau that never arrives means the numbers below are measuring the card
     warming up rather than the engines.
@@ -382,7 +382,7 @@ def warm_card(exe, args):
     before = card_now()
     print(f"warming the card ({before['clock']:.0f} MHz now)...", flush=True)
     cmd = [
-        str(exe),
+        str(engine.exe),
         "-m",
         str(args.models[0]),
         "-p",
@@ -392,8 +392,14 @@ def warm_card(exe, args):
         "-r",
         "400",
     ]
+    # The engine's own environment, not the session's: a llama-bench warming
+    # the card without its CUDA runtime on PATH warms the CPU instead.
     proc = subprocess.Popen(
-        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, cwd=ROOT
+        cmd,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        cwd=ROOT,
+        env=engine.env,
     )
     deadline = time.time() + args.warm_secs
     seen, peak, plateau = [], 0.0, False
@@ -789,6 +795,12 @@ def parse_args():
         " other column means",
     )
     ap.add_argument("--no-llama", action="store_true", help="phobos only")
+    ap.add_argument(
+        "--no-phobos",
+        action="store_true",
+        help="llama.cpp only, for a model phobos cannot load yet: it measures"
+        " the target rather than a comparison",
+    )
     ap.add_argument("--no-build", action="store_true", help="use the existing bench.exe")
     ap.add_argument(
         "--warm-secs", type=float, default=45.0, help="cap on the warmup (default 45)"
@@ -823,10 +835,13 @@ def parse_args():
 
 def main():
     args = parse_args()
+    if args.no_phobos and args.no_llama:
+        sys.exit("--no-phobos and --no-llama together leave no engine to run")
     meta = preflight(args)
-    phobos_exe = build_phobos(args)
 
-    engines = [Phobos(phobos_exe)]
+    engines = []
+    if not args.no_phobos:
+        engines.append(Phobos(build_phobos(args)))
     if not args.no_llama:
         for exe in find_llama_benches(args.llama_bench):
             engines.append(LlamaCpp(exe, shlex.split(args.llama_args)))
@@ -858,22 +873,30 @@ def main():
             engine.name = f"{engine.name} {backend}"
         backends[engine.name] = backend
         working.append(engine)
-    if not any(e.name == "phobos" for e in working):
+    if not working:
+        sys.exit("no engine ran; nothing to measure")
+    if not args.no_phobos and not any(e.name == "phobos" for e in working):
         sys.exit("phobos itself did not run; nothing to compare")
     if len(working) == 1:
         print(
-            "\nonly phobos is usable, so this run measures phobos alone rather than"
-            " comparing\nanything. Pass --llama-bench to point at a build, and"
-            " --cuda-lib at the CUDA\nruntime it needs."
+            f"\nonly {working[0].name} is usable, so this run measures it alone"
+            " rather than comparing anything."
         )
+        if not args.no_phobos:
+            print(
+                "Pass --llama-bench to point at a build, and --cuda-lib at the"
+                " CUDA runtime it needs."
+            )
 
-    if not warm_card(phobos_exe, args) and not args.force:
+    # Warmed by whichever engine is present: the command is the pp-only shape
+    # both binaries take, so it does not matter which one holds the card.
+    if not warm_card(working[0], args) and not args.force:
         print("  (proceeding anyway; the clean-round filter below will show it)")
 
     # phobos's own warmup covers a batch of at least 128 rows, so a shallower
     # prompt row is a shape it has not compiled and the first repetition pays
     # for the compile. llama.cpp warms at the shape it is about to time.
-    shallow = [n for n in args.prompt_tokens if n < 128]
+    shallow = [] if args.no_phobos else [n for n in args.prompt_tokens if n < 128]
     if shallow:
         print(
             f"\n{', '.join(f'pp{n}' for n in shallow)} is below the 128 rows phobos warms"
