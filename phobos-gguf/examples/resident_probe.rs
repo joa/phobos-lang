@@ -20,6 +20,8 @@ use phobos_kernels::{compile, cuda_ok, push_descriptor};
 thread_local! {
     /// Free VRAM before the ballast, so its real cost can be read off.
     static START: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Set while the warm-up runs, so the rows it runs print nothing.
+    static WARMING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// One format's decode matvec: the production source, its device block
@@ -277,9 +279,104 @@ const KQUANT_SHAPES: [(&Probe, usize, usize, &str); 6] = [
     (&Q6K_I8, 2560, 248320, "the head"),
 ];
 
+/// A K-quant staged projection, `<fmt>_qgemm_t` with no tables: the source
+/// `kernels/qgemm.rs` builds, at its shipped launch bound.
+fn kquant_gemm_src(name: &str) -> String {
+    format!(
+        "@launch(256, 2)
+@autotune(TM in [128], TN in [64])
+@aligned(M = TM, N = TN, K = 256)
+kernel {name}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                  QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                  C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  C[pm * TM :+ TM, pn * TN :+ TN] = {name}_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
+}}
+"
+    )
+}
+
+/// Two seconds of `work` before anything is timed: an idle card sits at its
+/// lowest clock, and a short probe would measure the ramp.
+fn warm(stream: &Stream, mut work: impl FnMut() -> Result<()>) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut n = 0;
+    WARMING.with(|w| w.set(true));
+    while start.elapsed().as_secs_f32() < 2.0 {
+        work()?;
+        n += 1;
+    }
+    WARMING.with(|w| w.set(false));
+    stream.synchronize()?;
+    println!("warmed the card with {n} runs of the first kernel");
+    Ok(())
+}
+
+/// One staged projection at `m` rows, timed: TOPS from the MACs, GB/s from
+/// the weight bytes, so the tensor-core rate and the weight traffic read
+/// side by side.
+fn run_gemm(stream: &Stream, name: &str, block_bytes: usize, m: usize, k: usize, n: usize) -> Result<f64> {
+    let nb = k / 256;
+    let rb = nb * block_bytes;
+    let module = compile(&kquant_gemm_src(name), &[("TM", 128), ("TN", 64)], &format!("{name}_gemm"))?;
+    let function = module.get_function(&format!("{name}_qgemm"))?.to_raw();
+    let bytes: Vec<i8> = (0..n * rb).map(|i| (i.wrapping_mul(2654435761) >> 13) as i8).collect();
+    let d: Vec<u16> = vec![0x3400u16; n * nb];
+    let aq: Vec<i8> = (0..m * k).map(|i| ((i % 17) as i32 - 8) as i8).collect();
+    let asc: Vec<f32> = vec![ACT_SCALE; m * k / 32];
+    let qb = DeviceBuffer::from_slice(&bytes)?;
+    let db = DeviceBuffer::from_slice(&d)?;
+    let aqb = DeviceBuffer::from_slice(&aq)?;
+    let ascb = DeviceBuffer::from_slice(&asc)?;
+    let cb = DeviceBuffer::from_slice(&vec![0.0f32; m * n])?;
+    let mut slots = Vec::new();
+    push_descriptor(&mut slots, aqb.as_device_ptr().as_raw(), [m as i64, k as i64]);
+    push_descriptor(&mut slots, ascb.as_device_ptr().as_raw(), [m as i64, (k / 32) as i64]);
+    push_descriptor(&mut slots, qb.as_device_ptr().as_raw(), [n as i64, rb as i64]);
+    push_descriptor(&mut slots, db.as_device_ptr().as_raw(), [n as i64, nb as i64]);
+    push_descriptor(&mut slots, cb.as_device_ptr().as_raw(), [m as i64, n as i64]);
+    let grid = ((m / 128) as u32, (n / 64) as u32);
+    let millis = time_grid(stream, function, grid, 256, &mut slots, &[])?;
+    if !WARMING.with(|w| w.get()) {
+        println!(
+            "{:>6} {m:>5} {k:>8} {n:>8} {millis:>9.3} {:>7.1} {:>7.1}",
+            name,
+            2.0 * (m * n * k) as f64 / (millis / 1000.0) / 1e12,
+            (n * rb) as f64 / (millis / 1000.0) / 1e9,
+        );
+    }
+    Ok(millis)
+}
+
+/// `resident_probe --prompt`: the three K-quant staged projections at the
+/// 4B's shapes and at the 27B's FFN shape, where the IQ formats' rate is
+/// known; between the two `k`s is what a short k loop costs, and between
+/// formats at one shape what the decode and the minimum term cost.
+fn run_prompt(stream: &Stream) -> Result<()> {
+    warm(stream, || run_gemm(stream, "q4k", 144, 512, 5120, 17408).map(|_| ()))?;
+    println!("{:>6} {:>5} {:>8} {:>8} {:>9} {:>7} {:>7}", "fmt", "m", "k", "n", "ms", "TOPS", "GB/s");
+    for (name, block_bytes, m, k, n) in [
+        ("q4k", 144usize, 128usize, 2560usize, 9216usize),
+        ("q4k", 144, 512, 2560, 9216),
+        ("q4k", 144, 512, 9216, 2560),
+        ("q4k", 144, 128, 5120, 17408),
+        ("q4k", 144, 512, 5120, 17408),
+        ("q5k", 176, 512, 2560, 8192),
+        ("q5k", 176, 128, 5120, 17408),
+        ("q6k", 208, 512, 9216, 2560),
+        ("q6k", 208, 128, 5120, 17408),
+    ] {
+        run_gemm(stream, name, block_bytes, m, k, n)?;
+    }
+    Ok(())
+}
+
 /// `resident_probe --kquant [BALLAST_MIB [CHUNKS]]`: the three K-quant
 /// decode matvecs at the 4B's shapes, and nothing else.
 fn run_kquant(stream: &Stream, ballast: &[DeviceBuffer<f32>]) -> Result<()> {
+    warm(stream, || run(stream, &Q6K_I8, 2560, 248320, Q6K_I8.tn, &[]).map(|_| ()))?;
     println!(
         "{:>6} {:>8} {:>8} {:>5} {:>9} {:>9} {:>9}",
         "fmt", "k", "n", "TN", "ms", "GB/s", "GMAC/s"
@@ -344,6 +441,9 @@ fn main() -> Result<()> {
 
     if std::env::args().any(|a| a == "--kquant") {
         return run_kquant(&stream, &ballast);
+    }
+    if std::env::args().any(|a| a == "--prompt") {
+        return run_prompt(&stream);
     }
     println!(
         "{:>6} {:>8} {:>8} {:>5} {:>9} {:>9} {:>9}",
@@ -545,12 +645,14 @@ fn run_at(
     let millis = time(stream, function, n.div_ceil(tn) as u32, threads, &mut slots, ballast)?;
     let mut got = vec![0.0f32; n];
     cb.copy_to(&mut got)?;
-    println!(
-        "{:>6} {k:>8} {n:>8} {tn:>5} {millis:>9.3} {:>9.1} {:>9.1}",
-        probe.name,
-        (n * rb) as f64 / (millis / 1000.0) / 1e9,
-        (n * k) as f64 / (millis / 1000.0) / 1e9,
-    );
+    if !WARMING.with(|w| w.get()) {
+        println!(
+            "{:>6} {k:>8} {n:>8} {tn:>5} {millis:>9.3} {:>9.1} {:>9.1}",
+            probe.name,
+            (n * rb) as f64 / (millis / 1000.0) / 1e9,
+            (n * k) as f64 / (millis / 1000.0) / 1e9,
+        );
+    }
     Ok(got)
 }
 
@@ -559,6 +661,18 @@ fn time(
     stream: &Stream,
     function: cust::sys::CUfunction,
     blocks: u32,
+    threads: u32,
+    slots: &mut [u64],
+    ballast: &[DeviceBuffer<f32>],
+) -> Result<f64> {
+    time_grid(stream, function, (blocks, 1), threads, slots, ballast)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn time_grid(
+    stream: &Stream,
+    function: cust::sys::CUfunction,
+    blocks: (u32, u32),
     threads: u32,
     slots: &mut [u64],
     ballast: &[DeviceBuffer<f32>],
@@ -572,8 +686,8 @@ fn time(
             cuda_ok(
                 cust::sys::cuLaunchKernel(
                     function,
-                    blocks,
-                    1,
+                    blocks.0,
+                    blocks.1,
                     1,
                     threads,
                     1,
