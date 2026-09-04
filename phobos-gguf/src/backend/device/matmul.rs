@@ -463,11 +463,6 @@ impl DeviceBackend {
             None
         };
         if let Some((module, name, tn, tables)) = i8_pick {
-            ensure!(
-                k <= KQUANT_MAX_K || !matches!(quant, Quant::Q4_K | Quant::Q5_K),
-                "a {} decode matvec holds at most k = {KQUANT_MAX_K}, got {k}",
-                quant.name()
-            );
             let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
             let rb = *nb * quant.device_block_bytes();
             let (nb, n_blocks) = (*nb as i64, k / Q8_BLOCK);

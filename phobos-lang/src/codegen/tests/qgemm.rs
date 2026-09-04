@@ -91,15 +91,20 @@ fn a_k_quant_with_a_minimum_sums_the_activation_at_stage_time() {
 }
 
 #[test]
-fn the_k_quant_decode_matvecs_sum_the_row_once_where_there_is_a_minimum() {
-    for fmt in ["q4k", "q5k", "q6k"] {
+fn the_k_quant_decode_matvecs_sum_each_run_in_its_own_lane() {
+    let dots = |fmt: &str| {
         let mlir = emit_mlir(&qdot_i8_src(fmt));
         assert_contains(&mlir, &["nvvm.dot.accumulate.4way", "nvvm.prmt", "gpu.shuffle", "scf.for"]);
-        // The run-sum prologue is a shared i32 tile of KQ_MAX_GROUPS.
-        let sums = mlir.contains("memref<1x1024xi32, 3>");
-        assert_eq!(sums, fmt != "q6k", "{fmt}:
+        // No prologue: no shared run-sum tile, and no shared tile of any
+        // width but the output's.
+        assert!(!mlir.contains("xi32, 3>"), "{fmt}:
 {mlir}");
-    }
+        mlir.matches("nvvm.dot.accumulate.4way").count()
+    };
+    // A format with a minimum dots the activation against ones as well as
+    // against the weights, so it has twice Q6_K's dot count per run.
+    let (q4k, q5k, q6k) = (dots("q4k"), dots("q5k"), dots("q6k"));
+    assert!(q4k > q6k && q5k > q6k, "q4k {q4k}, q5k {q5k}, q6k {q6k}");
 }
 
 #[test]

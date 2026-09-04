@@ -20,12 +20,6 @@ pub(crate) const Q4K_I8_NARROW_TN: usize = 16;
 pub(crate) const Q5K_I8_NARROW_TN: usize = 16;
 pub(crate) const Q6K_I8_NARROW_TN: usize = 16;
 
-/// The largest contraction the decode matvec's activation-sum prologue
-/// holds: `kquant_qdot.rs`'s `KQ_MAX_GROUPS` blocks of 32. A wider `k`
-/// falls to the staged projection's path or an error, never to a silent
-/// truncation.
-pub(crate) const KQUANT_MAX_K: usize = 1024 * 32;
-
 /// `resident` CTAs of the tile's threads a multiprocessor sets the register
 /// budget: Q4_K fits four (64 registers); Q5_K and Q6_K, whose pipeline
 /// holds the whole `qh` plane or three planes and the scales, spill there

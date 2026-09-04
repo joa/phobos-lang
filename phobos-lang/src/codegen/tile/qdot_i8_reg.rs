@@ -4,8 +4,6 @@
 // bytes ride a two-deep register pipeline and the activations come from
 // L1 at decode time. The decode itself is `qgemm_fmt.rs`'s.
 
-use super::kquant::KQ_GROUP;
-use super::kquant_qdot::KQ_MAX_GROUPS;
 use super::qgemm_fmt::{IQ1_LUT4_MINUS, IQ1_LUT4_PLUS};
 use super::*;
 
@@ -97,25 +95,6 @@ impl<'c> Codegen<'c> {
         let total = self.const_index(block, cols / COLS_PER_WARP * WARP)?;
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
-
-        // A format with a minimum needs the activation's sum over every
-        // 32-element run, the same for every column: summed once here into
-        // shared memory, read twice a block by every lane.
-        if fmt.has_min() {
-            if aq.shape[1] != DYN && aq.shape[1] / KQ_GROUP > KQ_MAX_GROUPS {
-                bail!("{label} holds a row of at most {} elements", KQ_MAX_GROUPS * KQ_GROUP);
-            }
-            let sums = self.alloc_tile_shaped(block, self.i32_t, &[1, KQ_MAX_GROUPS])?;
-            let kd = if aq.shape[1] == DYN {
-                let one = self.const_index(block, 1)?;
-                self.push(block, memref::dim(aq.mem, one, self.loc))?
-            } else {
-                self.const_index(block, aq.shape[1])?
-            };
-            self.kq_sum_prologue(block, aq, &sums, kd, tid, bdim)?;
-            self.barrier(block)?;
-            tabs.push(sums);
-        }
 
         // One turn per warp per group of eight columns.
         let body = Block::new(&[(self.index_t, self.loc)]);
@@ -415,7 +394,7 @@ impl<'c> Codegen<'c> {
         carry: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
         if fmt.is_kquant() {
-            return self.kq_qdot_block(kb, fmt, tabs, regs, aq, asc, k_off, carry);
+            return self.kq_qdot_block(kb, fmt, regs, aq, asc, k_off, carry);
         }
         let (i8_t, i32_t, f32_t) = (self.i8_t, self.i32_t, self.f32_t);
         let words = &regs[..regs.len() - 1];
