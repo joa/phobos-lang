@@ -15,6 +15,7 @@ mod q3_k;
 mod q4_0;
 mod q4_1;
 mod q4_k;
+mod q5_k;
 mod q5_0;
 mod q5_1;
 mod q6_k;
@@ -50,6 +51,7 @@ pub enum Quant {
     Q8_0,
     Q8_1,
     Q4_K,
+    Q5_K,
     Q6_K,
     Q2_K,
     Q3_K,
@@ -64,7 +66,7 @@ pub enum Quant {
 }
 
 impl Quant {
-    pub const ALL: [Quant; 18] = [
+    pub const ALL: [Quant; 19] = [
         Quant::Q4_0,
         Quant::Q4_1,
         Quant::Q5_0,
@@ -72,6 +74,7 @@ impl Quant {
         Quant::Q8_0,
         Quant::Q8_1,
         Quant::Q4_K,
+        Quant::Q5_K,
         Quant::Q6_K,
         Quant::Q2_K,
         Quant::Q3_K,
@@ -137,6 +140,7 @@ impl Quant {
             Quant::Q8_0 => &q8_0::SPEC,
             Quant::Q8_1 => &q8_1::SPEC,
             Quant::Q4_K => &q4_k::SPEC,
+            Quant::Q5_K => &q5_k::SPEC,
             Quant::Q6_K => &q6_k::SPEC,
             Quant::Q2_K => &q2_k::SPEC,
             Quant::Q3_K => &q3_k::SPEC,
@@ -474,6 +478,7 @@ impl GgmlType {
             GgmlType::Q8_0 => Quant::Q8_0,
             GgmlType::Q8_1 => Quant::Q8_1,
             GgmlType::Q4_K => Quant::Q4_K,
+            GgmlType::Q5_K => Quant::Q5_K,
             GgmlType::Q6_K => Quant::Q6_K,
             GgmlType::Q2_K => Quant::Q2_K,
             GgmlType::Q3_K => Quant::Q3_K,

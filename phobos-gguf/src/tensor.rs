@@ -288,10 +288,10 @@ mod tests {
     fn rejects_short_buffers_and_unsupported_types() {
         let mut out = vec![0.0; 32];
         assert!(dequantize_into(GgmlType::Q8_0, &[0; 33], &mut out).is_err());
-        // The K-quants a Q4_K_M file holds are in the registry; Q5_K is not.
+        // The three K-quants a Q4_K_M file holds are all in the registry.
         assert!(dequantize_into(GgmlType::Q4_K, &[0; 144], &mut vec![0.0; 256]).is_ok());
+        assert!(dequantize_into(GgmlType::Q5_K, &[0; 176], &mut vec![0.0; 256]).is_ok());
         assert!(dequantize_into(GgmlType::Q6_K, &[0; 210], &mut vec![0.0; 256]).is_ok());
-        assert!(dequantize_into(GgmlType::Q5_K, &[0; 176], &mut vec![0.0; 256]).is_err());
     }
 
     #[test]
