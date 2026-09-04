@@ -36,14 +36,12 @@ impl Qgemm {
         }
     }
 
-    /// Whether the staged kernel takes this shape: a format it decodes, its
-    /// tile both ways, and `k` a whole number of blocks.
+    /// Whether the staged kernel takes this shape: a format it decodes, more
+    /// than one row, and `k` a whole number of blocks. The output tile does
+    /// not gate it: a shape ragged either way runs padded into a scratch
+    /// (see [`DeviceBackend::project_raw_qmma`]).
     fn takes(&self, quant: Quant, m: usize, k: usize, n: usize) -> bool {
-        self.on
-            && qgemm_name(quant).is_some()
-            && m.is_multiple_of(QGEMM_TM)
-            && n.is_multiple_of(QGEMM_TN)
-            && k.is_multiple_of(256)
+        self.on && qgemm_name(quant).is_some() && m > 1 && k.is_multiple_of(256) && n > 0
     }
 
     fn module(&self, quant: Quant) -> Result<std::cell::Ref<'_, Module>> {
@@ -103,15 +101,18 @@ impl DeviceBackend {
         if self.raw_quant_is(w, Quant::IQ1_M) {
             return self.qgemm.takes(Quant::IQ1_M, m, k, n);
         }
-        FUSED
-            .iter()
-            .filter(|&&q| self.raw_qmma_formats.contains(&q))
-            .any(|&q| self.raw_quant_is(w, q))
-            && {
-                let (tm, tn, _) = qmma_tile();
-                m.is_multiple_of(tm) && n.is_multiple_of(tn)
-            }
-            && k.is_multiple_of(256)
+        let Some(&quant) = FUSED.iter().find(|&&q| self.raw_quant_is(w, q)) else {
+            return false;
+        };
+        if !self.raw_qmma_formats.contains(&quant) {
+            return false;
+        }
+        // The staged kernel pads a ragged shape; the register form needs its
+        // tile whole both ways.
+        self.qgemm.takes(quant, m, k, n) || {
+            let (tm, tn, _) = qmma_tile();
+            m.is_multiple_of(tm) && n.is_multiple_of(tn) && k.is_multiple_of(256)
+        }
     }
 
     /// `out[m, n] = a[m, k] . w[n, k]` with the IQ1_S decode folded into the
@@ -145,30 +146,61 @@ impl DeviceBackend {
         let (bytes_ptr, d_ptr, quant) = (raw.bytes, raw.d, raw.quant);
         drop(raws);
         if self.qgemm.takes(quant, m, k, n) {
+            // The kernel is `@aligned` and stores whole tiles, so a ragged
+            // shape runs padded: the activation in a slot of `m_pad` rows
+            // (the tail rows are never written, and the stage keeps rows
+            // apart), the weight as the grouped upload already padded it to
+            // `RAW_GROUP_PAD` columns, and the result into a scratch the
+            // caller's `[m, n]` window is copied out of. Only a ragged shape
+            // pays the copy.
+            let (m_pad, n_pad) = (m.next_multiple_of(QGEMM_TM), n.next_multiple_of(QGEMM_TN));
+            let padded = (m_pad, n_pad) != (m, n);
             let act = match act {
-                Some(act) => act,
-                None => {
+                // The caller's copy where there is one, `rms_norm_q`'s rows;
+                // at a ragged `m` it is `m` rows and the kernel reads `m_pad`.
+                Some(act) if !padded => act,
+                _ => {
                     self.note_dense_pass();
-                    self.quantize_act_transient(a, m, k)?
+                    let slot = self.act_slot_transient(m_pad, k)?;
+                    self.quantize_act_into(slot, a, m, k)?
                 }
+            };
+            let dest = if padded {
+                self.dense_scratch(1, m_pad * n_pad)?
+            } else {
+                out
             };
             let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
             let mut operands = vec![
-                (qa_ptr, [m as i64, k as i64]),
-                (das_ptr, [m as i64, (k / Q8_BLOCK) as i64]),
-                (bytes_ptr, [n as i64, rb as i64]),
-                (d_ptr, [n as i64, nb as i64]),
+                (qa_ptr, [m_pad as i64, k as i64]),
+                (das_ptr, [m_pad as i64, (k / Q8_BLOCK) as i64]),
+                (bytes_ptr, [n_pad as i64, rb as i64]),
+                (d_ptr, [n_pad as i64, nb as i64]),
             ];
             operands.extend(self.qgemm_tables(quant)?);
-            operands.push((self.ptr(out, 0)?, [m as i64, n as i64]));
+            operands.push((self.ptr(dest, 0)?, [m_pad as i64, n_pad as i64]));
             let module = self.qgemm.module(quant)?;
             let name = qgemm_kernel(quant).expect("takes() checked the format");
-            return self.launch(
+            self.launch(
                 &module,
                 name,
                 &operands,
-                ((m / QGEMM_TM) as u32, (n / QGEMM_TN) as u32, 1),
-            );
+                ((m_pad / QGEMM_TM) as u32, (n_pad / QGEMM_TN) as u32, 1),
+            )?;
+            if padded {
+                let src = Plane {
+                    buf: dest,
+                    offset: 0,
+                    pitch: n_pad,
+                };
+                let dst = Plane {
+                    buf: out,
+                    offset: 0,
+                    pitch: n,
+                };
+                self.copy_2d(src, dst, m, n)?;
+            }
+            return Ok(());
         }
         let (module, name) = match quant {
             Quant::IQ1_S => (&self.iq1s_qmma, "iq1s_qmma"),
