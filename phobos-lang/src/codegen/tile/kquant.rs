@@ -43,6 +43,12 @@ impl QgFormat {
     pub(in crate::codegen) fn d_in_block(self) -> bool {
         matches!(self, Self::Q4k | Self::Q5k)
     }
+
+    /// Blocks the decode matvec's register pipeline holds ahead. Two for
+    /// every format; Q4_K at three measured slower.
+    pub(in crate::codegen) fn pipeline_depth(self) -> usize {
+        2
+    }
 }
 
 impl<'c> Codegen<'c> {
@@ -212,7 +218,13 @@ impl<'c> Codegen<'c> {
         lanes: &Lanes<'c>,
         off: Value<'c, 'c>,
     ) -> Result<[Value<'c, 'c>; 4]> {
-        let v = self.vec_load_al(block, qb.mem, &[lanes.qb_row, off], Type::vector(&[16], self.i8_t), 16)?;
+        let v = self.vec_load_al(
+            block,
+            qb.mem,
+            &[lanes.qb_row, off],
+            Type::vector(&[16], self.i8_t),
+            16,
+        )?;
         let v = self.vec_bitcast(block, v, Type::vector(&[4], self.i32_t))?;
         Ok([
             self.vec_extract(block, v, &[0], self.i32_t)?,
@@ -314,7 +326,11 @@ impl<'c> Codegen<'c> {
         match fmt {
             QgFormat::Q4k | QgFormat::Q5k => {
                 let (hdr, rest) = regs.split_at(4);
-                let (qh, rest) = if fmt == QgFormat::Q5k { rest.split_at(8) } else { rest.split_at(0) };
+                let (qh, rest) = if fmt == QgFormat::Q5k {
+                    rest.split_at(8)
+                } else {
+                    rest.split_at(0)
+                };
                 let (qs, ib) = (&rest[..8], rest[8]);
                 let dmin = self.kq_f16_of(block, hdr[0], true)?;
                 let (sc, m) = self.kq_scale_min(block, [hdr[1], hdr[2], hdr[3]], ib)?;
@@ -358,7 +374,8 @@ impl<'c> Codegen<'c> {
                 let qh_shift = self.push(block, arith::shli(quarter, one, self.loc))?;
                 for l in 0..4usize {
                     let w0 = self.kq_q6_bytes(block, ql[2 * l], qh[2 * l], nib_shift, qh_shift)?;
-                    let w1 = self.kq_q6_bytes(block, ql[2 * l + 1], qh[2 * l + 1], nib_shift, qh_shift)?;
+                    let w1 =
+                        self.kq_q6_bytes(block, ql[2 * l + 1], qh[2 * l + 1], nib_shift, qh_shift)?;
                     self.qgemm_put_octet(block, stage, l as i64, w0, w1)?;
                 }
             }
