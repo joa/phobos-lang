@@ -6,7 +6,7 @@
 
 use phobos_base::half::f16_to_f32;
 
-use super::Spec;
+use super::{RawScales, Spec};
 
 const BLOCK: usize = 256;
 const BLOCK_BYTES: usize = 210;
@@ -31,8 +31,18 @@ pub static SPEC: Spec = Spec {
     has_min: false,
     dequantize,
     planes: None,
-    raw_scales: None,
+    raw_scales: Some(raw_scales),
 };
+
+/// The trailing `d`, which the device block drops (`Quant::device_block`)
+/// so the kernels read it from this plane alone. No minimum term.
+fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
+    let mut d = Vec::with_capacity(bytes.len() / BLOCK_BYTES);
+    for block in bytes.chunks_exact(BLOCK_BYTES) {
+        d.push(u16::from_le_bytes([block[D], block[D + 1]]));
+    }
+    RawScales { d, dmin: Vec::new() }
+}
 
 fn dequantize(bytes: &[u8], out: &mut [f32]) {
     for (block, dst) in bytes.chunks_exact(BLOCK_BYTES).zip(out.chunks_mut(BLOCK)) {

@@ -425,12 +425,49 @@ impl DeviceBackend {
                         mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
                     ],
                 )),
+                // The K-quants have no other path, so a ragged n is not
+                // guarded here: it runs padded below.
+                Quant::Q4_K => Some((
+                    &self.q4k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q4K_I8_TN)))],
+                    "q4k_qdot_i8_matvec",
+                    if wide_tile(qdot_i8_tn(Q4K_I8_TN)) {
+                        qdot_i8_tn(Q4K_I8_TN)
+                    } else {
+                        Q4K_I8_NARROW_TN
+                    },
+                    Vec::new(),
+                )),
+                Quant::Q5_K => Some((
+                    &self.q5k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q5K_I8_TN)))],
+                    "q5k_qdot_i8_matvec",
+                    if wide_tile(qdot_i8_tn(Q5K_I8_TN)) {
+                        qdot_i8_tn(Q5K_I8_TN)
+                    } else {
+                        Q5K_I8_NARROW_TN
+                    },
+                    Vec::new(),
+                )),
+                Quant::Q6_K => Some((
+                    &self.q6k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q6K_I8_TN)))],
+                    "q6k_qdot_i8_matvec",
+                    if wide_tile(qdot_i8_tn(Q6K_I8_TN)) {
+                        qdot_i8_tn(Q6K_I8_TN)
+                    } else {
+                        Q6K_I8_NARROW_TN
+                    },
+                    Vec::new(),
+                )),
                 _ => None,
             }
         } else {
             None
         };
         if let Some((module, name, tn, tables)) = i8_pick {
+            ensure!(
+                k <= KQUANT_MAX_K || !matches!(quant, Quant::Q4_K | Quant::Q5_K),
+                "a {} decode matvec holds at most k = {KQUANT_MAX_K}, got {k}",
+                quant.name()
+            );
             let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
             let rb = *nb * quant.device_block_bytes();
             let (nb, n_blocks) = (*nb as i64, k / Q8_BLOCK);
@@ -438,15 +475,39 @@ impl DeviceBackend {
             // The caller's quantized copy where it has one.
             let act = act.map_or_else(|| self.quantize_act(a, 1, k), Ok)?;
             let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
+            // The tile is @aligned and stores whole; a ragged n runs padded
+            // into a scratch (the grouped upload padded the weight to 64
+            // columns) and the row's n values are copied out. See
+            // `project_raw_qmma`, which does the same for a prompt.
+            let n_pad = n.next_multiple_of(tn);
+            let dest = if n_pad == n {
+                out
+            } else {
+                self.dense_scratch(1, n_pad)?
+            };
             let mut operands = vec![
                 (qa_ptr, [1, k as i64]),
                 (das_ptr, [1, n_blocks as i64]),
-                (bytes_ptr, [n as i64, rb as i64]),
-                (d_ptr, [n as i64, nb]),
+                (bytes_ptr, [n_pad as i64, rb as i64]),
+                (d_ptr, [n_pad as i64, nb]),
             ];
             operands.extend(tables.into_iter().map(|(ptr, len)| (ptr, [1, len])));
-            operands.push((self.ptr(out, 0)?, [1, n as i64]));
-            return self.launch(module, name, &operands, (n.div_ceil(tn) as u32, 1, 1));
+            operands.push((self.ptr(dest, 0)?, [1, n_pad as i64]));
+            self.launch(module, name, &operands, ((n_pad / tn) as u32, 1, 1))?;
+            if n_pad != n {
+                let src = Plane {
+                    buf: dest,
+                    offset: 0,
+                    pitch: n_pad,
+                };
+                let dst = Plane {
+                    buf: out,
+                    offset: 0,
+                    pitch: n,
+                };
+                self.copy_2d(src, dst, 1, n)?;
+            }
+            return Ok(());
         }
         let (module, name, tn) = if iq1s_qdot_eligible {
             (&self.iq1s_qdot_matvec, "iq1s_qdot_matvec", IQ1S_TN)

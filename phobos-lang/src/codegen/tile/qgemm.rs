@@ -8,6 +8,7 @@
 // epilogue is `iq1s_qmma_t`'s in the same order, so the two agree bit for
 // bit (`examples/qmma_probe`).
 
+use super::kquant::KQ_GROUP;
 use super::*;
 
 pub(in crate::codegen) use super::qgemm_fmt::QgFormat;
@@ -147,6 +148,17 @@ impl<'c> Codegen<'c> {
         let w_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TN, QGEMM_KT])?;
         let sa_st = self.alloc_tile_shaped(block, f32_t, &[QGEMM_TM, QGEMM_KT / Q8_BLOCK])?;
         let sw_st = self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?;
+        // A format with a minimum: `dmin * m` a column a group beside the
+        // scales, and the activation's sum a row a group, both filled at
+        // stage time (see `kquant.rs`).
+        let mw_st = match fmt.has_min() {
+            true => Some(self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?),
+            false => None,
+        };
+        let as_st = match fmt.has_min() {
+            true => Some(self.alloc_tile_shaped(block, self.i32_t, &[QGEMM_TM, QGEMM_KT / KQ_GROUP])?),
+            false => None,
+        };
         let mut tabs = Vec::with_capacity(tables.len());
         for (table, &bytes) in tables.iter().zip(table_bytes) {
             let tile = self.alloc_tile_shaped(block, i8_t, &[1, bytes])?;
@@ -171,7 +183,8 @@ impl<'c> Codegen<'c> {
         // at the end of every turn.
         let zero_k = self.const_index(block, 0)?;
         let first = self.qgemm_load(block, fmt, &lanes, aq, asc, qb, d, zero_k)?;
-        self.qgemm_store(block, fmt, &lanes, &first, &a_st, &w_st, &sa_st, &sw_st, &tabs)?;
+        let planes = (mw_st.as_ref(), as_st.as_ref());
+        self.qgemm_store(block, fmt, &lanes, &first, &a_st, &w_st, &sa_st, &sw_st, planes, &tabs)?;
         self.barrier(block)?;
 
         let acc_count = (PATCH * PATCH * 2) as usize;
@@ -191,12 +204,12 @@ impl<'c> Codegen<'c> {
         let next = self.push(&kb, arith::minui(after, last, self.loc))?;
         let fetched = self.qgemm_load(&kb, fmt, &lanes, aq, asc, qb, d, next)?;
 
-        let accs = self.qgemm_contract(&kb, fmt, &lanes, &a_st, &w_st, &sa_st, &sw_st, &accs)?;
+        let accs = self.qgemm_contract(&kb, fmt, &lanes, &a_st, &w_st, &sa_st, &sw_st, planes, &accs)?;
 
         // Every warp is done with the stage before anyone overwrites it, and
         // the new stage is complete before anyone reads it.
         self.barrier(&kb)?;
-        self.qgemm_store(&kb, fmt, &lanes, &fetched, &a_st, &w_st, &sa_st, &sw_st, &tabs)?;
+        self.qgemm_store(&kb, fmt, &lanes, &fetched, &a_st, &w_st, &sa_st, &sw_st, planes, &tabs)?;
         self.barrier(&kb)?;
         kb.append_operation(scf::r#yield(&accs, self.loc));
 
@@ -417,7 +430,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The thread's part of a stage: its activation pieces and scales copied
-    /// in, its four weight fragments decoded, its column scales written.
+    /// in, its four weight fragments decoded, its column scales written, and
+    /// for a format with a minimum the activation's group sums and the
+    /// column minimums beside them.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_store(
         &mut self,
@@ -429,18 +444,43 @@ impl<'c> Codegen<'c> {
         w_st: &MemVal<'c>,
         sa_st: &MemVal<'c>,
         sw_st: &MemVal<'c>,
+        planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
         tabs: &[MemVal<'c>],
     ) -> Result<()> {
+        let (mw_st, as_st) = planes;
         let pieces = lanes.a_rows.len();
         for ((v, row), dst) in regs[..pieces].iter().zip(&lanes.a_rows).zip(&lanes.a_dst) {
             self.vec_store_al(block, *v, a_st.mem, &[*row, *dst], CHUNK_BYTES)?;
         }
         self.vec_store_al(block, regs[pieces], sa_st.mem, &[lanes.sa_row, lanes.sa_col], 8)?;
+        if let Some(as_st) = as_st {
+            // The activation's sum over each 32-element group: a thread's
+            // sixteen-byte piece is half a group and the thread beside it
+            // holds the other half, so one xor shuffle joins them and both
+            // store the same word.
+            let words_t = Type::vector(&[4], self.i32_t);
+            let group_w = self.const_index(block, KQ_GROUP)?;
+            for ((v, row), chunk) in regs[..pieces].iter().zip(&lanes.a_rows).zip(&lanes.a_chunks) {
+                let w = self.vec_bitcast(block, *v, words_t)?;
+                let words: Vec<Value<'c, 'c>> = (0..4)
+                    .map(|i| self.vec_extract(block, w, &[i], self.i32_t))
+                    .collect::<Result<_>>()?;
+                let seed = self.zero_scalar(block, self.i32_t)?;
+                let half = self.kq_byte_sum(block, &words, seed)?;
+                let as_f = self.push(block, arith::bitcast(half, self.f32_t, self.loc))?;
+                let other = self.shfl_xor_f32(block, as_f, 1)?;
+                let other = self.push(block, arith::bitcast(other, self.i32_t, self.loc))?;
+                let sum = self.push(block, arith::addi(half, other, self.loc))?;
+                let group = self.divui(block, *chunk, group_w)?;
+                block.append_operation(memref::store(sum, as_st.mem, &[*row, group], self.loc));
+            }
+        }
         let dv = regs[pieces + 1];
         let stage = Stage {
             lanes,
             w_st,
             sw_st,
+            mw_st,
             tabs,
             dv,
         };
@@ -460,8 +500,10 @@ impl<'c> Codegen<'c> {
         w_st: &MemVal<'c>,
         sa_st: &MemVal<'c>,
         sw_st: &MemVal<'c>,
+        planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
         accs: &[Value<'c, 'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
+        let (mw_st, as_st) = planes;
         let (i8_t, i32_t, f32_t) = (self.i8_t, self.i32_t, self.f32_t);
         let four_i8 = Type::vector(&[4], i8_t);
         let frag_t = Type::vector(&[1, 4], i8_t);
@@ -492,6 +534,22 @@ impl<'c> Codegen<'c> {
             let mut sa = Vec::with_capacity(PATCH as usize);
             for row in &rows {
                 sa.push(self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?);
+            }
+            // The minimum term's operands, where the format has one: the
+            // column minimums like the scales, the row sums like the
+            // activation scales.
+            let mut mw = Vec::with_capacity(PATCH as usize);
+            if let Some(mw_st) = mw_st {
+                for col in &cols {
+                    mw.push(self.vec_load_al(block, mw_st.mem, &[s_idx, *col], two_f32, 8)?);
+                }
+            }
+            let mut asum = Vec::with_capacity(PATCH as usize);
+            if let Some(as_st) = as_st {
+                for row in &rows {
+                    let raw = self.push(block, memref::load(as_st.mem, &[*row, s_idx], self.loc))?;
+                    asum.push(self.small_int_to_f32(block, raw)?);
+                }
             }
 
             let (mut a_frags, mut w_frags) = (Vec::new(), Vec::new());
@@ -550,6 +608,16 @@ impl<'c> Codegen<'c> {
                             let inner = self.push(block, arith::mulf(c0, w0, self.loc))?;
                             let inner = self.elem_mac(block, f32_t, c1, w1, inner)?;
                             self.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
+                        } else if mw_st.is_some() {
+                            // acc += sa * (c * sw - asum * mw): the run's
+                            // minimum, weighed by the activation's sum.
+                            let w0 = sw_of(self, 0)?;
+                            let as_f = raw_of(self, 0)?;
+                            let mw0 = self.vec_extract(block, mw[c as usize], &[dj], f32_t)?;
+                            let inner = self.push(block, arith::mulf(as_f, w0, self.loc))?;
+                            let sub = self.push(block, arith::mulf(asum[r as usize], mw0, self.loc))?;
+                            let inner = self.push(block, arith::subf(inner, sub, self.loc))?;
+                            self.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
                         } else {
                             let w0 = sw_of(self, 0)?;
                             let scale = self.push(block, arith::mulf(sa[r as usize], w0, self.loc))?;
@@ -570,6 +638,8 @@ pub(super) struct Stage<'a, 'c> {
     pub(super) lanes: &'a Lanes<'c>,
     pub(super) w_st: &'a MemVal<'c>,
     pub(super) sw_st: &'a MemVal<'c>,
+    /// The column minimums, for a format that subtracts one.
+    pub(super) mw_st: Option<&'a MemVal<'c>>,
     pub(super) tabs: &'a [MemVal<'c>],
     pub(super) dv: Value<'c, 'c>,
 }
@@ -601,6 +671,21 @@ impl<'c> Codegen<'c> {
         let pair = self.vec_insert(block, w1, pair, &[1])?;
         let bytes = self.vec_bitcast(block, pair, eight_i8)?;
         self.vec_store_al(block, bytes, stage.w_st.mem, &[stage.lanes.j, dst], 8)
+    }
+
+    /// Write the thread's group minimum, `dmin * m`, for a format that
+    /// subtracts one.
+    pub(super) fn qgemm_put_min(
+        &mut self,
+        block: &Block<'c>,
+        stage: &Stage<'_, 'c>,
+        value: Value<'c, 'c>,
+    ) -> Result<()> {
+        let Some(mw_st) = stage.mw_st else {
+            bail!("a minimum for a format that has none");
+        };
+        block.append_operation(memref::store(value, mw_st.mem, &[stage.lanes.g, stage.lanes.j], self.loc));
+        Ok(())
     }
 
     /// Write the thread's group scale, or the `h`-th of its `per_group`.

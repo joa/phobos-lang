@@ -2,6 +2,7 @@
 // against the host's dense fallback.
 
 use super::*;
+use phobos_gguf::quant::quantize_row;
 
 /// A raw-format super-block: full-range random bytes, with a real (small,
 /// finite) `d`/`dmin` header written at the given offsets afterward.
@@ -158,6 +159,56 @@ fn check_matmul_raw(
     Ok(())
 }
 
+/// A K-quant format's device path against the host reference fed the same
+/// activation the device contracts: both device kernels quantize their
+/// activation to Q8_0 (ties to even, as `quantize_row` does) and neither has
+/// a float device path, so the host is handed the activation the device
+/// sees. What is left to differ is accumulation order and the f16 header
+/// rounding, which 1e-3 covers.
+#[allow(clippy::too_many_arguments)]
+fn check_matmul_kquant(
+    host: &dyn Backend,
+    gpu: &dyn Backend,
+    set_dp4a: &dyn Fn(bool),
+    set_qmma: &dyn Fn(bool),
+    check_within: &CheckWithin,
+    next: &mut dyn FnMut() -> f32,
+    quant: Quant,
+    name: &str,
+    mut gen_block: impl FnMut(&mut dyn FnMut() -> f32) -> Vec<u8>,
+) -> Result<()> {
+    set_dp4a(true);
+    set_qmma(true);
+    for (m, k, n) in RAW_SHAPES {
+        let nb = k / 256;
+        let mut blocks = Vec::new();
+        for _ in 0..n * nb {
+            blocks.extend(gen_block(next));
+        }
+        let packed = Packed::new(quant, blocks, k, n)?;
+        let a: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        // The activation as the device sees it, a scale every 32.
+        let mut seen = vec![0.0f32; m * k];
+        let mut qs = vec![0i8; 32];
+        for (row, from) in seen.chunks_mut(32).zip(a.chunks(32)) {
+            let scale = quantize_row(from, &mut qs);
+            for (y, &q) in row.iter_mut().zip(&qs) {
+                *y = f32::from(q) * scale;
+            }
+        }
+        let run = |b: &dyn Backend, act: &[f32]| -> Result<Vec<f32>> {
+            let ab = b.upload(act)?;
+            let wb = b.constant_raw(&format!("raw{name}{m}x{k}x{n}"), &packed)?;
+            let out = b.alloc(m * n)?;
+            b.matmul_raw(ab, m, k, wb, n, out)?;
+            read_vec(b, out, m * n)
+        };
+        let (want, got) = (run(host, &seen)?, run(gpu, &a)?);
+        check_within(&format!("matmul_raw {name} [{m} x {k} x {n}]"), 1e-3, &want, &got);
+    }
+    Ok(())
+}
+
 /// Every raw format, through [`check_matmul_raw`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_raw_formats(
@@ -300,5 +351,16 @@ pub(super) fn check_raw_formats(
         "IQ4_XS",
         |n| random_raw_block(n, 136, 0, None),
     )?;
+    // The K-quants: d at 0 and dmin at 2 for the two with a minimum, d
+    // trailing the 210-byte Q6_K block.
+    for (quant, name, block_bytes, d_off, dmin_off) in [
+        (Quant::Q4_K, "Q4_K", 144usize, 0usize, Some(2usize)),
+        (Quant::Q5_K, "Q5_K", 176, 0, Some(2)),
+        (Quant::Q6_K, "Q6_K", 210, 208, None),
+    ] {
+        check_matmul_kquant(host, gpu, set_dp4a, set_qmma, check_within, next, quant, name, |n| {
+            random_raw_block(n, block_bytes, d_off, dmin_off)
+        })?;
+    }
     Ok(())
 }

@@ -103,11 +103,16 @@ impl Quant {
     /// Q3_K pads to 112 so its planes land eight-byte aligned. The IQ formats
     /// open with an f16 `d` that no device kernel reads -- they take the scale
     /// from the separate plane `constant_raw` uploads -- so those two bytes
-    /// are dropped, which is about 173 MB across a 27B model.
+    /// are dropped, which is about 173 MB across a 27B model. Q6_K's `d`
+    /// trails its block and goes the same way: 210 bytes become 208, which is
+    /// sixteen-aligned, and the plane carries the scale. Q4_K and Q5_K keep
+    /// their headers, since 144 and 176 are sixteen-aligned as they are and
+    /// the kernels read `d` and `dmin` out of the same load as the scales.
     pub fn device_block(self) -> (usize, usize) {
         let bytes = self.spec().block_bytes;
         match self {
             Quant::Q3_K => (0, 112),
+            Quant::Q6_K => (0, 208),
             Quant::IQ1_S | Quant::IQ2_XXS | Quant::IQ2_S => (2, bytes - 2),
             Quant::IQ2_XS | Quant::IQ3_XXS | Quant::IQ3_S => (2, bytes - 2),
             _ => (0, bytes),
@@ -128,6 +133,9 @@ impl Quant {
                 | Quant::IQ2_S
                 | Quant::IQ3_XXS
                 | Quant::IQ3_S
+                | Quant::Q4_K
+                | Quant::Q5_K
+                | Quant::Q6_K
         )
     }
 
