@@ -200,6 +200,111 @@ const HEAD_N: usize = 248320;
 const FFN_K: usize = 5120;
 const FFN_N: usize = 17408;
 
+/// A K-quant decode matvec, `<fmt>_qdot_i8_t` with no tables: the source
+/// `kernels/kquant.rs` builds, at the launch bound each format ships with.
+const fn kquant_probe(name: &'static str, kernel: &'static str, block_bytes: usize, src: &'static str) -> Probe {
+    Probe {
+        name,
+        kernel,
+        int8_act: true,
+        signs_bytes: 0,
+        block_bytes,
+        tn: 64,
+        table_bytes: 0,
+        src,
+    }
+}
+
+const Q4K_I8: Probe = kquant_probe(
+    "q4k-i8",
+    "q4k_qdot_i8_matvec",
+    144,
+    "@launch(256, 4)
+@autotune(TN in [{TN}])
+@aligned(N = TN)
+kernel q4k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                          QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                          C: tensor<f32>[M, N]) {
+  let pn = program_id(0)
+  C[0 :+ 1, pn * TN :+ TN] = q4k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
+                                           QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
+}
+",
+);
+
+const Q5K_I8: Probe = kquant_probe(
+    "q5k-i8",
+    "q5k_qdot_i8_matvec",
+    176,
+    "@launch(256, 3)
+@autotune(TN in [{TN}])
+@aligned(N = TN)
+kernel q5k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                          QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                          C: tensor<f32>[M, N]) {
+  let pn = program_id(0)
+  C[0 :+ 1, pn * TN :+ TN] = q5k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
+                                           QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
+}
+",
+);
+
+const Q6K_I8: Probe = kquant_probe(
+    "q6k-i8",
+    "q6k_qdot_i8_matvec",
+    208,
+    "@launch(256, 3)
+@autotune(TN in [{TN}])
+@aligned(N = TN)
+kernel q6k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                          QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
+                          C: tensor<f32>[M, N]) {
+  let pn = program_id(0)
+  C[0 :+ 1, pn * TN :+ TN] = q6k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
+                                           QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
+}
+",
+);
+
+/// The 4B Q4_K_M's decode shapes, the K-quant kernels' own: `k` by `n`
+/// with the format that holds it there.
+const KQUANT_SHAPES: [(&Probe, usize, usize, &str); 6] = [
+    (&Q4K_I8, 2560, 9216, "ffn gate/up"),
+    (&Q4K_I8, 9216, 2560, "ffn down (half)"),
+    (&Q6K_I8, 9216, 2560, "ffn down (half)"),
+    (&Q5K_I8, 2560, 8192, "attn_qkv"),
+    (&Q5K_I8, 4096, 2560, "ssm_out"),
+    (&Q6K_I8, 2560, 248320, "the head"),
+];
+
+/// `resident_probe --kquant [BALLAST_MIB [CHUNKS]]`: the three K-quant
+/// decode matvecs at the 4B's shapes, and nothing else.
+fn run_kquant(stream: &Stream, ballast: &[DeviceBuffer<f32>]) -> Result<()> {
+    println!(
+        "{:>6} {:>8} {:>8} {:>5} {:>9} {:>9} {:>9}",
+        "fmt", "k", "n", "TN", "ms", "GB/s", "GMAC/s"
+    );
+    for (probe, k, n, role) in KQUANT_SHAPES {
+        run(stream, probe, k, n, probe.tn, ballast)?;
+        println!("      ^ {role}");
+    }
+    if !ballast.is_empty() {
+        return Ok(());
+    }
+    // The narrow-n shapes against the grid: 2560 columns is 40 CTAs of 64 on
+    // 48 multiprocessors. A thinner CTA owns fewer columns a warp and fills
+    // the card; whether that pays is what this sweep is for.
+    println!();
+    for (probe, k, n) in [(&Q4K_I8, 9216usize, 2560usize), (&Q5K_I8, 4096, 2560), (&Q4K_I8, 2560, 1024)] {
+        for (tn, threads) in [(64usize, 256u32), (32, 128), (16, 64)] {
+            let _ = run_at(stream, probe, k, n, tn, threads, &[])?;
+            println!("      ^ TN {tn} @launch({threads}), {} CTAs", n / tn);
+        }
+        println!();
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let _ctx = cust::quick_init()?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
@@ -207,12 +312,13 @@ fn main() -> Result<()> {
 
     // VRAM ballast in MiB, written between launches so the driver has to keep
     // it resident and cannot simply evict what nobody touches.
-    let ballast_mib: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(0);
+    let positional: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
+    let ballast_mib: usize = positional.first().and_then(|a| a.parse().ok()).unwrap_or(0);
     // How many allocations that ballast is split across. One is llama.cpp's
     // shape, a handful of big backend buffers; several hundred is phobos's,
     // one `cuMemAlloc` per tensor. WDDM manages residency per allocation, so
     // the two are not the same amount of pressure even at the same total.
-    let chunks: usize = std::env::args().nth(2).and_then(|a| a.parse().ok()).unwrap_or(1);
+    let chunks: usize = positional.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
     let mut ballast = Vec::new();
     if ballast_mib > 0 {
         let per = ballast_mib * 1024 * 1024 / 4 / chunks;
@@ -236,6 +342,9 @@ fn main() -> Result<()> {
         );
     }
 
+    if std::env::args().any(|a| a == "--kquant") {
+        return run_kquant(&stream, &ballast);
+    }
     println!(
         "{:>6} {:>8} {:>8} {:>5} {:>9} {:>9} {:>9}",
         "fmt", "k", "n", "TN", "ms", "GB/s", "GMAC/s"
@@ -355,7 +464,12 @@ fn run_at(
 ) -> Result<Vec<f32>> {
     let nb = k / 256;
     let rb = nb * probe.block_bytes;
-    let src = probe.src.replace("{TN}", &tn.to_string()).replace("@launch(256)", &format!("@launch({threads})"));
+    let src = probe
+        .src
+        .replace("{TN}", &tn.to_string())
+        .replace("@launch(256)", &format!("@launch({threads})"))
+        .replace("@launch(256, 4)", &format!("@launch({threads}, {})", 1024 / threads))
+        .replace("@launch(256, 3)", &format!("@launch({threads}, {})", (1024 / threads * 3 / 4).max(1)));
     let module = compile(&src, &[("TN", tn)], probe.name)?;
     let function = module.get_function(probe.kernel)?.to_raw();
 
