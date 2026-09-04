@@ -13,8 +13,6 @@ use super::*;
 const LANE_OCTETS: usize = 8;
 const LANES_PER_COL: i64 = 4;
 const COLS_PER_WARP: i64 = WARP / LANES_PER_COL;
-/// Blocks the register pipeline holds ahead of the decode.
-const DEPTH: usize = 2;
 /// Blocks past the pipeline that are prefetched into L2.
 const PREFETCH_BLOCKS: i64 = 1;
 
@@ -77,6 +75,7 @@ impl<'c> Codegen<'c> {
             bail!("{label} needs a whole number of 256-element blocks");
         }
         self.check_shapes(&[cols], &[d.shape[0]], "qdot_i8 d rows")?;
+        let depth = fmt.pipeline_depth();
         let table_bytes = fmt.qdot_tables();
         if tables.len() != table_bytes.len()
             || tables.iter().zip(table_bytes).any(|(t, &want)| t.shape[1] != want)
@@ -148,12 +147,12 @@ impl<'c> Codegen<'c> {
         let one_k = self.const_index(&body, 1)?;
         let last_blk = self.subi(&body, nb, one_k)?;
 
-        // Blocks 0..DEPTH are fetched before the loop; each turn decodes the
-        // oldest and fetches the block DEPTH ahead. The loop stops DEPTH
+        // Blocks 0..depth are fetched before the loop; each turn decodes the
+        // oldest and fetches the block depth ahead. The loop stops depth
         // blocks short, and the blocks still in the pipeline are decoded
         // after it, each gated on existing (the fetch clamps to the last).
-        let mut stages = Vec::with_capacity(DEPTH);
-        for stage in 0..DEPTH {
+        let mut stages = Vec::with_capacity(depth);
+        for stage in 0..depth {
             let blk = self.const_index(&body, stage as i64)?;
             let blk = self.push(&body, arith::minui(blk, last_blk, self.loc))?;
             stages.push(self.qr_fetch(&body, fmt, &pieces, j, qb, d, blk, blk_bytes)?);
@@ -167,7 +166,7 @@ impl<'c> Codegen<'c> {
         let kb = Block::new(&kb_args);
         let kbase = detach(kb.argument(0)?.into());
         let carry = detach(kb.argument(1)?.into());
-        let stage_regs: Vec<Vec<Value<'c, 'c>>> = (0..DEPTH)
+        let stage_regs: Vec<Vec<Value<'c, 'c>>> = (0..depth)
             .map(|stage| {
                 (0..per_stage)
                     .map(|i| Ok(detach(kb.argument(2 + stage * per_stage + i)?.into())))
@@ -175,9 +174,9 @@ impl<'c> Codegen<'c> {
             })
             .collect::<Result<_>>()?;
 
-        // The block DEPTH ahead, unclamped so the addresses stay affine.
+        // The block depth ahead, unclamped so the addresses stay affine.
         let blk = self.divui(&kb, kbase, step)?;
-        let depth_k = self.const_index(&kb, DEPTH as i64)?;
+        let depth_k = self.const_index(&kb, depth as i64)?;
         let ahead_blk = self.addi(&kb, blk, depth_k)?;
         // L2 prefetch of the lane's column, PREFETCH_BLOCKS further on.
         let ahead = self.const_index(&kb, PREFETCH_BLOCKS)?;
@@ -196,8 +195,8 @@ impl<'c> Codegen<'c> {
         yields.extend(self.qr_fetch(&kb, fmt, &pieces, j, qb, d, ahead_blk, blk_bytes)?);
         kb.append_operation(scf::r#yield(&yields, self.loc));
 
-        // `kd - DEPTH * 256`, clamped at zero for a row shorter than that.
-        let span_body = self.const_index(&body, DEPTH as i64 * 256)?;
+        // `kd - depth * 256`, clamped at zero for a row shorter than that.
+        let span_body = self.const_index(&body, depth as i64 * 256)?;
         let last_k = self.subi(&body, kd, span_body)?;
         let last_k = self.push(&body, arith::maxsi(last_k, zero_idx, self.loc))?;
         let mut loop_operands = vec![zero_idx, last_k, step, init];
@@ -218,15 +217,15 @@ impl<'c> Codegen<'c> {
                 .build()?,
         );
 
-        // Stage `s` holds block `nb - DEPTH + s`, present when `nb + s >= DEPTH`.
+        // Stage `s` holds block `nb - depth + s`, present when `nb + s >= depth`.
         let mut acc: Value<'c, 'c> = detach(loop_op.result(0)?.into());
-        for stage in 0..DEPTH {
+        for stage in 0..depth {
             let regs: Vec<Value<'c, 'c>> = (0..per_stage)
                 .map(|i| Ok(detach(loop_op.result(1 + stage * per_stage + i)?.into())))
                 .collect::<Result<_>>()?;
             let stage_k = self.const_index(&body, stage as i64)?;
             let reach = self.addi(&body, nb, stage_k)?;
-            let depth_body = self.const_index(&body, DEPTH as i64)?;
+            let depth_body = self.const_index(&body, depth as i64)?;
             let exists = self.push(
                 &body,
                 arith::cmpi(self.ctx, arith::CmpiPredicate::Uge, reach, depth_body, self.loc),

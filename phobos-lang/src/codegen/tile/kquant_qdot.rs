@@ -51,7 +51,8 @@ impl<'c> Codegen<'c> {
                 pieces
             }
             QgFormat::Q6k => {
-                let (two, sixteen, thirty_two, sixty_four) = (c(self, 2)?, c(self, 16)?, c(self, 32)?, c(self, 64)?);
+                let (two, sixteen, thirty_two, sixty_four) =
+                    (c(self, 2)?, c(self, 16)?, c(self, 32)?, c(self, 64)?);
                 let g = self.divui(body, quarter, two)?;
                 let l0 = self.remui(body, quarter, two)?;
                 let l0 = self.muli(body, l0, sixteen)?;
@@ -169,7 +170,11 @@ impl<'c> Codegen<'c> {
         match fmt {
             QgFormat::Q4k | QgFormat::Q5k => {
                 let (hdr, rest) = regs.split_at(4);
-                let (qh, qs) = if fmt == QgFormat::Q5k { rest.split_at(8) } else { rest.split_at(0) };
+                let (qh, qs) = if fmt == QgFormat::Q5k {
+                    rest.split_at(8)
+                } else {
+                    rest.split_at(0)
+                };
                 let dv = self.kq_f16_of(kb, hdr[0], false)?;
                 let dmin = self.kq_f16_of(kb, hdr[0], true)?;
                 let sixty_four = self.const_index(kb, 64)?;
