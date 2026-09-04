@@ -42,7 +42,7 @@ fn random_iq1m_block(next: &mut (impl FnMut() -> f32 + ?Sized)) -> Vec<u8> {
 
 /// `m`, `k`, `n`: small and large, single-row and batched, aligned and not.
 /// Shared by every raw-kernel format's check below.
-const RAW_SHAPES: [(usize, usize, usize); 10] = [
+const RAW_SHAPES: [(usize, usize, usize); 11] = [
     (1, 256, 32),
     (1, 256, 64),
     (1, 512, 96),
@@ -60,12 +60,19 @@ const RAW_SHAPES: [(usize, usize, usize); 10] = [
     // n of IQ1S_QMMA_TN, k a whole number of 256-element blocks. Without it
     // `project_raw_qmma` goes untested, and it is the prompt path.
     (128, 512, 128),
+    // More than one whole row tile and a ragged remainder: the staged kernel
+    // runs padded into a scratch and copies the window out, which is what a
+    // chat prompt of any length the tile does not divide takes.
+    (200, 512, 128),
 ];
 
 /// Shapes that reach the tensor cores, and so stage their weight to f16.
-/// Judged like every other f16 path here; see `check_tc`.
+/// Judged like every other f16 path here; see `check_tc`. `Backend::matmul`
+/// sends every whole 64-row band through that path and only the remainder
+/// rows through the f32 tile, so any `m` of 64 or more is one of these; the
+/// looser bound on the exact remainder rows costs nothing.
 fn raw_shape_is_tc(m: usize, k: usize, n: usize) -> bool {
-    m.is_multiple_of(64) && n.is_multiple_of(64) && k.is_multiple_of(16)
+    m >= 64 && n.is_multiple_of(64) && k.is_multiple_of(16)
 }
 
 /// `check_within`'s signature, named once since it appears as a parameter
