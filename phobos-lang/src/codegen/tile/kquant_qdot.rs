@@ -13,14 +13,8 @@
 // byte loads (`ql` at `64 g + l0` and 32 past it, `qh` at `128 + 32 g +
 // l0`), with the activations four sixteen-byte loads 32 apart.
 
-use super::kquant::KQ_GROUP;
 use super::qdot_i8_reg::Piece;
 use super::*;
-
-/// Groups of 32 the activation-sum prologue can hold: `k` up to 32768,
-/// four kilobytes of shared memory. `K` is dynamic, so the tile is sized
-/// here and the backend refuses a wider row.
-pub(in crate::codegen) const KQ_MAX_GROUPS: i64 = 1024;
 
 impl<'c> Codegen<'c> {
     /// The loads of a K-quant lane's quarter, sixteen bytes each.
@@ -99,47 +93,6 @@ impl<'c> Codegen<'c> {
         self.addi(body, g, l0)
     }
 
-    /// Sum every 32-element group of the activation row into `sums`, one
-    /// i32 a group, the CTA's threads striding over the groups. The caller
-    /// barriers after.
-    pub(super) fn kq_sum_prologue(
-        &mut self,
-        block: &Block<'c>,
-        aq: &MemVal<'c>,
-        sums: &MemVal<'c>,
-        kd: Value<'c, 'c>,
-        tid: Value<'c, 'c>,
-        bdim: Value<'c, 'c>,
-    ) -> Result<()> {
-        let group_w = self.const_index(block, KQ_GROUP)?;
-        let groups = self.divui(block, kd, group_w)?;
-        let body = Block::new(&[(self.index_t, self.loc)]);
-        let g = detach(body.argument(0)?.into());
-        let zero = self.const_index(&body, 0)?;
-        let thirty_two = self.const_index(&body, KQ_GROUP)?;
-        let sixteen = self.const_index(&body, 16)?;
-        let at = self.muli(&body, g, thirty_two)?;
-        let at_hi = self.addi(&body, at, sixteen)?;
-        let bytes16 = Type::vector(&[16], self.i8_t);
-        let words_t = Type::vector(&[4], self.i32_t);
-        let mut words = Vec::with_capacity(8);
-        for at in [at, at_hi] {
-            let v = self.vec_load_al(&body, aq.mem, &[zero, at], bytes16, 16)?;
-            let v = self.vec_bitcast(&body, v, words_t)?;
-            for w in 0..4 {
-                words.push(self.vec_extract(&body, v, &[w], self.i32_t)?);
-            }
-        }
-        let seed = self.zero_scalar(&body, self.i32_t)?;
-        let sum = self.kq_byte_sum(&body, &words, seed)?;
-        body.append_operation(memref::store(sum, sums.mem, &[zero, g], self.loc));
-        body.append_operation(scf::r#yield(&[], self.loc));
-        let region = Region::new();
-        region.append_block(body);
-        block.append_operation(scf::r#for(tid, groups, bdim, region, self.loc));
-        Ok(())
-    }
-
     /// A word's four bytes as a `dp4a` operand.
     fn kq_as_bytes(&self, block: &Block<'c>, w: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         let v = self.vec_broadcast(block, w, Type::vector(&[1], self.i32_t))?;
@@ -148,14 +101,15 @@ impl<'c> Codegen<'c> {
 
     /// `carry` plus one block of a K-quant lane's quarter, `regs` as
     /// [`Self::kq_pieces`] laid it out (plus the plane's `d` last for
-    /// Q6_K), against the activations from `k_off`. `tabs[0]` is the run
-    /// sums for a format with a minimum.
+    /// Q6_K), against the activations from `k_off`. A format with a minimum
+    /// needs each run's activation sum; the lane holds the run's 32
+    /// activation bytes for the dot already, so that is eight more `dp4a`
+    /// against ones.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn kq_qdot_block(
         &mut self,
         kb: &Block<'c>,
         fmt: QgFormat,
-        tabs: &[MemVal<'c>],
         regs: &[Value<'c, 'c>],
         aq: &MemVal<'c>,
         asc: &MemVal<'c>,
@@ -180,21 +134,18 @@ impl<'c> Codegen<'c> {
                 let sixty_four = self.const_index(kb, 64)?;
                 let quarter = self.divui(kb, in_block, sixty_four)?;
                 let quarter = self.numeric_cast(kb, quarter, self.i32_t)?;
-                let group_w = self.const_index(kb, KQ_GROUP)?;
-                let group0 = self.divui(kb, k_off, group_w)?;
-                let zero = self.const_index(kb, 0)?;
                 let two = self.const_i32(kb, 2)?;
                 let r0 = self.push(kb, arith::muli(quarter, two, self.loc))?;
+                let ones = self.const_i32(kb, 0x0101_0101)?;
+                let ones = self.kq_as_bytes(kb, ones)?;
                 for h in 0..2usize {
                     // Run 2 q + h: its scale and minimum, its activation sum.
                     let h_i32 = self.const_i32(kb, h as i64)?;
                     let r = self.push(kb, arith::addi(r0, h_i32, self.loc))?;
                     let (sc, m) = self.kq_scale_min(kb, [hdr[1], hdr[2], hdr[3]], r)?;
-                    let h_idx = self.const_index(kb, h as i64)?;
-                    let group = self.addi(kb, group0, h_idx)?;
-                    let sum = self.push(kb, memref::load(tabs[0].mem, &[zero, group], self.loc))?;
                     let shift = self.const_i32(kb, 4 * h as i64)?;
                     let mut dot = self.zero_scalar(kb, self.i32_t)?;
+                    let mut sum = self.zero_scalar(kb, self.i32_t)?;
                     for o in 0..4usize {
                         for w in 0..2usize {
                             let idx = 2 * o + w;
@@ -202,6 +153,7 @@ impl<'c> Codegen<'c> {
                             let q = self.kq_nibbles(kb, qs[idx], shift, fifth)?;
                             let q = self.kq_as_bytes(kb, q)?;
                             dot = self.dot4_accumulate(kb, q, act[8 * h + idx], dot)?;
+                            sum = self.dot4_accumulate(kb, ones, act[8 * h + idx], sum)?;
                         }
                     }
                     let dot = self.small_int_to_f32(kb, dot)?;
