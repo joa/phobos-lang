@@ -38,8 +38,8 @@ impl Config {
         ensure!(n_head > 0, "a llama model needs at least one head");
 
         let head_dim = match m.arch_get("attention.key_length") {
-            Some(_) => m.arch_count("attention.key_length")?, // use if specified
-            None => d_model / n_head,                         // fallback otherwise
+            Some(_) => m.arch_count("attention.key_length")?,
+            None => d_model / n_head,
         };
         let vocab = gguf
             .tensor("token_embd.weight")
@@ -104,10 +104,8 @@ fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
 /// second onto the first: destination pair `i` holds source elements `2i` and
 /// `2i + 1`, and both conventions give pair `i` the same angle.
 ///
-/// Applied to the query and key weights once at load, so it costs nothing per
-/// token. Every use those two have is a dot product of one against the other,
-/// which a permutation of both leaves alone. Channels past `rope_dim` pass
-/// through in place.
+/// Applied to the query and key weights once at load. Channels past
+/// `rope_dim` pass through in place.
 fn neox_order(heads: usize, head_dim: usize, rope_dim: usize) -> Vec<usize> {
     let half = rope_dim / 2;
     (0..heads * head_dim)
@@ -187,7 +185,7 @@ pub struct Model {
 }
 
 impl Model {
-    /// Read every weight this architecture needs, leaving quantized ones so
+    /// Read every weight this architecture needs, leaving quantized ones so.
     pub fn load(gguf: &Gguf) -> Result<Model> {
         let config = Config::from_gguf(gguf)?;
         ensure!(
@@ -208,7 +206,6 @@ impl Model {
 
         let embed = Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?;
 
-        // same as llama.cpp
         let head = match gguf.tensor("output.weight") {
             Some(_) => Linear::load(gguf, "output.weight", config.d_model, config.vocab)?,
             None => Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?,
@@ -286,9 +283,8 @@ impl Model {
     }
 
     /// [`Model::forward`] for a caller that only wants the winning token id,
-    /// as greedy decoding does: the LM head still runs (it is what the
-    /// prediction is), only the vocab-wide readback that follows it is
-    /// skipped. See [`Backend::argmax`].
+    /// as greedy decoding does: the LM head still runs, and only the
+    /// vocab-wide readback after it is skipped. See [`Backend::argmax`].
     pub fn forward_greedy(
         &self,
         state: &mut State,

@@ -1,5 +1,4 @@
-/// A node in the cluster.
-/// One node = one GPU.
+/// A node in the cluster: one node, one GPU.
 pub type NodeId = u16;
 
 /// Globally Unique Deterministic Supertile Identity (GUDSI)

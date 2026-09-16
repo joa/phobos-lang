@@ -99,10 +99,6 @@ kernel iq1m_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq1m_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq1m_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which this
-/// mirrors. `@aligned(N = TN)` is required for the same reason: `iq1m_qdot_t`
-/// demands its `qb`/`d` slices provably in bounds.
 /// Output tile for the dp4a variant; a warp takes two columns.
 pub(crate) const IQ1M_I8_TN: usize = 64;
 
@@ -133,6 +129,10 @@ kernel iq1m_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
+/// [`iq1m_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
+/// into one `iq1m_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which this
+/// mirrors. `@aligned(N = TN)` is required for the same reason: `iq1m_qdot_t`
+/// demands its `qb`/`d` slices provably in bounds.
 pub(crate) fn iq1m_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -181,7 +181,8 @@ kernel iq1m_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 }
 
 /// [`iq1m_dequant_src`]'s decode as a single `iq1m_qdecode_t` call; see
-/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ1_M's decode shares IQ1_S's grid outright.
+/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ1_M, whose
+/// decode shares IQ1_S's grid outright.
 pub(crate) fn iq1m_qdecode_src(tn: usize) -> String {
     format!(
         "@launch(256)

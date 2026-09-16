@@ -20,7 +20,7 @@ fn every_format_agrees_with_its_own_storage_size() {
             spec.scale_run
         );
         // Two blocks of zeros decode to zeros, whatever the format: a zero
-        // scale zeroes the block, which is what fused padding relies on.
+        // scale zeroes the block, and fused padding relies on that.
         let zeros = vec![0u8; spec.block_bytes * 2];
         let mut out = vec![1.0f32; spec.block * 2];
         (spec.dequantize)(&zeros, &mut out);
@@ -234,7 +234,7 @@ fn q4_k_scale_packing_round_trips_every_index() {
 #[test]
 fn legacy_nibble_formats_split_a_block_in_half() {
     // Q4_0, Q4_1, Q5_0 and Q5_1 all put the two nibbles of byte j at elements
-    // j and j + 16, which is the thing that reads wrong at a glance.
+    // j and j + 16, an easy layout to get backwards.
     for (quant, header) in [
         (Quant::Q4_0, 2usize),
         (Quant::Q4_1, 4),

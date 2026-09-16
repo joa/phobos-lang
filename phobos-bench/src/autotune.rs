@@ -16,8 +16,7 @@ pub struct Winner {
 
 /// Compile Phobos source with the given autotune choices pinned.
 pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
-    // mma.sync requires 64bit index width.
-    // we widen implicitly when required.
+    // mma.sync requires a 64-bit index width.
     let requires_wide_index = phobos_lang::parse(code)
         .map(|ks| phobos_lang::requires_wide_index(&ks))
         .unwrap_or(false);
@@ -99,7 +98,7 @@ where
         let all = cartesian_product(space);
         phinfo!("autotune: {} configs", all.len());
 
-        // Stage 1: compile and short-probe every config. We rank by the fastest observed launch
+        // Stage 1: compile and short-probe every config, ranked by the fastest observed launch.
         let mut candidates: Vec<(Vec<Setting>, String, Duration)> = Vec::new();
         for cfg in &all {
             match self.probe_short(cfg) {
@@ -114,13 +113,11 @@ where
         }
 
         // Stage 2: long-probe the top finalists, interleaved round-robin.
-        // Timing each finalist in its own contiguous block hands whichever
-        // runs first (already the stage 1 leader, after the sort) the coolest
-        // silicon and the highest boost clocks, and that bias is often larger
-        // than the margin between finalists, so stage 1 noise gets confirmed
-        // instead of corrected. One launch per finalist per round keeps every
-        // config under the same clock and thermal state, so min-over-rounds
-        // compares kernels rather than GPU moods.
+        // Timing each finalist in its own contiguous block would hand
+        // whichever runs first the coolest silicon and highest boost clocks,
+        // a bias often larger than the margin between finalists. One launch
+        // per finalist per round keeps every config under the same clock and
+        // thermal state, so min-over-rounds compares kernels, not GPU moods.
         candidates.sort_by_key(|(_, _, best)| *best);
         candidates.truncate(self.finalists);
         anyhow::ensure!(!candidates.is_empty(), "autotune: no config works");
@@ -196,7 +193,7 @@ where
         let module = Module::from_ptx(ptx.as_str(), &[])?;
         let grid = (self.grid_for)(cfg)?;
 
-        // verify correctness on the first launch (also a warmup).
+        // Verify correctness on the first launch (also a warmup).
         (self.launch)(&module, grid)?;
         (self.verify)()?;
         let (fastest, _) = self.time(&module, grid, self.short_probes)?;

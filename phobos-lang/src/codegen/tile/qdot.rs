@@ -3,34 +3,20 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// `dot_t` over int8 operands using the hardware four-way byte dot product.
-    ///
-    /// `dp4a` multiplies four int8 pairs and accumulates into an i32 in one
-    /// instruction, so this replaces four loads, four multiplies and four adds
-    /// per step with one vector load per operand and one instruction. It needs
-    /// the four bytes of each operand contiguous, which is why it lands on
-    /// `dot_t` and not `dot`: `dot_t` contracts the last axis of both operands,
-    /// so both walk memory contiguously.
-    ///
-    /// Returns false when it does not apply, leaving the caller on the generic
-    /// path: below Pascal there is no `dp4a`, and a contraction that is not a
-    /// multiple of four bytes has a remainder this does not handle.
     /// out[i, j] = sum_b (sum_{k in block b} a[i, k] * w[j, k]) * asc[i, b] * wsc[j, b]:
     /// the whole Q8_0 contraction, block scales included, as one operation.
     ///
-    /// This exists because `dot_t` cannot be given enough of `k` at a time. A
+    /// This exists because `dot_t` cannot be given enough of `k` at a time: a
     /// Q8_0 block carries its own scale, so a plain dot has to stop every 32
     /// elements to apply it, and `dot_t` puts one thread on each output and
-    /// walks `k` in that thread. A warp then reads 32 rows four bytes apart,
-    /// which is 32 sectors fetched to use 128 bytes of them, and the block
-    /// pays five barriers per 32 elements of `k`.
-    ///
-    /// Folding the scales in is what lets the mapping turn around: a warp owns
-    /// one output and its lanes divide `k`, so the 32 lanes read 512
-    /// contiguous bytes of one weight row. Nothing is staged, the accumulator
-    /// is a register, and the only synchronization is the closing butterfly
-    /// shuffle. Each lane takes 16 bytes, which is four `dp4a` under one scale
-    /// pair, since 16 divides the 32-element block.
+    /// walks `k` in that thread. That warp reads 32 rows four bytes apart, 32
+    /// sectors fetched to use 128 bytes of them, paying five barriers per 32
+    /// elements of `k`. Folding the scales in turns the mapping around
+    /// instead: a warp owns one output and its lanes divide `k`, so the 32
+    /// lanes read 512 contiguous bytes of one weight row. Nothing is staged,
+    /// the accumulator is a register, and the only synchronization is the
+    /// closing butterfly shuffle. Each lane takes 16 bytes, four `dp4a` under
+    /// one scale pair, since 16 divides the 32-element block.
     ///
     /// The scales are indexed `[row, block]` so a lane's scale load is
     /// contiguous with its neighbours'. Reading them `[block, row]`, the

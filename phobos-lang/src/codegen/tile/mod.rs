@@ -64,8 +64,8 @@ pub(super) struct QTables<'a, 'c> {
 
 /// Columns to a group of the grouped raw layout: the payload is
 /// `[N / 8][NB][8][block]` and the scale plane `[N / 8][NB][8]`, declared
-/// `[N, RB]` and `[N, NB]`. The backend uploads the IQ formats so
-/// (`Quant::grouped_rows`); every reader goes through
+/// `[N, RB]` and `[N, NB]`. The backend uploads the IQ formats grouped this
+/// way (see `Quant::grouped_rows`); every reader goes through
 /// [`Codegen::raw_block_at`].
 pub(super) const RAW_GROUP: i64 = 8;
 

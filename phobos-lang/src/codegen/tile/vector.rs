@@ -156,9 +156,6 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// `mask` picking elements out of `a` and `b` laid end to end, which is
-    /// what joins two four-wide grid entries into the eight-wide lane the
-    /// staged projection stores: see `qmma_signed.rs`.
     /// The same bits as another vector shape: `vector<4xi8>` as
     /// `vector<1xi32>` and back, which `arith.bitcast` refuses because it
     /// keeps the shape.
@@ -177,6 +174,9 @@ impl<'c> Codegen<'c> {
         )
     }
 
+    /// `mask` picks elements out of `a` and `b` laid end to end: how two
+    /// four-wide grid entries join into the eight-wide lane the staged
+    /// projection stores (see `qmma_signed.rs`).
     pub(in crate::codegen) fn vec_shuffle(
         &self,
         block: &Block<'c>,

@@ -102,8 +102,6 @@ fn the_mlp_chain_needs_exactly_one_barrier() {
     assert!(after.contains("+= qdot_t"), "the accumulation comes after");
 }
 
-/// What reaches global memory is exactly what crosses a barrier. Everything
-/// else stays in registers or shared memory.
 #[test]
 fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     let plan = qwen_plan();
@@ -121,8 +119,8 @@ fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     );
 }
 
-/// The grid's block count decides how many copies a published value needs.
-/// Two grids should still emit the same held row.
+/// A held value lives in shared memory, so it does not multiply with the
+/// block count the way a published one does.
 #[test]
 fn the_held_row_does_not_scale_with_the_grid() {
     let at = |blocks: u32| {
@@ -176,8 +174,6 @@ fn the_mixer_projection_needs_no_barrier() {
     assert_eq!(plan.held, 1);
 }
 
-/// Each run is declared only as far as it writes, and lands at the offset
-/// its consumer reads from.
 #[test]
 fn a_run_is_bound_only_as_far_as_it_writes() {
     let plan = qwen_project_plan(false);
@@ -195,9 +191,8 @@ fn a_run_is_bound_only_as_far_as_it_writes() {
     assert!(plan.source.contains("OF2 in [6144], DO2 in [6144]"));
 }
 
-/// The convolution costs one barrier and the gates behind it cost none: they
-/// take the same unit count, so they share its nest and the barrier it
-/// already forced covers their read too.
+/// The gates share the convolution's nest because they take the same unit
+/// count, so the barrier it already forced covers their read too.
 #[test]
 fn the_convolution_costs_one_barrier_and_the_gates_none() {
     let plan = qwen_project_plan(true);

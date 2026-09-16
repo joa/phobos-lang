@@ -64,10 +64,8 @@ pub fn autotune(
         }
     }
 
-    // order of priority:
-    // 1. shotrest makespan wins
-    // 2. smallest working set
-    // 3. larger supertiles -> fewer launches or better FLOP/byte
+    // priority: 1) shortest makespan, 2) smallest working set, 3) larger
+    // supertiles for fewer launches / better FLOP per byte.
     ranked.sort_by(|a, b| {
         a.makespan_sec
             .total_cmp(&b.makespan_sec)
@@ -270,9 +268,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
     #[test]
     fn parallelism_prune_drops_under_node_grids() {
         let p = program();
-        // M=N=K=8192 with min super 2048 -> grids up to 4x4; with super 8192 ->
-        // 1x1 (one output supertile). On 16 nodes the coarse configs are pruned
-        // for under-parallelism but fine-grained ones survive.
+        // M=N=K=8192: min super 2048 gives grids up to 4x4, max super 8192 gives 1x1.
+        // On 16 nodes, coarse configs get pruned for under-parallelism; fine ones survive.
         let fp = ClusterFingerprint {
             nodes: 16,
             vram_bytes: 32 << 30,
@@ -281,8 +278,7 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
         };
         let ranked = autotune(&p, &dims(8192), fp).unwrap();
         assert!(!ranked.is_empty());
-        // the winner must have at least 16 output supertiles, i.e. SUPER_M and
-        // SUPER_N small enough that (8192/SM)*(8192/SN) >= 16.
+        // the winner must have at least 16 output supertiles for 16 nodes.
         let w = &ranked[0];
         let sm = w.supers["TILE_M"];
         let sn = w.supers["TILE_N"];
@@ -319,9 +315,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 
     #[test]
     fn autotunes_a_scalar_kernel() {
-        // A kernel with a scalar param must tune without a job binding: the
-        // trial plan uses placeholder scalar values (the config is independent
-        // of them).
+        // A kernel with a scalar param must tune without a job binding: the trial
+        // plan uses placeholder scalar values, since the config doesn't depend on them.
         const FLASH: &str = r#"
 @cluster(BR in [1024, 4096])
 @autotune(D in [64], BR in [32, 128], BC in [32, 128])

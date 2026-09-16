@@ -15,12 +15,10 @@ impl Pool {
         Pool::default()
     }
 
-    /// A buffer of exactly `len` elements, reusing a released one when there is
-    /// one. The contents are undefined: every caller either copies the whole
-    /// buffer from the host or has a kernel write all of it before reading.
-    ///
-    /// Not for storage written immediately rather than from the stream, see
-    /// [`Pool::take_fresh`].
+    /// A buffer of exactly `len` elements, reusing a released one if there is
+    /// one. Contents are undefined: the caller must overwrite the whole buffer
+    /// before reading it. Not for storage written immediately rather than from
+    /// the stream; see [`Pool::take_fresh`].
     pub fn take(&self, len: usize) -> Result<DeviceBuffer<f32>> {
         if let Some(pooled) = self.free.borrow_mut().get_mut(&len).and_then(Vec::pop) {
             return Ok(pooled);
@@ -29,13 +27,11 @@ impl Pool {
     }
 
     /// A buffer of exactly `len` elements that the pool has never handed out,
-    /// for storage the caller writes immediately rather than from the stream.
-    ///
-    /// While a pass is being recorded, a buffer released earlier in that pass
-    /// is still read by launches recorded and not yet run. An immediate write
-    /// lands before those launches do, so a pooled buffer would overwrite their
-    /// input. Only the caller knows whether it is recording, so only the caller
-    /// can pick between the two.
+    /// for storage the caller writes immediately rather than from the stream:
+    /// a released buffer can still be read by launches recorded earlier in the
+    /// same pass but not yet run, and an immediate write would land before them
+    /// and overwrite their input. Only the caller knows whether it is
+    /// recording, so only the caller can choose between this and [`Pool::take`].
     pub fn take_fresh(&self, len: usize) -> Result<DeviceBuffer<f32>> {
         // SAFETY: no caller reads before writing, see above.
         Ok(unsafe { DeviceBuffer::uninitialized(len)? })
@@ -51,14 +47,11 @@ impl Pool {
             .push(buf);
     }
 
-    /// Give everything held back to the driver, and say how many bytes that
-    /// was. Held buffers are unused by definition, but a caller still has to
-    /// know the stream is idle: one released while a pass was recorded can
-    /// still be read by a launch that has not run.
-    ///
-    /// Worth doing when the pass shape changes, since the pool is keyed on
-    /// exact length and a prompt pass's scratch can never serve a decode step
-    /// anyway. It is then holding memory that only the weights can use.
+    /// Frees everything held back to the driver and returns how many bytes that
+    /// was. The caller must ensure the stream is idle first (see
+    /// [`Pool::take_fresh`]). Worth calling when the pass shape changes, since
+    /// the pool keys on exact length and a prompt pass's scratch can never
+    /// serve a decode step.
     pub fn trim(&self) -> usize {
         let mut free = self.free.borrow_mut();
         let bytes = free

@@ -25,25 +25,20 @@ fn tensorcore_matmul_uses_wmma() {
     assert_contains(
         &mlir,
         &[
-            // operands staged into shared as f16 (a m-major), with one
-            // truncf rounding per element; inner dims bank-conflict padded
-            // by 8 (16 -> 24, 64 -> 72)
+            // f16 staging pads the inner dim by 8 for bank conflicts
+            // (16 -> 24, 64 -> 72).
             "memref<64x24xf16, 3>",
             "memref<16x72xf16, 3>",
             "arith.truncf",
-            // warp-collective fragment loads and m16n16k16 computes,
-            // f32 accumulator fragments riding the kt loop
             "gpu.subgroup_mma_load_matrix",
             "!gpu.mma_matrix<16x16xf16, \"AOp\">",
             "!gpu.mma_matrix<16x16xf16, \"BOp\">",
             "gpu.subgroup_mma_compute",
             "!gpu.mma_matrix<16x16xf32, \"COp\">",
             "iter_args",
-            // fragment loads stride the padded rows: lead = inner + 8
             "leadDimension = 24 : index",
             "leadDimension = 72 : index",
-            // the epilogue drains through the per-warp f32 slabs
-            // (8 warps x 16 rows), not straight to C
+            // the epilogue drains through a per-warp f32 slab (8 warps x 16 rows).
             "gpu.subgroup_mma_store_matrix",
             "memref<128x16xf32, 3>",
         ],
@@ -90,14 +85,12 @@ fn tensorcore_uses_mma_sync_on_sm75() {
             "numTiles = 1 : i32",
             "transpose = true",
             "transpose = false",
-            // the m16n8k8 Turing shape, f16 operands, f32 accumulate
             "nvgpu.mma.sync",
             "mmaShape = [16, 8, 8]",
             "vector<2x2xf16>",
             "vector<1x2xf16>",
             "-> vector<2x2xf32>",
-            // the XOR column swizzle (zero-cost bank-conflict avoidance)
-            // riding the staging store and the ldmatrix load
+            // arith.xori is the bank-conflict swizzle on the staging store and load.
             "arith.xori",
             // the epilogue still drains through the per-warp f32 slab
             "memref<128x16xf32, 3>",
@@ -173,11 +166,9 @@ fn tensorcore_sync_f16_accumulator() {
         &[
             "nvgpu.mma.sync",
             "mmaShape = [16, 8, 8]",
-            // f16 accumulator C/D fragment and the matching f16 slab.
             "-> vector<2x2xf16>",
             "memref<128x16xf16, 3>",
-            // the coalesced f16 epilogue drain: 4xf16 widen / round / store
-            // (f16 inputs stage without truncf, so these are the drain).
+            // extf/truncf here are the epilogue's f16 drain, not input staging.
             "vector<4xf16>",
             "arith.extf",
             "arith.truncf",
@@ -215,10 +206,9 @@ fn tensorcore_wmma_optout_forces_legacy() {
 
 #[test]
 fn tensorcore_falls_back_to_wmma_without_wide_index() {
-    // The mma.sync path needs 64-bit index lowering (nvgpu memref
-    // descriptors are pointer-width); at the 32-bit default the default
-    // mma.sync selection is ignored and codegen stays on WMMA rather than
-    // emit casts that won't reconcile. emit_mlir uses the 32-bit default.
+    // mma.sync needs 64-bit index lowering (nvgpu memref descriptors are
+    // pointer-width). At the 32-bit default (what emit_mlir uses), codegen
+    // stays on WMMA rather than emit casts that won't reconcile.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore
@@ -263,14 +253,12 @@ fn tensorcore_pipelines_f16_staging() {
     assert_contains(
         &mlir,
         &[
-            // two f16 buffers per staged tile (order: a0, b0, a1, b1),
-            // inner dims bank-conflict padded by 8 (32 -> 40, 64 -> 72)
+            // f16 staging pads the inner dim by 8 for bank conflicts
+            // (32 -> 40, 64 -> 72).
             "@__matmul_tile0 : memref<64x40xf16, 3>",
             "@__matmul_tile1 : memref<32x72xf16, 3>",
             "@__matmul_tile2 : memref<64x40xf16, 3>",
             "@__matmul_tile3 : memref<32x72xf16, 3>",
-            // guarded prefetches / the half-B guard, fragments threading
-            // through as scf.if results
             "scf.if",
             "gpu.subgroup_mma_compute",
         ],

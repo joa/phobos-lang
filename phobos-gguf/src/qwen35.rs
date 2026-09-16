@@ -201,7 +201,6 @@ struct Block {
     ffn: Ffn,
 }
 
-// Qwen3.5 Model
 pub struct Model {
     pub config: Config,
     /// `token_embd.weight`, kept quantized.
@@ -337,8 +336,6 @@ impl Model {
             .collect();
         State { pos: 0, layers }
     }
-
-    // forward() and friends live in qwen35/forward.rs.
 
     #[allow(clippy::too_many_arguments)]
     fn attention(
@@ -553,9 +550,8 @@ impl Model {
 
         // The convolution and gates as the tail of a fused projection, given
         // where the decay and write strength land. The fused kernel bakes in
-        // a single head count; a grouped-query deltanet falls back to the
-        // unfused delta_conv/delta_gates path, which expands `kv_heads` into
-        // `heads`.
+        // a single head count, so a grouped-query deltanet falls back to the
+        // unfused delta_conv/delta_gates path instead.
         let fused_mix = |decay_at: (Buf, usize), beta_at: (Buf, usize)| -> Result<Option<FusedMix>> {
             if rows != 1 || kv_heads != heads {
                 return Ok(None);

@@ -57,15 +57,11 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// ---- CPU reference -------------------------------------------------------
-
 fn reference(table: &[f32], g: &[f32], bn: &[f32], ids: &[i64]) -> Vec<f32> {
-    // Gather.
     let mut emb = vec![0.0f32; S * W];
     for (r, &id) in ids.iter().enumerate() {
         emb[r * W..r * W + W].copy_from_slice(&table[id as usize * W..id as usize * W + W]);
     }
-    // LayerNorm.
     let mut ln = vec![0.0f32; S * W];
     for r in 0..S {
         let row = &emb[r * W..r * W + W];
@@ -76,7 +72,7 @@ fn reference(table: &[f32], g: &[f32], bn: &[f32], ids: &[i64]) -> Vec<f32> {
             ln[r * W + c] = (row[c] - mean) * inv * g[c] + bn[c];
         }
     }
-    // Split into halves and concat swapped: [h0 | h1] -> [h1 | h0].
+    // Swap the halves: [h0 | h1] -> [h1 | h0].
     let half = W / 2;
     let mut sw = vec![0.0f32; S * W];
     for r in 0..S {
@@ -106,8 +102,6 @@ fn reference(table: &[f32], g: &[f32], bn: &[f32], ids: &[i64]) -> Vec<f32> {
     }
     y
 }
-
-// ---- ONNX graph construction ---------------------------------------------
 
 fn build_graph(table: &[f32], g: &[f32], bn: &[f32]) -> Result<Vec<u8>> {
     let graph = proto::GraphProto {

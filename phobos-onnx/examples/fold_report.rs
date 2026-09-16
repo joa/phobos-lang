@@ -79,7 +79,6 @@ fn main() -> Result<()> {
         println!("  {c:>5}  {op}");
     }
 
-    // Build the residual static graph and report its size.
     match fold_graph(g, &inputs) {
         Ok(residual) => {
             let mut op_hist: BTreeMap<String, usize> = BTreeMap::new();

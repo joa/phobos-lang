@@ -102,18 +102,17 @@ impl<'c> Codegen<'c> {
             );
         }
 
-        // Vectorize an aligned copy at whatever moves 16 bytes a lane, which is
-        // four f32 or eight f16. A staging copy is bound by the loads it
-        // issues rather than by the bytes they carry, so a narrow element type
-        // vectorized by element count would stage at half the rate an f32 tile
-        // does for no reason. Worth 21% of a decode step's attention against a
-        // deep f16 cache.
+        // Vectorizes an aligned copy to whatever moves 16 bytes a lane: four
+        // f32 or eight f16. A staging copy is bound by the loads it issues
+        // rather than the bytes they carry, so a narrow element type
+        // vectorized by element count would stage at half the rate an f32
+        // tile does for no reason.
         //
-        // Only f16 goes wide. The 8-byte reach the row-pitch ABI promises on
+        // Only f16 goes wide: the 8-byte reach the row-pitch ABI promises on
         // its own is enough for four elements of any type, and past that a
-        // width needs a divisibility proof that only `@aligned` supplies; the
-        // quantized paths read i8 through their own staging and are not on this
-        // one, so nothing is gained by widening them here.
+        // width needs a divisibility proof that only `@aligned` supplies.
+        // The quantized paths read i8 through their own staging and are not
+        // on this one, so nothing is gained by widening them here.
         let elem_bytes = self.elem_bytes(dst.elem);
         let last = *dst.shape.last().expect("tile values are not rank-0");
         let vec_ok = !src.is_masked()
@@ -131,8 +130,8 @@ impl<'c> Codegen<'c> {
             (true, false) => 4,
             _ => 1,
         };
-        // Four elements even where the copy stays scalar, which is what the
-        // f32 cp.async path below reads.
+        // Four elements even when the copy stays scalar: the f32 cp.async
+        // path below reads that width.
         let align = i64::from(elem_bytes.unwrap_or(4)) * width.max(4);
 
         // cp.async needs a 4/8/16-byte transfer and cannot convert: f32
@@ -144,7 +143,6 @@ impl<'c> Codegen<'c> {
         let vec_t = Type::vector(&[width.max(4) as u64], dst.elem);
 
         self.distribute(block, dst, width, sync, |cg, blk, idx| {
-            // Read from the (unswizzled) source, store to the swizzled column.
             let didx = cg.swizzled_index(blk, dst, idx)?;
 
             if use_async {
@@ -159,10 +157,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// dst[...] = cast(src[...]) for every element.
-    ///
-    /// Converts between the source and destination element types, e.g. an f32
-    /// accumulator stored into an f16 or i8 output tensor. Not vectorized.
+    /// dst[...] = cast(src[...]) for every element, e.g. an f32 accumulator
+    /// stored into an f16 or i8 output tensor. Not vectorized.
     pub(in crate::codegen) fn tile_convert(
         &mut self,
         block: &Block<'c>,
@@ -185,13 +181,12 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// dst[k, m] = src[m, k]: stages a tile k-major, so a row of dst holds one
-    /// k-slice and fragment loads vectorize. The distribution iterates the
-    /// source, the map being a bijection: each thread reads a coalesced vector
-    /// row segment and scatters 4 scalar column writes. With async_copy the
-    /// elements move as 4-byte cp.async transfers, which cannot vectorize
-    /// against a strided destination but do not stall. Never emits a barrier;
-    /// the caller owns synchronization.
+    /// dst[k, m] = src[m, k]: stages a tile k-major so a row of dst holds one
+    /// k-slice and fragment loads vectorize. Iterates the source, a
+    /// bijection onto dst, so each thread's coalesced row read scatters
+    /// into 4 scalar column writes (or, with async_copy, 4-byte cp.async
+    /// transfers that cannot vectorize against a strided destination but do
+    /// not stall). Never emits a barrier; the caller owns synchronization.
     pub(in crate::codegen) fn tile_copy_transposed(
         &mut self,
         block: &Block<'c>,

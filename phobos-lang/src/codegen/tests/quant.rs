@@ -255,9 +255,8 @@ const IQ1S_QMMA: &str = "            @launch(128)
 
 #[test]
 fn iq1s_qmma_t_decodes_into_the_tensor_core_fragments() {
-    // The whole point of the fused projection: the grid entry lands in the
-    // same `vector<1x4xi8>` operand a Q8_0 weight would have been loaded into,
-    // so nothing expanded is ever written.
+    // The grid entry lands in the same `vector<1x4xi8>` operand a Q8_0 weight
+    // would have loaded into, so nothing expanded is ever written.
     let mlir = emit_mlir(IQ1S_QMMA);
     assert_contains(
         &mlir,
@@ -274,9 +273,8 @@ fn iq1s_qmma_t_decodes_into_the_tensor_core_fragments() {
 
 #[test]
 fn iq1s_qmma_t_writes_no_expanded_weight() {
-    // `_qdecode` is 11.4x `_qdot` on the same bytes purely because it stores
-    // the expanded weight; this path must have no such store, and no barrier
-    // inside the k loop either.
+    // Unlike `_qdecode`, this path never stores the expanded weight, and has
+    // no barrier inside the k loop either.
     let mlir = emit_mlir(IQ1S_QMMA);
     let stores = mlir.matches("memref.store").count();
     // Two accumulator halves per tile of the warp's patch, written once after

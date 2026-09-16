@@ -7,8 +7,8 @@ impl<'c> Codegen<'c> {
     ///
     /// Grown from one tile a side, alternating so the patch stays square, and
     /// stopped when the patch would leave warps of the CTA with nothing to do.
-    /// A square patch is what makes the operand loads pay: `rm` by `rn` tiles
-    /// issue `2 * rm * rn` tensor instructions against `2 * (rm + rn)` loads.
+    /// A square patch pays for the operand loads: `rm` by `rn` tiles issue
+    /// `2 * rm * rn` tensor instructions against `2 * (rm + rn)` loads.
     pub(super) fn qmma_patch(&self, rt: i64, ct: i64) -> (i64, i64) {
         let warps = self.cta_threads / WARP;
         let (mut rm, mut rn) = (1, 1);
@@ -46,17 +46,15 @@ impl<'c> Codegen<'c> {
     /// the batched Q8_0 contraction on the integer tensor cores, block scales
     /// included, as one operation.
     ///
-    /// This is to a prompt pass what [`Self::tile_qdot_t`] is to a decode step,
-    /// and it exists for the same reason. Written in the tile language the
-    /// contraction has to stop every 32 elements of `k` to apply the scales,
-    /// which puts the accumulator in shared memory and stages both operands
-    /// there per block: for a `[64, 64]` tile the accumulator alone is 16 KB,
-    /// so the tile cannot even be built.
-    ///
-    /// Folding the scales in lets the whole of `k` stay inside one operation,
-    /// so the accumulators are registers and live across it, both operands are
-    /// read straight from global memory in the layout the `m8n8k16` fragments
-    /// already want, and there is no barrier in the loop at all.
+    /// This is to a prompt pass what [`Self::tile_qdot_t`] is to a decode
+    /// step. Written in the tile language, the contraction would have to
+    /// stop every 32 elements of `k` to apply the scales, forcing the
+    /// accumulator into shared memory with both operands staged there per
+    /// block; for a `[64, 64]` tile the accumulator alone is 16 KB, so the
+    /// tile cannot be built at all. Folding the scales in instead keeps the
+    /// whole of `k` inside one operation: the accumulators are registers
+    /// live across it, both operands read straight from global memory in
+    /// the `m8n8k16` fragment layout, and the loop has no barrier.
     ///
     /// The weight scales are indexed `[block, out]` here and `[out, block]` in
     /// `qdot_t`, which is not an inconsistency: a lane of this kernel holds two
@@ -85,12 +83,11 @@ impl<'c> Codegen<'c> {
     /// [`Self::tile_qmma_t`] writing an existing destination rather than a
     /// fresh tile.
     ///
-    /// The destination is normally a slice of the output tensor, which is what
-    /// makes this worth having: the accumulators are already in registers, and
-    /// going through a shared tile on the way out costs a `[128, 64]` f32
-    /// buffer, which is 32 KB and holds the kernel to one CTA per
-    /// multiprocessor. Writing global directly leaves the occupancy to the
-    /// register file.
+    /// The destination is normally a slice of the output tensor: the
+    /// accumulators are already in registers, and going through a shared
+    /// tile on the way out costs a `[128, 64]` f32 buffer, 32 KB, which
+    /// holds the kernel to one CTA per multiprocessor. Writing global
+    /// directly leaves the occupancy to the register file.
     pub(in crate::codegen) fn qmma_t_into(
         &mut self,
         block: &Block<'c>,

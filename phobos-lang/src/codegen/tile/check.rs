@@ -1,7 +1,7 @@
 // Shape agreement, bounds masks, and distributing a tile over the CTA.
 //
-// `distribute` is what turns a tile-shaped operation into the thread-
-// distributed loop nest the rest of the emitter writes into.
+// `distribute` turns a tile-shaped operation into the thread-distributed
+// loop nest the rest of the emitter writes into.
 
 use super::*;
 

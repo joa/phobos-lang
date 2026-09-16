@@ -1,11 +1,10 @@
 // The compilation back end: how a target's kernels get from MLIR to text a
 // driver will load.
 //
-// This is the half of the target seam that lives below phobos-lang, because
-// phobos-mlir runs the lowering and cannot depend on the language crate. The
-// other half, the instruction vocabulary the emitter builds a module out of,
-// is `codegen::target::Isa` in phobos-lang. A second target needs both, and
-// they meet here only in the sense that the same [`GpuConfig`] selects them.
+// This is the half of the target seam below phobos-lang: phobos-mlir runs
+// the lowering and cannot depend on the language crate. The other half, the
+// instruction vocabulary the emitter builds a module from, is
+// `codegen::target::Isa` in phobos-lang; the same [`GpuConfig`] selects both.
 
 use crate::context::{GpuConfig, NvidiaGpuConfig};
 
@@ -31,8 +30,7 @@ pub trait Backend {
 
     /// A last pass over the generated text, for what the back end could not fix
     /// earlier. `dynamic_shared` is whether any kernel wants a launch-time
-    /// shared allocation, which is the one thing a text patch has so far had to
-    /// know. Most targets want the default.
+    /// shared allocation; most targets want the default.
     fn post_process(&self, code: String, dynamic_shared: bool) -> String {
         let _ = dynamic_shared;
         code
@@ -99,8 +97,6 @@ impl Backend for NvidiaGpuConfig {
 ///
 /// The back end demotes the allocation into the kernel as a one-byte static
 /// object; a launch-time size attaches only to the module-scope external form.
-/// This is an issue with MLIR and the NVPTX back end we don't really care
-/// about.
 fn extern_dynamic_shared(ptx: &str) -> String {
     const NEWLINE: char = '\n';
 
@@ -187,7 +183,6 @@ mod tests {
             !out.contains("\t.shared .align 16 .b8 __dynamic_shmem__0;"),
             "the demoted definition survived:\n{out}"
         );
-        // Module scope: before the kernel that uses it.
         let declared = out.find(".extern .shared").expect("declaration");
         let entry = out.find(".visible .entry").expect("kernel");
         assert!(declared < entry, "declared after the kernel:\n{out}");

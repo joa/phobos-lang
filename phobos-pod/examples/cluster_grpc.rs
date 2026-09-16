@@ -60,9 +60,8 @@ async fn main() -> Result<()> {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-    // This exercises the peer data plane, so force the home-LOAD/peer-FETCH
-    // ingest policy (the default DirectLoad would have every node LOAD its own
-    // inputs and move zero bytes between peers).
+    // Forces the home-LOAD/peer-FETCH ingest policy to exercise the peer data
+    // plane; the default DirectLoad would move zero bytes between peers.
     let pl = phobos_sched::plan_with(
         &program,
         &dims,
@@ -87,7 +86,6 @@ async fn main() -> Result<()> {
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Two nodes.
     for id in 0..2u16 {
         let sa = sched_addr.clone();
         tokio::spawn(async move {
@@ -100,8 +98,7 @@ async fn main() -> Result<()> {
     SERVED_BYTES.store(0, Ordering::SeqCst);
     GET_KERNEL_CALLS.store(0, Ordering::SeqCst);
 
-    // Dispatch: withhold the step leaf (kernel 0) from node 1 so it must peer
-    // GetKernel-fill from node 0.
+    // Withholds the step leaf (kernel 0) from node 1, so it must peer GetKernel-fill from node 0.
     let job = make_job(
         MATMUL,
         &[("M", N as i64), ("N", N as i64), ("K", N as i64)],

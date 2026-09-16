@@ -90,8 +90,8 @@ pub(crate) fn norm_cta(blocks: usize) -> usize {
 /// The CTA the one-statement quantized norm runs at: the largest whole
 /// number of warps up to [`CTA_THREADS`] whose `4 * cta` divides the row,
 /// since `rms_norm_q_t` gives a thread four elements of every `4 * cta`.
-/// 1024 and 5120 take 256 threads, 2560 takes 160. `None` for a width no
-/// such CTA divides, which takes the tile passes instead.
+/// `None` for a width no such CTA divides, which takes the tile passes
+/// instead.
 pub(crate) fn norm_q_cta(width: usize) -> Option<usize> {
     (WARP_THREADS..=CTA_THREADS as usize)
         .rev()

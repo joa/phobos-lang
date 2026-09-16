@@ -2,29 +2,11 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example attndecode
 //
-// `bench` says a decode step gets slower as the cache grows but not where the
-// time goes, and a whole-model measurement cannot separate attention from the
-// projections that dominate a short context. This calls the decode attention
-// path alone, one call per block over a working set the size of a real model's
-// caches, so the L2 hit rate is the one a forward pass actually sees. The calls
-// go through a pass, since a bare launch costs more in driver time than the
-// kernel costs on the card.
-//
-// The lengths below are primes, and that is the point of them. They used to be
-// powers of two, at which the cache divides both the split count and the tile,
-// so the single-key steps that finish a split never ran: a tile size measured 7%
-// faster here and 45% slower in a model. A decode reaches every cache length.
-// Keep these off the round numbers, and still read this against a `bench` run
-// rather than on its own.
-//
-// The last three rows are diagnostic shapes rather than models. Grouped-query
-// attention gives several query heads one key head, and this path gives each
-// query head its own program, so a key head is read once per query that shares
-// it. `group 1, same grid` keeps the programs and gives each its own key head:
-// the same launch, the same reads, eight times the distinct bytes. `group 1,
-// same cache` keeps the cache and drops to one program per key head: the same
-// distinct bytes, an eighth of the reads. Between them they say whether the
-// repeated reads cost anything.
+// Calls the decode attention path alone, one block at a time through a pass,
+// over a working set the size of a real model's caches, next to the card's
+// measured copy bandwidth. Lengths are primes so none lines up with a cache
+// split or tile boundary, and the last three shapes vary query/key-head
+// grouping to isolate whether repeated key reads cost anything.
 
 use std::time::Instant;
 
@@ -82,7 +64,8 @@ const SHAPES: [Shape; 5] = [
     },
 ];
 
-/// Primes, spaced like the powers of two they sit next to. See the note above.
+/// Primes, spaced like the powers of two they sit next to, so none lines up
+/// with a cache split or tile boundary.
 const LENGTHS: [usize; 8] = [37, 67, 131, 257, 521, 1031, 2053, 4099];
 
 /// Repeat `batch` until `secs` have passed and return the mean seconds an
@@ -143,8 +126,8 @@ fn step(
 }
 
 /// Restricts the sweep to one cache length, for an external profiler (ncu)
-/// that needs to isolate a single kernel launch rather than see the whole
-/// sweep. Unset by default, which is every prior invocation of this example.
+/// that needs to isolate a single kernel launch. Unset by default, so a
+/// normal run sweeps every length.
 fn length_wanted(length: usize) -> bool {
     std::env::var("PHOBOS_ATTNDECODE_LENGTH")
         .ok()

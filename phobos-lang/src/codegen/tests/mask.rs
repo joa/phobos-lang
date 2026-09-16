@@ -13,11 +13,9 @@ fn range_and_full_slices() {
     assert_contains(
         &mlir,
         &[
-            // i:j -> dynamic size (subi), : on dynamic N -> memref.dim
             "arith.subi",
             "memref.dim",
             "memref.subview",
-            // scalar store into a slice is a distributed fill
             "gpu.thread_id",
             "memref.store",
             "memref<4x?xf32, strided<[?, 1], offset: ?>, 1>",
@@ -41,9 +39,9 @@ fn partial_static_slice_is_masked() {
         &mlir,
         &[
             "memref.subview",
-            "arith.cmpi ult", // offset + index < extent
-            "arith.select",   // out-of-bounds reads fold to zero
-            "scf.if",         // the store runs only in bounds
+            "arith.cmpi ult",
+            "arith.select",
+            "scf.if",
         ],
     );
 }
@@ -63,20 +61,19 @@ fn a_program_id_slice_of_a_dynamic_extent_is_masked() {
     assert_contains(
         &mlir,
         &[
-            "memref.dim",     // the extent is only known at runtime
-            "arith.cmpi ult", // offset + index < extent
-            "arith.select",   // out-of-bounds reads fold to zero
-            "scf.if",         // the store runs only in bounds
+            "memref.dim",
+            "arith.cmpi ult",
+            "arith.select",
+            "scf.if",
         ],
     );
 }
 
 #[test]
 fn an_aligned_declaration_drops_the_dynamic_bounds_mask() {
-    // @aligned is the host promising the extent is a whole number of tiles,
-    // which is what a general GEMM needs to keep the register-blocked and
-    // tensor-core drains: those have no per-element store guard, so without
-    // the promise they decline and the kernel falls back.
+    // @aligned is the host promising the extent is a whole number of tiles.
+    // The register-blocked and tensor-core drains have no per-element store
+    // guard, so without the promise they decline and the kernel falls back.
     let mlir = emit_mlir(
         "@aligned(N = 32)
         kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
@@ -194,11 +191,11 @@ fn dynamic_extent_loop_splits_off_a_masked_remainder() {
     assert_contains(
         &mlir,
         &[
-            "memref.dim",     // the runtime extent
-            "arith.divui",    // (N - 0) / C whole chunks
-            "arith.cmpi ult", // offset + index < N inside the remainder
-            "arith.select",   // out-of-bounds reads fold to zero
-            "scf.if",         // the remainder runs only when N is ragged
+            "memref.dim",
+            "arith.divui",
+            "arith.cmpi ult",
+            "arith.select",
+            "scf.if",
         ],
     );
 }

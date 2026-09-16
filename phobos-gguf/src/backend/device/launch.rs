@@ -6,9 +6,8 @@ use super::*;
 impl DeviceBackend {
     /// Launch a kernel over tensor operands given as pointer and extents.
     ///
-    /// Nothing here allocates. A pass is some seven hundred launches, and a
-    /// fresh vector per descriptor cost most of a millisecond a step in host
-    /// code alone, which the card spends idle.
+    /// Nothing here allocates: a pass issues hundreds of these, and a fresh
+    /// vector per descriptor would cost host time the card spends idle.
     pub(super) fn launch(
         &self,
         module: &Module,
@@ -114,6 +113,11 @@ impl DeviceBackend {
         Ok(func)
     }
 
+    /// Runs `f` against the module cached under `key`, compiling it on first
+    /// use. Several kernels take a tile extent that has to be a compile-time
+    /// constant, so they are generated per shape; every shape a model uses is
+    /// fixed at load, so each cache holds a handful of entries and stops
+    /// growing once decoding starts.
     pub(super) fn with_kernel<K: Copy + Eq + std::hash::Hash>(
         &self,
         cache: &RefCell<HashMap<K, Module>>,

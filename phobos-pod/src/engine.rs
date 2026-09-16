@@ -130,7 +130,7 @@ impl Engine {
         let to_self = tx.clone();
         let (boot_tx, boot_rx) = std::sync::mpsc::channel::<Result<()>>();
         thread::spawn(move || {
-            // this thread owns the CUDA context for its whole lifetime!
+            // this thread owns the CUDA context for its whole lifetime
             let _ctx = match cust::quick_init() {
                 Ok(c) => c,
                 Err(e) => {
@@ -225,7 +225,7 @@ impl Engine {
             if !msg_recvd && self.inflight.is_empty() && self.ready.is_empty() {
                 self.check_alloc_stall();
 
-                // nothing immediately runnable: yield briefly so we don't livelock
+                // nothing immediately runnable: yield briefly to avoid livelock
                 thread::sleep(Duration::from_micros(100));
             }
         }
@@ -289,10 +289,8 @@ impl Engine {
 
         self.had_work = true;
 
-        // add nodes, then wire dep counters.
-        //
-        // all deps are node-local and earlier in topological order,
-        // so they are present and unfinished.
+        // Two passes: insert every node, then wire dep counters. Deps are
+        // node-local and earlier in topological order, so they're already present and unfinished.
         for instr in &seg.instructions {
             self.table.insert(
                 instr.iid,
@@ -362,8 +360,7 @@ impl Engine {
 
         match op {
             Op::Alloc { tile, shape, .. } => {
-                // node-side memory backpressure: if the arena is full, park the
-                // ALLOC and retry it once a FREE makes room.
+                // node-side memory backpressure: park the ALLOC when the arena is full, retried once a FREE makes room.
                 if !self.try_alloc(iid, tile, shape)? {
                     phdebug!(
                         "node{}: ALLOC #{iid} tile={:#x} deferred: arena full",

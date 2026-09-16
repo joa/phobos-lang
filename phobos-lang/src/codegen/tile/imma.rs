@@ -6,17 +6,14 @@ impl<'c> Codegen<'c> {
     /// `dot_t` over int8 operands on the integer tensor cores.
     ///
     /// Unlike the f16 tensor-core path there is no staging buffer and no
-    /// ldmatrix: the m8n8k16 fragment layout is already what `dot_t` holds in
-    /// memory. A lane's A register is four contiguous bytes of row `lane / 4`,
-    /// its B register is four contiguous bytes of row `lane / 4` of the [n, k]
-    /// operand, and both are exactly the four bytes `dp4a` would have read.
-    /// One `mma.sync` folds sixteen products per lane where `dp4a` folds four.
+    /// ldmatrix: the m8n8k16 fragment layout is already what `dot_t` holds
+    /// in memory. A lane's A and B registers are each four contiguous bytes
+    /// of row `lane / 4` of their operand, exactly what `dp4a` would read.
     ///
-    /// Returns false when it does not apply, leaving the caller on the dp4a
-    /// path: the tensor core issues whole 8x8 output tiles over a k that is a
-    /// multiple of 16, and there are no integer tensor cores before Turing. A
-    /// masked output would need the store guarded per element, which is what
-    /// the generic paths already do.
+    /// Returns false when it does not apply: the tensor core needs whole
+    /// 8x8 output tiles over a k that is a multiple of 16, no integer
+    /// tensor core exists before Turing, and a masked output needs the
+    /// per-element store guard only the generic dp4a path provides.
     pub(super) fn tile_matmul_t_imma(
         &mut self,
         block: &Block<'c>,
@@ -130,16 +127,14 @@ impl<'c> Codegen<'c> {
     /// A small signed integer as an f32, without the conversion instruction.
     ///
     /// Adding 1.5 * 2^23 to `value` as an integer lands it in the mantissa of
-    /// that float, so the bits are already the f32 of `1.5 * 2^23 + value` and
-    /// subtracting the constant back off leaves the value exactly. It holds for
-    /// `|value| < 2^22`, which a Q8_0 block guarantees: 32 products of two
-    /// int8s cannot exceed 32 * 127 * 127, about an eighth of the room.
+    /// that float, so the bits are already the f32 of `1.5 * 2^23 + value`,
+    /// and subtracting the constant back off leaves the value exactly. Holds
+    /// for `|value| < 2^22`, which a Q8_0 block guarantees: 32 products of
+    /// two int8s cannot exceed 32 * 127 * 127.
     ///
-    /// This is worth doing rather than a `cvt` because on Turing conversions
-    /// issue at a quarter of the arithmetic rate, one per eight cycles against
-    /// one per cycle, and the quantized matmul does one per accumulator per
-    /// block: at a patch's size that is 128 of them against the same block's
-    /// 128 tensor instructions, which run one per four cycles.
+    /// Avoids `cvt`, which on Turing issues at a quarter of the arithmetic
+    /// rate: the quantized matmul does one of these conversions per
+    /// accumulator per block, competing with the tensor core for issue slots.
     pub(super) fn small_int_to_f32(
         &self,
         block: &Block<'c>,

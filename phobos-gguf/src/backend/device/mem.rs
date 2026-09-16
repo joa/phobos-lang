@@ -6,9 +6,8 @@ use super::*;
 /// What a [`Buf`] handle points at: scratch this backend owns and can hand
 /// back to the pool, or a constant living in the arena.
 ///
-/// A constant is uploaded once and never released, so it does not need its own
-/// allocation, and giving it one costs residency: see `arena.rs`. 356 of the
-/// 488 live handles on Qwen3.8-27B are constants.
+/// A constant is uploaded once and never released, so it does not need its
+/// own allocation, and giving it one costs residency: see `arena.rs`.
 pub(super) enum Slot {
     Owned(DeviceBuffer<f32>),
     Const {
@@ -53,10 +52,9 @@ impl DeviceBackend {
         }))
     }
 
-    /// A zeroed handle onto the state arena, for a buffer that lives as long as
-    /// the sequence does. 48 of these, three megabytes each, and giving each
-    /// its own allocation is what leaves `delta_rule` reading its state at
-    /// 2 ms a launch where a resident one takes 15 us: see `arena.rs`.
+    /// A zeroed handle onto the state arena, for a buffer that lives as long
+    /// as the sequence does. Giving each its own allocation instead leaves
+    /// `delta_rule` reading state far slower: see `arena.rs`.
     pub(super) fn zeroed_state_buf(&self, len: usize) -> Result<Buf> {
         let at = self.state_arena.upload(&vec![0.0f32; len])?;
         self.state_live.set(self.state_live.get() + 1);
@@ -108,11 +106,10 @@ impl DeviceBackend {
 
     /// The same for f16 storage, whose offset is counted in halves.
     ///
-    /// An [`HBuf`] is a slot of the one table, holding a buffer of half as many
-    /// f32 words: the pool then serves both kinds, and a cache released at the
-    /// end of a sequence comes back as ordinary scratch. Nothing else about the
-    /// two handles is interchangeable, which is why they are separate types
-    /// above; only this file knows they share a table.
+    /// An [`HBuf`] is a slot of the one table, holding a buffer of half as
+    /// many f32 words, so the pool serves both kinds and a released cache
+    /// comes back as ordinary scratch. Only this file treats the two handle
+    /// types as interchangeable; elsewhere they stay distinct on purpose.
     pub(super) fn hptr(&self, buf: HBuf, elements: usize) -> Result<u64> {
         let slots = self.slots.borrow();
         let buffer = slots
@@ -185,9 +182,7 @@ impl DeviceBackend {
         Ok(((width / RMS_LANE) as i64, RMS_LANE as i64))
     }
 
-    /// This pass's next quantized-activation slot, big enough for `m` rows of
-    /// `k`, with its device pointers.
-    /// [`Backend::quantize_act`] into a slot the caller picked.
+    /// [`Backend::quantize_act`] into a slot the caller already picked.
     pub(super) fn quantize_act_into(
         &self,
         slot: (QAct, u64, u64),
@@ -227,17 +222,12 @@ impl DeviceBackend {
     /// by the one projection that asked for it, and never referred to again.
     ///
     /// A pass takes a fresh slot per `quantize_act` because a caller may hold
-    /// a handle across many projections, which is what `rms_norm_q` does for
-    /// QKV and for gate and up. The fused projection has one caller that does
-    /// not -- the down projection, whose input is the SwiGLU output -- and at
-    /// 128 rows of a 17408-wide FFN that is 2.2 MiB a layer, 143 MiB across a
-    /// 64-layer model, which is most of what the fused path costs a decode
-    /// step in residency.
-    ///
-    /// Those can share a handful of slots. A recorded pass is instantiated as
-    /// a chain of kernel nodes, in issue order, so the quantize that overwrites
-    /// a ring slot cannot run before the projection that read it: `RING` only
-    /// has to exceed how many are live at once, which is one.
+    /// a handle across several projections, as `rms_norm_q` does for QKV and
+    /// for gate and up. The fused projection's one caller, the down
+    /// projection, does not, so those can share a handful of slots: a
+    /// recorded pass replays as a chain of kernel nodes in issue order, so a
+    /// ring slot's quantize cannot run before the projection that reads it.
+    /// `RING` only has to exceed how many are live at once, which is one.
     pub(super) fn act_slot_transient(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
         const RING: usize = 4;
         let at = self.act_ring.get();
@@ -247,6 +237,8 @@ impl DeviceBackend {
         self.act_slot_at(at, m, k)
     }
 
+    /// This pass's next quantized-activation slot, big enough for `m` rows
+    /// of `k`, with its device pointers.
     pub(super) fn act_slot(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
         // The ring reserves the first `RING` slots of every pass, so an
         // exclusive one starts past them.
@@ -348,14 +340,13 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// An allocation for something that writes it immediately rather than from
-    /// the stream, so it must not come out of the pool mid-pass. This is the
-    /// only place that knows both halves: the pool cannot see whether a pass is
-    /// recording, and the recorder does not allocate. See [`Pool::take_fresh`].
-    ///
-    /// Two callers need it: a constant that grows mid-pass, as the rotary table
-    /// does when a sequence passes its length, and a zero fill, whose memset
-    /// goes straight to the stream while the pass around it is only recorded.
+    /// An allocation for something that writes it immediately rather than
+    /// from the stream, so it must not come out of the pool mid-pass. Only
+    /// this function knows both halves: the pool cannot see whether a pass
+    /// is recording, and the recorder does not allocate. See
+    /// [`Pool::take_fresh`]. Two callers need it: a constant that grows
+    /// mid-pass, like the rotary table, and a zero fill whose memset goes
+    /// straight to the stream while the pass around it is only recorded.
     #[track_caller]
     pub(super) fn alloc_written_now(&self, len: usize) -> Result<Buf> {
         if !self.recording.get() {

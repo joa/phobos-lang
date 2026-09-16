@@ -1,17 +1,13 @@
 //! Persists compiled PTX to disk, keyed by everything that can change what a
 //! kernel's source compiles to, so a cache hit survives a process restart and
-//! is shared by every binary built from the same compiler.
+//! is shared by every binary built from the same compiler. `PHOBOS_KERNEL_CACHE_DIR`
+//! overrides the default (`~/.phobos/kernel-cache`); empty disables caching,
+//! and `print_phases` always disables it, since a hit has nothing to print.
 //!
-//! Set `PHOBOS_KERNEL_CACHE_DIR` to override the default
-//! (`~/.phobos/kernel-cache`), or to an empty string to disable caching.
-//! Skipped outright under `print_phases`, since a hit has nothing to print.
-//!
-//! `PHOBOS_KERNEL_CACHE_EPOCH` replaces the compiler fingerprint with its own
-//! value. Editing one intrinsic otherwise invalidates every entry, which is
-//! right for correctness and wrong for a benchmarking session that changed a
-//! single kernel: pin the epoch, then evict just the kernels that moved with
-//! `cargo run -p phobos-kernels --example cache -- evict <name>`. Entries are
-//! named `<kernel>-<hash>` so that eviction is a glob rather than a guess.
+//! `PHOBOS_KERNEL_CACHE_EPOCH` overrides the compiler fingerprint, so a
+//! session can pin it and evict just the kernels that changed, with `cargo
+//! run -p phobos-kernels --example cache -- evict <name>`; entries are named
+//! `<kernel>-<hash>` so eviction can glob by name.
 
 use std::sync::OnceLock;
 
@@ -22,12 +18,11 @@ use sha2::{Digest, Sha256};
 
 /// Identifies the compiler that produces the PTX: the codegen crates' source
 /// and the MLIR/LLVM versions they call, folded at build time by `build.rs`.
-/// Any change to either -- committed or not, a dependency bump, an LLVM
-/// upgrade -- changes it, where a git commit hash would miss all three.
+/// Catches what a git commit hash would miss: an uncommitted change, a
+/// dependency bump, an LLVM upgrade.
 ///
-/// Deliberately not a hash of the running binary: two examples compiling
-/// identical kernels would then share no entries and each pay a cold
-/// compile.
+/// Not a hash of the running binary, so two examples compiling identical
+/// kernels share cache entries instead of each paying a cold compile.
 fn build_fingerprint() -> &'static str {
     static FINGERPRINT: OnceLock<String> = OnceLock::new();
     FINGERPRINT.get_or_init(|| {

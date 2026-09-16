@@ -38,10 +38,9 @@ fn tensor(name: &str, n: i64, mode: AccessMode) -> TensorInput {
 }
 
 /// A node that speaks the wire protocol but executes nothing: it acks every
-/// instruction in each segment it's issued (recording the iids). A good
-/// node also heartbeats so the watchdog can't mistake the busy scheduler for
-/// a dead node; a failing node skips heartbeats and drops its stream the
-/// moment it's handed work, which the scheduler sees as a failure.
+/// instruction it's issued. A good node also heartbeats, so the watchdog
+/// doesn't mistake a busy scheduler for a dead node; a failing node skips
+/// heartbeats and drops its stream on the first segment, read as a failure.
 async fn mock_node(sched_addr: String, node_id: u32, fail: bool, acked: Arc<Mutex<Vec<u64>>>) {
     let mut client = SchedulerClient::connect(format!("http://{sched_addr}"))
         .await
@@ -113,9 +112,6 @@ async fn recovery_reruns_failed_node_work() {
     let dims_v = [("M", N), ("N", N), ("K", N)];
     let dmap = dims_v.iter().map(|(k, v)| (k.to_string(), *v)).collect();
 
-    // Analytic expectation: node 0 (the only survivor) acks its own base
-    // instructions plus every recovery instruction (all of node 1's lost
-    // chains land on it).
     let kernel = phobos_lang::parse(MATMUL).unwrap().remove(0);
     let program = phobos_cluster::compile(&kernel).unwrap();
     let supers = crate::default_supers(&program);

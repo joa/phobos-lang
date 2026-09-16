@@ -23,21 +23,32 @@ mod q8_0;
 mod q8_1;
 mod tables;
 
+// Read only by the cuda backend; iq1s_signed_grid also has a host test.
+#[cfg(any(test, feature = "cuda"))]
+pub(crate) use iq1_s::signed_grid as iq1s_signed_grid;
+#[cfg(feature = "cuda")]
 pub(crate) use iq1_s::{
-    flat_grid as iq1s_flat_grid, packed_grid as iq1s_packed_grid, signed_grid as iq1s_signed_grid, grid2 as iq1s_grid2, grid4 as iq1s_grid4,
+    flat_grid as iq1s_flat_grid, grid2 as iq1s_grid2, grid4 as iq1s_grid4,
+    packed_grid as iq1s_packed_grid,
 };
+#[cfg(feature = "cuda")]
 pub(crate) use iq2_s::{
     flat_grid as iq2s_flat_grid, flat_signs as iq2s_flat_signs, packed_grid as iq2s_packed_grid,
     packed_sign_masks as iq2s_sign_masks, packed_signs as iq2s_packed_signs,
 };
+#[cfg(feature = "cuda")]
 pub(crate) use iq2_xs::{flat_grid as iq2xs_flat_grid, packed_grid as iq2xs_packed_grid};
+#[cfg(feature = "cuda")]
 pub(crate) use iq2_xxs::{
     flat_grid as iq2xxs_flat_grid, flat_signs as iq2xxs_flat_signs,
     packed_grid as iq2xxs_packed_grid, packed_sign_masks as iq2xxs_sign_masks,
     packed_signs as iq2xxs_packed_signs,
 };
+#[cfg(feature = "cuda")]
 pub(crate) use iq3_s::{flat_grid as iq3s_flat_grid, packed_grid as iq3s_packed_grid};
+#[cfg(feature = "cuda")]
 pub(crate) use iq3_xxs::{flat_grid as iq3xxs_flat_grid, packed_grid as iq3xxs_packed_grid};
+#[cfg(feature = "cuda")]
 pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
 pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
 
@@ -102,12 +113,11 @@ impl Quant {
     ///
     /// Q3_K pads to 112 so its planes land eight-byte aligned. The IQ formats
     /// open with an f16 `d` that no device kernel reads -- they take the scale
-    /// from the separate plane `constant_raw` uploads -- so those two bytes
-    /// are dropped, which is about 173 MB across a 27B model. Q6_K's `d`
-    /// trails its block and goes the same way: 210 bytes become 208, which is
-    /// sixteen-aligned, and the plane carries the scale. Q4_K and Q5_K keep
-    /// their headers, since 144 and 176 are sixteen-aligned as they are and
-    /// the kernels read `d` and `dmin` out of the same load as the scales.
+    /// from the separate plane `constant_raw` uploads instead -- so those two
+    /// bytes are dropped. Q6_K's `d` trails its block and goes the same way:
+    /// 210 bytes become 208, sixteen-aligned. Q4_K and Q5_K keep their
+    /// headers, since 144 and 176 are sixteen-aligned as they are and the
+    /// kernels read `d` and `dmin` out of the same load as the scales.
     pub fn device_block(self) -> (usize, usize) {
         let bytes = self.spec().block_bytes;
         match self {
@@ -259,7 +269,7 @@ impl Planes {
 ///
 /// The blocks are kept exactly as GGUF stores them, `[n, k / block]`, so one
 /// output's inputs are contiguous. Nothing here requantizes: stacking,
-/// permuting and reading a row all move whole blocks, which is what makes them
+/// permuting and reading a row all move whole blocks, so every operation is
 /// format-independent.
 pub struct Packed {
     quant: Quant,
@@ -351,14 +361,12 @@ impl Packed {
         self.spec().raw_scales.is_some()
     }
 
-    /// The block bytes exactly as the file holds them, `[n, k / block *
     /// The blocks as the device wants them, signed because the kernel language
     /// has no unsigned byte type: a raw block byte reads as i8 and the kernel
-    /// corrects it back to 0..255 itself (see `q2k_matvec_src`), same as every
-    /// dequantizer here on the host. A format whose device stride is wider
-    /// than its packed one gets the difference as zero padding a block, so a
-    /// kernel can read the block at its natural alignment; see
-    /// [`Quant::device_block_bytes`].
+    /// corrects it back to 0..255 itself, same as every dequantizer here on
+    /// the host. A format whose device stride is wider than its packed one
+    /// gets the difference as zero padding a block, so a kernel can read the
+    /// block at its natural alignment; see [`Quant::device_block_bytes`].
     pub fn device_blocks(&self) -> Vec<i8> {
         let packed = self.spec().block_bytes;
         let (skip, dev) = self.quant().device_block();
@@ -375,6 +383,7 @@ impl Packed {
         out
     }
 
+    /// The block bytes exactly as the file holds them, `[n, k / block *
     /// block_bytes]`, for a raw kernel to upload verbatim.
     pub fn blocks(&self) -> &[u8] {
         &self.blocks

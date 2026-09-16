@@ -149,8 +149,8 @@ fn fmt_supers(rc: &RankedConfig) -> String {
         .join(" ")
 }
 
-/// Section 1: time the full planning pipeline as problem size and node count
-/// grow, and report the instruction-emission rate.
+/// Times the full planning pipeline as problem size and node count grow,
+/// reporting the instruction-emission rate.
 fn throughput(w: &Workload, node_counts: &[u16]) -> Result<()> {
     println!("== {} planner throughput ({}) ==", w.name, w.shape);
     println!(
@@ -161,8 +161,7 @@ fn throughput(w: &Workload, node_counts: &[u16]) -> Result<()> {
     for &size in w.sizes {
         let dims = (w.dims_for)(size);
         for &nodes in node_counts {
-            // Skip configs the default supertile can't divide into >= nodes
-            // output supertiles; the planner would just error.
+            // Skip configs whose default supertile can't divide into >= nodes outputs; the planner would just error.
             let plan = plan_budgeted_with(
                 &w.program,
                 &dims,
@@ -199,9 +198,8 @@ fn throughput(w: &Workload, node_counts: &[u16]) -> Result<()> {
     Ok(())
 }
 
-/// Section 2: hold the problem fixed and let the autotuner pick the supertile
-/// granularity for each node count, reporting the cost model's predictions and
-/// the strong-scaling speedup they imply.
+/// Holds the problem size fixed and lets the autotuner pick the supertile
+/// granularity per node count, reporting predicted cost and strong-scaling speedup.
 fn scaling(w: &Workload, size: i64, node_counts: &[u16], fp: ClusterFingerprint) -> Result<()> {
     println!("== {} analytic scaling ({} = {size}) ==", w.name, w.shape);
     println!(
@@ -230,13 +228,10 @@ fn scaling(w: &Workload, size: i64, node_counts: &[u16], fp: ClusterFingerprint)
         };
         let rc = &ranked[0];
 
-        // The autotuner ranks under DirectLoad: on shared storage every node
-        // reads its own operands and zero bytes cross the network, so its
-        // makespan is purely compute-bound. To show the communication the
-        // owner-computes placement would move when operands live on a peer's
-        // disk, re-plan the winner under HomeLoadPeerFetch and fold the busiest
-        // node's fetch time into the makespan ourselves (compute is identical
-        // under either ingest, so rc.compute_sec carries over).
+        // The autotuner ranks under DirectLoad, so its makespan is purely
+        // compute-bound. Re-plan the winner under HomeLoadPeerFetch to see the
+        // communication owner-computes would move, folding the busiest node's
+        // fetch time into the makespan (compute carries over unchanged).
         let plan = plan_budgeted_with(
             &w.program,
             &dims,
@@ -332,10 +327,9 @@ fn main() -> Result<()> {
         scaling(w, size, &scaling_nodes, fp)?;
     }
 
-    // The same sgemm over a 10x slower link: communication stops hiding behind
-    // compute past a point, so the cost model's makespan goes comm-bound and
-    // strong-scaling efficiency falls off. This is the arithmetic-intensity
-    // wall made visible.
+    // The same sgemm over a 10x slower link: past a point communication stops
+    // hiding behind compute, so the makespan goes comm-bound and strong-scaling
+    // efficiency falls off.
     let slow = ClusterFingerprint {
         link_bytes_per_sec: 1e9,
         ..fp

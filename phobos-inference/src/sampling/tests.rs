@@ -90,8 +90,8 @@ fn presence_penalty_demotes_a_generated_token() {
 
 #[test]
 fn presence_penalty_leaves_the_prompt_alone() {
-    // vLLM and the OpenAI API both count only what was sampled, so a
-    // token the prompt happens to contain keeps its full logit.
+    // Only what was sampled counts, so a token the prompt happens to
+    // contain keeps its full logit.
     let logits = [0.1, 3.0, 0.2, 2.9];
     let cfg = SampleConfig {
         presence_penalty: 2.0,

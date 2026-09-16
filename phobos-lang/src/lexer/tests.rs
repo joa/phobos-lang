@@ -130,7 +130,6 @@ fn arithmetic_operators() {
 
 #[test]
 fn line_comments_are_skipped() {
-    // a comment runs to end of line and produces no tokens
     let k = kinds("let x = 1 // trailing comment\n// whole line\nlet y = 2");
     assert!(k.contains(&Tok::Let));
     assert!(k.contains(&Tok::Int(1)));
@@ -178,7 +177,6 @@ fn unexpected_char_is_an_error() {
 
 #[test]
 fn no_terminator_after_a_binary_operator() {
-    // a newline right after an operator continues the statement
     let k = kinds("x +\n y");
     // [Ident(x), Plus, Ident(y), Semicolon(trailing), Eof]
     assert_eq!(k[1], Tok::Plus);

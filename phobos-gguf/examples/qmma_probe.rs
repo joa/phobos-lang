@@ -5,8 +5,7 @@
 //       --intrinsic iq1s_qgemm_t --check
 //
 // One prompt-projection kernel at the model's own shapes, compiled and
-// launched directly. `--check` runs the production intrinsic beside the one
-// asked for and compares the outputs bit for bit.
+// launched directly; `--check` compares it bit for bit against the shipped one.
 
 use anyhow::{Result, ensure};
 use cust::prelude::*;

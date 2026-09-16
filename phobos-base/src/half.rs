@@ -19,13 +19,12 @@ pub fn f16_to_f32(bits: u16) -> f32 {
 }
 
 /// Narrow to an IEEE binary16 bit pattern, rounding to nearest with ties to
-/// even, which is what the hardware's `cvt.rn.f16.f32` does. A magnitude past
-/// the format's range becomes an infinity and one below its subnormals becomes
-/// a zero of the same sign.
+/// even (matching the hardware's `cvt.rn.f16.f32`); a magnitude past the
+/// format's range becomes an infinity, one below its subnormals a zero of
+/// the same sign.
 ///
-/// The key and value caches are held this way, so the host reference rounds
-/// through the same conversion the device kernel does and the two stay
-/// comparable.
+/// Matches the device kernel's rounding, since the key and value caches use
+/// this format and the host reference must stay comparable.
 #[inline]
 pub fn f32_to_f16(value: f32) -> u16 {
     let bits = value.to_bits();

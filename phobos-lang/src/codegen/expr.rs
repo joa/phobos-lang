@@ -461,10 +461,10 @@ impl<'c> Codegen<'c> {
             }
         }
 
-        // Alignment: divisibility of the flat offset is the gcd of each dim's
-        // off*stride. A dynamic extent's stride defaults to 4 elements (the
-        // row-pitch ABI) unless `@aligned` promised more, since that default is
-        // what lets a narrow element type still reach a full 16-byte access.
+        // Alignment: divisibility of the flat offset is the gcd of each dim's off*stride. A
+        // dynamic extent's stride defaults to 4 elements (the row-pitch ABI) unless
+        // `@aligned` promised more, so a narrow element type still reaches a full 16-byte
+        // access.
         let extent_div = |d: usize| {
             if src.shape[d] == DYN {
                 src.div_of(d).max(4)
@@ -488,12 +488,11 @@ impl<'c> Codegen<'c> {
         });
         let align_div = (0..rank - 1).map(stride_div).fold(base_div, gcd);
 
-        // Bounds mask: a dim that may run past the source extent records its
-        // offset and extent for the masked load/store epilogue. A static extent
-        // that doesn't tile evenly masks against that constant; a dynamic one
-        // masks against memref.dim unless dyn_in_bounds proves the offset safe
-        // (e.g. a trimmed loop's induction variable), which keeps the
-        // vector/WMMA/cp.async fast paths (see Codegen::emit_split_for).
+        // Bounds mask: a dim that may run past the source extent records its offset and
+        // extent for the masked load/store epilogue. A static extent that doesn't tile evenly
+        // masks against that constant; a dynamic one masks against memref.dim unless
+        // dyn_in_bounds proves the offset safe (a trimmed loop's induction variable, say),
+        // which keeps the vector/WMMA/cp.async fast paths (see Codegen::emit_split_for).
         let mut mask = vec![None; rank];
         for i in 0..rank {
             let extent = if src.shape[i] != DYN {

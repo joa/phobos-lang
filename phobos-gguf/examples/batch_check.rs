@@ -3,18 +3,10 @@
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example batch_check -- [--gpu] MODEL.gguf
 //
-// Both orders run the same sum on the same weights, so a backend that batches
-// correctly returns the same final logits either way. Comparing a backend
-// against itself is what isolates batching: host against device also picks up
-// every rounding difference between them, far larger after two dozen blocks
-// than the thing being looked for.
-//
-// The order differs on the device, though: a single row splits its contraction
-// across the grid while eight rows or more go to the integer tensor cores, and
-// the two accumulate differently. That is a legitimate 1e-4 or so per
-// projection, which compounds past what an exact comparison tolerates. So the
-// measure is the largest gap as a fraction of the logit spread, which a batching
-// mistake moves and a rounding difference does not, plus the token each picks.
+// Compares a backend against itself, since host-against-device also picks up
+// rounding differences far larger than a batching bug. The measure is the
+// largest gap as a fraction of the logit spread, which a batching mistake
+// moves and rounding does not, plus the token each picks.
 
 use anyhow::{Result, bail};
 use phobos_gguf::Decoder;
@@ -34,10 +26,9 @@ fn main() -> Result<()> {
     let gguf = Gguf::open(path.as_ref())?;
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
     let model = Decoder::load(&gguf)?;
-    // Two lengths on purpose. The short prompt is under the row tile of the
-    // quantized tensor-core projection, so it batches on the matvec; the long
-    // one crosses it and leaves a remainder, which is the only place the two
-    // kernels have to agree on a seam.
+    // Two lengths on purpose: the short one is under the tensor-core row
+    // tile and batches on the matvec; the long one crosses it into a
+    // remainder, the only place the two kernels must agree on a seam.
     let prompts = [
         "The capital of France is",
         "The capital of France is Paris, and the capital of Germany is Berlin, \
@@ -61,22 +52,17 @@ fn main() -> Result<()> {
         }
     }
 
-    // A prompt longer than one pass arrives as several batches, so the second
-    // and later ones run against a cache that is already deep. That is the only
-    // shape with both rows > 1 and start_pos > 0: a single-batch prefill has the
-    // rows without the offset and a decode step has the offset without the rows.
-    //
-    // Against one wide pass rather than the sequential order, since 600
-    // positions one at a time on the host is minutes. Both orders batch, so this
-    // isolates the seam. The sizes bracket the tiles attention picks a kernel
-    // by: a whole multiple, a ragged one, and one leaving a ragged remainder.
-    // Device only, the host having no shape-dependent paths.
+    // A prompt longer than one pass arrives as several batches, so later ones
+    // run against a cache that is already deep -- the only shape with both
+    // rows > 1 and start_pos > 0. Checked against one wide pass rather than
+    // one token at a time, which would take minutes; the sizes bracket the
+    // tiles attention picks a kernel by. Device only: the host has no
+    // shape-dependent paths.
     #[cfg(feature = "cuda")]
     {
         let long: Vec<u32> = (0..600).map(|i| tokens_of(i, model.vocab())).collect();
-        // Largest first: a lazily sized table only grows fresh once per process,
-        // so the first size through here is the one that exercises it, and 512
-        // is what the runtime actually batches at.
+        // Largest first: a lazily sized table grows once per process, on
+        // whichever size runs first, and 512 is what the runtime batches at.
         for batch in [512usize, 100, 64] {
             failed |= !compare_batches(&model, &gpu, "gpu", &long, batch)?;
         }
@@ -116,11 +102,10 @@ fn compare_batches(
         state.release(backend);
         Ok(logits)
     };
-    // The split order runs first, and that is not arbitrary. Anything grown
-    // lazily, the rotary table above all, is grown by whichever order runs
-    // first. A single wide pass grows once, at the front, with nothing released
-    // to collide with, and so hides every fault in the growth; the split order
-    // grows in the middle of a later pass, the case that was actually broken.
+    // The split order runs first, deliberately: anything grown lazily (the
+    // rotary table above all) grows on whichever order runs first. A wide
+    // pass grows it once at the front, with nothing released to collide
+    // with, which hides a fault a split pass would hit mid-growth instead.
     let label = format!("{} tokens in batches of {batch}", tokens.len());
     let split_first = split(batch)?;
     report(name, &label, &split(tokens.len())?, &split_first)
@@ -164,10 +149,11 @@ fn report(name: &str, what: &str, reference: &[f32], got: &[f32]) -> Result<bool
         "{name:>5}: spread err {error:>10.3e}   token {}   over {what}",
         if agreed { "agrees" } else { "DIFFERS" }
     );
-    // The device measures about 1.1e-2 on the long prompt from accumulation
-    // order alone, and the host stays exact. A batching mistake misplaces whole
-    // rows and moves the logits by a large fraction of their spread, so this
-    // leaves room for the one and not the other.
+    // The device accumulates the two orders differently (a single row splits
+    // its contraction across the grid, eight or more go to the tensor
+    // cores), while the host stays exact. A batching mistake misplaces whole
+    // rows and moves the logits by a large fraction of their spread, so a
+    // loose tolerance still catches it.
     let ok = error <= 5e-2 && agreed;
     if !ok {
         println!("  reference [..6] {:?}", &serial[..6]);

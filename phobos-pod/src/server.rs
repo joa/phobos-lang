@@ -75,10 +75,8 @@ impl TileServer for TileService {
     }
 }
 
-/// Connects this client to a scheduler.
-///
-/// First we connect, register and then start the pump loop. Exits when the stream
-/// is closed by the scheduler (job done).
+/// Connects this client to a scheduler, registers, and pumps messages until
+/// the scheduler closes the stream (job done).
 pub async fn attach(
     sched_addr: &str,
     node_id: NodeId,

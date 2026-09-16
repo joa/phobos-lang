@@ -5,10 +5,10 @@
 // Q2_K bytes routinely have bit 7 set and a signed remainder gives the
 // wrong nibble silently.
 //
-// Each run is one inlined expression rather than named intermediates: a
-// `let` tile never releases its buffer, so named per-run steps blew the
-// 48 KB shared memory ceiling by 2x. Inlined (scale reread rather than
-// named), it fits in 43 KB.
+// Each run is one inlined expression rather than a named intermediate: a
+// `let` tile never releases its buffer, so naming each run would exceed the
+// 48 KB shared-memory ceiling. Inlined, rereading the scale rather than
+// binding it, this fits in 43 KB.
 
 use std::fmt::Write as _;
 

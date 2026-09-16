@@ -108,9 +108,8 @@ pub(crate) fn bench_saxpy(
     verify_saxpy(&yb, &x, &y, alpha);
 
     phinfo!("check: {} elements, both correct", n);
-    // SAXPY is one fused multiply-add per element: 2 flops. It is memory-bound,
-    // so this sits far below the f32 FLOP peak, but it is reported like any
-    // other bench.
+    // SAXPY is one fused multiply-add per element (2 flops) and memory-bound,
+    // so its GFLOP/s sits far below the f32 peak; reported the same way regardless.
     let gflop = 2.0 * n as f64 / 1e9;
     phinfo!(
         "phobos saxpy: {:.1} GFLOP/s, cuBLAS saxpy: {:.1} GFLOP/s",

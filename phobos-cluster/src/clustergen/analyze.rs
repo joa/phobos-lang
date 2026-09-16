@@ -1,5 +1,4 @@
-// Walking a kernel: what each statement and assignment contributes to
-// the cluster program being built.
+// Walks a kernel: what each statement and assignment contributes to the cluster program.
 
 use super::*;
 
@@ -205,10 +204,8 @@ impl<'a> Analyzer<'a> {
         Ok(())
     }
 
-    /// Record every tensor-parameter read reachable from e.
-    ///
-    /// Tile-var reads are NOT tensor accesses, so they are ignored;
-    /// that access was already captured where the tile var was bound.
+    /// Records every tensor-parameter read reachable from e. Tile-var reads
+    /// are not tensor accesses, since that access was captured where the tile var was bound.
     pub(super) fn scan_reads(
         &mut self,
         e: &Expr,

@@ -52,7 +52,6 @@ fn matmul_2x2x2_single_node() {
     let pl = plan(&p, &dims(8192), &supers, 1).unwrap();
     validate(&pl).unwrap();
 
-    // a single node consumes every supertile itself: no peer transfer
     assert!(pl.fetches.iter().all(|f| f.is_empty()));
     assert_eq!(pl.fetch_bytes, 0);
 
@@ -124,7 +123,6 @@ fn matmul_2x2x2_single_node() {
 
 #[test]
 fn launch_attr_sets_compute_cta() {
-    // @launch overrides the default CTA on every leaf's COMPUTE.
     let src = MATMUL.replace("@cluster", "@launch(128)\n@cluster");
     let kernel = phobos_lang::parse(&src).unwrap().remove(0);
     let p = phobos_cluster::compile(&kernel).unwrap();
@@ -141,7 +139,6 @@ fn launch_attr_sets_compute_cta() {
 fn matmul_two_nodes_owner_computes() {
     let p = matmul_program();
     let supers = default_supers(&p);
-    // The FETCH/serve behavior is the HomeLoadPeerFetch ingest policy.
     let pl = plan_with(&p, &dims(8192), &supers, 2, IngestPolicy::HomeLoadPeerFetch).unwrap();
     validate(&pl).unwrap();
 
@@ -160,18 +157,16 @@ fn matmul_two_nodes_owner_computes() {
         }
     }
 
-    // each input supertile is LOADed from storage exactly once cluster-wide
-    // (4 A + 4 B = 8); the home node owns the LOAD, peers FETCH.
+    // each input supertile is LOADed from storage exactly once cluster-wide:
+    // the home node owns the LOAD, peers FETCH.
     let total_loads: usize = (0..2)
         .map(|n| count(&pl, n, |o| matches!(o, Op::Load { .. })))
         .sum();
     assert_eq!(total_loads, 8);
 
-    // owner-computes by C linear coord (lin = i*2+j, node = lin%2): both
-    // nodes consume all 4 A supertiles, so A homes to node 0 and node 1
-    // FETCHes all 4; B splits by column with no fetch. Hence node 0 LOADs
-    // 4 A + 2 B = 6 and node 1 LOADs 2 B; node 1 issues 4 FETCHes, node 0
-    // none; all from node 0.
+    // owner-computes by C's linear coord (node = lin % 2): both nodes consume
+    // all 4 A supertiles, so A homes to node 0 and node 1 fetches them; B
+    // splits by column, so each node LOADs only its own with no fetch.
     let loads = |n: usize| count(&pl, n, |o| matches!(o, Op::Load { .. }));
     assert_eq!(loads(0), 6);
     assert_eq!(loads(1), 2);
@@ -182,8 +177,7 @@ fn matmul_two_nodes_owner_computes() {
     assert_eq!(fetch_count(0), 0);
     assert_eq!(fetch_count(1), 4);
 
-    // node 0 serves each of its 4 A supertiles once (to node 1); every
-    // other FREE expects zero serves.
+    // node 0 serves its 4 A supertiles once each, to node 1; other FREEs expect zero.
     let a_serves: Vec<u32> = node_ops(&pl, 0)
         .iter()
         .filter_map(|i| match &i.op {
@@ -208,16 +202,13 @@ fn matmul_two_nodes_owner_computes() {
         }
     }
 
-    // analytic minimum: 4 fetched A supertiles of 4096x4096 f32
     assert_eq!(pl.fetch_bytes, 4 * 4096 * 4096 * 4);
 }
 
 #[test]
 fn matmul_two_nodes_direct_load() {
-    // The default policy: every node LOADs the inputs it consumes straight
-    // from storage, with no peer FETCH and no serve counts. Each node owns 2 C
-    // supertiles and consumes all 4 A (both rows) + its own 2 B (one
-    // column) = 6 distinct input supertiles.
+    // The default policy: every node LOADs its own inputs straight from
+    // storage, no peer FETCH; each node needs 6 distinct inputs (4 A + 2 B).
     let p = matmul_program();
     let supers = default_supers(&p);
     let pl = plan(&p, &dims(8192), &supers, 2).unwrap();
@@ -238,9 +229,8 @@ fn matmul_two_nodes_direct_load() {
             }
         }
     }
-    // Under HomeLoadPeerFetch the 4 A-supertiles cross the network once;
-    // DirectLoad instead re-reads them: node1 LOADs its 4 A directly, so
-    // the cluster does 12 LOADs (6 each) and 0 peer bytes.
+    // DirectLoad re-reads inputs instead of fetching from a peer: node 1
+    // LOADs its 4 A directly, so the cluster issues 12 LOADs and 0 peer bytes.
     let total_loads: usize = (0..2)
         .map(|n| count(&pl, n, |o| matches!(o, Op::Load { .. })))
         .sum();
@@ -332,7 +322,7 @@ fn flash_single_leaf_plan() {
     .unwrap();
     validate(&pl).unwrap();
 
-    // grid over query blocks: Nq / BR = 4096 / 1024 = 4 leaf computes
+    // grid over query blocks: count == Nq / BR
     assert_eq!(count(&pl, 0, |o| matches!(o, Op::Compute { .. })), 4);
 
     // K and V are read whole: their supertile spans the full Nk x D
@@ -357,10 +347,8 @@ fn flash_single_leaf_plan() {
 
 #[test]
 fn flash_leaf_lowers_to_ptx() {
-    // The single leaf is the whole flash kernel; it must lower all the way
-    // to PTX through the device pipeline (GPU-free: LLVM/NVPTX codegen),
-    // the same path dispatch runs. Exercises the scalar param plus
-    // exp/dot_t/softmax codegen end to end.
+    // Lowers the whole flash kernel to PTX through the same GPU-free device
+    // pipeline dispatch uses, exercising the scalar param and softmax codegen.
     let kernel = phobos_lang::parse(FLASH).unwrap().remove(0);
     let p = phobos_cluster::compile(&kernel).unwrap();
     assert_eq!(p.leaves.len(), 1);
@@ -394,11 +382,9 @@ fn flash_unbound_scalar_errors() {
 
 #[test]
 fn budget_splits_into_segments() {
-    // 2x2x2 grid on one node. Each supertile is 4096x4096 f32 = 64 MiB.
-    // The steady-state working set for one C chain is acc + a + b = 3
-    // tiles = 192 MiB. A budget below the whole program but at least one
-    // tile forces multiple segments; each segment's incremental footprint
-    // must stay within budget, and the plan must still validate.
+    // A budget that fits at least one tile but not the whole program forces
+    // multiple segments; each must stay within budget and the plan must
+    // still validate.
     let p = matmul_program();
     let supers = default_supers(&p);
     let tile = 4096u64 * 4096 * 4;
@@ -429,11 +415,9 @@ fn budget_splits_into_segments() {
 
 #[test]
 fn tight_budget_across_chains_no_overflow() {
-    // Regression: a node owning multiple output chains frees the first
-    // chain's operands (resident drops below the segment's starting floor)
-    // before allocating the next chain; the incremental calc must saturate
-    // rather than underflow the u64. A budget of ~2 supertiles makes the
-    // floor climb high enough to expose it. Exercised at 1 and 3 nodes.
+    // A node owning multiple output chains frees one chain's operands before
+    // allocating the next; the incremental calc must saturate rather than
+    // underflow when resident drops below the segment's starting floor.
     let p = matmul_program();
     let supers = default_supers(&p);
     let tile = 4096u64 * 4096 * 4;
@@ -468,12 +452,10 @@ fn peak_resident_is_reported() {
     let p = matmul_program();
     let supers = default_supers(&p);
     let pl = plan(&p, &dims(8192), &supers, 1).unwrap();
-    // at least one C chain's live set (acc + a + b = 3 x 64 MiB) is resident
+    // at least one C chain's live set (acc + a + b) is resident
     let tile = 4096u64 * 4096 * 4;
     assert!(pl.peak_resident >= 3 * tile);
 }
-
-// --- lineage re-execution ---
 
 /// The output supertiles a plan recomputes, as sorted (tensor, lin).
 fn recovered_outputs(pl: &Plan) -> Vec<(usize, u64)> {
@@ -484,8 +466,7 @@ fn recovered_outputs(pl: &Plan) -> Vec<(usize, u64)> {
 
 #[test]
 fn plan_exposes_stores_and_owners() {
-    // The initial plan records every output STORE and each output's owner,
-    // the data the dispatcher needs to drive recovery.
+    // The plan records every output STORE and its owner, for recovery to use.
     let p = matmul_program();
     let supers = default_supers(&p);
     let pl = plan(&p, &dims(8192), &supers, 2).unwrap();
@@ -504,9 +485,8 @@ fn plan_exposes_stores_and_owners() {
 
 #[test]
 fn recover_reassigns_lost_chains_to_survivor() {
-    // 2x2x2 matmul on 2 nodes; node 1 dies with nothing durable. Node 1
-    // owned C(lin=1) and C(lin=3); both chains re-run on node 0 (the only
-    // survivor), re-LOADing their inputs from durable storage.
+    // Node 1 owned C(lin=1) and C(lin=3); recovery reruns both on node 0,
+    // the only survivor, reloading their inputs from storage.
     let p = matmul_program();
     let supers = default_supers(&p);
     let base = plan(&p, &dims(8192), &supers, 2).unwrap();
@@ -610,9 +590,8 @@ fn recover_skips_already_stored_outputs() {
 
 #[test]
 fn recover_balances_across_multiple_survivors() {
-    // 4x4 grid on 4 nodes; node 2 dies. Its 4 outputs (lin % 4 == 2:
-    // 2,6,10,14) redistribute over the survivors [0,1,3] block-cyclically:
-    // none land back on the dead node, and all four are recomputed.
+    // node 2's 4 outputs (lin % 4 == 2) redistribute block-cyclically over
+    // survivors [0,1,3]; none land back on node 2.
     let p = matmul_program();
     let supers = default_supers(&p); // 4096 each -> 4x4 grid at 16384
     let base = plan(&p, &dims(16384), &supers, 4).unwrap();

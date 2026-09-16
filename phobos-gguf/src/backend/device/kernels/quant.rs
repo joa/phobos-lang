@@ -8,7 +8,7 @@ pub(crate) const Q8_TN: usize = 32;
 
 /// Output tile for the quantized tensor-core matmul: the depth of the m8
 /// fragment, and an 8x8 tile per warp so no two warps read the same weight
-/// byte. Deeper row tiles measured the same and run out of shared memory.
+/// byte. Deeper tiles run out of shared memory.
 pub(crate) const Q8_MMA_TM: usize = 8;
 
 pub(crate) const Q8_MMA_TN: usize = 64;
@@ -25,9 +25,9 @@ pub(crate) const QUANT_TB_WIDE: usize = 16;
 /// `[blocks, 32]` so a row is a block and `rowmax` gives its magnitude directly.
 ///
 /// The rounding is the hardware's own, ties to even, matching the host
-/// reference exactly. Biasing into `[1.5, 255.5]` and truncating would get
-/// round-half-up without a rounding instruction, but costs seven bits of
-/// mantissa, enough at the top of the range to cross a boundary.
+/// reference. Biasing into `[1.5, 255.5]` and truncating would get
+/// round-half-up without a rounding instruction, but costs enough mantissa
+/// bits to cross a boundary at the top of the range.
 pub(crate) const QUANTIZE_SRC: &str = "\
 @launch(256)
 @autotune(TB in [8])
@@ -93,27 +93,11 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
 
-/// Threads the `dp4a` decode matvecs carry. **256**, and the wider CTA that
-/// looks better standalone is a whole-pass loss.
-///
-/// The CTA sets occupancy and, because the tile is derived from it, how many
-/// columns a warp owns, so it is the one knob that moves these kernels. On
-/// IQ1_S at the FFN shape `resident_probe` says wider is better, 256 leaving
-/// only 24 of the multiprocessor's 32 warps resident:
-///
-/// | `@launch` | ms | GB/s | tg128 in the model |
-/// | ---: | ---: | ---: | ---: |
-/// | **256** | 0.136 | 128.4 | **12.90, 12.90** |
-/// | 512 | 0.119 | 145.8 | 12.53, 12.54 |
-/// | 1024 | 0.114 | 152.9 | 11.75 |
-///
-/// 1.19x standalone and 0.91x in the model, the same shape as the larger-CTA
-/// result already on file for the float matvecs. A decode step interleaves a
-/// thousand of these and a fatter block leaves fewer of them in flight.
-/// `PHOBOS_QDOT_I8_CTA` re-measures it; the clamp is not optional, since a
-/// warp owns `tn * WARP / threads` columns and the tile has to fill the CTA a
-/// whole number of times, so the 16-column narrow tile will not compile at
-/// 1024.
+/// Threads the `dp4a` decode matvecs launch with: 256, or what
+/// `PHOBOS_QDOT_I8_CTA` overrides it to, clamped so a warp's
+/// `tn * WARP / threads` columns fill the CTA a whole number of times. A
+/// wider CTA reads faster alone and loses in the model, where a decode
+/// step keeps a thousand of these in flight.
 pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
     let want = std::env::var("PHOBOS_QDOT_I8_CTA")
         .ok()
@@ -122,27 +106,12 @@ pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
     want.clamp(256, tn * 32).min(1024)
 }
 
-/// Columns a `dp4a` decode matvec's tile covers. **64**, or what
+/// Columns a `dp4a` decode matvec's tile covers: 64, or what
 /// `PHOBOS_QDOT_I8_TN` overrides it to, so the tile can be swept against the
-/// CTA rather than one at a time: a warp owns `tn * WARP / threads` columns and
-/// that product, not either half, is what moves these kernels.
-///
-/// Standalone, `resident_probe` likes both wider: IQ1_S at the FFN shape reads
-/// 132.0 GB/s at 64 and 256 threads, 152.1 at 64 and 1024, and **161.0 at 128
-/// and 1024**. In the model none of it survives. Each row twice,
-/// `-p 128 -n 128 -r 1`:
-///
-/// | TN | `@launch` | tg128 |
-/// | ---: | ---: | ---: |
-/// | **64** | **256** | **16.92, 16.69** |
-/// | 64 | 512 | 16.16, 14.49 |
-/// | 32 | 256 | 16.06, 15.96 |
-/// | 128 | 512 | 10.15, 10.20 |
-/// | 128 | 1024 | 10.06, 10.10 |
-///
-/// The 128-column rows are not a tile effect: 10.1 is what this model reads
-/// whenever its output head is evicted, and a wider tile is a different
-/// compiled kernel, so it is a different footprint. The default stays.
+/// CTA rather than one at a time. A warp owns `tn * WARP / threads` columns,
+/// and that product, not either half, is what moves these kernels. Wider
+/// columns read faster alone but do not help in the model, so the default
+/// stays.
 pub(crate) fn qdot_i8_tn(default: usize) -> usize {
     std::env::var("PHOBOS_QDOT_I8_TN")
         .ok()
@@ -151,13 +120,12 @@ pub(crate) fn qdot_i8_tn(default: usize) -> usize {
         .unwrap_or(default)
 }
 
-/// The Q8_0 projection as a single `qmma_t`, which is what a prompt pass runs.
-///
-/// [`Q8_MMA_SRC`] applies the block scales every 32 elements of `k`, which forces
-/// its accumulator into shared memory and stages both operands there per block:
-/// no tile shape moves it off 2.3 TOPS. `qmma_t` folds the scales in, leaving the
-/// whole of `k` one operation with the accumulators in registers and no barrier
-/// in the loop, 12.6 TOPS on the same shapes.
+/// The Q8_0 projection as a single `qmma_t`, which is what a prompt pass
+/// runs. [`Q8_MMA_SRC`] applies the block scales every 32 elements of `k`,
+/// which forces its accumulator into shared memory and stages both operands
+/// there per block. `qmma_t` folds the scales in instead, leaving the whole
+/// of `k` as one operation with the accumulators in registers and no barrier
+/// in the loop.
 pub(crate) fn q8_qmma_src(block: usize) -> String {
     format!(
         "@launch({block})
@@ -175,12 +143,12 @@ kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// Output tiles of the `qmma_t` projection: the depth, and the widths it comes
-/// in. Operand loads and scale arithmetic are per output element however the
-/// tiles are arranged, so what pays for them is the tensor-core tiles in a
-/// warp's patch, and the output tile bounds the patch. Wider wins until the
-/// register file runs out. The 64-deep kernel takes the rows a prompt leaves
-/// over.
+/// Output tiles of the `qmma_t` projection: the depth, and the widths it
+/// comes in. Operand loads and scale arithmetic are per output element
+/// however the tiles are arranged, so what pays for them is the tensor-core
+/// tiles in a warp's patch, which the output tile bounds. Wider wins until
+/// the register file runs out; the 64-deep kernel takes the rows a prompt
+/// leaves over.
 pub(crate) const Q8_QMMA_TM: usize = 128;
 
 pub(crate) const Q8_QMMA_SHALLOW: usize = 64;
@@ -195,17 +163,15 @@ pub(crate) fn qmma_takes(n: usize) -> bool {
 pub(crate) const Q8_QMMA_TN: usize = 64;
 
 /// Threads the projection's CTA carries: half of every other kernel here. A
-/// patch is 128 live accumulators whatever the CTA, so the warp is bounded by
-/// the register file and a narrower block buys the same warps per
-/// multiprocessor on twice the grid. 30.64 TOPS against 24.91 on the widest
-/// projection.
+/// patch is 128 live accumulators whatever the CTA, so the warp is bounded
+/// by the register file, and a narrower block buys the same warps per
+/// multiprocessor on twice the grid.
 pub(crate) const Q8_QMMA_CTA: usize = 128;
 
-/// The widest column tile that divides `n`, regardless of how many blocks that
-/// leaves. The warp's patch beats filling the grid even where the widest tile
-/// leaves a third of the card idle; keeping the grid full was costing the two
-/// 1024-wide projections about a quarter of their throughput. The depth stays
-/// 128 for the same reason, 64 measures worse at every width.
+/// The widest column tile that divides `n`, regardless of how many blocks
+/// that leaves: the warp's patch beats filling the grid, even where the
+/// widest tile leaves a third of the card idle. The depth stays 128 for the
+/// same reason.
 pub(crate) fn qmma_width(n: usize) -> usize {
     Q8_QMMA_WIDTHS
         .iter()
@@ -218,12 +184,12 @@ pub(crate) fn qmma_width(n: usize) -> usize {
 /// tile is eight outputs, one per warp of the CTA.
 ///
 /// [`Q8_DP4A_SRC`] and [`Q8_SPLIT_SRC`] both stop every 32 elements of `k` to
-/// apply the block scales, and `dot_t` gives each output column to one thread:
-/// five barriers and 32 scattered sectors per kilobyte of weight. `qdot_t` folds
-/// the scales in and turns the mapping around, so a warp owns an output and its
-/// lanes divide `k`, putting a warp's reads on 512 contiguous bytes with nothing
-/// to stage. Over the seven projections a decode step runs, 2.4x to 7.4x. It
-/// wants no k-split, since 32 lanes per output already fill the machine.
+/// apply the block scales, and `dot_t` gives each output column to one
+/// thread: five barriers and 32 scattered sectors per kilobyte of weight.
+/// `qdot_t` folds the scales in and turns the mapping around, so a warp owns
+/// an output and its lanes divide `k`, putting a warp's reads on 512
+/// contiguous bytes with nothing to stage. It wants no k-split, since 32
+/// lanes per output already fill the machine.
 pub(crate) const Q8_QDOT_SRC: &str = "\
 @launch(256)
 @autotune(TN in [8])
@@ -285,9 +251,9 @@ kernel {name}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 /// The Q8_0 projection with the contraction split across the grid.
 ///
 /// [`Q8_DP4A_SRC`] puts the whole of `k` in one program, leaving a grid of
-/// `n / TN` blocks and nothing else, which binds at decode: achieved bandwidth
-/// tracks the block count and little else, 38 GB/s at 32 blocks against roughly
-/// 427 the card sustains. Splitting `k` is the only fix that adds blocks.
+/// `n / TN` blocks and nothing else, which binds at decode: achieved
+/// bandwidth tracks the block count and little else. Splitting `k` is the
+/// only fix that adds blocks.
 ///
 /// Program `(pn, ps)` takes output tile `pn` and the `k` slice at `ps` and
 /// writes its partial sum to its own row of `P`, which `q8_reduce` then sums.
@@ -332,9 +298,9 @@ kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
 pub(crate) const Q8_REDUCE_TN: usize = 128;
 
 /// Blocks the split aims for, and the most slices it will cut `k` into. The
-/// target is a little over four times the card's SM count, where the measured
-/// bandwidth curve flattens. The cap keeps a slice from shrinking to a block or
-/// two, where the second pass costs more than the first saves.
+/// target is a little over four times the card's SM count, where the
+/// bandwidth curve flattens; the cap keeps a slice from shrinking to a block
+/// or two, where the second pass costs more than the first saves.
 pub(crate) const Q8_SPLIT_TARGET: usize = 256;
 
 pub(crate) const Q8_SPLIT_MAX: usize = 16;
@@ -355,18 +321,16 @@ pub(crate) fn q8_splits(n: usize, k: usize) -> usize {
     splits.max(1)
 }
 
-/// The `q8_qmma` deep tile's grid is `(rows / TM) * (n / TN)`, nothing else:
-/// a prompt short enough, or a projection narrow enough, leaves most of the
-/// card with no block at all, 12 or 20 blocks against 48 SMs measuring around
-/// half the register-bound occupancy ceiling. Below this many blocks the
-/// unsplit launch is declined in favor of [`q8_qmma_split_src`]. Above it,
-/// splitting only adds a reduction pass to a shape already filling the grid
-/// reasonably: 72 blocks reaches 79-80% of its own ceiling, with no occupancy
-/// left for more blocks to buy.
+/// The `q8_qmma` deep tile's grid is `(rows / TM) * (n / TN)`, nothing else,
+/// so a prompt short enough, or a projection narrow enough, leaves most of
+/// the card with no block at all. Below this many blocks the unsplit launch
+/// is declined in favor of [`q8_qmma_split_src`]; above it, a shape is
+/// already filling the grid well enough that splitting only adds a
+/// reduction pass with no occupancy left to buy.
 pub(crate) const Q8_QMMA_SPLIT_THRESHOLD: usize = 48;
 
 /// Blocks a split aims to reach: two per SM at the register-bound ceiling
-/// this card's `q8_qmma` patch has (128 accumulators per patch, 48 SMs).
+/// `q8_qmma`'s patch has, 128 accumulators per patch on a 48-SM part.
 pub(crate) const Q8_QMMA_SPLIT_TARGET: usize = 96;
 
 /// The widest a split kernel's branch chain gets. Each split is a whole
@@ -390,10 +354,9 @@ pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> us
     while splits > 1 && !blocks.is_multiple_of(splits) {
         splits /= 2;
     }
-    // The reduce pass costs roughly the same whatever the split count, so a
-    // split short of the max halves the compute-time saving without shrinking
-    // what pays for it, and can cost more than it buys. Below the max, the
-    // unsplit path stays.
+    // The reduce pass costs about the same whatever the split count, so a
+    // split short of the max halves the saving without shrinking what pays
+    // for it. Below the max, the unsplit path stays.
     if splits == Q8_QMMA_SPLIT_MAX {
         splits
     } else {
@@ -403,32 +366,30 @@ pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> us
 
 /// Threads the narrow-CTA variant of the deep tile carries, and its column
 /// tile: half of [`Q8_QMMA_CTA`] and half of [`Q8_QMMA_WIDTHS`]'s widest
-/// entry. The two must be halved *together* or the variant loses its whole
-/// point: `qmma_patch` resolves the pair to the same register-bound `(rm=8,
-/// rn=8)` per-warp patch as the shipped 128-wide config, so the grid doubles
-/// on a starved shape at unchanged tensor-core intensity, while halving `TN`
-/// alone at the full CTA collapses the patch to a worse-intensity `(rm=4,
-/// rn=8)`. That narrower-tile-alone lever is what [`Q8_QMMA_WIDTHS`]'s 64-wide
-/// fallback already is, and it measured a loss.
+/// entry, halved together or the variant loses its point. `qmma_patch`
+/// resolves the pair to the same register-bound `(rm=8, rn=8)` per-warp
+/// patch as the shipped 128-wide config, so the grid doubles on a starved
+/// shape at unchanged tensor-core intensity; halving `TN` alone at the full
+/// CTA would instead collapse the patch to a worse-intensity `(rm=4, rn=8)`,
+/// the same lever [`Q8_QMMA_WIDTHS`]'s 64-wide fallback already uses.
 pub(crate) const Q8_QMMA_NARROW_CTA: usize = 64;
 
 pub(crate) const Q8_QMMA_NARROW_TN: usize = 64;
 
 /// Whether `q8_qmma`'s deep tile at `rows x n`, already resolved to
 /// [`qmma_width`]'s widest option, should take the narrow-CTA path instead.
-/// Gated on block count the same way [`q8_qmma_splits`] gates split-K: a grid
-/// already at this card's SM count has no idle multiprocessor left for more
+/// Gated on block count the same way [`q8_qmma_splits`] gates split-K: a
+/// grid already at the SM count has no idle multiprocessor left for more
 /// blocks to reach. Declines whenever `wide` is not the widest tile, since a
-/// shape on the narrower entry already lost the intensity this path exists to
-/// preserve.
+/// shape on the narrower entry already lost the intensity this path exists
+/// to preserve.
 ///
-/// Known limit, and why the caller ships default-off: the threshold is a flat
-/// block count, so it does not scale with `rows`. A shape approaching it from
-/// below rather than sitting far under it can regress, halving warps per CTA
-/// costing more than the extra SM coverage buys back. Measured at `pp512`,
-/// where `rows` is 4x `pp128`'s: `n = 1024` still passes the gate and loses.
-/// Tighten the gate relative to how starved the grid actually is, or make it
-/// row-count-aware, before loosening it or flipping the default.
+/// Ships default-off: the threshold is a flat block count that does not
+/// scale with `rows`, and a shape approaching it from below rather than
+/// sitting far under it can regress, halving warps per CTA for more SM
+/// coverage than it buys back. Tighten the gate relative to how starved the
+/// grid actually is, or make it row-count-aware, before flipping the
+/// default.
 pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> bool {
     if wide != Q8_QMMA_WIDTHS[0] || !n.is_multiple_of(Q8_QMMA_NARROW_TN) {
         return false;
@@ -440,17 +401,15 @@ pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> boo
 /// The split-K variant of [`q8_qmma_src`], for the shapes [`q8_qmma_splits`]
 /// declines to leave at one program per output tile.
 ///
-/// Two things here look like they could be simplified and cannot, both for
-/// the same reason: `qmma_t`'s direct-to-global write only fires when a slice
-/// is provably in bounds from its offset expression alone, and a dynamic
-/// tensor dimension is only ever assumed a multiple of 4 elements whatever
-/// `@aligned` claims. So an offset built from `program_id(2)` can never clear
-/// that proof. Each split therefore gets its own output operand and its own
-/// `if ps == i` arm, keeping the exact `pm * TM, pn * TN` write shape the
-/// unsplit kernel already proves; and `k`'s slice bounds are baked in as
-/// literals, since a literal's own divisor is itself and `@aligned` can then
-/// cover `A`, `AS`, `W` and `WS` too. The arms are mutually exclusive on a
-/// CTA-uniform grid coordinate, so this is predication, not divergence.
+/// Each split gets its own output operand and its own `if ps == i` arm
+/// rather than one indexed write, because `qmma_t`'s direct-to-global write
+/// only fires when a slice is provably in bounds from its offset alone, and
+/// an offset built from `program_id(2)` can never clear that proof; the arm
+/// keeps the exact `pm * TM, pn * TN` write shape the unsplit kernel already
+/// proves. `k`'s slice bounds are baked in as literals rather than left
+/// dynamic, so `@aligned` can cover `A`, `AS`, `W` and `WS` too. The arms are
+/// mutually exclusive on a CTA-uniform grid coordinate, so this is
+/// predication, not divergence.
 pub(crate) fn q8_qmma_split_src(block: usize, k: usize, s: usize) -> String {
     let slice = k / s;
     let sb = slice / Q8_BLOCK;

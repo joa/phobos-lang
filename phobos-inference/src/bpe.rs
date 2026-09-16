@@ -1,10 +1,7 @@
-// Byte-level BPE, the part that is the same whatever supplied the vocabulary.
-//
-// A GGUF file carries its tokens and merges as metadata and an ONNX export
-// carries none at all, so the two front ends build their vocabularies from
-// different places. What happens after that is identical: split the text on a
-// pre-tokenizer pattern, map each byte to a visible character, and merge
-// adjacent pairs by rank. That much lives here.
+// Byte-level BPE, the part that is the same whatever supplied the vocabulary:
+// a GGUF file carries tokens and merges as metadata, an ONNX export carries
+// none, but both then split text on a pre-tokenizer pattern, map each byte to
+// a visible character, and merge adjacent pairs by rank.
 
 use std::collections::HashMap;
 
@@ -26,10 +23,9 @@ const LLAMA3_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL
 
 /// The markers that end an assistant turn, by name.
 ///
-/// A vocabulary that declares an end-of-sequence token names one, which on some
-/// models is not the one the chat template closes turns with: MiniCPM5 declares
-/// `</s>` but ends every turn with `<|im_end|>`. An ONNX export declares
-/// nothing at all. So we simply brute-force this.
+/// A vocabulary's declared end-of-sequence token is not always the one the
+/// chat template uses, and an ONNX export declares none at all. This list
+/// brute-forces the answer.
 pub const END_OF_TURN: &[&str] = &[
     "<|im_end|>",
     "<|endoftext|>",
@@ -78,7 +74,7 @@ pub enum PreTokenizer {
 
 impl PreTokenizer {
     /// Resolve a name such as GGUF's `tokenizer.ggml.pre`. Unknown names fall
-    /// back to GPT-2, as llama.cpp does, so an unrecognized model still encodes.
+    /// back to GPT-2, so an unrecognized model still encodes.
     pub fn from_name(name: Option<&str>) -> PreTokenizer {
         match name {
             Some(n) if n.starts_with("qwen") => PreTokenizer::Qwen,
@@ -101,10 +97,9 @@ impl PreTokenizer {
     }
 }
 
-/// A pre-tokenizer, the byte-to-character mapping, and the merge ranks.
-///
-/// It holds no vocabulary: a caller supplies the symbol-to-id lookup, which is
-/// where the two front ends differ.
+/// A pre-tokenizer, the byte-to-character mapping, and the merge ranks. Holds
+/// no vocabulary: a caller supplies the symbol-to-id lookup, which is where
+/// the two front ends differ.
 pub struct ByteBpe {
     ranks: HashMap<(String, String), u32>,
     byte_to_char: [char; 256],
@@ -132,9 +127,8 @@ impl ByteBpe {
         })
     }
 
-    /// The merge list of a `merges.txt` or `vocab.bpe` file, best rank first.
-    ///
-    /// One `a b` pair a line, led by a `#version` header that carries no pair.
+    /// The merge list of a `merges.txt` or `vocab.bpe` file, best rank first:
+    /// one `a b` pair a line, led by a `#version` header that carries no pair.
     pub fn parse_merges(text: &str) -> Result<Vec<(String, String)>> {
         text.lines()
             .filter(|line| !line.is_empty() && !line.starts_with('#'))
@@ -147,17 +141,15 @@ impl ByteBpe {
             .collect()
     }
 
-    /// The visible character byte `b` maps to.
-    ///
-    /// A byte-level vocabulary's single-character tokens are exactly these 256.
+    /// The visible character byte `b` maps to. A byte-level vocabulary's
+    /// single-character tokens are exactly these 256.
     pub fn byte_char(&self, b: u8) -> char {
         self.byte_to_char[b as usize]
     }
 
     /// Encode `text`, matching `specials` literally and BPE-merging the rest.
-    ///
-    /// `lookup` resolves a symbol against the caller's vocabulary, which is the
-    /// one part a front end supplies itself.
+    /// `lookup` resolves a symbol against the caller's vocabulary, the one
+    /// part a front end supplies itself.
     pub fn encode<T: Copy>(
         &self,
         text: &str,
@@ -214,10 +206,9 @@ impl ByteBpe {
         Ok(())
     }
 
-    /// The raw byte stream behind a run of vocabulary tokens.
-    ///
-    /// A token can end mid-character, so a streaming caller must buffer these
-    /// and emit complete UTF-8 only.
+    /// The raw byte stream behind a run of vocabulary tokens. A token can end
+    /// mid-character, so a streaming caller must buffer these and emit
+    /// complete UTF-8 only.
     pub fn decode_bytes<'a>(&self, tokens: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
         tokens
             .into_iter()

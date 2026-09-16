@@ -1,26 +1,21 @@
 use super::*;
 
 /// Ceiling for the "would the doubled buffers still fit" check below. Mirrors
-/// `phobos_kernels::launch::STATIC_SHARED_LIMIT`, duplicated by hand because
-/// phobos-kernels depends on phobos-lang and not the other way round. A
-/// `@dynshared` kernel can be raised past this at launch, but eligibility is
-/// decided here, before that opt-in is visible, so the static bound is the
-/// safe default for every kernel.
+/// `phobos_kernels::launch::STATIC_SHARED_LIMIT`, duplicated here since
+/// phobos-kernels depends on phobos-lang, not the reverse. A `@dynshared`
+/// kernel can raise the real limit at launch; this check still uses it.
 const PIPELINE_SHARED_LIMIT_BYTES: i64 = 48 * 1024;
 
 /// Why a loop body was not turned into a pipelined (double-buffered) loop.
-/// Every variant is a decline, not an error: the loop just falls through to
-/// the ordinary codegen path. Only an explicit `@pipeline` finding zero
-/// eligible loops in the whole kernel is a hard failure, checked in `emit`
-/// via `Codegen::pipelined_any`.
+/// Every variant is a decline, not an error: the loop falls through to the
+/// ordinary codegen path. Only `@pipeline` finding zero eligible loops in the
+/// kernel is a hard failure, via `Codegen::pipelined_any`.
 pub(super) enum PipelineDecline {
     /// The body has no leading run of `var t = <static tensor slice>; ...`
-    /// statements at all: a loop that opens with ordinary compute, or a
-    /// kernel with no for loop shaped like this in the first place.
+    /// statements: it opens with ordinary compute, or has no such loop at all.
     NoStagedPrefix,
     /// A staged slice's shape cannot be proven to tile evenly (see
-    /// `slice_is_partial`); double-buffering it would prefetch past the
-    /// source on the last tile the same way the plain unmasked path would.
+    /// `slice_is_partial`): double-buffering it would prefetch past the source.
     PartialSlice,
     /// A statement after the staged prefix writes one of the staged names,
     /// so prefetching would read a value the compute half does not expect.
@@ -60,16 +55,14 @@ impl std::fmt::Display for PipelineDecline {
 }
 
 impl<'c> Codegen<'c> {
-    /// Matches a loop body of the form "var t = <static tensor slice>; ..."
-    /// whose remaining statements never write the staged names, and whose
-    /// staged buffers would still fit shared memory once doubled. Returns the
-    /// staged (name, slice expr) pairs and the compute statements, or the
-    /// reason the loop is not (yet) pipelined.
+    /// Matches a loop body shaped "var t = <static tensor slice>; ...", where
+    /// the remaining statements never write a staged name and the staged
+    /// buffers still fit shared memory once doubled. Returns the staged
+    /// (name, slice expr) pairs and the compute statements, or why not.
     ///
-    /// Deliberately does not check the loop bounds for lane divergence, which
-    /// would turn `emit_pipelined_for`'s barrier-in-an-`scf.if` guard into a
-    /// hang: every `.ph`-level bound is CTA-uniform by construction. See the
-    /// block comment at the end of this file for why.
+    /// Does not check the loop bounds for lane divergence: every `.ph`-level
+    /// bound is CTA-uniform by construction (see the note at the end of this
+    /// file), so `emit_pipelined_for`'s barrier-in-an-`scf.if` guard cannot hang.
     #[allow(clippy::type_complexity)]
     pub(super) fn pipeline_candidate<'a>(
         &self,
@@ -105,12 +98,10 @@ impl<'c> Codegen<'c> {
         }
 
         // Double-buffering doubles every staged slice's footprint, which an
-        // auto-attempted loop has nobody to vouch for. Conservative both
-        // ways: it ignores pool reuse of released buffers, so it can decline
-        // a loop that would fit, and it does not see static globals absent
-        // from `shared_bytes`, so it can admit one that does not. The latter
-        // degrades to ptxas's own "uses too much shared data" error, not a
-        // hang.
+        // auto-attempted loop has nobody to vouch for. Conservative both ways:
+        // it ignores pool reuse so it can decline a loop that would fit, and it
+        // misses static globals so it can admit one that does not -- which
+        // degrades to ptxas's shared-data error, not a hang.
         let mut needed_bytes = 0i64;
         for (_, expr) in &staged {
             let shape = self
@@ -138,21 +129,18 @@ impl<'c> Codegen<'c> {
 
     /// Whether a tensor-slice expression can reach past its source on the last
     /// tile: a static extent an aligned tile cannot tile evenly, or a dynamic
-    /// extent the offset cannot be accounted for against.
-    ///
-    /// The specialized matmul, fragment and pipeline paths bail on such a slice
-    /// so the generic masked path handles it. This has to agree with the mask
-    /// [`Codegen::emit_subview`] builds, or a drain with no per-element guard
-    /// reaches a partial tile.
+    /// extent the offset cannot be accounted for against. The specialized
+    /// matmul, fragment and pipeline paths bail to the generic masked path on
+    /// such a slice, so this has to agree with the mask [`Codegen::emit_subview`]
+    /// builds, or a drain with no per-element guard reaches a partial tile.
     pub(super) fn slice_is_partial(&self, expr: &Expr) -> bool {
         self.slice_is_partial_within(expr, &[])
     }
 
-    /// [`Codegen::slice_is_partial`] for a slice that sits inside loops whose
-    /// induction variables are `ivs` and whose bodies have not been emitted yet.
-    /// A prescan runs at the enclosing scope, where those variables are not yet
-    /// bound, so without naming them every loop-offset slice would look
-    /// unprovable and the fast paths would never be taken.
+    /// [`Codegen::slice_is_partial`] for a slice inside loops whose induction
+    /// variables are `ivs` and whose bodies have not been emitted yet. A
+    /// prescan runs before those variables are bound, so without naming them
+    /// every loop-offset slice would look unprovable.
     pub(super) fn slice_is_partial_within(&self, expr: &Expr, ivs: &[&str]) -> bool {
         let Expr::Index { base, subs } = expr else {
             return false;
@@ -232,12 +220,11 @@ impl<'c> Codegen<'c> {
     }
 
     /// Double-buffered loop: each staged slice gets two shared buffers, and the
-    /// loop is unrolled by two so each half references its buffers statically, a
-    /// runtime select forcing dynamic shared addressing through the hot loop.
-    /// Per original iteration the next tiles are prefetched without a barrier
-    /// into the inactive buffers before the compute reads the active ones, so
-    /// global loads fly while the CTA does FMA work, and one closing barrier
-    /// publishes the prefetch and retires reads of the buffer it overwrites.
+    /// loop is unrolled by two so each half references its buffers statically.
+    /// Per iteration the next tiles are prefetched without a barrier into the
+    /// inactive buffers while compute reads the active ones; one closing
+    /// barrier publishes the prefetch and retires reads of the buffer it
+    /// overwrites.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_pipelined_for(
         &mut self,
@@ -439,25 +426,15 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    // Why a loop bound is CTA-uniform by construction, and so needs no
-    // runtime divergence check before pipelining it.
+    // Why a loop bound is CTA-uniform by construction, so needs no runtime
+    // divergence check before pipelining: `emit_pipelined_for` wraps a
+    // `gpu.barrier` in an `scf.if`, which hangs if a CTA's threads diverge.
     //
-    // `emit_pipelined_for` wraps a `gpu.barrier` in an `scf.if`, which hangs
-    // if a CTA's threads take different branches, so a bound has to hold the
-    // same value on every thread of the block.
-    //
-    // Every `.ph`-level bound lowers through `emit_index`, which demands an
-    // already-`index`-typed value. The only producers of one are integer
-    // literals, `program_id`, a tensor's shape via `memref.dim`, the constant
-    // zero `warp_partial`/`grid_barrier` nominally return, and arithmetic
-    // over those -- all block-uniform. Nothing that reads program data is on
-    // that list, and nothing can join it: `coerce` casts `index` to an
-    // integer but has no arm the other way, and `unify` bails on an
-    // int/index mismatch instead of promoting. So `atomic_add`'s i32, or a
-    // tensor load, can never reach a bound.
-    //
-    // `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` pins
-    // both failure modes. It goes red if some future change adds an
-    // int-to-index conversion, or makes `warp_partial`/`grid_barrier` return
-    // something data-dependent, which is when this argument needs revisiting.
+    // Every `.ph`-level bound lowers through `emit_index`; its only producers
+    // -- integer literals, `program_id`, a shape via `memref.dim`, the zero
+    // `warp_partial`/`grid_barrier` return, and arithmetic over those -- are
+    // block-uniform. `coerce` has no int-to-index arm and `unify` bails on a
+    // mismatch rather than promote one, so nothing data-dependent can reach a
+    // bound. `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound`
+    // pins this and goes red if a future change breaks either guarantee.
 }

@@ -50,25 +50,10 @@ use kernels::*;
 
 pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 
-/// Whether an opt-in `PHOBOS_*` toggle is set. Opt-out toggles (a default-on
-/// mechanism) negate the complementary spelling instead; see `attn_persist`.
-/// The formats `PHOBOS_RAW_QMMA` names, or all of them when it is just a flag.
-///
-/// Which formats pay was a real question and the answer moved. Attributed one
-/// card state at a time, `-p 128 -n 128 -r 1`, each row twice:
-///
-/// | fused | pp128, a slot a projection | pp128, a ring |
-/// | --- | ---: | ---: |
-/// | none | 71.8, 79.1 | 79.2, 79.0 |
-/// | IQ1_S | 114.3, 110.2 | |
-/// | IQ1_S, IQ2_XXS | 149.6, 149.4 | 151.8, 157.9 |
-/// | **all four** | 135.3, 107.0 | **188.0, 183.8** |
-///
-/// IQ2_S and IQ2_XS *lost* while every fused projection took an activation slot
-/// of its own, and win by a wide margin once those share a ring: 143 MiB of
-/// slots across the model was more than their kernels were worth. See
-/// [`DeviceBackend::act_slot_transient`]. It is worth keeping that the negative
-/// result was real and was about residency, not about the kernels.
+/// The formats `PHOBOS_RAW_QMMA` names, or all of them when it is unset or
+/// just a flag. Fusing a format trades its expansion for an activation slot
+/// in the projection ring; IQ2_S and IQ2_XS only gain once they share that
+/// ring with the others. See [`DeviceBackend::act_slot_transient`].
 fn qmma_formats() -> Vec<Quant> {
     const ALL: [Quant; 6] = [
         Quant::IQ1_S,
@@ -94,6 +79,8 @@ fn qmma_formats() -> Vec<Quant> {
         .collect()
 }
 
+/// Whether an opt-in `PHOBOS_*` toggle is set. Opt-out toggles negate the
+/// complementary spelling instead; see [`env_flag_on`].
 fn env_flag(name: &str) -> bool {
     matches!(
         std::env::var(name).as_deref(),
@@ -109,9 +96,6 @@ fn env_flag_on(name: &str) -> bool {
     )
 }
 
-/// A device-resident Q8_0 weight: signed bytes, per-block scales in both
-/// orders (`q8_mma` wants `[block, out]`, `qdot_t` wants `[out, block]`),
-/// and the output width it was uploaded with.
 /// The buffers behind a [`DeviceQuant`] or [`DeviceRaw`] that is not in the
 /// arena. Held only to keep the allocation alive; nothing reads them.
 type OwnedQuant = (DeviceBuffer<i8>, DeviceBuffer<f32>, DeviceBuffer<f32>);
@@ -187,28 +171,12 @@ pub struct DeviceBackend {
     /// until the first one is compiled and can be asked about.
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
-    /// Contract the IQ decode in `dp4a` against an int8 activation. **On**: 2x
-    /// the float matvec, and worth tg128 11.20 -> 18.06 on Qwen3.8-27B with
-    /// prefill unchanged.
-    ///
-    /// It quantizes the activation where the f32 host reference does not, so
-    /// device against host cannot judge it -- those rows disagree by the size
-    /// of an 8-bit activation however right the kernel is, which is why this
-    /// waited on a check for so long. `backend_check` now runs the `m = 1` raw
-    /// rows both ways on the device and compares them against each other, the
-    /// way `fuse_check` already does for the fused decode path, and keeps the
-    /// host comparison for the float path it replaces.
-    ///
-    /// It quantizes the activation where the f32 host reference does not, so
-    /// `backend_check`'s `m = 1` rows move by the size of an 8-bit activation
-    /// and device-against-host cannot settle it -- that bound is already too
-    /// wide, which is why `fuse_check` exists. Device against device can:
-    /// `argmax_check` on this model produces **identical tokens for all 32
-    /// greedy decode steps on each of three prompts**, factual, narrative and
-    /// code. The kernels themselves agree with the float bodies they replace to
-    /// 1.096e-6 for IQ1_S and exactly 0 for IQ2_XXS and IQ3_XXS, and
-    /// quantizing the activation is already what every Q8_0 projection here
-    /// does. `PHOBOS_IQ1S_DP4A=1` opts in.
+    /// Contracts the IQ decode in `dp4a` against an int8 activation;
+    /// `PHOBOS_IQ1S_DP4A=1` opts in. It quantizes the activation where the
+    /// f32 host reference does not, so device against host cannot judge it.
+    /// `backend_check` instead runs the `m = 1` raw rows both ways on the
+    /// device and compares them against each other, the way `fuse_check`
+    /// does for the fused decode path.
     iq1s_dp4a: Cell<bool>,
     /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved grid.
     /// `PHOBOS_QMMA_SPLIT=1` opts in; off by default, a net wall-clock loss.
@@ -298,11 +266,10 @@ pub struct DeviceBackend {
     attentions: RefCell<HashMap<(usize, usize, usize), Module>>,
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
     /// Whether [`DeviceBackend::attention_decode`] takes the persistent
-    /// split-plus-merge path. Default on; `PHOBOS_ATTN_PERSIST=0` switches
-    /// it off. Kept outside [`fused_stage`]'s `PHOBOS_FUSED` fallback since
-    /// this gates a `grid_barrier`, not a launch chain: a grid this flag
-    /// alone let through would hang rather than run slow, so it's
-    /// `attn_persist_plan`'s occupancy check, not the flag, keeping that safe.
+    /// split-plus-merge path. Default on, `PHOBOS_ATTN_PERSIST=0` off. Kept
+    /// outside [`fused_stage`]'s `PHOBOS_FUSED` fallback because this flag
+    /// gates a `grid_barrier`: alone, it would hang rather than run slow, so
+    /// `attn_persist_plan`'s occupancy check is what keeps the path safe.
     attn_persist: bool,
     /// The persistent attention kernel, keyed by [`AttnPersistKey`], with its
     /// settled block and split count. `None` means occupancy couldn't fit
@@ -313,8 +280,8 @@ pub struct DeviceBackend {
     /// Page-locked staging for the one readback a pass makes.
     readback: RefCell<Option<LockedBuffer<f32>>>,
     /// [`DeviceBackend::argmax`]'s reduction kernel, keyed by chunk width
-    /// ([`argmax_chunk_width`]); stays a single entry in practice, since a
-    /// vocabulary's size never changes for the life of the backend.
+    /// ([`argmax_chunk_width`]); stays a single entry, since a vocabulary's
+    /// size never changes for the life of the backend.
     argmax_reduce: RefCell<HashMap<usize, Module>>,
     /// [`argmax_reduce`]'s partial-value column, `[0, W)`, one per lane;
     /// added to each chunk's base index to recover a vocabulary position.
@@ -364,21 +331,15 @@ pub struct DeviceBackend {
     /// slabs can go back once the last one does.
     state_arena: arena::Arena,
     state_live: Cell<usize>,
-    /// Whether that arena is used at all. Off: it loses, and it is the third
-    /// measurement saying the same thing. The arena's win is that a *cold* 15
-    /// MiB weight stops being its own allocation, so the driver cannot single
-    /// it out; data that is read or written every token is resident anyway,
-    /// and pooling it only makes one slab's eviction cost more. tg128 reads
-    /// 11.20 with each layer's state on its own and 9.98 pooled, the same
-    /// direction as the Q8_0 planes and the f32 constants.
-    /// `PHOBOS_STATE_ARENA=1` re-measures it.
+    /// Whether that arena is used at all. Off by default: the arena's win is
+    /// that a cold weight stops being its own allocation the driver can
+    /// single out for eviction, but a sequence's state is read and written
+    /// every token and is resident anyway, so pooling it only makes one
+    /// slab's eviction cost more. `PHOBOS_STATE_ARENA=1` turns it on.
     state_arena_on: bool,
-    /// Whether the small, hot constants share the arena with the bulk weights.
-    /// Off, because measured they should not: the arena's win is that a cold
-    /// 15 MiB weight stops being its own allocation, and a hot 0.1 MiB scale
-    /// plane put in a 128 MiB slab instead drags the whole slab resident.
-    /// tg128 reads 9.74 with only the raw weights arena'd, 8.65 once the Q8_0
-    /// planes join them and 7.82 once the f32 constants do.
+    /// Whether the small, hot constants share the arena with the bulk
+    /// weights. Off: a hot, small scale plane put in a slab sized for cold
+    /// bulk weights drags the whole slab resident instead of just the plane.
     /// `PHOBOS_ARENA_CONST=1` puts them back in.
     arena_const: bool,
     /// Whether the bulk weights go in the arena at all. `PHOBOS_ARENA=0` gives
@@ -405,8 +366,8 @@ pub struct DeviceBackend {
     /// per-lane shared-memory staging. Needs `N` to be a whole number of its
     /// own `TN`; `project_raw` falls back to the plain matvec otherwise.
     iq1s_qdot_matvec: Module,
-    /// The dp4a decode matvec, wide tile then narrow; see `I8_NARROW_TN`.
     /// The dp4a decode matvecs: wide tile, then narrow for a ragged `n`.
+    /// See `I8_NARROW_TN`.
     iq1s_qdot_i8: [Module; 2],
     iq3s_qdot_i8: [Module; 2],
     iq3xxs_qdot_i8: [Module; 2],
@@ -491,41 +452,33 @@ pub struct DeviceBackend {
     /// reads: a lane's entry is then one vector load, and the table a quarter
     /// the size. The i32 copies stay for the `gather`-based fallbacks.
     iq1s_grid_packed: DeviceBuffer<i8>,
-    /// The same table with the delta folded in and both signs laid out, which
-    /// is what makes an IQ1_S weight an exact `i8`. See `quant::iq1s_signed_grid`.
+    /// The same table with the delta folded in and both signs laid out: an
+    /// exact `i8` IQ1_S weight. See `quant::iq1s_signed_grid`.
     iq1s_signed_grid: DeviceBuffer<i8>,
     /// IQ1_S's prompt projection: the decode contracted on the integer tensor
     /// cores, so no expanded weight is ever written. See `qmma_raw.rs`.
     iq1s_qmma: Module,
-    /// IQ2_XXS's, the second largest item in a prompt pass, and the two that
-    /// share its decode but scale per sixteen elements.
+    /// IQ2_XXS's prompt projection, and the two that share its decode but
+    /// scale per sixteen elements.
     iq2xxs_qmma: Module,
     iq2s_qmma: Module,
     iq2xs_qmma: Module,
     /// The two whose grid entry is four bytes rather than eight.
     iq3xxs_qmma: Module,
     iq3s_qmma: Module,
-    /// Whether that projection is used. On now, and `PHOBOS_RAW_QMMA=0` turns
-    /// it off. It was off while it cost decode more than it bought prefill,
-    /// which the activation ring and the 32 MiB dequant scratch between them
-    /// undid: at the current default, each row twice, it measures **pp128
-    /// 192.8, 192.9 against 58.4, 58.2 and tg128 18.05, 18.02 against 18.04,
-    /// 18.03**. Prefill 3.3x, decode unchanged.
+    /// Whether that projection is used. On by default, `PHOBOS_RAW_QMMA=0`
+    /// turns it off.
     raw_qmma: Cell<bool>,
-    /// Which formats it covers. `PHOBOS_RAW_QMMA` takes a comma-separated
-    /// list as well as a flag -- `iq1s,iq2xxs` -- so the formats can be
-    /// attributed one at a time. Fusing one trades its expansion for an
-    /// activation slot a projection, and on a card past its residency cliff
-    /// that trade can go either way, so which formats pay is a measurement
-    /// rather than a given.
+    /// Which formats [`raw_qmma`] covers. `PHOBOS_RAW_QMMA` takes a
+    /// comma-separated list as well as a flag, e.g. `iq1s,iq2xxs`. Fusing a
+    /// format trades its expansion for an activation slot in the projection
+    /// ring, and that trade is not the same for every format.
     raw_qmma_formats: Vec<Quant>,
     /// IQ1_S's staged projection, when asked for. See `qmma_raw.rs`.
     qgemm: qmma_raw::Qgemm,
-    /// `PHOBOS_DENSE_SCRATCH=0` goes back to a pooled pair per weight and
-    /// `PHOBOS_TRIM=1` to handing the whole free list back after a dense pass.
-    /// Both are what the prompt path used to do, kept so the pair can be
-    /// measured in one session; on Qwen3.8-27B they cost **pp128 82.3 against
-    /// 18.8 and tg128 8.19 against 7.52**. See `residency.rs`.
+    /// `PHOBOS_DENSE_SCRATCH=0` goes back to a pooled pair per weight, and
+    /// `PHOBOS_TRIM=1` to handing the whole free list back after a dense
+    /// pass. See `residency.rs`.
     dense_scratch_shared: bool,
     trim_after_dense: bool,
     iq2xxs_grid_packed: DeviceBuffer<i8>,
@@ -556,15 +509,11 @@ pub struct DeviceBackend {
 }
 
 impl DeviceBackend {
-    /// Turns every fused stage on or off, whatever the environment asked
-    /// for. Needed because [`fused_stage`] reads its env vars once at
-    /// construction, but the equivalence harness wants both paths in one
-    /// process; see `examples/fuse_check.rs`.
-    /// Turn the `dp4a` decode matvecs on or off after construction, so a check
-    /// can run the same projection both ways in one session and compare them
-    /// against each other. Device against host cannot judge this path: the
-    /// host reference does not quantize the activation, so it disagrees by the
-    /// size of an 8-bit one however right the kernel is.
+    /// Turns the `dp4a` decode matvecs on or off after construction, so a
+    /// check can run the same projection both ways in one session and
+    /// compare them against each other. Device against host cannot judge
+    /// this path: the host reference does not quantize the activation, so
+    /// it disagrees by the size of an 8-bit one however right the kernel is.
     pub fn set_iq_dp4a(&self, on: bool) {
         self.iq1s_dp4a.set(on);
     }
@@ -576,6 +525,10 @@ impl DeviceBackend {
         self.raw_qmma.set(on);
     }
 
+    /// Turns every fused stage on or off, whatever the environment asked
+    /// for. Needed because [`fused_stage`] reads its env vars once at
+    /// construction, but the equivalence harness wants both paths in one
+    /// process; see `examples/fuse_check.rs`.
     pub fn set_fused(&mut self, on: bool) {
         self.fused_mlp = on;
         self.fused_project = on;

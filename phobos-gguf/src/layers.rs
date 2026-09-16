@@ -12,17 +12,16 @@ use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the
-/// batched projection has. 8224 becomes 8448, 2.7% more arithmetic against a
-/// tile that is 23% faster.
+/// batched projection has.
 const FUSE_ALIGN: usize = 256;
 
 /// What a model's constants will occupy on the backend once every one of them
 /// is resident.
 ///
-/// Entries are keyed the way the backend caches them, so a weight two places
-/// reach for, a tied embedding and language-model head, counts once. Only
-/// weights that actually go up belong here: a llama embedding table is read row
-/// by row on the host and never uploaded, so the walk that fills this skips it.
+/// Entries are keyed the way the backend caches them, so a tied embedding and
+/// LM head count once. Only weights that actually go up belong here: a llama
+/// embedding table is read row by row on the host and never uploaded, so the
+/// walk that fills this skips it.
 #[derive(Default)]
 pub(crate) struct Uploads {
     uploads: HashMap<String, Upload>,
@@ -30,8 +29,8 @@ pub(crate) struct Uploads {
 
 struct Upload {
     bytes: usize,
-    /// Held as f32 rather than left quantized, which is what makes a heavily
-    /// quantized file want several times its own size on the device.
+    /// Held as f32 rather than left quantized: a heavily quantized file can
+    /// want several times its own size on the device.
     dense: bool,
 }
 
@@ -82,11 +81,11 @@ impl Linear {
             .with_context(|| format!("missing tensor '{name}'"))?;
         check_dims(info, &[in_dim as u64, out_dim as u64])?;
 
-        // The file's blocks are kept as they are: GGUF already stores them
-        // [out, in] with `in` contiguous, which is what every operation here
-        // and the four-way byte dot product both want. Nothing is requantized,
-        // and a format whose block does not divide the input width falls
-        // through to the dense path rather than being split across rows.
+        // GGUF already stores blocks [out, in] with `in` contiguous, the
+        // layout every operation here and the four-way byte dot product
+        // want. Nothing is requantized: a format whose block does not divide
+        // the input width falls through to the dense path instead of being
+        // split across rows.
         let quant = info
             .ggml_type
             .quant()
@@ -119,12 +118,11 @@ impl Linear {
 
     /// What [`Linear::project_shared`] will upload for this weight.
     ///
-    /// A weight a kernel unpacks goes up as one quant per element plus its
-    /// scales twice, once per block and once transposed per row, the two
+    /// A quantized weight a kernel unpacks goes up as one quant per element
+    /// plus its scales twice, per block and per row transposed, the two
     /// layouts the quantized kernels read. A weight a raw kernel decodes goes
-    /// up as its file bytes verbatim plus one `f16` header plane, or two for a
-    /// format with a minimum term. Anything else goes up as f32, whatever the
-    /// file held.
+    /// up as its file bytes plus an `f16` header plane per scale term.
+    /// Anything else goes up as f32.
     pub(crate) fn footprint(&self, into: &mut Uploads) {
         let elems = self.in_dim * self.out_dim;
         let (bytes, dense) = match &self.weight {
@@ -143,8 +141,8 @@ impl Linear {
     }
 
     /// The same projection with its output channels permuted: output `j` of the
-    /// result is output `order[j]` of this one. Nothing is requantized, a block
-    /// covering inputs of one output, so a row moves whole.
+    /// result is output `order[j]` of this one. Nothing is requantized: a block
+    /// covers one output's inputs, so a row moves whole.
     ///
     /// The rotary layout wants this. ggml rotates either consecutive pairs or
     /// pairs half a head apart and the backend implements only the second, so an
@@ -270,9 +268,9 @@ impl Linear {
         Ok(out)
     }
 
-    /// Write output row `index` of this weight into `out`, dequantizing it. Only
-    /// the embedding table uses this: reading a token's row straight out of the
-    /// quantized bytes removes the f32 copy without changing the result.
+    /// Write output row `index` of this weight into `out`, dequantizing it.
+    /// Only the embedding table uses this, reading a token's row straight out
+    /// of the quantized bytes instead of keeping a dense f32 copy.
     pub(crate) fn row_into(&self, index: usize, out: &mut [f32]) -> Result<()> {
         ensure!(
             index < self.out_dim && out.len() == self.in_dim,
@@ -744,8 +742,7 @@ fn release_once(backend: &dyn Backend, [a, b]: [Buf; 2]) {
 }
 
 /// An attention block's key and value caches, `[capacity, n_kv * head_dim]`
-/// each, in f16. Backend-resident: at a few thousand positions the cache is the
-/// largest thing in the block, and see [`HBuf`] for why it is held narrow.
+/// each, in f16 and backend-resident. See [`HBuf`] for why it is held narrow.
 #[derive(Default)]
 pub(crate) struct KvCache {
     keys: Option<HBuf>,
@@ -837,9 +834,9 @@ impl RopeTable {
         backend.constant(&key, &table)
     }
 
-    /// What the table costs once a sequence has reached `positions`. Doubling
-    /// leaves every superseded copy resident, and those sum to just under the
-    /// final one, so the pair is what a run ends up holding.
+    /// What the table costs once a sequence has reached `positions`: doubling
+    /// leaves superseded copies resident, so a run ends up holding about
+    /// twice the final table.
     pub(crate) fn footprint(&self, into: &mut Uploads, positions: usize) {
         let rows = positions.next_power_of_two().max(512);
         let key = format!("rope.{}.{}", self.rope_dim, self.freq_base);

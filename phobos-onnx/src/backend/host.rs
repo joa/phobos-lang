@@ -454,8 +454,8 @@ fn matmul(
         bail!("MatMul inner dims disagree: {ad:?} x {bd:?}");
     }
 
-    // A plain 2-D matmul, the lm-head among them, goes to the backend. A
-    // constant B stays device-resident like the Gemm weights.
+    // A plain 2-D matmul goes to the backend. A constant B stays
+    // device-resident like the Gemm weights.
     if ad.len() == 2 && bd.len() == 2 {
         let b_name = node.inputs.get(1).map(String::as_str).unwrap_or("");
         let b_key = weights.contains_key(b_name).then(|| format!("{b_name}:mm"));

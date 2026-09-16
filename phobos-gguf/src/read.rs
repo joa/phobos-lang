@@ -66,10 +66,10 @@ impl<'a> Reader<'a> {
 
     fn checked_len(&mut self) -> Result<usize> {
         let len = usize::try_from(self.u64()?).context_overflow()?;
+        let remaining = self.bytes.len() - self.pos;
         ensure!(
-            len <= self.bytes.len() - self.pos,
-            "GGUF declares {len} elements but only {} bytes remain",
-            self.bytes.len() - self.pos
+            len <= remaining,
+            "GGUF declares {len} elements but only {remaining} bytes remain"
         );
         Ok(len)
     }

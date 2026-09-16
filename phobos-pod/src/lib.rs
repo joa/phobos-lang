@@ -15,7 +15,7 @@ use phobos_cluster::tile::NodeId;
 
 use crate::engine::Engine;
 
-/// Default device arena per node (one node = one GPU currently)
+/// Default device arena per node (one node, one GPU)
 pub const DEFAULT_ARENA_BYTES: usize = 512 << 20;
 
 pub async fn serve(
@@ -41,7 +41,7 @@ pub async fn serve(
     let addr: SocketAddr = listen_addr.parse().context("invalid listen address")?;
     let listener = TcpListener::bind(addr).await?;
     let bound = match advertise_addr {
-        // for 0.0.0.0:0 shenanigans
+        // caller-supplied override for a 0.0.0.0:0 bind, which peers can't dial directly
         Some(a) => a,
         None => connectable(listener.local_addr()?),
     };

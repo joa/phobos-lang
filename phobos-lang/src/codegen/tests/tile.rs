@@ -4,11 +4,8 @@ use super::*;
 
 #[test]
 fn a_dead_named_tile_returns_its_buffer_to_the_pool() {
-    // A named tile used to hold its shared buffer for the whole kernel,
-    // because bind cannot see where the name stops being read. A block's
-    // own declarations are the case where it can: the last statement
-    // mentioning the name ends its life, so the next allocation in the
-    // block reuses the buffer instead of minting another global.
+    // The last statement that reads a name ends its life; a block's own
+    // declarations reuse the freed buffer instead of minting another global.
     let mlir = emit_mlir(
         "@launch(256)
         kernel chain(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
@@ -29,15 +26,10 @@ fn a_dead_named_tile_returns_its_buffer_to_the_pool() {
 
 #[test]
 fn dynamic_shared_resets_its_cursor_between_dead_phases() {
-    // `@dynshared` tiles live at byte offsets in one allocation rather than
-    // one `memref.global` apiece, so two distinct shapes used to just sum:
-    // this is the bug behind attention_persist_src's 41KB combined
-    // footprint before the fix, since its two barrier-separated phases
-    // never share a shape. `a` ([16, 64], 4096 bytes) and `b` ([8, 4], 128
-    // bytes) are both read and therefore released before `c` ([1, 8], a
-    // shape neither of them is) is ever declared, so nothing is live when
-    // `c` mints: the allocator should restart at offset 0 rather than
-    // append past `a` and `b`'s combined 4224 bytes.
+    // `@dynshared` tiles live at byte offsets in one shared allocation. `a`
+    // and `b` are read and released before `c` is declared, so nothing is
+    // live when `c` mints: the allocator must restart at offset 0 rather
+    // than append past their combined footprint.
     let mlir = emit_mlir(
         "@dynshared
         kernel chain(X: tensor<f32>[16, 64], Y: tensor<f32>[8, 4],
@@ -77,8 +69,8 @@ fn a_tile_read_after_a_loop_keeps_its_buffer() {
     assert!(module_verifies(&mlir), "{mlir}");
 }
 
-/// A tile is shared memory, so a slice of one has to name that address
-/// space, which is why the space travels on the [`MemVal`].
+/// A tile is shared memory, so a slice of one must name that address
+/// space: the space travels on the [`MemVal`].
 #[test]
 fn a_tile_slice_stays_in_shared_memory() {
     let mlir = emit_mlir(
@@ -93,9 +85,7 @@ fn a_tile_slice_stays_in_shared_memory() {
     assert_contains(
         &mlir,
         &[
-            // the tile's own slice, in shared
             "memref<16x32xf32, strided<[32, 1], offset: ?>, 3>",
-            // the tensor's, in global, from the same code path
             "memref<16x32xf32, strided<[32, 1], offset: ?>, 1>",
         ],
     );
@@ -144,9 +134,8 @@ fn an_uninitialized_declaration_needs_a_tile_type() {
     }
 }
 
-/// The flat view is the same bytes under another type, still in shared
-/// memory: what lets a value reduced per block of 32 be contracted over as
-/// one row.
+/// The flat view reinterprets the same shared-memory bytes as another type,
+/// so a value reduced per block of 32 can be contracted over as one row.
 #[test]
 fn flat_views_a_tile_as_one_row() {
     let mlir = emit_mlir(
@@ -171,10 +160,8 @@ fn flat_views_a_tile_as_one_row() {
         &mlir,
         &[
             "memref.reinterpret_cast",
-            // the quantized row and its scales, both one row, both shared
             "memref<32x32xi8, 3> to memref<1x1024xi8, 3>",
             "memref<32x1xf32, 3> to memref<1x32xf32, 3>",
-            // and the contraction reads them there rather than from global
             "vector<4xi8>",
         ],
     );
@@ -195,8 +182,6 @@ fn a_flattened_tile_is_not_recycled() {
             O[0 :+ 1, 0 :+ 32] = flatA
         }",
     );
-    // Two declarations of the same shape, and so two buffers rather than one
-    // reused: the reuse is what would corrupt the view.
     assert_eq!(
         mlir.matches("memref<8x4xf32, 3> = uninitialized").count(),
         2,

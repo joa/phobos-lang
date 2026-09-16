@@ -10,9 +10,8 @@ use phobos_cluster::tile::{AccessMode, DataType};
 use phobos_sched::server::{DispatchConfig, Scheduler, make_job};
 use phobos_sched::{IngestPolicy, default_supers, plan_budgeted_with};
 
-/// Cluster matmul. The @cluster lower bounds are what default_supers picks, so
-/// they set the supertile shape directly; SUPER_K = SUPER means K/SUPER k-steps
-/// per output supertile (operands stream rather than all co-residing).
+/// Cluster matmul. The @cluster lower bounds set the supertile shape directly
+/// (default_supers picks them), so K/SUPER k-steps per output stream rather than co-reside.
 fn matmul_src(super_dim: usize) -> String {
     format!(
         r#"
@@ -91,9 +90,8 @@ fn tensor(name: &str, n: usize, mode: AccessMode, uri: String) -> TensorInput {
     }
 }
 
-/// Recompute C[r, c] on the CPU in f64 by reading just row r of A and
-/// column c of B from disk, and compare to the stored distributed value.
-/// Returns the relative error.
+/// Recomputes C[r, c] on the CPU in f64, from row r of A and column c of B
+/// read off disk, and returns the relative error against the stored value.
 fn sample_rel_err(ua: &str, ub: &str, uc: &str, n: usize, r: usize, c: usize) -> Result<f64> {
     let shape = [n as u64, n as u64];
     let row = storage::load_f32(
@@ -153,12 +151,10 @@ async fn main() -> Result<()> {
         grid * grid
     );
 
-    // Plan first (CPU-only, instant): peak_resident is the per-node resident
-    // high-water (operands stream k-step by k-step and free, so it's a few
-    // supertiles, not the whole problem). The node engine honors it via arena
-    // backpressure -- it allocates in topological order and parks ALLOCs that
-    // would overflow until a FREE makes room -- so arena = peak + headroom runs
-    // within bound.
+    // Plan first (CPU-only, instant): peak_resident is the per-node high-water,
+    // since operands stream and free k-step by k-step rather than all co-residing.
+    // The node engine enforces it via arena backpressure, parking ALLOCs that
+    // would overflow until a FREE makes room, so arena = peak + headroom holds.
     let source = matmul_src(super_dim);
     let program = phobos_cluster::compile(&phobos_lang::parse(&source)?.remove(0))?;
     let supers = default_supers(&program);
@@ -179,10 +175,9 @@ async fn main() -> Result<()> {
     let arena = (peak + peak / 5) as usize; // +20% headroom for prefetch/alignment
     let budget = arena as u64;
 
-    // Each in-process node keeps its own arena on the shared GPU, so the card
-    // must hold the sum. Simulating N nodes on one GPU replicates operands,
-    // so it costs more VRAM than the problem; the cluster's real win needs
-    // separate VRAM per physical node.
+    // Each in-process node keeps its own arena on the shared GPU, so the card must
+    // hold their sum: simulating nodes on one GPU replicates operands and costs
+    // more VRAM than the real problem, which would give each node separate VRAM.
     let aggregate = arena as u64 * nodes as u64;
     println!(
         "on disk: {} of f32 (A+B+C)\nplan: {} instrs, peak resident {}/node -> arena {}/node",

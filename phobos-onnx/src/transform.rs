@@ -287,7 +287,7 @@ fn try_attention(si: usize, graph: &Graph, counts: &HashMap<String, usize>) -> O
     // The softmax input's producer: an optional scale wrapping the Q@K^T.
     let (scores_edge, scale) = unwrap_scale(graph, sm_in)?;
 
-    // K^T must itself be a Transpose of K swapping the last two axes.
+    // K^T must itself be a Transpose of K.
     let mm1 = producer(nodes, &scores_edge)?;
     if nodes[mm1].op_type != "MatMul" {
         return None;

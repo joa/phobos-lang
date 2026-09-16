@@ -2,14 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example ppsweep
 //
-// Decoding was fixed by turning the projection's mapping around. Prompt
-// processing runs a different kernel, `q8_mma`, measured here at the shapes a
-// 512-token prompt asks for.
-//
-// Reports achieved integer throughput, since a batched projection is compute
-// bound where the matvec was bandwidth bound: the weight is read once per row
-// tile, so what matters is how much of the tensor core's 89 TOPS the tiling
-// reaches.
+// Times `q8_mma`, the batched projection prompt processing runs, at the
+// shapes a 512-token prompt asks for. Reports achieved integer throughput,
+// since the weight is read once per row tile in a batched pass: what
+// matters is how much of the tensor core's throughput the tiling reaches.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -51,8 +47,8 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 /// so the whole of `k` can be handed over at once.
 ///
 /// The accumulators then live in registers across all of `k` rather than in a
-/// shared-memory tile rewritten every 32 elements, and neither operand is
-/// staged: the `m8n8k16` fragment layout is what they are already in.
+/// shared-memory tile rewritten every 32 elements, and neither operand
+/// stages, since both already sit in the `m8n8k16` fragment layout.
 const SRC_QMMA: &str = "\
 @launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}])
@@ -221,8 +217,7 @@ fn main() -> Result<()> {
             for &(tm, tn, block) in tiles {
                 let aligned = format!("@aligned(M = {tm}, N = {tn})");
                 // A tile whose accumulator does not fit in shared memory fails
-                // to build, which is itself a result: it is why `q8_mma`'s tile
-                // has to stay small.
+                // to build: that failure is why `q8_mma`'s tile stays small.
                 let Ok(module) = compile(
                     source,
                     &[("BLOCK", block), ("TM", tm), ("TN", tn)],

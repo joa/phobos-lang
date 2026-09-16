@@ -26,18 +26,14 @@ pub(super) fn fused_stage(var: &str) -> bool {
 }
 
 impl DeviceBackend {
-    /// Run `f` against a module compiled under `key` on first use.
+    /// The matvec on a fixed, card-sized grid. See [`q8_qdot_persist_src`]:
+    /// this exists to be measured against the launched kernel, not to be the
+    /// default.
     ///
-    /// Several kernels take a tile extent that has to be a compile-time
-    /// constant, so they are generated per shape. Every shape a model uses is
-    /// fixed at load, so each cache holds a handful of entries and stops growing
-    /// once decoding starts.
-    /// The matvec on a fixed, card-sized grid. See [`q8_qdot_persist_src`]: this
-    /// exists to be measured against the launched kernel, not to be the default.
-    ///
-    /// The grid is the driver's answer for a kernel already compiled at it, so the
-    /// first projection compiles twice: once at a provisional 4 blocks per SM to
-    /// have something to ask about, then at whatever came back. Both are cached.
+    /// The grid is the driver's answer for a kernel already compiled at it,
+    /// so the first projection compiles twice: once at a provisional 4
+    /// blocks per SM to have something to ask about, then at whatever came
+    /// back. Both are cached.
     pub(super) fn qdot_persistent(
         &self,
         n: usize,

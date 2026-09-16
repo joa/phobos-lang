@@ -34,7 +34,7 @@ impl DeviceBackend {
         let block = packed.spec().block;
         let nb = k / block;
         let mut bytes = packed.device_blocks();
-        let mut d = scales.d.clone();
+        let mut d = scales.d;
         if packed.quant().grouped_rows() {
             let dev = packed.quant().device_block().1;
             bytes = group_rows(&bytes, n, nb, dev);

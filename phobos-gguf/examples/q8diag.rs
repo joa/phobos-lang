@@ -2,12 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example q8diag
 //
-// The device kernel and the host reference disagree by more than plain f32
-// noise would suggest, and comparing both to f64 shows the kernel is the more
-// accurate of the two: it sums each 32-element block before scaling and
-// accumulating, which grows error more slowly than the host's flat running sum
-// over all of k. So the disagreement is summation order, and `backend_check`'s
-// tolerance has to allow for it rather than the kernel matching bit for bit.
+// Against f64, the device kernel is more accurate than the host reference:
+// it sums each 32-element block before accumulating, where the host runs
+// one flat sum over all of k. The disagreement is summation order, which is
+// why `backend_check` allows for it instead of requiring a bit-for-bit match.
 use anyhow::Result;
 use phobos_base::half::{f16_to_f32, f32_to_f16};
 use phobos_gguf::backend::{Backend, HostBackend, quantize_row, read_vec};
@@ -35,13 +33,13 @@ fn main() -> Result<()> {
             .collect();
         let a: Vec<f32> = (0..k).map(|_| next()).collect();
 
-        // The f64 truth of the sum both backends are actually computing, which
-        // means the quantized activation rather than the original: quantizing is
-        // part of the operation's definition, and including its error here would
-        // swamp the difference in accumulation order this exists to measure.
+        // The f64 truth of the sum both backends actually compute, from the
+        // quantized activation rather than the original: quantizing is part
+        // of the operation's definition, and its error would otherwise swamp
+        // the accumulation-order difference this measures.
         //
-        // `qs` is [n, k], the order the file stores and the contraction wants,
-        // so an output's weights are one contiguous row.
+        // `qs` is [n, k], the order the file stores and the contraction
+        // wants, so an output's weights are one contiguous row.
         let mut qa = vec![0i8; k];
         let mut da = vec![0.0f64; k / 32];
         for (b, chunk) in a.chunks_exact(32).enumerate() {

@@ -47,8 +47,8 @@ fn src_for(name: &str, tables: usize) -> String {
     }
 }
 
-/// The whole point of the intrinsic: no shared buffer, no barrier, and the
-/// eight decoded weights of a lane going straight to the scratch.
+/// No shared buffer, no barrier: the intrinsic writes a lane's eight
+/// decoded weights straight to the scratch.
 #[test]
 fn qdecode_t_writes_the_scratch_without_staging() {
     for (what, tables) in FORMATS {
@@ -71,10 +71,9 @@ fn qdecode_t_writes_the_scratch_without_staging() {
     }
 }
 
-/// The packed tables are read a whole entry at a time: one `vector.load` for
-/// a one-table format, two for a format that keeps its signs separate. That
-/// is the point of packing them to `i8` -- eight scalar loads an element
-/// group become one, and the table is a quarter the size.
+/// The packed tables are read a whole entry at a time: one `vector.load`
+/// for a one-table format, two when signs are kept separate. Packing to
+/// `i8` turns eight scalar loads a group into one, a quarter the size.
 #[test]
 fn qdecode_t_reads_a_whole_table_entry_at_once() {
     for (what, tables) in FORMATS {
@@ -88,8 +87,8 @@ fn qdecode_t_reads_a_whole_table_entry_at_once() {
     }
 }
 
-/// The store has to coalesce, which is what picks the thread map: the column
-/// is the fast axis, so a warp covers whole sectors of a row band.
+/// The store must coalesce: the thread map puts the column on the fast
+/// axis, so a warp covers whole sectors of a row band.
 #[test]
 fn qdecode_t_makes_the_column_the_fast_axis() {
     let mlir = emit_mlir(SRC);

@@ -27,7 +27,7 @@ fn main() -> Result<()> {
     let decoder = load_model(&std::fs::read(dir.join("decoder.onnx"))?)?.graph;
     let with_past = load_model(&std::fs::read(dir.join("decoder_with_past.onnx"))?)?.graph;
 
-    // --- prompt pass: full sequence through the no-past decoder ---
+    // Prompt pass: full sequence through the no-past decoder.
     let folded = fold_graph(
         &decoder,
         &HashMap::from([("input_ids".to_string(), vec![1, n as i64])]),
@@ -57,14 +57,14 @@ fn main() -> Result<()> {
         }
     }
 
-    // --- step: one token with past through the with-past decoder ---
+    // Step: one token with past through the with-past decoder.
     let mut shapes = HashMap::from([("input_ids".to_string(), vec![1, 1])]);
     shapes.extend(past_dims);
     let folded_step = fold_graph(&with_past, &shapes)?;
     let step_out = host::run(&folded_step, &step_inputs)?;
     let step_logits = step_out.get("logits").context("no step logits")?.to_f32();
 
-    // --- oracle: full recompute over n+1 tokens ---
+    // Oracle: full recompute over n+1 tokens.
     let mut ids2 = ids.clone();
     ids2.push(next);
     let folded2 = fold_graph(

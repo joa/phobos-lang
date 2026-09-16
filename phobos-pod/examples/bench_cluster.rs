@@ -9,9 +9,8 @@ use phobos_cluster::tile::{AccessMode, DataType};
 use phobos_sched::server::{DispatchConfig, Scheduler, make_job};
 
 /// The cluster matmul (mirrors examples/matmul_cluster_fp32.ph). The @cluster
-/// lower bound is filled per run so default_supers picks the supertile we
-/// want; the device-tile @autotune defaults (32/32/4) are shared with the
-/// leaf the scheduler compiles.
+/// lower bound is filled per run so default_supers picks the wanted supertile;
+/// its device-tile @autotune defaults (32/32/4) match the leaf the scheduler compiles.
 fn matmul_src(super_lo: usize) -> String {
     format!(
         r#"
@@ -31,9 +30,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
     )
 }
 
-/// The same matmul without @cluster, for the bare device launch (device
-/// codegen need not know the cluster attribute; the tile dims are pinned via
-/// shape_overrides).
+/// The same matmul without @cluster, for the bare device launch: device
+/// codegen ignores the cluster attribute, and the tile dims are pinned via shape_overrides.
 const DEVICE_SRC: &str = r#"
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
@@ -196,7 +194,6 @@ async fn main() -> Result<()> {
         storage::write_tensor_f32(&uri("B.bin"), &b)?;
         storage::write_tensor_f32(&uri("C.bin"), &vec![0.0; n * n])?;
 
-        // 1. bare single full-K launch.
         let bare = bare_launch(&stream, n, &a, &b, iters)?;
         println!(
             "{n:>6}  {:>16}  {:>11}  {:>11.1}  {:>8}",
@@ -206,7 +203,6 @@ async fn main() -> Result<()> {
             "1.00x"
         );
 
-        // 2 & 3. cluster job latency at one supertile (1x1x1) then tiled (2x2x2).
         for (label, super_lo) in [("cluster 1x1x1", n), ("cluster 2x2x2", n / 2)] {
             let source = matmul_src(super_lo);
             let job = || {

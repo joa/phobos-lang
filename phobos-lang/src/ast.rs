@@ -193,14 +193,6 @@ impl Kernel {
         self.attrs.iter().any(|a| a.name == "padstage")
     }
 
-    /// Whether the kernel spans several stages of a pass and synchronizes them
-    /// with `grid_barrier`, so every block must be resident at once or the
-    /// barrier deadlocks. The launcher, not the compiler, has to honour it: see
-    /// `phobos_kernels::launch::persistent_grid`.
-    pub fn wants_persistent(&self) -> bool {
-        self.attrs.iter().any(|a| a.name == "persistent")
-    }
-
     /// Whether the kernel calls an intrinsic that uses `ldmatrix`, which
     /// needs the module indexed at 64 bits.
     pub fn wants_ldmatrix(&self) -> bool {
@@ -217,7 +209,8 @@ impl Kernel {
         found
     }
 
-    // force legacy WMMA
+    /// True for `@tensorcore` without the `wmma` argument, which forces the
+    /// legacy WMMA path.
     pub fn wants_mma_sync(&self) -> bool {
         self.attrs.iter().any(|a| {
             a.name == "tensorcore"

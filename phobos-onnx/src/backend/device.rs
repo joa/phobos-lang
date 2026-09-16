@@ -105,8 +105,8 @@ impl MatmulBackend for GpuBackend {
         n: usize,
         b_key: Option<&str>,
     ) -> Result<Vec<f32>> {
-        // All three axes pad to whole tiles. Masking a ragged N makes the
-        // tiled kernel miscompute, see `examples/mm_check.rs`.
+        // All three axes pad to whole tiles; masking a ragged N instead makes
+        // the tiled kernel miscompute.
         let (mp, kp, np) = (round_up(m, MM_TM), round_up(k, MM_TK), round_up(n, MM_TN));
         let a_pad = pad(a, m, k, mp, kp);
 
@@ -182,7 +182,6 @@ impl MatmulBackend for GpuBackend {
         if np == n {
             return Ok(c_pad);
         }
-        // The real [m, n] block out of the [m, np] padded rows.
         let mut out = vec![0.0f32; m * n];
         for i in 0..m {
             out[i * n..(i + 1) * n].copy_from_slice(&c_pad[i * np..i * np + n]);
@@ -291,16 +290,15 @@ fn layernorm_src(w: usize) -> (String, usize) {
 /// row-major f32 vectors.
 ///
 /// Compute ops lower to Phobos kernels and run one per node in topological
-/// order, over intermediate f32 device buffers. Layout and index ops move data
-/// rather than compute on it, so [`crate::layout`] resolves them on the host;
-/// that costs a round-trip apiece but keeps them rank-general. Integer tensors
-/// stay host-side as i64.
+/// order over device buffers. Layout and index ops move data rather than
+/// compute on it, so [`crate::layout`] resolves them on the host at the cost
+/// of a round trip; integer tensors stay host-side as i64.
 pub fn run(graph: &Graph, inputs: &HashMap<String, Vec<f32>>) -> Result<HashMap<String, Vec<f32>>> {
     run_typed(graph, inputs, &HashMap::new())
 }
 
-/// [`run`] also taking integer inputs, token ids for a Gather among them, as
-/// `(values, dims)` keyed by edge name.
+/// [`run`] also taking integer inputs, token ids for a Gather among them,
+/// keyed by edge name.
 pub fn run_typed(
     graph: &Graph,
     f32_inputs: &HashMap<String, Vec<f32>>,

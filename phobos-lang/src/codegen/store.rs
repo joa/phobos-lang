@@ -1,9 +1,7 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// Stores value into the tile target (= or +=).
-    ///
-    /// This is where tile-level patterns get matched:
+    /// Stores value into the tile target (= or +=), matching these tile-level patterns:
     ///
     /// - t += dot(a, b) -> accumulating matmul loop into target
     /// - t = dot(a, b)  -> zero-fill plus that accumulating loop
@@ -43,11 +41,9 @@ impl<'c> Codegen<'c> {
             return self.tile_exp_into(block, &src, target);
         }
 
-        // t = qmma_t(..) writes the accumulators where they are wanted rather
-        // than through a tile.
-        //
-        // The accumulators are registers already, and a `[128, 64]` f32 tile
-        // on the way out is 32 KB, which holds the kernel to one CTA per SM.
+        // t = qmma_t(..) writes the accumulators where they are wanted rather than through a
+        // tile: they are registers already, and a `[128, 64]` f32 tile on the way out is 32 KB,
+        // holding the kernel to one CTA per SM.
         if op == AssignOp::Set
             && let Expr::Call { callee, args } = value
             && callee == "qmma_t"
@@ -65,11 +61,9 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
 
-        // t = iq1s_qmma_t(..) likewise. Without this the fused projection
-        // allocates its own [128, 64] f32 tile, which ptxas reports as 32 KB of
-        // shared memory and holds the kernel to two CTAs per multiprocessor for
-        // no gain: the accumulators are already registers at the rows they
-        // belong in.
+        // t = iq1s_qmma_t(..) likewise: without this the fused projection allocates its own
+        // [128, 64] f32 tile (32 KB, ptxas reports), holding the kernel to two CTAs per SM for
+        // no gain, since the accumulators are already registers at the rows they belong in.
         if op == AssignOp::Set
             && let Expr::Call { callee, args } = value
             && callee == "iq1s_qmma_t"
@@ -179,9 +173,8 @@ impl<'c> Codegen<'c> {
             && (callee == "dot" || callee == "dot_t")
         {
             // The matmul kernels write the target in place (register/fragment
-            // blocking or a strided sub-tile sweep), none of which carry the
-            // per-element store guard a partial tile needs. Route such stores
-            // through an accumulator tile instead.
+            // blocking, or a strided sub-tile sweep), carrying no per-element
+            // store guard, so a partial tile routes through an accumulator tile instead.
             if target.is_masked() {
                 bail!(
                     "writing a dot result directly into a partially out-of-bounds \
@@ -192,7 +185,7 @@ impl<'c> Codegen<'c> {
             let transpose = callee == "dot_t";
             let (a, b) = self.dot_operands(block, args)?;
 
-            // `p = dot(p, p)` is routed through a tmp since we create garbage otherwise.
+            // `p = dot(p, p)` is routed through a tmp to avoid aliasing garbage.
             if target.global.is_some() && (target.global == a.global || target.global == b.global) {
                 let temp = self.alloc_tile_shaped(block, target.elem, &target.shape)?;
 
@@ -284,9 +277,8 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
 
-        // Anything else built out of arithmetic, tmax and the per-element math
-        // calls: the whole tree in one sweep, whatever its depth. See
-        // codegen/elemwise.rs.
+        // Anything else built out of arithmetic, tmax and the per-element
+        // math calls: the whole tree in one sweep. See codegen/elemwise.rs.
         if self.store_fused(block, target, op, value)? {
             return Ok(());
         }

@@ -43,9 +43,8 @@ pub(crate) fn tool_choice_instruction(tool_choice: Option<&Value>) -> Option<Str
 }
 
 /// MiniCPM5's equivalent of [`TOOL_FORMAT_INSTRUCTION`], also verbatim from
-/// its template. The CDATA rule is not decoration: an `edit` call carries file
-/// contents, the multi-line text with `<` in it that the bare form cannot
-/// represent.
+/// its template. An `edit` call's file contents are multi-line text with `<`
+/// in it, which only the CDATA form can represent.
 pub(crate) const MINICPM_TOOL_GUIDELINES: &str = "\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param>";
 
 /// Where MiniCPM5's template substitutes the tool definitions when the
@@ -72,10 +71,10 @@ pub(crate) fn render_tool_definitions(tools: &Value, dialect: Dialect) -> String
     text
 }
 
-/// The system turn a tool-carrying request opens with. The two templates order
-/// it differently and the order is what the model was trained on: Qwen puts the
-/// tool block first and the caller's system prompt after it, MiniCPM5 the other
-/// way round unless the prompt places the definitions itself.
+/// The system turn a tool-carrying request opens with. The two templates
+/// order it differently, matching what each model was trained on: Qwen puts
+/// the tool block first and the caller's system prompt after it, MiniCPM5 the
+/// other way round unless the prompt places the definitions itself.
 pub(crate) fn render_tools_system(
     tools: &Value,
     system: Option<&str>,

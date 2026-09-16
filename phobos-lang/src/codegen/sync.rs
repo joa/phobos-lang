@@ -1,20 +1,16 @@
 use super::*;
 
-/// Grid-wide synchronization, for kernels that outlive one stage of a pass.
+/// Grid-wide synchronization, for a kernel that spans several stages of a
+/// pass and barriers between them instead of paying a launch boundary per stage.
 ///
-/// A decode step is a deep, narrow chain of tiny kernels, and a launch boundary
-/// costs about twice what an in-kernel grid barrier does, so a kernel that spans
-/// several stages and separates them with a barrier pays less than the same
-/// stages launched one at a time.
-///
-/// `grid_barrier(bar)` takes an `i32` tensor of at least two elements: slot 0 is
-/// the arrival counter and slot 1 the release generation. `tensor<i32>[2]` and
-/// the `tensor<i32>[2, 1]` column both spell it, the latter for a host whose
-/// launch ABI passes rank-2 descriptors. The caller owns it,
-/// zeroed once before the launch, and must not touch it again while the kernel
-/// runs. Two properties are the caller's to guarantee, and neither is checked:
-/// - every block of the grid is resident at once, since a block still waiting to
-///   be scheduled never arrives and the barrier deadlocks. That is what
+/// `grid_barrier(bar)` takes an `i32` tensor of at least two elements: slot 0
+/// is the arrival counter, slot 1 the release generation (`tensor<i32>[2]` or
+/// the `tensor<i32>[2, 1]` column, for a host whose launch ABI passes rank-2
+/// descriptors). The caller owns it, zeroed once before the launch, untouched
+/// while the kernel runs. Two properties are the caller's to guarantee, and
+/// neither is checked:
+/// - every block of the grid is resident at once: a block still waiting to be
+///   scheduled never arrives, and the barrier deadlocks. That is what
 ///   `@persistent` is for.
 /// - the same barrier tensor is not shared by two concurrent kernels.
 ///
@@ -37,10 +33,9 @@ use super::*;
 /// so the reset is itself atomic and cannot lose an arrival from a block that
 /// has already raced ahead into the next barrier.
 ///
-/// Both the spin and the generation read go through `atomic_add(_, 0)` rather
-/// than a plain load: an ordinary load is free to be hoisted out of the spin
-/// loop or served from a stale cache line, and the atomic is ordered against
-/// the releasing block's writes.
+/// Both the spin and the generation read use `atomic_add(_, 0)` rather than a
+/// plain load, which could be hoisted out of the spin loop or read a stale
+/// cache line; the atomic orders against the releasing block's writes.
 impl<'c> Codegen<'c> {
     /// `atomic_add(t, i, v) -> old`: adds `v` to `t[i]` and returns the previous
     /// value, atomically across the whole device. `t` must be an `i32` tensor.
@@ -65,10 +60,9 @@ impl<'c> Codegen<'c> {
         Ok(Rv::Scalar(old))
     }
 
-    /// Resolves the atomic-state operand: a named `i32` tensor parameter, and
-    /// nothing else. A tile lives in shared memory and a slice has an offset
-    /// the atomic would have to fold in, so neither is accepted. Returns the
-    /// memref and its rank, which decides how the slot index is subscripted.
+    /// Resolves the atomic-state operand: a named `i32` tensor parameter,
+    /// nothing else (a tile is shared memory, a slice has an offset to fold
+    /// in). Returns the memref and rank, which decides the slot's subscript.
     fn barrier_tensor(&self, e: &Expr, what: &str) -> Result<(Value<'c, 'c>, usize)> {
         let Expr::Var(name) = e else {
             bail!("{what} expects a named i32 tensor parameter");
@@ -86,11 +80,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The `memref.atomic_rmw addi` itself, addressing slot `idx` of an `i32`
-    /// tensor of any rank.
-    ///
-    /// The slot indexes the leading dimension and the rest are zero, so the
-    /// state is a rank-1 pair or the `[2, 1]` column a rank-2 launch ABI can
-    /// pass without a descriptor of its own.
+    /// tensor of any rank. The slot indexes the leading dimension and the rest
+    /// are zero, so the state is a rank-1 pair or the `[2, 1]` column a rank-2
+    /// launch ABI can pass without a descriptor of its own.
     fn atomic_add_raw(
         &self,
         block: &Block<'c>,

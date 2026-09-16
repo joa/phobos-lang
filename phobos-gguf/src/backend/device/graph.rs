@@ -213,10 +213,10 @@ impl DeviceBackend {
     }
 
     /// Replays the recorded pass, building or patching the graph first. A
-    /// rebuild is only needed when the pass's shape changes, which in practice
-    /// means the first decode step after a prefill and the reverse. Otherwise
-    /// the topology is identical and the only nodes that moved are the ones
-    /// reading the key/value cache, whose length grew by a token.
+    /// rebuild is only needed when the pass's shape changes: the first
+    /// decode step after a prefill, and the reverse. Otherwise the topology
+    /// is identical and the only nodes that moved are the ones reading the
+    /// key/value cache, whose length grew by a token.
     pub(super) fn replay(&self) -> Result<()> {
         if self.report_pass.get() != 0 {
             let left = self.report_pass.get() - 1;

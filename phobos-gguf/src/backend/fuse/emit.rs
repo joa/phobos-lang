@@ -31,14 +31,12 @@ impl ChainKey {
             }
         }
 
-        // The whole of the pass's judgement is here. A value read outside the
-        // nest that wrote it has to be in memory, and it needs a barrier unless
-        // the reader can prove it is reading its own block's work.
-        //
-        // The walk is in chain order and the write is recorded after the reads,
-        // so a value the chain both reads early and writes late, which is what
-        // accumulating into the residual is, does not look like a dependency of
-        // the stage that read it first.
+        // A value read outside the nest that wrote it has to be in memory, and
+        // needs a barrier unless the reader can prove it is reading its own
+        // block's work. The walk is in chain order and a write is recorded
+        // after its stage's reads, so a value read early and written late
+        // (accumulating into the residual, for instance) does not look like a
+        // dependency of the stage that read it first.
         let mut redundant: HashSet<Val> = HashSet::new();
         let mut writer: HashMap<Val, usize> = HashMap::new();
         for (s, stage) in self.stages.iter().enumerate() {
@@ -490,16 +488,12 @@ impl Emit {
         Ok(true)
     }
 
-    /// One (plane, head) pair of the causal depthwise convolution.
+    /// One (plane, head) pair of the causal depthwise convolution: each block
+    /// does one plane of one head.
     ///
-    /// The plane rides the unit index rather than being unrolled inside it: a
-    /// block does one plane of one head, which is the parallelism the launched
-    /// kernel had on its third grid axis. Unrolling instead measured 13.5
-    /// microseconds a layer against the 9.5 the two launches it replaced cost.
-    ///
-    /// The epilogue tests the plane, which is derived from the block index and so
-    /// is uniform across the CTA. That matters: the gain reduces the row, and a
-    /// CTA-wide reduction inside a divergent branch would hang.
+    /// The epilogue tests the plane, which is derived from the block index and
+    /// so is uniform across the CTA: the gain reduces the row, and a CTA-wide
+    /// reduction inside a divergent branch would hang.
     fn conv(&mut self, key: &ChainKey, s: usize, unit: &str) -> Result<()> {
         let Stage::Conv {
             history,
@@ -567,9 +561,9 @@ impl Emit {
     }
 
     /// Where a unit's run of `stride` elements starts, as source text. A zero
-    /// offset is left out rather than compiled in as a constant nobody reads,
-    /// which keeps the emitted source of a projection starting at row zero the
-    /// shape it had before offsets existed.
+    /// offset is left out rather than compiled in as a constant nobody reads:
+    /// otherwise every projection would carry an unused tune constant and an
+    /// empty `+` prefix in its emitted source.
     fn strided(&mut self, name: String, offset: usize, unit: &str, stride: usize) -> String {
         if offset == 0 {
             return format!("{unit} * {stride}");
@@ -721,16 +715,14 @@ impl Emit {
         }
     }
 
-    /// Claims a quantized activation's storage on first sight under either shape.
+    /// Claims a quantized activation's storage on first sight under either
+    /// shape. A value every block wrote its own copy of goes in shared memory,
+    /// since only the block that wrote it reads it back; a value one block
+    /// wrote and another reads has to be global, which is the case a barrier
+    /// already precedes.
     ///
-    /// Where that storage is, is the one decision here. A value every block wrote
-    /// its own copy of is read back only by the block that wrote it, so it goes
-    /// in shared and the grid's worth of copies a redundant stage would otherwise
-    /// publish never happens. A value one block wrote and another reads has to be
-    /// global, and that is exactly the case a barrier already precedes.
-    ///
-    /// `folded` is a flag rather than a [`View`] because those two shapes are the
-    /// only ones a quantized row has any meaning under.
+    /// `folded` is a flag rather than a [`View`] because those are the only two
+    /// shapes a quantized row has meaning under.
     fn quant(&mut self, val: Val, len: usize, folded: bool) -> (String, String) {
         let view = if folded { View::Folded } else { View::Flat };
         if let Some(pair) = self.pairs.get(&(val, view)) {

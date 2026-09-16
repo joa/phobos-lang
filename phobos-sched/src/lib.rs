@@ -169,21 +169,15 @@ pub fn plan_budgeted_with(
     lower(p, &inst, &cfg, scalars)
 }
 
-/// Re-plan the work lost when `dead` fails, for redispatch onto the survivors.
+/// Re-plans the work lost when `dead` fails, for redispatch onto survivors.
+/// `width` is the original cluster size (dead nodes included): output
+/// ownership is keyed by `lin % width`, so it must match the initial plan's.
 ///
-/// Lineage recovery for owner-computes: every output supertile a dead node owned
-/// but had not yet STOREd is recomputed from scratch on a survivor. Its operands
-/// are durable inputs re-LOADed from storage, so each chain is self-contained
-/// and the lost subgraph is just those chains placed over the survivor set.
-/// Deterministic TileIds keep the rest of the DAG valid; reissued tiles carry a
-/// bumped version so they cannot collide with tiles still resident on the
-/// survivor that adopts them, and iids start at `iid_base` so they never alias
-/// instructions still in a survivor's table.
-///
-/// `width` is the original cluster size, `dead` every node that has failed so
-/// far, and `durable` the output supertiles the dispatcher must not recompute:
-/// those already STOREd, plus those an outstanding recovery is redoing. Returns
-/// an empty plan when nothing is lost.
+/// Every output a dead node owned but had not yet STOREd is recomputed from
+/// durable inputs re-LOADed from storage. Reissued tiles carry a bumped
+/// `version` so they cannot collide with a survivor's resident tiles, and
+/// iids start above `iid_base` so they never alias its instructions. `durable`
+/// lists outputs to skip: already STOREd, or claimed by another recovery.
 #[allow(clippy::too_many_arguments)]
 pub fn recover_plan(
     p: &ClusterProgram,
@@ -374,8 +368,7 @@ fn instantiate(
         super_grids.push(grid);
     }
 
-    // leaf launch grids: same (dim, sym) formula scaled down.
-    // the leaf's runtime dims are the supertile shape divided by the @autotune default for now
+    // leaf launch grids: supertile shape divided by each leaf's @autotune default.
     let mut leaf_grids = Vec::new();
     let mut leaf_ctas = Vec::new();
 
@@ -610,9 +603,7 @@ fn lower(
     }
 
     // home of an input supertile = lowest-id consuming node (it LOADs from storage);
-    // every other consuming node FETCHes from it. The home serves the tile once per remote consuming node.
-    //
-    // note: this depends on the fetch mode; could also be nodes just loading from storage
+    // every other consuming node FETCHes from it, and home serves it once per remote consumer.
     let home = |key: &(usize, u64)| -> usize { *consumers_of[key].iter().next().unwrap() };
     let remote_serves = |key: &(usize, u64)| -> u32 { (consumers_of[key].len() - 1) as u32 };
 
@@ -689,14 +680,12 @@ fn lower(
                             let ingest = next();
                             let op = match cfg.policy {
                                 IngestPolicy::HomeLoadPeerFetch if node != home(&key) => {
-                                    // must fetch
                                     let from = home(&key) as NodeId;
                                     fetches[node].push((tile, from));
                                     fetch_bytes += tile_bytes(*t);
                                     Op::Fetch { tile, from }
                                 }
                                 _ => Op::Load {
-                                    // direct load
                                     tile,
                                     src: storage_ref(*t, coords, super_shapes),
                                 },
@@ -758,8 +747,7 @@ fn lower(
                 }
             }
 
-            // inline lifetime end: STORE/FREE each tile whose last use is now
-            // last_use is exact!
+            // STORE/FREE each tile whose last use is now, per the exact last_use map.
             for (t, coords, _) in &c.args {
                 let key = (*t, lin(*t, coords));
                 if last_use[node][&key] != pos {
@@ -838,16 +826,14 @@ fn lower(
     })
 }
 
-/// Partition one node's topologically ordered instruction list into segments
-/// whose incremental working set (bytes allocated since the segment began
-/// that are still live at its peak) stays within budget. Returns the
-/// segments, their [`SegMem`], and the node's absolute resident high-water.
+/// Partitions one node's instruction list into segments whose incremental
+/// working set (bytes allocated since the segment began, still live at its
+/// peak) stays within budget. Returns the segments, their [`SegMem`], and the
+/// node's absolute resident high-water.
 ///
-/// Boundaries fall before an ALLOC that would push the current segment's
-/// incremental footprint over budget; a single tile larger than the budget is
-/// a hard error (the autotuner's feasibility prune should have rejected the
-/// config first). Cutting never reorders; deps that now cross a boundary are
-/// ordinary same-node InstrId deps and stay valid (see [`validate`]).
+/// A boundary falls before an ALLOC that would push the segment over budget;
+/// a single tile larger than budget is a hard error. Cutting never reorders,
+/// so deps crossing a boundary stay valid same-node InstrId deps (see [`validate`]).
 fn segment(
     instrs: Vec<Instr>,
     budget: u64,
@@ -870,7 +856,7 @@ fn segment(
             );
         }
     }
-    let _ = ntensors; // (reserved: per-tensor budgeting could key on this)
+    let _ = ntensors; // reserved for future per-tensor budgeting
 
     let mut segs = Vec::new();
     let mut mems = Vec::new();
@@ -907,11 +893,9 @@ fn segment(
             if b > budget {
                 bail!("supertile of {b} bytes exceeds the memory budget of {budget} bytes",);
             }
-            // Would this allocation push the segment's incremental working
-            // set over budget? Inline FREEs can drop resident below the
-            // segment's starting floor, so this must saturate; being below the
-            // floor means negative incremental, never a reason to cut (and a
-            // plain - would underflow the u64, panicking).
+            // Would this allocation push the segment's incremental set over budget?
+            // Inline FREEs can drop resident below the segment's starting floor, so
+            // this must saturate: a plain subtraction could underflow the u64 and panic.
             if !cur.is_empty() && (resident + b).saturating_sub(seg_start) > budget {
                 flush(&mut cur, &mut segs, &mut mems, seg_peak, seg_start, seg_id);
                 seg_start = resident;

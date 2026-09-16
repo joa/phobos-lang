@@ -87,10 +87,6 @@ kernel iq2xs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq2xs_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq2xs_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which
-/// this mirrors. `@aligned(N = TN)` is required for the same reason:
-/// `iq2xs_qdot_t` demands its `qb`/`d` slices provably in bounds.
 /// Output tile for the dp4a variant; a warp takes two columns.
 pub(crate) const IQ2XS_I8_TN: usize = 64;
 
@@ -119,6 +115,10 @@ kernel iq2xs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
+/// [`iq2xs_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
+/// into one `iq2xs_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which
+/// this mirrors. `@aligned(N = TN)` is required for the same reason:
+/// `iq2xs_qdot_t` demands its `qb`/`d` slices provably in bounds.
 pub(crate) fn iq2xs_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)

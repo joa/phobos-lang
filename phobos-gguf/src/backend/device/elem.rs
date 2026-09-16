@@ -35,7 +35,6 @@ impl DeviceBackend {
 
     /// [`DeviceBackend::strided`], but two independent plane pairs in one
     /// launch; see [`Backend::store_2d_pair`].
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn strided_pair(
         &self,
         a_src: (u64, usize),

@@ -1,21 +1,16 @@
 // IQ1_S on the integer tensor cores, with the grid decode folded in.
 //
-// This is to a prompt pass what `iq1s_qdot.rs` is to a decode step. The
-// expansion path it replaces is not slow because its decode is slow: measured
-// per instruction the two bodies are the same size, and both move DRAM at
-// 67 GB/s. It is slow because it writes the expanded weight out and reads it
-// back, 23.8 GB against the 2.3 GB the format itself is, so it pays 11.4x the
-// bytes for the same arithmetic. Contracting straight out of the registers the
-// decode already lands in costs none of that, and leaves no scratch on a card
-// where the weights are 6.37 GiB of 8.
+// This is to a prompt pass what `iq1s_qdot.rs` is to a decode step: it
+// contracts straight out of the registers the decode already lands in,
+// instead of writing the expanded weight out and reading it back.
 //
-// Two properties of the format are what make it fit `mma.m8n8k16.s8` at all.
-// A grid byte is -1, 0 or 1 and the delta is a quarter of the step between
-// them, so `dl * (g + delta)` is `(dl / 8) * (8g +- 1)` and the weight is an
-// exact int8 in -9..9: no activation row sums, unlike the `dp4a` decode path,
-// which carries the delta as a second dot product. And a group of 32 elements
-// shares one scale, which is exactly one Q8_0 activation block, so both scales
-// land on the same k step and the accumulators stay in registers.
+// Two properties of the format let it fit `mma.m8n8k16.s8` at all. A grid
+// byte is -1, 0 or 1 and the delta is a quarter of the step between them, so
+// `dl * (g + delta)` is `(dl / 8) * (8g +- 1)`, an exact int8 in -9..9 with
+// no activation row sums (the `dp4a` decode path carries the delta as a
+// second dot product). And a group of 32 elements shares one scale, exactly
+// one Q8_0 activation block, so both scales land on the same k step and the
+// accumulators stay in registers.
 
 use super::iq1s::IQ1S_BLOCK_BYTES;
 use super::*;
@@ -33,8 +28,8 @@ impl<'c> Codegen<'c> {
     ///
     /// `grid` is the signed table, `8 * g +- 1` already folded, indexed by the
     /// 11-bit grid index and the group's sign bit together. Folding the delta
-    /// into the table rather than the kernel is what keeps the decode to a
-    /// single four-byte load per fragment: see `iq1s_signed_grid` on the host.
+    /// into the table rather than the kernel keeps the decode to a single
+    /// four-byte load per fragment: see `iq1s_signed_grid` on the host.
     pub(in crate::codegen) fn tile_iq1s_qmma_t(
         &mut self,
         block: &Block<'c>,
@@ -375,20 +370,13 @@ impl<'c> Codegen<'c> {
 
 impl<'c> Codegen<'c> {
     /// [`Self::iq1s_qmma_t_into`] with the decoded weight staged through shared
-    /// memory rather than decoded again in every warp that needs it.
+    /// memory once per CTA instead of re-decoded in every warp that reads it.
     ///
-    /// `qmma_patch` caps a warp's patch at [`QMMA_TILES`] tiles, so a 128-row
-    /// output tile takes two patches and each column of the weight is decoded
-    /// twice over. Staging decodes it once for the whole CTA and turns a
-    /// fragment from about seventeen instructions into one shared load.
-    ///
-    /// What it costs is the loop nest. The register form carries its
-    /// accumulators across `k` inside a patch loop; staging needs every warp at
-    /// the same `k` at once, so the patch loop has to go, and it only can when
-    /// there is exactly one patch a warp. That is why this is a second entry
-    /// point rather than a flag on the first: the caller picks it by name,
-    /// which also keeps the two apart in the kernel cache, where a flag read
-    /// during codegen would not.
+    /// Only valid with exactly one patch per warp ([`Self::qmma_patch`]): the
+    /// staged form needs every warp at the same `k` together, which drops
+    /// the patch loop the register form uses to carry accumulators across
+    /// `k`. A separate entry point rather than a flag keeps the two apart in
+    /// the kernel cache.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn iq1s_qmma_staged_into(
         &mut self,

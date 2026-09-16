@@ -199,11 +199,9 @@ kernel iq2xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// IQ2_XXS's prompt projection, decode and contraction in one kernel.
-///
-/// The same shape as [`super::iq1s::iq1s_qmma_src`] and the second largest item
-/// in a prompt pass: `iq2xxs_qdecode` is 24.0% of one against `iq1s_qdecode`'s
-/// 25.0%, and the expansion pays the same 11x in bytes that fusing removes.
+/// IQ2_XXS's prompt projection, decode and contraction in one kernel, the
+/// same shape as [`super::iq1s::iq1s_qmma_src`]: fusing avoids the byte
+/// expansion a separate dequant-then-matmul pass would pay.
 pub(crate) fn iq2xxs_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     format!(
         "@launch({block})

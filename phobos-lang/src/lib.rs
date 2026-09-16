@@ -21,11 +21,9 @@ pub fn compile(context: &phobos_base::context::Context, code: &str) -> anyhow::R
 }
 
 /// Compiles the given code and reports the dynamic shared memory each
-/// kernel needs at launch.
-///
-/// Note: Must use `@dynshared` for this to have any effect. Kernels not annotated
-///       with dynamic shared memory will use static globals with a cap at 48 KB.
-///       Shared memory must be respected in the launch ABI.
+/// kernel needs at launch. Only kernels marked `@dynshared` report a nonzero
+/// amount; others use static globals capped at 48 KB, and the launch ABI
+/// must respect this.
 ///
 /// Enforces every kernel's `@pipeline` assertion: fails if a kernel wrote the
 /// attribute and nothing in it pipelined. A caller that compiles several

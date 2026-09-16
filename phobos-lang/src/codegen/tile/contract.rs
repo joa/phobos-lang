@@ -7,11 +7,10 @@ impl<'c> Codegen<'c> {
     /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind
     /// `dot_t` (contracts the last dim of both operands).
     ///
-    /// The int8 operands take the tensor cores first and `dp4a` second. The
-    /// generic fallback is a plain thread-per-output scalar reduction: the
-    /// heavily-tuned [`Self::tile_matmul`] has no transposed-b variant, and the
-    /// attention S = Q @ K.T tile is small relative to the kernel's other
-    /// costs.
+    /// Int8 operands take the tensor cores first, then `dp4a`. Otherwise a
+    /// plain thread-per-output scalar reduction: [`Self::tile_matmul`] has
+    /// no transposed-b variant, and the attention S = Q @ K.T tile is small
+    /// next to the kernel's other costs.
     pub(in crate::codegen) fn tile_matmul_t(
         &mut self,
         block: &Block<'c>,
@@ -215,21 +214,15 @@ impl<'c> Codegen<'c> {
 
     /// out[m, n] += sum_k(a[m, k] * b[k, n]): accumulates into out.
     ///
-    /// Register-blocked when out has a static shape: the CTA's threads stride over
-    /// TMxTN sub-tiles of the output ([`Self::sub_tile`]), carrying the
-    /// accumulator through the k-loop as one vector<TMxTN> iter_arg, fed by
-    /// vector.contract over k-chunks. That loads TM + TN operand elements per
-    /// k-step for TM*TN MACs, instead of two loads per MAC in the element-wise
-    /// scheme.
+    /// Register-blocked when out has a static shape: threads stride over
+    /// TMxTN sub-tiles ([`Self::sub_tile`]), carrying the accumulator
+    /// through the k-loop as one vector<TMxTN> iter_arg so each k-step
+    /// loads TM + TN elements for TM*TN MACs.
     ///
-    /// Warp-tiled when a factorization of the 32 lanes divides the sub-tile grid
-    /// ([`Self::lane_grid`]): warps stride over WMxWN warp tiles (WM = lm*TM,
-    /// WN = ln*TN) with lanes laid out lmxln row-major inside, so the warp's
-    /// per-k-step shared reads collapse to WM + WN distinct elements. Lanes in a
-    /// row broadcast the same a fragment, lanes in a column the same b fragment,
-    /// and the b row segments the lanes read are contiguous (conflict-free). The
-    /// flat fallback scatters the warp across a thin full-width strip and reads up
-    /// to twice as much.
+    /// Warp-tiled when a factorization of the 32 lanes divides the sub-tile
+    /// grid ([`Self::lane_grid`]): lanes share a and b fragments along rows
+    /// and columns of the warp tile, so shared reads collapse to WM + WN
+    /// elements with the b row conflict-free. The flat fallback reads more.
     pub(in crate::codegen) fn tile_matmul(
         &mut self,
         block: &Block<'c>,
@@ -254,11 +247,9 @@ impl<'c> Codegen<'c> {
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
 
-        // Warp decomposition, hoisted out of the warp-tile loop: which warp
-        // this thread belongs to, how many warps the CTA has (the launch ABI
-        // requires a multiple of 32 threads), and the lane's element offset
-        // within its warp tile. Unsigned div/rem (non-negative operands) by
-        // constants strength-reduce to shift/mask.
+        // Warp id, lane, and warp count for this thread; the launch ABI
+        // requires a multiple of 32 threads. Unsigned div/rem by constants
+        // strength-reduce to shift/mask.
         let warp = match Self::lane_grid(tiles_m, tiles_n, tm, tn) {
             Some((lm, ln)) => {
                 let w = self.const_index(block, 32)?;
@@ -319,15 +310,10 @@ impl<'c> Codegen<'c> {
             ns.push(self.addi(&body, n0, c)?);
         }
 
-        // Row segments become single vector accesses when the buffer's base
-        // and row starts are provably 16-byte aligned (MemVal::aligned; n0 is
-        // a multiple of tn, k chunks are multiples of 4). A vector access per
-        // thread is also free of shared-bank conflicts, where stride-4 scalar
-        // accesses conflict 4-way. Unvectorizable operands get assembled
-        // element-wise instead; the MAC grid is a vector.contract either way
-        // (see register_mac for the scheme; here a is m-major, so lhs chunks
-        // are (m, k) and the contract's lhs transpose folds at constant
-        // positions).
+        // Vectorizes to one access per thread when the buffer is provably
+        // 16-byte aligned (MemVal::aligned; n0 a multiple of tn, k chunks a
+        // multiple of 4), avoiding the bank conflicts of stride-4 scalar
+        // accesses. Falls back to element-wise assembly otherwise.
         let kk = a.shape[1];
         let chunk = if kk == DYN {
             1
@@ -346,9 +332,9 @@ impl<'c> Codegen<'c> {
         let lhs_t = Type::vector(&[tm as u64, chunk as u64], elem);
         let rhs_t = Type::vector(&[chunk as u64, tn as u64], elem);
 
-        // The accumulator starts from the current output values (the +=),
-        // assembled into one TMxTN vector (zero seeds are fully overwritten
-        // and fold away in lowering).
+        // Seeds the accumulator from the current output values (the +=);
+        // the zero broadcast folds away in lowering once every lane is
+        // overwritten.
         let zero = self.zero_scalar(&body, elem)?;
         let mut acc = self.vec_broadcast(&body, zero, acc_t)?;
         for (i, mi) in ms.iter().enumerate() {
@@ -425,14 +411,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// Register sub-tile extents (TM, TN) for an mxn matmul output: the
-    /// largest of 8x8 (4 MACs per shared element loaded) and 8x4 (2.67)
-    /// whose sub-tile grid keeps at least one sub-tile per CTA thread (the
-    /// @launch thread count); bigger lane tiles below that would idle
-    /// threads instead of adding work per lane, else the legacy <=4 extents
-    /// (2.0). (Every shape that selects 8x8 needs an m*n >= 128x128 output,
-    /// whose shared acc tile exceeds the 48KB CTA budget on the unfused path
-    /// -- those configs only ever launch through the register-accumulator
-    /// fusion.)
+    /// largest of 8x8 or 8x4 whose sub-tile grid keeps at least one
+    /// sub-tile per CTA thread, else the legacy <=4 extents. 8x8 needs an
+    /// m*n >= 128x128 output: its shared accumulator tile only fits the
+    /// CTA budget through the register-accumulator fusion.
     pub(in crate::codegen) fn sub_tile(&self, m: i64, n: i64) -> (i64, i64) {
         for (tm, tn) in [(8, 8), (8, 4)] {
             if m % tm == 0 && n % tn == 0 && (m / tm) * (n / tn) >= self.cta_threads {
@@ -443,12 +425,11 @@ impl<'c> Codegen<'c> {
     }
 
     /// Lane grid (lm x ln, lm*ln = 32) for warp tiling: each warp owns an
-    /// (lm*TM)x(ln*TN) warp tile with lanes laid out row-major inside it.
-    /// Picks the factorization minimizing the warp's distinct shared reads
-    /// per k-step (WM + WN, for WM*WN MACs), i.e. the most square warp tile.
-    /// Ties break toward wider WN so the warp's b reads span one contiguous
-    /// row segment. None when no factorization divides the sub-tile grid, in
-    /// which case the flat per-thread distribution is used instead.
+    /// (lm*TM)x(ln*TN) tile, lanes row-major inside it. Picks the
+    /// factorization with the fewest distinct shared reads per k-step
+    /// (WM + WN), breaking ties toward wider WN so the warp's b reads stay
+    /// contiguous. None when no factorization divides the sub-tile grid;
+    /// the caller falls back to a flat per-thread distribution.
     pub(in crate::codegen) fn lane_grid(
         tiles_m: i64,
         tiles_n: i64,
@@ -547,10 +528,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// One multiply-accumulate (acc + a*b) on the element type. Floats use
-    /// math.fma, a single rounding that lowers to PTX fma.rn, because a
-    /// separate mul/add pair emits explicitly-rounded mul.rn/add.rn, which
-    /// ptxas is not allowed to contract into an FMA: the matmul would spend
-    /// two instructions per MAC and halve its FLOP ceiling.
+    /// math.fma, a single rounding that lowers to PTX fma.rn: a separate
+    /// mul/add pair rounds each op explicitly, which ptxas cannot contract
+    /// back into an FMA.
     pub(in crate::codegen) fn elem_mac(
         &mut self,
         block: &Block<'c>,

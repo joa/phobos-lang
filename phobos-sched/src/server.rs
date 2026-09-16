@@ -30,9 +30,7 @@ pub struct DispatchConfig {
 
     pub withhold: Vec<(NodeId, u32)>,
 
-    /// Per-node memory budget for segment sizing.
-    ///
-    /// Won't let in-flight segments exceed this many bytes.
+    /// Per-node memory budget for segment sizing: caps in-flight segments at this many bytes.
     pub budget_bytes: Option<u64>,
 
     pub autotune: Option<ClusterFingerprint>,

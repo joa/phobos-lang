@@ -127,10 +127,9 @@ impl Variants {
     /// Compiles both the aligned and the masked-fallback text of one kernel
     /// source, substituting `{ALIGNED}` with `claims.0` / `claims.1`.
     ///
-    /// Uses `compile_raw` rather than [`compile_shared`] because `@pipeline`
-    /// is checked across the pair: the fallback variant's slices are partial
-    /// by construction and never expected to pipeline, so either variant
-    /// pipelining satisfies the assertion.
+    /// Uses `compile_raw` rather than [`compile_shared`] because `@pipeline` is
+    /// checked across the pair, and the fallback variant's partial slices never
+    /// pipeline on their own, so either variant satisfies the assertion.
     pub fn compile(
         source: &str,
         shapes: &[Override<'_>],

@@ -10,7 +10,9 @@ mod emit;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use chains::{attn_out_chain, mlp_chain, mlp_chain_raw, project_chain};
+#[cfg(feature = "cuda")]
+pub(crate) use chains::attn_out_chain;
+pub(crate) use chains::{mlp_chain, mlp_chain_raw, project_chain};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -153,14 +155,12 @@ pub(crate) enum Stage {
         width: usize,
     },
     /// The delta net's causal depthwise convolution over one position, one
-    /// (plane, head) pair per unit, writing the packed planes a delta rule reads.
+    /// (plane, head) pair per unit, writing the packed planes a delta rule
+    /// reads.
     ///
     /// A unit is a head's row rather than a run of channels because the L2
-    /// normalization couples the whole of it, which is also why this cannot share
-    /// the projection's partition and so why it costs a barrier. The plane rides
-    /// the unit index alongside the head: folding the three into one unit and
-    /// unrolling them costs a third of the parallelism and measured worse than
-    /// the launch it replaced.
+    /// normalization couples the whole of it, so this cannot share the
+    /// projection's partition and costs a barrier of its own.
     ///
     /// The unit is also the packed output's row, which holds only at one
     /// position, where a plane is exactly `heads` rows wide.
@@ -190,10 +190,10 @@ pub(crate) enum Stage {
     /// `decay = exp(rate * softplus(a + bias))` and `beta = sigmoid(b)`, one
     /// head per unit, appended to the same buffer the planes went in.
     ///
-    /// This rides the convolution's nest rather than taking one of its own, which
-    /// is what makes it free: it reads across blocks and so needs a barrier, and
-    /// sharing the convolution's partition means sharing the barrier the
-    /// convolution already forced. Hence `units`, which is wider than the work.
+    /// This rides the convolution's nest rather than taking one of its own: it
+    /// reads across blocks and needs a barrier, and sharing the convolution's
+    /// partition means sharing the barrier the convolution already forced.
+    /// Hence `units`, which is wider than the work.
     Gates {
         /// The raw decay and write-strength projections, and where in the value
         /// each starts. Both are windows of the same projection in every layout
@@ -309,8 +309,8 @@ pub(crate) struct Chain {
 }
 
 /// Everything about a chain that decides the emitted source, and so the module
-/// cache's key. Buffer handles are excluded on purpose, which is what lets one
-/// compiled kernel serve every layer of a model.
+/// cache's key. Buffer handles are excluded on purpose: one compiled kernel
+/// then serves every layer of a model.
 #[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ChainKey {
     vals: Vec<Kind>,
@@ -378,8 +378,8 @@ impl Chain {
     }
 
     /// The chain's shape at this grid, for looking a compiled plan up. Cloning
-    /// the shape and leaving the bindings behind is what lets one compiled
-    /// kernel serve every layer.
+    /// the shape and leaving the bindings behind lets one compiled kernel
+    /// serve every layer.
     pub(crate) fn key(&self, blocks: u32) -> ChainKey {
         ChainKey {
             blocks,
@@ -431,7 +431,7 @@ pub(crate) struct Plan {
     pub(crate) blocks: u32,
     /// Grid barriers the chain turned out to need.
     pub(crate) barriers: usize,
-    /// Values the chain keeps in shared memory rather than publishing. These
-    /// cost nothing on the device, which is the point of counting them.
+    /// Values the chain keeps in shared memory rather than publishing. They
+    /// cost nothing on the device.
     pub(crate) held: usize,
 }

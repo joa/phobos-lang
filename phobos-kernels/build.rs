@@ -1,10 +1,8 @@
 //! Fingerprints the compiler that turns a kernel source into PTX, so the disk
-//! cache can key on it.
-//!
-//! It has to change whenever the generated PTX could and stay put otherwise,
-//! so it hashes what reaches the generated code: every `.rs` under the crates
-//! that lower a kernel, and the toolchain versions from `Cargo.lock`. Not the
-//! calling executable, which would give each binary its own cold compile.
+//! cache can key on it. Changes whenever the generated PTX could and stays
+//! put otherwise: hashes every `.rs` under the crates that lower a kernel,
+//! plus the toolchain versions from `Cargo.lock`. Not the calling executable,
+//! which would give each binary its own cold compile.
 
 use std::{
     fs,
@@ -14,8 +12,7 @@ use std::{
 /// Crates whose source can change what a kernel compiles to.
 const CODEGEN_CRATES: [&str; 4] = ["phobos-lang", "phobos-mlir", "phobos-base", "phobos-kernels"];
 
-/// Dependencies whose version can change what a kernel compiles to, even with
-/// our own source untouched.
+/// Dependencies whose version can change what a kernel compiles to, even unmodified.
 const TOOLCHAIN: [&str; 4] = ["melior", "mlir-sys", "llvm-sys", "inkwell"];
 
 fn main() {
@@ -79,8 +76,7 @@ fn toolchain_versions(lock: &Path) -> Vec<String> {
     out
 }
 
-/// FNV-1a over the parts: not worth a hash crate in a build script, and the
-/// input is our own source.
+/// FNV-1a over the parts: not worth a hash crate here, over the crate's own source.
 fn fold(parts: &[String]) -> String {
     let mut h: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
     const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;

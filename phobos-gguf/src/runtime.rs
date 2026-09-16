@@ -27,8 +27,7 @@ pub fn backend_name() -> &'static str {
 }
 
 /// Positions one pass of the prompt covers. A pass sizes its intermediates
-/// per row (a feed-forward's two halves alone are 37 KB a position), and
-/// `bench` measures batching's payoff peaking around here.
+/// per row, and batching's payoff peaks around here.
 const PROMPT_BATCH: usize = 512;
 
 /// Device bytes [`check_fits`] leaves for everything that is not a weight: a
@@ -95,8 +94,8 @@ fn check_fits(backend: &dyn Backend, decoder: &Decoder) -> Result<()> {
     }
 
     // A file this crate has to dequantize costs four bytes a weight on the
-    // device whatever it took on disk, which is the usual reason the figure is
-    // a surprise. Worth saying once it accounts for a quarter of the total.
+    // device whatever it took on disk. Surfaced only once it accounts for a
+    // quarter of the total.
     let dense_note = if footprint.dense_bytes * 4 > footprint.weight_bytes {
         format!(
             "\n{} of that is weights this crate does not keep quantized, held as f32 on the device",
@@ -151,8 +150,8 @@ impl Session for GgufSession<'_> {
     fn extend(&mut self, ids: &[i64]) -> Result<Vec<f32>> {
         let ids = to_u32(ids);
         let mut logits = Vec::new();
-        // A prompt arrives as one call and is split here, where the reason for
-        // the split lives; a single generated token is one batch of one.
+        // A prompt arrives as one call and is split into batches here; a
+        // single generated token is one batch of one.
         for batch in ids.chunks(PROMPT_BATCH) {
             logits =
                 self.model
@@ -166,8 +165,7 @@ impl Session for GgufSession<'_> {
         let ids = to_u32(ids);
         let mut id = 0i64;
         // Same split as `extend`. Only the last batch's result is kept;
-        // greedy decoding calls this with one token, so in practice the
-        // loop runs once.
+        // greedy decoding calls this with one token, so the loop runs once.
         for batch in ids.chunks(PROMPT_BATCH) {
             id = self
                 .model

@@ -35,6 +35,7 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
 
 /// [`IQ2XXS_GRID`] flattened to one magnitude byte a slot: `flat_grid()[i *
 /// 8 + j]` is byte `j` of `IQ2XXS_GRID[i]`.
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ2XXS_GRID
         .iter()
@@ -45,6 +46,7 @@ pub(crate) fn flat_grid() -> Vec<i32> {
 /// [`KSIGNS_IQ2XS`] expanded to per-element +-1 multipliers via
 /// [`KMASK_IQ2XS`]: `flat_signs()[i * 8 + j]` is element `j`'s sign under
 /// sign index `i`.
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_signs() -> Vec<i32> {
     KSIGNS_IQ2XS
         .iter()
@@ -56,6 +58,7 @@ pub(crate) fn flat_signs() -> Vec<i32> {
 /// lane's eight magnitudes are eight contiguous bytes, so it takes one 64-bit
 /// load instead of eight 32-bit ones. Magnitudes top out at 43, so `i8` holds
 /// them exactly.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ2XXS_GRID
         .iter()
@@ -63,10 +66,10 @@ pub(crate) fn packed_grid() -> Vec<i8> {
         .collect()
 }
 
-/// [`flat_signs`] packed the same way; the multipliers are +-1.
 /// [`packed_signs`] as a bitwise mask: `0` where the sign is positive, `-1`
 /// where it is negative. The dp4a decode applies signs with `and`, since an
 /// elementwise i8 multiply has no hardware form and scalarizes.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_sign_masks() -> Vec<i8> {
     KSIGNS_IQ2XS
         .iter()
@@ -74,6 +77,8 @@ pub(crate) fn packed_sign_masks() -> Vec<i8> {
         .collect()
 }
 
+/// [`flat_signs`] packed the same way; the multipliers are +-1.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_signs() -> Vec<i8> {
     KSIGNS_IQ2XS
         .iter()

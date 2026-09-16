@@ -42,6 +42,7 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
 /// [`IQ3S_GRID`] flattened to one magnitude byte a slot, four bytes an
 /// entry (a lane's eight elements come from two grid entries). Signs reuse
 /// [`super::iq2_s::flat_signs`].
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ3S_GRID
         .iter()
@@ -50,6 +51,7 @@ pub(crate) fn flat_grid() -> Vec<i32> {
 }
 
 /// [`flat_grid`]'s values as raw bytes; four-byte entries like IQ3_XXS's.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ3S_GRID
         .iter()

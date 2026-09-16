@@ -32,8 +32,8 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
     }
 }
 
-/// Pulls the blocks apart without decoding, which is what lets a device upload
-/// a quarter of the bytes and do the multiply in the kernel.
+/// Pulls the blocks apart without decoding, so a device can upload a quarter
+/// of the bytes and do the multiply in the kernel.
 fn planes(bytes: &[u8], k: usize, n: usize) -> Planes {
     let blocks = k / BLOCK;
     let mut qs = vec![0i8; k * n];
@@ -76,8 +76,8 @@ pub fn pack(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<Packed> {
 /// Quantize one block of [`BLOCK`] activations to int8 with a shared scale:
 /// symmetric, round to nearest, the extreme element landing on 127.
 ///
-/// The device kernel reproduces this and has to round the same way. Ties go to
-/// even because that is what the hardware's rounding instruction does.
+/// The device kernel reproduces this and has to round the same way. Ties go
+/// to even, matching the hardware's rounding instruction.
 pub fn quantize_row(x: &[f32], qs: &mut [i8]) -> f32 {
     let absmax = x.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     let inv = 127.0 / (absmax + 1e-8);

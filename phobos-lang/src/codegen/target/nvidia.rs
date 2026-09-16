@@ -1,9 +1,6 @@
-// NVIDIA, the one implementation of [`Isa`].
-//
-// Everything here is an nvgpu, nvvm or gpu-dialect op, a PTX string, or a
-// number off the chip's data sheet. Nothing here decides which of them a
-// contraction wants: that is the emitter's, and it asks the capability
-// predicates first.
+// NVIDIA, the one implementation of [`Isa`]. Everything here is an nvgpu, nvvm or gpu-dialect
+// op, a PTX string, or a number off the chip's data sheet. Nothing here decides which of them
+// a contraction wants: that is the emitter's, which asks the capability predicates first.
 
 use super::*;
 
@@ -36,11 +33,10 @@ impl Nvidia {
         Nvidia { cc, index_bits }
     }
 
-    /// One PTX instruction over an f32, taken through llvm.inline_asm.
-    ///
-    /// The math dialect does not reach these: convert-math-to-llvm runs before
-    /// the gpu-to-nvvm libdevice patterns and rewrites math.exp and friends to
-    /// llvm.intr.*, which the NVPTX backend cannot select.
+    /// One PTX instruction over an f32, taken through llvm.inline_asm: the
+    /// math dialect does not reach these, since convert-math-to-llvm runs
+    /// before the gpu-to-nvvm libdevice patterns and rewrites math.exp and
+    /// friends to llvm.intr.*, which the NVPTX backend cannot select.
     fn ptx_f32<'c>(
         &self,
         cg: &Codegen<'c>,

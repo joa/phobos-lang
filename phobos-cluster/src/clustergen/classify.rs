@@ -1,5 +1,4 @@
-// Deciding what a tensor reference is: which super-tile it names, which
-// grid axis it rides, and whether a scalar is invariant.
+// Decides what a tensor reference is: which supertile it names, its grid axis, and scalar invariance.
 
 use super::*;
 

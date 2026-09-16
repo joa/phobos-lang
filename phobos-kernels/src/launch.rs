@@ -23,11 +23,9 @@ pub const WARP_THREADS: usize = 32;
 /// The largest grid every block of which is resident at once: what a
 /// `@persistent` kernel using `grid_barrier` must be launched with, since a
 /// block still waiting for an SM never arrives and the barrier deadlocks.
-///
-/// Asked of the driver rather than assumed, because the answer is a property of
-/// the compiled kernel: shared memory, not registers, is what bounds it in
-/// practice, and it is the widest fused stage that sets the figure. Returns the
-/// block count and the blocks per SM behind it.
+/// Asked of the driver rather than assumed: shared memory, not registers,
+/// bounds it, and the widest fused stage sets the figure. Returns the block
+/// count and the blocks per SM behind it.
 ///
 /// # Safety
 ///

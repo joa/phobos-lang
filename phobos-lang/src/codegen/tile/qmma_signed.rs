@@ -5,20 +5,12 @@
 // an exact i8, -43..43 here, and the contraction needs no correction term, the
 // same property that lets `iq1s_qmma.rs` fold its delta into its table.
 //
-// **But only one instantiation, and the reason is worth keeping.** IQ2_S and
-// IQ2_XS decode identically and were generated from this macro first; they are
-// wrong that way, at 2.5e-1 against the dense path where IQ2_XXS reads 1.8e-3.
-// Their scale is a nibble, low for lanes 0 and 1 and high for 2 and 3, so they
-// carry **two scales per 32-element block** where `qmma_t`'s structure assumes
-// one. That assumption is not incidental: one scale a k step is what keeps the
-// accumulators in registers across `k`, and it is the whole difference between
-// `qmma_t` at 30.6 TOPS and `q8_mma` at 2.3.
-//
-// The two halves of a k step are already separate `mma` operations at exactly
-// the boundary the nibble changes on, so the fix is to scale each half rather
-// than their sum -- at the cost of doubling the epilogue, which is a third of
-// this kernel. That is the next thing here, and it wants its own measurement
-// rather than an assumption that it pays.
+// IQ2_S and IQ2_XS carry two scales a 32-element block, a nibble low for
+// lanes 0 and 1 and high for 2 and 3, rather than the one scale the macro's
+// structure otherwise assumes; getting that wrong is a silent correctness
+// bug, not just a slower kernel. `split` (below) runs each k step's two
+// `mma` halves as independent accumulators so each takes its own scale, at
+// the cost of doubling the epilogue.
 
 use super::iq2s::{IQ2S_BLOCK_BYTES, IQ2S_LANE};
 use super::iq3s::{IQ3S_BLOCK_BYTES, IQ3S_LANE};
@@ -47,9 +39,9 @@ macro_rules! signed_qmma {
             /// out[i, j] = sum_b (sum_{k in group b} a[i, k] * w[j, k]) with
             /// `w` decoded from the format rather than read: the batched
             /// contraction, both table lookups and both scales as one
-            /// operation, with the decoded weight staged through shared memory
-            /// so a column is decoded once for the CTA rather than once for
-            /// every warp whose patch covers it.
+            /// operation, with the decoded weight staged through shared
+            /// memory so the CTA decodes a column once rather than once a
+            /// warp.
             ///
             /// Needs one patch a warp, for the reason
             /// [`Codegen::iq1s_qmma_staged_into`] gives.
@@ -266,7 +258,7 @@ macro_rules! signed_qmma {
                 // column whose fragment this lane staged, so it decodes that
                 // column's block header for itself. Its grid and sign loads go
                 // unread and ptxas drops them: the emitted body is the same
-                // size either way, measured.
+                // size either way.
                 //
                 // `split` is whether the format carries one scale a 32-element
                 // block or one per sixteen. The two land `halves` apart, and a

@@ -3,11 +3,9 @@
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example model_check -- MODEL.gguf [-p PROMPT] [--single]
 //
-// The individual ops agreeing does not prove the sequence does: buffer reuse,
-// aliasing and stream ordering only show up once a whole block runs.
-//
-// `--single` truncates the prompt to one token, which never reaches the tiled
-// matmul, so a disagreement surviving it is not the tiled path's.
+// The individual ops agreeing does not prove the sequence does: buffer
+// reuse, aliasing and ordering only show up once a whole block runs.
+// `--single` truncates the prompt to one token, past the tiled matmul.
 
 use anyhow::{Result, bail};
 use phobos_gguf::backend::HostBackend;
@@ -23,9 +21,9 @@ fn main() -> Result<()> {
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
     let model = Decoder::load(&gguf)?;
     let args: Vec<String> = std::env::args().collect();
-    // A prompt of one's own, because how much of the bound below a model spends
-    // on quantization alone varies with the prompt, and a model that spends most
-    // of it cannot be used to judge anything else.
+    // A prompt of one's own: how much of the bound below goes to quantization
+    // alone varies with the prompt, and a model that spends most of it there
+    // cannot be used to judge anything else.
     let prompt = match args.iter().position(|a| a == "-p") {
         Some(at) => args.get(at + 1).cloned().unwrap_or_default(),
         None => "The capital of France is".to_string(),
@@ -49,13 +47,11 @@ fn main() -> Result<()> {
         let want = model.forward(&mut host_state, &feed, &host)?;
         let got = model.forward(&mut gpu_state, &feed, &gpu)?;
 
-        // Against the logit spread, not element by element. Two dozen blocks of
-        // f32 arithmetic in a different order do not agree to a fixed number of
-        // digits per element, and a logit near zero would make a per-element
-        // relative error report a difference that changes nothing. What has to
-        // hold is that the distribution is the same shape and picks the same
-        // token; a kernel writing outside its output moves it far more than
-        // this bound, which is how the tiled matmul's overrun showed up.
+        // Against the logit spread, not element by element: two dozen blocks
+        // of f32 arithmetic in a different order will not agree digit for
+        // digit, and a near-zero logit would make a per-element relative
+        // error report a difference that changes nothing. What has to hold
+        // is that the distribution keeps its shape and picks the same token.
         let spread = want.iter().fold(f32::MIN, |a, &b| a.max(b))
             - want.iter().fold(f32::MAX, |a, &b| a.min(b));
         let worst = want
@@ -76,9 +72,8 @@ fn main() -> Result<()> {
             bpe.decode(&[gpu_top]),
             if decisive { "" } else { "  (tied)" }
         );
-        // About 1% of spread is where two dozen blocks of accumulated rounding
-        // land. A kernel writing outside its output moves it far more than
-        // this, which is how the tiled matmul's overrun showed up here.
+        // 2e-2 sits above where accumulated rounding over two dozen blocks
+        // lands, so only a real defect crosses it.
         if error > 2e-2 || (decisive && host_top != gpu_top) {
             println!("  host[..8] {:?}", &want[..8]);
             println!("  gpu [..8] {:?}", &got[..8]);

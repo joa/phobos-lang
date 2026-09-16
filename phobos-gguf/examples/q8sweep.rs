@@ -2,35 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example q8sweep
 //
-// Profiling a decode step once said `q8_dp4a` was 84% of its device time, and
-// three plausible reasons turned out to be wrong. What the numbers say:
-//
-// - Achieved bandwidth tracks the grid, which is `n / TN` blocks: 38 GB/s at 32
-//   blocks, 111 at 112, 159 at 7760, against roughly 427 the card can sustain.
-//   Below a couple of hundred blocks the kernel is starved of parallelism, and
-//   most of a decode step's projections are down there.
-// - Widening the tile to do more work per barrier is worse everywhere, since it
-//   shrinks the grid further.
-// - Rearranging the weight so a program's tile is contiguous rather than `TN`
-//   scattered 32-byte pieces does not help, so the ceiling above a few hundred
-//   blocks is not the row scatter.
-// - Pairing the tile with the CTA so no thread idles does not help either, even
-//   with the k-split restoring the grid: 256 outputs on 256 threads measures 2
-//   to 3 times slower than 32 on 128. Idle threads were not the constraint.
-//
-// Splitting the contraction buys blocks without shrinking the tile, and that
-// does help: each program takes a slice of `k` and a second pass sums the
-// partials.
-//
-// `qdot_t` helps far more. It folds the Q8_0 block scales into the contraction
-// so the whole of `k` goes in at once, which lets a warp own an output and its
-// lanes divide `k` rather than a thread owning an output and walking `k`: the
-// weight read becomes 512 contiguous bytes a warp, nothing is staged, and the
-// k-split stops being worth anything. It is 2.4x to 7.4x here, and split 1 wins
-// on every shape.
-//
-// Launches the kernels directly rather than through `DeviceBackend`, since the
-// block size is baked into both the kernel attribute and the launch.
+// Times `q8_dp4a` (the shipped kernel), a k-split of it, and `qdot_t`, across
+// output tile, CTA size and split count, for every shape a decode step
+// projects. Prints microseconds per projection: `*` fails the host
+// reference, and split 1 is the shipped shape.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -110,8 +85,8 @@ kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
 /// the whole of `k` can be handed over at once.
 ///
 /// The mapping turns around: a warp owns one output and its lanes divide `k`,
-/// instead of a thread owning one output and walking `k`. That is what makes
-/// the weight read contiguous, and it leaves nothing to stage.
+/// instead of a thread owning one output and walking `k`, so the weight read
+/// is contiguous and nothing needs to stage.
 const SRC_QDOT: &str = "\
 @launch({BLOCK})
 @autotune(TN in [{TN}])
@@ -167,11 +142,10 @@ const SHAPES: &[(usize, usize, usize, &str)] = &[
 
 /// Output tile and the CTA that carries it.
 ///
-/// `dot_t` puts one thread on each output column, so a CTA wider than the tile
-/// runs the contraction on `TN` of its threads and idles the rest. The shipped
-/// 32-wide tile on 128 threads uses a quarter of them. Pairing the two is the
-/// obvious thing to try and it was not tried before, because the earlier sweep
-/// widened the tile without splitting `k` and so kept shrinking the grid.
+/// `dot_t` puts one thread on each output column, so a CTA wider than the
+/// tile runs the contraction on `TN` of its threads and idles the rest. The
+/// shipped 32-wide tile on 128 threads uses a quarter of them; pairing the
+/// two removes that idle fraction.
 const TILES: &[(usize, usize)] = &[(32, 128), (64, 64), (128, 128), (256, 256), (512, 512)];
 const SPLITS: &[usize] = &[1, 2, 4, 8, 16, 32];
 

@@ -23,27 +23,19 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
     assert_contains(
         &mlir,
         &[
-            // staging buffers in shared memory: a is staged k-major
-            // (transposed: 16x64, not 64x16), b is 16x64 anyway
+            // a stages k-major (transposed: 16x64, not 64x16); b is 16x64 anyway.
             "memref.global \"private\" @__matmul_tile0 : memref<16x64xf32, 3>",
             "memref.global \"private\" @__matmul_tile1 : memref<16x64xf32, 3>",
             "memref.get_global @__matmul_tile0",
-            // K is dynamic, so the kt loop is scf
             "memref.dim",
-            // tile loads are subviews with static sizes and dynamic offsets
             "memref.subview",
             "memref<64x16xf32, strided<[?, 1], offset: ?>, 1>",
-            // staging is distributed across the CTA's threads, with
-            // barriers publishing it
             "gpu.thread_id",
             "gpu.block_dim",
             "gpu.barrier",
-            // the lane's accumulator vector rides the kt loop as an
-            // iter_arg, fed by k-chunk contractions (whose outer-product
-            // lowering ends in single-rounding vector FMAs -> PTX fma.rn)
+            // the outer-product lowering ends in single-rounding fma.rn.
             "iter_args",
             "vector.contract",
-            // fragment loads and the epilogue store are 128-bit vectors
             "vector.load",
             "vector.store",
         ],
@@ -57,10 +49,9 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
 
 #[test]
 fn matmul_accumulates_in_registers() {
-    // Same kernel as above: the canonical pattern fuses, so the lane's
-    // 4x4 accumulator vector rides the kt loop, surplus warps clamp
-    // onto the last warp tile, and the epilogue writes registers
-    // straight to the C subview.
+    // The canonical pattern fuses: the lane's 4x4 accumulator vector rides
+    // the kt loop, surplus warps clamp onto the last warp tile, and the
+    // epilogue writes registers straight to the C subview.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -137,14 +128,10 @@ fn matmul_is_warp_tiled() {
     assert_contains(
         &mlir,
         &[
-            // tid decomposes against the warp size into warp id and
-            // lane (unsigned: non-negative, pow2 -> shift/mask)
             "arith.constant 32 : index",
             "arith.divui",
             "arith.remui",
-            // warps stride over the 8 warp tiles
             "arith.constant 8 : index",
-            // lane offsets scale by the 16x32 warp-tile extents
             "arith.constant 16 : index",
         ],
     );
@@ -202,12 +189,9 @@ fn shape_overrides_pin_autotune_choices() {
 
 #[test]
 fn a_matmul_into_one_of_its_own_operands_uses_a_temp() {
-    // Every matmul path writes the target as it goes, so an operand that
-    // is the target would be read after it had been partly overwritten.
-    // Squaring a matrix in place is the shape this takes in practice, and
-    // it produced a plausible wrong answer rather than a failure: the
-    // first four rows of a 16-row triangular inverse were right and the
-    // rest were not.
+    // Every matmul path writes the target as it goes, so an operand that is
+    // also the target would be read after being partly overwritten. Squaring
+    // a matrix in place is the shape this takes.
     let mlir = emit_mlir(
         "@launch(256)
         kernel square(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {

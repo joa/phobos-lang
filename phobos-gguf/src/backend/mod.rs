@@ -117,8 +117,7 @@ pub struct FusedMlp {
 
 /// [`FusedMlp`] over raw-format weights, which a raw file holds as two
 /// separate gate and up tensors. Each carries its format, since a file mixes
-/// them: the 4B's down projection is Q6_K in half its layers and Q4_K in
-/// the rest.
+/// formats per tensor.
 pub struct FusedMlpRaw {
     pub x: Buf,
     pub d_model: usize,
@@ -421,13 +420,11 @@ pub trait Backend {
     }
 
     /// [`Backend::matmul_raw`] against an activation quantized already, where
-    /// the backend has a path that wants one.
-    ///
-    /// A raw kernel that decodes to f32 has no use for it, which is why this
-    /// defaults to ignoring it. One that contracts on the integer tensor cores
-    /// does, and then quantizing per weight rather than taking the caller's
-    /// copy costs an `m * k` scratch slot a projection -- 163 of them for
-    /// IQ1_S alone on a 27B, which is memory the weights need.
+    /// the backend has a path that wants one. A raw kernel that decodes to f32
+    /// has no use for it, which is why this defaults to ignoring it; one that
+    /// contracts on the integer tensor cores does, since quantizing per weight
+    /// instead of reusing the caller's copy costs an `m * k` scratch slot per
+    /// projection.
     #[allow(clippy::too_many_arguments)]
     fn matmul_raw_act(
         &self,
@@ -690,13 +687,8 @@ pub trait Backend {
     /// query, key and value planes, each `[rows * heads, head_dim]`, then
     /// decay and beta, each `[rows * heads]`. `out` is a fourth such plane;
     /// `state` is `[heads * head_dim, head_dim]`. Per position, per head:
-    ///
-    /// ```text
-    /// S      <- decay * S
-    /// error  <- beta * (v - k @ S)
-    /// S      <- S + k^T @ error
-    /// out    <- q @ S
-    /// ```
+    /// `S <- decay * S`, `error <- beta * (v - k @ S)`, `S <- S + k^T @ error`,
+    /// `out <- q @ S`.
     fn delta_rule(
         &self,
         packed: Buf,

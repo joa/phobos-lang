@@ -7,7 +7,7 @@
 /// alongside the operands in a head's 64K shared-memory footprint. Rows are
 /// `[position, head]` with head fastest, so program `h` steps `H` at a time.
 /// The rank-one write is a broadcast product rather than a `dot` of `[D, 1]`
-/// by `[1, TN]`: same arithmetic, 12% of the kernel apart.
+/// by `[1, TN]`: the same arithmetic on a cheaper path.
 pub(crate) const DELTA_SRC: &str = "\
 @launch(256)
 @autotune(H in [{H}], D in [{D}], TN in [{TN}])
@@ -45,10 +45,9 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
 
 /// The gated delta rule in chunks, as two passes ([`delta_wy_src`] here,
 /// [`delta_scan_src`] below): unrolls the sequential dependency between
-/// positions into matmuls over chunks of `C`. Split into two kernels
-/// because `N`, its inverse, and the intra-chunk attention depend only on
-/// the keys, so they're shared across every state column instead of being
-/// recomputed per column (measured worse as one kernel).
+/// positions into matmuls over chunks of `C`, split into two kernels since
+/// `N`, its inverse, and the intra-chunk attention depend only on the keys
+/// and are shared across every state column.
 ///
 /// Recurrence: `S_i = a_i (I - beta_i k_i^T k_i) S_{i-1} + beta_i k_i^T
 /// v_i`. With `b_i` the cumulative log decay, the chunk's pseudo-values
@@ -60,17 +59,18 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
 ///
 /// with `D[i, j] = exp(b_i - b_j)`.
 ///
-/// Non-obvious choices: decay rides as the matrix `D` rather than folded
-/// into `q_i exp(b_i)` / `k_j exp(-b_j)`, since the latter overflows f32 as
-/// the chunk decays (D's used entries are all <= 1; `tril` selects rather
-/// than multiplies, so the unused infinities never reach an operand).
-/// `(I + N)^-1` uses `(I - M)^-1 = prod_j (I + M^(2^j))`, `log2(C) - 1`
-/// matmul rounds since `N` is nilpotent, instead of `C` sequential
-/// forward-substitution steps. `(T diag(exp b) K) S_0` associates right to
-/// keep the intermediate `[C, TN]` rather than `[C, head_dim]`. `D`'s
-/// diagonal is exactly 1, so `tril(D) - I` gives the strict lower mask.
+/// Decay rides as the matrix `D` rather than folded into per-vector
+/// exponents, which would overflow f32 as the chunk decays; `tril` selects
+/// rather than multiplies, so the masked infinities never reach an operand.
+/// `(I + N)^-1`
+/// uses repeated squaring, `(I - M)^-1 = prod_j (I + M^(2^j))`, for
+/// `log2(C) - 1` matmul rounds instead of `C` sequential
+/// forward-substitution steps, since `N` is nilpotent. `(T diag(exp b) K)
+/// S_0` associates right to keep the intermediate `[C, TN]` rather than
+/// `[C, head_dim]`, and `tril(D) - I` is the strict lower mask since `D`'s
+/// diagonal is exactly 1.
 ///
-/// `E` is the uploaded identity, serving as both `I` and that diagonal. The
+/// `E` is the uploaded identity, serving as `I` and that diagonal. The
 /// three `[C, C]` matrices this pass leaves are laid out one row per
 /// position with heads side by side, like the operands.
 pub(crate) fn delta_wy_src(heads: usize, head_dim: usize, chunk: usize) -> String {
@@ -203,15 +203,15 @@ pub(crate) const DELTA_CHUNK_TN: usize = 64;
 pub(crate) const DELTA_TN: usize = 16;
 
 /// The delta net's causal depthwise convolution, fused with the activation,
-/// the split into per-head planes, and their normalization.
+/// the split into per-head planes, and their normalization. One program
+/// owns one position's one head of one plane (`D` channels).
 ///
-/// One program owns one position's one head of one plane (`D` channels).
 /// `X` already carries the previous call's trailing positions ahead of this
 /// call's, so tap `k` of position `t` is row `t + k` with no boundary case.
 /// Taps arrive as `[KS, C]`, transposed relative to the file, so one tap
 /// across a run of channels is one contiguous load. The plane rides the
-/// grid's third axis rather than three launches, since one launch of 96
-/// blocks beats three of 32.
+/// grid's third axis rather than three separate launches, since fewer,
+/// larger launches cost less dispatch overhead.
 ///
 /// `h`, the grid's head axis, ranges over the packed (value) head count.
 /// Query and key exist at only `kv_heads` physical columns for a
@@ -292,9 +292,8 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
     )
 }
 
-/// Positions one program of [`delta_conv_src`] carries. A position at a
-/// time measured 512 microseconds a call at a 512-token prompt, almost all
-/// dispatch overhead.
+/// Positions one program of [`delta_conv_src`] carries: one position at a
+/// time is almost all dispatch overhead, so calls batch several.
 pub(crate) const DELTA_CONV_ROWS: usize = 8;
 
 /// The positions a call batches. The tile has no remainder, so this is the

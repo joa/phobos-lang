@@ -6,9 +6,6 @@
 //   o  = h @ W2 + b2
 //   Y  = Softmax(o)
 //
-// LayerNormalization, MatMul, a broadcast bias-row Add, Gelu and Softmax in one
-// graph.
-//
 //   cargo run -p phobos-onnx --example run_transformer_ffn --features cuda
 
 use std::collections::HashMap;
@@ -63,8 +60,6 @@ fn main() -> Result<()> {
 fn fill(n: usize, f: impl Fn(usize) -> f32) -> Vec<f32> {
     (0..n).map(f).collect()
 }
-
-// ---- CPU reference -------------------------------------------------------
 
 fn reference(
     x: &[f32],
@@ -139,8 +134,6 @@ fn softmax(x: &[f32], rows: usize, w: usize) -> Vec<f32> {
     }
     y
 }
-
-// ---- ONNX graph construction ---------------------------------------------
 
 fn build_graph(
     g: &[f32],

@@ -37,6 +37,7 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
 }
 
 /// [`KVALUES_IQ4NL`] widened to `i32`, one entry a nibble value.
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_codebook() -> Vec<i32> {
     KVALUES_IQ4NL.iter().map(|&v| i32::from(v)).collect()
 }

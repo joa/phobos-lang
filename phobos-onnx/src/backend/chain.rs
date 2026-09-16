@@ -50,8 +50,7 @@ pub struct ChainExec {
     /// Kernels launched since the last sync: a pending device write.
     dirty: bool,
     stats: Stats,
-    /// What ran on-device against what fell back, by op type, so a run on a
-    /// real graph maps out the coverage the later phases need.
+    /// What ran on-device against what fell back, by op type.
     device_hist: HashMap<String, usize>,
     fallback_hist: HashMap<String, usize>,
     /// The plain tiled matmul kernel, compiled once.
@@ -65,8 +64,7 @@ pub struct ChainExec {
     /// synchronize: an async copy must outlive its queued work.
     pending: Vec<DeviceBuffer<f32>>,
     /// Must be the last field: Rust drops in declaration order, and everything
-    /// above has to be released while the context is still alive. Declared
-    /// first, teardown faulted after a clean run.
+    /// above has to be released while the context is still alive.
     _ctx: cust::context::Context,
 }
 
@@ -108,11 +106,10 @@ impl ChainExec {
     /// Execute `graph` over host-tensor `inputs`, returning host tensors.
     /// Mirrors [`host::run`] so the results can be checked against it.
     ///
-    /// Float activations live on the device and supported compute ops launch
-    /// cached kernels on one stream with no per-op sync, so consecutive device
-    /// ops chain on stream ordering and the host syncs only to read a value
-    /// back. An op with no device kernel falls back to the host interpreter,
-    /// downloading its inputs and forcing a sync.
+    /// Float activations live on the device; device ops launch cached kernels
+    /// on one stream with no per-op sync and chain on stream ordering. An op
+    /// with no device kernel falls back to the host interpreter and forces a
+    /// sync.
     pub fn run(
         &mut self,
         graph: &Graph,
@@ -193,8 +190,7 @@ impl ChainExec {
                 ad[ad.len() - 1] as usize,
                 bd[bd.len() - 1] as usize,
             );
-            // A batch-1 matmul against a 2-D weight goes through the padded
-            // gate, which is what carries the lm-head's M=1, N=50257.
+            // A batch-1 matmul against a 2-D weight goes through the padded gate.
             if bd.len() == 2
                 && ad[..ad.len() - 2].iter().product::<i64>() == 1
                 && bd[0] as usize == k
@@ -249,9 +245,7 @@ impl ChainExec {
             // among them, so fall back rather than error.
             Err(_) => return Ok(false),
         };
-        // Some lowered kernels do not JIT at every shape: lower.rs's LayerNorm
-        // overflows shared memory at wide widths. A compile failure means this
-        // shape is unsupported, so fall back.
+        // A compile failure means this shape is unsupported, so fall back.
         if self.ensure_kernel(&plan).is_err() {
             return Ok(false);
         }

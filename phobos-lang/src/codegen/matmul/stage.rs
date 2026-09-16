@@ -6,8 +6,7 @@ use super::*;
 impl<'c> Codegen<'c> {
     /// Picks the f16 staging strategy for a tensor-core k-loop. Returns
     /// (stage_async, reg_stage): the first is true when cp.async is available
-    /// for f16 operands, the second when register staging works (the tile has
-    /// to divide evenly by the CTA).
+    /// for f16 operands, the second when the tile divides evenly by the CTA.
     pub(in crate::codegen) fn staging_mode(
         &self,
         p: &MatmulFusion<'_>,
@@ -61,11 +60,10 @@ impl<'c> Codegen<'c> {
         self.tile_copy(block, &b_src, b_buf, false, async_copy)
     }
 
-    /// Returns the staged f16 shared buffer for one tile-dot operand: the
-    /// preheader copy when an enclosing loop hoisted this operand (see
-    /// codegen/hoist.rs), else a fresh pooled buffer staged here without a
-    /// barrier. The flag is true for the hoisted case, where the caller
-    /// must skip the release; the loop epilogue owns that buffer.
+    /// Returns the staged f16 shared buffer for one tile-dot operand: the preheader copy
+    /// when an enclosing loop hoisted this operand (see codegen/hoist.rs), else a fresh
+    /// pooled buffer staged here without a barrier. The flag is true for the hoisted case,
+    /// where the caller must skip the release; the loop epilogue owns that buffer.
     pub(in crate::codegen) fn dot_stage(
         &mut self,
         block: &Block<'c>,
@@ -145,11 +143,10 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// Stages an operand into an f16 shared buffer for WMMA. An f32 source is
-    /// rounded down ([`Self::tile_copy_f16`]), an f16 source is copied as-is,
-    /// and anything else is rejected. async_copy only applies to the straight
-    /// f16 copy; the f32 round-down can't be a raw cp.async byte transfer. Never
-    /// emits a barrier; the caller owns synchronization.
+    /// Stages an operand into an f16 shared buffer for WMMA: an f32 source is rounded down
+    /// ([`Self::tile_copy_f16`]), an f16 source copied as-is, anything else rejected. async_copy
+    /// applies only to the straight f16 copy, since the f32 round-down can't be a raw cp.async
+    /// byte transfer. Never emits a barrier; the caller owns synchronization.
     pub(in crate::codegen) fn stage_to_f16(
         &mut self,
         block: &Block<'c>,

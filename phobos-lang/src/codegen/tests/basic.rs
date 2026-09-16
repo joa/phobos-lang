@@ -97,12 +97,12 @@ fn scalar_ops_cover_arith_and_comparisons() {
             "arith.addf",
             "arith.subf",
             "arith.divf",
-            "arith.negf", // unary neg on a float
-            "arith.cmpf", // float comparisons
-            "arith.extf", // f32 -> f64 widening in a + b
-            "arith.muli", // integer arithmetic on index
-            "arith.cmpi", // integer comparison
-            "arith.xori", // !lt on a bool
+            "arith.negf",
+            "arith.cmpf",
+            "arith.extf",
+            "arith.muli",
+            "arith.cmpi",
+            "arith.xori",
         ],
     );
 }
@@ -157,9 +157,9 @@ fn cumsum_tril_transpose_lower_and_verify() {
         &mlir,
         &[
             "gpu.func @prim",
-            "arith.cmpi sle",  // tril's j <= i predicate
-            "arith.select",    // tril keeps or zeroes each element
-            "vector.contract", // the dot / dot_t matmuls
+            "arith.cmpi sle",
+            "arith.select",
+            "vector.contract",
         ],
     );
 }
@@ -205,9 +205,9 @@ fn kda_chunkwise_gated_linear_attention_lowers() {
         &mlir,
         &[
             "gpu.func @kda",
-            "ex2.approx.ftz.f32", // exp on the gates
-            "arith.select",       // tril causal mask
-            "vector.contract",    // the chunk matmuls
+            "ex2.approx.ftz.f32",
+            "arith.select",
+            "vector.contract",
         ],
     );
 }

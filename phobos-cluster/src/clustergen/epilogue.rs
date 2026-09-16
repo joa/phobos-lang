@@ -1,5 +1,4 @@
-// Peeling an accumulator or a previous-value read out of a store, which
-// is what makes a step an epilogue rather than a fresh write.
+// Peels an accumulator or previous-value term out of a store: the epilogue pattern.
 
 use super::*;
 
@@ -14,7 +13,6 @@ impl<'a> Analyzer<'a> {
             rhs,
         } = value
         {
-            // one side carries acc, the other the prior-C load
             let (acc_side, prev_side) = if self.uses_scratch(lhs) {
                 (lhs.as_ref(), rhs.as_ref())
             } else {

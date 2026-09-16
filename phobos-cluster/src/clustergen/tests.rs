@@ -79,7 +79,6 @@ fn matmul_cluster_ir() {
     assert_eq!(p.tensors[1].super_syms, vec!["TILE_K", "TILE_N"]);
     assert_eq!(p.tensors[2].super_syms, vec!["TILE_M", "TILE_N"]);
 
-    // body: init compute, then the kt chain
     assert_eq!(p.body.len(), 2);
     let ClusterStmt::Compute { leaf: 1, args, .. } = &p.body[0] else {
         panic!("expected init compute, got {:?}", p.body[0]);
@@ -201,16 +200,14 @@ C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
 fn gemm_cluster_ir() {
     let p = compile(&first(GEMM)).unwrap();
 
-    // C is now read-modify-write: the init leaf seeds it with beta*C_old,
-    // so its original value must be loaded rather than zeroed.
+    // C is now rmw: the init leaf seeds it with beta*C_old instead of zeroing it.
     let modes: Vec<_> = p.tensors.iter().map(|t| t.mode).collect();
     assert_eq!(
         modes,
         vec![AccessMode::Read, AccessMode::Read, AccessMode::RMW]
     );
 
-    // both scalars stay out of the cluster IR's dataflow; the step compute
-    // carries the kernel's own [alpha, beta], the init carries its local beta.
+    // scalars skip the dataflow: the step carries [alpha, beta], the init carries just beta.
     assert_eq!(p.scalars[0].name, "alpha");
     assert_eq!(p.scalars[1].name, "beta");
 
@@ -240,8 +237,7 @@ fn gemm_cluster_ir() {
         "beta sits at the init leaf's local position (after C)"
     );
 
-    // the chain step still targets C(pm,pn) rmw (acc copy-elided) and carries
-    // both kernel scalars
+    // the chain step targets C(pm,pn) rmw (acc copy-elided) and carries both scalars
     let ClusterStmt::Loop { body, .. } = &p.body[1] else {
         panic!("expected the k-loop, got {:?}", p.body[1]);
     };
@@ -364,8 +360,7 @@ O[row :+ BR, :] = acc
 
 #[test]
 fn accepts_scalar_params() {
-    // matmul + an (unused) alpha scalar still clusters; the scalar is
-    // recorded with its parameter position and the step compute carries it.
+    // an unused alpha scalar clusters: recorded at its param position and carried by the step compute.
     let src = MATMUL.replace("C: tensor<f32>[M, N])", "C: tensor<f32>[M, N], alpha: f32)");
     let p = compile(&first(&src)).unwrap();
     assert_eq!(p.scalars.len(), 1);
@@ -419,8 +414,7 @@ fn flash_single_leaf() {
         ]
     );
 
-    // exactly one compute: Q(p0,:), K(:,:), V(:,:) read, O(p0,:) written,
-    // carrying the scalar
+    // exactly one compute: Q(p0,:), K(:,:), V(:,:) read, O(p0,:) written, carrying the scalar
     assert_eq!(p.body.len(), 1);
     let ClusterStmt::Compute {
         leaf: 0,
@@ -494,7 +488,7 @@ fn rejects_cluster_dim_without_autotune() {
 
 #[test]
 fn rejects_multiple_cluster_computes() {
-    // Two rmw chains over the same cluster loop is still unsupported on the
+    // Two rmw chains over the same cluster loop are unsupported on the
     // accumulator path.
     let src = r#"
 @cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])

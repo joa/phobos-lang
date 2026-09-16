@@ -56,8 +56,6 @@ fn bf16_is_emulated_below_ampere_and_native_from_ampere() {
     for chip in ["sm_75", "sm_80"] {
         assert_contains(&emit_mlir_on(src, chip), &["arith.truncf", "bf16"]);
     }
-    // Capability, not availability: sm_75 has no native bf16 arithmetic and
-    // still compiles this, because the conversion is all the source asks for.
 }
 
 #[test]
@@ -89,10 +87,10 @@ fn f16_tensors_lower_to_f16_memrefs() {
     assert_contains(
         &mlir,
         &[
-            "memref<?xf16, 1>", // the f16 tensor param
-            "memref<8xf16, 3>", // the f16 shared tile buffer
-            "arith.truncf",     // the f32 literal rounded to f16
-            "arith.addf",       // the elementwise f16 accumulate
+            "memref<?xf16, 1>",
+            "memref<8xf16, 3>",
+            "arith.truncf",
+            "arith.addf",
         ],
     );
     // f16 rows aren't 16B-aligned under the multiple-of-4 ABI, so the
@@ -138,14 +136,13 @@ fn f16_matmul_runs_on_tensor_cores() {
     assert_contains(
         &mlir,
         &[
-            // f16 operand tensors and f16 shared staging (a m-major),
-            // inner dims bank-conflict padded by 8 (16 -> 24, 64 -> 72)
+            // f16 staging pads the inner dim by 8 for bank conflicts
+            // (16 -> 24, 64 -> 72).
             "memref<?x?xf16, 1>",
             "memref<64x24xf16, 3>",
             "memref<16x72xf16, 3>",
             "gpu.subgroup_mma_compute",
             "!gpu.mma_matrix<16x16xf32, \"COp\">",
-            // the f32 accumulator is rounded to the f16 output
             "arith.truncf",
         ],
     );
@@ -179,8 +176,8 @@ fn f16_matmul_accumulates_in_f16_on_tensor_cores() {
         &mlir,
         &[
             "gpu.subgroup_mma_compute",
-            "!gpu.mma_matrix<16x16xf16, \"COp\">", // f16 accumulator fragments
-            "memref<128x16xf16, 3>",               // the f16 drain slab
+            "!gpu.mma_matrix<16x16xf16, \"COp\">",
+            "memref<128x16xf16, 3>",
         ],
     );
     // No f32 accumulator fragments or slab on the f16-accumulate path.
@@ -262,10 +259,10 @@ fn f16_flash_attention_runs_on_tensor_cores() {
         &mlir,
         &[
             "gpu.func @flash_attention",
-            "memref<?x64xf16, 1>",      // f16 Q/K/V/O tensors
-            "gpu.subgroup_mma_compute", // dot_t and dot on the cores
-            "ex2.approx.ftz.f32",       // f32 softmax exp
-            "arith.truncf",             // f32 acc rounded to the f16 O
+            "memref<?x64xf16, 1>",
+            "gpu.subgroup_mma_compute",
+            "ex2.approx.ftz.f32",
+            "arith.truncf",
         ],
     );
     assert!(
@@ -312,9 +309,9 @@ fn f16_flash_attention_without_tensorcore_widens_to_f32() {
     assert_contains(
         &mlir,
         &[
-            "vector.contract", // generic mixed-precision dots
-            "arith.extf",      // f16 operands widened to the f32 accumulator
-            "arith.truncf",    // f32 result rounded to the f16 output tensor
+            "vector.contract",
+            "arith.extf",
+            "arith.truncf",
         ],
     );
     assert!(

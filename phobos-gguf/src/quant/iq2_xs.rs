@@ -36,6 +36,7 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
 /// [`IQ2XS_GRID`] flattened to one magnitude byte a slot (512 entries,
 /// wider than IQ2_XXS's). Sign mechanism is identical to IQ2_XXS's, so
 /// `iq2xs_matvec` reuses [`super::iq2xxs_flat_signs`].
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ2XS_GRID
         .iter()
@@ -45,6 +46,7 @@ pub(crate) fn flat_grid() -> Vec<i32> {
 
 /// [`flat_grid`]'s values as raw bytes; see `iq2_xxs.rs`'s `packed_grid`.
 /// The sign table is IQ2_XXS's own, packed there.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ2XS_GRID
         .iter()

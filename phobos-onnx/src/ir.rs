@@ -31,11 +31,6 @@ pub enum Dim {
 pub struct Shape(pub Option<Vec<Dim>>);
 
 impl Shape {
-    /// Every extent known.
-    pub fn is_static(&self) -> bool {
-        matches!(&self.0, Some(dims) if dims.iter().all(|d| matches!(d, Dim::Fixed(_))))
-    }
-
     /// Element count when the shape is fully static.
     pub fn numel(&self) -> Option<i64> {
         let dims = self.0.as_ref()?;

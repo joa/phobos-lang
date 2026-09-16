@@ -42,10 +42,10 @@ fn grid_barrier_lowers_to_arrive_and_spin() {
     assert_contains(
         &mlir,
         &[
-            "memref.atomic_rmw", // arrive, release and spin all go through it
-            "scf.while",         // the spin
-            "gpu.barrier",       // the CTA brackets
-            "gpu.grid_dim",      // how many arrivals make a full barrier
+            "memref.atomic_rmw",
+            "scf.while",
+            "gpu.barrier",
+            "gpu.grid_dim",
         ],
     );
     // Five atomics: the generation read, the arrival, the counter reset, the

@@ -1,6 +1,6 @@
 use super::*;
 
-/// Minimal GGUF writer, enough to round-trip the reader.q
+/// Minimal GGUF writer, enough to round-trip the reader.
 #[derive(Default)]
 struct Builder {
     kv: Vec<u8>,

@@ -2,26 +2,20 @@ use super::*;
 
 impl<'c> Codegen<'c> {
     /// Whether a slice of `size` elements starting at `start` provably stays
-    /// inside a *dynamic* tensor extent whose known divisor is `extent_div`, so
-    /// it needs no runtime bounds mask.
+    /// inside a *dynamic* tensor extent whose known divisor is `extent_div`,
+    /// so it needs no runtime bounds mask. `pending` names loop variables
+    /// whose loop is not emitted yet but will be trimmed once it is, letting
+    /// a prescan reason about a slice inside a loop body (see
+    /// [`Codegen::slice_is_partial_within`]).
     ///
-    /// Three offsets qualify. One riding a trimmed main loop's induction
-    /// variable is covered by that loop's rounded-down trip count (see
-    /// [`Codegen::emit_split_for`]). A single element at a literal zero is
-    /// inside any tensor that has elements at all, and a kernel launched over
-    /// an empty one has nothing to do; this is what keeps the leading
-    /// `[0 :+ 1]` of a row-vector kernel off the masked path. Last, a
-    /// tile-aligned offset into an extent the host declared a whole number of
-    /// tiles: every program id then addresses a whole tile, since the grid runs
-    /// to the extent (see `@aligned` in [`Codegen::declared_divs`]).
-    ///
-    /// Anything else, an undeclared program id above all, is unbounded from
-    /// inside the kernel: the grid is the host's business, and a kernel that
-    /// assumed otherwise would write through the end of a row and into the next
-    /// one.
-    /// `pending` names loop variables whose loop has not been emitted yet but
-    /// will be trimmed once it is, which is what lets a prescan reason about a
-    /// slice inside a loop body (see [`Codegen::slice_is_partial_within`]).
+    /// Three offsets qualify: one riding a trimmed main loop's induction
+    /// variable, covered by its rounded-down trip count; a single element at
+    /// a literal zero, since any non-empty tensor holds it; and a
+    /// tile-aligned offset into an extent declared a whole number of tiles
+    /// (`@aligned`, see [`Codegen::declared_divs`]), since the grid then
+    /// addresses whole tiles throughout. Anything else -- an undeclared
+    /// program id above all -- is unbounded: the grid is the host's
+    /// business, and assuming otherwise would write into the next row.
     pub(super) fn dyn_in_bounds(
         &self,
         start: &Expr,
@@ -75,9 +69,8 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// Folds an expression to a compile-time constant.
-    ///
-    /// Scans @autotune symbols. Used for affine bounds and static slice checks.
+    /// Folds an expression to a compile-time constant, scanning `@autotune`
+    /// symbols; used for affine bounds and static slice checks.
     pub(super) fn const_fold(&self, expr: &Expr) -> Option<i64> {
         match expr {
             Expr::Int(n) => Some(*n),
@@ -298,10 +291,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// Width in bits of a float type, which orders the widening conversions.
-    ///
-    /// f16 and bf16 are both 16 bits and neither contains the other: bf16 has
-    /// f32's exponent range with 8 fewer mantissa bits. Width alone therefore
-    /// does not decide a conversion between them; see [`Self::float_join`].
+    /// f16 and bf16 are both 16 bits and neither contains the other (bf16 has
+    /// f32's exponent range with 8 fewer mantissa bits), so width alone does
+    /// not decide a conversion between them; see [`Self::float_join`].
     pub(super) fn float_bits(&self, t: Type<'c>) -> Option<u32> {
         if t == self.f16_t || t == self.bf16_t {
             Some(16)
@@ -315,10 +307,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The narrowest float type both operands convert into without loss.
-    ///
-    /// Equal types join to themselves and a wider type absorbs a narrower one,
-    /// but f16 and bf16 join to f32: each has bits the other cannot hold, so
-    /// f32 is their only common supertype.
+    /// Equal types join to themselves and a wider type absorbs a narrower
+    /// one, but f16 and bf16 join to f32: each has bits the other cannot
+    /// hold, so f32 is their only common supertype.
     pub(super) fn float_join(&self, a: Type<'c>, b: Type<'c>) -> Option<Type<'c>> {
         if a == b {
             return self.is_float(a).then_some(a);
@@ -351,12 +342,10 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The element type a contraction of `a` and `b` accumulates in.
-    ///
-    /// Floats accumulate in their join. Integers accumulate in i32 rather than
-    /// the operand type: a dot product of bytes overflows i8 almost at once,
-    /// and i32 is what the hardware's integer dot product accumulates in
-    /// anyway.
+    /// The element type a contraction of `a` and `b` accumulates in. Floats
+    /// accumulate in their join; integers accumulate in i32 rather than the
+    /// operand type, since a dot product of bytes overflows i8 almost at once
+    /// and i32 is what the hardware's integer dot product accumulates in anyway.
     pub(super) fn accumulator_elem(&self, a: Type<'c>, b: Type<'c>) -> Result<Type<'c>> {
         let join = self
             .numeric_join(a, b)
@@ -408,10 +397,9 @@ impl<'c> Codegen<'c> {
         t == self.i8_t || t == self.i32_t || t == self.i64_t
     }
 
-    /// Convert between any two numeric element types, float or signed integer.
-    ///
-    /// Integers are signed throughout, so the widening and float conversions
-    /// are the sign-extending ones.
+    /// Convert between any two numeric element types, float or signed
+    /// integer; integers are signed throughout, so widening and float
+    /// conversions are the sign-extending ones.
     pub(super) fn numeric_cast(
         &self,
         block: &Block<'c>,

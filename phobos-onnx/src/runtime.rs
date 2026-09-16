@@ -348,9 +348,7 @@ impl Session for OnnxSession<'_> {
                 seen.extend_from_slice(ids);
                 graph.next_logits(seen)
             }
-            // The prompt goes through `decoder` and every token after it
-            // through `decoder_with_past`, one at a time: the step graph takes
-            // a single position.
+            // First call is the prompt pass; later calls step one token at a time.
             (Engine::Kv(graph), GenState::Kv(cache @ None)) => {
                 let (logits, fresh) = graph.prompt(ids)?;
                 *cache = Some(fresh);

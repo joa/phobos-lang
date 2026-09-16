@@ -2,36 +2,36 @@
 // caller that only wants the winning token id reads a couple of floats back
 // instead of the whole vocab.
 //
-// Two kernels. `argmax_reduce` grid-strides the row in chunks of `W`, folding
-// a running `[1, W]` (value, index) pair per lane with `tmax`/`argsel`, then
-// collapses that tile to one winner with an unrolled halving tree and leaves
-// one partial per block in `P`. `argmax_finish` folds the (small) partial
-// list the same way, serially, down to the single answer.
+// Two kernels: `argmax_reduce` grid-strides the row in chunks of `W`,
+// folding a running `[1, W]` (value, index) pair per lane with
+// `tmax`/`argsel`, collapses that tile with an unrolled halving tree, and
+// leaves one partial per block in `P`. `argmax_finish` folds the small
+// partial list the same way, serially, down to the single answer.
 //
-// The index side of the fold carries the winning column as an f32: safe up to
-// 2^24, far past either model's vocab, and it lets `argsel` stay a plain
-// float select with no integer reduction path to add alongside it.
+// The index side of the fold carries the winning column as an f32, safe up
+// to 2^24 and far past a real vocabulary, so `argsel` stays a plain float
+// select with no integer reduction path to add alongside it.
 
-/// Columns one program of [`argmax_reduce_src`] folds per grid-stride step.
-/// Picked to divide the vocabularies both bench models use (130,560 and
-/// 248,320) exactly; [`argmax_chunk_width`] handles one that does not.
+/// Columns one program of [`argmax_reduce_src`] folds per grid-stride step,
+/// picked to divide real vocabularies exactly; [`argmax_chunk_width`]
+/// handles one that does not.
 pub(crate) const ARGMAX_CHUNK: usize = 512;
 
 /// Blocks [`argmax_reduce_src`] launches with, and so partials
-/// [`argmax_finish_src`] folds. Comfortably below the card's SM count is not
-/// the goal here: the whole reduction moves at most a couple of megabytes
-/// already resident on the device, so the grid only needs to be wide enough
-/// that `argmax_finish`'s serial fold over it stays cheap.
+/// [`argmax_finish_src`] folds. Matching the SM count is not the goal: the
+/// whole reduction moves at most a couple of megabytes already resident on
+/// the device, so the grid only needs to be wide enough that the serial
+/// fold over it in `argmax_finish` stays cheap.
 pub(crate) const ARGMAX_SPLITS: usize = 128;
 
 /// The widest power of two, at most [`ARGMAX_CHUNK`], that divides `n`.
 ///
-/// A chunk that does not divide the vocab would need a masked tail read, and
-/// the mask's zero fill is not `tmax`'s identity: a row whose real values are
-/// all negative would lose to a fake 0.0 in the ragged remainder. Every
-/// candidate here is a power of two by construction (the loop only ever
-/// halves), which is also what [`argmax_reduce_src`]'s halving tree needs to
-/// bottom out exactly at one element.
+/// A chunk that does not divide the vocab would need a masked tail read,
+/// and the mask's zero fill is not `tmax`'s identity: a row whose real
+/// values are all negative would lose to a fake 0.0 in the ragged
+/// remainder. Every candidate here is a power of two by construction, which
+/// is also what [`argmax_reduce_src`]'s halving tree needs to bottom out
+/// exactly at one element.
 pub(crate) fn argmax_chunk_width(n: usize) -> usize {
     let mut w = ARGMAX_CHUNK;
     while w > n.max(1) {
@@ -52,13 +52,12 @@ pub(crate) fn argmax_splits(n: usize, w: usize) -> usize {
 }
 
 /// The unrolled `[1, W]` -> `[1, 1]` halving tree: fold the upper half into
-/// the lower with `argsel` (the index side) then `tmax` (the value side), in
-/// that order, since `argsel` needs both halves' values intact. The upper
-/// half goes in `argsel`/`tmax`'s first operand throughout, so a value tie
-/// resolves toward the higher lane. That is a fixed, reproducible choice for
-/// the rare exact tie, not agreement with the host's "last of equal maxima"
-/// rule: once the grid-stride loop has folded several chunks into a lane, the
-/// lane an index lands in no longer tracks index order.
+/// the lower with `argsel` (the index side) then `tmax` (the value side),
+/// since `argsel` needs both halves' values intact. The upper half is
+/// `argsel`/`tmax`'s first operand throughout, so an exact tie resolves
+/// toward the higher lane, a fixed but reproducible choice, not the host's
+/// "last of equal maxima" rule: once the grid-stride loop folds several
+/// chunks into a lane, that lane's index no longer tracks index order.
 fn halving_tree(width: usize) -> String {
     let mut tree = String::new();
     let mut half = width / 2;

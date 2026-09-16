@@ -1,6 +1,6 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
-    // cust links the CUDA driver API itself; we only add cuBLAS.
+    // cust links the CUDA driver API itself; this only adds cuBLAS.
     if let Ok(cuda) = std::env::var("CUDA_PATH") {
         // TODO(joa): windows only atm
         println!("cargo:rustc-link-search=native={cuda}\\lib\\x64");

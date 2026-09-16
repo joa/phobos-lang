@@ -90,7 +90,7 @@ impl DeviceBackend {
 
         // Four kernels, deepest tile first, each taking the whole tiles it
         // can before handing the remainder on: qmma_t (in two depths, the
-        // deeper one 30% faster), then q8_mma for the leftover tensor-core
+        // deeper one faster), then q8_mma for the leftover tensor-core
         // tiles, then the matvec for single rows and decoding.
         let mut qmma_rows = 0;
         if qmma_takes(n) {
@@ -326,8 +326,7 @@ impl DeviceBackend {
         let q2k_qdot_eligible = *quant == Quant::Q2_K && m == 1 && n.is_multiple_of(Q2K_TN);
         let q3k_qdot_eligible = *quant == Quant::Q3_K && m == 1 && n.is_multiple_of(Q3K_TN);
 
-        // The wide tile whenever it divides n; a CTA-count rule measured
-        // worse, sending wide projections to the narrow tile.
+        // The wide tile whenever it divides n, not by a CTA-count rule.
         let wide_tile = |tn: usize| n.is_multiple_of(tn);
         // The dp4a decode matvecs: the format only decides the output tile
         // and which lookup tables ride along. Off unless asked, since

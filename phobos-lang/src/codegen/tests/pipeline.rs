@@ -23,18 +23,13 @@ fn pipeline_double_buffers_staged_slices() {
     assert_contains(
         &mlir,
         &[
-            // two shared buffers per staged tile; the fused matmul has
-            // no acc buffer and stages a k-major, so all four are 16x64
-            // (allocation order: a0, b0, a1, b1)
             "@__matmul_tile0 : memref<16x64xf32, 3>",
             "@__matmul_tile1 : memref<16x64xf32, 3>",
             "@__matmul_tile2 : memref<16x64xf32, 3>",
             "@__matmul_tile3 : memref<16x64xf32, 3>",
-            // guarded prefetches and the unrolled half-B guard
             "scf.if",
         ],
     );
-    // Buffers are referenced statically (unroll-by-2), never selected.
     assert!(
         !mlir.contains("arith.select"),
         "unexpected dynamic buffer select in:\n{mlir}"
@@ -69,21 +64,17 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
     assert_contains(
         &mlir,
         &[
-            // prefetches are 16B cp.async transfers, L1-bypassed
             "nvgpu.device_async_copy",
             "bypassL1",
-            // one group per stage, waited on before the closing barrier
             "nvgpu.device_async_create_group",
             "nvgpu.device_async_wait",
         ],
     );
-    // Without the capability the same kernel uses plain vector copies.
     let plain = emit_mlir(src);
     assert!(
         !plain.contains("nvgpu."),
         "cp.async leaked into a non-sm_80 target:\n{plain}"
     );
-    // Under the default 32-bit index ABI, sm_80 must also stay plain.
     let narrow = emit_mlir_on(src, "sm_80");
     assert!(
         !narrow.contains("nvgpu."),
@@ -93,10 +84,9 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
 
 #[test]
 fn tensorcore_f16_inputs_pipeline_with_cp_async() {
-    // f16 operands stage into the WMMA fragments as a straight byte copy,
-    // so the pipelined prefetch can lower to cp.async. The wmma opt-out
-    // keeps this on the legacy path; at sm_80 + 64-bit index bare
-    // @tensorcore would select mma.sync instead.
+    // f16 operands byte-copy into the WMMA fragments, so the prefetch can
+    // lower to cp.async. wmma keeps this on the legacy path; bare @tensorcore
+    // at sm_80 + 64-bit index would select mma.sync instead.
     let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [32])
         @pipeline
         @tensorcore(wmma)
@@ -112,7 +102,6 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    // cp.async needs sm_80+ and 64-bit index lowering, as for the f32 path.
     use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
     let base = BaseContext {
         gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
@@ -129,14 +118,12 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
             "gpu.subgroup_mma_compute",
         ],
     );
-    // The promise on K makes the f16 transfers 8xf16, so they reach
-    // cp.async.cg's 16 bytes and skip L1 as the f32 path does: a staged
-    // tile is consumed from shared memory and never re-read through L1.
+    // K's alignment makes the f16 transfer 8xf16 (16 bytes), reaching
+    // cp.async.cg's L1-bypass threshold.
     assert!(
         mlir.contains("bypassL1"),
         "16-byte f16 cp.async should bypass L1:\n{mlir}"
     );
-    // Capability-gated: sm_75 and the 32-bit-index ABI stay on plain copies.
     assert!(
         !emit_mlir(src).contains("nvgpu."),
         "cp.async leaked into a non-sm_80 target"
@@ -149,12 +136,10 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
 
 #[test]
 fn tensorcore_f16_pipeline_register_stages_on_sm75() {
-    // Without cp.async (sm_75) the f16-input WMMA pipeline register-stages:
-    // the next tile's global loads are hoisted into registers and held
-    // across the WMMA compute, with the shared store deferred past it, so
-    // the global latency overlaps the math. The load is unconditional with a
-    // clamped index, the store guarded. This locks in that the path is taken
-    // and stays cp.async-free; the ordering is checked in the emitted PTX.
+    // Without cp.async (sm_75) the f16 WMMA pipeline register-stages: the
+    // next tile's global load is hoisted into registers and held across the
+    // WMMA compute, with the shared store deferred past it so global latency
+    // overlaps the math.
     let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @pipeline
         @tensorcore
@@ -174,12 +159,9 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
     assert_contains(
         &mlir,
         &[
-            // Unconditional global loads held in registers; the in-bounds
-            // clamp is what the synchronous path lacks.
             "vector.load",
             "arith.subi",
             "arith.minsi",
-            // the deferred shared store sits under the prefetch guard
             "scf.if",
             "vector.store",
             "gpu.subgroup_mma_compute",
@@ -203,13 +185,11 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
 
 #[test]
 fn generic_pipeline_double_buffers_a_non_matmul_loop() {
-    // Misnamed: this loop's slice is partial (K is dynamic and offset by the
-    // induction variable), so `pipeline_candidate` declines it and what is
-    // actually pinned here is `emit_split_for`'s main-loop-plus-masked-
-    // remainder structure, which mints two same-shaped buffers of its own.
+    // Misnamed: this loop's slice is partial, so `pipeline_candidate`
+    // declines it. What is actually under test is `emit_split_for`'s
+    // main-loop-plus-masked-remainder buffers, not double buffering;
     // `bare_kernel_auto_pipelines_without_the_attribute` is the real
-    // generic-pipeline test; retitling this one belongs with whoever next
-    // touches `emit_split_for`.
+    // generic-pipeline test.
     let mlir = emit_mlir(
         "@pipeline
         @autotune(T in [16])
@@ -227,22 +207,19 @@ fn generic_pipeline_double_buffers_a_non_matmul_loop() {
         &mlir,
         &[
             "gpu.func @stage",
-            // two shared staging buffers for the single staged slice
             "@__stage_tile0 : memref<16x16xf32, 3>",
             "@__stage_tile1 : memref<16x16xf32, 3>",
-            "scf.if",      // the guarded prefetch of the next tile
-            "gpu.barrier", // publish/consume barriers around staging
+            "scf.if",
+            "gpu.barrier",
         ],
     );
 }
 
 #[test]
 fn bare_kernel_auto_pipelines_without_the_attribute() {
-    // A row-at-a-time loop: dimension 0's size-1 span is provably in bounds
-    // regardless of alignment (any dynamic extent has room for one more
-    // element wherever the loop var points), and `@aligned(K = T)` covers
-    // dimension 1, so the slice is not partial -- eligible, and pipelined
-    // with no `@pipeline` written at all.
+    // A row-at-a-time loop: dimension 0's size-1 span is always in bounds,
+    // and `@aligned(K = T)` covers dimension 1, so the slice is not partial
+    // and auto-pipelines with no `@pipeline` attribute written.
     let mlir = emit_mlir(
         "@autotune(T in [16])
         @aligned(K = T)
@@ -256,10 +233,9 @@ fn bare_kernel_auto_pipelines_without_the_attribute() {
             C[0 :+ 1, 0 :+ T] = acc
         }",
     );
-    // tile0 is `acc` (declared once, outside the loop); tile1 and tile2 are
-    // `a`'s two ping-pong buffers -- three globals total is what tells this
-    // apart from the ordinary single-buffered path, which would only ever
-    // mint tile0 and tile1.
+    // tile0 is `acc`; tile1 and tile2 are `a`'s ping-pong buffers. Three
+    // globals distinguishes this from the single-buffered path, which mints
+    // only tile0 and tile1.
     assert_contains(
         &mlir,
         &[
@@ -295,12 +271,11 @@ fn pipeline_assertion_fails_with_the_decline_reason() {
 
 #[test]
 fn shared_memory_budget_declines_silently_without_the_attribute() {
-    // The eligible shape above at T = 8192: one staged buffer is 32768 bytes,
-    // 65536 doubled, over the 48 KiB ceiling. No `@pipeline`, so declining
-    // must fall back to the plain loop quietly rather than error. The literal
-    // row count keeps the bound affine, so the fallback is the plain unmasked
-    // loop and not `emit_split_for`'s split, whose own remainder would mint a
-    // second buffer and defeat the assertion below.
+    // At T = 8192 a staged buffer is 32768 bytes, 65536 doubled: over the 48
+    // KiB budget, so pipelining declines silently and falls back to the
+    // plain loop. The literal row count keeps the bound affine, so the
+    // fallback skips `emit_split_for`'s split, whose remainder buffer would
+    // defeat the assertion below.
     let mlir = emit_mlir(
         "@autotune(T in [8192])
         @aligned(K = T)
@@ -324,10 +299,9 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
 
 #[test]
 fn atomic_add_cannot_reach_a_loop_bound() {
-    // Not a pipelining test: the tripwire for the CTA-uniformity argument at
-    // the end of pipeline.rs, that no `.ph` expression can put a
-    // data-dependent value into a loop bound. If a future change adds an
-    // int-to-index conversion, these assertions are what catch it.
+    // Not a pipelining test: guards the CTA-uniformity argument that no
+    // `.ph` expression can put a data-dependent value into a loop bound. An
+    // int-to-index conversion added later would need to pass this too.
     let err = emit_err(
         "kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K], BAR: tensor<i32>[2]) {
             let n = atomic_add(BAR, 0, 1)

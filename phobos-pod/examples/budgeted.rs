@@ -50,9 +50,8 @@ async fn main() -> Result<()> {
     storage::write_tensor_f32(&uri("B.bin"), &b)?;
     storage::write_tensor_f32(&uri("C.bin"), &vec![0.0; N * N])?;
 
-    // The cluster autotuner picks SUPER_* for a 1-node fingerprint; plan with a
-    // budget that fits only ~3 supertiles at a time so the node's program must
-    // span several segments. Verify both client-side before dispatching.
+    // Picks SUPER_* for a 1-node fingerprint, then plans with a budget that fits
+    // only ~3 supertiles so the node's program must span several segments.
     let kernel = phobos_lang::parse(MATMUL)?.remove(0);
     let program = phobos_cluster::compile(&kernel)?;
     let dims: std::collections::HashMap<String, i64> =

@@ -32,12 +32,9 @@ pub enum GpuConfig {
 }
 
 impl GpuConfig {
-    /// Chip's compute capability as a number
-    ///
-    /// Example: sm_75 is 75, sm_90a is 90.
-    ///
-    /// This is what selects a target's instruction vocabulary; everything the
-    /// number then decides lives behind that vocabulary rather than here.
+    /// Chip's compute capability as a number (sm_75 is 75, sm_90a is 90).
+    /// Selects a target's instruction vocabulary; everything the number then
+    /// decides lives behind that vocabulary rather than here.
     ///
     /// TODO(joa): how to map this across vendors
     pub fn compute_capability(&self) -> u32 {

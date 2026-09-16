@@ -3,17 +3,12 @@
 use crate::harness::*;
 use crate::*;
 
-/// A full CPU reference is 2*M*N*K flops (137 GFLOP at 4096^3), so spot-check
-/// a sample of output elements against an f64 reference instead.
+/// Spot-checks a sample of output elements against an f64 reference (a full
+/// check costs O(M*N*K) flops): alpha * (A*B)[i,j] + beta * c_in[i,j].
 ///
-/// Expected value: alpha * (A*B)[i,j] + beta * c_in[i,j].
-///
-/// The f32 kernel accumulates in f32 over K=4096 terms (worst-case relative
-/// error ~ K*eps ~ 2.4e-4): 1e-3 relative tolerance. The tensor-core kernel
-/// additionally rounds each input to fp16 (eps ~ 4.9e-4), an error relative
-/// to the dot's RMS magnitude sqrt(K)/3 (uniform [-1,1] inputs), not to want;
-/// near-cancelling outputs would blow up a plain relative test, so its
-/// errors are normalized by max(|want|, sqrt(K)/3) with a 1e-2 tolerance.
+/// The f32 kernel checks at 1e-3 relative tolerance. The tensor-core kernel
+/// additionally rounds inputs to fp16, so error is normalized by
+/// max(|want|, sqrt(K)/3), the dot's RMS magnitude, at 1e-2 tolerance.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)] // mirrors the BLAS gemm signature
 pub(crate) fn verify_matmul(
@@ -48,8 +43,7 @@ pub(crate) fn verify_matmul(
             _ => (sample(M), sample(N)),
         };
         let (want, got) = if fp16 {
-            // The reference must see the same fp16-rounded inputs the
-            // tensor cores do.
+            // Reference sees the same fp16-rounded inputs the tensor cores do.
             let mut dot = 0.0f64;
             for k in 0..K {
                 dot += fp16_round(a[i * K + k]) as f64 * fp16_round(b[k * N + j]) as f64;
@@ -115,13 +109,11 @@ pub(crate) fn bench_gemm_fp32(
         c_dev.as_device_ptr(),
     );
 
-    // Match the kernel's @launch thread count (a PTX .maxntid); launching
-    // more threads than that is a hard error.
+    // Must match the kernel's @launch thread count (.maxntid); more is a hard error.
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // The default @tensorcore matmul path (mma.sync) compiles at 64-bit index,
-    // widening the memref descriptor's offset/size/stride params from i32 to i64;
-    // the host metadata must match (see bench_gemm_fp16).
+    // The default @tensorcore path (mma.sync) compiles at 64-bit index,
+    // widening the memref descriptor; host metadata must match (see bench_gemm_fp16).
     let wide = phobos_lang::requires_wide_index(&kernels);
 
     let mut tuner = autotune::Autotuner {
@@ -229,9 +221,8 @@ pub(crate) fn bench_gemm_fp32(
         100.0f64 * cublas_avg.as_secs_f64() / phobos_avg.as_secs_f64()
     );
 
-    // Inputs are rounded to fp16 for the tensor-core path (fp16), so phobos
-    // runs against the fp16f32acc tensor peak; the cuBLAS baseline here is always
-    // f32 sgemm.
+    // Inputs are rounded to fp16 for the tensor-core path, so phobos runs
+    // against the fp16f32acc tensor peak; the cuBLAS baseline is f32 sgemm.
     let phobos_prec = if fp16 {
         Precision::F16TcF32
     } else {
@@ -253,15 +244,13 @@ pub(crate) fn bench_gemm_fp32(
     Ok(())
 }
 
-/// Reference for the fp16-accumulate GEMM (examples/gemm_fp16.ph): the
-/// kernel rounds every input to fp16, accumulates the dot in an fp16 WMMA
-/// fragment, then scales (alpha/beta in f32) and rounds the result back
-/// to fp16. The reference mirrors that, rounding each accumulation step to
-/// fp16. fp16 accumulation over K=4096 terms is intentionally low precision
-/// (~fp16 ulp at magnitude sqrt(K/3)); errors are normalized by
-/// max(|want|, sqrt(K)/3) (the dot's RMS magnitude for uniform [-1,1]
-/// inputs) with a generous 1.5e-1 tolerance, and the kernel's pairwise
-/// fragment reduction is typically more accurate than this sequential model.
+/// Reference for the fp16-accumulate GEMM (examples/gemm_fp16.ph): rounds
+/// inputs to fp16, accumulates in fp16 mirroring the kernel's WMMA
+/// fragment, then scales (alpha/beta in f32) and rounds back to fp16.
+///
+/// Accumulation is low precision by construction, so error is normalized
+/// by max(|want|, sqrt(K)/3), the dot's RMS magnitude, at a generous
+/// 1.5e-1 tolerance.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_matmul_fp16acc(
@@ -289,7 +278,6 @@ pub(crate) fn verify_matmul_fp16acc(
             1 => (M - 1, N - 1),
             _ => (sample(M), sample(N)),
         };
-        // fp16 inputs, fp16 accumulation (round each step), mirroring the kernel.
         let mut acc = 0.0f32;
         for k in 0..K {
             let af = fp16_round(a[i * K + k]);
@@ -351,11 +339,10 @@ pub(crate) fn bench_gemm_fp16(
 
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // @tensorcore (the default mma.sync path) compiles at 64-bit index (nvgpu
-    // ABI), which widens the flattened memref descriptor's offset/size/stride
-    // params from i32 to i64; the host metadata must match or every field after
-    // the first pointer shifts and the kernel reads garbage. The legacy WMMA
-    // opt-out (@tensorcore(wmma)) stays 32-bit.
+    // @tensorcore (mma.sync) compiles at 64-bit index (nvgpu ABI), widening
+    // the memref descriptor's offset/size/stride from i32 to i64: host
+    // metadata must match or the kernel reads garbage past the first pointer.
+    // The legacy WMMA opt-out (@tensorcore(wmma)) stays 32-bit.
     let wide = phobos_lang::requires_wide_index(&kernels);
 
     let mut tuner = autotune::Autotuner {
@@ -370,8 +357,7 @@ pub(crate) fn bench_gemm_fp16(
             Ok(autotune::Grid(M as u32 / tile_m, N as u32 / tile_n))
         },
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
-            // Zero C (fp16 +0.0 is all-zero bits): a byte memset over 2 bytes
-            // per element.
+            // Zero C (fp16 +0.0 is all-zero bits): a byte memset, 2 bytes per element.
             zero_device_async(c_ptr.as_raw(), (M * N) as usize * 2, stream)?;
             let func = module.get_function("gemm")?;
             launch_gemm(

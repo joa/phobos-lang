@@ -277,16 +277,14 @@ impl<'c> Codegen<'c> {
     }
 
     /// Runs the fused matmul's k-loop. Both the vector and WMMA paths use it.
+    /// With `@pipeline`, it double-buffers by unrolling two iterations: the
+    /// first half computes from one buffer pair while prefetching the next
+    /// into the other, the second half does the same for the odd iteration
+    /// (its accumulators pass through a CTA-uniform scf.if). Without it, this
+    /// just stages, barriers, accumulates, barriers in place.
     ///
-    /// With @pipeline on we double-buffer by unrolling two iterations at a
-    /// time. The first half computes from one buffer pair while prefetching
-    /// the next iteration into the other; the second half does the same for
-    /// the odd iteration (its accumulators pass through a CTA-uniform scf.if).
-    /// Without @pipeline we just stage, barrier, accumulate, barrier in place.
-    ///
-    /// Returns the finished accumulators. The closures: stage prefetches one
-    /// iteration into a pair, half emits one pipelined half, mac accumulates
-    /// one resident pair.
+    /// Returns the finished accumulators; stage prefetches one iteration
+    /// into a pair, half emits one pipelined half, mac accumulates one pair.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn matmul_kloop(
         &mut self,

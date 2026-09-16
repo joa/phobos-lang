@@ -115,8 +115,6 @@ impl Decoder {
         }
     }
 
-    /// Perform a forward pass.
-    ///
     /// Run `tokens`, advancing `state`, and return the final position's logits.
     pub fn forward(
         &self,

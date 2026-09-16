@@ -1,15 +1,11 @@
 // The target seam: everything the emitter cannot say in a portable dialect.
+// `Isa` is the vocabulary, `nvidia.rs` its one implementation, and the
+// forwarding methods below are what the rest of codegen/ calls; a second
+// target is a second file here rather than a match arm in thirty emission
+// sites.
 //
-// `Isa` is the vocabulary, `nvidia.rs` is the one implementation of it, and the
-// forwarding methods at the bottom are what the rest of codegen/ calls. The
-// indirection buys one thing: a second target is a second file here rather than
-// a match arm inside thirty emission sites.
-//
-// Two rules keep the seam honest. Nothing above this module names an
-// instruction, and nothing below it names a codegen type: `Isa` speaks in MLIR
-// values and plain integers, never in [`MemVal`] or [`Binding`], so the layout
-// decisions that read a tile's stride stay on the emitter's side where a second
-// target inherits them for free.
+// Nothing above this module names an instruction, and nothing below it names
+// a codegen type: `Isa` speaks only in MLIR values and plain integers.
 
 use phobos_base::context::GpuConfig;
 
@@ -17,12 +13,10 @@ use super::*;
 
 mod nvidia;
 
-/// One GPU target's instruction vocabulary.
-///
-/// The capability half is chip data and answers what may be emitted; the rest
-/// emits it. A caller that asks the first half a question it does not need is
-/// how the two stay separable: `mma_sync_k` returning None is a chip without
-/// the instruction, not an error, and the emitter picks another path.
+/// One GPU target's instruction vocabulary. The capability half is chip data
+/// answering what may be emitted; the rest emits it. `mma_sync_k` returning
+/// None means a chip without the instruction, not an error, and the emitter
+/// picks another path.
 pub(super) trait Isa {
     // ---- what the chip can do ----
 
@@ -170,9 +164,8 @@ pub(super) trait Isa {
     // ---- how bytes arrive ----
 
     /// One asynchronous transfer of `width` elements, src[src_idx] into
-    /// dst[dst_idx]. Any token it produces is the target's to drop: the
-    /// enclosing stage commits with [`Isa::async_create_group`] and waits on
-    /// that.
+    /// dst[dst_idx]. Any token it produces is the target's to drop; the
+    /// enclosing stage commits with [`Isa::async_create_group`] and waits on it.
     #[allow(clippy::too_many_arguments)]
     fn async_copy<'c>(
         &self,
@@ -325,8 +318,7 @@ pub(super) trait Isa {
 }
 
 /// The target a config selects. The one arm is not an oversight: a second
-/// vendor is a second arm here and a second file beside `nvidia.rs`, which is
-/// the whole point of the trait above.
+/// vendor is a second arm here and a second file beside `nvidia.rs`.
 pub(super) fn isa_for(base: &phobos_base::context::Context) -> Box<dyn Isa> {
     match &base.gpu_config {
         GpuConfig::Nvidia(_) => Box::new(nvidia::Nvidia::new(
@@ -336,12 +328,10 @@ pub(super) fn isa_for(base: &phobos_base::context::Context) -> Box<dyn Isa> {
     }
 }
 
-/// What the rest of codegen/ calls. Each of these is the emitter's name for one
-/// piece of the vocabulary; the target decides what it becomes.
-///
-/// The few that are not a bare forward are the ones where a codegen type meets
-/// the seam: a tile's stride and element width are the emitter's to know, so
-/// they are read here and passed down as plain numbers.
+/// What the rest of codegen/ calls: each is the emitter's name for one piece
+/// of the vocabulary. The few that are not a bare forward are where a codegen
+/// type meets the seam: a tile's stride and element width are the emitter's
+/// to know, so they are read here and passed down as plain numbers.
 impl<'c> Codegen<'c> {
     // ---- what the chip can do, with what the kernel asked for folded in ----
 

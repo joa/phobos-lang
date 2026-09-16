@@ -143,10 +143,9 @@ impl CuBlas {
     }
 
     /// Row-major f16 c = alpha * a * b + beta * c via cublasHgemm: the
-    /// half-precision analog of [`CuBlas::matmul`], with f16 operands and f16
-    /// accumulation. The pointers are raw device addresses to u16/f16 bit
-    /// patterns; alpha/beta are given in f32 and rounded to f16. The same
-    /// row-major-is-column-major-transpose trick applies (compute C^T = B^T*A^T).
+    /// half-precision analog of [`CuBlas::matmul`]. Pointers are raw device
+    /// addresses to u16/f16 bit patterns; alpha/beta are given in f32 and
+    /// rounded to f16. The same row-major-is-column-major-transpose trick applies.
     #[allow(clippy::too_many_arguments)] // mirrors the BLAS gemm signature
     pub fn matmul_fp16(
         &self,

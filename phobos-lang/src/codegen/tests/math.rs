@@ -39,7 +39,6 @@ fn fused_slice_binary_has_no_temp_buffer() {
             c[base :+ BLOCK] = a[base :+ BLOCK] + b[base :+ BLOCK]
         }",
     );
-    // c[slice] = a[slice] + b[slice] writes the target subview directly.
     assert!(
         !mlir.contains("memref.alloca"),
         "unexpected temp in:\n{mlir}"
@@ -99,11 +98,11 @@ fn flash_attention_lowers_softmax_builtins() {
         &mlir,
         &[
             "gpu.func @flash_attention",
-            "vector.contract",    // dot / dot_t
-            "ex2.approx.ftz.f32", // exp lowers to the PTX ex2 intrinsic
-            "arith.cmpf ogt",     // rowmax / tmax reductions
-            "arith.divf",         // the broadcast normalize divide
-            "arith.subf",         // broadcast subtraction inside exp
+            "vector.contract",
+            "ex2.approx.ftz.f32",
+            "arith.cmpf ogt",
+            "arith.divf",
+            "arith.subf",
         ],
     );
 }
@@ -127,9 +126,9 @@ fn argsel_folds_a_value_index_pair_alongside_tmax() {
         &mlir,
         &[
             "gpu.func @argmax_step",
-            "arith.cmpf oge", // argsel's own comparison
-            "arith.select",   // argsel picks the winning index
-            "arith.cmpf ogt", // tmax's comparison, unaffected by argsel
+            "arith.cmpf oge",
+            "arith.select",
+            "arith.cmpf ogt",
         ],
     );
 }
@@ -159,10 +158,9 @@ fn layernorm_lowers_sqrt_to_ptx_intrinsic() {
 
 #[test]
 fn log_lowers_to_the_ptx_base_two_intrinsic() {
-    // softplus is the reason log exists: the GatedDeltaNet decay is
-    // exp(rate * log(1 + exp(x))), so the gates cannot be computed on the
-    // device without it. The hardware primitive is base two, so a natural
-    // log is lg2 with the change of base folded in.
+    // softplus is why log exists: GatedDeltaNet's decay is
+    // exp(rate * log(1 + exp(x))). The hardware primitive is base two, so a
+    // natural log is lg2 with the change of base folded in.
     let mlir = emit_mlir(
         "@launch(256)
         @autotune(TILE in [64])
@@ -238,9 +236,9 @@ fn rowreduce_serial_without_spare_threads() {
     );
 }
 
-/// A nested per-element chain becomes one sweep. Before this, every call in
-/// `i8(i32(round(a)))` staged a shared tile of its own, so a kernel doing
-/// nothing else allocated four. See codegen/elemwise.rs.
+/// A nested per-element chain becomes one sweep that stages only the
+/// operand; unfused, each call in `i8(i32(round(a)))` would stage its own
+/// shared tile. See codegen/elemwise.rs.
 #[test]
 fn elementwise_chain_fuses_into_one_sweep() {
     let mlir = emit_mlir(
@@ -268,7 +266,7 @@ fn elementwise_chain_fuses_into_one_sweep() {
 
 /// The chain must not swallow a store whose operand it cannot index safely:
 /// a masked operand would be read out of bounds by a target-indexed sweep,
-/// so such a store keeps the old tile-per-call path and still verifies.
+/// so such a store keeps the tile-per-call path and still verifies.
 #[test]
 fn elementwise_chain_leaves_a_masked_operand_alone() {
     let mlir = emit_mlir(

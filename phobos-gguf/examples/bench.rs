@@ -3,16 +3,9 @@
 //   cargo run --release -p phobos-gguf --features cuda --example bench -- \
 //       -m MODEL.gguf -p 128,512 -n 32,128,512 -r 3
 //
-// Reports the same numbers llama-bench does, in the same units, one row per
-// size given:
-//
-//   pp<N>  prompt processing, N tokens fed into a fresh state
-//   tg<N>  text generation, N tokens produced one at a time
-//
-// pp batches over the prompt on the device (delta-rule, attention, Q8_0
-// projection). A raw-quantized weight only joins that batching once its
-// format has a dequant kernel (see `project_raw_dense`); others still
-// redecode per row, which keeps pp-to-tg under llama.cpp's.
+// Reports the same numbers llama-bench does, in the same units: pp<N> is
+// prompt processing (N tokens fed into a fresh state) and tg<N> is text
+// generation (N tokens produced one at a time), one row per size given.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -129,10 +122,9 @@ fn main() -> Result<()> {
 
     let load_start = Instant::now();
     let gguf = Gguf::open(&args.model)?;
-    // The label llama-bench prints, read off the file rather than assumed: two
-    // architectures of different sizes and widths now run through here. The
-    // quantization is whichever type carries the most elements, since the norms
-    // are f32 in every file.
+    // The label llama-bench prints, read off the file since architectures
+    // differ in size and width. The quantization is whichever type carries
+    // the most elements: the norms are always f32.
     let quantization = gguf
         .tensors()
         .iter()
@@ -167,18 +159,13 @@ fn main() -> Result<()> {
 
     if args.warmup {
         eprint!("warmup... ");
-        // A batch and then single steps, because the two take different kernels
-        // and a backend may compile each on first use. Warming only one leaves
-        // the other's compile inside the first timed repetition, where it is
-        // worth more than the repetition it lands in. The batch has to be deep
-        // enough to reach the widest tile a batched kernel has: 128 rows is the
-        // quantized projection's, and it also carries the attention block past
-        // the 64 rows its matmul path needs. Past that it is the prompt itself,
-        // which is what llama-bench warms with: it runs each test once before
-        // timing it, and the first pass at a new shape also builds the graph.
-        // Hence one pass per prompt size rather than one at the largest: a
-        // shape that was never run is a graph that gets built inside the
-        // repetition that first asks for it.
+        // Batch and single-step warmups both run: they hit different kernels,
+        // and a backend may compile each on first use. The batch needs at
+        // least 128 rows to reach the widest tile a batched kernel has (the
+        // quantized projection's, and past the attention matmul path's own
+        // 64-row floor). One warmup pass runs per distinct prompt size, not
+        // just the largest, since the first pass at a new shape also builds
+        // its graph.
         let mut shapes: Vec<usize> = args.prompt_tokens.iter().map(|&n| n.max(128)).collect();
         shapes.push(128);
         shapes.sort_unstable();
@@ -190,9 +177,8 @@ fn main() -> Result<()> {
         }
         let mut state = model.new_state();
         for &token in tokens.iter().take(4) {
-            // Warms the same greedy fast path the timed tg loop below takes,
-            // so its kernels' first compile lands here rather than in a
-            // timed repetition.
+            // Warms the same greedy fast path the timed tg loop takes, so its
+            // kernels compile here rather than inside a timed repetition.
             model.forward_greedy(&mut state, &[token], backend.as_ref())?;
         }
         state.release(backend.as_ref());
@@ -205,9 +191,8 @@ fn main() -> Result<()> {
         for rep in 0..args.repetitions {
             let mut state = model.new_state();
             let start = Instant::now();
-            // The whole prompt in one pass, which is what makes pp a different
-            // measurement from tg: the projections become real matmuls instead
-            // of a matvec per position.
+            // The whole prompt in one pass: pp's projections are real matmuls,
+            // not a matvec per position like tg's.
             model.forward(&mut state, &tokens[..prompt_tokens], backend.as_ref())?;
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
@@ -228,10 +213,9 @@ fn main() -> Result<()> {
             // same split llama-bench uses.
             model.forward(&mut state, &tokens[..1], backend.as_ref())?;
             let start = Instant::now();
-            // The greedy fast path: a real deployment serving temperature-0
-            // decoding takes this route, and this loop re-feeds a fixed
-            // token regardless of what comes back either way, so timing it
-            // instead of `forward` measures what actually ships.
+            // The greedy fast path: a temperature-0 deployment takes this
+            // route, re-feeding a fixed token regardless of what comes back,
+            // so timing it instead of `forward` measures what actually ships.
             for &token in tokens.iter().skip(1).take(gen_tokens) {
                 model.forward_greedy(&mut state, &[token], backend.as_ref())?;
             }

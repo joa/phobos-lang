@@ -134,16 +134,14 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The fused k-loop, done as a vector contraction. The lane's accumulator
-    /// rides the loop as one vector<TMxTNxf32> iter_arg. Each iteration grabs a
-    /// CxTM and a CxTN chunk and folds them in with a single vector.contract
-    /// over k. C is the largest of 4, 2, 1 that divides TILE_K; a_t and b_sh
-    /// are both k-major, so the chunk rows are contiguous loads.
+    /// The fused k-loop, done as a vector contraction. The lane's accumulator rides the loop as
+    /// one vector<TMxTNxf32> iter_arg. Each iteration grabs a CxTM and a CxTN chunk and folds
+    /// them in with a single vector.contract over k. C is the largest of 4, 2, 1 that divides
+    /// TILE_K; a_t and b_sh are both k-major, so the chunk rows are contiguous loads.
     ///
-    /// Doing C k-steps per iteration cuts the loop overhead by C. The contract
-    /// lowers to broadcast + vector.fma rank-1 updates, which on NVPTX is the
-    /// same fma.rn stream as the scalar form, just without the extract/insert
-    /// noise in the IR.
+    /// Doing C k-steps per iteration cuts the loop overhead by C. The contract lowers to
+    /// broadcast plus vector.fma rank-1 updates, the same fma.rn stream as the scalar form
+    /// without the extract/insert noise in the IR.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn register_mac(
         &mut self,

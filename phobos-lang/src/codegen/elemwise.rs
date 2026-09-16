@@ -1,17 +1,14 @@
 use super::*;
 
-/// Per-element unary chains, fused into one sweep of the target.
-///
-/// Every elementwise call materializes a shared tile of its own and sweeps it,
-/// so a nested one pays per call. `i8(i32(round(q)))`, which is how every
-/// quantizing kernel writes its Q8_0 bytes, costs three tiles besides the
-/// operand: an f32 for the rounding, an i32 for the widening conversion, and the
-/// i8 itself. On the decode path that is 4 KB of shared memory spent on an i32
-/// nobody reads, in kernels whose whole live set is what bounds their occupancy.
+/// Per-element unary chains, fused into one sweep of the target. Every
+/// elementwise call otherwise materializes a shared tile of its own, so a
+/// nested chain like `i8(i32(round(q)))` -- how quantizing kernels write
+/// their Q8_0 bytes -- costs a tile per step, in kernels whose live set
+/// bounds their occupancy.
 ///
 /// This recognizes such a chain on the right of a store and emits a single
-/// `distribute`: load the operand once, apply the conversions in registers, store
-/// the result.
+/// `distribute`: load the operand once, apply the conversions in registers,
+/// store the result.
 impl<'c> Codegen<'c> {
     /// One step of a chain, as peeled from the outside in.
     fn elem_step(&self, callee: &str) -> Option<ElemStep<'c>> {
@@ -48,13 +45,11 @@ impl<'c> Codegen<'c> {
     }
 
     /// `target = f(g(...(t)))` in one sweep, for per-element unary f, g, ...
-    ///
-    /// Returns false without emitting anything when `value` is not such a chain
-    /// over a named, unmasked, statically shaped tile. The gate is deliberately
-    /// narrow: the operand is resolved from the symbol table rather than by
-    /// emitting it, so a shape this does not handle leaves every other path in
-    /// `store_tile` exactly as it was. A masked operand is excluded because the
-    /// sweep is indexed by the target and would read the operand out of bounds.
+    /// Returns false when `value` is not such a chain over a named, unmasked,
+    /// statically shaped tile: the operand is resolved from the symbol table
+    /// rather than emitted, so an unhandled shape leaves every other path in
+    /// `store_tile` untouched. A masked operand is excluded because the sweep
+    /// is indexed by the target and would read it out of bounds.
     pub(super) fn store_elem_chain(
         &mut self,
         block: &Block<'c>,
@@ -76,8 +71,7 @@ impl<'c> Codegen<'c> {
             return Ok(false);
         }
         // The operand may be the target: each thread reads and writes the same
-        // element, so the rewrite in place is race-free, exactly as the single
-        // op `*_into` helpers rely on.
+        // element, so the rewrite in place is race-free.
         self.distribute(block, target, 1, true, |cg, blk, idx| {
             let mut v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
             for step in steps.iter().rev() {
@@ -181,25 +175,21 @@ fn is_arith(op: BinOp) -> bool {
 }
 
 /// Fusing a whole per-element expression into one sweep of its target.
-///
-/// Every tile-valued node used to materialize a shared buffer and sweep it, so
-/// a statement cost a barrier per operator: `acc = acc * corr + dot(sc, v)`
-/// spent one on the product, one on the sum, and two tiles nobody reads again.
-/// A chain of them is what a softmax rescale and a GEMM epilogue both are, and
-/// on the decode path, where the tiles are a row or two and the CTA is 256
-/// threads wide, the barrier is most of what the statement costs.
+/// Materializing a shared buffer per operator otherwise costs a barrier
+/// each, which is most of a statement's cost on the decode path, where the
+/// tiles are a row or two.
 ///
 /// This recognizes the whole tree at once: the operands that have to be
-/// materialized anyway (a `dot`, a row reduction) are emitted first and become
-/// leaves, and everything above them is evaluated per element in registers.
+/// materialized anyway (a `dot`, a row reduction) are emitted first and
+/// become leaves, and everything above them is evaluated per element in
+/// registers.
 impl<'c> Codegen<'c> {
     /// Interior nodes of a fusable tree, or None when `value` is not one.
-    ///
     /// Leaves are named tiles, scalars, and the calls whose result has to be
     /// materialized anyway; interior nodes are arithmetic, `tmax`, and the
     /// per-element math and conversion calls. A subscript is deliberately not
-    /// a leaf: a slice can carry a bounds mask, and the sweep is indexed by
-    /// the target, so reading one would run past the source extent.
+    /// a leaf: a slice can carry a bounds mask, so reading one against the
+    /// target's index would run past the source extent.
     pub(super) fn fusable_nodes(&self, value: &Expr) -> Option<usize> {
         match value {
             Expr::Int(_) | Expr::Float(_) => Some(0),
@@ -226,11 +216,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// Builds the tree, emitting the operands that cannot be fused and
-    /// recording every tile leaf for release afterwards.
-    ///
-    /// A scalar leaf is coerced to `elem` here rather than joined with its
-    /// sibling at each use: that is what the single-operand paths have always
-    /// done, and it is what keeps an integer literal off the index type.
+    /// recording every tile leaf for release afterwards. A scalar leaf is
+    /// coerced to `elem` here rather than at each use, which keeps an
+    /// integer literal off the index type.
     fn plan_fused(
         &mut self,
         block: &Block<'c>,
@@ -265,10 +253,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// `target op= <per-element expression>` in one sweep, or false when the
-    /// value is not such a tree.
-    ///
-    /// The gate wants at least one operator, since a bare tile is a copy, and
-    /// at least one tile operand, since a tree of scalars is a fill.
+    /// value is not such a tree: the gate wants at least one operator (a bare
+    /// tile is a copy) and at least one tile operand (a tree of scalars is a fill).
     pub(super) fn store_fused(
         &mut self,
         block: &Block<'c>,

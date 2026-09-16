@@ -17,7 +17,6 @@ const K: usize = 64;
 const N: usize = 128;
 
 fn main() -> Result<()> {
-    // Deterministic, small inputs.
     let x: Vec<f32> = (0..M * K).map(|i| ((i % 7) as f32 - 3.0) * 0.1).collect();
     let w: Vec<f32> = (0..K * N).map(|i| ((i % 5) as f32 - 2.0) * 0.05).collect();
     let b: Vec<f32> = (0..M * N).map(|i| ((i % 3) as f32 - 1.0) * 0.2).collect();

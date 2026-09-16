@@ -105,11 +105,9 @@ pub struct Peaks {
 }
 
 impl Peaks {
-    /// Detect peaks from device 0, applying any command-line overrides (given
-    /// in TFLOP/s). The per-architecture throughput figures are vendor-spec
-    /// dense rates and best-effort across products (consumer parts in
-    /// particular vary); the override flags exist to correct them. The chosen
-    /// values are logged so the assumption is visible.
+    /// Detect peaks from device 0, applying any command-line overrides (given in
+    /// TFLOP/s): the per-architecture rates are vendor-spec dense throughput,
+    /// best-effort for consumer parts, which the overrides exist to correct.
     pub fn detect(
         peak_fp32_tflops: Option<f64>,
         peak_fp16_tc_tflops: Option<f64>,

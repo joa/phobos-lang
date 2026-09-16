@@ -1,17 +1,11 @@
-// The device-side argmax reduction (Backend::argmax) against host argmax
-// over the same device logits, plus a synthetic edge case the model's own
-// vocab shape never exercises:
+// Device argmax against host argmax, plus a synthetic edge case:
 //
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example argmax_check -- MODEL.gguf [-p PROMPT]
 //
-// Two backends' logits (host and device) can legitimately disagree by a
-// rounding difference too small to flip the winning token; comparing device
-// argmax against a host argmax computed over a *different* backend's logits
-// would conflate that with an argmax bug. So this reads the full logits back
-// from the device (`Session::extend`'s own path) and compares the device
-// kernel's answer only against the host reduction of that same vector --
-// isolating the one thing this beam changed.
+// Reads the full logits back from the device and compares its argmax only
+// against the host reduction of that same vector, so cross-backend rounding
+// is never mistaken for an argmax bug.
 
 use anyhow::{Result, bail};
 use phobos_gguf::backend::device;
@@ -93,10 +87,9 @@ fn main() -> Result<()> {
     );
 
     // A synthetic edge case no real model logit vector exercises: every
-    // element negative, so a masked tail's zero fill (this kernel's
-    // argmax_chunk_width never produces one, but the sentinel logic is worth
-    // pinning directly) would silently win if the reduction's identity were
-    // wrong. Also covers the winner sitting at index 0 and at the last index.
+    // element negative, so a masked tail's zero fill would silently win if
+    // the reduction's identity were wrong. Also covers the winner sitting
+    // at index 0 and at the last index.
     println!("\nsynthetic edge cases:");
     let cases: [(&str, Vec<f32>); 3] = [
         ("all negative, winner in the middle", {

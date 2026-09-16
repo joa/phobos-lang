@@ -1,7 +1,5 @@
-// Kernel to cluster program.
-//
-// [`Analyzer`] holds the state and the rest of this module is its work,
-// split by phase: walk, classify, finalize, then lower.
+// Kernel to cluster program: [`Analyzer`] holds the state, and the rest of
+// this module is its work, split by phase: walk, classify, finalize, then lower.
 
 mod analyze;
 mod classify;
@@ -61,9 +59,8 @@ enum Binding {
     Scratch,
     /// Cluster-loop iv; payload is the step's super sym.
     LoopVar(String),
-    /// A leaf-internal (device-scale) loop iv -> used only by the single-leaf path.
-    /// Payload is the dim the loop uses; a slice offset by it covers
-    /// the whole axis, so the cluster never tiles that axis (see [`Coord::Full`]).
+    /// A leaf-internal (device-scale) loop iv, used only by the single-leaf path.
+    /// Its dim offsets a full-axis slice, so the cluster never tiles that axis (see [`Coord::Full`]).
     DeviceLoop(String),
 }
 
@@ -80,9 +77,7 @@ enum Statement {
 }
 
 struct Pending {
-    /// Reads collected from the value expression.
-    ///
-    /// Key is tensor index.
+    /// Reads collected from the value expression, keyed by tensor index.
     reads: Vec<(usize, SuperTile)>,
     /// Direct-compute write target; None when the target is the scratch.
     target: Option<(usize, SuperTile, AccessMode)>,
@@ -106,14 +101,12 @@ struct Define {
     epilogue: Option<Epilogue>,
 }
 
-/// A GEMM-shaped accumulator epilogue: C[..] = [alpha *] acc [+ [beta *] c_old]
+/// A GEMM-shaped accumulator epilogue: C[..] = [alpha *] acc [+ [beta *] c_old],
 /// where c_old is a prior load of the same output supertile.
 ///
-/// Copy-elision keeps the accumulator on C's buffer, so the epilogue folds:
-/// the step leaf accumulates alpha*acc (stored as alpha*acc + c_old, which
-/// stays on the fused register-accumulator path with an implicit beta of 1),
-/// and the init leaf seeds C with beta*c_old instead of zero-filling. The
-/// running sum then lands on beta*C_orig + alpha*sum(dot) = alpha*acc + beta*C_orig.
+/// Copy-elision keeps the accumulator on C's buffer: the step leaf folds in
+/// alpha (stored as alpha*acc + c_old on the fused accumulator path), and the
+/// init leaf seeds C with beta*c_old instead of zero-filling.
 struct Epilogue {
     /// The accumulator scratch var name.
     acc: String,

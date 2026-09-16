@@ -2,14 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example attnsweep
 //
-// A block of queries at head dimension 256 cannot hold much: the query tile,
-// the accumulator and the key and value tiles are all `[BR, 256]` f32, so 48 KB
-// of shared memory caps `BR` at eight and a `[8, 8]` score tile puts 64 output
-// elements on a 256-thread CTA. Materializing the scores makes both halves
-// ordinary matmuls with no such cap.
-//
-// This measures the two halves alone, to see whether they are worth the pass
-// over memory the fused form does not pay.
+// The fused kernel caps its query block at eight rows: at head dimension 256
+// its tiles are all `[BR, 256]` f32, and that is what 48 KB of shared memory
+// holds. Materializing the scores as an ordinary matmul has no such cap;
+// this measures whether that is worth the extra pass over memory.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -44,8 +40,8 @@ kernel scores(Q: tensor<f32>[M, K], W: tensor<f32>[N, K], S: tensor<f32>[M, N]) 
 /// The same scores against a key block already transposed to `[D, NK]`.
 ///
 /// `dot_t` cannot accumulate in place, so the loop above builds a fresh tile
-/// every step and adds it; `dot` can, which is what reaches the pipelined and
-/// tensor-core paths. Transposing the cache once a layer is the price.
+/// every step and adds it; `dot` can, reaching the pipelined and tensor-core
+/// paths. Transposing the cache once a layer is the price.
 const SRC_SCORES_T: &str = "@launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}], TK in [{TK}])
 {TC}
@@ -63,11 +59,9 @@ kernel scores_t(Q: tensor<f32>[M, K], W: tensor<f32>[K, N], S: tensor<f32>[M, N]
 }
 ";
 
-/// The same again with the head on the grid's third axis.
-///
-/// Both operands are then column windows of a wider tensor at an offset the
-/// compiler cannot bound, so this measures what the bounds mask costs against
-/// gathering each head into a buffer of its own first.
+/// The same again with the head on the grid's third axis: both operands
+/// become column windows the compiler cannot bound, so this measures what
+/// the bounds mask costs against gathering each head into its own buffer.
 const SRC_SCORES_H: &str = "@launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}], TK in [{TK}], D in [256], NH in [8])
 {TC}
@@ -168,7 +162,7 @@ fn main() -> Result<()> {
     };
 
     // Wide enough for every head, so the head-on-the-grid kernel reads the
-    // same layout the model has rather than a flattered one.
+    // same layout the model has rather than a flattened one.
     let wide = HEADS * HEAD_DIM;
     let q: Vec<f32> = (0..ROWS * wide).map(|_| next()).collect();
     let q_dev = DeviceBuffer::from_slice(&q)?;
@@ -187,9 +181,8 @@ fn main() -> Result<()> {
 "
     );
 
-    // Each half on its own: they are different shapes, only one of them can be
-    // written to accumulate in place, and the head is either a grid axis or a
-    // gather into a buffer of its own.
+    // Each half on its own: they are different shapes, only one can
+    // accumulate in place, and the head is either a grid axis or a gather.
     for tensorcore in [false, true] {
         println!("{}", if tensorcore { "@tensorcore" } else { "f32" });
         for &(tm, tn, tk, block) in TILES {

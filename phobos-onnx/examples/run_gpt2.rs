@@ -24,14 +24,11 @@ fn main() -> Result<()> {
     let graph = &model.graph;
     let input_name = graph.inputs[0].name.clone();
 
-    // Read the reference input (token ids) and its shape.
     let input_pb = read_pb(&dir.join("test_data_set_0/input_0.pb"))?;
     let dims = input_pb.dims.clone();
     let ids = pb_i64(&input_pb);
     println!("input '{input_name}' dims {dims:?}");
 
-    // Fold to a static graph for this input shape, then fuse the decomposed
-    // LayerNorm chains into single LayerNormalization nodes.
     let folded = fold_graph(graph, &HashMap::from([(input_name.clone(), dims.clone())]))?;
     let fused = transform::fuse_layernorm(&folded);
     let lns = fused
@@ -51,7 +48,6 @@ fn main() -> Result<()> {
     let outputs = host::run(&folded, &inputs)?;
     println!("interp ran in {:.2?}\n", start.elapsed());
 
-    // Compare each graph output (in order) to output_{i}.pb.
     let mut worst = 0.0f32;
     for (i, vi) in graph.outputs.iter().enumerate() {
         let got = outputs.get(&vi.name).context("missing output")?;

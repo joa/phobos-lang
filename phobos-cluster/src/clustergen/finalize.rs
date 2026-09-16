@@ -1,5 +1,4 @@
-// Turning the analysis into a program: grid axes, super symbols, the
-// init leaves and the output slices.
+// Turns the analysis into a program: grid axes, super symbols, init leaves, output slices.
 
 use super::*;
 
@@ -118,8 +117,7 @@ impl<'a> Analyzer<'a> {
 
         self.finalize_super_syms()?;
 
-        // The step compute carries only the kernel's own scalars; the init leaf
-        // may append its own (beta) decls below, so snapshot the count first.
+        // Snapshot the scalar count now: the init leaf appends its own beta decls below.
         let step_scalars: Vec<usize> = (0..self.scalars.len()).collect();
 
         let scratch = self.scratch.take();
@@ -146,7 +144,6 @@ impl<'a> Analyzer<'a> {
             modes: step_modes,
         }];
 
-        // init leaf: how the output supertile is seeded before the chain runs
         let mut init = InitInfo {
             skip: false,
             c_mode: AccessMode::Write,
@@ -266,9 +263,8 @@ impl<'a> Analyzer<'a> {
     /// (folding the epilogue's prior-C term out of the per-step accumulation):
     /// kernel {name}_init(C: .., <beta scalars>) { ..; let c_old = C[..]; C[..] = beta*c_old }
     ///
-    /// The leaf's scalar params get fresh decls at local positions (the pod
-    /// marshals a leaf's args by dense parameter index), returned as the init
-    /// compute's scalar list.
+    /// The leaf's scalar params get fresh decls at local positions (the pod marshals
+    /// a leaf's args by dense index), returned as the init compute's scalar list.
     pub(super) fn beta_init_leaf(
         &mut self,
         d: &Define,

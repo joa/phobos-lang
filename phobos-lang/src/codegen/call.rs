@@ -234,8 +234,7 @@ impl<'c> Codegen<'c> {
             }
             // iq1s_qmma_t(a, a_scales, qb, d, grid): the same decode as
             // `iq1s_qdot_t`, contracted on the integer tensor cores over a
-            // batch of rows instead. What a prompt pass runs, so that the
-            // expanded weight is never written at all.
+            // batch of rows, so the expanded weight is never written at all.
             "iq1s_qmma_t" => {
                 let [a, asc, qb, d, grid] = self.iq1s_qmma_operands(block, args)?;
                 let out = self.tile_iq1s_qmma_t(block, &a, &asc, &qb, &d, &grid)?;

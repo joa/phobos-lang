@@ -2,15 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --example quant_check -- WIDE.gguf NARROW.gguf
 //
-// What this catches is a decoder that reads a format's blocks wrongly. Such a
-// decoder still produces numbers, and a model built on it still generates
-// text, so the only way to see it is to hold the weights against the same
-// weights read another way. Requantizing a file gives exactly that: every
-// tensor of the narrow file is the wide one plus quantization error, so a
-// relative error of a few percent is the format working and anything near one
-// is the decoder reading the wrong bits.
-//
-// Make the pair with llama.cpp:
+// Every tensor of the narrow file is the wide one plus quantization error,
+// so a relative error of a few percent is the format decoding correctly and
+// one near 1.0 is a decoder reading the wrong bits. Make the pair with:
 //
 //   llama-quantize --allow-requantize WIDE.gguf NARROW.gguf Q4_K_M
 use std::path::Path;
@@ -49,9 +43,9 @@ fn main() -> Result<()> {
             );
         }
 
-        // Relative in the root-mean-square, which is what a quantization error
-        // is quoted as and does not blow up on the near-zero weights that make
-        // up most of a tensor.
+        // Relative in the root-mean-square: the usual way to quote a
+        // quantization error, and one that does not blow up on the
+        // near-zero weights that make up most of a tensor.
         let (mut error, mut scale) = (0.0f64, 0.0f64);
         for (&w, &g) in want.iter().zip(&got) {
             error += (f64::from(w) - f64::from(g)).powi(2);

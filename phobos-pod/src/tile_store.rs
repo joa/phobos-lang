@@ -227,8 +227,7 @@ mod tests {
 
     #[test]
     fn size_class_is_exact_fit_not_power_of_two() {
-        // A 400 MiB supertile must claim ~400 MiB, not round to a 512 MiB slab:
-        // three of them have to fit a 1200 MiB arena.
+        // A 400 MiB supertile claims ~400 MiB, not a rounded 512 MiB slab: three fit a 1200 MiB arena.
         let tile = 10240 * 10240 * 4; // 400 MiB, already 256-aligned
         assert_eq!(size_class(tile), tile);
         assert_eq!(size_class(tile).next_power_of_two(), 512 << 20);

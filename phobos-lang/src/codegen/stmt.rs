@@ -93,13 +93,10 @@ impl<'c> Codegen<'c> {
     /// tensor parameter (`slice_static_shape`), proven in bounds
     /// (`!slice_is_partial`).
     ///
-    /// The narrowness of that match is what makes [`Self::emit_staging_run`]
-    /// eliding barriers safe, and must stay that way. A `var`'s value may in
-    /// general name tiles (`s * scale`, `dot(s, v)`, ...), but
-    /// `slice_static_shape` accepts only a bare index on a `Tensor` binding,
-    /// so a matched statement reads no shared tile at all and cannot race a
-    /// sibling's write. Widening this to statements that merely avoid reading
-    /// the specific writes being elided would reintroduce that race.
+    /// This narrow match is what lets [`Self::emit_staging_run`] elide
+    /// barriers safely: `slice_static_shape` only accepts a bare index on a
+    /// `Tensor` binding, so a matched statement reads no shared tile and
+    /// cannot race a sibling's write. Widening it would reintroduce that race.
     fn stage_run(&self, stmts: &[Stmt]) -> usize {
         stmts
             .iter()
@@ -111,12 +108,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// Emits a [`Self::stage_run`]-matched prefix, deferring every barrier but
-    /// the last. Each copy's barrier only has to publish its write before the
-    /// next read of it, and no read of any of these lands before the run ends:
-    /// the run's statements never read each other (see `stage_run`), and
-    /// whatever follows is guarded by the last statement's barrier. Nor can
-    /// the pool-reuse race `Codegen::release` warns about arise, since these
-    /// buffers are fresh `var`s, released well past the run.
+    /// the last: the run's statements never read each other (see
+    /// `stage_run`), and whatever follows is guarded by the last statement's
+    /// barrier. The pool-reuse race `Codegen::release` warns about cannot
+    /// arise either, since these buffers are fresh `var`s released well past the run.
     fn emit_staging_run(&mut self, block: &Block<'c>, stmts: &[Stmt]) -> Result<()> {
         let last = stmts.len() - 1;
         for (j, s) in stmts.iter().enumerate() {
@@ -136,13 +131,11 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Emits a tile-typed let/var initializer. Initializers store_tile would
-    /// not fuse into the target (the reductions, the masks, the transpose) are
-    /// evaluated first: when the result is an owned temp of exactly the
-    /// declared type, its buffer is adopted outright, eliding the copy pass
-    /// and its shared allocation. Everything else takes the regular
-    /// alloc-then-store_tile path, which fuses dot/binary/scalar initializers
-    /// and whole per-element trees straight into the target.
+    /// Emits a tile-typed let/var initializer. Initializers store_tile cannot
+    /// fuse (reductions, masks, transpose) are evaluated first: an owned temp
+    /// of exactly the declared type has its buffer adopted outright, eliding
+    /// the copy and its shared allocation. Everything else takes the regular
+    /// alloc-then-store_tile path.
     fn emit_tile_decl(
         &mut self,
         block: &Block<'c>,
@@ -283,9 +276,8 @@ impl<'c> Codegen<'c> {
         }
 
         // Every loop shaped for it pipelines whether or not `@pipeline` was
-        // written; the attribute is only the assertion that some loop in the
-        // kernel did, enforced in `emit` from `pipelined_any` and the decline
-        // reasons collected here.
+        // written; the attribute only asserts that some loop in the kernel
+        // did, enforced in `emit` via `pipelined_any` and the decline reasons collected here.
         match self.pipeline_candidate(body) {
             Ok((staged, rest)) => {
                 self.pipelined_any = true;
@@ -333,11 +325,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// Whether some slice in this loop body rides `var` into a dynamic tensor
-    /// extent, so the last chunk can overrun the tensor and the loop needs the
-    /// trimmed-main-loop / masked-remainder split.
-    ///
-    /// Only a span with a static length qualifies: a dynamically sized slice
-    /// has no static tile shape for the masked staging buffer to take.
+    /// extent, so the last chunk can overrun and the loop needs the
+    /// trimmed-main-loop / masked-remainder split. Only a span with a static
+    /// length qualifies: a dynamically sized slice has no static tile shape
+    /// for the masked staging buffer to take.
     fn needs_ragged_epilogue(&self, body: &[Stmt], var: &str) -> bool {
         let mut found = false;
         for stmt in body {
@@ -365,14 +356,13 @@ impl<'c> Codegen<'c> {
     }
 
     /// Splits a loop whose trip count may be ragged into the chunks that are
-    /// provably whole plus a single masked remainder.
-    ///
-    /// The main loop runs to `lo + ((hi - lo) / st) * st`, so every slice it
-    /// takes is in bounds by construction and keeps the unmasked fast paths
-    /// (vectorized copies, WMMA, cp.async). The remainder replays the body
-    /// once at that index with `ragged_iv` set, which makes emit_subview guard
-    /// the affected dims against the tensor's runtime extent. Tiles live in
-    /// memrefs, so loop-carried state flows into the remainder unchanged.
+    /// provably whole plus a single masked remainder. The main loop runs to
+    /// `lo + ((hi - lo) / st) * st`, so every slice it takes is in bounds by
+    /// construction and keeps the unmasked fast paths (vectorized copies,
+    /// WMMA, cp.async). The remainder replays the body once more at that
+    /// index with `ragged_iv` set, so `emit_subview` guards the affected dims
+    /// against the tensor's runtime extent; loop-carried state flows into it
+    /// unchanged since tiles live in memrefs.
     #[allow(clippy::too_many_arguments)]
     fn emit_split_for(
         &mut self,

@@ -28,13 +28,11 @@ impl<'c> Codegen<'c> {
     ///   acc += dot(<[m, k] tile>, <[k, n] tile or tensor slice>)
     ///   <[m, n] float tensor slice> = acc
     ///
-    /// with mutations only at statement level of the surrounding blocks and
-    /// enclosing for loops (threaded as iter_args by emit_frag_for; never
-    /// inside if/while, whose regions cannot carry them). Such an accumulator
-    /// never exists in shared memory: it lives in per-lane mma.sync D
-    /// fragments, which kills both its shared footprint (occupancy) and its
-    /// per-iteration shared round-trips (the += seed/scatter and the scale
-    /// pass). Returns None to fall back to the regular shared-tile path.
+    /// Mutations are allowed only at statement level of the surrounding
+    /// blocks and enclosing for loops, never inside if/while (whose regions
+    /// cannot carry iter_args). Such an accumulator lives in per-lane
+    /// mma.sync D fragments rather than shared memory, avoiding its shared
+    /// footprint and round-trips. Returns None to fall back to the shared-tile path.
     pub(super) fn frag_acc_candidate(&self, stmts: &[Stmt]) -> Option<FragAccPlan> {
         let [
             Stmt::Var {
@@ -342,9 +340,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// acc = acc {*, /} col for a [m, 1] f32 column vector in shared memory:
-    /// each lane rescales its fragment elements by col[row], the rows coming
-    /// from the same per-lane walk the scatter store uses. Pure register
-    /// math plus broadcast column reads; no barrier (col is only read).
+    /// each lane rescales its fragment elements by col[row], the rows from
+    /// the same per-lane walk the scatter store uses. No barrier: col is only read.
     fn frag_scale(
         &mut self,
         block: &Block<'c>,
@@ -481,8 +478,7 @@ impl<'c> Codegen<'c> {
     /// scf.for threading the fragment accumulators the body assigns as
     /// iter_args: fragments are SSA values, unlike the memref-backed tiles,
     /// so loop-carried updates must ride the loop op. The body scope shadows
-    /// each name onto the block arguments and the outer bindings pick up the
-    /// loop results.
+    /// each name onto the block arguments; the outer bindings pick up the loop results.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_frag_for(
         &mut self,

@@ -19,8 +19,6 @@ fn host_matmul_matches_by_hand() {
 
 #[test]
 fn q8_matmul_matches_the_dequantized_matmul() {
-    // The quantized path has to agree with multiplying by the dequantized
-    // weight, since that is what it replaces.
     let (k, n) = (Q8_BLOCK * 3, 5usize);
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {
@@ -255,7 +253,7 @@ fn delta_gates_hold_up_where_the_direct_softplus_overflows() {
     let out = read_vec(&backend, packed, mix.packed_len()).unwrap();
     let at = 3 * mix.span();
     // softplus(200) is 200, so the decay is exp(-200), which underflows to
-    // zero. The point is that it is a zero and not a NaN.
+    // zero rather than NaN.
     assert_eq!(out[at], 0.0);
     // softplus(0) is ln(2), so the decay is a half.
     assert!((out[at + 1] - 0.5).abs() < 1e-6);

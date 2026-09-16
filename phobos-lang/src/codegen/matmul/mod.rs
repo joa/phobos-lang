@@ -8,11 +8,9 @@ use super::*;
 /// Width of the vector<Nxf16> global loads used when staging f16 operands
 const HALF_VEC: i64 = 4;
 
-/// The matched register-accumulator GEMM pattern.
+/// The matched register-accumulator GEMM pattern (see
+/// [`Codegen::matmul_candidate`]):
 ///
-/// See also [`Codegen::matmul_candidate`].
-///
-/// ```plain
 /// var acc: tile<f32>[M, N] = <scalar>
 ///
 /// for kt in range(lo, hi, st) {
@@ -24,7 +22,6 @@ const HALF_VEC: i64 = 4;
 /// // Optional GEMM epilogue (alpha/beta scaling with prev_load load):
 /// [let prev_load = C[<slice>]] // same slice as store target
 /// C[<slice>] = [alpha *] acc [+ beta * prev_load] // acc's last use
-/// ```
 pub struct MatmulFusion<'a> {
     pub dims: &'a [Dim],
     /// Element type of the accumulator

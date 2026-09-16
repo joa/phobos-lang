@@ -24,9 +24,9 @@ const MAX_INLINE_TEST_LINES: usize = 150;
 /// the cap has to be deleted: that is the whole ratchet. The list only ever
 /// gets shorter, and when it is empty the cap drops to 700.
 const GRANDFATHERED: &[(&str, usize)] = &[
-    ("phobos-onnx/src/backend/chain.rs", 917),
-    ("phobos-pod/src/engine.rs", 915),
-    ("phobos-sched/src/lib.rs", 970),
+    ("phobos-onnx/src/backend/chain.rs", 911),
+    ("phobos-pod/src/engine.rs", 912),
+    ("phobos-sched/src/lib.rs", 954),
 ];
 
 #[test]

@@ -11,29 +11,11 @@ const RAW_DEQUANT_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
 /// [`RAW_DEQUANT_BUDGET_BYTES`], or what `PHOBOS_DEQUANT_MIB` overrides it to.
 ///
-/// The scratch is live for the whole prompt pass, and it is what keeps the
-/// 521 MiB output head paged. Traced, the same kernel at the same shape reads
-/// **3.03 ms a token in a decode that follows no prompt pass and 47.19 ms in
-/// one that does**, which is 50% of a decode step and 11.6 GB/s, the bus
-/// rather than the card.
-///
-/// Shrinking it buys that back and costs launches. The trade was steep when
-/// two formats were fused and most of a pass went through here; with four it
-/// is not, and 32 MiB is where it lands. Each row twice, `-p 128 -n 128 -r 1`:
-///
-/// | budget | pp128 | tg128 |
-/// | ---: | ---: | ---: |
-/// | 128 MiB | 204.4, 208.6 | 10.06, 11.33 |
-/// | 64 MiB | 202.2, 206.2 | 11.31, 12.93 |
-/// | **32 MiB** | **192.9, 193.0** | **18.03, 18.03** |
-/// | 16 MiB | 150.7, 2.6 | 15.08, 5.79 |
-/// | 8 MiB | 88.8, 87.1 | 18.03, 12.90 |
-///
-/// Below 32 the strip stops covering a whole tensor in few enough launches and
-/// the prompt pass falls apart; the two rounds at 16 MiB disagree by 58x, which
-/// is the shape of a pass that has started thrashing rather than a measurement.
-/// The way out is still no scratch at all: a format with a fused projection
-/// never allocates one, and IQ1_M, IQ3_XXS and IQ3_S are what is left.
+/// The scratch stays live for the whole prompt pass, which pages the output
+/// head out for as long as it does. Shrinking the budget buys residency
+/// back and costs launches; below a floor the strip stops covering a whole
+/// tensor in few enough launches and the prompt pass falls apart. A format
+/// with a fused projection never allocates this scratch at all.
 fn raw_dequant_budget() -> usize {
     std::env::var("PHOBOS_DEQUANT_MIB")
         .ok()
@@ -110,8 +92,8 @@ impl DeviceBackend {
                 "iq3xxs_qdecode",
             )),
             Quant::IQ3_S => Some((&self.iq3s_qdecode, &self.iq3s_qdecode_f16, "iq3s_qdecode")),
-            // Q2_K and IQ4_XS decode on a different lane geometry and are 1%
-            // of a prompt pass between them; they keep `_dequant`.
+            // Q2_K and IQ4_XS decode on a different lane geometry and are a
+            // small share of a prompt pass; they keep `_dequant`.
             _ => None,
         };
         let rb = nb * quant.device_block_bytes();
@@ -127,13 +109,12 @@ impl DeviceBackend {
         } else {
             strip
         };
-        // One buffer for every strip of every weight in the model, not one per
-        // distinct width. A kernel operand is a pointer and a shape, so a
-        // narrower weight simply uses a prefix, and `k * strip` is bounded by
-        // RAW_DEQUANT_BUDGET_BYTES by construction. Taken from the pool per
-        // weight instead, the exact-length keying leaves one entry per shape:
-        // 741 to 886 MiB on the 27B, which is what pages its output head out.
-        // See `residency.rs`.
+        // One buffer for every strip of every weight in the model, not one
+        // per distinct width. A kernel operand is a pointer and a shape, so
+        // a narrower weight simply uses a prefix, and `k * strip` is bounded
+        // by RAW_DEQUANT_BUDGET_BYTES by construction. Taken from the pool
+        // per weight instead, the exact-length keying would leave one entry
+        // per shape and page the output head out. See `residency.rs`.
         // A grouped format is padded to `RAW_GROUP_PAD` columns, so a ragged
         // strip decodes to the next whole tile, `dec` wide, and copies `cur`.
         let grouped = quant.grouped_rows();

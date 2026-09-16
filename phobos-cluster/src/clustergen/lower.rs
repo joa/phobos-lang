@@ -2,12 +2,10 @@
 
 use super::*;
 
-/// Rewrite the step leaf's store so each launch contributes one k-chunk.
-///
+/// Rewrites the step leaf's store so each launch contributes one k-chunk.
 /// A plain C[..] = acc flips to += acc. A GEMM epilogue keeps the fused
-/// register-accumulator store shape C[..] = alpha*acc + c_old (an implicit
-/// beta of 1); the real beta is applied once by the init leaf. alpha*acc
-/// with no prior-C term accumulates as += alpha*acc.
+/// store shape C[..] = alpha*acc + c_old (implicit beta of 1, applied once by
+/// the init leaf); with no prior-C term it accumulates as += alpha*acc.
 pub(super) fn rewrite_step_store(step: &mut Kernel, d: &Define) {
     let Stmt::Assign { op, value, .. } = &mut step.body[d.stmt_idx] else {
         unreachable!("define index points at the accumulator store");

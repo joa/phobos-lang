@@ -196,18 +196,11 @@ kernel iq1s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// Rows and columns of the fused prompt projection's output tile.
-///
-/// The same 128 x 64 the Q8_0 projection settled on, and for the same reason:
-/// operand loads and scale arithmetic are per output element however the tiles
-/// are arranged, so what pays for them is the tensor-core tiles in a warp's
-/// patch, and the output tile bounds the patch.
 /// The fused projection's tile, and the CTA that carries it.
-///
-/// `PHOBOS_QMMA_TILE=TMxTNxCTA` overrides all three together, which is how the
-/// shape gets swept without a rebuild. The tile has to divide the batch, so
-/// `TM` above 128 takes the expansion path at `pp128`, and the staged form
-/// needs exactly one warp patch a warp.
+/// `PHOBOS_QMMA_TILE=TMxTNxCTA` overrides all three together, which is how
+/// the shape gets swept without a rebuild. The tile has to divide the
+/// batch, so `TM` above 128 takes the expansion path at `pp128`, and the
+/// staged form needs exactly one warp patch a warp.
 pub(crate) fn qmma_tile() -> (usize, usize, usize) {
     let Ok(spec) = std::env::var("PHOBOS_QMMA_TILE") else {
         return (IQ1S_QMMA_TM, IQ1S_QMMA_TN, IQ1S_QMMA_CTA);
@@ -219,25 +212,21 @@ pub(crate) fn qmma_tile() -> (usize, usize, usize) {
     }
 }
 
+/// Rows and columns of the fused prompt projection's output tile: the same
+/// 128 x 64 the Q8_0 projection settled on, for the same reason. Operand
+/// loads and scale arithmetic are per output element however the tiles are
+/// arranged, so what pays for them is the tensor-core tiles in a warp's
+/// patch, which the output tile bounds.
 pub(crate) const IQ1S_QMMA_TM: usize = 128;
 pub(crate) const IQ1S_QMMA_TN: usize = 64;
 
 /// Threads the fused projection's CTA carries.
 ///
 /// Narrower than `q8_qmma`'s because `qmma_patch` will not grow a patch past
-/// the point where it leaves warps of the CTA idle, and the patch is what pays
-/// for the decode: at `rm` row-tiles a weight fragment is decoded once and fed
-/// to `rm` tensor instructions. Four warps hold it to `rm = 4`, two let it
-/// reach 8. Emitted, per k step:
-///
-/// | CTA | registers | mma | global loads |
-/// | ---: | ---: | ---: | ---: |
-/// | 32 | 251 | 128 | 104 |
-/// | **64** | **251** | **128** | **104** |
-/// | 128 | 168 | 64 | 92 |
-/// | 256 | 101 | 32 | 52 |
-///
-/// 1.23 tensor instructions a load against 0.70, and no spill either way.
+/// the point where it leaves warps of the CTA idle, and the patch is what
+/// pays for the decode: at `rm` row-tiles a weight fragment is decoded once
+/// and fed to `rm` tensor instructions. Four warps hold it to `rm = 4`, two
+/// let it reach 8, so each decode feeds twice as many tensor instructions.
 pub(crate) const IQ1S_QMMA_CTA: usize = 64;
 
 /// Twice [`IQ1S_GRID_LEN`]: the signed table carries both foldings of every
@@ -245,21 +234,17 @@ pub(crate) const IQ1S_QMMA_CTA: usize = 64;
 /// `crate::quant::iq1s_signed_grid`.
 pub(crate) const IQ1S_SIGNED_GRID_LEN: usize = 2 * IQ1S_GRID_LEN;
 
-/// IQ1_S's prompt projection, decode and contraction in one kernel.
-///
-/// What this replaces is `iq1s_qdecode` writing an expanded weight and
-/// `matmul_tc` reading it back: 23.8 GB of traffic against the 2.3 GB the
-/// weights themselves are, plus the scratch to hold it, on a card where the
-/// weights are 6.37 GiB of 8. `@aligned` is required, as it is for
-/// `iq1s_qdot_matvec`: `iq1s_qmma_t` assumes in-bounds slices, and `K = 256`
-/// because a lane indexes the block bytes itself.
+/// IQ1_S's prompt projection, decode and contraction in one kernel: this
+/// replaces `iq1s_qdecode` writing an expanded weight for `matmul_tc` to
+/// read back, avoiding that traffic and the scratch to hold it. `@aligned`
+/// is required, as it is for `iq1s_qdot_matvec`: `iq1s_qmma_t` assumes
+/// in-bounds slices, and `K = 256` because a lane indexes the block bytes
+/// itself.
 pub(crate) fn iq1s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     // The staged form decodes each column once for the whole CTA instead of
-    // once per warp that needs it: pp128 117.7 against 112.4, reproducible, and
-    // the same answer to four digits in `backend_check`. Chosen here rather
-    // than inside codegen so the two produce different source text, which is
-    // what keeps them apart in the kernel cache; a flag read during codegen
-    // would collide with the entry the other one wrote.
+    // once per warp that needs it, chosen here rather than in codegen so the
+    // two branches compile to different source text: a runtime flag would
+    // collide in the kernel cache, which keys on that text.
     //
     // It needs one patch a warp, which `IQ1S_QMMA_TM`, `IQ1S_QMMA_TN` and
     // `IQ1S_QMMA_CTA` give it; the intrinsic refuses rather than guesses if a

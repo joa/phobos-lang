@@ -42,6 +42,7 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
 
 /// [`IQ1S_GRID`] flattened to sign-extended lanes: `flat_grid()[i * 8 + j]`
 /// is byte `j` of `IQ1S_GRID[i]` read as `i8`.
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ1S_GRID
         .iter()
@@ -54,6 +55,7 @@ pub(crate) fn flat_grid() -> Vec<i32> {
 /// [`flat_grid`] widens to `i32`. A lane's eight entries are eight contiguous
 /// bytes here, so it takes one 64-bit load instead of eight 32-bit ones, and
 /// the whole table is 16 KB rather than 64.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ1S_GRID
         .iter()
@@ -64,6 +66,7 @@ pub(crate) fn packed_grid() -> Vec<i8> {
 /// [`IQ1S_GRID`] at two bits a lane, for `iq1s_qgemm_t`: entry `i` is the
 /// little-endian `u16` whose bits `2j, 2j + 1` are byte `j` of
 /// `IQ1S_GRID[i]` masked to two bits (0 for 0, 1 for +1, 3 for -1).
+#[cfg(feature = "cuda")]
 pub(crate) fn grid2() -> Vec<i8> {
     IQ1S_GRID
         .iter()
@@ -81,6 +84,7 @@ pub(crate) fn grid2() -> Vec<i8> {
 /// [`IQ1S_GRID`] at a nibble a lane, for the `dp4a` matvecs: entry `i` is
 /// the little-endian `u32` whose nibble `j` is byte `j` of `IQ1S_GRID[i]`
 /// plus one (0 for -1, 1 for 0, 2 for +1), a `prmt` selector as it is.
+#[cfg(feature = "cuda")]
 pub(crate) fn grid4() -> Vec<i8> {
     IQ1S_GRID
         .iter()
@@ -100,11 +104,11 @@ pub(crate) fn grid4() -> Vec<i8> {
 /// `8 * g - 1` when `neg`, `8 * g + 1` otherwise, for byte `j` of
 /// `IQ1S_GRID[idx]` read as `i8`.
 ///
-/// A weight is `dl * (g +- 1/8)`, which is `(dl / 8) * (8g +- 1)`, and `g` is
-/// -1, 0 or 1, so `8g +- 1` is an exact `i8` in -9..9. That is what lets the
-/// prompt path contract IQ1_S on the integer tensor cores at all, and folding
-/// the sign into the index keeps the decode to one four-byte load: the sign bit
-/// becomes the table's low index bit instead of arithmetic in the kernel.
+/// A weight is `dl * (g +- 1/8)`, which is `(dl / 8) * (8g +- 1)`, and
+/// `8g +- 1` is an exact `i8` in -9..9, letting the prompt path contract
+/// IQ1_S on the integer tensor cores. Folding the sign into the index keeps
+/// the decode to one four-byte load instead of arithmetic in the kernel.
+#[cfg(any(test, feature = "cuda"))]
 pub(crate) fn signed_grid() -> Vec<i8> {
     let mut out = Vec::with_capacity(IQ1S_GRID.len() * 2 * 8);
     for entry in IQ1S_GRID {

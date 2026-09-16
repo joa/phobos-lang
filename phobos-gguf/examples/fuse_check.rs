@@ -3,34 +3,22 @@
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example fuse_check -- MODEL.gguf [-n STEPS] [--single]
 //
-// `model_check` compares the device against the host, so its bound has to cover
-// the whole of Q8 quantization, and on a model already sitting against that
-// bound a fusion cannot be told apart from the noise. This runs both paths on
-// one backend, over one upload of the weights and one context, so the only
-// difference between the two passes is the fusion.
-//
-// Any pass of more than one row has to come out exactly equal, because no stage
-// fuses past one row, and a difference there is a bug rather than an
-// accumulation order. A decode step may differ, since a fused kernel contracts
-// and reduces in its own order. What that difference has to stay under is not a
-// constant: it is what two paths already accepted as equivalent differ by, so
-// compare it against `batch_check`, which measures the same thing between the
-// batched and single-row paths on the same model in the same session.
+// Runs both paths on one backend, over one upload of weights, so the only
+// difference between the two passes is the fusion. A pass of more than one
+// row must come out exactly equal, since no stage fuses past one row; a
+// decode step may differ by its own accumulation order, bounded by `APART_MAX`.
 
 use anyhow::{Result, bail};
 use phobos_gguf::{Bpe, Decoder, Gguf};
 
 use phobos_gguf::backend::device;
 
-/// Where a defect lands rather than where rounding does, and the gap between the
-/// two is why the number is not delicate. Measured on `minicpm5-1b`: the fused
-/// path sits at 1.07e-2 of the logit spread whether its normalization sweeps 8
-/// rows or 16, and making that sweep one tile short lands at 7.5e-1, seventy
-/// times higher. Anything in between is a bound; this is the round number in the
-/// middle of it.
+/// Where a defect lands rather than where rounding does: comfortably above
+/// what a correct fusion's own accumulation order drifts by, and comfortably
+/// below what a broken one produces.
 ///
-/// A flip cannot carry this on its own: a large enough drift makes every flip
-/// undecided, so a gross defect would report nothing but ties.
+/// A flip cannot carry this on its own: a large enough drift makes every
+/// flip undecided, so a gross defect would report nothing but ties.
 const APART_MAX: f32 = 1e-1;
 
 fn main() -> Result<()> {

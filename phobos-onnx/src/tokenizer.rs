@@ -71,7 +71,7 @@ impl BpeTokenizer {
         let decoder = encoder.iter().map(|(k, &v)| (v, k.clone())).collect();
 
         // A byte-level vocabulary marks nothing as special, so the turn-enders
-        // it happens to contain are all we can go on.
+        // it happens to contain are all there is to go on.
         let markers: Vec<(String, i64)> = END_OF_TURN
             .iter()
             .filter_map(|&m| encoder.get(m).map(|&id| (m.to_string(), id)))
@@ -80,8 +80,8 @@ impl BpeTokenizer {
         eog.sort_unstable();
 
         Ok(BpeTokenizer {
-            // Nothing in the files names a pre-tokenizer; every export we have
-            // seen wants GPT-2's.
+            // Nothing in the files names a pre-tokenizer; every export seen so
+            // far wants GPT-2's.
             bpe: ByteBpe::new(PreTokenizer::Gpt2, merges)?,
             encoder,
             decoder,

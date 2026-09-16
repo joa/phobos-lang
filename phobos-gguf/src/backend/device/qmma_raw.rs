@@ -2,15 +2,11 @@
 //! expanded weight in between.
 //!
 //! [`super::DeviceBackend::project_raw_dense`] decodes a strip of the weight
-//! into `f32` or `f16` scratch and runs a dense matmul over it. Measured on
-//! Qwen3.8-27B that costs 872 ms of `_qdecode` and 529 ms of `matmul_tc` in a
-//! 1582 ms pass, and the reason is not the decode: `iq1s_qdecode` and
-//! `iq1s_qdot_matvec` are the same size instruction for instruction and move
-//! DRAM at the same 67 GB/s. The expansion moves **11.2x the bytes** -- 23.8 GB
-//! written and read back against the 2.3 GB IQ1_S actually is -- and leaves
-//! 128 MiB of scratch behind on a card whose weights are 6.37 GiB of 8.
-//!
-//! Contracting out of the registers the decode already lands in pays neither.
+//! into `f32` or `f16` scratch and runs a dense matmul over it. The cost is
+//! not the decode, which runs at the same speed either way; it is that the
+//! expansion moves many times the weight's own bytes and leaves scratch
+//! resident behind it. Contracting out of the registers the decode already
+//! lands in pays neither cost.
 
 use anyhow::{Context, Result, bail, ensure};
 
@@ -123,7 +119,7 @@ impl DeviceBackend {
     ///
     /// The activation is quantized once for the whole weight, as it is for
     /// [`Self::project_q8`]: a Q8_0 block is 32 elements and so is an IQ1_S
-    /// scale group, which is what lets both scales land on the same k step.
+    /// scale group, so both scales land on the same k step.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn project_raw_qmma(
         &self,
@@ -224,9 +220,8 @@ impl DeviceBackend {
             None => {
                 // Nothing outlives this one: the down projection is its only
                 // reader, so it takes a ring slot rather than a slot of its
-                // own. At 128 rows of a 17408-wide FFN a slot apiece is 2.2 MiB
-                // a layer and 143 MiB across the model, which is most of what
-                // the fused path costs a decode step.
+                // own, which is most of what the fused path would otherwise
+                // cost a decode step in residency.
                 self.note_dense_pass();
                 self.quantize_act_transient(a, m, k)?
             }

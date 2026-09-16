@@ -204,8 +204,8 @@ fn minicpm_calls_are_one_element_with_named_attributes() {
     );
 }
 
-/// What the guidelines exist for: an argument holding the `<` and the
-/// newlines that would otherwise close the parameter early.
+/// An argument holding `<` and newlines that would otherwise close the
+/// parameter early.
 #[test]
 fn a_cdata_argument_survives_its_own_markup() {
     let out = AssistantOutput::collect(

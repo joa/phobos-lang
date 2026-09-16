@@ -95,8 +95,6 @@ fn check_attention_fusion() -> Result<()> {
     Ok(())
 }
 
-// ---- references ----------------------------------------------------------
-
 fn linear_reference(x: &[f32], w: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
     let mut y = vec![0.0f32; m * n];
     for i in 0..m {
@@ -122,7 +120,6 @@ fn attention_reference(
 ) -> Vec<f32> {
     let mut out = vec![0.0f32; s * d];
     for i in 0..s {
-        // scores row, scaled.
         let mut scores = vec![0.0f32; s];
         for j in 0..s {
             let mut dot = 0.0f32;
@@ -131,11 +128,9 @@ fn attention_reference(
             }
             scores[j] = dot * scale;
         }
-        // softmax.
         let mx = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
         let exps: Vec<f32> = scores.iter().map(|s| (s - mx).exp()).collect();
         let sum: f32 = exps.iter().sum();
-        // weighted sum of V.
         for e in 0..d {
             let mut acc = 0.0f32;
             for j in 0..s {
@@ -146,8 +141,6 @@ fn attention_reference(
     }
     out
 }
-
-// ---- graph builders ------------------------------------------------------
 
 fn linear_graph(m: usize, k: usize, n: usize, w: &[f32], b: &[f32]) -> Result<Vec<u8>> {
     let (mi, ki, ni) = (m as i64, k as i64, n as i64);
@@ -188,8 +181,6 @@ fn attention_graph(s: usize, d: usize, scale: f32) -> Result<Vec<u8>> {
     };
     Ok(wrap(graph))
 }
-
-// ---- helpers -------------------------------------------------------------
 
 fn fill(n: usize, f: impl Fn(usize) -> f32) -> Vec<f32> {
     (0..n).map(f).collect()

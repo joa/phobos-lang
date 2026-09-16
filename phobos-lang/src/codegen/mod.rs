@@ -51,8 +51,7 @@ enum Reduce {
 /// Lanes in a warp.
 const WARP: i64 = 32;
 
-/// Values in a Q8_0 block.
-/// This is the granularity `qdot_t` scales at.
+/// Values in a Q8_0 block, the granularity `qdot_t` scales at.
 const Q8_BLOCK: i64 = 32;
 
 const QDOT_LANE: i64 = 16;
@@ -71,8 +70,7 @@ const SHARED_BANK_BYTES: i64 = 128;
 
 /// What `emit` learned across the module: the dynamic shared-memory sideband,
 /// plus `(kernel name, decline reasons)` for every kernel whose `@pipeline`
-/// assertion did not hold. `phobos_lang::compile_shared` turns a non-empty
-/// `pipeline_failures` into an error.
+/// assertion did not hold.
 #[derive(Debug)]
 pub struct EmitOutput {
     pub shared: Vec<(String, usize)>,
@@ -126,8 +124,7 @@ pub fn emit<'c>(
     })
 }
 
-/// XOR column swizzle for mma.sync staging buffers
-///
+/// XOR column swizzle for mma.sync staging buffers.
 /// col' = col ^ (((row >> shift) & ((1 << bits) - 1)) << elem_log)
 #[derive(Clone, Copy)]
 struct Swizzle {
@@ -143,8 +140,7 @@ struct MemVal<'c> {
     elem: Type<'c>,
     /// Static dims, with [`DYN`] for dynamic ones.
     shape: Vec<i64>,
-    /// None means contiguous, otherwise the padded stride. See
-    /// [`Codegen::alloc_tile_padded`]
+    /// None means contiguous, otherwise the padded stride; see [`Codegen::alloc_tile_padded`].
     row_stride: Option<i64>,
     /// Proven divisor, in elements, of the base offset and of every stride
     /// above the innermost. The row-pitch ABI promises 4 elements on its own
@@ -152,9 +148,8 @@ struct MemVal<'c> {
     /// means no offset at all, so any width goes.
     align_div: i64,
 
-    /// XOR column swizzle for ldmatrix staging buffers. Every access, staging
-    /// store and ldmatrix load alike, must permute the column index. See
-    /// [`Swizzle`]
+    /// XOR column swizzle for ldmatrix staging buffers; every access, staging
+    /// store and load alike, must permute the column index. See [`Swizzle`].
     swizzle: Option<Swizzle>,
 
     /// The memref.global symbol backing a whole tile buffer (None for subviews
@@ -165,9 +160,8 @@ struct MemVal<'c> {
     /// Unlike [`Self::global`] this survives a subview.
     shared: bool,
 
-    /// A fresh unnamed temp whose buffer may be released back to the pool once
-    /// all reads of it have been emitted. [`Codegen::bind`] clears this, so
-    /// named buffers are never pooled.
+    /// A fresh unnamed temp whose buffer may be released once all reads of it
+    /// are emitted. [`Codegen::bind`] clears this, so named buffers are never pooled.
     owned: bool,
 
     /// Per-dimension bounds mask for a slice that may reach past the source
@@ -249,9 +243,8 @@ enum Binding<'c> {
 
 struct Codegen<'c> {
     /// The chip this kernel is emitted for. Every construct the portable
-    /// dialects cannot express goes through here; see [`target::Isa`]. It is
-    /// the only thing the host's config survives as: the autotune choices are
-    /// resolved into `shape_env` at construction and nothing else is read.
+    /// dialects cannot express goes through here, see [`target::Isa`]. Autotune
+    /// choices are resolved into `shape_env` at construction.
     isa: Box<dyn target::Isa>,
     ctx: &'c Context,
     loc: Location<'c>,
@@ -269,9 +262,8 @@ struct Codegen<'c> {
     kernel_name: String,
     shared_globals: Vec<Operation<'c>>, // shared-memory tiles (memref.global)
     tile_count: usize,
-    // Released tile buffers by (element type, physical shape), reused so temps
-    // don't each grow the CTA's static shared footprint, which caps occupancy.
-    // See Codegen::release.
+    // Released tile buffers by (element type, physical shape), reused so a
+    // temp doesn't grow the CTA's static shared footprint and cap occupancy.
     tile_pool: HashMap<(String, Vec<i64>), Vec<String>>,
     /// Tile buffers a view still aliases, which never go back to the pool.
     /// See [`Codegen::tile_flat`].
@@ -283,32 +275,25 @@ struct Codegen<'c> {
     /// reaches: what the host has to pass at launch.
     tile_offsets: HashMap<String, i64>,
     shared_bytes: i64,
-    /// High-water mark of `shared_bytes`, what the host must actually reserve.
-    /// A barrier-separated kernel can let `shared_bytes` fall back to zero
-    /// between phases (see `dynamic_live`), but the allocation still has to
-    /// cover whichever phase asked for the most.
+    /// High-water mark of `shared_bytes`: what the host must reserve, since a
+    /// barrier-separated kernel's phases can each ask for less than the peak.
     shared_bytes_peak: i64,
-    /// Count of dynamic tiles allocated and not yet released. Reaching zero
-    /// between two phases of a barrier-separated kernel lets the next shape
-    /// mint restart the allocation at offset 0 instead of growing to fit both
-    /// phases at once. See `alloc_tile_shaped` and `release`.
+    /// Dynamic tiles allocated and not yet released. At zero the next
+    /// allocation restarts at offset 0, so a barrier-separated kernel's
+    /// phases share the space instead of summing it.
     dynamic_live: i64,
     // Loop-invariant dot operands staged into shared f16 in a loop's preheader,
-    // one frame per active for loop: (source view's memref value, staged
-    // buffer). See codegen/hoist.rs.
+    // one frame per active for loop: (source view's memref value, staged buffer).
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
-    // Induction variable of the ragged remainder chunk being emitted, if any.
-    // emit_subview guards a slice offset by it against the runtime dim; the
-    // trimmed main loop leaves it None and keeps the unmasked fast paths.
+    // Induction variable of the ragged remainder chunk, if any; a slice offset
+    // by it is guarded against the runtime dim. None in the trimmed main loop.
     ragged_iv: Option<String>,
-    // Induction variables of the enclosing trimmed main loops. Their trip count
-    // was rounded down to whole chunks, so a slice offset by one of them is in
-    // bounds by construction and needs no mask.
+    // Induction variables of the enclosing trimmed main loops: their trip
+    // count is rounded to whole chunks, so an offset slice needs no mask.
     trimmed_ivs: Vec<String>,
     /// Whether `@pipeline` was written on this kernel. The generic loop path
-    /// auto-attempts every eligible loop regardless; this still gates the
-    /// fused-GEMM backend's double-buffering (see [`Self::staging_pairs`]) and
-    /// is checked kernel-wide as an assertion via `pipelined_any` in `emit`.
+    /// auto-attempts every eligible loop regardless; this only gates the
+    /// fused-GEMM backend's double-buffering (see [`Self::staging_pairs`]).
     pipeline_assert: bool,
     /// Whether some loop in the kernel being emitted did pipeline, through
     /// either mechanism `pipeline_assert` gates.
@@ -325,10 +310,8 @@ struct Codegen<'c> {
     pad_stage: bool,
 }
 
-/// Widens a value's borrow to the context lifetime. Values borrow the block they
-/// were created in, but every block here is appended to a region the module
-/// transitively owns, so the MlirValue stays valid for the whole build; only the
-/// borrow is too conservative.
+/// Widens a value's borrow to the context lifetime: every block here is
+/// appended to a region the module owns, so the value outlives the borrow.
 fn detach<'c>(value: Value<'c, '_>) -> Value<'c, 'c> {
     unsafe { Value::from_raw(value.to_raw()) }
 }
@@ -436,8 +419,6 @@ fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
 /// Whether a slice dimension provably never reaches past the source extent,
 /// so it needs no bounds mask. `size` is the slice's static extent, `off_div`
 /// the largest known divisor of the slice offset (see [`Codegen::expr_div`]).
-/// A dynamic source extent is handled one level up, by
-/// [`Codegen::emit_split_for`] trimming the loop to provably-whole chunks.
 fn dim_in_bounds(extent: i64, size: i64, off_div: i64) -> bool {
     if extent == DYN {
         return true;

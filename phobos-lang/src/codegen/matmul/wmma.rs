@@ -5,11 +5,10 @@ use super::*;
 
 impl<'c> Codegen<'c> {
     /// Warp grid (wm x wn, with wm*wn the launch ABI's warp count) laid over
-    /// the matmul's 16x16-fragment grid. Returns None when the shape doesn't
-    /// split into whole fragments owned by whole warps. We pick the
-    /// factorization that loads the fewest fragments per k-step (fm + fn for
-    /// fm*fn computes), breaking ties toward wider warp blocks since those give
-    /// contiguous b reads and epilogue stores.
+    /// the matmul's 16x16-fragment grid, or None when the shape doesn't split
+    /// into whole fragments owned by whole warps. Picks the factorization
+    /// with the fewest fragments loaded per k-step, breaking ties toward
+    /// wider warp blocks for contiguous b reads and epilogue stores.
     pub(in crate::codegen) fn wmma_plan(&self, m: i64, n: i64, kk: i64) -> Option<(i64, i64)> {
         if m == DYN || n == DYN || kk == DYN || m % 16 != 0 || n % 16 != 0 || kk % 16 != 0 {
             return None;
@@ -25,10 +24,9 @@ impl<'c> Codegen<'c> {
             .min_by_key(|&(wm, wn)| (gm / wm + gn / wn, gm / wm))
     }
 
-    /// Whether to pad the WMMA staging buffers.
-    ///
-    /// More padding means a larger CTA footprint, so fewer CTAs fit per SM. We
-    /// skip it when kernel registers (@launch) are the limiting factor instead.
+    /// Whether to pad the WMMA staging buffers: more padding means a larger
+    /// CTA footprint, so fewer CTAs fit per SM. Skipped when kernel registers
+    /// (`@launch`) are the limiting factor instead.
     pub(super) fn wmma_should_pad(
         &self,
         m: i64,
@@ -100,12 +98,10 @@ impl<'c> Codegen<'c> {
             |cg, blk, shape| alloc(cg, blk, cg.f16_t, shape),
         )?;
 
-        // epilogue: each warp drains its fragments through its 16x16 slab,
-        // optionally applying alpha*acc + beta*prev_load
+        // epilogue: warp drains fragments via its 16x16 slab, applying alpha*acc + beta*prev_load
         let view = self.epilogue_view(block, p, &shape)?;
 
-        // The slab matches the accumulator fragments' element type; the f32
-        // vector drain only applies when both the slab and C are f32.
+        // Slab element type matches the accumulator; vector drain needs slab and C both f32.
         let slab = self.alloc_tile_shaped(block, acc_elem, &[(self.cta_threads / 32) * 16, 16])?;
         let slab_f32 = acc_elem == self.f32_t;
         let sixteen = self.const_index(block, 16)?;
@@ -117,8 +113,7 @@ impl<'c> Codegen<'c> {
         let row_t = Type::vector(&[4], self.f32_t);
 
         // The 128-bit vector drain needs an f32 slab and a 16B-aligned f32 C
-        // row (aligned on its own is element-agnostic: an f16 C is 8B-aligned
-        // but takes the scalar, rounding store).
+        // row; an f16 C is only 8B-aligned so it takes the scalar, rounding store.
         let vec_drain = slab_f32 && view.elem == self.f32_t && view.vectorizes(4);
 
         // pre-compute alpha/beta broadcasts once
@@ -154,12 +149,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// Drives the tensor-core k-loop shared by the WMMA and mma.sync paths:
-    /// the loop bounds, the warp's fragment-block origin (surplus warps clamp
-    /// onto the last block), the staging pairs (a as [m, kk], b as [kk, n],
-    /// via alloc, double-buffered under @pipeline), and [`Self::matmul_kloop`]
-    /// with WMMA staging and the tensor-core MAC. Returns the finished
-    /// accumulators and the origin (as [`Self::warp_block_origin`]) for the
-    /// epilogue.
+    /// loop bounds, the warp's fragment-block origin (surplus warps clamp onto
+    /// the last block), staging pairs (a as [m, kk], b as [kk, n], double-
+    /// buffered under `@pipeline`), and [`Self::matmul_kloop`] with the
+    /// tensor-core MAC. Returns the finished accumulators and the origin.
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     pub(super) fn tc_matmul_kloop(
         &mut self,
@@ -227,17 +220,14 @@ impl<'c> Codegen<'c> {
     }
 
     /// Tile-by-tile matmul on the tensor cores: out = a @ b (NN), or
-    /// out = a @ b.T (NT, transpose_b), contracting the last dim of both
-    /// operands. f16 inputs, f32 accumulate; the f32 result goes straight into
-    /// the (shared) out tile. Returns false without emitting anything when
-    /// @tensorcore is off or the shapes don't split into whole 16x16 tiles
-    /// owned by whole warps, so the caller can fall back to the vector path.
+    /// out = a @ b.T (NT, transpose_b). f16 inputs, f32 accumulate, stored
+    /// straight to the shared out tile. Returns false, falling back to the
+    /// vector path, when `@tensorcore` is off or the shapes don't split into
+    /// whole 16x16 tiles owned by whole warps.
     ///
-    /// With accumulate (out += a @ b) the accumulator fragments start from out
-    /// instead of zero, folding the running sum into the tensor-core MAC. This
-    /// relies on the launch matching cta_threads (no surplus warps), which the
-    /// warp grid (wm * wn == warps) and the launch ABI guarantee; a surplus
-    /// warp would double-count.
+    /// With accumulate (out += a @ b), the accumulator fragments start from
+    /// out instead of zero. This relies on wm * wn == warps (guaranteed by
+    /// the warp grid and launch ABI): a surplus warp would double-count.
     pub(in crate::codegen) fn wmma_dot(
         &mut self,
         block: &Block<'c>,
@@ -253,9 +243,8 @@ impl<'c> Codegen<'c> {
             return Ok(false);
         };
 
-        // The tensor cores accumulate in f32: the output (and so the running
-        // sum for +=) must be f32. Operands may be f16 or f32; f32 is
-        // rounded to f16 when staged. Anything else stays on the vector path.
+        // The tensor cores accumulate in f32, so out (and the += running sum)
+        // must be f32; operands may be f16 or f32, rounded to f16 when staged.
         if out.elem != self.f32_t || !self.is_f16_or_f32(a.elem) || !self.is_f16_or_f32(b.elem) {
             return Ok(false);
         }
@@ -391,14 +380,11 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// The sm_75 register-staged pipeline half. The synchronous path goes
-    /// load -> shared -> barrier -> compute, so the shared store stalls on the
-    /// global load before any math runs. This one issues the next tile's global
-    /// loads into registers, runs the current tile's WMMA compute while they're
-    /// in flight, then stores the registers to shared under the same prefetch
-    /// guard. The loads are unconditional (so they overlap the compute) with a
-    /// clamped, in-bounds index, and the guarded store skips the redundant final
-    /// read. Assumes the launch block is cta_threads (the WMMA launch ABI).
+    /// The sm_75 register-staged pipeline half: reorders the synchronous
+    /// load -> shared -> barrier -> compute path so the next tile's global
+    /// loads run in registers while the current tile's WMMA compute is in
+    /// flight, then commits to shared under the prefetch guard. Assumes the
+    /// launch block is cta_threads.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn wmma_half_reg_staged(
         &mut self,

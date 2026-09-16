@@ -24,9 +24,9 @@ impl<'c> Codegen<'c> {
                 AstType::Scalar(_) => Binding::Let { value: arg, div: 1 },
                 AstType::Tensor(scalar, dims) => {
                     let elem = self.scalar_type(*scalar);
-                    // narrow-element tensor base pointers are assumed 16-byte
-                    // aligned (the host allocator returns aligned buffers),
-                    // which is what lets their rows vectorize.
+                    // narrow-element tensor base pointers are assumed 16-byte aligned
+                    // (the host allocator returns aligned buffers), so their rows can
+                    // vectorize.
                     let mem = if matches!(
                         scalar,
                         Scalar::F32 | Scalar::F16 | Scalar::BF16 | Scalar::I8

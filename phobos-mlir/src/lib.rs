@@ -26,8 +26,7 @@ fn ensure_global_init() {
 
 /// Generate PTX for a given function body F.
 ///
-/// A thin wrapper over [`gen_code`] from before there was more than one thing
-/// to generate; the callers that only ever wanted NVIDIA keep using it.
+/// A thin wrapper over [`gen_code`] for callers that only ever want NVIDIA.
 pub fn gen_ptx<'p, F>(ctx: &'p phobos_base::context::Context, body: F) -> anyhow::Result<String>
 where
     F: for<'c> FnOnce(

@@ -1,52 +1,12 @@
-//! The one scratch a prompt pass expands a raw weight into, and what the card
-//! is holding besides the weights.
+//! The one scratch a prompt pass expands a raw weight into, and what the
+//! card is holding besides the weights. One buffer at
+//! `RAW_DEQUANT_BUDGET_BYTES` serves every weight in the model.
 //!
-//! Dequantizing a raw weight needs a strip of `f32` big enough to matter next
-//! to the weights themselves, and the pool keys on exact length. A pair taken
-//! and released per weight therefore leaves one entry per distinct shape, not
-//! one entry: 741 to 886 MiB measured on Qwen3.8-27B, against 6.22 GiB of
-//! weights on a card with 6.95 GiB free. The driver answers by paging out the
-//! largest cold allocation, which is the 521 MiB output head, and reading that
-//! across PCIe once a token costs two orders of magnitude more than the
-//! scratch saves.
-//!
-//! `k * strip` is bounded by `RAW_DEQUANT_BUDGET_BYTES` by construction, so one
-//! buffer at the budget serves every weight in the model and a narrower one
-//! uses a prefix: 131 MiB rather than 741.
-//!
-//! It is handed back at the first pass after a dense one, which is the only
-//! point that is safe: a recorded pass graph is cached and replayed, and its
-//! kernel nodes carry raw device pointers, so freeing a pooled buffer at any
-//! later boundary can leave a replay reading memory the driver has taken back.
-//! Doing exactly that at a *decode* boundary, after the decode graph had been
-//! recorded, faults with `an illegal memory access was encountered`.
-//!
-//! Handing it back is what makes decode fast and what used to make prefill
-//! slow, and it is *what* is handed back that reconciles them. Note the free
-//! list itself is not where the memory is: measured, it holds **8 MiB across
-//! two lengths**. What costs is the re-allocation the trim forces, which this
-//! card does at roughly 70 ms a MiB. Measured at
-//! `-p 128 -n 128 -r 2`, one session:
-//!
-//! | handed back at that boundary | pp128 | tg128 |
-//! | --- | ---: | ---: |
-//! | the whole free list, `Pool::trim` | 11.68 | 6.94 |
-//! | nothing | 56.96 | 4.70 |
-//!
-//! The free list is hundreds of entries, so emptying it makes the next prompt
-//! pass allocate them all again: that is the 40.5 s first rep. The scratch is
-//! one buffer and one `cuMemAlloc`. So only the scratch goes back, and it goes
-//! to the driver rather than to the pool, since a pooled buffer is still
-//! reserved for a shape none of the decode steps ask for.
-//!
-//! Capping the free list on every `put` is not a substitute and is not safe: a
-//! caller releases a buffer while the pass is still being recorded, and the
-//! pool is what keeps it alive until those launches run. The cost of the trim is the
-//! re-allocation the next prompt pass has to do, and that used to be 741 to
-//! 886 MiB across seven pool entries: 30.2 s against 5.9 s for the pass after
-//! it. Sized as one buffer it is a single 128 MiB `cuMemAlloc`. Held through
-//! decode instead, a step runs against `live 336 MiB` and tg128 measures
-//! 6.00 t/s against the 11.07 it should.
+//! Handed back at the first pass after a dense one, the only safe point: a
+//! cached pass graph replays with raw device pointers in its kernel nodes,
+//! so freeing a pooled buffer any later leaves it reading memory the driver
+//! already took back. It goes to the driver, not the pool, since a pooled
+//! buffer stays reserved for a shape decode never asks for.
 
 use super::*;
 
@@ -56,8 +16,8 @@ impl DeviceBackend {
     ///
     /// Growing has to drain the stream first: an earlier weight in this pass
     /// has launches recorded and not yet run that still read the old buffer.
-    /// In practice the weight scratch reaches the budget on its first use and
-    /// never grows again.
+    /// The scratch reaches the budget on its first use and does not grow
+    /// again.
     pub(super) fn dense_scratch(&self, which: usize, len: usize) -> Result<Buf> {
         if !self.dense_scratch_shared {
             return self.alloc(len);
@@ -88,11 +48,10 @@ impl DeviceBackend {
             return Ok(());
         }
         self.stream.synchronize()?;
-        // The quantized-activation slots always. A prompt pass takes one per
-        // projection, `m * k` bytes each, and they are not pooled, so nothing
-        // else ever gives them back: on this model they come to about 130 MiB
-        // and that alone is tg128 5.69 t/s against 4.28. A decode step re-takes
-        // the two or three it needs at one row, which costs nothing.
+        // The quantized-activation slots always: a prompt pass takes one per
+        // projection, `m * k` bytes each, and they are not pooled, so
+        // nothing else ever gives them back. A decode step re-takes the two
+        // or three it needs at one row, which costs nothing.
         self.act_scratch.borrow_mut().clear();
         // Freeing anything here frees memory the cached pass graph's kernel
         // nodes still point at, so it must not be replayed after this.
@@ -252,7 +211,7 @@ impl DeviceBackend {
     }
 }
 
-/// The same for a named model constant, which is the half that says *what*.
+/// The same for a named model constant: names what is big rather than where.
 pub(super) fn note_big_const(key: &str, len: usize) {
     if len * size_of::<f32>() < (8 << 20) || std::env::var_os("PHOBOS_VRAM").is_none() {
         return;
@@ -263,10 +222,10 @@ pub(super) fn note_big_const(key: &str, len: usize) {
     );
 }
 
-/// Where a large pass buffer is asked for. `PHOBOS_VRAM=1` only: on a card
-/// this close to full, one 20 MiB buffer nobody remembers asking for is the
-/// difference between an output head that stays resident and one that does not,
-/// and the call site is the only thing that names it.
+/// Where a large pass buffer is asked for. `PHOBOS_VRAM=1` only: the call
+/// site is the only thing that names it, and one buffer nobody remembers
+/// asking for can be the difference between the output head staying
+/// resident or not.
 #[track_caller]
 pub(super) fn note_big_alloc(len: usize) {
     if len * size_of::<f32>() < (8 << 20) || std::env::var_os("PHOBOS_VRAM").is_none() {
@@ -279,9 +238,9 @@ pub(super) fn note_big_alloc(len: usize) {
     );
 }
 
-/// What the card has free at a named point, and what the step before it cost.
-/// `PHOBOS_VRAM=1` only; this is how the headroom a 521 MiB output head has to
-/// sit in gets attributed to the weights, the loaded modules and the context.
+/// What the card has free at a named point, and what the step before it
+/// cost. `PHOBOS_VRAM=1` only; this is how the output head's headroom gets
+/// attributed to the weights, the loaded modules and the context.
 pub(super) fn vram_mark(label: &str) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(-1);

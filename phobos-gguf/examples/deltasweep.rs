@@ -2,15 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example deltasweep
 //
-// At a 512-token prompt the recurrence is 43% of the pass and each position
-// costs about six microseconds, some ten thousand cycles for two 128-long dot
-// products. That is far too much for the arithmetic, so this takes the step
-// apart: each variant drops one piece and keeps the rest, and the difference is
-// what that piece costs.
-//
-// The variants are not all correct as recurrences. They keep the same
-// loop-carried dependency so the measurement stays honest, but only `full`
-// computes the delta rule.
+// Each `VARIANTS` entry drops one piece of the step and keeps the rest, so
+// the difference between two rows is what that piece costs. They keep the
+// same loop-carried dependency to keep the measurement honest, but only
+// `full` computes the actual delta rule.
 
 use std::ffi::c_void;
 use std::time::Instant;

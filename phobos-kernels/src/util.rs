@@ -19,11 +19,10 @@ pub fn round_up(x: usize, tile: usize) -> usize {
     x.div_ceil(tile) * tile
 }
 
-/// Zero-pad a row-major `[r, c]` matrix into `[rp, cp]`.
-///
-/// Zero-padding the contraction axis contributes zero terms to the dot, and the
-/// padded output rows and columns are discarded, so a kernel that only handles
-/// whole tiles still computes the right `[r, c]`.
+/// Zero-pads a row-major `[r, c]` matrix into `[rp, cp]`: the padding
+/// contributes zero terms to the contraction and the padded rows/columns
+/// are discarded, so a kernel that only handles whole tiles still computes
+/// the right `[r, c]`.
 pub fn pad(src: &[f32], r: usize, c: usize, rp: usize, cp: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; rp * cp];
     for i in 0..r {

@@ -6,10 +6,10 @@ use super::*;
 /// projection, the SwiGLU between them, and the down projection accumulating
 /// back into the residual.
 ///
-/// `x` is both the first stage's input and the last stage's target, which is
-/// what the aliasing in the emitted kernel means, and the barrier is what makes
-/// it safe: every block reads the residual in its own normalization before it
-/// arrives, and the down projection adds into it only after.
+/// `x` is both the first stage's input and the last stage's target, aliasing
+/// the emitted kernel relies on: every block reads the residual in its own
+/// normalization before the barrier, and the down projection adds into it
+/// only after.
 pub(crate) fn mlp_chain(
     x: Buf,
     gain: Buf,
@@ -143,19 +143,19 @@ pub(crate) fn mlp_chain_raw(
     Some(chain)
 }
 
-/// A mixer's input normalization and the projection reading it as a chain, with
-/// each run of the projection's outputs written where its consumer wants it, and
-/// optionally the delta net's convolution and gates behind them.
+/// A mixer's input normalization and the projection reading it as a chain,
+/// each run of the projection's outputs written where its consumer wants it,
+/// and optionally the delta net's convolution and gates behind them.
 ///
-/// The projection alone costs no barrier: the normalization is redundant, so its
-/// quantized row crosses into the projection for free, and the runs are
-/// independent nests writing disjoint windows of the caller's buffers. The
-/// convolution costs exactly one, for the reason [`super::FusedMix`] gives, and
-/// the gates ride in its nest.
+/// The projection alone costs no barrier: the normalization is redundant, so
+/// its quantized row crosses into the projection for free, and the runs write
+/// disjoint windows of the caller's buffers. The convolution costs exactly
+/// one, for the reason [`super::FusedMix`] gives, and the gates ride in its
+/// nest.
 ///
-/// `None` means a shape the pass has no stage for, so the caller keeps its own
-/// launches: a run not dividing into whole Q8_0 output blocks, more than one
-/// position, or gates split across two projections.
+/// `None` means a shape with no stage for it: a run not dividing into whole
+/// Q8_0 output blocks, more than one position, or gates split across two
+/// projections.
 pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
     // One value per buffer, at the widest extent any stage touches. Two values
     // naming one buffer would hide a dependency: the convolution reads the
@@ -315,21 +315,15 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
 
 /// Attention's output epilogue as a chain: quantize the mixed heads, one
 /// scale per Q8_0 block, then the output projection accumulating into the
-/// residual.
+/// residual. Unlike [`project_chain`], `x` is already the attention kernel's
+/// output, so there is no upstream normalization to fold in.
 ///
-/// Unlike [`project_chain`] there is no upstream normalization to fold in --
-/// `x` is already the value the attention kernel produced, not a row this
-/// pass would otherwise normalize itself. The quantization tiles in
-/// [`Q8_BLOCK`]-wide units (Q8_0's own per-block scale, not a tunable width)
-/// while the projection tiles in [`OUT_TILE`]-wide ones over `d_model`, so
-/// the two land in separate nests with a barrier between rather than one --
-/// the same shape [`mlp_chain`]'s SwiGLU-then-quantize pair already forces,
-/// just reading a value the caller handed in rather than one a nest here
-/// computed.
+/// The quantization tiles in [`Q8_BLOCK`]-wide units and the projection tiles
+/// in [`OUT_TILE`]-wide ones, so the two land in separate nests with a
+/// barrier between them.
 ///
 /// `None` means `width` does not divide into whole Q8_0 blocks, which no
-/// architecture this crate loads produces but a chain should decline rather
-/// than assume.
+/// loaded architecture produces but a chain should decline rather than assume.
 pub(crate) fn attn_out_chain(x: Buf, w: QBuf, dest: Buf, width: usize, d_model: usize) -> Option<Chain> {
     if !width.is_multiple_of(Q8_BLOCK) {
         return None;

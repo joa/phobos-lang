@@ -38,6 +38,7 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
 
 /// [`IQ2S_GRID`] flattened to one magnitude byte a slot: `flat_grid()[i * 8
 /// + j]` is byte `j` of `IQ2S_GRID[i]`.
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ2S_GRID
         .iter()
@@ -49,6 +50,7 @@ pub(crate) fn flat_grid() -> Vec<i32> {
 /// multipliers via [`KMASK_IQ2XS`]: `flat_signs()[b * 8 + j]` is element
 /// `j`'s sign under byte `b`. IQ2_S stores the sign byte directly, unlike
 /// IQ2_XXS's 7-bit parity index.
+#[cfg(feature = "cuda")]
 pub(crate) fn flat_signs() -> Vec<i32> {
     (0u32..256)
         .flat_map(|byte| KMASK_IQ2XS.map(move |bit| if byte & u32::from(bit) != 0 { -1 } else { 1 }))
@@ -56,6 +58,7 @@ pub(crate) fn flat_signs() -> Vec<i32> {
 }
 
 /// [`flat_grid`]'s values as raw bytes; see `iq2_xxs.rs`'s `packed_grid`.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ2S_GRID
         .iter()
@@ -63,14 +66,16 @@ pub(crate) fn packed_grid() -> Vec<i8> {
         .collect()
 }
 
-/// [`flat_signs`] packed the same way; the multipliers are +-1.
-/// [`packed_signs`] as a bitwise mask; see IQ2_XXS's.
+/// [`packed_signs`] as a bitwise mask; see IQ2_XXS's `packed_sign_masks`.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_sign_masks() -> Vec<i8> {
     (0u32..256)
         .flat_map(|byte| KMASK_IQ2XS.map(move |bit| if byte & u32::from(bit) != 0 { -1i8 } else { 0 }))
         .collect()
 }
 
+/// [`flat_signs`] packed the same way; the multipliers are +-1.
+#[cfg(feature = "cuda")]
 pub(crate) fn packed_signs() -> Vec<i8> {
     (0u32..256)
         .flat_map(|byte| KMASK_IQ2XS.map(move |bit| if byte & u32::from(bit) != 0 { -1i8 } else { 1 }))

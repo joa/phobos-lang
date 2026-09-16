@@ -74,11 +74,7 @@ impl<'c> Codegen<'c> {
         // `lane / 2`, and elements `y0 = (lane % 2) * 8` upwards. Sixteen runs
         // of sixteen over thirty-two lanes covers the whole 256-element block
         // in a single pass, and eight consecutive elements make the qs bytes,
-        // the hmask bytes and the activations one wide load each. The earlier
-        // map gave a lane one element per run and strided its eight by 32, so
-        // nothing could merge: nineteen load instructions for the same 42
-        // bytes this shape reads in seven, which left the kernel stalled on
-        // `long_scoreboard` at a fiftieth of the bandwidth its siblings reach.
+        // the hmask bytes and the activations one wide load each.
         //
         // Every index below comes from `is`, so it is invariant across the
         // k-loop and computed once here rather than eight times a block.
@@ -98,8 +94,8 @@ impl<'c> Codegen<'c> {
         let half2_16 = self.muli(&body, half2, sixteen_idx)?;
 
         // qs_off = QS_OFF + h*32 + half2*16 + y0 and hm_off = half2*16 + y0.
-        // Every term is a multiple of eight, and so is the block stride, which
-        // is what lets the two loads below promise align-8.
+        // Every term is a multiple of eight, and so is the block stride, so
+        // the two loads below can promise align-8.
         let thirtytwo = self.const_index(&body, 32)?;
         let qs_base = self.addi(
             &body,
@@ -141,7 +137,7 @@ impl<'c> Codegen<'c> {
 
         // Where the lane's eight activations start. `y0` is 0 or 8, so the
         // byte address is 0 or 32 past a block boundary: a multiple of sixteen
-        // either way, which is what the two `vector<4xf32>` loads need.
+        // either way, as the two `vector<4xf32>` loads need.
         let act_off = self.addi(&body, self.muli(&body, is, sixteen_idx)?, y0)?;
 
         let step = self.const_index(&body, 256)?;

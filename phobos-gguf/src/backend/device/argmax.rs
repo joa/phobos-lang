@@ -1,6 +1,5 @@
 // The greedy-decode fast path: a device-side argmax over the logits row, so
-// `forward_greedy` reads a token id back instead of the whole vocab. See
-// `autoresearch/beams/greedy-argmax-readback.md`.
+// `forward_greedy` reads a token id back instead of the whole vocab.
 
 use super::*;
 

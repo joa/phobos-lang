@@ -54,15 +54,12 @@ pub struct Eval {
 
 /// Combined static-shape inference and constant folding.
 ///
-/// The exported GPT-2 graphs are fully dynamic: most nodes compute shapes at
-/// runtime, position ids by the ConstantOfShape and NonZero arange trick. Fix a
-/// concrete input shape and all of that folds to constants, leaving the compute
-/// graph static. This propagates a shape and an optional constant value per
-/// edge, evaluating the shape and index ops on the host.
-///
-/// Deliberately tolerant: an unhandled op or a missing input leaves that edge
-/// unknown and is tallied in [`Eval::unsupported`], so one run over a real
-/// model reports the whole coverage gap rather than stopping at the first hole.
+/// The exported GPT-2 graphs compute shapes and position ids at runtime;
+/// fixing a concrete input shape folds all of that away, leaving a static
+/// compute graph with one shape and optional constant value per edge. An
+/// unhandled op or missing input leaves that edge unknown, tallied in
+/// [`Eval::unsupported`] so a run over a real model reports the whole
+/// coverage gap instead of stopping at the first hole.
 pub fn evaluate(graph: &Graph, input_dims: &HashMap<String, Dims>) -> Eval {
     let mut vals: HashMap<String, Val> = HashMap::new();
 
@@ -104,7 +101,6 @@ pub fn evaluate(graph: &Graph, input_dims: &HashMap<String, Dims>) -> Eval {
             }
             None => {
                 *unsupported.entry(node.op_type.clone()).or_default() += 1;
-                // Note whether at least the shape was derivable elsewhere.
                 if node
                     .outputs
                     .iter()
@@ -281,7 +277,7 @@ fn eval_node(node: &Node, vals: &HashMap<String, Val>) -> Option<Vec<Val>> {
             vec![Val::shape_only(ins[0].dims.clone())]
         }
         "Split" => split_shapes(node, ins[0])?,
-        // Where and anything else is not handled yet.
+        // Anything else is not handled yet.
         _ => return None,
     };
     Some(out)

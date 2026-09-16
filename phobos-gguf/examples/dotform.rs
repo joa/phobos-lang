@@ -2,20 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example dotform
 //
-// The delta rule's chunk scan is 18 GFLOP a pass in 22 ms, 0.8 TFLOP/s where the
-// same card's tiled matmul reaches three to five, so the suspicion is that its
-// dots are on a slower path: single `dot(a, b)` calls over the whole
-// contraction, where the fast ones in the attention rewrite are a `+=` inside a
-// loop over slices of it.
-//
-// They are not. Both forms measure 1.25 TFLOP/s at the shape the scan uses, so
-// there is no rewrite to do. What is left is the shape: `[16, 128]` by
-// `[128, 32]` is 512 output elements on a 256-thread CTA, and a matmul that
-// small does not reach a large one's rate however it is spelled.
-//
-// Which puts it back on the chunk size, and so on shared memory: a chunk of 32
-// over two column slices would double the tile and halve the count, but it is
-// 64 KB against the 48 static shared memory allows.
+// Times the delta rule's chunk-scan contraction as one `dot` over the whole
+// contraction (`WHOLE`, what the scan ships with) against an accumulating
+// loop over slices of it (`SLICED`, the register-blocked path's shape).
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -38,7 +27,7 @@ const CHUNKS: usize = 32;
 const PROGRAMS: usize = 64;
 const BLOCKS_PER_PASS: usize = 18;
 
-/// One `dot` over the whole contraction, which is what the scan does today.
+/// One `dot` over the whole contraction: the scan's shape.
 const WHOLE: &str = "\
 @launch(256)
 @autotune(C in [16], D in [128], TN in [32])
@@ -54,8 +43,8 @@ kernel dots(K: tensor<f32>[N, QW], S: tensor<f32>[SD, TN], O: tensor<f32>[N, OW]
 }
 ";
 
-/// The same contraction as an accumulating loop over slices of it, which is the
-/// shape the register-blocked path recognizes.
+/// The same contraction as an accumulating loop over slices of it: the shape
+/// the register-blocked path recognizes.
 const SLICED: &str = "\
 @launch(256)
 @autotune(C in [16], D in [128], TN in [32], DT in [16])

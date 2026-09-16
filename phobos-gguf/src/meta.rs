@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ValueType {
-    // Note: The codes are part of the file format and MUST NOT be renumbered.
+    // The codes are part of the file format and must not be renumbered.
     U8,
     I8,
     U16,
@@ -67,7 +67,7 @@ impl Value {
             Value::I16(v) => v.into(),
             Value::U32(v) => v.into(),
             Value::I32(v) => v.into(),
-            Value::U64(v) => i64::try_from(v).ok()?, // we reject u64 that doesn't fit
+            Value::U64(v) => i64::try_from(v).ok()?,
             Value::I64(v) => v,
             Value::Bool(v) => v.into(),
             _ => return None,
@@ -241,7 +241,6 @@ pub struct Metadata {
 impl Metadata {
     pub fn insert(&mut self, key: String, value: Value) {
         // A duplicate key replaces the earlier value in place.
-        // Same as llama.cpp
         match self.index.get(&key) {
             Some(&at) => self.entries[at].1 = value,
             None => {
@@ -303,12 +302,6 @@ impl Metadata {
             .with_context(|| format!("metadata '{key}' is not a number"))
     }
 
-    pub fn boolean(&self, key: &str) -> Result<bool> {
-        self.require(key)?
-            .as_bool()
-            .with_context(|| format!("metadata '{key}' is not a bool"))
-    }
-
     pub fn strings(&self, key: &str) -> Result<&[String]> {
         self.require(key)?
             .as_array()
@@ -330,10 +323,6 @@ impl Metadata {
     pub fn arch_key(&self, suffix: &str) -> Result<String> {
         // arch_key("block_count") yields "qwen35.block_count" for a Qwen3.5
         Ok(format!("{}.{suffix}", self.architecture()?))
-    }
-
-    pub fn arch_int(&self, suffix: &str) -> Result<i64> {
-        self.int(&self.arch_key(suffix)?)
     }
 
     pub fn arch_count(&self, suffix: &str) -> Result<usize> {

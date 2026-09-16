@@ -5,10 +5,10 @@ use phobos_kernels::launch::STATIC_SHARED_LIMIT;
 /// Elements per block for the pointwise kernels.
 pub(crate) const ELEM_TILE: usize = 128;
 
-/// Pointwise elements a program takes when there are enough of them. A decode
-/// step wants [`ELEM_TILE`] and any blocks at all; a prompt's 1.8-million-element
-/// SwiGLU halves at this one. Shared memory is the ceiling, `swiglu` holding
-/// about six tiles at once.
+/// Pointwise elements a program takes when there are enough of them: a
+/// decode step wants [`ELEM_TILE`] and any blocks at all, while a large
+/// SwiGLU halves at this width instead. Shared memory is the ceiling,
+/// `swiglu` holding about six tiles at once.
 pub(crate) const ELEM_TILE_WIDE: usize = 1024;
 
 /// Below this the narrow tile still wins: enough wide tiles to fill the card

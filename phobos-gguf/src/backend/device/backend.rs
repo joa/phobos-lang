@@ -150,9 +150,9 @@ impl Backend for DeviceBackend {
             out.len(),
             buffer.len()
         );
-        // Through page-locked staging: straight into a Vec the driver bounces
-        // the copy through its own pinned staging a page at a time, at about
-        // a third of the rate, and the logits are a megabyte a token here.
+        // Through page-locked staging: straight into a Vec the driver
+        // bounces the copy through its own pinned staging a page at a time,
+        // which costs real bandwidth at this size and frequency.
         let mut staging = self.readback.borrow_mut();
         let too_small = staging.as_ref().is_none_or(|s| s.len() < out.len());
         if too_small {
@@ -584,13 +584,13 @@ impl Backend for DeviceBackend {
 
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         self.check_distinct("attention", out, &[q]);
-        // The blocked kernel's online-softmax pass measures 3x cheaper than
-        // the gemm path below at shapes both can take; a tensor-core variant
-        // was tried and reverted as a net loss here.
+        // The blocked kernel's online-softmax pass is cheaper than the gemm
+        // path below at shapes both can take.
         //
         // It masks its diagonal tile with `tril`, the causal mask only when
         // the tile starts where the query block does; a misaligned
-        // continuation falls to the row kernel instead, which needs no alignment.
+        // continuation falls to the row kernel instead, which needs no
+        // alignment.
         let block = attention_block_tile(spec.head_dim);
         if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
             return self.attention_blocked(q, keys, values, spec, block, out);

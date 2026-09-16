@@ -1,12 +1,10 @@
 // The `<fmt>_qgemm_t` family: a prompt projection against a raw quantized
 // weight, both operands staged through shared memory. Per 128 elements of
-// `k` the CTA copies its 128 activation rows in with 16-byte loads, decodes
-// its 64 weight columns into an int8 tile beside them, writes the column
-// scales, and contracts both with `ldmatrix` and `mma.m8n8k16`; the next
-// tile's global reads are issued before the current one is contracted.
-// What a format reads and how it decodes lives in `qgemm_fmt.rs`. The
-// epilogue is `iq1s_qmma_t`'s in the same order, so the two agree bit for
-// bit (`examples/qmma_probe`).
+// `k` the CTA stages 128 activation rows and 64 decoded weight columns as
+// an int8 tile, writes column scales, and contracts both with `ldmatrix`
+// and `mma.m8n8k16`; the next tile's reads are issued before this one is
+// contracted. Format decode lives in `qgemm_fmt.rs`; the epilogue matches
+// `iq1s_qmma_t`'s so both agree bit for bit.
 
 use super::kquant::KQ_GROUP;
 use super::*;
@@ -196,9 +194,9 @@ impl<'c> Codegen<'c> {
             .map(|slot| Ok(detach(kb.argument(slot + 1)?.into())))
             .collect::<Result<_>>()?;
 
-        // The next tile's global reads go out first, so they are in flight
-        // under the whole of this tile's contraction. The last turn re-reads
-        // its own tile, which costs one stage and needs no branch.
+        // The next tile's reads go out first, kept in flight under this
+        // tile's contraction; the last turn re-reads its own tile rather than
+        // branching.
         let last = self.push(&kb, arith::subi(nk, one, self.loc))?;
         let after = self.addi(&kb, kt, one)?;
         let next = self.push(&kb, arith::minui(after, last, self.loc))?;
@@ -226,7 +224,6 @@ impl<'c> Codegen<'c> {
                 .build()?,
         );
 
-        // The accumulators land straight in the output rows they belong to.
         let (rows, cols) = self.qgemm_patch_coords(block, &lanes)?;
         for (r, row) in rows.iter().enumerate() {
             for (c, col) in cols.iter().enumerate() {
@@ -429,10 +426,10 @@ impl<'c> Codegen<'c> {
         Ok(regs)
     }
 
-    /// The thread's part of a stage: its activation pieces and scales copied
-    /// in, its four weight fragments decoded, its column scales written, and
-    /// for a format with a minimum the activation's group sums and the
-    /// column minimums beside them.
+    /// The thread's part of a stage: activation pieces and scales copied in,
+    /// four weight fragments decoded, column scales written, and for a
+    /// format with a minimum, the activation's group sums and column
+    /// minimums beside them.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_store(
         &mut self,
@@ -488,8 +485,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// The warp's patch over one stage: four 32-element groups, each two
-    /// `ldmatrix.x4` an operand, sixteen tensor tiles, and the scale
-    /// epilogue.
+    /// `ldmatrix.x4` an operand, sixteen tensor tiles, and the scale epilogue.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_contract(
         &mut self,

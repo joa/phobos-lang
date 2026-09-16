@@ -3,10 +3,8 @@
 use crate::*;
 
 /// Times `launch` and returns the fastest of N runs with the spread beside it.
-/// Run-to-run variance is external noise (clock ramp, scheduling, driver work)
-/// that only ever slows a sample, so the minimum is the truest measure. This is
-/// also the autotuner's ranking metric, so the winner it picks is the one
-/// reported here.
+/// Run-to-run variance only ever slows a sample, so the minimum is the
+/// truest measure and also the autotuner's ranking metric.
 pub(crate) fn bench(
     name: &str,
     mut launch: impl FnMut() -> anyhow::Result<()>,

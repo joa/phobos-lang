@@ -28,23 +28,19 @@ impl<'c> Codegen<'c> {
         let space = self.shared_space()?;
         let t = MemRefType::new(elem, shape, None, Some(space));
 
-        // Reuse a released buffer of the same type when one is free (see
-        // release); otherwise mint a new one.
+        // Pool entries come from release().
         let key = (elem.to_string(), shape.to_vec());
         let name = match self.tile_pool.get_mut(&key).and_then(Vec::pop) {
             Some(name) => name,
             None => {
-                // Nothing from an earlier phase is still live: a kernel
-                // whose phases are separated by a barrier (see
-                // attention_persist_src) fully drains one phase's tiles
-                // before the next phase declares its own shapes, so the
+                // Nothing from an earlier phase is still live once
+                // dynamic_live hits 0: a kernel with phases separated by a
+                // barrier (see attention_persist_src) fully drains one
+                // phase's tiles before the next declares its own, so the
                 // allocation can restart at offset 0 instead of growing to
-                // fit both phases' tiles at once. shared_bytes_peak already
-                // has the high-water mark, so this only ever shrinks what
-                // gets requested from the driver, never grows it: every
-                // live reference to a name cleared here has already gone
-                // through release() (or is still counted live and this
-                // branch is unreached), so nothing dangles.
+                // fit every phase at once. shared_bytes_peak keeps the
+                // high-water mark, so this only ever shrinks what gets
+                // requested from the driver, never grows it.
                 if self.dynamic_shared && self.dynamic_live == 0 && self.shared_bytes > 0 {
                     self.tile_pool.clear();
                     self.tile_offsets.clear();
@@ -125,15 +121,15 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Returns an owned temp's shared buffer to the pool, so a later allocation
-    /// of the same element type and physical shape reuses it instead of growing
-    /// the CTA's static shared footprint. No-op for views, params and named
+    /// Returns an owned temp's shared buffer to the pool so a later allocation
+    /// of the same element type and physical shape reuses it instead of
+    /// growing the CTA's shared footprint. No-op for views, params and named
     /// tiles (bind clears owned).
     ///
-    /// Only call after every op reading the buffer has been emitted. Reuse is
-    /// race-free because each tile op ends in a CTA barrier, so the reusing op's
-    /// writes are ordered after the previous consumer's reads; the garbage a
-    /// reused buffer holds is fine, every producing op fully writes its output.
+    /// Call only after every op reading the buffer has been emitted. Reuse is
+    /// race-free because each tile op ends in a CTA barrier, ordering the
+    /// reusing op's writes after the previous reads; leftover contents don't
+    /// matter since every producing op fully writes its output.
     pub(in crate::codegen) fn release(&mut self, mv: &MemVal<'c>) {
         if !mv.owned {
             return;
@@ -345,7 +341,7 @@ impl<'c> Codegen<'c> {
             row_stride: None,
             align_div: src.align_div,
             swizzle: None,
-            global: None, // it's a view; we don't own the memory and must not release it
+            global: None, // a view: not owned, so it must not be released
             shared: true,
             owned: false,
             mask: Vec::new(),

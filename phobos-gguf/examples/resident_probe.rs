@@ -3,15 +3,10 @@
 //   cargo run --release --features cuda -p phobos-gguf --example resident_probe
 //   cargo run --release --features cuda -p phobos-gguf --example resident_probe -- 6144
 //
-// The model path compiles two hundred kernels before it reaches one of these,
-// so asking it a question used to cost twenty minutes. This compiles the one
-// kernel and launches it directly, which makes a question cost seconds.
-//
-// It exists to tell a slow kernel from an evicted one. The same kernel at the
-// same shape runs at 170 GB/s on a card with room and 15 GB/s on one without,
-// so a number measured inside a model that does not fit says nothing about
-// the kernel. The optional argument is VRAM ballast in MiB, held and written
-// between launches, which is what reproduces the second case.
+// Compiles and launches the one kernel directly rather than a whole model, so
+// it tells a slow kernel from an evicted one: the same kernel at the same
+// shape reads much slower once VRAM is tight. The optional argument is VRAM
+// ballast in MiB, held and written between launches, to reproduce that.
 
 use anyhow::Result;
 use cust::prelude::*;
@@ -351,9 +346,9 @@ fn run_gemm(stream: &Stream, name: &str, block_bytes: usize, m: usize, k: usize,
 }
 
 /// `resident_probe --prompt`: the three K-quant staged projections at the
-/// 4B's shapes and at the 27B's FFN shape, where the IQ formats' rate is
-/// known; between the two `k`s is what a short k loop costs, and between
-/// formats at one shape what the decode and the minimum term cost.
+/// 4B's shapes and at the 27B's FFN shape. Between the two `k`s is what a
+/// short k loop costs, and between formats at one shape what the decode
+/// and the minimum term cost.
 fn run_prompt(stream: &Stream) -> Result<()> {
     warm(stream, || run_gemm(stream, "q4k", 144, 512, 5120, 17408).map(|_| ()))?;
     println!("{:>6} {:>5} {:>8} {:>8} {:>9} {:>7} {:>7}", "fmt", "m", "k", "n", "ms", "TOPS", "GB/s");
@@ -388,9 +383,9 @@ fn run_kquant(stream: &Stream, ballast: &[DeviceBuffer<f32>]) -> Result<()> {
     if !ballast.is_empty() {
         return Ok(());
     }
-    // The narrow-n shapes against the grid: 2560 columns is 40 CTAs of 64 on
-    // 48 multiprocessors. A thinner CTA owns fewer columns a warp and fills
-    // the card; whether that pays is what this sweep is for.
+    // The narrow-n shapes against the grid: a thinner CTA owns fewer columns
+    // a warp and fills the card with more of them; whether that pays is
+    // what this sweep is for.
     println!();
     for (probe, k, n) in [(&Q4K_I8, 9216usize, 2560usize), (&Q5K_I8, 4096, 2560), (&Q4K_I8, 2560, 1024)] {
         for (tn, threads) in [(64usize, 256u32), (32, 128), (16, 64)] {
@@ -498,7 +493,7 @@ fn main() -> Result<()> {
     }
     println!();
     // The CTA size sets both occupancy and, since it is derived, how many
-    // columns a warp owns. 256 threads leaves only 24 of 32 warps resident.
+    // columns a warp owns.
     for threads in [256u32, 512, 1024] {
         let got = run_at(&stream, &IQ1S_I8, FFN_K, FFN_N, 64, threads, &[])?;
         let _ = got;
@@ -513,8 +508,7 @@ fn main() -> Result<()> {
     println!();
     // The i8 kernel gives a warp two columns, so it needs twice the tile to
     // keep a 256-thread CTA busy. Past 64 the grid starts running out of
-    // blocks: n / TN at 17408 is 272 at 64 and 68 at 256, against 48
-    // multiprocessors.
+    // blocks to fill the card.
     for tn in [8, 16, 32, 64, 128, 256] {
         run(&stream, &IQ1S_I8, FFN_K, FFN_N, tn, &[])?;
     }
@@ -552,7 +546,6 @@ fn run(
     run_at(stream, probe, k, n, tn, 256, ballast)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn run_at(
     stream: &Stream,
     probe: &Probe,
@@ -612,10 +605,9 @@ fn run_at(
         (0..probe.table_bytes.max(1)).map(|i| (i % 7 + 1) as i8).collect()
     };
     let table = DeviceBuffer::from_slice(&table)?;
-    // Signs are +/-1; a table of zeroes would make every weight vanish and
-    // hide a disagreement between the two paths.
-    // The float path multiplies by +/-1; the dp4a path masks with 0/-1. Both
-    // spell the same signs, so the two kernels stay comparable.
+    // Signs are +/-1, never zero, so a disagreement cannot hide behind a
+    // vanished weight. The float path multiplies by +/-1; the dp4a path
+    // masks with 0/-1 -- both spell the same signs.
     let signs: Vec<i8> = (0..probe.signs_bytes.max(1))
         .map(|i| match (i % 3 == 0, probe.int8_act) {
             (true, _) => -1,
@@ -656,7 +648,6 @@ fn run_at(
     Ok(got)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn time(
     stream: &Stream,
     function: cust::sys::CUfunction,
@@ -668,7 +659,6 @@ fn time(
     time_grid(stream, function, (blocks, 1), threads, slots, ballast)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn time_grid(
     stream: &Stream,
     function: cust::sys::CUfunction,

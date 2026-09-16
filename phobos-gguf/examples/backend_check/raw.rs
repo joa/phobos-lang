@@ -67,11 +67,10 @@ const RAW_SHAPES: [(usize, usize, usize); 11] = [
     (200, 512, 128),
 ];
 
-/// Shapes that reach the tensor cores, and so stage their weight to f16.
-/// Judged like every other f16 path here; see `check_tc`. `Backend::matmul`
-/// sends every whole 64-row band through that path and only the remainder
-/// rows through the f32 tile, so any `m` of 64 or more is one of these; the
-/// looser bound on the exact remainder rows costs nothing.
+/// Shapes that reach the tensor cores and so stage their weight to f16,
+/// judged like every other f16 path (see `check_tc`). `Backend::matmul`
+/// sends every whole 64-row band through that path, so any `m` of 64 or
+/// more qualifies.
 fn raw_shape_is_tc(m: usize, k: usize, n: usize) -> bool {
     m >= 64 && n.is_multiple_of(64) && k.is_multiple_of(16)
 }
@@ -91,14 +90,9 @@ type CheckSpread<'a> = dyn Fn(&str, &[f32], &[f32]) + 'a;
 /// (`Packed::dense`), across every shape in [`RAW_SHAPES`]. `gen_block`
 /// builds one random super-block.
 ///
-/// At one row the device has two paths and they need different oracles. The
-/// float matvec is judged against the host, as everything else here is. The
-/// `dp4a` one quantizes its activation, which the host reference does not, so
-/// against the host it disagrees by the size of an 8-bit activation however
-/// right it is -- the same reason `fuse_check` compares the fused decode path
-/// against the launched one rather than against the host. So it is judged
-/// against the float path it replaces, on the device, in this session:
-/// `set_dp4a` runs the same projection both ways.
+/// At one row the `dp4a` path quantizes its activation, which the host
+/// reference does not, so it is judged against the float path it replaces
+/// on the device instead: `set_dp4a` runs the same projection both ways.
 #[allow(clippy::too_many_arguments)]
 fn check_matmul_raw(
     host: &dyn Backend,
@@ -160,11 +154,10 @@ fn check_matmul_raw(
 }
 
 /// A K-quant format's device path against the host reference fed the same
-/// activation the device contracts: both device kernels quantize their
-/// activation to Q8_0 (ties to even, as `quantize_row` does) and neither has
-/// a float device path, so the host is handed the activation the device
-/// sees. What is left to differ is accumulation order and the f16 header
-/// rounding, which 1e-3 covers.
+/// activation the device contracts: both device kernels quantize to Q8_0
+/// (ties to even, as `quantize_row` does) and neither has a float device
+/// path, so the host sees the same quantized input. What is left to differ
+/// is accumulation order and the f16 header rounding, which 1e-3 covers.
 #[allow(clippy::too_many_arguments)]
 fn check_matmul_kquant(
     host: &dyn Backend,

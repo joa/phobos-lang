@@ -70,7 +70,6 @@ fn infer_node(node: &Node, ins: &[&Dims], graph: &Graph) -> Result<Vec<Dims>> {
                 .ok_or_else(|| anyhow::anyhow!("{op}: shapes {a:?} and {b:?} do not broadcast"))?)
         }
         "Relu" | "Gelu" => one(expect_n::<1>(op, ins)?[0].clone()),
-        // Normalization and softmax preserve the first input's shape.
         "LayerNormalization" | "Softmax" => one(first_in(op, ins)?.clone()),
         "Reshape" => {
             let data = first_in(op, ins)?;

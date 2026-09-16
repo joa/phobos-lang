@@ -84,7 +84,6 @@ async fn main() -> Result<()> {
         uri,
     };
 
-    // --- matmul (1 node, no FETCH) ---
     const N: usize = 1024;
     let a = randoms(N * N, 1);
     let b = randoms(N * N, 2);
@@ -117,7 +116,6 @@ async fn main() -> Result<()> {
     }
     println!("matmul loopback: 2x2x2 supertile grid OK");
 
-    // --- elementwise add (bit-exact) ---
     const M: usize = 1024;
     let x = randoms(M, 3);
     let y = randoms(M, 4);
