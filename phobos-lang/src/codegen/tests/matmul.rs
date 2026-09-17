@@ -24,9 +24,8 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
         &mlir,
         &[
             // a stages k-major (transposed: 16x64, not 64x16); b is 16x64 anyway.
-            "memref.global \"private\" @__matmul_tile0 : memref<16x64xf32, 3>",
-            "memref.global \"private\" @__matmul_tile1 : memref<16x64xf32, 3>",
-            "memref.get_global @__matmul_tile0",
+            "memref.view",
+            "to memref<16x64xf32, 3>",
             "memref.dim",
             "memref.subview",
             "memref<64x16xf32, strided<[?, 1], offset: ?>, 1>",
@@ -230,4 +229,55 @@ fn dot_falls_back_to_vector_without_tensorcore() {
         !mlir.contains("subgroup_mma"),
         "WMMA emitted for dot_t without @tensorcore:\n{mlir}"
     );
+}
+
+#[test]
+fn a_gemm_epilogue_with_bare_terms_scales_by_one() {
+    // acc + c_old: both coefficients are the identity, emitted as f32 ones,
+    // and the prior C is read back before the store.
+    let mlir = emit_mlir(
+        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+        @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+        kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
+            let pm = program_id(0)
+            let pn = program_id(1)
+            var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+            for kt in range(0, K, TILE_K) {
+                let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                acc += dot(a, b)
+            }
+            let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc + c_old
+        }",
+    );
+    let (_, epilogue) = split_at_kt_loop(&mlir);
+    assert_eq!(epilogue.matches("arith.constant 1.000000e+00 : f32").count(), 2, "{epilogue}");
+    assert_contains(epilogue, &["vector.load", "arith.mulf", "arith.addf", "vector.store"]);
+}
+
+#[test]
+fn a_gemm_epilogue_scales_acc_by_its_coefficient_and_c_by_one() {
+    let mlir = emit_mlir(
+        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+        @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+        kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
+            let pm = program_id(0)
+            let pn = program_id(1)
+            var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+            for kt in range(0, K, TILE_K) {
+                let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                acc += dot(a, b)
+            }
+            let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = 2.0 * acc + c_old
+        }",
+    );
+    let (_, epilogue) = split_at_kt_loop(&mlir);
+    assert_contains(
+        epilogue,
+        &["arith.constant 2.000000e+00 : f32", "arith.constant 1.000000e+00 : f32", "vector.load"],
+    );
+    assert_eq!(epilogue.matches("arith.constant 1.000000e+00 : f32").count(), 1, "{epilogue}");
 }

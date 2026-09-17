@@ -54,17 +54,9 @@ fn flash_accumulator_rides_in_fragments() {
         !mlir.contains("memref<32x64xf32, 3>"),
         "fragment accumulator materialized in shared memory:\n{mlir}"
     );
-    let globals = mlir.matches("memref.global").count();
-    assert!(
-        globals <= 9,
-        "expected at most 9 pooled shared buffers, got {globals}:\n{mlir}"
-    );
     // One [BR, BC] f32 buffer serves scores and probabilities: the
     // fused exp(s - mnew) sweep rewrites it in place.
-    let s_bufs = mlir
-        .lines()
-        .filter(|l| l.contains("memref.global") && l.contains("memref<32x32xf32, 3>"))
-        .count();
+    let s_bufs = tile_views(&mlir, "32x32xf32").len();
     assert_eq!(
         s_bufs, 1,
         "expected the score tile to stay a single in-place buffer:\n{mlir}"

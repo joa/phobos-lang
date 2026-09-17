@@ -1,96 +1,6 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// Whether a slice of `size` elements starting at `start` provably stays
-    /// inside a *dynamic* tensor extent whose known divisor is `extent_div`,
-    /// so it needs no runtime bounds mask. `pending` names loop variables
-    /// whose loop is not emitted yet but will be trimmed once it is, letting
-    /// a prescan reason about a slice inside a loop body (see
-    /// [`Codegen::slice_is_partial_within`]).
-    ///
-    /// Three offsets qualify: one riding a trimmed main loop's induction
-    /// variable, covered by its rounded-down trip count; a single element at
-    /// a literal zero, since any non-empty tensor holds it; and a
-    /// tile-aligned offset into an extent declared a whole number of tiles
-    /// (`@aligned`, see [`Codegen::declared_divs`]), since the grid then
-    /// addresses whole tiles throughout. Anything else -- an undeclared
-    /// program id above all -- is unbounded: the grid is the host's
-    /// business, and assuming otherwise would write into the next row.
-    pub(super) fn dyn_in_bounds(
-        &self,
-        start: &Expr,
-        size: i64,
-        extent_div: i64,
-        pending: &[&str],
-    ) -> bool {
-        if self
-            .trimmed_ivs
-            .iter()
-            .map(String::as_str)
-            .chain(pending.iter().copied())
-            .any(|iv| start.uses_name(iv))
-        {
-            return true;
-        }
-        if size <= 1 && self.const_fold(start) == Some(0) {
-            return true;
-        }
-        size > 0 && extent_div % size == 0 && self.expr_div(start) % size == 0
-    }
-
-    pub(super) fn expr_div(&self, expr: &Expr) -> i64 {
-        const CAP: i64 = 1 << 20;
-        match expr {
-            Expr::Int(n) => n.abs().min(CAP),
-            Expr::Var(name) => match self.lookup(name) {
-                Some(Binding::Let { div, .. }) => div,
-                Some(_) => 1,
-                None => self.shape_env.get(name).map_or(1, |v| v.abs().min(CAP)),
-            },
-            Expr::Unary { op: UnOp::Neg, rhs } => self.expr_div(rhs),
-            Expr::Binary {
-                op: BinOp::Mul,
-                lhs,
-                rhs,
-            } => {
-                let (a, b) = (self.expr_div(lhs), self.expr_div(rhs));
-                if a == 0 || b == 0 {
-                    0
-                } else {
-                    a.saturating_mul(b).min(CAP)
-                }
-            }
-            Expr::Binary {
-                op: BinOp::Add | BinOp::Sub,
-                lhs,
-                rhs,
-            } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
-            _ => 1,
-        }
-    }
-
-    /// Folds an expression to a compile-time constant, scanning `@autotune`
-    /// symbols; used for affine bounds and static slice checks.
-    pub(super) fn const_fold(&self, expr: &Expr) -> Option<i64> {
-        match expr {
-            Expr::Int(n) => Some(*n),
-            // shadowing
-            Expr::Var(name) if self.lookup(name).is_none() => self.shape_env.get(name).copied(),
-            Expr::Unary { op: UnOp::Neg, rhs } => self.const_fold(rhs)?.checked_neg(),
-            Expr::Binary { op, lhs, rhs } => {
-                let (a, b) = (self.const_fold(lhs)?, self.const_fold(rhs)?);
-                match op {
-                    BinOp::Add => a.checked_add(b),
-                    BinOp::Sub => a.checked_sub(b),
-                    BinOp::Mul => a.checked_mul(b),
-                    BinOp::Div => a.checked_div(b),
-                    BinOp::Rem => a.checked_rem(b),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
 
     pub(super) fn push(&self, block: &Block<'c>, op: Operation<'c>) -> Result<Value<'c, 'c>> {
         let result = block.append_operation(op).result(0)?;
@@ -265,22 +175,6 @@ impl<'c> Codegen<'c> {
         Type::parse(self.ctx, text).ok_or_else(|| anyhow!("failed to parse type '{text}'"))
     }
 
-    pub(super) fn expect_index(&self, v: Value<'c, 'c>, what: &str) -> Result<Value<'c, 'c>> {
-        if v.r#type() == self.index_t {
-            Ok(v)
-        } else {
-            bail!("{what} must be an integer, got {}", v.r#type())
-        }
-    }
-
-    pub(super) fn expect_bool(&self, v: Value<'c, 'c>, what: &str) -> Result<Value<'c, 'c>> {
-        if v.r#type() == self.bool_t {
-            Ok(v)
-        } else {
-            bail!("{what} must be a bool, got {}", v.r#type())
-        }
-    }
-
     pub(super) fn is_float(&self, t: Type<'c>) -> bool {
         t == self.f16_t || t == self.bf16_t || t == self.f32_t || t == self.f64_t
     }
@@ -340,21 +234,6 @@ impl<'c> Codegen<'c> {
             }
             _ => None,
         }
-    }
-
-    /// The element type a contraction of `a` and `b` accumulates in. Floats
-    /// accumulate in their join; integers accumulate in i32 rather than the
-    /// operand type, since a dot product of bytes overflows i8 almost at once
-    /// and i32 is what the hardware's integer dot product accumulates in anyway.
-    pub(super) fn accumulator_elem(&self, a: Type<'c>, b: Type<'c>) -> Result<Type<'c>> {
-        let join = self
-            .numeric_join(a, b)
-            .ok_or_else(|| anyhow!("no common type for a contraction of {a} and {b}"))?;
-        Ok(if self.is_int(join) && join != self.i64_t {
-            self.i32_t
-        } else {
-            join
-        })
     }
 
     pub(super) fn float_cast(
@@ -472,32 +351,4 @@ impl<'c> Codegen<'c> {
         Identifier::new(self.ctx, name)
     }
 
-    pub(super) fn lookup(&self, name: &str) -> Option<Binding<'c>> {
-        self.scopes.iter().rev().find_map(|s| s.get(name).cloned())
-    }
-
-    pub(super) fn bind(&mut self, name: &str, mut binding: Binding<'c>) {
-        // A named buffer is never released to the pool: it may be read for
-        // the rest of its scope (including the next iteration of an
-        // enclosing loop), which the per-statement release sites cannot see.
-        if let Binding::View(mv) | Binding::Tile(mv) = &mut binding {
-            mv.owned = false;
-        }
-        self.scopes
-            .last_mut()
-            .expect("a scope is always open while emitting")
-            .insert(name.to_string(), binding);
-    }
-
-    /// Replaces the binding of an already-bound name in the innermost scope
-    /// containing it (bind would shadow it in the current scope instead).
-    pub(super) fn update_binding(&mut self, name: &str, binding: Binding<'c>) {
-        for scope in self.scopes.iter_mut().rev() {
-            if let Some(slot) = scope.get_mut(name) {
-                *slot = binding;
-                return;
-            }
-        }
-        panic!("update_binding of unbound name '{name}'");
-    }
 }

@@ -3,41 +3,39 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    pub(in crate::codegen) fn emit_register_matmul(
+    /// The lane's whole accumulator is one tm x tn f32 vector.
+    pub(super) fn reg_seed(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-    ) -> Result<()> {
-        let (shape, kk) = self.fusion_dims(p)?;
-        let (m, n) = (shape[0], shape[1]);
-
-        if self.has_wmma() && self.wmma_plan(m, n, kk).is_some() {
-            return if self.has_mma_sync() {
-                self.emit_mma_sync_matmul(block, p)
-            } else {
-                self.emit_wmma_matmul(block, p)
-            };
-        }
-
-        let (tm, tn) = self.sub_tile(m, n);
-        let (tiles_m, tiles_n) = (m / tm, n / tn);
-        let (lm, ln) = Self::lane_grid(tiles_m, tiles_n, tm, tn)
-            .ok_or_else(|| anyhow!("matmul fusion without a lane grid"))?;
-
-        let init = self.emit_scalar(block, p.init)?;
+        plan: &GemmPlan<'c>,
+        init: Value<'c, 'c>,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let GemmPath::Reg { tm, tn, .. } = plan.path else {
+            bail!("reg_seed on a tensor-core plan");
+        };
         let init = self.coerce(block, init, self.f32_t)?;
-
-        // the lane's whole accumulator is one TMxTN vector
         let acc_t = Type::vector(&[tm as u64, tn as u64], self.f32_t);
-        let regs = vec![self.vec_broadcast(block, init, acc_t)?];
+        Ok(vec![self.vec_broadcast(block, init, acc_t)?])
+    }
 
-        let (lo, hi, st, iv_div) = self.loop_bounds(block, p.start, p.end, p.step)?;
+    pub(super) fn reg_loop(
+        &mut self,
+        block: &Block<'c>,
+        mut acc: GemmAcc<'c>,
+        (lo, hi, st): (Value<'c, 'c>, Value<'c, 'c>, Value<'c, 'c>),
+        src: &GemmSource<'_>,
+    ) -> Result<GemmAcc<'c>> {
+        let GemmPlan { m, n, kk, .. } = acc.plan;
+        let GemmPath::Reg { tm, tn, lm, ln } = acc.plan.path else {
+            bail!("reg_loop on a tensor-core plan");
+        };
+        let (tiles_m, tiles_n) = (m / tm, n / tn);
 
         // The lane's sub-tile origin: the warp's block origin (surplus warps
         // clamped onto the last block, as in tile_matmul) plus the lane's
         // position on the lm x ln lane grid of tm x tn sub-tiles.
-        let (tid, w, _, wm0, wn0) =
-            self.warp_block_origin(block, tiles_m / lm, tiles_n / ln, lm * tm, ln * tn)?;
+        let origin = self.warp_block_origin(block, tiles_m / lm, tiles_n / ln, lm * tm, ln * tn)?;
+        let (tid, w, wt, wm0, wn0) = origin;
         let lane = self.remui(block, tid, w)?;
         let ln_v = self.const_index(block, ln)?;
         let lane_m = self.divui(block, lane, ln_v)?;
@@ -62,28 +60,45 @@ impl<'c> Codegen<'c> {
         let finals = self.matmul_kloop(
             block,
             (lo, hi, st),
-            &regs,
+            &acc.regs,
             &a_bufs,
             &b_bufs,
-            |cg, body, kt, a, b| cg.fused_stage(body, p, kt, iv_div, a, b, false),
+            |cg, body, kt, a, b| cg.fused_stage(body, src, kt, a, b, false),
             |cg, body, piv, cur, dst, accs| {
-                cg.fused_half(body, p, iv_div, piv, hi, cur, dst, dims, m0, n0, accs)
+                cg.fused_half(body, src, piv, hi, cur, dst, dims, m0, n0, accs)
             },
             |cg, body, a, b, accs| cg.register_mac(body, a, b, dims, m0, n0, accs),
         )?;
+        acc.regs = finals;
+        // The lane's own origin is what the drain indexes by.
+        acc.origin = Some((tid, w, wt, m0, n0));
+        Ok(acc)
+    }
 
-        // epilogue: each lane writes its finished sub-tile straight to C,
-        // optionally applying alpha*acc + beta*prev_load
-        let view = self.epilogue_view(block, p, &shape)?;
+    /// Each lane writes its finished sub-tile straight to C, optionally
+    /// applying alpha*acc + beta*prev_load.
+    pub(super) fn reg_store(
+        &mut self,
+        block: &Block<'c>,
+        acc: GemmAcc<'c>,
+        view: MemVal<'c>,
+        alpha: Option<GemmScale<'c>>,
+        beta: Option<GemmScale<'c>>,
+    ) -> Result<()> {
+        let GemmPath::Reg { tm, tn, .. } = acc.plan.path else {
+            bail!("reg_store on a tensor-core plan");
+        };
+        let (_, _, _, m0, n0) = Self::gemm_finals(&acc)?;
         let row_t = Type::vector(&[tn as u64], self.f32_t);
 
         // pre-compute alpha/beta broadcasts once
-        let (alpha_row, beta_row) = self.epilogue_scaling(block, p, row_t, view.vectorizes(4))?;
+        let (alpha_row, beta_row) =
+            self.epilogue_scaling(block, alpha, beta, row_t, view.vectorizes(4))?;
 
         for i in 0..tm {
             let ci = self.const_index(block, i)?;
             let mi = self.addi(block, m0, ci)?;
-            let row = self.vec_extract(block, finals[0], &[i], row_t)?;
+            let row = self.vec_extract(block, acc.regs[0], &[i], row_t)?;
 
             if view.vectorizes(4) {
                 let out_row = self.apply_scaling(block, row, alpha_row, beta_row, |cg| {
@@ -105,33 +120,6 @@ impl<'c> Codegen<'c> {
             }
         }
         Ok(())
-    }
-
-    /// Evaluates one staged operand slice with the fusion's k-loop iv bound
-    /// to kt.
-    pub(super) fn emit_kt_slice(
-        &mut self,
-        block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        slice: &Expr,
-        kt: Value<'c, 'c>,
-        iv_div: i64,
-    ) -> Result<MemVal<'c>> {
-        self.scopes.push(HashMap::new());
-        self.bind(
-            p.kt,
-            Binding::Let {
-                value: kt,
-                div: iv_div,
-            },
-        );
-        let src = self.emit_expr(block, slice);
-        self.scopes.pop();
-
-        match src? {
-            Rv::Tile(mv) => Ok(mv),
-            Rv::Scalar(_) => bail!("staged value must be a tensor slice"),
-        }
     }
 
     /// The fused k-loop, done as a vector contraction. The lane's accumulator rides the loop as

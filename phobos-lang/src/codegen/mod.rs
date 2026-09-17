@@ -7,36 +7,23 @@ use melior::{
     ir::{
         Attribute, Block, BlockLike, Identifier, Location, Module, Operation, Region, RegionLike,
         Type, Value, ValueLike,
-        attribute::{
-            DenseI32ArrayAttribute, FloatAttribute, IntegerAttribute, StringAttribute,
-            TypeAttribute,
-        },
+        attribute::{DenseI32ArrayAttribute, FloatAttribute, IntegerAttribute, StringAttribute},
         operation::OperationBuilder,
-        r#type::{FunctionType, IntegerType, MemRefType},
+        r#type::{IntegerType, MemRefType},
     },
 };
 
-use crate::ast::{
-    AssignOp, AttrArg, BinOp, Dim, Expr, Kernel, Launch, Literal, Scalar, Stmt, Sub,
-    Type as AstType, UnOp,
-};
+use crate::ast::{BinOp, Kernel, Launch};
 
-mod call;
 mod elemwise;
 mod expr;
 mod frag;
-mod hoist;
-mod kernel;
+mod lower;
 mod matmul;
-mod pipeline;
-mod stmt;
-mod store;
 mod sync;
-mod target;
+pub mod target;
 mod tile;
 mod util;
-
-use tile::{QFormat, QgFormat};
 
 /// MLIR's ShapedType::kDynamic
 const DYN: i64 = i64::MIN;
@@ -64,9 +51,6 @@ const QMMA_TILES: i64 = 64;
 
 const WMMA_SMEM_PAD: i64 = 8;
 
-/// Shared-memory bank period on every architecture this compiler targets: 32
-/// banks, 4 bytes each. See [`Codegen::should_pad_stage`].
-const SHARED_BANK_BYTES: i64 = 128;
 
 /// What `emit` learned across the module: the dynamic shared-memory sideband,
 /// plus `(kernel name, decline reasons)` for every kernel whose `@pipeline`
@@ -90,9 +74,35 @@ pub fn emit<'c>(
 
     for kernel in kernels {
         let mut cg = Codegen::new(base, context, kernel)?;
-        let func = cg.emit_kernel(kernel)?;
+        let func = {
+            let target = target::build_target(base);
+            let (ir, report) = crate::ir::build::build(base, target, kernel)?;
+            #[cfg(debug_assertions)]
+            crate::ir::verify::verify(&ir)?;
+
+            // A first emission, thrown away, records every buffer the
+            // emitters allocate; the plan places them and the second
+            // emission hands out its offsets. See `lower::plan`.
+            let mut recorder = Codegen::new(base, context, kernel)?;
+            recorder.policy = SharedPolicy::Record;
+            recorder.pipeline_declines = report.pipeline_declines.clone();
+            drop(recorder.emit_kernel_ir(&ir)?);
+            let plan = lower::plan::Plan::compute(&ir, &recorder.trace);
+            let elision = lower::membar::Elision::decide(&ir, &recorder.trace, &plan);
+
+            cg.elided = elision.skip;
+            cg.policy = SharedPolicy::Replay(plan);
+            cg.pipeline_declines = report.pipeline_declines;
+            let func = cg.emit_kernel_ir(&ir)?;
+            cg.finish_shared_buffer()?;
+            func
+        };
         if cg.dynamic_shared {
-            shared.push((kernel.name.clone(), cg.shared_bytes_peak as usize));
+            let peak = match &cg.policy {
+                SharedPolicy::Replay(plan) => plan.peak,
+                _ => cg.shared_bytes_peak,
+            };
+            shared.push((kernel.name.clone(), peak as usize));
         }
         if cg.pipeline_assert && !cg.pipelined_any {
             pipeline_failures.push((kernel.name.clone(), cg.pipeline_declines));
@@ -161,19 +171,14 @@ struct MemVal<'c> {
     shared: bool,
 
     /// A fresh unnamed temp whose buffer may be released once all reads of it
-    /// are emitted. [`Codegen::bind`] clears this, so named buffers are never pooled.
+    /// are emitted; a named buffer is never pooled.
     owned: bool,
 
     /// Per-dimension bounds mask for a slice that may reach past the source
     /// extent. Some((offset, extent)) lets a load zero-fill and a store skip
     /// where offset + local index >= extent; None means provably in bounds.
-    /// Empty for tile buffers and whole slices, see [`Codegen::emit_subview`].
+    /// Empty for tile buffers and whole slices.
     mask: Vec<Option<(Value<'c, 'c>, Value<'c, 'c>)>>,
-
-    /// Known divisor of each dynamic extent, 1 when nothing is known. Only
-    /// `@aligned` raises it, for tensor params only: the host's promise that
-    /// the extent is a whole number of tiles. See [`Codegen::dyn_in_bounds`].
-    dim_div: Vec<i64>,
 }
 
 impl<'c> MemVal<'c> {
@@ -182,22 +187,11 @@ impl<'c> MemVal<'c> {
         self.mask.iter().any(Option::is_some)
     }
 
-    /// The promised divisor of dim `d`, 1 when nothing was promised.
-    fn div_of(&self, d: usize) -> i64 {
-        self.dim_div.get(d).copied().unwrap_or(1)
-    }
-
     /// Whether a `width`-element vector access stays on a legal boundary. A
     /// zero divisor is an unoffset base, which every width clears.
     fn vectorizes(&self, width: i64) -> bool {
         self.align_div % width == 0
     }
-}
-
-/// The result of evaluating an expression.
-enum Rv<'c> {
-    Scalar(Value<'c, 'c>),
-    Tile(MemVal<'c>),
 }
 
 /// A tile accumulator living in per-lane mma.sync D fragments instead of
@@ -220,31 +214,9 @@ impl FragAcc<'_> {
     }
 }
 
-/// An optional scalar coefficient in a GEMM epilogue (None means 1.0/identity)
-type Coeff<'a> = Option<&'a Expr>;
-
-/// What a name in scope resolves to.
-#[derive(Clone)]
-enum Binding<'c> {
-    /// An immutable scalar: let bindings, scalar params, loop ivs.
-    /// div is the largest known divisor of the value (see [`Codegen::expr_div`]).
-    Let { value: Value<'c, 'c>, div: i64 },
-    /// A mutable scalar (var): a rank-0 memref holding the current value.
-    Var { slot: Value<'c, 'c>, elem: Type<'c> },
-    /// A tensor parameter (identity layout, global memory, sliceable).
-    Tensor(MemVal<'c>),
-    /// A read-only tile (let-bound slice or tile expression).
-    View(MemVal<'c>),
-    /// A writable tile (var-bound buffer).
-    Tile(MemVal<'c>),
-    /// A fragment-resident accumulator (never in shared memory).
-    Frags(FragAcc<'c>),
-}
-
 struct Codegen<'c> {
     /// The chip this kernel is emitted for. Every construct the portable
-    /// dialects cannot express goes through here, see [`target::Isa`]. Autotune
-    /// choices are resolved into `shape_env` at construction.
+    /// dialects cannot express goes through here, see [`target::Isa`].
     isa: Box<dyn target::Isa>,
     ctx: &'c Context,
     loc: Location<'c>,
@@ -257,8 +229,6 @@ struct Codegen<'c> {
     i32_t: Type<'c>,
     i64_t: Type<'c>,
     bool_t: Type<'c>,
-    shape_env: HashMap<String, i64>, // autotune search dims, seeded with each dim's first choice.
-    scopes: Vec<HashMap<String, Binding<'c>>>, // symbol table
     kernel_name: String,
     shared_globals: Vec<Operation<'c>>, // shared-memory tiles (memref.global)
     tile_count: usize,
@@ -287,10 +257,8 @@ struct Codegen<'c> {
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
     // Induction variable of the ragged remainder chunk, if any; a slice offset
     // by it is guarded against the runtime dim. None in the trimmed main loop.
-    ragged_iv: Option<String>,
     // Induction variables of the enclosing trimmed main loops: their trip
     // count is rounded to whole chunks, so an offset slice needs no mask.
-    trimmed_ivs: Vec<String>,
     /// Whether `@pipeline` was written on this kernel. The generic loop path
     /// auto-attempts every eligible loop regardless; this only gates the
     /// fused-GEMM backend's double-buffering (see [`Self::staging_pairs`]).
@@ -305,9 +273,34 @@ struct Codegen<'c> {
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
     launch: Option<Launch>,
     cta_threads: i64,
-    /// Whether `@padstage` was written on this kernel; see
-    /// [`Codegen::should_pad_stage`], its only reader.
-    pad_stage: bool,
+    /// What each graph value became, one layer per instantiated body; see
+    /// `codegen/lower`.
+    lowered: Vec<HashMap<crate::ir::ValueId, lower::Lowered<'c>>>,
+    /// Where tile buffers get their bytes; see [`SharedPolicy`].
+    policy: SharedPolicy,
+    /// What a recording emission saw; see `lower::plan`.
+    trace: lower::plan::Trace,
+    /// Allocations handed out so far by a replaying emission.
+    replay_next: usize,
+    /// Ops whose trailing barrier the membar pass elided, with how many
+    /// barriers each emits; see `lower::membar`.
+    elided: std::collections::BTreeMap<crate::ir::OpId, usize>,
+    /// While emitting an elided op: which barrier call to skip, and how
+    /// many have been made.
+    skip_barrier: Option<usize>,
+    barrier_calls: usize,
+}
+
+/// How a tile buffer gets its bytes.
+enum SharedPolicy {
+    /// A free list per shape, reused last-in first-out, and what a
+    /// recording emission runs on top of.
+    Pool,
+    /// The pool, with every allocation and release recorded for the plan.
+    Record,
+    /// A planned offset per allocation, in recording order, in one byte
+    /// buffer the kernel owns.
+    Replay(lower::plan::Plan),
 }
 
 /// Widens a value's borrow to the context lifetime: every block here is
@@ -325,27 +318,6 @@ impl<'c> Codegen<'c> {
         let launch = kernel.launch().map_err(|e| anyhow!(e))?;
         let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
 
-        let mut shape_env = HashMap::new();
-        for attr in &kernel.attrs {
-            if attr.name == "autotune" {
-                for arg in &attr.args {
-                    if let AttrArg::Search { name, choices } = arg
-                        && let Some(&first) = choices.first()
-                    {
-                        shape_env.insert(name.clone(), first);
-                    }
-                }
-            }
-        }
-
-        // the autotuner pins specific choices via the phobos context.
-        // only declared search dims may be overridden.
-        for (name, value) in &base.shape_overrides {
-            if shape_env.contains_key(name) {
-                shape_env.insert(name.clone(), *value);
-            }
-        }
-
         Ok(Codegen {
             isa: target::isa_for(base),
             ctx,
@@ -359,8 +331,6 @@ impl<'c> Codegen<'c> {
             i32_t: IntegerType::new(ctx, 32).into(),
             i64_t: IntegerType::new(ctx, 64).into(),
             bool_t: IntegerType::new(ctx, 1).into(),
-            shape_env,
-            scopes: Vec::new(),
             kernel_name: kernel.name.clone(),
             shared_globals: Vec::new(),
             tile_count: 0,
@@ -372,8 +342,6 @@ impl<'c> Codegen<'c> {
             shared_bytes_peak: 0,
             dynamic_live: 0,
             hoisted_stages: Vec::new(),
-            ragged_iv: None,
-            trimmed_ivs: Vec::new(),
             pipeline_assert: kernel.attrs.iter().any(|a| a.name == "pipeline"),
             pipelined_any: false,
             pipeline_declines: Vec::new(),
@@ -381,7 +349,13 @@ impl<'c> Codegen<'c> {
             mma_sync: kernel.wants_mma_sync(),
             launch,
             cta_threads,
-            pad_stage: kernel.wants_padded_stage(),
+            lowered: Vec::new(),
+            policy: SharedPolicy::Pool,
+            trace: lower::plan::Trace::default(),
+            replay_next: 0,
+            elided: std::collections::BTreeMap::new(),
+            skip_barrier: None,
+            barrier_calls: 0,
         })
     }
 
@@ -397,36 +371,6 @@ impl<'c> Codegen<'c> {
 fn gcd(a: i64, b: i64) -> i64 {
     let (a, b) = (a.abs(), b.abs());
     if b == 0 { a } else { gcd(b, a % b) }
-}
-
-fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
-    if a.len() != b.len() {
-        return None;
-    }
-    a.iter()
-        .zip(b)
-        .map(|(&x, &y)| match (x, y) {
-            _ if x == y => Some(x),
-            (1, _) => Some(y),
-            (_, 1) => Some(x),
-            (DYN, _) => Some(y),
-            (_, DYN) => Some(x),
-            _ => None,
-        })
-        .collect()
-}
-
-/// Whether a slice dimension provably never reaches past the source extent,
-/// so it needs no bounds mask. `size` is the slice's static extent, `off_div`
-/// the largest known divisor of the slice offset (see [`Codegen::expr_div`]).
-fn dim_in_bounds(extent: i64, size: i64, off_div: i64) -> bool {
-    if extent == DYN {
-        return true;
-    }
-    if size == DYN {
-        return false;
-    }
-    extent % size == 0 && off_div % size == 0
 }
 
 /// row-major strides for a shape ([`DYN`] propagates outward).

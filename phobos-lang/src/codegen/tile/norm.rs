@@ -10,24 +10,19 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    pub(in crate::codegen) fn emit_rms_norm_q(&mut self, block: &Block<'c>, args: &[Expr]) -> Result<Rv<'c>> {
-        // Six operands write the normalized row to `out` as well; five
-        // leave it, for a caller that only wants the quantized copy.
-        let (x, g, eps, o, q, s) = match args {
-            [x, g, eps, o, q, s] => (x, g, eps, Some(o), q, s),
-            [x, g, eps, q, s] => (x, g, eps, None, q, s),
-            _ => bail!("rms_norm_q_t expects (x, gain, eps, [out,] q, scales)"),
-        };
-        let tile = |cg: &mut Self, e: &Expr, what: &str| match cg.emit_expr(block, e)? {
-            Rv::Tile(t) => Ok(t),
-            Rv::Scalar(_) => bail!("rms_norm_q_t {what} must be a tile"),
-        };
-        let x = tile(self, x, "x")?;
-        let g = tile(self, g, "gain")?;
-        let eps = self.emit_scalar(block, eps)?;
-        let o = o.map(|o| tile(self, o, "out")).transpose()?;
-        let q = tile(self, q, "q")?;
-        let s = tile(self, s, "scales")?;
+
+    /// The normalization over resolved operands; returns the inverse rms.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::codegen) fn rms_norm_q_raw(
+        &mut self,
+        block: &Block<'c>,
+        x: MemVal<'c>,
+        g: MemVal<'c>,
+        eps: Value<'c, 'c>,
+        o: Option<MemVal<'c>>,
+        q: MemVal<'c>,
+        s: MemVal<'c>,
+    ) -> Result<Value<'c, 'c>> {
         let (f32_t, i8_t, i32_t) = (self.f32_t, self.i8_t, self.i32_t);
         let mut checked = vec![(&x, "x"), (&g, "gain"), (&q, "q"), (&s, "scales")];
         if let Some(o) = &o {
@@ -218,7 +213,7 @@ impl<'c> Codegen<'c> {
             self.release(o);
         }
         self.barrier(block)?;
-        Ok(Rv::Scalar(inv))
+        Ok(inv)
     }
 
     /// Four f32 at `indices`, or zeros where `present` says the piece is past

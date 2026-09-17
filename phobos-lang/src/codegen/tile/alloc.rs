@@ -4,15 +4,6 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    pub(in crate::codegen) fn alloc_tile(
-        &mut self,
-        block: &Block<'c>,
-        scalar: Scalar,
-        dims: &[Dim],
-    ) -> Result<MemVal<'c>> {
-        let shape = self.tile_shape(dims)?;
-        self.alloc_tile_shaped(block, self.scalar_type(scalar), &shape)
-    }
 
     /// alloc a tile buffer in SM
     pub(in crate::codegen) fn alloc_tile_shaped(
@@ -27,6 +18,39 @@ impl<'c> Codegen<'c> {
 
         let space = self.shared_space()?;
         let t = MemRefType::new(elem, shape, None, Some(space));
+
+        // each tile is a window of the one allocation and 16-byte aligned so
+        // a four-element vector access stays legal.
+        let width = self
+            .elem_bytes(elem)
+            .with_context(|| format!("tile element {elem} has no known width"))?;
+        let bytes = (i64::from(width) * shape.iter().product::<i64>() + 15) & !15;
+
+        if let SharedPolicy::Replay(plan) = &self.policy {
+            let k = self.replay_next;
+            self.replay_next += 1;
+            let Some(&offset) = plan.offsets.get(k) else {
+                bail!("the replaying emission allocated a buffer the recording one did not");
+            };
+            let name = format!("__{}_tile{}", self.kernel_name, k);
+            let mem = self.planned_view(block, t.into(), offset, plan.peak)?;
+            let mem = self.assume_align(block, mem, 16)?;
+            let align_div = row_major_strides(shape)[..shape.len() - 1]
+                .iter()
+                .fold(0i64, |acc, &s| gcd(acc, s.abs().max(1)));
+            return Ok(MemVal {
+                mem,
+                elem,
+                shape: shape.to_vec(),
+                row_stride: None,
+                align_div,
+                swizzle: None,
+                global: Some(name),
+                shared: true,
+                owned: true,
+                mask: Vec::new(),
+                });
+        }
 
         // Pool entries come from release().
         let key = (elem.to_string(), shape.to_vec());
@@ -51,17 +75,8 @@ impl<'c> Codegen<'c> {
                 self.tile_count += 1;
 
                 if self.dynamic_shared {
-                    // each tile is a window of the one allocation and 16-byte
-                    // aligned so a four-element vector access stays legal.
-                    let width = self
-                        .elem_bytes(elem)
-                        .with_context(|| format!("tile element {elem} has no known width"))?;
-
-                    let bytes = i64::from(width) * shape.iter().product::<i64>();
-
                     self.tile_offsets.insert(name.clone(), self.shared_bytes);
-
-                    self.shared_bytes += (bytes + 15) & !15;
+                    self.shared_bytes += bytes;
                     self.shared_bytes_peak = self.shared_bytes_peak.max(self.shared_bytes);
                 } else {
                     self.shared_globals.push(memref::global(
@@ -78,6 +93,9 @@ impl<'c> Codegen<'c> {
                 name
             }
         };
+        if matches!(self.policy, SharedPolicy::Record) {
+            self.trace.alloc(&name, bytes);
+        }
 
         let mem = if self.dynamic_shared {
             let offset = self.tile_offsets[&name];
@@ -117,7 +135,6 @@ impl<'c> Codegen<'c> {
             shared: true,
             owned: true,
             mask: Vec::new(),
-            dim_div: Vec::new(),
         })
     }
 
@@ -131,6 +148,10 @@ impl<'c> Codegen<'c> {
     /// reusing op's writes after the previous reads; leftover contents don't
     /// matter since every producing op fully writes its output.
     pub(in crate::codegen) fn release(&mut self, mv: &MemVal<'c>) {
+        // A planned buffer has its place for its whole life; nothing to return.
+        if matches!(self.policy, SharedPolicy::Replay(_)) {
+            return;
+        }
         if !mv.owned {
             return;
         }
@@ -143,6 +164,9 @@ impl<'c> Codegen<'c> {
             return;
         }
 
+        if matches!(self.policy, SharedPolicy::Record) {
+            self.trace.release(name);
+        }
         if self.dynamic_shared {
             self.dynamic_live -= 1;
         }
@@ -160,6 +184,65 @@ impl<'c> Codegen<'c> {
         if !names.contains(name) {
             names.push(name.clone());
         }
+    }
+
+    /// A tile as a window at `offset` of the kernel's one byte buffer: the
+    /// dynamic allocation, or the static global [`Self::finish_shared_buffer`]
+    /// declares once the size is known.
+    fn planned_view(
+        &mut self,
+        block: &Block<'c>,
+        t: Type<'c>,
+        offset: i64,
+        peak: i64,
+    ) -> Result<Value<'c, 'c>> {
+        let space = self.shared_space()?;
+        let base = if self.dynamic_shared {
+            let byte_t = MemRefType::new(self.i8_t, &[DYN], None, Some(space));
+            self.dynamic_shared_base(block, byte_t.into())?
+        } else {
+            let byte_t = MemRefType::new(self.i8_t, &[peak], None, Some(space));
+            let name = self.shared_buffer_name();
+            self.push(block, memref::get_global(self.ctx, &name, byte_t, self.loc))?
+        };
+        let at = self.const_index(block, offset)?;
+        self.push(
+            block,
+            OperationBuilder::new("memref.view", self.loc)
+                .add_operands(&[base, at])
+                .add_results(&[t])
+                .build()?,
+        )
+    }
+
+    fn shared_buffer_name(&self) -> String {
+        format!("__{}_shared", self.kernel_name)
+    }
+
+    /// Declares the static byte buffer a replaying emission's views point
+    /// into, sized to the plan's peak. Nothing for a dynamic kernel, whose
+    /// host reserves the peak at launch, or for a kernel with no tiles.
+    pub(in crate::codegen) fn finish_shared_buffer(&mut self) -> Result<()> {
+        let SharedPolicy::Replay(plan) = &self.policy else {
+            return Ok(());
+        };
+        if self.dynamic_shared || plan.peak == 0 {
+            return Ok(());
+        }
+        let space = self.shared_space()?;
+        let byte_t = MemRefType::new(self.i8_t, &[plan.peak], None, Some(space));
+        let name = self.shared_buffer_name();
+        self.shared_globals.push(memref::global(
+            self.ctx,
+            &name,
+            Some("private"),
+            byte_t,
+            None,
+            false,
+            Some(IntegerAttribute::new(self.i64_t, 16)),
+            self.loc,
+        ));
+        Ok(())
     }
 
     /// Allocates an unpadded shared staging tile with an XOR column swizzle (see
@@ -261,30 +344,6 @@ impl<'c> Codegen<'c> {
         Ok(mv)
     }
 
-    /// Whether a `var x = <tensor slice>` staging tile should allocate through
-    /// [`Self::alloc_tile_padded`] rather than [`Self::alloc_tile_shaped`].
-    ///
-    /// Gated by `@padstage`, and even then only for a row pitch that is an
-    /// exact multiple of [`SHARED_BANK_BYTES`], the one layout where every row
-    /// collides on the same bank at a fixed column. Padding any other tile
-    /// would grow the CTA's shared footprint for nothing.
-    pub(in crate::codegen) fn should_pad_stage(&self, elem: Type<'c>, shape: &[i64]) -> bool {
-        if !self.pad_stage {
-            return false;
-        }
-        let Some(&cols) = shape.last() else {
-            return false;
-        };
-        if cols == DYN {
-            return false;
-        }
-        let Some(width) = self.elem_bytes(elem) else {
-            return false;
-        };
-        let pitch_bytes = cols * i64::from(width);
-        pitch_bytes > 0 && pitch_bytes % SHARED_BANK_BYTES == 0
-    }
-
     /// tile_flat aliases a tile as one row [1, rows * cols].
     ///
     /// Nothing is allocated and no data moves!
@@ -345,7 +404,6 @@ impl<'c> Codegen<'c> {
             shared: true,
             owned: false,
             mask: Vec::new(),
-            dim_div: Vec::new(),
         })
     }
 

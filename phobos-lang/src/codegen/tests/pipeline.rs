@@ -20,16 +20,12 @@ fn pipeline_double_buffers_staged_slices() {
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }",
     );
-    assert_contains(
-        &mlir,
-        &[
-            "@__matmul_tile0 : memref<16x64xf32, 3>",
-            "@__matmul_tile1 : memref<16x64xf32, 3>",
-            "@__matmul_tile2 : memref<16x64xf32, 3>",
-            "@__matmul_tile3 : memref<16x64xf32, 3>",
-            "scf.if",
-        ],
+    assert_eq!(
+        tile_views(&mlir, "16x64xf32").len(),
+        4,
+        "two staging pairs, doubled:\n{mlir}"
     );
+    assert_contains(&mlir, &["scf.if"]);
     assert!(
         !mlir.contains("arith.select"),
         "unexpected dynamic buffer select in:\n{mlir}"
@@ -203,16 +199,12 @@ fn generic_pipeline_double_buffers_a_non_matmul_loop() {
             C[pm * T :+ T, 0 :+ T] = acc
         }",
     );
-    assert_contains(
-        &mlir,
-        &[
-            "gpu.func @stage",
-            "@__stage_tile0 : memref<16x16xf32, 3>",
-            "@__stage_tile1 : memref<16x16xf32, 3>",
-            "scf.if",
-            "gpu.barrier",
-        ],
-    );
+    assert_contains(&mlir, &["gpu.func @stage", "scf.if", "gpu.barrier"]);
+    // `acc` and `a`: the remainder's copy of `a` takes the main loop's bytes.
+    let mut offsets = view_offsets(&mlir, "16x16xf32");
+    offsets.sort_unstable();
+    offsets.dedup();
+    assert_eq!(offsets.len(), 2, "{mlir}");
 }
 
 #[test]
@@ -233,18 +225,10 @@ fn bare_kernel_auto_pipelines_without_the_attribute() {
             C[0 :+ 1, 0 :+ T] = acc
         }",
     );
-    // tile0 is `acc`; tile1 and tile2 are `a`'s ping-pong buffers. Three
-    // globals distinguishes this from the single-buffered path, which mints
-    // only tile0 and tile1.
-    assert_contains(
-        &mlir,
-        &[
-            "@__stage_tile0 : memref<1x16xf32, 3>",
-            "@__stage_tile1 : memref<1x16xf32, 3>",
-            "@__stage_tile2 : memref<1x16xf32, 3>",
-            "scf.if",
-        ],
-    );
+    // One buffer is `acc`; two are `a`'s ping-pong pair. Three distinguishes
+    // this from the single-buffered path, which stages `a` once.
+    assert_eq!(tile_views(&mlir, "1x16xf32").len(), 3, "{mlir}");
+    assert_contains(&mlir, &["scf.if"]);
 }
 
 #[test]
@@ -289,10 +273,11 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
             C[0 :+ 1, 0 :+ T] = acc
         }",
     );
-    // tile0 is `acc`, tile1 is `a`'s single (non-doubled) buffer; a
-    // pipelined form would additionally mint tile2 for `a`'s second buffer.
-    assert!(
-        !mlir.contains("__stage_tile2"),
+    // One buffer is `acc`, one is `a`'s single (non-doubled) buffer; a
+    // pipelined form would stage a second for `a`.
+    assert_eq!(
+        tile_views(&mlir, "1x8192xf32").len(),
+        2,
         "a loop over the shared-memory budget should not get a second buffer:\n{mlir}"
     );
 }

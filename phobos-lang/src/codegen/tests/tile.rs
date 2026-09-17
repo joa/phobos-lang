@@ -182,10 +182,11 @@ fn a_flattened_tile_is_not_recycled() {
             O[0 :+ 1, 0 :+ 32] = flatA
         }",
     );
-    assert_eq!(
-        mlir.matches("memref<8x4xf32, 3> = uninitialized").count(),
-        2,
-        "the flattened buffer was handed out again"
+    let offsets = view_offsets(&mlir, "8x4xf32");
+    assert_eq!(offsets.len(), 2, "{mlir}");
+    assert_ne!(
+        offsets[0], offsets[1],
+        "the flattened buffer was handed out again:\n{mlir}"
     );
 }
 
@@ -226,7 +227,7 @@ fn warp_partial_vectorizes_kv_loads_at_dpl_8() {
 }
 
 /// `@padstage` routes a staging tile whose row pitch is a bank-period
-/// multiple through `alloc_tile_padded`. See `Codegen::should_pad_stage`.
+/// multiple through `alloc_tile_padded`. See `Build::should_pad_stage`.
 #[test]
 fn padstage_pads_a_bank_period_pitch_tile() {
     let mlir = emit_mlir(
@@ -279,14 +280,17 @@ fn consecutive_staged_slices_share_one_barrier() {
             O[0 :+ 8, 0 :+ 128] = a + b
         }",
     );
+    // One barrier for the merged a/b pair, where the store's sweep reads
+    // them at another width; the store's own trailing barrier closes the
+    // kernel and nothing depends on it.
     let barriers = mlir.matches("gpu.barrier").count();
     assert_eq!(
-        barriers, 2,
-        "expected one barrier for the merged a/b pair plus one for the \
-         store, got {barriers}:\n{mlir}"
+        barriers, 1,
+        "expected one barrier for the merged a/b pair, got {barriers}:\n{mlir}"
     );
-    let a_pos = mlir.find("__stage2_tile0").expect("a's tile");
-    let b_pos = mlir.find("__stage2_tile1").expect("b's tile");
+    let [a_pos, b_pos] = tile_views(&mlir, "8x128xf16")[..] else {
+        panic!("expected a's and b's tiles in:\n{mlir}");
+    };
     let first_barrier = mlir.find("gpu.barrier").expect("a barrier");
     assert!(
         a_pos < b_pos && b_pos < first_barrier,
@@ -294,10 +298,10 @@ fn consecutive_staged_slices_share_one_barrier() {
     );
 }
 
-/// A lone staging statement keeps its own barrier: the merge needs a run of
-/// two or more.
+/// A staging copy read back by a copy of the same width is read by the
+/// threads that wrote it, element for element, so neither needs a barrier.
 #[test]
-fn a_lone_staged_slice_keeps_its_own_barrier() {
+fn a_staged_slice_copied_back_by_the_same_threads_needs_no_barrier() {
     let mlir = emit_mlir(
         "kernel stage1(A: tensor<f16>[8, 128], O: tensor<f16>[8, 128]) {
             var a = A[0 :+ 8, 0 :+ 128]
@@ -305,11 +309,7 @@ fn a_lone_staged_slice_keeps_its_own_barrier() {
         }",
     );
     let barriers = mlir.matches("gpu.barrier").count();
-    assert_eq!(
-        barriers, 2,
-        "a lone staging copy plus the store should keep two barriers, got \
-         {barriers}:\n{mlir}"
-    );
+    assert_eq!(barriers, 0, "got {barriers}:\n{mlir}");
 }
 
 /// A statement that reads a just-staged tile is not a bare tensor slice, so
@@ -324,12 +324,15 @@ fn staging_run_stops_before_a_non_slice_statement() {
             O[0 :+ 8, 0 :+ 128] = c + b
         }",
     );
+    // a and b merge and c copies a at the same width, so the one barrier
+    // that survives is c's, the last before the store reads b and c at
+    // another width; it orders b's copy too.
     let barriers = mlir.matches("gpu.barrier").count();
-    assert_eq!(
-        barriers, 3,
-        "a and b still merge (1), but c is not a bare tensor slice and \
-         starts a new run (1), plus the store (1), got {barriers}:\n{mlir}"
-    );
+    assert_eq!(barriers, 1, "got {barriers}:\n{mlir}");
+    let views = tile_views(&mlir, "8x128xf16");
+    assert_eq!(views.len(), 3, "{mlir}");
+    let barrier = mlir.find("gpu.barrier").expect("a barrier");
+    assert!(views[2] < barrier, "the barrier must follow c's copy:\n{mlir}");
 }
 
 /// A minimal kernel calling `warp_partial` the way `attention_split_src`
