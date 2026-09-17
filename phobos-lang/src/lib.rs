@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod codegen;
+pub mod ir;
 pub mod lexer;
 pub mod parser;
 pub mod token;
@@ -48,12 +49,39 @@ pub fn compile_shared(
     Ok((out.code, out.shared))
 }
 
+/// PHOBOS_DUMP_DIR collects every source that reaches the compiler as a
+/// `.ph` named by a hash of its text, so a model run leaves behind the exact
+/// kernels it compiled and `examples/snapshot.rs` can sweep them.
+fn dump_source(code: &str) {
+    use std::hash::{Hash, Hasher};
+    let Ok(dir) = std::env::var("PHOBOS_DUMP_DIR") else {
+        return;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    code.hash(&mut h);
+    let name = ast_kernel_name(code).unwrap_or("kernel");
+    let dir = std::path::PathBuf::from(dir);
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(dir.join(format!("{name}_{:016x}.ph", h.finish())), code);
+    }
+}
+
+/// The first kernel's name in a source, for the dump's file name; None when
+/// the source does not parse, which the compile proper will report.
+fn ast_kernel_name(code: &str) -> Option<&str> {
+    let at = code.find("kernel ")?;
+    let rest = &code[at + "kernel ".len()..];
+    let end = rest.find(|c: char| !(c.is_alphanumeric() || c == '_'))?;
+    Some(&rest[..end])
+}
+
 /// [`compile_shared`] without its `@pipeline`-assertion enforcement: reports
 /// every kernel's outcome instead of failing on the first unsatisfied one.
 pub fn compile_raw(
     context: &phobos_base::context::Context,
     code: &str,
 ) -> anyhow::Result<CompileOutput> {
+    dump_source(code);
     if context.print_phases {
         println!("=== SOURCE ========================");
         println!("{code}");

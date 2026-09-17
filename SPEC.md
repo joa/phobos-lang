@@ -284,18 +284,26 @@ float       = digit { digit } "." { digit } ;
   a tile or a scalar: `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`,
   `i64(x)`. Float-to-float rounds, integer-to-float sign-converts, float-to-integer
   truncates toward zero. There is no `bool(x)`.
-- **Tile buffers are pooled by liveness**: a tile lives in shared memory, and the
-  buffer of a tile a block declares goes back to the pool after the last
-  statement of that block mentioning its name, so a later declaration reuses it.
-  A nested body counts as part of the statement containing it, so a name read
-  inside a loop stays live until after the loop. This is what keeps a long chain
-  of named intermediates from costing a static allocation each: static shared
-  memory is capped at 48 KB on every architecture.
+- **Tile buffers are placed by liveness**: a tile lives in shared memory, in
+  one byte buffer per kernel that every tile is a window of. A buffer lives
+  from its allocation to the last operation reading it or any view of it,
+  through every loop that reads it without declaring it, and two buffers
+  whose lives do not overlap share bytes. This is what keeps a long chain of
+  named intermediates from costing a static allocation each: static shared
+  memory is capped at 48 KB on every architecture. The compiler's own
+  staging (a dot's f16 operands, a quantized contraction's tables) is placed
+  the same way, from a first emission that records what every operation
+  allocates; see `phobos-lang/src/codegen/lower/plan.rs`.
 
   Since a tile outlives the loops between its declaration and its last use, a
   tile declared ahead of one loop and read after another is **block-private
-  storage carried across both**, and the barrier that trails every tile store is
-  what makes one thread's write visible to the rest of the CTA.
+  storage carried across both**. The barrier that trails a tile store is what
+  makes one thread's write visible to the rest of the CTA, and it is kept
+  only where something depends on it: a later operation that reads or writes
+  the same bytes from other threads. Two elementwise sweeps over one tile at
+  one vector width touch the same elements from the same thread and run with
+  no barrier between them; a reduction, a dot or a transpose after a sweep
+  keeps it. See `phobos-lang/src/codegen/lower/membar.rs`.
 - **`var` without an initializer**: `var t: tile<f32>[R, C]` declares a buffer and
   leaves it alone, for one a following loop overwrites element for element. The
   type is required, nothing being left to infer one from, and it must be a tile:

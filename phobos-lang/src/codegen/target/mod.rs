@@ -408,7 +408,19 @@ impl<'c> Codegen<'c> {
         self.isa.block_id(self, block, dim)
     }
 
-    pub(in crate::codegen) fn barrier(&self, block: &Block<'c>) -> Result<()> {
+    /// A CTA barrier. Records itself when recording; when replaying an op
+    /// whose trailing barrier the membar pass elided, the call that would
+    /// have been that barrier emits nothing.
+    pub(in crate::codegen) fn barrier(&mut self, block: &Block<'c>) -> Result<()> {
+        if matches!(self.policy, SharedPolicy::Record) {
+            self.trace.barrier();
+        }
+        if let Some(k) = self.skip_barrier {
+            self.barrier_calls += 1;
+            if self.barrier_calls == k {
+                return Ok(());
+            }
+        }
         self.isa.barrier(self, block)
     }
 
@@ -629,5 +641,19 @@ impl<'c> Codegen<'c> {
         sel: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
         self.isa.byte_permute(self, block, lo, hi, sel)
+    }
+}
+
+/// The chip facts the AST-to-IR build asks, read off the same [`Isa`] the
+/// emitter uses so the two never disagree about a target.
+pub fn build_target(base: &phobos_base::context::Context) -> crate::ir::build::Target {
+    let isa = isa_for(base);
+    crate::ir::build::Target {
+        has_cp_async: isa.has_cp_async(),
+        has_wmma: isa.has_wmma(),
+        has_mma_sync: isa.has_mma_sync(),
+        mma_sync_k: isa.mma_sync_k(),
+        has_dp4a: isa.has_dp4a(),
+        has_int8_mma: isa.has_int8_mma(),
     }
 }

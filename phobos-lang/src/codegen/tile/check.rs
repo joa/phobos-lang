@@ -193,6 +193,9 @@ impl<'c> Codegen<'c> {
         sync: bool,
         body: impl FnOnce(&mut Self, &Block<'c>, &[Value<'c, 'c>]) -> Result<()>,
     ) -> Result<()> {
+        if matches!(self.policy, SharedPolicy::Record) {
+            self.trace.sweep(&out.shape, width);
+        }
         let mut sizes = self.tile_sizes(block, out)?;
         let rank = sizes.len();
 

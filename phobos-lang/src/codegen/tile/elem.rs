@@ -335,41 +335,6 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// `argsel(va, vb, ia, ib)`: the call-site glue for
-    /// [`Self::tile_argsel_bc`].
-    pub(in crate::codegen) fn emit_argsel(
-        &mut self,
-        block: &Block<'c>,
-        args: &[Expr],
-    ) -> Result<Rv<'c>> {
-        let [va, vb, ia, ib] = args else {
-            bail!("argsel expects four tile arguments (value, value, index, index)");
-        };
-        let (Rv::Tile(va), Rv::Tile(vb), Rv::Tile(ia), Rv::Tile(ib)) = (
-            self.emit_expr(block, va)?,
-            self.emit_expr(block, vb)?,
-            self.emit_expr(block, ia)?,
-            self.emit_expr(block, ib)?,
-        ) else {
-            bail!("argsel expects tile arguments");
-        };
-        let vshape = broadcast_shape(&va.shape, &vb.shape)
-            .ok_or_else(|| anyhow!("argsel value operands are not broadcast-compatible"))?;
-        let ishape = broadcast_shape(&ia.shape, &ib.shape)
-            .ok_or_else(|| anyhow!("argsel index operands are not broadcast-compatible"))?;
-        ensure!(
-            va.elem == vb.elem && ia.elem == ib.elem && vshape == ishape,
-            "argsel: value and index operands must each share an element type, and both \
-             pairs must broadcast to the same shape"
-        );
-        let out = self.alloc_tile_shaped(block, ia.elem, &ishape)?;
-        self.tile_argsel_bc(block, &va, &vb, &ia, &ib, &out)?;
-        for t in [&va, &vb, &ia, &ib] {
-            self.release(t);
-        }
-        Ok(Rv::Tile(out))
-    }
-
     /// out[...] = select(va[...] >= vb[...], ia[...], ib[...]), broadcasting:
     /// the index side of a (value, index) fold, which `tmax` alone cannot
     /// carry. `>=` rather than `>` so a caller that always passes the later

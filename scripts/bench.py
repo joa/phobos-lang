@@ -57,6 +57,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MODELS = [
     "models/Qwen3.5-0.8B-Q8_0.gguf",
     "models/minicpm5-1b-Q8_0.gguf",
+    "models/Qwen3.5-4B-Q4_K_M.gguf",
 ]
 
 

@@ -27,7 +27,7 @@ kernel gemm(A: tensor<f32>[M, K],
 ```
 
 SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
-The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, for a model that fits in its VRAM. One that does not fit is a different story, and [Inference](#inference) gives both.
+The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, from a 0.8B Q8_0 to a 27B IQ1_M that only just fits in its VRAM. The prompt pass still trails; [Inference](#inference) gives both.
 
 ![Phobos benchmark results](results/bench.svg)
 
@@ -49,6 +49,8 @@ Inference has been tested with:
 
 - [MiniCPM5-1B-Q8_0](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF)
 - [Qwen3.5-0.8B-Q8_0](https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF)
+- Qwen3.5-4B-Q4_K_M
+- Qwen3.8-27B-UD-IQ1_M
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
 
 **Note:**
@@ -64,29 +66,39 @@ Two model front ends, each with a host backend and a GPU one:
 
 Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
-| test   | llama.cpp CUDA[^2]  | Phobos GPU          |
-| ------ | ------------------: | ------------------: |
-| pp128  |  6052.22 +/-  198.25 |  5459.93 +/- 198.74 |
-| pp512  |  9383.85 +/- 1044.71 |  8351.91 +/-  74.81 |
-| tg32   |   230.12 +/-    4.57 |   288.20 +/-   4.14 |
-| tg128  |   249.45 +/-    2.23 |   283.63 +/-   3.58 |
-| tg512  |   252.67 +/-    2.32 |   284.70 +/-   3.11 |
-| tg1024 |   255.21 +/-    1.19 |   283.96 +/-   3.08 |
-| tg2048 |   253.45 +/-    1.70 |   281.52 +/-   4.07 |
+| test   | llama.cpp CUDA[^2]  | Phobos GPU         |
+| ------ | ------------------: | -----------------: |
+| pp128  |  6853.32 +/-  13.87 | 5863.60 +/- 183.01 |
+| pp512  | 10758.03 +/-  33.09 | 8660.98 +/-  33.06 |
+| tg32   |   239.93 +/-   0.26 |  322.81 +/-   0.55 |
+| tg128  |   258.93 +/-   0.22 |  320.80 +/-   0.41 |
+| tg512  |   262.76 +/-   0.31 |  320.68 +/-   0.28 |
+| tg1024 |   262.66 +/-   0.26 |  319.88 +/-   0.28 |
+| tg2048 |   261.50 +/-   0.24 |  318.43 +/-   0.30 |
+
+Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
+
+| test   | llama.cpp CUDA[^2] | Phobos GPU        |
+| ------ | -----------------: | ----------------: |
+| pp128  | 2325.17 +/-   3.32 | 2319.06 +/-  7.14 |
+| pp512  | 2961.19 +/-   2.40 | 2383.07 +/- 16.91 |
+| tg32   |  106.86 +/-   0.03 |  111.32 +/-  0.08 |
+| tg128  |  110.07 +/-   0.06 |  111.20 +/-  0.07 |
+| tg512  |  110.51 +/-   0.05 |  111.22 +/-  0.04 |
+| tg1024 |  110.39 +/-   0.03 |  111.08 +/-  0.06 |
+| tg2048 |  109.87 +/-   0.02 |  110.45 +/-  0.22 |
 
 Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
-| test  | llama.cpp CUDA[^2] | Phobos GPU     |
-| ----- | -----------------: | -------------: |
-| tg128 |    21.74 +/-  0.00 | 29.55 +/- 0.02 |
+| test  | llama.cpp CUDA[^2] | Phobos GPU      |
+| ----- | -----------------: | --------------: |
+| pp128 |   477.03 +/-  0.63 | 330.18 +/- 0.28 |
+| tg128 |    21.97 +/-  0.01 |  30.56 +/- 0.04 |
 
-Prompt processing is left out of the table on purpose: at this size (6.27 GiB of weights)
-neither engine measures it repeatably. In the run above Phobos spread 388 +/- 79 t/s
-at `pp128` (246 to 518 across rounds) and llama.cpp 388 +/- 82 (225 to 473); with a
-512-token prompt in the same process llama.cpp reads 9 t/s and Phobos 4. Those are
-residency artifacts, not throughput: a Phobos decode pass peaks at 7883 MiB of 8192
-with the desktop holding about 950, and once the desktop holds a gigabyte the same
-binary pages and generates at 5 to 7 t/s.
+The 27B's 6.27 GiB of weights leave little of the card's 8 GiB, and its figures hold
+only while the desktop's share stays small: these were taken with 956 MiB in use
+before the run. Once the desktop holds more than about 1.2 GiB the model no longer
+fits and the driver pages it over PCIe, which an earlier session measured at 7 t/s.
 
 <details>
   <summary>Benchmark Details</summary>
@@ -94,7 +106,7 @@ binary pages and generates at 5 to 7 t/s.
 ```plain
 # both engines, interleaved on a card checked for contention, which is what a
 # comparison between the two columns has to be measured with. One invocation
-# covers every row of the first table above; the table is its Qwen half.
+# covers the 0.8B and 4B tables above and MiniCPM5-1B, which is in the plot only.
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
 

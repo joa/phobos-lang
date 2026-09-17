@@ -10,68 +10,17 @@ use super::*;
 /// `distribute`: load the operand once, apply the conversions in registers,
 /// store the result.
 impl<'c> Codegen<'c> {
-    /// One step of a chain, as peeled from the outside in.
-    fn elem_step(&self, callee: &str) -> Option<ElemStep<'c>> {
-        Some(match callee {
-            "round" => ElemStep::Round,
-            "sqrt" => ElemStep::Sqrt,
-            "exp" => ElemStep::Exp,
-            "log" => ElemStep::Log,
-            "tanh" => ElemStep::Tanh,
-            other => {
-                let scalar = Scalar::from_name(other)?;
-                if scalar == Scalar::Bool {
-                    return None;
-                }
-                ElemStep::Cast(self.scalar_type(scalar))
-            }
-        })
-    }
 
-    /// Peels the per-element unary calls off the outside of `value`, outermost
-    /// first, and returns them with whatever they all apply to.
-    fn peel_elem_chain<'e>(&self, value: &'e Expr) -> (Vec<ElemStep<'c>>, &'e Expr) {
-        let mut steps = Vec::new();
-        let mut inner = value;
-        while let Expr::Call { callee, args } = inner {
-            let [arg] = &args[..] else { break };
-            let Some(step) = self.elem_step(callee) else {
-                break;
-            };
-            steps.push(step);
-            inner = arg;
-        }
-        (steps, inner)
-    }
-
-    /// `target = f(g(...(t)))` in one sweep, for per-element unary f, g, ...
-    /// Returns false when `value` is not such a chain over a named, unmasked,
-    /// statically shaped tile: the operand is resolved from the symbol table
-    /// rather than emitted, so an unhandled shape leaves every other path in
-    /// `store_tile` untouched. A masked operand is excluded because the sweep
-    /// is indexed by the target and would read it out of bounds.
-    pub(super) fn store_elem_chain(
+    /// The sweep of a chain over `src` into `target`, outermost step last.
+    /// The operand may be the target: each thread reads and writes the same
+    /// element, so the rewrite in place is race-free.
+    pub(super) fn elem_chain_sweep(
         &mut self,
         block: &Block<'c>,
+        src: &MemVal<'c>,
         target: &MemVal<'c>,
-        value: &Expr,
-    ) -> Result<bool> {
-        let (steps, base) = self.peel_elem_chain(value);
-        if steps.is_empty() {
-            return Ok(false);
-        }
-        let Expr::Var(name) = base else {
-            return Ok(false);
-        };
-        let src = match self.lookup(name) {
-            Some(Binding::Tile(t) | Binding::View(t)) => t,
-            _ => return Ok(false),
-        };
-        if src.is_masked() || src.shape.contains(&DYN) || src.shape != target.shape {
-            return Ok(false);
-        }
-        // The operand may be the target: each thread reads and writes the same
-        // element, so the rewrite in place is race-free.
+        steps: &[ElemStep<'c>],
+    ) -> Result<()> {
         self.distribute(block, target, 1, true, |cg, blk, idx| {
             let mut v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
             for step in steps.iter().rev() {
@@ -80,9 +29,7 @@ impl<'c> Codegen<'c> {
             let v = cg.numeric_cast(blk, v, target.elem)?;
             blk.append_operation(memref::store(v, target.mem, idx, cg.loc));
             Ok(())
-        })?;
-        self.release(&src);
-        Ok(true)
+        })
     }
 
     /// One step on one element. The transcendentals want f32, and a chain can
@@ -128,7 +75,7 @@ impl<'c> Codegen<'c> {
 /// A per-element unary operation, in the order a chain applies them innermost
 /// first. See [`Codegen::store_elem_chain`].
 #[derive(Clone, Copy)]
-pub(super) enum ElemStep<'c> {
+pub(in crate::codegen) enum ElemStep<'c> {
     Cast(Type<'c>),
     Round,
     Sqrt,
@@ -139,7 +86,7 @@ pub(super) enum ElemStep<'c> {
 
 /// A per-element expression tree, evaluated in registers by a single sweep of
 /// the target rather than a shared tile and a barrier per node.
-enum Fused<'c> {
+pub(super) enum Fused<'c> {
     /// A materialized operand, read with broadcasting.
     Tile(MemVal<'c>),
     /// One value for every element: a literal, a scalar binding, a call that
@@ -165,15 +112,6 @@ impl Fused<'_> {
     }
 }
 
-/// Whether a binary operator is arithmetic, so its result is an element rather
-/// than a predicate.
-fn is_arith(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-    )
-}
-
 /// Fusing a whole per-element expression into one sweep of its target.
 /// Materializing a shared buffer per operator otherwise costs a barrier
 /// each, which is most of a statement's cost on the decode path, where the
@@ -184,104 +122,17 @@ fn is_arith(op: BinOp) -> bool {
 /// become leaves, and everything above them is evaluated per element in
 /// registers.
 impl<'c> Codegen<'c> {
-    /// Interior nodes of a fusable tree, or None when `value` is not one.
-    /// Leaves are named tiles, scalars, and the calls whose result has to be
-    /// materialized anyway; interior nodes are arithmetic, `tmax`, and the
-    /// per-element math and conversion calls. A subscript is deliberately not
-    /// a leaf: a slice can carry a bounds mask, so reading one against the
-    /// target's index would run past the source extent.
-    pub(super) fn fusable_nodes(&self, value: &Expr) -> Option<usize> {
-        match value {
-            Expr::Int(_) | Expr::Float(_) => Some(0),
-            Expr::Var(name) => match self.lookup(name)? {
-                Binding::Let { .. } | Binding::Var { .. } => Some(0),
-                Binding::Tile(t) | Binding::View(t) => {
-                    (!t.is_masked() && !t.shape.contains(&DYN)).then_some(0)
-                }
-                _ => None,
-            },
-            Expr::Binary { op, lhs, rhs } if is_arith(*op) => {
-                Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
-            }
-            Expr::Call { callee, args } => match &args[..] {
-                [arg] if self.elem_step(callee).is_some() => Some(1 + self.fusable_nodes(arg)?),
-                [a, b] if callee == "tmax" => {
-                    Some(1 + self.fusable_nodes(a)? + self.fusable_nodes(b)?)
-                }
-                // Everything else is opaque: a leaf this materializes.
-                _ => Some(0),
-            },
-            _ => None,
-        }
-    }
 
-    /// Builds the tree, emitting the operands that cannot be fused and
-    /// recording every tile leaf for release afterwards. A scalar leaf is
-    /// coerced to `elem` here rather than at each use, which keeps an
-    /// integer literal off the index type.
-    fn plan_fused(
-        &mut self,
-        block: &Block<'c>,
-        value: &Expr,
-        elem: Type<'c>,
-        leaves: &mut Vec<MemVal<'c>>,
-    ) -> Result<Fused<'c>> {
-        Ok(match value {
-            Expr::Binary { op, lhs, rhs } if is_arith(*op) => {
-                let a = self.plan_fused(block, lhs, elem, leaves)?;
-                let b = self.plan_fused(block, rhs, elem, leaves)?;
-                Fused::Binary(*op, Box::new(a), Box::new(b))
-            }
-            Expr::Call { callee, args } if args.len() == 1 && self.elem_step(callee).is_some() => {
-                let step = self.elem_step(callee).expect("checked above");
-                let inner = self.plan_fused(block, &args[0], elem, leaves)?;
-                Fused::Unary(step, Box::new(inner))
-            }
-            Expr::Call { callee, args } if args.len() == 2 && callee == "tmax" => {
-                let a = self.plan_fused(block, &args[0], elem, leaves)?;
-                let b = self.plan_fused(block, &args[1], elem, leaves)?;
-                Fused::Max(Box::new(a), Box::new(b))
-            }
-            other => match self.emit_expr(block, other)? {
-                Rv::Scalar(v) => Fused::Scalar(self.coerce(block, v, elem)?),
-                Rv::Tile(t) => {
-                    leaves.push(t.clone());
-                    Fused::Tile(t)
-                }
-            },
-        })
-    }
-
-    /// `target op= <per-element expression>` in one sweep, or false when the
-    /// value is not such a tree: the gate wants at least one operator (a bare
-    /// tile is a copy) and at least one tile operand (a tree of scalars is a fill).
-    pub(super) fn store_fused(
+    /// One sweep of `target` evaluating `tree`, whose tile leaves are
+    /// `leaves`. Checks the leaves broadcast to the target and are unmasked.
+    pub(super) fn fused_sweep(
         &mut self,
         block: &Block<'c>,
         target: &MemVal<'c>,
-        op: AssignOp,
-        value: &Expr,
-    ) -> Result<bool> {
-        if target.shape.contains(&DYN) || self.fusable_nodes(value).unwrap_or(0) < 1 {
-            return Ok(false);
-        }
-
-        let mut leaves = Vec::new();
-        let mut tree = self.plan_fused(block, value, target.elem, &mut leaves)?;
-        if leaves.is_empty() {
-            return Ok(false);
-        }
-        // `+=` is the same sweep with the target as one more addend: a thread
-        // reads and writes the element it owns, so it stays race-free.
-        if op == AssignOp::Add {
-            tree = Fused::Binary(
-                BinOp::Add,
-                Box::new(Fused::Tile(target.clone())),
-                Box::new(tree),
-            );
-        }
-
-        for leaf in &leaves {
+        tree: &Fused<'c>,
+        leaves: &[MemVal<'c>],
+    ) -> Result<()> {
+        for leaf in leaves {
             let fits = leaf.shape.len() == target.shape.len()
                 && leaf
                     .shape
@@ -317,19 +168,14 @@ impl<'c> Codegen<'c> {
         let vec_t = Type::vector(&[4], target.elem);
 
         self.distribute(block, target, width, true, |cg, blk, idx| {
-            let v = cg.eval_fused(blk, &tree, idx, &target.shape, width, vec_t)?;
+            let v = cg.eval_fused(blk, tree, idx, &target.shape, width, vec_t)?;
             let v = if width > 1 {
                 v
             } else {
                 cg.coerce(blk, v, target.elem)?
             };
             cg.elem_store(blk, v, target.mem, idx, width)
-        })?;
-
-        for leaf in &leaves {
-            self.release(leaf);
-        }
-        Ok(true)
+        })
     }
 
     /// One element of the tree, in registers.

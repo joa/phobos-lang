@@ -4,51 +4,22 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    pub(in crate::codegen) fn emit_mma_sync_matmul(
+    /// One m16n8 vector<2x2x{acc}> accumulator per (fi, fj, n8), seeded
+    /// from init.
+    pub(super) fn mma_sync_seed(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-    ) -> Result<()> {
-        let (shape, kk) = self.fusion_dims(p)?;
-        let (m, n) = (shape[0], shape[1]);
-        let (wm, wn) = self
-            .wmma_plan(m, n, kk)
-            .ok_or_else(|| anyhow!("mma.sync matmul without a warp grid"))?;
-        let (fm, fnn) = ((m / 16) / wm, (n / 16) / wn);
-
-        // accumulators: one m16n8 vector<2x2x{acc}> per (fi, fj, n8), seeded from init
-        let acc_elem = self.scalar_type(p.acc_scalar);
-        let init = self.emit_scalar(block, p.init)?;
-        let init = self.coerce(block, init, acc_elem)?;
-        let acc_t = Type::vector(&[2, 2], acc_elem);
+        plan: &GemmPlan<'c>,
+        init: Value<'c, 'c>,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let GemmPath::MmaSync { wm, wn } = plan.path else {
+            bail!("mma_sync_seed on another path's plan");
+        };
+        let (fm, fnn) = ((plan.m / 16) / wm, (plan.n / 16) / wn);
+        let init = self.coerce(block, init, plan.acc_elem)?;
+        let acc_t = Type::vector(&[2, 2], plan.acc_elem);
         let seed = self.vec_broadcast(block, init, acc_t)?;
-        let regs = vec![seed; (fm * fnn * 2) as usize];
-
-        // f16 staging, XOR-swizzled (not padded): the ldmatrix reads stride
-        // consecutive rows, which alias shared banks unpadded, so the column
-        // is permuted per row to spread them. The store and load MUST apply the same swizzle.
-        let (finals, (tid, _, wt, m0, n0)) = self.tc_matmul_kloop(
-            block,
-            p,
-            (m, n, kk),
-            (wm, wn),
-            &regs,
-            true,
-            |cg, blk, shape| cg.alloc_tile_swizzled(blk, cg.f16_t, shape),
-        )?;
-
-        self.mma_sync_epilogue(
-            block,
-            p,
-            &shape,
-            finals,
-            (fm, fnn),
-            acc_elem,
-            tid,
-            wt,
-            m0,
-            n0,
-        )
+        Ok(vec![seed; (fm * fnn * 2) as usize])
     }
 
     /// Drains the mma.sync accumulators to C. Each lane's m16n8 D fragment
@@ -57,22 +28,21 @@ impl<'c> Codegen<'c> {
     /// its private 16x16 shared slab, then the lanes copy slab to C between
     /// barriers, applying alpha*acc + beta*prev_load. The drain matches the
     /// WMMA epilogue so the f32 and f16 paths share it.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn mma_sync_epilogue(
+    pub(super) fn mma_sync_store(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        shape: &[i64],
-        finals: Vec<Value<'c, 'c>>,
-        warp_frags: (i64, i64),
-        acc_elem: Type<'c>,
-        tid: Value<'c, 'c>,
-        wt: Value<'c, 'c>,
-        m0: Value<'c, 'c>,
-        n0: Value<'c, 'c>,
+        acc: GemmAcc<'c>,
+        view: MemVal<'c>,
+        alpha: Option<GemmScale<'c>>,
+        beta: Option<GemmScale<'c>>,
     ) -> Result<()> {
-        let (fm, fnn) = warp_frags;
-        let view = self.epilogue_view(block, p, shape)?;
+        let GemmPath::MmaSync { wm, wn } = acc.plan.path else {
+            bail!("mma_sync_store on another path's plan");
+        };
+        let acc_elem = acc.plan.acc_elem;
+        let (fm, fnn) = ((acc.plan.m / 16) / wm, (acc.plan.n / 16) / wn);
+        let (tid, _, wt, m0, n0) = Self::gemm_finals(&acc)?;
+        let finals = acc.regs;
 
         let slab = self.alloc_tile_shaped(block, acc_elem, &[(self.cta_threads / 32) * 16, 16])?;
         let slab_f32 = acc_elem == self.f32_t;
@@ -95,7 +65,7 @@ impl<'c> Codegen<'c> {
         // scalar; the scaling vectors are f32 either way.
         let vec_f32 = slab_f32 && view.elem == self.f32_t && view.vectorizes(4);
         let vec_f16 = !slab_f32 && view.elem == self.f16_t && view.vectorizes(4);
-        let (alpha, beta) = self.epilogue_scaling(block, p, row_t, vec_f32 || vec_f16)?;
+        let (alpha, beta) = self.epilogue_scaling(block, alpha, beta, row_t, vec_f32 || vec_f16)?;
         let drain = SlabDrain {
             slab: slab.clone(),
             view,

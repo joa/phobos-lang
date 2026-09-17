@@ -70,8 +70,8 @@ fn every_format_stages_both_operands_and_reads_them_with_ldmatrix() {
         );
         // Both operand tiles, the two scale planes, one tile a table, and
         // the minimums and row sums where the format subtracts a minimum.
-        let globals = 4 + tables.len() + if has_min(fmt) { 2 } else { 0 };
-        assert_eq!(mlir.matches("memref.global").count(), globals, "{fmt}:
+        let buffers = 4 + tables.len() + if has_min(fmt) { 2 } else { 0 };
+        assert_eq!(mlir.matches("memref.view").count(), buffers, "{fmt}:
 {mlir}");
     }
 }

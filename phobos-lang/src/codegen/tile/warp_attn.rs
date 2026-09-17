@@ -20,32 +20,17 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)`.
-    ///
-    /// `q` is the staged `[QG, D]` query tile, `K`/`V` the raw `[NK, KW]`
-    /// f16 cache tensors, `col` this call's key head's column offset in them
-    /// (`h / G * D`), and `lo`/`hi` the block's key range.
-    ///
-    /// `WM`/`WL` are `[QG, W]` and `WACC` is `[QG * W, D]`, all
-    /// `var`-declared by the caller. A warp writes only its own column of
-    /// `WM`/`WL` and row of `WACC`, so the single CTA barrier at the end
-    /// suffices to publish them.
-    pub(in crate::codegen) fn emit_warp_partial(
+
+    /// The warp's partial attention over resolved operands: the tiles
+    /// `q, K, V, WM, WL, WACC` and the scalars `scale, lo, hi, col`.
+    pub(in crate::codegen) fn warp_partial_raw(
         &mut self,
         block: &Block<'c>,
-        args: &[Expr],
-    ) -> Result<Rv<'c>> {
-        let [q, k, v, lo, hi, col, wm, wl, wacc, scale] = args else {
-            bail!("warp_partial expects (q, K, V, lo, hi, col, WM, WL, WACC, scale)");
-        };
-
-        let q_mv = self.named_tile(q, "warp_partial q")?;
-        let k_mv = self.named_tensor(k, "warp_partial K")?;
-        let v_mv = self.named_tensor(v, "warp_partial V")?;
-        let wm_mv = self.named_tile(wm, "warp_partial WM")?;
-        let wl_mv = self.named_tile(wl, "warp_partial WL")?;
-        let wacc_mv = self.named_tile(wacc, "warp_partial WACC")?;
-
+        tiles: [&MemVal<'c>; 6],
+        scalars: [Value<'c, 'c>; 4],
+    ) -> Result<()> {
+        let [q_mv, k_mv, v_mv, wm_mv, wl_mv, wacc_mv] = tiles;
+        let [scale_v, lo_v, hi_v, col_v] = scalars;
         if q_mv.is_masked() {
             bail!("warp_partial needs an unmasked q tile");
         }
@@ -62,10 +47,6 @@ impl<'c> Codegen<'c> {
         if wacc_mv.shape != [qg * wct, d] {
             bail!("warp_partial WACC must be [QG * W, D]");
         }
-        // warp_id ranges over every warp the CTA launches, whatever W was
-        // sized for; a narrower W would silently put the extra warps' final
-        // stores past WM/WL/WACC rather than raise anything, so check it up
-        // front.
         if wct != self.cta_threads / WARP {
             bail!(
                 "warp_partial's WM/WL/WACC are sized for {wct} warps, but this kernel launches \
@@ -75,11 +56,6 @@ impl<'c> Codegen<'c> {
                 self.cta_threads
             );
         }
-
-        let scale_v = self.emit_scalar(block, scale)?;
-        let lo_v = self.emit_index(block, lo, "warp_partial lo")?;
-        let hi_v = self.emit_index(block, hi, "warp_partial hi")?;
-        let col_v = self.emit_index(block, col, "warp_partial col")?;
 
         let tid = self.thread_id(block)?;
         let warp_w = self.const_index(block, WARP)?;
@@ -296,32 +272,7 @@ impl<'c> Codegen<'c> {
             }
         }
 
-        self.barrier(block)?;
-        Ok(Rv::Scalar(self.const_index(block, 0)?))
+        self.barrier(block)
     }
 
-    /// Resolves a named, already-bound tile. This and [`Self::named_tensor`]
-    /// accept only a bare identifier, the same restriction
-    /// `atomic_add`/`grid_barrier` place on their state operands and for the
-    /// same reason: they read the buffer's memref directly instead of going
-    /// through the slice/subview machinery, so there is no offset to fold in.
-    fn named_tile(&self, e: &Expr, what: &str) -> Result<MemVal<'c>> {
-        let Expr::Var(name) = e else {
-            bail!("{what} expects a named tile variable");
-        };
-        match self.lookup(name) {
-            Some(Binding::Tile(t) | Binding::View(t)) => Ok(t),
-            _ => bail!("{what}: '{name}' is not a tile"),
-        }
-    }
-
-    fn named_tensor(&self, e: &Expr, what: &str) -> Result<MemVal<'c>> {
-        let Expr::Var(name) = e else {
-            bail!("{what} expects a named tensor parameter");
-        };
-        match self.lookup(name) {
-            Some(Binding::Tensor(t)) => Ok(t),
-            _ => bail!("{what}: '{name}' is not a tensor parameter"),
-        }
-    }
 }

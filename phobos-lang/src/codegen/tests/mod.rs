@@ -66,6 +66,7 @@ fn emit_mlir_sync(src: &str, chip: &str) -> String {
 }
 
 fn emit_mlir_base(src: &str, base: &phobos_base::context::Context) -> String {
+    dump_source(src);
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
     let context = Context::new();
@@ -81,6 +82,20 @@ fn emit_mlir_base(src: &str, base: &phobos_base::context::Context) -> String {
     text
 }
 
+/// PHOBOS_DUMP_DIR collects every source the tests emit as a `.ph`, named by
+/// a hash of its text, so the emit sweep over every target covers them.
+fn dump_source(src: &str) {
+    use std::hash::{Hash, Hasher};
+    let Ok(dir) = std::env::var("PHOBOS_DUMP_DIR") else {
+        return;
+    };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    src.hash(&mut h);
+    let dir = std::path::PathBuf::from(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(format!("test_{:016x}.ph", h.finish())), src).unwrap();
+}
+
 /// emit_mlir already verifies; this just makes the intent of a test that
 /// only cares about validity readable.
 fn module_verifies(mlir: &str) -> bool {
@@ -94,6 +109,7 @@ fn assert_contains(mlir: &str, needles: &[&str]) {
 }
 
 fn emit_err(src: &str) -> String {
+    dump_source(src);
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
     let context = Context::new();
@@ -122,4 +138,43 @@ fn split_at_kt_loop(mlir: &str) -> (&str, &str) {
         .min()
         .expect("no dynamically-bounded loop in module");
     mlir.split_at(pos)
+}
+
+/// The kernel's one shared byte buffer, in bytes: what the planner needed.
+/// Zero for a kernel with no tiles.
+fn shared_bytes(mlir: &str) -> usize {
+    mlir.lines()
+        .filter(|l| l.contains("memref.global") && l.contains("_shared : memref<"))
+        .filter_map(|l| {
+            let after = l.split("_shared : memref<").nth(1)?;
+            after.split("xi8").next()?.parse::<usize>().ok()
+        })
+        .sum()
+}
+
+/// Byte positions in the module of every tile view of the given dims, one
+/// per allocation: `memref.view ... to memref<DIMS, 3>`.
+fn tile_views(mlir: &str, dims: &str) -> Vec<usize> {
+    let want = format!("to memref<{dims}, 3>");
+    mlir.match_indices("memref.view")
+        .filter(|(at, _)| mlir[*at..].lines().next().is_some_and(|l| l.contains(&want)))
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The byte offsets the planner gave every tile view of the given dims.
+fn view_offsets(mlir: &str, dims: &str) -> Vec<i64> {
+    tile_views(mlir, dims)
+        .into_iter()
+        .filter_map(|at| {
+            let line = mlir[at..].lines().next()?;
+            let digits: String = line
+                .split("[%c")
+                .nth(1)?
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            digits.parse().ok()
+        })
+        .collect()
 }

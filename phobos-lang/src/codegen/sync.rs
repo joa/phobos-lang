@@ -37,53 +37,12 @@ use super::*;
 /// plain load, which could be hoisted out of the spin loop or read a stale
 /// cache line; the atomic orders against the releasing block's writes.
 impl<'c> Codegen<'c> {
-    /// `atomic_add(t, i, v) -> old`: adds `v` to `t[i]` and returns the previous
-    /// value, atomically across the whole device. `t` must be an `i32` tensor.
-    pub(super) fn emit_atomic_add(&mut self, block: &Block<'c>, args: &[Expr]) -> Result<Rv<'c>> {
-        let [t, i, v] = args else {
-            bail!("atomic_add expects (tensor, index, value)");
-        };
-        let (mem, rank) = self.barrier_tensor(t, "atomic_add")?;
-        let idx = self.emit_index(block, i, "atomic_add index")?;
-        let val = self.emit_scalar(block, v)?;
-        // Integer literals lower to index, so the common `atomic_add(B, 0, 1)`
-        // arrives here needing a cast rather than a diagnostic.
-        let i32_t: Type<'c> = IntegerType::new(self.ctx, 32).into();
-        let val = match val.r#type() {
-            t if t == i32_t => val,
-            t if t == self.index_t || self.is_int(t) => {
-                self.push(block, arith::index_cast(val, i32_t, self.loc))?
-            }
-            t => bail!("atomic_add value must be an integer, got {t}"),
-        };
-        let old = self.atomic_add_raw(block, mem, rank, idx, val)?;
-        Ok(Rv::Scalar(old))
-    }
-
-    /// Resolves the atomic-state operand: a named `i32` tensor parameter,
-    /// nothing else (a tile is shared memory, a slice has an offset to fold
-    /// in). Returns the memref and rank, which decides the slot's subscript.
-    fn barrier_tensor(&self, e: &Expr, what: &str) -> Result<(Value<'c, 'c>, usize)> {
-        let Expr::Var(name) = e else {
-            bail!("{what} expects a named i32 tensor parameter");
-        };
-        let Some(Binding::Tensor(mem)) = self.lookup(name) else {
-            bail!("{what} expects a tensor parameter, but '{name}' is not one");
-        };
-        if mem.elem != IntegerType::new(self.ctx, 32).into() {
-            bail!(
-                "{what} expects an i32 tensor, but '{name}' holds {}",
-                mem.elem
-            );
-        }
-        Ok((mem.mem, mem.shape.len()))
-    }
 
     /// The `memref.atomic_rmw addi` itself, addressing slot `idx` of an `i32`
     /// tensor of any rank. The slot indexes the leading dimension and the rest
     /// are zero, so the state is a rank-1 pair or the `[2, 1]` column a rank-2
     /// launch ABI can pass without a descriptor of its own.
-    fn atomic_add_raw(
+    pub(super) fn atomic_add_raw(
         &self,
         block: &Block<'c>,
         mem: Value<'c, 'c>,
@@ -111,13 +70,13 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// `grid_barrier(bar)`: every block of the grid waits for every other.
-    pub(super) fn emit_grid_barrier(&mut self, block: &Block<'c>, args: &[Expr]) -> Result<Rv<'c>> {
-        let [bar] = args else {
-            bail!("grid_barrier expects one argument, the barrier tensor");
-        };
-        let (mem, rank) = self.barrier_tensor(bar, "grid_barrier")?;
-
+    /// The barrier itself, over a resolved state tensor of `rank`.
+    pub(super) fn grid_barrier_raw(
+        &mut self,
+        block: &Block<'c>,
+        mem: Value<'c, 'c>,
+        rank: usize,
+    ) -> Result<()> {
         // Publish this stage's writes to the rest of the CTA, and make sure no
         // thread of it is still working when thread 0 arrives.
         self.barrier(block)?;
@@ -144,8 +103,7 @@ impl<'c> Codegen<'c> {
 
         // The release only reached thread 0; this is what hands it to the CTA,
         // and it orders the next stage's reads after every block's writes.
-        self.barrier(block)?;
-        Ok(Rv::Scalar(self.const_index(block, 0)?))
+        self.barrier(block)
     }
 
     /// Thread 0's half of the barrier: arrive, then either release or spin.

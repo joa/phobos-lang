@@ -54,52 +54,44 @@ impl<'c> Codegen<'c> {
         blocks(smem(kk + WMMA_SMEM_PAD, n + WMMA_SMEM_PAD)) >= blocks(smem(kk, n))
     }
 
-    pub(in crate::codegen) fn emit_wmma_matmul(
+    /// The warp's accumulators, seeded with the init scalar rounded to the
+    /// accumulator type.
+    pub(super) fn wmma_seed(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-    ) -> Result<()> {
-        let (shape, kk) = self.fusion_dims(p)?;
-        let (m, n) = (shape[0], shape[1]);
-        let (wm, wn) = self
-            .wmma_plan(m, n, kk)
-            .ok_or_else(|| anyhow!("wmma matmul without a warp grid"))?;
-
+        plan: &GemmPlan<'c>,
+        init: Value<'c, 'c>,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let GemmPath::Wmma { wm, wn } = plan.path else {
+            bail!("wmma_seed on another path's plan");
+        };
         // fragments per warp: fmxfn block of the 16x16-fragment grid
-        let (fm, fnn) = ((m / 16) / wm, (n / 16) / wn);
-
-        // the warp's accumulators, seeded with the init scalar rounded to the accumulator type
-        let acc_elem = self.scalar_type(p.acc_scalar);
-        let init = self.emit_scalar(block, p.init)?;
-        let init = self.coerce(block, init, acc_elem)?;
-        let c_frag_t = self.wmma_c_type(acc_elem)?;
+        let (fm, fnn) = ((plan.m / 16) / wm, (plan.n / 16) / wn);
+        let init = self.coerce(block, init, plan.acc_elem)?;
+        let c_frag_t = self.wmma_c_type(plan.acc_elem)?;
         let mut regs = Vec::with_capacity((fm * fnn) as usize);
-
         for _ in 0..fm * fnn {
             regs.push(self.wmma_const_frag(block, init, c_frag_t)?);
         }
+        Ok(regs)
+    }
 
-        // f16 staging, padded against bank conflicts when the CTA budget allows
-        let pairs = self.staging_pairs();
-        let pad = self.wmma_should_pad(m, kk, n, acc_elem, pairs as i64);
-        let alloc = if pad {
-            Self::alloc_tile_padded
-        } else {
-            Self::alloc_tile_shaped
+    /// The warp drains its fragments via its 16x16 slab, applying
+    /// alpha*acc + beta*prev_load.
+    pub(super) fn wmma_store_acc(
+        &mut self,
+        block: &Block<'c>,
+        acc: GemmAcc<'c>,
+        view: MemVal<'c>,
+        alpha: Option<GemmScale<'c>>,
+        beta: Option<GemmScale<'c>>,
+    ) -> Result<()> {
+        let GemmPath::Wmma { wm, wn } = acc.plan.path else {
+            bail!("wmma_store_acc on another path's plan");
         };
-
-        let (finals, (tid, w, wt, m0, n0)) = self.tc_matmul_kloop(
-            block,
-            p,
-            (m, n, kk),
-            (wm, wn),
-            &regs,
-            false,
-            |cg, blk, shape| alloc(cg, blk, cg.f16_t, shape),
-        )?;
-
-        // epilogue: warp drains fragments via its 16x16 slab, applying alpha*acc + beta*prev_load
-        let view = self.epilogue_view(block, p, &shape)?;
+        let acc_elem = acc.plan.acc_elem;
+        let (fm, fnn) = ((acc.plan.m / 16) / wm, (acc.plan.n / 16) / wn);
+        let (tid, w, wt, m0, n0) = Self::gemm_finals(&acc)?;
 
         // Slab element type matches the accumulator; vector drain needs slab and C both f32.
         let slab = self.alloc_tile_shaped(block, acc_elem, &[(self.cta_threads / 32) * 16, 16])?;
@@ -117,7 +109,7 @@ impl<'c> Codegen<'c> {
         let vec_drain = slab_f32 && view.elem == self.f32_t && view.vectorizes(4);
 
         // pre-compute alpha/beta broadcasts once
-        let (alpha, beta) = self.epilogue_scaling(block, p, row_t, vec_drain)?;
+        let (alpha, beta) = self.epilogue_scaling(block, alpha, beta, row_t, vec_drain)?;
         let drain = SlabDrain {
             slab: slab.clone(),
             view,
@@ -135,7 +127,7 @@ impl<'c> Codegen<'c> {
 
         for fi in 0..fm {
             for fj in 0..fnn {
-                let frag = finals[(fi * fnn + fj) as usize];
+                let frag = acc.regs[(fi * fnn + fj) as usize];
 
                 self.wmma_store(block, frag, slab.mem, &[slab0, zero], 16)?;
 
@@ -148,57 +140,59 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Drives the tensor-core k-loop shared by the WMMA and mma.sync paths:
-    /// loop bounds, the warp's fragment-block origin (surplus warps clamp onto
-    /// the last block), staging pairs (a as [m, kk], b as [kk, n], double-
-    /// buffered under `@pipeline`), and [`Self::matmul_kloop`] with the
-    /// tensor-core MAC. Returns the finished accumulators and the origin.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    pub(super) fn tc_matmul_kloop(
+    /// The tensor-core k-loop shared by the WMMA and mma.sync paths: the
+    /// warp's fragment-block origin (surplus warps clamp onto the last
+    /// block), staging pairs (a as [m, kk], b as [kk, n], double-buffered
+    /// under `@pipeline`, padded or swizzled as the path wants), and
+    /// [`Self::matmul_kloop`] with the tensor-core MAC.
+    pub(super) fn tc_loop(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        (m, n, kk): (i64, i64, i64),
-        (wm, wn): (i64, i64),
-        regs: &[Value<'c, 'c>],
-        mma_sync: bool,
-        alloc: impl Fn(&mut Self, &Block<'c>, &[i64]) -> Result<MemVal<'c>>,
-    ) -> Result<(
-        Vec<Value<'c, 'c>>,
-        (
-            Value<'c, 'c>,
-            Value<'c, 'c>,
-            Value<'c, 'c>,
-            Value<'c, 'c>,
-            Value<'c, 'c>,
-        ),
-    )> {
+        mut acc: GemmAcc<'c>,
+        (lo, hi, st): (Value<'c, 'c>, Value<'c, 'c>, Value<'c, 'c>),
+        src: &GemmSource<'_>,
+    ) -> Result<GemmAcc<'c>> {
+        let GemmPlan { m, n, kk, acc_elem, .. } = acc.plan;
+        let (wm, wn, mma_sync) = match acc.plan.path {
+            GemmPath::Wmma { wm, wn } => (wm, wn, false),
+            GemmPath::MmaSync { wm, wn } => (wm, wn, true),
+            GemmPath::Reg { .. } => bail!("tc_loop on the vector path's plan"),
+        };
         let (fm, fnn) = ((m / 16) / wm, (n / 16) / wn);
         let dims = (kk, fm, fnn);
 
-        let (lo, hi, st, iv_div) = self.loop_bounds(block, p.start, p.end, p.step)?;
         let origin = self.warp_block_origin(block, wm, wn, fm * 16, fnn * 16)?;
         let (_, _, _, m0, n0) = origin;
 
         let pairs = self.staging_pairs();
-        let (a_bufs, b_bufs) = self.alloc_staging_pairs(pairs, |cg| {
-            Ok((alloc(cg, block, &[m, kk])?, alloc(cg, block, &[kk, n])?))
-        })?;
+        // f16 staging: XOR-swizzled for the ldmatrix reads of mma.sync, else
+        // padded against bank conflicts when the CTA budget allows.
+        let pad = !mma_sync && self.wmma_should_pad(m, kk, n, acc_elem, pairs as i64);
+        let alloc = |cg: &mut Self, shape: &[i64]| {
+            if mma_sync {
+                cg.alloc_tile_swizzled(block, cg.f16_t, shape)
+            } else if pad {
+                cg.alloc_tile_padded(block, cg.f16_t, shape)
+            } else {
+                cg.alloc_tile_shaped(block, cg.f16_t, shape)
+            }
+        };
+        let (a_bufs, b_bufs) =
+            self.alloc_staging_pairs(pairs, |cg| Ok((alloc(cg, &[m, kk])?, alloc(cg, &[kk, n])?)))?;
 
-        let (stage_async, reg_stage) = self.staging_mode(p, m, kk, n);
+        let (stage_async, reg_stage) = self.staging_mode(src, m, kk, n);
 
         let finals = self.matmul_kloop(
             block,
             (lo, hi, st),
-            regs,
+            &acc.regs,
             &a_bufs,
             &b_bufs,
-            |cg, body, kt, a, b| cg.wmma_stage(body, p, kt, iv_div, a, b, false),
+            |cg, body, kt, a, b| cg.wmma_stage(body, src, kt, a, b, false),
             |cg, body, piv, cur, dst, accs| {
                 cg.wmma_half(
                     body,
-                    p,
-                    iv_div,
+                    src,
                     piv,
                     hi,
                     st,
@@ -215,8 +209,9 @@ impl<'c> Codegen<'c> {
             },
             |cg, body, a, b, accs| cg.tc_mac(body, a, b, dims, m0, n0, accs, false, mma_sync),
         )?;
-
-        Ok((finals, origin))
+        acc.regs = finals;
+        acc.origin = Some(origin);
+        Ok(acc)
     }
 
     /// Tile-by-tile matmul on the tensor cores: out = a @ b (NN), or
@@ -316,15 +311,13 @@ impl<'c> Codegen<'c> {
     pub(in crate::codegen) fn wmma_stage(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
+        src: &GemmSource<'_>,
         kt: Value<'c, 'c>,
-        iv_div: i64,
         a_buf: &MemVal<'c>,
         b_buf: &MemVal<'c>,
         async_copy: bool,
     ) -> Result<()> {
-        let a_src = self.emit_kt_slice(block, p, p.a_slice, kt, iv_div)?;
-        let b_src = self.emit_kt_slice(block, p, p.b_slice, kt, iv_div)?;
+        let (a_src, b_src) = self.gemm_operands(block, src, kt)?;
 
         self.stage_to_f16(block, &a_src, a_buf, async_copy)?;
         self.stage_to_f16(block, &b_src, b_buf, async_copy)
@@ -337,8 +330,7 @@ impl<'c> Codegen<'c> {
     pub(in crate::codegen) fn wmma_half(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        iv_div: i64,
+        src: &GemmSource<'_>,
         prefetch_iv: Value<'c, 'c>,
         hi: Value<'c, 'c>,
         st: Value<'c, 'c>,
@@ -355,8 +347,7 @@ impl<'c> Codegen<'c> {
         if reg_stage {
             return self.wmma_half_reg_staged(
                 block,
-                p,
-                iv_div,
+                src,
                 prefetch_iv,
                 hi,
                 st,
@@ -375,7 +366,7 @@ impl<'c> Codegen<'c> {
             prefetch_iv,
             hi,
             async_copy,
-            |cg, then| cg.wmma_stage(then, p, prefetch_iv, iv_div, dst.0, dst.1, async_copy),
+            |cg, then| cg.wmma_stage(then, src, prefetch_iv, dst.0, dst.1, async_copy),
             |cg| cg.tc_mac(block, cur.0, cur.1, dims, m0, n0, accs, false, mma_sync),
         )
     }
@@ -389,8 +380,7 @@ impl<'c> Codegen<'c> {
     pub(in crate::codegen) fn wmma_half_reg_staged(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        iv_div: i64,
+        src: &GemmSource<'_>,
         prefetch_iv: Value<'c, 'c>,
         hi: Value<'c, 'c>,
         st: Value<'c, 'c>,
@@ -409,8 +399,8 @@ impl<'c> Codegen<'c> {
         let safe = self.minsi(block, prefetch_iv, last)?;
 
         // Issue the next tile's global loads into registers (held across compute).
-        let a_loaded = self.wmma_load_operand(block, p, p.a_slice, safe, iv_div, dst.0)?;
-        let b_loaded = self.wmma_load_operand(block, p, p.b_slice, safe, iv_div, dst.1)?;
+        let a_loaded = self.wmma_load_operand(block, src, GemmOperand::A, safe, dst.0)?;
+        let b_loaded = self.wmma_load_operand(block, src, GemmOperand::B, safe, dst.1)?;
 
         // Compute the current tile while the loads are in flight.
         let next = self.tc_mac(block, cur.0, cur.1, dims, m0, n0, accs, false, mma_sync)?;
@@ -435,13 +425,12 @@ impl<'c> Codegen<'c> {
     pub(super) fn wmma_load_operand(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        slice: &Expr,
+        src: &GemmSource<'_>,
+        which: GemmOperand,
         kt: Value<'c, 'c>,
-        iv_div: i64,
         dst: &MemVal<'c>,
     ) -> Result<Vec<(Value<'c, 'c>, [Value<'c, 'c>; 2])>> {
-        let src = self.emit_kt_slice(block, p, slice, kt, iv_div)?;
+        let src = self.gemm_operand(block, src, which, kt)?;
         let (rows, cols) = (dst.shape[0], dst.shape[1]);
         let inner = cols / HALF_VEC; // HALF_VEC-wide vectors per row
         let per = (rows * inner) / self.cta_threads;

@@ -9,13 +9,13 @@ impl<'c> Codegen<'c> {
     /// for f16 operands, the second when the tile divides evenly by the CTA.
     pub(in crate::codegen) fn staging_mode(
         &self,
-        p: &MatmulFusion<'_>,
+        src: &GemmSource<'_>,
         m: i64,
         kk: i64,
         n: i64,
     ) -> (bool, bool) {
-        let both_f16 = self.slice_tensor_elem(p.a_slice) == Some(self.f16_t)
-            && self.slice_tensor_elem(p.b_slice) == Some(self.f16_t);
+        let (a_elem, b_elem) = self.gemm_operand_elems(src);
+        let both_f16 = a_elem == Some(self.f16_t) && b_elem == Some(self.f16_t);
         let stage_async = self.has_cp_async() && both_f16; // TODO(joa): probably too conservative
         let reg_stage = !self.has_cp_async()
             && both_f16
@@ -46,18 +46,55 @@ impl<'c> Codegen<'c> {
     pub(in crate::codegen) fn fused_stage(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
+        src: &GemmSource<'_>,
         kt: Value<'c, 'c>,
-        iv_div: i64,
         a_buf: &MemVal<'c>,
         b_buf: &MemVal<'c>,
         async_copy: bool,
     ) -> Result<()> {
-        let a_src = self.emit_kt_slice(block, p, p.a_slice, kt, iv_div)?;
-        let b_src = self.emit_kt_slice(block, p, p.b_slice, kt, iv_div)?;
+        let (a_src, b_src) = self.gemm_operands(block, src, kt)?;
 
         self.tile_copy_transposed(block, &a_src, a_buf, async_copy)?;
         self.tile_copy(block, &b_src, b_buf, false, async_copy)
+    }
+
+    /// The preheader-staged f16 buffer for a dot operand, when a surrounding
+    /// loop hoisted it (see `ir/build/hoist.rs`). The caller skips both the
+    /// in-loop staging and the release.
+    pub(in crate::codegen) fn hoisted_stage(&self, src: &MemVal<'c>) -> Option<MemVal<'c>> {
+        self.hoisted_stages
+            .iter()
+            .rev()
+            .flatten()
+            .find(|(v, _)| *v == src.mem)
+            .map(|(_, buf)| buf.clone())
+    }
+
+    /// if guard_iv < hi { prefetch(...) }: a guard around a barrier-free
+    /// prefetch of one more iteration. No thread ids leak into it, so it stays
+    /// CTA-uniform and a barrier inside would be safe. Every loop bound lowers
+    /// from block-uniform producers (literals, `program_id`, a shape via
+    /// `memref.dim`, the zero `warp_partial`/`grid_barrier` return, and
+    /// arithmetic over those), which
+    /// `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` pins.
+    pub(in crate::codegen) fn guarded_prefetch(
+        &mut self,
+        block: &Block<'c>,
+        guard_iv: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        prefetch: impl FnOnce(&mut Self, &Block<'c>) -> Result<()>,
+    ) -> Result<()> {
+        let more = self.push(
+            block,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, guard_iv, hi, self.loc),
+        )?;
+        let then_block = Block::new(&[]);
+        prefetch(self, &then_block)?;
+        then_block.append_operation(scf::r#yield(&[], self.loc));
+        let then_region = Region::new();
+        then_region.append_block(then_block);
+        block.append_operation(scf::r#if(more, &[], then_region, Region::new(), self.loc));
+        Ok(())
     }
 
     /// Returns the staged f16 shared buffer for one tile-dot operand: the preheader copy
@@ -121,8 +158,7 @@ impl<'c> Codegen<'c> {
     pub(in crate::codegen) fn fused_half(
         &mut self,
         block: &Block<'c>,
-        p: &MatmulFusion<'_>,
-        iv_div: i64,
+        src: &GemmSource<'_>,
         prefetch_iv: Value<'c, 'c>,
         hi: Value<'c, 'c>,
         cur: (&MemVal<'c>, &MemVal<'c>),
@@ -138,7 +174,7 @@ impl<'c> Codegen<'c> {
             prefetch_iv,
             hi,
             use_async,
-            |cg, then| cg.fused_stage(then, p, prefetch_iv, iv_div, dst.0, dst.1, use_async),
+            |cg, then| cg.fused_stage(then, src, prefetch_iv, dst.0, dst.1, use_async),
             |cg| cg.register_mac(block, cur.0, cur.1, dims, m0, n0, accs),
         )
     }

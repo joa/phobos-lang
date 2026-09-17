@@ -188,7 +188,7 @@ impl Kernel {
 
     /// Whether `@padstage` was written on this kernel: pad a `var x = <tensor
     /// slice>` staging tile against shared-memory bank conflicts. See
-    /// `Codegen::should_pad_stage` for which tiles that reaches.
+    /// `Build::should_pad_stage` for which tiles that reaches.
     pub fn wants_padded_stage(&self) -> bool {
         self.attrs.iter().any(|a| a.name == "padstage")
     }
@@ -222,7 +222,7 @@ impl Kernel {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AssignOp {
     Set,
     Add,
@@ -298,13 +298,13 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum UnOp {
     Neg,
     Not,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinOp {
     Add,
     Sub,

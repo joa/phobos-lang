@@ -250,19 +250,11 @@ fn tensorcore_pipelines_f16_staging() {
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }",
     );
-    assert_contains(
-        &mlir,
-        &[
-            // f16 staging pads the inner dim by 8 for bank conflicts
-            // (32 -> 40, 64 -> 72).
-            "@__matmul_tile0 : memref<64x40xf16, 3>",
-            "@__matmul_tile1 : memref<32x72xf16, 3>",
-            "@__matmul_tile2 : memref<64x40xf16, 3>",
-            "@__matmul_tile3 : memref<32x72xf16, 3>",
-            "scf.if",
-            "gpu.subgroup_mma_compute",
-        ],
-    );
+    // f16 staging pads the inner dim by 8 for bank conflicts (32 -> 40,
+    // 64 -> 72), one pair per operand.
+    assert_eq!(tile_views(&mlir, "64x40xf16").len(), 2, "{mlir}");
+    assert_eq!(tile_views(&mlir, "32x72xf16").len(), 2, "{mlir}");
+    assert_contains(&mlir, &["scf.if", "gpu.subgroup_mma_compute"]);
     // No cp.async here: these inputs are f32, and the f32 -> f16 staging
     // round-down can't be a raw cp.async byte transfer (f16 inputs can;
     // see tensorcore_f16_inputs_pipeline_with_cp_async).

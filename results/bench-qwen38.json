@@ -3,7 +3,7 @@
     "card": "NVIDIA GeForce RTX 2080 SUPER",
     "driver": "610.88",
     "clock_max": "2145",
-    "commit": "c7711b7"
+    "commit": "6d6fe8b"
   },
   "args": {
     "models": "['Qwen3.8-27B-UD-IQ1_M']",
@@ -15,14 +15,15 @@
     "cuda_lib": "[]",
     "llama_args": "",
     "no_llama": "False",
+    "no_phobos": "False",
     "no_build": "True",
     "warm_secs": "45.0",
     "max_idle_util": "45.0",
     "max_idle_power": "120.0",
     "poll": "0.5",
     "force": "False",
-    "csv": "None",
-    "json": "C:/Users/joaeb/AppData/Local/Temp/claude/C--Users-joaeb-code-phobos/39132c7b-e860-43b1-880b-ef296b8d5f75/scratchpad/cmp2.json"
+    "csv": "results/bench-qwen38.csv",
+    "json": "results/bench-qwen38.json"
   },
   "backends": {
     "phobos": "CUDA",
@@ -33,7 +34,7 @@
     "phobos/Qwen3.8-27B-UD-IQ1_M": "qwen35 26.9B Q2_K"
   },
   "summary": {
-    "median_clock": 1787.063492063492,
+    "median_clock": 1801.4711538461538,
     "uncontended_rounds": [
       1,
       2,
@@ -45,23 +46,23 @@
       3
     ],
     "drift": {
-      "1": -0.0550179181107914,
-      "2": -0.09595204289720882,
-      "3": 0.0035580647674199883
+      "1": 6.44206226997901e-05,
+      "2": -0.00036503584959385327,
+      "3": 0.0010817068166945054
     }
   },
   "health": {
     "1": {
-      "util": 1.0,
-      "power": 38.56
+      "util": 0.0,
+      "power": 38.66
     },
     "2": {
-      "util": 1.0,
-      "power": 38.635
+      "util": 0.0,
+      "power": 38.7
     },
     "3": {
-      "util": 1.0,
-      "power": 38.614999999999995
+      "util": 0.0,
+      "power": 38.775000000000006
     }
   },
   "samples": [
@@ -73,8 +74,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 225.186,
-      "clock": 2011.3636363636363
+      "rate": 478.199,
+      "clock": 2025.75
     },
     {
       "round": 1,
@@ -84,8 +85,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 21.7315,
-      "clock": 2011.3636363636363
+      "rate": 21.9783,
+      "clock": 2025.75
     },
     {
       "round": 1,
@@ -95,8 +96,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 518.2186234817814,
-      "clock": 1643.888888888889
+      "rate": 329.8969072164948,
+      "clock": 1685.1923076923076
     },
     {
       "round": 1,
@@ -106,8 +107,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 29.51348858658059,
-      "clock": 1643.888888888889
+      "rate": 30.483448440104787,
+      "clock": 1685.1923076923076
     },
     {
       "round": 2,
@@ -117,8 +118,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 245.6813819577735,
-      "clock": 1560.0
+      "rate": 329.8969072164948,
+      "clock": 1556.5384615384614
     },
     {
       "round": 2,
@@ -128,8 +129,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 29.55437543292542,
-      "clock": 1560.0
+      "rate": 30.563514804202484,
+      "clock": 1556.5384615384614
     },
     {
       "round": 2,
@@ -139,7 +140,7 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 466.953,
+      "rate": 476.057,
       "clock": 2005.5
     },
     {
@@ -150,7 +151,7 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 21.7445,
+      "rate": 21.9817,
       "clock": 2005.5
     },
     {
@@ -161,8 +162,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 472.951,
-      "clock": 1928.5714285714287
+      "rate": 476.827,
+      "clock": 1917.75
     },
     {
       "round": 3,
@@ -172,8 +173,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 21.743,
-      "clock": 1928.5714285714287
+      "rate": 21.964,
+      "clock": 1917.75
     },
     {
       "round": 3,
@@ -183,8 +184,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 398.7538940809969,
-      "clock": 1645.5555555555557
+      "rate": 330.74935400516796,
+      "clock": 1685.1923076923076
     },
     {
       "round": 3,
@@ -194,8 +195,8 @@
       "model": "Qwen3.8-27B-UD-IQ1_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 29.595375722543352,
-      "clock": 1645.5555555555557
+      "rate": 30.636668262326474,
+      "clock": 1685.1923076923076
     }
   ]
 }

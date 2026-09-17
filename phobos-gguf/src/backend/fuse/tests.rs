@@ -81,11 +81,23 @@ fn qwen_project_plan(mix: bool) -> Plan {
 #[test]
 #[ignore = "prints the emitted source rather than checking anything"]
 fn fused_source() {
-    println!("{}", qwen_plan().source);
-    println!("{}", qwen_project_plan(false).source);
-    println!("{}", qwen_project_plan(true).source);
-    println!("{}", qwen_4b_plan().source);
-    println!("{}", qwen_4b_project_plan().source);
+    let plans = [
+        ("fused_qwen08_mlp", qwen_plan()),
+        ("fused_qwen08_project", qwen_project_plan(false)),
+        ("fused_qwen08_project_mix", qwen_project_plan(true)),
+        ("fused_qwen4b_mlp", qwen_4b_plan()),
+        ("fused_qwen4b_project", qwen_4b_project_plan()),
+    ];
+    // PHOBOS_DUMP_DIR writes each as a `.ph` beside the raw-format dump, so
+    // the emit sweep covers the fused kernels too.
+    let dir = std::env::var("PHOBOS_DUMP_DIR").ok().map(std::path::PathBuf::from);
+    for (name, plan) in plans {
+        println!("{}", plan.source);
+        if let Some(dir) = &dir {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(format!("{name}.ph")), &plan.source).unwrap();
+        }
+    }
 }
 
 #[test]

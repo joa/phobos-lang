@@ -253,14 +253,18 @@ fn elementwise_chain_fuses_into_one_sweep() {
     // Only the operand is staged; the rounding, the i32 and the i8 are all
     // register steps of the one store sweep.
     assert_eq!(
-        mlir.matches("memref.global").count(),
-        1,
+        shared_bytes(&mlir),
+        32 * 32 * 4,
         "the chain should stage one tile, not one per call, in:\n{mlir}"
     );
-    assert!(
-        !mlir.contains("xi32, 3>") && !mlir.contains("xi8, 3>"),
-        "no integer tile should be staged in:\n{mlir}"
-    );
+    let integer_tile = mlir.lines().any(|l| {
+        l.contains("memref.view")
+            && l
+                .rsplit("to memref<")
+                .next()
+                .is_some_and(|r| r.contains("xi32, 3>") || r.contains("xi8, 3>"))
+    });
+    assert!(!integer_tile, "no integer tile should be staged in:\n{mlir}");
     assert_contains(&mlir, &["cvt.rni", "arith.fptosi"]);
 }
 
