@@ -345,15 +345,47 @@ pub(super) fn check_raw_formats(
         |n| random_raw_block(n, 136, 0, None),
     )?;
     // The K-quants: d at 0 and dmin at 2 for the two with a minimum, d
-    // trailing the 210-byte Q6_K block.
+    // trailing the 210-byte Q6_K block. PTQ1_0's registry block is two file
+    // blocks, each with its d trailing; any byte is a valid five trits.
     for (quant, name, block_bytes, d_off, dmin_off) in [
         (Quant::Q4_K, "Q4_K", 144usize, 0usize, Some(2usize)),
         (Quant::Q5_K, "Q5_K", 176, 0, Some(2)),
         (Quant::Q6_K, "Q6_K", 210, 208, None),
+        (Quant::PTQ1_0, "PTQ1_0", 56, 26, Some(54)),
     ] {
         check_matmul_kquant(host, gpu, set_dp4a, set_qmma, check_within, next, quant, name, |n| {
             random_raw_block(n, block_bytes, d_off, dmin_off)
         })?;
+    }
+    Ok(())
+}
+
+/// The Hadamard transform ahead of a folded weight, at the widths the
+/// ternary 27B folds and with its delta net's head regrouping.
+pub(super) fn check_hadamard(
+    host: &dyn Backend,
+    gpu: &dyn Backend,
+    check_within: &CheckWithin,
+    next: &mut dyn FnMut() -> f32,
+) -> Result<()> {
+    let regroup = HeadPerm { head_dim: 128, groups: 16, repeat: 3 };
+    for (rows, width, perm) in [
+        (1usize, 5120usize, None),
+        (3, 5120, None),
+        (1, 17408, None),
+        (1, 6144, Some(regroup)),
+        (4, 6144, Some(regroup)),
+    ] {
+        let x: Vec<f32> = (0..rows * width).map(|_| next()).collect();
+        let signs: Vec<f32> = (0..width).map(|_| if next() < 0.0 { -1.0 } else { 1.0 }).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let (xb, sb) = (b.upload(&x)?, b.upload(&signs)?);
+            let out = b.alloc(rows * width)?;
+            b.hadamard(xb, rows, width, sb, perm, out)?;
+            read_vec(b, out, rows * width)
+        };
+        let label = format!("hadamard [{rows} x {width}]{}", if perm.is_some() { " regrouped" } else { "" });
+        check_within(&label, 1e-4, &run(host)?, &run(gpu)?);
     }
     Ok(())
 }

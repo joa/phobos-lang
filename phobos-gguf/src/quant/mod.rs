@@ -10,6 +10,7 @@ mod iq2_xxs;
 mod iq3_s;
 mod iq3_xxs;
 mod iq4_xs;
+pub(crate) mod ptq1_0;
 mod q2_k;
 mod q3_k;
 mod q4_0;
@@ -74,10 +75,11 @@ pub enum Quant {
     IQ3_XXS,
     IQ3_S,
     IQ4_XS,
+    PTQ1_0,
 }
 
 impl Quant {
-    pub const ALL: [Quant; 19] = [
+    pub const ALL: [Quant; 20] = [
         Quant::Q4_0,
         Quant::Q4_1,
         Quant::Q5_0,
@@ -97,6 +99,7 @@ impl Quant {
         Quant::IQ3_XXS,
         Quant::IQ3_S,
         Quant::IQ4_XS,
+        Quant::PTQ1_0,
     ];
 
     /// Bytes a block occupies once uploaded, which is `spec().block_bytes`
@@ -118,6 +121,8 @@ impl Quant {
     /// 210 bytes become 208, sixteen-aligned. Q4_K and Q5_K keep their
     /// headers, since 144 and 176 are sixteen-aligned as they are and the
     /// kernels read `d` and `dmin` out of the same load as the scales.
+    /// PTQ1_0 keeps its size but not its order: [`Packed::device_blocks`]
+    /// re-lays each block (see `ptq1_0.rs`).
     pub fn device_block(self) -> (usize, usize) {
         let bytes = self.spec().block_bytes;
         match self {
@@ -146,6 +151,7 @@ impl Quant {
                 | Quant::Q4_K
                 | Quant::Q5_K
                 | Quant::Q6_K
+                | Quant::PTQ1_0
         )
     }
 
@@ -170,6 +176,7 @@ impl Quant {
             Quant::IQ3_XXS => &iq3_xxs::SPEC,
             Quant::IQ3_S => &iq3_s::SPEC,
             Quant::IQ4_XS => &iq4_xs::SPEC,
+            Quant::PTQ1_0 => &ptq1_0::SPEC,
         }
     }
 
@@ -369,6 +376,13 @@ impl Packed {
     /// block at its natural alignment; see [`Quant::device_block_bytes`].
     pub fn device_blocks(&self) -> Vec<i8> {
         let packed = self.spec().block_bytes;
+        if self.quant == Quant::PTQ1_0 {
+            let mut out = vec![0u8; self.blocks.len()];
+            for (src, dst) in self.blocks.chunks_exact(packed).zip(out.chunks_exact_mut(packed)) {
+                ptq1_0::device_block(src, dst);
+            }
+            return out.into_iter().map(|b| b as i8).collect();
+        }
         let (skip, dev) = self.quant().device_block();
         if skip == 0 && dev == packed {
             return self.blocks().iter().map(|&b| b as i8).collect();
@@ -507,6 +521,7 @@ impl GgmlType {
             GgmlType::IQ3_XXS => Quant::IQ3_XXS,
             GgmlType::IQ3_S => Quant::IQ3_S,
             GgmlType::IQ4_XS => Quant::IQ4_XS,
+            GgmlType::PTQ1_0 => Quant::PTQ1_0,
             _ => return None,
         })
     }

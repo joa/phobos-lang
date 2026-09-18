@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod bpe;
+pub mod hadamard;
 mod layers;
 pub mod llama;
 pub mod meta;
@@ -51,6 +52,7 @@ pub struct Gguf {
     tensors: Vec<TensorInfo>,
     index: HashMap<String, usize>,
     data_offset_bytes: usize,
+    folding: Option<hadamard::Folding>,
 }
 
 impl std::fmt::Debug for Gguf {
@@ -85,8 +87,10 @@ impl Gguf {
             container.data_offset_bytes,
             backing.len()
         );
+        let folding = hadamard::Folding::from_metadata(&container.metadata)?;
         Ok(Gguf {
             backing,
+            folding,
             version: container.version,
             metadata: container.metadata,
             tensors: container.tensors,
@@ -101,6 +105,11 @@ impl Gguf {
 
     pub fn metadata(&self) -> &Metadata {
         &self.metadata
+    }
+
+    /// The Hadamard folding the file declares, if any.
+    pub fn folding(&self) -> Option<&hadamard::Folding> {
+        self.folding.as_ref()
     }
 
     /// The model architecture, which selects the forward pass.

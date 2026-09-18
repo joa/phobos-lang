@@ -20,6 +20,7 @@ mod matmul;
 mod narrow;
 mod norm;
 mod pipeline;
+mod ptq1;
 mod q2k_qdot;
 mod q3k_qdot;
 mod qdecode;

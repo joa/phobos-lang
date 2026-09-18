@@ -147,7 +147,7 @@ impl DeviceBackend {
         // The dp4a decode matvecs, wide tile then narrow. One table drives the
         // sources, the compile entries and the `remove`s below, so their order
         // cannot drift apart.
-        let i8: [I8Row; 10] = [
+        let i8: [I8Row; 11] = [
             (
                 iq1s_qdot_i8_matvec_src,
                 IQ1S_I8_TN,
@@ -207,6 +207,12 @@ impl DeviceBackend {
                 Q6K_I8_TN,
                 Q6K_I8_NARROW_TN,
                 "q6k_qdot_i8_matvec",
+            ),
+            (
+                ptq1_qdot_i8_matvec_src,
+                PTQ1_I8_TN,
+                PTQ1_I8_NARROW_TN,
+                "ptq1_qdot_i8_matvec",
             ),
         ];
         let i8_srcs: Vec<OwnedEntry> = i8
@@ -463,6 +469,7 @@ impl DeviceBackend {
         let q4k_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let q5k_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let q6k_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
+        let ptq1_qdot_i8 = [raw_matvecs.remove(0), raw_matvecs.remove(0)];
         let iq1s_qmma = raw_matvecs.remove(0);
         let iq2xxs_qmma = raw_matvecs.remove(0);
         let iq2s_qmma = raw_matvecs.remove(0);
@@ -567,6 +574,7 @@ impl DeviceBackend {
             identities: RefCell::new(HashMap::new()),
             convs: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
+            hadamards: RefCell::new(HashMap::new()),
             splits: RefCell::new(HashMap::new()),
             store_pairs: RefCell::new(HashMap::new()),
             ropes: RefCell::new(HashMap::new()),
@@ -652,6 +660,7 @@ impl DeviceBackend {
             q4k_qdot_i8,
             q5k_qdot_i8,
             q6k_qdot_i8,
+            ptq1_qdot_i8,
             iq2xxs_qdot_matvec,
             iq1m_qdot_matvec,
             iq2s_qdot_matvec,

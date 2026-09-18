@@ -1,10 +1,11 @@
-// The K-quant decode matvecs: Q4_K, Q5_K and Q6_K, each one `<fmt>_qdot_i8_t`
-// call, no table operands. The decode is the compiler's
+// The table-free decode matvecs: Q4_K, Q5_K, Q6_K and PTQ1_0, each one
+// `<fmt>_qdot_i8_t` call, no table operands. The decode is the compiler's
 // (`phobos-lang`'s `codegen/tile/kquant_qdot.rs`); the source only names the
 // kernel and the tile, as the IQ formats' do. Q4_K and Q5_K read their `d`
 // and `dmin` out of the block header, so the `D` plane is an operand the
 // intrinsic takes and never reads; Q6_K's `d` is trailing on disk and lives in
-// the plane alone (see `Quant::device_block`).
+// the plane alone (see `Quant::device_block`). PTQ1_0 keeps both of a block
+// pair's scales in the re-laid block itself (`quant/ptq1_0.rs`).
 
 use super::quant::qdot_i8_cta;
 
@@ -13,12 +14,14 @@ use super::quant::qdot_i8_cta;
 pub(crate) const Q4K_I8_TN: usize = 64;
 pub(crate) const Q5K_I8_TN: usize = 64;
 pub(crate) const Q6K_I8_TN: usize = 64;
+pub(crate) const PTQ1_I8_TN: usize = 64;
 
 /// The tile for an `n` that 64 does not divide; a ragged `n` past that is
 /// padded into a scratch by `project_raw`.
 pub(crate) const Q4K_I8_NARROW_TN: usize = 16;
 pub(crate) const Q5K_I8_NARROW_TN: usize = 16;
 pub(crate) const Q6K_I8_NARROW_TN: usize = 16;
+pub(crate) const PTQ1_I8_NARROW_TN: usize = 16;
 
 /// `resident` CTAs of the tile's threads a multiprocessor sets the register
 /// budget: Q4_K fits four (64 registers); Q5_K and Q6_K, whose pipeline
@@ -52,4 +55,8 @@ pub(crate) fn q5k_qdot_i8_matvec_src(tn: usize) -> String {
 
 pub(crate) fn q6k_qdot_i8_matvec_src(tn: usize) -> String {
     kquant_qdot_i8_matvec_src("q6k", tn, 3)
+}
+
+pub(crate) fn ptq1_qdot_i8_matvec_src(tn: usize) -> String {
+    kquant_qdot_i8_matvec_src("ptq1", tn, 4)
 }

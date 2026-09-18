@@ -68,6 +68,10 @@ name = "model_check"
 required-features = ["cuda"]
 
 [[example]]
+name = "oracle_check"
+required-features = ["cuda"]
+
+[[example]]
 name = "ppsweep"
 required-features = ["cuda"]
 

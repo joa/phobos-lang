@@ -1,11 +1,3 @@
-//! The op vocabulary. Coarse on purpose: a builtin is one op with its
-//! format as an attribute, a per-element expression is one op with its
-//! tree, and every decision a pass makes is an attribute on the op it
-//! decided about. What each kind declares here (its name, whether it ends
-//! a block, which results alias which operands, which operands it writes)
-//! is what the generic passes read; the per-kind typing rules live in
-//! `verify.rs`.
-
 use std::fmt;
 
 pub use crate::ast::{AssignOp, BinOp, UnOp};
@@ -129,10 +121,11 @@ pub enum RawFmt {
     Q4k,
     Q5k,
     Q6k,
+    Ptq1,
 }
 
 impl RawFmt {
-    pub const ALL: [RawFmt; 13] = [
+    pub const ALL: [RawFmt; 14] = [
         RawFmt::Iq1s,
         RawFmt::Iq1m,
         RawFmt::Iq2xxs,
@@ -146,6 +139,7 @@ impl RawFmt {
         RawFmt::Q4k,
         RawFmt::Q5k,
         RawFmt::Q6k,
+        RawFmt::Ptq1,
     ];
 
     pub fn name(self) -> &'static str {
@@ -163,6 +157,7 @@ impl RawFmt {
             RawFmt::Q4k => "q4k",
             RawFmt::Q5k => "q5k",
             RawFmt::Q6k => "q6k",
+            RawFmt::Ptq1 => "ptq1",
         }
     }
 
@@ -471,6 +466,14 @@ impl Intrinsic {
 
 /// What an op does. Operands, results and blocks live beside the kind in
 /// the arena; the kind holds only attributes.
+///
+/// The vocabulary is coarse: a builtin is one op carrying its format, a
+/// per-element expression is one op carrying its tree, and a pass records
+/// what it decided as an attribute on the op it decided about. The
+/// declarations below this enum, the name, whether the kind ends a block,
+/// which results alias which operands and which operands it writes, are
+/// what the generic passes read; the per-kind typing rules live in
+/// `verify.rs`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpKind {
     // Scalars.
@@ -716,8 +719,7 @@ impl OpKind {
     }
 
     /// Whether the result is a fresh buffer of its own, as opposed to a view
-    /// of an operand's bytes, a scalar, or nothing. The emitter's parity path
-    /// asks this where the old code asked `MemVal::global.is_some()`.
+    /// of an operand's bytes, a scalar, or nothing.
     pub fn makes_buffer(&self) -> bool {
         matches!(
             self,

@@ -26,8 +26,8 @@ pub(crate) fn qgemm_tables(quant: Quant) -> Option<&'static [usize]> {
         Quant::IQ2_S => &[1024 * 8, 256 * 8],
         Quant::IQ3_XXS => &[256 * 4, 128 * 8],
         Quant::IQ3_S => &[512 * 4, 256 * 8],
-        // The K-quants decode from the block bytes alone.
-        Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => &[],
+        // The K-quants and PTQ1_0 decode from the block bytes alone.
+        Quant::Q4_K | Quant::Q5_K | Quant::Q6_K | Quant::PTQ1_0 => &[],
         _ => return None,
     })
 }
@@ -45,6 +45,7 @@ pub(crate) fn qgemm_name(quant: Quant) -> Option<&'static str> {
         Quant::Q4_K => "q4k",
         Quant::Q5_K => "q5k",
         Quant::Q6_K => "q6k",
+        Quant::PTQ1_0 => "ptq1",
         _ => return None,
     })
 }
@@ -62,6 +63,7 @@ pub(crate) fn qgemm_kernel(quant: Quant) -> Option<&'static str> {
         Quant::Q4_K => "q4k_qgemm",
         Quant::Q5_K => "q5k_qgemm",
         Quant::Q6_K => "q6k_qgemm",
+        Quant::PTQ1_0 => "ptq1_qgemm",
         _ => return None,
     })
 }

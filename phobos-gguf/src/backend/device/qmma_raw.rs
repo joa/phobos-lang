@@ -1,19 +1,17 @@
-//! A prompt pass's projection against a raw quantized weight, with no
-//! expanded weight in between.
-//!
-//! [`super::DeviceBackend::project_raw_dense`] decodes a strip of the weight
-//! into `f32` or `f16` scratch and runs a dense matmul over it. The cost is
-//! not the decode, which runs at the same speed either way; it is that the
-//! expansion moves many times the weight's own bytes and leaves scratch
-//! resident behind it. Contracting out of the registers the decode already
-//! lands in pays neither cost.
-
 use anyhow::{Context, Result, bail, ensure};
 
 use super::*;
 
 /// The staged projections (`<fmt>_qgemm_t`), built on first use;
-/// `PHOBOS_QGEMM=0` turns them off.
+/// `PHOBOS_QGEMM=0` turns them off. These contract a prompt pass against a
+/// raw quantized weight with no expanded weight in between.
+///
+/// [`super::DeviceBackend::project_raw_dense`] instead decodes a strip of
+/// the weight into `f32` or `f16` scratch and runs a dense matmul over it.
+/// The cost is not the decode, which runs at the same speed either way; it
+/// is that the expansion moves many times the weight's own bytes and leaves
+/// scratch resident behind it. Contracting out of the registers the decode
+/// already lands in pays neither cost.
 pub(super) struct Qgemm {
     on: bool,
     kernels: RefCell<HashMap<Quant, Module>>,
@@ -93,9 +91,9 @@ impl DeviceBackend {
             Quant::IQ3_XXS,
             Quant::IQ3_S,
         ];
-        // IQ1_M and the K-quants have only the staged kernel; the rest have
-        // both.
-        for staged_only in [Quant::IQ1_M, Quant::Q4_K, Quant::Q5_K, Quant::Q6_K] {
+        // IQ1_M, the K-quants and PTQ1_0 have only the staged kernel; the
+        // rest have both.
+        for staged_only in [Quant::IQ1_M, Quant::Q4_K, Quant::Q5_K, Quant::Q6_K, Quant::PTQ1_0] {
             if self.raw_quant_is(w, staged_only) {
                 return self.qgemm.takes(staged_only, m, k, n);
             }
@@ -315,8 +313,8 @@ impl DeviceBackend {
                 raw(&self.iq3s_grid_packed),
                 raw(&self.iq2s_signs_packed) + IQ2S_SIGNS_LEN as u64,
             ],
-            // The K-quants decode from the block bytes alone.
-            Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => Vec::new(),
+            // The K-quants and PTQ1_0 decode from the block bytes alone.
+            Quant::Q4_K | Quant::Q5_K | Quant::Q6_K | Quant::PTQ1_0 => Vec::new(),
             other => bail!("no staged kernel for {}", other.name()),
         };
         Ok(ptrs

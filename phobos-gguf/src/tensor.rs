@@ -35,6 +35,8 @@ pub enum GgmlType {
     F64,
     IQ1_M,
     BF16,
+    /// PrismML's ternary format; no upstream ggml type carries this code.
+    PTQ1_0,
 }
 
 impl GgmlType {
@@ -69,6 +71,7 @@ impl GgmlType {
             28 => GgmlType::F64,
             29 => GgmlType::IQ1_M,
             30 => GgmlType::BF16,
+            143 => GgmlType::PTQ1_0,
             other => bail!("unknown or retired ggml tensor type {other}"),
         })
     }
@@ -104,6 +107,7 @@ impl GgmlType {
             GgmlType::F64 => "F64",
             GgmlType::IQ1_M => "IQ1_M",
             GgmlType::BF16 => "BF16",
+            GgmlType::PTQ1_0 => "PTQ1_0",
         }
     }
 
@@ -124,6 +128,7 @@ impl GgmlType {
             | GgmlType::Q8_0
             | GgmlType::Q8_1
             | GgmlType::IQ4_NL => 32,
+            GgmlType::PTQ1_0 => crate::quant::ptq1_0::FILE_BLOCK,
             _ => 256,
         }
     }
@@ -154,6 +159,7 @@ impl GgmlType {
             GgmlType::IQ2_S => 82,
             GgmlType::IQ4_XS => 136,
             GgmlType::IQ1_M => 56,
+            GgmlType::PTQ1_0 => crate::quant::ptq1_0::FILE_BLOCK_BYTES,
         }
     }
 

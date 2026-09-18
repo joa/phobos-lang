@@ -23,7 +23,7 @@ fn dump_raw_kernel_sources() {
             sources.push((name.to_string(), src));
         }
     }
-    let i8: [I8Row; 10] = [
+    let i8: [I8Row; 11] = [
         (
             iq1s_qdot_i8_matvec_src,
             IQ1S_I8_TN,
@@ -67,6 +67,7 @@ fn dump_raw_kernel_sources() {
             "iq3s",
         ),
         (q4k_qdot_i8_matvec_src, Q4K_I8_TN, Q4K_I8_NARROW_TN, "q4k"),
+        (ptq1_qdot_i8_matvec_src, PTQ1_I8_TN, PTQ1_I8_NARROW_TN, "ptq1"),
         (q5k_qdot_i8_matvec_src, Q5K_I8_TN, Q5K_I8_NARROW_TN, "q5k"),
         (q6k_qdot_i8_matvec_src, Q6K_I8_TN, Q6K_I8_NARROW_TN, "q6k"),
     ];

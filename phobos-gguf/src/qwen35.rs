@@ -210,6 +210,33 @@ pub struct Model {
     blocks: Vec<Block>,
     output_norm: Gain,
     rope: RopeTable,
+    /// Every quantized projection is Hadamard-folded and quantizes its own
+    /// rotated input, so a normalization's quantized copy has no reader.
+    folded: bool,
+}
+
+/// Refuses a Hadamard-folded file naming a tensor this model does not read
+/// through a [`Linear`], which is where the transform is applied.
+fn check_folding(gguf: &Gguf) -> Result<()> {
+    const LINEAR: [&str; 12] = [
+        "attn_q", "attn_k", "attn_v", "attn_output", "attn_qkv", "attn_gate", "ssm_alpha",
+        "ssm_beta", "ssm_out", "ffn_gate", "ffn_up", "ffn_down",
+    ];
+    let Some(folding) = gguf.folding() else {
+        return Ok(());
+    };
+    for name in folding.names() {
+        let kind = name
+            .strip_prefix("blk.")
+            .and_then(|rest| rest.split_once('.'))
+            .and_then(|(_, rest)| rest.strip_suffix(".weight"));
+        let known = match kind {
+            Some(kind) => LINEAR.contains(&kind),
+            None => matches!(name, "output.weight" | "token_embd.weight"),
+        };
+        ensure!(known, "'{name}' is Hadamard-folded but this model does not project through it");
+    }
+    Ok(())
 }
 
 /// Copies a projection's qkv window into the delta net's history cache: a
@@ -254,10 +281,19 @@ impl Model {
             config.n_head_kv
         );
 
+        check_folding(gguf)?;
         let embed = Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?;
         let head = match gguf.tensor("output.weight") {
             Some(_) => Linear::load(gguf, "output.weight", config.d_model, config.vocab)?,
-            None => Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?,
+            None => {
+                // A folded table's rows are `H S h`, which the head would
+                // contract against an unrotated `h`.
+                ensure!(
+                    !gguf.folding().is_some_and(|f| f.restores("token_embd.weight")),
+                    "a Hadamard-folded token_embd cannot double as the output head"
+                );
+                Linear::load(gguf, "token_embd.weight", config.d_model, config.vocab)?
+            }
         };
 
         let mut blocks = Vec::with_capacity(config.n_block);
@@ -283,6 +319,7 @@ impl Model {
         let output_norm = Gain::load(gguf, "output_norm.weight", config.d_model)?;
 
         Ok(Model {
+            folded: gguf.folding().is_some(),
             rope: RopeTable::new(config.rope_dim, config.rope_freq_base),
             config,
             embed,
@@ -337,12 +374,30 @@ impl Model {
         State { pos: 0, layers }
     }
 
+    /// The pre-projection normalization of `x` into `normed`, with the
+    /// quantized copy the projections share, unless nothing would read it.
+    pub(super) fn norm(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        rows: usize,
+        gain: Buf,
+        normed: Buf,
+    ) -> Result<Option<QAct>> {
+        let (d, eps) = (self.config.d_model, self.config.rms_eps);
+        if self.folded {
+            backend.rms_norm(x, rows, d, gain, eps, normed)?;
+            return Ok(None);
+        }
+        Ok(Some(backend.rms_norm_q(x, rows, d, gain, eps, normed)?))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn attention(
         &self,
         attn: &Attention,
         x: Buf,
-        act: QAct,
+        act: Option<QAct>,
         rows: usize,
         start_pos: usize,
         cache: &mut KvCache,
@@ -601,7 +656,7 @@ impl Model {
                 if !fused.project {
                     // The normalization leaves the quantized copy behind,
                     // which the projection reading it would otherwise redo.
-                    let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+                    let act = self.norm(backend, resid, rows, gain, normed)?;
                     linear.project_into_act(backend, normed, act, rows, stacked)?;
                     copy_qkv_into_history(
                         backend,
@@ -677,7 +732,7 @@ impl Model {
                         ((stacked, 0), (stacked, alpha_at), (stacked, beta_at), mix_done, vec![stacked])
                     }
                     None => {
-                        let act = backend.rms_norm_q(resid, rows, cfg.d_model, gain, cfg.rms_eps, normed)?;
+                        let act = self.norm(backend, resid, rows, gain, normed)?;
                         let qkv_buf = qkv.forward_act(backend, normed, act, rows)?;
                         copy_qkv_into_history(
                             backend,
@@ -780,7 +835,7 @@ impl Model {
         };
 
         match gated_act {
-            Some(act) => delta.out.add_into_act(backend, gated, act, rows, resid)?,
+            Some(act) => delta.out.add_into_act(backend, gated, Some(act), rows, resid)?,
             None => delta.out.add_into(backend, gated, rows, resid)?,
         }
         release.extend([packed, scratch, mixed_buf]);
