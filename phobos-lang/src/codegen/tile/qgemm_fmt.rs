@@ -4,7 +4,8 @@
 // IQ1_S and IQ1_M decode by `prmt` from a two-bit grid into `8g +- 1`
 // bytes; the IQ2 and IQ3 grids are int8 already, signed by a 0/-1 byte mask
 // as `(m ^ mask) + (mask & 0x01010101)`. The K-quants, Q4_K, Q5_K and Q6_K,
-// have no tables and decode in `kquant.rs`.
+// have no tables and decode in `kquant.rs`; PTQ1_0's base-three bytes decode in
+// `ptq1.rs`.
 
 use super::qgemm::{Lanes, Stage, TileAt};
 use super::*;
@@ -22,6 +23,7 @@ pub(in crate::codegen) enum QgFormat {
     Q4k,
     Q5k,
     Q6k,
+    Ptq1,
 }
 
 /// IQ1_S's grid at two bits a lane: 2048 entries of eight.
@@ -55,6 +57,7 @@ impl QgFormat {
             "q4k_qgemm_t" => Self::Q4k,
             "q5k_qgemm_t" => Self::Q5k,
             "q6k_qgemm_t" => Self::Q6k,
+            "ptq1_qgemm_t" => Self::Ptq1,
             _ => return None,
         })
     }
@@ -71,6 +74,7 @@ impl QgFormat {
             Self::Q4k => "q4k_qgemm_t",
             Self::Q5k => "q5k_qgemm_t",
             Self::Q6k => "q6k_qgemm_t",
+            Self::Ptq1 => "ptq1_qgemm_t",
         }
     }
 
@@ -87,6 +91,7 @@ impl QgFormat {
             "q4k_qdot_i8_t" => Self::Q4k,
             "q5k_qdot_i8_t" => Self::Q5k,
             "q6k_qdot_i8_t" => Self::Q6k,
+            "ptq1_qdot_i8_t" => Self::Ptq1,
             _ => return None,
         })
     }
@@ -103,6 +108,7 @@ impl QgFormat {
             Self::Q4k => "q4k_qdot_i8_t",
             Self::Q5k => "q5k_qdot_i8_t",
             Self::Q6k => "q6k_qdot_i8_t",
+            Self::Ptq1 => "ptq1_qdot_i8_t",
         }
     }
 
@@ -120,6 +126,7 @@ impl QgFormat {
             Self::Q4k => 144,
             Self::Q5k => 176,
             Self::Q6k => 208,
+            Self::Ptq1 => 56,
         }
     }
 
@@ -133,7 +140,7 @@ impl QgFormat {
             Self::Iq2s => &[1024 * 8, 256 * 8],
             Self::Iq3xxs => &[256 * 4, 128 * 8],
             Self::Iq3s => &[512 * 4, 256 * 8],
-            Self::Q4k | Self::Q5k | Self::Q6k => &[],
+            Self::Q4k | Self::Q5k | Self::Q6k | Self::Ptq1 => &[],
         }
     }
 
@@ -365,6 +372,7 @@ impl<'c> Codegen<'c> {
             QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
                 self.kq_gemm_load(block, fmt, lanes, qb, at, regs)?;
             }
+            QgFormat::Ptq1 => self.pt_gemm_load(block, lanes, qb, at, regs)?,
             QgFormat::Iq1s => {
                 let qs = self.qg_at(block, at, 0, 4)?;
                 let qh = self.qg_at(block, at, 32, 2)?;
@@ -457,6 +465,7 @@ impl<'c> Codegen<'c> {
             QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
                 self.kq_gemm_decode(block, fmt, stage, regs)?;
             }
+            QgFormat::Ptq1 => self.pt_gemm_decode(block, stage, regs)?,
             QgFormat::Iq1s => {
                 let (qs, qh) = (regs[0], regs[1]);
                 let n = self.qg_bits(block, qh, 12, 7)?;

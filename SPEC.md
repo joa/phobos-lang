@@ -119,7 +119,7 @@ float       = digit { digit } "." { digit } ;
     contraction lands, since one row cannot fill an 8-row tensor-core tile.
   - the **generic integer path**, with the same result, for anything else: a
     ragged contraction, a pre-Pascal target, or a masked operand.
-- **Grouped raw layout**: the seven IQ formats (`iq1s`, `iq1m`, `iq2xxs`, `iq2xs`, `iq2s`, `iq3xxs`, `iq3s`) and the three K-quants (`q4k`, `q5k`, `q6k`) are held on the device grouped by eight columns: the payload `qb`, declared `[N, K/256*bytes]`, is laid out `[N/8][K/256][8][bytes]`, eight columns' copies of each block side by side, and the scale plane `d`, declared `[N, K/256]`, likewise `[N/8][K/256][8]`; a last group short of eight columns is zero-padded. Every built-in that reads these formats addresses them so, through one helper, and the host lays them out at upload (`Quant::grouped_rows`). The point is the decode matvec: a warp reading eight columns' blocks touches three or four whole lines rather than eight scattered sectors, and the miss-tracking slots that bound its bandwidth go three times as far. The other formats stay row-major.
+- **Grouped raw layout**: the seven IQ formats (`iq1s`, `iq1m`, `iq2xxs`, `iq2xs`, `iq2s`, `iq3xxs`, `iq3s`), the three K-quants (`q4k`, `q5k`, `q6k`) and `ptq1` are held on the device grouped by eight columns: the payload `qb`, declared `[N, K/256*bytes]`, is laid out `[N/8][K/256][8][bytes]`, eight columns' copies of each block side by side, and the scale plane `d`, declared `[N, K/256]`, likewise `[N/8][K/256][8]`; a last group short of eight columns is zero-padded. Every built-in that reads these formats addresses them so, through one helper, and the host lays them out at upload (`Quant::grouped_rows`). The point is the decode matvec: a warp reading eight columns' blocks touches three or four whole lines rather than eight scattered sectors, and the miss-tracking slots that bound its bandwidth go three times as far. The other formats stay row-major.
 - **Quantized contraction**: `qdot_t` is the Q8_0 contraction with the block
   scales folded in, so the whole of `k` is one operation. `dot` and `dot_t`
   cannot be given enough of `k` at a time here: a Q8_0 block carries its own
@@ -167,6 +167,18 @@ float       = digit { digit } "." { digit } ;
   groups, so a lane takes sixteen elements of each of a group's four quarters,
   four runs of sixteen that are each one Q6_K scale run, with its activations
   four sixteen-byte loads 32 apart.
+- **Ternary contraction**: `ptq1_qgemm_t` and `ptq1_qdot_i8_t` take PTQ1_0,
+  weights `d * (t - 1)` for a trit `t` in 0..2 and one `f16` scale per 128. A
+  byte holds five trits base three, trit `n` the top trit of `b * 3^n mod 256`,
+  so a word decodes as two 16-bit lane pairs: a multiply by three per trit and a
+  `prmt` gathering the four tops, with no carry between lanes. The device block
+  is two file blocks (256 weights, 56 bytes) re-laid at upload so each 64-weight
+  quarter is three words whose trit `n` is four consecutive weights, a `dp4a`
+  operand, plus a tail byte for the last four, and both scales in the block, so
+  the `d` operand is taken and never read. The matvec contracts the trits as
+  they are and adds a second `dp4a` of the activation against -1 bytes, the
+  exact `sum (t - 1) a`; the projection writes `t - 1` into the stage as
+  `(t + 0x7F7F7F7F) ^ 0x80808080`, which never carries between bytes.
 - **Grid-decode contraction**: `iq1s_qdot_t` is IQ1_S's matvec contraction with
   its grid-table decode folded in, the same **warp owns one output, register
   accumulator, one closing shuffle** shape `qdot_t` uses, for the same reason:

@@ -36,10 +36,10 @@ impl QgFormat {
         matches!(self, Self::Q4k | Self::Q5k)
     }
 
-    /// Whether `d` (and `dmin`) sit in the block header, in the same load
-    /// as the scales, so the scale plane is uploaded but never read.
+    /// Whether `d` (and `dmin`) sit in the block, in the same load as the
+    /// scales, so the scale plane is uploaded but never read.
     pub(in crate::codegen) fn d_in_block(self) -> bool {
-        matches!(self, Self::Q4k | Self::Q5k)
+        matches!(self, Self::Q4k | Self::Q5k | Self::Ptq1)
     }
 
     /// Blocks the decode matvec's register pipeline holds ahead: two, for

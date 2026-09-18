@@ -98,7 +98,7 @@ impl Model {
                     // The normalization leaves the quantized copy behind too,
                     // which the three projections reading it would otherwise
                     // redo.
-                    let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
+                    let act = self.norm(backend, x, rows, gain, normed)?;
                     self.attention(
                         attn, normed, act, rows, state.pos, cache, backend, variants, x,
                     )?
@@ -117,7 +117,7 @@ impl Model {
                 .ffn
                 .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
             {
-                let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
+                let act = self.norm(backend, x, rows, gain, normed)?;
                 block.ffn.forward(backend, normed, act, rows, x)?;
             }
 

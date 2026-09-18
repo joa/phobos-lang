@@ -19,8 +19,8 @@ use phobos_kernels::launch::{CTA_THREADS, STATIC_SHARED_LIMIT, persistent_grid};
 use crate::quant::Quant;
 
 use super::{
-    Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject, HBuf, HPlane,
-    Packed, Plane, Q8_BLOCK, QAct, QBuf, RawBuf, Rope,
+    Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject,
+    HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, Packed, Plane, Q8_BLOCK, QAct, QBuf, RawBuf, Rope,
 };
 
 mod arena;
@@ -32,6 +32,7 @@ mod dense;
 mod elem;
 mod fused;
 mod graph;
+mod hadamard;
 use graph::{PassGraph, PassOp, Recorded};
 mod init;
 mod kernels;
@@ -250,6 +251,8 @@ pub struct DeviceBackend {
     convs: RefCell<HashMap<ConvKey, Module>>,
     /// Gate kernels, keyed by head count.
     gates: RefCell<HashMap<usize, Module>>,
+    /// The Hadamard transforms, by width and head regrouping.
+    hadamards: RefCell<HashMap<(usize, Option<HeadPerm>), Module>>,
     /// Strided copy kernels, keyed by direction, the width they copy, and
     /// whether the pitches let the promise be made.
     splits: RefCell<HashMap<(Strided, usize, bool), Module>>,
@@ -380,6 +383,7 @@ pub struct DeviceBackend {
     q4k_qdot_i8: [Module; 2],
     q5k_qdot_i8: [Module; 2],
     q6k_qdot_i8: [Module; 2],
+    ptq1_qdot_i8: [Module; 2],
     iq2xxs_qdot_matvec: Module,
     iq1m_qdot_matvec: Module,
     iq2s_qdot_matvec: Module,

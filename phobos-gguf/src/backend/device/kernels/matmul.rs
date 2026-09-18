@@ -51,4 +51,39 @@ kernel matvec(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
   }
   C[0 :+ 1, pn * TILE_N :+ TILE_N] = acc
 }
+
+@launch(256)
+@autotune(TILE_N in [128], TILE_K in [16])
+{ALIGNED}
+kernel matvec_split(A: tensor<f32>[M, K], B: tensor<f32>[K, N], P: tensor<f32>[S, N]) {
+  let pn = program_id(0)
+  let ps = program_id(1)
+  let slice = K / S
+  let from = ps * slice
+  var acc: tile<f32>[1, TILE_N] = 0.0
+  for kt in range(from, from + slice, TILE_K) {
+    var a = A[0 :+ 1, kt :+ TILE_K]
+    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+    acc += dot(a, b)
+  }
+  P[ps :+ 1, pn * TILE_N :+ TILE_N] = acc
+}
 ";
+
+/// Programs a narrow dense matvec splits `k` to reach, and the shortest
+/// slice it will cut. A projection a few dozen outputs wide is one program
+/// unsplit and walks all of `k` alone.
+pub(crate) const MV_SPLIT_TARGET: usize = 96;
+const MV_SPLIT_MIN_SLICE: usize = 64;
+
+/// Slices for a `[1, k] x [k, n]` dense projection: one where the output
+/// grid already fills the card, else as many as reach
+/// [`MV_SPLIT_TARGET`] programs with whole `TILE_K` steps a slice.
+pub(crate) fn mv_splits(n: usize, k: usize) -> usize {
+    let grid = n.div_ceil(MV_TN);
+    let mut splits = (MV_SPLIT_TARGET / grid).min(k / MV_SPLIT_MIN_SLICE);
+    while splits > 1 && !k.is_multiple_of(splits * TILE_K) {
+        splits -= 1;
+    }
+    splits.max(1)
+}

@@ -35,15 +35,17 @@ fn every_format_agrees_with_its_own_storage_size() {
 #[test]
 fn ggml_type_codes_map_onto_the_registry() {
     // The bridge has to agree with the file format's own block geometry, or a
-    // tensor's byte count and its decoder would disagree.
-    for code in 0..31u32 {
+    // tensor's byte count and its decoder would disagree. A registry block
+    // may be a whole number of file blocks (PTQ1_0 pairs its 128s).
+    for code in (0..31u32).chain([143]) {
         let Ok(ggml) = GgmlType::from_code(code) else {
             continue;
         };
         let Some(quant) = ggml.quant() else { continue };
         let spec = quant.spec();
-        assert_eq!(ggml.block_size(), spec.block, "{}", spec.name);
-        assert_eq!(ggml.type_size(), spec.block_bytes, "{}", spec.name);
+        let files = spec.block / ggml.block_size();
+        assert_eq!(files * ggml.block_size(), spec.block, "{}", spec.name);
+        assert_eq!(files * ggml.type_size(), spec.block_bytes, "{}", spec.name);
         assert_eq!(ggml.name(), spec.name);
     }
 }
@@ -299,4 +301,45 @@ fn iq1s_folds_its_delta_into_an_exact_int8() {
             }
         }
     }
+}
+
+/// The five trits of `v` in 0..243, the first most significant.
+fn ptq1_trits(v: u16) -> [u8; 5] {
+    std::array::from_fn(|n| (v / 3u16.pow(4 - n as u32) % 3) as u8)
+}
+
+#[test]
+fn ptq1_0_trits_round_trip_every_byte_value() {
+    for v in 0..243u16 {
+        let trits = ptq1_trits(v);
+        let byte = super::ptq1_0::encode(trits);
+        let back: [u8; 5] = std::array::from_fn(|n| super::ptq1_0::trit(byte, n));
+        assert_eq!(back, trits, "value {v}");
+    }
+}
+
+#[test]
+fn ptq1_0_device_layout_decodes_to_the_file_order() {
+    use super::ptq1_0::{dequantize_device, device_block};
+    // Two file blocks of pseudo-random trit bytes under distinct scales.
+    let mut pair = vec![0u8; 56];
+    let mut state = 0x2545_f491u32;
+    for b in pair.iter_mut() {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        *b = super::ptq1_0::encode(ptq1_trits((state >> 8) as u16 % 243));
+    }
+    for (h, d) in [(0, 0.75f32), (1, -1.5)] {
+        pair[28 * h + 26..28 * h + 28].copy_from_slice(&f32_to_f16(d).to_le_bytes());
+    }
+    let mut want = vec![0.0f32; 256];
+    (Quant::PTQ1_0.spec().dequantize)(&pair, &mut want);
+    assert!(want[..128].iter().all(|v| [-0.75, 0.0, 0.75].contains(v)));
+    assert!(want[128..].iter().all(|v| [-1.5, 0.0, 1.5].contains(v)));
+    let mut dev = vec![0u8; 56];
+    device_block(&pair, &mut dev);
+    let mut got = vec![0.0f32; 256];
+    dequantize_device(&dev, &mut got);
+    assert_eq!(got, want);
 }

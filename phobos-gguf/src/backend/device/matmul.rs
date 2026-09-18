@@ -456,6 +456,16 @@ impl DeviceBackend {
                     },
                     Vec::new(),
                 )),
+                Quant::PTQ1_0 => Some((
+                    &self.ptq1_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(PTQ1_I8_TN)))],
+                    "ptq1_qdot_i8_matvec",
+                    if wide_tile(qdot_i8_tn(PTQ1_I8_TN)) {
+                        qdot_i8_tn(PTQ1_I8_TN)
+                    } else {
+                        PTQ1_I8_NARROW_TN
+                    },
+                    Vec::new(),
+                )),
                 _ => None,
             }
         } else {

@@ -5,7 +5,8 @@ use anyhow::{Result, ensure};
 use phobos_base::half::{f16_to_f32, f32_to_f16};
 
 use super::{
-    Attn, Backend, Buf, DeltaMix, HBuf, HPlane, HostQuant, L2_EPS, Packed, Plane, Q8_BLOCK, QAct,
+    Attn, Backend, Buf, DeltaMix, HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, HostQuant, L2_EPS, Packed,
+    Plane, Q8_BLOCK, QAct,
     QBuf, Rope, quantize_row,
 };
 
@@ -455,6 +456,29 @@ impl Backend for HostBackend {
             let g = &slabs[gate.0];
             for (d, &v) in dst.iter_mut().zip(g) {
                 *d *= sigmoid(v);
+            }
+            Ok(())
+        })
+    }
+
+    fn hadamard(
+        &self,
+        x: Buf,
+        rows: usize,
+        width: usize,
+        signs: Buf,
+        perm: Option<HeadPerm>,
+        out: Buf,
+    ) -> Result<()> {
+        ensure!(x != out, "hadamard cannot run in place");
+        self.writing(out, |slabs, dst| {
+            let (src, signs) = (&slabs[x.0], &slabs[signs.0]);
+            ensure!(
+                src.len() >= rows * width && dst.len() >= rows * width && signs.len() >= width,
+                "hadamard operands are too small for {rows} rows of {width}"
+            );
+            for (row, o) in src.chunks_exact(width).zip(dst.chunks_exact_mut(width)).take(rows) {
+                crate::hadamard::rotate_row(row, &signs[..width], perm, HADAMARD_BLOCK, o);
             }
             Ok(())
         })

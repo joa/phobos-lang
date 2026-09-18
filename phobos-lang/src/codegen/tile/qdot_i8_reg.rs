@@ -250,6 +250,9 @@ impl<'c> Codegen<'c> {
         if fmt.is_kquant() {
             return self.kq_pieces(body, fmt, quarter);
         }
+        if fmt == QgFormat::Ptq1 {
+            return self.pt_pieces(body, quarter);
+        }
         // `base + mul * quarter`.
         let at = |cg: &mut Self, base: i64, mul: i64| -> Result<Value<'c, 'c>> {
             let mul = cg.const_index(body, mul)?;
@@ -259,7 +262,7 @@ impl<'c> Codegen<'c> {
         };
         let piece = |off, width| Piece { off, width };
         Ok(match fmt {
-            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => unreachable!("returned above"),
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k | QgFormat::Ptq1 => unreachable!("returned above"),
             QgFormat::Iq1s => vec![piece(at(self, 0, 8)?, 8), piece(at(self, 32, 4)?, 4)],
             QgFormat::Iq1m => vec![
                 piece(at(self, 0, 8)?, 8),
@@ -396,6 +399,9 @@ impl<'c> Codegen<'c> {
         if fmt.is_kquant() {
             return self.kq_qdot_block(kb, fmt, regs, aq, asc, k_off, carry);
         }
+        if fmt == QgFormat::Ptq1 {
+            return self.pt_qdot_block(kb, regs, aq, asc, k_off, carry);
+        }
         let (i8_t, i32_t, f32_t) = (self.i8_t, self.i32_t, self.f32_t);
         let words = &regs[..regs.len() - 1];
         let dv = regs[regs.len() - 1];
@@ -461,8 +467,8 @@ impl<'c> Codegen<'c> {
         let bits = |cg: &mut Self, word: Value<'c, 'c>, shift: usize, mask: i64| cg.qg_bits(kb, word, shift as i64, mask);
         let mut out = Vec::with_capacity(LANE_OCTETS);
         match fmt {
-            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
-                bail!("{} decodes in kquant_qdot.rs", fmt.qdot_i8_intrinsic())
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k | QgFormat::Ptq1 => {
+                bail!("{} decodes on its own path", fmt.qdot_i8_intrinsic())
             }
             QgFormat::Iq1s => {
                 let (qs, qh) = (&w[0..2], w[2]);
@@ -554,8 +560,8 @@ impl<'c> Codegen<'c> {
             cg.push(kb, arith::addi(n2, one, cg.loc))
         };
         Ok(match fmt {
-            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
-                bail!("{} decodes in kquant_qdot.rs", fmt.qdot_i8_intrinsic())
+            QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k | QgFormat::Ptq1 => {
+                bail!("{} decodes on its own path", fmt.qdot_i8_intrinsic())
             }
             QgFormat::Iq1s => vec![odd_at(self, w[2], 12, 3)?, odd_at(self, w[2], 28, 3)?],
             QgFormat::Iq1m => (0..4).map(|g| odd_of(self, w[3], 3 * g, 3)).collect::<Result<_>>()?,
@@ -647,8 +653,8 @@ impl QgFormat {
         match self {
             QgFormat::Iq1s | QgFormat::Iq1m | QgFormat::Iq2xxs | QgFormat::Iq2xs | QgFormat::Iq2s => 0.125,
             QgFormat::Iq3xxs => 0.25,
-            // Never consulted: the K-quants decode in kquant_qdot.rs.
-            QgFormat::Iq3s | QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => 1.0,
+            // Never consulted: the K-quants and PTQ1_0 decode on their own paths.
+            QgFormat::Iq3s | QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k | QgFormat::Ptq1 => 1.0,
         }
     }
 
@@ -660,6 +666,7 @@ impl QgFormat {
             QgFormat::Iq3xxs => 62,
             QgFormat::Iq3s => 15,
             QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => 63,
+            QgFormat::Ptq1 => 1,
         }
     }
 

@@ -187,6 +187,10 @@ pub struct Model {
 impl Model {
     /// Read every weight this architecture needs, leaving quantized ones so.
     pub fn load(gguf: &Gguf) -> Result<Model> {
+        ensure!(
+            gguf.folding().is_none(),
+            "this file is Hadamard-folded, which only the qwen35 forward pass applies"
+        );
         let config = Config::from_gguf(gguf)?;
         ensure!(
             config.head_dim > 0
@@ -356,7 +360,7 @@ impl Model {
                 .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
             {
                 let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
-                block.ffn.forward(backend, normed, act, rows, x)?;
+                block.ffn.forward(backend, normed, Some(act), rows, x)?;
             }
 
             if trace {
@@ -430,7 +434,7 @@ impl Model {
 
         let (width, kv_width) = (cfg.n_head * cfg.head_dim, spec.kv_width());
 
-        let qkv = attn.qkv.forward_act(backend, x, act, rows)?;
+        let qkv = attn.qkv.forward_act(backend, x, Some(act), rows)?;
 
         // The three parts (QKV) sit side by side in fused order.
         // Each is a window of one position's row of the result.

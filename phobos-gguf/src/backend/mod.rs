@@ -39,6 +39,10 @@ pub struct QAct(pub usize);
 /// quantized contraction here runs on.
 pub const Q8_BLOCK: usize = crate::quant::Q8_0_BLOCK;
 
+/// The block [`Backend::hadamard`] transforms in: the only one a folded
+/// file here declares, and the one the device kernel is written for.
+pub const HADAMARD_BLOCK: usize = 1024;
+
 /// Guards the delta rule's L2 normalization, so an all-zero row stays zero.
 pub const L2_EPS: f32 = 1e-12;
 
@@ -56,6 +60,16 @@ pub struct HPlane {
     pub buf: HBuf,
     pub offset: usize,
     pub pitch: usize,
+}
+
+/// The delta net's value heads regrouped ahead of a folded projection:
+/// grouped head `k * repeat + r` reads tiled head `r * groups + k`. See
+/// [`crate::hadamard`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct HeadPerm {
+    pub head_dim: usize,
+    pub groups: usize,
+    pub repeat: usize,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -654,6 +668,20 @@ pub trait Backend {
 
     /// `x *= sigmoid(gate)`, elementwise. The attention output gate.
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()>;
+
+    /// The activation side of a Hadamard-folded weight: each row of `x`,
+    /// `[rows, width]`, regrouped by `perm`, times `signs`, through the
+    /// normalized Walsh-Hadamard transform in blocks of 1024, into `out`.
+    /// See [`crate::hadamard`].
+    fn hadamard(
+        &self,
+        x: Buf,
+        rows: usize,
+        width: usize,
+        signs: Buf,
+        perm: Option<HeadPerm>,
+        out: Buf,
+    ) -> Result<()>;
 
     /// The causal depthwise convolution that feeds the delta rule, split
     /// into the packed planes [`Backend::delta_rule`] reads. `history` is

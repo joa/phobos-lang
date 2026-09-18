@@ -241,15 +241,36 @@ impl Backend for DeviceBackend {
             );
         }
 
+        let module = self.matvec.pick(n.is_multiple_of(MV_TN));
+        let splits = mv_splits(n, k);
+        if splits == 1 {
+            return self.launch(
+                module,
+                "matvec",
+                &[
+                    (a_ptr, [1, k as i64]),
+                    (w_ptr, [k as i64, n as i64]),
+                    (out_ptr, [1, n as i64]),
+                ],
+                (n.div_ceil(MV_TN) as u32, 1, 1),
+            );
+        }
+        let partials = self.split_partials(splits * n)?;
         self.launch(
-            self.matvec.pick(n.is_multiple_of(MV_TN)),
-            "matvec",
+            module,
+            "matvec_split",
             &[
                 (a_ptr, [1, k as i64]),
                 (w_ptr, [k as i64, n as i64]),
-                (out_ptr, [1, n as i64]),
+                (partials, [splits as i64, n as i64]),
             ],
-            (n.div_ceil(MV_TN) as u32, 1, 1),
+            (n.div_ceil(MV_TN) as u32, splits as u32, 1),
+        )?;
+        self.launch(
+            self.q8_split.pick(n.is_multiple_of(Q8_REDUCE_TN)),
+            "q8_reduce",
+            &[(partials, [splits as i64, n as i64]), (out_ptr, [1, n as i64])],
+            (n.div_ceil(Q8_REDUCE_TN) as u32, 1, 1),
         )
     }
 
@@ -610,6 +631,10 @@ impl Backend for DeviceBackend {
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()> {
         let len = self.len_of(x)?.min(self.len_of(gate)?);
         self.pointwise("gate_into", &[(x, 0), (gate, 0)], len)
+    }
+
+    fn hadamard(&self, x: Buf, rows: usize, width: usize, signs: Buf, perm: Option<HeadPerm>, out: Buf) -> Result<()> {
+        self.hadamard_rows(x, rows, width, signs, perm, out)
     }
 
     fn delta_conv(&self, history: Buf, taps: Buf, mix: DeltaMix, packed: Buf) -> Result<()> {

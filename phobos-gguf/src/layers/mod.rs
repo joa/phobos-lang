@@ -1,15 +1,20 @@
 use std::borrow::Cow;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
-    Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedMlpRaw, FusedProject, HBuf, Plane,
+    Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedProject, HADAMARD_BLOCK, HBuf, HeadPerm,
     ProjRun, ProjWeight, QAct, QBuf, RawBuf,
 };
 use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
+
+mod ffn;
+
+pub(crate) use ffn::Ffn;
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the
 /// batched projection has.
@@ -64,6 +69,16 @@ pub(crate) struct Linear {
     pub(crate) in_dim: usize,
     pub(crate) out_dim: usize,
     key: String,
+    fold: Option<Box<Fold>>,
+}
+
+/// A weight stored Hadamard-folded ([`crate::hadamard`]): an input one,
+/// whose activation goes through the transform ahead of every projection,
+/// or a lookup table, whose rows are restored after the lookup.
+#[derive(Clone)]
+enum Fold {
+    Input { signs: Arc<Vec<f32>>, perm: Option<HeadPerm> },
+    Table { signs: Arc<Vec<f32>> },
 }
 
 /// How a projection's weights are held between load and upload.
@@ -108,12 +123,54 @@ impl Linear {
             Weights::Dense(dense)
         };
 
+        let fold = match gguf.folding() {
+            Some(f) if f.folds(name) => Some(Box::new(Fold::Input { signs: f.signs(in_dim)?, perm: None })),
+            Some(f) if f.restores(name) => Some(Box::new(Fold::Table { signs: f.signs(in_dim)? })),
+            _ => None,
+        };
+        if let Some(f) = gguf.folding().filter(|_| fold.is_some()) {
+            ensure!(
+                f.block == HADAMARD_BLOCK,
+                "'{name}' is folded in blocks of {}; only {HADAMARD_BLOCK} is implemented",
+                f.block
+            );
+        }
+
         Ok(Linear {
             weight,
             in_dim,
             out_dim,
             key: name.to_string(),
+            fold,
         })
+    }
+
+    /// For a folded input weight, regroup the activation's heads ahead of the
+    /// transform; see [`HeadPerm`].
+    pub(crate) fn regroup_heads(&mut self, regroup: HeadPerm) {
+        if let Some(Fold::Input { perm, .. }) = self.fold.as_deref_mut() {
+            *perm = Some(regroup);
+        }
+    }
+
+    /// Whether this weight's input has to go through the Hadamard transform.
+    pub(crate) fn folded(&self) -> bool {
+        matches!(self.fold.as_deref(), Some(Fold::Input { .. }))
+    }
+
+    /// `x` carried through this weight's transform into a fresh buffer, or
+    /// `None` for a weight that reads its input as it is.
+    fn rotated(&self, backend: &dyn Backend, x: Buf, rows: usize) -> Result<Option<Buf>> {
+        let Some(Fold::Input { signs, perm }) = self.fold.as_deref() else {
+            return Ok(None);
+        };
+        let key = format!("prism.hadamard.signs.{}", self.in_dim);
+        let signs = backend.constant(&key, signs)?;
+        let out = backend.alloc(rows * self.in_dim)?;
+        backend
+            .hadamard(x, rows, self.in_dim, signs, *perm, out)
+            .with_context(|| format!("Hadamard transform ahead of '{}'", self.key))?;
+        Ok(Some(out))
     }
 
     /// What [`Linear::project_shared`] will upload for this weight.
@@ -175,6 +232,7 @@ impl Linear {
             in_dim,
             out_dim,
             key: format!("{}.{suffix}", self.key),
+            fold: self.fold.clone(),
         })
     }
 
@@ -183,6 +241,9 @@ impl Linear {
     /// uniform quant across every part; `Packed::stack` on the raw tier
     /// (K-quant, IQ) is unexercised, so that tier always declines.
     pub(crate) fn should_fuse(parts: &[&Linear]) -> bool {
+        if parts.iter().any(|p| p.fold.is_some()) {
+            return false;
+        }
         match packed_parts(parts) {
             None => true,
             Some(ps) => ps[0].has_planes() && ps.iter().all(|p| p.quant() == ps[0].quant()),
@@ -216,6 +277,10 @@ impl Linear {
             .map(|p| p.key.as_str())
             .collect::<Vec<_>>()
             .join("+");
+        ensure!(
+            parts.iter().all(|p| p.fold.is_none()),
+            "fusing Hadamard-folded weights ('{key}') is not implemented"
+        );
 
         // Blocks only stack if every part is in the same format. A K-quant file
         // is routinely mixed, leaving its more sensitive tensors wider, and
@@ -258,14 +323,8 @@ impl Linear {
             in_dim,
             out_dim,
             key,
+            fold: None,
         })
-    }
-
-    /// Project `x[rows, in_dim]` into a freshly allocated `[rows, out_dim]`.
-    pub(crate) fn forward(&self, backend: &dyn Backend, x: Buf, rows: usize) -> Result<Buf> {
-        let out = backend.alloc(rows * self.out_dim)?;
-        self.project_into(backend, x, rows, out)?;
-        Ok(out)
     }
 
     /// Write output row `index` of this weight into `out`, dequantizing it.
@@ -288,6 +347,9 @@ impl Linear {
             }
             Weights::Quant(packed) => packed.row_into(index, out)?,
         }
+        if let Some(Fold::Table { signs }) = self.fold.as_deref() {
+            crate::hadamard::restore_row(out, signs, HADAMARD_BLOCK);
+        }
         Ok(())
     }
 
@@ -307,11 +369,11 @@ impl Linear {
         &self,
         backend: &dyn Backend,
         x: Buf,
-        act: QAct,
+        act: Option<QAct>,
         rows: usize,
         out: Buf,
     ) -> Result<()> {
-        self.project_shared(backend, x, Some(act), rows, out)
+        self.project_shared(backend, x, act, rows, out)
     }
 
     /// Project and add into `dest`, the residual connection's epilogue. The
@@ -323,9 +385,20 @@ impl Linear {
         rows: usize,
         dest: Buf,
     ) -> Result<()> {
+        if let Some(rotated) = self.rotated(backend, x, rows)? {
+            let done = self.add_plain(backend, rotated, rows, dest);
+            backend.release(rotated);
+            return done;
+        }
+        self.add_plain(backend, x, rows, dest)
+    }
+
+    /// [`Linear::add_into`] on an input already carried through any
+    /// transform.
+    fn add_plain(&self, backend: &dyn Backend, x: Buf, rows: usize, dest: Buf) -> Result<()> {
         if self.is_quantized() {
             let act = backend.quantize_act(x, rows, self.in_dim)?;
-            return self.add_into_act(backend, x, act, rows, dest);
+            return self.add_act_plain(backend, x, act, rows, dest);
         }
         self.add_dense(backend, x, rows, dest)
     }
@@ -342,7 +415,7 @@ impl Linear {
         rows: usize,
         dest: Buf,
     ) -> Result<()> {
-        if rows == 1 && self.is_quantized() {
+        if rows == 1 && self.is_quantized() && self.fold.is_none() {
             let fused = backend.fused_attn_out(FusedAttnOut {
                 x,
                 width: self.in_dim,
@@ -363,6 +436,21 @@ impl Linear {
         &self,
         backend: &dyn Backend,
         x: Buf,
+        act: Option<QAct>,
+        rows: usize,
+        dest: Buf,
+    ) -> Result<()> {
+        // `act` quantizes `x` as it is, which a folded weight cannot read.
+        match act {
+            Some(act) if !self.folded() => self.add_act_plain(backend, x, act, rows, dest),
+            _ => self.add_into(backend, x, rows, dest),
+        }
+    }
+
+    fn add_act_plain(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
         act: QAct,
         rows: usize,
         dest: Buf,
@@ -379,7 +467,8 @@ impl Linear {
     /// The accumulating projection as a separate pass, which is all a dense
     /// weight has: [`Backend::matmul`] does not add into its destination.
     fn add_dense(&self, backend: &dyn Backend, x: Buf, rows: usize, dest: Buf) -> Result<()> {
-        let out = self.forward(backend, x, rows)?;
+        let out = backend.alloc(rows * self.out_dim)?;
+        self.project_plain(backend, x, None, rows, out)?;
         backend.add_into(dest, out)?;
         backend.release(out);
         Ok(())
@@ -423,6 +512,9 @@ impl Linear {
         let Weights::Quant(packed) = &self.weight else {
             return Ok(None);
         };
+        if self.fold.is_some() {
+            return Ok(None);
+        }
         if packed.has_planes() {
             return Ok(Some(ProjWeight::Q8(backend.constant_quant(&self.key, packed)?)));
         }
@@ -477,15 +569,33 @@ impl Linear {
         &self,
         backend: &dyn Backend,
         x: Buf,
-        act: QAct,
+        act: Option<QAct>,
         rows: usize,
     ) -> Result<Buf> {
         let out = backend.alloc(rows * self.out_dim)?;
-        self.project_shared(backend, x, Some(act), rows, out)?;
+        self.project_shared(backend, x, act, rows, out)?;
         Ok(out)
     }
 
     fn project_shared(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        act: Option<QAct>,
+        rows: usize,
+        out: Buf,
+    ) -> Result<()> {
+        // A caller's `act` quantizes the untransformed input, so a folded
+        // weight quantizes its own.
+        if let Some(rotated) = self.rotated(backend, x, rows)? {
+            let done = self.project_plain(backend, rotated, None, rows, out);
+            backend.release(rotated);
+            return done;
+        }
+        self.project_plain(backend, x, act, rows, out)
+    }
+
+    fn project_plain(
         &self,
         backend: &dyn Backend,
         x: Buf,
@@ -584,161 +694,6 @@ pub(crate) fn check_dims(info: &TensorInfo, expected: &[u64]) -> Result<()> {
         info.dims
     );
     Ok(())
-}
-
-/// Gate and up, fused into one launch when [`Linear::should_fuse`] allows it
-/// and run as two ordinary projections otherwise.
-enum GateUp {
-    /// Stacked: they read the same row, so one launch over a doubly wide
-    /// output replaces two over half of it.
-    Fused(Linear),
-    Split { gate: Linear, up: Linear },
-}
-
-/// The SwiGLU feed-forward every architecture here ends a block with.
-pub(crate) struct Ffn {
-    gate_up: GateUp,
-    down: Linear,
-}
-
-impl Ffn {
-    pub(crate) fn load(gguf: &Gguf, prefix: &str, d_model: usize, d_ff: usize) -> Result<Ffn> {
-        let gate = Linear::load(gguf, &format!("{prefix}.ffn_gate.weight"), d_model, d_ff)?;
-        let up = Linear::load(gguf, &format!("{prefix}.ffn_up.weight"), d_model, d_ff)?;
-        let gate_up = if Linear::should_fuse(&[&gate, &up]) {
-            GateUp::Fused(Linear::fuse(&[&gate, &up])?)
-        } else {
-            GateUp::Split { gate, up }
-        };
-        Ok(Ffn {
-            gate_up,
-            down: Linear::load(gguf, &format!("{prefix}.ffn_down.weight"), d_ff, d_model)?,
-        })
-    }
-
-    pub(crate) fn footprint(&self, into: &mut Uploads) {
-        match &self.gate_up {
-            GateUp::Fused(gate_up) => gate_up.footprint(into),
-            GateUp::Split { gate, up } => {
-                gate.footprint(into);
-                up.footprint(into);
-            }
-        }
-        self.down.footprint(into);
-    }
-
-    /// The normalization and the whole of [`Ffn::forward`] as one kernel, if
-    /// the backend has one. `false` leaves the caller to take the usual
-    /// path.
-    pub(crate) fn forward_fused(
-        &self,
-        backend: &dyn Backend,
-        x: Buf,
-        gain: Buf,
-        eps: f32,
-        rows: usize,
-    ) -> Result<bool> {
-        if rows != 1 {
-            return Ok(false);
-        }
-        // Raw formats keep gate and up apart; a backend with a fused form for
-        // them takes the three weights and their formats.
-        if let (GateUp::Split { gate, up }, Some((gq, uq)), Some(dq)) =
-            (&self.gate_up, self.split_raw_quants(), self.down.raw_quant())
-        {
-            return backend.fused_mlp_raw(FusedMlpRaw {
-                x,
-                d_model: gate.in_dim,
-                d_ff: self.down.in_dim,
-                gain,
-                eps,
-                gate: (gate.raw(backend)?, gq),
-                up: (up.raw(backend)?, uq),
-                down: (self.down.raw(backend)?, dq),
-            });
-        }
-        let GateUp::Fused(gate_up) = &self.gate_up else {
-            return Ok(false);
-        };
-        if !gate_up.is_quantized() || !self.down.is_quantized() {
-            return Ok(false);
-        }
-        backend.fused_mlp(FusedMlp {
-            x,
-            d_model: gate_up.in_dim,
-            d_ff: self.down.in_dim,
-            gain,
-            eps,
-            gate_up: gate_up.quantized(backend)?,
-            down: self.down.quantized(backend)?,
-        })
-    }
-
-    /// The raw formats of a split gate and up, if that is how both are held.
-    fn split_raw_quants(&self) -> Option<(Quant, Quant)> {
-        match &self.gate_up {
-            GateUp::Split { gate, up } => Some((gate.raw_quant()?, up.raw_quant()?)),
-            GateUp::Fused(_) => None,
-        }
-    }
-
-    /// SwiGLU: `down(silu(gate(x)) * up(x))`, added into `dest`. Nothing leaves
-    /// the backend, so the two wide intermediates never reach the host.
-    pub(crate) fn forward(
-        &self,
-        backend: &dyn Backend,
-        x: Buf,
-        act: QAct,
-        rows: usize,
-        dest: Buf,
-    ) -> Result<()> {
-        let width = self.down.in_dim;
-        let joined = backend.alloc(rows * width)?;
-        let dense = |buf| Plane { buf, offset: 0, pitch: width };
-
-        // Either a fused projection's two windows, or two ordinary
-        // projections' own dense buffers -- either way this ends as a
-        // (gate, up) pair of planes and the buffers to release once the
-        // SwiGLU has read them.
-        let (gate_p, up_p, release): (Plane, Plane, [Buf; 2]) = match &self.gate_up {
-            GateUp::Fused(gate_up) => {
-                let both = gate_up.forward_act(backend, x, act, rows)?;
-                // Past one row the two halves interleave, so the SwiGLU reads
-                // them where they lie rather than pulling them apart first.
-                let stacked = |offset| Plane { buf: both, offset, pitch: 2 * width };
-                (stacked(0), stacked(width), [both, both])
-            }
-            GateUp::Split { gate, up } => {
-                let gate_buf = gate.forward_act(backend, x, act, rows)?;
-                let up_buf = up.forward_act(backend, x, act, rows)?;
-                (dense(gate_buf), dense(up_buf), [gate_buf, up_buf])
-            }
-        };
-
-        if rows == 1 {
-            // One launch for the gate, the product, and the quantized copy.
-            let act =
-                backend.swiglu_q(gate_p.buf, gate_p.offset, up_p.buf, up_p.offset, joined, width)?;
-            release_once(backend, release);
-            self.down.add_into_act(backend, joined, act, rows, dest)?;
-            backend.release(joined);
-            return Ok(());
-        }
-        backend.swiglu_planes(gate_p, up_p, joined, rows, width)?;
-        release_once(backend, release);
-        self.down.add_into(backend, joined, rows, dest)?;
-        backend.release(joined);
-        Ok(())
-    }
-}
-
-/// Releases `[a, b]`, once each even when `a == b` (the fused case, where
-/// gate and up are two windows of the same buffer).
-fn release_once(backend: &dyn Backend, [a, b]: [Buf; 2]) {
-    backend.release(a);
-    if b != a {
-        backend.release(b);
-    }
 }
 
 /// An attention block's key and value caches, `[capacity, n_kv * head_dim]`

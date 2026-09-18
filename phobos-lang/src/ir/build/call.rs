@@ -1,7 +1,3 @@
-//! Builtins. Mirrors `codegen/call.rs`: each arm evaluates its operands in
-//! source order, checks what the old arm checked before it allocated, and
-//! produces one op whose result type is the buffer the emitter allocates.
-
 use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
@@ -9,6 +5,8 @@ use crate::ast::{Expr, Scalar as AstScalar};
 use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Reduce, Scalar, Type, ValueId};
 
 impl Build {
+    /// Each arm evaluates its operands in source order and produces one op
+    /// whose result type is the buffer the emitter allocates.
     pub(crate) fn emit_call(&mut self, callee: &str, args: &[Expr]) -> Result<Rv> {
         match callee {
             "program_id" => {
@@ -534,6 +532,7 @@ pub(crate) fn qg_tables(fmt: RawFmt) -> usize {
         RawFmt::Iq1s | RawFmt::Iq1m => 1,
         RawFmt::Iq2xxs | RawFmt::Iq2xs | RawFmt::Iq2s | RawFmt::Iq3xxs | RawFmt::Iq3s => 2,
         RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k | RawFmt::Q4k | RawFmt::Q5k | RawFmt::Q6k => 0,
+        RawFmt::Ptq1 => 0,
     }
 }
 

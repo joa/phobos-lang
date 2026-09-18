@@ -11,6 +11,7 @@ mod delta;
 #[cfg(test)]
 mod dump;
 mod elem;
+mod hadamard;
 mod iq1m;
 mod iq1s;
 mod iq2s;
@@ -34,6 +35,7 @@ pub(crate) use attn::*;
 pub use attn::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 pub(crate) use delta::*;
 pub(crate) use elem::*;
+pub(crate) use hadamard::*;
 pub(crate) use iq1m::*;
 pub(crate) use qgemm::*;
 pub(crate) use iq1s::*;

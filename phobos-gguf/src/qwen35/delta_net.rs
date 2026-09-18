@@ -4,7 +4,7 @@
 use anyhow::{Context, Result};
 
 use crate::Gguf;
-use crate::backend::{Backend, Buf};
+use crate::backend::{Backend, Buf, HeadPerm};
 use crate::layers::{Gain, Linear, check_dims};
 
 use super::Config;
@@ -13,6 +13,9 @@ use super::Config;
 /// launch when [`Linear::should_fuse`] allows it and run as four ordinary
 /// projections otherwise. A four-way fuse needs matching quant formats
 /// across all four tensors, which per-tensor quantized files rarely have.
+// One per delta net, held for the model's lifetime: the variants' size
+// difference costs nothing worth a box.
+#[allow(clippy::large_enum_variant)]
 pub(super) enum Proj {
     /// Where each part starts in the fused output, and how wide it is.
     Fused { linear: Linear, parts: [(usize, usize); 4] },
@@ -75,13 +78,22 @@ impl DeltaNet {
             Proj::Split { qkv, gate, alpha, beta }
         };
 
+        let mut out = Linear::load(gguf, &format!("{prefix}.ssm_out.weight"), cfg.ssm_inner, d)?;
+        if gguf.folding().is_some_and(|f| f.gdn_v_grouped) {
+            out.regroup_heads(HeadPerm {
+                head_dim: cfg.ssm_inner / cfg.ssm_heads,
+                groups: cfg.ssm_kv_heads,
+                repeat: cfg.ssm_heads / cfg.ssm_kv_heads,
+            });
+        }
+
         Ok(DeltaNet {
             proj,
             conv_taps: Gain::derived(format!("{conv_name}.taps"), taps),
             a_log: Gain::load(gguf, &format!("{prefix}.ssm_a"), cfg.ssm_heads)?,
             dt_bias: Gain::load(gguf, &format!("{prefix}.ssm_dt.bias"), cfg.ssm_heads)?,
             norm: Gain::load(gguf, &format!("{prefix}.ssm_norm.weight"), cfg.ssm_head_dim)?,
-            out: Linear::load(gguf, &format!("{prefix}.ssm_out.weight"), cfg.ssm_inner, d)?,
+            out,
         })
     }
 

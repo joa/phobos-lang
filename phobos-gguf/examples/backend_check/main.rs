@@ -7,7 +7,7 @@
 
 use anyhow::Result;
 use phobos_gguf::backend::{
-    Attn, Backend, Buf, DeltaMix, HBuf, HPlane, HostBackend, Plane, Rope, read_vec,
+    Attn, Backend, Buf, DeltaMix, HBuf, HPlane, HeadPerm, HostBackend, Plane, Rope, read_vec,
 };
 
 use phobos_base::half::f32_to_f16;
@@ -17,7 +17,7 @@ use phobos_gguf::quant::{Packed, Quant, pack_q8_0};
 
 mod raw;
 
-use raw::check_raw_formats;
+use raw::{check_hadamard, check_raw_formats};
 
 fn main() -> Result<()> {
     let gpu = device::DeviceBackend::new()?;
@@ -755,6 +755,23 @@ fn main() -> Result<()> {
         };
         check("gate_into", &run(&host)?, &run(&gpu)?);
     }
+
+    // Checks added since the ones above draw from the same stream, so they
+    // go last: anything earlier would change every later check's data.
+    {
+        // A delta net's gate projections, one program unsplit.
+        let (k, n) = (5120, 48);
+        let a: Vec<f32> = (0..k).map(|_| next()).collect();
+        let w: Vec<f32> = (0..k * n).map(|_| next()).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let (ab, wb) = (b.upload(&a)?, b.upload(&w)?);
+            let out = b.alloc(n)?;
+            b.matmul(ab, 1, k, wb, n, out)?;
+            read_vec(b, out, n)
+        };
+        check(&format!("matmul [1 x {k} x {n}]"), &run(&host)?, &run(&gpu)?);
+    }
+    check_hadamard(&host, &gpu, &check_within, &mut next)?;
 
     let _ = Buf(0);
     println!("\nworst relative error {:.3e}", worst.get());

@@ -4,7 +4,7 @@ use super::*;
 
 /// One kernel per format, with the table operands its decode reads (none
 /// for the K-quants).
-fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
+pub(super) fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
     let params: String = tables
         .iter()
         .enumerate()
@@ -27,7 +27,7 @@ fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
 }
 
 /// The decode matvec of a format with no tables.
-fn qdot_i8_src(fmt: &str) -> String {
+pub(super) fn qdot_i8_src(fmt: &str) -> String {
     format!(
         "@launch(256, 4)
         @autotune(TN in [64])
@@ -42,7 +42,7 @@ fn qdot_i8_src(fmt: &str) -> String {
     )
 }
 
-const FORMATS: [(&str, &[usize]); 10] = [
+const FORMATS: [(&str, &[usize]); 11] = [
     ("iq1s", &[4096]),
     ("iq1m", &[4096]),
     ("iq2xxs", &[2048, 1024]),
@@ -53,6 +53,7 @@ const FORMATS: [(&str, &[usize]); 10] = [
     ("q4k", &[]),
     ("q5k", &[]),
     ("q6k", &[]),
+    ("ptq1", &[]),
 ];
 
 /// The formats whose runs subtract a minimum, and so stage two planes more.
