@@ -85,7 +85,7 @@ impl Model {
 
         // Everything from here to the logits is device-only, which lets a
         // backend take the whole pass as one unit.
-        backend.begin_pass()?;
+        backend.begin_pass(rows)?;
 
         let trace = std::env::var_os("PHOBOS_TRACE").is_some();
         for (index, (block, layer_state)) in self.blocks.iter().zip(&mut state.layers).enumerate() {

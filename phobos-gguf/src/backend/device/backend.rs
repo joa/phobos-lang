@@ -112,7 +112,8 @@ impl Backend for DeviceBackend {
         Ok(buf)
     }
 
-    fn begin_pass(&self) -> Result<()> {
+    fn begin_pass(&self, rows: usize) -> Result<()> {
+        self.trim_after_prompt(rows)?;
         self.trim_after_dense()?;
         self.mark_pass_vram();
         self.act_next.set(0);

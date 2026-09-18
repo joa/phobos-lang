@@ -330,7 +330,7 @@ impl Model {
         let normed = backend.alloc(rows * d)?;
 
         // Everything from here to the logits is device-only
-        backend.begin_pass()?;
+        backend.begin_pass(rows)?;
 
         // Prints each block's per-token activation RMS.
         let trace = std::env::var_os("PHOBOS_TRACE").is_some();

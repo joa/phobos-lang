@@ -118,7 +118,7 @@ fn step(
     out: Buf,
     spec: Attn,
 ) -> Result<()> {
-    backend.begin_pass()?;
+    backend.begin_pass(spec.rows)?;
     for &(keys, values) in caches {
         backend.attention(q, keys, values, spec, out)?;
     }

@@ -374,10 +374,11 @@ pub trait Backend {
         Ok(false)
     }
 
-    /// Brackets the device-only part of a forward pass; nothing in between
-    /// reads back. The GPU backend replays the bracket as one CUDA graph,
-    /// backends that issue eagerly ignore both.
-    fn begin_pass(&self) -> Result<()> {
+    /// Brackets the device-only part of a forward pass over `rows`
+    /// positions; nothing in between reads back. The GPU backend replays the
+    /// bracket as one CUDA graph and frees a prompt pass's scratch once the
+    /// pass shape changes; backends that issue eagerly ignore both.
+    fn begin_pass(&self, _rows: usize) -> Result<()> {
         Ok(())
     }
     fn end_pass(&self) -> Result<()> {

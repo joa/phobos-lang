@@ -721,6 +721,16 @@ impl Model {
             )?;
         }
 
+        // A prompt pass's history is `pad + rows` positions and the next call
+        // reads only the last `pad`: carry those alone, not the whole stream,
+        // which at 512 rows is 20 MiB a layer held until the next call.
+        if rows > 1 && carried > 0 {
+            let tail = backend.alloc(carried)?;
+            backend.copy(history, mix.history_len() - carried, tail, 0, carried)?;
+            backend.release(history);
+            *carry = Some((tail, carried));
+        }
+
         // The recurrent state is why this op exists on the backend at all: a
         // [head_dim, head_dim] matrix per head, so keeping it on the host means
         // moving a megabyte in and out per block per token.
