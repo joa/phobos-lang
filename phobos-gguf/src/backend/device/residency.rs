@@ -39,6 +39,26 @@ impl DeviceBackend {
         self.drop_scratch.set(true);
     }
 
+    /// Hand a prompt pass's buffers back once the pass shape moves on from
+    /// it. The pool files a released buffer under its exact length and the
+    /// activation slots only grow, so a server whose prompts end in a ragged
+    /// batch of a new length every request strands a whole pass's worth of
+    /// `rows x width` buffers per length, gigabytes within a few dozen
+    /// requests. Same-length passes, a long prompt's full batches or a
+    /// repeated benchmark, keep theirs: they are the next pass's buffers.
+    pub(super) fn trim_after_prompt(&self, rows: usize) -> Result<()> {
+        let last = self.last_rows.replace(rows);
+        if last <= 1 || last == rows {
+            return Ok(());
+        }
+        self.stream.synchronize()?;
+        self.act_scratch.borrow_mut().clear();
+        // Freeing anything frees memory the cached pass graph points at.
+        self.pass.borrow_mut().take();
+        self.pool.trim();
+        Ok(())
+    }
+
     /// Hand the scratch and the pool's free list back, once, at the start of
     /// the pass after the one that filled them. The stream has to be drained
     /// first: a buffer released while a pass was being recorded is still read

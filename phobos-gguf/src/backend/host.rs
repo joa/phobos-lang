@@ -192,7 +192,7 @@ impl Backend for HostBackend {
         Ok(buf)
     }
 
-    fn begin_pass(&self) -> Result<()> {
+    fn begin_pass(&self, _rows: usize) -> Result<()> {
         self.qact_next.set(0);
         Ok(())
     }

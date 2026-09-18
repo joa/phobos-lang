@@ -307,6 +307,8 @@ pub struct DeviceBackend {
     /// Set by a pass that filled the scratch, cleared by the trim that follows
     /// it. See [`DeviceBackend::trim_after_dense`].
     drop_scratch: Cell<bool>,
+    /// Rows of the pass before this one, for [`DeviceBackend::trim_after_prompt`].
+    last_rows: Cell<usize>,
     /// Passes begun, so [`DeviceBackend::mark_pass_vram`] can thin its output.
     pass_marks: Cell<usize>,
     /// Every distinct allocation length this backend has asked the pool for,

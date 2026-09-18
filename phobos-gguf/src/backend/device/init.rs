@@ -591,6 +591,7 @@ impl DeviceBackend {
             pool: Pool::new(),
             dense_scratch: [const { Cell::new(None) }; 2],
             drop_scratch: Cell::new(false),
+            last_rows: Cell::new(0),
             pass_marks: Cell::new(0),
             alloc_hist: RefCell::new(HashMap::new()),
             constants: RefCell::new(HashMap::new()),
