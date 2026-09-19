@@ -6,7 +6,7 @@
     "commit": "bc9cd99"
   },
   "args": {
-    "models": "['Qwen3.8-27B-UD-IQ1_M']",
+    "models": "['Ternary-Bonsai-2-27B-PTQ1_0']",
     "prompt_tokens": "[128]",
     "gen_tokens": "[128]",
     "reps": "1",
@@ -22,19 +22,19 @@
     "max_idle_power": "120.0",
     "poll": "0.5",
     "force": "False",
-    "csv": "results/bench-qwen38.csv",
-    "json": "results/bench-qwen38.json"
+    "csv": "results/bench-bonsai.csv",
+    "json": "results/bench-bonsai.json"
   },
   "backends": {
     "phobos": "CUDA",
-    "llama.cpp CUDA": "CUDA"
+    "llama.cpp-prism CUDA": "CUDA"
   },
   "labels": {
-    "llama.cpp CUDA/Qwen3.8-27B-UD-IQ1_M": "qwen35 27B IQ1_M - 1.75 bpw",
-    "phobos/Qwen3.8-27B-UD-IQ1_M": "qwen35 26.9B Q2_K"
+    "llama.cpp-prism CUDA/Ternary-Bonsai-2-27B-PTQ1_0": "qwen35 27B PTQ1_0 - 1.75 bpw ternary (group 128)",
+    "phobos/Ternary-Bonsai-2-27B-PTQ1_0": "qwen35 26.9B PTQ1_0"
   },
   "summary": {
-    "median_clock": 1784.4093406593406,
+    "median_clock": 1256.0964912280701,
     "uncontended_rounds": [
       1,
       2,
@@ -46,157 +46,157 @@
       3
     ],
     "drift": {
-      "1": 0.00010228760546987514,
-      "2": -0.003330629834226523,
-      "3": -0.001860332907344997
+      "1": 0.002696879060178292,
+      "2": -0.015737245924292848,
+      "3": 0.0
     }
   },
   "health": {
     "1": {
       "util": 0.0,
-      "power": 38.765
+      "power": 29.919999999999998
     },
     "2": {
       "util": 0.0,
-      "power": 38.77
+      "power": 38.735
     },
     "3": {
       "util": 0.0,
-      "power": 38.845
+      "power": 38.825
     }
   },
   "samples": [
     {
       "round": 1,
       "slot": 0,
-      "engine": "llama.cpp CUDA",
+      "engine": "llama.cpp-prism CUDA",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 478.244,
-      "clock": 2007.857142857143
+      "rate": 300.55,
+      "clock": 1904.1666666666667
     },
     {
       "round": 1,
       "slot": 0,
-      "engine": "llama.cpp CUDA",
+      "engine": "llama.cpp-prism CUDA",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 22.0058,
-      "clock": 2007.857142857143
-    },
-    {
-      "round": 1,
-      "slot": 1,
-      "engine": "phobos",
-      "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
-      "test": "pp128",
-      "rep": 0,
-      "rate": 533.3333333333334,
-      "clock": 1581.923076923077
+      "rate": 29.3503,
+      "clock": 1904.1666666666667
     },
     {
       "round": 1,
       "slot": 1,
       "engine": "phobos",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 603.7735849056604,
+      "clock": 606.5044247787611
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 31.449631449631447,
-      "clock": 1581.923076923077
+      "rate": 46.09290601368383,
+      "clock": 606.5044247787611
     },
     {
       "round": 2,
       "slot": 0,
       "engine": "phobos",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 531.1203319502075,
-      "clock": 1550.1923076923076
+      "rate": 554.1125541125541,
+      "clock": 561.578947368421
     },
     {
       "round": 2,
       "slot": 0,
       "engine": "phobos",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 31.449631449631447,
-      "clock": 1550.1923076923076
+      "rate": 46.142754145638065,
+      "clock": 561.578947368421
     },
     {
       "round": 2,
       "slot": 1,
-      "engine": "llama.cpp CUDA",
+      "engine": "llama.cpp-prism CUDA",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 473.857,
-      "clock": 2008.5714285714287
+      "rate": 302.938,
+      "clock": 2001.6666666666667
     },
     {
       "round": 2,
       "slot": 1,
-      "engine": "llama.cpp CUDA",
+      "engine": "llama.cpp-prism CUDA",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 21.9968,
-      "clock": 2008.5714285714287
+      "rate": 29.3826,
+      "clock": 2001.6666666666667
     },
     {
       "round": 3,
       "slot": 0,
-      "engine": "llama.cpp CUDA",
+      "engine": "llama.cpp-prism CUDA",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 478.765,
-      "clock": 1922.857142857143
+      "rate": 302.852,
+      "clock": 1905.0
     },
     {
       "round": 3,
       "slot": 0,
-      "engine": "llama.cpp CUDA",
+      "engine": "llama.cpp-prism CUDA",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 21.9967,
-      "clock": 1922.857142857143
+      "rate": 29.3538,
+      "clock": 1905.0
     },
     {
       "round": 3,
       "slot": 1,
       "engine": "phobos",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 533.3333333333334,
-      "clock": 1645.9615384615386
+      "rate": 592.5925925925926,
+      "clock": 608.0263157894736
     },
     {
       "round": 3,
       "slot": 1,
       "engine": "phobos",
       "backend": "CUDA",
-      "model": "Qwen3.8-27B-UD-IQ1_M",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 31.181485992691837,
-      "clock": 1645.9615384615386
+      "rate": 46.10951008645534,
+      "clock": 608.0263157894736
     }
   ]
 }
