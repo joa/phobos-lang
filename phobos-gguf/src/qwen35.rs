@@ -550,24 +550,18 @@ impl Model {
 
         let (channels, carried) = (mix.channels(), mix.pad() * mix.channels());
 
-        // History is a fresh alloc each call, with the previous call's tail
+        // History is scratch for this call, with the previous call's tail
         // copied to the front so the convolution reads one padded stream and
         // needs no boundary case.
         let history = backend.alloc(mix.history_len())?;
         match *carry {
-            Some((previous, len)) => {
-                // The tail, wherever it falls: the last call may have had a
-                // different number of rows, a prompt followed by decoding.
-                backend.copy(previous, len - carried, history, 0, carried)?;
-                backend.release(previous);
-            }
+            Some((previous, len)) => backend.copy(previous, len - carried, history, 0, carried)?,
             None => {
                 let zeros = backend.zeroed(carried)?;
                 backend.copy(zeros, 0, history, 0, carried)?;
                 backend.release(zeros);
             }
         }
-        *carry = Some((history, mix.history_len()));
 
         // The delta rule's five operands are one allocation; each is a window
         // of it, written in place by the projection.
@@ -754,15 +748,25 @@ impl Model {
             )?;
         }
 
-        // A prompt pass's history is `pad + rows` positions and the next call
-        // reads only the last `pad`: carry those alone, not the whole stream,
-        // which at 512 rows is 20 MiB a layer held until the next call.
-        if rows > 1 && carried > 0 {
-            let tail = backend.alloc(carried)?;
+        // The next call reads only the last `pad` positions: they are carried
+        // in a buffer of their own that stays put, rather than the whole
+        // stream (20 MiB a layer after a 512-row prompt), and with the history
+        // released a decode step records the same buffers as the one before
+        // it, so the cached pass graph needs no patching for them.
+        if carried > 0 {
+            let tail = match carry.take() {
+                Some((buf, len)) if len == carried => buf,
+                other => {
+                    if let Some((buf, _)) = other {
+                        backend.release(buf);
+                    }
+                    backend.alloc(carried)?
+                }
+            };
             backend.copy(history, mix.history_len() - carried, tail, 0, carried)?;
-            backend.release(history);
             *carry = Some((tail, carried));
         }
+        backend.release(history);
 
         // The recurrent state is why this op exists on the backend at all: a
         // [head_dim, head_dim] matrix per head, so keeping it on the host means
@@ -829,9 +833,8 @@ impl Model {
 enum LayerState {
     Attention(KvCache),
     DeltaNet {
-        /// Allocated on first use; `carry` is the previous call's whole
-        /// convolution stream plus its length, since a prompt and a decode
-        /// step leave streams of different lengths.
+        /// Allocated on first use; `carry` is the last `pad` positions of the
+        /// previous call's convolution stream, and their length.
         carry: Option<(Buf, usize)>,
         recurrent: Option<Buf>,
     },

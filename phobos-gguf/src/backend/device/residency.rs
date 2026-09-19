@@ -1,18 +1,10 @@
-//! The one scratch a prompt pass expands a raw weight into, and what the
-//! card is holding besides the weights. One buffer at
-//! `RAW_DEQUANT_BUDGET_BYTES` serves every weight in the model.
-//!
-//! Handed back at the first pass after a dense one, the only safe point: a
-//! cached pass graph replays with raw device pointers in its kernel nodes,
-//! so freeing a pooled buffer any later leaves it reading memory the driver
-//! already took back. It goes to the driver, not the pool, since a pooled
-//! buffer stays reserved for a shape decode never asks for.
-
 use super::*;
 
 impl DeviceBackend {
-    /// The dequant scratch, at least `len` elements of it. Grown rather than
-    /// reallocated per weight, and held for the process.
+    /// The one scratch a prompt pass expands a raw weight into, at least
+    /// `len` elements of it. One buffer at `RAW_DEQUANT_BUDGET_BYTES`
+    /// serves every weight in the model, grown rather than reallocated per
+    /// weight, and held for the process.
     ///
     /// Growing has to drain the stream first: an earlier weight in this pass
     /// has launches recorded and not yet run that still read the old buffer.
@@ -59,10 +51,15 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// Hand the scratch and the pool's free list back, once, at the start of
-    /// the pass after the one that filled them. The stream has to be drained
-    /// first: a buffer released while a pass was being recorded is still read
-    /// by launches that have not run.
+    /// Hand the scratch and the pool's free list back, once, at the start
+    /// of the pass after the one that filled them. This is the only safe
+    /// point: a cached pass graph replays with raw device pointers in its
+    /// kernel nodes, so freeing any later leaves it reading memory the
+    /// driver already took back. The bytes go to the driver, not the pool,
+    /// since a pooled buffer stays reserved for a shape decode never asks
+    /// for. The stream has to be drained first: a buffer released while a
+    /// pass was being recorded is still read by launches that have not
+    /// run.
     pub(super) fn trim_after_dense(&self) -> Result<()> {
         if !self.drop_scratch.replace(false) {
             return Ok(());
@@ -104,7 +101,7 @@ impl DeviceBackend {
     /// Count an allocation of `len` elements in or out, so the free list can be
     /// attributed to the shapes that make it up.
     pub(super) fn note_alloc(&self, len: usize, delta: isize) {
-        if std::env::var_os("PHOBOS_VRAM").is_none() {
+        if !vram_report() {
             return;
         }
         *self.alloc_hist.borrow_mut().entry(len).or_insert(0) += delta;
@@ -114,7 +111,7 @@ impl DeviceBackend {
     /// length, and a length released more often than taken is one sitting in
     /// the free list for a shape nothing is asking for.
     pub(super) fn mark_alloc_hist(&self) {
-        if std::env::var_os("PHOBOS_VRAM").is_none() {
+        if !vram_report() {
             return;
         }
         let hist = self.alloc_hist.borrow();
@@ -142,7 +139,7 @@ impl DeviceBackend {
     /// what [`vram_mark`] reports: the difference between the two is the pool's
     /// free list plus whatever the driver is holding on its own account.
     pub(super) fn mark_buffers(&self) {
-        if std::env::var_os("PHOBOS_VRAM").is_none() {
+        if !vram_report() {
             return;
         }
         let mib = |bytes: usize| bytes as f64 / (1 << 20) as f64;
@@ -233,7 +230,7 @@ impl DeviceBackend {
 
 /// The same for a named model constant: names what is big rather than where.
 pub(super) fn note_big_const(key: &str, len: usize) {
-    if len * size_of::<f32>() < (8 << 20) || std::env::var_os("PHOBOS_VRAM").is_none() {
+    if len * size_of::<f32>() < (8 << 20) || !vram_report() {
         return;
     }
     eprintln!(
@@ -248,7 +245,7 @@ pub(super) fn note_big_const(key: &str, len: usize) {
 /// resident or not.
 #[track_caller]
 pub(super) fn note_big_alloc(len: usize) {
-    if len * size_of::<f32>() < (8 << 20) || std::env::var_os("PHOBOS_VRAM").is_none() {
+    if len * size_of::<f32>() < (8 << 20) || !vram_report() {
         return;
     }
     eprintln!(
@@ -264,7 +261,7 @@ pub(super) fn note_big_alloc(len: usize) {
 pub(super) fn vram_mark(label: &str) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(-1);
-    if std::env::var_os("PHOBOS_VRAM").is_none() {
+    if !vram_report() {
         return;
     }
     let Ok((free, total)) = cust::memory::mem_get_info() else {
@@ -283,4 +280,11 @@ pub(super) fn vram_mark(label: &str) {
         mib(free_mib),
         mib(total as i64),
     );
+}
+
+/// Whether `PHOBOS_VRAM` is set, read once: every allocation and release
+/// asks, and reading the environment takes a process-wide lock.
+pub(super) fn vram_report() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("PHOBOS_VRAM").is_some())
 }

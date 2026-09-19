@@ -151,7 +151,10 @@ impl DeviceBackend {
     /// The kernels do not tolerate a destination sharing storage with a
     /// source, so fail loudly on one.
     pub(super) fn check_distinct(&self, what: &str, dst: Buf, sources: &[Buf]) {
-        if std::env::var_os("PHOBOS_CHECK_BUFS").is_none() {
+        // Read once: nearly every launch asks, and reading the environment
+        // takes a process-wide lock.
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("PHOBOS_CHECK_BUFS").is_some()) {
             return;
         }
         for &src in sources {
