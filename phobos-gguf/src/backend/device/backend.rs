@@ -197,6 +197,10 @@ impl Backend for DeviceBackend {
         self.matmul_dense(a, m, k, w, n, out)
     }
 
+    fn matmul_rows(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()> {
+        self.matmul_rows_dense(a, m, k, w, n, out)
+    }
+
     fn constant_quant(&self, key: &str, packed: &Packed) -> Result<QBuf> {
         if let Some(&buf) = self.q_constants.borrow().get(key) {
             return Ok(buf);

@@ -177,10 +177,10 @@ impl Mixer {
             Mixer::DeltaNet(delta) => {
                 match &delta.proj {
                     Proj::Fused { linear, .. } => linear.footprint(into),
-                    Proj::Split { qkv, gate, alpha, beta } => {
-                        for weight in [qkv, gate, alpha, beta] {
-                            weight.footprint(into);
-                        }
+                    Proj::Split { qkv, gate, gates } => {
+                        qkv.footprint(into);
+                        gate.footprint(into);
+                        gates.footprint(into);
                     }
                 }
                 delta.out.footprint(into);
@@ -671,13 +671,15 @@ impl Model {
                 extracted.push(stacked);
                 (z, alpha_op, beta_op, fused.mix, extracted)
             }
-            Proj::Split { qkv, gate, alpha, beta } => {
+            Proj::Split { qkv, gate, gates: decay_gates } => {
                 // The three gate operands in one buffer, as the fused layout
                 // has them, so the kernel's tail can read them the same way.
-                let (gate_w, alpha_w, beta_w) = (gate.out_dim, alpha.out_dim, beta.out_dim);
+                let (gate_w, (alpha_w, beta_w)) = (gate.out_dim, decay_gates.widths());
                 let (alpha_at, beta_at) = (gate_w, gate_w + alpha_w);
                 let mut fused = None;
-                if rows == 1 {
+                if rows == 1
+                    && let Some([alpha, beta]) = decay_gates.apart()
+                {
                     let parts = [qkv, gate, alpha, beta];
                     let weights: Option<Vec<_>> = parts
                         .iter()
@@ -727,15 +729,9 @@ impl Model {
                         // The gates read the row unfolded, which `normed` is.
                         let act = input.plain_act();
                         input.release(backend);
-                        let alpha_buf = alpha.forward_act(backend, normed, act, rows)?;
-                        let beta_buf = beta.forward_act(backend, normed, act, rows)?;
-                        (
-                            (gate_buf, 0),
-                            (alpha_buf, 0),
-                            (beta_buf, 0),
-                            false,
-                            vec![gate_buf, alpha_buf, beta_buf],
-                        )
+                        let (alpha_op, beta_op, mut release) = decay_gates.project(backend, normed, act, rows)?;
+                        release.push(gate_buf);
+                        ((gate_buf, 0), alpha_op, beta_op, false, release)
                     }
                 }
             }

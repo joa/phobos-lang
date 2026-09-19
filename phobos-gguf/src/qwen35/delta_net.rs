@@ -4,8 +4,8 @@
 use anyhow::{Context, Result};
 
 use crate::Gguf;
-use crate::backend::{Backend, Buf, HeadPerm};
-use crate::layers::{Gain, Linear, check_dims};
+use crate::backend::{Backend, Buf, HeadPerm, Plane, QAct};
+use crate::layers::{Gain, Linear, Uploads, check_dims};
 
 use super::Config;
 
@@ -19,7 +19,84 @@ use super::Config;
 pub(super) enum Proj {
     /// Where each part starts in the fused output, and how wide it is.
     Fused { linear: Linear, parts: [(usize, usize); 4] },
-    Split { qkv: Linear, gate: Linear, alpha: Linear, beta: Linear },
+    Split { qkv: Linear, gate: Linear, gates: Gates },
+}
+
+/// The decay and write-strength projections of a [`Proj::Split`]: stacked
+/// into one launch where [`Linear::stack`] takes them, apart otherwise.
+pub(super) enum Gates {
+    Stacked { both: Linear, alpha_w: usize },
+    Apart { alpha: Linear, beta: Linear },
+}
+
+impl Gates {
+    fn new(alpha: Linear, beta: Linear) -> Gates {
+        match Linear::stack(&[&alpha, &beta]) {
+            Some(both) => Gates::Stacked { both, alpha_w: alpha.out_dim },
+            None => Gates::Apart { alpha, beta },
+        }
+    }
+
+    /// The two widths, decay first.
+    pub(super) fn widths(&self) -> (usize, usize) {
+        match self {
+            Gates::Stacked { both, alpha_w } => (*alpha_w, both.out_dim - alpha_w),
+            Gates::Apart { alpha, beta } => (alpha.out_dim, beta.out_dim),
+        }
+    }
+
+    /// The two weights, where a fused projection could take them apart.
+    pub(super) fn apart(&self) -> Option<[&Linear; 2]> {
+        match self {
+            Gates::Stacked { .. } => None,
+            Gates::Apart { alpha, beta } => Some([alpha, beta]),
+        }
+    }
+
+    pub(super) fn footprint(&self, into: &mut Uploads) {
+        match self {
+            Gates::Stacked { both, .. } => both.footprint(into),
+            Gates::Apart { alpha, beta } => {
+                alpha.footprint(into);
+                beta.footprint(into);
+            }
+        }
+    }
+
+    /// Both projections of `x`, `act` its quantized copy where there is one:
+    /// where each lands, and the buffers to release once the gates are read.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn project(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        act: Option<QAct>,
+        rows: usize,
+    ) -> Result<((Buf, usize), (Buf, usize), Vec<Buf>)> {
+        let (alpha, beta) = match self {
+            Gates::Apart { alpha, beta } => (alpha, beta),
+            Gates::Stacked { both, alpha_w } => {
+                let stacked = both.forward_act(backend, x, act, rows)?;
+                if rows == 1 {
+                    return Ok(((stacked, 0), (stacked, *alpha_w), vec![stacked]));
+                }
+                // Past one row the two interleave, and the gates read each
+                // one dense.
+                let mut parts = Vec::new();
+                for (at, width) in [(0, *alpha_w), (*alpha_w, both.out_dim - alpha_w)] {
+                    let buf = backend.alloc(rows * width)?;
+                    let src = Plane { buf: stacked, offset: at, pitch: both.out_dim };
+                    backend.copy_2d(src, Plane { buf, offset: 0, pitch: width }, rows, width)?;
+                    parts.push(buf);
+                }
+                backend.release(stacked);
+                return Ok(((parts[0], 0), (parts[1], 0), parts));
+            }
+        };
+        let alpha_buf = alpha.forward_act(backend, x, act, rows)?;
+        let beta_buf = beta.forward_act(backend, x, act, rows)?;
+        Ok(((alpha_buf, 0), (beta_buf, 0), vec![alpha_buf, beta_buf]))
+    }
 }
 
 /// A GatedDeltaNet block: a causal depthwise convolution over the fused q/k/v
@@ -75,7 +152,7 @@ impl DeltaNet {
             }
             Proj::Fused { linear: Linear::fuse(&[&qkv, &gate, &alpha, &beta])?, parts }
         } else {
-            Proj::Split { qkv, gate, alpha, beta }
+            Proj::Split { qkv, gate, gates: Gates::new(alpha, beta) }
         };
 
         let mut out = Linear::load(gguf, &format!("{prefix}.ssm_out.weight"), cfg.ssm_inner, d)?;

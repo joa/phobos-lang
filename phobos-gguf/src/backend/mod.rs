@@ -43,6 +43,18 @@ pub const Q8_BLOCK: usize = crate::quant::Q8_0_BLOCK;
 /// file here declares, and the one the device kernel is written for.
 pub const HADAMARD_BLOCK: usize = 1024;
 
+/// Widest output [`Backend::matmul_rows`] takes: past it the `[k, n]`
+/// kernels have columns enough to spread across the card.
+pub const ROWS_MAX_N: usize = 128;
+
+/// What `k` has to be a multiple of for [`Backend::matmul_rows`].
+pub const ROWS_TK: usize = 32;
+
+/// Whether [`Backend::matmul_rows`] takes a `[k, n]` projection.
+pub fn takes_rows(k: usize, n: usize) -> bool {
+    n <= ROWS_MAX_N && k.is_multiple_of(ROWS_TK)
+}
+
 /// Guards the delta rule's L2 normalization, so an all-zero row stays zero.
 pub const L2_EPS: f32 = 1e-12;
 
@@ -456,6 +468,11 @@ pub trait Backend {
 
     /// `out[m, n] = a[m, k] @ w[k, n]`, all row-major.
     fn matmul(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()>;
+
+    /// [`Backend::matmul`] against a weight held the other way round,
+    /// `w[n, k]`, for a projection at most [`ROWS_MAX_N`] wide with `k` a
+    /// whole number of [`ROWS_TK`] steps; see [`takes_rows`].
+    fn matmul_rows(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()>;
 
     /// [`Backend::matmul`] against a weight left quantized. The activation
     /// quantizes to Q8_0 whatever the weight's format is, so the contraction

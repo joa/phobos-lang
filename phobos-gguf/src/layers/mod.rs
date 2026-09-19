@@ -7,7 +7,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::backend::{
     Backend, Buf, Fused, FusedAttnOut, FusedMix, FusedProject, HADAMARD_BLOCK, HBuf, HeadPerm,
-    ProjRun, ProjWeight, QAct, QBuf, RawBuf,
+    ProjRun, ProjWeight, QAct, QBuf, RawBuf, takes_rows,
 };
 use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
@@ -160,6 +160,26 @@ impl Linear {
         matches!(self.fold.as_deref(), Some(Fold::Input { .. }))
     }
 
+    /// The key a dense weight goes up under: its own, or for one narrow
+    /// enough for [`Backend::matmul_rows`], that of the layout it reads.
+    fn dense_key(&self) -> String {
+        match &self.weight {
+            Weights::Dense(_) if takes_rows(self.in_dim, self.out_dim) => format!("{}.rows", self.key),
+            _ => self.key.clone(),
+        }
+    }
+
+    /// A dense `[in, out]` weight back in the file's `[out, in]` order.
+    fn file_rows(&self, data: &[f32]) -> Vec<f32> {
+        let mut rows = vec![0.0f32; data.len()];
+        for (i, row) in data.chunks_exact(self.out_dim).enumerate() {
+            for (o, &v) in row.iter().enumerate() {
+                rows[o * self.in_dim + i] = v;
+            }
+        }
+        rows
+    }
+
     /// What [`Linear::project_shared`] will upload for this weight.
     ///
     /// A quantized weight a kernel unpacks goes up as one quant per element
@@ -181,7 +201,7 @@ impl Linear {
             }
             _ => (elems * size_of::<f32>(), true),
         };
-        into.add(&self.key, bytes, dense);
+        into.add(&self.dense_key(), bytes, dense);
     }
 
     /// The same projection with its output channels permuted: output `j` of the
@@ -312,6 +332,32 @@ impl Linear {
             key,
             fold: None,
         })
+    }
+
+    /// Dense parts sharing an input, stacked along the output axis into one
+    /// projection narrow enough for [`Backend::matmul_rows`], unpadded; `None`
+    /// where any part is held otherwise or the stack is too wide.
+    pub(crate) fn stack(parts: &[&Linear]) -> Option<Linear> {
+        let in_dim = parts.first()?.in_dim;
+        let out_dim = parts.iter().map(|p| p.out_dim).sum();
+        let sources = parts
+            .iter()
+            .map(|p| match &p.weight {
+                Weights::Dense(data) if p.in_dim == in_dim && p.fold.is_none() => Some((data, p.out_dim)),
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>()
+            .filter(|_| takes_rows(in_dim, out_dim))?;
+        let mut data = vec![0.0f32; in_dim * out_dim];
+        for (i, row) in data.chunks_exact_mut(out_dim).enumerate() {
+            let mut at = 0;
+            for (src, width) in &sources {
+                row[at..at + width].copy_from_slice(&src[i * width..(i + 1) * width]);
+                at += width;
+            }
+        }
+        let key = parts.iter().map(|p| p.key.as_str()).collect::<Vec<_>>().join("+");
+        Some(Linear { weight: Weights::Dense(data), in_dim, out_dim, key, fold: None })
     }
 
     /// Write output row `index` of this weight into `out`, dequantizing it.
@@ -600,6 +646,15 @@ impl Linear {
                 None => backend.matmul_raw(x, rows, self.in_dim, w, self.out_dim, out),
             }
             .with_context(|| format!("matmul for '{}'", self.key));
+        }
+
+        if let Weights::Dense(data) = &self.weight
+            && takes_rows(self.in_dim, self.out_dim)
+        {
+            let w = backend.constant_lazy(&self.dense_key(), &|| Ok(self.file_rows(data)))?;
+            return backend
+                .matmul_rows(x, rows, self.in_dim, w, self.out_dim, out)
+                .with_context(|| format!("matmul for '{}'", self.key));
         }
 
         // Either the file was dense or no kernel unpacks its format, in which

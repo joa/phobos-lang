@@ -87,3 +87,104 @@ pub(crate) fn mv_splits(n: usize, k: usize) -> usize {
     }
     splits.max(1)
 }
+
+/// Rows a prompt's program of the row-major contraction takes; the rest go
+/// a row a program.
+pub(crate) const ROWS_TM: usize = 16;
+
+/// Outputs a prompt's program takes at most: small tiles, many programs, as
+/// a narrow projection over a short prompt has little else to spread over.
+pub(crate) const ROWS_TN: usize = 16;
+
+/// Programs below which a prompt's row-major contraction splits `k`, and the
+/// most slices it cuts: every program walks its slice alone, so a short
+/// prompt is latency bound without them, and a long one only pays the
+/// extra pass over the partials.
+pub(crate) const ROWS_SPLIT_TARGET: usize = 192;
+pub(crate) const ROWS_MAX_SPLITS: usize = 8;
+
+/// Widest `k` [`matvec_blocks_src`] stages whole: the row and one output's
+/// weight row, beside the partial sums, within the static shared memory.
+pub(crate) const BLOCKS_MAX_K: usize = 5120;
+
+/// The row-major contractions, and the tile each is generated for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum RowsKernel {
+    /// [`matvec_blocks_src`], a decode row against a weight `k` wide.
+    Blocks { k: usize, tn: usize },
+    /// [`matmul_rows_src`], and for a prompt's band
+    /// [`matmul_rows_split_src`] in the same module.
+    Tiles { tm: usize, tn: usize },
+}
+
+/// `C = A W^T` for a weight held row-major as the file has it, `[n, k]`, a
+/// `tm` by `tn` tile a program, the weight tile transposed in the
+/// contraction.
+pub(crate) fn matmul_rows_src(tm: usize, tn: usize) -> String {
+    format!(
+        "@launch(256)
+@autotune(TM in [{tm}], TN in [{tn}], TK in [16])
+@aligned(M = TM, N = TN, K = TK)
+kernel matmul_rows(A: tensor<f32>[M, K], W: tensor<f32>[N, K], C: tensor<f32>[M, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  var acc: tile<f32>[TM, TN] = 0.0
+  for kt in range(0, K, TK) {{
+    var a = A[pm * TM :+ TM, kt :+ TK]
+    var w = W[pn * TN :+ TN, kt :+ TK]
+    acc += dot(a, transpose(w))
+  }}
+  C[pm * TM :+ TM, pn * TN :+ TN] = acc
+}}
+"
+    )
+}
+
+/// [`matmul_rows_src`] over one of `S` slices of `k` a program, the partials
+/// `[S * M, N]` for `q8_reduce` to sum.
+pub(crate) fn matmul_rows_split_src(tm: usize, tn: usize) -> String {
+    format!(
+        "@launch(256)
+@autotune(TM in [{tm}], TN in [{tn}], TK in [16])
+@aligned(M = TM, N = TN, K = TK)
+kernel matmul_rows_split(A: tensor<f32>[M, K], W: tensor<f32>[N, K], P: tensor<f32>[SM, N]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  let ps = program_id(2)
+  let slice = K / (SM / M)
+  let from = ps * slice
+  var acc: tile<f32>[TM, TN] = 0.0
+  for kt in range(from, from + slice, TK) {{
+    var a = A[pm * TM :+ TM, kt :+ TK]
+    var w = W[pn * TN :+ TN, kt :+ TK]
+    acc += dot(a, transpose(w))
+  }}
+  P[ps * M + pm * TM :+ TM, pn * TN :+ TN] = acc
+}}
+"
+    )
+}
+
+/// One row against a `[n, k]` weight, `tn` outputs a program. The row and
+/// each weight row are viewed `[k / 32, 32]`, so `k` runs across the threads
+/// a 32-element block apiece and one closing sum per output ends it: a
+/// contraction's own output tile is too narrow to keep the threads busy.
+pub(crate) fn matvec_blocks_src(k: usize, tn: usize) -> String {
+    let kb = k / 32;
+    format!(
+        "@launch(256)
+@autotune(TN in [{tn}], KB in [{kb}])
+@aligned(AB = KB, WB = KB, N = TN)
+kernel matvec_blocks(A: tensor<f32>[AB, 32], W: tensor<f32>[WB, 32], C: tensor<f32>[N, D1]) {{
+  let pn = program_id(0)
+  var a = A[0 :+ KB, :]
+  var parts: tile<f32>[KB, TN] = 0.0
+  for j in range(0, TN) {{
+    let o = pn * TN + j
+    parts[:, j :+ 1] = rowsum(a * W[o * KB :+ KB, :])
+  }}
+  C[pn * TN :+ TN, 0 :+ 1] = rowsum(transpose(parts))
+}}
+"
+    )
+}
