@@ -85,4 +85,82 @@ impl DeviceBackend {
             (n.div_ceil(Q8_REDUCE_TN) as u32, 1, 1),
         )
     }
+
+    /// [`Backend::matmul_rows`]: a decode row by [`matvec_blocks_src`] where
+    /// the row fits, otherwise a band of whole [`ROWS_TM`]-row programs, `k`
+    /// split across programs where they are few, and then the rest a row a
+    /// program.
+    pub(super) fn matmul_rows_dense(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()> {
+        self.check_distinct("matmul_rows", out, &[a, w]);
+        ensure!(
+            crate::backend::takes_rows(k, n),
+            "a [{k}, {n}] weight is not one the row-major contraction takes"
+        );
+        let f32_bytes = size_of::<f32>() as u64;
+        let (a_ptr, w_ptr, out_ptr) = (self.ptr(a, 0)?, self.ptr(w, 0)?, self.ptr(out, 0)?);
+        if m == 1 && k <= BLOCKS_MAX_K {
+            let tn = if n.is_multiple_of(2) { 2 } else { 1 };
+            let kb = (k / 32) as i64;
+            let operands = [(a_ptr, [kb, 32]), (w_ptr, [n as i64 * kb, 32]), (out_ptr, [n as i64, 1])];
+            let kernel = RowsKernel::Blocks { k, tn };
+            return self.with_kernel(
+                &self.rows_matmuls,
+                kernel,
+                "matvec_blocks",
+                || matvec_blocks_src(k, tn),
+                |module| self.launch(module, "matvec_blocks", &operands, ((n / tn) as u32, 1, 1)),
+            );
+        }
+        let band = m - m % ROWS_TM;
+        let tn = (1..=ROWS_TN).rev().find(|t| n.is_multiple_of(*t)).unwrap_or(1);
+        for (from, rows, tm) in [(0, band, ROWS_TM), (band, m - band, 1)] {
+            if rows == 0 {
+                continue;
+            }
+            let (a_at, out_at) = (a_ptr + (from * k) as u64 * f32_bytes, out_ptr + (from * n) as u64 * f32_bytes);
+            let grid = ((rows / tm) as u32, (n / tn) as u32);
+            let mut splits = (ROWS_SPLIT_TARGET / (grid.0 * grid.1) as usize).clamp(1, ROWS_MAX_SPLITS);
+            while splits > 1 && !k.is_multiple_of(splits * 16) {
+                splits -= 1;
+            }
+            if tm > 1 && splits > 1 {
+                let partials = self.split_partials(splits * rows * n)?;
+                let operands = [
+                    (a_at, [rows as i64, k as i64]),
+                    (w_ptr, [n as i64, k as i64]),
+                    (partials, [(splits * rows) as i64, n as i64]),
+                ];
+                self.with_kernel(
+                    &self.rows_matmuls,
+                    RowsKernel::Tiles { tm, tn },
+                    "matmul_rows",
+                    || matmul_rows_src(tm, tn) + &matmul_rows_split_src(tm, tn),
+                    |module| self.launch(module, "matmul_rows_split", &operands, (grid.0, grid.1, splits as u32)),
+                )?;
+                // The band's outputs are contiguous, so the sum runs over
+                // them as one row.
+                let len = rows * n;
+                self.launch(
+                    self.q8_split.pick(len.is_multiple_of(Q8_REDUCE_TN)),
+                    "q8_reduce",
+                    &[(partials, [splits as i64, len as i64]), (out_at, [1, len as i64])],
+                    (len.div_ceil(Q8_REDUCE_TN) as u32, 1, 1),
+                )?;
+                continue;
+            }
+            let operands = [
+                (a_at, [rows as i64, k as i64]),
+                (w_ptr, [n as i64, k as i64]),
+                (out_at, [rows as i64, n as i64]),
+            ];
+            self.with_kernel(
+                &self.rows_matmuls,
+                RowsKernel::Tiles { tm, tn },
+                "matmul_rows",
+                || matmul_rows_src(tm, tn) + &matmul_rows_split_src(tm, tn),
+                |module| self.launch(module, "matmul_rows", &operands, (grid.0, grid.1, 1)),
+            )?;
+        }
+        Ok(())
+    }
 }

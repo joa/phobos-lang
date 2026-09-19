@@ -284,6 +284,22 @@ impl Backend for HostBackend {
         })
     }
 
+    fn matmul_rows(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()> {
+        self.writing(out, |slabs, dst| {
+            let (left, right) = (&slabs[a.0], &slabs[w.0]);
+            ensure!(
+                left.len() >= m * k && right.len() >= n * k && dst.len() >= m * n,
+                "matmul_rows operands are too small"
+            );
+            for (row, d) in left.chunks_exact(k).zip(dst.chunks_exact_mut(n)).take(m) {
+                for (v, col) in d.iter_mut().zip(right.chunks_exact(k)) {
+                    *v = row.iter().zip(col).map(|(x, y)| x * y).sum();
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn matmul(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()> {
         self.writing(out, |slabs, dst| {
             let left = &slabs[a.0];

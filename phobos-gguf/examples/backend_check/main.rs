@@ -773,6 +773,21 @@ fn main() -> Result<()> {
     }
     check_hadamard(&host, &gpu, &check_within, &mut next)?;
 
+    // The narrow dense projection against a weight held `[n, k]`: a decode
+    // row, a prompt of whole tiles, one with a tail, and a width the prompt
+    // tile does not divide.
+    for (m, k, n) in [(1usize, 5120usize, 48usize), (128, 5120, 48), (37, 5120, 96), (19, 1024, 20), (512, 5120, 96)] {
+        let a: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let w: Vec<f32> = (0..n * k).map(|_| next()).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let (ab, wb) = (b.upload(&a)?, b.upload(&w)?);
+            let out = b.alloc(m * n)?;
+            b.matmul_rows(ab, m, k, wb, n, out)?;
+            read_vec(b, out, m * n)
+        };
+        check(&format!("matmul_rows [{m} x {k} x {n}]"), &run(&host)?, &run(&gpu)?);
+    }
+
     // The plain norm at the widths a model runs it: attention's per-head
     // norms and the model width.
     for (rows, width) in [(96usize, 256usize), (3, 5120), (1, 5120)] {

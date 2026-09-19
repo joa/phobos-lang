@@ -575,6 +575,7 @@ impl DeviceBackend {
             convs: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
             hadamards: RefCell::new(HashMap::new()),
+            rows_matmuls: RefCell::new(HashMap::new()),
             splits: RefCell::new(HashMap::new()),
             store_pairs: RefCell::new(HashMap::new()),
             ropes: RefCell::new(HashMap::new()),

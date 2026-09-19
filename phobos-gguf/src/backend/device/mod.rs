@@ -256,6 +256,8 @@ pub struct DeviceBackend {
     /// The Hadamard transforms, by width, head regrouping and what they do
     /// around the transform.
     hadamards: RefCell<HashMap<HadamardKey, Module>>,
+    /// The row-major dense contractions, by tile rows and outputs.
+    rows_matmuls: RefCell<HashMap<RowsKernel, Module>>,
     /// Strided copy kernels, keyed by direction, the width they copy, and
     /// whether the pitches let the promise be made.
     splits: RefCell<HashMap<(Strided, usize, bool), Module>>,
