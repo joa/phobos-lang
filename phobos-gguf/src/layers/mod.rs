@@ -13,8 +13,10 @@ use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
 
 mod ffn;
+mod shared;
 
 pub(crate) use ffn::Ffn;
+pub(crate) use shared::Shared;
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the
 /// batched projection has.
@@ -156,21 +158,6 @@ impl Linear {
     /// Whether this weight's input has to go through the Hadamard transform.
     pub(crate) fn folded(&self) -> bool {
         matches!(self.fold.as_deref(), Some(Fold::Input { .. }))
-    }
-
-    /// `x` carried through this weight's transform into a fresh buffer, or
-    /// `None` for a weight that reads its input as it is.
-    fn rotated(&self, backend: &dyn Backend, x: Buf, rows: usize) -> Result<Option<Buf>> {
-        let Some(Fold::Input { signs, perm }) = self.fold.as_deref() else {
-            return Ok(None);
-        };
-        let key = format!("prism.hadamard.signs.{}", self.in_dim);
-        let signs = backend.constant(&key, signs)?;
-        let out = backend.alloc(rows * self.in_dim)?;
-        backend
-            .hadamard(x, rows, self.in_dim, signs, *perm, out)
-            .with_context(|| format!("Hadamard transform ahead of '{}'", self.key))?;
-        Ok(Some(out))
     }
 
     /// What [`Linear::project_shared`] will upload for this weight.
@@ -364,18 +351,6 @@ impl Linear {
         self.project_shared(backend, x, None, rows, out)
     }
 
-    /// [`Linear::project_into`] against an activation quantized already.
-    pub(crate) fn project_into_act(
-        &self,
-        backend: &dyn Backend,
-        x: Buf,
-        act: Option<QAct>,
-        rows: usize,
-        out: Buf,
-    ) -> Result<()> {
-        self.project_shared(backend, x, act, rows, out)
-    }
-
     /// Project and add into `dest`, the residual connection's epilogue. The
     /// dense fallback has no accumulating form, so it keeps the separate pass.
     pub(crate) fn add_into(
@@ -385,22 +360,23 @@ impl Linear {
         rows: usize,
         dest: Buf,
     ) -> Result<()> {
-        if let Some(rotated) = self.rotated(backend, x, rows)? {
-            let done = self.add_plain(backend, rotated, rows, dest);
-            backend.release(rotated);
+        if self.folded() {
+            let input = self.share(backend, x, None, rows)?;
+            let done = self.add_plain(backend, input.x, input.act, rows, dest);
+            input.release(backend);
             return done;
         }
-        self.add_plain(backend, x, rows, dest)
+        self.add_plain(backend, x, None, rows, dest)
     }
 
     /// [`Linear::add_into`] on an input already carried through any
-    /// transform.
-    fn add_plain(&self, backend: &dyn Backend, x: Buf, rows: usize, dest: Buf) -> Result<()> {
+    /// transform, and `act` its quantized copy where there is one.
+    fn add_plain(&self, backend: &dyn Backend, x: Buf, act: Option<QAct>, rows: usize, dest: Buf) -> Result<()> {
         if self.is_quantized() {
-            let act = backend.quantize_act(x, rows, self.in_dim)?;
+            let act = act.map_or_else(|| backend.quantize_act(x, rows, self.in_dim), Ok)?;
             return self.add_act_plain(backend, x, act, rows, dest);
         }
-        self.add_dense(backend, x, rows, dest)
+        self.add_dense(backend, x, act, rows, dest)
     }
 
     /// [`Linear::add_into`], but letting a backend fuse the activation's
@@ -456,7 +432,7 @@ impl Linear {
         dest: Buf,
     ) -> Result<()> {
         if !self.is_quantized() {
-            return self.add_dense(backend, x, rows, dest);
+            return self.add_dense(backend, x, None, rows, dest);
         }
         let w = self.quantized(backend)?;
         backend
@@ -466,9 +442,9 @@ impl Linear {
 
     /// The accumulating projection as a separate pass, which is all a dense
     /// weight has: [`Backend::matmul`] does not add into its destination.
-    fn add_dense(&self, backend: &dyn Backend, x: Buf, rows: usize, dest: Buf) -> Result<()> {
+    fn add_dense(&self, backend: &dyn Backend, x: Buf, act: Option<QAct>, rows: usize, dest: Buf) -> Result<()> {
         let out = backend.alloc(rows * self.out_dim)?;
-        self.project_plain(backend, x, None, rows, out)?;
+        self.project_plain(backend, x, act, rows, out)?;
         backend.add_into(dest, out)?;
         backend.release(out);
         Ok(())
@@ -587,9 +563,10 @@ impl Linear {
     ) -> Result<()> {
         // A caller's `act` quantizes the untransformed input, so a folded
         // weight quantizes its own.
-        if let Some(rotated) = self.rotated(backend, x, rows)? {
-            let done = self.project_plain(backend, rotated, None, rows, out);
-            backend.release(rotated);
+        if self.folded() {
+            let input = self.share(backend, x, None, rows)?;
+            let done = self.project_plain(backend, input.x, input.act, rows, out);
+            input.release(backend);
             return done;
         }
         self.project_plain(backend, x, act, rows, out)

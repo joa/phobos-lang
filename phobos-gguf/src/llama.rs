@@ -359,8 +359,9 @@ impl Model {
                 .ffn
                 .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
             {
-                let act = backend.rms_norm_q(x, rows, d, gain, cfg.rms_eps, normed)?;
-                block.ffn.forward(backend, normed, Some(act), rows, x)?;
+                let input = block.ffn.input().share_norm(backend, x, rows, gain, cfg.rms_eps, normed)?;
+                block.ffn.forward(backend, input, rows, x)?;
+                input.release(backend);
             }
 
             if trace {

@@ -3,10 +3,10 @@
 use anyhow::Result;
 
 use crate::Gguf;
-use crate::backend::{Backend, Buf, FusedMlp, FusedMlpRaw, Plane, QAct};
+use crate::backend::{Backend, Buf, FusedMlp, FusedMlpRaw, Plane};
 use crate::quant::Quant;
 
-use super::{Linear, Uploads};
+use super::{Linear, Shared, Uploads};
 
 /// Gate and up, fused into one launch when [`Linear::should_fuse`] allows it
 /// and run as two ordinary projections otherwise.
@@ -96,6 +96,15 @@ impl Ffn {
         })
     }
 
+    /// The weight that reads the block's input, or the first of the two
+    /// that do; see [`Linear::share`].
+    pub(crate) fn input(&self) -> &Linear {
+        match &self.gate_up {
+            GateUp::Fused(gate_up) => gate_up,
+            GateUp::Split { gate, .. } => gate,
+        }
+    }
+
     /// Whether any of the three weights is Hadamard-folded, which the fused
     /// kernels do not transform for.
     fn folded(&self) -> bool {
@@ -114,35 +123,29 @@ impl Ffn {
         }
     }
 
-    /// SwiGLU: `down(silu(gate(x)) * up(x))`, added into `dest`. Nothing leaves
-    /// the backend, so the two wide intermediates never reach the host.
-    pub(crate) fn forward(
-        &self,
-        backend: &dyn Backend,
-        x: Buf,
-        act: Option<QAct>,
-        rows: usize,
-        dest: Buf,
-    ) -> Result<()> {
+    /// SwiGLU: `down(silu(gate(x)) * up(x))`, added into `dest`, `x` shared
+    /// by [`Ffn::input`]. Nothing leaves the backend, so the two wide
+    /// intermediates never reach the host.
+    pub(crate) fn forward(&self, backend: &dyn Backend, x: Shared, rows: usize, dest: Buf) -> Result<()> {
         let width = self.down.in_dim;
         let joined = backend.alloc(rows * width)?;
         let dense = |buf| Plane { buf, offset: 0, pitch: width };
 
-        // Either a fused projection's two windows, or two ordinary
-        // projections' own dense buffers -- either way this ends as a
+        // Either a fused projection's two windows or two ordinary
+        // projections' own dense buffers, and either way this ends as a
         // (gate, up) pair of planes and the buffers to release once the
         // SwiGLU has read them.
         let (gate_p, up_p, release): (Plane, Plane, [Buf; 2]) = match &self.gate_up {
             GateUp::Fused(gate_up) => {
-                let both = gate_up.forward_act(backend, x, act, rows)?;
+                let both = gate_up.forward_shared(backend, x, rows)?;
                 // Past one row the two halves interleave, so the SwiGLU reads
                 // them where they lie rather than pulling them apart first.
                 let stacked = |offset| Plane { buf: both, offset, pitch: 2 * width };
                 (stacked(0), stacked(width), [both, both])
             }
             GateUp::Split { gate, up } => {
-                let gate_buf = gate.forward_act(backend, x, act, rows)?;
-                let up_buf = up.forward_act(backend, x, act, rows)?;
+                let gate_buf = gate.forward_shared(backend, x, rows)?;
+                let up_buf = up.forward_shared(backend, x, rows)?;
                 (dense(gate_buf), dense(up_buf), [gate_buf, up_buf])
             }
         };

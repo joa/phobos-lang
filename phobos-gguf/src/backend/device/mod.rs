@@ -38,7 +38,9 @@ mod init;
 mod kernels;
 mod launch;
 mod matmul;
+mod matmul_f32;
 mod mem;
+mod norm;
 mod qmma_raw;
 mod raw;
 mod residency;
@@ -251,8 +253,9 @@ pub struct DeviceBackend {
     convs: RefCell<HashMap<ConvKey, Module>>,
     /// Gate kernels, keyed by head count.
     gates: RefCell<HashMap<usize, Module>>,
-    /// The Hadamard transforms, by width and head regrouping.
-    hadamards: RefCell<HashMap<(usize, Option<HeadPerm>), Module>>,
+    /// The Hadamard transforms, by width, head regrouping and what they do
+    /// around the transform.
+    hadamards: RefCell<HashMap<HadamardKey, Module>>,
     /// Strided copy kernels, keyed by direction, the width they copy, and
     /// whether the pitches let the promise be made.
     splits: RefCell<HashMap<(Strided, usize, bool), Module>>,
@@ -506,6 +509,8 @@ pub struct DeviceBackend {
     /// Which of the first few `act_scratch` slots the next transient
     /// activation takes. See [`DeviceBackend::act_slot_transient`].
     act_ring: Cell<usize>,
+    /// The next slot of the shared ring, see [`DeviceBackend::act_slot_shared`].
+    act_shared: Cell<usize>,
     act_next: Cell<usize>,
     /// Split-K partial sums, `[splits, n]`, grown to the largest asked for.
     split_scratch: RefCell<Option<DeviceBuffer<f32>>>,

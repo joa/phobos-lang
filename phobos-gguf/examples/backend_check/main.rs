@@ -773,6 +773,20 @@ fn main() -> Result<()> {
     }
     check_hadamard(&host, &gpu, &check_within, &mut next)?;
 
+    // The plain norm at the widths a model runs it: attention's per-head
+    // norms and the model width.
+    for (rows, width) in [(96usize, 256usize), (3, 5120), (1, 5120)] {
+        let x: Vec<f32> = (0..rows * width).map(|_| next() * 3.0).collect();
+        let gain: Vec<f32> = (0..width).map(|_| next() + 1.5).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let (xb, gb) = (b.upload(&x)?, b.upload(&gain)?);
+            let out = b.alloc(rows * width)?;
+            b.rms_norm(xb, rows, width, gb, eps, out)?;
+            read_vec(b, out, rows * width)
+        };
+        check(&format!("rms_norm [{rows} x {width}]"), &run(&host)?, &run(&gpu)?);
+    }
+
     let _ = Buf(0);
     println!("\nworst relative error {:.3e}", worst.get());
     if failures.get() > 0 {

@@ -2,9 +2,9 @@ use anyhow::{Context, Result, ensure};
 
 use crate::Gguf;
 use crate::backend::{
-    Attn, Backend, Buf, DeltaMix, FusedMix, FusedProject, HPlane, Plane, ProjRun, QAct, Rope,
+    Attn, Backend, Buf, DeltaMix, FusedMix, FusedProject, HPlane, Plane, ProjRun, Rope,
 };
-use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Uploads};
+use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Shared, Uploads};
 
 mod delta_net;
 mod forward;
@@ -210,9 +210,6 @@ pub struct Model {
     blocks: Vec<Block>,
     output_norm: Gain,
     rope: RopeTable,
-    /// Every quantized projection is Hadamard-folded and quantizes its own
-    /// rotated input, so a normalization's quantized copy has no reader.
-    folded: bool,
 }
 
 /// Refuses a Hadamard-folded file naming a tensor this model does not read
@@ -222,21 +219,7 @@ fn check_folding(gguf: &Gguf) -> Result<()> {
         "attn_q", "attn_k", "attn_v", "attn_output", "attn_qkv", "attn_gate", "ssm_alpha",
         "ssm_beta", "ssm_out", "ffn_gate", "ffn_up", "ffn_down",
     ];
-    let Some(folding) = gguf.folding() else {
-        return Ok(());
-    };
-    for name in folding.names() {
-        let kind = name
-            .strip_prefix("blk.")
-            .and_then(|rest| rest.split_once('.'))
-            .and_then(|(_, rest)| rest.strip_suffix(".weight"));
-        let known = match kind {
-            Some(kind) => LINEAR.contains(&kind),
-            None => matches!(name, "output.weight" | "token_embd.weight"),
-        };
-        ensure!(known, "'{name}' is Hadamard-folded but this model does not project through it");
-    }
-    Ok(())
+    gguf.folding().map_or(Ok(()), |f| f.check_projected(&LINEAR))
 }
 
 /// Copies a projection's qkv window into the delta net's history cache: a
@@ -319,7 +302,6 @@ impl Model {
         let output_norm = Gain::load(gguf, "output_norm.weight", config.d_model)?;
 
         Ok(Model {
-            folded: gguf.folding().is_some(),
             rope: RopeTable::new(config.rope_dim, config.rope_freq_base),
             config,
             embed,
@@ -374,8 +356,8 @@ impl Model {
         State { pos: 0, layers }
     }
 
-    /// The pre-projection normalization of `x` into `normed`, with the
-    /// quantized copy the projections share, unless nothing would read it.
+    /// The pre-projection normalization of `x` into `normed`, shared by
+    /// `reader` and every projection beside it; see [`Linear::share_norm`].
     pub(super) fn norm(
         &self,
         backend: &dyn Backend,
@@ -383,21 +365,16 @@ impl Model {
         rows: usize,
         gain: Buf,
         normed: Buf,
-    ) -> Result<Option<QAct>> {
-        let (d, eps) = (self.config.d_model, self.config.rms_eps);
-        if self.folded {
-            backend.rms_norm(x, rows, d, gain, eps, normed)?;
-            return Ok(None);
-        }
-        Ok(Some(backend.rms_norm_q(x, rows, d, gain, eps, normed)?))
+        reader: &Linear,
+    ) -> Result<Shared> {
+        reader.share_norm(backend, x, rows, gain, self.config.rms_eps, normed)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn attention(
         &self,
         attn: &Attention,
-        x: Buf,
-        act: Option<QAct>,
+        input: Shared,
         rows: usize,
         start_pos: usize,
         cache: &mut KvCache,
@@ -415,9 +392,10 @@ impl Model {
         };
         let (dim, width, kv_width) = (cfg.head_dim, cfg.n_head * cfg.head_dim, spec.kv_width());
 
-        let q_gate_buf = attn.q.forward_act(backend, x, act, rows)?;
-        let k_buf = attn.k.forward_act(backend, x, act, rows)?;
-        let v_buf = attn.v.forward_act(backend, x, act, rows)?;
+        let q_gate_buf = attn.q.forward_shared(backend, input, rows)?;
+        let k_buf = attn.k.forward_shared(backend, input, rows)?;
+        let v_buf = attn.v.forward_shared(backend, input, rows)?;
+        input.release(backend);
 
         // Split the query from its output gate; the layout only changes where
         // the copy starts and how far apart its rows are.
@@ -656,8 +634,9 @@ impl Model {
                 if !fused.project {
                     // The normalization leaves the quantized copy behind,
                     // which the projection reading it would otherwise redo.
-                    let act = self.norm(backend, resid, rows, gain, normed)?;
-                    linear.project_into_act(backend, normed, act, rows, stacked)?;
+                    let input = self.norm(backend, resid, rows, gain, normed, linear)?;
+                    linear.project_into_shared(backend, input, rows, stacked)?;
+                    input.release(backend);
                     copy_qkv_into_history(
                         backend,
                         Plane { buf: stacked, offset: qkv_at, pitch: width },
@@ -732,8 +711,8 @@ impl Model {
                         ((stacked, 0), (stacked, alpha_at), (stacked, beta_at), mix_done, vec![stacked])
                     }
                     None => {
-                        let act = self.norm(backend, resid, rows, gain, normed)?;
-                        let qkv_buf = qkv.forward_act(backend, normed, act, rows)?;
+                        let input = self.norm(backend, resid, rows, gain, normed, qkv)?;
+                        let qkv_buf = qkv.forward_shared(backend, input, rows)?;
                         copy_qkv_into_history(
                             backend,
                             Plane { buf: qkv_buf, offset: 0, pitch: channels },
@@ -744,7 +723,10 @@ impl Model {
                         )?;
                         backend.release(qkv_buf);
 
-                        let gate_buf = gate.forward_act(backend, normed, act, rows)?;
+                        let gate_buf = gate.forward_shared(backend, input, rows)?;
+                        // The gates read the row unfolded, which `normed` is.
+                        let act = input.plain_act();
+                        input.release(backend);
                         let alpha_buf = alpha.forward_act(backend, normed, act, rows)?;
                         let beta_buf = beta.forward_act(backend, normed, act, rows)?;
                         (
