@@ -871,7 +871,11 @@ def main():
             continue
         seen.add((engine.name, backend))
         if engine.name != "phobos":
-            engine.name = f"{engine.name} {backend}"
+            # Named after its directory when that names a build, so a fork's
+            # column never reads as stock llama.cpp.
+            build = Path(engine.exe).parent.name
+            name = build if build.startswith("llama") else engine.name
+            engine.name = f"{name} {backend}"
         backends[engine.name] = backend
         working.append(engine)
     if not working:
