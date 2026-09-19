@@ -244,17 +244,28 @@ impl Linear {
     }
 
     /// Whether [`Linear::fuse`] on these parts stays quantized rather than
-    /// falling back to a dense fusion. Requires the plane-tier format and a
-    /// uniform quant across every part; `Packed::stack` on the raw tier
-    /// (K-quant, IQ) is unexercised, so that tier always declines.
+    /// falling back to a dense fusion. Requires a uniform quant across every
+    /// part, in the plane tier or PTQ1_0 (`Packed::stack` on the rest of the
+    /// raw tier is unexercised), and parts that are either all unfolded or
+    /// all read through the same transform, which the stack then keeps.
     pub(crate) fn should_fuse(parts: &[&Linear]) -> bool {
-        if parts.iter().any(|p| p.fold.is_some()) {
+        if !Linear::same_fold(parts) {
             return false;
         }
         match packed_parts(parts) {
-            None => true,
-            Some(ps) => ps[0].has_planes() && ps.iter().all(|p| p.quant() == ps[0].quant()),
+            None => parts.iter().all(|p| p.fold.is_none()),
+            Some(ps) => {
+                (ps[0].has_planes() || ps[0].quant() == Quant::PTQ1_0)
+                    && ps.iter().all(|p| p.quant() == ps[0].quant())
+            }
         }
+    }
+
+    /// Whether every part reads its input through the same transform, or
+    /// none does.
+    fn same_fold(parts: &[&Linear]) -> bool {
+        let folds = |p: &Linear| p.fold.as_deref().map(|f| matches!(f, Fold::Input { .. }));
+        parts.iter().all(|p| p.rotation() == parts[0].rotation() && folds(p) == folds(parts[0]))
     }
 
     /// Stacks weights that share an input into one projection, replacing a
@@ -285,8 +296,8 @@ impl Linear {
             .collect::<Vec<_>>()
             .join("+");
         ensure!(
-            parts.iter().all(|p| p.fold.is_none()),
-            "fusing Hadamard-folded weights ('{key}') is not implemented"
+            Linear::same_fold(parts),
+            "fusing weights read through different transforms ('{key}')"
         );
 
         // Blocks only stack if every part is in the same format. A K-quant file
@@ -330,7 +341,7 @@ impl Linear {
             in_dim,
             out_dim,
             key,
-            fold: None,
+            fold: first.fold.clone(),
         })
     }
 
