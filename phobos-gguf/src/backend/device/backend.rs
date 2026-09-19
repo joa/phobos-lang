@@ -117,7 +117,11 @@ impl Backend for DeviceBackend {
         self.trim_after_prompt(rows)?;
         self.trim_after_dense()?;
         self.mark_pass_vram();
+        // The rings restart too, so a step records the same slots as the one
+        // before it and the cached graph needs no patching for them.
         self.act_next.set(0);
+        self.act_ring.set(0);
+        self.act_shared.set(mem::ACT_RING);
         self.recorded_len.set(0);
         self.flushed.set(false);
         self.recording.set(true);

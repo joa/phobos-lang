@@ -99,9 +99,9 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 /// wider CTA reads faster alone and loses in the model, where a decode
 /// step keeps a thousand of these in flight.
 pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
-    let want = std::env::var("PHOBOS_QDOT_I8_CTA")
-        .ok()
-        .and_then(|v| v.parse().ok())
+    static CTA: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let want = CTA
+        .get_or_init(|| std::env::var("PHOBOS_QDOT_I8_CTA").ok().and_then(|v| v.parse().ok()))
         .unwrap_or(256);
     want.clamp(256, tn * 32).min(1024)
 }
@@ -113,11 +113,16 @@ pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
 /// columns read faster alone but do not help in the model, so the default
 /// stays.
 pub(crate) fn qdot_i8_tn(default: usize) -> usize {
-    std::env::var("PHOBOS_QDOT_I8_TN")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|&tn| tn.is_power_of_two() && (8..=256).contains(&tn))
-        .unwrap_or(default)
+    // Read once: every decode matvec asks, and reading the environment
+    // takes a process-wide lock.
+    static TN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    TN.get_or_init(|| {
+        std::env::var("PHOBOS_QDOT_I8_TN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|&tn| tn.is_power_of_two() && (8..=256).contains(&tn))
+    })
+    .unwrap_or(default)
 }
 
 /// The Q8_0 projection as a single `qmma_t`, which is what a prompt pass

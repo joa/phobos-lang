@@ -39,12 +39,19 @@ impl Pool {
 
     /// Hand a buffer back. It is filed under its own length, so it only comes
     /// out again for an allocation of exactly that many elements.
+    ///
+    /// Each length's buffers are kept in address order, lowest out first, so
+    /// which buffer an allocation gets depends only on what is free and not
+    /// on the order it was released in. A recorded pass that releases in a
+    /// different order than it allocates would otherwise swap its buffers
+    /// every step, and every launch reading them would need its graph node
+    /// patched.
     pub fn put(&self, buf: DeviceBuffer<f32>) {
-        self.free
-            .borrow_mut()
-            .entry(buf.len())
-            .or_default()
-            .push(buf);
+        let mut free = self.free.borrow_mut();
+        let list = free.entry(buf.len()).or_default();
+        let at = buf.as_device_ptr().as_raw();
+        let slot = list.partition_point(|b| b.as_device_ptr().as_raw() > at);
+        list.insert(slot, buf);
     }
 
     /// Frees everything held back to the driver and returns how many bytes that
