@@ -387,5 +387,40 @@ pub(super) fn check_hadamard(
         let label = format!("hadamard [{rows} x {width}]{}", if perm.is_some() { " regrouped" } else { "" });
         check_within(&label, 1e-4, &run(host)?, &run(gpu)?);
     }
+
+    // The quantizing forms, the int8 copy read back through a Q8_0
+    // projection, and the normalizing one's plain row beside it.
+    let (n, eps) = (64usize, 1e-6f32);
+    for (rows, width, perm, norm) in [
+        (1usize, 5120usize, None, true),
+        (3, 5120, None, true),
+        (1, 17408, None, false),
+        (4, 6144, Some(regroup), false),
+    ] {
+        let x: Vec<f32> = (0..rows * width).map(|_| next() * 4.0).collect();
+        let signs: Vec<f32> = (0..width).map(|_| if next() < 0.0 { -1.0 } else { 1.0 }).collect();
+        let gain: Vec<f32> = (0..width).map(|_| next() + 1.5).collect();
+        let qs: Vec<i8> = (0..width * n).map(|_| (next() * 127.0) as i8).collect();
+        let scales: Vec<f32> = (0..(width / 32) * n).map(|_| next().abs() + 0.01).collect();
+        let packed = pack_q8_0(&qs, &scales, width, n)?;
+        let run = |b: &dyn Backend| -> Result<[Vec<f32>; 3]> {
+            let (xb, sb, gb) = (b.upload(&x)?, b.upload(&signs)?, b.upload(&gain)?);
+            let (normed, out) = (b.alloc(rows * width)?, b.alloc(rows * width)?);
+            let act = match norm {
+                true => b.rms_norm_hadamard_q(xb, rows, width, gb, eps, sb, normed, out)?,
+                false => b.hadamard_q(xb, rows, width, sb, perm, out)?,
+            };
+            let wb = b.constant_quant(&format!("hadamard_q{width}"), &packed)?;
+            let proj = b.alloc(rows * n)?;
+            b.matmul_quant_act(act, rows, width, wb, n, proj)?;
+            let normed = if norm { read_vec(b, normed, rows * width)? } else { Vec::new() };
+            Ok([normed, read_vec(b, out, rows * width)?, read_vec(b, proj, rows * n)?])
+        };
+        let ([want_n, want_o, want_p], [got_n, got_o, got_p]) = (run(host)?, run(gpu)?);
+        let label = format!("{} [{rows} x {width}]", if norm { "rms_norm_hadamard_q" } else { "hadamard_q" });
+        check_within(&format!("{label} normed"), 1e-4, &want_n, &got_n);
+        check_within(&label, 1e-4, &want_o, &got_o);
+        check_within(&format!("{label} act x {n}"), 1e-3, &want_p, &got_p);
+    }
     Ok(())
 }

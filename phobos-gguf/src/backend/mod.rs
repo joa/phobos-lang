@@ -683,6 +683,43 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()>;
 
+    /// [`Backend::hadamard`] that also leaves `out` quantized for the
+    /// projections that read it. The copy may be reused by the second call
+    /// of this or [`Backend::rms_norm_hadamard_q`] after it, so its readers
+    /// come before that.
+    fn hadamard_q(
+        &self,
+        x: Buf,
+        rows: usize,
+        width: usize,
+        signs: Buf,
+        perm: Option<HeadPerm>,
+        out: Buf,
+    ) -> Result<QAct> {
+        self.hadamard(x, rows, width, signs, perm, out)?;
+        self.quantize_act(out, rows, width)
+    }
+
+    /// [`Backend::rms_norm`] of `x` into `normed`, carried on through
+    /// [`Backend::hadamard_q`] into `out`: everything a folded projection
+    /// reading a normalized row wants, and the plain row for any unfolded one
+    /// beside it.
+    #[allow(clippy::too_many_arguments)]
+    fn rms_norm_hadamard_q(
+        &self,
+        x: Buf,
+        rows: usize,
+        width: usize,
+        gain: Buf,
+        eps: f32,
+        signs: Buf,
+        normed: Buf,
+        out: Buf,
+    ) -> Result<QAct> {
+        self.rms_norm(x, rows, width, gain, eps, normed)?;
+        self.hadamard_q(normed, rows, width, signs, None, out)
+    }
+
     /// The causal depthwise convolution that feeds the delta rule, split
     /// into the packed planes [`Backend::delta_rule`] reads. `history` is
     /// `[pad + rows, channels]`: the `pad` positions carried from the

@@ -38,6 +38,16 @@ impl Slot {
     }
 }
 
+
+/// Quantized-activation slots in the transient ring, at the front of a pass.
+pub(super) const ACT_RING: usize = 4;
+
+/// Slots in the shared ring, after the transient one.
+const ACT_SHARED: usize = 2;
+
+/// The first slot a pass hands out exclusively.
+const ACT_EXCLUSIVE: usize = ACT_RING + ACT_SHARED;
+
 impl DeviceBackend {
     /// A handle onto `data` in the arena, for a constant the model never
     /// releases and never reads back.
@@ -227,22 +237,31 @@ impl DeviceBackend {
     /// projection, does not, so those can share a handful of slots: a
     /// recorded pass replays as a chain of kernel nodes in issue order, so a
     /// ring slot's quantize cannot run before the projection that reads it.
-    /// `RING` only has to exceed how many are live at once, which is one.
+    /// `ACT_RING` only has to exceed how many are live at once, which is one.
     pub(super) fn act_slot_transient(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
-        const RING: usize = 4;
         let at = self.act_ring.get();
-        self.act_ring.set((at + 1) % RING);
-        let base = self.act_next.get();
-        self.act_next.set(base.max(RING));
+        self.act_ring.set((at + 1) % ACT_RING);
+        self.act_next.set(self.act_next.get().max(ACT_EXCLUSIVE));
+        self.act_slot_at(at, m, k)
+    }
+
+    /// [`Self::act_slot`] for the Hadamard transform's quantized copy, read
+    /// by the projections sharing one input and dead before the next such
+    /// input is made: at most one is live, so a pair of slots serves every
+    /// one of them, however many a pass makes.
+    pub(super) fn act_slot_shared(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
+        let at = self.act_shared.get();
+        self.act_shared.set(ACT_RING + (at + 1 - ACT_RING) % ACT_SHARED);
+        self.act_next.set(self.act_next.get().max(ACT_EXCLUSIVE));
         self.act_slot_at(at, m, k)
     }
 
     /// This pass's next quantized-activation slot, big enough for `m` rows
     /// of `k`, with its device pointers.
     pub(super) fn act_slot(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
-        // The ring reserves the first `RING` slots of every pass, so an
+        // The two rings reserve the first slots of every pass, so an
         // exclusive one starts past them.
-        let at = self.act_next.get().max(4);
+        let at = self.act_next.get().max(ACT_EXCLUSIVE);
         self.act_next.set(at + 1);
         self.act_slot_at(at, m, k)
     }

@@ -705,6 +705,7 @@ impl DeviceBackend {
             iota8,
             act_scratch: RefCell::new(Vec::new()),
             act_ring: Cell::new(0),
+            act_shared: Cell::new(mem::ACT_RING),
             act_next: Cell::new(0),
             split_scratch: RefCell::new(None),
             _ctx,

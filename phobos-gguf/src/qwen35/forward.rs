@@ -95,13 +95,11 @@ impl Model {
             let gain = block.attn_norm.buf(backend)?;
             match (&block.mixer, layer_state) {
                 (Mixer::Attention(attn), LayerState::Attention(cache)) => {
-                    // The normalization leaves the quantized copy behind too,
-                    // which the three projections reading it would otherwise
-                    // redo.
-                    let act = self.norm(backend, x, rows, gain, normed)?;
-                    self.attention(
-                        attn, normed, act, rows, state.pos, cache, backend, variants, x,
-                    )?
+                    // The three projections share one normalized, quantized
+                    // (and for folded weights, transformed) row.
+                    let input = self.norm(backend, x, rows, gain, normed, &attn.q)?;
+                    self.attention(attn, input, rows, state.pos, cache, backend, variants, x)?;
+                    input.release(backend);
                 }
                 (Mixer::DeltaNet(delta), LayerState::DeltaNet { carry, recurrent }) => self
                     .delta_net(
@@ -117,8 +115,9 @@ impl Model {
                 .ffn
                 .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
             {
-                let act = self.norm(backend, x, rows, gain, normed)?;
-                block.ffn.forward(backend, normed, act, rows, x)?;
+                let input = self.norm(backend, x, rows, gain, normed, block.ffn.input())?;
+                block.ffn.forward(backend, input, rows, x)?;
+                input.release(backend);
             }
 
             if trace {

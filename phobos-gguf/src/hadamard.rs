@@ -122,6 +122,24 @@ impl Folding {
         self.weights.iter().chain(&self.inverse).map(String::as_str)
     }
 
+    /// Refuses a declared name a model does not project through: a block
+    /// weight whose kind is not in `linear`, or a top-level one other than
+    /// the head and the embedding.
+    pub fn check_projected(&self, linear: &[&str]) -> Result<()> {
+        for name in self.names() {
+            let kind = name
+                .strip_prefix("blk.")
+                .and_then(|rest| rest.split_once('.'))
+                .and_then(|(_, rest)| rest.strip_suffix(".weight"));
+            let known = match kind {
+                Some(kind) => linear.contains(&kind),
+                None => matches!(name, "output.weight" | "token_embd.weight"),
+            };
+            ensure!(known, "'{name}' is Hadamard-folded but this model does not project through it");
+        }
+        Ok(())
+    }
+
     /// The sign vector for an input `width`: all ones where the file carries
     /// none.
     pub fn signs(&self, width: usize) -> Result<Arc<Vec<f32>>> {
