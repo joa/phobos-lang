@@ -44,7 +44,7 @@ impl Linear {
 
     /// The transform this weight's input goes through: its width and head
     /// regrouping, or `None` for a weight that reads its input as it is.
-    fn rotation(&self) -> Option<(usize, Option<HeadPerm>)> {
+    pub(super) fn rotation(&self) -> Option<(usize, Option<HeadPerm>)> {
         match self.fold.as_deref() {
             Some(Fold::Input { perm, .. }) => Some((self.in_dim, *perm)),
             _ => None,
