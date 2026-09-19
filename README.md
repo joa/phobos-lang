@@ -27,7 +27,7 @@ kernel gemm(A: tensor<f32>[M, K],
 ```
 
 SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
-The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, from a 0.8B Q8_0 to a 27B IQ1_M that only just fits in its VRAM. The prompt pass still trails; [Inference](#inference) gives both.
+The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, from a 0.8B Q8_0 to two 27Bs, IQ1_M and ternary PTQ1_0, that only just fit in its VRAM. The prompt pass trails on the small models and leads on both 27Bs; [Inference](#inference) gives both.
 
 ![Phobos benchmark results](results/bench.svg)
 
@@ -51,6 +51,7 @@ Inference has been tested with:
 - [Qwen3.5-0.8B-Q8_0](https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF)
 - Qwen3.5-4B-Q4_K_M
 - Qwen3.8-27B-UD-IQ1_M
+- Ternary-Bonsai-2-27B-PTQ1_0
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
 
 **Note:**
@@ -68,37 +69,59 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test   | llama.cpp CUDA[^2]  | Phobos GPU         |
 | ------ | ------------------: | -----------------: |
-| pp128  |  6853.32 +/-  13.87 | 5863.60 +/- 183.01 |
-| pp512  | 10758.03 +/-  33.09 | 8660.98 +/-  33.06 |
-| tg32   |   239.93 +/-   0.26 |  322.81 +/-   0.55 |
-| tg128  |   258.93 +/-   0.22 |  320.80 +/-   0.41 |
-| tg512  |   262.76 +/-   0.31 |  320.68 +/-   0.28 |
-| tg1024 |   262.66 +/-   0.26 |  319.88 +/-   0.28 |
-| tg2048 |   261.50 +/-   0.24 |  318.43 +/-   0.30 |
+| pp128  |  6865.64 +/-  20.15 | 5598.11 +/- 192.96 |
+| pp512  | 10871.30 +/-   9.37 | 8491.03 +/-  17.11 |
+| tg32   |   241.50 +/-   0.18 |  329.45 +/-   0.27 |
+| tg128  |   260.12 +/-   0.09 |  328.37 +/-   0.14 |
+| tg512  |   263.78 +/-   0.10 |  328.63 +/-   0.05 |
+| tg1024 |   263.35 +/-   0.09 |  327.67 +/-   0.07 |
+| tg2048 |   262.47 +/-   0.05 |  326.14 +/-   0.08 |
+
+MiniCPM5-1B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
+
+| test   | llama.cpp CUDA[^2]  | Phobos GPU          |
+| ------ | ------------------: | ------------------: |
+| pp128  |  8613.27 +/-  30.14 |  7574.73 +/-  27.89 |
+| pp512  | 16235.99 +/-  34.08 | 10114.45 +/-  20.40 |
+| tg32   |   280.79 +/-   0.15 |   318.95 +/-   0.33 |
+| tg128  |   281.81 +/-   0.18 |   317.78 +/-   0.18 |
+| tg512  |   280.80 +/-   0.13 |   316.35 +/-   0.12 |
+| tg1024 |   280.01 +/-   0.16 |   313.77 +/-   0.13 |
+| tg2048 |   277.07 +/-   0.14 |   308.68 +/-   0.12 |
 
 Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
-| test   | llama.cpp CUDA[^2] | Phobos GPU        |
-| ------ | -----------------: | ----------------: |
-| pp128  | 2325.17 +/-   3.32 | 2319.06 +/-  7.14 |
-| pp512  | 2961.19 +/-   2.40 | 2383.07 +/- 16.91 |
-| tg32   |  106.86 +/-   0.03 |  111.32 +/-  0.08 |
-| tg128  |  110.07 +/-   0.06 |  111.20 +/-  0.07 |
-| tg512  |  110.51 +/-   0.05 |  111.22 +/-  0.04 |
-| tg1024 |  110.39 +/-   0.03 |  111.08 +/-  0.06 |
-| tg2048 |  109.87 +/-   0.02 |  110.45 +/-  0.22 |
+| test   | llama.cpp CUDA[^2] | Phobos GPU         |
+| ------ | -----------------: | -----------------: |
+| pp128  | 2317.77 +/-   1.83 | 2307.98 +/-   3.33 |
+| pp512  | 2956.77 +/-   3.66 | 2352.83 +/-  24.31 |
+| tg32   |  107.04 +/-   0.07 |  113.53 +/-   0.08 |
+| tg128  |  110.07 +/-   0.06 |  113.29 +/-   0.05 |
+| tg512  |  110.59 +/-   0.04 |  113.30 +/-   0.04 |
+| tg1024 |  110.44 +/-   0.05 |  113.15 +/-   0.06 |
+| tg2048 |  109.87 +/-   0.03 |  112.60 +/-   0.05 |
 
 Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
 | test  | llama.cpp CUDA[^2] | Phobos GPU      |
 | ----- | -----------------: | --------------: |
-| pp128 |   477.03 +/-  0.63 | 330.18 +/- 0.28 |
-| tg128 |    21.97 +/-  0.01 |  30.56 +/- 0.04 |
+| pp128 |   476.96 +/-  1.56 | 532.60 +/- 0.74 |
+| tg128 |    22.00 +/-  0.00 |  31.36 +/- 0.09 |
 
-The 27B's 6.27 GiB of weights leave little of the card's 8 GiB, and its figures hold
-only while the desktop's share stays small: these were taken with 956 MiB in use
-before the run. Once the desktop holds more than about 1.2 GiB the model no longer
-fits and the driver pages it over PCIe, which an earlier session measured at 7 t/s.
+Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
+
+| test  | llama.cpp-prism CUDA[^3] | Phobos GPU       |
+| ----- | -----------------------: | ---------------: |
+| pp128 |         302.11 +/-  0.78 | 583.49 +/- 15.04 |
+| tg128 |          29.36 +/-  0.01 |  46.12 +/-  0.01 |
+
+The two 27Bs, at 6.27 GiB and 5.53 GiB of weights, leave little of the card's 8 GiB,
+and their figures hold only while the desktop's share stays small: the IQ1_M was
+taken with 1377 MiB in use before the run, the PTQ1_0 with 979 MiB. Once the desktop
+holds much more the model no longer fits and the driver pages it over PCIe, which an
+earlier session measured at 7 t/s.
+
+![phobos vs llama.cpp, tokens per second](results/inference.svg)
 
 <details>
   <summary>Benchmark Details</summary>
@@ -106,7 +129,7 @@ fits and the driver pages it over PCIe, which an earlier session measured at 7 t
 ```plain
 # both engines, interleaved on a card checked for contention, which is what a
 # comparison between the two columns has to be measured with. One invocation
-# covers the 0.8B and 4B tables above and MiniCPM5-1B, which is in the plot only.
+# covers the 0.8B, MiniCPM5-1B and 4B tables above.
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
 
@@ -115,11 +138,17 @@ python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
 python scripts/bench.py -m models/Qwen3.8-27B-UD-IQ1_M.gguf -p 128 -n 128 \
   -r 1 -R 3 --csv results/bench-qwen38.csv --json results/bench-qwen38.json
 
-# the plot carries both runs, a block each: one file is one visit to the card,
-# and the 27B generates two orders of magnitude slower, so the two do not share
+# the ternary 27B, against PrismML's llama.cpp fork, since stock llama.cpp has
+# neither PTQ1_0 nor the Hadamard rotation the file carries
+python scripts/bench.py -m models/Ternary-Bonsai-2-27B-PTQ1_0.gguf -p 128 -n 128 \
+  -r 1 -R 3 --llama-bench ${llama_cpp_prism}/llama-bench.exe \
+  --csv results/bench-bonsai.csv --json results/bench-bonsai.json
+
+# the plot carries every run, a block each: one file is one visit to the card,
+# and a 27B generates an order of magnitude slower, so the blocks do not share
 # a scale.
 python scripts/plot.py results/bench.json results/bench-qwen38.json \
-  -o results/inference.svg
+  results/bench-bonsai.json -o results/inference.svg
 
 # either engine on its own, which measures one column and not a comparison
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
@@ -373,3 +402,4 @@ this project.
 
 [^1]: [Table 2. GeForce RTX 3080 vs GeForce RTX 2080 / 2080 Super; P.14](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf)
 [^2]: build: 4d19b2876 (10636)
+[^3]: [PrismML's llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), build: 7dffb158d (10685)
