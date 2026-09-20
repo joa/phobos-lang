@@ -271,12 +271,19 @@ impl Linear {
     /// part, in the plane tier or PTQ1_0 (`Packed::stack` on the rest of the
     /// raw tier is unexercised), and parts that are either all unfolded or
     /// all read through the same transform, which the stack then keeps.
+    /// Parts held dense fuse dense only when every part is: a quantized
+    /// projection fused with an F32 one would go up as f32 many times its
+    /// size (a delta net's qkv and gate beside its alpha and beta, 98 MiB a
+    /// block where the file holds 27), and reading that back every token
+    /// costs more than the launch the fusion saves.
     pub(crate) fn should_fuse(parts: &[&Linear]) -> bool {
         if !Linear::same_fold(parts) {
             return false;
         }
         match packed_parts(parts) {
-            None => parts.iter().all(|p| p.fold.is_none()),
+            None => parts
+                .iter()
+                .all(|p| p.fold.is_none() && matches!(p.weight, Weights::Dense(_))),
             Some(ps) => {
                 (ps[0].has_planes() || ps[0].quant() == Quant::PTQ1_0)
                     && ps.iter().all(|p| p.quant() == ps[0].quant())
