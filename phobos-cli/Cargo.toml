@@ -18,6 +18,7 @@ phobos-base = { path = "../phobos-base" }
 phobos-inference = { path = "../phobos-inference" }
 phobos-gguf = { path = "../phobos-gguf" }
 phobos-onnx = { path = "../phobos-onnx" }
+ratatui = "0.30.2"
 
 [features]
 cuda = ["phobos-gguf/cuda", "phobos-onnx/cuda"]
