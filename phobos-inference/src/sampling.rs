@@ -17,6 +17,13 @@ impl Sequence {
         self.tokens.push(id);
     }
 
+    /// Every token in order: the prompt followed by what has been generated
+    /// and fed back. This is exactly what the session that produced it holds,
+    /// which is what lets a caller keep the session for the next request.
+    pub fn tokens(&self) -> &[i64] {
+        &self.tokens
+    }
+
     pub fn history(&self) -> History<'_> {
         let (prompt, generated) = self.tokens.split_at(self.prompt_len);
         History::new(prompt, generated)
