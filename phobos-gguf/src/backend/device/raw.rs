@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::quant::RawScales;
+use crate::quant::grouped::group_rows;
 
 /// A device-resident raw-block weight: where its file bytes and `f16` header
 /// plane(s) landed in the [`arena::Arena`] (`dmin` absent for a format with no
@@ -83,22 +84,3 @@ impl DeviceBackend {
     }
 }
 
-/// Columns a grouped upload is padded to: the widest decode tile.
-pub(super) const RAW_GROUP_PAD: usize = 64;
-
-/// `[n][nb][unit]` rows as `[n' / 8][nb][8][unit]`, `n'` the next multiple
-/// of [`RAW_GROUP_PAD`], zero-padded.
-fn group_rows<T: Copy + Default>(rows: &[T], n: usize, nb: usize, unit: usize) -> Vec<T> {
-    const GROUP: usize = 8;
-    let groups = n.div_ceil(RAW_GROUP_PAD) * (RAW_GROUP_PAD / GROUP);
-    let mut out = vec![T::default(); groups * nb * GROUP * unit];
-    for j in 0..n {
-        let (group, in_group) = (j / GROUP, j % GROUP);
-        for b in 0..nb {
-            let src = (j * nb + b) * unit;
-            let dst = ((group * nb + b) * GROUP + in_group) * unit;
-            out[dst..dst + unit].copy_from_slice(&rows[src..src + unit]);
-        }
-    }
-    out
-}

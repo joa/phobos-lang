@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 
 use crate::Gguf;
 use crate::backend::{Backend, Buf, DeltaMix, FusedMix, FusedProject, Plane, ProjRun};
-use crate::layers::{Ffn, Gain, KvCache, Linear, RopeTable, Shared, Uploads};
+use crate::layers::{Ffn, Gain, KvCache, Linear, MoeFfn, RopeTable, Shared, Uploads};
 
 mod attention;
 mod delta_net;
@@ -13,13 +13,29 @@ use attention::Attention;
 use delta_net::{DeltaNet, Proj};
 pub use variants::Variants;
 
+/// The routed feed-forward of the `qwen35moe` architecture.
+#[derive(Clone, Copy, Debug)]
+pub struct MoeConfig {
+    pub n_expert: usize,
+    /// Experts a token goes through.
+    pub n_used: usize,
+    /// Width of one expert.
+    pub d_expert: usize,
+    /// Width of the shared expert every token goes through.
+    pub d_shared: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// `qwen35`, or `qwen35moe` for the same trunk with routed experts.
+    pub arch: &'static str,
     /// Blocks that take part in ordinary decoding, excluding the trailing
     /// multi-token-prediction block.
     pub n_block: usize,
     pub d_model: usize,
+    /// Width of the feed-forward, or of one expert in the routed one.
     pub d_ff: usize,
+    pub moe: Option<MoeConfig>,
     pub vocab: usize,
     pub context_length: usize,
     pub rms_eps: f32,
@@ -46,13 +62,27 @@ pub struct Config {
 
 impl Config {
     pub fn from_gguf(gguf: &Gguf) -> Result<Config> {
-        let arch = gguf.architecture()?;
-        ensure!(
-            arch == "qwen35",
-            "expected a qwen35 model, found architecture '{arch}'"
-        );
+        let arch = match gguf.architecture()? {
+            "qwen35" => "qwen35",
+            "qwen35moe" => "qwen35moe",
+            other => anyhow::bail!("expected a qwen35 model, found architecture '{other}'"),
+        };
 
         let m = gguf.metadata();
+
+        let moe = match arch {
+            "qwen35moe" => Some(MoeConfig {
+                n_expert: m.arch_count("expert_count")?,
+                n_used: m.arch_count("expert_used_count")?,
+                d_expert: m.arch_count("expert_feed_forward_length")?,
+                d_shared: m.arch_count("expert_shared_feed_forward_length")?,
+            }),
+            _ => None,
+        };
+        let d_ff = match moe {
+            Some(moe) => moe.d_expert,
+            None => m.arch_count("feed_forward_length")?,
+        };
 
         let n_block_total = m.arch_count("block_count")?;
 
@@ -93,9 +123,11 @@ impl Config {
             .row_major_dims()[0] as usize;
 
         Ok(Config {
+            arch,
             n_block,
             d_model: m.arch_count("embedding_length")?,
-            d_ff: m.arch_count("feed_forward_length")?,
+            d_ff,
+            moe,
             vocab,
             context_length: m.arch_count("context_length")?,
             rms_eps: m.arch_float("attention.layer_norm_rms_epsilon")?,
@@ -154,13 +186,44 @@ impl Mixer {
     }
 }
 
+/// The feed-forward half of a block: one SwiGLU, or a router's choice among
+/// many plus a shared one.
+enum FeedForward {
+    Dense(Ffn),
+    Moe(MoeFfn),
+}
+
+impl FeedForward {
+    fn load(gguf: &Gguf, prefix: &str, cfg: &Config) -> Result<FeedForward> {
+        Ok(match cfg.moe {
+            Some(moe) => FeedForward::Moe(MoeFfn::load(
+                gguf,
+                prefix,
+                cfg.d_model,
+                moe.n_expert,
+                moe.n_used,
+                moe.d_expert,
+                moe.d_shared,
+            )?),
+            None => FeedForward::Dense(Ffn::load(gguf, prefix, cfg.d_model, cfg.d_ff)?),
+        })
+    }
+
+    fn footprint(&self, into: &mut Uploads) {
+        match self {
+            FeedForward::Dense(ffn) => ffn.footprint(into),
+            FeedForward::Moe(moe) => moe.footprint(into),
+        }
+    }
+}
+
 struct Block {
     attn_norm: Gain,
     /// Despite the name this gates the FFN input, as in a standard pre-norm
     /// transformer block.
     post_attn_norm: Gain,
     mixer: Mixer,
-    ffn: Ffn,
+    ffn: FeedForward,
 }
 
 pub struct Model {
@@ -257,7 +320,7 @@ impl Model {
                     config.d_model,
                 )?,
                 mixer,
-                ffn: Ffn::load(gguf, &prefix, config.d_model, config.d_ff)?,
+                ffn: FeedForward::load(gguf, &prefix, &config)?,
             });
         }
 

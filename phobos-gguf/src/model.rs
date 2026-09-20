@@ -44,6 +44,10 @@ pub struct Footprint {
     /// this crate dequantizes wants four bytes a weight on the device however
     /// few it took on disk.
     pub dense_bytes: usize,
+    /// Weights that are not resident at all: expert sets the backend streams
+    /// from the file, as the file holds them. What the host has to hold, and
+    /// what a device cache is filled from.
+    pub streamed_bytes: usize,
     /// What both attention caches across every block add per position. They
     /// grow by doubling and the growth holds the old pair while it copies, so a
     /// run's peak reaches about three times this times the sequence length.
@@ -59,7 +63,7 @@ impl Decoder {
     pub fn load(gguf: &Gguf) -> Result<Decoder> {
         Ok(match gguf.architecture()? {
             "llama" => Decoder::Llama(Box::new(llama::Model::load(gguf)?)),
-            "qwen35" => Decoder::Qwen35(Box::new(qwen35::Model::load(gguf)?)),
+            "qwen35" | "qwen35moe" => Decoder::Qwen35(Box::new(qwen35::Model::load(gguf)?)),
             other => bail!("no forward pass is implemented for the '{other}' architecture"),
         })
     }
@@ -67,7 +71,7 @@ impl Decoder {
     pub fn architecture(&self) -> &'static str {
         match self {
             Decoder::Llama(_) => "llama",
-            Decoder::Qwen35(_) => "qwen35",
+            Decoder::Qwen35(m) => m.config.arch,
         }
     }
 
@@ -96,6 +100,7 @@ impl Decoder {
         Footprint {
             weight_bytes: uploads.bytes(),
             dense_bytes: uploads.dense_bytes(),
+            streamed_bytes: uploads.streamed_bytes(),
             kv_bytes_per_token,
         }
     }

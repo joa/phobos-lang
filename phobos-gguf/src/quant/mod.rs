@@ -527,5 +527,7 @@ impl GgmlType {
     }
 }
 
+pub mod grouped;
+
 #[cfg(test)]
 mod tests;

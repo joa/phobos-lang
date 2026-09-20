@@ -13,9 +13,11 @@ use crate::quant::{Packed, Quant};
 use crate::{Gguf, TensorInfo};
 
 mod ffn;
+mod moe;
 mod shared;
 
 pub(crate) use ffn::Ffn;
+pub(crate) use moe::MoeFfn;
 pub(crate) use shared::Shared;
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the
@@ -39,17 +41,33 @@ struct Upload {
     /// Held as f32 rather than left quantized: a heavily quantized file can
     /// want several times its own size on the device.
     dense: bool,
+    /// Not resident: a set of experts the backend streams from the file's
+    /// bytes, holding whatever share of them it has room for. Counted in
+    /// [`Uploads::streamed_bytes`] and nowhere else.
+    streamed: bool,
 }
 
 impl Uploads {
     fn add(&mut self, key: &str, bytes: usize, dense: bool) {
         self.uploads
             .entry(key.to_string())
-            .or_insert(Upload { bytes, dense });
+            .or_insert(Upload { bytes, dense, streamed: false });
     }
 
+    fn add_streamed(&mut self, key: &str, bytes: usize) {
+        self.uploads
+            .entry(key.to_string())
+            .or_insert(Upload { bytes, dense: false, streamed: true });
+    }
+
+    /// Bytes of every weight the backend keeps resident.
     pub(crate) fn bytes(&self) -> usize {
-        self.uploads.values().map(|u| u.bytes).sum()
+        self.uploads.values().filter(|u| !u.streamed).map(|u| u.bytes).sum()
+    }
+
+    /// Bytes of the weights that stream, as the file holds them.
+    pub(crate) fn streamed_bytes(&self) -> usize {
+        self.uploads.values().filter(|u| u.streamed).map(|u| u.bytes).sum()
     }
 
     /// Of [`Uploads::bytes`], what goes up as f32.

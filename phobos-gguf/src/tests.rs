@@ -1,8 +1,9 @@
 use super::*;
 
-/// Minimal GGUF writer, enough to round-trip the reader.
+/// Minimal GGUF writer, enough to round-trip the reader and to stand in for
+/// a real file in the crate's other tests.
 #[derive(Default)]
-struct Builder {
+pub(crate) struct Builder {
     kv: Vec<u8>,
     kv_count: u64,
     tensors: Vec<u8>,
@@ -16,7 +17,7 @@ fn push_str(buf: &mut Vec<u8>, s: &str) {
 }
 
 impl Builder {
-    fn kv_string(&mut self, key: &str, value: &str) -> &mut Self {
+    pub(crate) fn kv_string(&mut self, key: &str, value: &str) -> &mut Self {
         push_str(&mut self.kv, key);
         self.kv.extend(8u32.to_le_bytes());
         push_str(&mut self.kv, value);
@@ -24,7 +25,7 @@ impl Builder {
         self
     }
 
-    fn kv_u32(&mut self, key: &str, value: u32) -> &mut Self {
+    pub(crate) fn kv_u32(&mut self, key: &str, value: u32) -> &mut Self {
         push_str(&mut self.kv, key);
         self.kv.extend(4u32.to_le_bytes());
         self.kv.extend(value.to_le_bytes());
@@ -32,7 +33,7 @@ impl Builder {
         self
     }
 
-    fn kv_string_array(&mut self, key: &str, values: &[&str]) -> &mut Self {
+    pub(crate) fn kv_string_array(&mut self, key: &str, values: &[&str]) -> &mut Self {
         push_str(&mut self.kv, key);
         self.kv.extend(9u32.to_le_bytes());
         self.kv.extend(8u32.to_le_bytes());
@@ -44,7 +45,7 @@ impl Builder {
         self
     }
 
-    fn tensor_f32(&mut self, name: &str, dims: &[u64], values: &[f32]) -> &mut Self {
+    pub(crate) fn tensor_f32(&mut self, name: &str, dims: &[u64], values: &[f32]) -> &mut Self {
         push_str(&mut self.tensors, name);
         self.tensors.extend((dims.len() as u32).to_le_bytes());
         for d in dims {
@@ -59,7 +60,22 @@ impl Builder {
         self
     }
 
-    fn build(&self) -> Vec<u8> {
+    /// A tensor of any ggml type from its storage bytes, `code` being the
+    /// type's number in the file format (8 is Q8_0, 12 Q4_K, 13 Q5_K).
+    pub(crate) fn tensor_raw(&mut self, name: &str, dims: &[u64], code: u32, bytes: &[u8]) -> &mut Self {
+        push_str(&mut self.tensors, name);
+        self.tensors.extend((dims.len() as u32).to_le_bytes());
+        for d in dims {
+            self.tensors.extend(d.to_le_bytes());
+        }
+        self.tensors.extend(code.to_le_bytes());
+        self.tensors.extend((self.data.len() as u64).to_le_bytes());
+        self.tensor_count += 1;
+        self.data.extend(bytes);
+        self
+    }
+
+    pub(crate) fn build(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend(b"GGUF");
         out.extend(3u32.to_le_bytes());

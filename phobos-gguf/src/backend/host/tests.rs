@@ -274,3 +274,103 @@ fn softplus_stays_finite_for_large_inputs() {
     assert_eq!(softplus(100.0), 100.0);
     assert!(softplus(-100.0).abs() < 1e-6);
 }
+
+/// The routed feed-forward against the same arithmetic done densely: every
+/// expert decoded through `Packed`, each row's choice and weights from
+/// `route`, the shared expert scaled by its gate's sigmoid.
+#[test]
+fn moe_matches_a_dense_reference_and_reports_its_routes() {
+    use std::sync::Arc;
+
+    use crate::experts::tests::{Q4_K, q4k_stack};
+    use crate::experts::ExpertSet;
+    use crate::quant::{Packed, Quant};
+    use crate::tests::Builder;
+
+    let (count, used, d, d_ff, rows) = (4usize, 2usize, 256usize, 256usize, 3usize);
+    let stacks = [
+        ("gate", d_ff, d, q4k_stack(count, d_ff, d, 21)),
+        ("up", d_ff, d, q4k_stack(count, d_ff, d, 22)),
+        ("down", d, d_ff, q4k_stack(count, d, d_ff, 23)),
+    ];
+    let mut builder = Builder::default();
+    builder.kv_string("general.architecture", "qwen35moe");
+    for (name, n, k, bytes) in &stacks {
+        builder.tensor_raw(
+            &format!("blk.0.ffn_{name}_exps.weight"),
+            &[*k as u64, *n as u64, count as u64],
+            Q4_K,
+            bytes,
+        );
+    }
+    let gguf = crate::Gguf::from_bytes(builder.build()).unwrap();
+    let set: Arc<ExpertSet> = ExpertSet::load(&gguf, "blk.0", count, d, d_ff).unwrap();
+
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / 8388608.0 - 1.0
+    };
+    let x: Vec<f32> = (0..rows * d).map(|_| next()).collect();
+    let logits: Vec<f32> = (0..rows * count).map(|_| 3.0 * next()).collect();
+    let shared: Vec<f32> = (0..rows * d).map(|_| next()).collect();
+    let gate: Vec<f32> = (0..rows).map(|_| 2.0 * next()).collect();
+    let resid: Vec<f32> = (0..rows * d).map(|_| next()).collect();
+
+    // The reference: dense matmuls over `Packed`'s [k, n] decoding.
+    let dense = |bytes: &[u8], n: usize, k: usize, e: usize| {
+        let per = n * k / 256 * 144;
+        Packed::from_bytes(Quant::Q4_K, &bytes[e * per..(e + 1) * per], k, n).unwrap().dense()
+    };
+    let matvec = |w: &[f32], k: usize, n: usize, v: &[f32]| -> Vec<f32> {
+        (0..n).map(|j| (0..k).map(|i| w[i * n + j] * v[i]).sum()).collect()
+    };
+    let mut want = resid.clone();
+    let mut want_routes = Vec::new();
+    for r in 0..rows {
+        let xr = &x[r * d..(r + 1) * d];
+        for (e, w) in super::super::route(&logits[r * count..(r + 1) * count], used) {
+            want_routes.push(e as f32);
+            let g = matvec(&dense(&stacks[0].3, d_ff, d, e), d, d_ff, xr);
+            let u = matvec(&dense(&stacks[1].3, d_ff, d, e), d, d_ff, xr);
+            let h: Vec<f32> = g.iter().zip(&u).map(|(&g, &u)| g / (1.0 + (-g).exp()) * u).collect();
+            let y = matvec(&dense(&stacks[2].3, d, d_ff, e), d_ff, d, &h);
+            for (acc, v) in want[r * d..(r + 1) * d].iter_mut().zip(y) {
+                *acc += w * v;
+            }
+        }
+        let s = 1.0 / (1.0 + (-gate[r]).exp());
+        for (acc, &v) in want[r * d..(r + 1) * d].iter_mut().zip(&shared[r * d..(r + 1) * d]) {
+            *acc += s * v;
+        }
+    }
+
+    let backend = HostBackend::new();
+    let dest = backend.upload(&resid).unwrap();
+    let routes = backend.alloc(rows * used).unwrap();
+    let experts = backend.constant_experts("blk.0.experts", &set).unwrap();
+    assert_eq!(backend.constant_experts("blk.0.experts", &set).unwrap(), experts);
+    backend
+        .moe(super::super::Moe {
+            x: backend.upload(&x).unwrap(),
+            act: None,
+            rows,
+            d_model: d,
+            d_ff,
+            logits: backend.upload(&logits).unwrap(),
+            n_expert: count,
+            n_used: used,
+            experts,
+            shared: Some((backend.upload(&shared).unwrap(), backend.upload(&gate).unwrap())),
+            dest,
+            routes: Some(routes),
+        })
+        .unwrap();
+    let got = read_vec(&backend, dest, rows * d).unwrap();
+    for (i, (g, w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() <= 1e-4 * (1.0 + w.abs()), "element {i}: {g} vs {w}");
+    }
+    assert_eq!(read_vec(&backend, routes, rows * used).unwrap(), want_routes);
+}
