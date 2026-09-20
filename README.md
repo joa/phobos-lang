@@ -1,3 +1,5 @@
+![Inference using phobos-cli](results/phobos-cli.gif)
+
 # phobos
 
 **EXPERIMENTAL** Tile-based kernel language for distributed tensor algebra. Inspired by [Triton](https://triton-lang.org).
