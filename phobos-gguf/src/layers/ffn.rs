@@ -25,8 +25,20 @@ pub(crate) struct Ffn {
 
 impl Ffn {
     pub(crate) fn load(gguf: &Gguf, prefix: &str, d_model: usize, d_ff: usize) -> Result<Ffn> {
-        let gate = Linear::load(gguf, &format!("{prefix}.ffn_gate.weight"), d_model, d_ff)?;
-        let up = Linear::load(gguf, &format!("{prefix}.ffn_up.weight"), d_model, d_ff)?;
+        Ffn::load_suffixed(gguf, prefix, "", d_model, d_ff)
+    }
+
+    /// [`Ffn::load`] from `{prefix}.ffn_gate{suffix}.weight` and its two
+    /// siblings: a mixture-of-experts block names its shared expert this way.
+    pub(crate) fn load_suffixed(
+        gguf: &Gguf,
+        prefix: &str,
+        suffix: &str,
+        d_model: usize,
+        d_ff: usize,
+    ) -> Result<Ffn> {
+        let gate = Linear::load(gguf, &format!("{prefix}.ffn_gate{suffix}.weight"), d_model, d_ff)?;
+        let up = Linear::load(gguf, &format!("{prefix}.ffn_up{suffix}.weight"), d_model, d_ff)?;
         let gate_up = if Linear::should_fuse(&[&gate, &up]) {
             GateUp::Fused(Linear::fuse(&[&gate, &up])?)
         } else {
@@ -34,7 +46,7 @@ impl Ffn {
         };
         Ok(Ffn {
             gate_up,
-            down: Linear::load(gguf, &format!("{prefix}.ffn_down.weight"), d_ff, d_model)?,
+            down: Linear::load(gguf, &format!("{prefix}.ffn_down{suffix}.weight"), d_ff, d_model)?,
         })
     }
 

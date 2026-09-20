@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 use crate::backend::{Backend, read_vec};
 use crate::model::ForwardBufs;
 
-use super::{Config, LayerState, Mixer, Model, State, Variants};
+use super::{Config, FeedForward, LayerState, Mixer, Model, State, Variants};
 
 impl Model {
     /// Run `tokens`, advancing `state`, and return the final position's logits.
@@ -111,13 +111,19 @@ impl Model {
             // The normalization is passed along rather than run first, so a
             // backend with a fused MLP owns the whole of it.
             let gain = block.post_attn_norm.buf(backend)?;
-            if !block
-                .ffn
-                .forward_fused(backend, x, gain, cfg.rms_eps, rows)?
-            {
-                let input = self.norm(backend, x, rows, gain, normed, block.ffn.input())?;
-                block.ffn.forward(backend, input, rows, x)?;
-                input.release(backend);
+            match &block.ffn {
+                FeedForward::Dense(ffn) => {
+                    if !ffn.forward_fused(backend, x, gain, cfg.rms_eps, rows)? {
+                        let input = self.norm(backend, x, rows, gain, normed, ffn.input())?;
+                        ffn.forward(backend, input, rows, x)?;
+                        input.release(backend);
+                    }
+                }
+                FeedForward::Moe(moe) => {
+                    let input = self.norm(backend, x, rows, gain, normed, moe.input())?;
+                    moe.forward(backend, input, rows, x, None)?;
+                    input.release(backend);
+                }
             }
 
             if trace {

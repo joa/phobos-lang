@@ -1,7 +1,14 @@
-use anyhow::Result;
+use std::sync::Arc;
 
+use anyhow::{Result, bail};
+
+use crate::experts::ExpertSet;
 use crate::quant::{Packed, Quant};
 pub use crate::quant::quantize_row;
+
+mod moe;
+
+pub use moe::{ExpertsBuf, Moe, route};
 
 /// A handle to backend-owned storage, so the bytes can live on a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -559,6 +566,19 @@ pub trait Backend {
     /// has no fused form and the caller runs the four stages itself.
     fn fused_mlp(&self, _mlp: FusedMlp) -> Result<bool> {
         Ok(false)
+    }
+
+    /// Registers a block's expert set under `key`, once: a later call with
+    /// the same key returns the same handle. What the backend keeps of the
+    /// set is its own affair, from every expert resident to none of them;
+    /// the model hands over the file's bytes and asks nothing else.
+    fn constant_experts(&self, _key: &str, _set: &Arc<ExpertSet>) -> Result<ExpertsBuf> {
+        bail!("this backend has no mixture-of-experts path")
+    }
+
+    /// A block's routed feed-forward, see [`Moe`].
+    fn moe(&self, _req: Moe) -> Result<()> {
+        bail!("this backend has no mixture-of-experts path")
     }
 
     /// [`Backend::fused_mlp`] over raw-format weights, which a file keeps

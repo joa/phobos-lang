@@ -29,6 +29,9 @@ pub struct HostBackend {
     qacts: RefCell<Vec<(Vec<i8>, Vec<f32>)>>,
     qact_next: std::cell::Cell<usize>,
     q_constants: RefCell<std::collections::HashMap<String, QBuf>>,
+    /// Expert sets, kept as the file holds them; see `host/moe.rs`.
+    experts: RefCell<Vec<std::sync::Arc<crate::experts::ExpertSet>>>,
+    expert_keys: RefCell<std::collections::HashMap<String, super::ExpertsBuf>>,
 }
 
 impl HostBackend {
@@ -191,6 +194,18 @@ impl Backend for HostBackend {
         drop(quants);
         self.q_constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
+    }
+
+    fn constant_experts(
+        &self,
+        key: &str,
+        set: &std::sync::Arc<crate::experts::ExpertSet>,
+    ) -> Result<super::ExpertsBuf> {
+        Ok(self.register_experts(key, set))
+    }
+
+    fn moe(&self, req: super::Moe) -> Result<()> {
+        self.run_moe(req)
     }
 
     fn begin_pass(&self, _rows: usize) -> Result<()> {
@@ -701,6 +716,8 @@ pub fn softmax(row: &mut [f32]) {
         *v *= inv;
     }
 }
+
+mod moe;
 
 #[cfg(test)]
 mod tests;

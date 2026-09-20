@@ -189,7 +189,7 @@ impl DeviceBackend {
                     let raws = self.raw_quants.borrow();
                     let r = raws.get(w.0).context("use of an unknown raw weight handle")?;
                     ensure!(
-                        r.n.next_multiple_of(super::raw::RAW_GROUP_PAD) as i64 == slot.dims[0],
+                        r.n.next_multiple_of(crate::quant::grouped::RAW_GROUP_PAD) as i64 == slot.dims[0],
                         "a fused raw weight went up with n = {}, used with {} padded rows",
                         r.n,
                         slot.dims[0]

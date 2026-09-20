@@ -1,5 +1,6 @@
 pub mod backend;
 pub mod bpe;
+pub mod experts;
 pub mod hadamard;
 mod layers;
 pub mod llama;
@@ -15,6 +16,7 @@ pub mod vocab;
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use memmap2::Mmap;
@@ -45,8 +47,26 @@ impl std::ops::Deref for Backing {
     }
 }
 
+/// A window of a [`Gguf`]'s bytes that outlives the `Gguf`: the file stays
+/// mapped as long as any window of it is held, so a weight streamed from the
+/// file needs no copy of its own.
+#[derive(Clone)]
+pub struct Window {
+    backing: Arc<Backing>,
+    start: usize,
+    len: usize,
+}
+
+impl std::ops::Deref for Window {
+    type Target = [u8];
+
+    fn deref(&self) -> &[u8] {
+        &self.backing[self.start..self.start + self.len]
+    }
+}
+
 pub struct Gguf {
-    backing: Backing,
+    backing: Arc<Backing>,
     version: u32,
     metadata: Metadata,
     tensors: Vec<TensorInfo>,
@@ -89,7 +109,7 @@ impl Gguf {
         );
         let folding = hadamard::Folding::from_metadata(&container.metadata)?;
         Ok(Gguf {
-            backing,
+            backing: Arc::new(backing),
             folding,
             version: container.version,
             metadata: container.metadata,
@@ -133,6 +153,19 @@ impl Gguf {
 
     /// The raw, still-quantized bytes backing a tensor.
     pub fn tensor_bytes(&self, info: &TensorInfo) -> Result<&[u8]> {
+        let (start, len) = self.tensor_span(info)?;
+        Ok(&self.backing[start..start + len])
+    }
+
+    /// [`Gguf::tensor_bytes`] as a [`Window`], for a caller that keeps the
+    /// bytes past this `Gguf`'s lifetime.
+    pub fn tensor_window(&self, info: &TensorInfo) -> Result<Window> {
+        let (start, len) = self.tensor_span(info)?;
+        Ok(Window { backing: Arc::clone(&self.backing), start, len })
+    }
+
+    /// Where a tensor's bytes sit in the backing, bounds-checked.
+    fn tensor_span(&self, info: &TensorInfo) -> Result<(usize, usize)> {
         let len = info.storage_bytes()?;
         let start = self
             .data_offset_bytes
@@ -147,7 +180,7 @@ impl Gguf {
             info.name,
             self.backing.len()
         );
-        Ok(&self.backing[start..end])
+        Ok((start, len))
     }
 
     /// Dequantize a tensor into a fresh f32 buffer, in ggml element order (the
@@ -186,4 +219,4 @@ impl Gguf {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
