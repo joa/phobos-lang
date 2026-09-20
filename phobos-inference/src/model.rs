@@ -88,6 +88,10 @@ pub struct CacheStats {
     pub expert_hits: u64,
     pub expert_misses: u64,
     pub expert_bytes: u64,
+    /// Experts a lookahead copied ahead of their block, and how many of
+    /// those the block then wanted. Zero without a lookahead.
+    pub expert_prefetches: u64,
+    pub expert_prefetch_hits: u64,
 }
 
 impl CacheStats {

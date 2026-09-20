@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 
 use crate::Gguf;
-use crate::backend::{Backend, Buf, Moe};
+use crate::backend::{Backend, Buf, Lookahead, Moe};
 use crate::experts::ExpertSet;
 
 use super::{Ffn, Gain, Linear, Shared, Uploads};
@@ -90,6 +90,21 @@ impl MoeFfn {
     /// The whole feed-forward added into `dest`: router, chosen experts,
     /// gated shared expert. `routes`, if given, receives each row's chosen
     /// expert ids as [`Moe::routes`] describes.
+    /// What a backend needs to run this block's router ahead of the block,
+    /// given the norm that feeds it; `None` where the router is not a plain
+    /// dense weight.
+    pub(crate) fn lookahead(&self, backend: &dyn Backend, gain: &Gain, eps: f32) -> Result<Option<Lookahead>> {
+        let Some(router) = self.router.dense_plain(backend)? else {
+            return Ok(None);
+        };
+        Ok(Some(Lookahead {
+            gain: gain.buf(backend)?,
+            eps,
+            router,
+            experts: backend.constant_experts(&self.key, &self.experts)?,
+        }))
+    }
+
     pub(crate) fn forward(
         &self,
         backend: &dyn Backend,
@@ -97,6 +112,7 @@ impl MoeFfn {
         rows: usize,
         dest: Buf,
         routes: Option<Buf>,
+        lookahead: Option<Lookahead>,
     ) -> Result<()> {
         let d_model = self.router.in_dim;
         let logits = self.router.forward_shared(backend, x, rows)?;
@@ -115,6 +131,7 @@ impl MoeFfn {
             d_model,
             d_ff: self.experts.gate.n(),
             logits,
+            lookahead,
             n_expert: self.experts.count(),
             n_used: self.n_used,
             experts: backend.constant_experts(&self.key, &self.experts)?,

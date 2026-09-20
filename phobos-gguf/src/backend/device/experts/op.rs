@@ -3,7 +3,9 @@
 // copied into their slots and the slot matvecs and combine that read them.
 
 use anyhow::{Context, Result, bail, ensure};
+use cust::event::{Event, EventFlags};
 use cust::memory::CopyDestination;
+use cust::stream::StreamWaitEventFlags;
 use phobos_kernels::cuda_ok;
 
 use super::super::kernels::{
@@ -79,7 +81,53 @@ impl DeviceBackend {
                 (rows as u32, 1, 1),
             )
         })?;
+        // The next block's router on the residual as it stands, into that
+        // block's lookahead table, read at the same sync point.
+        let next = match (self.moe_lookahead && rows == 1, req.lookahead) {
+            (true, Some(look)) => {
+                let scratch = self.alloc(d)?;
+                self.rms_norm(req.dest, 1, d, look.gain, look.eps, scratch)?;
+                let (look_logits, look_topk, look_w) = {
+                    let n = &experts.blocks[look.experts.0];
+                    (
+                        n.look_logits.as_device_ptr().as_raw(),
+                        n.look_topk.as_device_ptr().as_raw(),
+                        n.look_w.as_device_ptr().as_raw(),
+                    )
+                };
+                // The matvec through the pool's handle so the logits land
+                // in the block's own buffer: a temporary, then a copy.
+                let logits = self.alloc(n_expert)?;
+                self.matmul(scratch, 1, d, look.router, n_expert, logits)?;
+                self.with_kernel(&self.moe_topk, n_expert, "moe_topk", || moe_topk_src(n_expert), |module| {
+                    self.launch(
+                        module,
+                        "moe_topk",
+                        &[
+                            (self.ptr(logits, 0)?, [1, n_expert as i64]),
+                            (iota, [1, n_expert as i64]),
+                            (look_topk, [1, u]),
+                            (look_w, [1, u]),
+                        ],
+                        (1, 1, 1),
+                    )
+                })?;
+                let _ = look_logits;
+                self.release(logits);
+                self.release(scratch);
+                Some(look.experts.0)
+            }
+            _ => None,
+        };
         self.sync_point()?;
+        // What the previous block predicted for this one is on the copy
+        // stream; this block's copies and kernels queue behind it.
+        if let Some(event) = experts.blocks[block].fetched.take() {
+            self.stream.wait_event(event, StreamWaitEventFlags::DEFAULT)?;
+        }
+        if let Some(next) = next {
+            self.prefetch(&mut experts, next, n_expert)?;
+        }
         {
             let b = &mut experts.blocks[block];
             let wanted = rows * MOE_USED;
@@ -174,6 +222,9 @@ impl DeviceBackend {
             let local = match b.slot_of[e] {
                 s if s != NONE => {
                     stats.hits += 1;
+                    if std::mem::take(&mut b.prefetched[s as usize]) {
+                        stats.prefetch_hits += 1;
+                    }
                     s as usize
                 }
                 _ => {
@@ -224,6 +275,70 @@ impl DeviceBackend {
             unsafe { cust::sys::cuMemcpyHtoDAsync_v2(dst, src.cast(), ROW_BYTES, self.stream.as_inner()) },
             "publishing a row's slot table",
         )?;
+        Ok(())
+    }
+
+    /// Block `next`'s predicted experts into its slots on the copy stream:
+    /// the ones not resident, into its least recently used slots, with an
+    /// event the block waits on before it runs. A wrong prediction costs a
+    /// copy and a slot; the stamp it gets is the current tick, so a right
+    /// one is not the next victim.
+    fn prefetch(&self, experts: &mut Experts, next: usize, n_expert: usize) -> Result<()> {
+        let Experts { blocks, slabs, per_block, tick, stats, .. } = &mut *experts;
+        *tick += 1;
+        let (tick, per_block) = (*tick, *per_block);
+        let slabs = slabs.as_ref().expect("ensured by the caller");
+        let b = &mut blocks[next];
+        b.look_topk.copy_to(&mut b.look_host.as_mut_slice()[..MOE_USED])?;
+        let mut predicted = [0usize; MOE_USED];
+        for (j, &id) in b.look_host.as_slice()[..MOE_USED].iter().enumerate() {
+            ensure!((0..n_expert as i32).contains(&id), "the lookahead chose expert {id} of {n_expert}");
+            predicted[j] = id as usize;
+        }
+        for &e in &predicted {
+            let s = b.slot_of[e];
+            if s != NONE {
+                b.held[s as usize].1 = tick;
+            }
+        }
+        let mut copied = false;
+        for &e in &predicted {
+            if b.slot_of[e] != NONE {
+                continue;
+            }
+            let Some(victim) = (0..per_block).filter(|&s| b.held[s].1 != tick).min_by_key(|&s| b.held[s].1) else {
+                break;
+            };
+            let (old, _) = b.held[victim];
+            if old != NONE {
+                b.slot_of[old as usize] = NONE;
+            }
+            let src = b.mirror.expert(e);
+            for (k, kind) in KINDS.into_iter().enumerate() {
+                let slab = &slabs[&(kind, kind.stack(&b.set).quant())];
+                let (bytes_at, d_at) = slab.at(b.base[k] + victim);
+                for (dst, (ptr, len)) in [(bytes_at, src[k]), (d_at, src[3 + k])] {
+                    // SAFETY: the mirror is pinned and outlives the copy;
+                    // the slot is inside the slab; nothing reads the slot
+                    // until the event below.
+                    cuda_ok(
+                        unsafe { cust::sys::cuMemcpyHtoDAsync_v2(dst, ptr, len, self.copy_stream.as_inner()) },
+                        "prefetching an expert into its slot",
+                    )?;
+                    stats.bytes += len as u64;
+                }
+            }
+            b.held[victim] = (e as u32, tick);
+            b.slot_of[e] = victim as u32;
+            b.prefetched[victim] = true;
+            stats.prefetches += 1;
+            copied = true;
+        }
+        if copied {
+            let event = Event::new(EventFlags::DISABLE_TIMING)?;
+            event.record(&self.copy_stream)?;
+            b.fetched = Some(event);
+        }
         Ok(())
     }
 

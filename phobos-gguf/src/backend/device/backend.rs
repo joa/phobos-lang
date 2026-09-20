@@ -31,6 +31,8 @@ impl Backend for DeviceBackend {
             expert_hits: experts.hits,
             expert_misses: experts.misses,
             expert_bytes: experts.bytes,
+            expert_prefetches: experts.prefetches,
+            expert_prefetch_hits: experts.prefetch_hits,
         })
     }
 

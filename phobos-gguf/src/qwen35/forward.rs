@@ -217,7 +217,15 @@ impl Model {
                 FeedForward::Moe(moe) => {
                     let input = self.norm(backend, x, rows, gain, normed, moe.input())?;
                     let routes = tracing.as_ref().map(|t| t.routes[index]);
-                    moe.forward(backend, input, rows, x, routes)?;
+                    // The next block's router, for a backend that starts
+                    // its misses early.
+                    let lookahead = match self.blocks.get(index + 1).map(|next| (next, &next.ffn)) {
+                        Some((next, FeedForward::Moe(moe))) => {
+                            moe.lookahead(backend, &next.post_attn_norm, cfg.rms_eps)?
+                        }
+                        _ => None,
+                    };
+                    moe.forward(backend, input, rows, x, routes, lookahead)?;
                     input.release(backend);
                 }
             }

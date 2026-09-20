@@ -143,6 +143,14 @@ type AttnPersistEntry = (Module, u32, usize);
 /// device memory; it synchronizes once, to read the logits.
 pub struct DeviceBackend {
     stream: Stream,
+    /// Copies that need not wait for the compute stream: a prefetched
+    /// expert on its way into a slot. See `experts/`.
+    copy_stream: Stream,
+    /// Whether the mixture-of-experts path runs the next block's router on
+    /// the residual as it stands and copies what it predicts early, on the
+    /// copy stream. `PHOBOS_MOE_LOOKAHEAD=1` opts in: the trace priced the
+    /// prediction's misses at a third more bytes, so it is off by default.
+    moe_lookahead: bool,
     matmul: Variants,
     /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=
     /// TC_TILE_M`; the plain `matmul` above finishes whatever doesn't fit a

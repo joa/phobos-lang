@@ -2,6 +2,19 @@
 
 use super::{Buf, QAct};
 
+/// What a backend needs to run the next block's router on the residual as
+/// it stands, ahead of that block: its post-attention norm, the router's
+/// dense `[d_model, n_expert]` weight and its expert set. A backend that
+/// prefetches uses it to start the next block's misses early; one that
+/// does not ignores it.
+#[derive(Clone, Copy, Debug)]
+pub struct Lookahead {
+    pub gain: Buf,
+    pub eps: f32,
+    pub router: Buf,
+    pub experts: ExpertsBuf,
+}
+
 /// A handle to a block's expert set as a backend holds it. See
 /// [`super::Backend::constant_experts`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +51,9 @@ pub struct Moe {
     pub shared: Option<(Buf, Buf)>,
     /// The residual, `[rows, d_model]`, accumulated into.
     pub dest: Buf,
+    /// The next block's router, for a backend that prefetches; see
+    /// [`Lookahead`]. `None` for the last block or a caller without one.
+    pub lookahead: Option<Lookahead>,
     /// Where to leave each row's chosen experts, `[rows, n_used]` ids held as
     /// f32 the way [`super::Backend::argmax`] carries an index, for a caller
     /// tracing the router. Read back after the pass, never inside it.

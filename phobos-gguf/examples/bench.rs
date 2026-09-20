@@ -253,6 +253,14 @@ expert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
             stats.expert_hits + stats.expert_misses,
             stats.expert_bytes as f64 / 1e9
         );
+        if stats.expert_prefetches > 0 {
+            println!(
+                "lookahead: {} prefetched, {} of them wanted ({:.1}%)",
+                stats.expert_prefetches,
+                stats.expert_prefetch_hits,
+                stats.expert_prefetch_hits as f64 / stats.expert_prefetches as f64 * 100.0
+            );
+        }
     }
     Ok(())
 }
