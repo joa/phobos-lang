@@ -17,10 +17,10 @@ that follows it):
 - OPT: Belady's rule, evict the one next used furthest ahead. The upper
   bound on any policy at that budget, since it peeks at the future.
 - LRU+la: LRU where block b's lookahead (its router on the residual leaving
-  block b-1) is prefetched into the cache before the real choice is made;
-  a prefetch that turns out wrong still costs a copy, and the column beside
-  it says how many copies the prefetch issued per position on top of the
-  misses.
+  block b-1) is prefetched into the cache before the real choice is made.
+  A prefetch that turns out wrong still costs a copy, so the two columns
+  after the hit rates are what crosses PCIe a position: LRU's misses, and
+  the lookahead's remaining misses plus every prefetch it issued.
 
 The last line is the one-block lookahead's own accuracy: the share of chosen
 experts its prediction named.
@@ -36,8 +36,13 @@ def load(path):
     rows = []
     for line in open(path, encoding="utf-8"):
         line = line.strip()
-        if line.startswith("{"):
+        if not line.startswith("{"):
+            continue
+        try:
             rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            # A trace still being written ends in a partial line.
+            break
     return rows
 
 
@@ -160,14 +165,22 @@ def main():
 
     experts = max(e for r in rows for b in r["routes"] for e in b) + 1
     print(f"{experts} experts a block; hit rates over generated positions:")
-    print(f"{'slots':>6} {'/block':>6} {'LRU':>7} {'LFU':>7} {'static':>7} {'OPT':>7} {'LRU+la':>7} {'prefetch/pos':>13}")
+    print(
+        f"{'slots':>6} {'/block':>6} {'LRU':>7} {'LFU':>7} {'static':>7} {'OPT':>7} {'LRU+la':>7} "
+        f"{'copies/pos LRU':>15} {'LRU+la':>8}"
+    )
+    per_pos = blocks * n_used
     for total in (int(s) for s in args.slots.split(",")):
         per_block = max(1, total // blocks)
         hits, accesses, prefetches = simulate(rows, blocks, per_block, n_used)
         rate = lambda name: hits[name] / accesses if accesses else 0.0
+        # What crosses PCIe a position: LRU's misses; with the lookahead,
+        # its remaining misses plus every prefetch.
+        lru_copies = (1.0 - rate("LRU")) * per_pos
+        la_copies = (1.0 - rate("LRU+la")) * per_pos + prefetches / max(decode, 1)
         print(
             f"{total:>6} {per_block:>6} {rate('LRU'):>7.3f} {rate('LFU'):>7.3f} {rate('static'):>7.3f} "
-            f"{rate('OPT'):>7.3f} {rate('LRU+la'):>7.3f} {prefetches / max(decode, 1):>13.1f}"
+            f"{rate('OPT'):>7.3f} {rate('LRU+la'):>7.3f} {lru_copies:>15.1f} {la_copies:>8.1f}"
         )
 
     named = 0
