@@ -80,7 +80,7 @@ remembered figure and has to be labelled as such.
   IR -> PTX via inkwell/NVPTX), taking the pass pipeline and the LLVM machine
   from the target's `phobos_base::backend::Backend`. `gen_ptx` is a thin wrapper
 - **phobos-bench**: stand-alone compiler + benchmark binary: builds a kernel, compiles to PTX, launches it with `cust` (CUDA). Requires an NVIDIA GPU + CUDA toolkit at runtime
-- **phobos-base**: shared config & logger (`Context`, GPU target config), the
+- **phobos-base**: shared config & logger (`Context`, GPU target config), `progress` and `log`, each a sink a front end installs so a library can report without knowing what draws it, the
   `Backend` trait that owns a target's lowering pipeline and its post-processing
   of the generated text, plus utilities used across the crates
 - **phobos-cluster**: distributed execution codegen and utils
@@ -89,5 +89,5 @@ remembered figure and has to be labelled as such.
 - **phobos-kernels**: what both front ends need to reach a GPU: the launch ABI, the compile step, the launcher, the allocation pool and the plain f32 matmul. The `cuda` feature gates everything that talks to the driver, so the ABI and the kernel sources still compile without one
 - **phobos-gguf**: GGUF container, byte-level BPE, the `qwen35` and `llama` forward passes, `quant/` with one file per quantized format behind a `Quant`/`Spec` registry, and `backend/` with the host and device implementations plus `fuse/`, the pass that lowers a chain of decode stages into one persistent kernel. A format with no kernel dequantizes at upload and takes the dense path, so a new one lands correct before it lands fast
 - **phobos-onnx**: ONNX proto -> graph IR -> shape inference, folding, fusion -> Phobos kernels, and `backend/` with the host interpreter as the oracle alongside the device paths
-- **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server
-- **phobos-cli**: Argument parsing, the REPL, and the one `match` that decides GGUF or ONNX
+- **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server, plus `telemetry::Meter`, the shared record the engine writes progress into and a viewer reads snapshots of. What a front end can report about itself, and what it cannot, is the default-`None` half of the `Model` trait: `footprint`, `device_memory`, `device_info`, `architecture`, `cache_stats`, and `Session::truncate`, whose default accepts only the request that drops nothing, so a backend that cannot rewind still gets prefix reuse by extension
+- **phobos-cli**: Argument parsing, the REPL, the one `match` that decides GGUF or ONNX, and `tui/`, the full-screen dashboard `--listen` puts on the terminal. The dashboard runs on its own thread and reads only a `Meter`, so it never names a model format and never blocks a decode; `--no-tui`, or output that is not a terminal, turns it off

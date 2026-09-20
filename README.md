@@ -54,6 +54,30 @@ Inference has been tested with:
 - Ternary-Bonsai-2-27B-PTQ1_0
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
 
+`--listen ADDR` serves an OpenAI-compatible API and puts a dashboard on the terminal: the card and
+its driver, the weight footprint, VRAM as one stacked bar of weights, key/value cache and everything
+else on the card, the context in use against the limit and what the rest of it would cost, the block
+layout with its attention and recurrent share, the cache hit rates, and the prompt and decode rates
+as they are measured.
+
+A cold start compiles every kernel from source, which takes minutes; a warm one reads them back from
+`~/.phobos/kernel-cache` in seconds. Either way it reports what it is doing: a line per kernel with
+`--no-tui`, and on the dashboard a progress bar beside the kernel itself, its own text going in one
+side and the PTX it became coming out the other, with a histogram of how long each one took and how
+much PTX a character of kernel text turns into. The cache is keyed on a fingerprint of every `.rs` under
+the crates that lower a kernel, so editing `phobos-base`, `phobos-kernels`, `phobos-lang` or
+`phobos-mlir` costs one cold start even when the generated PTX could not have changed.
+
+The server keeps a finished request's session and reuses as much of it as the next request's prompt
+agrees with, so a chat re-sending its whole transcript only runs the new turn. How far it can reuse
+depends on the architecture: plain attention rewinds to any shared position, while a model with
+recurrent blocks, such as a Qwen3.5, carries state that summarises every token it has seen and can
+only be continued, never rewound. `--no-prefix-cache` turns it off and hands the cache's buffers
+back for a pass to use as scratch, which is the difference on a card that only just fits. `--no-tui` turns it off, as does output that
+is not a terminal or a `PHOBOS_VRAM`/`PHOBOS_PASS_REPORT` left set in the environment, since those
+write to stderr from inside a pass and would land on top of it. Whenever the dashboard is skipped
+the reason is printed; `--tui` draws one regardless.
+
 **Note:**
 * The host backend is used for verification and *very* slow. Always build with `--features=cuda` unless you need to verify against the host oracle. Always build with `--release` if the host backend is used.
 * ONNX has not seen a lot of love (as in: it runs the OG GPT-2, but it's slow).
