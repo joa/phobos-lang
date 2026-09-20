@@ -25,8 +25,7 @@ pub mod target;
 mod tile;
 mod util;
 
-/// MLIR's ShapedType::kDynamic
-const DYN: i64 = i64::MIN;
+pub(crate) use crate::shape::DYN;
 
 /// A row-reduction kind (rowmax / rowsum).
 #[derive(Clone, Copy)]

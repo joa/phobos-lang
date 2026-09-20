@@ -5,6 +5,7 @@ use anyhow::Result;
 use super::{Binding, Build, DYN};
 use crate::ast::{Expr, Scalar as AstScalar, Stmt, Type as AstType};
 use crate::ir::{Layout, OpKind, Scalar, Space, Swizzle, TileType, Type, ValueId};
+use crate::shape;
 
 /// Names and shapes the body scan has resolved so far.
 #[derive(Default)]
@@ -151,7 +152,7 @@ impl Build {
             return;
         };
         let (n, bk) = if transpose_b { (b0, b1) } else { (b1, b0) };
-        if bk != kk || self.wmma_plan(m, n, kk).is_none() {
+        if bk != kk || shape::wmma_plan(m, n, kk, self.cta_threads).is_none() {
             return;
         }
         for e in [ae, be] {

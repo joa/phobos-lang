@@ -6,6 +6,7 @@
 use super::*;
 
 use crate::codegen::lower::Lowered;
+use crate::shape;
 use crate::ir::{Ir, OpId, ValueId};
 
 /// Which of the three paths runs a register matmul, with the tiling that
@@ -93,16 +94,18 @@ impl<'c> Codegen<'c> {
         kk: i64,
         acc_elem: Type<'c>,
     ) -> Result<GemmPlan<'c>> {
-        let path = if let Some((wm, wn)) = self.has_wmma().then(|| self.wmma_plan(m, n, kk)).flatten() {
+        let path = if let Some((wm, wn)) = self.has_wmma()
+            .then(|| shape::wmma_plan(m, n, kk, self.cta_threads))
+            .flatten() {
             if self.has_mma_sync() {
                 GemmPath::MmaSync { wm, wn }
             } else {
                 GemmPath::Wmma { wm, wn }
             }
         } else {
-            let (tm, tn) = self.sub_tile(m, n);
+            let (tm, tn) = shape::sub_tile(m, n, self.cta_threads);
             let (tiles_m, tiles_n) = (m / tm, n / tn);
-            let (lm, ln) = Self::lane_grid(tiles_m, tiles_n, tm, tn)
+            let (lm, ln) = shape::lane_grid(tiles_m, tiles_n, tm, tn)
                 .ok_or_else(|| anyhow!("matmul fusion without a lane grid"))?;
             GemmPath::Reg { tm, tn, lm, ln }
         };

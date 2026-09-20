@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
+pub(crate) mod shape;
 pub mod token;
 
 pub fn parse(src: &str) -> anyhow::Result<Vec<ast::Kernel>> {

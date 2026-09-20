@@ -5,6 +5,7 @@ use anyhow::{Result, bail};
 use super::{Binding, Build, DYN};
 use crate::ast::{AssignOp, BinOp, Expr, Scalar as AstScalar, Stmt, Type as AstType};
 use crate::ir::{Bounds, ForInfo, FragType, OpKind, Scalar, Type, ValueId};
+use crate::shape;
 
 /// The validated shape of a fragment-accumulator declaration.
 pub(crate) struct FragAccPlan {
@@ -50,7 +51,7 @@ impl Build {
         if !self.frag_uses_ok(name, m, n, rest, &mut scan, &[]) {
             return None;
         }
-        let (wm, wn) = self.wmma_plan(m, n, scan.kk?)?;
+        let (wm, wn) = shape::wmma_plan(m, n, scan.kk?, self.cta_threads)?;
         Some(FragAccPlan {
             name: name.clone(),
             init: *init,
