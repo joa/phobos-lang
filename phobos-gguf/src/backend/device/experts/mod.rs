@@ -31,8 +31,9 @@ const MIN_SLOTS_PER_BLOCK: usize = super::kernels::MOE_USED;
 /// Bytes a slab may not exceed: the decode matvec indexes in 32 bits.
 const SLAB_LIMIT: usize = 1 << 31;
 
-/// Rows one `moe` call may carry: the runtime's prompt batch.
-pub(super) const MAX_ROWS: usize = 512;
+/// Rows one `moe` call may carry: twice the runtime's prompt batch, since
+/// the checks feed longer passes than the runtime does.
+pub(super) const MAX_ROWS: usize = 1024;
 
 /// Which of a block's three stacks.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
