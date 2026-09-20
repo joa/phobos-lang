@@ -855,6 +855,19 @@ impl State {
         self.pos == 0
     }
 
+    /// Forget everything past `positions`, which this architecture can only do
+    /// when there is nothing to forget.
+    ///
+    /// Its attention blocks would rewind as llama's do, but its delta net
+    /// blocks carry a recurrent state summarising every token they have seen.
+    /// Nothing in it is indexed by position, so there is no prefix of it to
+    /// keep, and rewinding one half of the model but not the other would leave
+    /// the two at different points in the sequence. Extending is still fine:
+    /// that is what a decode step does.
+    pub fn truncate(&mut self, positions: usize) -> bool {
+        positions == self.pos
+    }
+
     /// Hands every device allocation the state holds back to the backend.
     ///
     /// Dropping a state instead strands its caches, since a [`Buf`] is a

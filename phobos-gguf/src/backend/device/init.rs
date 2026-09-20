@@ -598,6 +598,8 @@ impl DeviceBackend {
             slots: RefCell::new(Vec::new()),
             free_slots: RefCell::new(Vec::new()),
             pool: Pool::new(),
+            kernels_reused: Cell::new(0),
+            kernels_compiled: Cell::new(0),
             dense_scratch: [const { Cell::new(None) }; 2],
             drop_scratch: Cell::new(false),
             last_rows: Cell::new(0),
@@ -712,4 +714,51 @@ impl DeviceBackend {
             _ctx,
         })
     }
+}
+
+/// The card, as the driver describes it.
+///
+/// Read fresh on every call, but a caller should want it once: the display
+/// driver's version costs a subprocess, since the CUDA driver API knows its
+/// own version and not the release the driver is known by.
+pub(super) fn device_info() -> Option<phobos_inference::DeviceInfo> {
+    use cust::device::DeviceAttribute;
+
+    let device = cust::device::Device::get_device(0).ok()?;
+    let attribute = |which| device.get_attribute(which).ok().unwrap_or(0).max(0) as u32;
+    let api = cust::CudaApiVersion::get().ok();
+    Some(phobos_inference::DeviceInfo {
+        name: device.name().ok()?,
+        capability: (
+            attribute(DeviceAttribute::ComputeCapabilityMajor),
+            attribute(DeviceAttribute::ComputeCapabilityMinor),
+        ),
+        multiprocessors: attribute(DeviceAttribute::MultiprocessorCount),
+        core_clock_khz: attribute(DeviceAttribute::ClockRate),
+        memory_clock_khz: attribute(DeviceAttribute::MemoryClockRate),
+        memory_bus_bits: attribute(DeviceAttribute::GlobalMemoryBusWidth),
+        cuda: api
+            .map(|v| (v.major().max(0) as u32, v.minor().max(0) as u32))
+            .unwrap_or((0, 0)),
+        driver: display_driver(),
+    })
+}
+
+/// What the display driver calls itself, which is the number a release is
+/// known by and the one the CUDA API cannot report.
+///
+/// Asked of `nvidia-smi`, which ships with every driver. Absent rather than
+/// wrong when it is not on the path: a dashboard can say so, and this is not
+/// worth failing a load over.
+fn display_driver() -> Option<String> {
+    let out = std::process::Command::new("nvidia-smi")
+        .args(["--query-gpu=driver_version", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(out.stdout).ok()?;
+    let line = text.lines().next()?.trim();
+    (!line.is_empty()).then(|| line.to_string())
 }

@@ -126,9 +126,12 @@ impl DeviceBackend {
         source: impl FnOnce() -> String,
         f: impl FnOnce(&Module) -> Result<()>,
     ) -> Result<()> {
-        if !cache.borrow().contains_key(&key) {
+        if cache.borrow().contains_key(&key) {
+            self.kernels_reused.set(self.kernels_reused.get() + 1);
+        } else {
             let module = self.compile_dynamic(&source(), what)?;
             cache.borrow_mut().insert(key, module);
+            self.kernels_compiled.set(self.kernels_compiled.get() + 1);
         }
         let modules = cache.borrow();
         f(&modules[&key])

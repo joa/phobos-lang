@@ -535,6 +535,23 @@ impl State {
         self.pos == 0
     }
 
+    /// Forget everything past `positions`.
+    ///
+    /// The cursor is the whole of it. A cache holds one row a position and
+    /// attention reads `start_pos + rows` of them, so rows past the cursor are
+    /// never looked at and are overwritten by whatever comes next. Growing the
+    /// cache copies them along with the rest, which costs a little bandwidth
+    /// once and is still correct. See [`Attn::total`].
+    ///
+    /// [`Attn::total`]: crate::backend::Attn::total
+    pub fn truncate(&mut self, positions: usize) -> bool {
+        if positions > self.pos {
+            return false;
+        }
+        self.pos = positions;
+        true
+    }
+
     /// Hands every device allocation the state holds back to the backend.
     ///
     /// Dropping a state instead strands its caches: a [`Buf`] is a handle, not
