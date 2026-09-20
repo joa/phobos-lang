@@ -1,10 +1,3 @@
-//! The model's weights in a handful of large allocations rather than one
-//! each.
-//!
-//! WDDM manages residency per allocation, and past a point it stops being
-//! able to keep a large set of them resident even at a constant total size.
-//! The cliff needs both a high allocation count and a large footprint.
-
 use anyhow::Result;
 use cust::memory::{DeviceBuffer, DeviceCopy};
 use phobos_kernels::cuda_ok;
@@ -41,8 +34,13 @@ pub(super) const HOT_SLAB_BYTES: usize = 4 * 1024 * 1024;
 /// neighbour cannot cost a tensor an extra sector on its first block.
 const ALIGN: usize = 256;
 
-/// Slabs the weights are bump-allocated out of. Never freed: a weight lives as
-/// long as the backend does.
+/// Slabs the weights are bump-allocated out of, so the model sits in a
+/// handful of large allocations rather than one each. Never freed: a weight
+/// lives as long as the backend does.
+///
+/// WDDM manages residency per allocation, and past a point it stops being
+/// able to keep a large set of them resident even at a constant total size.
+/// The cliff needs both a high allocation count and a large footprint.
 #[derive(Default)]
 pub(super) struct Arena {
     /// How much is taken from the driver at a time.
