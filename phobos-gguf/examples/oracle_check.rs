@@ -13,8 +13,19 @@
 use std::path::PathBuf;
 
 use anyhow::{Result, bail};
-use phobos_gguf::backend::device::DeviceBackend;
+use phobos_gguf::backend::Backend;
 use phobos_gguf::{Bpe, Decoder, Gguf};
+
+fn make_backend() -> Result<Box<dyn Backend>> {
+    #[cfg(feature = "cuda")]
+    {
+        Ok(Box::new(phobos_gguf::backend::device::DeviceBackend::new()?))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Box::new(phobos_gguf::backend::HostBackend::new()))
+    }
+}
 
 fn main() -> Result<()> {
     let (mut path, mut prompts) = (None::<PathBuf>, Vec::new());
@@ -43,7 +54,8 @@ fn main() -> Result<()> {
     let gguf = Gguf::open(&path)?;
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
     let model = Decoder::load(&gguf)?;
-    let backend = DeviceBackend::new()?;
+    let backend = make_backend()?;
+    let backend = backend.as_ref();
 
     let mut inputs = Vec::with_capacity(prompts.len() + id_prompts.len());
     for prompt in prompts {
@@ -55,15 +67,15 @@ fn main() -> Result<()> {
     }
     for (ids, prompt) in inputs {
         let mut state = model.new_state();
-        let logits = model.forward(&mut state, &ids, &backend)?;
+        let logits = model.forward(&mut state, &ids, backend)?;
         let top = log_softmax_top(&logits, top_k);
         let mut tokens = Vec::with_capacity(greedy);
         let mut next = top[0].0;
         for _ in 0..greedy {
             tokens.push(next);
-            next = model.forward_greedy(&mut state, &[next], &backend)? as u32;
+            next = model.forward_greedy(&mut state, &[next], backend)? as u32;
         }
-        state.release(&backend);
+        state.release(backend);
 
         let top: Vec<String> = top
             .iter()

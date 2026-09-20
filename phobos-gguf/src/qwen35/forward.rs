@@ -3,10 +3,37 @@
 
 use anyhow::{Result, bail, ensure};
 
-use crate::backend::{Backend, read_vec};
+use crate::backend::{Backend, Buf, read_vec, route};
 use crate::model::ForwardBufs;
 
 use super::{Config, FeedForward, LayerState, Mixer, Model, State, Variants};
+
+/// What the routers of a mixture-of-experts model chose during one pass,
+/// for a caller studying them: which experts, and which ones a cheap
+/// prediction would have named ahead of time.
+#[derive(Debug, Default)]
+pub struct RouteTrace {
+    /// Experts a token went through.
+    pub n_used: usize,
+    /// `[block][row][n_used]` expert ids, every block's router as it ran.
+    pub routes: Vec<u32>,
+    /// `[block][row][n_used]`: block `b + 1`'s router evaluated on the
+    /// residual as it left block `b`, before block `b + 1`'s own mixer
+    /// touched it. The last block predicts nothing; its entries are zero.
+    /// A prefetch that acts on this is only as good as its agreement with
+    /// `routes`, which is what the trace is for measuring.
+    pub lookahead: Vec<u32>,
+}
+
+/// The device buffers a traced pass leaves behind for [`RouteTrace`] to be
+/// read out of once the pass has ended.
+struct TraceBufs {
+    /// One `[rows, n_used]` buffer a block.
+    routes: Vec<Buf>,
+    /// One `[rows, n_expert]` logits buffer a block that predicts.
+    lookahead: Vec<Option<Buf>>,
+    scratch: Buf,
+}
 
 impl Model {
     /// Run `tokens`, advancing `state`, and return the final position's logits.
@@ -29,7 +56,8 @@ impl Model {
         tokens: &[u32],
         backend: &dyn Backend,
     ) -> Result<i64> {
-        let (bufs, cfg) = self.forward_to_logits(state, tokens, backend, Variants::REFERENCE)?;
+        let (bufs, cfg) =
+            self.forward_to_logits(state, tokens, backend, Variants::REFERENCE, None)?;
         let id = backend.argmax(bufs.logits, cfg.vocab)?;
         bufs.release(backend);
         Ok(id)
@@ -44,10 +72,65 @@ impl Model {
         backend: &dyn Backend,
         variants: Variants,
     ) -> Result<Vec<f32>> {
-        let (bufs, cfg) = self.forward_to_logits(state, tokens, backend, variants)?;
+        let (bufs, cfg) = self.forward_to_logits(state, tokens, backend, variants, None)?;
         let out = read_vec(backend, bufs.logits, cfg.vocab)?;
         bufs.release(backend);
         Ok(out)
+    }
+
+    /// [`Model::forward`] on a mixture-of-experts model, also reporting what
+    /// its routers chose. Slower than the plain pass by a router evaluation
+    /// a block and the readbacks; for studying the routers, not for serving.
+    pub fn forward_traced(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        backend: &dyn Backend,
+    ) -> Result<(Vec<f32>, RouteTrace)> {
+        let cfg = &self.config;
+        let moe = cfg
+            .moe
+            .ok_or_else(|| anyhow::anyhow!("a {} model has no routers to trace", cfg.arch))?;
+        let rows = tokens.len();
+        let mut bufs = TraceBufs {
+            routes: (0..cfg.n_block)
+                .map(|_| backend.alloc(rows * moe.n_used))
+                .collect::<Result<_>>()?,
+            lookahead: (0..cfg.n_block)
+                .map(|b| {
+                    (b + 1 < cfg.n_block)
+                        .then(|| backend.alloc(rows * moe.n_expert))
+                        .transpose()
+                })
+                .collect::<Result<_>>()?,
+            scratch: backend.alloc(rows * cfg.d_model)?,
+        };
+        let (out, _) =
+            self.forward_to_logits(state, tokens, backend, Variants::REFERENCE, Some(&mut bufs))?;
+        let logits = read_vec(backend, out.logits, cfg.vocab)?;
+        out.release(backend);
+
+        let mut trace = RouteTrace { n_used: moe.n_used, ..RouteTrace::default() };
+        for (routes, lookahead) in bufs.routes.iter().zip(&bufs.lookahead) {
+            let chosen = read_vec(backend, *routes, rows * moe.n_used)?;
+            trace.routes.extend(chosen.iter().map(|&id| id as u32));
+            match lookahead {
+                Some(buf) => {
+                    let predicted = read_vec(backend, *buf, rows * moe.n_expert)?;
+                    for row in predicted.chunks_exact(moe.n_expert) {
+                        trace
+                            .lookahead
+                            .extend(route(row, moe.n_used).iter().map(|&(e, _)| e as u32));
+                    }
+                }
+                None => trace.lookahead.extend(std::iter::repeat_n(0, rows * moe.n_used)),
+            }
+        }
+        for buf in bufs.routes.into_iter().chain(bufs.lookahead.into_iter().flatten()) {
+            backend.release(buf);
+        }
+        backend.release(bufs.scratch);
+        Ok((logits, trace))
     }
 
     /// The shared body of [`Model::forward_with`] and [`Model::forward_greedy`]:
@@ -60,6 +143,7 @@ impl Model {
         tokens: &[u32],
         backend: &dyn Backend,
         variants: Variants,
+        mut tracing: Option<&mut TraceBufs>,
     ) -> Result<(ForwardBufs, &Config)> {
         ensure!(
             !tokens.is_empty(),
@@ -121,9 +205,22 @@ impl Model {
                 }
                 FeedForward::Moe(moe) => {
                     let input = self.norm(backend, x, rows, gain, normed, moe.input())?;
-                    moe.forward(backend, input, rows, x, None)?;
+                    let routes = tracing.as_ref().map(|t| t.routes[index]);
+                    moe.forward(backend, input, rows, x, routes)?;
                     input.release(backend);
                 }
+            }
+
+            // The next block's router on the residual as it stands, ahead of
+            // that block's mixer: what a prefetch could know now.
+            if let Some(tracing) = tracing.as_deref_mut()
+                && let Some(logits) = tracing.lookahead[index]
+                && let Some(next) = self.blocks.get(index + 1)
+                && let FeedForward::Moe(moe) = &next.ffn
+            {
+                let gain = next.post_attn_norm.buf(backend)?;
+                backend.rms_norm(x, rows, d, gain, cfg.rms_eps, tracing.scratch)?;
+                moe.router_into(backend, tracing.scratch, rows, logits)?;
             }
 
             if trace {
