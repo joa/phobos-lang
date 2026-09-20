@@ -1,14 +1,14 @@
-//! Lists and evicts entries in the on-disk PTX cache.
-//!
-//! A compile costs minutes, so a benchmarking session that changed one kernel
-//! wants the other entries left alone: pin the compiler fingerprint with
-//! `PHOBOS_KERNEL_CACHE_EPOCH` and evict just the kernels that moved.
-//!
-//!     cargo run -p phobos-kernels --example cache -- list
-//!     cargo run -p phobos-kernels --example cache -- evict 'iq*_qdot*'
-//!
-//! `evict` matches against the kernel name an entry is filed under, with `*`
-//! as the only wildcard; there is nothing to undo but a recompile.
+// Lists and evicts entries in the on-disk PTX cache.
+//
+// A compile costs minutes, so a benchmarking session that changed one kernel
+// wants the other entries left alone: pin the compiler fingerprint with
+// `PHOBOS_KERNEL_CACHE_EPOCH` and evict just the kernels that moved.
+//
+//     cargo run -p phobos-kernels --example cache -- list
+//     cargo run -p phobos-kernels --example cache -- evict 'iq*_qdot*'
+//
+// `evict` matches against the kernel name an entry is filed under, with `*`
+// as the only wildcard; there is nothing to undo but a recompile.
 
 use std::fs;
 

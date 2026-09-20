@@ -1,8 +1,8 @@
-//! Fingerprints the compiler that turns a kernel source into PTX, so the disk
-//! cache can key on it. Changes whenever the generated PTX could and stays
-//! put otherwise: hashes every `.rs` under the crates that lower a kernel,
-//! plus the toolchain versions from `Cargo.lock`. Not the calling executable,
-//! which would give each binary its own cold compile.
+// Fingerprints the compiler that turns a kernel source into PTX, so the disk
+// cache can key on it. Changes whenever the generated PTX could and stays
+// put otherwise: hashes every `.rs` under the crates that lower a kernel,
+// plus the toolchain versions from `Cargo.lock`. Not the calling executable,
+// which would give each binary its own cold compile.
 
 use std::{
     fs,

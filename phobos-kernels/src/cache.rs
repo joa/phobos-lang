@@ -1,14 +1,3 @@
-//! Persists compiled PTX to disk, keyed by everything that can change what a
-//! kernel's source compiles to, so a cache hit survives a process restart and
-//! is shared by every binary built from the same compiler. `PHOBOS_KERNEL_CACHE_DIR`
-//! overrides the default (`~/.phobos/kernel-cache`); empty disables caching,
-//! and `print_phases` always disables it, since a hit has nothing to print.
-//!
-//! `PHOBOS_KERNEL_CACHE_EPOCH` overrides the compiler fingerprint, so a
-//! session can pin it and evict just the kernels that changed, with `cargo
-//! run -p phobos-kernels --example cache -- evict <name>`; entries are named
-//! `<kernel>-<hash>` so eviction can glob by name.
-
 use std::sync::OnceLock;
 
 use crate::util::kernel_cache_dir as cache_dir;
@@ -18,6 +7,10 @@ use sha2::{Digest, Sha256};
 
 /// Identifies the compiler that produces the PTX: the codegen crates' source
 /// and the MLIR/LLVM versions they call, folded at build time by `build.rs`.
+/// `PHOBOS_KERNEL_CACHE_EPOCH` overrides it, so a session can pin the
+/// fingerprint and evict just the kernels that changed, with `cargo run -p
+/// phobos-kernels --example cache -- evict <name>`; entries are named
+/// `<kernel>-<hash>` so eviction can glob by name.
 /// Catches what a git commit hash would miss: an uncommitted change, a
 /// dependency bump, an LLVM upgrade.
 ///
@@ -92,8 +85,14 @@ fn write(ctx: &Context, texts: &[&str], bytes: &[u8]) {
     }
 }
 
-/// A cached `(ptx, shared)` pair for one kernel, or `None` on any cache miss,
-/// corrupt entry, or disabled cache.
+/// A cached `(ptx, shared)` pair for one kernel, or `None` on any cache
+/// miss, corrupt entry, or disabled cache.
+///
+/// Entries are keyed by everything that can change what a kernel's source
+/// compiles to, so a hit survives a process restart and is shared by every
+/// binary built from the same compiler. `PHOBOS_KERNEL_CACHE_DIR` overrides
+/// the default (`~/.phobos/kernel-cache`); empty disables caching, and
+/// `print_phases` always disables it, since a hit has nothing to print.
 pub(crate) fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>)> {
     if ctx.print_phases {
         return None;
