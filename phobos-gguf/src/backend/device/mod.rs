@@ -340,6 +340,8 @@ pub struct DeviceBackend {
     /// and whether every program reads activation row zero, the combine.
     moe_topk: RefCell<HashMap<usize, Module>>,
     moe_qdot: RefCell<HashMap<(&'static str, usize, bool), Module>>,
+    /// Gate, up and the SwiGLU in one, by format and width.
+    moe_gateup: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_combine: RefCell<HashMap<(), Module>>,
     /// Addressed by [`QBuf`]: bytes, per-block scales, and the output width
     /// they went up with. Constants, so never released.

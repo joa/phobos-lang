@@ -7,7 +7,8 @@ use cust::memory::CopyDestination;
 use phobos_kernels::cuda_ok;
 
 use super::super::kernels::{
-    MOE_COMBINE_TN, MOE_QDOT_TN, MOE_USED, moe_combine_src, moe_qdot_src, moe_topk_src,
+    MOE_COMBINE_TN, MOE_QDOT_TN, MOE_USED, moe_combine_src, moe_gateup_src, moe_qdot_src,
+    moe_topk_src,
 };
 use super::super::{DeviceBackend, Plane};
 use super::{Experts, KINDS, Kind, MAX_ROWS, NONE};
@@ -92,6 +93,12 @@ impl DeviceBackend {
         let up_out = self.alloc(MOE_USED * d_ff)?;
         let h = self.alloc(MOE_USED * d_ff)?;
         let down_out = self.alloc(MOE_USED * d)?;
+        // Gate and up in one launch with the SwiGLU when they share a
+        // format, which is what a file does unless it mixes them.
+        let joint = {
+            let set = &experts.blocks[block].set;
+            set.gate.quant() == set.up.quant()
+        };
 
         for r in 0..rows {
             // The row's misses into slots, its table row published, both
@@ -99,10 +106,14 @@ impl DeviceBackend {
             self.place_row(&mut experts, block, r, n_expert)?;
             let row_slots = slot_ptr + (r * ROW_BYTES) as u64;
             let (row_qa, row_das) = (qa + (r * d) as u64, das + (r * d / 32 * 4) as u64);
-            self.slot_matvec(&experts, block, Kind::Gate, row_qa, row_das, 1, d, row_slots, d_ff, gate_out)?;
-            self.slot_matvec(&experts, block, Kind::Up, row_qa, row_das, 1, d, row_slots, d_ff, up_out)?;
-            let plane = |buf| Plane { buf, offset: 0, pitch: d_ff };
-            self.swiglu_planes(plane(gate_out), plane(up_out), h, MOE_USED, d_ff)?;
+            if joint {
+                self.slot_gateup(&experts, block, row_qa, row_das, d, row_slots, d_ff, h)?;
+            } else {
+                self.slot_matvec(&experts, block, Kind::Gate, row_qa, row_das, 1, d, row_slots, d_ff, gate_out)?;
+                self.slot_matvec(&experts, block, Kind::Up, row_qa, row_das, 1, d, row_slots, d_ff, up_out)?;
+                let plane = |buf| Plane { buf, offset: 0, pitch: d_ff };
+                self.swiglu_planes(plane(gate_out), plane(up_out), h, MOE_USED, d_ff)?;
+            }
             let hact = self.quantize_act(h, MOE_USED, d_ff)?;
             let (hqa, hdas) = self.act_ptrs(hact)?;
             self.slot_matvec(&experts, block, Kind::Down, hqa, hdas, MOE_USED, d_ff, row_slots, d, down_out)?;
@@ -265,6 +276,56 @@ impl DeviceBackend {
                     (bytes_at, [ns, slab.rb as i64]),
                     (d_at, [ns, slab.nb as i64]),
                     (self.ptr(out, 0)?, [u, n as i64]),
+                ],
+                ((n / MOE_QDOT_TN) as u32, MOE_USED as u32, 1),
+            )
+        })
+    }
+
+    /// Gate, up and the SwiGLU of the eight slots `row_slots` names, into
+    /// `h` (`[8, n]`), for a block whose gate and up share a format.
+    #[allow(clippy::too_many_arguments)]
+    fn slot_gateup(
+        &self,
+        experts: &Experts,
+        block: usize,
+        qa: u64,
+        das: u64,
+        k: usize,
+        row_slots: u64,
+        n: usize,
+        h: Buf,
+    ) -> Result<()> {
+        let (gate, up) = (experts.slab(block, Kind::Gate), experts.slab(block, Kind::Up));
+        let b = &experts.blocks[block];
+        let quant = b.set.gate.quant();
+        ensure!(
+            gate.n == n && up.n == n && n.is_multiple_of(MOE_QDOT_TN),
+            "a joint gate and up of {n} outputs does not fit the slabs or the tile"
+        );
+        let (name, function, resident) = match quant {
+            Quant::Q4_K => ("q4k", "q4k_moe_gateup", 4),
+            Quant::Q5_K => ("q5k", "q5k_moe_gateup", 3),
+            Quant::Q6_K => ("q6k", "q6k_moe_gateup", 3),
+            other => bail!("no slot matvec for {} experts", other.name()),
+        };
+        let u = MOE_USED as i64;
+        let ns = (experts.per_block * n) as i64;
+        let (gb, gd) = gate.at(b.base[Kind::Gate as usize]);
+        let (ub, ud) = up.at(b.base[Kind::Up as usize]);
+        self.with_kernel(&self.moe_gateup, (name, n), "moe_gateup", || moe_gateup_src(name, n, resident), |module| {
+            self.launch(
+                module,
+                function,
+                &[
+                    (qa, [1, k as i64]),
+                    (das, [1, (k / 32) as i64]),
+                    (row_slots, [1, u]),
+                    (gb, [ns, gate.rb as i64]),
+                    (gd, [ns, gate.nb as i64]),
+                    (ub, [ns, up.rb as i64]),
+                    (ud, [ns, up.nb as i64]),
+                    (self.ptr(h, 0)?, [u, n as i64]),
                 ],
                 ((n / MOE_QDOT_TN) as u32, MOE_USED as u32, 1),
             )
