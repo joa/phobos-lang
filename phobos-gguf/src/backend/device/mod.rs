@@ -151,6 +151,12 @@ pub struct DeviceBackend {
     /// copy stream. `PHOBOS_MOE_LOOKAHEAD=1` opts in: the trace priced the
     /// prediction's misses at a third more bytes, so it is off by default.
     moe_lookahead: bool,
+    /// Whether a decode step's misses are computed on the host from the
+    /// mirror's bytes instead of copied into a slot, the device summing
+    /// the hits and a zero slot standing in for each miss.
+    /// `PHOBOS_MOE_CPU_MISS=1` opts in; Phase 4 of the plan, for a bus
+    /// narrower than the host's memory.
+    moe_cpu_miss: bool,
     matmul: Variants,
     /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=
     /// TC_TILE_M`; the plain `matmul` above finishes whatever doesn't fit a

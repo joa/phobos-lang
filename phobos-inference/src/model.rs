@@ -92,6 +92,10 @@ pub struct CacheStats {
     /// those the block then wanted. Zero without a lookahead.
     pub expert_prefetches: u64,
     pub expert_prefetch_hits: u64,
+    /// Misses computed on the host rather than copied, and the host time
+    /// they took. Zero unless that path is on.
+    pub expert_cpu_misses: u64,
+    pub expert_cpu_nanos: u64,
 }
 
 impl CacheStats {
