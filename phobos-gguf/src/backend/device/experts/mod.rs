@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
+use cust::event::Event;
 use cust::memory::{DeviceBuffer, LockedBuffer};
 
 use super::DeviceBackend;
@@ -81,6 +82,10 @@ pub(super) struct ExpertStats {
     pub(super) bytes: u64,
     /// Host memory the mirrors pin, for the report.
     pub(super) pinned_bytes: u64,
+    /// Experts the lookahead copied early, and how many of those a block
+    /// then wanted.
+    pub(super) prefetches: u64,
+    pub(super) prefetch_hits: u64,
 }
 
 /// One block's experts: where they are on the host, and which slots hold
@@ -104,6 +109,17 @@ pub(super) struct BlockExperts {
     pub(super) topk: DeviceBuffer<i32>,
     pub(super) topk_host: LockedBuffer<i32>,
     pub(super) weights: DeviceBuffer<f32>,
+    /// What the previous block's lookahead predicted for this one, the
+    /// logits it selected from, and the event its copies on the copy
+    /// stream complete at; `None` when nothing is on its way.
+    pub(super) look_logits: DeviceBuffer<f32>,
+    pub(super) look_topk: DeviceBuffer<i32>,
+    pub(super) look_host: LockedBuffer<i32>,
+    pub(super) look_w: DeviceBuffer<f32>,
+    pub(super) fetched: Option<Event>,
+    /// Per slot, whether what it holds arrived by prefetch and has not
+    /// been read since, for the report.
+    pub(super) prefetched: Vec<bool>,
 }
 
 pub(super) const NONE: u32 = u32::MAX;
@@ -217,6 +233,12 @@ impl DeviceBackend {
             topk: ints(table)?,
             topk_host: LockedBuffer::new(&0i32, table)?,
             weights: DeviceBuffer::from_slice(&vec![0f32; table])?,
+            look_logits: DeviceBuffer::from_slice(&vec![0f32; n_expert])?,
+            look_topk: ints(super::kernels::MOE_USED)?,
+            look_host: LockedBuffer::new(&0i32, super::kernels::MOE_USED)?,
+            look_w: DeviceBuffer::from_slice(&[0f32; super::kernels::MOE_USED])?,
+            fetched: None,
+            prefetched: Vec::new(),
         });
         let buf = ExpertsBuf(experts.blocks.len() - 1);
         self.expert_keys.borrow_mut().insert(key.to_string(), buf);
@@ -285,6 +307,7 @@ impl DeviceBackend {
                 *at += per_block;
             }
             b.held = vec![(NONE, 0); per_block];
+            b.prefetched = vec![false; per_block];
         }
         let total: usize = slabs.values().map(|s| s.bytes.len()).sum();
         experts.per_block = per_block;

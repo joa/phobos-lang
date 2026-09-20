@@ -401,6 +401,17 @@ impl Linear {
         Some(Linear { weight: Weights::Dense(data), in_dim, out_dim, key, fold: None })
     }
 
+    /// The dense `[in, out]` weight as the backend holds it for
+    /// [`Backend::matmul`], or `None` for a weight held any other way.
+    pub(crate) fn dense_plain(&self, backend: &dyn Backend) -> Result<Option<Buf>> {
+        match &self.weight {
+            Weights::Dense(data) if self.fold.is_none() && !takes_rows(self.in_dim, self.out_dim) => {
+                backend.constant(&self.key, data).map(Some)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Write output row `index` of this weight into `out`, dequantizing it.
     /// Only the embedding table uses this, reading a token's row straight out
     /// of the quantized bytes instead of keeping a dense f32 copy.

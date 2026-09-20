@@ -360,6 +360,7 @@ fn moe_matches_a_dense_reference_and_reports_its_routes() {
             d_model: d,
             d_ff,
             logits: backend.upload(&logits).unwrap(),
+            lookahead: None,
             n_expert: count,
             n_used: used,
             experts,

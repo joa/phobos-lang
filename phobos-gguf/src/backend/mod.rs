@@ -8,7 +8,7 @@ pub use crate::quant::quantize_row;
 
 mod moe;
 
-pub use moe::{ExpertsBuf, Moe, route};
+pub use moe::{ExpertsBuf, Lookahead, Moe, route};
 
 /// A handle to backend-owned storage, so the bytes can live on a device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
