@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use phobos_inference::{Model, ModelInfo, Session, Tokenizer};
+use phobos_inference::{DeviceMemory, Model, ModelInfo, Session, Tokenizer};
 
 use crate::backend::Backend;
 use crate::model::State;
@@ -42,6 +42,9 @@ pub struct GgufModel {
     bpe: Bpe,
     backend: Box<dyn Backend>,
     info: ModelInfo,
+    /// Sized once at load, at the same batch [`check_fits`] gates on, so the
+    /// weight figure a caller displays is the one the fit was decided by.
+    footprint: crate::model::Footprint,
 }
 
 impl GgufModel {
@@ -63,11 +66,13 @@ impl GgufModel {
             context_limit: decoder.context_length(),
             chat_template,
         };
+        let footprint = decoder.footprint(PROMPT_BATCH);
         Ok(GgufModel {
             decoder,
             bpe,
             backend,
             info,
+            footprint,
         })
     }
 }
@@ -139,6 +144,34 @@ impl Model for GgufModel {
             model: self,
         }))
     }
+
+    fn footprint(&self) -> Option<phobos_inference::Footprint> {
+        Some(phobos_inference::Footprint {
+            weight_bytes: self.footprint.weight_bytes as u64,
+            dense_bytes: self.footprint.dense_bytes as u64,
+            kv_bytes_per_token: self.footprint.kv_bytes_per_token as u64,
+        })
+    }
+
+    fn device_memory(&self) -> Option<DeviceMemory> {
+        let (free_bytes, total_bytes) = self.backend.device_memory()?;
+        Some(DeviceMemory {
+            free_bytes: free_bytes as u64,
+            total_bytes: total_bytes as u64,
+        })
+    }
+
+    fn architecture(&self) -> Option<phobos_inference::Architecture> {
+        Some(self.decoder.layout())
+    }
+
+    fn device_info(&self) -> Option<phobos_inference::DeviceInfo> {
+        self.backend.device_info()
+    }
+
+    fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
+        self.backend.cache_stats()
+    }
 }
 
 pub struct GgufSession<'a> {
@@ -178,6 +211,25 @@ impl Session for GgufSession<'_> {
     fn len(&self) -> usize {
         self.state.len()
     }
+
+    fn truncate(&mut self, positions: usize) -> bool {
+        self.state.truncate(positions)
+    }
+
+    fn cache_bytes(&self) -> Option<u64> {
+        let per_token = self.model.footprint.kv_bytes_per_token as u64;
+        Some(per_token * kv_capacity(self.state.len()) as u64)
+    }
+}
+
+/// Positions the attention caches hold for a sequence of `len`.
+///
+/// They grow by doubling from a floor, so what is reserved is mostly headroom
+/// just after a growth. Reporting `len` instead would understate the cache by
+/// up to half of it. See `layers::KvCache::reserve`, which this mirrors; the
+/// recurrent state a delta net carries is fixed in size and not counted here.
+fn kv_capacity(len: usize) -> usize {
+    len.next_power_of_two().max(64)
 }
 
 impl Drop for GgufSession<'_> {

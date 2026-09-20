@@ -16,6 +16,20 @@ impl Backend for DeviceBackend {
         cust::memory::mem_get_info().ok()
     }
 
+    fn device_info(&self) -> Option<phobos_inference::DeviceInfo> {
+        super::init::device_info()
+    }
+
+    fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
+        let (buffers_reused, buffers_allocated) = self.pool.reuse_counts();
+        Some(phobos_inference::CacheStats {
+            kernels_reused: self.kernels_reused.get(),
+            kernels_compiled: self.kernels_compiled.get(),
+            buffers_reused,
+            buffers_allocated,
+        })
+    }
+
     fn release(&self, buf: Buf) {
         let taken = self
             .slots

@@ -308,6 +308,10 @@ pub struct DeviceBackend {
     /// Released allocations, handed out again rather than going back to the
     /// driver. See [`Backend::alloc`], [`DeviceBackend::alloc_written_now`].
     pool: Pool,
+    /// Kernel launches that found their module already built, and modules
+    /// that had to be compiled. See [`DeviceBackend::with_kernel`].
+    kernels_reused: Cell<u64>,
+    kernels_compiled: Cell<u64>,
     /// The weight strip a prompt pass dequantizes into, and the output the
     /// matmul over it writes. One of each for the whole model rather than a
     /// pooled pair per weight. See [`DeviceBackend::dense_scratch`].

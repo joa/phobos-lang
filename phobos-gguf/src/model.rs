@@ -100,6 +100,40 @@ impl Decoder {
         }
     }
 
+    /// The shape of the network, for a caller that displays it.
+    ///
+    /// A llama model is attention the whole way down. A qwen35 interleaves,
+    /// and which blocks are which is the interesting part: only the attention
+    /// ones pay per position, so the ratio is what makes a long context fit.
+    pub fn layout(&self) -> phobos_inference::Architecture {
+        match self {
+            Decoder::Llama(m) => phobos_inference::Architecture {
+                d_model: m.config.d_model,
+                d_ff: m.config.d_ff,
+                n_head: m.config.n_head,
+                n_head_kv: m.config.n_head_kv,
+                head_dim: m.config.head_dim,
+                blocks: vec![phobos_inference::BlockKind::Attention; m.config.n_block],
+            },
+            Decoder::Qwen35(m) => phobos_inference::Architecture {
+                d_model: m.config.d_model,
+                d_ff: m.config.d_ff,
+                n_head: m.config.n_head,
+                n_head_kv: m.config.n_head_kv,
+                head_dim: m.config.head_dim,
+                blocks: (0..m.config.n_block)
+                    .map(|i| {
+                        if m.config.is_attention_block(i) {
+                            phobos_inference::BlockKind::Attention
+                        } else {
+                            phobos_inference::BlockKind::Recurrent
+                        }
+                    })
+                    .collect(),
+            },
+        }
+    }
+
     /// Hyperparameter summary.
     pub fn summary(&self) -> String {
         match self {
@@ -156,6 +190,15 @@ impl State {
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Forget everything past `positions`, and say whether it could. See the
+    /// two architectures' own notes: one rewinds, one only extends.
+    pub fn truncate(&mut self, positions: usize) -> bool {
+        match self {
+            State::Llama(s) => s.truncate(positions),
+            State::Qwen35(s) => s.truncate(positions),
+        }
     }
 
     /// Hands every device allocation the state holds back to the backend.

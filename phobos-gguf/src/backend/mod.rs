@@ -327,6 +327,19 @@ pub trait Backend {
         None
     }
 
+    /// The card this backend computes on, or nothing for one that is not on
+    /// a card at all.
+    fn device_info(&self) -> Option<phobos_inference::DeviceInfo> {
+        None
+    }
+
+    /// What this backend's caches have returned so far, for a caller that
+    /// reports it. A backend that compiles nothing and pools nothing has
+    /// nothing to say, which is not the same as a hit rate of zero.
+    fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
+        None
+    }
+
     fn upload(&self, data: &[f32]) -> Result<Buf>;
     fn read(&self, buf: Buf, out: &mut [f32]) -> Result<()>;
 
