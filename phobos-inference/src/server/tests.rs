@@ -46,6 +46,7 @@ impl Model for Fake {
         Some(Footprint {
             weight_bytes: 1 << 30,
             dense_bytes: 0,
+            streamed_bytes: 0,
             kv_bytes_per_token: 1 << 10,
         })
     }
