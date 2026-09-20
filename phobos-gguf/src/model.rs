@@ -168,6 +168,22 @@ impl Decoder {
         }
     }
 
+    /// [`Decoder::forward`] reporting what a mixture-of-experts model's
+    /// routers chose; see [`qwen35::RouteTrace`]. Refused for a model with
+    /// no routers.
+    pub fn forward_traced(
+        &self,
+        state: &mut State,
+        tokens: &[u32],
+        backend: &dyn Backend,
+    ) -> Result<(Vec<f32>, qwen35::RouteTrace)> {
+        match (self, state) {
+            (Decoder::Qwen35(m), State::Qwen35(s)) => m.forward_traced(s, tokens, backend),
+            (Decoder::Llama(_), State::Llama(_)) => bail!("a llama model has no routers to trace"),
+            _ => bail!("generation state does not belong to the loaded architecture"),
+        }
+    }
+
     /// [`Decoder::forward`] for a caller that only wants the winning token
     /// id, as greedy decoding does. See [`Backend::argmax`].
     pub fn forward_greedy(

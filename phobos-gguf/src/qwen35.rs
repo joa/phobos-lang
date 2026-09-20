@@ -11,6 +11,7 @@ mod variants;
 
 use attention::Attention;
 use delta_net::{DeltaNet, Proj};
+pub use forward::RouteTrace;
 pub use variants::Variants;
 
 /// The routed feed-forward of the `qwen35moe` architecture.

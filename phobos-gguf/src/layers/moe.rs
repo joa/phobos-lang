@@ -67,6 +67,19 @@ impl MoeFfn {
         &self.router
     }
 
+    /// The router alone, on an already normalized `x`, into `logits`
+    /// (`[rows, n_expert]`): for a caller asking what this block would
+    /// choose for a row without running it.
+    pub(crate) fn router_into(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        rows: usize,
+        logits: Buf,
+    ) -> Result<()> {
+        self.router.project_into(backend, x, rows, logits)
+    }
+
     /// The whole feed-forward added into `dest`: router, chosen experts,
     /// gated shared expert. `routes`, if given, receives each row's chosen
     /// expert ids as [`Moe::routes`] describes.
