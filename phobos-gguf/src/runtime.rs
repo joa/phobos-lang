@@ -83,7 +83,9 @@ impl GgufModel {
 /// Weights are the part worth checking: they are constants, so every one of
 /// them is resident at once and none is ever released. Everything else is
 /// bounded by [`RESERVE_BYTES`], and the caches are only reported, since their
-/// cost depends on how long a sequence gets rather than on the model.
+/// cost depends on how long a sequence gets rather than on the model. Streamed
+/// experts are not weights in this sense: they are never all resident, and
+/// whatever room is left after the resident ones is what their cache gets.
 fn check_fits(backend: &dyn Backend, decoder: &Decoder) -> Result<()> {
     let Some((free_bytes, total_bytes)) = backend.device_memory() else {
         return Ok(());
@@ -149,6 +151,7 @@ impl Model for GgufModel {
         Some(phobos_inference::Footprint {
             weight_bytes: self.footprint.weight_bytes as u64,
             dense_bytes: self.footprint.dense_bytes as u64,
+            streamed_bytes: self.footprint.streamed_bytes as u64,
             kv_bytes_per_token: self.footprint.kv_bytes_per_token as u64,
         })
     }

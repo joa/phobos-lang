@@ -286,6 +286,13 @@ fn model(frame: &mut Frame, snap: &Snapshot, area: Rect) {
                     theme::MUTED,
                 ));
             }
+            if footprint.streamed_bytes > 0 {
+                lines.push(field(
+                    "streamed",
+                    &format!("{} of experts, on the host", bytes(footprint.streamed_bytes)),
+                    theme::MUTED,
+                ));
+            }
         }
         None => lines.push(field(
             "weights",

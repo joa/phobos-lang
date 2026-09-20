@@ -17,6 +17,10 @@ pub struct Footprint {
     /// Of [`Footprint::weight_bytes`], what the backend could not keep in the
     /// file's own format and holds widened instead.
     pub dense_bytes: u64,
+    /// Weights not counted in [`Footprint::weight_bytes`] because they are
+    /// never all resident: a mixture of experts the backend streams from the
+    /// file, as the file holds them. Zero for a model without any.
+    pub streamed_bytes: u64,
     /// What one more position of context costs across every cached layer.
     pub kv_bytes_per_token: u64,
 }

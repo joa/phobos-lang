@@ -41,6 +41,7 @@ fn loaded() -> Snapshot {
         footprint: Some(Footprint {
             weight_bytes: 7 << 30,
             dense_bytes: 1 << 30,
+            streamed_bytes: 0,
             kv_bytes_per_token: 256 << 10,
         }),
         architecture: Some(Architecture {
@@ -322,6 +323,7 @@ fn weights_not_yet_uploaded_are_not_drawn_as_resident() {
         footprint: Some(Footprint {
             weight_bytes: 6_012_954_214,
             dense_bytes: 0,
+            streamed_bytes: 0,
             kv_bytes_per_token: 1 << 10,
         }),
         ..Default::default()
