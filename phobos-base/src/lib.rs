@@ -6,5 +6,6 @@ pub mod combo;
 pub mod context;
 pub mod half;
 pub mod log;
+pub mod progress;
 pub mod rng;
 pub mod shape;

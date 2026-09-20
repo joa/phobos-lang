@@ -66,11 +66,22 @@ impl Args {
     /// typo rather than a positional, and is reported as one; a single-dash
     /// token is left alone, so a negative number still reads as an argument.
     pub fn positional(&self, valued: &[&str]) -> Result<Vec<&str>> {
+        self.positional_with(valued, &[])
+    }
+
+    /// [`Args::positional`] where some long flags are switches.
+    ///
+    /// A switch carries no value, so nothing distinguishes it from a typo
+    /// except being named, and `switches` is where it is named. Split from
+    /// [`Args::positional`] so the common case still reads as one list.
+    pub fn positional_with(&self, valued: &[&str], switches: &[&str]) -> Result<Vec<&str>> {
         let mut out = Vec::new();
         let mut tokens = self.tokens.iter();
         while let Some(token) = tokens.next() {
             if valued.contains(&token.as_str()) {
                 tokens.next();
+            } else if switches.contains(&token.as_str()) {
+                continue;
             } else if token.starts_with("--") {
                 return Err(anyhow!("unknown flag {token}"));
             } else {
@@ -200,6 +211,17 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert_eq!(err, "unknown flag --typo");
+    }
+
+    #[test]
+    fn a_switch_is_neither_a_positional_nor_a_typo() {
+        let a = args(&["--no-tui", "hello", "--listen", "addr", "world"]);
+        assert_eq!(
+            a.positional_with(&["--listen"], &["--no-tui"]).unwrap(),
+            vec!["hello", "world"]
+        );
+        assert!(a.has("--no-tui"));
+        assert!(a.positional(&["--listen"]).is_err());
     }
 
     #[test]
