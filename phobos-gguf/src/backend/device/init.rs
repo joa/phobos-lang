@@ -554,6 +554,7 @@ impl DeviceBackend {
             copy_stream,
             moe_lookahead: matches!(std::env::var("PHOBOS_MOE_LOOKAHEAD").as_deref(), Ok("1")),
             moe_cpu_miss: matches!(std::env::var("PHOBOS_MOE_CPU_MISS").as_deref(), Ok("1")),
+            moe_grouped: matches!(std::env::var("PHOBOS_MOE_GROUPED").as_deref(), Ok("1")),
             pass: RefCell::new(Vec::new()),
             segment: Cell::new(0),
             // The fourth replay by default: past the prefill and past the
@@ -630,6 +631,9 @@ impl DeviceBackend {
             moe_qdot: RefCell::new(HashMap::new()),
             moe_gateup: RefCell::new(HashMap::new()),
             moe_combine: RefCell::new(HashMap::new()),
+            moe_permute: RefCell::new(HashMap::new()),
+            moe_qgemm: RefCell::new(HashMap::new()),
+            moe_gather: RefCell::new(HashMap::new()),
             q2k_matvec,
             q3k_matvec,
             iq1s_matvec,
