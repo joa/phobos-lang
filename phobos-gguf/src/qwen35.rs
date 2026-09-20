@@ -7,6 +7,8 @@ use crate::layers::{Ffn, Gain, KvCache, Linear, MoeFfn, RopeTable, Shared, Uploa
 mod attention;
 mod delta_net;
 mod forward;
+#[cfg(test)]
+mod tests;
 mod variants;
 
 use attention::Attention;
