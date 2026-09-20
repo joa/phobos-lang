@@ -43,6 +43,9 @@ pub struct Defaults {
     pub sample: SampleConfig,
     pub seed: u64,
     pub max_tokens: usize,
+    /// Whether to keep a finished request's session and reuse as much of it
+    /// as the next request's prompt agrees with.
+    pub prefix_cache: bool,
 }
 
 impl Defaults {
@@ -50,7 +53,7 @@ impl Defaults {
         let s = &self.sample;
         format!(
             "temperature={} top_k={} top_p={} min_p={} presence_penalty={} \
-             repetition_penalty={} seed={} max_tokens={}",
+             repetition_penalty={} seed={} max_tokens={} prefix_cache={}",
             s.temperature,
             s.top_k,
             s.top_p,
@@ -59,6 +62,7 @@ impl Defaults {
             s.repetition_penalty,
             self.seed,
             self.max_tokens,
+            self.prefix_cache,
         )
     }
 }

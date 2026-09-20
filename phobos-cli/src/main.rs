@@ -10,6 +10,7 @@
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Result, bail};
 
@@ -19,6 +20,7 @@ use phobos_inference::Model;
 use phobos_inference::generate::{self, Flow};
 use phobos_inference::sampling::{Rng, SampleConfig, Sequence};
 use phobos_inference::server;
+use phobos_inference::telemetry::Meter;
 use phobos_onnx::OnnxModel;
 
 /// Every flag that takes a value. Whatever is left over is the prompt.
@@ -188,8 +190,9 @@ fn main() -> Result<()> {
             sample: args.sample,
             seed: args.seed,
             max_tokens: args.num_tokens,
+            prefix_cache: true,
         };
-        return server::serve(addr, model, defaults);
+        return server::serve(addr, model, defaults, Arc::new(Meter::new()));
     }
 
     match &args.prompt {
@@ -220,10 +223,7 @@ fn oneshot(model: &dyn Model, prompt: &str, args: &Args, rng: &mut Rng) -> Resul
     print!("{prompt}");
     io::stdout().flush().ok();
 
-    let config = generate::Config {
-        sample: args.sample,
-        max_tokens: args.num_tokens,
-    };
+    let config = generate::Config::new(args.sample, args.num_tokens);
     let mut sequence = Sequence::new(ids);
     let mut sink = |text: &str| {
         print!("{text}");

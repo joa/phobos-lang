@@ -7,6 +7,7 @@ use axum::{
         sse::{Event, Sse},
     },
 };
+use phobos_base::log::Level;
 use serde_json::{Value, json};
 
 use crate::chat::tools::selected_tools;
@@ -63,13 +64,16 @@ pub(crate) async fn handle_completions(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Response {
-    let body_str = String::from_utf8_lossy(&body);
-    println!("Received request: {}", body_str);
+    state
+        .meter
+        .log(Level::Debug, format!("POST /v1/completions {}", body.len()));
 
     let req: CompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            println!("Failed to parse request: {}", e);
+            state
+                .meter
+                .log(Level::Info, format!("bad completion request: {e}"));
             return error_response(StatusCode::BAD_REQUEST, e.to_string());
         }
     };
@@ -115,13 +119,17 @@ pub(crate) async fn handle_chat_completions(
     State(state): State<AppState>,
     body: axum::body::Bytes,
 ) -> Response {
-    let body_str = String::from_utf8_lossy(&body);
-    println!("Received chat request: {}", body_str);
+    state.meter.log(
+        Level::Debug,
+        format!("POST /v1/chat/completions {}", body.len()),
+    );
 
     let chat_req: ChatCompletionRequest = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            println!("Failed to parse chat request: {}", e);
+            state
+                .meter
+                .log(Level::Info, format!("bad chat request: {e}"));
             return error_response(StatusCode::BAD_REQUEST, e.to_string());
         }
     };
