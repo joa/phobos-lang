@@ -106,6 +106,26 @@ impl ExpertStack {
         grouped_len(self.n, self.blocks_per_row(), self.quant.device_block().1)
     }
 
+    /// Elements of expert `e`'s grouped scale plane: one `f16` a block,
+    /// rows regrouped by eights like the blocks. The K-quant kernels read
+    /// it only for a format whose scale is not in the block on the device
+    /// (Q6_K); the rest take it as an operand and never read it.
+    pub fn grouped_scales(&self) -> usize {
+        grouped_len(self.n, self.blocks_per_row(), 1)
+    }
+
+    /// Expert `e`'s scale plane in the grouped layout, into a buffer of
+    /// [`ExpertStack::grouped_scales`]. A format with no header scale gets
+    /// zeros.
+    pub fn grouped_scales_into(&self, e: usize, out: &mut [u16]) {
+        let Some(split) = self.quant.spec().raw_scales else {
+            out.fill(0);
+            return;
+        };
+        let scales = split(self.expert(e), self.k, self.n);
+        group_rows_into(&scales.d, self.n, self.blocks_per_row(), 1, out);
+    }
+
     /// Expert `e` in the grouped layout, into a buffer of
     /// [`ExpertStack::grouped_bytes`]: each block trimmed to its device
     /// window, then rows regrouped by eights. Padding rows past `n` are left

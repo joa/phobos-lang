@@ -506,7 +506,7 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     };
 
     let track = (inner.width as usize).saturating_sub(38).clamp(5, 18);
-    let lines = vec![
+    let mut lines = vec![
         prompt,
         hit_rate(
             "kernels",
@@ -532,6 +532,17 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             ),
         ]),
     ];
+    // Only a model whose experts stream has a third cache to speak of.
+    if let Some(rate) = stats.expert_hit_rate() {
+        lines.push(hit_rate(
+            "experts",
+            Some(rate),
+            stats.expert_hits,
+            stats.expert_misses,
+            track,
+            theme::AMBER,
+        ));
+    }
     frame.render_widget(Paragraph::new(lines), inner);
 }
 

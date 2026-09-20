@@ -48,6 +48,8 @@ pub struct Footprint {
     /// from the file, as the file holds them. What the host has to hold, and
     /// what a device cache is filled from.
     pub streamed_bytes: usize,
+    /// Expert sets that stream: the blocks a cache is shared among.
+    pub streamed_sets: usize,
     /// What both attention caches across every block add per position. They
     /// grow by doubling and the growth holds the old pair while it copies, so a
     /// run's peak reaches about three times this times the sequence length.
@@ -101,6 +103,7 @@ impl Decoder {
             weight_bytes: uploads.bytes(),
             dense_bytes: uploads.dense_bytes(),
             streamed_bytes: uploads.streamed_bytes(),
+            streamed_sets: uploads.streamed_sets(),
             kv_bytes_per_token,
         }
     }

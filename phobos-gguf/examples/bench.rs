@@ -240,6 +240,20 @@ fn main() -> Result<()> {
             backend_name()
         );
     }
+    // A model whose experts stream has one more number that decides its
+    // decode rate: what share of them the device cache had.
+    if let Some(stats) = backend.cache_stats()
+        && let Some(rate) = stats.expert_hit_rate()
+    {
+        println!(
+            "
+expert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
+            rate * 100.0,
+            stats.expert_hits,
+            stats.expert_hits + stats.expert_misses,
+            stats.expert_bytes as f64 / 1e9
+        );
+    }
     Ok(())
 }
 

@@ -62,6 +62,13 @@ impl MoeFfn {
         into.add_streamed(&self.key, self.experts.byte_len());
     }
 
+    /// Hands the expert set to the backend, once; every block does this
+    /// ahead of the first pass so a backend laying out a cache sees them
+    /// all. Later calls are a lookup.
+    pub(crate) fn register(&self, backend: &dyn Backend) -> Result<()> {
+        backend.constant_experts(&self.key, &self.experts).map(|_| ())
+    }
+
     /// The weight that reads the block's input; see [`Linear::share`].
     pub(crate) fn input(&self) -> &Linear {
         &self.router

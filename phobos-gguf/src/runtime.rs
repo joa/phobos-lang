@@ -35,7 +35,7 @@ const PROMPT_BATCH: usize = 512;
 /// delta net's recurrent state, and the driver's own context. Generous on
 /// purpose, to catch a model that cannot possibly fit rather than adjudicate
 /// the last hundred megabytes.
-const RESERVE_BYTES: usize = 768 << 20;
+pub(crate) const RESERVE_BYTES: usize = 768 << 20;
 
 pub struct GgufModel {
     decoder: Decoder,

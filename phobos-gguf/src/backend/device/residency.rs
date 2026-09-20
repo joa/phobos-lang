@@ -45,8 +45,8 @@ impl DeviceBackend {
         }
         self.stream.synchronize()?;
         self.act_scratch.borrow_mut().clear();
-        // Freeing anything frees memory the cached pass graph points at.
-        self.pass.borrow_mut().take();
+        // Freeing anything frees memory the cached pass graphs point at.
+        self.pass.borrow_mut().clear();
         self.pool.trim();
         Ok(())
     }
@@ -70,9 +70,9 @@ impl DeviceBackend {
         // nothing else ever gives them back. A decode step re-takes the two
         // or three it needs at one row, which costs nothing.
         self.act_scratch.borrow_mut().clear();
-        // Freeing anything here frees memory the cached pass graph's kernel
-        // nodes still point at, so it must not be replayed after this.
-        self.pass.borrow_mut().take();
+        // Freeing anything here frees memory the cached pass graphs' kernel
+        // nodes still point at, so they must not be replayed after this.
+        self.pass.borrow_mut().clear();
         if !self.trim_after_dense {
             return Ok(());
         }

@@ -568,6 +568,15 @@ pub trait Backend {
         Ok(false)
     }
 
+    /// Tells a backend that streams experts how much of its memory the
+    /// resident weights will take and how many expert sets will register,
+    /// so it can size the expert cache from what is left and share it out.
+    /// Called once at load, before any pass, by a model with streamed
+    /// weights; a backend with no cache ignores it.
+    fn budget_streamed(&self, _resident_bytes: usize, _sets: usize) -> Result<()> {
+        Ok(())
+    }
+
     /// Registers a block's expert set under `key`, once: a later call with
     /// the same key returns the same handle. What the backend keeps of the
     /// set is its own affair, from every expert resident to none of them;

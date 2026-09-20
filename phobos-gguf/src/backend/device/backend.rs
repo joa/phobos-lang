@@ -22,12 +22,28 @@ impl Backend for DeviceBackend {
 
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
         let (buffers_reused, buffers_allocated) = self.pool.reuse_counts();
+        let experts = self.expert_stats();
         Some(phobos_inference::CacheStats {
             kernels_reused: self.kernels_reused.get(),
             kernels_compiled: self.kernels_compiled.get(),
             buffers_reused,
             buffers_allocated,
+            expert_hits: experts.hits,
+            expert_misses: experts.misses,
+            expert_bytes: experts.bytes,
         })
+    }
+
+    fn budget_streamed(&self, resident_bytes: usize, sets: usize) -> Result<()> {
+        self.set_streamed_budget(resident_bytes, sets)
+    }
+
+    fn constant_experts(&self, key: &str, set: &std::sync::Arc<crate::experts::ExpertSet>) -> Result<crate::backend::ExpertsBuf> {
+        self.register_experts(key, set)
+    }
+
+    fn moe(&self, req: crate::backend::Moe) -> Result<()> {
+        self.run_moe(req)
     }
 
     fn release(&self, buf: Buf) {
@@ -137,6 +153,7 @@ impl Backend for DeviceBackend {
         self.act_ring.set(0);
         self.act_shared.set(mem::ACT_RING);
         self.recorded_len.set(0);
+        self.segment.set(0);
         self.flushed.set(false);
         self.recording.set(true);
         if self.report_pass.get() != 0 {
