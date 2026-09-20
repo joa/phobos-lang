@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use anyhow::Result;
@@ -8,6 +8,10 @@ use cust::memory::DeviceBuffer;
 #[derive(Default)]
 pub struct Pool {
     free: RefCell<HashMap<usize, Vec<DeviceBuffer<f32>>>>,
+    /// Buffers [`Pool::take`] found on the free list, and buffers it had to
+    /// allocate. Counters only: nothing here reads them back.
+    reused: Cell<u64>,
+    allocated: Cell<u64>,
 }
 
 impl Pool {
@@ -21,9 +25,23 @@ impl Pool {
     /// the stream; see [`Pool::take_fresh`].
     pub fn take(&self, len: usize) -> Result<DeviceBuffer<f32>> {
         if let Some(pooled) = self.free.borrow_mut().get_mut(&len).and_then(Vec::pop) {
+            self.reused.set(self.reused.get() + 1);
             return Ok(pooled);
         }
+        self.allocated.set(self.allocated.get() + 1);
         self.take_fresh(len)
+    }
+
+    /// Buffers handed back off the free list, and buffers allocated because
+    /// nothing of that size was on it.
+    ///
+    /// A steady state reuses nearly everything: the shapes a pass asks for are
+    /// the same every pass. Allocations still climbing once decoding has
+    /// settled mean something is asking for a size nothing returns.
+    /// [`Pool::take_fresh`] is deliberately not counted, being a request for a
+    /// new buffer rather than a lookup that missed.
+    pub fn reuse_counts(&self) -> (u64, u64) {
+        (self.reused.get(), self.allocated.get())
     }
 
     /// A buffer of exactly `len` elements that the pool has never handed out,
