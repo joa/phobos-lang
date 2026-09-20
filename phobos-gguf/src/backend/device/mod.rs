@@ -157,6 +157,10 @@ pub struct DeviceBackend {
     /// `PHOBOS_MOE_CPU_MISS=1` opts in; Phase 4 of the plan, for a bus
     /// narrower than the host's memory.
     moe_cpu_miss: bool,
+    /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
+    /// over rows sorted by expert rather than row by row.
+    /// `PHOBOS_MOE_GROUPED=1` opts in.
+    moe_grouped: bool,
     matmul: Variants,
     /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=
     /// TC_TILE_M`; the plain `matmul` above finishes whatever doesn't fit a
@@ -357,6 +361,11 @@ pub struct DeviceBackend {
     /// Gate, up and the SwiGLU in one, by format and width.
     moe_gateup: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_combine: RefCell<HashMap<(), Module>>,
+    /// The grouped prompt path's kernels: the row permutation, the
+    /// schedule-table GEMM by format and width, the gathering combine.
+    moe_permute: RefCell<HashMap<(), Module>>,
+    moe_qgemm: RefCell<HashMap<(&'static str, usize), Module>>,
+    moe_gather: RefCell<HashMap<(), Module>>,
     /// Addressed by [`QBuf`]: bytes, per-block scales, and the output width
     /// they went up with. Constants, so never released.
     quants: RefCell<Vec<DeviceQuant>>,

@@ -165,6 +165,19 @@ impl DeviceBackend {
             set.gate.quant() == set.up.quant()
         };
 
+        // A prompt pass as grouped GEMMs, where asked.
+        if self.moe_grouped && rows > 1 {
+            self.run_grouped(&mut experts, &req, (shared, gate_logit))?;
+            if let Some(routes) = req.routes {
+                let ids: Vec<f32> = experts.blocks[block].topk_host.as_slice()[..rows * MOE_USED]
+                    .iter()
+                    .map(|&id| id as f32)
+                    .collect();
+                self.write_now(routes, &ids)?;
+            }
+            return Ok(());
+        }
+
         // The host's share of a decode step: the misses, computed there
         // from the mirror while the device sums the hits.
         let host_misses = self.moe_cpu_miss && rows == 1;

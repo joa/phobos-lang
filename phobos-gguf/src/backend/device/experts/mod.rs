@@ -10,6 +10,7 @@
 // expert of one block across the three, and the block's map says which.
 // Eviction is least recently used within the block, stamped by routing step.
 
+mod grouped;
 mod mirror;
 mod op;
 
