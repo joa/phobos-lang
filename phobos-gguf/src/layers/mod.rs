@@ -70,6 +70,11 @@ impl Uploads {
         self.uploads.values().filter(|u| u.streamed).map(|u| u.bytes).sum()
     }
 
+    /// Expert sets that stream.
+    pub(crate) fn streamed_sets(&self) -> usize {
+        self.uploads.values().filter(|u| u.streamed).count()
+    }
+
     /// Of [`Uploads::bytes`], what goes up as f32.
     pub(crate) fn dense_bytes(&self) -> usize {
         self.uploads

@@ -238,6 +238,9 @@ pub struct Model {
     blocks: Vec<Block>,
     output_norm: Gain,
     rope: RopeTable,
+    /// Bytes the resident weights take on a backend, for the expert cache's
+    /// budget; zero for a model with nothing streamed.
+    resident_bytes: usize,
 }
 
 /// Refuses a Hadamard-folded file naming a tensor this model does not read
@@ -329,14 +332,20 @@ impl Model {
 
         let output_norm = Gain::load(gguf, "output_norm.weight", config.d_model)?;
 
-        Ok(Model {
+        let mut model = Model {
             rope: RopeTable::new(config.rope_dim, config.rope_freq_base),
             config,
             embed,
             head,
             blocks,
             output_norm,
-        })
+            resident_bytes: 0,
+        };
+        if model.config.moe.is_some() {
+            // Sized at the prompt batch the runtime uses, as `check_fits` is.
+            model.resident_bytes = model.footprint(512).bytes();
+        }
+        Ok(model)
     }
 
     /// Every constant the forward pass uploads, at a context of `positions`.

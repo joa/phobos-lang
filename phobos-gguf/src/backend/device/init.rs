@@ -550,7 +550,8 @@ impl DeviceBackend {
             flushed: Cell::new(false),
             pending: RefCell::new(Vec::new()),
             recorded_len: Cell::new(0),
-            pass: RefCell::new(None),
+            pass: RefCell::new(Vec::new()),
+            segment: Cell::new(0),
             // The fourth replay by default: past the prefill and past the
             // warmup passes whose scratch arenas are still growing.
             report_pass: Cell::new(match std::env::var("PHOBOS_PASS_REPORT") {
@@ -619,6 +620,11 @@ impl DeviceBackend {
             owned_quants: RefCell::new(Vec::new()),
             owned_raw: RefCell::new(Vec::new()),
             raw_constants: RefCell::new(HashMap::new()),
+            experts: RefCell::new(experts::Experts::new()),
+            expert_keys: RefCell::new(HashMap::new()),
+            moe_topk: RefCell::new(HashMap::new()),
+            moe_qdot: RefCell::new(HashMap::new()),
+            moe_combine: RefCell::new(HashMap::new()),
             q2k_matvec,
             q3k_matvec,
             iq1s_matvec,

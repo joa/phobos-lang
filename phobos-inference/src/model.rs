@@ -82,6 +82,12 @@ pub struct CacheStats {
     /// be allocated because nothing of that size was free.
     pub buffers_reused: u64,
     pub buffers_allocated: u64,
+    /// For a model whose experts stream: experts a token wanted that were
+    /// in the device cache, ones that were not and had to cross the bus,
+    /// and the bytes that crossed. All zero for a model without experts.
+    pub expert_hits: u64,
+    pub expert_misses: u64,
+    pub expert_bytes: u64,
 }
 
 impl CacheStats {
@@ -89,6 +95,12 @@ impl CacheStats {
     /// first lookup, which is not a rate of zero.
     pub fn kernel_hit_rate(&self) -> Option<f64> {
         rate(self.kernels_reused, self.kernels_compiled)
+    }
+
+    /// Share of the experts a model's tokens wanted that were already on
+    /// the device, or `None` for a model that streams none.
+    pub fn expert_hit_rate(&self) -> Option<f64> {
+        rate(self.expert_hits, self.expert_misses)
     }
 
     pub fn buffer_hit_rate(&self) -> Option<f64> {

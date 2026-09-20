@@ -68,6 +68,9 @@ fn loaded() -> Snapshot {
         kernels_compiled: 64,
         buffers_reused: 18204,
         buffers_allocated: 1801,
+        expert_hits: 0,
+        expert_misses: 0,
+        expert_bytes: 0,
     }));
     meter.set_device_memory(Some(DeviceMemory {
         free_bytes: 5 << 30,

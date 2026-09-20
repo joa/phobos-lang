@@ -167,6 +167,17 @@ impl Model {
         let x = backend.upload(&host_x)?;
         let normed = backend.alloc(rows * d)?;
 
+        // A backend that caches streamed experts sizes the cache from what
+        // the resident weights leave; told every pass, it sizes once.
+        if self.config.moe.is_some() {
+            backend.budget_streamed(self.resident_bytes, cfg.n_block)?;
+            for block in &self.blocks {
+                if let FeedForward::Moe(moe) = &block.ffn {
+                    moe.register(backend)?;
+                }
+            }
+        }
+
         // Everything from here to the logits is device-only, which lets a
         // backend take the whole pass as one unit.
         backend.begin_pass(rows)?;

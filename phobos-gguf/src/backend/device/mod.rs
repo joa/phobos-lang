@@ -24,6 +24,7 @@ use super::{
 };
 
 mod arena;
+mod experts;
 mod argmax;
 mod attn;
 mod backend;
@@ -225,7 +226,11 @@ pub struct DeviceBackend {
     flushed: Cell<bool>,
     pending: RefCell<Vec<Recorded>>,
     recorded_len: Cell<usize>,
-    pass: RefCell<Option<PassGraph>>,
+    /// The recorded pass's graphs, one a segment: a pass with no sync point
+    /// is one segment, a mixture-of-experts pass one a block and one more.
+    pass: RefCell<Vec<PassGraph>>,
+    /// Segments replayed so far in the current pass.
+    segment: Cell<usize>,
     /// Which replay to report on, and the launches seen so far in the current
     /// one. Zero when `PHOBOS_PASS_REPORT` is unset, which costs nothing.
     report_pass: Cell<usize>,
@@ -328,6 +333,14 @@ pub struct DeviceBackend {
     /// exact length, so this is what its free list is made of.
     alloc_hist: RefCell<HashMap<usize, isize>>,
     constants: RefCell<HashMap<String, Buf>>,
+    /// The streamed experts: mirrors, slabs, maps. See `experts/`.
+    experts: RefCell<experts::Experts>,
+    expert_keys: RefCell<HashMap<String, crate::backend::ExpertsBuf>>,
+    /// The top-k kernel by expert count, the slot matvec by format, width
+    /// and whether every program reads activation row zero, the combine.
+    moe_topk: RefCell<HashMap<usize, Module>>,
+    moe_qdot: RefCell<HashMap<(&'static str, usize, bool), Module>>,
+    moe_combine: RefCell<HashMap<(), Module>>,
     /// Addressed by [`QBuf`]: bytes, per-block scales, and the output width
     /// they went up with. Constants, so never released.
     quants: RefCell<Vec<DeviceQuant>>,

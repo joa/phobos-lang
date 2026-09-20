@@ -212,11 +212,7 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// Replays the recorded pass, building or patching the graph first. A
-    /// rebuild is only needed when the pass's shape changes: the first
-    /// decode step after a prefill, and the reverse. Otherwise the topology
-    /// is identical and the only nodes that moved are the ones reading the
-    /// key/value cache, whose length grew by a token.
+    /// Replays the pass's last segment, and reports the pass if asked to.
     pub(super) fn replay(&self) -> Result<()> {
         if self.report_pass.get() != 0 {
             let left = self.report_pass.get() - 1;
@@ -226,10 +222,32 @@ impl DeviceBackend {
             }
             self.reported.set(self.reported.get() + 1);
         }
+        self.replay_segment()
+    }
+
+    /// Runs what has been recorded so far and waits for it, so the host can
+    /// read a result mid-pass. The launches before it become a segment of
+    /// their own, cached like any other; the ones after start the next.
+    pub(super) fn sync_point(&self) -> Result<()> {
+        if self.recording.get() {
+            self.replay_segment()?;
+        }
+        self.stream.synchronize()?;
+        Ok(())
+    }
+
+    /// Replays the recorded launches as the pass's next segment, building or
+    /// patching its graph first. A rebuild is only needed when the segment's
+    /// shape changes: the first decode step after a prefill, and the
+    /// reverse. Otherwise the topology is identical and the only nodes that
+    /// moved are the ones reading the key/value cache, whose length grew by
+    /// a token.
+    fn replay_segment(&self) -> Result<()> {
         let pending = self.pending.borrow();
         let recorded = &pending[..self.recorded_len.replace(0)];
-        let mut cached = self.pass.borrow_mut();
-        let reusable = cached.as_ref().is_some_and(|p| {
+        let at = self.segment.replace(self.segment.get() + 1);
+        let mut segments = self.pass.borrow_mut();
+        let reusable = segments.get(at).is_some_and(|p| {
             p.recorded.len() == recorded.len()
                 && p.recorded
                     .iter()
@@ -237,9 +255,18 @@ impl DeviceBackend {
                     .all(|(a, b)| a.func == b.func)
         });
         if !reusable {
-            *cached = Some(Self::build_graph(recorded)?);
+            let built = Self::build_graph(recorded)?;
+            if at < segments.len() {
+                segments[at] = built;
+            } else {
+                // A segment past the ones cached: a pass with more sync
+                // points than the last, which never happens once the shape
+                // of a pass settles.
+                segments.truncate(at);
+                segments.push(built);
+            }
         } else {
-            let pass = cached.as_mut().expect("reusable implies present");
+            let pass = &mut segments[at];
             let mut argv = Vec::new();
             for (i, (was, now)) in pass.recorded.iter_mut().zip(recorded).enumerate() {
                 if was.same(now) {
@@ -261,7 +288,7 @@ impl DeviceBackend {
             }
         }
 
-        let exec = cached.as_ref().expect("built above").exec;
+        let exec = segments[at].exec;
         // SAFETY: the exec outlives the launch, held by self.pass.
         cuda_ok(
             unsafe { cust::sys::cuGraphLaunch(exec, self.stream.as_inner()) },
