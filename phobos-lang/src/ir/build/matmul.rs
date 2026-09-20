@@ -3,6 +3,7 @@ use anyhow::{Result, bail};
 use super::{Binding, Build, Rv};
 use crate::ast::{AssignOp, BinOp, Expr, Scalar as AstScalar, Stmt, Type as AstType};
 use crate::ir::{Bounds, Coeff, ForInfo, GemmType, OpKind, Scalar, Type};
+use crate::shape;
 
 fn is_f16_or_f32(s: Scalar) -> bool {
     matches!(s, Scalar::F16 | Scalar::F32)
@@ -275,7 +276,7 @@ impl Build {
             return None;
         }
 
-        if self.has_wmma() && self.wmma_plan(m, n, ak).is_some() {
+        if self.has_wmma() && shape::wmma_plan(m, n, ak, self.cta_threads).is_some() {
             // The tensor-core path takes f16 or f32 throughout.
         } else {
             let a_elem = self.slice_tensor_elem(a_slice);
@@ -287,12 +288,12 @@ impl Build {
             {
                 return None;
             }
-            let (tm, tn) = self.sub_tile(m, n);
+            let (tm, tn) = shape::sub_tile(m, n, self.cta_threads);
             if tm % 4 != 0 || tn % 4 != 0 {
                 return None;
             }
             let (tiles_m, tiles_n) = (m / tm, n / tn);
-            Self::lane_grid(tiles_m, tiles_n, tm, tn)?;
+            shape::lane_grid(tiles_m, tiles_n, tm, tn)?;
             if tiles_m * tiles_n > self.cta_threads {
                 return None;
             }

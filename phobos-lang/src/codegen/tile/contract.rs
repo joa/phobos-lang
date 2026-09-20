@@ -3,6 +3,8 @@
 
 use super::*;
 
+use crate::shape;
+
 impl<'c> Codegen<'c> {
     /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind
     /// `dot_t` (contracts the last dim of both operands).
@@ -242,7 +244,7 @@ impl<'c> Codegen<'c> {
             return self.tile_matmul_dynamic(block, a, b, out, k_extent);
         }
         let elem = out.elem;
-        let (tm, tn) = self.sub_tile(m, n);
+        let (tm, tn) = shape::sub_tile(m, n, self.cta_threads);
         let (tiles_m, tiles_n) = (m / tm, n / tn);
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
@@ -250,7 +252,7 @@ impl<'c> Codegen<'c> {
         // Warp id, lane, and warp count for this thread; the launch ABI
         // requires a multiple of 32 threads. Unsigned div/rem by constants
         // strength-reduce to shift/mask.
-        let warp = match Self::lane_grid(tiles_m, tiles_n, tm, tn) {
+        let warp = match shape::lane_grid(tiles_m, tiles_n, tm, tn) {
             Some((lm, ln)) => {
                 let w = self.const_index(block, 32)?;
                 let warp_id = self.divui(block, tid, w)?;
@@ -403,43 +405,6 @@ impl<'c> Codegen<'c> {
         block.append_operation(scf::r#for(lo, total, step, region, self.loc));
         self.barrier(block)?;
         Ok(())
-    }
-
-    /// Largest register sub-tile extent that divides d.
-    pub(in crate::codegen) fn sub_extent(d: i64) -> i64 {
-        [4, 2].into_iter().find(|c| d % c == 0).unwrap_or(1)
-    }
-
-    /// Register sub-tile extents (TM, TN) for an mxn matmul output: the
-    /// largest of 8x8 or 8x4 whose sub-tile grid keeps at least one
-    /// sub-tile per CTA thread, else the legacy <=4 extents. 8x8 needs an
-    /// m*n >= 128x128 output: its shared accumulator tile only fits the
-    /// CTA budget through the register-accumulator fusion.
-    pub(in crate::codegen) fn sub_tile(&self, m: i64, n: i64) -> (i64, i64) {
-        for (tm, tn) in [(8, 8), (8, 4)] {
-            if m % tm == 0 && n % tn == 0 && (m / tm) * (n / tn) >= self.cta_threads {
-                return (tm, tn);
-            }
-        }
-        (Self::sub_extent(m), Self::sub_extent(n))
-    }
-
-    /// Lane grid (lm x ln, lm*ln = 32) for warp tiling: each warp owns an
-    /// (lm*TM)x(ln*TN) tile, lanes row-major inside it. Picks the
-    /// factorization with the fewest distinct shared reads per k-step
-    /// (WM + WN), breaking ties toward wider WN so the warp's b reads stay
-    /// contiguous. None when no factorization divides the sub-tile grid;
-    /// the caller falls back to a flat per-thread distribution.
-    pub(in crate::codegen) fn lane_grid(
-        tiles_m: i64,
-        tiles_n: i64,
-        tm: i64,
-        tn: i64,
-    ) -> Option<(i64, i64)> {
-        [(1, 32), (2, 16), (4, 8), (8, 4), (16, 2), (32, 1)]
-            .into_iter()
-            .filter(|&(lm, ln)| tiles_m % lm == 0 && tiles_n % ln == 0)
-            .min_by_key(|&(lm, ln)| (lm * tm + ln * tn, lm))
     }
 
     /// Element-wise matmul fallback for dynamically-shaped outputs.

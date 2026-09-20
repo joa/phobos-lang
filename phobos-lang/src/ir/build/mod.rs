@@ -22,8 +22,7 @@ use super::{
 };
 use crate::ast::{AttrArg, Dim, Kernel, Literal as AstLiteral, Type as AstType};
 
-/// MLIR's dynamic-extent sentinel.
-pub(crate) const DYN: i64 = i64::MIN;
+pub(crate) use crate::shape::DYN;
 
 /// What the build asks the chip. The `@tensorcore` attributes are folded
 /// in by [`Build::has_wmma`] and [`Build::has_mma_sync`].
@@ -499,43 +498,6 @@ impl Build {
     pub(crate) fn has_mma_sync(&self) -> bool {
         self.mma_sync && self.target.has_mma_sync
     }
-
-    /// Kept in step with `Codegen::wmma_plan`.
-    pub(crate) fn wmma_plan(&self, m: i64, n: i64, kk: i64) -> Option<(i64, i64)> {
-        if m == DYN || n == DYN || kk == DYN || m % 16 != 0 || n % 16 != 0 || kk % 16 != 0 {
-            return None;
-        }
-        let warps = self.cta_threads / 32;
-        let (gm, gn) = (m / 16, n / 16);
-        (1..=warps)
-            .filter(|wm| warps % wm == 0)
-            .map(|wm| (wm, warps / wm))
-            .filter(|&(wm, wn)| gm % wm == 0 && gn % wn == 0)
-            .min_by_key(|&(wm, wn)| (gm / wm + gn / wn, gm / wm))
-    }
-
-    /// Kept in step with `Codegen::sub_tile`.
-    pub(crate) fn sub_tile(&self, m: i64, n: i64) -> (i64, i64) {
-        for (tm, tn) in [(8, 8), (8, 4)] {
-            if m % tm == 0 && n % tn == 0 && (m / tm) * (n / tn) >= self.cta_threads {
-                return (tm, tn);
-            }
-        }
-        (sub_extent(m), sub_extent(n))
-    }
-
-    /// Kept in step with `Codegen::lane_grid`.
-    pub(crate) fn lane_grid(tiles_m: i64, tiles_n: i64, tm: i64, tn: i64) -> Option<(i64, i64)> {
-        [(1, 32), (2, 16), (4, 8), (8, 4), (16, 2), (32, 1)]
-            .into_iter()
-            .filter(|&(lm, ln)| tiles_m % lm == 0 && tiles_n % ln == 0)
-            .min_by_key(|&(lm, ln)| (lm * tm + ln * tn, lm))
-    }
-}
-
-/// Kept in step with `Codegen::sub_extent`.
-fn sub_extent(d: i64) -> i64 {
-    [4, 2].into_iter().find(|c| d % c == 0).unwrap_or(1)
 }
 
 /// The WMMA staging pad, in elements; kept in step with

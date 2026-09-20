@@ -3,27 +3,10 @@
 
 use super::*;
 
+use crate::shape;
+
 impl<'c> Codegen<'c> {
     /// Warp grid (wm x wn, with wm*wn the launch ABI's warp count) laid over
-    /// the matmul's 16x16-fragment grid, or None when the shape doesn't split
-    /// into whole fragments owned by whole warps. Picks the factorization
-    /// with the fewest fragments loaded per k-step, breaking ties toward
-    /// wider warp blocks for contiguous b reads and epilogue stores.
-    pub(in crate::codegen) fn wmma_plan(&self, m: i64, n: i64, kk: i64) -> Option<(i64, i64)> {
-        if m == DYN || n == DYN || kk == DYN || m % 16 != 0 || n % 16 != 0 || kk % 16 != 0 {
-            return None;
-        }
-
-        let warps = self.cta_threads / 32;
-        let (gm, gn) = (m / 16, n / 16);
-
-        (1..=warps)
-            .filter(|wm| warps % wm == 0)
-            .map(|wm| (wm, warps / wm))
-            .filter(|&(wm, wn)| gm % wm == 0 && gn % wn == 0)
-            .min_by_key(|&(wm, wn)| (gm / wm + gn / wn, gm / wm))
-    }
-
     /// Whether to pad the WMMA staging buffers: more padding means a larger
     /// CTA footprint, so fewer CTAs fit per SM. Skipped when kernel registers
     /// (`@launch`) are the limiting factor instead.
@@ -234,7 +217,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<bool> {
         let (m, n) = (out.shape[0], out.shape[1]);
         let kk = a.shape[1];
-        let Some((wm, wn)) = self.has_wmma().then(|| self.wmma_plan(m, n, kk)).flatten() else {
+        let Some((wm, wn)) = self.has_wmma().then(|| shape::wmma_plan(m, n, kk, self.cta_threads)).flatten() else {
             return Ok(false);
         };
 
