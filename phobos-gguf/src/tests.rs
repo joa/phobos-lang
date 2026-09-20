@@ -33,6 +33,14 @@ impl Builder {
         self
     }
 
+    pub(crate) fn kv_f32(&mut self, key: &str, value: f32) -> &mut Self {
+        push_str(&mut self.kv, key);
+        self.kv.extend(6u32.to_le_bytes());
+        self.kv.extend(value.to_le_bytes());
+        self.kv_count += 1;
+        self
+    }
+
     pub(crate) fn kv_string_array(&mut self, key: &str, values: &[&str]) -> &mut Self {
         push_str(&mut self.kv, key);
         self.kv.extend(9u32.to_le_bytes());
