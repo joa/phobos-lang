@@ -624,6 +624,7 @@ impl DeviceBackend {
             expert_keys: RefCell::new(HashMap::new()),
             moe_topk: RefCell::new(HashMap::new()),
             moe_qdot: RefCell::new(HashMap::new()),
+            moe_gateup: RefCell::new(HashMap::new()),
             moe_combine: RefCell::new(HashMap::new()),
             q2k_matvec,
             q3k_matvec,

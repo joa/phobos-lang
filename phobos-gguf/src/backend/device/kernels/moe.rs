@@ -95,6 +95,32 @@ kernel {name}_moe_qdot(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tenso
     )
 }
 
+/// Gate, up and the SwiGLU in one launch: program `j` of the second grid
+/// axis contracts the shared activation row against slot `SLOT[j]` of the
+/// gate slab and of the up slab, both `NE` rows an expert in one format,
+/// and writes `silu(gate) * up` as row `j` of `H`. Two launches and a
+/// SwiGLU fewer a block than the separate form.
+pub(crate) fn moe_gateup_src(name: &str, ne: usize, resident: usize) -> String {
+    let cta = qdot_i8_cta(MOE_QDOT_TN);
+    let min_blocks = (1024 / cta * resident / 4).max(1);
+    format!(
+        "@launch({cta}, {min_blocks})
+@autotune(TN in [{MOE_QDOT_TN}], NE in [{ne}])
+@aligned(N = TN, NS = NE)
+kernel {name}_moe_gateup(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tensor<i32>[1, U],
+                        GB: tensor<i8>[NS, RB], GD: tensor<f16>[NS, NB],
+                        UB: tensor<i8>[NS, RB], UD: tensor<f16>[NS, NB], H: tensor<f32>[U, N]) {{
+  let pn = program_id(0)
+  let j = program_id(1)
+  let r = SLOT[0, j] * NE + pn * TN
+  var g: tile<f32>[1, TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :], GB[r :+ TN, :], GD[r :+ TN, :])
+  var u: tile<f32>[1, TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :], UB[r :+ TN, :], UD[r :+ TN, :])
+  H[j :+ 1, pn * TN :+ TN] = g / (1.0 + exp(0.0 - g)) * u
+}}
+"
+    )
+}
+
 /// `X += sum_j W[j] * C[j, :] + sigmoid(G) * S`: the routed experts'
 /// down rows weighted by the router, plus the shared expert's row scaled by
 /// its gate's logit, into the residual. One CTA a tile of columns.
