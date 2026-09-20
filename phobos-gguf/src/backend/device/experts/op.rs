@@ -20,6 +20,23 @@ use crate::quant::Quant;
 /// Bytes of one row's eight table entries.
 const ROW_BYTES: usize = MOE_USED * size_of::<i32>();
 
+/// Expert `e` of `stack` applied to `x`: each of its `n` rows decoded into
+/// a scratch and dotted, on the calling thread.
+fn dequant_matvec(stack: &crate::experts::ExpertStack, e: usize, x: &[f32]) -> Result<Vec<f32>> {
+    let (n, k) = (stack.n(), stack.k());
+    let block = stack.quant().spec().block;
+    let block_bytes = stack.quant().spec().block_bytes;
+    let rb = k / block * block_bytes;
+    let bytes = stack.expert(e);
+    let mut decoded = vec![0.0f32; k];
+    let mut out = vec![0.0f32; n];
+    for (j, o) in out.iter_mut().enumerate() {
+        (stack.quant().spec().dequantize)(&bytes[j * rb..(j + 1) * rb], &mut decoded);
+        *o = decoded.iter().zip(x).map(|(&w, &v)| w * v).sum();
+    }
+    Ok(out)
+}
+
 impl DeviceBackend {
     pub(in super::super) fn run_moe(&self, req: Moe) -> Result<()> {
         ensure!(
@@ -148,10 +165,19 @@ impl DeviceBackend {
             set.gate.quant() == set.up.quant()
         };
 
+        // The host's share of a decode step: the misses, computed there
+        // from the mirror while the device sums the hits.
+        let host_misses = self.moe_cpu_miss && rows == 1;
         for r in 0..rows {
             // The row's misses into slots, its table row published, both
             // asynchronous on the stream ahead of its kernels.
-            self.place_row(&mut experts, block, r, n_expert)?;
+            let misses = self.place_row(&mut experts, block, r, n_expert, host_misses)?;
+            if !misses.is_empty() {
+                let y = self.host_misses(&mut experts, block, req.x, d, d_ff, &misses)?;
+                let ybuf = self.upload(&y)?;
+                self.add_into(req.dest, ybuf)?;
+                self.release(ybuf);
+            }
             let row_slots = slot_ptr + (r * ROW_BYTES) as u64;
             let (row_qa, row_das) = (qa + (r * d) as u64, das + (r * d / 32 * 4) as u64);
             if joint {
@@ -198,7 +224,15 @@ impl DeviceBackend {
     /// Row `r`'s eight experts into slots: hits stamped, misses copied from
     /// the mirror into the least recently used slots the row does not
     /// itself read, the row's slot table published, all on the stream.
-    fn place_row(&self, experts: &mut Experts, block: usize, r: usize, n_expert: usize) -> Result<()> {
+    fn place_row(
+        &self,
+        experts: &mut Experts,
+        block: usize,
+        r: usize,
+        n_expert: usize,
+        host_misses: bool,
+    ) -> Result<Vec<(usize, usize)>> {
+        let mut for_host = Vec::new();
         let Experts { blocks, slabs, per_block, tick, stats, .. } = &mut *experts;
         *tick += 1;
         let (tick, per_block) = (*tick, *per_block);
@@ -226,6 +260,13 @@ impl DeviceBackend {
                         stats.prefetch_hits += 1;
                     }
                     s as usize
+                }
+                _ if host_misses => {
+                    // The zero slot past the block's share; the host adds
+                    // this expert's share of the row itself.
+                    stats.misses += 1;
+                    for_host.push((j, e));
+                    per_block
                 }
                 _ => {
                     stats.misses += 1;
@@ -275,7 +316,64 @@ impl DeviceBackend {
             unsafe { cust::sys::cuMemcpyHtoDAsync_v2(dst, src.cast(), ROW_BYTES, self.stream.as_inner()) },
             "publishing a row's slot table",
         )?;
-        Ok(())
+        Ok(for_host)
+    }
+
+    /// The misses' share of a decode row, computed on the host: for each
+    /// `(rank, expert)`, the expert decoded from the mirror's file bytes and
+    /// applied to the row, weighted by the router's weight of that rank,
+    /// summed into a `[d]` row for the device to add. One thread an expert
+    /// and matrix.
+    fn host_misses(
+        &self,
+        experts: &mut Experts,
+        block: usize,
+        x: Buf,
+        d: usize,
+        d_ff: usize,
+        misses: &[(usize, usize)],
+    ) -> Result<Vec<f32>> {
+        let started = std::time::Instant::now();
+        let mut row = vec![0.0f32; d];
+        self.read(x, &mut row)?;
+        let mut weights = [0.0f32; MOE_USED];
+        experts.blocks[block].weights.index(0..MOE_USED).copy_to(&mut weights[..])?;
+        let set = std::sync::Arc::clone(&experts.blocks[block].set);
+        let parts: Vec<Vec<f32>> = std::thread::scope(|scope| {
+            let handles: Vec<_> = misses
+                .iter()
+                .map(|&(j, e)| {
+                    let (set, row) = (&set, &row);
+                    let w = weights[j];
+                    scope.spawn(move || -> Result<Vec<f32>> {
+                        // Gate and up on two threads, the down after them.
+                        let (g, u) = std::thread::scope(|inner| {
+                            let gate = inner.spawn(|| dequant_matvec(&set.gate, e, row));
+                            let up = inner.spawn(|| dequant_matvec(&set.up, e, row));
+                            (gate.join().expect("gate thread"), up.join().expect("up thread"))
+                        });
+                        let (g, u) = (g?, u?);
+                        let h: Vec<f32> = g.iter().zip(&u).map(|(&g, &u)| g / (1.0 + (-g).exp()) * u).collect();
+                        let mut y = dequant_matvec(&set.down, e, &h)?;
+                        for v in &mut y {
+                            *v *= w;
+                        }
+                        Ok(y)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().expect("expert thread")).collect::<Result<Vec<_>>>()
+        })?;
+        let mut y = vec![0.0f32; d];
+        for part in parts {
+            for (acc, v) in y.iter_mut().zip(part) {
+                *acc += v;
+            }
+        }
+        debug_assert_eq!(d_ff, set.gate.n());
+        experts.stats.cpu_misses += misses.len() as u64;
+        experts.stats.cpu_nanos += started.elapsed().as_nanos() as u64;
+        Ok(y)
     }
 
     /// Block `next`'s predicted experts into its slots on the copy stream:

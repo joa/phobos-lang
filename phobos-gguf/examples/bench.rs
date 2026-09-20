@@ -253,6 +253,13 @@ expert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
             stats.expert_hits + stats.expert_misses,
             stats.expert_bytes as f64 / 1e9
         );
+        if stats.expert_cpu_misses > 0 {
+            println!(
+                "cpu misses: {} computed on the host, {:.0} us each",
+                stats.expert_cpu_misses,
+                stats.expert_cpu_nanos as f64 / 1e3 / stats.expert_cpu_misses as f64
+            );
+        }
         if stats.expert_prefetches > 0 {
             println!(
                 "lookahead: {} prefetched, {} of them wanted ({:.1}%)",

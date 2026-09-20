@@ -33,6 +33,8 @@ impl Backend for DeviceBackend {
             expert_bytes: experts.bytes,
             expert_prefetches: experts.prefetches,
             expert_prefetch_hits: experts.prefetch_hits,
+            expert_cpu_misses: experts.cpu_misses,
+            expert_cpu_nanos: experts.cpu_nanos,
         })
     }
 

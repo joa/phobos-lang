@@ -553,6 +553,7 @@ impl DeviceBackend {
             recorded_len: Cell::new(0),
             copy_stream,
             moe_lookahead: matches!(std::env::var("PHOBOS_MOE_LOOKAHEAD").as_deref(), Ok("1")),
+            moe_cpu_miss: matches!(std::env::var("PHOBOS_MOE_CPU_MISS").as_deref(), Ok("1")),
             pass: RefCell::new(Vec::new()),
             segment: Cell::new(0),
             // The fourth replay by default: past the prefill and past the

@@ -86,6 +86,9 @@ pub(super) struct ExpertStats {
     /// then wanted.
     pub(super) prefetches: u64,
     pub(super) prefetch_hits: u64,
+    /// Misses computed on the host, and the host time they took.
+    pub(super) cpu_misses: u64,
+    pub(super) cpu_nanos: u64,
 }
 
 /// One block's experts: where they are on the host, and which slots hold
@@ -293,6 +296,8 @@ impl DeviceBackend {
             budget >> 20
         );
 
+        // A block's share plus one zero slot, for a miss served elsewhere.
+        let stride = per_block + 1;
         let mut slabs = HashMap::new();
         let mut next: HashMap<(Kind, Quant), usize> = HashMap::new();
         for b in &mut experts.blocks {
@@ -300,11 +305,18 @@ impl DeviceBackend {
                 let stack = kind.stack(&b.set);
                 let key = (kind, stack.quant());
                 if let std::collections::hash_map::Entry::Vacant(v) = slabs.entry(key) {
-                    v.insert(Slab::new(per_block * counts[&key], stack)?);
+                    v.insert(Slab::new(stride * counts[&key], stack)?);
                 }
                 let at = next.entry(key).or_default();
                 b.base[i] = *at;
-                *at += per_block;
+                *at += stride;
+                let slab = &slabs[&key];
+                let (zero_at, _) = slab.at(b.base[i] + per_block);
+                // SAFETY: the zero slot is inside the slab just made.
+                phobos_kernels::cuda_ok(
+                    unsafe { cust::sys::cuMemsetD8_v2(zero_at, 0, slab.slot_bytes()) },
+                    "zeroing a block's spare slot",
+                )?;
             }
             b.held = vec![(NONE, 0); per_block];
             b.prefetched = vec![false; per_block];
