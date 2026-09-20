@@ -115,7 +115,7 @@ impl Ffn {
         gate_up || self.down.folded()
     }
 
-    /// The raw formats of a split gate and up, if that is how both are held.
+    /// A split gate and up's raw formats, when both are raw.
     fn split_raw_quants(&self) -> Option<(Quant, Quant)> {
         match &self.gate_up {
             GateUp::Split { gate, up } => Some((gate.raw_quant()?, up.raw_quant()?)),

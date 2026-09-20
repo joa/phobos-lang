@@ -710,7 +710,6 @@ fn compile_leaves(
         .collect()
 }
 
-// gRPC service
 
 type SchedulerMessageStream =
     Pin<Box<dyn Stream<Item = Result<SchedulerMessage, Status>> + Send + 'static>>;

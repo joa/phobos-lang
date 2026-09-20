@@ -127,6 +127,10 @@ impl Plan {
     }
 
     /// Places every allocation the trace recorded.
+    ///
+    /// Each one becomes an interval, alive from its event until its release or
+    /// the end of the trace. A body a loop instantiates more than once gets an
+    /// interval per instance, not one spanning the loop.
     pub(crate) fn compute(ir: &Ir, trace: &Trace) -> Plan {
         let events = &trace.events;
         let end_of = events.len();

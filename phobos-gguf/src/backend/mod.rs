@@ -175,7 +175,6 @@ pub struct FusedAttnOut {
 /// stage for.
 #[derive(Clone, Copy, Debug)]
 pub enum ProjWeight {
-    /// Q8_0 planes.
     Q8(QBuf),
     /// A raw format, decoded in the kernel by its own intrinsic.
     Raw(RawBuf, Quant),
@@ -222,7 +221,6 @@ pub struct FusedProject<'a> {
 /// its own and a backend may cover the projection without it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Fused {
-    /// The normalization, the projection and its runs.
     pub project: bool,
     /// The convolution and the gates behind them.
     pub mix: bool,

@@ -23,7 +23,7 @@ use prost::Message;
 
 const VOCAB: usize = 8;
 const S: usize = 4; // sequence length
-const W: usize = 4; // width
+const W: usize = 4;
 const EPS: f32 = 1e-5;
 
 fn main() -> Result<()> {

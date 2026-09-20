@@ -72,6 +72,10 @@ where
 }
 
 /// Lowering of MLIR to the target's code.
+///
+/// The pass pipeline and the machine both come from the target's `Backend`,
+/// so nothing here names a chip: the GPU dialect goes down to LLVM IR and the
+/// backend emits from there.
 pub fn lower_mlir_to_ptx<'c>(
     ctx: &phobos_base::context::Context,
     mlir_ctx: &'c Context,

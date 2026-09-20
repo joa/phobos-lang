@@ -81,7 +81,6 @@ impl ForInfo {
 /// One coefficient of a register matmul's epilogue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Coeff {
-    /// Not applied.
     Absent,
     /// Applied as one: the epilogue has a prev_load term and this side of
     /// it is unscaled.

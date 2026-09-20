@@ -164,6 +164,9 @@ pub fn concat(inputs: &[(&[f32], &[i64])], axis: usize) -> Result<(Vec<f32>, Dim
 }
 
 /// Split a tensor along `axis` into segments of the given sizes.
+///
+/// The sizes have to sum to the axis extent: a list that does not is an error
+/// rather than a truncated or padded result.
 pub fn split(
     data: &[f32],
     dims: &[i64],
@@ -210,7 +213,7 @@ mod tests {
         assert_eq!(reshape_dims(&[2, 3, 4], &[6, 4]).unwrap(), vec![6, 4]);
         assert_eq!(reshape_dims(&[2, 3, 4], &[-1, 4]).unwrap(), vec![6, 4]);
         assert_eq!(reshape_dims(&[2, 3, 4], &[0, -1]).unwrap(), vec![2, 12]);
-        assert!(reshape_dims(&[2, 3], &[5]).is_err()); // element count changes
+        assert!(reshape_dims(&[2, 3], &[5]).is_err());
     }
 
     #[test]

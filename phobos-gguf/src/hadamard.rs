@@ -111,7 +111,7 @@ impl Folding {
         self.weights.contains(name)
     }
 
-    /// Whether `name` is a table whose looked-up rows need the inverse.
+    /// Whether `name`'s looked-up rows need the inverse.
     pub fn restores(&self, name: &str) -> bool {
         self.inverse.contains(name)
     }

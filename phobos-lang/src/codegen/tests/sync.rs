@@ -1,4 +1,3 @@
-// `atomic_add` and `grid_barrier`.
 
 use super::*;
 

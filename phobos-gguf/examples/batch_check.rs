@@ -125,6 +125,11 @@ fn compare(model: &Decoder, backend: &dyn Backend, name: &str, tokens: &[u32]) -
 }
 
 /// Compare two runs that should have produced the same logits.
+///
+/// The error is the largest difference over the reference's own spread, so it
+/// stays comparable between models whose logits sit on different scales, and
+/// the argmax is reported beside it because that is the part a decode
+/// actually depends on.
 fn report(name: &str, what: &str, reference: &[f32], got: &[f32]) -> Result<bool> {
     let (serial, batched) = (reference, got);
 

@@ -35,6 +35,9 @@ pub(super) struct Iq2sBlock<'c> {
 
 impl<'c> Codegen<'c> {
     /// The byte offsets warp lane `lane` reads, and its element offset.
+    ///
+    /// None of it depends on which block is being decoded, so it is emitted once
+    /// outside the k loop and every block's decode reuses it.
     pub(super) fn iq2s_lane(&mut self, body: &Block<'c>, lane: Value<'c, 'c>) -> Result<Iq2sLane<'c>> {
         let i32_t = self.i32_t;
         let four = self.const_index(body, 4)?;

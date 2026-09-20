@@ -30,7 +30,7 @@ fn run_geometry(is: usize) -> (usize, usize) {
     (QS_OFF + h * 32 + half2 * 16, 4usize.pow(j as u32))
 }
 
-/// One run's decoded value, `let decoded{is} = ...`, and its `out_off`.
+/// One run's decoded value and its `out_off`.
 fn decoded_run(is: usize) -> (usize, String) {
     let (qs_off, shift_div) = run_geometry(is);
     let out_off = is * RUN;

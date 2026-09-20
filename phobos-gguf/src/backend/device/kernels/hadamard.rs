@@ -28,7 +28,6 @@ pub(crate) fn hadamard_matrix() -> Vec<f32> {
 /// What the kernel does around the transform.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum HadamardForm {
-    /// The transform alone.
     Plain,
     /// With the Q8_0 copy of its output, a 32-element block a tile row.
     Quantized,
@@ -57,6 +56,10 @@ pub(crate) type HadamardKey = (usize, Option<HeadPerm>, HadamardForm);
 pub(crate) const HADAMARD_NORM_MAX_WIDTH: usize = 5120;
 
 /// The kernel for rows `width` wide, regrouped by `perm` where given.
+///
+/// Both are baked into the emitted source, so each combination is its own
+/// module. [`HadamardForm::Normed`] additionally stages the whole row for the
+/// sum of squares, which is what bounds it by [`HADAMARD_NORM_MAX_WIDTH`].
 pub(crate) fn hadamard_src(width: usize, perm: Option<HeadPerm>, form: HadamardForm) -> String {
     let side = HADAMARD_SIDE;
     let blocks = width / HADAMARD_BLOCK;

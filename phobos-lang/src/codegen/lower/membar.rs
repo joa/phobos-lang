@@ -226,6 +226,10 @@ impl Membar<'_> {
     }
 
     /// Everything the op touches in shared memory.
+    ///
+    /// Every operand and result, flagged read or written, as the byte ranges the
+    /// plan gave its buffer. An `Alloc` is the exception: it names bytes and
+    /// touches none.
     fn accesses(&self, op: OpId) -> Vec<Access> {
         let ir = self.ir;
         let w = self.windows.get(&op);

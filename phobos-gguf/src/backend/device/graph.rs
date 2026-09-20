@@ -126,6 +126,10 @@ impl DeviceBackend {
 
     /// What the pass costs in launches, and what each kernel costs in registers
     /// and shared memory.
+    ///
+    /// It fires from [`Self::replay`] when the `PHOBOS_PASS_REPORT` countdown
+    /// reaches zero, so the count decides which pass it describes: a low one
+    /// lands on the prefill, and reaching a decode pass takes a count past it.
     pub(super) fn print_report(&self) -> Result<()> {
         let ops = self.report.borrow();
         let sms = cust::device::Device::get_device(0)?

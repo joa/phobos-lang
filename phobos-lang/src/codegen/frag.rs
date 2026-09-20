@@ -4,7 +4,6 @@ impl<'c> Codegen<'c> {
 
 }
 
-// emission
 impl<'c> Codegen<'c> {
 
     /// The rescaled fragments of `fa`, without rebinding anything.

@@ -71,6 +71,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// The barrier itself, over a resolved state tensor of `rank`.
+    ///
+    /// Thread 0 alone arrives and waits, fenced by a CTA barrier either side of
+    /// it. The grid has to be one-dimensional: gridDim.x is what counts as a
+    /// full set of arrivals.
     pub(super) fn grid_barrier_raw(
         &mut self,
         block: &Block<'c>,
@@ -107,6 +111,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// Thread 0's half of the barrier: arrive, then either release or spin.
+    ///
+    /// The generation read before arriving is what makes the barrier reusable: a
+    /// spinning block waits for that number to move, not for a count the release
+    /// has already reset for the next stage.
     fn emit_arrive_and_wait(
         &mut self,
         block: &Block<'c>,

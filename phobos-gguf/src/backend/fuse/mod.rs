@@ -392,7 +392,6 @@ impl Chain {
 /// resolves it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Bound {
-    /// A caller buffer.
     Given(Val),
     /// A weight's signed bytes, then its per-row scales.
     WeightQs(Val),

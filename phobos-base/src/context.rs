@@ -5,13 +5,14 @@ pub struct Context {
     /// Whether to print the output of different compiler phases.
     pub print_phases: bool,
 
-    /// The GPU config.
     pub gpu_config: GpuConfig,
 
     /// Values for @autotune search dims.
     pub shape_overrides: HashMap<String, i64>,
 
-    /// Bit width index values lower to.
+    /// Bit width index values lower to. 32 unless some kernel in the module
+    /// wants `ldmatrix`, which widens the whole module to 64. It reaches
+    /// codegen, so it is part of the kernel cache key.
     pub index_bitwidth: u32,
 }
 

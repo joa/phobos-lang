@@ -283,7 +283,6 @@ fn eval_node(node: &Node, vals: &HashMap<String, Val>) -> Option<Vec<Val>> {
     Some(out)
 }
 
-// ---- op evaluators ----
 
 fn constant_value(node: &Node) -> Option<Val> {
     match node.attrs.get("value") {
@@ -369,7 +368,6 @@ fn unsqueeze(node: &Node, v: &Val) -> Option<Val> {
     for &a in &norm {
         dims.insert(a.min(dims.len()), 1);
     }
-    // The data is unchanged; only the shape gains size-1 axes.
     Some(Val {
         dims,
         data: v.data.clone(),
@@ -413,14 +411,12 @@ fn concat(node: &Node, ins: &[&Val]) -> Option<Val> {
 }
 
 fn cast(v: &Val) -> Val {
-    // The shape is preserved and integer data passes through as it stands.
     v.clone()
 }
 
 fn reshape(data: &Val, shape: &Val) -> Option<Val> {
     let target = shape.data.as_ref()?.as_i64();
     let dims = crate::layout::reshape_dims(&data.dims, &target).ok()?;
-    // A reshape leaves constant data alone.
     Some(Val {
         dims,
         data: data.data.clone(),

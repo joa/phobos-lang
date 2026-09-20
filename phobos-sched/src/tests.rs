@@ -219,7 +219,6 @@ fn matmul_two_nodes_direct_load() {
         assert_eq!(count(&pl, n, |o| matches!(o, Op::Fetch { .. })), 0);
         assert_eq!(count(&pl, n, |o| matches!(o, Op::Load { .. })), 6);
         assert!(pl.fetches[n].is_empty());
-        // no input is served to a peer
         for i in node_ops(&pl, n) {
             if let Op::Free {
                 expected_serves, ..
@@ -399,7 +398,6 @@ fn budget_splits_into_segments() {
     // total instruction count is unchanged by segmentation
     assert_eq!(node_ops(&pl, 0).len(), 48);
 
-    // every segment respects the incremental budget
     for m in &pl.segment_mem[0] {
         assert!(
             m.incremental <= budget,

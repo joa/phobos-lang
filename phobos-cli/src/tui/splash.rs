@@ -143,7 +143,7 @@ mod tests {
         let faint = weight('.').unwrap();
         let solid = weight('@').unwrap();
         assert!(faint < solid, "{faint} should be fainter than {solid}");
-        // Lettering is not on the ramp and is drawn at full brightness.
+        // Lettering is off the ramp, at full brightness.
         assert_eq!(weight('P'), Some(1.0));
     }
 

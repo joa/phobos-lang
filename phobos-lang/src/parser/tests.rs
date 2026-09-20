@@ -39,7 +39,6 @@ fn parses_attribute_slices_and_for() {
         }
         _ => panic!("expected an autotune search arg"),
     }
-    // body: var, for, assign
     assert!(matches!(p[0].body[0], Stmt::Var { .. }));
     assert!(matches!(p[0].body[1], Stmt::For { .. }));
     assert!(matches!(

@@ -141,8 +141,7 @@ impl KvGraph {
         Ok((logits, self.collect_cache(&out, n)?))
     }
 
-    /// One step over `token` and the cache, returning its logits and the
-    /// grown cache.
+    /// One step over `token` and the cache.
     fn step(&self, token: i64, cache: &KvCache) -> Result<(Vec<f32>, KvCache)> {
         let mut shapes = HashMap::from([("input_ids".to_string(), vec![1, 1])]);
         let mut inputs = HashMap::from([(

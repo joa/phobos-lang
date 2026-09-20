@@ -222,7 +222,7 @@ fn lowers_flash_attention() {
     ]);
     let plan = lower_node(&n, &dims_fn(&dims)).unwrap();
     assert_eq!(plan.kernel_name, "flash_attention");
-    assert_eq!(plan.grid, (2, 1, 1)); // Nq=64, BR=32
+    assert_eq!(plan.grid, (2, 1, 1));
     assert!(plan.source.contains("dot_t(q, k)"));
     assert!(plan.source.contains("acc += dot(p, v)"));
     // Q, K, V, O, then the scale.

@@ -96,6 +96,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The lane's per-block decode state for the block `at` names.
+    ///
+    /// The half that does depend on the block, emitted inside the k loop against
+    /// the lane geometry hoisted out of it.
     pub(super) fn iq3xxs_block(
         &mut self,
         kb: &Block<'c>,

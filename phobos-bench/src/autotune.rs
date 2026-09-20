@@ -21,7 +21,6 @@ pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
         .map(|ks| phobos_lang::requires_wide_index(&ks))
         .unwrap_or(false);
     let mut ctx = phobos_base::context::Context {
-        //print_phases: true,
         shape_overrides: config.iter().cloned().collect(),
         ..Default::default()
     };
@@ -221,7 +220,7 @@ where
 
         Ok((
             Duration::from_secs_f64(min),
-            Duration::from_secs_f64(max - min), // spread
+            Duration::from_secs_f64(max - min),
         ))
     }
 }

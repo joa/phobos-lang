@@ -26,7 +26,6 @@ pub fn parse_job(path: &str) -> Result<Job> {
             })?;
             source = Some(src);
         } else if let Some(rest) = line.strip_prefix("dim ") {
-            // dim NAME = VALUE
             let (name, value) = rest
                 .split_once('=')
                 .ok_or_else(|| err("expected `dim NAME = VALUE`"))?;

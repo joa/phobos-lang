@@ -177,11 +177,10 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
         assert!(dot.starts_with("digraph \"matmul\""));
         assert!(dot.contains("subgraph cluster_n0"));
         assert!(dot.contains("subgraph cluster_n1"));
-        // the real op vocabulary shows up, tile-labelled with tensor names
+        // the real op vocabulary, tile-labelled with tensor names
         assert!(dot.contains("COMPUTE k"));
         assert!(dot.contains("LOAD A#"));
         assert!(dot.contains("STORE C#"));
-        // dependency edges are present
         assert!(dot.contains(" -> i"), "no dependency edges in:\n{dot}");
         // DirectLoad: no peer FETCH, so no dashed cross-node edges
         assert!(!dot.contains("style=dashed"));

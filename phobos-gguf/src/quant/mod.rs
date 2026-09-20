@@ -191,7 +191,6 @@ pub struct Spec {
     pub name: &'static str,
     /// Elements one stored block covers.
     pub block: usize,
-    /// Bytes that block occupies.
     pub block_bytes: usize,
     /// Elements sharing one scale. Equal to `block` for the legacy formats; a
     /// K-quant block is a super-block carrying several runs.

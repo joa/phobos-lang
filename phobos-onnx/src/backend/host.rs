@@ -46,7 +46,7 @@ pub fn host_layer_norm(
     Ok(out)
 }
 
-/// Execute `graph` with the given inputs on the host, returning its outputs.
+/// Execute `graph` on the host.
 pub fn run(graph: &Graph, inputs: &HashMap<String, Tensor>) -> Result<HashMap<String, Tensor>> {
     run_with(graph, inputs, &HostBackend)
 }
@@ -436,7 +436,6 @@ fn softmax(node: &Node, t: &Tensor) -> Result<Tensor> {
     Ok(Tensor::f32(t.dims.clone(), out))
 }
 
-// ---- matmul ----
 
 /// Contract the last dim of `a` with the second-to-last of `b`, the leading
 /// batch dims broadcasting.
@@ -809,7 +808,6 @@ mod tests {
         // [[0,1,2],[3,4,5]] @ [[0,1],[2,3],[4,5]] = [[10,13],[28,40]]
         assert_eq!(c.as_f32(), vec![10.0, 13.0, 28.0, 40.0]);
 
-        // Batched [2,1,3] by [2,3,1] is [2,1,1].
         let a = Tensor::f32(vec![2, 1, 3], (0..6).map(|x| x as f32).collect());
         let b = Tensor::f32(vec![2, 3, 1], (0..6).map(|x| x as f32).collect());
         let c = matmul(&mm, &a, &b, &w, &HostBackend).unwrap();

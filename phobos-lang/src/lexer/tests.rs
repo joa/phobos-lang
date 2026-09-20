@@ -28,7 +28,6 @@ fn inserts_terminators_at_newlines() {
     let kinds: Vec<Tok> = toks.into_iter().map(|t| t.tok).collect();
     let semis = kinds.iter().filter(|t| **t == Tok::Semicolon).count();
     assert_eq!(semis, 3);
-    // let x = 1 ;
     assert_eq!(kinds[4], Tok::Semicolon);
     // 2 + continues the statement: no terminator between + and 3
     assert_eq!(kinds[8], Tok::Plus);
@@ -149,7 +148,7 @@ fn int_and_float_literals() {
 #[test]
 fn tracks_line_and_column() {
     let toks = Lexer::new("a\n  b").tokenize().unwrap();
-    assert_eq!((toks[0].line, toks[0].col), (1, 1)); // a
+    assert_eq!((toks[0].line, toks[0].col), (1, 1));
     // toks[1] is the inserted terminator after a
     assert_eq!(toks[1].tok, Tok::Semicolon);
     // b is on line 2, column 3 (after two spaces)

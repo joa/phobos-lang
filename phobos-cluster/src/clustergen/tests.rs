@@ -367,7 +367,7 @@ fn accepts_scalar_params() {
     assert_eq!(p.scalars[0].name, "alpha");
     assert_eq!(p.scalars[0].data_type, crate::tile::DataType::F32);
     assert_eq!(p.scalars[0].param_pos, 3);
-    // the step compute (leaf 0) inside the k-loop passes the scalar
+    // the step compute passes the scalar
     let ClusterStmt::Loop { body, .. } = &p.body[1] else {
         panic!("expected the k-loop");
     };
@@ -384,16 +384,15 @@ fn accepts_scalar_params() {
 fn flash_single_leaf() {
     let p = compile(&first(FLASH)).unwrap();
 
-    // one grid axis over query blocks, supertiled by BR
     assert_eq!(p.grid.len(), 1);
     assert_eq!(p.grid[0].dim, Dim::Sym("Nq".into()));
     assert_eq!(p.grid[0].super_sym, "BR");
 
-    // the whole kernel is a single leaf (no cluster loop, no init leaf)
+    // a single leaf: no cluster loop, no init leaf
     assert_eq!(p.leaves.len(), 1);
     assert_eq!(p.leaves[0].kernel.name, "attn");
 
-    // scalar recorded at its parameter position (after the four tensors)
+    // the scalar's parameter position, after the four tensors
     assert_eq!(p.scalars.len(), 1);
     assert_eq!(p.scalars[0].name, "scale");
     assert_eq!(p.scalars[0].param_pos, 4);
@@ -414,7 +413,7 @@ fn flash_single_leaf() {
         ]
     );
 
-    // exactly one compute: Q(p0,:), K(:,:), V(:,:) read, O(p0,:) written, carrying the scalar
+    // Q(p0,:), K(:,:), V(:,:) read, O(p0,:) written, carrying the scalar
     assert_eq!(p.body.len(), 1);
     let ClusterStmt::Compute {
         leaf: 0,

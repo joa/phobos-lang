@@ -456,6 +456,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The lane's eight octets as `dp4a` word pairs, from the piece words.
+    ///
+    /// The IQ formats only: a K-quant has its own `qdot_i8` intrinsic, decodes on
+    /// that path, and is rejected here.
     fn qr_octets(
         &mut self,
         kb: &Block<'c>,

@@ -109,6 +109,10 @@ fn fuse_linear(graph: &Graph) -> Vec<Node> {
 
 /// Fuse the `MatMul` at `mi` with a following bias `Add` and an optional `Relu`
 /// or `Gelu`.
+///
+/// Only where each member feeds nothing but the next: a node with a second
+/// consumer still has to produce its own output, so folding it away would
+/// lose that edge.
 fn try_linear(mi: usize, graph: &Graph, counts: &HashMap<String, usize>) -> Option<Fusion> {
     let nodes = &graph.nodes;
     let mm = &nodes[mi];
@@ -379,7 +383,6 @@ fn unwrap_scale(graph: &Graph, edge: &str) -> Option<(String, Scale)> {
     ))
 }
 
-/// The node index producing `edge`, if any.
 fn producer(nodes: &[Node], edge: &str) -> Option<usize> {
     nodes
         .iter()

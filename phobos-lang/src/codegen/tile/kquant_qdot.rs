@@ -18,6 +18,10 @@ use super::*;
 
 impl<'c> Codegen<'c> {
     /// The loads of a K-quant lane's quarter, sixteen bytes each.
+    ///
+    /// Sixteen so that each piece is one 128-bit access. The header, and for Q5_K
+    /// the qh plane, are read by all four of a column's lanes, which costs
+    /// nothing past the first: they hit in L1.
     pub(super) fn kq_pieces(
         &mut self,
         body: &Block<'c>,

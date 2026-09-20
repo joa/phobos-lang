@@ -5,7 +5,11 @@ use super::*;
 
 impl<'c> Codegen<'c> {
 
-    /// alloc a tile buffer in SM
+    /// Allocates a tile buffer in shared memory.
+    ///
+    /// The shape has to be static. Every tile is a window of the kernel's one
+    /// shared allocation, rounded up to 16 bytes so a four-element vector access
+    /// stays legal.
     pub(in crate::codegen) fn alloc_tile_shaped(
         &mut self,
         block: &Block<'c>,

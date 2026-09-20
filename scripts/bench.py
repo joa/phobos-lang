@@ -295,7 +295,6 @@ def cuda_lib_dirs(explicit):
 
 
 def with_lib(directory):
-    """The environment plus one directory at the front of PATH."""
     if directory is None:
         return None, ""
     env = dict(os.environ)

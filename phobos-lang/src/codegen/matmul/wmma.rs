@@ -6,7 +6,6 @@ use super::*;
 use crate::shape;
 
 impl<'c> Codegen<'c> {
-    /// Warp grid (wm x wn, with wm*wn the launch ABI's warp count) laid over
     /// Whether to pad the WMMA staging buffers: more padding means a larger
     /// CTA footprint, so fewer CTAs fit per SM. Skipped when kernel registers
     /// (`@launch`) are the limiting factor instead.
@@ -61,6 +60,10 @@ impl<'c> Codegen<'c> {
 
     /// The warp drains its fragments via its 16x16 slab, applying
     /// alpha*acc + beta*prev_load.
+    ///
+    /// The slab is what turns per-lane fragments into an addressable tile the
+    /// epilogue can read. It takes the accumulator's element type, and only an
+    /// f32 slab writing an f32 C drains as vectors.
     pub(super) fn wmma_store_acc(
         &mut self,
         block: &Block<'c>,

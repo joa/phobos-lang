@@ -50,7 +50,7 @@ impl Builder {
         for d in dims {
             self.tensors.extend(d.to_le_bytes());
         }
-        self.tensors.extend(0u32.to_le_bytes()); // F32
+        self.tensors.extend(0u32.to_le_bytes());
         self.tensors.extend((self.data.len() as u64).to_le_bytes());
         self.tensor_count += 1;
         for v in values {

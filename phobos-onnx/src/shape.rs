@@ -225,6 +225,10 @@ fn expect_n<const N: usize>(op_type: &str, ins: &[&Dims]) -> Result<[Dims; N]> {
 }
 
 /// Read a fully static shape for a named edge out of the graph's value info.
+///
+/// An edge with no declared type, an unknown rank, or a symbolic or unknown
+/// dim is an error here rather than a deferred decision: everything past
+/// shape inference wants numbers.
 fn static_dims(graph: &Graph, name: &str) -> Result<Dims> {
     let Some(vi) = graph.values.get(name) else {
         bail!("input '{name}' has no declared type");

@@ -198,7 +198,7 @@ fn infers_layout_ops() {
         ..Default::default()
     };
     let dims = infer(&graph).unwrap();
-    assert_eq!(dims["Xt"], vec![2, 4, 3]); // perm [0,2,1]
+    assert_eq!(dims["Xt"], vec![2, 4, 3]);
     assert_eq!(dims["Xr"], vec![8, 3]); // reshape [-1,3] over 24 elems
     assert_eq!(dims["emb"], vec![3, 5]); // gather rows of [10,5]
     assert_eq!(dims["a"], vec![4, 2]); // split [4,6] -> three [4,2]

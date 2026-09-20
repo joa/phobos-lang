@@ -87,7 +87,7 @@ impl Results {
         out
     }
 
-    /// Write the CSV to path, using peaks for the reference columns.
+    /// Write the CSV, with peaks for the reference columns.
     pub fn write_csv(&self, path: &Path, peaks: &Peaks) -> anyhow::Result<()> {
         fs::write(path, self.to_csv(peaks))?;
         phinfo!("wrote {} rows to {}", self.records.len(), path.display());

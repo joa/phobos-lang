@@ -88,7 +88,6 @@ impl Parser {
     }
 }
 
-// top level
 
 impl Parser {
     /// End a statement.
@@ -210,7 +209,6 @@ impl Parser {
     }
 }
 
-// types
 
 impl Parser {
     fn parse_type(&mut self) -> Result<Type, String> {
@@ -272,7 +270,6 @@ impl Parser {
     }
 }
 
-// statements
 
 impl Parser {
     fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
@@ -336,11 +333,10 @@ impl Parser {
         // A `var` with a type may omit its initializer, which declares a buffer
         // without filling it. A `let` cannot: it would name nothing.
         if is_var && ty.is_some() && !self.matches(&Tok::Eq) {
-            // we allow tiles without an init if a type is known
-            // - uninitialized (this) : var foo: tile<f32>[D, D]
-            // - initialized   (below): var bar: tile<f32>[D, D] = 0.0
-            // - illegal              : var baz
-            // - illegal (immutable!) : let eek: tile<f32>[D, D]
+            // var foo: tile<f32>[D, D]        uninitialized, this path
+            // var bar: tile<f32>[D, D] = 0.0  initialized, below
+            // var baz                         illegal, no type
+            // let eek: tile<f32>[D, D]        illegal, immutable
             self.end_stmt()?;
             return Ok(Stmt::Var {
                 name,
@@ -417,7 +413,6 @@ impl Parser {
     }
 }
 
-// expressions
 
 impl Parser {
     fn parse_expr(&mut self) -> Result<Expr, String> {
@@ -535,7 +530,7 @@ impl Parser {
                 };
             } else if self.matches(&Tok::LParen) {
                 if let Expr::Var(name) = expr {
-                    self.advance(); // `(`
+                    self.advance();
                     let args = if self.matches(&Tok::RParen) {
                         Vec::new()
                     } else {
@@ -565,7 +560,7 @@ impl Parser {
             let len = self.parse_expr()?;
             Ok(Sub::Span { start, len }) // A[start :+ len]
         } else {
-            Ok(Sub::Point(start)) // A[index]
+            Ok(Sub::Point(start))
         }
     }
 

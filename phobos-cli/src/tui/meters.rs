@@ -140,7 +140,7 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// One legend row: a dot in the segment's colour, its name, its size.
+/// One legend row: a coloured dot, a name, a size.
 fn key(color: Color, label: &str, value: String) -> Line<'static> {
     Line::from(vec![
         Span::raw("  "),

@@ -35,6 +35,10 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Peel acc or SCALAR * acc into (coefficient, acc name).
+    ///
+    /// Anything else fails: the term has to name the scratch binding, and a
+    /// coefficient on it goes through `check_invariant`, since every alpha*acc
+    /// step applies that same one.
     pub(super) fn peel_acc(&self, e: &Expr) -> Result<(Option<Expr>, String)> {
         if let Expr::Var(n) = e
             && matches!(self.symbols.get(n), Some(Binding::Scratch))

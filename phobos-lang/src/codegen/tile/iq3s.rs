@@ -45,6 +45,9 @@ pub(super) struct Iq3sBlock<'c> {
 
 impl<'c> Codegen<'c> {
     /// The byte offsets warp lane `lane` reads, and its element offset.
+    ///
+    /// None of it depends on which block is being decoded, so it is emitted once
+    /// outside the k loop and every block's decode reuses it.
     pub(super) fn iq3s_lane(&mut self, body: &Block<'c>, lane: Value<'c, 'c>) -> Result<Iq3sLane<'c>> {
         let i32_t = self.i32_t;
         let eight_idx = self.const_index(body, 8)?;
@@ -101,6 +104,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The lane's per-block decode state for the block `at` names.
+    ///
+    /// The half that does depend on the block, emitted inside the k loop against
+    /// the lane geometry hoisted out of it.
     pub(super) fn iq3s_block(
         &mut self,
         kb: &Block<'c>,

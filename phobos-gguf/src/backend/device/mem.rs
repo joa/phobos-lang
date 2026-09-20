@@ -270,6 +270,9 @@ impl DeviceBackend {
     }
 
     /// The slot at `at`, grown to `m` by `k` if it is not already that big.
+    ///
+    /// It only ever grows, so a slot settles at the largest shape the pass asked
+    /// for and later calls reuse it. `k` has to be a whole number of Q8 blocks.
     fn act_slot_at(&self, at: usize, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
         ensure!(
             k.is_multiple_of(Q8_BLOCK),
@@ -324,6 +327,9 @@ impl DeviceBackend {
     }
 
     /// Grows the scratch a plan wants for the values it found crossing a nest.
+    ///
+    /// The early return is the path that matters: when every slot already fits,
+    /// nothing is flushed, and growing costs the recorded pass.
     pub(super) fn grow_scratch(&self, need: &[Scratch]) -> Result<()> {
         let fits = |pool: &[(DeviceBuffer<i8>, DeviceBuffer<f32>)], at: usize, n: &Scratch| {
             pool.get(at)

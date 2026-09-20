@@ -103,7 +103,6 @@ impl<'c> Codegen<'c> {
             .build()?)
     }
 
-    // Types.
 
     pub(super) fn ir_scalar_type(&self, s: ir::Scalar) -> Type<'c> {
         match s {

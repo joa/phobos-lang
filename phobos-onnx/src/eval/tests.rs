@@ -251,6 +251,6 @@ fn propagates_compute_shapes_without_data() {
     let inputs = HashMap::from([("h".to_string(), vec![4, 8])]);
     let ev = evaluate(&graph, &inputs);
     assert_eq!(ev.vals["m"].dims, vec![4, 1]); // reduced last axis, keepdims
-    assert_eq!(ev.vals["g"].dims, vec![4, 16]); // Gemm with transB
+    assert_eq!(ev.vals["g"].dims, vec![4, 16]);
     assert!(ev.vals["m"].data.is_none()); // f32 activation, not folded
 }

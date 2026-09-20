@@ -11,8 +11,12 @@ pub(super) struct HadamardExtra {
 }
 
 impl DeviceBackend {
-    /// The transform, and the quantized copy of its output where `extra`
-    /// asks for one.
+    /// The transform, and the quantized copy of its output where `extra` asks
+    /// for one.
+    ///
+    /// The width has to be a whole number of Hadamard blocks, and a `perm` has to
+    /// regroup the row in whole tiles. Both are checked here rather than left to
+    /// the kernel.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn hadamard_rows(
         &self,

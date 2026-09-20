@@ -387,6 +387,10 @@ impl Exec {
     }
 
     /// Resolve a layout or index op on the host.
+    ///
+    /// They rearrange elements rather than compute over them, so they stay here
+    /// instead of taking a kernel each. A `Reshape` does not even rearrange, and
+    /// carries its values straight over.
     fn exec_layout(&mut self, node: &Node) -> Result<()> {
         match node.op_type.as_str() {
             "Reshape" => {
@@ -464,6 +468,10 @@ impl Exec {
     }
 
     /// Marshal a plan's parameters into the memref ABI and launch.
+    ///
+    /// A tensor becomes a whole memref descriptor rather than a pointer, so the
+    /// argument list is longer than the parameter list and only `abi` knows the
+    /// shape of it.
     fn launch(&self, func: &cust::function::Function, plan: &lower::KernelPlan) -> Result<()> {
         let mut args: Vec<KernelArg> = Vec::new();
         for param in &plan.params {

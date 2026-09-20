@@ -12,6 +12,11 @@ use super::*;
 impl<'c> Codegen<'c> {
 
     /// The normalization over resolved operands; returns the inverse rms.
+    ///
+    /// Every operand has to be a rank-2 tile of static shape and an in-bounds
+    /// slice, which is what `@aligned` promises. A masked slice arrives already
+    /// copied into a shared tile, and the stores would land in that copy rather
+    /// than in the tensor.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn rms_norm_q_raw(
         &mut self,

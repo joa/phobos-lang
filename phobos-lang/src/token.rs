@@ -26,7 +26,7 @@ pub enum Tok {
     Comma,
     Colon,
     Semicolon,
-    At, // @
+    At,
 
     // operators
     Plus,

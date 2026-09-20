@@ -151,7 +151,7 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    let mlir = emit_mlir(src); // sm_75 (no cp.async)
+    let mlir = emit_mlir(src);
     assert_contains(
         &mlir,
         &[

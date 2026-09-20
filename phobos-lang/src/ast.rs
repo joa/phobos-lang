@@ -66,7 +66,6 @@ pub enum AttrArg {
     /// Autotune search dimension: NAME in [v0, v1, ..., vN] for those choices,
     /// or NAME in [start, end] for the range start..=end when end > start.
     Search { name: String, choices: Vec<i64> },
-    /// Keyword argument: key = value.
     KeyValue { key: String, value: Literal },
     /// Positional value or bare flag/enum: value.
     Positional(Literal),
@@ -267,10 +266,10 @@ pub enum Stmt {
 /// Subscript inside A[ ... ].
 #[derive(Debug, Clone)]
 pub enum Sub {
-    Point(Expr),                      // A[i]
+    Point(Expr),
     Range { start: Expr, end: Expr }, // A[start : end]  (end-exclusive)
     Span { start: Expr, len: Expr },  // A[start :+ len] (start + len)
-    Full,                             // A[:]
+    Full,
 }
 
 #[derive(Debug, Clone)]

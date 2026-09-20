@@ -624,7 +624,6 @@ fn row_tiling(dims: &Dims, width: i64) -> Result<(i64, i64)> {
     Ok((rows, tr))
 }
 
-/// The flattened element count.
 fn numel(dims: &Dims) -> i64 {
     dims.iter().product()
 }

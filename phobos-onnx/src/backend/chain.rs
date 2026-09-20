@@ -254,7 +254,6 @@ impl ChainExec {
         Ok(true)
     }
 
-    /// The plan's kernel, compiled and cached on first use.
     fn ensure_kernel(&mut self, plan: &lower::KernelPlan) -> Result<()> {
         if !self.kernels.contains_key(&plan.source) {
             self.kernels.insert(plan.source.clone(), compile(plan)?);

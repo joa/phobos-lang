@@ -3,7 +3,9 @@
 use super::*;
 
 impl DeviceBackend {
-    /// [`Backend::matmul`].
+    /// [`Backend::matmul`]. Plain f32: the matvec specialization at `m == 1`,
+    /// tensor cores over whole tiles above it, and the plain kernel for whatever
+    /// those leave.
     pub(super) fn matmul_dense(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()> {
         self.check_distinct("matmul", out, &[a, w]);
         let (a_ptr, w_ptr, out_ptr) = (self.ptr(a, 0)?, self.ptr(w, 0)?, self.ptr(out, 0)?);

@@ -24,6 +24,9 @@ pub(super) struct DeviceRaw {
 impl DeviceBackend {
     /// [`Backend::constant_raw`]: the payload and scale planes, grouped
     /// where the format wants it.
+    ///
+    /// Keyed by name, so a weight named twice goes up once, and the handle this
+    /// returns is what a projection binds later.
     pub(super) fn upload_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
 
         if let Some(&buf) = self.raw_constants.borrow().get(key) {

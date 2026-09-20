@@ -37,7 +37,7 @@ fn check_linear_fusion() -> Result<()> {
 
     let graph = load_model(&linear_graph(M, K, N, &w, &b)?)?.graph;
     let fused = transform::fuse(&graph);
-    // The three nodes (MatMul, Add, Gelu) collapse to one PhobosFusedLinear.
+    // MatMul, Add and Gelu collapse to one PhobosFusedLinear.
     if fused.nodes.len() != 1 || fused.nodes[0].op_type != FUSED_LINEAR {
         bail!(
             "linear fusion did not collapse the block: {:?}",

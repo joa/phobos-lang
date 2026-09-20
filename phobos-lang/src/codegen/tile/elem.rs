@@ -122,7 +122,6 @@ impl<'c> Codegen<'c> {
             && src.vectorizes(4)
             && dst.vectorizes(4)
             && last % 4 == 0;
-        // Both sides share an element type, checked above.
         let wide =
             dst.elem == self.f16_t && src.vectorizes(8) && dst.vectorizes(8) && last % 8 == 0;
         let width = match (vec_ok, wide) {

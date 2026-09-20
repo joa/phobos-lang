@@ -74,7 +74,10 @@ impl<'c> Codegen<'c> {
         bail!("mismatched operand types: {lt} vs {rt}")
     }
 
-    /// Coerces value to want for a store
+    /// Coerces value to want for a store.
+    ///
+    /// Only the conversions a store needs: float to float, and index to either an
+    /// integer or a float. Anything else is a type error.
     pub(super) fn coerce(
         &mut self,
         block: &Block<'c>,
@@ -177,7 +180,6 @@ impl<'c> Codegen<'c> {
     }
 }
 
-// expression classifiers
 impl<'c> Codegen<'c> {
 
 }
