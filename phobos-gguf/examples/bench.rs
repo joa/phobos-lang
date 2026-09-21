@@ -25,6 +25,9 @@ struct Args {
     gen_tokens: Vec<usize>,
     repetitions: usize,
     warmup: bool,
+    /// A cap on a streamed model's expert cache, as `phobos-cli`'s
+    /// `--expert-cache`.
+    expert_cache_bytes: Option<u64>,
 }
 
 fn print_usage() {
@@ -39,6 +42,9 @@ OPTIONS:
   -r, --repetitions N   timed repetitions per row (default: 3)
       --no-warmup       skip the warmup pass, which leaves each kernel's first
                         compile inside the repetition it lands in
+      --expert-cache SIZE
+                        device memory for a streamed model's expert cache
+                        (2g, 1500m, bytes); default, what the weights leave
   -h, --help            print this message
 
   -p and -n take a comma-separated list, and repeat, so -p 128,512 and
@@ -68,6 +74,7 @@ fn parse_args() -> Result<Args> {
         gen_tokens: Vec::new(),
         repetitions: 3,
         warmup: true,
+        expert_cache_bytes: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -78,6 +85,9 @@ fn parse_args() -> Result<Args> {
             "-n" | "--n-gen" => args.gen_tokens.extend(parse_sizes(&next("-n")?)?),
             "-r" | "--repetitions" => args.repetitions = next("-r")?.parse().context("-r")?,
             "--no-warmup" => args.warmup = false,
+            "--expert-cache" => {
+                args.expert_cache_bytes = Some(phobos_base::cli::parse_size(&next("--expert-cache")?)?)
+            }
             "-h" | "--help" => {
                 print_usage();
                 std::process::exit(0);
@@ -137,6 +147,9 @@ fn main() -> Result<()> {
     );
     let model = Decoder::load(&gguf)?;
     let backend = make_backend()?;
+    if let Some(bytes) = args.expert_cache_bytes {
+        backend.limit_expert_cache(bytes as usize)?;
+    }
     let load_millis = load_start.elapsed().as_secs_f64() * 1e3;
 
     let vocab = model.vocab();

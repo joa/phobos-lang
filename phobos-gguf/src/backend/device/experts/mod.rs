@@ -67,6 +67,9 @@ pub(super) struct Experts {
     /// The budget `budget_streamed` set, in bytes, and the expert sets it
     /// said would register, or `None` before it did.
     budget: Option<(usize, usize)>,
+    /// A cap the user put on the cache, in bytes; see
+    /// [`crate::backend::Backend::limit_expert_cache`].
+    pub(super) limit: Option<usize>,
     /// The iota row the top-k carries, `[0, n_expert)` as f32.
     pub(super) iota: HashMap<usize, DeviceBuffer<f32>>,
     /// Routing steps so far, the stamp a slot takes when it is used: one a
@@ -173,6 +176,7 @@ impl Experts {
             blocks: Vec::new(),
             slabs: None,
             budget: None,
+            limit: None,
             iota: HashMap::new(),
             tick: 0,
             stats: ExpertStats::default(),
@@ -196,7 +200,23 @@ impl DeviceBackend {
         }
         let (free, _) = cust::memory::mem_get_info()?;
         let reserve = crate::runtime::RESERVE_BYTES;
-        let budget = free.saturating_sub(resident_bytes).saturating_sub(reserve);
+        let room = free.saturating_sub(resident_bytes).saturating_sub(reserve);
+        let limit = self.experts.borrow().limit;
+        let budget = match limit {
+            Some(asked) if asked > room => {
+                phobos_base::log::emit(
+                    phobos_base::log::Level::Info,
+                    format_args!(
+                        "expert cache: {} MiB asked for, {} MiB left after the resident weights and the reserve; taking what is left",
+                        asked >> 20,
+                        room >> 20
+                    ),
+                );
+                room
+            }
+            Some(asked) => asked,
+            None => room,
+        };
         ensure!(
             budget > 0 && sets > 0,
             "no device memory is left for an expert cache after {resident_bytes} bytes of resident weights"

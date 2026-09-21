@@ -47,8 +47,21 @@ pub struct GgufModel {
     footprint: crate::model::Footprint,
 }
 
+/// What a caller can choose about a load beyond the file.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct LoadOptions {
+    /// Device bytes for the expert cache of a model whose experts stream,
+    /// instead of everything the resident weights leave. Ignored by a model
+    /// with no experts and by a backend with no cache.
+    pub expert_cache_bytes: Option<u64>,
+}
+
 impl GgufModel {
     pub fn load(path: &Path) -> Result<GgufModel> {
+        GgufModel::load_with(path, LoadOptions::default())
+    }
+
+    pub fn load_with(path: &Path, options: LoadOptions) -> Result<GgufModel> {
         let gguf = Gguf::open(path)?;
         let architecture = gguf.architecture()?.to_string();
         let vocab = gguf.vocab()?;
@@ -59,6 +72,10 @@ impl GgufModel {
             Decoder::load(&gguf).with_context(|| format!("load '{architecture}' weights"))?;
         let backend = make_backend()?;
         check_fits(backend.as_ref(), &decoder)?;
+        if let Some(bytes) = options.expert_cache_bytes {
+            let bytes = usize::try_from(bytes).context("expert cache size")?;
+            backend.limit_expert_cache(bytes)?;
+        }
         let info = ModelInfo {
             label: format!("GGUF, {}", decoder.architecture()),
             backend: backend_name(),

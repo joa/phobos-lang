@@ -15,7 +15,7 @@ use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use phobos_base::cli;
 use phobos_base::progress::{self, Event, Step};
@@ -46,6 +46,7 @@ const VALUED: &[&str] = &[
     "--repetition-penalty",
     "--seed",
     "--listen",
+    "--expert-cache",
 ];
 
 /// Lines of the dashboard's log to reprint if serving ends badly. The tail is
@@ -57,8 +58,9 @@ const SWITCHES: &[&str] = &["--no-tui", "--tui", "--no-prefix-cache"];
 
 /// Which model to run, and where its tokenizer comes from.
 enum Source {
-    /// A GGUF file, which carries its own vocabulary.
-    Gguf(PathBuf),
+    /// A GGUF file, which carries its own vocabulary, and how much of the
+    /// device to give a streamed model's expert cache.
+    Gguf(PathBuf, phobos_gguf::runtime::LoadOptions),
     /// An ONNX export, plus the directory holding the tokenizer it was
     /// exported against. Defaults to the export's own directory.
     Onnx { dir: PathBuf, tokenizer: PathBuf },
@@ -120,7 +122,14 @@ fn sampling(args: &cli::Args) -> Result<SampleConfig> {
 
 fn source(args: &cli::Args) -> Result<Source> {
     match (args.value("--gguf")?, args.value("--onnx")?) {
-        (Some(path), None) => Ok(Source::Gguf(path.into())),
+        (Some(path), None) => {
+            let expert_cache_bytes = args
+                .value("--expert-cache")?
+                .map(phobos_base::cli::parse_size)
+                .transpose()
+                .context("--expert-cache")?;
+            Ok(Source::Gguf(path.into(), phobos_gguf::runtime::LoadOptions { expert_cache_bytes }))
+        }
         (None, Some(dir)) => Ok(Source::Onnx {
             // An ONNX export carries no vocabulary, so the tokenizer is a pair
             // of files that by default sit beside the model.
@@ -135,7 +144,7 @@ fn source(args: &cli::Args) -> Result<Source> {
 impl Source {
     fn load(&self) -> Result<Box<dyn Model>> {
         match self {
-            Source::Gguf(path) => Ok(Box::new(GgufModel::load(path)?)),
+            Source::Gguf(path, options) => Ok(Box::new(GgufModel::load_with(path, *options)?)),
             Source::Onnx { dir, tokenizer } => {
                 Ok(Box::new(OnnxModel::load_with_tokenizer(dir, tokenizer)?))
             }
@@ -144,7 +153,7 @@ impl Source {
 
     fn backend_name(&self) -> &'static str {
         match self {
-            Source::Gguf(_) => phobos_gguf::runtime::backend_name(),
+            Source::Gguf(..) => phobos_gguf::runtime::backend_name(),
             Source::Onnx { .. } => phobos_onnx::runtime::backend_name(),
         }
     }
@@ -162,6 +171,14 @@ One of --gguf or --onnx is required; there is no default model.
 OPTIONS:
       --gguf FILE     run a GGUF model, dispatching on the architecture the
                       file declares, with the tokenizer the file carries
+      --expert-cache SIZE
+                      device memory for the expert cache of a GGUF model
+                      whose experts stream (a mixture of experts too large
+                      for the card): 2g, 1500m, or bytes. Default: all the
+                      resident weights leave, less a reserve for the pass.
+                      More is a higher hit rate and fewer bytes over the bus
+                      a token; the dashboard shows the rate on its experts line.
+                      Ignored by a model with no experts
       --onnx DIR      run an ONNX export from DIR. A decoder.onnx beside a
                       decoder_with_past.onnx is the KV-cached engine; a
                       model.onnx is the full-recompute one

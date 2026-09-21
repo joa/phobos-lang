@@ -38,6 +38,11 @@ impl Backend for DeviceBackend {
         })
     }
 
+    fn limit_expert_cache(&self, bytes: usize) -> Result<()> {
+        self.experts.borrow_mut().limit = Some(bytes);
+        Ok(())
+    }
+
     fn budget_streamed(&self, resident_bytes: usize, sets: usize) -> Result<()> {
         self.set_streamed_budget(resident_bytes, sets)
     }
