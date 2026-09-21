@@ -1,7 +1,7 @@
 use std::fmt::Display;
 use std::str::FromStr;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 
 /// The program arguments without the executable name.
 #[derive(Clone, Debug)]
@@ -133,9 +133,32 @@ impl Args {
     }
 }
 
+/// A size a flag takes: a count of bytes, or one with a `k`, `m`, `g` or
+/// `t` suffix in powers of 1024, in either case (`2g`, `1500M`, `512k`).
+pub fn parse_size(text: &str) -> Result<u64> {
+    let text = text.trim();
+    let split = text
+        .find(|c: char| !c.is_ascii_digit() && c != '.')
+        .unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let value: f64 = number
+        .parse()
+        .with_context(|| format!("'{text}' is not a size"))?;
+    let scale: f64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "k" | "kb" | "kib" => 1024.0,
+        "m" | "mb" | "mib" => 1024.0 * 1024.0,
+        "g" | "gb" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tb" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        other => bail!("'{text}': unknown size unit '{other}'"),
+    };
+    ensure!(value >= 0.0, "'{text}' is negative");
+    Ok((value * scale) as u64)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::Args;
+    use super::{Args, parse_size};
 
     fn args(xs: &[&str]) -> Args {
         Args::new(xs.iter().map(|s| s.to_string()))
@@ -237,5 +260,16 @@ mod tests {
         assert_eq!(cmd, "init");
         assert_eq!(rest.value("--uri").unwrap(), Some("u"));
         assert!(args(&[]).subcommand().is_none());
+    }
+
+    #[test]
+    fn sizes_take_a_unit_in_powers_of_1024() {
+        assert_eq!(parse_size("2g").unwrap(), 2 << 30);
+        assert_eq!(parse_size("1500M").unwrap(), 1500 << 20);
+        assert_eq!(parse_size("512 KiB").unwrap(), 512 << 10);
+        assert_eq!(parse_size("1.5g").unwrap(), 3 << 29);
+        assert_eq!(parse_size("4096").unwrap(), 4096);
+        assert!(parse_size("2x").is_err());
+        assert!(parse_size("lots").is_err());
     }
 }

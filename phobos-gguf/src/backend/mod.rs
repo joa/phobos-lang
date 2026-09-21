@@ -568,6 +568,14 @@ pub trait Backend {
         Ok(false)
     }
 
+    /// Caps the device memory a backend that streams experts gives their
+    /// cache, in bytes, ahead of [`Backend::budget_streamed`]. What a user
+    /// chose over what the card has free; a backend with no cache ignores
+    /// it.
+    fn limit_expert_cache(&self, _bytes: usize) -> Result<()> {
+        Ok(())
+    }
+
     /// Tells a backend that streams experts how much of its memory the
     /// resident weights will take and how many expert sets will register,
     /// so it can size the expert cache from what is left and share it out.
