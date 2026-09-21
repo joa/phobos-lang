@@ -3,7 +3,7 @@
 // the GEMM's tile, the experts brought in a group at a time (as many as the
 // block has slots), each group's segments contracted through a schedule
 // table, and each row's eight results gathered back with its weights.
-// `PHOBOS_MOE_GROUPED=1` opts in.
+// `PHOBOS_MOE_GROUPED` opts in; see `ENV.md`.
 
 use anyhow::{Result, bail, ensure};
 use cust::memory::DeviceBuffer;

@@ -182,7 +182,7 @@ impl Model {
         // backend take the whole pass as one unit.
         backend.begin_pass(rows)?;
 
-        let trace = std::env::var_os("PHOBOS_TRACE").is_some();
+        let trace = phobos_base::env::flag("PHOBOS_TRACE");
         for (index, (block, layer_state)) in self.blocks.iter().zip(&mut state.layers).enumerate() {
             // Both mixers add their output into the residual stream
             // themselves and own running their input normalization, so a

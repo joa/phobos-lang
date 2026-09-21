@@ -154,7 +154,7 @@ impl DeviceBackend {
         // Read once: nearly every launch asks, and reading the environment
         // takes a process-wide lock.
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if !*ON.get_or_init(|| std::env::var_os("PHOBOS_CHECK_BUFS").is_some()) {
+        if !*ON.get_or_init(|| phobos_base::env::flag("PHOBOS_CHECK_BUFS")) {
             return;
         }
         for &src in sources {

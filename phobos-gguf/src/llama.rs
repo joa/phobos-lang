@@ -337,7 +337,7 @@ impl Model {
         backend.begin_pass(rows)?;
 
         // Prints each block's per-token activation RMS.
-        let trace = std::env::var_os("PHOBOS_TRACE").is_some();
+        let trace = phobos_base::env::flag("PHOBOS_TRACE");
 
         for (index, (block, cache)) in self.blocks.iter().zip(&mut state.caches).enumerate() {
             // The normalization leaves the quantized copy behind too, which the

@@ -18,11 +18,8 @@ const _: () = assert!(Q8_QDOT_TN == fuse::OUT_TILE);
 ///
 /// Switch off via `PHOBOS_FUSED=0`.
 pub(super) fn fused_stage(var: &str) -> bool {
-    fn asked(var: &str) -> Option<bool> {
-        let want = std::env::var(var).ok()?;
-        Some(!matches!(want.trim(), "0" | "off" | "no" | "false"))
-    }
-    asked(var).or_else(|| asked("PHOBOS_FUSED")).unwrap_or(true)
+    use phobos_base::env::flag_set;
+    flag_set(var).or_else(|| flag_set("PHOBOS_FUSED")).unwrap_or(true)
 }
 
 impl DeviceBackend {
