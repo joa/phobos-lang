@@ -529,7 +529,7 @@ impl DeviceBackend {
             q8_qdot_add,
             q8_qdot_persist: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
-            persist_qdot: std::env::var_os("PHOBOS_PERSIST_QDOT").is_some(),
+            persist_qdot: env_flag("PHOBOS_PERSIST_QDOT"),
             iq1s_dp4a: Cell::new(env_flag_on("PHOBOS_IQ1S_DP4A")),
             qmma_split: env_flag("PHOBOS_QMMA_SPLIT"),
             qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),
@@ -552,9 +552,9 @@ impl DeviceBackend {
             pending: RefCell::new(Vec::new()),
             recorded_len: Cell::new(0),
             copy_stream,
-            moe_lookahead: matches!(std::env::var("PHOBOS_MOE_LOOKAHEAD").as_deref(), Ok("1")),
-            moe_cpu_miss: matches!(std::env::var("PHOBOS_MOE_CPU_MISS").as_deref(), Ok("1")),
-            moe_grouped: matches!(std::env::var("PHOBOS_MOE_GROUPED").as_deref(), Ok("1")),
+            moe_lookahead: env_flag("PHOBOS_MOE_LOOKAHEAD"),
+            moe_cpu_miss: env_flag("PHOBOS_MOE_CPU_MISS"),
+            moe_grouped: env_flag("PHOBOS_MOE_GROUPED"),
             pass: RefCell::new(Vec::new()),
             segment: Cell::new(0),
             // The fourth replay by default: past the prefill and past the
@@ -588,10 +588,7 @@ impl DeviceBackend {
             rope_gathers: RefCell::new(HashMap::new()),
             attentions: RefCell::new(HashMap::new()),
             split_attn: RefCell::new(HashMap::new()),
-            attn_persist: !matches!(
-                std::env::var("PHOBOS_ATTN_PERSIST").as_deref(),
-                Ok("0" | "off" | "no" | "false")
-            ),
+            attn_persist: env_flag_on("PHOBOS_ATTN_PERSIST"),
             attn_persist_modules: RefCell::new(HashMap::new()),
             attn_partials: RefCell::new(None),
             readback: RefCell::new(None),
@@ -705,10 +702,7 @@ impl DeviceBackend {
             iq2xs_qmma,
             iq3xxs_qmma,
             iq3s_qmma,
-            raw_qmma: Cell::new(!matches!(
-                std::env::var("PHOBOS_RAW_QMMA").as_deref(),
-                Ok("0" | "off" | "no" | "false")
-            )),
+            raw_qmma: Cell::new(env_flag_on("PHOBOS_RAW_QMMA")),
             raw_qmma_formats: qmma_formats(),
             qgemm: qmma_raw::Qgemm::from_env(),
             dense_scratch_shared: env_flag_on("PHOBOS_DENSE_SCRATCH"),

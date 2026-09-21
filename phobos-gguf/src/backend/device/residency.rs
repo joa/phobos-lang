@@ -286,5 +286,5 @@ pub(super) fn vram_mark(label: &str) {
 /// asks, and reading the environment takes a process-wide lock.
 pub(super) fn vram_report() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("PHOBOS_VRAM").is_some())
+    *ON.get_or_init(|| phobos_base::env::flag("PHOBOS_VRAM"))
 }

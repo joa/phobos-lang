@@ -54,10 +54,11 @@ use kernels::*;
 
 pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 
-/// The formats `PHOBOS_RAW_QMMA` names, or all of them when it is unset or
-/// just a flag. Fusing a format trades its expansion for an activation slot
-/// in the projection ring; IQ2_S and IQ2_XS only gain once they share that
-/// ring with the others. See [`DeviceBackend::act_slot_transient`].
+/// The formats `PHOBOS_RAW_QMMA` names, all of them when it is unset or an
+/// opt-out spelling that is on, none when it is one that is off. Fusing a
+/// format trades its expansion for an activation slot in the projection
+/// ring; IQ2_S and IQ2_XS only gain once they share that ring with the
+/// others. See [`DeviceBackend::act_slot_transient`].
 fn qmma_formats() -> Vec<Quant> {
     const ALL: [Quant; 6] = [
         Quant::IQ1_S,
@@ -71,7 +72,7 @@ fn qmma_formats() -> Vec<Quant> {
         return ALL.to_vec();
     };
     if !value.contains(',') && ALL.iter().all(|q| !value.eq_ignore_ascii_case(q.name())) {
-        return ALL.to_vec();
+        return if env_flag_on("PHOBOS_RAW_QMMA") { ALL.to_vec() } else { Vec::new() };
     }
     value
         .split(',')
@@ -83,22 +84,8 @@ fn qmma_formats() -> Vec<Quant> {
         .collect()
 }
 
-/// Whether an opt-in `PHOBOS_*` toggle is set. Opt-out toggles negate the
-/// complementary spelling instead; see [`env_flag_on`].
-fn env_flag(name: &str) -> bool {
-    matches!(
-        std::env::var(name).as_deref(),
-        Ok("1" | "on" | "yes" | "true")
-    )
-}
-
-/// The same for a flag that is on unless it is turned off.
-fn env_flag_on(name: &str) -> bool {
-    !matches!(
-        std::env::var(name).as_deref(),
-        Ok("0" | "off" | "no" | "false")
-    )
-}
+/// The tree's two toggle spellings, see `ENV.md`.
+use phobos_base::env::{flag as env_flag, flag_on as env_flag_on};
 
 /// The buffers behind a [`DeviceQuant`] or [`DeviceRaw`] that is not in the
 /// arena. Held only to keep the allocation alive; nothing reads them.
@@ -148,18 +135,18 @@ pub struct DeviceBackend {
     copy_stream: Stream,
     /// Whether the mixture-of-experts path runs the next block's router on
     /// the residual as it stands and copies what it predicts early, on the
-    /// copy stream. `PHOBOS_MOE_LOOKAHEAD=1` opts in: the trace priced the
+    /// copy stream. `PHOBOS_MOE_LOOKAHEAD` opts in (see `ENV.md`): the trace priced the
     /// prediction's misses at a third more bytes, so it is off by default.
     moe_lookahead: bool,
     /// Whether a decode step's misses are computed on the host from the
     /// mirror's bytes instead of copied into a slot, the device summing
     /// the hits and a zero slot standing in for each miss.
-    /// `PHOBOS_MOE_CPU_MISS=1` opts in; Phase 4 of the plan, for a bus
+    /// `PHOBOS_MOE_CPU_MISS` opts in (see `ENV.md`); Phase 4 of the plan, for a bus
     /// narrower than the host's memory.
     moe_cpu_miss: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
     /// over rows sorted by expert rather than row by row.
-    /// `PHOBOS_MOE_GROUPED=1` opts in.
+    /// `PHOBOS_MOE_GROUPED` opts in; see `ENV.md`.
     moe_grouped: bool,
     matmul: Variants,
     /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=

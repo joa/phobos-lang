@@ -12,7 +12,7 @@ fn main() -> anyhow::Result<()> {
     let ctx = Context {
         gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
         index_bitwidth,
-        print_phases: std::env::var_os("PHOBOS_PRINT_PHASES").is_some(),
+        print_phases: phobos_base::env::flag("PHOBOS_PRINT_PHASES"),
         ..Default::default()
     };
     let src = std::fs::read_to_string(path)?;

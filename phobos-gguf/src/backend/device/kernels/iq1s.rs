@@ -250,9 +250,9 @@ pub(crate) fn iq1s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     // `IQ1S_QMMA_CTA` give it; the intrinsic refuses rather than guesses if a
     // future tile does not. `PHOBOS_QMMA_STAGE=0` goes back to the register
     // form.
-    let intrinsic = match std::env::var("PHOBOS_QMMA_STAGE").as_deref() {
-        Ok("0") => "iq1s_qmma_t",
-        _ => "iq1s_qmma_staged_t",
+    let intrinsic = match phobos_base::env::flag_on("PHOBOS_QMMA_STAGE") {
+        true => "iq1s_qmma_staged_t",
+        false => "iq1s_qmma_t",
     };
     format!(
         "@launch({block})
