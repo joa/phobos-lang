@@ -88,7 +88,9 @@ whose PCIe link runs at x8; they exist for a wider bus or a faster host.
 | variable | takes | default | effect |
 | --- | --- | --- | --- |
 | `PHOBOS_MOE_LOOKAHEAD` | opt-in | off | At each block's sync point, run the next block's router on the residual as it stands and copy its predicted misses early on a second stream. Right about 80% of the time; the wrong fifth is extra bytes on the bus, and on an x8 link that costs more than the overlap buys (tg128 24.8 against 32.0). |
-| `PHOBOS_MOE_CPU_MISS` | opt-in | off | Compute a decode step's misses on the host from the mirror instead of copying them, a zero slot standing in on the device. With the reference decoder a miss is ~1,145 us against ~290 us to copy; a SIMD K-quant dot is what would make it pay. |
+| `PHOBOS_MOE_CPU_MISS` | opt-in | off | Compute a decode step's misses on the host with the AVX2 K-quant kernels (`simd`) instead of copying them, a zero slot standing in on the device. A miss costs ~99 us against ~290 to copy, but a host miss never fills a slot and runs serially with the device, so tg64 measured 26.3 against 29.9 t/s; kept for the day the two overlap. |
+| `PHOBOS_HOST_THREADS` | a count | half the logical CPUs | Workers of the host expert kernels' pool (`simd`). Two threads on one core share its vector units; on the 24-core box 24 measured faster than 48. |
+| `PHOBOS_MOE_HOST` | opt-out | on | In a grouped prompt pass, give the lightest experts by rows to the host's AVX2 kernels while the device works the rest, each one sparing the bus a copy. The host's share of a block's experts is set from the last block's host and device times, from an initial 0.4. On the 35B, pp128 285 t/s against 77 without and pp512 506 against 196; `=0` is the bus alone. |
 | `PHOBOS_MOE_GROUPED` | opt-out | on | Run a pass whose rows choose more experts than a block's cache holds as grouped GEMMs over rows sorted by expert, each expert copied once a block, rather than row by row with the cache thrashing. On the 35B, pp128 77 t/s against 41 row by row and pp512 196 against 33. `=0` is the row path for every pass. |
 
 ## Benchmarks and examples

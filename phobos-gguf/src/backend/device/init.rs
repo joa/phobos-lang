@@ -554,6 +554,7 @@ impl DeviceBackend {
             copy_stream,
             moe_lookahead: env_flag("PHOBOS_MOE_LOOKAHEAD"),
             moe_cpu_miss: env_flag("PHOBOS_MOE_CPU_MISS"),
+            moe_host: env_flag_on("PHOBOS_MOE_HOST"),
             moe_grouped: env_flag_on("PHOBOS_MOE_GROUPED"),
             pass: RefCell::new(Vec::new()),
             segment: Cell::new(0),

@@ -14,8 +14,8 @@ use super::super::kernels::{
 use super::super::{DeviceBackend, Plane};
 use super::{Experts, Kind, MAX_ROWS};
 use crate::backend::{Backend, Buf, Moe};
-use crate::experts::ExpertStack;
 use crate::quant::Quant;
+use crate::simd::{self, Job};
 
 const U: i64 = MOE_USED as i64;
 
@@ -234,32 +234,10 @@ impl DeviceBackend {
         self.read(x, &mut row)?;
         let mut weights = [0.0f32; MOE_USED];
         experts.blocks[block].weights.index(0..MOE_USED).copy_to(&mut weights[..])?;
-        let set = &experts.blocks[block].set;
-        let parts: Vec<Vec<f32>> = std::thread::scope(|scope| {
-            let handles: Vec<_> = misses
-                .iter()
-                .map(|&(j, e)| {
-                    let (set, row, w) = (set, &row, weights[j]);
-                    scope.spawn(move || -> Result<Vec<f32>> {
-                        let (g, u) = std::thread::scope(|inner| {
-                            let gate = inner.spawn(|| dequant_matvec(&set.gate, e, row));
-                            let up = inner.spawn(|| dequant_matvec(&set.up, e, row));
-                            (gate.join().expect("gate thread"), up.join().expect("up thread"))
-                        });
-                        let (g, u) = (g?, u?);
-                        let h: Vec<f32> = g.iter().zip(&u).map(|(&g, &u)| g / (1.0 + (-g).exp()) * u).collect();
-                        Ok(dequant_matvec(&set.down, e, &h)?.into_iter().map(|v| v * w).collect())
-                    })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().expect("expert thread")).collect::<Result<_>>()
-        })?;
+        let jobs: Vec<Job> = misses.iter().map(|&(j, e)| Job { expert: e, rows: vec![0], weights: vec![weights[j]] }).collect();
         let mut y = vec![0.0f32; d];
-        for part in parts {
-            for (acc, v) in y.iter_mut().zip(part) {
-                *acc += v;
-            }
-        }
+        let b = &experts.blocks[block];
+        simd::experts_ffn(&b.mirror.source(&b.set), &jobs, &row, 1, &mut y)?;
         experts.stats.cpu_misses += misses.len() as u64;
         experts.stats.cpu_nanos += started.elapsed().as_nanos() as u64;
         Ok(y)
@@ -342,18 +320,3 @@ impl DeviceBackend {
     }
 }
 
-/// Expert `e` of `stack` applied to `x`, each row decoded into a scratch
-/// and dotted, on the calling thread.
-fn dequant_matvec(stack: &ExpertStack, e: usize, x: &[f32]) -> Result<Vec<f32>> {
-    let (n, k) = (stack.n(), stack.k());
-    let spec = stack.quant().spec();
-    let rb = k / spec.block * spec.block_bytes;
-    let bytes = stack.expert(e);
-    let mut decoded = vec![0.0f32; k];
-    Ok((0..n)
-        .map(|j| {
-            (spec.dequantize)(&bytes[j * rb..(j + 1) * rb], &mut decoded);
-            decoded.iter().zip(x).map(|(&w, &v)| w * v).sum()
-        })
-        .collect())
-}

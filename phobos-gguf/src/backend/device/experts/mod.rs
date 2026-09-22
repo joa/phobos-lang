@@ -75,6 +75,9 @@ pub(super) struct Experts {
     pub(super) stats: ExpertStats,
     /// The grouped prompt path's tables, once it has run.
     grouped: Option<grouped::GroupedScratch>,
+    /// The share of a wide pass's experts the host takes, moved toward
+    /// balance block by block; see `grouped.rs`.
+    pub(super) host_share: f32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -204,6 +207,7 @@ impl Experts {
             budget: None,
             limit: None,
             grouped: None,
+            host_share: grouped::HOST_SHARE_START,
             iota: HashMap::new(),
             tick: 0,
             stats: ExpertStats::default(),
@@ -370,6 +374,19 @@ impl DeviceBackend {
                 *counts.entry((kind, kind.stack(&b.set).quant())).or_default() += 1;
             }
         }
+        // A prompt pass's scratch comes out of the budget, or the card pages
+        // once the pass allocates it; the widest group it can want is bound
+        // by the slots the budget would buy before the hold-back.
+        let (d, d_ff, n_expert) = {
+            let set = &experts.blocks[0].set;
+            (set.gate.k(), set.gate.n(), set.count())
+        };
+        let held = grouped::scratch_bytes(MAX_ROWS, d, d_ff, n_expert, budget / slot_bytes / blocks);
+        let budget = budget.saturating_sub(held);
+        phobos_base::log::emit(
+            phobos_base::log::Level::Info,
+            format_args!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20),
+        );
         // The spare slot a block gets comes out of the budget too.
         let mut per_block = (budget / slot_bytes / blocks).saturating_sub(1);
         for (&(kind, quant), &count) in &counts {
