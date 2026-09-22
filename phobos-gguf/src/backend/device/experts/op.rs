@@ -77,7 +77,10 @@ impl DeviceBackend {
             self.prefetch(&mut experts, next)?;
         }
 
-        if self.moe_grouped && rows > 1 {
+        // Grouped once the rows choose more experts than the block holds,
+        // where the row path's cache would thrash.
+        let grouped = self.moe_grouped && rows * MOE_USED > experts.per_block && super::grouped::fits(&experts.blocks[block].set, d, d_ff);
+        if grouped {
             self.run_grouped(&mut experts, &req, (shared, gate_logit))?;
         } else {
             let act = req.act.map_or_else(|| self.quantize_act(req.x, rows, d), Ok)?;

@@ -146,7 +146,7 @@ pub struct DeviceBackend {
     moe_cpu_miss: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
     /// over rows sorted by expert rather than row by row.
-    /// `PHOBOS_MOE_GROUPED` opts in; see `ENV.md`.
+    /// `PHOBOS_MOE_GROUPED=0` opts out; see `ENV.md`.
     moe_grouped: bool,
     matmul: Variants,
     /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=

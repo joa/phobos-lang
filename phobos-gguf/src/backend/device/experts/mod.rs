@@ -73,6 +73,8 @@ pub(super) struct Experts {
     /// block, so a prompt pass's rows do not all stamp alike.
     tick: u64,
     pub(super) stats: ExpertStats,
+    /// The grouped prompt path's tables, once it has run.
+    grouped: Option<grouped::GroupedScratch>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -152,7 +154,7 @@ impl Slab {
 /// # Safety
 /// `src` is page-locked and both sides live until the stream reaches the
 /// copy.
-unsafe fn copy_async(dst: u64, src: *const std::ffi::c_void, len: usize, stream: &Stream) -> Result<()> {
+pub(super) unsafe fn copy_async(dst: u64, src: *const std::ffi::c_void, len: usize, stream: &Stream) -> Result<()> {
     cuda_ok(unsafe { cust::sys::cuMemcpyHtoDAsync_v2(dst, src, len, stream.as_inner()) }, "copying to the device")
 }
 
@@ -201,6 +203,7 @@ impl Experts {
             slabs: None,
             budget: None,
             limit: None,
+            grouped: None,
             iota: HashMap::new(),
             tick: 0,
             stats: ExpertStats::default(),
