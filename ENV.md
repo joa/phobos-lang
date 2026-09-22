@@ -89,7 +89,7 @@ whose PCIe link runs at x8; they exist for a wider bus or a faster host.
 | --- | --- | --- | --- |
 | `PHOBOS_MOE_LOOKAHEAD` | opt-in | off | At each block's sync point, run the next block's router on the residual as it stands and copy its predicted misses early on a second stream. Right about 80% of the time; the wrong fifth is extra bytes on the bus, and on an x8 link that costs more than the overlap buys (tg128 24.8 against 32.0). |
 | `PHOBOS_MOE_CPU_MISS` | opt-in | off | Compute a decode step's misses on the host from the mirror instead of copying them, a zero slot standing in on the device. With the reference decoder a miss is ~1,145 us against ~290 us to copy; a SIMD K-quant dot is what would make it pay. |
-| `PHOBOS_MOE_GROUPED` | opt-in | off | Run a prompt pass's experts as grouped GEMMs over rows sorted by expert rather than row by row. Checked, not yet timed; on an x8 link the copies are nine tenths of a prompt pass either way. |
+| `PHOBOS_MOE_GROUPED` | opt-out | on | Run a pass whose rows choose more experts than a block's cache holds as grouped GEMMs over rows sorted by expert, each expert copied once a block, rather than row by row with the cache thrashing. On the 35B, pp128 77 t/s against 41 row by row and pp512 196 against 33. `=0` is the row path for every pass. |
 
 ## Benchmarks and examples
 

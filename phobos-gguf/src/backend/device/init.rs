@@ -554,7 +554,7 @@ impl DeviceBackend {
             copy_stream,
             moe_lookahead: env_flag("PHOBOS_MOE_LOOKAHEAD"),
             moe_cpu_miss: env_flag("PHOBOS_MOE_CPU_MISS"),
-            moe_grouped: env_flag("PHOBOS_MOE_GROUPED"),
+            moe_grouped: env_flag_on("PHOBOS_MOE_GROUPED"),
             pass: RefCell::new(Vec::new()),
             segment: Cell::new(0),
             // The fourth replay by default: past the prefill and past the
