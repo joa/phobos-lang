@@ -1,8 +1,8 @@
 // Q5_K against Q8: Q4_K's runs, scales and nibble planes with a fifth bit,
 // run `r`'s element `l` taking it from bit `r` of `qh[l]`.
 
-use super::Block;
 use super::q4_k::{Unpacked, dot_runs32};
+use super::{Block, Sums};
 
 const RUNS: usize = 8;
 const RUN: usize = 32;
@@ -15,8 +15,8 @@ impl Block for Scalar {
     const AVX2: bool = false;
     type Unpacked = Unpacked;
 
-    unsafe fn unpack(bytes: &[u8], u: &mut Unpacked) {
-        u.header.read(bytes);
+    unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
+        u.header.read(bytes, phobos_base::half::f16_to_f32);
         let qh = &bytes[QH..QS];
         for run in 0..RUNS {
             let plane = &bytes[QS + (run / 2) * RUN..][..RUN];
@@ -32,8 +32,8 @@ impl Block for Scalar {
         (u.header.d, u.header.dmin)
     }
 
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16]) -> (i32, i32) {
-        (dot_runs32(&u.q, &u.header.scales, qs), u.header.min_term(sums))
+    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
+        out.set(dot_runs32(&u.q, &u.header.scales, qs), u.header.min_term(sums));
     }
 }
 
@@ -44,14 +44,14 @@ pub(super) use avx2::Avx2;
 mod avx2 {
     use std::arch::x86_64::*;
 
-    use super::super::x86::dot_runs32;
-    use super::{Block, QH, QS, RUNS, Unpacked};
+    use super::super::x86::{dot_runs32, half, min_term};
+    use super::{Block, QH, QS, RUNS, Sums, Unpacked};
 
     pub(crate) struct Avx2;
 
-    #[target_feature(enable = "avx2")]
-    unsafe fn unpack(bytes: &[u8], u: &mut Unpacked) {
-        u.header.read(bytes);
+    #[target_feature(enable = "avx2,f16c")]
+    unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
+        u.header.read(bytes, |bits| half(bits));
         // SAFETY: the caller has AVX2; a block holds the planes.
         unsafe {
             let m4 = _mm256_set1_epi8(0x0f);
@@ -76,9 +76,9 @@ mod avx2 {
         type Unpacked = Unpacked;
 
         #[inline(always)]
-        unsafe fn unpack(bytes: &[u8], u: &mut Unpacked) {
+        unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
             // SAFETY: the caller has AVX2.
-            unsafe { unpack(bytes, u) }
+            unsafe { unpack(bytes, _d, u) }
         }
 
         fn scales(u: &Unpacked) -> (f32, f32) {
@@ -86,9 +86,12 @@ mod avx2 {
         }
 
         #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16]) -> (i32, i32) {
+        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
             // SAFETY: the caller has AVX2.
-            (unsafe { dot_runs32(&u.q, &u.header.scales, qs) }, u.header.min_term(sums))
+            unsafe {
+                dot_runs32(&u.q, &u.header.scales, qs, &mut out.dot);
+                min_term(&u.header.mins, sums, &mut out.min);
+            }
         }
     }
 }

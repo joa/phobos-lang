@@ -5,8 +5,12 @@
 //! The activation is quantized to eight bits a block of 256 with one scale
 //! and the sums of each sixteen quants, so a block's minimums (or Q6_K's
 //! offset) fold into one integer term, as llama.cpp's Q8_K does. A weight
-//! block is unpacked once, to an aligned byte array either path reads, and
-//! dotted against every activation row.
+//! row's blocks are unpacked once, to aligned byte arrays either path
+//! reads, and dotted against every activation row with the eight-lane
+//! sums of each block scaled into one float accumulator, so a row costs
+//! one horizontal sum. The weights come from a [`Source`]: the file's
+//! row-major blocks, or the device's grouped layout in pinned memory,
+//! which a long pass wants since the mapping's pages get trimmed.
 
 use std::sync::OnceLock;
 
@@ -15,6 +19,7 @@ use rayon::prelude::*;
 
 use crate::experts::{ExpertSet, ExpertStack};
 use crate::quant::Quant;
+use crate::quant::grouped::RAW_GROUP;
 
 mod q4_k;
 mod q5_k;
@@ -91,6 +96,80 @@ impl Q8Act {
     }
 }
 
+/// One expert's `[n, k]` blocks, wherever they are.
+#[derive(Clone, Copy)]
+pub enum Weight<'a> {
+    /// The file's layout: row after row, each `nb` whole blocks.
+    Flat { bytes: &'a [u8], block_bytes: usize },
+    /// The device's layout, see `quant::grouped`: rows in eights, a block
+    /// of each of the eight side by side, at the format's device stride;
+    /// Q6_K's trailing scale is in `scales`, one a block in the same
+    /// order.
+    Grouped { bytes: &'a [u8], unit: usize, nb: usize, scales: &'a [u16] },
+}
+
+impl Weight<'_> {
+    /// Block `b` of row `j`, and its scale where the layout keeps it apart.
+    #[inline(always)]
+    fn block(&self, j: usize, b: usize, nb: usize) -> (&[u8], Option<u16>) {
+        match *self {
+            Weight::Flat { bytes, block_bytes } => (&bytes[(j * nb + b) * block_bytes..][..block_bytes], None),
+            Weight::Grouped { bytes, unit, scales, .. } => {
+                let at = ((j / RAW_GROUP) * nb + b) * RAW_GROUP + j % RAW_GROUP;
+                (&bytes[at * unit..][..unit], Some(scales[at]))
+            }
+        }
+    }
+
+    fn holds(&self, n: usize, nb: usize) -> bool {
+        match *self {
+            Weight::Flat { bytes, block_bytes } => bytes.len() >= n * nb * block_bytes,
+            Weight::Grouped { bytes, unit, nb: have, scales } => {
+                let blocks = n.div_ceil(RAW_GROUP) * RAW_GROUP * nb;
+                have == nb && bytes.len() >= blocks * unit && scales.len() >= blocks
+            }
+        }
+    }
+}
+
+/// The three stacks of a block's routed feed-forward.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Stack {
+    Gate,
+    Up,
+    Down,
+}
+
+/// Where a block's experts are read from.
+pub trait Source: Sync {
+    /// The format, `n` and `k` of one stack.
+    fn shape(&self, stack: Stack) -> (Quant, usize, usize);
+    /// Expert `e`'s blocks in one stack.
+    fn weight(&self, stack: Stack, e: usize) -> Weight<'_>;
+}
+
+impl Source for ExpertSet {
+    fn shape(&self, stack: Stack) -> (Quant, usize, usize) {
+        let s = self.stack(stack);
+        (s.quant(), s.n(), s.k())
+    }
+
+    fn weight(&self, stack: Stack, e: usize) -> Weight<'_> {
+        let s = self.stack(stack);
+        Weight::Flat { bytes: s.expert(e), block_bytes: s.quant().spec().block_bytes }
+    }
+}
+
+impl ExpertSet {
+    pub fn stack(&self, stack: Stack) -> &ExpertStack {
+        match stack {
+            Stack::Gate => &self.gate,
+            Stack::Up => &self.up,
+            Stack::Down => &self.down,
+        }
+    }
+}
+
 /// One block's quants unpacked to a byte apiece, in element order, aligned
 /// for the vector loads.
 #[repr(C, align(32))]
@@ -102,6 +181,23 @@ impl Default for Quants {
     }
 }
 
+/// A block's eight-lane integer sums: the dot, and the correction the
+/// block's minimums (or offset) owe from the Q8 sums per sixteen. The
+/// vector path stores its lanes as they are; the scalar path fills one.
+#[repr(C, align(32))]
+#[derive(Default)]
+pub(crate) struct Sums {
+    pub(crate) dot: [i32; 8],
+    pub(crate) min: [i32; 8],
+}
+
+impl Sums {
+    fn set(&mut self, dot: i32, min: i32) {
+        self.dot = [dot, 0, 0, 0, 0, 0, 0, 0];
+        self.min = [min, 0, 0, 0, 0, 0, 0, 0];
+    }
+}
+
 /// One format's block arithmetic against a Q8 block, in one instruction
 /// set.
 pub(crate) trait Block {
@@ -109,62 +205,73 @@ pub(crate) trait Block {
     const AVX2: bool;
     type Unpacked: Default;
 
-    /// Unpacks one block's bytes.
+    /// Unpacks one block's bytes, its scale from `d` where the layout
+    /// keeps it apart.
     ///
     /// # Safety
     /// An AVX2 implementation runs only on a CPU that has it.
-    unsafe fn unpack(bytes: &[u8], into: &mut Self::Unpacked);
+    unsafe fn unpack(bytes: &[u8], d: Option<u16>, into: &mut Self::Unpacked);
 
     /// The block's scale, and the scale of the correction `dot` returns.
     fn scales(u: &Self::Unpacked) -> (f32, f32);
 
-    /// The integer dot with a Q8 block, and the correction the block's
-    /// minimums (or offset) owe, from the Q8 sums per sixteen.
+    /// The integer dot with a Q8 block and the minimums' correction, as
+    /// lane sums into `out`.
     ///
     /// # Safety
     /// As [`Block::unpack`].
-    unsafe fn dot(u: &Self::Unpacked, qs: &[i8], sums: &[i16]) -> (i32, i32);
+    unsafe fn dot(u: &Self::Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums);
 }
 
-/// `yt[j * rows + r] = sum_i w[j, i] x[r, i]` over the weight rows in
-/// `weight`, each `act.blocks()` blocks of `block_bytes`.
+/// `yt[(j - j0) * rows + r] = sum_i w[j, i] x[r, i]` over the weight rows
+/// from `j0` that `yt` has room for.
 #[inline(always)]
-unsafe fn rows_dot<F: Block>(weight: &[u8], block_bytes: usize, act: &Q8Act, yt: &mut [f32]) {
-    let rows = act.rows;
-    let mut u = F::Unpacked::default();
-    for (row_bytes, out) in weight.chunks_exact(act.blocks() * block_bytes).zip(yt.chunks_exact_mut(rows)) {
-        out.fill(0.0);
-        for (b, bytes) in row_bytes.chunks_exact(block_bytes).enumerate() {
+unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
+    let (rows, nb) = (act.rows, act.blocks());
+    let mut row: Vec<F::Unpacked> = (0..nb).map(|_| F::Unpacked::default()).collect();
+    let mut sums = Sums::default();
+    for (j, out) in (j0..).zip(yt.chunks_exact_mut(rows)) {
+        for (b, u) in row.iter_mut().enumerate() {
+            let (bytes, d) = weight.block(j, b, nb);
             // SAFETY: the caller's contract, see `Block::unpack`.
-            unsafe { F::unpack(bytes, &mut u) };
-            let (d, dmin) = F::scales(&u);
-            for (r, acc) in out.iter_mut().enumerate() {
-                let (da, qs, sums) = act.block(r, b);
+            unsafe { F::unpack(bytes, d, u) };
+        }
+        for (r, acc) in out.iter_mut().enumerate() {
+            // Eight lanes the vector path fills and the compiler keeps in
+            // one register; the scalar path uses the first.
+            let mut lanes = [0.0f32; 8];
+            for (b, u) in row.iter().enumerate() {
+                let (da, qs, q8_sums) = act.block(r, b);
                 // SAFETY: as above.
-                let (sumi, correction) = unsafe { F::dot(&u, qs, sums) };
-                *acc += da * (d * sumi as f32 - dmin * correction as f32);
+                unsafe { F::dot(u, qs, q8_sums, &mut sums) };
+                let (d, dmin) = F::scales(u);
+                let (pd, pm) = (d * da, dmin * da);
+                for ((lane, &dot), &min) in lanes.iter_mut().zip(&sums.dot).zip(&sums.min) {
+                    *lane += pd * dot as f32 - pm * min as f32;
+                }
             }
+            *acc = lanes.iter().sum();
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,fma")]
-unsafe fn rows_dot_avx2<F: Block>(weight: &[u8], block_bytes: usize, act: &Q8Act, yt: &mut [f32]) {
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn rows_dot_avx2<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
     // SAFETY: the caller checked for AVX2.
-    unsafe { rows_dot::<F>(weight, block_bytes, act, yt) }
+    unsafe { rows_dot::<F>(weight, j0, act, yt) }
 }
 
 /// `rows_dot` in the instruction set `F` is written for.
-fn rows_dot_in<F: Block>(weight: &[u8], block_bytes: usize, act: &Q8Act, yt: &mut [f32]) {
+fn rows_dot_in<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
     // SAFETY: an AVX2 implementation is chosen only after `avx2()` said
     // the CPU has it.
     unsafe {
         #[cfg(target_arch = "x86_64")]
         if F::AVX2 {
-            return rows_dot_avx2::<F>(weight, block_bytes, act, yt);
+            return rows_dot_avx2::<F>(weight, j0, act, yt);
         }
-        rows_dot::<F>(weight, block_bytes, act, yt)
+        rows_dot::<F>(weight, j0, act, yt)
     }
 }
 
@@ -172,17 +279,18 @@ fn rows_dot_in<F: Block>(weight: &[u8], block_bytes: usize, act: &Q8Act, yt: &mu
 /// are dealt out in contiguous chunks, each thread's outputs its own;
 /// otherwise it runs where it is called, for a caller that is itself one
 /// of many tasks.
-fn gemm_with<F: Block>(weight: &[u8], n: usize, block_bytes: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) {
+fn gemm_with<F: Block>(weight: &Weight, n: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) {
     if !threaded {
-        return rows_dot_in::<F>(weight, block_bytes, act, yt);
+        return rows_dot_in::<F>(weight, 0, act, yt);
     }
     let rows = act.rows;
-    let row_bytes = act.blocks() * block_bytes;
-    let chunk = n.div_ceil(pool().current_num_threads() * 2).max(1);
+    // Two tasks a thread, but never a task under sixteen rows: waking a
+    // worker costs more than that many rows of one activation row.
+    let chunk = n.div_ceil(pool().current_num_threads() * 2).max(16);
     pool().install(|| {
         yt.par_chunks_mut(chunk * rows)
-            .zip(weight.par_chunks(chunk * row_bytes))
-            .for_each(|(out, w)| rows_dot_in::<F>(w, block_bytes, act, out))
+            .enumerate()
+            .for_each(|(c, out)| rows_dot_in::<F>(weight, c * chunk, act, out))
     });
 }
 
@@ -190,7 +298,7 @@ fn gemm_with<F: Block>(weight: &[u8], n: usize, block_bytes: usize, act: &Q8Act,
 pub fn avx2() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
-        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") && std::is_x86_feature_detected!("f16c")
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -198,16 +306,15 @@ pub fn avx2() -> bool {
     }
 }
 
-/// [`gemm`] over raw blocks, in the instruction set asked for.
-fn gemm_raw(quant: Quant, wide: bool, weight: &[u8], n: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) -> Result<()> {
-    let block_bytes = quant.spec().block_bytes;
-    ensure!(weight.len() == n * act.blocks() * block_bytes && yt.len() == n * act.rows, "a [{n}, {}] weight against {} activation rows", act.k, act.rows);
+/// [`gemm`] over a weight, in the instruction set asked for.
+fn gemm_raw(quant: Quant, wide: bool, weight: &Weight, n: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) -> Result<()> {
+    ensure!(weight.holds(n, act.blocks()) && yt.len() == n * act.rows, "a [{n}, {}] weight against {} activation rows", act.k, act.rows);
     macro_rules! by_format {
         ($set:ident) => {
             match quant {
-                Quant::Q4_K => gemm_with::<q4_k::$set>(weight, n, block_bytes, act, yt, threaded),
-                Quant::Q5_K => gemm_with::<q5_k::$set>(weight, n, block_bytes, act, yt, threaded),
-                Quant::Q6_K => gemm_with::<q6_k::$set>(weight, n, block_bytes, act, yt, threaded),
+                Quant::Q4_K => gemm_with::<q4_k::$set>(weight, n, act, yt, threaded),
+                Quant::Q5_K => gemm_with::<q5_k::$set>(weight, n, act, yt, threaded),
+                Quant::Q6_K => gemm_with::<q6_k::$set>(weight, n, act, yt, threaded),
                 other => bail!("no host expert kernel for {}", other.name()),
             }
         };
@@ -223,22 +330,23 @@ fn gemm_raw(quant: Quant, wide: bool, weight: &[u8], n: usize, act: &Q8Act, yt: 
 }
 
 /// `yt[j * rows + r] = sum_i w[j, i] x[r, i]` over expert `e`'s `[n, k]`
-/// rows of `stack`: the outputs transposed, so each thread's rows are
+/// rows of one stack: the outputs transposed, so each thread's rows are
 /// contiguous.
-pub fn gemm(stack: &ExpertStack, e: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
-    gemm_in(stack, e, act, yt, true)
+pub fn gemm(source: &impl Source, stack: Stack, e: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
+    gemm_in(source, stack, e, act, yt, true)
 }
 
-fn gemm_in(stack: &ExpertStack, e: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) -> Result<()> {
-    ensure!(stack.k() == act.k, "a [{}, {}] expert against a {}-wide activation", stack.n(), stack.k(), act.k);
-    gemm_raw(stack.quant(), avx2(), stack.expert(e), stack.n(), act, yt, threaded)
+fn gemm_in(source: &impl Source, stack: Stack, e: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) -> Result<()> {
+    let (quant, n, k) = source.shape(stack);
+    ensure!(k == act.k, "a [{n}, {k}] expert against a {}-wide activation", act.k);
+    gemm_raw(quant, avx2(), &source.weight(stack, e), n, act, yt, threaded)
 }
 
-/// Whether [`expert_ffn`] can run a set on this host.
-pub fn supports(set: &ExpertSet) -> bool {
-    [&set.gate, &set.up, &set.down]
+/// Whether [`expert_ffn`] can run a source on this host.
+pub fn supports(source: &impl Source) -> bool {
+    [Stack::Gate, Stack::Up, Stack::Down]
         .iter()
-        .all(|stack| matches!(stack.quant(), Quant::Q4_K | Quant::Q5_K | Quant::Q6_K))
+        .all(|&stack| matches!(source.shape(stack).0, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K))
 }
 
 /// What [`expert_ffn`] works in, kept between calls.
@@ -251,20 +359,20 @@ pub struct Scratch {
     down: Vec<f32>,
 }
 
-/// Expert `e` of `set` over the activation's rows, each row's result
-/// scaled by its `weights[r]` and added into `out`, `[rows, d_model]`,
-/// the three GEMMs over the pool.
-pub fn expert_ffn(set: &ExpertSet, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut Scratch, out: &mut [f32]) -> Result<()> {
-    ffn_in(set, e, act, weights, scratch, out, true)
+/// Expert `e` over the activation's rows, each row's result scaled by its
+/// `weights[r]` and added into `out`, `[rows, d_model]`, the three GEMMs
+/// over the pool.
+pub fn expert_ffn(source: &impl Source, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut Scratch, out: &mut [f32]) -> Result<()> {
+    ffn_in(source, e, act, weights, scratch, out, true)
 }
 
-fn ffn_in(set: &ExpertSet, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut Scratch, out: &mut [f32], threaded: bool) -> Result<()> {
-    let (rows, d, d_ff) = (act.rows, set.down.n(), set.gate.n());
+fn ffn_in(source: &impl Source, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut Scratch, out: &mut [f32], threaded: bool) -> Result<()> {
+    let (rows, d, d_ff) = (act.rows, source.shape(Stack::Down).1, source.shape(Stack::Gate).1);
     ensure!(weights.len() == rows && out.len() == rows * d, "{} weights and {} outputs for {rows} rows of {d}", weights.len(), out.len());
     scratch.gate.resize(d_ff * rows, 0.0);
     scratch.up.resize(d_ff * rows, 0.0);
-    gemm_in(&set.gate, e, act, &mut scratch.gate, threaded)?;
-    gemm_in(&set.up, e, act, &mut scratch.up, threaded)?;
+    gemm_in(source, Stack::Gate, e, act, &mut scratch.gate, threaded)?;
+    gemm_in(source, Stack::Up, e, act, &mut scratch.up, threaded)?;
     scratch.h.resize(rows * d_ff, 0.0);
     for (j, (g, u)) in scratch.gate.chunks_exact(rows).zip(scratch.up.chunks_exact(rows)).enumerate() {
         for r in 0..rows {
@@ -273,7 +381,7 @@ fn ffn_in(set: &ExpertSet, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut
     }
     scratch.hact.quantize_into(&scratch.h, rows, d_ff);
     scratch.down.resize(d * rows, 0.0);
-    gemm_in(&set.down, e, &scratch.hact, &mut scratch.down, threaded)?;
+    gemm_in(source, Stack::Down, e, &scratch.hact, &mut scratch.down, threaded)?;
     for (i, y) in scratch.down.chunks_exact(rows).enumerate() {
         for (r, &v) in y.iter().enumerate() {
             out[r * d + i] += weights[r] * v;
@@ -290,66 +398,43 @@ pub struct Job {
     pub weights: Vec<f32>,
 }
 
-/// A worker's own scratch and its sum of the jobs it ran.
+/// A worker's own scratch.
+#[derive(Default)]
 struct Worker {
     gathered: Vec<f32>,
     act: Q8Act,
     scratch: Scratch,
-    y: Vec<f32>,
-    acc: Vec<f32>,
 }
 
 impl Worker {
-    fn new(len: usize) -> Worker {
-        Worker { gathered: Vec::new(), act: Q8Act::default(), scratch: Scratch::default(), y: Vec::new(), acc: vec![0.0; len] }
-    }
-
-    fn run(&mut self, set: &ExpertSet, job: &Job, x: &[f32], d: usize) -> Result<()> {
+    /// One job's rows of output, `[rows, d]`, each scaled by its weight.
+    fn run(&mut self, source: &impl Source, job: &Job, x: &[f32], d: usize) -> Result<Vec<f32>> {
         let n = job.rows.len();
         self.gathered.clear();
         for &r in &job.rows {
             self.gathered.extend_from_slice(&x[r * d..(r + 1) * d]);
         }
         self.act.quantize_into(&self.gathered, n, d);
-        self.y.clear();
-        self.y.resize(n * d, 0.0);
-        ffn_in(set, job.expert, &self.act, &job.weights, &mut self.scratch, &mut self.y, false)?;
-        for (&r, y) in job.rows.iter().zip(self.y.chunks_exact(d)) {
-            for (acc, &v) in self.acc[r * d..(r + 1) * d].iter_mut().zip(y) {
-                *acc += v;
-            }
-        }
-        Ok(())
+        let mut y = vec![0.0; n * d];
+        ffn_in(source, job.expert, &self.act, &job.weights, &mut self.scratch, &mut y, false)?;
+        Ok(y)
     }
 }
 
 /// The jobs over `x`, `[rows, d_model]`, the experts spread over the pool
-/// and each one's result scaled by its weights and added into `out`.
-pub fn experts_ffn(set: &ExpertSet, jobs: &[Job], x: &[f32], rows: usize, out: &mut [f32]) -> Result<()> {
-    let d = set.gate.k();
+/// and each one's result scaled by its weights and added into `out`. Each
+/// job's rows come back on their own and are added here: a sum a worker
+/// would be the whole output apiece, most of it zero.
+pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, out: &mut [f32]) -> Result<()> {
+    let d = source.shape(Stack::Gate).2;
     ensure!(x.len() == rows * d && out.len() == rows * d, "{} inputs and {} outputs for {rows} rows of {d}", x.len(), out.len());
-    let sum: Vec<f32> = pool().install(|| {
-        jobs.par_iter()
-            .try_fold(
-                || Worker::new(rows * d),
-                |mut worker, job| {
-                    worker.run(set, job, x, d)?;
-                    Ok(worker)
-                },
-            )
-            .map(|worker: Result<Worker>| worker.map(|w| w.acc))
-            .try_reduce(
-                || vec![0.0; rows * d],
-                |mut a, b| {
-                    for (a, b) in a.iter_mut().zip(b) {
-                        *a += b;
-                    }
-                    Ok(a)
-                },
-            )
-    })?;
-    for (o, s) in out.iter_mut().zip(sum) {
-        *o += s;
+    let ys: Vec<Vec<f32>> = pool().install(|| jobs.par_iter().map_init(Worker::default, |w, job| w.run(source, job, x, d)).collect::<Result<_>>())?;
+    for (job, y) in jobs.iter().zip(ys) {
+        for (&r, y) in job.rows.iter().zip(y.chunks_exact(d)) {
+            for (o, &v) in out[r * d..(r + 1) * d].iter_mut().zip(y) {
+                *o += v;
+            }
+        }
     }
     Ok(())
 }
@@ -372,9 +457,21 @@ pub fn threads() -> usize {
     pool().current_num_threads()
 }
 
+/// Workers the pool starts with: `PHOBOS_HOST_THREADS`, or half the
+/// logical CPUs, since two threads on one core share its vector units and
+/// measured slower than one (see `ENV.md`).
+fn default_threads() -> usize {
+    std::env::var("PHOBOS_HOST_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)))
+}
+
 fn pool() -> &'static rayon::ThreadPool {
     POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
+            .num_threads(default_threads())
             .thread_name(|i| format!("phobos-host-{i}"))
             .build()
             .expect("a thread pool")
@@ -388,22 +485,20 @@ pub(crate) mod x86 {
 
     use super::Quants;
 
-    /// The lanes of `v` summed.
+    /// A half to a float.
     #[inline]
-    #[target_feature(enable = "avx2")]
-    pub(crate) unsafe fn hsum(v: __m256i) -> i32 {
-        let s = _mm_add_epi32(_mm256_castsi256_si128(v), _mm256_extracti128_si256(v, 1));
-        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b01_00_11_10));
-        let s = _mm_add_epi32(s, _mm_shuffle_epi32(s, 0b10_11_00_01));
-        _mm_cvtsi128_si32(s)
+    #[target_feature(enable = "f16c")]
+    pub(crate) fn half(bits: u16) -> f32 {
+        _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(i32::from(bits))))
     }
 
     /// The dot of unpacked quants with a Q8 block where every run of 32
-    /// shares a scale: Q4_K and Q5_K.
+    /// shares a scale, as eight lane sums: Q4_K and Q5_K.
     #[target_feature(enable = "avx2")]
-    pub(crate) unsafe fn dot_runs32(q: &Quants, scales: &[i16; 8], qs: &[i8]) -> i32 {
+    pub(crate) unsafe fn dot_runs32(q: &Quants, scales: &[i16; 8], qs: &[i8], out: &mut [i32; 8]) {
         debug_assert!(qs.len() >= super::BLOCK);
-        // SAFETY: the caller has AVX2; `q` is aligned and `qs` a block long.
+        // SAFETY: the caller has AVX2; `q` and `out` are aligned and `qs`
+        // a block long.
         unsafe {
             let mut acc = _mm256_setzero_si256();
             for (run, &scale) in scales.iter().enumerate() {
@@ -411,13 +506,13 @@ pub(crate) mod x86 {
                 let a = _mm256_loadu_si256(qs.as_ptr().add(run * 32).cast());
                 acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_set1_epi16(scale), _mm256_maddubs_epi16(w, a)));
             }
-            hsum(acc)
+            _mm256_store_si256(out.as_mut_ptr().cast(), acc);
         }
     }
 
     /// The same where every run of 16 has its own scale: Q6_K.
     #[target_feature(enable = "avx2")]
-    pub(crate) unsafe fn dot_runs16(q: &Quants, scales: &[i16; 16], qs: &[i8]) -> i32 {
+    pub(crate) unsafe fn dot_runs16(q: &Quants, scales: &[i16; 16], qs: &[i8], out: &mut [i32; 8]) {
         debug_assert!(qs.len() >= super::BLOCK);
         // SAFETY: as `dot_runs32`.
         unsafe {
@@ -430,7 +525,20 @@ pub(crate) mod x86 {
                 let scale = _mm256_set_m128i(_mm_set1_epi16(pair[1]), _mm_set1_epi16(pair[0]));
                 acc = _mm256_add_epi32(acc, _mm256_madd_epi16(scale, _mm256_maddubs_epi16(w, a)));
             }
-            hsum(acc)
+            _mm256_store_si256(out.as_mut_ptr().cast(), acc);
+        }
+    }
+
+    /// Sixteen per-run factors against the Q8 sums per sixteen, as eight
+    /// lane sums: the minimums' or the offset's term.
+    #[target_feature(enable = "avx2")]
+    pub(crate) unsafe fn min_term(factors: &[i16; 16], sums: &[i16], out: &mut [i32; 8]) {
+        debug_assert!(sums.len() >= 16);
+        // SAFETY: the caller has AVX2; `sums` holds a block's sixteen.
+        unsafe {
+            let f = _mm256_loadu_si256(factors.as_ptr().cast());
+            let s = _mm256_loadu_si256(sums.as_ptr().cast());
+            _mm256_store_si256(out.as_mut_ptr().cast(), _mm256_madd_epi16(f, s));
         }
     }
 }

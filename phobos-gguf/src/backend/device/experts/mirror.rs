@@ -8,6 +8,7 @@ use anyhow::Result;
 use phobos_kernels::cuda_ok;
 
 use crate::experts::ExpertSet;
+use crate::simd::{Source, Stack, Weight};
 
 /// The three stacks of one block, each `count` experts of
 /// [`ExpertStack::grouped_bytes`] back to back, then the three scale planes
@@ -97,6 +98,47 @@ impl Mirror {
     /// Bytes pinned for this block.
     pub(super) fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    /// The mirror as the host kernels' source of `set`'s experts, which
+    /// are the same bytes in the device's layout: pinned, so a pass never
+    /// waits on a trimmed mapping.
+    pub(super) fn source<'a>(&'a self, set: &'a ExpertSet) -> MirrorSource<'a> {
+        MirrorSource { mirror: self, set }
+    }
+}
+
+pub(in crate::backend::device) struct MirrorSource<'a> {
+    mirror: &'a Mirror,
+    set: &'a ExpertSet,
+}
+
+// SAFETY: the mirror is only read once built, by any thread.
+unsafe impl Sync for MirrorSource<'_> {}
+
+impl Source for MirrorSource<'_> {
+    fn shape(&self, stack: Stack) -> (crate::quant::Quant, usize, usize) {
+        self.set.shape(stack)
+    }
+
+    fn weight(&self, stack: Stack, e: usize) -> Weight<'_> {
+        let i = match stack {
+            Stack::Gate => 0,
+            Stack::Up => 1,
+            Stack::Down => 2,
+        };
+        let regions = self.mirror.expert(e);
+        let (blocks, plane) = (regions[i], regions[3 + i]);
+        // SAFETY: both regions are inside the pinned allocation, written
+        // once by `build`, and the plane is u16-aligned (see there).
+        let (bytes, scales) = unsafe {
+            (
+                std::slice::from_raw_parts(blocks.0.cast::<u8>(), blocks.1),
+                std::slice::from_raw_parts(plane.0.cast::<u16>(), plane.1 / 2),
+            )
+        };
+        let s = self.set.stack(stack);
+        Weight::Grouped { bytes, unit: s.quant().device_block_bytes(), nb: s.blocks_per_row(), scales }
     }
 }
 

@@ -215,6 +215,9 @@ fn main() -> Result<()> {
                 rep + 1,
                 args.repetitions,
             );
+            if let (Some(stats), Some((free, _))) = (backend.cache_stats(), backend.device_memory()) {
+                eprintln!("    pool: {} reused, {} allocated; device free {} MiB", stats.buffers_reused, stats.buffers_allocated, free >> 20);
+            }
         }
         rows.push((format!("pp{prompt_tokens}"), rates));
     }

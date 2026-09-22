@@ -6,17 +6,50 @@
 // expert crosses the bus once a block, where the row path's cache thrashes
 // as soon as a pass's rows choose more experts than the block holds.
 // `PHOBOS_MOE_GROUPED=0` opts out; see `ENV.md`.
+//
+// The lightest experts by rows go to the host's own kernels instead, a
+// share of the block's experts set from what the last block showed of
+// each side's time, each one sparing the bus a copy; the host works while
+// the device does and its rows are added at the end. `PHOBOS_MOE_HOST=0`
+// opts out.
+
+use std::time::Instant;
 
 use anyhow::Result;
-use cust::memory::{DeviceBuffer, LockedBuffer};
+use cust::event::{Event, EventFlags};
+use cust::memory::{CopyDestination, DeviceBuffer, LockedBuffer};
 use cust::stream::Stream;
 
 use super::super::kernels::{MOE_COMBINE_TN, MOE_USED, QGEMM_TM, QGEMM_TN};
 use super::super::{DeviceBackend, Plane};
 use super::op::kernel_for;
-use super::{Experts, Kind, MAX_ROWS, copy_async};
+use super::{BlockExperts, Experts, Kind, MAX_ROWS, NONE, copy_async};
 use crate::backend::{Backend, Buf, Moe};
 use crate::experts::ExpertSet;
+use crate::simd::{self, Job};
+
+/// The share of a block's experts the host starts with, before a block has
+/// shown which side was the long pole.
+pub(super) const HOST_SHARE_START: f32 = 0.4;
+
+/// Padded rows `segments` experts' rows can come to when each is padded to
+/// the tile: the rows plus a tile less one apiece.
+fn padded(rows: usize, segments: usize) -> usize {
+    (rows * MOE_USED + segments * (QGEMM_TM - 1)).next_multiple_of(QGEMM_TM)
+}
+
+/// Device bytes a pass of `rows` takes on this path beyond the cache: the
+/// permuted activation and its quantized copy in the ring, the gate, up
+/// and SwiGLU outputs of the widest group, the down output of every
+/// padded row, and the host's rows.
+pub(super) fn scratch_bytes(rows: usize, d: usize, d_ff: usize, n_expert: usize, per_block: usize) -> usize {
+    let (m_max, widest) = (padded(rows, n_expert.min(rows * MOE_USED)), padded(rows, per_block));
+    let f32s = m_max * d + widest * (d + 3 * d_ff) + rows * d;
+    // The ring's four slots, each grown to the widest quantized activation
+    // and its scales.
+    let ring = 4 * (widest * d + widest * d / 32 * 4);
+    f32s * size_of::<f32>() + ring
+}
 
 /// Whether the grouped path can run a set: gate and up in one format, and
 /// widths in whole blocks and tiles.
@@ -58,18 +91,22 @@ impl Staged {
     }
 }
 
-/// A pass's permutation, positions and schedule tables, reused block after
-/// block: a block's end synchronizes before the next one writes them.
+/// A pass's permutation, positions and schedule tables, and the pinned
+/// rows the host's experts produce, reused block after block: a block's
+/// end synchronizes before the next one writes them.
 pub(super) struct GroupedScratch {
     perm: Staged,
     pos: Staged,
     sched: Staged,
     /// Integers a group's schedule table may take.
     sched_stride: usize,
+    /// `[MAX_ROWS, d_model]` the host's share sums into, copied to the
+    /// device asynchronously in stream order.
+    y_host: LockedBuffer<f32>,
 }
 
 impl GroupedScratch {
-    fn new(n_expert: usize, per_block: usize) -> Result<GroupedScratch> {
+    fn new(n_expert: usize, per_block: usize, d: usize) -> Result<GroupedScratch> {
         let uses = MAX_ROWS * MOE_USED;
         // A segment is at least one tile and the rows past the first tile
         // of each add at most `uses / TM` more over the whole block.
@@ -79,6 +116,7 @@ impl GroupedScratch {
             pos: Staged::new(uses)?,
             sched: Staged::new(n_expert.div_ceil(per_block) * sched_stride)?,
             sched_stride,
+            y_host: LockedBuffer::new(&0.0, MAX_ROWS * d)?,
         })
     }
 }
@@ -150,7 +188,7 @@ impl DeviceBackend {
     pub(super) fn run_grouped(&self, experts: &mut Experts, req: &Moe, shared: (Buf, Buf)) -> Result<()> {
         let mut scratch = match experts.grouped.take() {
             Some(scratch) => scratch,
-            None => GroupedScratch::new(req.n_expert, experts.per_block)?,
+            None => GroupedScratch::new(req.n_expert, experts.per_block, req.d_model)?,
         };
         let result = self.grouped_blocks(experts, &mut scratch, req, shared);
         experts.grouped = Some(scratch);
@@ -168,10 +206,30 @@ impl DeviceBackend {
                 by_expert[e].push((r, j));
             }
         }
+        let host_jobs = if self.moe_host && simd::supports(&*experts.blocks[block].set) {
+            let share = experts.host_share;
+            self.host_share(&mut experts.blocks[block], rows, &by_expert, share)?
+        } else {
+            Vec::new()
+        };
+        let mut on_host = vec![false; req.n_expert];
+        for job in &host_jobs {
+            on_host[job.expert] = true;
+        }
+        // The host reads the activation before the device's work is
+        // queued, since a read drains the stream.
+        let mut x_host = Vec::new();
+        if !host_jobs.is_empty() {
+            x_host.resize(rows * d, 0.0);
+            self.read(req.x, &mut x_host)?;
+        }
+        // The device's own time over its experts, for the split.
+        let device_span = [Event::new(EventFlags::DEFAULT)?, Event::new(EventFlags::DEFAULT)?];
+        device_span[0].record(&self.stream)?;
         let mut segments = Vec::new();
         let mut perm: Vec<i32> = Vec::new();
         let mut pos = vec![0i32; rows * MOE_USED];
-        for (expert, users) in by_expert.iter().enumerate().filter(|(_, u)| !u.is_empty()) {
+        for (expert, users) in by_expert.iter().enumerate().filter(|&(e, u)| !u.is_empty() && !on_host[e]) {
             let start = perm.len();
             for &(r, j) in users {
                 pos[r * MOE_USED + j] = perm.len() as i32;
@@ -192,10 +250,8 @@ impl DeviceBackend {
         // routing: the pool hands a buffer out again only for its exact
         // length, and a size that moved with the block left every block's
         // scratch dead on the free list until the card paged.
-        let uses = rows * MOE_USED;
-        let padded = |segments: usize| (uses + segments * (QGEMM_TM - 1)).next_multiple_of(QGEMM_TM);
-        let m_max = padded(req.n_expert.min(uses));
-        let widest = padded(experts.per_block);
+        let m_max = padded(rows, req.n_expert.min(rows * MOE_USED));
+        let widest = padded(rows, experts.per_block);
         let perm_ptr = scratch.perm.push(0, &perm, &self.stream)?;
         let pos_ptr = scratch.pos.push(0, &pos, &self.stream)?;
         let xp = self.alloc(widest * d)?;
@@ -245,6 +301,21 @@ impl DeviceBackend {
             self.grouped_gemm(experts, block, Kind::Down, hqa, hdas, g_rows, d_ff, table_ptr, tiles, d, self.ptr(down_out, g_start * d)?)?;
         }
 
+        device_span[1].record(&self.stream)?;
+
+        // The host's share, while the device runs its groups.
+        let mut host_micros = 0.0;
+        if !host_jobs.is_empty() {
+            let started = Instant::now();
+            let y_host = &mut scratch.y_host.as_mut_slice()[..rows * d];
+            y_host.fill(0.0);
+            let b = &experts.blocks[block];
+            simd::experts_ffn(&b.mirror.source(&b.set), &host_jobs, &x_host, rows, y_host)?;
+            host_micros = started.elapsed().as_secs_f64() * 1e6;
+            experts.stats.cpu_misses += host_jobs.len() as u64;
+            experts.stats.cpu_nanos += (host_micros * 1e3) as u64;
+        }
+
         let w_ptr = experts.blocks[block].weights.as_device_ptr().as_raw();
         let u = MOE_USED as i64;
         self.with_kernel(&self.moe_gather, (), "moe_gather", moe_gather_src, |module| {
@@ -262,12 +333,55 @@ impl DeviceBackend {
                 (rows as u32, (d / MOE_COMBINE_TN) as u32, 1),
             )
         })?;
+        if !host_jobs.is_empty() {
+            let ybuf = self.alloc(rows * d)?;
+            // SAFETY: the pinned rows are not written again before the
+            // block's end synchronizes.
+            unsafe { copy_async(self.ptr(ybuf, 0)?, scratch.y_host.as_slice().as_ptr().cast(), rows * d * size_of::<f32>(), &self.stream)? };
+            self.add_into(req.dest, ybuf)?;
+            self.release(ybuf);
+        }
         // The next block rewrites the staging the launches just issued read.
         self.stream.synchronize()?;
+        // Each side's time is about proportional to its count of experts,
+        // so the two rates say where the split balances; the share moves
+        // halfway there, and no further than the ends.
+        if !host_jobs.is_empty() && host_micros > 0.0 {
+            let device_micros = f64::from(device_span[1].elapsed_time_f32(&device_span[0])?) * 1e3;
+            let share = experts.host_share;
+            let (host_rate, device_rate) = (host_micros / f64::from(share), device_micros / f64::from(1.0 - share));
+            let balanced = (device_rate / (host_rate + device_rate)) as f32;
+            experts.host_share = (0.5 * share + 0.5 * balanced).clamp(0.05, 0.95);
+        }
         for buf in [xp, down_out].into_iter().chain(bufs) {
             self.release(buf);
         }
         Ok(())
+    }
+
+    /// The experts the host takes: the lightest by rows among those not
+    /// resident, `share` of them, each sparing the device one copy. Their
+    /// entries' weights go to zero on the device, so the gather, which
+    /// sums every row's eight, adds nothing for them.
+    fn host_share(&self, b: &mut BlockExperts, rows: usize, by_expert: &[Vec<(usize, usize)>], share: f32) -> Result<Vec<Job>> {
+        let mut weights = vec![0.0f32; rows * MOE_USED];
+        b.weights.index(0..rows * MOE_USED).copy_to(&mut weights)?;
+        let mut order: Vec<usize> = (0..by_expert.len()).filter(|&e| !by_expert[e].is_empty() && b.slot_of[e] == NONE).collect();
+        order.sort_by_key(|&e| by_expert[e].len());
+        let take = (order.len() as f32 * share).round() as usize;
+        let mut jobs = Vec::with_capacity(take);
+        for e in order.into_iter().take(take) {
+            let users = &by_expert[e];
+            jobs.push(Job {
+                expert: e,
+                rows: users.iter().map(|&(r, _)| r).collect(),
+                weights: users.iter().map(|&(r, j)| std::mem::take(&mut weights[r * MOE_USED + j])).collect(),
+            });
+        }
+        if !jobs.is_empty() {
+            b.weights.index(0..rows * MOE_USED).copy_from(&weights)?;
+        }
+        Ok(jobs)
     }
 
     #[allow(clippy::too_many_arguments)]

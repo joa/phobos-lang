@@ -144,6 +144,8 @@ pub struct DeviceBackend {
     /// `PHOBOS_MOE_CPU_MISS` opts in (see `ENV.md`); Phase 4 of the plan, for a bus
     /// narrower than the host's memory.
     moe_cpu_miss: bool,
+    /// `PHOBOS_MOE_HOST=0` opts out; see `ENV.md`.
+    moe_host: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
     /// over rows sorted by expert rather than row by row.
     /// `PHOBOS_MOE_GROUPED=0` opts out; see `ENV.md`.

@@ -2,6 +2,7 @@ use phobos_base::half::f32_to_f16;
 
 use super::*;
 use crate::Gguf;
+use crate::quant::grouped::{group_rows, grouped_len};
 use crate::tests::Builder;
 
 /// A deterministic byte stream.
@@ -67,11 +68,26 @@ fn check(quant: Quant, wide: bool) {
     let weight = blocks(quant, n, k, 7);
     let act = Q8Act::quantize(&activation(rows, k, 11), rows, k);
     let want = reference(quant, &weight, n, &act);
+    let flat = Weight::Flat { bytes: &weight, block_bytes: quant.spec().block_bytes };
     let mut got = vec![0.0f32; n * rows];
-    gemm_raw(quant, wide, &weight, n, &act, &mut got, true).unwrap();
+    gemm_raw(quant, wide, &flat, n, &act, &mut got, true).unwrap();
     let mut serial = vec![0.0f32; n * rows];
-    gemm_raw(quant, wide, &weight, n, &act, &mut serial, false).unwrap();
+    gemm_raw(quant, wide, &flat, n, &act, &mut serial, false).unwrap();
     assert_eq!(got, serial, "{} threaded against serial", quant.name());
+    // The device's layout, with the trailing scale in its plane, reads
+    // the same.
+    let nb = k / BLOCK;
+    let (skip, unit) = quant.device_block();
+    let trimmed: Vec<u8> = weight.chunks_exact(quant.spec().block_bytes).flat_map(|b| b[skip..skip + unit].to_vec()).collect();
+    let bytes = group_rows(&trimmed, n, nb, unit);
+    let planes: Vec<u16> = match quant.spec().raw_scales {
+        Some(split) => group_rows(&split(&weight, k, n).d, n, nb, 1),
+        None => vec![0; grouped_len(n, nb, 1)],
+    };
+    let grouped = Weight::Grouped { bytes: &bytes, unit, nb, scales: &planes };
+    let mut via_grouped = vec![0.0f32; n * rows];
+    gemm_raw(quant, wide, &grouped, n, &act, &mut via_grouped, false).unwrap();
+    assert_eq!(got, via_grouped, "{} flat against grouped", quant.name());
     let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
     for (j, (&g, &w)) in got.iter().zip(&want).enumerate() {
         assert!((f64::from(g) - w).abs() <= 1e-5 * scale, "{} output {j}: {g} against {w}", quant.name());
@@ -162,20 +178,20 @@ fn an_expert_matches_the_reference_within_the_activation_quantization() {
         let (count, d, d_ff, rows) = (3, 512, 256, 4);
         let gguf = expert_file(count, d, d_ff, gate_up, down);
         let set = ExpertSet::load(&gguf, "blk.0", count, d, d_ff).unwrap();
-        assert!(supports(&set));
+        assert!(supports(&*set));
         let x = activation(rows, d, 5);
         let weights = [0.5, 1.0, 0.25, 2.0];
         let act = Q8Act::quantize(&x, rows, d);
         let mut scratch = Scratch::default();
         let mut got = vec![0.0; rows * d];
-        expert_ffn(&set, 2, &act, &weights, &mut scratch, &mut got).unwrap();
+        expert_ffn(&*set, 2, &act, &weights, &mut scratch, &mut got).unwrap();
         let want = reference_ffn(&set, 2, &x, rows, &weights);
         let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
         for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
             assert!((g - w).abs() <= 0.02 * scale, "{}/{} output {i}: {g} against {w}", gate_up.name(), down.name());
         }
         // Accumulates: a second call doubles it.
-        expert_ffn(&set, 2, &act, &weights, &mut scratch, &mut got).unwrap();
+        expert_ffn(&*set, 2, &act, &weights, &mut scratch, &mut got).unwrap();
         for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
             assert!((g - 2.0 * w).abs() <= 0.04 * scale, "output {i} after two calls: {g} against {}", 2.0 * w);
         }
@@ -194,7 +210,7 @@ fn jobs_over_the_pool_sum_each_experts_rows() {
         Job { expert: 1, rows: vec![3], weights: vec![0.75] },
     ];
     let mut got = vec![0.0; rows * d];
-    experts_ffn(&set, &jobs, &x, rows, &mut got).unwrap();
+    experts_ffn(&*set, &jobs, &x, rows, &mut got).unwrap();
     let mut want = vec![0.0f32; rows * d];
     for job in &jobs {
         let xs: Vec<f32> = job.rows.iter().flat_map(|&r| x[r * d..(r + 1) * d].to_vec()).collect();

@@ -2,15 +2,13 @@
 // no minimum, the quants six bits around 32. The offset comes off through
 // the Q8 sums, so the quants are dotted as they are stored, unsigned.
 
-use phobos_base::half::f16_to_f32;
-
-use super::{Block, Quants};
+use super::{Block, Quants, Sums};
 
 const RUNS: usize = 16;
 /// Elements whose quants interleave across one stretch of `ql` and `qh`.
 const GROUP: usize = 128;
 const QUARTER: usize = GROUP / 4;
-const OFFSET: i32 = 32;
+const OFFSET: f32 = 32.0;
 
 const QL: usize = 0;
 const QH: usize = QL + 128;
@@ -25,16 +23,19 @@ pub(crate) struct Unpacked {
 }
 
 impl Unpacked {
-    fn read_header(&mut self, bytes: &[u8]) {
-        self.d = f16_to_f32(u16::from_le_bytes([bytes[D], bytes[D + 1]]));
+    /// The header: the scale from `d` where the layout keeps it apart,
+    /// else the block's trailing half.
+    fn read_header(&mut self, bytes: &[u8], d: Option<u16>, half: impl Fn(u16) -> f32) {
+        self.d = half(d.unwrap_or_else(|| u16::from_le_bytes([bytes[D], bytes[D + 1]])));
         for (scale, &b) in self.scales.iter_mut().zip(&bytes[SCALES..D]) {
             *scale = i16::from(b as i8);
         }
     }
 
-    /// The offset's term: each run's scale times its Q8 sum, times 32.
+    /// The offset's term without the 32: each run's scale times its Q8
+    /// sum. The 32 is in the correction's scale.
     fn offset_term(&self, sums: &[i16]) -> i32 {
-        OFFSET * self.scales.iter().zip(sums).map(|(&s, &sum)| i32::from(s) * i32::from(sum)).sum::<i32>()
+        self.scales.iter().zip(sums).map(|(&s, &sum)| i32::from(s) * i32::from(sum)).sum()
     }
 }
 
@@ -44,8 +45,8 @@ impl Block for Scalar {
     const AVX2: bool = false;
     type Unpacked = Unpacked;
 
-    unsafe fn unpack(bytes: &[u8], u: &mut Unpacked) {
-        u.read_header(bytes);
+    unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut Unpacked) {
+        u.read_header(bytes, d, phobos_base::half::f16_to_f32);
         for g in 0..2 {
             let ql = &bytes[QL + g * GROUP / 2..];
             let qh = &bytes[QH + g * GROUP / 4..];
@@ -61,17 +62,17 @@ impl Block for Scalar {
     }
 
     fn scales(u: &Unpacked) -> (f32, f32) {
-        (u.d, u.d)
+        (u.d, u.d * OFFSET)
     }
 
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16]) -> (i32, i32) {
+    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
         let sumi = u
             .scales
             .iter()
             .zip(u.q.0.chunks_exact(16).zip(qs.chunks_exact(16)))
             .map(|(&scale, (w, a))| i32::from(scale) * w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum::<i32>())
             .sum();
-        (sumi, u.offset_term(sums))
+        out.set(sumi, u.offset_term(sums));
     }
 }
 
@@ -82,14 +83,14 @@ pub(super) use avx2::Avx2;
 mod avx2 {
     use std::arch::x86_64::*;
 
-    use super::super::x86::dot_runs16;
-    use super::{Block, GROUP, QH, QL, Unpacked};
+    use super::super::x86::{dot_runs16, half, min_term};
+    use super::{Block, GROUP, OFFSET, QH, QL, Sums, Unpacked};
 
     pub(crate) struct Avx2;
 
-    #[target_feature(enable = "avx2")]
-    unsafe fn unpack(bytes: &[u8], u: &mut Unpacked) {
-        u.read_header(bytes);
+    #[target_feature(enable = "avx2,f16c")]
+    unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut Unpacked) {
+        u.read_header(bytes, d, |bits| half(bits));
         // SAFETY: the caller has AVX2; a block holds both groups.
         unsafe {
             let m4 = _mm256_set1_epi8(0x0f);
@@ -116,19 +117,22 @@ mod avx2 {
         type Unpacked = Unpacked;
 
         #[inline(always)]
-        unsafe fn unpack(bytes: &[u8], u: &mut Unpacked) {
+        unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut Unpacked) {
             // SAFETY: the caller has AVX2.
-            unsafe { unpack(bytes, u) }
+            unsafe { unpack(bytes, d, u) }
         }
 
         fn scales(u: &Unpacked) -> (f32, f32) {
-            (u.d, u.d)
+            (u.d, u.d * OFFSET)
         }
 
         #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16]) -> (i32, i32) {
+        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
             // SAFETY: the caller has AVX2.
-            (unsafe { dot_runs16(&u.q, &u.scales, qs) }, u.offset_term(sums))
+            unsafe {
+                dot_runs16(&u.q, &u.scales, qs, &mut out.dot);
+                min_term(&u.scales, sums, &mut out.min);
+            }
         }
     }
 }
