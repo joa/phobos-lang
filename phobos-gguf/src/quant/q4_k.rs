@@ -72,7 +72,7 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
 /// minimum, both with two bits spare. The last four are split: their low four
 /// bits come from `packed[8..12]` and their top two are the spare bits of the
 /// first four runs' bytes.
-pub(super) fn scale_min(run: usize, packed: &[u8]) -> (u8, u8) {
+pub(crate) fn scale_min(run: usize, packed: &[u8]) -> (u8, u8) {
     if run < 4 {
         (packed[run] & 63, packed[run + 4] & 63)
     } else {

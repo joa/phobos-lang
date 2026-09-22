@@ -15,7 +15,7 @@ mod q2_k;
 mod q3_k;
 mod q4_0;
 mod q4_1;
-mod q4_k;
+pub(crate) mod q4_k;
 mod q5_k;
 mod q5_0;
 mod q5_1;
