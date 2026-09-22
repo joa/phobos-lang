@@ -15,6 +15,7 @@ memmap2 = "0.9"
 phobos-base = { path = "../phobos-base" }
 phobos-kernels = { path = "../phobos-kernels" }
 phobos-inference = { path = "../phobos-inference" }
+rayon = "1"
 cust = { version = "0.3.2", optional = true }
 
 [dev-dependencies]

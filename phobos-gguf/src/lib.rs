@@ -10,6 +10,7 @@ pub mod quant;
 pub mod qwen35;
 pub mod read;
 pub mod runtime;
+pub mod simd;
 pub mod tensor;
 pub mod vocab;
 
