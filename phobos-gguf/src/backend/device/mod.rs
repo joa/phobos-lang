@@ -352,9 +352,10 @@ pub struct DeviceBackend {
     moe_combine: RefCell<HashMap<(), Module>>,
     /// The grouped prompt path's kernels: the row permutation, the
     /// schedule-table GEMM by format and width, the gathering combine.
-    moe_permute: RefCell<HashMap<(), Module>>,
+    moe_permute: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_qgemm: RefCell<HashMap<(&'static str, usize), Module>>,
-    moe_gather: RefCell<HashMap<(), Module>>,
+    moe_gather_add: RefCell<HashMap<(), Module>>,
+    moe_shared: RefCell<HashMap<(), Module>>,
     /// Addressed by [`QBuf`]: bytes, per-block scales, and the output width
     /// they went up with. Constants, so never released.
     quants: RefCell<Vec<DeviceQuant>>,

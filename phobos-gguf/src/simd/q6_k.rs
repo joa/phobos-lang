@@ -2,7 +2,7 @@
 // no minimum, the quants six bits around 32. The offset comes off through
 // the Q8 sums, so the quants are dotted as they are stored, unsigned.
 
-use super::{Block, Quants, Sums};
+use super::{Block, Lanes, Quants};
 
 const RUNS: usize = 16;
 /// Elements whose quants interleave across one stretch of `ql` and `qh`.
@@ -32,11 +32,6 @@ impl Unpacked {
         }
     }
 
-    /// The offset's term without the 32: each run's scale times its Q8
-    /// sum. The 32 is in the correction's scale.
-    fn offset_term(&self, sums: &[i16]) -> i32 {
-        self.scales.iter().zip(sums).map(|(&s, &sum)| i32::from(s) * i32::from(sum)).sum()
-    }
 }
 
 pub(super) struct Scalar;
@@ -61,18 +56,13 @@ impl Block for Scalar {
         }
     }
 
-    fn scales(u: &Unpacked) -> (f32, f32) {
-        (u.d, u.d * OFFSET)
-    }
-
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
-        let sumi = u
-            .scales
-            .iter()
-            .zip(u.q.0.chunks_exact(16).zip(qs.chunks_exact(16)))
-            .map(|(&scale, (w, a))| i32::from(scale) * w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum::<i32>())
-            .sum();
-        out.set(sumi, u.offset_term(sums));
+    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
+        // A run of 16 at a time, its scaled dot less the offset times its
+        // Q8 sum, scaled by its activation run's scale.
+        for (i, (&scale, (w, a))) in u.scales.iter().zip(u.q.0.chunks_exact(RUNS).zip(qs.chunks_exact(RUNS))).enumerate() {
+            let dot = w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum::<i32>();
+            acc.0[0] += da[i / 2] * u.d * f32::from(scale) * (dot as f32 - OFFSET * f32::from(sums[i]));
+        }
     }
 }
 
@@ -84,7 +74,7 @@ mod avx2 {
     use std::arch::x86_64::*;
 
     use super::super::x86::{dot_runs16, half, min_term};
-    use super::{Block, GROUP, OFFSET, QH, QL, Sums, Unpacked};
+    use super::{Block, GROUP, Lanes, OFFSET, QH, QL, Unpacked};
 
     pub(crate) struct Avx2;
 
@@ -122,16 +112,12 @@ mod avx2 {
             unsafe { unpack(bytes, d, u) }
         }
 
-        fn scales(u: &Unpacked) -> (f32, f32) {
-            (u.d, u.d * OFFSET)
-        }
-
         #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
-            // SAFETY: the caller has AVX2.
+        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
+            // SAFETY: the caller has AVX2 and FMA.
             unsafe {
-                dot_runs16(&u.q, &u.scales, qs, &mut out.dot);
-                min_term(&u.scales, sums, &mut out.min);
+                dot_runs16(&u.q, &u.scales, qs, u.d, da, acc);
+                min_term(&u.scales, sums, u.d * OFFSET, da, acc);
             }
         }
     }

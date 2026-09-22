@@ -55,7 +55,7 @@ fn reference(quant: Quant, weight: &[u8], n: usize, act: &Q8Act) -> Vec<f64> {
             out[j * act.rows + r] = (0..k)
                 .map(|i| {
                     let (d, qs, _) = act.block(r, i / BLOCK);
-                    f64::from(dense[j * k + i]) * f64::from(d) * f64::from(qs[i % BLOCK])
+                    f64::from(dense[j * k + i]) * f64::from(d[i % BLOCK / RUN]) * f64::from(qs[i % BLOCK])
                 })
                 .sum();
         }
@@ -123,7 +123,7 @@ fn the_activation_keeps_its_sums() {
                 assert_eq!(*sum, run.iter().map(|&q| i16::from(q)).sum::<i16>());
             }
             for (i, &q) in qs.iter().enumerate() {
-                let v = x[r * k + b * BLOCK + i];
+                let (v, d) = (x[r * k + b * BLOCK + i], d[i / RUN]);
                 assert!((d * f32::from(q) - v).abs() <= d * 0.5 + 1e-6, "row {r} element {i}: {v} quantized to {q} at {d}");
             }
         }
