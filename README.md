@@ -29,7 +29,7 @@ kernel gemm(A: tensor<f32>[M, K],
 ```
 
 SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
-The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, from a 0.8B Q8_0 to two 27Bs, IQ1_M and ternary PTQ1_0, that only just fit in its VRAM. The prompt pass trails on the small models and leads on both 27Bs; [Inference](#inference) gives both.
+The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, from a 0.8B Q8_0 to two 27Bs, IQ1_M and ternary PTQ1_0, that only just fit in its VRAM, and a 35B mixture of experts whose experts do not fit at all and stream from host memory. The prompt pass trails on the small models and leads on both 27Bs and the 35B; [Inference](#inference) gives both.
 
 ![Phobos benchmark results](results/bench.svg)
 
@@ -141,6 +141,25 @@ Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 610.88, tokens per seco
 | pp128 |         302.11 +/-  0.78 | 583.49 +/- 15.04 |
 | tg128 |          29.36 +/-  0.01 |  46.12 +/-  0.01 |
 
+Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the card, on an RTX 2080 SUPER, driver 610.88, tokens per second:
+
+| test  | llama.cpp CUDA[^2], 33 blocks' experts on the CPU | Phobos GPU       |
+| ----- | ------------------------------------------------: | ---------------: |
+| pp128 |                                   71.38 +/-  0.25 | 348.80 +/- 1.97  |
+| pp512 |                                  245.94 +/-  0.43 | 623.13 +/- 0.91  |
+| tg128 |                                   28.14 +/-  0.18 |  29.88 +/- 0.02  |
+
+Both engines keep the 35B's trunk on the card. llama.cpp splits the experts
+by layer at load: `-ncmoe 33` runs 33 blocks' experts on the CPU and keeps
+the last seven blocks' resident on the card, the most that fit beside the
+trunk here (ten page); it was the best of 40, 36, 33, 30 and 27. Phobos
+streams the experts a token chooses over PCIe into a cache on the card, 3.6
+GiB of it here, and computes the rest of a prompt's experts on the CPU with
+AVX2 kernels while the bus carries the others, the split moving toward
+balance block by block. The link is PCIe 3.0 x8 on this box, 6.4 GB/s, so a
+decode token is mostly its misses crossing the bus; a wider link or a bigger
+card moves the decode figure directly.
+
 The two 27Bs, at 6.27 GiB and 5.53 GiB of weights, leave little of the card's 8 GiB,
 and their figures hold only while the desktop's share stays small: the IQ1_M was
 taken with 1377 MiB in use before the run, the PTQ1_0 with 979 MiB. Once the desktop
@@ -170,11 +189,17 @@ python scripts/bench.py -m models/Ternary-Bonsai-2-27B-PTQ1_0.gguf -p 128 -n 128
   -r 1 -R 3 --llama-bench ${llama_cpp_prism}/llama-bench.exe \
   --csv results/bench-bonsai.csv --json results/bench-bonsai.json
 
+# the 35B mixture of experts, llama.cpp with the first 33 blocks' experts on
+# the CPU and the rest on the card, the largest card share that fits here
+python scripts/bench.py -m models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -p 128 512 -n 128 \
+  -r 1 -R 3 --llama-args="-ncmoe 33" \
+  --csv results/bench-qwen36moe.csv --json results/bench-qwen36moe.json
+
 # the plot carries every run, a block each: one file is one visit to the card,
 # and a 27B generates an order of magnitude slower, so the blocks do not share
 # a scale.
 python scripts/plot.py results/bench.json results/bench-qwen38.json \
-  results/bench-bonsai.json -o results/inference.svg
+  results/bench-bonsai.json results/bench-qwen36moe.json -o results/inference.svg
 
 # either engine on its own, which measures one column and not a comparison
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
