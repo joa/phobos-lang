@@ -1,8 +1,8 @@
 // Q5_K against Q8: Q4_K's runs, scales and nibble planes with a fifth bit,
 // run `r`'s element `l` taking it from bit `r` of `qh[l]`.
 
-use super::q4_k::{Unpacked, dot_runs32};
-use super::{Block, Sums};
+use super::q4_k::{Unpacked, dot_plain};
+use super::{Block, Lanes};
 
 const RUNS: usize = 8;
 const RUN: usize = 32;
@@ -28,12 +28,8 @@ impl Block for Scalar {
         }
     }
 
-    fn scales(u: &Unpacked) -> (f32, f32) {
-        (u.header.d, u.header.dmin)
-    }
-
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
-        out.set(dot_runs32(&u.q, &u.header.scales, qs), u.header.min_term(sums));
+    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
+        dot_plain(&u.header, &u.q, qs, sums, da, acc);
     }
 }
 
@@ -45,7 +41,7 @@ mod avx2 {
     use std::arch::x86_64::*;
 
     use super::super::x86::{dot_runs32, half, min_term};
-    use super::{Block, QH, QS, RUNS, Sums, Unpacked};
+    use super::{Block, Lanes, QH, QS, RUNS, Unpacked};
 
     pub(crate) struct Avx2;
 
@@ -81,16 +77,12 @@ mod avx2 {
             unsafe { unpack(bytes, _d, u) }
         }
 
-        fn scales(u: &Unpacked) -> (f32, f32) {
-            (u.header.d, u.header.dmin)
-        }
-
         #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums) {
-            // SAFETY: the caller has AVX2.
+        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
+            // SAFETY: the caller has AVX2 and FMA.
             unsafe {
-                dot_runs32(&u.q, &u.header.scales, qs, &mut out.dot);
-                min_term(&u.header.mins, sums, &mut out.min);
+                dot_runs32(&u.q, &u.header.scales, qs, u.header.d, da, acc);
+                min_term(&u.header.mins, sums, u.header.dmin, da, acc);
             }
         }
     }

@@ -377,11 +377,11 @@ impl DeviceBackend {
         // A prompt pass's scratch comes out of the budget, or the card pages
         // once the pass allocates it; the widest group it can want is bound
         // by the slots the budget would buy before the hold-back.
-        let (d, d_ff, n_expert) = {
+        let (d, d_ff) = {
             let set = &experts.blocks[0].set;
-            (set.gate.k(), set.gate.n(), set.count())
+            (set.gate.k(), set.gate.n())
         };
-        let held = grouped::scratch_bytes(MAX_ROWS, d, d_ff, n_expert, budget / slot_bytes / blocks);
+        let held = grouped::scratch_bytes(MAX_ROWS, d, d_ff, budget / slot_bytes / blocks);
         let budget = budget.saturating_sub(held);
         phobos_base::log::emit(
             phobos_base::log::Level::Info,

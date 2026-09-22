@@ -2,13 +2,13 @@
 //! Q5_K and Q6_K weight blocks against a Q8 activation, for the experts a
 //! pass computes on the host rather than copies to the device.
 //!
-//! The activation is quantized to eight bits a block of 256 with one scale
-//! and the sums of each sixteen quants, so a block's minimums (or Q6_K's
-//! offset) fold into one integer term, as llama.cpp's Q8_K does. A weight
+//! The activation is quantized to eight bits with a scale a run of 32, as
+//! the device's is, and the sums of each sixteen quants, so a block's
+//! minimums (or Q6_K's offset) fold into one integer term a run. A weight
 //! row's blocks are unpacked once, to aligned byte arrays either path
-//! reads, and dotted against every activation row with the eight-lane
-//! sums of each block scaled into one float accumulator, so a row costs
-//! one horizontal sum. The weights come from a [`Source`]: the file's
+//! reads, and dotted against every activation row with each run's
+//! eight-lane sums scaled into one float accumulator, so a row costs one
+//! horizontal sum. The weights come from a [`Source`]: the file's
 //! row-major blocks, or the device's grouped layout in pinned memory,
 //! which a long pass wants since the mapping's pages get trimmed.
 
@@ -29,14 +29,17 @@ mod tests;
 
 /// Elements of one activation block, the K-quant super-block.
 pub const BLOCK: usize = 256;
+/// Elements sharing one activation scale.
+const RUN: usize = 32;
+const RUNS: usize = BLOCK / RUN;
 /// Elements each partial sum of a block covers.
 const SUM_RUN: usize = 16;
 const SUMS: usize = BLOCK / SUM_RUN;
 
-/// `[rows, k]` activations quantized to `i8` a block of 256: a scale a
-/// block and the sums of each sixteen quants. Held block-major, the rows
-/// of one block side by side, so a weight block's dot over the rows walks
-/// memory forward rather than striding a row's width.
+/// `[rows, k]` activations quantized to `i8`: a scale a run of 32 and the
+/// sums of each sixteen quants. Held block-major, the rows of one block
+/// side by side, so a weight block's dot over the rows walks memory
+/// forward rather than striding a row's width.
 #[derive(Default)]
 pub struct Q8Act {
     rows: usize,
@@ -58,18 +61,20 @@ impl Q8Act {
         assert!(k.is_multiple_of(BLOCK) && x.len() == rows * k, "a [{rows}, {k}] activation of {} elements", x.len());
         let blocks = rows * k / BLOCK;
         (self.rows, self.k) = (rows, k);
-        self.d.resize(blocks, 0.0);
+        self.d.resize(blocks * RUNS, 0.0);
         self.qs.resize(blocks * BLOCK, 0);
         self.sums.resize(blocks * SUMS, 0);
         for (i, block) in x.chunks_exact(BLOCK).enumerate() {
             let (r, b) = (i / self.blocks(), i % self.blocks());
             let at = b * rows + r;
-            let absmax = block.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
-            let inv = if absmax > 0.0 { 127.0 / absmax } else { 0.0 };
-            self.d[at] = absmax / 127.0;
             let qs = &mut self.qs[at * BLOCK..][..BLOCK];
-            for (q, &v) in qs.iter_mut().zip(block) {
-                *q = (v * inv).round_ties_even() as i8;
+            for ((d, run), qrun) in self.d[at * RUNS..][..RUNS].iter_mut().zip(block.chunks_exact(RUN)).zip(qs.chunks_exact_mut(RUN)) {
+                let absmax = run.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
+                let inv = if absmax > 0.0 { 127.0 / absmax } else { 0.0 };
+                *d = absmax / 127.0;
+                for (q, &v) in qrun.iter_mut().zip(run) {
+                    *q = (v * inv).round_ties_even() as i8;
+                }
             }
             for (sum, run) in self.sums[at * SUMS..][..SUMS].iter_mut().zip(qs.chunks_exact(SUM_RUN)) {
                 *sum = run.iter().map(|&q| i16::from(q)).sum();
@@ -89,10 +94,10 @@ impl Q8Act {
         self.k / BLOCK
     }
 
-    /// Row `r`'s block `b`: its scale, quants and sums.
-    fn block(&self, r: usize, b: usize) -> (f32, &[i8], &[i16]) {
+    /// Row `r`'s block `b`: its runs' scales, its quants and its sums.
+    fn block(&self, r: usize, b: usize) -> (&[f32], &[i8], &[i16]) {
         let at = b * self.rows + r;
-        (self.d[at], &self.qs[at * BLOCK..][..BLOCK], &self.sums[at * SUMS..][..SUMS])
+        (&self.d[at * RUNS..][..RUNS], &self.qs[at * BLOCK..][..BLOCK], &self.sums[at * SUMS..][..SUMS])
     }
 }
 
@@ -181,22 +186,11 @@ impl Default for Quants {
     }
 }
 
-/// A block's eight-lane integer sums: the dot, and the correction the
-/// block's minimums (or offset) owe from the Q8 sums per sixteen. The
-/// vector path stores its lanes as they are; the scalar path fills one.
+/// A row's running sum in eight lanes: the vector path keeps all eight,
+/// the scalar path the first.
 #[repr(C, align(32))]
 #[derive(Default)]
-pub(crate) struct Sums {
-    pub(crate) dot: [i32; 8],
-    pub(crate) min: [i32; 8],
-}
-
-impl Sums {
-    fn set(&mut self, dot: i32, min: i32) {
-        self.dot = [dot, 0, 0, 0, 0, 0, 0, 0];
-        self.min = [min, 0, 0, 0, 0, 0, 0, 0];
-    }
-}
+pub(crate) struct Lanes(pub(crate) [f32; 8]);
 
 /// One format's block arithmetic against a Q8 block, in one instruction
 /// set.
@@ -212,15 +206,12 @@ pub(crate) trait Block {
     /// An AVX2 implementation runs only on a CPU that has it.
     unsafe fn unpack(bytes: &[u8], d: Option<u16>, into: &mut Self::Unpacked);
 
-    /// The block's scale, and the scale of the correction `dot` returns.
-    fn scales(u: &Self::Unpacked) -> (f32, f32);
-
-    /// The integer dot with a Q8 block and the minimums' correction, as
-    /// lane sums into `out`.
+    /// The block's dot with a Q8 block whose runs are scaled by `da`, the
+    /// minimums' correction taken off, added into `acc`.
     ///
     /// # Safety
     /// As [`Block::unpack`].
-    unsafe fn dot(u: &Self::Unpacked, qs: &[i8], sums: &[i16], out: &mut Sums);
+    unsafe fn dot(u: &Self::Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes);
 }
 
 /// `yt[(j - j0) * rows + r] = sum_i w[j, i] x[r, i]` over the weight rows
@@ -229,7 +220,6 @@ pub(crate) trait Block {
 unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
     let (rows, nb) = (act.rows, act.blocks());
     let mut row: Vec<F::Unpacked> = (0..nb).map(|_| F::Unpacked::default()).collect();
-    let mut sums = Sums::default();
     for (j, out) in (j0..).zip(yt.chunks_exact_mut(rows)) {
         for (b, u) in row.iter_mut().enumerate() {
             let (bytes, d) = weight.block(j, b, nb);
@@ -237,20 +227,13 @@ unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [
             unsafe { F::unpack(bytes, d, u) };
         }
         for (r, acc) in out.iter_mut().enumerate() {
-            // Eight lanes the vector path fills and the compiler keeps in
-            // one register; the scalar path uses the first.
-            let mut lanes = [0.0f32; 8];
+            let mut lanes = Lanes::default();
             for (b, u) in row.iter().enumerate() {
                 let (da, qs, q8_sums) = act.block(r, b);
                 // SAFETY: as above.
-                unsafe { F::dot(u, qs, q8_sums, &mut sums) };
-                let (d, dmin) = F::scales(u);
-                let (pd, pm) = (d * da, dmin * da);
-                for ((lane, &dot), &min) in lanes.iter_mut().zip(&sums.dot).zip(&sums.min) {
-                    *lane += pd * dot as f32 - pm * min as f32;
-                }
+                unsafe { F::dot(u, qs, q8_sums, da, &mut lanes) };
             }
-            *acc = lanes.iter().sum();
+            *acc = lanes.0.iter().sum();
         }
     }
 }
@@ -483,7 +466,7 @@ fn pool() -> &'static rayon::ThreadPool {
 pub(crate) mod x86 {
     use std::arch::x86_64::*;
 
-    use super::Quants;
+    use super::{Lanes, Quants};
 
     /// A half to a float.
     #[inline]
@@ -493,52 +476,62 @@ pub(crate) mod x86 {
     }
 
     /// The dot of unpacked quants with a Q8 block where every run of 32
-    /// shares a scale, as eight lane sums: Q4_K and Q5_K.
-    #[target_feature(enable = "avx2")]
-    pub(crate) unsafe fn dot_runs32(q: &Quants, scales: &[i16; 8], qs: &[i8], out: &mut [i32; 8]) {
-        debug_assert!(qs.len() >= super::BLOCK);
-        // SAFETY: the caller has AVX2; `q` and `out` are aligned and `qs`
-        // a block long.
+    /// shares a weight scale, each run's eight lanes scaled by the block's
+    /// `d`, the run's index and the activation's run scale into `acc`:
+    /// Q4_K and Q5_K.
+    #[target_feature(enable = "avx2,fma")]
+    pub(crate) unsafe fn dot_runs32(q: &Quants, scales: &[i16; 8], qs: &[i8], d: f32, da: &[f32], acc: &mut Lanes) {
+        debug_assert!(qs.len() >= super::BLOCK && da.len() >= 8);
+        // SAFETY: the caller has AVX2 and FMA; `q` and `acc` are aligned
+        // and `qs` a block long.
         unsafe {
-            let mut acc = _mm256_setzero_si256();
+            let mut sum = _mm256_load_ps(acc.0.as_ptr());
             for (run, &scale) in scales.iter().enumerate() {
                 let w = _mm256_load_si256(q.0.as_ptr().add(run * 32).cast());
                 let a = _mm256_loadu_si256(qs.as_ptr().add(run * 32).cast());
-                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(_mm256_set1_epi16(scale), _mm256_maddubs_epi16(w, a)));
+                let p = _mm256_madd_epi16(_mm256_set1_epi16(scale), _mm256_maddubs_epi16(w, a));
+                sum = _mm256_fmadd_ps(_mm256_set1_ps(d * da[run]), _mm256_cvtepi32_ps(p), sum);
             }
-            _mm256_store_si256(out.as_mut_ptr().cast(), acc);
+            _mm256_store_ps(acc.0.as_mut_ptr(), sum);
         }
     }
 
-    /// The same where every run of 16 has its own scale: Q6_K.
-    #[target_feature(enable = "avx2")]
-    pub(crate) unsafe fn dot_runs16(q: &Quants, scales: &[i16; 16], qs: &[i8], out: &mut [i32; 8]) {
-        debug_assert!(qs.len() >= super::BLOCK);
+    /// The same where every run of 16 has its own weight scale, two to an
+    /// activation run: Q6_K.
+    #[target_feature(enable = "avx2,fma")]
+    pub(crate) unsafe fn dot_runs16(q: &Quants, scales: &[i16; 16], qs: &[i8], d: f32, da: &[f32], acc: &mut Lanes) {
+        debug_assert!(qs.len() >= super::BLOCK && da.len() >= 8);
         // SAFETY: as `dot_runs32`.
         unsafe {
-            let mut acc = _mm256_setzero_si256();
+            let mut sum = _mm256_load_ps(acc.0.as_ptr());
             for (i, pair) in scales.chunks_exact(2).enumerate() {
                 let w = _mm256_load_si256(q.0.as_ptr().add(i * 32).cast());
                 let a = _mm256_loadu_si256(qs.as_ptr().add(i * 32).cast());
                 // The multiply-add's sixteen lanes are the run's first
                 // sixteen elements then its last: one scale a half.
                 let scale = _mm256_set_m128i(_mm_set1_epi16(pair[1]), _mm_set1_epi16(pair[0]));
-                acc = _mm256_add_epi32(acc, _mm256_madd_epi16(scale, _mm256_maddubs_epi16(w, a)));
+                let p = _mm256_madd_epi16(scale, _mm256_maddubs_epi16(w, a));
+                sum = _mm256_fmadd_ps(_mm256_set1_ps(d * da[i]), _mm256_cvtepi32_ps(p), sum);
             }
-            _mm256_store_si256(out.as_mut_ptr().cast(), acc);
+            _mm256_store_ps(acc.0.as_mut_ptr(), sum);
         }
     }
 
-    /// Sixteen per-run factors against the Q8 sums per sixteen, as eight
-    /// lane sums: the minimums' or the offset's term.
-    #[target_feature(enable = "avx2")]
-    pub(crate) unsafe fn min_term(factors: &[i16; 16], sums: &[i16], out: &mut [i32; 8]) {
-        debug_assert!(sums.len() >= 16);
-        // SAFETY: the caller has AVX2; `sums` holds a block's sixteen.
+    /// Sixteen per-run factors against the Q8 sums per sixteen, a lane an
+    /// activation run, scaled by `dmin` and the run's activation scale and
+    /// taken off `acc`: the minimums' or the offset's term.
+    #[target_feature(enable = "avx2,fma")]
+    pub(crate) unsafe fn min_term(factors: &[i16; 16], sums: &[i16], dmin: f32, da: &[f32], acc: &mut Lanes) {
+        debug_assert!(sums.len() >= 16 && da.len() >= 8);
+        // SAFETY: the caller has AVX2 and FMA; `sums` holds a block's
+        // sixteen and `da` its eight.
         unsafe {
             let f = _mm256_loadu_si256(factors.as_ptr().cast());
             let s = _mm256_loadu_si256(sums.as_ptr().cast());
-            _mm256_store_si256(out.as_mut_ptr().cast(), _mm256_madd_epi16(f, s));
+            let m = _mm256_cvtepi32_ps(_mm256_madd_epi16(f, s));
+            let scale = _mm256_mul_ps(_mm256_set1_ps(dmin), _mm256_loadu_ps(da.as_ptr()));
+            let sum = _mm256_fnmadd_ps(scale, m, _mm256_load_ps(acc.0.as_ptr()));
+            _mm256_store_ps(acc.0.as_mut_ptr(), sum);
         }
     }
 }
