@@ -9,13 +9,9 @@ pub(crate) const Q4_K: u32 = 12;
 
 /// `count` experts of `[n, k]` Q4_K blocks with deterministic contents:
 /// small finite headers, pseudo-random scales and quants.
-pub(crate) fn q4k_stack(count: usize, n: usize, k: usize, mut seed: u64) -> Vec<u8> {
-    let mut next = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 56) as u8
-    };
+pub(crate) fn q4k_stack(count: usize, n: usize, k: usize, seed: u64) -> Vec<u8> {
+    let mut words = crate::tests::xorshift(seed);
+    let mut next = move || (words() >> 56) as u8;
     let blocks = count * n * k / 256;
     let mut out = Vec::with_capacity(blocks * 144);
     for _ in 0..blocks {

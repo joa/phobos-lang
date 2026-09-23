@@ -2,12 +2,10 @@
 // run `r`'s element `l` taking it from bit `r` of `qh[l]`.
 
 use super::q4_k::{Unpacked, dot_plain};
-use super::{Block, Lanes};
+use super::{Acc, Block, Q8Block, RUN, RUNS};
 
-const RUNS: usize = 8;
-const RUN: usize = 32;
 const QH: usize = 16;
-pub(super) const QS: usize = QH + 32;
+const QS: usize = QH + 32;
 
 pub(super) struct Scalar;
 
@@ -28,8 +26,8 @@ impl Block for Scalar {
         }
     }
 
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
-        dot_plain(&u.header, &u.q, qs, sums, da, acc);
+    unsafe fn dot(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
+        dot_plain(u, block, acc);
     }
 }
 
@@ -40,13 +38,14 @@ pub(super) use avx2::Avx2;
 mod avx2 {
     use std::arch::x86_64::*;
 
-    use super::super::x86::{dot_runs32, half, min_term};
-    use super::{Block, Lanes, QH, QS, RUNS, Unpacked};
-
-    pub(crate) struct Avx2;
+    use super::super::avx2_block;
+    use super::super::q4_k::avx2::dot;
+    use super::super::x86::half;
+    use super::{QH, QS, RUNS, Unpacked};
 
     #[target_feature(enable = "avx2,f16c")]
     unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
+        // A closure, since a `#[target_feature]` function is not `Fn`.
         u.header.read(bytes, |bits| half(bits));
         // SAFETY: the caller has AVX2; a block holds the planes.
         unsafe {
@@ -67,23 +66,5 @@ mod avx2 {
         }
     }
 
-    impl Block for Avx2 {
-        const AVX2: bool = true;
-        type Unpacked = Unpacked;
-
-        #[inline(always)]
-        unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
-            // SAFETY: the caller has AVX2.
-            unsafe { unpack(bytes, _d, u) }
-        }
-
-        #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
-            // SAFETY: the caller has AVX2 and FMA.
-            unsafe {
-                dot_runs32(&u.q, &u.header.scales, qs, u.header.d, da, acc);
-                min_term(&u.header.mins, sums, u.header.dmin, da, acc);
-            }
-        }
-    }
+    avx2_block!(Avx2, Unpacked, unpack, dot);
 }

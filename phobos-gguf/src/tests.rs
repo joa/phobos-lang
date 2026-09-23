@@ -1,4 +1,27 @@
 use super::*;
+use crate::quant::Quant;
+use crate::tensor::GgmlType;
+
+/// A deterministic stream of `u64`s from a seed.
+pub(crate) fn xorshift(mut seed: u64) -> impl FnMut() -> u64 {
+    move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    }
+}
+
+/// A deterministic stream of floats in [-1, 1) from a seed.
+pub(crate) fn uniform(seed: u64) -> impl FnMut() -> f32 {
+    let mut next = xorshift(seed);
+    move || (next() >> 40) as f32 / 8388608.0 - 1.0
+}
+
+/// The ggml type code a format is stored under.
+pub(crate) fn ggml_code(quant: Quant) -> u32 {
+    (0..64).find(|&code| GgmlType::from_code(code).ok().and_then(|t| t.quant()) == Some(quant)).expect("a stored format")
+}
 
 /// Minimal GGUF writer, enough to round-trip the reader and to stand in for
 /// a real file in the crate's other tests.

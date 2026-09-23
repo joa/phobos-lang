@@ -20,13 +20,7 @@ fn host_matmul_matches_by_hand() {
 #[test]
 fn q8_matmul_matches_the_dequantized_matmul() {
     let (k, n) = (Q8_BLOCK * 3, 5usize);
-    let mut seed = 0x2545_f491_4f6c_dd1du64;
-    let mut next = || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 40) as f32 / 8388608.0 - 1.0
-    };
+    let mut next = crate::tests::uniform(0x2545_f491_4f6c_dd1d);
 
     let qs: Vec<i8> = (0..k * n).map(|_| (next() * 127.0) as i8).collect();
     // Rounded through a half, which is how a scale is stored, so the dense
@@ -306,13 +300,7 @@ fn moe_matches_a_dense_reference_and_reports_its_routes() {
     let gguf = crate::Gguf::from_bytes(builder.build()).unwrap();
     let set: Arc<ExpertSet> = ExpertSet::load(&gguf, "blk.0", count, d, d_ff).unwrap();
 
-    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
-    let mut next = move || {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        (seed >> 40) as f32 / 8388608.0 - 1.0
-    };
+    let mut next = crate::tests::uniform(0x9e37_79b9_7f4a_7c15);
     let x: Vec<f32> = (0..rows * d).map(|_| next()).collect();
     let logits: Vec<f32> = (0..rows * count).map(|_| 3.0 * next()).collect();
     let shared: Vec<f32> = (0..rows * d).map(|_| next()).collect();
