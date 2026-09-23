@@ -117,6 +117,12 @@ pub(super) struct BlockExperts {
     pub(super) look_host: LockedBuffer<i32>,
     pub(super) look_w: DeviceBuffer<f32>,
     pub(super) fetched: Option<Event>,
+    /// The host's share of a decode row, pinned for the copy in, and the
+    /// row itself and the router's weights, pinned for the copies out: a
+    /// copy into pageable memory is staged by the driver and slow.
+    pub(super) y_host: LockedBuffer<f32>,
+    pub(super) x_host: LockedBuffer<f32>,
+    pub(super) w_host: LockedBuffer<f32>,
 }
 
 pub(super) struct Slab {
@@ -183,7 +189,7 @@ impl BlockExperts {
     }
 
     /// The least recently used slot not stamped `tick`.
-    fn victim(&self, tick: u64) -> Option<usize> {
+    pub(super) fn victim(&self, tick: u64) -> Option<usize> {
         (0..self.held.len()).filter(|&s| self.held[s].1 != tick).min_by_key(|&s| self.held[s].1)
     }
 
@@ -223,6 +229,11 @@ impl Experts {
     pub(super) fn step(&mut self, block: usize, ids: &[usize]) -> u64 {
         self.tick += 1;
         self.blocks[block].stamp(ids, self.tick);
+        self.tick
+    }
+
+    /// The current routing step, the stamp the slots in use carry.
+    pub(super) fn tick(&self) -> u64 {
         self.tick
     }
 
@@ -346,6 +357,9 @@ impl DeviceBackend {
             look_host: LockedBuffer::new(&0i32, MOE_USED)?,
             look_w: DeviceBuffer::from_slice(&[0f32; MOE_USED])?,
             fetched: None,
+            y_host: LockedBuffer::new(&0.0, set.gate.k())?,
+            x_host: LockedBuffer::new(&0.0, set.gate.k())?,
+            w_host: LockedBuffer::new(&0.0, table)?,
         });
         let buf = ExpertsBuf(experts.blocks.len() - 1);
         self.expert_keys.borrow_mut().insert(key.to_string(), buf);

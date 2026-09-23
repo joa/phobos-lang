@@ -242,7 +242,7 @@ impl DeviceBackend {
     /// reverse. Otherwise the topology is identical and the only nodes that
     /// moved are the ones reading the key/value cache, whose length grew by
     /// a token.
-    fn replay_segment(&self) -> Result<()> {
+    pub(super) fn replay_segment(&self) -> Result<()> {
         let pending = self.pending.borrow();
         let recorded = &pending[..self.recorded_len.replace(0)];
         let at = self.segment.replace(self.segment.get() + 1);

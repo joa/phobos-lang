@@ -216,6 +216,30 @@ fn main() -> Result<()> {
         {
             let pinned = grouped.pinned()?;
             jobs_shape(&pinned, "grouped layout, pinned", &args.rows, d, flops)?;
+            // Its vectors are the driver's pinned memory, not the
+            // allocator's, so they must not be freed as vectors.
+            std::mem::forget(pinned);
+        }
+
+        // A decode step's misses: one row, one or two experts, spread over
+        // the pool by rows, with a millisecond of idleness between calls as
+        // a step's blocks leave, against calls back to back.
+        for (label, idle) in [("back to back", 0u64), ("1 ms idle between", 1000u64)] {
+            let x: Vec<f32> = (0..d).map(|_| random()).collect();
+            let mut out = vec![0.0f32; d];
+            let mut total = 0.0;
+            let calls = 40;
+            for i in 0..calls {
+                let jobs = [Job { expert: (7 * i) % moe.n_expert, rows: vec![0], weights: vec![1.0] }, Job { expert: (7 * i + 3) % moe.n_expert, rows: vec![0], weights: vec![1.0] }];
+                if idle > 0 {
+                    let until = Instant::now() + std::time::Duration::from_micros(idle);
+                    while Instant::now() < until {}
+                }
+                let started = Instant::now();
+                simd::experts_row(&*set, &jobs, &x, &mut out)?;
+                total += started.elapsed().as_secs_f64() * 1e6;
+            }
+            println!("two misses a call, {label}: {:.0} us a call", total / calls as f64);
         }
 
         // The reference decoder, one row, one expert: what the CPU miss

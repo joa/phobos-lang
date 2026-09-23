@@ -199,6 +199,23 @@ fn an_expert_matches_the_reference_within_the_activation_quantization() {
 }
 
 #[test]
+fn one_row_spread_by_rows_matches_the_jobs() {
+    let (count, d, d_ff) = (3, 512, 256);
+    let gguf = expert_file(count, d, d_ff, Quant::Q4_K, Quant::Q6_K);
+    let set = ExpertSet::load(&gguf, "blk.0", count, d, d_ff).unwrap();
+    let x = activation(1, d, 13);
+    let jobs = [Job { expert: 2, rows: vec![0], weights: vec![0.75] }, Job { expert: 0, rows: vec![0], weights: vec![1.5] }];
+    let mut got = vec![0.0; d];
+    experts_row(&*set, &jobs, &x, &mut got).unwrap();
+    let mut want = vec![0.0; d];
+    experts_ffn(&*set, &jobs, &x, 1, &mut want).unwrap();
+    let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+    for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+        assert!((g - w).abs() <= 1e-4 * scale, "output {i}: {g} against {w}");
+    }
+}
+
+#[test]
 fn jobs_over_the_pool_sum_each_experts_rows() {
     let (count, d, d_ff, rows) = (3, 512, 256, 4);
     let gguf = expert_file(count, d, d_ff, Quant::Q4_K, Quant::Q5_K);

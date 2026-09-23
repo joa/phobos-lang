@@ -141,11 +141,10 @@ pub struct DeviceBackend {
     /// Whether a decode step's misses are computed on the host from the
     /// mirror's bytes instead of copied into a slot, the device summing
     /// the hits and a zero slot standing in for each miss.
-    /// `PHOBOS_MOE_CPU_MISS` opts in (see `ENV.md`); Phase 4 of the plan, for a bus
-    /// narrower than the host's memory.
-    moe_cpu_miss: bool,
     /// `PHOBOS_MOE_HOST=0` opts out; see `ENV.md`.
     moe_host: bool,
+    /// `PHOBOS_MOE_HOST_DECODE` opts in; see `ENV.md`.
+    moe_host_decode: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
     /// over rows sorted by expert rather than row by row.
     /// `PHOBOS_MOE_GROUPED=0` opts out; see `ENV.md`.

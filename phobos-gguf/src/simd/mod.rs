@@ -312,6 +312,28 @@ fn gemm_raw(quant: Quant, wide: bool, weight: &Weight, n: usize, act: &Q8Act, yt
     Ok(())
 }
 
+/// The weight rows from `j0` that `yt` has room for, on the calling
+/// thread: one task of a GEMM spread over the pool by rows.
+fn gemm_rows(quant: Quant, weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
+    macro_rules! by_format {
+        ($set:ident) => {
+            match quant {
+                Quant::Q4_K => rows_dot_in::<q4_k::$set>(weight, j0, act, yt),
+                Quant::Q5_K => rows_dot_in::<q5_k::$set>(weight, j0, act, yt),
+                Quant::Q6_K => rows_dot_in::<q6_k::$set>(weight, j0, act, yt),
+                other => bail!("no host expert kernel for {}", other.name()),
+            }
+        };
+    }
+    #[cfg(target_arch = "x86_64")]
+    if avx2() {
+        by_format!(Avx2);
+        return Ok(());
+    }
+    by_format!(Scalar);
+    Ok(())
+}
+
 /// `yt[j * rows + r] = sum_i w[j, i] x[r, i]` over expert `e`'s `[n, k]`
 /// rows of one stack: the outputs transposed, so each thread's rows are
 /// contiguous.
@@ -417,6 +439,53 @@ pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, o
             for (o, &v) in out[r * d..(r + 1) * d].iter_mut().zip(y) {
                 *o += v;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Weight rows a task of [`experts_row`] takes: a few kilobytes of one
+/// expert, so a handful of misses spread over every worker.
+const ROW_CHUNK: usize = 16;
+
+/// The jobs' experts over one row `x`, each GEMM spread over the pool by
+/// rows and every job's in one region: a decode step's misses, where an
+/// expert on its own thread would read at that thread's memory rate.
+/// Each expert's result, scaled by its weight, is added into `out`.
+pub fn experts_row(source: &impl Source, jobs: &[Job], x: &[f32], out: &mut [f32]) -> Result<()> {
+    let (gate, up, down) = (source.shape(Stack::Gate), source.shape(Stack::Up), source.shape(Stack::Down));
+    let (d, d_ff) = (gate.2, gate.1);
+    ensure!(x.len() == d && out.len() == d && jobs.iter().all(|j| j.rows.len() == 1), "one row of {d} for {} outputs", out.len());
+    let act = Q8Act::quantize(x, 1, d);
+    let mut gu: Vec<Vec<f32>> = jobs.iter().map(|_| vec![0.0; 2 * d_ff]).collect();
+    // Every job's gate and up rows, `ROW_CHUNK` a task.
+    pool().install(|| {
+        gu.par_iter_mut().zip(jobs).try_for_each(|(gu, job)| {
+            let (g, u) = gu.split_at_mut(d_ff);
+            let weights = [(gate.0, source.weight(Stack::Gate, job.expert), g), (up.0, source.weight(Stack::Up, job.expert), u)];
+            weights.into_par_iter().try_for_each(|(quant, weight, out)| {
+                out.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm_rows(quant, &weight, c * ROW_CHUNK, &act, chunk))
+            })
+        })
+    })?;
+    let hs: Vec<Q8Act> = gu
+        .iter()
+        .map(|gu| {
+            let (g, u) = gu.split_at(d_ff);
+            let h: Vec<f32> = g.iter().zip(u).map(|(&g, &u)| g / (1.0 + (-g).exp()) * u).collect();
+            Q8Act::quantize(&h, 1, d_ff)
+        })
+        .collect();
+    let mut ys: Vec<Vec<f32>> = jobs.iter().map(|_| vec![0.0; d]).collect();
+    pool().install(|| {
+        ys.par_iter_mut().zip(jobs).zip(&hs).try_for_each(|((y, job), h)| {
+            let weight = source.weight(Stack::Down, job.expert);
+            y.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm_rows(down.0, &weight, c * ROW_CHUNK, h, chunk))
+        })
+    })?;
+    for (job, y) in jobs.iter().zip(&ys) {
+        for (o, &v) in out.iter_mut().zip(y) {
+            *o += job.weights[0] * v;
         }
     }
     Ok(())
