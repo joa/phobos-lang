@@ -342,8 +342,7 @@ impl Model {
             resident_bytes: 0,
         };
         if model.config.moe.is_some() {
-            // Sized at the prompt batch the runtime uses, as `check_fits` is.
-            model.resident_bytes = model.footprint(512).bytes();
+            model.resident_bytes = model.footprint(crate::runtime::PROMPT_BATCH).bytes();
         }
         Ok(model)
     }

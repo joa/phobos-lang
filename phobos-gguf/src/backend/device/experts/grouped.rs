@@ -18,15 +18,14 @@ use std::time::Instant;
 
 use anyhow::Result;
 use cust::event::{Event, EventFlags};
-use cust::memory::{CopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
-use cust::stream::Stream;
+use cust::memory::LockedBuffer;
 
 use super::super::kernels::{MOE_COMBINE_TN, MOE_USED, QGEMM_TM, QGEMM_TN};
 use super::super::{DeviceBackend, Plane};
-use super::op::kernel_for;
-use super::{BlockExperts, Experts, Kind, MAX_ROWS, NONE, copy_async};
+use super::op::{U, kernels};
+use super::{Experts, MAX_ROWS, Staged};
 use crate::backend::{Backend, Buf, Moe};
-use crate::experts::ExpertSet;
+use crate::experts::{ExpertSet, Stack};
 use crate::simd::{self, Job};
 
 /// The share of a block's experts the host starts with, before a block has
@@ -52,7 +51,7 @@ pub(super) fn scratch_bytes(rows: usize, d: usize, d_ff: usize, per_block: usize
 
 /// Whether the grouped path can run a set: gate and up in one format, and
 /// widths in whole blocks and tiles.
-pub(super) fn fits(set: &ExpertSet, d: usize, d_ff: usize) -> bool {
+pub(super) fn can_group(set: &ExpertSet, d: usize, d_ff: usize) -> bool {
     set.gate.quant() == set.up.quant() && [d, d_ff].iter().all(|w| w.is_multiple_of(256) && w.is_multiple_of(QGEMM_TN))
 }
 
@@ -69,43 +68,6 @@ fn permute_tile(k: usize) -> usize {
     (1..=k.min(256)).rev().find(|t| k.is_multiple_of(*t)).unwrap_or(1)
 }
 
-/// The permutation kernel's name for `elem` rows in `tk` columns, made
-/// once apiece: a launch wants a name that lives as long as the process.
-fn permute_name(elem: &str, tk: usize) -> &'static str {
-    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
-    let name = format!("moe_permute_{elem}_{tk}");
-    let mut names = NAMES.lock().expect("kernel names");
-    if let Some(&known) = names.iter().find(|&&n| n == name) {
-        return known;
-    }
-    let leaked: &'static str = Box::leak(name.into_boxed_str());
-    names.push(leaked);
-    leaked
-}
-
-/// Values the host writes for the device to read: a pinned mirror and its
-/// device copy, filled by asynchronous copies in stream order.
-struct Staged<T: DeviceCopy> {
-    host: LockedBuffer<T>,
-    dev: DeviceBuffer<T>,
-}
-
-impl<T: DeviceCopy + Default> Staged<T> {
-    fn new(len: usize) -> Result<Staged<T>> {
-        Ok(Staged { host: LockedBuffer::new(&T::default(), len)?, dev: DeviceBuffer::from_slice(&vec![T::default(); len])? })
-    }
-
-    /// Copies `values` in at `at` and returns their device address.
-    fn push(&mut self, at: usize, values: &[T], stream: &Stream) -> Result<u64> {
-        self.host.as_mut_slice()[at..at + values.len()].copy_from_slice(values);
-        let dst = self.dev.as_device_ptr().as_raw() + (at * size_of::<T>()) as u64;
-        // SAFETY: the region is not written again before the block's end
-        // synchronizes.
-        unsafe { copy_async(dst, self.host.as_slice()[at..].as_ptr().cast(), size_of_val(values), stream)? };
-        Ok(dst)
-    }
-}
-
 /// A pass's permutation, each group's schedule, positions and weights,
 /// and the pinned rows the host's experts produce, reused block after
 /// block: a block's end synchronizes before the next one writes them.
@@ -116,9 +78,12 @@ pub(super) struct GroupedScratch {
     w: Staged<f32>,
     /// Integers a group's schedule table may take.
     sched_stride: usize,
-    /// `[MAX_ROWS, d_model]` the host's share sums into, copied to the
-    /// device asynchronously in stream order.
+    /// `[MAX_ROWS, d_model]` the host's share sums into.
     y_host: LockedBuffer<f32>,
+    /// The permutation kernels' names and tiles, for the int8 rows and for
+    /// their scales; a launch wants a name that lives as long as the
+    /// process, and this scratch does.
+    permute: [(&'static str, usize); 2],
 }
 
 impl GroupedScratch {
@@ -128,6 +93,8 @@ impl GroupedScratch {
         // of each add at most `uses / TM` more over the whole block.
         let sched_stride = 2 * (per_block + uses / QGEMM_TM);
         let groups = n_expert.div_ceil(per_block);
+        let scale_tile = permute_tile(d / 32);
+        let name = |elem: &str, tk: usize| -> &'static str { Box::leak(format!("moe_permute_{elem}_{tk}").into_boxed_str()) };
         Ok(GroupedScratch {
             perm: Staged::new(uses + n_expert * (QGEMM_TM - 1))?,
             sched: Staged::new(groups * sched_stride)?,
@@ -135,12 +102,13 @@ impl GroupedScratch {
             w: Staged::new(groups * uses)?,
             sched_stride,
             y_host: LockedBuffer::new(&0.0, MAX_ROWS * d)?,
+            permute: [(name("i8", 256), 256), (name("f32", scale_tile), scale_tile)],
         })
     }
 }
 
 /// Rows of `elem` copied by a permutation, `tk` columns a program.
-pub(crate) fn moe_permute_src(elem: &str, tk: usize) -> String {
+fn moe_permute_src(elem: &str, tk: usize) -> String {
     format!(
         "@launch(256)
 @autotune(TK in [{tk}])
@@ -157,7 +125,7 @@ kernel moe_permute_{elem}_{tk}(PERM: tensor<i32>[1, M], A: tensor<{elem}>[R, K],
 
 /// The K-quant prompt GEMM over a schedule table: program `p` contracts
 /// activation tile `SCHED[1, p]` against slot `SCHED[0, p]`'s rows.
-pub(crate) fn moe_qgemm_src(name: &str, ne: usize) -> String {
+fn moe_qgemm_src(name: &str, ne: usize) -> String {
     format!(
         "@launch(256, 2)
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}], NE in [{ne}])
@@ -178,7 +146,7 @@ kernel {name}_moe_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB], SCHED: tens
 /// Each row's eight down rows of one group gathered by position and added
 /// with the router's weights into the residual; an entry outside the group
 /// carries weight zero.
-pub(crate) fn moe_gather_add_src() -> String {
+fn moe_gather_add_src() -> String {
     format!(
         "@launch(256)
 @autotune(TN in [{MOE_COMBINE_TN}], U in [{MOE_USED}])
@@ -199,7 +167,7 @@ kernel moe_gather_add(POS: tensor<i32>[R, U], W: tensor<f32>[R, U], C: tensor<f3
 }
 
 /// The gated shared expert added into the residual.
-pub(crate) fn moe_shared_src() -> String {
+fn moe_shared_src() -> String {
     format!(
         "@launch(256)
 @autotune(TN in [{MOE_COMBINE_TN}])
@@ -241,13 +209,9 @@ impl DeviceBackend {
                 by_expert[e].push((r, j));
             }
         }
-        let weights = {
-            let b = &mut experts.blocks[block];
-            b.weights.index(0..entries).copy_to(&mut b.w_host.as_mut_slice()[..entries])?;
-            b.w_host.as_slice()[..entries].to_vec()
-        };
+        let weights = experts.blocks[block].weights.pull(entries)?.to_vec();
         let host_jobs = if self.moe_host && simd::supports(&*experts.blocks[block].set) {
-            host_share(&experts.blocks[block], &by_expert, &weights, experts.host_share)
+            host_jobs(experts, block, &by_expert, &weights)
         } else {
             Vec::new()
         };
@@ -286,9 +250,8 @@ impl DeviceBackend {
         }
 
         // Groups of at most the block's slots, each a contiguous run of
-        // padded rows, so a group's activation, GEMMs and SwiGLU are its
-        // own rows only. Scratch is sized by a bound on the rows rather
-        // than by this block's routing: the pool hands a buffer out again
+        // padded rows. Scratch is sized by a bound on the rows rather than
+        // by this block's routing, since the pool hands a buffer out again
         // only for its exact length.
         let groups: Vec<&[Segment]> = segments.chunks(experts.per_block).collect();
         let span = |g: &[Segment]| (g[0].start, g.last().map_or(0, |s| s.start + s.len.next_multiple_of(QGEMM_TM)) - g[0].start);
@@ -308,14 +271,13 @@ impl DeviceBackend {
         let (qa, das) = (self.ptr(xq_g, 0)?, self.ptr(xs_g, 0)?);
         let act = req.act.map_or_else(|| self.quantize_act(req.x, rows, d), Ok)?;
         let (xq, xs) = self.act_ptrs(act)?;
-        let (scale_cols, scale_tile) = (d / 32, permute_tile(d / 32));
+        let [rows_kernel, scales_kernel] = scratch.permute;
 
         for (gi, group) in groups.into_iter().enumerate() {
             let (g_start, g_rows) = span(group);
             // The group's rows of the quantized activation and its scales.
             let perm_at = perm_ptr + (g_start * size_of::<i32>()) as u64;
-            for (elem, tk, src, dst, cols) in [("i8", 256, xq, qa, d), ("f32", scale_tile, xs, das, scale_cols)] {
-                let name = permute_name(elem, tk);
+            for (elem, (name, tk), src, dst, cols) in [("i8", rows_kernel, xq, qa, d), ("f32", scales_kernel, xs, das, d / 32)] {
                 self.with_kernel(&self.moe_permute, (elem, tk), "moe_permute", || moe_permute_src(elem, tk), |module| {
                     self.launch(
                         module,
@@ -340,13 +302,13 @@ impl DeviceBackend {
             }
             let tiles = sched[0].len();
             let table_ptr = scratch.sched.push(gi * scratch.sched_stride, &sched.concat(), &self.stream)?;
-            self.grouped_gemm(experts, block, Kind::Gate, qa, das, g_rows, d, table_ptr, tiles, d_ff, self.ptr(gate_out, 0)?)?;
-            self.grouped_gemm(experts, block, Kind::Up, qa, das, g_rows, d, table_ptr, tiles, d_ff, self.ptr(up_out, 0)?)?;
+            self.grouped_gemm(experts, block, Stack::Gate, qa, das, g_rows, d, table_ptr, tiles, d_ff, self.ptr(gate_out, 0)?)?;
+            self.grouped_gemm(experts, block, Stack::Up, qa, das, g_rows, d, table_ptr, tiles, d_ff, self.ptr(up_out, 0)?)?;
             let plane = |buf| Plane { buf, offset: 0, pitch: d_ff };
             self.swiglu_planes(plane(gate_out), plane(up_out), h, g_rows, d_ff)?;
             let hact = self.quantize_act_into(self.act_slot_transient(g_rows, d_ff)?, h, g_rows, d_ff)?;
             let (hqa, hdas) = self.act_ptrs(hact)?;
-            self.grouped_gemm(experts, block, Kind::Down, hqa, hdas, g_rows, d_ff, table_ptr, tiles, d, self.ptr(down_out, 0)?)?;
+            self.grouped_gemm(experts, block, Stack::Down, hqa, hdas, g_rows, d_ff, table_ptr, tiles, d, self.ptr(down_out, 0)?)?;
 
             // This group's entries by their rows in its down output, the
             // rest at row zero with weight zero.
@@ -356,14 +318,13 @@ impl DeviceBackend {
             let w_g: Vec<f32> = (0..entries).map(|i| if in_group(i) { weights[i] } else { 0.0 }).collect();
             let pos_ptr = scratch.pos.push(gi * MAX_ROWS * MOE_USED, &pos_g, &self.stream)?;
             let w_ptr = scratch.w.push(gi * MAX_ROWS * MOE_USED, &w_g, &self.stream)?;
-            let u = MOE_USED as i64;
             self.with_kernel(&self.moe_gather_add, (), "moe_gather_add", moe_gather_add_src, |module| {
                 self.launch(
                     module,
                     "moe_gather_add",
                     &[
-                        (pos_ptr, [rows as i64, u]),
-                        (w_ptr, [rows as i64, u]),
+                        (pos_ptr, [rows as i64, U]),
+                        (w_ptr, [rows as i64, U]),
                         (self.ptr(down_out, 0)?, [g_rows as i64, d as i64]),
                         (self.ptr(req.dest, 0)?, [rows as i64, d as i64]),
                     ],
@@ -396,12 +357,7 @@ impl DeviceBackend {
             host_micros = started.elapsed().as_secs_f64() * 1e6;
             experts.stats.cpu_misses += host_jobs.len() as u64;
             experts.stats.cpu_nanos += (host_micros * 1e3) as u64;
-            let ybuf = self.alloc(rows * d)?;
-            // SAFETY: the pinned rows are not written again before the
-            // block's end synchronizes.
-            unsafe { copy_async(self.ptr(ybuf, 0)?, scratch.y_host.as_slice().as_ptr().cast(), rows * d * size_of::<f32>(), &self.stream)? };
-            self.add_into(req.dest, ybuf)?;
-            self.release(ybuf);
+            self.add_row(req.dest, &scratch.y_host, rows * d)?;
         }
         // The next block rewrites the staging the launches just issued read.
         self.stream.synchronize()?;
@@ -422,24 +378,14 @@ impl DeviceBackend {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn grouped_gemm(&self, experts: &Experts, block: usize, kind: Kind, qa: u64, das: u64, m_pad: usize, k: usize, table: u64, tiles: usize, n: usize, out: u64) -> Result<()> {
-        let slab = experts.slab(block, kind);
-        let b = &experts.blocks[block];
-        let (name, [_, _, function], _) = kernel_for(kind.stack(&b.set).quant())?;
-        let ns = (experts.per_block * slab.n) as i64;
-        let (bytes_at, d_at) = slab.at(b.base[kind as usize]);
-        self.with_kernel(&self.moe_qgemm, (name, n), "moe_qgemm", || moe_qgemm_src(name, n), |module| {
+    fn grouped_gemm(&self, experts: &Experts, block: usize, stack: Stack, qa: u64, das: u64, m_pad: usize, k: usize, table: u64, tiles: usize, n: usize, out: u64) -> Result<()> {
+        let kernels = kernels(experts.blocks[block].set.stack(stack).quant())?;
+        let [bytes, d] = experts.slab_operands(block, stack);
+        self.with_kernel(&self.moe_qgemm, (kernels.prefix, n), "moe_qgemm", || moe_qgemm_src(kernels.prefix, n), |module| {
             self.launch(
                 module,
-                function,
-                &[
-                    (qa, [m_pad as i64, k as i64]),
-                    (das, [m_pad as i64, (k / 32) as i64]),
-                    (table, [2, tiles as i64]),
-                    (bytes_at, [ns, slab.rb as i64]),
-                    (d_at, [ns, slab.nb as i64]),
-                    (out, [m_pad as i64, n as i64]),
-                ],
+                kernels.qgemm,
+                &[(qa, [m_pad as i64, k as i64]), (das, [m_pad as i64, (k / 32) as i64]), (table, [2, tiles as i64]), bytes, d, (out, [m_pad as i64, n as i64])],
                 (tiles as u32, (n / QGEMM_TN) as u32, 1),
             )
         })
@@ -447,12 +393,12 @@ impl DeviceBackend {
 }
 
 /// The experts the host takes: the lightest by rows among those not
-/// resident, `share` of them, each sparing the device one copy. Their
-/// entries are in no group, so no gather adds them.
-fn host_share(b: &BlockExperts, by_expert: &[Vec<(usize, usize)>], weights: &[f32], share: f32) -> Vec<Job> {
-    let mut order: Vec<usize> = (0..by_expert.len()).filter(|&e| !by_expert[e].is_empty() && b.slot_of[e] == NONE).collect();
+/// resident, the block's share of them, each sparing the device one copy.
+/// Their entries are in no group, so no gather adds them.
+fn host_jobs(experts: &Experts, block: usize, by_expert: &[Vec<(usize, usize)>], weights: &[f32]) -> Vec<Job> {
+    let mut order: Vec<usize> = (0..by_expert.len()).filter(|&e| !by_expert[e].is_empty() && !experts.resident(block, e)).collect();
     order.sort_by_key(|&e| by_expert[e].len());
-    let take = (order.len() as f32 * share).round() as usize;
+    let take = (order.len() as f32 * experts.host_share).round() as usize;
     order
         .into_iter()
         .take(take)

@@ -69,6 +69,13 @@ kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R
     )
 }
 
+/// A slot kernel's CTA and the blocks an SM keeps resident, from the
+/// format's register budget.
+fn slot_launch(resident: usize) -> (usize, usize) {
+    let cta = qdot_i8_cta(MOE_QDOT_TN);
+    (cta, (1024 / cta * resident / 4).max(1))
+}
+
 /// The decode matvec of `kquant.rs` over a cache slab: program `j` of the
 /// second grid axis reads slot `SLOT[j]`, `NE` rows apiece, and writes row
 /// `j` of `C`. `AQ`/`AS` carry `U` rows of quantized activation; `act_row`
@@ -77,8 +84,7 @@ kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R
 /// of its gate and up). `resident` is the register budget's CTA count, as
 /// `kquant.rs` sets it per format.
 pub(crate) fn moe_qdot_src(name: &str, ne: usize, act_row: &str, resident: usize) -> String {
-    let cta = qdot_i8_cta(MOE_QDOT_TN);
-    let min_blocks = (1024 / cta * resident / 4).max(1);
+    let (cta, min_blocks) = slot_launch(resident);
     format!(
         "@launch({cta}, {min_blocks})
 @autotune(TN in [{MOE_QDOT_TN}], NE in [{ne}])
@@ -98,11 +104,9 @@ kernel {name}_moe_qdot(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tenso
 /// Gate, up and the SwiGLU in one launch: program `j` of the second grid
 /// axis contracts the shared activation row against slot `SLOT[j]` of the
 /// gate slab and of the up slab, both `NE` rows an expert in one format,
-/// and writes `silu(gate) * up` as row `j` of `H`. Two launches and a
-/// SwiGLU fewer a block than the separate form.
+/// and writes `silu(gate) * up` as row `j` of `H`.
 pub(crate) fn moe_gateup_src(name: &str, ne: usize, resident: usize) -> String {
-    let cta = qdot_i8_cta(MOE_QDOT_TN);
-    let min_blocks = (1024 / cta * resident / 4).max(1);
+    let (cta, min_blocks) = slot_launch(resident);
     format!(
         "@launch({cta}, {min_blocks})
 @autotune(TN in [{MOE_QDOT_TN}], NE in [{ne}])

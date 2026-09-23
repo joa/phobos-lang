@@ -8,14 +8,14 @@ use anyhow::Result;
 use phobos_kernels::cuda_ok;
 
 use crate::experts::ExpertSet;
-use crate::simd::{Source, Stack, Weight};
+use crate::experts::Stack;
+use crate::simd::{Shape, Source, Weight};
 
 /// The three stacks of one block, each `count` experts of
 /// [`ExpertStack::grouped_bytes`] back to back, then the three scale planes
 /// the same way, all page-locked.
-pub(in crate::backend::device) struct Mirror {
+pub(super) struct Mirror {
     host: *mut c_void,
-    bytes: usize,
     /// Byte offsets of the six regions: gate, up and down blocks, then
     /// gate, up and down scale planes.
     at: [usize; 6],
@@ -47,7 +47,7 @@ impl Mirror {
             unsafe { cust::sys::cuMemHostAlloc(&mut host, bytes, 0) },
             "pinning an expert mirror",
         )?;
-        let mirror = Mirror { host, bytes, at, per };
+        let mirror = Mirror { host, at, per };
         // SAFETY: the allocation is `bytes` long and nothing else holds it.
         let whole = unsafe { std::slice::from_raw_parts_mut(host.cast::<u8>(), bytes) };
         let mut regions: Vec<&mut [u8]> = Vec::with_capacity(6);
@@ -62,7 +62,7 @@ impl Mirror {
                 let stack = stacks[i % 3];
                 let per = per[i];
                 // A few threads a region: the regroup is a memcpy in a
-                // different order, and a block's experts are half a gigabyte.
+                // different order.
                 let lanes = 4;
                 let chunk = stack.count().div_ceil(lanes);
                 for (lane, part) in region.chunks_mut(chunk * per).enumerate() {
@@ -95,11 +95,6 @@ impl Mirror {
         std::array::from_fn(|i| ((base + self.at[i] + e * self.per[i]) as *const c_void, self.per[i]))
     }
 
-    /// Bytes pinned for this block.
-    pub(super) fn bytes(&self) -> usize {
-        self.bytes
-    }
-
     /// The mirror as the host kernels' source of `set`'s experts, which
     /// are the same bytes in the device's layout: pinned, so a pass never
     /// waits on a trimmed mapping.
@@ -108,7 +103,7 @@ impl Mirror {
     }
 }
 
-pub(in crate::backend::device) struct MirrorSource<'a> {
+pub(super) struct MirrorSource<'a> {
     mirror: &'a Mirror,
     set: &'a ExpertSet,
 }
@@ -117,16 +112,12 @@ pub(in crate::backend::device) struct MirrorSource<'a> {
 unsafe impl Sync for MirrorSource<'_> {}
 
 impl Source for MirrorSource<'_> {
-    fn shape(&self, stack: Stack) -> (crate::quant::Quant, usize, usize) {
+    fn shape(&self, stack: Stack) -> Shape {
         self.set.shape(stack)
     }
 
     fn weight(&self, stack: Stack, e: usize) -> Weight<'_> {
-        let i = match stack {
-            Stack::Gate => 0,
-            Stack::Up => 1,
-            Stack::Down => 2,
-        };
+        let i = stack as usize;
         let regions = self.mirror.expert(e);
         let (blocks, plane) = (regions[i], regions[3 + i]);
         // SAFETY: both regions are inside the pinned allocation, written
@@ -138,7 +129,7 @@ impl Source for MirrorSource<'_> {
             )
         };
         let s = self.set.stack(stack);
-        Weight::Grouped { bytes, unit: s.quant().device_block_bytes(), nb: s.blocks_per_row(), scales }
+        Weight::Grouped { bytes, block_bytes: s.quant().device_block_bytes(), nb: s.blocks_per_row(), scales }
     }
 }
 
