@@ -172,13 +172,9 @@ OPTIONS:
       --gguf FILE     run a GGUF model, dispatching on the architecture the
                       file declares, with the tokenizer the file carries
       --expert-cache SIZE
-                      device memory for the expert cache of a GGUF model
-                      whose experts stream (a mixture of experts too large
-                      for the card): 2g, 1500m, or bytes. Default: all the
-                      resident weights leave, less a reserve for the pass.
-                      More is a higher hit rate and fewer bytes over the bus
-                      a token; the dashboard shows the rate on its experts line.
-                      Ignored by a model with no experts
+                      device memory for a streamed model's expert cache,
+                      2g, 1500m or bytes; default what the resident weights
+                      leave, less a reserve. Ignored without experts
       --onnx DIR      run an ONNX export from DIR. A decoder.onnx beside a
                       decoder_with_past.onnx is the KV-cached engine; a
                       model.onnx is the full-recompute one
