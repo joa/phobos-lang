@@ -1,12 +1,10 @@
 // Q4_K against Q8: eight runs of 32, a 6-bit scale and minimum apiece; the
 // low nibbles of a 32-byte plane are one run and the high nibbles the next.
 
-use super::{Block, Lanes, Quants};
+use super::{Acc, Block, Q8Block, Quants, RUN, RUNS, SUMS};
 
-const RUNS: usize = 8;
-const RUN: usize = 32;
 const SCALES: usize = 4;
-pub(super) const QS: usize = SCALES + 12;
+const QS: usize = SCALES + 12;
 
 /// A block's header: `d`, `dmin`, the runs' scale indices, and the minimum
 /// indices doubled up to one a Q8 sum of sixteen, for the multiply-add
@@ -16,7 +14,7 @@ pub(super) struct Header {
     pub(super) d: f32,
     pub(super) dmin: f32,
     pub(super) scales: [i16; RUNS],
-    pub(super) mins: [i16; 2 * RUNS],
+    pub(super) mins: [i16; SUMS],
 }
 
 impl Header {
@@ -40,24 +38,24 @@ impl Header {
             set(run, (p[run + 4] & 0x0f) | ((p[run - 4] >> 6) << 4), (p[run + 4] >> 4) | ((p[run] >> 6) << 4));
         }
     }
+}
 
+#[derive(Default)]
+pub(super) struct Unpacked {
+    pub(super) header: Header,
+    pub(super) q: Quants,
 }
 
 /// The dot without vectors: each run's scaled dot less its minimum times
 /// its Q8 sums, times the run's activation scale, into the first lane.
-pub(super) fn dot_plain(h: &Header, q: &Quants, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
+pub(super) fn dot_plain(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
+    let h = &u.header;
     for run in 0..RUNS {
-        let (w, a) = (&q.0[run * RUN..][..RUN], &qs[run * RUN..][..RUN]);
-        let dot = w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum::<i32>();
-        let min = i32::from(sums[2 * run]) + i32::from(sums[2 * run + 1]);
-        acc.0[0] += da[run] * (h.d * f32::from(h.scales[run]) * dot as f32 - h.dmin * f32::from(h.mins[2 * run]) * min as f32);
+        let (w, a) = (&u.q.0[run * RUN..][..RUN], &block.qs[run * RUN..][..RUN]);
+        let dot = super::dot_i32(w, a);
+        let min = i32::from(block.sums[2 * run]) + i32::from(block.sums[2 * run + 1]);
+        acc.0[0] += block.d[run] * (h.d * f32::from(h.scales[run]) * dot as f32 - h.dmin * f32::from(h.mins[2 * run]) * min as f32);
     }
-}
-
-#[derive(Default)]
-pub(crate) struct Unpacked {
-    pub(super) header: Header,
-    pub(super) q: Quants,
 }
 
 pub(super) struct Scalar;
@@ -77,8 +75,8 @@ impl Block for Scalar {
         }
     }
 
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
-        dot_plain(&u.header, &u.q, qs, sums, da, acc);
+    unsafe fn dot(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
+        dot_plain(u, block, acc);
     }
 }
 
@@ -86,16 +84,16 @@ impl Block for Scalar {
 pub(super) use avx2::Avx2;
 
 #[cfg(target_arch = "x86_64")]
-mod avx2 {
+pub(super) mod avx2 {
     use std::arch::x86_64::*;
 
     use super::super::x86::{dot_runs32, half, min_term};
-    use super::{Block, Lanes, QS, Unpacked};
-
-    pub(crate) struct Avx2;
+    use super::super::{Acc, Q8Block, avx2_block};
+    use super::{QS, Unpacked};
 
     #[target_feature(enable = "avx2,f16c")]
     unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
+        // A closure, since a `#[target_feature]` function is not `Fn`.
         u.header.read(bytes, |bits| half(bits));
         // SAFETY: the caller has AVX2; a block holds the four planes.
         unsafe {
@@ -109,23 +107,16 @@ mod avx2 {
         }
     }
 
-    impl Block for Avx2 {
-        const AVX2: bool = true;
-        type Unpacked = Unpacked;
-
-        #[inline(always)]
-        unsafe fn unpack(bytes: &[u8], _d: Option<u16>, u: &mut Unpacked) {
-            // SAFETY: the caller has AVX2.
-            unsafe { unpack(bytes, _d, u) }
-        }
-
-        #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
-            // SAFETY: the caller has AVX2 and FMA.
-            unsafe {
-                dot_runs32(&u.q, &u.header.scales, qs, u.header.d, da, acc);
-                min_term(&u.header.mins, sums, u.header.dmin, da, acc);
-            }
+    /// The dot for Q4_K's and Q5_K's unpacked quants alike.
+    #[target_feature(enable = "avx2,fma")]
+    pub(in crate::simd) unsafe fn dot(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
+        let h = &u.header;
+        // SAFETY: the caller has AVX2 and FMA.
+        unsafe {
+            dot_runs32(&u.q, &h.scales, block.qs, h.d, block.d, acc);
+            min_term(&h.mins, block.sums, h.dmin, block.d, acc);
         }
     }
+
+    avx2_block!(Avx2, Unpacked, unpack, dot);
 }

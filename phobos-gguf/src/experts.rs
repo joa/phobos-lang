@@ -100,13 +100,13 @@ impl ExpertStack {
         Ok(())
     }
 
-    /// Bytes expert `e` takes in the grouped layout the device kernels read:
-    /// [`grouped_len`] of its rows at the format's device block.
+    /// Bytes one expert takes in the grouped layout the device kernels
+    /// read: [`grouped_len`] of its rows at the format's device block.
     pub fn grouped_bytes(&self) -> usize {
         grouped_len(self.n, self.blocks_per_row(), self.quant.device_block().1)
     }
 
-    /// Elements of expert `e`'s grouped scale plane: one `f16` a block,
+    /// Elements of one expert's grouped scale plane: one `f16` a block,
     /// rows regrouped by eights like the blocks. The K-quant kernels read
     /// it only for a format whose scale is not in the block on the device
     /// (Q6_K); the rest take it as an operand and never read it.
@@ -155,6 +155,18 @@ pub struct ExpertSet {
     pub down: ExpertStack,
 }
 
+/// One of the three, in the order the set holds them.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Stack {
+    Gate,
+    Up,
+    Down,
+}
+
+impl Stack {
+    pub const ALL: [Stack; 3] = [Stack::Gate, Stack::Up, Stack::Down];
+}
+
 impl ExpertSet {
     pub fn load(gguf: &Gguf, prefix: &str, count: usize, d_model: usize, d_ff: usize) -> Result<Arc<ExpertSet>> {
         let stack = |name: &str, n, k| ExpertStack::load(gguf, &format!("{prefix}.ffn_{name}_exps.weight"), count, n, k);
@@ -167,6 +179,14 @@ impl ExpertSet {
 
     pub fn count(&self) -> usize {
         self.gate.count()
+    }
+
+    pub fn stack(&self, stack: Stack) -> &ExpertStack {
+        match stack {
+            Stack::Gate => &self.gate,
+            Stack::Up => &self.up,
+            Stack::Down => &self.down,
+        }
     }
 
     /// Bytes of all three stacks, as the file holds them.

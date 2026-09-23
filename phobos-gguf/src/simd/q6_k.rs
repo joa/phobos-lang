@@ -2,23 +2,21 @@
 // no minimum, the quants six bits around 32. The offset comes off through
 // the Q8 sums, so the quants are dotted as they are stored, unsigned.
 
-use super::{Block, Lanes, Quants};
+use super::{Acc, Block, Q8Block, Quants, SUMS, SUM_RUN};
 
-const RUNS: usize = 16;
 /// Elements whose quants interleave across one stretch of `ql` and `qh`.
 const GROUP: usize = 128;
 const QUARTER: usize = GROUP / 4;
 const OFFSET: f32 = 32.0;
 
-const QL: usize = 0;
-const QH: usize = QL + 128;
+const QH: usize = 128;
 const SCALES: usize = QH + 64;
-const D: usize = SCALES + RUNS;
+const D: usize = SCALES + SUMS;
 
 #[derive(Default)]
-pub(crate) struct Unpacked {
+pub(super) struct Unpacked {
     d: f32,
-    scales: [i16; RUNS],
+    scales: [i16; SUMS],
     q: Quants,
 }
 
@@ -31,7 +29,6 @@ impl Unpacked {
             *scale = i16::from(b as i8);
         }
     }
-
 }
 
 pub(super) struct Scalar;
@@ -43,7 +40,7 @@ impl Block for Scalar {
     unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut Unpacked) {
         u.read_header(bytes, d, phobos_base::half::f16_to_f32);
         for g in 0..2 {
-            let ql = &bytes[QL + g * GROUP / 2..];
+            let ql = &bytes[g * GROUP / 2..];
             let qh = &bytes[QH + g * GROUP / 4..];
             let group = &mut u.q.0[g * GROUP..][..GROUP];
             for (l, &high) in qh[..QUARTER].iter().enumerate() {
@@ -56,12 +53,12 @@ impl Block for Scalar {
         }
     }
 
-    unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
+    unsafe fn dot(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
         // A run of 16 at a time, its scaled dot less the offset times its
         // Q8 sum, scaled by its activation run's scale.
-        for (i, (&scale, (w, a))) in u.scales.iter().zip(u.q.0.chunks_exact(RUNS).zip(qs.chunks_exact(RUNS))).enumerate() {
-            let dot = w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum::<i32>();
-            acc.0[0] += da[i / 2] * u.d * f32::from(scale) * (dot as f32 - OFFSET * f32::from(sums[i]));
+        for (i, (&scale, (w, a))) in u.scales.iter().zip(u.q.0.chunks_exact(SUM_RUN).zip(block.qs.chunks_exact(SUM_RUN))).enumerate() {
+            let dot = super::dot_i32(w, a);
+            acc.0[0] += block.d[i / 2] * u.d * f32::from(scale) * (dot as f32 - OFFSET * f32::from(block.sums[i]));
         }
     }
 }
@@ -74,19 +71,19 @@ mod avx2 {
     use std::arch::x86_64::*;
 
     use super::super::x86::{dot_runs16, half, min_term};
-    use super::{Block, GROUP, Lanes, OFFSET, QH, QL, Unpacked};
-
-    pub(crate) struct Avx2;
+    use super::super::{Acc, Q8Block, avx2_block};
+    use super::{GROUP, OFFSET, QH, Unpacked};
 
     #[target_feature(enable = "avx2,f16c")]
     unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut Unpacked) {
+        // A closure, since a `#[target_feature]` function is not `Fn`.
         u.read_header(bytes, d, |bits| half(bits));
         // SAFETY: the caller has AVX2; a block holds both groups.
         unsafe {
             let m4 = _mm256_set1_epi8(0x0f);
             let m3 = _mm256_set1_epi8(3);
             for g in 0..2 {
-                let ql = bytes.as_ptr().add(QL + g * GROUP / 2);
+                let ql = bytes.as_ptr().add(g * GROUP / 2);
                 let low = [_mm256_loadu_si256(ql.cast()), _mm256_loadu_si256(ql.add(32).cast())];
                 let high = _mm256_loadu_si256(bytes.as_ptr().add(QH + g * GROUP / 4).cast());
                 // Quarter `i` takes its nibble from plane `i % 2`, the top
@@ -102,23 +99,14 @@ mod avx2 {
         }
     }
 
-    impl Block for Avx2 {
-        const AVX2: bool = true;
-        type Unpacked = Unpacked;
-
-        #[inline(always)]
-        unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut Unpacked) {
-            // SAFETY: the caller has AVX2.
-            unsafe { unpack(bytes, d, u) }
-        }
-
-        #[inline(always)]
-        unsafe fn dot(u: &Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes) {
-            // SAFETY: the caller has AVX2 and FMA.
-            unsafe {
-                dot_runs16(&u.q, &u.scales, qs, u.d, da, acc);
-                min_term(&u.scales, sums, u.d * OFFSET, da, acc);
-            }
+    #[target_feature(enable = "avx2,fma")]
+    unsafe fn dot(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
+        // SAFETY: the caller has AVX2 and FMA.
+        unsafe {
+            dot_runs16(&u.q, &u.scales, block.qs, u.d, block.d, acc);
+            min_term(&u.scales, block.sums, u.d * OFFSET, block.d, acc);
         }
     }
+
+    avx2_block!(Avx2, Unpacked, unpack, dot);
 }

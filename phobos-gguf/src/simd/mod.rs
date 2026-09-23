@@ -5,19 +5,18 @@
 //! The activation is quantized to eight bits with a scale a run of 32, as
 //! the device's is, and the sums of each sixteen quants, so a block's
 //! minimums (or Q6_K's offset) fold into one integer term a run. A weight
-//! row's blocks are unpacked once, to aligned byte arrays either path
-//! reads, and dotted against every activation row with each run's
-//! eight-lane sums scaled into one float accumulator, so a row costs one
-//! horizontal sum. The weights come from a [`Source`]: the file's
-//! row-major blocks, or the device's grouped layout in pinned memory,
-//! which a long pass wants since the mapping's pages get trimmed.
+//! block is unpacked once to an aligned byte array either path reads and
+//! dotted against every activation row, each run's eight-lane sums scaled
+//! into one float accumulator, so a row costs one horizontal sum. The
+//! weights come from a [`Source`]: the file's row-major blocks, or the
+//! device's grouped layout in pinned memory.
 
 use std::sync::OnceLock;
 
 use anyhow::{Result, bail, ensure};
 use rayon::prelude::*;
 
-use crate::experts::{ExpertSet, ExpertStack};
+use crate::experts::{ExpertSet, Stack};
 use crate::quant::Quant;
 use crate::quant::grouped::RAW_GROUP;
 
@@ -28,7 +27,7 @@ mod q6_k;
 mod tests;
 
 /// Elements of one activation block, the K-quant super-block.
-pub const BLOCK: usize = 256;
+const BLOCK: usize = 256;
 /// Elements sharing one activation scale.
 const RUN: usize = 32;
 const RUNS: usize = BLOCK / RUN;
@@ -49,24 +48,31 @@ pub struct Q8Act {
     sums: Vec<i16>,
 }
 
+/// One row's block: its runs' scales, its quants and its sums.
+struct Q8Block<'a> {
+    d: &'a [f32; RUNS],
+    qs: &'a [i8; BLOCK],
+    sums: &'a [i16; SUMS],
+}
+
 impl Q8Act {
-    pub fn quantize(x: &[f32], rows: usize, k: usize) -> Q8Act {
+    pub fn quantize(x: &[f32], rows: usize, k: usize) -> Result<Q8Act> {
         let mut act = Q8Act::default();
-        act.quantize_into(x, rows, k);
-        act
+        act.quantize_into(x, rows, k)?;
+        Ok(act)
     }
 
     /// Requantizes `x`, `[rows, k]`, into the buffers already held.
-    pub fn quantize_into(&mut self, x: &[f32], rows: usize, k: usize) {
-        assert!(k.is_multiple_of(BLOCK) && x.len() == rows * k, "a [{rows}, {k}] activation of {} elements", x.len());
+    pub fn quantize_into(&mut self, x: &[f32], rows: usize, k: usize) -> Result<()> {
+        ensure!(k.is_multiple_of(BLOCK) && x.len() == rows * k, "a [{rows}, {k}] activation of {} elements", x.len());
         let blocks = rows * k / BLOCK;
         (self.rows, self.k) = (rows, k);
         self.d.resize(blocks * RUNS, 0.0);
         self.qs.resize(blocks * BLOCK, 0);
         self.sums.resize(blocks * SUMS, 0);
+        let nb = k / BLOCK;
         for (i, block) in x.chunks_exact(BLOCK).enumerate() {
-            let (r, b) = (i / self.blocks(), i % self.blocks());
-            let at = b * rows + r;
+            let at = (i % nb) * rows + i / nb;
             let qs = &mut self.qs[at * BLOCK..][..BLOCK];
             for ((d, run), qrun) in self.d[at * RUNS..][..RUNS].iter_mut().zip(block.chunks_exact(RUN)).zip(qs.chunks_exact_mut(RUN)) {
                 let absmax = run.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
@@ -80,25 +86,34 @@ impl Q8Act {
                 *sum = run.iter().map(|&q| i16::from(q)).sum();
             }
         }
-    }
-
-    pub fn rows(&self) -> usize {
-        self.rows
-    }
-
-    pub fn k(&self) -> usize {
-        self.k
+        Ok(())
     }
 
     fn blocks(&self) -> usize {
         self.k / BLOCK
     }
 
-    /// Row `r`'s block `b`: its runs' scales, its quants and its sums.
-    fn block(&self, r: usize, b: usize) -> (&[f32], &[i8], &[i16]) {
+    fn block(&self, r: usize, b: usize) -> Q8Block<'_> {
         let at = b * self.rows + r;
-        (&self.d[at * RUNS..][..RUNS], &self.qs[at * BLOCK..][..BLOCK], &self.sums[at * SUMS..][..SUMS])
+        Q8Block {
+            d: self.d[at * RUNS..][..RUNS].try_into().expect("a block's runs"),
+            qs: self.qs[at * BLOCK..][..BLOCK].try_into().expect("a block"),
+            sums: self.sums[at * SUMS..][..SUMS].try_into().expect("a block's sums"),
+        }
     }
+}
+
+/// `silu(gate) * up`.
+pub fn swiglu(gate: f32, up: f32) -> f32 {
+    gate / (1.0 + (-gate).exp()) * up
+}
+
+/// The format, rows and columns of one expert stack.
+#[derive(Clone, Copy)]
+pub struct Shape {
+    pub quant: Quant,
+    pub n: usize,
+    pub k: usize,
 }
 
 /// One expert's `[n, k]` blocks, wherever they are.
@@ -110,7 +125,7 @@ pub enum Weight<'a> {
     /// of each of the eight side by side, at the format's device stride;
     /// Q6_K's trailing scale is in `scales`, one a block in the same
     /// order.
-    Grouped { bytes: &'a [u8], unit: usize, nb: usize, scales: &'a [u16] },
+    Grouped { bytes: &'a [u8], block_bytes: usize, nb: usize, scales: &'a [u16] },
 }
 
 impl Weight<'_> {
@@ -119,44 +134,36 @@ impl Weight<'_> {
     fn block(&self, j: usize, b: usize, nb: usize) -> (&[u8], Option<u16>) {
         match *self {
             Weight::Flat { bytes, block_bytes } => (&bytes[(j * nb + b) * block_bytes..][..block_bytes], None),
-            Weight::Grouped { bytes, unit, scales, .. } => {
+            Weight::Grouped { bytes, block_bytes, scales, .. } => {
                 let at = ((j / RAW_GROUP) * nb + b) * RAW_GROUP + j % RAW_GROUP;
-                (&bytes[at * unit..][..unit], Some(scales[at]))
+                (&bytes[at * block_bytes..][..block_bytes], Some(scales[at]))
             }
         }
     }
 
-    fn holds(&self, n: usize, nb: usize) -> bool {
+    /// Whether the bytes hold `n` rows of `nb` blocks.
+    fn covers(&self, n: usize, nb: usize) -> bool {
         match *self {
             Weight::Flat { bytes, block_bytes } => bytes.len() >= n * nb * block_bytes,
-            Weight::Grouped { bytes, unit, nb: have, scales } => {
+            Weight::Grouped { bytes, block_bytes, nb: rows_of, scales } => {
                 let blocks = n.div_ceil(RAW_GROUP) * RAW_GROUP * nb;
-                have == nb && bytes.len() >= blocks * unit && scales.len() >= blocks
+                rows_of == nb && bytes.len() >= blocks * block_bytes && scales.len() >= blocks
             }
         }
     }
-}
-
-/// The three stacks of a block's routed feed-forward.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Stack {
-    Gate,
-    Up,
-    Down,
 }
 
 /// Where a block's experts are read from.
 pub trait Source: Sync {
-    /// The format, `n` and `k` of one stack.
-    fn shape(&self, stack: Stack) -> (Quant, usize, usize);
+    fn shape(&self, stack: Stack) -> Shape;
     /// Expert `e`'s blocks in one stack.
     fn weight(&self, stack: Stack, e: usize) -> Weight<'_>;
 }
 
 impl Source for ExpertSet {
-    fn shape(&self, stack: Stack) -> (Quant, usize, usize) {
+    fn shape(&self, stack: Stack) -> Shape {
         let s = self.stack(stack);
-        (s.quant(), s.n(), s.k())
+        Shape { quant: s.quant(), n: s.n(), k: s.k() }
     }
 
     fn weight(&self, stack: Stack, e: usize) -> Weight<'_> {
@@ -165,20 +172,16 @@ impl Source for ExpertSet {
     }
 }
 
-impl ExpertSet {
-    pub fn stack(&self, stack: Stack) -> &ExpertStack {
-        match stack {
-            Stack::Gate => &self.gate,
-            Stack::Up => &self.up,
-            Stack::Down => &self.down,
-        }
-    }
+/// Whether the host kernels can run a source: every stack in a format they
+/// have.
+pub fn supports(source: &impl Source) -> bool {
+    Stack::ALL.iter().all(|&stack| matches!(source.shape(stack).quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K))
 }
 
 /// One block's quants unpacked to a byte apiece, in element order, aligned
 /// for the vector loads.
 #[repr(C, align(32))]
-pub(crate) struct Quants([u8; BLOCK]);
+struct Quants([u8; BLOCK]);
 
 impl Default for Quants {
     fn default() -> Quants {
@@ -190,11 +193,22 @@ impl Default for Quants {
 /// the scalar path the first.
 #[repr(C, align(32))]
 #[derive(Default)]
-pub(crate) struct Lanes(pub(crate) [f32; 8]);
+struct Acc([f32; 8]);
+
+impl Acc {
+    fn sum(&self) -> f32 {
+        self.0.iter().sum()
+    }
+}
+
+/// The integer dot of unpacked quants with Q8 quants, without vectors.
+fn dot_i32(w: &[u8], a: &[i8]) -> i32 {
+    w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum()
+}
 
 /// One format's block arithmetic against a Q8 block, in one instruction
 /// set.
-pub(crate) trait Block {
+trait Block {
     /// Whether the implementation runs only under AVX2.
     const AVX2: bool;
     type Unpacked: Default;
@@ -206,191 +220,144 @@ pub(crate) trait Block {
     /// An AVX2 implementation runs only on a CPU that has it.
     unsafe fn unpack(bytes: &[u8], d: Option<u16>, into: &mut Self::Unpacked);
 
-    /// The block's dot with a Q8 block whose runs are scaled by `da`, the
-    /// minimums' correction taken off, added into `acc`.
+    /// The block's dot with a Q8 block, the minimums' correction taken
+    /// off, added into `acc`.
     ///
     /// # Safety
     /// As [`Block::unpack`].
-    unsafe fn dot(u: &Self::Unpacked, qs: &[i8], sums: &[i16], da: &[f32], acc: &mut Lanes);
+    unsafe fn dot(u: &Self::Unpacked, block: &Q8Block, acc: &mut Acc);
 }
 
+/// The AVX2 side of a format: a unit type whose [`Block`] impl forwards to
+/// the format's `#[target_feature]` functions, which the trait's methods
+/// cannot carry themselves.
+macro_rules! avx2_block {
+    ($name:ident, $unpacked:ty, $unpack:path, $dot:path) => {
+        pub(in crate::simd) struct $name;
+
+        impl crate::simd::Block for $name {
+            const AVX2: bool = true;
+            type Unpacked = $unpacked;
+
+            #[inline(always)]
+            unsafe fn unpack(bytes: &[u8], d: Option<u16>, u: &mut $unpacked) {
+                // SAFETY: the caller has AVX2.
+                unsafe { $unpack(bytes, d, u) }
+            }
+
+            #[inline(always)]
+            unsafe fn dot(u: &$unpacked, block: &crate::simd::Q8Block, acc: &mut crate::simd::Acc) {
+                // SAFETY: the caller has AVX2.
+                unsafe { $dot(u, block, acc) }
+            }
+        }
+    };
+}
+pub(crate) use avx2_block;
+
 /// `yt[(j - j0) * rows + r] = sum_i w[j, i] x[r, i]` over the weight rows
-/// from `j0` that `yt` has room for.
+/// from `j0` that `yt` has room for. One row is dotted block by block as
+/// it is unpacked; more rows unpack a weight row once into `row` and dot
+/// each against it.
 #[inline(always)]
-unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
+unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32], row: &mut Vec<F::Unpacked>) {
     let (rows, nb) = (act.rows, act.blocks());
-    let mut row: Vec<F::Unpacked> = (0..nb).map(|_| F::Unpacked::default()).collect();
+    if rows == 1 {
+        let mut u = F::Unpacked::default();
+        for (j, out) in (j0..).zip(yt.iter_mut()) {
+            let mut acc = Acc::default();
+            for b in 0..nb {
+                let (bytes, d) = weight.block(j, b, nb);
+                // SAFETY: the caller's contract, see `Block::unpack`.
+                unsafe {
+                    F::unpack(bytes, d, &mut u);
+                    F::dot(&u, &act.block(0, b), &mut acc);
+                }
+            }
+            *out = acc.sum();
+        }
+        return;
+    }
+    row.resize_with(nb, Default::default);
     for (j, out) in (j0..).zip(yt.chunks_exact_mut(rows)) {
         for (b, u) in row.iter_mut().enumerate() {
             let (bytes, d) = weight.block(j, b, nb);
-            // SAFETY: the caller's contract, see `Block::unpack`.
+            // SAFETY: as above.
             unsafe { F::unpack(bytes, d, u) };
         }
-        for (r, acc) in out.iter_mut().enumerate() {
-            let mut lanes = Lanes::default();
+        for (r, acc_out) in out.iter_mut().enumerate() {
+            let mut acc = Acc::default();
             for (b, u) in row.iter().enumerate() {
-                let (da, qs, q8_sums) = act.block(r, b);
                 // SAFETY: as above.
-                unsafe { F::dot(u, qs, q8_sums, da, &mut lanes) };
+                unsafe { F::dot(u, &act.block(r, b), &mut acc) };
             }
-            *acc = lanes.0.iter().sum();
+            *acc_out = acc.sum();
         }
     }
 }
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma,f16c")]
-unsafe fn rows_dot_avx2<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
+unsafe fn rows_dot_avx2<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32], row: &mut Vec<F::Unpacked>) {
     // SAFETY: the caller checked for AVX2.
-    unsafe { rows_dot::<F>(weight, j0, act, yt) }
+    unsafe { rows_dot::<F>(weight, j0, act, yt, row) }
 }
 
 /// `rows_dot` in the instruction set `F` is written for.
-fn rows_dot_in<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) {
-    // SAFETY: an AVX2 implementation is chosen only after `avx2()` said
-    // the CPU has it.
+fn rows_dot_for<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32], row: &mut Vec<F::Unpacked>) {
+    // SAFETY: an AVX2 implementation is chosen only after `Isa::detect`
+    // said the CPU has it.
     unsafe {
         #[cfg(target_arch = "x86_64")]
         if F::AVX2 {
-            return rows_dot_avx2::<F>(weight, j0, act, yt);
+            return rows_dot_avx2::<F>(weight, j0, act, yt, row);
         }
-        rows_dot::<F>(weight, j0, act, yt)
+        rows_dot::<F>(weight, j0, act, yt, row)
     }
 }
 
-/// The GEMM in one format and instruction set. Threaded, the weight rows
-/// are dealt out in contiguous chunks, each thread's outputs its own;
-/// otherwise it runs where it is called, for a caller that is itself one
-/// of many tasks.
-fn gemm_with<F: Block>(weight: &Weight, n: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) {
-    if !threaded {
-        return rows_dot_in::<F>(weight, 0, act, yt);
+/// The instruction set the kernels run in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Isa {
+    Scalar,
+    Avx2,
+}
+
+impl Isa {
+    fn detect() -> Isa {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") && std::is_x86_feature_detected!("f16c") {
+            return Isa::Avx2;
+        }
+        Isa::Scalar
     }
-    let rows = act.rows;
-    // Two tasks a thread, but never a task under sixteen rows: waking a
-    // worker costs more than that many rows of one activation row.
-    let chunk = n.div_ceil(pool().current_num_threads() * 2).max(16);
-    pool().install(|| {
-        yt.par_chunks_mut(chunk * rows)
-            .enumerate()
-            .for_each(|(c, out)| rows_dot_in::<F>(weight, c * chunk, act, out))
-    });
 }
 
 /// Whether the vector path runs here.
 pub fn avx2() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma") && std::is_x86_feature_detected!("f16c")
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    Isa::detect() == Isa::Avx2
 }
 
-/// [`gemm`] over a weight, in the instruction set asked for.
-fn gemm_raw(quant: Quant, wide: bool, weight: &Weight, n: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) -> Result<()> {
-    ensure!(weight.holds(n, act.blocks()) && yt.len() == n * act.rows, "a [{n}, {}] weight against {} activation rows", act.k, act.rows);
+/// The GEMM of `weight`'s rows from `j0` against `act` into `yt`, in the
+/// shape's format, on the calling thread: the callers are themselves the
+/// pool's tasks.
+fn gemm(shape: &Shape, isa: Isa, weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
+    ensure!(shape.k == act.k && weight.covers(shape.n, act.blocks()), "a [{}, {}] weight against a [{}, {}] activation", shape.n, shape.k, act.rows, act.k);
+    ensure!(yt.len().is_multiple_of(act.rows) && j0 + yt.len() / act.rows <= shape.n, "{} outputs from row {j0} of {}", yt.len(), shape.n);
     macro_rules! by_format {
         ($set:ident) => {
-            match quant {
-                Quant::Q4_K => gemm_with::<q4_k::$set>(weight, n, act, yt, threaded),
-                Quant::Q5_K => gemm_with::<q5_k::$set>(weight, n, act, yt, threaded),
-                Quant::Q6_K => gemm_with::<q6_k::$set>(weight, n, act, yt, threaded),
+            match shape.quant {
+                Quant::Q4_K => rows_dot_for::<q4_k::$set>(weight, j0, act, yt, &mut Vec::new()),
+                Quant::Q5_K => rows_dot_for::<q5_k::$set>(weight, j0, act, yt, &mut Vec::new()),
+                Quant::Q6_K => rows_dot_for::<q6_k::$set>(weight, j0, act, yt, &mut Vec::new()),
                 other => bail!("no host expert kernel for {}", other.name()),
             }
         };
     }
-    #[cfg(target_arch = "x86_64")]
-    if wide {
-        by_format!(Avx2);
-        return Ok(());
-    }
-    let _ = wide;
-    by_format!(Scalar);
-    Ok(())
-}
-
-/// The weight rows from `j0` that `yt` has room for, on the calling
-/// thread: one task of a GEMM spread over the pool by rows.
-fn gemm_rows(quant: Quant, weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
-    macro_rules! by_format {
-        ($set:ident) => {
-            match quant {
-                Quant::Q4_K => rows_dot_in::<q4_k::$set>(weight, j0, act, yt),
-                Quant::Q5_K => rows_dot_in::<q5_k::$set>(weight, j0, act, yt),
-                Quant::Q6_K => rows_dot_in::<q6_k::$set>(weight, j0, act, yt),
-                other => bail!("no host expert kernel for {}", other.name()),
-            }
-        };
-    }
-    #[cfg(target_arch = "x86_64")]
-    if avx2() {
-        by_format!(Avx2);
-        return Ok(());
-    }
-    by_format!(Scalar);
-    Ok(())
-}
-
-/// `yt[j * rows + r] = sum_i w[j, i] x[r, i]` over expert `e`'s `[n, k]`
-/// rows of one stack: the outputs transposed, so each thread's rows are
-/// contiguous.
-pub fn gemm(source: &impl Source, stack: Stack, e: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
-    gemm_in(source, stack, e, act, yt, true)
-}
-
-fn gemm_in(source: &impl Source, stack: Stack, e: usize, act: &Q8Act, yt: &mut [f32], threaded: bool) -> Result<()> {
-    let (quant, n, k) = source.shape(stack);
-    ensure!(k == act.k, "a [{n}, {k}] expert against a {}-wide activation", act.k);
-    gemm_raw(quant, avx2(), &source.weight(stack, e), n, act, yt, threaded)
-}
-
-/// Whether [`expert_ffn`] can run a source on this host.
-pub fn supports(source: &impl Source) -> bool {
-    [Stack::Gate, Stack::Up, Stack::Down]
-        .iter()
-        .all(|&stack| matches!(source.shape(stack).0, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K))
-}
-
-/// What [`expert_ffn`] works in, kept between calls.
-#[derive(Default)]
-pub struct Scratch {
-    gate: Vec<f32>,
-    up: Vec<f32>,
-    h: Vec<f32>,
-    hact: Q8Act,
-    down: Vec<f32>,
-}
-
-/// Expert `e` over the activation's rows, each row's result scaled by its
-/// `weights[r]` and added into `out`, `[rows, d_model]`, the three GEMMs
-/// over the pool.
-pub fn expert_ffn(source: &impl Source, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut Scratch, out: &mut [f32]) -> Result<()> {
-    ffn_in(source, e, act, weights, scratch, out, true)
-}
-
-fn ffn_in(source: &impl Source, e: usize, act: &Q8Act, weights: &[f32], scratch: &mut Scratch, out: &mut [f32], threaded: bool) -> Result<()> {
-    let (rows, d, d_ff) = (act.rows, source.shape(Stack::Down).1, source.shape(Stack::Gate).1);
-    ensure!(weights.len() == rows && out.len() == rows * d, "{} weights and {} outputs for {rows} rows of {d}", weights.len(), out.len());
-    scratch.gate.resize(d_ff * rows, 0.0);
-    scratch.up.resize(d_ff * rows, 0.0);
-    gemm_in(source, Stack::Gate, e, act, &mut scratch.gate, threaded)?;
-    gemm_in(source, Stack::Up, e, act, &mut scratch.up, threaded)?;
-    scratch.h.resize(rows * d_ff, 0.0);
-    for (j, (g, u)) in scratch.gate.chunks_exact(rows).zip(scratch.up.chunks_exact(rows)).enumerate() {
-        for r in 0..rows {
-            scratch.h[r * d_ff + j] = g[r] / (1.0 + (-g[r]).exp()) * u[r];
-        }
-    }
-    scratch.hact.quantize_into(&scratch.h, rows, d_ff);
-    scratch.down.resize(d * rows, 0.0);
-    gemm_in(source, Stack::Down, e, &scratch.hact, &mut scratch.down, threaded)?;
-    for (i, y) in scratch.down.chunks_exact(rows).enumerate() {
-        for (r, &v) in y.iter().enumerate() {
-            out[r * d + i] += weights[r] * v;
-        }
+    match isa {
+        #[cfg(target_arch = "x86_64")]
+        Isa::Avx2 => by_format!(Avx2),
+        _ => by_format!(Scalar),
     }
     Ok(())
 }
@@ -403,37 +370,62 @@ pub struct Job {
     pub weights: Vec<f32>,
 }
 
-/// A worker's own scratch.
+/// A worker's scratch, kept across its jobs.
 #[derive(Default)]
 struct Worker {
     gathered: Vec<f32>,
     act: Q8Act,
-    scratch: Scratch,
+    gate: Vec<f32>,
+    up: Vec<f32>,
+    h: Vec<f32>,
+    hact: Q8Act,
+    down: Vec<f32>,
 }
 
 impl Worker {
-    /// One job's rows of output, `[rows, d]`, each scaled by its weight.
-    fn run(&mut self, source: &impl Source, job: &Job, x: &[f32], d: usize) -> Result<Vec<f32>> {
-        let n = job.rows.len();
+    /// One job's rows of output, `[rows, d]`, each scaled by its weight,
+    /// the three GEMMs on this thread.
+    fn run(&mut self, source: &impl Source, job: &Job, x: &[f32], isa: Isa) -> Result<Vec<f32>> {
+        let (gate, up, down) = (source.shape(Stack::Gate), source.shape(Stack::Up), source.shape(Stack::Down));
+        let (d, d_ff, rows) = (gate.k, gate.n, job.rows.len());
+        ensure!(job.weights.len() == rows, "{} weights for {rows} rows", job.weights.len());
         self.gathered.clear();
         for &r in &job.rows {
             self.gathered.extend_from_slice(&x[r * d..(r + 1) * d]);
         }
-        self.act.quantize_into(&self.gathered, n, d);
-        let mut y = vec![0.0; n * d];
-        ffn_in(source, job.expert, &self.act, &job.weights, &mut self.scratch, &mut y, false)?;
+        self.act.quantize_into(&self.gathered, rows, d)?;
+        self.gate.resize(d_ff * rows, 0.0);
+        self.up.resize(d_ff * rows, 0.0);
+        gemm(&gate, isa, &source.weight(Stack::Gate, job.expert), 0, &self.act, &mut self.gate)?;
+        gemm(&up, isa, &source.weight(Stack::Up, job.expert), 0, &self.act, &mut self.up)?;
+        // The GEMMs' outputs are `[d_ff, rows]`; the down GEMM wants its
+        // activation `[rows, d_ff]`.
+        self.h.resize(rows * d_ff, 0.0);
+        for (j, (g, u)) in self.gate.chunks_exact(rows).zip(self.up.chunks_exact(rows)).enumerate() {
+            for r in 0..rows {
+                self.h[r * d_ff + j] = swiglu(g[r], u[r]);
+            }
+        }
+        self.hact.quantize_into(&self.h, rows, d_ff)?;
+        self.down.resize(d * rows, 0.0);
+        gemm(&down, isa, &source.weight(Stack::Down, job.expert), 0, &self.hact, &mut self.down)?;
+        let mut y = vec![0.0; rows * d];
+        for (i, col) in self.down.chunks_exact(rows).enumerate() {
+            for (r, &v) in col.iter().enumerate() {
+                y[r * d + i] = job.weights[r] * v;
+            }
+        }
         Ok(y)
     }
 }
 
-/// The jobs over `x`, `[rows, d_model]`, the experts spread over the pool
-/// and each one's result scaled by its weights and added into `out`. Each
-/// job's rows come back on their own and are added here: a sum a worker
-/// would be the whole output apiece, most of it zero.
+/// The jobs over `x`, `[rows, d]`, the experts spread over the pool and
+/// each one's result added into `out`.
 pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, out: &mut [f32]) -> Result<()> {
-    let d = source.shape(Stack::Gate).2;
+    let d = source.shape(Stack::Gate).k;
     ensure!(x.len() == rows * d && out.len() == rows * d, "{} inputs and {} outputs for {rows} rows of {d}", x.len(), out.len());
-    let ys: Vec<Vec<f32>> = pool().install(|| jobs.par_iter().map_init(Worker::default, |w, job| w.run(source, job, x, d)).collect::<Result<_>>())?;
+    let isa = Isa::detect();
+    let ys: Vec<Vec<f32>> = pool().install(|| jobs.par_iter().map_init(Worker::default, |w, job| w.run(source, job, x, isa)).collect::<Result<_>>())?;
     for (job, y) in jobs.iter().zip(ys) {
         for (&r, y) in job.rows.iter().zip(y.chunks_exact(d)) {
             for (o, &v) in out[r * d..(r + 1) * d].iter_mut().zip(y) {
@@ -448,51 +440,53 @@ pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, o
 /// expert, so a handful of misses spread over every worker.
 const ROW_CHUNK: usize = 16;
 
-/// The jobs' experts over one row `x`, each GEMM spread over the pool by
-/// rows and every job's in one region: a decode step's misses, where an
-/// expert on its own thread would read at that thread's memory rate.
-/// Each expert's result, scaled by its weight, is added into `out`.
-pub fn experts_row(source: &impl Source, jobs: &[Job], x: &[f32], out: &mut [f32]) -> Result<()> {
+/// The experts `misses` names, each with its weight, over one row `x`:
+/// each GEMM spread over the pool by rows and every miss's in one region,
+/// for a decode step, where an expert on its own thread would read at
+/// that thread's memory rate. Each expert's weighted result is added into
+/// `out`.
+pub fn experts_row(source: &impl Source, misses: &[(usize, f32)], x: &[f32], out: &mut [f32]) -> Result<()> {
     let (gate, up, down) = (source.shape(Stack::Gate), source.shape(Stack::Up), source.shape(Stack::Down));
-    let (d, d_ff) = (gate.2, gate.1);
-    ensure!(x.len() == d && out.len() == d && jobs.iter().all(|j| j.rows.len() == 1), "one row of {d} for {} outputs", out.len());
-    let act = Q8Act::quantize(x, 1, d);
-    let mut gu: Vec<Vec<f32>> = jobs.iter().map(|_| vec![0.0; 2 * d_ff]).collect();
-    // Every job's gate and up rows, `ROW_CHUNK` a task.
+    let (d, d_ff) = (gate.k, gate.n);
+    ensure!(x.len() == d && out.len() == d, "one row of {d} for {} outputs", out.len());
+    let isa = Isa::detect();
+    let act = Q8Act::quantize(x, 1, d)?;
+    let mut gu: Vec<Vec<f32>> = misses.iter().map(|_| vec![0.0; 2 * d_ff]).collect();
     pool().install(|| {
-        gu.par_iter_mut().zip(jobs).try_for_each(|(gu, job)| {
+        gu.par_iter_mut().zip(misses).try_for_each(|(gu, &(e, _))| {
             let (g, u) = gu.split_at_mut(d_ff);
-            let weights = [(gate.0, source.weight(Stack::Gate, job.expert), g), (up.0, source.weight(Stack::Up, job.expert), u)];
-            weights.into_par_iter().try_for_each(|(quant, weight, out)| {
-                out.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm_rows(quant, &weight, c * ROW_CHUNK, &act, chunk))
+            [(g, &gate, Stack::Gate), (u, &up, Stack::Up)].into_par_iter().try_for_each(|(y, shape, stack)| {
+                let weight = source.weight(stack, e);
+                y.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm(shape, isa, &weight, c * ROW_CHUNK, &act, chunk))
             })
         })
     })?;
-    let hs: Vec<Q8Act> = gu
+    let hs = gu
         .iter()
         .map(|gu| {
             let (g, u) = gu.split_at(d_ff);
-            let h: Vec<f32> = g.iter().zip(u).map(|(&g, &u)| g / (1.0 + (-g).exp()) * u).collect();
+            let h: Vec<f32> = g.iter().zip(u).map(|(&g, &u)| swiglu(g, u)).collect();
             Q8Act::quantize(&h, 1, d_ff)
         })
-        .collect();
-    let mut ys: Vec<Vec<f32>> = jobs.iter().map(|_| vec![0.0; d]).collect();
+        .collect::<Result<Vec<_>>>()?;
+    let mut ys: Vec<Vec<f32>> = misses.iter().map(|_| vec![0.0; d]).collect();
     pool().install(|| {
-        ys.par_iter_mut().zip(jobs).zip(&hs).try_for_each(|((y, job), h)| {
-            let weight = source.weight(Stack::Down, job.expert);
-            y.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm_rows(down.0, &weight, c * ROW_CHUNK, h, chunk))
+        ys.par_iter_mut().zip(misses).zip(&hs).try_for_each(|((y, &(e, _)), h)| {
+            let weight = source.weight(Stack::Down, e);
+            y.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm(&down, isa, &weight, c * ROW_CHUNK, h, chunk))
         })
     })?;
-    for (job, y) in jobs.iter().zip(&ys) {
+    for (&(_, w), y) in misses.iter().zip(&ys) {
         for (o, &v) in out.iter_mut().zip(y) {
-            *o += job.weights[0] * v;
+            *o += w * v;
         }
     }
     Ok(())
 }
 
-/// Builds the pool with `threads` workers, before its first use. Once it
-/// exists the count stands.
+/// Builds the pool with `threads` workers, before its first use, for a
+/// benchmark that wants a count of its own. Once it exists the count
+/// stands.
 pub fn init_pool(threads: usize) -> Result<()> {
     let built = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -504,14 +498,12 @@ pub fn init_pool(threads: usize) -> Result<()> {
 
 static POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
-/// Threads the host kernels run on.
 pub fn threads() -> usize {
     pool().current_num_threads()
 }
 
 /// Workers the pool starts with: `PHOBOS_HOST_THREADS`, or half the
-/// logical CPUs, since two threads on one core share its vector units and
-/// measured slower than one (see `ENV.md`).
+/// logical CPUs, since two threads on one core share its vector units.
 fn default_threads() -> usize {
     std::env::var("PHOBOS_HOST_THREADS")
         .ok()
@@ -532,15 +524,15 @@ fn pool() -> &'static rayon::ThreadPool {
 
 /// The vector helpers the formats share.
 #[cfg(target_arch = "x86_64")]
-pub(crate) mod x86 {
+mod x86 {
     use std::arch::x86_64::*;
 
-    use super::{Lanes, Quants};
+    use super::{Acc, BLOCK, Quants, RUNS, SUMS};
 
     /// A half to a float.
     #[inline]
     #[target_feature(enable = "f16c")]
-    pub(crate) fn half(bits: u16) -> f32 {
+    pub(super) fn half(bits: u16) -> f32 {
         _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(i32::from(bits))))
     }
 
@@ -549,10 +541,8 @@ pub(crate) mod x86 {
     /// `d`, the run's index and the activation's run scale into `acc`:
     /// Q4_K and Q5_K.
     #[target_feature(enable = "avx2,fma")]
-    pub(crate) unsafe fn dot_runs32(q: &Quants, scales: &[i16; 8], qs: &[i8], d: f32, da: &[f32], acc: &mut Lanes) {
-        debug_assert!(qs.len() >= super::BLOCK && da.len() >= 8);
-        // SAFETY: the caller has AVX2 and FMA; `q` and `acc` are aligned
-        // and `qs` a block long.
+    pub(super) unsafe fn dot_runs32(q: &Quants, scales: &[i16; RUNS], qs: &[i8; BLOCK], d: f32, da: &[f32; RUNS], acc: &mut Acc) {
+        // SAFETY: the caller has AVX2 and FMA; `q` and `acc` are aligned.
         unsafe {
             let mut sum = _mm256_load_ps(acc.0.as_ptr());
             for (run, &scale) in scales.iter().enumerate() {
@@ -568,8 +558,7 @@ pub(crate) mod x86 {
     /// The same where every run of 16 has its own weight scale, two to an
     /// activation run: Q6_K.
     #[target_feature(enable = "avx2,fma")]
-    pub(crate) unsafe fn dot_runs16(q: &Quants, scales: &[i16; 16], qs: &[i8], d: f32, da: &[f32], acc: &mut Lanes) {
-        debug_assert!(qs.len() >= super::BLOCK && da.len() >= 8);
+    pub(super) unsafe fn dot_runs16(q: &Quants, scales: &[i16; SUMS], qs: &[i8; BLOCK], d: f32, da: &[f32; RUNS], acc: &mut Acc) {
         // SAFETY: as `dot_runs32`.
         unsafe {
             let mut sum = _mm256_load_ps(acc.0.as_ptr());
@@ -590,10 +579,8 @@ pub(crate) mod x86 {
     /// activation run, scaled by `dmin` and the run's activation scale and
     /// taken off `acc`: the minimums' or the offset's term.
     #[target_feature(enable = "avx2,fma")]
-    pub(crate) unsafe fn min_term(factors: &[i16; 16], sums: &[i16], dmin: f32, da: &[f32], acc: &mut Lanes) {
-        debug_assert!(sums.len() >= 16 && da.len() >= 8);
-        // SAFETY: the caller has AVX2 and FMA; `sums` holds a block's
-        // sixteen and `da` its eight.
+    pub(super) unsafe fn min_term(factors: &[i16; SUMS], sums: &[i16; SUMS], dmin: f32, da: &[f32; RUNS], acc: &mut Acc) {
+        // SAFETY: the caller has AVX2 and FMA; `acc` is aligned.
         unsafe {
             let f = _mm256_loadu_si256(factors.as_ptr().cast());
             let s = _mm256_loadu_si256(sums.as_ptr().cast());
