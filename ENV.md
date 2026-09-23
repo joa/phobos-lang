@@ -81,17 +81,17 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 
 The mixture-of-experts path (`qwen35moe`) keeps a model's experts in a
 pinned host mirror and a device cache; see `docs/MOE-QWEN36-35B-A3B.md` for
-the design and every measurement behind these defaults. All three are
-opt-in and all three measured slower than the default on an RTX 2080 SUPER
-whose PCIe link runs at x8; they exist for a wider bus or a faster host.
+the design and every measurement behind these defaults, on an RTX 2080
+SUPER whose PCIe link runs at x8. The two on by default won the prompt pass
+there; the two opt-ins lost and exist for a wider bus or a faster host.
 
 | variable | takes | default | effect |
 | --- | --- | --- | --- |
-| `PHOBOS_MOE_HOST_DECODE` | opt-in | off | A decode step's misses on the host: the device runs the hits, replayed at once, while the host computes the misses' share with each GEMM spread over the pool by rows, and each miss is copied into its slot in the background for the next token. Measured a loss on the 35B: tg128 17.2 t/s (20.9 with `PHOBOS_HOST_THREADS=6`) against 30.3 with the copies alone. A miss costs the host 125 to 250 us against 300 to copy, both on the step's critical path, and the split adds a graph launch, two readbacks and a pool dispatch a block. Kept for a narrower bus or a faster host. |
-| `PHOBOS_MOE_LOOKAHEAD` | opt-in | off | At each block's sync point, run the next block's router on the residual as it stands and copy its predicted misses early on a second stream. Right about 80% of the time; the wrong fifth is extra bytes on the bus, and on an x8 link that costs more than the overlap buys (tg128 24.8 against 32.0). |
-| `PHOBOS_HOST_THREADS` | a count | half the logical CPUs | Workers of the host expert kernels' pool (`simd`). Two threads on one core share its vector units; on the 24-core box 24 measured faster than 48. |
-| `PHOBOS_MOE_HOST` | opt-out | on | In a grouped prompt pass, give the lightest experts by rows to the host's AVX2 K-quant kernels (`simd`) while the device works the rest, each one sparing the bus a copy. The host's share of a block's experts is set from the last block's host and device times, from an initial 0.4. On the 35B, pp128 285 t/s against 77 without and pp512 506 against 196; `=0` is the bus alone. |
-| `PHOBOS_MOE_GROUPED` | opt-out | on | Run a pass whose rows choose more experts than a block's cache holds as grouped GEMMs over rows sorted by expert, each expert copied once a block, rather than row by row with the cache thrashing. On the 35B, pp128 77 t/s against 41 row by row and pp512 196 against 33. `=0` is the row path for every pass. |
+| `PHOBOS_MOE_GROUPED` | opt-out | on | Run a pass whose rows choose more experts than a block's cache holds as grouped GEMMs over rows sorted by expert, each expert copied once a block, rather than row by row with the cache thrashing. Off, a 512-token prompt on the 35B runs at a sixth of the rate. |
+| `PHOBOS_MOE_HOST` | opt-out | on | In a grouped prompt pass, give the lightest experts by rows to the host's AVX2 K-quant kernels (`simd`) while the device works the rest, each one sparing the bus a copy; the host's share of a block's experts follows the last block's host and device times. Off, the prompt pass runs at a third of the rate. |
+| `PHOBOS_MOE_HOST_DECODE` | opt-in | off | A decode step's misses on the host while the device runs the hits, each miss also copied into its slot for the next token. A miss costs the host about as much as its copy and both sit on the step's critical path, so on the 35B it decoded at 17 t/s against 30. |
+| `PHOBOS_MOE_LOOKAHEAD` | opt-in | off | At each block's sync point, run the next block's router on the residual as it stands and copy its predicted misses early on a second stream. Right four times in five; the wrong fifth costs more bytes on an x8 link than the overlap buys. |
+| `PHOBOS_HOST_THREADS` | a count | half the logical CPUs | Workers of the host expert kernels' pool (`simd`), whichever path runs them. Two threads on one core share its vector units and measured slower than one. |
 
 ## Benchmarks and examples
 

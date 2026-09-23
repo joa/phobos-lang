@@ -215,9 +215,6 @@ fn main() -> Result<()> {
                 rep + 1,
                 args.repetitions,
             );
-            if let (Some(stats), Some((free, _))) = (backend.cache_stats(), backend.device_memory()) {
-                eprintln!("    pool: {} reused, {} allocated; device free {} MiB", stats.buffers_reused, stats.buffers_allocated, free >> 20);
-            }
         }
         rows.push((format!("pp{prompt_tokens}"), rates));
     }
@@ -262,8 +259,7 @@ fn main() -> Result<()> {
         && let Some(rate) = stats.expert_hit_rate()
     {
         println!(
-            "
-expert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
+            "\nexpert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
             rate * 100.0,
             stats.expert_hits,
             stats.expert_hits + stats.expert_misses,
@@ -271,7 +267,7 @@ expert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
         );
         if stats.expert_cpu_misses > 0 {
             println!(
-                "cpu misses: {} computed on the host, {:.0} us each",
+                "host misses: {}, {:.0} us each",
                 stats.expert_cpu_misses,
                 stats.expert_cpu_nanos as f64 / 1e3 / stats.expert_cpu_misses as f64
             );
