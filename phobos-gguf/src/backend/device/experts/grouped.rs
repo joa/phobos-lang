@@ -241,8 +241,11 @@ impl DeviceBackend {
                 by_expert[e].push((r, j));
             }
         }
-        let mut weights = vec![0.0f32; entries];
-        experts.blocks[block].weights.index(0..entries).copy_to(&mut weights)?;
+        let weights = {
+            let b = &mut experts.blocks[block];
+            b.weights.index(0..entries).copy_to(&mut b.w_host.as_mut_slice()[..entries])?;
+            b.w_host.as_slice()[..entries].to_vec()
+        };
         let host_jobs = if self.moe_host && simd::supports(&*experts.blocks[block].set) {
             host_share(&experts.blocks[block], &by_expert, &weights, experts.host_share)
         } else {

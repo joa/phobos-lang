@@ -1,8 +1,15 @@
 // The device side of `Backend::moe`: top-k over every row, one sync point
 // a block where the rows' choices come back, then per row the misses into
 // their slots and the slot matvecs and combine that read them.
+//
+// A decode step's misses go to the host: the row's kernels run over the
+// hits with a zero slot standing in for each miss, replayed at once so
+// the device works while the host computes the misses' share, which is
+// added afterwards; each miss is also copied into its slot on the second
+// stream, so the next token finds it. `PHOBOS_MOE_HOST_DECODE=1` opts in.
 
 use anyhow::{Result, bail, ensure};
+use phobos_kernels::cuda_ok;
 use cust::event::{Event, EventFlags};
 use cust::memory::CopyDestination;
 use cust::stream::StreamWaitEventFlags;
@@ -12,7 +19,7 @@ use super::super::kernels::{
     moe_topk_src,
 };
 use super::super::{DeviceBackend, Plane};
-use super::{Experts, Kind, MAX_ROWS};
+use super::{Experts, Kind, MAX_ROWS, copy_async};
 use crate::backend::{Backend, Buf, Moe};
 use crate::quant::Quant;
 use crate::simd::{self, Job};
@@ -87,15 +94,29 @@ impl DeviceBackend {
             let (qa, das) = self.act_ptrs(act)?;
             let bufs = [self.alloc(MOE_USED * d_ff)?, self.alloc(MOE_USED * d_ff)?, self.alloc(MOE_USED * d_ff)?, self.alloc(MOE_USED * d)?];
             let [gate_out, up_out, h, down_out] = bufs;
-            let host_misses = self.moe_cpu_miss && rows == 1;
+            let host_misses = self.moe_host_decode && rows == 1 && simd::supports(&*experts.blocks[block].set);
             let slot_ptr = experts.blocks[block].slot_table.as_device_ptr().as_raw();
+            let mut owed = Vec::new();
             for r in 0..rows {
                 let misses = self.place_row(&mut experts, block, r, host_misses)?;
-                if !misses.is_empty() {
-                    let y = self.host_misses(&mut experts, block, req.x, &misses)?;
-                    let ybuf = self.upload(&y)?;
-                    self.add_into(req.dest, ybuf)?;
-                    self.release(ybuf);
+                if host_misses {
+                    self.fetch_later(&mut experts, block, &misses)?;
+                    // The activation, read while the stream is idle from
+                    // the sync point: a read drains it. A row with no
+                    // misses is owed a zero row, so every step records the
+                    // same launches and its graphs stay cached.
+                    let mut x = vec![0.0f32; d];
+                    if !misses.is_empty() {
+                        let b = &mut experts.blocks[block];
+                        // SAFETY: the row is `d` floats on the device and the
+                        // pinned mirror holds `d`.
+                        cuda_ok(
+                            unsafe { cust::sys::cuMemcpyDtoH_v2(b.x_host.as_mut_slice().as_mut_ptr().cast(), self.ptr(req.x, 0)?, d * size_of::<f32>()) },
+                            "reading the row",
+                        )?;
+                        x.copy_from_slice(&b.x_host.as_slice()[..d]);
+                    }
+                    owed.push((misses, x));
                 }
                 let row_slots = slot_ptr + (r * ROW_BYTES) as u64;
                 let (row_qa, row_das) = (qa + (r * d) as u64, das + (r * d / 32 * 4) as u64);
@@ -126,6 +147,28 @@ impl DeviceBackend {
             }
             for buf in bufs {
                 self.release(buf);
+            }
+            // The hits' kernels go to the device now rather than at the next
+            // sync point, so it works while the host does; a decode step
+            // replays here whether or not it owes, so its segments keep one
+            // shape and their graphs stay cached.
+            if host_misses {
+                self.replay_segment()?;
+            }
+            for (misses, x) in owed {
+                let y = if misses.is_empty() { vec![0.0; d] } else { self.host_misses(&mut experts, block, &x, &misses)? };
+                // Through the block's pinned row into a pool buffer, in
+                // stream order: nothing is written before the recorded
+                // launches ahead of it run, and the row is rewritten only
+                // after the next sync point.
+                let b = &mut experts.blocks[block];
+                b.y_host.as_mut_slice()[..d].copy_from_slice(&y);
+                let ybuf = self.alloc(d)?;
+                // SAFETY: the pinned row lives with the block and is not
+                // written again before the next sync point.
+                unsafe { copy_async(self.ptr(ybuf, 0)?, b.y_host.as_slice().as_ptr().cast(), d * size_of::<f32>(), &self.stream)? };
+                self.add_into(req.dest, ybuf)?;
+                self.release(ybuf);
             }
         }
         if let Some(routes) = req.routes {
@@ -224,20 +267,42 @@ impl DeviceBackend {
         Ok(for_host)
     }
 
-    /// The misses' share of a decode row, computed on the host from the
+    /// The misses copied into least recently used slots on the second
+    /// stream, for the next token, with the event the block's kernels wait
+    /// on before they read them. A slot this row's kernels read is never a
+    /// victim, since it is stamped this tick.
+    fn fetch_later(&self, experts: &mut Experts, block: usize, misses: &[(usize, usize)]) -> Result<()> {
+        let tick = experts.tick();
+        let mut copied = false;
+        for &(_, e) in misses {
+            let Some(victim) = experts.blocks[block].victim(tick) else {
+                break;
+            };
+            experts.fill(block, e, victim, tick, &self.copy_stream)?;
+            experts.mark_prefetched(block, victim);
+            copied = true;
+        }
+        if copied {
+            let event = Event::new(EventFlags::DISABLE_TIMING)?;
+            event.record(&self.copy_stream)?;
+            experts.blocks[block].fetched = Some(event);
+        }
+        Ok(())
+    }
+
+    /// The misses' share of a decode row `x`, computed on the host from the
     /// mirror's bytes and weighted by the router, summed into a `[d]` row
-    /// for the device to add. One thread an expert, gate and up in parallel.
-    fn host_misses(&self, experts: &mut Experts, block: usize, x: Buf, misses: &[(usize, usize)]) -> Result<Vec<f32>> {
+    /// for the device to add.
+    fn host_misses(&self, experts: &mut Experts, block: usize, row: &[f32], misses: &[(usize, usize)]) -> Result<Vec<f32>> {
         let started = std::time::Instant::now();
-        let d = experts.blocks[block].set.gate.k();
-        let mut row = vec![0.0f32; d];
-        self.read(x, &mut row)?;
-        let mut weights = [0.0f32; MOE_USED];
-        experts.blocks[block].weights.index(0..MOE_USED).copy_to(&mut weights[..])?;
+        let d = row.len();
+        let b = &mut experts.blocks[block];
+        b.weights.index(0..MOE_USED).copy_to(&mut b.w_host.as_mut_slice()[..MOE_USED])?;
+        let weights = &b.w_host.as_slice()[..MOE_USED];
         let jobs: Vec<Job> = misses.iter().map(|&(j, e)| Job { expert: e, rows: vec![0], weights: vec![weights[j]] }).collect();
         let mut y = vec![0.0f32; d];
         let b = &experts.blocks[block];
-        simd::experts_ffn(&b.mirror.source(&b.set), &jobs, &row, 1, &mut y)?;
+        simd::experts_row(&b.mirror.source(&b.set), &jobs, row, &mut y)?;
         experts.stats.cpu_misses += misses.len() as u64;
         experts.stats.cpu_nanos += started.elapsed().as_nanos() as u64;
         Ok(y)
