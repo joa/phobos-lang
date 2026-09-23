@@ -173,7 +173,7 @@ impl Model {
             backend.budget_streamed(self.resident_bytes, cfg.n_block)?;
             for block in &self.blocks {
                 if let FeedForward::Moe(moe) = &block.ffn {
-                    moe.register(backend)?;
+                    moe.handle(backend)?;
                 }
             }
         }

@@ -70,11 +70,6 @@ impl Uploads {
         self.uploads.values().filter(|u| u.streamed).map(|u| u.bytes).sum()
     }
 
-    /// Expert sets that stream.
-    pub(crate) fn streamed_sets(&self) -> usize {
-        self.uploads.values().filter(|u| u.streamed).count()
-    }
-
     /// Of [`Uploads::bytes`], what goes up as f32.
     pub(crate) fn dense_bytes(&self) -> usize {
         self.uploads
@@ -273,9 +268,9 @@ impl Linear {
     /// all read through the same transform, which the stack then keeps.
     /// Parts held dense fuse dense only when every part is: a quantized
     /// projection fused with an F32 one would go up as f32 many times its
-    /// size (a delta net's qkv and gate beside its alpha and beta, 98 MiB a
-    /// block where the file holds 27), and reading that back every token
-    /// costs more than the launch the fusion saves.
+    /// size (a delta net's qkv and gate beside its alpha and beta), and
+    /// reading that back every token costs more than the launch the fusion
+    /// saves.
     pub(crate) fn should_fuse(parts: &[&Linear]) -> bool {
         if !Linear::same_fold(parts) {
             return false;

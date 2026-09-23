@@ -6,7 +6,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 
 use crate::Gguf;
-use crate::backend::{Backend, Buf, Lookahead, Moe};
+use crate::backend::{Backend, Buf, Lookahead, Moe, ExpertsBuf};
 use crate::experts::ExpertSet;
 
 use super::{Ffn, Gain, Linear, Shared, Uploads};
@@ -62,11 +62,11 @@ impl MoeFfn {
         into.add_streamed(&self.key, self.experts.byte_len());
     }
 
-    /// Hands the expert set to the backend, once; every block does this
-    /// ahead of the first pass so a backend laying out a cache sees them
-    /// all. Later calls are a lookup.
-    pub(crate) fn register(&self, backend: &dyn Backend) -> Result<()> {
-        backend.constant_experts(&self.key, &self.experts).map(|_| ())
+    /// The backend's handle on the expert set, made at the first call;
+    /// every block does this ahead of the first pass so a backend laying
+    /// out a cache sees them all.
+    pub(crate) fn handle(&self, backend: &dyn Backend) -> Result<ExpertsBuf> {
+        backend.constant_experts(&self.key, &self.experts)
     }
 
     /// The weight that reads the block's input; see [`Linear::share`].
@@ -87,9 +87,6 @@ impl MoeFfn {
         self.router.project_into(backend, x, rows, logits)
     }
 
-    /// The whole feed-forward added into `dest`: router, chosen experts,
-    /// gated shared expert. `routes`, if given, receives each row's chosen
-    /// expert ids as [`Moe::routes`] describes.
     /// What a backend needs to run this block's router ahead of the block,
     /// given the norm that feeds it; `None` where the router is not a plain
     /// dense weight.
@@ -101,10 +98,13 @@ impl MoeFfn {
             gain: gain.buf(backend)?,
             eps,
             router,
-            experts: backend.constant_experts(&self.key, &self.experts)?,
+            experts: self.handle(backend)?,
         }))
     }
 
+    /// The whole feed-forward added into `dest`: router, chosen experts,
+    /// gated shared expert. `routes`, if given, receives each row's chosen
+    /// expert ids as [`Moe::routes`] describes.
     pub(crate) fn forward(
         &self,
         backend: &dyn Backend,
@@ -134,7 +134,7 @@ impl MoeFfn {
             lookahead,
             n_expert: self.experts.count(),
             n_used: self.n_used,
-            experts: backend.constant_experts(&self.key, &self.experts)?,
+            experts: self.handle(backend)?,
             shared: Some((shared_out, gate)),
             dest,
             routes,

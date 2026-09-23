@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 
-use super::HostBackend;
+use super::{HostBackend, sigmoid, silu};
 use crate::backend::{ExpertsBuf, Moe, route};
 use crate::experts::ExpertSet;
 
@@ -69,8 +69,8 @@ impl HostBackend {
             (take(req.x, rows * d, "input")?, take(req.logits, rows * req.n_expert, "router logits")?, shared)
         };
 
+        // Gate, up and down in turn through one dense scratch.
         let mut weight = vec![0.0f32; d_ff * d];
-        let mut down = vec![0.0f32; d * d_ff];
         let (mut g, mut u, mut h) = (vec![0.0f32; d_ff], vec![0.0f32; d_ff], vec![0.0f32; d_ff]);
         let mut y = vec![0.0f32; rows * d];
         let mut routes = Vec::with_capacity(rows * req.n_used);
@@ -90,9 +90,9 @@ impl HostBackend {
                 for ((out, &gate), &up) in h.iter_mut().zip(&g).zip(&u) {
                     *out = silu(gate) * up;
                 }
-                set.down.dequantize(e, &mut down)?;
+                set.down.dequantize(e, &mut weight)?;
                 for (i, out) in yr.iter_mut().enumerate() {
-                    *out += w * dot(&down[i * d_ff..(i + 1) * d_ff], &h);
+                    *out += w * dot(&weight[i * d_ff..(i + 1) * d_ff], &h);
                 }
             }
             if let Some((out, gate)) = &shared {
@@ -123,12 +123,4 @@ impl HostBackend {
 
 fn dot(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).map(|(&x, &y)| x * y).sum()
-}
-
-fn silu(v: f32) -> f32 {
-    v * sigmoid(v)
-}
-
-fn sigmoid(v: f32) -> f32 {
-    1.0 / (1.0 + (-v).exp())
 }

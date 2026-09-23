@@ -2,8 +2,8 @@
 // share of them in device cache slots, and every miss crosses the bus once,
 // at the block's sync point, into the slot it will be read from.
 //
-// A slab per stack kind and format (a file mixes formats per block, and a
-// slab has one row stride), each `[slots * n, rb]` in the grouped layout the
+// A slab per stack and format (a file mixes formats per block, and a slab
+// has one row stride), each `[slots * n, rb]` in the grouped layout the
 // decode matvec reads, with an `f16` scale plane apiece. A block owns
 // `per_block` consecutive slots of each of its three slabs plus one zeroed
 // spare, from a base of its own; a slot holds one expert of one block across
@@ -18,15 +18,15 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use cust::event::Event;
-use cust::memory::{DeviceBuffer, LockedBuffer};
+use cust::event::{Event, EventFlags};
+use cust::memory::{CopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::stream::Stream;
 use phobos_kernels::cuda_ok;
 
 use super::DeviceBackend;
 use super::kernels::MOE_USED;
-use crate::backend::ExpertsBuf;
-use crate::experts::{ExpertSet, ExpertStack};
+use crate::backend::{Backend, Buf, ExpertsBuf};
+use crate::experts::{ExpertSet, ExpertStack, Stack};
 use crate::quant::Quant;
 use mirror::Mirror;
 
@@ -35,49 +35,30 @@ const SLAB_LIMIT: usize = 1 << 31;
 
 /// Rows one `moe` call may carry: twice the runtime's prompt batch, since
 /// the checks feed longer passes than the runtime does.
-pub(super) const MAX_ROWS: usize = 1024;
+const MAX_ROWS: usize = 1024;
 
 const NONE: u32 = u32::MAX;
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(super) enum Kind {
-    Gate,
-    Up,
-    Down,
-}
-
-pub(super) const KINDS: [Kind; 3] = [Kind::Gate, Kind::Up, Kind::Down];
-
-impl Kind {
-    pub(super) fn stack(self, set: &ExpertSet) -> &ExpertStack {
-        match self {
-            Kind::Gate => &set.gate,
-            Kind::Up => &set.up,
-            Kind::Down => &set.down,
-        }
-    }
-}
-
 pub(super) struct Experts {
-    pub(super) per_block: usize,
-    pub(super) blocks: Vec<BlockExperts>,
-    /// By stack kind and format; `None` until the first `moe`.
-    pub(super) slabs: Option<HashMap<(Kind, Quant), Slab>>,
+    per_block: usize,
+    blocks: Vec<BlockExperts>,
+    /// By stack and format; `None` until the first `moe`.
+    slabs: Option<HashMap<(Stack, Quant), Slab>>,
     /// Bytes and expert sets `budget_streamed` gave, once it did.
     budget: Option<(usize, usize)>,
     /// A cap the user put on the cache, in bytes.
     pub(super) limit: Option<usize>,
     /// The iota row the top-k carries, by expert count.
-    pub(super) iota: HashMap<usize, DeviceBuffer<f32>>,
+    iota: HashMap<usize, DeviceBuffer<f32>>,
     /// Routing steps so far, the stamp a slot takes when used: one a row a
     /// block, so a prompt pass's rows do not all stamp alike.
     tick: u64,
-    pub(super) stats: ExpertStats,
+    stats: ExpertStats,
     /// The grouped prompt path's tables, once it has run.
     grouped: Option<grouped::GroupedScratch>,
     /// The share of a wide pass's experts the host takes, moved toward
     /// balance block by block; see `grouped.rs`.
-    pub(super) host_share: f32,
+    host_share: f32,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -85,16 +66,54 @@ pub(super) struct ExpertStats {
     pub(super) hits: u64,
     pub(super) misses: u64,
     pub(super) bytes: u64,
-    pub(super) pinned_bytes: u64,
     pub(super) prefetches: u64,
     pub(super) prefetch_hits: u64,
     pub(super) cpu_misses: u64,
     pub(super) cpu_nanos: u64,
 }
 
-pub(super) struct BlockExperts {
-    pub(super) set: Arc<ExpertSet>,
-    pub(super) mirror: Mirror,
+/// A pinned host buffer and its device twin. What the host writes for the
+/// device goes up asynchronously in stream order; what the device writes
+/// for the host comes back synchronously, which a pinned buffer makes one
+/// transfer where a pageable one is staged by the driver.
+struct Staged<T: DeviceCopy> {
+    host: LockedBuffer<T>,
+    dev: DeviceBuffer<T>,
+}
+
+impl<T: DeviceCopy + Default> Staged<T> {
+    fn new(len: usize) -> Result<Staged<T>> {
+        Ok(Staged { host: LockedBuffer::new(&T::default(), len)?, dev: DeviceBuffer::from_slice(&vec![T::default(); len])? })
+    }
+
+    fn dev(&self) -> u64 {
+        self.dev.as_device_ptr().as_raw()
+    }
+
+    fn host(&self) -> &[T] {
+        self.host.as_slice()
+    }
+
+    /// Copies `values` in at `at` and returns their device address.
+    fn push(&mut self, at: usize, values: &[T], stream: &Stream) -> Result<u64> {
+        self.host.as_mut_slice()[at..at + values.len()].copy_from_slice(values);
+        let dst = self.dev() + (at * size_of::<T>()) as u64;
+        // SAFETY: the region is not written again before the next sync
+        // point.
+        unsafe { copy_async(dst, self.host.as_slice()[at..].as_ptr().cast(), size_of_val(values), stream)? };
+        Ok(dst)
+    }
+
+    /// The device's first `len` back, as a slice of the host copy.
+    fn pull(&mut self, len: usize) -> Result<&[T]> {
+        self.dev.index(0..len).copy_to(&mut self.host.as_mut_slice()[..len])?;
+        Ok(&self.host.as_slice()[..len])
+    }
+}
+
+struct BlockExperts {
+    set: Arc<ExpertSet>,
+    mirror: Mirror,
     /// `expert -> slot within the block`, `NONE` where not resident.
     slot_of: Vec<u32>,
     /// Per slot: the expert held and the tick it was last used at.
@@ -102,35 +121,30 @@ pub(super) struct BlockExperts {
     /// Whether a slot's expert arrived by prefetch and is unread since.
     prefetched: Vec<bool>,
     /// The block's first slot in each of its three slabs.
-    pub(super) base: [usize; 3],
+    base: [usize; 3],
     /// `SLOT[rows, 8]`, `TOPK[rows, 8]` and `W[rows, 8]`, pointer-stable so
-    /// a segment's graph needs no patching, with page-locked mirrors of
-    /// the first two.
-    pub(super) slot_table: DeviceBuffer<i32>,
-    slot_host: LockedBuffer<i32>,
-    pub(super) topk: DeviceBuffer<i32>,
-    pub(super) topk_host: LockedBuffer<i32>,
-    pub(super) weights: DeviceBuffer<f32>,
+    /// a segment's graph needs no patching.
+    slots: Staged<i32>,
+    topk: Staged<i32>,
+    weights: Staged<f32>,
     /// The previous block's prediction for this one, and the event its
-    /// copies complete at.
-    pub(super) look_topk: DeviceBuffer<i32>,
-    pub(super) look_host: LockedBuffer<i32>,
-    pub(super) look_w: DeviceBuffer<f32>,
-    pub(super) fetched: Option<Event>,
-    /// The host's share of a decode row, pinned for the copy in, and the
-    /// row itself and the router's weights, pinned for the copies out: a
-    /// copy into pageable memory is staged by the driver and slow.
-    pub(super) y_host: LockedBuffer<f32>,
-    pub(super) x_host: LockedBuffer<f32>,
-    pub(super) w_host: LockedBuffer<f32>,
+    /// copies complete at. The prediction's weights are the kernel's
+    /// mandatory output and nothing reads them.
+    look: Staged<i32>,
+    look_w: DeviceBuffer<f32>,
+    fetched: Option<Event>,
+    /// A decode row on its way to the host's kernels, and their share of
+    /// it on its way back.
+    x_row: LockedBuffer<f32>,
+    y_row: LockedBuffer<f32>,
 }
 
-pub(super) struct Slab {
-    pub(super) bytes: DeviceBuffer<u8>,
-    pub(super) d: DeviceBuffer<u16>,
-    pub(super) n: usize,
-    pub(super) nb: usize,
-    pub(super) rb: usize,
+struct Slab {
+    bytes: DeviceBuffer<u8>,
+    d: DeviceBuffer<u16>,
+    n: usize,
+    nb: usize,
+    rb: usize,
 }
 
 impl Slab {
@@ -146,14 +160,14 @@ impl Slab {
     }
 
     /// Device addresses of slot `s`'s rows and of their scale plane.
-    pub(super) fn at(&self, s: usize) -> (u64, u64) {
+    fn at(&self, s: usize) -> (u64, u64) {
         (
             self.bytes.as_device_ptr().as_raw() + (s * self.n * self.rb) as u64,
             self.d.as_device_ptr().as_raw() + (s * self.n * self.nb * 2) as u64,
         )
     }
 
-    pub(super) fn slot_bytes(&self) -> usize {
+    fn slot_bytes(&self) -> usize {
         self.n * self.rb
     }
 }
@@ -163,16 +177,16 @@ impl Slab {
 /// # Safety
 /// `src` is page-locked and both sides live until the stream reaches the
 /// copy.
-pub(super) unsafe fn copy_async(dst: u64, src: *const std::ffi::c_void, len: usize, stream: &Stream) -> Result<()> {
+unsafe fn copy_async(dst: u64, src: *const std::ffi::c_void, len: usize, stream: &Stream) -> Result<()> {
     cuda_ok(unsafe { cust::sys::cuMemcpyHtoDAsync_v2(dst, src, len, stream.as_inner()) }, "copying to the device")
 }
 
 impl BlockExperts {
     /// Row `r`'s chosen experts, as the last sync point read them back.
-    pub(super) fn chosen(&self, r: usize) -> Result<[usize; MOE_USED]> {
+    fn chosen(&self, r: usize) -> Result<[usize; MOE_USED]> {
         let n = self.set.count() as i32;
         let mut out = [0; MOE_USED];
-        for (o, &id) in out.iter_mut().zip(&self.topk_host.as_slice()[r * MOE_USED..(r + 1) * MOE_USED]) {
+        for (o, &id) in out.iter_mut().zip(&self.topk.host()[r * MOE_USED..(r + 1) * MOE_USED]) {
             ensure!((0..n).contains(&id), "the router chose expert {id} of {n}");
             *o = id as usize;
         }
@@ -189,18 +203,8 @@ impl BlockExperts {
     }
 
     /// The least recently used slot not stamped `tick`.
-    pub(super) fn victim(&self, tick: u64) -> Option<usize> {
+    fn victim(&self, tick: u64) -> Option<usize> {
         (0..self.held.len()).filter(|&s| self.held[s].1 != tick).min_by_key(|&s| self.held[s].1)
-    }
-
-    /// Publishes row `r`'s slot table from its pinned mirror.
-    pub(super) fn publish(&mut self, r: usize, slots: &[i32; MOE_USED], stream: &Stream) -> Result<()> {
-        let at = r * MOE_USED;
-        self.slot_host.as_mut_slice()[at..at + MOE_USED].copy_from_slice(slots);
-        let dst = self.slot_table.as_device_ptr().as_raw() + (at * size_of::<i32>()) as u64;
-        // SAFETY: the row's region is not written again before the next
-        // sync point.
-        unsafe { copy_async(dst, self.slot_host.as_slice()[at..].as_ptr().cast(), size_of_val(slots), stream) }
     }
 }
 
@@ -220,31 +224,37 @@ impl Experts {
         }
     }
 
-    pub(super) fn slab(&self, b: usize, kind: Kind) -> &Slab {
-        let quant = kind.stack(&self.blocks[b].set).quant();
-        &self.slabs.as_ref().expect("laid out")[&(kind, quant)]
+    fn slab(&self, block: usize, stack: Stack) -> &Slab {
+        let quant = self.blocks[block].set.stack(stack).quant();
+        &self.slabs.as_ref().expect("laid out")[&(stack, quant)]
+    }
+
+    /// The slab operands of `block`'s `stack` for a slot kernel: its rows
+    /// and their scale plane from the block's base, over the block's share
+    /// without its spare slot, since the kernels' grouped addressing reads
+    /// the extent.
+    fn slab_operands(&self, block: usize, stack: Stack) -> [(u64, [i64; 2]); 2] {
+        let slab = self.slab(block, stack);
+        let ns = (self.per_block * slab.n) as i64;
+        let (bytes, d) = slab.at(self.blocks[block].base[stack as usize]);
+        [(bytes, [ns, slab.rb as i64]), (d, [ns, slab.nb as i64])]
     }
 
     /// A new routing step: `ids` of `block` stamped, the tick returned.
-    pub(super) fn step(&mut self, block: usize, ids: &[usize]) -> u64 {
+    fn step(&mut self, block: usize, ids: &[usize]) -> u64 {
         self.tick += 1;
         self.blocks[block].stamp(ids, self.tick);
         self.tick
     }
 
-    /// The current routing step, the stamp the slots in use carry.
-    pub(super) fn tick(&self) -> u64 {
-        self.tick
-    }
-
-    pub(super) fn resident(&self, block: usize, e: usize) -> bool {
+    fn resident(&self, block: usize, e: usize) -> bool {
         self.blocks[block].slot_of[e] != NONE
     }
 
     /// Expert `e` of `block` in a slot: the one it is in, or the least
     /// recently used one, filled from the mirror on `stream`. `Ok(None)`
     /// when every slot is stamped `tick`.
-    pub(super) fn place(&mut self, block: usize, e: usize, tick: u64, stream: &Stream) -> Result<Option<usize>> {
+    fn place(&mut self, block: usize, e: usize, tick: u64, stream: &Stream) -> Result<Option<usize>> {
         let b = &mut self.blocks[block];
         let s = b.slot_of[e];
         if s != NONE {
@@ -263,7 +273,7 @@ impl Experts {
     }
 
     /// Expert `e` copied into `victim`'s slot of `block` on `stream`.
-    pub(super) fn fill(&mut self, block: usize, e: usize, victim: usize, tick: u64, stream: &Stream) -> Result<()> {
+    fn fill(&mut self, block: usize, e: usize, victim: usize, tick: u64, stream: &Stream) -> Result<()> {
         let slabs = self.slabs.as_ref().expect("laid out");
         let b = &mut self.blocks[block];
         let (old, _) = b.held[victim];
@@ -271,8 +281,8 @@ impl Experts {
             b.slot_of[old as usize] = NONE;
         }
         let src = b.mirror.expert(e);
-        for (k, kind) in KINDS.into_iter().enumerate() {
-            let slab = &slabs[&(kind, kind.stack(&b.set).quant())];
+        for (k, stack) in Stack::ALL.into_iter().enumerate() {
+            let slab = &slabs[&(stack, b.set.stack(stack).quant())];
             let (bytes_at, d_at) = slab.at(b.base[k] + victim);
             ensure!(
                 src[k].1 == slab.slot_bytes() && src[3 + k].1 == slab.n * slab.nb * 2,
@@ -292,9 +302,30 @@ impl Experts {
         Ok(())
     }
 
-    pub(super) fn mark_prefetched(&mut self, block: usize, slot: usize) {
-        self.blocks[block].prefetched[slot] = true;
-        self.stats.prefetches += 1;
+    /// Experts `ids` of `block` that are not resident copied into least
+    /// recently used slots on `stream`, the second one, and the event the
+    /// block's kernels wait on before they read them. A slot stamped
+    /// `tick` is never a victim.
+    fn fetch(&mut self, block: usize, ids: impl IntoIterator<Item = usize>, tick: u64, stream: &Stream) -> Result<()> {
+        let mut copied = false;
+        for e in ids {
+            if self.resident(block, e) {
+                continue;
+            }
+            let Some(victim) = self.blocks[block].victim(tick) else {
+                break;
+            };
+            self.fill(block, e, victim, tick, stream)?;
+            self.blocks[block].prefetched[victim] = true;
+            self.stats.prefetches += 1;
+            copied = true;
+        }
+        if copied {
+            let event = Event::new(EventFlags::DISABLE_TIMING)?;
+            event.record(stream)?;
+            self.blocks[block].fetched = Some(event);
+        }
+        Ok(())
     }
 }
 
@@ -335,12 +366,10 @@ impl DeviceBackend {
         ensure!(experts.slabs.is_none(), "an expert set registered after the cache was laid out");
         let n_expert = set.count();
         let mirror = Mirror::build(set).with_context(|| format!("mirroring the experts of {key}"))?;
-        experts.stats.pinned_bytes += mirror.bytes() as u64;
         experts.iota.entry(n_expert).or_insert_with(|| {
             DeviceBuffer::from_slice(&(0..n_expert).map(|i| i as f32).collect::<Vec<_>>()).expect("a few hundred floats")
         });
-        let ints = |len: usize| DeviceBuffer::from_slice(&vec![0i32; len]);
-        let table = MAX_ROWS * MOE_USED;
+        let (table, d) = (MAX_ROWS * MOE_USED, set.gate.k());
         experts.blocks.push(BlockExperts {
             set: Arc::clone(set),
             mirror,
@@ -348,28 +377,24 @@ impl DeviceBackend {
             held: Vec::new(),
             prefetched: Vec::new(),
             base: [0; 3],
-            slot_table: ints(table)?,
-            slot_host: LockedBuffer::new(&0i32, table)?,
-            topk: ints(table)?,
-            topk_host: LockedBuffer::new(&0i32, table)?,
-            weights: DeviceBuffer::from_slice(&vec![0f32; table])?,
-            look_topk: ints(MOE_USED)?,
-            look_host: LockedBuffer::new(&0i32, MOE_USED)?,
+            slots: Staged::new(table)?,
+            topk: Staged::new(table)?,
+            weights: Staged::new(table)?,
+            look: Staged::new(MOE_USED)?,
             look_w: DeviceBuffer::from_slice(&[0f32; MOE_USED])?,
             fetched: None,
-            y_host: LockedBuffer::new(&0.0, set.gate.k())?,
-            x_host: LockedBuffer::new(&0.0, set.gate.k())?,
-            w_host: LockedBuffer::new(&0.0, table)?,
+            x_row: LockedBuffer::new(&0.0, d)?,
+            y_row: LockedBuffer::new(&0.0, d)?,
         });
         let buf = ExpertsBuf(experts.blocks.len() - 1);
         self.expert_keys.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
     }
 
-    /// The slabs, laid out at the first `moe`: the budget shared equally
-    /// over the blocks, each with at least a token's worth plus a zeroed
-    /// spare, one slab per stack kind and format.
-    pub(super) fn ensure_slabs(&self, experts: &mut Experts) -> Result<()> {
+    /// The slabs, laid out at the first `moe`: the budget, less a prompt
+    /// pass's scratch, shared equally over the blocks, each with at least
+    /// a token's worth plus a zeroed spare, one slab per stack and format.
+    fn ensure_slabs(&self, experts: &mut Experts) -> Result<()> {
         if experts.slabs.is_some() {
             return Ok(());
         }
@@ -379,23 +404,20 @@ impl DeviceBackend {
         let slot_bytes = experts
             .blocks
             .iter()
-            .map(|b| KINDS.iter().map(|k| k.stack(&b.set).grouped_bytes()).sum::<usize>())
+            .map(|b| Stack::ALL.iter().map(|&s| b.set.stack(s).grouped_bytes()).sum::<usize>())
             .max()
             .context("no expert set is registered")?;
-        let mut counts: HashMap<(Kind, Quant), usize> = HashMap::new();
+        let mut counts: HashMap<(Stack, Quant), usize> = HashMap::new();
         for b in &experts.blocks {
-            for kind in KINDS {
-                *counts.entry((kind, kind.stack(&b.set).quant())).or_default() += 1;
+            for stack in Stack::ALL {
+                *counts.entry((stack, b.set.stack(stack).quant())).or_default() += 1;
             }
         }
-        // A prompt pass's scratch comes out of the budget, or the card pages
-        // once the pass allocates it; the widest group it can want is bound
-        // by the slots the budget would buy before the hold-back.
-        let (d, d_ff) = {
-            let set = &experts.blocks[0].set;
-            (set.gate.k(), set.gate.n())
-        };
-        let held = grouped::scratch_bytes(MAX_ROWS, d, d_ff, budget / slot_bytes / blocks);
+        // The scratch comes out of the budget, or the card pages once the
+        // pass allocates it; the widest group it can want is bound by the
+        // slots the whole budget would buy.
+        let set = &experts.blocks[0].set;
+        let held = grouped::scratch_bytes(MAX_ROWS, set.gate.k(), set.gate.n(), budget / slot_bytes / blocks);
         let budget = budget.saturating_sub(held);
         phobos_base::log::emit(
             phobos_base::log::Level::Info,
@@ -403,9 +425,9 @@ impl DeviceBackend {
         );
         // The spare slot a block gets comes out of the budget too.
         let mut per_block = (budget / slot_bytes / blocks).saturating_sub(1);
-        for (&(kind, quant), &count) in &counts {
-            let stack = experts.blocks.iter().map(|b| kind.stack(&b.set)).find(|s| s.quant() == quant).expect("counted");
-            per_block = per_block.min(SLAB_LIMIT / stack.grouped_bytes() / count - 1);
+        for (&(stack, quant), &count) in &counts {
+            let found = experts.blocks.iter().map(|b| b.set.stack(stack)).find(|s| s.quant() == quant).expect("counted");
+            per_block = per_block.min(SLAB_LIMIT / found.grouped_bytes() / count - 1);
         }
         ensure!(
             per_block >= MOE_USED,
@@ -415,13 +437,12 @@ impl DeviceBackend {
 
         let stride = per_block + 1;
         let mut slabs = HashMap::new();
-        let mut next: HashMap<(Kind, Quant), usize> = HashMap::new();
+        let mut next: HashMap<(Stack, Quant), usize> = HashMap::new();
         for b in &mut experts.blocks {
-            for (i, kind) in KINDS.into_iter().enumerate() {
-                let stack = kind.stack(&b.set);
-                let key = (kind, stack.quant());
+            for (i, stack) in Stack::ALL.into_iter().enumerate() {
+                let key = (stack, b.set.stack(stack).quant());
                 if let std::collections::hash_map::Entry::Vacant(v) = slabs.entry(key) {
-                    v.insert(Slab::new(stride * counts[&key], stack)?);
+                    v.insert(Slab::new(stride * counts[&key], b.set.stack(stack))?);
                 }
                 let at = next.entry(key).or_default();
                 b.base[i] = *at;
@@ -446,6 +467,18 @@ impl DeviceBackend {
                 counts.len()
             ),
         );
+        Ok(())
+    }
+
+    /// A pinned row of `len` added into `dest` in stream order: nothing is
+    /// written before the recorded launches ahead of it run, and the row
+    /// is rewritten only after the next sync point.
+    fn add_row(&self, dest: Buf, row: &LockedBuffer<f32>, len: usize) -> Result<()> {
+        let buf = self.alloc(len)?;
+        // SAFETY: the pinned row lives with its block.
+        unsafe { copy_async(self.ptr(buf, 0)?, row.as_slice().as_ptr().cast(), len * size_of::<f32>(), &self.stream)? };
+        self.add_into(dest, buf)?;
+        self.release(buf);
         Ok(())
     }
 

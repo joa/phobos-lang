@@ -135,14 +135,14 @@ pub struct DeviceBackend {
     copy_stream: Stream,
     /// Whether the mixture-of-experts path runs the next block's router on
     /// the residual as it stands and copies what it predicts early, on the
-    /// copy stream. `PHOBOS_MOE_LOOKAHEAD` opts in (see `ENV.md`): the trace priced the
-    /// prediction's misses at a third more bytes, so it is off by default.
+    /// copy stream. `PHOBOS_MOE_LOOKAHEAD` opts in; see `ENV.md`.
     moe_lookahead: bool,
-    /// Whether a decode step's misses are computed on the host from the
-    /// mirror's bytes instead of copied into a slot, the device summing
-    /// the hits and a zero slot standing in for each miss.
-    /// `PHOBOS_MOE_HOST=0` opts out; see `ENV.md`.
+    /// Whether a prompt pass gives the lightest experts to the host's
+    /// kernels while the device works the rest. `PHOBOS_MOE_HOST=0` opts
+    /// out; see `ENV.md`.
     moe_host: bool,
+    /// Whether a decode step's misses are computed on the host while the
+    /// device runs the hits, a zero slot standing in for each miss.
     /// `PHOBOS_MOE_HOST_DECODE` opts in; see `ENV.md`.
     moe_host_decode: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs

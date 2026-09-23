@@ -28,7 +28,7 @@ pub fn backend_name() -> &'static str {
 
 /// Positions one pass of the prompt covers. A pass sizes its intermediates
 /// per row, and batching's payoff peaks around here.
-const PROMPT_BATCH: usize = 512;
+pub(crate) const PROMPT_BATCH: usize = 512;
 
 /// Device bytes [`check_fits`] leaves for everything that is not a weight: a
 /// pass's intermediates, quantized-activation scratch, split-K partials, a
