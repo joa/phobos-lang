@@ -612,7 +612,6 @@ impl Backend for DeviceBackend {
             mix.head_stride,
             mix.normalize,
             mix.query_scale.to_bits(),
-            mix.rows,
             batch,
         );
         self.with_kernel(
@@ -627,7 +626,6 @@ impl Backend for DeviceBackend {
                     mix.kernel,
                     mix.head_stride,
                     plane_stride,
-                    mix.rows,
                     batch,
                     mix.normalize,
                     mix.query_scale,

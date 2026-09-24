@@ -206,6 +206,7 @@ pub(crate) const DELTA_TN: usize = 16;
 /// the split into per-head planes, and their normalization. One program
 /// owns one position's one head of one plane (`D` channels).
 ///
+/// The position count is the output's, `R3` being its three planes of them.
 /// `X` already carries the previous call's trailing positions ahead of this
 /// call's, so tap `k` of position `t` is row `t + k` with no boundary case.
 /// Taps arrive as `[KS, C]`, transposed relative to the file, so one tap
@@ -226,7 +227,6 @@ pub(crate) fn delta_conv_src(
     kernel: usize,
     stride: usize,
     plane_stride: usize,
-    rows: usize,
     batch: usize,
     normalize: bool,
     query_scale: f32,
@@ -265,12 +265,13 @@ pub(crate) fn delta_conv_src(
 
     format!(
         "@launch(256)
-@autotune(H in [{heads}], D in [{head_dim}], KS in [{kernel}], ST in [{stride}], PS in [{plane_stride}], R in [{rows}], TB in [{batch}])
+@autotune(H in [{heads}], D in [{head_dim}], KS in [{kernel}], ST in [{stride}], PS in [{plane_stride}], TB in [{batch}])
 @aligned(C = D, HD = D)
 kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R3, HD]) {{
   let t = program_id(0)
   let h = program_id(1)
   let p = program_id(2)
+  let r = R3 / 3
   var hs: i32 = h % {kv_heads}
   if p == 2 {{
     hs = h
@@ -286,7 +287,7 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
   var g: tile<f32>[TB, 1] = 1.0
   if p == 0 {{
 {query}  }}
-{key_case}  O[p * R + t * TB :+ TB, h * D :+ D] = s * g
+{key_case}  O[p * r + t * TB :+ TB, h * D :+ D] = s * g
 }}
 "
     )
