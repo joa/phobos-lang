@@ -268,6 +268,9 @@ macro_rules! avx2_block {
 }
 pub(crate) use avx2_block;
 
+/// How far ahead of the block being dotted the one-row path prefetches.
+const PREFETCH_BYTES: usize = 256;
+
 /// `yt[(j - j0) * rows + r] = sum_i w[j, i] x[r, i]` over the weight rows
 /// from `j0` that `yt` has room for. One row is dotted block by block as
 /// it is unpacked; more rows unpack a weight row once into `row` and dot
@@ -275,6 +278,44 @@ pub(crate) use avx2_block;
 #[inline(always)]
 unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32], row: &mut Vec<F::Unpacked>) {
     let (rows, nb) = (act.rows, act.blocks());
+    // One row against the grouped layout: a group's eight rows at once, in
+    // the order the layout stores them, with the bytes a few blocks on
+    // prefetched, since one row's arithmetic is too little to hide the
+    // loads behind.
+    if rows == 1
+        && let Weight::Grouped { bytes: all, .. } = *weight
+        && j0.is_multiple_of(RAW_GROUP)
+        && yt.len().is_multiple_of(RAW_GROUP)
+    {
+        let mut u = F::Unpacked::default();
+        for (g, out) in yt.chunks_exact_mut(RAW_GROUP).enumerate() {
+            let mut acc: [Acc; RAW_GROUP] = Default::default();
+            let j = j0 + g * RAW_GROUP;
+            for b in 0..nb {
+                let block = act.block(0, b);
+                for (r, acc) in acc.iter_mut().enumerate() {
+                    let (bytes, d) = weight.block(j + r, b, nb);
+                    #[cfg(target_arch = "x86_64")]
+                    {
+                        let at = bytes.as_ptr() as usize - all.as_ptr() as usize + PREFETCH_BYTES;
+                        if at < all.len() {
+                            // SAFETY: a prefetch of an address inside the weight.
+                            unsafe { std::arch::x86_64::_mm_prefetch(all.as_ptr().add(at).cast(), std::arch::x86_64::_MM_HINT_T0) };
+                        }
+                    }
+                    // SAFETY: the caller's contract, see `Block::unpack`.
+                    unsafe {
+                        F::unpack(bytes, d, &mut u);
+                        F::dot(&u, &block, acc);
+                    }
+                }
+            }
+            for (o, acc) in out.iter_mut().zip(&acc) {
+                *o = acc.sum();
+            }
+        }
+        return;
+    }
     if rows == 1 {
         let mut u = F::Unpacked::default();
         for (j, out) in (j0..).zip(yt.iter_mut()) {
