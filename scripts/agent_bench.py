@@ -18,11 +18,12 @@ For each engine, one server at a time on the port the agent is configured for:
 
 Fair settings, which each server would otherwise disagree on:
 
- - pi sends no sampling fields and no thinking switch, so each server's own
-   defaults would decide both: phobos samples greedily and does not think,
-   llama.cpp samples at 0.8 and thinks, since the Qwen template thinks unless
-   told otherwise. Both are given the same sampler on the command line here,
-   and llama.cpp is told not to think.
+ - pi sends no sampling fields, and asks for reasoning only with a reasoning
+   model, so each server's own defaults would decide both: phobos samples
+   greedily and thinks only when asked, llama.cpp samples at 0.8 and thinks,
+   since the Qwen template thinks unless told otherwise. Both are given the
+   same sampler here, Qwen's for the mode, and either neither thinks or,
+   with `--thinking`, pi asks for reasoning and llama.cpp is told to.
  - The context is the agent's: pi is configured for 16k, one slot.
  - The expert split is each engine's own. llama.cpp fits `-ncmoe` to the card
    itself (`--fit`, on by default); phobos sizes its expert cache from free
@@ -80,8 +81,9 @@ ENGINE_PORT = 8081
 CONTEXT = 16384
 MAX_TOKENS = 8192
 
-# Qwen's recommendation for the non-thinking mode.
+# Qwen's recommendations for the non-thinking mode and for thinking.
 SAMPLER = {"temp": 0.7, "top_k": 20, "top_p": 0.8, "min_p": 0.0, "presence_penalty": 1.5}
+THINKING_SAMPLER = {"temp": 0.6, "top_k": 20, "top_p": 0.95, "min_p": 0.0, "presence_penalty": 0.0}
 SEED = 0
 
 
@@ -301,7 +303,12 @@ class Llama(Engine):
                 break
         else:
             sys.exit(f"{exe} lists no CUDA device with any runtime tried; pass --cuda-lib")
-        self.fit = self.fitted()
+        given = args.llama_arg
+        if "-ncmoe" in given or "--n-cpu-moe" in given:
+            at = given.index("-ncmoe" if "-ncmoe" in given else "--n-cpu-moe")
+            self.fit = f"experts of {given[at + 1]} blocks on the CPU, as given"
+        else:
+            self.fit = self.fitted()
 
     def fitted(self):
         """The expert split `--fit` will settle on, which the server does not
@@ -330,7 +337,7 @@ class Llama(Engine):
             "--host", "127.0.0.1",
             "-c", CONTEXT,
             "-np", 1,
-            "--reasoning", "off",
+            "--reasoning", "on" if self.args.thinking else "off",
             "--temp", s["temp"],
             "--top-k", s["top_k"],
             "--top-p", s["top_p"],
@@ -536,11 +543,14 @@ def run_check(child, workdir):
     return "none"
 
 
-def run_agent(pi, workdir, out_path, timeout_secs):
+def run_agent(pi, workdir, out_path, timeout_secs, thinking):
     """pi in print mode until it exits. Its stdin is closed: print mode waits
     on an open one before it sends anything."""
     prompt = workdir / "prompt.md"
     cmd = [pi, "-p", "--offline", "--mode", "json", "--no-session", f"@{prompt}"]
+    if thinking:
+        # pi then asks for reasoning_effort, which phobos reads as thinking.
+        cmd[1:1] = ["--model", "reasoning=true", "--thinking", "medium"]
     started = time.perf_counter()
     with open(out_path, "wb") as out:
         proc = subprocess.Popen(cmd, cwd=workdir, stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT)
@@ -682,13 +692,16 @@ def parse_args():
     p.add_argument("--llama-arg", action="append", default=[], help="extra llama-server argument")
     p.add_argument("--phobos-env", action="append", default=[], help="NAME=VALUE for the phobos server")
     p.add_argument("--greedy", action="store_true", help="temperature 0 on both instead of Qwen's sampler")
+    p.add_argument("--thinking", action="store_true", help="both engines think: pi asks for reasoning, llama.cpp --reasoning on")
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--out", help="folder for logs and results (default: a new temp folder)")
     p.add_argument("--max-idle-util", type=float, default=30)
     p.add_argument("--max-idle-power", type=float, default=80)
     p.add_argument("--force", action="store_true")
     args = p.parse_args()
-    args.sampler = dict(SAMPLER, temp=0.0) if args.greedy else SAMPLER
+    args.sampler = THINKING_SAMPLER if args.thinking else SAMPLER
+    if args.greedy:
+        args.sampler = dict(args.sampler, temp=0.0)
     return args
 
 
@@ -718,7 +731,7 @@ def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
                 child = Path(child).name.removesuffix(".requests.jsonl")
             else:
                 recorder.path = out / f"{kind}-rep{rep}-{child}.requests.jsonl"
-                wall, exited, done, turns, prompts = run_agent(pi, workdir, out / f"{kind}-rep{rep}-{child}.jsonl", engine.args.timeout)
+                wall, exited, done, turns, prompts = run_agent(pi, workdir, out / f"{kind}-rep{rep}-{child}.jsonl", engine.args.timeout, engine.args.thinking)
                 recorder.path = None
             time.sleep(0.5)  # the last request's summary line
             text = engine.text(before)
