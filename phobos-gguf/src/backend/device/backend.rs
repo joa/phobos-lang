@@ -144,6 +144,16 @@ impl Backend for DeviceBackend {
     }
 
     fn zeroed(&self, len: usize) -> Result<Buf> {
+        // While recording, a pooled buffer cleared by a recorded launch, in
+        // order with the launches before it. A clear issued now would run
+        // ahead of them, so it would need a buffer none of them can still
+        // be reading, a fresh allocation and later a free: most of a decode
+        // step's host time when a layer asks for one every block.
+        if self.recording.get() {
+            let buf = self.alloc(len)?;
+            self.pointwise("zero", &[(buf, 0)], len)?;
+            return Ok(buf);
+        }
         let buf = self.alloc_written_now(len)?;
         let ptr = self.ptr(buf, 0)?;
         // Async on the stream, so it orders with the pass instead of forcing

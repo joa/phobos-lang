@@ -46,6 +46,14 @@ kernel copy(S: tensor<f32>[M, N], D: tensor<f32>[M, N]) {
 
 @launch(256)
 @autotune(TILE in [1024])
+kernel zero(D: tensor<f32>[M, N]) {
+  let p = program_id(0)
+  var z: tile<f32>[1, TILE] = 0.0
+  D[0 :+ 1, p * TILE :+ TILE] = z
+}
+
+@launch(256)
+@autotune(TILE in [1024])
 kernel gate_into(X: tensor<f32>[M, N], G: tensor<f32>[M, N]) {
   let p = program_id(0)
   var x = X[0 :+ 1, p * TILE :+ TILE]
