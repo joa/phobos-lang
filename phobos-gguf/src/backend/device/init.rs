@@ -87,7 +87,7 @@ impl DeviceBackend {
         let quantize_wide = compile(QUANTIZE_SRC, &[("TB", QUANT_TB_WIDE)], "quantize")?;
         let pointwise = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE)], "pointwise")?;
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
-        let argmax_finish = compile(ARGMAX_FINISH_SRC, &[], "argmax_finish")?;
+        let argmax_finish = compile(&argmax_finish_src(), &[], "argmax_finish")?;
         // Independent kernels compiled in parallel (`compile_parallel`), so
         // MLIR-to-PTX lowering runs concurrently. `Vec::remove(0)` keeps the
         // destructure in the jobs' own order without cloning `Module`s.
