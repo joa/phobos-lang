@@ -112,10 +112,37 @@ pub(crate) fn render_tools_system(
     text
 }
 
+/// A value as the chat template writes it into a call: a string as is, and
+/// anything else as JSON with the separators the template's `tojson` uses,
+/// which are the ones the model writes, so a call it made renders back as
+/// the same tokens.
 pub(crate) fn argument_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
-        other => other.to_string(),
+        other => {
+            let mut out = Vec::new();
+            let mut ser = serde_json::Serializer::with_formatter(&mut out, SpacedJson);
+            serde::Serialize::serialize(other, &mut ser).expect("a Value serializes");
+            String::from_utf8(out).expect("serde_json writes UTF-8")
+        }
+    }
+}
+
+/// Compact JSON but for a space after each `,` and `:`, as Python's
+/// `json.dumps` writes by default.
+struct SpacedJson;
+
+impl serde_json::ser::Formatter for SpacedJson {
+    fn begin_array_value<W: ?Sized + std::io::Write>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()> {
+        if first { Ok(()) } else { writer.write_all(b", ") }
+    }
+
+    fn begin_object_key<W: ?Sized + std::io::Write>(&mut self, writer: &mut W, first: bool) -> std::io::Result<()> {
+        if first { Ok(()) } else { writer.write_all(b", ") }
+    }
+
+    fn begin_object_value<W: ?Sized + std::io::Write>(&mut self, writer: &mut W) -> std::io::Result<()> {
+        writer.write_all(b": ")
     }
 }
 
