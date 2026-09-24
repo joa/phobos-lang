@@ -112,9 +112,10 @@ use raw::DeviceRaw;
 /// generated text is a function of.
 type QmmaSplitKey = (usize, usize, usize);
 
-/// Heads, head dimension, taps, head stride, normalize, query scale, rows, and
-/// rows per program: everything [`delta_conv_src`] bakes in.
-type ConvKey = (usize, usize, usize, usize, usize, bool, u32, usize, usize);
+/// Heads, grouped heads, head dimension, taps, head stride, normalize, query
+/// scale and rows per program: everything [`delta_conv_src`] bakes in. The
+/// row count is the launch's, so a prompt of a new length compiles nothing.
+type ConvKey = (usize, usize, usize, usize, usize, bool, u32, usize);
 
 /// Head count, group size, head dimension and query group: the shape
 /// [`DeviceBackend::attn_persist_plan`] settles a grid and split count for.
