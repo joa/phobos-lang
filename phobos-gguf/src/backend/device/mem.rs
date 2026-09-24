@@ -95,7 +95,10 @@ impl DeviceBackend {
             .borrow_mut()
             .get_mut(buf.0)
             .and_then(Option::take);
-        if taken.is_some() {
+        if let Some(slot) = taken {
+            if let Slot::Owned(buffer) = slot {
+                self.pool.forget(buffer);
+            }
             self.free_slots.borrow_mut().push(buf.0);
         }
     }

@@ -22,12 +22,15 @@ impl Backend for DeviceBackend {
 
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
         let (buffers_reused, buffers_allocated) = self.pool.reuse_counts();
+        let (buffer_live_bytes, buffer_idle_bytes) = self.pool.byte_counts();
         let experts = self.expert_stats();
         Some(phobos_inference::CacheStats {
             kernels_reused: self.kernels_reused.get(),
             kernels_compiled: self.kernels_compiled.get(),
             buffers_reused,
             buffers_allocated,
+            buffer_live_bytes,
+            buffer_idle_bytes,
             expert_hits: experts.hits,
             expert_misses: experts.misses,
             expert_bytes: experts.bytes,

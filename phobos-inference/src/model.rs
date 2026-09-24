@@ -82,6 +82,10 @@ pub struct CacheStats {
     /// be allocated because nothing of that size was free.
     pub buffers_reused: u64,
     pub buffers_allocated: u64,
+    /// Device memory in pooled buffers: handed out and in use, and released
+    /// and waiting on the free list for a request of the same size.
+    pub buffer_live_bytes: u64,
+    pub buffer_idle_bytes: u64,
     /// For a model whose experts stream: experts a token wanted that were
     /// in the device cache, ones that were not and had to cross the bus,
     /// and the bytes that crossed. All zero for a model without experts.

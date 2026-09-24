@@ -468,106 +468,109 @@ fn mhz(khz: u32) -> String {
     format!("{} MHz", khz / 1000)
 }
 
-/// What the backend got back out of its caches.
+/// What the caches saved.
 ///
-/// Both settle: the kernel shapes a model uses are fixed once it is loaded,
-/// and a decode asks for the same buffers every step. A number still climbing
-/// after a few tokens is the interesting case, not a high one.
+/// Only a cache whose misses cost something a watcher can see gets a hit
+/// rate: the prefix cache, whose misses are prefill, and the expert cache,
+/// whose misses cross the bus. The buffer pool reads near 100% within a few
+/// tokens whatever happens, so it is measured in memory instead: what is in
+/// use, what sits idle on the free list, and how many buffers it allocated.
+/// Idle memory and allocations should stop rising once the model is warm, and
+/// either one that keeps rising is a leak.
+/// Kernels are not shown at all. Every shape compiles during the load, which
+/// the loading screen already follows, and every launch after it hits.
 pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let block = panel("CACHES", theme::GREEN_DIM, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    let width = inner.width as usize;
 
-    // Prompt positions a kept session already held. Unlike the two below it
-    // this is not a property of the backend, so it is shown whether or not
-    // the backend keeps caches of its own.
-    let prompt = hit_rate(
-        "prompt",
+    // Unlike the rows below it this is not a property of the backend, so it
+    // is shown whether or not the backend keeps caches of its own.
+    let mut lines = vec![hit_rate(
+        "prefix hit",
         rate_of(snap.prompt_reused, snap.prompt_tokens),
-        snap.prompt_reused,
-        snap.prompt_tokens - snap.prompt_reused.min(snap.prompt_tokens),
-        (inner.width as usize).saturating_sub(38).clamp(5, 18),
+        format!(" of {} prompt tokens", count(snap.prompt_tokens)),
+        width,
         theme::GREEN,
-    );
+    )];
 
     let Some(stats) = snap.caches else {
-        frame.render_widget(
-            Paragraph::new(vec![
-                prompt,
-                Line::from(Span::styled("this backend keeps none", theme::muted())),
-                Line::from(Span::styled(
-                    "it compiles nothing and pools nothing",
-                    Style::default().fg(theme::GREEN_FAINT),
-                )),
-            ]),
-            inner,
-        );
+        lines.push(Line::from(Span::styled(
+            "this backend keeps none",
+            theme::muted(),
+        )));
+        lines.push(Line::from(Span::styled(
+            "it compiles nothing and pools nothing",
+            Style::default().fg(theme::GREEN_FAINT),
+        )));
+        frame.render_widget(Paragraph::new(lines), inner);
         return;
     };
 
-    let track = (inner.width as usize).saturating_sub(38).clamp(5, 18);
-    let mut lines = vec![
-        prompt,
-        hit_rate(
-            "kernels",
-            stats.kernel_hit_rate(),
-            stats.kernels_reused,
-            stats.kernels_compiled,
-            track,
-            theme::CYAN,
-        ),
-        hit_rate(
-            "buffers",
-            stats.buffer_hit_rate(),
-            stats.buffers_reused,
-            stats.buffers_allocated,
-            track,
-            theme::MAGENTA,
-        ),
-        Line::from(vec![
-            Span::raw("          "),
-            Span::styled(
-                "kept / made from scratch",
-                Style::default().fg(theme::GREEN_FAINT),
-            ),
-        ]),
-    ];
-    // Only a model whose experts stream has a third cache to speak of.
+    // Only a model whose experts stream has an expert cache to speak of.
     if let Some(rate) = stats.expert_hit_rate() {
         lines.push(hit_rate(
-            "experts",
+            "expert hit",
             Some(rate),
-            stats.expert_hits,
-            stats.expert_misses,
-            track,
+            format!(
+                " of {} routed, resident",
+                count(stats.expert_hits + stats.expert_misses)
+            ),
+            width,
             theme::AMBER,
         ));
     }
+    lines.push(Line::from(vec![
+        Span::styled(format!("{:<12}", "buffers"), theme::muted()),
+        Span::styled(
+            bytes(stats.buffer_live_bytes),
+            theme::accent(theme::MAGENTA),
+        ),
+        Span::styled(" in use, ", theme::muted()),
+        Span::styled(bytes(stats.buffer_idle_bytes), theme::text()),
+        Span::styled(" idle", theme::muted()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::raw(" ".repeat(12)),
+        Span::styled(count(stats.buffers_allocated), theme::text()),
+        Span::styled(" allocated, ", theme::muted()),
+        Span::styled(count(stats.buffers_reused), theme::text()),
+        Span::styled(" reused", theme::muted()),
+    ]));
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// A hit rate and what it is a share of. The bar gives way first when the
+/// panel is narrow.
 fn hit_rate(
     label: &str,
     rate: Option<f64>,
-    hits: u64,
-    misses: u64,
-    track: usize,
+    of: String,
+    width: usize,
     color: Color,
 ) -> Line<'static> {
+    let head = Span::styled(format!("{label:<12}"), theme::muted());
     let Some(rate) = rate else {
         return Line::from(vec![
-            Span::styled(format!("{label:<10}"), theme::muted()),
+            head,
             Span::styled("nothing asked for yet", theme::muted()),
         ]);
     };
-    Line::from(vec![
-        Span::styled(format!("{label:<10}"), theme::muted()),
-        Span::styled(anim::bar(rate, track), Style::default().fg(color)),
-        Span::styled(format!(" {:>5.1}%", rate * 100.0), theme::accent(color)),
-        Span::styled(format!("  {}", count(hits)), Style::default().fg(color)),
-        Span::styled(" / ", theme::muted()),
-        Span::styled(count(misses), theme::muted()),
-    ])
+    let track = width.saturating_sub(12 + 7 + of.len()).min(18);
+    let mut spans = vec![head];
+    if track >= 4 {
+        spans.push(Span::styled(
+            format!("{} ", anim::bar(rate, track)),
+            Style::default().fg(color),
+        ));
+    }
+    spans.push(Span::styled(
+        format!("{:.1}%", rate * 100.0),
+        theme::accent(color),
+    ));
+    spans.push(Span::styled(of, theme::muted()));
+    Line::from(spans)
 }
 
 /// What a load is doing, for the screen that is up before there is a model.

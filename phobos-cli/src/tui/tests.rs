@@ -68,6 +68,8 @@ fn loaded() -> Snapshot {
         kernels_compiled: 64,
         buffers_reused: 18204,
         buffers_allocated: 1801,
+        buffer_live_bytes: 3 << 30,
+        buffer_idle_bytes: 512 << 20,
         expert_hits: 0,
         expert_misses: 0,
         expert_bytes: 0,
@@ -297,14 +299,24 @@ fn the_block_strip_counts_both_kinds() {
 }
 
 #[test]
-fn the_cache_rates_are_shown_as_rates() {
+fn the_caches_say_what_they_count() {
     let text = screen(150, 46, &loaded());
-    // 3512 of 3576 kernel lookups found one ready, 18204 of 20005 buffers.
-    assert!(text.contains("98.2%"), "the kernel hit rate is missing");
-    assert!(text.contains("91.0%"), "the buffer hit rate is missing");
     // 96 of 640 prompt positions came out of a kept session.
-    assert!(text.contains("prompt"), "the prompt cache row is missing");
-    assert!(text.contains("15.0%"), "the prompt reuse rate is missing");
+    for words in [
+        "prefix hit",
+        "15.0% of 640 prompt tokens",
+        "3.00 GiB in use, 512.00 MiB idle",
+        "1 801 allocated, 18 204 reused",
+    ] {
+        assert!(
+            text.contains(words),
+            "{words:?} is missing:
+{text}"
+        );
+    }
+    // Buffers are a count, not a rate, and kernels are not shown.
+    assert!(!text.contains("91.0%"), "the buffer hit rate is back");
+    assert!(!text.contains("launches"), "the kernel row is back");
 }
 
 #[test]
