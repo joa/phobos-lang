@@ -31,6 +31,27 @@ fn top_k_one_is_deterministic() {
 }
 
 #[test]
+fn top_k_keeps_only_the_k_highest_wherever_they_sit() {
+    // The best three are scattered through a vocab much wider than k, so the
+    // cut has to find them rather than take a prefix.
+    let mut logits = vec![0.0f32; 1000];
+    for (at, logit) in [(917, 5.0), (3, 4.9), (500, 4.8), (501, 4.7)] {
+        logits[at] = logit;
+    }
+    let cfg = SampleConfig {
+        temperature: 100.0,
+        top_k: 3,
+        ..SampleConfig::greedy()
+    };
+    let mut rng = Rng::new(7);
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..200 {
+        seen.insert(choose(&logits, &cfg, History::default(), &mut rng));
+    }
+    assert_eq!(seen.into_iter().collect::<Vec<_>>(), [3, 500, 917]);
+}
+
+#[test]
 fn sampling_is_seed_reproducible() {
     let logits = [1.0, 1.0, 1.0, 1.0, 1.0];
     let cfg = SampleConfig {
@@ -157,4 +178,27 @@ fn penalties_skip_ids_outside_the_vocab() {
         choose(&logits, &cfg, History::new(&[], &[-1, 7]), &mut rng),
         1
     );
+}
+
+#[test]
+fn the_penalized_top_k_is_the_top_k_of_the_penalized_vocab() {
+    // The one-pass cut against penalizing a copy and ranking all of it.
+    let mut rng = Rng::new(3);
+    let logits: Vec<f32> = (0..5000).map(|_| rng.next_f32() * 8.0 - 4.0).collect();
+    let prompt: Vec<i64> = (0..300).map(|i| i * 13 % 5000).collect();
+    let generated: Vec<i64> = (0..40).map(|i| i * 29 % 5000).collect();
+    let cfg = SampleConfig {
+        temperature: 0.7,
+        top_k: 20,
+        repetition_penalty: 1.3,
+        presence_penalty: 1.5,
+        ..SampleConfig::greedy()
+    };
+    let history = History::new(&prompt, &generated);
+    let mut penalized = logits.clone();
+    penalize(&mut penalized, &cfg, history);
+    let mut want: Vec<(usize, f32)> = penalized.into_iter().enumerate().collect();
+    want.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+    want.truncate(20);
+    assert_eq!(top_k(&logits, &cfg, history), want);
 }

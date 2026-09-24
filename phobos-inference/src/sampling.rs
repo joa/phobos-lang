@@ -114,8 +114,11 @@ impl SampleConfig {
 pub use phobos_base::rng::SplitMix64 as Rng;
 
 pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rng) -> i64 {
-    // The penalties rewrite the logits, so they need a copy of the vocab.
-    // Both the greedy and the sampled path see the rewritten values.
+    // A top-k cut applies the penalties as it passes over the vocab; every
+    // other path rewrites a copy of it. Both see the same values.
+    if cfg.top_k > 0 && cfg.top_k < logits.len() && !cfg.is_greedy() {
+        return sample(top_k(logits, cfg, history), cfg, rng);
+    }
     let penalized = cfg.penalizes(history).then(|| {
         let mut scratch = logits.to_vec();
         penalize(&mut scratch, cfg, history);
@@ -128,12 +131,17 @@ pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rn
         return argmax(logits);
     }
 
-    // Ranked by logit, then cut to the top-k.
     let mut ranked: Vec<(usize, f32)> = logits.iter().copied().enumerate().collect();
     ranked.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
     if cfg.top_k > 0 {
         ranked.truncate(cfg.top_k);
     }
+    sample(ranked, cfg, rng)
+}
+
+/// One draw from `ranked`, the candidates highest logit first, after the
+/// temperature, the nucleus and the min-p cut.
+fn sample(mut ranked: Vec<(usize, f32)>, cfg: &SampleConfig, rng: &mut Rng) -> i64 {
 
     // Temperature-scaled softmax over the survivors.
     let max = ranked[0].1;
@@ -189,6 +197,52 @@ pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rn
     }
 
     ranked.last().map(|&(i, _)| i as i64).unwrap_or(0)
+}
+
+/// The `cfg.top_k` highest logits once penalized, highest first, in one pass
+/// over the vocab: a quarter million of them, where copying the vocab to
+/// penalize it or ranking all of it costs a millisecond a token. A logit
+/// only enters the buffer by beating its lowest, which almost none do.
+fn top_k(logits: &[f32], cfg: &SampleConfig, history: History) -> Vec<(usize, f32)> {
+    let k = cfg.top_k;
+    // Which penalties touch which ids: bit 0 repetition, bit 1 presence.
+    let mut marks = Vec::new();
+    if cfg.penalizes(history) {
+        marks = vec![0u8; logits.len()];
+        if cfg.repetition_penalty != 1.0 {
+            for id in history.prompt.iter().chain(history.generated) {
+                if let Some(m) = usize::try_from(*id).ok().and_then(|i| marks.get_mut(i)) {
+                    *m |= 1;
+                }
+            }
+        }
+        if cfg.presence_penalty != 0.0 {
+            for id in history.generated {
+                if let Some(m) = usize::try_from(*id).ok().and_then(|i| marks.get_mut(i)) {
+                    *m |= 2;
+                }
+            }
+        }
+    }
+    let mut best: Vec<(usize, f32)> = Vec::with_capacity(k + 1);
+    for (i, &raw) in logits.iter().enumerate() {
+        let mut logit = raw;
+        if let Some(&m) = marks.get(i) {
+            if m & 1 != 0 {
+                logit = if logit > 0.0 { logit / cfg.repetition_penalty } else { logit * cfg.repetition_penalty };
+            }
+            if m & 2 != 0 {
+                logit -= cfg.presence_penalty;
+            }
+        }
+        if best.len() == k && best[k - 1].1.total_cmp(&logit).is_ge() {
+            continue;
+        }
+        let at = best.partition_point(|&(_, l)| l.total_cmp(&logit).is_ge());
+        best.insert(at, (i, logit));
+        best.truncate(k);
+    }
+    best
 }
 
 /// Demote the tokens already in the sequence. Both penalties are one-shot: a
