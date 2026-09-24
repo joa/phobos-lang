@@ -312,4 +312,10 @@ fn a_request_reports_decode_and_prompt_lookups_apart() {
         super::describe_experts(&before, &after).unwrap(),
         "experts resident: decode 75.0% of 100, prompt 25.0% of 40; 2.00 GB copied"
     );
+    let host = CacheStats {
+        expert_cpu_misses: 25,
+        expert_cpu_nanos: 3_000_000,
+        ..after
+    };
+    assert!(super::describe_experts(&before, &host).unwrap().ends_with("; 25 computed on the host in 3 ms"));
 }

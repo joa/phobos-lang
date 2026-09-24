@@ -1,16 +1,12 @@
-// Expert streaming: a block's experts live in a pinned host mirror, a
-// share of them in device cache slots, and every miss crosses the bus once,
-// at the block's sync point, into the slot it will be read from.
-//
-// A slab per stack and format (a file mixes formats per block, and a slab
-// has one row stride), each `[slots * n, rb]` in the grouped layout the
-// decode matvec reads, with an `f16` scale plane apiece. A block owns
-// `per_block` consecutive slots of each of its three slabs plus one zeroed
-// spare, from a base of its own; a slot holds one expert of one block across
-// the three. Eviction is least recently used within the block, stamped by
-// routing step.
+// Expert streaming: a block's experts live in a pinned host mirror and a
+// share of them in device cache slots. A decode step's misses are computed
+// on the host from the mirror (`handoff.rs`); a prompt pass's cross the bus
+// once, at the block's sync point, into the slot they will be read from,
+// or go to the host too (`grouped.rs`).
 
 mod grouped;
+mod handoff;
+mod mapped;
 mod mirror;
 mod op;
 
@@ -19,15 +15,18 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use cust::event::{Event, EventFlags};
-use cust::memory::{CopyDestination, DeviceBuffer, DeviceCopy, LockedBuffer};
+use cust::memory::{DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::stream::Stream;
 use phobos_kernels::cuda_ok;
 
 use super::DeviceBackend;
 use super::kernels::MOE_USED;
-use crate::backend::{Backend, Buf, ExpertsBuf};
+use crate::backend::ExpertsBuf;
 use crate::experts::{ExpertSet, ExpertStack, Stack};
 use crate::quant::Quant;
+use crate::simd::StartedRow;
+use handoff::Handoff;
+use mapped::Mapped;
 use mirror::Mirror;
 
 /// Bytes a slab may not exceed: the decode matvec indexes in 32 bits.
@@ -59,6 +58,11 @@ pub(super) struct Experts {
     /// The share of a wide pass's experts the host takes, moved toward
     /// balance block by block; see `grouped.rs`.
     host_share: f32,
+    /// Misses to copy into slots once the host has time: a block, the
+    /// expert and the tick it was routed at.
+    refills: Vec<(usize, usize, u64)>,
+    /// The last block's misses, still running on the host.
+    started: Option<StartedRow>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -76,10 +80,8 @@ pub(super) struct ExpertStats {
     pub(super) cpu_nanos: u64,
 }
 
-/// A pinned host buffer and its device twin. What the host writes for the
-/// device goes up asynchronously in stream order; what the device writes
-/// for the host comes back synchronously, which a pinned buffer makes one
-/// transfer where a pageable one is staged by the driver.
+/// A pinned host buffer and its device twin, for tables many programs
+/// read: what the host writes goes up asynchronously in stream order.
 struct Staged<T: DeviceCopy> {
     host: LockedBuffer<T>,
     dev: DeviceBuffer<T>,
@@ -94,10 +96,6 @@ impl<T: DeviceCopy + Default> Staged<T> {
         self.dev.as_device_ptr().as_raw()
     }
 
-    fn host(&self) -> &[T] {
-        self.host.as_slice()
-    }
-
     /// Copies `values` in at `at` and returns their device address.
     fn push(&mut self, at: usize, values: &[T], stream: &Stream) -> Result<u64> {
         self.host.as_mut_slice()[at..at + values.len()].copy_from_slice(values);
@@ -106,12 +104,6 @@ impl<T: DeviceCopy + Default> Staged<T> {
         // point.
         unsafe { copy_async(dst, self.host.as_slice()[at..].as_ptr().cast(), size_of_val(values), stream)? };
         Ok(dst)
-    }
-
-    /// The device's first `len` back, as a slice of the host copy.
-    fn pull(&mut self, len: usize) -> Result<&[T]> {
-        self.dev.index(0..len).copy_to(&mut self.host.as_mut_slice()[..len])?;
-        Ok(&self.host.as_slice()[..len])
     }
 }
 
@@ -128,19 +120,17 @@ struct BlockExperts {
     base: [usize; 3],
     /// `SLOT[rows, 8]`, `TOPK[rows, 8]` and `W[rows, 8]`, pointer-stable so
     /// a segment's graph needs no patching.
-    slots: Staged<i32>,
-    topk: Staged<i32>,
-    weights: Staged<f32>,
+    slots: Mapped<i32>,
+    topk: Mapped<i32>,
+    weights: Mapped<f32>,
     /// The previous block's prediction for this one, and the event its
     /// copies complete at. The prediction's weights are the kernel's
     /// mandatory output and nothing reads them.
-    look: Staged<i32>,
+    look: Mapped<i32>,
     look_w: DeviceBuffer<f32>,
     fetched: Option<Event>,
-    /// A decode row on its way to the host's kernels, and their share of
-    /// it on its way back.
-    x_row: LockedBuffer<f32>,
-    y_row: LockedBuffer<f32>,
+    /// A decode row's misses on their way to the host and back.
+    handoff: Handoff,
 }
 
 struct Slab {
@@ -225,6 +215,8 @@ impl Experts {
             iota: HashMap::new(),
             tick: 0,
             stats: ExpertStats::default(),
+            refills: Vec::new(),
+            started: None,
         }
     }
 
@@ -334,6 +326,39 @@ impl Experts {
         }
         Ok(())
     }
+
+    /// The refills queued since the last call copied into slots on
+    /// `stream`. A decode step queues one a block, its most heavily
+    /// weighted miss: the host computes a miss in a quarter of a copy, so
+    /// copying them all would outrun the bus and have a later token wait on
+    /// the copies, and a fixed number keeps the cache, and so what the host
+    /// computes, the same from run to run for a seed. Issuing a copy costs
+    /// the host several microseconds, so this runs while the device is busy.
+    fn refill(&mut self, stream: &Stream) -> Result<()> {
+        for (block, expert, tick) in std::mem::take(&mut self.refills) {
+            self.fetch(block, [expert], tick, stream)?;
+        }
+        Ok(())
+    }
+}
+
+impl Experts {
+    /// Waits for the misses started on the host, if any, and counts their
+    /// time.
+    fn join_started(&mut self) -> Result<()> {
+        if let Some(started) = self.started.take() {
+            self.stats.cpu_nanos += started.join()?;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for Experts {
+    /// Misses started on the host read a block's mirror, which goes with
+    /// this.
+    fn drop(&mut self) {
+        let _ = self.join_started();
+    }
 }
 
 impl DeviceBackend {
@@ -384,14 +409,13 @@ impl DeviceBackend {
             held: Vec::new(),
             prefetched: Vec::new(),
             base: [0; 3],
-            slots: Staged::new(table)?,
-            topk: Staged::new(table)?,
-            weights: Staged::new(table)?,
-            look: Staged::new(MOE_USED)?,
+            slots: Mapped::new(table)?,
+            topk: Mapped::new(table)?,
+            weights: Mapped::new(table)?,
+            look: Mapped::new(MOE_USED)?,
             look_w: DeviceBuffer::from_slice(&[0f32; MOE_USED])?,
             fetched: None,
-            x_row: LockedBuffer::new(&0.0, d)?,
-            y_row: LockedBuffer::new(&0.0, d)?,
+            handoff: Handoff::new(d)?,
         });
         let buf = ExpertsBuf(experts.blocks.len() - 1);
         self.expert_keys.borrow_mut().insert(key.to_string(), buf);
@@ -474,18 +498,6 @@ impl DeviceBackend {
                 counts.len()
             ),
         );
-        Ok(())
-    }
-
-    /// A pinned row of `len` added into `dest` in stream order: nothing is
-    /// written before the recorded launches ahead of it run, and the row
-    /// is rewritten only after the next sync point.
-    fn add_row(&self, dest: Buf, row: &LockedBuffer<f32>, len: usize) -> Result<()> {
-        let buf = self.alloc(len)?;
-        // SAFETY: the pinned row lives with its block.
-        unsafe { copy_async(self.ptr(buf, 0)?, row.as_slice().as_ptr().cast(), len * size_of::<f32>(), &self.stream)? };
-        self.add_into(dest, buf)?;
-        self.release(buf);
         Ok(())
     }
 

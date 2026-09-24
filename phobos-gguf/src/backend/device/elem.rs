@@ -77,10 +77,14 @@ impl DeviceBackend {
         buffers: &[(Buf, usize)],
         len: usize,
     ) -> Result<()> {
-        let mut operands = Vec::with_capacity(buffers.len());
-        for &(buf, offset) in buffers {
-            operands.push((self.ptr(buf, offset)?, [1i64, len as i64]));
-        }
+        let ptrs = buffers.iter().map(|&(buf, offset)| self.ptr(buf, offset)).collect::<Result<Vec<_>>>()?;
+        self.pointwise_raw(name, &ptrs, len)
+    }
+
+    /// [`DeviceBackend::pointwise`] over raw device addresses, such as a
+    /// mapped host buffer's.
+    pub(super) fn pointwise_raw(&self, name: &'static str, ptrs: &[u64], len: usize) -> Result<()> {
+        let operands: Vec<_> = ptrs.iter().map(|&ptr| (ptr, [1i64, len as i64])).collect();
         let (module, tile) = if len >= WIDE_FLOOR {
             (&self.pointwise_wide, ELEM_TILE_WIDE)
         } else {

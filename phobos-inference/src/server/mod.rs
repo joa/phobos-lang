@@ -175,8 +175,15 @@ fn describe_experts(before: &CacheStats, after: &CacheStats) -> Option<String> {
         0 => "none".to_string(),
         lookups => format!("{:.1}% of {lookups}", 100.0 * hits as f64 / lookups as f64),
     };
+    let host = match after.expert_cpu_misses - before.expert_cpu_misses {
+        0 => String::new(),
+        misses => format!(
+            "; {misses} computed on the host in {:.0} ms",
+            (after.expert_cpu_nanos - before.expert_cpu_nanos) as f64 / 1e6
+        ),
+    };
     Some(format!(
-        "experts resident: decode {}, prompt {}; {:.2} GB copied",
+        "experts resident: decode {}, prompt {}; {:.2} GB copied{host}",
         part(decode),
         part(prompt),
         (after.expert_bytes - before.expert_bytes) as f64 / 1e9,

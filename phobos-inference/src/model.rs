@@ -87,9 +87,9 @@ pub struct CacheStats {
     pub buffer_live_bytes: u64,
     pub buffer_idle_bytes: u64,
     /// For a model whose experts stream: experts a decode step wanted that
-    /// were in the device cache, ones that were not and had to cross the
-    /// bus, and the bytes that crossed for any pass. All zero for a model
-    /// without experts.
+    /// were in the device cache, ones that were not, computed on the host or
+    /// copied, and the bytes that crossed the bus for any pass. All zero for
+    /// a model without experts.
     pub expert_hits: u64,
     pub expert_misses: u64,
     pub expert_bytes: u64,
@@ -97,12 +97,14 @@ pub struct CacheStats {
     /// all the rows routed to it, so these count experts and not tokens.
     pub expert_prompt_hits: u64,
     pub expert_prompt_misses: u64,
-    /// Experts a lookahead copied ahead of their block, and how many of
-    /// those the block then wanted. Zero without a lookahead.
+    /// Experts copied into slots on the side, by a lookahead ahead of their
+    /// block or as a host-computed miss kept for later tokens, and how many
+    /// of those a block then found there.
     pub expert_prefetches: u64,
     pub expert_prefetch_hits: u64,
-    /// Misses computed on the host rather than copied, and the host time
-    /// they took. Zero unless that path is on.
+    /// A decode step's misses computed on the host rather than copied, and
+    /// the host time they took, a block's misses at a time. Zero unless that
+    /// path is on.
     pub expert_cpu_misses: u64,
     pub expert_cpu_nanos: u64,
 }

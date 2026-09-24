@@ -110,6 +110,7 @@ pub(super) struct MirrorSource<'a> {
 
 // SAFETY: the mirror is only read once built, by any thread.
 unsafe impl Sync for MirrorSource<'_> {}
+unsafe impl Send for MirrorSource<'_> {}
 
 impl Source for MirrorSource<'_> {
     fn shape(&self, stack: Stack) -> Shape {

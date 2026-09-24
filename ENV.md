@@ -89,9 +89,9 @@ there; the two opt-ins lost and exist for a wider bus or a faster host.
 | --- | --- | --- | --- |
 | `PHOBOS_MOE_GROUPED` | opt-out | on | Run a pass whose rows choose more experts than a block's cache holds as grouped GEMMs over rows sorted by expert, each expert copied once a block, rather than row by row with the cache thrashing. Off, a 512-token prompt on the 35B runs at a sixth of the rate. |
 | `PHOBOS_MOE_HOST` | opt-out | on | In a grouped prompt pass, give the lightest experts by rows to the host's AVX2 K-quant kernels (`simd`) while the device works the rest, each one sparing the bus a copy; the host's share of a block's experts follows the last block's host and device times. Off, the prompt pass runs at a third of the rate. |
-| `PHOBOS_MOE_HOST_DECODE` | opt-in | off | A decode step's misses on the host while the device runs the hits, each miss also copied into its slot for the next token. A miss costs the host about as much as its copy and both sit on the step's critical path, so on the 35B it decoded at 17 t/s against 30. |
+| `PHOBOS_MOE_HOST_DECODE` | opt-out | on | A decode step's misses on the host's kernels while the device runs the hits and the next block is recorded; each block's most heavily weighted miss is also copied into a slot for later tokens. A host miss costs a quarter of a copy on an x8 link. Off, every miss is copied on the step's critical path and the 35B decodes at half the rate. |
 | `PHOBOS_MOE_LOOKAHEAD` | opt-in | off | At each block's sync point, run the next block's router on the residual as it stands and copy its predicted misses early on a second stream. Right four times in five; the wrong fifth costs more bytes on an x8 link than the overlap buys. |
-| `PHOBOS_HOST_THREADS` | a count | half the logical CPUs | Workers of the host expert kernels' pool (`simd`), whichever path runs them. Two threads on one core share its vector units and measured slower than one. |
+| `PHOBOS_HOST_THREADS` | a count | half the logical CPUs | Workers of the host expert kernels (`simd`): the pool a prompt pass's share runs on, and the team a decode step's misses run on. Two threads on one core share its vector units and measured slower than one. |
 
 ## Benchmarks and examples
 
