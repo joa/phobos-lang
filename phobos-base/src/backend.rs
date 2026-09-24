@@ -1,36 +1,26 @@
-// The compilation back end: how a target's kernels get from MLIR to text a
-// driver will load.
-//
-// This is the half of the target seam below phobos-lang: phobos-mlir runs
-// the lowering and cannot depend on the language crate. The other half, the
-// instruction vocabulary the emitter builds a module from, is
-// `codegen::target::Isa` in phobos-lang; the same [`GpuConfig`] selects both.
-
 use crate::context::{GpuConfig, NvidiaGpuConfig};
 
-/// The LLVM machine a back end compiles its module for.
+/// The LLVM target machine.
 pub struct LlvmTarget<'a> {
     pub triple: &'a str,
     pub cpu: &'a str,
     pub features: &'a str,
 }
 
-/// One target's lowering: the passes that take a `gpu.module` down to LLVM IR,
-/// the machine that IR is compiled for, and a last look at the result.
 pub trait Backend {
-    /// What the generated text is, for logs and error messages.
     fn code_name(&self) -> &'static str;
 
-    /// The MLIR pass pipeline lowering a `gpu.module` to LLVM IR. `index_bits`
-    /// is the width index values lower to, which several passes take as an
-    /// option rather than infer.
+    /// The MLIR pipeline lowering a `gpu.module` to LLVM IR.
+    ///
+    /// `index_bits` is the width index values lower to.
     fn pipeline(&self, index_bits: u32) -> String;
 
     fn llvm_target(&self) -> LlvmTarget<'_>;
 
-    /// A last pass over the generated text, for what the back end could not fix
-    /// earlier. `dynamic_shared` is whether any kernel wants a launch-time
-    /// shared allocation; most targets want the default.
+    /// Post process the generated text.
+    ///
+    /// `dynamic_shared` is whether any kernel wants a launch-time
+    /// shared allocation.
     fn post_process(&self, code: String, dynamic_shared: bool) -> String {
         let _ = dynamic_shared;
         code
@@ -94,9 +84,6 @@ impl Backend for NvidiaGpuConfig {
 }
 
 /// Patch the demoted dynamic-shared declaration into an external one.
-///
-/// The back end demotes the allocation into the kernel as a one-byte static
-/// object; a launch-time size attaches only to the module-scope external form.
 fn extern_dynamic_shared(ptx: &str) -> String {
     const NEWLINE: char = '\n';
 
