@@ -12,6 +12,10 @@ pub struct Pool {
     /// allocate. Counters only: nothing here reads them back.
     reused: Cell<u64>,
     allocated: Cell<u64>,
+    /// Bytes of every buffer the pool allocated and still accounts for, in
+    /// use or not, and of those the ones waiting on the free list.
+    owned_bytes: Cell<u64>,
+    idle_bytes: Cell<u64>,
 }
 
 impl Pool {
@@ -26,6 +30,8 @@ impl Pool {
     pub fn take(&self, len: usize) -> Result<DeviceBuffer<f32>> {
         if let Some(pooled) = self.free.borrow_mut().get_mut(&len).and_then(Vec::pop) {
             self.reused.set(self.reused.get() + 1);
+            self.idle_bytes
+                .set(self.idle_bytes.get() - bytes_of(&pooled));
             return Ok(pooled);
         }
         self.allocated.set(self.allocated.get() + 1);
@@ -44,6 +50,14 @@ impl Pool {
         (self.reused.get(), self.allocated.get())
     }
 
+    /// Bytes in buffers handed out and not yet back, and bytes on the free
+    /// list. Idle bytes that keep growing are the same leak as allocations
+    /// that keep climbing, measured in what it costs.
+    pub fn byte_counts(&self) -> (u64, u64) {
+        let idle_bytes = self.idle_bytes.get();
+        (self.owned_bytes.get() - idle_bytes, idle_bytes)
+    }
+
     /// A buffer of exactly `len` elements that the pool has never handed out,
     /// for storage the caller writes immediately rather than from the stream:
     /// a released buffer can still be read by launches recorded earlier in the
@@ -52,7 +66,10 @@ impl Pool {
     /// recording, so only the caller can choose between this and [`Pool::take`].
     pub fn take_fresh(&self, len: usize) -> Result<DeviceBuffer<f32>> {
         // SAFETY: no caller reads before writing, see above.
-        Ok(unsafe { DeviceBuffer::uninitialized(len)? })
+        let buf = unsafe { DeviceBuffer::uninitialized(len)? };
+        self.owned_bytes
+            .set(self.owned_bytes.get() + bytes_of(&buf));
+        Ok(buf)
     }
 
     /// Hand a buffer back. It is filed under its own length, so it only comes
@@ -65,6 +82,7 @@ impl Pool {
     /// every step, and every launch reading them would need its graph node
     /// patched.
     pub fn put(&self, buf: DeviceBuffer<f32>) {
+        self.idle_bytes.set(self.idle_bytes.get() + bytes_of(&buf));
         let mut free = self.free.borrow_mut();
         let list = free.entry(buf.len()).or_default();
         let at = buf.as_device_ptr().as_raw();
@@ -84,6 +102,19 @@ impl Pool {
             .map(|(len, bufs)| len * bufs.len() * size_of::<f32>())
             .sum();
         free.clear();
+        self.owned_bytes.set(self.owned_bytes.get() - bytes as u64);
+        self.idle_bytes.set(0);
         bytes
     }
+
+    /// Gives a buffer the pool handed out back to the driver instead of the
+    /// free list. Dropping it directly works too, but leaves it counted.
+    pub fn forget(&self, buf: DeviceBuffer<f32>) {
+        self.owned_bytes
+            .set(self.owned_bytes.get() - bytes_of(&buf));
+    }
+}
+
+fn bytes_of(buf: &DeviceBuffer<f32>) -> u64 {
+    (buf.len() * size_of::<f32>()) as u64
 }
