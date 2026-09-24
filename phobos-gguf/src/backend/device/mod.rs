@@ -306,7 +306,7 @@ pub struct DeviceBackend {
     /// [`argmax_reduce`]'s partial-value column, `[0, W)`, one per lane;
     /// added to each chunk's base index to recover a vocabulary position.
     argmax_iota: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
-    /// [`ARGMAX_FINISH_SRC`], compiled once: it takes no shape baked in.
+    /// [`argmax_finish_src`], compiled once: it bakes in no shape of the model's.
     argmax_finish: Module,
     /// [`argmax_reduce`]'s per-block partials and [`argmax_finish`]'s
     /// answer, reused across calls since [`Backend::argmax`] is hot-path.

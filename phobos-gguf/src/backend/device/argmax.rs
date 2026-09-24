@@ -13,7 +13,7 @@ impl DeviceBackend {
     /// stability and both are cheap enough that recording them buys nothing.
     pub(super) fn device_argmax(&self, buf: Buf, len: usize) -> Result<i64> {
         let w = argmax_chunk_width(len);
-        let s = argmax_splits(len, w);
+        let s = ARGMAX_SPLITS;
 
         if !self.argmax_iota.borrow().contains_key(&w) {
             let iota: Vec<f32> = (0..w as i64).map(|i| i as f32).collect();
