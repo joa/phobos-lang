@@ -135,6 +135,7 @@ fn main() -> Result<()> {
     let args = parse()?;
     if let Some(threads) = args.threads {
         simd::init_pool(threads)?;
+        simd::init_team(threads)?;
     }
     let gguf = Gguf::open(Path::new(&args.model))?;
     let config = Config::from_gguf(&gguf)?;
@@ -155,16 +156,27 @@ fn main() -> Result<()> {
         let grouped = GroupedCopy::build(&set);
         batch_shape(&grouped, "grouped layout", &args.rows, moe.n_expert, args.reps)?;
 
-        // A decode step's misses: two experts over one row.
+        // A decode step's misses: a few experts over one row, back to back
+        // and with the gap a block's device work leaves between them.
         let x: Vec<f32> = (0..d).map(|_| next()).collect();
         let mut out = vec![0.0f32; d];
-        let calls = 40;
-        let started = Instant::now();
-        for i in 0..calls {
-            let misses = [((7 * i) % moe.n_expert, 1.0), ((7 * i + 3) % moe.n_expert, 1.0)];
-            simd::experts_row(&grouped, &misses, &x, &mut out)?;
+        let calls = 200;
+        for gap_us in [0, 400] {
+            for n in 1..=4 {
+                let mut took = 0.0;
+                for i in 0..calls {
+                    let misses: Vec<(usize, f32)> = (0..n).map(|k| ((7 * (i * n + k)) % moe.n_expert, 1.0)).collect();
+                    let started = Instant::now();
+                    simd::experts_row(&grouped, &misses, &x, &mut out)?;
+                    took += started.elapsed().as_secs_f64();
+                    let idle = Instant::now();
+                    while idle.elapsed().as_micros() < gap_us {
+                        std::hint::spin_loop();
+                    }
+                }
+                println!("{n} misses of one row, {gap_us} us apart: {:.0} us a call", took * 1e6 / calls as f64);
+            }
         }
-        println!("two misses of one row, spread by rows: {:.0} us a call", started.elapsed().as_secs_f64() * 1e6 / calls as f64);
 
         // The reference decoder: one expert, one row, one thread.
         let started = Instant::now();

@@ -19,10 +19,13 @@ use rayon::prelude::*;
 use crate::experts::{ExpertSet, Stack};
 use crate::quant::Quant;
 use crate::quant::grouped::RAW_GROUP;
+pub use decode::{RowOut, StartedRow, experts_row, init_team, start_experts_row};
 
+mod decode;
 mod q4_k;
 mod q5_k;
 mod q6_k;
+mod team;
 #[cfg(test)]
 mod tests;
 
@@ -158,6 +161,16 @@ pub trait Source: Sync {
     fn shape(&self, stack: Stack) -> Shape;
     /// Expert `e`'s blocks in one stack.
     fn weight(&self, stack: Stack, e: usize) -> Weight<'_>;
+}
+
+impl<S: Source + ?Sized> Source for &S {
+    fn shape(&self, stack: Stack) -> Shape {
+        (**self).shape(stack)
+    }
+
+    fn weight(&self, stack: Stack, e: usize) -> Weight<'_> {
+        (**self).weight(stack, e)
+    }
 }
 
 impl Source for ExpertSet {
@@ -431,54 +444,6 @@ pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, o
             for (o, &v) in out[r * d..(r + 1) * d].iter_mut().zip(y) {
                 *o += v;
             }
-        }
-    }
-    Ok(())
-}
-
-/// Weight rows a task of [`experts_row`] takes: a few kilobytes of one
-/// expert, so a handful of misses spread over every worker.
-const ROW_CHUNK: usize = 16;
-
-/// The experts `misses` names, each with its weight, over one row `x`:
-/// each GEMM spread over the pool by rows and every miss's in one region,
-/// for a decode step, where an expert on its own thread would read at
-/// that thread's memory rate. Each expert's weighted result is added into
-/// `out`.
-pub fn experts_row(source: &impl Source, misses: &[(usize, f32)], x: &[f32], out: &mut [f32]) -> Result<()> {
-    let (gate, up, down) = (source.shape(Stack::Gate), source.shape(Stack::Up), source.shape(Stack::Down));
-    let (d, d_ff) = (gate.k, gate.n);
-    ensure!(x.len() == d && out.len() == d, "one row of {d} for {} outputs", out.len());
-    let isa = Isa::detect();
-    let act = Q8Act::quantize(x, 1, d)?;
-    let mut gu: Vec<Vec<f32>> = misses.iter().map(|_| vec![0.0; 2 * d_ff]).collect();
-    pool().install(|| {
-        gu.par_iter_mut().zip(misses).try_for_each(|(gu, &(e, _))| {
-            let (g, u) = gu.split_at_mut(d_ff);
-            [(g, &gate, Stack::Gate), (u, &up, Stack::Up)].into_par_iter().try_for_each(|(y, shape, stack)| {
-                let weight = source.weight(stack, e);
-                y.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm(shape, isa, &weight, c * ROW_CHUNK, &act, chunk))
-            })
-        })
-    })?;
-    let hs = gu
-        .iter()
-        .map(|gu| {
-            let (g, u) = gu.split_at(d_ff);
-            let h: Vec<f32> = g.iter().zip(u).map(|(&g, &u)| swiglu(g, u)).collect();
-            Q8Act::quantize(&h, 1, d_ff)
-        })
-        .collect::<Result<Vec<_>>>()?;
-    let mut ys: Vec<Vec<f32>> = misses.iter().map(|_| vec![0.0; d]).collect();
-    pool().install(|| {
-        ys.par_iter_mut().zip(misses).zip(&hs).try_for_each(|((y, &(e, _)), h)| {
-            let weight = source.weight(Stack::Down, e);
-            y.par_chunks_mut(ROW_CHUNK).enumerate().try_for_each(|(c, chunk)| gemm(&down, isa, &weight, c * ROW_CHUNK, h, chunk))
-        })
-    })?;
-    for (&(_, w), y) in misses.iter().zip(&ys) {
-        for (o, &v) in out.iter_mut().zip(y) {
-            *o += w * v;
         }
     }
     Ok(())
