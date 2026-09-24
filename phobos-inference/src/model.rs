@@ -215,6 +215,13 @@ pub trait Model {
     fn cache_stats(&self) -> Option<CacheStats> {
         None
     }
+
+    /// Does now what the first request would otherwise wait for, such as
+    /// putting the weights on the device. A caller runs it once, straight
+    /// after the load; a backend with nothing to prepare does nothing.
+    fn warm_up(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub trait Session {
