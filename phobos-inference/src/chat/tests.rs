@@ -265,6 +265,47 @@ fn the_minicpm_tool_block_follows_the_system_prompt() {
 
 /// What the parser reads out of a call has to render back into the prompt
 /// the same way, or a tool loop's second turn drifts.
+/// A kept session is reused only as far as the next prompt repeats it, so a
+/// call the client sends back has to render as the tokens the model wrote,
+/// arguments in the model's order rather than sorted.
+#[test]
+fn a_qwen_call_renders_back_as_the_model_wrote_it() {
+    let written = concat!(
+        "<tool_call>\n<function=edit>\n",
+        "<parameter=path>\nsrc/main.rs\n</parameter>\n",
+        "<parameter=old_string>\na\n</parameter>\n",
+        "<parameter=new_string>\nb\n</parameter>\n",
+        "</function>\n</tool_call>",
+    );
+    let out = AssistantOutput::collect(written, None, false, Dialect::Qwen);
+    let mut prompt = String::new();
+    render_tool_calls(&mut prompt, &out.tool_calls, false, Dialect::Qwen);
+
+    assert_eq!(prompt, written);
+}
+
+/// A structured argument is parsed into JSON on the way out and written
+/// again on the way back in, and the two have to agree on spacing too.
+#[test]
+fn a_json_argument_renders_back_with_the_models_spacing() {
+    let written = concat!(
+        "<tool_call>
+<function=edit>
+",
+        "<parameter=edits>
+[{\"oldText\": \"a\", \"newText\": \"b\"}]
+</parameter>
+",
+        "</function>
+</tool_call>",
+    );
+    let out = AssistantOutput::collect(written, None, false, Dialect::Qwen);
+    let mut prompt = String::new();
+    render_tool_calls(&mut prompt, &out.tool_calls, false, Dialect::Qwen);
+
+    assert_eq!(prompt, written);
+}
+
 #[test]
 fn a_minicpm_call_renders_back_into_the_prompt() {
     let call = ToolCall {
