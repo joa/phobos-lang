@@ -143,22 +143,50 @@ Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 610.88, tokens per seco
 
 Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the card, on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
-| test  | llama.cpp CUDA[^2], 33 blocks' experts on the CPU | Phobos GPU       |
-| ----- | ------------------------------------------------: | ---------------: |
-| pp128 |                                   71.38 +/-  0.25 | 348.80 +/- 1.97  |
-| pp512 |                                  245.94 +/-  0.43 | 623.13 +/- 0.91  |
-| tg128 |                                   28.14 +/-  0.18 |  29.88 +/- 0.02  |
+| test  | llama.cpp CUDA[^2], 31 blocks' experts on the CPU, 8 threads | Phobos GPU       |
+| ----- | -----------------------------------------------------------: | ---------------: |
+| pp128 |                                              75.68 +/-  0.32 | 329.33 +/- 0.75  |
+| pp512 |                                             256.91 +/-  0.55 | 598.85 +/- 2.13  |
+| tg128 |                                              31.41 +/-  0.75 |  55.52 +/- 0.15  |
 
 Both engines keep the 35B's trunk on the card. llama.cpp splits the experts
-by layer at load: `-ncmoe 33` runs 33 blocks' experts on the CPU and keeps
-the last seven blocks' resident on the card, the most that fit beside the
-trunk here (ten page); it was the best of 40, 36, 33, 30 and 27. Phobos
-streams the experts a token chooses over PCIe into a cache on the card, 3.6
-GiB of it here, and computes the rest of a prompt's experts on the CPU with
-AVX2 kernels while the bus carries the others, the split moving toward
-balance block by block. The link is PCIe 3.0 x8 on this box, 6.4 GB/s, so a
-decode token is mostly its misses crossing the bus; a wider link or a bigger
-card moves the decode figure directly.
+by layer at load, and runs at its best split and thread count for this
+card, swept with `llama-bench` at a 3k context: `-ncmoe 31 -t 8`, where 30
+is the edge of paging and 29 pages, and 8 threads decode 12% faster than
+its default. Phobos keeps a cache of experts on the card, sized to leave
+room for the context to grow. A decode step's hits run on the card while a
+team of CPU threads computes its misses from host memory, in a quarter of
+the time copying one over the link takes, and hands its share to the card
+through mapped memory. A prompt pass copies experts over PCIe and computes
+the rest on the CPU at the same time. The link is PCIe 3.0 x8 on this box,
+6.4 GB/s.
+
+#### An agent's work
+
+The figures above are a benchmark's. `scripts/agent_bench.py` runs the
+[pi](https://pi.dev) coding agent on the tasks in `bench/` against each
+engine in turn, records every request the agent sends, and replays a
+recording to each engine at the recorded answer lengths, so both do the
+same work: the same prompts in the same order, each engine's kept session
+rewound where the agent's prompts leave it. Both engines get the same
+sampler, a 16k context and one slot, and llama.cpp the split above. The fib
+task, 8 requests, three rounds each:
+
+| no thinking      | wall   | prompt    | decode     |
+| ---------------- | -----: | --------: | ---------: |
+| llama.cpp CUDA   | 71.9 s | 132 t/s   | 29.9 t/s   |
+| Phobos GPU       | 44.0 s | 237 t/s   | 42.3 t/s   |
+
+| thinking         | wall    | prompt    | decode     | generated a round |
+| ---------------- | ------: | --------: | ---------: | ----------------: |
+| llama.cpp CUDA   | 149.1 s | 105 t/s   | 30.1 t/s   |             2,005 |
+| Phobos GPU       | 147.8 s | 193 t/s   | 42.0 t/s   |            ~4,400 |
+
+A replay caps each answer at the recorded length but cannot make an engine
+go on, and llama.cpp ends the long reasoning turn early, so with thinking
+the two walls cover different work: Phobos writes twice the tokens in the
+same time. The context reaches 4k tokens without thinking and 8.6k with it,
+which is why decode is slower here than in the benchmark above.
 
 The two 27Bs, at 6.27 GiB and 5.53 GiB of weights, leave little of the card's 8 GiB,
 and their figures hold only while the desktop's share stays small: the IQ1_M was
@@ -189,11 +217,16 @@ python scripts/bench.py -m models/Ternary-Bonsai-2-27B-PTQ1_0.gguf -p 128 -n 128
   -r 1 -R 3 --llama-bench ${llama_cpp_prism}/llama-bench.exe \
   --csv results/bench-bonsai.csv --json results/bench-bonsai.json
 
-# the 35B mixture of experts, llama.cpp with the first 33 blocks' experts on
-# the CPU and the rest on the card, the largest card share that fits here
+# the 35B mixture of experts, llama.cpp with the first 31 blocks' experts on
+# the CPU and 8 threads, its best on this card at a 3k context
 python scripts/bench.py -m models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -p 128 512 -n 128 \
-  -r 1 -R 3 --llama-args="-ncmoe 33" \
+  -r 1 -R 3 --llama-args="-ncmoe 31 -t 8" \
   --csv results/bench-qwen36moe.csv --json results/bench-qwen36moe.json
+
+# an agent's work: record a pi session, then replay it to both engines
+python scripts/agent_bench.py --engines phobos -r 1 [--thinking]
+python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-fib.requests.jsonl \
+  --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8
 
 # the plot carries every run, a block each: one file is one visit to the card,
 # and a 27B generates an order of magnitude slower, so the blocks do not share
