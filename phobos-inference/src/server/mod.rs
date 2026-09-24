@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use phobos_base::log::Level;
 
-use crate::chat::Dialect;
+use crate::chat::{Dialect, TURN_START};
 use crate::generate::{self, Flow};
 use crate::model::{CacheStats, Model, Session, Tokenizer};
 use crate::sampling::Rng;
@@ -112,10 +112,23 @@ fn rewind<'a>(
     let shared = common_prefix(held, ids).min(ids.len().saturating_sub(1));
     // Nothing to keep is not worth keeping: a session holding none of this
     // prompt still holds its buffers, and dropping it hands them back.
-    if shared == 0 || !session.truncate(shared) {
+    if shared == 0 {
         return None;
     }
-    Some((session, shared))
+    let kept = session.truncate(shared).filter(|&kept| kept > 0)?;
+    Some((session, kept))
+}
+
+/// Where the prompt's last turn opens, the reply's own header. The next
+/// request repeats everything before it, but may render this turn
+/// differently once it is history: an earlier turn loses its reasoning. So
+/// that is where a session that cannot rewind by position keeps its
+/// checkpoint. `None` for a prompt with no turns, such as a raw completion.
+fn last_turn(tokenizer: &dyn Tokenizer, ids: &[i64]) -> Option<usize> {
+    let [turn] = tokenizer.encode(TURN_START).ok()?[..] else {
+        return None;
+    };
+    ids.iter().rposition(|&id| id == turn)
 }
 
 fn common_prefix(held: &[i64], ids: &[i64]) -> usize {
@@ -276,15 +289,15 @@ pub fn serve(
         let responder = inf_req.responder;
 
         let mut rng = Rng::new(req.seed.unwrap_or(defaults.seed));
+        let Ok(ids) = model.tokenizer().encode(&req.prompt) else {
+            let _ = responder.send(Err("Failed to encode prompt".to_string()));
+            continue;
+        };
         let config = generate::Config {
             sample: req.sample.resolve(&defaults.sample),
             max_tokens: req.max_tokens.unwrap_or(defaults.max_tokens),
             meter: Some(meter.clone()),
-        };
-
-        let Ok(ids) = model.tokenizer().encode(&req.prompt) else {
-            let _ = responder.send(Err("Failed to encode prompt".to_string()));
-            continue;
+            checkpoint_at: last_turn(model.tokenizer(), &ids),
         };
         // A session kept from the last request is worth reusing for as far as
         // the two prompts agree. What it holds past that is wrong for this

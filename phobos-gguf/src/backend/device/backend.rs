@@ -191,15 +191,14 @@ impl Backend for DeviceBackend {
         // The only synchronization point in a block: everything queued since
         // the last read has to land before the host can look at it.
         self.stream.synchronize()?;
-        let slots = self.slots.borrow();
-        let Some(mem::Slot::Owned(buffer)) = slots.get(buf.0).and_then(Option::as_ref) else {
-            bail!("reading a released handle, or a constant, which lives in the arena")
-        };
+        // Any slot, a recurrent state in its arena among them: a session
+        // saving a checkpoint reads those back too.
+        let (at, len) = (self.ptr(buf, 0)?, self.len_of(buf)?);
         ensure!(
-            buffer.len() >= out.len(),
+            len >= out.len(),
             "reading {} elements from a {}-element buffer",
             out.len(),
-            buffer.len()
+            len
         );
         // Through page-locked staging: straight into a Vec the driver
         // bounces the copy through its own pinned staging a page at a time,
@@ -210,9 +209,13 @@ impl Backend for DeviceBackend {
             *staging = Some(LockedBuffer::new(&0.0f32, out.len())?);
         }
         let pinned = staging.as_mut().expect("filled above");
-        buffer
-            .index(0..out.len())
-            .copy_to(&mut pinned.as_mut_slice()[..out.len()])?;
+        let dst = pinned.as_mut_slice()[..out.len()].as_mut_ptr();
+        // SAFETY: `at` holds at least `out.len()` elements, checked above,
+        // and the pinned staging as many; the stream is drained.
+        cuda_ok(
+            unsafe { cust::sys::cuMemcpyDtoH_v2(dst.cast(), at, size_of_val(out)) },
+            "reading a buffer back",
+        )?;
         out.copy_from_slice(&pinned.as_slice()[..out.len()]);
         Ok(())
     }

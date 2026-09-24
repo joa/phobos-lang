@@ -2,6 +2,9 @@ pub(crate) const THINK_START: &str = "<think>";
 
 pub(crate) const THINK_END: &str = "</think>";
 
+/// What opens every turn, in both dialects.
+pub(crate) const TURN_START: &str = "<|im_start|>";
+
 pub(crate) const TOOL_CALL_START: &str = "<tool_call>";
 
 pub(crate) const TOOL_CALL_END: &str = "</tool_call>";

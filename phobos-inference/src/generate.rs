@@ -57,6 +57,11 @@ pub struct Config {
     /// Where to report progress, for a caller displaying it. Not a setting
     /// the generation reads: nothing below branches on it.
     pub meter: Option<Arc<Meter>>,
+    /// The prompt position to leave a [`Session::checkpoint`] at, for a
+    /// caller that knows where the next prompt is likely to part from this
+    /// one. `None`, or a position the pass does not reach, is the end of the
+    /// prompt.
+    pub checkpoint_at: Option<usize>,
 }
 
 impl Config {
@@ -66,6 +71,7 @@ impl Config {
             sample,
             max_tokens,
             meter: None,
+            checkpoint_at: None,
         }
     }
 }
@@ -114,13 +120,47 @@ pub fn generate(
     }
 
     let started = Instant::now();
-    let logits = prefill(session, fresh)?;
+    // The checkpoint goes where the prompt's last turn opens, if that is in
+    // the fresh part, and at its end otherwise.
+    let split = config
+        .checkpoint_at
+        .filter(|&at| at > cached && at < prompt.len())
+        .map_or(fresh.len(), |at| at - cached);
+    let logits = match session.prompt_batch() {
+        Some(batch) => feed_in_batches(session, fresh, split, batch, config.meter.as_deref(), started)?,
+        None => {
+            let logits = prefill(session, fresh)?;
+            session.checkpoint()?;
+            logits
+        }
+    };
     if let Some(meter) = config.meter.as_ref() {
         meter.prefilled(fresh.len(), started.elapsed());
     }
     probe(model, config);
     let mut sequence = Sequence::new(prompt.to_vec());
     continue_from(model, session, &mut sequence, &logits, config, rng, sink)
+}
+
+/// `fresh` fed a batch at a time, the live prompt rate updated between
+/// batches, with the checkpoint taken after its first `split` positions.
+/// Returns the logits of its last position.
+fn feed_in_batches(session: &mut dyn Session, fresh: &[i64], split: usize, batch: usize, meter: Option<&Meter>, started: Instant) -> Result<Vec<f32>> {
+    let mut logits = Vec::new();
+    let mut done = 0;
+    for (i, part) in [&fresh[..split], &fresh[split..]].into_iter().enumerate() {
+        for chunk in part.chunks(batch.max(1)) {
+            logits = session.extend(chunk)?;
+            done += chunk.len();
+            if let Some(meter) = meter {
+                meter.prefilling(done, started.elapsed());
+            }
+        }
+        if i == 0 {
+            session.checkpoint()?;
+        }
+    }
+    Ok(logits)
 }
 
 /// Continue a generation, `logits` being those for the position after

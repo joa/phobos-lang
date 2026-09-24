@@ -489,6 +489,18 @@ impl Meter {
         });
     }
 
+    /// The prompt pass is under way, `tokens` positions run in `took`. The
+    /// rate shows while the pass runs; only [`Meter::prefilled`] ends it and
+    /// enters it into the history.
+    pub fn prefilling(&self, tokens: usize, took: Duration) {
+        let rate = rate_of(tokens, took);
+        let mut inner = self.lock();
+        inner.prefill_rate = rate;
+        if let Some(live) = inner.live.as_mut() {
+            live.prefill_rate = rate;
+        }
+    }
+
     /// The prompt pass finished, having run `tokens` positions in `took`.
     pub fn prefilled(&self, tokens: usize, took: Duration) {
         let rate = rate_of(tokens, took);

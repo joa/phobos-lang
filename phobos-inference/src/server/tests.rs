@@ -180,9 +180,9 @@ fn a_session_rewinds_only_as_far_as_its_backend_allows() {
 
     // The default accepts only the request that drops nothing, which is how a
     // session is extended rather than rewound.
-    assert!(session.truncate(4));
+    assert_eq!(session.truncate(4), Some(4));
     assert_eq!(session.len(), 4);
-    assert!(!session.truncate(2));
+    assert_eq!(session.truncate(2), None);
     assert_eq!(session.len(), 4, "a refused rewind changes nothing");
 }
 
@@ -203,6 +203,7 @@ fn a_generation_reads_the_card_while_it_runs() {
         sample: SampleConfig::greedy(),
         max_tokens: 4,
         meter: Some(meter.clone()),
+        checkpoint_at: None,
     };
 
     assert_eq!(model.probes.load(Ordering::Relaxed), 0);

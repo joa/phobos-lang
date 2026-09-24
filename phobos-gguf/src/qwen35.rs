@@ -5,6 +5,7 @@ use crate::backend::{Backend, Buf, DeltaMix, FusedMix, FusedProject, Plane, Proj
 use crate::layers::{Ffn, Gain, KvCache, Linear, MoeFfn, RopeTable, Shared, Uploads};
 
 mod attention;
+mod checkpoint;
 mod delta_net;
 mod forward;
 #[cfg(test)]
@@ -389,7 +390,11 @@ impl Model {
                 }
             })
             .collect();
-        State { pos: 0, layers }
+        State {
+            pos: 0,
+            layers,
+            saved: None,
+        }
     }
 
     /// The pre-projection normalization of `x` into `normed`, shared by
@@ -415,7 +420,7 @@ impl Model {
         gain: Buf,
         rows: usize,
         carry: &mut Option<(Buf, usize)>,
-        recurrent: &mut Option<Buf>,
+        recurrent: &mut Option<(Buf, usize)>,
         backend: &dyn Backend,
         variants: Variants,
     ) -> Result<()> {
@@ -679,10 +684,11 @@ impl Model {
         // [head_dim, head_dim] matrix per head, so keeping it on the host means
         // moving a megabyte in and out per block per token.
         let state = match *recurrent {
-            Some(buf) => buf,
+            Some((buf, _)) => buf,
             None => {
-                let buf = backend.zeroed_state(heads * head_dim * head_dim)?;
-                *recurrent = Some(buf);
+                let len = heads * head_dim * head_dim;
+                let buf = backend.zeroed_state(len)?;
+                *recurrent = Some((buf, len));
                 buf
             }
         };
@@ -740,16 +746,19 @@ impl Model {
 enum LayerState {
     Attention(KvCache),
     DeltaNet {
-        /// Allocated on first use; `carry` is the last `pad` positions of the
-        /// previous call's convolution stream, and their length.
+        /// Allocated on first use, each with its length; `carry` is the last
+        /// `pad` positions of the previous call's convolution stream.
         carry: Option<(Buf, usize)>,
-        recurrent: Option<Buf>,
+        recurrent: Option<(Buf, usize)>,
     },
 }
 
 pub struct State {
     pos: usize,
     layers: Vec<LayerState>,
+    /// The last point [`State::checkpoint`] saved, which a truncate can
+    /// return to.
+    saved: Option<checkpoint::Checkpoint>,
 }
 
 impl State {
@@ -760,19 +769,6 @@ impl State {
 
     pub fn is_empty(&self) -> bool {
         self.pos == 0
-    }
-
-    /// Forget everything past `positions`, which this architecture can only do
-    /// when there is nothing to forget.
-    ///
-    /// Its attention blocks would rewind as llama's do, but its delta net
-    /// blocks carry a recurrent state summarising every token they have seen.
-    /// Nothing in it is indexed by position, so there is no prefix of it to
-    /// keep, and rewinding one half of the model but not the other would leave
-    /// the two at different points in the sequence. Extending is still fine:
-    /// that is what a decode step does.
-    pub fn truncate(&mut self, positions: usize) -> bool {
-        positions == self.pos
     }
 
     /// Hands every device allocation the state holds back to the backend.
@@ -787,12 +783,13 @@ impl State {
                     if let Some((buf, _)) = carry.take() {
                         backend.release(buf);
                     }
-                    if let Some(buf) = recurrent.take() {
+                    if let Some((buf, _)) = recurrent.take() {
                         backend.release(buf);
                     }
                 }
             }
         }
         self.pos = 0;
+        self.saved = None;
     }
 }

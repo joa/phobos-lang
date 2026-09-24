@@ -8,7 +8,7 @@ mod tests;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) use dialect::Dialect;
+pub(crate) use dialect::{Dialect, TURN_START};
 pub(crate) use stream::{AssistantOutput, OutputEvent, OutputParser};
 
 use dialect::{THINK_END, THINK_START};

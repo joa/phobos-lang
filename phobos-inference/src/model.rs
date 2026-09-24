@@ -233,6 +233,15 @@ pub trait Session {
     /// backend, not of the interface.
     fn extend(&mut self, ids: &[i64]) -> Result<Vec<f32>>;
 
+    /// The batch a long [`Session::extend`] is split into, when the backend
+    /// splits one. A caller can then hand the prompt over in pieces, a batch
+    /// at a time to report progress between them at no cost, since the
+    /// passes run are the same. `None`, the default, is a backend whose
+    /// prompt has to arrive in one call.
+    fn prompt_batch(&self) -> Option<usize> {
+        None
+    }
+
     /// [`Session::extend`] for a caller that only wants the winning token id,
     /// as greedy decoding does: `choose` over a one-element argmax is the
     /// identity, so skipping the full logits vector changes only how much a
@@ -246,16 +255,27 @@ pub trait Session {
     fn len(&self) -> usize;
 
     /// Drop everything past `positions`, so the next [`Session::extend`]
-    /// continues from there, and say whether it could.
+    /// continues from there, and return how many positions the session
+    /// kept. That may be fewer than asked: a session goes back only to
+    /// points it can return to, and the caller runs the rest again. `None`
+    /// is a session that could not go back at all, which the caller drops.
     ///
     /// Rewinding is what lets a session be kept and reused for a request that
     /// shares a prefix with the last one. Not every backend can: a recurrent
     /// block's state summarises every token it has seen rather than storing
-    /// them by position, and there is nothing to subtract. The default is that
-    /// rule, and it still permits the case that asks for nothing to be
-    /// dropped, which is how a session is extended rather than rewound.
-    fn truncate(&mut self, positions: usize) -> bool {
-        positions == self.len()
+    /// them by position, and there is nothing to subtract. It can only return
+    /// to a [`Session::checkpoint`]. The default is a session with neither,
+    /// and it still permits the case that asks for nothing to be dropped,
+    /// which is how a session is extended rather than rewound.
+    fn truncate(&mut self, positions: usize) -> Option<usize> {
+        (positions == self.len()).then_some(positions)
+    }
+
+    /// Remember the current position as one [`Session::truncate`] can
+    /// return to, in place of any remembered before. A session that rewinds
+    /// to any position, or to none, has nothing to remember.
+    fn checkpoint(&mut self) -> Result<()> {
+        Ok(())
     }
 
     /// Bytes of key/value cache this session holds right now, which is what

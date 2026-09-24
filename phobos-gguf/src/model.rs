@@ -213,12 +213,22 @@ impl State {
         self.len() == 0
     }
 
-    /// Forget everything past `positions`, and say whether it could. See the
-    /// two architectures' own notes: one rewinds, one only extends.
-    pub fn truncate(&mut self, positions: usize) -> bool {
+    /// Forget everything past `positions` and return how many positions are
+    /// kept, or `None` when the state cannot go back that far. Llama rewinds
+    /// to any position; qwen35 only to the last [`State::checkpoint`].
+    pub fn truncate(&mut self, positions: usize, backend: &dyn Backend) -> Result<Option<usize>> {
         match self {
-            State::Llama(s) => s.truncate(positions),
-            State::Qwen35(s) => s.truncate(positions),
+            State::Llama(s) => Ok(s.truncate(positions).then_some(positions)),
+            State::Qwen35(s) => s.truncate(positions, backend),
+        }
+    }
+
+    /// Mark this position as one a later truncate can return to. Only a
+    /// state that cannot rewind by position has anything to save.
+    pub fn checkpoint(&mut self, backend: &dyn Backend) -> Result<()> {
+        match self {
+            State::Llama(_) => Ok(()),
+            State::Qwen35(s) => s.checkpoint(backend),
         }
     }
 
