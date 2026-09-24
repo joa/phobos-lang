@@ -3,7 +3,6 @@ use std::str::FromStr;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 
-/// The program arguments without the executable name.
 #[derive(Clone, Debug)]
 pub struct Args {
     tokens: Vec<String>,
@@ -24,12 +23,12 @@ impl Args {
         self.tokens.is_empty()
     }
 
-    pub fn wants_help(&self) -> bool {
-        self.has("-h") || self.has("-help") || self.has("--help")
-    }
-
     pub fn has(&self, flag: &str) -> bool {
         self.tokens.iter().any(|t| t == flag)
+    }
+
+    pub fn wants_help(&self) -> bool {
+        self.has("-h") || self.has("-help") || self.has("--help")
     }
 
     pub fn value(&self, flag: &str) -> Result<Option<&str>> {
@@ -44,12 +43,6 @@ impl Args {
             .ok_or_else(|| anyhow!("{flag} expects a value"))
     }
 
-    pub fn required(&self, flag: &str) -> Result<&str> {
-        self.value(flag)?.ok_or_else(|| anyhow!("missing {flag}"))
-    }
-
-    /// [`Args::value`] over a set of spellings, for a flag with a short and a
-    /// long form. The first one present wins.
     pub fn value_of(&self, flags: &[&str]) -> Result<Option<&str>> {
         for flag in flags {
             if let Some(value) = self.value(flag)? {
@@ -57,6 +50,10 @@ impl Args {
             }
         }
         Ok(None)
+    }
+
+    pub fn required(&self, flag: &str) -> Result<&str> {
+        self.value(flag)?.ok_or_else(|| anyhow!("missing {flag}"))
     }
 
     /// The tokens that are neither a flag nor a flag's value.
