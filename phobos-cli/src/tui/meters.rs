@@ -514,7 +514,7 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             "expert hit",
             Some(rate),
             format!(
-                " of {} routed, resident",
+                " of {} a decode step routed, resident",
                 count(stats.expert_hits + stats.expert_misses)
             ),
             width,

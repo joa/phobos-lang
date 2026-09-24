@@ -86,12 +86,17 @@ pub struct CacheStats {
     /// and waiting on the free list for a request of the same size.
     pub buffer_live_bytes: u64,
     pub buffer_idle_bytes: u64,
-    /// For a model whose experts stream: experts a token wanted that were
-    /// in the device cache, ones that were not and had to cross the bus,
-    /// and the bytes that crossed. All zero for a model without experts.
+    /// For a model whose experts stream: experts a decode step wanted that
+    /// were in the device cache, ones that were not and had to cross the
+    /// bus, and the bytes that crossed for any pass. All zero for a model
+    /// without experts.
     pub expert_hits: u64,
     pub expert_misses: u64,
     pub expert_bytes: u64,
+    /// The same lookups by a prompt pass, which looks up an expert once for
+    /// all the rows routed to it, so these count experts and not tokens.
+    pub expert_prompt_hits: u64,
+    pub expert_prompt_misses: u64,
     /// Experts a lookahead copied ahead of their block, and how many of
     /// those the block then wanted. Zero without a lookahead.
     pub expert_prefetches: u64,
@@ -109,8 +114,8 @@ impl CacheStats {
         rate(self.kernels_reused, self.kernels_compiled)
     }
 
-    /// Share of the experts a model's tokens wanted that were already on
-    /// the device, or `None` for a model that streams none.
+    /// Share of the experts a decode step wanted that were already on the
+    /// device, or `None` for a model that streams none.
     pub fn expert_hit_rate(&self) -> Option<f64> {
         rate(self.expert_hits, self.expert_misses)
     }

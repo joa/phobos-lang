@@ -293,7 +293,7 @@ impl DeviceBackend {
             let mut sched = [Vec::new(), Vec::new()];
             for seg in group {
                 let slot = experts
-                    .place(block, seg.expert, tick, &self.stream)?
+                    .place(block, seg.expert, tick, &self.stream, true)?
                     .ok_or_else(|| anyhow::anyhow!("a group of {} experts does not fit the block's slots", group.len()))?;
                 for t in 0..seg.len.div_ceil(QGEMM_TM) {
                     sched[0].push(slot as i32);

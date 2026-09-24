@@ -33,6 +33,8 @@ impl Backend for DeviceBackend {
             buffer_idle_bytes,
             expert_hits: experts.hits,
             expert_misses: experts.misses,
+            expert_prompt_hits: experts.prompt_hits,
+            expert_prompt_misses: experts.prompt_misses,
             expert_bytes: experts.bytes,
             expert_prefetches: experts.prefetches,
             expert_prefetch_hits: experts.prefetch_hits,

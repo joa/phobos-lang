@@ -137,7 +137,7 @@ impl DeviceBackend {
         let (slot_ptr, w_ptr) = (b.slots.dev(), b.weights.dev());
         let mut owed = Vec::new();
         for r in 0..rows {
-            let misses = self.place_row(experts, block, r, host_misses)?;
+            let misses = self.place_row(experts, block, r, host_misses, rows > 1)?;
             if host_misses {
                 // A row with no misses still owes a zero row, so every step
                 // records the same launches and its graphs stay cached.
@@ -237,8 +237,9 @@ impl DeviceBackend {
     /// Row `r`'s experts into slots and its table row published, all on
     /// the stream ahead of its kernels. With `host_misses`, a miss is left
     /// for the host with the zero slot standing in, and copied into a slot
-    /// on the second stream for the next token.
-    fn place_row(&self, experts: &mut Experts, block: usize, r: usize, host_misses: bool) -> Result<Vec<Miss>> {
+    /// on the second stream for the next token. `prompt` counts the lookups
+    /// as a prompt pass's.
+    fn place_row(&self, experts: &mut Experts, block: usize, r: usize, host_misses: bool, prompt: bool) -> Result<Vec<Miss>> {
         let chosen = experts.blocks[block].chosen(r)?;
         let tick = experts.step(block, &chosen);
         let mut slots = [0i32; MOE_USED];
@@ -249,7 +250,7 @@ impl DeviceBackend {
                 misses.push(Miss { rank, expert });
                 experts.per_block
             } else {
-                experts.place(block, expert, tick, &self.stream)?.ok_or_else(|| anyhow::anyhow!("every slot of the block is in use by this row"))?
+                experts.place(block, expert, tick, &self.stream, prompt)?.ok_or_else(|| anyhow::anyhow!("every slot of the block is in use by this row"))?
             };
             slots[rank] = slot as i32;
         }
