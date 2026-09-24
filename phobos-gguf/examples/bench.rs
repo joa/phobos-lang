@@ -17,12 +17,18 @@ use phobos_gguf::backend::Backend;
 
 use phobos_gguf::backend::device;
 
+/// The runtime's prompt batch, which a depth is primed in.
+const PROMPT_BATCH: usize = 512;
+
 const DEFAULT_MODEL: &str = "models/Qwen3.5-0.8B-Q8_0.gguf";
 
 struct Args {
     model: PathBuf,
     prompt_tokens: Vec<usize>,
     gen_tokens: Vec<usize>,
+    /// Positions already in the context when a tg row starts, one row per
+    /// depth, as llama-bench's `-d`.
+    depths: Vec<usize>,
     repetitions: usize,
     warmup: bool,
     /// A cap on a streamed model's expert cache, as `phobos-cli`'s
@@ -39,6 +45,8 @@ OPTIONS:
   -m, --model FILE      the GGUF file to run (default: {DEFAULT_MODEL})
   -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
   -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
+  -d, --depth N,...     positions in the context before each tg row starts,
+                        one set of tg rows per depth (default: 0)
   -r, --repetitions N   timed repetitions per row (default: 3)
       --no-warmup       skip the warmup pass, which leaves each kernel's first
                         compile inside the repetition it lands in
@@ -72,6 +80,7 @@ fn parse_args() -> Result<Args> {
         model: PathBuf::from(DEFAULT_MODEL),
         prompt_tokens: Vec::new(),
         gen_tokens: Vec::new(),
+        depths: Vec::new(),
         repetitions: 3,
         warmup: true,
         expert_cache_bytes: None,
@@ -83,6 +92,7 @@ fn parse_args() -> Result<Args> {
             "-m" | "--model" => args.model = next("--model")?.into(),
             "-p" | "--n-prompt" => args.prompt_tokens.extend(parse_sizes(&next("-p")?)?),
             "-n" | "--n-gen" => args.gen_tokens.extend(parse_sizes(&next("-n")?)?),
+            "-d" | "--depth" => args.depths.extend(parse_sizes(&next("-d")?)?),
             "-r" | "--repetitions" => args.repetitions = next("-r")?.parse().context("-r")?,
             "--no-warmup" => args.warmup = false,
             "--expert-cache" => {
@@ -102,6 +112,9 @@ fn parse_args() -> Result<Args> {
     }
     if !std::env::args().any(|a| a == "-n" || a == "--n-gen") {
         args.gen_tokens.push(32);
+    }
+    if args.depths.is_empty() {
+        args.depths.push(0);
     }
     args.prompt_tokens.retain(|&n| n > 0);
     args.gen_tokens.retain(|&n| n > 0);
@@ -164,8 +177,8 @@ fn main() -> Result<()> {
     let longest = args
         .prompt_tokens
         .iter()
-        .chain(args.gen_tokens.iter())
         .copied()
+        .chain(args.gen_tokens.iter().map(|&n| n + args.depths.iter().max().unwrap_or(&0)))
         .max()
         .unwrap_or(0);
     let tokens = synthetic_tokens(longest.max(128) + 1, vocab);
@@ -218,30 +231,40 @@ fn main() -> Result<()> {
         }
         rows.push((format!("pp{prompt_tokens}"), rates));
     }
-    for &gen_tokens in &args.gen_tokens {
+    for (&depth, &gen_tokens) in args.depths.iter().flat_map(|d| args.gen_tokens.iter().map(move |n| (d, n))) {
+        let test = if depth == 0 { format!("tg{gen_tokens}") } else { format!("tg{gen_tokens} @ d{depth}") };
         let mut rates = Vec::new();
         for rep in 0..args.repetitions {
             let mut state = model.new_state();
-            // Prime with one position so the timed loop is pure decoding, the
+            // Prime with the depth's positions, in the runtime's prompt
+            // batches, and one more, so the timed loop is pure decoding, the
             // same split llama-bench uses.
-            model.forward(&mut state, &tokens[..1], backend.as_ref())?;
+            for chunk in tokens[..depth + 1].chunks(PROMPT_BATCH) {
+                model.forward(&mut state, chunk, backend.as_ref())?;
+            }
+            let before = backend.cache_stats();
             let start = Instant::now();
             // The greedy fast path: a temperature-0 deployment takes this
             // route, re-feeding a fixed token regardless of what comes back,
             // so timing it instead of `forward` measures what actually ships.
-            for &token in tokens.iter().skip(1).take(gen_tokens) {
+            for &token in tokens.iter().skip(depth + 1).take(gen_tokens) {
                 model.forward_greedy(&mut state, &[token], backend.as_ref())?;
             }
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
             rates.push(gen_tokens as f64 / secs);
-            eprintln!(
-                "  tg{gen_tokens} rep {}/{}: {secs:.3} s",
-                rep + 1,
-                args.repetitions,
-            );
+            // A streamed model's decode rate follows its hit rate, which the
+            // prompt a depth is primed with moves.
+            let hits = match (before, backend.cache_stats()) {
+                (Some(b), Some(a)) if a.expert_hits + a.expert_misses > b.expert_hits + b.expert_misses => {
+                    let (h, m) = (a.expert_hits - b.expert_hits, a.expert_misses - b.expert_misses);
+                    format!(", {:.1}% expert hits", 100.0 * h as f64 / (h + m) as f64)
+                }
+                _ => String::new(),
+            };
+            eprintln!("  {test} rep {}/{}: {secs:.3} s{hits}", rep + 1, args.repetitions);
         }
-        rows.push((format!("tg{gen_tokens}"), rates));
+        rows.push((test, rates));
     }
 
     println!("\n| model | backend | test | t/s |");
