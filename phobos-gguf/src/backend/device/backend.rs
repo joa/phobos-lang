@@ -160,6 +160,7 @@ impl Backend for DeviceBackend {
     fn begin_pass(&self, rows: usize) -> Result<()> {
         self.trim_after_prompt(rows)?;
         self.trim_after_dense()?;
+        self.keep_headroom(rows)?;
         self.mark_pass_vram();
         // The rings restart too, so a step records the same slots as the one
         // before it and the cached graph needs no patching for them.

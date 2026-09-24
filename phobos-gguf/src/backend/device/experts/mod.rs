@@ -3,9 +3,18 @@
 // on the host from the mirror (`handoff.rs`); a prompt pass's cross the bus
 // once, at the block's sync point, into the slot they will be read from,
 // or go to the host too (`grouped.rs`).
+//
+// A slab per stack and format (a file mixes formats per block, and a slab
+// has one row stride), each `[slots * n, rb]` in the grouped layout the
+// decode matvec reads, with an `f16` scale plane apiece. A block owns
+// `per_block` consecutive slots of each of its three slabs plus one zeroed
+// spare, from a base of its own; a slot holds one expert of one block across
+// the three. Eviction is least recently used within the block, stamped by
+// routing step.
 
 mod grouped;
 mod handoff;
+mod headroom;
 mod mapped;
 mod mirror;
 mod op;
@@ -63,6 +72,10 @@ pub(super) struct Experts {
     refills: Vec<(usize, usize, u64)>,
     /// The last block's misses, still running on the host.
     started: Option<StartedRow>,
+    /// The most slots a block may have, once the cache has had to shrink.
+    per_block_cap: Option<usize>,
+    /// Passes since free memory was last asked for.
+    since_checked: usize,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -164,6 +177,11 @@ impl Slab {
     fn slot_bytes(&self) -> usize {
         self.n * self.rb
     }
+
+    /// Device bytes the slab holds, rows and scales.
+    fn held_bytes(&self) -> usize {
+        self.bytes.len() + self.d.len() * size_of::<u16>()
+    }
 }
 
 /// An asynchronous host-to-device copy of `len` bytes.
@@ -217,6 +235,8 @@ impl Experts {
             stats: ExpertStats::default(),
             refills: Vec::new(),
             started: None,
+            per_block_cap: None,
+            since_checked: 0,
         }
     }
 
@@ -455,7 +475,7 @@ impl DeviceBackend {
             format_args!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20),
         );
         // The spare slot a block gets comes out of the budget too.
-        let mut per_block = (budget / slot_bytes / blocks).saturating_sub(1);
+        let mut per_block = (budget / slot_bytes / blocks).saturating_sub(1).min(experts.per_block_cap.unwrap_or(usize::MAX));
         for (&(stack, quant), &count) in &counts {
             let found = experts.blocks.iter().map(|b| b.set.stack(stack)).find(|s| s.quant() == quant).expect("counted");
             per_block = per_block.min(SLAB_LIMIT / found.grouped_bytes() / count - 1);
