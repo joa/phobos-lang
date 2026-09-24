@@ -15,31 +15,14 @@ pub(crate) const MOE_QDOT_TN: usize = 64;
 /// Columns one CTA of the combine adds.
 pub(crate) const MOE_COMBINE_TN: usize = 256;
 
-/// The halving tree `argmax.rs` uses, over a `[1, W]` (value, index) pair
-/// held in `v` and `i`, folding the upper half into the lower.
-fn halving_tree(width: usize) -> String {
-    let mut tree = String::new();
-    let mut half = width / 2;
-    while half >= 1 {
-        tree.push_str(&format!(
-            "    i[0 :+ 1, 0 :+ {half}] = argsel(v[0 :+ 1, {half} :+ {half}], v[0 :+ 1, 0 :+ {half}], \
-             i[0 :+ 1, {half} :+ {half}], i[0 :+ 1, 0 :+ {half}])\n    \
-             v[0 :+ 1, 0 :+ {half}] = tmax(v[0 :+ 1, {half} :+ {half}], v[0 :+ 1, 0 :+ {half}])\n"
-        ));
-        half /= 2;
-    }
-    tree
-}
-
 /// Softmax over each row of `n_expert` router logits, one program a row,
 /// the `MOE_USED` largest probabilities in descending order as `TOPK` (i32)
 /// and `W` (renormalized to sum to one), the order llama.cpp's
-/// `build_moe_ffn` uses. `IO` is the iota row `argmax` carries, `[0,
-/// n_expert)` as f32. A picked entry is masked to -1, which no probability
-/// reaches, so it is not picked twice. `n_expert` must be a power of two
-/// for the tree.
+/// `build_moe_ffn` uses. `IO` is the iota row, `[0, n_expert)` as f32. Each
+/// pick is two row reductions: the largest probability, then the largest
+/// index holding it. A picked entry is masked to -1, which no probability
+/// reaches, so it is not picked twice.
 pub(crate) fn moe_topk_src(n_expert: usize) -> String {
-    assert!(n_expert.is_power_of_two(), "the top-k tree wants a power of two, got {n_expert}");
     format!(
         "@launch(256)
 @autotune(NE in [{n_expert}], U in [{MOE_USED}])
@@ -53,19 +36,19 @@ kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R
   p = ex / total
   var picked: tile<f32>[1, 1] = 0.0
   var neg: tile<f32>[1, NE] = -1.0
+  var io: tile<f32>[1, NE] = IO[0 :+ 1, 0 :+ NE]
   for j in range(0, U, 1) {{
-    var v: tile<f32>[1, NE] = p
-    var i: tile<f32>[1, NE] = IO[0 :+ 1, 0 :+ NE]
-{tree}    W[r :+ 1, j :+ 1] = v[0 :+ 1, 0 :+ 1]
-    TOPK[r :+ 1, j :+ 1] = i32(i[0 :+ 1, 0 :+ 1])
-    picked = picked + v[0 :+ 1, 0 :+ 1]
-    p = argsel(p, v[0 :+ 1, 0 :+ 1], neg, p)
+    let v = rowmax(p)
+    let i = rowmax(argsel(p, v, io, neg))
+    W[r :+ 1, j :+ 1] = v
+    TOPK[r :+ 1, j :+ 1] = i32(i)
+    picked = picked + v
+    p = argsel(p, v, neg, p)
   }}
   var w: tile<f32>[1, U] = W[r :+ 1, 0 :+ U]
   W[r :+ 1, 0 :+ U] = w / picked
 }}
-",
-        tree = halving_tree(n_expert)
+"
     )
 }
 
