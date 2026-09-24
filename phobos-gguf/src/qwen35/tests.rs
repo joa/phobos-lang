@@ -158,3 +158,31 @@ fn a_traced_pass_reports_routes_and_lookahead_per_block() {
     state.release(&backend);
     plain.release(&backend);
 }
+
+/// A delta net cannot rewind by position, only to a checkpoint, and what it
+/// computes from there has to match a state that never went further.
+#[test]
+fn a_rewind_to_the_checkpoint_matches_a_state_that_never_left_it() {
+    let gguf = Gguf::from_bytes(tiny_moe_file()).unwrap();
+    let model = Decoder::load(&gguf).unwrap();
+    let backend = HostBackend::new();
+
+    let mut state = model.new_state();
+    model.forward(&mut state, &[1, 2, 3], &backend).unwrap();
+    state.checkpoint(&backend).unwrap();
+    model.forward(&mut state, &[4, 5], &backend).unwrap();
+    model.forward(&mut state, &[6], &backend).unwrap();
+
+    assert_eq!(state.truncate(2, &backend).unwrap(), None, "before the checkpoint");
+    assert_eq!(state.len(), 6, "a refused rewind changes nothing");
+    assert_eq!(state.truncate(5, &backend).unwrap(), Some(3), "back to the checkpoint, not to 5");
+    let rewound = model.forward(&mut state, &[9, 10], &backend).unwrap();
+
+    let mut straight = model.new_state();
+    let expected = model.forward(&mut straight, &[1, 2, 3, 9, 10], &backend).unwrap();
+    for (a, b) in rewound.iter().zip(&expected) {
+        assert!((a - b).abs() <= 1e-5 * (1.0 + b.abs()), "{a} vs {b}");
+    }
+    state.release(&backend);
+    straight.release(&backend);
+}

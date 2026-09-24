@@ -253,8 +253,18 @@ impl Session for GgufSession<'_> {
         self.state.len()
     }
 
-    fn truncate(&mut self, positions: usize) -> bool {
-        self.state.truncate(positions)
+    fn prompt_batch(&self) -> Option<usize> {
+        Some(PROMPT_BATCH)
+    }
+
+    fn truncate(&mut self, positions: usize) -> Option<usize> {
+        // A failed restore leaves the state for release, which is what the
+        // caller does with a session that cannot be rewound.
+        self.state.truncate(positions, self.model.backend.as_ref()).ok().flatten()
+    }
+
+    fn checkpoint(&mut self) -> Result<()> {
+        self.state.checkpoint(self.model.backend.as_ref())
     }
 
     fn cache_bytes(&self) -> Option<u64> {
