@@ -20,7 +20,7 @@ use phobos_base::log::Level;
 
 use crate::chat::Dialect;
 use crate::generate::{self, Flow};
-use crate::model::{Model, Session};
+use crate::model::{CacheStats, Model, Session, Tokenizer};
 use crate::sampling::Rng;
 use crate::telemetry::{Fixed, Meter};
 
@@ -109,18 +109,65 @@ fn rewind<'a>(
     if !enabled {
         return None;
     }
-    let shared = held
-        .iter()
-        .zip(ids)
-        .take_while(|(a, b)| a == b)
-        .count()
-        .min(ids.len().saturating_sub(1));
+    let shared = common_prefix(held, ids).min(ids.len().saturating_sub(1));
     // Nothing to keep is not worth keeping: a session holding none of this
     // prompt still holds its buffers, and dropping it hands them back.
     if shared == 0 || !session.truncate(shared) {
         return None;
     }
     Some((session, shared))
+}
+
+fn common_prefix(held: &[i64], ids: &[i64]) -> usize {
+    held.iter().zip(ids).take_while(|(a, b)| a == b).count()
+}
+
+/// Where a new prompt stops agreeing with what the kept session holds, with
+/// the text on either side of that point, or `None` when the prompt extends
+/// it. A backend that cannot rewind starts over from nothing whenever the
+/// two differ, and the text says which part of the chat rendering moved.
+fn divergence(tokenizer: &dyn Tokenizer, held: &[i64], ids: &[i64]) -> Option<String> {
+    const CONTEXT_TOKENS: usize = 12;
+    let at = common_prefix(held, ids);
+    if at == held.len() {
+        return None;
+    }
+    let from = at.saturating_sub(CONTEXT_TOKENS);
+    let window = |ids: &[i64]| tokenizer.decode(&ids[from..(at + CONTEXT_TOKENS).min(ids.len())]);
+    Some(format!(
+        "prompt leaves the kept session at token {at} of {}: held {:?}, prompt {:?}",
+        held.len(),
+        window(held),
+        window(ids),
+    ))
+}
+
+/// A request's expert cache lookups in a line, from the counts before and
+/// after it, or `None` for a model that streams no experts. A decode step
+/// counts one lookup per routed expert, a prompt pass one per expert it
+/// routes to, so the two rates are given apart.
+fn describe_experts(before: &CacheStats, after: &CacheStats) -> Option<String> {
+    let decode = (
+        after.expert_hits - before.expert_hits,
+        after.expert_misses - before.expert_misses,
+    );
+    let prompt = (
+        after.expert_prompt_hits - before.expert_prompt_hits,
+        after.expert_prompt_misses - before.expert_prompt_misses,
+    );
+    if decode == (0, 0) && prompt == (0, 0) {
+        return None;
+    }
+    let part = |(hits, misses): (u64, u64)| match hits + misses {
+        0 => "none".to_string(),
+        lookups => format!("{:.1}% of {lookups}", 100.0 * hits as f64 / lookups as f64),
+    };
+    Some(format!(
+        "experts resident: decode {}, prompt {}; {:.2} GB copied",
+        part(decode),
+        part(prompt),
+        (after.expert_bytes - before.expert_bytes) as f64 / 1e9,
+    ))
 }
 
 /// One finished request in a line: the two rates a reader compares runs by,
@@ -230,6 +277,11 @@ pub fn serve(
         // A session kept from the last request is worth reusing for as far as
         // the two prompts agree. What it holds past that is wrong for this
         // one, so it is either rewound or given up.
+        if let Some((_, held)) = &kept
+            && let Some(line) = divergence(model.tokenizer(), held, &ids)
+        {
+            meter.log(Level::Info, line);
+        }
         let reused = match kept.take() {
             Some((session, held)) => match rewind(session, &held, &ids, reuse) {
                 Some((session, at)) => {
@@ -252,6 +304,7 @@ pub fn serve(
         };
 
         meter.request_started(ids.len(), reused);
+        let stats_before = model.cache_stats();
         let _ = responder.send(Ok(InferenceResponse::Start {
             model: name.clone(),
             prompt_tokens: ids.len(),
@@ -284,6 +337,11 @@ pub fn serve(
                 let reason = outcome.stop.finish_reason().to_string();
                 if let Some(done) = meter.request_finished(&reason) {
                     meter.log(Level::Info, describe(&done));
+                }
+                if let (Some(before), Some(after)) = (stats_before, model.cache_stats())
+                    && let Some(line) = describe_experts(&before, &after)
+                {
+                    meter.log(Level::Info, line);
                 }
                 // Kept for the next request, which may well be this
                 // conversation with one more turn on the end. `held` is what

@@ -63,8 +63,12 @@ pub(super) struct Experts {
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct ExpertStats {
+    /// Lookups by a one-row pass, a decode step, per expert a token routes to.
     pub(super) hits: u64,
     pub(super) misses: u64,
+    /// Lookups by a wider pass, once per expert a group of rows routes to.
+    pub(super) prompt_hits: u64,
+    pub(super) prompt_misses: u64,
     pub(super) bytes: u64,
     pub(super) prefetches: u64,
     pub(super) prefetch_hits: u64,
@@ -253,18 +257,21 @@ impl Experts {
 
     /// Expert `e` of `block` in a slot: the one it is in, or the least
     /// recently used one, filled from the mirror on `stream`. `Ok(None)`
-    /// when every slot is stamped `tick`.
-    fn place(&mut self, block: usize, e: usize, tick: u64, stream: &Stream) -> Result<Option<usize>> {
+    /// when every slot is stamped `tick`. `prompt` says which counters the
+    /// lookup goes to.
+    fn place(&mut self, block: usize, e: usize, tick: u64, stream: &Stream, prompt: bool) -> Result<Option<usize>> {
         let b = &mut self.blocks[block];
         let s = b.slot_of[e];
+        let stats = &mut self.stats;
+        let (hits, misses) = if prompt { (&mut stats.prompt_hits, &mut stats.prompt_misses) } else { (&mut stats.hits, &mut stats.misses) };
         if s != NONE {
-            self.stats.hits += 1;
+            *hits += 1;
             if std::mem::take(&mut b.prefetched[s as usize]) {
-                self.stats.prefetch_hits += 1;
+                stats.prefetch_hits += 1;
             }
             return Ok(Some(s as usize));
         }
-        self.stats.misses += 1;
+        *misses += 1;
         let Some(victim) = b.victim(tick) else {
             return Ok(None);
         };

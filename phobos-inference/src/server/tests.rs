@@ -259,3 +259,56 @@ fn the_worker_stops_when_the_meter_says_to() {
         asked.elapsed()
     );
 }
+
+/// Token ids that are their own bytes, so a test reads the text a log line
+/// quotes.
+struct Bytes;
+
+impl Tokenizer for Bytes {
+    fn encode(&self, text: &str) -> Result<Vec<i64>> {
+        Ok(text.bytes().map(i64::from).collect())
+    }
+
+    fn decode_bytes(&self, ids: &[i64]) -> Vec<u8> {
+        ids.iter().map(|&id| id as u8).collect()
+    }
+
+    fn is_eog(&self, _id: i64) -> bool {
+        false
+    }
+}
+
+#[test]
+fn a_prompt_that_extends_the_session_is_not_a_divergence() {
+    let held = Bytes.encode("<user>hi<assistant>hello").unwrap();
+    let ids = Bytes.encode("<user>hi<assistant>hello<user>more").unwrap();
+    assert_eq!(super::divergence(&Bytes, &held, &ids), None);
+
+    let edited = Bytes.encode("<user>hi<assistant>HELLO<user>more").unwrap();
+    let line = super::divergence(&Bytes, &held, &edited).unwrap();
+    assert!(line.contains("token 19 of 24"), "{line}");
+    assert!(line.contains("hello") && line.contains("HELLO"), "{line}");
+}
+
+#[test]
+fn a_request_reports_decode_and_prompt_lookups_apart() {
+    use crate::model::CacheStats;
+    let before = CacheStats {
+        expert_hits: 100,
+        expert_misses: 100,
+        ..Default::default()
+    };
+    assert_eq!(super::describe_experts(&before, &before), None);
+    let after = CacheStats {
+        expert_hits: 175,
+        expert_misses: 125,
+        expert_prompt_hits: 10,
+        expert_prompt_misses: 30,
+        expert_bytes: 2_000_000_000,
+        ..before
+    };
+    assert_eq!(
+        super::describe_experts(&before, &after).unwrap(),
+        "experts resident: decode 75.0% of 100, prompt 25.0% of 40; 2.00 GB copied"
+    );
+}

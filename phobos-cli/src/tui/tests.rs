@@ -72,6 +72,8 @@ fn loaded() -> Snapshot {
         buffer_idle_bytes: 512 << 20,
         expert_hits: 0,
         expert_misses: 0,
+        expert_prompt_hits: 0,
+        expert_prompt_misses: 0,
         expert_bytes: 0,
         expert_prefetches: 0,
         expert_prefetch_hits: 0,
