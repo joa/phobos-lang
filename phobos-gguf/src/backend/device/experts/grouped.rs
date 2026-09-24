@@ -23,7 +23,7 @@ use cust::memory::LockedBuffer;
 use super::super::kernels::{MOE_COMBINE_TN, MOE_USED, QGEMM_TM, QGEMM_TN};
 use super::super::{DeviceBackend, Plane};
 use super::op::{U, kernels};
-use super::{Experts, MAX_ROWS, Staged};
+use super::{Experts, MAX_ROWS, Staged, copy_async};
 use crate::backend::{Backend, Buf, Moe};
 use crate::experts::{ExpertSet, Stack};
 use crate::simd::{self, Job};
@@ -209,7 +209,7 @@ impl DeviceBackend {
                 by_expert[e].push((r, j));
             }
         }
-        let weights = experts.blocks[block].weights.pull(entries)?.to_vec();
+        let weights = experts.blocks[block].weights.host()[..entries].to_vec();
         let host_jobs = if self.moe_host && simd::supports(&*experts.blocks[block].set) {
             host_jobs(experts, block, &by_expert, &weights)
         } else {
@@ -357,7 +357,7 @@ impl DeviceBackend {
             host_micros = started.elapsed().as_secs_f64() * 1e6;
             experts.stats.cpu_misses += host_jobs.len() as u64;
             experts.stats.cpu_nanos += (host_micros * 1e3) as u64;
-            self.add_row(req.dest, &scratch.y_host, rows * d)?;
+            self.add_host_rows(req.dest, &scratch.y_host, rows * d)?;
         }
         // The next block rewrites the staging the launches just issued read.
         self.stream.synchronize()?;
@@ -390,6 +390,20 @@ impl DeviceBackend {
             )
         })
     }
+
+    /// Pinned rows of `len` floats in all added into `dest` in stream
+    /// order: nothing is written before the recorded launches ahead of it
+    /// run, and the rows are rewritten only after the next sync point.
+    /// For a prompt pass's megabytes, which no refill competes with.
+    fn add_host_rows(&self, dest: Buf, rows: &LockedBuffer<f32>, len: usize) -> Result<()> {
+        let buf = self.alloc(len)?;
+        // SAFETY: the pinned rows live with the grouped scratch.
+        unsafe { copy_async(self.ptr(buf, 0)?, rows.as_slice().as_ptr().cast(), len * size_of::<f32>(), &self.stream)? };
+        self.add_into(dest, buf)?;
+        self.release(buf);
+        Ok(())
+    }
+
 }
 
 /// The experts the host takes: the lightest by rows among those not

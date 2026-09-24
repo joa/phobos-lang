@@ -144,7 +144,7 @@ pub struct DeviceBackend {
     moe_host: bool,
     /// Whether a decode step's misses are computed on the host while the
     /// device runs the hits, a zero slot standing in for each miss.
-    /// `PHOBOS_MOE_HOST_DECODE` opts in; see `ENV.md`.
+    /// `PHOBOS_MOE_HOST_DECODE=0` opts out; see `ENV.md`.
     moe_host_decode: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
     /// over rows sorted by expert rather than row by row.
@@ -350,6 +350,8 @@ pub struct DeviceBackend {
     /// Gate, up and the SwiGLU in one, by format and width.
     moe_gateup: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_combine: RefCell<HashMap<(), Module>>,
+    /// The PTX kernel a decode row's host share is handed over with.
+    host_add: RefCell<Option<Module>>,
     /// The grouped prompt path's kernels: the row permutation, the
     /// schedule-table GEMM by format and width, the gathering combine.
     moe_permute: RefCell<HashMap<(&'static str, usize), Module>>,

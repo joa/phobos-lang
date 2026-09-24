@@ -226,12 +226,15 @@ impl DeviceBackend {
     }
 
     /// Runs what has been recorded so far and waits for it, so the host can
-    /// read a result mid-pass. The launches before it become a segment of
-    /// their own, cached like any other; the ones after start the next.
-    pub(super) fn sync_point(&self) -> Result<()> {
+    /// read a result mid-pass, with `meanwhile` run on the host between
+    /// issuing the launches and waiting, where it would otherwise sit idle.
+    /// The launches before it become a segment of their own, cached like any
+    /// other; the ones after start the next.
+    pub(super) fn sync_point(&self, meanwhile: impl FnOnce() -> Result<()>) -> Result<()> {
         if self.recording.get() {
             self.replay_segment()?;
         }
+        meanwhile()?;
         self.stream.synchronize()?;
         Ok(())
     }

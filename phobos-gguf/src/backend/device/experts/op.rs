@@ -3,19 +3,23 @@
 // here, per row the misses into their slots and the slot matvecs and
 // combine that read them, or the grouped path of `grouped.rs`.
 //
-// With `PHOBOS_MOE_HOST_DECODE=1` a decode step's misses go to the host:
+// A decode step's misses go to the host unless `PHOBOS_MOE_HOST_DECODE=0`:
 // the row's kernels run over the hits with a zero slot standing in for
-// each miss, replayed at once so the device works while the host computes
-// the misses' share, which is added afterwards; each miss is also copied
-// into its slot on the second stream, so the next token finds it.
+// each miss, replayed at once, while the team computes the misses' share
+// and the host goes on recording the next block; a kernel at the head of
+// the next segment waits for the share and adds it (`handoff.rs`). A
+// block's most heavily weighted miss is copied into a slot on the second
+// stream for later tokens, issued while the next segment runs. Nothing the
+// step waits on crosses by DMA, since a transfer queues behind the copies
+// in flight.
 
 use anyhow::{Result, bail, ensure};
 use cust::memory::CopyDestination;
 use cust::stream::StreamWaitEventFlags;
-use phobos_kernels::cuda_ok;
 
 use super::super::kernels::{MOE_COMBINE_TN, MOE_QDOT_TN, MOE_USED, moe_combine_src, moe_gateup_src, moe_qdot_src, moe_topk_src};
 use super::super::{DeviceBackend, Plane};
+use super::mirror::MirrorSource;
 use super::{Experts, MAX_ROWS};
 use crate::backend::{Backend, Buf, Moe};
 use crate::experts::Stack;
@@ -52,12 +56,6 @@ pub(super) fn kernels(quant: Quant) -> Result<Kernels> {
 struct Miss {
     rank: usize,
     expert: usize,
-}
-
-/// What a decode row owes the host: its misses and the row itself.
-struct Owed {
-    misses: Vec<Miss>,
-    x: Vec<f32>,
 }
 
 impl DeviceBackend {
@@ -108,13 +106,15 @@ impl DeviceBackend {
         let b = &experts.blocks[block];
         let iota = experts.iota[&req.n_expert].as_device_ptr().as_raw();
         self.launch_topk(self.ptr(req.logits, 0)?, rows, req.n_expert, iota, b.topk.dev(), b.weights.dev())?;
+        if self.host_decodes(b, rows) {
+            self.send_row(req.x, &b.handoff, req.d_model)?;
+        }
         let next = self.lookahead(experts, req, iota)?;
-        self.sync_point()?;
+        self.sync_point(|| experts.refill(&self.copy_stream))?;
         let b = &mut experts.blocks[block];
         if let Some(event) = b.fetched.take() {
             self.stream.wait_event(event, StreamWaitEventFlags::DEFAULT)?;
         }
-        b.topk.pull(rows * MOE_USED)?;
         if let Some(next) = next {
             self.prefetch(experts, next)?;
         }
@@ -133,16 +133,17 @@ impl DeviceBackend {
         let [gate_out, up_out, h, down_out] = bufs;
         let b = &experts.blocks[block];
         let joint = b.set.gate.quant() == b.set.up.quant();
-        let host_misses = self.moe_host_decode && rows == 1 && simd::supports(&*b.set);
+        let host_misses = self.host_decodes(b, rows);
         let (slot_ptr, w_ptr) = (b.slots.dev(), b.weights.dev());
-        let mut owed = Vec::new();
         for r in 0..rows {
+            // The host's share goes to the team first, so it runs while the
+            // hits are recorded and launched; the device takes it when the
+            // block's flag goes up. A row with no misses still hands over a
+            // zero row, so every step records the same launches and its
+            // graphs stay cached.
             let misses = self.place_row(experts, block, r, host_misses, rows > 1)?;
             if host_misses {
-                // A row with no misses still owes a zero row, so every step
-                // records the same launches and its graphs stay cached.
-                let x = self.read_row(experts, block, req.x, d, !misses.is_empty())?;
-                owed.push(Owed { misses, x });
+                self.start_host_misses(experts, block, &misses)?;
             }
             let row_slots = slot_ptr + (r * ROW_BYTES) as u64;
             let (row_qa, row_das) = (qa + (r * d) as u64, das + (r * d / 32 * 4) as u64);
@@ -175,15 +176,11 @@ impl DeviceBackend {
             self.release(buf);
         }
         // The hits' kernels go to the device now rather than at the next
-        // sync point, so it works while the host does.
+        // sync point, so it works while the host does, and the host's share
+        // is taken at the head of the next segment.
         if host_misses {
             self.replay_segment()?;
-        }
-        for Owed { misses, x } in owed {
-            let y = self.host_misses(experts, block, &x, &misses)?;
-            let b = &mut experts.blocks[block];
-            b.y_row.as_mut_slice()[..d].copy_from_slice(&y);
-            self.add_row(req.dest, &b.y_row, d)?;
+            self.host_add(&experts.blocks[block].handoff, req.dest, d)?;
         }
         Ok(())
     }
@@ -226,7 +223,7 @@ impl DeviceBackend {
         let b = &mut experts.blocks[next];
         let n = b.set.count() as i32;
         let mut predicted = [0usize; MOE_USED];
-        for (p, &id) in predicted.iter_mut().zip(b.look.pull(MOE_USED)?) {
+        for (p, &id) in predicted.iter_mut().zip(&b.look.host()[..MOE_USED]) {
             ensure!((0..n).contains(&id), "the lookahead chose expert {id} of {n}");
             *p = id as usize;
         }
@@ -254,46 +251,37 @@ impl DeviceBackend {
             };
             slots[rank] = slot as i32;
         }
-        experts.blocks[block].slots.push(r * MOE_USED, &slots, &self.stream)?;
-        if host_misses {
-            experts.fetch(block, misses.iter().map(|m| m.expert), tick, &self.copy_stream)?;
+        experts.blocks[block].slots.put(r * MOE_USED, &slots);
+        // The most heavily weighted miss into a slot for the tokens after,
+        // copied at the next sync point.
+        let weights = &experts.blocks[block].weights.host()[r * MOE_USED..(r + 1) * MOE_USED];
+        if let Some(top) = misses.iter().max_by(|a, b| weights[a.rank].total_cmp(&weights[b.rank])) {
+            experts.refills.push((block, top.expert, tick));
         }
         Ok(misses)
     }
 
-    /// A decode row `x` back to the host through the block's pinned row,
-    /// while the stream is idle from the sync point; zeros when `wanted`
-    /// is not.
-    fn read_row(&self, experts: &mut Experts, block: usize, x: Buf, d: usize, wanted: bool) -> Result<Vec<f32>> {
-        if !wanted {
-            return Ok(vec![0.0; d]);
-        }
-        let row = &mut experts.blocks[block].x_row;
-        // SAFETY: the row is `d` floats on the device and the pinned row
-        // holds `d`.
-        cuda_ok(
-            unsafe { cust::sys::cuMemcpyDtoH_v2(row.as_mut_slice().as_mut_ptr().cast(), self.ptr(x, 0)?, d * size_of::<f32>()) },
-            "reading the row",
-        )?;
-        Ok(row.as_slice()[..d].to_vec())
+    /// Whether a pass of `rows` over block `b` leaves its misses to the
+    /// host: a decode step, unless `PHOBOS_MOE_HOST_DECODE=0`, on formats
+    /// the host kernels have.
+    fn host_decodes(&self, b: &super::BlockExperts, rows: usize) -> bool {
+        self.moe_host_decode && rows == 1 && simd::supports(&*b.set)
     }
 
-    /// The misses' share of a decode row `x`, computed on the host from the
-    /// mirror's bytes and weighted by the router, summed into a `[d]` row
-    /// for the device to add.
-    fn host_misses(&self, experts: &mut Experts, block: usize, x: &[f32], misses: &[Miss]) -> Result<Vec<f32>> {
-        let mut y = vec![0.0f32; x.len()];
-        if misses.is_empty() {
-            return Ok(y);
-        }
-        let started = std::time::Instant::now();
-        let b = &mut experts.blocks[block];
-        let weights = b.weights.pull(MOE_USED)?;
-        let jobs: Vec<(usize, f32)> = misses.iter().map(|m| (m.expert, weights[m.rank])).collect();
-        simd::experts_row(&b.mirror.source(&b.set), &jobs, x, &mut y)?;
+    /// The misses' share of the block's decode row started on the team,
+    /// from the mirror's bytes and weighted by the router. The last block's
+    /// is joined first.
+    fn start_host_misses(&self, experts: &mut Experts, block: usize, misses: &[Miss]) -> Result<()> {
+        experts.join_started()?;
         experts.stats.cpu_misses += misses.len() as u64;
-        experts.stats.cpu_nanos += started.elapsed().as_nanos() as u64;
-        Ok(y)
+        let b = &mut experts.blocks[block];
+        let weights = &b.weights.host()[..MOE_USED];
+        let jobs = misses.iter().map(|m| (m.expert, weights[m.rank])).collect();
+        // SAFETY: the mirror and the set live as long as the cache, which
+        // joins a started row before it drops.
+        let source = unsafe { std::mem::transmute::<MirrorSource<'_>, MirrorSource<'static>>(b.mirror.source(&b.set)) };
+        experts.started = b.handoff.start(source, jobs)?;
+        Ok(())
     }
 
     /// One slot matvec over the eight slots `row_slots` names in `block`'s
