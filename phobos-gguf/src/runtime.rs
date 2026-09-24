@@ -192,6 +192,27 @@ impl Model for GgufModel {
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
         self.backend.cache_stats()
     }
+
+    /// A short prompt and one decode step through a throwaway session. A
+    /// weight reaches the device the first time a pass uses it, and a kernel
+    /// is loaded the first time a pass launches it. A prompt pass launches
+    /// kernels a decode step never does, and the other way round, so both
+    /// run. Streamed experts are not uploaded: only the ones routed to are
+    /// copied.
+    fn warm_up(&self) -> Result<()> {
+        // Wide enough that the prompt pass takes the same paths a real
+        // prompt does, the grouped expert GEMMs among them.
+        const PROMPT_TOKENS: usize = 128;
+        // The host backend reads its weights where the file left them, and a
+        // pass there costs seconds for nothing.
+        if !cfg!(feature = "cuda") {
+            return Ok(());
+        }
+        let mut session = self.session()?;
+        session.extend(&[0; PROMPT_TOKENS])?;
+        session.extend(&[0])?;
+        Ok(())
+    }
 }
 
 pub struct GgufSession<'a> {

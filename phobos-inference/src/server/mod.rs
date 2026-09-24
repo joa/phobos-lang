@@ -14,7 +14,7 @@ use axum::{
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use phobos_base::log::Level;
 
@@ -243,6 +243,18 @@ pub fn serve(
             axum::serve(listener, app).await.unwrap();
         });
     });
+
+    // After the listener, so the port is open while the weights go up; a
+    // request that arrives meanwhile waits in the channel.
+    meter.log(Level::Info, "uploading weights");
+    let started = Instant::now();
+    model.warm_up()?;
+    meter.log(
+        Level::Info,
+        format!("warmed up in {:.1} s", started.elapsed().as_secs_f64()),
+    );
+    meter.set_device_memory(model.device_memory());
+    meter.set_cache_stats(model.cache_stats());
 
     // The session from the last request, with the tokens it holds, for as
     // long as nothing has replaced it.

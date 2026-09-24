@@ -247,6 +247,11 @@ fn main() -> Result<()> {
     }
 
     let model = args.source.load()?;
+    // Before "ready", so the first prompt does not pay for the upload. A
+    // server warms up on its own, once it is listening.
+    if serving.is_none() {
+        model.warm_up()?;
+    }
     let info = model.info();
     match drawing.as_ref() {
         Some(drawing) => drawing.loaded(info),
