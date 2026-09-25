@@ -1,6 +1,6 @@
 """Records the kernels every GGUF model under models/ compiles, for phobos-cache warm.
 
-    python scripts/record_kernels.py [--manifest DIR] [--models DIR] [--epoch FINGERPRINT] [NAME...]
+    python scripts/record_kernels.py [--manifest DIR] [--models DIR] [--skip NAME]... [--epoch FINGERPRINT] [NAME...]
 
 Runs each GGUF file through phobos-bench with PHOBOS_KERNEL_MANIFEST set,
 so the manifest holds every compile request a run makes. A kernel's source
@@ -9,7 +9,7 @@ cache depth, so the bench shape covers a short prompt, a full 512-row batch,
 a ragged remainder past it, and decode both fresh and at depth. A request is recorded on a cache hit too: pass the
 fingerprint a warm cache was built under as --epoch and the runs only load.
 
-NAME filters the models by substring; --models points at a directory other
+NAME filters the models by substring and --skip drops them the same way; --models points at a directory other
 than models/, which a release's worktree does not carry. The binary is built
 under CARGO_TARGET_DIR when that is set. The manifest is chip-independent;
 `phobos-cache warm --manifest DIR` then compiles it for every supported chip.
@@ -28,21 +28,26 @@ BENCH = Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target")) / "release" / 
 BENCH_SHAPE = ["-p", "7,100,512,600", "-n", "16", "-d", "0,2048", "-r", "1", "--no-warmup"]
 
 
-def runs(models, names):
+def runs(models, names, skip):
     jobs = [(p.name, [str(BENCH), "-m", str(p), *BENCH_SHAPE]) for p in sorted(models.glob("*.gguf"))]
-    return [(name, cmd) for name, cmd in jobs if not names or any(n in name for n in names)]
+    return [
+        (name, cmd)
+        for name, cmd in jobs
+        if (not names or any(n in name for n in names)) and not any(s in name for s in skip)
+    ]
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--manifest", type=Path, default=ROOT / "target" / "kernel-manifest")
     ap.add_argument("--models", type=Path, default=ROOT / "models")
+    ap.add_argument("--skip", action="append", default=[], help="leave out models whose name holds this")
     ap.add_argument("--epoch", help="PHOBOS_KERNEL_CACHE_EPOCH for the runs, to hit an existing cache")
     ap.add_argument("--dry-run", action="store_true", help="print the runs without building or running")
     ap.add_argument("names", nargs="*")
     args = ap.parse_args()
 
-    jobs = runs(args.models, args.names)
+    jobs = runs(args.models, args.names, args.skip)
     if args.dry_run:
         for name, cmd in jobs:
             print(f"{name}: {' '.join(cmd)}")

@@ -1,6 +1,6 @@
 """Builds a Phobos release for a tag, x64, Windows and Linux.
 
-    python scripts/release.py TAG [--models DIR] [--jobs N] [--seed-manifest DIR] [--local] [--publish]
+    python scripts/release.py TAG [--models DIR] [--skip NAME]... [--jobs N] [--seed-manifest DIR] [--local] [--publish]
     python scripts/release.py toolchain [--llvm DIR] [--llvm-version V] [--ref BRANCH] [--pack-only]
 
 For TAG, in order:
@@ -155,7 +155,7 @@ def seed_manifest(tag, dist, explicit, online):
     return local if local.is_dir() else None
 
 
-def warm_cache(src, dist, models, jobs, seed):
+def warm_cache(src, dist, models, skip, jobs, seed):
     cache, manifest = dist / "kernel-cache", dist / "kernel-manifest"
     cache_tool = exe("phobos-cache")
     if seed:
@@ -163,7 +163,8 @@ def warm_cache(src, dist, models, jobs, seed):
     shutil.rmtree(manifest, ignore_errors=True)
     env = BASE_ENV | {"PHOBOS_KERNEL_CACHE_DIR": str(cache)}
     recorded = run(
-        [sys.executable, src / "scripts" / "record_kernels.py", "--manifest", manifest, "--models", models],
+        [sys.executable, src / "scripts" / "record_kernels.py", "--manifest", manifest, "--models", models,
+         *[arg for name in skip for arg in ("--skip", name)]],
         cwd=src, env=env, check=False,
     )
     if recorded.returncode != 0:
@@ -266,7 +267,7 @@ def release(args):
     print(f"{tag} at {commit[:12]}, compiler {fingerprint}")
 
     seed = seed_manifest(tag, dist, args.seed_manifest, online=not args.local)
-    cache, manifest = warm_cache(src, dist, args.models.resolve(), args.jobs, seed)
+    cache, manifest = warm_cache(src, dist, args.models.resolve(), args.skip, args.jobs, seed)
 
     builds = local_build(src, dist) if args.local else ci_builds(commit, dist)
     for platform, built in builds.items():
@@ -333,6 +334,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("tag")
     ap.add_argument("--models", type=Path, default=ROOT / "models", help="the GGUF files to record")
+    ap.add_argument("--skip", action="append", default=[], help="leave out models whose name holds this")
     ap.add_argument("--jobs", default=str(max(1, (os.cpu_count() or 2) // 2)), help="concurrent kernel compiles")
     ap.add_argument("--seed-manifest", type=Path, help="warm this manifest first instead of the last release's")
     ap.add_argument("--local", action="store_true", help="build Windows here, skip CI and the upload")
