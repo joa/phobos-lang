@@ -60,8 +60,9 @@ fn record_in(dir: &Path, ctx: &Context, texts: &[&str]) {
     }
 }
 
-/// Every request in a manifest directory, in file-name order.
-pub fn read(dir: &Path) -> Result<Vec<Request>> {
+/// Every request in a manifest directory with the file it came from, in
+/// file-name order.
+pub fn read(dir: &Path) -> Result<Vec<(PathBuf, Request)>> {
     let mut files: Vec<_> = std::fs::read_dir(dir)
         .with_context(|| format!("reading the manifest {}", dir.display()))?
         .flatten()
@@ -72,12 +73,18 @@ pub fn read(dir: &Path) -> Result<Vec<Request>> {
         .collect();
     files.sort();
     files
-        .iter()
+        .into_iter()
         .map(|path| {
-            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-            Request::decode(&bytes).with_context(|| format!("{} is not a manifest entry", path.display()))
+            let request = read_one(&path)?;
+            Ok((path, request))
         })
         .collect()
+}
+
+/// The request one manifest file holds.
+pub fn read_one(path: &Path) -> Result<Request> {
+    let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    Request::decode(&bytes).with_context(|| format!("{} is not a manifest entry", path.display()))
 }
 
 impl Request {
@@ -293,7 +300,7 @@ mod tests {
             record_in(&dir, &ctx("sm_75"), texts);
         }
         record_in(&dir, &ctx("sm_86"), &single);
-        let got = read(&dir).unwrap();
+        let got: Vec<_> = read(&dir).unwrap().into_iter().map(|(_, request)| request).collect();
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(got, [Request::of(&ctx("sm_75"), &single), Request::of(&ctx("sm_75"), &pair)]);
     }

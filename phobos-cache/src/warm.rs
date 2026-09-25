@@ -12,7 +12,9 @@ use crate::Args;
 
 /// Compiles every manifest request for every chip asked for into the cache,
 /// skipping what is already there unless `--force`. Runs `--jobs` lowerings
-/// at once, all cores by default.
+/// at once, all cores by default, each in a child process of its own: a few
+/// dozen large lowerings in one process hold four cores between them, the
+/// same in as many processes hold all of them.
 pub fn run(args: &Args) -> Result<()> {
     if args.manifests.is_empty() {
         bail!("warm needs at least one --manifest DIR, recorded with PHOBOS_KERNEL_MANIFEST");
@@ -28,20 +30,20 @@ pub fn run(args: &Args) -> Result<()> {
     let mut seen = HashSet::new();
     let mut requests = Vec::new();
     for dir in &args.manifests {
-        for request in manifest::read(dir)? {
+        for (path, request) in manifest::read(dir)? {
             if seen.insert(request.clone()) {
-                requests.push(request);
+                requests.push((path, request));
             }
         }
     }
     // Longest source first, a cheap stand-in for the slowest compile, so the
     // tail of the run is not one large kernel on one core.
-    requests.sort_by_key(|r| std::cmp::Reverse(r.texts.iter().map(String::len).sum::<usize>()));
+    requests.sort_by_key(|(_, r)| std::cmp::Reverse(r.texts.iter().map(String::len).sum::<usize>()));
 
-    let jobs: Vec<(&Request, &str)> = requests
+    let jobs: Vec<(&Path, &Request, &str)> = requests
         .iter()
-        .flat_map(|r| chips.iter().map(move |chip| (r, chip.as_str())))
-        .filter(|(r, chip)| args.force || !r.is_cached(&root, chip))
+        .flat_map(|(path, r)| chips.iter().map(move |chip| (path.as_path(), r, chip.as_str())))
+        .filter(|(_, r, chip)| args.force || !r.is_cached(&root, chip))
         .collect();
     let skipped = requests.len() * chips.len() - jobs.len();
     println!(
@@ -56,6 +58,7 @@ pub fn run(args: &Args) -> Result<()> {
         .jobs
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
         .clamp(1, jobs.len().max(1));
+    let exe = std::env::current_exe().context("finding phobos-cache itself")?;
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
     let failures = Mutex::new(Vec::new());
@@ -63,16 +66,19 @@ pub fn run(args: &Args) -> Result<()> {
     std::thread::scope(|scope| {
         for _ in 0..workers {
             scope.spawn(|| {
-                while let Some(&(request, chip)) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let result = request.compile(chip).and_then(|compiled| {
-                        if let Some(ptxas) = &ptxas {
-                            for ptx in &compiled.ptx {
-                                assemble(ptxas, chip, ptx)?;
-                            }
-                        }
-                        compiled.store(&root)?;
-                        Ok(compiled.took)
-                    });
+                while let Some(&(path, request, chip)) = jobs.get(next.fetch_add(1, Ordering::Relaxed)) {
+                    let at = Instant::now();
+                    let mut child = Command::new(&exe);
+                    child.arg("warm-one").arg("--request").arg(path).args(["--chip", chip]).arg("--dir").arg(&root);
+                    match &ptxas {
+                        Some(ptxas) => child.arg("--ptxas").arg(ptxas),
+                        None => child.arg("--no-ptxas"),
+                    };
+                    let result = match child.output() {
+                        Ok(out) if out.status.success() => Ok(at.elapsed()),
+                        Ok(out) => Err(anyhow::anyhow!("{}", String::from_utf8_lossy(&out.stderr).trim())),
+                        Err(e) => Err(anyhow::Error::new(e).context("spawning warm-one")),
+                    };
                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                     match result {
                         Ok(took) => println!(
@@ -105,6 +111,20 @@ pub fn run(args: &Args) -> Result<()> {
         bail!("{} of {} compiles failed", failures.len(), jobs.len());
     }
     Ok(())
+}
+
+/// One job of [`run`], in the child process it spawns: lowers `--request`
+/// for `--chip`, assembles it with `--ptxas` when given, and stores it.
+pub fn one(args: &Args) -> Result<()> {
+    let path = args.request.as_deref().context("warm-one needs --request FILE")?;
+    let [chip] = args.chips.as_slice() else { bail!("warm-one needs exactly one --chip") };
+    let compiled = manifest::read_one(path)?.compile(chip)?;
+    if let Some(ptxas) = args.ptxas.as_deref().filter(|_| !args.no_ptxas) {
+        for ptx in &compiled.ptx {
+            assemble(ptxas, chip, ptx)?;
+        }
+    }
+    compiled.store(&args.root()?)
 }
 
 /// `--ptxas`, else `ptxas` on PATH, else the toolkit's under `CUDA_PATH`.

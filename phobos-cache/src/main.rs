@@ -39,6 +39,7 @@ struct Args {
     force: bool,
     ptxas: Option<PathBuf>,
     no_ptxas: bool,
+    request: Option<PathBuf>,
     patterns: Vec<String>,
 }
 
@@ -55,6 +56,7 @@ impl Args {
                 "--force" => args.force = true,
                 "--ptxas" => args.ptxas = Some(value()?.into()),
                 "--no-ptxas" => args.no_ptxas = true,
+                "--request" => args.request = Some(value()?.into()),
                 flag if flag.starts_with("--") => bail!("unknown flag {flag}\n{USAGE}"),
                 _ => args.patterns.push(arg),
             }
@@ -90,6 +92,8 @@ fn main() -> Result<()> {
     let args = Args::parse(raw)?;
     match command.as_str() {
         "warm" => warm::run(&args),
+        // What `warm` runs each job as; not meant to be typed.
+        "warm-one" => warm::one(&args),
         "list" => entries::list(&args),
         "clear" => entries::clear(&args),
         _ => bail!("{USAGE}"),

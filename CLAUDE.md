@@ -84,7 +84,7 @@ remembered figure and has to be labelled as such.
   IR -> PTX via inkwell/NVPTX), taking the pass pipeline and the LLVM machine
   from the target's `phobos_base::backend::Backend`. `gen_ptx` is a thin wrapper
 - **phobos-bench**: stand-alone compiler + benchmark binary: builds a kernel, compiles to PTX, launches it with `cust` (CUDA). Requires an NVIDIA GPU + CUDA toolkit at runtime
-- **phobos-cache**: the compiled-kernel cache's tool, split one directory per chip. `warm` replays a manifest recorded with `PHOBOS_KERNEL_MANIFEST` for every supported chip with no GPU, `list` and `clear` manage it
+- **phobos-cache**: the compiled-kernel cache's tool, split one directory per chip. `warm` replays a manifest recorded with `PHOBOS_KERNEL_MANIFEST` (`scripts/record_kernels.py` records every GGUF model) for every supported chip with no GPU, one child process per job; `list` and `clear` manage it
 - **phobos-base**: shared config & logger (`Context`, GPU target config), `progress` and `log`, each a sink a front end installs so a library can report without knowing what draws it, the
   `Backend` trait that owns a target's lowering pipeline and its post-processing
   of the generated text, plus utilities used across the crates

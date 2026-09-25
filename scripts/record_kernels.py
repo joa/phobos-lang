@@ -1,11 +1,11 @@
-"""Records the kernels every model under models/ compiles, for phobos-cache warm.
+"""Records the kernels every GGUF model under models/ compiles, for phobos-cache warm.
 
     python scripts/record_kernels.py [--manifest DIR] [--epoch FINGERPRINT] [NAME...]
 
-Runs each GGUF file through the bench example and each ONNX export through
-phobos-cli with PHOBOS_KERNEL_MANIFEST set, so the manifest holds every compile
-request a run makes. A kernel's source depends on the model's shapes and, for
-some, on the prompt's row count and the cache depth, so the bench shape covers
+Runs each GGUF file through the bench example with PHOBOS_KERNEL_MANIFEST set,
+so the manifest holds every compile request a run makes. A kernel's source
+depends on the model's shapes and, for some, on the prompt's row count and the
+cache depth, so the bench shape covers
 a short prompt, a full 512-row batch, a ragged remainder past it, and decode
 both fresh and at depth. A request is recorded on a cache hit too: pass the
 fingerprint a warm cache was built under as --epoch and the runs only load.
@@ -24,23 +24,12 @@ ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 EXE = ".exe" if os.name == "nt" else ""
 BENCH = ROOT / "target" / "release" / "examples" / f"bench{EXE}"
-CLI = ROOT / "target" / "release" / f"phobos-cli{EXE}"
 
 BENCH_SHAPE = ["-p", "7,100,512,600", "-n", "16", "-d", "0,2048", "-r", "1", "--no-warmup"]
-ONNX_PROMPT = "The quick brown fox jumps over the lazy dog, and then"
-
-
-def onnx_exports():
-    """Every directory under models/ holding an ONNX graph."""
-    return sorted({p.parent for p in MODELS.rglob("*.onnx")})
 
 
 def runs(names):
     jobs = [(p.name, [str(BENCH), "-m", str(p), *BENCH_SHAPE]) for p in sorted(MODELS.glob("*.gguf"))]
-    jobs += [
-        (str(d.relative_to(MODELS)), [str(CLI), "--onnx", str(d), "--no-tui", "-n", "16", ONNX_PROMPT])
-        for d in onnx_exports()
-    ]
     return [(name, cmd) for name, cmd in jobs if not names or any(n in name for n in names)]
 
 
@@ -58,9 +47,8 @@ def main():
             print(f"{name}: {' '.join(cmd)}")
         return 0
 
-    build = ["cargo", "build", "--release", "--features", "cuda"]
-    subprocess.run([*build, "-p", "phobos-gguf", "--example", "bench"], cwd=ROOT, check=True)
-    subprocess.run([*build, "-p", "phobos-cli"], cwd=ROOT, check=True)
+    build = ["cargo", "build", "--release", "--features", "cuda", "-p", "phobos-gguf", "--example", "bench"]
+    subprocess.run(build, cwd=ROOT, check=True)
 
     env = dict(os.environ, PHOBOS_KERNEL_MANIFEST=str(args.manifest.resolve()))
     if args.epoch:
