@@ -40,6 +40,7 @@ struct Args {
     ptxas: Option<PathBuf>,
     no_ptxas: bool,
     request: Option<PathBuf>,
+    version: bool,
     patterns: Vec<String>,
 }
 
@@ -57,6 +58,7 @@ impl Args {
                 "--ptxas" => args.ptxas = Some(value()?.into()),
                 "--no-ptxas" => args.no_ptxas = true,
                 "--request" => args.request = Some(value()?.into()),
+                "--version" | "-V" => args.version = true,
                 flag if flag.starts_with("--") => bail!("unknown flag {flag}\n{USAGE}"),
                 _ => args.patterns.push(arg),
             }
@@ -90,6 +92,11 @@ fn main() -> Result<()> {
     let mut raw = std::env::args().skip(1);
     let command = raw.next().unwrap_or_default();
     let args = Args::parse(raw)?;
+    if command == "--version" || command == "-V" || args.version {
+        let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
+        println!("phobos-cache {} (compiler {fingerprint})", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     match command.as_str() {
         "warm" => warm::run(&args),
         // What `warm` runs each job as; not meant to be typed.

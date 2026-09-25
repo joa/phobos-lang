@@ -1748,6 +1748,7 @@ dependencies = [
  "phobos-base",
  "phobos-gguf",
  "phobos-inference",
+ "phobos-kernels",
  "phobos-onnx",
  "ratatui",
 ]

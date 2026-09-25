@@ -16,6 +16,7 @@ path = "src/main.rs"
 anyhow = "1"
 phobos-base = { path = "../phobos-base" }
 phobos-inference = { path = "../phobos-inference" }
+phobos-kernels = { path = "../phobos-kernels" }
 phobos-gguf = { path = "../phobos-gguf" }
 phobos-onnx = { path = "../phobos-onnx" }
 ratatui = "0.30.2"

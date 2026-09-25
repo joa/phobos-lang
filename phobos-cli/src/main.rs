@@ -212,6 +212,7 @@ OPTIONS:
                       is most of a chat. Turning it off costs that and gains
                       the cache's buffers back for a pass to use as scratch,
                       which is the difference on a card that only just fits
+  -V, --version       print the version and the compiler fingerprint
   -h, --help          print this message"
     );
 }
@@ -220,6 +221,11 @@ fn main() -> Result<()> {
     let raw = cli::Args::from_env();
     if raw.wants_help() {
         print_usage();
+        return Ok(());
+    }
+    if raw.has("--version") || raw.has("-V") {
+        let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
+        println!("phobos-cli {} (compiler {fingerprint})", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
     let args = parse_args(&raw)?;
