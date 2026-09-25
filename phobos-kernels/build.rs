@@ -29,8 +29,11 @@ fn main() {
         collect_rs(&src, &mut files);
         files.sort();
         for file in files {
-            parts.push(file.strip_prefix(&root).unwrap_or(&file).display().to_string());
-            parts.push(fs::read_to_string(&file).unwrap_or_default());
+            // Separators and line endings normalized, so one commit keys the
+            // same on every host and a cache warmed on one serves the other.
+            let rel = file.strip_prefix(&root).unwrap_or(&file);
+            parts.push(rel.display().to_string().replace('\\', "/"));
+            parts.push(fs::read_to_string(&file).unwrap_or_default().replace('\r', ""));
         }
     }
 
