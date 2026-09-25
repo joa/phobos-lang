@@ -241,10 +241,12 @@ def package(tag, platform, built, cache, fingerprint, dist):
     else:
         archive = dist / f"{name}.tar.gz"
 
-        # An artifact download drops the executable bit, so it is set here.
+        # Modes are set rather than kept: an artifact download drops the
+        # executable bit, and a tree staged on Windows reads as world-writable.
         def executable(info):
-            if Path(info.name).name in BINARIES:
-                info.mode = 0o755
+            info.mode = 0o755 if info.isdir() or Path(info.name).name in BINARIES else 0o644
+            info.uid = info.gid = 0
+            info.uname = info.gname = ""
             return info
 
         with tarfile.open(archive, "w:gz") as t:
