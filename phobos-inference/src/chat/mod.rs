@@ -95,6 +95,19 @@ pub(crate) fn split_reasoning(message: &ChatMessage, content: &str) -> (String, 
     }
 }
 
+/// A single user turn and the assistant's opening, rendered as the server
+/// renders a one-message chat, for a caller holding plain text. An instruct
+/// model fed its prompt bare treats it as a document to continue, which from
+/// a question is rarely the answer.
+pub fn user_turn(text: &str, template: Option<&str>, bos: Option<&str>) -> String {
+    let message = ChatMessage {
+        role: "user".to_string(),
+        content: Some(MessageContent::Text(text.to_string())),
+        ..ChatMessage::default()
+    };
+    format_chat(&[message], None, None, false, Dialect::detect(template), bos)
+}
+
 pub(crate) fn format_chat(
     messages: &[ChatMessage],
     tools: Option<&Value>,

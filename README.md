@@ -348,7 +348,7 @@ cargo run [--features cuda] -r -p phobos-cli -- [--gguf <file.gguf>] [-m|--model
                                                 [-t|--temp <float>] [-k|--top-k <int>] [-p|--top-p <float>]
                                                 [--min-p <float>]
                                                 [--presence-penalty <float>] [--repetition-penalty <float>]
-                                                [--seed <int>]
+                                                [--seed <int>] [--raw]
                                                 [prompt]
 ```
 
@@ -356,7 +356,9 @@ Perform inference. `--gguf` loads a GGUF model and dispatches on the architectur
 without it the exported ONNX engines load (`--kv` when that directory is present, else `--model`).
 Uses the host backend when CUDA is not selected as a build feature; both backends produce the same logits.
 
-Given a prompt it prints the continuation and exits. Without one it starts a REPL that keeps the model warm.
+Given a prompt it prints the model's answer and exits. Without one it starts a REPL that keeps the model warm and
+answers each line on its own. A model whose file carries a chat template is asked in it, as the server asks it;
+`--raw` sends the text as typed and prints its continuation, for a base model or text that is already a prompt.
 
 `--listen` runs a minimal OpenAI-compatible server (`/v1/completions`, `/v1/chat/completions`, `/v1/models`)
 with SSE streaming, rendering conversations and tool definitions through the model's own

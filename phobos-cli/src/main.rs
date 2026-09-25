@@ -21,6 +21,7 @@ use phobos_base::cli;
 use phobos_base::progress::{self, Event, Step};
 use phobos_gguf::GgufModel;
 use phobos_inference::Model;
+use phobos_inference::chat;
 use phobos_inference::generate::{self, Flow};
 use phobos_inference::sampling::{Rng, SampleConfig, Sequence};
 use phobos_inference::server;
@@ -54,7 +55,7 @@ const VALUED: &[&str] = &[
 const REPLAY_LINES: usize = 32;
 
 /// Every flag that is a switch rather than a value. See [`cli::Args::positional_with`].
-const SWITCHES: &[&str] = &["--no-tui", "--tui", "--no-prefix-cache"];
+const SWITCHES: &[&str] = &["--no-tui", "--tui", "--no-prefix-cache", "--raw"];
 
 /// Which model to run, and where its tokenizer comes from.
 enum Source {
@@ -78,6 +79,9 @@ struct Args {
     tui: bool,
     /// Whether serving should keep a finished request's session.
     prefix_cache: bool,
+    /// Whether a prompt goes to the model as typed rather than as a user turn
+    /// of its chat template.
+    raw: bool,
 }
 
 fn parse_args(args: &cli::Args) -> Result<Args> {
@@ -98,6 +102,7 @@ fn parse_args(args: &cli::Args) -> Result<Args> {
         // to draw anyway, for a terminal this fails to recognize.
         tui: !args.has("--no-tui") && (args.has("--tui") || tui::unavailable().is_none()),
         prefix_cache: !args.has("--no-prefix-cache"),
+        raw: args.has("--raw"),
     })
 }
 
@@ -164,7 +169,9 @@ fn print_usage() {
         "\
 usage: phobos-cli (--gguf FILE | --onnx DIR) [OPTIONS] [PROMPT]
 
-With a PROMPT: print a continuation. Without one: start a REPL.
+With a PROMPT: print the model's answer. Without one: start a REPL, which
+answers each line on its own. A model whose file carries a chat template is
+asked in it; --raw sends the text as typed and prints its continuation.
 
 One of --gguf or --onnx is required; there is no default model.
 
@@ -197,6 +204,9 @@ OPTIONS:
                       prompt included, towards zero by P (default: 1.0 = off)
       --seed S        PRNG seed for sampling (default: 0)
       --show K        show the top-K candidates for the first token (default: 5)
+      --raw           send the prompt as typed instead of as a user turn of
+                      the model's chat template, and print its continuation;
+                      for a base model, or text that is already a prompt
       --listen ADDR   run an OpenAI compatible HTTP server on ADDR (e.g.
                       127.0.0.1:8080). The sampling options above become what a
                       request falls back to for every field it does not send.
@@ -385,11 +395,20 @@ fn serve(
 
 fn oneshot(model: &dyn Model, prompt: &str, args: &Args, rng: &mut Rng) -> Result<()> {
     let tokenizer = model.tokenizer();
-    let ids = tokenizer.encode(prompt)?;
+    // A model that ships a chat template is asked in it: bare, an instruct
+    // model continues the prompt as a document, and a question rarely
+    // continues into its answer.
+    let template = model.info().chat_template.as_deref().filter(|_| !args.raw);
+    let text = match template {
+        Some(template) => chat::user_turn(prompt, Some(template), tokenizer.bos_text()),
+        None => prompt.to_string(),
+    };
+    let ids = tokenizer.encode(&text)?;
     if ids.is_empty() {
         bail!("prompt encoded to zero tokens");
     }
-    println!("prompt: {prompt:?} ({} tokens)", ids.len());
+    let form = if template.is_some() { "chat turn" } else { "raw" };
+    println!("prompt: {prompt:?} ({} tokens, {form})", ids.len());
 
     let mut session = model.session()?;
     let logits = generate::prefill(session.as_mut(), &ids)?;
@@ -402,8 +421,11 @@ fn oneshot(model: &dyn Model, prompt: &str, args: &Args, rng: &mut Rng) -> Resul
     }
 
     println!("\n--- continuation ---");
-    print!("{prompt}");
-    io::stdout().flush().ok();
+    // A chat turn's answer stands alone; raw text continues what was typed.
+    if template.is_none() {
+        print!("{prompt}");
+        io::stdout().flush().ok();
+    }
 
     let config = generate::Config::new(args.sample, args.num_tokens);
     let mut sequence = Sequence::new(ids);

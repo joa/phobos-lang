@@ -222,6 +222,20 @@ fn a_cdata_argument_survives_its_own_markup() {
 }
 
 #[test]
+fn a_user_turn_is_the_servers_one_message_chat() {
+    let qwen = user_turn("what is the capital of Germany ? ", None, None);
+    assert_eq!(
+        qwen,
+        "<|im_start|>user\nwhat is the capital of Germany ?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+    );
+    let minicpm_template = format!("... {MINICPM_FUNCTION_START} ...");
+    assert_eq!(
+        user_turn("hi", Some(&minicpm_template), Some("<s>")),
+        format_chat(&[user("hi")], None, None, false, Dialect::MiniCpm, Some("<s>"))
+    );
+}
+
+#[test]
 fn a_minicpm_prompt_opens_with_bos_and_prefills_no_think_block() {
     let prompt = format_chat(
         &[user("hi")],
