@@ -18,7 +18,9 @@ phobos-mlir = { path = "../phobos-mlir", optional = true }
 sha2 = { workspace = true, optional = true }
 
 [features]
-cuda = ["dep:cust", "dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir", "dep:sha2"]
+# Lowering, the PTX cache and the manifest: everything short of the driver.
+compiler = ["dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir", "dep:sha2"]
+cuda = ["compiler", "dep:cust"]
 
 [[example]]
 name = "barrier_bench"

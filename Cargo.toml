@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "phobos-base",
     "phobos-bench",
+    "phobos-cache",
     "phobos-cli",
     "phobos-cluster",
     "phobos-gguf",

@@ -1,23 +1,19 @@
 use anyhow::{Context as _, Result};
+use cust::device::DeviceAttribute;
 use cust::module::Module;
-use phobos_base::context::Context;
+use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig, SUPPORTED_CHIPS};
 use phobos_base::progress::{self, Step};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
+
+use crate::lower::{self, Timed};
+use crate::{cache, manifest};
 
 /// What compilation calls itself when it reports progress.
 const STAGE: &str = "kernels";
 
 /// Compile-time `@autotune` override.
 pub type Override<'a> = (&'a str, usize);
-
-/// One kernel's PTX plus the dynamic-shared-memory byte count each of its
-/// `@dynshared` functions needs.
-type CompiledSource = (String, Vec<(String, usize)>);
-
-/// A lowering's result and what it cost. Timed inside the thread that ran it:
-/// a batch lowers everything at once, so the wall time around a join says how
-/// long the batch has been going rather than what this kernel took.
-type Timed = (CompiledSource, Duration);
 
 pub fn compile(source: &str, shapes: &[Override<'_>], what: &str) -> Result<Module> {
     Ok(compile_shared(source, shapes, what)?.0)
@@ -31,36 +27,64 @@ pub fn compile_shared(
     compile_in(&context_for(shapes), source, what)
 }
 
-/// A compilation context with `shapes` bound as `@autotune` overrides.
+/// The chip kernels compile for: `PHOBOS_CHIP`, or the newest supported chip
+/// the card can run, since PTX for an older target JITs forward. A card below
+/// every supported chip gets the oldest, which the driver then refuses.
+fn chip() -> &'static str {
+    static CHIP: OnceLock<String> = OnceLock::new();
+    CHIP.get_or_init(|| {
+        if let Ok(chip) = std::env::var("PHOBOS_CHIP") {
+            return chip;
+        }
+        let device = cust::device::Device::get_device(0).ok();
+        let attribute = |which| {
+            device
+                .and_then(|d| d.get_attribute(which).ok())
+                .map_or(0, |v| v.max(0) as u32)
+        };
+        let capability = attribute(DeviceAttribute::ComputeCapabilityMajor) * 10
+            + attribute(DeviceAttribute::ComputeCapabilityMinor);
+        best_chip(capability).to_string()
+    })
+}
+
+/// The newest of [`SUPPORTED_CHIPS`] at or below `capability`.
+fn best_chip(capability: u32) -> &'static str {
+    SUPPORTED_CHIPS
+        .iter()
+        .copied()
+        .rev()
+        .find(|chip| GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(*chip)).compute_capability() <= capability)
+        .unwrap_or(SUPPORTED_CHIPS[0])
+}
+
+/// A compilation context for the card, with `shapes` bound as `@autotune`
+/// overrides.
 fn context_for(shapes: &[Override<'_>]) -> Context {
-    let mut ctx = Context::default();
+    let mut ctx = Context {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip())),
+        ..Context::default()
+    };
     for &(name, value) in shapes {
         ctx.shape_overrides.insert(name.to_string(), value as i64);
     }
     ctx
 }
 
-/// Stack size for the compile thread: MLIR-to-PTX lowering recurses with the
-/// emitted IR's size, and a wide kernel like `q2k_matvec` can exceed a
-/// thread's default (1 MiB on Windows, fixed at link time). `Module::from_ptx`
-/// stays on the calling thread, where the CUDA context lives.
-const COMPILE_STACK_BYTES: usize = 256 << 20;
-
 pub fn compile_in(
     ctx: &Context,
     source: &str,
     what: &str,
 ) -> Result<(Module, Vec<(String, usize)>)> {
-    let hit = crate::cache::load(ctx, source);
+    manifest::record(ctx, &[source]);
+    let hit = cache::load(ctx, source);
     let cached = hit.is_some();
     let (took, (ptx, shared)) = match hit {
         Some(hit) => (Duration::ZERO, hit),
         None => {
             progress::started(STAGE, what);
-            let handle = spawn_compile(ctx, source)
-                .with_context(|| format!("spawning the compile thread for {what}"))?;
-            let (out, took) = join_compile(handle, what)?;
-            crate::cache::store(ctx, source, &out.0, &out.1);
+            let (out, took) = lower::single(ctx, source, what)?;
+            cache::store(ctx, source, &out.0, &out.1);
             (took, out)
         }
     };
@@ -80,30 +104,6 @@ pub fn compile_in(
     Ok((module, shared))
 }
 
-/// Spawns `phobos_lang::compile_shared` on its own stack (see
-/// [`COMPILE_STACK_BYTES`]); does not join.
-fn spawn_compile(
-    ctx: &Context,
-    source: &str,
-) -> std::io::Result<std::thread::JoinHandle<Result<Timed>>> {
-    let ctx = ctx.clone();
-    let source = source.to_string();
-    std::thread::Builder::new()
-        .stack_size(COMPILE_STACK_BYTES)
-        .spawn(move || {
-            let at = Instant::now();
-            let out = phobos_lang::compile_shared(&ctx, &source)?;
-            Ok((out, at.elapsed()))
-        })
-}
-
-fn join_compile(handle: std::thread::JoinHandle<Result<Timed>>, what: &str) -> Result<Timed> {
-    handle
-        .join()
-        .map_err(|_| anyhow::anyhow!("the compile thread for {what} panicked"))?
-        .with_context(|| format!("compiling {what}"))
-}
-
 /// [`compile`] for several independent sources at once: each source's
 /// MLIR-to-PTX lowering runs on its own stack in parallel. Only the
 /// PTX-to-`Module` load, which touches the CUDA driver, stays sequential on
@@ -118,13 +118,14 @@ pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Mo
         .iter()
         .map(|&(source, shapes, what)| {
             let ctx = context_for(shapes);
-            match crate::cache::load(&ctx, source) {
+            manifest::record(&ctx, &[source]);
+            match cache::load(&ctx, source) {
                 Some((ptx, _)) => Ok(Slot::Hit(ptx)),
                 None => {
                     // Said before the spawn, so the whole batch is named the
                     // moment it starts rather than as each one is joined.
                     progress::started(STAGE, what);
-                    let handle = spawn_compile(&ctx, source)
+                    let handle = lower::spawn(&ctx, source)
                         .with_context(|| format!("spawning the compile thread for {what}"))?;
                     Ok(Slot::Miss(handle, ctx, source.to_string()))
                 }
@@ -141,8 +142,8 @@ pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Mo
             let (ptx, took) = match slot {
                 Slot::Hit(ptx) => (ptx, Duration::ZERO),
                 Slot::Miss(handle, ctx, source) => {
-                    let ((ptx, shared), took) = join_compile(handle, what)?;
-                    crate::cache::store(&ctx, &source, &ptx, &shared);
+                    let ((ptx, shared), took) = lower::join(handle, what)?;
+                    cache::store(&ctx, &source, &ptx, &shared);
                     (ptx, took)
                 }
             };
@@ -175,11 +176,8 @@ pub struct Variants {
 
 impl Variants {
     /// Compiles both the aligned and the masked-fallback text of one kernel
-    /// source, substituting `{ALIGNED}` with `claims.0` / `claims.1`.
-    ///
-    /// Uses `compile_raw` rather than [`compile_shared`] because `@pipeline` is
-    /// checked across the pair, and the fallback variant's partial slices never
-    /// pipeline on their own, so either variant satisfies the assertion.
+    /// source, substituting `{ALIGNED}` with `claims.0` / `claims.1`; see
+    /// [`lower::pair`].
     pub fn compile(
         source: &str,
         shapes: &[Override<'_>],
@@ -192,7 +190,8 @@ impl Variants {
             source.replace("{ALIGNED}", claims.1),
         );
 
-        let hit = crate::cache::load_pair(&ctx, &aligned_src, &general_src);
+        manifest::record(&ctx, &[&aligned_src, &general_src]);
+        let hit = cache::load_pair(&ctx, &aligned_src, &general_src);
         // The pair is one cache entry and one unit of work, so it is timed and
         // reported as one kernel; `what` names the kernel rather than either
         // of its two alignment variants.
@@ -202,61 +201,9 @@ impl Variants {
             Some(hit) => hit,
             None => {
                 progress::started(STAGE, what);
-                // A thread each, not one thread doing both: the two texts are
-                // the same kernel under different alignment claims and neither
-                // reads the other, so lowering them at once costs nothing but
-                // a second stack. See COMPILE_STACK_BYTES for why that stack
-                // is not the caller's.
-                let lower = |ctx: Context, src: String, half: &'static str| {
-                    std::thread::Builder::new()
-                        .stack_size(COMPILE_STACK_BYTES)
-                        .spawn(move || phobos_lang::compile_raw(&ctx, &src))
-                        .with_context(|| format!("spawning the compile thread for {what} ({half})"))
-                };
-                let aligned_thread = lower(ctx.clone(), aligned_src.clone(), "aligned")?;
-                let general_thread = lower(ctx.clone(), general_src.clone(), "general")?;
-                let join = |handle: std::thread::JoinHandle<_>| {
-                    handle
-                        .join()
-                        .map_err(|_| anyhow::anyhow!("the compile thread for {what} panicked"))
-                };
-                let aligned_out = join(aligned_thread)?;
-                let general_out = join(general_thread)?;
-                let aligned_out =
-                    aligned_out.with_context(|| format!("compiling {what} (aligned)"))?;
-                let general_out =
-                    general_out.with_context(|| format!("compiling {what} (general)"))?;
-
-                for (name, aligned_reasons) in &aligned_out.pipeline_failures {
-                    // A kernel missing from the general variant's failures pipelined
-                    // there, which satisfies the assertion for the pair.
-                    let Some((_, general_reasons)) = general_out
-                        .pipeline_failures
-                        .iter()
-                        .find(|(n, _)| n == name)
-                    else {
-                        continue;
-                    };
-                    let why = |reasons: &[String]| match reasons {
-                        [] => "no loop shaped for pipelining".to_string(),
-                        _ => reasons.join("; "),
-                    };
-                    anyhow::bail!(
-                        "kernel `{name}` in {what}: @pipeline asserts this kernel can be pipelined, but \
-                         neither compiled variant did (aligned: {}; general: {})",
-                        why(aligned_reasons),
-                        why(general_reasons),
-                    );
-                }
-
-                crate::cache::store_pair(
-                    &ctx,
-                    &aligned_src,
-                    &general_src,
-                    &aligned_out.code,
-                    &general_out.code,
-                );
-                (aligned_out.code, general_out.code)
+                let (aligned_ptx, general_ptx) = lower::pair(&ctx, &aligned_src, &general_src, what)?;
+                cache::store_pair(&ctx, &aligned_src, &general_src, &aligned_ptx, &general_ptx);
+                (aligned_ptx, general_ptx)
             }
         };
 
@@ -286,5 +233,20 @@ impl Variants {
         } else {
             &self.general
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::best_chip;
+
+    #[test]
+    fn a_card_gets_the_newest_chip_it_can_run() {
+        assert_eq!(best_chip(75), "sm_75");
+        assert_eq!(best_chip(87), "sm_86");
+        assert_eq!(best_chip(89), "sm_89");
+        assert_eq!(best_chip(100), "sm_90");
+        assert_eq!(best_chip(121), "sm_120");
+        assert_eq!(best_chip(61), "sm_75");
     }
 }

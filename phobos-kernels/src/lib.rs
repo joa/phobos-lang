@@ -2,8 +2,17 @@ pub mod abi;
 pub mod matmul;
 pub mod util;
 
-#[cfg(feature = "cuda")]
+// The reading and recording halves of these serve `compile`, which needs the
+// driver; a build without it, such as `phobos-cache`, only writes.
+#[cfg(feature = "compiler")]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 mod cache;
+#[cfg(feature = "compiler")]
+mod lower;
+#[cfg(feature = "compiler")]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
+pub mod manifest;
+
 #[cfg(feature = "cuda")]
 pub mod compile;
 #[cfg(feature = "cuda")]

@@ -51,6 +51,9 @@ impl GpuConfig {
     }
 }
 
+/// The NVIDIA targets a release carries compiled kernels for.
+pub const SUPPORTED_CHIPS: [&str; 6] = ["sm_75", "sm_80", "sm_86", "sm_89", "sm_90", "sm_120"];
+
 #[derive(Debug, Clone)]
 pub struct NvidiaGpuConfig {
     chip: String,

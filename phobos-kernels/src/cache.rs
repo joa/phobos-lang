@@ -1,3 +1,4 @@
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use crate::util::kernel_cache_dir as cache_dir;
@@ -8,9 +9,9 @@ use sha2::{Digest, Sha256};
 /// Identifies the compiler that produces the PTX: the codegen crates' source
 /// and the MLIR/LLVM versions they call, folded at build time by `build.rs`.
 /// `PHOBOS_KERNEL_CACHE_EPOCH` overrides it, so a session can pin the
-/// fingerprint and evict just the kernels that changed, with `cargo run -p
-/// phobos-kernels --example cache -- evict <name>`; entries are named
-/// `<kernel>-<hash>` so eviction can glob by name.
+/// fingerprint and evict just the kernels that changed, with `phobos-cache
+/// clear <name>`; entries are named `<kernel>-<hash>` so eviction can glob by
+/// name.
 /// Catches what a git commit hash would miss: an uncommitted change, a
 /// dependency bump, an LLVM upgrade.
 ///
@@ -26,7 +27,7 @@ fn build_fingerprint() -> &'static str {
 
 /// The kernel's own name, so an entry can be found without its hash. The
 /// hash is what makes the file unique, so a miss here is harmless.
-fn kernel_name(source: &str) -> String {
+pub(crate) fn kernel_name(source: &str) -> String {
     let name = source
         .split_once("kernel ")
         .and_then(|(_, rest)| rest.split_once('('))
@@ -72,16 +73,27 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// Where the entry for a `(ctx, texts)` compile lives under `root`: one
+/// directory per chip, so a cache warmed for several cards splits cleanly.
+pub(crate) fn entry(root: &Path, ctx: &Context, texts: &[&str]) -> PathBuf {
+    let GpuConfig::Nvidia(nv) = &ctx.gpu_config;
+    root.join(nv.chip()).join(hash(ctx, texts))
+}
+
+/// Writes `bytes` to `path` through a temporary file renamed into place, so a
+/// concurrent reader never sees a half-written entry.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    // Per process and thread, since a warm writes from many threads at once.
+    let tmp = dir.join(format!(".tmp-{}-{:?}", std::process::id(), std::thread::current().id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
+}
+
 fn write(ctx: &Context, texts: &[&str], bytes: &[u8]) {
-    let Some(dir) = cache_dir() else { return };
-    if std::fs::create_dir_all(&dir).is_err() {
-        return;
-    }
-    // Written under a per-process name and renamed into place so a
-    // concurrent reader never sees a half-written entry.
-    let tmp = dir.join(format!(".tmp-{}", std::process::id()));
-    if std::fs::write(&tmp, bytes).is_ok() {
-        let _ = std::fs::rename(&tmp, dir.join(hash(ctx, texts)));
+    if let Some(root) = cache_dir() {
+        let _ = write_atomic(&entry(&root, ctx, texts), bytes);
     }
 }
 
@@ -93,11 +105,12 @@ fn write(ctx: &Context, texts: &[&str], bytes: &[u8]) {
 /// binary built from the same compiler. `PHOBOS_KERNEL_CACHE_DIR` overrides
 /// the default (`~/.phobos/kernel-cache`); empty disables caching, and
 /// `print_phases` always disables it, since a hit has nothing to print.
+/// Entries sit under a directory per chip, `<dir>/sm_75/<kernel>-<hash>`.
 pub(crate) fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>)> {
     if ctx.print_phases {
         return None;
     }
-    let bytes = std::fs::read(cache_dir()?.join(hash(ctx, &[source]))).ok()?;
+    let bytes = std::fs::read(entry(&cache_dir()?, ctx, &[source])).ok()?;
     decode_one(&bytes)
 }
 
@@ -117,7 +130,7 @@ pub(crate) fn load_pair(ctx: &Context, aligned_src: &str, general_src: &str) -> 
     if ctx.print_phases {
         return None;
     }
-    let bytes = std::fs::read(cache_dir()?.join(hash(ctx, &[aligned_src, general_src]))).ok()?;
+    let bytes = std::fs::read(entry(&cache_dir()?, ctx, &[aligned_src, general_src])).ok()?;
     decode_pair(&bytes)
 }
 
@@ -141,7 +154,7 @@ pub(crate) fn store_pair(
 
 /// `shared.len() : u32`, then each `(name.len() : u32, name, bytes : u64)`,
 /// then `ptx.len() : u64, ptx`.
-fn encode_one(ptx: &str, shared: &[(String, usize)]) -> Vec<u8> {
+pub(crate) fn encode_one(ptx: &str, shared: &[(String, usize)]) -> Vec<u8> {
     let mut out = Vec::new();
     out.extend((shared.len() as u32).to_le_bytes());
     for (name, bytes) in shared {
@@ -154,7 +167,7 @@ fn encode_one(ptx: &str, shared: &[(String, usize)]) -> Vec<u8> {
     out
 }
 
-fn decode_one(bytes: &[u8]) -> Option<(String, Vec<(String, usize)>)> {
+pub(crate) fn decode_one(bytes: &[u8]) -> Option<(String, Vec<(String, usize)>)> {
     let mut r = Reader::new(bytes);
     let shared_len = r.u32()? as usize;
     let mut shared = Vec::with_capacity(shared_len);
@@ -169,7 +182,7 @@ fn decode_one(bytes: &[u8]) -> Option<(String, Vec<(String, usize)>)> {
 }
 
 /// `a.len() : u64, a, b.len() : u64, b`.
-fn encode_pair(a: &str, b: &str) -> Vec<u8> {
+pub(crate) fn encode_pair(a: &str, b: &str) -> Vec<u8> {
     let mut out = Vec::new();
     for s in [a, b] {
         out.extend((s.len() as u64).to_le_bytes());
@@ -188,31 +201,31 @@ fn decode_pair(bytes: &[u8]) -> Option<(String, String)> {
 
 /// A cursor over a cache entry's bytes, since [`decode_one`] and
 /// [`decode_pair`] both walk a run of length-prefixed fields.
-struct Reader<'a> {
+pub(crate) struct Reader<'a> {
     bytes: &'a [u8],
     at: usize,
 }
 
 impl<'a> Reader<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
+    pub(crate) fn new(bytes: &'a [u8]) -> Self {
         Reader { bytes, at: 0 }
     }
 
-    fn take(&mut self, n: usize) -> Option<&'a [u8]> {
+    pub(crate) fn take(&mut self, n: usize) -> Option<&'a [u8]> {
         let slice = self.bytes.get(self.at..self.at + n)?;
         self.at += n;
         Some(slice)
     }
 
-    fn u32(&mut self) -> Option<u32> {
+    pub(crate) fn u32(&mut self) -> Option<u32> {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
 
-    fn u64(&mut self) -> Option<u64> {
+    pub(crate) fn u64(&mut self) -> Option<u64> {
         Some(u64::from_le_bytes(self.take(8)?.try_into().ok()?))
     }
 
-    fn utf8(&mut self, n: usize) -> Option<String> {
+    pub(crate) fn utf8(&mut self, n: usize) -> Option<String> {
         String::from_utf8(self.take(n)?.to_vec()).ok()
     }
 }

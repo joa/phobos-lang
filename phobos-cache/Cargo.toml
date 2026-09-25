@@ -1,0 +1,19 @@
+[package]
+name = "phobos-cache"
+version = "0.1.0"
+edition.workspace = true
+description = "Warms, lists and clears the compiled-kernel cache, one directory per chip"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[[bin]]
+name = "phobos-cache"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+phobos-base = { path = "../phobos-base" }
+phobos-kernels = { path = "../phobos-kernels", features = ["compiler"] }
