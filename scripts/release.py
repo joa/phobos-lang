@@ -1,7 +1,7 @@
 """Builds a Phobos release for a tag, x64, Windows and Linux.
 
     python scripts/release.py TAG [--models DIR] [--jobs N] [--seed-manifest DIR] [--local] [--publish]
-    python scripts/release.py toolchain [--llvm DIR] [--llvm-version V]
+    python scripts/release.py toolchain [--llvm DIR] [--llvm-version V] [--ref BRANCH] [--pack-only]
 
 For TAG, in order:
 
@@ -75,7 +75,13 @@ Compiler fingerprint {fingerprint}.
 """
 
 
-def run(cmd, cwd=ROOT, env=None, check=True, capture=False):
+# The shell's PHOBOS_* never reach a step: a leftover cache epoch would key
+# the shipped cache and every fingerprint.txt alike, pass the check, and miss
+# on every user's machine.
+BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("PHOBOS_")} | {"CARGO_TARGET_DIR": str(TARGET)}
+
+
+def run(cmd, cwd=ROOT, env=BASE_ENV, check=True, capture=False):
     print("$", " ".join(str(c) for c in cmd), flush=True)
     done = subprocess.run(
         [str(c) for c in cmd], cwd=cwd, env=env, check=False, text=True, capture_output=capture
@@ -113,10 +119,6 @@ def worktree(tag, dist):
     return src, commit
 
 
-def cargo_env():
-    return dict(os.environ, CARGO_TARGET_DIR=str(TARGET))
-
-
 def build(src, binaries):
     cmd = ["cargo", "build", "--release", "--locked"]
     for bin in binaries:
@@ -124,7 +126,7 @@ def build(src, binaries):
     features = [f"{b}/cuda" for b in binaries if b in ("phobos-cli", "phobos-bench")]
     if features:
         cmd += ["--features", ",".join(features)]
-    run(cmd, cwd=src, env=cargo_env())
+    run(cmd, cwd=src)
 
 
 def exe(name):
@@ -159,9 +161,7 @@ def warm_cache(src, dist, models, jobs, seed):
     if seed:
         run([cache_tool, "warm", "--manifest", seed, "--dir", cache, "--jobs", jobs])
     shutil.rmtree(manifest, ignore_errors=True)
-    env = dict(cargo_env(), PHOBOS_KERNEL_CACHE_DIR=str(cache))
-    for var in ("PHOBOS_KERNEL_CACHE_EPOCH", "PHOBOS_KERNEL_MANIFEST", "PHOBOS_CHIP"):
-        env.pop(var, None)
+    env = BASE_ENV | {"PHOBOS_KERNEL_CACHE_DIR": str(cache)}
     recorded = run(
         [sys.executable, src / "scripts" / "record_kernels.py", "--manifest", manifest, "--models", models],
         cwd=src, env=env, check=False,
@@ -311,12 +311,14 @@ def toolchain(args):
         for tool in tools:
             z.write(llvm / "bin" / tool, Path("llvm-install") / "bin" / tool)
     print(f"packed {archive} ({archive.stat().st_size >> 20} MiB)")
+    if args.pack_only:
+        return
 
     if run(["gh", "release", "view", tag], check=False, capture=True).returncode != 0:
         notes = f"LLVM and MLIR {version}, static, for the release workflow to link against. Not a Phobos release."
         run(["gh", "release", "create", tag, "--prerelease", "--title", tag, "--notes", notes])
     run(["gh", "release", "upload", tag, archive, "--clobber"])
-    run(["gh", "workflow", "run", "toolchain.yml", "-f", f"llvm_version={version}"])
+    run(["gh", "workflow", "run", "toolchain.yml", "--ref", args.ref, "-f", f"llvm_version={version}"])
 
 
 def main():
@@ -324,6 +326,8 @@ def main():
         ap = argparse.ArgumentParser(prog="release.py toolchain")
         ap.add_argument("--llvm", type=Path, default=Path(os.environ.get("LLVM_SYS_221_PREFIX", "")))
         ap.add_argument("--llvm-version", default=LLVM_VERSION)
+        ap.add_argument("--ref", default="main", help="the branch holding toolchain.yml")
+        ap.add_argument("--pack-only", action="store_true", help="pack the archive, upload nothing")
         toolchain(ap.parse_args(sys.argv[2:]))
         return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)

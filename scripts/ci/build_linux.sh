@@ -21,7 +21,7 @@ source "$toolset/enable"
 # bindgen wants a libclang for the MLIR and TableGen headers; any recent one
 # parses them, so the distribution's does.
 dnf install -y -q clang-devel
-dnf config-manager --add-repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
+curl -sSfo /etc/yum.repos.d/cuda-rhel8.repo https://developer.download.nvidia.com/compute/cuda/repos/rhel8/x86_64/cuda-rhel8.repo
 dnf install -y -q "$CUDA_PACKAGE"
 cuda="$(ls -d /usr/local/cuda-* | sort -V | tail -1)"
 
