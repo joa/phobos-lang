@@ -5,6 +5,7 @@ members = [
     "phobos-bench",
     "phobos-cache",
     "phobos-cli",
+    "phobos-compile",
     "phobos-cluster",
     "phobos-gguf",
     "phobos-inference",

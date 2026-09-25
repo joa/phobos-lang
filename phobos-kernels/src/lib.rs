@@ -1,3 +1,7 @@
+/// The build's compiler fingerprint, which keys every cache entry: a release
+/// ships a cache only binaries printing the same one can read.
+pub const COMPILER_FINGERPRINT: &str = env!("PHOBOS_COMPILER_FINGERPRINT");
+
 pub mod abi;
 pub mod matmul;
 pub mod util;

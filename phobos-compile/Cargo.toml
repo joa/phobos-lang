@@ -1,0 +1,21 @@
+[package]
+name = "phobos-compile"
+version = "0.1.0"
+edition.workspace = true
+description = "Compiles a Phobos kernel source to PTX for one chip"
+readme.workspace = true
+repository.workspace = true
+license.workspace = true
+keywords.workspace = true
+categories = ["compilers", "development-tools"]
+
+[[bin]]
+name = "phobos-compile"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+phobos-base = { path = "../phobos-base" }
+phobos-kernels = { path = "../phobos-kernels" }
+phobos-lang = { path = "../phobos-lang" }
+phobos-mlir = { path = "../phobos-mlir" }

@@ -362,6 +362,14 @@ Given a prompt it prints the continuation and exits. Without one it starts a REP
 with SSE streaming, rendering conversations and tool definitions through the model's own
 `tokenizer.chat_template`. The sampling flags above become defaults unless specified otherwise in the query.
 
+### `phobos-compile` (no GPU)
+
+```plain
+cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY>] [--index-bits 32|64] [-o <out.ptx>]
+```
+
+Compiles a kernel source to PTX, for `sm_75` by default. `PHOBOS_PRINT_PHASES=1` prints the IR of each lowering phase.
+
 ### `phobos-bench` (needs a GPU)
 
 ```plain
@@ -405,7 +413,6 @@ Run with `cargo run -p <crate> --example <name> -- <args>`.
 | Example | Crate | Syntax | What it does |
 | --- | --- | --- | --- |
 | `emit` | `phobos-lang` | `emit -- [file.ph]` | Prints the emitted MLIR (defaults to a built-in matmul). No GPU. |
-| `ptx` | `phobos-lang` | `ptx -- <file.ph> [chip] [index-bitwidth]` | Compiles a source file to PTX (default chip `sm_75`). No GPU. |
 | `dag_dot` | `phobos-cluster` | `dag_dot -- <file.ph> [out.dot]` | Renders a `@cluster` kernel's parametric cluster IR as Graphviz DOT. No GPU. |
 | `plan_dot` | `phobos-sched` | `plan_dot -- <job.txt> [--nodes N] [--ingest direct\|home-fetch] [out.dot]` | Lowers a job to the concrete per-node instruction DAG and renders it as Graphviz DOT. No GPU. |
 | `cluster_bench` | `phobos-sched` | `cluster_bench` | Analytic, CPU-only scheduler benchmark: planner throughput and cost-model quality as node count grows. No GPU. |

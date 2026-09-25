@@ -21,7 +21,7 @@ fn build_fingerprint() -> &'static str {
     static FINGERPRINT: OnceLock<String> = OnceLock::new();
     FINGERPRINT.get_or_init(|| {
         std::env::var("PHOBOS_KERNEL_CACHE_EPOCH")
-            .unwrap_or_else(|_| env!("PHOBOS_COMPILER_FINGERPRINT").to_string())
+            .unwrap_or_else(|_| crate::COMPILER_FINGERPRINT.to_string())
     })
 }
 
