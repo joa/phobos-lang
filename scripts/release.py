@@ -11,9 +11,12 @@ For TAG, in order:
     nobody ships. Pushes the tag if origin
     lacks it, which starts .github/workflows/release.yml.
  2. Builds phobos-cache and phobos-bench there and reads their fingerprint.
- 3. Warms the previous release's kernel manifest under that fingerprint, so
-    the recording runs after it hit instead of compiling on the GPU box one
-    model at a time. The slow kernels land here, on every core.
+ 3. Starts the cache from the newest earlier release's under target/dist,
+    then warms the previous release's kernel manifest under that
+    fingerprint, so the recording runs after it hit instead of compiling on
+    the GPU box one model at a time. Under an unchanged fingerprint the copy
+    already holds everything; otherwise the slow kernels land here, on every
+    core.
  4. Records this tag's manifest by running every GGUF model under --models
     through phobos-bench, then warms whatever it added and prunes whatever it
     no longer asks for, so the cache ships exactly this build's kernels.
@@ -170,9 +173,26 @@ def seed_manifest(tag, dist, explicit, online):
     return local if local.is_dir() else None
 
 
+def inherit_cache(dist, cache):
+    """Starts an empty cache from the newest other release's. Under the same
+    compiler fingerprint every entry it holds is one this release would
+    compile, which turns the slowest step into a copy; under another none
+    match, and the prune after the warm drops them all."""
+    if cache.is_dir() and any(cache.iterdir()):
+        return
+    others = [d / "kernel-cache" for d in dist.parent.iterdir() if d != dist and (d / "kernel-cache").is_dir()]
+    if not others:
+        return
+    newest = max(others, key=lambda c: c.stat().st_mtime)
+    print(f"starting from {newest}", flush=True)
+    shutil.rmtree(cache, ignore_errors=True)
+    shutil.copytree(newest, cache)
+
+
 def warm_cache(src, dist, models, skip, jobs, seed):
     cache, manifest = dist / "kernel-cache", dist / "kernel-manifest"
     cache_tool = exe(src, "phobos-cache")
+    inherit_cache(dist, cache)
     if seed:
         run([cache_tool, "warm", "--manifest", seed, "--dir", cache, "--jobs", jobs])
     shutil.rmtree(manifest, ignore_errors=True)
