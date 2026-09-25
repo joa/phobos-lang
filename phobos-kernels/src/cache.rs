@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::util::kernel_cache_dir as cache_dir;
+use crate::util::{bundled_kernel_cache_dir, kernel_cache_dir as cache_dir};
 
 use phobos_base::context::{Context, GpuConfig};
 use sha2::{Digest, Sha256};
@@ -97,21 +97,39 @@ fn write(ctx: &Context, texts: &[&str], bytes: &[u8]) {
     }
 }
 
+/// The first of `roots` holding an entry for `(ctx, texts)` that decodes.
+fn lookup<T>(
+    roots: impl IntoIterator<Item = PathBuf>,
+    ctx: &Context,
+    texts: &[&str],
+    decode: impl Fn(&[u8]) -> Option<T>,
+) -> Option<T> {
+    roots
+        .into_iter()
+        .find_map(|root| decode(&std::fs::read(entry(&root, ctx, texts)).ok()?))
+}
+
+/// The caches a lookup reads, in order: the one a release ships, then the
+/// user's, which is also the one written.
+fn roots() -> impl Iterator<Item = PathBuf> {
+    bundled_kernel_cache_dir().into_iter().chain(cache_dir())
+}
+
 /// A cached `(ptx, shared)` pair for one kernel, or `None` on any cache
 /// miss, corrupt entry, or disabled cache.
 ///
 /// Entries are keyed by everything that can change what a kernel's source
 /// compiles to, so a hit survives a process restart and is shared by every
-/// binary built from the same compiler. `PHOBOS_KERNEL_CACHE_DIR` overrides
-/// the default (`~/.phobos/kernel-cache`); empty disables caching, and
+/// binary built from the same compiler. The bundled cache beside the binary
+/// is read first, then `~/.phobos/kernel-cache`, the only one written.
+/// `PHOBOS_KERNEL_CACHE_DIR` replaces both; empty disables caching, and
 /// `print_phases` always disables it, since a hit has nothing to print.
 /// Entries sit under a directory per chip, `<dir>/sm_75/<kernel>-<hash>`.
 pub(crate) fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>)> {
     if ctx.print_phases {
         return None;
     }
-    let bytes = std::fs::read(entry(&cache_dir()?, ctx, &[source])).ok()?;
-    decode_one(&bytes)
+    lookup(roots(), ctx, &[source], decode_one)
 }
 
 /// Persists one kernel's compiled output. Best-effort: a write failure never
@@ -130,8 +148,7 @@ pub(crate) fn load_pair(ctx: &Context, aligned_src: &str, general_src: &str) -> 
     if ctx.print_phases {
         return None;
     }
-    let bytes = std::fs::read(entry(&cache_dir()?, ctx, &[aligned_src, general_src])).ok()?;
-    decode_pair(&bytes)
+    lookup(roots(), ctx, &[aligned_src, general_src], decode_pair)
 }
 
 /// [`store`] for the aligned/general pair.
@@ -240,6 +257,23 @@ mod tests {
         let (ptx, got) = decode_one(&encode_one("// ptx text\n", &shared)).unwrap();
         assert_eq!(ptx, "// ptx text\n");
         assert_eq!(got, shared);
+    }
+
+    #[test]
+    fn a_lookup_reads_the_first_cache_holding_a_good_entry() {
+        let base = std::env::temp_dir().join(format!("phobos-tiers-{}", std::process::id()));
+        let (bundled, user) = (base.join("bundled"), base.join("user"));
+        let ctx = Context::default();
+        let texts = ["kernel k() {}"];
+        write_atomic(&entry(&user, &ctx, &texts), &encode_one("user ptx", &[])).unwrap();
+        let read = || lookup([bundled.clone(), user.clone()], &ctx, &texts, decode_one).map(|(ptx, _)| ptx);
+
+        assert_eq!(read().as_deref(), Some("user ptx"));
+        write_atomic(&entry(&bundled, &ctx, &texts), b"corrupt").unwrap();
+        assert_eq!(read().as_deref(), Some("user ptx"));
+        write_atomic(&entry(&bundled, &ctx, &texts), &encode_one("bundled ptx", &[])).unwrap();
+        assert_eq!(read().as_deref(), Some("bundled ptx"));
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

@@ -14,6 +14,18 @@ pub fn kernel_cache_dir() -> Option<PathBuf> {
     }
 }
 
+/// The read-only cache a release ships beside its binaries,
+/// `<exe dir>/kernel-cache`, looked up before [`kernel_cache_dir`] and never
+/// written. `None` when `PHOBOS_KERNEL_CACHE_DIR` is set, which names the one
+/// cache to use.
+pub fn bundled_kernel_cache_dir() -> Option<PathBuf> {
+    if std::env::var_os("PHOBOS_KERNEL_CACHE_DIR").is_some() {
+        return None;
+    }
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.join("kernel-cache"))
+}
+
 /// `x` rounded up to a whole number of `tile`s.
 pub fn round_up(x: usize, tile: usize) -> usize {
     x.div_ceil(tile) * tile

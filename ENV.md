@@ -34,7 +34,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 
 | variable | takes | default | effect |
 | --- | --- | --- | --- |
-| `PHOBOS_KERNEL_CACHE_DIR` | a directory, or empty | `~/.phobos/kernel-cache` | Where compiled PTX is cached across processes, one subdirectory per chip (`sm_75/`, `sm_86/`, ...). Empty turns caching off. |
+| `PHOBOS_KERNEL_CACHE_DIR` | a directory, or empty | `kernel-cache` beside the binary, read-only, then `~/.phobos/kernel-cache` | Where compiled PTX is cached across processes, one subdirectory per chip (`sm_75/`, `sm_86/`, ...). A release ships its cache beside the binary; new entries go to the user's. Set, it is the one cache read and written; empty turns caching off. |
 | `PHOBOS_KERNEL_MANIFEST` | a directory | unset | Records every kernel compile request, hit or miss, into that directory, one file each, without the chip. `phobos-cache warm --manifest DIR` compiles them for every supported chip with no GPU. |
 | `PHOBOS_KERNEL_CACHE_EPOCH` | any string | the compiler's build fingerprint | Replaces the fingerprint that keys the cache, so a stale cache can be forced cold or two builds made to share one. |
 | `PHOBOS_CHIP` | an SM target, `sm_75`, `sm_80` | the newest supported chip the card runs, or the context default | The target kernels compile for: on the device path, in place of the card's, and in `phobos-lang`'s `emit`, `ir` and `ptx` examples, to reach a code path the default never takes. |
