@@ -38,7 +38,9 @@ futures = "0.3"
 sha2 = "0.10"
 melior = "0.27.0"
 mlir-sys = "220.0.2"
-inkwell = { version = "0.9.0", default-features = false, features = ["llvm22-1", "target-nvptx"] }
+# no-libffi-linking: inkwell links libffi on every non-Windows target, which
+# only LLVM's interpreter uses and our LLVM is built without.
+inkwell = { version = "0.9.0", default-features = false, features = ["llvm22-1", "target-nvptx", "no-libffi-linking"] }
 llvm-sys = "221.0.1"
 
 [patch.crates-io]
