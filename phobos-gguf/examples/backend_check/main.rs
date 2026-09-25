@@ -93,7 +93,7 @@ fn main() -> Result<()> {
 
     // Tensor-core matmul rounds inputs to fp16, so error is relative to the
     // dot's RMS magnitude sqrt(K)/3 rather than to want (see
-    // phobos-bench/src/gemm.rs's verify_matmul).
+    // phobos-kbench/src/gemm.rs's verify_matmul).
     let check_tc = |name: &str, k: usize, want: &[f32], got: &[f32]| {
         let floor = (k as f32).sqrt() / 3.0;
         let error = want

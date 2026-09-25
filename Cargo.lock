@@ -1726,13 +1726,9 @@ name = "phobos-bench"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cust",
- "half",
- "melior",
  "phobos-base",
- "phobos-lang",
- "phobos-mlir",
- "rand",
+ "phobos-gguf",
+ "phobos-kernels",
 ]
 
 [[package]]
@@ -1807,6 +1803,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "phobos-kbench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cust",
+ "half",
+ "melior",
+ "phobos-base",
+ "phobos-lang",
+ "phobos-mlir",
+ "rand",
 ]
 
 [[package]]

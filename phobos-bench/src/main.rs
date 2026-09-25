@@ -1,237 +1,338 @@
-use cust::prelude::*;
-use phobos_base::phinfo;
-use rand::prelude::*;
-use std::collections::HashMap;
-use std::time::{Duration, Instant};
+// Throughput benchmark for the GGUF path, shaped like `llama-bench`:
+//
+//   cargo run --release -p phobos-bench --features cuda -- \
+//       -m MODEL.gguf -p 128,512 -n 32,128,512 -r 3
+//
+// Reports the same numbers llama-bench does, in the same units: pp<N> is
+// prompt processing (N tokens fed into a fresh state) and tg<N> is text
+// generation (N tokens produced one at a time), one row per size given.
 
-mod autotune;
-mod flash;
-mod gemm;
-mod harness;
-mod saxpy;
+use std::path::PathBuf;
+use std::time::Instant;
 
-use flash::*;
-use gemm::*;
-use saxpy::*;
-mod cublas;
-mod report;
+use anyhow::{Context, Result};
+use phobos_gguf::Decoder;
+use phobos_gguf::Gguf;
+use phobos_gguf::backend::Backend;
 
-use report::{Precision, Results};
+#[cfg(feature = "cuda")]
+use phobos_gguf::backend::device;
 
-pub(crate) const CODE_SAXPY: &str = include_str!("../../examples/saxpy_fp32.ph");
-pub(crate) const CODE_MATMUL: &str = include_str!("../../examples/gemm_fp32.ph");
-pub(crate) const CODE_MATMUL_TC: &str = include_str!("../../examples/gemm_fp16tc_fp32acc.ph");
-pub(crate) const CODE_MATMUL_FP16: &str = include_str!("../../examples/gemm_fp16.ph");
-pub(crate) const CODE_FLASH: &str = include_str!("../../examples/flash_attention_fp32.ph");
-pub(crate) const CODE_FLASH_F16: &str = include_str!("../../examples/flash_attention_fp16.ph");
+/// The runtime's prompt batch, which a depth is primed in.
+const PROMPT_BATCH: usize = 512;
 
-pub(crate) const PROBES_SHORT: u32 = 5u32;
-// Stage 2 rounds: one interleaved launch per finalist per round (see
-// autotune::Autotuner::run). More rounds tighten the min at trivial cost.
-pub(crate) const PROBES_LONG: u32 = 30u32;
+const DEFAULT_MODEL: &str = "models/Qwen3.5-0.8B-Q8_0.gguf";
 
-/// All benchmark names, for --bench and usage messages.
-pub(crate) const BENCHES: &[&str] = &[
-    "saxpy_fp32",
-    "gemm_fp32",
-    "gemm_fp16tc_fp32acc",
-    "gemm_fp16",
-    "flash_fp32",
-    "flash_fp16",
-];
-
-/// Parsed command line. bench selects a single benchmark (all of them when
-/// None); pins fixes autotune dims to skip the search (for ncu profiling).
-struct Options {
-    bench: Option<String>,
-    pins: HashMap<String, i64>,
-    /// Where to write the results CSV, if --csv was given.
-    csv: Option<std::path::PathBuf>,
-    /// Theoretical-peak overrides (TFLOP/s) for the CSV's reference columns.
-    peak_fp32: Option<f64>,
-    peak_fp16tc: Option<f64>,
-    peak_fp16tcf32acc: Option<f64>,
+struct Args {
+    model: PathBuf,
+    prompt_tokens: Vec<usize>,
+    gen_tokens: Vec<usize>,
+    /// Positions already in the context when a tg row starts, one row per
+    /// depth, as llama-bench's `-d`.
+    depths: Vec<usize>,
+    repetitions: usize,
+    warmup: bool,
+    /// A cap on a streamed model's expert cache, as `phobos-cli`'s
+    /// `--expert-cache`.
+    expert_cache_bytes: Option<u64>,
 }
 
-/// Default path used when --csv is passed without an explicit value.
-pub(crate) const DEFAULT_CSV: &str = "phobos-bench.csv";
+fn print_usage() {
+    eprintln!(
+        "\
+usage: phobos-bench [OPTIONS]
 
-impl Options {
-    fn parse(args: impl Iterator<Item = String>) -> anyhow::Result<Options> {
-        let mut bench = None;
-        let mut pins = HashMap::new();
-        let mut csv = None;
-        let mut peak_fp32 = None;
-        let mut peak_fp16tc = None;
-        let mut peak_fp16tcf32acc = None;
-        let mut args = args.peekable();
-        while let Some(arg) = args.next() {
-            match arg.as_str() {
-                "--bench" | "-bench" => {
-                    bench = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("{arg} needs a benchmark name"))?,
-                    );
-                }
-                "--autotune" | "-autotune" => {
-                    let spec = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("{arg} needs a \"NAME=VALUE ...\" spec"))?;
-                    parse_pins(&spec, &mut pins)?;
-                }
-                "--csv" | "-csv" => {
-                    // Optional value: a following token that is not another flag.
-                    let path = match args.peek() {
-                        Some(next) if !next.starts_with('-') => args.next().unwrap(),
-                        _ => DEFAULT_CSV.to_string(),
-                    };
-                    csv = Some(std::path::PathBuf::from(path));
-                }
-                "--peak-fp32" | "-peak-fp32" => {
-                    peak_fp32 = Some(parse_peak(&arg, args.next())?);
-                }
-                "--peak-fp16tc" | "-peak-fp16tc" => {
-                    peak_fp16tc = Some(parse_peak(&arg, args.next())?);
-                }
-                "--peak-fp16tcf32acc" | "-peak-fp16tcf32acc" => {
-                    peak_fp16tcf32acc = Some(parse_peak(&arg, args.next())?);
-                }
-                "--help" | "-h" => {
-                    println!(
-                        "usage: phobos-bench [--bench NAME] [--autotune \"DIM=VAL ...\"] \
-                         [--csv [PATH]] [--peak-fp32 TFLOPS] [--peak-fp16tc TFLOPS] [--peak-fp16tcf32acc TFLOPS]\n\
-                         \n  --bench NAME                run only one benchmark: {}\
-                         \n  --autotune SPEC             pin autotune dims (skips the search), e.g.\
-                         \n                              --bench gemm_fp16 --autotune \"TILE_M=256 TILE_N=128 TILE_K=16\"\
-                         \n  --csv [PATH]                write a results CSV (default {DEFAULT_CSV}) of achieved\
-                         \n                              GFLOP/s vs theoretical peak\
-                         \n  --peak-fp32         TFLOPS  override the detected fp32 CUDA-core peak\
-                         \n  --peak-fp16tc       TFLOPS  override the detected fp16 tensor-core peak\
-                         \n  --peak-fp16tcf32acc TFLOPS  override the detected fp16 tensor-core f32 acc peak",
-                        BENCHES.join(", ")
-                    );
-                    std::process::exit(0);
-                }
-                other => anyhow::bail!("unknown argument '{other}' (try --help)"),
+OPTIONS:
+  -m, --model FILE      the GGUF file to run (default: {DEFAULT_MODEL})
+  -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
+  -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
+  -d, --depth N,...     positions in the context before each tg row starts,
+                        one set of tg rows per depth (default: 0)
+  -r, --repetitions N   timed repetitions per row (default: 3)
+      --no-warmup       skip the warmup pass, which leaves each kernel's first
+                        compile inside the repetition it lands in
+      --expert-cache SIZE
+                        device memory for a streamed model's expert cache
+                        (2g, 1500m, bytes); default, what the weights leave
+  -h, --help            print this message
+
+  -p and -n take a comma-separated list, and repeat, so -p 128,512 and
+  -p 128 -p 512 both ask for the same two rows."
+    );
+}
+
+/// One size, or a comma-separated list of them. A zero drops the row, which is
+/// how a caller asks for prompt passes alone or decode steps alone.
+fn parse_sizes(value: &str) -> Result<Vec<usize>> {
+    value
+        .split(',')
+        .filter(|piece| !piece.trim().is_empty())
+        .map(|piece| {
+            piece
+                .trim()
+                .parse::<usize>()
+                .with_context(|| format!("{piece:?} is not a token count"))
+        })
+        .collect()
+}
+
+fn parse_args() -> Result<Args> {
+    let mut args = Args {
+        model: PathBuf::from(DEFAULT_MODEL),
+        prompt_tokens: Vec::new(),
+        gen_tokens: Vec::new(),
+        depths: Vec::new(),
+        repetitions: 3,
+        warmup: true,
+        expert_cache_bytes: None,
+    };
+    let mut it = std::env::args().skip(1);
+    while let Some(arg) = it.next() {
+        let mut next = |flag: &str| it.next().with_context(|| format!("{flag} needs a value"));
+        match arg.as_str() {
+            "-m" | "--model" => args.model = next("--model")?.into(),
+            "-p" | "--n-prompt" => args.prompt_tokens.extend(parse_sizes(&next("-p")?)?),
+            "-n" | "--n-gen" => args.gen_tokens.extend(parse_sizes(&next("-n")?)?),
+            "-d" | "--depth" => args.depths.extend(parse_sizes(&next("-d")?)?),
+            "-r" | "--repetitions" => args.repetitions = next("-r")?.parse().context("-r")?,
+            "--no-warmup" => args.warmup = false,
+            "--expert-cache" => {
+                args.expert_cache_bytes = Some(phobos_base::cli::parse_size(&next("--expert-cache")?)?)
             }
+            "-h" | "--help" => {
+                print_usage();
+                std::process::exit(0);
+            }
+            "-V" | "--version" => {
+                let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
+                println!("phobos-bench {} (compiler {fingerprint})", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
+            other => anyhow::bail!("unknown argument {other:?} (try --help)"),
         }
-        if let Some(b) = &bench {
-            anyhow::ensure!(
-                BENCHES.contains(&b.as_str()),
-                "unknown --bench '{b}'; available: {}",
-                BENCHES.join(", ")
+    }
+    // Only when the flag never appeared: -p 0 is a request for no prompt row,
+    // not a request for the default one.
+    if !std::env::args().any(|a| a == "-p" || a == "--n-prompt") {
+        args.prompt_tokens.push(128);
+    }
+    if !std::env::args().any(|a| a == "-n" || a == "--n-gen") {
+        args.gen_tokens.push(32);
+    }
+    if args.depths.is_empty() {
+        args.depths.push(0);
+    }
+    args.prompt_tokens.retain(|&n| n > 0);
+    args.gen_tokens.retain(|&n| n > 0);
+    Ok(args)
+}
+
+fn make_backend() -> Result<Box<dyn Backend>> {
+    #[cfg(feature = "cuda")]
+    {
+        Ok(Box::new(device::DeviceBackend::new()?))
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        Ok(Box::new(phobos_gguf::backend::HostBackend::new()))
+    }
+}
+
+fn backend_name() -> &'static str {
+    if cfg!(feature = "cuda") {
+        "Phobos GPU"
+    } else {
+        "Phobos host"
+    }
+}
+
+fn main() -> Result<()> {
+    let args = parse_args()?;
+
+    let load_start = Instant::now();
+    let gguf = Gguf::open(&args.model)?;
+    // The label llama-bench prints, read off the file since architectures
+    // differ in size and width. The quantization is whichever type carries
+    // the most elements: the norms are always f32.
+    let quantization = gguf
+        .tensors()
+        .iter()
+        .max_by_key(|t| t.numel())
+        .map_or("?", |t| t.ggml_type.name());
+    let architecture = format!(
+        "{} {:.1}B {quantization}",
+        gguf.architecture()?,
+        gguf.parameter_count() as f64 / 1e9,
+    );
+    let model = Decoder::load(&gguf)?;
+    let backend = make_backend()?;
+    if let Some(bytes) = args.expert_cache_bytes {
+        backend.limit_expert_cache(bytes as usize)?;
+    }
+    let load_millis = load_start.elapsed().as_secs_f64() * 1e3;
+
+    let vocab = model.vocab();
+    eprintln!(
+        "model {} ({architecture}, {vocab} vocab), backend {}, load {load_millis:.0} ms",
+        args.model.display(),
+        backend_name()
+    );
+
+    // llama-bench feeds pseudorandom token ids rather than real text: the cost
+    // of a position does not depend on which token sits there.
+    let longest = args
+        .prompt_tokens
+        .iter()
+        .copied()
+        .chain(args.gen_tokens.iter().map(|&n| n + args.depths.iter().max().unwrap_or(&0)))
+        .max()
+        .unwrap_or(0);
+    let tokens = synthetic_tokens(longest.max(128) + 1, vocab);
+
+    if args.warmup {
+        eprint!("warmup... ");
+        // Batch and single-step warmups both run: they hit different kernels,
+        // and a backend may compile each on first use. The batch needs at
+        // least 128 rows to reach the widest tile a batched kernel has (the
+        // quantized projection's, and past the attention matmul path's own
+        // 64-row floor). One warmup pass runs per distinct prompt size, not
+        // just the largest, since the first pass at a new shape also builds
+        // its graph.
+        let mut shapes: Vec<usize> = args.prompt_tokens.iter().map(|&n| n.max(128)).collect();
+        shapes.push(128);
+        shapes.sort_unstable();
+        shapes.dedup();
+        for batch in shapes {
+            let mut state = model.new_state();
+            model.forward(&mut state, &tokens[..tokens.len().min(batch)], backend.as_ref())?;
+            state.release(backend.as_ref());
+        }
+        let mut state = model.new_state();
+        for &token in tokens.iter().take(4) {
+            // Warms the same greedy fast path the timed tg loop takes, so its
+            // kernels compile here rather than inside a timed repetition.
+            model.forward_greedy(&mut state, &[token], backend.as_ref())?;
+        }
+        state.release(backend.as_ref());
+        eprintln!("done");
+    }
+
+    let mut rows = Vec::new();
+    for &prompt_tokens in &args.prompt_tokens {
+        let mut rates = Vec::new();
+        for rep in 0..args.repetitions {
+            let mut state = model.new_state();
+            let start = Instant::now();
+            // The whole prompt in one pass: pp's projections are real matmuls,
+            // not a matvec per position like tg's.
+            model.forward(&mut state, &tokens[..prompt_tokens], backend.as_ref())?;
+            let secs = start.elapsed().as_secs_f64();
+            state.release(backend.as_ref());
+            rates.push(prompt_tokens as f64 / secs);
+            eprintln!(
+                "  pp{prompt_tokens} rep {}/{}: {secs:.3} s",
+                rep + 1,
+                args.repetitions,
             );
         }
-        anyhow::ensure!(
-            pins.is_empty() || bench.is_some(),
-            "--autotune pins are kernel-specific; pass --bench to pick one"
-        );
-        Ok(Options {
-            bench,
-            pins,
-            csv,
-            peak_fp32,
-            peak_fp16tc,
-            peak_fp16tcf32acc,
-        })
+        rows.push((format!("pp{prompt_tokens}"), rates));
     }
-
-    /// Whether name should run under the current --bench selection.
-    fn wants(&self, name: &str) -> bool {
-        self.bench.as_deref().is_none_or(|b| b == name)
-    }
-}
-
-/// Parses a positive TFLOP/s value for a --peak-* override.
-fn parse_peak(flag: &str, value: Option<String>) -> anyhow::Result<f64> {
-    let value = value.ok_or_else(|| anyhow::anyhow!("{flag} needs a value in TFLOP/s"))?;
-    let tflops: f64 = value
-        .parse()
-        .map_err(|_| anyhow::anyhow!("{flag} value '{value}' is not a number"))?;
-    anyhow::ensure!(tflops > 0.0, "{flag} value must be positive");
-    Ok(tflops)
-}
-
-/// Parses a "TILE_M=256 TILE_N=128 ..." spec (whitespace- or comma-separated)
-/// into the pin map.
-fn parse_pins(spec: &str, pins: &mut HashMap<String, i64>) -> anyhow::Result<()> {
-    for tok in spec.split(|c: char| c.is_whitespace() || c == ',') {
-        if tok.is_empty() {
-            continue;
+    for (&depth, &gen_tokens) in args.depths.iter().flat_map(|d| args.gen_tokens.iter().map(move |n| (d, n))) {
+        let test = if depth == 0 { format!("tg{gen_tokens}") } else { format!("tg{gen_tokens} @ d{depth}") };
+        let mut rates = Vec::new();
+        for rep in 0..args.repetitions {
+            let mut state = model.new_state();
+            // Prime with the depth's positions, in the runtime's prompt
+            // batches, and one more, so the timed loop is pure decoding, the
+            // same split llama-bench uses.
+            for chunk in tokens[..depth + 1].chunks(PROMPT_BATCH) {
+                model.forward(&mut state, chunk, backend.as_ref())?;
+            }
+            let before = backend.cache_stats();
+            let start = Instant::now();
+            // The greedy fast path: a temperature-0 deployment takes this
+            // route, re-feeding a fixed token regardless of what comes back,
+            // so timing it instead of `forward` measures what actually ships.
+            for &token in tokens.iter().skip(depth + 1).take(gen_tokens) {
+                model.forward_greedy(&mut state, &[token], backend.as_ref())?;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            state.release(backend.as_ref());
+            rates.push(gen_tokens as f64 / secs);
+            // A streamed model's decode rate follows its hit rate, which the
+            // prompt a depth is primed with moves.
+            let hits = match (before, backend.cache_stats()) {
+                (Some(b), Some(a)) if a.expert_hits + a.expert_misses > b.expert_hits + b.expert_misses => {
+                    let (h, m) = (a.expert_hits - b.expert_hits, a.expert_misses - b.expert_misses);
+                    format!(", {:.1}% expert hits", 100.0 * h as f64 / (h + m) as f64)
+                }
+                _ => String::new(),
+            };
+            eprintln!("  {test} rep {}/{}: {secs:.3} s{hits}", rep + 1, args.repetitions);
         }
-        let (name, val) = tok
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("bad autotune pin '{tok}', expected NAME=VALUE"))?;
-        let val: i64 = val.parse().map_err(|_| {
-            anyhow::anyhow!("autotune pin '{name}' has a non-integer value '{val}'")
-        })?;
-        pins.insert(name.to_string(), val);
+        rows.push((test, rates));
+    }
+
+    println!("\n| model | backend | test | t/s |");
+    println!("| ----- | ------- | ---- | --- |");
+    for (test, rates) in &rows {
+        let (mean, stddev) = mean_stddev(rates);
+        println!(
+            "| {architecture} | {} | {test} | {mean:.2} +/- {stddev:.2} |",
+            backend_name()
+        );
+    }
+    // A model whose experts stream has one more number that decides its
+    // decode rate: what share of them the device cache had.
+    if let Some(stats) = backend.cache_stats()
+        && let Some(rate) = stats.expert_hit_rate()
+    {
+        println!(
+            "\nexpert cache: {:.1}% hits ({} of {}), {:.2} GB copied over the bus",
+            rate * 100.0,
+            stats.expert_hits,
+            stats.expert_hits + stats.expert_misses,
+            stats.expert_bytes as f64 / 1e9
+        );
+        if stats.expert_cpu_misses > 0 {
+            println!(
+                "host misses: {}, {:.0} us each",
+                stats.expert_cpu_misses,
+                stats.expert_cpu_nanos as f64 / 1e3 / stats.expert_cpu_misses as f64
+            );
+        }
+        if stats.expert_prefetches > 0 {
+            println!(
+                "lookahead: {} prefetched, {} of them wanted ({:.1}%)",
+                stats.expert_prefetches,
+                stats.expert_prefetch_hits,
+                stats.expert_prefetch_hits as f64 / stats.expert_prefetches as f64 * 100.0
+            );
+        }
     }
     Ok(())
 }
 
-fn main() -> anyhow::Result<()> {
-    let opts = Options::parse(std::env::args().skip(1))?;
-    let pins = &opts.pins;
+/// A deterministic spread of valid token ids (xorshift64*, same generator the
+/// other checks use).
+fn synthetic_tokens(count: usize, vocab: usize) -> Vec<u32> {
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    (0..count)
+        .map(|_| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % vocab as u64) as u32
+        })
+        .collect()
+}
 
-    let _ctx = cust::quick_init()?;
-    let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
-
-    let mut results = Results::default();
-
-    if opts.wants("saxpy_fp32") {
-        bench_saxpy(&stream, pins, &mut results)?;
+fn mean_stddev(values: &[f64]) -> (f64, f64) {
+    let mean = values.iter().sum::<f64>() / values.len() as f64;
+    if values.len() < 2 {
+        return (mean, 0.0);
     }
-    if opts.wants("gemm_fp32") {
-        bench_gemm_fp32(
-            &stream,
-            CODE_MATMUL,
-            "gemm_fp32",
-            "phobos gemm_fp32",
-            false,
-            1.5f32,
-            2.5f32,
-            pins,
-            &mut results,
-        )?;
-    }
-    if opts.wants("gemm_fp16tc_fp32acc") {
-        bench_gemm_fp32(
-            &stream,
-            CODE_MATMUL_TC,
-            "gemm_fp16tc_fp32acc",
-            "phobos gemm_fp16tc_fp32acc",
-            true,
-            1.0f32,
-            1.0f32,
-            pins,
-            &mut results,
-        )?;
-    }
-    if opts.wants("gemm_fp16") {
-        bench_gemm_fp16(
-            &stream,
-            CODE_MATMUL_FP16,
-            "gemm_fp16",
-            "phobos gemm_fp16",
-            1.0f32,
-            1.0f32,
-            pins,
-            &mut results,
-        )?;
-    }
-    if opts.wants("flash_fp32") {
-        bench_flash_attention_fp32(&stream, pins, &mut results)?;
-    }
-    if opts.wants("flash_fp16") {
-        bench_flash_attention_fp16(&stream, pins, &mut results)?;
-    }
-
-    if let Some(path) = &opts.csv {
-        let peaks =
-            report::Peaks::detect(opts.peak_fp32, opts.peak_fp16tc, opts.peak_fp16tcf32acc)?;
-        results.write_csv(path, &peaks)?;
-    }
-
-    Ok(())
+    let variance =
+        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+    (mean, variance.sqrt())
 }

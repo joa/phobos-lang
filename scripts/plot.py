@@ -117,7 +117,7 @@ def load(path):
     if not rows:
         sys.exit(f"no samples in {path}")
 
-    # phobos-bench writes a CSV too, of GFLOP/s against a theoretical peak,
+    # phobos-kbench writes a CSV too, of GFLOP/s against a theoretical peak,
     # which is a different measurement and not what this draws.
     wanted = {"round", "engine", "backend", "model", "test", "rate"}
     missing = wanted - set(rows[0])

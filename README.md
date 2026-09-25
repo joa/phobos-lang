@@ -236,11 +236,11 @@ python scripts/plot.py results/bench.json results/bench-qwen38.json \
 
 # either engine on its own, which measures one column and not a comparison
 llama-bench -p 512 -n 128 -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -r 10
-cargo run --features cuda --release -p phobos-gguf --example bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
+cargo run --features cuda --release -p phobos-bench -- -m ${models}/Qwen3.5-0.8B-Q8_0.gguf -p 512 -n 128 -r 10
 
 # the cuBLAS/gemm chart at the top of this file, a separate measurement:
-# phobos-bench autotunes and times its own kernels once each, no interleaving.
-cargo run -r -p phobos-bench -- --csv results/results.csv
+# phobos-kbench autotunes and times its own kernels once each, no interleaving.
+cargo run -r -p phobos-kbench -- --csv results/results.csv
 python scripts/plot_bench.py results/results.csv -o results/bench.svg
 ```
 </details>
@@ -373,7 +373,16 @@ Compiles a kernel source to PTX, for `sm_75` by default. `PHOBOS_PRINT_PHASES=1`
 ### `phobos-bench` (needs a GPU)
 
 ```plain
-cargo run -r -p phobos-bench
+cargo run --features cuda -r -p phobos-bench -- [-m <file.gguf>] [-p <N,...>] [-n <N,...>] [-d <N,...>] [-r <reps>]
+```
+
+The two numbers `llama-bench` reports for a GGUF model, in the same units: `pp<N>` is prompt processing, `tg<N>` text
+generation, one row per size given. `-d` starts the generation rows at a context depth. `--help` lists the rest.
+
+### `phobos-kbench` (needs a GPU)
+
+```plain
+cargo run -r -p phobos-kbench
 ```
 
 Compiles and autotunes the bundled kernels at 4096^3 and prints throughput (against cuBLAS where a shim exists). Covers `saxpy_fp32`, `gemm_fp32`, `gemm_fp16tc_fp32acc` (tensor-core, f16 inputs with f32 accumulation), `gemm_fp16` (f16 inputs, output, and accumulation), `flash_fp32`, and `flash_fp16` (f16 Q/K/V/O with an f32 online-softmax state). Runs all of them by default; pass `--bench NAME` to run a single one, or `--help` for the full flag list. `--autotune "DIM=VAL ..."` pins the autotune dims (skipping the search) for the selected `--bench`; `--csv [PATH]` writes achieved throughput; `--peak-fp32`/`--peak-fp16tc`/`--peak-fp16tcf32acc TFLOPS` override the detected roofline peaks.
@@ -436,7 +445,6 @@ The model path has its own set. Build these `--release`, and the ones needing a 
 | `run_gpt2` | `phobos-onnx` | `run_gpt2` | A real exported GPT-2 through load, fold and the host interpreter, against its bundled reference. No GPU. |
 | `run_gpt2_gpu` | `phobos-onnx` | `run_gpt2_gpu` | The same model with the Gemm projections and all 25 LayerNorms on Phobos kernels. Needs a GPU. |
 | `kv_check` | `phobos-onnx` | `kv_check` | A single with-past step against the last row of a full recompute. No GPU. |
-| `bench` | `phobos-gguf` | `bench -- -m MODEL.gguf -p 512 -n 128 -r 5` | The two numbers `llama-bench` reports, in the same units. Needs a GPU. |
 | `backend_check` | `phobos-gguf` | `backend_check` | Every device op against the host reference. Needs a GPU. |
 | `batch_check` | `phobos-gguf` | `batch_check -- MODEL.gguf` | A batched pass against the same tokens one at a time, and a split prompt against a whole one. Needs a GPU. |
 | `model_check` | `phobos-gguf` | `model_check -- MODEL.gguf [-p PROMPT]` | Whole-model logits, device against host. Needs a GPU. |

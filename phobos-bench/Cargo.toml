@@ -2,19 +2,22 @@
 name = "phobos-bench"
 version = "0.1.0"
 edition.workspace = true
-description = "Phobos kernel language stand-alone compiler and benchmark"
+description = "Prompt and generation throughput of a GGUF model, as llama-bench reports it"
 readme.workspace = true
 repository.workspace = true
 license.workspace = true
 keywords.workspace = true
-categories = ["compilers", "development-tools"]
+categories = ["development-tools"]
+
+[[bin]]
+name = "phobos-bench"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
-cust = "0.3.2"
-half = "2"
-rand = { version = "0.8", features = ["small_rng"] }
 phobos-base = { path = "../phobos-base" }
-phobos-lang = { path = "../phobos-lang" }
-phobos-mlir = { path = "../phobos-mlir" }
-melior.workspace = true
+phobos-gguf = { path = "../phobos-gguf" }
+phobos-kernels = { path = "../phobos-kernels" }
+
+[features]
+cuda = ["phobos-gguf/cuda"]

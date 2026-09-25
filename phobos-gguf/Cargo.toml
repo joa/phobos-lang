@@ -49,10 +49,6 @@ name = "batch_check"
 required-features = ["cuda"]
 
 [[example]]
-name = "bench"
-required-features = ["cuda"]
-
-[[example]]
 name = "deltasweep"
 required-features = ["cuda"]
 

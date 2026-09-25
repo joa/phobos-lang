@@ -2,7 +2,7 @@ use cust::prelude::*;
 use phobos_base::phinfo;
 
 // Masking only turns on for compile-time-constant extents that an aligned tile
-// cannot tile evenly. The phobos-bench kernels pass their shapes as runtime
+// cannot tile evenly. The phobos-kbench kernels pass their shapes as runtime
 // extents, which the row-pitch ABI assumes aligned, so none of them reach it.
 const CODE_COPY: &str = "kernel copy(A: tensor<f32>[100], B: tensor<f32>[100]) {
     let p = program_id(0)

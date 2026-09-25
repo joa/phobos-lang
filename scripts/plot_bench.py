@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
-"""Plot what phobos-bench measured: GFLOP/s against the card's roofline peak.
+"""Plot what phobos-kbench measured: GFLOP/s against the card's roofline peak.
 
-Reads the CSV that `cargo run -r -p phobos-bench -- --csv PATH` writes
+Reads the CSV that `cargo run -r -p phobos-kbench -- --csv PATH` writes
 (columns: benchmark, impl, precision, gflops, peak_gflops, pct_of_peak) and
 draws one horizontal bar per (benchmark, impl), grouped by benchmark, labelled
 with achieved GFLOP/s and percent of peak. Kernels only phobos has a shim for
 (no cuBLAS entry, e.g. flash attention) draw a single bar rather than a pair.
 
-Unlike scripts/plot.py this has nothing to average: phobos-bench times its own
+Unlike scripts/plot.py this has nothing to average: phobos-kbench times its own
 best autotuned configuration once per kernel, not several interleaved rounds,
 so there is no round, no repetition and no error bar here.
 
 Usage:
-    cargo run -r -p phobos-bench -- --csv results/results.csv
+    cargo run -r -p phobos-kbench -- --csv results/results.csv
     python scripts/plot_bench.py results/results.csv -o results/bench.svg
     python scripts/plot_bench.py results/results.csv --dark -o results/bench-dark.svg
 
@@ -69,7 +69,7 @@ def load(path):
     missing = wanted - set(rows[0])
     if missing:
         sys.exit(
-            f"{path} is not what phobos-bench --csv writes:"
+            f"{path} is not what phobos-kbench --csv writes:"
             f" missing {', '.join(sorted(missing))}"
         )
     out = []
@@ -97,7 +97,7 @@ def main():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    ap.add_argument("results", help="the CSV phobos-bench --csv wrote")
+    ap.add_argument("results", help="the CSV phobos-kbench --csv wrote")
     ap.add_argument(
         "-o",
         "--out",

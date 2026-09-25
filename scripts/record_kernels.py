@@ -2,12 +2,11 @@
 
     python scripts/record_kernels.py [--manifest DIR] [--epoch FINGERPRINT] [NAME...]
 
-Runs each GGUF file through the bench example with PHOBOS_KERNEL_MANIFEST set,
+Runs each GGUF file through phobos-bench with PHOBOS_KERNEL_MANIFEST set,
 so the manifest holds every compile request a run makes. A kernel's source
 depends on the model's shapes and, for some, on the prompt's row count and the
-cache depth, so the bench shape covers
-a short prompt, a full 512-row batch, a ragged remainder past it, and decode
-both fresh and at depth. A request is recorded on a cache hit too: pass the
+cache depth, so the bench shape covers a short prompt, a full 512-row batch,
+a ragged remainder past it, and decode both fresh and at depth. A request is recorded on a cache hit too: pass the
 fingerprint a warm cache was built under as --epoch and the runs only load.
 
 NAME filters the models by substring. The manifest is chip-independent;
@@ -23,7 +22,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MODELS = ROOT / "models"
 EXE = ".exe" if os.name == "nt" else ""
-BENCH = ROOT / "target" / "release" / "examples" / f"bench{EXE}"
+BENCH = ROOT / "target" / "release" / f"phobos-bench{EXE}"
 
 BENCH_SHAPE = ["-p", "7,100,512,600", "-n", "16", "-d", "0,2048", "-r", "1", "--no-warmup"]
 
@@ -47,7 +46,7 @@ def main():
             print(f"{name}: {' '.join(cmd)}")
         return 0
 
-    build = ["cargo", "build", "--release", "--features", "cuda", "-p", "phobos-gguf", "--example", "bench"]
+    build = ["cargo", "build", "--release", "--features", "cuda", "-p", "phobos-bench"]
     subprocess.run(build, cwd=ROOT, check=True)
 
     env = dict(os.environ, PHOBOS_KERNEL_MANIFEST=str(args.manifest.resolve()))

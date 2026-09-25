@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Phobos against llama.cpp, on the same models, in one session, on a warm card.
 
-Runs the GGUF path's `bench` example and `llama-bench` over the same models with
+Runs `phobos-bench` and `llama-bench` over the same models with
 the same pp/tg sizes and reports one table, plus the phobos-to-llama.cpp ratio
 per row.
 
@@ -326,10 +326,10 @@ def best_backend(engine, model, libs):
 
 
 def build_phobos(args):
-    """Compile the bench example before anything is timed, so no repetition
+    """Compile phobos-bench before anything is timed, so no repetition
     pays for a cargo build or a first-use kernel compile."""
-    exe = ROOT / "target" / "release" / "examples" / (
-        "bench.exe" if os.name == "nt" else "bench"
+    exe = ROOT / "target" / "release" / (
+        "phobos-bench.exe" if os.name == "nt" else "phobos-bench"
     )
     if args.no_build:
         if not exe.is_file():
@@ -340,11 +340,9 @@ def build_phobos(args):
         "build",
         "--release",
         "-p",
-        "phobos-gguf",
+        "phobos-bench",
         "--features",
         "cuda",
-        "--example",
-        "bench",
     ]
     print("building phobos bench...", flush=True)
     done = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True)
