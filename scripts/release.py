@@ -1,7 +1,7 @@
 """Builds a Phobos release for a tag, x64, Windows and Linux.
 
     python scripts/release.py TAG [--models DIR] [--skip NAME]... [--jobs N] [--seed-manifest DIR] [--local] [--publish]
-    python scripts/release.py toolchain [--llvm DIR] [--llvm-version V] [--ref BRANCH] [--pack-only]
+    python scripts/release.py toolchain [--llvm DIR] [--llvm-version V] [--linux ARCHIVE] [--ref BRANCH] [--pack-only]
 
 For TAG, in order:
 
@@ -26,8 +26,9 @@ For TAG, in order:
 worktree and packages them, which exercises everything but the other OS.
 
 `toolchain` packs a local Windows LLVM/MLIR install into the
-toolchain-llvm-VERSION release, creating it, and dispatches the workflow that
-builds the Linux one. Needs gh, logged in, and the MLIR toolchain the rest of
+toolchain-llvm-VERSION release, creating it. The Linux one is --linux, an
+archive scripts/ci/build_llvm.sh wrote, or else the toolchain workflow is
+dispatched to build it. Needs gh, logged in, and the MLIR toolchain the rest of
 the tree builds with.
 """
 
@@ -319,7 +320,10 @@ def toolchain(args):
         notes = f"LLVM and MLIR {version}, static, for the release workflow to link against. Not a Phobos release."
         run(["gh", "release", "create", tag, "--prerelease", "--title", tag, "--notes", notes])
     run(["gh", "release", "upload", tag, archive, "--clobber"])
-    run(["gh", "workflow", "run", "toolchain.yml", "--ref", args.ref, "-f", f"llvm_version={version}"])
+    if args.linux:
+        run(["gh", "release", "upload", tag, args.linux, "--clobber"])
+    else:
+        run(["gh", "workflow", "run", "toolchain.yml", "--ref", args.ref, "-f", f"llvm_version={version}"])
 
 
 def main():
@@ -329,6 +333,7 @@ def main():
         ap.add_argument("--llvm-version", default=LLVM_VERSION)
         ap.add_argument("--ref", default="main", help="the branch holding toolchain.yml")
         ap.add_argument("--pack-only", action="store_true", help="pack the archive, upload nothing")
+        ap.add_argument("--linux", type=Path, help="a Linux toolchain archive to upload instead of building one in CI")
         toolchain(ap.parse_args(sys.argv[2:]))
         return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
