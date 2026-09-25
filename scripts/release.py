@@ -5,9 +5,10 @@
 
 For TAG, in order:
 
- 1. Checks the tag out into a clean worktree under target/dist/TAG/src, since
-    the compiler fingerprint hashes the files on disk and one uncommitted edit
-    would key the cache to a build nobody ships. Pushes the tag if origin
+ 1. Checks the tag out into a clean worktree under target/dist/TAG/src, built
+    into target/dist/TAG/target, since the compiler fingerprint hashes the
+    files on disk and one uncommitted edit would key the cache to a build
+    nobody ships. Pushes the tag if origin
     lacks it, which starts .github/workflows/release.yml.
  2. Builds phobos-cache and phobos-bench there and reads their fingerprint.
  3. Warms the previous release's kernel manifest under that fingerprint, so
@@ -79,7 +80,7 @@ Compiler fingerprint {fingerprint}.
 # The shell's PHOBOS_* never reach a step: a leftover cache epoch would key
 # the shipped cache and every fingerprint.txt alike, pass the check, and miss
 # on every user's machine.
-BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("PHOBOS_")} | {"CARGO_TARGET_DIR": str(TARGET)}
+BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("PHOBOS_")}
 
 
 def run(cmd, cwd=ROOT, env=BASE_ENV, check=True, capture=False):
@@ -120,6 +121,19 @@ def worktree(tag, dist):
     return src, commit
 
 
+def build_dir(src):
+    """The worktree's own target directory. Never the checkout's: the worktree
+    sits under it, so cargo records the worktree's sources relative to the
+    same root and each build takes the other's artifacts for its own, which
+    ships a working tree's edits in a release and a release's code in a
+    working tree's next build."""
+    return src.parent / "target"
+
+
+def cargo_env(src):
+    return BASE_ENV | {"CARGO_TARGET_DIR": str(build_dir(src))}
+
+
 def build(src, binaries):
     cmd = ["cargo", "build", "--release", "--locked"]
     for bin in binaries:
@@ -127,11 +141,11 @@ def build(src, binaries):
     features = [f"{b}/cuda" for b in binaries if b in ("phobos-cli", "phobos-bench")]
     if features:
         cmd += ["--features", ",".join(features)]
-    run(cmd, cwd=src)
+    run(cmd, cwd=src, env=cargo_env(src))
 
 
-def exe(name):
-    return TARGET / "release" / f"{name}{EXE}"
+def exe(src, name):
+    return build_dir(src) / "release" / f"{name}{EXE}"
 
 
 def seed_manifest(tag, dist, explicit, online):
@@ -158,11 +172,11 @@ def seed_manifest(tag, dist, explicit, online):
 
 def warm_cache(src, dist, models, skip, jobs, seed):
     cache, manifest = dist / "kernel-cache", dist / "kernel-manifest"
-    cache_tool = exe("phobos-cache")
+    cache_tool = exe(src, "phobos-cache")
     if seed:
         run([cache_tool, "warm", "--manifest", seed, "--dir", cache, "--jobs", jobs])
     shutil.rmtree(manifest, ignore_errors=True)
-    env = BASE_ENV | {"PHOBOS_KERNEL_CACHE_DIR": str(cache)}
+    env = cargo_env(src) | {"PHOBOS_KERNEL_CACHE_DIR": str(cache)}
     recorded = run(
         [sys.executable, src / "scripts" / "record_kernels.py", "--manifest", manifest, "--models", models,
          *[arg for name in skip for arg in ("--skip", name)]],
@@ -209,7 +223,7 @@ def local_build(src, dist):
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
     for bin in BINARIES:
-        shutil.copy2(exe(bin), out)
+        shutil.copy2(exe(src, bin), out)
     vswhere = Path(os.environ["ProgramFiles(x86)"]) / "Microsoft Visual Studio" / "Installer" / "vswhere.exe"
     vs = Path(output([vswhere, "-latest", "-property", "installationPath"]))
     crt = sorted((vs / "VC" / "Redist" / "MSVC").glob("*/x64/Microsoft.VC14*.CRT"))[-1]
@@ -266,7 +280,7 @@ def release(args):
         ensure_pushed(tag)
 
     build(src, ["phobos-cache", "phobos-bench"])
-    fingerprint = fingerprint_of(output([exe("phobos-cache"), "--version"]))
+    fingerprint = fingerprint_of(output([exe(src, "phobos-cache"), "--version"]))
     print(f"{tag} at {commit[:12]}, compiler {fingerprint}")
 
     seed = seed_manifest(tag, dist, args.seed_manifest, online=not args.local)
