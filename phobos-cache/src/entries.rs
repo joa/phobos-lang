@@ -1,7 +1,10 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
+use phobos_base::context::SUPPORTED_CHIPS;
+use phobos_kernels::manifest;
 
 use crate::Args;
 
@@ -94,6 +97,29 @@ pub fn clear(args: &Args) -> Result<()> {
     if failed > 0 {
         bail!("{failed} entries could not be removed");
     }
+    Ok(())
+}
+
+/// Removes every entry the manifests do not ask for, for any supported chip,
+/// so a cache warmed on top of an older one ships only what this build runs.
+/// Entries of an unsupported chip and the unsplit ones go too.
+pub fn prune(args: &Args) -> Result<()> {
+    if args.manifests.is_empty() {
+        bail!("prune needs at least one --manifest DIR");
+    }
+    let root = args.root()?;
+    let mut keep = HashSet::new();
+    for dir in &args.manifests {
+        for (_, request) in manifest::read(dir)? {
+            keep.extend(SUPPORTED_CHIPS.iter().map(|chip| request.entry(&root, chip)));
+        }
+    }
+    let found = walk(&root, &[]);
+    let stale: Vec<_> = found.iter().filter(|e| !keep.contains(&e.path)).collect();
+    for entry in &stale {
+        fs::remove_file(&entry.path)?;
+    }
+    println!("{} of {} entries pruned from {}", stale.len(), found.len(), root.display());
     Ok(())
 }
 

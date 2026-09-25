@@ -86,7 +86,7 @@ remembered figure and has to be labelled as such.
 - **phobos-kbench**: stand-alone kernel benchmark against cuBLAS: builds a kernel, compiles to PTX, launches it with `cust` (CUDA). Requires an NVIDIA GPU + CUDA toolkit at runtime
 - **phobos-compile**: a kernel source to PTX for one chip, the compiler a release ships
 - **phobos-bench**: a GGUF model's `pp<N>` and `tg<N>`, as `llama-bench` reports them
-- **phobos-cache**: the compiled-kernel cache's tool, split one directory per chip. `warm` replays a manifest recorded with `PHOBOS_KERNEL_MANIFEST` (`scripts/record_kernels.py` records every GGUF model) for every supported chip with no GPU, one child process per job; `list` and `clear` manage it
+- **phobos-cache**: the compiled-kernel cache's tool, split one directory per chip. `warm` replays a manifest recorded with `PHOBOS_KERNEL_MANIFEST` (`scripts/record_kernels.py` records every GGUF model) for every supported chip with no GPU, one child process per job; `list`, `clear` and `prune` manage it. `scripts/release.py TAG` records, warms and packages a release around the binaries `.github/workflows/release.yml` builds
 - **phobos-base**: shared config & logger (`Context`, GPU target config), `progress` and `log`, each a sink a front end installs so a library can report without knowing what draws it, the
   `Backend` trait that owns a target's lowering pipeline and its post-processing
   of the generated text, plus utilities used across the crates

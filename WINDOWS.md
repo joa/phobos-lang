@@ -29,8 +29,12 @@ cmake --build build --config Release --target install
 Set the following environment variables
 
 ```powershell
+$env:LLVM_SYS_221_PREFIX="C:\llvm-install"
 $env:MLIR_SYS_220_PREFIX="C:\llvm-install"
-$env:TABLEGEN_220_PREFIX= "C:\llvm-install"
-$env:LIBCLANG_PATH="C:\llvm-install\bin"
-$env:PATH = $env:PATH + ";C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.3\nvvm\bin\x64"
+$env:MLIR_SYS_221_PREFIX="C:\llvm-install"
+$env:TABLEGEN_220_PREFIX="C:\llvm-install"
+$env:PATH = "C:\llvm-install\bin;" + $env:PATH
 ```
+
+`libclang.dll` is found through `llvm-config` on the path, so `LIBCLANG_PATH` is only
+needed to point bindgen at a different one.

@@ -4,6 +4,7 @@
 //                       [--force] [--ptxas PATH | --no-ptxas]
 //     phobos-cache list [--chip sm_86]... [--dir CACHE]
 //     phobos-cache clear [--chip sm_86]... [--dir CACHE] [KERNEL...]
+//     phobos-cache prune --manifest DIR... [--dir CACHE]
 //
 // `warm` compiles every request a manifest holds (see `PHOBOS_KERNEL_MANIFEST`)
 // for each chip, with no GPU; a run on a card of that chip then starts warm.
@@ -14,7 +15,7 @@
 //
 // `clear` takes kernel names with `*` as the only wildcard, and clears
 // everything, including entries from before the cache was split by chip, when
-// given none.
+// given none. `prune` keeps only the entries the manifests ask for.
 
 mod entries;
 mod warm;
@@ -25,7 +26,7 @@ use anyhow::{Context as _, Result, bail};
 use phobos_base::context::SUPPORTED_CHIPS;
 use phobos_kernels::util::kernel_cache_dir;
 
-const USAGE: &str = "usage: phobos-cache <warm|list|clear> [--chip CHIP]... [--dir CACHE] \
+const USAGE: &str = "usage: phobos-cache <warm|list|clear|prune> [--chip CHIP]... [--dir CACHE] \
                      [--manifest DIR]... [--jobs N] [--force] [--ptxas PATH | --no-ptxas] [KERNEL...]";
 
 /// The command line after the subcommand: repeatable `--flag value` pairs,
@@ -103,6 +104,7 @@ fn main() -> Result<()> {
         "warm-one" => warm::one(&args),
         "list" => entries::list(&args),
         "clear" => entries::clear(&args),
+        "prune" => entries::prune(&args),
         _ => bail!("{USAGE}"),
     }
 }

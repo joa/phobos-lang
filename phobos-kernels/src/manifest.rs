@@ -124,9 +124,14 @@ impl Request {
         self.texts.iter().map(String::as_str).collect()
     }
 
+    /// Where this request's entry for `chip` lives under `root`.
+    pub fn entry(&self, root: &Path, chip: &str) -> PathBuf {
+        cache::entry(root, &self.context(chip), &self.texts())
+    }
+
     /// Whether `root` already holds this request's entry for `chip`.
     pub fn is_cached(&self, root: &Path, chip: &str) -> bool {
-        cache::entry(root, &self.context(chip), &self.texts()).is_file()
+        self.entry(root, chip).is_file()
     }
 
     /// Lowers the request for `chip`, without storing it.
