@@ -1,0 +1,111 @@
+# Builds the release binaries for a tag on Windows and Linux, x64, and
+# uploads each set with the compiler fingerprint it carries. No GPU, no
+# kernel cache: `python scripts/release.py TAG` warms that on a machine with
+# the cores for it, checks every fingerprint agrees, and packages the lot.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Tag or commit to build
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  LLVM_VERSION: "22.1.7"
+  RUST_VERSION: "1.96.0"
+  CARGO_TERM_COLOR: never
+
+jobs:
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Toolchain
+        shell: pwsh
+        run: |
+          gh release download "toolchain-llvm-$env:LLVM_VERSION" -p "llvm-$env:LLVM_VERSION-windows-x64.zip" -D $env:RUNNER_TEMP
+          7z x -y "-o$env:RUNNER_TEMP" "$env:RUNNER_TEMP\llvm-$env:LLVM_VERSION-windows-x64.zip" | Out-Null
+          $llvm = "$env:RUNNER_TEMP\llvm-install"
+          foreach ($v in "LLVM_SYS_221_PREFIX", "MLIR_SYS_220_PREFIX", "MLIR_SYS_221_PREFIX", "TABLEGEN_220_PREFIX") {
+            "$v=$llvm" >> $env:GITHUB_ENV
+          }
+          "$llvm\bin" >> $env:GITHUB_PATH
+          rustup toolchain install $env:RUST_VERSION --profile minimal
+          rustup default $env:RUST_VERSION
+
+      # cust links the driver API's import library; the driver itself is the
+      # user's.
+      - uses: Jimver/cuda-toolkit@v0.2.36
+        with:
+          cuda: "13.3.1"
+          method: network
+          sub-packages: '["cudart"]'
+
+      - name: Build
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "$env:CUDA_PATH\lib\x64\cuda.lib")) { throw "no cuda.lib under $env:CUDA_PATH" }
+          cargo build --release --locked -p phobos-cli -p phobos-bench -p phobos-cache -p phobos-compile --features phobos-cli/cuda,phobos-bench/cuda
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Stage
+        shell: pwsh
+        run: |
+          $out = New-Item -ItemType Directory -Force dist
+          foreach ($bin in "phobos-cli", "phobos-bench", "phobos-cache", "phobos-compile") {
+            Copy-Item "target\release\$bin.exe" $out
+          }
+          # The C++ runtime LLVM was built against, shipped beside the
+          # binaries so a machine without the redistributable runs them.
+          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT" | Sort-Object FullName | Select-Object -Last 1
+          foreach ($dll in "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll") {
+            Copy-Item (Join-Path $crt.FullName $dll) $out
+          }
+          & "$out\phobos-cache.exe" --version | Out-File -Encoding ascii "$out\fingerprint.txt"
+          Get-Content "$out\fingerprint.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phobos-windows-x64
+          path: dist/
+          if-no-files-found: error
+
+  linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+
+      - name: Toolchain
+        run: |
+          gh release download "toolchain-llvm-$LLVM_VERSION" -p "llvm-$LLVM_VERSION-linux-x64.tar.gz" -D "$RUNNER_TEMP"
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/llvm-$LLVM_VERSION-linux-x64.tar.gz"
+
+      - name: Build on glibc 2.28
+        run: |
+          docker run --rm -e RUST_VERSION -v "$PWD:/src" -v "$RUNNER_TEMP/llvm-install:/llvm" -w /src \
+            quay.io/pypa/manylinux_2_28_x86_64 bash scripts/ci/build_linux.sh /llvm /src/dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: phobos-linux-x64
+          path: dist/
+          if-no-files-found: error
