@@ -1,8 +1,22 @@
 ![Inference using phobos-cli](results/phobos-cli.gif)
 
-# phobos
+# Phobos
 
-**EXPERIMENTAL** Tile-based kernel language for distributed tensor algebra. Inspired by [Triton](https://triton-lang.org).
+Phobos is a tile-based GPU kernel language and an LLM inference engine built on it. I wrote it to learn the stack on an RTX 2080 SUPER (8 GB), so it targets low-VRAM machines.
+
+For mixture-of-experts models that don't fit in VRAM, Phobos needs no manual CPU/GPU split. It keeps an expert cache on the card and computes misses on the CPU in parallel. On Qwen3.6-35B-A3B it replays a recorded coding-agent session 1.6x faster than llama.cpp at its best swept configuration. Decode matches or beats llama.cpp on every model tested. Prompt processing on small dense models is 60–80% of llama.cpp.
+
+I come from compilers and virtual machines, not AI, which shaped several design choices. Phobos will understand your architecture as it performs inference and chooses the best runtime configuration.
+
+Phobos is **very** fast for highly quantized models such as Ternary-Bonsai-2-27B-PTQ1_0.
+
+## Components
+
+- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 76% SGEMM cuBLAS throughput.
+- **[Inference](#inference)**: OpenAI compatible server for GGUF models. Kernel fusion, memory management; decodes at or above llama.cpp's rate. 
+- **[Clustering](#clustering)**: Distributed tensor algebra.
+
+## Compiler
 
 ```plain
 @cluster(TILE_M in [16384, 65536], TILE_N in [16384, 65536], TILE_K in [16384, 65536])
@@ -28,16 +42,13 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
-The same language runs LLM inference end to end: a quantized GGUF model running on phobos kernels generates at or above llama.cpp's rate on that card, from a 0.8B Q8_0 to two 27Bs, IQ1_M and ternary PTQ1_0, that only just fit in its VRAM, and a 35B mixture of experts whose experts do not fit at all and stream from host memory. The prompt pass trails on the small models and leads on both 27Bs and the 35B; [Inference](#inference) gives both.
-
-![Phobos benchmark results](results/bench.svg)
-
-## Language
+LLVM/MLIR based compiler. SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
 
 See [SPEC](./SPEC.md) for details or check out the [`examples/`](./examples).
 
-## Autotuning
+![Phobos benchmark results](results/bench.svg)
+
+### Autotuning
 
 Phobos supports autotuning for finding the optimal configuration. 
 
@@ -45,7 +56,9 @@ Phobos supports autotuning for finding the optimal configuration.
 
 ## Inference
 
-Frontends for ONNX and GGUF sit atop the language and `phobos-cli` executes them.
+The same language runs LLM inference end to end: a quantized GGUF model running on Phobos kernels generates at or above llama.cpp's rate on the RTX 2080 SUPER, from a 0.8B Q8_0 to two 27Bs, IQ1_M and ternary PTQ1_0, that only just fit in its VRAM, and a 35B mixture of experts whose experts do not fit at all and stream from host memory. 
+
+Frontends for GGUF and ONNX sit atop the language and `phobos-cli` executes them. `--listen ADDR` serves an OpenAI-compatible API and puts a dashboard on the terminal.
 
 Inference has been tested with:
 
@@ -54,42 +67,21 @@ Inference has been tested with:
 - Qwen3.5-4B-Q4_K_M
 - Qwen3.8-27B-UD-IQ1_M
 - Ternary-Bonsai-2-27B-PTQ1_0
+- Qwen3.6-35B-A3B-UD-Q4_K_M
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
-
-`--listen ADDR` serves an OpenAI-compatible API and puts a dashboard on the terminal: the card and
-its driver, the weight footprint, VRAM as one stacked bar of weights, key/value cache and everything
-else on the card, the context in use against the limit and what the rest of it would cost, the block
-layout with its attention and recurrent share, the cache hit rates, and the prompt and decode rates
-as they are measured.
-
-A cold start compiles every kernel from source, which takes minutes; a warm one reads them back from
-`~/.phobos/kernel-cache` in seconds. Either way it reports what it is doing: a line per kernel with
-`--no-tui`, and on the dashboard a progress bar beside the kernel itself, its own text going in one
-side and the PTX it became coming out the other, with a histogram of how long each one took and how
-much PTX a character of kernel text turns into. The cache is keyed on a fingerprint of every `.rs` under
-the crates that lower a kernel, so editing `phobos-base`, `phobos-kernels`, `phobos-lang` or
-`phobos-mlir` costs one cold start even when the generated PTX could not have changed.
-
-The server keeps a finished request's session and reuses as much of it as the next request's prompt
-agrees with, so a chat re-sending its whole transcript only runs the new turn. How far it can reuse
-depends on the architecture: plain attention rewinds to any shared position, while a model with
-recurrent blocks, such as a Qwen3.5, carries state that summarises every token it has seen and can
-only be continued, never rewound. `--no-prefix-cache` turns it off and hands the cache's buffers
-back for a pass to use as scratch, which is the difference on a card that only just fits. `--no-tui` turns it off, as does output that
-is not a terminal or a `PHOBOS_VRAM`/`PHOBOS_PASS_REPORT` left set in the environment, since those
-write to stderr from inside a pass and would land on top of it. Whenever the dashboard is skipped
-the reason is printed; `--tui` draws one regardless.
 
 **Note:**
 * The host backend is used for verification and *very* slow. Always build with `--features=cuda` unless you need to verify against the host oracle. Always build with `--release` if the host backend is used.
 * ONNX has not seen a lot of love (as in: it runs the OG GPT-2, but it's slow).
 
-Two model front ends, each with a host backend and a GPU one:
-
 - **`phobos-gguf`**: This has been verified against llama.cpp (token for token where greedy decoding is stable, 
   and by next-token logit gaps where it is not).
 - **`phobos-onnx`**: ONNX protobuf to a graph IR, then shape inference, constant folding, LayerNorm
   and epilogue fusion. GPT-2 runs end to end and has been verified against its bundled reference, with a KV-cache path.
+
+### Benchmarks
+
+![phobos vs llama.cpp, tokens per second](results/inference.svg)
 
 Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
 
@@ -177,10 +169,10 @@ task, 8 requests, three rounds each:
 | llama.cpp CUDA   | 71.9 s | 132 t/s   | 29.9 t/s   |
 | Phobos GPU       | 44.0 s | 237 t/s   | 42.3 t/s   |
 
-| thinking         | wall    | prompt    | decode     | generated a round |
-| ---------------- | ------: | --------: | ---------: | ----------------: |
-| llama.cpp CUDA   | 149.1 s | 105 t/s   | 30.1 t/s   |             2,005 |
-| Phobos GPU       | 147.8 s | 193 t/s   | 42.0 t/s   |            ~4,400 |
+| thinking         | wall    | prompt    | decode     | tokens/round |
+| ---------------- | ------: | --------: | ---------: | -----------: |
+| llama.cpp CUDA   | 149.1 s | 105 t/s   | 30.1 t/s   |        2,005 |
+| Phobos GPU       | 147.8 s | 193 t/s   | 42.0 t/s   |       ~4,400 |
 
 A replay caps each answer at the recorded length but cannot make an engine
 go on, and llama.cpp ends the long reasoning turn early, so with thinking
@@ -193,8 +185,6 @@ and their figures hold only while the desktop's share stays small: the IQ1_M was
 taken with 1377 MiB in use before the run, the PTQ1_0 with 979 MiB. Once the desktop
 holds much more the model no longer fits and the driver pages it over PCIe, which an
 earlier session measured at 7 t/s.
-
-![phobos vs llama.cpp, tokens per second](results/inference.svg)
 
 <details>
   <summary>Benchmark Details</summary>
@@ -498,7 +488,7 @@ The model path has its own set. Build these `--release`, and the ones needing a 
 
 ## AI Disclaimer
 
-Claude Code was used, among the Gemini and Codex free tiers, when building
+Claude Code was used, alongside the Gemini and Codex free tiers, when building
 this project.
 
 [^1]: [Table 2. GeForce RTX 3080 vs GeForce RTX 2080 / 2080 Super; P.14](https://www.nvidia.com/content/PDF/nvidia-ampere-ga-102-gpu-architecture-whitepaper-v2.1.pdf)
