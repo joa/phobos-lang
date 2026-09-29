@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn narrow_types_convert_on_load_and_store() {
-    // An i8 tensor sign-extends into f32 and a bf16 result rounds back
-    // down: the two halves of a dequantizing weight load.
+    // An i8 tensor converts to f32 and a bf16 result rounds back down, the
+    // two halves of a dequantizing weight load.
     let mlir = emit_mlir(
         "@launch(256)
         kernel narrow(W: tensor<i8>[M, N], S: tensor<f32>[M, N], C: tensor<bf16>[M, N]) {
@@ -24,8 +24,8 @@ fn narrow_types_convert_on_load_and_store() {
 
 #[test]
 fn f16_and_bf16_operands_meet_at_f32() {
-    // Neither 16-bit float contains the other, so mixing them widens to
-    // f32 rather than picking a side. Two extf, no truncf.
+    // Neither 16-bit float contains the other, so mixing them widens both
+    // to f32. Two extf, no truncf.
     let mlir = emit_mlir(
         "@launch(256)
         kernel meet(A: tensor<f16>[M, N], B: tensor<bf16>[M, N], C: tensor<f32>[M, N]) {
@@ -44,9 +44,8 @@ fn f16_and_bf16_operands_meet_at_f32() {
 
 #[test]
 fn bf16_is_emulated_below_ampere_and_native_from_ampere() {
-    // The type is available on every target; only the instruction count
-    // changes. sm_75 has no bf16 unit, so NVPTX emits the shift and
-    // round-to-nearest-even sequence, while sm_80 has cvt.rn.bf16.f32.
+    // bf16 works on every target. sm_75 has no bf16 unit, so NVPTX emits a
+    // shift and round-to-nearest-even sequence. sm_80 has cvt.rn.bf16.f32.
     let src = "@launch(256)
         kernel round(A: tensor<f32>[M, N], C: tensor<bf16>[M, N]) {
             let p = program_id(0)
@@ -74,8 +73,8 @@ fn converting_to_a_non_numeric_type_is_an_error() {
 
 #[test]
 fn f16_tensors_lower_to_f16_memrefs() {
-    // f16 tensor params and tile buffers carry the f16 element type, and
-    // the 0.0 f32 literal seed is rounded down on store.
+    // f16 tensor params and tile buffers keep the f16 element type, and the
+    // f32 literal seed is rounded down on store.
     let mlir = emit_mlir(
         "@autotune(T in [8])
         kernel k(A: tensor<f16>[N]) {
@@ -93,8 +92,8 @@ fn f16_tensors_lower_to_f16_memrefs() {
             "arith.addf",
         ],
     );
-    // f16 rows aren't 16B-aligned under the multiple-of-4 ABI, so the
-    // elementwise op stays scalar (no 128-bit f32 vectors).
+    // The multiple-of-4 ABI does not make f16 rows 16-byte aligned, so no
+    // 128-bit f32 vectors appear.
     assert!(
         !mlir.contains("vector<4xf32>"),
         "unexpected f32 vectorization of an f16 tile:\n{mlir}"
@@ -103,7 +102,7 @@ fn f16_tensors_lower_to_f16_memrefs() {
 
 #[test]
 fn f16_scalar_arithmetic_widens_to_f32() {
-    // Mixing an f16 operand with an f32 one widens to f32 (arith.extf).
+    // Mixing an f16 operand with an f32 one widens to f32.
     let mlir = emit_mlir(
         "kernel k(out: tensor<f32>[N], a: f16, b: f32) {
             out[0] = a + b
@@ -114,9 +113,9 @@ fn f16_scalar_arithmetic_widens_to_f32() {
 
 #[test]
 fn f16_matmul_runs_on_tensor_cores() {
-    // f16 inputs and output, f32 accumulation: the operands stage into
-    // the WMMA fragments verbatim (no rounding), and the f32 result is
-    // rounded back to f16 in the epilogue.
+    // f16 inputs and output with f32 accumulation. The operands stage
+    // without rounding, and the f32 result rounds back to f16 in the
+    // epilogue.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore
@@ -136,8 +135,8 @@ fn f16_matmul_runs_on_tensor_cores() {
     assert_contains(
         &mlir,
         &[
-            // f16 staging pads the inner dim by 8 for bank conflicts
-            // (16 -> 24, 64 -> 72).
+            // f16 staging pads the inner dim by 8 against bank conflicts,
+            // 16 to 24 and 64 to 72.
             "memref<?x?xf16, 1>",
             "memref<64x24xf16, 3>",
             "memref<16x72xf16, 3>",
@@ -154,8 +153,8 @@ fn f16_matmul_runs_on_tensor_cores() {
 
 #[test]
 fn f16_matmul_accumulates_in_f16_on_tensor_cores() {
-    // An f16 accumulator runs the WMMA in the m16n16k16 f16.f16 mode:
-    // f16 COp fragments and an f16 drain slab, no f32 anywhere in the MAC.
+    // An f16 accumulator runs WMMA in the m16n16k16 f16.f16 mode, with f16
+    // COp fragments and an f16 drain slab.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore
@@ -193,8 +192,8 @@ fn f16_matmul_accumulates_in_f16_on_tensor_cores() {
 
 #[test]
 fn f16_matmul_without_tensorcore_uses_f16_vector_contract() {
-    // No @tensorcore and an f16 accumulator: the generic register matmul
-    // contracts in f16 (no fusion, no WMMA).
+    // Without @tensorcore, an f16 accumulator contracts in f16 on the
+    // register matmul, with no WMMA.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -219,9 +218,9 @@ fn f16_matmul_without_tensorcore_uses_f16_vector_contract() {
 
 #[test]
 fn f16_flash_attention_runs_on_tensor_cores() {
-    // f16 Q/K/V/O with an f32 online-softmax state: both matmuls run on
-    // the tensor cores (f16 operands, f32 accumulate), the softmax math
-    // stays f32, and the result rounds back to f16 on the store.
+    // f16 Q/K/V/O with an f32 online-softmax state. Both matmuls run on the
+    // tensor cores with f32 accumulation, the softmax math stays f32, and
+    // the result rounds back to f16 on the store.
     let mlir = emit_mlir(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
@@ -273,9 +272,9 @@ fn f16_flash_attention_runs_on_tensor_cores() {
 
 #[test]
 fn f16_flash_attention_without_tensorcore_widens_to_f32() {
-    // Same kernel, no @tensorcore and a non-fragmenting tile: the mixed
-    // f16-input/f32-accumulate dots fall back to the vector path, widening
-    // each f16 operand to f32 (arith.extf) on load.
+    // Same kernel without @tensorcore and with tiles too small for
+    // fragments. The dots take the vector path and widen each f16 operand
+    // to f32 on load.
     let mlir = emit_mlir(
         "@autotune(D in [8], BR in [8], BC in [8])
         @aligned(Nq = BR, Nk = BC)

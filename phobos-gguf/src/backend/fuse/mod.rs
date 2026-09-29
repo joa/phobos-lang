@@ -1,8 +1,8 @@
 // Lowering a chain of decode stages into one persistent kernel.
 //
-// This file is the vocabulary: what a stage is, what it reads and writes,
-// and how a chain keys into a compiled plan. `emit.rs` turns that into
-// Phobos source and `chains.rs` builds the two chains the model uses.
+// This file defines the vocabulary: stages, what they read and write, and how
+// a chain keys a compiled plan. `emit.rs` turns a chain into Phobos source.
+// `chains.rs` builds the chains the model uses.
 
 mod chains;
 mod emit;
@@ -22,18 +22,17 @@ use anyhow::{Result, bail};
 use super::{Buf, FusedProject, L2_EPS, ProjWeight, Q8_BLOCK, QBuf, RawBuf};
 use crate::quant::Quant;
 
-/// Outputs one block takes of a contraction accumulating into its target.
-/// Mirrors `Q8_QDOT_TN`, which the device backend asserts against.
+/// Outputs per block of an accumulating contraction. Must equal
+/// `Q8_QDOT_TN`; the device backend asserts it.
 pub(crate) const OUT_TILE: usize = 8;
 
-/// Outputs one block takes of a raw-format contraction, both kinds: the
-/// `<fmt>_qdot_i8_t` decode gives a warp eight columns and a CTA of eight
-/// warps wants 64 to keep every warp busy. Two Q8_0 blocks, so a
-/// quantization of a unit's run writes two rows.
+/// Outputs per block of a raw-format contraction. Eight warps of eight
+/// columns each. This is two Q8_0 blocks, so quantizing a unit's run writes
+/// two scales.
 pub(crate) const RAW_UNIT: usize = 64;
 
-/// Threads per block. A grid barrier ties the block count to the compiled code,
-/// so the thread count has to be fixed here too.
+/// Threads per block. Fixed, since the grid barrier ties the launch shape to
+/// the compiled code.
 const CTA: usize = 256;
 
 /// Guards a Q8_0 scale against an all-zero run.
@@ -43,28 +42,28 @@ const QUANT_EPS: &str = "0.00000001";
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct Val(usize);
 
-/// What a value is, as far as the pass is concerned.
+/// The shape of a value.
 ///
-/// Deliberately free of buffer handles: this is half the module cache's key, and
-/// two layers with different weights want the same compiled kernel.
+/// Holds no buffer handles, since it is part of the module cache key and
+/// layers with different weights share one compiled kernel.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum Kind {
     /// A caller's row of `len` f32, read or written in place.
     Given { len: usize },
     /// A Q8_0 weight of `rows` by `k`, one scale per [`Q8_BLOCK`] of `k`.
     Weight { rows: usize, k: usize },
-    /// A raw-format weight of `rows` by `k`, its block bytes and `d` plane
-    /// as `constant_raw` uploaded them, decoded by `quant`'s own intrinsic.
+    /// A raw-format weight of `rows` by `k`, as `constant_raw` uploaded it,
+    /// decoded by `quant`'s own intrinsic.
     Raw { rows: usize, k: usize, quant: Quant },
-    /// A Q8_0 activation the pass gives storage to, `len` elements before any
+    /// A Q8_0 activation the pass allocates, `len` elements before any
     /// per-block replication.
     Quant { len: usize },
-    /// A value that only ever lives in registers, `len` elements wide. Crossing
-    /// a nest with one is what the pass declines on.
+    /// A value that lives only in registers, `len` elements wide. The pass
+    /// declines a chain where one crosses a nest.
     Temp { len: usize },
 }
 
-/// The storage behind a value. The cache key leaves this out; the backend
+/// The storage behind a value. Not part of the cache key; the backend
 /// resolves it at launch.
 #[derive(Clone, Copy, Debug)]
 enum Bind {
@@ -77,9 +76,8 @@ enum Bind {
 
 /// One recorded op of a decode step.
 ///
-/// Each variant is a stage of the pass's IR, not a kernel: whether it becomes a
-/// loop nest of its own or a few registers inside someone else's is what
-/// [`ChainKey::plan`] decides.
+/// A stage of the pass's IR, not a kernel. [`ChainKey::plan`] decides whether
+/// it gets a loop nest of its own or joins another's.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub(crate) enum Stage {
     /// `out = quantize(x * rsqrt(mean(x * x) + eps) * gain)` over the whole row.
@@ -88,13 +86,13 @@ pub(crate) enum Stage {
         gain: Val,
         out: Val,
         width: usize,
-        /// The epsilon's bit pattern, so a chain can key a hash map. Build this
-        /// with [`Stage::norm_q`] rather than spelling the bits.
+        /// The epsilon's bits, so the stage can be hashed. Build with
+        /// [`Stage::norm_q`].
         eps_bits: u32,
     },
-    /// `out = w[row_off + unit * Q8_BLOCK ..] . a`, contracting the whole of
-    /// `a`. One Q8_0 run of outputs per unit, `units` of them, so a unit's run
-    /// is exactly what one output scale covers.
+    /// `out = w[row_off + unit * Q8_BLOCK ..] . a`, contracting all of `a`.
+    /// Each of the `units` produces one Q8_0 block of outputs, covered by one
+    /// output scale.
     ProjQ {
         a: Val,
         w: Val,
@@ -103,9 +101,7 @@ pub(crate) enum Stage {
         row_off: usize,
     },
     /// `out[out_off + unit * Q8_BLOCK ..] = w[row_off + unit * Q8_BLOCK ..] . a`,
-    /// contracting the whole of `a` and publishing f32 where the caller asked
-    /// for it, which is what removes the copy a consumer reading a window of it
-    /// would otherwise need.
+    /// contracting all of `a` and writing f32 at the caller's offset.
     ProjF {
         a: Val,
         w: Val,
@@ -115,7 +111,7 @@ pub(crate) enum Stage {
         row_off: usize,
     },
     /// `out = w[row_off + unit * RAW_UNIT ..] . a` for a raw-format weight,
-    /// contracting the whole of `a`: one [`RAW_UNIT`] run of outputs per unit.
+    /// contracting all of `a`. One [`RAW_UNIT`] run of outputs per unit.
     ProjRaw {
         a: Val,
         w: Val,
@@ -124,8 +120,8 @@ pub(crate) enum Stage {
         row_off: usize,
     },
     /// `out[out_off + unit * RAW_UNIT ..] = w[row_off + unit * RAW_UNIT ..] . a`
-    /// for a raw-format weight, `width` outputs a unit: [`RAW_UNIT`], or the
-    /// remainder of a run for the one unit that finishes it.
+    /// for a raw-format weight. Each unit writes `width` outputs, which is
+    /// [`RAW_UNIT`] or, for the last unit, the remainder.
     ProjRawF {
         a: Val,
         w: Val,
@@ -137,8 +133,8 @@ pub(crate) enum Stage {
     },
     /// `out = (g * sigmoid(g)) * u` on a unit's run.
     Swiglu { g: Val, u: Val, out: Val },
-    /// `out = quantize(h)`, `blocks` scales per unit: one where a unit is a
-    /// Q8_0 block, two where it is a raw format's run of [`RAW_UNIT`].
+    /// `out = quantize(h)` with `blocks` scales per unit: one for a Q8_0
+    /// block, two for a raw format's [`RAW_UNIT`] run.
     QuantQ { h: Val, out: Val, units: usize, blocks: usize },
     /// `y += w[unit * RAW_UNIT ..] . a` for a raw-format weight.
     ProjAddRaw {
@@ -147,57 +143,55 @@ pub(crate) enum Stage {
         y: Val,
         width: usize,
     },
-    /// `y += w[unit * OUT_TILE ..] . a`, contracting the whole of `a`.
+    /// `y += w[unit * OUT_TILE ..] . a`, contracting all of `a`.
     ProjAdd {
         a: Val,
         w: Val,
         y: Val,
         width: usize,
     },
-    /// The delta net's causal depthwise convolution over one position, one
-    /// (plane, head) pair per unit, writing the packed planes a delta rule
+    /// The delta net's causal depthwise convolution over one position. One
+    /// (plane, head) pair per unit, writing the packed planes the delta rule
     /// reads.
     ///
-    /// A unit is a head's row rather than a run of channels because the L2
-    /// normalization couples the whole of it, so this cannot share the
-    /// projection's partition and costs a barrier of its own.
+    /// A unit is a whole head's row because the L2 normalization spans it.
+    /// So this cannot share the projection's partition and needs its own
+    /// barrier.
     ///
-    /// The unit is also the packed output's row, which holds only at one
-    /// position, where a plane is exactly `heads` rows wide.
+    /// A unit is also a row of the packed output, which holds only for a
+    /// single position.
     Conv {
         history: Val,
         taps: Val,
         out: Val,
-        /// Planes, which is three: the query, the key and the value.
+        /// Three: the query, the key and the value.
         planes: usize,
         heads: usize,
         head_dim: usize,
         kernel: usize,
         /// Elements in one position of the convolution's stream.
         channels: usize,
-        /// Element offset of head zero of the first plane within one position,
-        /// and the distance to the next plane. The three are evenly spaced in
-        /// both layouts a file uses, so this is a stride and not a table.
+        /// Element offset of the first plane's head zero within a position,
+        /// and the distance to the next plane. The planes are evenly spaced
+        /// in every supported layout.
         plane_base: usize,
         plane_stride: usize,
         /// Distance between consecutive heads within a plane.
         head_stride: usize,
-        /// L2-normalize the query and key planes, the value never.
+        /// L2-normalize the query and key planes. The value is never
+        /// normalized.
         normalize: bool,
-        /// The query's scale, as bits so a chain can key a hash map.
+        /// The query's scale, as bits so the stage can be hashed.
         scale_bits: u32,
     },
     /// `decay = exp(rate * softplus(a + bias))` and `beta = sigmoid(b)`, one
-    /// head per unit, appended to the same buffer the planes went in.
+    /// head per unit, appended after the planes in the same buffer.
     ///
-    /// This rides the convolution's nest rather than taking one of its own: it
-    /// reads across blocks and needs a barrier, and sharing the convolution's
-    /// partition means sharing the barrier the convolution already forced.
-    /// Hence `units`, which is wider than the work.
+    /// It shares the convolution's nest, so it reuses the barrier the
+    /// convolution already needs. Hence `units` is wider than the work.
     Gates {
-        /// The raw decay and write-strength projections, and where in the value
-        /// each starts. Both are windows of the same projection in every layout
-        /// seen so far, hence one value.
+        /// The raw decay and write-strength projections, and where each
+        /// starts. Both are windows of one projection.
         raw: Val,
         decay_at: usize,
         beta_at: usize,
@@ -205,9 +199,9 @@ pub(crate) enum Stage {
         bias: Val,
         out: Val,
         heads: usize,
-        /// Units of the nest this shares, of which it covers the first `heads`.
+        /// Units of the shared nest. Only the first `heads` do work.
         units: usize,
-        /// Elements in one packed plane; the gates follow three of them.
+        /// Elements in one packed plane. The gates follow three planes.
         span: usize,
     },
 }
@@ -215,12 +209,12 @@ pub(crate) enum Stage {
 /// How a stage's work divides across the grid.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Part {
-    /// Every block does all of it, on a row narrow enough that repeating the
-    /// read beats publishing the result. Carries the row's width in elements.
+    /// Every block does all of it, redundantly. Carries the row's width in
+    /// elements.
     Whole(usize),
     /// One unit per block, `count` in all, walked with a grid stride.
     Units(usize),
-    /// Elementwise, so whatever partition the nest already has.
+    /// Elementwise, so it takes the nest's partition.
     Inherit,
 }
 
@@ -229,8 +223,8 @@ enum Part {
 enum Read {
     /// Only the reader's own unit, so nothing crosses a block.
     Local,
-    /// All of it, which is what a contraction does, and what costs a barrier
-    /// when the writer split the value across the grid.
+    /// All of it, as a contraction does. Needs a barrier when the writer
+    /// split the value across the grid.
     All,
 }
 
@@ -270,13 +264,12 @@ impl Stage {
             | Stage::ProjRawF { a, w, .. } => vec![(a, Read::All), (w, Read::All)],
             Stage::Swiglu { g, u, .. } => vec![(g, Read::Local), (u, Read::Local)],
             Stage::QuantQ { h, .. } => vec![(h, Read::Local)],
-            // `y` is read only where it is written, so the accumulation crosses
-            // nothing of its own.
+            // `y` is read only where it is written, so it crosses no block.
             Stage::ProjAdd { a, w, y, .. } | Stage::ProjAddRaw { a, w, y, .. } => {
                 vec![(a, Read::All), (w, Read::All), (y, Read::Local)]
             }
-            // A head's row spans four of the projection's units, so the stream
-            // is read across blocks however the convolution is partitioned.
+            // A head's row spans several projection units, so the stream is
+            // read across blocks.
             Stage::Conv { history, taps, .. } => vec![(history, Read::All), (taps, Read::All)],
             Stage::Gates {
                 raw, rate, bias, ..
@@ -300,23 +293,22 @@ impl Stage {
     }
 }
 
-/// The stages of a decode step as a frontend records them, with the storage
-/// behind each value kept to one side.
+/// The recorded stages of a decode step, with each value's storage kept
+/// separately from the key.
 #[derive(Default)]
 pub(crate) struct Chain {
     key: ChainKey,
     binds: Vec<Bind>,
 }
 
-/// Everything about a chain that decides the emitted source, and so the module
-/// cache's key. Buffer handles are excluded on purpose: one compiled kernel
-/// then serves every layer of a model.
+/// Everything that decides the emitted source, used as the module cache key.
+/// It excludes buffer handles, so one compiled kernel serves every layer.
 #[derive(Clone, Default, PartialEq, Eq, Hash, Debug)]
 pub(crate) struct ChainKey {
     vals: Vec<Kind>,
     stages: Vec<Stage>,
-    /// Blocks the kernel is compiled for. A grid barrier makes this part of what
-    /// the kernel means, since a block that is not resident never arrives.
+    /// Blocks the kernel is compiled for. Every block must be resident, or
+    /// the grid barrier never completes.
     blocks: u32,
 }
 
@@ -335,13 +327,12 @@ impl Chain {
         self.add(Kind::Raw { rows, k, quant }, Bind::Raw(w))
     }
 
-    /// A quantized activation passed between stages, which the pass gives
-    /// storage to.
+    /// A quantized activation passed between stages, allocated by the pass.
     pub(crate) fn quant(&mut self, len: usize) -> Val {
         self.add(Kind::Quant { len }, Bind::Internal)
     }
 
-    /// A value that has to stay in registers, so it must not outlive its nest.
+    /// A register-only value. It must not outlive its nest.
     pub(crate) fn temp(&mut self, len: usize) -> Val {
         self.add(Kind::Temp { len }, Bind::Internal)
     }
@@ -377,9 +368,8 @@ impl Chain {
         }
     }
 
-    /// The chain's shape at this grid, for looking a compiled plan up. Cloning
-    /// the shape and leaving the bindings behind lets one compiled kernel
-    /// serve every layer.
+    /// The chain's cache key at this grid size. Bindings are left out, so
+    /// one compiled kernel serves every layer.
     pub(crate) fn key(&self, blocks: u32) -> ChainKey {
         ChainKey {
             blocks,
@@ -388,8 +378,8 @@ impl Chain {
     }
 }
 
-/// Where a slot's bytes come from. The pass names the operand, the backend
-/// resolves it.
+/// Where a slot's bytes come from. The pass names the operand and the
+/// backend resolves it.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Bound {
     /// A caller buffer.
@@ -421,17 +411,16 @@ pub(crate) struct Scratch {
     pub(crate) scales: usize,
 }
 
-/// What the pass produces: source to compile, operands to bind, scratch to
-/// allocate, and the grid all three were decided for.
+/// The pass's output: source to compile, operands to bind, scratch to
+/// allocate, and the grid size they assume.
 #[derive(Debug)]
 pub(crate) struct Plan {
     pub(crate) source: String,
     pub(crate) slots: Vec<Slot>,
     pub(crate) scratch: Vec<Scratch>,
     pub(crate) blocks: u32,
-    /// Grid barriers the chain turned out to need.
+    /// Grid barriers the chain needs.
     pub(crate) barriers: usize,
-    /// Values the chain keeps in shared memory rather than publishing. They
-    /// cost nothing on the device.
+    /// Values kept in shared memory rather than published to device memory.
     pub(crate) held: usize,
 }

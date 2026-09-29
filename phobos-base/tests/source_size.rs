@@ -1,11 +1,9 @@
-// The modularization guardrail: a tree that was split into modules
-// once grows back unless something objects, so this objects. It runs as part of
-// `cargo test` rather than as a separate task because a check nobody remembers
-// to run is not a guardrail.
+// Caps the length of source files and inline `mod tests` blocks, so a tree
+// that was split into modules stays split. It runs under `cargo test` so it
+// cannot be forgotten.
 //
-// The unit is physical lines, so `wc -l` is a second opinion. Generated code is
-// excluded by construction: everything the build scripts emit lands in OUT_DIR,
-// which is under `target/`, which the walk skips.
+// Lengths are physical lines, as `wc -l` counts them. Generated code lands in
+// OUT_DIR under `target/`, which the walk skips.
 
 use std::{
     path::{Path, PathBuf},
@@ -19,10 +17,10 @@ const MAX_FILE_LINES: usize = 900;
 /// beside the module it covers.
 const MAX_INLINE_TEST_LINES: usize = 150;
 
-/// The files that predate the cap, each with the length it had the day it was
-/// written down. They may shrink and never grow, and an entry that falls under
-/// the cap has to be deleted: that is the whole ratchet. The list only ever
-/// gets shorter, and when it is empty the cap drops to 700.
+/// Files that predate the cap, each with its length when it was listed.
+/// An entry may shrink but never grow, and must be deleted once its file is
+/// under the cap. No entry may be added. When the list is empty the cap drops
+/// to 700.
 const GRANDFATHERED: &[(&str, usize)] = &[
     ("phobos-onnx/src/backend/chain.rs", 911),
     ("phobos-pod/src/engine.rs", 912),
@@ -152,8 +150,8 @@ fn walk(dir: &Path, found: &mut Vec<PathBuf>) {
 
 /// The (first line, length in lines) of every inline `mod tests { .. }`.
 ///
-/// Brace counting has to know what is code: this tree embeds kernel sources in
-/// test strings, and one of them opens a brace it never closes on the Rust side.
+/// Braces inside comments, strings and char literals are skipped, since
+/// kernel sources embedded in test strings can leave braces unbalanced.
 fn inline_test_modules(src: &str) -> Vec<(usize, usize)> {
     let chars: Vec<char> = src.chars().collect();
     let mut found = Vec::new();

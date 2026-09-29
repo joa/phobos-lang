@@ -1,5 +1,5 @@
-// `@tensorcore` via mma.sync, the sm_75 path. Needs 64-bit index
-// lowering and its own fragment addressing; see `ldmatrix_frag`.
+// `@tensorcore` via mma.sync, the sm_75+ path. Needs 64-bit index lowering
+// and its own fragment addressing, see `ldmatrix_frag`.
 
 use super::*;
 
@@ -22,12 +22,13 @@ impl<'c> Codegen<'c> {
         Ok(vec![seed; (fm * fnn * 2) as usize])
     }
 
-    /// Drains the mma.sync accumulators to C. Each lane's m16n8 D fragment
-    /// (vector<2x2x{acc}>) maps to (row, col) pairs of the 16x8 tile (row =
-    /// laneId/4 [+8], col = 2*(laneId%4) [+1]). The warp scatters them into
-    /// its private 16x16 shared slab, then the lanes copy slab to C between
-    /// barriers, applying alpha*acc + beta*prev_load. The drain matches the
-    /// WMMA epilogue so the f32 and f16 paths share it.
+    /// Drains the mma.sync accumulators to C.
+    ///
+    /// Each lane's m16n8 D fragment (vector<2x2x{acc}>) covers (row, col)
+    /// pairs of the 16x8 tile, see [`Self::mma_sync_dfrag_base`]. The warp
+    /// scatters them into its private 16x16 shared slab. The lanes then copy
+    /// the slab to C between barriers, computing alpha*acc + beta*prev. The
+    /// drain is shared with the WMMA epilogue.
     pub(super) fn mma_sync_store(
         &mut self,
         block: &Block<'c>,
@@ -59,10 +60,9 @@ impl<'c> Codegen<'c> {
         let (srow, lrow, lcol) = self.slab_lane_slice(block, slab0, lane)?;
         let row_t = Type::vector(&[4], self.f32_t);
 
-        // Coalesced 4-wide drains: an f32 slab straight to an f32 C, or an f16
-        // slab through an f32 scale to an f16 C (the gemm_fp16.ph case). Both
-        // need an aligned (multiple-of-4 row pitch) output, else the drain is
-        // scalar; the scaling vectors are f32 either way.
+        // Coalesced 4-wide drains: an f32 slab to an f32 C, or an f16 slab
+        // through an f32 scale to an f16 C. Both need a 4-aligned output row
+        // pitch, else the drain is scalar. The scaling vectors are always f32.
         let vec_f32 = slab_f32 && view.elem == self.f32_t && view.vectorizes(4);
         let vec_f16 = !slab_f32 && view.elem == self.f16_t && view.vectorizes(4);
         let (alpha, beta) = self.epilogue_scaling(block, alpha, beta, row_t, vec_f32 || vec_f16)?;
@@ -110,8 +110,8 @@ impl<'c> Codegen<'c> {
                     }
                 }
 
-                // publish the scatter, drain it to C, and retire the reads
-                // before the next fragment overwrites the slab
+                // The first barrier publishes the scatter. The second keeps
+                // the next fragment from overwriting the slab mid-drain.
                 self.barrier(block)?;
                 self.drain_slab_tile(block, &drain, m0, n0, fi, fj)?;
                 self.barrier(block)?;
@@ -121,9 +121,9 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// The lane's m16n8 D-fragment base within an mma.sync tile. The row is
-    /// laneId / 4 (the second 8-row half adds 8) and the column is
-    /// 2 * (laneId % 4) (the second element of a pair adds 1).
+    /// The lane's m16n8 D-fragment base within an mma.sync tile, as
+    /// (row, col). The row is lane / 4, plus 8 for the second half. The column
+    /// is 2 * (lane % 4), plus 1 for the second element of a pair.
     pub(super) fn mma_sync_dfrag_base(
         &self,
         block: &Block<'c>,
@@ -138,10 +138,12 @@ impl<'c> Codegen<'c> {
         Ok((gid, dcol))
     }
 
-    /// The mma.sync counterpart of the legacy [`Self::wmma_dot`] body: swizzled
-    /// f16 staging, per-lane vector<2x2xf32> accumulators folded with
-    /// nvgpu.mma.sync, and a direct scatter of the D fragments to the shared
-    /// out tile. += seeds the accumulators from out, as the WMMA path does.
+    /// The mma.sync counterpart of [`Self::wmma_dot`].
+    ///
+    /// Stages both operands as swizzled f16, accumulates per-lane
+    /// vector<2x2xf32> fragments with nvgpu.mma.sync, and scatters the D
+    /// fragments into the shared out tile. `+=` seeds the accumulators from
+    /// out.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn mma_sync_dot(
         &mut self,
@@ -159,18 +161,18 @@ impl<'c> Codegen<'c> {
         let (fm, fnn) = ((m / 16) / wm, (n / 16) / wn);
         let dims = (kk, fm, fnn);
 
-        // Swizzled (not padded) f16 staging, matching each operand's natural
-        // layout: a as [m, k], b as [k, n] (NN) or [n, k] (NT). ldmatrix reads
-        // stride consecutive rows, which alias shared banks unpadded; the
-        // swizzle permutes the column per row, the same way on store and load.
+        // Swizzled f16 staging in each operand's natural layout: a as [m, k],
+        // b as [k, n] (NN) or [n, k] (NT). ldmatrix reads consecutive rows,
+        // which would hit the same shared banks. The swizzle permutes the
+        // column per row, the same way on store and load.
         let (a_buf, a_hoisted) = self.dot_stage(block, a, &[m, kk], true)?;
         let (b_buf, b_hoisted) = self.dot_stage(block, b, &b.shape.clone(), true)?;
         self.barrier(block)?;
 
-        // The warp's fragment-block origin; surplus warps clamp onto the last.
+        // The warp's fragment-block origin. Surplus warps clamp onto the last.
         let (_, _, _, m0, n0) = self.warp_block_origin(block, wm, wn, fm * 16, fnn * 16)?;
 
-        // Accumulators: the running out D fragments for +=, else zero.
+        // Accumulators start from out for +=, else from zero.
         let acc_t = Type::vector(&[2, 2], self.f32_t);
         let regs = if accumulate {
             self.mma_sync_load_frags(block, out, (fm, fnn), m0, n0)?
@@ -186,8 +188,8 @@ impl<'c> Codegen<'c> {
         self.mma_sync_store_frags(block, out, &finals, (fm, fnn), m0, n0)?;
         self.barrier(block)?;
 
-        // The staging is dead past the MAC; the closing barrier orders its
-        // reads before any pooled reuse. Hoisted buffers outlive the loop.
+        // The barrier above orders the staging reads before any reuse.
+        // Hoisted buffers outlive the loop and are not released here.
         if !a_hoisted {
             self.release(&a_buf);
         }
@@ -198,10 +200,11 @@ impl<'c> Codegen<'c> {
         Ok(true)
     }
 
-    /// Walks the warp's m16n8 D fragments over the tile at (m0, n0), yielding
-    /// each fragment's register index with its elements' (di, dj) position and
-    /// [row, col] address (see [`Self::mma_sync_dfrag_base`]). The scatter and
-    /// its inverse gather share this walk, so their addressing cannot drift.
+    /// Walks the warp's m16n8 D fragments over the tile at (m0, n0).
+    ///
+    /// Calls `f` with each fragment's register index and, per element, its
+    /// (di, dj) position and [row, col] address. The scatter and the gather
+    /// both use this walk, so their addressing always matches.
     pub(in crate::codegen) fn for_each_dfrag(
         &mut self,
         block: &Block<'c>,
@@ -250,9 +253,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Scatters each lane's m16n8 D fragment (vector<2x2xf32>) straight to its
-    /// (row, col) spot in the shared out tile: the mma.sync take on a
-    /// straight-to-shared subgroup_mma_store_matrix. The caller barriers afterward.
+    /// Scatters each lane's m16n8 D fragment (vector<2x2xf32>) to its
+    /// (row, col) spots in the shared out tile. The caller adds the barrier.
     pub(super) fn mma_sync_store_frags(
         &mut self,
         block: &Block<'c>,
@@ -271,9 +273,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Seeds the per-lane D fragments from the shared out tile (the += running
-    /// sum), the inverse of [`Self::mma_sync_store_frags`]: each lane reads its
-    /// four (row, col) elements per m16n8 tile into a vector<2x2xf32>.
+    /// Seeds the per-lane D fragments from the shared out tile for `+=`. The
+    /// inverse of [`Self::mma_sync_store_frags`].
     pub(super) fn mma_sync_load_frags(
         &mut self,
         block: &Block<'c>,
@@ -301,13 +302,13 @@ impl<'c> Codegen<'c> {
         Ok(regs)
     }
 
-    /// One k-tile of mma.sync computes from the staged f16 buffers. The
-    /// hardware shape is m16n8kK (K = 8 on Turing, 16 on Ampere+): each
-    /// logical 16x16 fragment splits into two n-sub-tiles of 8, and the warp
-    /// owns fm * fnn * 2 vector<2x2x{acc}> accumulators (one per (fi, fj, n8)).
-    /// Each kK-deep step ldmatrix-loads the warp's A and B fragments and folds
-    /// them in with nvgpu.mma.sync. With transpose_b, B is staged [n, k] (the
-    /// dot_t layout) and read without the transpose flip.
+    /// One k-tile of mma.sync from the staged f16 buffers.
+    ///
+    /// The hardware shape is m16n8kK, with K = 8 on Turing and 16 on Ampere+.
+    /// Each 16x16 fragment splits into two n8 halves, so the warp owns
+    /// fm * fnn * 2 accumulators. Each K-deep step loads A and B with ldmatrix
+    /// and accumulates with nvgpu.mma.sync. With `transpose_b`, B is staged
+    /// [n, k] and read without the transpose flag.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn mma_sync_mac(
         &mut self,
@@ -322,8 +323,8 @@ impl<'c> Codegen<'c> {
     ) -> Result<Vec<Value<'c, 'c>>> {
         let (kk, fm, fnn) = dims;
         let mma_k = self.mma_sync_k()?;
-        // Per-lane fragment register counts: A spans m16 x kK as 8x8 tiles, B
-        // spans kK x n8, both two f16 per tile. C/D is the m16n8 accumulator.
+        // 8x8 tiles per fragment: A spans m16 x K, B spans K x n8. Each lane
+        // holds two f16 per tile.
         let a_tiles = 2 * (mma_k / 8);
         let b_tiles = mma_k / 8;
         let a_frag_t = Type::vector(&[a_tiles as u64, 2], self.f16_t);
@@ -332,7 +333,6 @@ impl<'c> Codegen<'c> {
             .first()
             .map(|v| v.r#type())
             .ok_or_else(|| anyhow!("mma_sync_mac needs at least one accumulator"))?;
-        // The lane index spreads the ldmatrix reads across the warp.
         let tid = self.thread_id(block)?;
         let w = self.const_index(block, 32)?;
         let lane = self.remui(block, tid, w)?;
@@ -341,7 +341,7 @@ impl<'c> Codegen<'c> {
         for ks in 0..kk / mma_k {
             let kbase = self.const_index(block, ks * mma_k)?;
 
-            // A fragments: one m16 x kK block per fi.
+            // A fragments: one m16 x K block per fi.
             let mut a_frags = Vec::with_capacity(fm as usize);
             for fi in 0..fm {
                 let c = self.const_index(block, fi * 16)?;
@@ -357,9 +357,8 @@ impl<'c> Codegen<'c> {
                 )?);
             }
 
-            // B fragments: one kK x n8 block per (fj, n8). NN reads b[k, n]
-            // transposed (k-major buffer, col-major operand); NT reads the
-            // [n, k] buffer straight.
+            // B fragments: one K x n8 block per (fj, n8). NN reads the [k, n]
+            // buffer transposed. NT reads the [n, k] buffer as is.
             let mut b_frags = Vec::with_capacity((fnn * 2) as usize);
             for fj in 0..fnn {
                 for nn in 0..2 {
@@ -397,15 +396,15 @@ impl<'c> Codegen<'c> {
     }
 
     /// The warp's [`Self::ldmatrix`] operand at the warp-tile origin `indices`
-    /// (row, col). The lowering does a plain strided-element-pointer and does
-    /// not spread work across the warp's lanes, so the per-lane offset is
-    /// folded in here (each lane holds one 8-element row's start address).
-    /// The offset depends on how the operand's tiles are laid out. Non-transpose
-    /// A is 16 rows by num_tiles/2 8-wide k-tiles: row = lane % 16, k-column =
-    /// (lane / 16) % (num_tiles/2) * 8. Transpose B is num_tiles 8x8 tiles
-    /// stacked along k: row = lane % (8 * num_tiles), column = the warp-tile
-    /// column. Any swizzle rides the staging store, not this load, since the
-    /// offset already rides the index.
+    /// (row, col).
+    ///
+    /// The lowering does not spread addresses across lanes, so the per-lane
+    /// offset is added here. Each lane supplies the start of one 8-element
+    /// row. Non-transpose A is 16 rows by num_tiles/2 k-tiles of 8: row =
+    /// lane % 16, column = (lane / 16) % (num_tiles/2) * 8. Transpose B is
+    /// num_tiles 8x8 tiles stacked along k: row = lane % (8 * num_tiles),
+    /// column unchanged. The column is then swizzled to match the staging
+    /// store.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn ldmatrix_frag(
         &self,
@@ -417,12 +416,9 @@ impl<'c> Codegen<'c> {
         frag_t: Type<'c>,
         lane: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
-        // Fold the per-lane (row, col) offset into the warp-tile origin.
-        // Lanes past the consumed address count (8 per tile) still compute an
-        // address the hardware dereferences even though the value is unused,
-        // so the row modulus clamps them into the block: an unclamped operand
-        // near the end of the shared buffer could read past the CTA's shared
-        // window and fault.
+        // Lanes past the used address count (8 per tile) still have their
+        // address dereferenced. The row modulus keeps them inside the block,
+        // or a read near the end of the buffer could fault.
         let (row_off, col_off) = if transpose {
             let rows = self.const_index(block, 8 * num_tiles)?;
             (self.remui(block, lane, rows)?, None)
@@ -443,8 +439,7 @@ impl<'c> Codegen<'c> {
             None => indices[1],
         };
 
-        // Read back the swizzled column the staging store wrote (identity when
-        // the buffer is unswizzled).
+        // Identity when the buffer is unswizzled.
         let col = self.swizzle_col(block, buf, row, col)?;
 
         self.ldmatrix(block, buf.mem, [row, col], num_tiles, transpose, frag_t)

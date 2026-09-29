@@ -34,9 +34,9 @@ fn every_format_agrees_with_its_own_storage_size() {
 
 #[test]
 fn ggml_type_codes_map_onto_the_registry() {
-    // The bridge has to agree with the file format's own block geometry, or a
+    // The bridge must agree with the file format's block geometry, or a
     // tensor's byte count and its decoder would disagree. A registry block
-    // may be a whole number of file blocks (PTQ1_0 pairs its 128s).
+    // may span several file blocks (PTQ1_0 pairs its 128s).
     for code in (0..31u32).chain([143]) {
         let Ok(ggml) = GgmlType::from_code(code) else {
             continue;
@@ -105,8 +105,8 @@ fn stacking_appends_rows_and_zero_pads() {
     let planes = stacked.planes().unwrap();
     assert_eq!(&planes.qs[..k], &vec![1i8; k][..]);
     assert_eq!(&planes.qs[k..3 * k], &vec![-3i8; 2 * k][..]);
-    // Scales are [k / block, n], so one run of five outputs, the last two
-    // being the padding.
+    // Scales are [k / block, n]: one run of five outputs, the last two
+    // padding.
     assert_eq!(planes.scales, vec![2.0, 4.0, 8.0, 0.0, 0.0]);
     // dense() is [k, n], so the two padded outputs are the last two columns of
     // every row.
@@ -140,10 +140,10 @@ fn shapes_that_do_not_tile_are_rejected() {
     assert!(Packed::new(Quant::Q4_K, vec![0; 144], 128, 1).is_err());
 }
 
-/// Q4_K decodes `d * scale[run] * q - dmin * min[run]`, so choosing the two
-/// six-bit indices and the nibble makes the expected value exact. This is the
-/// packing the format is easiest to get wrong: the last four runs take their
-/// top two bits from the first four runs' spare bits.
+/// Q4_K decodes `d * scale[run] * q - dmin * min[run]`, so chosen six-bit
+/// indices and nibbles give an exact expected value. The packing is easy to
+/// get wrong: the last four runs take their top two bits from the first four
+/// runs' spare bits.
 #[test]
 fn q4_k_unpacks_its_six_bit_scales() {
     let (d, dmin) = (0.5f32, 0.25f32);
@@ -175,10 +175,10 @@ fn q4_k_unpacks_its_six_bit_scales() {
     }
 }
 
-/// Q5_K is Q4_K plus a fifth bit: run `r`'s element `l` reads bit `r` of
-/// `qh[l]`, and `qh` never advances. The high bit here depends on both the
-/// run and the element, so a decoder that advances `qh` with the run, or
-/// reads the wrong bit of it, lands on the wrong value somewhere.
+/// Q5_K is Q4_K plus a fifth bit: element `l` of run `r` reads bit `r` of
+/// `qh[l]`, and `qh` never advances. The high bit here depends on both run
+/// and element, so a decoder that advances `qh` with the run, or reads the
+/// wrong bit, gets some value wrong.
 #[test]
 fn q5_k_takes_its_fifth_bit_from_the_shared_qh_plane() {
     let (d, dmin) = (0.5f32, 0.25f32);
@@ -263,9 +263,9 @@ fn f16(v: f32) -> f32 {
     phobos_base::half::f16_to_f32(f32_to_f16(v))
 }
 
-/// The delta fold the fused IQ1_S projection rests on: a weight is
-/// `dl * (g +- 1/8)`, `g` is -1, 0 or 1, so `8g +- 1` is an exact `i8` and the
-/// weight is `(dl / 8)` times it. If this holds, the tensor-core path needs no
+/// The delta fold the fused IQ1_S projection relies on. A weight is
+/// `dl * (g +- 1/8)` with `g` in -1, 0, 1, so `8g +- 1` is an exact `i8` and
+/// the weight is `dl / 8` times it. The tensor-core path then needs no
 /// activation row sums and no second dot product for the delta.
 #[test]
 fn iq1s_folds_its_delta_into_an_exact_int8() {

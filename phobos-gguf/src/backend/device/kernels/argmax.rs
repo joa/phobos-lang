@@ -1,35 +1,28 @@
-// Greedy decode's fast path: a device-side argmax over the logits row, so a
-// caller that only wants the winning token id reads a couple of floats back
-// instead of the whole vocab.
+// Device-side argmax over the logits row, for greedy decode. The caller
+// reads back two floats instead of the whole vocab.
 //
-// Two kernels: `argmax_reduce` grid-strides the row in chunks of `W`,
-// folding a running `[1, W]` (value, index) pair per lane with
-// `tmax`/`argsel`, and leaves one partial per block in `P`. Both kernels
-// collapse a row the same way: its largest value, then the largest index
-// holding it, two row reductions.
+// `argmax_reduce` grid-strides the row in chunks of `W`, keeping a running
+// (value, index) pair per lane, and writes one partial per block to `P`.
+// `argmax_finish` folds the partials. Both pick the largest value, then the
+// largest index holding it.
 //
-// The index side of the fold carries the winning column as an f32, safe up
-// to 2^24 and far past a real vocabulary, so `argsel` stays a plain float
-// select with no integer reduction path to add alongside it.
+// Indices are carried as f32, which is exact up to 2^24. That keeps
+// `argsel` a plain float select.
 
-/// Columns one program of [`argmax_reduce_src`] folds per grid-stride step,
-/// picked to divide real vocabularies exactly; [`argmax_chunk_width`]
-/// handles one that does not.
+/// Columns one program of [`argmax_reduce_src`] folds per grid-stride step.
+/// [`argmax_chunk_width`] narrows it for a vocab it does not divide.
 pub(crate) const ARGMAX_CHUNK: usize = 512;
 
-/// Blocks [`argmax_reduce_src`] launches with, and so partials
-/// [`argmax_finish_src`] folds. Matching the SM count is not the goal: the
-/// whole reduction moves at most a couple of megabytes already resident on
-/// the device. Always this many, whatever the vocab: a block with no chunk
-/// leaves the identity, and `argmax_finish` reduces a row this wide.
+/// Blocks [`argmax_reduce_src`] launches, and so the partials
+/// [`argmax_finish_src`] folds. Fixed whatever the vocab: a block with no
+/// chunk leaves the identity.
 pub(crate) const ARGMAX_SPLITS: usize = 128;
 
 /// The widest power of two, at most [`ARGMAX_CHUNK`], that divides `n`.
 ///
-/// A chunk that does not divide the vocab would need a masked tail read,
-/// and the mask's zero fill is not `tmax`'s identity: a row whose real
-/// values are all negative would lose to a fake 0.0 in the ragged
-/// remainder.
+/// The chunk must divide the vocab. A masked tail would fill with zero,
+/// which is not `tmax`'s identity, so an all-negative row would lose to a
+/// fake 0.0.
 pub(crate) fn argmax_chunk_width(n: usize) -> usize {
     let mut w = ARGMAX_CHUNK;
     while w > n.max(1) {
@@ -41,11 +34,11 @@ pub(crate) fn argmax_chunk_width(n: usize) -> usize {
     w.max(1)
 }
 
-/// `A[0, :]`'s argmax, grid-strided in chunks of `w`, one partial `(value,
-/// index)` pair left per block in `P[:, pid]`. `IO` is `[0, 1, .., w - 1]`,
-/// uploaded once and reused for every launch at this width; adding the
-/// chunk's own base index turns it into that chunk's column-to-vocab-index
-/// map, which is what the fold's index side tracks.
+/// Argmax of `A[0, :]`, grid-strided in chunks of `w`. Each block leaves
+/// one `(value, index)` partial in `P[:, pid]`.
+///
+/// `IO` is `[0, 1, .., w - 1]`, uploaded once per width. Adding a chunk's
+/// base turns it into that chunk's vocab indices.
 pub(crate) fn argmax_reduce_src(w: usize) -> String {
     format!(
         "@launch(256)
@@ -70,9 +63,8 @@ kernel argmax_reduce(A: tensor<f32>[M, N], IO: tensor<f32>[M, W], P: tensor<f32>
     )
 }
 
-/// [`argmax_reduce_src`]'s [`ARGMAX_SPLITS`] partials folded to the single
-/// winner: the largest value, then the largest index holding it, the host's
-/// last-of-equal-maxima rule.
+/// Folds [`argmax_reduce_src`]'s [`ARGMAX_SPLITS`] partials to one winner.
+/// Ties go to the largest index, matching the host.
 pub(crate) fn argmax_finish_src() -> String {
     format!(
         "@launch(256)

@@ -95,10 +95,11 @@ pub(crate) fn split_reasoning(message: &ChatMessage, content: &str) -> (String, 
     }
 }
 
-/// A single user turn and the assistant's opening, rendered as the server
-/// renders a one-message chat, for a caller holding plain text. An instruct
-/// model fed its prompt bare treats it as a document to continue, which from
-/// a question is rarely the answer.
+/// Wraps plain text as a single user turn plus the assistant's opening, the
+/// same way the server renders a one-message chat.
+///
+/// An instruct model fed a bare prompt treats it as a document to continue
+/// rather than a question to answer.
 pub fn user_turn(text: &str, template: Option<&str>, bos: Option<&str>) -> String {
     let message = ChatMessage {
         role: "user".to_string(),
@@ -118,8 +119,8 @@ pub(crate) fn format_chat(
 ) -> String {
     let mut prompt = String::new();
 
-    // MiniCPM5's template opens `{{- bos_token }}` and its file sets
-    // `add_bos_token = false`, so nothing else would add one.
+    // MiniCPM5's template opens with `{{- bos_token }}` and its file sets
+    // `add_bos_token = false`, so the BOS has to be added here.
     if let Some(bos) = bos {
         prompt.push_str(bos);
     }
@@ -186,8 +187,8 @@ pub(crate) fn format_chat(
                 );
                 prompt.push_str("<|im_end|>\n");
             }
-            // A second system message is outside the template's grammar, so
-            // it folds in as a plain turn rather than being dropped.
+            // A later system message is outside the template's grammar, so it
+            // is rendered as a plain turn rather than dropped.
             role => {
                 prompt.push_str("<|im_start|>");
                 prompt.push_str(role);
@@ -200,10 +201,9 @@ pub(crate) fn format_chat(
     }
 
     prompt.push_str("<|im_start|>assistant\n");
-    // Qwen's template prefills a think block either way, and leaving it out
-    // invites the model to open one itself, which leaks into the visible
-    // content. MiniCPM5's prefills nothing unless thinking was asked for, and
-    // an empty block it was not trained to see costs it the turn's opening.
+    // Qwen's template always prefills a think block. Without it the model
+    // opens one itself and it leaks into the visible content. MiniCPM5 was
+    // not trained on an empty block, so it gets none unless thinking is on.
     prompt.push_str(match (thinking, dialect.prefills_empty_think()) {
         (true, _) => "<think>\n",
         (false, true) => "<think>\n\n</think>\n\n",

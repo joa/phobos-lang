@@ -1,5 +1,5 @@
-// DeltaNet and its projection layout. A sibling module of `qwen35.rs`, so
-// its types need `pub(super)` to stay reachable from the parent.
+// DeltaNet and its projection layout. Its types are `pub(super)` so
+// `qwen35.rs` can reach them.
 
 use anyhow::{Context, Result};
 
@@ -9,12 +9,12 @@ use crate::layers::{Gain, Linear, Uploads, check_dims};
 
 use super::Config;
 
-/// The query-key-value, gate, decay and beta projections, fused into one
-/// launch when [`Linear::should_fuse`] allows it and run as four ordinary
-/// projections otherwise. A four-way fuse needs matching quant formats
-/// across all four tensors, which per-tensor quantized files rarely have.
-// One per delta net, held for the model's lifetime: the variants' size
-// difference costs nothing worth a box.
+/// The query-key-value, gate, decay and beta projections. They are fused
+/// into one launch when [`Linear::should_fuse`] allows it, else run as four
+/// projections. A four-way fuse needs one quant format across all four
+/// tensors, which per-tensor quantized files rarely have.
+// One per delta net for the model's lifetime, so the variants' size
+// difference is not worth a box.
 #[allow(clippy::large_enum_variant)]
 pub(super) enum Proj {
     /// Where each part starts in the fused output, and how wide it is.
@@ -23,7 +23,7 @@ pub(super) enum Proj {
 }
 
 /// The decay and write-strength projections of a [`Proj::Split`]: stacked
-/// into one launch where [`Linear::stack`] takes them, apart otherwise.
+/// into one launch when [`Linear::stack`] accepts them, else kept apart.
 pub(super) enum Gates {
     Stacked { both: Linear, alpha_w: usize },
     Apart { alpha: Linear, beta: Linear },
@@ -45,7 +45,7 @@ impl Gates {
         }
     }
 
-    /// The two weights, where a fused projection could take them apart.
+    /// The two weights, if they are held apart.
     pub(super) fn apart(&self) -> Option<[&Linear; 2]> {
         match self {
             Gates::Stacked { .. } => None,
@@ -63,8 +63,8 @@ impl Gates {
         }
     }
 
-    /// Both projections of `x`, `act` its quantized copy where there is one:
-    /// where each lands, and the buffers to release once the gates are read.
+    /// Both projections of `x`, with `act` its quantized copy if any. Returns
+    /// where each lands and the buffers to release once the gates are read.
     #[allow(clippy::type_complexity)]
     pub(super) fn project(
         &self,
@@ -80,8 +80,8 @@ impl Gates {
                 if rows == 1 {
                     return Ok(((stacked, 0), (stacked, *alpha_w), vec![stacked]));
                 }
-                // Past one row the two interleave, and the gates read each
-                // one dense.
+                // Past one row the two interleave, so copy each into a dense
+                // buffer for the gates.
                 let mut parts = Vec::new();
                 for (at, width) in [(0, *alpha_w), (*alpha_w, both.out_dim - alpha_w)] {
                     let buf = backend.alloc(rows * width)?;
@@ -105,9 +105,9 @@ pub(super) struct DeltaNet {
     pub(super) proj: Proj,
 
     /// `[kernel, channels]` row-major, transposed from the file so one tap
-    /// across a run of channels is contiguous, which is how both backends read
-    /// it. The file groups each channel's taps instead, making every load of a
-    /// channel tile a stride.
+    /// across a run of channels is contiguous, as both backends read it. The
+    /// file groups each channel's taps instead, which would make every
+    /// channel-tile load strided.
     pub(super) conv_taps: Gain,
 
     /// Log-space decay rate per head.
@@ -121,8 +121,8 @@ pub(super) struct DeltaNet {
 impl DeltaNet {
     pub(super) fn load(gguf: &Gguf, prefix: &str, cfg: &Config) -> Result<DeltaNet> {
         let d = cfg.d_model;
-        // Query and key at `kv_heads` wide apiece, value at the full `inner`;
-        // equal to `3 * ssm_inner` outside a grouped-query deltanet.
+        // Query and key are `kv_heads` wide each, value the full `inner`.
+        // This is `3 * ssm_inner` unless the deltanet groups its queries.
         let channels = 2 * cfg.ssm_kv_heads * cfg.ssm_head_dim + cfg.ssm_inner;
 
         let conv_name = format!("{prefix}.ssm_conv1d.weight");
@@ -175,8 +175,8 @@ impl DeltaNet {
     }
 
     /// The convolution taps as the backend reads them, newest-first if the
-    /// architecture runs them that way. The reversal goes up under its own key,
-    /// and only the sweep asks for it: no GGUF file stores them reversed.
+    /// architecture runs them that way. Only the sweep asks for reversed taps,
+    /// uploaded under their own key; no GGUF file stores them reversed.
     pub(super) fn taps(&self, backend: &dyn Backend, channels: usize, reversed: bool) -> Result<Buf> {
         if !reversed {
             return self.conv_taps.buf(backend);
@@ -193,9 +193,9 @@ impl DeltaNet {
         Gain::derived(format!("{}.reversed", self.conv_taps.key), flipped).buf(backend)
     }
 
-    /// The per-head decay rate. A GGUF file stores `-exp(A_log)` and llama.cpp
-    /// multiplies by it directly; the HuggingFace checkpoint stores `A_log`, so
-    /// that reading has to exponentiate.
+    /// The per-head decay rate. A GGUF file stores `-exp(A_log)`, used as is.
+    /// The HuggingFace checkpoint stores `A_log`, which has to be
+    /// exponentiated.
     pub(super) fn rate(&self, backend: &dyn Backend, from_log: bool) -> Result<Buf> {
         if !from_log {
             return self.a_log.buf(backend);

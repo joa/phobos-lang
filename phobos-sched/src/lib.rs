@@ -11,7 +11,7 @@ use phobos_cluster::isa::{Instr, InstrId, Op, Region, ScalarArg, Segment, Storag
 use phobos_cluster::tile::{AccessMode, DataType, NodeId, ScalarValue, TileId};
 use phobos_lang::ast::{AttrArg, Dim};
 
-/// Default launch args
+/// Default CTA shape for a leaf launch.
 pub const CTA: (u32, u32, u32) = (phobos_lang::ast::DEFAULT_CTA_THREADS as u32, 1, 1);
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -29,12 +29,12 @@ pub enum IngestPolicy {
 pub struct SegMem {
     pub peak: u64, // high-watermark for this segment
 
-    pub incremental: u64, // bytes NEWLY allocated within the segment
+    pub incremental: u64, // bytes allocated within the segment
 }
 
 #[derive(Debug)]
 pub struct Plan {
-    /// The ordered list of segments to dispatch; indexed by node id
+    /// Segments to dispatch, in order, indexed by node id.
     pub node_segments: Vec<Vec<Segment>>,
 
     /// Memory accounting parallel to node_segments.
@@ -46,7 +46,7 @@ pub struct Plan {
     /// Supertile-grid extents per tensor.
     pub super_grids: Vec<Vec<u64>>,
 
-    /// Tile homes for FETCH instructions.
+    /// Per node, each FETCHed tile and the node it comes from.
     pub fetches: Vec<Vec<(TileId, NodeId)>>,
 
     /// Total bytes moved by FETCHes.
@@ -123,9 +123,9 @@ pub fn plan_with(
     plan_budgeted_with(p, dims, supers, nodes, u64::MAX, policy, &HashMap::new())
 }
 
-/// Plan by partitioning each node's program into segments where the
-/// incremental working set stays within budget bytes.
-/// u64::MAX is one segment per node.
+/// Plans with each node's program split into segments whose incremental
+/// working set stays within `budget` bytes. `u64::MAX` gives one segment per
+/// node.
 pub fn plan_budgeted(
     p: &ClusterProgram,
     dims: &HashMap<String, i64>,
@@ -170,14 +170,15 @@ pub fn plan_budgeted_with(
 }
 
 /// Re-plans the work lost when `dead` fails, for redispatch onto survivors.
-/// `width` is the original cluster size (dead nodes included): output
-/// ownership is keyed by `lin % width`, so it must match the initial plan's.
 ///
-/// Every output a dead node owned but had not yet STOREd is recomputed from
-/// durable inputs re-LOADed from storage. Reissued tiles carry a bumped
-/// `version` so they cannot collide with a survivor's resident tiles, and
-/// iids start above `iid_base` so they never alias its instructions. `durable`
-/// lists outputs to skip: already STOREd, or claimed by another recovery.
+/// `width` is the original cluster size, dead nodes included. Output
+/// ownership is keyed by `lin % width`, so it must match the initial plan.
+///
+/// Every output a dead node owned and had not STOREd is recomputed from
+/// inputs re-LOADed from storage. `durable` lists outputs to skip, either
+/// already STOREd or claimed by another recovery. Reissued tiles carry the
+/// bumped `version` so they cannot collide with resident tiles, and iids
+/// start above `iid_base` so they cannot alias earlier instructions.
 #[allow(clippy::too_many_arguments)]
 pub fn recover_plan(
     p: &ClusterProgram,
@@ -200,7 +201,7 @@ pub fn recover_plan(
 
     let inst = instantiate(p, dims, supers)?;
 
-    // lost are the tiles that were owned by dead nodes
+    // Outputs owned by a dead node and not yet durable.
     let mut lost: HashSet<(usize, u64)> = HashSet::new();
 
     for c in &inst.computes {
@@ -225,15 +226,15 @@ pub fn recover_plan(
 }
 
 struct LowerCfg {
-    /// Live nodes in ascending id order.
-    /// Output lin maps to live[lin % live.len()]
+    /// Live nodes in ascending id order. Output `lin` goes to
+    /// `live[lin % live.len()]`.
     live: Vec<NodeId>,
-    /// Max node id + 1
+    /// Max node id + 1.
     width: usize,
-    /// Restrict to the (tensor, lin) set when given; otherwise emit every chain.
+    /// When set, emit only the chains for these (tensor, lin) outputs.
     restrict: Option<HashSet<(usize, u64)>>,
     version: u16,
-    /// Exclusive lower bound -> the first iid is iid_base + 1.
+    /// Exclusive lower bound: the first iid is `iid_base + 1`.
     iid_base: InstrId,
     budget: u64,
     policy: IngestPolicy,
@@ -602,8 +603,8 @@ fn lower(
         }
     }
 
-    // home of an input supertile = lowest-id consuming node (it LOADs from storage);
-    // every other consuming node FETCHes from it, and home serves it once per remote consumer.
+    // An input supertile's home is its lowest-id consumer, which LOADs it from
+    // storage. Every other consumer FETCHes it from the home, once each.
     let home = |key: &(usize, u64)| -> usize { *consumers_of[key].iter().next().unwrap() };
     let remote_serves = |key: &(usize, u64)| -> u32 { (consumers_of[key].len() - 1) as u32 };
 
@@ -637,7 +638,7 @@ fn lower(
     let mut stores: Vec<(InstrId, NodeId, usize, u64)> = Vec::new();
 
     for node in 0..cfg.width {
-        // (tensor, coord) -> slot; BTreeMap for deterministic output
+        // Keyed by (tensor, coord). A BTreeMap keeps the output deterministic.
         let mut slots: BTreeMap<(usize, u64), TileSlot> = BTreeMap::new();
         let instrs = &mut node_lists[node];
 
@@ -747,7 +748,7 @@ fn lower(
                 }
             }
 
-            // STORE/FREE each tile whose last use is now, per the exact last_use map.
+            // STORE and FREE each tile whose last use is this compute.
             for (t, coords, _) in &c.args {
                 let key = (*t, lin(*t, coords));
                 if last_use[node][&key] != pos {
@@ -826,14 +827,14 @@ fn lower(
     })
 }
 
-/// Partitions one node's instruction list into segments whose incremental
-/// working set (bytes allocated since the segment began, still live at its
-/// peak) stays within budget. Returns the segments, their [`SegMem`], and the
-/// node's absolute resident high-water.
+/// Splits one node's instruction list into segments whose incremental
+/// working set stays within `budget`. Returns the segments, their
+/// [`SegMem`], and the node's peak resident bytes.
 ///
-/// A boundary falls before an ALLOC that would push the segment over budget;
-/// a single tile larger than budget is a hard error. Cutting never reorders,
-/// so deps crossing a boundary stay valid same-node InstrId deps (see [`validate`]).
+/// The incremental working set is the bytes allocated since the segment
+/// began that are still live at its peak. A cut falls before any ALLOC that
+/// would go over budget. A single tile larger than the budget is an error.
+/// Cutting never reorders, so deps across a cut stay valid (see [`validate`]).
 fn segment(
     instrs: Vec<Instr>,
     budget: u64,
@@ -893,9 +894,8 @@ fn segment(
             if b > budget {
                 bail!("supertile of {b} bytes exceeds the memory budget of {budget} bytes",);
             }
-            // Would this allocation push the segment's incremental set over budget?
-            // Inline FREEs can drop resident below the segment's starting floor, so
-            // this must saturate: a plain subtraction could underflow the u64 and panic.
+            // Cut if this allocation takes the segment over budget. FREEs can
+            // drop resident below `seg_start`, so the subtraction saturates.
             if !cur.is_empty() && (resident + b).saturating_sub(seg_start) > budget {
                 flush(&mut cur, &mut segs, &mut mems, seg_peak, seg_start, seg_id);
                 seg_start = resident;

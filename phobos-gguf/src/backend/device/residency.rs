@@ -1,15 +1,12 @@
 use super::*;
 
 impl DeviceBackend {
-    /// The one scratch a prompt pass expands a raw weight into, at least
-    /// `len` elements of it. One buffer at `RAW_DEQUANT_BUDGET_BYTES`
-    /// serves every weight in the model, grown rather than reallocated per
-    /// weight, and held for the process.
+    /// The shared scratch a prompt pass expands a raw weight into, holding at
+    /// least `len` elements. One buffer serves every weight in the model and
+    /// only ever grows.
     ///
-    /// Growing has to drain the stream first: an earlier weight in this pass
-    /// has launches recorded and not yet run that still read the old buffer.
-    /// The scratch reaches the budget on its first use and does not grow
-    /// again.
+    /// Growing drains the stream first, because launches already recorded in
+    /// this pass still read the old buffer.
     pub(super) fn dense_scratch(&self, which: usize, len: usize) -> Result<Buf> {
         if !self.dense_scratch_shared {
             return self.alloc(len);
@@ -26,18 +23,18 @@ impl DeviceBackend {
         Ok(buf)
     }
 
-    /// Record that this pass expanded a raw weight into the scratch.
+    /// Records that this pass used prompt-only scratch, so the next pass
+    /// frees it.
     pub(super) fn note_dense_pass(&self) {
         self.drop_scratch.set(true);
     }
 
-    /// Hand a prompt pass's buffers back once the pass shape moves on from
-    /// it. The pool files a released buffer under its exact length and the
-    /// activation slots only grow, so a server whose prompts end in a ragged
-    /// batch of a new length every request strands a whole pass's worth of
-    /// `rows x width` buffers per length, gigabytes within a few dozen
-    /// requests. Same-length passes, a long prompt's full batches or a
-    /// repeated benchmark, keep theirs: they are the next pass's buffers.
+    /// Frees a prompt pass's buffers when the next pass has a different
+    /// row count.
+    ///
+    /// The pool keys free buffers by exact length. Without this, every new
+    /// prompt length would keep a full pass's worth of buffers alive.
+    /// Passes of the same length keep theirs for reuse.
     pub(super) fn trim_after_prompt(&self, rows: usize) -> Result<()> {
         let last = self.last_rows.replace(rows);
         if last <= 1 || last == rows {
@@ -45,33 +42,27 @@ impl DeviceBackend {
         }
         self.stream.synchronize()?;
         self.act_scratch.borrow_mut().clear();
-        // Freeing anything frees memory the cached pass graphs point at.
+        // Cached pass graphs point into this memory, so drop them too.
         self.pass.borrow_mut().clear();
         self.pool.trim();
         Ok(())
     }
 
-    /// Hand the scratch and the pool's free list back, once, at the start
-    /// of the pass after the one that filled them. This is the only safe
-    /// point: a cached pass graph replays with raw device pointers in its
-    /// kernel nodes, so freeing any later leaves it reading memory the
-    /// driver already took back. The bytes go to the driver, not the pool,
-    /// since a pooled buffer stays reserved for a shape decode never asks
-    /// for. The stream has to be drained first: a buffer released while a
-    /// pass was being recorded is still read by launches that have not
-    /// run.
+    /// Frees the prompt scratch and the pool's free list at the start of the
+    /// pass after the one that used them.
+    ///
+    /// Cached pass graphs hold raw pointers, so they are dropped here too.
+    /// The memory goes back to the driver, not the pool. The stream is
+    /// drained first, since recorded launches may still read these buffers.
     pub(super) fn trim_after_dense(&self) -> Result<()> {
         if !self.drop_scratch.replace(false) {
             return Ok(());
         }
         self.stream.synchronize()?;
-        // The quantized-activation slots always: a prompt pass takes one per
-        // projection, `m * k` bytes each, and they are not pooled, so
-        // nothing else ever gives them back. A decode step re-takes the two
-        // or three it needs at one row, which costs nothing.
+        // Always free the quantized-activation slots. They are not pooled,
+        // and a prompt pass takes one per projection.
         self.act_scratch.borrow_mut().clear();
-        // Freeing anything here frees memory the cached pass graphs' kernel
-        // nodes still point at, so they must not be replayed after this.
+        // Cached pass graphs point into this memory, so drop them too.
         self.pass.borrow_mut().clear();
         if !self.trim_after_dense {
             return Ok(());
@@ -85,9 +76,8 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// Free memory at the first few pass boundaries, then every 32nd: the
-    /// weights land on the first, so the drop across it is what they cost and
-    /// what is left is what the output head has to sit in.
+    /// Reports free memory at the first few pass boundaries, then every
+    /// 32nd. Only with `PHOBOS_VRAM`.
     pub(super) fn mark_pass_vram(&self) {
         let n = self.pass_marks.get();
         self.pass_marks.set(n + 1);
@@ -98,8 +88,8 @@ impl DeviceBackend {
         }
     }
 
-    /// Count an allocation of `len` elements in or out, so the free list can be
-    /// attributed to the shapes that make it up.
+    /// Counts an allocation of `len` elements in or out, so the free list can
+    /// be broken down by length.
     pub(super) fn note_alloc(&self, len: usize, delta: isize) {
         if !vram_report() {
             return;
@@ -107,9 +97,8 @@ impl DeviceBackend {
         *self.alloc_hist.borrow_mut().entry(len).or_insert(0) += delta;
     }
 
-    /// The shapes the pool's free list is made of: an entry is one distinct
-    /// length, and a length released more often than taken is one sitting in
-    /// the free list for a shape nothing is asking for.
+    /// Prints the pool's free list by length. A length released more often
+    /// than taken is sitting idle in the free list.
     pub(super) fn mark_alloc_hist(&self) {
         if !vram_report() {
             return;
@@ -135,9 +124,9 @@ impl DeviceBackend {
         }
     }
 
-    /// What the pass allocations come to, against the raw weights. Neither is
-    /// what [`vram_mark`] reports: the difference between the two is the pool's
-    /// free list plus whatever the driver is holding on its own account.
+    /// Prints the live buffers and the weight storage. The gap to
+    /// [`vram_mark`]'s figure is the pool's free list plus what the driver
+    /// holds itself.
     pub(super) fn mark_buffers(&self) {
         if !vram_report() {
             return;
@@ -228,7 +217,7 @@ impl DeviceBackend {
     }
 }
 
-/// The same for a named model constant: names what is big rather than where.
+/// Reports a large named model constant. Only with `PHOBOS_VRAM`.
 pub(super) fn note_big_const(key: &str, len: usize) {
     if len * size_of::<f32>() < (8 << 20) || !vram_report() {
         return;
@@ -239,10 +228,8 @@ pub(super) fn note_big_const(key: &str, len: usize) {
     );
 }
 
-/// Where a large pass buffer is asked for. `PHOBOS_VRAM=1` only: the call
-/// site is the only thing that names it, and one buffer nobody remembers
-/// asking for can be the difference between the output head staying
-/// resident or not.
+/// Reports the call site of a large pass buffer allocation. Only with
+/// `PHOBOS_VRAM`.
 #[track_caller]
 pub(super) fn note_big_alloc(len: usize) {
     if len * size_of::<f32>() < (8 << 20) || !vram_report() {
@@ -255,9 +242,8 @@ pub(super) fn note_big_alloc(len: usize) {
     );
 }
 
-/// What the card has free at a named point, and what the step before it
-/// cost. `PHOBOS_VRAM=1` only; this is how the output head's headroom gets
-/// attributed to the weights, the loaded modules and the context.
+/// Reports free device memory at a named point, and the change since the
+/// last mark. Only with `PHOBOS_VRAM`.
 pub(super) fn vram_mark(label: &str) {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(-1);
@@ -282,8 +268,7 @@ pub(super) fn vram_mark(label: &str) {
     );
 }
 
-/// Whether `PHOBOS_VRAM` is set, read once: every allocation and release
-/// asks, and reading the environment takes a process-wide lock.
+/// Whether `PHOBOS_VRAM` is set. Read once, since every allocation asks.
 pub(super) fn vram_report() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| phobos_base::env::flag("PHOBOS_VRAM"))

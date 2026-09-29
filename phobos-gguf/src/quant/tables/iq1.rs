@@ -1,6 +1,6 @@
-// Ternary grid for IQ1_S and IQ1_M: 2048 entries, each eight signed
-// int8 lanes (-1, 0, 1) packed into one u64. Index is the low byte of a
-// block's qs plus three high bits from qh. From ggml-common.h iq1s_grid.
+// Ternary grid for IQ1_S and IQ1_M, from ggml-common.h `iq1s_grid`. 2048
+// entries, each eight signed int8 values (-1, 0, 1) packed into one u64. The
+// index is a `qs` byte plus three high bits from `qh`.
 pub(crate) static IQ1S_GRID: [u64; 2048] = [
     0xffffffffffffffff, 0xffffffffffffff01, 0xffffffffffff0000, 0xffffffffffff01ff, 0xffffffffffff0101, 0xffffffffff00ff00, 0xffffffffff000000, 0xffffffffff01ffff,
     0xffffffffff01ff01, 0xffffffffff0101ff, 0xffffffffff010101, 0xffffffff00ff0000, 0xffffffff0000ff00, 0xffffffff000000ff, 0xffffffff00000001, 0xffffffff00010000,

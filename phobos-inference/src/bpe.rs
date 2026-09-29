@@ -1,7 +1,6 @@
-// Byte-level BPE, the part that is the same whatever supplied the vocabulary:
-// a GGUF file carries tokens and merges as metadata, an ONNX export carries
-// none, but both then split text on a pre-tokenizer pattern, map each byte to
-// a visible character, and merge adjacent pairs by rank.
+// Byte-level BPE, shared by both front ends whatever supplied the vocabulary.
+// Text is split on a pre-tokenizer pattern, each byte is mapped to a visible
+// character, and adjacent pairs are merged by rank.
 
 use std::collections::HashMap;
 
@@ -97,9 +96,9 @@ impl PreTokenizer {
     }
 }
 
-/// A pre-tokenizer, the byte-to-character mapping, and the merge ranks. Holds
-/// no vocabulary: a caller supplies the symbol-to-id lookup, which is where
-/// the two front ends differ.
+/// A pre-tokenizer, the byte-to-character mapping, and the merge ranks.
+///
+/// Holds no vocabulary. The caller supplies the symbol-to-id lookup.
 pub struct ByteBpe {
     ranks: HashMap<(String, String), u32>,
     byte_to_char: [char; 256],
@@ -148,8 +147,7 @@ impl ByteBpe {
     }
 
     /// Encode `text`, matching `specials` literally and BPE-merging the rest.
-    /// `lookup` resolves a symbol against the caller's vocabulary, the one
-    /// part a front end supplies itself.
+    /// `lookup` resolves a symbol against the caller's vocabulary.
     pub fn encode<T: Copy>(
         &self,
         text: &str,
@@ -206,9 +204,10 @@ impl ByteBpe {
         Ok(())
     }
 
-    /// The raw byte stream behind a run of vocabulary tokens. A token can end
-    /// mid-character, so a streaming caller must buffer these and emit
-    /// complete UTF-8 only.
+    /// The raw bytes behind a run of vocabulary tokens.
+    ///
+    /// A token can end mid-character, so a streaming caller must buffer
+    /// these and emit only complete UTF-8.
     pub fn decode_bytes<'a>(&self, tokens: impl IntoIterator<Item = &'a str>) -> Vec<u8> {
         tokens
             .into_iter()
@@ -358,8 +357,8 @@ mod tests {
     #[test]
     fn matches_a_special_literally_and_longest_first() {
         let (bpe, mut vocab) = toy(PreTokenizer::Gpt2);
-        // The merges never build either marker, so only a literal match finds
-        // them, and the longer one has to win where both could start.
+        // No merge builds either marker, so only a literal match finds them.
+        // Where both could start, the longer one must win.
         vocab.insert("<|end|>".into(), 300);
         vocab.insert("<|end_of_text|>".into(), 301);
         let specials = Specials::new([

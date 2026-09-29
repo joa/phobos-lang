@@ -1,13 +1,14 @@
-// A decode step's misses on the host: one row through a few experts, a
-// few hundred microseconds of work a block. It runs on the team rather
-// than the pool, whose wake and fork-join cost as much as the work at this
-// size: every member takes chunks of the gate and up rows of every miss,
-// meets the others at a barrier, quantizes its share of the SwiGLUs, and
-// after a second barrier takes chunks of the down rows.
+// A decode step's expert misses on the host: one row through a few experts,
+// a few hundred microseconds of work per block. It runs on the team, not
+// the pool, whose wake and fork-join cost as much as the work.
 //
-// The runtime starts the work and goes on recording the next block while
-// the team computes; the device waits for the result on a flag in mapped
-// memory, which the last member to finish raises.
+// Every member takes chunks of the gate and up rows of every miss, then
+// meets the others at a barrier. It then quantizes its share of the
+// SwiGLUs and, after a second barrier, takes chunks of the down rows.
+//
+// The runtime starts the work and keeps recording the next block while the
+// team computes. The device waits on a flag in mapped memory, which the
+// last member to finish raises.
 
 use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -19,8 +20,8 @@ use super::team::{Member, Team};
 use super::{Isa, Q8Act, Source, gemm, swiglu};
 use crate::experts::Stack;
 
-/// Weight rows a chunk takes: a few kilobytes of one expert, so a handful
-/// of misses spread over every member.
+/// Weight rows per chunk: a few kilobytes of one expert, so even a handful
+/// of misses spreads over every member.
 const ROW_CHUNK: usize = 16;
 
 /// A buffer the members write disjoint parts of.
@@ -100,8 +101,8 @@ impl<S: Source> RowWork<S> {
         self.failed.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get_or_insert(e);
     }
 
-    /// One member's share. Every member reaches both barriers whatever
-    /// fails, or the rest would wait for it.
+    /// One member's share. Every member reaches both barriers even on
+    /// failure, or the others would wait forever.
     fn member(&self, member: &Member) {
         let (gate, up, down) = (self.source.shape(Stack::Gate), self.source.shape(Stack::Up), self.source.shape(Stack::Down));
         let (d, d_ff, m) = (gate.k, gate.n, self.misses.len());
@@ -154,8 +155,8 @@ impl<S: Source> RowWork<S> {
     }
 }
 
-/// The experts `misses` names, each with its weight, over one row `x`, the
-/// weighted results added into `out`.
+/// Runs the experts `misses` names over one row `x` and adds their
+/// weighted results into `out`.
 pub fn experts_row(source: &impl Source, misses: &[(usize, f32)], x: &[f32], out: &mut [f32]) -> Result<()> {
     ensure!(out.len() == x.len(), "one row of {} for {} outputs", x.len(), out.len());
     if misses.is_empty() {
@@ -211,21 +212,20 @@ impl StartedRow {
     }
 }
 
-/// [`experts_row`] started on the team's workers, returning at once. The
-/// sum is written to `to.out` in place of what was there, and `to.ready`
-/// is set once it is, whatever went wrong on the way.
+/// [`experts_row`] started on the team's workers; returns at once. The sum
+/// overwrites `to.out`, then `to.ready` is set, even if something failed.
 ///
 /// # Safety
-/// `to.out` holds `to.len` floats and `to.ready` stays valid, and the
-/// caller touches neither, until the flag is set; `source` borrows nothing
-/// that ends before then.
+/// Until the flag is set, `to.out` holds `to.len` floats, `to.ready` stays
+/// valid, and the caller touches neither. `source` borrows nothing that
+/// ends before then.
 pub unsafe fn start_experts_row<S: Source + Send + 'static>(source: S, misses: Vec<(usize, f32)>, x: &[f32], to: RowOut) -> Result<StartedRow> {
     let work = RowWork::new(source, misses, x)?;
     let outcome = Arc::new(Outcome::default());
     let (left_behind, started) = (Arc::clone(&outcome), Instant::now());
     let job = move |member: &Member| {
-        // Raised from a guard, so a member that fails or panics still
-        // leaves the device a result to take.
+        // The flag is raised from a guard, so a member that fails or panics
+        // still leaves the device a result.
         struct Leave<'a, S: Source> {
             work: &'a RowWork<S>,
             to: &'a RowOut,
@@ -257,8 +257,8 @@ pub unsafe fn start_experts_row<S: Source + Send + 'static>(source: S, misses: V
 
 static TEAM: OnceLock<Team> = OnceLock::new();
 
-/// Builds the team with `size` members, before its first use, for a
-/// benchmark that wants a size of its own. Once it exists the size stands.
+/// Builds the team with `size` members before its first use, for a
+/// benchmark that wants its own size. The size cannot change afterwards.
 pub fn init_team(size: usize) -> Result<()> {
     ensure!(TEAM.set(Team::new(size)).is_ok(), "the host team is already running");
     Ok(())

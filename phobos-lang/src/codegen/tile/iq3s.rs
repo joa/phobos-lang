@@ -1,13 +1,12 @@
 // IQ3_S's decode geometry, shared by the contraction (`iq3s_qdot.rs`) and the
-// expansion (`qdecode.rs`). IQ3_XXS's two four-wide grid entries again, but
-// with IQ2_S's direct-byte sign table: no lo/hi assembly at all, a lane reads
-// its sign index outright.
+// expansion (`qdecode.rs`). A lane has two four-wide grid entries, like
+// IQ3_XXS, and reads its sign index as one byte, like IQ2_S.
 
 use super::*;
 
-// IQ3_S block layout (phobos-gguf/src/quant/iq3_s.rs): 110 bytes, qs at
-// byte 2 (two grid-index bytes a lane), qh at byte 66 (one byte a half),
-// signs at byte 74, scales at byte 106.
+// IQ3_S device block layout: 108 bytes, qs at byte 0 (two grid-index bytes a
+// lane), qh at byte 64 (one byte a half), signs at byte 72, scales at byte
+// 104. A device block drops the file's leading f16 `d` (`Quant::device_block`).
 pub(super) const IQ3S_BLOCK_BYTES: i64 = 108;
 const IQ3S_QS_OFF: i64 = 0;
 const IQ3S_QH_OFF: i64 = 64;
@@ -147,7 +146,7 @@ impl<'c> Codegen<'c> {
         };
         let g1_base = widen(self, g1_byte, geom.qh_div1)?;
         let g2_base = widen(self, g2_byte, geom.qh_div2)?;
-        // Four bytes a grid entry, eight for the sign entry: three loads.
+        // Four bytes per grid entry and eight for the sign entry: three loads.
         let z = self.const_index(kb, 0)?;
         let g_t = Type::vector(&[IQ3S_HALF as u64], self.i8_t);
         let s_t = Type::vector(&[2 * IQ3S_HALF as u64], self.i8_t);
@@ -163,8 +162,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// One decoded weight: element `y` of grid entry `entry` (0 or 1), signed
-    /// by the matching half of the lane's sign entry. Both are already in
-    /// registers, so this is arithmetic only.
+    /// by the matching half of the lane's sign entry, both already in
+    /// registers.
     pub(super) fn iq3s_decoded(
         &mut self,
         kb: &Block<'c>,

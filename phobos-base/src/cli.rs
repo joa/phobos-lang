@@ -58,19 +58,17 @@ impl Args {
 
     /// The tokens that are neither a flag nor a flag's value.
     ///
-    /// `valued` names every flag that takes one, since nothing else says where
-    /// a value ends and a positional begins. A long flag outside that set is a
-    /// typo rather than a positional, and is reported as one; a single-dash
-    /// token is left alone, so a negative number still reads as an argument.
+    /// `valued` lists every flag that takes a value. Any other `--` token is
+    /// reported as an unknown flag. Single-dash tokens count as positionals,
+    /// so a negative number still works as an argument.
     pub fn positional(&self, valued: &[&str]) -> Result<Vec<&str>> {
         self.positional_with(valued, &[])
     }
 
     /// [`Args::positional`] where some long flags are switches.
     ///
-    /// A switch carries no value, so nothing distinguishes it from a typo
-    /// except being named, and `switches` is where it is named. Split from
-    /// [`Args::positional`] so the common case still reads as one list.
+    /// `switches` lists the valueless long flags, so they are not reported
+    /// as unknown.
     pub fn positional_with(&self, valued: &[&str], switches: &[&str]) -> Result<Vec<&str>> {
         let mut out = Vec::new();
         let mut tokens = self.tokens.iter();

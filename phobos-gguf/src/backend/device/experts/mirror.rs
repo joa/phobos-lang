@@ -1,5 +1,5 @@
-// A block's experts in pinned host memory, in the grouped layout the slabs
-// hold, so a miss is one `cuMemcpyHtoDAsync` from here into its slot.
+// A block's experts in pinned host memory, in the slabs' grouped layout.
+// Filling a slot is one `cuMemcpyHtoDAsync` per region.
 
 use std::ffi::c_void;
 use std::sync::Arc;
@@ -11,9 +11,9 @@ use crate::experts::ExpertSet;
 use crate::experts::Stack;
 use crate::simd::{Shape, Source, Weight};
 
-/// The three stacks of one block, each `count` experts of
-/// [`ExpertStack::grouped_bytes`] back to back, then the three scale planes
-/// the same way, all page-locked.
+/// One block's experts, page-locked. The three stacks come first, each
+/// holding `count` experts of [`ExpertStack::grouped_bytes`] back to back.
+/// The three scale planes follow in the same layout.
 pub(super) struct Mirror {
     host: *mut c_void,
     /// Byte offsets of the six regions: gate, up and down blocks, then
@@ -41,8 +41,8 @@ impl Mirror {
             bytes += stacks[i % 3].count() * per[i];
         }
         let mut host: *mut c_void = std::ptr::null_mut();
-        // Pinned so the copies out of it are asynchronous; not mapped into
-        // the device, since no kernel reads it in place.
+        // Pinned so copies from it are asynchronous. Not mapped, since no
+        // kernel reads it in place.
         cuda_ok(
             unsafe { cust::sys::cuMemHostAlloc(&mut host, bytes, 0) },
             "pinning an expert mirror",
@@ -61,8 +61,8 @@ impl Mirror {
             for (i, region) in regions.into_iter().enumerate() {
                 let stack = stacks[i % 3];
                 let per = per[i];
-                // A few threads a region: the regroup is a memcpy in a
-                // different order.
+                // The regroup is a reordered memcpy, so a few threads per
+                // region suffice.
                 let lanes = 4;
                 let chunk = stack.count().div_ceil(lanes);
                 for (lane, part) in region.chunks_mut(chunk * per).enumerate() {
@@ -95,9 +95,8 @@ impl Mirror {
         std::array::from_fn(|i| ((base + self.at[i] + e * self.per[i]) as *const c_void, self.per[i]))
     }
 
-    /// The mirror as the host kernels' source of `set`'s experts, which
-    /// are the same bytes in the device's layout: pinned, so a pass never
-    /// waits on a trimmed mapping.
+    /// The mirror as the host kernels' source for `set`'s experts. Being
+    /// pinned, it never waits on a trimmed mapping.
     pub(super) fn source<'a>(&'a self, set: &'a ExpertSet) -> MirrorSource<'a> {
         MirrorSource { mirror: self, set }
     }

@@ -2,17 +2,16 @@
 //
 //   cargo run --release --features cuda -p phobos-gguf --example moe_probe -- [MIRROR_GIB]
 //
-// In order: whether the driver maps host memory into the device's address
-// space at all; whether it grants a pinned, device-mapped allocation the
-// size of the model's experts (20 GiB by default, the argument overrides);
-// how fast the K-quant decode matvec reads weights straight out of that
-// mapping over PCIe against the same kernel on device memory; how fast the
-// copy engine moves expert-sized chunks from pinned and from pageable host
-// memory with one, four and sixteen in flight; and whether copies on a
-// second stream overlap kernels on the first, or serialize behind them.
+// The probes, in order. Whether the driver can map host memory into the
+// device's address space. Whether it grants a pinned, device-mapped
+// allocation the size of the model's experts, 20 GiB unless the argument
+// says otherwise. How fast the K-quant decode matvec reads weights from that
+// mapping over PCIe, against the same kernel on device memory. How fast the
+// copy engine moves expert-sized chunks from pinned and from pageable
+// memory, with 1, 4 and 16 in flight. Whether copies on a second stream
+// overlap kernels on the first.
 //
-// Every number is printed as measured, once, on this card and driver; none
-// is a spec-sheet figure. Nothing here touches a model file.
+// Every number is measured once on this card. No model file is read.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -116,9 +115,8 @@ fn probe_mirror(gib: usize) -> Result<Option<Mapped>> {
                 mapped.device,
                 started.elapsed().as_secs_f64()
             );
-            // Given back: the zero-copy probe wants a small mapping of its
-            // own, and holding 20 GiB pinned for the rest of the run says
-            // nothing more.
+            // Freed now, since the zero-copy probe uses a small mapping of
+            // its own.
             cuda_ok(unsafe { sys::cuMemFreeHost(mapped.host) }, "free pinned")?;
         }
         Err(e) => {
@@ -142,9 +140,9 @@ fn probe_mirror(gib: usize) -> Result<Option<Mapped>> {
     Ok(host_alloc_mapped(small).map_err(|e| println!("small mapping refused: {e}")).ok())
 }
 
-/// The decode matvec over eight experts' worth of rows, from `qb` (a device
-/// pointer, wherever it points), with its operands built once so that
-/// timing it queues nothing but launches.
+/// The decode matvec over eight experts' rows, reading weights through the
+/// device pointer `qb`, wherever it points. Operands are built once, so
+/// timing queues only launches.
 struct Matvec {
     function: sys::CUfunction,
     n: usize,
@@ -195,7 +193,8 @@ impl Matvec {
         )
     }
 
-    /// Milliseconds a launch over `reps` launches, by events on `stream`.
+    /// Mean milliseconds per launch over `reps` launches, timed by events on
+    /// `stream`.
     fn time(&mut self, stream: &Stream, reps: usize) -> Result<f64> {
         self.launch(stream)?;
         stream.synchronize()?;
@@ -324,8 +323,8 @@ fn probe_overlap(stream: &Stream, copy_stream: &Stream) -> Result<()> {
     let reps = ((copy_ms / ms_one).ceil() as usize).max(1);
     let kernels_ms = matvec.time(stream, reps)? * reps as f64;
 
-    // Both at once: the copies queued on their stream, the kernels on
-    // theirs, nothing else submitted, one wall clock over the pair.
+    // Both at once, copies and kernels on their own streams, timed by one
+    // wall clock.
     stream.synchronize()?;
     copy_stream.synchronize()?;
     let started = Instant::now();

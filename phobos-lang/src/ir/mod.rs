@@ -76,9 +76,9 @@ struct ValueData {
     ty: Type,
     def: Def,
     uses: Vec<Use>,
-    /// The source name the value was bound to, when it had one. Only ever
-    /// informative: the printer shows it, and the lowering treats a named
-    /// tile as one the source may read again.
+    /// The source name the value was bound to, if any. The printer shows
+    /// it, and the lowering treats a named tile as one the source may read
+    /// again.
     name: Option<String>,
 }
 
@@ -106,16 +106,16 @@ pub struct KernelInfo {
     pub shape_env: BTreeMap<String, i64>,
 }
 
-/// One kernel's graph: an SSA arena with structured control flow, and the
-/// home of every analysis and rewrite that runs before the MLIR lowering.
+/// One kernel's graph: an SSA arena with structured control flow. Every
+/// analysis and rewrite before the MLIR lowering runs on it.
 ///
-/// Ids are the only handles; nothing hands out a reference into the arena
-/// that outlives a call. `For`, `While` and `If` own their blocks, so a
-/// value dominates a use when its defining op precedes the use in the same
-/// block or in an enclosing one. The mutation methods below are the only
-/// way to change an operand, and each leaves operands and use lists
-/// agreeing. An erased op or value leaves a tombstone, so a stale id panics
-/// instead of resolving to something else.
+/// Ids are the only handles, and no reference into the arena outlives a
+/// call. `For`, `While` and `If` own their blocks, so a value dominates a
+/// use when its defining op precedes the use in the same block or in an
+/// enclosing one. Only the mutation methods below change an operand, and
+/// each keeps operands and use lists in agreement. An erased op or value
+/// leaves a tombstone, so a stale id panics instead of resolving to
+/// something else.
 #[derive(Debug)]
 pub struct Ir {
     ops: Vec<Option<OpData>>,

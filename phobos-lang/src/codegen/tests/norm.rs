@@ -29,11 +29,11 @@ fn a_row_of_whole_stripes_gates_nothing() {
 
 #[test]
 fn a_partial_last_stripe_gates_its_loads_and_stores() {
-    // 2560 elements at 256 threads: two stripes and a half, so the third
+    // 2560 elements at 256 threads: two and a half stripes, so the third
     // stripe's pieces are gated on their element existing.
     let mlir = emit_mlir(&norm_src(80, 256, true));
     assert_contains(&mlir, &["gpu.shuffle", "arith.cmpi ult", "scf.if"]);
-    // The gated loads yield zeros past the end; the shuffles are not gated.
+    // The gated loads yield zeros past the end. The shuffles are not gated.
     let (before, _) = mlir.split_once("gpu.shuffle").expect("a shuffle");
     assert!(before.contains("scf.if"), "{mlir}");
 }

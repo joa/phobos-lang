@@ -1,13 +1,15 @@
 // Delta rule kernel sources: the WY transform, the scan, the
 // causal convolution and the gates.
 
-/// The gated delta rule, carrying the recurrent state in shared memory.
-/// Positions are sequential (looped inside the kernel), but state columns
-/// are independent, so the state tiles into `DELTA_TN`-wide slices to fit
-/// alongside the operands in a head's 64K shared-memory footprint. Rows are
-/// `[position, head]` with head fastest, so program `h` steps `H` at a time.
-/// The rank-one write is a broadcast product rather than a `dot` of `[D, 1]`
-/// by `[1, TN]`: the same arithmetic on a cheaper path.
+/// The gated delta rule, with the recurrent state in shared memory.
+///
+/// Positions run sequentially inside the kernel. State columns are
+/// independent, so the state is tiled into `DELTA_TN`-wide slices to fit in
+/// shared memory. Rows are `[position, head]` with head fastest, so program
+/// `h` steps by `H`.
+///
+/// The rank-one update is a broadcast product rather than a `dot`, which is
+/// cheaper for the same arithmetic.
 pub(crate) const DELTA_SRC: &str = "\
 @launch(256)
 @autotune(H in [{H}], D in [{D}], TN in [{TN}])
@@ -43,11 +45,13 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
 }
 ";
 
-/// The gated delta rule in chunks, as two passes ([`delta_wy_src`] here,
-/// [`delta_scan_src`] below): unrolls the sequential dependency between
-/// positions into matmuls over chunks of `C`, split into two kernels since
-/// `N`, its inverse, and the intra-chunk attention depend only on the keys
-/// and are shared across every state column.
+/// First pass of the chunked gated delta rule; [`delta_scan_src`] is the
+/// second.
+///
+/// The chunked form turns the sequential dependency between positions into
+/// matmuls over chunks of `C`. This pass computes what depends only on the
+/// keys (`N`, its inverse and the intra-chunk attention), since it is
+/// shared across every state column.
 ///
 /// Recurrence: `S_i = a_i (I - beta_i k_i^T k_i) S_{i-1} + beta_i k_i^T
 /// v_i`. With `b_i` the cumulative log decay, the chunk's pseudo-values
@@ -59,23 +63,21 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
 ///
 /// with `D[i, j] = exp(b_i - b_j)`.
 ///
-/// Decay rides as the matrix `D` rather than folded into per-vector
-/// exponents, which would overflow f32 as the chunk decays; `tril` selects
-/// rather than multiplies, so the masked infinities never reach an operand.
-/// `(I + N)^-1`
-/// uses repeated squaring, `(I - M)^-1 = prod_j (I + M^(2^j))`, for
-/// `log2(C) - 1` matmul rounds instead of `C` sequential
-/// forward-substitution steps, since `N` is nilpotent. `(T diag(exp b) K)
-/// S_0` associates right to keep the intermediate `[C, TN]` rather than
-/// `[C, head_dim]`, and `tril(D) - I` is the strict lower mask since `D`'s
-/// diagonal is exactly 1.
+/// Decay is kept as the matrix `D`, because per-vector exponents would
+/// overflow f32. `tril` selects rather than multiplies, so masked
+/// infinities never reach an operand.
 ///
-/// `E` is the uploaded identity, serving as `I` and that diagonal. The
-/// three `[C, C]` matrices this pass leaves are laid out one row per
-/// position with heads side by side, like the operands.
+/// `N` is nilpotent, so `(I + N)^-1` uses repeated squaring,
+/// `(I - M)^-1 = prod_j (I + M^(2^j))`, in `log2(C) - 1` matmul rounds.
+/// `(T diag(exp b) K) S_0` associates right to keep the intermediate at
+/// `[C, TN]`. `tril(D) - I` is the strict lower mask since `D`'s diagonal
+/// is exactly 1.
+///
+/// `E` is the uploaded identity. The three `[C, C]` outputs are laid out
+/// one row per position with heads side by side, like the operands.
 pub(crate) fn delta_wy_src(heads: usize, head_dim: usize, chunk: usize) -> String {
-    // Squarings alternate between two names since a matmul writes its target
-    // as it goes, and `p = dot(p, p)` would read what it overwrote.
+    // Squarings alternate between two names, since `p = dot(p, p)` would
+    // read what it has already overwritten.
     let rounds = chunk.trailing_zeros().max(2) - 1;
     let mut invert = String::from("  var p0: tile<f32>[C, C] = dot(nn, nn)\n");
 
@@ -149,9 +151,10 @@ kernel delta_wy(Q:   tensor<f32>[N, QW],
     )
 }
 
-/// The state scan of the chunked delta rule; see [`delta_wy_src`]. The
-/// transpose of `k` is taken at its last use so the query tile can reuse
-/// its buffer: keeps shared memory at 42 KB against the 48 KB limit.
+/// The state scan of the chunked delta rule; see [`delta_wy_src`].
+///
+/// The transpose of `k` is taken right after its last use, so the query
+/// tile can reuse its buffer and shared memory stays under 48 KB.
 pub(crate) fn delta_scan_src(heads: usize, head_dim: usize, tile: usize, chunk: usize) -> String {
     format!(
         "@launch(256)
@@ -193,8 +196,8 @@ kernel delta_scan(Q:   tensor<f32>[N, QW],
     )
 }
 
-/// Positions one chunk covers. Sized by shared memory: its tiles run 42 KB
-/// of the 48 KB static limit.
+/// Positions one chunk covers, bounded by the 48 KB static shared memory
+/// limit.
 pub(crate) const DELTA_CHUNK: usize = 16;
 
 pub(crate) const DELTA_CHUNK_TN: usize = 64;
@@ -203,22 +206,18 @@ pub(crate) const DELTA_CHUNK_TN: usize = 64;
 pub(crate) const DELTA_TN: usize = 16;
 
 /// The delta net's causal depthwise convolution, fused with the activation,
-/// the split into per-head planes, and their normalization. One program
-/// owns one position's one head of one plane (`D` channels).
+/// the split into per-head planes, and their normalization. A program owns
+/// `TB` positions of one head of one plane (`D` channels).
 ///
-/// The position count is the output's, `R3` being its three planes of them.
-/// `X` already carries the previous call's trailing positions ahead of this
-/// call's, so tap `k` of position `t` is row `t + k` with no boundary case.
-/// Taps arrive as `[KS, C]`, transposed relative to the file, so one tap
-/// across a run of channels is one contiguous load. The plane rides the
-/// grid's third axis rather than three separate launches, since fewer,
-/// larger launches cost less dispatch overhead.
+/// `R3` is three planes of output positions. `X` already holds the previous
+/// call's trailing positions ahead of this call's, so tap `k` of position
+/// `t` is row `t + k` with no boundary case. Taps are `[KS, C]`, transposed
+/// from the file, so one tap over a run of channels is a contiguous load.
+/// The plane is the grid's third axis, to save two launches.
 ///
-/// `h`, the grid's head axis, ranges over the packed (value) head count.
-/// Query and key exist at only `kv_heads` physical columns for a
-/// grouped-query deltanet, so those two planes read column `h % kv_heads`
-/// instead, matching upstream's `ggml_repeat_4d`; this collapses to `h` for
-/// the non-grouped case.
+/// The head axis `h` covers the value heads. In a grouped-query deltanet,
+/// query and key have only `kv_heads` heads, so those planes read head
+/// `h % kv_heads`, matching upstream's `ggml_repeat_4d`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn delta_conv_src(
     heads: usize,
@@ -293,12 +292,12 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
     )
 }
 
-/// Positions one program of [`delta_conv_src`] carries: one position at a
-/// time is almost all dispatch overhead, so calls batch several.
+/// Most positions one program of [`delta_conv_src`] carries.
 pub(crate) const DELTA_CONV_ROWS: usize = 8;
 
-/// The positions a call batches. The tile has no remainder, so this is the
-/// largest power of two up to [`DELTA_CONV_ROWS`] dividing the call.
+/// Positions per program for a call: the largest power of two up to
+/// [`DELTA_CONV_ROWS`] that divides `rows`, since the tile has no
+/// remainder.
 pub(crate) fn delta_conv_batch(rows: usize) -> usize {
     let mut batch = DELTA_CONV_ROWS;
     while batch > 1 && !rows.is_multiple_of(batch) {
@@ -307,9 +306,9 @@ pub(crate) fn delta_conv_batch(rows: usize) -> usize {
     batch
 }
 
-/// The delta rule's per-head gates. Softplus is `max(x, 0) + log(1 +
-/// exp(-|x|))` rather than the direct `log(1 + exp(x))`, since the direct
-/// form overflows well inside the decay projection's range.
+/// The delta rule's per-head gates. Softplus is computed as
+/// `max(x, 0) + log(1 + exp(-|x|))`, because `log(1 + exp(x))` overflows
+/// within the decay projection's range.
 pub(crate) fn delta_gates_src(heads: usize, tile_rows: usize) -> String {
     format!(
         "@launch(256)

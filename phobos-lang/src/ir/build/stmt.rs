@@ -260,8 +260,8 @@ impl Build {
         step: Option<&Expr>,
         body: &[Stmt],
     ) -> Result<()> {
-        // Loop-invariant dot operands staged into the preheader once; the
-        // loop carries the buffers as operands so they live through it.
+        // Stage loop-invariant dot operands once, in the preheader. The loop
+        // takes the buffers as operands so they stay live through it.
         let frame = self.hoist_dot_staging(body)?;
         let bufs: Vec<ValueId> = frame.iter().map(|&(_, buf)| buf).collect();
         self.hoisted.push(frame);

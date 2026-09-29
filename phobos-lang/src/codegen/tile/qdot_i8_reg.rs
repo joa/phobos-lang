@@ -1,8 +1,10 @@
-// `<fmt>_qdot_i8_t`: a raw format's single-row contraction against an
-// int8 activation in `dp4a`. Four lanes decode a column, a quarter of each
-// 256-element block apiece, and a warp covers eight columns; the block
-// bytes ride a two-deep register pipeline and the activations come from
-// L1 at decode time. The decode itself is `qgemm_fmt.rs`'s.
+// `<fmt>_qdot_i8_t`: a raw format's single-row contraction against an int8
+// activation, using `dp4a`.
+//
+// Four lanes decode a column, each a quarter of every 256-element block, so
+// a warp covers eight columns. The block bytes go through a register
+// pipeline, and the activations are read from L1 at decode time. The decode
+// itself lives in `qgemm_fmt.rs`.
 
 use super::qgemm_fmt::{IQ1_LUT4_MINUS, IQ1_LUT4_PLUS};
 use super::*;
@@ -126,10 +128,10 @@ impl<'c> Codegen<'c> {
         let one_k = self.const_index(&body, 1)?;
         let last_blk = self.subi(&body, nb, one_k)?;
 
-        // Blocks 0..depth are fetched before the loop; each turn decodes the
+        // Blocks 0..depth are fetched before the loop. Each turn decodes the
         // oldest and fetches the block depth ahead. The loop stops depth
-        // blocks short, and the blocks still in the pipeline are decoded
-        // after it, each gated on existing (the fetch clamps to the last).
+        // blocks short, and the blocks left in the pipeline are decoded after
+        // it, each gated on existing. The fetch clamps to the last block.
         let mut stages = Vec::with_capacity(depth);
         for stage in 0..depth {
             let blk = self.const_index(&body, stage as i64)?;
@@ -347,8 +349,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// The lane's 64 activations from `k_off` as `dp4a` words, and their
-    /// scales: 64 contiguous elements under two scales, or for Q6_K four
-    /// runs of sixteen 32 apart under four (see `kquant_qdot.rs`).
+    /// scales. That is 64 contiguous elements under two scales, or for Q6_K
+    /// four runs of sixteen, 32 apart, under four (see `kquant_qdot.rs`).
     pub(super) fn qr_act(
         &mut self,
         block: &Block<'c>,
@@ -604,10 +606,11 @@ impl<'c> Codegen<'c> {
         Ok((self.qg_negate(kb, m0, masks[0])?, self.qg_negate(kb, m1, masks[1])?))
     }
 
-    /// The two 0/-1 byte-mask words of eight sign bits. With `parity` the
-    /// eighth bit is the odd parity of the seven given. `v * 0x204081`
-    /// lays four copies of a nibble seven bits apart; `0x01010101` keeps
-    /// one bit of each.
+    /// The two 0/-1 byte-mask words of eight sign bits. With `parity`, the
+    /// eighth bit is the odd parity of the seven given.
+    ///
+    /// `v * 0x204081` lays four copies of a nibble seven bits apart, and
+    /// `0x01010101` keeps one bit of each.
     fn qr_sign_masks(&mut self, kb: &Block<'c>, sidx: Value<'c, 'c>, parity: bool) -> Result<[Value<'c, 'c>; 2]> {
         let bits = if parity {
             let ones = self.push(kb, OperationBuilder::new("math.ctpop", self.loc).add_operands(&[sidx]).add_results(&[self.i32_t]).build()?)?;

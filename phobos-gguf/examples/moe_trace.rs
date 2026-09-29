@@ -6,12 +6,11 @@
 //   cargo run --release -p phobos-gguf --example moe_trace -- \
 //       MODEL.gguf -n 64 -o trace.jsonl --prompts prompts.txt
 //
-// One JSON line a position: the prompt it belongs to, whether it was part of
-// the prompt or generated, the token, every block's chosen experts, and
-// every block's one-block lookahead (see `RouteTrace`). `scripts/moe_sim.py`
-// replays the file against cache policies. Runs on whatever backend the
-// build has; on the host reference a 35B token is a second or two, so a
-// trace of a few thousand tokens is an hour or so.
+// Writes one JSON line per position: the prompt index, whether the position
+// was prompt or generated, the token, and each block's chosen experts and
+// one-block lookahead (see `RouteTrace`). `scripts/moe_sim.py` replays the
+// file against cache policies. Runs on the device with `--features cuda`,
+// on the host otherwise.
 
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;

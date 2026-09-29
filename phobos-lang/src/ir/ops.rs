@@ -34,9 +34,9 @@ pub enum Bounds {
     Dynamic,
 }
 
-/// A loop the build found shaped for double buffering: its body opens with
-/// `staged` stage ops of tensor slices that nothing later writes. Whether
-/// the doubled buffers fit is the emitter's call, since the budget counts
+/// A loop the build found shaped for double buffering. Its body opens with
+/// `staged` stage ops of tensor slices that nothing later writes. The
+/// emitter decides whether the doubled buffers fit, since that depends on
 /// what the pool holds at that point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Pipeline {
@@ -51,9 +51,9 @@ pub struct Pipeline {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ForInfo {
     pub bounds: Bounds,
-    /// A loop over a dynamic extent split into whole chunks and a masked
-    /// remainder: the bounds are `lo, full, step, hi`, the first block runs
-    /// the trimmed main loop and the second replays the body once at `full`
+    /// A loop over a dynamic extent, split into whole chunks and a masked
+    /// remainder. The bounds are `lo, full, step, hi`. The first block runs
+    /// the trimmed main loop, and the second replays the body once at `full`
     /// when `full < hi`. Dynamic bounds only.
     pub ragged: bool,
     /// Loop-carried values: operands after the bounds, block arguments
@@ -467,13 +467,13 @@ impl Intrinsic {
 /// What an op does. Operands, results and blocks live beside the kind in
 /// the arena; the kind holds only attributes.
 ///
-/// The vocabulary is coarse: a builtin is one op carrying its format, a
-/// per-element expression is one op carrying its tree, and a pass records
-/// what it decided as an attribute on the op it decided about. The
-/// declarations below this enum, the name, whether the kind ends a block,
-/// which results alias which operands and which operands it writes, are
-/// what the generic passes read; the per-kind typing rules live in
-/// `verify.rs`.
+/// The vocabulary is coarse. A builtin is one op carrying its format, and a
+/// per-element expression is one op carrying its tree. A pass records what
+/// it decided as an attribute on the op it decided about.
+///
+/// The generic passes read the methods below this enum: the name, whether
+/// the kind ends a block, which results alias which operands, and which
+/// operands it writes. The per-kind typing rules live in `verify.rs`.
 #[derive(Clone, Debug, PartialEq)]
 pub enum OpKind {
     // Scalars.

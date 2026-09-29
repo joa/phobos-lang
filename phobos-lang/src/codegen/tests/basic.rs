@@ -74,8 +74,8 @@ fn static_dims_from_literals_and_autotune() {
 
 #[test]
 fn scalar_ops_cover_arith_and_comparisons() {
-    // every scalar operator across float, integer, and bool operands,
-    // plus unary neg/not and an f32/f64 mixed-width promotion.
+    // Every scalar operator across float, integer and bool operands, plus
+    // unary neg and not, and an f32/f64 mixed-width promotion.
     let mlir = emit_mlir(
         "kernel k(out: tensor<f32>[N], a: f32, b: f64) {
             var f = a * a + a - a / a
@@ -133,10 +133,9 @@ fn tensor_used_as_value_is_an_error() {
 
 #[test]
 fn cumsum_tril_transpose_lower_and_verify() {
-    // The linear-attention primitives: cumsum scans the sequence axis,
-    // tril masks the strict upper triangle (a compare plus select), and
-    // transpose mirrors a rank-2 tile so a contraction can run over the
-    // leading axis.
+    // The linear-attention primitives. cumsum scans the sequence axis. tril
+    // masks the strict upper triangle with a compare and select. transpose
+    // mirrors a rank-2 tile so a contraction can run over the leading axis.
     let mlir = emit_mlir(
         "@autotune(D in [32], C in [32])
         kernel prim(G: tensor<f32>[N, 1], X: tensor<f32>[N, D], O: tensor<f32>[N, D]) {
@@ -167,9 +166,9 @@ fn cumsum_tril_transpose_lower_and_verify() {
 #[test]
 fn kda_chunkwise_gated_linear_attention_lowers() {
     // The KDA backbone (examples/kda_fp32.ph): chunkwise gated linear
-    // attention carrying an [D, D] recurrent state, exercising cumsum
-    // (the gate), tril (causal mask), transpose (K^T V), exp, and the
-    // intra/inter dot products.
+    // attention with a [D, D] recurrent state. Covers cumsum for the gate,
+    // tril for the causal mask, transpose for K^T V, exp, and the intra and
+    // inter chunk dot products.
     let mlir = emit_mlir(
         "@autotune(D in [64], C in [32, 128])
         kernel kda(Q: tensor<f32>[N, D], K: tensor<f32>[N, D], V: tensor<f32>[N, D],

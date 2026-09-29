@@ -1,13 +1,14 @@
-// A fixed team of threads for work that arrives every few hundred
-// microseconds and takes about as long, a decode step's misses a block.
+// A fixed team of threads for short, frequent jobs, such as a decode step's
+// expert misses: a few hundred microseconds of work per block.
 //
-// A pool that parks its workers between jobs pays a wake a job, which on
-// this scale is most of the job. The team's workers spin for a while after
-// each job instead, so the next one a block later finds them running, and
-// park only once the jobs stop coming. A job is one closure every member
-// runs, with a barrier the members can meet at: either the caller's, run
-// with the caller taking part, or started for the workers alone while the
-// caller goes on with something else.
+// A pool that parks workers between jobs pays a wake per job, which here
+// costs about as much as the job. Team workers instead spin for a while
+// after each job, so the next one finds them running. They park only once
+// jobs stop arriving.
+//
+// A job is one closure every member runs, with a barrier the members can
+// meet at. [`Team::run`] runs it with the caller taking part.
+// [`Team::start`] runs it on the workers alone while the caller goes on.
 
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -23,10 +24,10 @@ type Started = dyn Fn(&Member) + Sync + Send;
 
 struct Shared {
     size: usize,
-    /// Bumped once a job; a worker runs the job when it sees it move.
+    /// Bumped once per job; a worker runs the job when it sees it change.
     epoch: AtomicU64,
-    /// The current job, valid while `epoch` says it is, as a pointer whose
-    /// lifetime the team vouches for.
+    /// The current job, valid while `epoch` says so. The team guarantees
+    /// the pointer outlives the job.
     job: UnsafeCell<Option<*const Job>>,
     /// Whether the caller is a member of the current job.
     with_caller: AtomicBool,
@@ -109,9 +110,8 @@ impl Team {
         self.wait();
     }
 
-    /// Starts `job` on the workers alone and returns at once; it is joined
-    /// by [`Team::join`] or the next job. A team with no workers runs it
-    /// here.
+    /// Starts `job` on the workers alone and returns at once. [`Team::join`]
+    /// or the next job joins it. A team with no workers runs it here.
     pub fn start(&self, job: Box<Started>) {
         let mut started = self.started.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         self.finish(&mut started);
@@ -185,7 +185,7 @@ fn work(shared: &Shared, index: usize) {
         let (index, size) = if shared.with_caller.load(Ordering::Relaxed) { (index, shared.size) } else { (index - 1, shared.size - 1) };
         // SAFETY: the job was set before the epoch moved and is cleared
         // only after this worker reports finished. A panic is caught so the
-        // report still comes; the job sees to what it owed on its own.
+        // report still happens; the job handles its own cleanup.
         if let Some(job) = unsafe { *shared.job.get() } {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe { (*job)(&Member { index, size, shared }) }));
         }

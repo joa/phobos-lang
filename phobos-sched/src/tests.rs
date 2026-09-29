@@ -164,9 +164,9 @@ fn matmul_two_nodes_owner_computes() {
         .sum();
     assert_eq!(total_loads, 8);
 
-    // owner-computes by C's linear coord (node = lin % 2): both nodes consume
-    // all 4 A supertiles, so A homes to node 0 and node 1 fetches them; B
-    // splits by column, so each node LOADs only its own with no fetch.
+    // C's owner is lin % 2. Both nodes consume all 4 A supertiles, so A's
+    // home is node 0 and node 1 fetches them. B splits by column, so each
+    // node LOADs only its own.
     let loads = |n: usize| count(&pl, n, |o| matches!(o, Op::Load { .. }));
     assert_eq!(loads(0), 6);
     assert_eq!(loads(1), 2);
@@ -207,8 +207,8 @@ fn matmul_two_nodes_owner_computes() {
 
 #[test]
 fn matmul_two_nodes_direct_load() {
-    // The default policy: every node LOADs its own inputs straight from
-    // storage, no peer FETCH; each node needs 6 distinct inputs (4 A + 2 B).
+    // Under the default policy every node LOADs its inputs from storage,
+    // with no peer FETCH. Each node needs 6 inputs, 4 A and 2 B.
     let p = matmul_program();
     let supers = default_supers(&p);
     let pl = plan(&p, &dims(8192), &supers, 2).unwrap();
@@ -229,8 +229,7 @@ fn matmul_two_nodes_direct_load() {
             }
         }
     }
-    // DirectLoad re-reads inputs instead of fetching from a peer: node 1
-    // LOADs its 4 A directly, so the cluster issues 12 LOADs and 0 peer bytes.
+    // Node 1 LOADs its 4 A itself, so the cluster issues 12 LOADs.
     let total_loads: usize = (0..2)
         .map(|n| count(&pl, n, |o| matches!(o, Op::Load { .. })))
         .sum();
@@ -382,9 +381,8 @@ fn flash_unbound_scalar_errors() {
 
 #[test]
 fn budget_splits_into_segments() {
-    // A budget that fits at least one tile but not the whole program forces
-    // multiple segments; each must stay within budget and the plan must
-    // still validate.
+    // A budget that fits one chain but not the whole program forces several
+    // segments. Each stays within budget and the plan still validates.
     let p = matmul_program();
     let supers = default_supers(&p);
     let tile = 4096u64 * 4096 * 4;
@@ -399,7 +397,6 @@ fn budget_splits_into_segments() {
     // total instruction count is unchanged by segmentation
     assert_eq!(node_ops(&pl, 0).len(), 48);
 
-    // every segment respects the incremental budget
     for m in &pl.segment_mem[0] {
         assert!(
             m.incremental <= budget,
@@ -415,9 +412,9 @@ fn budget_splits_into_segments() {
 
 #[test]
 fn tight_budget_across_chains_no_overflow() {
-    // A node owning multiple output chains frees one chain's operands before
-    // allocating the next; the incremental calc must saturate rather than
-    // underflow when resident drops below the segment's starting floor.
+    // A node with several output chains frees one chain's operands before
+    // allocating the next, so resident can drop below the segment's start.
+    // The incremental size must saturate there, not underflow.
     let p = matmul_program();
     let supers = default_supers(&p);
     let tile = 4096u64 * 4096 * 4;
@@ -528,9 +525,9 @@ fn recover_reassigns_lost_chains_to_survivor() {
 
 #[test]
 fn recover_reissues_at_fresh_ids_and_versions() {
-    // Reissued instructions must not alias iids still live in the survivor's
-    // table, and reissued tiles must carry a bumped version so they can't
-    // collide with version-0 tiles the survivor may still hold.
+    // Reissued iids must not alias iids the survivor still tracks. Reissued
+    // tiles carry the new version so they cannot collide with its version-0
+    // tiles.
     let p = matmul_program();
     let supers = default_supers(&p);
     let base = plan(&p, &dims(8192), &supers, 2).unwrap();
@@ -562,8 +559,8 @@ fn recover_reissues_at_fresh_ids_and_versions() {
 
 #[test]
 fn recover_skips_already_stored_outputs() {
-    // An output that reached storage before the crash is durable; never
-    // recomputed. Mark C(lin=1) durable; only C(lin=3) comes back.
+    // An output STOREd before the crash is durable and not recomputed. With
+    // C(lin=1) durable, only C(lin=3) comes back.
     let p = matmul_program();
     let supers = default_supers(&p);
     let base = plan(&p, &dims(8192), &supers, 2).unwrap();

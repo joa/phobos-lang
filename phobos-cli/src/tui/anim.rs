@@ -1,57 +1,51 @@
-// The moving parts: falling glyphs, a block font, and the two easings that
-// keep a figure from snapping between frames.
+// The moving parts: falling glyphs, a block font, bars, and easing.
 //
 // Nothing here reads the engine. Everything is a function of the frame
-// counter and of values the panels hand over, so a frame can be rendered
-// twice and look the same both times, which is what makes the tests below
-// possible.
+// counter and the values the panels pass in, so rendering is deterministic
+// and testable.
 
 use ratatui::style::Color;
 use ratatui::text::Span;
 
 use super::theme;
 
-/// The glyphs the rain falls in. Digits and hex letters: dense, single width,
-/// and all present in every font a terminal is likely to be using.
+/// The glyphs the rain falls in: single width and present in any terminal
+/// font.
 const RAIN_GLYPHS: &[u8] = b"0123456789ABCDEF<>[]{}/\\|=+*-";
 
-/// Frames a drop waits between steps, at its slowest and at its fastest. A
-/// column picks one and keeps it, so the field has depth rather than moving
-/// as one sheet.
+/// Frames a drop waits between steps, at its slowest and at its fastest. Each
+/// column picks one and keeps it, which gives the field depth.
 const SLOWEST: u64 = 9;
 const FASTEST: u64 = 3;
 
 /// How far behind the head a drop stays lit.
 const TAIL: i32 = 5;
 
-/// How many columns in sixteen carry a drop. The field is a backdrop, and a
-/// backdrop that fills every column competes with what is drawn over it.
+/// How many columns in sixteen carry a drop. Kept sparse so the backdrop does
+/// not compete with what is drawn over it.
 const DENSITY: u32 = 5;
 
 /// A field of falling glyphs, one drop per column.
 ///
-/// Sized to the area it was built for, and rebuilt when that changes, so a
-/// resize does not leave drops outside the panel.
+/// Rebuilt when its area changes, so a resize leaves no drops outside the
+/// panel.
 pub struct Rain {
     width: u16,
     height: u16,
-    /// One entry a column, empty where no drop falls.
+    /// One entry per column, `None` where no drop falls.
     columns: Vec<Option<Column>>,
-    /// Columns the rain keeps out of, so whatever is drawn over it reads
-    /// cleanly. Empty until something claims a lane.
+    /// Columns the rain stays out of, so text drawn there reads cleanly.
     clear: std::ops::Range<u16>,
 }
 
 #[derive(Clone, Copy)]
 struct Column {
-    /// Where the head is, in rows, counting from above the top so a column
-    /// starts part way through its fall rather than all of them starting
-    /// together.
+    /// The head's row. Starts above the top, at a random offset, so columns
+    /// do not all fall together.
     head: i32,
     period: u64,
-    /// Which glyph this column starts from. Each row offsets from it, which
-    /// gives a column a stable pattern instead of one that reshuffles under
-    /// the head every step.
+    /// The column's starting glyph. Each row offsets from it, so a column's
+    /// pattern stays stable as the head moves.
     seed: u32,
 }
 
@@ -65,8 +59,7 @@ impl Rain {
         }
     }
 
-    /// Keep the drops out of `columns`, which is where something opaque is
-    /// about to be drawn.
+    /// Keep the drops out of `columns`, where something opaque will be drawn.
     pub fn clear_lane(&mut self, columns: std::ops::Range<u16>) {
         self.clear = columns;
     }
@@ -106,8 +99,7 @@ impl Rain {
 
     /// What to draw at `(x, y)` within the field, if anything.
     ///
-    /// The head is brightest and the tail fades to the faintest green the
-    /// palette has, so the field reads as depth rather than as noise.
+    /// The head is brightest and the tail fades to the faintest green.
     pub fn cell(&self, x: u16, y: u16) -> Option<Span<'static>> {
         if self.clear.contains(&x) {
             return None;
@@ -132,16 +124,13 @@ impl Rain {
 
 /// Move `current` a fraction of the way to `target`.
 ///
-/// A gauge that jumps to its new value every frame reads as noise, and one
-/// that is averaged lags. Easing is neither: it arrives, and takes a few
-/// frames doing it. `rate` is the fraction closed per frame.
+/// `rate` is the fraction of the gap closed per frame.
 pub fn ease(current: f64, target: f64, rate: f64) -> f64 {
     if !current.is_finite() {
         return target;
     }
     let next = current + (target - current) * rate.clamp(0.0, 1.0);
-    // Otherwise a decaying value never quite reaches zero and the last
-    // hundredth of a bar stays lit forever.
+    // Snap when close, or a decaying value never quite reaches its target.
     if (target - next).abs() < 1e-3 {
         target
     } else {
@@ -160,11 +149,10 @@ pub fn pulse(frame: u64, period: u64) -> f32 {
     }
 }
 
-/// Rows of a bar plot of `values`, newest at the right, drawn in one line.
+/// A one-line bar plot of `values`, newest at the right.
 ///
-/// Scaled to the largest value present rather than to a fixed ceiling: the
-/// shape of the last few seconds is what this is for, and an absolute figure
-/// is printed beside it anyway.
+/// Scaled to the largest value shown rather than a fixed ceiling, since it
+/// shows shape and the absolute figure is printed beside it.
 pub fn spark(values: &[f64], width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -184,16 +172,14 @@ pub fn spark(values: &[f64], width: usize) -> String {
     out
 }
 
-/// Rows of a horizontal gauge `width` cells wide, `ratio` of it filled.
+/// A horizontal gauge `width` cells wide, `ratio` of it filled.
 ///
-/// The last cell is a part-width block, so a gauge moves smoothly rather than
-/// a whole character at a time, and the remainder is shaded rather than blank
-/// so the track is visible at any fill.
+/// The last filled cell is a part-width block, so the gauge moves smoothly.
+/// The unfilled track is shaded so it is visible at any fill.
 pub fn bar(ratio: f64, width: usize) -> String {
     let ratio = ratio.clamp(0.0, 1.0);
     let eighths = (ratio * width as f64 * 8.0).round() as usize;
-    // A share that rounds to nothing still gets the narrowest slice: a cache
-    // that is a thousandth of a card is small, not absent.
+    // A nonzero share that rounds to nothing still gets the narrowest slice.
     let eighths = if eighths == 0 && ratio > 0.0 {
         1
     } else {
@@ -214,12 +200,11 @@ pub fn bar(ratio: f64, width: usize) -> String {
     out
 }
 
-/// A bar of `width` cells split into `parts`, each a share of the whole and
-/// drawn in its own colour, with whatever is left over shaded as the track.
+/// A bar of `width` cells split into `parts`, each a share of the whole in
+/// its own colour. The rest is shaded as the track.
 ///
-/// A share too small to fill a cell still gets one, so a segment that exists
-/// is visible; the exact figures go in the legend beside it, which is where a
-/// reader gets the real proportions.
+/// A nonzero share too small to fill a cell still gets one, so it stays
+/// visible. The legend beside it carries the exact figures.
 pub fn stacked(parts: &[(f64, Color)], width: usize) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
     let mut filled = 0usize;
@@ -252,9 +237,8 @@ pub const FONT_HEIGHT: usize = 5;
 
 /// `text` in the block font, as [`FONT_HEIGHT`] rows of equal length.
 ///
-/// Only the characters a throughput figure and the wordmark need are cut;
-/// anything else comes out as a blank of the same width, which keeps the rows
-/// aligned rather than raising an error nobody can act on mid-frame.
+/// Only the characters for throughput figures and the wordmark exist. Any
+/// other character renders as a three-cell blank.
 pub fn block_text(text: &str) -> Vec<String> {
     let mut rows = vec![String::new(); FONT_HEIGHT];
     for ch in text.chars() {
@@ -282,9 +266,8 @@ pub fn block_width(text: &str) -> usize {
 
 /// One character of the block font, [`FONT_HEIGHT`] rows of `#` and space.
 ///
-/// Three cells wide, which is the narrowest a digit can be and stay
-/// unambiguous: at two, 8 and 0 are the same shape. A period and a space are
-/// cut narrower, since padding them to three leaves a visible hole.
+/// Three cells wide, the narrowest that keeps digits distinct. A period is
+/// one cell wide.
 fn glyph(ch: char) -> [&'static str; FONT_HEIGHT] {
     match ch.to_ascii_uppercase() {
         '0' => ["###", "# #", "# #", "# #", "###"],
@@ -307,8 +290,8 @@ fn glyph(ch: char) -> [&'static str; FONT_HEIGHT] {
     }
 }
 
-/// Format a rate for the block font: three significant figures at most, since
-/// the font has no room for more and the last one is noise anyway.
+/// Format a rate for the block font, with at most one decimal place and none
+/// from 100 up.
 pub fn rate_text(rate: f64) -> String {
     if !rate.is_finite() || rate <= 0.0 {
         return "0".to_string();
@@ -320,8 +303,8 @@ pub fn rate_text(rate: f64) -> String {
     }
 }
 
-/// A 64-bit xorshift, for laying the rain out. Deterministic on purpose: the
-/// field looks the same every run, so a screenshot of it is reproducible.
+/// A 64-bit xorshift for laying out the rain. Fixed-seeded, so the field
+/// looks the same every run.
 struct Xorshift(u64);
 
 impl Xorshift {
@@ -345,8 +328,8 @@ impl Xorshift {
     }
 }
 
-/// A color for a figure judged against the best this run has seen: bright
-/// when it is at its best, dim when it has fallen away from it.
+/// A color for a figure relative to the run's best: bright at the best, dim
+/// as it falls away.
 pub fn relative(value: f64, best: f64, color: Color) -> Color {
     if best <= 0.0 || value <= 0.0 {
         return theme::GREEN_DIM;

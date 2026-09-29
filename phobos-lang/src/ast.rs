@@ -50,7 +50,7 @@ pub enum Dim {
 pub enum Type {
     Scalar(Scalar),
     Tensor(Scalar, Vec<Dim>), // global tensor with a shape
-    Tile(Scalar, Vec<Dim>),   // register/accumulator tile with a shape
+    Tile(Scalar, Vec<Dim>),   // kernel-local tile with a shape
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,8 +63,8 @@ pub enum Literal {
 
 #[derive(Debug, Clone)]
 pub enum AttrArg {
-    /// Autotune search dimension: NAME in [v0, v1, ..., vN] for those choices,
-    /// or NAME in [start, end] for the range start..=end when end > start.
+    /// Autotune search dimension: NAME in [v0, v1, ..., vN] for those choices.
+    /// NAME in [lo, hi] with 0 < lo < hi means lo, 2*lo, 4*lo, ... and hi.
     Search { name: String, choices: Vec<i64> },
     /// Keyword argument: key = value.
     KeyValue { key: String, value: Literal },
@@ -332,7 +332,7 @@ impl Sub {
 }
 
 impl Expr {
-    /// pre-order
+    /// Visits this expression and its sub-expressions in pre-order.
     pub fn walk(&self, f: &mut impl FnMut(&Expr)) {
         f(self);
         match self {
@@ -417,7 +417,8 @@ impl Stmt {
         }
     }
 
-    /// pre-order over every expression in this statement and its nested blocks
+    /// Visits every expression in this statement and its nested blocks, in
+    /// pre-order.
     pub fn walk_exprs(&self, f: &mut impl FnMut(&Expr)) {
         match self {
             Stmt::Let { value, .. } => value.walk(f),

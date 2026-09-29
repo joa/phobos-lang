@@ -1,5 +1,5 @@
-// The four-way integer dot product, for cards without integer
-// tensor cores and for single-row contractions.
+// The four-way integer dot product, for cards without integer tensor cores
+// and for single-row contractions.
 
 use super::*;
 

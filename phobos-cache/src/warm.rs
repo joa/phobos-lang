@@ -11,10 +11,11 @@ use phobos_kernels::manifest::{self, Request};
 use crate::Args;
 
 /// Compiles every manifest request for every chip asked for into the cache,
-/// skipping what is already there unless `--force`. Runs `--jobs` lowerings
-/// at once, all cores by default, each in a child process of its own: a few
-/// dozen large lowerings in one process hold four cores between them, the
-/// same in as many processes hold all of them.
+/// skipping cached ones unless `--force`.
+///
+/// Runs `--jobs` lowerings at once, all cores by default. Each runs in its own
+/// child process, because lowerings sharing one process do not scale across
+/// cores.
 pub fn run(args: &Args) -> Result<()> {
     if args.manifests.is_empty() {
         bail!("warm needs at least one --manifest DIR, recorded with PHOBOS_KERNEL_MANIFEST");
@@ -36,8 +37,8 @@ pub fn run(args: &Args) -> Result<()> {
             }
         }
     }
-    // Longest source first, a cheap stand-in for the slowest compile, so the
-    // tail of the run is not one large kernel on one core.
+    // Longest source first, as a cheap proxy for the slowest compile, so the
+    // run does not end on one large kernel.
     requests.sort_by_key(|(_, r)| std::cmp::Reverse(r.texts.iter().map(String::len).sum::<usize>()));
 
     let jobs: Vec<(&Path, &Request, &str)> = requests
@@ -144,8 +145,8 @@ fn find_ptxas(args: &Args) -> Option<PathBuf> {
     runs(&toolkit).then_some(toolkit)
 }
 
-/// Assembles `ptx` for `chip` and throws the object away: what a driver
-/// would do with it on first load, on a host with no such card.
+/// Assembles `ptx` for `chip` and discards the object. This checks the PTX
+/// as a driver would on first load, without the card.
 fn assemble(ptxas: &Path, chip: &str, ptx: &str) -> Result<()> {
     let stem = std::env::temp_dir().join(format!(
         "phobos-cache-{}-{:?}",

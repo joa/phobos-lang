@@ -1,7 +1,7 @@
 // Codegen tests.
 //
-// The shared harness lives here; each submodule covers one area of the
-// emitter. See `emit_mlir` for the default target, which is sm_75.
+// The shared harness lives here, and each submodule covers one area of the
+// emitter. The default target, in `emit_mlir`, is sm_75.
 
 mod basic;
 mod dot;
@@ -53,7 +53,7 @@ fn emit_mlir_on(src: &str, chip: &str) -> String {
 }
 
 /// Like [`emit_mlir_on`] but with 64-bit index lowering, which the
-/// @tensorcore mma.sync path requires (see Codegen::mma_sync).
+/// `@tensorcore` mma.sync path requires.
 fn emit_mlir_sync(src: &str, chip: &str) -> String {
     use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
     emit_mlir_base(
@@ -83,8 +83,9 @@ fn emit_mlir_base(src: &str, base: &phobos_base::context::Context) -> String {
     text
 }
 
-/// PHOBOS_DUMP_DIR collects every source the tests emit as a `.ph`, named by
-/// a hash of its text, so the emit sweep over every target covers them.
+/// With `PHOBOS_DUMP_DIR` set, writes each test source there as a `.ph`
+/// named by a hash of its text, so the emit sweep over every target can
+/// cover them.
 fn dump_source(src: &str) {
     use std::hash::{Hash, Hasher};
     let Ok(dir) = std::env::var("PHOBOS_DUMP_DIR") else {
@@ -97,8 +98,8 @@ fn dump_source(src: &str) {
     std::fs::write(dir.join(format!("test_{:016x}.ph", h.finish())), src).unwrap();
 }
 
-/// emit_mlir already verifies; this just makes the intent of a test that
-/// only cares about validity readable.
+/// `emit_mlir` already verifies. This only names the intent of a test that
+/// cares about validity alone.
 fn module_verifies(mlir: &str) -> bool {
     !mlir.is_empty()
 }
@@ -128,10 +129,9 @@ fn emit_err(src: &str) -> String {
     .to_string()
 }
 
-/// Splits emitted IR at the flash kt loop (the only loop bounded by a
-/// dynamic %dim) into (preheader, body) for staging-placement asserts. A
-/// ragged-split loop is trimmed first and bounded by that arithmetic rather
-/// than %dim directly, so either pattern is accepted, whichever comes first.
+/// Splits emitted IR into (preheader, body) at the flash kt loop, the only
+/// loop bounded by a dynamic %dim. A ragged-split loop is bounded by
+/// arithmetic on %dim instead, so the first of either pattern is used.
 fn split_at_kt_loop(mlir: &str) -> (&str, &str) {
     let pos = [" = arith.subi %dim", " to %dim"]
         .iter()
@@ -141,8 +141,8 @@ fn split_at_kt_loop(mlir: &str) -> (&str, &str) {
     mlir.split_at(pos)
 }
 
-/// The kernel's one shared byte buffer, in bytes: what the planner needed.
-/// Zero for a kernel with no tiles.
+/// The size in bytes of the kernel's shared byte buffer, as the planner
+/// sized it. Zero for a kernel with no tiles.
 fn shared_bytes(mlir: &str) -> usize {
     mlir.lines()
         .filter(|l| l.contains("memref.global") && l.contains("_shared : memref<"))

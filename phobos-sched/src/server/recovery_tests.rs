@@ -37,10 +37,11 @@ fn tensor(name: &str, n: i64, mode: AccessMode) -> TensorInput {
     }
 }
 
-/// A node that speaks the wire protocol but executes nothing: it acks every
-/// instruction it's issued. A good node also heartbeats, so the watchdog
-/// doesn't mistake a busy scheduler for a dead node; a failing node skips
-/// heartbeats and drops its stream on the first segment, read as a failure.
+/// A node that speaks the wire protocol but executes nothing. It acks every
+/// instruction it is issued.
+///
+/// A good node also heartbeats, so the watchdog keeps it alive. A failing
+/// node skips heartbeats and drops its stream on the first segment.
 async fn mock_node(sched_addr: String, node_id: u32, fail: bool, acked: Arc<Mutex<Vec<u64>>>) {
     let mut client = SchedulerClient::connect(format!("http://{sched_addr}"))
         .await
@@ -83,7 +84,7 @@ async fn mock_node(sched_addr: String, node_id: u32, fail: bool, acked: Arc<Mute
     while let Ok(Some(msg)) = inbound.message().await {
         if let Some(proto::scheduler_message::Payload::IssueSegment(is)) = msg.payload {
             if fail {
-                return; // drop the only sender -> stream closes -> node down
+                return; // closing the only sender reads as the node going down
             }
             if let Some(seg) = is.segment {
                 let batch: Vec<CompleteItem> = seg

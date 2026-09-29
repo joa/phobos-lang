@@ -17,9 +17,8 @@ impl Sequence {
         self.tokens.push(id);
     }
 
-    /// Every token in order: the prompt followed by what has been generated
-    /// and fed back. This is exactly what the session that produced it holds,
-    /// which is what lets a caller keep the session for the next request.
+    /// Every token in order, the prompt followed by what was generated and
+    /// fed back. Matches exactly what the producing session holds.
     pub fn tokens(&self) -> &[i64] {
         &self.tokens
     }
@@ -61,18 +60,17 @@ pub struct SampleConfig {
     pub top_p: f32,
 
     /// Keep the tokens at least `min_p` as likely as the best candidate; 0.0
-    /// and below disables. Unlike top-p the cut adapts to how peaked the
-    /// distribution is: a confident step keeps few tokens, a flat one many.
+    /// and below disables.
     pub min_p: f32,
 
     /// Subtracted from the logit of every token the model has generated, the
-    /// prompt excluded; 0.0 disables. Flat, so ten occurrences cost what one
-    /// does.
+    /// prompt excluded; 0.0 disables. Applied once per token however often it
+    /// occurs.
     pub presence_penalty: f32,
 
-    /// Scales the logit of every token already in the sequence, the prompt
-    /// included, towards zero: positive logits divide by it and negative ones
-    /// multiply, so it pushes the same direction either way. 1.0 disables.
+    /// Demotes every token already in the sequence, the prompt included.
+    /// Positive logits are divided by it and negative ones multiplied.
+    /// 1.0 disables.
     pub repetition_penalty: f32,
 }
 
@@ -92,18 +90,13 @@ impl SampleConfig {
         self.temperature <= 0.0
     }
 
-    /// Whether [`choose`]'s result depends on nothing but which logit is
-    /// largest: greedy, with both penalties off so [`penalize`] is a no-op
-    /// whatever the history. Exactly when a caller may substitute a
-    /// device-side argmax for [`choose`]; penalized greedy still needs the
-    /// full rewritten vector and stays on the ordinary path.
+    /// Greedy with both penalties off, so [`choose`] is a plain argmax. Only
+    /// then may a caller substitute a device-side argmax for [`choose`].
     pub fn is_greedy_unpenalized(&self) -> bool {
         self.is_greedy() && self.repetition_penalty == 1.0 && self.presence_penalty == 0.0
     }
 
-    /// Whether the penalties would move any logit. Checked per half so the first
-    /// generated token does not pay for a vocab-sized copy just because a
-    /// presence penalty is set.
+    /// Whether the penalties would move any logit given this history.
     fn penalizes(&self, history: History) -> bool {
         (self.repetition_penalty != 1.0 && !history.is_empty())
             || (self.presence_penalty != 0.0 && !history.generated.is_empty())
@@ -114,8 +107,8 @@ impl SampleConfig {
 pub use phobos_base::rng::SplitMix64 as Rng;
 
 pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rng) -> i64 {
-    // A top-k cut applies the penalties as it passes over the vocab; every
-    // other path rewrites a copy of it. Both see the same values.
+    // The top-k path applies the penalties in its single pass. Every other
+    // path penalizes a copy. Both see the same values.
     if cfg.top_k > 0 && cfg.top_k < logits.len() && !cfg.is_greedy() {
         return sample(top_k(logits, cfg, history), cfg, rng);
     }
@@ -167,7 +160,7 @@ fn sample(mut ranked: Vec<(usize, f32)>, cfg: &SampleConfig, rng: &mut Rng) -> i
         }
     }
 
-    // min-p: drop whatever the leader outclasses by more than min_p.
+    // min-p: drop tokens less likely than min_p times the leader.
     if cfg.min_p > 0.0 {
         let cutoff = cfg.min_p * probs[0];
         let bound = probs
@@ -199,10 +192,8 @@ fn sample(mut ranked: Vec<(usize, f32)>, cfg: &SampleConfig, rng: &mut Rng) -> i
     ranked.last().map(|&(i, _)| i as i64).unwrap_or(0)
 }
 
-/// The `cfg.top_k` highest logits once penalized, highest first, in one pass
-/// over the vocab: a quarter million of them, where copying the vocab to
-/// penalize it or ranking all of it costs a millisecond a token. A logit
-/// only enters the buffer by beating its lowest, which almost none do.
+/// The `cfg.top_k` highest penalized logits, highest first, in one pass over
+/// the vocab without copying or sorting it.
 fn top_k(logits: &[f32], cfg: &SampleConfig, history: History) -> Vec<(usize, f32)> {
     let k = cfg.top_k;
     // Which penalties touch which ids: bit 0 repetition, bit 1 presence.
@@ -245,8 +236,8 @@ fn top_k(logits: &[f32], cfg: &SampleConfig, history: History) -> Vec<(usize, f3
     best
 }
 
-/// Demote the tokens already in the sequence. Both penalties are one-shot: a
-/// token occurring ten times is hit as hard as one occurring once.
+/// Demote the tokens already in the sequence. Each penalty applies once per
+/// distinct token, however often it occurs.
 fn penalize(logits: &mut [f32], cfg: &SampleConfig, history: History) {
     let vocab = logits.len();
     if cfg.repetition_penalty != 1.0 {

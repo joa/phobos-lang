@@ -1,15 +1,13 @@
-// Fused Q3_K dot: static-offset decode folded into the contraction. Same
-// warp mapping as q2k_qdot.rs, but a six-bit signed scale per run unpacked
-// from three interleaved bytes, and a third quant bit from a separate
-// hmask plane.
+// Fused Q3_K dot: the decode folded into the contraction, with no table
+// lookup. Each run has a six-bit signed scale split across two bytes, and
+// each quant takes its third bit from a separate hmask plane.
 
 use super::*;
 
 // Q3_K block layout (phobos-gguf/src/quant/q3_k.rs): hmask at byte 0, qs at
-// byte 32, scales at byte 96. No minimum term, unlike Q2_K. The blocks are
-// 110 bytes on disk and on the host; the device upload pads them to 112 so
-// every block base is a multiple of eight, which is what the two vector loads
-// below need. See `Quant::device_block_bytes`.
+// byte 32, scales at byte 96, and no minimum term. A block is 110 bytes on
+// disk. The device upload pads it to 112 so every block base is a multiple of
+// eight, as the vector loads below need. See `Quant::device_block_bytes`.
 const Q3K_BLOCK_BYTES: i64 = 112;
 const Q3K_QS_OFF: i64 = 32;
 const Q3K_SCALES_OFF: i64 = 96;
@@ -17,9 +15,8 @@ const Q3K_RUN: i64 = 16;
 const Q3K_RUNS: i64 = 16;
 
 impl<'c> Codegen<'c> {
-    /// Q3_K's matvec contraction with the decode folded in. Same lane
-    /// mapping as `tile_q2k_qdot_t`, same overall shape as
-    /// `tile_iq1s_qdot_t`.
+    /// Q3_K's matvec contraction with the decode folded in. Same overall
+    /// shape as `tile_iq1s_qdot_t`.
     pub(in crate::codegen) fn tile_q3k_qdot_t(
         &mut self,
         block: &Block<'c>,
@@ -70,14 +67,13 @@ impl<'c> Codegen<'c> {
         let j = self.divui(&body, li, warp_w)?;
         let lane = self.remui(&body, li, warp_w)?;
 
-        // A lane owns eight consecutive elements of one run: run `is`, from
-        // `lane / 2`, and elements `y0 = (lane % 2) * 8` upwards. Sixteen runs
-        // of sixteen over thirty-two lanes covers the whole 256-element block
-        // in a single pass, and eight consecutive elements make the qs bytes,
-        // the hmask bytes and the activations one wide load each.
+        // A lane owns eight consecutive elements of run `is = lane / 2`,
+        // starting at `y0 = (lane % 2) * 8`. So one pass covers the whole
+        // block, and the qs bytes, hmask bytes and activations are one wide
+        // load each.
         //
-        // Every index below comes from `is`, so it is invariant across the
-        // k-loop and computed once here rather than eight times a block.
+        // Every index below comes from `is`, so it is computed once, outside
+        // the k-loop.
         let two_idx = self.const_index(&body, 2)?;
         let four_idx = self.const_index(&body, 4)?;
         let eight_idx = self.const_index(&body, 8)?;
@@ -94,8 +90,8 @@ impl<'c> Codegen<'c> {
         let half2_16 = self.muli(&body, half2, sixteen_idx)?;
 
         // qs_off = QS_OFF + h*32 + half2*16 + y0 and hm_off = half2*16 + y0.
-        // Every term is a multiple of eight, and so is the block stride, so
-        // the two loads below can promise align-8.
+        // Every term and the block stride are multiples of eight, so both
+        // loads can promise align-8.
         let thirtytwo = self.const_index(&body, 32)?;
         let qs_base = self.addi(
             &body,
@@ -113,8 +109,8 @@ impl<'c> Codegen<'c> {
         let h4 = self.push(&body, arith::muli(h_i32, four_i32, self.loc))?;
         let hm_shift = self.push(&body, arith::addi(h4, jj_i32, self.loc))?;
 
-        // The run's six-bit scale, a low nibble and two high bits that sit in
-        // separate bytes: `group` picks the pair, `c` the byte within it.
+        // The run's six-bit scale is a low nibble and two high bits in
+        // separate bytes. `group` picks the pair, `c` the byte within it.
         let group = self.divui(&body, is, four_idx)?;
         let c = self.remui(&body, is, four_idx)?;
         let group_mod2 = self.remui(&body, group, two_idx)?;
@@ -136,8 +132,8 @@ impl<'c> Codegen<'c> {
         let hi_shift = self.push(&body, arith::muli(group_i32, two_i32, self.loc))?;
 
         // Where the lane's eight activations start. `y0` is 0 or 8, so the
-        // byte address is 0 or 32 past a block boundary: a multiple of sixteen
-        // either way, as the two `vector<4xf32>` loads need.
+        // byte address stays a multiple of sixteen, as the two
+        // `vector<4xf32>` loads need.
         let act_off = self.addi(&body, self.muli(&body, is, sixteen_idx)?, y0)?;
 
         let step = self.const_index(&body, 256)?;

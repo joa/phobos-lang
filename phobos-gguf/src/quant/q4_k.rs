@@ -1,11 +1,11 @@
 // Q4_K: `{ f16 d; f16 dmin; uint8 scales[12]; uint8 qs[128]; }`.
 //
-// Eight runs of 32, each with its own scale and minimum stored as 6-bit
-// indices into the super-block's `d`/`dmin` rather than as halves of their
-// own. The twelve scale bytes pack sixteen 6-bit values; see [`scale_min`].
+// Eight runs of 32. Each run's scale and minimum are 6-bit multipliers of the
+// block's `d` and `dmin`. The twelve scale bytes pack these sixteen values;
+// see [`scale_min`].
 //
-// Nibble order follows Q4_0: a byte plane of 32 supplies one run from its low
-// nibbles and the next run from its high ones.
+// A 32-byte plane of `qs` gives one run from its low nibbles and the next run
+// from its high ones.
 
 use phobos_base::half::f16_to_f32;
 
@@ -29,9 +29,9 @@ pub static SPEC: Spec = Spec {
     raw_scales: Some(raw_scales),
 };
 
-/// `d` at 0 and `dmin` at 2, the block's own header, for Q4_K and Q5_K
-/// alike. The device kernels read both out of the block; the planes exist
-/// so the upload has the shape every raw format shares.
+/// Each block's header `d` (offset 0) and `dmin` (offset 2), for Q4_K and
+/// Q5_K. The kernels read both from the block itself; these planes only give
+/// the upload the shape every raw format shares.
 pub(super) fn header_scales(bytes: &[u8], block_bytes: usize) -> RawScales {
     let mut d = Vec::with_capacity(bytes.len() / block_bytes);
     let mut dmin = Vec::with_capacity(d.capacity());

@@ -1,14 +1,14 @@
 // A full-screen dashboard for the inference engine.
 //
-// It runs on its own thread and owns the terminal; the engine stays on the
-// thread that loaded the model, since that is where its device context is.
-// The two share nothing but a [`Meter`]: the engine writes events into it as
-// they happen and the dashboard reads whole snapshots on its own clock, so
-// neither waits for the other and a slow redraw cannot slow a decode.
+// It runs on its own thread and owns the terminal. The engine stays on the
+// thread that loaded the model, where its device context is.
 //
-// Quitting is the dashboard's to signal, because it has the keyboard: `q`
-// clears the meter's running flag, the engine notices at its next idle tick
-// and returns, and the model drops on the way out.
+// The two share only a [`Meter`]. The engine writes events into it and the
+// dashboard reads snapshots on its own clock, so a slow redraw cannot slow a
+// decode.
+//
+// The dashboard owns the keyboard, so it signals quitting: `q` clears the
+// meter's running flag and the engine returns at its next idle tick.
 
 mod anim;
 mod cinema;
@@ -40,19 +40,16 @@ use phobos_inference::telemetry::Meter;
 
 use view::View;
 
-/// Frame interval. Thirty a second is enough for the rain to fall smoothly
-/// and cheap enough that an idle dashboard does not show up in a profile.
+/// Frame interval, about thirty frames a second.
 const FRAME: Duration = Duration::from_millis(33);
 
-/// How long to wait for the dashboard to take the terminal before giving up
-/// on it. It either works immediately or not at all.
+/// How long to wait for the dashboard to take the terminal before giving up.
 const START: Duration = Duration::from_secs(5);
 
 /// A running dashboard, and the meter it is drawing.
 ///
-/// Started before the model is loaded, so a cold start has something to watch
-/// while every kernel is compiled. Until [`Dashboard::loaded`] it draws the
-/// loading screen; after it, the panels.
+/// Started before the model is loaded, so kernel compilation is visible.
+/// Until [`Dashboard::loaded`] it draws the loading screen, then the panels.
 pub struct Dashboard {
     meter: Arc<Meter>,
     drawing: std::thread::JoinHandle<Result<()>>,
@@ -63,7 +60,7 @@ impl Dashboard {
         self.meter.clone()
     }
 
-    /// There is a model now, so the panels have something to show.
+    /// Logs that the model has loaded.
     pub fn loaded(&self, info: &ModelInfo) {
         self.meter.log(
             phobos_base::log::Level::Info,
@@ -75,8 +72,8 @@ impl Dashboard {
     pub fn join(self) -> Result<()> {
         match self.drawing.join() {
             Ok(drawn) => drawn,
-            // The panic already printed and the terminal is already back; see
-            // `Screen::drop`.
+            // The panic already printed and `Screen::drop` restored the
+            // terminal.
             Err(_) => Ok(()),
         }
     }
@@ -84,16 +81,15 @@ impl Dashboard {
 
 /// Take the terminal and start drawing, before there is anything to draw.
 ///
-/// Fails softly: a terminal that cannot be taken over is a reason to serve
-/// plainly, not a reason not to serve, so this reports and hands back nothing
-/// rather than an error.
+/// Fails softly. If the terminal cannot be taken over, this says why and
+/// switches the meter to echo on stderr, so serving carries on without a
+/// dashboard.
 pub fn start() -> Result<Dashboard> {
     let meter = Arc::new(Meter::new());
 
-    // Anything the runtime would have written to stderr goes to the meter
-    // instead: a pass that logs mid-frame would otherwise land on top of the
-    // dashboard. Installed before the first pass and never uninstalled, so
-    // from here on the ring is the only copy of those lines.
+    // Route runtime logs and progress to the meter, so nothing is printed
+    // over the dashboard. The sinks stay installed, so from here on the ring
+    // is the only copy of those lines.
     let logging = meter.clone();
     phobos_base::log::set_sink(move |level, text| logging.log(level, text));
     let stepping = meter.clone();
@@ -102,10 +98,9 @@ pub fn start() -> Result<Dashboard> {
         phobos_base::progress::Event::Finished(step) => stepping.stepped(step),
     });
 
-    // Taking over the terminal needs a console on stdin as well as stdout,
-    // which not every way of starting a process provides. Whether it worked
-    // has to be known before the caller goes off to load a model, or a
-    // dashboard that never opened would go unreported for as long as it runs.
+    // Taking over the terminal needs a console on both stdin and stdout, which
+    // is not always there. Find out before the model loads, so a failure is
+    // reported up front.
     let (ready, started) = std::sync::mpsc::sync_channel(1);
     let screen = meter.clone();
     let drawing = std::thread::spawn(move || run(screen, ready));
@@ -123,12 +118,10 @@ pub fn start() -> Result<Dashboard> {
     Ok(Dashboard { meter, drawing })
 }
 
-/// Reports that a pass writes straight to stderr, and the variable that asks
-/// for each. They do not go through the logger, so no sink can catch them and
-/// they would land on top of whatever the dashboard has drawn.
+/// Variables that enable reports written straight to stderr, bypassing the
+/// logger. They would draw over the dashboard.
 ///
-/// Presence is what turns these on, not the value, so `PHOBOS_VRAM=0` counts
-/// as asking for one.
+/// Presence turns them on, not the value, so `PHOBOS_VRAM=0` counts too.
 const RAW_REPORTS: &[&str] = &["PHOBOS_VRAM", "PHOBOS_PASS_REPORT"];
 
 /// The first of [`RAW_REPORTS`] that is set, if any.
@@ -141,17 +134,14 @@ pub fn raw_report() -> Option<&'static str> {
 
 /// Why a dashboard would not be drawn here, if it would not.
 ///
-/// A reason rather than a flag, because a server that quietly prints lines
-/// when it was expected to draw is a thing to spend an afternoon on. The
-/// caller says this out loud.
+/// Returns a reason rather than a flag, so the caller can tell the user.
 pub fn unavailable() -> Option<String> {
     if let Some(name) = raw_report() {
         return Some(format!(
             "{name} is set, and its report goes straight to stderr, over the top of anything drawn"
         ));
     }
-    // Redirected output must not get escape codes: a server being piped to a
-    // file wants the lines.
+    // Redirected output must not get escape codes.
     if !io::stdout().is_terminal() {
         return Some("stdout is not a terminal".to_string());
     }
@@ -160,13 +150,10 @@ pub fn unavailable() -> Option<String> {
 
 /// Draw until the user quits or the engine stops.
 ///
-/// Returns once either happens, with the terminal put back the way it was.
+/// Returns once either happens, with the terminal restored.
 ///
-/// `ready` carries the one thing the caller cannot find out any other way:
-/// whether the terminal could be taken over at all. Taking it over needs a
-/// console on stdin as well as stdout, which not every way of starting a
-/// process provides, and the caller is about to block serving. It is sent
-/// exactly once, before anything is drawn.
+/// `ready` receives exactly one message before anything is drawn: `None` if
+/// the terminal was taken over, or the reason it could not be.
 pub fn run(meter: Arc<Meter>, ready: SyncSender<Option<String>>) -> Result<()> {
     let mut screen = match Screen::enter(meter.clone()) {
         Ok(screen) => {
@@ -174,8 +161,7 @@ pub fn run(meter: Arc<Meter>, ready: SyncSender<Option<String>>) -> Result<()> {
             screen
         }
         Err(e) => {
-            // Not an error the process should end on: serving without a
-            // dashboard is worth more than not serving.
+            // Not fatal: serving goes on without a dashboard.
             let _ = ready.send(Some(format!("{e:#}")));
             return Ok(());
         }
@@ -189,16 +175,14 @@ pub fn run(meter: Arc<Meter>, ready: SyncSender<Option<String>>) -> Result<()> {
             .draw(|frame| panels::render(frame, &mut view, &snapshot))?;
         view.tick();
 
-        // One poll per frame, so a keypress is acted on within a frame and
-        // the loop is otherwise asleep.
+        // Wait up to one frame for a keypress.
         if !event::poll(FRAME)? {
             continue;
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
                 KeyCode::Char('q') | KeyCode::Esc => break,
-                // Raw mode swallows the interrupt, so the dashboard has to
-                // honour it itself or the only way out is to kill the process.
+                // Raw mode swallows the interrupt, so handle Ctrl-C here.
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                 KeyCode::Char('c') => meter.clear_log(),
                 KeyCode::Char('r') => view.reset_peaks(),
@@ -212,16 +196,15 @@ pub fn run(meter: Arc<Meter>, ready: SyncSender<Option<String>>) -> Result<()> {
     Ok(())
 }
 
-/// The terminal, in the state the dashboard needs it, for as long as it is
-/// alive.
+/// The terminal in raw mode on the alternate screen, for as long as this
+/// lives.
 ///
-/// Raw mode and the alternate screen are process-wide and outlive a panic, so
-/// putting them back has to happen on every exit path. [`Drop`] covers the
-/// ordinary ones and the hook covers the rest.
+/// Both settings are process-wide and outlive a panic, so they must be
+/// restored on every exit path. [`Drop`] covers normal exits and the panic
+/// hook covers the rest.
 ///
-/// Dropping also stops the engine. However the dashboard ends, quitting or
-/// panicking, it was the only thing holding the keyboard, so a process that
-/// kept serving after it went would have no way left to reach it.
+/// Dropping also stops the engine, since without the dashboard nothing can
+/// reach it from the keyboard.
 struct Screen {
     terminal: Terminal<CrosstermBackend<Stdout>>,
     meter: Arc<Meter>,
@@ -231,8 +214,7 @@ impl Screen {
     fn enter(meter: Arc<Meter>) -> Result<Screen> {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            // Before the default hook, or the message prints onto a screen
-            // that is about to be thrown away.
+            // Restore first, or the message prints onto the alternate screen.
             restore();
             previous(info);
         }));
@@ -253,8 +235,8 @@ impl Drop for Screen {
     }
 }
 
-/// Put the terminal back. Every step is best effort: this runs while
-/// unwinding as often as not, and a second failure there would abort.
+/// Put the terminal back. Every step is best effort, since this often runs
+/// while unwinding and a second panic there would abort.
 fn restore() {
     let _ = disable_raw_mode();
     let _ = io::stdout().execute(LeaveAlternateScreen);

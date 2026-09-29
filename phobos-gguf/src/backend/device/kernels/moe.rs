@@ -1,27 +1,30 @@
 // The mixture-of-experts feed-forward's kernels: the router's top-k, the
-// slot-indexed decode matvec, and the weighted combine. Every expert a
-// token reads is in a cache slot by the time its kernel runs (the misses
-// were copied in at the block's sync point), so the matvec takes a slot
-// table and nothing else that varies per token.
+// slot-indexed decode matvec, and the weighted combine.
+//
+// Every expert a token reads is in a cache slot by the time its kernel
+// runs, so the matvec's only per-token input besides the activation is a
+// slot table.
 
 use super::quant::qdot_i8_cta;
 
 /// Experts a token goes through, baked into the kernels as `U`.
 pub(crate) const MOE_USED: usize = 8;
 
-/// Columns a warp of the slot matvec owns, as `kquant.rs`'s wide tile.
+/// Output tile of the slot matvec, the same as `kquant.rs`'s wide tile.
 pub(crate) const MOE_QDOT_TN: usize = 64;
 
 /// Columns one CTA of the combine adds.
 pub(crate) const MOE_COMBINE_TN: usize = 256;
 
-/// Softmax over each row of `n_expert` router logits, one program a row,
-/// the `MOE_USED` largest probabilities in descending order as `TOPK` (i32)
-/// and `W` (renormalized to sum to one), the order llama.cpp's
-/// `build_moe_ffn` uses. `IO` is the iota row, `[0, n_expert)` as f32. Each
-/// pick is two row reductions: the largest probability, then the largest
-/// index holding it. A picked entry is masked to -1, which no probability
-/// reaches, so it is not picked twice.
+/// Softmax and top-k over each row of `n_expert` router logits, one program
+/// per row.
+///
+/// Writes the `MOE_USED` largest probabilities in descending order: ids to
+/// `TOPK` and weights, renormalized to sum to one, to `W`. This matches
+/// llama.cpp's `build_moe_ffn`. `IO` is the iota row `[0, n_expert)` as f32.
+///
+/// Each pick takes the largest probability, then the largest index holding
+/// it. The picked entry is then set to -1 so it is not picked again.
 pub(crate) fn moe_topk_src(n_expert: usize) -> String {
     format!(
         "@launch(256)
@@ -52,20 +55,20 @@ kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R
     )
 }
 
-/// A slot kernel's CTA and the blocks an SM keeps resident, from the
+/// A slot kernel's CTA width and minimum resident blocks per SM, from the
 /// format's register budget.
 fn slot_launch(resident: usize) -> (usize, usize) {
     let cta = qdot_i8_cta(MOE_QDOT_TN);
     (cta, (1024 / cta * resident / 4).max(1))
 }
 
-/// The decode matvec of `kquant.rs` over a cache slab: program `j` of the
-/// second grid axis reads slot `SLOT[j]`, `NE` rows apiece, and writes row
-/// `j` of `C`. `AQ`/`AS` carry `U` rows of quantized activation; `act_row`
-/// picks which one a program reads: `0` when every expert reads the same
-/// row (gate and up), `j` when each reads its own (down, fed by the SwiGLU
-/// of its gate and up). `resident` is the register budget's CTA count, as
-/// `kquant.rs` sets it per format.
+/// `kquant.rs`'s decode matvec over a cache slab.
+///
+/// Program `j` on the second grid axis reads slot `SLOT[j]`, `NE` rows per
+/// slot, and writes row `j` of `C`. `AQ` and `AS` hold `U` rows of
+/// quantized activation. `act_row` picks the row a program reads: `0` when
+/// all experts share one (gate and up), `j` when each has its own (down).
+/// `resident` is the per-format CTA count from `kquant.rs`.
 pub(crate) fn moe_qdot_src(name: &str, ne: usize, act_row: &str, resident: usize) -> String {
     let (cta, min_blocks) = slot_launch(resident);
     format!(
@@ -84,10 +87,11 @@ kernel {name}_moe_qdot(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tenso
     )
 }
 
-/// Gate, up and the SwiGLU in one launch: program `j` of the second grid
-/// axis contracts the shared activation row against slot `SLOT[j]` of the
-/// gate slab and of the up slab, both `NE` rows an expert in one format,
-/// and writes `silu(gate) * up` as row `j` of `H`.
+/// Gate, up and SwiGLU in one launch.
+///
+/// Program `j` on the second grid axis contracts the shared activation row
+/// against slot `SLOT[j]` of both the gate and up slabs, which share a
+/// format. It writes `silu(gate) * up` as row `j` of `H`.
 pub(crate) fn moe_gateup_src(name: &str, ne: usize, resident: usize) -> String {
     let (cta, min_blocks) = slot_launch(resident);
     format!(
@@ -108,9 +112,9 @@ kernel {name}_moe_gateup(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: ten
     )
 }
 
-/// `X += sum_j W[j] * C[j, :] + sigmoid(G) * S`: the routed experts'
-/// down rows weighted by the router, plus the shared expert's row scaled by
-/// its gate's logit, into the residual. One CTA a tile of columns.
+/// `X += sum_j W[j] * C[j, :] + sigmoid(G) * S`: the routed experts' down
+/// rows weighted by the router, plus the gated shared expert, added into
+/// the residual. One CTA per tile of columns.
 pub(crate) fn moe_combine_src() -> String {
     format!(
         "@launch(256)

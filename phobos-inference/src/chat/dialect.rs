@@ -31,13 +31,13 @@ pub(crate) const CDATA_END: &str = "]]>";
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Dialect {
-    /// Qwen3.5: no opening token, a `<tool_call>` wrapper around
-    /// `<function=name>`, and an empty think block prefilled whenever thinking
-    /// was not asked for.
+    /// Qwen3.5. No opening token, and calls are `<function=name>` inside a
+    /// `<tool_call>` wrapper. An empty think block is prefilled when thinking
+    /// is off.
     Qwen,
-    /// MiniCPM5: opens with BOS, calls are a bare `<function name="...">` with
-    /// `<param name="...">` children and CDATA for awkward values, and an
-    /// unspecified `enable_thinking` prefills nothing at all.
+    /// MiniCPM5. Opens with BOS, and calls are a bare `<function name="...">`
+    /// with `<param name="...">` children and CDATA for awkward values.
+    /// Nothing is prefilled when thinking is off.
     MiniCpm,
 }
 

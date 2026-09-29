@@ -1,7 +1,7 @@
 // Q8_0: `{ f16 d; int8 qs[32]; }`, every element `d * qs[i]`.
 //
-// The only format a kernel unpacks today, and the one activations are always
-// quantized to whatever a weight is held in; see [`quantize_row`].
+// Activations are always quantized to this format, whatever format the
+// weight is in; see [`quantize_row`].
 
 use anyhow::Result;
 
@@ -32,8 +32,8 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
     }
 }
 
-/// Pulls the blocks apart without decoding, so a device can upload a quarter
-/// of the bytes and do the multiply in the kernel.
+/// Splits the blocks into quants and scales without decoding, so a device
+/// uploads a quarter of the bytes and multiplies in the kernel.
 fn planes(bytes: &[u8], k: usize, n: usize) -> Planes {
     let blocks = k / BLOCK;
     let mut qs = vec![0i8; k * n];
@@ -48,13 +48,11 @@ fn planes(bytes: &[u8], k: usize, n: usize) -> Planes {
     Planes { qs, scales }
 }
 
-/// The inverse of [`planes`]: blocks assembled from chosen quants and scales,
-/// which is how the checks and the benchmarks make a weight rather than reading
-/// one from a file.
+/// The inverse of [`planes`]: builds blocks from given quants and scales.
+/// Checks and benchmarks use it to make a weight without a file.
 ///
-/// A scale is stored as a half, so one that is not representable comes back
-/// rounded. Weights out of a file always round-trip exactly, having been halves
-/// to begin with.
+/// Scales are stored as halves, so a scale a half cannot hold comes back
+/// rounded. Weights read from a file always round-trip exactly.
 pub fn pack(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<Packed> {
     let planes = Planes {
         qs: qs.to_vec(),
@@ -73,11 +71,12 @@ pub fn pack(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<Packed> {
     Packed::new(Quant::Q8_0, bytes, k, n)
 }
 
-/// Quantize one block of [`BLOCK`] activations to int8 with a shared scale:
-/// symmetric, round to nearest, the extreme element landing on 127.
+/// Quantizes one block of [`BLOCK`] activations to int8 and returns the
+/// shared scale. Symmetric and round to nearest; the largest magnitude maps
+/// to 127.
 ///
-/// The device kernel reproduces this and has to round the same way. Ties go
-/// to even, matching the hardware's rounding instruction.
+/// The device kernel must round the same way: ties go to even, as the
+/// hardware's rounding instruction does.
 pub fn quantize_row(x: &[f32], qs: &mut [i8]) -> f32 {
     let absmax = x.iter().fold(0.0f32, |m, &v| m.max(v.abs()));
     let inv = 127.0 / (absmax + 1e-8);

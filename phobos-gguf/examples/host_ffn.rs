@@ -1,9 +1,10 @@
-//! Times the host expert kernels on a mixture-of-experts file, no GPU, in
-//! the two shapes the runtime runs them: a batch of experts each over its
-//! own rows, as a prompt pass's host share, from the file's layout and
-//! from the device's grouped one; and one row's few experts spread over
-//! the pool by rows, as a decode step's misses. The reference decoder's
-//! time for one expert stands beside them.
+//! Times the host expert kernels on a mixture-of-experts file, with no GPU.
+//!
+//! It covers the two shapes the runtime uses. A prompt pass's host share is
+//! a batch of experts, each over its own rows, timed in both the file's
+//! layout and the device's grouped one. A decode step's misses are one row's
+//! few experts, split across the pool by rows. The reference decoder's time
+//! for one expert is printed alongside.
 //!
 //! `host_ffn MODEL [--rows 1,4,16,64] [--threads N] [--reps R]`
 

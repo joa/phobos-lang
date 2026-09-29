@@ -1,11 +1,12 @@
-// IQ4_XS matvec: decodes straight from the raw block bytes (see q2k.rs).
-// Unlike the other IQ formats, quants are not grid-coded: each nibble
-// indexes a fixed 16-entry codebook ([`crate::quant::iq4xs_flat_codebook`],
-// `KVALUES_IQ4NL`), so one `gather` covers a whole 32-element run. The scale
-// is split the way Q4_K's is: four bits from `scales_l`, two from
-// `scales_h`. The gather index is built with a `var` and two sliced
-// assignments (unlike a `let`-bound view, a `var` can be written into a
-// slice at a time), since low/high nibbles land in different output halves.
+// IQ4_XS matvec, decoding straight from the raw block bytes (see q2k.rs).
+//
+// Unlike the other IQ formats, quants are not grid-coded. Each nibble
+// indexes a fixed 16-entry codebook ([`crate::quant::iq4xs_flat_codebook`]),
+// so one `gather` covers a whole 32-element run. The scale is split as in
+// Q4_K: four bits from `scales_l` and two from `scales_h`.
+//
+// Low and high nibbles land in different halves of the run, so the gather
+// index is a `var` filled by two sliced assignments.
 
 use std::fmt::Write as _;
 
@@ -31,7 +32,7 @@ fn run_geometry(ib: usize) -> (usize, usize, usize, usize) {
     (scale_l_off, scale_l_div, scale_h_div, qs_off)
 }
 
-/// One run's decoded value, `var idx{ib}`/`let decoded{ib} = ...`, and its
+/// One run's decode, `var idx{ib}` and `let decoded{ib} = ...`, with its
 /// `out_off`.
 fn decoded_run(ib: usize) -> (usize, String) {
     let (scale_l_off, scale_l_div, scale_h_div, qs_off) = run_geometry(ib);
@@ -89,10 +90,9 @@ kernel iq4xs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq4xs_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq4xs_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which
-/// this mirrors. `@aligned(N = TN)` is required for the same reason:
-/// `iq4xs_qdot_t` demands its `qb`/`d` slices provably in bounds.
+/// [`iq4xs_matvec_src`] for `m == 1`, as one `iq4xs_qdot_t` call; mirrors
+/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `iq4xs_qdot_t` needs its `qb` and `d` slices provably in bounds.
 pub(crate) fn iq4xs_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -109,9 +109,8 @@ kernel iq4xs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq4xs_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`iq4xs_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
+/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
 pub(crate) fn iq4xs_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for ib in 0..RUNS {

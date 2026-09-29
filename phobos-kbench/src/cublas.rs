@@ -39,7 +39,7 @@ unsafe extern "C" {
         c: *mut f32,
         ldc: i32,
     ) -> i32;
-    /// Half-precision GEMM (f16 operands, f16 accumulation); the __half
+    /// Half-precision GEMM (f16 operands, f16 accumulation). The __half
     /// arguments are passed as their u16 bit patterns.
     fn cublasHgemm(
         handle: Handle,
@@ -82,8 +82,8 @@ impl CuBlas {
         Ok(CuBlas { handle })
     }
 
-    /// In-place y = alpha * x + y over contiguous vectors (unit stride). The
-    /// pointers are raw device addresses (DevicePointer::as_raw()).
+    /// In-place y = alpha * x + y over contiguous vectors. The pointers are
+    /// raw device addresses (`DevicePointer::as_raw()`).
     pub fn saxpy(&self, n: i32, alpha: f32, x: u64, y: u64) -> Result<()> {
         check(
             unsafe {
@@ -104,9 +104,9 @@ impl CuBlas {
 
 impl CuBlas {
     /// Row-major c = alpha * a * b + beta * c (a: m x k, b: k x n, c: m x n).
-    /// cuBLAS is column-major, so this computes the column-major identity
-    /// C^T = alpha*B^T*A^T + beta*C^T; a row-major buffer is its column-major
-    /// transpose, so nothing is actually transposed or copied.
+    /// cuBLAS is column-major, and a row-major buffer is its column-major
+    /// transpose. So this computes C^T = alpha*B^T*A^T + beta*C^T, with no
+    /// transpose or copy.
     #[allow(clippy::too_many_arguments)] // mirrors the BLAS gemm signature
     pub fn matmul(
         &self,
@@ -142,10 +142,9 @@ impl CuBlas {
         )
     }
 
-    /// Row-major f16 c = alpha * a * b + beta * c via cublasHgemm: the
-    /// half-precision analog of [`CuBlas::matmul`]. Pointers are raw device
-    /// addresses to u16/f16 bit patterns; alpha/beta are given in f32 and
-    /// rounded to f16. The same row-major-is-column-major-transpose trick applies.
+    /// The f16 version of [`CuBlas::matmul`], via cublasHgemm. Pointers are
+    /// raw device addresses of f16 bit patterns. `alpha` and `beta` are
+    /// rounded to f16.
     #[allow(clippy::too_many_arguments)] // mirrors the BLAS gemm signature
     pub fn matmul_fp16(
         &self,

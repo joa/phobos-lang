@@ -1,15 +1,15 @@
 // The vector and memref primitives every other file here builds on.
 //
-// The loads and stores are 128-bit, so they are only valid on a buffer
-// provably aligned to 16 bytes; the `_al` variants are the ones that carry
-// the alignment attribute through to the lowering.
+// The plain loads and stores are 128-bit, so they are only valid on a buffer
+// provably aligned to 16 bytes. The `_al` variants take an explicit
+// alignment.
 
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// vector.load mem[indices] : vector<4 x elem>, declared align-16.
-    /// (Without the explicit attribute the lowering uses the element
-    /// alignment, and the backend splits the access into scalars.)
+    /// vector.load mem[indices], declared align-16. Without the attribute,
+    /// the lowering uses the element alignment and the backend splits the
+    /// access into scalars.
     pub(in crate::codegen) fn vec_load(
         &self,
         block: &Block<'c>,
@@ -20,8 +20,7 @@ impl<'c> Codegen<'c> {
         self.vec_load_al(block, mem, indices, vec_t, 16)
     }
 
-    /// vector.load with an explicit alignment (16 for 4xf32 accesses, 8 for
-    /// the f16 staging's 4xf16 loads).
+    /// vector.load with an explicit alignment in bytes.
     pub(in crate::codegen) fn vec_load_al(
         &self,
         block: &Block<'c>,
@@ -55,8 +54,7 @@ impl<'c> Codegen<'c> {
         self.vec_store_al(block, value, mem, indices, 16)
     }
 
-    /// vector.store with an explicit alignment (16 for 4xf32 accesses,
-    /// 8 for the f16 staging's 4xf16 stores).
+    /// vector.store with an explicit alignment in bytes.
     pub(in crate::codegen) fn vec_store_al(
         &self,
         block: &Block<'c>,
@@ -79,8 +77,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Loads a scalar element and float-casts it to want (used by the
-    /// mixed-precision matmul fallbacks: f16 operands accumulated in f32).
+    /// Loads a scalar element and casts it to want, e.g. an f16 operand
+    /// accumulated in f32.
     pub(in crate::codegen) fn load_as(
         &self,
         block: &Block<'c>,
@@ -174,9 +172,9 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// `mask` picks elements out of `a` and `b` laid end to end: how two
-    /// four-wide grid entries join into the eight-wide lane the staged
-    /// projection stores (see `qmma_signed.rs`).
+    /// `mask` picks elements out of `a` and `b` laid end to end. Joins two
+    /// four-wide grid entries into one eight-wide lane (see
+    /// `qmma_signed.rs`).
     pub(in crate::codegen) fn vec_shuffle(
         &self,
         block: &Block<'c>,
@@ -264,11 +262,12 @@ impl<'c> Codegen<'c> {
     }
 
     /// vector.contract accumulating lhs * rhs into acc over the chunk
-    /// dimension k. With lhs_k_major the maps are {(k, m), (k, n) -> (m, n)},
-    /// the fused path's layout (k-major a staging), whose outer-product
-    /// lowering needs no transposes; otherwise {(m, k), (k, n) -> (m, n)} (the
-    /// unfused path's m-major a; the lowering's lhs transpose folds away at
-    /// constant positions).
+    /// dimension k.
+    ///
+    /// With lhs_k_major the maps are {(k, m), (k, n) -> (m, n)}, for a
+    /// k-major staged a, and the lowering needs no transposes. Otherwise they
+    /// are {(m, k), (k, n) -> (m, n)}, and the lhs transpose folds away at
+    /// constant positions.
     pub(in crate::codegen) fn vec_contract(
         &self,
         block: &Block<'c>,

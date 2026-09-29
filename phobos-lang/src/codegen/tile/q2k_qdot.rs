@@ -1,11 +1,11 @@
-// Fused Q2_K dot: static-offset decode folded into the contraction. Unlike
-// the grid-coded IQ formats, Q2_K needs no table lookup. A run is 16
-// elements (half a warp), so this maps two runs onto one warp per pass.
+// Fused Q2_K dot: the decode folded into the contraction, with no table
+// lookup. A run is 16 elements, half a warp, so one warp covers two runs per
+// pass.
 
 use super::*;
 
-// Q2_K block layout (phobos-gguf/src/quant/q2_k.rs): 84 bytes, scale/min
-// byte plane at byte 0 (one byte a run), two-bit quant plane at byte 16.
+// Q2_K block layout (phobos-gguf/src/quant/q2_k.rs): 84 bytes, the scale and
+// min plane at byte 0 (one byte per run), the two-bit quant plane at byte 16.
 const Q2K_BLOCK_BYTES: i64 = 84;
 const Q2K_QS_OFF: i64 = 16;
 const Q2K_RUN: i64 = 16;
@@ -13,7 +13,7 @@ const Q2K_RUNS: i64 = 16;
 
 impl<'c> Codegen<'c> {
     /// Q2_K's matvec contraction with the decode folded in. Same shape as
-    /// `tile_iq1s_qdot_t`; differs only in the lane mapping.
+    /// `tile_iq1s_qdot_t`, with a different lane mapping.
     pub(in crate::codegen) fn tile_q2k_qdot_t(
         &mut self,
         block: &Block<'c>,

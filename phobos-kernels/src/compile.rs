@@ -89,8 +89,8 @@ pub fn compile_in(
         }
     };
     let module = Module::from_ptx(&ptx, &[]).with_context(|| format!("loading {what} PTX"))?;
-    // A kernel asked for on its own is a batch of one: a caller watching gets
-    // the same shape of report either way and never has to special-case it.
+    // A kernel asked for on its own is reported as a batch of one, so a
+    // watcher sees the same shape of report either way.
     progress::report(Step {
         stage: STAGE,
         item: what,
@@ -104,10 +104,9 @@ pub fn compile_in(
     Ok((module, shared))
 }
 
-/// [`compile`] for several independent sources at once: each source's
-/// MLIR-to-PTX lowering runs on its own stack in parallel. Only the
-/// PTX-to-`Module` load, which touches the CUDA driver, stays sequential on
-/// the calling thread, after every lowering has finished.
+/// [`compile`] for several independent sources at once. Each source lowers to
+/// PTX on its own thread, in parallel. Loading the PTX into a `Module` touches
+/// the CUDA driver, so that stays sequential on the calling thread.
 pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Module>> {
     enum Slot {
         Hit(String),
@@ -122,8 +121,8 @@ pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Mo
             match cache::load(&ctx, source) {
                 Some((ptx, _)) => Ok(Slot::Hit(ptx)),
                 None => {
-                    // Said before the spawn, so the whole batch is named the
-                    // moment it starts rather than as each one is joined.
+                    // Announced before the spawn, so the whole batch is named
+                    // as soon as it starts.
                     progress::started(STAGE, what);
                     let handle = lower::spawn(&ctx, source)
                         .with_context(|| format!("spawning the compile thread for {what}"))?;
@@ -149,11 +148,9 @@ pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Mo
             };
             let module =
                 Module::from_ptx(&ptx, &[]).with_context(|| format!("loading {what} PTX"))?;
-            // Every lowering started at once, and they are joined in the
-            // order the jobs were given, so this counts how far along that
-            // order it has got rather than how many threads have finished.
-            // It only ever moves forward, and a job that finishes early is
-            // not reported until the ones before it have.
+            // Jobs are joined in the order given, so `done` counts progress
+            // along that order, not finished threads. A job that finishes
+            // early is reported only after the ones before it.
             progress::report(Step {
                 stage: STAGE,
                 item: what,
@@ -193,8 +190,7 @@ impl Variants {
         manifest::record(&ctx, &[&aligned_src, &general_src]);
         let hit = cache::load_pair(&ctx, &aligned_src, &general_src);
         // The pair is one cache entry and one unit of work, so it is timed and
-        // reported as one kernel; `what` names the kernel rather than either
-        // of its two alignment variants.
+        // reported as one kernel named `what`.
         let cached = hit.is_some();
         let at = Instant::now();
         let (aligned_ptx, general_ptx) = match hit {

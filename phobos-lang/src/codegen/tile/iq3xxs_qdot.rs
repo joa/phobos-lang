@@ -1,14 +1,13 @@
-// Fused IQ3_XXS dot: two four-wide grid-table lookups a lane plus a sign-table
-// lookup, folded into the contraction. The decode itself lives in
-// `iq3xxs.rs`, shared with `qdecode.rs`.
+// Fused IQ3_XXS dot: two four-wide grid lookups and one sign lookup per lane,
+// folded into the contraction. The decode itself lives in `iq3xxs.rs`,
+// shared with `qdecode.rs`.
 
 use super::iq3xxs::{IQ3XXS_BLOCK_BYTES, IQ3XXS_HALF};
 use super::*;
 
 impl<'c> Codegen<'c> {
     /// IQ3_XXS's matvec contraction with its two-grid-entry decode folded
-    /// in. Same shape as `tile_iq1s_qdot_t`; reuses `tile_iq2xxs_qdot_t`'s
-    /// `arith.select`-folded lo/hi byte geometry.
+    /// in. Same shape as `tile_iq1s_qdot_t`.
     pub(in crate::codegen) fn tile_iq3xxs_qdot_t(
         &mut self,
         block: &Block<'c>,

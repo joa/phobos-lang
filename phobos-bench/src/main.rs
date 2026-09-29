@@ -3,9 +3,9 @@
 //   cargo run --release -p phobos-bench --features cuda -- \
 //       -m MODEL.gguf -p 128,512 -n 32,128,512 -r 3
 //
-// Reports the same numbers llama-bench does, in the same units: pp<N> is
-// prompt processing (N tokens fed into a fresh state) and tg<N> is text
-// generation (N tokens produced one at a time), one row per size given.
+// Reports llama-bench's numbers in its units, one row per size given.
+// pp<N> is prompt processing: N tokens fed into a fresh state.
+// tg<N> is text generation: N tokens produced one at a time.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -18,7 +18,7 @@ use phobos_gguf::backend::Backend;
 #[cfg(feature = "cuda")]
 use phobos_gguf::backend::device;
 
-/// The runtime's prompt batch, which a depth is primed in.
+/// The runtime's prompt batch size, used to prime a depth.
 const PROMPT_BATCH: usize = 512;
 
 const DEFAULT_MODEL: &str = "models/Qwen3.5-0.8B-Q8_0.gguf";
@@ -27,8 +27,8 @@ struct Args {
     model: PathBuf,
     prompt_tokens: Vec<usize>,
     gen_tokens: Vec<usize>,
-    /// Positions already in the context when a tg row starts, one row per
-    /// depth, as llama-bench's `-d`.
+    /// Positions already in the context when a tg row starts, as
+    /// llama-bench's `-d`. Each depth gets its own set of tg rows.
     depths: Vec<usize>,
     repetitions: usize,
     warmup: bool,
@@ -61,8 +61,8 @@ OPTIONS:
     );
 }
 
-/// One size, or a comma-separated list of them. A zero drops the row, which is
-/// how a caller asks for prompt passes alone or decode steps alone.
+/// One size, or a comma-separated list of them. A zero drops the row, so
+/// `-p 0` or `-n 0` runs only the other kind.
 fn parse_sizes(value: &str) -> Result<Vec<usize>> {
     value
         .split(',')
@@ -111,8 +111,7 @@ fn parse_args() -> Result<Args> {
             other => anyhow::bail!("unknown argument {other:?} (try --help)"),
         }
     }
-    // Only when the flag never appeared: -p 0 is a request for no prompt row,
-    // not a request for the default one.
+    // Default only when the flag never appeared, so -p 0 means no prompt row.
     if !std::env::args().any(|a| a == "-p" || a == "--n-prompt") {
         args.prompt_tokens.push(128);
     }
@@ -151,9 +150,8 @@ fn main() -> Result<()> {
 
     let load_start = Instant::now();
     let gguf = Gguf::open(&args.model)?;
-    // The label llama-bench prints, read off the file since architectures
-    // differ in size and width. The quantization is whichever type carries
-    // the most elements: the norms are always f32.
+    // The model label llama-bench prints. The quantization is the type of
+    // the largest tensor, since norms are always f32.
     let quantization = gguf
         .tensors()
         .iter()
@@ -178,8 +176,8 @@ fn main() -> Result<()> {
         backend_name()
     );
 
-    // llama-bench feeds pseudorandom token ids rather than real text: the cost
-    // of a position does not depend on which token sits there.
+    // Pseudorandom token ids, as llama-bench uses. A position's cost does not
+    // depend on the token.
     let longest = args
         .prompt_tokens
         .iter()
@@ -191,13 +189,11 @@ fn main() -> Result<()> {
 
     if args.warmup {
         eprint!("warmup... ");
-        // Batch and single-step warmups both run: they hit different kernels,
-        // and a backend may compile each on first use. The batch needs at
-        // least 128 rows to reach the widest tile a batched kernel has (the
-        // quantized projection's, and past the attention matmul path's own
-        // 64-row floor). One warmup pass runs per distinct prompt size, not
-        // just the largest, since the first pass at a new shape also builds
-        // its graph.
+        // Batch and single-step passes hit different kernels, and each may
+        // compile on first use, so both are warmed. A batch needs at least 128
+        // rows to reach the widest batched tile. Each distinct prompt size
+        // gets its own pass, because the first pass at a shape builds its
+        // graph.
         let mut shapes: Vec<usize> = args.prompt_tokens.iter().map(|&n| n.max(128)).collect();
         shapes.push(128);
         shapes.sort_unstable();
@@ -209,8 +205,7 @@ fn main() -> Result<()> {
         }
         let mut state = model.new_state();
         for &token in tokens.iter().take(4) {
-            // Warms the same greedy fast path the timed tg loop takes, so its
-            // kernels compile here rather than inside a timed repetition.
+            // The same greedy path the timed tg loop takes.
             model.forward_greedy(&mut state, &[token], backend.as_ref())?;
         }
         state.release(backend.as_ref());
@@ -223,8 +218,7 @@ fn main() -> Result<()> {
         for rep in 0..args.repetitions {
             let mut state = model.new_state();
             let start = Instant::now();
-            // The whole prompt in one pass: pp's projections are real matmuls,
-            // not a matvec per position like tg's.
+            // The whole prompt in one pass.
             model.forward(&mut state, &tokens[..prompt_tokens], backend.as_ref())?;
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
@@ -242,25 +236,22 @@ fn main() -> Result<()> {
         let mut rates = Vec::new();
         for rep in 0..args.repetitions {
             let mut state = model.new_state();
-            // Prime with the depth's positions, in the runtime's prompt
-            // batches, and one more, so the timed loop is pure decoding, the
-            // same split llama-bench uses.
+            // Prime `depth + 1` positions in prompt batches, so the timed
+            // loop is pure decoding, as in llama-bench.
             for chunk in tokens[..depth + 1].chunks(PROMPT_BATCH) {
                 model.forward(&mut state, chunk, backend.as_ref())?;
             }
             let before = backend.cache_stats();
             let start = Instant::now();
-            // The greedy fast path: a temperature-0 deployment takes this
-            // route, re-feeding a fixed token regardless of what comes back,
-            // so timing it instead of `forward` measures what actually ships.
+            // The greedy fast path, which temperature-0 decoding takes. It is
+            // fed fixed tokens regardless of what comes back.
             for &token in tokens.iter().skip(depth + 1).take(gen_tokens) {
                 model.forward_greedy(&mut state, &[token], backend.as_ref())?;
             }
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
             rates.push(gen_tokens as f64 / secs);
-            // A streamed model's decode rate follows its hit rate, which the
-            // prompt a depth is primed with moves.
+            // A streamed model's decode rate follows its expert hit rate.
             let hits = match (before, backend.cache_stats()) {
                 (Some(b), Some(a)) if a.expert_hits + a.expert_misses > b.expert_hits + b.expert_misses => {
                     let (h, m) = (a.expert_hits - b.expert_hits, a.expert_misses - b.expert_misses);
@@ -282,8 +273,7 @@ fn main() -> Result<()> {
             backend_name()
         );
     }
-    // A model whose experts stream has one more number that decides its
-    // decode rate: what share of them the device cache had.
+    // For a model that streams its experts, the device cache's hit rate.
     if let Some(stats) = backend.cache_stats()
         && let Some(rate) = stats.expert_hit_rate()
     {
@@ -313,8 +303,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// A deterministic spread of valid token ids (xorshift64*, same generator the
-/// other checks use).
+/// A deterministic spread of valid token ids from an xorshift generator.
 fn synthetic_tokens(count: usize, vocab: usize) -> Vec<u32> {
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     (0..count)

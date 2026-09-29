@@ -31,8 +31,8 @@ fn first(src: &str) -> Kernel {
     phobos_lang::parse(src).unwrap().remove(0)
 }
 
-/// Mirrors phobos-lang's emit_mlir test harness: device-compile a leaf
-/// and run the MLIR verifier on the emitted module.
+/// Device-compile a leaf and run the MLIR verifier on the emitted module,
+/// like phobos-lang's `emit_mlir` test harness.
 fn verify_leaf(k: &Kernel) -> String {
     use melior::{
         Context,
@@ -177,9 +177,9 @@ fn matmul_leaves_compile_at_device_scale() {
     assert!(init.contains("gpu.func"), "init leaf missing gpu.func");
 }
 
-/// A full GEMM: C = alpha*acc + beta*C_old. The accumulator epilogue reads
-/// C back, so copy-elision folds beta into the init leaf (C = beta*C_old,
-/// an rmw) and keeps alpha on the step chain (C = alpha*acc + c_old).
+/// A full GEMM, `C = alpha*acc + beta*C_old`. The epilogue reads C back, so
+/// the init leaf applies beta (`C = beta*C_old`, an rmw) and the step chain
+/// keeps alpha (`C = alpha*acc + c_old`).
 const GEMM: &str = r#"
 @cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
@@ -200,14 +200,14 @@ C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
 fn gemm_cluster_ir() {
     let p = compile(&first(GEMM)).unwrap();
 
-    // C is now rmw: the init leaf seeds it with beta*C_old instead of zeroing it.
+    // C is rmw: the init leaf seeds it with beta*C_old instead of zeroing it.
     let modes: Vec<_> = p.tensors.iter().map(|t| t.mode).collect();
     assert_eq!(
         modes,
         vec![AccessMode::Read, AccessMode::Read, AccessMode::RMW]
     );
 
-    // scalars skip the dataflow: the step carries [alpha, beta], the init carries just beta.
+    // The step carries [alpha, beta], the init carries just beta.
     assert_eq!(p.scalars[0].name, "alpha");
     assert_eq!(p.scalars[1].name, "beta");
 
@@ -258,8 +258,7 @@ fn gemm_leaves() {
     let p = compile(&first(GEMM)).unwrap();
     assert_eq!(p.leaves.len(), 2);
 
-    // step leaf: the store keeps the fused epilogue shape alpha*acc + c_old
-    // (an implicit beta of 1); the real beta is applied once by the init.
+    // step leaf: the store stays alpha*acc + c_old, since the init applies beta.
     let step = &p.leaves[0];
     let Some(Stmt::Assign {
         op: AssignOp::Set,
@@ -329,9 +328,9 @@ fn add_cluster_ir() {
     verify_leaf(&p.leaves[0].kernel);
 }
 
-/// A flash-attention-shaped kernel: grid over query blocks, a device-scale
-/// key loop kept inside the leaf, full : slices over the head dim, running
-/// tile state, and a scalar parameter.
+/// A flash-attention-shaped kernel: a grid over query blocks, a device-scale
+/// key loop inside the leaf, full `:` slices over the head dim, running tile
+/// state, and a scalar parameter.
 const FLASH: &str = r#"
 @cluster(BR in [1024, 4096])
 @autotune(D in [64], BR in [32, 128], BC in [32, 128])
@@ -360,7 +359,7 @@ O[row :+ BR, :] = acc
 
 #[test]
 fn accepts_scalar_params() {
-    // an unused alpha scalar clusters: recorded at its param position and carried by the step compute.
+    // An unused scalar is recorded at its param position and carried by the step compute.
     let src = MATMUL.replace("C: tensor<f32>[M, N])", "C: tensor<f32>[M, N], alpha: f32)");
     let p = compile(&first(&src)).unwrap();
     assert_eq!(p.scalars.len(), 1);
@@ -488,8 +487,7 @@ fn rejects_cluster_dim_without_autotune() {
 
 #[test]
 fn rejects_multiple_cluster_computes() {
-    // Two rmw chains over the same cluster loop are unsupported on the
-    // accumulator path.
+    // The accumulator path rejects two rmw chains over one cluster loop.
     let src = r#"
 @cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])

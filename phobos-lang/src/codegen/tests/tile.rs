@@ -4,8 +4,8 @@ use super::*;
 
 #[test]
 fn a_dead_named_tile_returns_its_buffer_to_the_pool() {
-    // The last statement that reads a name ends its life; a block's own
-    // declarations reuse the freed buffer instead of minting another global.
+    // The last statement that reads a name ends its life. Later
+    // declarations reuse the freed buffer instead of adding another global.
     let mlir = emit_mlir(
         "@launch(256)
         kernel chain(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
@@ -27,9 +27,8 @@ fn a_dead_named_tile_returns_its_buffer_to_the_pool() {
 #[test]
 fn dynamic_shared_resets_its_cursor_between_dead_phases() {
     // `@dynshared` tiles live at byte offsets in one shared allocation. `a`
-    // and `b` are read and released before `c` is declared, so nothing is
-    // live when `c` mints: the allocator must restart at offset 0 rather
-    // than append past their combined footprint.
+    // and `b` are released before `c` is declared, so nothing is live then.
+    // The allocator must restart at offset 0 instead of appending past them.
     let mlir = emit_mlir(
         "@dynshared
         kernel chain(X: tensor<f32>[16, 64], Y: tensor<f32>[8, 4],
@@ -52,9 +51,9 @@ fn dynamic_shared_resets_its_cursor_between_dead_phases() {
 
 #[test]
 fn a_tile_read_after_a_loop_keeps_its_buffer() {
-    // The last mention is what ends a name's life, and a nested body is
-    // part of the statement that contains it: `keep` is read inside the
-    // loop and again after it, so neither point may release it.
+    // The last mention ends a name's life, and a nested body counts as part
+    // of its statement. `keep` is read inside the loop and after it, so
+    // neither the loop body nor the loop may release it.
     let mlir = emit_mlir(
         "@launch(256)
         kernel later(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
@@ -69,8 +68,8 @@ fn a_tile_read_after_a_loop_keeps_its_buffer() {
     assert!(module_verifies(&mlir), "{mlir}");
 }
 
-/// A tile is shared memory, so a slice of one must name that address
-/// space: the space travels on the [`MemVal`].
+/// A tile is shared memory, so a slice of one keeps that address space. The
+/// space travels on the [`MemVal`].
 #[test]
 fn a_tile_slice_stays_in_shared_memory() {
     let mlir = emit_mlir(
@@ -91,8 +90,8 @@ fn a_tile_slice_stays_in_shared_memory() {
     );
 }
 
-/// Declaring a buffer a following loop fills entirely should not emit the
-/// fill an initializer would, since every element of it is overwritten.
+/// A tile declared without an initializer emits no fill, since the code
+/// that follows overwrites every element.
 #[test]
 fn an_uninitialized_tile_emits_no_fill() {
     let filled = emit_mlir(
@@ -109,7 +108,7 @@ fn an_uninitialized_tile_emits_no_fill() {
             O[0 :+ 16, 0 :+ 32] = A
         }",
     );
-    // Same buffers either way, one fewer sweep over one of them.
+    // Same buffers either way, but one fewer sweep.
     assert_eq!(
         filled.matches("memref.global").count(),
         bare.matches("memref.global").count()
@@ -120,8 +119,8 @@ fn an_uninitialized_tile_emits_no_fill() {
     );
 }
 
-/// `var` without an initializer needs the type, since nothing is left to
-/// infer one from, and `let` cannot omit it at all: it would name nothing.
+/// `var` without an initializer needs a tile type, since there is nothing
+/// to infer one from. `let` always needs an initializer.
 #[test]
 fn an_uninitialized_declaration_needs_a_tile_type() {
     for src in [
@@ -134,8 +133,9 @@ fn an_uninitialized_declaration_needs_a_tile_type() {
     }
 }
 
-/// The flat view reinterprets the same shared-memory bytes as another type,
-/// so a value reduced per block of 32 can be contracted over as one row.
+/// The flat view reinterprets the same shared-memory bytes as another
+/// shape, so a value reduced per block of 32 can be contracted over as one
+/// row.
 #[test]
 fn flat_views_a_tile_as_one_row() {
     let mlir = emit_mlir(
@@ -167,9 +167,8 @@ fn flat_views_a_tile_as_one_row() {
     );
 }
 
-/// A flattened tile's buffer must leave the pool: the view is bound to a
-/// name of its own, so the second declaration below would otherwise be
-/// handed the bytes the view still reads, and compile to a wrong answer.
+/// A flattened tile's buffer must leave the pool. Otherwise the second
+/// declaration below would get the bytes the view still reads.
 #[test]
 fn a_flattened_tile_is_not_recycled() {
     let mlir = emit_mlir(
@@ -190,18 +189,17 @@ fn a_flattened_tile_is_not_recycled() {
     );
 }
 
-/// A view is not a buffer, so it cannot be flattened again, and neither can
-/// the staging tiles whose rows are not where row-major says they are.
+/// `flat` accepts only a declared tile, not a view or a tensor slice.
 #[test]
 fn flat_rejects_what_is_not_a_declared_tile() {
     for src in [
-        // a slice of a tile, whose offset the cast would drop
+        // A slice of a tile, whose offset the cast would drop.
         "kernel v(X: tensor<f32>[32, 32], O: tensor<f32>[1, 32]) {
             var A: tile<f32>[32, 32] = 0.0
             let s = A[0 :+ 16, 0 :+ 32]
             O[0 :+ 1, 0 :+ 32] = flat(s)
         }",
-        // a tensor slice, which is not in shared memory at all
+        // A tensor slice, which is not in shared memory at all.
         "kernel v(X: tensor<f32>[32, 32], O: tensor<f32>[1, 32]) {
             O[0 :+ 1, 0 :+ 32] = flat(X[0 :+ 16, 0 :+ 32])
         }",
@@ -219,15 +217,16 @@ fn warp_partial_vectorizes_kv_loads_at_dpl_4() {
     assert_contains(&mlir, &["vector.load", "vector<4xf16>", "alignment = 8"]);
 }
 
-/// The same at D = 256 (dpl = 8): a whole lane's slice in one 16-byte load.
+/// The same at D = 256 (dpl = 8), with a lane's whole slice in one 16-byte
+/// load.
 #[test]
 fn warp_partial_vectorizes_kv_loads_at_dpl_8() {
     let mlir = emit_mlir(&warp_partial_probe(256, 8, 8));
     assert_contains(&mlir, &["vector.load", "vector<8xf16>", "alignment = 16"]);
 }
 
-/// `@padstage` routes a staging tile whose row pitch is a bank-period
-/// multiple through `alloc_tile_padded`. See `Build::should_pad_stage`.
+/// `@padstage` pads a staging tile whose row pitch is a multiple of the bank
+/// period, via `alloc_tile_padded`. See `Build::should_pad_stage`.
 #[test]
 fn padstage_pads_a_bank_period_pitch_tile() {
     let mlir = emit_mlir(
@@ -240,8 +239,8 @@ fn padstage_pads_a_bank_period_pitch_tile() {
     assert_contains(&mlir, &["memref<8x136xf16, 3>"]);
 }
 
-/// The same statement without `@padstage` stays unpadded: opt-in per kernel,
-/// not a default.
+/// Without `@padstage` the same tile stays unpadded. Padding is opt-in per
+/// kernel.
 #[test]
 fn without_padstage_the_same_tile_stays_unpadded() {
     let mlir = emit_mlir(
@@ -254,8 +253,8 @@ fn without_padstage_the_same_tile_stays_unpadded() {
     assert!(!mlir.contains("136"), "should not have padded:\n{mlir}");
 }
 
-/// A pitch under the bank period (32 f16 elements, 64 bytes/row) is left
-/// alone even with the attribute on.
+/// A pitch under the bank period, here 32 f16 elements or 64 bytes per row,
+/// is left alone even with the attribute.
 #[test]
 fn padstage_leaves_a_sub_period_pitch_tile_alone() {
     let mlir = emit_mlir(
@@ -268,9 +267,8 @@ fn padstage_leaves_a_sub_period_pitch_tile_alone() {
     assert_contains(&mlir, &["memref<8x32xf16, 3>"]);
 }
 
-/// Two consecutive staging statements read only global memory, so neither's
-/// write can race the other and the first's trailing barrier is redundant:
-/// one barrier for the pair, plus the final store's own.
+/// Two consecutive staging statements read only global memory, so neither
+/// write can race the other. The first one's trailing barrier is dropped.
 #[test]
 fn consecutive_staged_slices_share_one_barrier() {
     let mlir = emit_mlir(
@@ -280,9 +278,9 @@ fn consecutive_staged_slices_share_one_barrier() {
             O[0 :+ 8, 0 :+ 128] = a + b
         }",
     );
-    // One barrier for the merged a/b pair, where the store's sweep reads
-    // them at another width; the store's own trailing barrier closes the
-    // kernel and nothing depends on it.
+    // One barrier after the a/b pair, since the store's sweep reads them at
+    // another width. The store's own trailing barrier ends the kernel and
+    // nothing needs it.
     let barriers = mlir.matches("gpu.barrier").count();
     assert_eq!(
         barriers, 1,
@@ -299,7 +297,7 @@ fn consecutive_staged_slices_share_one_barrier() {
 }
 
 /// A staging copy read back by a copy of the same width is read by the
-/// threads that wrote it, element for element, so neither needs a barrier.
+/// same threads that wrote it, so no barrier is needed.
 #[test]
 fn a_staged_slice_copied_back_by_the_same_threads_needs_no_barrier() {
     let mlir = emit_mlir(
@@ -324,9 +322,9 @@ fn staging_run_stops_before_a_non_slice_statement() {
             O[0 :+ 8, 0 :+ 128] = c + b
         }",
     );
-    // a and b merge and c copies a at the same width, so the one barrier
-    // that survives is c's, the last before the store reads b and c at
-    // another width; it orders b's copy too.
+    // a and b merge, and c copies a at the same width. The one barrier left
+    // is c's, before the store reads b and c at another width. It orders
+    // b's copy too.
     let barriers = mlir.matches("gpu.barrier").count();
     assert_eq!(barriers, 1, "got {barriers}:\n{mlir}");
     let views = tile_views(&mlir, "8x128xf16");
@@ -336,7 +334,7 @@ fn staging_run_stops_before_a_non_slice_statement() {
 }
 
 /// A minimal kernel calling `warp_partial` the way `attention_split_src`
-/// does: one program, one warp group of query rows, the whole cache as
+/// does: one program, one warp group of query rows, and the whole cache as
 /// `[lo, hi)`.
 fn warp_partial_probe(d: i64, wct: i64, qw: i64) -> String {
     format!(

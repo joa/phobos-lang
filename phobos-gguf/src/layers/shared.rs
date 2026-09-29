@@ -6,10 +6,10 @@ use crate::backend::{Backend, Buf, HeadPerm, QAct};
 
 use super::{Fold, Linear};
 
-/// An input several projections read, from [`Linear::share`]: the
+/// An input several projections read, from [`Linear::share`]. Holds the
 /// activation and its quantized copy, both after the Hadamard transform when
-/// the weights are folded, so the transform and the quantization run once
-/// rather than per weight.
+/// the weights are folded, so the transform and quantization run once
+/// instead of per weight.
 #[derive(Clone, Copy)]
 pub(crate) struct Shared {
     pub(super) x: Buf,
@@ -18,13 +18,12 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    /// The quantized copy, if it is of the row as it came in rather than of
-    /// its transform.
+    /// The quantized copy, if it is of the untransformed row.
     pub(crate) fn plain_act(&self) -> Option<QAct> {
         self.act.filter(|_| self.rotation.is_none())
     }
 
-    /// Hands back the transformed copy, the only buffer this owns.
+    /// Releases the transformed copy, the only buffer this owns.
     pub(crate) fn release(self, backend: &dyn Backend) {
         if self.rotation.is_some() {
             backend.release(self.x);
@@ -51,9 +50,9 @@ impl Linear {
         }
     }
 
-    /// `x`, and `act` its quantized copy where the caller has one, made ready
-    /// once for this weight and every other one reading the same input
-    /// through the same transform. See [`Linear::forward_shared`].
+    /// Prepares `x`, and its quantized copy `act` if the caller has one, once
+    /// for this weight and every other weight reading the same input through
+    /// the same transform. See [`Linear::forward_shared`].
     pub(crate) fn share(
         &self,
         backend: &dyn Backend,
@@ -73,10 +72,10 @@ impl Linear {
         Ok(Shared { x: out, act, rotation: Some((width, perm)) })
     }
 
-    /// The normalization of `x` into `normed` ahead of this weight and every
-    /// other one reading the same row, shared as [`Linear::share`] does. A
-    /// folded weight has it normalized, transformed and quantized in one
-    /// operation; `normed` holds the plain row either way.
+    /// Normalizes `x` into `normed` for this weight and every other one
+    /// reading the same row, shared as [`Linear::share`] does. A folded
+    /// weight normalizes, transforms and quantizes in one operation.
+    /// `normed` holds the plain normalized row either way.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn share_norm(
         &self,
@@ -116,8 +115,8 @@ impl Linear {
 
     /// [`Linear::forward_shared`] into a destination the caller owns.
     pub(crate) fn project_into_shared(&self, backend: &dyn Backend, input: Shared, rows: usize, out: Buf) -> Result<()> {
-        // An input rotated for another weight, or not at all, still projects
-        // to fluent-looking output, so a mismatch is refused here.
+        // An input rotated for another weight, or not rotated, still gives
+        // fluent-looking output, so refuse a mismatch here.
         ensure!(
             input.rotation == self.rotation(),
             "'{}' reads its input through {:?}, but it was prepared for {:?}",

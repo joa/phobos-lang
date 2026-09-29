@@ -71,9 +71,9 @@ impl OutputParser {
                 }
                 Mode::Content => {
                     let (start, _) = self.dialect.call_markers();
-                    // A model whose template prefills no think block, as
-                    // MiniCPM5's does not, opens one itself. Without this the
-                    // reasoning arrives as prose with its tags intact.
+                    // A model whose template prefills no think block, such as
+                    // MiniCPM5, opens one itself. Catch it here so the
+                    // reasoning is not emitted as content with its tags.
                     let think_at = self.buf.find(THINK_START);
                     let call_at = self.buf.find(start);
                     let (marker, at, next) = match (think_at, call_at) {
@@ -131,8 +131,8 @@ impl OutputParser {
     }
 
     pub(crate) fn parse_call(&self, raw: &str) -> Option<ToolCall> {
-        // MiniCPM5's start marker is part of the call, so its body still opens
-        // with the name and must not be trimmed at the front.
+        // MiniCPM5's body still opens with the name after its start marker,
+        // so it must not be trimmed at the front.
         if self.dialect == Dialect::MiniCpm {
             return parse_minicpm_function(raw, self.tools.as_ref(), self.calls);
         }
@@ -143,7 +143,7 @@ impl OutputParser {
         parse_json_call(&serde_json::from_str::<Value>(raw).ok()?, self.calls)
     }
 
-    /// Blank lines follow the `</think>` closer, and the caller must not see them.
+    /// Emits content, dropping the leading whitespace that follows `</think>`.
     pub(crate) fn emit_content(&mut self, events: &mut Vec<OutputEvent>, text: String) {
         let text = if self.at_content_start {
             text.trim_start().to_string()

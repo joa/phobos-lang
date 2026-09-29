@@ -1,8 +1,7 @@
 // `<fmt>_qdecode_t`: a format's decode stored to the `[K, N]` scratch a
-// batched matmul reads, where `<fmt>_qdot_t` contracts the same decode against
-// one activation row. The decode itself is shared with `<fmt>_qdot.rs`; only
-// the thread map differs, and the store sets it (see the doc comment on
-// `qdecode_t_into`).
+// batched matmul reads. `<fmt>_qdot_t` contracts the same decode against one
+// activation row instead. Both share the decode in `<fmt>.rs` and differ only
+// in the thread map (see `qdecode_t_into`).
 
 use super::iq1m::{IQ1M_BLOCK_BYTES, IQ1M_LANE, Iq1mBlock, Iq1mLane};
 use super::iq1s::{IQ1S_BLOCK_BYTES, IQ1S_LANE, Iq1sBlock, Iq1sLane};
@@ -108,7 +107,7 @@ impl QFormat {
     }
 
     /// Elements per grid entry. IQ3_XXS and IQ3_S split a lane's eight over
-    /// two entries; the rest read one.
+    /// two entries, the rest read one.
     fn half(self) -> i64 {
         match self {
             Self::Iq3xxs => IQ3XXS_HALF,
@@ -135,11 +134,10 @@ impl<'c> LaneGeom<'c> {
 impl<'c> Codegen<'c> {
     /// `out[kbase + lane*8 + y, j] = decode(..)` over the whole of `k`.
     ///
-    /// Consecutive threads take consecutive output *columns*, so a warp's 32
-    /// stores land in four fully covered 32-byte sectors. Nothing is staged and
-    /// nothing synchronizes. `out` is a tensor slice, never a tile: the decoded
-    /// values are already in registers at the rows they belong in, which is
-    /// also why there is no value form.
+    /// Consecutive threads take consecutive output columns, so a warp's 32
+    /// stores fill whole 32-byte sectors. Nothing is staged and nothing
+    /// synchronizes. `out` is a tensor slice, never a tile, so there is no
+    /// value form.
     pub(in crate::codegen) fn qdecode_t_into(
         &mut self,
         block: &Block<'c>,
@@ -173,8 +171,9 @@ impl<'c> Codegen<'c> {
         if tables.iter().any(|t| t.elem != self.i8_t) {
             bail!("{what}'s tables must hold packed i8 lanes");
         }
-        // f16 is free where the reader is `stage_to_f16`, which truncates a
-        // weight operand anyway. The caller decides; see `project_raw_dense`.
+        // f16 output loses nothing when the reader is `stage_to_f16`, which
+        // truncates a weight operand anyway. The caller decides, see
+        // `project_raw_dense`.
         if out.elem != self.f32_t && out.elem != self.f16_t {
             bail!("{what} produces f32 or f16 weights, not {}", out.elem);
         }
@@ -201,7 +200,8 @@ impl<'c> Codegen<'c> {
 
         let body = Block::new(&[(self.index_t, self.loc)]);
         let li = detach(body.argument(0)?.into());
-        // Lane over columns, not columns over lanes: `j` is the fast axis.
+        // `j` is the fast axis, so consecutive threads take consecutive
+        // columns.
         let lane = self.divui(&body, li, cols_w)?;
         let j = self.remui(&body, li, cols_w)?;
 
@@ -229,8 +229,7 @@ impl<'c> Codegen<'c> {
         let kbase = detach(kb.argument(0)?.into());
         let blk = self.divui(&kb, kbase, step)?;
         let at = self.raw_block_at(&kb, j, blk, blk_bytes)?;
-        // A one-table format never reads `signs`; aliasing it to the grid
-        // keeps one shape for the call below.
+        // A one-table format never reads `signs`, so it aliases the grid.
         let two = QTables {
             grid: &tables[0],
             signs: tables.last().expect("checked non-empty above"),
@@ -262,8 +261,8 @@ impl<'c> Codegen<'c> {
         let row0 = self.addi(&kb, kbase, geom.k_lane_off())?;
         let half = fmt.half();
         for entry in 0..fmt.lane_elems() / half {
-            // Both the entry's element offset and its offset into the sign
-            // entry, which are the same number. Zero for a one-entry format.
+            // The entry's element offset, which is also its offset into the
+            // sign entry. Zero for a one-entry format.
             let entry_off = self.const_index(&kb, entry * half)?;
             let base = if entry == 0 {
                 row0

@@ -1,11 +1,11 @@
 // What each raw format contributes to the staged projection in `qgemm.rs`:
 // the bytes a thread reads for its column and 32-element group, and how they
-// become four octets of int8 weights plus one scale a group or a half.
-// IQ1_S and IQ1_M decode by `prmt` from a two-bit grid into `8g +- 1`
-// bytes; the IQ2 and IQ3 grids are int8 already, signed by a 0/-1 byte mask
-// as `(m ^ mask) + (mask & 0x01010101)`. The K-quants, Q4_K, Q5_K and Q6_K,
-// have no tables and decode in `kquant.rs`; PTQ1_0's base-three bytes decode in
-// `ptq1.rs`.
+// become four octets of int8 weights plus one scale per group or half group.
+//
+// IQ1_S and IQ1_M decode from a two-bit grid into `8g +- 1` bytes by `prmt`.
+// The IQ2 and IQ3 grids are already int8, signed by a 0/-1 byte mask as
+// `(m ^ mask) + (mask & 0x01010101)`. The K-quants decode in `kquant.rs` and
+// PTQ1_0 in `ptq1.rs`, neither with tables.
 
 use super::qgemm::{Lanes, Stage, TileAt};
 use super::*;
@@ -26,20 +26,20 @@ pub(in crate::codegen) enum QgFormat {
     Ptq1,
 }
 
-/// IQ1_S's grid at two bits a lane: 2048 entries of eight.
+/// IQ1_S's grid at two bits per lane: 2048 entries of eight.
 pub(in crate::codegen) const IQ1_GRID2_BYTES: i64 = 2048 * 2;
 
-/// The same grid at a nibble a lane, `g + 1` in 0..2, a `prmt` selector as
-/// it is; the matvecs read this one.
+/// The same grid at a nibble per lane, holding `g + 1` in 0..2, which is
+/// already a `prmt` selector. The matvecs read this one.
 pub(in crate::codegen) const IQ1_GRID4_BYTES: i64 = 2048 * 4;
 
-/// The byte tables for the nibble grid: selector `g + 1` is 0 for -1, 1 for
-/// 0, 2 for +1, and the byte is `8g + 1` or `8g - 1`.
+/// The byte tables for the nibble grid. Selector `g + 1` is 0 for -1, 1 for
+/// 0 and 2 for +1, and the byte is `8g + 1` or `8g - 1`.
 pub(super) const IQ1_LUT4_PLUS: i64 = 0x0009_01F9;
 pub(super) const IQ1_LUT4_MINUS: i64 = 0x0007_FFF7;
 
-/// The byte tables `prmt` applies to a ternary lane. A code is `g & 3`: 0 for
-/// a zero, 1 for +1, 3 for -1, and byte `code` of the table is `8g + 1` or
+/// The byte tables `prmt` applies to a ternary lane. A code is `g & 3`: 0
+/// for 0, 1 for +1, 3 for -1. Byte `code` of the table is `8g + 1` or
 /// `8g - 1`. Written as the i32 the register holds, low byte first.
 const IQ1_LUT_PLUS: i64 = 0xF900_0901u32 as i32 as i64;
 const IQ1_LUT_MINUS: i64 = 0xF700_07FFu32 as i32 as i64;
@@ -112,8 +112,9 @@ impl QgFormat {
         }
     }
 
-    /// The device block: the file's, less the leading `d` the IQ formats
-    /// carry and no device kernel reads, and less Q6_K's trailing one.
+    /// The device block size in bytes. It is the file's block without the
+    /// IQ formats' leading `d`, and without Q6_K's trailing one, since no
+    /// device kernel reads them.
     pub(in crate::codegen) fn block_bytes(self) -> i64 {
         match self {
             Self::Iq1s => 48,
@@ -131,7 +132,7 @@ impl QgFormat {
     }
 
     /// The table operands after `(qb, d)`, by size in bytes: the magnitude
-    /// grid, then the 0/-1 sign masks for the formats that carry signs apart.
+    /// grid, then the 0/-1 sign masks for formats with separate signs.
     pub(in crate::codegen) fn tables(self) -> &'static [i64] {
         match self {
             Self::Iq1s | Self::Iq1m => &[IQ1_GRID2_BYTES],
@@ -144,8 +145,8 @@ impl QgFormat {
         }
     }
 
-    /// The tables a format's decode matvec reads: the ternary formats take
-    /// the nibble grid there, the rest the same tables as the projection.
+    /// The tables a format's decode matvec reads. The ternary formats use the
+    /// nibble grid, the rest the same tables as the projection.
     pub(in crate::codegen) fn qdot_tables(self) -> &'static [i64] {
         match self {
             Self::Iq1s | Self::Iq1m => &[IQ1_GRID4_BYTES],
@@ -275,8 +276,8 @@ impl<'c> Codegen<'c> {
         let e = self.vec_bitcast(block, e, Type::vector(&[1], i16_t))?;
         let e = self.vec_extract(block, e, &[0], i16_t)?;
         let e = self.extui(block, e, self.i32_t)?;
-        // Spread eight two-bit codes into eight nibbles: three doublings of
-        // the gap between them.
+        // Spread eight two-bit codes into eight nibbles, doubling the gap
+        // between them three times.
         let x = self.qg_spread(block, e, 8, 0x00FF_00FF)?;
         let x = self.qg_spread(block, x, 4, 0x0F0F_0F0F)?;
         let x = self.qg_spread(block, x, 2, 0x3333_3333)?;
@@ -329,8 +330,7 @@ impl<'c> Codegen<'c> {
     /// `d * (0.5 + n) * q` for an integer `n`, in the order the register
     /// kernels compute it.
     pub(super) fn qg_half_scale(&self, block: &Block<'c>, dv: Value<'c, 'c>, n: Value<'c, 'c>, q: f64) -> Result<Value<'c, 'c>> {
-        // A few bits wide, so the add-and-subtract conversion is exact and
-        // skips the quarter-rate `cvt`.
+        // `n` is a few bits wide, so the exact small-int conversion applies.
         let n = self.small_int_to_f32(block, n)?;
         let half = self.const_f32(block, 0.5)?;
         let q = self.const_f32(block, q)?;
@@ -339,8 +339,8 @@ impl<'c> Codegen<'c> {
         self.push(block, arith::mulf(dv, sc, self.loc))
     }
 
-    /// `d * (2 n + 1) / 8`: the IQ1 group scale, with the delta's eighth
-    /// folded in.
+    /// `d * (2 n + 1) / 8`: the IQ1 group scale, with the 1/8 of the delta
+    /// fold applied.
     pub(super) fn qg_odd_eighth(&self, block: &Block<'c>, dv: Value<'c, 'c>, n: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         let two = self.const_i32(block, 2)?;
         let one = self.const_i32(block, 1)?;
@@ -384,7 +384,7 @@ impl<'c> Codegen<'c> {
                 let qh = self.qg_at(block, at, 32, 2)?;
                 regs.push(self.qg_u32(block, qb, lanes, qs)?);
                 regs.push(self.qg_u16(block, qb, lanes, qh)?);
-                // The scale word is shared by two groups: bytes 48 + 2 (ib / 2).
+                // Two groups share a scale word, at byte 48 + 2 (ib / 2).
                 let two = self.const_index(block, 2)?;
                 let pair = self.divui(block, at.ib, two)?;
                 let pair2 = self.muli(block, pair, two)?;
@@ -443,7 +443,7 @@ impl<'c> Codegen<'c> {
                 let sc = self.addi(block, pair, base)?;
                 let sc = self.addi(block, at.blk_off, sc)?;
                 regs.push(self.qg_u8(block, qb, lanes, sc)?);
-                // And which nibble: the group's parity.
+                // The group's parity picks the nibble.
                 let parity = self.remui(block, at.ib, two)?;
                 regs.push(self.numeric_cast(block, parity, self.i32_t)?);
             }
@@ -451,8 +451,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Decode the thread's group from the registers `qgemm_fmt_load` filled
-    /// and write its four octets and its scale or scales into the stage.
+    /// Decodes the thread's group from the registers `qgemm_fmt_load` filled,
+    /// and writes its four octets and its scales into the stage.
     pub(super) fn qgemm_fmt_decode(
         &mut self,
         block: &Block<'c>,
@@ -503,8 +503,8 @@ impl<'c> Codegen<'c> {
                     self.qgemm_put_scale(block, stage, 2, h, sw)?;
                 }
                 for l in 0..4 {
-                    // Octet l takes byte l / 2 of qh: the low nibble for an
-                    // even l, the high for an odd, three index bits then the
+                    // Octet l takes a nibble of qh byte l / 2, low for even l
+                    // and high for odd. It holds three index bits, then the
                     // delta's sign.
                     let lo = self.qg_byte(block, qs, l)?;
                     let nib = 8 * (l / 2) + 4 * (l % 2);
@@ -564,7 +564,7 @@ impl<'c> Codegen<'c> {
                 let sw = self.qg_half_scale(block, dv, n, 0.5)?;
                 self.qgemm_put_scale(block, stage, 1, 0, sw)?;
                 for l in 0..4 {
-                    // Octet l is grid bytes 2l and 2l + 1, four lanes apiece.
+                    // Octet l is grid bytes 2l and 2l + 1, four lanes each.
                     let word = if l < 2 { lo } else { hi };
                     let g1 = self.qg_byte(block, word, 2 * (l % 2))?;
                     let g2 = self.qg_byte(block, word, 2 * (l % 2) + 1)?;
@@ -648,7 +648,6 @@ impl<'c> Codegen<'c> {
         self.qgemm_put_octet(block, stage, l, w0, w1)
     }
 
-    /// Zero-extend an integer.
     pub(super) fn extui(&self, block: &Block<'c>, v: Value<'c, 'c>, to: Type<'c>) -> Result<Value<'c, 'c>> {
         self.push(
             block,

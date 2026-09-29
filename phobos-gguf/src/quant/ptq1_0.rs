@@ -1,21 +1,25 @@
 // PTQ1_0, PrismML's ternary format: `{ uint8 qs[24]; uint8 qh[2]; f16 d; }`
-// over 128 weights, each `d * (t - 1)` for a trit `t` in 0..2, 1.75 bits a
-// weight. A byte holds five trits (`qh` four) in the TQ1_0 encoding: trit
-// `n` of byte `b` is the top trit of `b * 3^n mod 256`, read as
-// `(x * 3) >> 8`.
+// over 128 weights, 1.75 bits a weight. Each weight is `d * (t - 1)` for a
+// trit `t` in 0..2. A byte holds five trits (a `qh` byte four) in the TQ1_0
+// encoding: trit `n` of byte `b` is the top trit of `b * 3^n mod 256`, read
+// as `(x * 3) >> 8`.
 //
-// The file's element order is a staging artifact: qs[0..16] carry elements
-// `16 n + m`, qs[16..24] `80 + 8 n + m`, qh `120 + 2 n + h`. The registry
-// block is a pair of them, 256 weights in 56 bytes, so every width here
-// divides; the device holds the pair re-laid ([`device_block`]) so that each
-// 64-weight quarter decodes on its own:
+// File element order: qs[0..16] hold elements `16 n + m`, qs[16..24] hold
+// `80 + 8 n + m`, and qh holds `120 + 2 n + h`. The registry block is a pair
+// of file blocks, 256 weights in 56 bytes, so every width here divides.
 //
-// - bytes `12 q .. 12 q + 12`: three words of quarter `q`; trit `n` of byte
-//   `b` of word `w` is weight `4 (5 w + n) + b` of the quarter, so one trit
-//   of a word is four consecutive weights, a `dp4a` operand;
-// - byte `48 + q`: the quarter's last four weights, trit `n` weight `60 + n`;
-// - bytes 52 and 54: the two file blocks' `d`, the first scaling quarters 0
-//   and 1.
+// The device holds the pair re-laid ([`device_block`]) so each 64-weight
+// quarter decodes on its own.
+//
+// Bytes `12 q .. 12 q + 12` are three words of quarter `q`. Trit `n` of byte
+// `b` of word `w` is weight `4 (5 w + n) + b` of the quarter, so one trit of
+// a word is four consecutive weights, a `dp4a` operand.
+//
+// Byte `48 + q` holds the quarter's last four weights: trit `n` is weight
+// `60 + n`.
+//
+// Bytes 52 and 54 hold the two file blocks' `d`. The first scales quarters 0
+// and 1.
 
 use phobos_base::half::f16_to_f32;
 
@@ -90,8 +94,8 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
     }
 }
 
-/// The first file block's `d` of each pair: the plane every raw format
-/// uploads. The kernels read both from the block itself.
+/// The first file block's `d` of each pair, the plane every raw format
+/// uploads. The kernels read both scales from the block itself.
 fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     let d = bytes
         .chunks_exact(BLOCK_BYTES)
@@ -121,7 +125,7 @@ pub(crate) fn device_block(pair: &[u8], out: &mut [u8]) {
     }
 }
 
-/// A device block decoded, the host's reading of what the kernels see.
+/// Decodes a device block the way the kernels read it.
 #[cfg(test)]
 pub(crate) fn dequantize_device(block: &[u8], out: &mut [f32]) {
     for q in 0..4 {

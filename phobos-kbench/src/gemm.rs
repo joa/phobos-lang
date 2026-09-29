@@ -3,11 +3,11 @@
 use crate::harness::*;
 use crate::*;
 
-/// Spot-checks a sample of output elements against an f64 reference (a full
-/// check costs O(M*N*K) flops): alpha * (A*B)[i,j] + beta * c_in[i,j].
+/// Spot-checks a sample of output elements against an f64 reference,
+/// alpha * (A*B)[i,j] + beta * c_in[i,j]. A full check would cost O(M*N*K).
 ///
 /// The f32 kernel checks at 1e-3 relative tolerance. The tensor-core kernel
-/// additionally rounds inputs to fp16, so error is normalized by
+/// also rounds inputs to fp16, so its error is normalized by
 /// max(|want|, sqrt(K)/3), the dot's RMS magnitude, at 1e-2 tolerance.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)] // mirrors the BLAS gemm signature
@@ -112,8 +112,8 @@ pub(crate) fn bench_gemm_fp32(
     // Must match the kernel's @launch thread count (.maxntid); more is a hard error.
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // The default @tensorcore path (mma.sync) compiles at 64-bit index,
-    // widening the memref descriptor; host metadata must match (see bench_gemm_fp16).
+    // The default @tensorcore path (mma.sync) compiles at 64-bit index, so
+    // the host's memref descriptors must be 64-bit too.
     let wide = phobos_lang::requires_wide_index(&kernels);
 
     let mut tuner = autotune::Autotuner {
@@ -221,8 +221,8 @@ pub(crate) fn bench_gemm_fp32(
         100.0f64 * cublas_avg.as_secs_f64() / phobos_avg.as_secs_f64()
     );
 
-    // Inputs are rounded to fp16 for the tensor-core path, so phobos runs
-    // against the fp16f32acc tensor peak; the cuBLAS baseline is f32 sgemm.
+    // The tensor-core path rounds inputs to fp16, so phobos is measured
+    // against the fp16 f32-acc peak. The cuBLAS baseline is f32 sgemm.
     let phobos_prec = if fp16 {
         Precision::F16TcF32
     } else {
@@ -244,13 +244,13 @@ pub(crate) fn bench_gemm_fp32(
     Ok(())
 }
 
-/// Reference for the fp16-accumulate GEMM (examples/gemm_fp16.ph): rounds
-/// inputs to fp16, accumulates in fp16 mirroring the kernel's WMMA
-/// fragment, then scales (alpha/beta in f32) and rounds back to fp16.
+/// Reference for the fp16-accumulate GEMM (examples/gemm_fp16.ph). Rounds
+/// inputs to fp16 and accumulates in fp16 like the kernel's WMMA fragment,
+/// then scales in f32 and rounds back to fp16.
 ///
-/// Accumulation is low precision by construction, so error is normalized
-/// by max(|want|, sqrt(K)/3), the dot's RMS magnitude, at a generous
-/// 1.5e-1 tolerance.
+/// fp16 accumulation is imprecise, so error is normalized by
+/// max(|want|, sqrt(K)/3), the dot's RMS magnitude, at a loose 1.5e-1
+/// tolerance.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_matmul_fp16acc(
@@ -295,10 +295,10 @@ pub(crate) fn verify_matmul_fp16acc(
     Ok(())
 }
 
-/// Half-precision GEMM benchmark (examples/gemm_fp16.ph): fp16 A/B/C and an
-/// fp16 accumulator on the tensor cores. Data lives on the device as fp16
-/// (uploaded as u16 bit patterns; the kernel reads it as fp16). Compared
-/// against cublasHgemm, the matching fp16-operand, fp16-accumulate cuBLAS gemm.
+/// Half-precision GEMM benchmark (examples/gemm_fp16.ph): fp16 A, B, C and
+/// fp16 accumulation on the tensor cores. Device data is fp16, uploaded as
+/// u16 bit patterns. Compared against cublasHgemm, which also takes fp16
+/// operands and accumulates in fp16.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)] // gemm dims plus the result sink
 pub(crate) fn bench_gemm_fp16(
@@ -324,8 +324,7 @@ pub(crate) fn bench_gemm_fp16(
     let b: Vec<f32> = (0..(K * N)).map(|_| rng.gen_range(-1.0f32..=1.0)).collect();
     let c_in = vec![0.0f32; (M * N) as usize];
 
-    // fp16 device tensors, stored as u16 bit patterns (bit-compatible with the
-    // kernel's fp16 reads; 0 bits = +0.0).
+    // fp16 device tensors, uploaded as u16 bit patterns.
     let a_dev = to_fp16_bits(&a).as_slice().as_dbuf()?;
     let b_dev = to_fp16_bits(&b).as_slice().as_dbuf()?;
     let c_dev = vec![0u16; (M * N) as usize].as_slice().as_dbuf()?;
@@ -339,10 +338,10 @@ pub(crate) fn bench_gemm_fp16(
 
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // @tensorcore (mma.sync) compiles at 64-bit index (nvgpu ABI), widening
-    // the memref descriptor's offset/size/stride from i32 to i64: host
-    // metadata must match or the kernel reads garbage past the first pointer.
-    // The legacy WMMA opt-out (@tensorcore(wmma)) stays 32-bit.
+    // @tensorcore (mma.sync) compiles at 64-bit index, which widens the
+    // memref descriptor fields to i64. Host metadata must match, or the
+    // kernel reads garbage past the first pointer. The WMMA opt-out,
+    // @tensorcore(wmma), stays 32-bit.
     let wide = phobos_lang::requires_wide_index(&kernels);
 
     let mut tuner = autotune::Autotuner {
@@ -357,7 +356,7 @@ pub(crate) fn bench_gemm_fp16(
             Ok(autotune::Grid(M as u32 / tile_m, N as u32 / tile_n))
         },
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
-            // Zero C (fp16 +0.0 is all-zero bits): a byte memset, 2 bytes per element.
+            // Zero C with a byte memset, 2 bytes per element.
             zero_device_async(c_ptr.as_raw(), (M * N) as usize * 2, stream)?;
             let func = module.get_function("gemm")?;
             launch_gemm(
@@ -400,7 +399,7 @@ pub(crate) fn bench_gemm_fp16(
 
     let blas = cublas::CuBlas::new(stream)?;
     let (cublas_avg, _) = bench("cuBLAS hgemm ", || {
-        // Zero C (fp16 +0.0 is all-zero bits): 2 bytes per element.
+        // Zero C, 2 bytes per element.
         zero_device_async(c_ptr.as_raw(), (M * N) as usize * 2, stream)?;
         blas.matmul_fp16(
             M,
@@ -434,7 +433,7 @@ pub(crate) fn bench_gemm_fp16(
         100.0f64 * cublas_avg.as_secs_f64() / phobos_avg.as_secs_f64()
     );
 
-    // fp16 operands on the tensor cores; the cuBLAS baseline is hgemm (also fp16).
+    // Both sides are fp16 on the tensor cores.
     results.push(
         name,
         "phobos",

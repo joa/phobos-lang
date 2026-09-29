@@ -75,8 +75,8 @@ impl Model {
         let v_buf = attn.v.forward_shared(backend, input, rows)?;
         input.release(backend);
 
-        // Split the query from its output gate; the layout only changes where
-        // the copy starts and how far apart its rows are.
+        // Split the query from its output gate. The variant only changes
+        // where each copy starts and its row stride.
         let (blocks, block) = if variants.attn_gate_contiguous {
             (rows, width)
         } else {
@@ -108,8 +108,9 @@ impl Model {
             )?;
         }
 
-        // QK normalization is per head, before the rotary embedding. Both are
-        // already a run of `head_dim` heads, the row the norm wants.
+        // QK normalization is per head, before the rotary embedding. Both
+        // buffers are already runs of `head_dim`-wide heads, the rows the
+        // norm expects.
         let q_normed = backend.alloc(rows * width)?;
         let k_normed = backend.alloc(rows * kv_width)?;
         let eps = cfg.rms_eps;
@@ -145,9 +146,9 @@ impl Model {
             )?;
         }
 
-        // The caches hold every head of one position together, so appending is
-        // one contiguous copy rather than one per head, and the kernel reads a
-        // head as a column window.
+        // The caches hold every head of one position together, so appending
+        // is one contiguous copy, and the kernel reads a head as a column
+        // window.
         let (keys, values) = cache.reserve(backend, spec.total(), kv_width)?;
         for (src, dst) in [(k_normed, keys), (v_buf, values)] {
             backend.store_2d(

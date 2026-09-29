@@ -17,7 +17,7 @@ pub struct Config {
     pub n_head: usize,
     pub n_head_kv: usize,
 
-    pub head_dim: usize, // width of one attention head. not necessarily d_model / n_head
+    pub head_dim: usize, // Width of one attention head, not necessarily d_model / n_head.
     pub rope_dim: usize,
     pub rope_freq_base: f32,
 }
@@ -65,9 +65,9 @@ impl Config {
     }
 }
 
-/// Refuse a file whose rotary frequencies are rescaled. Extending a model past
-/// its trained window rescales the angles rather than changing the graph, so
-/// such a file would load, run, and be quietly wrong at long context.
+/// Refuses a file whose rotary frequencies are rescaled. Context extension
+/// rescales the angles without changing the graph, so such a file would load,
+/// run, and be quietly wrong at long context.
 fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
     let m = gguf.metadata();
     if let Some(kind) = m.arch_get("rope.scaling.type").and_then(|v| v.as_str()) {
@@ -98,14 +98,14 @@ fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
 /// The permutation that turns ggml's `llama` rotary layout into the one
 /// [`Backend::rope`] implements.
 ///
-/// NeoX pairs element `i` with `i + rope_dim / 2`, which is what the backend
-/// implements; `llama` pairs consecutive elements, `2i` with `2i + 1`.
-/// Reordering a head's channels to `[0, 2, 4, ..., 1, 3, 5, ...]` maps the
-/// second onto the first: destination pair `i` holds source elements `2i` and
+/// The backend implements NeoX, which pairs element `i` with
+/// `i + rope_dim / 2`. `llama` pairs consecutive elements, `2i` with `2i + 1`.
+/// Reordering a head's channels to `[0, 2, 4, ..., 1, 3, 5, ...]` maps one
+/// onto the other: destination pair `i` holds source elements `2i` and
 /// `2i + 1`, and both conventions give pair `i` the same angle.
 ///
 /// Applied to the query and key weights once at load. Channels past
-/// `rope_dim` pass through in place.
+/// `rope_dim` stay in place.
 fn neox_order(heads: usize, head_dim: usize, rope_dim: usize) -> Vec<usize> {
     let half = rope_dim / 2;
     (0..heads * head_dim)
@@ -134,8 +134,7 @@ fn dense_plane(buf: Buf, width: usize) -> Plane {
 /// projection.
 struct Attention {
     /// Query, key and value stacked in that order. They read the same
-    /// normalized row, so one launch over a wide output replaces three, two of
-    /// them only `n_head_kv * head_dim` wide.
+    /// normalized row, so one launch over a wide output replaces three.
     qkv: Linear,
     output: Linear,
 }
@@ -185,7 +184,8 @@ pub struct Model {
 }
 
 impl Model {
-    /// Read every weight this architecture needs, leaving quantized ones so.
+    /// Reads every weight this architecture needs, keeping quantized ones
+    /// quantized.
     pub fn load(gguf: &Gguf) -> Result<Model> {
         ensure!(
             gguf.folding().is_none(),
@@ -238,9 +238,9 @@ impl Model {
 
     /// Every constant the forward pass uploads, at a context of `positions`.
     ///
-    /// `embed` is missing on purpose: the pass reads a token's row out of it on
-    /// the host and only `head` reaches the backend. When the file ties the two
-    /// they share a key and the backend uploads one of them.
+    /// `embed` is left out on purpose: the pass reads token rows from it on
+    /// the host, and only `head` reaches the backend. When the file ties the
+    /// two, they share a key and are uploaded once.
     pub(crate) fn footprint(&self, positions: usize) -> Uploads {
         let mut into = Uploads::default();
         self.head.footprint(&mut into);
@@ -272,8 +272,8 @@ impl Model {
         }
     }
 
-    /// Run `tokens`, advancing `state`, and return the final position's logits.
-    /// Only the last row is projected through the LM head.
+    /// Runs `tokens`, advancing `state`, and returns the final position's
+    /// logits. Only the last row goes through the LM head.
     pub fn forward(
         &self,
         state: &mut State,
@@ -287,8 +287,8 @@ impl Model {
     }
 
     /// [`Model::forward`] for a caller that only wants the winning token id,
-    /// as greedy decoding does: the LM head still runs, and only the
-    /// vocab-wide readback after it is skipped. See [`Backend::argmax`].
+    /// as greedy decoding does. The LM head still runs; only the vocab-wide
+    /// readback is skipped. See [`Backend::argmax`].
     pub fn forward_greedy(
         &self,
         state: &mut State,
@@ -302,9 +302,8 @@ impl Model {
     }
 
     /// The shared body of [`Model::forward`] and [`Model::forward_greedy`]:
-    /// everything through the LM head projection and the pass's own
-    /// `end_pass`, leaving only "how much of the result to read back" to the
-    /// two callers above.
+    /// everything through the LM head and `end_pass`. The callers only decide
+    /// how much of the result to read back.
     fn forward_to_logits(
         &self,
         state: &mut State,
@@ -333,15 +332,15 @@ impl Model {
         let x = backend.upload(&host_x)?;
         let normed = backend.alloc(rows * d)?;
 
-        // Everything from here to the logits is device-only
+        // Everything from here to the logits is device-only.
         backend.begin_pass(rows)?;
 
         // Prints each block's per-token activation RMS.
         let trace = phobos_base::env::flag("PHOBOS_TRACE");
 
         for (index, (block, cache)) in self.blocks.iter().zip(&mut state.caches).enumerate() {
-            // The normalization leaves the quantized copy behind too, which the
-            // projection reading it would otherwise redo.
+            // The normalization also produces the quantized copy, which the
+            // projection would otherwise redo.
             let act = backend.rms_norm_q(
                 x,
                 rows,
@@ -352,8 +351,8 @@ impl Model {
             )?;
             self.attention(&block.attn, normed, act, rows, state.pos, cache, backend, x)?;
 
-            // The normalization is passed along rather than run first, so a
-            // backend with a fused MLP owns the whole of it.
+            // The normalization is passed along instead of run first, so a
+            // backend with a fused MLP can do all of it.
             let gain = block.ffn_norm.buf(backend)?;
             if !block
                 .ffn
@@ -392,7 +391,7 @@ impl Model {
         )?;
 
         // Only the final position goes through the LM head, the largest weight
-        // in the model; the other normalized rows are dead.
+        // in the model; the other normalized rows are unused.
         let last = backend.alloc(d)?;
         backend.copy(normed, (rows - 1) * d, last, 0, d)?;
 
@@ -458,9 +457,9 @@ impl Model {
         let table = self.rope.buf(backend, spec.total())?;
 
         // A decode step's query is the front of the projection and already
-        // contiguous, so it rotates where it lies. Past one row the three
-        // parts interleave, so `rope_gather` reads its own strided window
-        // directly instead of a caller pulling it out with `copy_2d` first.
+        // contiguous, so it rotates in place. Past one row the three parts
+        // interleave, so `rope_gather` reads its strided window directly,
+        // with no `copy_2d` first.
         let q_rope = Rope {
             heads: cfg.n_head,
             head_dim: cfg.head_dim,
@@ -478,10 +477,10 @@ impl Model {
             buf
         };
 
-        // The key never can alias `qkv`: it starts at a nonzero offset of the
-        // fused projection and `rope` only ever rotates from the front of the
-        // buffer it's given. `rope_gather` reads that offset directly, so
-        // this needs no `copy_2d` ahead of it either, at any row count.
+        // The key can never alias `qkv`: it starts at a nonzero offset of the
+        // fused projection, and `rope` only rotates from the front of its
+        // buffer. `rope_gather` reads that offset directly, so no `copy_2d` is
+        // needed at any row count.
         let k = backend.alloc(rows * kv_width)?;
         backend.rope_gather(
             part(width),
@@ -497,10 +496,9 @@ impl Model {
         )?;
         scratch.push(k);
 
-        // The value store waits for the key's rope to land here too, one
-        // launch instead of two: nothing reads either cache before the
-        // attention call below, so nothing depends on the value arriving
-        // sooner.
+        // The value store waits for the key's rope and lands with it, one
+        // launch instead of two. Nothing reads either cache before the
+        // attention call below, so the value need not arrive sooner.
         backend.store_2d_pair(
             (part(width + kv_width), landing(values)),
             (dense_plane(k, kv_width), landing(keys)),
@@ -535,13 +533,12 @@ impl State {
         self.pos == 0
     }
 
-    /// Forget everything past `positions`.
+    /// Forgets everything past `positions`.
     ///
-    /// The cursor is the whole of it. A cache holds one row a position and
-    /// attention reads `start_pos + rows` of them, so rows past the cursor are
-    /// never looked at and are overwritten by whatever comes next. Growing the
-    /// cache copies them along with the rest, which costs a little bandwidth
-    /// once and is still correct. See [`Attn::total`].
+    /// Moving the cursor is enough. A cache holds one row per position and
+    /// attention reads `start_pos + rows` of them, so rows past the cursor
+    /// are never read and get overwritten. Growing the cache copies them
+    /// along, which is harmless. See [`Attn::total`].
     ///
     /// [`Attn::total`]: crate::backend::Attn::total
     pub fn truncate(&mut self, positions: usize) -> bool {
@@ -554,7 +551,7 @@ impl State {
 
     /// Hands every device allocation the state holds back to the backend.
     ///
-    /// Dropping a state instead strands its caches: a [`Buf`] is a handle, not
+    /// Dropping a state instead leaks its caches: a [`Buf`] is a handle, not
     /// an owner.
     pub fn release(&mut self, backend: &dyn Backend) {
         for cache in &mut self.caches {

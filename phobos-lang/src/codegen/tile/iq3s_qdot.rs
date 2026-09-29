@@ -1,6 +1,6 @@
-// Fused IQ3_S dot: two four-wide grid-table lookups a lane plus a sign-table
-// lookup, folded into the contraction. The decode itself lives in `iq3s.rs`,
-// shared with `qdecode.rs`.
+// Fused IQ3_S dot: two four-wide grid lookups and one sign lookup per lane,
+// folded into the contraction. The decode itself lives in `iq3s.rs`, shared
+// with `qdecode.rs`.
 
 use super::iq3s::{IQ3S_BLOCK_BYTES, IQ3S_HALF};
 use super::*;

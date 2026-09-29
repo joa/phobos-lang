@@ -1,9 +1,9 @@
-// Magnitude grids for IQ2_XXS, IQ2_XS and IQ2_S: each entry is eight
-// unsigned magnitude bytes packed into one u64, indexed by a code
-// carried in the block; the sign of each lane comes separately, from
-// KSIGNS_IQ2XS (a 7-bit parity index into an 8-bit sign mask) or, for
-// IQ2_S, from an explicit per-lane sign byte tested against KMASK_IQ2XS.
-// From ggml-common.h.
+// Magnitude grids for IQ2_XXS, IQ2_XS and IQ2_S, from ggml-common.h. Each
+// entry packs eight unsigned magnitude bytes into one u64.
+//
+// Signs come separately. IQ2_XXS and IQ2_XS map a 7-bit parity index to an
+// 8-bit sign mask through KSIGNS_IQ2XS. IQ2_S stores a sign byte per lane,
+// tested against KMASK_IQ2XS.
 
 pub(crate) static KMASK_IQ2XS: [u8; 8] = [1, 2, 4, 8, 16, 32, 64, 128];
 

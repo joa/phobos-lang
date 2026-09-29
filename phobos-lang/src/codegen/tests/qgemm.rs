@@ -2,8 +2,8 @@
 
 use super::*;
 
-/// One kernel per format, with the table operands its decode reads (none
-/// for the K-quants).
+/// The prompt projection kernel for one format, with the table operands its
+/// decode reads. The K-quants have none.
 pub(super) fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
     let params: String = tables
         .iter()
@@ -56,7 +56,8 @@ const FORMATS: [(&str, &[usize]); 11] = [
     ("ptq1", &[]),
 ];
 
-/// The formats whose runs subtract a minimum, and so stage two planes more.
+/// Whether the format's runs subtract a minimum, which stages two more
+/// planes.
 fn has_min(fmt: &str) -> bool {
     matches!(fmt, "q4k" | "q5k")
 }
@@ -69,8 +70,8 @@ fn every_format_stages_both_operands_and_reads_them_with_ldmatrix() {
             &mlir,
             &["nvgpu.ldmatrix", "vector<4x4xi8>", "nvgpu.mma.sync", "gpu.barrier", "iter_args"],
         );
-        // Both operand tiles, the two scale planes, one tile a table, and
-        // the minimums and row sums where the format subtracts a minimum.
+        // Both operand tiles, the two scale planes, one tile per table, and
+        // the minimums and row sums for a format with a minimum.
         let buffers = 4 + tables.len() + if has_min(fmt) { 2 } else { 0 };
         assert_eq!(mlir.matches("memref.view").count(), buffers, "{fmt}:
 {mlir}");
@@ -80,11 +81,11 @@ fn every_format_stages_both_operands_and_reads_them_with_ldmatrix() {
 #[test]
 fn a_k_quant_with_a_minimum_sums_the_activation_at_stage_time() {
     // The row sums: a byte dot against ones, one xor shuffle to join the
-    // two halves of a group, an i32 plane of a row a stage.
+    // two halves of a group, and an i32 plane with one row per stage.
     let with_min = emit_mlir(&qgemm_src("q4k", &[], "256, 2"));
     assert_contains(&with_min, &["nvvm.dot.accumulate.4way", "gpu.shuffle", "memref<128x4xi32, 3>", "nvvm.prmt"]);
-    // Q6_K has no minimum: no sums, no shuffle, and its two scales a group
-    // take the split epilogue.
+    // Q6_K has no minimum, so no sums and no shuffle. Its two scales per
+    // group take the split epilogue.
     let without = emit_mlir(&qgemm_src("q6k", &[], "256, 2"));
     assert!(!without.contains("gpu.shuffle"), "{without}");
     assert!(without.contains("memref<8x64xf32, 3>"), "{without}");
@@ -96,14 +97,13 @@ fn the_k_quant_decode_matvecs_sum_each_run_in_its_own_lane() {
     let dots = |fmt: &str| {
         let mlir = emit_mlir(&qdot_i8_src(fmt));
         assert_contains(&mlir, &["nvvm.dot.accumulate.4way", "nvvm.prmt", "gpu.shuffle", "scf.for"]);
-        // No prologue: no shared run-sum tile, and no shared tile of any
-        // width but the output's.
+        // No prologue, so no shared i32 run-sum tile.
         assert!(!mlir.contains("xi32, 3>"), "{fmt}:
 {mlir}");
         mlir.matches("nvvm.dot.accumulate.4way").count()
     };
-    // A format with a minimum dots the activation against ones as well as
-    // against the weights, so it has twice Q6_K's dot count per run.
+    // A format with a minimum also dots the activation against ones, so it
+    // has more dots than Q6_K.
     let (q4k, q5k, q6k) = (dots("q4k"), dots("q5k"), dots("q6k"));
     assert!(q4k > q6k && q5k > q6k, "q4k {q4k}, q5k {q5k}, q6k {q6k}");
 }
@@ -120,12 +120,12 @@ fn the_ternary_formats_decode_with_a_byte_permute_and_the_rest_with_masks() {
 
 #[test]
 fn a_split_scale_format_contracts_each_half_on_its_own() {
-    // Two scales a group means two mma chains a tile per group: sixteen
-    // tiles, four groups, two halves, against one chain for the rest.
+    // Two scales per group means each group contracts in two halves, one
+    // per scale. The mma.sync count stays the same as a one-scale format.
     let split = emit_mlir(&qgemm_src("iq2s", &[8192, 2048], "256, 2"));
     let whole = emit_mlir(&qgemm_src("iq2xxs", &[2048, 1024], "256, 2"));
     assert_eq!(split.matches("nvgpu.mma.sync").count(), whole.matches("nvgpu.mma.sync").count());
-    // ..and reads two scale rows a group where the other reads one.
+    // It reads two scale rows per group where the other reads one.
     assert!(split.contains("memref<8x64xf32, 3>"), "{split}");
     assert!(whole.contains("memref<4x64xf32, 3>"), "{whole}");
 }

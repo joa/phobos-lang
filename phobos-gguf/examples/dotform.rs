@@ -2,9 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example dotform
 //
-// Times the delta rule's chunk-scan contraction as one `dot` over the whole
-// contraction (`WHOLE`, what the scan ships with) against an accumulating
-// loop over slices of it (`SLICED`, the register-blocked path's shape).
+// Times the delta rule's chunk-scan contraction two ways. `WHOLE` is one
+// `dot` over the whole contraction, as the scan does it. `SLICED` is an
+// accumulating loop over slices, the shape the register-blocked path takes.
 
 use std::ffi::c_void;
 use std::time::Instant;

@@ -23,9 +23,9 @@ kernel iq2xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                                              GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }";
 
-/// Every format with an expansion, by name and table count. `XXS_SRC`'s body
-/// is the two-table shape and `SRC`'s the one-table shape, so a format's own
-/// source is either of those with its name substituted in.
+/// Every format with an expansion, by name and table count. `SRC` is the
+/// one-table shape and `XXS_SRC` the two-table one. A format's source is one
+/// of them with its name substituted in.
 const FORMATS: [(&str, usize); 7] = [
     ("iq1s", 1),
     ("iq1m", 1),
@@ -36,9 +36,8 @@ const FORMATS: [(&str, usize); 7] = [
     ("iq3s", 2),
 ];
 
-/// A format's kernel. The table lengths do not have to be the format's own:
-/// the intrinsic indexes its tables itself, and only their element type is
-/// checked.
+/// A format's kernel. The table lengths need not match the format, since
+/// only the tables' element type is checked.
 fn src_for(name: &str, tables: usize) -> String {
     if tables == 1 {
         SRC.replace("iq1s", name)
@@ -47,7 +46,7 @@ fn src_for(name: &str, tables: usize) -> String {
     }
 }
 
-/// No shared buffer, no barrier: the intrinsic writes a lane's eight
+/// No shared buffer and no barrier. The intrinsic writes a lane's eight
 /// decoded weights straight to the scratch.
 #[test]
 fn qdecode_t_writes_the_scratch_without_staging() {
@@ -71,9 +70,8 @@ fn qdecode_t_writes_the_scratch_without_staging() {
     }
 }
 
-/// The packed tables are read a whole entry at a time: one `vector.load`
-/// for a one-table format, two when signs are kept separate. Packing to
-/// `i8` turns eight scalar loads a group into one, a quarter the size.
+/// The packed `i8` tables are read a whole entry at a time, with one
+/// `vector.load` per table. The IQ3 formats load one more.
 #[test]
 fn qdecode_t_reads_a_whole_table_entry_at_once() {
     for (what, tables) in FORMATS {
@@ -87,7 +85,7 @@ fn qdecode_t_reads_a_whole_table_entry_at_once() {
     }
 }
 
-/// The store must coalesce: the thread map puts the column on the fast
+/// The store must coalesce. The thread map puts the column on the fast
 /// axis, so a warp covers whole sectors of a row band.
 #[test]
 fn qdecode_t_makes_the_column_the_fast_axis() {
@@ -107,9 +105,9 @@ fn qdecode_t_makes_the_column_the_fast_axis() {
     );
 }
 
-/// The destination's element type picks the width: an f16 scratch halves the
-/// traffic to the matmul that reads it, and costs nothing on the tensor-core
-/// ladder, which truncates its weight operand to f16 anyway.
+/// The destination's element type picks the width. An f16 scratch halves
+/// the traffic to the matmul that reads it, which truncates its weight
+/// operand to f16 anyway.
 #[test]
 fn qdecode_t_narrows_to_an_f16_destination() {
     let f32_mlir = emit_mlir(SRC);

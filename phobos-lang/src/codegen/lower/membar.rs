@@ -9,8 +9,8 @@ struct Access {
     lo: i64,
     hi: i64,
     write: bool,
-    /// The elementwise sweep the access was made under, or None for one
-    /// any thread might make.
+    /// The elementwise sweep the access was made under. None means any
+    /// thread might make it.
     mapping: Option<(Vec<i64>, i64)>,
 }
 
@@ -29,7 +29,8 @@ impl Access {
     }
 }
 
-/// A pending access: what made it, where in emission order, in which block.
+/// An access not yet ordered by a kept barrier, with its emission order and
+/// block.
 #[derive(Clone, Debug)]
 struct Pending {
     seq: usize,
@@ -37,7 +38,7 @@ struct Pending {
     access: Access,
 }
 
-/// A trailing barrier not yet needed by anything.
+/// An op's trailing barrier, which may be elided.
 #[derive(Clone, Copy, Debug)]
 struct Candidate {
     op: OpId,
@@ -45,12 +46,11 @@ struct Candidate {
     block: BlockId,
 }
 
-/// What the recording emission said about one op: the ranges its scratch
-/// took, its sweeps, and how many barriers it emitted, the last of them
-/// trailing or not.
+/// What the recording emission saw of one op: its scratch ranges, its
+/// sweeps, how many barriers it emitted, and whether it ends in one.
 #[derive(Clone, Debug, Default)]
 struct Window {
-    /// The `Alloc` events of scratch made inside the op, then their ranges.
+    /// The `Alloc` events of scratch made inside the op, and their ranges.
     scratch_events: Vec<usize>,
     scratch: Vec<(i64, i64)>,
     sweeps: Vec<(Vec<i64>, i64)>,
@@ -59,8 +59,8 @@ struct Window {
     instances: usize,
 }
 
-/// Which ops skip their trailing barrier, and how many barriers each of
-/// those emits, so the replay knows which call to skip.
+/// Which ops skip their trailing barrier, with how many barriers each emits
+/// so the replay knows which call to skip.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Elision {
     pub(crate) skip: BTreeMap<OpId, usize>,
@@ -72,7 +72,7 @@ struct Membar<'a> {
     ranges: &'a HashMap<ValueId, Vec<(i64, i64)>>,
     seq: usize,
     kept: BTreeSet<OpId>,
-    /// Every candidate seen, whether or not later kept.
+    /// Every candidate seen, kept or not.
     candidates: Vec<Candidate>,
 }
 
@@ -88,8 +88,8 @@ impl Membar<'_> {
         ) && !self.ir.kind(op).has_blocks()
     }
 
-    /// Whether the op reads its same-shaped tile operands elementwise, so a
-    /// recorded sweep is the mapping of every access it makes to them.
+    /// Whether the op accesses its same-shaped tile operands elementwise, so
+    /// its recorded sweep describes every such access.
     fn elementwise(&self, op: OpId) -> bool {
         matches!(
             self.ir.kind(op),
@@ -119,8 +119,9 @@ impl Membar<'_> {
             OpKind::For(info) => {
                 let body = ir.blocks_of(op)[0];
                 if info.pipeline.is_some() {
-                    // Instantiated twice with prefetches interleaved: keep
-                    // every barrier inside, carry every access out.
+                    // The body is instantiated twice with prefetches
+                    // interleaved. Keep every barrier inside, and carry
+                    // every access out.
                     let entry = pending.clone();
                     self.walk_block(body, pending, false);
                     pending.extend(entry);
@@ -128,8 +129,8 @@ impl Membar<'_> {
                 }
                 let entry = pending.clone();
                 self.walk_block(body, pending, elide);
-                // The body again, with the first pass's trailing accesses
-                // flowing into its head, for what one iteration hands the next.
+                // Walk the body again so one iteration's trailing accesses
+                // meet the next iteration's head.
                 self.walk_block(body, pending, elide);
                 pending.extend(entry);
                 if info.ragged {
@@ -168,10 +169,9 @@ impl Membar<'_> {
         let block = ir.parent_block(op);
         let accesses = self.accesses(op);
 
-        // A conflict with a pending access wants a barrier between them:
-        // the latest candidate after the pending access and before this op
-        // that sits in the pending access's block or one enclosing it, so
-        // that it lies on every path from the one to the other.
+        // A conflict with a pending access needs a barrier between them.
+        // Keep the latest candidate between the two that sits in the pending
+        // access's block or an enclosing one, so it lies on every path.
         for a in &accesses {
             let clashes: Vec<Pending> = pending
                 .iter()
@@ -211,8 +211,8 @@ impl Membar<'_> {
         }
     }
 
-    /// Keeps a barrier: it orders every pending access before it on a path
-    /// through it, which is every access in its block or below it.
+    /// Keeps a barrier. It orders every earlier pending access in its block
+    /// or a nested one, so those are dropped.
     fn keep(&mut self, c: Candidate, pending: &mut Vec<Pending>) {
         self.kept.insert(c.op);
         pending.retain(|p| !(p.seq <= c.seq && self.enclosing(p.block).contains(&c.block)));
@@ -242,8 +242,8 @@ impl Membar<'_> {
             .enumerate()
             .map(|(i, &v)| (v, writes.contains(&i)))
             .collect();
-        // A fresh result is written by the op that makes it; an `Alloc` only
-        // names bytes and touches none.
+        // An op writes its fresh results. An `Alloc` only names bytes and
+        // touches none.
         if !matches!(ir.kind(op), OpKind::Alloc) {
             values.extend(ir.results(op).iter().map(|&r| (r, true)));
         }
@@ -272,9 +272,8 @@ impl Membar<'_> {
                 });
             }
         }
-        // A dot inside a loop reads the operand an enclosing loop staged in
-        // its preheader in place of the operand it names, so those buffers
-        // are among what it reads.
+        // A dot inside a loop may read operands an enclosing loop staged in
+        // its preheader, instead of the ones it names. Count those as reads.
         if matches!(
             ir.kind(op),
             OpKind::Dot { .. } | OpKind::DotInto { .. } | OpKind::FragDot
@@ -313,8 +312,8 @@ impl Membar<'_> {
     }
 }
 
-/// The logical shape of an unmasked tile value; None for a masked slice or
-/// a non-tile, which no sweep maps element for element.
+/// The logical shape of an unmasked tile value. None for a masked slice or a
+/// non-tile, which no sweep maps element for element.
 fn unmasked_shape(ir: &Ir, v: ValueId) -> Option<Vec<i64>> {
     let crate::ir::Type::Tile(t) = ir.ty(v) else {
         return None;
@@ -328,7 +327,7 @@ fn unmasked_shape(ir: &Ir, v: ValueId) -> Option<Vec<i64>> {
     t.static_shape()
 }
 
-/// One op being recorded: what its window has seen so far.
+/// One op while scanning the trace, with what its window has seen so far.
 struct Frame {
     op: OpId,
     last_was_barrier: bool,
@@ -337,7 +336,7 @@ struct Frame {
     allocs: Vec<usize>,
 }
 
-/// Per op, over every instance the trace recorded.
+/// Each op's window, over every instance the trace recorded.
 fn windows(trace: &Trace) -> HashMap<OpId, Window> {
     let mut out: HashMap<OpId, Window> = HashMap::new();
     let mut stack: Vec<Frame> = Vec::new();
@@ -407,30 +406,26 @@ fn buffer_ranges(trace: &Trace, plan: &Plan) -> HashMap<ValueId, Vec<(i64, i64)>
 }
 
 impl Elision {
-    /// Decides for one kernel, from its graph, its recorded emission and
-    /// the placement the plan gave every buffer.
+    /// Decides which trailing barriers one kernel can drop, from its graph,
+    /// its recorded emission and the plan's buffer placement.
     ///
-    /// Every tile op closes with a CTA barrier, whether or not anything
-    /// after it reads what it wrote. The walk runs in emission order
-    /// carrying the shared-memory accesses made since the last barrier
-    /// kept, and when an op's accesses conflict with a pending one it keeps
-    /// the latest barrier site standing between them on every path. A
-    /// trailing barrier no conflict ever needed is elided.
+    /// Every tile op ends with a CTA barrier, needed or not. The walk goes in
+    /// emission order and tracks the shared-memory accesses since the last
+    /// kept barrier. When a new access conflicts with a pending one, it keeps
+    /// the latest barrier between them that lies on every path. Trailing
+    /// barriers that no conflict needs are elided.
     ///
-    /// An access is a byte range of the planned buffer, read or written,
-    /// and the mapping it was made under. An elementwise sweep touches
-    /// element `t, t + blockDim, ...` from thread `t`, so two sweeps over
-    /// the same shape at the same vector width read and write the same
-    /// elements from the same thread and need no barrier between them.
-    /// Everything else, a reduction, a dot, a transpose, the quantized
-    /// paths and the emitters' own scratch, is an access any thread might
-    /// make.
+    /// An access is a byte range of a planned buffer, read or written, plus
+    /// the mapping it was made under. An elementwise sweep has thread `t`
+    /// touch elements `t, t + blockDim, ...`. Two sweeps over the same shape
+    /// at the same vector width touch the same elements from the same thread,
+    /// so they need no barrier between them. Every other access, such as a
+    /// reduction, a dot, a transpose or scratch, may come from any thread.
     ///
-    /// A barrier inside an `if`, a `while`, a pipelined loop or the
-    /// register matmul's k-loop is never elided: those sites are not on
-    /// every path, or the body is instantiated more than once and the
-    /// emission order is not the graph's. Their accesses still flow into
-    /// what follows.
+    /// Barriers inside an `if`, a `while`, a pipelined loop or the register
+    /// matmul's k-loop are never elided. They are not on every path, or the
+    /// body is emitted more than once in a different order. Their accesses
+    /// still flow into what follows.
     pub(crate) fn decide(ir: &Ir, trace: &Trace, plan: &Plan) -> Elision {
         let mut windows = windows(trace);
         for w in windows.values_mut() {

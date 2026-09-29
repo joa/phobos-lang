@@ -125,8 +125,8 @@ impl<'c> Codegen<'c> {
                 let acc = self.gemm_ir(ir.operand(op, 0))?;
                 let view = self.tile_ir(ir, ir.operand(op, 1))?;
                 self.check_shapes(&view.shape, &[acc.plan.m, acc.plan.n], "matmul epilogue store")?;
-                // The match declines partial output tiles, so the drains, which
-                // have no per-element bounds guard, never see one.
+                // The drains have no bounds guard. The matcher already rejects
+                // partial output tiles, so this is an internal error.
                 if view.is_masked() {
                     bail!("internal: register matmul epilogue reached a partial output tile");
                 }
@@ -219,8 +219,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// An intrinsic writing its destination, the `*_into` forms `store_tile`
-    /// takes.
+    /// An intrinsic that writes into `dst`, the `*_into` forms `store_tile`
+    /// uses.
     fn intrinsic_into(
         &mut self,
         block: &Block<'c>,
@@ -276,8 +276,8 @@ impl<'c> Codegen<'c> {
     }
 }
 
-/// The emitter's grouped-format enum for a raw format, by the intrinsic's
-/// own name so the two tables cannot drift.
+/// The emitter's grouped-format enum for a raw format. Looked up by the
+/// intrinsic's name so the two tables cannot drift apart.
 fn qg_format(fmt: RawFmt, i: &Intrinsic) -> Result<QgFormat> {
     let name = i.name();
     QgFormat::from_intrinsic(&name)

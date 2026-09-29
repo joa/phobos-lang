@@ -1,19 +1,16 @@
 use super::*;
 
-/// Per-element unary chains, fused into one sweep of the target. Every
-/// elementwise call otherwise materializes a shared tile of its own, so a
-/// nested chain like `i8(i32(round(q)))` -- how quantizing kernels write
-/// their Q8_0 bytes -- costs a tile per step, in kernels whose live set
-/// bounds their occupancy.
+/// Per-element unary chains, fused into one sweep of the target.
 ///
-/// This recognizes such a chain on the right of a store and emits a single
-/// `distribute`: load the operand once, apply the conversions in registers,
-/// store the result.
+/// Without this, every elementwise call would materialize its own shared
+/// tile, so a chain like `i8(i32(round(q)))` would cost a tile per step. A
+/// chain on the right of a store becomes a single `distribute` instead: load
+/// the operand once, convert in registers, store the result.
 impl<'c> Codegen<'c> {
 
-    /// The sweep of a chain over `src` into `target`, outermost step last.
-    /// The operand may be the target: each thread reads and writes the same
-    /// element, so the rewrite in place is race-free.
+    /// Sweeps a chain over `src` into `target`, with the outermost step last
+    /// in `steps`. `src` may be `target`, since each thread reads and writes
+    /// the same element.
     pub(super) fn elem_chain_sweep(
         &mut self,
         block: &Block<'c>,
@@ -32,8 +29,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// One step on one element. The transcendentals want f32, and a chain can
-    /// have converted away from it, so each checks what it actually has.
+    /// Applies one step to one element. The transcendentals need a float,
+    /// which they widen to f32. An earlier cast may have left a non-float.
     fn apply_elem_step(
         &mut self,
         block: &Block<'c>,
@@ -72,8 +69,8 @@ impl<'c> Codegen<'c> {
     }
 }
 
-/// A per-element unary operation, in the order a chain applies them innermost
-/// first. See [`Codegen::store_elem_chain`].
+/// A per-element unary operation, one step of a chain. See
+/// [`Codegen::store_elem_chain`].
 #[derive(Clone, Copy)]
 pub(in crate::codegen) enum ElemStep<'c> {
     Cast(Type<'c>),
@@ -85,24 +82,21 @@ pub(in crate::codegen) enum ElemStep<'c> {
 }
 
 /// A per-element expression tree, evaluated in registers by a single sweep of
-/// the target rather than a shared tile and a barrier per node.
+/// the target.
 pub(super) enum Fused<'c> {
     /// A materialized operand, read with broadcasting.
     Tile(MemVal<'c>),
-    /// One value for every element: a literal, a scalar binding, a call that
-    /// returned a scalar.
+    /// One value for every element, such as a literal or a scalar binding.
     Scalar(Value<'c, 'c>),
     Unary(ElemStep<'c>, Box<Fused<'c>>),
     Binary(BinOp, Box<Fused<'c>>, Box<Fused<'c>>),
-    /// `tmax`, which arith spells as a compare and a select rather than as an
-    /// op of its own.
+    /// `tmax`, emitted as a compare and a select.
     Max(Box<Fused<'c>>, Box<Fused<'c>>),
 }
 
 impl Fused<'_> {
-    /// Whether the tree carries a step only the scalar path can take. The
-    /// transcendental approximations work on one f32 at a time, so a tree
-    /// holding one cannot be swept four elements to the thread.
+    /// Whether the tree has a unary step. Those work on one f32 at a time, so
+    /// such a tree cannot be swept four elements per thread.
     fn has_unary(&self) -> bool {
         match self {
             Fused::Tile(_) | Fused::Scalar(_) => false,
@@ -112,19 +106,17 @@ impl Fused<'_> {
     }
 }
 
-/// Fusing a whole per-element expression into one sweep of its target.
-/// Materializing a shared buffer per operator otherwise costs a barrier
-/// each, which is most of a statement's cost on the decode path, where the
-/// tiles are a row or two.
+/// Fusing a whole per-element expression into one sweep of its target, which
+/// avoids a shared buffer and a barrier per operator.
 ///
-/// This recognizes the whole tree at once: the operands that have to be
-/// materialized anyway (a `dot`, a row reduction) are emitted first and
-/// become leaves, and everything above them is evaluated per element in
-/// registers.
+/// Operands that must be materialized anyway, such as a `dot` or a row
+/// reduction, are emitted first and become leaves. Everything above them is
+/// evaluated per element in registers.
 impl<'c> Codegen<'c> {
 
     /// One sweep of `target` evaluating `tree`, whose tile leaves are
-    /// `leaves`. Checks the leaves broadcast to the target and are unmasked.
+    /// `leaves`. Checks that the leaves broadcast to the target and are
+    /// unmasked.
     pub(super) fn fused_sweep(
         &mut self,
         block: &Block<'c>,
@@ -145,8 +137,8 @@ impl<'c> Codegen<'c> {
                 fmt_shape(&leaf.shape),
                 fmt_shape(&target.shape)
             );
-            // Named operands are screened by `fusable_nodes`; this catches an
-            // emitted one, whose mask the target-indexed sweep cannot honour.
+            // `fusable_nodes` screens named operands. This catches an emitted
+            // one, since the sweep indexes by the target and ignores masks.
             ensure!(
                 !leaf.is_masked(),
                 "fused elementwise op: a partially out-of-bounds operand must be \
@@ -154,9 +146,9 @@ impl<'c> Codegen<'c> {
             );
         }
 
-        // Four elements to the thread only when nothing broadcasts (a
-        // stretched operand has a non-contiguous innermost access) and nothing
-        // needs the scalar transcendentals.
+        // Four elements per thread only when nothing broadcasts and nothing
+        // needs the scalar transcendentals. A broadcast operand's innermost
+        // access is not contiguous.
         let dense = leaves.iter().all(|l| l.shape == target.shape) && !tree.has_unary();
         let mut operands: Vec<&MemVal<'c>> = leaves.iter().collect();
         operands.push(target);
@@ -197,8 +189,8 @@ impl<'c> Codegen<'c> {
                     self.push(block, memref::load(t.mem, &at, self.loc))
                 }
             }
-            // Already the target's element type, from `plan_fused`. The
-            // splat is loop-invariant and sinks to the preheader.
+            // `plan_fused` already cast it to the target's element type. The
+            // splat is loop-invariant and gets hoisted.
             Fused::Scalar(v) => {
                 if width > 1 {
                     self.vec_broadcast(block, *v, vec_t)
@@ -225,9 +217,8 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// Two operands of a node brought to a common type, with the element type
-    /// the arithmetic is chosen by. A vectorized sweep carries `vector<4xf32>`
-    /// values whose element type is f32, and `elem_arith` wants the latter.
+    /// Brings a node's two operands to a common type. Also returns the
+    /// element type `elem_arith` needs, which is f32 for a vectorized sweep.
     fn fuse_pair(
         &mut self,
         block: &Block<'c>,
@@ -237,7 +228,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<(Value<'c, 'c>, Value<'c, 'c>, Type<'c>)> {
         let (xt, yt) = (x.r#type(), y.r#type());
         if width > 1 {
-            // Vectorization is gated on every operand being f32 already.
+            // A vectorized sweep only runs when every operand is f32.
             return Ok((x, y, self.f32_t));
         }
         if xt == yt {

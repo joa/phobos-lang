@@ -10,8 +10,9 @@ use phobos_cluster::tile::{AccessMode, DataType};
 use phobos_sched::server::{DispatchConfig, Scheduler, make_job};
 use phobos_sched::{IngestPolicy, default_supers, plan_budgeted_with};
 
-/// Cluster matmul. The @cluster lower bounds set the supertile shape directly
-/// (default_supers picks them), so K/SUPER k-steps per output stream rather than co-reside.
+/// Cluster matmul. The `@cluster` lower bounds set the supertile shape, since
+/// `default_supers` picks them. Each output streams its K/SUPER k-steps
+/// instead of holding them all resident.
 fn matmul_src(super_dim: usize) -> String {
     format!(
         r#"
@@ -41,8 +42,8 @@ fn fmt_bytes(b: u64) -> String {
     format!("{v:.1} {}", U[u])
 }
 
-/// Stream n f32 in [-1, 1] to a fresh file:// tensor in chunks, never
-/// holding more than one chunk in RAM. Returns the wall time.
+/// Write `n` f32 in [-1, 1] to a fresh file:// tensor, one chunk in RAM at a
+/// time. Returns the wall time.
 fn seed_tensor(uri: &str, n: usize, seed: u64) -> Result<Duration> {
     const CHUNK: usize = 1 << 22; // 16 MiB of f32
     let start = Instant::now();
@@ -68,8 +69,8 @@ fn seed_tensor(uri: &str, n: usize, seed: u64) -> Result<Duration> {
     Ok(start.elapsed())
 }
 
-/// Pre-size a write-only tensor on disk without writing its bytes (the pods
-/// STORE into regions of it; DirectLoad never reads a write-only tensor).
+/// Pre-size a write-only tensor on disk without writing its bytes. The pods
+/// STORE into regions of it, and DirectLoad never reads a write-only tensor.
 fn alloc_tensor(uri: &str, n: usize) -> Result<()> {
     let f = OpenOptions::new()
         .write(true)
@@ -151,10 +152,10 @@ async fn main() -> Result<()> {
         grid * grid
     );
 
-    // Plan first (CPU-only, instant): peak_resident is the per-node high-water,
-    // since operands stream and free k-step by k-step rather than all co-residing.
-    // The node engine enforces it via arena backpressure, parking ALLOCs that
-    // would overflow until a FREE makes room, so arena = peak + headroom holds.
+    // Plan first, on the CPU. peak_resident is the per-node high-water mark,
+    // since operands are loaded and freed one k-step at a time. The engine
+    // parks an ALLOC that would overflow until a FREE makes room, so an arena
+    // of peak plus headroom is enough.
     let source = matmul_src(super_dim);
     let program = phobos_cluster::compile(&phobos_lang::parse(&source)?.remove(0))?;
     let supers = default_supers(&program);
@@ -175,9 +176,8 @@ async fn main() -> Result<()> {
     let arena = (peak + peak / 5) as usize; // +20% headroom for prefetch/alignment
     let budget = arena as u64;
 
-    // Each in-process node keeps its own arena on the shared GPU, so the card must
-    // hold their sum: simulating nodes on one GPU replicates operands and costs
-    // more VRAM than the real problem, which would give each node separate VRAM.
+    // Each in-process node has its own arena on the shared GPU, so the card
+    // must hold their sum. That is more VRAM than a real cluster needs per card.
     let aggregate = arena as u64 * nodes as u64;
     println!(
         "on disk: {} of f32 (A+B+C)\nplan: {} instrs, peak resident {}/node -> arena {}/node",
@@ -193,7 +193,7 @@ async fn main() -> Result<()> {
         fmt_bytes(aggregate),
     );
 
-    // Seed inputs (the slow part), pre-size the output.
+    // Seed the inputs, the slow part, and pre-size the output.
     let dir = std::env::temp_dir().join("phobos_cluster_correctness");
     std::fs::create_dir_all(&dir)?;
     let uri = |f: &str| format!("file://{}", dir.join(f).display());
@@ -203,7 +203,7 @@ async fn main() -> Result<()> {
     alloc_tensor(&uc, n * n)?;
     println!("seeded A in {ta:.1?}, B in {tb:.1?}");
 
-    // Scheduler + nodes in-process pods over localhost gRPC.
+    // Scheduler and in-process pods over localhost gRPC.
     let sched = Scheduler::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let sched_addr = listener.local_addr()?.to_string();
@@ -244,8 +244,8 @@ async fn main() -> Result<()> {
     sched.dispatch(job, cfg).await?;
     println!("dispatched + ran in {:.1?}", run.elapsed());
 
-    // Sample-verify: corners, the diagonal, and a few scattered interior cells,
-    // each recomputed in f64 from disk-read row/col.
+    // Spot-check corners, the diagonal and a few interior cells, each
+    // recomputed in f64 from the row and column on disk.
     let mut samples = vec![
         (0, 0),
         (n - 1, n - 1),

@@ -8,14 +8,12 @@ impl DeviceBackend {
         self.check_distinct("matmul", out, &[a, w]);
         let (a_ptr, w_ptr, out_ptr) = (self.ptr(a, 0)?, self.ptr(w, 0)?, self.ptr(out, 0)?);
 
-        // Decoding (m == 1) stays on the matvec specialization; anything
-        // wider tiles. Both handle a ragged shape by masking the boundary tile.
+        // A single row takes the matvec, anything wider tiles. Both mask a
+        // ragged boundary tile.
         if m > 1 {
             let f32_bytes = size_of::<f32>() as u64;
-            // The tensor-core kernel needs whole TC_TILE_M-row bands of a
-            // whole TC_TILE_N-wide output (@aligned demands provably in-bounds
-            // slices). Whatever it can't cover falls to the plain kernel below,
-            // the same deepest-tile-first ladder project_q8 uses for Q8_0.
+            // The tensor-core kernel is `@aligned`, so it takes only whole
+            // tiles. The rows it cannot cover go to the plain kernel below.
             let tc_rows = if n.is_multiple_of(TC_TILE_N) && k.is_multiple_of(TC_TILE_K) {
                 m - m % TC_TILE_M
             } else {
@@ -86,10 +84,11 @@ impl DeviceBackend {
         )
     }
 
-    /// [`Backend::matmul_rows`]: a decode row by [`matvec_blocks_src`] where
-    /// the row fits, otherwise a band of whole [`ROWS_TM`]-row programs, `k`
-    /// split across programs where they are few, and then the rest a row a
-    /// program.
+    /// [`Backend::matmul_rows`].
+    ///
+    /// A single short row runs [`matvec_blocks_src`]. Otherwise a band of
+    /// [`ROWS_TM`]-row programs runs first, splitting `k` when the grid is
+    /// small, and the remaining rows run one per program.
     pub(super) fn matmul_rows_dense(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()> {
         self.check_distinct("matmul_rows", out, &[a, w]);
         ensure!(

@@ -5,8 +5,10 @@ use crate::ast::{AssignOp, BinOp, Expr};
 use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, ValueId};
 
 impl Build {
-    /// A cascade of forms tried in order, since which arm a statement takes
-    /// decides which emitter runs.
+    /// Lowers `target op= value` for a tile-shaped target.
+    ///
+    /// Tries a cascade of forms in order. The first that matches decides
+    /// which emitter runs.
     pub(crate) fn store_tile(&mut self, target: ValueId, op: AssignOp, value: &Expr) -> Result<()> {
         // <tensor slice> = acc for a fragment accumulator.
         if let Expr::Var(n) = value
@@ -116,7 +118,7 @@ impl Build {
             let transpose = callee == "dot_t";
             let (a, b) = self.dot_operands(args)?;
 
-            // `p = dot(p, p)` is routed through a temp to avoid aliasing garbage.
+            // `p = dot(p, p)` goes through a temp, since the target aliases an operand.
             if self.is_buffer(target) && (target == a || target == b) {
                 self.stmt(
                     OpKind::DotInto {

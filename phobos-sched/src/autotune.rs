@@ -21,7 +21,7 @@ impl Default for ClusterFingerprint {
         ClusterFingerprint {
             nodes: 1,
             vram_bytes: 16 << 30,      // 16 GiB
-            link_bytes_per_sec: 10e9,  // ca 10GB/s
+            link_bytes_per_sec: 10e9,  // 10 GB/s
             leaf_flops_per_sec: 10e12, // 10 TFLOP/s
         }
     }
@@ -70,7 +70,7 @@ pub fn autotune(
         a.makespan_sec
             .total_cmp(&b.makespan_sec)
             .then(a.peak_resident.cmp(&b.peak_resident))
-            .then(b.fetch_bytes.cmp(&a.fetch_bytes))
+            .then(a.fetch_bytes.cmp(&b.fetch_bytes))
     });
 
     Ok(ranked)
@@ -268,8 +268,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
     #[test]
     fn parallelism_prune_drops_under_node_grids() {
         let p = program();
-        // M=N=K=8192: min super 2048 gives grids up to 4x4, max super 8192 gives 1x1.
-        // On 16 nodes, coarse configs get pruned for under-parallelism; fine ones survive.
+        // At 8192, a 2048 supertile gives a 4x4 grid and an 8192 one gives 1x1.
+        // On 16 nodes the coarse configs lack parallelism and get pruned.
         let fp = ClusterFingerprint {
             nodes: 16,
             vram_bytes: 32 << 30,
@@ -315,8 +315,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 
     #[test]
     fn autotunes_a_scalar_kernel() {
-        // A kernel with a scalar param must tune without a job binding: the trial
-        // plan uses placeholder scalar values, since the config doesn't depend on them.
+        // A kernel with a scalar param tunes without a job binding. The trial
+        // plan uses placeholder scalars, since the config does not depend on them.
         const FLASH: &str = r#"
 @cluster(BR in [1024, 4096])
 @autotune(D in [64], BR in [32, 128], BC in [32, 128])

@@ -1,9 +1,9 @@
-// Magnitude grids for IQ3_XXS and IQ3_S: each entry is four unsigned
-// magnitude bytes packed into one u32, covering half a lane group;
-// sign comes from the same KSIGNS_IQ2XS / KMASK_IQ2XS pair IQ2_XXS uses
-// (a parity index for IQ3_XXS, an explicit sign byte for IQ3_S). Also
-// the sixteen-value non-linear codebook IQ4_XS indexes with a nibble.
-// From ggml-common.h.
+// Magnitude grids for IQ3_XXS and IQ3_S, from ggml-common.h. Each entry
+// packs four unsigned magnitude bytes into one u32, half a lane. Signs come
+// from the KSIGNS_IQ2XS / KMASK_IQ2XS pair IQ2_XXS uses: a parity index for
+// IQ3_XXS, an explicit sign byte for IQ3_S.
+//
+// Also the sixteen-value non-linear codebook IQ4_XS indexes by nibble.
 
 pub(crate) static IQ3XXS_GRID: [u32; 256] = [
     0x04040404, 0x04040414, 0x04040424, 0x04040c0c, 0x04040c1c, 0x04040c3e, 0x04041404, 0x04041414, 0x04041c0c, 0x04042414,

@@ -1,6 +1,5 @@
-/// SplitMix64, which keeps a run reproducible without an RNG dependency.
-/// [`Lcg`] fills test tensors; this one has the better distribution and is
-/// what sampling draws from.
+/// SplitMix64, a reproducible RNG with no dependency. Sampling draws from it.
+/// It has a better distribution than [`Lcg`], which fills test tensors.
 #[derive(Clone, Debug)]
 pub struct SplitMix64(u64);
 
@@ -97,7 +96,6 @@ mod tests {
 
     #[test]
     fn matches_the_hand_rolled_recurrence() {
-        // Guard: reproduces this hand-rolled recurrence exactly.
         let mut seed = 1u64;
         let mut lcg = Lcg::new(1);
         for _ in 0..8 {

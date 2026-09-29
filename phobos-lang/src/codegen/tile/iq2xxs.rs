@@ -1,18 +1,17 @@
 // IQ2_XXS's decode geometry, shared by the contraction (`iq2xxs_qdot.rs`) and
-// the expansion (`qdecode.rs`). Two table lookups a lane, a magnitude grid and
-// a sign table, and unlike IQ1_S a real branch on the lane's byte split:
-// `l == 0` has no `hi` byte.
+// the expansion (`qdecode.rs`). Each lane does two table lookups, a magnitude
+// grid and a sign table. Lane `l == 0` has no `hi` sign byte.
 
 use super::*;
 
-// IQ2_XXS block layout (phobos-gguf/src/quant/iq2_xxs.rs): 66 bytes, the
-// qs/aux plane at byte 2.
+// IQ2_XXS device block layout: 64 bytes, the qs/aux plane at byte 0.
+// A device block drops the file's leading f16 `d` (`Quant::device_block`).
 pub(super) const IQ2XXS_BLOCK_BYTES: i64 = 64;
 const IQ2XXS_QS_OFF: i64 = 0;
 pub(super) const IQ2XXS_LANE: i64 = 8;
 
 /// Lane geometry: byte offsets within a block, and the lane's element offset.
-/// `hi_off` re-reads `lo_off` at `l == 0`; the select below drops it.
+/// At `l == 0`, `hi_off` re-reads `lo_off` and a select drops it.
 pub(super) struct Iq2xxsLane<'c> {
     l: Value<'c, 'c>,
     grid_off: Value<'c, 'c>,
@@ -34,8 +33,8 @@ pub(super) struct Iq2xxsBlock<'c> {
 
 impl<'c> Codegen<'c> {
     /// The byte offsets warp lane `lane` reads, and its element offset.
-    /// `hi_off` folds to a re-read of `lo_off` at `l == 0` (harmless, in
-    /// bounds); `arith.select` drops its contribution below.
+    /// At `l == 0`, `hi_off` is an in-bounds re-read of `lo_off`, and
+    /// `arith.select` drops its contribution.
     pub(super) fn iq2xxs_lane(
         &mut self,
         body: &Block<'c>,
@@ -65,7 +64,7 @@ impl<'c> Codegen<'c> {
         let scale_off = self.addi(body, aux, three_idx)?;
 
         // lo_off = aux + (max(l, 1) - 1): aux+0 for l in {0,1}, aux+1 for
-        // l=2, aux+2 for l=3, matching run_geometry's match arms.
+        // l=2, aux+2 for l=3, as in the host kernel's run_geometry.
         let l_or_1 = self.push(body, arith::select(is_l0, one_idx, l, self.loc))?;
         let lo_off = self.addi(body, aux, self.subi(body, l_or_1, one_idx)?)?;
         let hi_off = self.addi(body, aux, l)?;
@@ -117,7 +116,7 @@ impl<'c> Codegen<'c> {
         let word = self.push(kb, arith::addi(lo, hi_shifted, self.loc))?;
 
         // shift_div = 1 for l == 0, else 1 << (8 - l): 128, 64, 32 for l =
-        // 1, 2, 3, matching run_geometry's match arms.
+        // 1, 2, 3, as in the host kernel's run_geometry.
         let eight_i32 = self.numeric_cast(kb, self.const_index(kb, 8)?, i32_t)?;
         let l_i32 = self.numeric_cast(kb, geom.l, i32_t)?;
         let exp = self.push(kb, arith::subi(eight_i32, l_i32, self.loc))?;
@@ -145,7 +144,7 @@ impl<'c> Codegen<'c> {
 
         let grid_idx = self.numeric_cast(kb, grid_idx, self.index_t)?;
         let grid_idx8 = self.push(kb, arith::muli(grid_idx, geom.eight_idx, self.loc))?;
-        // Eight contiguous bytes apiece: one load each, not one per element.
+        // Eight contiguous bytes each, so one vector load per table.
         let vec_t = Type::vector(&[IQ2XXS_LANE as u64], self.i8_t);
         let z = geom.zero_idx;
         let grid_v = self.vec_load_al(kb, tables.grid.mem, &[z, grid_idx8], vec_t, 8)?;

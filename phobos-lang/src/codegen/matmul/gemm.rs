@@ -1,7 +1,7 @@
-// The register matmul in thirds: the accumulators are seeded before the
-// k-loop, carried through it, and drained after it. Keeping the thirds
-// apart lets whoever drives them emit the loop bounds and the epilogue's
-// operands in between.
+// The register matmul in three parts: seed the accumulators before the
+// k-loop, carry them through it, and drain them after it. Keeping the parts
+// separate lets the caller emit the loop bounds and the epilogue operands in
+// between.
 
 use super::*;
 
@@ -9,8 +9,7 @@ use crate::codegen::lower::Lowered;
 use crate::shape;
 use crate::ir::{Ir, OpId, ValueId};
 
-/// Which of the three paths runs a register matmul, with the tiling that
-/// path decided from the shapes alone.
+/// Which of the three paths runs a register matmul, with its tiling.
 #[derive(Clone, Copy, Debug)]
 pub(in crate::codegen) enum GemmPath {
     /// Vector contractions in registers: each lane owns a tm x tn sub-tile
@@ -33,8 +32,8 @@ pub(in crate::codegen) struct GemmPlan<'c> {
     pub(in crate::codegen) path: GemmPath,
 }
 
-/// The warp's origin values the k-loop computes and the epilogue drains
-/// from: (tid, w, wt, m0, n0), as [`Codegen::warp_block_origin`] returns them.
+/// The warp's origin, computed by the k-loop and used by the epilogue:
+/// (tid, w, wt, m0, n0), as [`Codegen::warp_block_origin`] returns it.
 pub(in crate::codegen) type GemmOrigin<'c> = (
     Value<'c, 'c>,
     Value<'c, 'c>,
@@ -43,12 +42,12 @@ pub(in crate::codegen) type GemmOrigin<'c> = (
     Value<'c, 'c>,
 );
 
-/// The accumulators between the thirds.
+/// The accumulators passed between the three parts.
 #[derive(Clone)]
 pub(in crate::codegen) struct GemmAcc<'c> {
     pub(in crate::codegen) plan: GemmPlan<'c>,
     pub(in crate::codegen) regs: Vec<Value<'c, 'c>>,
-    /// Set by the loop third.
+    /// Set by the loop.
     pub(in crate::codegen) origin: Option<GemmOrigin<'c>>,
 }
 
@@ -61,11 +60,11 @@ pub(in crate::codegen) enum GemmOperand {
 
 /// Where the k-loop's operand slices come from.
 pub(in crate::codegen) enum GemmSource<'a> {
-    /// The body of the graph's loop: its iv argument, the ops before the
-    /// `gemm_dot`, and the dot's two slice operands, each defined by one of
-    /// those ops. The a slice's ops come first, then the b slice's, and
-    /// neither slice's ops use the other's values, so each can be lowered
-    /// on its own.
+    /// The body of the graph's loop: its iv, the ops before the `gemm_dot`,
+    /// and the dot's two slice operands, each defined by one of those ops.
+    ///
+    /// The a slice's ops come first, then the b slice's. Neither uses the
+    /// other's values, so each can be lowered on its own.
     Graph {
         ir: &'a Ir,
         iv: ValueId,
@@ -80,13 +79,13 @@ pub(in crate::codegen) enum GemmSource<'a> {
 pub(in crate::codegen) enum GemmScale<'c> {
     /// A value already emitted.
     Value(Value<'c, 'c>),
-    /// The identity, an f32 one.
+    /// The f32 constant one.
     One,
 }
 
 impl<'c> Codegen<'c> {
-    /// Decides the path and its tiling for an [m, n] accumulator over a
-    /// k extent of kk.
+    /// Decides the path and its tiling for an [m, n] accumulator over a k
+    /// extent of `kk`.
     pub(in crate::codegen) fn gemm_plan(
         &self,
         m: i64,
@@ -170,7 +169,7 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The finished accumulators and the origin the loop third recorded.
+    /// The origin the loop recorded. Fails if the loop has not run.
     pub(in crate::codegen) fn gemm_finals(acc: &GemmAcc<'c>) -> Result<GemmOrigin<'c>> {
         acc.origin
             .ok_or_else(|| anyhow!("a register matmul drained before its loop ran"))
@@ -189,9 +188,8 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// One operand slice of iteration `kt`, lowered into `block`. The
-    /// slices are lowered in the order the caller asks for them, and every
-    /// call lowers its slice afresh.
+    /// One operand slice of iteration `kt`, lowered into `block`. Every call
+    /// lowers the slice afresh.
     pub(in crate::codegen) fn gemm_operand(
         &mut self,
         block: &Block<'c>,
@@ -207,14 +205,14 @@ impl<'c> Codegen<'c> {
                 a,
                 b,
             } => {
-                // The slice's ops, lowered afresh under a layer binding the
-                // iv to this call's kt: up to a's definition for a, from
-                // there to b's for b. Lowered without windows of their own:
-                // a masked slice materializes into a shared tile here, and
-                // its trailing barrier orders the staging copy this loop
-                // makes next, which no op of the graph reads, so the barrier
-                // pass must never see it as a candidate. The tile is scratch
-                // of the loop's window.
+                // Lower the slice's ops in a new layer that binds the iv to
+                // `kt`: up to a's definition for a, then on to b's for b.
+                //
+                // These ops get no barrier windows of their own. A masked
+                // slice becomes a shared tile here, and its trailing barrier
+                // orders the staging copy that follows. No graph op reads
+                // that copy, so the membar pass must never elide the
+                // barrier. The tile is scratch of the loop's window.
                 let def = |v: ValueId| {
                     ir.def_op(v)
                         .and_then(|d| prefix.iter().position(|&o| o == d))
@@ -248,9 +246,9 @@ impl<'c> Codegen<'c> {
         Ok((a, b))
     }
 
-    /// Precomputes the alpha and beta operands of a GEMM epilogue
-    /// (alpha*acc [+ beta*prev_load]), broadcast to vec_t when the store is
-    /// aligned. Each coefficient is prepared whole before the next.
+    /// Prepares the alpha and beta of a GEMM epilogue,
+    /// alpha*acc [+ beta*prev], as f32. Broadcasts them to `vec_t` when the
+    /// store is aligned.
     pub(in crate::codegen) fn epilogue_scaling(
         &mut self,
         block: &Block<'c>,

@@ -1,9 +1,9 @@
 // Q5_K: `{ f16 d; f16 dmin; uint8 scales[12]; uint8 qh[32]; uint8 qs[128]; }`.
 //
-// Q4_K with a fifth bit. The same eight runs of 32, the same 6-bit scale and
-// minimum indices packed the same way (see [`super::q4_k::scale_min`]), and
-// the same nibble planes in `qs`. Run `r`'s element `l` takes its top bit
-// from bit `r` of `qh[l]`, so the one 32-byte `qh` plane serves every run.
+// Q4_K with a fifth bit. Runs, packed scales and minimums (see
+// [`super::q4_k::scale_min`]) and the nibble planes in `qs` match Q4_K.
+// Element `l` of run `r` takes its top bit from bit `r` of `qh[l]`, so one
+// 32-byte `qh` plane serves every run.
 
 use phobos_base::half::f16_to_f32;
 

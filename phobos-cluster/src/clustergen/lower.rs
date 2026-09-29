@@ -1,11 +1,12 @@
-// Rewriting a step into its leaf kernels once the shape is settled.
+// Lowers a settled step into its leaf kernels.
 
 use super::*;
 
-/// Rewrites the step leaf's store so each launch contributes one k-chunk.
-/// A plain C[..] = acc flips to += acc. A GEMM epilogue keeps the fused
-/// store shape C[..] = alpha*acc + c_old (implicit beta of 1, applied once by
-/// the init leaf); with no prior-C term it accumulates as += alpha*acc.
+/// Rewrites the step leaf's store so each launch adds one k-chunk.
+///
+/// A plain `C[..] = acc` becomes `+= acc`. An epilogue with a prior-C term
+/// becomes `C[..] = alpha*acc + c_old`, since the init leaf already applied
+/// beta. Without one it becomes `+= alpha*acc`.
 pub(super) fn rewrite_step_store(step: &mut Kernel, d: &Define) {
     let Stmt::Assign { op, value, .. } = &mut step.body[d.stmt_idx] else {
         unreachable!("define index points at the accumulator store");
@@ -75,7 +76,7 @@ pub(super) fn lower_body(
         match b {
             Statement::InitPlaceholder => {
                 if init.skip {
-                    continue; // beta identity: C keeps its original value
+                    continue; // beta is 1.0, C keeps its original value
                 }
                 let d = define.expect("placeholder implies a define (validated)");
                 out.push(ClusterStmt::Compute {

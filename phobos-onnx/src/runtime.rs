@@ -9,8 +9,8 @@ use crate::eval::fold_graph;
 use crate::tokenizer::BpeTokenizer;
 use crate::{Graph, load_model, transform};
 
-/// One LM-head model, re-run over the whole prefix each step. Simple, but
-/// O(seq) work per token; [`KvGraph`] is the cached alternative.
+/// An LM-head model re-run over the whole prefix each step, so every token
+/// costs O(seq) work. [`KvGraph`] is the cached alternative.
 struct FullGraph {
     graph: Graph,
     input_name: String,
@@ -69,12 +69,13 @@ impl FullGraph {
 
 /// The prompt goes through `decoder` and each single-token step through
 /// `decoder_with_past`, the per-layer key/value cache threaded between them.
-/// A step is then O(1) in sequence length.
+/// A step runs only the new token, so its projections cost the same at any
+/// length; attention still reads the whole cache.
 struct KvGraph {
     prompt_graph: Graph,
     step_graph: Graph,
-    /// Decoded once and reused every token: re-decoding 500 MB per step
-    /// otherwise dominates a single-token decode.
+    /// Decoded once and reused every token, since re-decoding the weights per
+    /// step would dominate a single-token decode.
     step_weights: HashMap<String, Tensor>,
     vocab: usize,
     n_layer: usize,
@@ -244,8 +245,9 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-/// What to assume when the graph does not say. GPT-2's learned position
-/// embedding is 1024 long and a decode past it indexes out of the table.
+/// The context limit to assume when the graph does not say. GPT-2's learned
+/// position embedding is 1024 long, and a decode past it indexes out of the
+/// table.
 const DEFAULT_CONTEXT: usize = 1024;
 
 /// An ONNX export, paired with the tokenizer it was exported against. The
@@ -265,9 +267,9 @@ impl OnnxModel {
     /// Load the export in `dir` against the tokenizer in `tokenizer_dir`.
     ///
     /// A `decoder.onnx` and a `decoder_with_past.onnx` side by side are a
-    /// with-cache export and give the KV-cached engine; a `model.onnx` is a
+    /// with-cache export and use the KV-cached engine. A `model.onnx` is a
     /// full-recompute LM-head export. Nothing in the files says which is
-    /// intended, so the directory's contents are what decides.
+    /// intended, so the directory's contents decide.
     pub fn load_with_tokenizer(dir: &Path, tokenizer_dir: &Path) -> Result<OnnxModel> {
         let engine =
             if dir.join("decoder.onnx").is_file() && dir.join("decoder_with_past.onnx").is_file() {
@@ -303,9 +305,9 @@ impl OnnxModel {
 /// Rows in the learned position embedding, which is the hard cap on how far a
 /// decode can run.
 ///
-/// The table is an initializer rather than anything the graph declares, so it
-/// has to be recognized by name; `wpe` is what the GPT-2 family exports call
-/// it. A model that names it otherwise falls back to [`DEFAULT_CONTEXT`].
+/// The graph does not declare the table, so its initializer is recognized by
+/// name, such as `wpe` in GPT-2 family exports. A model that names it
+/// otherwise falls back to [`DEFAULT_CONTEXT`].
 fn position_embedding_len(graph: &Graph) -> Option<usize> {
     graph
         .initializers

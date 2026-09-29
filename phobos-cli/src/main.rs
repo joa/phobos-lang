@@ -3,11 +3,9 @@
 //   phobos-cli --gguf MODEL.gguf "The color of the sky is"
 //   phobos-cli --onnx MODEL_DIR "The color of the sky is"
 //
-// Encodes the prompt, runs it through either a GGUF model or an ONNX export,
-// and streams the continuation. With no prompt it drops into a REPL that keeps
-// the loaded model warm. With --listen it serves instead, and puts a dashboard
-// on the terminal unless told not to.
-//
+// Encodes the prompt, runs it through a GGUF model or an ONNX export, and
+// streams the continuation. With no prompt it starts a REPL. With --listen it
+// serves instead, with a dashboard on the terminal unless told not to.
 
 mod tui;
 
@@ -50,8 +48,7 @@ const VALUED: &[&str] = &[
     "--expert-cache",
 ];
 
-/// Lines of the dashboard's log to reprint if serving ends badly. The tail is
-/// where the failure is; the rest is the session that led up to it.
+/// Lines of the dashboard's log to reprint if serving fails.
 const REPLAY_LINES: usize = 32;
 
 /// Every flag that is a switch rather than a value. See [`cli::Args::positional_with`].
@@ -59,11 +56,11 @@ const SWITCHES: &[&str] = &["--no-tui", "--tui", "--no-prefix-cache", "--raw"];
 
 /// Which model to run, and where its tokenizer comes from.
 enum Source {
-    /// A GGUF file, which carries its own vocabulary, and how much of the
-    /// device to give a streamed model's expert cache.
+    /// A GGUF file, which carries its own vocabulary, plus load options such
+    /// as the expert cache size.
     Gguf(PathBuf, phobos_gguf::runtime::LoadOptions),
-    /// An ONNX export, plus the directory holding the tokenizer it was
-    /// exported against. Defaults to the export's own directory.
+    /// An ONNX export, plus the directory holding its tokenizer. The
+    /// tokenizer defaults to the export's own directory.
     Onnx { dir: PathBuf, tokenizer: PathBuf },
 }
 
@@ -97,9 +94,8 @@ fn parse_args(args: &cli::Args) -> Result<Args> {
         seed: args.parse("--seed")?.unwrap_or(0),
         listen: args.value("--listen")?.map(str::to_string),
         prompt: (!words.is_empty()).then(|| words.join(" ")),
-        // On when there is a terminal to draw on, and off when there is not,
-        // which is what a server being logged to a file wants. `--tui` says
-        // to draw anyway, for a terminal this fails to recognize.
+        // On when there is a terminal to draw on. `--tui` draws anyway, for a
+        // terminal that is not recognized.
         tui: !args.has("--no-tui") && (args.has("--tui") || tui::unavailable().is_none()),
         prefix_cache: !args.has("--no-prefix-cache"),
         raw: args.has("--raw"),
@@ -136,8 +132,8 @@ fn source(args: &cli::Args) -> Result<Source> {
             Ok(Source::Gguf(path.into(), phobos_gguf::runtime::LoadOptions { expert_cache_bytes }))
         }
         (None, Some(dir)) => Ok(Source::Onnx {
-            // An ONNX export carries no vocabulary, so the tokenizer is a pair
-            // of files that by default sit beside the model.
+            // An ONNX export carries no vocabulary. Its tokenizer files sit
+            // beside the model by default.
             tokenizer: args.value("--tokenizer")?.unwrap_or(dir).into(),
             dir: dir.into(),
         }),
@@ -241,9 +237,8 @@ fn main() -> Result<()> {
     let args = parse_args(&raw)?;
     let serving = args.listen.clone();
 
-    // Only a server draws, and only it needs the dashboard up before the
-    // model: a cold start compiles every kernel from source and takes
-    // minutes, which without something watching looks like a hung process.
+    // Only a server draws. The dashboard goes up before the model loads, so
+    // a slow cold start does not look like a hung process.
     let drawing = match (&serving, args.tui) {
         (Some(_), true) => Some(tui::start()?),
         _ => None,
@@ -256,7 +251,7 @@ fn main() -> Result<()> {
         eprintln!("note: {name} is set, so its report will overwrite part of the dashboard.");
     }
     if drawing.is_none() {
-        // Nothing is drawing, so the lines go to stderr as they happen.
+        // Nothing is drawing, so progress goes to stderr.
         progress::set_sink(report_line);
         eprint!("loading model on {}... ", args.source.backend_name());
         io::stderr().flush().ok();
@@ -264,7 +259,7 @@ fn main() -> Result<()> {
 
     let model = args.source.load()?;
     // Before "ready", so the first prompt does not pay for the upload. A
-    // server warms up on its own, once it is listening.
+    // server warms up on its own once it is listening.
     if serving.is_none() {
         model.warm_up()?;
     }
@@ -290,24 +285,18 @@ fn main() -> Result<()> {
     }
 }
 
-/// One line for each kernel that had to be built, for a run with no dashboard.
-///
-/// Only the ones built: a warm start finds every kernel in the on-disk cache
-/// and is over in seconds, and forty lines saying so are forty lines of
-/// nothing. A cold start is the case worth narrating.
+/// Prints a line for each kernel that had to be built, for a run with no
+/// dashboard. Cached kernels print nothing.
 fn report_line(event: Event<'_>) {
     static BUILT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     static STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
     use std::sync::atomic::Ordering::Relaxed;
 
     match event {
-        // Said as each one begins, because a batch begins all at once and a
-        // kernel that takes ten minutes is otherwise never named until it is
-        // over. The name that matters during the wait is the one that has
-        // not come back.
+        // Named as each one begins, so a slow kernel is visible during the
+        // wait and not only when it finishes.
         Event::Started { item, .. } => {
-            // The first line interrupts the unfinished "loading model on ...",
-            // which a warm start would have completed with "ready".
+            // The first line breaks the unfinished "loading model on ..." line.
             if STARTED.fetch_add(1, Relaxed) == 0 {
                 eprintln!();
             }
@@ -323,12 +312,10 @@ fn report_line(event: Event<'_>) {
     }
 }
 
-/// A finished kernel, as a line. Said in the past tense: it is reported when
-/// the lowering comes back, and `lowering ...` already said when it began.
+/// A finished kernel, as a line.
 ///
-/// A batch knows how many it holds and can say how far along it is. A kernel
-/// compiled on its own is a batch of one, where a percentage would always
-/// read 100 and the only honest figure is how many have been built so far.
+/// A batch reports its position and a percentage. A kernel compiled on its
+/// own reports how many have been built so far instead.
 fn progress_line(step: &Step<'_>, built: usize) -> String {
     if step.total > 1 {
         let done = step.done as f64 / step.total as f64 * 100.0;
@@ -341,11 +328,8 @@ fn progress_line(step: &Step<'_>, built: usize) -> String {
     }
 }
 
-/// Say why there is no dashboard, loudly enough to be found again.
-///
-/// A screen of build output usually sits above this, and the alternative to
-/// being hard to miss is a user who asked for a dashboard watching a server
-/// print lines and wondering which part went wrong.
+/// Say why there is no dashboard, in a banner that stands out from the build
+/// output around it.
 fn no_dashboard(why: &str) {
     let rule = "=".repeat(72);
     eprintln!("{rule}");
@@ -358,10 +342,9 @@ fn no_dashboard(why: &str) {
 
 /// Serve, with the dashboard drawing beside the engine if it was asked for.
 ///
-/// The engine stays on this thread because that is where the model was loaded
-/// and where its device context lives; the dashboard is what moves. They meet
-/// only at the [`Meter`], and either one ending clears its running flag, so
-/// the other stops too.
+/// The engine stays on this thread, where the model and its device context
+/// live. The two share only the [`Meter`], and when either ends the other
+/// stops too.
 fn serve(
     addr: String,
     model: Box<dyn Model>,
@@ -369,8 +352,7 @@ fn serve(
     drawing: Option<tui::Dashboard>,
 ) -> Result<()> {
     let Some(drawing) = drawing else {
-        // Nothing will draw the meter, so its lines go where the server's
-        // own used to.
+        // Nothing draws the meter, so its lines go to stderr.
         let meter = Arc::new(Meter::new());
         meter.echo_to_stderr();
         return server::serve(addr, model, defaults, meter);
@@ -378,13 +360,12 @@ fn serve(
 
     let meter = drawing.meter();
     let result = server::serve(addr, model, defaults, meter.clone());
-    // Whichever of the two finished first, the other is told to stop.
+    // Whichever finished first, tell the other to stop.
     meter.stop();
     let outcome = drawing.join().and(result);
 
-    // On the way out after a failure, print what the dashboard was showing
-    // when it happened. The terminal is back by now, and the ring is the only
-    // copy; a clean quit needs none of it, since the user was watching.
+    // After a failure, reprint the log's tail now that the terminal is back.
+    // The meter's ring is the only copy.
     if outcome.is_err() {
         for line in meter.snapshot().log.iter().rev().take(REPLAY_LINES) {
             eprintln!("[{:>7.3}s] {}", line.at.as_secs_f64(), line.text);
@@ -395,9 +376,8 @@ fn serve(
 
 fn oneshot(model: &dyn Model, prompt: &str, args: &Args, rng: &mut Rng) -> Result<()> {
     let tokenizer = model.tokenizer();
-    // A model that ships a chat template is asked in it: bare, an instruct
-    // model continues the prompt as a document, and a question rarely
-    // continues into its answer.
+    // A model with a chat template is asked in it. A bare prompt makes an
+    // instruct model continue it as a document instead of answering.
     let template = model.info().chat_template.as_deref().filter(|_| !args.raw);
     let text = match template {
         Some(template) => chat::user_turn(prompt, Some(template), tokenizer.bos_text()),
@@ -518,8 +498,8 @@ mod tests {
 
     #[test]
     fn a_kernel_on_its_own_reports_the_running_count() {
-        // A batch of one is every kernel asked for outside a batch, where
-        // 1/1 and 100% would be true and useless.
+        // A kernel compiled outside a batch is a batch of one, where 1/1 and
+        // 100% would say nothing.
         assert_eq!(
             progress_line(&step("argmax_finish", 1, 1), 4),
             "compiled kernel argmax_finish - 4 built so far"

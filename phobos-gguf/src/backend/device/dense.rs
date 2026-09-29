@@ -1,21 +1,16 @@
-// The dense fallback for a raw format: the weight decoded to an `f32`
-// strip, then the plain matmul, for the shapes no fused or decode-in-kernel
-// path takes.
+// The dense fallback for a raw format: decode the weight into an `f32`
+// strip, then run the plain matmul. Used for shapes no fused path takes.
 
 use super::*;
 
-/// Scratch cap for [`DeviceBackend::project_raw_dense`]'s dequantized weight
-/// strip, bounded well under card memory instead of dequantizing a whole
-/// `[K, N]` tensor at once.
+/// Default scratch cap for [`DeviceBackend::project_raw_dense`]'s
+/// dequantized weight strip.
 const RAW_DEQUANT_BUDGET_BYTES: usize = 32 * 1024 * 1024;
 
-/// [`RAW_DEQUANT_BUDGET_BYTES`], or what `PHOBOS_DEQUANT_MIB` overrides it to.
+/// [`RAW_DEQUANT_BUDGET_BYTES`], or `PHOBOS_DEQUANT_MIB` if set.
 ///
-/// The scratch stays live for the whole prompt pass, which pages the output
-/// head out for as long as it does. Shrinking the budget buys residency
-/// back and costs launches; below a floor the strip stops covering a whole
-/// tensor in few enough launches and the prompt pass falls apart. A format
-/// with a fused projection never allocates this scratch at all.
+/// The scratch stays live for the whole prompt pass. A smaller budget frees
+/// memory but needs more launches per weight.
 fn raw_dequant_budget() -> usize {
     std::env::var("PHOBOS_DEQUANT_MIB")
         .ok()
@@ -25,12 +20,10 @@ fn raw_dequant_budget() -> usize {
 }
 
 impl DeviceBackend {
-    /// [`Self::project_raw`], but for `m > 1`: dequantizes each output-column
-    /// strip of the weight into an `f32` `[K, strip]` scratch once and runs
-    /// `Backend::matmul` against it for all `m` rows, instead of redoing the
-    /// decode per `(output tile, row)`. Strip-sized to stay under
-    /// [`RAW_DEQUANT_BUDGET_BYTES`] rather than dequantizing the whole `[K, N]`
-    /// weight at once.
+    /// [`Self::project_raw`] for `m > 1`. Dequantizes one output-column strip
+    /// of the weight at a time into a `[K, strip]` scratch, then runs
+    /// `Backend::matmul` against it for all `m` rows. The strip width keeps
+    /// the scratch under the dequant budget.
     pub(super) fn project_raw_dense(
         &self,
         a: Buf,
@@ -50,8 +43,7 @@ impl DeviceBackend {
             "raw weight was uploaded with n = {stored_n}, used with n = {n}"
         );
 
-        // Tile size and extra grid/signs/iota operands mirror project_raw's
-        // own match table.
+        // Keep in sync with project_raw's match table.
         let (dequant, dequant_name, tn) = match quant {
             Quant::IQ1_S => (&self.iq1s_dequant, "iq1s_dequant", IQ1S_TN),
             Quant::IQ2_XXS => (&self.iq2xxs_dequant, "iq2xxs_dequant", IQ2XXS_TN),
@@ -67,10 +59,10 @@ impl DeviceBackend {
                 other.name()
             ),
         };
-        // `_dequant` above stays the masked fallback, for a ragged last strip
-        // and for the formats with no `_qdecode`. The f16 strip is only sound
-        // where the matmul reading it is entirely tensor-core: the plain tile
-        // contracts in f32, and an f16 weight there costs real precision.
+        // `_dequant` above is the masked fallback, for a ragged last strip
+        // and for formats with no `_qdecode`. An f16 strip is only used when
+        // the matmul is entirely tensor-core. The plain tile contracts in f32
+        // and would lose precision on an f16 weight.
         let all_tc = m.is_multiple_of(TC_TILE_M) && k.is_multiple_of(TC_TILE_K);
         let qdecode = match quant {
             Quant::IQ1_S => Some((&self.iq1s_qdecode, &self.iq1s_qdecode_f16, "iq1s_qdecode")),
@@ -92,16 +84,15 @@ impl DeviceBackend {
                 "iq3xxs_qdecode",
             )),
             Quant::IQ3_S => Some((&self.iq3s_qdecode, &self.iq3s_qdecode_f16, "iq3s_qdecode")),
-            // Q2_K and IQ4_XS decode on a different lane geometry and are a
-            // small share of a prompt pass; they keep `_dequant`.
+            // Q2_K and IQ4_XS use a different lane geometry and keep
+            // `_dequant`.
             _ => None,
         };
         let rb = nb * quant.device_block_bytes();
         let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
         let f16_bytes = size_of::<u16>() as u64;
 
-        // Rounded to a whole TC_TILE_N: a budget-shaped strip is a multiple of
-        // 64 for no reason, and `Backend::matmul` needs one to reach the
+        // Round down to a whole TC_TILE_N so `Backend::matmul` can use the
         // tensor cores. Only the last strip is then ragged.
         let strip = (raw_dequant_budget() / (k * size_of::<f32>())).clamp(1, n);
         let strip = if strip >= TC_TILE_N {
@@ -109,14 +100,12 @@ impl DeviceBackend {
         } else {
             strip
         };
-        // One buffer for every strip of every weight in the model, not one
-        // per distinct width. A kernel operand is a pointer and a shape, so
-        // a narrower weight simply uses a prefix, and `k * strip` is bounded
-        // by RAW_DEQUANT_BUDGET_BYTES by construction. Taken from the pool
-        // per weight instead, the exact-length keying would leave one entry
-        // per shape and page the output head out. See `residency.rs`.
-        // A grouped format is padded to `RAW_GROUP_PAD` columns, so a ragged
-        // strip decodes to the next whole tile, `dec` wide, and copies `cur`.
+        // One shared buffer serves every strip of every weight; a narrower
+        // weight uses a prefix. Pool buffers per shape would pile up, since
+        // the pool keys by exact length. See `residency.rs`.
+        //
+        // A grouped format is padded to whole tiles, so a ragged strip
+        // decodes `dec` columns and copies out `cur`.
         let grouped = quant.grouped_rows();
         let round_up = |x: usize| if grouped { x.div_ceil(tn) * tn } else { x };
         let widest = k * round_up(strip);
@@ -149,9 +138,8 @@ impl DeviceBackend {
                 Some((wide, half, name)) => (if narrow { half } else { wide }, name),
                 None => (dequant, dequant_name),
             };
-            // A `_qdecode` indexes its tables itself and reads the packed i8
-            // ones; a `_dequant` gathers against the i32 ones. Same slot count,
-            // so only the pointer changes.
+            // A `_qdecode` reads the packed i8 tables and a `_dequant` the i32
+            // ones. Only the pointer differs.
             let packed = expand.is_some();
             let table = |i32_buf: &DeviceBuffer<i32>, i8_buf: &DeviceBuffer<i8>, len: usize| {
                 let ptr = if packed {
@@ -261,9 +249,8 @@ impl DeviceBackend {
         Ok(())
     }
     /// [`super::DeviceBackend::matmul`]'s ladder over an f16 weight. The
-    /// tensor-core arm is bit-identical to the f32 one, since `stage_to_f16`
-    /// truncates a weight operand either way; callers keep the remainder rows
-    /// off this path (see `narrow` in `project_raw_dense`).
+    /// tensor-core arm matches the f32 one bit for bit. Callers keep
+    /// remainder rows off this path, see `narrow` in `project_raw_dense`.
     fn matmul_f16_weight(
         &self,
         a_ptr: u64,

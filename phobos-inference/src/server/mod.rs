@@ -92,14 +92,11 @@ pub(crate) async fn fallback_handler(
     StatusCode::NOT_FOUND
 }
 
-/// Put `session` back to where `held` and `ids` stop agreeing, if it can go
-/// there and there is anything to gain.
+/// Rewind `session` to where `held` and `ids` stop agreeing.
 ///
-/// Returns the session and the number of positions it kept, or nothing if it
-/// should be dropped and a fresh one started. One position short of the whole
-/// prompt on purpose: the token that decoding starts from is chosen from the
-/// logits of the last prompt position, and those have to come from a pass run
-/// now rather than from whatever the session last did.
+/// Returns the session and the positions it kept, or `None` if it should be
+/// dropped for a fresh one. Stops at least one position short of the whole
+/// prompt, since decoding needs fresh logits for the last prompt position.
 fn rewind<'a>(
     mut session: Box<dyn Session + 'a>,
     held: &[i64],
@@ -110,8 +107,7 @@ fn rewind<'a>(
         return None;
     }
     let shared = common_prefix(held, ids).min(ids.len().saturating_sub(1));
-    // Nothing to keep is not worth keeping: a session holding none of this
-    // prompt still holds its buffers, and dropping it hands them back.
+    // Drop a session that shares nothing, to free its buffers.
     if shared == 0 {
         return None;
     }
@@ -119,11 +115,11 @@ fn rewind<'a>(
     Some((session, kept))
 }
 
-/// Where the prompt's last turn opens, the reply's own header. The next
-/// request repeats everything before it, but may render this turn
-/// differently once it is history: an earlier turn loses its reasoning. So
-/// that is where a session that cannot rewind by position keeps its
-/// checkpoint. `None` for a prompt with no turns, such as a raw completion.
+/// Where the prompt's last turn opens, used as the session checkpoint.
+///
+/// The next request repeats everything before this point, but may render
+/// this turn differently once it is history, since earlier turns lose their
+/// reasoning. `None` for a prompt with no turns, such as a raw completion.
 fn last_turn(tokenizer: &dyn Tokenizer, ids: &[i64]) -> Option<usize> {
     let [turn] = tokenizer.encode(TURN_START).ok()?[..] else {
         return None;
@@ -135,10 +131,9 @@ fn common_prefix(held: &[i64], ids: &[i64]) -> usize {
     held.iter().zip(ids).take_while(|(a, b)| a == b).count()
 }
 
-/// Where a new prompt stops agreeing with what the kept session holds, with
-/// the text on either side of that point, or `None` when the prompt extends
-/// it. A backend that cannot rewind starts over from nothing whenever the
-/// two differ, and the text says which part of the chat rendering moved.
+/// A log line saying where a new prompt diverges from the kept session, with
+/// the text around that point. `None` when the prompt extends the session.
+/// It shows which part of the chat rendering changed.
 fn divergence(tokenizer: &dyn Tokenizer, held: &[i64], ids: &[i64]) -> Option<String> {
     const CONTEXT_TOKENS: usize = 12;
     let at = common_prefix(held, ids);
@@ -155,10 +150,11 @@ fn divergence(tokenizer: &dyn Tokenizer, held: &[i64], ids: &[i64]) -> Option<St
     ))
 }
 
-/// A request's expert cache lookups in a line, from the counts before and
-/// after it, or `None` for a model that streams no experts. A decode step
-/// counts one lookup per routed expert, a prompt pass one per expert it
-/// routes to, so the two rates are given apart.
+/// A one-line summary of a request's expert cache lookups, from the counts
+/// before and after it. `None` for a model that streams no experts.
+///
+/// Decode and prompt rates are reported separately, since they count
+/// different things.
 fn describe_experts(before: &CacheStats, after: &CacheStats) -> Option<String> {
     let decode = (
         after.expert_hits - before.expert_hits,
@@ -190,8 +186,7 @@ fn describe_experts(before: &CacheStats, after: &CacheStats) -> Option<String> {
     ))
 }
 
-/// One finished request in a line: the two rates a reader compares runs by,
-/// and the counts they were measured over.
+/// A one-line summary of a finished request: token counts and rates.
 fn describe(done: &crate::telemetry::Request) -> String {
     format!(
         "{} prompt ({} reused) + {} generated, {:.1} pp, {:.1} tg tok/s, stopped on {}",
@@ -204,11 +199,10 @@ fn describe(done: &crate::telemetry::Request) -> String {
     )
 }
 
-/// How long the worker waits for a request before looking up from it.
+/// How long the idle worker waits for a request before waking.
 ///
-/// It wakes to re-read the card, which is what keeps a memory gauge moving
-/// while nothing is being generated, and to notice that a viewer has asked to
-/// quit. Short enough to feel live, long enough that an idle server is idle.
+/// It wakes to refresh the device memory reading and to notice a request to
+/// quit.
 const IDLE_TICK: Duration = Duration::from_millis(250);
 
 pub fn serve(
@@ -264,8 +258,8 @@ pub fn serve(
         });
     });
 
-    // After the listener, so the port is open while the weights go up; a
-    // request that arrives meanwhile waits in the channel.
+    // After the listener, so the port is open during the upload. Requests
+    // arriving meanwhile wait in the channel.
     meter.log(Level::Info, "uploading weights");
     let started = Instant::now();
     model.warm_up()?;
@@ -276,12 +270,11 @@ pub fn serve(
     meter.set_device_memory(model.device_memory());
     meter.set_cache_stats(model.cache_stats());
 
-    // The session from the last request, with the tokens it holds, for as
-    // long as nothing has replaced it.
+    // The last request's session and the tokens it holds.
     let mut kept: Option<(Box<dyn Session + '_>, Vec<i64>)> = None;
 
-    // Not `for req in rx`: the worker has to look up between requests, both
-    // to re-read the card and to notice a viewer asking to quit.
+    // Not `for req in rx`: the worker must wake between requests to refresh
+    // the meter and to notice a request to quit.
     while meter.running() {
         let inf_req = match rx.recv_timeout(IDLE_TICK) {
             Ok(req) => req,
@@ -306,9 +299,8 @@ pub fn serve(
             meter: Some(meter.clone()),
             checkpoint_at: last_turn(model.tokenizer(), &ids),
         };
-        // A session kept from the last request is worth reusing for as far as
-        // the two prompts agree. What it holds past that is wrong for this
-        // one, so it is either rewound or given up.
+        // Reuse the kept session as far as the two prompts agree. It is
+        // rewound past that point, or dropped.
         if let Some((_, held)) = &kept
             && let Some(line) = divergence(model.tokenizer(), held, &ids)
         {
@@ -342,10 +334,8 @@ pub fn serve(
             prompt_tokens: ids.len(),
         }));
 
-        // Stops for either reason a generation stops being wanted: the client
-        // hung up, or a viewer asked to quit. Checked per token, so quitting
-        // costs one step rather than the rest of the response. A prompt pass
-        // is one call and cannot be interrupted part way.
+        // Stops when the client hangs up or a quit is requested. Checked per
+        // token; a prompt pass cannot be interrupted part way.
         let mut sink = |text: &str| {
             if !meter.running() {
                 return Flow::Stop;
@@ -375,11 +365,9 @@ pub fn serve(
                 {
                     meter.log(Level::Info, line);
                 }
-                // Kept for the next request, which may well be this
-                // conversation with one more turn on the end. `held` is what
-                // the session holds and not what was emitted; the two differ
-                // whenever a generation stops without feeding its last token
-                // back.
+                // Keep the session for the next request, likely the same
+                // conversation plus a turn. `held` is what the session holds,
+                // which can differ from what was emitted.
                 if reuse {
                     meter.set_cache(session.len(), session.cache_bytes());
                     kept = Some((session, outcome.held));
@@ -395,8 +383,7 @@ pub fn serve(
             Err(e) => {
                 meter.log(Level::Info, format!("generation failed: {e:#}"));
                 meter.request_finished("error");
-                // A failed pass leaves the session holding who knows what, so
-                // it goes rather than being reused.
+                // A failed pass leaves the session in an unknown state.
                 drop(session);
                 meter.set_cache(0, None);
                 let _ = responder.send(Ok(InferenceResponse::Done {
@@ -405,11 +392,10 @@ pub fn serve(
                 }));
             }
         }
-        // Whatever was released is back with the backend by now; see `Model`.
         meter.set_device_memory(model.device_memory());
         meter.set_cache_stats(model.cache_stats());
     }
-    // Before `model`, which it borrows.
+    // Drop before `model`, which it borrows.
     drop(kept);
 
     Ok(())

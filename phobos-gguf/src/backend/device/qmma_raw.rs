@@ -2,20 +2,17 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::*;
 
-/// The staged projections (`<fmt>_qgemm_t`), built on first use;
-/// `PHOBOS_QGEMM=0` turns them off. These contract a prompt pass against a
-/// raw quantized weight with no expanded weight in between.
+/// The staged projections (`<fmt>_qgemm_t`), built on first use.
+/// `PHOBOS_QGEMM=0` turns them off.
 ///
-/// [`super::DeviceBackend::project_raw_dense`] instead decodes a strip of
-/// the weight into `f32` or `f16` scratch and runs a dense matmul over it.
-/// The cost is not the decode, which runs at the same speed either way; it
-/// is that the expansion moves many times the weight's own bytes and leaves
-/// scratch resident behind it. Contracting out of the registers the decode
-/// already lands in pays neither cost.
+/// They contract a prompt pass directly against a raw quantized weight, with
+/// no expanded copy. [`super::DeviceBackend::project_raw_dense`] instead
+/// decodes into scratch first, which moves far more bytes and keeps the
+/// scratch resident.
 pub(super) struct Qgemm {
     on: bool,
     kernels: RefCell<HashMap<Quant, Module>>,
-    /// The ternary grid at two bits a lane and at a nibble a lane.
+    /// The ternary grid at two bits per lane and at four bits per lane.
     grid2: RefCell<Option<DeviceBuffer<i8>>>,
     grid4: RefCell<Option<DeviceBuffer<i8>>>,
 }
@@ -31,9 +28,8 @@ impl Qgemm {
     }
 
     /// Whether the staged kernel takes this shape: a format it decodes, more
-    /// than one row, and `k` a whole number of blocks. The output tile does
-    /// not gate it: a shape ragged either way runs padded into a scratch
-    /// (see [`DeviceBackend::project_raw_qmma`]).
+    /// than one row, and `k` a whole number of blocks. Ragged `m` or `n` is
+    /// fine, it runs padded (see [`DeviceBackend::project_raw_qmma`]).
     fn takes(&self, quant: Quant, m: usize, k: usize, n: usize) -> bool {
         self.on && qgemm_name(quant).is_some() && m > 1 && k.is_multiple_of(256) && n > 0
     }
@@ -78,10 +74,9 @@ impl Qgemm {
 impl DeviceBackend {
     /// Whether `w` at this shape can take the fused projection.
     ///
-    /// The kernel is `@aligned`, so every slice it takes has to be whole: the
-    /// output tile both ways, and `k` a whole number of 256-element blocks
-    /// because a lane indexes the block bytes itself. A shape that misses goes
-    /// back to `project_raw_dense`, which masks.
+    /// The register-form kernel is `@aligned`, so it needs whole output tiles
+    /// both ways and `k` a multiple of 256. Other shapes go to
+    /// `project_raw_dense`, which masks.
     pub(super) fn raw_qmma_eligible(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
         const FUSED: [Quant; 6] = [
             Quant::IQ1_S,
@@ -91,8 +86,7 @@ impl DeviceBackend {
             Quant::IQ3_XXS,
             Quant::IQ3_S,
         ];
-        // IQ1_M, the K-quants and PTQ1_0 have only the staged kernel; the
-        // rest have both.
+        // These formats have only the staged kernel. The rest have both.
         for staged_only in [Quant::IQ1_M, Quant::Q4_K, Quant::Q5_K, Quant::Q6_K, Quant::PTQ1_0] {
             if self.raw_quant_is(w, staged_only) {
                 return self.qgemm.takes(staged_only, m, k, n);
@@ -112,12 +106,11 @@ impl DeviceBackend {
         }
     }
 
-    /// `out[m, n] = a[m, k] . w[n, k]` with the IQ1_S decode folded into the
+    /// `out[m, n] = a[m, k] . w[n, k]` with the weight decode folded into the
     /// integer tensor-core contraction.
     ///
-    /// The activation is quantized once for the whole weight, as it is for
-    /// [`Self::project_q8`]: a Q8_0 block is 32 elements and so is an IQ1_S
-    /// scale group, so both scales land on the same k step.
+    /// The activation is quantized to Q8_0 once for the whole weight, as in
+    /// [`Self::project_q8`].
     #[allow(clippy::too_many_arguments)]
     pub(super) fn project_raw_qmma(
         &self,
@@ -143,18 +136,16 @@ impl DeviceBackend {
         let (bytes_ptr, d_ptr, quant) = (raw.bytes, raw.d, raw.quant);
         drop(raws);
         if self.qgemm.takes(quant, m, k, n) {
-            // The kernel is `@aligned` and stores whole tiles, so a ragged
-            // shape runs padded: the activation in a slot of `m_pad` rows
-            // (the tail rows are never written, and the stage keeps rows
-            // apart), the weight as the grouped upload already padded it to
-            // `RAW_GROUP_PAD` columns, and the result into a scratch the
-            // caller's `[m, n]` window is copied out of. Only a ragged shape
-            // pays the copy.
+            // The kernel stores whole tiles, so a ragged shape runs padded.
+            // The activation goes in a slot of `m_pad` rows; the tail rows
+            // are never written and do not affect the others. The weight is
+            // already padded by the grouped upload. The result lands in a
+            // scratch and the `[m, n]` window is copied out.
             let (m_pad, n_pad) = (m.next_multiple_of(QGEMM_TM), n.next_multiple_of(QGEMM_TN));
             let padded = (m_pad, n_pad) != (m, n);
             let act = match act {
-                // The caller's copy where there is one, `rms_norm_q`'s rows;
-                // at a ragged `m` it is `m` rows and the kernel reads `m_pad`.
+                // Reuse the caller's quantized rows, unless the kernel needs
+                // `m_pad` rows and the caller's copy has only `m`.
                 Some(act) if !padded => act,
                 _ => {
                     self.note_dense_pass();
@@ -209,17 +200,12 @@ impl DeviceBackend {
             other => bail!("project_raw_qmma has no fused kernel for {}", other.name()),
         };
 
-        // The caller's copy where there is one: `rms_norm_q` already left the
-        // rows quantized, and taking a slot per weight to redo it is what the
-        // fused path costs a decode step. The slots it does take are a prompt
-        // pass's and no use to a decode step either, hence `note_dense_pass`.
+        // Reuse the caller's quantized rows when there are some.
         let act = match act {
             Some(act) => act,
             None => {
-                // Nothing outlives this one: the down projection is its only
-                // reader, so it takes a ring slot rather than a slot of its
-                // own, which is most of what the fused path would otherwise
-                // cost a decode step in residency.
+                // Only this projection reads it, so a transient ring slot
+                // is enough.
                 self.note_dense_pass();
                 self.quantize_act_transient(a, m, k)?
             }
@@ -231,15 +217,15 @@ impl DeviceBackend {
             (bytes_ptr, [n as i64, rb as i64]),
             (d_ptr, [n as i64, nb as i64]),
         ];
-        // IQ1_S folds its delta and its sign into one table; IQ2_XXS keeps
-        // magnitudes and signs apart, as its decode does everywhere else.
+        // IQ1_S folds its delta and sign into one table. The other formats
+        // take a magnitude grid and a sign table.
         match quant {
             Quant::IQ1_S => operands.push((
                 self.iq1s_signed_grid.as_device_ptr().as_raw(),
                 [1, IQ1S_SIGNED_GRID_LEN as i64],
             )),
-            // IQ2_XS shares IQ2_XXS's sign table, as its decode does
-            // everywhere else in this backend.
+            // IQ2_XS and IQ3_XXS share IQ2_XXS's sign table, IQ3_S shares
+            // IQ2_S's.
             other => {
                 let (grid, glen, signs, slen) = match other {
                     Quant::IQ2_S => (

@@ -1,18 +1,15 @@
-// The raw-format upload: a format's block bytes and scale planes as the
-// device kernels read them.
+// Uploading a raw-format weight: its block bytes and scale planes, laid out
+// as the device kernels read them.
 
 use super::*;
 use crate::quant::RawScales;
 use crate::quant::grouped::group_rows;
 
-/// A device-resident raw-block weight: where its file bytes and `f16` header
-/// plane(s) landed in the [`arena::Arena`] (`dmin` absent for a format with no
-/// minimum term), output width, super-blocks per row, and which format's
-/// kernel decodes it.
+/// A device-resident raw-block weight: the addresses of its block bytes and
+/// `f16` scale planes, its output width `n`, super-blocks per row `nb`, and
+/// its format. `dmin` is `None` for a format with no minimum term.
 ///
-/// Device pointers rather than buffers because the arena owns the allocation:
-/// see `arena.rs` for why the weights share a dozen of those rather than
-/// taking one each.
+/// These are raw pointers because the [`arena::Arena`] owns the memory.
 pub(super) struct DeviceRaw {
     pub(super) bytes: u64,
     pub(super) d: u64,
@@ -23,8 +20,8 @@ pub(super) struct DeviceRaw {
 }
 
 impl DeviceBackend {
-    /// [`Backend::constant_raw`]: the payload and scale planes, grouped
-    /// where the format wants it.
+    /// [`Backend::constant_raw`]. Uploads the blocks and scale planes, with
+    /// rows grouped for formats that need it.
     pub(super) fn upload_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
 
         if let Some(&buf) = self.raw_constants.borrow().get(key) {

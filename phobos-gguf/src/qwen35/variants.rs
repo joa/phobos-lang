@@ -1,6 +1,7 @@
-/// Points where the tensor extents alone do not pin the architecture down.
-/// [`Variants::REFERENCE`] is llama.cpp's `qwen35` impl and our default; the
-/// rest are swept by `examples/sweep.rs` against a repeated-phrase probe.
+/// Architecture choices the tensor shapes alone do not settle.
+///
+/// [`Variants::REFERENCE`] matches llama.cpp's `qwen35` and is the default.
+/// `examples/sweep.rs` tries the others against a repeated-phrase probe.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Variants {
     /// `attn_qkv` groups query/key/value per head rather than as three
@@ -13,9 +14,8 @@ pub struct Variants {
     pub attn_gate_first: bool,
     /// Normalize before applying the output gate rather than after.
     pub norm_before_gate: bool,
-    /// `ssm_a` holds `log(A)`, as the HuggingFace checkpoint does. The GGUF
-    /// converter instead stores `-exp(A_log)` and llama.cpp multiplies by it
-    /// directly, so this is false for GGUF files.
+    /// `ssm_a` holds `log(A)`, as in the HuggingFace checkpoint. GGUF files
+    /// store `-exp(A_log)` instead, used as is, so this is false for GGUF.
     pub decay_from_log: bool,
     /// L2-normalize delta-rule queries and keys.
     pub l2_normalize_qk: bool,
@@ -41,8 +41,7 @@ impl Variants {
         query_contracts_value: false,
     };
 
-    /// The combinations the sweep explores; the rest are settled and held
-    /// fixed.
+    /// The combinations the sweep explores. The other fields are held fixed.
     pub fn all() -> Vec<Variants> {
         (0..16u32)
             .map(|bits| Variants {

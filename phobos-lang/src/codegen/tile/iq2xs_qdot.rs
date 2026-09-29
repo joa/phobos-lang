@@ -1,14 +1,13 @@
-// Fused IQ2_XS dot: two grid-table lookups a lane, folded into the
-// contraction. The decode itself lives in `iq2xs.rs`, shared with
-// `qdecode.rs`.
+// Fused IQ2_XS dot: two table lookups per lane, folded into the contraction.
+// The decode itself lives in `iq2xs.rs`, shared with `qdecode.rs`.
 
 use super::iq2xs::{IQ2XS_BLOCK_BYTES, IQ2XS_LANE};
 use super::*;
 
 impl<'c> Codegen<'c> {
     /// IQ2_XS's matvec contraction with its magnitude-grid and sign-table
-    /// lookups folded in (the sign table is IQ2_XXS's own, reused outright).
-    /// Same shape as `tile_iq1s_qdot_t`.
+    /// lookups folded in. The sign table is IQ2_XXS's. Same shape as
+    /// `tile_iq1s_qdot_t`.
     pub(in crate::codegen) fn tile_iq2xs_qdot_t(
         &mut self,
         block: &Block<'c>,

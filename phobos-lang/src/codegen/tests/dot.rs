@@ -6,8 +6,8 @@ use super::*;
 fn flash_accumulator_rides_in_fragments() {
     // The canonical fp16 flash kernel (examples/flash_attention_fp16.ph).
     // Every use of acc is fragment-representable, so it never exists in
-    // shared memory: its per-lane fragments ride the kt loop as iter_args
-    // and the epilogue scatters straight to O.
+    // shared memory. Its per-lane fragments ride the kt loop as iter_args,
+    // and the epilogue scatters them straight to O.
     let mlir = emit_mlir_sync(
         "@autotune(D in [64], BR in [32], BC in [32])
         @tensorcore
@@ -54,7 +54,7 @@ fn flash_accumulator_rides_in_fragments() {
         !mlir.contains("memref<32x64xf32, 3>"),
         "fragment accumulator materialized in shared memory:\n{mlir}"
     );
-    // One [BR, BC] f32 buffer serves scores and probabilities: the
+    // One [BR, BC] f32 buffer serves scores and probabilities, since the
     // fused exp(s - mnew) sweep rewrites it in place.
     let s_bufs = tile_views(&mlir, "32x32xf32").len();
     assert_eq!(
@@ -65,11 +65,10 @@ fn flash_accumulator_rides_in_fragments() {
 
 #[test]
 fn flash_q_staging_hoists_to_the_loop_preheader() {
-    // q in dot_t(q, k) is a let-bound Q slice defined outside the kt
-    // loop and nothing in the body stores to global memory, so its
-    // global-to-shared f16 staging copy runs once in the preheader
-    // instead of every iteration. q's subview is the first in the
-    // kernel, so its loads print as "%subview[" exactly.
+    // q is a let-bound slice defined outside the kt loop, and the body
+    // stores nothing to global memory. So q's f16 staging copy runs once in
+    // the preheader instead of every iteration. q's subview is the first in
+    // the kernel, so its loads print as "%subview[" exactly.
     let src = "@autotune(D in [64], BR in [32], BC in [32])
         @tensorcore
         @launch(128)
@@ -100,8 +99,8 @@ fn flash_q_staging_hoists_to_the_loop_preheader() {
             acc = acc / l
             O[row :+ BR, :] = acc
         }";
-    // Both tensor-core paths hoist: mma.sync (frag-carried kt loop) and
-    // the legacy WMMA fallback (plain kt loop).
+    // Both tensor-core paths hoist: mma.sync with a fragment-carrying kt
+    // loop, and the WMMA fallback with a plain one.
     for mlir in [emit_mlir_sync(src, "sm_75"), emit_mlir(src)] {
         let (preheader, body) = split_at_kt_loop(&mlir);
         assert!(
@@ -117,9 +116,8 @@ fn flash_q_staging_hoists_to_the_loop_preheader() {
 
 #[test]
 fn dot_staging_stays_in_loop_when_body_stores_global() {
-    // The body stores s to O each iteration: a staged copy of q could
-    // not see global writes, so the hoist must stand down and q stages
-    // inside the loop as before.
+    // The body stores to O each iteration, and a hoisted copy of q would
+    // miss global writes. So q must stage inside the loop.
     let mlir = emit_mlir_sync(
         "@autotune(D in [64], BR in [32], BC in [32])
         @tensorcore
@@ -150,8 +148,8 @@ fn dot_staging_stays_in_loop_when_body_stores_global() {
 
 #[test]
 fn frag_acc_falls_back_on_unsanctioned_reads() {
-    // rowsum(o) reads the accumulator outside the fragment-representable
-    // forms, so the candidate must reject it and o stays a shared tile.
+    // rowsum(o) is not a fragment-representable use, so o stays a shared
+    // tile.
     let mlir = emit_mlir_sync(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
@@ -177,8 +175,8 @@ fn frag_acc_falls_back_on_unsanctioned_reads() {
 #[test]
 fn tensorcore_dot_t_loads_transposed_b() {
     // dot_t (Q @ K.T) stages both operands in their natural [rows, D]
-    // layout and loads the B (K) fragment column-major (transpose), so no
-    // transposing staging pass is needed.
+    // layout. The B fragment is loaded transposed, so no transposing
+    // staging pass is needed.
     let mlir = emit_mlir(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
@@ -212,9 +210,9 @@ fn tensorcore_dot_t_loads_transposed_b() {
 
 #[test]
 fn tensorcore_f16_dot_stages_vectorized() {
-    // f16 staging is a plain copy (no truncf) and vectorizes as 8xf16, the
-    // same 16 bytes an f32 tile moves as 4xf32. The 16-byte reach needs a
-    // provable row pitch; D = 64 here gives 128 bytes, so the shape alone proves it.
+    // f16 staging is a plain copy with no truncf, vectorized as 8xf16 (16
+    // bytes). That needs a provable 16-byte row pitch, which D = 64 gives
+    // from the shape alone.
     let mlir = emit_mlir(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
@@ -248,8 +246,8 @@ fn tensorcore_f16_dot_stages_vectorized() {
 
 #[test]
 fn tensorcore_dot_uses_wmma() {
-    // The plain dot (P @ V) path runs on the tensor cores with a
-    // row-major (non-transposed) B load.
+    // The plain dot (P @ V) runs on the tensor cores with a row-major B
+    // load.
     let mlir = emit_mlir(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
@@ -285,8 +283,8 @@ fn tensorcore_dot_uses_wmma() {
 
 #[test]
 fn tensorcore_dot_t_uses_mma_sync() {
-    // At 64-bit index dot_t (Q @ K.T) takes the default mma.sync path:
-    // ldmatrix + nvgpu.mma.sync over swizzled f16 staging, no WMMA.
+    // With 64-bit indices, dot_t (Q @ K.T) takes the mma.sync path:
+    // ldmatrix and nvgpu.mma.sync over swizzled f16 staging, no WMMA.
     let mlir = emit_mlir_sync(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore
@@ -321,10 +319,10 @@ fn tensorcore_dot_t_uses_mma_sync() {
 
 #[test]
 fn tensorcore_dot_accumulate_rides_in_fragments() {
-    // o += dot(p, v): an accumulator whose every use is fragment-representable
-    // never materializes in shared memory. Per-lane mma.sync D fragments seed
-    // the MAC directly and the epilogue scatters them straight to O; the NN
-    // B operand is still read transposed (k-major staging).
+    // o += dot(p, v) with only fragment-representable uses of o, so o never
+    // lives in shared memory. The mma.sync D fragments seed the MAC, and
+    // the epilogue scatters them straight to O. The NN B operand is still
+    // read transposed from its k-major staging.
     let mlir = emit_mlir_sync(
         "@autotune(D in [64], BR in [64], BC in [64])
         @tensorcore

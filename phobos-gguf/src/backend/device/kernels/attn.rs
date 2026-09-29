@@ -1,38 +1,38 @@
-// Attention kernel sources, the split and blocked decode variants,
-// and rope.
+// Attention kernel sources: prompt, blocked, split decode and persistent
+// decode variants, plus rope.
 
 use phobos_kernels::launch::WARP_THREADS;
 
 use crate::backend::Attn;
 
-/// Elements of one `[BC, head_dim]` tile in [`attention_src`]. Shared memory
-/// bounds it: key and value tiles are `[BC, head_dim]` each, the codegen
-/// allocates a second pair for the masked replay of the loop body, and all
-/// four have to fit in 48 KB. The caches are f16, halving that cost.
+/// Elements of one `[BC, head_dim]` tile in [`attention_src`].
+///
+/// Bounded by shared memory. Key and value tiles take one each, the codegen
+/// adds a second pair for the masked loop replay, and all four (f16) must
+/// fit in 48 KB.
 pub(crate) const ATTN_TILE_ELEMS: usize = 4096;
 
-/// The other bound on that tile, and usually the tighter one: rows set the
-/// cost of the scan's remainder, up to `BC - 1` single-key steps after the
-/// tiled loop, so this is capped apart from the element budget above.
+/// Row cap on that tile, usually the tighter bound. The scan's remainder
+/// takes up to `BC - 1` single-key steps, so rows are capped separately.
 pub(crate) const ATTN_TILE_ROWS: usize = 16;
 
-/// Rows of the cache one pass of the scan covers, and the cap on the single-key
-/// remainder that follows it.
+/// Cache rows one step of the scan covers. The single-key remainder after
+/// the tiled loop is shorter than this.
 pub(crate) fn attention_tile(head_dim: usize) -> usize {
     (ATTN_TILE_ELEMS / head_dim).clamp(1, ATTN_TILE_ROWS)
 }
 
-/// Query heads one program of the decode split covers, capped rather than
-/// taken from the group. The query, accumulator and rescale are
-/// `[QG, head_dim]` in shared memory, so the block's footprint grows with
-/// `QG` while the bytes it saves only halve each time; the first halving is
-/// most of the win and the rest costs occupancy.
+/// Cap on the query heads one decode split program covers.
+///
+/// The query, accumulator and rescale are `[QG, head_dim]` in shared
+/// memory, so larger `QG` costs occupancy while its savings shrink.
 pub(crate) const ATTN_QGROUP: usize = 2;
 
-/// Query heads one program of the decode split actually carries: the cap above,
-/// or the largest divisor of it the group divides by. The heads a program
-/// carries read one key head between them, so a program straddling two groups
-/// would hand the second one the first one's keys.
+/// Query heads one decode split program carries: the largest value up to
+/// [`ATTN_QGROUP`] that divides `group`.
+///
+/// A program's heads share one key head, so a program must not straddle two
+/// groups.
 pub(crate) fn attention_qgroup(group: usize) -> usize {
     (1..=ATTN_QGROUP)
         .rev()
@@ -40,30 +40,31 @@ pub(crate) fn attention_qgroup(group: usize) -> usize {
         .unwrap_or(1)
 }
 
-/// Elements of one `[BR, head_dim]` tile in [`attention_block_src`]. It stages
-/// about ten of these as static shared-memory arrays, capped at 48 KB on
-/// every architecture, so ten at 4 KB each is near the limit.
+/// Elements of one `[BR, head_dim]` tile in [`attention_block_src`]. The
+/// kernel stages about ten of these in static shared memory, which is
+/// capped at 48 KB.
 pub(crate) const ATTN_BLOCK_ELEMS: usize = 1024;
 
-/// Queries one program of [`attention_block_src`] covers: four at a head
-/// dimension of 256, which is what caps it.
+/// Queries one program of [`attention_block_src`] covers, for example four
+/// at a head dimension of 256.
 pub(crate) fn attention_block_tile(head_dim: usize) -> usize {
     (ATTN_BLOCK_ELEMS / head_dim).clamp(1, 16)
 }
 
-/// Query rows, keys and contraction depth of one [`attn_gemm_src`] tile. The
-/// square tile is what puts the causal mask on `tril`: with both sides 64, the
-/// one tile straddling the diagonal has key `j` paired with query `i` at the
-/// same tile coordinates, so keeping `j <= i` is the mask.
+/// Query rows and keys of one [`attn_gemm_src`] score tile.
+///
+/// The tile is square, so on the tile straddling the diagonal key `j` and
+/// query `i` share tile coordinates, and `tril` is the causal mask.
 pub const ATTN_GEMM_TILE: usize = 64;
 
 pub(crate) const ATTN_GEMM_STEP: usize = 32;
 
-/// The same for the softmax and the mix, bounded by shared memory rather than
-/// throughput: the softmax tile is square and holds four at once, so 64 would
-/// be 66 KB. The mix uses the same row tile because the softmax only zeroes a
-/// row up to its own last query; a deeper mix would sum unmasked scores above
-/// it. Its step is shallower to fit the `[32, 64]` accumulator.
+/// Row tile of the softmax and the mix, bounded by shared memory. The
+/// softmax holds four square tiles at once, so 64 would not fit.
+///
+/// The mix must use the same row tile, since the softmax only zeroes a row
+/// up to its own last query. Its step is shallower to fit the `[32, 64]`
+/// accumulator.
 pub const ATTN_SOFT_TILE: usize = 32;
 
 pub(crate) const ATTN_MIX_STEP: usize = 16;
@@ -71,8 +72,8 @@ pub(crate) const ATTN_MIX_STEP: usize = 16;
 /// Rows one program of the key transpose carries.
 pub(crate) const ATTN_KT_ROWS: usize = 8;
 
-/// Whether a call tiles evenly enough for [`DeviceBackend::attention_gemm`]. The
-/// kernels it falls back to need no alignment at all.
+/// Whether a call tiles evenly for [`DeviceBackend::attention_gemm`]. The
+/// fallback kernels need no alignment.
 pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
     spec.rows >= ATTN_GEMM_TILE
         && spec.rows.is_multiple_of(ATTN_GEMM_TILE)
@@ -81,20 +82,20 @@ pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
         && spec.total().is_multiple_of(ATTN_KT_ROWS)
 }
 
-/// Causal attention for a prompt: a score matmul, a softmax, and a mix
-/// matmul, materializing the `[rows, keys]` score matrix in between. It is
-/// the fallback [`crate::backend::Backend::attention`] uses for shapes
+/// Causal attention for a prompt as a score matmul, a softmax and a mix
+/// matmul, with the full `[rows, keys]` score matrix in between.
+///
+/// [`crate::backend::Backend::attention`] uses it for shapes
 /// [`attention_block_src`] declines: a head dimension whose block tile does
 /// not divide 64, or a misaligned continuation.
 ///
-/// Keys are transposed once per head so the score matmul is a plain `dot`
-/// rather than an in-place `dot_t` accumulation, and each head is gathered
-/// into its own buffer first since slicing a column window at an unbounded
-/// offset would mask every operand and drop the pipelined path.
+/// Keys are transposed once per head so the score matmul is a plain `dot`.
+/// Each head is gathered into its own buffer first, because a column window
+/// at an unbounded offset would mask every operand and lose pipelining.
 ///
-/// The three kernels split where a row of scores must be whole: the softmax
-/// needs its row max before exponentiating and its sum, left for the mix,
-/// before normalizing. All three skip blocks past the diagonal.
+/// The kernels split where a score row must be complete: the softmax needs
+/// the row max and the mix needs the row sum. All three skip blocks past
+/// the diagonal.
 pub fn attn_gemm_src(head_dim: usize, tile: usize) -> String {
     let scale = (head_dim as f32).sqrt().recip();
     let (step, soft, mix_step) = (ATTN_GEMM_STEP, ATTN_SOFT_TILE, ATTN_MIX_STEP);
@@ -169,21 +170,20 @@ kernel attn_mix(P: tensor<f32>[R, NK], V: tensor<f32>[NK, DV], L: tensor<f32>[R,
     )
 }
 
-/// Causal attention over a block of queries at once. A program owns `BR`
-/// consecutive positions of one head, so one pass over the cache serves all
-/// of them, unlike [`attention_src`] which re-reads key and value tiles per
-/// row. `Q` is `[rows, n_head * head_dim]` already, the same layout the norm
-/// and rotary use, so the query block needs no rearranging.
+/// Causal attention over a block of queries at once.
 ///
-/// The key tile is the query block's size so `tril` on the one tile
-/// straddling the diagonal is the causal mask: at both `BR`, tile column `j`
-/// is key `base + j` and row `i` is query `base + i`. This also handles the
-/// end of the cache, since a column past the last key only pairs with a
-/// query row that is also past it and not stored.
+/// A program owns `BR` consecutive positions of one head, so one pass over
+/// the cache serves all of them. `Q` is `[rows, n_head * head_dim]`, the
+/// layout the norm and rotary use, so it needs no rearranging.
 ///
-/// The mask lands on probabilities rather than scores (equivalent, since a
-/// masked score's `exp` is what softmax drives to zero); the running maximum
-/// includes masked entries too, which only shifts the exponentials down.
+/// The key tile matches the query block, so on the diagonal tile column `j`
+/// is key `base + j` and row `i` is query `base + i`, and `tril` is the
+/// causal mask. A column past the last key only pairs with a row that is
+/// also past the end and never stored.
+///
+/// The mask is applied to probabilities rather than scores, which is
+/// equivalent. The running maximum includes masked entries, which only
+/// shifts the exponentials down.
 pub(crate) fn attention_block_src(
     n_head: usize,
     group: usize,
@@ -243,14 +243,12 @@ kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
 
 /// The rotary embedding, in place.
 ///
-/// Angles arrive as a precomputed table: the language has no sine, and the
-/// hardware's approximate one loses accuracy across an absolute position's
-/// range. The caller offsets `T` to the first row's position, so `r / H` is
-/// the row's position within it.
+/// Angles come from a precomputed table, since the language has no sine
+/// and the hardware one is too inexact at large positions. The caller
+/// offsets `T` to the first row's position, so `r / H` indexes it.
 ///
-/// Reading both halves into tiles before either store is what makes the
-/// update safe in place; the second store still needs the pre-rotation
-/// values.
+/// Both halves are read before either store, which makes the in-place
+/// update safe.
 pub(crate) fn rope_src(heads: usize, half: usize) -> String {
     format!(
         "@launch(256)
@@ -269,18 +267,16 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
     )
 }
 
-/// [`rope_src`], reading a strided window of a fused QKV projection instead
-/// of rotating in place, and writing a dense destination: what a prompt's
-/// query and key both want, since past one row the three parts of the
-/// projection interleave.
+/// [`rope_src`] that reads a strided window of a fused QKV projection and
+/// writes a dense destination. A prompt's query and key both need this,
+/// since past one row the projection's three parts interleave.
 ///
-/// `S` is addressed the way a fused epilogue kernel addresses its planes: the
-/// whole fused row is `stride_heads` heads wide, and a program only touches
-/// the `heads` of them this call's window starts at (the caller's pointer
-/// offset does that shift; see [`Backend::rope_gather`]). Channels past
-/// `rope_dim` pass through unrotated, same as [`rope_src`], except this
-/// kernel copies them itself, since it has no prior copy to leave them for,
-/// when `half * 2 < head_dim`.
+/// A fused row of `S` is `stride_heads` heads wide, and a program touches
+/// only the `heads` in this call's window. The caller's pointer offset
+/// selects the window; see [`Backend::rope_gather`].
+///
+/// When `half * 2 < head_dim`, the channels past `rope_dim` are copied
+/// through unrotated.
 pub(crate) fn rope_gather_src(
     heads: usize,
     half: usize,
@@ -315,25 +311,24 @@ kernel rope_gather(S: tensor<f32>[RS, {head_dim}], T: tensor<f32>[P, RD], D: ten
     )
 }
 
-/// Causal softmax attention over the whole cache, one group of query rows per
-/// program, with the key axis split across the grid and, inside each split's
-/// own block, split again across the block's eight warps via
-/// [`warp_partial`] (a `phobos-lang` builtin in
-/// `phobos-lang/src/codegen/tile/warp_attn.rs`).
+/// Decode attention over the whole cache, one group of query rows per
+/// program.
 ///
-/// Each warp gets its own `[lo, hi)` slice of the block's key range and
-/// computes a register-resident `(m, l, acc)`, the head dimension spread
-/// across its 32 lanes and reduced by shuffle, so warps run independently
-/// instead of serializing through a shared per-tile barrier.
+/// The key axis is split across the grid, and each split is split again
+/// across the block's warps by [`warp_partial`], a `phobos-lang` builtin in
+/// `phobos-lang/src/codegen/tile/warp_attn.rs`.
 ///
-/// A block still publishes one `(m, l, acc)` triple per query row:
-/// [`attention_combine`] merges the `WCT` partials here the same way
-/// [`attention_merge`] merges across splits, because widening `S` to
-/// `S * WCT` instead would blow the merge's shared-memory budget.
+/// Each warp takes its own `[lo, hi)` key range and keeps `(m, l, acc)` in
+/// registers, with the head dimension spread over its lanes and reduced by
+/// shuffle. Warps never wait on each other.
 ///
-/// Every key in a warp's range takes the same one-at-a-time step, so there is
-/// no tiled-plus-remainder split; `K`/`V` stay f16 and widen on load, the
-/// query, max and accumulator stay f32.
+/// A block still publishes one `(m, l, acc)` per query row:
+/// [`attention_combine`] merges the `WCT` warp partials first. Widening `S`
+/// to `S * WCT` instead would exceed the merge's shared memory.
+///
+/// Keys are processed one at a time, so there is no remainder loop. `K`
+/// and `V` stay f16 and widen on load; the query, max and accumulator are
+/// f32.
 pub(crate) fn attention_split_src(
     n_head: usize,
     group: usize,
@@ -345,9 +340,7 @@ pub(crate) fn attention_split_src(
     let scale = (head_dim as f32).sqrt().recip();
     let qw = qgroup * wct;
     let combine = attention_combine(qgroup, "");
-    // Derived, not hardcoded: `warp_partial` bails unless the launch width is
-    // exactly `wct` warps, so a future sweep of `wct` must not leave a
-    // literal 256 behind.
+    // `warp_partial` requires a launch width of exactly `wct` warps.
     let cta = wct * WARP_THREADS;
     format!(
         "@launch({cta})
@@ -395,13 +388,12 @@ kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
     )
 }
 
-/// The `WCT`-way online-softmax merge [`attention_split_src`] and
-/// [`attention_persist_src`] both run once their `WCT` warps have written
-/// their column of `wm`/`wl` and row-group of `wacc`: the same
-/// `rowmax`/`exp`/`rowsum`/`dot` merge `attention_merge` runs across splits,
-/// run here across warps instead. `indent` is the leading whitespace every
-/// generated line gets past its own two spaces, so the text is valid whether
-/// it lands at a kernel's top level or nested inside a `for`/`if`.
+/// The online-softmax merge of the `WCT` warp partials in `wm`, `wl` and
+/// `wacc`, used by [`attention_split_src`] and [`attention_persist_src`].
+/// It is the same merge `attention_merge` runs across splits.
+///
+/// `indent` is extra leading whitespace for every line, so the text can be
+/// nested inside a `for` or `if`.
 fn attention_combine(qgroup: usize, indent: &str) -> String {
     let mut out = String::new();
     for i in 0..qgroup {
@@ -420,23 +412,23 @@ fn attention_combine(qgroup: usize, indent: &str) -> String {
     out
 }
 
-/// [`attention_split_src`]'s two kernels folded into one `@persistent` kernel
-/// via `grid_barrier()` instead of a launch and a scratch round-trip. Phase
-/// one is the split kernel's body ([`warp_partial`] plus
-/// [`attention_combine`]) over a grid-strided range of `(group, split)`
-/// units; phase two is the merge kernel's body over a grid-strided range of
-/// heads. `IT1`/`IT2`, the trip counts, are compiled in and guarded with
-/// `if unit < total`, since a strided loop split from a dynamic extent needs
-/// a static shape for its masked remainder. `P` and `PM` are one scratch
-/// pointer bound to two parameters under the shapes each phase uses, the
-/// same pair [`DeviceBackend::attention_decode`] hands to the two separate
+/// [`attention_split_src`]'s two kernels as one `@persistent` kernel, with
+/// a `grid_barrier()` between the phases.
+///
+/// Phase one runs the split body over a grid-strided range of
+/// `(group, split)` units. Phase two runs the merge body over a
+/// grid-strided range of heads. The trip counts `IT1` and `IT2` are
+/// compiled in and guarded with `if unit < total`, because a strided loop
+/// needs a static shape.
+///
+/// `P` and `PM` are the same scratch pointer, bound under each phase's
+/// shape, as [`DeviceBackend::attention_decode`] passes to the separate
 /// kernels.
 ///
-/// Every block of `BLOCKS` must be resident at once or `grid_barrier`
-/// deadlocks; the caller derives `BLOCKS` from the occupancy API before
-/// compiling this. `@dynshared` sizes shared memory to the max of the two
-/// phases rather than their sum, safe because nothing crosses the barrier
-/// through shared memory: phase two reads only the global `PM`/`ML`.
+/// All `BLOCKS` blocks must be resident at once or `grid_barrier`
+/// deadlocks, so the caller derives `BLOCKS` from the occupancy API.
+/// `@dynshared` takes the max of the two phases' shared memory, which is
+/// safe because phase two reads only the global `PM` and `ML`.
 pub(crate) fn attention_persist_src(
     n_head: usize,
     group: usize,
@@ -512,23 +504,19 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
     )
 }
 
-/// Pieces the key axis is cut into while decoding, per query head a program
-/// carries. Fixed rather than derived from the cache length, since a count
-/// that grows with the cache would reshape the launch every few dozen tokens
-/// and cost a graph rebuild; a piece with no keys just exits its block
-/// immediately.
+/// Pieces the key axis is split into while decoding.
+///
+/// Fixed rather than derived from the cache length, so the launch shape
+/// never changes and the cached graph stays valid. A piece with no keys
+/// exits at once.
 ///
 /// The merge folds a head's pieces into one `[S, head_dim]` tile, so this
-/// times [`ATTN_QGROUP`] is bounded by shared memory: 16 pieces at a head
-/// dimension of 256 is a 16 KB tile, and 64 would not compile.
+/// times [`ATTN_QGROUP`] is bounded by shared memory.
 pub(crate) const ATTN_SPLITS: usize = 8;
 
-/// Warps one block of [`attention_split_src`]/[`attention_persist_src`]
-/// divides its own `[lo, hi)` key range across, one warp per piece. Fixed at
-/// the block's whole warp count (`@launch(256)` is eight warps): the point is
-/// to give already-resident, otherwise-idle warps independent work, not to
-/// add more of them, so there is no headroom to sweep and no reason to leave
-/// any idle.
+/// Warps a block of [`attention_split_src`] or [`attention_persist_src`]
+/// splits its key range across, one piece per warp. Equal to the block's
+/// full warp count at `@launch(256)`, so no warp is idle.
 pub(crate) const ATTN_WARP_SPLITS: usize = 8;
 
 pub(crate) fn attention_src(n_head: usize, group: usize, head_dim: usize, tile: usize) -> String {

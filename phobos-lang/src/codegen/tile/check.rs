@@ -1,7 +1,7 @@
 // Shape agreement, bounds masks, and distributing a tile over the CTA.
 //
-// `distribute` turns a tile-shaped operation into the thread-distributed
-// loop nest the rest of the emitter writes into.
+// `distribute` turns a tile-shaped operation into a loop nest spread over the
+// CTA's threads. The rest of the emitter writes into that nest.
 
 use super::*;
 
@@ -30,9 +30,8 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
 
-        // The accumulator has to hold both operands: their join, or something
-        // wider of the same kind. Equal width is not enough, since f16 and bf16
-        // are both 16b and neither holds the other.
+        // The accumulator must be the operands' join, or wider of the same
+        // kind. Equal width is not enough: f16 and bf16 cannot hold each other.
         let holds = self.numeric_join(a.elem, b.elem).is_some_and(|join| {
             if join == out.elem {
                 return true;
@@ -40,8 +39,7 @@ impl<'c> Codegen<'c> {
             match (self.is_float(join), self.is_float(out.elem)) {
                 (true, true) => self.float_bits(out.elem) > self.float_bits(join),
                 (false, false) => self.elem_bytes(out.elem) > self.elem_bytes(join),
-                // An integer contraction into a float accumulator, or the
-                // reverse, would silently change what the sum means.
+                // Mixing integer and float would change what the sum means.
                 _ => false,
             }
         });
@@ -76,9 +74,10 @@ impl<'c> Codegen<'c> {
     }
 
     /// Conjunction of `offset + idx[d] < extent` over the masked dims of a
-    /// tensor slice, or None when the mask is empty (every dim in bounds).
-    /// The offset and extent values were materialized where the slice was
-    /// taken, so they dominate the distributed loop body that calls this.
+    /// tensor slice, or None when no dim is masked.
+    ///
+    /// The offset and extent values come from where the slice was taken, so
+    /// they dominate the loop body that calls this.
     pub(in crate::codegen) fn bounds_pred(
         &self,
         block: &Block<'c>,
@@ -110,12 +109,11 @@ impl<'c> Codegen<'c> {
         Ok(pred)
     }
 
-    /// Stages a partially out-of-bounds slice into a fresh, fully in-bounds
-    /// tile: in-bounds elements are copied, out-of-bounds ones read as zero.
-    /// The load index is clamped to 0 on any masked dim that overflows, so no
-    /// access ever leaves the tensor, then a select substitutes zero for the
-    /// clamped reads. Downstream ops then treat the result as an ordinary
-    /// dense tile.
+    /// Stages a partially out-of-bounds slice into a fresh dense tile.
+    /// In-bounds elements are copied and out-of-bounds ones read as zero.
+    ///
+    /// An overflowing index is clamped to 0, so no load leaves the tensor, and
+    /// a select replaces the clamped reads with zero.
     pub(in crate::codegen) fn materialize_masked(
         &mut self,
         block: &Block<'c>,
@@ -168,7 +166,6 @@ impl<'c> Codegen<'c> {
         Ok(dst)
     }
 
-    /// arith.select(cond, a, b): a when cond is true, else b.
     pub(in crate::codegen) fn select(
         &self,
         block: &Block<'c>,
@@ -179,12 +176,12 @@ impl<'c> Codegen<'c> {
         self.push(block, arith::select(cond, a, b, self.loc))
     }
 
-    /// Emits body once per element of out, or once per width-element innermost
-    /// segment when width > 1 (the caller guarantees a static, width-divisible
-    /// innermost extent), distributed across the CTA.
+    /// Emits body once per element of out, distributed across the CTA. With
+    /// width > 1 it runs once per innermost segment of width elements. The
+    /// caller guarantees a static innermost extent divisible by width.
     ///
-    /// sync=false skips the trailing barrier, for pipelined prefetch copies that
-    /// get synced by their iteration's closing barrier instead.
+    /// sync=false skips the trailing barrier. Pipelined prefetch copies use
+    /// it, since their iteration's closing barrier syncs them.
     pub(in crate::codegen) fn distribute(
         &mut self,
         block: &Block<'c>,
@@ -234,11 +231,10 @@ impl<'c> Codegen<'c> {
             idx[rank - 1] = self.muli(&body_block, idx[rank - 1], w)?;
         }
 
-        // A masked output writes only the in-bounds elements: the whole body
-        // runs under an scf.if guarding offset + local index < extent. Callers
-        // scalarize masked writes, so the guard is exact per element. The
-        // trailing barrier stays outside it, being CTA-uniform where the guard
-        // is not.
+        // A masked output writes only in-bounds elements, so the body runs
+        // under an scf.if. Callers scalarize masked writes, so the guard is
+        // exact per element. The trailing barrier stays outside the guard,
+        // since the guard is not CTA-uniform.
         if let Some(pred) = self.bounds_pred(&body_block, &out.mask, &idx)? {
             let then = Block::new(&[]);
             body(self, &then, &idx)?;
@@ -265,12 +261,12 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Vector width for an elementwise op over these buffers: 4 when every
-    /// buffer has f32 elements, provably 16B-aligned rows, and a static
-    /// innermost extent divisible by 4; otherwise 1 (scalar).
+    /// Vector width for an elementwise op over these buffers. It is 4 when
+    /// every buffer has f32 elements, provably 16B-aligned rows, and a static
+    /// innermost extent divisible by 4. Otherwise it is 1.
     pub(in crate::codegen) fn elementwise_width(&self, mvs: &[&MemVal<'c>]) -> i64 {
-        // A masked buffer is scalarized so the per-element store guard is
-        // exact (a partial vector could straddle the bounds).
+        // A masked buffer is scalarized, since a vector could straddle the
+        // bounds.
         if mvs.iter().any(|m| m.is_masked()) {
             return 1;
         }

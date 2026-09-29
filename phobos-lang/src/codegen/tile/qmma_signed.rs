@@ -1,16 +1,14 @@
-// IQ2_XXS on the integer tensor cores, staged through shared memory.
+// The IQ2 and IQ3 formats on the integer tensor cores, with the decoded
+// weight staged through shared memory.
 //
-// A macro, because the shape generalises to any format that decodes to
-// `scale * magnitude * sign` with both planes already i8 -- the weight is then
-// an exact i8, -43..43 here, and the contraction needs no correction term, the
-// same property that lets `iq1s_qmma.rs` fold its delta into its table.
+// One macro covers every format that decodes to `scale * magnitude * sign`
+// with both planes already i8. The weight is then an exact i8, and the
+// contraction needs no correction term.
 //
-// IQ2_S and IQ2_XS carry two scales a 32-element block, a nibble low for
-// lanes 0 and 1 and high for 2 and 3, rather than the one scale the macro's
-// structure otherwise assumes; getting that wrong is a silent correctness
-// bug, not just a slower kernel. `split` (below) runs each k step's two
-// `mma` halves as independent accumulators so each takes its own scale, at
-// the cost of doubling the epilogue.
+// IQ2_S and IQ2_XS carry two scales per 32-element block: the low nibble for
+// lanes 0 and 1, the high one for lanes 2 and 3. Using one scale for them is
+// a silent correctness bug. With `split`, each k step's two `mma` halves get
+// their own accumulator and scale, which doubles the epilogue.
 
 use super::iq2s::{IQ2S_BLOCK_BYTES, IQ2S_LANE};
 use super::iq3s::{IQ3S_BLOCK_BYTES, IQ3S_LANE};
@@ -19,9 +17,8 @@ use super::iq2xs::{IQ2XS_BLOCK_BYTES, IQ2XS_LANE};
 use super::iq2xxs::{IQ2XXS_BLOCK_BYTES, IQ2XXS_LANE};
 use super::*;
 
-/// The lane's eight magnitudes: one eight-wide grid entry, or two four-wide
-/// ones joined. IQ2's grid is a `u64` a lane and IQ3's a pair of `u32`, which
-/// is the only thing that differs between them here.
+/// The lane's eight magnitudes: one eight-wide grid entry for IQ2, or two
+/// four-wide ones joined for IQ3.
 macro_rules! qmma_grid {
     ($self:ident, $kb:ident, $dec:ident, $g:ident) => {
         $dec.$g
@@ -37,14 +34,13 @@ macro_rules! signed_qmma {
      $bytes:ident, $lane_w:ident, $scale:ident, $split:expr, $($grid_f:ident),+) => {
         impl<'c> Codegen<'c> {
             /// out[i, j] = sum_b (sum_{k in group b} a[i, k] * w[j, k]) with
-            /// `w` decoded from the format rather than read: the batched
-            /// contraction, both table lookups and both scales as one
-            /// operation, with the decoded weight staged through shared
-            /// memory so the CTA decodes a column once rather than once a
-            /// warp.
+            /// `w` decoded from the format. The contraction, both table
+            /// lookups and both scales are one operation. The decoded weight
+            /// is staged through shared memory, so the CTA decodes each column
+            /// once.
             ///
-            /// Needs one patch a warp, for the reason
-            /// [`Codegen::iq1s_qmma_staged_into`] gives.
+            /// Needs one patch per warp, as
+            /// [`Codegen::iq1s_qmma_staged_into`] does.
             #[allow(clippy::too_many_arguments)]
             pub(in crate::codegen) fn $fn(
                 &mut self,
@@ -205,10 +201,9 @@ macro_rules! signed_qmma {
                 let eight = self.const_index(&kb, $lane_w)?;
                 let four_ib = self.muli(&kb, ib, four)?;
 
-                // Stage the block, one format lane a thread a turn. The lane
-                // helper maps a lane index to the geometry and a group's four
-                // lanes are `4 * ib + l`, so the same helper the matvec uses
-                // serves here.
+                // Stage the block, one format lane per thread per turn. A
+                // group's four lanes are `4 * ib + l`, so the matvec's lane
+                // helper gives their geometry.
                 for entry in &mine {
                     let j = self.divui(&kb, *entry, four)?;
                     let l = self.remui(&kb, *entry, four)?;
@@ -216,9 +211,7 @@ macro_rules! signed_qmma {
                     let geom = self.$lane_fn(&kb, fmt_lane)?;
                     let at = self.raw_block_at(&kb, j, blk, blk_bytes)?;
                     let dec = self.$block_fn(&kb, &geom, qb, d, &tables, &at)?;
-                    // A magnitude times its sign is the weight, and both are
-                    // already i8, which is why this family reaches the tensor
-                    // cores without a correction term.
+                    // The weight is magnitude times sign, both already i8.
                     let mag = qmma_grid!(self, kb, dec, $($grid_f),+);
                     let v = self.push(&kb, arith::muli(mag, dec.signs_v, self.loc))?;
                     let dst = self.muli(&kb, l, eight)?;
@@ -254,16 +247,14 @@ macro_rules! signed_qmma {
                 let empty = self.vec_broadcast(&kb, zero_i, acc_t)?;
                 let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
 
-                // The scale belongs to an output column, which is not the
-                // column whose fragment this lane staged, so it decodes that
-                // column's block header for itself. Its grid and sign loads go
-                // unread and ptxas drops them: the emitted body is the same
-                // size either way.
+                // The scale belongs to an output column, not the column whose
+                // fragment this lane staged, so the lane decodes that column's
+                // block itself. Its unused grid and sign loads are dead code
+                // that ptxas drops.
                 //
-                // `split` is whether the format carries one scale a 32-element
-                // block or one per sixteen. The two land `halves` apart, and a
-                // k step is already two mma operations divided on exactly that
-                // boundary, so a split format keeps a scale a half.
+                // `split` means the format has one scale per 16 elements
+                // rather than per 32. A k step is two mma operations split on
+                // that boundary, so a split format keeps one scale per half.
                 let split = $split;
                 let per_col = if split { halves } else { 1 };
                 let mut w_scales = Vec::with_capacity(rn as usize * 2 * per_col as usize);
@@ -272,9 +263,8 @@ macro_rules! signed_qmma {
                         let off = self.const_index(&kb, dj)?;
                         let col = self.addi(&kb, *out_col, off)?;
                         for h in 0..per_col {
-                            // Lane 0 of the block for the low scale and lane 2
-                            // for the high one: the same `l < 2` the format's
-                            // own decode selects on.
+                            // Lane 0 gives the low scale and lane 2 the high
+                            // one, matching the decode's `l < 2` select.
                             let l = self.const_index(&kb, 2 * h)?;
                             let fmt_lane = self.addi(&kb, four_ib, l)?;
                             let geom = self.$lane_fn(&kb, fmt_lane)?;
@@ -289,10 +279,10 @@ macro_rules! signed_qmma {
                 for r in 0..rm as usize {
                     let sa = self.push(&kb, memref::load(asc.mem, &[a_rows[r], b], self.loc))?;
                     for c in 0..rn as usize {
-                        // One accumulator a half where the scale changes on
-                        // that boundary, one for the pair where it does not:
-                        // chaining the two mma operations is only sound when
-                        // they share a scale.
+                        // One accumulator per half when the scale changes
+                        // there, one for the pair otherwise. Chaining the two
+                        // mma operations is only sound when they share a
+                        // scale.
                         let mut sums = Vec::with_capacity(per_col as usize);
                         if split {
                             for h in 0..halves as usize {
@@ -408,9 +398,9 @@ signed_qmma!(
     true,
     grid_v
 );
-// IQ3's grid entry is four bytes, so a lane joins two of them; its scale is one
-// a 32-element group in IQ3_XXS and one a 64 in IQ3_S, and either is constant
-// across a k step, which is all the unsplit arm needs.
+// IQ3's grid entry is four bytes, so a lane joins two of them. IQ3_XXS has
+// one scale per 32 elements and IQ3_S one per 64. Either is constant across a
+// k step, which is all the unsplit arm needs.
 signed_qmma!(
     iq3xxs_qmma_staged_into,
     "iq3xxs_qmma_t",

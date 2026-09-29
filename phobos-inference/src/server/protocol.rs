@@ -43,8 +43,8 @@ pub struct Defaults {
     pub sample: SampleConfig,
     pub seed: u64,
     pub max_tokens: usize,
-    /// Whether to keep a finished request's session and reuse as much of it
-    /// as the next request's prompt agrees with.
+    /// Whether to keep a finished request's session and reuse the prefix the
+    /// next prompt shares with it.
     pub prefix_cache: bool,
 }
 
@@ -191,8 +191,8 @@ pub(crate) fn response_id(prefix: &str) -> String {
     format!("{prefix}-{millis}")
 }
 
-/// Whether the caller wants a reasoning pass. The template treats an undefined
-/// `enable_thinking` as off, so this defaults the same way.
+/// Whether the caller wants a reasoning pass. Off unless asked for, matching
+/// the template's handling of an undefined `enable_thinking`.
 pub(crate) fn thinking_enabled(req: &ChatCompletionRequest) -> bool {
     if let Some(enabled) = req
         .chat_template_kwargs
@@ -208,7 +208,7 @@ pub(crate) fn thinking_enabled(req: &ChatCompletionRequest) -> bool {
     )
 }
 
-/// OpenAI clients accept only a fixed set here, so a worker-side stop is a stop.
+/// Maps a worker stop reason onto the fixed set OpenAI clients accept.
 pub(crate) fn normalize_finish_reason(reason: &str) -> &str {
     match reason {
         "length" => "length",

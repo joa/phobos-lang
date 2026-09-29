@@ -27,8 +27,8 @@ fn atomic_add_rejects_a_float_tensor() {
 }
 
 /// The two-phase barrier: a generation read, an arrival, a reset, a release
-/// and a spin, bracketed by the CTA barriers that carry the release to the
-/// rest of the block. See codegen/sync.rs.
+/// and a spin, between CTA barriers that pass the release to the rest of the
+/// block. See codegen/sync.rs.
 #[test]
 fn grid_barrier_lowers_to_arrive_and_spin() {
     let mlir = emit_mlir(
@@ -53,10 +53,10 @@ fn grid_barrier_lowers_to_arrive_and_spin() {
     assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5);
 }
 
-/// The same barrier as a `[2, 1]` column, which is how a host whose launch
-/// ABI passes rank-2 descriptors spells it. The slot indexes the leading
-/// dimension and the atomic takes a second subscript, which the verifier
-/// checks against the memref rank.
+/// The same barrier as a `[2, 1]` column, for a host whose launch ABI passes
+/// rank-2 descriptors. The slot indexes the leading dimension, and the
+/// atomic takes a second subscript that the verifier checks against the
+/// memref rank.
 #[test]
 fn grid_barrier_takes_a_rank_two_column() {
     let mlir = emit_mlir(
@@ -83,8 +83,8 @@ fn grid_barrier_rejects_a_non_tensor() {
     assert!(err.is_err(), "a tile barrier should not compile");
 }
 
-/// Two elementwise sweeps over one tile at one width read and write the
-/// same elements from the same thread, so nothing separates them.
+/// Two elementwise sweeps over one tile at one width touch the same
+/// elements from the same thread, so they need no barrier between them.
 #[test]
 fn same_thread_sweeps_need_no_barrier_between_them() {
     let mlir = emit_mlir(
@@ -96,8 +96,8 @@ fn same_thread_sweeps_need_no_barrier_between_them() {
             C[0 :+ 8, 0 :+ 8] = t
         }",
     );
-    // The staging copy moves 16 bytes a lane and the f32 sweeps four
-    // elements, the same mapping; the store reads it the same way.
+    // The staging copy moves 16 bytes per lane and the f32 sweeps four
+    // elements, the same mapping. The store reads it the same way too.
     assert_eq!(mlir.matches("gpu.barrier").count(), 0, "{mlir}");
 }
 
@@ -123,8 +123,8 @@ fn a_reduction_after_a_sweep_keeps_the_barrier() {
     );
 }
 
-/// A sweep a loop carries to its next iteration is read by the same
-/// threads again, so the loop runs with no barrier at all.
+/// A sweep carried to the next iteration is read by the same threads again,
+/// so the loop needs no barrier at all.
 #[test]
 fn a_loop_carried_sweep_needs_no_barrier() {
     let mlir = emit_mlir(
@@ -140,8 +140,8 @@ fn a_loop_carried_sweep_needs_no_barrier() {
     assert_eq!(mlir.matches("gpu.barrier").count(), 0, "{mlir}");
 }
 
-/// A loop whose body reads its tile at another width than it wrote it has
-/// to keep a barrier for what one iteration hands the next.
+/// A loop body that reads its tile with a different mapping than it wrote
+/// it must keep a barrier between iterations.
 #[test]
 fn a_loop_carried_hazard_keeps_a_barrier_in_the_body() {
     let mlir = emit_mlir(
@@ -161,9 +161,9 @@ fn a_loop_carried_hazard_keeps_a_barrier_in_the_body() {
     assert!(barriers >= 1, "{mlir}");
 }
 
-/// A per-thread element read of a tile another thread's sweep wrote needs
-/// the sweep's barrier, and a per-thread store has no barrier site of its
-/// own, so the pass keeps the barrier.
+/// A per-thread element read of a tile that another thread's sweep wrote
+/// needs the sweep's barrier. The per-thread store has no barrier of its
+/// own, so the pass keeps the sweep's.
 #[test]
 fn an_element_read_after_a_sweep_keeps_the_barrier() {
     let mlir = emit_mlir(
@@ -183,10 +183,10 @@ fn an_element_read_after_a_sweep_keeps_the_barrier() {
     );
 }
 
-/// A hazard that only crosses the iteration boundary: the body's last op
-/// writes the tile at one width and its first op reads it at another. The
-/// write's own trailing barrier is the only site between them, and the
-/// walk sees the conflict only on its second pass over the body.
+/// A hazard that only crosses the iteration boundary. The body's last op
+/// writes the tile with one mapping and its first op reads it with another.
+/// The write's own trailing barrier is the only site between them, and the
+/// walk only sees the conflict on its second pass over the body.
 #[test]
 fn a_hazard_across_the_iteration_boundary_keeps_the_last_ops_barrier() {
     let mlir = emit_mlir(
@@ -201,9 +201,9 @@ fn a_hazard_across_the_iteration_boundary_keeps_the_last_ops_barrier() {
             C[0 :+ 8, 0 :+ 8] = u
         }",
     );
-    // From the body's first op on: one barrier after the read for the write
-    // that follows it in the same iteration, one after the write for the
-    // read that opens the next, and none for the store after the loop.
+    // From the body's first op on, expect two barriers. One after the read,
+    // for the write later in the same iteration. One after the write, for
+    // the read that opens the next. None for the store after the loop.
     let read = mlir.find("ex2.approx").expect("the exp sweep");
     let barriers: Vec<usize> = mlir
         .match_indices("gpu.barrier")

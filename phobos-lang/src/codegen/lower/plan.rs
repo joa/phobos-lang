@@ -7,16 +7,16 @@ use crate::ir::{Ir, OpId, OpKind, ValueId};
 pub(crate) enum Event {
     OpBegin(OpId),
     OpEnd(OpId),
-    /// A buffer handed out: its running index, the pool's name for it, and
-    /// its size, 16-byte aligned.
+    /// A buffer handed out, with the pool's name for it and its size,
+    /// 16-byte aligned.
     Alloc { name: String, bytes: i64 },
-    /// The pool's name returned; the allocation it ends is the latest with
-    /// that name, since the pool reuses names last-in first-out.
+    /// A buffer returned. It ends the latest allocation with that name,
+    /// since the pool reuses names last-in first-out.
     Release { name: String },
     /// A CTA barrier.
     Barrier,
-    /// An elementwise sweep of a tile of `shape`, `width` elements to the
-    /// thread: what `distribute` runs, and the mapping its accesses share.
+    /// An elementwise sweep of a tile of `shape`, `width` elements per
+    /// thread, as `distribute` runs it. All its accesses share this mapping.
     Sweep { shape: Vec<i64>, width: i64 },
 }
 
@@ -24,8 +24,8 @@ pub(crate) enum Event {
 #[derive(Debug, Default)]
 pub(crate) struct Trace {
     pub(crate) events: Vec<Event>,
-    /// Which allocations each buffer-valued graph value ended up in, by the
-    /// index of their `Alloc` events: one per instantiation of its body.
+    /// The `Alloc` event indices of each buffer-valued graph value, one per
+    /// instantiation of its body.
     assigned: HashMap<ValueId, Vec<usize>>,
     /// The latest `Alloc` event index per pool name.
     latest: HashMap<String, usize>,
@@ -72,8 +72,8 @@ impl Trace {
         });
     }
 
-    /// Records that `value` is the buffer the pool most recently named
-    /// `name`: what the emitter returned for the op that defines it.
+    /// Records that `value` lives in the buffer the pool most recently named
+    /// `name`.
     pub(crate) fn assign(&mut self, value: ValueId, name: &str) {
         if let Some(&at) = self.latest.get(name) {
             let allocs = self.assigned.entry(value).or_default();
@@ -84,22 +84,20 @@ impl Trace {
     }
 }
 
-/// Where each allocation of the emission goes, in the order the emission
+/// The shared-memory offset of each allocation, in the order the emission
 /// makes them.
 ///
-/// The emitters allocate scratch the graph never sees: dot staging, the
-/// quantized paths' tiles, the register matmul's staging pairs and slab.
-/// A first emission into a throwaway module records every allocation and
-/// release tagged with the op being emitted, and the graph adds what the
-/// trace cannot say, that a buffer which is a value lives until the last
-/// use of anything derived from it and through every loop that reads it
-/// without defining it. The second emission hands out the offsets this
-/// computes, in the order the first recorded them.
+/// The emitters allocate scratch the graph never sees, such as dot staging
+/// or the matmul slab. So a throwaway first emission records every
+/// allocation and release, tagged with the op being emitted. The graph adds
+/// what the trace cannot know: a buffer that is a value lives until the
+/// last use of anything derived from it, and through every loop that reads
+/// it without defining it. The second emission hands out these offsets in
+/// recording order.
 ///
-/// Reuse rests on every tile op ending in a CTA barrier, so a buffer whose
-/// last reader is a tile op can be overwritten by the next. A per-thread
-/// load or store on a tile does not barrier, and this planner does not
-/// account for it; [`super::membar`] is where that is handled.
+/// Reuse relies on every tile op ending in a CTA barrier, so the next op may
+/// overwrite a buffer whose last reader was a tile op. Per-thread loads and
+/// stores on a tile do not barrier. [`super::membar`] handles those.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Plan {
     pub(crate) offsets: Vec<i64>,
@@ -131,9 +129,9 @@ impl Plan {
         let events = &trace.events;
         let end_of = events.len();
 
-        // Every moment each op finished, ascending. A body a loop instantiates
-        // more than once emits its ops more than once, and each instance's
-        // buffers live within that instance.
+        // Every event index where each op finished, ascending. A loop body
+        // emitted more than once has several, and each instance's buffers
+        // live within that instance.
         let mut op_ends: HashMap<OpId, Vec<usize>> = HashMap::new();
         for (i, e) in events.iter().enumerate() {
             if let Event::OpEnd(op) = e {
@@ -146,8 +144,8 @@ impl Plan {
             ends.get(k).copied()
         };
 
-        // Every allocation, first as scratch: alive until its release, or
-        // to the end when never released.
+        // Start by treating every allocation as scratch: alive until its
+        // release, or to the end if never released.
         let mut intervals: Vec<Interval> = Vec::new();
         let mut open: HashMap<String, usize> = HashMap::new();
         for (i, e) in events.iter().enumerate() {
@@ -171,7 +169,7 @@ impl Plan {
         }
 
         // A buffer that is a value lives by the graph instead: to the last
-        // op that reads it or a view of it, through every loop that reads
+        // op reading it or a view of it, and through every loop that reads
         // it without defining it.
         let by_alloc: HashMap<usize, usize> = intervals
             .iter()
@@ -207,8 +205,8 @@ impl Plan {
             intervals[k].end = end;
         }
 
-        // First fit by size, largest first; ties by start so the order is
-        // total and the plan deterministic.
+        // First fit, largest first. Ties break by start so the plan is
+        // deterministic.
         let mut order: Vec<usize> = (0..intervals.len()).collect();
         order.sort_by_key(|&k| (std::cmp::Reverse(intervals[k].bytes), intervals[k].start, k));
         let mut placed: Vec<(usize, i64, i64)> = Vec::new(); // (interval, offset, end offset)
@@ -308,7 +306,7 @@ mod tests {
         t.events.push(Event::OpEnd(ops[3]));
 
         let plan = Plan::compute(&ir, &t);
-        // a dies at the transpose; c takes its bytes; r lives to the copy.
+        // a dies at the transpose and c takes its bytes. r lives to the copy.
         assert_eq!(plan.offsets[0], plan.offsets[2]);
         assert_ne!(plan.offsets[0], plan.offsets[1]);
         assert_eq!(plan.peak, 128);

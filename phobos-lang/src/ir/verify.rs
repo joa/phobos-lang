@@ -5,11 +5,12 @@ use super::{
     ValueId,
 };
 
-/// Checks every structural invariant of the arena, the use lists,
-/// dominance, terminators and each kind's typing rule. Runs after the
-/// build, after every pass under test, and under `debug_assertions` in the
-/// pipeline. Collects every violation rather than stopping at the first,
-/// since a pass that broke one thing usually broke it in several places.
+/// Checks every structural invariant: the arena, the use lists, dominance,
+/// terminators, and each kind's typing rule.
+///
+/// Runs after the build, after every pass under test, and under
+/// `debug_assertions` in the pipeline. Collects every violation rather than
+/// stopping at the first, since a broken pass usually breaks several places.
 pub fn verify(ir: &Ir) -> Result<()> {
     let mut v = Verifier {
         ir,
@@ -218,7 +219,6 @@ impl Verifier<'_> {
         }
     }
 
-    /// A block's terminator must be `kind` with operands of `types`.
     /// Operand `i` as the gemm accumulator it must be.
     fn gemm_acc(&mut self, op: OpId, i: usize) -> Option<GemmType> {
         match self.ir.ty(*self.ir.operands(op).get(i)?) {
@@ -230,8 +230,8 @@ impl Verifier<'_> {
         }
     }
 
-    /// Operand `i` as a `shape` tile the register matmul's paths may index
-    /// with no bounds guard: an unmasked tensor slice, or, where the loop
+    /// Operand `i` as a `shape` tile the register matmul may index with no
+    /// bounds guard. That is an unmasked tensor slice or, where the loop
     /// stages it anyway, the shared tile a masked one was materialized into.
     fn want_gemm_slice(&mut self, op: OpId, i: usize, shape: &[i64], shared_ok: bool) {
         let Some(&v) = self.ir.operands(op).get(i) else { return };
@@ -839,8 +839,8 @@ impl Verifier<'_> {
     }
 
     /// An intrinsic's own operands, before any destination. Each intrinsic
-    /// checks its own shapes when it is emitted; here only what every one
-    /// shares: no fragments, and `rms_norm_q_t`'s `eps` is a scalar.
+    /// checks its own shapes when it is emitted. This checks only the shared
+    /// rules: no fragments, and `rms_norm_q_t`'s `eps` is a scalar.
     fn intrinsic_operands(&mut self, op: OpId, i: Intrinsic, n: usize) {
         for k in 0..n {
             let v = self.ir.operand(op, k);

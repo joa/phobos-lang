@@ -1,7 +1,8 @@
-// IQ1_M matvec: same raw-byte decode as iq1s.rs. IQ1_M shares IQ1_S's
-// four-lane grid lookup but each group of 32 carries its own pair of 3-bit
-// scales instead of one shared scale, and has no `f16` of its own;
-// `quant/iq1_m.rs::raw_scales` reassembles the equivalent word host-side so
+// IQ1_M matvec, with the same raw-byte decode as iq1s.rs.
+//
+// IQ1_M shares IQ1_S's four-lane grid lookup, but each group of 32 carries
+// its own pair of 3-bit scales, and the block has no `f16` of its own.
+// `quant/iq1_m.rs::raw_scales` rebuilds the equivalent word on the host, so
 // `d` here is still a plain per-block read.
 
 use super::qgemm::IQ1_GRID4_LEN;
@@ -21,9 +22,11 @@ const QS_OFF: usize = 0;
 const QH_OFF: usize = 32;
 const SCALES_OFF: usize = 48;
 
-/// Byte offsets for lane `is` (ib = is/4, l = is%4, matching
-/// quant/iq1_m.rs::dequantize). Lanes 0/2 read the group's first `qh` byte,
-/// lanes 1/3 the second; index bits at bit 0 or 4, sign bit 8 higher.
+/// Byte offsets and bit divisors for lane `is`, with `ib = is / 4` and
+/// `l = is % 4` as in `quant/iq1_m.rs::dequantize`.
+///
+/// Lanes 0 and 1 read the group's first `qh` byte, lanes 2 and 3 the
+/// second. Even lanes take the low nibble and odd lanes the high one.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let ib = is / 4;
     let l = is % 4;
@@ -37,10 +40,11 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     (qs4_off, qh_off, idx_div, bit_div)
 }
 
-/// Scale-word offsets for group `ib` and the divisor to reach lane `is`'s
-/// 3-bit scale: two groups share one 16-bit word (low/high six bits each),
-/// and within a group the first two lanes take the low 3 bits, last two the
-/// high 3.
+/// Scale-word offsets for lane `is`'s group, and the divisor that reaches
+/// its 3-bit scale.
+///
+/// Two groups share one 16-bit word, six bits each. Within a group, the
+/// first two lanes take the low 3 bits and the last two the high 3.
 fn dl_geometry(is: usize) -> (usize, usize, usize) {
     let ib = is / 4;
     let l = is % 4;
@@ -99,18 +103,18 @@ kernel iq1m_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// Output tile for the dp4a variant; a warp takes two columns.
+/// Output tile for the dp4a variant. A warp takes eight columns at the
+/// default 256-thread CTA.
 pub(crate) const IQ1M_I8_TN: usize = 64;
 
 /// The tile for an `n` that 64 does not divide. A warp then takes two
-/// columns rather than eight, which is slower but still well ahead of the
-/// float path it would otherwise fall back to.
+/// columns rather than eight, which beats the float fallback.
 pub(crate) const IQ1M_I8_NARROW_TN: usize = 16;
 
 /// [`iq1m_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
 pub(crate) fn iq1m_qdot_i8_matvec_src(tn: usize) -> String {
     let cta = qdot_i8_cta(tn);
-    // Four CTAs of 256 resident: 64 registers a thread.
+    // Four resident CTAs of 256 threads, so 64 registers per thread.
     let min_blocks = 1024 / cta;
     format!(
         "@launch({cta}, {min_blocks})
@@ -129,10 +133,9 @@ kernel iq1m_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq1m_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq1m_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which this
-/// mirrors. `@aligned(N = TN)` is required for the same reason: `iq1m_qdot_t`
-/// demands its `qb`/`d` slices provably in bounds.
+/// [`iq1m_matvec_src`] for `m == 1`, as one `iq1m_qdot_t` call; mirrors
+/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `iq1m_qdot_t` needs its `qb` and `d` slices provably in bounds.
 pub(crate) fn iq1m_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -149,9 +152,8 @@ kernel iq1m_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq1m_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`iq1m_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
+/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
 pub(crate) fn iq1m_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..LANES {
@@ -180,9 +182,8 @@ kernel iq1m_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq1m_dequant_src`]'s decode as a single `iq1m_qdecode_t` call; see
-/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ1_M, whose
-/// decode shares IQ1_S's grid outright.
+/// [`iq1m_dequant_src`]'s decode as one `iq1m_qdecode_t` call. Mirrors
+/// `iq1s_qdecode_src` in `iq1s.rs`, and uses the same grid.
 pub(crate) fn iq1m_qdecode_src(tn: usize) -> String {
     format!(
         "@launch(256)

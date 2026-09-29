@@ -1,30 +1,23 @@
 #!/usr/bin/env python3
 """Plot what scripts/bench.py measured: tokens per second, higher is better.
 
-Reads the CSVs that `bench.py --csv` writes, or the JSONs that `bench.py --json`
-writes, and draws one panel per test with a bar per engine and model. The bars
-carry the same figure the table prints, a mean over rounds of each round's mean,
-with the standard error over rounds as the whisker.
+Reads the CSVs that `bench.py --csv` writes, or the JSONs from `bench.py
+--json`, and draws one panel per test with a bar per engine and model. Each bar
+is the mean over rounds of each round's mean, the same figure the table prints.
+The whisker is the standard error over rounds.
 
-One panel per test rather than one axis for everything: a prompt pass and a
-decode step are both tokens per second and are an order of magnitude apart, so
-sharing an axis would flatten the decode rows into the baseline. The panels are
-laid out a row per kind, prompt above decode, and a row shares one scale, so
-pp128 against pp512 is a fair comparison of bar lengths while pp against tg is
-not. Every bar is labelled with its own number regardless.
+Prompt and decode rates differ by an order of magnitude, so each test gets its
+own panel. Panels are laid out one row per kind, prompt above decode, and a row
+shares one scale. Bar lengths compare within a row, not across rows. Every bar
+is labelled with its own number.
 
 Several files draw as several blocks, one under the other, each with its own
-rows and its own scale. A file is one invocation of bench.py, which is one visit
-to the card with the engines interleaved against each other, so bars are a fair
-comparison within a block and not across two. The scale is per block for the
-same reason it is per row: a 27B that only just fits generates two orders of
-magnitude slower than a model that does, and on the small models' scale it would
-draw as a sliver.
+rows and scale. A file is one bench.py run with the engines interleaved, so
+bars compare within a block but not across blocks.
 
-Given the JSON it plots only the rounds bench.py found the card to itself
-between, which is the same number its "t/s uncontended" column reports, and says
-so under the title. The CSV carries no such record, so everything in it is
-plotted. --all-rounds turns the filter off.
+From a JSON it plots only the rounds bench.py found uncontended, matching its
+"t/s uncontended" column, and says so under the title. A CSV has no such
+record, so all of it is plotted. --all-rounds turns the filter off.
 
 Usage:
     python scripts/bench.py --json bench.json
@@ -50,9 +43,8 @@ import matplotlib.pyplot as plt
 # Fixed, so the element ids in an SVG are stable across runs.
 matplotlib.rcParams["svg.hashsalt"] = "phobos-bench"
 
-# The chart's colors, one theme per mode, both validated as a categorical set
-# against their own surface. Series are assigned in a fixed order, so an engine
-# keeps its color whatever else is in the file.
+# One theme per mode, each validated as a categorical set against its own
+# surface. Series colors are assigned in a fixed order.
 THEMES = {
     "light": {
         "surface": "#fcfcfb",
@@ -75,8 +67,8 @@ THEMES = {
 }
 
 
-# What comes off a model name to leave the label. Only these: a version is a
-# dot too, and Path.stem would take Qwen3.8-27B-UD-IQ1_M down to Qwen3.
+# Extensions stripped from a model name. Path.stem would not do, since it
+# turns Qwen3.8-27B-UD-IQ1_M into Qwen3.
 MODEL_SUFFIXES = (".gguf", ".onnx")
 
 
@@ -87,8 +79,7 @@ MODEL_SUFFIXES = (".gguf", ".onnx")
 def model_name(value):
     """The model's name without its directory or its format's extension.
 
-    bench.py writes the name already, but a CSV assembled by hand can carry the
-    path the run named."""
+    bench.py writes the bare name, but a hand-made CSV may carry a path."""
     name = Path(value).name
     for suffix in MODEL_SUFFIXES:
         if name.lower().endswith(suffix):
@@ -97,10 +88,10 @@ def model_name(value):
 
 
 def load(path):
-    """The samples and whatever the file knows beyond them.
+    """The samples and the file's metadata.
 
-    Both of bench.py's outputs carry the same per-repetition rows; the JSON adds
-    the card, the commit and which rounds were uncontended."""
+    CSV and JSON carry the same per-repetition rows. The JSON adds the card,
+    the commit and which rounds were uncontended."""
     try:
         text = Path(path).read_text(encoding="utf-8-sig")
     except OSError as err:
@@ -117,8 +108,7 @@ def load(path):
     if not rows:
         sys.exit(f"no samples in {path}")
 
-    # phobos-kbench writes a CSV too, of GFLOP/s against a theoretical peak,
-    # which is a different measurement and not what this draws.
+    # Rejects phobos-kbench's CSV, which is a different measurement.
     wanted = {"round", "engine", "backend", "model", "test", "rate"}
     missing = wanted - set(rows[0])
     if missing:
@@ -145,10 +135,10 @@ def load(path):
 
 
 def keep_uncontended(samples, meta, all_rounds, name):
-    """The rounds bench.py had the card to itself around, and how many went.
+    """The uncontended rounds, their count, and how many were dropped.
 
-    A JSON records which rounds those were; a CSV does not, and neither does a
-    run where the card was busy throughout, so both plot whole."""
+    Keeps everything for a CSV, which has no such record, and for a run where
+    every round was contended."""
     rounds = {s["round"] for s in samples}
     clean = meta.get("clean")
     if not clean or all_rounds:
@@ -193,9 +183,8 @@ def engine_key(engine):
 def summarize(samples):
     """Round means, then the mean and standard error over rounds.
 
-    The same two steps bench.py's table takes. Averaging every repetition
-    together instead would treat a round as several independent samples, and a
-    round is one visit to the card at one set of clocks."""
+    The same two steps bench.py's table takes. A round is one sample, not
+    one per repetition, since its repetitions share the same clocks."""
     per_round = {}
     for s in samples:
         key = (s["engine"], s["model"], s["test"])
@@ -214,8 +203,8 @@ def summarize(samples):
 
 
 def fmt_rate(rate):
-    """A rate at three significant-ish figures. The label sits inside the axis,
-    so every character it does not need is axis the bars get to keep."""
+    """A rate at about three significant figures, kept short to leave room
+    for the bars."""
     if rate >= 1000:
         return f"{rate:,.0f}"
     return f"{rate:.1f}"
@@ -227,13 +216,11 @@ def panel_inches(models, engines):
 
 
 def draw_panel(ax, test, models, engines, stats, theme, colors, base, scale_max):
-    """One test: a bar per engine within a group per model, laid out along y so
-    the model names read horizontally.
+    """One test: a group of bars per model, one bar per engine, laid out
+    along y so the model names read horizontally.
 
-    scale_max is the widest bar anywhere in this panel's row, since the row
-    shares one axis."""
-    # Capped, so a file with one engine draws a bar of the same weight as one
-    # with three rather than a block filling its group.
+    scale_max is the widest bar in this panel's row, which shares one axis."""
+    # Capped, so a single engine does not draw one fat bar filling its group.
     bar_h = min(0.6 / len(engines), 0.3)
     group_h = bar_h * len(engines)
     pad = scale_max * 0.02
@@ -247,9 +234,8 @@ def draw_panel(ax, test, models, engines, stats, theme, colors, base, scale_max)
             if not got:
                 continue
             mean, err, _ = got
-            # The y axis is inverted below, so subtracting here puts the first
-            # engine at the top of its group and keeps the bars in the order the
-            # legend lists them.
+            # The y axis is inverted below, so the first engine sits at the top
+            # of its group, in legend order.
             y = gi - group_h / 2 + bar_h * (ei + 0.5)
             ax.barh(
                 y,
@@ -271,9 +257,7 @@ def draw_panel(ax, test, models, engines, stats, theme, colors, base, scale_max)
                     capthick=1.0,
                     zorder=3,
                 )
-            # The value on the bar, in ink rather than the series color: the two
-            # panels have different scales, so an unlabelled bar is only
-            # comparable within its own panel.
+            # Rows have different scales, so every bar carries its value.
             note = fmt_rate(mean)
             other = stats.get((base, model, test)) if engine != base else None
             if other and other[0]:
@@ -318,11 +302,10 @@ def draw_panel(ax, test, models, engines, stats, theme, colors, base, scale_max)
 def fit_labels(fig, ax, labels):
     """Widen the axis until every value label fits inside it.
 
-    The labels sit in data coordinates but are as wide as their glyphs, so the
-    room one needs depends on the scale it is measured under. Widening the axis
-    moves the label left as fast as it frees room to the right, hence solving for
-    the limit rather than padding by a guess: for a label starting at x with a
-    width that is some fraction f of the axis, x + f * limit <= limit."""
+    A label's start is in data coordinates but its width is in pixels, so
+    widening the axis shrinks the room each needs. Solves for the limit: a
+    label starting at x and taking a fraction f of the axis fits when
+    x + f * limit <= limit."""
     fig.canvas.draw()
     axis_pixels = ax.get_window_extent().width
     limit = ax.get_xlim()[1]
@@ -336,9 +319,8 @@ def fit_labels(fig, ax, labels):
 def widen_for_chrome(fig, chrome):
     """Grow the figure until the title, the subtitle and the footer line fit.
 
-    The panels set the width, and a tall narrow file (one test per kind, say)
-    can end up narrower than the sentence describing the card it ran on, which
-    would then run off the edge: none of the chrome wraps."""
+    The panels set the width, and a narrow figure can be shorter than its
+    subtitle. None of these lines wrap."""
     fig.canvas.draw()
     width_inches, height_inches = fig.get_size_inches()
     lines = [row if isinstance(row, tuple) else (row,) for row in chrome]
@@ -356,15 +338,15 @@ def plural(count, noun):
 def agreed(sources, field, fmt=str):
     """One rendering of a field per distinct value, in the order the files came.
 
-    Two files are two sessions, so the card and the commit are theirs to agree
-    on rather than the plot's to assume."""
+    Files can come from different sessions, so their card or commit may
+    differ."""
     seen = [fmt(s["meta"][field]) for s in sources if s["meta"].get(field)]
     return list(dict.fromkeys(seen))
 
 
 def subtitle(sources):
-    """What the numbers rest on, in one line: the card, the commit, how many
-    rounds each file carries, and whether any of them were thrown out."""
+    """One line of context: the card, the commit, the rounds per file, and
+    any contended rounds dropped."""
     bits = []
     for field, fmt, shape in (
         ("card", str, "{}"),
@@ -455,9 +437,8 @@ def main():
         )
     colors = dict(zip(engines, theme["series"]))
 
-    # A row per kind of test within a file, so prompt sits above decode and the
-    # panels of a row can share one scale. A file's rows stay together, and a
-    # row is only ever as tall as that file's models need.
+    # One row per file and kind of test, prompt above decode. A row's height
+    # follows that file's model count.
     plan = [
         (source, kind, tests)
         for source in sources
@@ -477,8 +458,7 @@ def main():
 
     panels = []
     for row, (source, kind, tests) in enumerate(plan):
-        # One scale for the row, taken from its widest bar, so a longer prompt
-        # reading faster than a shorter one is visible as a longer bar.
+        # One scale for the row, taken from its widest bar.
         stats = source["stats"]
         scale_max = max(
             (stats[k][0] for k in stats if test_kind(k[2]) == kind), default=1.0
@@ -494,13 +474,12 @@ def main():
                 base, scale_max,
             )
             if column:
-                # The models are the same in every panel of a row, so naming
-                # them once at the left is enough.
+                # Model names only on the row's first panel.
                 ax.set_yticklabels([])
             panels.append((ax, labels))
 
-    # The chrome is placed in inches off the edges, so a file with more models
-    # grows the panels and leaves the title and the legend where they were.
+    # Title, subtitle and legend are placed in inches from the edges, so they
+    # stay put as the panels grow.
     height_inches = fig.get_size_inches()[1]
     chrome = [
         fig.text(
@@ -524,14 +503,14 @@ def main():
             va="center",
         )
     )
-    # Identity is never color alone: the legend names every engine, and the
-    # backend rides along with it, since a CPU-served row is not a comparison.
+    # The legend names every engine with its backend, so a CPU-served row is
+    # visible as such.
     footer = 0.0
     if len(engines) > 1:
         footer = 0.42
         backends = {s["engine"]: s["backend"] for s in drawn}
-        # Gathered over every panel rather than the first: an engine missing
-        # from the first file still belongs in the legend.
+        # Gathered over every panel, since an engine may be missing from the
+        # first file.
         handles, labels = [], []
         for ax, _ in panels:
             for handle, label in zip(*ax.get_legend_handles_labels()):
@@ -562,8 +541,7 @@ def main():
             ha="right",
             va="center",
         )
-        # The legend sits left and the note right on one line, so together they
-        # set a width the same way a single run of text does.
+        # Legend and note share one line, so they count as one for the width.
         chrome.append((legend, note))
 
     widen_for_chrome(fig, chrome)
@@ -578,8 +556,8 @@ def main():
         plt.show()
         return
     for path in args.out:
-        # No creation date in the vector formats, so re-running on the same
-        # samples produces the same file rather than a diff.
+        # No creation date in vector formats, so the same samples give the
+        # same file.
         fig.savefig(
             path,
             dpi=args.dpi,

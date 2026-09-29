@@ -24,13 +24,12 @@ pub(crate) use shared::Shared;
 /// batched projection has.
 const FUSE_ALIGN: usize = 256;
 
-/// What a model's constants will occupy on the backend once every one of them
-/// is resident.
+/// What a model's constants occupy on the backend once all are resident.
 ///
-/// Entries are keyed the way the backend caches them, so a tied embedding and
-/// LM head count once. Only weights that actually go up belong here: a llama
-/// embedding table is read row by row on the host and never uploaded, so the
-/// walk that fills this skips it.
+/// Entries are keyed as the backend caches them, so a tied embedding and LM
+/// head count once. Only uploaded weights belong here. A llama embedding
+/// table is read row by row on the host, so the walk that fills this skips
+/// it.
 #[derive(Default)]
 pub(crate) struct Uploads {
     uploads: HashMap<String, Upload>,
@@ -38,12 +37,12 @@ pub(crate) struct Uploads {
 
 struct Upload {
     bytes: usize,
-    /// Held as f32 rather than left quantized: a heavily quantized file can
-    /// want several times its own size on the device.
+    /// Held as f32 instead of quantized. A heavily quantized file can need
+    /// several times its own size on the device.
     dense: bool,
-    /// Not resident: a set of experts the backend streams from the file's
-    /// bytes, holding whatever share of them it has room for. Counted in
-    /// [`Uploads::streamed_bytes`] and nowhere else.
+    /// Not resident: an expert set the backend streams from the file,
+    /// holding whatever share fits. Counted only in
+    /// [`Uploads::streamed_bytes`].
     streamed: bool,
 }
 
@@ -80,10 +79,10 @@ impl Uploads {
     }
 }
 
-/// A projection matrix, transposed at load into the `[in, out]` row-major layout
-/// [`Backend::matmul`] expects. GGUF stores linear weights the other way round:
-/// the ggml extents are `[in, out]` with `in` fastest, which in memory is a
-/// row-major `[out, in]` matrix.
+/// A projection matrix. A dense one is transposed at load into the
+/// `[in, out]` row-major layout [`Backend::matmul`] expects. GGUF stores it
+/// the other way: ggml extents `[in, out]` with `in` fastest, which in memory
+/// is a row-major `[out, in]` matrix.
 pub(crate) struct Linear {
     weight: Weights,
     pub(crate) in_dim: usize,
@@ -92,9 +91,9 @@ pub(crate) struct Linear {
     fold: Option<Box<Fold>>,
 }
 
-/// A weight stored Hadamard-folded ([`crate::hadamard`]): an input one,
-/// whose activation goes through the transform ahead of every projection,
-/// or a lookup table, whose rows are restored after the lookup.
+/// A weight stored Hadamard-folded ([`crate::hadamard`]). An input weight's
+/// activation goes through the transform before every projection. A lookup
+/// table's rows are restored after the lookup.
 #[derive(Clone)]
 enum Fold {
     Input { signs: Arc<Vec<f32>>, perm: Option<HeadPerm> },
@@ -116,11 +115,10 @@ impl Linear {
             .with_context(|| format!("missing tensor '{name}'"))?;
         check_dims(info, &[in_dim as u64, out_dim as u64])?;
 
-        // GGUF already stores blocks [out, in] with `in` contiguous, the
-        // layout every operation here and the four-way byte dot product
-        // want. Nothing is requantized: a format whose block does not divide
-        // the input width falls through to the dense path instead of being
-        // split across rows.
+        // GGUF stores blocks [out, in] with `in` contiguous, the layout every
+        // operation here and the four-way byte dot product want. Nothing is
+        // requantized. A format whose block does not divide the input width
+        // takes the dense path instead of splitting blocks across rows.
         let quant = info
             .ggml_type
             .quant()
@@ -165,7 +163,7 @@ impl Linear {
         })
     }
 
-    /// For a folded input weight, regroup the activation's heads ahead of the
+    /// For a folded input weight, regroups the activation's heads before the
     /// transform; see [`HeadPerm`].
     pub(crate) fn regroup_heads(&mut self, regroup: HeadPerm) {
         if let Some(Fold::Input { perm, .. }) = self.fold.as_deref_mut() {
@@ -178,8 +176,8 @@ impl Linear {
         matches!(self.fold.as_deref(), Some(Fold::Input { .. }))
     }
 
-    /// The key a dense weight goes up under: its own, or for one narrow
-    /// enough for [`Backend::matmul_rows`], that of the layout it reads.
+    /// The key a dense weight is uploaded under: its own, or for one narrow
+    /// enough for [`Backend::matmul_rows`], a key for that layout.
     fn dense_key(&self) -> String {
         match &self.weight {
             Weights::Dense(_) if takes_rows(self.in_dim, self.out_dim) => format!("{}.rows", self.key),
@@ -200,11 +198,10 @@ impl Linear {
 
     /// What [`Linear::project_shared`] will upload for this weight.
     ///
-    /// A quantized weight a kernel unpacks goes up as one quant per element
-    /// plus its scales twice, per block and per row transposed, the two
-    /// layouts the quantized kernels read. A weight a raw kernel decodes goes
-    /// up as its file bytes plus an `f16` header plane per scale term.
-    /// Anything else goes up as f32.
+    /// A weight with a plane kernel uploads one quant per element plus its
+    /// scales twice, per block and per row transposed, the two layouts the
+    /// kernels read. A weight a raw kernel decodes uploads its file bytes plus
+    /// an `f16` header plane per scale term. Anything else uploads as f32.
     pub(crate) fn footprint(&self, into: &mut Uploads) {
         let elems = self.in_dim * self.out_dim;
         let (bytes, dense) = match &self.weight {
@@ -222,13 +219,13 @@ impl Linear {
         into.add(&self.dense_key(), bytes, dense);
     }
 
-    /// The same projection with its output channels permuted: output `j` of the
-    /// result is output `order[j]` of this one. Nothing is requantized: a block
-    /// covers one output's inputs, so a row moves whole.
+    /// The same projection with its output channels permuted: output `j` of
+    /// the result is output `order[j]` of this one. Nothing is requantized,
+    /// since a block covers one output's inputs and a row moves whole.
     ///
-    /// The rotary layout wants this. ggml rotates either consecutive pairs or
-    /// pairs half a head apart and the backend implements only the second, so an
-    /// architecture using the first permutes its query and key weights.
+    /// The rotary layout needs this. ggml rotates either consecutive pairs or
+    /// pairs half a head apart, and the backend implements only the second.
+    /// An architecture using the first permutes its query and key weights.
     pub(crate) fn reorder_outputs(&self, suffix: &str, order: &[usize]) -> Result<Linear> {
         ensure!(
             order.len() == self.out_dim && order.iter().all(|&j| j < self.out_dim),
@@ -261,16 +258,15 @@ impl Linear {
         })
     }
 
-    /// Whether [`Linear::fuse`] on these parts stays quantized rather than
-    /// falling back to a dense fusion. Requires a uniform quant across every
-    /// part, in the plane tier or PTQ1_0 (`Packed::stack` on the rest of the
-    /// raw tier is unexercised), and parts that are either all unfolded or
-    /// all read through the same transform, which the stack then keeps.
-    /// Parts held dense fuse dense only when every part is: a quantized
-    /// projection fused with an F32 one would go up as f32 many times its
-    /// size (a delta net's qkv and gate beside its alpha and beta), and
-    /// reading that back every token costs more than the launch the fusion
-    /// saves.
+    /// Whether to fuse these parts with [`Linear::fuse`]. All parts must be
+    /// unfolded or read through the same transform. Quantized parts need one
+    /// quant across all of them, a plane format or PTQ1_0 (`Packed::stack`
+    /// is untested on the other raw formats).
+    ///
+    /// Dense parts fuse only when every part is dense. A quantized projection
+    /// fused with an F32 one would upload as f32 at many times its size (a
+    /// delta net's qkv and gate beside its alpha and beta), and reading that
+    /// every token costs more than the launch the fusion saves.
     pub(crate) fn should_fuse(parts: &[&Linear]) -> bool {
         if !Linear::same_fold(parts) {
             return false;
@@ -306,9 +302,9 @@ impl Linear {
             "fused projections must share their input width"
         );
 
-        // A fused width that does not divide by the tile would send the whole
-        // projection to the narrower kernel, so it is padded with zero columns.
-        // The padding sits past every part's window, so nothing reads it.
+        // A fused width the tile does not divide would send the whole
+        // projection to the narrower kernel, so pad it with zero columns. The
+        // padding lies past every part's window and is never read.
         let out_dim = parts
             .iter()
             .map(|p| p.out_dim)
@@ -325,9 +321,9 @@ impl Linear {
             "fusing weights read through different transforms ('{key}')"
         );
 
-        // Blocks only stack if every part is in the same format. A K-quant file
-        // is routinely mixed, leaving its more sensitive tensors wider, and
-        // there the fused weight has to go dense.
+        // Blocks only stack if every part has the same format. K-quant files
+        // often mix formats, keeping sensitive tensors wider, and then the
+        // fused weight goes dense.
         let packed = packed_parts(parts);
         let uniform = packed
             .as_ref()
@@ -370,9 +366,9 @@ impl Linear {
         })
     }
 
-    /// Dense parts sharing an input, stacked along the output axis into one
-    /// projection narrow enough for [`Backend::matmul_rows`], unpadded; `None`
-    /// where any part is held otherwise or the stack is too wide.
+    /// Stacks dense parts sharing an input along the output axis, unpadded,
+    /// into one projection narrow enough for [`Backend::matmul_rows`]. `None`
+    /// if any part is held otherwise or the stack is too wide.
     pub(crate) fn stack(parts: &[&Linear]) -> Option<Linear> {
         let in_dim = parts.first()?.in_dim;
         let out_dim = parts.iter().map(|p| p.out_dim).sum();
@@ -407,9 +403,9 @@ impl Linear {
         }
     }
 
-    /// Write output row `index` of this weight into `out`, dequantizing it.
-    /// Only the embedding table uses this, reading a token's row straight out
-    /// of the quantized bytes instead of keeping a dense f32 copy.
+    /// Writes output row `index` of this weight into `out`, dequantizing it.
+    /// Only the embedding table uses this, reading a token's row straight from
+    /// the quantized bytes instead of keeping a dense f32 copy.
     pub(crate) fn row_into(&self, index: usize, out: &mut [f32]) -> Result<()> {
         ensure!(
             index < self.out_dim && out.len() == self.in_dim,
@@ -433,7 +429,7 @@ impl Linear {
         Ok(())
     }
 
-    /// Project into a destination the caller owns.
+    /// Projects into a destination the caller owns.
     pub(crate) fn project_into(
         &self,
         backend: &dyn Backend,
@@ -444,8 +440,8 @@ impl Linear {
         self.project_shared(backend, x, None, rows, out)
     }
 
-    /// Project and add into `dest`, the residual connection's epilogue. The
-    /// dense fallback has no accumulating form, so it keeps the separate pass.
+    /// Projects and adds into `dest`, the residual connection's epilogue. The
+    /// dense path has no accumulating form, so it adds in a separate pass.
     pub(crate) fn add_into(
         &self,
         backend: &dyn Backend,
@@ -462,8 +458,8 @@ impl Linear {
         self.add_plain(backend, x, None, rows, dest)
     }
 
-    /// [`Linear::add_into`] on an input already carried through any
-    /// transform, and `act` its quantized copy where there is one.
+    /// [`Linear::add_into`] on an input already through any transform, with
+    /// `act` its quantized copy if any.
     fn add_plain(&self, backend: &dyn Backend, x: Buf, act: Option<QAct>, rows: usize, dest: Buf) -> Result<()> {
         if self.is_quantized() {
             let act = act.map_or_else(|| backend.quantize_act(x, rows, self.in_dim), Ok)?;
@@ -472,11 +468,10 @@ impl Linear {
         self.add_dense(backend, x, act, rows, dest)
     }
 
-    /// [`Linear::add_into`], but letting a backend fuse the activation's
-    /// quantization into the accumulating contraction itself, one kernel
-    /// instead of two. `x` is unquantized and not yet reduced; the fused
-    /// kernel does that itself if it takes this at all. Falls back to
-    /// [`Linear::add_into`] otherwise.
+    /// [`Linear::add_into`], letting a backend fuse the activation's
+    /// quantization into the accumulating contraction as one kernel. `x` is
+    /// unquantized and not yet reduced; the fused kernel does both itself.
+    /// Falls back to [`Linear::add_into`] when the backend declines.
     pub(crate) fn add_projected(
         &self,
         backend: &dyn Backend,
@@ -499,8 +494,8 @@ impl Linear {
         self.add_into(backend, x, rows, dest)
     }
 
-    /// [`Linear::add_into`] against an activation quantized already. `x` is
-    /// what `act` quantizes, for a weight that has to be contracted densely.
+    /// [`Linear::add_into`] against an already quantized activation. `x` is
+    /// what `act` quantizes, for a weight that must be contracted densely.
     pub(crate) fn add_into_act(
         &self,
         backend: &dyn Backend,
@@ -533,7 +528,7 @@ impl Linear {
             .with_context(|| format!("residual matmul for '{}'", self.key))
     }
 
-    /// The accumulating projection as a separate pass, which is all a dense
+    /// The accumulating projection as a separate pass, the only form a dense
     /// weight has: [`Backend::matmul`] does not add into its destination.
     fn add_dense(&self, backend: &dyn Backend, x: Buf, act: Option<QAct>, rows: usize, dest: Buf) -> Result<()> {
         let out = backend.alloc(rows * self.out_dim)?;
@@ -543,10 +538,10 @@ impl Linear {
         Ok(())
     }
 
-    /// The normalization ahead of this projection and the projection itself
-    /// as one kernel, each run of the output landing where the caller wants
-    /// it, and `mix` continuing into the delta net's convolution and gates.
-    /// Whatever comes back unset is the caller's to launch.
+    /// Runs the normalization and this projection as one kernel. Each run of
+    /// the output lands where the caller wants it, and `mix` continues into
+    /// the delta net's convolution and gates. The caller launches whatever
+    /// comes back unset.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn project_fused(
         &self,
@@ -593,14 +588,14 @@ impl Linear {
         Ok(None)
     }
 
-    /// Whether the quantized contraction applies, which needs both a quantized
-    /// weight and a kernel that unpacks its format.
+    /// Whether the quantized contraction applies: a quantized weight whose
+    /// format a kernel unpacks.
     fn is_quantized(&self) -> bool {
         matches!(&self.weight, Weights::Quant(packed) if packed.has_planes())
     }
 
-    /// This weight uploaded in its quantized form, for a caller that contracts
-    /// against it itself rather than through one of the projections here.
+    /// This weight uploaded in quantized form, for a caller that contracts
+    /// against it directly instead of through a projection here.
     pub(crate) fn quantized(&self, backend: &dyn Backend) -> Result<QBuf> {
         let Weights::Quant(packed) = &self.weight else {
             bail!("'{}' is not held in quantized form", self.key);
@@ -615,7 +610,7 @@ impl Linear {
         matches!(&self.weight, Weights::Quant(packed) if packed.has_raw_scales())
     }
 
-    /// The raw format this weight is held in, where a raw kernel decodes it.
+    /// The raw format this weight is held in, if a raw kernel decodes it.
     pub(crate) fn raw_quant(&self) -> Option<Quant> {
         match &self.weight {
             Weights::Quant(packed) if packed.has_raw_scales() => Some(packed.quant()),
@@ -623,8 +618,8 @@ impl Linear {
         }
     }
 
-    /// This weight uploaded in its raw block bytes, for a caller that
-    /// contracts against it itself.
+    /// This weight uploaded as its raw block bytes, for a caller that
+    /// contracts against it directly.
     pub(crate) fn raw(&self, backend: &dyn Backend) -> Result<RawBuf> {
         let Weights::Quant(packed) = &self.weight else {
             bail!("'{}' is not held in quantized form", self.key);
@@ -632,7 +627,7 @@ impl Linear {
         backend.constant_raw(&self.key, packed)
     }
 
-    /// [`Linear::forward`] against an activation quantized already. `act` must
+    /// [`Linear::forward`] against an already quantized activation. `act` must
     /// be `x` at this weight's input width; a dense weight ignores it.
     pub(crate) fn forward_act(
         &self,
@@ -683,10 +678,9 @@ impl Linear {
         }
 
         if self.is_raw() {
-            // A raw kernel that decodes to f32 has no use for a caller's
-            // pre-quantized `act`; one that contracts on the integer tensor
-            // cores does, and it is cheaper to hand it over than to have the
-            // backend quantize the same rows again per weight.
+            // A raw kernel that decodes to f32 ignores a caller's quantized
+            // `act`. One that runs on the integer tensor cores uses it, which
+            // saves quantizing the same rows again per weight.
             let w = self.raw(backend)?;
             return match act {
                 Some(act) => backend.matmul_raw_act(act, x, rows, self.in_dim, w, self.out_dim, out),
@@ -704,8 +698,8 @@ impl Linear {
                 .with_context(|| format!("matmul for '{}'", self.key));
         }
 
-        // Either the file was dense or no kernel unpacks its format, in which
-        // case the weight is decoded once at upload and contracted densely.
+        // Either the file was dense or no kernel reads its format. Then the
+        // weight is decoded once at upload and contracted densely.
         let w = match &self.weight {
             Weights::Dense(data) => backend.constant(&self.key, data)?,
             Weights::Quant(packed) => backend.constant_lazy(&self.key, &|| Ok(packed.dense()))?,
@@ -742,8 +736,8 @@ impl Gain {
     }
 
     /// A constant with no tensor of its own: a rearrangement of one, or one
-    /// variant's reading of it. The key must distinguish it from every other
-    /// reading, since the backend caches the upload under it.
+    /// variant's reading of it. The key must be unique among readings, since
+    /// the backend caches the upload under it.
     pub(crate) fn derived(key: String, data: Vec<f32>) -> Gain {
         Gain { data, key }
     }
@@ -776,7 +770,7 @@ pub(crate) fn check_dims(info: &TensorInfo, expected: &[u64]) -> Result<()> {
 }
 
 /// An attention block's key and value caches, `[capacity, n_kv * head_dim]`
-/// each, in f16 and backend-resident. See [`HBuf`] for why it is held narrow.
+/// each, f16 and backend-resident. See [`HBuf`] for why they are narrow.
 #[derive(Default)]
 pub(crate) struct KvCache {
     keys: Option<HBuf>,
@@ -786,9 +780,9 @@ pub(crate) struct KvCache {
 }
 
 impl KvCache {
-    /// The pair, grown to hold `total` positions. Doubling amortizes the copy
-    /// to a constant per position; sizing to the context length up front would
-    /// reserve gigabytes for a prompt of a dozen tokens.
+    /// The pair, grown to hold `total` positions. Doubling keeps the copy cost
+    /// constant per position. Sizing to the context length up front would
+    /// reserve gigabytes for a short prompt.
     pub(crate) fn reserve(
         &mut self,
         backend: &dyn Backend,
@@ -813,7 +807,7 @@ impl KvCache {
         ))
     }
 
-    /// Hands both caches back to the backend and leaves the pair as new.
+    /// Releases both caches and resets the pair to empty.
     pub(crate) fn release(&mut self, backend: &dyn Backend) {
         for slot in [&mut self.keys, &mut self.values] {
             if let Some(buf) = slot.take() {
@@ -824,10 +818,10 @@ impl KvCache {
     }
 }
 
-/// Rotary cosines and sines by absolute position, `[positions, rope_dim]`, a
-/// row's cosines followed by its sines. Built on the host because the language
-/// has no sine and the hardware's approximate one loses accuracy across the
-/// range a position reaches; precomputing also makes it a constant at decode.
+/// Rotary cosines and sines by absolute position, `[positions, rope_dim]`: a
+/// row's cosines, then its sines. Built on the host because the language has
+/// no sine, and the hardware's approximate one loses accuracy at large
+/// positions. Precomputing also makes it a constant at decode.
 pub(crate) struct RopeTable {
     rope_dim: usize,
     freq_base: f32,
@@ -843,10 +837,10 @@ impl RopeTable {
         }
     }
 
-    /// The table, extended to cover `positions` and uploaded. The name carries
-    /// its length, so a growth is a new constant rather than a mutation of one
-    /// the backend has cached. Superseded copies stay resident, which doubling
-    /// bounds at roughly one extra table.
+    /// The table, extended to cover `positions` and uploaded. The key includes
+    /// the length, so growth makes a new constant instead of mutating a cached
+    /// one. Superseded copies stay resident; doubling bounds them at about one
+    /// extra table.
     pub(crate) fn buf(&self, backend: &dyn Backend, positions: usize) -> Result<Buf> {
         let (rope_dim, half) = (self.rope_dim, self.rope_dim / 2);
         let mut table = self.angles.borrow_mut();
@@ -868,9 +862,8 @@ impl RopeTable {
         backend.constant(&key, &table)
     }
 
-    /// What the table costs once a sequence has reached `positions`: doubling
-    /// leaves superseded copies resident, so a run ends up holding about
-    /// twice the final table.
+    /// What the table costs once a sequence reaches `positions`. Superseded
+    /// copies stay resident, so a run holds about twice the final table.
     pub(crate) fn footprint(&self, into: &mut Uploads, positions: usize) {
         let rows = positions.next_power_of_two().max(512);
         let key = format!("rope.{}.{}", self.rope_dim, self.freq_base);

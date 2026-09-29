@@ -2,8 +2,9 @@
 //
 //     phobos-compile FILE.ph [--chip sm_86] [--index-bits 64] [-o OUT.ptx]
 //
-// `--chip` defaults to sm_75, whose PTX every supported card runs; `--index-bits`
-// to 32. `PHOBOS_PRINT_PHASES` prints each lowering phase's IR on the way.
+// `--chip` defaults to sm_75, which every supported card can run.
+// `--index-bits` defaults to 32. `PHOBOS_PRINT_PHASES` prints the IR after
+// each lowering phase.
 
 use std::path::PathBuf;
 

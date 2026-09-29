@@ -1,10 +1,12 @@
-// IQ3_S matvec: same raw-byte decode as iq1s.rs, IQ3_XXS's two four-wide
-// grid entries a lane, but IQ2_S's direct sign byte rather than a parity
-// index (see quant/iq3_s.rs), so this reuses `iq2s_flat_signs`.
+// IQ3_S matvec, with the same raw-byte decode as iq1s.rs.
 //
-// The two four-wide gathers land in two separate `dot_t` calls, each
-// reading its iota offsets straight from the `IOTA` parameter rather than
-// reslicing a `let`-bound view, which cannot be sliced again.
+// Like IQ3_XXS, each lane decodes two four-wide grid entries. Like IQ2_S,
+// the sign is a direct byte rather than a parity index (see
+// quant/iq3_s.rs), so this reuses `iq2s_flat_signs`.
+//
+// The two gathers feed two separate `dot_t` calls. Each reads its iota
+// straight from the `IOTA` parameter, since a `let`-bound view cannot be
+// sliced again.
 
 use std::fmt::Write as _;
 
@@ -21,12 +23,12 @@ const QH_OFF: usize = QS_OFF + 64;
 const SIGNS_OFF: usize = QH_OFF + 8;
 const SCALES_OFF: usize = SIGNS_OFF + 32;
 
-/// [`crate::quant::iq3s_flat_grid`]'s length: 512 grid entries, four `i32`
-/// lanes apiece.
+/// [`crate::quant::iq3s_flat_grid`]'s length: 512 grid entries of four
+/// lanes each.
 pub(crate) const IQ3S_GRID_LEN: usize = 512 * 4;
 
-/// Byte offsets for lane `is` (o/half/l, matching
-/// quant/iq3_s.rs::dequantize's group/half/lane decomposition).
+/// Byte offsets and `qh` divisors for lane `is`, split into group, half and
+/// lane as in `quant/iq3_s.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize, usize, usize) {
     let o = is / 8;
     let rem = is % 8;
@@ -48,8 +50,8 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize, usize, usize) 
     )
 }
 
-/// Both of one lane's decoded halves, `let decoded{is}_{half} = ...`, and
-/// each half's own `out_off`.
+/// Both of one lane's decoded halves, `let decoded{is}_{half} = ...`, each
+/// with its `out_off`.
 fn decoded_lane(is: usize) -> [(usize, String); 2] {
     let (g1_off, g2_off, qh_off, signs_off, scale_off, qh_div1, qh_div2) = run_geometry(is);
     let out_off = is * 8;
@@ -137,10 +139,9 @@ kernel iq3s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq3s_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq3s_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which this
-/// mirrors. `@aligned(N = TN)` is required for the same reason: `iq3s_qdot_t`
-/// demands its `qb`/`d` slices provably in bounds.
+/// [`iq3s_matvec_src`] for `m == 1`, as one `iq3s_qdot_t` call; mirrors
+/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `iq3s_qdot_t` needs its `qb` and `d` slices provably in bounds.
 pub(crate) fn iq3s_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -157,9 +158,8 @@ kernel iq3s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq3s_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`iq3s_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
+/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
 pub(crate) fn iq3s_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..LANES {
@@ -189,8 +189,8 @@ kernel iq3s_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq3s_dequant_src`]'s decode as a single `iq3s_qdecode_t` call; see
-/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ3_S.
+/// [`iq3s_dequant_src`]'s decode as one `iq3s_qdecode_t` call. Mirrors
+/// `iq1s_qdecode_src` in `iq1s.rs`.
 pub(crate) fn iq3s_qdecode_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -212,7 +212,7 @@ kernel iq3s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 
 /// IQ3_S's prompt projection, decode and contraction in one kernel.
 ///
-/// IQ3_XXS's shape with a wider grid and one scale per sixty-four elements,
+/// Like IQ3_XXS, with a wider grid and one scale per sixty-four elements,
 /// which is still constant across a k step. See `qmma_signed.rs`.
 pub(crate) fn iq3s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     format!(

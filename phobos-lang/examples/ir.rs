@@ -1,6 +1,6 @@
-// Prints the graph a source builds to, the fastest way to eyeball what the
-// build decided: `cargo run -p phobos-lang --example ir [file]`. The same
-// `PHOBOS_CHIP` and `PHOBOS_INDEX_BITS` overrides as `emit`.
+// Prints the IR graph a source builds to:
+// `cargo run -p phobos-lang --example ir [file]`.
+// Takes the same `PHOBOS_CHIP` and `PHOBOS_INDEX_BITS` overrides as `emit`.
 
 use phobos_base::context::{GpuConfig, NvidiaGpuConfig};
 

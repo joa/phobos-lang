@@ -4,8 +4,8 @@
 //   cargo run --release --features cuda -p phobos-gguf --example qmma_probe -- \
 //       --intrinsic iq1s_qgemm_t --check
 //
-// One prompt-projection kernel at the model's own shapes, compiled and
-// launched directly; `--check` compares it bit for bit against the shipped one.
+// Compiles and launches one IQ1_S prompt-projection kernel at the model's
+// shapes. `--check` compares it bit for bit against the production kernel.
 
 use anyhow::{Result, ensure};
 use cust::prelude::*;
@@ -34,8 +34,8 @@ enum Table {
     TwoBit,
 }
 
-/// What one variant of the projection is: the intrinsic it calls, the tile
-/// it is compiled at, and the table it takes.
+/// One variant of the projection: the intrinsic it calls, its tile, and its
+/// launch spec. The intrinsic decides the table it reads.
 #[derive(Clone)]
 struct Variant {
     intrinsic: String,
@@ -117,8 +117,8 @@ kernel iq1s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     }
 }
 
-/// The operands one shape needs, uploaded once and shared by every variant so
-/// the outputs are comparable: both tables are built from one ternary grid.
+/// One shape's operands, uploaded once and shared by every variant. Both
+/// tables come from one ternary grid, so the outputs are comparable.
 struct Operands {
     m: usize,
     k: usize,
@@ -136,9 +136,9 @@ impl Operands {
     fn new(m: usize, k: usize, n: usize) -> Result<Operands> {
         let nb = k / 256;
         let rb = nb * BLOCK_BYTES;
-        // Values do not reach the timing, and the check compares two kernels
-        // against each other, so any spread of bytes serves; they vary only
-        // so that a constant page cannot stand in for the traffic.
+        // Any bytes will do, since values do not affect timing and the check
+        // compares two kernels. They vary so that a constant page cannot
+        // stand in for real traffic.
         let mut seed = 0x2545_f491_4f6c_dd1du64;
         let mut next = || {
             seed ^= seed << 13;

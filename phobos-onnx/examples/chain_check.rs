@@ -35,9 +35,9 @@ fn node(op: &str, ins: &[&str], outs: &[&str], attrs: &[(&str, Attribute)]) -> N
 fn main() -> Result<()> {
     // A mixed chain: MatMul -> Add (device), Tanh (host fallback),
     // Mul -> LayerNorm -> Softmax (device). The fallback in the middle forces
-    // one download/sync and a re-upload; the rest chains on the device.
-    // Dims are tile-aligned: the Phase-A kernels have no tail masking yet, so a
-    // non-aligned extent would (correctly) fall back to the host.
+    // one download, sync and re-upload. The rest chains on the device.
+    // Dims are tile-aligned: the kernels have no tail masking yet, so a
+    // non-aligned extent would fall back to the host.
     let (rows, w) = (64usize, 64usize);
     let seed = |k: u64| {
         (0..(rows * w))
@@ -101,8 +101,8 @@ fn main() -> Result<()> {
         bail!("ChainExec disagrees with the interp oracle (err {err:e})");
     }
     // Expect 5 device ops (MatMul, Add, Mul, LayerNorm, Softmax) and 1 fallback
-    // (Tanh). Syncs: one for the fallback's input download, one for the final
-    // output download (consecutive device ops chain without a sync).
+    // (Tanh). Expect 2 syncs, one for the fallback's input download and one for
+    // the final output. Consecutive device ops chain without a sync.
     if stats.device_ops != 5 || stats.host_ops != 1 {
         bail!("unexpected device/host split: {stats:?}");
     }

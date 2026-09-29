@@ -54,16 +54,16 @@ pub struct Eval {
 
 /// Combined static-shape inference and constant folding.
 ///
-/// The exported GPT-2 graphs compute shapes and position ids at runtime;
-/// fixing a concrete input shape folds all of that away, leaving a static
-/// compute graph with one shape and optional constant value per edge. An
-/// unhandled op or missing input leaves that edge unknown, tallied in
-/// [`Eval::unsupported`] so a run over a real model reports the whole
-/// coverage gap instead of stopping at the first hole.
+/// The exported GPT-2 graphs compute shapes and position ids at runtime.
+/// Fixing a concrete input shape folds all of that away, leaving one static
+/// shape and an optional constant value per edge. An unhandled op or missing
+/// input leaves its edges unknown and is tallied in [`Eval::unsupported`], so
+/// a run over a real model reports every gap, not just the first.
 pub fn evaluate(graph: &Graph, input_dims: &HashMap<String, Dims>) -> Eval {
     let mut vals: HashMap<String, Val> = HashMap::new();
 
-    // Shape always; data only for the integer tensors that can fold.
+    // Shape always. Data only for integer tensors and f32 ones small enough
+    // to fold.
     for (name, t) in &graph.initializers {
         let data = match &t.data {
             TensorData::I64(v) => Some(Const::I64(v.clone())),
@@ -119,10 +119,11 @@ pub fn evaluate(graph: &Graph, input_dims: &HashMap<String, Dims>) -> Eval {
     }
 }
 
-/// Rewrite `graph` into the residual static graph for a fixed input shape:
-/// drop every node whose outputs are all constant, promote each folded constant
-/// a surviving node consumes into an initializer, keep the real weights, and
-/// record static shapes in `values`. What is left is plain compute with no
+/// Rewrite `graph` into the residual static graph for a fixed input shape.
+///
+/// Nodes whose outputs are all constant are dropped. A folded constant that a
+/// surviving node reads becomes an initializer, and the real weights stay.
+/// `values` records the static shapes. What is left is plain compute with no
 /// runtime shape plumbing.
 pub fn fold_graph(graph: &Graph, input_dims: &HashMap<String, Dims>) -> Result<Graph> {
     let ev = evaluate(graph, input_dims);
@@ -230,8 +231,8 @@ fn const_tensor(v: &Val) -> Tensor {
     }
 }
 
-/// Larger constant f32 tensors are treated as runtime data. Sized to take in
-/// the 1024x1024 causal-mask bias, so attention-mask slices fold, but to leave
+/// Larger constant f32 tensors are treated as runtime data. The limit admits
+/// the 1024x1024 causal-mask bias, so attention-mask slices fold, but leaves
 /// out the weight and embedding tables.
 const FOLD_F32_LIMIT: usize = 1 << 21;
 

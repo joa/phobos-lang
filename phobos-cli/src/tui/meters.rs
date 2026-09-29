@@ -1,9 +1,5 @@
-// The gauges: what memory holds, how fast it is going, what the network is
-// made of, and what the backend's caches gave back.
-//
-// Split from the panels around them because these four are the ones that
-// draw rather than list, and because a panel file that renders every bar as
-// well ends up longer than anything should be.
+// The gauge panels: memory, throughput, network shape, card, caches, and
+// loading progress.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -19,12 +15,8 @@ use super::panels::{bytes, count, panel};
 use super::theme;
 use super::view::View;
 
-/// The card, and what is standing on it.
-///
-/// One stacked bar rather than three separate ones: the parts are shares of
-/// the same total, and a reader wants to see them add up. What is left over
-/// after the weights and the caches is real memory belonging to someone, so
-/// it gets a segment rather than being left out.
+/// Device memory as one stacked bar: weights, KV cache, and everything else
+/// in use, all shares of the same total.
 pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
     let block = panel("MEMORY", theme::AMBER, false);
     let inner = block.inner(area);
@@ -38,10 +30,9 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
             let total = device.total_bytes as f64;
             view.vram = anim::ease(view.vram, device.used_bytes() as f64 / total, 0.2);
 
-            // What the model will occupy once every weight is up, which
-            // before the first pass it is not: the weights go to the card
-            // lazily. The driver's figure is the truth, so the shares are
-            // clamped to it and can never add up to more than is in use.
+            // What the model occupies once every weight is uploaded, which
+            // happens lazily. The shares are clamped to the driver's used
+            // figure so they never add up to more.
             let claimed = snap
                 .fixed
                 .footprint
@@ -50,12 +41,10 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
             let weights = claimed.min(view.vram);
             let cache =
                 (snap.cache_bytes.unwrap_or(0) as f64 / total).min((view.vram - weights).max(0.0));
-            // Whatever the two named shares do not account for: a pass's
-            // intermediates, the driver's own context, and anything else on
-            // the card, this process or not.
+            // The rest: scratch, the driver's context, and other processes.
             let elsewhere = (view.vram - weights - cache).max(0.0);
-            // A tenth of a percent of slack: the reading and the footprint are
-            // taken at different moments and need not agree to the byte.
+            // Some slack, since the reading and the footprint are taken at
+            // different moments.
             let resident = claimed <= view.vram + 0.001;
 
             lines.push(Line::from({
@@ -89,9 +78,7 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
                 if resident {
                     bytes(held)
                 } else {
-                    // Less on the card than the model accounts for, so the
-                    // upload is still going: saying the whole figure here
-                    // would draw memory that is not there yet.
+                    // The upload is still going, so show how far it got.
                     format!("{} of {} up", bytes((weights * total) as u64), bytes(held))
                 },
             ));
@@ -152,10 +139,8 @@ fn key(color: Color, label: &str, value: String) -> Line<'static> {
 
 /// How much context is in use, and what the rest of it would cost.
 ///
-/// The cost at the full context is a projection and says so: it is what the
-/// caches would take if a conversation ever ran that long, which for a large
-/// model is usually more than the card has. The figure worth acting on is the
-/// last one, which is how much context actually fits in what is free.
+/// Shows the cost of a full context as a projection, and how many more
+/// positions fit in free memory.
 fn context(view: &mut View, snap: &Snapshot, track: usize) -> Vec<Line<'static>> {
     let limit = snap.fixed.context_limit;
     let ratio = if limit == 0 {
@@ -272,8 +257,7 @@ fn rate(
         ),
     ])];
 
-    // The block font only when there are rows for it; below that the figure
-    // is still the point, just at one line.
+    // The block font when it fits, one bold line otherwise.
     if area.height as usize >= FONT_HEIGHT + 2 && anim::block_width(&text) <= area.width as usize {
         for row in anim::block_text(&text) {
             lines.push(Line::from(Span::styled(row, Style::default().fg(lit))));
@@ -294,11 +278,10 @@ fn rate(
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// What the network is made of, one cell a block.
+/// The network's shape, with a strip showing each block's kind.
 ///
-/// The interleave is the point on a model that has one: attention blocks are
-/// the only ones whose cost grows with the conversation, so the ratio between
-/// the two colours is what decides whether a long context fits.
+/// Only attention blocks grow with the context, so the mix of the two
+/// colours shows how much a long context costs.
 pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let working = snap.phase != Phase::Idle;
     let block = panel("NETWORK", theme::GREEN, working);
@@ -334,9 +317,8 @@ pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect
         Span::styled(count(arch.head_dim as u64), theme::text()),
     ])];
 
-    // Lit while a pass is running, so the strip reads as the live part of the
-    // panel. It says the network is working, not which block is: nothing here
-    // measures a block, and a marker crawling along it would claim otherwise.
+    // Pulses while a pass runs. It shows that the network is working, not
+    // which block is running.
     let wash = if working {
         0.75 + 0.25 * anim::pulse(view.frame, 30)
     } else {
@@ -361,12 +343,8 @@ pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// The blocks across the whole width, each one as many cells as it gets.
-///
-/// Stretched rather than drawn one cell a block: at any usual width that
-/// leaves a short bar in a wide box, and the pattern is what this is for. A
-/// window too narrow for one cell each samples instead, which keeps the
-/// pattern even though it loses the count.
+/// The blocks stretched across the whole width. When the width is less than
+/// the block count, blocks are sampled.
 fn strip(blocks: &[BlockKind], width: usize, wash: f32) -> Vec<Span<'static>> {
     if blocks.is_empty() || width == 0 {
         return Vec::new();
@@ -388,10 +366,8 @@ fn strip(blocks: &[BlockKind], width: usize, wash: f32) -> Vec<Span<'static>> {
 
 /// The card, as the driver describes it.
 ///
-/// The clocks are the card's maxima and are labelled as such: an idle card
-/// sits at a fraction of them, and nothing here samples a running one. The
-/// bandwidth is the figure a decode is worth judging against, since decoding
-/// reads every weight once a token.
+/// The clocks are the card's rated maxima, not live readings. Peak bandwidth
+/// is shown because decode is bound by it.
 pub(super) fn card(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let block = panel("CARD", theme::CYAN, false);
     let inner = block.inner(area);
@@ -457,8 +433,7 @@ pub(super) fn card(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     );
 }
 
-/// A share, or nothing before anything was asked for, which is not a rate of
-/// zero.
+/// A share, or `None` before the first lookup.
 fn rate_of(hits: u64, total: u64) -> Option<f64> {
     (total > 0).then(|| hits as f64 / total as f64)
 }
@@ -470,23 +445,19 @@ fn mhz(khz: u32) -> String {
 
 /// What the caches saved.
 ///
-/// Only a cache whose misses cost something a watcher can see gets a hit
-/// rate: the prefix cache, whose misses are prefill, and the expert cache,
-/// whose misses cross the bus. The buffer pool reads near 100% within a few
-/// tokens whatever happens, so it is measured in memory instead: what is in
-/// use, what sits idle on the free list, and how many buffers it allocated.
-/// Idle memory and allocations should stop rising once the model is warm, and
-/// either one that keeps rising is a leak.
-/// Kernels are not shown at all. Every shape compiles during the load, which
-/// the loading screen already follows, and every launch after it hits.
+/// The prefix and expert caches get hit rates, since their misses are
+/// costly. The buffer pool is shown in memory instead: in use, idle, and
+/// buffers allocated. Idle memory or allocations that keep rising once the
+/// model is warm point to a leak.
+///
+/// Kernels are not shown, since they all compile during the load.
 pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let block = panel("CACHES", theme::GREEN_DIM, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
 
-    // Unlike the rows below it this is not a property of the backend, so it
-    // is shown whether or not the backend keeps caches of its own.
+    // Not a backend property, so shown even when the backend keeps no caches.
     let mut lines = vec![hit_rate(
         "prefix hit",
         rate_of(snap.prompt_reused, snap.prompt_tokens),
@@ -508,7 +479,7 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
         return;
     };
 
-    // Only a model whose experts stream has an expert cache to speak of.
+    // Only a model with streamed experts has an expert cache.
     if let Some(rate) = stats.expert_hit_rate() {
         lines.push(hit_rate(
             "expert hit",
@@ -541,7 +512,7 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-/// A hit rate and what it is a share of. The bar gives way first when the
+/// A hit rate and what it is a share of. The bar is dropped first when the
 /// panel is narrow.
 fn hit_rate(
     label: &str,
@@ -573,12 +544,10 @@ fn hit_rate(
     Line::from(spans)
 }
 
-/// What a load is doing, for the screen that is up before there is a model.
+/// Loading progress, shown before there is a model.
 ///
-/// A cold start compiles every kernel from source and takes minutes; a warm
-/// one finds them all in the on-disk cache and takes seconds. Which of the
-/// two is happening is the thing a watcher most wants to know, so the counts
-/// are split rather than summed.
+/// Built and cached kernels are counted separately, which tells a cold start
+/// from a warm one.
 pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let block = panel("LOADING", theme::CYAN, true);
     let inner = block.inner(area);
@@ -602,9 +571,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
     };
 
     let track = (inner.width as usize).saturating_sub(24).clamp(10, 60);
-    // Names what is running, not what last finished. During a batch those
-    // are different kernels, and the one still going is the answer to why
-    // the screen has not moved.
+    // Names what is running, not what last finished.
     let mut lines = vec![
         match load.in_flight.as_slice() {
             [] => Line::from(Span::styled("loading", theme::accent(theme::CYAN))),
@@ -621,9 +588,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
         Line::raw(""),
     ];
 
-    // A bar only where there is a batch to measure against. A kernel asked
-    // for on its own is a batch of one, and a bar that is always full says
-    // nothing.
+    // A progress bar only for a batch of more than one.
     match load.ratio() {
         Some(ratio) => lines.push(Line::from(vec![
             Span::styled(anim::bar(ratio, track), Style::default().fg(theme::CYAN)),
@@ -645,10 +610,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
         ])),
     }
 
-    // What has not come back yet, and which of those has been going longest.
-    // A batch starts everything at once and cannot finish before its slowest
-    // member, so that kernel is what the wait is actually for; the name of
-    // the last one to finish says nothing about it.
+    // The kernel lowering longest, which the batch is waiting on.
     if let Some((name, waiting)) = load.longest() {
         lines.push(Line::from(vec![
             Span::styled("waiting on ", theme::muted()),

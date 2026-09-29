@@ -1,11 +1,11 @@
-// Peels an accumulator or previous-value term out of a store: the epilogue pattern.
+// The epilogue pattern: peels the accumulator and prior-value terms out of a store.
 
 use super::*;
 
 impl<'a> Analyzer<'a> {
-    /// Parse an accumulator epilogue [alpha *] acc [+ [beta *] c_old], where
-    /// c_old is a prior load of the output supertile target. The store's
-    /// scalars stay out of the cluster IR: they only surface in the leaves.
+    /// Parse an accumulator epilogue `[alpha *] acc [+ [beta *] c_old]`, where
+    /// `c_old` is a prior load of the target supertile. The store's scalars
+    /// stay out of the cluster IR and only appear in the leaves.
     pub(super) fn parse_epilogue(&self, value: &Expr, target: &SuperTile) -> Result<Epilogue> {
         if let Expr::Binary {
             op: BinOp::Add,
@@ -34,7 +34,7 @@ impl<'a> Analyzer<'a> {
         })
     }
 
-    /// Peel acc or SCALAR * acc into (coefficient, acc name).
+    /// Peel `acc` or `SCALAR * acc` into (coefficient, acc name).
     pub(super) fn peel_acc(&self, e: &Expr) -> Result<(Option<Expr>, String)> {
         if let Expr::Var(n) = e
             && matches!(self.symbols.get(n), Some(Binding::Scratch))
@@ -59,8 +59,8 @@ impl<'a> Analyzer<'a> {
         bail!("the accumulator term of a GEMM epilogue must be `acc` or `SCALAR * acc`");
     }
 
-    /// Peel c_old or SCALAR * c_old into (coefficient, c_old name), checking
-    /// that c_old is a prior load of the same supertile the store targets.
+    /// Peel `c_old` or `SCALAR * c_old` into (coefficient, c_old name).
+    /// `c_old` must be a prior load of the supertile the store targets.
     pub(super) fn peel_prev(&self, e: &Expr, target: &SuperTile) -> Result<(Option<Expr>, String)> {
         let (coeff, name) = match e {
             Expr::Var(n) => (None, n.clone()),

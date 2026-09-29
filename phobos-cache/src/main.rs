@@ -6,16 +6,15 @@
 //     phobos-cache clear [--chip sm_86]... [--dir CACHE] [KERNEL...]
 //     phobos-cache prune --manifest DIR... [--dir CACHE]
 //
-// `warm` compiles every request a manifest holds (see `PHOBOS_KERNEL_MANIFEST`)
-// for each chip, with no GPU; a run on a card of that chip then starts warm.
+// `warm` compiles every request in a manifest (see `PHOBOS_KERNEL_MANIFEST`)
+// for each chip, with no GPU. A run on a card of that chip then starts warm.
 // `--chip` defaults to every supported chip, and `--dir` to the cache a run
-// reads. Each PTX is assembled with `ptxas` for its chip before it is stored,
-// when one is found on PATH or under CUDA_PATH, since no card here can load
-// the foreign chips' output to check it.
+// reads. When `ptxas` is found on PATH or under CUDA_PATH, each PTX is
+// assembled for its chip before it is stored, as a check no local card can do.
 //
-// `clear` takes kernel names with `*` as the only wildcard, and clears
-// everything, including entries from before the cache was split by chip, when
-// given none. `prune` keeps only the entries the manifests ask for.
+// `clear` takes kernel names, with `*` as the only wildcard. Given none, it
+// clears everything, including entries from before the cache was split by
+// chip. `prune` keeps only the entries the manifests ask for.
 
 mod entries;
 mod warm;

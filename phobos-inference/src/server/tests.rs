@@ -1,9 +1,8 @@
-// The server's two responsibilities that no model file is needed to check:
-// that it tells the meter what it loaded, and that it stops when asked.
+// Server checks that need no model file: session bookkeeping, meter
+// reporting, and stopping when asked.
 //
-// Stopping is the one worth a test. A full-screen viewer has no other way out
-// than clearing the running flag, so a worker that never looks at it would
-// leave the user with a dead dashboard and a live process.
+// A full-screen viewer can only quit by clearing the running flag, so a
+// worker that ignores it leaves a dead dashboard and a live process.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -16,12 +15,11 @@ use crate::telemetry::Meter;
 
 use super::{Defaults, serve};
 
-/// A model that reports a footprint and produces one token forever, so a test
-/// exercises the worker without a file, a tokenizer or a device.
+/// A model that reports a footprint and produces one token forever, for
+/// testing the worker without a file, a tokenizer or a device.
 struct Fake {
     info: ModelInfo,
-    /// How many times the card has been read, so a test can show that a
-    /// generation asks at all.
+    /// How many times device memory has been read.
     probes: std::sync::atomic::AtomicUsize,
 }
 
@@ -78,8 +76,7 @@ impl Tokenizer for Fake {
 impl Session for FakeSession {
     fn extend(&mut self, ids: &[i64]) -> Result<Vec<f32>> {
         self.len += ids.len();
-        // Token 1 always wins, so nothing ever reaches the end-of-turn id and
-        // a generation is bounded only by its token limit.
+        // Token 1 always wins, so a generation ends only at its token limit.
         Ok(vec![0.0, 1.0, 0.0, 0.0, 0.0])
     }
 
@@ -118,12 +115,11 @@ fn defaults() -> Defaults {
     }
 }
 
-/// What a session holds has to be exactly what the outcome reports, or a
-/// kept session is rewound against the wrong tokens and the next request
-/// silently attends to somebody else's prompt.
+/// The outcome must report exactly what the session holds. Otherwise a kept
+/// session is rewound against the wrong tokens.
 ///
-/// The two differ whenever a generation stops without feeding its last token
-/// back, which is every stop reason except the token limit.
+/// This matters when a generation stops without feeding its last token back,
+/// which is every stop reason except the token limit.
 #[test]
 fn what_a_generation_reports_holding_is_what_the_session_holds() {
     use crate::generate::{self, Config, Flow};
@@ -134,8 +130,8 @@ fn what_a_generation_reports_holding_is_what_the_session_holds() {
         let mut session = model.session().unwrap();
         let prompt = vec![1i64, 2, 3];
         let config = Config::new(SampleConfig::greedy(), limit);
-        // The second run stops from the sink rather than the limit, which is
-        // the case that emits a token it never feeds back.
+        // The second run stops from the sink, which emits a token it never
+        // feeds back.
         let mut emitted = 0usize;
         let mut sink = |_: &str| {
             emitted += 1;
@@ -169,8 +165,7 @@ fn what_a_generation_reports_holding_is_what_the_session_holds() {
     }
 }
 
-/// Rewinding is what makes a kept session safe to reuse, and a backend that
-/// cannot rewind has to say so rather than quietly keeping stale positions.
+/// A backend that cannot rewind must refuse rather than keep stale positions.
 #[test]
 fn a_session_rewinds_only_as_far_as_its_backend_allows() {
     let model = model();
@@ -178,18 +173,16 @@ fn a_session_rewinds_only_as_far_as_its_backend_allows() {
     session.extend(&[1, 2, 3, 4]).unwrap();
     assert_eq!(session.len(), 4);
 
-    // The default accepts only the request that drops nothing, which is how a
-    // session is extended rather than rewound.
+    // The default accepts only a request that drops nothing.
     assert_eq!(session.truncate(4), Some(4));
     assert_eq!(session.len(), 4);
     assert_eq!(session.truncate(2), None);
     assert_eq!(session.len(), 4, "a refused rewind changes nothing");
 }
 
-/// Only the thread running the pass can ask the driver, and it is inside the
-/// generation for the whole of a request. Without asking from in there, a
-/// dashboard's memory figures sit at whatever they were before the request
-/// and catch up only once it is over, which is when they stop mattering.
+/// The generation must read device memory while it runs, since only its
+/// thread can query the driver. Otherwise a dashboard shows stale figures
+/// for the whole request.
 #[test]
 fn a_generation_reads_the_card_while_it_runs() {
     use crate::generate::{self, Config, Flow};
@@ -218,8 +211,8 @@ fn a_generation_reads_the_card_while_it_runs() {
     )
     .unwrap();
 
-    // At least either side of the prompt pass, which is the one that puts the
-    // weights on the card. A long decode adds more, on a timer.
+    // At least once on each side of the prompt pass. A long decode adds more
+    // on a timer.
     assert!(
         model.probes.load(Ordering::Relaxed) >= 2,
         "the card was read {} times during a generation",
@@ -232,7 +225,7 @@ fn a_generation_reads_the_card_while_it_runs() {
 fn the_worker_stops_when_the_meter_says_to() {
     let meter = Arc::new(Meter::new());
     let worker = meter.clone();
-    // Port zero, so the test never collides with a port something else holds.
+    // Port zero, so the test never collides with a port in use.
     let serving =
         std::thread::spawn(move || serve("127.0.0.1:0".to_string(), model(), defaults(), worker));
 
@@ -252,8 +245,7 @@ fn the_worker_stops_when_the_meter_says_to() {
     meter.stop();
     let result = serving.join().expect("the worker panicked");
     assert!(result.is_ok(), "{result:?}");
-    // It waits for a request at most one tick at a time, so it must notice
-    // well inside a second.
+    // It waits at most one idle tick at a time, so it must notice quickly.
     assert!(
         asked.elapsed() < Duration::from_secs(2),
         "took {:?} to stop",
@@ -261,8 +253,8 @@ fn the_worker_stops_when_the_meter_says_to() {
     );
 }
 
-/// Token ids that are their own bytes, so a test reads the text a log line
-/// quotes.
+/// A tokenizer whose ids are their own bytes, so log lines quote readable
+/// text.
 struct Bytes;
 
 impl Tokenizer for Bytes {

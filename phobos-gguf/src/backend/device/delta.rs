@@ -5,11 +5,9 @@ use super::*;
 impl DeviceBackend {
     /// The chunked gated delta rule, in two passes; see [`delta_wy_src`].
     ///
-    /// The packed operands are one row per (position, head), where a chunk's `C`
-    /// consecutive positions of one head sit `C` rows apart. Read as one row per
-    /// position with the heads side by side, the same memory, a chunk becomes a
-    /// column window of consecutive rows and so an ordinary tile. The gates and
-    /// the first pass's three `[C, C]` matrices are laid out to match.
+    /// The packed operands are read as one row per position with the heads
+    /// side by side. A chunk of one head is then an ordinary tile. The gates
+    /// and the first pass's three `[C, C]` matrices use the same layout.
     pub(super) fn delta_chunked(
         &self,
         packed: Buf,

@@ -1,8 +1,10 @@
 // IQ1_M's decode geometry, shared by the contraction (`iq1m_qdot.rs`) and the
-// expansion (`qdecode.rs`). Mirrors IQ1_S's grid lookup, but each group of 32
-// has its own pair of 3-bit scales and the grid index and sign bit both come
-// from one qh byte per lane, so the per-lane offsets need `arith.select`s
-// where a source generator would have written per-lane branches.
+// expansion (`qdecode.rs`).
+//
+// It mirrors IQ1_S's grid lookup, with two differences. Each group of 32 has
+// its own pair of 3-bit scales. The grid index and sign bit both come from
+// one qh byte per lane, so the per-lane offsets are picked with
+// `arith.select`.
 
 use super::*;
 
@@ -13,8 +15,8 @@ const IQ1M_QH_OFF: i64 = 32;
 const IQ1M_SCALES_OFF: i64 = 48;
 pub(super) const IQ1M_LANE: i64 = 8;
 
-/// Lane geometry, IQ1_S's with `arith.select`s: the divisors picking this
-/// lane's grid index, sign bit and group scale out of one qh byte.
+/// Lane geometry: the offsets and the divisors that pick this lane's grid
+/// index, sign bit and group scale out of one qh byte.
 pub(super) struct Iq1mLane<'c> {
     qh_off: Value<'c, 'c>,
     sc_lo_off: Value<'c, 'c>,
@@ -30,7 +32,7 @@ pub(super) struct Iq1mLane<'c> {
 }
 
 /// Per-block state: the group scale, the sign offset, and the lane's grid
-/// entry as one `vector<8xi8>` (IQ1_S's table, shared outright).
+/// entry as one `vector<8xi8>`. The grid table is IQ1_S's.
 pub(super) struct Iq1mBlock<'c> {
     pub(super) dl: Value<'c, 'c>,
     pub(super) delta: Value<'c, 'c>,
@@ -130,7 +132,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Iq1mBlock<'c>> {
         let f32_t = self.f32_t;
         let (c1_i32, c8_i32) = (geom.c1_i32, geom.c8_i32);
-        // qs4_off = lane exactly (QS_OFF == 0, and 4*(is/4)+is%4 == is).
+        // The qs byte offset is the lane itself, since qs starts at byte 0.
         let qs4 = self.qbyte(kb, qb, at.j, at.off, geom.lane)?;
         let qh = self.qbyte(kb, qb, at.j, at.off, geom.qh_off)?;
         let sc_lo = self.qbyte(kb, qb, at.j, at.off, geom.sc_lo_off)?;

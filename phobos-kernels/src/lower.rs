@@ -7,14 +7,14 @@ use std::time::{Duration, Instant};
 /// `@dynshared` functions needs.
 pub type CompiledSource = (String, Vec<(String, usize)>);
 
-/// A lowering's result and what it cost. Timed inside the thread that ran it:
-/// a batch lowers everything at once, so the wall time around a join says how
-/// long the batch has been going rather than what this kernel took.
+/// A lowering's result and the time it took, measured inside its own thread.
+/// A batch lowers everything at once, so wall time around a join would
+/// measure the batch, not this kernel.
 pub type Timed = (CompiledSource, Duration);
 
-/// Stack size for the compile thread: MLIR-to-PTX lowering recurses with the
-/// emitted IR's size, and a wide kernel like `q2k_matvec` can exceed a
-/// thread's default (1 MiB on Windows, fixed at link time).
+/// Stack size for the compile thread. MLIR-to-PTX lowering recurses deeper
+/// the larger the emitted IR, and a wide kernel like `q2k_matvec` can exceed
+/// the default stack (1 MiB on Windows).
 const COMPILE_STACK_BYTES: usize = 256 << 20;
 
 /// Spawns `phobos_lang::compile_shared` on its own stack (see
@@ -48,12 +48,11 @@ pub fn single(ctx: &Context, source: &str, what: &str) -> Result<Timed> {
 /// Lowers the aligned and general texts of one kernel to a PTX pair.
 ///
 /// Uses `compile_raw` rather than `compile_shared` because `@pipeline` is
-/// checked across the pair, and the fallback variant's partial slices never
-/// pipeline on their own, so either variant satisfies the assertion.
+/// checked across the pair: the assertion holds if either variant pipelines.
+/// The general variant's partial slices never pipeline on their own.
 pub fn pair(ctx: &Context, aligned_src: &str, general_src: &str, what: &str) -> Result<(String, String)> {
-    // A thread each, not one thread doing both: the two texts are the same
-    // kernel under different alignment claims and neither reads the other,
-    // so lowering them at once costs nothing but a second stack.
+    // One thread per text. The two are independent, so lowering them at once
+    // costs only a second stack.
     let lower = |src: &str, half: &'static str| {
         let (ctx, src) = (ctx.clone(), src.to_string());
         std::thread::Builder::new()

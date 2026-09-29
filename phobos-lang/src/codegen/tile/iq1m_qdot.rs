@@ -6,9 +6,8 @@ use super::*;
 
 impl<'c> Codegen<'c> {
     /// IQ1_M's matvec contraction with the decode folded in. Same shape as
-    /// `tile_iq1s_qdot_t` (warp owns an output, register accumulator, one
-    /// closing shuffle), but the per-lane offsets need `arith.select`s
-    /// instead of a source generator's per-lane branches.
+    /// `tile_iq1s_qdot_t`: a warp owns an output, accumulates in a register,
+    /// and reduces with one closing shuffle.
     pub(in crate::codegen) fn tile_iq1m_qdot_t(
         &mut self,
         block: &Block<'c>,

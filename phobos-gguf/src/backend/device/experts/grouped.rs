@@ -1,18 +1,19 @@
-// The prompt pass's routed feed-forward as grouped GEMMs: the rows sorted
-// by expert on the host, a permuted quantized activation whose segments
-// are padded to the GEMM's tile, the experts brought in a group at a time
-// (as many as the block has slots), each group's segments contracted
-// through a schedule table and its rows added into the residual by
-// position before the next group's overwrite them. Each expert crosses the
-// bus once a block, where the row path's cache thrashes as soon as a pass's
-// rows choose more experts than the block holds. `PHOBOS_MOE_GROUPED=0`
-// opts out; see `ENV.md`.
+// The prompt pass's routed feed-forward as grouped GEMMs.
 //
-// The lightest experts by rows go to the host's own kernels instead, a
-// share of the block's experts set from what the last block showed of
-// each side's time, each one sparing the bus a copy; the host works while
-// the device does and its rows are added at the end. `PHOBOS_MOE_HOST=0`
-// opts out.
+// The host sorts the rows by expert and builds the permutation for a
+// quantized activation, with each expert's segment padded to the GEMM tile. Experts
+// are brought in one group at a time, as many as the block has slots. A
+// schedule table drives each group's GEMMs, and the group's rows are added
+// into the residual before the next group overwrites them.
+//
+// Each expert crosses the bus once per block. The per-row path would
+// thrash the cache whenever the rows choose more experts than a block
+// holds. `PHOBOS_MOE_GROUPED=0` opts out; see `ENV.md`.
+//
+// The experts with the fewest rows run on the host instead, which saves
+// their copies. The host's share is tuned from the last block's timings.
+// The host runs alongside the device and its rows are added at the end.
+// `PHOBOS_MOE_HOST=0` opts out.
 
 use std::time::Instant;
 
@@ -28,20 +29,19 @@ use crate::backend::{Backend, Buf, Moe};
 use crate::experts::{ExpertSet, Stack};
 use crate::simd::{self, Job};
 
-/// The share of a block's experts the host starts with, before a block has
-/// shown which side was the long pole.
+/// The host's initial share of a block's experts, before any timings.
 pub(super) const HOST_SHARE_START: f32 = 0.4;
 
-/// Padded rows `segments` experts' rows can come to when each is padded to
-/// the tile: the rows plus a tile less one apiece.
+/// Upper bound on the padded row count for `segments` experts, each padded
+/// to the tile.
 fn padded(rows: usize, segments: usize) -> usize {
     (rows * MOE_USED + segments * (QGEMM_TM - 1)).next_multiple_of(QGEMM_TM)
 }
 
-/// Device bytes a pass of `rows` takes on this path beyond the cache: the
-/// widest group's permuted quantized activation, its gate, up, SwiGLU and
-/// down outputs, the ring's quantized copies of the SwiGLU output, and the
-/// host's rows.
+/// Device bytes a pass of `rows` needs on this path, beyond the cache.
+///
+/// Covers the widest group's permuted activation, its gate, up, SwiGLU and
+/// down outputs, the quantized SwiGLU copies, and the host's rows.
 pub(super) fn scratch_bytes(rows: usize, d: usize, d_ff: usize, per_block: usize) -> usize {
     let widest = padded(rows, per_block);
     let f32s = widest * (d + 3 * d_ff) + rows * d;
@@ -49,14 +49,14 @@ pub(super) fn scratch_bytes(rows: usize, d: usize, d_ff: usize, per_block: usize
     f32s * size_of::<f32>() + quantized(d) + 4 * quantized(d_ff)
 }
 
-/// Whether the grouped path can run a set: gate and up in one format, and
-/// widths in whole blocks and tiles.
+/// Whether the grouped path can run a set. Gate and up must share a format,
+/// and both widths must be whole blocks and tiles.
 pub(super) fn can_group(set: &ExpertSet, d: usize, d_ff: usize) -> bool {
     set.gate.quant() == set.up.quant() && [d, d_ff].iter().all(|w| w.is_multiple_of(256) && w.is_multiple_of(QGEMM_TN))
 }
 
-/// One expert's rows of the permuted activation: its first padded row and
-/// the real rows there.
+/// One expert's rows in the permuted activation: the first padded row and
+/// the count of real rows.
 struct Segment {
     expert: usize,
     start: usize,
@@ -68,29 +68,30 @@ fn permute_tile(k: usize) -> usize {
     (1..=k.min(256)).rev().find(|t| k.is_multiple_of(*t)).unwrap_or(1)
 }
 
-/// A pass's permutation, each group's schedule, positions and weights,
-/// and the pinned rows the host's experts produce, reused block after
-/// block: a block's end synchronizes before the next one writes them.
+/// A pass's permutation, each group's schedule, positions and weights, and
+/// the pinned rows the host's experts produce.
+///
+/// Reused across blocks. Each block synchronizes at its end, before the
+/// next one writes these.
 pub(super) struct GroupedScratch {
     perm: Staged<i32>,
     sched: Staged<i32>,
     pos: Staged<i32>,
     w: Staged<f32>,
-    /// Integers a group's schedule table may take.
+    /// Maximum entries in one group's schedule table.
     sched_stride: usize,
     /// `[MAX_ROWS, d_model]` the host's share sums into.
     y_host: LockedBuffer<f32>,
     /// The permutation kernels' names and tiles, for the int8 rows and for
-    /// their scales; a launch wants a name that lives as long as the
-    /// process, and this scratch does.
+    /// their scales. A launch needs a `'static` name, so these are leaked.
     permute: [(&'static str, usize); 2],
 }
 
 impl GroupedScratch {
     fn new(n_expert: usize, per_block: usize, d: usize) -> Result<GroupedScratch> {
         let uses = MAX_ROWS * MOE_USED;
-        // A segment is at least one tile and the rows past the first tile
-        // of each add at most `uses / TM` more over the whole block.
+        // Each segment is at least one tile, and the rows past each first
+        // tile add at most `uses / TM` tiles over the whole block.
         let sched_stride = 2 * (per_block + uses / QGEMM_TM);
         let groups = n_expert.div_ceil(per_block);
         let scale_tile = permute_tile(d / 32);
@@ -107,7 +108,7 @@ impl GroupedScratch {
     }
 }
 
-/// Rows of `elem` copied by a permutation, `tk` columns a program.
+/// Gathers rows of `elem` through a permutation, `tk` columns per program.
 fn moe_permute_src(elem: &str, tk: usize) -> String {
     format!(
         "@launch(256)
@@ -123,8 +124,8 @@ kernel moe_permute_{elem}_{tk}(PERM: tensor<i32>[1, M], A: tensor<{elem}>[R, K],
     )
 }
 
-/// The K-quant prompt GEMM over a schedule table: program `p` contracts
-/// activation tile `SCHED[1, p]` against slot `SCHED[0, p]`'s rows.
+/// The K-quant prompt GEMM over a schedule table. Program `p` contracts
+/// activation tile `SCHED[1, p]` against the rows of slot `SCHED[0, p]`.
 fn moe_qgemm_src(name: &str, ne: usize) -> String {
     format!(
         "@launch(256, 2)
@@ -143,9 +144,9 @@ kernel {name}_moe_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB], SCHED: tens
     )
 }
 
-/// Each row's eight down rows of one group gathered by position and added
-/// with the router's weights into the residual; an entry outside the group
-/// carries weight zero.
+/// Gathers each row's down outputs for one group by position and adds
+/// them, weighted by the router, into the residual. Entries outside the
+/// group carry weight zero.
 fn moe_gather_add_src() -> String {
     format!(
         "@launch(256)
@@ -186,8 +187,8 @@ kernel moe_shared(G: tensor<f32>[R, 1], S: tensor<f32>[R, N], X: tensor<f32>[R, 
 }
 
 impl DeviceBackend {
-    /// The rows' feed-forward as grouped GEMMs, after the sync point has
-    /// filled the block's `topk_host`. Eager: the caller flushed.
+    /// Runs the rows' feed-forward as grouped GEMMs. Call after the sync
+    /// point has filled the block's top-k, with the stream flushed.
     pub(super) fn run_grouped(&self, experts: &mut Experts, req: &Moe, shared: (Buf, Buf)) -> Result<()> {
         let mut scratch = match experts.grouped.take() {
             Some(scratch) => scratch,
@@ -219,21 +220,21 @@ impl DeviceBackend {
         for job in &host_jobs {
             on_host[job.expert] = true;
         }
-        // The host reads the activation before the device's work is
-        // queued, since a read drains the stream.
+        // Read the activation before queuing device work, since a read
+        // drains the stream.
         let mut x_host = Vec::new();
         if !host_jobs.is_empty() {
             x_host.resize(rows * d, 0.0);
             self.read(req.x, &mut x_host)?;
         }
 
-        // The device's own time over its experts, for the split.
+        // Times the device's experts, to tune the host share.
         let device_span = [Event::new(EventFlags::DEFAULT)?, Event::new(EventFlags::DEFAULT)?];
         device_span[0].record(&self.stream)?;
 
-        // Each device expert's segment padded to the tile; padding rows read
-        // row zero and nothing gathers their outputs. Each entry's padded
-        // row and the segment it is in, for the gathers.
+        // Pad each device expert's segment to the tile. Padding rows read
+        // row zero and their outputs are never gathered. Record each
+        // entry's padded row and segment for the gathers.
         let mut segments = Vec::new();
         let mut perm: Vec<i32> = Vec::new();
         let mut pos = vec![0usize; entries];
@@ -249,16 +250,16 @@ impl DeviceBackend {
             segments.push(Segment { expert, start, len: users.len() });
         }
 
-        // Groups of at most the block's slots, each a contiguous run of
-        // padded rows. Scratch is sized by a bound on the rows rather than
-        // by this block's routing, since the pool hands a buffer out again
-        // only for its exact length.
+        // Groups of at most the block's slot count, each a contiguous run
+        // of padded rows. Scratch is sized from a row bound, not from this
+        // block's routing, because the pool reuses buffers only at their
+        // exact length.
         let groups: Vec<&[Segment]> = segments.chunks(experts.per_block).collect();
         let span = |g: &[Segment]| (g[0].start, g.last().map_or(0, |s| s.start + s.len.next_multiple_of(QGEMM_TM)) - g[0].start);
         let widest = padded(rows, experts.per_block);
         let perm_ptr = scratch.perm.push(0, &perm, &self.stream)?;
-        // The permuted activation as the GEMMs read it, int8 rows and their
-        // scales, in the pool's f32 units.
+        // The last two are the permuted int8 activation and its scales,
+        // sized in the pool's f32 units.
         let bufs = [
             self.alloc(widest * d_ff)?,
             self.alloc(widest * d_ff)?,
@@ -275,7 +276,8 @@ impl DeviceBackend {
 
         for (gi, group) in groups.into_iter().enumerate() {
             let (g_start, g_rows) = span(group);
-            // The group's rows of the quantized activation and its scales.
+            // Permute the group's rows of the quantized activation and its
+            // scales.
             let perm_at = perm_ptr + (g_start * size_of::<i32>()) as u64;
             for (elem, (name, tk), src, dst, cols) in [("i8", rows_kernel, xq, qa, d), ("f32", scales_kernel, xs, das, d / 32)] {
                 self.with_kernel(&self.moe_permute, (elem, tk), "moe_permute", || moe_permute_src(elem, tk), |module| {
@@ -310,8 +312,8 @@ impl DeviceBackend {
             let (hqa, hdas) = self.act_ptrs(hact)?;
             self.grouped_gemm(experts, block, Stack::Down, hqa, hdas, g_rows, d_ff, table_ptr, tiles, d, self.ptr(down_out, 0)?)?;
 
-            // This group's entries by their rows in its down output, the
-            // rest at row zero with weight zero.
+            // Map this group's entries to their rows in the down output.
+            // Other entries point at row zero with weight zero.
             let (first, last) = (gi * experts.per_block, gi * experts.per_block + group.len());
             let in_group = |i: usize| (first..last).contains(&segment_of[i]);
             let pos_g: Vec<i32> = (0..entries).map(|i| if in_group(i) { (pos[i] - g_start) as i32 } else { 0 }).collect();
@@ -346,7 +348,7 @@ impl DeviceBackend {
         })?;
         device_span[1].record(&self.stream)?;
 
-        // The host's share, while the device runs its groups.
+        // Run the host's share while the device runs its groups.
         let mut host_micros = 0.0;
         if !host_jobs.is_empty() {
             let started = Instant::now();
@@ -359,11 +361,11 @@ impl DeviceBackend {
             experts.stats.cpu_nanos += (host_micros * 1e3) as u64;
             self.add_host_rows(req.dest, &scratch.y_host, rows * d)?;
         }
-        // The next block rewrites the staging the launches just issued read.
+        // The next block rewrites the staging these launches read.
         self.stream.synchronize()?;
-        // Each side's time is about proportional to its count of experts,
-        // so the two rates say where the split balances; the share moves
-        // halfway there, and no further than the ends.
+        // Each side's time is roughly proportional to its expert count, so
+        // the two rates give the balanced split. Move the share halfway
+        // there, clamped.
         if !host_jobs.is_empty() && host_micros > 0.0 {
             let device_micros = f64::from(device_span[1].elapsed_time_f32(&device_span[0])?) * 1e3;
             let share = experts.host_share;
@@ -391,10 +393,10 @@ impl DeviceBackend {
         })
     }
 
-    /// Pinned rows of `len` floats in all added into `dest` in stream
-    /// order: nothing is written before the recorded launches ahead of it
-    /// run, and the rows are rewritten only after the next sync point.
-    /// For a prompt pass's megabytes, which no refill competes with.
+    /// Adds `len` floats of pinned rows into `dest`, in stream order.
+    ///
+    /// The rows must not be rewritten before the next sync point. Meant for
+    /// a prompt pass, where no refill competes for the copy queue.
     fn add_host_rows(&self, dest: Buf, rows: &LockedBuffer<f32>, len: usize) -> Result<()> {
         let buf = self.alloc(len)?;
         // SAFETY: the pinned rows live with the grouped scratch.
@@ -406,9 +408,9 @@ impl DeviceBackend {
 
 }
 
-/// The experts the host takes: the lightest by rows among those not
-/// resident, the block's share of them, each sparing the device one copy.
-/// Their entries are in no group, so no gather adds them.
+/// The experts the host takes: the host share of the non-resident experts,
+/// fewest rows first. Their entries are in no group, so no gather adds
+/// them.
 fn host_jobs(experts: &Experts, block: usize, by_expert: &[Vec<(usize, usize)>], weights: &[f32]) -> Vec<Job> {
     let mut order: Vec<usize> = (0..by_expert.len()).filter(|&e| !by_expert[e].is_empty() && !experts.resident(block, e)).collect();
     order.sort_by_key(|&e| by_expert[e].len());

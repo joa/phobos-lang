@@ -3,17 +3,15 @@ use cust::memory::{DeviceBuffer, DeviceCopy};
 use phobos_kernels::cuda_ok;
 use std::cell::{Cell, RefCell};
 
-/// Slab size. A slab only ever wastes the tail a tensor does not fill, so
-/// the choice trades allocation count against wasted space: bigger slabs
-/// mean fewer allocations and more waste in tails, smaller slabs the
-/// opposite.
+/// Default slab size. Bigger slabs mean fewer allocations but more space
+/// wasted in the tails tensors do not fill.
 const SLAB_BYTES: usize = 128 * 1024 * 1024;
 
-/// [`SLAB_BYTES`], or what `PHOBOS_SLAB_MIB` overrides it to. The size
-/// decides whether the output head gets a slab to itself: a tensor larger
-/// than a slab does, and its own allocation lets the driver single it out
-/// for eviction. Above it, the head shares with weights that are read every
-/// token and have to be resident anyway.
+/// [`SLAB_BYTES`], or `PHOBOS_SLAB_MIB` if set.
+///
+/// A tensor larger than a slab gets its own allocation, which lets the
+/// driver evict it on its own. So the size decides whether the output head
+/// is separate or shares a slab with weights read every token.
 fn slab_bytes() -> usize {
     match std::env::var("PHOBOS_SLAB_MIB").ok().and_then(|v| v.parse::<usize>().ok()) {
         Some(mib) if mib > 0 => mib * 1024 * 1024,
@@ -21,33 +19,28 @@ fn slab_bytes() -> usize {
     }
 }
 
-/// Slab size for the small, hot constants: the Q8_0 scale planes and the f32
-/// tensors. They cannot share the bulk slabs, since a small plane read every
-/// token would drag a whole bulk slab resident with it, but leaving them one
-/// allocation each keeps the total over the count the driver falls off at.
-/// They get slabs of their own instead, small enough that dragging one is
-/// cheap.
+/// Slab size for small, hot constants: Q8_0 scale planes and f32 tensors.
+///
+/// In a bulk slab, a plane read every token would keep the whole slab
+/// resident. One allocation each would push the allocation count too high.
+/// Small slabs of their own avoid both.
 pub(super) const HOT_SLAB_BYTES: usize = 4 * 1024 * 1024;
 
-/// What every region is aligned to. The widest load a decode kernel issues is
-/// eight bytes; 256 keeps regions on a sector boundary as well, so a slab
-/// neighbour cannot cost a tensor an extra sector on its first block.
+/// Alignment of every region. 256 bytes keeps each region on a sector
+/// boundary, so a neighbour never costs a tensor an extra sector.
 const ALIGN: usize = 256;
 
-/// Slabs the weights are bump-allocated out of, so the model sits in a
-/// handful of large allocations rather than one each. Never freed: a weight
-/// lives as long as the backend does.
+/// Slabs the weights are bump-allocated from, so the model lives in a few
+/// large allocations. Never freed: a weight lives as long as the backend.
 ///
-/// WDDM manages residency per allocation, and past a point it stops being
-/// able to keep a large set of them resident even at a constant total size.
-/// The cliff needs both a high allocation count and a large footprint.
+/// WDDM manages residency per allocation. Many allocations with a large
+/// total footprint stop staying resident.
 #[derive(Default)]
 pub(super) struct Arena {
-    /// How much is taken from the driver at a time.
+    /// Bytes taken from the driver per slab.
     slab: Cell<usize>,
-    /// Each slab and how much of it has been handed out. First fit rather
-    /// than only the newest: a tensor that will not fit the slab being
-    /// filled still fits an earlier one instead of wasting it.
+    /// Each slab and how many bytes of it are handed out. Allocation is
+    /// first fit across all slabs, not only the newest.
     slabs: RefCell<Vec<(DeviceBuffer<u8>, usize)>>,
     /// Bytes handed out across every slab, for the report.
     handed: Cell<usize>,
@@ -61,10 +54,9 @@ impl Arena {
         arena
     }
 
-    /// Copy `data` onto the device and return where it landed.
+    /// Copies `data` onto the device and returns its address.
     ///
-    /// A region larger than a slab gets one of its own, so the output head is
-    /// still a single allocation rather than a special case.
+    /// A region larger than a slab gets a slab of its own.
     pub(super) fn upload<T: DeviceCopy>(&self, data: &[T]) -> Result<u64> {
         let bytes = std::mem::size_of_val(data);
         let want = bytes.next_multiple_of(ALIGN);
@@ -94,20 +86,19 @@ impl Arena {
         Ok(at)
     }
 
-    /// Bytes the slabs occupy, which is what the weights cost the card, and
-    /// the bytes actually handed out, whose difference is the tails.
+    /// Bytes the slabs occupy and bytes handed out. The difference is the
+    /// unused tails.
     pub(super) fn bytes(&self) -> (usize, usize) {
         let held = self.slabs.borrow().iter().map(|(s, _)| s.len()).sum();
         (held, self.handed.get())
     }
 
-    /// How many allocations that is.
+    /// Number of slabs, which is the number of allocations.
     pub(super) fn slabs(&self) -> usize {
         self.slabs.borrow().len()
     }
 
-    /// Give every slab back. Only for an arena whose regions are all dead: a
-    /// caller that hands out regions individually has to count them itself.
+    /// Frees every slab. Only valid once no region is in use any more.
     pub(super) fn reset(&self) {
         self.slabs.borrow_mut().clear();
         self.handed.set(0);

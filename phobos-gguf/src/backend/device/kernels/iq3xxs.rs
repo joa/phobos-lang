@@ -1,10 +1,10 @@
-// IQ3_XXS matvec: same raw-byte decode as iq2xxs.rs; its scale-and-sign
-// field is byte-for-byte IQ2_XXS's own `aux32` (see quant/iq3_xxs.rs), so
-// this reuses IQ2_XXS's flattened sign table. Grid entries are four bytes
-// (`[u32; 256]`, not IQ2_XXS's `[u64; 256]`), so each lane needs two
-// four-wide gathers landing in two separate `dot_t` calls. `IOTA[0 :+ 1,
-// 0 :+ 4]` reads offsets straight from the tensor parameter for both,
-// since a `let`-bound view cannot be resliced.
+// IQ3_XXS matvec, with the same raw-byte decode as iq2xxs.rs.
+//
+// The scale-and-sign field has IQ2_XXS's `aux32` layout (see
+// quant/iq3_xxs.rs), so this reuses IQ2_XXS's sign table. Grid entries are
+// four bytes rather than eight, so each lane does two four-wide gathers
+// into two separate `dot_t` calls. Both read their iota straight from the
+// `IOTA` parameter, since a `let`-bound view cannot be sliced again.
 
 use std::fmt::Write as _;
 
@@ -19,12 +19,13 @@ const BLOCK_BYTES: usize = 96;
 const QS_OFF: usize = 0;
 const SS_OFF: usize = QS_OFF + 64;
 
-/// [`crate::quant::iq3xxs_flat_grid`]'s length: 256 grid entries, four
-/// `i32` lanes apiece.
+/// [`crate::quant::iq3xxs_flat_grid`]'s length: 256 grid entries of four
+/// lanes each.
 pub(crate) const IQ3XXS_GRID_LEN: usize = 256 * 4;
 
-/// Byte offsets for lane `is` (ib32 = is/4, l = is%4); same derivation as
-/// `iq2xxs.rs::run_geometry` since both read an identical `aux32` layout.
+/// Byte offsets for lane `is`, with `ib32 = is / 4` and `l = is % 4`. The
+/// sign part matches `iq2xxs.rs::run_geometry`, since the `aux32` layout
+/// is the same.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize, Option<usize>, usize) {
     let ib32 = is / 4;
     let l = is % 4;
@@ -40,8 +41,8 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize, Option<usize>, usize)
     (base, base + 1, scale_off, lo_off, hi_off, shift_div)
 }
 
-/// Both of one lane's decoded halves, `let decoded{is}_{half} = ...`, and
-/// each half's own `out_off`.
+/// Both of one lane's decoded halves, `let decoded{is}_{half} = ...`, each
+/// with its `out_off`.
 fn decoded_lane(is: usize) -> [(usize, String); 2] {
     let (g1_off, g2_off, scale_off, lo_off, hi_off, shift_div) = run_geometry(is);
     let out_off = is * 8;
@@ -129,10 +130,9 @@ kernel iq3xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq3xxs_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq3xxs_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which
-/// this mirrors. `@aligned(N = TN)` is required for the same reason:
-/// `iq3xxs_qdot_t` demands its `qb`/`d` slices provably in bounds.
+/// [`iq3xxs_matvec_src`] for `m == 1`, as one `iq3xxs_qdot_t` call;
+/// mirrors `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `iq3xxs_qdot_t` needs its `qb` and `d` slices provably in bounds.
 pub(crate) fn iq3xxs_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -149,9 +149,9 @@ kernel iq3xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq3xxs_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`iq3xxs_matvec_src`]'s decode, stored into a `[K, N]` scratch instead
+/// of reduced against an activation row; see `iq1s_dequant_src` in
+/// `iq1s.rs`.
 pub(crate) fn iq3xxs_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..LANES {
@@ -181,8 +181,8 @@ kernel iq3xxs_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq3xxs_dequant_src`]'s decode as a single `iq3xxs_qdecode_t` call; see
-/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ3_XXS.
+/// [`iq3xxs_dequant_src`]'s decode as one `iq3xxs_qdecode_t` call. Mirrors
+/// `iq1s_qdecode_src` in `iq1s.rs`.
 pub(crate) fn iq3xxs_qdecode_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -204,8 +204,8 @@ kernel iq3xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
 
 /// IQ3_XXS's prompt projection, decode and contraction in one kernel.
 ///
-/// A grid entry is four bytes here, so a lane joins two of them; the scale
-/// and sign geometry is IQ2_XXS's byte for byte. See `qmma_signed.rs`.
+/// A grid entry is four bytes here, so a lane joins two of them. The scale
+/// and sign layout is the same as IQ2_XXS's. See `qmma_signed.rs`.
 pub(crate) fn iq3xxs_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     format!(
         "@launch({block})

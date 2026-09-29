@@ -1,13 +1,11 @@
-// Q8_0 dequantizing matvec: the decode-step projection with the weights left
-// quantized in memory.
+// Q8_0 matvec: a decode-step projection that reads the weights quantized.
 //
-// GGUF Q8_0 stores weights as signed bytes with one f32 scale per block of 32
-// values along the contraction axis. Keeping them as i8 all the way into the
-// kernel is the point: a decode step is bound by weight bandwidth, and i8 reads
-// a quarter of the bytes that the dequantized f32 copy would.
+// Q8_0 stores signed bytes with one scale per block of 32 values along the
+// contraction axis. Reading the bytes directly moves a quarter of the data
+// an f32 copy would.
 //
-// The scale factors out of the block's dot product, so it applies once per
-// block per output column rather than once per weight.
+// The scale factors out of a block's dot product, so it is applied once per
+// block and column, not once per weight.
 @autotune(TILE_N in [64], BLK in [32])
 @launch(256)
 kernel q8_matvec(A: tensor<f32>[1, K],

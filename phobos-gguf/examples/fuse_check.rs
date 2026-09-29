@@ -3,22 +3,22 @@
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example fuse_check -- MODEL.gguf [-n STEPS] [--single]
 //
-// Runs both paths on one backend, over one upload of weights, so the only
-// difference between the two passes is the fusion. A pass of more than one
-// row must come out exactly equal, since no stage fuses past one row; a
-// decode step may differ by its own accumulation order, bounded by `APART_MAX`.
+// Both paths run on one backend over one upload of weights, so fusion is the
+// only difference. A pass of more than one row must match exactly, since no
+// stage fuses past one row. A decode step may differ by accumulation order,
+// up to `APART_MAX`.
 
 use anyhow::{Result, bail};
 use phobos_gguf::{Bpe, Decoder, Gguf};
 
 use phobos_gguf::backend::device;
 
-/// Where a defect lands rather than where rounding does: comfortably above
-/// what a correct fusion's own accumulation order drifts by, and comfortably
-/// below what a broken one produces.
+/// The largest allowed gap, as a fraction of the logit spread. Well above a
+/// correct fusion's accumulation drift, and well below what a broken one
+/// produces.
 ///
-/// A flip cannot carry this on its own: a large enough drift makes every
-/// flip undecided, so a gross defect would report nothing but ties.
+/// Token flips alone cannot catch a defect. With enough drift every flip
+/// counts as tied, so a gross defect would report only ties.
 const APART_MAX: f32 = 1e-1;
 
 fn main() -> Result<()> {
@@ -42,9 +42,9 @@ fn main() -> Result<()> {
         tokens.truncate(1);
     }
 
-    // One backend, one set of weights, two contexts. The recorded pass is keyed
-    // by its launch list, so alternating the two configurations rebuilds the
-    // graph every pass; that costs time and nothing else.
+    // One backend, one set of weights, two states. The recorded pass is keyed
+    // by its launch list, so alternating configurations rebuilds the graph
+    // every pass. That only costs time.
     let mut gpu = device::DeviceBackend::new()?;
     let mut plain_state = model.new_state();
     let mut fused_state = model.new_state();
@@ -62,13 +62,12 @@ fn main() -> Result<()> {
         gpu.set_fused(true);
         let got = model.forward(&mut fused_state, &feed, &gpu)?;
 
-        // The same measure `model_check` and `batch_check` report, so the three
-        // numbers can be put next to each other.
+        // The same measure `model_check` and `batch_check` report, so the
+        // numbers compare.
         let spread = want.iter().fold(f32::MIN, |a, &b| a.max(b))
             - want.iter().fold(f32::MAX, |a, &b| a.min(b));
-        // Checked before the distance, because `f32::max` returns the operand
-        // that is not NaN: a fused path that produced NaN would fold to a
-        // distance of exactly zero and read as perfect agreement.
+        // Checked before the distance. `f32::max` drops NaN, so a NaN logit
+        // would fold to zero distance and look like perfect agreement.
         if let Some(at) = got.iter().position(|v| !v.is_finite()) {
             bail!(
                 "the fused path put {} in logit {at} at step {step}",
@@ -82,9 +81,8 @@ fn main() -> Result<()> {
             .fold(0.0f32, f32::max)
             / spread;
         let (plain_top, fused_top) = (argmax(&want), argmax(&got));
-        // A flip only means something when the launched path was decided: two
-        // leading logits closer together than the drift can come out either way
-        // and the flip carries no information.
+        // A flip counts only when the launched path was decisive. Two top
+        // logits closer than the drift can come out either way.
         let decisive = top_margin(&want) > 2.0 * apart * spread;
         if plain_top != fused_top {
             flips += 1;
@@ -93,8 +91,8 @@ fn main() -> Result<()> {
             (worst, worst_at) = (apart, step);
         }
         let rows = feed.len();
-        // A one-token prompt is already a decode step, so the average is over
-        // what actually fused rather than over the loop.
+        // Average over one-row passes only, the ones that fuse. A one-token
+        // prompt counts.
         if rows == 1 {
             total += apart;
             decodes += 1;

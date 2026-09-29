@@ -5,7 +5,6 @@ pub struct Context {
     /// Whether to print the output of different compiler phases.
     pub print_phases: bool,
 
-    /// The GPU config.
     pub gpu_config: GpuConfig,
 
     /// Values for @autotune search dims.
@@ -32,9 +31,9 @@ pub enum GpuConfig {
 }
 
 impl GpuConfig {
-    /// Chip's compute capability as a number (sm_75 is 75, sm_90a is 90).
-    /// Selects a target's instruction vocabulary; everything the number then
-    /// decides lives behind that vocabulary rather than here.
+    /// The chip's compute capability as a number (sm_75 is 75, sm_90a is 90).
+    /// It selects the target's instruction vocabulary. Anything that depends
+    /// on the number belongs behind that vocabulary, not here.
     ///
     /// TODO(joa): how to map this across vendors
     pub fn compute_capability(&self) -> u32 {

@@ -14,47 +14,45 @@ pub use moe::{ExpertsBuf, Lookahead, Moe, route};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Buf(pub usize);
 
-/// A handle to backend-owned storage holding f16 rather than f32, its length
-/// still counted in elements. Only the key and value caches use it: GQA reads
-/// each cached position once per query in its group, and the decode kernel is
-/// bound by the rate it reads them, so halving the format halves bytes moved.
-/// Everything else stays f32; the kernels widen a cached element on load.
+/// A handle to backend-owned f16 storage, its length counted in elements.
+///
+/// Only the key and value caches use it, since decode attention is bound by
+/// how fast it reads them. Kernels widen a cached element to f32 on load.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HBuf(pub usize);
 
-/// A weight left quantized, held in the planes its kernels index. See
-/// [`crate::quant::Spec::planes`] for what those are.
+/// A quantized weight held as planes. See [`crate::quant::Spec::planes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QBuf(pub usize);
 
-/// A weight held in its file's raw block bytes plus the header-field planes
-/// [`crate::quant::Spec::raw_scales`] pulls out of them, for a kernel that
-/// decodes the rest itself. [`Backend::constant_raw`]'s default wraps a plain
-/// dense [`Buf`], so this is safe to read as one whenever a backend has not
-/// overridden that method.
+/// A weight held as its file's raw block bytes, plus the planes
+/// [`crate::quant::Spec::raw_scales`] extracts, for a kernel that decodes it
+/// itself.
+///
+/// Under [`Backend::constant_raw`]'s default this wraps a dense [`Buf`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RawBuf(pub usize);
 
-/// An activation quantized once for the several projections that read it. Valid
-/// only inside the pass that produced it, and only while its source buffer is
-/// unchanged.
+/// An activation quantized once for the projections that share it.
+///
+/// Valid only inside the pass that produced it, and only while its source
+/// buffer is unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QAct(pub usize);
 
-/// Elements sharing one activation scale. Activations quantize to Q8_0
-/// whatever format the weight is held in, so this is the block every
-/// quantized contraction here runs on.
+/// Elements sharing one activation scale. Activations always quantize to
+/// Q8_0, whatever the weight's format.
 pub const Q8_BLOCK: usize = crate::quant::Q8_0_BLOCK;
 
-/// The block [`Backend::hadamard`] transforms in: the only one a folded
-/// file here declares, and the one the device kernel is written for.
+/// The block size [`Backend::hadamard`] transforms in. The device kernel
+/// supports only this size.
 pub const HADAMARD_BLOCK: usize = 1024;
 
-/// Widest output [`Backend::matmul_rows`] takes: past it the `[k, n]`
-/// kernels have columns enough to spread across the card.
+/// Widest output [`Backend::matmul_rows`] takes. Wider projections use the
+/// `[k, n]` kernels.
 pub const ROWS_MAX_N: usize = 128;
 
-/// What `k` has to be a multiple of for [`Backend::matmul_rows`].
+/// [`Backend::matmul_rows`] needs `k` to be a multiple of this.
 pub const ROWS_TK: usize = 32;
 
 /// Whether [`Backend::matmul_rows`] takes a `[k, n]` projection.
@@ -73,7 +71,7 @@ pub struct Plane {
     pub pitch: usize,
 }
 
-/// [`Plane`] over f16 storage: the destination [`Backend::store_2d`] writes.
+/// [`Plane`] over f16 storage, the destination of [`Backend::store_2d`].
 #[derive(Clone, Copy, Debug)]
 pub struct HPlane {
     pub buf: HBuf,
@@ -81,9 +79,9 @@ pub struct HPlane {
     pub pitch: usize,
 }
 
-/// The delta net's value heads regrouped ahead of a folded projection:
-/// grouped head `k * repeat + r` reads tiled head `r * groups + k`. See
-/// [`crate::hadamard`].
+/// How the delta net's value heads are regrouped ahead of a folded
+/// projection: grouped head `k * repeat + r` reads tiled head
+/// `r * groups + k`. See [`crate::hadamard`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct HeadPerm {
     pub head_dim: usize,
@@ -130,10 +128,10 @@ impl Attn {
 
 /// A whole decode MLP, for a backend that can run it as one kernel.
 ///
-/// `x` is the residual row and destination both, since the down projection
-/// adds into it. The normalization is part of the request rather than a step
-/// already taken, so a fused kernel recomputes it per block instead of
-/// paying a barrier to share it.
+/// `x` is the residual row and also the destination, since the down
+/// projection adds into it. The normalization is part of the request so a
+/// fused kernel can recompute it per block instead of sharing it through a
+/// barrier.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedMlp {
     pub x: Buf,
@@ -148,9 +146,8 @@ pub struct FusedMlp {
     pub down: QBuf,
 }
 
-/// [`FusedMlp`] over raw-format weights, which a raw file holds as two
-/// separate gate and up tensors. Each carries its format, since a file mixes
-/// formats per tensor.
+/// [`FusedMlp`] over raw-format weights, with separate gate and up tensors.
+/// Each carries its own format, since a file can mix formats.
 pub struct FusedMlpRaw {
     pub x: Buf,
     pub d_model: usize,
@@ -162,10 +159,9 @@ pub struct FusedMlpRaw {
     pub down: (RawBuf, Quant),
 }
 
-/// Attention's output epilogue for a backend that can run it as one kernel:
-/// quantize the mixed heads, then the output projection accumulating into the
-/// residual. Unlike [`FusedProject`] there is no normalization ahead of it --
-/// `x` is already what the attention kernel produced.
+/// Attention's output epilogue as one kernel: quantize the mixed heads, then
+/// run the output projection, accumulating into the residual. There is no
+/// normalization ahead of it.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedAttnOut {
     /// The mixed heads, one row, `width` wide.
@@ -178,8 +174,7 @@ pub struct FusedAttnOut {
     pub dest: Buf,
 }
 
-/// A weight a fused projection contracts against, in a form the pass has a
-/// stage for.
+/// A weight a fused projection contracts against.
 #[derive(Clone, Copy, Debug)]
 pub enum ProjWeight {
     /// Q8_0 planes.
@@ -188,11 +183,11 @@ pub enum ProjWeight {
     Raw(RawBuf, Quant),
 }
 
-/// One contiguous run of a projection's outputs, and where the caller wants
-/// it. A stacked projection's consumers can want their window elsewhere (the
-/// delta net's convolution reads its qkv plane as the tail of a padded
-/// stream), so naming the destination per run lets the projection write
-/// there instead of being copied out afterwards.
+/// One contiguous run of a projection's outputs and where to write it.
+///
+/// A per-run destination lets the projection write each window straight to
+/// its consumer, for example the tail of the delta net's padded history,
+/// instead of copying it out afterwards.
 #[derive(Clone, Copy, Debug)]
 pub struct ProjRun {
     /// Which of the projection's weights this run reads.
@@ -204,9 +199,8 @@ pub struct ProjRun {
     pub dst_off: usize,
 }
 
-/// A normalization and the projection reading it, for a backend that can run
-/// them as one kernel. `x` is the residual row, normalized per block rather
-/// than published, for the reason [`FusedMlp`] gives.
+/// A normalization and the projection reading it, as one kernel. `x` is the
+/// residual row, normalized per block as in [`FusedMlp`].
 #[derive(Clone, Copy, Debug)]
 pub struct FusedProject<'a> {
     pub x: Buf,
@@ -214,19 +208,17 @@ pub struct FusedProject<'a> {
     /// Gain of the normalization ahead of the projection.
     pub gain: Buf,
     pub eps: f32,
-    /// Each `[out_dim, d_model]`, the runs being windows of their outputs. A
-    /// raw file keeps a stacked projection's parts as separate tensors, so
-    /// one projection reads several weights.
+    /// Each `[out_dim, d_model]`. A raw file keeps a stacked projection's
+    /// parts as separate tensors, so there can be several.
     pub weights: &'a [(ProjWeight, usize)],
     pub runs: &'a [ProjRun],
-    /// The delta net's convolution and gates, for a chain continuing past the
-    /// projection into them.
+    /// The delta net's convolution and gates, if the chain continues into
+    /// them.
     pub mix: Option<FusedMix>,
 }
 
-/// Which halves of a [`FusedProject`] a backend ran, so the caller knows what it
-/// still has to launch itself. The two are separate because the tail is gated on
-/// its own and a backend may cover the projection without it.
+/// Which halves of a [`FusedProject`] a backend ran. The caller launches the
+/// rest itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Fused {
     /// The normalization, the projection and its runs.
@@ -236,10 +228,8 @@ pub struct Fused {
 }
 
 /// The delta net's convolution and per-head gates as the tail of a fused
-/// projection: [`Backend::delta_conv`] and [`Backend::delta_gates`] with the
-/// same operands, run in the kernel that produced their input. Only the
-/// convolution costs a barrier; the gates read a window it already
-/// published, riding along for free.
+/// projection. Same operands as [`Backend::delta_conv`] and
+/// [`Backend::delta_gates`], run in the kernel that produced their input.
 #[derive(Clone, Copy, Debug)]
 pub struct FusedMix {
     pub spec: DeltaMix,
@@ -261,13 +251,13 @@ pub struct FusedMix {
 #[derive(Clone, Copy, Debug)]
 pub struct DeltaMix {
     pub rows: usize,
-    /// Value heads: the packed layout's head count, what the delta rule, the
-    /// gates and the readout norm all run at.
+    /// Value heads. This is the head count of the packed layout, the delta
+    /// rule, the gates and the readout norm.
     pub heads: usize,
     pub head_dim: usize,
-    /// Query/key heads. Equal to `heads` outside a grouped-query deltanet;
-    /// otherwise fewer, each repeated `heads / kv_heads` times to match, the
-    /// same repetition [`ggml_repeat_4d`] does upstream.
+    /// Query/key heads. Equal to `heads` unless the delta net is grouped.
+    /// Then there are fewer, each repeated `heads / kv_heads` times, as
+    /// [`ggml_repeat_4d`] does upstream.
     pub kv_heads: usize,
     /// Taps in the causal depthwise convolution.
     pub kernel: usize,
@@ -275,10 +265,9 @@ pub struct DeltaMix {
     pub planes: [usize; 3],
     /// Distance between consecutive heads within a plane.
     pub head_stride: usize,
-    /// L2-normalize the query and key, what the delta rule is defined on.
+    /// L2-normalize the query and key.
     pub normalize: bool,
-    /// Applied to the query after normalization: the `1/sqrt(d)` softmax
-    /// attention also carries.
+    /// Applied to the query after normalization, typically `1/sqrt(d)`.
     pub query_scale: f32,
 }
 
@@ -293,8 +282,8 @@ impl DeltaMix {
         self.rows * self.heads
     }
 
-    /// Width of one position of the fused projection: query and key at
-    /// `kv_heads` wide apiece, value at the full `heads`.
+    /// Width of one position of the fused projection: query and key
+    /// `kv_heads` wide each, value `heads` wide.
     pub fn channels(&self) -> usize {
         (2 * self.kv_heads + self.heads) * self.head_dim
     }
@@ -319,30 +308,25 @@ impl DeltaMix {
 /// uploaded with. See [`crate::quant::Spec::planes`].
 type HostQuant = (Vec<i8>, Vec<f32>, usize);
 
-/// Where a GGUF model's arithmetic happens. The unit of exchange is a [`Buf`]
-/// handle rather than a slice, so activations stay wherever the backend
-/// computes.
+/// Where a GGUF model's arithmetic happens. Operands are [`Buf`] handles, so
+/// activations stay wherever the backend computes.
 pub trait Backend {
     fn alloc(&self, len: usize) -> Result<Buf>;
     fn release(&self, buf: Buf);
 
-    /// Free and total bytes on the device this backend allocates from, for a
-    /// caller deciding up front whether a model fits. A backend working out of
-    /// host memory reports nothing: it competes with the whole machine rather
-    /// than with a fixed budget, and the operating system oversubscribes.
+    /// Free and total bytes on this backend's device, to check whether a
+    /// model fits. `None` for a host backend, which has no fixed budget.
     fn device_memory(&self) -> Option<(usize, usize)> {
         None
     }
 
-    /// The card this backend computes on, or nothing for one that is not on
-    /// a card at all.
+    /// The card this backend computes on, or `None` for a host backend.
     fn device_info(&self) -> Option<phobos_inference::DeviceInfo> {
         None
     }
 
-    /// What this backend's caches have returned so far, for a caller that
-    /// reports it. A backend that compiles nothing and pools nothing has
-    /// nothing to say, which is not the same as a hit rate of zero.
+    /// Hit statistics for this backend's caches. `None` means the backend
+    /// has no caches, not a hit rate of zero.
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
         None
     }
@@ -350,11 +334,11 @@ pub trait Backend {
     fn upload(&self, data: &[f32]) -> Result<Buf>;
     fn read(&self, buf: Buf, out: &mut [f32]) -> Result<()>;
 
-    /// The index of the largest of `buf`'s first `len` elements, without
-    /// reading the rest back. The default reads the whole vector and reduces
-    /// on the host; a device backend overrides it with a reduction that
-    /// never leaves the card. Ties go to the last of equal maxima, matching
-    /// [`phobos_inference::sampling::argmax`], which this delegates to.
+    /// The index of the largest of `buf`'s first `len` elements.
+    ///
+    /// The default reads the vector back and reduces on the host. A device
+    /// backend overrides it to reduce on the card. Ties go to the last
+    /// maximum, as in [`phobos_inference::sampling::argmax`].
     fn argmax(&self, buf: Buf, len: usize) -> Result<i64> {
         let mut out = vec![0.0f32; len];
         self.read(buf, &mut out)?;
@@ -368,22 +352,21 @@ pub trait Backend {
     /// [`Backend::alloc`] in f16, `len` still counted in elements.
     fn alloc_h(&self, len: usize) -> Result<HBuf>;
     fn release_h(&self, buf: HBuf);
-    /// [`Backend::zeroed`] for a buffer that lives as long as the sequence: a
-    /// backend where residency is per allocation wants those together rather
-    /// than one each. Defaults to an ordinary zeroed buffer.
+    /// [`Backend::zeroed`] for a buffer that lives as long as the sequence.
+    /// A backend may group these into shared allocations. Defaults to
+    /// [`Backend::zeroed`].
     fn zeroed_state(&self, len: usize) -> Result<Buf> {
         self.zeroed(len)
     }
 
     fn zeroed_h(&self, len: usize) -> Result<HBuf>;
 
-    /// Widen f16 storage back for a caller that has to look at it, which only
-    /// the checks do: nothing in a forward pass reads a cache on the host.
+    /// Reads f16 storage back as f32. Only the checks use it; a forward pass
+    /// never reads a cache on the host.
     fn read_h(&self, buf: HBuf, out: &mut [f32]) -> Result<()>;
 
-    /// [`Backend::copy`] between f16 buffers. Only a cache outgrowing itself
-    /// needs this, so `len` and both offsets are even and a backend may lean on
-    /// that to move whole words.
+    /// [`Backend::copy`] between f16 buffers, used when a cache grows. `len`
+    /// and both offsets are even, so a backend may move whole words.
     fn copy_h(
         &self,
         src: HBuf,
@@ -393,15 +376,14 @@ pub trait Backend {
         len: usize,
     ) -> Result<()>;
 
-    /// [`Backend::copy_2d`] rounding f32 into f16 as it goes: the projection's
-    /// keys and values landing in the caches. See [`HBuf`] for why they are held
-    /// narrow, and `phobos_base::half::f32_to_f16` for the rounding both
-    /// backends have to agree on.
+    /// [`Backend::copy_2d`] rounding f32 to f16, for writing keys and values
+    /// into the caches. Both backends must round as
+    /// `phobos_base::half::f32_to_f16` does.
     fn store_2d(&self, src: Plane, dst: HPlane, rows: usize, width: usize) -> Result<()>;
 
-    /// [`Backend::store_2d`] applied to two independent plane pairs in one
-    /// launch: attention's value and key landing in the same cache row. A
-    /// backend with no combined kernel calls [`Backend::store_2d`] twice.
+    /// [`Backend::store_2d`] on two independent plane pairs in one launch,
+    /// for a key and value landing in the same cache row. Defaults to two
+    /// [`Backend::store_2d`] calls.
     fn store_2d_pair(
         &self,
         a: (Plane, HPlane),
@@ -413,17 +395,17 @@ pub trait Backend {
         self.store_2d(b.0, b.1, rows, width)
     }
 
-    /// Attention's output epilogue (quantize the mixed heads, then the
-    /// output projection) as one kernel. `false` means the backend has no
+    /// Runs [`FusedAttnOut`] as one kernel. `false` means the backend has no
     /// fused form and the caller runs the two stages itself.
     fn fused_attn_out(&self, _out: FusedAttnOut) -> Result<bool> {
         Ok(false)
     }
 
     /// Brackets the device-only part of a forward pass over `rows`
-    /// positions; nothing in between reads back. The GPU backend replays the
-    /// bracket as one CUDA graph and frees a prompt pass's scratch once the
-    /// pass shape changes; backends that issue eagerly ignore both.
+    /// positions. Nothing in between reads back.
+    ///
+    /// The GPU backend records the bracket as one CUDA graph. Eager backends
+    /// ignore it.
     fn begin_pass(&self, _rows: usize) -> Result<()> {
         Ok(())
     }
@@ -431,47 +413,35 @@ pub trait Backend {
         Ok(())
     }
 
-    /// A weight uploaded once under `key` and reused afterwards. The backend
-    /// owns it for its lifetime; it is never released.
+    /// A weight uploaded once under `key` and reused afterwards. It is never
+    /// released.
     fn constant(&self, key: &str, data: &[f32]) -> Result<Buf>;
 
-    /// [`Backend::constant`] whose data costs something to produce: `fill`
-    /// runs only if `key` is not resident already. A weight in a format no
-    /// kernel unpacks goes up this way, dequantized once at upload rather
-    /// than once per token.
+    /// [`Backend::constant`] where `fill` runs only if `key` is not uploaded
+    /// yet. Formats with no kernel are dequantized this way at upload.
     fn constant_lazy(&self, key: &str, fill: &dyn Fn() -> Result<Vec<f32>>) -> Result<Buf>;
 
-    /// A quantized weight uploaded once under `key`, split into the planes its
-    /// kernels index. Only a format with [`crate::quant::Spec::planes`] can go
-    /// up this way; the rest dequantize through [`Backend::constant_lazy`].
+    /// A quantized weight uploaded once under `key`, split into planes. Only
+    /// formats with [`crate::quant::Spec::planes`] qualify.
     fn constant_quant(&self, key: &str, packed: &Packed) -> Result<QBuf>;
 
-    /// A weight uploaded once under `key` in its raw block bytes, for a
-    /// format with [`crate::quant::Spec::raw_scales`] but no kernel that
-    /// unpacks it into [`Backend::constant_quant`]'s planes. The default
-    /// lands it dense instead, via [`Backend::constant_lazy`]; the handle
-    /// stays valid either way.
+    /// A weight uploaded once under `key` as raw block bytes, for a format
+    /// with [`crate::quant::Spec::raw_scales`]. The default uploads it dense
+    /// via [`Backend::constant_lazy`].
     fn constant_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
         let buf = self.constant_lazy(key, &|| Ok(packed.dense()))?;
         Ok(RawBuf(buf.0))
     }
 
-    /// [`Backend::matmul`] against a weight uploaded through
-    /// [`Backend::constant_raw`]. The activation stays f32: a raw kernel
-    /// decodes its weight to f32 in place rather than needing a quantized
-    /// activation the way [`Backend::matmul_quant`] does. The default
-    /// matches [`Backend::constant_raw`]'s: `w` is a dense buffer in a
-    /// [`RawBuf`] wrapper.
+    /// [`Backend::matmul`] against a weight from [`Backend::constant_raw`],
+    /// with an f32 activation. The default treats `w` as the dense buffer
+    /// [`Backend::constant_raw`]'s default made.
     fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
         self.matmul(a, m, k, Buf(w.0), n, out)
     }
 
-    /// [`Backend::matmul_raw`] against an activation quantized already, where
-    /// the backend has a path that wants one. A raw kernel that decodes to f32
-    /// has no use for it, which is why this defaults to ignoring it; one that
-    /// contracts on the integer tensor cores does, since quantizing per weight
-    /// instead of reusing the caller's copy costs an `m * k` scratch slot per
-    /// projection.
+    /// [`Backend::matmul_raw`] with the activation also available quantized.
+    /// An integer tensor core path uses `act`; the default ignores it.
     #[allow(clippy::too_many_arguments)]
     fn matmul_raw_act(
         &self,
@@ -489,14 +459,13 @@ pub trait Backend {
     /// `out[m, n] = a[m, k] @ w[k, n]`, all row-major.
     fn matmul(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()>;
 
-    /// [`Backend::matmul`] against a weight held the other way round,
-    /// `w[n, k]`, for a projection at most [`ROWS_MAX_N`] wide with `k` a
-    /// whole number of [`ROWS_TK`] steps; see [`takes_rows`].
+    /// [`Backend::matmul`] against a transposed weight, `w[n, k]`. Only for
+    /// shapes [`takes_rows`] accepts.
     fn matmul_rows(&self, a: Buf, m: usize, k: usize, w: Buf, n: usize, out: Buf) -> Result<()>;
 
-    /// [`Backend::matmul`] against a weight left quantized. The activation
-    /// quantizes to Q8_0 whatever the weight's format is, so the contraction
-    /// is integer throughout. See [`quantize_row`].
+    /// [`Backend::matmul`] against a quantized weight. The activation is
+    /// quantized to Q8_0, so the contraction is all integer. See
+    /// [`quantize_row`].
     fn matmul_quant(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
         let act = self.quantize_act(a, m, k)?;
         self.matmul_quant_act(act, m, k, w, n, out)
@@ -561,34 +530,30 @@ pub trait Backend {
         self.quantize_act(out, rows, width)
     }
 
-    /// The normalization, both projections and the SwiGLU between them as
-    /// one kernel, for a single-row decode step. `false` means the backend
-    /// has no fused form and the caller runs the four stages itself.
+    /// Runs [`FusedMlp`] as one kernel for a single-row decode step. `false`
+    /// means the backend has no fused form and the caller runs the stages
+    /// itself.
     fn fused_mlp(&self, _mlp: FusedMlp) -> Result<bool> {
         Ok(false)
     }
 
-    /// Caps the device memory a backend that streams experts gives their
-    /// cache, in bytes, ahead of [`Backend::budget_streamed`]. What a user
-    /// chose over what the card has free; a backend with no cache ignores
-    /// it.
+    /// Caps the expert cache at `bytes`, a user limit applied before
+    /// [`Backend::budget_streamed`]. Backends with no expert cache ignore it.
     fn limit_expert_cache(&self, _bytes: usize) -> Result<()> {
         Ok(())
     }
 
-    /// Tells a backend that streams experts how much of its memory the
-    /// resident weights will take and how many expert sets will register,
-    /// so it can size the expert cache from what is left and share it out.
-    /// Called once at load, before any pass, by a model with streamed
-    /// weights; a backend with no cache ignores it.
+    /// Tells an expert-streaming backend the resident weights' size and the
+    /// number of expert sets, so it can size its expert cache from what is
+    /// left. Called once at load, before any pass. Backends with no expert
+    /// cache ignore it.
     fn budget_streamed(&self, _resident_bytes: usize, _sets: usize) -> Result<()> {
         Ok(())
     }
 
-    /// Registers a block's expert set under `key`, once: a later call with
-    /// the same key returns the same handle. What the backend keeps of the
-    /// set is its own affair, from every expert resident to none of them;
-    /// the model hands over the file's bytes and asks nothing else.
+    /// Registers a block's expert set under `key`. A later call with the same
+    /// key returns the same handle. How much of the set stays resident is up
+    /// to the backend.
     fn constant_experts(&self, _key: &str, _set: &Arc<ExpertSet>) -> Result<ExpertsBuf> {
         bail!("this backend has no mixture-of-experts path")
     }
@@ -598,16 +563,14 @@ pub trait Backend {
         bail!("this backend has no mixture-of-experts path")
     }
 
-    /// [`Backend::fused_mlp`] over raw-format weights, which a file keeps
-    /// as separate gate and up tensors. `false` by default.
+    /// [`Backend::fused_mlp`] over raw-format weights. `false` by default.
     fn fused_mlp_raw(&self, _mlp: FusedMlpRaw) -> Result<bool> {
         Ok(false)
     }
 
-    /// The normalization ahead of a mixer and the projection reading it as
-    /// one kernel, each run landing where the caller asked, and optionally
-    /// the delta net's convolution and gates behind them. The result says
-    /// which halves ran; the caller launches the rest.
+    /// Runs [`FusedProject`] as one kernel, optionally including the delta
+    /// net's convolution and gates. The result says which halves ran; the
+    /// caller launches the rest.
     fn fused_project(&self, _project: FusedProject) -> Result<Fused> {
         Ok(Fused::default())
     }
@@ -627,8 +590,8 @@ pub trait Backend {
         self.quantize_act(out, 1, len)
     }
 
-    /// `out = silu(gate) * rms_norm(x)`, quantized as well: the delta net's
-    /// gated readout.
+    /// `out = silu(gate) * rms_norm(x)`, also returned quantized. The delta
+    /// net's gated readout.
     #[allow(clippy::too_many_arguments)]
     fn rms_norm_gated(
         &self,
@@ -651,8 +614,8 @@ pub trait Backend {
     /// `acc += add`, elementwise.
     fn add_into(&self, acc: Buf, add: Buf) -> Result<()>;
 
-    /// `out = silu(gate) * up` over `len` elements. The operands take an offset
-    /// because a fused projection leaves them as two windows of one buffer.
+    /// `out = silu(gate) * up` over `len` elements. The offsets allow both
+    /// operands to be windows of one fused projection's output.
     fn swiglu(
         &self,
         gate: Buf,
@@ -663,9 +626,8 @@ pub trait Backend {
         len: usize,
     ) -> Result<()>;
 
-    /// [`Backend::swiglu`] where the two operands are planes of a wider buffer,
-    /// as a fused gate-and-up projection leaves them. The default pulls them
-    /// apart into dense copies.
+    /// [`Backend::swiglu`] where the operands are planes of a wider buffer.
+    /// The default copies them out densely first.
     fn swiglu_planes(
         &self,
         gate: Plane,
@@ -688,21 +650,19 @@ pub trait Backend {
         Ok(())
     }
 
-    /// Copy a `rows` by `width` block between two strided planes.
-    /// [`Backend::copy`] is the case where neither side is wider than the
-    /// block.
+    /// Copies a `rows` by `width` block between two strided planes.
     fn copy_2d(&self, src: Plane, dst: Plane, rows: usize, width: usize) -> Result<()>;
 
-    /// Rotary embedding, in place, over `[rows * heads, head_dim]`. `table`
-    /// is `[positions, rope_dim]`, each row the cosines for one absolute
-    /// position followed by its sines; row `p` must be position `p`. Pairs
-    /// are `(i, i + rope_dim / 2)`.
+    /// Rotary embedding in place over `[rows * heads, head_dim]`.
+    ///
+    /// `table` is `[positions, rope_dim]`. Row `p` holds position `p`'s
+    /// cosines followed by its sines. Rotated pairs are
+    /// `(i, i + rope_dim / 2)`.
     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()>;
 
-    /// [`Backend::rope`] against a strided window of a wider buffer, writing
-    /// a dense `dest` instead of rotating in place: what a fused QKV
-    /// projection's query and key both want. The default is
-    /// [`Backend::copy_2d`] then [`Backend::rope`], unfused.
+    /// [`Backend::rope`] reading a strided window of a wider buffer, such as
+    /// a fused QKV output, and writing a dense `dest`. The default is
+    /// [`Backend::copy_2d`] then [`Backend::rope`].
     fn rope_gather(
         &self,
         src: Plane,
@@ -726,20 +686,21 @@ pub trait Backend {
     }
 
     /// Causal softmax attention against the key and value caches, which must
-    /// already carry this call's rows. `q` is `[rows * n_head, head_dim]`
-    /// with the head varying fastest; the caches are
-    /// `[positions, n_kv * head_dim]` in f16. Row `t` attends to cache
-    /// positions `0 ..= start_pos + t`, with `group` query heads sharing
-    /// each key head. `out` matches `q` and stays f32.
+    /// already hold this call's rows.
+    ///
+    /// `q` is `[rows * n_head, head_dim]`, head varying fastest. The caches
+    /// are f16 `[positions, n_kv * head_dim]`. Row `t` attends to positions
+    /// `0 ..= start_pos + t`, and `group` query heads share each key head.
+    /// `out` has `q`'s shape, in f32.
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()>;
 
     /// `x *= sigmoid(gate)`, elementwise. The attention output gate.
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()>;
 
-    /// The activation side of a Hadamard-folded weight: each row of `x`,
-    /// `[rows, width]`, regrouped by `perm`, times `signs`, through the
-    /// normalized Walsh-Hadamard transform in blocks of 1024, into `out`.
-    /// See [`crate::hadamard`].
+    /// The activation side of a Hadamard-folded weight. Each row of `x`,
+    /// `[rows, width]`, is regrouped by `perm`, multiplied by `signs`, and
+    /// put through the normalized Walsh-Hadamard transform in blocks of
+    /// [`HADAMARD_BLOCK`], into `out`. See [`crate::hadamard`].
     fn hadamard(
         &self,
         x: Buf,
@@ -750,10 +711,10 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()>;
 
-    /// [`Backend::hadamard`] that also leaves `out` quantized for the
-    /// projections that read it. The copy may be reused by the second call
-    /// of this or [`Backend::rms_norm_hadamard_q`] after it, so its readers
-    /// come before that.
+    /// [`Backend::hadamard`] that also returns `out` quantized.
+    ///
+    /// The quantized copy may be overwritten by the next call to this or
+    /// [`Backend::rms_norm_hadamard_q`], so read it before then.
     fn hadamard_q(
         &self,
         x: Buf,
@@ -767,10 +728,9 @@ pub trait Backend {
         self.quantize_act(out, rows, width)
     }
 
-    /// [`Backend::rms_norm`] of `x` into `normed`, carried on through
-    /// [`Backend::hadamard_q`] into `out`: everything a folded projection
-    /// reading a normalized row wants, and the plain row for any unfolded one
-    /// beside it.
+    /// [`Backend::rms_norm`] of `x` into `normed`, then
+    /// [`Backend::hadamard_q`] of that into `out`. Folded projections read
+    /// `out`, unfolded ones `normed`.
     #[allow(clippy::too_many_arguments)]
     fn rms_norm_hadamard_q(
         &self,
@@ -787,12 +747,13 @@ pub trait Backend {
         self.hadamard_q(normed, rows, width, signs, None, out)
     }
 
-    /// The causal depthwise convolution that feeds the delta rule, split
-    /// into the packed planes [`Backend::delta_rule`] reads. `history` is
-    /// `[pad + rows, channels]`: the `pad` positions carried from the
-    /// previous call followed by this call's fused projection, so position
-    /// `t` sees inputs `t - pad ..= t`. `taps` is `[kernel, channels]`,
-    /// transposed relative to the file.
+    /// The causal depthwise convolution feeding the delta rule, written into
+    /// the packed planes [`Backend::delta_rule`] reads.
+    ///
+    /// `history` is `[pad + rows, channels]`: the `pad` positions carried
+    /// from the previous call, then this call's projection. Position `t`
+    /// sees inputs `t - pad ..= t`. `taps` is `[kernel, channels]`,
+    /// transposed from the file's layout.
     fn delta_conv(&self, history: Buf, taps: Buf, mix: DeltaMix, packed: Buf) -> Result<()>;
 
     /// The delta rule's per-head gates, written into `packed` after the planes.
@@ -815,13 +776,15 @@ pub trait Backend {
     ) -> Result<()>;
 
     /// The gated delta rule over a block of positions, advancing `state`.
-    /// `packed` carries all five operands consecutively, as
-    /// [`Backend::delta_conv`] and [`Backend::delta_gates`] leave them:
-    /// query, key and value planes, each `[rows * heads, head_dim]`, then
-    /// decay and beta, each `[rows * heads]`. `out` is a fourth such plane;
-    /// `state` is `[heads * head_dim, head_dim]`. Per position, per head:
-    /// `S <- decay * S`, `error <- beta * (v - k @ S)`, `S <- S + k^T @ error`,
-    /// `out <- q @ S`.
+    ///
+    /// `packed` holds five consecutive operands, as [`Backend::delta_conv`]
+    /// and [`Backend::delta_gates`] write them: query, key and value planes,
+    /// each `[rows * heads, head_dim]`, then decay and beta, each
+    /// `[rows * heads]`. `out` is one more such plane. `state` is
+    /// `[heads * head_dim, head_dim]`.
+    ///
+    /// Per position and head: `S <- decay * S`,
+    /// `error <- beta * (v - k @ S)`, `S <- S + k^T @ error`, `out <- q @ S`.
     fn delta_rule(
         &self,
         packed: Buf,
@@ -832,7 +795,7 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()>;
 
-    /// Copy `len` elements between buffers at the given offsets.
+    /// Copies `len` elements between buffers at the given offsets.
     fn copy(
         &self,
         src: Buf,
@@ -851,9 +814,8 @@ pub fn read_vec(backend: &dyn Backend, buf: Buf, len: usize) -> Result<Vec<f32>>
 
 pub mod host;
 
-/// The fusion pass. Only the device backend consumes it, but what it emits is
-/// checked without a device, so the tests build it too; there the half that
-/// binds operands has no caller.
+/// The fusion pass. Only the device backend uses it, but tests build it too
+/// to check its output without a device.
 #[cfg(any(feature = "cuda", test))]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub(crate) mod fuse;

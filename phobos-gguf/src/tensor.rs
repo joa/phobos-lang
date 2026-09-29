@@ -167,8 +167,8 @@ impl GgmlType {
         self.scalar_decode().is_some() || self.quant().is_some()
     }
 
-    /// How to widen one element of a type that is not blocked at all, which
-    /// are the types [`dequantize_into`] handles without the quant registry.
+    /// How to widen one element of an unblocked type. These are the types
+    /// [`dequantize_into`] handles without the quant registry.
     fn scalar_decode(self) -> Option<ScalarDecode> {
         Some(match self {
             GgmlType::F32 => (4, |b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])),

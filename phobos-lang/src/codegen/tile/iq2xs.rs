@@ -1,12 +1,11 @@
 // IQ2_XS's decode geometry, shared by the contraction (`iq2xs_qdot.rs`) and
 // the expansion (`qdecode.rs`). A 16-bit qs halfword splits into a magnitude
-// index and a sign index via `% 512` and `/ 512`; the sign table is IQ2_XXS's
-// own, reused outright.
+// index (`% 512`) and a sign index (`/ 512`). The sign table is IQ2_XXS's.
 
 use super::*;
 
-// IQ2_XS block layout (phobos-gguf/src/quant/iq2_xs.rs): 74 bytes, qs at
-// byte 2 (two bytes a lane), scales at byte 66.
+// IQ2_XS device block layout: 72 bytes, qs at byte 0 (two bytes a lane),
+// scales at byte 64. A device block drops the file's leading f16 `d` (`Quant::device_block`).
 pub(super) const IQ2XS_BLOCK_BYTES: i64 = 72;
 const IQ2XS_QS_OFF: i64 = 0;
 const IQ2XS_SCALES_OFF: i64 = 64;
@@ -106,7 +105,7 @@ impl<'c> Codegen<'c> {
         let eight_idx = self.const_index(kb, 8)?;
         let mag_idx8 = self.push(kb, arith::muli(mag_idx, eight_idx, self.loc))?;
         let sign_idx8 = self.push(kb, arith::muli(sign_idx, eight_idx, self.loc))?;
-        // Eight contiguous bytes apiece: one load each, not one per element.
+        // Eight contiguous bytes each, so one vector load per table.
         let vec_t = Type::vector(&[IQ2XS_LANE as u64], self.i8_t);
         let z = self.const_index(kb, 0)?;
         let grid_v = self.vec_load_al(kb, tables.grid.mem, &[z, mag_idx8], vec_t, 8)?;

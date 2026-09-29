@@ -39,7 +39,7 @@ pub enum EngineMsg {
     NodeAddrs(Vec<(NodeId, String)>),
     FetchLocs(Vec<(TileId, String)>),
     Issue(Segment),
-    Cancel(Vec<InstrId>), // Scheduler may retract pending instructions (e.g. FREE when serve count changes)
+    Cancel(Vec<InstrId>), // the scheduler retracts pending instructions, e.g. a FREE whose serve count changed
     IoDone {
         iid: InstrId,
         tile: TileId,
@@ -103,7 +103,7 @@ pub struct Engine {
     table: HashMap<InstrId, Node>,
     ready: VecDeque<InstrId>,
     inflight: Vec<Inflight>,
-    deferred_allocs: Vec<(InstrId, TileId, Vec<u64>)>, // parked ALLOCs because arena is full; retried after every FREE
+    deferred_allocs: Vec<(InstrId, TileId, Vec<u64>)>, // ALLOCs parked on a full arena, retried after every FREE
     outstanding_io: usize,                             // in-flight LOAD/FETCH/STORE tasks
     deferred_frees: Vec<(InstrId, TileId)>,
     parked_serves: HashMap<TileId, Vec<oneshot::Sender<Option<Vec<f32>>>>>,
@@ -202,7 +202,7 @@ impl Engine {
 
     fn run(mut self, mut rx: mpsc::UnboundedReceiver<EngineMsg>) {
         loop {
-            // drain all queued messages without blocking.
+            // Drain all queued messages without blocking.
             let mut msg_recvd = false;
 
             while let Ok(msg) = rx.try_recv() {
@@ -289,8 +289,8 @@ impl Engine {
 
         self.had_work = true;
 
-        // Two passes: insert every node, then wire dep counters. Deps are
-        // node-local and earlier in topological order, so they're already present and unfinished.
+        // Insert every node, then wire dep counters. Deps are node-local and
+        // come earlier in topological order, so a dep in the table is unfinished.
         for instr in &seg.instructions {
             self.table.insert(
                 instr.iid,
@@ -360,7 +360,7 @@ impl Engine {
 
         match op {
             Op::Alloc { tile, shape, .. } => {
-                // node-side memory backpressure: park the ALLOC when the arena is full, retried once a FREE makes room.
+                // Park the ALLOC while the arena is full. A FREE that makes room retries it.
                 if !self.try_alloc(iid, tile, shape)? {
                     phdebug!(
                         "node{}: ALLOC #{iid} tile={:#x} deferred: arena full",
@@ -466,7 +466,7 @@ impl Engine {
             .context("STORE of unknown tensor")?
             .clone();
 
-        // D2H happens on the engine thread; the file write is offloaded
+        // D2H runs on the engine thread, the file write on a blocking task.
         let data = self.store.d2h(tile)?;
         phinfo!(
             "node{}: D2H tile={:#x} {} read back from VRAM, writing to {}",
@@ -545,7 +545,7 @@ impl Engine {
         grid: (u32, u32, u32),
         cta: (u32, u32, u32),
     ) -> Result<()> {
-        // PTX may not be cached yet; fill it from a peer, parking this iid.
+        // Without cached PTX, park this iid and fetch the PTX from a peer.
         if self.ptx.function(kernel)?.is_none() {
             let hash = self.ptx.hash_of(kernel)?.to_string();
             self.kernel_waiters
@@ -576,8 +576,8 @@ impl Engine {
             return Ok(());
         }
 
-        // marshal the exploded-memref ABI (phobos-mlir, index_bitwidth = 32):
-        //   each f32 tile -> (alloc_ptr, align_ptr, 0i32, sizes..., strides...).
+        // Marshal phobos-mlir's exploded-memref ABI with 32-bit indices. Each
+        // f32 tile becomes (alloc_ptr, align_ptr, 0i32, sizes..., strides...).
         let mut addrs: Vec<u64> = Vec::with_capacity(args.len());
         let mut ints: Vec<i32> = Vec::new();
         let mut wrote = None;
@@ -634,9 +634,9 @@ impl Engine {
             .expect("function present (checked above)");
         let event = Event::new(EventFlags::DEFAULT)?;
 
-        // SAFETY: raw points into addrs/ints/scalar_bits which outlive this
-        // call; the ABI matches phobos-mlir's exploded memref marshalling, with
-        // scalar params as plain value args interleaved by parameter position.
+        // SAFETY: raw points into addrs, ints and scalar_bits, which outlive
+        // this call. The layout is phobos-mlir's exploded memref ABI, with
+        // scalar params passed by value at their parameter positions.
         unsafe {
             stream
                 .launch(&func, grid, cta, 0, &raw)

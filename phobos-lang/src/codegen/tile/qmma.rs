@@ -5,9 +5,9 @@ use super::*;
 impl<'c> Codegen<'c> {
     /// The warp's patch of `m8n8k16` tiles: how many down, how many across.
     ///
-    /// Grown from one tile a side, alternating so the patch stays square, and
-    /// stopped when the patch would leave warps of the CTA with nothing to do.
-    /// A square patch pays for the operand loads: `rm` by `rn` tiles issue
+    /// Grows from one tile per side, alternating so the patch stays square,
+    /// and stops before any warp of the CTA would be left idle. A square
+    /// patch amortizes the operand loads best: `rm` by `rn` tiles issue
     /// `2 * rm * rn` tensor instructions against `2 * (rm + rn)` loads.
     pub(super) fn qmma_patch(&self, rt: i64, ct: i64) -> (i64, i64) {
         let warps = self.cta_threads / WARP;
@@ -46,23 +46,17 @@ impl<'c> Codegen<'c> {
     /// the batched Q8_0 contraction on the integer tensor cores, block scales
     /// included, as one operation.
     ///
-    /// This is to a prompt pass what [`Self::tile_qdot_t`] is to a decode
-    /// step. Written in the tile language, the contraction would have to
-    /// stop every 32 elements of `k` to apply the scales, forcing the
-    /// accumulator into shared memory with both operands staged there per
-    /// block; for a `[64, 64]` tile the accumulator alone is 16 KB, so the
-    /// tile cannot be built at all. Folding the scales in instead keeps the
-    /// whole of `k` inside one operation: the accumulators are registers
-    /// live across it, both operands read straight from global memory in
-    /// the `m8n8k16` fragment layout, and the loop has no barrier.
+    /// The prompt-pass counterpart of [`Self::tile_qdot_t`]. The whole of `k`
+    /// stays inside one operation, so the accumulators stay in registers.
+    /// Both operands are read straight from global memory in the `m8n8k16`
+    /// fragment layout, and the loop has no barrier.
     ///
-    /// The weight scales are indexed `[block, out]` here and `[out, block]` in
-    /// `qdot_t`, which is not an inconsistency: a lane of this kernel holds two
-    /// neighbouring output columns of one block, so `[block, out]` puts its two
-    /// scales next to each other and a warp's eight columns in one sector.
+    /// The weight scales are indexed `[block, out]` here, unlike `qdot_t`. A
+    /// lane holds two neighbouring output columns of one block, so this puts
+    /// its two scales side by side and a warp's eight columns in one sector.
     ///
-    /// Like `qdot_t` this assumes `k` is a whole number of Q8_0 blocks, which
-    /// is what the format guarantees.
+    /// Assumes `k` is a whole number of Q8_0 blocks, as the format
+    /// guarantees.
     pub(in crate::codegen) fn tile_qmma_t(
         &mut self,
         block: &Block<'c>,
@@ -83,11 +77,9 @@ impl<'c> Codegen<'c> {
     /// [`Self::tile_qmma_t`] writing an existing destination rather than a
     /// fresh tile.
     ///
-    /// The destination is normally a slice of the output tensor: the
-    /// accumulators are already in registers, and going through a shared
-    /// tile on the way out costs a `[128, 64]` f32 buffer, 32 KB, which
-    /// holds the kernel to one CTA per multiprocessor. Writing global
-    /// directly leaves the occupancy to the register file.
+    /// The destination is normally a slice of the output tensor, written
+    /// straight from the accumulator registers. A shared output tile would
+    /// cost 32 KB for `[128, 64]` f32 and limit occupancy.
     pub(in crate::codegen) fn qmma_t_into(
         &mut self,
         block: &Block<'c>,
@@ -154,9 +146,9 @@ impl<'c> Codegen<'c> {
             self.const_index(block, a.shape[1])?
         };
 
-        // The lane's place in the fragments, as in [`Self::tile_matmul_t_imma`]:
-        // both operands are read from row lane / 4 four bytes on, and the two
-        // accumulator elements land in columns 2 * (lane % 4) and one past.
+        // The lane's place in the fragments, as in [`Self::tile_matmul_t_imma`].
+        // Both operands are read from row lane / 4. The two accumulator
+        // elements land in columns 2 * (lane % 4) and the one after.
         let tid = self.thread_id(block)?;
         let warp_w = self.const_index(block, WARP)?;
         let warp = self.divui(block, tid, warp_w)?;
@@ -188,7 +180,7 @@ impl<'c> Codegen<'c> {
         let frag_base = self.addi(&tb, j0, quad)?;
 
         // Row of A and of the accumulator, row of W, and output column, one per
-        // tile of the patch. All are loop-invariant, so they are built once.
+        // tile of the patch. All are loop-invariant.
         let mut a_rows = Vec::with_capacity(rm as usize);
         for r in 0..rm {
             let off = self.const_index(&tb, r * IMMA_TILE)?;
@@ -240,10 +232,8 @@ impl<'c> Codegen<'c> {
         let empty = self.vec_broadcast(&kb, zero_i, acc_t)?;
         let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
 
-        // A weight scale belongs to an output column, not to a row of the
-        // patch, so loading it inside the row loop would fetch each one `rm`
-        // times. The patch is square and square is where the tensor work pays,
-        // so that is eight redundant loads out of every nine.
+        // A weight scale belongs to an output column, not a patch row, so it
+        // is loaded once here rather than once per row.
         let mut w_scales = Vec::with_capacity(rn as usize * 2);
         for out_col in &out_cols {
             for dj in 0..2 {
@@ -274,9 +264,6 @@ impl<'c> Codegen<'c> {
                     let raw = self.vec_extract(&kb, sum, &[0, dj], i32_t)?;
                     let as_f = self.small_int_to_f32(&kb, raw)?;
                     let slot = (r * rn as usize + c) * 2 + dj as usize;
-                    // A mul and an add here are mul.rn and add.rn, which ptxas
-                    // may not contract; at a patch's size that is 128 wasted
-                    // instructions against the same block's 128 tensor ones.
                     next.push(self.elem_mac(&kb, f32_t, as_f, scale, accs[slot])?);
                 }
             }

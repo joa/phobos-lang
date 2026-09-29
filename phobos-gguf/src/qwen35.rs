@@ -58,8 +58,8 @@ pub struct Config {
     pub ssm_inner: usize,
     /// Per-head state dimension, `ssm.state_size`.
     pub ssm_head_dim: usize,
-    /// Query/key heads, `ssm.group_count`; equal to `ssm_heads` outside a
-    /// grouped-query deltanet.
+    /// Query/key heads, `ssm.group_count`. Equals `ssm_heads` unless the
+    /// deltanet groups its queries.
     pub ssm_kv_heads: usize,
     pub conv_kernel: usize,
 }
@@ -108,9 +108,9 @@ impl Config {
             ssm_head_dim > 0 && ssm_inner.is_multiple_of(ssm_head_dim),
             "ssm inner {ssm_inner} does not split into a state size of {ssm_head_dim}"
         );
-        // Two readings of the value head count, cross-checked: `time_step_rank`
-        // is llama.cpp's, `inner / state_size` derives it. A GQA deltanet's
-        // key/query heads, `group_count`, may be fewer.
+        // Two readings of the value head count, cross-checked: llama.cpp's
+        // `time_step_rank`, and `inner / state_size`. A GQA deltanet's
+        // query/key heads, `group_count`, may be fewer.
         let ssm_heads = ssm_inner / ssm_head_dim;
         ensure!(
             m.arch_count("ssm.time_step_rank")? == ssm_heads,
@@ -160,9 +160,9 @@ enum Mixer {
 }
 
 impl Mixer {
-    /// The constants this mixer uploads. A delta net's derived readings, the
-    /// reversed taps and the exponentiated decay rate, are a few kilobytes and
-    /// go up under keys of their own; they are left out.
+    /// The constants this mixer uploads. A delta net's derived readings
+    /// (reversed taps, exponentiated decay rate) are a few kilobytes under
+    /// their own keys and are left out.
     fn footprint(&self, into: &mut Uploads) {
         match self {
             Mixer::Attention(attn) => {
@@ -240,7 +240,7 @@ pub struct Model {
     output_norm: Gain,
     rope: RopeTable,
     /// Bytes the resident weights take on a backend, for the expert cache's
-    /// budget; zero for a model with nothing streamed.
+    /// budget. Zero for a model with nothing streamed.
     resident_bytes: usize,
 }
 
@@ -254,9 +254,9 @@ fn check_folding(gguf: &Gguf) -> Result<()> {
     gguf.folding().map_or(Ok(()), |f| f.check_projected(&LINEAR))
 }
 
-/// Copies a projection's qkv window into the delta net's history cache: a
-/// decode step's one row is already contiguous, and the strided kernel is the
-/// wrong shape for it.
+/// Copies a projection's qkv window into the delta net's history cache. A
+/// decode step's single row is already contiguous, so it takes a plain copy
+/// instead of the strided one.
 fn copy_qkv_into_history(
     backend: &dyn Backend,
     src: Plane,
@@ -278,7 +278,8 @@ fn copy_qkv_into_history(
 }
 
 impl Model {
-    /// Read every weight this architecture needs, leaving quantized ones so.
+    /// Reads every weight this architecture needs, keeping quantized ones
+    /// quantized.
     pub fn load(gguf: &Gguf) -> Result<Model> {
         let config = Config::from_gguf(gguf)?;
         ensure!(
@@ -349,8 +350,8 @@ impl Model {
     }
 
     /// Every constant the forward pass uploads, at a context of `positions`.
-    /// `embed` is missing on purpose: the pass reads a token's row out of it
-    /// on the host, and only `head` reaches the backend.
+    /// `embed` is left out on purpose: the pass reads token rows from it on
+    /// the host, and only `head` reaches the backend.
     pub(crate) fn footprint(&self, positions: usize) -> Uploads {
         let mut into = Uploads::default();
         self.head.footprint(&mut into);
@@ -365,8 +366,8 @@ impl Model {
         into
     }
 
-    /// Device bytes the caches take per position. Only the attention blocks
-    /// have any: a delta net carries a recurrent state whose size is fixed.
+    /// Device bytes the caches take per position. Only attention blocks have
+    /// any; a delta net's recurrent state has a fixed size.
     pub(crate) fn kv_bytes_per_token(&self) -> usize {
         let attention_blocks = (0..self.config.n_block)
             .filter(|&index| self.config.is_attention_block(index))
@@ -437,9 +438,9 @@ impl Model {
             "the interleaved qkv layout assumes uniform query/key/value heads; it is not the reference layout and only the sweep ever asked for it on a grouped-query deltanet"
         );
 
-        // Both fused layouts are the same strided read, just a different
-        // offset and stride. Query and key are `kv_heads` wide apiece outside
-        // the interleaved layout; value is always the full `inner`.
+        // Both fused layouts are the same strided read with a different
+        // offset and stride. Outside the interleaved layout, query and key are
+        // `kv_heads` wide each; value is always the full `inner`.
         let (planes, head_stride) = if variants.qkv_interleaved {
             ([0, head_dim, 2 * head_dim], 3 * head_dim)
         } else {
@@ -462,9 +463,9 @@ impl Model {
 
         let (channels, carried) = (mix.channels(), mix.pad() * mix.channels());
 
-        // History is scratch for this call, with the previous call's tail
-        // copied to the front so the convolution reads one padded stream and
-        // needs no boundary case.
+        // History is scratch for this call. The previous call's tail is copied
+        // to the front, so the convolution reads one padded stream with no
+        // boundary case.
         let history = backend.alloc(mix.history_len())?;
         match *carry {
             Some((previous, len)) => backend.copy(previous, len - carried, history, 0, carried)?,
@@ -475,22 +476,22 @@ impl Model {
             }
         }
 
-        // The delta rule's five operands are one allocation; each is a window
-        // of it, written in place by the projection.
+        // The delta rule's five operands share one allocation. Each is a
+        // window of it, written in place by the projection.
         let packed = backend.alloc(mix.packed_len())?;
         let taps = delta.taps(backend, channels, variants.conv_reversed)?;
 
-        // Which of the two gate projections decays and which weights the
-        // write is a layout question, shared by both paths below.
+        // Which gate projection is the decay and which the write strength
+        // depends on the layout; both paths below share this.
         let gates = |alpha, beta| match variants.swap_alpha_beta {
             true => (beta, alpha),
             false => (alpha, beta),
         };
 
         // The convolution and gates as the tail of a fused projection, given
-        // where the decay and write strength land. The fused kernel bakes in
-        // a single head count, so a grouped-query deltanet falls back to the
-        // unfused delta_conv/delta_gates path instead.
+        // where the decay and write strength land. The fused kernel assumes a
+        // single head count, so a grouped-query deltanet takes the unfused
+        // delta_conv/delta_gates path.
         let fused_mix = |decay_at: (Buf, usize), beta_at: (Buf, usize)| -> Result<Option<FusedMix>> {
             if rows != 1 || kv_heads != heads {
                 return Ok(None);
@@ -508,19 +509,18 @@ impl Model {
             }))
         };
 
-        // [`Proj::Fused`] is a single launch producing history, gate, and
-        // gate operands together; [`Proj::Split`] is the four separate
-        // tensors a raw file holds, one fused kernel where the backend has a
-        // stage for each format and four launches where it does not.
+        // [`Proj::Fused`] is one launch producing history, gate, and gate
+        // operands together. [`Proj::Split`] is the four separate tensors a
+        // raw file holds: one fused kernel where the backend has a stage for
+        // each format, four launches where it does not.
         let (z, alpha_op, beta_op, mix_done, mut release) = match &delta.proj {
             Proj::Fused { linear, parts } => {
                 let width = linear.out_dim;
                 let stacked = backend.alloc(rows * width)?;
 
-                // One projection, output split into two destinations: qkv
-                // goes straight into the convolution's history buffer, the
-                // other three parts stay in `stacked` and are read as windows
-                // below.
+                // One projection with two destinations. qkv goes straight into
+                // the convolution's history buffer; the other three parts stay
+                // in `stacked` and are read as windows below.
                 let (qkv_at, _) = parts[0];
                 let (rest_at, rest_end) = (parts[1].0, parts[3].0 + parts[3].1);
                 let runs = [
@@ -538,8 +538,8 @@ impl Model {
                 let fused =
                     linear.project_fused(backend, resid, gain, cfg.rms_eps, rows, &runs, fused_mix)?;
                 if !fused.project {
-                    // The normalization leaves the quantized copy behind,
-                    // which the projection reading it would otherwise redo.
+                    // The normalization also produces the quantized copy,
+                    // which the projection would otherwise redo.
                     let input = self.norm(backend, resid, rows, gain, normed, linear)?;
                     linear.project_into_shared(backend, input, rows, stacked)?;
                     input.release(backend);
@@ -554,8 +554,8 @@ impl Model {
                 }
 
                 // Each of the other three parts is a window of the
-                // projection: at a single row an offset, past one row a
-                // strided copy apiece.
+                // projection: an offset at a single row, a strided copy each
+                // past one row.
                 let mut planes = [(stacked, 0usize); 3];
                 let mut extracted = Vec::new();
                 for (plane, &(at, part)) in planes.iter_mut().zip(&parts[1..]) {
@@ -660,11 +660,10 @@ impl Model {
             )?;
         }
 
-        // The next call reads only the last `pad` positions: they are carried
-        // in a buffer of their own that stays put, rather than the whole
-        // stream (20 MiB a layer after a 512-row prompt), and with the history
-        // released a decode step records the same buffers as the one before
-        // it, so the cached pass graph needs no patching for them.
+        // The next call reads only the last `pad` positions, so only they are
+        // carried, in their own buffer that stays put. With the history
+        // released, a decode step records the same buffers as the previous
+        // one, so the cached pass graph needs no patching for them.
         if carried > 0 {
             let tail = match carry.take() {
                 Some((buf, len)) if len == carried => buf,
@@ -680,8 +679,8 @@ impl Model {
         }
         backend.release(history);
 
-        // The recurrent state is why this op exists on the backend at all: a
-        // [head_dim, head_dim] matrix per head, so keeping it on the host means
+        // The recurrent state is why this op runs on the backend: a
+        // [head_dim, head_dim] matrix per head, which on the host would mean
         // moving a megabyte in and out per block per token.
         let state = match *recurrent {
             Some((buf, _)) => buf,
@@ -697,13 +696,13 @@ impl Model {
         let mixed_buf = backend.alloc(n)?;
         backend.delta_rule(packed, rows, heads, head_dim, state, mixed_buf)?;
 
-        // Gated RMSNorm: the gate multiplies before normalization, as in the
-        // Mamba2-style RMSNormGated this architecture inherits. swiglu is
-        // silu(gate) * up, the multiply this wants.
+        // Gated RMSNorm, `rms_norm(x) * silu(gate)` in the reference order.
+        // Without `norm_before_gate` the gate multiplies first, through
+        // swiglu's silu(gate) * up.
         let scratch = backend.alloc(n)?;
         let readout_gain = delta.norm.buf(backend)?;
         let (gated, gated_act) = if variants.norm_before_gate {
-            // Into a destination that is not the source: the gate reads one
+            // Write to a buffer other than the source: the gate reads one
             // element per thread, but the norm's reduction reads the whole row.
             let readout = backend.rms_norm_gated(
                 mixed_buf,
@@ -746,7 +745,7 @@ impl Model {
 enum LayerState {
     Attention(KvCache),
     DeltaNet {
-        /// Allocated on first use, each with its length; `carry` is the last
+        /// Allocated on first use, each with its length. `carry` is the last
         /// `pad` positions of the previous call's convolution stream.
         carry: Option<(Buf, usize)>,
         recurrent: Option<(Buf, usize)>,
@@ -773,7 +772,7 @@ impl State {
 
     /// Hands every device allocation the state holds back to the backend.
     ///
-    /// Dropping a state instead strands its caches, since a [`Buf`] is a
+    /// Dropping a state instead leaks its caches, since a [`Buf`] is a
     /// handle, not an owner.
     pub fn release(&mut self, backend: &dyn Backend) {
         for layer in &mut self.layers {

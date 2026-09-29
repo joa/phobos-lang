@@ -73,9 +73,9 @@ pub(crate) struct Build {
     scopes: Vec<HashMap<String, Binding>>,
     pub(crate) shape_env: BTreeMap<String, i64>,
     pub(crate) report: Report,
-    /// Per-dimension divisors of a slice's extents, what `@aligned`
-    /// promised carried through `Full` subscripts; only the prescans read
-    /// it, so it stays beside the build rather than on the type.
+    /// Per-dimension divisors of a slice's extents, carried from `@aligned`
+    /// through `Full` subscripts. Only the prescans read it, so it lives
+    /// here rather than on the type.
     view_divs: HashMap<ValueId, Vec<i64>>,
     /// Loop-invariant dot operands staged in an enclosing loop's preheader,
     /// one frame per open loop: `(source view, staged buffer)`.
@@ -94,10 +94,10 @@ pub(crate) struct Build {
 /// Builds one kernel's graph. Names are resolved here and nowhere else,
 /// and every builtin becomes one op.
 ///
-/// What the build cannot decide it records for the emitter: whether a loop
-/// shaped for double buffering fits its budget depends on what the pool
-/// holds when the loop is reached, so the `For` carries the candidate and
-/// the emitter answers.
+/// What the build cannot decide it records for the emitter. Whether a
+/// double-buffered loop fits its budget depends on what the pool holds when
+/// the loop is reached, so the `For` carries the candidate and the emitter
+/// decides.
 pub fn build(
     base: &phobos_base::context::Context,
     target: Target,
@@ -165,8 +165,8 @@ pub fn build(
 }
 
 impl Build {
-    /// Parameters bound, symbolic tensor
-    /// dims bound to their runtime extents, then the body.
+    /// Binds the parameters and the symbolic tensor dims, then builds the
+    /// body.
     fn emit_kernel(&mut self, kernel: &Kernel) -> Result<()> {
         self.scopes.push(HashMap::new());
         let entry = self.ir.entry();
@@ -174,15 +174,15 @@ impl Build {
             let arg = self.ir.args(entry)[i];
             self.ir.set_name(arg, &param.name);
             let binding = match &param.ty {
-                // integer params join the index-type world on entry
+                // Integer params convert to index on entry.
                 AstType::Scalar(crate::ast::Scalar::I32 | crate::ast::Scalar::I64) => {
                     let value = self.value(OpKind::IndexCast(Scalar::Index), &[arg], Type::INDEX);
                     Binding::Let { value, div: 1 }
                 }
                 AstType::Scalar(_) => Binding::Let { value: arg, div: 1 },
-                // narrow-element tensor base pointers are assumed 16-byte
-                // aligned (the host allocator returns aligned buffers), so
-                // their rows can vectorize.
+                // These tensors' base pointers are assumed 16-byte aligned,
+                // as the host allocator guarantees, so their rows can
+                // vectorize.
                 AstType::Tensor(
                     crate::ast::Scalar::F32
                     | crate::ast::Scalar::F16
@@ -404,7 +404,7 @@ impl Build {
     }
 
     /// Whether a value is a whole buffer of its own rather than a view or a
-    /// tensor: what `MemVal::global.is_some()` said.
+    /// tensor. The codegen counterpart is `MemVal::global.is_some()`.
     pub(crate) fn is_buffer(&self, v: ValueId) -> bool {
         self.ir
             .def_op(v)
@@ -412,7 +412,7 @@ impl Build {
     }
 
     /// Whether a value is an unnamed temp whose buffer the consuming op may
-    /// release: what `MemVal::owned` said.
+    /// release. The codegen counterpart is `MemVal::owned`.
     pub(crate) fn owned(&self, v: ValueId) -> bool {
         self.is_buffer(v) && self.ir.name(v).is_none()
     }

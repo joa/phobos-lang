@@ -8,10 +8,10 @@ pub enum Decoder {
     Qwen35(Box<qwen35::Model>),
 }
 
-/// The device-only buffers one architecture's `forward_to_logits` leaves
-/// live, shared by `llama` and `qwen35` since both end a pass the same way:
-/// residual stream, normalized copy, the last row split off it, and the
-/// logits the LM head projected it into.
+/// The device buffers `forward_to_logits` leaves live. Shared by `llama` and
+/// `qwen35`, since both end a pass the same way: the residual stream, its
+/// normalized copy, the last row split off it, and the logits the LM head
+/// projects that row into.
 pub(crate) struct ForwardBufs {
     pub(crate) x: Buf,
     pub(crate) normed: Buf,
@@ -27,30 +27,28 @@ impl ForwardBufs {
     }
 }
 
-/// What a loaded model will ask of a backend, so a device path can decide
-/// whether it fits before the first pass starts uploading.
+/// What a loaded model will ask of a backend, so a device path can check it
+/// fits before the first pass uploads anything.
 ///
-/// An estimate, and deliberately one of the weights alone: a pass's
-/// intermediates and a delta net's recurrent state are the caller's to allow
-/// for. Nothing here is measured against the file's size on disk, which is a
-/// poor guide, see `dense_bytes`.
+/// An estimate of the weights alone. A pass's intermediates and a delta
+/// net's recurrent state are the caller's to allow for. The file's size on
+/// disk is a poor guide, see `dense_bytes`.
 #[derive(Clone, Copy, Debug)]
 pub struct Footprint {
     /// Every weight the forward pass uploads. They are constants: uploaded
     /// once, kept for the backend's lifetime, never released.
     pub weight_bytes: usize,
-    /// Of [`Footprint::weight_bytes`], what goes up as f32 because the file did
-    /// not store it Q8_0. Nothing else is left quantized, so a file in a format
-    /// this crate dequantizes wants four bytes a weight on the device however
-    /// few it took on disk.
+    /// Of [`Footprint::weight_bytes`], what is uploaded as f32 because no
+    /// kernel reads its format. Such a weight costs four bytes per element on
+    /// the device, however few it took on disk.
     pub dense_bytes: usize,
-    /// Weights that are not resident at all: expert sets the backend streams
-    /// from the file, as the file holds them. What the host has to hold, and
-    /// what a device cache is filled from.
+    /// Weights that are never resident: expert sets the backend streams from
+    /// the file as stored. The host must hold these, and a device cache is
+    /// filled from them.
     pub streamed_bytes: usize,
     /// What both attention caches across every block add per position. They
-    /// grow by doubling and the growth holds the old pair while it copies, so a
-    /// run's peak reaches about three times this times the sequence length.
+    /// grow by doubling, and growth holds the old pair while copying, so a
+    /// run peaks near three times this times the sequence length.
     pub kv_bytes_per_token: usize,
 }
 
@@ -105,11 +103,11 @@ impl Decoder {
         }
     }
 
-    /// The shape of the network, for a caller that displays it.
+    /// The shape of the network, for display.
     ///
-    /// A llama model is attention the whole way down. A qwen35 interleaves,
-    /// and which blocks are which is the interesting part: only the attention
-    /// ones pay per position, so the ratio is what makes a long context fit.
+    /// A llama model is all attention. A qwen35 model interleaves attention
+    /// and recurrent blocks. Only attention blocks cost memory per position,
+    /// so their share decides whether a long context fits.
     pub fn layout(&self) -> phobos_inference::Architecture {
         match self {
             Decoder::Llama(m) => phobos_inference::Architecture {
@@ -154,7 +152,7 @@ impl Decoder {
         }
     }
 
-    /// Run `tokens`, advancing `state`, and return the final position's logits.
+    /// Runs `tokens`, advancing `state`, and returns the final position's logits.
     pub fn forward(
         &self,
         state: &mut State,
@@ -213,7 +211,7 @@ impl State {
         self.len() == 0
     }
 
-    /// Forget everything past `positions` and return how many positions are
+    /// Forgets everything past `positions` and returns how many positions are
     /// kept, or `None` when the state cannot go back that far. Llama rewinds
     /// to any position; qwen35 only to the last [`State::checkpoint`].
     pub fn truncate(&mut self, positions: usize, backend: &dyn Backend) -> Result<Option<usize>> {
@@ -223,8 +221,8 @@ impl State {
         }
     }
 
-    /// Mark this position as one a later truncate can return to. Only a
-    /// state that cannot rewind by position has anything to save.
+    /// Marks this position as one a later truncate can return to. Only a
+    /// state that cannot rewind by position saves anything.
     pub fn checkpoint(&mut self, backend: &dyn Backend) -> Result<()> {
         match self {
             State::Llama(_) => Ok(()),
@@ -234,7 +232,7 @@ impl State {
 
     /// Hands every device allocation the state holds back to the backend.
     ///
-    /// Dropping a state instead strands its caches: a [`crate::backend::Buf`]
+    /// Dropping a state instead leaks its caches: a [`crate::backend::Buf`]
     /// is a handle, not an owner.
     pub fn release(&mut self, backend: &dyn Backend) {
         match self {

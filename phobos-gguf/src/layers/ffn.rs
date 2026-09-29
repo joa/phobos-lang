@@ -11,8 +11,8 @@ use super::{Linear, Shared, Uploads};
 /// Gate and up, fused into one launch when [`Linear::should_fuse`] allows it
 /// and run as two ordinary projections otherwise.
 enum GateUp {
-    /// Stacked: they read the same row, so one launch over a doubly wide
-    /// output replaces two over half of it.
+    /// Stacked: both read the same row, so one launch over a double-wide
+    /// output replaces two.
     Fused(Linear),
     Split { gate: Linear, up: Linear },
 }
@@ -29,7 +29,7 @@ impl Ffn {
     }
 
     /// [`Ffn::load`] from `{prefix}.ffn_gate{suffix}.weight` and its two
-    /// siblings: a mixture-of-experts block names its shared expert this way.
+    /// siblings. A mixture-of-experts block names its shared expert this way.
     pub(crate) fn load_suffixed(
         gguf: &Gguf,
         prefix: &str,
@@ -61,9 +61,9 @@ impl Ffn {
         self.down.footprint(into);
     }
 
-    /// The normalization and the whole of [`Ffn::forward`] as one kernel, if
-    /// the backend has one. `false` leaves the caller to take the usual
-    /// path.
+    /// Runs the normalization and all of [`Ffn::forward`] as one kernel, if
+    /// the backend has one. Returns `false` when the caller must take the
+    /// usual path.
     pub(crate) fn forward_fused(
         &self,
         backend: &dyn Backend,
@@ -75,7 +75,7 @@ impl Ffn {
         if rows != 1 || self.folded() {
             return Ok(false);
         }
-        // Raw formats keep gate and up apart; a backend with a fused form for
+        // Raw formats keep gate and up apart. A backend with a fused form for
         // them takes the three weights and their formats.
         if let (GateUp::Split { gate, up }, Some((gq, uq)), Some(dq)) =
             (&self.gate_up, self.split_raw_quants(), self.down.raw_quant())
@@ -117,8 +117,8 @@ impl Ffn {
         }
     }
 
-    /// Whether any of the three weights is Hadamard-folded, which the fused
-    /// kernels do not transform for.
+    /// Whether any of the three weights is Hadamard-folded. The fused
+    /// kernels do not apply the transform.
     fn folded(&self) -> bool {
         let gate_up = match &self.gate_up {
             GateUp::Fused(gate_up) => gate_up.folded(),
@@ -135,23 +135,22 @@ impl Ffn {
         }
     }
 
-    /// SwiGLU: `down(silu(gate(x)) * up(x))`, added into `dest`, `x` shared
-    /// by [`Ffn::input`]. Nothing leaves the backend, so the two wide
-    /// intermediates never reach the host.
+    /// SwiGLU, `down(silu(gate(x)) * up(x))`, added into `dest`. `x` is
+    /// shared by [`Ffn::input`]. The two wide intermediates stay on the
+    /// backend.
     pub(crate) fn forward(&self, backend: &dyn Backend, x: Shared, rows: usize, dest: Buf) -> Result<()> {
         let width = self.down.in_dim;
         let joined = backend.alloc(rows * width)?;
         let dense = |buf| Plane { buf, offset: 0, pitch: width };
 
-        // Either a fused projection's two windows or two ordinary
-        // projections' own dense buffers, and either way this ends as a
-        // (gate, up) pair of planes and the buffers to release once the
-        // SwiGLU has read them.
+        // Either a fused projection's two windows or two separate buffers.
+        // Both end as a (gate, up) pair of planes plus the buffers to
+        // release after the SwiGLU reads them.
         let (gate_p, up_p, release): (Plane, Plane, [Buf; 2]) = match &self.gate_up {
             GateUp::Fused(gate_up) => {
                 let both = gate_up.forward_shared(backend, x, rows)?;
                 // Past one row the two halves interleave, so the SwiGLU reads
-                // them where they lie rather than pulling them apart first.
+                // them in place instead of separating them first.
                 let stacked = |offset| Plane { buf: both, offset, pitch: 2 * width };
                 (stacked(0), stacked(width), [both, both])
             }

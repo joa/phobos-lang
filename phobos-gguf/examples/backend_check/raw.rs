@@ -54,45 +54,43 @@ const RAW_SHAPES: [(usize, usize, usize); 11] = [
     (3, 512, 33),
     (5, 1024, 128),
     (6, 2048, 5120),
-    // The only shape `project_raw_dense` hands an f16 strip: every other m
-    // here is under TC_TILE_M. Without it the narrow path goes untested.
+    // The only shape `project_raw_dense` hands an f16 strip, since every
+    // other m here is under TC_TILE_M.
     (64, 512, 128),
-    // The one shape the fused projection takes: m a multiple of IQ1S_QMMA_TM,
-    // n of IQ1S_QMMA_TN, k a whole number of 256-element blocks. Without it
-    // `project_raw_qmma` goes untested, and it is the prompt path.
+    // The one shape the fused projection takes: m a multiple of
+    // IQ1S_QMMA_TM, n of IQ1S_QMMA_TN, k whole 256-element blocks. This is
+    // what covers `project_raw_qmma`, the prompt path.
     (128, 512, 128),
-    // More than one whole row tile and a ragged remainder: the staged kernel
-    // runs padded into a scratch and copies the window out, which is what a
-    // chat prompt of any length the tile does not divide takes.
+    // More than one row tile plus a ragged remainder. The staged kernel runs
+    // padded into a scratch and copies the window out, as for any prompt
+    // length the tile does not divide.
     (200, 512, 128),
 ];
 
-/// Shapes that reach the tensor cores and so stage their weight to f16,
-/// judged like every other f16 path (see `check_tc`). `Backend::matmul`
-/// sends every whole 64-row band through that path, so any `m` of 64 or
-/// more qualifies.
+/// Shapes that reach the tensor cores and stage their weight to f16, so they
+/// are judged like other f16 paths (see `check_tc`). `Backend::matmul` sends
+/// every whole 64-row band that way, so any `m` of 64 or more qualifies.
 fn raw_shape_is_tc(m: usize, k: usize, n: usize) -> bool {
     m >= 64 && n.is_multiple_of(64) && k.is_multiple_of(16)
 }
 
-/// `check_within`'s signature, named once since it appears as a parameter
-/// type below and clippy would rather it not be spelled out inline.
+/// `check_within`'s signature, named so clippy accepts it as a parameter
+/// type.
 type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 
-/// `check_tc`'s signature, named for the same reason.
+/// `check_tc`'s signature.
 type CheckTc<'a> = dyn Fn(&str, usize, &[f32], &[f32]) + 'a;
 
-/// [`CheckWithin`]'s signature for the spread measure, which carries its own
-/// tolerance because only one comparison uses it.
+/// `check_spread`'s signature. Unlike [`CheckWithin`] it takes no tolerance.
 type CheckSpread<'a> = dyn Fn(&str, &[f32], &[f32]) + 'a;
 
 /// A raw-kernel format's device path against the host reference
 /// (`Packed::dense`), across every shape in [`RAW_SHAPES`]. `gen_block`
 /// builds one random super-block.
 ///
-/// At one row the `dp4a` path quantizes its activation, which the host
-/// reference does not, so it is judged against the float path it replaces
-/// on the device instead: `set_dp4a` runs the same projection both ways.
+/// At one row the `dp4a` path quantizes its activation and the host does
+/// not. So `dp4a` is judged against the device float path instead, with
+/// `set_dp4a` running the same projection both ways.
 #[allow(clippy::too_many_arguments)]
 fn check_matmul_raw(
     host: &dyn Backend,
@@ -131,16 +129,16 @@ fn check_matmul_raw(
         } else {
             check_within(&label, 1e-3, &want, &float_path);
         }
-        // Only one row reaches a `dp4a` matvec at all; anything wider takes the
-        // same path either way and the comparison would be vacuous.
+        // Only a single row reaches the `dp4a` matvec. Wider shapes take the
+        // same path either way.
         if m == 1 {
             set_dp4a(true);
             let dp4a = run(gpu)?;
             set_dp4a(false);
             check_spread(&format!("{label} dp4a vs float"), &float_path, &dp4a);
         }
-        // The fused projection quantizes its activation as well, so the host
-        // cannot judge it either; the path it replaces can.
+        // The fused projection also quantizes its activation, so it is
+        // judged against the dense device path it replaces.
         if m > 1 {
             set_qmma(true);
             let fused = run(gpu)?;
@@ -153,11 +151,12 @@ fn check_matmul_raw(
     Ok(())
 }
 
-/// A K-quant format's device path against the host reference fed the same
-/// activation the device contracts: both device kernels quantize to Q8_0
-/// (ties to even, as `quantize_row` does) and neither has a float device
-/// path, so the host sees the same quantized input. What is left to differ
-/// is accumulation order and the f16 header rounding, which 1e-3 covers.
+/// A K-quant format's device path against the host reference.
+///
+/// Both device kernels quantize the activation to Q8_0, ties to even as
+/// `quantize_row` does, and neither has a float path. So the host is fed that
+/// same quantized activation. Only accumulation order and f16 header
+/// rounding remain, which 1e-3 covers.
 #[allow(clippy::too_many_arguments)]
 fn check_matmul_kquant(
     host: &dyn Backend,
@@ -202,7 +201,8 @@ fn check_matmul_kquant(
     Ok(())
 }
 
-/// Every raw format, through [`check_matmul_raw`].
+/// Every raw format, through [`check_matmul_raw`] or, for the formats with
+/// no float device path, [`check_matmul_kquant`].
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check_raw_formats(
     host: &dyn Backend,
@@ -344,9 +344,9 @@ pub(super) fn check_raw_formats(
         "IQ4_XS",
         |n| random_raw_block(n, 136, 0, None),
     )?;
-    // The K-quants: d at 0 and dmin at 2 for the two with a minimum, d
-    // trailing the 210-byte Q6_K block. PTQ1_0's registry block is two file
-    // blocks, each with its d trailing; any byte is a valid five trits.
+    // Header offsets: d at 0 and dmin at 2 for Q4_K and Q5_K, d in the last
+    // two bytes of Q6_K. A PTQ1_0 registry block is two file blocks, each
+    // ending in its d. Any byte is a valid five trits.
     for (quant, name, block_bytes, d_off, dmin_off) in [
         (Quant::Q4_K, "Q4_K", 144usize, 0usize, Some(2usize)),
         (Quant::Q5_K, "Q5_K", 176, 0, Some(2)),
@@ -388,8 +388,8 @@ pub(super) fn check_hadamard(
         check_within(&label, 1e-4, &run(host)?, &run(gpu)?);
     }
 
-    // The quantizing forms, the int8 copy read back through a Q8_0
-    // projection, and the normalizing one's plain row beside it.
+    // The quantizing forms, with the int8 copy read back through a Q8_0
+    // projection. The normalizing form also returns its plain row.
     let (n, eps) = (64usize, 1e-6f32);
     for (rows, width, perm, norm) in [
         (1usize, 5120usize, None, true),

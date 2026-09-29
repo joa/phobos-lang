@@ -22,8 +22,9 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The hoisted frame is pushed around the loop; the planner keeps its
-    /// buffers alive through it, as the loop's operands.
+    /// Emits a for loop, with its hoisted staging buffers pushed as a frame
+    /// around it. Those buffers are loop operands, so the planner keeps them
+    /// alive through the loop.
     fn emit_for_ir(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, info: ForInfo) -> Result<()> {
         let first_hoisted = info.bound_operands() + info.carried;
         let mut frame = Vec::new();
@@ -94,7 +95,7 @@ impl<'c> Codegen<'c> {
                 region.append_block(body_block);
                 block.append_operation(scf::r#for(lo, hi, st, region, self.loc));
 
-                // The masked replay of the last chunk; see `emit_split_for`.
+                // The masked replay of the last chunk, see `emit_split_for`.
                 if info.ragged {
                     let full = hi;
                     let end = self.scalar_ir(ir.operand(op, 3))?;
@@ -114,8 +115,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// The fragment accumulators ride the loop as iter args, one MLIR
-    /// value per fragment.
+    /// A loop carrying fragment accumulators as iter args, one MLIR value per
+    /// fragment.
     fn emit_frag_for_ir(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, info: ForInfo) -> Result<()> {
         let lo = self.scalar_ir(ir.operand(op, 0))?;
         let hi = self.scalar_ir(ir.operand(op, 1))?;
@@ -235,10 +236,9 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// The register matmul's k-loop: the seeded accumulator rides the loop
-    /// the emitter builds itself, staging each iteration's operands by
-    /// lowering the body's slices afresh, and comes out as the loop's
-    /// result. See `matmul::gemm`.
+    /// The register matmul's k-loop. The matmul emitter builds the loop
+    /// itself and lowers the body's operand slices afresh each iteration.
+    /// The finished accumulator is the loop's result. See `matmul::gemm`.
     fn emit_gemm_for_ir(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
         let lo = self.scalar_ir(ir.operand(op, 0))?;
         let hi = self.scalar_ir(ir.operand(op, 1))?;
@@ -262,8 +262,7 @@ impl<'c> Codegen<'c> {
             a: ir.operand(dot, 1),
             b: ir.operand(dot, 2),
         };
-        // The fused-GEMM backend doubles its buffers whenever the attribute
-        // is on, so this really did pipeline.
+        // The fused-GEMM backend always double-buffers under `@pipeline`.
         if self.pipeline_assert {
             self.pipelined_any = true;
         }

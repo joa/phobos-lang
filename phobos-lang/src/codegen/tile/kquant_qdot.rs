@@ -1,17 +1,19 @@
 // The K-quants' side of `<fmt>_qdot_i8_t` (`qdot_i8_reg.rs`): what a lane's
-// quarter of a block loads, where its 64 activations sit, the activation
-// run sums the minimum term needs, and the decode of one block. The
-// arithmetic is `kquant.rs`'s.
+// quarter of a block loads, where its 64 activations sit, the activation run
+// sums the minimum term needs, and the decode of one block. The arithmetic
+// lives in `kquant.rs`.
 //
-// A Q4_K or Q5_K quarter is runs `2 q` and `2 q + 1`: one contiguous 32-byte
-// span of `qs`, low nibbles then high, so the lane's activations are the
-// 64 contiguous elements the intrinsic already loads. A Q6_K block is
-// interleaved across two 128-element groups, so a lane takes sixteen
-// elements of each of a group's four quarters instead: `128 g + l0 +
-// {0..16} + 32 {0, 1, 2, 3}` for `g = q / 2`, `l0 = 16 (q % 2)`, four runs
-// of sixteen that are each exactly one Q6_K scale run, from three sixteen-
-// byte loads (`ql` at `64 g + l0` and 32 past it, `qh` at `128 + 32 g +
-// l0`), with the activations four sixteen-byte loads 32 apart.
+// A Q4_K or Q5_K quarter is runs `2 q` and `2 q + 1`. That is one contiguous
+// 32-byte span of `qs`, low nibbles then high, so the lane's activations are
+// 64 contiguous elements.
+//
+// A Q6_K block is interleaved across two 128-element groups. A lane takes
+// sixteen elements from each of a group's four quarters:
+// `128 g + l0 + {0..16} + 32 {0, 1, 2, 3}`, with `g = q / 2` and
+// `l0 = 16 (q % 2)`. Each run of sixteen is exactly one Q6_K scale run. The
+// quants come from three sixteen-byte loads: `ql` at `64 g + l0` and 32 past
+// it, and `qh` at `128 + 32 g + l0`. The activations are four sixteen-byte
+// loads 32 apart.
 
 use super::qdot_i8_reg::Piece;
 use super::*;
@@ -28,8 +30,8 @@ impl<'c> Codegen<'c> {
         let piece = |off, width| Piece { off, width };
         Ok(match fmt {
             QgFormat::Q4k | QgFormat::Q5k => {
-                // The header, shared by the column's four lanes through L1;
-                // Q5_K's whole qh plane likewise; then the quarter's span.
+                // The header and Q5_K's whole qh plane, shared by the
+                // column's four lanes through L1, then the quarter's span.
                 let qs_base = if fmt == QgFormat::Q5k { 48 } else { 16 };
                 let thirty_two = c(self, 32)?;
                 let span = self.muli(body, quarter, thirty_two)?;
@@ -99,12 +101,12 @@ impl<'c> Codegen<'c> {
         self.vec_bitcast(block, v, Type::vector(&[4], self.i8_t))
     }
 
-    /// `carry` plus one block of a K-quant lane's quarter, `regs` as
-    /// [`Self::kq_pieces`] laid it out (plus the plane's `d` last for
-    /// Q6_K), against the activations from `k_off`. A format with a minimum
-    /// needs each run's activation sum; the lane holds the run's 32
-    /// activation bytes for the dot already, so that is eight more `dp4a`
-    /// against ones.
+    /// `carry` plus one block of a K-quant lane's quarter, against the
+    /// activations from `k_off`. `regs` is laid out as [`Self::kq_pieces`]
+    /// loaded it, with the plane's `d` last for Q6_K.
+    ///
+    /// A format with a minimum also needs each run's activation sum. That
+    /// costs eight more `dp4a` against ones, on bytes already loaded.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn kq_qdot_block(
         &mut self,

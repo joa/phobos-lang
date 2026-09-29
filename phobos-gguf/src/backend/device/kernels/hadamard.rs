@@ -1,13 +1,14 @@
 // The activation side of a Hadamard-folded weight; see `crate::hadamard`.
 //
-// The Sylvester matrix of 1024 is the Kronecker square of the one of 32, so a
-// 1024-element block viewed as a [32, 32] tile `X` (element `32 a + b` at row
-// `a`, column `b`) transforms as `H X H` for the normalized 32-point `H`,
-// symmetric and its own inverse. The row buffer is handed over as `[rows *
-// width / 32, 32]`, a block is 32 consecutive rows of it, and a program takes
-// one block. The delta net's regrouped heads are gathered a head at a time,
-// `head_dim / 32` rows apiece, from wherever the tiled order keeps them.
-// Both extents are whole blocks by construction, which `@aligned` promises.
+// The 1024-point Sylvester matrix is the Kronecker square of the 32-point
+// one. So a 1024-element block, viewed as a [32, 32] tile `X` (element
+// `32 a + b` at row `a`, column `b`), transforms as `H X H`. Here `H` is
+// the normalized 32-point matrix, which is symmetric and its own inverse.
+//
+// The row buffer is passed as `[rows * width / 32, 32]`. A block is 32
+// consecutive rows of it, and a program takes one block. The delta net's
+// regrouped heads are gathered one head at a time, `head_dim / 32` rows
+// each. Both extents are whole blocks, as `@aligned` promises.
 
 use crate::backend::{HADAMARD_BLOCK, HeadPerm};
 
@@ -30,15 +31,16 @@ pub(crate) fn hadamard_matrix() -> Vec<f32> {
 pub(crate) enum HadamardForm {
     /// The transform alone.
     Plain,
-    /// With the Q8_0 copy of its output, a 32-element block a tile row.
+    /// Also writes a Q8_0 copy of the output, one 32-element block per tile
+    /// row.
     Quantized,
-    /// Quantized, and RMS-normalized first with the epsilon of these bits,
-    /// the plain normalized row written out as well.
+    /// Quantized, with an RMS norm first. The payload is the epsilon's f32
+    /// bits. The normalized row is written out as well.
     Normed(u32),
 }
 
 impl HadamardForm {
-    /// The kernel's name, one per form so a trace tells them apart.
+    /// The kernel's name, distinct per form so a trace tells them apart.
     pub(crate) fn kernel(self) -> &'static str {
         match self {
             HadamardForm::Plain => "hadamard",
@@ -48,12 +50,11 @@ impl HadamardForm {
     }
 }
 
-/// What a Hadamard kernel is generated for: its width, head regrouping and
-/// form.
+/// A Hadamard kernel's cache key: width, head regrouping and form.
 pub(crate) type HadamardKey = (usize, Option<HeadPerm>, HadamardForm);
 
-/// Widest row [`HadamardForm::Normed`] takes: each program stages its whole
-/// row for the sum of squares, beside the five tiles of its own block.
+/// Widest row [`HadamardForm::Normed`] accepts. Each program stages its
+/// whole row for the sum of squares, beside its block's five tiles.
 pub(crate) const HADAMARD_NORM_MAX_WIDTH: usize = 5120;
 
 /// The kernel for rows `width` wide, regrouped by `perm` where given.
@@ -98,7 +99,7 @@ pub(crate) fn hadamard_src(width: usize, perm: Option<HeadPerm>, form: HadamardF
                 G: tensor<f32>[SR, {side}], N: tensor<f32>[R, {side}]"));
     }
     if form != HadamardForm::Plain {
-        // The same arithmetic as `quantize`, whose rows are these.
+        // Same arithmetic as `quantize`.
         params.push_str(&format!(",
                 Q: tensor<i8>[R, {side}], D: tensor<f32>[R, D1]"));
         store = format!(

@@ -23,7 +23,7 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
     assert_contains(
         &mlir,
         &[
-            // a stages k-major (transposed: 16x64, not 64x16); b is 16x64 anyway.
+            // a stages k-major as 16x64, not 64x16. b is 16x64 anyway.
             "memref.view",
             "to memref<16x64xf32, 3>",
             "memref.dim",
@@ -32,7 +32,7 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
             "gpu.thread_id",
             "gpu.block_dim",
             "gpu.barrier",
-            // the outer-product lowering ends in single-rounding fma.rn.
+            // The accumulator rides the kt loop through vector.contract.
             "iter_args",
             "vector.contract",
             "vector.load",
@@ -48,9 +48,9 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
 
 #[test]
 fn matmul_accumulates_in_registers() {
-    // The canonical pattern fuses: the lane's 4x4 accumulator vector rides
-    // the kt loop, surplus warps clamp onto the last warp tile, and the
-    // epilogue writes registers straight to the C subview.
+    // The canonical pattern fuses. The lane's 4x4 accumulator rides the kt
+    // loop, surplus warps clamp onto the last warp tile, and the epilogue
+    // writes registers straight to the C subview.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -78,9 +78,8 @@ fn matmul_accumulates_in_registers() {
 
 #[test]
 fn register_fusion_bails_when_acc_outlives_store() {
-    // acc is read again after the epilogue store -> no fusion; the
-    // shared-accumulator path runs instead (also contraction-based,
-    // but acc lives in shared memory and round-trips per kt).
+    // acc is read again after the epilogue store, so it does not fuse. The
+    // shared-accumulator path runs instead, still with vector contractions.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -106,9 +105,9 @@ fn register_fusion_bails_when_acc_outlives_store() {
 
 #[test]
 fn matmul_is_warp_tiled() {
-    // 64x64 output, 4x4 sub-tiles -> 16x16 sub-tile grid; the 4x8 lane
-    // grid wins (16x32 warp tiles, most square -> minimal shared traffic),
-    // giving (16/4)*(16/8) = 8 warp tiles.
+    // A 64x64 output in 4x4 sub-tiles is a 16x16 sub-tile grid. The 4x8
+    // lane grid gives the squarest warp tiles (16x32), so there are
+    // (16/4)*(16/8) = 8 warp tiles.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -155,11 +154,11 @@ fn large_tiles_widen_register_blocking() {
             }}"
         )
     };
-    // 128x64: a 16x16 grid of 8x4 sub-tiles (256, one per thread of a
-    // 256-thread CTA) -> the lane accumulator is an 8x4 vector.
+    // 128x64 is a 16x16 grid of 8x4 sub-tiles, one per thread of a
+    // 256-thread CTA, so the lane accumulator is 8x4.
     let mlir = emit_mlir(&src("128"));
     assert_contains(&mlir, &["vector<8x4xf32>"]);
-    // 64x64 can't afford TM=8 (would leave only 128 sub-tiles): 4x4.
+    // 64x64 with TM=8 would leave only 128 sub-tiles, so it stays 4x4.
     let mlir = emit_mlir(&src("64"));
     assert_contains(&mlir, &["vector<4x4xf32>"]);
     assert!(
@@ -189,8 +188,8 @@ fn shape_overrides_pin_autotune_choices() {
 #[test]
 fn a_matmul_into_one_of_its_own_operands_uses_a_temp() {
     // Every matmul path writes the target as it goes, so an operand that is
-    // also the target would be read after being partly overwritten. Squaring
-    // a matrix in place is the shape this takes.
+    // also the target would be read after being partly overwritten, as when
+    // squaring a matrix in place.
     let mlir = emit_mlir(
         "@launch(256)
         kernel square(X: tensor<f32>[R, N], O: tensor<f32>[R, N]) {
@@ -199,7 +198,7 @@ fn a_matmul_into_one_of_its_own_operands_uses_a_temp() {
             O[0 :+ 16, 0 :+ 16] = p
         }",
     );
-    // The temp is the tell: two 16x16 buffers rather than one.
+    // The temp shows as a second 16x16 buffer.
     let buffers = mlir.matches("memref<16x16xf32, 3>").count();
     assert!(
         buffers >= 2,
@@ -210,8 +209,7 @@ fn a_matmul_into_one_of_its_own_operands_uses_a_temp() {
 
 #[test]
 fn dot_falls_back_to_vector_without_tensorcore() {
-    // Same shapes, but no @tensorcore: the generic tile-dot (vector)
-    // path must run, never WMMA.
+    // Without @tensorcore the generic vector tile-dot runs, never WMMA.
     let mlir = emit_mlir(
         "@autotune(D in [64], BR in [64], BC in [64])
         @launch(256)
@@ -233,8 +231,8 @@ fn dot_falls_back_to_vector_without_tensorcore() {
 
 #[test]
 fn a_gemm_epilogue_with_bare_terms_scales_by_one() {
-    // acc + c_old: both coefficients are the identity, emitted as f32 ones,
-    // and the prior C is read back before the store.
+    // acc + c_old: both coefficients are emitted as f32 ones, and the prior
+    // C is read back before the store.
     let mlir = emit_mlir(
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)

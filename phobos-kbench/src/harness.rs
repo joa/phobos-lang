@@ -2,9 +2,9 @@
 
 use crate::*;
 
-/// Times `launch` and returns the fastest of N runs with the spread beside it.
-/// Run-to-run variance only ever slows a sample, so the minimum is the
-/// truest measure and also the autotuner's ranking metric.
+/// Times `launch` and returns the fastest of N runs and the spread (max minus
+/// min). Noise only slows a run, so the minimum is the best measure. The
+/// autotuner ranks by it too.
 pub(crate) fn bench(
     name: &str,
     mut launch: impl FnMut() -> anyhow::Result<()>,
@@ -46,11 +46,12 @@ pub(crate) fn zero_device_async(
     Ok(())
 }
 
-/// Launches a matmul kernel over C[M,N] = A[M,K] @ B[K,N], dispatching on `wide`
-/// so the memref descriptor's offset/size/stride fields match the kernel's index
-/// width: i64 for the default @tensorcore mma.sync path, i32 otherwise. Get that
-/// wrong and every field after the first pointer shifts. Pointers are raw device
-/// addresses either way, so this is element-type agnostic.
+/// Launches a matmul kernel over C[M,N] = A[M,K] @ B[K,N].
+///
+/// `wide` must match the kernel's index width: i64 for the default
+/// @tensorcore mma.sync path, i32 otherwise. A mismatch shifts every
+/// descriptor field after the first pointer. Pointers are raw device
+/// addresses, so any element type works.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn launch_gemm(
@@ -93,8 +94,7 @@ pub(crate) fn launch_gemm(
 }
 
 /// Launches a flash_attention kernel over Q/K/V/O (each [rows, D]),
-/// dispatching on wide exactly as [`launch_gemm`] does. Pointers are raw
-/// device addresses, so this serves both the f32 and fp16 benches.
+/// with `wide` as in [`launch_gemm`]. Serves both the f32 and fp16 benches.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn launch_flash(

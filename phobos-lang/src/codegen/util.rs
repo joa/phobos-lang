@@ -126,8 +126,8 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// One raw block byte of `qb`'s row `j`, zero-extended: the block fields
-    /// are unsigned where the tile language's element type is `i8`.
+    /// One raw block byte of `qb`'s row `j`, zero-extended to i32. The block
+    /// fields are unsigned even though the tile's element type is `i8`.
     pub(super) fn qbyte(
         &self,
         block: &Block<'c>,
@@ -179,15 +179,15 @@ impl<'c> Codegen<'c> {
         t == self.f16_t || t == self.bf16_t || t == self.f32_t || t == self.f64_t
     }
 
-    /// The tensor-core operand element types: f16, or f32 rounded down on stage.
+    /// Whether `t` is a tensor-core operand type: f16, or f32 rounded when
+    /// staged.
     pub(super) fn is_f16_or_f32(&self, t: Type<'c>) -> bool {
         t == self.f16_t || t == self.f32_t
     }
 
     /// Width in bits of a float type, which orders the widening conversions.
-    /// f16 and bf16 are both 16 bits and neither contains the other (bf16 has
-    /// f32's exponent range with 8 fewer mantissa bits), so width alone does
-    /// not decide a conversion between them; see [`Self::float_join`].
+    /// f16 and bf16 are both 16 bits but neither contains the other, so width
+    /// alone does not order them. See [`Self::float_join`].
     pub(super) fn float_bits(&self, t: Type<'c>) -> Option<u32> {
         if t == self.f16_t || t == self.bf16_t {
             Some(16)
@@ -201,9 +201,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// The narrowest float type both operands convert into without loss.
-    /// Equal types join to themselves and a wider type absorbs a narrower
-    /// one, but f16 and bf16 join to f32: each has bits the other cannot
-    /// hold, so f32 is their only common supertype.
+    /// Usually the wider of the two. f16 and bf16 join to f32, since neither
+    /// holds the other.
     pub(super) fn float_join(&self, a: Type<'c>, b: Type<'c>) -> Option<Type<'c>> {
         if a == b {
             return self.is_float(a).then_some(a);
@@ -212,14 +211,14 @@ impl<'c> Codegen<'c> {
         Some(match ab.cmp(&bb) {
             std::cmp::Ordering::Greater => a,
             std::cmp::Ordering::Less => b,
-            // same width, different types: f16 vs bf16.
+            // Same width, different types: f16 and bf16.
             std::cmp::Ordering::Equal => self.f32_t,
         })
     }
 
     /// The element type a mixed-type pair computes in: [`Self::float_join`]
-    /// between floats, the wider of two integers, and the float side when an
-    /// integer meets a float.
+    /// for two floats, the wider of two integers, and the float for an
+    /// integer and a float.
     pub(super) fn numeric_join(&self, a: Type<'c>, b: Type<'c>) -> Option<Type<'c>> {
         match (self.is_float(a), self.is_float(b)) {
             (true, true) => self.float_join(a, b),
@@ -252,8 +251,8 @@ impl<'c> Codegen<'c> {
             self.float_bits(want)
                 .ok_or_else(|| anyhow!("float_cast to non-float {want}"))?,
         );
-        // f16 <-> bf16 is neither a widening nor a narrowing, and arith has no
-        // op for it. Round-trip through f32, which holds either exactly.
+        // arith has no f16 to bf16 op. Go through f32, which holds either
+        // exactly.
         if lo == hi {
             let wide = self.float_cast(block, value, self.f32_t)?;
             return self.float_cast(block, wide, want);
@@ -276,9 +275,8 @@ impl<'c> Codegen<'c> {
         t == self.i8_t || t == self.i32_t || t == self.i64_t
     }
 
-    /// Convert between any two numeric element types, float or signed
-    /// integer; integers are signed throughout, so widening and float
-    /// conversions are the sign-extending ones.
+    /// Converts between any two numeric element types. Integers are treated
+    /// as signed, so widening and float conversions sign-extend.
     pub(super) fn numeric_cast(
         &self,
         block: &Block<'c>,
@@ -293,7 +291,7 @@ impl<'c> Codegen<'c> {
         if from_float && want_float {
             return self.float_cast(block, value, want);
         }
-        // index is its own world; route it through i32/i64 on the way in.
+        // Convert index through i64 first.
         if from == self.index_t {
             let as_int = self.push(block, arith::index_cast(value, self.i64_t, self.loc))?;
             return self.numeric_cast(block, as_int, want);

@@ -1,5 +1,5 @@
-// CUDA graph capture: what a recorded launch is, and how a pass is
-// replayed and reported.
+// CUDA graph capture: recorded launches, and how a pass is replayed and
+// reported.
 
 use super::*;
 
@@ -7,18 +7,18 @@ use super::*;
 pub(super) struct Recorded {
     pub(super) func: cust::sys::CUfunction,
     pub(super) grid: (u32, u32, u32),
-    /// Zero for the kernels whose tiles are static globals.
+    /// Dynamic shared bytes. Zero for kernels whose tiles are static.
     pub(super) shared: u32,
     pub(super) threads: u32,
     /// The exploded-memref ABI's argument words, one per kernel parameter.
-    /// See [`push_descriptor`]
+    /// See [`push_descriptor`].
     pub(super) slots: Vec<u64>,
 }
 
 impl Recorded {
     pub(super) fn params(&self, argv: &mut Vec<*mut c_void>) -> cust::sys::CUDA_KERNEL_NODE_PARAMS {
-        // Borrows slots for the pointer array. The driver copies the values out
-        // during the call, so neither outlives it.
+        // `argv` borrows `slots`. The driver copies the values during the
+        // call, so neither needs to outlive it.
         argv.clear();
         argv.extend(
             self.slots
@@ -44,7 +44,7 @@ impl Recorded {
     }
 }
 
-/// enabled via `PHOBOS_PASS_REPORT`
+/// One launch in the pass report, enabled via `PHOBOS_PASS_REPORT`.
 pub(super) struct PassOp {
     pub(super) name: &'static str,
     pub(super) func: cust::sys::CUfunction,
@@ -101,11 +101,11 @@ impl DeviceBackend {
         )
     }
 
-    /// Issues whatever has been recorded so far and stops recording this pass.
-    /// Growing a scratch arena frees the buffer the recorded launches point at,
-    /// so the recording has to be spent before the old pointer dies. The arenas
-    /// grow only until they have seen the widest projection, so after the
-    /// warmup no pass flushes and every pass is one graph.
+    /// Issues everything recorded so far and stops recording this pass.
+    ///
+    /// Call before growing a scratch arena, since recorded launches still
+    /// point at the old buffer. Arenas stop growing after warmup, so later
+    /// passes do not flush.
     pub(super) fn flush_pending(&self) -> Result<()> {
         if !self.recording.get() {
             return Ok(());
@@ -124,17 +124,15 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// What the pass costs in launches, and what each kernel costs in registers
-    /// and shared memory.
+    /// Prints the pass's launches per kernel, with each kernel's registers,
+    /// shared memory and occupancy.
     pub(super) fn print_report(&self) -> Result<()> {
         let ops = self.report.borrow();
         let sms = cust::device::Device::get_device(0)?
             .get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)?;
 
-        // Keyed by function, not by name: `with_kernel` compiles a module per
-        // tile, so one name can cover several shapes with quite different
-        // shared-memory footprints, and collapsing them hides exactly the thing
-        // this report is for.
+        // Keyed by function, not name. One name can cover several compiled
+        // shapes with different footprints.
         type Key = (&'static str, usize);
         let mut order: Vec<Key> = Vec::new();
         let mut per: HashMap<Key, (usize, usize, &PassOp)> = HashMap::new();
@@ -153,10 +151,8 @@ impl DeviceBackend {
         }
         order.sort_by_key(|k| usize::MAX - per[k].0);
 
-        // Which replay this was matters: a prefill replays too, and a prompt
-        // pass takes different kernels than a decode step (swiglu_2d against
-        // swiglu_q, q8_mma against q8_qdot). Naming the replay is what stops the
-        // two being confused.
+        // Name the replay, since a prefill replays too and uses different
+        // kernels than a decode step.
         eprintln!(
             "=== pass report, replay {}: {} launches, {sms} SMs ===",
             self.reported.get() + 1,
@@ -225,11 +221,11 @@ impl DeviceBackend {
         self.replay_segment()
     }
 
-    /// Runs what has been recorded so far and waits for it, so the host can
-    /// read a result mid-pass, with `meanwhile` run on the host between
-    /// issuing the launches and waiting, where it would otherwise sit idle.
-    /// The launches before it become a segment of their own, cached like any
-    /// other; the ones after start the next.
+    /// Runs everything recorded so far and waits for it, so the host can read
+    /// a result mid-pass. `meanwhile` runs on the host while the device works.
+    ///
+    /// The launches so far become a cached segment of their own. Later ones
+    /// start the next segment.
     pub(super) fn sync_point(&self, meanwhile: impl FnOnce() -> Result<()>) -> Result<()> {
         if self.recording.get() {
             self.replay_segment()?;
@@ -240,11 +236,11 @@ impl DeviceBackend {
     }
 
     /// Replays the recorded launches as the pass's next segment, building or
-    /// patching its graph first. A rebuild is only needed when the segment's
-    /// shape changes: the first decode step after a prefill, and the
-    /// reverse. Otherwise the topology is identical and the only nodes that
-    /// moved are the ones reading the key/value cache, whose length grew by
-    /// a token.
+    /// patching its graph first.
+    ///
+    /// The graph is rebuilt only when the sequence of kernels changes, for
+    /// example between prefill and decode. Otherwise only the nodes whose
+    /// parameters changed are patched.
     pub(super) fn replay_segment(&self) -> Result<()> {
         let pending = self.pending.borrow();
         let recorded = &pending[..self.recorded_len.replace(0)];
@@ -262,9 +258,7 @@ impl DeviceBackend {
             if at < segments.len() {
                 segments[at] = built;
             } else {
-                // A segment past the ones cached: a pass with more sync
-                // points than the last, which never happens once the shape
-                // of a pass settles.
+                // This pass has more segments than any cached one.
                 segments.truncate(at);
                 segments.push(built);
             }
@@ -300,9 +294,8 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// Instantiates a recorded pass as a chain of kernel nodes. A chain rather
-    /// than a dependency analysis: these launches shared one stream, so serial
-    /// order is the ordering they already relied on.
+    /// Instantiates a recorded pass as a serial chain of kernel nodes, the
+    /// same order the launches had on one stream.
     pub(super) fn build_graph(recorded: &[Recorded]) -> Result<PassGraph> {
         let mut graph: cust::sys::CUgraph = std::ptr::null_mut();
         // SAFETY: graph is written on success and destroyed by PassGraph.

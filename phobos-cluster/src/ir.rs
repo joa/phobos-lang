@@ -2,23 +2,22 @@ use phobos_lang::ast::{Dim, Kernel};
 
 use crate::tile::{AccessMode, DataType};
 
-/// @cluster search dimension
+/// An `@cluster` search dimension.
 #[derive(Clone, Debug)]
 pub struct SearchDim {
     pub name: String,
     pub choices: Vec<i64>,
 }
 
-/// Distributed tensor
+/// A distributed tensor.
 #[derive(Clone, Debug)]
 pub struct TensorDecl {
     pub name: String,
     pub data_type: DataType,
     pub dims: Vec<Dim>,
     pub super_syms: Vec<String>,
-    /// Read = LOAD
-    /// Write = pure output (no initial read; zero-init)
-    /// RMW = LOAD and STORE
+    /// Read loads the tensor. Write is a pure output that starts zeroed and
+    /// is never read. RMW loads and stores it.
     pub mode: AccessMode,
 }
 
@@ -39,18 +38,18 @@ pub struct GridAxis {
 #[derive(Clone, Debug)]
 pub struct LeafKernel {
     pub kernel: Kernel,
-    /// Parameter access modes (in order)
+    /// Access mode of each parameter, in order.
     pub modes: Vec<AccessMode>,
 }
 
 /// Cluster-loop iteration index.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Coord {
-    /// program_id(pid) index into [`ClusterProgram::grid`]
+    /// The `program_id(pid)` index into [`ClusterProgram::grid`].
     Grid(usize),
     /// Iteration index of the named cluster loop (0-based).
     Loop(String),
-    // Not tiled -> [:]
+    // Not tiled, the whole axis ([:]).
     Full,
 }
 
@@ -67,7 +66,7 @@ pub enum ClusterStmt {
         args: Vec<(SuperTile, AccessMode)>,
         scalars: Vec<usize>,
     },
-    /// Cluster-level loop with dim / super_sym iterations.
+    /// Cluster-level loop running `dim / super_sym` iterations.
     Loop {
         var: String,
         dim: Dim,

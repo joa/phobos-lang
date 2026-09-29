@@ -91,10 +91,11 @@ impl Parser {
 // top level
 
 impl Parser {
-    /// End a statement.
+    /// Ends a statement.
     ///
-    /// Statements end at a terminator, either newline-inserted or an explicit
-    /// ';', which may also be omitted before a closing } or at EOF.
+    /// A statement ends at a terminator, either newline-inserted or an
+    /// explicit ';'. The terminator may be omitted before a closing } or at
+    /// EOF.
     fn end_stmt(&mut self) -> Result<(), String> {
         if self.consume(&Tok::Semicolon) || self.matches(&Tok::RBrace) || self.matches(&Tok::Eof) {
             Ok(())
@@ -336,11 +337,6 @@ impl Parser {
         // A `var` with a type may omit its initializer, which declares a buffer
         // without filling it. A `let` cannot: it would name nothing.
         if is_var && ty.is_some() && !self.matches(&Tok::Eq) {
-            // we allow tiles without an init if a type is known
-            // - uninitialized (this) : var foo: tile<f32>[D, D]
-            // - initialized   (below): var bar: tile<f32>[D, D] = 0.0
-            // - illegal              : var baz
-            // - illegal (immutable!) : let eek: tile<f32>[D, D]
             self.end_stmt()?;
             return Ok(Stmt::Var {
                 name,

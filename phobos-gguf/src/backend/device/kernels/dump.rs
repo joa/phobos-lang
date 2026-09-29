@@ -1,7 +1,6 @@
-// Writes the generated sources of the raw-format kernels to a directory, so
-// `phobos-lang`'s `emit` example can turn each into MLIR under every target
-// and a codegen change can be diffed over them; these live in `format!`
-// strings, not `.ph` files, so the emit sweep is otherwise blind to them.
+// Writes the generated raw-format kernel sources to a directory as `.ph`
+// files. `phobos-lang`'s `emit` example can then diff a codegen change over
+// them, which it cannot do for sources built in `format!` strings.
 //
 //   PHOBOS_DUMP_DIR=/some/dir cargo test -p phobos-gguf --features cuda \
 //       dump_raw_kernel_sources -- --ignored

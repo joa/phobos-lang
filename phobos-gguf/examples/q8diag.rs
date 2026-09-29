@@ -2,10 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example q8diag
 //
-// Against f64, the device kernel is more accurate than the host reference:
-// it sums each 32-element block before accumulating, where the host runs
-// one flat sum over all of k. The disagreement is summation order, which is
-// why `backend_check` allows for it instead of requiring a bit-for-bit match.
+// The device kernel sums each 32-element block before accumulating, while
+// the host runs one flat sum over all of k. The two differ only in summation
+// order, which is why `backend_check` does not require a bit-for-bit match.
 use anyhow::Result;
 use phobos_base::half::{f16_to_f32, f32_to_f16};
 use phobos_gguf::backend::{Backend, HostBackend, quantize_row, read_vec};
@@ -26,20 +25,18 @@ fn main() -> Result<()> {
 
     for (k, n) in [(1024usize, 6144usize), (3584, 1024)] {
         let qs: Vec<i8> = (0..k * n).map(|_| (next() * 127.0) as i8).collect();
-        // Rounded through a half, which is how a packed weight stores a
-        // scale, so the f64 truth below is of the sum the backends really run.
+        // Rounded through f16, as a packed weight stores its scales, so the
+        // f64 truth matches what the backends compute.
         let scales: Vec<f32> = (0..(k / 32) * n)
             .map(|_| f16_to_f32(f32_to_f16(next().abs() + 0.01)))
             .collect();
         let a: Vec<f32> = (0..k).map(|_| next()).collect();
 
-        // The f64 truth of the sum both backends actually compute, from the
-        // quantized activation rather than the original: quantizing is part
-        // of the operation's definition, and its error would otherwise swamp
-        // the accumulation-order difference this measures.
+        // The f64 truth uses the quantized activation, not the original.
+        // Quantizing is part of the operation, and its error would swamp the
+        // accumulation-order difference measured here.
         //
-        // `qs` is [n, k], the order the file stores and the contraction
-        // wants, so an output's weights are one contiguous row.
+        // `qs` is [n, k], so an output's weights are one contiguous row.
         let mut qa = vec![0i8; k];
         let mut da = vec![0.0f64; k / 32];
         for (b, chunk) in a.chunks_exact(32).enumerate() {

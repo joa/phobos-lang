@@ -45,8 +45,8 @@ fn files(dir: &Path, chip: Option<&str>, found: &mut Vec<Entry>) {
     }
 }
 
-/// Files an entry under its kernel name, everything before the last dash in
-/// `<kernel>-<hash>`. Temporary files, dot-prefixed, are no entry.
+/// Records an entry under its kernel name, the part of `<kernel>-<hash>`
+/// before the last dash. Dot-prefixed temporary files are skipped.
 fn push(path: PathBuf, file: String, chip: Option<String>, found: &mut Vec<Entry>) {
     if file.starts_with('.') {
         return;

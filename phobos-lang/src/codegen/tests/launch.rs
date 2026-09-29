@@ -29,8 +29,8 @@ fn launch_min_blocks_optional() {
 
 #[test]
 fn launch_max_regs_emits_nvvm_maxnreg() {
-    // The third @launch arg hard-caps registers per thread (PTX .maxnreg),
-    // the lever for forcing occupancy when .minnctapersm is only advisory.
+    // The third @launch arg hard-caps registers per thread (PTX .maxnreg).
+    // Unlike .minnctapersm, which is only advisory, it forces occupancy.
     let mlir = emit_mlir(
         "@launch(256, 2, 128)
         kernel k(A: tensor<f32>[N]) { let i = program_id(0) }",

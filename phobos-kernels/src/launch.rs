@@ -20,12 +20,13 @@ pub const CTA_THREADS: u32 = 256;
 
 pub const WARP_THREADS: usize = 32;
 
-/// The largest grid every block of which is resident at once: what a
-/// `@persistent` kernel using `grid_barrier` must be launched with, since a
-/// block still waiting for an SM never arrives and the barrier deadlocks.
-/// Asked of the driver rather than assumed: shared memory, not registers,
-/// bounds it, and the widest fused stage sets the figure. Returns the block
-/// count and the blocks per SM behind it.
+/// The largest grid whose blocks are all resident at once. Returns the block
+/// count and the blocks per SM.
+///
+/// A `@persistent` kernel using `grid_barrier` must be launched with this
+/// grid. A block still waiting for an SM never arrives, so the barrier would
+/// deadlock. The driver is asked because shared memory, not registers, is
+/// what bounds it.
 ///
 /// # Safety
 ///

@@ -2,12 +2,8 @@ use super::*;
 
 impl<'c> Codegen<'c> {
 
-}
-
-// emission
-impl<'c> Codegen<'c> {
-
-    /// The rescaled fragments of `fa`, without rebinding anything.
+    /// The fragments of `fa` with each element combined by `op` with its
+    /// row's value in `col`. Rebinds nothing.
     pub(super) fn frag_scale_raw(
         &mut self,
         block: &Block<'c>,
@@ -31,7 +27,7 @@ impl<'c> Codegen<'c> {
         Ok(frags)
     }
 
-    /// The accumulated fragments of `fa += dot(a, b)`, without rebinding.
+    /// The fragments of `fa += dot(a, b)`. Rebinds nothing.
     pub(super) fn frag_dot_raw(
         &mut self,
         block: &Block<'c>,
@@ -60,9 +56,8 @@ impl<'c> Codegen<'c> {
             false,
         )?;
 
-        // No shared output to publish, but the barrier still orders the
-        // ldmatrix reads before the released staging is reused. Hoisted
-        // buffers outlive the loop.
+        // Nothing to publish, but the barrier orders the ldmatrix reads
+        // before the staging is reused. Hoisted buffers are not released.
         self.barrier(block)?;
         if !a_hoisted {
             self.release(&a_buf);
@@ -73,9 +68,9 @@ impl<'c> Codegen<'c> {
         Ok(finals)
     }
 
-    /// <tensor slice> = acc: scatters each lane's fragment elements straight
-    /// to the target, rounding f32 to f16 when the tensor is f16. The
-    /// epilogue analogue of mma_sync_store_frags, minus the shared hop.
+    /// `<tensor slice> = acc`: scatters each lane's fragment elements
+    /// straight to the target, converting to its element type. Like
+    /// [`Self::mma_sync_store_frags`], but without going through shared.
     pub(super) fn frag_store(
         &mut self,
         block: &Block<'c>,

@@ -95,8 +95,8 @@ fn dims_flash(size: i64) -> HashMap<String, i64> {
         .collect()
 }
 
-/// Mean wall time per call of f over iters runs, after two warmups. f is
-/// also the work whose result the caller wants from the last run.
+/// Mean wall time per call of `f` over `iters` runs, after two warmup calls,
+/// plus the result of the last run.
 fn timed<T>(iters: u32, mut f: impl FnMut() -> Result<T>) -> Result<(Duration, T)> {
     f()?;
     let mut last = f()?;
@@ -118,9 +118,9 @@ fn fmt_bytes(b: u64) -> String {
     format!("{v:.1} {}", UNITS[u])
 }
 
-/// Bytes the busiest node pulls from peers under the lowered plan (the comm
-/// term that races compute for the makespan). Mirrors the scheduler's own
-/// busiest_comm_sec, but on a plan lowered with peer FETCHes.
+/// Bytes the busiest node fetches from peers under the plan. This is the
+/// communication term of the makespan, as in the autotuner's
+/// `busiest_comm_sec`.
 fn busiest_fetch_bytes(p: &ClusterProgram, pl: &Plan) -> u64 {
     pl.fetches
         .iter()
@@ -161,7 +161,8 @@ fn throughput(w: &Workload, node_counts: &[u16]) -> Result<()> {
     for &size in w.sizes {
         let dims = (w.dims_for)(size);
         for &nodes in node_counts {
-            // Skip configs whose default supertile can't divide into >= nodes outputs; the planner would just error.
+            // The planner errors when the default supertile gives fewer
+            // outputs than nodes. Skip those configs.
             let plan = plan_budgeted_with(
                 &w.program,
                 &dims,
@@ -173,7 +174,6 @@ fn throughput(w: &Workload, node_counts: &[u16]) -> Result<()> {
             );
             let Ok(probe) = plan else { continue };
             let instrs = probe.total_instrs();
-            // More iterations for cheap (small) plans, fewer for the big ones.
             let iters = if instrs < 10_000 { 200 } else { 20 };
             let (dt, _) = timed(iters, || {
                 plan_budgeted_with(
@@ -228,10 +228,9 @@ fn scaling(w: &Workload, size: i64, node_counts: &[u16], fp: ClusterFingerprint)
         };
         let rc = &ranked[0];
 
-        // The autotuner ranks under DirectLoad, so its makespan is purely
-        // compute-bound. Re-plan the winner under HomeLoadPeerFetch to see the
-        // communication owner-computes would move, folding the busiest node's
-        // fetch time into the makespan (compute carries over unchanged).
+        // The autotuner ranks under DirectLoad, where the makespan is compute
+        // only. Re-plan the winner under HomeLoadPeerFetch to add the busiest
+        // node's fetch time. Compute stays the same.
         let plan = plan_budgeted_with(
             &w.program,
             &dims,
@@ -327,9 +326,8 @@ fn main() -> Result<()> {
         scaling(w, size, &scaling_nodes, fp)?;
     }
 
-    // The same sgemm over a 10x slower link: past a point communication stops
-    // hiding behind compute, so the makespan goes comm-bound and strong-scaling
-    // efficiency falls off.
+    // The same sgemm over a 10x slower link. Communication stops hiding
+    // behind compute, so the makespan becomes comm-bound.
     let slow = ClusterFingerprint {
         link_bytes_per_sec: 1e9,
         ..fp

@@ -1,8 +1,8 @@
 // IQ2_XS: `{ f16 d; uint16 qs[32]; uint8 scales[8]; }`, 2.3125 bits a weight.
 //
-// Each `qs` halfword carries a 9-bit grid index into
-// [`super::tables::iq2::IQ2XS_GRID`] plus a 7-bit sign parity in its top
-// bits; `scales` gives each half of a 32-element group its own 4-bit scale.
+// Each `qs` halfword holds a 9-bit index into
+// [`super::tables::iq2::IQ2XS_GRID`] and a 7-bit sign parity in its top
+// bits. `scales` gives each half of a 32-element group its own 4-bit scale.
 
 use phobos_base::half::f16_to_f32;
 
@@ -33,9 +33,9 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ2XS_GRID`] flattened to one magnitude byte a slot (512 entries,
-/// wider than IQ2_XXS's). Sign mechanism is identical to IQ2_XXS's, so
-/// `iq2xs_matvec` reuses [`super::iq2xxs_flat_signs`].
+/// [`IQ2XS_GRID`] flattened to one magnitude byte per slot (512 entries).
+/// Signs work as in IQ2_XXS, so `iq2xs_matvec` reuses
+/// [`super::iq2xxs_flat_signs`].
 #[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ2XS_GRID

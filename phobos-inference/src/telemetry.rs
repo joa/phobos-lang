@@ -1,9 +1,7 @@
-// What the runtime is doing, for something that displays it.
+// A record of what the runtime is doing, for a viewer to display.
 //
-// The engine writes events as they happen and a viewer reads whole snapshots
-// on its own clock, so the two never have to run at the same rate. Nothing
-// here draws, and nothing here names a model format: a viewer is one more
-// reader of the same traits the runtime already speaks.
+// The engine writes events as they happen. A viewer reads whole snapshots on
+// its own clock. Nothing here draws or names a model format.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -15,20 +13,16 @@ use phobos_base::progress::Step;
 
 use crate::model::{Architecture, CacheStats, DeviceInfo, DeviceMemory, Footprint, Model};
 
-/// Samples each rate history keeps. At one per token a decode of any length
-/// fills it, and the viewer plots however much of it fits.
+/// Samples each rate history keeps.
 const HISTORY: usize = 256;
 
-/// Lines the log ring holds. Older ones are dropped: a viewer that is behind
-/// wants the recent end, not the start.
+/// Lines the log ring holds. Older ones are dropped.
 const LOG_LINES: usize = 256;
 
 /// Finished requests the ring holds.
 const RECENT: usize = 32;
 
-/// Weight of the newest interval in the decode rate's moving average. Low
-/// enough that one slow token does not make the figure jump, high enough that
-/// the figure still follows a real change within a few tokens.
+/// Weight of the newest interval in the decode rate's moving average.
 const DECODE_SMOOTHING: f64 = 0.2;
 
 /// What the engine is doing right now.
@@ -36,7 +30,7 @@ const DECODE_SMOOTHING: f64 = 0.2;
 pub enum Phase {
     #[default]
     Idle,
-    /// Running a prompt, which is one call however many tokens it carries.
+    /// Running a prompt.
     Prefill,
     /// Producing tokens, one call each.
     Decode,
@@ -52,25 +46,22 @@ impl Phase {
     }
 }
 
-/// One finished request, as the log of them keeps it.
+/// One finished request.
 #[derive(Clone, Debug)]
 pub struct Request {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub reason: String,
-    /// Prompt positions that were already in the session and did not have to
-    /// be run again.
+    /// Prompt positions already in the session, which were not run again.
     pub reused: usize,
-    /// Prompt tokens a second, over the prompt pass alone.
+    /// Prompt tokens per second, over the prompt pass alone.
     pub prefill_rate: f64,
-    /// Generated tokens a second, over the decode alone. The prompt pass is
-    /// excluded on purpose: the two differ by an order of magnitude and an
-    /// average over both describes neither.
+    /// Generated tokens per second, over the decode alone.
     pub decode_rate: f64,
     pub at: Duration,
 }
 
-/// One line something in the runtime wanted to say.
+/// One log line from the runtime.
 #[derive(Clone, Debug)]
 pub struct LogLine {
     pub level: Level,
@@ -78,78 +69,63 @@ pub struct LogLine {
     pub at: Duration,
 }
 
-/// Upper edge of each compile-time bucket, in milliseconds, the last one
-/// standing for everything slower.
+/// Upper edge of each compile-time bucket, in milliseconds. The last one
+/// catches everything slower.
 pub const BUCKET_EDGES_MILLIS: [u64; 7] = [250, 500, 1_000, 2_000, 4_000, 8_000, u64::MAX];
 
-/// How much of a kernel's text and of its PTX to keep for a display.
-///
-/// A few screens' worth. The whole of either runs to tens of kilobytes, and
-/// nothing can show that much before the next kernel replaces it.
+/// How much of a kernel's text and of its PTX to keep for display, a few
+/// screens' worth.
 const EXCERPT_BYTES: usize = 8 << 10;
 
-/// How far a load has got.
-///
-/// Kept separate from the caches a running engine reports: this is the work
-/// done before there is a model at all, and on a cold start it is nearly all
-/// of the time a user waits.
+/// Progress of the startup work done before a model exists, mostly kernel
+/// compilation.
 #[derive(Clone, Debug, Default)]
 pub struct Loading {
     pub stage: String,
     /// What was finished most recently.
     pub item: String,
-    /// Position in the batch the last item belonged to. Work that arrives one
-    /// piece at a time reports a batch of one, so a bar is only worth drawing
-    /// when `total` is more than that.
+    /// Position in the batch of the last item. Work that arrives one piece at
+    /// a time reports a batch of one.
     pub done: usize,
     pub total: usize,
-    /// Built from source, and found already built. The first number is what
-    /// makes a cold start slow.
+    /// Kernels built from source, and kernels found already built.
     pub built: u64,
     pub cached: u64,
     pub elapsed: Duration,
     /// Kernels built, by how long they took. See [`BUCKET_EDGES_MILLIS`].
     pub buckets: [u64; BUCKET_EDGES_MILLIS.len()],
-    /// Characters put through the compiler, and characters of PTX that came
-    /// out. Counted over the kernels built, since a cached one compiled
-    /// nothing this run.
+    /// Kernel source and PTX sizes, counted over built kernels only.
     pub source_bytes: u64,
     pub ptx_bytes: u64,
-    /// Summed lowering time. Larger than the wall clock, because a batch
-    /// lowers on every core at once.
+    /// Summed lowering time. Can exceed the wall clock, since a batch lowers
+    /// on every core at once.
     pub compile_time: Duration,
-    /// The slowest kernel so far, which is the one worth knowing about.
+    /// The slowest kernel so far.
     pub slowest: String,
     pub slowest_took: Duration,
-    /// The last kernel built: its text, the PTX it became, and what it cost.
-    /// Both are cut to [`EXCERPT_BYTES`].
+    /// The last kernel built: its text, its PTX, and how long it took. Both
+    /// texts are cut to [`EXCERPT_BYTES`].
     pub source: String,
     pub ptx: String,
     pub took: Duration,
-    /// Kernels whose lowering has begun and not finished, longest first, with
-    /// how long each has been going.
+    /// Kernels still lowering, longest first, with how long each has run.
     ///
-    /// A batch starts all of them at once, so for most of a cold start this
-    /// is most of the batch. The head of it is the one to know about: the
-    /// batch cannot finish before its slowest member does, so that kernel is
-    /// what the wait is actually for.
+    /// The head is the one the batch is waiting on.
     pub in_flight: Vec<(String, Duration)>,
 }
 
 impl Loading {
-    /// Everything finished so far, however many batches it took.
+    /// Everything finished so far, across all batches.
     pub fn finished(&self) -> u64 {
         self.built + self.cached
     }
 
-    /// How far through the current batch, or nothing when the batch is one
-    /// item and a bar would say nothing.
+    /// Progress through the current batch, or `None` for a batch of one.
     pub fn ratio(&self) -> Option<f64> {
         (self.total > 1).then(|| self.done as f64 / self.total as f64)
     }
 
-    /// The kernel that has been lowering the longest, which is the one the
-    /// rest of the batch is waiting on.
+    /// The kernel that has been lowering the longest.
     pub fn longest(&self) -> Option<&(String, Duration)> {
         self.in_flight.first()
     }
@@ -175,9 +151,7 @@ impl Loading {
         out
     }
 
-    /// PTX characters produced per character of kernel text, over what has
-    /// been built. One line of this language becomes a great many of PTX,
-    /// and how many is the interesting part.
+    /// PTX bytes produced per byte of kernel source, over what was built.
     pub fn expansion(&self) -> Option<f64> {
         (self.source_bytes > 0).then(|| self.ptx_bytes as f64 / self.source_bytes as f64)
     }
@@ -192,7 +166,7 @@ pub struct Active {
     pub elapsed: Duration,
 }
 
-/// Everything fixed at load: named once so a viewer need not hold the model.
+/// Everything fixed at load, copied so a viewer need not hold the model.
 #[derive(Clone, Debug, Default)]
 pub struct Fixed {
     pub label: String,
@@ -206,10 +180,9 @@ pub struct Fixed {
 }
 
 impl Fixed {
-    /// Everything a model can say about itself that will not change again.
+    /// Everything a model reports about itself that never changes.
     ///
-    /// Asked once, on the way into serving: finding the card's driver version
-    /// may cost a subprocess, and none of this moves afterwards.
+    /// Call once. Finding the driver version may spawn a subprocess.
     pub fn of(model: &dyn Model, listen: Option<&str>) -> Fixed {
         let info = model.info();
         Fixed {
@@ -233,9 +206,9 @@ pub struct Snapshot {
     pub fixed: Fixed,
     pub device: Option<DeviceMemory>,
     pub caches: Option<CacheStats>,
-    /// What the load is doing, until there is a model to describe.
+    /// Startup progress.
     pub loading: Option<Loading>,
-    /// Positions the live session holds, and what its caches reserved for them.
+    /// Positions the live session holds, and the cache bytes reserved for them.
     pub cache_tokens: usize,
     pub cache_bytes: Option<u64>,
     pub prefill_rate: f64,
@@ -244,7 +217,7 @@ pub struct Snapshot {
     pub decode_history: Vec<f64>,
     pub requests: u64,
     pub prompt_tokens: u64,
-    /// Of [`Snapshot::prompt_tokens`], those a kept session already held.
+    /// The part of [`Snapshot::prompt_tokens`] a kept session already held.
     pub prompt_reused: u64,
     pub completion_tokens: u64,
     pub active: Option<Active>,
@@ -289,17 +262,14 @@ struct Inner {
 
 /// The shared record of what the engine is doing.
 ///
-/// Every method takes `&self` so the engine can hold one behind an [`Arc`] and
-/// write to it from wherever the work happens. The lock is held for a field
-/// update and never across a pass, so a decode at any rate a card can reach
-/// does not contend on it.
+/// Every method takes `&self`, so it can be shared behind an [`Arc`]. The
+/// lock is held only for field updates, never across a pass.
 ///
 /// [`Arc`]: std::sync::Arc
 pub struct Meter {
     running: AtomicBool,
-    /// Whether a line written here should also reach stderr. Off while a
-    /// full-screen viewer owns the terminal, on when nothing else would ever
-    /// show the line.
+    /// Whether log lines also go to stderr. Off while a full-screen viewer
+    /// owns the terminal.
     echo: AtomicBool,
     inner: Mutex<Inner>,
 }
@@ -340,15 +310,13 @@ impl Meter {
         }
     }
 
-    /// A poisoned meter is a display fault and not a reason to stop serving,
-    /// so every path recovers the guard rather than unwrapping it.
+    /// Recovers from poisoning, since a display fault should not stop serving.
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// Whether the engine should keep serving. A viewer clears this when the
-    /// user asks to quit, which is the only way a full-screen front end can
-    /// say so: it has the keyboard.
+    /// user asks to quit.
     pub fn running(&self) -> bool {
         self.running.load(Ordering::Relaxed)
     }
@@ -357,11 +325,8 @@ impl Meter {
         self.running.store(false, Ordering::Relaxed);
     }
 
-    /// Print every line to stderr as well as keeping it.
-    ///
-    /// For a caller with no viewer: the ring alone would mean a server that
-    /// says nothing at all, and the engine's lines are the only account of
-    /// what it did.
+    /// Print every log line to stderr as well as keeping it. For a caller
+    /// with no viewer.
     pub fn echo_to_stderr(&self) {
         self.echo.store(true, Ordering::Relaxed);
     }
@@ -369,9 +334,8 @@ impl Meter {
     pub fn describe(&self, fixed: Fixed) {
         let mut inner = self.lock();
         inner.fixed = fixed;
-        // Loading is over the moment there is a model to describe. Kernels
-        // compiled later, on the first pass that wants a shape nothing has
-        // built yet, keep counting but no longer hold up a screen.
+        // Loading ends once there is a model. Kernels compiled later still
+        // count, but no longer show a loading bar.
         if let Some(loading) = inner.loading.as_mut() {
             loading.done = 0;
             loading.total = 0;
@@ -400,8 +364,8 @@ impl Meter {
             return;
         }
 
-        // By name and only the first: the sequential phase compiles several
-        // kernels under one name, but never two at the same time.
+        // Remove only the first match by name. Several kernels can share a
+        // name, but never compile at the same time.
         if let Some(at) = inner
             .in_flight
             .iter()
@@ -429,8 +393,8 @@ impl Meter {
         loading.ptx = excerpt(step.ptx);
     }
 
-    /// What a kept session holds now that a request is over, or nothing when
-    /// it was dropped.
+    /// What the kept session holds after a request, or zero and `None` if it
+    /// was dropped.
     pub fn set_cache(&self, tokens: usize, bytes: Option<u64>) {
         let mut inner = self.lock();
         inner.cache_tokens = tokens;
@@ -453,24 +417,21 @@ impl Meter {
         let text = text.into();
         let mut inner = self.lock();
         let at = inner.started.elapsed();
-        // The ring keeps everything, since a viewer renders it with its own
-        // styling and can be asked for more detail. Only stderr is filtered,
-        // because that is the stream PHOBOS_LOG was set to configure.
+        // The ring keeps every level. Only the stderr echo is filtered by
+        // PHOBOS_LOG.
         if self.echo.load(Ordering::Relaxed) && phobos_base::log::enabled(level) {
             eprintln!("[{:>7.3}s] {text}", at.as_secs_f64());
         }
         push_capped(&mut inner.log, LogLine { level, text, at }, LOG_LINES);
     }
 
-    /// Drop every line held. A viewer offers this because the ring is the
-    /// only place these lines exist once a full-screen front end owns the
-    /// terminal.
+    /// Drop every log line held.
     pub fn clear_log(&self) {
         self.lock().log.clear();
     }
 
-    /// A request has begun, `reused` of whose `prompt_tokens` a kept session
-    /// already held and which therefore never reach a pass.
+    /// A request has begun. `reused` of its `prompt_tokens` were already in
+    /// the kept session and are not run.
     pub fn request_started(&self, prompt_tokens: usize, reused: usize) {
         let mut inner = self.lock();
         inner.phase = Phase::Prefill;
@@ -489,9 +450,8 @@ impl Meter {
         });
     }
 
-    /// The prompt pass is under way, `tokens` positions run in `took`. The
-    /// rate shows while the pass runs; only [`Meter::prefilled`] ends it and
-    /// enters it into the history.
+    /// The prompt pass is under way, `tokens` positions run in `took`. Only
+    /// [`Meter::prefilled`] records the rate in the history.
     pub fn prefilling(&self, tokens: usize, took: Duration) {
         let rate = rate_of(tokens, took);
         let mut inner = self.lock();
@@ -528,8 +488,8 @@ impl Meter {
             return;
         };
         live.produced += 1;
-        // For the moving average, and only for it: the gap back to the prompt
-        // pass is the prompt's cost rather than this token's.
+        // The first token has no interval, since the gap back to the prompt
+        // pass is not a decode step.
         let interval = live.last_token.map(|last| now.duration_since(last));
         live.last_token = Some(now);
         let Some(rate) = interval.map(|d| rate_of(1, d)) else {
@@ -544,18 +504,15 @@ impl Meter {
         push_capped(&mut inner.decode_history, smoothed, HISTORY);
     }
 
-    /// Close the live request and hand back what was recorded, so a caller
-    /// can report it without reading the whole snapshot back.
+    /// Close the live request and return its record.
     pub fn request_finished(&self, reason: &str) -> Option<Request> {
         let mut inner = self.lock();
         inner.phase = Phase::Idle;
         let at = inner.started.elapsed();
         let live = inner.live.take()?;
-        // Over the decode alone, so it is comparable with the live figure and
-        // with what a decode benchmark reports. Every token is followed by one
-        // more step, so a span that produced n of them covers n steps: the
-        // first token came free with the prompt pass and the last step's token
-        // was not emitted, which cancel.
+        // Over the decode alone. A span that produced n tokens covers n
+        // steps: the first token came with the prompt pass, and the last
+        // step's token was not emitted.
         let decode_rate = match live.decode_started {
             Some(from) if live.produced > 0 => rate_of(live.produced, from.elapsed()),
             _ => 0.0,
@@ -570,14 +527,14 @@ impl Meter {
             at,
         };
         push_capped(&mut inner.recent, done.clone(), RECENT);
-        // The caches are not cleared here: a session may be kept for the next
-        // request, and whether it was is the caller's to report.
+        // Cache figures are left alone. The caller reports whether the
+        // session was kept.
         Some(done)
     }
 
     pub fn snapshot(&self) -> Snapshot {
         let inner = self.lock();
-        // Longest first: the head is the one the batch is waiting on.
+        // Longest first.
         let mut in_flight: Vec<(String, Duration)> = inner
             .in_flight
             .iter()
@@ -616,8 +573,7 @@ impl Meter {
     }
 }
 
-/// As much of `text` as a display could use, cut on a character boundary so
-/// what is kept is still a string.
+/// `text` cut to [`EXCERPT_BYTES`] characters.
 fn excerpt(text: &str) -> String {
     match text.char_indices().nth(EXCERPT_BYTES) {
         Some((at, _)) => text[..at].to_string(),
@@ -625,8 +581,7 @@ fn excerpt(text: &str) -> String {
     }
 }
 
-/// Tokens a second, with a zero-length interval reported as no rate at all
-/// rather than as an infinite one.
+/// Tokens per second, or zero for a zero-length interval.
 fn rate_of(tokens: usize, took: Duration) -> f64 {
     let seconds = took.as_secs_f64();
     if seconds <= 0.0 {

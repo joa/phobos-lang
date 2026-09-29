@@ -211,7 +211,7 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// `Map` into a fresh buffer of the result's type, or `MapInto` a
+    /// `Map` into a fresh buffer of the result's type, or `MapInto` the
     /// given one.
     fn emit_map(
         &mut self,
@@ -288,7 +288,7 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The dot arm of a store, past the self-alias check.
+    /// Stores a dot into `target`, once the self-alias check has passed.
     fn dot_into(
         &mut self,
         block: &Block<'c>,
@@ -359,8 +359,8 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The emitter's fused tree from the op's, with every tile leaf that
-    /// is not the target collected for release, once per mention.
+    /// Converts the op's fused tree into the emitter's. Every tile leaf other
+    /// than the target is pushed to `leaves` for release, once per mention.
     fn fused_from_tree(
         &self,
         ir: &Ir,

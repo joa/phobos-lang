@@ -7,14 +7,11 @@ use crate::model::{Model, Session};
 use crate::sampling::{Rng, SampleConfig, Sequence, choose};
 use crate::telemetry::Meter;
 
-/// How often a generation stops to re-read the card.
+/// How often a generation stops to re-read the card's memory.
 ///
-/// Only the thread running the pass can ask the driver, and it is inside this
-/// loop for the whole of a request. Without this the memory a dashboard shows
-/// would sit at whatever it was before the request started and only catch up
-/// once the request was over, which is exactly when it stops being
-/// interesting. The call is a driver query costing microseconds, and once a
-/// second against a forward pass is nothing.
+/// Only the thread running the pass can query the driver, and it stays in
+/// this loop for the whole request. Without a periodic refresh a dashboard
+/// would show stale memory until the request ends. The query is cheap.
 const DEVICE_REFRESH: Duration = Duration::from_secs(1);
 
 pub enum Stop {
@@ -54,13 +51,11 @@ pub enum Flow {
 pub struct Config {
     pub sample: SampleConfig,
     pub max_tokens: usize,
-    /// Where to report progress, for a caller displaying it. Not a setting
-    /// the generation reads: nothing below branches on it.
+    /// Where to report progress. The generation never branches on it.
     pub meter: Option<Arc<Meter>>,
-    /// The prompt position to leave a [`Session::checkpoint`] at, for a
-    /// caller that knows where the next prompt is likely to part from this
-    /// one. `None`, or a position the pass does not reach, is the end of the
-    /// prompt.
+    /// The prompt position to leave a [`Session::checkpoint`] at, typically
+    /// where the next prompt is likely to diverge from this one. `None`, or a
+    /// position the pass does not reach, means the end of the prompt.
     pub checkpoint_at: Option<usize>,
 }
 
@@ -81,10 +76,9 @@ pub struct Outcome {
     pub tokens: usize,
     /// Every token the session now holds, in order.
     ///
-    /// Not the same as the prompt plus what was emitted: a generation stopped
-    /// by its sink emits a token it never feeds back, and one stopped by an
-    /// end-of-turn token never feeds that either. A caller keeping the session
-    /// has to know which, so it is reported rather than reconstructed.
+    /// This is not always the prompt plus what was emitted. A token that
+    /// stopped the sink, or an end-of-turn token, is never fed back. A caller
+    /// keeping the session needs the exact list.
     pub held: Vec<i64>,
 }
 
@@ -94,10 +88,9 @@ pub fn prefill(session: &mut dyn Session, prompt: &[i64]) -> Result<Vec<f32>> {
 
 /// [`prefill`] then [`continue_from`].
 ///
-/// Whatever `session` already holds must be a prefix of `prompt`; only the
-/// remainder is run. A fresh session holds nothing and so runs all of it,
-/// which is the ordinary case. Sampling still sees the whole sequence, so a
-/// penalty does not depend on how much of the prompt was already cached.
+/// Whatever `session` already holds must be a prefix of `prompt`, and only
+/// the remainder is run. Sampling still sees the whole sequence, so a penalty
+/// does not depend on how much of the prompt was cached.
 pub fn generate(
     model: &dyn Model,
     session: &mut dyn Session,
@@ -106,16 +99,13 @@ pub fn generate(
     rng: &mut Rng,
     sink: &mut dyn FnMut(&str) -> Flow,
 ) -> Result<Outcome> {
-    // Before anything: the first pass of a run is what puts the weights on
-    // the card, so the reading either side of it is the interesting pair.
+    // The first pass puts the weights on the card, so read memory before it.
     probe(model, config);
     let cached = session.len().min(prompt.len());
     let fresh = &prompt[cached..];
     if fresh.is_empty() {
-        // The decode's first token is chosen from the logits of the last
-        // prompt position, and those have to come from a pass run now: what
-        // the session last returned belongs to whatever it was doing before.
-        // A caller reusing a session leaves it one position short for this.
+        // The first token needs fresh logits for the last prompt position.
+        // A caller reusing a session must leave it one position short.
         bail!("the session already holds the whole prompt, leaving no position to run");
     }
 
@@ -142,9 +132,9 @@ pub fn generate(
     continue_from(model, session, &mut sequence, &logits, config, rng, sink)
 }
 
-/// `fresh` fed a batch at a time, the live prompt rate updated between
-/// batches, with the checkpoint taken after its first `split` positions.
-/// Returns the logits of its last position.
+/// Feeds `fresh` a batch at a time, reporting progress between batches, and
+/// checkpoints after the first `split` positions. Returns the last position's
+/// logits.
 fn feed_in_batches(session: &mut dyn Session, fresh: &[i64], split: usize, batch: usize, meter: Option<&Meter>, started: Instant) -> Result<Vec<f32>> {
     let mut logits = Vec::new();
     let mut done = 0;
@@ -166,8 +156,8 @@ fn feed_in_batches(session: &mut dyn Session, fresh: &[i64], split: usize, batch
 /// Continue a generation, `logits` being those for the position after
 /// `sequence`.
 ///
-/// Split from [`generate`] so a caller that wants to show the prompt pass's own
-/// logits, as the CLI's top-candidates listing does, can look at them first.
+/// Separate from [`generate`] so a caller can inspect the prompt pass's
+/// logits first, as the CLI's top-candidates listing does.
 pub fn continue_from(
     model: &dyn Model,
     session: &mut dyn Session,
@@ -180,9 +170,8 @@ pub fn continue_from(
     let tokenizer = model.tokenizer();
     let context_limit = model.info().context_limit;
 
-    // Greedy with no penalty active needs nothing from a step but the
-    // winning token id, which a backend may be able to produce without
-    // moving the whole logits vector; see `Session::extend_greedy`.
+    // Unpenalized greedy only needs the winning token id, which a backend
+    // may produce without copying out the logits. See `Session::extend_greedy`.
     let fast_greedy = config.sample.is_greedy_unpenalized();
 
     // Bytes short of a complete UTF-8 character; a token can split one.
@@ -203,9 +192,8 @@ pub fn continue_from(
         pending.extend(tokenizer.decode_bytes(&[next]));
         emitted += 1;
         if let Some(meter) = config.meter.as_ref() {
-            // Counted here rather than at the sink: a token whose bytes only
-            // half-finish a character does not reach the sink, and it is
-            // still a token the card produced.
+            // Counted here, not at the sink, because a token that ends
+            // mid-character never reaches the sink.
             meter.token(session.len(), session.cache_bytes());
             if probed.elapsed() >= DEVICE_REFRESH {
                 probe(model, config);
@@ -231,8 +219,7 @@ pub fn continue_from(
         }
     };
 
-    // Trailing incomplete bytes, rendered lossy: there is nothing left to
-    // complete them with.
+    // Nothing will complete the trailing bytes, so render them lossy.
     if !pending.is_empty() {
         sink(&String::from_utf8_lossy(&pending));
     }
@@ -243,10 +230,8 @@ pub fn continue_from(
     })
 }
 
-/// Ask the model what the card looks like now, for whoever is watching.
-///
-/// Costs nothing when nobody is: without a meter there is no one to tell, and
-/// a front end with no device to read reports nothing either way.
+/// Copies the model's current device memory and cache stats into the meter.
+/// Does nothing without a meter.
 fn probe(model: &dyn Model, config: &Config) {
     let Some(meter) = config.meter.as_ref() else {
         return;
@@ -265,7 +250,6 @@ fn take_complete(pending: &mut Vec<u8>) -> Option<String> {
     if valid == 0 {
         return None;
     }
-    // Valid UTF-8 by construction.
     let text = std::str::from_utf8(&pending[..valid]).unwrap().to_string();
     pending.drain(..valid);
     Some(text)

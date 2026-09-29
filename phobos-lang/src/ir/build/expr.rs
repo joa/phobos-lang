@@ -163,7 +163,7 @@ impl Build {
         Ok(self.value(OpKind::Map(Map::Binary(op)), &[wa, wb], ty))
     }
 
-    /// Widens two tiles to a common type (noop if already equal).
+    /// Widens two tiles to a common element type.
     fn widen_pair(&mut self, a: ValueId, b: ValueId) -> Result<(ValueId, ValueId)> {
         let (ae, be) = (self.elem(a), self.elem(b));
         if ae == be {
@@ -290,7 +290,7 @@ impl Build {
         }
     }
 
-    /// Whether a slice of this binding is a subview the type system can name.
+    /// Fails unless a slice of this binding is a subview the type system can name.
     pub(crate) fn check_sliceable(&self, mv: ValueId, binding: &Binding) -> Result<()> {
         if !matches!(binding, Binding::Tensor(_) | Binding::Tile(_)) {
             bail!("only tensors and tiles can be sliced");

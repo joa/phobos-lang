@@ -1,14 +1,14 @@
-// Q2_K matvec: decodes straight from the raw block bytes, all sixteen runs
-// at static offsets (run order is output order), so the block unrolls into
-// one straight-line expression per run instead of a `gather`. Every raw
-// byte goes through `(i32(b) + 256) % 256` before any `/` or `%`, since
-// Q2_K bytes routinely have bit 7 set and a signed remainder gives the
-// wrong nibble silently.
+// Q2_K matvec, decoding straight from the raw block bytes.
 //
-// Each run is one inlined expression rather than a named intermediate: a
-// `let` tile never releases its buffer, so naming each run would exceed the
-// 48 KB shared-memory ceiling. Inlined, rereading the scale rather than
-// binding it, this fits in 43 KB.
+// All sixteen runs sit at static offsets, in output order, so the block
+// unrolls into one straight-line expression per run with no `gather`. Every
+// raw byte goes through `(i32(b) + 256) % 256` before any `/` or `%`,
+// because a signed remainder silently gives the wrong bits when bit 7 is
+// set.
+//
+// Each run is inlined rather than bound to a name, and the scale is reread
+// rather than bound. A `let` tile never releases its buffer, so naming them
+// would exceed 48 KB of shared memory.
 
 use std::fmt::Write as _;
 
@@ -20,8 +20,8 @@ const RUNS_PER_BLOCK: usize = 256 / RUN;
 const BLOCK_BYTES: usize = 84;
 const QS_OFF: usize = 16;
 
-/// Byte offset and shift divisor for run `is` (h/j/half2 decomposition,
-/// matching quant/q2_k.rs::dequantize).
+/// Byte offset and shift divisor for run `is`, split into `h`, `j` and
+/// `half2` as in `quant/q2_k.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize) {
     let h = is / 8;
     let rem = is % 8;
@@ -75,10 +75,9 @@ kernel q2k_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`q2k_matvec_src`] for `m == 1`, folding the whole decode-and-reduce into
-/// one `q2k_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which this
-/// mirrors. `@aligned(N = TN)` is required for the same reason: `q2k_qdot_t`
-/// demands its `qb`/`d`/`dmin` slices provably in bounds.
+/// [`q2k_matvec_src`] for `m == 1`, as one `q2k_qdot_t` call; mirrors
+/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `q2k_qdot_t` needs its `qb`, `d` and `dmin` slices provably in bounds.
 pub(crate) fn q2k_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -95,9 +94,8 @@ kernel q2k_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`q2k_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`q2k_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
+/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
 pub(crate) fn q2k_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..RUNS_PER_BLOCK {

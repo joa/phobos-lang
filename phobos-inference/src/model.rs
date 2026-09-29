@@ -8,33 +8,30 @@ pub struct ModelInfo {
     pub chat_template: Option<String>,
 }
 
-/// What a loaded model occupies, in bytes, for a caller that reports rather
-/// than decides: a front end that cannot say returns nothing rather than zero.
+/// What a loaded model occupies, in bytes. For display only.
 #[derive(Clone, Copy, Debug)]
 pub struct Footprint {
     /// Every weight, as held by the backend rather than as stored on disk.
     pub weight_bytes: u64,
-    /// Of [`Footprint::weight_bytes`], what the backend could not keep in the
-    /// file's own format and holds widened instead.
+    /// The part of [`Footprint::weight_bytes`] held widened because the
+    /// backend cannot use the file's own format.
     pub dense_bytes: u64,
-    /// Weights not counted in [`Footprint::weight_bytes`] because they are
-    /// never all resident: a mixture of experts the backend streams from the
-    /// file, as the file holds them. Zero for a model without any.
+    /// Streamed expert weights, at their file size. Not counted in
+    /// [`Footprint::weight_bytes`] since they are never all resident. Zero for
+    /// a model without streamed experts.
     pub streamed_bytes: u64,
     /// What one more position of context costs across every cached layer.
     pub kv_bytes_per_token: u64,
 }
 
-/// What one block of the network does, as much as anything outside a front
-/// end needs to know.
+/// The kind of one block of the network.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BlockKind {
     /// Softmax attention, reading a key/value cache that grows with the
     /// sequence.
     Attention,
-    /// A recurrent or linear-attention block, carrying state of a fixed size
-    /// however long the sequence gets. It is why a model can interleave and
-    /// still fit: only the attention blocks pay per position.
+    /// A recurrent or linear-attention block. Its state has a fixed size
+    /// however long the sequence gets.
     Recurrent,
 }
 
@@ -55,7 +52,7 @@ pub struct Architecture {
     pub n_head: usize,
     pub n_head_kv: usize,
     pub head_dim: usize,
-    /// One entry a block, in the order they run.
+    /// One entry per block, in the order they run.
     pub blocks: Vec<BlockKind>,
 }
 
@@ -65,53 +62,48 @@ impl Architecture {
     }
 }
 
-/// What a backend got back out of the caches it keeps, against what it had to
-/// make from scratch.
+/// Hit and miss counts for the caches a backend keeps.
 ///
 /// Counts rather than ratios, so a caller can show a rate over the whole run
-/// or a change since it last looked. Every one of these rises towards a plateau
-/// as a model warms up: the shapes a model uses are fixed once it is loaded.
+/// or since it last looked. They level off as a model warms up.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct CacheStats {
-    /// Kernels a launch found already compiled, and kernels it had to compile.
-    /// Compiling is measured in seconds, so the second number should stop
-    /// rising early and then stay still.
+    /// Kernels found already compiled, and kernels that had to be compiled.
+    /// The second should stop rising early.
     pub kernels_reused: u64,
     pub kernels_compiled: u64,
-    /// Device buffers taken off the pool's free list, and buffers that had to
-    /// be allocated because nothing of that size was free.
+    /// Device buffers taken off the pool's free list, and buffers newly
+    /// allocated because nothing of that size was free.
     pub buffers_reused: u64,
     pub buffers_allocated: u64,
-    /// Device memory in pooled buffers: handed out and in use, and released
-    /// and waiting on the free list for a request of the same size.
+    /// Device memory in pooled buffers, split into in use and idle on the
+    /// free list.
     pub buffer_live_bytes: u64,
     pub buffer_idle_bytes: u64,
-    /// For a model whose experts stream: experts a decode step wanted that
-    /// were in the device cache, ones that were not, computed on the host or
-    /// copied, and the bytes that crossed the bus for any pass. All zero for
-    /// a model without experts.
+    /// Streamed experts only. A decode step's expert lookups that hit the
+    /// device cache, those that missed, and the bytes copied over the bus by
+    /// any pass. All zero for a model without experts.
     pub expert_hits: u64,
     pub expert_misses: u64,
     pub expert_bytes: u64,
-    /// The same lookups by a prompt pass, which looks up an expert once for
-    /// all the rows routed to it, so these count experts and not tokens.
+    /// The same lookups by a prompt pass. These count experts, not tokens,
+    /// since a prompt pass looks up each expert once for all its rows.
     pub expert_prompt_hits: u64,
     pub expert_prompt_misses: u64,
-    /// Experts copied into slots on the side, by a lookahead ahead of their
-    /// block or as a host-computed miss kept for later tokens, and how many
-    /// of those a block then found there.
+    /// Experts copied into side slots ahead of use, either by lookahead or
+    /// as a host-computed miss kept for later tokens, and how many of those
+    /// were then used.
     pub expert_prefetches: u64,
     pub expert_prefetch_hits: u64,
-    /// A decode step's misses computed on the host rather than copied, and
-    /// the host time they took, a block's misses at a time. Zero unless that
-    /// path is on.
+    /// Decode misses computed on the host instead of copied, and the host
+    /// time they took. Zero unless that path is on.
     pub expert_cpu_misses: u64,
     pub expert_cpu_nanos: u64,
 }
 
 impl CacheStats {
     /// Share of kernel lookups that found one ready, or `None` before the
-    /// first lookup, which is not a rate of zero.
+    /// first lookup.
     pub fn kernel_hit_rate(&self) -> Option<f64> {
         rate(self.kernels_reused, self.kernels_compiled)
     }
@@ -134,9 +126,8 @@ fn rate(hits: u64, misses: u64) -> Option<f64> {
 
 /// The card a model is running on, as the driver describes it.
 ///
-/// Everything here is fixed for the life of the process and read once. The
-/// clocks are the card's maxima rather than what it is running at: an idle
-/// card sits far below them, and nothing here samples a live one.
+/// Read once and fixed for the life of the process. The clocks are the card's
+/// maxima, not live readings.
 #[derive(Clone, Debug)]
 pub struct DeviceInfo {
     pub name: String,
@@ -146,28 +137,26 @@ pub struct DeviceInfo {
     pub core_clock_khz: u32,
     pub memory_clock_khz: u32,
     pub memory_bus_bits: u32,
-    /// The CUDA driver API version, major and minor. Not the version a driver
-    /// release is known by, which is [`DeviceInfo::driver`].
+    /// The CUDA driver API version, major and minor. The driver's release
+    /// version is [`DeviceInfo::driver`].
     pub cuda: (u32, u32),
-    /// The display driver's own version, when something could be asked for it.
+    /// The display driver's own version, when it could be found.
     pub driver: Option<String>,
 }
 
 impl DeviceInfo {
-    /// Peak memory bandwidth, in bytes a second: double data rate, times the
-    /// bus width in bytes, times the clock.
+    /// Peak memory bandwidth in bytes per second, from the specification:
+    /// double data rate times bus width in bytes times the clock.
     ///
-    /// A ceiling from the card's specification rather than a measurement, and
-    /// the number a decode is worth comparing against, since decoding reads
-    /// every weight once per token and is bound by this long before it is
-    /// bound by arithmetic.
+    /// Decode reads every weight once per token, so this is the ceiling to
+    /// compare it against.
     pub fn peak_bandwidth(&self) -> u64 {
         2 * (self.memory_bus_bits as u64 / 8) * self.memory_clock_khz as u64 * 1_000
     }
 }
 
-/// A device's memory as the driver reports it, which is the whole card and not
-/// this process's share of it.
+/// A device's memory as the driver reports it, for the whole card rather than
+/// this process.
 #[derive(Clone, Copy, Debug)]
 pub struct DeviceMemory {
     pub free_bytes: u64,
@@ -187,16 +176,14 @@ pub trait Model {
 
     fn session(&self) -> Result<Box<dyn Session + '_>>;
 
-    /// What this model occupies, for a caller that only displays it. The
-    /// default is `None`, so a front end that does not account for its own
-    /// weights is not obliged to invent a number.
+    /// What this model occupies, for display. `None` when the front end does
+    /// not account for its weights.
     fn footprint(&self) -> Option<Footprint> {
         None
     }
 
-    /// Free and total bytes on the device this model computes on, read fresh
-    /// on every call. A host backend reports nothing: it competes with the
-    /// whole machine rather than with a fixed budget.
+    /// Free and total bytes on this model's device, read fresh on every call.
+    /// A host backend reports nothing.
     fn device_memory(&self) -> Option<DeviceMemory> {
         None
     }
@@ -206,21 +193,19 @@ pub trait Model {
         None
     }
 
-    /// The card this model computes on. Fixed, and worth asking for once:
-    /// finding the display driver's version may cost a subprocess.
+    /// The card this model computes on. Fixed, so ask once: finding the
+    /// display driver's version may spawn a subprocess.
     fn device_info(&self) -> Option<DeviceInfo> {
         None
     }
 
-    /// What the backend's caches have returned so far, read fresh on every
-    /// call. A backend that keeps no caches reports nothing.
+    /// The backend's cache counters so far, read fresh on every call.
     fn cache_stats(&self) -> Option<CacheStats> {
         None
     }
 
-    /// Does now what the first request would otherwise wait for, such as
-    /// putting the weights on the device. A caller runs it once, straight
-    /// after the load; a backend with nothing to prepare does nothing.
+    /// Does up front what the first request would otherwise wait for, such as
+    /// putting the weights on the device. Call once, right after loading.
     fn warm_up(&self) -> Result<()> {
         Ok(())
     }
@@ -229,26 +214,20 @@ pub trait Model {
 pub trait Session {
     /// Run `ids` and return the logits for the position after the last one.
     ///
-    /// The prompt is one call and each generated token another, so a caller
-    /// never has to keep a model and a state in step by hand. An implementation
-    /// is free to split a long call into batches; that is a property of the
-    /// backend, not of the interface.
+    /// Typically the prompt is one call and each generated token another. An
+    /// implementation may split a long call into batches internally.
     fn extend(&mut self, ids: &[i64]) -> Result<Vec<f32>>;
 
-    /// The batch a long [`Session::extend`] is split into, when the backend
-    /// splits one. A caller can then hand the prompt over in pieces, a batch
-    /// at a time to report progress between them at no cost, since the
-    /// passes run are the same. `None`, the default, is a backend whose
-    /// prompt has to arrive in one call.
+    /// The batch size a long [`Session::extend`] is split into, if any.
+    /// Feeding the prompt a batch at a time then costs nothing and allows
+    /// progress reports. `None` means the prompt must arrive in one call.
     fn prompt_batch(&self) -> Option<usize> {
         None
     }
 
-    /// [`Session::extend`] for a caller that only wants the winning token id,
-    /// as greedy decoding does: `choose` over a one-element argmax is the
-    /// identity, so skipping the full logits vector changes only how much a
-    /// backend has to move, not the result. Purely additive, since the
-    /// default is [`Session::extend`] plus a host-side argmax.
+    /// [`Session::extend`] returning only the argmax token id, for greedy
+    /// decoding. A backend can skip copying out the logits. The default is
+    /// [`Session::extend`] plus a host-side argmax.
     fn extend_greedy(&mut self, ids: &[i64]) -> Result<i64> {
         Ok(crate::sampling::argmax(&self.extend(ids)?))
     }
@@ -256,33 +235,28 @@ pub trait Session {
     /// Tokens consumed so far, prompt included.
     fn len(&self) -> usize;
 
-    /// Drop everything past `positions`, so the next [`Session::extend`]
-    /// continues from there, and return how many positions the session
-    /// kept. That may be fewer than asked: a session goes back only to
-    /// points it can return to, and the caller runs the rest again. `None`
-    /// is a session that could not go back at all, which the caller drops.
+    /// Drop everything past `positions` and return how many positions were
+    /// kept. The next [`Session::extend`] continues from there.
     ///
-    /// Rewinding is what lets a session be kept and reused for a request that
-    /// shares a prefix with the last one. Not every backend can: a recurrent
-    /// block's state summarises every token it has seen rather than storing
-    /// them by position, and there is nothing to subtract. It can only return
-    /// to a [`Session::checkpoint`]. The default is a session with neither,
-    /// and it still permits the case that asks for nothing to be dropped,
-    /// which is how a session is extended rather than rewound.
+    /// The result may be fewer than asked, since a session can only go back
+    /// to points it can return to. The caller runs the rest again. `None`
+    /// means the session could not go back at all and should be dropped.
+    ///
+    /// A recurrent block's state cannot be rewound by position, only restored
+    /// to a [`Session::checkpoint`]. The default rewinds nowhere, but still
+    /// accepts a request that drops nothing, so the session can be extended.
     fn truncate(&mut self, positions: usize) -> Option<usize> {
         (positions == self.len()).then_some(positions)
     }
 
     /// Remember the current position as one [`Session::truncate`] can
-    /// return to, in place of any remembered before. A session that rewinds
-    /// to any position, or to none, has nothing to remember.
+    /// return to, replacing any earlier checkpoint.
     fn checkpoint(&mut self) -> Result<()> {
         Ok(())
     }
 
-    /// Bytes of key/value cache this session holds right now, which is what
-    /// the backend reserved and not what [`Session::len`] would need: a cache
-    /// that grows by doubling is mostly headroom just after it grows.
+    /// Bytes of key/value cache this session has reserved right now, which
+    /// can be well above what [`Session::len`] needs.
     fn cache_bytes(&self) -> Option<u64> {
         None
     }

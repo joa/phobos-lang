@@ -8,7 +8,7 @@ use std::path::Path;
 pub enum Precision {
     /// f32 CUDA cores.
     F32,
-    /// f16 tensor cores,
+    /// f16 tensor cores.
     F16Tc,
     /// f16 tensor cores; f32 accumulate.
     F16TcF32,
@@ -49,7 +49,7 @@ pub struct Results {
 }
 
 impl Results {
-    /// Record one implementation's throughput. gflops is the achieved rate
+    /// Record one implementation's throughput. `gflops` is the achieved rate
     /// (total GFLOP / seconds), not the operation count.
     pub fn push(
         &mut self,
@@ -87,7 +87,7 @@ impl Results {
         out
     }
 
-    /// Write the CSV to path, using peaks for the reference columns.
+    /// Write the CSV to `path`, using `peaks` for the reference columns.
     pub fn write_csv(&self, path: &Path, peaks: &Peaks) -> anyhow::Result<()> {
         fs::write(path, self.to_csv(peaks))?;
         phinfo!("wrote {} rows to {}", self.records.len(), path.display());
@@ -105,9 +105,9 @@ pub struct Peaks {
 }
 
 impl Peaks {
-    /// Detect peaks from device 0, applying any command-line overrides (given in
-    /// TFLOP/s): the per-architecture rates are vendor-spec dense throughput,
-    /// best-effort for consumer parts, which the overrides exist to correct.
+    /// Detect peaks from device 0, applying any overrides (in TFLOP/s).
+    /// The per-architecture rates are vendor-spec dense throughput and only
+    /// best-effort for consumer parts. The overrides correct them.
     pub fn detect(
         peak_fp32_tflops: Option<f64>,
         peak_fp16_tc_tflops: Option<f64>,

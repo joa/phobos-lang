@@ -68,9 +68,8 @@ impl DeviceBackend {
         )
     }
 
-    /// A pointwise launch over `len` elements of one or more flat buffers. Past
-    /// enough of them to fill the card the wide kernel takes over; see
-    /// [`ELEM_TILE_WIDE`].
+    /// A pointwise launch over `len` elements of one or more flat buffers.
+    /// Long runs use the wide kernel, see [`ELEM_TILE_WIDE`].
     pub(super) fn pointwise(
         &self,
         name: &'static str,

@@ -151,8 +151,8 @@ impl Build {
                     bail!("{callee} expects a tile argument");
                 };
                 let step = ElemStep::from_callee(callee).expect("a math call");
-                // An owned temp is rewritten in place; the emitter decides,
-                // and the type is the source's either way.
+                // The emitter may rewrite an owned temp in place. The result
+                // type is the source's either way.
                 let shape = self.shape(t);
                 if !self.owned(t) && shape.contains(&DYN) {
                     bail!("{callee} needs a static tile shape");
@@ -450,8 +450,8 @@ impl Build {
         Ok(Rv::Scalar(self.value(OpKind::GridBarrier, &[mem], Type::INDEX)))
     }
 
-    /// `rms_norm_q_t(x, gain, eps, [out,] q, scales)`. Yields the zero the
-    /// source sees; the emitter checks the shapes.
+    /// `rms_norm_q_t(x, gain, eps, [out,] q, scales)`. Yields the f32
+    /// inverse rms; the emitter checks the shapes.
     fn emit_rms_norm_q(&mut self, args: &[Expr]) -> Result<Rv> {
         let (x, g, eps, o, q, s) = match args {
             [x, g, eps, o, q, s] => (x, g, eps, Some(o), q, s),
@@ -480,9 +480,9 @@ impl Build {
         Ok(Rv::Scalar(inv))
     }
 
-    /// `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)`: the tiles
-    /// and tensors by name, then the scalars in the order the emitter
-    /// evaluated them. Operands: the six buffers, then `scale, lo, hi, col`.
+    /// `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)`. Tiles and
+    /// tensors are taken by name. The op's operands are the six buffers, then
+    /// `scale, lo, hi, col`, the order the emitter evaluates the scalars in.
     fn emit_warp_partial(&mut self, args: &[Expr]) -> Result<Rv> {
         let [q, k, v, lo, hi, col, wm, wl, wacc, scale] = args else {
             bail!("warp_partial expects (q, K, V, lo, hi, col, WM, WL, WACC, scale)");

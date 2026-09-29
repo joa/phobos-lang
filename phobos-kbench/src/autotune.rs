@@ -113,11 +113,9 @@ where
         }
 
         // Stage 2: long-probe the top finalists, interleaved round-robin.
-        // Timing each finalist in its own contiguous block would hand
-        // whichever runs first the coolest silicon and highest boost clocks,
-        // a bias often larger than the margin between finalists. One launch
-        // per finalist per round keeps every config under the same clock and
-        // thermal state, so min-over-rounds compares kernels, not GPU moods.
+        // Timing each finalist in one block would favor whichever runs first,
+        // on cooler silicon at higher boost clocks. One launch per finalist
+        // per round keeps them all under the same clock and thermal state.
         candidates.sort_by_key(|(_, _, best)| *best);
         candidates.truncate(self.finalists);
         anyhow::ensure!(!candidates.is_empty(), "autotune: no config works");

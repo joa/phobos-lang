@@ -17,8 +17,8 @@ pub fn infer(graph: &Graph) -> Result<HashMap<String, Dims>> {
         dims.insert(name.clone(), t.dims.clone());
     }
 
-    // An input already fed by an initializer is an optional one with a default,
-    // which ONNX allows.
+    // An input also fed by an initializer is optional, with the initializer as
+    // its default.
     for vi in &graph.inputs {
         if dims.contains_key(&vi.name) {
             continue;

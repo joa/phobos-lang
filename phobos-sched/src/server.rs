@@ -30,7 +30,8 @@ pub struct DispatchConfig {
 
     pub withhold: Vec<(NodeId, u32)>,
 
-    /// Per-node memory budget for segment sizing: caps in-flight segments at this many bytes.
+    /// Per-node memory budget. Sizes the segments and caps the bytes of
+    /// segments in flight.
     pub budget_bytes: Option<u64>,
 
     pub autotune: Option<ClusterFingerprint>,
@@ -705,7 +706,7 @@ fn compile_leaves(
             let mut h = Sha256::new();
             h.update(ptx.as_bytes());
             let hash = format!("{:x}", h.finalize());
-            Ok((hash, l.kernel.name.clone(), ptx)) // name -> entrypoint
+            Ok((hash, l.kernel.name.clone(), ptx)) // the name is the entry point
         })
         .collect()
 }

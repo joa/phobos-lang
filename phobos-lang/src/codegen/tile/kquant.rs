@@ -1,22 +1,25 @@
-// The K-quants, Q4_K, Q5_K and Q6_K, in the staged projection (`qgemm.rs`)
+// The K-quants Q4_K, Q5_K and Q6_K, for the staged projection (`qgemm.rs`)
 // and the decode matvec (`qdot_i8_reg.rs`): what each loads and decodes, and
-// the arithmetic they share. No tables: a quant is a nibble plus, for Q5_K,
-// one bit of a 32-byte `qh` plane, or for Q6_K, two bits of a 64-byte one.
-// Scales are six-bit indices in the block, packed twelve bytes for Q4_K and
-// Q5_K, sixteen signed bytes for Q6_K.
+// the arithmetic they share.
 //
-// Q4_K and Q5_K subtract a minimum: a run decodes as `d * sc * q - dmin * m`,
-// so against a Q8_0 activation `a = sa * aq` the contraction is
-// `sa * (d * sc * A - dmin * m * S)`, `A` the dp4a chain and `S` the
-// activation's sum over the run, computed on both paths (the decode
-// matvec's in `kquant_qdot.rs`). Q6_K has no minimum, and its `q - 32`
-// folds into the byte before the dp4a without a carry: `(qh2 + 14) & 15`
-// is `qh2 - 2 mod 16`, so `ql | (((qh2 + 0x0E0E0E0E) & 0x0F0F0F0F) << 4)`
-// is `q - 32` as an i8.
+// There are no tables. A quant is a nibble, plus one bit of a 32-byte `qh`
+// plane for Q5_K, or two bits of a 64-byte one for Q6_K. Scales are six-bit
+// values in the block: twelve packed bytes for Q4_K and Q5_K, sixteen signed
+// bytes for Q6_K.
 //
-// Quants of six bits or fewer are the same bytes signed or unsigned and ride
-// the signed dp4a and mma unmodified; a run's dot product stays under 2^22,
-// exact in f32.
+// Q4_K and Q5_K subtract a minimum, so a run decodes as
+// `d * sc * q - dmin * m`. Against a Q8_0 activation `a = sa * aq`, the
+// contraction is `sa * (d * sc * A - dmin * m * S)`. `A` is the dp4a chain
+// and `S` the activation's sum over the run (see `kquant_qdot.rs` for the
+// decode matvec's).
+//
+// Q6_K has no minimum. Its `q - 32` folds into the byte with no carry:
+// `(qh2 + 14) & 15` is `qh2 - 2 mod 16`, so
+// `ql | (((qh2 + 0x0E0E0E0E) & 0x0F0F0F0F) << 4)` is `q - 32` as an i8.
+//
+// Quants of six bits or fewer are the same bytes signed or unsigned, so they
+// go through the signed dp4a and mma as is. A run's dot product stays under
+// 2^22, which is exact in f32.
 
 use super::qgemm::{Lanes, Stage, TileAt};
 use super::*;
@@ -36,14 +39,13 @@ impl QgFormat {
         matches!(self, Self::Q4k | Self::Q5k)
     }
 
-    /// Whether `d` (and `dmin`) sit in the block, in the same load as the
-    /// scales, so the scale plane is uploaded but never read.
+    /// Whether `d` (and `dmin`) sit in the block, read in the same load as
+    /// the scales. The scale plane is then uploaded but never read.
     pub(in crate::codegen) fn d_in_block(self) -> bool {
         matches!(self, Self::Q4k | Self::Q5k | Self::Ptq1)
     }
 
-    /// Blocks the decode matvec's register pipeline holds ahead: two, for
-    /// every format.
+    /// Blocks the decode matvec's register pipeline holds ahead.
     pub(in crate::codegen) fn pipeline_depth(self) -> usize {
         2
     }
@@ -101,8 +103,8 @@ impl<'c> Codegen<'c> {
         self.push(block, arith::andi(picked, mask, self.loc))
     }
 
-    /// Byte `idx` (a runtime 0..7) of the pair, sign-extended: the selector
-    /// names the byte once and its sign three times.
+    /// Byte `idx` (a runtime 0..7) of the pair, sign-extended. The permute
+    /// selector names the byte once and its sign three times.
     pub(super) fn kq_sbyte_at(
         &self,
         block: &Block<'c>,
@@ -119,8 +121,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// Q4_K's and Q5_K's six-bit scale and minimum of run `r` (a runtime
-    /// 0..7) from the three words of the twelve scale bytes, both branches
-    /// of `q4_k::scale_min` computed and one selected on `r < 4`.
+    /// 0..7), from the three words of the twelve scale bytes. Computes both
+    /// branches of `q4_k::scale_min` and selects on `r < 4`.
     pub(super) fn kq_scale_min(
         &self,
         block: &Block<'c>,
@@ -165,9 +167,9 @@ impl<'c> Codegen<'c> {
         ))
     }
 
-    /// Four Q4_K or Q5_K quants of a `qs` word as bytes: the nibbles `shift`
-    /// (a runtime 0 or 4) selects, plus, for Q5_K, bit `bit` of the matching
-    /// `qh` word as the fifth.
+    /// Four Q4_K or Q5_K quants of a `qs` word as bytes. `shift` (a runtime 0
+    /// or 4) picks the nibbles. For Q5_K, bit `bit` of the matching `qh` word
+    /// is the fifth bit.
     pub(super) fn kq_nibbles(
         &self,
         block: &Block<'c>,
@@ -185,9 +187,9 @@ impl<'c> Codegen<'c> {
         self.push(block, arith::ori(low, fifth, self.loc))
     }
 
-    /// Four Q6_K quants as signed bytes, `q - 32`: the nibbles of `ql` that
-    /// `nib_shift` selects and the two bits of `qh` that `qh_shift` does,
-    /// the offset folded in without a carry (see the module comment).
+    /// Four Q6_K quants as signed bytes, `q - 32`. `nib_shift` picks the
+    /// nibbles of `ql` and `qh_shift` the two bits of `qh`. The offset is
+    /// folded in with no carry (see the module comment).
     pub(super) fn kq_q6_bytes(
         &self,
         block: &Block<'c>,
@@ -233,8 +235,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// The staged projection's reads for a K-quant thread: its column's
-    /// block header and the bytes of its 32-element group, then the group
-    /// index the decode needs as a runtime value.
+    /// block header, the bytes of its 32-element group, and the group index
+    /// the decode needs at runtime.
     pub(super) fn kq_gemm_load(
         &mut self,
         block: &Block<'c>,
@@ -257,8 +259,8 @@ impl<'c> Codegen<'c> {
                         regs.extend(self.qg_u128(block, qb, lanes, at_qh)?);
                     }
                 }
-                // Runs 2p and 2p + 1 share the 32-byte plane p, one the low
-                // nibbles and one the high, so a group is the whole plane.
+                // Runs 2p and 2p + 1 share the 32-byte plane p, as its low
+                // and high nibbles, so a group reads the whole plane.
                 let qs_base = if fmt == QgFormat::Q5k { 48 } else { 16 };
                 let pair = self.divui(block, at.ib, two)?;
                 let thirty_two = self.const_index(block, 32)?;
@@ -275,9 +277,9 @@ impl<'c> Codegen<'c> {
             }
             QgFormat::Q6k => {
                 // Group `ib` is quarter `ib % 4` of the 128-element group
-                // `ib / 4`: 32 `ql` bytes at `64 g + 32 (quarter % 2)`,
-                // nibble `quarter / 2`; the 32 `qh` bytes of the group at
-                // `128 + 32 g`, bits `2 quarter`.
+                // `g = ib / 4`. Its 32 `ql` bytes sit at
+                // `64 g + 32 (quarter % 2)`, nibble `quarter / 2`. Its 32 `qh`
+                // bytes sit at `128 + 32 g`, bits `2 quarter`.
                 let g = self.divui(block, at.ib, four)?;
                 let parity = self.remui(block, at.ib, two)?;
                 let sixty_four = self.const_index(block, 64)?;
@@ -311,8 +313,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Decode the thread's group from what [`Self::kq_gemm_load`] read: four
-    /// octets into the stage, the scale, and the minimum where there is one.
+    /// Decodes the thread's group from what [`Self::kq_gemm_load`] read. It
+    /// writes four octets, the scale, and any minimum into the stage.
     pub(super) fn kq_gemm_decode(
         &mut self,
         block: &Block<'c>,
@@ -382,7 +384,7 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// The sum of the four bytes of each of `words`, as one i32: `dp4a`
+    /// The sum of all bytes of `words` plus `seed`, as one i32, using `dp4a`
     /// against a word of ones.
     pub(super) fn kq_byte_sum(
         &self,

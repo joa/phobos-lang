@@ -1,4 +1,4 @@
-// Decides what a tensor reference is: which supertile it names, its grid axis, and scalar invariance.
+// Classifies tensor references: which supertile each names, its grid axis, and scalar invariance.
 
 use super::*;
 
@@ -157,7 +157,7 @@ impl<'a> Analyzer<'a> {
                 lhs,
                 rhs,
             } => {
-                // pid * SUPER or SUPER * pid
+                // `pid * SUPER` or `SUPER * pid`
                 for (a, b) in [(lhs, rhs), (rhs, lhs)] {
                     if let Expr::Var(s) = b.as_ref()
                         && self.super_set.contains(s)
@@ -283,7 +283,7 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Whether e reads the accumulator scratch tile anywhere.
+    /// Whether `e` reads the accumulator scratch tile anywhere.
     pub(super) fn uses_scratch(&self, e: &Expr) -> bool {
         match e {
             Expr::Var(n) => matches!(self.symbols.get(n), Some(Binding::Scratch)),
@@ -295,7 +295,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Collect the scalar-parameter indices an epilogue coefficient references,
-    /// in first-appearance order, rejecting any non-scalar term.
+    /// in first-appearance order. Any non-scalar term is an error.
     pub(super) fn collect_scalar_refs(&self, e: &Expr, out: &mut Vec<usize>) -> Result<()> {
         match e {
             Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => Ok(()),
@@ -317,8 +317,8 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Reject epilogue coefficients that are not loop-invariant scalar arithmetic
-    /// (each alpha*acc step and the one-shot beta*c_old init need it constant).
+    /// Reject epilogue coefficients that are not scalar-parameter arithmetic.
+    /// They must be loop-invariant: alpha applies every step, beta once at init.
     pub(super) fn check_invariant(&self, e: &Expr) -> Result<()> {
         let mut idxs = Vec::new();
         self.collect_scalar_refs(e, &mut idxs)

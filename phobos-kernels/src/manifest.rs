@@ -1,11 +1,10 @@
 //! What a run asked the compiler for, recorded so the same kernels can be
-//! compiled again later for any chip without a GPU or a model.
+//! compiled again later for any chip, without a GPU or a model.
 //!
-//! `PHOBOS_KERNEL_MANIFEST` names a directory, and every compile request,
-//! hit or miss, lands in it as one file named `<kernel>-<key>`. The key
-//! covers everything a request carries except the chip, so several runs, and
-//! several models, can share one directory and a kernel two of them ask for
-//! is written once.
+//! `PHOBOS_KERNEL_MANIFEST` names a directory. Every compile request, hit or
+//! miss, lands there as one file named `<kernel>-<key>`. The key covers
+//! everything in the request except the chip. So several runs and models can
+//! share one directory, and a kernel asked for twice is written once.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -41,8 +40,8 @@ pub struct Request {
 }
 
 /// Appends a request to the manifest directory when one is set. Best-effort
-/// like the cache, but a failure is logged: a manifest with a hole in it
-/// warms a cache that still compiles on first launch.
+/// like the cache, but a failure is logged, since a manifest with a hole in
+/// it leaves that kernel to compile on first launch.
 pub(crate) fn record(ctx: &Context, texts: &[&str]) {
     if let Some(dir) = manifest_dir() {
         record_in(dir, ctx, texts);

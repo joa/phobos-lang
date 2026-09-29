@@ -1,11 +1,10 @@
-// The saxpy benchmark, the one that is purely bandwidth-bound.
+// The saxpy benchmark, which is purely bandwidth-bound.
 
 use crate::harness::*;
 use crate::*;
 
-/// SAXPY reference: out = alpha * x + y. The kernel lowers to a separate
-/// mulf then addf in f32 (no fused multiply-add), so an exact f32 match is
-/// expected.
+/// SAXPY reference: out = alpha * x + y. The kernel does a separate f32
+/// multiply and add, with no FMA, so the match must be exact.
 pub(crate) fn verify_saxpy(out: &[f32], x: &[f32], y: &[f32], alpha: f32) {
     for i in 0..out.len() {
         let want = alpha * x[i] + y[i];
@@ -54,7 +53,7 @@ pub(crate) fn bench_saxpy(
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
             let func = module.get_function("saxpy")?;
             let grid_x = grid.0;
-            // Kernel params: x, y, out (each a tensor<f32>[N] => 5-scalar
+            // Kernel params: x, y, out (each tensor<f32>[N] is a 5-scalar
             // memref descriptor), then the alpha scalar.
             unsafe {
                 launch!(func<<<grid_x, block, 0, stream>>>(
@@ -88,9 +87,9 @@ pub(crate) fn bench_saxpy(
     })?;
     (tuner.verify)()?;
 
-    // cuBLAS saxpy is in-place (y := alpha*x + y), so it runs on a dedicated
-    // buffer. The timed loop lets it accumulate (irrelevant to the runtime);
-    // correctness is checked separately on a freshly reset buffer.
+    // cuBLAS saxpy works in place (y := alpha*x + y), so it gets its own
+    // buffer. The timed loop lets it accumulate. Correctness is checked on a
+    // freshly reset buffer.
     let mut yb = y.clone();
     let mut yb_dev = y.as_slice().as_dbuf()?;
     let yb_ptr = yb_dev.as_device_ptr();
@@ -108,8 +107,8 @@ pub(crate) fn bench_saxpy(
     verify_saxpy(&yb, &x, &y, alpha);
 
     phinfo!("check: {} elements, both correct", n);
-    // SAXPY is one fused multiply-add per element (2 flops) and memory-bound,
-    // so its GFLOP/s sits far below the f32 peak; reported the same way regardless.
+    // SAXPY is 2 flops per element and memory-bound, so its GFLOP/s is far
+    // below the f32 peak.
     let gflop = 2.0 * n as f64 / 1e9;
     phinfo!(
         "phobos saxpy: {:.1} GFLOP/s, cuBLAS saxpy: {:.1} GFLOP/s",

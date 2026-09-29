@@ -1,9 +1,10 @@
 /// A node in the cluster: one node, one GPU.
 pub type NodeId = u16;
 
-/// Globally Unique Deterministic Supertile Identity (GUDSI)
+/// Globally unique, deterministic supertile identity (GUDSI).
 ///
-/// id = (tensor:u12 << 52) | (version:u16  << 36)| (linear supertile coord:u36)
+/// Bit layout, high to low: tensor (12 bits), version (16 bits), and the
+/// row-major supertile coordinate (36 bits).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct TileId(pub u64);
 
@@ -71,7 +72,7 @@ impl ScalarValue {
         }
     }
 
-    /// little-endian
+    /// The raw bits, zero-extended to 64.
     pub fn to_bits(self) -> u64 {
         match self {
             ScalarValue::F32(x) => x.to_bits() as u64,
@@ -87,7 +88,7 @@ impl ScalarValue {
 pub enum AccessMode {
     Read,
     Write,
-    RMW, // consumes one ssa node and produces next
+    RMW, // reads one SSA version and produces the next
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

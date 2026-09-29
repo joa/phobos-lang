@@ -2,9 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --example quant_check -- WIDE.gguf NARROW.gguf
 //
-// Every tensor of the narrow file is the wide one plus quantization error,
-// so a relative error of a few percent is the format decoding correctly and
-// one near 1.0 is a decoder reading the wrong bits. Make the pair with:
+// Each narrow tensor should be the wide one plus quantization error. A
+// relative error of a few percent means the format decodes correctly; one
+// near 1.0 means the decoder reads the wrong bits. Make the pair with:
 //
 //   llama-quantize --allow-requantize WIDE.gguf NARROW.gguf Q4_K_M
 use std::path::Path;
@@ -20,8 +20,8 @@ fn main() -> Result<()> {
     let wide = Gguf::open(Path::new(&wide_path))?;
     let narrow = Gguf::open(Path::new(&narrow_path))?;
 
-    // Worst error per format rather than per tensor: the point is whether a
-    // decoder works, and one tensor of a format is as good a witness as any.
+    // Worst error per format, not per tensor, since the question is whether
+    // each format's decoder works.
     let mut worst: Vec<(&'static str, f64, String)> = Vec::new();
     let mut checked = 0usize;
 
@@ -43,9 +43,8 @@ fn main() -> Result<()> {
             );
         }
 
-        // Relative in the root-mean-square: the usual way to quote a
-        // quantization error, and one that does not blow up on the
-        // near-zero weights that make up most of a tensor.
+        // Relative RMS error. It is the usual measure, and it does not blow
+        // up on the near-zero weights that make up most of a tensor.
         let (mut error, mut scale) = (0.0f64, 0.0f64);
         for (&w, &g) in want.iter().zip(&got) {
             error += (f64::from(w) - f64::from(g)).powi(2);
@@ -69,9 +68,8 @@ fn main() -> Result<()> {
 
     let mut failures = 0;
     for (format, rel, tensor) in &worst {
-        // Every format here is at worst a four-bit one, which costs a few
-        // percent. Ten is far outside that and far inside a wrong decoder,
-        // which correlates with nothing and lands near one.
+        // A four-bit format costs a few percent. A wrong decoder correlates
+        // with nothing and lands near 1.0. The 10% bar sits well between.
         let verdict = if *rel < 0.10 { "ok  " } else { "WRONG" };
         failures += u32::from(*rel >= 0.10);
         println!("{verdict} {format:<6} worst rel rms {rel:9.3e}  {tensor}");

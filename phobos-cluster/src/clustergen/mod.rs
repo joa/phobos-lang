@@ -1,5 +1,5 @@
-// Kernel to cluster program: [`Analyzer`] holds the state, and the rest of
-// this module is its work, split by phase: walk, classify, finalize, then lower.
+// Kernel to cluster program. [`Analyzer`] holds the state, and the submodules
+// are its phases: walk, classify, finalize, then lower.
 
 mod analyze;
 mod classify;
@@ -22,7 +22,7 @@ use crate::ir::{
 };
 use crate::tile::{AccessMode, DataType};
 
-/// Compile a @cluster kernel to the parametric cluster IR.
+/// Compile an `@cluster` kernel to the parametric cluster IR.
 pub fn compile(kernel: &Kernel) -> Result<ClusterProgram> {
     Analyzer::new(kernel)?.run()
 }
@@ -40,12 +40,12 @@ fn data_type(s: Scalar) -> DataType {
     }
 }
 
-/// Cluster scale scalar value.
+/// A scalar value at cluster scale.
 #[derive(Clone, Debug)]
 enum ScalarValue {
-    /// program_id(i)
+    /// `program_id(i)`
     Pid(usize),
-    /// program_id(i) * SUPER
+    /// `program_id(i) * SUPER`
     PidSuper(usize, String),
 }
 
@@ -53,14 +53,15 @@ enum ScalarValue {
 #[derive(Clone, Debug)]
 enum Binding {
     Scalar(ScalarValue),
-    /// Supertile view (let a = A[..]).
+    /// Supertile view (`let a = A[..]`).
     Ref(SuperTile),
-    /// The accumulator tile (var acc: tile<..>[..] = 0.0).
+    /// The accumulator tile (`var acc: tile<..>[..] = 0.0`).
     Scratch,
-    /// Cluster-loop iv; payload is the step's super sym.
+    /// Cluster-loop induction variable, carrying the step's super sym.
     LoopVar(String),
-    /// A leaf-internal (device-scale) loop iv, used only by the single-leaf path.
-    /// Its dim offsets a full-axis slice, so the cluster never tiles that axis (see [`Coord::Full`]).
+    /// A device-scale loop inside a leaf, used only by the single-leaf path.
+    /// It offsets a full-axis slice, so the cluster never tiles that axis
+    /// (see [`Coord::Full`]).
     DeviceLoop(String),
 }
 
@@ -79,7 +80,7 @@ enum Statement {
 struct Pending {
     /// Reads collected from the value expression, keyed by tensor index.
     reads: Vec<(usize, SuperTile)>,
-    /// Direct-compute write target; None when the target is the scratch.
+    /// Direct-compute write target. None when the target is the scratch.
     target: Option<(usize, SuperTile, AccessMode)>,
     uses_scratch: bool,
 }
@@ -88,42 +89,41 @@ struct Scratch {
     init: Expr,
 }
 
-/// The chain's C[<grid slice>] = <epilogue> store.
+/// The chain's `C[<grid slice>] = <epilogue>` store.
 struct Define {
     tensor: usize,
     coords: Vec<Coord>,
-    /// Super sym per axis (for the synthesized init leaf's slice).
+    /// Super sym per axis, for the synthesized init leaf's slice.
     supers: Vec<String>,
     /// Top-level statement index, for the step leaf's store rewrite.
     stmt_idx: usize,
-    /// The GEMM epilogue when the store is alpha*acc + beta*c_old rather than
-    /// a bare = acc. None keeps the plain chain (zero-init, += acc step).
+    /// The GEMM epilogue, when the store is `alpha*acc + beta*c_old`.
+    /// None means a plain `= acc` store: zero-init, then `+= acc` per step.
     epilogue: Option<Epilogue>,
 }
 
-/// A GEMM-shaped accumulator epilogue: C[..] = [alpha *] acc [+ [beta *] c_old],
-/// where c_old is a prior load of the same output supertile.
+/// A GEMM-shaped accumulator epilogue, `C[..] = [alpha *] acc [+ [beta *] c_old]`,
+/// where `c_old` is a prior load of the same output supertile.
 ///
-/// Copy-elision keeps the accumulator on C's buffer: the step leaf folds in
-/// alpha (stored as alpha*acc + c_old on the fused accumulator path), and the
-/// init leaf seeds C with beta*c_old instead of zero-filling.
+/// The accumulator lives in C's buffer. The step leaf applies alpha each
+/// step, and the init leaf seeds C with `beta*c_old` instead of zeros.
 struct Epilogue {
     /// The accumulator scratch var name.
     acc: String,
-    /// Coefficient on acc (None is identity 1.0), applied per step.
+    /// Coefficient on acc, applied per step. None means 1.0.
     alpha: Option<Expr>,
-    /// The prior-C term: Some((beta, c_old)) when the epilogue reads C back.
-    /// beta is the coefficient (None is identity 1.0); c_old names the load.
+    /// The prior-C term `(beta, c_old)`, when the epilogue reads C back.
+    /// A None beta means 1.0. `c_old` names the load.
     prev: Option<(Option<Expr>, String)>,
 }
 
 /// How to seed the accumulator output before the chain runs.
 struct InitInfo {
-    /// No init compute at all (beta is identity, so C keeps its original value).
+    /// No init compute: beta is 1.0, so C keeps its original value.
     skip: bool,
-    /// C's access mode in the init compute (Write to zero-fill, RMW to scale C).
+    /// C's access mode in the init compute: Write to zero-fill, RMW to scale C.
     c_mode: AccessMode,
-    /// Scalar indices the init compute carries (the beta coefficient's params).
+    /// Scalar indices the init compute carries, the beta coefficient's params.
     scalars: Vec<usize>,
 }
 

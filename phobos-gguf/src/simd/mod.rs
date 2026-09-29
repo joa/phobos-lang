@@ -1,14 +1,17 @@
 //! The host's K-quant expert feed-forward: a threaded AVX2 dot of Q4_K,
-//! Q5_K and Q6_K weight blocks against a Q8 activation, for the experts a
-//! pass computes on the host rather than copies to the device.
+//! Q5_K and Q6_K weight blocks against a Q8 activation. It serves the
+//! experts a pass computes on the host instead of copying them to the
+//! device.
 //!
-//! The activation is quantized to eight bits with a scale a run of 32, as
-//! the device's is, and the sums of each sixteen quants, so a block's
-//! minimums (or Q6_K's offset) fold into one integer term a run. A weight
-//! block is unpacked once to an aligned byte array either path reads and
-//! dotted against every activation row, each run's eight-lane sums scaled
-//! into one float accumulator, so a row costs one horizontal sum. The
-//! weights come from a [`Source`]: the file's row-major blocks, or the
+//! The activation is quantized to eight bits with one scale per run of 32,
+//! as on the device. It also keeps the sum of each sixteen quants, so a
+//! block's minimums (or Q6_K's offset) fold into one integer term per run.
+//!
+//! Each weight block is unpacked once into an aligned byte array and dotted
+//! against every activation row. Each run's eight-lane sums are scaled into
+//! one float accumulator, so a row costs one horizontal sum.
+//!
+//! Weights come from a [`Source`]: the file's row-major blocks, or the
 //! device's grouped layout in pinned memory.
 
 use std::sync::OnceLock;
@@ -38,10 +41,10 @@ const RUNS: usize = BLOCK / RUN;
 const SUM_RUN: usize = 16;
 const SUMS: usize = BLOCK / SUM_RUN;
 
-/// `[rows, k]` activations quantized to `i8`: a scale a run of 32 and the
-/// sums of each sixteen quants. Held block-major, the rows of one block
-/// side by side, so a weight block's dot over the rows walks memory
-/// forward rather than striding a row's width.
+/// `[rows, k]` activations quantized to `i8`, with one scale per run of 32
+/// and the sum of each sixteen quants. Stored block-major, one block's rows
+/// side by side, so a weight block's dot over the rows walks memory forward
+/// instead of striding a row's width.
 #[derive(Default)]
 pub struct Q8Act {
     rows: usize,
@@ -124,15 +127,14 @@ pub struct Shape {
 pub enum Weight<'a> {
     /// The file's layout: row after row, each `nb` whole blocks.
     Flat { bytes: &'a [u8], block_bytes: usize },
-    /// The device's layout, see `quant::grouped`: rows in eights, a block
-    /// of each of the eight side by side, at the format's device stride;
-    /// Q6_K's trailing scale is in `scales`, one a block in the same
-    /// order.
+    /// The device's layout (see `quant::grouped`): rows in groups of eight,
+    /// one block of each side by side, at the format's device stride. Q6_K's
+    /// trailing scale is in `scales`, one per block in the same order.
     Grouped { bytes: &'a [u8], block_bytes: usize, nb: usize, scales: &'a [u16] },
 }
 
 impl Weight<'_> {
-    /// Block `b` of row `j`, and its scale where the layout keeps it apart.
+    /// Block `b` of row `j`, and its scale when the layout stores it apart.
     #[inline(always)]
     fn block(&self, j: usize, b: usize, nb: usize) -> (&[u8], Option<u16>) {
         match *self {
@@ -185,14 +187,14 @@ impl Source for ExpertSet {
     }
 }
 
-/// Whether the host kernels can run a source: every stack in a format they
-/// have.
+/// Whether the host kernels can run a source: every stack must be in a
+/// format they implement.
 pub fn supports(source: &impl Source) -> bool {
     Stack::ALL.iter().all(|&stack| matches!(source.shape(stack).quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K))
 }
 
-/// One block's quants unpacked to a byte apiece, in element order, aligned
-/// for the vector loads.
+/// One block's quants unpacked to one byte each, in element order, aligned
+/// for vector loads.
 #[repr(C, align(32))]
 struct Quants([u8; BLOCK]);
 
@@ -202,8 +204,8 @@ impl Default for Quants {
     }
 }
 
-/// A row's running sum in eight lanes: the vector path keeps all eight,
-/// the scalar path the first.
+/// A row's running sum in eight lanes. The vector path uses all eight, the
+/// scalar path only the first.
 #[repr(C, align(32))]
 #[derive(Default)]
 struct Acc([f32; 8]);
@@ -219,22 +221,22 @@ fn dot_i32(w: &[u8], a: &[i8]) -> i32 {
     w.iter().zip(a).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum()
 }
 
-/// One format's block arithmetic against a Q8 block, in one instruction
+/// One format's block arithmetic against a Q8 block, for one instruction
 /// set.
 trait Block {
     /// Whether the implementation runs only under AVX2.
     const AVX2: bool;
     type Unpacked: Default;
 
-    /// Unpacks one block's bytes, its scale from `d` where the layout
-    /// keeps it apart.
+    /// Unpacks one block's bytes. `d` is the scale when the layout stores it
+    /// apart.
     ///
     /// # Safety
     /// An AVX2 implementation runs only on a CPU that has it.
     unsafe fn unpack(bytes: &[u8], d: Option<u16>, into: &mut Self::Unpacked);
 
-    /// The block's dot with a Q8 block, the minimums' correction taken
-    /// off, added into `acc`.
+    /// Adds the block's dot with a Q8 block, minus the minimums' correction,
+    /// into `acc`.
     ///
     /// # Safety
     /// As [`Block::unpack`].
@@ -242,8 +244,8 @@ trait Block {
 }
 
 /// The AVX2 side of a format: a unit type whose [`Block`] impl forwards to
-/// the format's `#[target_feature]` functions, which the trait's methods
-/// cannot carry themselves.
+/// the format's `#[target_feature]` functions. Trait methods cannot carry
+/// that attribute themselves.
 macro_rules! avx2_block {
     ($name:ident, $unpacked:ty, $unpack:path, $dot:path) => {
         pub(in crate::simd) struct $name;
@@ -272,16 +274,15 @@ pub(crate) use avx2_block;
 const PREFETCH_BYTES: usize = 256;
 
 /// `yt[(j - j0) * rows + r] = sum_i w[j, i] x[r, i]` over the weight rows
-/// from `j0` that `yt` has room for. One row is dotted block by block as
-/// it is unpacked; more rows unpack a weight row once into `row` and dot
-/// each against it.
+/// from `j0` that fit in `yt`. With one activation row, each block is
+/// dotted as it is unpacked. With more, a weight row is unpacked once into
+/// `row` and dotted against each.
 #[inline(always)]
 unsafe fn rows_dot<F: Block>(weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32], row: &mut Vec<F::Unpacked>) {
     let (rows, nb) = (act.rows, act.blocks());
     // One row against the grouped layout: a group's eight rows at once, in
-    // the order the layout stores them, with the bytes a few blocks on
-    // prefetched, since one row's arithmetic is too little to hide the
-    // loads behind.
+    // storage order. Prefetch a few blocks ahead, since one row's arithmetic
+    // is too little to hide the loads.
     if rows == 1
         && let Weight::Grouped { bytes: all, .. } = *weight
         && j0.is_multiple_of(RAW_GROUP)
@@ -392,9 +393,8 @@ pub fn avx2() -> bool {
     Isa::detect() == Isa::Avx2
 }
 
-/// The GEMM of `weight`'s rows from `j0` against `act` into `yt`, in the
-/// shape's format, on the calling thread: the callers are themselves the
-/// pool's tasks.
+/// The GEMM of `weight`'s rows from `j0` against `act` into `yt`. Runs on
+/// the calling thread, since the callers are already pool tasks.
 fn gemm(shape: &Shape, isa: Isa, weight: &Weight, j0: usize, act: &Q8Act, yt: &mut [f32]) -> Result<()> {
     ensure!(shape.k == act.k && weight.covers(shape.n, act.blocks()), "a [{}, {}] weight against a [{}, {}] activation", shape.n, shape.k, act.rows, act.k);
     ensure!(yt.len().is_multiple_of(act.rows) && j0 + yt.len() / act.rows <= shape.n, "{} outputs from row {j0} of {}", yt.len(), shape.n);
@@ -437,8 +437,8 @@ struct Worker {
 }
 
 impl Worker {
-    /// One job's rows of output, `[rows, d]`, each scaled by its weight,
-    /// the three GEMMs on this thread.
+    /// Computes one job's output rows, `[rows, d]`, each scaled by its
+    /// router weight. All three GEMMs run on this thread.
     fn run(&mut self, source: &impl Source, job: &Job, x: &[f32], isa: Isa) -> Result<Vec<f32>> {
         let (gate, up, down) = (source.shape(Stack::Gate), source.shape(Stack::Up), source.shape(Stack::Down));
         let (d, d_ff, rows) = (gate.k, gate.n, job.rows.len());
@@ -473,8 +473,8 @@ impl Worker {
     }
 }
 
-/// The jobs over `x`, `[rows, d]`, the experts spread over the pool and
-/// each one's result added into `out`.
+/// Runs the jobs over `x`, `[rows, d]`, spreading the experts over the
+/// pool, and adds each result into `out`.
 pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, out: &mut [f32]) -> Result<()> {
     let d = source.shape(Stack::Gate).k;
     ensure!(x.len() == rows * d && out.len() == rows * d, "{} inputs and {} outputs for {rows} rows of {d}", x.len(), out.len());
@@ -490,9 +490,8 @@ pub fn experts_ffn(source: &impl Source, jobs: &[Job], x: &[f32], rows: usize, o
     Ok(())
 }
 
-/// Builds the pool with `threads` workers, before its first use, for a
-/// benchmark that wants a count of its own. Once it exists the count
-/// stands.
+/// Builds the pool with `threads` workers before its first use, for a
+/// benchmark that wants its own count. The count cannot change afterwards.
 pub fn init_pool(threads: usize) -> Result<()> {
     let built = rayon::ThreadPoolBuilder::new()
         .num_threads(threads)
@@ -542,10 +541,10 @@ mod x86 {
         _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(i32::from(bits))))
     }
 
-    /// The dot of unpacked quants with a Q8 block where every run of 32
-    /// shares a weight scale, each run's eight lanes scaled by the block's
-    /// `d`, the run's index and the activation's run scale into `acc`:
-    /// Q4_K and Q5_K.
+    /// The dot of unpacked quants with a Q8 block when every run of 32
+    /// shares one weight scale (Q4_K, Q5_K). Each run's eight lanes are
+    /// scaled by `d`, the run's scale index and the activation run scale,
+    /// then added into `acc`.
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn dot_runs32(q: &Quants, scales: &[i16; RUNS], qs: &[i8; BLOCK], d: f32, da: &[f32; RUNS], acc: &mut Acc) {
         // SAFETY: the caller has AVX2 and FMA; `q` and `acc` are aligned.
@@ -561,8 +560,8 @@ mod x86 {
         }
     }
 
-    /// The same where every run of 16 has its own weight scale, two to an
-    /// activation run: Q6_K.
+    /// The same when every run of 16 has its own weight scale, two per
+    /// activation run (Q6_K).
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn dot_runs16(q: &Quants, scales: &[i16; SUMS], qs: &[i8; BLOCK], d: f32, da: &[f32; RUNS], acc: &mut Acc) {
         // SAFETY: as `dot_runs32`.
@@ -571,8 +570,8 @@ mod x86 {
             for (i, pair) in scales.chunks_exact(2).enumerate() {
                 let w = _mm256_load_si256(q.0.as_ptr().add(i * 32).cast());
                 let a = _mm256_loadu_si256(qs.as_ptr().add(i * 32).cast());
-                // The multiply-add's sixteen lanes are the run's first
-                // sixteen elements then its last: one scale a half.
+                // The multiply-add's lanes cover the run's first sixteen
+                // elements, then its last sixteen: one scale per half.
                 let scale = _mm256_set_m128i(_mm_set1_epi16(pair[1]), _mm_set1_epi16(pair[0]));
                 let p = _mm256_madd_epi16(scale, _mm256_maddubs_epi16(w, a));
                 sum = _mm256_fmadd_ps(_mm256_set1_ps(d * da[i]), _mm256_cvtepi32_ps(p), sum);
@@ -581,9 +580,9 @@ mod x86 {
         }
     }
 
-    /// Sixteen per-run factors against the Q8 sums per sixteen, a lane an
-    /// activation run, scaled by `dmin` and the run's activation scale and
-    /// taken off `acc`: the minimums' or the offset's term.
+    /// The minimums' (or offset's) term. Dots sixteen per-run factors with
+    /// the Q8 sums of sixteen, one lane per activation run, scales by `dmin`
+    /// and the activation run scale, and subtracts the result from `acc`.
     #[target_feature(enable = "avx2,fma")]
     pub(super) unsafe fn min_term(factors: &[i16; SUMS], sums: &[i16; SUMS], dmin: f32, da: &[f32; RUNS], acc: &mut Acc) {
         // SAFETY: the caller has AVX2 and FMA; `acc` is aligned.

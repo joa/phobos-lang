@@ -4,8 +4,7 @@ use super::*;
 
 impl DeviceBackend {
     /// Causal attention for a prompt, one head at a time, as two matmuls with
-    /// the scores materialized in between. The gathers and the key transpose are
-    /// what let those matmuls be clean; see [`attn_gemm_src`].
+    /// the scores materialized in between. See [`attn_gemm_src`].
     pub(super) fn attention_gemm(
         &self,
         q: Buf,
@@ -34,7 +33,7 @@ impl DeviceBackend {
                 let (r, d, n) = (rows as i64, dim as i64, nk as i64);
                 for h in 0..spec.n_head {
                     // Consecutive query heads share a key head, so the
-                    // transpose and the value gather only redo on a change.
+                    // transpose and value gather only rerun when it changes.
                     if h.is_multiple_of(spec.group()) {
                         let at = h / spec.group() * dim;
                         self.launch(
@@ -46,10 +45,8 @@ impl DeviceBackend {
                             ],
                             (nk.div_ceil(ATTN_KT_ROWS) as u32, 1, 1),
                         )?;
-                        // The prompt's two matmuls contract in f32, so the head
-                        // widens once here rather than on every tile the mix
-                        // stages. The transpose above widens for the same
-                        // reason.
+                        // Both matmuls contract in f32, so the values widen
+                        // once here, as the keys do in the transpose above.
                         self.strided(
                             Strided::Load,
                             (self.hptr(values, at)?, kw),
@@ -124,10 +121,11 @@ impl DeviceBackend {
         result
     }
 
-    /// Causal attention for a prompt, one query block per program and its whole
-    /// attention inside it; see [`attention_block_src`]. `block` is the query
-    /// rows one program covers, and the caller has checked that the cache is a
-    /// whole number of them deep.
+    /// Causal attention for a prompt, one query block per program. See
+    /// [`attention_block_src`].
+    ///
+    /// `block` is the query rows per program. The caller ensures the cache
+    /// depth is a multiple of it.
     pub(super) fn attention_blocked(
         &self,
         q: Buf,
@@ -160,18 +158,15 @@ impl DeviceBackend {
         )
     }
 
-    /// Attention for a decode step, the key axis split across the grid and a
-    /// merge folding the pieces back together; see [`attention_split_src`].
-    /// The row kernel would leave the grid at `n_head` blocks, underusing
-    /// the card, so splitting the keys fills it instead.
+    /// Attention for a decode step. The key axis is split across the grid
+    /// and a merge folds the pieces back together. See
+    /// [`attention_split_src`]. Splitting fills the card, where one block per
+    /// head would not.
     ///
-    /// Default on: tries [`Self::attention_persist`] first, which does the
-    /// same split and merge inside one `@persistent` kernel and a
-    /// `grid_barrier()` instead of two launches. `PHOBOS_ATTN_PERSIST=0`
-    /// bails out to the launched path below unconditionally; short of that,
-    /// [`Self::attn_persist_plan`] declines any shape a grid barrier would
-    /// deadlock on, since it checks the driver's actual occupancy rather
-    /// than assume a shape fits.
+    /// Tries [`Self::attention_persist`] first, which does the split and
+    /// merge in one `@persistent` kernel. `PHOBOS_ATTN_PERSIST=0` disables
+    /// it. [`Self::attn_persist_plan`] declines any shape whose grid barrier
+    /// could deadlock.
     pub(super) fn attention_decode(
         &self,
         q: Buf,
@@ -180,8 +175,8 @@ impl DeviceBackend {
         spec: Attn,
         out: Buf,
     ) -> Result<()> {
-        // Carrying `qgroup` heads to a program divides the grid, so the split
-        // count multiplies by it to leave the block count unchanged.
+        // Each program carries `qgroup` heads, so the split count scales by
+        // `qgroup` to keep the block count unchanged.
         let qgroup = attention_qgroup(spec.group());
         if self.attn_persist {
             let key = (spec.n_head, spec.group(), spec.head_dim, qgroup);
@@ -194,9 +189,8 @@ impl DeviceBackend {
         let (r, d) = (spec.n_head as i64, spec.head_dim as i64);
         let (nk, kw) = (spec.total() as i64, spec.kv_width() as i64);
         let (part, ml) = self.attn_scratch(splits * spec.n_head, spec.head_dim)?;
-        // The same two buffers under the shape each kernel wants: the partials
-        // are written `[S * NH, D]` and read `[S, NH * D]`, the maxima and sums
-        // are `[NH, 2 * S]` to both.
+        // The partials are written as `[S * NH, D]` and read as `[S, NH * D]`.
+        // The maxima and sums are `[NH, 2 * S]` in both kernels.
         let tall = [(splits * spec.n_head) as i64, d];
         let wide = [splits as i64, spec.n_head as i64 * d];
         let stats = [spec.n_head as i64, 2 * splits as i64];
@@ -237,16 +231,12 @@ impl DeviceBackend {
         )
     }
 
-    /// [`Self::attention_decode`]'s split-plus-merge, as one `@persistent`
-    /// kernel instead of two launches and a scratch round-trip through a
-    /// second kernel's parameters; see [`attention_persist_src`] for the
-    /// phase split and why the barrier makes it safe. Only reached once
-    /// [`Self::attn_persist_plan`] has already settled `blocks` for `key`.
+    /// [`Self::attention_decode`]'s split and merge as one `@persistent`
+    /// kernel. See [`attention_persist_src`] for the phases and the barrier.
+    /// Requires [`Self::attn_persist_plan`] to have settled `blocks` for
+    /// `key`.
     ///
-    /// `P` is bound twice, once per shape the two phases read and write it
-    /// under, the same way the launched pair already passed one buffer to two
-    /// kernels; a persistent kernel does it with two parameters in one launch
-    /// instead of two launches.
+    /// The partials buffer is bound twice, once under each phase's shape.
     #[allow(clippy::too_many_arguments)]
     fn attention_persist(
         &self,
@@ -289,17 +279,15 @@ impl DeviceBackend {
         )
     }
 
-    /// Settles the block count from an occupancy query, then `splits =
-    /// blocks / groups` (floored), compiling [`attention_persist_src`] for
-    /// one shape on first use and caching the decision either way.
+    /// Picks the block count and split count for [`attention_persist_src`],
+    /// compiling it on first use. The decision is cached either way.
     ///
-    /// The two settle in separate stages, not one loop that resettles both
-    /// together: a joint candidate's `splits` depends on its own `blocks`
-    /// guess, so the guess feeds back on itself and settles low.
+    /// Stage one settles `blocks` from an occupancy query. Stage two sets
+    /// `splits = blocks / groups`. Settling both in one loop would feed the
+    /// guess back on itself and settle too low.
     ///
-    /// `None` means the settled grid cannot hold even one unit per group
-    /// (`blocks < groups`), which would need a second grid-strided pass over
-    /// the whole key axis; neither shipped model shape reaches it.
+    /// `None` means the grid cannot hold one unit per group
+    /// (`blocks < groups`).
     fn attn_persist_plan(
         &self,
         key: AttnPersistKey,
@@ -331,11 +319,9 @@ impl DeviceBackend {
             );
             let module = self.compile_dynamic(&src, "attention_persist")?;
             let func = module.get_function("attention_persist")?.to_raw();
-            // attention_persist_src is `@dynshared`: its shared footprint is
-            // a launch-time byte count, not the function's static attribute.
-            // The occupancy query needs that count, or it undercounts the
-            // footprint and settles a grid that deadlocks grid_barrier;
-            // compile_dynamic already recorded it in func_shared above.
+            // The kernel is `@dynshared`, so the occupancy query needs its
+            // launch-time shared bytes. Without them it undercounts and picks
+            // a grid that deadlocks `grid_barrier`.
             let dynamic_shared = self.shared_of(func) as usize;
             // SAFETY: func belongs to a module alive for this call.
             let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, dynamic_shared)? };
@@ -343,11 +329,9 @@ impl DeviceBackend {
                 settled = Some((module, blocks));
                 break;
             }
-            // The module about to unload can free its CUfunction address for
-            // reuse by an unrelated later compile, and shared_of's cache is
-            // keyed on that address; removing the stale entry stops a future
-            // kernel from reading someone else's dynamic-shared byte count.
-            // Not reachable with a fixed probe_splits, kept defensively.
+            // `func_shared` is keyed by function address, which a later
+            // compile may reuse once this module unloads. Drop the stale
+            // entry.
             self.func_shared.borrow_mut().remove(&(func as usize));
             blocks = allowed;
         }
@@ -366,13 +350,12 @@ impl DeviceBackend {
                 (self.compile_dynamic(&src, "attention_persist")?, blocks)
             }
         };
-        // Stage two: as many whole units as the settled grid holds exactly,
-        // so no resident block starts phase one with nothing assigned.
+        // Stage two: as many whole units as the grid holds, so every block
+        // has work in phase one.
         let splits = ((blocks as usize) / groups).max(1);
         let units1 = (groups * splits) as u32;
         if blocks < units1 {
-            // blocks < groups: not reached by either shipped shape, kept as
-            // the decline path.
+            // blocks < groups.
             self.attn_persist_modules.borrow_mut().insert(key, None);
             return Ok(None);
         }
@@ -399,10 +382,9 @@ impl DeviceBackend {
                     .remove(&(probe_module.get_function("attention_persist")?.to_raw() as usize));
                 (module, splits)
             } else {
-                // The wider S's mv/c growth pushed this shape's footprint
-                // past what the settled grid allows. Fall back to the probe
-                // module: some idle blocks in phase one, but provably safe
-                // against grid_barrier's co-residency need.
+                // More splits need more shared memory than the grid allows.
+                // Fall back to the probe module, which is safe for
+                // `grid_barrier` but leaves some blocks idle in phase one.
                 self.func_shared.borrow_mut().remove(&(func as usize));
                 (probe_module, probe_splits)
             }
@@ -415,9 +397,8 @@ impl DeviceBackend {
         Ok(result)
     }
 
-    /// Causal attention one query row per program, over the whole cache; see
-    /// [`attention_src`]. What the dispatch above falls through to, since this
-    /// one needs no alignment of any extent.
+    /// Causal attention, one query row per program over the whole cache. See
+    /// [`attention_src`]. The fallback path, since it needs no alignment.
     pub(super) fn attention_rows(
         &self,
         q: Buf,
@@ -456,8 +437,7 @@ impl DeviceBackend {
         )
     }
 
-    /// [`Backend::rope_gather`]'s fused form, keeping [`Backend`]'s own impl
-    /// block a thin call layer.
+    /// [`Backend::rope_gather`]'s device implementation.
     pub(super) fn rope_gather_impl(
         &self,
         src: Plane,
@@ -467,9 +447,8 @@ impl DeviceBackend {
         dest: Buf,
     ) -> Result<()> {
         self.check_distinct("rope_gather", dest, &[src.buf]);
-        // The reshaped source needs a pitch that is a whole number of heads;
-        // every fused QKV projection this codebase builds satisfies it, but a
-        // caller that does not takes the unfused pair.
+        // The fused kernel needs a pitch that is a whole number of heads.
+        // Otherwise fall back to a copy and a separate rope.
         if !src.pitch.is_multiple_of(spec.head_dim) {
             let width = spec.heads * spec.head_dim;
             self.copy_2d(

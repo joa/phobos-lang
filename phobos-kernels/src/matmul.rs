@@ -27,10 +27,12 @@ pub fn src() -> String {
     TEMPLATE.replace("{ALIGNED}\n", "")
 }
 
-/// Tensor-core tile: a 64x64 output block over 4x4 sixteen-square WMMA
-/// fragments, the smallest square `wmma_plan` accepts at `@launch(256)`'s
-/// eight warps. Only launched over whole `TC_TILE_M`-row bands; a caller with
-/// a ragged `m` hands the remainder to [`TEMPLATE`] above.
+/// Tensor-core tile: a 64x64 output block made of 4x4 WMMA fragments of
+/// 16x16. This is the smallest square `wmma_plan` accepts for the eight warps
+/// of `@launch(256)`.
+///
+/// It only covers whole `TC_TILE_M`-row bands. A caller with a ragged `m`
+/// runs the remainder through [`TEMPLATE`].
 pub const TC_TILE_M: usize = 64;
 pub const TC_TILE_N: usize = 64;
 pub const TC_TILE_K: usize = 16;

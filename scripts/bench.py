@@ -1,32 +1,26 @@
 #!/usr/bin/env python3
 """Phobos against llama.cpp, on the same models, in one session, on a warm card.
 
-Runs `phobos-bench` and `llama-bench` over the same models with
-the same pp/tg sizes and reports one table, plus the phobos-to-llama.cpp ratio
-per row.
+Runs `phobos-bench` and `llama-bench` over the same models with the same pp/tg
+sizes. Reports one table plus the phobos-to-llama.cpp ratio per row.
 
-What this does that a pair of hand-run benchmarks does not:
+Beyond a pair of hand-run benchmarks, it:
 
  1. Refuses to start on a contended card.
- 2. Warms the card before the first timed run and confirms the SM clock has
-    reached a plateau.
+ 2. Warms the card and checks that the SM clock has plateaued.
  3. Interleaves. Every round runs each engine once per model, and the order
-    reverses on odd rounds, so the first slot of a round (worth about a percent)
-    is shared out instead of always landing on the same engine.
- 4. Checks the card again between rounds, when none of our work is on it, and
-    reports the summary twice if anything was found.
- 5. Gets llama.cpp onto the GPU, and proves it did. A llama.cpp release ships
-    ggml-cuda.dll without the CUDA runtime it links against, and lacking it the
-    build serves the CPU while still printing a benchmark.
- 6. Records what each engine ran with: the build, the runtime, and any PHOBOS_
-    override in the environment.
+    reverses on odd rounds so no engine always gets the first slot.
+ 4. Checks the card between rounds, while none of our work runs, and reports
+    the summary twice if it found contention.
+ 5. Gets llama.cpp onto the GPU and proves it. A llama.cpp release ships
+    ggml-cuda.dll without its CUDA runtime, and without it the build silently
+    benchmarks the CPU.
+ 6. Records each engine's build, runtime, and any PHOBOS_ override in the
+    environment.
 
-Not controlled for: llama.cpp runs its own defaults, which are its best
-configuration rather than a match for phobos's internals. Its KV cache is f16 and
-flash attention is on where the card takes it. That is left alone deliberately,
-since pinning it down to whatever phobos does would measure a configuration
-nobody runs, but it is a difference between the two columns and not only between
-the two engines.
+llama.cpp runs with its own defaults: f16 KV cache, and flash attention where
+the card supports it. This is deliberate, but it means the two columns differ
+in configuration as well as engine.
 
 Usage:
     python scripts/bench.py
@@ -94,9 +88,7 @@ def card_now():
 
 
 def compute_apps():
-    """The pids holding the GPU. Counted, never named: which processes those
-    are is not the benchmark's business, and a workload heavy enough to move a
-    measurement shows up in what the card draws."""
+    """The pids holding the GPU. Only counted, never named."""
     try:
         rows = smi("pid", mode="compute-apps")
     except subprocess.CalledProcessError:
@@ -105,9 +97,11 @@ def compute_apps():
 
 
 class Monitor:
-    """Polls the card while something else runs, so the clocks recorded for a
-    run are the clocks it ran at. Sampling before or after says nothing: the
-    card leaves its plateau within a moment of the last launch."""
+    """Polls the card while a run executes, so the recorded clocks are the
+    ones it ran at.
+
+    Sampling before or after is useless, since the clock drops right after
+    the last launch."""
 
     def __init__(self, interval_secs):
         self.interval_secs = interval_secs
@@ -180,9 +174,8 @@ class Phobos:
         ]
 
     def parse(self, stdout, stderr):
-        # The per-repetition seconds off the progress lines rather than the mean
-        # off the summary table, so the samples line up with llama-bench's
-        # samples_ts and the spread can be computed the same way for both.
+        # Per-repetition times from the progress lines, not the summary mean,
+        # to match llama-bench's samples_ts.
         rates = {}
         for test, count, secs in re.findall(
             r"^\s*((?:pp|tg)(\d+)) rep \d+/\d+: ([\d.]+) s", stderr, re.M
@@ -204,15 +197,12 @@ class LlamaCpp:
 
     def __init__(self, exe, extra=()):
         self.exe = str(exe)
-        # Its own PATH, not the session's: a llama.cpp release ships
-        # ggml-cuda.dll with no CUDA runtime beside it, and a directory that
-        # supplies one has to reach this process without also reaching the one
-        # phobos runs in, which finds its own driver and needs no help.
+        # Its own environment, set by best_backend. A llama.cpp release needs a
+        # CUDA runtime on PATH, which must not leak into phobos's process.
         self.env = None
         self.lib = ""
-        # Whatever the caller wants llama.cpp configured with, appended last so
-        # it overrides the defaults above. The probe sees these too, so the
-        # backend reported is the one the timed runs will use.
+        # Caller flags, appended last so they override the defaults. The probe
+        # uses them too, so it reports the backend the timed runs get.
         self.extra = list(extra)
 
     def command(self, model, prompt_tokens, gen_tokens, reps):
@@ -284,10 +274,8 @@ def cuda_lib_dirs(explicit):
     """Directories worth putting on a llama-bench's PATH.
 
     A llama.cpp release carries ggml-cuda.dll but not the cudart and cublas it
-    links against, and without them the backend never loads: the build serves the
-    CPU and says so only in one line of its own log, which reads as a working
-    benchmark and quietly turns a GPU comparison into a CPU one. Ollama ships a
-    matching runtime per major version, so try each of those."""
+    links against. Without them it silently runs on the CPU. Ollama ships a
+    runtime per CUDA major version, so each of those is a candidate."""
     if explicit:
         return [Path(p) for p in explicit]
     root = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Ollama" / "lib" / "ollama"
@@ -304,12 +292,11 @@ def with_lib(directory):
 
 
 def best_backend(engine, model, libs):
-    """The engine set up the best way it can be, and which backend that reaches.
+    """Sets up the engine's environment for the best backend it can reach, and
+    returns that backend.
 
-    Tried bare first, so a build that finds its own runtime is left alone, then
-    once per candidate directory. CUDA short-circuits; anything else is kept only
-    as a fallback, because a CPU row that could have been a GPU row is the whole
-    failure this is here to avoid."""
+    Tries the plain environment first, then each candidate directory. Stops
+    at the first CUDA hit; a non-CUDA backend is kept only as a fallback."""
     fallback = None
     for directory in [None, *libs]:
         engine.env, engine.lib = with_lib(directory)
@@ -352,10 +339,9 @@ def build_phobos(args):
 
 
 def probe(engine, model):
-    """A tiny run to find out whether the engine works at all and which backend
-    actually served it. A llama.cpp build can carry ggml-cuda.dll, load it, and
-    still fail at the first launch, or quietly fall back to the CPU; either one
-    read as a GPU comparison would be wrong."""
+    """A tiny run that says whether the engine works and which backend served
+    it. A llama.cpp build can load ggml-cuda.dll and still fail at the first
+    launch, or fall back to the CPU."""
     cmd = engine.command(model, [16], [4], 1)
     done = subprocess.run(
         cmd, capture_output=True, text=True, cwd=ROOT, timeout=900, env=engine.env
@@ -371,13 +357,11 @@ def probe(engine, model):
 
 
 def warm_card(engine, args):
-    """Sustained work until the SM clock stops climbing. Reports the ramp, since
-    a plateau that never arrives means the numbers below are measuring the card
-    warming up rather than the engines.
+    """Runs sustained work until the SM clock stops climbing, and returns
+    whether it plateaued.
 
-    Prompt passes only, no decode: a decode step is launch-bound and leaves the
-    card idle enough that it never asks for its boost clock, so warming with one
-    would report a plateau the prompt rows then climb straight past."""
+    Uses prompt passes only. Decode is launch-bound and leaves the card too
+    idle to reach its boost clock."""
     before = card_now()
     print(f"warming the card ({before['clock']:.0f} MHz now)...", flush=True)
     cmd = [
@@ -391,8 +375,7 @@ def warm_card(engine, args):
         "-r",
         "400",
     ]
-    # The engine's own environment, not the session's: a llama-bench warming
-    # the card without its CUDA runtime on PATH warms the CPU instead.
+    # The engine's own environment, or llama-bench would warm the CPU.
     proc = subprocess.Popen(
         cmd,
         stdout=subprocess.DEVNULL,
@@ -435,13 +418,11 @@ def warm_card(engine, args):
 
 
 def gap_scan(settle_secs=1.5, samples=4):
-    """What the card is doing with none of our work on it, between two rounds.
+    """The card's load between two rounds, with none of our work running.
+    This is what a round is judged on.
 
-    This is the signal a round is judged on.
-
-    The middle of several samples rather than the worst, because the desktop
-    catches up on its own drawing the moment a GPU-heavy process exits and one
-    spike there is not a contended session."""
+    Takes the median of several samples, since the desktop redraws in a
+    short spike right after a GPU-heavy process exits."""
     time.sleep(settle_secs)
     seen = []
     for _ in range(samples):
@@ -454,11 +435,10 @@ def gap_scan(settle_secs=1.5, samples=4):
 
 
 def busy(state, args):
-    """Why the card is not ours, or None.
+    """Why the card is busy, or None.
 
-    Judged on what the card is doing, never on which processes hold it: a
-    workload large enough to bend a measurement draws power and occupies SMs,
-    and the thresholds sit above an ordinary busy desktop."""
+    Judged on power and utilization, not on which processes hold the card.
+    The thresholds sit above an ordinary busy desktop."""
     if state["power"] > args.max_idle_power:
         return f"{state['power']:.0f} W drawn with none of our work running"
     if state["util"] > args.max_idle_util:
@@ -471,8 +451,7 @@ def preflight(args):
     name, driver, clock_max = smi("name,driver_version,clocks.max.sm")
     now = card_now()
     apps = compute_apps()
-    # The same median-of-samples the rounds are judged on, so the gate to start
-    # and the gate on each round cannot disagree about the same card.
+    # The same check the rounds are judged on.
     state = gap_scan(settle_secs=0.0)
     print(f"card {name}, driver {driver}, max SM clock {clock_max} MHz")
     print(
@@ -557,11 +536,9 @@ def summarize(samples, rounds_kept, engines, models, tests):
 def drift(samples, backends, rounds):
     """Per round, how far its GPU-backed rows sat from their own medians.
 
-    A diagnostic, not a filter. Selecting rounds by the rates being summarized
-    would pull every mean toward its median and shrink the error bars to match,
-    so what a round is judged on is the contention scan beside it, which knows
-    nothing about the rates. This is here to be looked at: an ambient slowdown
-    moves every row of a round together, which is visible in one column."""
+    A diagnostic only. Filtering rounds by their rates would bias the means
+    and shrink the error bars, so rounds are judged by the contention scan
+    instead. An ambient slowdown shows here as a whole round moving together."""
     by_row = {}
     for s in samples:
         if backends.get(s["engine"]) == "CPU":
@@ -598,8 +575,7 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
         if backends.get(engine) != "CPU" and c == c
     ]
     median = statistics.median(watched) if watched else 0.0
-    # Judged on what the card was doing between rounds, which is independent of
-    # the rates being summarized.
+    # Judged on the scan between rounds, never on the rates themselves.
     dirty = [rnd for rnd in all_rounds if health.get(rnd) and busy(health[rnd], args)]
     clean = [rnd for rnd in all_rounds if rnd not in dirty]
     moved = drift(samples, backends, all_rounds)
@@ -678,8 +654,7 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
             + table(spread, ["round", "GPU rows", "SM MHz", "util between", "note"])
         )
 
-    # The ratio, and a marker when the two engines were not served by the same
-    # backend, which makes the row a curiosity rather than a comparison.
+    # The ratio, marked when the two engines ran on different backends.
     if len(engines) >= 2:
         base, *rest = engines
         rows = []
@@ -845,8 +820,7 @@ def main():
         for exe in find_llama_benches(args.llama_bench):
             engines.append(LlamaCpp(exe, shlex.split(args.llama_args)))
 
-    # Probe every engine before the session starts. An engine that cannot run is
-    # dropped here with its reason, rather than aborting a round halfway.
+    # Probe every engine up front, dropping one that cannot run with its reason.
     print("\nprobing engines:")
     libs = cuda_lib_dirs(args.cuda_lib)
     backends, labels, working, seen = {}, {}, [], set()
@@ -861,16 +835,15 @@ def main():
             f"  {tag}: backend {backend}"
             + (f", runtime from {engine.lib}" if engine.lib else "")
         )
-        # One build per (engine, backend) pair: two llama.cpp builds that both
-        # fall back to the CPU would measure the same thing twice under
-        # different names, and one of them would win the ratio row by accident.
+        # Keep one build per (engine, backend) pair, so two builds on the same
+        # backend are not measured twice.
         if (engine.name, backend) in seen:
             print("    same backend as a build already kept, skipped")
             continue
         seen.add((engine.name, backend))
         if engine.name != "phobos":
-            # Named after its directory when that names a build, so a fork's
-            # column never reads as stock llama.cpp.
+            # Named after its directory when that names a build, so a fork
+            # never reads as stock llama.cpp.
             build = Path(engine.exe).parent.name
             name = build if build.startswith("llama") else engine.name
             engine.name = f"{name} {backend}"
@@ -891,14 +864,12 @@ def main():
                 " CUDA runtime it needs."
             )
 
-    # Warmed by whichever engine is present: the command is the pp-only shape
-    # both binaries take, so it does not matter which one holds the card.
+    # Either engine can warm the card; both take the same pp-only command.
     if not warm_card(working[0], args) and not args.force:
         print("  (proceeding anyway; the clean-round filter below will show it)")
 
-    # phobos's own warmup covers a batch of at least 128 rows, so a shallower
-    # prompt row is a shape it has not compiled and the first repetition pays
-    # for the compile. llama.cpp warms at the shape it is about to time.
+    # phobos warms with at least 128 rows, so a shorter prompt compiles a new
+    # kernel during its first timed repetition.
     shallow = [] if args.no_phobos else [n for n in args.prompt_tokens if n < 128]
     if shallow:
         print(
@@ -910,9 +881,8 @@ def main():
     samples, cell_clocks, health = [], {}, {}
     cells = [(e, m) for m in args.models for e in working]
     for rnd in range(1, args.rounds + 1):
-        # Reversed on odd rounds: the first slot of a round is systematically
-        # the faster one here, worth about a percent, which is larger than the
-        # differences this is meant to resolve.
+        # Reversed on odd rounds, since the first slot of a round is
+        # systematically faster.
         turn = cells if rnd % 2 == 0 else list(reversed(cells))
         print(f"\nround {rnd}/{args.rounds}")
         for slot, (engine, model) in enumerate(turn):
@@ -922,7 +892,7 @@ def main():
                 print(f"  {engine.name} {Path(model).stem}: FAILED, {err}")
                 continue
             clock = statistics.fmean(run.clocks) if run.clocks else float("nan")
-            # Recorded by name, not by path: the results are published.
+            # Recorded by name, not path, since the results are published.
             name = Path(model).stem
             cell_clocks[(rnd, engine.name, name)] = clock
             labels[(engine.name, name)] = run.label
@@ -970,7 +940,7 @@ def main():
     if args.csv:
         write_csv(args.csv, samples)
     if args.json:
-        # Same reason as the samples: names, not the paths they were read from.
+        # Names, not paths, as for the samples.
         recorded = dict(
             vars(args),
             models=[Path(m).stem for m in args.models],

@@ -2,12 +2,11 @@
 //
 //   cargo run --release -p phobos-kernels --features cuda --example barrier_bench
 //
-// A decode step is a deep, narrow chain of tiny kernels: does a kernel
-// spanning several stages, separated by `grid_barrier`, beat the same
-// stages launched one at a time? Both rows do the same arithmetic on the
-// same buffer the same number of times; only the boundary differs. The
-// launch row goes through a CUDA graph, not plain launches, since that is
-// what the GGUF backend records a pass as.
+// Both rows do the same arithmetic on the same buffer the same number of
+// times, and only the boundary between stages differs. One row runs every
+// stage in one persistent kernel, separated by `grid_barrier`. The other
+// launches each stage as a node of a CUDA graph, as the GGUF backend records
+// a pass.
 
 use anyhow::Result;
 use cust::prelude::*;
@@ -68,8 +67,8 @@ fn main() -> Result<()> {
         graph_millis / STEPS as f64 * 1000.0
     );
 
-    // The grid has to be known at compile time here, since the kernel strides by
-    // it, so ask the driver first with a throwaway compile at the same shape.
+    // The kernel strides by the grid, so the grid must be known at compile
+    // time. A throwaway compile at the same shape asks the driver first.
     let probe = compile(
         PERSISTENT_SRC,
         &[("TILE", TILE), ("STEPS", 1), ("BLOCKS", 48)],

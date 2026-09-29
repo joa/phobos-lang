@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
     storage::write_tensor_f32(&uri("B.bin"), &b)?;
     storage::write_tensor_f32(&uri("C.bin"), &vec![0.0; N * N])?;
 
-    // The analytic peer minimum for owner-computes (for the bytes assertion).
+    // The analytic minimum of peer bytes under owner-computes, for the assertion below.
     let kernel = phobos_lang::parse(MATMUL)?.remove(0);
     let program = phobos_cluster::compile(&kernel)?;
     let supers = phobos_sched::default_supers(&program);
@@ -60,8 +60,8 @@ async fn main() -> Result<()> {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-    // Forces the home-LOAD/peer-FETCH ingest policy to exercise the peer data
-    // plane; the default DirectLoad would move zero bytes between peers.
+    // Use the home-LOAD, peer-FETCH ingest policy to exercise the peer data
+    // plane. The default DirectLoad moves no bytes between peers.
     let pl = phobos_sched::plan_with(
         &program,
         &dims,
@@ -71,8 +71,8 @@ async fn main() -> Result<()> {
     )?;
     let want_bytes = pl.fetch_bytes;
 
-    // Scheduler gRPC server on an OS-assigned port (Windows reserves many
-    // fixed ranges); nodes also listen on :0 and register their bound addr.
+    // The scheduler and the nodes listen on OS-assigned ports, since Windows
+    // reserves many fixed ranges. Nodes register their bound address.
     let sched = Scheduler::new();
     let sched_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let sched_addr = sched_listener.local_addr()?.to_string();
@@ -98,7 +98,7 @@ async fn main() -> Result<()> {
     SERVED_BYTES.store(0, Ordering::SeqCst);
     GET_KERNEL_CALLS.store(0, Ordering::SeqCst);
 
-    // Withholds the step leaf (kernel 0) from node 1, so it must peer GetKernel-fill from node 0.
+    // Withhold the step leaf (kernel 0) from node 1, so it has to GetKernel it from node 0.
     let job = make_job(
         MATMUL,
         &[("M", N as i64), ("N", N as i64), ("K", N as i64)],

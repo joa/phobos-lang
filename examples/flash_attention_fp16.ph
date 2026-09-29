@@ -1,9 +1,7 @@
-// FlashAttention-2 implementation
-// see https://tridao.me/publications/flash2/flash2.pdf
+// FlashAttention-2 in fp16: https://tridao.me/publications/flash2/flash2.pdf
 //
-// Half-precision FlashAttention-2: fp16 Q/K/V/O with an fp32 softmax state.
-//
-// This is fp16 tensor core with fp32 accumulation.
+// Q, K, V and O are fp16. The softmax state and the tensor core
+// accumulation are fp32.
 @cluster(BR in [1024, 4096])
 @tensorcore
 @launch(128)
@@ -20,7 +18,7 @@ kernel flash_attention(Q: tensor<f16>[Nq, D],
   let q = Q[row :+ BR, :]
 
   var acc: tile<f32>[BR, D] = 0.0       // unnormalized output sum p*v
-  var m: tile<f32>[BR, 1] = -65504.0    // running row max (f16 min, ~ -inf)
+  var m: tile<f32>[BR, 1] = -65504.0    // running row max, from the f16 minimum
   var l: tile<f32>[BR, 1] = 0.0         // running denominator sum p
 
   for kt in range(0, Nk, BC) {
@@ -30,11 +28,11 @@ kernel flash_attention(Q: tensor<f16>[Nq, D],
     var s: tile<f32>[BR, BC] = dot_t(q, k)   // [BR, BC] = q @ k.T (f16 -> f32)
     s = s * scale
 
-    // online softmax update (f32)
+    // Online softmax update.
     var mnew: tile<f32>[BR, 1] = rowmax(s)
-    mnew = tmax(m, mnew)                      // new running max
-    s = exp(s - mnew)                         // scores -> probabilities, fused in place
-    var corr: tile<f32>[BR, 1] = exp(m - mnew) // rescale factor for old state
+    mnew = tmax(m, mnew)
+    s = exp(s - mnew)                         // unnormalized probabilities
+    var corr: tile<f32>[BR, 1] = exp(m - mnew) // rescales the carried state
 
     l = l * corr
     l += rowsum(s)
@@ -45,6 +43,6 @@ kernel flash_attention(Q: tensor<f16>[Nq, D],
     m = mnew
   }
 
-  acc = acc / l                              // normalize
-  O[row :+ BR, :] = acc                      // f32 -> f16 store
+  acc = acc / l
+  O[row :+ BR, :] = acc                      // narrows to f16 on store
 }

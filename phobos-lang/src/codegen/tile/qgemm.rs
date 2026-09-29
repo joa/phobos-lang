@@ -1,10 +1,13 @@
 // The `<fmt>_qgemm_t` family: a prompt projection against a raw quantized
-// weight, both operands staged through shared memory. Per 128 elements of
-// `k` the CTA stages 128 activation rows and 64 decoded weight columns as
-// an int8 tile, writes column scales, and contracts both with `ldmatrix`
-// and `mma.m8n8k16`; the next tile's reads are issued before this one is
-// contracted. Format decode lives in `qgemm_fmt.rs`; the epilogue matches
-// `iq1s_qmma_t`'s so both agree bit for bit.
+// weight, with both operands staged through shared memory.
+//
+// For each 128 elements of `k`, the CTA stages 128 activation rows and 64
+// decoded weight columns as int8 tiles, plus the column scales. It contracts
+// them with `ldmatrix` and `mma.m8n8k16`. The next tile's reads are issued
+// before this one is contracted.
+//
+// Format decode lives in `qgemm_fmt.rs`. The epilogue matches
+// `iq1s_qmma_t`'s, so both agree bit for bit.
 
 use super::kquant::KQ_GROUP;
 use super::*;
@@ -24,7 +27,8 @@ pub(in crate::codegen) const QGEMM_KT: i64 = 128;
 /// across, each holding a 32 x 32 patch.
 pub(in crate::codegen) const QGEMM_THREADS: i64 = 256;
 
-/// Bytes of a 16-element `k` chunk, what one `ldmatrix` row carries.
+/// Bytes of a 16-element `k` chunk, which is what one `ldmatrix` row
+/// carries.
 pub(super) const CHUNK_BYTES: i64 = 16;
 
 /// Tiles of 8 x 8 a warp's patch spans, each way.
@@ -55,8 +59,8 @@ pub(super) struct Lanes<'c> {
     pub(super) j: Value<'c, 'c>,
     pub(super) g: Value<'c, 'c>,
     j_xor: Value<'c, 'c>,
-    /// The row of the grouped weight the column's bytes are read from,
-    /// `8 (j / 8)`, and `j % 8`. See [`RAW_GROUP`].
+    /// The row of the grouped weight holding the column's bytes, `8 (j / 8)`,
+    /// and `j % 8`. See [`RAW_GROUP`].
     pub(super) qb_row: Value<'c, 'c>,
     in_group: Value<'c, 'c>,
 }
@@ -64,8 +68,8 @@ pub(super) struct Lanes<'c> {
 /// Where a tile's bytes sit in the weight: the 256-element block, and the
 /// thread's group within it.
 pub(super) struct TileAt<'c> {
-    /// The byte offset of the block in the group's row, and the entry of
-    /// its scale in the plane's: both `8 blk + j % 8` blocks in.
+    /// The byte offset of the block in the group's row, and its scale's
+    /// entry in the scale plane. Both are `8 blk + j % 8` blocks in.
     pub(super) blk_off: Value<'c, 'c>,
     pub(super) d_col: Value<'c, 'c>,
     /// The thread's group, 0 to 7, within the block.
@@ -146,9 +150,9 @@ impl<'c> Codegen<'c> {
         let w_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TN, QGEMM_KT])?;
         let sa_st = self.alloc_tile_shaped(block, f32_t, &[QGEMM_TM, QGEMM_KT / Q8_BLOCK])?;
         let sw_st = self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?;
-        // A format with a minimum: `dmin * m` a column a group beside the
-        // scales, and the activation's sum a row a group, both filled at
-        // stage time (see `kquant.rs`).
+        // For a format with a minimum: `dmin * m` per column and group, and
+        // the activation's sum per row and group. Both are filled at stage
+        // time (see `kquant.rs`).
         let mw_st = match fmt.has_min() {
             true => Some(self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?),
             false => None,
@@ -177,7 +181,7 @@ impl<'c> Codegen<'c> {
 
         let lanes = self.qgemm_lanes(block)?;
 
-        // Stage the first tile before the loop; the loop stages the next one
+        // Stage the first tile before the loop. The loop stages the next one
         // at the end of every turn.
         let zero_k = self.const_index(block, 0)?;
         let first = self.qgemm_load(block, fmt, &lanes, aq, asc, qb, d, zero_k)?;
@@ -194,9 +198,9 @@ impl<'c> Codegen<'c> {
             .map(|slot| Ok(detach(kb.argument(slot + 1)?.into())))
             .collect::<Result<_>>()?;
 
-        // The next tile's reads go out first, kept in flight under this
-        // tile's contraction; the last turn re-reads its own tile rather than
-        // branching.
+        // Issue the next tile's reads first, so they are in flight during
+        // this tile's contraction. The last turn re-reads its own tile rather
+        // than branching.
         let last = self.push(&kb, arith::subi(nk, one, self.loc))?;
         let after = self.addi(&kb, kt, one)?;
         let next = self.push(&kb, arith::minui(after, last, self.loc))?;
@@ -204,8 +208,8 @@ impl<'c> Codegen<'c> {
 
         let accs = self.qgemm_contract(&kb, fmt, &lanes, &a_st, &w_st, &sa_st, &sw_st, planes, &accs)?;
 
-        // Every warp is done with the stage before anyone overwrites it, and
-        // the new stage is complete before anyone reads it.
+        // Every warp must finish with the stage before it is overwritten, and
+        // the new stage must be complete before it is read.
         self.barrier(&kb)?;
         self.qgemm_store(&kb, fmt, &lanes, &fetched, &a_st, &w_st, &sa_st, &sw_st, planes, &tabs)?;
         self.barrier(&kb)?;
@@ -240,7 +244,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Copy a `[1, bytes]` table into shared memory, 16 bytes a thread a turn.
+    /// Copies a `[1, bytes]` table into shared memory, 16 bytes per thread
+    /// per turn.
     pub(super) fn stage_bytes(
         &mut self,
         block: &Block<'c>,
@@ -283,16 +288,16 @@ impl<'c> Codegen<'c> {
         let quad = self.divui(block, lane, four)?;
         let in_quad = self.remui(block, lane, four)?;
 
-        // Warps 0..7 as four down and two across, 32 rows or columns apiece.
+        // Warps 0..7 as four down and two across, 32 rows or columns each.
         let patch_w = c(self, PATCH * IMMA_TILE)?;
         let wr = self.divui(block, warp, two)?;
         let wc = self.remui(block, warp, two)?;
         let i0 = self.muli(block, wr, patch_w)?;
         let j0 = self.muli(block, wc, patch_w)?;
 
-        // ldmatrix.x4: lanes 8t..8t+7 address the eight rows of tile t, so a
-        // lane's row is its index within the patch, and the chunk it reads is
-        // permuted by that row's place in the bank period.
+        // ldmatrix.x4: lanes 8t..8t+7 address the eight rows of tile t. So a
+        // lane's row is its index within the patch, and its chunk is permuted
+        // by that row's place in the bank period.
         let ldm_a_row = self.addi(block, i0, lane)?;
         let ldm_w_row = self.addi(block, j0, lane)?;
         let ldm_xor = self.remui(block, lane, eight)?;
@@ -315,7 +320,7 @@ impl<'c> Codegen<'c> {
         let sa_half = self.remui(block, tid, two)?;
         let sa_col = self.muli(block, sa_half, two)?;
 
-        // Weight staging: four threads a column, one 32-element group each.
+        // Weight staging: four threads per column, one 32-element group each.
         let j = self.divui(block, tid, four)?;
         let g = self.remui(block, tid, four)?;
         let j_xor = self.remui(block, j, eight)?;
@@ -451,10 +456,10 @@ impl<'c> Codegen<'c> {
         }
         self.vec_store_al(block, regs[pieces], sa_st.mem, &[lanes.sa_row, lanes.sa_col], 8)?;
         if let Some(as_st) = as_st {
-            // The activation's sum over each 32-element group: a thread's
-            // sixteen-byte piece is half a group and the thread beside it
-            // holds the other half, so one xor shuffle joins them and both
-            // store the same word.
+            // The activation's sum over each 32-element group. A thread's
+            // sixteen-byte piece is half a group, and its neighbour holds the
+            // other half. One xor shuffle joins them, and both store the same
+            // word.
             let words_t = Type::vector(&[4], self.i32_t);
             let group_w = self.const_index(block, KQ_GROUP)?;
             for ((v, row), chunk) in regs[..pieces].iter().zip(&lanes.a_rows).zip(&lanes.a_chunks) {
@@ -484,8 +489,9 @@ impl<'c> Codegen<'c> {
         self.qgemm_fmt_decode(block, fmt, &stage, &regs[pieces + 2..])
     }
 
-    /// The warp's patch over one stage: four 32-element groups, each two
-    /// `ldmatrix.x4` an operand, sixteen tensor tiles, and the scale epilogue.
+    /// The warp's patch over one stage: four 32-element groups, each with two
+    /// `ldmatrix.x4` per operand, sixteen tensor tiles, and the scale
+    /// epilogue.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_contract(
         &mut self,
@@ -517,7 +523,7 @@ impl<'c> Codegen<'c> {
 
         let mut accs = accs.to_vec();
         for s in 0..(QGEMM_KT / Q8_BLOCK) {
-            // The weight scales this group needs: one a column, or one a
+            // The weight scales this group needs: one per column, or one per
             // column and half.
             let mut sw = Vec::with_capacity((PATCH * per_col) as usize);
             for col in &cols {
@@ -531,8 +537,8 @@ impl<'c> Codegen<'c> {
             for row in &rows {
                 sa.push(self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?);
             }
-            // The minimum term's operands, where the format has one: the
-            // column minimums like the scales, the row sums like the
+            // The minimum term's operands, if the format has one: column
+            // minimums, loaded like the scales, and row sums, loaded like the
             // activation scales.
             let mut mw = Vec::with_capacity(PATCH as usize);
             if let Some(mw_st) = mw_st {
@@ -566,8 +572,8 @@ impl<'c> Codegen<'c> {
 
             for r in 0..PATCH {
                 for c in 0..PATCH {
-                    // One accumulator over both halves where a scale covers
-                    // the group, one a half where it does not.
+                    // One accumulator over both halves when a scale covers
+                    // the group, otherwise one per half.
                     let mut sums = Vec::with_capacity(per_col as usize);
                     let mut sum = empty;
                     for h in 0..halves {
@@ -597,8 +603,7 @@ impl<'c> Codegen<'c> {
                             cg.small_int_to_f32(block, raw)
                         };
                         accs[slot] = if split {
-                            // acc += sa * (c0 * sw0 + c1 * sw1): two scale
-                            // products a group rather than four.
+                            // acc += sa * (c0 * sw0 + c1 * sw1).
                             let (w0, w1) = (sw_of(self, 0)?, sw_of(self, 1)?);
                             let (c0, c1) = (raw_of(self, 0)?, raw_of(self, 1)?);
                             let inner = self.push(block, arith::mulf(c0, w0, self.loc))?;
@@ -606,7 +611,7 @@ impl<'c> Codegen<'c> {
                             self.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
                         } else if mw_st.is_some() {
                             // acc += sa * (c * sw - asum * mw): the run's
-                            // minimum, weighed by the activation's sum.
+                            // minimum, weighted by the activation's sum.
                             let w0 = sw_of(self, 0)?;
                             let as_f = raw_of(self, 0)?;
                             let mw0 = self.vec_extract(block, mw[c as usize], &[dj], f32_t)?;
@@ -641,9 +646,9 @@ pub(super) struct Stage<'a, 'c> {
 }
 
 impl<'c> Codegen<'c> {
-    /// Write the thread's `l`-th octet, two i32 words of four bytes, where
-    /// the tile keeps elements `32 g + 8 l ..+ 8` of column `j`: chunk
-    /// `2 g + l / 2`, permuted by the row's phase, low or high half.
+    /// Writes the thread's `l`-th octet, two i32 words, where the tile keeps
+    /// elements `32 g + 8 l ..+ 8` of column `j`. That is chunk `2 g + l / 2`,
+    /// permuted by the row's phase, in its low or high half.
     pub(super) fn qgemm_put_octet(
         &mut self,
         block: &Block<'c>,
@@ -669,7 +674,7 @@ impl<'c> Codegen<'c> {
         self.vec_store_al(block, bytes, stage.w_st.mem, &[stage.lanes.j, dst], 8)
     }
 
-    /// Write the thread's group minimum, `dmin * m`, for a format that
+    /// Writes the thread's group minimum, `dmin * m`, for a format that
     /// subtracts one.
     pub(super) fn qgemm_put_min(
         &mut self,
@@ -684,7 +689,7 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Write the thread's group scale, or the `h`-th of its `per_group`.
+    /// Writes the thread's group scale, or the `h`-th of its `per_group`.
     pub(super) fn qgemm_put_scale(
         &mut self,
         block: &Block<'c>,

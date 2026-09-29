@@ -1,8 +1,9 @@
 // Fused IQ4_XS dot: a fixed 16-entry codebook lookup folded into the
-// contraction. Not grid-coded like the other formats here: a block is eight
-// 32-element runs, and a warp's 32 lanes map onto one run (RUN == WARP).
-// A run's scale is uniform across it, computed once and shared by every
-// lane; only the codebook nibble index varies by lane.
+// contraction.
+//
+// A block is eight 32-element runs, and a warp's 32 lanes map onto one run.
+// Every lane shares the run's scale. Only the codebook nibble varies by
+// lane.
 
 use super::*;
 
@@ -15,9 +16,9 @@ const IQ4XS_QS_OFF: i64 = 8;
 const IQ4XS_RUNS: i64 = 8;
 const IQ4XS_RUN: i64 = 32;
 
-/// Four offsets for run `ib` (see
-/// [`crate::backend::device::kernels::iq4xs::run_geometry`]), compile-time
-/// constants here since `ib` is a Rust loop index, not a lane id.
+/// The byte offsets and divisors for run `ib`, as in `run_geometry` in
+/// phobos-gguf's `kernels/iq4xs.rs`. They are compile-time constants, since
+/// `ib` is unrolled, not a lane id.
 fn run_geometry(ib: i64) -> (i64, i64, i64, i64) {
     let scale_l_off = IQ4XS_SCALES_L_OFF + ib / 2;
     let scale_l_div = if ib % 2 == 0 { 1 } else { 16 };
@@ -27,9 +28,9 @@ fn run_geometry(ib: i64) -> (i64, i64, i64, i64) {
 }
 
 impl<'c> Codegen<'c> {
-    /// IQ4_XS's matvec contraction with the codebook lookup folded in. Same
-    /// warp-owns-an-output shape as `tile_iq1s_qdot_t`, but the lane maps to
-    /// an element position within a 32-wide run, not a format lane.
+    /// IQ4_XS's matvec contraction with the codebook lookup folded in. A warp
+    /// owns an output, as in `tile_iq1s_qdot_t`, but a lane is an element
+    /// position within a 32-wide run.
     pub(in crate::codegen) fn tile_iq4xs_qdot_t(
         &mut self,
         block: &Block<'c>,
@@ -83,7 +84,7 @@ impl<'c> Codegen<'c> {
         let body = Block::new(&[(self.index_t, self.loc)]);
         let li = detach(body.argument(0)?.into());
         let j = self.divui(&body, li, warp_w)?;
-        // `y`: this lane's position within a 32-element run (RUN == WARP).
+        // This lane's position within a 32-element run.
         let y = self.remui(&body, li, warp_w)?;
 
         let sixteen_idx = self.const_index(&body, 16)?;

@@ -1,5 +1,4 @@
-// The `Backend` impl. A trait impl cannot be split across files, so this
-// is the whole surface here; method bodies live in the sibling modules.
+// The `Backend` impl. Most method bodies live in the sibling modules.
 
 use super::*;
 use super::hadamard::HadamardExtra;
@@ -98,7 +97,7 @@ impl Backend for DeviceBackend {
     }
 
     fn read_h(&self, buf: HBuf, out: &mut [f32]) -> Result<()> {
-        // Through the f32 readback: a word is two halves, low one first.
+        // Each f32 word holds two halves, low one first.
         let mut words = vec![0.0f32; out.len().div_ceil(2)];
         self.read(DeviceBackend::words(buf), &mut words)?;
         for (o, bits) in out.iter_mut().zip(
@@ -144,11 +143,9 @@ impl Backend for DeviceBackend {
     }
 
     fn zeroed(&self, len: usize) -> Result<Buf> {
-        // While recording, a pooled buffer cleared by a recorded launch, in
-        // order with the launches before it. A clear issued now would run
-        // ahead of them, so it would need a buffer none of them can still
-        // be reading, a fresh allocation and later a free: most of a decode
-        // step's host time when a layer asks for one every block.
+        // While recording, clear a pooled buffer with a recorded launch, so
+        // it runs in order with the launches before it. An immediate clear
+        // would need a fresh allocation, which is too slow per block.
         if self.recording.get() {
             let buf = self.alloc(len)?;
             self.pointwise("zero", &[(buf, 0)], len)?;
@@ -156,8 +153,7 @@ impl Backend for DeviceBackend {
         }
         let buf = self.alloc_written_now(len)?;
         let ptr = self.ptr(buf, 0)?;
-        // Async on the stream, so it orders with the pass instead of forcing
-        // a sync the way an upload's staging copy would.
+        // Async on the stream, so it needs no sync.
         cuda_ok(
             // SAFETY: the allocation is at least `len` floats and the handle
             // holds it alive for the duration.
@@ -172,8 +168,8 @@ impl Backend for DeviceBackend {
         self.trim_after_dense()?;
         self.keep_headroom(rows)?;
         self.mark_pass_vram();
-        // The rings restart too, so a step records the same slots as the one
-        // before it and the cached graph needs no patching for them.
+        // Restart the rings, so each step records the same slots and the
+        // cached graph needs no patching.
         self.act_next.set(0);
         self.act_ring.set(0);
         self.act_shared.set(mem::ACT_RING);
@@ -188,8 +184,8 @@ impl Backend for DeviceBackend {
     }
 
     fn end_pass(&self) -> Result<()> {
-        // A pass that had to flush is only partly recorded: issue the tail as
-        // launches and leave the cached graph for the next whole pass to replace.
+        // A flushed pass is only partly recorded. Issue the tail as launches
+        // and keep the cached graph for the next whole pass to replace.
         if self.flushed.replace(false) {
             self.recording.set(false);
             return self.issue_recorded("issuing the tail of a flushed pass");
@@ -199,11 +195,10 @@ impl Backend for DeviceBackend {
     }
 
     fn read(&self, buf: Buf, out: &mut [f32]) -> Result<()> {
-        // The only synchronization point in a block: everything queued since
-        // the last read has to land before the host can look at it.
+        // The only synchronization point in a block.
         self.stream.synchronize()?;
-        // Any slot, a recurrent state in its arena among them: a session
-        // saving a checkpoint reads those back too.
+        // Any slot kind can be read, including recurrent state for a
+        // checkpoint.
         let (at, len) = (self.ptr(buf, 0)?, self.len_of(buf)?);
         ensure!(
             len >= out.len(),
@@ -211,9 +206,8 @@ impl Backend for DeviceBackend {
             out.len(),
             len
         );
-        // Through page-locked staging: straight into a Vec the driver
-        // bounces the copy through its own pinned staging a page at a time,
-        // which costs real bandwidth at this size and frequency.
+        // Copy through pinned staging. A copy straight into a Vec is bounced
+        // by the driver a page at a time, which is slower.
         let mut staging = self.readback.borrow_mut();
         let too_small = staging.as_ref().is_none_or(|s| s.len() < out.len());
         if too_small {
@@ -312,9 +306,7 @@ impl Backend for DeviceBackend {
     }
 
     fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
-        // Batching only pays off once a dequant kernel amortizes the decode
-        // over m rows (project_raw_dense's match table covers every raw
-        // format except Q3_K, the LM head, which never reaches m > 1).
+        // Formats with a dequant kernel, used for multi-row batches.
         const DEQUANT_FORMATS: [Quant; 9] = [
             Quant::IQ1_S,
             Quant::IQ2_XXS,
@@ -326,9 +318,9 @@ impl Backend for DeviceBackend {
             Quant::IQ4_XS,
             Quant::Q2_K,
         ];
-        // The fused projection first: it decodes inside the contraction, so it
-        // neither writes an expanded weight nor leaves scratch behind. Only the
-        // shapes it can take whole, see `raw_qmma_eligible`.
+        // Prefer the fused projection, which decodes inside the contraction
+        // and needs no scratch. See `raw_qmma_eligible` for the shapes it
+        // takes.
         if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
             return self.project_raw_qmma(None, a, m, k, w, n, out);
         }
@@ -389,8 +381,8 @@ impl Backend for DeviceBackend {
         n: usize,
         out: Buf,
     ) -> Result<()> {
-        // Only the single-row kernel accumulates; a prefill's tensor-core
-        // path treats the residual add as noise, not a launch that matters.
+        // Only the single-row kernel accumulates. Other shapes project into
+        // a temporary and add it separately.
         if m != 1 || !n.is_multiple_of(Q8_QDOT_TN) {
             let temp = self.alloc(m * n)?;
             self.matmul_quant_act(act, m, k, w, n, temp)?;
@@ -513,8 +505,7 @@ impl Backend for DeviceBackend {
                         (self.ptr(x, 0)?, [r, d]),
                         (
                             // Offset to this call's first position, so the
-                            // kernel indexes the table by row rather than
-                            // taking the absolute position as an argument.
+                            // kernel indexes the table by row.
                             self.ptr(table, spec.start_pos * spec.rope_dim)?,
                             [rows as i64, spec.rope_dim as i64],
                         ),
@@ -538,19 +529,13 @@ impl Backend for DeviceBackend {
 
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         self.check_distinct("attention", out, &[q]);
-        // The blocked kernel's online-softmax pass is cheaper than the gemm
-        // path below at shapes both can take.
-        //
-        // It masks its diagonal tile with `tril`, the causal mask only when
-        // the tile starts where the query block does; a misaligned
-        // continuation falls to the row kernel instead, which needs no
-        // alignment.
+        // Prefer the blocked kernel. Its causal mask needs the query blocks
+        // aligned to the tile, so a misaligned start falls through.
         let block = attention_block_tile(spec.head_dim);
         if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
             return self.attention_blocked(q, keys, values, spec, block, out);
         }
-        // Whatever the blocked kernel declined still goes through the two
-        // matmuls if it tiles evenly; see `attn_gemm_src`.
+        // Next, the two-matmul path if the shape tiles evenly.
         if attn_gemm_fits(spec) {
             return self.attention_gemm(q, keys, values, spec, out);
         }
@@ -588,8 +573,8 @@ impl Backend for DeviceBackend {
         normed: Buf,
         out: Buf,
     ) -> Result<QAct> {
-        // Every program of the one-kernel form sums its whole row, which a
-        // decode row can afford and a prompt's cannot.
+        // The one-kernel form has every program sum the whole row, so it
+        // only suits a single narrow row.
         if rows > 1 || width > HADAMARD_NORM_MAX_WIDTH {
             self.rms_norm(x, rows, width, gain, eps, normed)?;
             return self.hadamard_q(normed, rows, width, signs, None, out);
@@ -603,13 +588,11 @@ impl Backend for DeviceBackend {
         self.check_distinct("delta_conv", packed, &[history, taps]);
         let channels = mix.channels();
         let (pr, c) = ((mix.pad() + mix.rows) as i64, channels as i64);
-        // The packed destination is one row per (position, head): `batch`
-        // positions of one head are then a column window of consecutive rows,
-        // so the strided store is an ordinary tile.
+        // The packed destination has one row per (position, head), so
+        // `batch` positions of one head form an ordinary tile.
         let batch = delta_conv_batch(mix.rows);
         let (planes, width) = ((3 * mix.rows) as i64, (mix.heads * mix.head_dim) as i64);
-        // Both fused layouts space the planes evenly, so the second's offset
-        // is the whole spacing.
+        // The planes are evenly spaced, checked below.
         let plane_stride = mix.planes[1];
         ensure!(
             mix.planes == [0, plane_stride, 2 * plane_stride],
@@ -710,14 +693,12 @@ impl Backend for DeviceBackend {
             head_dim.is_multiple_of(DELTA_TN),
             "delta_rule needs a head dimension ({head_dim}) that is a multiple of {DELTA_TN}"
         );
-        // The five operands are one allocation, each a descriptor over its
-        // own window of it.
+        // The five operands are windows of one allocation.
         let (span, gates) = (rows * heads * head_dim, rows * heads);
         let (r, d) = ((rows * heads) as i64, head_dim as i64);
 
-        // A prompt goes through the chunked form (whole chunks, a state slice
-        // dividing the head); everything else, including single-position
-        // decode, falls through to the sequential kernel.
+        // Use the chunked form when rows and head dim divide evenly.
+        // Everything else, including decode, uses the sequential kernel.
         if rows.is_multiple_of(DELTA_CHUNK) && head_dim.is_multiple_of(DELTA_CHUNK_TN) {
             return self.delta_chunked(packed, rows, heads, head_dim, state, out);
         }

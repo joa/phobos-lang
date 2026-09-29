@@ -22,7 +22,7 @@ fn elementwise_tile_accumulate_is_distributed() {
             "gpu.block_dim",
             "scf.for",
             "arith.addf",
-            // aligned operands, 8 % 4 == 0 -> vectorized accumulate
+            // Aligned operands with 8 % 4 == 0, so the accumulate vectorizes.
             "vector.load",
             "vector.store",
         ],
@@ -51,8 +51,8 @@ fn fused_slice_binary_has_no_temp_buffer() {
             "gpu.block_dim",
             "scf.for",
             "arith.addf",
-            // slice offsets are provably 16B-aligned (base = pid*1024),
-            // so the whole add is 128-bit vectorized
+            // Slice offsets are provably 16-byte aligned (base = pid*1024),
+            // so the whole add uses 128-bit vectors.
             "vector.load",
             "vector.store",
             "alignment = 16",
@@ -62,8 +62,8 @@ fn fused_slice_binary_has_no_temp_buffer() {
 
 #[test]
 fn flash_attention_lowers_softmax_builtins() {
-    // The SPEC's online-softmax kernel exercises dot_t, exp, rowmax,
-    // rowsum, tmax, broadcast subtract/divide, and tile-scalar scaling.
+    // The SPEC's online-softmax kernel. Covers dot_t, exp, rowmax, rowsum,
+    // tmax, broadcast subtract and divide, and tile-scalar scaling.
     let mlir = emit_mlir(
         "@autotune(D in [64], BR in [32], BC in [32])
         @aligned(Nq = BR, Nk = BC)
@@ -109,8 +109,8 @@ fn flash_attention_lowers_softmax_builtins() {
 
 #[test]
 fn argsel_folds_a_value_index_pair_alongside_tmax() {
-    // The greedy-argmax reduction's shape: a running (value, index) pair
-    // folded against a fresh chunk, argsel carrying the index side.
+    // The greedy-argmax reduction: a running (value, index) pair folded
+    // against a fresh chunk, with argsel carrying the index.
     let mlir = emit_mlir(
         "@autotune(W in [8])
         kernel argmax_step(X: tensor<f32>[M, W], IDX: tensor<f32>[M, W]) {
@@ -135,9 +135,9 @@ fn argsel_folds_a_value_index_pair_alongside_tmax() {
 
 #[test]
 fn layernorm_lowers_sqrt_to_ptx_intrinsic() {
-    // A LayerNorm-shaped body: mean and variance via rowsum, an
-    // inverse-stddev via sqrt, and broadcast center/scale. sqrt must lower
-    // to the PTX sqrt.approx intrinsic (like exp -> ex2.approx).
+    // A LayerNorm-shaped body: mean and variance via rowsum, stddev via
+    // sqrt, and broadcast center and scale. sqrt must lower to the PTX
+    // sqrt.approx intrinsic.
     let mlir = emit_mlir(
         "@launch(128)
         @autotune(BR in [32], W in [64])
@@ -158,9 +158,9 @@ fn layernorm_lowers_sqrt_to_ptx_intrinsic() {
 
 #[test]
 fn log_lowers_to_the_ptx_base_two_intrinsic() {
-    // softplus is why log exists: GatedDeltaNet's decay is
-    // exp(rate * log(1 + exp(x))). The hardware primitive is base two, so a
-    // natural log is lg2 with the change of base folded in.
+    // softplus, as in GatedDeltaNet's decay exp(rate * log(1 + exp(x))).
+    // The hardware primitive is base two, so a natural log is lg2 times
+    // ln 2.
     let mlir = emit_mlir(
         "@launch(256)
         @autotune(TILE in [64])
@@ -178,8 +178,7 @@ fn log_lowers_to_the_ptx_base_two_intrinsic() {
 
 #[test]
 fn unary_minus_negates_a_tile() {
-    // `-t` on a tile lowers through the scalar-broadcast path as `0 - t`,
-    // so a sigmoid written the obvious way compiles.
+    // `-t` on a tile lowers as `0 - t` through the scalar-broadcast path.
     let mlir = emit_mlir(
         "@launch(256)
         @autotune(TILE in [64])
@@ -194,11 +193,9 @@ fn unary_minus_negates_a_tile() {
 
 #[test]
 fn rowreduce_cooperates_via_warp_shuffles() {
-    // 128 threads over 32 rows leaves four lanes per row: each lane
-    // folds a strided quarter of the columns in a register and a
-    // gpu.shuffle xor butterfly combines the partials, instead of one
-    // thread sweeping all 64 columns while three quarters of the CTA
-    // idles.
+    // 128 threads over 32 rows gives four lanes per row. Each lane folds a
+    // strided quarter of the columns, and a gpu.shuffle xor butterfly
+    // combines the partials.
     let mlir = emit_mlir(
         "@launch(128)
         @autotune(BR in [32], BC in [64])
@@ -216,8 +213,8 @@ fn rowreduce_cooperates_via_warp_shuffles() {
 
 #[test]
 fn rowreduce_serial_without_spare_threads() {
-    // One thread per row (128 rows, 128 threads) leaves no lanes to
-    // cooperate, so the reduction stays the serial per-row sweep.
+    // 128 rows on 128 threads leaves no lanes to cooperate, so each thread
+    // sweeps its row serially.
     let mlir = emit_mlir(
         "@launch(128)
         @autotune(BR in [128], BC in [64])
@@ -236,9 +233,8 @@ fn rowreduce_serial_without_spare_threads() {
     );
 }
 
-/// A nested per-element chain becomes one sweep that stages only the
-/// operand; unfused, each call in `i8(i32(round(a)))` would stage its own
-/// shared tile. See codegen/elemwise.rs.
+/// A nested per-element chain like `i8(i32(round(a)))` becomes one sweep
+/// that stages only the operand. See codegen/elemwise.rs.
 #[test]
 fn elementwise_chain_fuses_into_one_sweep() {
     let mlir = emit_mlir(
@@ -250,8 +246,8 @@ fn elementwise_chain_fuses_into_one_sweep() {
             Q[r * NB :+ NB, 0 :+ 32] = i8(i32(round(a)))
         }",
     );
-    // Only the operand is staged; the rounding, the i32 and the i8 are all
-    // register steps of the one store sweep.
+    // Only the operand is staged. The round, i32 and i8 steps all happen
+    // in registers during the store sweep.
     assert_eq!(
         shared_bytes(&mlir),
         32 * 32 * 4,
@@ -268,9 +264,8 @@ fn elementwise_chain_fuses_into_one_sweep() {
     assert_contains(&mlir, &["cvt.rni", "arith.fptosi"]);
 }
 
-/// The chain must not swallow a store whose operand it cannot index safely:
-/// a masked operand would be read out of bounds by a target-indexed sweep,
-/// so such a store keeps the tile-per-call path and still verifies.
+/// A masked operand would be read out of bounds by a target-indexed sweep,
+/// so its store keeps the tile-per-call path and still verifies.
 #[test]
 fn elementwise_chain_leaves_a_masked_operand_alone() {
     let mlir = emit_mlir(
@@ -284,8 +279,7 @@ fn elementwise_chain_leaves_a_masked_operand_alone() {
     assert!(module_verifies(&mlir));
 }
 
-/// A float step after a conversion away from float is a type error, not a
-/// silent reinterpretation.
+/// A float step after a conversion to an integer is a type error.
 #[test]
 fn elementwise_chain_rejects_rounding_an_integer() {
     let err = std::panic::catch_unwind(|| {

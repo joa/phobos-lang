@@ -1,8 +1,8 @@
 // Q6_K: `{ uint8 ql[128]; uint8 qh[64]; int8 scales[16]; f16 d; }`.
 //
-// Six-bit quants, four low bits in `ql` and two high ones in `qh`, symmetric
-// around 32. The sixteen runs of 16 scale by a signed 8-bit index into the
-// super-block's `d`; unlike Q4_K there is no minimum to subtract.
+// Six-bit quants symmetric around 32: four low bits in `ql`, two high bits
+// in `qh`. Each of the sixteen runs of 16 has a signed 8-bit scale applied
+// on top of the block's `d`. Unlike Q4_K there is no minimum.
 
 use phobos_base::half::f16_to_f32;
 
@@ -14,8 +14,7 @@ const BLOCK_BYTES: usize = 210;
 const RUN: usize = 16;
 /// Elements whose quants are interleaved across one stretch of `ql` and `qh`.
 const GROUP: usize = 128;
-/// One byte of `qh` covers this many elements' worth of stride: the group is
-/// decoded a quarter at a time.
+/// Elements in a quarter of a group. A group is decoded a quarter at a time.
 const QUARTER: usize = GROUP / 4;
 
 const QL: usize = 0;
@@ -34,8 +33,8 @@ pub static SPEC: Spec = Spec {
     raw_scales: Some(raw_scales),
 };
 
-/// The trailing `d`, which the device block drops (`Quant::device_block`)
-/// so the kernels read it from this plane alone. No minimum term.
+/// Each block's trailing `d`. The device block drops it
+/// (`Quant::device_block`), so kernels read `d` from this plane only.
 fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     let mut d = Vec::with_capacity(bytes.len() / BLOCK_BYTES);
     for block in bytes.chunks_exact(BLOCK_BYTES) {
@@ -52,9 +51,8 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
         for (g, group) in dst.chunks_mut(GROUP).enumerate() {
             let ql = &block[QL + g * GROUP / 2..];
             let qh = &block[QH + g * GROUP / 4..];
-            // One byte of `qh` carries the top two bits of four quants, one
-            // from each quarter of the group; the low nibbles of those four sit
-            // in two bytes of `ql`, one nibble each.
+            // One byte of `qh` holds the top two bits of four quants, one per
+            // quarter of the group. Their low nibbles sit in two bytes of `ql`.
             for (l, &high) in qh[..QUARTER].iter().enumerate() {
                 let sources = [
                     (l, 0, false),

@@ -3,16 +3,17 @@
 use super::*;
 use phobos_kernels::launch::{CTA_THREADS, WARP_THREADS};
 
-/// Root-mean-square normalization, one CTA per row, reshaped into blocks of
-/// 32 so the row reduction runs a warp at a time and doubles as the Q8_0
-/// quantization's block maximum. Generated per width since the tile size
-/// must be a compile-time constant. `@dynshared`: footprint scales with
-/// `width`, past the static 48 KB ceiling for wide models.
+/// RMS normalization, one CTA per row.
+///
+/// The row is reshaped into blocks of 32, so the reduction runs a warp at a
+/// time and also yields the Q8_0 block maximum. Generated per width, since
+/// the tile size is a compile-time constant. `@dynshared` because the
+/// footprint grows with `width` past the static 48 KB limit.
 pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
     let blocks = width / RMS_LANE;
     let (gated, quantized) = (form.gated(), form.quantized());
-    // The quantized, ungated norm as one `rms_norm_q_t` statement where a
-    // thread can own four elements of every `4 * cta`.
+    // The quantized, ungated norm is one `rms_norm_q_t` statement when some
+    // CTA width divides the row; see `norm_q_cta`.
     if quantized && !gated && let Some(cta) = norm_q_cta(width) {
         return format!(
             "@launch({cta})
@@ -81,17 +82,17 @@ kernel {name}(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
     )
 }
 
-/// Threads a normalization's CTA carries: one per tile value, up to the
-/// usual width; sizing to the tile does not lengthen the reduction.
+/// Threads in a normalization's CTA: one per tile value, clamped to
+/// between one warp and [`CTA_THREADS`].
 pub(crate) fn norm_cta(blocks: usize) -> usize {
     (blocks * RMS_LANE).clamp(WARP_THREADS, CTA_THREADS as usize)
 }
 
-/// The CTA the one-statement quantized norm runs at: the largest whole
-/// number of warps up to [`CTA_THREADS`] whose `4 * cta` divides the row,
-/// since `rms_norm_q_t` gives a thread four elements of every `4 * cta`.
-/// `None` for a width no such CTA divides, which takes the tile passes
-/// instead.
+/// CTA width for the one-statement quantized norm: the most whole warps, up
+/// to [`CTA_THREADS`], with `4 * cta` dividing the row. `rms_norm_q_t`
+/// gives each thread four elements of every `4 * cta`.
+///
+/// `None` when no such CTA exists; the tile form is used instead.
 pub(crate) fn norm_q_cta(width: usize) -> Option<usize> {
     (WARP_THREADS..=CTA_THREADS as usize)
         .rev()
@@ -102,8 +103,8 @@ pub(crate) fn norm_q_cta(width: usize) -> Option<usize> {
 /// Values per row of the reshaped normalization tile, and of a Q8_0 block.
 pub(crate) const RMS_LANE: usize = 32;
 
-/// `out = silu(gate) * up`, with a quantized copy for the projection after
-/// it. Folded into [`RMS_LANE`] blocks, same reasoning as `rms_norm_src`.
+/// `out = silu(gate) * up`, plus a quantized copy for the next projection.
+/// Reshaped into [`RMS_LANE`] blocks, as in `rms_norm_src`.
 pub(crate) fn swiglu_q_src(blocks: usize) -> String {
     format!(
         "@launch(256)
@@ -125,7 +126,7 @@ kernel swiglu_q(G: tensor<f32>[RB, {RMS_LANE}], U: tensor<f32>[RB, {RMS_LANE}],
     )
 }
 
-/// Values of a SwiGLU one CTA takes, in [`RMS_LANE`] blocks.
+/// [`RMS_LANE`] blocks of SwiGLU output one CTA takes.
 pub(crate) const SWIGLU_Q_BLOCKS: usize = ELEM_TILE / RMS_LANE;
 
 /// What a normalization kernel leaves behind besides the normalized row.

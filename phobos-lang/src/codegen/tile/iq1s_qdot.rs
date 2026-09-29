@@ -5,12 +5,12 @@ use super::iq1s::{IQ1S_BLOCK_BYTES, IQ1S_LANE};
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// IQ1_S's matvec contraction with the decode folded in. A warp owns one
-    /// output; its 32 lanes divide the contraction into a register
-    /// accumulator, synchronized once via a closing shuffle instead of
-    /// staging every intermediate through shared memory with a barrier each.
-    /// Each lane reads its own 9-bit grid index and 3-bit group scale from
-    /// the block's qs/qh bytes, so warp lane l decodes format lane l directly.
+    /// IQ1_S's matvec contraction with the decode folded in.
+    ///
+    /// A warp owns one output. Its 32 lanes split the contraction, each into
+    /// a register accumulator, and one closing shuffle sums them. Warp lane l
+    /// decodes format lane l, reading its own grid index and group scale from
+    /// the block's qs and qh bytes.
     pub(in crate::codegen) fn tile_iq1s_qdot_t(
         &mut self,
         block: &Block<'c>,

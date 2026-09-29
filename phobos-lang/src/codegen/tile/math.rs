@@ -23,16 +23,15 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// out[...] = exp(src[...]) elementwise. The hardware ex2.approx is f32, so
-    /// f16 tiles round-trip through f32 (load, widen, exp, narrow).
+    /// out[...] = exp(src[...]) elementwise. The hardware exp is f32, so f16
+    /// tiles are widened to f32 and narrowed back.
     pub(in crate::codegen) fn tile_exp(
         &mut self,
         block: &Block<'c>,
         src: &MemVal<'c>,
     ) -> Result<MemVal<'c>> {
-        // An owned temp is rewritten in place, saving a buffer and letting
-        // var p = exp(...) elide every copy. Swizzled staging never flows
-        // here.
+        // An owned temp is rewritten in place, which saves a buffer and lets
+        // `var p = exp(...)` skip every copy.
         let out = if src.owned && src.swizzle.is_none() {
             src.clone()
         } else {
@@ -45,7 +44,7 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out = sqrt(src), element-wise. Mirrors [`Self::tile_exp`]: an owned temp
+    /// out = sqrt(src), element-wise. Like [`Self::tile_exp`], an owned temp
     /// is rewritten in place, otherwise a fresh tile is allocated.
     pub(in crate::codegen) fn tile_sqrt(
         &mut self,
@@ -68,9 +67,7 @@ impl<'c> Codegen<'c> {
 
     /// out = convert(src) elementwise, to a tile of `want` element type.
     ///
-    /// Always a fresh tile: unlike exp or sqrt, the result has a different
-    /// element type (and so a different physical size) than the source, so
-    /// there is nothing to rewrite in place.
+    /// Always allocates a fresh tile, since the element type changes.
     pub(in crate::codegen) fn tile_cast(
         &mut self,
         block: &Block<'c>,
@@ -93,8 +90,8 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[...] = sqrt(src[...]); out may be src itself (each thread reads and
-    /// writes the same element, so the in-place rewrite is race-free).
+    /// out[...] = sqrt(src[...]). out may be src itself, since each thread
+    /// reads and writes the same element.
     pub(in crate::codegen) fn tile_sqrt_into(
         &mut self,
         block: &Block<'c>,
@@ -119,8 +116,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// out[...] = exp(src[...]); out may be src itself (each thread reads and
-    /// writes the same element, so the in-place rewrite is race-free).
+    /// out[...] = exp(src[...]). out may be src itself, since each thread
+    /// reads and writes the same element.
     pub(in crate::codegen) fn tile_exp_into(
         &mut self,
         block: &Block<'c>,
@@ -163,7 +160,7 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[...] = log(src[...]); out may be src itself (race-free per element).
+    /// out[...] = log(src[...]). out may be src itself.
     pub(in crate::codegen) fn tile_log_into(
         &mut self,
         block: &Block<'c>,
@@ -206,7 +203,7 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[...] = round(src[...]); out may be src itself (race-free per element).
+    /// out[...] = round(src[...]). out may be src itself.
     pub(in crate::codegen) fn tile_round_into(
         &mut self,
         block: &Block<'c>,
@@ -247,7 +244,7 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[...] = tanh(src[...]); out may be src itself (race-free per element).
+    /// out[...] = tanh(src[...]). out may be src itself.
     pub(in crate::codegen) fn tile_tanh_into(
         &mut self,
         block: &Block<'c>,

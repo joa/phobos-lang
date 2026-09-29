@@ -1,12 +1,12 @@
 // IQ1_S's decode geometry, shared by the contraction (`iq1s_qdot.rs`) and the
-// expansion (`qdecode.rs`). Both walk the format the same way: a thread
-// owns one of the 32 format lanes of a 256-element block and decodes its eight
-// elements from a 9-bit grid index and a 3-bit group scale.
+// expansion (`qdecode.rs`). A thread owns one of the 32 format lanes of a
+// 256-element block. It decodes its eight elements from an 11-bit grid index
+// and a 3-bit group scale.
 
 use super::*;
 
-// IQ1_S block layout (phobos-gguf/src/quant/iq1_s.rs): 50 bytes, qs at byte
-// 2, qh at byte 34, 32 lanes of 8 elements.
+// IQ1_S device block layout: 48 bytes, qs at byte 0, qh at byte 32, 32 lanes
+// of 8 elements. A device block drops the file's leading f16 `d` (`Quant::device_block`).
 pub(super) const IQ1S_BLOCK_BYTES: i64 = 48;
 const IQ1S_QS_OFF: i64 = 0;
 const IQ1S_QH_OFF: i64 = 32;
@@ -120,9 +120,8 @@ impl<'c> Codegen<'c> {
         Ok(Iq1sBlock { dl, delta, grid_v })
     }
 
-    /// The lane's `y`-th decoded weight, taken from the grid entry already in
-    /// registers. The grid value is signed, so it widens with `extsi`, not the
-    /// zero-extend the unsigned block fields take.
+    /// The lane's `y`-th decoded weight, from the grid entry already in
+    /// registers. The grid value is signed, so it widens with `extsi`.
     pub(super) fn iq1s_decoded(
         &mut self,
         kb: &Block<'c>,

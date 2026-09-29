@@ -22,19 +22,19 @@ use raw::{check_hadamard, check_raw_formats};
 fn main() -> Result<()> {
     let gpu = device::DeviceBackend::new()?;
     let host = HostBackend::new();
-    // Cells rather than plain locals so the two checkers below can both hold
-    // them; a closure that captured them by mutable reference would lock the
-    // other one out.
+    // Cells so that every checker closure below can update them.
     let worst = std::cell::Cell::new(0.0f32);
     let failures = std::cell::Cell::new(0u32);
 
-    // The one thing device-against-host cannot judge: see `check_matmul_raw`.
+    // Switches for the device paths that quantize their activation, which the
+    // host cannot judge. See `check_matmul_raw`.
     let set_dp4a = |on: bool| gpu.set_iq_dp4a(on);
     let set_qmma = |on: bool| gpu.set_raw_qmma(on);
 
-    /// The largest gap as a fraction of the output's own spread. A per-element
-    /// relative error is misleading here: random weights make a matvec's
-    /// outputs cancel toward zero, but the spread does not move with it.
+    /// The largest gap as a fraction of the spread of `want`.
+    ///
+    /// Random weights make matvec outputs cancel toward zero, so a
+    /// per-element relative error would mislead.
     fn spread_error(want: &[f32], got: &[f32]) -> f32 {
         let (lo, hi) = want
             .iter()
@@ -47,9 +47,8 @@ fn main() -> Result<()> {
         gap / (hi - lo).max(f32::MIN_POSITIVE)
     }
 
-    // Loose next to the 1e-3 the float path holds, deliberately: it bounds a
-    // documented approximation, not a layout mistake, which would be orders
-    // of magnitude worse.
+    // Looser than the float path's 1e-3, since it bounds a known
+    // approximation. A layout mistake would be orders of magnitude worse.
     let check_spread = |name: &str, want: &[f32], got: &[f32]| {
         let error = spread_error(want, got);
         worst.set(worst.get().max(error));
@@ -91,9 +90,9 @@ fn main() -> Result<()> {
     // The default tolerance for ops without their own.
     let check = |name: &str, want: &[f32], got: &[f32]| check_within(name, 1e-4, want, got);
 
-    // Tensor-core matmul rounds inputs to fp16, so error is relative to the
-    // dot's RMS magnitude sqrt(K)/3 rather than to want (see
-    // phobos-kbench/src/gemm.rs's verify_matmul).
+    // Tensor-core matmul rounds inputs to fp16, so the error is relative to
+    // the dot's RMS magnitude, sqrt(K)/3. Same rule as `verify_matmul` in
+    // phobos-kbench/src/gemm.rs.
     let check_tc = |name: &str, k: usize, want: &[f32], got: &[f32]| {
         let floor = (k as f32).sqrt() / 3.0;
         let error = want
@@ -148,8 +147,8 @@ fn main() -> Result<()> {
         .collect();
     println!("     rms_norm rows disagreeing: {bad_rows:?}");
 
-    // Checks the normalized rows and the int8 copy read back through a Q8_0
-    // projection, at this width and the 27B's.
+    // `rms_norm_q`: the normalized rows, and the int8 copy read back through
+    // a Q8_0 projection. At this width and the 27B's.
     for width_q in [1024usize, 5120] {
         let x: Vec<f32> = (0..rows * width_q).map(|_| next() * 4.0).collect();
         let gain: Vec<f32> = (0..width_q).map(|_| next() + 1.5).collect();
@@ -181,9 +180,9 @@ fn main() -> Result<()> {
     };
     check("add_into [3072]", &run_add(&host)?, &run_add(&gpu)?);
 
-    // At the FFN width and a length that is not a tile multiple. The offsets
-    // are how the fused gate-and-up projection is read back: the two halves
-    // share one buffer, so `at` walks the second one forward.
+    // At the FFN width and at a length that is not a tile multiple. A nonzero
+    // `at` reads the second half of a shared buffer, as the fused
+    // gate-and-up projection does.
     for (len, at) in [(rows * 3584, 0), (1000, 0), (1024, 1024)] {
         let g: Vec<f32> = (0..len + at).map(|_| next()).collect();
         let u: Vec<f32> = (0..len + at).map(|_| next()).collect();
@@ -197,9 +196,9 @@ fn main() -> Result<()> {
         check(&format!("swiglu [{len} @ {at}]"), &run(&host)?, &run(&gpu)?);
     }
 
-    // What a prompt pass takes: the gate and up halves interleave in the fused
-    // projection's output, so both are strided. 3584 is a whole row per
-    // program; 4608 overruns the static shared memory a kernel gets.
+    // The prompt-pass form: gate and up interleave in the fused projection's
+    // output, so both are strided. At 3584 one program holds a whole row;
+    // 4608 overruns a kernel's static shared memory.
     for ffn in [3584usize, 4608] {
         let both: Vec<f32> = (0..rows * 2 * ffn).map(|_| next()).collect();
         let run = |b: &dyn Backend| -> Result<Vec<f32>> {
@@ -304,15 +303,14 @@ fn main() -> Result<()> {
         );
     }
 
-    // The delta rule carries most of the model's blocks. Its state matters as
-    // much as its output: a decay that is slightly wrong shows up in the
-    // state before it shows up in one position's readout.
+    // The delta rule, checked on its state as well as its output. A slightly
+    // wrong decay shows in the state before it shows in the output.
     for (rows, heads, head_dim) in [
         (1usize, 16usize, 128usize),
         (7, 16, 128),
         (64, 4, 32),
-        // Prompt depths, where the recurrence runs far enough for the f32
-        // accumulation to separate the two backends.
+        // Prompt depths, where f32 accumulation order starts to separate the
+        // two backends.
         (48, 16, 128),
         (47, 16, 128),
     ] {
@@ -339,9 +337,8 @@ fn main() -> Result<()> {
         };
         let (host_out, host_state) = run(&host)?;
         let (gpu_out, gpu_state) = run(&gpu)?;
-        // f32 accumulation order differs from the host's over many rows,
-        // which needs a looser tolerance than the default at this depth. A
-        // layout mistake is orders of magnitude worse than either.
+        // Accumulation order differs from the host's over many rows, so this
+        // needs a looser tolerance than the default.
         check_within(
             &format!("delta_rule [{rows} x {heads} x {head_dim}]"),
             3e-4,
@@ -356,8 +353,7 @@ fn main() -> Result<()> {
         );
     }
 
-    // The quantized kernel is the one decoding actually runs, so it carries
-    // the model.
+    // The Q8_0 matmul, which decode runs.
     for (m, k, n) in [
         (1usize, 1024usize, 2048usize),
         (1, 1024, 16),
@@ -366,25 +362,25 @@ fn main() -> Result<()> {
         (1, 3584, 1024),
         (1, 2048, 1024),
         (2, 1024, 512),
-        // From 8 rows up the tensor-core kernel takes over, so these cover the
+        // From 8 rows the tensor-core kernel takes over. These cover the
         // seam: an exact tile, one row short of two, one row past, and an n
         // that does not tile.
         (8, 1024, 512),
         (15, 1024, 512),
         (17, 1024, 512),
         (128, 1024, 2048),
-        // A width no 64-wide tile divides but a 48-wide one does: the delta
-        // net's alpha/beta projections, one block unsplit, so split-K.
-        // Checked at k=1024 rather than the model's 5120 to stay inside the
-        // 1e-3 bound.
+        // A width a 48-wide tile divides but no 64-wide one: the delta net's
+        // alpha/beta projections, which run split-K. k is 1024 rather than
+        // the model's 5120 to stay inside the 1e-3 bound.
         (128, 1024, 48),
         (8, 1024, 40),
         (33, 1024, 33),
-        // From 64 rows up the fused tensor-core kernel takes over, and it hands
-        // what it cannot tile to the two below it. These cover that seam: an
-        // exact tile, one short, and one that leaves all three kernels
-        // something (64 + 32 + 5). The last two have an n the 64-wide column
-        // tile does not divide, so no row of them may reach the fused kernel.
+        // From 64 rows the fused tensor-core kernel takes over and passes
+        // what it cannot tile to the two kernels below it. These cover that
+        // seam: an exact tile, one short, and 101 = 64 + 32 + 5, which gives
+        // all three kernels rows. The last two have an n the 64-wide column
+        // tile does not divide, so none of their rows may reach the fused
+        // kernel.
         (64, 1024, 512),
         (63, 1024, 512),
         (101, 1024, 512),
@@ -402,10 +398,9 @@ fn main() -> Result<()> {
             b.matmul_quant(ab, m, k, wb, n, out)?;
             read_vec(b, out, m * n)
         };
-        // Looser than the dense ops on purpose: quantized sums run to a few
-        // thousand, and the kernel sums by 32-element block where the
-        // reference uses one flat accumulator over all of k. `q8diag` shows
-        // the kernel is the more accurate of the two.
+        // Looser than the dense ops. Quantized sums reach a few thousand, and
+        // the kernel sums per 32-element block where the reference uses one
+        // flat accumulator. `q8diag` shows the kernel is the more accurate.
         check_within(
             &format!("matmul_quant [{m} x {k} x {n}]"),
             1e-3,
@@ -414,10 +409,10 @@ fn main() -> Result<()> {
         );
     }
 
-    // matmul_raw for every raw-kernel format: random weight bytes through
-    // the device's decode-in-kernel path and the host's dense fallback
-    // (`Packed::dense`). `d`/`dmin` are built from small positive floats
-    // rather than random bits to avoid hitting the f16 Inf/NaN exponent.
+    // `matmul_raw` for every raw-kernel format: random weight bytes through
+    // the device's in-kernel decode and the host's dense fallback
+    // (`Packed::dense`). `d`/`dmin` are small positive floats, not random
+    // bits, so they are never f16 Inf or NaN.
     check_raw_formats(
         &host,
         &gpu,
@@ -429,10 +424,9 @@ fn main() -> Result<()> {
         &mut next,
     )?;
 
-    // The convolution feeding the delta rule, in both fused layouts. The decode
-    // shape is the one to watch: at a single row the carried positions are most
-    // of the input, so an off-by-one in the padding still produces a plausible
-    // number.
+    // The convolution feeding the delta rule, in both fused layouts. Watch the
+    // one-row shapes: there the carried positions are most of the input, so a
+    // padding off-by-one still gives a plausible number.
     for (rows, heads, kv_heads, head_dim, interleaved, normalize) in [
         (1usize, 16usize, 16usize, 128usize, false, true),
         (7, 16, 16, 128, false, true),
@@ -504,9 +498,9 @@ fn main() -> Result<()> {
         let rate: Vec<f32> = (0..heads).map(|_| -next().abs()).collect();
         let bias: Vec<f32> = (0..heads).map(|_| next()).collect();
         let zeros = vec![0.0f32; mix.packed_len()];
-        // Both gates come out of one stacked projection, so they arrive as
-        // windows of a buffer rather than buffers; the decay sits second here so
-        // its offset is not zero either.
+        // Both gates come from one stacked projection, so they arrive as
+        // windows of one buffer. The decay sits second so its offset is
+        // nonzero.
         let stacked: Vec<f32> = beta.iter().chain(&alpha).copied().collect();
         let run = |b: &dyn Backend| -> Result<Vec<f32>> {
             let both = b.upload(&stacked)?;
@@ -523,9 +517,8 @@ fn main() -> Result<()> {
         );
     }
 
-    // The ragged totals matter: the scan covers whole key tiles and then
-    // picks up the last few one at a time, so a total that is a multiple of
-    // the tile exercises a different path from one that is not.
+    // Attention. The scan covers whole key tiles, then the rest one key at a
+    // time, so totals on and off a tile multiple take different paths.
     for (rows, start_pos, n_head, n_kv, head_dim) in [
         (1usize, 0usize, 16usize, 8usize, 128usize),
         (1, 63, 16, 8, 128),
@@ -540,17 +533,17 @@ fn main() -> Result<()> {
         (64, 0, 8, 4, 256),
         (29, 0, 8, 4, 256),
         (1, 40, 8, 4, 256),
-        // Decoding deep enough that the key axis is split several ways and one
-        // piece has a partial key tile, which is what the merge pass has to
-        // rescale correctly. The last one is shorter than the split count, so
-        // most pieces see no keys at all.
+        // Decode deep enough that the key axis is split several ways, with
+        // one piece holding a partial key tile that the merge pass must
+        // rescale. The last is shorter than the split count, so most pieces
+        // see no keys at all.
         (1, 300, 8, 4, 256),
         (1, 511, 8, 4, 256),
         (1, 3, 8, 4, 256),
-        // A prompt whose rows, cache and head dimension all tile by 64, which
-        // is what the matmul path needs: into an empty cache, onto one that is
-        // already a whole number of tiles deep, and a block that is exactly one
-        // tile. The 96-row case tiles by 32 but not 64 and must not take it.
+        // Prompts whose rows, cache and head dimension all tile by 64, as the
+        // matmul path needs: into an empty cache, onto a cache a whole number
+        // of tiles deep, and exactly one tile. The 96-row case tiles by 32
+        // but not 64 and must not take that path.
         (128, 0, 8, 4, 256),
         (128, 64, 8, 4, 256),
         (64, 0, 8, 4, 256),
@@ -575,9 +568,9 @@ fn main() -> Result<()> {
         let q: Vec<f32> = (0..rows * n_head * head_dim).map(|_| next()).collect();
         let k: Vec<f32> = (0..cached).map(|_| next()).collect();
         let v: Vec<f32> = (0..cached).map(|_| next()).collect();
-        // The caches go up the way a block fills one, through the projection's
-        // f32 landing and the narrowing store, so both backends round the same
-        // values the same way and what is left to compare is the arithmetic.
+        // Fill the caches as a block does, through f32 and the narrowing
+        // store. Both backends then round the same way, and only the
+        // arithmetic is compared.
         let cache = |b: &dyn Backend, data: &[f32]| -> Result<HBuf> {
             let width = spec.kv_width();
             let dense = b.upload(data)?;
@@ -636,12 +629,11 @@ fn main() -> Result<()> {
         );
     }
 
-    // A strided window of a fused QKV buffer, offset past other heads sharing
-    // the same physical row: what `llama.rs::attention` hands this op for K
-    // (any row count) and for Q past one row. One shape has no passthrough
-    // range (rope_dim == head_dim, minicpm's); the other does (rope_dim <
-    // head_dim, Qwen's), whose own forward pass never calls this op -- this
-    // is the only place that path is checked.
+    // A strided window of a fused QKV buffer, offset past other heads in the
+    // same row. `llama.rs::attention` passes this for K, and for Q past one
+    // row. The first shape has rope_dim == head_dim, as minicpm does. The
+    // second has a passthrough range, as Qwen does; Qwen's forward pass never
+    // calls this op, so this is the only check of that path.
     for (rows, heads, head_dim, rope_dim, stride_heads, slot, start_pos) in [
         (5usize, 2usize, 32usize, 32usize, 8usize, 4usize, 10usize),
         (9, 4, 64, 32, 8, 4, 0),
@@ -710,11 +702,9 @@ fn main() -> Result<()> {
             &run(&gpu)?,
         );
 
-        // The same block into a cache, which rounds it. Checked standalone
-        // rather than only through attention, since a wrong rounding here
-        // would otherwise look like arithmetic noise once it reaches the
-        // comparison. The bar is equality: `f32::MIN_POSITIVE` as tolerance
-        // is how that is said to a checker built for approximate answers.
+        // The same block into an f16 cache. Checked on its own, since a
+        // rounding bug would look like noise inside attention. The bar is
+        // equality, which `f32::MIN_POSITIVE` expresses to this checker.
         let store = |b: &dyn Backend| -> Result<Vec<f32>> {
             let sb = b.upload(&src)?;
             let db = b.alloc_h(rows * width)?;
@@ -756,8 +746,8 @@ fn main() -> Result<()> {
         check("gate_into", &run(&host)?, &run(&gpu)?);
     }
 
-    // Checks added since the ones above draw from the same stream, so they
-    // go last: anything earlier would change every later check's data.
+    // New checks go last. They draw from the same random stream, so one
+    // inserted earlier would change every later check's data.
     {
         // A delta net's gate projections, one program unsplit.
         let (k, n) = (5120, 48);

@@ -3,15 +3,15 @@
 use crate::harness::*;
 use crate::*;
 
-/// Flash attention: O = softmax(scale * Q @ K.T) @ V, softmax taken row-wise
-/// over the Nk keys. A full reference is Nq*Nk*D work, so this spot-checks a
-/// sample of output elements against an f64 reference that replays the
-/// kernel's own online-softmax recurrence, differing only in precision.
+/// Flash attention: O = softmax(scale * Q @ K.T) @ V, softmax row-wise over
+/// the Nk keys. Spot-checks a sample of output elements against an f64
+/// replay of the kernel's online-softmax recurrence, since a full reference
+/// would cost Nq*Nk*D.
 ///
-/// Each output is a convex combination of the V rows, bounded by max|V| ~ 1,
-/// so error is normalized by max(|want|, 0.1) rather than a plain relative
-/// test. The @tensorcore path additionally rounds scores and P @ V through
-/// fp16 fragments, hence the looser fp16-grade 2e-2 tolerance.
+/// Each output is a convex combination of V rows, bounded by max|V| ~ 1, so
+/// error is normalized by max(|want|, 0.1). The @tensorcore path rounds
+/// scores and P @ V through fp16 fragments, hence the fp16-grade 2e-2
+/// tolerance.
 #[allow(non_snake_case)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn verify_flash_attention(
@@ -76,8 +76,7 @@ pub(crate) fn bench_flash_attention_fp32(
     let kernels = phobos_lang::parse(CODE_FLASH)?;
     let space = autotune::pin(phobos_lang::search_space(&kernels[0]), pins)?;
 
-    // D is pinned to 64 by the kernel's @autotune(D in [64]); must match the
-    // tensors' head-dim.
+    // Must match the kernel's @autotune(D in [64]).
     let Nq: i32 = 4096;
     let Nk: i32 = 4096;
     let D: i32 = 64;
@@ -107,13 +106,13 @@ pub(crate) fn bench_flash_attention_fp32(
         o_dev.as_device_ptr(),
     );
 
-    // Must launch the block size @launch compiled for (.maxntid); more is a
+    // Must match the kernel's @launch thread count (.maxntid); more is a
     // hard error.
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // @tensorcore compiles at 64-bit index (the default mma.sync path), widening
-    // the memref descriptor; host metadata must match. The dots still run on
-    // legacy WMMA via wmma_dot, but the kernel attr forces the wide index regardless.
+    // @tensorcore compiles at 64-bit index, so the host's memref descriptors
+    // must be 64-bit too. That holds even though the dots here run on WMMA
+    // via wmma_dot.
     let wide = phobos_lang::requires_wide_index(&kernels);
 
     let mut tuner = autotune::Autotuner {
@@ -127,8 +126,7 @@ pub(crate) fn bench_flash_attention_fp32(
             Ok(autotune::Grid(Nq as u32 / br, 1))
         },
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
-            // Each tensor is a memref<?x64>; the kernel writes all of O, so no
-            // memset.
+            // The kernel writes all of O, so no memset.
             let func = module.get_function("flash_attention")?;
             launch_flash(
                 &func,
@@ -193,10 +191,9 @@ pub(crate) fn bench_flash_attention_fp32(
 }
 
 /// Half-precision flash attention benchmark (examples/flash_attention_fp16.ph):
-/// fp16 Q/K/V/O with an f32 online-softmax state, both matmuls on the tensor
-/// cores. Inputs/outputs live on the device as fp16 (u16 bit patterns). The
-/// reference replays the recurrence in f64 over the fp16-rounded inputs, so the
-/// fp16-grade 2e-2 tolerance from the f32 tensor-core path applies.
+/// fp16 Q, K, V, O with an f32 online-softmax state, both matmuls on the
+/// tensor cores. The reference replays the recurrence in f64 over the
+/// fp16-rounded inputs, at the same 2e-2 tolerance.
 #[allow(non_snake_case)]
 pub(crate) fn bench_flash_attention_fp16(
     stream: &cust::stream::Stream,
@@ -242,8 +239,8 @@ pub(crate) fn bench_flash_attention_fp16(
 
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // @tensorcore compiles at 64-bit index (the default mma.sync path); the host
-    // descriptor metadata must match (see bench_flash_attention_fp32).
+    // @tensorcore compiles at 64-bit index, so the host's memref descriptors
+    // must be 64-bit too.
     let wide = phobos_lang::requires_wide_index(&kernels);
 
     let mut tuner = autotune::Autotuner {

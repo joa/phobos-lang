@@ -80,8 +80,7 @@ impl BpeTokenizer {
         eog.sort_unstable();
 
         Ok(BpeTokenizer {
-            // Nothing in the files names a pre-tokenizer; every export seen so
-            // far wants GPT-2's.
+            // Nothing in the files names a pre-tokenizer, so assume GPT-2's.
             bpe: ByteBpe::new(PreTokenizer::Gpt2, merges)?,
             encoder,
             decoder,
@@ -138,10 +137,10 @@ impl phobos_inference::Tokenizer for BpeTokenizer {
 mod tests {
     use super::*;
 
-    /// The GPT-2 tokenizer beside the zoo export, when it is there. The model
+    /// The GPT-2 tokenizer beside the zoo export, if present. The model
     /// directories are not in the repository, so a checkout without one skips
-    /// the tests that need a real vocabulary instead of failing them. A pair
-    /// that is present but unreadable still fails, loudly.
+    /// the tests that need a real vocabulary. A pair that is present but
+    /// unreadable still fails.
     ///
     /// See `models/README.md` for how the files get there.
     fn gpt2() -> Option<BpeTokenizer> {

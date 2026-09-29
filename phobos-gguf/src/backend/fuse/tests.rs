@@ -1,9 +1,7 @@
 use super::*;
 use crate::backend::{DeltaMix, FusedMix, ProjRun, ProjWeight};
 
-/// Qwen3.5-0.8B's MLP on the grid the card settles at. The one barrier
-/// lands after the SwiGLU, since the down projection needs the whole
-/// hidden row and a block only wrote a run of 32 of it.
+/// Qwen3.5-0.8B's MLP at 192 blocks.
 fn qwen_plan() -> Plan {
     let chain = mlp_chain(Buf(0), Buf(1), QBuf(0), QBuf(1), 1024, 3584, 1e-6);
     chain
@@ -13,9 +11,9 @@ fn qwen_plan() -> Plan {
         .expect("a shape the pass fuses")
 }
 
-/// Qwen3.5-0.8B's delta-net input: block normalization plus the stacked
-/// qkv projection, output gate, decay and write strength. `mix` continues
-/// into the convolution and gates reading that projection.
+/// Qwen3.5-0.8B's delta-net input: normalization plus the stacked qkv,
+/// output gate, decay and write strength projection. `mix` adds the
+/// convolution and gates.
 fn qwen_project_plan(mix: bool) -> Plan {
     let (channels, carried, gates) = (6144, 3 * 6144, 2048 + 2 * 16);
     let runs = [
@@ -56,8 +54,8 @@ fn qwen_project_plan(mix: bool) -> Plan {
             spec,
             history: Buf(2),
             taps: Buf(4),
-            // The decay and write strength sit at the tail of the second
-            // run, the output gate taking the 2048 ahead of them.
+            // The decay and write strength follow the 2048-wide output gate
+            // in the second run.
             decay: (Buf(3), channels + 2048),
             beta: (Buf(3), channels + 2048 + 16),
             rate: Buf(5),
@@ -73,9 +71,8 @@ fn qwen_project_plan(mix: bool) -> Plan {
         .expect("a shape the pass fuses")
 }
 
-/// Prints the emitted kernel, so it can be fed to
-/// `cargo run -p phobos-lang --example emit` when the generated source is
-/// what is under suspicion.
+/// Prints the emitted kernels, for feeding to
+/// `cargo run -p phobos-lang --example emit`.
 ///
 ///     cargo test -p phobos-gguf fused_source -- --nocapture --ignored
 #[test]
@@ -88,8 +85,7 @@ fn fused_source() {
         ("fused_qwen4b_mlp", qwen_4b_plan()),
         ("fused_qwen4b_project", qwen_4b_project_plan()),
     ];
-    // PHOBOS_DUMP_DIR writes each as a `.ph` beside the raw-format dump, so
-    // the emit sweep covers the fused kernels too.
+    // With PHOBOS_DUMP_DIR set, each is also written there as a `.ph`.
     let dir = std::env::var("PHOBOS_DUMP_DIR").ok().map(std::path::PathBuf::from);
     for (name, plan) in plans {
         println!("{}", plan.source);
@@ -105,9 +101,9 @@ fn the_mlp_chain_needs_exactly_one_barrier() {
     let plan = qwen_plan();
     assert_eq!(plan.barriers, 1);
     assert_eq!(plan.source.matches("grid_barrier").count(), 1);
-    // And in one place: after the SwiGLU's quantization, since the down
-    // projection needs the whole hidden row. The normalization is
-    // redundant, so its output crosses no barrier.
+    // It sits after the SwiGLU's quantization, since the down projection
+    // reads the whole hidden row. The normalization is redundant, so it
+    // needs none.
     let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
     assert!(before.contains("rms_norm_q_t("), "the normalization comes first");
     assert!(before.contains("exp(-v1)"), "the SwiGLU comes first");
@@ -117,12 +113,11 @@ fn the_mlp_chain_needs_exactly_one_barrier() {
 #[test]
 fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     let plan = qwen_plan();
-    // The SwiGLU's quantized row, which the down projection contracts over
-    // the whole of, so a block reads what other blocks wrote.
+    // The SwiGLU's quantized row, read whole by the down projection.
     assert_eq!(plan.scratch.len(), 1);
     assert_eq!(plan.scratch[0].bytes, 3584);
     assert_eq!(plan.scratch[0].scales, 112);
-    // And the normalized row, held per block instead of published 192 times.
+    // The normalized row is held in shared memory per block.
     assert_eq!(plan.held, 1);
     assert_eq!(plan.source.matches("flat(").count(), 2);
     assert!(
@@ -131,8 +126,8 @@ fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     );
 }
 
-/// A held value lives in shared memory, so it does not multiply with the
-/// block count the way a published one does.
+/// A held value lives in shared memory, so its size does not depend on the
+/// block count.
 #[test]
 fn the_held_row_does_not_scale_with_the_grid() {
     let at = |blocks: u32| {
@@ -157,8 +152,7 @@ fn the_held_row_does_not_scale_with_the_grid() {
     assert_eq!(small[0].bytes, large[0].bytes);
 }
 
-/// The residual is read folded and accumulated into flat, so it is bound
-/// twice under two shapes.
+/// The residual is read folded and accumulated flat, so it is bound twice.
 #[test]
 fn the_residual_is_bound_under_both_views() {
     let plan = qwen_plan();
@@ -171,17 +165,15 @@ fn the_residual_is_bound_under_both_views() {
     assert_eq!(x, vec![[32, 32], [1, 1024]]);
 }
 
-/// A mixer's projection costs no barrier at all: the normalization ahead of
-/// it is redundant, and the runs are independent nests writing disjoint
-/// windows of buffers nothing in the chain reads back.
+/// A mixer's projection needs no barrier. The normalization is redundant
+/// and the runs write disjoint windows that nothing in the chain reads back.
 #[test]
 fn the_mixer_projection_needs_no_barrier() {
     let plan = qwen_project_plan(false);
     assert_eq!(plan.barriers, 0);
     assert!(!plan.source.contains("grid_barrier"));
-    // And with no barrier, nothing at all has to be published: the one value
-    // the chain passes between its nests is the normalized row, which every
-    // block wrote for itself and reads from shared.
+    // Nothing is published. The only value passed between nests is the
+    // normalized row, held in shared memory.
     assert!(plan.scratch.is_empty());
     assert_eq!(plan.held, 1);
 }
@@ -195,16 +187,16 @@ fn a_run_is_bound_only_as_far_as_it_writes() {
         .filter(|s| matches!(s.bound, Bound::Given(v) if v.0 > 1))
         .map(|s| s.dims)
         .collect();
-    // The convolution's stream, up to the end of the fresh position, and the
-    // stacked projection up to the end of the write strength. Neither says
-    // how large the caller's buffer is.
+    // The stream up to the end of the new position, and the stacked
+    // projection up to the end of the write strength. Neither is the
+    // caller's full buffer size.
     assert_eq!(given, vec![[1, 4 * 6144], [1, 6144 + 2080]]);
     assert!(plan.source.contains("DO1 in [18432]"));
     assert!(plan.source.contains("OF2 in [6144], DO2 in [6144]"));
 }
 
-/// The gates share the convolution's nest because they take the same unit
-/// count, so the barrier it already forced covers their read too.
+/// The gates share the convolution's nest, so the convolution's barrier
+/// covers them too.
 #[test]
 fn the_convolution_costs_one_barrier_and_the_gates_none() {
     let plan = qwen_project_plan(true);
@@ -212,19 +204,15 @@ fn the_convolution_costs_one_barrier_and_the_gates_none() {
     let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
     assert!(before.contains("qdot_t"), "the projection comes first");
     assert!(!before.contains("rowsum(y"), "the convolution comes after");
-    // Both stages after it, and inside the same grid-strided loop rather
-    // than one each.
     assert!(after.contains("rowsum(y3"), "the convolution");
     assert!(after.contains("exp(X6["), "the gates");
-    // One nest, which is the whole reason the gates are free: a nest of their
-    // own would read across blocks and want a barrier of its own.
+    // Both in one grid-strided loop.
     assert_eq!(after.matches("in range(0, IT").count(), 1);
     assert!(after.contains("UN3 in [48]") || plan.source.contains("UN3 in [48]"));
 }
 
-/// The convolution reads the stream position the projection wrote, and the
-/// pass sees that only because both name one value. Splitting them is a
-/// latent miscompile the gates' own barrier happens to mask here.
+/// The convolution reads what the projection wrote to the stream. The pass
+/// sees that dependency only if both name one value.
 #[test]
 fn the_stream_is_one_value_under_two_shapes() {
     let plan = qwen_project_plan(true);
@@ -234,14 +222,13 @@ fn the_stream_is_one_value_under_two_shapes() {
         .filter(|s| matches!(s.bound, Bound::Given(v) if v == Val(2)))
         .map(|s| s.dims)
         .collect();
-    // Flat, which is where the projection writes its run, and by position,
-    // which is how the convolution walks its taps.
+    // Flat for the projection's write, by position for the convolution's
+    // taps.
     assert_eq!(stream, vec![[1, 24576], [4, 6144]]);
 }
 
-/// And the stream alone is enough: a convolution with no gates behind it
-/// still cannot be shown to read its own block's work, because a head's row
-/// spans four of the projection's units however the two are partitioned.
+/// A convolution without gates still needs the barrier, because a head's
+/// row spans several of the projection's units.
 #[test]
 fn the_convolution_alone_still_costs_the_barrier() {
     let (channels, carried) = (6144, 3 * 6144);
@@ -285,9 +272,8 @@ fn the_convolution_alone_still_costs_the_barrier() {
     assert_eq!(plan.barriers, 1);
 }
 
-/// The gates go where the delta rule reads them: after the three planes, the
-/// decay then the write strength. An offset wrong here is a plausible-looking
-/// model that decays by a stale number.
+/// The gates go where the delta rule reads them: after the three planes,
+/// the decay then the write strength.
 #[test]
 fn the_gates_land_behind_the_planes() {
     let plan = qwen_project_plan(true);
@@ -300,18 +286,15 @@ fn the_gates_land_behind_the_planes() {
         "X5[0 :+ 1, {} + u3 :+ 1] = 1.0 /",
         3 * span + heads
     )));
-    // And the planes ahead of them. At one position a plane is exactly
-    // `heads` rows, so the unit index *is* the packed row and the three
-    // planes need no offset of their own.
+    // At one position a plane is exactly `heads` rows, so the unit index is
+    // the packed row and the planes need no offset.
     assert!(plan.source.contains("X5[0 :+ 1, u3 * 128 :+ HD3]"));
     assert_eq!(span, heads * 128);
 }
 
 /// Only the query carries the readout scale, and only the query and key are
-/// normalized: the value feeds the recurrent state rather than being
-/// matched against it. The gain branches on the plane, which is uniform
-/// across the CTA, since a divergent branch under the row-wide reduction
-/// would hang.
+/// normalized. The gain branches on the plane, which is uniform across the
+/// CTA.
 #[test]
 fn only_the_query_and_key_are_normalized() {
     let plan = qwen_project_plan(true);
@@ -331,16 +314,14 @@ fn only_the_query_and_key_are_normalized() {
         gains[1],
         "g3 = 1.0 / sqrt(rowsum(y3 * y3) + 0.000000000001)"
     );
-    // Guarded on the plane, not on the head, and defaulted to 1.0 so the
-    // value plane falls through.
+    // Guarded on the plane, with 1.0 as the value plane's default.
     assert!(plan.source.contains("if pl3 == 0 {"));
     assert!(plan.source.contains("if pl3 == 1 {"));
     assert!(plan.source.contains("var g3: tile<f32>[1, 1] = 1.0"));
 }
 
-/// More than one position is a different convolution: the taps then walk a
-/// window per position rather than the whole stream, and the packed planes
-/// are strided. The pass declines rather than emitting the decode shape.
+/// More than one position is declined; the pass only emits the decode
+/// shape.
 #[test]
 fn a_prompt_pass_is_not_recorded() {
     let (channels, carried) = (6144, 3 * 6144);
@@ -383,9 +364,7 @@ fn a_prompt_pass_is_not_recorded() {
     assert!(project_chain(&project).is_none());
 }
 
-/// A run that does not divide into whole Q8_0 output blocks has no unit
-/// count, so the chain cannot even be recorded and the caller keeps its own
-/// projection and copy.
+/// A run that is not whole Q8_0 output blocks is not recorded.
 #[test]
 fn a_ragged_run_is_not_recorded() {
     let runs = [ProjRun {
@@ -407,17 +386,14 @@ fn a_ragged_run_is_not_recorded() {
     assert!(project_chain(&project).is_none());
 }
 
-/// A row that is not whole Q8_0 blocks is declined rather than mis-emitted,
-/// which leaves the caller running the four stages itself.
+/// A row that is not whole Q8_0 blocks is declined.
 #[test]
 fn an_unfoldable_width_is_declined() {
     let chain = mlp_chain(Buf(0), Buf(1), QBuf(0), QBuf(1), 1040, 3584, 1e-6);
     assert!(chain.key(192).plan().expect("well-formed").is_none());
 }
 
-/// A register value read outside the nest that wrote it has nowhere to live,
-/// so the pass declines instead of emitting a kernel that reads a stale
-/// tile.
+/// A register value read outside the nest that wrote it is declined.
 #[test]
 fn a_register_crossing_a_nest_is_declined() {
     let mut chain = Chain::default();
@@ -434,8 +410,7 @@ fn a_register_crossing_a_nest_is_declined() {
         units: 112,
         row_off: 0,
     });
-    // A second nest, since the unit count differs, reading the first's
-    // register output.
+    // A different unit count starts a second nest.
     let up = chain.temp(Q8_BLOCK);
     chain.push(Stage::ProjQ {
         a: act,
@@ -454,7 +429,7 @@ fn a_register_crossing_a_nest_is_declined() {
 }
 
 /// Qwen3.5-4B-Q4_K_M's MLP: gate and up as separate Q4_K weights, the down
-/// projection Q6_K, on the grid the card settles at.
+/// projection Q6_K, at 192 blocks.
 fn qwen_4b_plan() -> Plan {
     let chain = mlp_chain_raw(
         Buf(0),
@@ -481,18 +456,18 @@ fn the_raw_mlp_decodes_each_weight_with_its_own_intrinsic() {
     let src = &plan.source;
     assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 2, "gate and up");
     assert_eq!(src.matches("+= q6k_qdot_i8_t(").count(), 1, "the down projection");
-    // The raw weights come in as their block bytes and `d` plane, the 4B's
-    // 2560-wide row being ten blocks of 144 bytes and 9216 thirty-six of 208.
+    // Block bytes and `d` plane. A 2560-wide row is ten Q4_K blocks of 144
+    // bytes; a 9216-wide row is 36 Q6_K blocks of 208.
     assert!(src.contains("Rq3: tensor<i8>[9216, 1440]"), "{src}");
     assert!(src.contains("Rd3: tensor<f16>[9216, 10]"), "{src}");
     assert!(src.contains("Rq9: tensor<i8>[2560, 7488]"), "{src}");
     assert!(src.contains("Rd9: tensor<f16>[2560, 36]"), "{src}");
-    // A unit is a run of 64 hidden values, two Q8_0 blocks, each quantized
-    // and stored on its own row.
+    // A unit is 64 hidden values, two Q8_0 blocks, each quantized and
+    // stored on its own row.
     assert!(src.contains("[0 :+ 1, 0 :+ 32]"), "{src}");
     assert!(src.contains("[0 :+ 1, 32 :+ 32]"), "{src}");
     assert!(src.contains("* 2 + 1 :+ 1, 0 :+ 32]"), "{src}");
-    // Two CTAs an SM: the bound the intrinsics ship at spills here.
+    // Two CTAs per SM with a raw decode.
     assert!(src.starts_with("@launch(256, 2)"), "{src}");
 }
 
@@ -524,9 +499,9 @@ fn the_raw_mlp_is_declined_for_a_format_without_a_fused_decode() {
 
 /// The 4B's delta-net projection: `attn_qkv` Q5_K and `attn_gate` Q4_K as
 /// raw weights, `ssm_alpha` and `ssm_beta` as Q8_0, into the history and
-/// one stacked buffer of gate operands. Its 16 key heads against 32 value
-/// heads keep the convolution and gates launched, so the chain is the
-/// projection alone.
+/// one stacked buffer of gate operands. The projection only: with 16 key
+/// heads and 32 value heads the convolution and gates stay separate
+/// launches.
 fn qwen_4b_project_plan() -> Plan {
     let (channels, carried) = (8192, 3 * 8192);
     let weights = [
@@ -572,9 +547,8 @@ fn the_split_projection_mixes_raw_and_q8_weights() {
     assert!(src.contains("UN2 in [64]"), "{src}");
 }
 
-/// A raw run 64 does not divide finishes with a unit of its remainder,
-/// which decodes a whole unit into the upload's row padding and stores
-/// its head.
+/// A raw run not divisible by 64 ends with a remainder unit. It decodes a
+/// whole unit, reading the upload's row padding, and stores only its head.
 #[test]
 fn a_ragged_raw_run_stores_its_remainder() {
     let weights = [(ProjWeight::Raw(RawBuf(0), Quant::Q4_K), 96)];

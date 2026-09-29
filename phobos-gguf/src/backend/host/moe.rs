@@ -1,9 +1,8 @@
 // The host reference's mixture-of-experts feed-forward.
 //
-// Experts stay in their file bytes and are decoded one at a time into a
-// scratch as a row chooses them: held dense the way the trunk's weights are,
-// a model's experts would take four bytes a weight of host memory, several
-// times what the file does.
+// Experts stay in their file encoding and are decoded one at a time into a
+// scratch as a row picks them. Holding them as f32 would take several times
+// the file's size in host memory.
 
 use std::sync::Arc;
 
@@ -53,8 +52,7 @@ impl HostBackend {
             req.n_expert
         );
 
-        // Inputs copied out first, so the destination can be taken for
-        // writing without aliasing any of them.
+        // Copy the inputs out so the destination can be borrowed for writing.
         let (x, logits, shared) = {
             let slabs = self.slabs.borrow();
             let take = |buf: crate::backend::Buf, len: usize, what: &str| -> Result<Vec<f32>> {
@@ -69,7 +67,7 @@ impl HostBackend {
             (take(req.x, rows * d, "input")?, take(req.logits, rows * req.n_expert, "router logits")?, shared)
         };
 
-        // Gate, up and down in turn through one dense scratch.
+        // Gate, up and down are decoded in turn into one dense scratch.
         let mut weight = vec![0.0f32; d_ff * d];
         let (mut g, mut u, mut h) = (vec![0.0f32; d_ff], vec![0.0f32; d_ff], vec![0.0f32; d_ff]);
         let mut y = vec![0.0f32; rows * d];

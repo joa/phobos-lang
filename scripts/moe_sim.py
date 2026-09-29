@@ -2,28 +2,31 @@
 
     python scripts/moe_sim.py trace.jsonl [--slots 800,1200,1600,2000,2400]
 
-`trace.jsonl` is what `examples/moe_trace.rs` writes. Each block gets an
-equal share of the slot budget (a slot holds one expert of one block), and
-every position's chosen experts are looked up in that block's cache in
-order. Reported per budget, for the generated positions only (the prompt
-positions warm the cache, which is what a prompt pass does for the decode
-that follows it):
+`trace.jsonl` is what `examples/moe_trace.rs` writes. A slot holds one expert
+of one block, and each block gets an equal share of the slot budget. Every
+position's chosen experts are looked up in that block's cache in order.
 
-- LRU: evict the least recently used.
-- LFU: evict the least frequently used, counts halved every 256 positions
-  so an old favourite can fall out.
-- static: the experts most used over the whole trace, never evicted. An
-  upper bound on any static placement, since it peeks at the whole trace.
-- OPT: Belady's rule, evict the one next used furthest ahead. The upper
-  bound on any policy at that budget, since it peeks at the future.
-- LRU+la: LRU where block b's lookahead (its router on the residual leaving
-  block b-1) is prefetched into the cache before the real choice is made.
-  A prefetch that turns out wrong still costs a copy, so the two columns
-  after the hit rates are what crosses PCIe a position: LRU's misses, and
-  the lookahead's remaining misses plus every prefetch it issued.
+Hit rates are reported per budget, over generated positions only. Prompt
+positions just warm the cache, as a prompt pass does for the decode after it.
 
-The last line is the one-block lookahead's own accuracy: the share of chosen
-experts its prediction named.
+The policies:
+
+    LRU     evict the least recently used.
+    LFU     evict the least frequently used; counts halve every 256
+            positions so an old favourite can fall out.
+    static  keep the experts most used over the whole trace. An upper bound
+            on any static placement, since it sees the whole trace.
+    OPT     Belady's rule, evict the one next used furthest ahead. An upper
+            bound on any policy, since it sees the future.
+    LRU+la  LRU that first prefetches block b's lookahead, its router run on
+            the residual leaving block b-1.
+
+The two columns after the hit rates are copies over PCIe per position: LRU's
+misses, and the lookahead's misses plus every prefetch, since a wrong
+prefetch still costs a copy.
+
+The last line is the lookahead's accuracy, the share of chosen experts it
+predicted.
 """
 
 import argparse
@@ -130,8 +133,7 @@ def simulate(rows, blocks, per_block, n_used):
         for b in range(blocks):
             chosen = r["routes"][b]
             if b > 0:
-                # Prefetch what block b-1's residual predicted for block b,
-                # copying only what is not already resident.
+                # Prefetch block b's lookahead, copying only what is missing.
                 cache = caches["LRU+la"][b]
                 for e in r["lookahead"][b - 1]:
                     if e not in cache.d:
@@ -174,8 +176,8 @@ def main():
         per_block = max(1, total // blocks)
         hits, accesses, prefetches = simulate(rows, blocks, per_block, n_used)
         rate = lambda name: hits[name] / accesses if accesses else 0.0
-        # What crosses PCIe a position: LRU's misses; with the lookahead,
-        # its remaining misses plus every prefetch.
+        # Copies per position. The lookahead pays for its misses and every
+        # prefetch.
         lru_copies = (1.0 - rate("LRU")) * per_pos
         la_copies = (1.0 - rate("LRU+la")) * per_pos + prefetches / max(decode, 1)
         print(

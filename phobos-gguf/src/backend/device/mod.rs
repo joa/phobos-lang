@@ -48,17 +48,15 @@ mod residency;
 
 use fused::*;
 
-// The catalog is written as one flat namespace of sources and tile sizes, and
-// the impls below reach for them unqualified; see kernels/mod.rs.
+// The kernel catalog is one flat namespace of sources and tile sizes, used
+// unqualified below. See kernels/mod.rs.
 use kernels::*;
 
 pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 
-/// The formats `PHOBOS_RAW_QMMA` names, all of them when it is unset or an
-/// opt-out spelling that is on, none when it is one that is off. Fusing a
-/// format trades its expansion for an activation slot in the projection
-/// ring; IQ2_S and IQ2_XS only gain once they share that ring with the
-/// others. See [`DeviceBackend::act_slot_transient`].
+/// The formats `PHOBOS_RAW_QMMA` enables for the fused prompt projection.
+/// It takes a comma-separated list of format names, or a plain on/off flag.
+/// Unset means all of them.
 fn qmma_formats() -> Vec<Quant> {
     const ALL: [Quant; 6] = [
         Quant::IQ1_S,
@@ -87,8 +85,8 @@ fn qmma_formats() -> Vec<Quant> {
 /// The tree's two toggle spellings, see `ENV.md`.
 use phobos_base::env::{flag as env_flag, flag_on as env_flag_on};
 
-/// The buffers behind a [`DeviceQuant`] or [`DeviceRaw`] that is not in the
-/// arena. Held only to keep the allocation alive; nothing reads them.
+/// The buffers behind a [`DeviceQuant`] or [`DeviceRaw`] outside the arena.
+/// Held only to keep the allocation alive.
 type OwnedQuant = (DeviceBuffer<i8>, DeviceBuffer<f32>, DeviceBuffer<f32>);
 type OwnedRaw = (
     DeviceBuffer<i8>,
@@ -96,9 +94,9 @@ type OwnedRaw = (
     Option<DeviceBuffer<u16>>,
 );
 
-/// A device-resident Q8_0 weight: where its int8 blocks and its two scale
-/// layouts landed in the [`arena::Arena`], and the output width they went up
-/// with. Pointers rather than buffers for the reason `arena.rs` gives.
+/// A device-resident Q8_0 weight: the addresses of its int8 blocks and its
+/// two scale layouts, and its output width. Raw pointers, because the
+/// [`arena::Arena`] or `owned_quants` owns the memory.
 struct DeviceQuant {
     qs: u64,
     scales: u64,
@@ -108,55 +106,50 @@ struct DeviceQuant {
 
 use raw::DeviceRaw;
 
-/// Output width, `k`, and split count: what [`kernels::q8_qmma_split_src`]'s
-/// generated text is a function of.
+/// Output width, `k`, and split count: the parameters of
+/// [`kernels::q8_qmma_split_src`].
 type QmmaSplitKey = (usize, usize, usize);
 
 /// Heads, grouped heads, head dimension, taps, head stride, normalize, query
 /// scale and rows per program: everything [`delta_conv_src`] bakes in. The
-/// row count is the launch's, so a prompt of a new length compiles nothing.
+/// row count is a launch parameter, so a new prompt length compiles nothing.
 type ConvKey = (usize, usize, usize, usize, usize, bool, u32, usize);
 
 /// Head count, group size, head dimension and query group: the shape
 /// [`DeviceBackend::attn_persist_plan`] settles a grid and split count for.
-/// The split count itself is derived from occupancy, not part of the key.
 type AttnPersistKey = (usize, usize, usize, usize);
 
-/// The compiled module for one [`AttnPersistKey`], with the block count and
-/// the persist-specific split count [`DeviceBackend::attn_persist_plan`]
-/// settled on.
+/// The compiled module for one [`AttnPersistKey`], with its settled block
+/// count and split count.
 type AttnPersistEntry = (Module, u32, usize);
 
-/// A device-resident backend for GGUF models. A whole decode step stays in
-/// device memory; it synchronizes once, to read the logits.
+/// A device-resident backend for GGUF models. A decode step stays in device
+/// memory and synchronizes once, to read the logits.
 pub struct DeviceBackend {
     stream: Stream,
-    /// Copies that need not wait for the compute stream: a prefetched
-    /// expert on its way into a slot. See `experts/`.
+    /// Copies that run beside the compute stream, such as prefetched
+    /// experts. See `experts/`.
     copy_stream: Stream,
-    /// Whether the mixture-of-experts path runs the next block's router on
-    /// the residual as it stands and copies what it predicts early, on the
-    /// copy stream. `PHOBOS_MOE_LOOKAHEAD` opts in; see `ENV.md`.
+    /// Whether the MoE path runs the next block's router early on the
+    /// current residual and prefetches the predicted experts.
+    /// `PHOBOS_MOE_LOOKAHEAD` opts in.
     moe_lookahead: bool,
-    /// Whether a prompt pass gives the lightest experts to the host's
-    /// kernels while the device works the rest. `PHOBOS_MOE_HOST=0` opts
-    /// out; see `ENV.md`.
+    /// Whether a prompt pass runs the lightest experts on the host while the
+    /// device runs the rest. `PHOBOS_MOE_HOST=0` opts out.
     moe_host: bool,
-    /// Whether a decode step's misses are computed on the host while the
-    /// device runs the hits, a zero slot standing in for each miss.
-    /// `PHOBOS_MOE_HOST_DECODE=0` opts out; see `ENV.md`.
+    /// Whether a decode step computes cache misses on the host while the
+    /// device runs the hits. A zero slot stands in for each miss.
+    /// `PHOBOS_MOE_HOST_DECODE=0` opts out.
     moe_host_decode: bool,
     /// Whether a prompt pass runs its routed feed-forward as grouped GEMMs
-    /// over rows sorted by expert rather than row by row.
-    /// `PHOBOS_MOE_GROUPED=0` opts out; see `ENV.md`.
+    /// over rows sorted by expert. `PHOBOS_MOE_GROUPED=0` opts out.
     moe_grouped: bool,
     matmul: Variants,
-    /// The tensor-core band [`DeviceBackend::matmul`] takes first for `m >=
-    /// TC_TILE_M`; the plain `matmul` above finishes whatever doesn't fit a
-    /// whole 64x64 tile.
+    /// The tensor-core matmul for whole tiles when `m >= TC_TILE_M`. The
+    /// plain `matmul` above handles the remainder.
     matmul_tc: Module,
-    /// The same ladder over an f16 weight, which is what a `_qdecode` strip
-    /// is. See `kernels/matmul.rs`'s `matmul_f16w_src`.
+    /// The same pair over an f16 weight, such as a `_qdecode` strip. See
+    /// `matmul_f16w_src`.
     matmul_f16w: Variants,
     matmul_tc_f16w: Module,
     matvec: Variants,
@@ -167,43 +160,42 @@ pub struct DeviceBackend {
     /// The split-K variant of the deep tile and its reduction, keyed by output
     /// width, `k` and split count. Built when the unsplit grid is declined.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
-    /// The narrow-CTA variant of the deep tile: same `qmma_t` kernel, half
-    /// the threads and column tile, same per-warp patch. Compiled lazily,
-    /// only when [`Self::qmma_narrow`] asks for it.
+    /// The narrow-CTA variant of the deep tile: half the threads and column
+    /// tile, same per-warp patch. Compiled lazily when
+    /// [`Self::qmma_narrow`] is set.
     q8_qmma_narrow: RefCell<Option<Module>>,
     q8_split: Variants,
     q8_qdot: Module,
     q8_qdot_add: Module,
     /// The persistent matvec, keyed by iteration count and whether it
-    /// accumulates. Only built when `PHOBOS_PERSIST_QDOT` asks for it; see
+    /// accumulates. Only built with `PHOBOS_PERSIST_QDOT`. See
     /// [`q8_qdot_persist_src`].
     q8_qdot_persist: RefCell<HashMap<(usize, bool), Module>>,
-    /// Blocks a persistent kernel may use here, from the occupancy API, and zero
-    /// until the first one is compiled and can be asked about.
+    /// Blocks a persistent matvec may use, from the occupancy API. Zero until
+    /// first compiled.
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
-    /// Contracts the IQ decode in `dp4a` against an int8 activation;
-    /// `PHOBOS_IQ1S_DP4A=1` opts in. It quantizes the activation where the
-    /// f32 host reference does not, so device against host cannot judge it.
-    /// `backend_check` instead runs the `m = 1` raw rows both ways on the
-    /// device and compares them against each other, the way `fuse_check`
-    /// does for the fused decode path.
+    /// Whether the raw decode matvecs contract in `dp4a` against an int8
+    /// activation. `PHOBOS_IQ1S_DP4A=0` opts out.
+    ///
+    /// The host reference does not quantize the activation, so it cannot
+    /// judge this path. `backend_check` compares both device paths instead.
     iq1s_dp4a: Cell<bool>,
     /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved grid.
-    /// `PHOBOS_QMMA_SPLIT=1` opts in; off by default, a net wall-clock loss.
+    /// `PHOBOS_QMMA_SPLIT=1` opts in.
     qmma_split: bool,
-    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path instead of
-    /// the unsplit launch. `PHOBOS_QMMA_NARROW=1` opts in; default off, see
-    /// [`kernels::q8_qmma_narrow_eligible`] for the row-count caveat.
+    /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path.
+    /// `PHOBOS_QMMA_NARROW=1` opts in. See
+    /// [`kernels::q8_qmma_narrow_eligible`].
     qmma_narrow: bool,
-    /// Fused kernels the pass has emitted, with the plan that says what to bind
-    /// to each. See [`fuse`].
+    /// Fused kernels the pass has emitted, each with the plan that says what
+    /// to bind. See [`fuse`].
     fused_plans: RefCell<HashMap<ChainKey, (Module, Plan)>>,
     fused_mlp: bool,
     fused_project: bool,
     /// Whether the delta net's convolution and gates join the projection's
-    /// kernel. Separate from [`Self::fused_project`] since this one costs a
-    /// barrier and has to be measurable against the projection alone.
+    /// fused kernel. Separate from [`Self::fused_project`], since it adds a
+    /// barrier.
     fused_mix: bool,
     /// Whether attention's output epilogue (quantizing the mixed heads, then
     /// the output projection) joins the fused-chain path. Default on.
@@ -211,16 +203,15 @@ pub struct DeviceBackend {
     /// Whether attention's key and value writes into the cache land in one
     /// launch instead of two. Default on, `PHOBOS_FUSED_STORE2D=0` off.
     fused_store2d: bool,
-    /// Blocks a fused kernel is launched with, which unlike [`persist_blocks`]
-    /// has to be exact: a block of the grid that is not resident never reaches
-    /// the barrier. Zero until such a kernel exists to be asked about.
+    /// Blocks a fused kernel is launched with. Unlike [`persist_blocks`] this
+    /// must be exact, since a non-resident block never reaches the barrier.
+    /// Zero until the first fused kernel is compiled.
     fused_blocks: Cell<u32>,
-    /// Storage for the values a plan found crossing a nest, by the plan's own
-    /// scratch index, each grown to the largest a chain has asked for.
+    /// Storage for values that cross a loop nest in a fused kernel, by the
+    /// plan's scratch index. Each only grows.
     fused_scratch: RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>,
-    /// A fused kernel's arrival counter and release generation, zeroed once. The
-    /// barrier leaves both as it found them, so every launch of every layer
-    /// reuses it.
+    /// A fused kernel's arrival counter and release generation, zeroed once.
+    /// The barrier restores both, so every launch reuses them.
     fused_barrier: RefCell<Option<DeviceBuffer<i32>>>,
     /// Operands for a fused launch, reused so a fused step allocates nothing.
     fused_operands: RefCell<Vec<(u64, [i64; 2])>>,
@@ -233,16 +224,16 @@ pub struct DeviceBackend {
     flushed: Cell<bool>,
     pending: RefCell<Vec<Recorded>>,
     recorded_len: Cell<usize>,
-    /// The recorded pass's graphs, one a segment: a pass with no sync point
-    /// is one segment, a mixture-of-experts pass one a block and one more.
+    /// The recorded pass's graphs, one per segment. Each sync point starts a
+    /// new segment.
     pass: RefCell<Vec<PassGraph>>,
     /// Segments replayed so far in the current pass.
     segment: Cell<usize>,
-    /// Which replay to report on, and the launches seen so far in the current
-    /// one. Zero when `PHOBOS_PASS_REPORT` is unset, which costs nothing.
+    /// Replays left until the one to report on, and that pass's launches.
+    /// Zero when `PHOBOS_PASS_REPORT` is unset.
     report_pass: Cell<usize>,
     report: RefCell<Vec<PassOp>>,
-    /// Replays so far, so the report can name which one it is describing.
+    /// Replays so far, so the report can name its replay.
     reported: Cell<usize>,
     quantize: Module,
     quantize_wide: Module,
@@ -253,149 +244,135 @@ pub struct DeviceBackend {
     quant_norms: RefCell<HashMap<(usize, u32), Module>>,
     gated_norms: RefCell<HashMap<(usize, u32), Module>>,
     gated_swiglu: RefCell<HashMap<usize, Module>>,
-    /// A SwiGLU reading its two operands as planes of a wider buffer, by width.
+    /// SwiGLU over two planes of a wider buffer, keyed by tile width.
     swiglu_planes: RefCell<HashMap<usize, Module>>,
-    /// Keyed by head count and head dimension. Both are tile extents, so both
-    /// have to be compile-time constants; a model only ever uses one pair.
+    /// Delta rule kernels, keyed by head count and head dimension. Both are
+    /// compile-time tile extents.
     deltas: RefCell<HashMap<(usize, usize), Module>>,
     chunks: RefCell<HashMap<(usize, usize), Module>>,
     identities: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
-    /// Keyed by [`ConvKey`]. A model compiles three, one per plane, since the
-    /// epilogue differs.
+    /// Delta convolution kernels, keyed by [`ConvKey`].
     convs: RefCell<HashMap<ConvKey, Module>>,
     /// Gate kernels, keyed by head count.
     gates: RefCell<HashMap<usize, Module>>,
-    /// The Hadamard transforms, by width, head regrouping and what they do
-    /// around the transform.
+    /// Hadamard transforms, keyed by width, head regrouping and form.
     hadamards: RefCell<HashMap<HadamardKey, Module>>,
     /// The row-major dense contractions, by tile rows and outputs.
     rows_matmuls: RefCell<HashMap<RowsKernel, Module>>,
-    /// Strided copy kernels, keyed by direction, the width they copy, and
-    /// whether the pitches let the promise be made.
+    /// Strided copy kernels, keyed by direction, copy width, and whether the
+    /// pitches are aligned to the width.
     splits: RefCell<HashMap<(Strided, usize, bool), Module>>,
-    /// [`Backend::store_2d_pair`] kernels, keyed by the width both windows
-    /// share and whether the pitches let the alignment promise be made.
+    /// [`Backend::store_2d_pair`] kernels, keyed by width and whether all
+    /// pitches are aligned to it.
     store_pairs: RefCell<HashMap<(usize, bool), Module>>,
     /// Rotary kernels, keyed by head count and half the rotary width.
     ropes: RefCell<HashMap<(usize, usize), Module>>,
     /// [`Backend::rope_gather`] kernels, keyed by head count, half the
-    /// rotary width, the source's heads-per-physical-row stride and the head
-    /// dimension (the passthrough tail's width follows from the last two).
+    /// rotary width, the source's heads per row, and the head dimension.
     rope_gathers: RefCell<HashMap<(usize, usize, usize, usize), Module>>,
     /// Attention kernels, keyed by query heads, group size and head dimension.
     attentions: RefCell<HashMap<(usize, usize, usize), Module>>,
     split_attn: RefCell<HashMap<(usize, usize, usize), Module>>,
-    /// Whether [`DeviceBackend::attention_decode`] takes the persistent
-    /// split-plus-merge path. Default on, `PHOBOS_ATTN_PERSIST=0` off. Kept
-    /// outside [`fused_stage`]'s `PHOBOS_FUSED` fallback because this flag
-    /// gates a `grid_barrier`: alone, it would hang rather than run slow, so
-    /// `attn_persist_plan`'s occupancy check is what keeps the path safe.
+    /// Whether [`DeviceBackend::attention_decode`] takes the persistent path.
+    /// Default on, `PHOBOS_ATTN_PERSIST=0` turns it off. Not controlled by
+    /// `PHOBOS_FUSED`.
     attn_persist: bool,
     /// The persistent attention kernel, keyed by [`AttnPersistKey`], with its
-    /// settled block and split count. `None` means occupancy couldn't fit
-    /// the split phase in one pass, so the persistent path is declined.
+    /// settled block and split count. `None` means the persistent path was
+    /// declined for that shape.
     attn_persist_modules: RefCell<HashMap<AttnPersistKey, Option<AttnPersistEntry>>>,
     /// Per-split partial accumulators, and their running maxima and sums.
     attn_partials: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
     /// Page-locked staging for the one readback a pass makes.
     readback: RefCell<Option<LockedBuffer<f32>>>,
     /// [`DeviceBackend::argmax`]'s reduction kernel, keyed by chunk width
-    /// ([`argmax_chunk_width`]); stays a single entry, since a vocabulary's
-    /// size never changes for the life of the backend.
+    /// ([`argmax_chunk_width`]).
     argmax_reduce: RefCell<HashMap<usize, Module>>,
-    /// [`argmax_reduce`]'s partial-value column, `[0, W)`, one per lane;
-    /// added to each chunk's base index to recover a vocabulary position.
+    /// `[0, W)` as floats, added to a chunk's base index to recover a
+    /// vocabulary position. Keyed by chunk width.
     argmax_iota: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
-    /// [`argmax_finish_src`], compiled once: it bakes in no shape of the model's.
+    /// [`argmax_finish_src`], compiled once since it has no shape parameter.
     argmax_finish: Module,
     /// [`argmax_reduce`]'s per-block partials and [`argmax_finish`]'s
-    /// answer, reused across calls since [`Backend::argmax`] is hot-path.
+    /// result, reused across calls.
     argmax_scratch: RefCell<Option<(DeviceBuffer<f32>, DeviceBuffer<f32>)>>,
-    /// The blocked attention kernels, keyed the same way.
+    /// The blocked attention kernels, keyed like `attentions`.
     blocked: RefCell<HashMap<(usize, usize, usize), Module>>,
     attn_gemm: RefCell<HashMap<usize, Module>>,
     /// Addressed by [`Buf`]; a slot is `None` while free.
     slots: RefCell<Vec<Option<mem::Slot>>>,
     free_slots: RefCell<Vec<usize>>,
-    /// Released allocations, handed out again rather than going back to the
-    /// driver. See [`Backend::alloc`], [`DeviceBackend::alloc_written_now`].
+    /// Released allocations, reused instead of returned to the driver. See
+    /// [`Backend::alloc`], [`DeviceBackend::alloc_written_now`].
     pool: Pool,
-    /// Kernel launches that found their module already built, and modules
-    /// that had to be compiled. See [`DeviceBackend::with_kernel`].
+    /// Module cache hits and compiles. See [`DeviceBackend::with_kernel`].
     kernels_reused: Cell<u64>,
     kernels_compiled: Cell<u64>,
-    /// The weight strip a prompt pass dequantizes into, and the output the
-    /// matmul over it writes. One of each for the whole model rather than a
-    /// pooled pair per weight. See [`DeviceBackend::dense_scratch`].
+    /// The weight strip a prompt pass dequantizes into, and the matmul's
+    /// output. One of each for the whole model. See
+    /// [`DeviceBackend::dense_scratch`].
     dense_scratch: [Cell<Option<Buf>>; 2],
-    /// Set by a pass that filled the scratch, cleared by the trim that follows
-    /// it. See [`DeviceBackend::trim_after_dense`].
+    /// Set by a pass that used the prompt scratch, cleared by the next trim.
+    /// See [`DeviceBackend::trim_after_dense`].
     drop_scratch: Cell<bool>,
     /// Rows of the pass before this one, for [`DeviceBackend::trim_after_prompt`].
     last_rows: Cell<usize>,
     /// Passes begun, so [`DeviceBackend::mark_pass_vram`] can thin its output.
     pass_marks: Cell<usize>,
-    /// Every distinct allocation length this backend has asked the pool for,
-    /// and how many are outstanding. `PHOBOS_VRAM=1` only: the pool keys on
-    /// exact length, so this is what its free list is made of.
+    /// Outstanding allocations per length. Only tracked with `PHOBOS_VRAM`.
     alloc_hist: RefCell<HashMap<usize, isize>>,
     constants: RefCell<HashMap<String, Buf>>,
-    /// The streamed experts: mirrors, slabs, maps. See `experts/`.
+    /// The streamed experts. See `experts/`.
     experts: RefCell<experts::Experts>,
     expert_keys: RefCell<HashMap<String, crate::backend::ExpertsBuf>>,
-    /// The top-k kernel by expert count, the slot matvec by format, width
-    /// and whether every program reads activation row zero, the combine.
+    /// The MoE kernels. Top-k is keyed by expert count. The slot matvec is
+    /// keyed by format, width, and whether every program reads activation
+    /// row zero.
     moe_topk: RefCell<HashMap<usize, Module>>,
     moe_qdot: RefCell<HashMap<(&'static str, usize, bool), Module>>,
     /// Gate, up and the SwiGLU in one, by format and width.
     moe_gateup: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_combine: RefCell<HashMap<(), Module>>,
-    /// The PTX kernel a decode row's host share is handed over with.
+    /// Adds the host-computed share of a decode row into the device result.
     host_add: RefCell<Option<Module>>,
-    /// The grouped prompt path's kernels: the row permutation, the
-    /// schedule-table GEMM by format and width, the gathering combine.
+    /// The grouped prompt path's kernels: the row permutation, the GEMM
+    /// (keyed by format and width), and the gathering combine.
     moe_permute: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_qgemm: RefCell<HashMap<(&'static str, usize), Module>>,
     moe_gather_add: RefCell<HashMap<(), Module>>,
     moe_shared: RefCell<HashMap<(), Module>>,
-    /// Addressed by [`QBuf`]: bytes, per-block scales, and the output width
-    /// they went up with. Constants, so never released.
+    /// Q8_0 weights, addressed by [`QBuf`]. Never released.
     quants: RefCell<Vec<DeviceQuant>>,
     q_constants: RefCell<HashMap<String, QBuf>>,
-    /// Addressed by [`RawBuf`]: raw block bytes, the two header planes, the
-    /// output width and the super-blocks per row they went up with.
+    /// Raw-format weights, addressed by [`RawBuf`].
     raw_quants: RefCell<Vec<DeviceRaw>>,
-    /// The slabs every raw weight's bytes and header planes live in.
+    /// The slabs the bulk weights live in.
     arena: arena::Arena,
-    /// The same for the small hot constants, in slabs a thirty-second the size.
-    /// See [`arena::HOT_SLAB_BYTES`].
+    /// Smaller slabs for the small, hot constants. See
+    /// [`arena::HOT_SLAB_BYTES`].
     hot: arena::Arena,
-    /// And for a sequence's recurrent state, which is released when the
-    /// sequence ends rather than never; `state_live` counts the regions so the
-    /// slabs can go back once the last one does.
+    /// Slabs for recurrent state. `state_live` counts the live regions, and
+    /// the slabs are freed when it reaches zero.
     state_arena: arena::Arena,
     state_live: Cell<usize>,
-    /// Whether that arena is used at all. Off by default: the arena's win is
-    /// that a cold weight stops being its own allocation the driver can
-    /// single out for eviction, but a sequence's state is read and written
-    /// every token and is resident anyway, so pooling it only makes one
-    /// slab's eviction cost more. `PHOBOS_STATE_ARENA=1` turns it on.
+    /// Whether recurrent state goes in `state_arena`. State is resident
+    /// anyway, so the arena brings no benefit. `PHOBOS_STATE_ARENA=1` turns
+    /// it on.
     state_arena_on: bool,
-    /// Whether the small, hot constants share the arena with the bulk
-    /// weights. Off: a hot, small scale plane put in a slab sized for cold
-    /// bulk weights drags the whole slab resident instead of just the plane.
-    /// `PHOBOS_ARENA_CONST=1` puts them back in.
+    /// Whether the small, hot constants go in the bulk arena instead of
+    /// `hot`. A hot plane in a bulk slab keeps the whole slab resident.
+    /// `PHOBOS_ARENA_CONST=1` turns it on.
     arena_const: bool,
-    /// Whether the bulk weights go in the arena at all. `PHOBOS_ARENA=0` gives
-    /// every tensor its own allocation again, which is what this replaced.
+    /// Whether the bulk weights go in the arena. `PHOBOS_ARENA=0` gives each
+    /// tensor its own allocation.
     arena_weights: bool,
-    /// Buffers a constant owns when it is not in the arena, kept alive so the
-    /// pointer in its [`DeviceQuant`] or [`DeviceRaw`] stays good.
+    /// Buffers of constants outside the arena, kept alive so the pointers in
+    /// [`DeviceQuant`] and [`DeviceRaw`] stay valid.
     owned_quants: RefCell<Vec<OwnedQuant>>,
     owned_raw: RefCell<Vec<OwnedRaw>>,
     raw_constants: RefCell<HashMap<String, RawBuf>>,
-    /// Every raw format's matvec, compiled once in parallel (see
-    /// `compile_parallel`); each shape is a kernel parameter, not baked in.
+    /// Every raw format's matvec, compiled once in parallel. Shapes are
+    /// kernel parameters, not baked in.
     q2k_matvec: Module,
     q3k_matvec: Module,
     iq1s_matvec: Module,
@@ -406,9 +383,9 @@ pub struct DeviceBackend {
     iq3xxs_matvec: Module,
     iq3s_matvec: Module,
     iq4xs_matvec: Module,
-    /// Each format's `m == 1` decode folded into one `*_qdot_t` call, no
-    /// per-lane shared-memory staging. Needs `N` to be a whole number of its
-    /// own `TN`; `project_raw` falls back to the plain matvec otherwise.
+    /// Each format's `m == 1` decode as one `*_qdot_t` call, with no
+    /// shared-memory staging. Needs `N` to be a multiple of its `TN`;
+    /// otherwise `project_raw` uses the plain matvec.
     iq1s_qdot_matvec: Module,
     /// The dp4a decode matvecs: wide tile, then narrow for a ragged `n`.
     /// See `I8_NARROW_TN`.
@@ -432,10 +409,8 @@ pub struct DeviceBackend {
     iq4xs_qdot_matvec: Module,
     q2k_qdot_matvec: Module,
     q3k_qdot_matvec: Module,
-    /// Every raw format's own decode minus the per-row reduction: writes a
-    /// `[K, N]` strip of dequantized weight for
-    /// [`DeviceBackend::project_raw_dense`] to run a batched matmul against.
-    /// `m == 1` still uses the matching `_matvec` kernel unchanged.
+    /// Each raw format's decode without the reduction. Writes a `[K, N]`
+    /// strip of dequantized weight for [`DeviceBackend::project_raw_dense`].
     iq1s_dequant: Module,
     iq2xxs_dequant: Module,
     iq1m_dequant: Module,
@@ -445,8 +420,8 @@ pub struct DeviceBackend {
     iq3s_dequant: Module,
     iq4xs_dequant: Module,
     /// The warp-collective form of the `_dequant` kernels above: one
-    /// `*_qdecode_t` call, nothing staged, no barrier. Needs a strip that is a
-    /// whole number of its own `TN`.
+    /// `*_qdecode_t` call, no staging, no barrier. Needs a strip that is a
+    /// multiple of its `TN`.
     iq1s_qdecode: Module,
     iq2xxs_qdecode: Module,
     iq1m_qdecode: Module,
@@ -454,8 +429,8 @@ pub struct DeviceBackend {
     iq2xs_qdecode: Module,
     iq3xxs_qdecode: Module,
     iq3s_qdecode: Module,
-    /// The same seven writing an f16 strip, launched only where the matmul
-    /// reading it is entirely tensor-core. See `project_raw_dense`.
+    /// The same seven writing an f16 strip, used only when the matmul is
+    /// entirely tensor-core. See `project_raw_dense`.
     iq1s_qdecode_f16: Module,
     iq2xxs_qdecode_f16: Module,
     iq1m_qdecode_f16: Module,
@@ -463,84 +438,76 @@ pub struct DeviceBackend {
     iq2xs_qdecode_f16: Module,
     iq3xxs_qdecode_f16: Module,
     iq3s_qdecode_f16: Module,
-    /// Q2_K's own dequant, same purpose as the block above. Q3_K has none:
-    /// it is the LM head, run only at `m == 1`, so it never takes
-    /// `project_raw_dense`'s batched path.
+    /// Q2_K's dequant, like the block above. Q3_K has none, since it only
+    /// runs at `m == 1`.
     q2k_dequant: Module,
-    /// IQ1_S's grid, uploaded once and shared by every IQ1_S weight:
-    /// [`crate::quant::iq1s_flat_grid`] unpacked to one `i32` lane a slot.
-    /// IQ1_M shares this same grid; see `quant/iq1_m.rs`'s module doc.
+    /// IQ1_S's grid, [`crate::quant::iq1s_flat_grid`] at one `i32` per
+    /// lane. Shared by every IQ1_S and IQ1_M weight.
     iq1s_grid: DeviceBuffer<i32>,
-    /// IQ2_XXS's magnitude grid and sign table, flattened like IQ1_S's and
-    /// shared by every IQ2_XXS weight.
+    /// IQ2_XXS's magnitude grid and sign table, flattened like IQ1_S's.
     iq2xxs_grid: DeviceBuffer<i32>,
     iq2xxs_signs: DeviceBuffer<i32>,
-    /// IQ2_S's own magnitude grid and sign table; wider than IQ2_XXS's and
-    /// keyed by raw byte rather than parity index, so not shared with it.
+    /// IQ2_S's magnitude grid and sign table. The signs are keyed by raw
+    /// byte rather than parity index, unlike IQ2_XXS's.
     iq2s_grid: DeviceBuffer<i32>,
     iq2s_signs: DeviceBuffer<i32>,
-    /// IQ2_XS's own magnitude grid (wider than IQ2_XXS's), but shares its
-    /// sign mechanism, so it reuses `iq2xxs_signs`.
+    /// IQ2_XS's magnitude grid. Its signs use `iq2xxs_signs`.
     iq2xs_grid: DeviceBuffer<i32>,
-    /// IQ3_XXS's own magnitude grid (four `i32` lanes an entry, `u32`
-    /// entries); its sign field matches IQ2_XXS's `aux32`, so it reuses
+    /// IQ3_XXS's magnitude grid, four `i32` lanes per entry. Its signs use
     /// `iq2xxs_signs`.
     iq3xxs_grid: DeviceBuffer<i32>,
-    /// IQ3_S's own magnitude grid (also four `i32` lanes an entry); its
-    /// sign byte matches IQ2_S's, so it reuses `iq2s_signs`.
+    /// IQ3_S's magnitude grid, four `i32` lanes per entry. Its signs use
+    /// `iq2s_signs`.
     iq3s_grid: DeviceBuffer<i32>,
-    /// IQ4_XS's fixed sixteen-value codebook every nibble indexes directly
-    /// ([`crate::quant::iq4xs_flat_codebook`]); needs no per-lane unpacking,
-    /// and its `gather` covers a whole run rather than a lane.
+    /// IQ4_XS's fixed sixteen-value codebook, indexed directly by each
+    /// nibble. See [`crate::quant::iq4xs_flat_codebook`].
     iq4xs_codebook: DeviceBuffer<i32>,
-    /// The same tables at one `i8` a slot, which every `*_qdot_t`/`*_qdecode_t`
-    /// reads: a lane's entry is then one vector load, and the table a quarter
-    /// the size. The i32 copies stay for the `gather`-based fallbacks.
+    /// The same tables at one `i8` per slot, read by every `*_qdot_t` and
+    /// `*_qdecode_t`. The i32 copies above serve the `gather`-based
+    /// fallbacks.
     iq1s_grid_packed: DeviceBuffer<i8>,
-    /// The same table with the delta folded in and both signs laid out: an
-    /// exact `i8` IQ1_S weight. See `quant::iq1s_signed_grid`.
+    /// The IQ1_S grid with the delta and signs folded in, giving an exact
+    /// `i8` weight. See `quant::iq1s_signed_grid`.
     iq1s_signed_grid: DeviceBuffer<i8>,
-    /// IQ1_S's prompt projection: the decode contracted on the integer tensor
-    /// cores, so no expanded weight is ever written. See `qmma_raw.rs`.
+    /// IQ1_S's prompt projection, decoding inside an integer tensor-core
+    /// contraction. See `qmma_raw.rs`.
     iq1s_qmma: Module,
-    /// IQ2_XXS's prompt projection, and the two that share its decode but
-    /// scale per sixteen elements.
+    /// IQ2_XXS's prompt projection, and the two formats that share its
+    /// decode but scale per sixteen elements.
     iq2xxs_qmma: Module,
     iq2s_qmma: Module,
     iq2xs_qmma: Module,
-    /// The two whose grid entry is four bytes rather than eight.
+    /// The two formats whose grid entry is four bytes rather than eight.
     iq3xxs_qmma: Module,
     iq3s_qmma: Module,
-    /// Whether that projection is used. On by default, `PHOBOS_RAW_QMMA=0`
-    /// turns it off.
+    /// Whether the fused prompt projection is used. On by default,
+    /// `PHOBOS_RAW_QMMA=0` turns it off.
     raw_qmma: Cell<bool>,
-    /// Which formats [`raw_qmma`] covers. `PHOBOS_RAW_QMMA` takes a
-    /// comma-separated list as well as a flag, e.g. `iq1s,iq2xxs`. Fusing a
-    /// format trades its expansion for an activation slot in the projection
-    /// ring, and that trade is not the same for every format.
+    /// Which formats [`raw_qmma`] covers, from `PHOBOS_RAW_QMMA`, which also
+    /// takes a comma-separated list such as `iq1s,iq2xxs`.
     raw_qmma_formats: Vec<Quant>,
-    /// IQ1_S's staged projection, when asked for. See `qmma_raw.rs`.
+    /// The staged prompt projections. See `qmma_raw.rs`.
     qgemm: qmma_raw::Qgemm,
-    /// `PHOBOS_DENSE_SCRATCH=0` goes back to a pooled pair per weight, and
-    /// `PHOBOS_TRIM=1` to handing the whole free list back after a dense
-    /// pass. See `residency.rs`.
+    /// `PHOBOS_DENSE_SCRATCH=0` uses a pooled scratch pair per weight
+    /// instead of one shared pair. `PHOBOS_TRIM=1` also frees the scratch
+    /// and the pool's free list after a dense pass. See `residency.rs`.
     dense_scratch_shared: bool,
     trim_after_dense: bool,
     iq2xxs_grid_packed: DeviceBuffer<i8>,
-    /// +/-1 for the float decode, then the same signs as a 0/-1 mask for the
-    /// dp4a one, which applies them with `and`.
+    /// The signs as +/-1 for the float decode, followed by the same signs as
+    /// a 0/-1 mask for the dp4a decode.
     iq2xxs_signs_packed: DeviceBuffer<i8>,
     iq2s_grid_packed: DeviceBuffer<i8>,
     iq2s_signs_packed: DeviceBuffer<i8>,
     iq2xs_grid_packed: DeviceBuffer<i8>,
     iq3xxs_grid_packed: DeviceBuffer<i8>,
     iq3s_grid_packed: DeviceBuffer<i8>,
-    /// `[0, 1, .., 7]`: the row offsets a grid-coded raw kernel's batched
-    /// `gather` broadcasts against, so one call reads a whole eight-wide lane.
+    /// `[0, 1, .., 7]`, the offsets a grid-coded raw kernel's `gather`
+    /// broadcasts against to read an eight-wide lane in one call.
     iota8: DeviceBuffer<i32>,
-    /// One entry per `quantize_act` in a pass, grown to the largest
-    /// projection seen. Slot by slot, not one arena: several are live at
-    /// once, and a pass asks for them in the same order every time.
+    /// One entry per `quantize_act` in a pass, each grown to the largest
+    /// projection seen. Several are live at once, and a pass takes them in
+    /// the same order every time.
     act_scratch: RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>,
     /// Which of the first few `act_scratch` slots the next transient
     /// activation takes. See [`DeviceBackend::act_slot_transient`].
@@ -548,34 +515,29 @@ pub struct DeviceBackend {
     /// The next slot of the shared ring, see [`DeviceBackend::act_slot_shared`].
     act_shared: Cell<usize>,
     act_next: Cell<usize>,
-    /// Split-K partial sums, `[splits, n]`, grown to the largest asked for.
+    /// Split-K partial sums, `[splits, n]`. Only grows.
     split_scratch: RefCell<Option<DeviceBuffer<f32>>>,
-    /// Must be last: Rust drops in declaration order and every allocation
-    /// above has to be released while the context is still alive.
+    /// Must be last. Fields drop in declaration order, and every allocation
+    /// above must be freed while the context is alive.
     _ctx: cust::context::Context,
 }
 
 impl DeviceBackend {
-    /// Turns the `dp4a` decode matvecs on or off after construction, so a
-    /// check can run the same projection both ways in one session and
-    /// compare them against each other. Device against host cannot judge
-    /// this path: the host reference does not quantize the activation, so
-    /// it disagrees by the size of an 8-bit one however right the kernel is.
+    /// Turns the `dp4a` decode matvecs on or off, so a check can compare
+    /// both paths in one session. The host reference does not quantize the
+    /// activation, so it cannot judge this path.
     pub fn set_iq_dp4a(&self, on: bool) {
         self.iq1s_dp4a.set(on);
     }
 
-    /// The same for the fused prompt projection. It quantizes its activation
-    /// too, so the host cannot judge it either; `backend_check` runs the shapes
-    /// it takes both ways on the device.
+    /// The same for the fused prompt projection, which also quantizes its
+    /// activation.
     pub fn set_raw_qmma(&self, on: bool) {
         self.raw_qmma.set(on);
     }
 
-    /// Turns every fused stage on or off, whatever the environment asked
-    /// for. Needed because [`fused_stage`] reads its env vars once at
-    /// construction, but the equivalence harness wants both paths in one
-    /// process; see `examples/fuse_check.rs`.
+    /// Turns every fused stage on or off, overriding the environment, so one
+    /// process can compare both paths. See `examples/fuse_check.rs`.
     pub fn set_fused(&mut self, on: bool) {
         self.fused_mlp = on;
         self.fused_project = on;

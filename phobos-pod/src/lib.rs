@@ -15,7 +15,7 @@ use phobos_cluster::tile::NodeId;
 
 use crate::engine::Engine;
 
-/// Default device arena per node (one node, one GPU)
+/// Default device arena per node. A node is one GPU.
 pub const DEFAULT_ARENA_BYTES: usize = 512 << 20;
 
 pub async fn serve(

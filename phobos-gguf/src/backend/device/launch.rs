@@ -1,13 +1,14 @@
-// Getting a kernel onto the card: compiling it, finding it in a module,
-// and issuing or recording the launch.
+// Compiling kernels, resolving them in a module, and issuing or recording
+// launches.
 
 use super::*;
 
 impl DeviceBackend {
-    /// Launch a kernel over tensor operands given as pointer and extents.
+    /// Launches a kernel over tensor operands given as pointer and extents,
+    /// or records it while a pass is recording.
     ///
-    /// Nothing here allocates: a pass issues hundreds of these, and a fresh
-    /// vector per descriptor would cost host time the card spends idle.
+    /// Reuses its buffers instead of allocating, since a pass issues
+    /// hundreds of these.
     pub(super) fn launch(
         &self,
         module: &Module,
@@ -57,7 +58,7 @@ impl DeviceBackend {
         self.issue(&eager, name)
     }
 
-    /// Zero unless the kernel is one of the `@dynshared` ones.
+    /// The kernel's dynamic shared bytes. Zero unless it is `@dynshared`.
     #[inline]
     pub(super) fn shared_of(&self, func: cust::sys::CUfunction) -> u32 {
         self.func_shared
@@ -67,8 +68,7 @@ impl DeviceBackend {
             .unwrap_or(0)
     }
 
-    /// What `@launch` put in the kernel's `maxntid`, asked of the driver once
-    /// per kernel.
+    /// The kernel's block width from its `maxntid`, queried once per kernel.
     #[inline]
     pub(super) fn threads_of(&self, func: cust::sys::CUfunction) -> Result<u32> {
         if let Some(&threads) = self.func_threads.borrow().get(&(func as usize)) {
@@ -94,10 +94,10 @@ impl DeviceBackend {
         Ok(threads)
     }
 
-    /// The kernel handle for `name`, resolved once. `cuModuleGetFunction` is a
-    /// driver call, and the key is the two addresses rather than the name's
-    /// text: every call site passes a literal, so the pointer identifies it
-    /// without hashing or copying the string.
+    /// The kernel handle for `name`, resolved once and cached.
+    ///
+    /// The cache key is the module and name addresses, not the name text.
+    /// Every caller passes a literal, so the pointer identifies it.
     #[inline]
     pub(super) fn function(
         &self,
@@ -114,10 +114,8 @@ impl DeviceBackend {
     }
 
     /// Runs `f` against the module cached under `key`, compiling it on first
-    /// use. Several kernels take a tile extent that has to be a compile-time
-    /// constant, so they are generated per shape; every shape a model uses is
-    /// fixed at load, so each cache holds a handful of entries and stops
-    /// growing once decoding starts.
+    /// use. Kernels with compile-time shapes are generated per shape, and a
+    /// model uses only a few.
     pub(super) fn with_kernel<K: Copy + Eq + std::hash::Hash>(
         &self,
         cache: &RefCell<HashMap<K, Module>>,
@@ -137,8 +135,8 @@ impl DeviceBackend {
         f(&modules[&key])
     }
 
-    /// Compiles a module whose kernels may want dynamic shared memory,
-    /// recording what each needs and raising those past the 48 KB ceiling.
+    /// Compiles a module whose kernels may use dynamic shared memory. Records
+    /// each kernel's need and raises the limit for those past 48 KB.
     pub(super) fn compile_dynamic(&self, source: &str, what: &'static str) -> Result<Module> {
         let (module, shared) = compile_shared(source, &[], what)?;
         for (name, bytes) in shared {

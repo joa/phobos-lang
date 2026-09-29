@@ -23,14 +23,14 @@ pub fn compile(context: &phobos_base::context::Context, code: &str) -> anyhow::R
 }
 
 /// Compiles the given code and reports the dynamic shared memory each
-/// kernel needs at launch. Only kernels marked `@dynshared` report a nonzero
-/// amount; others use static globals capped at 48 KB, and the launch ABI
-/// must respect this.
+/// kernel needs at launch.
 ///
-/// Enforces every kernel's `@pipeline` assertion: fails if a kernel wrote the
-/// attribute and nothing in it pipelined. A caller that compiles several
-/// variants of one source and accepts the assertion if any of them pipelines
-/// should use [`compile_raw`] and aggregate `pipeline_failures` itself.
+/// Only kernels marked `@dynshared` report a nonzero amount. The others use
+/// static globals capped at 48 KB, and the launch ABI must respect this.
+///
+/// Fails if a kernel carries `@pipeline` and nothing in it pipelined. To
+/// accept the assertion when any of several variants pipelines, use
+/// [`compile_raw`] and aggregate `pipeline_failures` yourself.
 pub fn compile_shared(
     context: &phobos_base::context::Context,
     code: &str,
@@ -50,9 +50,8 @@ pub fn compile_shared(
     Ok((out.code, out.shared))
 }
 
-/// PHOBOS_DUMP_DIR collects every source that reaches the compiler as a
-/// `.ph` named by a hash of its text, so a model run leaves behind the exact
-/// kernels it compiled and `examples/snapshot.rs` can sweep them.
+/// With `PHOBOS_DUMP_DIR` set, writes every compiled source there as a `.ph`
+/// named by a hash of its text. `examples/snapshot.rs` can sweep the result.
 fn dump_source(code: &str) {
     use std::hash::{Hash, Hasher};
     let Ok(dir) = std::env::var("PHOBOS_DUMP_DIR") else {
@@ -67,8 +66,8 @@ fn dump_source(code: &str) {
     }
 }
 
-/// The first kernel's name in a source, for the dump's file name; None when
-/// the source does not parse, which the compile proper will report.
+/// The first kernel's name in a source, for the dump's file name. None when
+/// no name is found; the compile itself reports the parse error.
 fn ast_kernel_name(code: &str) -> Option<&str> {
     let at = code.find("kernel ")?;
     let rest = &code[at + "kernel ".len()..];
@@ -91,7 +90,7 @@ pub fn compile_raw(
 
     let kernels = parse(code)?;
 
-    // `Kernel::wants_ldmatrix`: 64-bit indices for the whole module.
+    // A kernel that wants `ldmatrix` needs 64-bit indices for the whole module.
     let mut wide;
     let context = if context.index_bitwidth < 64 && kernels.iter().any(ast::Kernel::wants_ldmatrix)
     {

@@ -32,15 +32,13 @@ pub(super) enum Lowered<'c> {
 }
 
 impl<'c> Codegen<'c> {
-    /// The kernel as a `gpu.func`, from its graph: a walk over the ops
-    /// that calls the tile emitters in turn. Which operands each arm
-    /// releases matters, since the pool's reuse order is part of the
-    /// emitted module.
+    /// Emits the kernel graph as a `gpu.func` by walking its ops and calling
+    /// the emitters in turn. The order in which operands are released
+    /// matters, since the pool's reuse order shapes the emitted module.
     ///
-    /// Values are looked up through a stack of layers. The plain walk uses
-    /// one; a body instantiated more than once, a pipelined loop's halves
-    /// and prefetches, pushes a layer with the substitutions that instance
-    /// needs.
+    /// Values are looked up through a stack of layers. A body emitted more
+    /// than once, such as a pipelined loop's halves and prefetches, pushes a
+    /// layer with the substitutions that instance needs.
     pub(super) fn emit_kernel_ir(&mut self, ir: &Ir) -> Result<Operation<'c>> {
         let entry = ir.entry();
         let param_types = ir
@@ -164,9 +162,8 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// A tile operand as the emitters want it. `owned` is what the old
-    /// binding rules said: a fresh buffer nothing named, and so one the
-    /// consuming op may return to the pool.
+    /// A tile operand as the emitters want it. It is `owned` when it is a
+    /// fresh, unnamed buffer, which the consuming op may return to the pool.
     pub(super) fn tile_ir(&self, ir: &Ir, v: ValueId) -> Result<MemVal<'c>> {
         match self.get_ir(v)? {
             Lowered::Tile(mv) => {
@@ -203,8 +200,8 @@ impl<'c> Codegen<'c> {
         range.map(|i| self.tile_ir(ir, ir.operand(op, i))).collect()
     }
 
-    /// Every op of a block but its terminator, which the op owning the
-    /// block appends itself.
+    /// Emits every op of a block except its terminator, which the op owning
+    /// the block appends itself.
     pub(super) fn emit_ops(&mut self, block: &Block<'c>, ir: &Ir, ops: &[OpId]) -> Result<()> {
         for &op in ops {
             if ir.kind(op).is_terminator() {
@@ -215,8 +212,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// One op, bracketed in the trace when recording, with each buffer it
-    /// yields tied to the allocation the pool gave it.
+    /// Emits one op. When recording, brackets it in the trace and ties each
+    /// buffer it yields to the pool's allocation.
     pub(super) fn emit_op(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
         let recording = matches!(self.policy, super::SharedPolicy::Record);
         if recording {
@@ -249,8 +246,8 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// One op with no window in the trace: what a loop lowers on its own
-    /// behalf.
+    /// Emits one op without a window in the trace, for ops a loop lowers on
+    /// its own behalf.
     pub(in crate::codegen) fn emit_op_inner(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
         match ir.kind(op) {
             OpKind::Const(_)
@@ -284,7 +281,7 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// The terminator of `block` as the values it yields.
+    /// The values the terminator of `block` yields.
     pub(super) fn yielded(&self, ir: &Ir, block: ir::BlockId) -> Result<Vec<ValueId>> {
         let last = ir
             .ops(block)

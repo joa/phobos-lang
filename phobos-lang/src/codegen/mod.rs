@@ -79,9 +79,9 @@ pub fn emit<'c>(
             #[cfg(debug_assertions)]
             crate::ir::verify::verify(&ir)?;
 
-            // A first emission, thrown away, records every buffer the
-            // emitters allocate; the plan places them and the second
-            // emission hands out its offsets. See `lower::plan`.
+            // A throwaway first emission records every buffer the emitters
+            // allocate. The plan places them, and the second emission uses
+            // those offsets. See `lower::plan`.
             let mut recorder = Codegen::new(base, context, kernel)?;
             recorder.policy = SharedPolicy::Record;
             recorder.pipeline_declines = report.pipeline_declines.clone();
@@ -151,31 +151,30 @@ struct MemVal<'c> {
     shape: Vec<i64>,
     /// None means contiguous, otherwise the padded stride; see [`Codegen::alloc_tile_padded`].
     row_stride: Option<i64>,
-    /// Proven divisor, in elements, of the base offset and of every stride
-    /// above the innermost. The row-pitch ABI promises 4 elements on its own
-    /// (16 bytes of f32, 8 of f16); `@aligned` can raise it further. Zero
-    /// means no offset at all, so any width goes.
+    /// Proven divisor, in elements, of the base offset and of every outer
+    /// stride. The row-pitch ABI guarantees 4, and `@aligned` can raise it.
+    /// Zero means no offset at all, so any vector width is legal.
     align_div: i64,
 
-    /// XOR column swizzle for ldmatrix staging buffers; every access, staging
-    /// store and load alike, must permute the column index. See [`Swizzle`].
+    /// XOR column swizzle for ldmatrix staging buffers. Every load and store
+    /// must permute the column index. See [`Swizzle`].
     swizzle: Option<Swizzle>,
 
-    /// The memref.global symbol backing a whole tile buffer (None for subviews
-    /// and tensor params); what [`Codegen::release`] returns to the pool.
+    /// The memref.global symbol backing a whole tile buffer, None for subviews
+    /// and tensor params. This is what [`Codegen::release`] returns to the pool.
     global: Option<String>,
 
     /// Whether the bytes are in shared memory rather than global.
     /// Unlike [`Self::global`] this survives a subview.
     shared: bool,
 
-    /// A fresh unnamed temp whose buffer may be released once all reads of it
-    /// are emitted; a named buffer is never pooled.
+    /// A fresh unnamed temp, released once all its reads are emitted. A named
+    /// buffer is never pooled.
     owned: bool,
 
     /// Per-dimension bounds mask for a slice that may reach past the source
-    /// extent. Some((offset, extent)) lets a load zero-fill and a store skip
-    /// where offset + local index >= extent; None means provably in bounds.
+    /// extent. Some((offset, extent)) makes a load zero-fill and a store skip
+    /// where offset + local index >= extent. None means provably in bounds.
     /// Empty for tile buffers and whole slices.
     mask: Vec<Option<(Value<'c, 'c>, Value<'c, 'c>)>>,
 }
@@ -186,17 +185,18 @@ impl<'c> MemVal<'c> {
         self.mask.iter().any(Option::is_some)
     }
 
-    /// Whether a `width`-element vector access stays on a legal boundary. A
-    /// zero divisor is an unoffset base, which every width clears.
+    /// Whether a `width`-element vector access stays on a legal boundary.
     fn vectorizes(&self, width: i64) -> bool {
         self.align_div % width == 0
     }
 }
 
-/// A tile accumulator living in per-lane mma.sync D fragments instead of
-/// shared memory (the flash-attention acc): each warp of the wm x wn grid
-/// carries fm*fnn*2 vector<2x2xf32> fragments of its [m, n] slice, and the
-/// values ride enclosing loops as scf.for iter_args. See codegen/frag.rs.
+/// A tile accumulator held in per-lane mma.sync D fragments instead of shared
+/// memory, as in flash attention.
+///
+/// Each warp of the wm x wn grid holds fm*fnn*2 vector<2x2xf32> fragments of
+/// its [m, n] slice. The values ride enclosing loops as scf.for iter_args.
+/// See codegen/frag.rs.
 #[derive(Clone)]
 struct FragAcc<'c> {
     frags: Vec<Value<'c, 'c>>,
@@ -231,8 +231,8 @@ struct Codegen<'c> {
     kernel_name: String,
     shared_globals: Vec<Operation<'c>>, // shared-memory tiles (memref.global)
     tile_count: usize,
-    // Released tile buffers by (element type, physical shape), reused so a
-    // temp doesn't grow the CTA's static shared footprint and cap occupancy.
+    // Released tile buffers by (element type, physical shape). Reusing them
+    // keeps temps from growing the CTA's static shared footprint.
     tile_pool: HashMap<(String, Vec<i64>), Vec<String>>,
     /// Tile buffers a view still aliases, which never go back to the pool.
     /// See [`Codegen::tile_flat`].
@@ -240,33 +240,26 @@ struct Codegen<'c> {
     /// Tiles live in one dynamic allocation rather than a global apiece, sized
     /// at launch. See [`Kernel::wants_dynamic_shared`].
     dynamic_shared: bool,
-    /// Byte offset of each named tile within that allocation, and how far it
-    /// reaches: what the host has to pass at launch.
+    /// Byte offset of each named tile within that allocation.
     tile_offsets: HashMap<String, i64>,
     shared_bytes: i64,
-    /// High-water mark of `shared_bytes`: what the host must reserve, since a
-    /// barrier-separated kernel's phases can each ask for less than the peak.
+    /// High-water mark of `shared_bytes`, which the host must reserve.
     shared_bytes_peak: i64,
     /// Dynamic tiles allocated and not yet released. At zero the next
-    /// allocation restarts at offset 0, so a barrier-separated kernel's
-    /// phases share the space instead of summing it.
+    /// allocation restarts at offset 0, so phases separated by a barrier
+    /// share the space.
     dynamic_live: i64,
-    // Loop-invariant dot operands staged into shared f16 in a loop's preheader,
-    // one frame per active for loop: (source view's memref value, staged buffer).
+    // Loop-invariant dot operands staged into shared f16 in a loop's
+    // preheader. One frame per active for loop, each entry being
+    // (source view's memref value, staged buffer).
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
-    // Induction variable of the ragged remainder chunk, if any; a slice offset
-    // by it is guarded against the runtime dim. None in the trimmed main loop.
-    // Induction variables of the enclosing trimmed main loops: their trip
-    // count is rounded to whole chunks, so an offset slice needs no mask.
     /// Whether `@pipeline` was written on this kernel. The generic loop path
-    /// auto-attempts every eligible loop regardless; this only gates the
-    /// fused-GEMM backend's double-buffering (see [`Self::staging_pairs`]).
+    /// tries every eligible loop regardless. This only gates the fused-GEMM
+    /// backend's double-buffering, see [`Self::staging_pairs`].
     pipeline_assert: bool,
-    /// Whether some loop in the kernel being emitted did pipeline, through
-    /// either mechanism `pipeline_assert` gates.
+    /// Whether some loop in the kernel did pipeline, through either path.
     pipelined_any: bool,
-    /// Why each loop declined, collected while `pipeline_assert` is set so a
-    /// failed assertion can say more than that it failed.
+    /// Why each loop declined, so a failed `@pipeline` can explain itself.
     pipeline_declines: Vec<String>,
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
@@ -292,12 +285,11 @@ struct Codegen<'c> {
 
 /// How a tile buffer gets its bytes.
 enum SharedPolicy {
-    /// A free list per shape, reused last-in first-out, and what a
-    /// recording emission runs on top of.
+    /// A free list per shape, reused last-in first-out.
     Pool,
     /// The pool, with every allocation and release recorded for the plan.
     Record,
-    /// A planned offset per allocation, in recording order, in one byte
+    /// A planned offset per allocation, in recording order, into one byte
     /// buffer the kernel owns.
     Replay(lower::plan::Plan),
 }
@@ -358,10 +350,11 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// How many staging buffers per operand the fused-GEMM backend allocates:
-    /// two to double-buffer the k loop, one otherwise. Unlike the generic loop
-    /// path, this backend has no legality or budget check of its own, so it
-    /// stays gated on `@pipeline` rather than auto-attempted.
+    /// Staging buffers per operand for the fused-GEMM backend: two to
+    /// double-buffer the k loop under `@pipeline`, one otherwise.
+    ///
+    /// This backend has no legality or budget check of its own, so it is
+    /// never tried without `@pipeline`.
     fn staging_pairs(&self) -> usize {
         if self.pipeline_assert { 2 } else { 1 }
     }

@@ -1,14 +1,9 @@
-// The compile, shown as what it is: a kernel's own text going in one side,
-// the PTX it became coming out the other, and the bytes of that PTX after it.
+// The compile screen: a kernel's source on one side, the PTX it became on the
+// other, and that PTX's bytes as hex.
 //
-// Every character on this screen is real. The source is the text the compiler
-// was handed, the PTX is what it returned, and the hex is that PTX's bytes.
-// Nothing is generated to fill space, which is what makes it worth watching:
-// a kernel that takes a minute is a minute of its own code going past.
-//
-// What is not real is the middle column. The stages there are the passes a
-// lowering runs, lit in turn on a timer rather than by anything the compiler
-// reports, so it says work is happening and never which pass is running.
+// The source, PTX and hex are real compiler input and output. The middle
+// column is not: its stages are lit in turn on a timer, since the compiler
+// does not report which pass is running.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -24,8 +19,7 @@ use super::theme;
 use super::view::View;
 
 /// The passes a kernel goes through, named for the display. Lit in order on a
-/// timer: the compiler does not report which it is in, and a marker that
-/// claimed to know would be inventing it.
+/// timer, not by compiler progress.
 const STAGES: [&str; 5] = ["PARSE", "IR", "MLIR", "LLVM", "PTX"];
 
 /// Frames each stage stays lit.
@@ -34,7 +28,7 @@ const STAGE_FRAMES: u64 = 9;
 /// Columns the stage column needs, the widest label plus room either side.
 const STAGE_WIDTH: u16 = 11;
 
-/// The whole cinema: the text going in, the machine, the text coming out.
+/// The whole compile panel: source, stages, PTX and hex.
 pub(super) fn compiling(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let block = panel("COMPILING", theme::CYAN, true);
     let inner = block.inner(area);
@@ -71,8 +65,7 @@ pub(super) fn compiling(frame: &mut Frame, view: &View, snap: &Snapshot, area: R
         .split(rows[1]);
 
     let height = rows[1].height as usize;
-    // All three text columns scroll together, so a line of source and the PTX
-    // beside it move as one thing rather than three.
+    // All three text columns scroll together.
     let scroll = (view.frame / 4) as usize;
     text_column(
         frame,
@@ -87,10 +80,9 @@ pub(super) fn compiling(frame: &mut Frame, view: &View, snap: &Snapshot, area: R
     hex_column(frame, columns[3], &load.ptx, scroll, height);
 }
 
-/// What is being compiled, how big it is, and what it cost.
+/// The last kernel built, its sizes, and how long it took.
 fn headline(load: &Loading) -> Line<'static> {
-    // The last one built, which is what there is source and PTX for. What is
-    // still running has produced neither yet.
+    // Only a finished kernel has source and PTX to show.
     let mut spans = vec![
         Span::styled("built ", theme::muted()),
         Span::styled(load.item.clone(), theme::accent(theme::CYAN)),
@@ -130,12 +122,10 @@ fn text_column(
     }
     let rendered: Vec<Line> = (0..height)
         .map(|row| {
-            // Wraps around rather than running out: a kernel compiles for
-            // longer than its own text takes to go past.
+            // Wraps around when the text runs out.
             let line = lines[(scroll + row) % lines.len()];
             let cut: String = line.chars().take(width).collect();
-            // Brightest in the middle of the column, falling away at both
-            // edges, so the text reads as moving through rather than sitting.
+            // Brightest in the middle of the column, fading at both edges.
             let edge = (row as f32 / height as f32 - 0.5).abs() * 2.0;
             Line::from(Span::styled(
                 cut,
@@ -146,12 +136,12 @@ fn text_column(
     frame.render_widget(Paragraph::new(rendered), area);
 }
 
-/// The same PTX again, as the bytes it is.
+/// The PTX's bytes as hex.
 fn hex_column(frame: &mut Frame, area: Rect, ptx: &str, scroll: usize, height: usize) {
     if area.width < 8 {
         return;
     }
-    // Three columns a byte, and the row is only worth drawing whole.
+    // Three columns per byte, whole bytes only.
     let per_row = ((area.width as usize - 1) / 3).max(1);
     let data = ptx.as_bytes();
     if data.is_empty() {
@@ -173,12 +163,11 @@ fn hex_column(frame: &mut Frame, area: Rect, ptx: &str, scroll: usize, height: u
     frame.render_widget(Paragraph::new(rendered), area);
 }
 
-/// The machine in the middle: the passes, lit in turn.
+/// The middle column: the passes, lit in turn.
 fn stages(frame: &mut Frame, view: &View, area: Rect) {
     let height = area.height as usize;
     let lit = (view.frame / STAGE_FRAMES) as usize % STAGES.len();
-    // Centred in the column, so the labels sit against the two text columns
-    // rather than at the top of a tall panel.
+    // Centred vertically in the column.
     let top = height.saturating_sub(STAGES.len()) / 2;
 
     let rendered: Vec<Line> = (0..height)
@@ -195,8 +184,7 @@ fn stages(frame: &mut Frame, view: &View, area: Rect) {
                     };
                     Line::from(Span::styled(format!("{stage:^11}"), style))
                 }
-                // The shaded band the text appears to pass through, drifting so
-                // the column is never still.
+                // A drifting shaded band above and below the labels.
                 None => {
                     let shade =
                         theme::SHADES[(row + (view.frame / 6) as usize) % theme::SHADES.len()];
@@ -213,8 +201,8 @@ fn stages(frame: &mut Frame, view: &View, area: Rect) {
 
 /// How long the kernels took, in buckets.
 ///
-/// The shape is the point: a handful of slow kernels account for most of a
-/// cold start, and this says which end the time went to.
+/// Shows whether a cold start's time went to many fast kernels or a few slow
+/// ones.
 pub(super) fn histogram(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let block = panel("COMPILE TIMES", theme::MAGENTA, false);
     let inner = block.inner(area);
@@ -266,7 +254,7 @@ pub(super) fn histogram(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             format!("{:.0}s", load.compile_time.as_secs_f64()),
             theme::text(),
         ),
-        // Summed across threads, so it runs ahead of the clock on the wall.
+        // Summed across threads, so it can exceed the wall clock.
         Span::styled(" lowering, ", theme::muted()),
         Span::styled(count(load.built), theme::text()),
         Span::styled(" kernels at once", theme::muted()),

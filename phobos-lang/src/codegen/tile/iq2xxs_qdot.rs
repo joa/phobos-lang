@@ -1,4 +1,4 @@
-// Fused IQ2_XXS dot: two grid-table lookups a lane, folded into the
+// Fused IQ2_XXS dot: two table lookups per lane, folded into the
 // contraction. The decode itself lives in `iq2xxs.rs`, shared with
 // `qdecode.rs`.
 

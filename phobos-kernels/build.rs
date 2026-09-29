@@ -1,8 +1,8 @@
 // Fingerprints the compiler that turns a kernel source into PTX, so the disk
-// cache can key on it. Changes whenever the generated PTX could and stays
-// put otherwise: hashes every `.rs` under the crates that lower a kernel,
-// plus the toolchain versions from `Cargo.lock`. Not the calling executable,
-// which would give each binary its own cold compile.
+// cache can key on it. It hashes every `.rs` under the crates that lower a
+// kernel, plus the toolchain versions from `Cargo.lock`. It changes whenever
+// the generated PTX could, and not otherwise. The calling executable is left
+// out, so every binary shares one cache.
 
 use std::{
     fs,
@@ -29,8 +29,8 @@ fn main() {
         collect_rs(&src, &mut files);
         files.sort();
         for file in files {
-            // Separators and line endings normalized, so one commit keys the
-            // same on every host and a cache warmed on one serves the other.
+            // Normalize separators and line endings, so one commit keys the
+            // same on every host.
             let rel = file.strip_prefix(&root).unwrap_or(&file);
             parts.push(rel.display().to_string().replace('\\', "/"));
             parts.push(fs::read_to_string(&file).unwrap_or_default().replace('\r', ""));
@@ -41,8 +41,8 @@ fn main() {
     println!("cargo:rerun-if-changed={}", lock.display());
     parts.extend(toolchain_versions(&lock));
 
-    // A build's own fingerprint, folded from the parts above. Not a hash of
-    // the whole workspace: a change to the server or the CLI leaves it alone.
+    // Only the parts above count, so a change to the server or the CLI
+    // leaves the fingerprint alone.
     let digest = fold(&parts);
     println!("cargo:rustc-env=PHOBOS_COMPILER_FINGERPRINT={digest}");
 }
@@ -79,7 +79,7 @@ fn toolchain_versions(lock: &Path) -> Vec<String> {
     out
 }
 
-/// FNV-1a over the parts: not worth a hash crate here, over the crate's own source.
+/// FNV-1a over the parts.
 fn fold(parts: &[String]) -> String {
     let mut h: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
     const PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;

@@ -207,13 +207,13 @@ fn lower_relu(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result<KernelP
     })
 }
 
-/// Output tile for the fused matmul-epilogue kernel. Smaller than the plain
-/// matmul's 64x64 because the epilogue holds an extra full tile, and two 64x64
-/// f32 tiles plus GEMM staging overflow sm_75's 48 KB shared budget.
+/// Output tile for the fused matmul-epilogue kernel. It is smaller than the
+/// plain matmul's 64x64 because the epilogue holds an extra full tile. Two
+/// 64x64 f32 tiles plus GEMM staging overflow sm_75's 48 KB of shared memory.
 const FUSED_TILE: i64 = 32;
-/// Flash-attention block sizes, rows of Q per CTA and keys per step. The
-/// largest that divides the sequence length is used, capped at 32 so the score
-/// and prob tiles fit the 48 KB shared budget on older GPUs.
+/// Flash-attention block sizes, for rows of Q per CTA and keys per step. The
+/// largest that divides the sequence length is used. The cap at 32 keeps the
+/// score and prob tiles within 48 KB of shared memory on older GPUs.
 const FLASH_TILE_CHOICES: [i64; 4] = [32, 16, 8, 4];
 
 /// `C = act(A @ B + bias)` with `bias` a row vector, from
@@ -234,9 +234,9 @@ fn lower_fused_linear(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result
         Some(crate::ir::Attribute::String(s)) => s.as_str(),
         _ => "none",
     };
-    // The bias is added into `acc` in place and the activation applied over
-    // as few extra tiles as possible: the [TILE_M, TILE_N] tiles dominate the
-    // shared budget.
+    // The bias is added into `acc` in place, and the activation uses as few
+    // extra tiles as possible, since the [TILE_M, TILE_N] tiles dominate
+    // shared memory.
     let store = "C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]";
     let epilogue = match activation {
         "none" => format!("  {store} = acc\n"),
@@ -301,10 +301,10 @@ fn lower_fused_linear(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result
     })
 }
 
-/// `O = softmax(scale * Q @ K^T) @ V` from [`crate::transform`]: one CTA per
-/// BR-row block, streaming the keys in BC-sized steps with an online softmax.
-/// The SPEC's flash-attention kernel with head dim D and the block sizes baked
-/// in.
+/// `O = softmax(scale * Q @ K^T) @ V` from [`crate::transform`]. One CTA per
+/// BR-row block streams the keys in BC-sized steps with an online softmax.
+/// This is the SPEC's flash-attention kernel, with head dim D and the block
+/// sizes baked in.
 fn lower_flash_attention(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result<KernelPlan> {
     let (q, k, v, out) = match (node.inputs.as_slice(), node.outputs.as_slice()) {
         ([q, k, v], [out]) => (q, k, v, out),

@@ -1,16 +1,13 @@
-// IQ1_S on the integer tensor cores, with the grid decode folded in.
+// IQ1_S on the integer tensor cores, with the grid decode folded in. This is
+// the prompt-pass counterpart of `iq1s_qdot.rs`: it contracts straight from
+// the registers the decode lands in.
 //
-// This is to a prompt pass what `iq1s_qdot.rs` is to a decode step: it
-// contracts straight out of the registers the decode already lands in,
-// instead of writing the expanded weight out and reading it back.
-//
-// Two properties of the format let it fit `mma.m8n8k16.s8` at all. A grid
-// byte is -1, 0 or 1 and the delta is a quarter of the step between them, so
-// `dl * (g + delta)` is `(dl / 8) * (8g +- 1)`, an exact int8 in -9..9 with
-// no activation row sums (the `dp4a` decode path carries the delta as a
-// second dot product). And a group of 32 elements shares one scale, exactly
-// one Q8_0 activation block, so both scales land on the same k step and the
-// accumulators stay in registers.
+// Two properties of the format make it fit `mma.m8n8k16.s8`. First, a grid
+// byte is -1, 0 or 1 and the delta is 1/8, so `dl * (g + delta)` is
+// `(dl / 8) * (8g +- 1)`. That is an exact int8 in -9..9, and needs no
+// activation row sums. Second, a group of 32 elements shares one scale, the
+// same span as one Q8_0 activation block. Both scales land on the same k
+// step, so the accumulators stay in registers.
 
 use super::iq1s::IQ1S_BLOCK_BYTES;
 use super::*;
@@ -23,13 +20,13 @@ const IQ1S_LANE: i64 = 8;
 
 impl<'c> Codegen<'c> {
     /// out[i, j] = sum_b (sum_{k in group b} a[i, k] * w[j, k]), with `w`
-    /// decoded from IQ1_S rather than read: the batched contraction, the grid
-    /// lookup and both scales as one operation.
+    /// decoded from IQ1_S. The contraction, grid lookup and both scales are
+    /// one operation.
     ///
-    /// `grid` is the signed table, `8 * g +- 1` already folded, indexed by the
-    /// 11-bit grid index and the group's sign bit together. Folding the delta
-    /// into the table rather than the kernel keeps the decode to a single
-    /// four-byte load per fragment: see `iq1s_signed_grid` on the host.
+    /// `grid` is the signed table with `8 * g +- 1` already folded in. It is
+    /// indexed by the 11-bit grid index and the group's sign bit together, so
+    /// a fragment decodes in one four-byte load. See `iq1s_signed_grid` on
+    /// the host.
     pub(in crate::codegen) fn tile_iq1s_qmma_t(
         &mut self,
         block: &Block<'c>,
@@ -48,9 +45,9 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// [`Self::tile_iq1s_qmma_t`] writing an existing destination, so the
-    /// accumulators go straight to global from the registers they are in. See
-    /// [`Self::qmma_t_into`], whose patch and fragment geometry this shares.
+    /// [`Self::tile_iq1s_qmma_t`] writing an existing destination, straight
+    /// from the accumulator registers. Shares its patch and fragment geometry
+    /// with [`Self::qmma_t_into`].
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn iq1s_qmma_t_into(
         &mut self,
@@ -126,9 +123,9 @@ impl<'c> Codegen<'c> {
             self.const_index(block, aq.shape[1])?
         };
 
-        // The lane's place in the fragments, as in `qmma_t_into`: both operands
-        // are read from row lane / 4 four bytes on, and the two accumulator
-        // elements land in columns 2 * (lane % 4) and one past.
+        // The lane's place in the fragments, as in `qmma_t_into`. Both operands
+        // are read from row lane / 4. The two accumulator elements land in
+        // columns 2 * (lane % 4) and the one after.
         let tid = self.thread_id(block)?;
         let warp_w = self.const_index(block, WARP)?;
         let warp = self.divui(block, tid, warp_w)?;
@@ -140,11 +137,10 @@ impl<'c> Codegen<'c> {
         let k_off = self.muli(block, in_quad, four)?;
         let d_col = self.muli(block, in_quad, two)?;
 
-        // A fragment is four consecutive k of one column, so it is half of one
-        // eight-element format lane. Which half, and which of the group's four
-        // lanes, are fixed for the thread: element `in_quad * 4 + h * 16` of
-        // the group sits in format lane `in_quad / 2 + h * 2`, low half when
-        // `in_quad` is even. Both are loop-invariant; only the block moves.
+        // A fragment is four consecutive k of one column, half of one format
+        // lane. Element `in_quad * 4 + h * 16` of the group sits in format lane
+        // `in_quad / 2 + h * 2`, in the low half when `in_quad` is even. Both
+        // are fixed for the thread, only the block moves.
         let half = self.remui(block, in_quad, two)?;
         let half_off = self.muli(block, half, four)?;
         let lane_of = |cg: &mut Self, blk: &Block<'c>, h: i64| -> Result<Value<'c, 'c>> {
@@ -204,8 +200,8 @@ impl<'c> Codegen<'c> {
             accs.push(detach(kb.argument(slot + 1)?.into()));
         }
 
-        // One k step is one 32-element group, which is one activation block and
-        // one weight scale at the same time.
+        // One k step is one 32-element group: one activation block and one
+        // weight scale.
         let blk_w = self.const_index(&kb, Q8_BLOCK)?;
         let b = self.divui(&kb, k, blk_w)?;
         let groups = self.const_index(&kb, 256 / Q8_BLOCK)?;
@@ -237,8 +233,8 @@ impl<'c> Codegen<'c> {
         }
 
         // The weight fragment, decoded rather than loaded. `qh` is per column
-        // and per group, so it serves both halves of the k step; `qs` is per
-        // format lane, so each half takes its own byte.
+        // and group, so both halves of the k step share it. `qs` is per format
+        // lane, so each half reads its own byte.
         let c8_i32 = self.const_i32(&kb, 8)?;
         let c256_i32 = self.const_i32(&kb, 256)?;
         let c32768 = self.const_i32(&kb, 32768)?;
@@ -260,8 +256,8 @@ impl<'c> Codegen<'c> {
                 let hi = self.push(&kb, arith::remui(hi, c8_i32, self.loc))?;
                 let hi = self.push(&kb, arith::muli(hi, c256_i32, self.loc))?;
                 let idx = self.push(&kb, arith::addi(qs, hi, self.loc))?;
-                // The sign picks between the two foldings of the same entry, so
-                // it is the table's low index bit and costs no arithmetic here.
+                // The sign is the table's low index bit, picking one of the
+                // entry's two foldings.
                 let idx = self.push(&kb, arith::muli(idx, c2_i32, self.loc))?;
                 let idx = self.push(&kb, arith::addi(idx, sign, self.loc))?;
                 let idx = self.numeric_cast(&kb, idx, self.index_t)?;
@@ -276,10 +272,9 @@ impl<'c> Codegen<'c> {
         let empty = self.vec_broadcast(&kb, zero_i, acc_t)?;
         let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
 
-        // The weight scale belongs to an output column, which is not the column
-        // whose fragment this lane holds, so it takes its own `qh`. An eighth
-        // is the delta fold: the table carries `8g +- 1` where the weight is
-        // `dl * (g +- 1/8)`.
+        // The weight scale belongs to an output column, not the column whose
+        // fragment this lane holds, so it reads its own `qh`. The factor 1/8
+        // undoes the table's `8g +- 1` folding.
         let eighth = self.const_f32(&kb, 0.125)?;
         let c4096 = self.const_i32(&kb, 4096)?;
         let c1_i32 = self.const_i32(&kb, 1)?;
@@ -369,14 +364,12 @@ impl<'c> Codegen<'c> {
 }
 
 impl<'c> Codegen<'c> {
-    /// [`Self::iq1s_qmma_t_into`] with the decoded weight staged through shared
-    /// memory once per CTA instead of re-decoded in every warp that reads it.
+    /// [`Self::iq1s_qmma_t_into`] with the decoded weight staged through
+    /// shared memory, decoded once per CTA rather than once per warp.
     ///
-    /// Only valid with exactly one patch per warp ([`Self::qmma_patch`]): the
-    /// staged form needs every warp at the same `k` together, which drops
-    /// the patch loop the register form uses to carry accumulators across
-    /// `k`. A separate entry point rather than a flag keeps the two apart in
-    /// the kernel cache.
+    /// Needs exactly one patch per warp ([`Self::qmma_patch`]), since every
+    /// warp must be at the same `k` together. It is a separate entry point so
+    /// the two forms stay apart in the kernel cache.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn iq1s_qmma_staged_into(
         &mut self,
@@ -441,8 +434,8 @@ impl<'c> Codegen<'c> {
         let k_off = self.muli(block, in_quad, four)?;
         let d_col = self.muli(block, in_quad, two)?;
 
-        // The warp's patch straight from its index. No patch loop: that is the
-        // guard above, and the whole reason staging is expressible here.
+        // The warp's patch comes straight from its index. The guard above
+        // rules out a patch loop.
         let across = self.const_index(block, ct / rn)?;
         let ui = self.divui(block, warp, across)?;
         let uj = self.remui(block, warp, across)?;
@@ -465,8 +458,8 @@ impl<'c> Codegen<'c> {
             w_rows.push(self.addi(block, frag_base, off)?);
             out_cols.push(self.addi(block, col_base, off)?);
         }
-        // Staging lanes this thread owns, strided by the CTA so that
-        // consecutive threads write consecutive columns.
+        // Staging lanes this thread owns, strided by the CTA so consecutive
+        // threads write consecutive columns.
         let per_thread = entries / self.cta_threads;
         let mut mine = Vec::with_capacity(per_thread as usize);
         for e in 0..per_thread {
@@ -526,8 +519,8 @@ impl<'c> Codegen<'c> {
             let hi = self.push(&kb, arith::remui(hi, c8_i32, self.loc))?;
             let hi = self.push(&kb, arith::muli(hi, c256_i32, self.loc))?;
             let idx = self.push(&kb, arith::addi(qs, hi, self.loc))?;
-            // The sign picks between the two foldings of the same entry, so it
-            // is the table's low index bit and costs no arithmetic here.
+            // The sign is the table's low index bit, picking one of the
+            // entry's two foldings.
             let idx = self.push(&kb, arith::muli(idx, c2_i32, self.loc))?;
             let idx = self.push(&kb, arith::addi(idx, sign, self.loc))?;
             let idx = self.numeric_cast(&kb, idx, self.index_t)?;
@@ -554,7 +547,6 @@ impl<'c> Codegen<'c> {
                 a_frags.push(self.vec_shape_cast(&kb, v, frag_t)?);
             }
         }
-        // One shared load where the register form spends a decode.
         let mut w_frags = Vec::new();
         for row in &w_rows {
             for col in &stage_cols {

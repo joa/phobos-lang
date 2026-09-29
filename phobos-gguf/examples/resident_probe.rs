@@ -3,10 +3,10 @@
 //   cargo run --release --features cuda -p phobos-gguf --example resident_probe
 //   cargo run --release --features cuda -p phobos-gguf --example resident_probe -- 6144
 //
-// Compiles and launches the one kernel directly rather than a whole model, so
-// it tells a slow kernel from an evicted one: the same kernel at the same
-// shape reads much slower once VRAM is tight. The optional argument is VRAM
-// ballast in MiB, held and written between launches, to reproduce that.
+// Compiles and launches one kernel directly, without a model, to tell a slow
+// kernel from an evicted one. The same kernel at the same shape reads much
+// slower once VRAM is tight. The optional argument is VRAM ballast in MiB,
+// held and written between launches, to reproduce that pressure.
 
 use anyhow::Result;
 use cust::prelude::*;
@@ -197,8 +197,8 @@ const HEAD_N: usize = 248320;
 const FFN_K: usize = 5120;
 const FFN_N: usize = 17408;
 
-/// A K-quant decode matvec, `<fmt>_qdot_i8_t` with no tables: the source
-/// `kernels/kquant.rs` builds, at the launch bound each format ships with.
+/// A K-quant decode matvec, `<fmt>_qdot_i8_t` with no tables, as
+/// `kernels/kquant.rs` builds it, at each format's launch bound.
 const fn kquant_probe(name: &'static str, kernel: &'static str, block_bytes: usize, src: &'static str) -> Probe {
     Probe {
         name,
@@ -263,8 +263,8 @@ kernel q6k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 ",
 );
 
-/// The 4B Q4_K_M's decode shapes, the K-quant kernels' own: `k` by `n`
-/// with the format that holds it there.
+/// The 4B Q4_K_M's decode shapes, `k` by `n`, each with the format the
+/// model stores it in.
 const KQUANT_SHAPES: [(&Probe, usize, usize, &str); 6] = [
     (&Q4K_I8, 2560, 9216, "ffn gate/up"),
     (&Q4K_I8, 9216, 2560, "ffn down (half)"),
@@ -274,8 +274,8 @@ const KQUANT_SHAPES: [(&Probe, usize, usize, &str); 6] = [
     (&Q6K_I8, 2560, 248320, "the head"),
 ];
 
-/// A K-quant staged projection, `<fmt>_qgemm_t` with no tables: the source
-/// `kernels/qgemm.rs` builds, at its shipped launch bound.
+/// A K-quant staged projection, `<fmt>_qgemm_t` with no tables, as
+/// `kernels/qgemm.rs` builds it, at its shipped launch bound.
 fn kquant_gemm_src(name: &str) -> String {
     format!(
         "@launch(256, 2)
@@ -309,9 +309,8 @@ fn warm(stream: &Stream, mut work: impl FnMut() -> Result<()>) -> Result<()> {
     Ok(())
 }
 
-/// One staged projection at `m` rows, timed: TOPS from the MACs, GB/s from
-/// the weight bytes, so the tensor-core rate and the weight traffic read
-/// side by side.
+/// Times one staged projection at `m` rows. Prints TOPS from the MACs next
+/// to GB/s from the weight bytes.
 fn run_gemm(stream: &Stream, name: &str, block_bytes: usize, m: usize, k: usize, n: usize) -> Result<f64> {
     let nb = k / 256;
     let rb = nb * block_bytes;
@@ -346,9 +345,9 @@ fn run_gemm(stream: &Stream, name: &str, block_bytes: usize, m: usize, k: usize,
 }
 
 /// `resident_probe --prompt`: the three K-quant staged projections at the
-/// 4B's shapes and at the 27B's FFN shape. Between the two `k`s is what a
-/// short k loop costs, and between formats at one shape what the decode
-/// and the minimum term cost.
+/// 4B's shapes and at the 27B's FFN shape. Comparing the two `k`s shows what
+/// a short k loop costs. Comparing formats at one shape shows what the
+/// decode and the minimum term cost.
 fn run_prompt(stream: &Stream) -> Result<()> {
     warm(stream, || run_gemm(stream, "q4k", 144, 512, 5120, 17408).map(|_| ()))?;
     println!("{:>6} {:>5} {:>8} {:>8} {:>9} {:>7} {:>7}", "fmt", "m", "k", "n", "ms", "TOPS", "GB/s");
@@ -383,9 +382,8 @@ fn run_kquant(stream: &Stream, ballast: &[DeviceBuffer<f32>]) -> Result<()> {
     if !ballast.is_empty() {
         return Ok(());
     }
-    // The narrow-n shapes against the grid: a thinner CTA owns fewer columns
-    // a warp and fills the card with more of them; whether that pays is
-    // what this sweep is for.
+    // The narrow-n shapes at thinner CTAs. A thinner CTA gives each warp
+    // fewer columns and puts more CTAs on the card.
     println!();
     for (probe, k, n) in [(&Q4K_I8, 9216usize, 2560usize), (&Q5K_I8, 4096, 2560), (&Q4K_I8, 2560, 1024)] {
         for (tn, threads) in [(64usize, 256u32), (32, 128), (16, 64)] {
@@ -406,10 +404,10 @@ fn main() -> Result<()> {
     // it resident and cannot simply evict what nobody touches.
     let positional: Vec<String> = std::env::args().skip(1).filter(|a| !a.starts_with("--")).collect();
     let ballast_mib: usize = positional.first().and_then(|a| a.parse().ok()).unwrap_or(0);
-    // How many allocations that ballast is split across. One is llama.cpp's
-    // shape, a handful of big backend buffers; several hundred is phobos's,
-    // one `cuMemAlloc` per tensor. WDDM manages residency per allocation, so
-    // the two are not the same amount of pressure even at the same total.
+    // How many allocations the ballast is split across. One matches
+    // llama.cpp's few large buffers; several hundred matches phobos's one
+    // `cuMemAlloc` per tensor. WDDM manages residency per allocation, so
+    // equal totals are not equal pressure.
     let chunks: usize = positional.get(1).and_then(|a| a.parse().ok()).unwrap_or(1);
     let mut ballast = Vec::new();
     if ballast_mib > 0 {
@@ -421,9 +419,9 @@ fn main() -> Result<()> {
             "holding {ballast_mib} MiB of ballast across {chunks} allocation(s),              written between launches"
         );
     }
-    // What the ballast actually took off the card. A `cuMemAlloc` is rounded
-    // up to the driver's page, so many small ones cost far more than the bytes
-    // asked for, and that difference is invisible from inside the process.
+    // What the ballast really took off the card. Each `cuMemAlloc` rounds up
+    // to the driver's page, so many small ones cost more than the bytes asked
+    // for, and the process cannot see that otherwise.
     if let Ok((free, total)) = cust::memory::mem_get_info() {
         let mib = |b: usize| b as f64 / (1 << 20) as f64;
         println!(
@@ -444,16 +442,15 @@ fn main() -> Result<()> {
         "{:>6} {:>8} {:>8} {:>5} {:>9} {:>9} {:>9}",
         "fmt", "k", "n", "TN", "ms", "GB/s", "GMAC/s"
     );
-    // The model's two heaviest decode kernels, with room to breathe.
+    // The 27B's two heaviest decode kernels.
     run(&stream, &Q3K, HEAD_K, HEAD_N, Q3K.tn, &ballast)?;
     run(&stream, &IQ1S, FFN_K, FFN_N, IQ1S.tn, &ballast)?;
     run(&stream, &IQ1S, FFN_N, FFN_K, IQ1S.tn, &ballast)?;
     run(&stream, &IQ1S_I8, FFN_K, FFN_N, IQ1S_I8.tn, &ballast)?;
     run(&stream, &IQ1S_I8, FFN_N, FFN_K, IQ1S_I8.tn, &ballast)?;
 
-    // The dp4a path has to agree with the float one it replaces. Both read
-    // the same weights and the same activation values, so the only difference
-    // left is the order the sums are accumulated in.
+    // The dp4a path must agree with the float path it replaces. Both read the
+    // same weights and activation values, so only accumulation order differs.
     let want = run(&stream, &IQ1S, FFN_K, FFN_N, IQ1S.tn, &[])?;
     let got = run(&stream, &IQ1S_I8, FFN_K, FFN_N, IQ1S_I8.tn, &[])?;
     let scale = want.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(1e-6);
@@ -492,8 +489,7 @@ fn main() -> Result<()> {
         run(&stream, &Q3K, HEAD_K, n, Q3K.tn, &[])?;
     }
     println!();
-    // The CTA size sets both occupancy and, since it is derived, how many
-    // columns a warp owns.
+    // The CTA size sets occupancy and also how many columns a warp owns.
     for threads in [256u32, 512, 1024] {
         let got = run_at(&stream, &IQ1S_I8, FFN_K, FFN_N, 64, threads, &[])?;
         let _ = got;
@@ -507,21 +503,19 @@ fn main() -> Result<()> {
     }
     println!();
     // The i8 kernel gives a warp two columns, so it needs twice the tile to
-    // keep a 256-thread CTA busy. Past 64 the grid starts running out of
-    // blocks to fill the card.
+    // keep a 256-thread CTA busy. Past 64 the grid runs short of blocks to
+    // fill the card.
     for tn in [8, 16, 32, 64, 128, 256] {
         run(&stream, &IQ1S_I8, FFN_K, FFN_N, tn, &[])?;
     }
     println!();
-    // The tile and the CTA together, at the two shapes the model runs and for
-    // the second-largest format as well: a warp owns `tn * 32 / threads`
-    // columns, and that product is the thing being swept, not either half.
+    // Tile and CTA together, at both model shapes and for IQ2_XXS too. A warp
+    // owns `tn * 32 / threads` columns, and that ratio is what is swept.
     for probe in [&IQ1S_I8, &IQ2XXS_I8] {
         for (k, n) in [(FFN_K, FFN_N), (FFN_N, FFN_K)] {
             for tn in [64usize, 128, 256] {
                 for threads in [256u32, 512, 1024] {
-                    // A warp owns `tn * WARP / threads` columns and the tile
-                    // has to fill the CTA a whole number of times.
+                    // The tile must fill the CTA a whole number of times.
                     if threads as usize > tn * 32 || !(tn * 32).is_multiple_of(threads as usize) {
                         continue;
                     }
@@ -566,14 +560,13 @@ fn run_at(
     let module = compile(&src, &[("TN", tn)], probe.name)?;
     let function = module.get_function(probe.kernel)?.to_raw();
 
-    // Values do not reach the timing: every lane decodes the same count of
-    // weights whatever the bytes say. They vary only so that a constant page
-    // cannot stand in for the traffic.
+    // Values do not affect timing, since every lane decodes the same number
+    // of weights. They vary so that a constant page cannot stand in for real
+    // traffic.
     let bytes: Vec<i8> = (0..n * rb).map(|i| (i.wrapping_mul(2654435761) >> 13) as i8).collect();
     let d: Vec<u16> = vec![0x3400u16; n * nb];
-    // The f32 activation is exactly the dequantization of the int8 one, so
-    // the float and dp4a kernels contract identical values and their outputs
-    // are comparable rather than merely both plausible.
+    // The f32 activation is exactly the dequantized int8 one, so the float
+    // and dp4a kernels contract identical values and their outputs compare.
     let aq: Vec<i8> = (0..k).map(|i| ((i % 17) as i32 - 8) as i8).collect();
     let asc: Vec<f32> = vec![ACT_SCALE; k / 32];
     let a: Vec<f32> = aq.iter().map(|&q| f32::from(q) * ACT_SCALE).collect();
@@ -584,11 +577,11 @@ fn run_at(
     let aqb = DeviceBuffer::from_slice(&aq)?;
     let ascb = DeviceBuffer::from_slice(&asc)?;
     let cb = DeviceBuffer::from_slice(&vec![0.0f32; n])?;
-    // The tables both paths read, from one random grid so they agree. A
-    // ternary grid for IQ1_S, as the float path's bytes (`g` in -1..1, eight
-    // an entry) or the int8 path's nibbles (`g + 1`, eight a word); for the
-    // rest, magnitudes of the shape a real grid holds, none of them zero,
-    // since the int8 path negates a masked byte as `(m ^ 0xff) + 1`.
+    // The tables both paths read, built from one random grid so they agree.
+    // IQ1_S gets a ternary grid: bytes `g` in -1..1 for the float path, or
+    // nibbles `g + 1`, eight per word, for the int8 path. The other formats
+    // get nonzero magnitudes like a real grid's. Zero is avoided because the
+    // int8 path negates a masked byte as `(m ^ 0xff) + 1`.
     let ternary = |i: usize| ((i.wrapping_mul(2654435761) >> 7) % 3) as i8 - 1;
     let table: Vec<i8> = if probe.name.starts_with("iq1s") {
         if probe.int8_act {
@@ -605,9 +598,9 @@ fn run_at(
         (0..probe.table_bytes.max(1)).map(|i| (i % 7 + 1) as i8).collect()
     };
     let table = DeviceBuffer::from_slice(&table)?;
-    // Signs are +/-1, never zero, so a disagreement cannot hide behind a
-    // vanished weight. The float path multiplies by +/-1; the dp4a path
-    // masks with 0/-1 -- both spell the same signs.
+    // Signs are never zero, so a disagreement cannot hide behind a vanished
+    // weight. The float path multiplies by +/-1 and the dp4a path masks with
+    // 0/-1, which encode the same signs.
     let signs: Vec<i8> = (0..probe.signs_bytes.max(1))
         .map(|i| match (i % 3 == 0, probe.int8_act) {
             (true, _) => -1,
@@ -695,8 +688,8 @@ fn time_grid(
     launch()?;
     stream.synchronize()?;
 
-    // Events rather than a host timer: with a ballast held, the number wanted
-    // is what the kernel costs, not what writing the ballast costs beside it.
+    // Timed by events, not a host clock, so the ballast writes between
+    // launches are not counted.
     use cust::event::{Event, EventFlags};
     let (begin, end) = (Event::new(EventFlags::DEFAULT)?, Event::new(EventFlags::DEFAULT)?);
     let mut total = 0.0f32;

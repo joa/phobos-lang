@@ -1,11 +1,11 @@
-// Tile buffers: allocating them in shared memory, swizzling and
-// padding them, and returning them to the pool.
+// Tile buffers: allocating them in shared memory, swizzling and padding
+// them, and returning them to the pool.
 
 use super::*;
 
 impl<'c> Codegen<'c> {
 
-    /// alloc a tile buffer in SM
+    /// Allocates a tile buffer in shared memory.
     pub(in crate::codegen) fn alloc_tile_shaped(
         &mut self,
         block: &Block<'c>,
@@ -19,8 +19,8 @@ impl<'c> Codegen<'c> {
         let space = self.shared_space()?;
         let t = MemRefType::new(elem, shape, None, Some(space));
 
-        // each tile is a window of the one allocation and 16-byte aligned so
-        // a four-element vector access stays legal.
+        // Each tile is 16-byte aligned so a four-element vector access is
+        // legal.
         let width = self
             .elem_bytes(elem)
             .with_context(|| format!("tile element {elem} has no known width"))?;
@@ -52,19 +52,14 @@ impl<'c> Codegen<'c> {
                 });
         }
 
-        // Pool entries come from release().
         let key = (elem.to_string(), shape.to_vec());
         let name = match self.tile_pool.get_mut(&key).and_then(Vec::pop) {
             Some(name) => name,
             None => {
-                // Nothing from an earlier phase is still live once
-                // dynamic_live hits 0: a kernel with phases separated by a
-                // barrier (see attention_persist_src) fully drains one
-                // phase's tiles before the next declares its own, so the
-                // allocation can restart at offset 0 instead of growing to
-                // fit every phase at once. shared_bytes_peak keeps the
-                // high-water mark, so this only ever shrinks what gets
-                // requested from the driver, never grows it.
+                // Once dynamic_live hits 0, no earlier tile is live, so
+                // allocation restarts at offset 0. This lets barrier-separated
+                // phases (see attention_persist_src) share the same bytes.
+                // shared_bytes_peak keeps the high-water mark.
                 if self.dynamic_shared && self.dynamic_live == 0 && self.shared_bytes > 0 {
                     self.tile_pool.clear();
                     self.tile_offsets.clear();
@@ -138,17 +133,15 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Returns an owned temp's shared buffer to the pool so a later allocation
-    /// of the same element type and physical shape reuses it instead of
-    /// growing the CTA's shared footprint. No-op for views, params and named
-    /// tiles (bind clears owned).
+    /// Returns an owned temp's shared buffer to the pool. A later allocation
+    /// of the same element type and physical shape reuses it. No-op for
+    /// views, params and named tiles (bind clears owned).
     ///
     /// Call only after every op reading the buffer has been emitted. Reuse is
-    /// race-free because each tile op ends in a CTA barrier, ordering the
-    /// reusing op's writes after the previous reads; leftover contents don't
-    /// matter since every producing op fully writes its output.
+    /// race-free because each tile op ends in a CTA barrier. Leftover contents
+    /// don't matter, since every producing op fully writes its output.
     pub(in crate::codegen) fn release(&mut self, mv: &MemVal<'c>) {
-        // A planned buffer has its place for its whole life; nothing to return.
+        // A planned buffer keeps its place for its whole life.
         if matches!(self.policy, SharedPolicy::Replay(_)) {
             return;
         }
@@ -171,8 +164,8 @@ impl<'c> Codegen<'c> {
             self.dynamic_live -= 1;
         }
 
-        // Pool by the physical allocation shape (padded buffers carry a
-        // logical shape narrower than the backing global).
+        // Pool by physical shape. A padded buffer's logical shape is narrower
+        // than its allocation.
         let mut shape = mv.shape.clone();
         if let (Some(stride), Some(last)) = (mv.row_stride, shape.last_mut()) {
             *last = stride;
@@ -186,9 +179,9 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// A tile as a window at `offset` of the kernel's one byte buffer: the
-    /// dynamic allocation, or the static global [`Self::finish_shared_buffer`]
-    /// declares once the size is known.
+    /// A tile as a view at `offset` into the kernel's byte buffer. That buffer
+    /// is the dynamic allocation, or the static global that
+    /// [`Self::finish_shared_buffer`] declares.
     fn planned_view(
         &mut self,
         block: &Block<'c>,
@@ -220,8 +213,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// Declares the static byte buffer a replaying emission's views point
-    /// into, sized to the plan's peak. Nothing for a dynamic kernel, whose
-    /// host reserves the peak at launch, or for a kernel with no tiles.
+    /// into, sized to the plan's peak. Does nothing for a dynamic kernel,
+    /// whose host reserves the peak at launch, or for a kernel with no tiles.
     pub(in crate::codegen) fn finish_shared_buffer(&mut self) -> Result<()> {
         let SharedPolicy::Replay(plan) = &self.policy else {
             return Ok(());
@@ -245,10 +238,10 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Allocates an unpadded shared staging tile with an XOR column swizzle (see
-    /// [`Swizzle`]), so ldmatrix reads avoid bank conflicts without paying for
-    /// the WMMA path's padding. Shape and layout are unchanged; only the column
-    /// index each access uses is permuted, the same way on store and load.
+    /// Allocates an unpadded shared staging tile with an XOR column swizzle
+    /// (see [`Swizzle`]), so ldmatrix reads avoid bank conflicts without
+    /// padding. Shape and layout are unchanged. Only the column index of each
+    /// access is permuted, the same way on store and load.
     pub(in crate::codegen) fn alloc_tile_swizzled(
         &mut self,
         block: &Block<'c>,
@@ -258,8 +251,8 @@ impl<'c> Codegen<'c> {
         let mut mv = self.alloc_tile_shaped(block, elem, shape)?;
         let width = *shape.last().expect("tile values are not rank-0");
 
-        // 8-f16 blocks per row; permute the block index by up to the bank period
-        // (32 banks / 4 banks per 16B granule = 8 phases, so at most 3 bits).
+        // Permute the index of each 8-f16 block by at most 3 bits: 32 banks
+        // over 4 banks per 16B granule gives 8 phases.
         let blocks = (width / 8).max(1);
         let bits = blocks.trailing_zeros().min(3);
 
@@ -273,8 +266,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// Permutes a column index through a buffer's [`Swizzle`], or returns it
-    /// unchanged when the buffer is unswizzled. Every staging store and ldmatrix
-    /// load goes through here, so the data round-trips whatever the params are.
+    /// unchanged when the buffer is unswizzled. Every staging store and
+    /// ldmatrix load goes through here, so the data always round-trips.
     pub(in crate::codegen) fn swizzle_col(
         &self,
         block: &Block<'c>,
@@ -301,8 +294,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// A copy of idx with its last (column) component swizzled through mv's
-    /// layout, or idx unchanged for an unswizzled buffer. Lets a staging store
-    /// land at the same permuted column the ldmatrix load reads.
+    /// layout, or idx unchanged for an unswizzled buffer.
     pub(in crate::codegen) fn swizzled_index(
         &self,
         block: &Block<'c>,
@@ -318,11 +310,10 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// Allocates a shared WMMA staging tile whose innermost dimension is padded
-    /// by [`WMMA_SMEM_PAD`] elements, spreading consecutive rows across distinct
-    /// banks. The tile keeps its logical shape, so iteration and fragment
-    /// indexing are unchanged; the padding lives only in the physical allocation
-    /// and the row_stride the WMMA leadDimension reads.
+    /// Allocates a shared WMMA staging tile whose innermost dimension is
+    /// padded by [`WMMA_SMEM_PAD`] elements, spreading consecutive rows across
+    /// banks. The tile keeps its logical shape. The padding shows only in the
+    /// allocation and in row_stride, which WMMA reads as leadDimension.
     pub(in crate::codegen) fn alloc_tile_padded(
         &mut self,
         block: &Block<'c>,
@@ -334,8 +325,7 @@ impl<'c> Codegen<'c> {
 
         phys[last] += WMMA_SMEM_PAD;
 
-        // alloc_tile_shaped sizes the buffer and proves alignment off the
-        // padded physical shape; restore the logical view afterwards.
+        // Allocate the padded physical shape, then restore the logical one.
         let mut mv = self.alloc_tile_shaped(block, elem, &phys)?;
 
         mv.row_stride = Some(phys[last]);
@@ -344,9 +334,8 @@ impl<'c> Codegen<'c> {
         Ok(mv)
     }
 
-    /// tile_flat aliases a tile as one row [1, rows * cols].
-    ///
-    /// Nothing is allocated and no data moves!
+    /// Aliases a tile as one row `[1, rows * cols]`. Nothing is allocated and
+    /// no data moves.
     pub(in crate::codegen) fn tile_flat(
         &mut self,
         block: &Block<'c>,

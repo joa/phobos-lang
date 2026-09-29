@@ -67,9 +67,9 @@ pub fn run_node_host(node: &Node, inputs: &HashMap<String, Tensor>) -> Result<Ve
     eval_node(node, inputs, &HashMap::new(), &HostBackend)
 }
 
-/// Decode a graph's initializers once, for reuse across runs. KV-cache steps
-/// re-fold the same weights every token, and decoding per step would
-/// re-materialize hundreds of megabytes. Feeds [`run_with_env`].
+/// Decode a graph's initializers once, for reuse across runs with
+/// [`run_with_env`]. KV-cache steps use the same weights every token, and
+/// decoding them per step would be costly.
 pub fn decode_initializers(graph: &Graph) -> Result<HashMap<String, Tensor>> {
     graph
         .initializers
@@ -169,8 +169,8 @@ fn eval_node(
     let op = node.op_type.as_str();
 
     let out = match op {
-        // A constant the folder could not resolve, a bool causal-mask buffer
-        // among them, survives into the residual graph.
+        // A constant the folder could not resolve, such as a bool causal-mask
+        // buffer, survives into the residual graph.
         "Constant" => match node.attrs.get("value") {
             Some(Attribute::Tensor(t)) => vec![from_initializer(t)?],
             _ => bail!("Constant '{}' has no tensor value attribute", node.name),
@@ -201,8 +201,8 @@ fn eval_node(
         "Split" => split(node, ins[0])?,
         "Gather" => vec![gather(node, ins[0], ins[1])?],
         "Slice" => vec![slice(&ins)?],
-        // Shape plumbing the folder could not resolve, the with-past graph's
-        // dynamic past length among it.
+        // Shape plumbing the folder could not resolve, such as the with-past
+        // graph's dynamic past length.
         "Shape" => vec![Tensor::i64(
             vec![ins[0].dims.len() as i64],
             ins[0].dims.clone(),

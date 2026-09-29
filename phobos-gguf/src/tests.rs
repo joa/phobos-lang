@@ -91,8 +91,8 @@ impl Builder {
         self
     }
 
-    /// A tensor of any ggml type from its storage bytes, `code` being the
-    /// type's number in the file format (8 is Q8_0, 12 Q4_K, 13 Q5_K).
+    /// A tensor of any ggml type from its storage bytes. `code` is the type's
+    /// number in the file format (8 is Q8_0, 12 Q4_K, 13 Q5_K).
     pub(crate) fn tensor_raw(&mut self, name: &str, dims: &[u64], code: u32, bytes: &[u8]) -> &mut Self {
         push_str(&mut self.tensors, name);
         self.tensors.extend((dims.len() as u32).to_le_bytes());

@@ -1,9 +1,9 @@
 // Q2_K: `{ uint8 scales[16]; uint8 qs[64]; f16 d; f16 dmin; }`.
 //
-// 16 runs of 16 elements, each with a scale and min packed into one byte
-// (`scale = byte & 0xf`, `min = byte >> 4`). `qs` packs four 2-bit values a
-// byte; each 32-byte half serves 128 elements, read four times with the
-// shift advancing by two each pass.
+// 16 runs of 16 elements. A run's scale and min share one byte
+// (`scale = byte & 0xf`, `min = byte >> 4`). `qs` packs four 2-bit values
+// per byte. Each 32-byte half of `qs` serves 128 elements and is read four
+// times, the shift advancing by two each pass.
 
 use phobos_base::half::f16_to_f32;
 

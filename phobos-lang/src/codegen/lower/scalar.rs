@@ -117,7 +117,8 @@ impl<'c> Codegen<'c> {
                 self.const_index(block, 0)?
             }
             OpKind::Alloc => {
-                // The private slot of a `var` scalar; shared buffers are tile ops.
+                // The private slot of a `var` scalar. Shared buffers are tile
+                // ops.
                 let ir::Type::Tile(t) = ir.ty(ir.result(op)) else {
                     bail!("alloc of a non-tile");
                 };

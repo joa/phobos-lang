@@ -1,16 +1,14 @@
-// The greedy-decode fast path: a device-side argmax over the logits row, so
-// `forward_greedy` reads a token id back instead of the whole vocab.
+// Device-side argmax over the logits row, so greedy decode reads back one
+// token id instead of the whole vocab.
 
 use super::*;
 
 impl DeviceBackend {
     /// [`Backend::argmax`]'s device override.
     ///
-    /// Runs outside the recorded pass, on the stream, after `end_pass` has
-    /// already replayed the graph that produced `buf`: two small eager
-    /// launches (`argmax_reduce` then `argmax_finish`) rather than a third
-    /// node folded into the graph, since neither needs the graph's node-arg
-    /// stability and both are cheap enough that recording them buys nothing.
+    /// Runs outside the recorded pass, after `end_pass` has replayed the
+    /// graph that produced `buf`. It is two small eager launches,
+    /// `argmax_reduce` then `argmax_finish`.
     pub(super) fn device_argmax(&self, buf: Buf, len: usize) -> Result<i64> {
         let w = argmax_chunk_width(len);
         let s = ARGMAX_SPLITS;
@@ -64,7 +62,7 @@ impl DeviceBackend {
             (1, 1, 1),
         )?;
 
-        // Two floats, not the vocab: the whole point of this path.
+        // Reads back two floats: the max and its index.
         self.stream.synchronize()?;
         let mut winner = [0.0f32; 2];
         out.copy_to(&mut winner)?;

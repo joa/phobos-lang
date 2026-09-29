@@ -25,7 +25,7 @@ impl<'c> Codegen<'c> {
         let iv = ir.args(body)[0];
         let ops = ir.ops(body);
 
-        // The prefix ends at the last of the staged prefix's stage ops.
+        // The prefix ends at its `info.staged`-th stage op.
         let mut stages = Vec::with_capacity(info.staged);
         for &o in ops {
             if matches!(ir.kind(o), OpKind::Stage(_)) {
@@ -76,11 +76,11 @@ impl<'c> Codegen<'c> {
             hi,
             ends_with_tile_op: info.ends_with_tile_op,
         };
-        // Half A: compute iteration iv from bufs0, prefetch iv+st -> bufs1.
+        // Half A: compute iteration iv from bufs0, prefetch iv+st into bufs1.
         self.emit_pipeline_stage_ir(&body_block, &half, mlir_iv, next, &bufs0, &bufs1)?;
 
-        // Half B (when iteration iv+st exists): compute it from bufs1,
-        // prefetch iv+2*st -> bufs0.
+        // Half B, when iteration iv+st exists: compute it from bufs1,
+        // prefetch iv+2*st into bufs0.
         let have_b = self.push(
             &body_block,
             arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, next, hi, self.loc),
@@ -108,8 +108,9 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// One unrolled half: a guarded prefetch (no barrier) of `prefetch_iv`
-    /// into `dst`, compute of `compute_iv` from `cur`, one closing barrier.
+    /// One unrolled half: a guarded prefetch of `prefetch_iv` into `dst`,
+    /// then compute of `compute_iv` from `cur`, then a closing barrier. The
+    /// barrier is skipped when the body's last tile op already ends in one.
     fn emit_pipeline_stage_ir(
         &mut self,
         block: &Block<'c>,
@@ -141,15 +142,14 @@ impl<'c> Codegen<'c> {
             out
         })?;
 
-        // cp.async: commit everything this thread issued in the prefetch into
-        // one group.
+        // Commit every cp.async this thread issued in the prefetch as one
+        // group.
         let group = if use_async {
             Some(self.async_create_group(block)?)
         } else {
             None
         };
 
-        // Compute against cur.
         self.lowered.push(HashMap::new());
         self.set_ir(half.iv, Lowered::Scalar(compute_iv));
         for (&stage, c) in half.stages.iter().zip(cur) {

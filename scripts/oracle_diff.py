@@ -4,13 +4,16 @@
         -k 8 -n 8 "The capital of France is" > phobos.jsonl
     python scripts/oracle_diff.py phobos.jsonl [--port 8090]
 
-The server must be serving the same file (`llama.exe serve -m MODEL.gguf
---port 8090`). Per prompt: whether the server tokenizes it the same, the
-top-k log-probabilities of the next token on both sides as differences
-against each side's own top token (which cancels the softmax normalization,
-so what is left is the two implementations' disagreement), and the greedy
-continuation. Near-tied logits legitimately diverge in the greedy text; the
-log-prob spread is the measurement.
+The server must serve the same file (`llama.exe serve -m MODEL.gguf
+--port 8090`). For each prompt it prints whether the server tokenizes it the
+same, the top-k next-token log-probabilities of both sides, and the greedy
+continuation.
+
+Each side's log-probabilities are taken relative to its own top token. That
+cancels the softmax normalization, so only the disagreement is left.
+
+The log-prob spread is the measurement. Near-tied logits can legitimately
+make the greedy text diverge.
 """
 
 import argparse

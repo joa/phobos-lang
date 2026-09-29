@@ -26,15 +26,15 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-/// Positions one pass of the prompt covers. A pass sizes its intermediates
-/// per row, and batching's payoff peaks around here.
+/// Positions one prompt pass covers. A pass sizes its intermediates per
+/// row, and batching pays off most around here.
 pub(crate) const PROMPT_BATCH: usize = 512;
 
 /// Device bytes [`check_fits`] leaves for everything that is not a weight: a
 /// pass's intermediates, quantized-activation scratch, split-K partials, a
-/// delta net's recurrent state, and the driver's own context. Generous on
-/// purpose, to catch a model that cannot possibly fit rather than adjudicate
-/// the last hundred megabytes.
+/// delta net's recurrent state, and the driver's context. Deliberately
+/// generous: it catches a model that cannot fit, not the last hundred
+/// megabytes.
 pub(crate) const RESERVE_BYTES: usize = 768 << 20;
 
 pub struct GgufModel {
@@ -42,8 +42,8 @@ pub struct GgufModel {
     bpe: Bpe,
     backend: Box<dyn Backend>,
     info: ModelInfo,
-    /// Sized once at load, at the same batch [`check_fits`] gates on, so the
-    /// weight figure a caller displays is the one the fit was decided by.
+    /// Computed once at load, at the batch [`check_fits`] uses, so the weight
+    /// figure a caller displays matches the fit decision.
     footprint: crate::model::Footprint,
 }
 
@@ -94,31 +94,30 @@ impl GgufModel {
     }
 }
 
-/// Refuse a model whose weights cannot fit the device, before the first pass
-/// discovers it a third of the way through uploading them.
+/// Refuses a model whose weights cannot fit the device, before the first
+/// pass finds out partway through uploading.
 ///
-/// Weights are the part worth checking: they are constants, so every one of
-/// them is resident at once and none is ever released. Everything else is
-/// bounded by [`RESERVE_BYTES`], and the caches are only reported, since their
-/// cost depends on how long a sequence gets rather than on the model. Streamed
-/// experts are not weights in this sense: they are never all resident, and
-/// whatever room is left after the resident ones is what their cache gets.
+/// Weights are the part worth checking: they are constants, all resident at
+/// once and never released. Everything else is bounded by [`RESERVE_BYTES`].
+/// The caches are only reported, since their cost depends on sequence
+/// length, not the model. Streamed experts do not count: they are never all
+/// resident, and their cache gets whatever room the resident weights leave.
 fn check_fits(backend: &dyn Backend, decoder: &Decoder) -> Result<()> {
     let Some((free_bytes, total_bytes)) = backend.device_memory() else {
         return Ok(());
     };
 
-    // Sized at a pass's row count, not the trained context: the rope table
-    // this folds in grows lazily like the KV cache, so gating on the full
-    // context length would reserve for a table the run may never reach.
+    // Sized at a pass's row count, not the trained context. The rope table
+    // included here grows lazily like the KV cache, so the full context
+    // length would reserve for a table the run may never reach.
     let footprint = decoder.footprint(PROMPT_BATCH);
     let want_bytes = footprint.weight_bytes + RESERVE_BYTES;
     if want_bytes <= free_bytes {
         return Ok(());
     }
 
-    // A file this crate has to dequantize costs four bytes a weight on the
-    // device whatever it took on disk. Surfaced only once it accounts for a
+    // A weight this crate dequantizes costs four bytes per element on the
+    // device, whatever it took on disk. Mention it only when it is over a
     // quarter of the total.
     let dense_note = if footprint.dense_bytes * 4 > footprint.weight_bytes {
         format!(
@@ -193,18 +192,17 @@ impl Model for GgufModel {
         self.backend.cache_stats()
     }
 
-    /// A short prompt and one decode step through a throwaway session. A
-    /// weight reaches the device the first time a pass uses it, and a kernel
-    /// is loaded the first time a pass launches it. A prompt pass launches
-    /// kernels a decode step never does, and the other way round, so both
-    /// run. Streamed experts are not uploaded: only the ones routed to are
-    /// copied.
+    /// Runs a short prompt and one decode step through a throwaway session.
+    /// A weight reaches the device the first time a pass uses it, and a
+    /// kernel loads the first time a pass launches it. Prompt passes and
+    /// decode steps launch different kernels, so both run. Streamed experts
+    /// are not uploaded; only the routed ones are copied.
     fn warm_up(&self) -> Result<()> {
         // Wide enough that the prompt pass takes the same paths a real
         // prompt does, the grouped expert GEMMs among them.
         const PROMPT_TOKENS: usize = 128;
-        // The host backend reads its weights where the file left them, and a
-        // pass there costs seconds for nothing.
+        // The host backend reads weights in place from the file, and a pass
+        // there costs seconds for nothing.
         if !cfg!(feature = "cuda") {
             return Ok(());
         }
@@ -275,10 +273,10 @@ impl Session for GgufSession<'_> {
 
 /// Positions the attention caches hold for a sequence of `len`.
 ///
-/// They grow by doubling from a floor, so what is reserved is mostly headroom
-/// just after a growth. Reporting `len` instead would understate the cache by
-/// up to half of it. See `layers::KvCache::reserve`, which this mirrors; the
-/// recurrent state a delta net carries is fixed in size and not counted here.
+/// They grow by doubling from a floor, so just after a growth most of the
+/// reservation is headroom. Reporting `len` would understate the cache by up
+/// to half. Mirrors `layers::KvCache::reserve`. A delta net's fixed-size
+/// recurrent state is not counted.
 fn kv_capacity(len: usize) -> usize {
     len.next_power_of_two().max(64)
 }
@@ -286,7 +284,7 @@ fn kv_capacity(len: usize) -> usize {
 impl Drop for GgufSession<'_> {
     fn drop(&mut self) {
         // A [`crate::backend::Buf`] is a handle, not an owner, so dropping the
-        // state alone would strand its caches on the device.
+        // state alone would leak its caches on the device.
         self.state.release(self.model.backend.as_ref());
     }
 }

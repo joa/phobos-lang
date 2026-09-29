@@ -1,10 +1,11 @@
 // IQ2_S: `{ f16 d; uint8 qs[64]; uint8 qh[8]; uint8 scales[8]; }`, 2.5625
 // bits a weight.
 //
-// `qs`'s first half holds an 8-bit grid index per lane, extended to 10 bits
-// by 2 bits of `qh` shared across a group of four; its second half holds a
-// sign byte per lane, tested directly against [`super::tables::iq2::KMASK_IQ2XS`]
-// rather than through the parity table IQ2_XXS/IQ2_XS use.
+// The first half of `qs` holds an 8-bit grid index per lane, extended to 10
+// bits by 2 bits of a `qh` byte shared by four lanes. The second half holds
+// a sign byte per lane, tested directly against
+// [`super::tables::iq2::KMASK_IQ2XS`] instead of going through the parity
+// table IQ2_XXS and IQ2_XS use.
 
 use phobos_base::half::f16_to_f32;
 
@@ -36,8 +37,8 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ2S_GRID`] flattened to one magnitude byte a slot: `flat_grid()[i * 8
-/// + j]` is byte `j` of `IQ2S_GRID[i]`.
+/// [`IQ2S_GRID`] flattened to one magnitude byte per slot:
+/// `flat_grid()[i * 8 + j]` is byte `j` of `IQ2S_GRID[i]`.
 #[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ2S_GRID
@@ -46,10 +47,9 @@ pub(crate) fn flat_grid() -> Vec<i32> {
         .collect()
 }
 
-/// Every sign byte (0..256) expanded to its eight per-element +-1
-/// multipliers via [`KMASK_IQ2XS`]: `flat_signs()[b * 8 + j]` is element
-/// `j`'s sign under byte `b`. IQ2_S stores the sign byte directly, unlike
-/// IQ2_XXS's 7-bit parity index.
+/// Every sign byte (0..256) expanded to eight +-1 multipliers via
+/// [`KMASK_IQ2XS`]: `flat_signs()[b * 8 + j]` is element `j`'s sign under
+/// byte `b`. IQ2_S stores the sign byte itself, not a parity index.
 #[cfg(feature = "cuda")]
 pub(crate) fn flat_signs() -> Vec<i32> {
     (0u32..256)

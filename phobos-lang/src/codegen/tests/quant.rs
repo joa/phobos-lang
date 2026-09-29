@@ -14,7 +14,8 @@ const I8_DOT_T: &str = "@launch(256)
 
 #[test]
 fn i8_dot_t_uses_the_hardware_four_way_dot() {
-    // dot_t contracts the last axis of both operands, landing on dp4a's four-byte load.
+    // dot_t contracts the last axis of both operands, which matches dp4a's
+    // four-byte load.
     let mlir = emit_mlir(I8_DOT_T);
     assert_contains(
         &mlir,
@@ -29,7 +30,7 @@ fn i8_dot_t_uses_the_hardware_four_way_dot() {
 
 #[test]
 fn i8_dot_t_falls_back_below_pascal() {
-    // dp4a arrived with Pascal; older targets fall back to the generic integer path.
+    // dp4a needs Pascal. Older targets take the generic integer path.
     let mlir = emit_mlir_on(I8_DOT_T, "sm_50");
     assert!(
         !mlir.contains("nvvm.dot.accumulate.4way"),
@@ -51,8 +52,8 @@ const I8_DOT_T_TILED: &str = "@launch(256)
 
 #[test]
 fn i8_dot_t_uses_the_integer_tensor_cores() {
-    // Whole 8x8 output tiles route to mma.sync instead of dp4a; m8n8k16
-    // fragments are vector<1x4xi8> operands into a vector<1x2xi32> accumulator.
+    // Whole 8x8 output tiles use mma.sync instead of dp4a. m8n8k16 takes
+    // vector<1x4xi8> operands into a vector<1x2xi32> accumulator.
     let mlir = emit_mlir(I8_DOT_T_TILED);
     assert_contains(
         &mlir,
@@ -71,7 +72,7 @@ fn i8_dot_t_uses_the_integer_tensor_cores() {
 
 #[test]
 fn a_single_row_i8_dot_t_stays_on_dp4a() {
-    // A single row can't fill the tensor core's 8-row minimum tile.
+    // A single row cannot fill the tensor core's 8-row minimum tile.
     let mlir = emit_mlir(I8_DOT_T);
     assert!(
         !mlir.contains("nvgpu.mma.sync"),
@@ -81,7 +82,7 @@ fn a_single_row_i8_dot_t_stays_on_dp4a() {
 
 #[test]
 fn i8_dot_t_falls_back_below_turing() {
-    // Integer tensor cores arrived with Turing; Pascal/Volta fall back to dp4a.
+    // Integer tensor cores need Turing. Pascal and Volta use dp4a.
     let mlir = emit_mlir_on(I8_DOT_T_TILED, "sm_70");
     assert!(
         !mlir.contains("nvgpu.mma.sync"),
@@ -104,8 +105,8 @@ const Q8_QMMA: &str = "            @launch(256)
 
 #[test]
 fn qmma_t_keeps_its_accumulators_in_registers() {
-    // Folding the block scales into qmma_t keeps accumulators as loop-carried
-    // f32 values instead of forcing them into shared memory.
+    // With the block scales folded into qmma_t, the accumulators stay
+    // loop-carried f32 values instead of living in shared memory.
     let mlir = emit_mlir(Q8_QMMA);
     assert_contains(
         &mlir,
@@ -114,7 +115,7 @@ fn qmma_t_keeps_its_accumulators_in_registers() {
             "mmaShape = [8, 8, 16]",
             "vector<1x4xi8>",
             "vector<1x2xi32>",
-            // f32 via the 1.5*2^23 mantissa trick, not a conversion instruction.
+            // i32 to f32 via the 1.5*2^23 mantissa trick, not a conversion.
             "arith.bitcast",
             "arith.constant 0x4B400000 : f32",
         ],
@@ -124,7 +125,7 @@ fn qmma_t_keeps_its_accumulators_in_registers() {
         "the block accumulator still converts the slow way in:
 {mlir}"
     );
-    // Eight tiles a warp, two f32 accumulators each, carried across k.
+    // Eight tiles per warp, two f32 accumulators each, carried across k.
     assert_contains(&mlir, &["iter_args"]);
     let carried = mlir
         .matches("%cst = arith.constant 0.000000e+00 : f32")
@@ -157,7 +158,7 @@ fn qmma_t_needs_whole_tensor_core_tiles() {
 
 #[test]
 fn i8_contraction_accumulates_in_i32() {
-    // i8*i8 overflows immediately, so the accumulator widens even when unwritten.
+    // i8*i8 overflows i8 at once, so the accumulator is always i32.
     let mlir = emit_mlir(
         "@launch(256)
         @aligned(K = 32, N = 32)
@@ -190,7 +191,7 @@ fn a_ragged_contraction_stays_off_the_dp4a_path() {
 
 #[test]
 fn gather_indexes_a_table_per_element() {
-    // gather needs one lookup per element inside the distributed loop, not a
+    // gather does one lookup per element inside the distributed loop, not a
     // single CTA-uniform load.
     let mlir = emit_mlir(
         "@launch(256)
@@ -212,7 +213,8 @@ fn gather_indexes_a_table_per_element() {
 #[test]
 fn gather_accepts_a_rank_two_table_with_a_leading_one() {
     // Kernel params are always rank-2, so a [1, n] table must work like a
-    // rank-1 one: A[0, :] can't get there since point/slice subscripts don't mix.
+    // rank-1 one. `A[0, :]` is not an option, since point and slice
+    // subscripts do not mix.
     let mlir = emit_mlir(
         "@launch(256)
         kernel gather_test(IDX: tensor<i32>[N, 4], TABLE: tensor<i32>[1, 256], OUT: tensor<i32>[N, 4]) {
@@ -255,8 +257,8 @@ const IQ1S_QMMA: &str = "            @launch(128)
 
 #[test]
 fn iq1s_qmma_t_decodes_into_the_tensor_core_fragments() {
-    // The grid entry lands in the same `vector<1x4xi8>` operand a Q8_0 weight
-    // would have loaded into, so nothing expanded is ever written.
+    // The grid entry goes into the same `vector<1x4xi8>` operand a Q8_0
+    // weight would load into, so no expanded weight is ever written.
     let mlir = emit_mlir(IQ1S_QMMA);
     assert_contains(
         &mlir,
@@ -267,18 +269,17 @@ fn iq1s_qmma_t_decodes_into_the_tensor_core_fragments() {
             "vector<1x2xi32>",
         ],
     );
-    // Accumulators carried across k rather than staged.
+    // Accumulators are carried across k, not staged.
     assert_contains(&mlir, &["iter_args"]);
 }
 
 #[test]
 fn iq1s_qmma_t_writes_no_expanded_weight() {
-    // Unlike `_qdecode`, this path never stores the expanded weight, and has
-    // no barrier inside the k loop either.
+    // Unlike `_qdecode`, this path never stores the expanded weight.
     let mlir = emit_mlir(IQ1S_QMMA);
     let stores = mlir.matches("memref.store").count();
-    // Two accumulator halves per tile of the warp's patch, written once after
-    // the loop. Anything more would be an expansion.
+    // Two accumulator halves per tile of the warp's patch, written once
+    // after the loop. Anything more would be an expansion.
     assert!(
         stores <= 64,
         "the fused projection is storing more than its accumulators ({stores}) in:
@@ -289,8 +290,7 @@ fn iq1s_qmma_t_writes_no_expanded_weight() {
 #[test]
 fn iq1s_qmma_t_needs_whole_tensor_core_tiles() {
     // 8x8 tensor-core outputs need tile dims that are multiples of 8. `k` is
-    // dynamic in the signature, so the whole-256-block promise is the caller's
-    // instead, made by `raw_qmma_eligible` on the host.
+    // dynamic, so the host's `raw_qmma_eligible` promises whole 256-blocks.
     let src = IQ1S_QMMA.replace("TN in [64]", "TN in [12]");
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);

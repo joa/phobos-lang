@@ -8,9 +8,9 @@ use crate::model::ForwardBufs;
 
 use super::{Config, FeedForward, LayerState, Mixer, Model, State, Variants};
 
-/// What the routers of a mixture-of-experts model chose during one pass,
-/// for a caller studying them: which experts, and which ones a cheap
-/// prediction would have named ahead of time.
+/// What the routers of a mixture-of-experts model chose during one pass:
+/// which experts, and which a cheap prediction would have named ahead of
+/// time. For studying the routers.
 #[derive(Debug, Default)]
 pub struct RouteTrace {
     /// Experts a token went through.
@@ -18,26 +18,25 @@ pub struct RouteTrace {
     /// `[block][row][n_used]` expert ids, every block's router as it ran.
     pub routes: Vec<u32>,
     /// `[block][row][n_used]`: block `b + 1`'s router evaluated on the
-    /// residual as it left block `b`, before block `b + 1`'s own mixer
-    /// touched it. The last block predicts nothing; its entries are zero.
-    /// A prefetch that acts on this is only as good as its agreement with
-    /// `routes`, which is what the trace is for measuring.
+    /// residual leaving block `b`, before block `b + 1`'s own mixer. The last
+    /// block predicts nothing; its entries are zero. A prefetch using this is
+    /// only as good as its agreement with `routes`, which the trace measures.
     pub lookahead: Vec<u32>,
 }
 
-/// The device buffers a traced pass leaves behind for [`RouteTrace`] to be
-/// read out of once the pass has ended.
+/// The device buffers a traced pass fills, read into a [`RouteTrace`] after
+/// the pass ends.
 struct TraceBufs {
-    /// One `[rows, n_used]` buffer a block.
+    /// One `[rows, n_used]` buffer per block.
     routes: Vec<Buf>,
-    /// One `[rows, n_expert]` logits buffer a block that predicts.
+    /// One `[rows, n_expert]` logits buffer per predicting block.
     lookahead: Vec<Option<Buf>>,
     scratch: Buf,
 }
 
 impl Model {
-    /// Run `tokens`, advancing `state`, and return the final position's logits.
-    /// Only the last row is projected through the LM head.
+    /// Runs `tokens`, advancing `state`, and returns the final position's
+    /// logits. Only the last row goes through the LM head.
     pub fn forward(
         &self,
         state: &mut State,
@@ -48,8 +47,8 @@ impl Model {
     }
 
     /// [`Model::forward`] for a caller that only wants the winning token id,
-    /// as greedy decoding does: the LM head still runs, only the vocab-wide
-    /// readback that follows it is skipped. See [`Backend::argmax`].
+    /// as greedy decoding does. The LM head still runs; only the vocab-wide
+    /// readback is skipped. See [`Backend::argmax`].
     pub fn forward_greedy(
         &self,
         state: &mut State,
@@ -79,8 +78,8 @@ impl Model {
     }
 
     /// [`Model::forward`] on a mixture-of-experts model, also reporting what
-    /// its routers chose. Slower than the plain pass by a router evaluation
-    /// a block and the readbacks; for studying the routers, not for serving.
+    /// its routers chose. Costs an extra router evaluation per block plus the
+    /// readbacks, so it is for studying the routers, not for serving.
     pub fn forward_traced(
         &self,
         state: &mut State,
@@ -134,9 +133,8 @@ impl Model {
     }
 
     /// The shared body of [`Model::forward_with`] and [`Model::forward_greedy`]:
-    /// everything through the LM head projection and the pass's own
-    /// `end_pass`, leaving only "how much of the result to read back" to the
-    /// two callers above.
+    /// everything through the LM head and `end_pass`. The callers only decide
+    /// how much of the result to read back.
     fn forward_to_logits(
         &self,
         state: &mut State,
@@ -168,7 +166,7 @@ impl Model {
         let normed = backend.alloc(rows * d)?;
 
         // A backend that caches streamed experts sizes the cache from what
-        // the resident weights leave; told every pass, it sizes once.
+        // the resident weights leave. It is told every pass but sizes once.
         if self.config.moe.is_some() {
             backend.budget_streamed(self.resident_bytes, cfg.n_block)?;
             for block in &self.blocks {
@@ -184,9 +182,9 @@ impl Model {
 
         let trace = phobos_base::env::flag("PHOBOS_TRACE");
         for (index, (block, layer_state)) in self.blocks.iter().zip(&mut state.layers).enumerate() {
-            // Both mixers add their output into the residual stream
-            // themselves and own running their input normalization, so a
-            // fused projection can absorb it.
+            // Both mixers add their output into the residual stream and run
+            // their own input normalization, so a fused projection can absorb
+            // it.
             let gain = block.attn_norm.buf(backend)?;
             match (&block.mixer, layer_state) {
                 (Mixer::Attention(attn), LayerState::Attention(cache)) => {
@@ -203,8 +201,8 @@ impl Model {
                 _ => bail!("generation state does not match the model's block layout"),
             }
 
-            // The normalization is passed along rather than run first, so a
-            // backend with a fused MLP owns the whole of it.
+            // The normalization is passed along instead of run first, so a
+            // backend with a fused MLP can do all of it.
             let gain = block.post_attn_norm.buf(backend)?;
             match &block.ffn {
                 FeedForward::Dense(ffn) => {
@@ -269,7 +267,7 @@ impl Model {
         )?;
 
         // Only the final position goes through the LM head, the largest weight
-        // in the model; the other normalized rows are dead.
+        // in the model; the other normalized rows are unused.
         let last = backend.alloc(d)?;
         backend.copy(normed, (rows - 1) * d, last, 0, d)?;
         let logits = backend.alloc(cfg.vocab)?;

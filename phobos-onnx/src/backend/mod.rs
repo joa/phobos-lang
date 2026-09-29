@@ -60,8 +60,8 @@ impl Tensor {
 }
 
 /// The ops worth offloading to Phobos GPU kernels: the FLOP-heavy `Gemm`
-/// projections and `LayerNormalization`. Everything else stays on the host, and
-/// `layer_norm` defaults to a host implementation so a matmul-only backend
+/// projections and `LayerNormalization`. Everything else stays on the host.
+/// `layer_norm` defaults to a host implementation, so a matmul-only backend
 /// still works.
 pub trait MatmulBackend {
     /// `C[m,n] = A[m,k] @ B[k,n]`, both row-major.

@@ -78,7 +78,7 @@ fn a_stack_groups_an_expert_as_the_upload_does() {
     let mut got = vec![0u8; stack.grouped_bytes()];
     stack.grouped_into(1, &mut got);
     // Q4_K keeps its whole block on the device, so the reference regroups
-    // the file bytes as they are.
+    // the file bytes unchanged.
     assert_eq!(got, group_rows(stack.expert(1), n, 2, 144));
     // 24 rows pad to 64: the grouped buffer is 64 rows of 2 blocks.
     assert_eq!(got.len(), 64 * 2 * 144);

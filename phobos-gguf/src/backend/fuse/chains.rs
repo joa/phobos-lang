@@ -1,15 +1,15 @@
-// The two chains a decode step builds: the MLP and the projection.
+// The chains a decode step builds: the MLP, the mixer's input projection and
+// attention's output projection.
 
 use super::*;
 
-/// The decode MLP as a chain: the normalization, the two halves of the gate/up
-/// projection, the SwiGLU between them, and the down projection accumulating
-/// back into the residual.
+/// The decode MLP as a chain: the normalization, the two halves of the
+/// gate/up projection, the SwiGLU, and the down projection accumulating into
+/// the residual.
 ///
-/// `x` is both the first stage's input and the last stage's target, aliasing
-/// the emitted kernel relies on: every block reads the residual in its own
-/// normalization before the barrier, and the down projection adds into it
-/// only after.
+/// `x` is both the first input and the last target. This is safe because
+/// every block reads the residual before the barrier and the down projection
+/// adds into it only after.
 pub(crate) fn mlp_chain(
     x: Buf,
     gain: Buf,
@@ -72,11 +72,11 @@ fn has_fused_decode(quant: Quant) -> bool {
     matches!(quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K)
 }
 
-/// [`mlp_chain`] over raw-format weights: gate and up as the two separate
-/// weights a raw file holds (nothing stacks them; a run of [`RAW_UNIT`]
-/// outputs of each is one unit), the down projection likewise. The
-/// contractions are the formats' own `<fmt>_qdot_i8_t`, so the chain is
-/// declined for a format without one, or a width the unit does not divide.
+/// [`mlp_chain`] over raw-format weights, with gate and up as two separate
+/// weights. A unit is a run of [`RAW_UNIT`] outputs.
+///
+/// `None` for a format without a `<fmt>_qdot_i8_t`, or a width that
+/// [`RAW_UNIT`] does not divide.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn mlp_chain_raw(
     x: Buf,
@@ -143,24 +143,20 @@ pub(crate) fn mlp_chain_raw(
     Some(chain)
 }
 
-/// A mixer's input normalization and the projection reading it as a chain,
-/// each run of the projection's outputs written where its consumer wants it,
-/// and optionally the delta net's convolution and gates behind them.
+/// A mixer's input normalization and projection as a chain, optionally
+/// followed by the delta net's convolution and gates. Each run of the
+/// projection's outputs is written where its consumer wants it.
 ///
-/// The projection alone costs no barrier: the normalization is redundant, so
-/// its quantized row crosses into the projection for free, and the runs write
-/// disjoint windows of the caller's buffers. The convolution costs exactly
-/// one, for the reason [`super::FusedMix`] gives, and the gates ride in its
-/// nest.
+/// The projection needs no barrier: every block normalizes redundantly and
+/// the runs write disjoint windows. The convolution needs one, see
+/// [`super::FusedMix`]. The gates share its nest.
 ///
-/// `None` means a shape with no stage for it: a run not dividing into whole
-/// Q8_0 output blocks, more than one position, or gates split across two
-/// projections.
+/// `None` for an unsupported shape: a run not made of whole Q8_0 blocks,
+/// more than one position, or gates split across two projections.
 pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
-    // One value per buffer, at the widest extent any stage touches. Two values
-    // naming one buffer would hide a dependency: the convolution reads the
-    // stream position the projection wrote, and the pass sees that only if both
-    // stages name the same value.
+    // One value per buffer, at the widest extent any stage touches. The pass
+    // sees a dependency only between stages naming the same value, and the
+    // convolution reads what the projection wrote.
     let mut extents: Vec<(Buf, usize)> = Vec::new();
     let mut want = |buf: Buf, len: usize| match extents.iter_mut().find(|(b, _)| *b == buf) {
         Some((_, at)) => *at = (*at).max(len),
@@ -170,8 +166,7 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
         want(run.dst, run.dst_off + run.width);
     }
     if let Some(m) = &project.mix {
-        // Two projections feeding the gates would need a value each, and no
-        // layout splits them; the stage carries one on purpose.
+        // The gates stage reads both gates from one value.
         if m.decay.0 != m.beta.0 {
             return None;
         }
@@ -236,9 +231,9 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
                 });
             }
             ProjWeight::Raw(..) => {
-                // Whole units, then the remainder as one unit of its own
-                // width. The upload pads a weight's rows to a whole unit, so
-                // the remainder's decode reads rows that exist.
+                // Whole units, then the remainder as one narrower unit. The
+                // upload pads rows to a whole unit, so the remainder's decode
+                // stays in bounds.
                 if !run.row_off.is_multiple_of(RAW_UNIT) {
                     return None;
                 }
@@ -271,14 +266,12 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
 
     if let Some(m) = &project.mix {
         let spec = &m.spec;
-        // One head a unit, and a position at a time, which is the decode shape
-        // the whole fused path is for. A prompt pass keeps its own launches.
+        // Decode only: one position at a time.
         if spec.rows != 1 {
             return None;
         }
-        // The plane rides the unit index as a stride, so unevenly spaced planes
-        // have no stage. No layout uses them, and the device backend's own
-        // convolution asserts the same thing.
+        // The stage addresses planes by a single stride, so they must be
+        // evenly spaced.
         let [first, second, third] = spec.planes;
         if third - second != second - first {
             return None;
@@ -313,17 +306,14 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
     Some(chain)
 }
 
-/// Attention's output epilogue as a chain: quantize the mixed heads, one
-/// scale per Q8_0 block, then the output projection accumulating into the
-/// residual. Unlike [`project_chain`], `x` is already the attention kernel's
-/// output, so there is no upstream normalization to fold in.
+/// Attention's output epilogue as a chain: quantize the mixed heads, then
+/// the output projection accumulating into the residual. There is no
+/// normalization; `x` is the attention kernel's output.
 ///
-/// The quantization tiles in [`Q8_BLOCK`]-wide units and the projection tiles
-/// in [`OUT_TILE`]-wide ones, so the two land in separate nests with a
-/// barrier between them.
+/// The quantization and projection have different unit widths, so they land
+/// in separate nests with a barrier between them.
 ///
-/// `None` means `width` does not divide into whole Q8_0 blocks, which no
-/// loaded architecture produces but a chain should decline rather than assume.
+/// `None` if `width` is not a whole number of Q8_0 blocks.
 pub(crate) fn attn_out_chain(x: Buf, w: QBuf, dest: Buf, width: usize, d_model: usize) -> Option<Chain> {
     if !width.is_multiple_of(Q8_BLOCK) {
         return None;

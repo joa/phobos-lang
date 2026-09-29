@@ -1,11 +1,11 @@
-// IQ1_S matvec: decodes straight from the raw block bytes (see q2k.rs) plus
-// a grid lookup via IQ1S_GRID. Byte reads go through (b + 256) % 256 first
-// to avoid truncating-division mismatches on signed bytes.
+// IQ1_S matvec. Decodes straight from the raw block bytes (see q2k.rs) plus
+// a grid lookup. Byte reads go through `(b + 256) % 256` first, so division
+// on signed bytes does not truncate the wrong way.
 //
 // Per-lane quantities are substituted as text at each use rather than bound
-// to a name, since a name bound to a computed tile is released back to the
-// shared-memory pool on first use. `qb`, `d`, `grid`, `iota` are the
-// exception: they're views/staged buffers the pool doesn't own.
+// to a name, because a name bound to a computed tile is released back to
+// the shared-memory pool on first use. `qb`, `d`, `grid` and `iota` are
+// exempt, since the pool does not own them.
 
 use super::qgemm::IQ1_GRID4_LEN;
 use super::quant::qdot_i8_cta;
@@ -15,13 +15,12 @@ use std::fmt::Write as _;
 /// Output columns per CTA.
 pub(crate) const IQ1S_TN: usize = 8;
 
-/// Output tile for the dp4a variant, which gives a warp several columns and
-/// needs a wider tile than `IQ1S_TN` to keep the CTA busy.
+/// Output tile for the dp4a variant. A warp takes eight columns at the
+/// default 256-thread CTA, so the tile is wider than `IQ1S_TN`.
 pub(crate) const IQ1S_I8_TN: usize = 64;
 
 /// The tile for an `n` that 64 does not divide. A warp then takes two
-/// columns rather than eight, which is slower but still well ahead of the
-/// float path it would otherwise fall back to.
+/// columns rather than eight, which beats the float fallback.
 pub(crate) const IQ1S_I8_NARROW_TN: usize = 16;
 
 const LANES: usize = 32;
@@ -31,12 +30,12 @@ const QS_OFF: usize = 0;
 const QH_OFF: usize = 32;
 const DELTA: f32 = 0.125;
 
-/// [`crate::quant::iq1s_flat_grid`]'s length: 2048 grid entries, eight `i32`
-/// lanes apiece.
+/// [`crate::quant::iq1s_flat_grid`]'s length: 2048 grid entries of eight
+/// lanes each.
 pub(crate) const IQ1S_GRID_LEN: usize = 2048 * 8;
 
-/// Byte/halfword offsets for lane `is` (ib = is/4, l = is%4, matching
-/// quant/iq1_s.rs::dequantize).
+/// Byte offsets and index divisor for lane `is`, with `ib = is / 4` and
+/// `l = is % 4` as in `quant/iq1_s.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let ib = is / 4;
     let l = is % 4;
@@ -47,7 +46,7 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     (qs_off, qh_lo_off, qh_hi_off, shift_div)
 }
 
-/// Emits `let decoded{is} = ...` plus its output offset within the
+/// Emits `let decoded{is} = ...` and returns it with its offset in the
 /// 256-wide k-block.
 fn decoded_lane(is: usize) -> (usize, String) {
     let (qs_off, qh_lo_off, qh_hi_off, shift_div) = run_geometry(is);
@@ -99,11 +98,12 @@ kernel iq1s_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// Same as [`iq1s_matvec_src`] for `m == 1`, fused into one `iq1s_qdot_t`
-/// call. `@aligned(N = TN)` is required: `iq1s_qdot_t` assumes in-bounds
-/// slices, only true when N is a multiple of tn
-/// ([`crate::backend::device::DeviceBackend::project_raw`] guards this;
-/// [`iq1s_matvec_src`] is the masked fallback).
+/// [`iq1s_matvec_src`] for `m == 1`, as one `iq1s_qdot_t` call.
+///
+/// `@aligned(N = TN)` is required, because `iq1s_qdot_t` assumes in-bounds
+/// slices. [`crate::backend::device::DeviceBackend::project_raw`] ensures
+/// `N` is a multiple of `tn`, and falls back to [`iq1s_matvec_src`]
+/// otherwise.
 pub(crate) fn iq1s_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -120,12 +120,12 @@ kernel iq1s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq1s_qdot_matvec_src`] against an activation already quantized to int8
-/// by the `quantize` kernel, contracted in `dp4a`. Same result, a third fewer
-/// instructions a weight, and a quarter of the activation traffic.
+/// [`iq1s_qdot_matvec_src`] against an activation the `quantize` kernel
+/// already quantized to int8, contracted with `dp4a`. It reads a quarter of
+/// the activation bytes.
 pub(crate) fn iq1s_qdot_i8_matvec_src(tn: usize) -> String {
     let cta = qdot_i8_cta(tn);
-    // Four CTAs of 256 resident: 64 registers a thread.
+    // Four resident CTAs of 256 threads, so 64 registers per thread.
     let min_blocks = 1024 / cta;
     format!(
         "@launch({cta}, {min_blocks})
@@ -144,9 +144,9 @@ kernel iq1s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// Same per-(tile, k-block) decode as [`iq1s_matvec_src`] but stored into a
-/// `[K, N]` scratch instead of reduced, so a matmul over multiple rows only
-/// decodes once. `transpose` matches `Backend::matmul`'s `[K, N]` layout.
+/// [`iq1s_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
+/// reduced, so a matmul over many rows decodes only once. The `transpose`
+/// matches `Backend::matmul`'s `[K, N]` layout.
 pub(crate) fn iq1s_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..LANES {
@@ -175,11 +175,12 @@ kernel iq1s_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq1s_dequant_src`]'s decode as a single `iq1s_qdecode_t` call: nothing
-/// staged in shared memory, no barrier, and a thread's eight decoded weights
-/// written straight to the rows they belong in. `@aligned(N = TN)` is required
-/// for the reason [`iq1s_qdot_matvec_src`] needs it, and
-/// [`crate::backend::device::DeviceBackend::project_raw_dense`] keeps
+/// [`iq1s_dequant_src`]'s decode as one `iq1s_qdecode_t` call, with no
+/// shared-memory staging and no barrier. Each thread writes its eight
+/// decoded weights straight to their rows.
+///
+/// `@aligned(N = TN)` is required, as for [`iq1s_qdot_matvec_src`].
+/// [`crate::backend::device::DeviceBackend::project_raw_dense`] uses
 /// [`iq1s_dequant_src`] for a strip that is not a whole number of `TN`.
 pub(crate) fn iq1s_qdecode_src(tn: usize) -> String {
     format!(
@@ -196,11 +197,11 @@ kernel iq1s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// The fused projection's tile, and the CTA that carries it.
-/// `PHOBOS_QMMA_TILE=TMxTNxCTA` overrides all three together, which is how
-/// the shape gets swept without a rebuild. The tile has to divide the
-/// batch, so `TM` above 128 takes the expansion path at `pp128`, and the
-/// staged form needs exactly one warp patch a warp.
+/// The fused projection's tile and CTA width, as `(TM, TN, CTA)`.
+///
+/// `PHOBOS_QMMA_TILE=TMxTNxCTA` overrides all three, to sweep the shape
+/// without a rebuild. The tile must divide the batch, and the staged form
+/// needs exactly one patch per warp.
 pub(crate) fn qmma_tile() -> (usize, usize, usize) {
     let Ok(spec) = std::env::var("PHOBOS_QMMA_TILE") else {
         return (IQ1S_QMMA_TM, IQ1S_QMMA_TN, IQ1S_QMMA_CTA);
@@ -212,44 +213,39 @@ pub(crate) fn qmma_tile() -> (usize, usize, usize) {
     }
 }
 
-/// Rows and columns of the fused prompt projection's output tile: the same
-/// 128 x 64 the Q8_0 projection settled on, for the same reason. Operand
-/// loads and scale arithmetic are per output element however the tiles are
-/// arranged, so what pays for them is the tensor-core tiles in a warp's
-/// patch, which the output tile bounds.
+/// Rows and columns of the fused prompt projection's output tile, the same
+/// as the Q8_0 projection's. The output tile bounds a warp's patch of
+/// tensor-core tiles, which is what amortizes operand loads and scales.
 pub(crate) const IQ1S_QMMA_TM: usize = 128;
 pub(crate) const IQ1S_QMMA_TN: usize = 64;
 
 /// Threads the fused projection's CTA carries.
 ///
-/// Narrower than `q8_qmma`'s because `qmma_patch` will not grow a patch past
-/// the point where it leaves warps of the CTA idle, and the patch is what
-/// pays for the decode: at `rm` row-tiles a weight fragment is decoded once
-/// and fed to `rm` tensor instructions. Four warps hold it to `rm = 4`, two
-/// let it reach 8, so each decode feeds twice as many tensor instructions.
+/// Narrower than `q8_qmma`'s, so each warp gets a larger patch. With `rm`
+/// row-tiles in a patch, one decoded weight fragment feeds `rm` tensor
+/// instructions. `qmma_patch` never grows a patch so far that warps sit
+/// idle, so two warps allow `rm = 8` where four allow only 4.
 pub(crate) const IQ1S_QMMA_CTA: usize = 64;
 
-/// Twice [`IQ1S_GRID_LEN`]: the signed table carries both foldings of every
-/// entry so the group's sign bit is an index bit rather than arithmetic. See
-/// `crate::quant::iq1s_signed_grid`.
+/// Twice [`IQ1S_GRID_LEN`]. The signed table holds both sign foldings of
+/// every entry, so the group's sign bit is an index bit rather than
+/// arithmetic. See `crate::quant::iq1s_signed_grid`.
 pub(crate) const IQ1S_SIGNED_GRID_LEN: usize = 2 * IQ1S_GRID_LEN;
 
-/// IQ1_S's prompt projection, decode and contraction in one kernel: this
-/// replaces `iq1s_qdecode` writing an expanded weight for `matmul_tc` to
-/// read back, avoiding that traffic and the scratch to hold it. `@aligned`
-/// is required, as it is for `iq1s_qdot_matvec`: `iq1s_qmma_t` assumes
-/// in-bounds slices, and `K = 256` because a lane indexes the block bytes
-/// itself.
+/// IQ1_S's prompt projection, decode and contraction in one kernel. It
+/// avoids writing an expanded weight to scratch for `matmul_tc` to read.
+///
+/// `@aligned` is required, as for `iq1s_qdot_matvec`, because
+/// `iq1s_qmma_t` assumes in-bounds slices. `K = 256` because a lane
+/// indexes the block bytes itself.
 pub(crate) fn iq1s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
-    // The staged form decodes each column once for the whole CTA instead of
-    // once per warp that needs it, chosen here rather than in codegen so the
-    // two branches compile to different source text: a runtime flag would
-    // collide in the kernel cache, which keys on that text.
+    // The staged form decodes each column once per CTA instead of once per
+    // warp. The choice is made here so the two forms differ in source text,
+    // which the kernel cache keys on.
     //
-    // It needs one patch a warp, which `IQ1S_QMMA_TM`, `IQ1S_QMMA_TN` and
-    // `IQ1S_QMMA_CTA` give it; the intrinsic refuses rather than guesses if a
-    // future tile does not. `PHOBOS_QMMA_STAGE=0` goes back to the register
-    // form.
+    // The staged form needs exactly one patch per warp, and the intrinsic
+    // rejects a tile that does not give it. `PHOBOS_QMMA_STAGE=0` selects
+    // the register form.
     let intrinsic = match phobos_base::env::flag_on("PHOBOS_QMMA_STAGE") {
         true => "iq1s_qmma_staged_t",
         false => "iq1s_qmma_t",

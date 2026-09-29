@@ -8,9 +8,11 @@ use phobos_cluster::storage;
 use phobos_cluster::tile::{AccessMode, DataType};
 use phobos_sched::server::{DispatchConfig, Scheduler, make_job};
 
-/// The cluster matmul (mirrors examples/matmul_cluster_fp32.ph). The @cluster
-/// lower bound is filled per run so default_supers picks the wanted supertile;
-/// its device-tile @autotune defaults (32/32/4) match the leaf the scheduler compiles.
+/// The cluster matmul, as in examples/matmul_cluster_fp32.ph.
+///
+/// Each run fills in the `@cluster` lower bound, so `default_supers` picks the
+/// wanted supertile. The `@autotune` defaults (32/32/4) match the leaf the
+/// scheduler compiles.
 fn matmul_src(super_lo: usize) -> String {
     format!(
         r#"
@@ -30,8 +32,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
     )
 }
 
-/// The same matmul without @cluster, for the bare device launch: device
-/// codegen ignores the cluster attribute, and the tile dims are pinned via shape_overrides.
+/// The same matmul without `@cluster`, for the bare device launch. The tile
+/// dims are pinned through `shape_overrides`.
 const DEVICE_SRC: &str = r#"
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
@@ -60,7 +62,7 @@ fn tensor(name: &str, n: usize, mode: AccessMode, uri: String) -> TensorInput {
     }
 }
 
-/// Mean wall time per call over iters runs, after one warmup.
+/// Mean wall time per call over `iters` runs, after one warmup.
 fn timed(iters: u32, mut f: impl FnMut() -> Result<()>) -> Result<Duration> {
     f()?;
     let start = Instant::now();
@@ -85,9 +87,9 @@ fn verify(c: &[f32], a: &[f32], b: &[f32], n: usize) -> Result<()> {
     Ok(())
 }
 
-/// Compile the matmul to PTX with the device tile pinned (the same 32/32/4 the
-/// cluster leaf uses) and launch it once over the whole MxN grid, full K in the
-/// kernel's loop. Returns mean execution time; verifies the result.
+/// Compile the matmul with the cluster leaf's device tile (32/32/4) and launch
+/// it over the whole MxN grid, with all of K in the kernel's loop. Verifies the
+/// result and returns the mean execution time.
 fn bare_launch(stream: &Stream, n: usize, a: &[f32], b: &[f32], iters: u32) -> Result<Duration> {
     const DEV: i32 = 32; // device tile (matches the leaf's @autotune default)
     let ctx = Context {
@@ -116,7 +118,7 @@ fn bare_launch(stream: &Stream, n: usize, a: &[f32], b: &[f32], iters: u32) -> R
     let grid = (ni as u32 / DEV as u32, ni as u32 / DEV as u32);
 
     // Each tensor is a memref<?x?xf32>: (alloc, aligned, offset, sizes[2],
-    // strides[2]); C = acc overwrites, so no memset needed.
+    // strides[2]). The kernel overwrites C, so it needs no memset.
     let launch = || -> Result<()> {
         unsafe {
             launch!(func<<<grid, block, 0, stream>>>(
@@ -146,12 +148,12 @@ async fn main() -> Result<()> {
     let arena = 1usize << 30; // 1 GiB per node
     let iters = 5;
 
-    // Main-thread CUDA context for the bare launches. The pod engine inits its
-    // own on its thread; both attach the same device primary context.
+    // Main-thread CUDA context for the bare launches. The pod engine makes its
+    // own on its thread, and both attach the device's primary context.
     let _ctx = cust::quick_init()?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
-    // Scheduler + one node over localhost gRPC (shared across all runs).
+    // Scheduler and one node over localhost gRPC, shared across all runs.
     let sched = Scheduler::new();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let sched_addr = listener.local_addr()?.to_string();

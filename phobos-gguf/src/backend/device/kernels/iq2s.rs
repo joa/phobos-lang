@@ -1,8 +1,8 @@
-// IQ2_S matvec: same raw-byte decode as iq1s.rs, structurally close to
-// IQ2_XXS's two batched gathers a lane, but the magnitude index is a plain
-// qs byte widened by two qh bits, and the sign byte is tested directly
-// against KMASK_IQ2XS rather than through IQ2_XXS's parity table (see
-// quant/iq2_s.rs).
+// IQ2_S matvec, with the same raw-byte decode as iq1s.rs.
+//
+// Like IQ2_XXS, each lane does two gathers. The magnitude index is a qs
+// byte widened by two qh bits, and the sign byte is looked up directly
+// rather than through IQ2_XXS's parity table (see quant/iq2_s.rs).
 
 use std::fmt::Write as _;
 
@@ -17,15 +17,15 @@ const SIGNS_OFF: usize = QS_OFF + 32;
 const QH_OFF: usize = SIGNS_OFF + 32;
 const SCALES_OFF: usize = QH_OFF + 8;
 
-/// [`crate::quant::iq2s_flat_grid`]'s length: 1024 grid entries, eight
-/// `i32` lanes apiece.
+/// [`crate::quant::iq2s_flat_grid`]'s length: 1024 grid entries of eight
+/// lanes each.
 pub(crate) const IQ2S_GRID_LEN: usize = 1024 * 8;
-/// [`crate::quant::iq2s_flat_signs`]'s length: every byte value, eight
-/// `i32` multipliers apiece.
+/// [`crate::quant::iq2s_flat_signs`]'s length: eight sign multipliers for
+/// every byte value.
 pub(crate) const IQ2S_SIGNS_LEN: usize = 256 * 8;
 
-/// Byte offsets for lane `is` (ib32 = is/4, l = is%4, matching
-/// quant/iq2_s.rs::dequantize).
+/// Byte offsets and `qh` divisor for lane `is`, with `ib32 = is / 4` and
+/// `l = is % 4` as in `quant/iq2_s.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize) {
     let ib32 = is / 4;
     let l = is % 4;
@@ -94,12 +94,12 @@ kernel iq2s_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// Output tile for the dp4a variant; a warp takes two columns.
+/// Output tile for the dp4a variant. A warp takes eight columns at the
+/// default 256-thread CTA.
 pub(crate) const IQ2S_I8_TN: usize = 64;
 
 /// The tile for an `n` that 64 does not divide. A warp then takes two
-/// columns rather than eight, which is slower but still well ahead of the
-/// float path it would otherwise fall back to.
+/// columns rather than eight, which beats the float fallback.
 pub(crate) const IQ2S_I8_NARROW_TN: usize = 16;
 
 /// [`iq2s_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
@@ -122,10 +122,9 @@ kernel iq2s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq2s_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq2s_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which this
-/// mirrors. `@aligned(N = TN)` is required for the same reason: `iq2s_qdot_t`
-/// demands its `qb`/`d` slices provably in bounds.
+/// [`iq2s_matvec_src`] for `m == 1`, as one `iq2s_qdot_t` call; mirrors
+/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `iq2s_qdot_t` needs its `qb` and `d` slices provably in bounds.
 pub(crate) fn iq2s_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -142,9 +141,8 @@ kernel iq2s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq2s_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`iq2s_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
+/// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
 pub(crate) fn iq2s_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..LANES {
@@ -174,8 +172,8 @@ kernel iq2s_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq2s_dequant_src`]'s decode as a single `iq2s_qdecode_t` call; see
-/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors for IQ2_S.
+/// [`iq2s_dequant_src`]'s decode as one `iq2s_qdecode_t` call. Mirrors
+/// `iq1s_qdecode_src` in `iq1s.rs`.
 pub(crate) fn iq2s_qdecode_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -195,10 +193,10 @@ kernel iq2s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// IQ2_Ss prompt projection, decode and contraction in one kernel.
+/// IQ2_S's prompt projection, decode and contraction in one kernel.
 ///
-/// One scale per sixteen elements rather than per thirty-two, so the tile
-/// language keeps an accumulator a half; see `qmma_signed.rs`.
+/// There is one scale per sixteen elements, so the tile language keeps one
+/// accumulator per half block; see `qmma_signed.rs`.
 pub(crate) fn iq2s_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     format!(
         "@launch({block})

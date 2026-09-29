@@ -4,14 +4,14 @@
 //     cargo run -p phobos-lang --example snapshot -- OUT_DIR SRC_DIR...
 //
 // For each source `name.ph` and each target, `OUT_DIR/name.CHIP.iBITS.mlir`
-// holds the printed module, and `OUT_DIR/footprint.txt` one line per kernel
+// holds the printed module. `OUT_DIR/footprint.txt` has one line per kernel
 // and target with its shared-memory bytes: the dynamic peak the sideband
 // reports, and the static total of its `memref.global` tiles. A source that
-// fails to emit under a target gets a `.err` file instead, since a sweep
-// that stops at the first failure covers nothing after it.
+// fails to emit under a target gets a `.err` file instead, and the sweep
+// goes on.
 //
 // The index width follows `compile_raw`: a kernel that wants `ldmatrix` is
-// emitted at 64 bits whatever the target says, as the real compile does.
+// emitted at 64 bits whatever the target says.
 
 use std::{fmt::Write as _, path::Path};
 

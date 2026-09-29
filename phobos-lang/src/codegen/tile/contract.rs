@@ -1,5 +1,5 @@
-// Tile contractions and the shape math that plans them, plus
-// cumsum, tril and transpose.
+// Tile contractions and the shape math that plans them, plus cumsum, tril
+// and transpose.
 
 use super::*;
 
@@ -7,12 +7,10 @@ use crate::shape;
 
 impl<'c> Codegen<'c> {
     /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind
-    /// `dot_t` (contracts the last dim of both operands).
+    /// `dot_t`. It contracts the last dim of both operands.
     ///
-    /// Int8 operands take the tensor cores first, then `dp4a`. Otherwise a
-    /// plain thread-per-output scalar reduction: [`Self::tile_matmul`] has
-    /// no transposed-b variant, and the attention S = Q @ K.T tile is small
-    /// next to the kernel's other costs.
+    /// Int8 operands try the tensor cores first, then `dp4a`. Everything else
+    /// is a scalar reduction with one thread per output.
     pub(in crate::codegen) fn tile_matmul_t(
         &mut self,
         block: &Block<'c>,
@@ -45,7 +43,7 @@ impl<'c> Codegen<'c> {
             let st = cg.const_index(blk, 1)?;
             let kb = Block::new(&[(cg.index_t, cg.loc)]);
             let k = detach(kb.argument(0)?.into());
-            // operands widen to the accumulator type (f16 inputs, f32 acc).
+            // Operands widen to the accumulator type.
             let va = cg.load_as(&kb, a.mem, &[i, k], elem)?;
             let vb = cg.load_as(&kb, b.mem, &[j, k], elem)?;
             let cur = cg.push(&kb, memref::load(slot, &[], cg.loc))?;
@@ -62,12 +60,12 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// out[i, j] = sum_{r <= i} src[r, j]: an inclusive prefix sum down the
-    /// rows (the sequence axis) of a rank-2 tile, the running gate cumulant
-    /// gated linear attention needs. One thread owns each column and sweeps
-    /// its rows in order, carrying the partial in a register (an scf.for
-    /// iter_arg); the sequential row dependence keeps this off the warp
-    /// path.
+    /// out[i, j] = sum_{r <= i} src[r, j], an inclusive prefix sum down the
+    /// rows of a rank-2 tile. Gated linear attention uses it for the running
+    /// gate cumulant.
+    ///
+    /// One thread owns each column and sweeps its rows in order, carrying the
+    /// partial sum as an scf.for iter_arg.
     pub(in crate::codegen) fn tile_cumsum(
         &mut self,
         block: &Block<'c>,
@@ -131,10 +129,9 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[i, j] = src[i, j] when j <= i, else 0: the causal (lower-
-    /// triangular) mask for intra-chunk attention. Rewrites src in place
-    /// when it owns an unswizzled buffer (each thread reads and writes one
-    /// element), otherwise writes a fresh tile.
+    /// out[i, j] = src[i, j] when j <= i, else 0. This is the causal mask for
+    /// intra-chunk attention. Rewrites src in place when it owns an
+    /// unswizzled buffer, otherwise writes a fresh tile.
     pub(in crate::codegen) fn tile_tril(
         &mut self,
         block: &Block<'c>,
@@ -184,10 +181,9 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[i, j] = src[j, i]: the rank-2 tile transpose. Each output element
-    /// is owned by one thread that reads the mirrored source element. Needed
-    /// to contract over the sequence axis (the K.T @ V state update) since
-    /// dot / dot_t only contract the last axes.
+    /// out[i, j] = src[j, i], the rank-2 tile transpose. It lets a kernel
+    /// contract over the sequence axis, as in the K.T @ V state update, since
+    /// dot and dot_t only contract the last axes.
     pub(in crate::codegen) fn tile_transpose(
         &mut self,
         block: &Block<'c>,
@@ -214,17 +210,17 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// out[m, n] += sum_k(a[m, k] * b[k, n]): accumulates into out.
+    /// out[m, n] += sum_k(a[m, k] * b[k, n]).
     ///
-    /// Register-blocked when out has a static shape: threads stride over
-    /// TMxTN sub-tiles ([`Self::sub_tile`]), carrying the accumulator
-    /// through the k-loop as one vector<TMxTN> iter_arg so each k-step
-    /// loads TM + TN elements for TM*TN MACs.
+    /// With a static out shape, threads stride over TMxTN sub-tiles (see
+    /// `shape::sub_tile`). Each carries its accumulator through the k-loop as
+    /// one vector<TMxTN> iter_arg, so a k-step loads TM + TN elements for
+    /// TM*TN MACs.
     ///
-    /// Warp-tiled when a factorization of the 32 lanes divides the sub-tile
-    /// grid ([`Self::lane_grid`]): lanes share a and b fragments along rows
-    /// and columns of the warp tile, so shared reads collapse to WM + WN
-    /// elements with the b row conflict-free. The flat fallback reads more.
+    /// When a factorization of the 32 lanes divides the sub-tile grid (see
+    /// `shape::lane_grid`), the work is warp-tiled. Lanes then share a and b
+    /// fragments, which cuts shared reads and keeps the b row
+    /// conflict-free.
     pub(in crate::codegen) fn tile_matmul(
         &mut self,
         block: &Block<'c>,
@@ -249,9 +245,8 @@ impl<'c> Codegen<'c> {
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
 
-        // Warp id, lane, and warp count for this thread; the launch ABI
-        // requires a multiple of 32 threads. Unsigned div/rem by constants
-        // strength-reduce to shift/mask.
+        // Warp id, lane, and warp count for this thread. The launch ABI
+        // requires a multiple of 32 threads.
         let warp = match shape::lane_grid(tiles_m, tiles_n, tm, tn) {
             Some((lm, ln)) => {
                 let w = self.const_index(block, 32)?;
@@ -293,7 +288,6 @@ impl<'c> Codegen<'c> {
             (self.addi(&body, wm0, off_m)?, self.addi(&body, wn0, off_n)?)
         } else {
             // Flat sub-tile origin: st -> (st / tiles_n * TM, st % tiles_n * TN).
-            // tiles_n is a constant, so the div/rem strength-reduce.
             let tiles_n_v = self.const_index(&body, tiles_n)?;
             let q = self.divui(&body, st, tiles_n_v)?;
             let r = self.remui(&body, st, tiles_n_v)?;
@@ -312,10 +306,9 @@ impl<'c> Codegen<'c> {
             ns.push(self.addi(&body, n0, c)?);
         }
 
-        // Vectorizes to one access per thread when the buffer is provably
-        // 16-byte aligned (MemVal::aligned; n0 a multiple of tn, k chunks a
-        // multiple of 4), avoiding the bank conflicts of stride-4 scalar
-        // accesses. Falls back to element-wise assembly otherwise.
+        // Each access is one vector load when the buffer is provably 16-byte
+        // aligned, which avoids the bank conflicts of stride-4 scalar
+        // accesses. Otherwise it falls back to element-wise loads.
         let kk = a.shape[1];
         let chunk = if kk == DYN {
             1
@@ -334,9 +327,7 @@ impl<'c> Codegen<'c> {
         let lhs_t = Type::vector(&[tm as u64, chunk as u64], elem);
         let rhs_t = Type::vector(&[chunk as u64, tn as u64], elem);
 
-        // Seeds the accumulator from the current output values (the +=);
-        // the zero broadcast folds away in lowering once every lane is
-        // overwritten.
+        // Seed the accumulator from the current output values, for the +=.
         let zero = self.zero_scalar(&body, elem)?;
         let mut acc = self.vec_broadcast(&body, zero, acc_t)?;
         for (i, mi) in ms.iter().enumerate() {
@@ -492,10 +483,10 @@ impl<'c> Codegen<'c> {
         Ok(finals)
     }
 
-    /// One multiply-accumulate (acc + a*b) on the element type. Floats use
-    /// math.fma, a single rounding that lowers to PTX fma.rn: a separate
-    /// mul/add pair rounds each op explicitly, which ptxas cannot contract
-    /// back into an FMA.
+    /// One multiply-accumulate (acc + a*b) on the element type.
+    ///
+    /// Floats use math.fma, which lowers to PTX fma.rn. A separate mul and add
+    /// would each round, and ptxas cannot fuse them back into an FMA.
     pub(in crate::codegen) fn elem_mac(
         &mut self,
         block: &Block<'c>,

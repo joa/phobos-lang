@@ -15,10 +15,9 @@ struct HoistScan {
 }
 
 impl Build {
-    /// Stages the body's hoistable dot operands into the current block, the
-    /// loop's preheader, and returns the `(source, buffer)` frame.
-    /// Stages a loop's invariant dot operands in its preheader: one
-    /// `HoistStage` op per candidate, and a barrier when there were any.
+    /// Stages a loop's invariant dot operands in its preheader, the current
+    /// block. Emits one `HoistStage` op per candidate, then a barrier if
+    /// there were any, and returns the `(source, buffer)` frame.
     pub(crate) fn hoist_dot_staging(&mut self, body: &[Stmt]) -> Result<Vec<(ValueId, ValueId)>> {
         let mut frame = Vec::new();
         if !self.has_wmma() {

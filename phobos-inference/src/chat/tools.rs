@@ -7,10 +7,10 @@ use super::dialect::{
 };
 use super::{ToolCall, ToolCallFunction};
 
-/// The tool-calling contract, verbatim from the model's own
-/// `tokenizer.chat_template`. Qwen3.5 is trained on an XML call syntax, not the
-/// JSON one most servers ask for, and asking for JSON gets a blend of the two
-/// back.
+/// The tool-calling contract, verbatim from Qwen3.5's `tokenizer.chat_template`.
+///
+/// The model is trained on this XML call syntax. Asking it for the usual JSON
+/// form gets a blend of the two back.
 pub(crate) const TOOL_FORMAT_INSTRUCTION: &str = "\n\nIf you choose to call a function ONLY reply in the following format with NO suffix:\n\n<tool_call>\n<function=example_function_name>\n<parameter=example_parameter_1>\nvalue_1\n</parameter>\n<parameter=example_parameter_2>\nThis is the value for the second parameter\nthat can span\nmultiple lines\n</parameter>\n</function>\n</tool_call>\n\n<IMPORTANT>\nReminder:\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\n- Required parameters MUST be specified\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\n</IMPORTANT>";
 
 pub(crate) fn default_tool_call_type() -> String {
@@ -43,12 +43,11 @@ pub(crate) fn tool_choice_instruction(tool_choice: Option<&Value>) -> Option<Str
 }
 
 /// MiniCPM5's equivalent of [`TOOL_FORMAT_INSTRUCTION`], also verbatim from
-/// its template. An `edit` call's file contents are multi-line text with `<`
-/// in it, which only the CDATA form can represent.
+/// its template.
 pub(crate) const MINICPM_TOOL_GUIDELINES: &str = "\n\nTool usage guidelines:\n- You may call zero or more functions. If no function calls are needed, just answer normally and do not include any <function ... </function>.\n- When calling a function, return an XML object within <function ... </function> using:\n<function name=\"function-name\"><param name=\"param-name\">param-value</param></function>\n- param-value may be multi-line. If it contains <, & or newline characters, wrap it in a CDATA block: <param name=\"param-name\"><![CDATA[...multi-line value...]]></param>";
 
-/// Where MiniCPM5's template substitutes the tool definitions when the
-/// caller's system prompt places them explicitly.
+/// A placeholder in the caller's system prompt that MiniCPM5 replaces with
+/// the tool definitions.
 pub(crate) const TOOL_DEF_SEP: &str = "<tool_def_sep>";
 
 /// The tool list and call format, without the surrounding system turn.
@@ -71,10 +70,10 @@ pub(crate) fn render_tool_definitions(tools: &Value, dialect: Dialect) -> String
     text
 }
 
-/// The system turn a tool-carrying request opens with. The two templates
-/// order it differently, matching what each model was trained on: Qwen puts
-/// the tool block first and the caller's system prompt after it, MiniCPM5 the
-/// other way round unless the prompt places the definitions itself.
+/// The system turn a request with tools opens with.
+///
+/// Qwen puts the tool block first and the caller's system prompt after it.
+/// MiniCPM5 does the reverse, unless the prompt places the definitions itself.
 pub(crate) fn render_tools_system(
     tools: &Value,
     system: Option<&str>,
@@ -112,10 +111,11 @@ pub(crate) fn render_tools_system(
     text
 }
 
-/// A value as the chat template writes it into a call: a string as is, and
-/// anything else as JSON with the separators the template's `tojson` uses,
-/// which are the ones the model writes, so a call it made renders back as
-/// the same tokens.
+/// A value as the chat template writes it into a call.
+///
+/// A string goes in as is. Anything else becomes JSON with the separators of
+/// the template's `tojson`, so a call the model made renders back as the same
+/// tokens.
 pub(crate) fn argument_text(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -146,8 +146,7 @@ impl serde_json::ser::Formatter for SpacedJson {
     }
 }
 
-/// Whether a value needs CDATA to survive MiniCPM5's form, the rule its own
-/// template states.
+/// Whether a value needs CDATA in MiniCPM5's form, by its template's rule.
 pub(crate) fn needs_cdata(value: &str) -> bool {
     value.contains(['<', '&', '\n'])
 }
@@ -228,9 +227,10 @@ pub(crate) fn schema_type<'a>(
         .as_str()
 }
 
-/// Parameters arrive as text and the schema says how to read them. Without one
-/// only unambiguously structured values are promoted, so "007" stays a
-/// string.
+/// Converts a parameter's text to a value, using the schema's type if given.
+///
+/// Without a schema only objects, arrays and booleans are promoted, so "007"
+/// stays a string.
 pub(crate) fn coerce_argument(
     text: &str,
     function: &str,
@@ -307,9 +307,8 @@ pub(crate) fn parse_minicpm_function(
             break;
         };
         let key = key.trim().to_string();
-        // CDATA carries values holding `<`, `&` or newlines, so its closer
-        // has to be found first, or a value containing one ends the parameter
-        // early.
+        // Look for the CDATA closer first. A CDATA value may contain
+        // `</param>`, which would otherwise end the parameter early.
         let (value, tail) = match after_key.strip_prefix(CDATA_START) {
             Some(inner) => match inner.split_once(CDATA_END) {
                 Some((value, tail)) => (value, tail),
@@ -334,8 +333,7 @@ pub(crate) fn parse_minicpm_function(
     })
 }
 
-/// The JSON call form other servers ask for, which the model still reaches for
-/// occasionally.
+/// The JSON call form, which the model still emits occasionally.
 pub(crate) fn parse_json_call(json_value: &Value, index: usize) -> Option<ToolCall> {
     let function = json_value.get("function").unwrap_or(json_value);
     let name = function.get("name")?.as_str()?.to_string();

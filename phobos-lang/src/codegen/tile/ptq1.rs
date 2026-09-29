@@ -1,18 +1,21 @@
 // PTQ1_0 in the staged projection (`qgemm.rs`) and the decode matvec
-// (`qdot_i8_reg.rs`). The device block is 256 weights in 56 bytes: quarter
-// `q` owns the three words at `12 q`, the tail byte `48 + q`, and the `f16`
-// scale at `52 + 2 (q / 2)`. Trit `n` of byte `b` of word `w` is weight
-// `4 (5 w + n) + b` of the quarter, so one trit of a word is a `dp4a` operand;
-// the tail byte's four trits are weights 60..64. See `phobos-gguf`'s
-// `quant/ptq1_0.rs`, which lays the file's blocks out this way at upload.
+// (`qdot_i8_reg.rs`).
 //
-// A byte holds five trits base three, scaled so trit `n` is the top trit of
-// `b * 3^n mod 256`: `((b * 3^n mod 256) * 3) >> 8`. Two bytes to a word in
-// 16-bit lanes carry no multiply into each other, so a word decodes as two
-// lane pairs, one `* 3`, one `prmt` of the high bytes and one mask a trit.
-// The trits are 0..2 for weights `d * (t - 1)`: the matvec takes `t` to the
-// `dp4a` and subtracts the activation's sum with one more against -1 bytes,
-// and the projection writes `t - 1` as `(t + 0x7F) ^ 0x80` a byte, which
+// The device block is 256 weights in 56 bytes. Quarter `q` owns the three
+// words at `12 q`, the tail byte at `48 + q`, and the `f16` scale at
+// `52 + 2 (q / 2)`. Trit `n` of byte `b` of word `w` is weight
+// `4 (5 w + n) + b` of the quarter, so one trit plane of a word is a `dp4a`
+// operand. The tail byte's four trits are weights 60..64. `phobos-gguf`'s
+// `quant/ptq1_0.rs` lays blocks out this way at upload.
+//
+// A byte holds five base-three trits, scaled so trit `n` is
+// `((b * 3^n mod 256) * 3) >> 8`. A word is split into two lane pairs of
+// 16-bit lanes that cannot carry into each other. Each trit then costs one
+// `* 3`, one `prmt` of the high bytes, and one mask.
+//
+// Trits are 0..2, for weights `d * (t - 1)`. The matvec feeds `t` to the
+// `dp4a` and subtracts the activation's sum with one more `dp4a` against -1
+// bytes. The projection writes `t - 1` per byte as `(t + 0x7F) ^ 0x80`, which
 // never carries.
 
 use super::qdot_i8_reg::Piece;
@@ -24,8 +27,8 @@ const PT_TAILS: i64 = 48;
 const PT_SCALES: i64 = 52;
 
 impl<'c> Codegen<'c> {
-    /// The first `count` trit planes of `word`: word `n` holds trit `n` of
-    /// each of its four bytes, 0..2 a byte.
+    /// The first `count` trit planes of `word`. Plane `n` holds trit `n` of
+    /// each of its four bytes, 0..2 per byte.
     fn pt_planes(&self, block: &Block<'c>, word: Value<'c, 'c>, count: usize) -> Result<Vec<Value<'c, 'c>>> {
         let zero = self.const_i32(block, 0)?;
         let lo_sel = self.const_i32(block, 0x4140)?;
@@ -37,8 +40,8 @@ impl<'c> Codegen<'c> {
         self.pt_advance(block, lanes, count)
     }
 
-    /// Trits off two lane pairs, each 16-bit lane `x mod 256` of some byte
-    /// times a power of three: one plane a step.
+    /// Trit planes from two lane pairs, one plane per step. Each 16-bit lane
+    /// holds some byte times a power of three, mod 256.
     fn pt_advance(&self, block: &Block<'c>, mut lanes: [Value<'c, 'c>; 2], count: usize) -> Result<Vec<Value<'c, 'c>>> {
         let three = self.const_i32(block, 3)?;
         let mask = self.const_i32(block, 0x00FF_00FF)?;
@@ -58,9 +61,9 @@ impl<'c> Codegen<'c> {
         Ok(planes)
     }
 
-    /// Quarter `q`'s tail byte of `tails` as one word of its four trits: the
-    /// byte times 1, 3, 9 and 27 in four lanes, then one step of
-    /// [`Self::pt_advance`].
+    /// Quarter `q`'s tail byte of `tails` as one word of its four trits. The
+    /// byte is spread times 1, 3, 9 and 27 into four lanes, then takes one
+    /// step of [`Self::pt_advance`].
     fn pt_tail(&self, block: &Block<'c>, tails: Value<'c, 'c>, q: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         let eight = self.const_i32(block, 8)?;
         let shift = self.push(block, arith::muli(q, eight, self.loc))?;
@@ -75,7 +78,7 @@ impl<'c> Codegen<'c> {
         Ok(self.pt_advance(block, [lanes[0], lanes[1]], 1)?[0])
     }
 
-    /// Trits 0..2 a byte as the weights' signed `t - 1`.
+    /// Trits 0..2 per byte as the weights' signed `t - 1`.
     fn pt_signed(&self, block: &Block<'c>, trits: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
         let bias = self.const_i32(block, 0x7F7F_7F7F)?;
         let flip = self.const_i32(block, 0x8080_8080u32 as i32 as i64)?;
@@ -125,9 +128,9 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Decode the thread's group from what [`Self::pt_gemm_load`] read. The
-    /// first half of a quarter is word 0's five planes and word 1's first
-    /// three; the second is word 1's last two, word 2's five and the tail.
+    /// Decodes the thread's group from what [`Self::pt_gemm_load`] read. A
+    /// quarter's first half is word 0's five planes and word 1's first three.
+    /// The second half is word 1's last two, word 2's five, and the tail.
     pub(super) fn pt_gemm_decode(&mut self, block: &Block<'c>, stage: &Stage<'_, 'c>, regs: &[Value<'c, 'c>]) -> Result<()> {
         let [w0, w1, w2, tails, scales, q, half] = regs else {
             bail!("ptq1_qgemm_t decodes seven registers, got {}", regs.len());
@@ -169,10 +172,10 @@ impl<'c> Codegen<'c> {
         Ok(pieces)
     }
 
-    /// `carry` plus one block of a decode lane's quarter, `regs` as
-    /// [`Self::pt_pieces`] laid them out, against the activations from
-    /// `k_off`: two groups of eight `dp4a` against the trits and eight
-    /// against -1, whose sum is the exact `sum (t - 1) a`.
+    /// `carry` plus one block of a decode lane's quarter, against the
+    /// activations from `k_off`. `regs` is laid out as [`Self::pt_pieces`]
+    /// loaded it. Each of the two groups runs eight `dp4a` against the trits
+    /// and eight against -1, which sum to the exact `sum (t - 1) a`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pt_qdot_block(
         &mut self,

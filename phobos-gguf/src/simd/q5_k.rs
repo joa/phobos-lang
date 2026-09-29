@@ -1,5 +1,5 @@
-// Q5_K against Q8: Q4_K's runs, scales and nibble planes with a fifth bit,
-// run `r`'s element `l` taking it from bit `r` of `qh[l]`.
+// Q5_K against Q8. Q4_K's layout with a fifth bit: element `l` of run `r`
+// takes it from bit `r` of `qh[l]`.
 
 use super::q4_k::{Unpacked, dot_plain};
 use super::{Acc, Block, Q8Block, RUN, RUNS};
@@ -52,9 +52,9 @@ mod avx2 {
             let m4 = _mm256_set1_epi8(0x0f);
             let m1 = _mm256_set1_epi8(1);
             let q = u.q.0.as_mut_ptr();
-            // Each run takes bit zero of the high plane and shifts it down
-            // for the next; a byte's neighbour only ever reaches its top
-            // bits, which the mask drops.
+            // Each run takes bit zero of the high plane, then shifts the plane
+            // down for the next run. The 16-bit shift only leaks a neighbour
+            // into a byte's top bits, which the mask drops.
             let mut high = _mm256_loadu_si256(bytes.as_ptr().add(QH).cast());
             for run in 0..RUNS {
                 let v = _mm256_loadu_si256(bytes.as_ptr().add(QS + (run / 2) * 32).cast());

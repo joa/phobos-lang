@@ -1,14 +1,14 @@
 """Export a Hugging Face GPT-2 as the two ONNX graphs the KV engine wants.
 
-The GPT-2 exports in the ONNX model zoo take a single `input1` and no past
-inputs, so every decode step has to recompute the whole sequence. This script
-exports the same weights twice instead:
+The model zoo's GPT-2 exports have no past inputs, so every decode step
+recomputes the whole sequence. This script exports the same weights twice,
+as `phobos_onnx::runtime::KvGraph` loads them:
 
     decoder.onnx            input_ids -> logits, present.{l}.{key,value}
     decoder_with_past.onnx  input_ids + past.* -> logits, present.*
 
-which is what `phobos_onnx::runtime::KvGraph` loads. It also drops the
-tokenizer files next to them, since an ONNX file carries no vocabulary.
+It also writes the tokenizer files beside them, since an ONNX file carries
+no vocabulary.
 
     pip install "torch==2.5.1" "transformers==4.47.1" onnx
     python models/export_kv.py --out models/gpt2-kv
@@ -22,9 +22,9 @@ import pathlib
 import torch
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
-# The exporter that produced the graphs in use. opset 11 is the floor for the
-# Range op the position arithmetic lowers to, and the ceiling that keeps the
-# attention as plain MatMul/Softmax rather than a fused Attention node.
+# Opset 11 is the lowest with the Range op the positions lower to. It is also
+# the highest that keeps attention as plain MatMul/Softmax instead of a fused
+# Attention node.
 OPSET = 11
 
 
@@ -116,8 +116,8 @@ def main():
     past_names = flat_names("past", n_layer)
     present_names = flat_names("present", n_layer)
 
-    # A 2-token prompt, then a 1-token step over a 2-long cache: the axes that
-    # matter are all dynamic, so the example only has to be well formed.
+    # Example inputs only need to be well formed; the axes that matter are
+    # dynamic.
     prompt_ids = torch.tensor([[15496, 995]], dtype=torch.long)
     step_ids = torch.tensor([[995]], dtype=torch.long)
     past = [torch.zeros(1, n_head, 2, head_dim) for _ in past_names]

@@ -1,13 +1,13 @@
 // IQ3_XXS's decode geometry, shared by the contraction (`iq3xxs_qdot.rs`) and
-// the expansion (`qdecode.rs`). Two four-wide grid lookups a lane (grid
-// entries are 4 bytes wide here, against IQ2_XXS's one eight-wide lookup) plus
-// a sign-table lookup. The scale/sign geometry is IQ2_XXS's outright: the
-// aux32 field is byte-for-byte the same.
+// the expansion (`qdecode.rs`). Each lane does two four-wide grid lookups and
+// one sign lookup. The aux32 scale and sign field is laid out as in IQ2_XXS,
+// so that geometry is shared.
 
 use super::*;
 
-// IQ3_XXS block layout (phobos-gguf/src/quant/iq3_xxs.rs): 98 bytes, qs at
-// byte 2 (two grid-index bytes a lane), aux32 scale/sign field at byte 66.
+// IQ3_XXS device block layout: 96 bytes, qs at byte 0 (two grid-index bytes
+// a lane), aux32 scale/sign field at byte 64. A device block drops the file's leading f16 `d`
+// (`Quant::device_block`).
 pub(super) const IQ3XXS_BLOCK_BYTES: i64 = 96;
 const IQ3XXS_QS_OFF: i64 = 0;
 const IQ3XXS_SS_OFF: i64 = 64;
@@ -75,8 +75,8 @@ impl<'c> Codegen<'c> {
         let three_idx = self.const_index(body, 3)?;
         let scale_off = self.addi(body, aux, three_idx)?;
 
-        // Same lo/hi/shift-div folding as iq2xxs_lane: lo_off = aux +
-        // (max(l, 1) - 1), hi_off = aux + l (a harmless re-read at l == 0).
+        // Same lo/hi folding as iq2xxs_lane: lo_off = aux + (max(l, 1) - 1),
+        // hi_off = aux + l, an in-bounds re-read at l == 0.
         let l_or_1 = self.push(body, arith::select(is_l0, one_idx, l, self.loc))?;
         let lo_off = self.addi(body, aux, self.subi(body, l_or_1, one_idx)?)?;
         let hi_off = self.addi(body, aux, l)?;
@@ -157,7 +157,7 @@ impl<'c> Codegen<'c> {
         let g2_idx = self.numeric_cast(kb, g2_byte, self.index_t)?;
         let g1_base = self.push(kb, arith::muli(g1_idx, four_idx, self.loc))?;
         let g2_base = self.push(kb, arith::muli(g2_idx, four_idx, self.loc))?;
-        // Four bytes a grid entry, eight for the sign entry: three loads.
+        // Four bytes per grid entry and eight for the sign entry: three loads.
         let z = self.const_index(kb, 0)?;
         let g_t = Type::vector(&[IQ3XXS_HALF as u64], self.i8_t);
         let s_t = Type::vector(&[2 * IQ3XXS_HALF as u64], self.i8_t);
@@ -173,8 +173,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// One decoded weight: element `y` of grid entry `entry` (0 or 1), signed
-    /// by the matching half of the lane's sign entry. Both are already in
-    /// registers, so this is arithmetic only.
+    /// by the matching half of the lane's sign entry, both already in
+    /// registers.
     pub(super) fn iq3xxs_decoded(
         &mut self,
         kb: &Block<'c>,

@@ -3,19 +3,20 @@
 
 use super::*;
 
-/// What a [`Buf`] handle points at: scratch this backend owns and can hand
-/// back to the pool, or a constant living in the arena.
+/// What a [`Buf`] handle points at: an owned buffer that goes back to the
+/// pool, or a region of an arena.
 ///
-/// A constant is uploaded once and never released, so it does not need its
-/// own allocation, and giving it one costs residency: see `arena.rs`.
+/// A constant is never released, so it lives in the arena rather than in an
+/// allocation of its own. See `arena.rs`.
 pub(super) enum Slot {
     Owned(DeviceBuffer<f32>),
     Const {
         at: u64,
         len: usize,
     },
-    /// A sequence's recurrent state: arena-backed like a constant, but
-    /// released when the sequence ends, so the arena is counted and reset.
+    /// A sequence's recurrent state. Arena-backed like a constant, but
+    /// released when the sequence ends. The state arena counts its live
+    /// regions and resets once none are left.
     State {
         at: u64,
         len: usize,
@@ -49,8 +50,7 @@ const ACT_SHARED: usize = 2;
 const ACT_EXCLUSIVE: usize = ACT_RING + ACT_SHARED;
 
 impl DeviceBackend {
-    /// A handle onto `data` in the arena, for a constant the model never
-    /// releases and never reads back.
+    /// Uploads a constant into the arena. It is never released or read back.
     pub(super) fn store_const(&self, data: &[f32]) -> Result<Buf> {
         if !self.arena_const {
             return self.upload(data);
@@ -62,9 +62,8 @@ impl DeviceBackend {
         }))
     }
 
-    /// A zeroed handle onto the state arena, for a buffer that lives as long
-    /// as the sequence does. Giving each its own allocation instead leaves
-    /// `delta_rule` reading state far slower: see `arena.rs`.
+    /// A zeroed buffer in the state arena that lives as long as the
+    /// sequence. See `arena.rs` for why it is not its own allocation.
     pub(super) fn zeroed_state_buf(&self, len: usize) -> Result<Buf> {
         let at = self.state_arena.upload(&vec![0.0f32; len])?;
         self.state_live.set(self.state_live.get() + 1);
@@ -85,10 +84,8 @@ impl DeviceBackend {
         Buf(slots.len() - 1)
     }
 
-    /// Give a buffer back to the driver rather than to the pool, so the memory
-    /// becomes the weights' again instead of staying reserved for a shape that
-    /// only a prompt pass asks for. Only safe where [`Pool::trim`] is: see
-    /// `residency.rs`.
+    /// Frees a buffer to the driver instead of returning it to the pool.
+    /// Only safe where [`Pool::trim`] is. See `residency.rs`.
     pub(super) fn discard(&self, buf: Buf) {
         let taken = self
             .slots
@@ -117,12 +114,11 @@ impl DeviceBackend {
         Ok(buffer.base() + (elements * size_of::<f32>()) as u64)
     }
 
-    /// The same for f16 storage, whose offset is counted in halves.
+    /// The same for f16 storage, with the offset counted in halves.
     ///
-    /// An [`HBuf`] is a slot of the one table, holding a buffer of half as
-    /// many f32 words, so the pool serves both kinds and a released cache
-    /// comes back as ordinary scratch. Only this file treats the two handle
-    /// types as interchangeable; elsewhere they stay distinct on purpose.
+    /// An [`HBuf`] lives in the same slot table as a [`Buf`], backed by half
+    /// as many f32 words, so the pool serves both. Only this file treats the
+    /// two handle types as interchangeable.
     pub(super) fn hptr(&self, buf: HBuf, elements: usize) -> Result<u64> {
         let slots = self.slots.borrow();
         let buffer = slots
@@ -136,8 +132,8 @@ impl DeviceBackend {
         Ok(buffer.base() + (elements * size_of::<u16>()) as u64)
     }
 
-    /// The f32 words behind f16 storage. Only safe for a whole even run, which
-    /// [`Backend::copy_h`] promises; see [`DeviceBackend::hptr`].
+    /// The f32 words behind f16 storage. Only valid for an even-length run,
+    /// as [`Backend::copy_h`] guarantees. See [`DeviceBackend::hptr`].
     pub(super) fn words(buf: HBuf) -> Buf {
         Buf(buf.0)
     }
@@ -151,11 +147,11 @@ impl DeviceBackend {
             .len())
     }
 
-    /// The kernels do not tolerate a destination sharing storage with a
-    /// source, so fail loudly on one.
+    /// Panics if the destination is one of the sources, which no kernel
+    /// tolerates. Only checked under `PHOBOS_CHECK_BUFS`.
     pub(super) fn check_distinct(&self, what: &str, dst: Buf, sources: &[Buf]) {
-        // Read once: nearly every launch asks, and reading the environment
-        // takes a process-wide lock.
+        // Cached: nearly every launch calls this, and reading the
+        // environment takes a process-wide lock.
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         if !*ON.get_or_init(|| phobos_base::env::flag("PHOBOS_CHECK_BUFS")) {
             return;
@@ -228,22 +224,20 @@ impl DeviceBackend {
         Ok(act)
     }
 
-    /// [`Self::quantize_act_into`] with a slot from the ring, for an
-    /// activation the projection that asked for it is the only reader of.
+    /// [`Self::quantize_act_into`] with a ring slot, for an activation read
+    /// only by the projection that asked for it.
     pub(super) fn quantize_act_transient(&self, a: Buf, m: usize, k: usize) -> Result<QAct> {
         self.quantize_act_into(self.act_slot_transient(m, k)?, a, m, k)
     }
 
-    /// [`Self::act_slot`] for an activation nothing outlives: quantized, read
-    /// by the one projection that asked for it, and never referred to again.
+    /// [`Self::act_slot`] for an activation read once, by the projection that
+    /// asked for it, and never again.
     ///
-    /// A pass takes a fresh slot per `quantize_act` because a caller may hold
-    /// a handle across several projections, as `rms_norm_q` does for QKV and
-    /// for gate and up. The fused projection's one caller, the down
-    /// projection, does not, so those can share a handful of slots: a
-    /// recorded pass replays as a chain of kernel nodes in issue order, so a
-    /// ring slot's quantize cannot run before the projection that reads it.
-    /// `ACT_RING` only has to exceed how many are live at once, which is one.
+    /// Normally each `quantize_act` gets a fresh slot, because a caller such
+    /// as `rms_norm_q` may hold the handle across several projections. A
+    /// single-use activation can instead reuse a small ring of slots. The
+    /// recorded pass runs in issue order, so a slot is never overwritten
+    /// before its reader runs.
     pub(super) fn act_slot_transient(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
         let at = self.act_ring.get();
         self.act_ring.set((at + 1) % ACT_RING);
@@ -251,10 +245,11 @@ impl DeviceBackend {
         self.act_slot_at(at, m, k)
     }
 
-    /// [`Self::act_slot`] for the Hadamard transform's quantized copy, read
-    /// by the projections sharing one input and dead before the next such
-    /// input is made: at most one is live, so a pair of slots serves every
-    /// one of them, however many a pass makes.
+    /// [`Self::act_slot`] for the Hadamard transform's quantized copy.
+    ///
+    /// Only the projections sharing that input read it, and it is dead
+    /// before the next one is made. At most one is live, so a pair of slots
+    /// serves the whole pass.
     pub(super) fn act_slot_shared(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
         let at = self.act_shared.get();
         self.act_shared.set(ACT_RING + (at + 1 - ACT_RING) % ACT_SHARED);
@@ -265,8 +260,8 @@ impl DeviceBackend {
     /// This pass's next quantized-activation slot, big enough for `m` rows
     /// of `k`, with its device pointers.
     pub(super) fn act_slot(&self, m: usize, k: usize) -> Result<(QAct, u64, u64)> {
-        // The two rings reserve the first slots of every pass, so an
-        // exclusive one starts past them.
+        // The two rings reserve the first slots, so exclusive ones start
+        // after them.
         let at = self.act_next.get().max(ACT_EXCLUSIVE);
         self.act_next.set(at + 1);
         self.act_slot_at(at, m, k)
@@ -285,8 +280,8 @@ impl DeviceBackend {
             .get(at)
             .is_none_or(|(q, s)| q.len() < m * k || s.len() < m * blocks);
         if too_small {
-            // Growing frees the buffer the recorded launches point at, so the
-            // recording has to be spent first.
+            // Growing frees a buffer recorded launches point at, so flush
+            // them first.
             self.flush_pending()?;
             // SAFETY: whatever fills the slot writes every element before the
             // projection reads it.
@@ -298,8 +293,8 @@ impl DeviceBackend {
             };
             let mut scratch = self.act_scratch.borrow_mut();
             while scratch.len() < at {
-                // SAFETY: as above; a gap is only ever written before it is
-                // read, by the `too_small` path that fills it.
+                // SAFETY: as above. A gap slot is grown by the `too_small`
+                // path before anything reads it.
                 scratch.push(unsafe {
                     (
                         DeviceBuffer::uninitialized(1)?,
@@ -340,17 +335,16 @@ impl DeviceBackend {
             return Ok(());
         }
 
-        // Growing frees what the recorded launches point at, so the recording
-        // has to be spent first.
+        // Growing frees buffers recorded launches point at, so flush them
+        // first.
         self.flush_pending()?;
         let mut pool = self.fused_scratch.borrow_mut();
         for (at, n) in need.iter().enumerate() {
             if fits(&pool, at, n) {
                 continue;
             }
-            // SAFETY: a plan only publishes a value whose every byte one of its
-            // stages writes before any stage reads it, which is what the nest
-            // and barrier analysis establishes.
+            // SAFETY: the plan's nest and barrier analysis guarantees every
+            // byte is written by a stage before any stage reads it.
             let fresh = unsafe {
                 (
                     DeviceBuffer::uninitialized(n.bytes)?,
@@ -365,13 +359,13 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// An allocation for something that writes it immediately rather than
-    /// from the stream, so it must not come out of the pool mid-pass. Only
-    /// this function knows both halves: the pool cannot see whether a pass
-    /// is recording, and the recorder does not allocate. See
-    /// [`Pool::take_fresh`]. Two callers need it: a constant that grows
-    /// mid-pass, like the rotary table, and a zero fill whose memset goes
-    /// straight to the stream while the pass around it is only recorded.
+    /// An allocation that is written immediately rather than by a recorded
+    /// launch.
+    ///
+    /// While a pass is recording, a pooled buffer may still be read by a
+    /// pending launch, so this takes a fresh one instead. See
+    /// [`Pool::take_fresh`]. Used for constants that grow mid-pass, like the
+    /// rotary table, and for zero fills.
     #[track_caller]
     pub(super) fn alloc_written_now(&self, len: usize) -> Result<Buf> {
         if !self.recording.get() {

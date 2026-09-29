@@ -30,10 +30,9 @@ struct LnKernel {
     tr: usize,
 }
 
-/// A Phobos GPU matmul backend for [`super::host`]. Compiles the tiled matmul
-/// once, then pads each call's operands to tile-aligned dims, launches, and
-/// slices out the real `[m, n]`. Zero-padding K contributes zero terms to the
-/// dot, and the padded M and N rows and columns are discarded.
+/// A Phobos GPU matmul backend for [`super::host`]. It compiles the tiled
+/// matmul once. Each call zero-pads the operands to whole tiles, launches, and
+/// slices out the real `[m, n]`.
 pub struct GpuBackend {
     stream: Stream,
     module: Module,
@@ -44,9 +43,9 @@ pub struct GpuBackend {
     weight_cache: RefCell<HashMap<String, DeviceBuffer<f32>>>,
     /// Non-constant operands and results.
     scratch: Pool,
-    /// Must be the last field: Rust drops in declaration order, and every
-    /// buffer, module and stream above has to be released while the context is
-    /// still alive or teardown faults.
+    /// Must be the last field. Fields drop in declaration order, and every
+    /// buffer, module and stream above must be released while the context is
+    /// alive, or teardown faults.
     _ctx: cust::context::Context,
 }
 
@@ -105,7 +104,7 @@ impl MatmulBackend for GpuBackend {
         n: usize,
         b_key: Option<&str>,
     ) -> Result<Vec<f32>> {
-        // All three axes pad to whole tiles; masking a ragged N instead makes
+        // All three axes pad to whole tiles. Masking a ragged N instead makes
         // the tiled kernel miscompute.
         let (mp, kp, np) = (round_up(m, MM_TM), round_up(k, MM_TK), round_up(n, MM_TN));
         let a_pad = pad(a, m, k, mp, kp);
@@ -172,8 +171,7 @@ impl MatmulBackend for GpuBackend {
         drop(cache_guard);
         drop(local_b);
 
-        // Only the first m rows are real, and reading back all mp of them
-        // would move a whole tile of rows to use one on a single-row call.
+        // Only the first m rows are real, so only those are read back.
         let mut c_pad = vec![0.0f32; m * np];
         c_dev.index(0..m * np).copy_to(&mut c_pad)?;
         self.return_scratch(a_dev);
@@ -248,8 +246,8 @@ impl MatmulBackend for GpuBackend {
 }
 
 /// Rows-per-CTA for a width-`w` LayerNorm. The kernel holds two full `[tr, w]`
-/// f32 tiles, the row and a squared temporary, so `2 * tr * w * 4` has to stay
-/// well under the 48 KB shared budget.
+/// f32 tiles, the row and a squared temporary, so `2 * tr * w * 4` bytes must
+/// stay well under 48 KB of shared memory.
 fn choose_ln_tr(w: usize) -> usize {
     let max_tr = (40_000 / (2 * w * 4)).max(1);
     [16, 8, 4, 2, 1]
@@ -289,10 +287,10 @@ fn layernorm_src(w: usize) -> (String, usize) {
 /// Run `graph` over f32 inputs keyed by edge name, returning its outputs as
 /// row-major f32 vectors.
 ///
-/// Compute ops lower to Phobos kernels and run one per node in topological
-/// order over device buffers. Layout and index ops move data rather than
-/// compute on it, so [`crate::layout`] resolves them on the host at the cost
-/// of a round trip; integer tensors stay host-side as i64.
+/// Compute ops lower to Phobos kernels, one launch per node in topological
+/// order, over device buffers. Layout and index ops only move data, so
+/// [`crate::layout`] resolves them on the host at the cost of a round trip.
+/// Integer tensors stay on the host as i64.
 pub fn run(graph: &Graph, inputs: &HashMap<String, Vec<f32>>) -> Result<HashMap<String, Vec<f32>>> {
     run_typed(graph, inputs, &HashMap::new())
 }

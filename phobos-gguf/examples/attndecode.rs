@@ -2,11 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example attndecode
 //
-// Calls the decode attention path alone, one block at a time through a pass,
-// over a working set the size of a real model's caches, next to the card's
-// measured copy bandwidth. Lengths are primes so none lines up with a cache
-// split or tile boundary, and the last three shapes vary query/key-head
-// grouping to isolate whether repeated key reads cost anything.
+// Runs only the decode attention path, over caches the size of a real
+// model's, and prints the card's measured copy bandwidth beside it. The last
+// three shapes vary the query-to-key-head grouping, to show whether repeated
+// key reads cost anything.
 
 use std::time::Instant;
 
@@ -23,9 +22,9 @@ struct Shape {
     head_dim: usize,
 }
 
-/// Both benchmarked models, counting only the blocks that keep a growing cache:
-/// qwen35 interleaves full attention every fourth block and the rest carry a
-/// fixed-size recurrent state instead.
+/// Two real models, then three synthetic groupings. `blocks` counts only the
+/// blocks with a growing cache. In qwen35 that is every fourth block; the rest
+/// keep a fixed-size recurrent state.
 const SHAPES: [Shape; 5] = [
     Shape {
         name: "minicpm5-1b",
@@ -68,10 +67,11 @@ const SHAPES: [Shape; 5] = [
 /// with a cache split or tile boundary.
 const LENGTHS: [usize; 8] = [37, 67, 131, 257, 521, 1031, 2053, 4099];
 
-/// Repeat `batch` until `secs` have passed and return the mean seconds an
-/// iteration took. `batch` reports how many iterations it ran, and has to leave
-/// the device drained: the calls are asynchronous, so a batch that has not been
-/// read back is not work the clock has seen.
+/// Repeats `batch` until `secs` have passed and returns the mean seconds per
+/// iteration. `batch` returns how many iterations it ran.
+///
+/// `batch` must leave the device drained. The calls are asynchronous, so work
+/// not yet read back is not timed.
 fn repeat_for(secs: f64, mut batch: impl FnMut() -> Result<usize>) -> Result<f64> {
     let start = Instant::now();
     let mut iters = 0;
@@ -81,12 +81,10 @@ fn repeat_for(secs: f64, mut batch: impl FnMut() -> Result<usize>) -> Result<f64
     Ok(start.elapsed().as_secs_f64() / iters as f64)
 }
 
-/// Device-to-device copy bandwidth, measured rather than assumed: the point of
-/// the comparison is what this card does, not what the box claims.
+/// Measured device-to-device copy bandwidth in bytes per second.
 ///
-/// The copy runs for `warm_secs` before anything is timed. A card sitting at
-/// its idle clock needs seconds of work to reach boost, and a measurement
-/// taken across the ramp says more about the clock than about the kernel.
+/// The copy runs for `warm_secs` before timing starts. An idle card needs
+/// seconds of work to reach its boost clock.
 fn copy_bandwidth(backend: &dyn Backend, warm_secs: f64) -> Result<f64> {
     let elems = 32 << 20;
     let src = backend.zeroed(elems)?;
@@ -109,8 +107,8 @@ fn copy_bandwidth(backend: &dyn Backend, warm_secs: f64) -> Result<f64> {
     Ok(2.0 * passes as f64 * (elems * size_of::<f32>()) as f64 / secs)
 }
 
-/// One decode step's worth of attention: every block's call, over that block's
-/// own cache, so nothing is served out of L2 that would not be.
+/// One decode step of attention: one call per block, each over its own cache,
+/// so L2 hits match a real model.
 fn step(
     backend: &dyn Backend,
     caches: &[(HBuf, HBuf)],
@@ -125,9 +123,8 @@ fn step(
     backend.end_pass()
 }
 
-/// Restricts the sweep to one cache length, for an external profiler (ncu)
-/// that needs to isolate a single kernel launch. Unset by default, so a
-/// normal run sweeps every length.
+/// `PHOBOS_ATTNDECODE_LENGTH` restricts the sweep to one cache length, so a
+/// profiler such as ncu can isolate one launch. Unset, every length runs.
 fn length_wanted(length: usize) -> bool {
     std::env::var("PHOBOS_ATTNDECODE_LENGTH")
         .ok()
@@ -141,8 +138,7 @@ fn main() -> Result<()> {
     println!("device copy bandwidth {:.0} GB/s\n", bandwidth / 1e9);
 
     for shape in &SHAPES {
-        // Same restriction, by shape name substring: an external profiler
-        // isolating one kernel launch wants one shape as well as one length.
+        // Same restriction for the profiler, by shape name substring.
         if std::env::var("PHOBOS_ATTNDECODE_SHAPE").is_ok_and(|s| !shape.name.contains(&s)) {
             continue;
         }
@@ -194,12 +190,11 @@ fn main() -> Result<()> {
             repeat_for(0.25, || steps(1))?;
             let micros = repeat_for(0.5, || steps(32))? * 1e6;
 
-            // Every cached key and value of every block, counted once. The
-            // caches are f16, so a position is half what it was.
+            // Every cached f16 key and value of every block, counted once.
             let bytes = shape.blocks * length * kv_width * 2 * size_of::<u16>();
             let floor = bytes as f64 / bandwidth * 1e6;
-            // The slope against the row above, which drops whatever fixed cost
-            // the launches carry and leaves what a position itself is worth.
+            // Cost per 1k positions against the previous row. The difference
+            // cancels the fixed launch cost.
             let slope = previous.map_or(f64::NAN, |(was, took)| {
                 (micros - took) / (length - was) as f64 * 1e3
             });

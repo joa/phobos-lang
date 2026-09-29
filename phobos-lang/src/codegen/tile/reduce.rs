@@ -35,9 +35,8 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// The fold identity: 0 for sum; for max, smaller than any finite input
-    /// (the first column overwrites it). f16 saturates at -65504, so use a
-    /// representable floor.
+    /// The fold identity: 0 for sum, and for max a floor below any finite
+    /// input. For f16 the floor is -65504, the lowest representable value.
     pub(super) fn reduce_identity(
         &self,
         block: &Block<'c>,
@@ -64,11 +63,11 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// Lanes cooperating on each row of a warp-shuffled row reduction: the
-    /// largest power of two the CTA can spend per row, capped at the warp
-    /// width, such that rows * lanes covers whole warps (shfl.sync stalls
-    /// unless every lane of a participating warp reaches it). None when only
-    /// a single lane per row fits; the serial path covers that.
+    /// Lanes cooperating on each row of a warp-shuffled row reduction. It is
+    /// the largest power of two the CTA can spend per row, at most 32, such
+    /// that rows * lanes covers whole warps. shfl.sync stalls unless every
+    /// lane of a participating warp reaches it. None when only one lane per
+    /// row fits.
     pub(super) fn reduce_lanes(&self, rows: i64) -> Option<i64> {
         let per_row = self.cta_threads / rows.max(1);
         if per_row < 2 {
@@ -84,8 +83,8 @@ impl<'c> Codegen<'c> {
         None
     }
 
-    /// Each output row is owned by one thread, which sweeps the columns with
-    /// a scalar accumulator (a thread-private rank-0 alloca).
+    /// One thread owns each output row and sweeps its columns with a
+    /// thread-private scalar accumulator.
     pub(super) fn rowreduce_serial(
         &mut self,
         block: &Block<'c>,
@@ -97,7 +96,6 @@ impl<'c> Codegen<'c> {
         let elem = src.elem;
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let i = idx[0];
-            // Thread-private scalar accumulator.
             let slot_t = MemRefType::new(elem, &[], None, None);
             let slot = cg.push(blk, memref::alloca(cg.ctx, slot_t, &[], &[], None, cg.loc))?;
             let init = cg.reduce_identity(blk, elem, kind)?;
@@ -126,15 +124,14 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Warp-cooperative row reduction: lanes consecutive lanes fold one row
-    /// (each folds a strided slice of the columns as an scf.for iter_arg),
-    /// then a gpu.shuffle xor butterfly combines the partials and lane 0 of
-    /// the group stores the row result.
+    /// Warp-cooperative row reduction. A group of `lanes` consecutive lanes
+    /// folds one row, each lane a strided slice of the columns. An xor
+    /// butterfly then combines the partials, and the group's lane 0 stores
+    /// the result.
     ///
-    /// Safety of the shuffle: rows * lanes covers whole warps and the block
-    /// dim is a warp multiple, so any warp reaching the shuffle has all 32
-    /// lanes present. The xor masks stay below lanes, so a lanes-aligned
-    /// group never exchanges outside itself.
+    /// rows * lanes covers whole warps and the block dim is a warp multiple,
+    /// so every warp reaching the shuffle has all 32 lanes present. The xor
+    /// masks stay below `lanes`, so a group never exchanges outside itself.
     pub(super) fn rowreduce_warp(
         &mut self,
         block: &Block<'c>,

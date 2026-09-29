@@ -1,4 +1,4 @@
-// Turns the analysis into a program: grid axes, super symbols, init leaves, output slices.
+// Turns the analysis into a program: grid axes, super syms, init leaves and output slices.
 
 use super::*;
 
@@ -117,7 +117,7 @@ impl<'a> Analyzer<'a> {
 
         self.finalize_super_syms()?;
 
-        // Snapshot the scalar count now: the init leaf appends its own beta decls below.
+        // Taken before the init leaf appends its own beta decls below.
         let step_scalars: Vec<usize> = (0..self.scalars.len()).collect();
 
         let scratch = self.scratch.take();
@@ -151,14 +151,14 @@ impl<'a> Analyzer<'a> {
         };
         if let (Some(scratch), Some(d)) = (&scratch, &define) {
             match &d.epilogue {
-                // plain = acc or = alpha*acc: zero-fill (the scratch literal)
+                // `= acc` or `= alpha*acc`: fill with the scratch literal
                 None
                 | Some(Epilogue { prev: None, .. })
                 | Some(Epilogue {
                     prev: Some((None, _)),
                     ..
                 }) => match &d.epilogue {
-                    // beta identity (+ c_old): C keeps its original value, no init
+                    // `+ c_old` with beta 1.0: C keeps its original value, no init
                     Some(Epilogue {
                         prev: Some((None, _)),
                         ..
@@ -171,7 +171,7 @@ impl<'a> Analyzer<'a> {
                         modes: vec![AccessMode::Write],
                     }),
                 },
-                // + beta*c_old: seed C with beta*C_orig (reads C back)
+                // `+ beta*c_old`: seed C with beta times its original value
                 Some(Epilogue {
                     prev: Some((Some(beta), c_old)),
                     ..
@@ -197,8 +197,8 @@ impl<'a> Analyzer<'a> {
         })
     }
 
-    /// The grid slice [p0*S0 :+ S0, ..] of the output supertile, plus the
-    /// let p{pid} = program_id(pid) bindings its offsets need.
+    /// The grid slice `[p0*S0 :+ S0, ..]` of the output supertile, plus the
+    /// `let p{pid} = program_id(pid)` bindings its offsets need.
     pub(super) fn output_slice(&self, d: &Define) -> (Vec<Stmt>, Vec<Sub>) {
         let mut lets = Vec::new();
         let mut declared = HashSet::new();
@@ -240,7 +240,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Synthesize the plain chain's init leaf:
-    /// kernel {name}_init(C: ..) { let p0 = program_id(0); ..; C[p0*S :+ S, ..] = <init> }
+    /// `kernel {name}_init(C: ..) { let p0 = program_id(0); ..; C[p0*S :+ S, ..] = <init> }`
     pub(super) fn zero_init_leaf(&self, scratch: &Scratch, d: &Define) -> Kernel {
         let (mut body, subs) = self.output_slice(d);
         body.push(Stmt::Assign {
@@ -259,12 +259,13 @@ impl<'a> Analyzer<'a> {
         }
     }
 
-    /// Synthesize the GEMM chain's init leaf, which seeds C with beta*c_old
-    /// (folding the epilogue's prior-C term out of the per-step accumulation):
-    /// kernel {name}_init(C: .., <beta scalars>) { ..; let c_old = C[..]; C[..] = beta*c_old }
+    /// Synthesize the GEMM chain's init leaf, which seeds C with `beta*c_old` so
+    /// the per-step accumulation needs no prior-C term:
+    /// `kernel {name}_init(C: .., <beta scalars>) { ..; let c_old = C[..]; C[..] = beta*c_old }`
     ///
-    /// The leaf's scalar params get fresh decls at local positions (the pod marshals
-    /// a leaf's args by dense index), returned as the init compute's scalar list.
+    /// The leaf's scalar params get fresh decls at local positions, because the
+    /// pod marshals a leaf's args by dense index. The returned list is the init
+    /// compute's scalars.
     pub(super) fn beta_init_leaf(
         &mut self,
         d: &Define,

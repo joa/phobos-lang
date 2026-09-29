@@ -4,44 +4,36 @@
 For each engine, one server at a time on the port the agent is configured for:
 
  1. Start the server and wait until it can answer. Phobos listens before its
-    weights are up, so for it that means its `warmed up` line, not the port.
-    One small request then runs untimed, so neither engine is measured cold.
- 2. Copy every child of bench/ into a fresh scratch folder. A child's
-    `check.*` file stays behind: the agent never sees how it is judged.
- 3. For each child in turn, run `pi -p @<child>/prompt.md` with the child as
-    its working folder. The task is finished when pi exits; it was completed
-    when the last thing the agent said contains DONE, and done right when the
-    child's check passes afterwards.
- 4. Read what the server logged while the agent worked: a request's prompt
-    and decode rates, how much of its prompt was already cached, and for
-    phobos the expert cache's hit rates.
+    weights are loaded, so for phobos this waits for its `warmed up` line.
+    One small untimed request follows, so neither engine is measured cold.
+ 2. Copy every child of bench/ into a fresh scratch folder, leaving out its
+    `check.*` file so the agent never sees how it is judged.
+ 3. For each child, run `pi -p @<child>/prompt.md` in the child's folder.
+    The task finishes when pi exits. It counts as completed when the agent's
+    last message contains DONE, and as correct when the child's check passes.
+ 4. Read the server's log for the run: per-request prompt and decode rates,
+    how much of each prompt was cached, and for phobos the expert cache's
+    hit rates.
 
-Fair settings, which each server would otherwise disagree on:
+Both servers get the same settings where their defaults would differ.
+pi sends no sampling fields, so both get Qwen's recommended sampler for the
+mode. Neither thinks by default; with `--thinking`, pi asks for reasoning and
+llama.cpp is told to reason. The context is pi's, 16k with one slot.
 
- - pi sends no sampling fields, and asks for reasoning only with a reasoning
-   model, so each server's own defaults would decide both: phobos samples
-   greedily and thinks only when asked, llama.cpp samples at 0.8 and thinks,
-   since the Qwen template thinks unless told otherwise. Both are given the
-   same sampler here, Qwen's for the mode, and either neither thinks or,
-   with `--thinking`, pi asks for reasoning and llama.cpp is told to.
- - The context is the agent's: pi is configured for 16k, one slot.
- - The expert split is each engine's own. llama.cpp fits `-ncmoe` to the card
-   itself (`--fit`, on by default); phobos sizes its expert cache from free
-   memory. Neither is tuned by hand, since tuning is what nobody else does.
+The expert split is left to each engine. llama.cpp fits `-ncmoe` to the card
+itself (`--fit`, on by default), and phobos sizes its expert cache from free
+memory. Neither is tuned by hand.
 
-Rates are token-weighted, summed tokens over summed seconds, so a 40-token
-prompt does not count as much as a 4,000-token one. Wall time is only
-meaningful beside the counts: two engines' numerics differ, the agent takes a
-different path on each, and a run that writes twice as much takes longer on
-any engine.
+Rates are token-weighted, summed tokens over summed seconds. Wall time only
+means something beside the token counts, since the agent can take a different
+path on each engine.
 
-Every request the agent sends passes through a proxy that records it, with
-the length of its answer, into `<engine>-rep<N>-<child>.requests.jsonl`.
-`--replay` sends such a file to each engine again instead of running the
-agent: the same prompts in the same order, each answered at the recorded
-length, so two engines, or two builds, are measured on the same work. The
-answers still differ, so each prompt leaves an engine's kept session where
-the agent's left the recording's, as it would in the agent.
+A proxy records every request the agent sends, with the length of its answer,
+into `<engine>-rep<N>-<child>.requests.jsonl`. `--replay` sends such a file to
+each engine instead of running the agent. The prompts are the same and each
+answer is capped at the recorded length, so two engines or two builds do the
+same work. The answers' text still differs from the recording, so an engine's
+kept session is not the one the recording had.
 
 Usage:
     python scripts/agent_bench.py
@@ -107,8 +99,8 @@ PHOBOS_LINE = re.compile(
 PHOBOS_EXPERTS = re.compile(
     r"experts resident: decode (?:([\d.]+)% of (\d+)|none), prompt (?:([\d.]+)% of (\d+)|none); ([\d.]+) GB copied"
 )
-# llama.cpp: "prompt eval time =    1232.22 ms /    39 tokens" and the same
-# without "prompt " for the decode, on one line each per request.
+# llama.cpp: "prompt eval time =    1232.22 ms /    39 tokens" per request,
+# and the same without "prompt " for the decode.
 LLAMA_PROMPT = re.compile(r"prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens")
 LLAMA_DECODE = re.compile(r"(?<!prompt )\beval time =\s*([\d.]+) ms /\s*(\d+) tokens")
 
@@ -132,8 +124,10 @@ def phobos_requests(text):
 
 
 def llama_requests(text):
-    """One request per `eval time` pair. llama.cpp logs only the positions
-    it evaluated; the prompt's full length comes from the agent's side."""
+    """One request per `eval time` pair.
+
+    llama.cpp logs only the positions it evaluated. The full prompt length
+    comes from the agent's side."""
     out = []
     for (p_ms, p_n), (d_ms, d_n) in zip(LLAMA_PROMPT.findall(text), LLAMA_DECODE.findall(text)):
         out.append(
@@ -291,9 +285,9 @@ class Llama(Engine):
         if not exe.is_file():
             sys.exit(f"no llama-server at {exe}")
         self.exe = exe
-        # A release ships ggml-cuda.dll without the runtime it links against
-        # and then serves the CPU without failing; see bench.py. The first
-        # environment the server lists a CUDA device under is kept.
+        # A release ships ggml-cuda.dll without its CUDA runtime and silently
+        # serves on the CPU; see bench.py. Keeps the first environment under
+        # which the server lists a CUDA device.
         for lib in [None, *cuda_lib_dirs(args.cuda_lib)]:
             env, _ = with_lib(lib)
             env = env or dict(os.environ)
@@ -311,11 +305,11 @@ class Llama(Engine):
             self.fit = self.fitted()
 
     def fitted(self):
-        """The expert split `--fit` will settle on, which the server does not
-        log: `llama-fit-params` runs the same fit and prints it as `-ot`
-        overrides, one per block whose experts stay on the CPU. Asked here,
-        while the card is as idle as the server will find it; with the
-        server up it would fit against what the server leaves."""
+        """The expert split `--fit` will choose, which the server does not log.
+
+        `llama-fit-params` runs the same fit and prints one `-ot` override per
+        block whose experts stay on the CPU. Must run before the server starts,
+        or it fits against what the server leaves free."""
         fit = self.exe.with_name(self.exe.name.replace("llama-server", "llama-fit-params"))
         if not fit.is_file():
             return None
@@ -368,7 +362,7 @@ def port_open(port):
 
 
 def warm_request():
-    """One short chat, untimed, so the first timed request is not a first."""
+    """One short untimed chat, so no timed request is the first."""
     body = json.dumps(
         {
             "model": "x",
@@ -390,9 +384,10 @@ def warm_request():
 
 
 class Recorder:
-    """A proxy on the agent's port that forwards to the engine's and, while
-    `path` is set, appends each chat request and the length of its answer
-    there: the agent's work as a file any engine can be given again."""
+    """A proxy from the agent's port to the engine's.
+
+    While `path` is set, appends each chat request and its answer length to
+    that file, so the work can be replayed on any engine."""
 
     def __init__(self):
         self.path = None
@@ -419,8 +414,8 @@ class Recorder:
                 for k, v in resp.getheaders():
                     if k.lower() not in ("transfer-encoding", "content-length", "connection"):
                         self.send_header(k, v)
-                # The answer ends when the connection does, so a stream can
-                # be passed on as it comes.
+                # Close ends the answer, so a stream passes through as it
+                # arrives.
                 self.send_header("connection", "close")
                 self.end_headers()
                 answer = bytearray()
@@ -460,12 +455,10 @@ def answer_usage(answer):
 
 
 def replay_trace(trace):
-    """A recorded agent's requests sent again, in order, each answered at
-    the length the recording's was, so every engine does the same work.
-    What an engine writes differs from the recording, so the next prompt
-    leaves its session where the agent's prompt left the recording's, as it
-    would in the agent. Returns the wall time and the prompt lengths the
-    engine reported."""
+    """Sends a recorded agent's requests again, in order, each capped at the
+    recorded answer length.
+
+    Returns the wall time and the prompt lengths the engine reported."""
     records = [json.loads(line) for line in Path(trace).read_text("utf-8").splitlines() if line.strip()]
     started = time.perf_counter()
     prompts = []
@@ -521,8 +514,8 @@ class Task:
 
 
 def copy_children(scratch, children):
-    """The children of bench/ into scratch, less any `check.*`, which judges
-    the result and is not the agent's to read."""
+    """Copies the children of bench/ into scratch, without the `check.*`
+    files the agent must not see."""
     for child in children:
         shutil.copytree(
             ROOT / "bench" / child,
@@ -544,8 +537,10 @@ def run_check(child, workdir):
 
 
 def run_agent(pi, workdir, out_path, timeout_secs, thinking):
-    """pi in print mode until it exits. Its stdin is closed: print mode waits
-    on an open one before it sends anything."""
+    """Runs pi in print mode until it exits.
+
+    Its stdin is closed, since print mode waits on an open one before it
+    sends anything."""
     prompt = workdir / "prompt.md"
     cmd = [pi, "-p", "--offline", "--mode", "json", "--no-session", f"@{prompt}"]
     if thinking:
@@ -706,8 +701,8 @@ def parse_args():
 
 
 def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
-    """One round on one engine: start it, run every child, or replay every
-    trace, and stop it."""
+    """One round on one engine: start it, run every child or replay every
+    trace, then stop it."""
     print(f"\nround {rep}, {engine.name}: loading, card {card_line()}")
     loaded, idle_gib = time.perf_counter(), used_gib()
     engine.start(out / f"{kind}-rep{rep}-server.log")
@@ -715,7 +710,7 @@ def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
     try:
         warm_request()
         print(f"{engine.name}: ready in {time.perf_counter() - loaded:.0f} s, card {card_line()}")
-        # The one sign an engine that fell back to the CPU cannot hide.
+        # An engine that fell back to the CPU takes no card memory.
         if used_gib() - idle_gib < 1.0:
             sys.exit(f"{engine.name} is up but took no card memory; it is not on the GPU")
         meta.setdefault(engine.name, engine.describe(engine.text()))
@@ -737,8 +732,8 @@ def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
             text = engine.text(before)
             requests = engine.requests(text)
             if len(requests) == len(prompts):
-                # The full prompt as the agent was told it; the engine's
-                # log says how much of it was evaluated.
+                # Full prompt length from the agent, evaluated share from
+                # the engine's log.
                 for r, total in zip(requests, prompts):
                     fresh = r.prompt - r.reused
                     r.prompt, r.reused = max(total, fresh), max(total - fresh, 0)
@@ -792,8 +787,8 @@ def main():
     recorder = None if args.replay else Recorder()
     tasks, meta = [], {}
     for rep in range(1, args.reps + 1):
-        # Each engine starts afresh every round, its caches empty, and the
-        # order reverses on even rounds so neither always goes first.
+        # Each engine starts fresh every round. The order reverses on even
+        # rounds so neither always goes first.
         for kind in order if rep % 2 else order[::-1]:
             tasks += run_engine(kinds[kind](args), kind, rep, children, pi, out, meta, recorder)
             (out / "results.json").write_text(json.dumps({"meta": meta, "tasks": [asdict(t) for t in tasks]}, indent=1))

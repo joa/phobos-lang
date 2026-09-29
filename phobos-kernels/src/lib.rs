@@ -1,13 +1,13 @@
-/// The build's compiler fingerprint, which keys every cache entry: a release
-/// ships a cache only binaries printing the same one can read.
+/// The build's compiler fingerprint. Every cache entry is keyed on it, so a
+/// shipped cache is readable only by binaries with the same fingerprint.
 pub const COMPILER_FINGERPRINT: &str = env!("PHOBOS_COMPILER_FINGERPRINT");
 
 pub mod abi;
 pub mod matmul;
 pub mod util;
 
-// The reading and recording halves of these serve `compile`, which needs the
-// driver; a build without it, such as `phobos-cache`, only writes.
+// Only `compile`, which needs the driver, reads and records through these.
+// A build without it, such as `phobos-cache`, only writes.
 #[cfg(feature = "compiler")]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 mod cache;

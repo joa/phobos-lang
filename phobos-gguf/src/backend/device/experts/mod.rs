@@ -1,16 +1,16 @@
-// Expert streaming: a block's experts live in a pinned host mirror and a
-// share of them in device cache slots. A decode step's misses are computed
-// on the host from the mirror (`handoff.rs`); a prompt pass's cross the bus
-// once, at the block's sync point, into the slot they will be read from,
-// or go to the host too (`grouped.rs`).
+// Expert streaming. All of a block's experts live in a pinned host mirror,
+// and some of them also live in device cache slots.
 //
-// A slab per stack and format (a file mixes formats per block, and a slab
-// has one row stride), each `[slots * n, rb]` in the grouped layout the
-// decode matvec reads, with an `f16` scale plane apiece. A block owns
-// `per_block` consecutive slots of each of its three slabs plus one zeroed
-// spare, from a base of its own; a slot holds one expert of one block across
-// the three. Eviction is least recently used within the block, stamped by
-// routing step.
+// A decode step computes its misses on the host from the mirror
+// (`handoff.rs`). A prompt pass copies its misses into slots at the block's
+// sync point, or runs some of them on the host instead (`grouped.rs`).
+//
+// There is one slab per stack and format, since a file can mix formats per
+// block and a slab has one row stride. Each slab is `[slots * n, rb]` in the
+// grouped layout the decode matvec reads, plus an `f16` scale plane. A block
+// owns `per_block` consecutive slots in each of its three slabs, plus one
+// zeroed spare. A slot holds one expert across the three slabs. Eviction is
+// least recently used within the block.
 
 mod grouped;
 mod handoff;
@@ -38,11 +38,11 @@ use handoff::Handoff;
 use mapped::Mapped;
 use mirror::Mirror;
 
-/// Bytes a slab may not exceed: the decode matvec indexes in 32 bits.
+/// Upper bound on a slab's size, since the decode matvec indexes in 32 bits.
 const SLAB_LIMIT: usize = 1 << 31;
 
-/// Rows one `moe` call may carry: twice the runtime's prompt batch, since
-/// the checks feed longer passes than the runtime does.
+/// Most rows one `moe` call may carry. This is twice the runtime's prompt
+/// batch, because the checks feed longer passes.
 const MAX_ROWS: usize = 1024;
 
 const NONE: u32 = u32::MAX;
@@ -52,38 +52,37 @@ pub(super) struct Experts {
     blocks: Vec<BlockExperts>,
     /// By stack and format; `None` until the first `moe`.
     slabs: Option<HashMap<(Stack, Quant), Slab>>,
-    /// Bytes and expert sets `budget_streamed` gave, once it did.
+    /// Cache bytes and expert set count, set by `set_streamed_budget`.
     budget: Option<(usize, usize)>,
-    /// A cap the user put on the cache, in bytes.
+    /// The user's cap on the cache, in bytes.
     pub(super) limit: Option<usize>,
     /// The iota row the top-k carries, by expert count.
     iota: HashMap<usize, DeviceBuffer<f32>>,
-    /// Routing steps so far, the stamp a slot takes when used: one a row a
-    /// block, so a prompt pass's rows do not all stamp alike.
+    /// Routing step counter, stamped on a slot when it is used. It advances
+    /// once per row per block, so a prompt pass's rows get distinct stamps.
     tick: u64,
     stats: ExpertStats,
     /// The grouped prompt path's tables, once it has run.
     grouped: Option<grouped::GroupedScratch>,
-    /// The share of a wide pass's experts the host takes, moved toward
+    /// The share of a wide pass's experts the host takes. It moves toward
     /// balance block by block; see `grouped.rs`.
     host_share: f32,
-    /// Misses to copy into slots once the host has time: a block, the
-    /// expert and the tick it was routed at.
+    /// Misses to copy into slots later, as (block, expert, routing tick).
     refills: Vec<(usize, usize, u64)>,
     /// The last block's misses, still running on the host.
     started: Option<StartedRow>,
     /// The most slots a block may have, once the cache has had to shrink.
     per_block_cap: Option<usize>,
-    /// Passes since free memory was last asked for.
+    /// Passes since free memory was last queried.
     since_checked: usize,
 }
 
 #[derive(Default, Clone, Copy)]
 pub(super) struct ExpertStats {
-    /// Lookups by a one-row pass, a decode step, per expert a token routes to.
+    /// Decode lookups, one per expert a token routes to.
     pub(super) hits: u64,
     pub(super) misses: u64,
-    /// Lookups by a wider pass, once per expert a group of rows routes to.
+    /// Prompt pass lookups, one per expert a group of rows routes to.
     pub(super) prompt_hits: u64,
     pub(super) prompt_misses: u64,
     pub(super) bytes: u64,
@@ -93,8 +92,8 @@ pub(super) struct ExpertStats {
     pub(super) cpu_nanos: u64,
 }
 
-/// A pinned host buffer and its device twin, for tables many programs
-/// read: what the host writes goes up asynchronously in stream order.
+/// A pinned host buffer and its device twin. Host writes are copied up
+/// asynchronously in stream order.
 struct Staged<T: DeviceCopy> {
     host: LockedBuffer<T>,
     dev: DeviceBuffer<T>,
@@ -131,14 +130,14 @@ struct BlockExperts {
     prefetched: Vec<bool>,
     /// The block's first slot in each of its three slabs.
     base: [usize; 3],
-    /// `SLOT[rows, 8]`, `TOPK[rows, 8]` and `W[rows, 8]`, pointer-stable so
-    /// a segment's graph needs no patching.
+    /// `SLOT[rows, 8]`, `TOPK[rows, 8]` and `W[rows, 8]`. Their pointers
+    /// never change, so a segment's graph needs no patching.
     slots: Mapped<i32>,
     topk: Mapped<i32>,
     weights: Mapped<f32>,
     /// The previous block's prediction for this one, and the event its
-    /// copies complete at. The prediction's weights are the kernel's
-    /// mandatory output and nothing reads them.
+    /// copies complete at. The kernel must write `look_w`, but nothing
+    /// reads it.
     look: Mapped<i32>,
     look_w: DeviceBuffer<f32>,
     fetched: Option<Event>,
@@ -245,10 +244,11 @@ impl Experts {
         &self.slabs.as_ref().expect("laid out")[&(stack, quant)]
     }
 
-    /// The slab operands of `block`'s `stack` for a slot kernel: its rows
-    /// and their scale plane from the block's base, over the block's share
-    /// without its spare slot, since the kernels' grouped addressing reads
-    /// the extent.
+    /// The slab operands of `block`'s `stack` for a slot kernel: rows and
+    /// scale plane, starting at the block's base.
+    ///
+    /// The extent covers the block's slots without the spare, because the
+    /// kernels' grouped addressing reads it.
     fn slab_operands(&self, block: usize, stack: Stack) -> [(u64, [i64; 2]); 2] {
         let slab = self.slab(block, stack);
         let ns = (self.per_block * slab.n) as i64;
@@ -256,7 +256,8 @@ impl Experts {
         [(bytes, [ns, slab.rb as i64]), (d, [ns, slab.nb as i64])]
     }
 
-    /// A new routing step: `ids` of `block` stamped, the tick returned.
+    /// Starts a new routing step, stamps `ids` of `block` and returns the
+    /// tick.
     fn step(&mut self, block: usize, ids: &[usize]) -> u64 {
         self.tick += 1;
         self.blocks[block].stamp(ids, self.tick);
@@ -267,10 +268,11 @@ impl Experts {
         self.blocks[block].slot_of[e] != NONE
     }
 
-    /// Expert `e` of `block` in a slot: the one it is in, or the least
-    /// recently used one, filled from the mirror on `stream`. `Ok(None)`
-    /// when every slot is stamped `tick`. `prompt` says which counters the
-    /// lookup goes to.
+    /// Returns the slot holding expert `e` of `block`. On a miss, fills the
+    /// least recently used slot from the mirror on `stream`.
+    ///
+    /// Returns `Ok(None)` when every slot is stamped `tick`. `prompt` picks
+    /// which counters the lookup goes to.
     fn place(&mut self, block: usize, e: usize, tick: u64, stream: &Stream, prompt: bool) -> Result<Option<usize>> {
         let b = &mut self.blocks[block];
         let s = b.slot_of[e];
@@ -291,7 +293,7 @@ impl Experts {
         Ok(Some(victim))
     }
 
-    /// Expert `e` copied into `victim`'s slot of `block` on `stream`.
+    /// Copies expert `e` into slot `victim` of `block` on `stream`.
     fn fill(&mut self, block: usize, e: usize, victim: usize, tick: u64, stream: &Stream) -> Result<()> {
         let slabs = self.slabs.as_ref().expect("laid out");
         let b = &mut self.blocks[block];
@@ -321,10 +323,11 @@ impl Experts {
         Ok(())
     }
 
-    /// Experts `ids` of `block` that are not resident copied into least
-    /// recently used slots on `stream`, the second one, and the event the
-    /// block's kernels wait on before they read them. A slot stamped
-    /// `tick` is never a victim.
+    /// Copies the non-resident experts in `ids` of `block` into least
+    /// recently used slots on `stream`. Records the event the block's
+    /// kernels wait on before reading them.
+    ///
+    /// A slot stamped `tick` is never evicted.
     fn fetch(&mut self, block: usize, ids: impl IntoIterator<Item = usize>, tick: u64, stream: &Stream) -> Result<()> {
         let mut copied = false;
         for e in ids {
@@ -347,13 +350,15 @@ impl Experts {
         Ok(())
     }
 
-    /// The refills queued since the last call copied into slots on
-    /// `stream`. A decode step queues one a block, its most heavily
-    /// weighted miss: the host computes a miss in a quarter of a copy, so
-    /// copying them all would outrun the bus and have a later token wait on
-    /// the copies, and a fixed number keeps the cache, and so what the host
-    /// computes, the same from run to run for a seed. Issuing a copy costs
-    /// the host several microseconds, so this runs while the device is busy.
+    /// Copies the refills queued since the last call into slots on `stream`.
+    ///
+    /// A decode step queues one refill per block, its most heavily weighted
+    /// miss. The host computes a miss faster than the bus copies it, so
+    /// copying every miss would stall later tokens. A fixed count also
+    /// keeps the cache contents deterministic for a seed.
+    ///
+    /// Issuing copies costs host time, so call this while the device is
+    /// busy.
     fn refill(&mut self, stream: &Stream) -> Result<()> {
         for (block, expert, tick) in std::mem::take(&mut self.refills) {
             self.fetch(block, [expert], tick, stream)?;
@@ -363,8 +368,7 @@ impl Experts {
 }
 
 impl Experts {
-    /// Waits for the misses started on the host, if any, and counts their
-    /// time.
+    /// Waits for any misses running on the host and counts their time.
     fn join_started(&mut self) -> Result<()> {
         if let Some(started) = self.started.take() {
             self.stats.cpu_nanos += started.join()?;
@@ -374,8 +378,8 @@ impl Experts {
 }
 
 impl Drop for Experts {
-    /// Misses started on the host read a block's mirror, which goes with
-    /// this.
+    /// Host misses still read a block's mirror, so join them before it is
+    /// freed.
     fn drop(&mut self) {
         let _ = self.join_started();
     }
@@ -408,8 +412,8 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// The block's mirror, built now; the slabs wait for the first `moe`,
-    /// by which time every block has registered.
+    /// Registers a block's experts and builds its mirror. The slabs are
+    /// laid out at the first `moe`, once every block has registered.
     pub(super) fn register_experts(&self, key: &str, set: &Arc<ExpertSet>) -> Result<ExpertsBuf> {
         if let Some(&buf) = self.expert_keys.borrow().get(key) {
             return Ok(buf);
@@ -442,9 +446,11 @@ impl DeviceBackend {
         Ok(buf)
     }
 
-    /// The slabs, laid out at the first `moe`: the budget, less a prompt
-    /// pass's scratch, shared equally over the blocks, each with at least
-    /// a token's worth plus a zeroed spare, one slab per stack and format.
+    /// Lays out the slabs at the first `moe`, one per stack and format.
+    ///
+    /// The budget, minus a prompt pass's scratch, is split equally over
+    /// the blocks. Each block gets at least a token's worth of slots plus a
+    /// zeroed spare.
     fn ensure_slabs(&self, experts: &mut Experts) -> Result<()> {
         if experts.slabs.is_some() {
             return Ok(());
@@ -464,9 +470,9 @@ impl DeviceBackend {
                 *counts.entry((stack, b.set.stack(stack).quant())).or_default() += 1;
             }
         }
-        // The scratch comes out of the budget, or the card pages once the
-        // pass allocates it; the widest group it can want is bound by the
-        // slots the whole budget would buy.
+        // Reserve the scratch from the budget, or the card pages when the
+        // pass allocates it. The widest group is bounded by the slots the
+        // whole budget would buy.
         let set = &experts.blocks[0].set;
         let held = grouped::scratch_bytes(MAX_ROWS, set.gate.k(), set.gate.n(), budget / slot_bytes / blocks);
         let budget = budget.saturating_sub(held);
@@ -474,7 +480,7 @@ impl DeviceBackend {
             phobos_base::log::Level::Info,
             format_args!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20),
         );
-        // The spare slot a block gets comes out of the budget too.
+        // Each block's spare slot comes out of the budget too.
         let mut per_block = (budget / slot_bytes / blocks).saturating_sub(1).min(experts.per_block_cap.unwrap_or(usize::MAX));
         for (&(stack, quant), &count) in &counts {
             let found = experts.blocks.iter().map(|b| b.set.stack(stack)).find(|s| s.quant() == quant).expect("counted");

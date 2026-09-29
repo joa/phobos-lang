@@ -8,15 +8,13 @@ use sha2::{Digest, Sha256};
 
 /// Identifies the compiler that produces the PTX: the codegen crates' source
 /// and the MLIR/LLVM versions they call, folded at build time by `build.rs`.
-/// `PHOBOS_KERNEL_CACHE_EPOCH` overrides it, so a session can pin the
-/// fingerprint and evict just the kernels that changed, with `phobos-cache
-/// clear <name>`; entries are named `<kernel>-<hash>` so eviction can glob by
-/// name.
-/// Catches what a git commit hash would miss: an uncommitted change, a
-/// dependency bump, an LLVM upgrade.
+/// Unlike a commit hash, it also catches uncommitted changes and dependency
+/// bumps. It does not hash the running binary, so every binary shares
+/// entries.
 ///
-/// Not a hash of the running binary, so two examples compiling identical
-/// kernels share cache entries instead of each paying a cold compile.
+/// `PHOBOS_KERNEL_CACHE_EPOCH` overrides it. A session can then pin the
+/// fingerprint and evict only the kernels that changed with `phobos-cache
+/// clear <name>`, since entries are named `<kernel>-<hash>`.
 fn build_fingerprint() -> &'static str {
     static FINGERPRINT: OnceLock<String> = OnceLock::new();
     FINGERPRINT.get_or_init(|| {
@@ -26,7 +24,7 @@ fn build_fingerprint() -> &'static str {
 }
 
 /// The kernel's own name, so an entry can be found without its hash. The
-/// hash is what makes the file unique, so a miss here is harmless.
+/// hash alone makes the file unique, so a wrong name here is harmless.
 pub(crate) fn kernel_name(source: &str) -> String {
     let name = source
         .split_once("kernel ")
@@ -118,13 +116,15 @@ fn roots() -> impl Iterator<Item = PathBuf> {
 /// A cached `(ptx, shared)` pair for one kernel, or `None` on any cache
 /// miss, corrupt entry, or disabled cache.
 ///
-/// Entries are keyed by everything that can change what a kernel's source
-/// compiles to, so a hit survives a process restart and is shared by every
-/// binary built from the same compiler. The bundled cache beside the binary
-/// is read first, then `~/.phobos/kernel-cache`, the only one written.
-/// `PHOBOS_KERNEL_CACHE_DIR` replaces both; empty disables caching, and
-/// `print_phases` always disables it, since a hit has nothing to print.
-/// Entries sit under a directory per chip, `<dir>/sm_75/<kernel>-<hash>`.
+/// Entries are keyed by everything that can change what a kernel compiles
+/// to, so every binary built from the same compiler shares them. Entries sit
+/// under a directory per chip, `<dir>/sm_75/<kernel>-<hash>`.
+///
+/// The bundled cache beside the binary is read first, then
+/// `~/.phobos/kernel-cache`, which is the only one written.
+/// `PHOBOS_KERNEL_CACHE_DIR` replaces both, and an empty value disables
+/// caching. `print_phases` always disables it, since a hit has nothing to
+/// print.
 pub(crate) fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>)> {
     if ctx.print_phases {
         return None;
@@ -142,8 +142,8 @@ pub(crate) fn store(ctx: &Context, source: &str, ptx: &str, shared: &[(String, u
 }
 
 /// [`load`] for [`crate::Variants`]'s aligned/general pair, which compile and
-/// cache together; a hit also skips the `@pipeline` cross-variant check,
-/// since that only has something to check right after a fresh compile.
+/// cache together. A hit skips the `@pipeline` cross-variant check, which
+/// only runs on a fresh compile.
 pub(crate) fn load_pair(ctx: &Context, aligned_src: &str, general_src: &str) -> Option<(String, String)> {
     if ctx.print_phases {
         return None;

@@ -1,9 +1,9 @@
 // IQ3_XXS: `{ f16 d; uint8 qs[96]; }`, 3.0625 bits a weight.
 //
-// Eight 32-element groups. `qs`'s first 64 bytes hold two grid-index bytes
-// per lane into [`super::tables::iq3::IQ3XXS_GRID`] (four elements per
-// entry); its last 32 bytes hold the same scale-and-parity word IQ2_XXS
-// reads (see [`super::iq2_xxs`]).
+// Eight 32-element groups. The first 64 bytes of `qs` hold two grid-index
+// bytes per lane into [`super::tables::iq3::IQ3XXS_GRID`], four elements per
+// entry. The last 32 bytes hold the scale-and-parity words IQ2_XXS also
+// uses (see [`super::iq2_xxs`]).
 
 use phobos_base::half::f16_to_f32;
 
@@ -35,9 +35,9 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ3XXS_GRID`] flattened to one magnitude byte a slot, four bytes an
-/// entry (a lane's eight elements come from two grid entries):
-/// `flat_grid()[i * 4 + j]` is byte `j` of `IQ3XXS_GRID[i]`.
+/// [`IQ3XXS_GRID`] flattened to one magnitude byte per slot, four per entry:
+/// `flat_grid()[i * 4 + j]` is byte `j` of `IQ3XXS_GRID[i]`. A lane's eight
+/// elements come from two entries.
 #[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ3XXS_GRID

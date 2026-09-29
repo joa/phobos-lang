@@ -1,17 +1,18 @@
-// A decode row's misses computed on the host and handed to the device
-// without the host waiting to hand them over.
+// A decode row's misses, computed on the host and handed back to the
+// device without the host blocking.
 //
-// A kernel copies the row into mapped memory before the block's sync point;
-// after it the host starts the misses on the team and goes on recording
-// the next block. The kernel here, recorded in between, holds the stream
-// until the team raises the block's flag, then adds the row the team wrote
-// beside it and lowers the flag again. It is written in PTX because
-// the wait needs a system-scope acquire load, which the kernel language has
-// no spelling for: a device-scope load or atomic can be answered from the
-// L2's copy of the line and never see the host's store.
+// A kernel copies the row into mapped memory before the block's sync point.
+// After it, the host starts the misses on its thread team and keeps
+// recording the next block. The `host_add` kernel spins until the team
+// raises the block's flag, adds the team's row into the destination, and
+// lowers the flag.
 //
-// Its parameters are the launch ABI's descriptors, `FLAG[1, 1]`, `Y[1, d]`
-// and `DEST[1, d]`: seven words each, of which it reads the aligned
+// `host_add` is hand-written PTX because the wait needs a system-scope
+// acquire load, which the kernel language cannot express. A device-scope
+// load can be served from L2 and never see the host's store.
+//
+// Its parameters are the launch ABI's descriptors for `FLAG[1, 1]`,
+// `Y[1, d]` and `DEST[1, d]`, seven words each. It reads only the aligned
 // pointers and `DEST`'s width.
 
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -78,9 +79,9 @@ $END:
 }
 "#;
 
-/// A block's decode row on its way to the host, the host's share of the
-/// output on its way back, and the flag between them: raised by the host
-/// once the share is written, lowered by the device once it has added it.
+/// A block's decode row sent to the host, the host's output coming back,
+/// and the flag between them. The host raises the flag once the output is
+/// written, and the device lowers it once it has added it.
 pub(super) struct Handoff {
     x: Mapped<f32>,
     y: Mapped<f32>,
@@ -92,19 +93,19 @@ impl Handoff {
         Ok(Handoff { x: Mapped::new(d)?, y: Mapped::new(d)?, ready: Mapped::new(1)? })
     }
 
-    /// The share of `misses`, each an expert and its router weight, started
-    /// on the team over the row the device sent. With none, or when the
-    /// start fails, a zero row goes back at once: the device waits for the
-    /// flag either way.
+    /// Starts `misses`, each an expert and its router weight, on the team
+    /// over the row the device sent.
+    ///
+    /// With no misses, or if the start fails, a zero row is raised at once,
+    /// since the device waits for the flag either way.
     pub(super) fn start(&mut self, source: impl Source + Send + 'static, misses: Vec<(usize, f32)>) -> Result<Option<StartedRow>> {
         if misses.is_empty() {
             self.raise_zeros();
             return Ok(None);
         }
         let to = RowOut { out: self.y.host_ptr(), len: self.y.host().len(), ready: self.ready.host_ptr() as *const AtomicU32 };
-        // SAFETY: the row and the flag are this hand-off's, and nothing
-        // touches them before the device lowers the flag, a sync point
-        // later.
+        // SAFETY: the row and the flag belong to this hand-off, and nothing
+        // touches them until the device lowers the flag.
         match unsafe { simd::start_experts_row(source, misses, self.x.host(), to) } {
             Ok(started) => Ok(Some(started)),
             Err(e) => {
@@ -122,14 +123,14 @@ impl Handoff {
 }
 
 impl DeviceBackend {
-    /// `x`'s first `len` sent to the host through `handoff`, in stream
-    /// order, by a kernel's stores rather than a copy.
+    /// Sends the first `len` of `x` to the host through `handoff`, in stream
+    /// order. A kernel stores it, rather than a DMA copy.
     pub(super) fn send_row(&self, x: Buf, handoff: &Handoff, len: usize) -> Result<()> {
         self.pointwise_raw("copy", &[self.ptr(x, 0)?, handoff.x.dev()], len)
     }
 
-    /// The host's share, once `handoff`'s flag is raised, added into the
-    /// first `len` of `dest`, in stream order; the flag is lowered after.
+    /// Waits for `handoff`'s flag, adds the host's row into the first `len`
+    /// of `dest`, then lowers the flag. Runs in stream order.
     pub(super) fn host_add(&self, handoff: &Handoff, dest: Buf, len: usize) -> Result<()> {
         if self.host_add.borrow().is_none() {
             let module = Module::from_ptx(HOST_ADD_PTX, &[]).context("loading the host hand-off kernel")?;

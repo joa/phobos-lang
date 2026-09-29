@@ -2,17 +2,22 @@
 
     python scripts/record_kernels.py [--manifest DIR] [--models DIR] [--skip NAME]... [--epoch FINGERPRINT] [NAME...]
 
-Runs each GGUF file through phobos-bench with PHOBOS_KERNEL_MANIFEST set,
-so the manifest holds every compile request a run makes. A kernel's source
-depends on the model's shapes and, for some, on the prompt's row count and the
-cache depth, so the bench shape covers a short prompt, a full 512-row batch,
-a ragged remainder past it, and decode both fresh and at depth. A request is recorded on a cache hit too: pass the
-fingerprint a warm cache was built under as --epoch and the runs only load.
+Runs each GGUF file through phobos-bench with PHOBOS_KERNEL_MANIFEST set, so
+the manifest holds every compile request a run makes.
 
-NAME filters the models by substring and --skip drops them the same way; --models points at a directory other
-than models/, which a release's worktree does not carry. The binary is built
-under CARGO_TARGET_DIR when that is set. The manifest is chip-independent;
-`phobos-cache warm --manifest DIR` then compiles it for every supported chip.
+Some kernels depend on the prompt's row count and the cache depth as well as
+the model's shapes. The bench shape therefore covers a short prompt, a full
+512-row batch, a ragged remainder past it, and decode both fresh and at depth.
+
+Requests are recorded on a cache hit too. Pass the fingerprint of an existing
+warm cache as --epoch and the runs only load.
+
+NAME keeps models whose name contains it; --skip drops them the same way.
+--models points at a directory other than models/, which a release's worktree
+does not carry. The binary is built under CARGO_TARGET_DIR when that is set.
+
+The manifest is chip-independent. `phobos-cache warm --manifest DIR` then
+compiles it for every supported chip.
 """
 
 import argparse

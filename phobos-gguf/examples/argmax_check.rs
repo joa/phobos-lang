@@ -3,9 +3,8 @@
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example argmax_check -- MODEL.gguf [-p PROMPT]
 //
-// Reads the full logits back from the device and compares its argmax only
-// against the host reduction of that same vector, so cross-backend rounding
-// is never mistaken for an argmax bug.
+// The host argmax runs over logits read back from the device, not over host
+// logits. That way cross-backend rounding never looks like an argmax bug.
 
 use anyhow::{Result, bail};
 use phobos_gguf::backend::device;
@@ -27,11 +26,10 @@ fn main() -> Result<()> {
     };
     let tokens = bpe.encode(&prompt)?;
 
-    // Two independent sessions of the same model, fed the identical token
-    // sequence: one reads back the full logits every step (Decoder::forward,
-    // what Session::extend runs), the other takes the fast path
-    // (Decoder::forward_greedy). Both run on their own DeviceBackend and
-    // State so neither's scratch reuse can leak into the other's numbers.
+    // Two sessions fed the same tokens. One reads back the full logits
+    // (`Decoder::forward`), the other takes the fast path
+    // (`Decoder::forward_greedy`). Each has its own backend and state so
+    // scratch reuse cannot leak between them.
     let full_backend = device::DeviceBackend::new()?;
     let fast_backend = device::DeviceBackend::new()?;
     let mut full_state = model.new_state();
@@ -46,9 +44,8 @@ fn main() -> Result<()> {
 
         let agrees = fast_id == host_id;
         if !agrees {
-            // A real tie: two logits equal to float precision, which the
-            // spatial halving tree does not resolve the same way `argmax`'s
-            // last-of-equal-maxima rule does (see argsel's own doc comment).
+            // Only an exact tie is allowed. The device reduction tree breaks
+            // ties differently from `argmax`, which picks the last maximum.
             // Anything else is a bug.
             let top = logits.iter().cloned().fold(f32::MIN, f32::max);
             let tied = logits[fast_id as usize] == top && logits[host_id as usize] == top;
@@ -86,10 +83,9 @@ fn main() -> Result<()> {
         if mismatches == 1 { "" } else { "s" }
     );
 
-    // A synthetic edge case no real model logit vector exercises: every
-    // element negative, so a masked tail's zero fill would silently win if
-    // the reduction's identity were wrong. Also covers the winner sitting
-    // at index 0 and at the last index.
+    // Cases real logits rarely hit. With every element negative, a wrong
+    // reduction identity would let the zero-filled tail win. Also covers a
+    // winner at the first and at the last index.
     println!("\nsynthetic edge cases:");
     let cases: [(&str, Vec<f32>); 3] = [
         ("all negative, winner in the middle", {

@@ -2,8 +2,10 @@ use std::path::PathBuf;
 
 /// Where compiled PTX is cached: `PHOBOS_KERNEL_CACHE_DIR`, or
 /// `~/.phobos/kernel-cache`. `None` when the variable is set but empty, which
-/// is how caching is turned off. Lives here rather than in `cache` so the
-/// `cache` example can find the directory without a CUDA build.
+/// turns caching off.
+///
+/// It lives here rather than in `cache` so a build without CUDA can find the
+/// directory.
 pub fn kernel_cache_dir() -> Option<PathBuf> {
     match std::env::var("PHOBOS_KERNEL_CACHE_DIR") {
         Ok(dir) if dir.is_empty() => None,
@@ -15,9 +17,9 @@ pub fn kernel_cache_dir() -> Option<PathBuf> {
 }
 
 /// The read-only cache a release ships beside its binaries,
-/// `<exe dir>/kernel-cache`, looked up before [`kernel_cache_dir`] and never
-/// written. `None` when `PHOBOS_KERNEL_CACHE_DIR` is set, which names the one
-/// cache to use.
+/// `<exe dir>/kernel-cache`. It is looked up before [`kernel_cache_dir`] and
+/// never written. `None` when `PHOBOS_KERNEL_CACHE_DIR` is set, since that
+/// names the only cache to use.
 pub fn bundled_kernel_cache_dir() -> Option<PathBuf> {
     if std::env::var_os("PHOBOS_KERNEL_CACHE_DIR").is_some() {
         return None;
@@ -31,10 +33,11 @@ pub fn round_up(x: usize, tile: usize) -> usize {
     x.div_ceil(tile) * tile
 }
 
-/// Zero-pads a row-major `[r, c]` matrix into `[rp, cp]`: the padding
-/// contributes zero terms to the contraction and the padded rows/columns
-/// are discarded, so a kernel that only handles whole tiles still computes
-/// the right `[r, c]`.
+/// Zero-pads a row-major `[r, c]` matrix into `[rp, cp]`.
+///
+/// The padding adds only zero terms to a contraction, and the padded rows and
+/// columns are discarded. A kernel that handles only whole tiles still
+/// computes the right `[r, c]`.
 pub fn pad(src: &[f32], r: usize, c: usize, rp: usize, cp: usize) -> Vec<f32> {
     let mut out = vec![0.0f32; rp * cp];
     for i in 0..r {

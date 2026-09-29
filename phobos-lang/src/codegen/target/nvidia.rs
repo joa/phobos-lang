@@ -1,6 +1,6 @@
-// NVIDIA, the one implementation of [`Isa`]. Everything here is an nvgpu, nvvm or gpu-dialect
-// op, a PTX string, or a number off the chip's data sheet. Nothing here decides which of them
-// a contraction wants: that is the emitter's, which asks the capability predicates first.
+// NVIDIA, the one implementation of [`Isa`]. Everything here is an nvgpu, nvvm
+// or gpu-dialect op, a PTX string, or a number from the chip's data sheet. The
+// emitter decides which of them to use.
 
 use super::*;
 
@@ -11,10 +11,10 @@ const WMMA_B: &str = "!gpu.mma_matrix<16x16xf16, \"BOp\">";
 const WMMA_C_F16: &str = "!gpu.mma_matrix<16x16xf16, \"COp\">";
 const WMMA_C_F32: &str = "!gpu.mma_matrix<16x16xf32, \"COp\">";
 
-/// Address space of tensor parameters -> GPU global memory.
+/// Address space of tensor parameters, GPU global memory.
 const MEM_GLOBAL: i64 = 1;
 
-/// Address space of tile buffers -> GPU shared memory (one per CTA).
+/// Address space of tile buffers, GPU shared memory (one per CTA).
 const MEM_SHARED: i64 = 3;
 
 /// Address space of dynamic tile buffers.
@@ -23,8 +23,7 @@ const MEM_SHARED_SYM: &str = "#gpu.address_space<workgroup>";
 pub(super) struct Nvidia {
     /// Compute capability as a number: sm_75 is 75, sm_90a is 90.
     cc: u32,
-    /// Width index values lower to. The nvgpu ops that form their own
-    /// addresses, cp.async and mma.sync both, need the 64-bit one.
+    /// Bit width of lowered index values. cp.async and mma.sync need 64.
     index_bits: u32,
 }
 
@@ -33,10 +32,11 @@ impl Nvidia {
         Nvidia { cc, index_bits }
     }
 
-    /// One PTX instruction over an f32, taken through llvm.inline_asm: the
-    /// math dialect does not reach these, since convert-math-to-llvm runs
-    /// before the gpu-to-nvvm libdevice patterns and rewrites math.exp and
-    /// friends to llvm.intr.*, which the NVPTX backend cannot select.
+    /// One PTX instruction over an f32, through llvm.inline_asm.
+    ///
+    /// The math dialect cannot be used here. convert-math-to-llvm runs first
+    /// and turns math.exp and friends into llvm.intr.*, which NVPTX cannot
+    /// select.
     fn ptx_f32<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -268,8 +268,7 @@ impl Isa for Nvidia {
 
     // ---- which math is approximate ----
 
-    /// ex2(x * log2e): the hardware primitive is base two, so the change of
-    /// base rides on the outside.
+    /// ex2(x * log2e), since the hardware primitive is base two.
     fn approx_exp<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -326,10 +325,8 @@ impl Isa for Nvidia {
         self.ptx_f32(cg, block, "tanh.approx.f32 $0, $1;", x)
     }
 
-    /// The hardware's own rounding, so unlike biasing into a positive range and
-    /// truncating it loses nothing: a bias large enough to cover the range
-    /// costs the low mantissa bits, enough at the top of an int8 range to cross
-    /// a boundary.
+    /// The hardware's own rounding, which is exact. Biasing into a positive
+    /// range and truncating would lose low mantissa bits.
     fn round_even<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -370,9 +367,9 @@ impl Isa for Nvidia {
             ),
         ];
 
-        // Only 16-byte copies can skip L1 (cp.async.cg), and staged tiles are
-        // consumed from shared memory rather than re-read through it. A
-        // vectorized f16 copy is only 8B, so gate on bytes, not elements.
+        // Only 16-byte copies can skip L1 (cp.async.cg). Staged tiles are read
+        // from shared memory, so L1 does not help them. Gate on bytes, since
+        // a 4-wide f16 copy is only 8 bytes.
         if width * dst_elem_bytes == 16 {
             attributes.push((cg.id("bypassL1"), Attribute::unit(cg.ctx)));
         }
@@ -604,9 +601,9 @@ impl Isa for Nvidia {
         )
     }
 
-    /// `prefetch.L2` on the byte address of `mem[indices]`, from the
-    /// memref's aligned base, offset and strides. (`memref.prefetch` lowers
-    /// to `llvm.prefetch`, which NVPTX drops.)
+    /// `prefetch.L2` on the byte address of `mem[indices]`, computed from the
+    /// memref's aligned base, offset and strides. `memref.prefetch` is not
+    /// used because NVPTX drops the `llvm.prefetch` it lowers to.
     fn prefetch_read<'c>(
         &self,
         cg: &Codegen<'c>,

@@ -2,10 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example ppsweep
 //
-// Times `q8_mma`, the batched projection prompt processing runs, at the
-// shapes a 512-token prompt asks for. Reports achieved integer throughput,
-// since the weight is read once per row tile in a batched pass: what
-// matters is how much of the tensor core's throughput the tiling reaches.
+// Times the batched Q8_0 projection a prompt pass runs, `q8_mma` against
+// `q8_qmma`, at the shapes of a 512-token prompt. A batched pass reads the
+// weight once per row tile, so the figure reported is integer throughput:
+// how much of the tensor cores the tiling reaches.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -19,8 +19,8 @@ use cust::stream::{Stream, StreamFlags};
 use phobos_gguf::backend::quantize_row;
 use phobos_kernels::abi::{self, KernelArg};
 
-/// The batched projection as it ships: an output tile in both directions, with
-/// the block scales applied to a shared-memory accumulator every 32 elements.
+/// The shipped batched projection. It tiles the output in both directions and
+/// applies the block scales to a shared-memory accumulator every 32 elements.
 const SRC_MMA: &str = "\
 @launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}])
@@ -43,12 +43,12 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
 
-/// The same contraction as one `qmma_t`, which folds the Q8_0 block scales in
-/// so the whole of `k` can be handed over at once.
+/// The same contraction as one `qmma_t`, which folds in the Q8_0 block scales
+/// and takes all of `k` at once.
 ///
-/// The accumulators then live in registers across all of `k` rather than in a
-/// shared-memory tile rewritten every 32 elements, and neither operand
-/// stages, since both already sit in the `m8n8k16` fragment layout.
+/// The accumulators stay in registers across `k`, instead of a shared-memory
+/// tile rewritten every 32 elements. Neither operand is staged, since both
+/// already sit in the `m8n8k16` fragment layout.
 const SRC_QMMA: &str = "\
 @launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}])
@@ -71,7 +71,7 @@ const SHAPES: &[(usize, usize, usize, &str)] = &[
     (2048, 1024, 24, "mixer out"),
 ];
 
-/// Row tile, column tile and the CTA carrying them.
+/// `(TM, TN, threads per CTA)` for `q8_mma`.
 const TILES: &[(usize, usize, usize)] = &[
     (8, 64, 256),
     (16, 64, 256),
@@ -83,15 +83,15 @@ const TILES: &[(usize, usize, usize)] = &[
     (32, 128, 256),
 ];
 
-/// The same for `qmma_t`, where the tile is only bounded by the register file
-/// and the shared-memory result, so it can be much wider.
+/// The same for `qmma_t`. Its tile is bounded only by the register file and
+/// the shared-memory result, so it can be much wider.
 const QTILES: &[(usize, usize, usize)] = &[
     (128, 256, 256),
     (128, 128, 256),
     (64, 256, 256),
-    // The same tiles on a smaller CTA. A patch is capped by the register file
-    // either way, so these hold the warps per multiprocessor and change only
-    // how many blocks the grid has to spread over it.
+    // Tiles on smaller CTAs. The register file caps a warp's patch either
+    // way, so these keep the warps per multiprocessor and change only how
+    // many blocks the grid spreads over it.
     (128, 256, 128),
     (128, 128, 128),
     (64, 128, 128),
@@ -172,8 +172,8 @@ fn main() -> Result<()> {
             }
         }
 
-        // Only the first row is checked: it exercises the same arithmetic as
-        // every other and a full reference at these sizes costs minutes.
+        // Only the first row is checked. It runs the same arithmetic as the
+        // others, and a full reference at these sizes takes minutes.
         let mut truth = vec![0.0f32; n];
         for (j, t) in truth.iter_mut().enumerate() {
             let row = &qs[j * k..(j + 1) * k];
@@ -217,7 +217,7 @@ fn main() -> Result<()> {
             for &(tm, tn, block) in tiles {
                 let aligned = format!("@aligned(M = {tm}, N = {tn})");
                 // A tile whose accumulator does not fit in shared memory fails
-                // to build: that failure is why `q8_mma`'s tile stays small.
+                // to build, which keeps `q8_mma`'s tile small.
                 let Ok(module) = compile(
                     source,
                     &[("BLOCK", block), ("TM", tm), ("TN", tn)],

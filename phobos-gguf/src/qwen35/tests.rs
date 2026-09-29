@@ -1,7 +1,7 @@
-// A qwen35moe model small enough to build in memory: two blocks, one delta
-// net and one attention, four experts of which two route, every trunk
-// weight F32 and the expert stacks Q4_K. The stand-in for a small file of
-// this architecture, which does not exist.
+// A qwen35moe model small enough to build in memory: two blocks (one delta
+// net, one attention), four experts with two routed, F32 trunk weights and
+// Q4_K expert stacks. It stands in for a small file of this architecture,
+// which does not exist.
 
 use crate::backend::HostBackend;
 use crate::experts::tests::{Q4_K, q4k_stack};

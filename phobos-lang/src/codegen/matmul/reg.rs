@@ -31,9 +31,9 @@ impl<'c> Codegen<'c> {
         };
         let (tiles_m, tiles_n) = (m / tm, n / tn);
 
-        // The lane's sub-tile origin: the warp's block origin (surplus warps
-        // clamped onto the last block, as in tile_matmul) plus the lane's
-        // position on the lm x ln lane grid of tm x tn sub-tiles.
+        // The lane's sub-tile origin is the warp's block origin plus the
+        // lane's place on the lm x ln grid of tm x tn sub-tiles. Surplus
+        // warps clamp onto the last block.
         let origin = self.warp_block_origin(block, tiles_m / lm, tiles_n / ln, lm * tm, ln * tn)?;
         let (tid, w, wt, wm0, wn0) = origin;
         let lane = self.remui(block, tid, w)?;
@@ -47,7 +47,7 @@ impl<'c> Codegen<'c> {
         let m0 = self.addi(block, wm0, off_m)?;
         let n0 = self.addi(block, wn0, off_n)?;
 
-        // staging buffers; a k-major (kk x m).
+        // Staging buffers, with a k-major (kk x m).
         let pairs = self.staging_pairs();
         let (a_bufs, b_bufs) = self.alloc_staging_pairs(pairs, |cg| {
             Ok((
@@ -70,13 +70,13 @@ impl<'c> Codegen<'c> {
             |cg, body, a, b, accs| cg.register_mac(body, a, b, dims, m0, n0, accs),
         )?;
         acc.regs = finals;
-        // The lane's own origin is what the drain indexes by.
+        // The drain indexes by the lane's own origin.
         acc.origin = Some((tid, w, wt, m0, n0));
         Ok(acc)
     }
 
     /// Each lane writes its finished sub-tile straight to C, optionally
-    /// applying alpha*acc + beta*prev_load.
+    /// computing alpha*acc + beta*prev.
     pub(super) fn reg_store(
         &mut self,
         block: &Block<'c>,
@@ -91,7 +91,6 @@ impl<'c> Codegen<'c> {
         let (_, _, _, m0, n0) = Self::gemm_finals(&acc)?;
         let row_t = Type::vector(&[tn as u64], self.f32_t);
 
-        // pre-compute alpha/beta broadcasts once
         let (alpha_row, beta_row) =
             self.epilogue_scaling(block, alpha, beta, row_t, view.vectorizes(4))?;
 
@@ -122,14 +121,12 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// The fused k-loop, done as a vector contraction. The lane's accumulator rides the loop as
-    /// one vector<TMxTNxf32> iter_arg. Each iteration grabs a CxTM and a CxTN chunk and folds
-    /// them in with a single vector.contract over k. C is the largest of 4, 2, 1 that divides
-    /// TILE_K; a_t and b_sh are both k-major, so the chunk rows are contiguous loads.
+    /// The fused k-loop body as a vector contraction.
     ///
-    /// Doing C k-steps per iteration cuts the loop overhead by C. The contract lowers to
-    /// broadcast plus vector.fma rank-1 updates, the same fma.rn stream as the scalar form
-    /// without the extract/insert noise in the IR.
+    /// The lane's accumulator is one vector<TMxTNxf32> iter_arg. Each
+    /// iteration loads a C x TM and a C x TN chunk and folds them in with one
+    /// vector.contract over k. C is the largest of 4, 2, 1 that divides kk.
+    /// Both buffers are k-major, so the chunk rows are contiguous loads.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn register_mac(
         &mut self,

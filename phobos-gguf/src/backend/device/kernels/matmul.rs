@@ -15,7 +15,7 @@ pub(crate) const MV_TN: usize = 128;
 pub(crate) const MATMUL_SRC: &str = matmul::TEMPLATE;
 
 /// Tensor-core tile and source for [`super::DeviceBackend::matmul`]'s deep
-/// band; see [`matmul::TC_TEMPLATE`]'s own doc for the shape reasoning.
+/// band; see [`matmul::TC_TEMPLATE`] for the shape.
 pub(crate) const TC_TILE_M: usize = matmul::TC_TILE_M;
 
 pub(crate) const TC_TILE_N: usize = matmul::TC_TILE_N;
@@ -24,7 +24,7 @@ pub(crate) const TC_TILE_K: usize = matmul::TC_TILE_K;
 
 pub(crate) const MATMUL_TC_SRC: &str = matmul::TC_TEMPLATE;
 
-/// The same two kernels reading an f16 weight, for the strip a `_qdecode`
+/// The matmul kernels reading an f16 weight, for the strip a `_qdecode`
 /// writes. Free on the tensor-core path, which stages to f16 anyway.
 pub(crate) fn matmul_f16w_src() -> String {
     MATMUL_SRC.replace("B: tensor<f32>[K, N]", "B: tensor<f16>[K, N]")
@@ -34,9 +34,9 @@ pub(crate) fn matmul_tc_f16w_src() -> String {
     MATMUL_TC_SRC.replace("B: tensor<f32>[K, N]", "B: tensor<f16>[K, N]")
 }
 
-/// The single-row specialization decoding needs. Always reads row zero: a
-/// caller wanting row `r` offsets the operand pointers instead, which keeps the
-/// kernel free of scalar arguments.
+/// The single-row matmul for decoding. It always reads row zero; a caller
+/// wanting row `r` offsets the operand pointers, so the kernel needs no
+/// scalar arguments.
 pub(crate) const MATVEC_SRC: &str = "\
 @launch(256)
 @autotune(TILE_N in [128], TILE_K in [16])
@@ -70,15 +70,15 @@ kernel matvec_split(A: tensor<f32>[M, K], B: tensor<f32>[K, N], P: tensor<f32>[S
 }
 ";
 
-/// Programs a narrow dense matvec splits `k` to reach, and the shortest
-/// slice it will cut. A projection a few dozen outputs wide is one program
-/// unsplit and walks all of `k` alone.
+/// Program count a narrow dense matvec splits `k` to reach, and the
+/// shortest slice it cuts. Without a split, a projection a few dozen
+/// outputs wide is one program walking all of `k`.
 pub(crate) const MV_SPLIT_TARGET: usize = 96;
 const MV_SPLIT_MIN_SLICE: usize = 64;
 
-/// Slices for a `[1, k] x [k, n]` dense projection: one where the output
-/// grid already fills the card, else as many as reach
-/// [`MV_SPLIT_TARGET`] programs with whole `TILE_K` steps a slice.
+/// Slices of `k` for a `[1, k] x [k, n]` dense projection. One when the
+/// output grid already fills the card, else enough to reach
+/// [`MV_SPLIT_TARGET`] programs, with whole `TILE_K` steps per slice.
 pub(crate) fn mv_splits(n: usize, k: usize) -> usize {
     let grid = n.div_ceil(MV_TN);
     let mut splits = (MV_SPLIT_TARGET / grid).min(k / MV_SPLIT_MIN_SLICE);
@@ -88,23 +88,23 @@ pub(crate) fn mv_splits(n: usize, k: usize) -> usize {
     splits.max(1)
 }
 
-/// Rows a prompt's program of the row-major contraction takes; the rest go
-/// a row a program.
+/// Rows per program of a prompt's row-major contraction. The leftover rows
+/// take one program each.
 pub(crate) const ROWS_TM: usize = 16;
 
-/// Outputs a prompt's program takes at most: small tiles, many programs, as
-/// a narrow projection over a short prompt has little else to spread over.
+/// Most outputs per program of a prompt's row-major contraction. Tiles are
+/// small so a narrow projection over a short prompt still gets many
+/// programs.
 pub(crate) const ROWS_TN: usize = 16;
 
-/// Programs below which a prompt's row-major contraction splits `k`, and the
-/// most slices it cuts: every program walks its slice alone, so a short
-/// prompt is latency bound without them, and a long one only pays the
-/// extra pass over the partials.
+/// Program count below which a prompt's row-major contraction splits `k`,
+/// and the most slices it cuts. Splitting helps a short prompt, which is
+/// latency bound; a long one only pays an extra pass over the partials.
 pub(crate) const ROWS_SPLIT_TARGET: usize = 192;
 pub(crate) const ROWS_MAX_SPLITS: usize = 8;
 
-/// Widest `k` [`matvec_blocks_src`] stages whole: the row and one output's
-/// weight row, beside the partial sums, within the static shared memory.
+/// Widest `k` [`matvec_blocks_src`] accepts. The row, one weight row and
+/// the partial sums must fit in static shared memory.
 pub(crate) const BLOCKS_MAX_K: usize = 5120;
 
 /// The row-major contractions, and the tile each is generated for.
@@ -112,14 +112,13 @@ pub(crate) const BLOCKS_MAX_K: usize = 5120;
 pub(crate) enum RowsKernel {
     /// [`matvec_blocks_src`], a decode row against a weight `k` wide.
     Blocks { k: usize, tn: usize },
-    /// [`matmul_rows_src`], and for a prompt's band
-    /// [`matmul_rows_split_src`] in the same module.
+    /// [`matmul_rows_src`], or [`matmul_rows_split_src`] for a prompt's
+    /// band.
     Tiles { tm: usize, tn: usize },
 }
 
-/// `C = A W^T` for a weight held row-major as the file has it, `[n, k]`, a
-/// `tm` by `tn` tile a program, the weight tile transposed in the
-/// contraction.
+/// `C = A W^T` for a weight stored row-major as `[n, k]`, as in the file.
+/// Each program computes a `tm` by `tn` tile.
 pub(crate) fn matmul_rows_src(tm: usize, tn: usize) -> String {
     format!(
         "@launch(256)
@@ -140,8 +139,8 @@ kernel matmul_rows(A: tensor<f32>[M, K], W: tensor<f32>[N, K], C: tensor<f32>[M,
     )
 }
 
-/// [`matmul_rows_src`] over one of `S` slices of `k` a program, the partials
-/// `[S * M, N]` for `q8_reduce` to sum.
+/// [`matmul_rows_src`] with `k` split into `S` slices, one per program. The
+/// partials, `[S * M, N]`, are summed by `q8_reduce`.
 pub(crate) fn matmul_rows_split_src(tm: usize, tn: usize) -> String {
     format!(
         "@launch(256)
@@ -165,10 +164,12 @@ kernel matmul_rows_split(A: tensor<f32>[M, K], W: tensor<f32>[N, K], P: tensor<f
     )
 }
 
-/// One row against a `[n, k]` weight, `tn` outputs a program. The row and
-/// each weight row are viewed `[k / 32, 32]`, so `k` runs across the threads
-/// a 32-element block apiece and one closing sum per output ends it: a
-/// contraction's own output tile is too narrow to keep the threads busy.
+/// One row against a `[n, k]` weight, `tn` outputs per program.
+///
+/// The row and each weight row are viewed as `[k / 32, 32]`, so `k` is
+/// spread across the threads, one 32-element block each, and a final sum
+/// closes each output. The output tile alone is too narrow to keep the
+/// threads busy.
 pub(crate) fn matvec_blocks_src(k: usize, tn: usize) -> String {
     let kb = k / 32;
     format!(

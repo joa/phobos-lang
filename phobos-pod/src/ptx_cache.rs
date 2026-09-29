@@ -62,13 +62,13 @@ impl PtxCache {
             .as_str())
     }
 
-    /// The peer (if any) that can serve a missing kernel's PTX
+    /// The peer, if any, that can serve a missing kernel's PTX.
     pub fn holder_of(&self, hash: &str) -> Option<NodeId> {
         self.holders.get(hash).copied()
     }
 
-    /// The CUDA function for a given kernel; None if its PTX is not cached.
-    /// Call GetKernel first to fill the cache.
+    /// The CUDA function for a kernel, or None if its PTX is not cached.
+    /// Fill the cache with GetKernel first.
     pub fn function(&self, kernel: u32) -> Result<Option<cust::function::Function<'_>>> {
         let entry = self
             .table

@@ -218,8 +218,8 @@ mod tests {
         );
     }
 
-    /// MiniCPM5's shape: the declared EOS is not what its template ends turns
-    /// with, so a generation stopping only on the declared id never stops.
+    /// MiniCPM5's case: the declared EOS is not what its template ends turns
+    /// with, so stopping only on the declared id never stops.
     #[test]
     fn a_turn_ender_need_not_be_the_declared_eos() {
         let m = metadata_with(vec![

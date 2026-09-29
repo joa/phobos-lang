@@ -1,5 +1,5 @@
-// Fused IQ2_S dot: two grid-table lookups a lane, folded into the
-// contraction. The decode itself lives in `iq2s.rs`, shared with `qdecode.rs`.
+// Fused IQ2_S dot: two table lookups per lane, folded into the contraction.
+// The decode itself lives in `iq2s.rs`, shared with `qdecode.rs`.
 
 use super::iq2s::{IQ2S_BLOCK_BYTES, IQ2S_LANE};
 use super::*;

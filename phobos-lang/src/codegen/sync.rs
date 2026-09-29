@@ -1,21 +1,20 @@
 use super::*;
 
-/// Grid-wide synchronization, for a kernel that spans several stages of a
-/// pass and barriers between them instead of paying a launch boundary per stage.
+/// Grid-wide synchronization, for a kernel that runs several stages of a
+/// pass with a barrier between them instead of one launch per stage.
 ///
-/// `grid_barrier(bar)` takes an `i32` tensor of at least two elements: slot 0
-/// is the arrival counter, slot 1 the release generation (`tensor<i32>[2]` or
-/// the `tensor<i32>[2, 1]` column, for a host whose launch ABI passes rank-2
-/// descriptors). The caller owns it, zeroed once before the launch, untouched
-/// while the kernel runs. Two properties are the caller's to guarantee, and
-/// neither is checked:
-/// - every block of the grid is resident at once: a block still waiting to be
-///   scheduled never arrives, and the barrier deadlocks. That is what
-///   `@persistent` is for.
-/// - the same barrier tensor is not shared by two concurrent kernels.
+/// `grid_barrier(bar)` takes an `i32` tensor of at least two elements. Slot 0
+/// is the arrival counter and slot 1 the release generation. It may be
+/// `tensor<i32>[2]` or the `tensor<i32>[2, 1]` column, for a host whose launch
+/// ABI passes rank-2 descriptors. The caller zeroes it once before the launch
+/// and leaves it alone while the kernel runs. The caller must also guarantee,
+/// unchecked:
+/// - every block of the grid is resident at once, or the barrier deadlocks.
+///   That is what `@persistent` is for.
+/// - no two concurrent kernels share the same barrier tensor.
 ///
-/// The expansion is the standard two-phase arrive-and-wait, one thread per
-/// block doing the atomics and the CTA barriers carrying the result to the rest:
+/// The expansion is the standard two-phase arrive-and-wait. One thread per
+/// block does the atomics, and CTA barriers carry the result to the rest:
 ///
 ///   gpu.barrier                       every thread in the CTA is done
 ///   if tid == 0 {
@@ -29,19 +28,17 @@ use super::*;
 ///   }
 ///   gpu.barrier                       the release reaches the whole CTA
 ///
-/// The counter is reset by subtracting the block count rather than storing zero,
-/// so the reset is itself atomic and cannot lose an arrival from a block that
-/// has already raced ahead into the next barrier.
+/// The counter is reset by subtracting the block count, not by storing zero.
+/// That keeps the reset atomic, so it cannot lose an arrival from a block
+/// already racing into the next barrier.
 ///
-/// Both the spin and the generation read use `atomic_add(_, 0)` rather than a
-/// plain load, which could be hoisted out of the spin loop or read a stale
-/// cache line; the atomic orders against the releasing block's writes.
+/// The spin and the generation read use `atomic_add(_, 0)`, not a plain load.
+/// A plain load could be hoisted out of the loop or read a stale cache line.
 impl<'c> Codegen<'c> {
 
-    /// The `memref.atomic_rmw addi` itself, addressing slot `idx` of an `i32`
-    /// tensor of any rank. The slot indexes the leading dimension and the rest
-    /// are zero, so the state is a rank-1 pair or the `[2, 1]` column a rank-2
-    /// launch ABI can pass without a descriptor of its own.
+    /// A `memref.atomic_rmw addi` on slot `idx` of an `i32` tensor of any
+    /// rank. The slot indexes the leading dimension and the other indices are
+    /// zero, so both the rank-1 pair and the `[2, 1]` column work.
     pub(super) fn atomic_add_raw(
         &self,
         block: &Block<'c>,
@@ -58,8 +55,8 @@ impl<'c> Codegen<'c> {
         self.push(
             block,
             OperationBuilder::new("memref.atomic_rmw", self.loc)
-                // AtomicRMWKindAttr is an I64EnumAttr, so the kind travels as a
-                // plain i64: addi is case 1 (mlir Arith/IR/ArithBase.td).
+                // AtomicRMWKindAttr is an I64EnumAttr, so the kind is a plain
+                // i64. addi is case 1 (mlir Arith/IR/ArithBase.td).
                 .add_attributes(&[(
                     self.id("kind"),
                     IntegerAttribute::new(IntegerType::new(self.ctx, 64).into(), 1).into(),
@@ -77,8 +74,7 @@ impl<'c> Codegen<'c> {
         mem: Value<'c, 'c>,
         rank: usize,
     ) -> Result<()> {
-        // Publish this stage's writes to the rest of the CTA, and make sure no
-        // thread of it is still working when thread 0 arrives.
+        // Every thread of the CTA must be done before thread 0 arrives.
         self.barrier(block)?;
 
         let tid = self.thread_id(block)?;
@@ -101,8 +97,8 @@ impl<'c> Codegen<'c> {
             self.loc,
         ));
 
-        // The release only reached thread 0; this is what hands it to the CTA,
-        // and it orders the next stage's reads after every block's writes.
+        // Only thread 0 saw the release. This barrier passes it to the CTA,
+        // ordering the next stage's reads after every block's writes.
         self.barrier(block)
     }
 
@@ -118,8 +114,8 @@ impl<'c> Codegen<'c> {
         let zero = self.const_i32(block, 0)?;
         let one = self.const_i32(block, 1)?;
 
-        // gridDim.x, as an i32, is how many arrivals make a full barrier. A
-        // kernel whose grid is not one-dimensional cannot use this.
+        // A full barrier is gridDim.x arrivals, so the grid must be
+        // one-dimensional.
         let blocks = self.grid_dim(block)?;
         let blocks = self.push(
             block,
@@ -134,9 +130,8 @@ impl<'c> Codegen<'c> {
             arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, arrived, last, self.loc),
         )?;
 
-        // Last in: undo every arrival and bump the generation, in that order, so
-        // no released block can arrive at the next barrier against a counter
-        // that has not been reset yet.
+        // Last in: reset the counter, then bump the generation. This order
+        // keeps a released block from arriving at a counter not yet reset.
         let release = Block::new(&[]);
         let neg = self.push(&release, arith::subi(zero, blocks, self.loc))?;
         self.atomic_add_raw(&release, mem, rank, count_at, neg)?;
@@ -145,7 +140,7 @@ impl<'c> Codegen<'c> {
         let release_region = Region::new();
         release_region.append_block(release);
 
-        // Everyone else spins until the generation moves off the one they saw.
+        // Everyone else spins until the generation changes.
         let spin = Block::new(&[]);
         let before = Block::new(&[]);
         let now = self.atomic_add_raw(&before, mem, rank, gen_at, zero)?;

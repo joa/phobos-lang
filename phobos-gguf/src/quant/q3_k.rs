@@ -1,9 +1,9 @@
 // Q3_K: `{ uint8 hmask[32]; uint8 qs[64]; uint8 scales[12]; f16 d; }`.
 //
-// Two bits per element from `qs` (same four-pass layout as Q2_K), the third
-// from `hmask` (one bit per element, set for the low half of the range).
-// `scales` packs sixteen signed 6-bit values into 12 bytes like Q6_K's (see
-// [`unpack_scales`]), offset by 32.
+// Two bits per element come from `qs`, in Q2_K's four-pass layout. The third
+// comes from `hmask`, one bit per element; a clear bit subtracts 4.
+// `scales` packs sixteen 6-bit values into 12 bytes (see [`unpack_scales`]),
+// offset by 32.
 
 use phobos_base::half::f16_to_f32;
 
@@ -70,9 +70,9 @@ fn dequantize(bytes: &[u8], out: &mut [f32]) {
     }
 }
 
-/// Sixteen signed 6-bit scales packed into 12 bytes: the first two groups of
-/// four take their low nibble from the first eight bytes, the last two the
-/// high nibble; all sixteen take their top two bits from the last four bytes.
+/// Unpacks sixteen signed 6-bit scales from 12 bytes. Scales 0..8 take their
+/// low four bits from the low nibbles of bytes 0..8, scales 8..16 from the
+/// high nibbles. All sixteen take their top two bits from the last four bytes.
 fn unpack_scales(b: &[u8]) -> [i8; 16] {
     let mut scales = [0i8; 16];
     for c in 0..4 {

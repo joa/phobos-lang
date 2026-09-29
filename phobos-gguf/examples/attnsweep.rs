@@ -2,10 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example attnsweep
 //
-// The fused kernel caps its query block at eight rows: at head dimension 256
-// its tiles are all `[BR, 256]` f32, and that is what 48 KB of shared memory
-// holds. Materializing the scores as an ordinary matmul has no such cap;
-// this measures whether that is worth the extra pass over memory.
+// The fused kernel caps its query block at eight rows, since at head
+// dimension 256 that is what 48 KB of shared memory holds. Writing the scores
+// out as an ordinary matmul has no such cap. This measures whether that is
+// worth the extra pass over memory.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -39,9 +39,8 @@ kernel scores(Q: tensor<f32>[M, K], W: tensor<f32>[N, K], S: tensor<f32>[M, N]) 
 
 /// The same scores against a key block already transposed to `[D, NK]`.
 ///
-/// `dot_t` cannot accumulate in place, so the loop above builds a fresh tile
-/// every step and adds it; `dot` can, reaching the pipelined and tensor-core
-/// paths. Transposing the cache once a layer is the price.
+/// Unlike `dot_t`, `dot` accumulates in place and reaches the pipelined and
+/// tensor-core paths. The cost is transposing the cache once per layer.
 const SRC_SCORES_T: &str = "@launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}], TK in [{TK}])
 {TC}
@@ -59,9 +58,9 @@ kernel scores_t(Q: tensor<f32>[M, K], W: tensor<f32>[K, N], S: tensor<f32>[M, N]
 }
 ";
 
-/// The same again with the head on the grid's third axis: both operands
-/// become column windows the compiler cannot bound, so this measures what
-/// the bounds mask costs against gathering each head into its own buffer.
+/// `scores_t` with the head on the grid's third axis. Both operands become
+/// column windows the compiler cannot bound. This measures the bounds mask
+/// against gathering each head into its own buffer.
 const SRC_SCORES_H: &str = "@launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}], TK in [{TK}], D in [256], NH in [8])
 {TC}
@@ -98,14 +97,15 @@ kernel mix(P: tensor<f32>[M, K], V: tensor<f32>[K, N], O: tensor<f32>[M, N]) {
 }
 ";
 
-/// Rows in the batch, keys in the cache, and the head dimension.
+/// Query rows, which is also the cache length, and the head dimension.
 const ROWS: usize = 512;
 const HEAD_DIM: usize = 256;
 /// Heads of one attention block, and how many blocks a pass runs.
 const HEADS: usize = 8;
 const BLOCKS_PER_PASS: usize = 6;
 
-/// Output tile, contraction tile and CTA, with and without the tensor cores.
+/// `(TM, TN, TK, threads)` per configuration, each run with and without
+/// tensor cores.
 const TILES: &[(usize, usize, usize, usize)] = &[
     (32, 32, 16, 256),
     (64, 64, 16, 256),
@@ -161,8 +161,7 @@ fn main() -> Result<()> {
         (seed >> 40) as f32 / 8388608.0 - 1.0
     };
 
-    // Wide enough for every head, so the head-on-the-grid kernel reads the
-    // same layout the model has rather than a flattened one.
+    // Holds every head, so `scores_h` reads the model's own layout.
     let wide = HEADS * HEAD_DIM;
     let q: Vec<f32> = (0..ROWS * wide).map(|_| next()).collect();
     let q_dev = DeviceBuffer::from_slice(&q)?;
@@ -181,8 +180,6 @@ fn main() -> Result<()> {
 "
     );
 
-    // Each half on its own: they are different shapes, only one can
-    // accumulate in place, and the head is either a grid axis or a gather.
     for tensorcore in [false, true] {
         println!("{}", if tensorcore { "@tensorcore" } else { "f32" });
         for &(tm, tn, tk, block) in TILES {

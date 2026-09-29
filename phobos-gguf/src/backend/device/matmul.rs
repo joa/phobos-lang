@@ -8,8 +8,7 @@ type I8Kernel<'a> = (&'a Module, &'static str, usize, Vec<(u64, i64)>);
 
 
 /// The five buffers every batched Q8_0 kernel contracts over. The weight
-/// pair is whole for every launch; the rest are offset to the row band
-/// a launch covers.
+/// pair is passed whole. The others are offset to each launch's row band.
 struct Q8Tiles {
     qa_ptr: u64,
     das_ptr: u64,
@@ -88,10 +87,9 @@ impl DeviceBackend {
             n,
         };
 
-        // Four kernels, deepest tile first, each taking the whole tiles it
-        // can before handing the remainder on: qmma_t (in two depths, the
-        // deeper one faster), then q8_mma for the leftover tensor-core
-        // tiles, then the matvec for single rows and decoding.
+        // Deepest tile first. Each kernel takes the whole tiles it can and
+        // passes the remaining rows on: qmma_t at two depths, then q8_mma,
+        // then a matvec per leftover row.
         let mut qmma_rows = 0;
         if qmma_takes(n) {
             let wide = qmma_width(n);
@@ -104,9 +102,8 @@ impl DeviceBackend {
                 if rows == 0 || !n.is_multiple_of(tn) {
                     continue;
                 }
-                // Only the deep tile ever leaves the grid starved enough for
-                // this to fire: see Q8_QMMA_SPLIT_THRESHOLD. A grid of one or
-                // two blocks is split whatever the flag says.
+                // Only the deep tile splits. A grid of one or two blocks
+                // always splits, whatever the flag says.
                 let starved = (rows / Q8_QMMA_TM) * (n / wide) <= 2;
                 let splits = if depth == Q8_QMMA_TM && (self.qmma_split || starved) {
                     q8_qmma_splits(rows, n, k, wide)
@@ -135,7 +132,7 @@ impl DeviceBackend {
         if mma_rows > qmma_rows {
             let rows = mma_rows - qmma_rows;
             self.launch(
-                // The rows tile evenly by construction; only n can be ragged.
+                // The rows tile evenly by construction. Only n can be ragged.
                 self.q8_mma.pick(n.is_multiple_of(Q8_MMA_TN)),
                 "q8_mma",
                 &tiles.band(qmma_rows, rows),
@@ -145,10 +142,9 @@ impl DeviceBackend {
 
         let tiles_evenly = n.is_multiple_of(Q8_TN);
         let grid_n = n.div_ceil(Q8_TN) as u32;
-        // A single row leaves the grid as short as the projection is wide.
-        // qdot_t fills it from the contraction and wants no split; the split
-        // kernels, which pay a pass to sum partials, cover the widths its
-        // tile does not divide.
+        // Per-row path. qdot_t needs no split. When its tile does not divide
+        // n, the split kernels spread k across the grid and sum the partials
+        // in a second launch.
         let splits = q8_splits(n, k);
         let qdot = n.is_multiple_of(Q8_QDOT_TN);
         for row in mma_rows..m {
@@ -231,9 +227,9 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// The starved-grid path for `q8_qmma`'s deep tile: `splits` copies of the
-    /// same `[Q8_QMMA_TM, wide]` patch, one per slice of `k`, reduced from a
-    /// `splits * rows * n` scratch into `out` by a second launch.
+    /// Split-K path for `q8_qmma`'s deep tile on a small grid. Each of
+    /// `splits` programs covers one slice of `k` and writes a partial plane.
+    /// A second launch sums the planes into `out`.
     fn launch_qmma_split(
         &self,
         tiles: &Q8Tiles,
@@ -287,9 +283,9 @@ impl DeviceBackend {
         )
     }
 
-    /// A raw-block weight's projection: one kernel, no split, no tensor
-    /// cores, decoding straight from the file's bytes. The module, tile
-    /// width and block size come from the weight's stored format.
+    /// Projection through a raw-block weight, decoded straight from the
+    /// file's bytes by one kernel. The weight's format picks the kernel and
+    /// tile width.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn project_raw(
         &self,
@@ -310,9 +306,8 @@ impl DeviceBackend {
             *stored_n == n,
             "raw weight was uploaded with n = {stored_n}, used with n = {n}"
         );
-        // The qdot_t kernels need their qb/d slices provably in bounds
-        // (@aligned(N = TN)), which only a whole number of tiles gives them;
-        // a ragged n falls back to the masked-tolerant body.
+        // The qdot_t kernels are `@aligned(N = TN)`, so they need n to be a
+        // whole number of tiles. A ragged n takes the masked body.
         let iq1s_qdot_eligible = *quant == Quant::IQ1_S && m == 1 && n.is_multiple_of(IQ1S_TN);
         let iq2xxs_qdot_eligible =
             *quant == Quant::IQ2_XXS && m == 1 && n.is_multiple_of(IQ2XXS_TN);
@@ -326,12 +321,11 @@ impl DeviceBackend {
         let q2k_qdot_eligible = *quant == Quant::Q2_K && m == 1 && n.is_multiple_of(Q2K_TN);
         let q3k_qdot_eligible = *quant == Quant::Q3_K && m == 1 && n.is_multiple_of(Q3K_TN);
 
-        // The wide tile whenever it divides n, not by a CTA-count rule.
+        // The wide tile whenever it divides n.
         let wide_tile = |tn: usize| n.is_multiple_of(tn);
-        // The dp4a decode matvecs: the format only decides the output tile
-        // and which lookup tables ride along. Off unless asked, since
-        // quantizing the activation is a numerics change the host reference
-        // does not make.
+        // The dp4a decode matvecs. The format picks the output tile and the
+        // lookup tables. It quantizes the activation, which the host
+        // reference does not.
         let i8_pick: Option<I8Kernel<'_>> = if self.iq1s_dp4a.get() && m == 1 {
             let grid = |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw(), len as i64);
             // The mask half sits one table past the +/-1 one.
@@ -424,8 +418,8 @@ impl DeviceBackend {
                         mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
                     ],
                 )),
-                // The K-quants have no other path, so a ragged n is not
-                // guarded here: it runs padded below.
+                // The K-quants have no other path, so a ragged n runs padded
+                // below.
                 Quant::Q4_K => Some((
                     &self.q4k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q4K_I8_TN)))],
                     "q4k_qdot_i8_matvec",
@@ -476,13 +470,12 @@ impl DeviceBackend {
             let rb = *nb * quant.device_block_bytes();
             let (nb, n_blocks) = (*nb as i64, k / Q8_BLOCK);
             drop(raws);
-            // The caller's quantized copy where it has one.
+            // Use the caller's quantized activation if it has one.
             let act = act.map_or_else(|| self.quantize_act(a, 1, k), Ok)?;
             let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
-            // The tile is @aligned and stores whole; a ragged n runs padded
-            // into a scratch (the grouped upload padded the weight to 64
-            // columns) and the row's n values are copied out. See
-            // `project_raw_qmma`, which does the same for a prompt.
+            // The tile is `@aligned` and stores whole tiles. A ragged n
+            // writes a padded scratch row and copies the first n values out.
+            // The upload already padded the weight to match.
             let n_pad = n.next_multiple_of(tn);
             let dest = if n_pad == n {
                 out
@@ -566,16 +559,14 @@ impl DeviceBackend {
         }
         match quant {
             Quant::IQ1_S if iq1s_qdot_eligible => {
-                // iq1s_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq1s_matvec's gather-based body.
+                // The qdot bodies compute their own byte offsets and take
+                // no iota8 operand.
                 operands.push((
                     self.iq1s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ1S_GRID_LEN as i64],
                 ));
             }
             Quant::IQ1_M if iq1m_qdot_eligible => {
-                // iq1m_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq1m_matvec's gather-based body.
                 operands.push((
                     self.iq1s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ1S_GRID_LEN as i64],
@@ -589,8 +580,6 @@ impl DeviceBackend {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             Quant::IQ2_XXS if iq2xxs_qdot_eligible => {
-                // iq2xxs_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq2xxs_matvec's gather-based body.
                 operands.push((
                     self.iq2xxs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2XXS_GRID_LEN as i64],
@@ -612,8 +601,6 @@ impl DeviceBackend {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             Quant::IQ2_S if iq2s_qdot_eligible => {
-                // iq2s_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq2s_matvec's gather-based body.
                 operands.push((
                     self.iq2s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2S_GRID_LEN as i64],
@@ -635,8 +622,6 @@ impl DeviceBackend {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             Quant::IQ2_XS if iq2xs_qdot_eligible => {
-                // iq2xs_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq2xs_matvec's gather-based body.
                 operands.push((
                     self.iq2xs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2XS_GRID_LEN as i64],
@@ -658,8 +643,6 @@ impl DeviceBackend {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             Quant::IQ3_XXS if iq3xxs_qdot_eligible => {
-                // iq3xxs_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq3xxs_matvec's gather-based body.
                 operands.push((
                     self.iq3xxs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ3XXS_GRID_LEN as i64],
@@ -681,8 +664,6 @@ impl DeviceBackend {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             Quant::IQ3_S if iq3s_qdot_eligible => {
-                // iq3s_qdot_matvec computes its own byte offsets; no iota8
-                // operand, unlike iq3s_matvec's gather-based body.
                 operands.push((
                     self.iq3s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ3S_GRID_LEN as i64],
@@ -728,10 +709,9 @@ impl DeviceBackend {
             .is_some_and(|raw| raw.quant == quant)
     }
 
-    /// The narrow-CTA path for `q8_qmma`'s deep tile: the same `qmma_t` kernel
-    /// at half the threads and column tile ([`Q8_QMMA_NARROW_CTA`],
-    /// [`Q8_QMMA_NARROW_TN`]), doubling the grid on a starved shape with one
-    /// launch and no scratch, unlike [`Self::launch_qmma_split`].
+    /// Narrow-CTA path for `q8_qmma`'s deep tile. The same kernel at half the
+    /// threads and half the column tile, which doubles the grid in one launch
+    /// with no scratch.
     fn launch_qmma_narrow(&self, tiles: &Q8Tiles, row_off: usize, rows: usize) -> Result<()> {
         if self.q8_qmma_narrow.borrow().is_none() {
             let module = compile(

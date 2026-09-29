@@ -14,9 +14,9 @@ use super::{Ffn, Gain, Linear, Shared, Uploads};
 /// A block's routed feed-forward.
 ///
 /// The router and the shared expert are ordinary weights, resident wherever
-/// the backend keeps its constants. The experts are not: they stay in the
-/// file's bytes and reach the backend through [`Backend::constant_experts`],
-/// which is free to hold as many or as few of them as it can.
+/// the backend keeps constants. The experts stay in the file's bytes and
+/// reach the backend through [`Backend::constant_experts`], which may hold
+/// as many or as few of them as it can.
 pub(crate) struct MoeFfn {
     /// `[d_model, n_expert]`, F32 in the file.
     router: Linear,
@@ -62,9 +62,9 @@ impl MoeFfn {
         into.add_streamed(&self.key, self.experts.byte_len());
     }
 
-    /// The backend's handle on the expert set, made at the first call;
-    /// every block does this ahead of the first pass so a backend laying
-    /// out a cache sees them all.
+    /// The backend's handle on the expert set, created on the first call.
+    /// Every block calls this before the first pass, so a backend laying
+    /// out a cache sees every set.
     pub(crate) fn handle(&self, backend: &dyn Backend) -> Result<ExpertsBuf> {
         backend.constant_experts(&self.key, &self.experts)
     }
@@ -74,9 +74,9 @@ impl MoeFfn {
         &self.router
     }
 
-    /// The router alone, on an already normalized `x`, into `logits`
-    /// (`[rows, n_expert]`): for a caller asking what this block would
-    /// choose for a row without running it.
+    /// Runs only the router on an already normalized `x`, into `logits`
+    /// (`[rows, n_expert]`). Tells a caller which experts this block would
+    /// choose, without running them.
     pub(crate) fn router_into(
         &self,
         backend: &dyn Backend,
@@ -88,7 +88,7 @@ impl MoeFfn {
     }
 
     /// What a backend needs to run this block's router ahead of the block,
-    /// given the norm that feeds it; `None` where the router is not a plain
+    /// given the norm that feeds it. `None` when the router is not a plain
     /// dense weight.
     pub(crate) fn lookahead(&self, backend: &dyn Backend, gain: &Gain, eps: f32) -> Result<Option<Lookahead>> {
         let Some(router) = self.router.dense_plain(backend)? else {
@@ -102,7 +102,7 @@ impl MoeFfn {
         }))
     }
 
-    /// The whole feed-forward added into `dest`: router, chosen experts,
+    /// Adds the whole feed-forward into `dest`: router, chosen experts, and
     /// gated shared expert. `routes`, if given, receives each row's chosen
     /// expert ids as [`Moe::routes`] describes.
     pub(crate) fn forward(
@@ -117,7 +117,7 @@ impl MoeFfn {
         let d_model = self.router.in_dim;
         let logits = self.router.forward_shared(backend, x, rows)?;
 
-        // The shared expert adds into a zeroed row of its own, since the
+        // The shared expert writes into its own zeroed rows, since the
         // combine scales it before it reaches the residual.
         let shared_out = backend.zeroed(rows * d_model)?;
         self.shared.forward(backend, x, rows, shared_out)?;

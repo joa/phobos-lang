@@ -4,14 +4,13 @@ use super::*;
 
 pub(super) const FUSED_KERNEL: &str = "fused";
 
-/// Times to try settling a fused kernel's grid against the occupancy API. The
-/// answer depends on the compiled code and the compiled code on the answer, so
-/// it is iterated; two passes is the most that has ever been needed.
+/// Attempts to settle a fused kernel's grid against the occupancy API. The
+/// grid size is compiled into the kernel and the occupancy depends on the
+/// compiled kernel, so it is iterated.
 pub(super) const FUSED_GRID_TRIES: usize = 4;
 
-/// The pass emits a contraction that accumulates in tiles of
-/// [`fuse::OUT_TILE`], which is this backend's own tile under another name
-/// because the pass cannot see it.
+/// [`fuse::OUT_TILE`] must match this backend's matvec tile, which the pass
+/// cannot see.
 const _: () = assert!(Q8_QDOT_TN == fuse::OUT_TILE);
 
 /// Whether one stage of a decode step goes through the fusion pass.
@@ -23,14 +22,11 @@ pub(super) fn fused_stage(var: &str) -> bool {
 }
 
 impl DeviceBackend {
-    /// The matvec on a fixed, card-sized grid. See [`q8_qdot_persist_src`]:
-    /// this exists to be measured against the launched kernel, not to be the
-    /// default.
+    /// The matvec on a fixed, card-sized grid, see [`q8_qdot_persist_src`].
+    /// An experimental alternative to the launched kernel, not the default.
     ///
-    /// The grid is the driver's answer for a kernel already compiled at it,
-    /// so the first projection compiles twice: once at a provisional 4
-    /// blocks per SM to have something to ask about, then at whatever came
-    /// back. Both are cached.
+    /// The first call compiles a probe at 4 blocks per SM to query the
+    /// occupancy, then compiles at the answer. Both are cached.
     pub(super) fn qdot_persistent(
         &self,
         n: usize,
@@ -38,9 +34,8 @@ impl DeviceBackend {
         operands: &[(u64, [i64; 2])],
     ) -> Result<()> {
         if self.persist_blocks.get() == 0 {
-            // A narrower grid than the occupancy answer stays co-resident, so
-            // PHOBOS_PERSIST_BLOCKS can ask what a matvec loses at a block count
-            // a fused kernel would be stuck with.
+            // PHOBOS_PERSIST_BLOCKS forces a block count. A grid narrower than
+            // the occupancy answer is still co-resident.
             if let Some(forced) = std::env::var("PHOBOS_PERSIST_BLOCKS")
                 .ok()
                 .and_then(|v| v.parse::<u32>().ok())
@@ -77,16 +72,13 @@ impl DeviceBackend {
         )
     }
 
-    /// Runs the pass over a chain, compiles what it emits, and settles the grid
-    /// the result must be launched with. `None` means the pass declined the
-    /// chain and the caller should run its stages as separate launches.
+    /// Runs the pass over a chain, compiles the result, and settles its grid.
+    /// `None` means the pass declined the chain, and the caller should run
+    /// the stages as separate launches.
     ///
-    /// A grid barrier makes the block count part of what the kernel means:
-    /// `BLOCKS` is compiled in, so the launch has to use exactly it, and every
-    /// block of it has to be resident or the barrier waits for an arrival that
-    /// never comes. The occupancy answer is a property of the compiled code and
-    /// the compiled code carries the block count, so the two are settled by
-    /// starting at the thread ceiling and shrinking to what the driver allows.
+    /// The block count is compiled in, and every block must be resident or
+    /// the grid barrier deadlocks. So the grid starts at the thread ceiling
+    /// and shrinks until the driver's occupancy answer allows it.
     pub(super) fn fused_plan(&self, chain: &Chain) -> Result<Option<ChainKey>> {
         let settled = self.fused_blocks.get();
         if settled != 0 {
@@ -113,9 +105,6 @@ impl DeviceBackend {
             // SAFETY: the function belongs to a module alive for this call.
             let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, 0)? };
             if allowed >= blocks {
-                // What the fusion collapsed, what it still pays and what it had
-                // to put in memory anyway: the numbers that say whether it was
-                // worth emitting.
                 phobos_base::phdebug!(
                     "fused kernel: stages={} blocks={blocks} barriers={} published={} held={}",
                     key.stages(),
@@ -131,18 +120,15 @@ impl DeviceBackend {
             }
             blocks = allowed;
         }
-        // Declining costs launches; failing would cost the model. Fusion is what
-        // a step does by default, so a card whose occupancy answer never settles
-        // falls back rather than taking the pass down with it.
+        // Fall back to separate launches rather than fail the pass.
         phobos_base::phinfo!(
             "fused kernel: no co-resident grid after {FUSED_GRID_TRIES} tries, not fusing"
         );
         Ok(None)
     }
 
-    /// A fused kernel's barrier state, zeroed on first use. Every barrier leaves
-    /// the counter and the generation as it found them, so one pair serves every
-    /// launch of every layer.
+    /// A fused kernel's barrier state, zeroed on first use. Every barrier
+    /// restores the counter and generation, so one pair serves every launch.
     pub(super) fn fused_bar(&self) -> Result<u64> {
         if self.fused_barrier.borrow().is_none() {
             self.flush_pending()?;
@@ -207,9 +193,9 @@ impl DeviceBackend {
 }
 
 impl DeviceBackend {
-    // The `Backend` entry points of the fused path. The chain is all
-    // this backend decides; the pass decides fusability, loop nesting and
-    // barrier placement, and a declined shape takes the launches instead.
+    // The `Backend` entry points of the fused path. This backend builds the
+    // chain; the pass decides everything else. `false` means the caller runs
+    // the separate launches.
     pub(super) fn launch_fused_mlp(&self, mlp: FusedMlp) -> Result<bool> {
         if !self.fused_mlp {
             return Ok(false);
@@ -257,8 +243,7 @@ impl DeviceBackend {
         if !self.fused_project {
             return Ok(Fused::default());
         }
-        // Dropping the tail here rather than at the frontend keeps the recording
-        // side free of the gate: the chain is what the gate is about.
+        // The mix tail is gated separately.
         let project = FusedProject {
             mix: project.mix.filter(|_| self.fused_mix),
             ..project

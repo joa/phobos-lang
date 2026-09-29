@@ -1,8 +1,8 @@
 // What a GGUF model will occupy on the backend, and whether the card has room.
 //
-// The same estimate `GgufModel::load` refuses on, printed rather than enforced,
-// so a model that is close to the line can be looked at before it is run. Under
-// `--features cuda` it also reports what the device has free.
+// Prints the same estimate `GgufModel::load` refuses on, so a model near the
+// limit can be checked before it is run. Under `--features cuda` it also
+// reports the device's free memory.
 
 use std::env;
 use std::path::Path;

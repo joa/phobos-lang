@@ -63,7 +63,7 @@ impl<'c> Codegen<'c> {
             return Ok((lhs, rhs));
         }
 
-        // mixed float types widen to their join (f16 and bf16 meet at f32)
+        // Mixed float types widen to their join. f16 and bf16 meet at f32.
         if let Some(want) = self.float_join(lt, rt) {
             return Ok((
                 self.float_cast(block, lhs, want)?,
@@ -74,7 +74,7 @@ impl<'c> Codegen<'c> {
         bail!("mismatched operand types: {lt} vs {rt}")
     }
 
-    /// Coerces value to want for a store
+    /// Converts `value` to `want` for a store.
     pub(super) fn coerce(
         &mut self,
         block: &Block<'c>,
@@ -85,7 +85,7 @@ impl<'c> Codegen<'c> {
         if t == want {
             Ok(value)
         } else if self.is_float(t) && self.is_float(want) {
-            // rounds or widens, e.g. an f32 literal into an f16 tile
+            // Rounds or widens, e.g. an f32 literal into an f16 tile.
             self.float_cast(block, value, want)
         } else if t == self.index_t && self.is_int(want) {
             self.push(block, arith::index_cast(value, want, self.loc))
@@ -97,10 +97,10 @@ impl<'c> Codegen<'c> {
     }
 }
 
-// memrefs
+// Memrefs.
 impl<'c> Codegen<'c> {
 
-    /// Loads a scalar element; integer elements are widened to index.
+    /// Loads a scalar element. Integer elements are widened to index.
     pub(super) fn load_scalar(
         &mut self,
         block: &Block<'c>,
@@ -152,7 +152,8 @@ impl<'c> Codegen<'c> {
             shape: static_sizes,
             row_stride: None,
             align_div,
-            // never taken of swizzled staging buffers (ldmatrix reads those directly)
+            // Swizzled staging buffers are never sliced; ldmatrix reads them
+            // directly.
             swizzle: None,
             global: None,
             shared: src.shared,
@@ -161,8 +162,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// The subview result type MLIR will infer: the slice's shape over the
-    /// source's row-major strides, with a dynamic offset.
+    /// The subview result type MLIR infers: the slice's shape with the
+    /// source's row-major strides and a dynamic offset.
     pub(super) fn subview_type(&self, src: &MemVal<'c>, sizes: &[i64]) -> Result<Type<'c>> {
         let strides = row_major_strides(&src.shape);
         let dims: String = sizes.iter().map(|&d| format!("{}x", fmt_dim(d))).collect();
@@ -175,9 +176,4 @@ impl<'c> Codegen<'c> {
         );
         Type::parse(self.ctx, &text).ok_or_else(|| anyhow!("failed to parse type '{text}'"))
     }
-}
-
-// expression classifiers
-impl<'c> Codegen<'c> {
-
 }

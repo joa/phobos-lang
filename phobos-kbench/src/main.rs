@@ -40,8 +40,8 @@ pub(crate) const BENCHES: &[&str] = &[
     "flash_fp16",
 ];
 
-/// Parsed command line. bench selects a single benchmark (all of them when
-/// None); pins fixes autotune dims to skip the search (for ncu profiling).
+/// Parsed command line. `bench` picks one benchmark, or all when `None`.
+/// `pins` fixes autotune dims to skip the search, e.g. for ncu profiling.
 struct Options {
     bench: Option<String>,
     pins: HashMap<String, i64>,
@@ -136,7 +136,7 @@ impl Options {
         })
     }
 
-    /// Whether name should run under the current --bench selection.
+    /// Whether `name` runs under the current --bench selection.
     fn wants(&self, name: &str) -> bool {
         self.bench.as_deref().is_none_or(|b| b == name)
     }

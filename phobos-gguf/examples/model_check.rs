@@ -21,9 +21,9 @@ fn main() -> Result<()> {
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
     let model = Decoder::load(&gguf)?;
     let args: Vec<String> = std::env::args().collect();
-    // A prompt of one's own: how much of the bound below goes to quantization
-    // alone varies with the prompt, and a model that spends most of it there
-    // cannot be used to judge anything else.
+    // `-p` sets the prompt. How much of the bound below quantization alone
+    // uses varies by prompt, and a prompt that uses most of it judges
+    // nothing else.
     let prompt = match args.iter().position(|a| a == "-p") {
         Some(at) => args.get(at + 1).cloned().unwrap_or_default(),
         None => "The capital of France is".to_string(),
@@ -36,8 +36,8 @@ fn main() -> Result<()> {
     let host = HostBackend::new();
     let gpu = device::DeviceBackend::new()?;
 
-    // Prompt pass, then two decode steps: the first exercises the tiled path,
-    // the rest the single-row one.
+    // The prompt pass takes the tiled path, then two decode steps take the
+    // single-row one.
     let mut host_state = model.new_state();
     let mut gpu_state = model.new_state();
     let mut step = 0;
@@ -47,11 +47,10 @@ fn main() -> Result<()> {
         let want = model.forward(&mut host_state, &feed, &host)?;
         let got = model.forward(&mut gpu_state, &feed, &gpu)?;
 
-        // Against the logit spread, not element by element: two dozen blocks
-        // of f32 arithmetic in a different order will not agree digit for
-        // digit, and a near-zero logit would make a per-element relative
-        // error report a difference that changes nothing. What has to hold
-        // is that the distribution keeps its shape and picks the same token.
+        // Measured against the logit spread, not per element. Reordered f32
+        // arithmetic will not match digit for digit, and a near-zero logit
+        // inflates a per-element relative error. What must hold is the
+        // distribution's shape and the chosen token.
         let spread = want.iter().fold(f32::MIN, |a, &b| a.max(b))
             - want.iter().fold(f32::MAX, |a, &b| a.min(b));
         let worst = want
@@ -62,9 +61,8 @@ fn main() -> Result<()> {
         let error = worst / spread;
         let host_top = argmax(&want);
         let gpu_top = argmax(&got);
-        // A flipped top token only means something when the host was decided:
-        // if the two leading logits sit closer together than the drift, either
-        // one can come out on top and the flip carries no information.
+        // A flipped top token counts only when the host was decisive. Two top
+        // logits closer than the drift can come out either way.
         let decisive = top_margin(&want) > 2.0 * worst;
         println!(
             "step {step}: spread err {error:>10.3e}   host {:?}  gpu {:?}{}",

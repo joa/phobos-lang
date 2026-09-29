@@ -14,10 +14,9 @@ use phobos_gguf::backend::HostBackend;
 use phobos_gguf::qwen35::{Model, Variants};
 use phobos_gguf::{Bpe, Gguf};
 
-/// Scoring only the repetitions measures one thing: whether context reaches
-/// the current position. A working mixer drives these near zero; a broken
-/// one sits near the vocabulary's entropy, so fluency effects cannot
-/// confuse the ranking.
+/// Scoring only the repetitions measures whether context reaches the current
+/// position. A working mixer drives their loss near zero, and a broken one
+/// stays near the vocabulary's entropy, so fluency cannot skew the ranking.
 const PROBE: &str = " apple banana cherry apple banana cherry apple banana cherry";
 
 /// Predictions before this index cover the first, genuinely unpredictable pass.

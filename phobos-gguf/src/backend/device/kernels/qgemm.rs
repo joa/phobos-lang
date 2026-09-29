@@ -1,23 +1,25 @@
-// The staged prompt projections, one kernel a raw format; see
+// The staged prompt projections, one kernel per raw format; see
 // `phobos-lang`'s `codegen/tile/qgemm.rs`.
 
 use crate::quant::Quant;
 
 /// Rows, columns and threads of a `<fmt>_qgemm` kernel, fixed by the
-/// intrinsic: the whole batch down, 64 columns across, eight warps.
+/// intrinsic.
 pub(crate) const QGEMM_TM: usize = 128;
 pub(crate) const QGEMM_TN: usize = 64;
 pub(crate) const QGEMM_CTA: usize = 256;
 
-/// The ternary grid at two bits a lane, shared by IQ1_S and IQ1_M.
+/// Length of the ternary grid at two bits per lane, shared by IQ1_S and
+/// IQ1_M.
 pub(crate) const IQ1_GRID2_LEN: usize = 2048 * 2;
 
-/// The same grid at a nibble a lane, which the decode matvecs read.
+/// Length of the same grid at a nibble per lane, which the decode matvecs
+/// read.
 pub(crate) const IQ1_GRID4_LEN: usize = 2048 * 4;
 
-/// The table operands a format's staged kernel reads after `(qb, d)`, by
-/// length: the magnitude grid, then the 0/-1 sign masks where the format
-/// carries signs apart. Mirrors `QgFormat::tables` in the compiler.
+/// Lengths of the table operands a format's staged kernel takes after
+/// `(qb, d)`: the magnitude grid, then the 0/-1 sign masks if the format
+/// stores signs separately. Mirrors `QgFormat::tables` in the compiler.
 pub(crate) fn qgemm_tables(quant: Quant) -> Option<&'static [usize]> {
     Some(match quant {
         Quant::IQ1_S | Quant::IQ1_M => &[IQ1_GRID2_LEN],
@@ -68,13 +70,12 @@ pub(crate) fn qgemm_kernel(quant: Quant) -> Option<&'static str> {
     })
 }
 
-/// The source of a format's staged projection, at two CTAs a
+/// The source of a format's staged projection, at two CTAs per
 /// multiprocessor (128 registers).
 pub(crate) fn qgemm_src(quant: Quant) -> Option<String> {
     let name = qgemm_name(quant)?;
     let tables = qgemm_tables(quant)?;
-    // A format with no tables declares none and passes none: the joins
-    // below leave no stray comma behind.
+    // Each piece carries its own comma, so no tables leaves no stray comma.
     let params: String = tables
         .iter()
         .enumerate()

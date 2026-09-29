@@ -82,7 +82,7 @@ impl DeviceArena {
     }
 }
 
-/// resident or in-flight supertile buffer
+/// A resident or in-flight supertile buffer.
 pub struct TileBuf {
     pub slab: Slab,
     pub shape: Vec<u64>,
@@ -107,7 +107,7 @@ impl TileStore {
         })
     }
 
-    /// Reserve an f32 buffer (4b) and register the tile.
+    /// Reserve an f32 buffer for `shape` and register the tile.
     pub fn alloc(&mut self, tile: TileId, shape: Vec<u64>) -> Result<()> {
         let elems: usize = shape.iter().product::<u64>() as usize;
         let slab = self.arena.alloc(elems * 4)?;
@@ -149,7 +149,7 @@ impl TileStore {
             .ok_or_else(|| anyhow::anyhow!("unknown tile {:#x}", tile.0))
     }
 
-    /// Host -> device marks the tile resident
+    /// Copy host data into the tile and mark it resident.
     pub fn h2d(&mut self, tile: TileId, data: &[f32]) -> Result<()> {
         let t = self
             .tiles
@@ -169,7 +169,7 @@ impl TileStore {
         Ok(())
     }
 
-    /// Device -> host (does not change residency).
+    /// Copy the tile to the host. Residency is unchanged.
     pub fn d2h(&self, tile: TileId) -> Result<Vec<f32>> {
         let t = self.get(tile)?;
         let mut out = vec![0f32; t.elems];
@@ -180,7 +180,7 @@ impl TileStore {
         Ok(out)
     }
 
-    /// A COMPUTE just wrote tile in place; it is now resident
+    /// Mark a tile resident after a COMPUTE wrote it in place.
     pub fn mark_resident(&mut self, tile: TileId) -> Result<()> {
         self.tiles
             .get_mut(&tile)
@@ -195,7 +195,7 @@ impl TileStore {
         }
     }
 
-    /// Record one peer serve; returns the new serve count
+    /// Record one peer serve and return the new serve count.
     pub fn record_serve(&mut self, tile: TileId) -> Result<u32> {
         let t = self
             .tiles
@@ -227,7 +227,7 @@ mod tests {
 
     #[test]
     fn size_class_is_exact_fit_not_power_of_two() {
-        // A 400 MiB supertile claims ~400 MiB, not a rounded 512 MiB slab: three fit a 1200 MiB arena.
+        // A 400 MiB supertile takes 400 MiB, not a 512 MiB slab, so three fit a 1200 MiB arena.
         let tile = 10240 * 10240 * 4; // 400 MiB, already 256-aligned
         assert_eq!(size_class(tile), tile);
         assert_eq!(size_class(tile).next_power_of_two(), 512 << 20);

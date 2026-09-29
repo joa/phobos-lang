@@ -48,8 +48,8 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    // cp.async additionally requires 64-bit index lowering (upstream's
-    // convert-nvgpu-to-nvvm hardcodes a 64-bit converter).
+    // cp.async also needs 64-bit index lowering, since upstream's
+    // convert-nvgpu-to-nvvm hardcodes a 64-bit converter.
     use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
     let base = BaseContext {
         gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
@@ -80,9 +80,9 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
 
 #[test]
 fn tensorcore_f16_inputs_pipeline_with_cp_async() {
-    // f16 operands byte-copy into the WMMA fragments, so the prefetch can
-    // lower to cp.async. wmma keeps this on the legacy path; bare @tensorcore
-    // at sm_80 + 64-bit index would select mma.sync instead.
+    // f16 operands are copied byte for byte, so the prefetch can use
+    // cp.async. `@tensorcore(wmma)` forces the WMMA path, since bare
+    // @tensorcore at sm_80 with 64-bit indices would pick mma.sync.
     let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [32])
         @pipeline
         @tensorcore(wmma)
@@ -114,8 +114,8 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
             "gpu.subgroup_mma_compute",
         ],
     );
-    // K's alignment makes the f16 transfer 8xf16 (16 bytes), reaching
-    // cp.async.cg's L1-bypass threshold.
+    // K's alignment makes the f16 copy 8xf16 (16 bytes), which is what
+    // cp.async.cg needs to bypass L1.
     assert!(
         mlir.contains("bypassL1"),
         "16-byte f16 cp.async should bypass L1:\n{mlir}"
@@ -132,10 +132,9 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
 
 #[test]
 fn tensorcore_f16_pipeline_register_stages_on_sm75() {
-    // Without cp.async (sm_75) the f16 WMMA pipeline register-stages: the
-    // next tile's global load is hoisted into registers and held across the
-    // WMMA compute, with the shared store deferred past it so global latency
-    // overlaps the math.
+    // Without cp.async (sm_75), the f16 WMMA pipeline stages in registers.
+    // The next tile's global load goes into registers before the compute,
+    // and the shared store comes after it.
     let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @pipeline
         @tensorcore
@@ -151,7 +150,7 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    let mlir = emit_mlir(src); // sm_75 (no cp.async)
+    let mlir = emit_mlir(src); // sm_75, no cp.async
     assert_contains(
         &mlir,
         &[
@@ -167,8 +166,8 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
         !mlir.contains("nvgpu."),
         "cp.async leaked into the sm_75 register-staged path:\n{mlir}"
     );
-    // The synchronous fallback applies when the staging tile does not divide
-    // evenly across the CTA: a 16x16 A-tile is 256 elements, under one
+    // A staging tile that does not divide evenly across the CTA takes the
+    // synchronous path. A 16x16 A-tile is 256 elements, less than one
     // 4-wide vector per thread, so no clamp is emitted.
     let small = src.replace("TILE_M in [64]", "TILE_M in [16]");
     let small = small.replace("TILE_N in [64]", "TILE_N in [128]");
@@ -182,10 +181,9 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
 #[test]
 fn generic_pipeline_double_buffers_a_non_matmul_loop() {
     // Misnamed: this loop's slice is partial, so `pipeline_candidate`
-    // declines it. What is actually under test is `emit_split_for`'s
-    // main-loop-plus-masked-remainder buffers, not double buffering;
-    // `bare_kernel_auto_pipelines_without_the_attribute` is the real
-    // generic-pipeline test.
+    // declines it. The test really covers the buffers of `emit_split_for`'s
+    // main loop and masked remainder. The generic pipeline test is
+    // `bare_kernel_auto_pipelines_without_the_attribute`.
     let mlir = emit_mlir(
         "@pipeline
         @autotune(T in [16])
@@ -200,7 +198,8 @@ fn generic_pipeline_double_buffers_a_non_matmul_loop() {
         }",
     );
     assert_contains(&mlir, &["gpu.func @stage", "scf.if", "gpu.barrier"]);
-    // `acc` and `a`: the remainder's copy of `a` takes the main loop's bytes.
+    // `acc` and `a`. The remainder's copy of `a` reuses the main loop's
+    // bytes.
     let mut offsets = view_offsets(&mlir, "16x16xf32");
     offsets.sort_unstable();
     offsets.dedup();
@@ -209,9 +208,9 @@ fn generic_pipeline_double_buffers_a_non_matmul_loop() {
 
 #[test]
 fn bare_kernel_auto_pipelines_without_the_attribute() {
-    // A row-at-a-time loop: dimension 0's size-1 span is always in bounds,
-    // and `@aligned(K = T)` covers dimension 1, so the slice is not partial
-    // and auto-pipelines with no `@pipeline` attribute written.
+    // A row-at-a-time loop. Dimension 0's size-1 span is always in bounds,
+    // and `@aligned(K = T)` covers dimension 1. So the slice is whole and
+    // pipelines without a `@pipeline` attribute.
     let mlir = emit_mlir(
         "@autotune(T in [16])
         @aligned(K = T)
@@ -225,17 +224,17 @@ fn bare_kernel_auto_pipelines_without_the_attribute() {
             C[0 :+ 1, 0 :+ T] = acc
         }",
     );
-    // One buffer is `acc`; two are `a`'s ping-pong pair. Three distinguishes
-    // this from the single-buffered path, which stages `a` once.
+    // One buffer for `acc` and two for `a`'s ping-pong pair. The
+    // single-buffered path would have two in total.
     assert_eq!(tile_views(&mlir, "1x16xf32").len(), 3, "{mlir}");
     assert_contains(&mlir, &["scf.if"]);
 }
 
 #[test]
 fn pipeline_assertion_fails_with_the_decline_reason() {
-    // `@pipeline` on a kernel with no loop shaped for it (here: no loop at
-    // all) is an assertion, so it must fail to compile and name why.
-    // `codegen::emit` reports rather than errors; `compile_shared` enforces.
+    // `@pipeline` is an assertion. On a kernel with no suitable loop, here
+    // no loop at all, compiling must fail and say why. `codegen::emit` only
+    // reports, and `compile_shared` turns that into an error.
     let err = crate::compile_shared(
         &phobos_base::context::Context::default(),
         "@pipeline
@@ -255,11 +254,10 @@ fn pipeline_assertion_fails_with_the_decline_reason() {
 
 #[test]
 fn shared_memory_budget_declines_silently_without_the_attribute() {
-    // At T = 8192 a staged buffer is 32768 bytes, 65536 doubled: over the 48
-    // KiB budget, so pipelining declines silently and falls back to the
-    // plain loop. The literal row count keeps the bound affine, so the
-    // fallback skips `emit_split_for`'s split, whose remainder buffer would
-    // defeat the assertion below.
+    // At T = 8192 a staged buffer is 32768 bytes, 65536 doubled, which is
+    // over the 48 KiB budget. So pipelining declines silently and the plain
+    // loop runs. The literal row count keeps the bound affine, which avoids
+    // `emit_split_for` and its remainder buffer.
     let mlir = emit_mlir(
         "@autotune(T in [8192])
         @aligned(K = T)
@@ -273,8 +271,8 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
             C[0 :+ 1, 0 :+ T] = acc
         }",
     );
-    // One buffer is `acc`, one is `a`'s single (non-doubled) buffer; a
-    // pipelined form would stage a second for `a`.
+    // One buffer for `acc` and one for `a`. Pipelining would add a second
+    // for `a`.
     assert_eq!(
         tile_views(&mlir, "1x8192xf32").len(),
         2,
@@ -284,9 +282,9 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
 
 #[test]
 fn atomic_add_cannot_reach_a_loop_bound() {
-    // Not a pipelining test: guards the CTA-uniformity argument that no
-    // `.ph` expression can put a data-dependent value into a loop bound. An
-    // int-to-index conversion added later would need to pass this too.
+    // Not a pipelining test. It guards the CTA-uniformity argument: no
+    // `.ph` expression can put a data-dependent value into a loop bound. Any
+    // future int-to-index conversion must keep this passing.
     let err = emit_err(
         "kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K], BAR: tensor<i32>[2]) {
             let n = atomic_add(BAR, 0, 1)
@@ -300,8 +298,8 @@ fn atomic_add_cannot_reach_a_loop_bound() {
         "atomic_add's i32 result should not typecheck as a loop bound: {err}"
     );
 
-    // The same holds combined with an index-typed value through arithmetic:
-    // `unify` bails on the mismatch rather than promoting the i32 side.
+    // The same holds through arithmetic with an index value. `unify`
+    // rejects the mismatch instead of promoting the i32 side.
     let err = emit_err(
         "kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K], BAR: tensor<i32>[2]) {
             let n = atomic_add(BAR, 0, 1)

@@ -1,14 +1,14 @@
-// Q4_K against Q8: eight runs of 32, a 6-bit scale and minimum apiece; the
-// low nibbles of a 32-byte plane are one run and the high nibbles the next.
+// Q4_K against Q8: eight runs of 32, each with a 6-bit scale and minimum. A
+// 32-byte plane's low nibbles are one run and its high nibbles the next.
 
 use super::{Acc, Block, Q8Block, Quants, RUN, RUNS, SUMS};
 
 const SCALES: usize = 4;
 const QS: usize = SCALES + 12;
 
-/// A block's header: `d`, `dmin`, the runs' scale indices, and the minimum
-/// indices doubled up to one a Q8 sum of sixteen, for the multiply-add
-/// that takes the minimums off.
+/// A block's header: `d`, `dmin`, each run's scale index, and the minimum
+/// indices duplicated to one per Q8 sum of sixteen, for the multiply-add
+/// that subtracts the minimums.
 #[derive(Default)]
 pub(super) struct Header {
     pub(super) d: f32,
@@ -18,13 +18,13 @@ pub(super) struct Header {
 }
 
 impl Header {
-    /// The header of `bytes`, `d` and `dmin` through `half`.
+    /// Reads the header of `bytes`, converting `d` and `dmin` with `half`.
     pub(super) fn read(&mut self, bytes: &[u8], half: impl Fn(u16) -> f32) {
         self.d = half(u16::from_le_bytes([bytes[0], bytes[1]]));
         self.dmin = half(u16::from_le_bytes([bytes[2], bytes[3]]));
-        // The first four runs get a byte each for the scale and the
-        // minimum, two bits spare; the last four take their low nibbles
-        // from the last four bytes and their top bits from those spares.
+        // The first four runs get a byte each for scale and minimum, with two
+        // bits spare. The last four take their low bits from the last four
+        // bytes and their top bits from those spares.
         let p = &bytes[SCALES..QS];
         let mut set = |run: usize, s: u8, m: u8| {
             self.scales[run] = i16::from(s);
@@ -46,8 +46,8 @@ pub(super) struct Unpacked {
     pub(super) q: Quants,
 }
 
-/// The dot without vectors: each run's scaled dot less its minimum times
-/// its Q8 sums, times the run's activation scale, into the first lane.
+/// The scalar dot. Per run: the scaled dot minus the minimum times the run's
+/// Q8 sums, times the activation scale, added into the first lane.
 pub(super) fn dot_plain(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
     let h = &u.header;
     for run in 0..RUNS {

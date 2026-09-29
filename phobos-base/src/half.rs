@@ -18,13 +18,12 @@ pub fn f16_to_f32(bits: u16) -> f32 {
     f32::from_bits(widened)
 }
 
-/// Narrow to an IEEE binary16 bit pattern, rounding to nearest with ties to
-/// even (matching the hardware's `cvt.rn.f16.f32`); a magnitude past the
-/// format's range becomes an infinity, one below its subnormals a zero of
-/// the same sign.
+/// Narrow to an IEEE binary16 bit pattern, rounding to nearest, ties to even.
+/// Too large a magnitude becomes an infinity. Too small becomes a zero of the
+/// same sign.
 ///
-/// Matches the device kernel's rounding, since the key and value caches use
-/// this format and the host reference must stay comparable.
+/// This must match the device's `cvt.rn.f16.f32`, because the key and value
+/// caches use this format and the host reference has to stay comparable.
 #[inline]
 pub fn f32_to_f16(value: f32) -> u16 {
     let bits = value.to_bits();

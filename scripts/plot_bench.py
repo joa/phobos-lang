@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """Plot what phobos-kbench measured: GFLOP/s against the card's roofline peak.
 
-Reads the CSV that `cargo run -r -p phobos-kbench -- --csv PATH` writes
-(columns: benchmark, impl, precision, gflops, peak_gflops, pct_of_peak) and
-draws one horizontal bar per (benchmark, impl), grouped by benchmark, labelled
-with achieved GFLOP/s and percent of peak. Kernels only phobos has a shim for
-(no cuBLAS entry, e.g. flash attention) draw a single bar rather than a pair.
+Reads the CSV that `cargo run -r -p phobos-kbench -- --csv PATH` writes, with
+columns benchmark, impl, precision, gflops, peak_gflops and pct_of_peak.
 
-Unlike scripts/plot.py this has nothing to average: phobos-kbench times its own
-best autotuned configuration once per kernel, not several interleaved rounds,
-so there is no round, no repetition and no error bar here.
+Draws one horizontal bar per (benchmark, impl), grouped by benchmark and
+labelled with GFLOP/s and percent of peak. A kernel with no cuBLAS entry, such
+as flash attention, gets a single bar.
+
+phobos-kbench measures each kernel once, so unlike scripts/plot.py there are
+no error bars.
 
 Usage:
     cargo run -r -p phobos-kbench -- --csv results/results.csv
@@ -53,10 +53,8 @@ THEMES = {
     },
 }
 
-# Fixed per implementation regardless of theme, carried over from the plotter
-# this replaces (phobos-bench/plot.py, deleted in 523d4df): cuBLAS gets
-# NVIDIA's own brand green rather than a palette color, since it is a vendor
-# library and not one of phobos's own series.
+# Colors fixed per implementation in every theme. cuBLAS is a vendor library,
+# so it gets NVIDIA's brand green instead of a palette color.
 IMPL_COLORS = {"cuBLAS": "#76b900"}
 
 
@@ -117,8 +115,8 @@ def main():
     rows = load(args.results)
     theme = THEMES["dark" if args.dark else "light"]
     impls = sorted({r["impl"] for r in rows}, key=lambda i: i != "phobos")
-    # IMPL_COLORS first (cuBLAS's fixed green), theme series for the rest, in
-    # order, so phobos gets the first series color whichever theme is active.
+    # Fixed colors first, then the theme's series in order, so phobos always
+    # gets the first series color.
     series = iter(theme["series"])
     colors = {i: IMPL_COLORS.get(i) or next(series) for i in impls}
 

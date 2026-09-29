@@ -10,26 +10,26 @@ use super::{
     QBuf, Rope, quantize_row,
 };
 
-/// The reference backend: every buffer is a `Vec<f32>` on the host. Defines the
-/// semantics the GPU backend must reproduce, and keeps the model runnable with
-/// no GPU or MLIR toolchain present.
+/// The reference backend, where every buffer is a `Vec<f32>` on the host.
+///
+/// It defines the semantics the GPU backend must reproduce, and runs the
+/// model with no GPU or MLIR toolchain.
 #[derive(Default)]
 pub struct HostBackend {
     slabs: RefCell<Vec<Vec<f32>>>,
-    /// Freed handles, reused so a long decode does not grow the slab forever.
+    /// Freed handles, reused by the next allocation.
     free: RefCell<Vec<usize>>,
-    /// The f16 slabs, in their own table because [`HBuf`] indexes separately.
-    /// The caches are the only thing here; see [`HBuf`].
+    /// The f16 slabs, indexed by [`HBuf`]. Only the caches live here.
     halves: RefCell<Vec<Vec<u16>>>,
     free_halves: RefCell<Vec<usize>>,
     constants: RefCell<std::collections::HashMap<String, Buf>>,
-    /// Weights kept quantized, in the planes their kernels index.
+    /// Quantized weights as `(quants, scales, n)` planes.
     quants: RefCell<Vec<HostQuant>>,
     /// Quantized activations, reused slot by slot across passes.
     qacts: RefCell<Vec<(Vec<i8>, Vec<f32>)>>,
     qact_next: std::cell::Cell<usize>,
     q_constants: RefCell<std::collections::HashMap<String, QBuf>>,
-    /// Expert sets, kept as the file holds them; see `host/moe.rs`.
+    /// Expert sets in their file encoding. See `host/moe.rs`.
     experts: RefCell<Vec<std::sync::Arc<crate::experts::ExpertSet>>>,
     expert_keys: RefCell<std::collections::HashMap<String, super::ExpertsBuf>>,
 }
@@ -39,10 +39,10 @@ impl HostBackend {
         HostBackend::default()
     }
 
-    /// Move a destination out of the slab so it can be written while other
-    /// buffers stay borrowed, then put it back. Moving, not copying: the LM
-    /// head destination alone is a quarter of a billion floats. Must not
-    /// alias a source.
+    /// Moves `dst` out of the slab table so it can be written while the other
+    /// buffers stay borrowed, then puts it back.
+    ///
+    /// `dst` must not also be a source: inside `f` its slot is empty.
     fn writing<R>(&self, dst: Buf, f: impl FnOnce(&[Vec<f32>], &mut Vec<f32>) -> R) -> R {
         let mut taken = std::mem::take(&mut self.slabs.borrow_mut()[dst.0]);
         let result = {
@@ -269,9 +269,8 @@ impl Backend for HostBackend {
         self.writing(out, |_, dst| {
             ensure!(dst.len() >= m * n, "matmul_quant destination is too small");
             dst[..m * n].fill(0.0);
-            // The weight walks k contiguously for one output, so the
-            // contraction is the inner loop and the scale hoists out of each
-            // 32-element block.
+            // The weight is contiguous along k, so k is the inner loop and
+            // the scales apply once per block.
             for i in 0..m {
                 let row = &qa[i * k..(i + 1) * k];
                 let row_scales = &da[i * blocks..(i + 1) * blocks];
@@ -283,8 +282,6 @@ impl Backend for HostBackend {
                         .zip(weights.chunks_exact(Q8_BLOCK))
                         .enumerate()
                     {
-                        // The integer dot the hardware does one instruction per
-                        // four lanes; both scales are constant across it.
                         let partial: i32 = a_block
                             .iter()
                             .zip(w_block)
@@ -325,8 +322,8 @@ impl Backend for HostBackend {
             );
             ensure!(dst.len() >= m * n, "matmul destination is too small");
             dst[..m * n].fill(0.0);
-            // Ordered so the inner pass walks the weight and the destination
-            // contiguously, which lets it vectorize.
+            // The inner loop walks the weight and destination contiguously,
+            // so it vectorizes.
             for i in 0..m {
                 let row = &mut dst[i * n..(i + 1) * n];
                 for p in 0..k {
@@ -527,14 +524,12 @@ impl Backend for HostBackend {
                 "delta_conv operands or destination are too small"
             );
             for (plane, &base) in mix.planes.iter().enumerate() {
-                // Only the query carries the readout scale; the value is
-                // never normalized, since it's written into the state rather
-                // than matched against it.
+                // Only the query gets the readout scale. Only query and key
+                // are normalized; the value is not.
                 let scale = if plane == 0 { mix.query_scale } else { 1.0 };
                 let normalize = mix.normalize && plane < 2;
-                // Query/key exist at only kv_heads physical columns; a packed
-                // head beyond that reads back via h % kv_heads, matching
-                // upstream's ggml_repeat_4d.
+                // Query and key have only `kv_heads` heads. Packed head `h`
+                // reads head `h % kv_heads`, like upstream's ggml_repeat_4d.
                 let src_heads = if plane == 2 { heads } else { mix.kv_heads };
                 for t in 0..mix.gates() {
                     let (position, head) = (t / heads, t % heads);
@@ -607,8 +602,8 @@ impl Backend for HostBackend {
     ) -> Result<()> {
         let plane = head_dim * head_dim;
         let (span, gates) = (rows * heads * head_dim, rows * heads);
-        // The state is read and written by the same call, so it comes out of
-        // the slab alongside the destination rather than being borrowed.
+        // The state is updated in place, so it is moved out like the
+        // destination.
         let mut carried = std::mem::take(&mut self.slabs.borrow_mut()[state.0]);
         let result = self.writing(out, |slabs, dst| {
             let all = &slabs[packed.0];

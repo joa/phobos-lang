@@ -23,18 +23,17 @@ pub enum StorageRef {
 
 #[derive(Clone, Debug)]
 pub enum Op {
-    /// Reserve a local buffer and register tile in the node-local table.
+    /// Reserve a local buffer and register the tile in the node-local table.
     Alloc {
         tile: TileId,
         shape: Vec<u64>,
         data_type: DataType,
     },
-    /// Read a supertile from durable storage into the ALLOCd buffer.
+    /// Read a supertile from durable storage into its allocated buffer.
     Load { tile: TileId, src: StorageRef },
-    /// Pull a tile from another node (the from field) into the ALLOCd buffer.
-    /// Waits server-side until the tile is resident there.
+    /// Pull a tile from node `from` into its allocated buffer.
+    /// The server waits until the tile is resident there.
     Fetch { tile: TileId, from: NodeId },
-    /// Launch kernel.
     Compute {
         kernel: KernelId,
         args: Vec<(TileId, AccessMode)>,
@@ -45,7 +44,7 @@ pub enum Op {
     /// Write a supertile to durable storage.
     Store { tile: TileId, dst: StorageRef },
     /// Release the buffer once local dependencies are met and the tile server
-    /// has served the tile expected_serves times (0 = no remote readers).
+    /// has served the tile `expected_serves` times. Zero means no remote readers.
     Free { tile: TileId, expected_serves: u32 },
 }
 

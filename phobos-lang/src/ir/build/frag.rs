@@ -27,9 +27,9 @@ fn is_f16_or_f32(s: Scalar) -> bool {
 impl Build {
     /// Matches `var acc: tile<f32>[m, n] = <float>` whose every later use is
     /// a fragment-representable form.
-    /// A fragment accumulator, if the statements declare one: each admitted
-    /// form becomes one op yielding a new fragment value, which the loop
-    /// carries as an iter arg.
+    ///
+    /// Each admitted form becomes one op yielding a new fragment value, which
+    /// the loop carries as an iter arg.
     pub(crate) fn frag_acc_candidate(&self, stmts: &[Stmt]) -> Option<FragAccPlan> {
         let [
             Stmt::Var {

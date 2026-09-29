@@ -1,11 +1,11 @@
 // The target seam: everything the emitter cannot say in a portable dialect.
-// `Isa` is the vocabulary, `nvidia.rs` its one implementation, and the
-// forwarding methods below are what the rest of codegen/ calls; a second
-// target is a second file here rather than a match arm in thirty emission
-// sites.
+//
+// `Isa` is the vocabulary and `nvidia.rs` its one implementation. The
+// forwarding methods below are what the rest of codegen/ calls. A second
+// target is a second file here.
 //
 // Nothing above this module names an instruction, and nothing below it names
-// a codegen type: `Isa` speaks only in MLIR values and plain integers.
+// a codegen type. `Isa` speaks only in MLIR values and plain integers.
 
 use phobos_base::context::GpuConfig;
 
@@ -13,23 +13,22 @@ use super::*;
 
 mod nvidia;
 
-/// One GPU target's instruction vocabulary. The capability half is chip data
-/// answering what may be emitted; the rest emits it. `mma_sync_k` returning
-/// None means a chip without the instruction, not an error, and the emitter
-/// picks another path.
+/// One GPU target's instruction vocabulary.
+///
+/// The capability methods say what may be emitted, and the rest emit it. A
+/// capability that is absent is not an error; the emitter picks another path.
 pub(super) trait Isa {
     // ---- what the chip can do ----
 
     /// Whether the chip has an asynchronous global-to-shared copy.
     fn has_cp_async(&self) -> bool;
 
-    /// Whether the chip has tensor cores at all, ignoring what the kernel asked
-    /// for; [`Codegen::has_wmma`] is the question with `@tensorcore` folded in.
+    /// Whether the chip has tensor cores, ignoring what the kernel asked for.
+    /// [`Codegen::has_wmma`] also checks `@tensorcore`.
     fn has_wmma(&self) -> bool;
 
-    /// Whether the per-lane tensor path is usable. Not the same question as
-    /// [`Isa::mma_sync_k`]: the chip can have the instruction and the target
-    /// still decline it, which is what the 32-bit index width does here.
+    /// Whether the per-lane tensor path is usable. This can be false even when
+    /// [`Isa::mma_sync_k`] is Some, for example under 32-bit indices.
     fn has_mma_sync(&self) -> bool;
 
     /// The k of the native f16 mma.sync, or None on a chip without one.
@@ -41,9 +40,9 @@ pub(super) trait Isa {
     /// Whether the chip has integer tensor cores.
     fn has_int8_mma(&self) -> bool;
 
-    /// Bytes of shared memory one SM hands out across its resident CTAs, and
-    /// the two other occupancy limits beside it. The staging-pad decision in
-    /// [`Codegen::wmma_should_pad`] is the only caller.
+    /// Shared memory bytes one SM splits across its resident CTAs, plus the
+    /// two other occupancy limits below. Only [`Codegen::wmma_should_pad`]
+    /// reads them.
     fn smem_per_sm(&self) -> i64;
     fn regs_per_sm(&self) -> i64;
     fn max_warps_per_sm(&self) -> i64;
@@ -52,11 +51,11 @@ pub(super) trait Isa {
 
     fn global_space<'c>(&self, cg: &Codegen<'c>) -> Attribute<'c>;
 
-    /// The shared address space. A dynamic allocation names it symbolically and
-    /// a view of one has to agree; a static global uses the integer form.
+    /// The shared address space. A dynamic allocation and its views use the
+    /// symbolic form, and a static global uses the integer form.
     fn shared_space<'c>(&self, cg: &Codegen<'c>, dynamic: bool) -> Result<Attribute<'c>>;
 
-    /// The same spaces as they are spelled inside a memref type's text.
+    /// The same spaces as spelled inside a memref type's text.
     fn mem_space_text(&self, shared: bool, dynamic: bool) -> String;
 
     /// The CTA's one dynamic shared allocation, as a byte buffer the tile views
@@ -74,8 +73,8 @@ pub(super) trait Isa {
     fn block_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
     fn grid_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
 
-    /// The CTA's index in the grid, the one place a dimension other than x
-    /// comes up: it is what `program_id` resolves to.
+    /// The CTA's index in the grid along `dim`, which is what `program_id`
+    /// resolves to.
     fn block_id<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -88,8 +87,8 @@ pub(super) trait Isa {
     /// Closes a kernel body.
     fn kernel_return<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()>;
 
-    /// What `@launch` becomes on the emitted function: the occupancy bounds the
-    /// assembler reads out of the module.
+    /// The function attributes `@launch` becomes, the occupancy bounds the
+    /// assembler reads.
     fn launch_attrs<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -119,9 +118,8 @@ pub(super) trait Isa {
 
     // ---- which math is approximate ----
     //
-    // All five are f32 in and f32 out, and all five are allowed to be less
-    // accurate than the IEEE operation of the same name: the emitter widens f16
-    // through them and narrows on the way out.
+    // All five take and return f32. The approx ones may be less accurate than
+    // the IEEE operation. The emitter widens f16 to f32 around them.
 
     fn approx_exp<'c>(
         &self,
@@ -151,9 +149,8 @@ pub(super) trait Isa {
         x: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>>;
 
-    /// The nearest integer to an f32, ties to even, as an f32. This one is not
-    /// approximate and must not be: rounding a quantized value is where the
-    /// last mantissa bit decides a byte.
+    /// The nearest integer to an f32, ties to even, as an f32. This must be
+    /// exact, because quantization rounds with it.
     fn round_even<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -163,9 +160,9 @@ pub(super) trait Isa {
 
     // ---- how bytes arrive ----
 
-    /// One asynchronous transfer of `width` elements, src[src_idx] into
-    /// dst[dst_idx]. Any token it produces is the target's to drop; the
-    /// enclosing stage commits with [`Isa::async_create_group`] and waits on it.
+    /// One asynchronous copy of `width` elements from src[src_idx] into
+    /// dst[dst_idx]. The target drops any token it produces. The caller
+    /// commits with [`Isa::async_create_group`] and waits on that.
     #[allow(clippy::too_many_arguments)]
     fn async_copy<'c>(
         &self,
@@ -194,8 +191,8 @@ pub(super) trait Isa {
 
     // ---- the opaque-fragment tensor path ----
     //
-    // Fragments whose per-lane layout the target keeps to itself: the emitter
-    // loads one, folds it and stores it without ever indexing inside it.
+    // Fragments with a per-lane layout only the target knows. The emitter
+    // loads, computes on and stores them, but never indexes inside one.
 
     fn wmma_a_type<'c>(&self, cg: &Codegen<'c>) -> Result<Type<'c>>;
     fn wmma_b_type<'c>(&self, cg: &Codegen<'c>) -> Result<Type<'c>>;
@@ -209,10 +206,11 @@ pub(super) trait Isa {
         c_frag_t: Type<'c>,
     ) -> Result<Value<'c, 'c>>;
 
-    /// mem[indices] as a fragment. `lead` is the buffer's physical row stride,
-    /// which exceeds the logical inner extent when the tile is bank-conflict
-    /// padded. `transpose` reads a logically transposed tile out of a row-major
-    /// buffer without a separate staging pass.
+    /// Loads mem[indices] as a fragment.
+    ///
+    /// `lead` is the physical row stride, larger than the logical width when
+    /// the tile is padded. `transpose` reads a transposed tile straight from a
+    /// row-major buffer.
     #[allow(clippy::too_many_arguments)]
     fn wmma_load<'c>(
         &self,
@@ -249,9 +247,9 @@ pub(super) trait Isa {
 
     // ---- the per-lane tensor path ----
     //
-    // The same arithmetic with the fragment layout exposed: operands are
-    // ordinary vectors a lane owns, so the emitter picks the shape and has to
-    // place the lanes itself.
+    // The same arithmetic with the fragment layout exposed. Operands are
+    // ordinary per-lane vectors, so the emitter picks the shape and places
+    // the lanes itself.
 
     /// acc + a * b over one [`Isa::mma_shape`].
     #[allow(clippy::too_many_arguments)]
@@ -275,8 +273,8 @@ pub(super) trait Isa {
     ) -> Result<Attribute<'c>>;
 
     /// A warp-collective load of `num_tiles` 8x8 f16 fragments into per-lane
-    /// registers, in the [`Isa::mma_sync`] operand layout. The caller has
-    /// already folded each lane's address offset into `indices`.
+    /// registers, in the [`Isa::mma_sync`] operand layout. `indices` already
+    /// includes each lane's address offset.
     #[allow(clippy::too_many_arguments)]
     fn ldmatrix<'c>(
         &self,
@@ -303,10 +301,9 @@ pub(super) trait Isa {
 
     // ---- byte permutation ----
 
-    /// The four bytes of `lo` and `hi` picked by the four low nibbles of
-    /// `sel`, byte `n` of the result being byte `sel[4n..4n+3]` of the pair
-    /// (`lo` is bytes 0 to 3, `hi` 4 to 7). One instruction wherever a
-    /// four-entry byte table has to be applied to four selectors at once.
+    /// Picks four bytes out of the pair `lo`, `hi` using the four low nibbles
+    /// of `sel`. Byte `n` of the result is byte `sel[4n..4n+3]` of the pair,
+    /// where `lo` holds bytes 0 to 3 and `hi` bytes 4 to 7.
     fn byte_permute<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -317,8 +314,8 @@ pub(super) trait Isa {
     ) -> Result<Value<'c, 'c>>;
 }
 
-/// The target a config selects. The one arm is not an oversight: a second
-/// vendor is a second arm here and a second file beside `nvidia.rs`.
+/// The target a config selects. A second vendor adds an arm here and a file
+/// beside `nvidia.rs`.
 pub(super) fn isa_for(base: &phobos_base::context::Context) -> Box<dyn Isa> {
     match &base.gpu_config {
         GpuConfig::Nvidia(_) => Box::new(nvidia::Nvidia::new(
@@ -328,10 +325,9 @@ pub(super) fn isa_for(base: &phobos_base::context::Context) -> Box<dyn Isa> {
     }
 }
 
-/// What the rest of codegen/ calls: each is the emitter's name for one piece
-/// of the vocabulary. The few that are not a bare forward are where a codegen
-/// type meets the seam: a tile's stride and element width are the emitter's
-/// to know, so they are read here and passed down as plain numbers.
+/// What the rest of codegen/ calls, one method per piece of the vocabulary.
+/// Most just forward. The rest read codegen facts, such as a tile's stride or
+/// element width, and pass them down as plain numbers.
 impl<'c> Codegen<'c> {
     // ---- what the chip can do, with what the kernel asked for folded in ----
 
@@ -355,9 +351,8 @@ impl<'c> Codegen<'c> {
         self.isa.has_int8_mma()
     }
 
-    /// The k of the native f16 mma.sync. The caller has already asked
-    /// [`Self::has_mma_sync`], so a chip without one is a bug rather than a
-    /// fallback.
+    /// The k of the native f16 mma.sync. Call only after
+    /// [`Self::has_mma_sync`]; a chip without one is an error here.
     pub(super) fn mma_sync_k(&self) -> Result<i64> {
         self.isa
             .mma_sync_k()
@@ -408,9 +403,8 @@ impl<'c> Codegen<'c> {
         self.isa.block_id(self, block, dim)
     }
 
-    /// A CTA barrier. Records itself when recording; when replaying an op
-    /// whose trailing barrier the membar pass elided, the call that would
-    /// have been that barrier emits nothing.
+    /// A CTA barrier. A recording emission logs it. A replaying emission
+    /// skips the one barrier call the membar pass elided for this op.
     pub(in crate::codegen) fn barrier(&mut self, block: &Block<'c>) -> Result<()> {
         if matches!(self.policy, SharedPolicy::Record) {
             self.trace.barrier();
@@ -500,8 +494,7 @@ impl<'c> Codegen<'c> {
         dst_idx: &[Value<'c, 'c>],
         width: i64,
     ) -> Result<()> {
-        // Whether the copy can skip L1 is the target's rule but it is keyed on
-        // bytes, and only the emitter knows what a tile's element weighs.
+        // The target decides whether the copy skips L1 by its size in bytes.
         let elem_bytes = if dst.elem == self.f16_t { 2 } else { 4 };
         self.isa.async_copy(
             self, block, src.mem, src_idx, dst.mem, dst_idx, width, elem_bytes,
@@ -644,8 +637,8 @@ impl<'c> Codegen<'c> {
     }
 }
 
-/// The chip facts the AST-to-IR build asks, read off the same [`Isa`] the
-/// emitter uses so the two never disagree about a target.
+/// The chip facts the AST-to-IR build needs, read from the same [`Isa`] the
+/// emitter uses so the two always agree.
 pub fn build_target(base: &phobos_base::context::Context) -> crate::ir::build::Target {
     let isa = isa_for(base);
     crate::ir::build::Target {

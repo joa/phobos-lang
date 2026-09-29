@@ -1,14 +1,10 @@
-// The moon, on the way in.
+// The moon splash shown at startup.
 //
-// The same image the README carries, kept beside this module as a text file
-// so it stays a picture rather than becoming a string literal nobody can
-// read. It is drawn in the density characters ASCII art has always used,
-// `.:-=+*#%@` from faintest to solidest, which is already a brightness ramp:
-// colouring each character by where it sits on that ramp is the whole effect.
+// The image is the README's, kept as a text file beside this module. It uses
+// the ASCII density ramp `.:-=+*#%@`, faintest to solidest, and each character
+// is coloured by its place on that ramp.
 //
-// Shown once on the way in and then given up, because a cold start has
-// minutes of compiling to report and a picture is not what a watcher needs
-// for those. `p` puts it back for anyone who wants another look.
+// Shown once at startup. `p` replays it.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -22,9 +18,7 @@ use super::view::View;
 /// The image, as the README prints it.
 const MOON: &str = include_str!("phobos.txt");
 
-/// Frames the splash lasts, at the dashboard's frame rate: about two and a
-/// half seconds, which is long enough to read and short enough not to be in
-/// the way of a load.
+/// Frames the splash lasts, about two and a half seconds.
 pub(super) const FRAMES: u64 = 75;
 
 /// Frames the reveal takes, the rest being the image held lit.
@@ -33,20 +27,18 @@ const REVEAL: u64 = 45;
 /// How far ahead of the revealed edge the bright band reaches.
 const BAND: f32 = 2.5;
 
-/// The characters ASCII art shades with, faintest first. Anything outside
-/// this, which is the lettering and the signature worked into the image, is
-/// drawn at full brightness.
+/// The shading characters, faintest first. Anything else, such as lettering
+/// in the image, is drawn at full brightness.
 const RAMP: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
-/// Where `ch` sits on the ramp, 0.0 to 1.0, or nothing for a space.
+/// Where `ch` sits on the ramp, 0.0 to 1.0, or `None` for a space.
 fn weight(ch: char) -> Option<f32> {
     if ch == ' ' {
         return None;
     }
     match RAMP.iter().position(|&c| c == ch) {
         Some(at) => Some((at + 1) as f32 / RAMP.len() as f32),
-        // Lettering: the wordmark along the bottom, and the initials someone
-        // left in the surface.
+        // Lettering in the image.
         None => Some(1.0),
     }
 }
@@ -58,8 +50,7 @@ pub(super) fn size() -> (u16, u16) {
     (cols, rows)
 }
 
-/// Whether there is room to draw it at all. A terminal too short for the
-/// whole moon gets no splash rather than a cropped one.
+/// Whether the whole image fits. It is never drawn cropped.
 pub(super) fn fits(area: Rect) -> bool {
     let (cols, rows) = size();
     area.width >= cols && area.height >= rows
@@ -90,8 +81,7 @@ pub(super) fn draw(frame: &mut Frame, view: &View, area: Rect) {
                 spans.push(Span::raw(" "));
                 continue;
             };
-            // Lit by the ramp, and brighter still just behind the edge, so
-            // the reveal reads as a band passing over the surface.
+            // Lit by the ramp, and brighter in a band just behind the edge.
             let heat = ((BAND - behind) / BAND).clamp(0.0, 1.0);
             let lit = theme::mix(theme::GREEN_FAINT, theme::GREEN, weight);
             spans.push(Span::styled(
@@ -147,8 +137,8 @@ mod tests {
         assert_eq!(weight('P'), Some(1.0));
     }
 
-    /// The image lives in two places, here and in the README, and neither is
-    /// generated from the other. This is what keeps them the same picture.
+    /// The image lives both here and in the README, and neither is generated
+    /// from the other. This keeps them in sync.
     #[test]
     fn the_readme_carries_the_same_moon() {
         const README: &str = include_str!("../../../README.md");

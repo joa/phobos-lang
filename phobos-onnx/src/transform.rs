@@ -9,11 +9,10 @@ pub const FLASH_ATTENTION: &str = "PhobosFlashAttention";
 /// Emitted when the decomposed LayerNorm chain is recognized.
 pub const LAYER_NORM: &str = "LayerNormalization";
 
-/// Rewrite groups of nodes into single fused nodes the runner lowers to one
-/// kernel each, cutting launches and intermediate buffers. The matches are
-/// structural, on op types, single-use edges and initializer ranks, so this
-/// runs on the raw graph before shape inference. Patterns already fused are
-/// left alone.
+/// Rewrite groups of nodes into single fused nodes, each lowered to one
+/// kernel. The matches are structural (op types, single-use edges and
+/// initializer ranks), so this runs on the raw graph before shape inference.
+/// Patterns already fused are left alone.
 pub fn fuse(graph: &Graph) -> Graph {
     let mut g = graph.clone();
     g.nodes = fuse_linear(&g);
@@ -276,8 +275,8 @@ fn consumer_with_op(edge: &str, nodes: &[Node], op: &str) -> Option<usize> {
 ///   K^T = Transpose(K); scores = MatMul(Q, K^T); [scaled = Mul/Div(scores, c);]
 ///   probs = Softmax(scaled); out = MatMul(probs, V)
 ///
-/// becomes one flash-attention node. Fires only when the softmax input is
-/// unmasked, no intervening Add, so the plain flash kernel is exact.
+/// becomes one flash-attention node. Fires only when no mask Add sits before
+/// the softmax, so the plain flash kernel is exact.
 fn try_attention(si: usize, graph: &Graph, counts: &HashMap<String, usize>) -> Option<Fusion> {
     let nodes = &graph.nodes;
     let softmax = &nodes[si];
@@ -334,8 +333,8 @@ struct Scale {
 }
 
 /// The pre-scale edge and factor when `edge` comes from `Mul(x, c)` or
-/// `Div(x, c)` with `c` a scalar constant. Otherwise the edge is its own
-/// producer at unit scale.
+/// `Div(x, c)` with `c` a scalar constant. Otherwise `edge` itself, at unit
+/// scale.
 fn unwrap_scale(graph: &Graph, edge: &str) -> Option<(String, Scale)> {
     let nodes = &graph.nodes;
     let Some(pi) = producer(nodes, edge) else {

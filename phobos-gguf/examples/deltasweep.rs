@@ -2,10 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example deltasweep
 //
-// Each `VARIANTS` entry drops one piece of the step and keeps the rest, so
-// the difference between two rows is what that piece costs. They keep the
-// same loop-carried dependency to keep the measurement honest, but only
-// `full` computes the actual delta rule.
+// Each `VARIANTS` entry removes a piece of the step, so the difference
+// between two rows is what that piece costs. All keep the same loop-carried
+// dependency, but only `full` computes the real delta rule.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -26,7 +25,7 @@ const TN: usize = 16;
 /// Delta-net blocks a pass runs.
 const BLOCKS_PER_PASS: usize = 18;
 
-/// The step as it ships, and the same with one piece taken out at a time.
+/// The full step, then variants with pieces taken out.
 ///
 /// `body` replaces the loop body; every variant reads the same operands and
 /// carries `st` across positions.

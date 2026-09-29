@@ -1,10 +1,10 @@
-// The expert cache giving memory back as the rest of a session grows.
+// Shrinks the expert cache as the rest of a session grows.
 //
-// The cache is sized from free memory when it is laid out, and the
-// attention caches, a longer prompt's scratch and the desktop all grow
-// after. On this driver an allocation past the card's memory succeeds by
-// evicting others to the host, and a decode step that then reads one costs
-// several times what the slots it would have taken save.
+// The cache is sized from free memory when it is laid out. The attention
+// caches, a longer prompt's scratch and the desktop all grow later. On this
+// driver an over-subscribed allocation still succeeds by paging other
+// buffers to the host, and reading a paged buffer costs far more than the
+// cache slots save.
 
 use anyhow::Result;
 
@@ -12,18 +12,16 @@ use super::super::DeviceBackend;
 use super::super::kernels::MOE_USED;
 use super::{Experts, NONE, Slab};
 
-/// Device memory the cache leaves free for what grows after it is laid
-/// out. Below half of it at a pass boundary the cache is laid out again
-/// smaller, to leave all of it.
+/// Device memory the cache leaves free for later growth. When free memory
+/// drops below half of this, the cache shrinks to restore all of it.
 const HEADROOM_BYTES: usize = 512 << 20;
 
-/// Decode passes between two looks at free memory.
+/// Decode passes between free memory checks.
 const HEADROOM_EVERY: usize = 16;
 
 impl Experts {
-    /// The slabs dropped, for the next `moe` to lay out again with at most
-    /// `per_block` slots a block, and everything that pointed into them
-    /// forgotten.
+    /// Drops the slabs and everything that points into them. The next `moe`
+    /// lays them out again with at most `per_block` slots per block.
     fn drop_slabs(&mut self, per_block: usize) {
         self.slabs = None;
         self.grouped = None;
@@ -37,13 +35,12 @@ impl Experts {
 }
 
 impl DeviceBackend {
-    /// The cache laid out again smaller when the card has come within half
-    /// of [`HEADROOM_BYTES`] of full, for the next `moe` to fill. Called
-    /// between passes. It only ever shrinks, so a session settles at the
-    /// size its longest context needed. Asking the driver costs most of a
-    /// hundred microseconds, so a decode step, which grows the caches a
-    /// position at a time, asks every [`HEADROOM_EVERY`] passes, and a
-    /// prompt pass always.
+    /// Shrinks the cache when free memory drops below half of
+    /// [`HEADROOM_BYTES`]. Call between passes.
+    ///
+    /// The cache only ever shrinks. Querying free memory is not free, so
+    /// decode checks every [`HEADROOM_EVERY`] passes and a prompt pass
+    /// checks every time.
     pub(in super::super) fn keep_headroom(&self, rows: usize) -> Result<()> {
         let mut experts = self.experts.borrow_mut();
         experts.since_checked += 1;
@@ -72,7 +69,7 @@ impl DeviceBackend {
             ),
         );
         // Nothing may still read or fill a slot, and the cached pass graphs
-        // point into the slabs about to go.
+        // point into the slabs, so drop them too.
         experts.join_started()?;
         self.stream.synchronize()?;
         self.copy_stream.synchronize()?;

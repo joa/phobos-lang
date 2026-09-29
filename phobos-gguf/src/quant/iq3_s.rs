@@ -2,10 +2,10 @@
 // scales[4]; }`, 3.3125 bits a weight.
 //
 // Four 64-element groups, each split into two 32-element halves with their
-// own scale nibble. A half's eight lanes read two grid-index bytes from
-// `qs`, extended to 9 bits by a bit of `qh`, into
-// [`super::tables::iq3::IQ3S_GRID`]; signs come from `signs`, tested against
-// [`super::tables::iq2::KMASK_IQ2XS`] like IQ2_S (see [`super::iq2_s`]).
+// own scale nibble. Each 8-element lane reads two index bytes from `qs`,
+// each extended to 9 bits by a bit of `qh`, into
+// [`super::tables::iq3::IQ3S_GRID`]. Signs come from `signs`, tested against
+// [`super::tables::iq2::KMASK_IQ2XS`] as in IQ2_S (see [`super::iq2_s`]).
 
 use phobos_base::half::f16_to_f32;
 
@@ -39,8 +39,8 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ3S_GRID`] flattened to one magnitude byte a slot, four bytes an
-/// entry (a lane's eight elements come from two grid entries). Signs reuse
+/// [`IQ3S_GRID`] flattened to one magnitude byte per slot, four per entry.
+/// A lane's eight elements come from two entries. Signs reuse
 /// [`super::iq2_s::flat_signs`].
 #[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {

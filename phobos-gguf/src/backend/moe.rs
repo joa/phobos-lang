@@ -2,11 +2,11 @@
 
 use super::{Buf, QAct};
 
-/// What a backend needs to run the next block's router on the residual as
-/// it stands, ahead of that block: its post-attention norm, the router's
-/// dense `[d_model, n_expert]` weight and its expert set. A backend that
-/// prefetches uses it to start the next block's misses early; one that
-/// does not ignores it.
+/// The next block's router inputs: its post-attention norm, the dense
+/// `[d_model, n_expert]` router weight and its expert set.
+///
+/// A prefetching backend runs the router early on the current residual to
+/// start loading missing experts. Other backends ignore it.
 #[derive(Clone, Copy, Debug)]
 pub struct Lookahead {
     pub gain: Buf,
@@ -20,17 +20,14 @@ pub struct Lookahead {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExpertsBuf(pub usize);
 
-/// A block's routed feed-forward: each row's top experts applied to it,
-/// their outputs summed by the router's weights, the gated shared expert
-/// added, and the whole thing added into `dest`.
+/// A block's routed feed-forward. Each row's top experts are applied and
+/// summed by the router's weights, the gated shared expert is added, and the
+/// result is added into `dest`.
 ///
-/// One operation rather than a loop over experts, because which experts a
-/// row chose exists only on the backend: nothing reads back inside a pass,
-/// so the choice can neither reach the model code nor pick a weight there.
+/// It is one operation because the expert choice exists only on the
+/// backend. Nothing reads back inside a pass, so model code cannot see it.
 ///
-/// The router follows llama.cpp's `build_moe_ffn` for this architecture:
-/// softmax over every expert's logit, the `n_used` largest probabilities
-/// selected, and those renormalized to sum to one. See [`route`].
+/// The router matches llama.cpp's `build_moe_ffn`. See [`route`].
 pub struct Moe {
     /// The block's normalized input, `[rows, d_model]`, and its quantized
     /// copy where the caller has one.
@@ -45,27 +42,24 @@ pub struct Moe {
     pub n_expert: usize,
     pub n_used: usize,
     pub experts: ExpertsBuf,
-    /// The shared expert's output, `[rows, d_model]`, and its gate's logit,
-    /// `[rows, 1]`: the output is scaled by the sigmoid of the logit and
-    /// added along with the routed experts.
+    /// The shared expert's output, `[rows, d_model]`, and its gate logit,
+    /// `[rows, 1]`. The output is scaled by the sigmoid of the logit.
     pub shared: Option<(Buf, Buf)>,
     /// The residual, `[rows, d_model]`, accumulated into.
     pub dest: Buf,
-    /// The next block's router, for a backend that prefetches; see
-    /// [`Lookahead`]. `None` for the last block or a caller without one.
+    /// The next block's router, for a prefetching backend. See
+    /// [`Lookahead`]. `None` for the last block.
     pub lookahead: Option<Lookahead>,
-    /// Where to leave each row's chosen experts, `[rows, n_used]` ids held as
-    /// f32 the way [`super::Backend::argmax`] carries an index, for a caller
-    /// tracing the router. Read back after the pass, never inside it.
+    /// Optional output of each row's chosen expert ids, `[rows, n_used]`,
+    /// stored as f32. Read it back after the pass, never inside it.
     pub routes: Option<Buf>,
 }
 
-/// The router's choice for one row: `(expert, weight)` pairs in descending
-/// weight, `n_used` of them, the weights summing to one.
+/// The router's choice for one row: `n_used` `(expert, weight)` pairs in
+/// descending weight, the weights summing to one.
 ///
-/// Softmax first over all `logits`, then the `n_used` largest probabilities,
-/// then those renormalized; the order matters, since selecting first and
-/// softmaxing after gives different weights. A tie keeps the lower index.
+/// Softmax runs over all `logits` before the top `n_used` are picked and
+/// renormalized. A tie keeps the lower index.
 pub fn route(logits: &[f32], n_used: usize) -> Vec<(usize, f32)> {
     assert!(n_used <= logits.len(), "routing to {n_used} of {} experts", logits.len());
     let max = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);

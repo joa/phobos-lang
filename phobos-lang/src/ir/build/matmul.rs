@@ -32,12 +32,13 @@ struct Matched<'a> {
 impl Build {
     /// Matches the register matmul and emits it. Returns how many statements
     /// it consumed.
-    /// The register matmul: `var acc; for kt {...}; [let prev;] C[...] =
-    /// epilogue` becomes a `gemm_init`, a loop carrying the accumulator
-    /// whose body slices the two operands and folds them in with
-    /// `gemm_dot`, and a `gemm_store`. A statement list this matches never
-    /// reaches the rest of the build. The prev_load's own slice is never
-    /// built: the store reads it back through its target.
+    ///
+    /// `var acc; for kt {...}; [let prev;] C[...] = epilogue` becomes a
+    /// `gemm_init`, a loop, and a `gemm_store`. The loop carries the
+    /// accumulator, slices the two operands, and folds them in with
+    /// `gemm_dot`. Matched statements never reach the rest of the build.
+    /// The prev_load's own slice is never built, since the store reads it
+    /// back through its target.
     pub(crate) fn matmul_candidate(&mut self, stmts: &[Stmt]) -> Result<Option<usize>> {
         let Some(m) = self.matmul_matches(stmts) else {
             return Ok(None);
@@ -107,8 +108,7 @@ impl Build {
         Ok(Some(m.consumed))
     }
 
-    /// The statements a register matmul consumes, or None. A port of
-    /// `Codegen::matmul_candidate`.
+    /// The statements a register matmul consumes, or None.
     fn matmul_matches<'a>(&self, stmts: &'a [Stmt]) -> Option<Matched<'a>> {
         let [
             Stmt::Var {

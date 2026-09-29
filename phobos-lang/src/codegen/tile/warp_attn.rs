@@ -1,21 +1,19 @@
 // A warp-partitioned online-softmax accumulation: each warp of the CTA owns
 // an independent key sub-range.
 //
-// This bypasses `distribute`: its CTA-collective ops end in a CTA-wide
-// `gpu.barrier` that every thread must reach the same number of times, and
-// these warps take different trip counts. Per-key state stays in registers
-// instead, reduced only with `gpu.shuffle`, which is scoped to the issuing
-// warp's 32 lanes; the one barrier sits after every warp's own loop.
+// This bypasses `distribute`, whose ops end in a CTA-wide barrier every
+// thread must reach equally often. These warps take different trip counts,
+// so per-key state stays in registers and is reduced only with warp-scoped
+// shuffles. The one barrier comes after every warp's loop.
 //
-// The head dimension splits across a warp's 32 lanes (`D / 32` each): a
+// The head dimension splits across a warp's 32 lanes, `D / 32` each. A
 // key's QK dot is a per-lane multiply-accumulate plus an xor-shuffle
-// butterfly, the accumulator keeps the same split so each lane's `WACC`
-// store is lane-local, and `m`/`l` are all-reduced so only lane 0 commits
+// butterfly. The accumulator keeps the same split, so each lane's `WACC`
+// store is lane-local. `m` and `l` are all-reduced, so only lane 0 stores
 // them.
 //
-// It is its own primitive rather than a warp-scoped mode of
-// `dot_t`/`rowmax`/`dot` so a thread-range-virtualized path through those
-// shared kernels never risks the other callers.
+// It is a separate primitive, not a warp-scoped mode of `dot_t`, `rowmax` or
+// `dot`, so those shared kernels stay safe for their other callers.
 
 use super::*;
 
@@ -62,9 +60,9 @@ impl<'c> Codegen<'c> {
         let warp_id = self.divui(block, tid, warp_w)?;
         let lane = self.remui(block, tid, warp_w)?;
 
-        // This warp's own slice of [lo, hi): ceil-divide the block's range
-        // into `wct` pieces and clamp both ends to hi, so a warp past the
-        // end runs zero iterations instead of needing a separate guard.
+        // This warp's slice of [lo, hi): the range ceil-divided into `wct`
+        // pieces, both ends clamped to hi. A warp past the end runs zero
+        // iterations.
         let wct_v = self.const_index(block, wct)?;
         let span = self.subi(block, hi_v, lo_v)?;
         let one = self.const_index(block, 1)?;
@@ -97,32 +95,27 @@ impl<'c> Codegen<'c> {
             inits.extend(std::iter::repeat_n(zero_f, per_row - 1));
         }
 
-        // Widest f16 vector load a lane's dpl-wide slice divides evenly into,
-        // falling back to scalar when none does. Every such load is
-        // `2 * dpl`-byte aligned, since `col` is a multiple of `D = 32 * dpl`,
-        // `lane * dpl` is a multiple of `dpl`, and the row pitch `KW` is a
-        // multiple of `D` per the kernel's own `@aligned(KW = D)`.
+        // The widest f16 vector load that evenly divides a lane's dpl-wide
+        // slice, or scalar. Each load is `2 * dpl`-byte aligned: `col` is a
+        // multiple of `D = 32 * dpl`, `lane * dpl` of `dpl`, and the row pitch
+        // `KW` of `D` per the kernel's `@aligned(KW = D)`.
         let vw = [8, 4, 2, 1].into_iter().find(|w| dpl % w == 0).unwrap_or(1);
         let k16_vec_t = Type::vector(&[vw as u64], self.f16_t);
         let f32_vec_t = Type::vector(&[vw as u64], self.f32_t);
         let vec_align = vw * 2; // f16 element size in bytes
 
         // Software-pipelined K/V load: iteration kt issues kt+1's load before
-        // consuming its own carried-in values, overlapping load latency with
-        // the QK dot, shuffle, and softmax update. Only the raw f16 vector
-        // loop-carries, not the widened f32 slice, to halve the carried
-        // registers.
+        // using its own carried-in values. Only the raw f16 vector is carried,
+        // not the widened f32 slice, to halve the carried registers.
         //
-        // A load's address clamps to `ghi - 1`, never `kt + 1` directly: a
-        // warp's range can be empty (`glo == ghi`), and even a non-empty
-        // range's last iteration has no `kt + 1` to load. The clamp is in
-        // bounds either way since `ghi <= hi <= NK`, and an empty range never
-        // runs the body that would read it.
+        // A load's row clamps to `ghi - 1`, since a warp's range can be empty
+        // and the last iteration has no `kt + 1`. The clamp stays in bounds
+        // because `ghi <= hi <= NK`.
         let ghi_m1 = self.subi(block, ghi, one)?;
         let first_row = self.minsi(block, glo, ghi_m1)?;
 
-        // Shared by the prologue load (`self`/`block`) and the in-loop
-        // prefetch (`cg`/`lblk`), hence the explicit receiver parameters.
+        // Shared by the prologue load and the in-loop prefetch, hence the
+        // explicit receiver parameters.
         let load_raw = |cg: &mut Self,
                         blk: &Block<'c>,
                         row: Value<'c, 'c>|
@@ -156,15 +149,14 @@ impl<'c> Codegen<'c> {
             let cur_k = &accs[acc_len..acc_len + chunks];
             let cur_v = &accs[acc_len + chunks..acc_len + 2 * chunks];
 
-            // Issue next iteration's load before this iteration touches the
-            // carried-in "current" values below.
+            // Issue the next iteration's load before using the carried-in
+            // values.
             let kt_plus1 = cg.addi(lblk, kt, one)?;
             let next_row = cg.minsi(lblk, kt_plus1, ghi_m1)?;
             let (next_k, next_v) = load_raw(cg, lblk, next_row)?;
 
-            // Widen this iteration's carried-in raw K/V once, here (a no-op
-            // copy in the scalar fallback, where `load_raw` already
-            // produced f32).
+            // Widen the carried-in raw K/V. In the scalar fallback,
+            // `load_raw` already produced f32.
             let mut k_vals = Vec::with_capacity(dpl as usize);
             let mut v_vals = Vec::with_capacity(dpl as usize);
             if vw > 1 {
@@ -200,8 +192,7 @@ impl<'c> Codegen<'c> {
                     let q_val = cg.push(lblk, memref::load(q_mv.mem, &[i_idx, d_idx], cg.loc))?;
                     partial = cg.elem_mac(lblk, cg.f32_t, q_val, k_val, partial)?;
                 }
-                // Warp all-reduce: every lane ends this loop holding the same
-                // full dot product, not just lane 0.
+                // Warp all-reduce, so every lane holds the full dot product.
                 let mut s = partial;
                 let mut mask = WARP / 2;
                 while mask >= 1 {

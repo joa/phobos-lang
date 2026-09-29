@@ -2,9 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example attncheck
 //
-// `backend_check` compares the whole call, which says only that the answer is
-// wrong. This checks the transpose, the scores, the softmax and the mix one at
-// a time, which says which one.
+// `backend_check` only says the whole call is wrong. This checks the
+// transpose, the scores, the softmax and the mix separately, so it says which
+// step is wrong.
 
 use std::ffi::c_void;
 
@@ -16,11 +16,10 @@ use cust::stream::{Stream, StreamFlags};
 
 use phobos_kernels::abi::{self, KernelArg};
 
-// Only four kernels of it are wanted here, so most of the backend is dead.
 use phobos_gguf::backend::device;
 
-/// One head's shape: queries, keys already cached, head dimension, and the
-/// width of a cached position.
+/// The test shape: query rows, positions already cached, head dimension, and
+/// KV heads per cached position.
 const ROWS: usize = 128;
 const START: usize = 0;
 const DIM: usize = 256;
@@ -196,9 +195,8 @@ fn main() -> Result<()> {
     for i in 0..ROWS {
         let last = START + i;
         let row = &want[i * nk..(i + 1) * nk];
-        // The kernel's maximum takes in the masked entries of its own diagonal
-        // tile, which only shifts the exponentials down, so the reference takes
-        // the same range: everything up to the end of that tile.
+        // The kernel's row maximum includes the masked entries of its diagonal
+        // tile. The reference takes the same range, up to the end of that tile.
         let seen = (i / device::ATTN_SOFT_TILE + 1) * device::ATTN_SOFT_TILE + START;
         let m = row[..seen.min(nk)].iter().copied().fold(f32::MIN, f32::max);
         for j in 0..=last {

@@ -1,8 +1,8 @@
 // IQ1_M: `{ uint8 qs[32]; uint8 qh[16]; uint8 scales[8]; }`, 1.75 bits a weight.
 //
 // Same grid lookup as IQ1_S (see [`super::iq1_s`]), but with no `f16` scale
-// of its own: `d` is packed across the top nibble of each `scales` halfword,
-// and each group of 32 gets its own 3-bit scale instead of sharing one.
+// field. `d` is spread over the top nibbles of the `scales` halfwords, and
+// each group of 32 gets its own 3-bit scales instead of sharing one.
 
 use phobos_base::half::f16_to_f32;
 

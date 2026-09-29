@@ -1,8 +1,8 @@
 // IQ2_XXS: `{ f16 d; uint16 qs[32]; }`, 2.0625 bits a weight.
 //
-// Each 32-element group's 8-byte span of `qs` packs 4 grid indices plus a
-// 32-bit aux word: its top 4 bits are the group's scale, the rest packs four
-// 7-bit sign parities (one per lane) indexing
+// Each 32-element group owns 8 bytes of `qs`: four grid index bytes, then a
+// 32-bit aux word. The aux word's top 4 bits are the group's scale. Below
+// them sit four 7-bit sign parities, one per lane, indexing
 // [`super::tables::iq2::KSIGNS_IQ2XS`].
 
 use phobos_base::half::f16_to_f32;
@@ -33,8 +33,8 @@ fn raw_scales(bytes: &[u8], _k: usize, _n: usize) -> RawScales {
     RawScales { d, dmin: Vec::new() }
 }
 
-/// [`IQ2XXS_GRID`] flattened to one magnitude byte a slot: `flat_grid()[i *
-/// 8 + j]` is byte `j` of `IQ2XXS_GRID[i]`.
+/// [`IQ2XXS_GRID`] flattened to one magnitude byte per slot:
+/// `flat_grid()[i * 8 + j]` is byte `j` of `IQ2XXS_GRID[i]`.
 #[cfg(feature = "cuda")]
 pub(crate) fn flat_grid() -> Vec<i32> {
     IQ2XXS_GRID
@@ -54,10 +54,9 @@ pub(crate) fn flat_signs() -> Vec<i32> {
         .collect()
 }
 
-/// [`flat_grid`]'s values as raw bytes, the layout `iq2xxs_qdot_t` reads: a
-/// lane's eight magnitudes are eight contiguous bytes, so it takes one 64-bit
-/// load instead of eight 32-bit ones. Magnitudes top out at 43, so `i8` holds
-/// them exactly.
+/// [`flat_grid`]'s values as raw bytes, the layout `iq2xxs_qdot_t` reads.
+/// A lane's eight magnitudes are contiguous, so one 64-bit load fetches
+/// them. Magnitudes are at most 43, so `i8` holds them exactly.
 #[cfg(feature = "cuda")]
 pub(crate) fn packed_grid() -> Vec<i8> {
     IQ2XXS_GRID
@@ -67,8 +66,8 @@ pub(crate) fn packed_grid() -> Vec<i8> {
 }
 
 /// [`packed_signs`] as a bitwise mask: `0` where the sign is positive, `-1`
-/// where it is negative. The dp4a decode applies signs with `and`, since an
-/// elementwise i8 multiply has no hardware form and scalarizes.
+/// where it is negative. The dp4a decode applies signs with `and`, because
+/// there is no hardware elementwise i8 multiply.
 #[cfg(feature = "cuda")]
 pub(crate) fn packed_sign_masks() -> Vec<i8> {
     KSIGNS_IQ2XS

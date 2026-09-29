@@ -1,5 +1,5 @@
-// Planning a chain into a nest of loops, and writing the fused kernel
-// source for it. One struct does the whole job; see [`Emit`].
+// Plans a chain into loop nests and writes the fused kernel source for it.
+// See [`Emit`].
 
 use super::*;
 
@@ -11,17 +11,17 @@ struct Nest {
 }
 
 impl ChainKey {
-    /// Stages the chain records, which is what one fused launch replaces.
+    /// Number of stages in the chain.
     pub(crate) fn stages(&self) -> usize {
         self.stages.len()
     }
 
-    /// Groups the stages into nests, decides where a barrier is genuinely
-    /// required, and emits the kernel.
+    /// Groups the stages into nests, places the barriers, and emits the
+    /// kernel.
     ///
-    /// `Ok(None)` means the pass has no fused form for this chain and the caller
-    /// should run the stages as separate launches. An `Err` is a malformed
-    /// chain, which is a bug in whoever recorded it.
+    /// `Ok(None)` means the chain has no fused form and the caller should
+    /// launch the stages separately. An `Err` means the chain was recorded
+    /// wrong.
     pub(crate) fn plan(&self) -> Result<Option<Plan>> {
         let mut nests = self.nests()?;
         let mut nest_of = vec![usize::MAX; self.stages.len()];
@@ -31,12 +31,11 @@ impl ChainKey {
             }
         }
 
-        // A value read outside the nest that wrote it has to be in memory, and
-        // needs a barrier unless the reader can prove it is reading its own
-        // block's work. The walk is in chain order and a write is recorded
-        // after its stage's reads, so a value read early and written late
-        // (accumulating into the residual, for instance) does not look like a
-        // dependency of the stage that read it first.
+        // A value read outside the nest that wrote it must be in memory. It
+        // needs a barrier unless the reader only reads its own block's work.
+        // Writes are recorded after their stage's reads, so a value read
+        // early and written late, like the residual, is not a dependency of
+        // its first reader.
         let mut redundant: HashSet<Val> = HashSet::new();
         let mut writer: HashMap<Val, usize> = HashMap::new();
         for (s, stage) in self.stages.iter().enumerate() {
@@ -47,14 +46,15 @@ impl ChainKey {
                     continue;
                 }
                 if matches!(self.vals[val.0], Kind::Temp { .. }) {
-                    // No f32 scratch path, so a register value crossing a nest
-                    // is a chain this pass cannot fuse.
+                    // There is no f32 scratch, so a register value cannot
+                    // cross a nest.
                     return Ok(None);
                 }
-                // A barrier costs nothing to skip only when the block that reads
-                // is the block that wrote: a redundant writer means every block
-                // wrote its own copy, and two nests striding the same unit count
-                // over the same grid hand unit `i` to the same block in both.
+                // The barrier can be skipped only when the reading block is
+                // the writing block. That holds for a redundant writer, where
+                // every block wrote its own copy, and for a local read between
+                // nests with the same partition, which give unit `i` to the
+                // same block.
                 let part = nests[nest_of[w]].part;
                 if matches!(part, Part::Whole(_)) {
                     redundant.insert(val);
@@ -81,8 +81,8 @@ impl ChainKey {
         let mut nests: Vec<Nest> = Vec::new();
         for (s, stage) in self.stages.iter().enumerate() {
             let part = stage.part();
-            // A whole-row stage emits a sweep of its own, so it never shares a
-            // nest. An elementwise one always joins the nest it is found in.
+            // A whole-row stage never shares a nest. An elementwise stage
+            // always joins the current one.
             let joins = match part {
                 Part::Whole(_) => false,
                 Part::Inherit => true,
@@ -116,45 +116,42 @@ struct Emit {
     params: Vec<String>,
     slots: Vec<Slot>,
     scratch: Vec<Scratch>,
-    /// Tile declarations and their flat views, which have to precede the loops
-    /// that fill them however late the stage wanting one is emitted.
+    /// Tile declarations and their flat views. They go before all loops.
     decls: String,
     body: String,
     barriers: usize,
-    /// Parameters already declared, by value and the shape it is seen under, so
-    /// a second use under the same shape reuses the operand. A quantized value
-    /// and a weight name two of them, the bytes and the scales.
+    /// Parameters already declared, keyed by value and view, so a repeat use
+    /// reuses the operand. `pairs` holds the bytes and scales of quantized
+    /// values and weights.
     views: HashMap<(Val, View), String>,
     pairs: HashMap<(Val, View), (String, String)>,
     /// Scratch already claimed, by value.
     stored: HashMap<Val, usize>,
-    /// Values every block wrote its own copy of, so a reader is reading its own
-    /// work and the value belongs in shared memory rather than in scratch.
+    /// Values every block wrote its own copy of. They live in shared memory
+    /// rather than in scratch.
     redundant: HashSet<Val>,
-    /// Those of them a stage has reached, so their tiles are declared exactly
-    /// once in [`Emit::decls`].
+    /// The redundant values already declared in [`Emit::decls`].
     shared: HashSet<Val>,
     /// Tile variables holding a value that never leaves its nest.
     regs: HashMap<Val, String>,
-    /// The barrier state's parameter, once some nest has needed one.
+    /// The barrier state's parameter, once a nest needs one.
     bar: Option<String>,
-    /// Whether a raw-format contraction is in the kernel, which sets its
+    /// Whether the kernel has a raw-format contraction, which sets its
     /// launch bound.
     raw: bool,
 }
 
 /// The shape a value is seen under.
 ///
-/// A normalization writes rows of [`Q8_BLOCK`] and a contraction reads one flat
-/// row, and both are the same bytes: the CTA barrier that trails every tile
-/// store is what orders the one against the other.
+/// A normalization writes rows of [`Q8_BLOCK`] and a contraction reads one
+/// flat row of the same bytes. The CTA barrier after every tile store orders
+/// the two.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum View {
     Folded,
     Flat,
-    /// `[len / width, width]`, which is what the convolution walks: one position
-    /// of the stream a row, so a tap is a row subscript rather than arithmetic
-    /// on a flat offset.
+    /// `[len / width, width]`, one stream position per row, so the
+    /// convolution indexes a tap by row.
     Grid(usize),
 }
 
@@ -180,7 +177,7 @@ impl Emit {
         }
     }
 
-    /// Emit one nest, or decline the chain by returning `false`.
+    /// Emits one nest. Returns `false` to decline the chain.
     fn nest(&mut self, key: &ChainKey, nest: &Nest, n: usize) -> Result<bool> {
         match nest.part {
             Part::Whole(width) => {
@@ -194,9 +191,8 @@ impl Emit {
         }
     }
 
-    /// The redundant sweep: every block normalizes and quantizes the whole row
-    /// into its own copy, so nothing has to be published before the first
-    /// contraction.
+    /// The redundant sweep: every block normalizes and quantizes the whole
+    /// row into its own copy, so no barrier precedes the first contraction.
     fn whole(&mut self, key: &ChainKey, s: usize, width: usize) -> Result<bool> {
         let Stage::NormQ {
             x,
@@ -208,15 +204,10 @@ impl Emit {
         else {
             bail!("only a normalization partitions as a whole row");
         };
-        // The row is Q8_BLOCK-wide blocks; one that does not divide takes
-        // the unfused path.
         if !width.is_multiple_of(Q8_BLOCK) {
             return Ok(false);
         }
 
-        // One statement: `rms_norm_q_t` gives a thread four elements of
-        // every 4 * CTA and reduces through shuffles, no tile passes and no
-        // barriers.
         let rows = width / Q8_BLOCK;
         let nb = self.tune_const(format!("NB{s}"), rows);
         let xf = self.given(x, key.len_of(x), View::Folded);
@@ -234,11 +225,10 @@ impl Emit {
         Ok(true)
     }
 
-    /// A grid-strided nest, one unit of work per block per turn.
+    /// A grid-strided nest, one unit of work per block per iteration.
     ///
-    /// The iteration count is compiled in and the tail guarded, because a
-    /// grid-stride loop over a dynamic extent splits and the masked remainder
-    /// then wants a static shape.
+    /// The iteration count is a compile-time constant and the tail is
+    /// guarded, so the loop keeps a static shape.
     fn units(&mut self, key: &ChainKey, nest: &Nest, n: usize, units: usize) -> Result<bool> {
         let iters = units.div_ceil(self.blocks as usize);
         let it = self.tune_const(format!("IT{n}"), iters);
@@ -337,8 +327,8 @@ impl Emit {
                 let at = self.strided(format!("OF{s}"), row_off, unit, RAW_UNIT);
                 let to = self.strided(format!("DO{s}"), out_off, unit, RAW_UNIT);
                 let _ = writeln!(self.body, "      let at{s} = {at}\n      let to{s} = {to}");
-                // A whole unit stores straight from the intrinsic; a run's
-                // remainder decodes the whole unit and stores its head.
+                // A whole unit stores straight from the intrinsic. A
+                // remainder decodes a whole unit and stores only its head.
                 let head = match width == RAW_UNIT {
                     true => format!("      {dst}[0 :+ 1, to{s} :+ {RAW_UNIT}] = {fmt}_qdot_i8_t("),
                     false => format!("      var v{s}: tile<f32>[1, {RAW_UNIT}] = {fmt}_qdot_i8_t("),
@@ -364,9 +354,8 @@ impl Emit {
                 );
             }
             Stage::QuantQ { h, out, blocks, .. } if blocks > 1 => {
-                // A raw unit's run is several Q8_0 blocks: each is sliced out
-                // of the register tile and quantized on its own, and lands on
-                // its own row of the scratch.
+                // A raw unit spans several Q8_0 blocks. Each is sliced out,
+                // quantized on its own, and stored to its own scratch row.
                 let hn = self.reg_of(h)?;
                 let (qs, sc) = self.quant_rows(out, key.len_of(out));
                 for b in 0..blocks {
@@ -383,12 +372,9 @@ impl Emit {
                 }
             }
             Stage::QuantQ { h, out, .. } => {
-                // A register when `h` is a nest-computed temp (the MLP's own
-                // SwiGLU output), a window of a caller buffer when it is not
-                // (attention's mixed heads, already resident before this
-                // chain runs): the two storage classes read differently, and
-                // this is the one place a stage has to tell them apart itself
-                // rather than through `quant_row`'s [`View`].
+                // `h` is either a register from this nest, like the SwiGLU
+                // output, or a caller buffer, like attention's mixed heads.
+                // The two are read differently.
                 let hn = match self.regs.get(&h) {
                     Some(reg) => reg.clone(),
                     None => {
@@ -397,9 +383,8 @@ impl Emit {
                     }
                 };
                 let (qs, sc) = self.quant_rows(out, key.len_of(out));
-                // The scale has to be bound before the store so the elementwise
-                // chain fuses into one sweep: the fusion fires on a named tile
-                // and not on an expression.
+                // Bind the scale to a named tile before the store. Elementwise
+                // fusion needs a named tile, not an expression.
                 let _ = write!(
                     self.body,
                     "      var m{s}: tile<f32>[1, 1] = rowmax(tmax({hn}, -{hn}))
@@ -464,11 +449,9 @@ impl Emit {
                 let (da, ba) = (decay_at, beta_at);
                 let (dec, bet) = (3 * span, 3 * span + heads);
                 let nh = self.tune_const(format!("GH{s}"), heads);
-                // The nest is wider than the gates, which cover a head each, so
-                // the tail of it sits this out. The softplus is
-                // max(x, 0) + log(1 + exp(-|x|)) rather than the direct
-                // log(1 + exp(x)), which overflows well inside the range the
-                // decay projection reaches.
+                // Only the first `heads` units do work. The softplus is
+                // max(x, 0) + log(1 + exp(-|x|)), since log(1 + exp(x))
+                // overflows in the range the decay projection reaches.
                 let _ = write!(
                     self.body,
                     "      if {unit} < {nh} {{
@@ -488,12 +471,11 @@ impl Emit {
         Ok(true)
     }
 
-    /// One (plane, head) pair of the causal depthwise convolution: each block
-    /// does one plane of one head.
+    /// One (plane, head) pair of the causal depthwise convolution per unit.
     ///
-    /// The epilogue tests the plane, which is derived from the block index and
-    /// so is uniform across the CTA: the gain reduces the row, and a CTA-wide
-    /// reduction inside a divergent branch would hang.
+    /// The epilogue branches on the plane, which is uniform across the CTA.
+    /// It must be: the gain is a CTA-wide reduction, which would hang in a
+    /// divergent branch.
     fn conv(&mut self, key: &ChainKey, s: usize, unit: &str) -> Result<()> {
         let Stage::Conv {
             history,
@@ -525,9 +507,8 @@ impl Emit {
             0 => String::new(),
             at => format!("{} + ", self.tune_const(format!("PB{s}"), at)),
         };
-        // Only the query carries the readout scale, and only the query and key
-        // are normalized: the value is written into the recurrent state rather
-        // than matched against it, so it leaves the convolution as it is.
+        // Only the query carries the readout scale. Only the query and key are
+        // normalized; the value leaves the convolution unscaled.
         let scale = f32::from_bits(scale_bits);
         let norm = format!("sqrt(rowsum(y{s} * y{s}) + {L2_EPS})");
         let query = match normalize {
@@ -561,9 +542,7 @@ impl Emit {
     }
 
     /// Where a unit's run of `stride` elements starts, as source text. A zero
-    /// offset is left out rather than compiled in as a constant nobody reads:
-    /// otherwise every projection would carry an unused tune constant and an
-    /// empty `+` prefix in its emitted source.
+    /// offset is omitted rather than emitted as a tune constant.
     fn strided(&mut self, name: String, offset: usize, unit: &str, stride: usize) -> String {
         if offset == 0 {
             return format!("{unit} * {stride}");
@@ -585,8 +564,8 @@ impl Emit {
             .ok_or_else(|| anyhow::anyhow!("value {} is read before its nest writes it", val.0))
     }
 
-    /// One counter and generation pair serves every barrier of the kernel, since
-    /// the expansion leaves both as it found them.
+    /// Emits a grid barrier. One counter and generation pair serves every
+    /// barrier, since each barrier leaves both as it found them.
     fn barrier(&mut self) {
         let bar = match &self.bar {
             Some(name) => name.clone(),
@@ -600,7 +579,7 @@ impl Emit {
         self.barriers += 1;
     }
 
-    /// Declare a parameter and record what the backend must bind to it.
+    /// Declares a parameter and records what the backend must bind to it.
     fn slot(&mut self, name: String, ty: &str, dims: [i64; 2], bound: Bound) -> String {
         self.params
             .push(format!("{name}: tensor<{ty}>[{}, {}]", dims[0], dims[1]));
@@ -615,8 +594,7 @@ impl Emit {
         name
     }
 
-    /// The parameter a caller buffer is seen through, folded into rows of
-    /// [`Q8_BLOCK`] or flat.
+    /// The parameter a caller buffer is read through, under `view`.
     fn given(&mut self, val: Val, len: usize, view: View) -> String {
         if let Some(name) = self.views.get(&(val, view)) {
             return name.clone();
@@ -679,8 +657,8 @@ impl Emit {
         if let Some(pair) = self.pairs.get(&(val, View::Flat)) {
             return Ok((pair.0.clone(), pair.1.clone(), fmt));
         }
-        // The upload pads the rows to a whole unit, and a run's remainder
-        // reads into that padding; the binding checks the two agree.
+        // The upload pads rows to a whole unit and a remainder reads into the
+        // padding. The binding checks the two agree.
         let nb = k / 256;
         let rows = rows.next_multiple_of(RAW_UNIT);
         let qs = self.slot(
@@ -694,19 +672,17 @@ impl Emit {
         Ok((qs, d, fmt))
     }
 
-    /// The bytes and scales of a quantized activation as rows of [`Q8_BLOCK`],
-    /// which is the shape a per-block reduction produces and so what a stage
-    /// stores through. The caller adds the row subscript.
+    /// The bytes and scales of a quantized activation as rows of
+    /// [`Q8_BLOCK`], the shape stages store through. The caller adds the row
+    /// subscript.
     fn quant_rows(&mut self, val: Val, len: usize) -> (String, String) {
         self.quant(val, len, true)
     }
 
     /// The same value as one row, ready to pass to a contraction.
     ///
-    /// Unlike [`Self::quant_rows`] this is a whole operand rather than a name to
-    /// subscript, because the two storage classes reach the contraction
-    /// differently: a shared value's flat view already *is* a one-row tile, where
-    /// a global one is a tensor parameter that a slice has to turn into one.
+    /// Returns a complete operand. A shared value's flat view is already a
+    /// one-row tile; a global one needs a slice.
     fn quant_row(&mut self, val: Val, len: usize) -> (String, String) {
         let (qs, scales) = self.quant(val, len, false);
         match self.shared.contains(&val) {
@@ -715,14 +691,12 @@ impl Emit {
         }
     }
 
-    /// Claims a quantized activation's storage on first sight under either
-    /// shape. A value every block wrote its own copy of goes in shared memory,
-    /// since only the block that wrote it reads it back; a value one block
-    /// wrote and another reads has to be global, which is the case a barrier
-    /// already precedes.
+    /// Claims a quantized activation's storage on first use under either
+    /// view. A redundantly written value goes in shared memory, since only its
+    /// writer reads it. Anything else goes in global scratch, behind a
+    /// barrier.
     ///
-    /// `folded` is a flag rather than a [`View`] because those are the only two
-    /// shapes a quantized row has meaning under.
+    /// `folded` picks [`View::Folded`] over [`View::Flat`].
     fn quant(&mut self, val: Val, len: usize, folded: bool) -> (String, String) {
         let view = if folded { View::Folded } else { View::Flat };
         if let Some(pair) = self.pairs.get(&(val, view)) {
@@ -767,11 +741,10 @@ impl Emit {
 
     /// A redundantly written activation, in shared memory.
     ///
-    /// The tile is declared without an initializer, since the sweep that follows
-    /// writes every element of it, and the flat view is bound next to the
-    /// declaration so both are in scope before any loop. The two views are the
-    /// same bytes: the folded one is what the per-block reduction produces, the
-    /// flat one what the contraction reads.
+    /// The tile has no initializer, since the sweep writes every element. Its
+    /// flat view is declared alongside it, before any loop. Both views are
+    /// the same bytes: the reduction writes the folded one and the
+    /// contraction reads the flat one.
     fn quant_shared(&mut self, val: Val, len: usize, folded: bool) -> (String, String) {
         let rows = len / Q8_BLOCK;
         let (qs, scales) = (format!("Aq{}", val.0), format!("As{}", val.0));
@@ -802,14 +775,13 @@ impl Emit {
             .collect::<Vec<_>>()
             .join(", ");
         let params = self.params.join(",\n             ");
-        // Two CTAs of 256 an SM with a raw decode in the kernel: the
-        // intrinsics' own bound of three spills there.
+        // Two CTAs per SM with a raw decode in the kernel. Three would spill.
         let launch = match self.raw {
             true => format!("{CTA}, 2"),
             false => CTA.to_string(),
         };
-        // The shared declarations go first whatever order the stages wanted them
-        // in, since a tile has to be in scope before the loop that fills it.
+        // Shared declarations go first, so every tile is in scope before the
+        // loop that fills it.
         let source = format!(
             "@launch({launch})\n@persistent\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
             self.decls, self.body

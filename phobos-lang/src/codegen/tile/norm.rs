@@ -1,11 +1,13 @@
-// `rms_norm_q_t(x, g, eps, [o,] q, s)`: one row's RMS normalization with
-// its gain, and the Q8_0 copy with a scale a 32-element block, as one
-// statement. A thread owns four contiguous elements of every `4 * threads`;
-// the reductions are warp shuffles and one shared word a warp. The row need
-// not be a whole number of stripes: a block of 32 sits in eight consecutive
-// lanes, so the last stripe's cut never splits a lane group, and only its
-// loads and stores are gated while the shuffles run with zeros from the
-// lanes past the end.
+// `rms_norm_q_t(x, g, eps, [o,] q, s)`: one row's RMS normalization with its
+// gain, plus its Q8_0 copy with one scale per 32-element block, as one
+// statement.
+//
+// A thread owns four contiguous elements of every `4 * threads`. The
+// reductions are warp shuffles plus one shared word per warp.
+//
+// The row need not be a whole number of stripes. A block of 32 sits in eight
+// consecutive lanes, so the last stripe never splits a block. Only its loads
+// and stores are gated, and lanes past the end feed zeros to the shuffles.
 
 use super::*;
 
@@ -32,8 +34,8 @@ impl<'c> Codegen<'c> {
             if t.shape.len() != 2 || t.shape.contains(&DYN) {
                 bail!("rms_norm_q_t {what} must be a rank-2 tile of static shape");
             }
-            // A masked slice reaches here already copied into a shared tile,
-            // and the stores below would land in that copy.
+            // A masked slice arrives as a shared copy, and the stores below
+            // would land in that copy.
             if t.global.is_some() || t.is_masked() {
                 bail!("rms_norm_q_t {what} must be an in-bounds slice of a tensor; `@aligned` promises that");
             }
@@ -79,7 +81,7 @@ impl<'c> Codegen<'c> {
         let e0 = self.muli(block, tid, four)?;
         let width_idx = c(self, width)?;
         // The thread's pieces: element `i * 4 cta + 4 tid`, as (row, col) of
-        // the [blocks, 32] view, and for a last stripe the row does not fill,
+        // the [blocks, 32] view. In a partial last stripe, `present` says
         // whether the piece exists.
         let mut at = Vec::with_capacity(per as usize);
         for i in 0..per {
@@ -137,9 +139,8 @@ impl<'c> Codegen<'c> {
         let one_f = self.const_f32(block, 1.0)?;
         let inv = self.push(block, arith::divf(one_f, root, self.loc))?;
 
-        // Normalize, store, and quantize: a block's 32 elements sit in the
-        // eight lanes `8 j .. 8 j + 8`, so its absolute maximum is three
-        // shuffles away.
+        // Normalize, store, and quantize. A block's 32 elements sit in eight
+        // consecutive lanes, so its absolute maximum takes three shuffles.
         let c127 = self.const_f32(block, 127.0)?;
         let tiny = self.const_f32(block, 1e-8)?;
         let eight = c(self, 8)?;
@@ -185,7 +186,7 @@ impl<'c> Codegen<'c> {
                 packed = self.vec_insert(block, *b, packed, &[k as i64])?;
             }
             let scale = self.push(block, arith::divf(mx, c127, self.loc))?;
-            // The piece's stores, in a block of their own where the piece
+            // The piece's stores, gated in their own block when the piece
             // may not exist.
             let gated = present.as_ref().map(|_| Block::new(&[]));
             let dst = gated.as_ref().unwrap_or(block);

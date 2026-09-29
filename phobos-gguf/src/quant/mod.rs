@@ -24,7 +24,7 @@ mod q8_0;
 mod q8_1;
 mod tables;
 
-// Read only by the cuda backend; iq1s_signed_grid also has a host test.
+// Used only by the cuda backend; `iq1s_signed_grid` also has a host test.
 #[cfg(any(test, feature = "cuda"))]
 pub(crate) use iq1_s::signed_grid as iq1s_signed_grid;
 #[cfg(feature = "cuda")]
@@ -102,27 +102,28 @@ impl Quant {
         Quant::PTQ1_0,
     ];
 
-    /// Bytes a block occupies once uploaded, which is `spec().block_bytes`
-    /// for every format but Q3_K. Q3_K's 110 leaves three blocks in four at
-    /// an odd multiple of two, and `q3k_qdot_t` reads its qs and hmask planes
-    /// eight bytes at a time, so the upload pads to 112. Disk and host stay
-    /// at 110; only `constant_raw` and the device kernels see this.
+    /// Bytes a block occupies once uploaded. Differs from
+    /// `spec().block_bytes` where [`Quant::device_block`] pads or trims.
+    ///
+    /// Q3_K pads 110 to 112 because `q3k_qdot_t` reads its `qs` and `hmask`
+    /// planes eight bytes at a time. Disk and host keep 110; only
+    /// `constant_raw` and the device kernels see the padding.
     pub fn device_block_bytes(self) -> usize {
         self.device_block().1
     }
 
-    /// How a block reaches the device: leading bytes dropped, then the stride
-    /// it occupies.
+    /// How a block reaches the device: the leading bytes dropped, and the
+    /// stride it occupies.
     ///
-    /// Q3_K pads to 112 so its planes land eight-byte aligned. The IQ formats
-    /// open with an f16 `d` that no device kernel reads -- they take the scale
-    /// from the separate plane `constant_raw` uploads instead -- so those two
-    /// bytes are dropped. Q6_K's `d` trails its block and goes the same way:
-    /// 210 bytes become 208, sixteen-aligned. Q4_K and Q5_K keep their
-    /// headers, since 144 and 176 are sixteen-aligned as they are and the
-    /// kernels read `d` and `dmin` out of the same load as the scales.
-    /// PTQ1_0 keeps its size but not its order: [`Packed::device_blocks`]
-    /// re-lays each block (see `ptq1_0.rs`).
+    /// Q3_K pads to 112 so its planes are eight-byte aligned. The listed IQ
+    /// formats drop their leading f16 `d`, because kernels read the scale
+    /// from the separate plane `constant_raw` uploads. Q6_K drops its
+    /// trailing `d` the same way, so 210 bytes become 208, sixteen-aligned.
+    ///
+    /// Q4_K and Q5_K keep their headers. 144 and 176 are already
+    /// sixteen-aligned, and the kernels read `d` and `dmin` in the same load
+    /// as the scales. PTQ1_0 keeps its size, but [`Packed::device_blocks`]
+    /// reorders each block (see `ptq1_0.rs`).
     pub fn device_block(self) -> (usize, usize) {
         let bytes = self.spec().block_bytes;
         match self {
@@ -135,9 +136,9 @@ impl Quant {
     }
 
     /// Whether the device holds this format's payload and scale planes
-    /// grouped by eight columns, `[n / 8][nb][8][block]` and
-    /// `[n / 8][nb][8]`, zero-padded; the compiler's `RAW_GROUP` readers
-    /// address them so.
+    /// grouped by eight columns, as `[n / 8][nb][8][block]` and
+    /// `[n / 8][nb][8]`, zero-padded. The compiler's `RAW_GROUP` readers
+    /// expect this layout.
     pub fn grouped_rows(self) -> bool {
         matches!(
             self,
@@ -185,39 +186,40 @@ impl Quant {
     }
 }
 
-/// What one block of a format holds, and the two things a caller can do with
-/// it. The registry is [`Quant::spec`].
+/// Describes one block format and how to decode it. [`Quant::spec`] is the
+/// registry.
 pub struct Spec {
     pub name: &'static str,
     /// Elements one stored block covers.
     pub block: usize,
     /// Bytes that block occupies.
     pub block_bytes: usize,
-    /// Elements sharing one scale. Equal to `block` for the legacy formats; a
-    /// K-quant block is a super-block carrying several runs.
+    /// Elements sharing one scale. Equals `block` for the legacy formats; a
+    /// K-quant super-block carries several runs.
     pub scale_run: usize,
-    /// Quants are unsigned with a per-block minimum rather than symmetric
-    /// around zero, so decoding them needs the minimum as well as the scale.
+    /// Quants are unsigned with a per-block minimum instead of symmetric
+    /// around zero, so decoding needs the minimum as well as the scale.
     pub has_min: bool,
     /// Decodes whole blocks in storage order. `out` is `bytes.len() /
     /// block_bytes * block` elements; both are checked before this runs.
     pub dequantize: fn(bytes: &[u8], out: &mut [f32]),
-    /// Splits a `[n, k]` weight into the planes the quantized kernels index,
-    /// or `None` for a format no kernel unpacks yet (dequantizes at upload
-    /// instead). The two planes are transposed relative to each other:
+    /// Splits a `[n, k]` weight into the planes the quantized kernels index.
+    /// `None` for a format without such a kernel, which dequantizes at upload
+    /// instead.
     ///
-    /// - `qs` is `[n, k]`: `qs[j * k + p]` is the quant for output `j`, input `p`.
-    /// - `scales` is `[k / scale_run, n]`: `scales[(p / scale_run) * n + j]`
-    ///   scales that quant.
+    /// The two planes are transposed relative to each other. `qs` is
+    /// `[n, k]`: `qs[j * k + p]` is the quant for output `j`, input `p`.
+    /// `scales` is `[k / scale_run, n]`: `scales[(p / scale_run) * n + j]`
+    /// scales that quant.
     pub planes: Option<Split>,
-    /// Pulls this format's per-super-block `d`/`dmin` header fields (raw f16
-    /// bit patterns, [`RawScales`]) out of a `[n, k]` weight's blocks, for a
-    /// kernel that decodes everything else straight from the block bytes
-    /// uploaded verbatim. `None` for a format with no such kernel.
+    /// Pulls the per-block `d` and `dmin` header fields out of a `[n, k]`
+    /// weight, as raw f16 bits ([`RawScales`]). Used by kernels that decode
+    /// everything else straight from the uploaded block bytes. `None` for a
+    /// format with no such kernel.
     ///
-    /// Unlike `planes`, nothing is split apart: a block's bytes stay exactly
-    /// as the file orders them, `[n, k / block * block_bytes]`. Only `d`/`dmin`
-    /// are pulled out into their own `[n, k / block]` planes.
+    /// Unlike `planes`, the blocks stay as the file orders them,
+    /// `[n, k / block * block_bytes]`. Only `d` and `dmin` are copied out,
+    /// into their own `[n, k / block]` planes.
     pub raw_scales: Option<RawSplit>,
 }
 
@@ -245,8 +247,8 @@ pub struct Planes {
 }
 
 impl Planes {
-    /// One quant per element, one scale per run of them. The runs go down `k`,
-    /// so `k` has to tile evenly.
+    /// Checks the plane sizes: one quant per element and one scale per run.
+    /// Runs go along `k`, so `k` must be a multiple of the run.
     pub fn check(&self, quant: Quant, k: usize, n: usize) -> Result<()> {
         let run = quant.spec().scale_run;
         ensure!(
@@ -272,12 +274,11 @@ impl Planes {
     }
 }
 
-/// A `[n, k]` weight held in its file format between load and upload.
+/// A `[n, k]` weight kept in its file format between load and upload.
 ///
-/// The blocks are kept exactly as GGUF stores them, `[n, k / block]`, so one
-/// output's inputs are contiguous. Nothing here requantizes: stacking,
-/// permuting and reading a row all move whole blocks, so every operation is
-/// format-independent.
+/// Blocks stay exactly as GGUF stores them, `[n, k / block]`, so one output's
+/// inputs are contiguous. Nothing here requantizes. Stacking, permuting and
+/// reading a row all move whole blocks, so they work for any format.
 pub struct Packed {
     quant: Quant,
     blocks: Vec<u8>,
@@ -302,8 +303,8 @@ impl Packed {
         })
     }
 
-    /// [`Packed::new`] taking what it needs off the front of a tensor's bytes,
-    /// which a GGUF file hands over as a window of the whole mapping.
+    /// [`Packed::new`] from the front of a longer slice, such as a tensor's
+    /// window into the file mapping.
     pub fn from_bytes(quant: Quant, bytes: &[u8], k: usize, n: usize) -> Result<Packed> {
         let want = byte_len(quant, k, n)?;
         ensure!(
@@ -368,12 +369,11 @@ impl Packed {
         self.spec().raw_scales.is_some()
     }
 
-    /// The blocks as the device wants them, signed because the kernel language
-    /// has no unsigned byte type: a raw block byte reads as i8 and the kernel
-    /// corrects it back to 0..255 itself, same as every dequantizer here on
-    /// the host. A format whose device stride is wider than its packed one
-    /// gets the difference as zero padding a block, so a kernel can read the
-    /// block at its natural alignment; see [`Quant::device_block_bytes`].
+    /// The blocks as the device wants them. Signed because the kernel language
+    /// has no unsigned byte type; kernels map each byte back to 0..255.
+    ///
+    /// Each block is trimmed or zero-padded to its device stride, see
+    /// [`Quant::device_block`]. PTQ1_0 blocks are also reordered.
     pub fn device_blocks(&self) -> Vec<i8> {
         let packed = self.spec().block_bytes;
         if self.quant == Quant::PTQ1_0 {
@@ -459,9 +459,9 @@ impl Packed {
     /// Weights sharing an input stacked along the output axis, padded out to
     /// `n` outputs.
     ///
-    /// The padding is zero blocks, which decode to zero in every format here
-    /// because a zero scale zeroes the whole block. It exists so a fused width
-    /// tiles evenly; nothing reads it.
+    /// Padding is zero blocks, which decode to zero in every format because
+    /// their scale is zero. It only makes a fused width tile evenly and is
+    /// never read.
     pub fn stack(parts: &[&Packed], n: usize) -> Result<Packed> {
         let (first, rest) = parts.split_first().context("stacking needs a weight")?;
         let (quant, k) = (first.quant, first.k);

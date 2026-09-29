@@ -1,8 +1,5 @@
-// Bringing a `DeviceBackend` up: the CUDA context, every kernel source
-// compiled (the independent ones in parallel), the constant tables the
-// grid-coded formats gather from, and the knobs read from the environment.
-// Nothing here runs after construction; it lives apart from `mod.rs` for
-// length alone.
+// Construction of a `DeviceBackend`: the CUDA context, the compiled kernels,
+// the grid tables the IQ formats gather from, and the environment knobs.
 
 use super::*;
 
@@ -50,8 +47,8 @@ impl DeviceBackend {
             "matvec",
             ("@aligned(N = TILE_N)", ""),
         )?;
-        // matmul_quant requires k to be a whole number of Q8_0 blocks, so the k
-        // loop never has a remainder to split off.
+        // k is always a whole number of Q8_0 blocks, so the k loop has no
+        // remainder.
         let q8_dp4a = Variants::compile(
             Q8_DP4A_SRC,
             &[("TN", Q8_TN)],
@@ -88,9 +85,8 @@ impl DeviceBackend {
         let pointwise = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE)], "pointwise")?;
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
         let argmax_finish = compile(&argmax_finish_src(), &[], "argmax_finish")?;
-        // Independent kernels compiled in parallel (`compile_parallel`), so
-        // MLIR-to-PTX lowering runs concurrently. `Vec::remove(0)` keeps the
-        // destructure in the jobs' own order without cloning `Module`s.
+        // The kernels below compile in parallel. The modules come back in
+        // entry order and are taken off the front with `remove(0)`.
         let q2k_src = q2k_matvec_src(Q2K_TN);
         let q3k_src = q3k_matvec_src(Q3K_TN);
         let iq1s_src = iq1s_matvec_src(IQ1S_TN);
@@ -145,9 +141,8 @@ impl DeviceBackend {
         let iq4xs_qdot_body = iq4xs_qdot_matvec_src(IQ4XS_TN);
         let q2k_qdot_body = q2k_qdot_matvec_src(Q2K_TN);
         let q3k_qdot_body = q3k_qdot_matvec_src(Q3K_TN);
-        // The dp4a decode matvecs, wide tile then narrow. One table drives the
-        // sources, the compile entries and the `remove`s below, so their order
-        // cannot drift apart.
+        // The dp4a decode matvecs, each as a wide then a narrow tile. The
+        // `remove`s below must follow this table's order.
         let i8: [I8Row; 11] = [
             (
                 iq1s_qdot_i8_matvec_src,
@@ -558,8 +553,7 @@ impl DeviceBackend {
             moe_grouped: env_flag_on("PHOBOS_MOE_GROUPED"),
             pass: RefCell::new(Vec::new()),
             segment: Cell::new(0),
-            // The fourth replay by default: past the prefill and past the
-            // warmup passes whose scratch arenas are still growing.
+            // Defaults to the fourth replay, after prefill and warmup.
             report_pass: Cell::new(match std::env::var("PHOBOS_PASS_REPORT") {
                 Ok(v) if v.is_empty() => 4,
                 Ok(v) => v.parse().unwrap_or(4),
@@ -730,9 +724,7 @@ impl DeviceBackend {
 
 /// The card, as the driver describes it.
 ///
-/// Read fresh on every call, but a caller should want it once: the display
-/// driver's version costs a subprocess, since the CUDA driver API knows its
-/// own version and not the release the driver is known by.
+/// Call it once: reading the display driver version spawns a subprocess.
 pub(super) fn device_info() -> Option<phobos_inference::DeviceInfo> {
     use cust::device::DeviceAttribute;
 
@@ -756,12 +748,9 @@ pub(super) fn device_info() -> Option<phobos_inference::DeviceInfo> {
     })
 }
 
-/// What the display driver calls itself, which is the number a release is
-/// known by and the one the CUDA API cannot report.
+/// The display driver's release version, which the CUDA API cannot report.
 ///
-/// Asked of `nvidia-smi`, which ships with every driver. Absent rather than
-/// wrong when it is not on the path: a dashboard can say so, and this is not
-/// worth failing a load over.
+/// Read from `nvidia-smi`. `None` if it is not on the path or fails.
 fn display_driver() -> Option<String> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=driver_version", "--format=csv,noheader"])

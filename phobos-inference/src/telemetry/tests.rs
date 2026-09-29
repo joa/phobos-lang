@@ -1,6 +1,3 @@
-// Tests for the meter, beside the module they cover: the inline block
-// outgrew the cap `phobos-base/tests/source_size.rs` keeps on them.
-
 use super::*;
 
 #[test]
@@ -36,9 +33,8 @@ fn a_request_reports_its_two_rates_separately() {
 
 #[test]
 fn a_decode_is_rated_over_every_step_it_took() {
-    // Two tokens over a span of two sleeps. Counting steps rather than
-    // intervals is the whole difference: over ~80ms, two tokens is ~25 a
-    // second and one is ~12.5, so the two answers do not overlap.
+    // Two tokens over two sleeps must count as two steps, not one interval.
+    // The two answers differ by a factor of two, so they cannot overlap.
     let step = Duration::from_millis(40);
     let meter = Meter::new();
     meter.request_started(4, 0);
@@ -51,8 +47,8 @@ fn a_decode_is_rated_over_every_step_it_took() {
 
     assert_eq!(done.completion_tokens, 2);
     let span = 2.0 / done.decode_rate;
-    // Loose, since a sleep only promises a lower bound, but far tighter
-    // than the factor of two an off-by-one step would cost.
+    // Loose, since a sleep only promises a lower bound, but tighter than
+    // the factor of two an off-by-one step would cost.
     assert!(
         (0.06..0.13).contains(&span),
         "two tokens rated at {:.1}/s implies a {span:.3}s span",
@@ -90,10 +86,10 @@ fn compile_times_land_in_the_bucket_they_belong_to() {
     assert_eq!(loading.cached, 1);
     assert_eq!(loading.slowest, "slow");
     assert_eq!(loading.slowest_took, Duration::from_secs(30));
-    // Summed lowering time, which a parallel batch makes exceed the clock.
+    // Summed lowering time, which can exceed the wall clock.
     assert_eq!(loading.compile_time, Duration::from_millis(30_910));
 
-    // Only what was built put anything through the compiler.
+    // Source bytes count built kernels only.
     assert_eq!(loading.source_bytes, 3 * "kernel x() { }".len() as u64);
     assert!(loading.expansion().unwrap() > 1.0, "PTX is the longer text");
 
@@ -126,7 +122,7 @@ fn loading_counts_what_was_built_apart_from_what_was_cached() {
     assert_eq!(loading.finished(), 3);
     assert_eq!(loading.ratio(), Some(1.0));
 
-    // A batch of one says nothing a bar could draw.
+    // A batch of one has no ratio.
     meter.stepped(Step {
         stage: "kernels",
         item: "alone",
@@ -161,8 +157,8 @@ fn the_cache_empties_with_the_session() {
     meter.prefilled(8, Duration::from_millis(10));
     meter.token(9, Some(1 << 20));
     assert_eq!(meter.snapshot().cache_bytes, Some(1 << 20));
-    // Finishing no longer clears it: the session may be kept, and only
-    // the caller knows whether it was.
+    // Finishing does not clear it. Only the caller knows whether the
+    // session was kept.
     meter.request_finished("stop");
     assert_eq!(meter.snapshot().cache_bytes, Some(1 << 20));
     meter.set_cache(0, None);

@@ -48,9 +48,9 @@ impl std::ops::Deref for Backing {
     }
 }
 
-/// A window of a [`Gguf`]'s bytes that outlives the `Gguf`: the file stays
-/// mapped as long as any window of it is held, so a weight streamed from the
-/// file needs no copy of its own.
+/// A window of a [`Gguf`]'s bytes that outlives the `Gguf`. The file stays
+/// mapped while any window of it is held, so a weight streamed from the file
+/// needs no copy.
 #[derive(Clone)]
 pub struct Window {
     backing: Arc<Backing>,
@@ -90,7 +90,7 @@ impl std::fmt::Debug for Gguf {
 impl Gguf {
     pub fn open(path: &Path) -> Result<Gguf> {
         let file = File::open(path).with_context(|| format!("open {}", path.display()))?;
-        // safe as long as the file is not modified while mapped
+        // SAFETY: sound as long as the file is not modified while mapped.
         let map =
             unsafe { Mmap::map(&file) }.with_context(|| format!("mmap {}", path.display()))?;
         Gguf::new(Backing::Mapped(map)).with_context(|| format!("parse {}", path.display()))
@@ -184,7 +184,7 @@ impl Gguf {
         Ok((start, len))
     }
 
-    /// Dequantize a tensor into a fresh f32 buffer, in ggml element order (the
+    /// Dequantizes a tensor into a new f32 buffer, in ggml element order (the
     /// fastest-varying axis of [`TensorInfo::dims`] first).
     pub fn dequantize(&self, name: &str) -> Result<Vec<f32>> {
         let info = self.require_tensor(name)?;
@@ -195,7 +195,7 @@ impl Gguf {
         Ok(out)
     }
 
-    /// Dequantize into storage holding exactly the tensor's element count.
+    /// Dequantizes into a slice holding exactly the tensor's element count.
     pub fn dequantize_into(&self, info: &TensorInfo, out: &mut [f32]) -> Result<()> {
         let numel =
             usize::try_from(info.numel()).context("tensor is too large for this platform")?;

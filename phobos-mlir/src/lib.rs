@@ -12,10 +12,10 @@ use inkwell::targets::{InitializationConfig, Target};
 
 mod mlir_flatten;
 
-/// `register_all_passes` and `Target::initialize_nvptx` write into
-/// process-global LLVM tables and aren't documented safe to race, unlike the
-/// rest of [`gen_code`], which only touches its own `Context`. Run once per
-/// process.
+/// Registers the MLIR passes and the NVPTX target, once per process.
+///
+/// Both write process-global LLVM tables and are not documented safe to
+/// race. The rest of [`gen_code`] only touches its own `Context`.
 fn ensure_global_init() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -71,7 +71,7 @@ where
     lower_mlir_to_ptx(ctx, &context, module)
 }
 
-/// Lowering of MLIR to the target's code.
+/// Lowers an MLIR module to the target's code.
 pub fn lower_mlir_to_ptx<'c>(
     ctx: &phobos_base::context::Context,
     mlir_ctx: &'c Context,
@@ -151,8 +151,7 @@ pub fn lower_mlir_to_ptx<'c>(
         println!("===================================");
     }
 
-    // 4) Compile LLVM IR to PTX. Target registration happened in
-    // `ensure_global_init`, before `gen_code` reached here.
+    // 4) Compile LLVM IR to PTX. `ensure_global_init` registered the target.
     let target = Target::from_name("nvptx64").ok_or_else(|| {
         anyhow::anyhow!("NVPTX target not found (must compile LLVM with NVPTX support)")
     })?;

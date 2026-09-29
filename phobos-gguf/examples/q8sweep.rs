@@ -2,10 +2,10 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example q8sweep
 //
-// Times `q8_dp4a` (the shipped kernel), a k-split of it, and `qdot_t`, across
-// output tile, CTA size and split count, for every shape a decode step
-// projects. Prints microseconds per projection: `*` fails the host
-// reference, and split 1 is the shipped shape.
+// Times the shipped `q8_dp4a`, a k-split of it, and `qdot_t`, across output
+// tile, CTA size and split count, for every projection shape of a decode
+// step. Prints microseconds per projection. `*` marks a result that fails
+// the host reference.
 
 use std::ffi::c_void;
 use std::time::Instant;
@@ -19,7 +19,7 @@ use cust::stream::{Stream, StreamFlags};
 use phobos_gguf::backend::quantize_row;
 use phobos_kernels::abi::{self, KernelArg};
 
-/// The kernel as it ships, with the whole contraction in one program.
+/// The shipped kernel, with the whole contraction in one program.
 const SRC_WHOLE: &str = "\
 @launch({BLOCK})
 @autotune(TN in [{TN}])
@@ -43,10 +43,10 @@ kernel q8_dp4a(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 
 /// The same arithmetic with the contraction split across the grid's second axis.
 ///
-/// Program `(pn, ps)` covers outputs `pn * TN` and the `k` slice starting at
-/// `ps * SLICE`, and writes its partial sum to its own row of `P`. The grid is
-/// `SPLITS` times larger for the same tile, which is the point: the tile stays
-/// wide enough to be efficient and the block count no longer follows from `n`.
+/// Program `(pn, ps)` covers outputs from `pn * TN` over the `k` slice from
+/// `ps * SLICE`, and writes its partial sum to row `ps` of `P`. The grid grows
+/// by the split count for the same tile, so the block count no longer
+/// depends on `n` alone.
 const SRC_SPLIT: &str = "\
 @launch({BLOCK})
 @autotune(TN in [{TN}], SLICE in [{SLICE}])
@@ -81,12 +81,11 @@ kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
 }
 ";
 
-/// The same contraction as one `qdot_t`, which folds the block scales in so
-/// the whole of `k` can be handed over at once.
+/// The same contraction as one `qdot_t`, which folds in the block scales and
+/// takes all of `k` at once.
 ///
-/// The mapping turns around: a warp owns one output and its lanes divide `k`,
-/// instead of a thread owning one output and walking `k`, so the weight read
-/// is contiguous and nothing needs to stage.
+/// A warp owns one output and its lanes divide `k`, instead of one thread
+/// walking `k`. The weight read is contiguous and nothing is staged.
 const SRC_QDOT: &str = "\
 @launch({BLOCK})
 @autotune(TN in [{TN}])
@@ -140,18 +139,16 @@ const SHAPES: &[(usize, usize, usize, &str)] = &[
     (1024, 248320, 1, "lm head"),
 ];
 
-/// Output tile and the CTA that carries it.
+/// `(TN, threads per CTA)` for the `dot_t` kernels.
 ///
 /// `dot_t` puts one thread on each output column, so a CTA wider than the
-/// tile runs the contraction on `TN` of its threads and idles the rest. The
-/// shipped 32-wide tile on 128 threads uses a quarter of them; pairing the
-/// two removes that idle fraction.
+/// tile idles the rest. The shipped 32-wide tile on 128 threads uses a
+/// quarter of them; the other pairs match tile and CTA.
 const TILES: &[(usize, usize)] = &[(32, 128), (64, 64), (128, 128), (256, 256), (512, 512)];
 const SPLITS: &[usize] = &[1, 2, 4, 8, 16, 32];
 
-/// The same for `qdot_t`, where the tile is warps rather than threads: a CTA
-/// of 256 carries eight outputs at a time, so a 16-wide tile gives each warp
-/// two.
+/// The same for `qdot_t`, which puts a warp on each output. A CTA of 256
+/// covers eight outputs at a time, so a 16-wide tile gives each warp two.
 const QTILES: &[(usize, usize)] = &[(8, 256), (16, 256), (32, 256), (8, 128), (4, 128)];
 
 fn compile(source: &str, subs: &[(&str, usize)], tiles_evenly: bool) -> Result<Module> {
@@ -370,8 +367,9 @@ fn main() -> Result<()> {
             }
             println!();
         }
-        // qdot_t wants the weight scales row-major, so a lane's scale load sits
-        // next to its neighbours'; the shipped kernels want them block-major.
+        // `qdot_t` wants the weight scales row-major, so neighbouring lanes
+        // load neighbouring scales. The shipped kernels want them
+        // block-major.
         let mut row_scales = vec![0.0f32; blocks * n];
         for b in 0..blocks {
             for j in 0..n {

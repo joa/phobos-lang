@@ -23,21 +23,20 @@ fn q8_matmul_matches_the_dequantized_matmul() {
     let mut next = crate::tests::uniform(0x2545_f491_4f6c_dd1d);
 
     let qs: Vec<i8> = (0..k * n).map(|_| (next() * 127.0) as i8).collect();
-    // Rounded through a half, which is how a scale is stored, so the dense
-    // reference below is built from the value the packed weight really holds.
+    // Scales are stored as f16, so round them the same way for the dense
+    // reference.
     let scales: Vec<f32> = (0..(k / Q8_BLOCK) * n)
         .map(|_| f16_to_f32(f32_to_f16(next().abs() + 0.01)))
         .collect();
-    // qs is [n, k]; the dense equivalent is [k, n], so this transposes.
+    // qs is [n, k] and the dense weight is [k, n].
     let mut dense = vec![0.0f32; k * n];
     for j in 0..n {
         for p in 0..k {
             dense[p * n + j] = qs[j * k + p] as f32 * scales[(p / Q8_BLOCK) * n + j];
         }
     }
-    // Pre-quantize the activation: matmul_quant requantizes internally, and
-    // requantizing an already quantized row is exact, so this isolates the
-    // weight layout from the activation's precision loss.
+    // Pre-quantize the activation. Requantizing it inside matmul_quant is
+    // then exact, so the test sees only the weight layout.
     let mut a: Vec<f32> = (0..2 * k).map(|_| next()).collect();
     let mut scratch = vec![0i8; Q8_BLOCK];
     for block in a.chunks_exact_mut(Q8_BLOCK) {
@@ -117,8 +116,7 @@ fn rms_norm_scales_rows_independently() {
 #[test]
 fn swiglu_and_residual() {
     let backend = HostBackend::new();
-    // The gate and the up half as one buffer, as the fused projection
-    // hands them over.
+    // Gate and up in one buffer, as the fused projection produces them.
     let both = backend.upload(&[0.0, 1.0, 2.0, 3.0]).unwrap();
     let u = backend.upload(&[2.0, 3.0]).unwrap();
     let out = backend.alloc(2).unwrap();
@@ -145,9 +143,8 @@ fn copy_moves_a_window() {
 
 #[test]
 fn delta_conv_leaves_an_all_zero_head_at_zero() {
-    // One position and one tap, so the convolution is a multiply by one and
-    // the query plane is its input through SiLU and the normalization. A
-    // silent head has no norm to divide by.
+    // One position and one tap, so the query plane is its input through SiLU
+    // and normalization. An all-zero head has no norm to divide by.
     let backend = HostBackend::new();
     let mix = DeltaMix {
         rows: 1,
@@ -175,9 +172,8 @@ fn delta_conv_leaves_an_all_zero_head_at_zero() {
 
 #[test]
 fn delta_conv_expands_query_and_key_over_kv_heads() {
-    // Four value heads sharing two key/query heads, the grouped-query
-    // deltanet shape UD-IQ1_M uses. One position, one tap, no normalization,
-    // so this tests only which input column each destination head reads.
+    // Four value heads share two query/key heads. One position, one tap and
+    // no normalization, so this tests only which column each head reads.
     let backend = HostBackend::new();
     let mix = DeltaMix {
         rows: 1,
@@ -200,17 +196,15 @@ fn delta_conv_expands_query_and_key_over_kv_heads() {
     let out = read_vec(&backend, packed, mix.packed_len()).unwrap();
     let head = |plane: usize, h: usize| &out[plane * mix.span() + h * mix.head_dim..][..2];
 
-    // Upstream's `ggml_repeat_4d` tiles rather than block-repeats, so packed
-    // head `h` of query/key reads physical head `h % kv_heads` back: heads 0
-    // and 2 both read kv-head 0, heads 1 and 3 both read kv-head 1.
+    // Like upstream's `ggml_repeat_4d`, packed head `h` reads head
+    // `h % kv_heads`: heads 0 and 2 read kv-head 0, heads 1 and 3 kv-head 1.
     for plane in [0usize, 1] {
         assert_eq!(head(plane, 0), head(plane, 2), "plane {plane} head 0 vs 2");
         assert_eq!(head(plane, 1), head(plane, 3), "plane {plane} head 1 vs 3");
         assert_ne!(head(plane, 0), head(plane, 1), "plane {plane} head 0 vs 1");
     }
 
-    // The value plane has a real head for every one of the four destination
-    // slots, so all four stay distinct.
+    // The value plane has all four heads, so they stay distinct.
     let v: Vec<&[f32]> = (0..4).map(|h| head(2, h)).collect();
     for (i, a) in v.iter().enumerate() {
         for b in &v[i + 1..] {
@@ -233,8 +227,7 @@ fn delta_gates_hold_up_where_the_direct_softplus_overflows() {
         normalize: false,
         query_scale: 1.0,
     };
-    // exp(200) is infinite in f32, so a softplus written as log(1 + exp(x))
-    // returns infinity here and the decay comes out as zero or a NaN.
+    // exp(200) overflows f32, so a naive log(1 + exp(x)) would give infinity.
     let decay_in = backend.upload(&[200.0, 0.0]).unwrap();
     let beta_in = backend.upload(&[0.0, 0.0]).unwrap();
     let rate = backend.upload(&[-1.0]).unwrap();
@@ -269,9 +262,8 @@ fn softplus_stays_finite_for_large_inputs() {
     assert!(softplus(-100.0).abs() < 1e-6);
 }
 
-/// The routed feed-forward against the same arithmetic done densely: every
-/// expert decoded through `Packed`, each row's choice and weights from
-/// `route`, the shared expert scaled by its gate's sigmoid.
+/// The routed feed-forward against a dense reference built from `Packed`
+/// decodes, `route`, and the sigmoid-gated shared expert.
 #[test]
 fn moe_matches_a_dense_reference_and_reports_its_routes() {
     use std::sync::Arc;

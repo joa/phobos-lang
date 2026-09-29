@@ -1,13 +1,14 @@
 // PrismML's Hadamard folding (`prism.hadamard.*`). A folded weight stores
-// `W H S` for a blockwise normalized Sylvester-Walsh-Hadamard `H` over its
-// input axis and a fixed +-1 sign vector `S`, so the projection only means
-// `W` once its activation is carried through `H S` first: `y = (W H S)
-// (S H x)`, both factors their own inverse. A lookup table is the other way
-// round, rows stored as `H S h`, restored after the lookup as `h = S (H z)`.
+// `W H S`, where `H` is a blockwise normalized Sylvester-Walsh-Hadamard
+// transform over the input axis and `S` a fixed +-1 sign vector. The
+// projection only means `W` once its activation goes through `H S` first:
+// `y = (W H S) (S H x)`, each factor being its own inverse. A lookup table
+// works the other way: rows are stored as `H S h` and restored after the
+// lookup as `h = S (H z)`.
 //
-// Nothing about a folded weight looks wrong, and a projection that skips the
-// transform still produces fluent-looking garbage, so the loader refuses any
-// file whose folding it does not understand, as the reference does.
+// A folded weight looks normal, and a projection that skips the transform
+// still produces fluent-looking garbage. So the loader refuses any file
+// whose folding it does not understand, as the reference does.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -116,8 +117,8 @@ impl Folding {
         self.inverse.contains(name)
     }
 
-    /// Every name the file declares, folded or restored, for the loader to
-    /// check it consumed each one.
+    /// Every name the file declares, folded or restored, so the loader can
+    /// check it used each one.
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.weights.iter().chain(&self.inverse).map(String::as_str)
     }
@@ -242,9 +243,9 @@ mod tests {
 
     #[test]
     fn rotating_then_restoring_is_the_identity() {
-        // A folded weight sees `H S x`, a restored row `S H z`: the two undo
-        // each other, which is what makes a folded table and a folded
-        // projection agree.
+        // A folded weight sees `H S x`, a restored row `S H z`. The two undo
+        // each other, which is why a folded table and a folded projection
+        // agree.
         let x = ramp(2048);
         let signs: Vec<f32> = (0..2048).map(|i| if i % 3 == 0 { -1.0 } else { 1.0 }).collect();
         let mut y = vec![0.0; 2048];

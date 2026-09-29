@@ -1,12 +1,13 @@
-// Getting operands into shared memory or registers for a contraction,
-// including the double-buffered and slab-drained forms.
+// Moving contraction operands into shared memory or registers, including the
+// double-buffered forms, and draining results out through a slab.
 
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// Picks the f16 staging strategy for a tensor-core k-loop. Returns
-    /// (stage_async, reg_stage): the first is true when cp.async is available
-    /// for f16 operands, the second when the tile divides evenly by the CTA.
+    /// Picks the f16 staging strategy for a tensor-core k-loop, as
+    /// (stage_async, reg_stage). Both need f16 operands. `stage_async` uses
+    /// cp.async. `reg_stage` is the fallback without cp.async and needs tiles
+    /// that divide evenly across the CTA.
     pub(in crate::codegen) fn staging_mode(
         &self,
         src: &GemmSource<'_>,
@@ -40,8 +41,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// Stages one iteration's a (k-major) and b tiles into shared, without a
-    /// barrier. With async_copy the transfers are cp.async and the caller owns
-    /// the group and wait.
+    /// barrier. With `async_copy` the copies are cp.async, and the caller
+    /// creates the group and waits on it.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn fused_stage(
         &mut self,
@@ -58,9 +59,9 @@ impl<'c> Codegen<'c> {
         self.tile_copy(block, &b_src, b_buf, false, async_copy)
     }
 
-    /// The preheader-staged f16 buffer for a dot operand, when a surrounding
-    /// loop hoisted it (see `ir/build/hoist.rs`). The caller skips both the
-    /// in-loop staging and the release.
+    /// The preheader-staged f16 buffer for a dot operand, if an enclosing
+    /// loop hoisted it (see `ir/build/hoist.rs`). The caller then skips both
+    /// the in-loop staging and the release.
     pub(in crate::codegen) fn hoisted_stage(&self, src: &MemVal<'c>) -> Option<MemVal<'c>> {
         self.hoisted_stages
             .iter()
@@ -70,13 +71,15 @@ impl<'c> Codegen<'c> {
             .map(|(_, buf)| buf.clone())
     }
 
-    /// if guard_iv < hi { prefetch(...) }: a guard around a barrier-free
-    /// prefetch of one more iteration. No thread ids leak into it, so it stays
-    /// CTA-uniform and a barrier inside would be safe. Every loop bound lowers
-    /// from block-uniform producers (literals, `program_id`, a shape via
-    /// `memref.dim`, the zero `warp_partial`/`grid_barrier` return, and
-    /// arithmetic over those), which
-    /// `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` pins.
+    /// Emits `if guard_iv < hi { prefetch(...) }`, guarding the prefetch of
+    /// one more iteration.
+    ///
+    /// The condition is CTA-uniform, so a barrier inside would be safe. That
+    /// holds because every loop bound comes from block-uniform values:
+    /// literals, `program_id`, `memref.dim`, the zero return of
+    /// `warp_partial` and `grid_barrier`, and arithmetic over those.
+    /// `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` checks
+    /// this.
     pub(in crate::codegen) fn guarded_prefetch(
         &mut self,
         block: &Block<'c>,
@@ -97,10 +100,11 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Returns the staged f16 shared buffer for one tile-dot operand: the preheader copy
-    /// when an enclosing loop hoisted this operand (see codegen/hoist.rs), else a fresh
-    /// pooled buffer staged here without a barrier. The flag is true for the hoisted case,
-    /// where the caller must skip the release; the loop epilogue owns that buffer.
+    /// The staged f16 shared buffer for one tile-dot operand, and whether it
+    /// was hoisted.
+    ///
+    /// A hoisted operand reuses the preheader copy, and the caller must not
+    /// release it. Otherwise a fresh buffer is staged here, without a barrier.
     pub(in crate::codegen) fn dot_stage(
         &mut self,
         block: &Block<'c>,
@@ -120,10 +124,12 @@ impl<'c> Codegen<'c> {
         Ok((buf, false))
     }
 
-    /// One unrolled half of a pipelined loop: a guarded, barrier-free prefetch
-    /// of iteration prefetch_iv, accumulation from the resident buffers via
-    /// mac, then a closing wait and barrier. The barrier publishes the prefetch
-    /// and retires the resident reads before the next half overwrites them.
+    /// One unrolled half of a pipelined loop.
+    ///
+    /// Prefetches iteration `prefetch_iv` under a guard, runs `mac` on the
+    /// resident buffers, then waits and barriers. The barrier publishes the
+    /// prefetch and retires the resident reads before the next half
+    /// overwrites them.
     pub(super) fn pipelined_half(
         &mut self,
         block: &Block<'c>,
@@ -135,8 +141,8 @@ impl<'c> Codegen<'c> {
     ) -> Result<Vec<Value<'c, 'c>>> {
         self.guarded_prefetch(block, prefetch_iv, hi, stage)?;
 
-        // cp.async group outside the guard (an empty group is a no-op wait;
-        // tokens can't cross scf.if regions).
+        // The group sits outside the guard, since tokens cannot leave an
+        // scf.if region. Waiting on an empty group is a no-op.
         let group = if use_async {
             Some(self.async_create_group(block)?)
         } else {
@@ -152,8 +158,8 @@ impl<'c> Codegen<'c> {
         Ok(next)
     }
 
-    /// The vector path's pipelined half: prefetch into dst, register-MAC from
-    /// cur (see [`Self::pipelined_half`]).
+    /// The vector path's pipelined half: prefetch into dst, register MAC from
+    /// cur. See [`Self::pipelined_half`].
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn fused_half(
         &mut self,
@@ -179,10 +185,12 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// Stages an operand into an f16 shared buffer for WMMA: an f32 source is rounded down
-    /// ([`Self::tile_copy_f16`]), an f16 source copied as-is, anything else rejected. async_copy
-    /// applies only to the straight f16 copy, since the f32 round-down can't be a raw cp.async
-    /// byte transfer. Never emits a barrier; the caller owns synchronization.
+    /// Stages an operand into an f16 shared buffer for the tensor cores.
+    ///
+    /// An f32 source is rounded with [`Self::tile_copy_f16`], an f16 source is
+    /// copied as is, and anything else is an error. `async_copy` applies only
+    /// to the f16 copy, since rounding cannot be a raw cp.async. The caller
+    /// adds the barrier.
     pub(in crate::codegen) fn stage_to_f16(
         &mut self,
         block: &Block<'c>,
@@ -203,10 +211,9 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// dst[...] = f16(src[...]): stages an f32 slice into an f16 shared buffer,
-    /// rounding each element once (arith.truncf). Vectorized as 4xf32 loads /
-    /// 4xf16 (8-byte) stores when the source rows are provably aligned. Never
-    /// emits a barrier; the caller owns sync.
+    /// dst[...] = f16(src[...]), staging an f32 slice into an f16 shared
+    /// buffer. Uses 4-wide vectors when the source rows are provably aligned.
+    /// The caller adds the barrier.
     pub(in crate::codegen) fn tile_copy_f16(
         &mut self,
         block: &Block<'c>,
@@ -228,7 +235,7 @@ impl<'c> Codegen<'c> {
         let v16_t = Type::vector(&[4], self.f16_t);
 
         self.distribute(block, dst, width, false, |cg, blk, idx| {
-            // Read the (unswizzled) source, round, store to the swizzled column.
+            // Only the destination is swizzled.
             let didx = cg.swizzled_index(blk, dst, idx)?;
 
             if width > 1 {
@@ -260,9 +267,8 @@ impl<'c> Codegen<'c> {
         )
     }
 
-    /// The lane's read slice of its warp's 16x16 slab tile (see
-    /// [`SlabDrain`]). Returns (srow, lrow, lcol) for the warp tile at slab
-    /// row slab0.
+    /// The lane's read slice of its warp's 16x16 slab, see [`SlabDrain`].
+    /// Returns (srow, lrow, lcol) for the warp tile at slab row `slab0`.
     pub(super) fn slab_lane_slice(
         &self,
         block: &Block<'c>,
@@ -278,8 +284,8 @@ impl<'c> Codegen<'c> {
         Ok((srow, lrow, lcol))
     }
 
-    /// Copies the warp's slab out to C for fragment (fi, fj), applying
-    /// alpha*acc + beta*prev_load. The caller owns the surrounding barriers.
+    /// Copies the warp's slab out to C for fragment (fi, fj), computing
+    /// alpha*acc + beta*prev. The caller adds the barriers around it.
     pub(super) fn drain_slab_tile(
         &mut self,
         block: &Block<'c>,

@@ -6,22 +6,14 @@ impl<'c> Codegen<'c> {
     /// out[i, j] = sum_b (sum_{k in block b} a[i, k] * w[j, k]) * asc[i, b] * wsc[j, b]:
     /// the whole Q8_0 contraction, block scales included, as one operation.
     ///
-    /// This exists because `dot_t` cannot be given enough of `k` at a time: a
-    /// Q8_0 block carries its own scale, so a plain dot has to stop every 32
-    /// elements to apply it, and `dot_t` puts one thread on each output and
-    /// walks `k` in that thread. That warp reads 32 rows four bytes apart, 32
-    /// sectors fetched to use 128 bytes of them, paying five barriers per 32
-    /// elements of `k`. Folding the scales in turns the mapping around
-    /// instead: a warp owns one output and its lanes divide `k`, so the 32
-    /// lanes read 512 contiguous bytes of one weight row. Nothing is staged,
-    /// the accumulator is a register, and the only synchronization is the
-    /// closing butterfly shuffle. Each lane takes 16 bytes, four `dp4a` under
-    /// one scale pair, since 16 divides the 32-element block.
+    /// A warp owns one output and its lanes split `k`, so the 32 lanes read
+    /// 512 contiguous bytes of one weight row. Nothing is staged, the
+    /// accumulator is a register, and the only synchronization is the closing
+    /// butterfly shuffle. Each lane takes 16 bytes, four `dp4a` under one
+    /// scale pair, since 16 divides the 32-element block.
     ///
-    /// The scales are indexed `[row, block]` so a lane's scale load is
-    /// contiguous with its neighbours'. Reading them `[block, row]`, the
-    /// layout the tensor-core kernel wants, would cost one sector per lane and
-    /// double the traffic.
+    /// The scales are indexed `[row, block]`, so a lane's scale load is
+    /// contiguous with its neighbours'.
     pub(in crate::codegen) fn tile_qdot_t(
         &mut self,
         block: &Block<'c>,
@@ -65,7 +57,7 @@ impl<'c> Codegen<'c> {
         let out = self.alloc_tile_shaped(block, self.f32_t, &[rows, cols])?;
         let (i32_t, f32_t, vec4_i8) = (self.i32_t, self.f32_t, Type::vector(&[4], self.i8_t));
 
-        // The contraction length: static when the slice pinned it, otherwise
+        // The contraction length: static when the slice fixes it, otherwise
         // the operand's own extent.
         let one = self.const_index(block, 1)?;
         let kd = if a.shape[1] == DYN {
@@ -79,9 +71,9 @@ impl<'c> Codegen<'c> {
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
 
-        // A warp per output element: the CTA size is a warp multiple and so is
-        // `total`, so a warp is either wholly inside this loop or wholly
-        // outside it and every lane reaches the shuffle.
+        // A warp per output element. The CTA size and `total` are both warp
+        // multiples, so a warp is wholly inside or outside this loop and every
+        // lane reaches the shuffle.
         let body = Block::new(&[(self.index_t, self.loc)]);
         let li = detach(body.argument(0)?.into());
         let unit = self.divui(&body, li, lane_w)?;
@@ -100,8 +92,7 @@ impl<'c> Codegen<'c> {
         let base = detach(kb.argument(0)?.into());
         let carry = detach(kb.argument(1)?.into());
         let koff = self.addi(&kb, base, lane_off)?;
-        // A lane's chunk divides the Q8_0 block, so it is wholly in or wholly
-        // out and one predicate covers it.
+        // A lane's chunk divides the Q8_0 block, so one predicate covers it.
         let live = self.push(
             &kb,
             arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, koff, kd, self.loc),

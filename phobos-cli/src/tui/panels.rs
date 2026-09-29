@@ -1,10 +1,8 @@
-// The panels, each one a pure function of a snapshot and the view state.
+// The panels, each a pure function of a snapshot and the view state.
 //
-// A panel never queries the engine and never blocks; it is handed a
-// [`Snapshot`] taken before the frame started, so every figure on screen is
-// from the same instant. Anything the front end could not report is drawn as
-// such rather than as a zero, since a host build has no card to read and an
-// ONNX model does not account for its own weights.
+// A panel never queries the engine. It gets a [`Snapshot`] taken before the
+// frame, so every figure is from the same instant. Anything the front end did
+// not report is drawn as missing, not as zero.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -25,24 +23,20 @@ use super::view::View;
 /// Rows the wordmark banner needs: the font plus a line of air under it.
 const HEADER_ROWS: u16 = FONT_HEIGHT as u16 + 2;
 
-/// Below this many rows the banner is dropped for a single title line: the
-/// panels carry the information and the wordmark does not.
+/// Below this many rows the banner becomes a single title line.
 const TALL_ENOUGH: u16 = 26;
 
 /// Below this many columns the panels stack instead of sitting side by side.
 const WIDE_ENOUGH: u16 = 100;
 
-/// Rows the block strip needs: a line of numbers, the strip, and a legend.
-/// The card sits beside it and wants the same, which is what sets the floor.
+/// Rows for the network row, set by what the network and card panels need.
 const NETWORK_ROWS: u16 = 6;
 
 pub fn render(frame: &mut Frame, view: &mut View, snap: &Snapshot) {
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
 
-    // The moon gets the whole screen while it is up, and only on a terminal
-    // with room for it. A load has minutes of compiling to report and the
-    // picture is not what a watcher needs for those, so it is brief.
+    // The splash takes the whole screen while it runs, if it fits.
     if view.splash > 0 && splash::fits(area) {
         splash::draw(frame, view, area);
         return;
@@ -74,8 +68,7 @@ pub fn render(frame: &mut Frame, view: &mut View, snap: &Snapshot) {
             rows[0],
         );
     }
-    // Until there is a model, the panels have nothing in them and the load
-    // is the only thing happening, so it gets the whole screen.
+    // Until there is a model, the loading screen takes the whole body.
     if snap.fixed.label.is_empty() {
         loading(frame, view, snap, rows[1].union(rows[2]));
     } else {
@@ -85,8 +78,8 @@ pub fn render(frame: &mut Frame, view: &mut View, snap: &Snapshot) {
     footer(frame, view, snap, rows[3]);
 }
 
-/// The screen that is up before there is a model: what the load has got
-/// through, the kernel going past, and where the time went.
+/// The screen shown before there is a model: load progress, the kernel being
+/// compiled, and compile times.
 fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
@@ -96,8 +89,6 @@ fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     if rows[1].height == 0 {
         return;
     }
-    // The cinema wants width and the histogram is a short list, so they sit
-    // beside each other rather than stacked.
     let columns = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
@@ -113,11 +104,10 @@ fn header(frame: &mut Frame, view: &mut View, area: Rect) {
     let glyphs = anim::block_text("PHOBOS");
     let mark_width = anim::block_width("PHOBOS") as u16;
     let left = area.width.saturating_sub(mark_width) / 2;
-    // A margin either side, so a drop never lands against a stroke.
+    // Keep the rain clear of the wordmark, with a margin.
     view.rain
         .clear_lane(left.saturating_sub(3)..(left + mark_width + 3));
-    // Travels a little past both edges, so the sweep leaves and arrives
-    // rather than appearing at the margin.
+    // The sweep runs a little past both edges.
     let span = area.width as i64 + 24;
     let sweep = (view.frame as i64 / 2) % span - 12;
 
@@ -133,8 +123,7 @@ fn header(frame: &mut Frame, view: &mut View, area: Rect) {
                 })
                 .is_some_and(|cell| cell == theme::FULL);
             if lit {
-                // Brightest where the sweep is, falling away over a few cells
-                // on either side of it.
+                // Brightest at the sweep, fading over a few cells either side.
                 let distance = (x as i64 - sweep).abs() as f32;
                 let heat = (1.0 - distance / 14.0).clamp(0.0, 1.0);
                 let color = theme::mix(theme::GREEN_DIM, theme::CYAN, heat.powi(2));
@@ -153,15 +142,14 @@ fn header(frame: &mut Frame, view: &mut View, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// The one line that says what the engine is doing right now.
+/// The status line: phase, uptime, and totals.
 fn status(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let (label, color) = match snap.phase {
         Phase::Idle => ("IDLE", theme::MUTED),
         Phase::Prefill => ("PREFILL", theme::CYAN),
         Phase::Decode => ("DECODE", theme::MAGENTA),
     };
-    // The light breathes only while there is work; a steady dot when idle is
-    // easier to read past than one that never stops moving.
+    // The lamp pulses only while there is work.
     let lamp = if snap.phase == Phase::Idle {
         Style::default().fg(theme::MUTED)
     } else {
@@ -199,7 +187,7 @@ fn status(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
 
 fn body(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
     if area.width < WIDE_ENOUGH {
-        // Narrow: the two that answer "is it working" go first.
+        // Narrow: only throughput and memory.
         let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
@@ -209,9 +197,8 @@ fn body(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
         return;
     }
 
-    // Three rows, each given up in turn as the window shortens: the gauges
-    // answer "is it working", the strip says what it is, and the rings are
-    // the history, which is what a short window can most afford to lose.
+    // Three rows: gauges, then network and card, then activity and log. As
+    // the window shortens the bottom row goes first, then the middle.
     let network = if area.height >= NETWORK_ROWS + 16 {
         NETWORK_ROWS
     } else {
@@ -235,7 +222,7 @@ fn body(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
             Constraint::Percentage(32),
         ])
         .split(rows[0]);
-    // The two that describe the engine rather than the run share a column.
+    // Model and caches share the left column.
     let left = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(8), Constraint::Min(4)])
@@ -367,8 +354,7 @@ fn activity(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     );
 }
 
-/// Whatever the runtime wanted to say, which on a full-screen front end has
-/// nowhere else to go.
+/// The runtime's log lines, newest first.
 fn log(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let rows = area.height.saturating_sub(2) as usize;
     let lines: Vec<Line> = snap
@@ -441,8 +427,7 @@ fn field(label: &str, value: &str, color: ratatui::style::Color) -> Line<'static
     ])
 }
 
-/// Bytes at the largest unit that leaves a figure above one, so a reader
-/// compares two numbers rather than two exponents.
+/// Bytes in the largest binary unit that keeps the figure at least one.
 pub fn bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
@@ -458,7 +443,7 @@ pub fn bytes(bytes: u64) -> String {
     }
 }
 
-/// A token count, thousands separated, since these run to six figures.
+/// A count with thousands separated by spaces.
 pub fn count(n: u64) -> String {
     let digits = n.to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3);

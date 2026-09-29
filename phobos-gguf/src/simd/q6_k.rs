@@ -1,6 +1,6 @@
-// Q6_K against Q8: sixteen runs of 16 with a signed 8-bit scale apiece and
-// no minimum, the quants six bits around 32. The offset comes off through
-// the Q8 sums, so the quants are dotted as they are stored, unsigned.
+// Q6_K against Q8. Sixteen runs of 16, each with a signed 8-bit scale and no
+// minimum; quants are six bits around 32. The quants are dotted unsigned, as
+// stored, and the offset is removed through the Q8 sums.
 
 use super::{Acc, Block, Q8Block, Quants, SUMS, SUM_RUN};
 
@@ -21,8 +21,8 @@ pub(super) struct Unpacked {
 }
 
 impl Unpacked {
-    /// The header: the scale from `d` where the layout keeps it apart,
-    /// else the block's trailing half.
+    /// Reads the header. The scale comes from `d` when the layout stores it
+    /// separately, else from the block's trailing half.
     fn read_header(&mut self, bytes: &[u8], d: Option<u16>, half: impl Fn(u16) -> f32) {
         self.d = half(d.unwrap_or_else(|| u16::from_le_bytes([bytes[D], bytes[D + 1]])));
         for (scale, &b) in self.scales.iter_mut().zip(&bytes[SCALES..D]) {
@@ -54,8 +54,8 @@ impl Block for Scalar {
     }
 
     unsafe fn dot(u: &Unpacked, block: &Q8Block, acc: &mut Acc) {
-        // A run of 16 at a time, its scaled dot less the offset times its
-        // Q8 sum, scaled by its activation run's scale.
+        // Per run of 16: the dot minus the offset times the run's Q8 sum,
+        // times the weight and activation scales.
         for (i, (&scale, (w, a))) in u.scales.iter().zip(u.q.0.chunks_exact(SUM_RUN).zip(block.qs.chunks_exact(SUM_RUN))).enumerate() {
             let dot = super::dot_i32(w, a);
             acc.0[0] += block.d[i / 2] * u.d * f32::from(scale) * (dot as f32 - OFFSET * f32::from(block.sums[i]));
@@ -86,8 +86,8 @@ mod avx2 {
                 let ql = bytes.as_ptr().add(g * GROUP / 2);
                 let low = [_mm256_loadu_si256(ql.cast()), _mm256_loadu_si256(ql.add(32).cast())];
                 let high = _mm256_loadu_si256(bytes.as_ptr().add(QH + g * GROUP / 4).cast());
-                // Quarter `i` takes its nibble from plane `i % 2`, the top
-                // nibble for the last two, and its high bits from bit pair
+                // Quarter `i` takes its nibble from plane `i % 2` (the high
+                // nibble for quarters 2 and 3) and its high bits from bit pair
                 // `i` of the shared high plane.
                 let nibbles = [low[0], low[1], _mm256_srli_epi16(low[0], 4), _mm256_srli_epi16(low[1], 4)];
                 let highs = [high, _mm256_srli_epi16(high, 2), _mm256_srli_epi16(high, 4), _mm256_srli_epi16(high, 6)];

@@ -182,7 +182,7 @@ fn penalties_skip_ids_outside_the_vocab() {
 
 #[test]
 fn the_penalized_top_k_is_the_top_k_of_the_penalized_vocab() {
-    // The one-pass cut against penalizing a copy and ranking all of it.
+    // Compares the one-pass cut with penalizing a copy and sorting all of it.
     let mut rng = Rng::new(3);
     let logits: Vec<f32> = (0..5000).map(|_| rng.next_f32() * 8.0 - 4.0).collect();
     let prompt: Vec<i64> = (0..300).map(|i| i * 13 % 5000).collect();

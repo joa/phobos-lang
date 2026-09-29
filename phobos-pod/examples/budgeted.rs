@@ -50,8 +50,8 @@ async fn main() -> Result<()> {
     storage::write_tensor_f32(&uri("B.bin"), &b)?;
     storage::write_tensor_f32(&uri("C.bin"), &vec![0.0; N * N])?;
 
-    // Picks SUPER_* for a 1-node fingerprint, then plans with a budget that fits
-    // only ~3 supertiles so the node's program must span several segments.
+    // Pick SUPER_* for one node, then plan with a budget of about three
+    // supertiles, so the node's program spans several segments.
     let kernel = phobos_lang::parse(MATMUL)?.remove(0);
     let program = phobos_cluster::compile(&kernel)?;
     let dims: std::collections::HashMap<String, i64> =
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         pl.peak_resident >> 20
     );
 
-    // Scheduler + one node over localhost gRPC.
+    // Scheduler and one node over localhost gRPC.
     let sched = Scheduler::new();
     let sched_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let sched_addr = sched_listener.local_addr()?.to_string();

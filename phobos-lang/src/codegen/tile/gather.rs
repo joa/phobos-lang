@@ -1,10 +1,9 @@
 // gather(TABLE, IDX): a per-element table lookup, out[i] = TABLE[IDX[i]].
-// Unlike other elementwise tile ops, each output element reads from a
-// data-dependent source rather than the same offset it writes to.
+// Each output element reads from a data-dependent index.
 //
-// A table may be rank-1 or rank-2 with a leading dim of 1: kernel parameters
-// are always rank-2 (`push_descriptor`'s fixed two-extent descriptor), and
-// `A[0, :]` can't reach rank-1 since point and slice subscripts don't mix.
+// A table may be rank-1, or rank-2 with a leading dim of 1. Kernel parameters
+// are always rank-2, and `A[0, :]` cannot reduce one to rank-1 because point
+// and slice subscripts don't mix.
 
 use super::*;
 

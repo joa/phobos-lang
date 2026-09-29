@@ -181,7 +181,6 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
         assert!(dot.contains("COMPUTE k"));
         assert!(dot.contains("LOAD A#"));
         assert!(dot.contains("STORE C#"));
-        // dependency edges are present
         assert!(dot.contains(" -> i"), "no dependency edges in:\n{dot}");
         // DirectLoad: no peer FETCH, so no dashed cross-node edges
         assert!(!dot.contains("style=dashed"));
@@ -189,8 +188,8 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 
     #[test]
     fn renders_cross_node_fetch_edges() {
-        // Under HomeLoadPeerFetch the home LOADs an input and peers FETCH it;
-        // the DAG should carry a FETCH node and a dashed producer->fetch edge.
+        // Under HomeLoadPeerFetch the home node LOADs an input and peers FETCH
+        // it. The DAG shows a FETCH node and a dashed edge from its producer.
         let kernel = phobos_lang::parse(MATMUL).unwrap().remove(0);
         let program = phobos_cluster::compile(&kernel).unwrap();
         let supers = default_supers(&program);

@@ -3,9 +3,8 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// out[i] = alpha * a[i] + beta * b[i]
-    ///
-    /// No intermediate tile allocations. b may be a global-memory view.
+    /// out[i] = alpha * a[i] + beta * b[i], with no intermediate tiles. b may
+    /// be a global-memory view.
     pub(in crate::codegen) fn tile_scaled_add_into(
         &mut self,
         block: &Block<'c>,
@@ -62,7 +61,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// out[...] = scalar for every element (scalar must be elem-typed)
+    /// out[...] = scalar for every element. scalar must have out's element
+    /// type.
     pub(in crate::codegen) fn tile_fill(
         &mut self,
         block: &Block<'c>,
@@ -83,9 +83,9 @@ impl<'c> Codegen<'c> {
 
     /// dst[...] = src[...] for every element.
     ///
-    /// With async_copy (pipelined prefetches on sm_80+), the global->shared
-    /// transfers go out as cp.async so the issuing thread doesn't stall on the
-    /// global load; the caller owns the async group and wait.
+    /// With async_copy (pipelined prefetches on sm_80+), global to shared
+    /// transfers use cp.async so the thread does not stall on the load. The
+    /// caller owns the async group and the wait.
     pub(in crate::codegen) fn tile_copy(
         &mut self,
         block: &Block<'c>,
@@ -102,17 +102,11 @@ impl<'c> Codegen<'c> {
             );
         }
 
-        // Vectorizes an aligned copy to whatever moves 16 bytes a lane: four
-        // f32 or eight f16. A staging copy is bound by the loads it issues
-        // rather than the bytes they carry, so a narrow element type
-        // vectorized by element count would stage at half the rate an f32
-        // tile does for no reason.
+        // An aligned copy moves 16 bytes per lane: four f32 or eight f16.
+        // Staging is bound by load count, not bytes, so width goes by bytes.
         //
-        // Only f16 goes wide: the 8-byte reach the row-pitch ABI promises on
-        // its own is enough for four elements of any type, and past that a
-        // width needs a divisibility proof that only `@aligned` supplies.
-        // The quantized paths read i8 through their own staging and are not
-        // on this one, so nothing is gained by widening them here.
+        // Only f16 goes to eight. Four elements of any type is always legal,
+        // while a wider access needs the divisibility proof `@aligned` gives.
         let elem_bytes = self.elem_bytes(dst.elem);
         let last = *dst.shape.last().expect("tile values are not rank-0");
         let vec_ok = !src.is_masked()
@@ -130,13 +124,12 @@ impl<'c> Codegen<'c> {
             (true, false) => 4,
             _ => 1,
         };
-        // Four elements even when the copy stays scalar: the f32 cp.async
-        // path below reads that width.
+        // At least four elements even for a scalar copy, since the f32
+        // cp.async path reads that width.
         let align = i64::from(elem_bytes.unwrap_or(4)) * width.max(4);
 
-        // cp.async needs a 4/8/16-byte transfer and cannot convert: f32
-        // qualifies at any width, the narrower types only vectorized, a scalar
-        // 1B or 2B element being below cp.async's minimum.
+        // cp.async needs a 4, 8 or 16-byte transfer. f32 qualifies at any
+        // width. Narrower types qualify only when vectorized.
         let use_async = async_copy
             && !dst.is_masked()
             && (dst.elem == self.f32_t || (width > 1 && matches!(align, 4 | 8 | 16)));
@@ -182,11 +175,11 @@ impl<'c> Codegen<'c> {
     }
 
     /// dst[k, m] = src[m, k]: stages a tile k-major so a row of dst holds one
-    /// k-slice and fragment loads vectorize. Iterates the source, a
-    /// bijection onto dst, so each thread's coalesced row read scatters
-    /// into 4 scalar column writes (or, with async_copy, 4-byte cp.async
-    /// transfers that cannot vectorize against a strided destination but do
-    /// not stall). Never emits a barrier; the caller owns synchronization.
+    /// k-slice and fragment loads vectorize.
+    ///
+    /// Iterates the source, so each thread reads a coalesced row and scatters
+    /// it into 4 scalar column writes, or 4-byte cp.async transfers with
+    /// async_copy. Never emits a barrier, the caller owns synchronization.
     pub(in crate::codegen) fn tile_copy_transposed(
         &mut self,
         block: &Block<'c>,
@@ -242,8 +235,7 @@ impl<'c> Codegen<'c> {
         let width = self.elementwise_width(&[a, b, out]);
         let vec_t = Type::vector(&[4], out.elem);
         self.distribute(block, out, width, true, |cg, blk, idx| {
-            // The arith ops apply elementwise to vectors, so the same code
-            // serves both widths.
+            // Arith ops work on vectors too, so this serves both widths.
             let x = cg.elem_load(blk, a.mem, idx, width, vec_t)?;
             let y = cg.elem_load(blk, b.mem, idx, width, vec_t)?;
             let r = cg.push(blk, cg.elem_arith(op, out.elem, x, y)?)?;
@@ -251,9 +243,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Elementwise out = a * b. Takes the vectorized equal-shape path
-    /// ([`Self::tile_binary`]) when nothing needs broadcasting, otherwise the
-    /// scalar broadcast path ([`Self::tile_binary_bc`]).
+    /// Elementwise out = a * b. Uses [`Self::tile_binary`] when nothing needs
+    /// broadcasting, otherwise [`Self::tile_binary_bc`].
     pub(in crate::codegen) fn tile_binary_dispatch(
         &mut self,
         block: &Block<'c>,
@@ -281,10 +272,9 @@ impl<'c> Codegen<'c> {
         }
     }
 
-    /// out[...] = a[...] * b[...] with broadcasting: an operand dim of extent 1
-    /// reads index 0 in that axis (so a [R, 1] column vector stretches across the
-    /// [R, C] output). Scalar, not vectorized, since the broadcast operands have
-    /// a non-contiguous innermost access.
+    /// out[...] = a[...] * b[...] with broadcasting. An operand dim of extent
+    /// 1 always reads index 0, so an [R, 1] column stretches across an [R, C]
+    /// output. Not vectorized.
     pub(in crate::codegen) fn tile_binary_bc(
         &mut self,
         block: &Block<'c>,
@@ -308,9 +298,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// out[...] = max(a[...], b[...]) with broadcasting (like
-    /// [`Self::tile_binary_bc`], but arith has no float-max BinOp so it lowers to
-    /// cmpf plus select).
+    /// out[...] = max(a[...], b[...]) with broadcasting, like
+    /// [`Self::tile_binary_bc`].
     pub(in crate::codegen) fn tile_max_bc(
         &mut self,
         block: &Block<'c>,
@@ -335,10 +324,11 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// out[...] = select(va[...] >= vb[...], ia[...], ib[...]), broadcasting:
-    /// the index side of a (value, index) fold, which `tmax` alone cannot
-    /// carry. `>=` rather than `>` so a caller that always passes the later
-    /// candidate as `(va, ia)` breaks an exact tie reproducibly.
+    /// out[...] = select(va[...] >= vb[...], ia[...], ib[...]), broadcasting.
+    /// This is the index side of a (value, index) fold.
+    ///
+    /// It uses `>=`, so a caller that always passes the later candidate as
+    /// `(va, ia)` breaks exact ties reproducibly.
     pub(in crate::codegen) fn tile_argsel_bc(
         &mut self,
         block: &Block<'c>,
@@ -382,8 +372,8 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// out[...] = tile[...] * scalar (or scalar * tile[...]). The scalar is
-    /// coerced to the output element type and broadcast over every element.
+    /// out[...] = tile[...] * scalar, or scalar * tile[...]. The scalar is
+    /// coerced to the output element type.
     pub(in crate::codegen) fn tile_scalar_into(
         &mut self,
         block: &Block<'c>,

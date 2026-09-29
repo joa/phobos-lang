@@ -1,6 +1,6 @@
 //! A mixture-of-experts block's expert weights: `[count, n, k]` tensors read
-//! out of the file's mapping rather than copied out of it, since a model's
-//! experts are most of its bytes and do not all fit on a device at once.
+//! in place from the file mapping, not copied. A model's experts are most of
+//! its bytes and do not all fit on a device at once.
 
 use std::sync::Arc;
 
@@ -11,8 +11,8 @@ use crate::quant::grouped::{group_rows_into, grouped_len};
 use crate::{Gguf, Window};
 
 /// One `[count, n, k]` quantized tensor: `count` experts' `[n, k]` matrices
-/// back to back in storage order, each `n` rows of `k / block` blocks, so
-/// expert `e` is the byte range `e * expert_bytes .. (e + 1) * expert_bytes`.
+/// back to back, each `n` rows of `k / block` blocks. Expert `e` is the byte
+/// range `e * expert_bytes .. (e + 1) * expert_bytes`.
 pub struct ExpertStack {
     bytes: Window,
     quant: Quant,
@@ -106,10 +106,10 @@ impl ExpertStack {
         grouped_len(self.n, self.blocks_per_row(), self.quant.device_block().1)
     }
 
-    /// Elements of one expert's grouped scale plane: one `f16` a block,
-    /// rows regrouped by eights like the blocks. The K-quant kernels read
-    /// it only for a format whose scale is not in the block on the device
-    /// (Q6_K); the rest take it as an operand and never read it.
+    /// Elements of one expert's grouped scale plane: one `f16` per block,
+    /// rows regrouped by eights like the blocks. Kernels read it only for a
+    /// format whose device block lacks the scale (Q6_K). The others take it
+    /// as an operand and ignore it.
     pub fn grouped_scales(&self) -> usize {
         grouped_len(self.n, self.blocks_per_row(), 1)
     }
@@ -128,8 +128,8 @@ impl ExpertStack {
 
     /// Expert `e` in the grouped layout, into a buffer of
     /// [`ExpertStack::grouped_bytes`]: each block trimmed to its device
-    /// window, then rows regrouped by eights. Padding rows past `n` are left
-    /// as they are.
+    /// window, then rows regrouped by eights. Padding rows past `n` are not
+    /// written.
     pub fn grouped_into(&self, e: usize, out: &mut [u8]) {
         let (skip, dev) = self.quant.device_block();
         let block_bytes = self.quant.spec().block_bytes;

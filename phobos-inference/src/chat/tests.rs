@@ -171,8 +171,8 @@ fn a_tools_request_opens_with_the_templates_system_turn() {
     assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n"));
 }
 
-/// The two templates disagree on the call syntax, and a model handed the
-/// other answers in a blend of the two that parses as neither.
+/// The two templates disagree on the call syntax. A model handed the wrong
+/// one answers in a blend that parses as neither.
 #[test]
 fn the_dialect_comes_off_the_models_own_template() {
     assert_eq!(Dialect::detect(None), Dialect::Qwen);
@@ -277,11 +277,9 @@ fn the_minicpm_tool_block_follows_the_system_prompt() {
     assert!(!prompt.contains(TOOL_CALL_START));
 }
 
-/// What the parser reads out of a call has to render back into the prompt
-/// the same way, or a tool loop's second turn drifts.
-/// A kept session is reused only as far as the next prompt repeats it, so a
-/// call the client sends back has to render as the tokens the model wrote,
-/// arguments in the model's order rather than sorted.
+/// A parsed call must render back as the exact tokens the model wrote, with
+/// arguments in the model's order. A kept session is reused only as far as
+/// the next prompt repeats it.
 #[test]
 fn a_qwen_call_renders_back_as_the_model_wrote_it() {
     let written = concat!(
@@ -298,8 +296,8 @@ fn a_qwen_call_renders_back_as_the_model_wrote_it() {
     assert_eq!(prompt, written);
 }
 
-/// A structured argument is parsed into JSON on the way out and written
-/// again on the way back in, and the two have to agree on spacing too.
+/// A structured argument is parsed to JSON and written back, and the
+/// spacing must survive the round trip.
 #[test]
 fn a_json_argument_renders_back_with_the_models_spacing() {
     let written = concat!(
@@ -341,8 +339,7 @@ fn a_minicpm_call_renders_back_into_the_prompt() {
 }
 
 /// MiniCPM5's template prefills no think block, so the model opens one
-/// itself and the parser picks it up mid-content rather than assuming it
-/// started inside one.
+/// itself and the parser must pick it up mid-content.
 #[test]
 fn a_think_block_the_model_opens_itself_is_still_reasoning() {
     let out = AssistantOutput::collect(
@@ -484,8 +481,8 @@ fn a_sent_field_wins_and_the_rest_still_inherit() {
 
 #[test]
 fn a_sent_field_wins_even_when_it_equals_the_built_in_default() {
-    // Why the request fields are Options: a client asking for greedy has
-    // to get greedy, not the temperature the server started with.
+    // A client asking for greedy gets greedy, not the server's temperature.
+    // This is why the request fields are Options.
     let req: ChatCompletionRequest =
         serde_json::from_str(r#"{"messages": [], "temperature": 0.0}"#).unwrap();
     let sample = req.sample.resolve(&command_line());

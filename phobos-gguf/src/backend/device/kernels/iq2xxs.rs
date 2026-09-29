@@ -1,9 +1,10 @@
-// IQ2_XXS matvec: same raw-byte decode as iq1s.rs, with a second batched
-// `gather` for signs. Magnitude is a byte index into IQ2XXS_GRID; sign is a
-// 7-bit index into KSIGNS_IQ2XS built from the group's four-byte `aux`
-// field (see quant/iq2_xxs.rs). The scale lives in aux's top four bits. A
-// lane's 7-bit sign index can cross a byte boundary, so it's assembled as
-// `lo + hi * 256` from two corrected bytes before the div/mod.
+// IQ2_XXS matvec, with the same raw-byte decode as iq1s.rs plus a second
+// `gather` for signs.
+//
+// The magnitude is a byte index into the grid. The sign is a 7-bit index
+// into the sign table, taken from the group's four-byte `aux` field (see
+// quant/iq2_xxs.rs). The scale is aux's top four bits. A sign index can
+// cross a byte boundary, so it is assembled as `lo + hi * 256` first.
 
 use std::fmt::Write as _;
 
@@ -14,8 +15,7 @@ pub(crate) const IQ2XXS_TN: usize = 8;
 pub(crate) const IQ2XXS_I8_TN: usize = 64;
 
 /// The tile for an `n` that 64 does not divide. A warp then takes two
-/// columns rather than eight, which is slower but still well ahead of the
-/// float path it would otherwise fall back to.
+/// columns rather than eight, which beats the float fallback.
 pub(crate) const IQ2XXS_I8_NARROW_TN: usize = 16;
 
 const LANES: usize = 32;
@@ -23,16 +23,16 @@ const LANE: usize = 8;
 const BLOCK_BYTES: usize = 64;
 const QS_OFF: usize = 0;
 
-/// [`crate::quant::iq2xxs_flat_grid`]'s length: 256 grid entries, eight
-/// `i32` lanes apiece.
+/// [`crate::quant::iq2xxs_flat_grid`]'s length: 256 grid entries of eight
+/// lanes each.
 pub(crate) const IQ2XXS_GRID_LEN: usize = 256 * 8;
-/// [`crate::quant::iq2xxs_flat_signs`]'s length: 128 sign indices, eight
-/// `i32` multipliers apiece.
+/// [`crate::quant::iq2xxs_flat_signs`]'s length: eight sign multipliers for
+/// each of 128 sign indices.
 pub(crate) const IQ2XXS_SIGNS_LEN: usize = 128 * 8;
 
-/// Byte offsets for lane `is` (ib32 = is/4, l = is%4, matching
-/// quant/iq2_xxs.rs::dequantize). `hi_off` is `None` for `l == 0`, whose
-/// sign bits fit entirely in `lo_off`'s byte.
+/// Byte offsets for lane `is`, with `ib32 = is / 4` and `l = is % 4` as in
+/// `quant/iq2_xxs.rs::dequantize`. `hi_off` is `None` for `l == 0`, whose
+/// sign bits fit in one byte.
 fn run_geometry(is: usize) -> (usize, usize, usize, Option<usize>, usize) {
     let ib32 = is / 4;
     let l = is % 4;
@@ -106,10 +106,9 @@ kernel iq2xxs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq2xxs_matvec_src`] for `m == 1`, folding the whole decode-and-reduce
-/// into one `iq2xxs_qdot_t` call; see `iq1s_qdot_matvec_src`'s doc, which
-/// this mirrors. `@aligned(N = TN)` is required for the same reason:
-/// `iq2xxs_qdot_t` demands its `qb`/`d` slices provably in bounds.
+/// [`iq2xxs_matvec_src`] for `m == 1`, as one `iq2xxs_qdot_t` call;
+/// mirrors `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
+/// `iq2xxs_qdot_t` needs its `qb` and `d` slices provably in bounds.
 pub(crate) fn iq2xxs_qdot_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -126,8 +125,8 @@ kernel iq2xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq2xxs_qdot_matvec_src`] against an int8-quantized activation,
-/// contracted in `dp4a`.
+/// [`iq2xxs_qdot_matvec_src`] against an int8-quantized activation, in
+/// dp4a.
 pub(crate) fn iq2xxs_qdot_i8_matvec_src(tn: usize) -> String {
     format!(
         "@launch(256, 4)
@@ -147,9 +146,9 @@ kernel iq2xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq2xxs_matvec_src`]'s decode, stored straight into a `[K, N]` scratch
-/// instead of reduced against an activation row; see `iq1s.rs`'s
-/// `iq1s_dequant_src` for why.
+/// [`iq2xxs_matvec_src`]'s decode, stored into a `[K, N]` scratch instead
+/// of reduced against an activation row; see `iq1s_dequant_src` in
+/// `iq1s.rs`.
 pub(crate) fn iq2xxs_dequant_src(tn: usize) -> String {
     let mut body = String::new();
     for is in 0..LANES {
@@ -179,9 +178,8 @@ kernel iq2xxs_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq2xxs_dequant_src`]'s decode as a single `iq2xxs_qdecode_t` call; see
-/// `iq1s.rs`'s `iq1s_qdecode_src`, which this mirrors with the sign table
-/// alongside the magnitude grid.
+/// [`iq2xxs_dequant_src`]'s decode as one `iq2xxs_qdecode_t` call. Mirrors
+/// `iq1s_qdecode_src` in `iq1s.rs`, with a sign table beside the grid.
 pub(crate) fn iq2xxs_qdecode_src(tn: usize) -> String {
     format!(
         "@launch(256)
@@ -199,9 +197,8 @@ kernel iq2xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// IQ2_XXS's prompt projection, decode and contraction in one kernel, the
-/// same shape as [`super::iq1s::iq1s_qmma_src`]: fusing avoids the byte
-/// expansion a separate dequant-then-matmul pass would pay.
+/// IQ2_XXS's prompt projection, decode and contraction in one kernel, like
+/// [`super::iq1s::iq1s_qmma_src`].
 pub(crate) fn iq2xxs_qmma_src(block: usize, tm: usize, tn: usize) -> String {
     format!(
         "@launch({block})

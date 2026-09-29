@@ -63,8 +63,8 @@ pub struct ChainExec {
     /// Padding buffers whose stream ops are still in flight, freed at the next
     /// synchronize: an async copy must outlive its queued work.
     pending: Vec<DeviceBuffer<f32>>,
-    /// Must be the last field: Rust drops in declaration order, and everything
-    /// above has to be released while the context is still alive.
+    /// Must be the last field. Fields drop in declaration order, and everything
+    /// above must be released while the context is alive.
     _ctx: cust::context::Context,
 }
 
@@ -106,8 +106,8 @@ impl ChainExec {
     /// Execute `graph` over host-tensor `inputs`, returning host tensors.
     /// Mirrors [`host::run`] so the results can be checked against it.
     ///
-    /// Float activations live on the device; device ops launch cached kernels
-    /// on one stream with no per-op sync and chain on stream ordering. An op
+    /// Float activations live on the device. Device ops launch cached kernels
+    /// on one stream and chain on stream order, with no per-op sync. An op
     /// with no device kernel falls back to the host interpreter and forces a
     /// sync.
     pub fn run(
@@ -164,9 +164,9 @@ impl ChainExec {
             .cloned()
             .collect();
 
-        // Reshaping a float tensor is metadata only, and keeps the data
-        // device-resident. Its shape input is an int, so this has to come
-        // before the int-input check below.
+        // Reshaping a float tensor only changes metadata, so the data stays
+        // on the device. Its shape input is an int, so this must come before
+        // the int-input check below.
         if op == "Reshape" && !self.is_int(&in_edges[0]) {
             return self.try_reshape(node);
         }
@@ -241,8 +241,8 @@ impl ChainExec {
         dmap.insert(node.outputs[0].clone(), out_dims.clone());
         let plan = match lower::lower_node(node, &|e| dmap.get(e).cloned()) {
             Ok(p) => p,
-            // Lowering bails on shapes it cannot handle yet, a broadcast Add
-            // among them, so fall back rather than error.
+            // Lowering bails on shapes it cannot handle yet, such as a
+            // broadcast Add, so fall back rather than error.
             Err(_) => return Ok(false),
         };
         // A compile failure means this shape is unsupported, so fall back.
@@ -312,10 +312,10 @@ impl ChainExec {
         Ok(())
     }
 
-    /// A device-resident 2-D matmul, padding its operands to tile-aligned dims
-    /// since Phobos has no tail masking yet. A constant B is padded once and
-    /// kept resident. The output is the logical `[m, n]` block, and every copy
-    /// is async on the stream, so this still chains.
+    /// A device-resident 2-D matmul. Operands are padded to whole tiles, since
+    /// Phobos has no tail masking yet, and a constant B is padded once and
+    /// kept resident. The output is the logical `[m, n]` block. Every copy is
+    /// async on the stream, so this still chains.
     fn matmul_2d(
         &mut self,
         a_edge: &str,
@@ -438,9 +438,9 @@ impl ChainExec {
         Ok(())
     }
 
-    /// Attention's `A[batch,m,k] @ B[batch,k,n]`, as a per-head loop of padded
-    /// 2-D matmuls all async on the stream. Both operands are activations, so
-    /// both pad per call; the heads share one launch config.
+    /// Attention's `A[batch,m,k] @ B[batch,k,n]`, as a loop of padded 2-D
+    /// matmuls over the heads, all async on the stream. Both operands are
+    /// activations, so both pad per call. The heads share one launch config.
     fn batched_matmul(
         &mut self,
         a_edge: &str,
@@ -597,8 +597,8 @@ impl ChainExec {
         self.launch(&plan, out_dims)
     }
 
-    /// Reshape a float tensor, which is metadata only. A device tensor stays
-    /// resident, its buffer copied under the new shape on the stream; a
+    /// Reshape a float tensor, which only changes metadata. A device tensor
+    /// stays resident, its buffer copied under the new shape on the stream. A
     /// host-only tensor is reshaped on the host.
     fn try_reshape(&mut self, node: &Node) -> Result<bool> {
         let data_edge = node.inputs[0].clone();

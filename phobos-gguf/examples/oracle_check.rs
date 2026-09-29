@@ -4,11 +4,11 @@
 //   cargo run --release -p phobos-gguf --features cuda --example oracle_check -- \
 //       MODEL.gguf -k 8 -n 24 "The capital of France is" "def fib(n):"
 //
-// Per prompt, one JSON line: the prompt's token ids, the top `k` next tokens
-// with their log-probabilities after the whole prompt in one pass, and `n`
-// greedy tokens after that: what `llama-server`'s `/completion` returns for
-// the same ids with `n_probs` set and greedy sampling. `--ids 1,2,3` takes a
-// prompt as token ids, to probe a position a diff has already found.
+// Prints one JSON line per prompt: its token ids, the top `k` next tokens
+// with log-probabilities after one prompt pass, and `n` greedy tokens after
+// that. This matches what `llama-server`'s `/completion` returns with
+// `n_probs` set and greedy sampling. `--ids 1,2,3` gives a prompt as token
+// ids, to probe a position a diff has already found.
 
 use std::path::PathBuf;
 

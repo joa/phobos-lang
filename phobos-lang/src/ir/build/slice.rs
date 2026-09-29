@@ -83,9 +83,11 @@ impl Build {
         self.value(OpKind::Dim(d), &[src], Type::INDEX)
     }
 
-    /// Lowers slice subscripts to a `Slice`. Offsets are always operands;
-    /// sizes are static when they fold; a dimension that may run past the
-    /// source carries its extent as a mask operand.
+    /// Lowers slice subscripts to a `Slice`.
+    ///
+    /// Offsets are always operands. Sizes are static when they fold. A
+    /// dimension that may run past the source carries its extent as a mask
+    /// operand.
     pub(crate) fn emit_subview(&mut self, src: ValueId, subs: &[Sub]) -> Result<ValueId> {
         let src_shape = self.shape(src);
         let rank = src_shape.len();

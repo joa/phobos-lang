@@ -6,34 +6,31 @@
 For TAG, in order:
 
  1. Checks the tag out into a clean worktree under target/dist/TAG/src, built
-    into target/dist/TAG/target, since the compiler fingerprint hashes the
-    files on disk and one uncommitted edit would key the cache to a build
-    nobody ships. Pushes the tag if origin
-    lacks it, which starts .github/workflows/release.yml.
+    into target/dist/TAG/target. The compiler fingerprint hashes the files on
+    disk, so an uncommitted edit would key the cache to a build nobody ships.
+    Pushes the tag if origin lacks it, which starts
+    .github/workflows/release.yml.
  2. Builds phobos-cache and phobos-bench there and reads their fingerprint.
- 3. Starts the cache from the newest earlier release's under target/dist,
-    then warms the previous release's kernel manifest under that
-    fingerprint, so the recording runs after it hit instead of compiling on
-    the GPU box one model at a time. Under an unchanged fingerprint the copy
-    already holds everything; otherwise the slow kernels land here, on every
-    core.
+ 3. Copies the newest earlier release's cache from target/dist, then warms
+    the previous release's kernel manifest under the new fingerprint. The
+    recording runs that follow then hit the cache instead of compiling.
  4. Records this tag's manifest by running every GGUF model under --models
-    through phobos-bench, then warms whatever it added and prunes whatever it
-    no longer asks for, so the cache ships exactly this build's kernels.
- 5. Waits for CI, downloads both builds, and refuses to go on unless every
-    binary carries the fingerprint the cache was warmed under.
- 6. Packages each platform with the cache, a README and the license, and
-    uploads a draft release (published with --publish) holding the packages
-    and the manifest the next release seeds from.
+    through phobos-bench. Warms what it added and prunes what it no longer
+    asks for, so the cache holds exactly this build's kernels.
+ 5. Waits for CI and downloads both builds. Stops unless every binary carries
+    the fingerprint the cache was warmed under.
+ 6. Packages each platform with the cache, a README and the license. Uploads
+    a draft release (published with --publish) holding the packages and the
+    manifest the next release seeds from.
 
---local skips CI and the upload: it builds the Windows binaries in the
-worktree and packages them, which exercises everything but the other OS.
+--local skips CI and the upload. It builds and packages the Windows binaries
+in the worktree, which exercises everything but the other OS.
 
 `toolchain` packs a local Windows LLVM/MLIR install into the
-toolchain-llvm-VERSION release, creating it. The Linux one is --linux, an
-archive scripts/ci/build_llvm.sh wrote, or else the toolchain workflow is
-dispatched to build it. Needs gh, logged in, and the MLIR toolchain the rest of
-the tree builds with.
+toolchain-llvm-VERSION release, creating it if needed. The Linux archive comes
+from --linux (written by scripts/ci/build_llvm.sh); without it the toolchain
+workflow is dispatched to build one. Needs gh, logged in, and the MLIR
+toolchain the rest of the tree builds with.
 """
 
 import argparse
@@ -80,9 +77,9 @@ Compiler fingerprint {fingerprint}.
 """
 
 
-# The shell's PHOBOS_* never reach a step: a leftover cache epoch would key
-# the shipped cache and every fingerprint.txt alike, pass the check, and miss
-# on every user's machine.
+# Strip the shell's PHOBOS_* variables. A leftover cache epoch would key the
+# shipped cache and the fingerprint check alike, then miss on every user's
+# machine.
 BASE_ENV = {k: v for k, v in os.environ.items() if not k.startswith("PHOBOS_")}
 
 
@@ -125,11 +122,11 @@ def worktree(tag, dist):
 
 
 def build_dir(src):
-    """The worktree's own target directory. Never the checkout's: the worktree
-    sits under it, so cargo records the worktree's sources relative to the
-    same root and each build takes the other's artifacts for its own, which
-    ships a working tree's edits in a release and a release's code in a
-    working tree's next build."""
+    """The worktree's own target directory.
+
+    Never share the checkout's. The worktree sits under it, so cargo would
+    mix up the two builds' artifacts, shipping a working tree's edits in a
+    release."""
     return src.parent / "target"
 
 
@@ -174,10 +171,10 @@ def seed_manifest(tag, dist, explicit, online):
 
 
 def inherit_cache(dist, cache):
-    """Starts an empty cache from the newest other release's. Under the same
-    compiler fingerprint every entry it holds is one this release would
-    compile, which turns the slowest step into a copy; under another none
-    match, and the prune after the warm drops them all."""
+    """Fills an empty cache with a copy of the newest other release's.
+
+    Under the same compiler fingerprint every entry is reused. Under another
+    none match, and the prune after the warm drops them."""
     if cache.is_dir() and any(cache.iterdir()):
         return
     others = [d / "kernel-cache" for d in dist.parent.iterdir() if d != dist and (d / "kernel-cache").is_dir()]
@@ -275,8 +272,8 @@ def package(tag, platform, built, cache, fingerprint, dist):
     else:
         archive = dist / f"{name}.tar.gz"
 
-        # Modes are set rather than kept: an artifact download drops the
-        # executable bit, and a tree staged on Windows reads as world-writable.
+        # Set modes explicitly. An artifact download drops the executable
+        # bit, and a tree staged on Windows reads as world-writable.
         def executable(info):
             info.mode = 0o755 if info.isdir() or Path(info.name).name in BINARIES else 0o644
             info.uid = info.gid = 0
@@ -332,9 +329,11 @@ def release(args):
 
 
 def toolchain(args):
-    """Packs the Windows LLVM/MLIR install CI links against and starts the
-    Linux build: `lib/` without clang's libraries, `include/`, and the four
-    tools the build scripts call."""
+    """Packs the Windows LLVM/MLIR install CI links against, then starts the
+    Linux build.
+
+    The archive holds `include/`, `lib/` without clang's libraries, and the
+    four tools the build scripts call."""
     llvm = args.llvm.resolve()
     version = args.llvm_version
     tag = f"toolchain-llvm-{version}"

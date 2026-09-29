@@ -7,8 +7,8 @@ use crate::vocab::Vocab;
 
 /// A byte-level BPE encoder built from a GGUF vocabulary.
 ///
-/// The merging itself is [`ByteBpe`]; what a GGUF file adds is the vocabulary,
-/// its control tokens, and which of them end a turn.
+/// [`ByteBpe`] does the merging. The GGUF file supplies the vocabulary, its
+/// control tokens, and which of them end a turn.
 pub struct Bpe {
     bpe: ByteBpe,
     encoder: HashMap<String, u32>,
@@ -93,15 +93,15 @@ impl Bpe {
         self.decoder.len()
     }
 
-    /// Encode text, matching special tokens literally and BPE-merging the rest.
+    /// Encodes text, matching special tokens literally and BPE-merging the rest.
     pub fn encode(&self, text: &str) -> Result<Vec<u32>> {
         self.bpe.encode(text, &self.specials, |symbol| {
             self.encoder.get(symbol).copied()
         })
     }
 
-    /// Decode ids to their raw byte stream. A token can end mid-character, so
-    /// a streaming caller must buffer these and emit complete UTF-8 only.
+    /// Decodes ids to their raw bytes. A token can end mid-character, so a
+    /// streaming caller must buffer and emit only complete UTF-8.
     pub fn decode_bytes(&self, ids: &[u32]) -> Vec<u8> {
         self.bpe.decode_bytes(
             ids.iter()

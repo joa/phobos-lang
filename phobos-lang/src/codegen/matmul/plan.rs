@@ -3,15 +3,16 @@
 use super::*;
 
 impl<'c> Codegen<'c> {
-    /// Runs the fused matmul's k-loop. Both the vector and WMMA paths use it.
-    /// With `@pipeline`, it double-buffers by unrolling two iterations: the
-    /// first half computes from one buffer pair while prefetching the next
-    /// into the other, the second half does the same for the odd iteration
-    /// (its accumulators pass through a CTA-uniform scf.if). Without it, this
-    /// just stages, barriers, accumulates, barriers in place.
+    /// Runs the fused matmul's k-loop and returns the finished accumulators.
     ///
-    /// Returns the finished accumulators; stage prefetches one iteration
-    /// into a pair, half emits one pipelined half, mac accumulates one pair.
+    /// Without `@pipeline`, each iteration stages, barriers, accumulates and
+    /// barriers again. With it, the loop is unrolled by two to double-buffer.
+    /// Each half computes from one buffer pair while prefetching into the
+    /// other. The second half sits in a CTA-uniform scf.if, for an odd
+    /// iteration count.
+    ///
+    /// `stage` stages one iteration into a pair, `half` emits one pipelined
+    /// half, and `mac` accumulates from one pair.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn matmul_kloop(
         &mut self,
@@ -43,8 +44,8 @@ impl<'c> Codegen<'c> {
             return self.carry_loop(block, lo, hi, st, regs, |cg, body, kt, accs| {
                 stage(cg, body, kt, &a_bufs[0], &b_bufs[0])?;
 
-                // publish the staging, accumulate, then retire this
-                // iteration's reads before the next one overwrites.
+                // The first barrier publishes the staging. The second
+                // retires this iteration's reads before the next overwrites.
                 cg.barrier(body)?;
                 let next = mac(cg, body, &a_bufs[0], &b_bufs[0], accs)?;
                 cg.barrier(body)?;
@@ -52,7 +53,7 @@ impl<'c> Codegen<'c> {
             });
         }
 
-        // prologue: stage lo into the first pair, then unroll by two
+        // Prologue: stage lo into the first pair, then unroll by two.
         stage(self, block, lo, &a_bufs[0], &b_bufs[0])?;
         self.barrier(block)?;
         let two = self.const_index(block, 2)?;
@@ -68,7 +69,7 @@ impl<'c> Codegen<'c> {
                 accs,
             )?;
 
-            // half_b: when iteration kt + st exists.
+            // half_b runs only when iteration kt + st exists.
             let have_b = cg.push(
                 body,
                 arith::cmpi(cg.ctx, arith::CmpiPredicate::Slt, next, hi, cg.loc),
@@ -103,10 +104,9 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Applies precomputed GEMM scaling to one accumulator value, producing
-    /// alpha*acc + beta*prev_load, or alpha*acc, or just acc. prev_load (the
-    /// prior C value) is only loaded when beta is present. Works the same on
-    /// scalars and vectors since the arith ops are element-wise.
+    /// Applies precomputed GEMM scaling to one accumulator value: alpha*acc +
+    /// beta*prev, alpha*acc, or just acc. The prior C value is loaded only
+    /// when beta is present. Works on scalars and vectors alike.
     pub(in crate::codegen) fn apply_scaling(
         &mut self,
         block: &Block<'c>,
@@ -130,7 +130,8 @@ impl<'c> Codegen<'c> {
 
     /// The warp's block origin (m0, n0) on a wm x wn warp grid of bm x bn
     /// element blocks, with surplus warps clamped onto the last block.
-    /// Returns (tid, w, wt, m0, n0) so callers can derive lane coordinates.
+    /// Returns (tid, w, wt, m0, n0), where w is the warp size and wt the
+    /// clamped warp id.
     pub(in crate::codegen) fn warp_block_origin(
         &self,
         block: &Block<'c>,

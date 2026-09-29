@@ -5,8 +5,8 @@ use crate::Gguf;
 use crate::quant::grouped::{group_rows, grouped_len};
 use crate::tests::{Builder, ggml_code, xorshift};
 
-/// `n` rows of `k` in `quant`, random quants and scales with small finite
-/// headers, which any byte pattern of a K-quant block is otherwise.
+/// `n` rows of `k` in `quant`: random bytes, except for small finite
+/// headers. Any other byte pattern is a valid K-quant block.
 fn blocks(quant: Quant, n: usize, k: usize, seed: u64) -> Vec<u8> {
     let mut next = xorshift(seed);
     let spec = quant.spec();
@@ -65,7 +65,7 @@ fn check(quant: Quant, isa: Isa) {
     for (j, (&g, &w)) in got.iter().zip(&want).enumerate() {
         assert!((f64::from(g) - w).abs() <= 1e-5 * scale, "{} output {j}: {g} against {w}", quant.name());
     }
-    // One row at a time, the fused path, sums the same.
+    // One row at a time, the fused path, gives the same sums.
     for r in 0..rows {
         let one = Q8Act::quantize(&activation(rows, k, 11)[r * k..(r + 1) * k], 1, k).unwrap();
         let mut single = vec![0.0f32; n];
@@ -74,8 +74,8 @@ fn check(quant: Quant, isa: Isa) {
             assert_eq!(single[j], got[j * rows + r], "{} row {r} output {j} alone against batched", quant.name());
         }
     }
-    // The device's layout, with the trailing scale in its plane, reads
-    // the same.
+    // The device's layout, with the trailing scale in its own plane, gives
+    // the same result.
     let nb = k / BLOCK;
     let (skip, unit) = quant.device_block();
     let trimmed: Vec<u8> = weight.chunks_exact(quant.spec().block_bytes).flat_map(|b| b[skip..skip + unit].to_vec()).collect();

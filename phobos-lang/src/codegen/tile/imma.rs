@@ -5,15 +5,13 @@ use super::*;
 impl<'c> Codegen<'c> {
     /// `dot_t` over int8 operands on the integer tensor cores.
     ///
-    /// Unlike the f16 tensor-core path there is no staging buffer and no
-    /// ldmatrix: the m8n8k16 fragment layout is already what `dot_t` holds
-    /// in memory. A lane's A and B registers are each four contiguous bytes
-    /// of row `lane / 4` of their operand, exactly what `dp4a` would read.
+    /// There is no staging buffer and no ldmatrix, because the m8n8k16
+    /// fragment layout is already how `dot_t` holds its operands. A lane's A
+    /// and B registers are each four contiguous bytes of row `lane / 4`.
     ///
-    /// Returns false when it does not apply: the tensor core needs whole
-    /// 8x8 output tiles over a k that is a multiple of 16, no integer
-    /// tensor core exists before Turing, and a masked output needs the
-    /// per-element store guard only the generic dp4a path provides.
+    /// Returns false when it does not apply. It needs whole 8x8 output tiles,
+    /// k a multiple of 16, an integer tensor core (Turing or later), and an
+    /// unmasked output.
     pub(super) fn tile_matmul_t_imma(
         &mut self,
         block: &Block<'c>,
@@ -26,8 +24,8 @@ impl<'c> Codegen<'c> {
         let applies = a.elem == self.i8_t
             && b.elem == self.i8_t
             && out.elem == self.i32_t
-            // Positive as well as divisible: DYN is i64::MIN, which every one
-            // of these divides.
+            // Check positive too, since DYN is i64::MIN and divisible by all
+            // of these.
             && md > 0
             && nd > 0
             && md % 8 == 0
@@ -55,9 +53,9 @@ impl<'c> Codegen<'c> {
         let warps = self.divui(block, bdim, warp_size)?;
         let lane = self.remui(block, tid, warp_size)?;
 
-        // The lane's place in the fragments: both operands are read from row
-        // lane / 4, four bytes starting at column 4 * (lane % 4), and the two
-        // accumulator elements land in columns 2 * (lane % 4) and one past.
+        // The lane's place in the fragments. Both operands are read from row
+        // lane / 4, four bytes from column 4 * (lane % 4). The two accumulator
+        // elements land in columns 2 * (lane % 4) and the one after.
         let four = self.const_index(block, 4)?;
         let quad = self.divui(block, lane, four)?;
         let in_quad = self.remui(block, lane, four)?;
@@ -65,8 +63,8 @@ impl<'c> Codegen<'c> {
         let two = self.const_index(block, 2)?;
         let d_col = self.muli(block, in_quad, two)?;
 
-        // One 8x8 output tile per warp, row-major so neighbouring warps share
-        // the A rows they read.
+        // One 8x8 output tile per warp, row-major so neighbouring warps read
+        // the same A rows.
         let eight = self.const_index(block, 8)?;
         let n_tiles = self.const_index(block, nd / 8)?;
         let total = self.const_index(block, (md / 8) * (nd / 8))?;
@@ -126,15 +124,13 @@ impl<'c> Codegen<'c> {
 
     /// A small signed integer as an f32, without the conversion instruction.
     ///
-    /// Adding 1.5 * 2^23 to `value` as an integer lands it in the mantissa of
-    /// that float, so the bits are already the f32 of `1.5 * 2^23 + value`,
-    /// and subtracting the constant back off leaves the value exactly. Holds
-    /// for `|value| < 2^22`, which a Q8_0 block guarantees: 32 products of
-    /// two int8s cannot exceed 32 * 127 * 127.
+    /// Adding the bits of 1.5 * 2^23 to `value` as an integer gives the f32
+    /// of `1.5 * 2^23 + value`. Subtracting the constant as a float then
+    /// leaves the value exactly.
     ///
-    /// Avoids `cvt`, which on Turing issues at a quarter of the arithmetic
-    /// rate: the quantized matmul does one of these conversions per
-    /// accumulator per block, competing with the tensor core for issue slots.
+    /// Requires `|value| < 2^22`. A Q8_0 block guarantees this, since 32
+    /// products of two int8s cannot exceed 32 * 127 * 127. Avoids `cvt`,
+    /// which issues at a quarter rate on Turing.
     pub(super) fn small_int_to_f32(
         &self,
         block: &Block<'c>,

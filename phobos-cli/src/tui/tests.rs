@@ -1,10 +1,8 @@
 // Rendering tests against a backend that draws into a buffer.
 //
-// They cannot say whether the dashboard looks right, which is a judgement for
-// somebody with a terminal. They can say that every size renders without
-// panicking and that the figures reach the screen, which is what a layout
-// change is most likely to break: a panel one row too tall to fit does not
-// fail a type check.
+// They cannot say whether the dashboard looks right. They check that every
+// size renders without panicking and that the figures reach the screen, which
+// is what a layout change most often breaks.
 
 use std::time::Duration;
 
@@ -21,8 +19,8 @@ use super::view::View;
 /// Everything the panels read, filled the way a loaded model would fill it.
 fn loaded() -> Snapshot {
     let meter = Meter::new();
-    // A qwen-shaped interleave: every fourth block is attention and the rest
-    // carry recurrent state, which is the case worth drawing.
+    // A qwen-shaped interleave: every fourth block is attention, the rest
+    // recurrent.
     let blocks = (0..48)
         .map(|i| {
             if (i + 1) % 4 == 0 {
@@ -94,8 +92,7 @@ fn loaded() -> Snapshot {
     }
     meter.request_finished("stop");
 
-    // The second request of a conversation: most of its prompt was already
-    // in the session the first one left behind.
+    // A follow-up request, with most of its prompt in the kept session.
     meter.request_started(128, 96);
     meter.prefilled(128, Duration::from_millis(90));
     meter.token(129, Some(4 << 20));
@@ -106,11 +103,9 @@ fn loaded() -> Snapshot {
 fn draw(width: u16, height: u16, snap: &Snapshot) -> Vec<String> {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     let mut view = View::new();
-    // Past the splash: these are about the panels behind it.
+    // Skip the splash.
     view.splash = 0;
-    // Several frames, so the eased gauges have moved off their starting
-    // values and the rain has fallen: a panic that only happens once the
-    // animations are running is still a panic.
+    // Several frames, so the animations are running too.
     for _ in 0..30 {
         terminal
             .draw(|frame| panels::render(frame, &mut view, snap))
@@ -131,15 +126,14 @@ fn screen(width: u16, height: u16, snap: &Snapshot) -> String {
     draw(width, height, snap).join("\n")
 }
 
-/// The moon, on the way in. Drawn over everything while it is up, so the
-/// panels behind it are not what a test of it should be looking at.
+/// The splash covers the panels while it runs, then hands the screen back.
 #[test]
 fn the_splash_draws_the_moon_and_then_gets_out_of_the_way() {
     let snap = loaded();
     let mut terminal = Terminal::new(TestBackend::new(100, 46)).unwrap();
     let mut view = View::new();
 
-    // Far enough in for the reveal to have reached the bottom.
+    // Far enough for the reveal to reach the bottom.
     for _ in 0..60 {
         terminal
             .draw(|frame| panels::render(frame, &mut view, &snap))
@@ -170,7 +164,7 @@ fn the_splash_draws_the_moon_and_then_gets_out_of_the_way() {
         "the panels drew under the splash"
     );
 
-    // It gives up the screen on its own.
+    // It ends on its own.
     while view.splash > 0 {
         view.tick();
     }
@@ -192,8 +186,7 @@ fn the_splash_draws_the_moon_and_then_gets_out_of_the_way() {
     );
 }
 
-/// A terminal too short for the whole moon gets none of it rather than a
-/// cropped one, and goes straight to the panels.
+/// A terminal too small for the whole image goes straight to the panels.
 #[test]
 fn a_small_terminal_skips_the_splash_entirely() {
     let text = screen(80, 24, &loaded());
@@ -203,8 +196,7 @@ fn a_small_terminal_skips_the_splash_entirely() {
 #[test]
 fn renders_at_every_size_it_may_be_given() {
     let snap = loaded();
-    // A tall wide terminal, the ordinary one, the default 80x24, and sizes
-    // small enough that a panel has no room left at all.
+    // From large down to sizes where a panel has no room at all.
     for (width, height) in [(200, 60), (120, 40), (80, 24), (60, 20), (40, 10), (20, 5)] {
         let lines = draw(width, height, &snap);
         assert_eq!(lines.len(), height as usize, "{width}x{height}");
@@ -219,8 +211,7 @@ fn renders_at_every_size_it_may_be_given() {
 
 #[test]
 fn an_empty_meter_renders() {
-    // What the first frame draws, before a request has arrived: every
-    // optional field is absent at once.
+    // The first frame, with every optional field absent.
     let snap = Meter::new().snapshot();
     for (width, height) in [(120, 40), (80, 24), (30, 8)] {
         draw(width, height, &snap);
@@ -255,16 +246,14 @@ fn the_figures_reach_the_screen() {
     assert!(text.contains("24.00 GiB"), "the card total is missing");
     assert!(text.contains("7.00 GiB"), "the weight figure is missing");
     assert!(text.contains("127.0.0.1:8080"), "the address is missing");
-    // Mid-request, so the phase is the decode it is in.
+    // Mid-request, so the phase is decode.
     assert!(text.contains("DECODE"), "the phase is missing");
 }
 
 #[test]
 fn the_context_cost_reads_as_a_projection_and_not_as_usage() {
     let text = screen(150, 46, &loaded());
-    // What the caches would take if the conversation ever ran the whole
-    // context, which is not what they take now, and used to be labelled as
-    // though it were.
+    // The full-context cost is a projection and must be labelled as one.
     assert!(
         text.contains("if the context ever filled"),
         "the projection is unlabelled"
@@ -273,7 +262,7 @@ fn the_context_cost_reads_as_a_projection_and_not_as_usage() {
         text.contains("more fit in what is free"),
         "the figure worth acting on is missing"
     );
-    // What they actually take, which is the gauge beside it.
+    // The live cache size.
     assert!(text.contains("4.00 MiB"), "the live cache size is missing");
 }
 
@@ -281,8 +270,8 @@ fn the_context_cost_reads_as_a_projection_and_not_as_usage() {
 fn the_card_is_described_including_both_version_numbers() {
     let text = screen(150, 46, &loaded());
     assert!(text.contains("RTX 2080 SUPER"), "the card name is missing");
-    // The display driver's version and the CUDA API's are different numbers
-    // and both are worth having; only the second is one CUDA can report.
+    // The display driver version and the CUDA API version are different
+    // numbers, and both are shown.
     assert!(text.contains("610.88"), "the driver version is missing");
     assert!(text.contains("CUDA 13.0"), "the CUDA version is missing");
     assert!(text.contains("sm_75"), "the compute capability is missing");
@@ -329,10 +318,8 @@ fn memory_accounts_for_what_is_neither_weights_nor_cache() {
     }
 }
 
-/// Weights reach the card lazily, so between loading a model and its first
-/// pass the footprint is larger than anything the driver says is in use.
-/// Drawing the whole footprint then puts memory on the screen that is not on
-/// the card.
+/// Weights are uploaded lazily, so before the first pass the footprint can
+/// exceed what the driver reports in use. Only what is on the card is drawn.
 #[test]
 fn weights_not_yet_uploaded_are_not_drawn_as_resident() {
     let meter = Meter::new();
@@ -361,7 +348,7 @@ fn weights_not_yet_uploaded_are_not_drawn_as_resident() {
         "the weights are drawn as resident when they are not:
 {text}"
     );
-    // The card's own figure is what the headline reports.
+    // The headline reports the driver's figure.
     assert!(
         text.contains("1.12 GiB of 8.00 GiB"),
         "
@@ -399,10 +386,9 @@ fn formatting_is_readable_at_the_scales_these_reach() {
     assert_eq!(panels::duration(Duration::from_secs(7265)), "2h01m");
 }
 
-/// Before there is a model, the load is the only thing happening and gets
-/// the screen. A cold start spends minutes here.
+/// A snapshot partway through loading, before there is a model.
 fn mid_load(cached: bool) -> Snapshot {
-    // Real shapes: a kernel's text is short and its PTX is not.
+    // A kernel's text is short and its PTX is longer.
     const SOURCE: &str = "kernel iq2s_matvec(A: tensor<f32>[M, K]) {\n\
                           let pm = program_id(0)\n\
                           var acc: tile<f32>[TM, TN] = 0.0\n\
@@ -451,14 +437,12 @@ fn a_load_reports_what_it_is_building() {
     assert!(!text.contains("THROUGHPUT"), "the panels drew too early");
 }
 
-/// The case that prompted this: a batch starts 71 kernels at once, one of
-/// them takes ten minutes, and reporting only completions leaves its name off
-/// the screen for the whole of that wait while a finished kernel's name sits
-/// there instead.
+/// A batch starts all its kernels at once. The one still running must be
+/// named on screen, not only the ones that finished.
 #[test]
 fn the_kernel_the_batch_is_waiting_on_is_named() {
     let meter = Meter::new();
-    // The whole batch starts together, as a real one does.
+    // The whole batch starts together.
     for name in ["q2k_matvec", "q3k_matvec", "iq1s_matvec"] {
         meter.starting(name);
     }
@@ -494,16 +478,13 @@ fn the_kernel_the_batch_is_waiting_on_is_named() {
 fn the_compile_screen_shows_the_real_source_and_the_real_ptx() {
     let text = screen(150, 46, &mid_load(false));
     assert!(text.contains("COMPILING"), "{text}");
-    // The kernel's own text, going in.
     assert!(
         text.contains("program_id"),
         "the source is missing:\n{text}"
     );
-    // The PTX it became, coming out.
     assert!(text.contains("ctaid"), "the ptx is missing:\n{text}");
-    // And that PTX as bytes. `.` is 2e, the first character of `.visible`.
+    // The PTX as bytes. `.` is 2e, the first character of `.visible`.
     assert!(text.contains("2e "), "the bytes are missing:\n{text}");
-    // The stages the text appears to pass through.
     for stage in ["PARSE", "MLIR", "LLVM", "PTX"] {
         assert!(text.contains(stage), "{stage} is missing");
     }

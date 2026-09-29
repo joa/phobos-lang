@@ -9,9 +9,9 @@ use crate::ir::{
 };
 use crate::proto;
 
-/// Decode a serialized `ModelProto` into a [`Model`]. A faithful translation
-/// only: unknown ops and attribute kinds are kept or dropped rather than
-/// rejected, so a partial model still loads for inspection.
+/// Decode a serialized `ModelProto` into a [`Model`]. Nothing is rejected:
+/// unknown ops are kept and unknown attribute kinds dropped, so a partial
+/// model still loads for inspection.
 pub fn load_model(bytes: &[u8]) -> Result<Model> {
     let model = proto::ModelProto::decode(bytes).context("decoding ModelProto")?;
     model_from_proto(model)
