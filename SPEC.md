@@ -1,4 +1,19 @@
-# Grammar (EBNF)
+# Phobos Language Spec
+
+1. [Grammar](#grammar)
+2. [Lexical](#lexical)
+3. [Types](#types)
+4. [Statements](#statements)
+5. [Subscripts](#subscripts)
+6. [Operators and conversions](#operators-and-conversions)
+7. [Bounds and masking](#bounds-and-masking)
+8. [Tiles and shared memory](#tiles-and-shared-memory)
+9. [Built-ins](#built-ins)
+10. [Quantized built-ins](#quantized-built-ins)
+11. [Attributes](#attributes)
+12. [Examples](#examples)
+
+## Grammar
 
 Notation: `{ x }` = zero or more, `[ x ]` = optional, `( ... )` = grouping, `"x"` = literal token, `(* ... *)` = comment.
 
@@ -57,359 +72,242 @@ int         = digit { digit } ;
 float       = digit { digit } "." { digit } ;
 ```
 
-## Notes
-- **Keywords:** `kernel let var if else for in while true false`.
-- **Tensor size**: Assumed to be a multiple of `4`. A tensor dimension need not
-  be a multiple of the tile: a slice that would run off the end is masked, so
-  the out-of-bounds elements read as zero and their stores are skipped.
-  - A compile-time constant size is masked in place, which falls back from the
-    specialized register/tensor-core matmul paths to the generic tiled path.
-  - A dynamic (runtime) size walked by a **loop** is handled by splitting that
-    loop: it is trimmed to `(extent / tile) * tile`, so its slices are whole by
-    construction and keep the vectorized, tensor-core and `cp.async` fast
-    paths, and the ragged remainder replays the body once under a runtime mask
-    against the tensor's own extent. Only spans with a static length split;
-    loops carrying `mma.sync` fragment accumulators, or that the compiler
-    pipelines (see `@pipeline` below), do not split yet, so their slices are
-    masked unless `@aligned` covers the dimension they walk.
-  - A dynamic size indexed by a **program id** cannot be trimmed the same way:
-    the grid is the host's, and nothing inside the kernel bounds it. Such a
-    slice is masked against the tensor's runtime extent, which costs the
-    specialized paths, since their drains have no per-element store guard.
-    `@aligned(DIM = tile)` is how a caller that knows better says so: it
-    promises the extent is a whole number of tiles, so every program id
-    addresses a whole tile and the mask drops. The promise is unchecked, and
-    breaking it writes past the tensor -- through the end of one row and into
-    the next, not merely off the end. A caller that cannot guarantee the shape
-    should leave it off, or compile the kernel both ways and pick per launch.
-  - Zero is the fill value, so a reduction that is not zero-identity (a softmax
-    denominator, for instance) still needs its own masking in the kernel.
-- **`f16`**: half precision (IEEE binary16). Float literals are written in f32 and
-  rounded to f16 on store, and arithmetic that mixes f16 with a wider float widens
-  to the wider type (so `f16 + f32 -> f32`). The heavy compute paths run f16 inputs
-  through the tensor cores with f32 accumulation (see `@tensorcore`); without it,
-  f16 tiles use the generic element/vector paths and accumulate in f16.
-- **`bf16`**: brain float. Same width as `f16` but with f32's exponent range and 8
-  fewer mantissa bits, so **neither 16-bit float contains the other**: mixing them
-  widens to `f32` rather than picking a side, and a direct `f16`/`bf16` conversion
-  round-trips through f32. The type is available on every target; what changes with
-  the target is the instruction count. From sm_80 a conversion is one
-  `cvt.rn.bf16.f32`, and below it the NVPTX backend emulates it with the
-  shift-and-round-to-nearest-even integer sequence. Nothing in phobos gates on
-  this, so a bf16 kernel compiles and runs everywhere; `GpuConfig::supports_bf16_native`
-  reports which of the two a target gets.
-- **`i8`**: signed byte, the quantized-weight element type. Loads sign-extend
-  (`ld.global.s8`) and `f32(w)` converts, so a dequantizing weight load costs a
-  quarter of the memory traffic of the same weights in f32. Integers are signed
-  throughout; there is no `u8` yet.
-- **Integer contraction**: `dot`/`dot_t` over `i8` operands accumulate in `i32`,
-  not in the operand type, since a dot product of bytes overflows a byte almost
-  at once. Both hardware paths hang off `dot_t` rather than `dot`, because both
-  want the bytes of each operand contiguous, and `dot_t` contracts the last axis
-  of both operands so both walk memory that way. From widest to narrowest:
-  - the **integer tensor cores** (`mma.sync.m8n8k16.s8.s8.s32`) when the target
-    has them (Turing onwards, `GpuConfig::supports_int8_mma`), the output tile is
-    a whole number of 8x8 blocks, and the contraction is a multiple of 16. This
-    needs no staging buffer and no `ldmatrix`: the fragment layout is already
-    what `dot_t` holds, a lane reading four contiguous bytes of one row per
-    operand. One warp owns each 8x8 output tile.
-  - the **four-way byte dot product** (`dp4a`, one instruction for four
-    multiplies and four adds) on Pascal onwards, `GpuConfig::supports_dp4a`,
-    when the contraction is a multiple of 4. This is where a single-row
-    contraction lands, since one row cannot fill an 8-row tensor-core tile.
-  - the **generic integer path**, with the same result, for anything else: a
-    ragged contraction, a pre-Pascal target, or a masked operand.
-- **Grouped raw layout**: the seven IQ formats (`iq1s`, `iq1m`, `iq2xxs`, `iq2xs`, `iq2s`, `iq3xxs`, `iq3s`), the three K-quants (`q4k`, `q5k`, `q6k`) and `ptq1` are held on the device grouped by eight columns: the payload `qb`, declared `[N, K/256*bytes]`, is laid out `[N/8][K/256][8][bytes]`, eight columns' copies of each block side by side, and the scale plane `d`, declared `[N, K/256]`, likewise `[N/8][K/256][8]`; a last group short of eight columns is zero-padded. Every built-in that reads these formats addresses them so, through one helper, and the host lays them out at upload (`Quant::grouped_rows`). The point is the decode matvec: a warp reading eight columns' blocks touches three or four whole lines rather than eight scattered sectors, and the miss-tracking slots that bound its bandwidth go three times as far. The other formats stay row-major.
-- **Quantized contraction**: `qdot_t` is the Q8_0 contraction with the block
-  scales folded in, so the whole of `k` is one operation. `dot` and `dot_t`
-  cannot be given enough of `k` at a time here: a Q8_0 block carries its own
-  scale, so a plain dot has to stop every 32 elements to apply it, and with one
-  thread per output walking `k`, a warp reads 32 rows four bytes apart and the
-  block pays several barriers per 32 elements. Folding the scales in is what
-  lets the mapping turn around: a **warp owns one output and its lanes divide
-  `k`**, so 32 lanes read 512 contiguous bytes of one weight row, nothing is
-  staged, and the only synchronization is the closing butterfly shuffle. Each
-  lane takes 16 bytes, four `dp4a` under one scale pair, which is the widest
-  chunk that still sits inside a single block.
+## Lexical
 
-  `qmma_t` is the same contraction batched over rows, on the integer tensor
-  cores, and it exists for the same reason at the other end: writing it in the
-  tile language puts the accumulator in shared memory, so a `[64, 64]` tile is
-  16 KB of accumulator alone and cannot be built at all. Folding the scales in
-  keeps the accumulators in registers across the whole of `k`, reads both
-  operands straight from global memory in the layout the `m8n8k16` fragments
-  already want, and leaves no barrier in the loop. A warp takes a square patch
-  of tensor-core tiles, since `rm` by `rn` tiles issue `2 * rm * rn` tensor
-  instructions against `2 * (rm + rn)` operand loads.
-- **K-quant contraction**: `q4k`, `q5k` and `q6k` join `<fmt>_qgemm_t` and
-  `<fmt>_qdot_i8_t` with no tables: a quant is a nibble plus, for Q5_K, one
-  bit of the block's 32-byte `qh` plane, or, for Q6_K, two bits of its 64-byte
-  one, and the scales are in the block, six-bit indices packed twelve bytes for
-  Q4_K and Q5_K (both branches of the unpacking computed and one selected on
-  the run) and sixteen signed bytes for Q6_K. Six-bit quants are the same
-  bytes signed or unsigned, so they ride the signed `dp4a` and `mma` as they
-  are, and a run's dot product stays under 2^22, within the exact
-  integer-to-float conversion. Q4_K and Q5_K subtract a minimum,
-  `d * sc * q - dmin * m`, so against an activation `sa * aq` the contraction
-  is `sa * (d * sc * A - dmin * m * S)` with `S` the activation's sum over the
-  run: `<fmt>_qgemm_t` sums each row's 32-element group at stage time (the two
-  threads holding a group's halves join theirs with one xor shuffle) into an
-  `[128, K/128*4]` i32 plane and keeps `dmin * m` a column beside the scales;
-  `<fmt>_qdot_i8_t` sums each run in the lane that contracts it, eight `dp4a`
-  against ones over the activation bytes it holds for the dot. Both read `d`
-  and `dmin` out of the block header for Q4_K and Q5_K, so the `d` operand is
-  taken and never read; Q6_K's `d` trails its block on disk, is dropped from
-  the device block (208 bytes of 210), and is read from the plane. Q6_K has no
-  minimum: its `q - 32` folds into the byte before the `dp4a` without a carry,
-  as `ql | (((qh2 + 0x0E0E0E0E) & 0x0F0F0F0F) << 4)`, and its scales are per
-  sixteen elements, so it takes the split epilogue. A Q6_K decode lane is not
-  64 contiguous elements: the block is interleaved across two 128-element
-  groups, so a lane takes sixteen elements of each of a group's four quarters,
-  four runs of sixteen that are each one Q6_K scale run, with its activations
-  four sixteen-byte loads 32 apart.
-- **Ternary contraction**: `ptq1_qgemm_t` and `ptq1_qdot_i8_t` take PTQ1_0,
-  weights `d * (t - 1)` for a trit `t` in 0..2 and one `f16` scale per 128. A
-  byte holds five trits base three, trit `n` the top trit of `b * 3^n mod 256`,
-  so a word decodes as two 16-bit lane pairs: a multiply by three per trit and a
-  `prmt` gathering the four tops, with no carry between lanes. The device block
-  is two file blocks (256 weights, 56 bytes) re-laid at upload so each 64-weight
-  quarter is three words whose trit `n` is four consecutive weights, a `dp4a`
-  operand, plus a tail byte for the last four, and both scales in the block, so
-  the `d` operand is taken and never read. The matvec contracts the trits as
-  they are and adds a second `dp4a` of the activation against -1 bytes, the
-  exact `sum (t - 1) a`; the projection writes `t - 1` into the stage as
-  `(t + 0x7F7F7F7F) ^ 0x80808080`, which never carries between bytes.
-- **Grid-decode contraction**: `iq1s_qdot_t` is IQ1_S's matvec contraction with
-  its grid-table decode folded in, the same **warp owns one output, register
-  accumulator, one closing shuffle** shape `qdot_t` uses, for the same reason:
-  ordinary `let`/`gather`/`dot_t` codegen stages every intermediate through
-  shared memory with a barrier, and an IQ1_S block's per-lane decode has many
-  intermediates (a byte read, a grid index, a table lookup, a sign correction)
-  where Q8_0's bytes are already values. Unlike `qdot_t`, no hardware
-  instruction backs this one; the win is deleting the staging and barriers,
-  not a wider memory transaction. It works only because an IQ1_S block's
-  thirty-two decode lanes are exactly a warp's width: warp lane `l` decodes
-  format lane `l` outright, with no remainder to fold in.
+| Item | Rule |
+|---|---|
+| Keywords | `kernel let var if else for in while true false` |
+| Contextual identifiers | `tensor`, `tile`, `range`, every built-in and every scalar type name. Ordinary identifiers outside their position; `range` is only special inside `for ... in range(...)`. |
+| Comments | `// ...` to end of line. |
+| Statement end | A newline or `;`. Optional before `}` or end of file. |
+| `else` | Must follow the `}` of the then-block on the same line; a newline there ends the `if`. |
 
-  `iq2xxs_qdot_t` is the same shape for IQ2_XXS, which needs two table
-  lookups a lane (a magnitude grid, a sign table) instead of one and has a
-  genuine branch its geometry cannot avoid (lane `l % 4 == 0` reads one raw
-  byte where the other three lanes read two and combine them). Folded
-  branch-free with `arith.select` rather than control flow, since a warp's
-  lanes already diverge in cost by reading different addresses and a real
-  branch would only add a reconvergence point.
+## Types
 
-  `iq1m_qdot_t` shares IQ1_S's grid outright but has its own per-group
-  scale-pair geometry, needing more `arith.select`s than either of the
-  other two (`iq2xxs_qdot_t`'s one branch versus `iq1m_qdot_t`'s several).
+| Type | Meaning |
+|---|---|
+| `f16` | IEEE binary16. Float literals are f32, rounded to f16 on store. |
+| `bf16` | 8-bit exponent, 7-bit mantissa. Works on every target (native conversion from sm_80, emulated below). |
+| `f32`, `f64` | IEEE binary32 / binary64. |
+| `i8` | Signed byte. Loads sign-extend. There is no `u8`. |
+| `i32`, `i64` | Signed integers. |
+| `bool` | Comparison result. No conversion to or from it. |
+| `tensor<T>[dims]` | Global memory, kernel parameters only. Dims are literals or symbolic names bound at launch or by `@autotune`. |
+| `tile<T>[dims]` | A block of shared memory owned by the CTA. See [Tiles and shared memory](#tiles-and-shared-memory). |
 
-  `iq2s_qdot_t` is IQ2_XXS's two-gather shape again with plainer fields:
-  both offsets collapse the same branch-free way `iq1s_qdot_t`'s do, the
-  divisor is a plain runtime shift with no `l == 0` special case, and the
-  sign table is keyed by the raw byte outright rather than a parity index,
-  so only the scale nibble needs a select.
+## Statements
 
-  `iq2xs_qdot_t` is `iq2s_qdot_t`'s same shape and same one select, splitting
-  a single 16-bit `qs` halfword by `% 512` / `/ 512` into the magnitude and
-  sign indices instead of reading them from separate byte fields, and reuses
-  IQ2_XXS's sign table outright rather than uploading its own.
+| Form | Meaning |
+|---|---|
+| `let x = e` | Immutable binding. Initializer required. A tensor slice bound with `let` is a view, not a copy. |
+| `let x: T = e` | Same, with a declared type. |
+| `var x = e` | Mutable binding. `var t = A[...]` copies the slice into a tile. |
+| `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
+| `var t: tile<T>[R, C]` | Uninitialized tile. The type is required and must be a tile. |
+| `x = e`, `x[...] = e` | Assign a whole value or a slice. Tiles and tensors are sliced the same way. |
+| `x += e`, `x[...] += e` | Accumulate. |
+| `for i in range(lo, hi[, step])` | `i` runs over `lo, lo + step, ...` while `< hi`. `step` defaults to 1. |
+| `while c { }`, `if c { } else { }` | Scalar condition. |
 
-  `iq3xxs_qdot_t` reuses `iq2xxs_qdot_t`'s scale/sign geometry outright (the
-  two share an identical `aux32` field), but its magnitude grid holds
-  four-byte entries where IQ2_XXS's hold eight, so a lane's eight elements
-  come from two grid entries instead of one: two four-wide reductions
-  against their own slice of `a` and `signs`, both adding into the same
-  per-lane partial before the closing shuffle, rather than one eight-wide
-  reduction.
+## Subscripts
 
-  `iq3s_qdot_t` is `iq3xxs_qdot_t`'s same two-four-wide-entry shape, but with
-  `iq2s_qdot_t`'s direct-byte sign table (so no `lo`/`hi` assembly at all: a
-  single `qh` byte a half, not a two-byte word) and its scale nibble select,
-  gated on the half rather than the lane's low bits.
+| Form | Selects | Example |
+|---|---|---|
+| `A[i]` | One index | `A[r, c]` |
+| `A[s : e]` | `s <= i < e` | `A[0 : 64, :]` |
+| `A[s :+ n]` | `s <= i < s + n`, same as `A[s : s + n]` | `A[pm * TM :+ TM, :]` |
+| `A[:]` | The whole dimension | `Q[row :+ BR, :]` |
+| `A[i:]`, `A[:j]` | Not supported. `:` needs an end, `:+` a length. | |
 
-  `iq4xs_qdot_t` is not grid-coded, and its warp mapping is structurally
-  different from the rest: IQ4_XS decodes eight 32-element runs a block
-  rather than thirty-two 8-element lanes, and a run is exactly a warp's
-  width, so lane `y` is a run's own element position, not a format lane. A
-  run's scale depends only on the run and the output column, not the lane,
-  so it is computed once and read identically by all 32 lanes; only the
-  16-entry codebook index (which nibble of `qs` lane `y` needs) varies by
-  lane. The eight runs are a Rust-unrolled loop inside the same per-block
-  body every other format's intrinsic has one decode step in, each run's
-  product adding into the same per-lane partial before the closing shuffle.
+## Operators and conversions
 
-  `q2k_qdot_t` and `q3k_qdot_t` need no table lookup at all -- Q2_K and
-  Q3_K decode from static offsets -- but pay the same staging cost the
-  grid-coded formats' old bodies did, since that cost comes from the tile
-  language's execution model, not from `gather`. Their block shape is
-  sixteen runs of sixteen elements rather than thirty-two of eight, so
-  `RUN * 2 == WARP`: two runs process a warp-pass, lane `l < 16` on the
-  first and `l >= 16` on the second, and the local k-offset collapses to
-  the raw lane id plus a per-iteration constant outright. Q3_K's six-bit
-  signed scale needs two `arith.select`s Q2_K's packed scale/min byte does
-  not, for a genuine conditional in its cross-byte unpacking.
-- **Packed tables**: every `<fmt>_qdot_t` and `<fmt>_qdecode_t` reads its
-  lookup tables as one `i8` a slot, not one `i32`. A lane's whole entry is then
-  eight contiguous bytes (four for IQ3_XXS and IQ3_S, whose grid entries are
-  half as wide), so it takes one `vector.load` where the widened layout took
-  one scalar load an element: eight table loads a lane become one, and the
-  table is a quarter the size, which is what gets it into L1. The values fit
-  exactly -- IQ1_S's grid holds `{-1, 0, 1}`, the IQ2/IQ3 magnitudes top out at
-  62, and the sign multipliers are `+-1` -- and they are signed, so they widen
-  with `arith.extsi`, not the zero-extend the unsigned block fields take.
+| Rule | Behavior |
+|---|---|
+| Arithmetic on tiles | Elementwise. `tile op scalar` and `scalar op tile` broadcast the scalar. |
+| Broadcasting | NumPy-style over axes of extent 1: `[R, C] op [R, 1]` stretches the column. |
+| Unary `-` | On a tile, elementwise `0 - t`. |
+| Unary `!` | Scalars only. |
+| Mixed types | Both operands convert to their join first. Float with float: the wider one. `f16` with `bf16`: `f32`. Integer with float: the float. |
+| `T(x)` conversion | `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`, `i64(x)`. Tile or scalar. |
+| Float to float | Rounds to nearest. |
+| Integer to float | Signed conversion. |
+| Float to integer | Truncates toward zero. |
 
-  The `i32` tables stay uploaded beside the packed ones for the fallback
-  `<fmt>_matvec`/`<fmt>_dequant` kernels, which reach them through `gather` a
-  slot at a time. Two copies of every table is a few KB.
-- **Vector activation reads**: in the `<fmt>_qdot_t` contractions whose lane
-  owns a contiguous run of the activation row, the lane reads that run as
-  `vector<4xf32>` rather than one scalar load an element. A warp's 32 lanes are
-  then 1024 contiguous bytes covered by two instructions, where the scalar form
-  issued eight, each spreading the warp across 32 separate sectors because
-  neighbouring lanes sit eight elements apart.
+## Bounds and masking
 
-  This does not apply to `iq4xs_qdot_t`, `q2k_qdot_t` or `q3k_qdot_t`: their
-  lane index *is* an element position within a run, so consecutive lanes
-  already read consecutive activations and the scalar form is coalesced.
-- **Grid-decode expansion**: `<fmt>_qdecode_t` runs one of those same decodes
-  and stores the weights into a `[K, N]` scratch instead of contracting them,
-  which is what a prompt pass needs: a batched matmul reads a dequantized
-  strip once for all its rows, where the matvec above reads a row of activation.
-  Only a statement, never a value -- `SCRATCH[:, pn * TN :+ TN] =
-  iq1s_qdecode_t(..)` -- because it writes the destination itself, the way
-  `qmma_t` writes its accumulators into an output slice.
+Tensor extents are assumed to be multiples of 4. They need not be multiples of the tile.
 
-  The decode is shared with the matching `<fmt>_qdot_t` outright, so what
-  differs is only the thread map, and the store sets it. `qdot_t` gives a warp
-  one output column, making its lanes the format's 32 lanes. Here consecutive
-  threads take consecutive output *columns* of the same rows, which puts a
-  warp's 32 stores in four fully covered 32-byte sectors of the scratch, and a
-  thread still owns eight elements of one column so the block bytes are still
-  read once per eight decodes. Nothing is staged in shared memory and there is
-  no barrier at all.
-- **Mixed element types**: a binary op whose operands differ converts both to their
-  join before computing. Between floats the join is the wider type, except that
-  `f16` and `bf16` join at `f32`; an integer meeting a float joins at the float.
-  Matching types keep the vectorized path, and a converting op falls back to the
-  scalar element path.
-- **Conversions**: every numeric scalar type names a conversion builtin that takes
-  a tile or a scalar: `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`,
-  `i64(x)`. Float-to-float rounds, integer-to-float sign-converts, float-to-integer
-  truncates toward zero. There is no `bool(x)`.
-- **Tile buffers are placed by liveness**: a tile lives in shared memory, in
-  one byte buffer per kernel that every tile is a window of. A buffer lives
-  from its allocation to the last operation reading it or any view of it,
-  through every loop that reads it without declaring it, and two buffers
-  whose lives do not overlap share bytes. This is what keeps a long chain of
-  named intermediates from costing a static allocation each: static shared
-  memory is capped at 48 KB on every architecture. The compiler's own
-  staging (a dot's f16 operands, a quantized contraction's tables) is placed
-  the same way, from a first emission that records what every operation
-  allocates; see `phobos-lang/src/codegen/lower/plan.rs`.
+| Case | Behavior |
+|---|---|
+| Slice past the end | Out-of-bounds elements read as `0`; their stores are skipped. |
+| Static extent | Masked in place. |
+| Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. Only spans with a static length split; loops with `mma.sync` accumulators or that are pipelined stay masked unless `@aligned` covers the dimension. |
+| Dynamic extent indexed by `program_id` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
+| Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask. |
 
-  Since a tile outlives the loops between its declaration and its last use, a
-  tile declared ahead of one loop and read after another is **block-private
-  storage carried across both**. The barrier that trails a tile store is what
-  makes one thread's write visible to the rest of the CTA, and it is kept
-  only where something depends on it: a later operation that reads or writes
-  the same bytes from other threads. Two elementwise sweeps over one tile at
-  one vector width touch the same elements from the same thread and run with
-  no barrier between them; a reduction, a dot or a transpose after a sweep
-  keeps it. See `phobos-lang/src/codegen/lower/membar.rs`.
-- **`var` without an initializer**: `var t: tile<f32>[R, C]` declares a buffer and
-  leaves it alone, for one a following loop overwrites element for element. The
-  type is required, nothing being left to infer one from, and it must be a tile:
-  a scalar with no value would name nothing. `let` always needs its initializer.
-- **Statements end at newlines**: Similar to how Golang is doing it
-- **`else` must follow `}` on the same line**: a newline after the `}` of the then-block ends the `if` statement.
-- Tiles
-  - **Slicing**: a tile is sliced and slice-assigned exactly as a tensor is, so a
-    loop can fill one a few rows at a time rather than only as a whole value. The
-    compiler's own staging buffers are the exception: the WMMA path's padded tile
-    and the `ldmatrix` path's XOR-swizzled one hold their rows somewhere other
-    than row-major says, and neither is reachable from source anyway.
-  - **Ranges**:`A[start : end]` is the elements from `start` up to but not including `end`.
-  - **Spans**: `A[start :+ length]` is `length` elements starting at `start`; same as `A[start : start + length]`.
-  - **Full**: `A[:]` selects the entire dimension.
-  - **Open-Ended**: `A[i:]`, `A[:j]` are not supported. A `:` after an expression requires an end, and a `:+` requires a length.
-- **Unary minus on a tile**: `-t` negates elementwise, lowering as `0 - t`. `!` stays scalar-only.
-- **Broadcasting**: binary tile ops broadcast a NumPy-style axis of extent 1 (so `[R, C] x [R, 1]` stretches the column vector), and `tile x scalar` (either order) broadcasts the scalar over the tile.
-- **Contextual Identifiers:** `tensor`, `tile`, `range`, `program_id`, the tile builtins (`dot`, `dot_t`, `qdot_t`, `qmma_t`, `iq1s_qdot_t`, `iq2xxs_qdot_t`, `iq1m_qdot_t`, `iq2s_qdot_t`, `iq2xs_qdot_t`, `iq3xxs_qdot_t`, `iq3s_qdot_t`, `iq4xs_qdot_t`, `q2k_qdot_t`, `q3k_qdot_t`, `iq1s_qdecode_t`, `iq2xxs_qdecode_t`, `iq1m_qdecode_t`, `iq2s_qdecode_t`, `iq2xs_qdecode_t`, `iq3xxs_qdecode_t`, `iq3s_qdecode_t`, `iq1s_qgemm_t`, `iq1m_qgemm_t`, `iq2xxs_qgemm_t`, `iq2xs_qgemm_t`, `iq2s_qgemm_t`, `iq3xxs_qgemm_t`, `iq3s_qgemm_t`, `q4k_qgemm_t`, `q5k_qgemm_t`, `q6k_qgemm_t`, `iq1s_qdot_i8_t`, `iq1m_qdot_i8_t`, `iq2xxs_qdot_i8_t`, `iq2xs_qdot_i8_t`, `iq2s_qdot_i8_t`, `iq3xxs_qdot_i8_t`, `iq3s_qdot_i8_t`, `q4k_qdot_i8_t`, `q5k_qdot_i8_t`, `q6k_qdot_i8_t`, `rms_norm_q_t`, `exp`, `log`, `round`, `sqrt`, `tanh`, `rowmax`, `rowsum`, `tmax`, `argsel`, `cumsum`, `tril`, `transpose`, `flat`), the
-  synchronization builtins (`grid_barrier`, `atomic_add`) and the
-  conversion builtins named after the scalar types are ordinary
-  identifiers, not keywords. `range` is recognized positionally inside `for ... in range(...)`.
-- **Built-Ins**:
-  - `dot(a, b)`: `a @ b` (contracts `a`'s last dim with `b`'s first).
-  - `dot_t(a, b)`: `a @ b.t` (contracting the last dim of both: `[M, K] x [N, K] -> [M, N]`). Over `i8` operands this is the integer tensor-core and `dp4a` path; see **Integer contraction**.
-  - `qdot_t(a, a_scales, w, w_scales)`: the Q8_0 contraction with its block scales, `[M, K] i8 x [N, K] i8 -> [M, N] f32`, where the scales are `[M, K/32]` and `[N, K/32]` f32 and element `[i, j]` is `sum_b (sum_{k in block b} a[i, k] * w[j, k]) * a_scales[i, b] * w_scales[j, b]`. The contraction axis may be dynamic, since it is not tiled. The scales are indexed `[row, block]` so a lane's scale load is contiguous with its neighbours'. See **Quantized contraction**.
-  - `qmma_t(a, a_scales, w, w_scales)`: the same contraction batched over rows, `[M, K] i8 x [N, K] i8 -> [M, N] f32` with `M` and `N` multiples of 8, where `a_scales` is `[M, K/32]` and `w_scales` is `[K/32, N]`. The weight scales are indexed `[block, out]`, the opposite of `qdot_t`: a lane here holds two neighbouring output columns of one block, so that order puts its two scales next to each other. See **Quantized contraction**.
-  - `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)`: a raw format's prompt projection with both operands staged through shared memory, `[128, K] i8 x [64, K/256*bytes] i8 -> [128, 64] f32`, for `iq1s`, `iq1m`, `iq2xxs`, `iq2xs`, `iq2s`, `iq3xxs` and `iq3s`, and for the K-quants `q4k`, `q5k` and `q6k`, which take no tables (see **K-quant contraction**). The tile is fixed at 128 x 64 and the kernel at `@launch(256)`, eight warps; `K` is a whole number of 256-element blocks and `a_scales` is `[128, K/32]`. The tables are the format's packed magnitude grid and, where it carries signs apart, its 0/-1 sign masks; the two ternary formats take the grid at two bits a lane instead. Per 128 elements of `k` the CTA copies the activation tile in with 16-byte loads, decodes its 64 columns into an int8 tile, and contracts both with `ldmatrix` and `mma.m8n8k16`; nothing in the k loop reads global memory, and the next tile's bytes are fetched before the current one is contracted. Only a statement, like `qmma_t`. See **Quantized contraction**.
-  - `<fmt>_qdot_i8_t(aq, a_scales, qb, d, tables..)`: a raw format's single-row contraction against an activation already quantized to Q8_0, in `dp4a`: `[1, K] i8 x [N, K/256*bytes] i8 -> [1, N] f32`, for the ten formats `<fmt>_qgemm_t` lists, with `a_scales` `[1, K/32]` f32, `d` `[N, K/256]` f16 and `K` a whole number of 256-element blocks (see **K-quant contraction** for the two formats with a minimum). The tables are the format's packed magnitude grid and, where it carries signs apart, its 0/-1 sign masks; the two ternary formats take the grid at a nibble a lane (`[1, 8192]`, `crate::quant::iq1s_grid4`), since that entry is already the selector a byte permute takes. Four lanes decode a column, a quarter of each block apiece, and a warp covers eight columns a block, so `N` is a whole number of eights and the tile a whole number of warps' worth; the block bytes ride a two-deep register pipeline and the 64 activations a lane needs come from L1 at decode time. The weight and its scale plane are read in the grouped layout below. See **Grid-decode contraction**.
-  - `rms_norm_q_t(x, gain, eps, [out,] q, scales)`: one row's RMS normalization with its gain, written to `out` where given, and its Q8_0 copy, `q` int8 and `scales` f32 one a 32-element block, as a single statement over `[K/32, 32]` views of the row; `scales` is `[K/32, 1]`. A thread owns four contiguous elements of every `4 * threads`; a row that is not a whole number of those gates the last stripe's loads and stores on the element existing (a 32-element block is eight consecutive lanes, so the cut never splits the lanes a block's maximum is shuffled across), and the reductions are warp shuffles rather than tile passes. The operands must be in-bounds slices of tensors, which `@aligned` promises; a masked slice would be staged and the stores would land in the copy.
-  - `iq1s_qdot_t(a, qb, d, grid)`: IQ1_S's single-row matvec contraction with its grid-table decode folded in, `[1, K] f32 x [N, K/256*50] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 (one block scale a row) and `grid` is the packed one-`i8`-per-slot grid (`[1, 2048*8]`, `crate::quant::iq1s_packed_grid`), whose eight bytes for a lane are one vector load. `N` must be a multiple of the CTA's warp count, one warp an output column. See **Grid-decode contraction**.
-  - `iq2xxs_qdot_t(a, qb, d, grid, signs)`: IQ2_XXS's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*66] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid`/`signs` are the packed one-`i8`-per-slot tables (`crate::quant::iq2xxs_packed_grid`/`iq2xxs_packed_signs`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq1m_qdot_t(a, qb, d, grid)`: IQ1_M's single-row matvec contraction with the decode folded in, `[1, K] f32 x [N, K/256*56] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid` is IQ1_S's own packed grid (`crate::quant::iq1s_packed_grid`, shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq2s_qdot_t(a, qb, d, grid, signs)`: IQ2_S's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*82] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `grid`/`signs` are the packed tables (`crate::quant::iq2s_packed_grid`/`iq2s_packed_signs`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq2xs_qdot_t(a, qb, d, grid, signs)`: IQ2_XS's single-row matvec contraction with its magnitude-grid and sign-table decode folded in, `[1, K] f32 x [N, K/256*74] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq2xs_packed_grid` and `signs` is IQ2_XXS's own packed sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq3xxs_qdot_t(a, qb, d, grid, signs)`: IQ3_XXS's single-row matvec contraction with its two four-wide grid lookups and sign-table decode folded in, `[1, K] f32 x [N, K/256*98] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq3xxs_packed_grid` (four `i8` lanes an entry, not eight) and `signs` is IQ2_XXS's own packed sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq3s_qdot_t(a, qb, d, grid, signs)`: IQ3_S's single-row matvec contraction with its two four-wide grid lookups and sign-table decode folded in, `[1, K] f32 x [N, K/256*110] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16, `grid` is `crate::quant::iq3s_packed_grid` (four `i8` lanes an entry) and `signs` is IQ2_S's own packed sign table (shared outright). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `iq4xs_qdot_t(a, qb, d, codebook)`: IQ4_XS's single-row matvec contraction with its fixed 16-entry codebook decode folded in, `[1, K] f32 x [N, K/256*136] i8 -> [1, N] f32`, where `K` is a multiple of 256, `d` is `[N, K/256]` f16 and `codebook` is the flattened codebook `gather` already uses (`[1, 16]`, `crate::quant::iq4xs_flat_codebook`). Same `N` requirement as `iq1s_qdot_t`. See **Grid-decode contraction**.
-  - `q2k_qdot_t(a, qb, d, dmin)`: Q2_K's single-row matvec contraction with its static-offset decode folded in, `[1, K] f32 x [N, K/256*84] i8 -> [1, N] f32`, where `K` is a multiple of 256 and `d`/`dmin` are each `[N, K/256]` f16. `N` must be a multiple of the CTA's warp count, one warp an output column. See **Grid-decode contraction**.
-  - `q3k_qdot_t(a, qb, d)`: Q3_K's single-row matvec contraction with its static-offset decode folded in, `[1, K] f32 x [N, K/256*110] i8 -> [1, N] f32`, where `K` is a multiple of 256 and `d` is `[N, K/256]` f16 (no minimum term). Same `N` requirement as `q2k_qdot_t`. See **Grid-decode contraction**.
-  - `iq1s_qdecode_t(qb, d, grid)`: IQ1_S's decode written into a dequantized weight strip rather than contracted, `[N, K/256*50] i8 -> [K, N] f32` or `[K, N] f16`, with `d` and the packed `grid` exactly as `iq1s_qdot_t` takes them. The destination's element type picks the width: f16 halves the traffic to the matmul that reads the strip, and the tensor-core ladder truncates a weight operand to f16 before the WMMA regardless, so it costs no accuracy there. Only valid as the whole right-hand side of an assignment to a tensor slice, which it writes itself; there is no value form. `K` must be a multiple of 256 and `N` a multiple of the destination's tile width. See **Grid-decode expansion**.
-  - `iq2xxs_qdecode_t(qb, d, grid, signs)`: the same for IQ2_XXS, `[N, K/256*66] i8 -> [K, N] f32`, with `d`, `grid` and `signs` exactly as `iq2xxs_qdot_t` takes them. See **Grid-decode expansion**.
-  - `iq1m_qdecode_t(qb, d, grid)`, `iq2s_qdecode_t(qb, d, grid, signs)`, `iq2xs_qdecode_t(qb, d, grid, signs)`, `iq3xxs_qdecode_t(qb, d, grid, signs)`, `iq3s_qdecode_t(qb, d, grid, signs)`: the same for the remaining formats whose lane is eight elements of a 256-element block, each taking exactly the operands its `<fmt>_qdot_t` takes and producing `[K, N] f32`. IQ3_XXS and IQ3_S read their eight elements four at a time from two grid entries, which changes nothing outside the intrinsic. Q2_K and IQ4_XS have no expansion: their lane geometry is not this one (sixteen runs of sixteen, and eight runs of thirty-two), and a dense pass spends a fifth of a percent of itself in them. See **Grid-decode expansion**.
-  - `exp(t)`: element-wise `e^x` (lowers to the hardware `ex2.approx`).
-  - `log(t)`: element-wise natural logarithm (lowers to the hardware `lg2.approx`, with the change of base folded in).
-  - `round(t)`: element-wise nearest integer, ties to even (lowers to the hardware `cvt.rni.f32.f32`). Rounding by biasing into a positive range and truncating instead costs the low mantissa bits, which is enough to move a value across a boundary at the top of a quantization range.
-  - `sqrt(t)`: element-wise square root (lowers to the hardware `sqrt.approx.f32`).
-  - `tanh(t)`: element-wise hyperbolic tangent (lowers to the hardware `tanh.approx.f32`).
-  - `rowmax(t)` / `rowsum(t)`: reduce a rank-2 tile over its last (column) dim to a `[rows, 1]` column vector.
-  - `tmax(a, b)`: elementwise maximum (broadcasting).
-  - `argsel(va, vb, ia, ib)`: elementwise `select(va >= vb, ia, ib)` (broadcasting): whichever of two indexed candidates carries the winning value, `>=` so a caller that always passes the more-recent candidate as `(va, ia)` gets a reproducible winner on an exact tie. `va`/`vb` share a float element type and `ia`/`ib` share the result's; there is no reduction primitive of its own (no `rowargmax`), so a caller folds it alongside `tmax` across a loop or a halving tree to build one, carrying an index as a tile of the same float type as the value it accompanies (safe up to 2^24, i.e. any array the memory to hold fits well under).
-  - `cumsum(t)`: inclusive prefix sum of a rank-2 tile down its first (row) dim, so `out[i, j] = sum_{r <= i} t[r, j]`. The scan runs along the sequence axis (the leading dim of a `[seq, feat]` tile), producing the running gate cumulant that chunkwise linear attention needs. Same shape as the input.
-  - `tril(t)`: causal lower-triangular mask of a rank-2 tile, keeping `t[i, j]` when `j <= i` and zeroing the strict upper triangle. Same shape as the input.
-  - `transpose(t)`: rank-2 tile transpose, `out[i, j] = t[j, i]` (a `[R, C]` tile becomes `[C, R]`). Lets a contraction run over the leading (sequence) axis, which `dot`/`dot_t` cannot reach on their own.
-  - `flat(t)`: a declared rank-2 tile viewed as one row, `[1, R * C]`. A **view**, not a copy: a tile is contiguous in shared memory, so the row-major flattening is the same bytes under another type, read-only and allocating nothing. It is for a value whose computed and consumed shapes differ, as quantizing an activation is: `rowmax` reduces the last axis, so the blocks of 32 have to be rows, and the contraction that follows wants one row. Only a tile declared with `var` or `let ... : tile<..>` can be flattened, not a slice of one (whose offset the view would drop) and not a tensor slice (which is not in shared memory).
-  - `f16(x)` / `bf16(x)` / `f32(x)` / `f64(x)` / `i8(x)` / `i32(x)` / `i64(x)`: element type conversion of a tile or a scalar (see **Conversions** above).
-  - `grid_barrier(bar)`: every block of the grid waits for every other, so a kernel spanning several stages of a pass can order one against the next. `bar` is an `i32` tensor of at least two elements, slot 0 the arrival counter and slot 1 the release generation (`tensor<i32>[2]` and the rank-2 `tensor<i32>[2, 1]` column both spell it). The caller zeroes it once before the launch and leaves it alone while the kernel runs; the barrier restores both slots, so one pair serves every barrier of every launch. Two things are the caller's to guarantee and neither is checked: that the grid is co-resident, which is what `@persistent` is for, and that no two concurrent kernels share the tensor. The grid must be one-dimensional, since the arrival count comes from `gridDim.x`, and every block has to reach the call, so it must not sit under a branch that only some of them take. See `phobos-lang/src/codegen/sync.rs`.
-  - `atomic_add(t, i, v)`: adds `v` to `t[i]` atomically across the device and returns the previous value. `t` is a named `i32` tensor parameter: a tile is block-private and a slice carries an offset the atomic would have to fold in, so neither is accepted.
-- **Attributes**:
-  - `@autotune(X in [..], ...)`: local search space; the first choice seeds the shape env. Two values are inclusive bounds searched in doubling steps (`X in [16, 256]` -> 16, 32, 64, 128, 256); three or more are an explicit list of choices. `[256, 16]` is two values (when x > y)
-  - `@cluster(X in [..], ...)`: super tile dimensions and search space for cluster tuning.
-  - `@aligned(DIM = tile, ...)`: promises that a symbolic tensor dimension is a whole number of `tile` elements, where `tile` is an integer or an `@autotune` constant. It also sets how far into a row a vector access may reach: the assumed multiple of 4 is 16 bytes of `f32` but only 8 of a 16-bit type, so a narrow tensor stages at half width unless a promise carries its row pitch to 16 bytes. 
-  - `@launch(maxThreads[, minBlocks[, maxRegs]])`: specifies CTA thread assumption (default: 256); maps to PTX `.maxntid` / `.minnctapersm` / `.maxnreg` at codegen. `maxRegs` (16..255) hard-caps registers per thread, forcing ptxas to fit the budget (spilling if needed) where `minBlocks`'s `.minnctapersm` is only advisory.
-  - `@padstage`: a `var name = <tensor slice>` staging tile (an unmasked slice copied into shared memory before use, e.g. flash attention's K/V tiles) allocates through the same padded-stride mechanism `@tensorcore`'s legacy WMMA path uses, but only when the tile's own row pitch is itself an exact multiple of the shared-memory bank period (128 bytes: 32 banks times the 4-byte word each addresses) -- the layout where every row of the tile lands on the same bank at a fixed column. A tile whose pitch misses that multiple is left alone, so this never grows a kernel's shared footprint for a tile that was not the defect it targets. Masked slices (an offset the compiler cannot prove in-bounds, materialized element-by-element) do not go through this path regardless of pitch; see `phobos-lang/src/codegen/tile/check.rs`'s `materialize_masked`. Opt-in per kernel: unlike `@pipeline`, this is not attempted by default, since it changes a tile's physical layout on kernels this pass did not audit.
-  - `@pipeline`: double-buffered (ping-pong shared buffer) staging is now attempted on every eligible loop by default, with no attribute needed -- a leading run of `var name = <static tensor slice>` statements whose names are never written again, whose slices are not partial, and whose doubled footprint still fits shared memory (see `phobos-lang/src/codegen/pipeline.rs`'s `pipeline_candidate`). Writing `@pipeline` now asserts that promise instead of requesting it: the kernel fails to compile, naming why, if nothing in it ends up pipelined. It still separately selects double-buffered staging for the fused-GEMM backend's own operand pairs (`matmul`/`reg`/`wmma.rs`'s `pairs`), which has no legality check of its own and stays attribute-gated exactly as before, since flipping it on by default would double every such kernel's staging footprint unconditionally -- a separate, unaudited change this pass did not make.
-  - `@tensorcore`: runs the matmul on tensor cores (sm_70+).
-     Operands are rounded to **f16** when staged (accumulation stays f32).
-     Tile dims and the k-slice must be multiples of 16 and the CTA's warps must tile the 16x16-fragment grid;
-     otherwise the kernel silently uses the regular f32 path.
-     The matmul lowers through thread-level `mma.sync` + `ldmatrix` (m16n8kK:
-     k8 on sm_75, k16 on sm_80+) with unpadded, XOR-swizzled shared staging by
-     default. This needs 64-bit `index` (the `nvgpu`
-     ops are pointer-width; the bench widens it automatically), so below sm_75
-     or when `index` lowers at 32 bits it falls back to the legacy
-     warp-collective WMMA API (m16n16k16). Tile-level `dot`/`dot_t` (flash
-     attention) take the same `mma.sync` path under the same gate. A dot
-     operand that is a `let`-bound tensor slice defined outside an enclosing
-     loop (the flash `q`) is staged into shared memory once before the loop
-     instead of every iteration, as long as the loop body stores to no
-     tensor.
-  - `@tensorcore(wmma)`: forces the legacy warp-collective WMMA m16n16k16 matmul
-     back on (the pre-`mma.sync` path), e.g. for comparison or rollback.
-     `@tensorcore(sync)` is accepted as a now-redundant explicit opt-in to the
-     default `mma.sync` path.
-  - `@dynshared`: Use dynamically shared memory (instead of the static 48KB); must change launch config respectively. Tiles pool by (element type, shape) as usual, but when every live tile has been released the byte cursor also resets to 0, so a later, differently-shaped tile can reuse a dead region's bytes instead of appending past it -- this is what lets a barrier-separated kernel's two phases share one footprint sized to the wider phase rather than their sum.
-  - `@persistent`: the kernel spans several stages of a pass and separates them with `grid_barrier`, so the whole grid must be resident at once or the barrier deadlocks. The compiler only records the intent; honouring it is the launcher's, which sizes the grid from the occupancy API (`phobos_kernels::launch::persistent_grid`).
-  - tile sizes for the MLIR GEMM (`TILE_M/N/K`, `WARP_M/N`, `TILE_TM/TN`) come from `@autotune` / the shape env.
-  - Unknown attributes parse but are ignored (with a note)
-  - **TODO**: Param- and loop-level attributes (`@readonly`, `@unroll`)
-  - **TODO**: `@fast_math`: enables fast-math flags at codegen.
-  - **TODO**: `@assert_coalesced`: build fails if any global access is strided (a broadcast is fine).
-- **Comments:** `// ...` to end of line.
+`@aligned(DIM = tile)` is unchecked. A wrong promise writes past the tensor, into the following rows.
 
-## Example
+## Tiles and shared memory
+
+- A tile is a window of one shared-memory buffer per kernel. Static shared memory is capped at 48 KB.
+- A tile lives from its declaration to its last use, across any loops in between. Tiles whose lifetimes do not overlap share bytes.
+- A tile declared before one loop and read after another is CTA-private storage carried across both.
+- A CTA barrier follows a tile store only when a later op reads or writes those bytes from other threads. Two elementwise passes at the same vector width need none; a reduction, `dot` or `transpose` after one does.
+
+## Built-ins
+
+### Indexing and synchronization
+
+| Built-in | Result | Semantics | Requires |
+|---|---|---|---|
+| `program_id(d)` | index | Block index along grid axis `d`. | `d` a literal `0`, `1` or `2`. |
+| `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
+| `atomic_add(t, i, v)` | `i32` | `old = t[i]; t[i] += v` atomically across the device. | `t` a named `i32` tensor parameter; `v` an integer. |
+
+### Elementwise
+
+| Built-in | Semantics | Notes |
+|---|---|---|
+| `exp(t)` | `e^x` | Approximate (`ex2.approx`). |
+| `log(t)` | `ln x` | Approximate (`lg2.approx`). |
+| `sqrt(t)` | `sqrt(x)` | Approximate (`sqrt.approx.f32`). |
+| `tanh(t)` | `tanh(x)` | Approximate (`tanh.approx.f32`). |
+| `round(t)` | Nearest integer, ties to even | Exact (`cvt.rni`). |
+| `tmax(a, b)` | `max(a, b)` | Broadcasts. Same element type. |
+| `argsel(va, vb, ia, ib)` | `va >= vb ? ia : ib` | Broadcasts. `va`, `vb` share a float type; `ia`, `ib` share the result type. Fold with `tmax` to build an argmax. Carry indices as floats (exact up to `2^24`). |
+
+### Reductions and shape
+
+All take a rank-2 tile with a static shape.
+
+| Built-in | Shape | Semantics |
+|---|---|---|
+| `rowmax(t)` | `[R, C] -> [R, 1]` | `max_j t[i, j]`. Float only. |
+| `rowsum(t)` | `[R, C] -> [R, 1]` | `sum_j t[i, j]`. Float only. |
+| `cumsum(t)` | `[R, C] -> [R, C]` | `out[i, j] = sum_{r <= i} t[r, j]`, down the rows. Float only. |
+| `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
+| `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
+| `flat(t)` | `[R, C] -> [1, R * C]` | Row-major view of the same bytes, read-only. `t` must be a declared tile, not a slice. |
+| `gather(table, idx)` | `idx.shape` | `out[i] = table[idx[i]]`. `table` is `[n]` or `[1, n]`; result has `table`'s element type. |
+
+### Dense contraction
+
+| Built-in | Shape | Semantics |
+|---|---|---|
+| `dot(a, b)` | `[M, K] x [K, N] -> [M, N]` | `a @ b` |
+| `dot_t(a, b)` | `[M, K] x [N, K] -> [M, N]` | `a @ b^T` |
+
+| Operands | Accumulator | Hardware path |
+|---|---|---|
+| `f32` | `f32` | Tiled FMA, or tensor cores under `@tensorcore` (operands rounded to f16). |
+| `f16` | `f16`, or `f32` under `@tensorcore` | Tensor cores need all tile dims and the k-slice to be multiples of 16. |
+| `i8` via `dot_t` | `i32` | `mma.m8n8k16.s8` when the output is whole 8x8 blocks and `K % 16 == 0` (sm_75+); else `dp4a` when `K % 4 == 0` (sm_61+); else scalar. |
+
+### Attention
+
+| Built-in | Semantics |
+|---|---|
+| `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)` | Split-key online softmax. Warp `w` takes the `w`-th of `W` equal pieces of keys `[lo, hi)` and, for each query row `i`, computes `s_j = scale * q[i, :] . K[j, col :+ D]`, writing `WM[i, w] = max_j s_j`, `WL[i, w] = sum_j exp(s_j - WM[i, w])`, and `WACC[i * W + w, :] = sum_j exp(s_j - WM[i, w]) * V[j, col :+ D]`. Returns `0`. |
+
+Shapes: `q` a named `[QG, D]` tile, unmasked; `K`, `V` named `f16` tensor parameters; `WM`, `WL` named `[QG, W]` tiles and `WACC` a named `[QG * W, D]` tile; with `D % 32 == 0` and `W` = CTA threads / 32. Merging the `W` partials is the caller's.
+
+## Quantized built-ins
+
+Symbols used below: `K` is the contraction length, a multiple of 256 unless stated. `N` is output columns. `qb` is the raw block bytes, `[N, K/256 * bytes]` `i8`. `d` is the per-block scale plane, `[N, K/256]` `f16`. Activation scales `a_scales` are Q8_0: one `f32` per 32 elements.
+
+### Q8_0
+
+| Built-in | Shape | Semantics |
+|---|---|---|
+| `qdot_t(a, a_scales, w, w_scales)` | `[M, K] i8 x [N, K] i8 -> [M, N] f32` | `out[i, j] = sum_b a_scales[i, b] * w_scales[j, b] * sum_{k in b} a[i, k] * w[j, k]`. Scales `[M, K/32]` and `[N, K/32]`. `K` may be dynamic. |
+| `qmma_t(a, a_scales, w, w_scales)` | same | Same sum on integer tensor cores. `M`, `N` multiples of 8. `w_scales` is `[K/32, N]` (transposed relative to `qdot_t`). Statement or value. |
+| `rms_norm_q_t(x, gain, eps, [out,] q, scales)` | row as `[K/32, 32]` | `y = x * gain / sqrt(mean(x^2) + eps)`, written to `out` if given, and quantized to Q8_0 into `q` (`i8`) and `scales` (`[K/32, 1]` `f32`). Returns `1 / rms` as `f32`. Operands must be in-bounds tensor slices (use `@aligned`). |
+
+### Raw-format families
+
+`<fmt>` is a format name from the [format table](#formats).
+
+| Built-in | Shape | Semantics | Form |
+|---|---|---|---|
+| `<fmt>_qdot_t(a, qb, d, tables..)` | `[1, K] f32 x qb -> [1, N] f32` | Matvec, decode folded in: `out[j] = sum_k a[k] * w[j, k]`. `N` a multiple of the CTA's warp count. | value |
+| `<fmt>_qdot_i8_t(aq, a_scales, qb, d, tables..)` | `[1, K] i8 x qb -> [1, N] f32` | Matvec against a Q8_0 activation (`a_scales` `[1, K/32]`). `N` a multiple of 8. | value |
+| `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | Prompt projection on integer tensor cores. Fixed 128 x 64 tile, needs `@launch(256)`. `a_scales` `[128, K/32]`. | statement or value |
+| `<fmt>_qdecode_t(qb, d, tables..)` | `qb -> [K, N] f32 or f16` | Dequantize into a scratch tensor slice. Element type follows the destination. `N` a multiple of the destination tile width. | statement |
+| `<fmt>_qmma_staged_t(a, a_scales, qb, d, tables..)` | `[M, K] i8 x qb -> [M, N] f32` | Batched projection on integer tensor cores (sm_75+). `M`, `N` multiples of 8, exactly one patch of 8x8 tiles per warp, the CTA's threads dividing the `N` columns' staging lanes, all operands in bounds. | statement or value |
+| `iq1s_qmma_t(a, a_scales, qb, d, grid)` | same | As above, decoded per warp instead of staged once per CTA. | statement or value |
+
+A statement-only built-in is valid only as the whole right-hand side of a tensor-slice assignment: `SCRATCH[:, pn * TN :+ TN] = iq1s_qdecode_t(...)`.
+
+### Formats
+
+| `<fmt>` | Bytes / 256 | Layout | `qdot_t` | `qdot_i8_t` | `qgemm_t` | `qdecode_t` | `qmma_staged_t` |
+|---|---|---|---|---|---|---|---|
+| `iq1s` | 50 | grouped | yes | yes | yes | yes | yes |
+| `iq1m` | 56 | grouped | yes | yes | yes | yes | |
+| `iq2xxs` | 66 | grouped | yes | yes | yes | yes | yes |
+| `iq2xs` | 74 | grouped | yes | yes | yes | yes | yes |
+| `iq2s` | 82 | grouped | yes | yes | yes | yes | yes |
+| `iq3xxs` | 98 | grouped | yes | yes | yes | yes | yes |
+| `iq3s` | 110 | grouped | yes | yes | yes | yes | yes |
+| `iq4xs` | 136 | row-major | yes | | | | |
+| `q2k` | 84 | row-major | yes | | | | |
+| `q3k` | 110 | row-major | yes | | | | |
+| `q4k` | 144 | grouped | | yes | yes | | |
+| `q5k` | 176 | grouped | | yes | yes | | |
+| `q6k` | 208 | grouped | | yes | yes | | |
+| `ptq1` | 56 | grouped | | yes | yes | | |
+
+`q6k` moves each block's trailing `d` into the scale plane on the device (208 of 210 bytes). `ptq1` is two 128-weight file blocks per 256, re-laid at upload. For `q4k`, `q5k` and `ptq1` the scales are inside the block: `d` is taken but not read.
+
+### Table operands
+
+Tables are `[1, n]` `i8` tensors, built on the host by `phobos-gguf`'s `quant` module.
+
+| `<fmt>` | `qdot_t`, `qdecode_t`, `qmma_staged_t` | `qdot_i8_t`, `qgemm_t` |
+|---|---|---|
+| `iq1s` | `grid` = `iq1s_packed_grid`; `iq1s_signed_grid` for `qmma_staged_t` and `iq1s_qmma_t` | `grid` = `iq1s_grid4` (`qdot_i8_t`), `iq1s_grid2` (`qgemm_t`) |
+| `iq1m` | `grid` = `iq1s_packed_grid` | as `iq1s` |
+| `iq2xxs` | `grid, signs` = `iq2xxs_packed_grid`, `iq2xxs_packed_signs` | `grid, masks` = `iq2xxs_packed_grid`, `iq2xxs_sign_masks` |
+| `iq2xs` | `iq2xs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |
+| `iq2s` | `iq2s_packed_grid`, `iq2s_packed_signs` | `iq2s_packed_grid`, `iq2s_sign_masks` |
+| `iq3xxs` | `iq3xxs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |
+| `iq3s` | `iq3s_packed_grid`, `iq2s_packed_signs` | packed grid, 0/-1 sign masks |
+| `iq4xs` | `codebook` = `iq4xs_flat_codebook` (`[1, 16]`) | |
+| `q2k` | `dmin`, not a table: `[N, K/256]` `f16` | |
+| `q3k`, `q4k`, `q5k`, `q6k`, `ptq1` | none | none |
+
+### Grouped layout
+
+For formats marked `grouped`, the device stores columns in groups of 8:
+
+- `qb`, declared `[N, K/256 * bytes]`, is laid out `[N/8][K/256][8][bytes]`.
+- `d`, declared `[N, K/256]`, is laid out `[N/8][K/256][8]`.
+- A last group short of 8 columns is zero-padded.
+
+The host produces this at upload (`Quant::grouped_rows`). Row-major formats are stored as declared.
+
+## Attributes
+
+| Attribute | Effect |
+|---|---|
+| `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Three or more: an explicit list. The first choice seeds the shape environment. |
+| `@cluster(X in [..], ...)` | Super-tile dimensions and search space for cluster tuning. |
+| `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. Unchecked. |
+| `@launch(threads[, min_blocks[, max_regs]])` | CTA size (default 256), PTX `.maxntid`, `.minnctapersm`, `.maxnreg`. `max_regs` (16..255) is a hard cap; `min_blocks` is advisory. |
+| `@tensorcore` | `dot`/`dot_t` and the GEMM run on tensor cores (sm_70+), operands rounded to f16, f32 accumulation. Uses `mma.sync` + `ldmatrix` with swizzled staging (sm_75+, 64-bit index), else WMMA m16n16k16. Falls back to the f32 path silently unless tile dims and the k-slice are multiples of 16 and the CTA's warps tile the 16x16 fragment grid. |
+| `@tensorcore(wmma)` | Forces the WMMA m16n16k16 path. |
+| `@tensorcore(sync)` | Same as `@tensorcore`. |
+| `@pipeline` | Double-buffered staging is on by default for every eligible loop. The attribute asserts it: compilation fails if nothing is pipelined. It also enables double buffering for the GEMM's own operand pairs. |
+| `@padstage` | Pads `var t = <tensor slice>` staging tiles whose row pitch is a multiple of 128 bytes, to avoid bank conflicts. Other tiles are unchanged. |
+| `@dynshared` | Dynamic shared memory instead of the static 48 KB; the launch must supply the size. The allocator resets once every tile is released, so phases separated by a barrier share one footprint. |
+| `@persistent` | The grid must be co-resident (required by `grid_barrier`). The launcher sizes it from the occupancy API (`phobos_kernels::launch::persistent_grid`). |
+| Unknown | Parsed and ignored, with a note. |
+
+GEMM tile sizes (`TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM`, `TILE_TN`) come from `@autotune` or the shape environment.
+
+Planned: `@readonly`, `@unroll` (parameter and loop level), `@fast_math`, `@assert_coalesced`.
+
+## Examples
 
 SGEMM
 ```plain
@@ -481,13 +379,7 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
 }
 ```
 
-Gated Linear Attention (the KDA backbone)
-
-Chunkwise gated linear attention, the first building block for Kimi Delta
-Attention. It streams a head's sequence in chunks of `C`, carrying an `[D, D]`
-recurrent state across chunks, and exercises `cumsum` (the running gate), `tril`
-(intra-chunk causal masking), and `transpose` (the `K^T V` state update). See
-[`examples/kda_fp32.ph`](./examples/kda_fp32.ph) for the fully commented kernel.
+Gated Linear Attention, chunkwise, using `cumsum`, `tril` and `transpose`. The commented kernel is [`examples/kda_fp32.ph`](./examples/kda_fp32.ph).
 
 ```plain
 @autotune(D in [64], C in [32, 128])
