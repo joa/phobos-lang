@@ -112,6 +112,7 @@ fn defaults() -> Defaults {
         seed: 0,
         max_tokens: 4,
         prefix_cache: true,
+        prefill_thinking: None,
     }
 }
 

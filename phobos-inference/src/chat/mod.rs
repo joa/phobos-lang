@@ -95,25 +95,56 @@ pub(crate) fn split_reasoning(message: &ChatMessage, content: &str) -> (String, 
     }
 }
 
+/// How the assistant's turn opens.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Thinking<'a> {
+    /// No reasoning pass. Qwen still gets an empty, closed think block.
+    Off,
+    /// The think block is left open for the model to fill.
+    Open,
+    /// The think block is left open with this text already in it, for the
+    /// model's reasoning to continue from.
+    Prefilled(&'a str),
+}
+
+impl Thinking<'_> {
+    /// Whether the model's output starts inside the think block.
+    pub fn is_on(self) -> bool {
+        self != Thinking::Off
+    }
+}
+
 /// Wraps plain text as a single user turn plus the assistant's opening, the
 /// same way the server renders a one-message chat.
 ///
 /// An instruct model fed a bare prompt treats it as a document to continue
 /// rather than a question to answer.
-pub fn user_turn(text: &str, template: Option<&str>, bos: Option<&str>) -> String {
+pub fn user_turn(
+    text: &str,
+    template: Option<&str>,
+    bos: Option<&str>,
+    thinking: Thinking,
+) -> String {
     let message = ChatMessage {
         role: "user".to_string(),
         content: Some(MessageContent::Text(text.to_string())),
         ..ChatMessage::default()
     };
-    format_chat(&[message], None, None, false, Dialect::detect(template), bos)
+    format_chat(
+        &[message],
+        None,
+        None,
+        thinking,
+        Dialect::detect(template),
+        bos,
+    )
 }
 
 pub(crate) fn format_chat(
     messages: &[ChatMessage],
     tools: Option<&Value>,
     tool_choice: Option<&Value>,
-    thinking: bool,
+    thinking: Thinking,
     dialect: Dialect,
     bos: Option<&str>,
 ) -> String {
@@ -204,10 +235,14 @@ pub(crate) fn format_chat(
     // Qwen's template always prefills a think block. Without it the model
     // opens one itself and it leaks into the visible content. MiniCPM5 was
     // not trained on an empty block, so it gets none unless thinking is on.
-    prompt.push_str(match (thinking, dialect.prefills_empty_think()) {
-        (true, _) => "<think>\n",
-        (false, true) => "<think>\n\n</think>\n\n",
-        (false, false) => "",
-    });
+    match (thinking, dialect.prefills_empty_think()) {
+        (Thinking::Open, _) => prompt.push_str("<think>\n"),
+        (Thinking::Prefilled(prefill), _) => {
+            prompt.push_str("<think>\n");
+            prompt.push_str(prefill);
+        }
+        (Thinking::Off, true) => prompt.push_str("<think>\n\n</think>\n\n"),
+        (Thinking::Off, false) => {}
+    }
     prompt
 }

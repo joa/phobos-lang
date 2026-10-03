@@ -157,7 +157,7 @@ fn a_tools_request_opens_with_the_templates_system_turn() {
         ],
         Some(&bash_tools()),
         None,
-        false,
+        Thinking::Off,
         Dialect::Qwen,
         None,
     );
@@ -223,15 +223,27 @@ fn a_cdata_argument_survives_its_own_markup() {
 
 #[test]
 fn a_user_turn_is_the_servers_one_message_chat() {
-    let qwen = user_turn("what is the capital of Germany ? ", None, None);
+    let qwen = user_turn(
+        "what is the capital of Germany ? ",
+        None,
+        None,
+        Thinking::Off,
+    );
     assert_eq!(
         qwen,
         "<|im_start|>user\nwhat is the capital of Germany ?<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
     );
     let minicpm_template = format!("... {MINICPM_FUNCTION_START} ...");
     assert_eq!(
-        user_turn("hi", Some(&minicpm_template), Some("<s>")),
-        format_chat(&[user("hi")], None, None, false, Dialect::MiniCpm, Some("<s>"))
+        user_turn("hi", Some(&minicpm_template), Some("<s>"), Thinking::Off),
+        format_chat(
+            &[user("hi")],
+            None,
+            None,
+            Thinking::Off,
+            Dialect::MiniCpm,
+            Some("<s>")
+        )
     );
 }
 
@@ -241,7 +253,7 @@ fn a_minicpm_prompt_opens_with_bos_and_prefills_no_think_block() {
         &[user("hi")],
         None,
         None,
-        false,
+        Thinking::Off,
         Dialect::MiniCpm,
         Some("<s>"),
     );
@@ -265,7 +277,7 @@ fn the_minicpm_tool_block_follows_the_system_prompt() {
         ],
         Some(&bash_tools()),
         None,
-        false,
+        Thinking::Off,
         Dialect::MiniCpm,
         Some("<s>"),
     );
@@ -355,8 +367,31 @@ fn a_think_block_the_model_opens_itself_is_still_reasoning() {
 
 #[test]
 fn a_thinking_request_leaves_the_block_open() {
-    let prompt = format_chat(&[user("hi")], None, None, true, Dialect::Qwen, None);
+    let prompt = format_chat(
+        &[user("hi")],
+        None,
+        None,
+        Thinking::Open,
+        Dialect::Qwen,
+        None,
+    );
     assert!(prompt.ends_with("<|im_start|>assistant\n<think>\n"));
+}
+
+#[test]
+fn a_prefilled_think_block_opens_on_the_prefill_in_both_dialects() {
+    for dialect in [Dialect::Qwen, Dialect::MiniCpm] {
+        let prompt = format_chat(
+            &[user("hi")],
+            None,
+            None,
+            Thinking::Prefilled("Let me see."),
+            dialect,
+            None,
+        );
+        let opening = "<|im_start|>assistant\n<think>\nLet me see.";
+        assert!(prompt.ends_with(opening), "{dialect:?}");
+    }
 }
 
 #[test]
@@ -388,7 +423,7 @@ fn tool_results_become_one_user_turn() {
         ],
         Some(&bash_tools()),
         None,
-        false,
+        Thinking::Off,
         Dialect::Qwen,
         None,
     );
@@ -418,7 +453,7 @@ fn an_earlier_assistant_turn_drops_its_reasoning() {
         ],
         None,
         None,
-        false,
+        Thinking::Off,
         Dialect::Qwen,
         None,
     );

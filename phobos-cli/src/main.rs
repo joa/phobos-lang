@@ -46,13 +46,19 @@ const VALUED: &[&str] = &[
     "--seed",
     "--listen",
     "--expert-cache",
+    "--prefill-thinking",
 ];
 
 /// Lines of the dashboard's log to reprint if serving fails.
 const REPLAY_LINES: usize = 32;
 
 /// Every flag that is a switch rather than a value. See [`cli::Args::positional_with`].
-const SWITCHES: &[&str] = &["--no-tui", "--tui", "--no-prefix-cache", "--raw"];
+const SWITCHES: &[&str] = &[
+    "--no-tui",
+    "--tui",
+    "--no-prefix-cache",
+    "--raw",
+];
 
 /// Which model to run, and where its tokenizer comes from.
 enum Source {
@@ -79,6 +85,8 @@ struct Args {
     /// Whether a prompt goes to the model as typed rather than as a user turn
     /// of its chat template.
     raw: bool,
+    /// The text a chat turn opens its think block on.
+    prefill_thinking: Option<String>,
 }
 
 fn parse_args(args: &cli::Args) -> Result<Args> {
@@ -99,6 +107,7 @@ fn parse_args(args: &cli::Args) -> Result<Args> {
         tui: !args.has("--no-tui") && (args.has("--tui") || tui::unavailable().is_none()),
         prefix_cache: !args.has("--no-prefix-cache"),
         raw: args.has("--raw"),
+        prefill_thinking: args.value("--prefill-thinking")?.map(str::to_string),
     })
 }
 
@@ -203,6 +212,11 @@ OPTIONS:
       --raw           send the prompt as typed instead of as a user turn of
                       the model's chat template, and print its continuation;
                       for a base model, or text that is already a prompt
+      --prefill-thinking TEXT
+                      open the answer's think block on TEXT and let the
+                      model reason on from it. When serving, this
+                      applies to every chat request, whatever it asks for.
+                      Ignored with --raw or a model with no chat template
       --listen ADDR   run an OpenAI compatible HTTP server on ADDR (e.g.
                       127.0.0.1:8080). The sampling options above become what a
                       request falls back to for every field it does not send.
@@ -275,6 +289,7 @@ fn main() -> Result<()> {
             seed: args.seed,
             max_tokens: args.num_tokens,
             prefix_cache: args.prefix_cache,
+            prefill_thinking: args.prefill_thinking.clone(),
         };
         return serve(addr, model, defaults, drawing);
     }
@@ -380,7 +395,13 @@ fn oneshot(model: &dyn Model, prompt: &str, args: &Args, rng: &mut Rng) -> Resul
     // instruct model continue it as a document instead of answering.
     let template = model.info().chat_template.as_deref().filter(|_| !args.raw);
     let text = match template {
-        Some(template) => chat::user_turn(prompt, Some(template), tokenizer.bos_text()),
+        Some(template) => {
+            let thinking = match &args.prefill_thinking {
+                Some(prefill) => chat::Thinking::Prefilled(prefill),
+                None => chat::Thinking::Off,
+            };
+            chat::user_turn(prompt, Some(template), tokenizer.bos_text(), thinking)
+        }
         None => prompt.to_string(),
     };
     let ids = tokenizer.encode(&text)?;

@@ -134,7 +134,7 @@ pub(crate) async fn handle_chat_completions(
         }
     };
 
-    let thinking = thinking_enabled(&chat_req);
+    let thinking = thinking(&chat_req, state.prefill_thinking.as_deref());
     let tools = selected_tools(chat_req.tools.as_ref(), chat_req.tool_choice.as_ref());
     let prompt = format_chat(
         &chat_req.messages,
@@ -144,6 +144,7 @@ pub(crate) async fn handle_chat_completions(
         state.dialect,
         state.bos.as_deref(),
     );
+    let reasoning = thinking.is_on();
     let max_tokens = chat_req.max_completion_tokens.or(chat_req.max_tokens);
     let requested_model = chat_req.model.clone();
 
@@ -164,7 +165,7 @@ pub(crate) async fn handle_chat_completions(
             gen_req,
             requested_model,
             tools,
-            thinking,
+            reasoning,
             include_usage,
         );
     }
@@ -175,7 +176,7 @@ pub(crate) async fn handle_chat_completions(
         Err(status) => return error_response(status, "inference failed"),
     };
 
-    let out = AssistantOutput::collect(&generated.text, tools, thinking, dialect);
+    let out = AssistantOutput::collect(&generated.text, tools, reasoning, dialect);
     let has_tool_calls = !out.tool_calls.is_empty();
     let finish_reason = if has_tool_calls {
         "tool_calls".to_string()

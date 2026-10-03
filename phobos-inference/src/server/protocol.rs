@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::chat::{ChatMessage, ToolCall};
+use crate::chat::{ChatMessage, Thinking, ToolCall};
 use crate::sampling::SampleConfig;
 
 #[derive(Deserialize, Default)]
@@ -46,6 +46,9 @@ pub struct Defaults {
     /// Whether to keep a finished request's session and reuse the prefix the
     /// next prompt shares with it.
     pub prefix_cache: bool,
+    /// The text every chat prompt opens its think block on, whatever the
+    /// request asks for.
+    pub prefill_thinking: Option<String>,
 }
 
 impl Defaults {
@@ -53,7 +56,8 @@ impl Defaults {
         let s = &self.sample;
         format!(
             "temperature={} top_k={} top_p={} min_p={} presence_penalty={} \
-             repetition_penalty={} seed={} max_tokens={} prefix_cache={}",
+             repetition_penalty={} seed={} max_tokens={} prefix_cache={} \
+             prefill_thinking={:?}",
             s.temperature,
             s.top_k,
             s.top_p,
@@ -63,6 +67,7 @@ impl Defaults {
             self.seed,
             self.max_tokens,
             self.prefix_cache,
+            self.prefill_thinking,
         )
     }
 }
@@ -191,9 +196,21 @@ pub(crate) fn response_id(prefix: &str) -> String {
     format!("{prefix}-{millis}")
 }
 
+/// How the assistant's turn opens. A server started with `prefill` always
+/// reasons from it; otherwise reasoning is off unless asked for.
+pub(crate) fn thinking<'a>(req: &ChatCompletionRequest, prefill: Option<&'a str>) -> Thinking<'a> {
+    if let Some(prefill) = prefill {
+        Thinking::Prefilled(prefill)
+    } else if thinking_enabled(req) {
+        Thinking::Open
+    } else {
+        Thinking::Off
+    }
+}
+
 /// Whether the caller wants a reasoning pass. Off unless asked for, matching
 /// the template's handling of an undefined `enable_thinking`.
-pub(crate) fn thinking_enabled(req: &ChatCompletionRequest) -> bool {
+fn thinking_enabled(req: &ChatCompletionRequest) -> bool {
     if let Some(enabled) = req
         .chat_template_kwargs
         .as_ref()

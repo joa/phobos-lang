@@ -59,6 +59,7 @@ pub(crate) struct AppState {
     pub(crate) model: String,
     pub(crate) dialect: Dialect,
     pub(crate) bos: Option<String>,
+    pub(crate) prefill_thinking: Option<String>,
     pub(crate) meter: Arc<Meter>,
 }
 
@@ -227,6 +228,7 @@ pub fn serve(
         model: name.clone(),
         dialect,
         bos,
+        prefill_thinking: defaults.prefill_thinking.clone(),
         meter: meter.clone(),
     };
 
