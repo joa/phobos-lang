@@ -54,17 +54,17 @@ Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
 | pp128 |   476.96 +/-  1.56 | 532.60 +/- 0.74 |
 | tg128 |    22.00 +/-  0.00 |  31.36 +/- 0.09 |
 
-Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
+Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test  | llama.cpp-prism CUDA[^2] | Phobos GPU       |
 | ----- | -----------------------: | ---------------: |
-| pp128 |         302.11 +/-  0.78 | 583.49 +/- 15.04 |
-| tg128 |          29.36 +/-  0.01 |  46.12 +/-  0.01 |
+| pp128 |         472.38 +/-  1.33 | 599.10 +/-  3.36 |
+| tg128 |          48.83 +/-  0.00 |  45.24 +/-  0.04 |
 
 The two 27B models need 6.27 GiB (IQ1_M) and 5.53 GiB (PTQ1_0) for their
 weights, which leaves little of the card's 8 GiB. Their numbers only hold while
 the desktop uses little VRAM: 1377 MiB was in use before the IQ1_M run, and
-979 MiB before the PTQ1_0 run. If the desktop uses much more, the model no
+1308 MiB before the PTQ1_0 run. If the desktop uses much more, the model no
 longer fits and the driver pages it over PCIe. An earlier session measured
 that at 7 t/s.
 
@@ -267,4 +267,4 @@ python scripts/plot_bench.py results/results.csv -o results/bench.svg
 ```
 
 [^1]: build: 4d19b2876 (10636)
-[^2]: [PrismML's llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), build: 7dffb158d (10685)
+[^2]: [PrismML's llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), build: 2459f68b5 (10754)
