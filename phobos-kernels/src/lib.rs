@@ -22,6 +22,8 @@ pub mod compile;
 #[cfg(feature = "cuda")]
 pub mod launch;
 #[cfg(feature = "cuda")]
+pub mod nvml;
+#[cfg(feature = "cuda")]
 pub mod pool;
 
 #[cfg(feature = "cuda")]

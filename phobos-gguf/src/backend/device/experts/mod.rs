@@ -390,7 +390,7 @@ impl DeviceBackend {
         if self.experts.borrow().budget.is_some() {
             return Ok(());
         }
-        let (free, _) = cust::memory::mem_get_info()?;
+        let free = headroom::free_bytes()?;
         let room = free.saturating_sub(resident_bytes).saturating_sub(crate::runtime::RESERVE_BYTES);
         let budget = match self.experts.borrow().limit {
             Some(asked) if asked > room => {

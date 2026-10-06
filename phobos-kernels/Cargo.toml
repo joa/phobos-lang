@@ -12,6 +12,7 @@ categories = ["compilers", "development-tools"]
 [dependencies]
 anyhow = "1"
 cust = { version = "0.3.2", optional = true }
+libloading = { version = "0.8", optional = true }
 phobos-base = { path = "../phobos-base", optional = true }
 phobos-lang = { path = "../phobos-lang", optional = true }
 phobos-mlir = { path = "../phobos-mlir", optional = true }
@@ -20,7 +21,7 @@ sha2 = { workspace = true, optional = true }
 [features]
 # Lowering, the PTX cache and the manifest: everything short of the driver.
 compiler = ["dep:phobos-base", "dep:phobos-lang", "dep:phobos-mlir", "dep:sha2"]
-cuda = ["compiler", "dep:cust"]
+cuda = ["compiler", "dep:cust", "dep:libloading"]
 
 [[example]]
 name = "barrier_bench"
