@@ -71,8 +71,10 @@ pub(super) struct Experts {
     refills: Vec<(usize, usize, u64)>,
     /// The last block's misses, still running on the host.
     started: Option<StartedRow>,
-    /// The most slots a block may have, once the cache has had to shrink.
+    /// The most slots a block may have while the card is short of memory.
     per_block_cap: Option<usize>,
+    /// The most slots a block the budget buys, which a grown cache returns to.
+    most_per_block: usize,
     /// Passes since free memory was last queried.
     since_checked: usize,
 }
@@ -235,6 +237,7 @@ impl Experts {
             refills: Vec::new(),
             started: None,
             per_block_cap: None,
+            most_per_block: 0,
             since_checked: 0,
         }
     }
@@ -481,11 +484,13 @@ impl DeviceBackend {
             format_args!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20),
         );
         // Each block's spare slot comes out of the budget too.
-        let mut per_block = (budget / slot_bytes / blocks).saturating_sub(1).min(experts.per_block_cap.unwrap_or(usize::MAX));
+        let mut most = (budget / slot_bytes / blocks).saturating_sub(1);
         for (&(stack, quant), &count) in &counts {
             let found = experts.blocks.iter().map(|b| b.set.stack(stack)).find(|s| s.quant() == quant).expect("counted");
-            per_block = per_block.min(SLAB_LIMIT / found.grouped_bytes() / count - 1);
+            most = most.min(SLAB_LIMIT / found.grouped_bytes() / count - 1);
         }
+        experts.most_per_block = most;
+        let per_block = most.min(experts.per_block_cap.unwrap_or(usize::MAX));
         ensure!(
             per_block >= MOE_USED,
             "the expert cache budget of {} MiB holds {per_block} experts a block; a token needs {MOE_USED}",

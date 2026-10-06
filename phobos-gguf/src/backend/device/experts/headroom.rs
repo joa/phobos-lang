@@ -1,10 +1,18 @@
-// Shrinks the expert cache as the rest of a session grows.
+// Sizes the expert cache to the memory the rest of the card leaves it.
 //
 // The cache is sized from free memory when it is laid out. The attention
 // caches, a longer prompt's scratch, the desktop and other programs all grow
 // later. On this driver an over-subscribed allocation still succeeds by
 // paging other buffers to the host, and reading a paged buffer costs far more
-// than the cache slots save.
+// than the cache slots save, so the cache shrinks. When the memory comes back,
+// say because another program exited, it grows again, up to what its budget
+// bought at load.
+//
+// Every resize empties the cache and drops the recorded pass graphs, so the
+// thresholds are far apart: a grown cache leaves more free than a shrink
+// restores, and a grow has to be worth a fair share of a slab. Free memory
+// read just after another program exits overstates what stays free by a few
+// hundred MiB, so a grow to the shrink's headroom would only shrink again.
 //
 // Free memory is the whole card's where NVML is there, since the process's
 // own figure does not see another program fill the card. That figure stops
@@ -24,8 +32,15 @@ use super::{Experts, NONE, Slab};
 /// always reads as short.
 const LOW_BYTES: usize = 512 << 20;
 
-/// Free memory a shrink restores, leaving room for later growth.
+/// Free memory a shrink restores, room for later growth.
 const HEADROOM_BYTES: usize = 1 << 30;
+
+/// Free memory a grow leaves.
+const GROWN_HEADROOM_BYTES: usize = 1536 << 20;
+
+/// The least a grow may add. Free memory has to exceed
+/// [`GROWN_HEADROOM_BYTES`] by this much before the cache grows.
+const GROW_BYTES: usize = 512 << 20;
 
 /// Decode passes between free memory checks.
 const HEADROOM_EVERY: usize = 16;
@@ -46,12 +61,13 @@ impl Experts {
 }
 
 impl DeviceBackend {
-    /// Shrinks the cache when free memory drops below [`LOW_BYTES`]. Call
-    /// between passes.
+    /// Shrinks the cache when free memory drops below [`LOW_BYTES`], and
+    /// grows it back when [`GROW_BYTES`] more than [`GROWN_HEADROOM_BYTES`]
+    /// is free. Call between passes.
     ///
-    /// The cache only ever shrinks. Querying free memory is not free, so
-    /// decode checks every [`HEADROOM_EVERY`] passes, and a prompt pass and
-    /// the pass after a shrink check every time.
+    /// Querying free memory is not free, so decode checks every
+    /// [`HEADROOM_EVERY`] passes, and a prompt pass and the pass after a
+    /// resize check every time.
     pub(in super::super) fn keep_headroom(&self, rows: usize) -> Result<()> {
         let mut experts = self.experts.borrow_mut();
         experts.since_checked += 1;
@@ -63,18 +79,30 @@ impl DeviceBackend {
             return Ok(());
         };
         let free = free_bytes()?;
-        if free >= LOW_BYTES || experts.per_block <= MOE_USED {
+        let slab_bytes: usize = slabs.values().map(Slab::held_bytes).sum();
+        // The bytes one more slot in every block costs.
+        let per_row = slab_bytes / (experts.per_block + 1);
+        let per_block = if free < LOW_BYTES {
+            let fewer = (HEADROOM_BYTES - free).div_ceil(per_row);
+            experts.per_block.saturating_sub(fewer).max(MOE_USED)
+        } else if free >= GROWN_HEADROOM_BYTES + GROW_BYTES {
+            let more = (free - GROWN_HEADROOM_BYTES) / per_row;
+            let grown = (experts.per_block + more).min(experts.most_per_block);
+            if (grown - experts.per_block) * per_row < GROW_BYTES {
+                return Ok(());
+            }
+            grown
+        } else {
+            return Ok(());
+        };
+        if per_block == experts.per_block {
             return Ok(());
         }
-        let slab_bytes: usize = slabs.values().map(Slab::held_bytes).sum();
-        let blocks = experts.blocks.len();
-        let per_slot = slab_bytes / ((experts.per_block + 1) * blocks);
-        let fewer = (HEADROOM_BYTES - free).div_ceil(per_slot * blocks);
-        let per_block = experts.per_block.saturating_sub(fewer).max(MOE_USED);
+        let verb = if per_block < experts.per_block { "shrinking" } else { "growing" };
         phobos_base::log::emit(
             phobos_base::log::Level::Info,
             format_args!(
-                "expert cache: {} MiB of the card left free; shrinking from {} to {per_block} slots a block",
+                "expert cache: {} MiB of the card left free; {verb} from {} to {per_block} slots a block",
                 free >> 20,
                 experts.per_block
             ),

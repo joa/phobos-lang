@@ -170,11 +170,26 @@ over PCIe.
 **Phobos** checks the whole card's free memory between passes. When another
 process fills the card, the expert cache gives the memory back. Here that took
 two steps within a few seconds, from 38 to 14 experts a block. More misses go
-to the CPU threads, but nothing is paged.
+to the CPU threads, but nothing is paged. When the memory is free again, the
+cache takes it back.
 
 Without the squeeze, Phobos replays this trace in 43.5 s.
 
-The raw results are `results/agent-squeeze.json` and `results/agent-squeeze-ncmoe36.json`.
+The other program can also close again. In this run the squeeze starts
+before the third request and ends before the sixth, so each phase gets three
+requests. llama.cpp three rounds, Phobos two:
+
+| engine         | wall    | decode before | during   | after    |
+| -------------- | ------: | ------------: | -------: | -------: |
+| llama.cpp CUDA | 131.7 s |      31.1 t/s |  9.0 t/s | 31.2 t/s |
+| Phobos GPU     |  52.4 s |      45.9 t/s | 30.8 t/s | 44.6 t/s |
+
+Both engines recover. llama.cpp waits for the driver to page its buffers back
+in. Phobos grows its cache from 14 back to 39 experts a block, the size it had
+before the squeeze.
+
+The raw results are `results/agent-squeeze.json`, `results/agent-squeeze-ncmoe36.json`
+and `results/agent-squeeze-release.json`.
 
 ## Details
 
@@ -221,7 +236,8 @@ python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-fib.req
 ```
 
 The same replay with 2 GiB of the card taken by another process from the
-fourth request on.
+fourth request on. `--squeeze-at 3 --squeeze-until 6` takes it before the
+third request and gives it back before the sixth.
 
 ```bash
 python scripts/agent_bench.py -r 3 --replay RUN/phobos-rep1-fib.requests.jsonl --squeeze \
