@@ -176,7 +176,7 @@ def kinds_of(samples):
 
 
 def engine_key(engine):
-    """phobos first, since it is what the ratios are taken against."""
+    """phobos first, since its bar carries the ratio against the other engine."""
     return (not engine.startswith("phobos"), engine)
 
 
@@ -259,9 +259,14 @@ def draw_panel(ax, test, models, engines, stats, theme, colors, base, scale_max)
                 )
             # Rows have different scales, so every bar carries its value.
             note = fmt_rate(mean)
-            other = stats.get((base, model, test)) if engine != base else None
-            if other and other[0]:
-                note += f"   {mean / other[0]:.2f}x"
+            if engine == base:
+                rivals = [
+                    stats[(e, model, test)][0]
+                    for e in engines
+                    if e != base and (e, model, test) in stats
+                ]
+                if len(rivals) == 1 and rivals[0]:
+                    note += f"   {mean / rivals[0]:.2f}x"
             labels.append(
                 ax.text(
                     mean + err + pad,
@@ -535,7 +540,7 @@ def main():
         note = fig.text(
             0.988,
             0.18 / height_inches,
-            f"Nx is that engine's rate over {base}'s",
+            f"Nx is {base}'s rate over the other engine's",
             fontsize=8,
             color=theme["muted"],
             ha="right",

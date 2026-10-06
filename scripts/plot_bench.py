@@ -5,8 +5,9 @@ Reads the CSV that `cargo run -r -p phobos-kbench -- --csv PATH` writes, with
 columns benchmark, impl, precision, gflops, peak_gflops and pct_of_peak.
 
 Draws one horizontal bar per (benchmark, impl), grouped by benchmark and
-labelled with GFLOP/s and percent of peak. A kernel with no cuBLAS entry, such
-as flash attention, gets a single bar.
+labelled with GFLOP/s and percent of peak, and the phobos bar with its ratio to
+cuBLAS. A kernel with no cuBLAS entry, such as flash attention, gets a single
+bar.
 
 phobos-kbench measures each kernel once, so unlike scripts/plot.py there are
 no error bars.
@@ -135,6 +136,7 @@ def main():
     for bench in benchmarks:
         group = by_bench[bench]
         group_top = y
+        cublas = next((r["gflops"] for r in group if r["impl"] == "cuBLAS"), None)
         for row in sorted(group, key=lambda r: impls.index(r["impl"])):
             ax.barh(
                 y,
@@ -145,6 +147,8 @@ def main():
                 label=row["impl"] if bench == benchmarks[0] else None,
             )
             note = f"{fmt_gflops(row['gflops'])}  ({row['pct_of_peak']:.0f}% of {fmt_gflops(row['peak_gflops'])})"
+            if row["impl"] != "cuBLAS" and cublas:
+                note += f"   {row['gflops'] / cublas:.2f}x"
             ax.text(
                 row["gflops"] + scale_max * 0.015,
                 y,
