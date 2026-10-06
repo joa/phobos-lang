@@ -4,7 +4,7 @@
 
 Phobos is a tile-based GPU kernel language and an LLM inference engine built on it. I wrote it to learn the stack on an RTX 2080 SUPER (8 GB), so it targets low-VRAM machines.
 
-For mixture-of-experts models that don't fit in VRAM, Phobos needs no manual CPU/GPU split. It keeps an expert cache on the card and computes misses on the CPU in parallel. On Qwen3.6-35B-A3B it replays a recorded coding-agent session 1.6x faster than llama.cpp at its best swept configuration. Decode matches or beats llama.cpp on every model tested. Prompt processing on small dense models is 60–80% of llama.cpp.
+For mixture-of-experts models that don't fit in VRAM, Phobos needs no manual CPU/GPU split. It keeps an expert cache on the card and computes misses on the CPU in parallel. On Qwen3.6-35B-A3B it replays a recorded coding-agent session 1.6x faster than llama.cpp at its best swept configuration. Decode matches or beats llama.cpp on every model tested except Ternary-Bonsai, where PrismML's fork is 8% faster. Prompt processing on small dense models is 60–80% of llama.cpp.
 
 I come from compilers and virtual machines, not AI, which shaped several design choices. Phobos will understand your architecture as it performs inference and chooses the best runtime configuration.
 
