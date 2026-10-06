@@ -1,6 +1,6 @@
 [package]
 name = "phobos-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 description = "Command line and server entry point for the Phobos inference runtime"
 readme.workspace = true

@@ -1,6 +1,6 @@
 [package]
 name = "phobos-bench"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 description = "Prompt and generation throughput of a GGUF model, as llama-bench reports it"
 readme.workspace = true

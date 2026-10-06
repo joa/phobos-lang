@@ -1,6 +1,6 @@
 [package]
 name = "phobos-pod"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 description = "Executes scheduler instructions on one GPU"
 readme.workspace = true

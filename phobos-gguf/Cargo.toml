@@ -1,6 +1,6 @@
 [package]
 name = "phobos-gguf"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 description = "GGUF front end: parse quantized model files into metadata, tensors, and vocabulary"
 readme.workspace = true

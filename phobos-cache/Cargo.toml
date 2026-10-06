@@ -1,6 +1,6 @@
 [package]
 name = "phobos-cache"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 description = "Warms, lists and clears the compiled-kernel cache, one directory per chip"
 readme.workspace = true
