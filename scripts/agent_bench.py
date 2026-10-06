@@ -35,11 +35,23 @@ answer is capped at the recorded length, so two engines or two builds do the
 same work. The answers' text still differs from the recording, so an engine's
 kept session is not the one the recording had.
 
+`--squeeze` takes 2 GiB of device memory away partway through each task, the
+way another program opening on the desktop would, and holds it until the task
+ends, or until the request `--squeeze-until` names, as if the program closed
+again. scripts/vram_hog.py holds it from a process of its own and keeps
+rewriting it, since the driver pages an idle allocation out first. It starts
+before the task's Nth chat request (`--squeeze-at`, the 4th by default), so
+both engines take the hit at the same point in the same work, and both load
+against the same unsqueezed card. The report then splits each task's rates
+into the requests before, during and after the squeeze, and for phobos lists
+each time its expert cache shrank or grew.
+
 Usage:
     python scripts/agent_bench.py
     python scripts/agent_bench.py --engines phobos -r 3
     python scripts/agent_bench.py --replay RUN/phobos-rep1-fib.requests.jsonl -r 3
     python scripts/agent_bench.py --engines phobos --phobos-env PHOBOS_MOE_HOST_DECODE=0
+    python scripts/agent_bench.py --replay RUN/phobos-rep1-fib.requests.jsonl -r 3 --squeeze
 
 Needs pi, nvidia-smi and cargo on PATH. No third-party imports.
 """
@@ -103,6 +115,7 @@ PHOBOS_EXPERTS = re.compile(
 # and the same without "prompt " for the decode.
 LLAMA_PROMPT = re.compile(r"prompt eval time =\s*([\d.]+) ms /\s*(\d+) tokens")
 LLAMA_DECODE = re.compile(r"(?<!prompt )\beval time =\s*([\d.]+) ms /\s*(\d+) tokens")
+PHOBOS_RESIZE = re.compile(r"expert cache: (\d+) MiB of the card left free; (?:shrinking|growing) from (\d+) to (\d+) slots")
 
 
 def phobos_requests(text):
@@ -140,6 +153,12 @@ def llama_requests(text):
             )
         )
     return out
+
+
+def phobos_resizes(text):
+    """Each time the expert cache shrank or grew, as (free MiB, slots a block
+    before, after)."""
+    return [tuple(map(int, m)) for m in PHOBOS_RESIZE.findall(text)]
 
 
 def phobos_experts(text):
@@ -380,6 +399,64 @@ def warm_request():
 
 
 # --------------------------------------------------------------------------- #
+# another program taking device memory mid-task
+
+
+class Squeeze:
+    """Starts scripts/vram_hog.py before a task's `at`th chat request and
+    stops it before the `until`th, or when the task ends if `until` is 0.
+    Off when `mib` is 0."""
+
+    def __init__(self, mib, at, until, touch_ms):
+        self.mib, self.at, self.until, self.touch_ms = mib, at, until, touch_ms
+        self.lock = threading.Lock()
+        self.seen = 0
+        self.hog = None
+        self.started = self.ended = 0
+        self.note = ""
+
+    def before_request(self):
+        """Counts one chat request, and starts or ends the squeeze before it."""
+        if not self.mib:
+            return
+        with self.lock:
+            self.seen += 1
+            if self.seen == self.until and self.hog:
+                self.stop()
+                self.ended = self.seen
+                print(f"  squeeze ended before request {self.seen}: card {card_line()}")
+            if self.seen != self.at:
+                return
+            before = card_line()
+            self.hog = subprocess.Popen(
+                [sys.executable, str(ROOT / "scripts" / "vram_hog.py"), str(self.mib), "--touch-ms", str(self.touch_ms)],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                text=True,
+            )
+            held = self.hog.stdout.readline().strip()
+            if not held.startswith("holding"):
+                sys.exit(f"vram_hog.py did not take its memory: {held or 'it exited'}")
+            self.started = self.seen
+            self.note = f"{held}; card {before}, then {card_line()}"
+            print(f"  squeeze before request {self.at}: {self.note}")
+
+    def stop(self):
+        self.hog.stdin.close()
+        self.hog.wait(timeout=30)
+        self.hog = None
+
+    def release(self):
+        """Ends the squeeze, if any, and resets the count for the next task.
+        Returns the requests it started and ended before, 0 for neither."""
+        if self.hog:
+            self.stop()
+        span = (self.started, self.ended)
+        self.seen = self.started = self.ended = 0
+        return span
+
+
+# --------------------------------------------------------------------------- #
 # recording what the agent asks, and asking it again
 
 
@@ -389,8 +466,9 @@ class Recorder:
     While `path` is set, appends each chat request and its answer length to
     that file, so the work can be replayed on any engine."""
 
-    def __init__(self):
+    def __init__(self, squeeze):
         self.path = None
+        self.squeeze = squeeze
         self.server = ThreadingHTTPServer(("127.0.0.1", PORT), self.handler())
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
@@ -406,6 +484,8 @@ class Recorder:
                 self.forward(self.rfile.read(int(self.headers.get("content-length", 0))))
 
             def forward(self, body):
+                if body and self.path.endswith("/chat/completions"):
+                    recorder.squeeze.before_request()
                 conn = http.client.HTTPConnection("127.0.0.1", ENGINE_PORT, timeout=3600)
                 keep = ("content-type", "authorization", "accept")
                 conn.request(self.command, self.path, body, {k: v for k, v in self.headers.items() if k.lower() in keep})
@@ -454,7 +534,7 @@ def answer_usage(answer):
     return usage
 
 
-def replay_trace(trace):
+def replay_trace(trace, squeeze):
     """Sends a recorded agent's requests again, in order, each capped at the
     recorded answer length.
 
@@ -463,6 +543,7 @@ def replay_trace(trace):
     started = time.perf_counter()
     prompts = []
     for record in records:
+        squeeze.before_request()
         body = dict(record["body"], stream=True, stream_options={"include_usage": True})
         body.pop("max_tokens", None)
         if record.get("completion_tokens"):
@@ -493,9 +574,13 @@ class Task:
     turns: int = 0
     requests: list = field(default_factory=list)
     experts: dict = None
+    squeezed_at: int = 0  # the request the squeeze started before, 0 without one
+    squeeze_ended: int = 0  # the request it ended before, 0 if it held to the end
+    squeeze: str = ""
+    resizes: list = field(default_factory=list)
 
-    def totals(self):
-        rs = [Request(**r) if isinstance(r, dict) else r for r in self.requests]
+    def totals(self, part=slice(None)):
+        rs = [Request(**r) if isinstance(r, dict) else r for r in self.requests][part]
         prompt = sum(r.prompt for r in rs)
         reused = sum(r.reused for r in rs)
         generated = sum(r.generated for r in rs)
@@ -668,6 +753,27 @@ def report(tasks, engines_meta):
         for k, v in meta.items():
             print(f"{name} {k}: {v}")
 
+    squeezed = [t for t in tasks if t.squeezed_at]
+    if squeezed:
+        print("\nbefore, during and after the squeeze, token-weighted:")
+        rows = []
+        for t in squeezed:
+            start, end = t.squeezed_at - 1, (t.squeeze_ended - 1 if t.squeeze_ended else None)
+            pre, during = t.totals(slice(None, start)), t.totals(slice(start, end))
+            post = t.totals(slice(end, None)) if end is not None else None
+            rate = lambda part, key: f"{part[key]:.1f}" if part else ""  # noqa: E731
+            slots = ", ".join(f"{a}->{b}" for _, a, b in t.resizes)
+            rows.append(
+                [
+                    t.engine, t.child, t.rep, f"{t.squeezed_at}-{t.squeeze_ended or 'end'}",
+                    rate(pre, "pp"), rate(during, "pp"), rate(post, "pp"),
+                    rate(pre, "tg"), rate(during, "tg"), rate(post, "tg"),
+                    f"{during['tg'] / pre['tg']:.2f}x" if pre["tg"] else "",
+                    len(t.resizes), slots,
+                ]
+            )
+        print(fmt_table(rows, ["engine", "child", "rep", "squeezed", "pp before", "pp during", "pp after", "tg before", "tg during", "tg after", "tg kept", "resizes", "slots a block"]))
+
 
 # --------------------------------------------------------------------------- #
 
@@ -690,6 +796,13 @@ def parse_args():
     p.add_argument("--thinking", action="store_true", help="both engines think: pi asks for reasoning, llama.cpp --reasoning on")
     p.add_argument("--no-build", action="store_true")
     p.add_argument("--out", help="folder for logs and results (default: a new temp folder)")
+    p.add_argument(
+        "--squeeze", type=int, nargs="?", const=2048, default=0, metavar="MIB",
+        help="take MIB of device memory, 2048 if not given, partway through each task",
+    )
+    p.add_argument("--squeeze-at", type=int, default=4, metavar="N", help="squeeze before the Nth chat request of a task")
+    p.add_argument("--squeeze-until", type=int, default=0, metavar="N", help="end the squeeze before the Nth chat request (default: at the task's end)")
+    p.add_argument("--squeeze-touch-ms", type=int, default=250, metavar="MS", help="how often the squeeze rewrites its memory")
     p.add_argument("--max-idle-util", type=float, default=30)
     p.add_argument("--max-idle-power", type=float, default=80)
     p.add_argument("--force", action="store_true")
@@ -700,7 +813,7 @@ def parse_args():
     return args
 
 
-def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
+def run_engine(engine, kind, rep, children, pi, out, meta, recorder, squeeze):
     """One round on one engine: start it, run every child or replay every
     trace, then stop it."""
     print(f"\nround {rep}, {engine.name}: loading, card {card_line()}")
@@ -721,13 +834,14 @@ def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
             workdir = scratch / child
             before = engine.offset()
             if engine.args.replay:
-                wall, prompts = replay_trace(child)
+                wall, prompts = replay_trace(child, squeeze)
                 exited, done, turns = "ok", True, len(prompts)
                 child = Path(child).name.removesuffix(".requests.jsonl")
             else:
                 recorder.path = out / f"{kind}-rep{rep}-{child}.requests.jsonl"
                 wall, exited, done, turns, prompts = run_agent(pi, workdir, out / f"{kind}-rep{rep}-{child}.jsonl", engine.args.timeout, engine.args.thinking)
                 recorder.path = None
+            squeezed_at, squeeze_ended = squeeze.release()
             time.sleep(0.5)  # the last request's summary line
             text = engine.text(before)
             requests = engine.requests(text)
@@ -750,6 +864,10 @@ def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
                 turns=turns,
                 requests=[asdict(r) for r in requests],
                 experts=phobos_experts(text) if kind == "phobos" else None,
+                squeezed_at=squeezed_at,
+                squeeze_ended=squeeze_ended,
+                squeeze=squeeze.note if squeezed_at else "",
+                resizes=phobos_resizes(text) if kind == "phobos" else [],
             )
             tasks.append(task)
             s = task.totals()
@@ -758,6 +876,7 @@ def run_engine(engine, kind, rep, children, pi, out, meta, recorder):
                 f" {s['requests']} requests, pp {s['pp']:.1f} tg {s['tg']:.1f} t/s"
             )
     finally:
+        squeeze.release()
         engine.stop()
     return tasks
 
@@ -784,13 +903,16 @@ def main():
     if "phobos" in order and not args.no_build:
         build_phobos()
 
-    recorder = None if args.replay else Recorder()
+    if args.squeeze_until and args.squeeze_until <= args.squeeze_at:
+        sys.exit("--squeeze-until has to come after --squeeze-at")
+    squeeze = Squeeze(args.squeeze, args.squeeze_at, args.squeeze_until, args.squeeze_touch_ms)
+    recorder = None if args.replay else Recorder(squeeze)
     tasks, meta = [], {}
     for rep in range(1, args.reps + 1):
         # Each engine starts fresh every round. The order reverses on even
         # rounds so neither always goes first.
         for kind in order if rep % 2 else order[::-1]:
-            tasks += run_engine(kinds[kind](args), kind, rep, children, pi, out, meta, recorder)
+            tasks += run_engine(kinds[kind](args), kind, rep, children, pi, out, meta, recorder, squeeze)
             (out / "results.json").write_text(json.dumps({"meta": meta, "tasks": [asdict(t) for t in tasks]}, indent=1))
 
     report(tasks, meta)

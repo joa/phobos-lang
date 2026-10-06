@@ -1,0 +1,504 @@
+{
+ "meta": {
+  "phobos": {
+   "expert_cache": "expert cache: 1920 slots of up to 1.94 MiB, 48 a block, 3571 MiB in 4 slabs"
+  },
+  "llama.cpp": {
+   "fit": "experts of 31 blocks on the CPU, as given"
+  }
+ },
+ "tasks": [
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-fib",
+   "rep": 1,
+   "wall_secs": 50.677046600030735,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 8,
+   "requests": [
+    {
+     "prompt": 1688,
+     "reused": 0,
+     "generated": 106,
+     "prompt_secs": 4.992605737947352,
+     "decode_secs": 2.3820224719101124
+    },
+    {
+     "prompt": 1973,
+     "reused": 1681,
+     "generated": 202,
+     "prompt_secs": 1.3543599257884973,
+     "decode_secs": 4.5291479820627805
+    },
+    {
+     "prompt": 2274,
+     "reused": 1966,
+     "generated": 114,
+     "prompt_secs": 1.5179891572203055,
+     "decode_secs": 2.5675675675675675
+    },
+    {
+     "prompt": 2408,
+     "reused": 2267,
+     "generated": 219,
+     "prompt_secs": 1.3919052319842053,
+     "decode_secs": 6.083333333333333
+    },
+    {
+     "prompt": 2722,
+     "reused": 2627,
+     "generated": 139,
+     "prompt_secs": 0.8289703315881327,
+     "decode_secs": 3.797814207650273
+    },
+    {
+     "prompt": 3041,
+     "reused": 2715,
+     "generated": 243,
+     "prompt_secs": 1.8355855855855856,
+     "decode_secs": 6.694214876033058
+    },
+    {
+     "prompt": 3629,
+     "reused": 3034,
+     "generated": 219,
+     "prompt_secs": 3.0860995850622404,
+     "decode_secs": 6.169014084507042
+    },
+    {
+     "prompt": 3943,
+     "reused": 3848,
+     "generated": 7,
+     "prompt_secs": 0.8010118043844857,
+     "decode_secs": 0.2095808383233533
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.39905524419535626,
+    "prompt_hit": 0.2775360041790565,
+    "copied_gb": 129.49
+   },
+   "squeezed_at": 4,
+   "squeeze": "holding 2048 MiB, rewritten every 250 ms; card 6.18 of 8.0 GiB used, 89% util, 83 W, 13 compute apps, then 7.59 of 8.0 GiB used, 65% util, 83 W, 14 compute apps",
+   "shrinks": [
+    [
+     335,
+     48,
+     38
+    ],
+    [
+     0,
+     38,
+     24
+    ],
+    [
+     255,
+     24,
+     13
+    ]
+   ]
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-fib",
+   "rep": 1,
+   "wall_secs": 173.2568427999504,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 8,
+   "requests": [
+    {
+     "prompt": 1783,
+     "reused": 0,
+     "generated": 112,
+     "prompt_secs": 16.66553,
+     "decode_secs": 3.50754
+    },
+    {
+     "prompt": 2068,
+     "reused": 1779,
+     "generated": 202,
+     "prompt_secs": 2.34659,
+     "decode_secs": 6.0715900000000005
+    },
+    {
+     "prompt": 2369,
+     "reused": 2064,
+     "generated": 110,
+     "prompt_secs": 2.92167,
+     "decode_secs": 3.43912
+    },
+    {
+     "prompt": 2503,
+     "reused": 2365,
+     "generated": 209,
+     "prompt_secs": 8.80826,
+     "decode_secs": 22.18198
+    },
+    {
+     "prompt": 2817,
+     "reused": 2499,
+     "generated": 139,
+     "prompt_secs": 10.76736,
+     "decode_secs": 14.63636
+    },
+    {
+     "prompt": 3136,
+     "reused": 2813,
+     "generated": 212,
+     "prompt_secs": 10.89799,
+     "decode_secs": 22.11214
+    },
+    {
+     "prompt": 3724,
+     "reused": 3132,
+     "generated": 219,
+     "prompt_secs": 17.98422,
+     "decode_secs": 22.36376
+    },
+    {
+     "prompt": 4038,
+     "reused": 3942,
+     "generated": 8,
+     "prompt_secs": 6.85564,
+     "decode_secs": 0.23157
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 4,
+   "squeeze": "holding 2048 MiB, rewritten every 250 ms; card 7.51 of 8.0 GiB used, 36% util, 52 W, 13 compute apps, then 7.55 of 8.0 GiB used, 37% util, 83 W, 14 compute apps",
+   "shrinks": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-fib",
+   "rep": 2,
+   "wall_secs": 167.21602140017785,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 8,
+   "requests": [
+    {
+     "prompt": 1783,
+     "reused": 0,
+     "generated": 112,
+     "prompt_secs": 13.02917,
+     "decode_secs": 3.32183
+    },
+    {
+     "prompt": 2068,
+     "reused": 1779,
+     "generated": 202,
+     "prompt_secs": 2.27001,
+     "decode_secs": 6.45573
+    },
+    {
+     "prompt": 2369,
+     "reused": 2064,
+     "generated": 110,
+     "prompt_secs": 2.3195300000000003,
+     "decode_secs": 3.39454
+    },
+    {
+     "prompt": 2503,
+     "reused": 2365,
+     "generated": 209,
+     "prompt_secs": 5.74395,
+     "decode_secs": 24.45656
+    },
+    {
+     "prompt": 2817,
+     "reused": 2499,
+     "generated": 139,
+     "prompt_secs": 8.04105,
+     "decode_secs": 14.41816
+    },
+    {
+     "prompt": 3136,
+     "reused": 2813,
+     "generated": 212,
+     "prompt_secs": 10.73931,
+     "decode_secs": 24.472060000000003
+    },
+    {
+     "prompt": 3724,
+     "reused": 3132,
+     "generated": 219,
+     "prompt_secs": 15.21011,
+     "decode_secs": 25.01754
+    },
+    {
+     "prompt": 4038,
+     "reused": 3942,
+     "generated": 8,
+     "prompt_secs": 6.80319,
+     "decode_secs": 0.22896
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 4,
+   "squeeze": "holding 2048 MiB, rewritten every 250 ms; card 7.54 of 8.0 GiB used, 38% util, 53 W, 13 compute apps, then 7.64 of 8.0 GiB used, 38% util, 70 W, 14 compute apps",
+   "shrinks": []
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-fib",
+   "rep": 2,
+   "wall_secs": 55.25109579996206,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 8,
+   "requests": [
+    {
+     "prompt": 1688,
+     "reused": 0,
+     "generated": 94,
+     "prompt_secs": 5.10432416087088,
+     "decode_secs": 2.088888888888889
+    },
+    {
+     "prompt": 1973,
+     "reused": 1681,
+     "generated": 202,
+     "prompt_secs": 1.3638486688463336,
+     "decode_secs": 4.4298245614035086
+    },
+    {
+     "prompt": 2274,
+     "reused": 1966,
+     "generated": 114,
+     "prompt_secs": 1.5150024594195768,
+     "decode_secs": 2.590909090909091
+    },
+    {
+     "prompt": 2408,
+     "reused": 2388,
+     "generated": 219,
+     "prompt_secs": 5.0,
+     "decode_secs": 9.201680672268907
+    },
+    {
+     "prompt": 2722,
+     "reused": 2627,
+     "generated": 139,
+     "prompt_secs": 0.8535489667565139,
+     "decode_secs": 3.736559139784946
+    },
+    {
+     "prompt": 3041,
+     "reused": 2715,
+     "generated": 223,
+     "prompt_secs": 1.8920487521764364,
+     "decode_secs": 6.109589041095891
+    },
+    {
+     "prompt": 3629,
+     "reused": 3034,
+     "generated": 219,
+     "prompt_secs": 3.125,
+     "decode_secs": 6.186440677966102
+    },
+    {
+     "prompt": 3943,
+     "reused": 3848,
+     "generated": 7,
+     "prompt_secs": 0.7903494176372712,
+     "decode_secs": 0.20771513353115725
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.42052341824157763,
+    "prompt_hit": 0.29429141525529523,
+    "copied_gb": 124.70000000000002
+   },
+   "squeezed_at": 4,
+   "squeeze": "holding 2048 MiB, rewritten every 250 ms; card 6.00 of 8.0 GiB used, 84% util, 110 W, 13 compute apps, then 7.50 of 8.0 GiB used, 53% util, 83 W, 14 compute apps",
+   "shrinks": [
+    [
+     257,
+     49,
+     38
+    ],
+    [
+     310,
+     38,
+     28
+    ],
+    [
+     21,
+     28,
+     14
+    ]
+   ]
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-fib",
+   "rep": 3,
+   "wall_secs": 56.19434619997628,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 8,
+   "requests": [
+    {
+     "prompt": 1688,
+     "reused": 0,
+     "generated": 94,
+     "prompt_secs": 5.037302297821546,
+     "decode_secs": 2.1218961625282167
+    },
+    {
+     "prompt": 1973,
+     "reused": 1681,
+     "generated": 202,
+     "prompt_secs": 1.3664014974262986,
+     "decode_secs": 4.420131291028446
+    },
+    {
+     "prompt": 2274,
+     "reused": 1966,
+     "generated": 109,
+     "prompt_secs": 1.4995131450827652,
+     "decode_secs": 2.5057471264367814
+    },
+    {
+     "prompt": 2408,
+     "reused": 2267,
+     "generated": 219,
+     "prompt_secs": 5.0,
+     "decode_secs": 8.76
+    },
+    {
+     "prompt": 2722,
+     "reused": 2627,
+     "generated": 136,
+     "prompt_secs": 0.852017937219731,
+     "decode_secs": 3.6856368563685638
+    },
+    {
+     "prompt": 3041,
+     "reused": 2715,
+     "generated": 248,
+     "prompt_secs": 1.8975552968568101,
+     "decode_secs": 6.831955922865014
+    },
+    {
+     "prompt": 3629,
+     "reused": 3034,
+     "generated": 219,
+     "prompt_secs": 3.1514830508474576,
+     "decode_secs": 6.186440677966102
+    },
+    {
+     "prompt": 3943,
+     "reused": 3848,
+     "generated": 7,
+     "prompt_secs": 0.841452612931798,
+     "decode_secs": 0.20648967551622419
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.42026337115072926,
+    "prompt_hit": 0.28764186602870817,
+    "copied_gb": 127.56
+   },
+   "squeezed_at": 4,
+   "squeeze": "holding 2048 MiB, rewritten every 250 ms; card 5.99 of 8.0 GiB used, 86% util, 111 W, 13 compute apps, then 7.60 of 8.0 GiB used, 86% util, 71 W, 14 compute apps",
+   "shrinks": [
+    [
+     257,
+     49,
+     38
+    ],
+    [
+     0,
+     38,
+     24
+    ],
+    [
+     319,
+     24,
+     14
+    ]
+   ]
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-fib",
+   "rep": 3,
+   "wall_secs": 169.40111860004254,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 8,
+   "requests": [
+    {
+     "prompt": 1783,
+     "reused": 0,
+     "generated": 112,
+     "prompt_secs": 13.057799999999999,
+     "decode_secs": 3.5812199999999996
+    },
+    {
+     "prompt": 2068,
+     "reused": 1779,
+     "generated": 202,
+     "prompt_secs": 2.2675799999999997,
+     "decode_secs": 6.2606
+    },
+    {
+     "prompt": 2369,
+     "reused": 2064,
+     "generated": 110,
+     "prompt_secs": 2.32345,
+     "decode_secs": 3.35107
+    },
+    {
+     "prompt": 2503,
+     "reused": 2365,
+     "generated": 209,
+     "prompt_secs": 6.047149999999999,
+     "decode_secs": 24.8476
+    },
+    {
+     "prompt": 2817,
+     "reused": 2499,
+     "generated": 139,
+     "prompt_secs": 10.7355,
+     "decode_secs": 14.661760000000001
+    },
+    {
+     "prompt": 3136,
+     "reused": 2813,
+     "generated": 212,
+     "prompt_secs": 8.270940000000001,
+     "decode_secs": 24.861330000000002
+    },
+    {
+     "prompt": 3724,
+     "reused": 3132,
+     "generated": 219,
+     "prompt_secs": 18.04278,
+     "decode_secs": 22.518279999999997
+    },
+    {
+     "prompt": 4038,
+     "reused": 3942,
+     "generated": 8,
+     "prompt_secs": 6.87997,
+     "decode_secs": 0.22672
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 4,
+   "squeeze": "holding 2048 MiB, rewritten every 250 ms; card 7.55 of 8.0 GiB used, 34% util, 54 W, 13 compute apps, then 7.59 of 8.0 GiB used, 32% util, 83 W, 14 compute apps",
+   "shrinks": []
+  }
+ ]
+}

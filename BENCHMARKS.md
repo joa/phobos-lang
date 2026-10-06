@@ -135,6 +135,47 @@ twice as many tokens in the same time.
 The context grows to 4k tokens without thinking and 8.6k with it. That is why
 decode is slower here than in the benchmark tables.
 
+## Under Memory Pressure
+
+A desktop does not leave the card alone. A browser, a game or a second model
+can take a share of its memory at any time. The same fib replay, but before
+the fourth of its eight requests another process takes 2 GiB of the card's 8
+and keeps writing to it until the task ends. Both engines loaded against the
+whole card. Three rounds each:
+
+| engine         | wall    | prompt  | decode   |
+| -------------- | ------: | ------: | -------: |
+| llama.cpp CUDA | 169.4 s | 55 t/s  | 12.2 t/s |
+| Phobos GPU     |  55.3 s | 191 t/s | 36.4 t/s |
+
+The same rates split at the squeeze:
+
+| engine         | decode before | decode after | kept | prompt before | prompt after |
+| -------------- | ------------: | -----------: | ---: | ------------: | -----------: |
+| llama.cpp CUDA |      32.3 t/s |      9.2 t/s |  28% |       126 t/s |       29 t/s |
+| Phobos GPU     |      44.8 t/s |     33.3 t/s |  74% |       289 t/s |      120 t/s |
+
+llama.cpp can buy room for the squeeze up front. With the experts of five more
+layers on the CPU (`-ncmoe 36`), it doesn't notice the squeeze at all, but it
+is slower without one, too:
+
+| engine                    | wall   | decode before | decode after | prompt before | prompt after |
+| ------------------------- | -----: | ------------: | -----------: | ------------: | -----------: |
+| llama.cpp CUDA, `-ncmoe 36` | 78.3 s |      27.7 t/s |     28.2 t/s |       116 t/s |      107 t/s |
+
+**llama.cpp** fixed its split at load time. When the card runs out of memory,
+the driver pages its buffers to host memory, and every token reads them back
+over PCIe.
+
+**Phobos** checks the whole card's free memory between passes. When another
+process fills the card, the expert cache gives the memory back. Here that took
+two steps within a few seconds, from 38 to 14 experts a block. More misses go
+to the CPU threads, but nothing is paged.
+
+Without the squeeze, Phobos replays this trace in 43.5 s.
+
+The raw results are `results/agent-squeeze.json` and `results/agent-squeeze-ncmoe36.json`.
+
 ## Details
 
 The 0.8B, MiniCPM5-1B and 4B tables come from one run of both engines.
@@ -176,6 +217,14 @@ Record a [pi](https://pi.dev) session, then replay it to both engines.
 ```bash
 python scripts/agent_bench.py --engines phobos -r 1 [--thinking]
 python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-fib.requests.jsonl \
+  --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8
+```
+
+The same replay with 2 GiB of the card taken by another process from the
+fourth request on.
+
+```bash
+python scripts/agent_bench.py -r 3 --replay RUN/phobos-rep1-fib.requests.jsonl --squeeze \
   --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8
 ```
 
