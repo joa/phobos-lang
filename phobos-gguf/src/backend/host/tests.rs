@@ -355,3 +355,15 @@ fn moe_matches_a_dense_reference_and_reports_its_routes() {
     }
     assert_eq!(read_vec(&backend, routes, rows * used).unwrap(), want_routes);
 }
+
+#[test]
+fn add_rows_broadcasts_the_bias_down_every_row() {
+    let backend = HostBackend::new();
+    let x = backend.upload(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]).unwrap();
+    let bias = backend.upload(&[10.0, 20.0, 30.0]).unwrap();
+    backend.add_rows(x, 2, 3, bias).unwrap();
+    assert_eq!(
+        read_vec(&backend, x, 6).unwrap(),
+        vec![11.0, 22.0, 33.0, 14.0, 25.0, 36.0]
+    );
+}

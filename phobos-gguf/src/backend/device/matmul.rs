@@ -7,6 +7,9 @@ use super::*;
 type I8Kernel<'a> = (&'a Module, &'static str, usize, Vec<(u64, i64)>);
 
 
+/// Blocks below which a decode matvec takes its narrow tile; see `i8_pick`.
+const WIDE_TILE_MIN_BLOCKS: usize = 8;
+
 /// The five buffers every batched Q8_0 kernel contracts over. The weight
 /// pair is passed whole. The others are offset to each launch's row band.
 struct Q8Tiles {
@@ -72,6 +75,10 @@ impl DeviceBackend {
             q.n
         );
         let (w_ptr, s_ptr, rs_ptr) = (q.qs, q.scales, q.row_scales);
+        if q.q50 {
+            drop(quants);
+            return self.project_q50(act, m, k, (w_ptr, s_ptr, rs_ptr), n, out, accumulate);
+        }
         let out_ptr = self.ptr(out, 0)?;
         let blocks = k / Q8_BLOCK;
         let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
@@ -321,8 +328,10 @@ impl DeviceBackend {
         let q2k_qdot_eligible = *quant == Quant::Q2_K && m == 1 && n.is_multiple_of(Q2K_TN);
         let q3k_qdot_eligible = *quant == Quant::Q3_K && m == 1 && n.is_multiple_of(Q3K_TN);
 
-        // The wide tile whenever it divides n.
-        let wide_tile = |tn: usize| n.is_multiple_of(tn);
+        // The wide tile whenever it divides n into enough blocks. A
+        // projection only a few wide tiles across, such as a 256-wide key,
+        // takes the narrow one at four times the blocks.
+        let wide_tile = |tn: usize| n.is_multiple_of(tn) && n / tn >= WIDE_TILE_MIN_BLOCKS;
         // The dp4a decode matvecs. The format picks the output tile and the
         // lookup tables. It quantizes the activation, which the host
         // reference does not.

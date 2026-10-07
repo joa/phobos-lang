@@ -5,6 +5,7 @@ use super::dialect::{
     MINICPM_PARAM_END, MINICPM_PARAM_START, PARAMETER_END, PARAMETER_START, TOOL_CALL_END,
     TOOL_CALL_START,
 };
+use super::glm::{GLM_TOOL_FORMAT, GLM_TOOLS_PREAMBLE, render_glm_calls};
 use super::{ToolCall, ToolCallFunction};
 
 /// The tool-calling contract, verbatim from Qwen3.5's `tokenizer.chat_template`.
@@ -57,15 +58,21 @@ pub(crate) fn render_tool_definitions(tools: &Value, dialect: Dialect) -> String
         Dialect::MiniCpm => {
             "# Tools\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>"
         }
+        Dialect::Glm => GLM_TOOLS_PREAMBLE,
     });
     for tool in tools.as_array().map(Vec::as_slice).unwrap_or_default() {
         text.push('\n');
-        text.push_str(&serde_json::to_string(tool).unwrap_or_default());
+        // GLM's list is spaced as its template's `tojson` writes it.
+        text.push_str(&match dialect {
+            Dialect::Glm => argument_text(tool),
+            _ => serde_json::to_string(tool).unwrap_or_default(),
+        });
     }
     text.push_str("\n</tools>");
     text.push_str(match dialect {
         Dialect::Qwen => TOOL_FORMAT_INSTRUCTION,
         Dialect::MiniCpm => MINICPM_TOOL_GUIDELINES,
+        Dialect::Glm => GLM_TOOL_FORMAT,
     });
     text
 }
@@ -74,6 +81,8 @@ pub(crate) fn render_tool_definitions(tools: &Value, dialect: Dialect) -> String
 ///
 /// Qwen puts the tool block first and the caller's system prompt after it.
 /// MiniCPM5 does the reverse, unless the prompt places the definitions itself.
+/// GLM gives the tools a system turn of their own and leaves `system` to the
+/// caller, as a turn after it.
 pub(crate) fn render_tools_system(
     tools: &Value,
     system: Option<&str>,
@@ -86,6 +95,9 @@ pub(crate) fn render_tools_system(
     }
     let system = system.map(str::trim).filter(|text| !text.is_empty());
 
+    if dialect == Dialect::Glm {
+        return format!("<|system|>\n{definitions}");
+    }
     let mut text = String::from("<|im_start|>system\n");
     match dialect {
         Dialect::Qwen => {
@@ -106,6 +118,7 @@ pub(crate) fn render_tools_system(
             }
             None => text.push_str(&definitions),
         },
+        Dialect::Glm => unreachable!("returned above"),
     }
     text.push_str("<|im_end|>\n");
     text
@@ -157,6 +170,9 @@ pub(crate) fn render_tool_calls(
     after_content: bool,
     dialect: Dialect,
 ) {
+    if dialect == Dialect::Glm {
+        return render_glm_calls(prompt, calls);
+    }
     for (index, call) in calls.iter().enumerate() {
         match index {
             0 if after_content => prompt.push_str("\n\n"),
@@ -207,6 +223,7 @@ pub(crate) fn render_tool_calls(
                 }
                 prompt.push_str(FUNCTION_END);
             }
+            Dialect::Glm => unreachable!("rendered by render_glm_calls"),
         }
     }
 }

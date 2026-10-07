@@ -614,6 +614,27 @@ pub trait Backend {
     /// `acc += add`, elementwise.
     fn add_into(&self, acc: Buf, add: Buf) -> Result<()>;
 
+    /// `x += rms_norm(y) * gain`: a mixer's output normalized onto the
+    /// residual stream. `normed` is scratch of `rows * width`.
+    #[allow(clippy::too_many_arguments)]
+    fn rms_norm_add(
+        &self,
+        y: Buf,
+        rows: usize,
+        width: usize,
+        gain: Buf,
+        eps: f32,
+        normed: Buf,
+        x: Buf,
+    ) -> Result<()> {
+        self.rms_norm(y, rows, width, gain, eps, normed)?;
+        self.add_into(x, normed)
+    }
+
+    /// `x[r] += bias` for each of `rows` rows of `width`: a projection's
+    /// bias, broadcast down the rows.
+    fn add_rows(&self, x: Buf, rows: usize, width: usize, bias: Buf) -> Result<()>;
+
     /// `out = silu(gate) * up` over `len` elements. The offsets allow both
     /// operands to be windows of one fused projection's output.
     fn swiglu(

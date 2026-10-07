@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use phobos_base::log::Level;
 
-use crate::chat::{Dialect, TURN_START};
+use crate::chat::Dialect;
 use crate::generate::{self, Flow};
 use crate::model::{CacheStats, Model, Session, Tokenizer};
 use crate::sampling::Rng;
@@ -121,8 +121,8 @@ fn rewind<'a>(
 /// The next request repeats everything before this point, but may render
 /// this turn differently once it is history, since earlier turns lose their
 /// reasoning. `None` for a prompt with no turns, such as a raw completion.
-fn last_turn(tokenizer: &dyn Tokenizer, ids: &[i64]) -> Option<usize> {
-    let [turn] = tokenizer.encode(TURN_START).ok()?[..] else {
+fn last_turn(tokenizer: &dyn Tokenizer, dialect: Dialect, ids: &[i64]) -> Option<usize> {
+    let [turn] = tokenizer.encode(dialect.turn_start()).ok()?[..] else {
         return None;
     };
     ids.iter().rposition(|&id| id == turn)
@@ -299,7 +299,7 @@ pub fn serve(
             sample: req.sample.resolve(&defaults.sample),
             max_tokens: req.max_tokens.unwrap_or(defaults.max_tokens),
             meter: Some(meter.clone()),
-            checkpoint_at: last_turn(model.tokenizer(), &ids),
+            checkpoint_at: last_turn(model.tokenizer(), dialect, &ids),
         };
         // Reuse the kept session as far as the two prompts agree. It is
         // rewound past that point, or dropped.

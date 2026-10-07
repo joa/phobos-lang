@@ -361,6 +361,14 @@ impl Chain {
         }
     }
 
+    /// Every Q8_0-family weight the chain binds.
+    pub(crate) fn weights(&self) -> impl Iterator<Item = QBuf> + '_ {
+        self.binds.iter().filter_map(|bind| match bind {
+            Bind::Weight(w) => Some(*w),
+            _ => None,
+        })
+    }
+
     pub(crate) fn raw_of(&self, val: Val) -> Result<RawBuf> {
         match self.binds[val.0] {
             Bind::Raw(w) => Ok(w),

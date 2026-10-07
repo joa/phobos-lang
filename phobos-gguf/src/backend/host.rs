@@ -377,6 +377,22 @@ impl Backend for HostBackend {
         })
     }
 
+    fn add_rows(&self, x: Buf, rows: usize, width: usize, bias: Buf) -> Result<()> {
+        self.writing(x, |slabs, dst| {
+            let bias = &slabs[bias.0];
+            ensure!(
+                dst.len() >= rows * width && bias.len() >= width,
+                "add_rows: {rows} rows of {width} do not fit their buffers"
+            );
+            for row in dst[..rows * width].chunks_exact_mut(width) {
+                for (d, &b) in row.iter_mut().zip(bias) {
+                    *d += b;
+                }
+            }
+            Ok(())
+        })
+    }
+
     fn swiglu(
         &self,
         gate: Buf,

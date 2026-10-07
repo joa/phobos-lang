@@ -72,6 +72,7 @@ Inference has been tested with:
 - Qwen3.8-27B-UD-IQ1_M
 - Ternary-Bonsai-2-27B-PTQ1_0
 - Qwen3.6-35B-A3B-UD-Q4_K_M
+- GLM-4.6V-Flash-Q4_K_M (text only)
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
 
 **Note:**

@@ -259,6 +259,35 @@ fn legacy_nibble_formats_split_a_block_in_half() {
     }
 }
 
+#[test]
+fn q5_0_planes_and_device_blocks_hold_the_blocks_exactly() {
+    // Varied quants under a few scales, a negative one and an f16
+    // subnormal among them.
+    let blocks: Vec<u8> = [1.0f32, -0.0371, 6.1e-5, 2.0e-7]
+        .iter()
+        .enumerate()
+        .flat_map(|(at, &d)| {
+            let mut b = block(Quant::Q5_0, |i| (i * 37 + at * 11) as u8);
+            b[..2].copy_from_slice(&f32_to_f16(d).to_le_bytes());
+            b
+        })
+        .collect();
+    let (k, n) = (64, 2);
+    let packed = Packed::new(Quant::Q5_0, blocks.clone(), k, n).unwrap();
+    let planes = packed.planes().unwrap();
+    let dense = packed.dense();
+    for j in 0..n {
+        for p in 0..k {
+            let scale = planes.scales[(p / 32) * n + j];
+            assert_eq!(f32::from(planes.qs[j * k + p]) * scale, dense[p * n + j], "({j}, {p})");
+        }
+    }
+    // The device keeps each block but its leading scale.
+    let device: Vec<u8> = packed.device_blocks().iter().map(|&b| b as u8).collect();
+    let kept: Vec<u8> = blocks.chunks_exact(22).flat_map(|b| b[2..].to_vec()).collect();
+    assert_eq!(device, kept);
+}
+
 fn f16(v: f32) -> f32 {
     phobos_base::half::f16_to_f32(f32_to_f16(v))
 }

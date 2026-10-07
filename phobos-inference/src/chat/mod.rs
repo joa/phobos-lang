@@ -1,4 +1,5 @@
 pub mod dialect;
+mod glm;
 pub mod stream;
 pub mod tools;
 
@@ -8,7 +9,7 @@ mod tests;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-pub(crate) use dialect::{Dialect, TURN_START};
+pub(crate) use dialect::Dialect;
 pub(crate) use stream::{AssistantOutput, OutputEvent, OutputParser};
 
 use dialect::{THINK_END, THINK_START};
@@ -148,6 +149,10 @@ pub(crate) fn format_chat(
     dialect: Dialect,
     bos: Option<&str>,
 ) -> String {
+    // GLM opens with its own marker rather than a BOS.
+    if dialect == Dialect::Glm {
+        return glm::format_glm(messages, tools, tool_choice, thinking);
+    }
     let mut prompt = String::new();
 
     // MiniCPM5's template opens with `{{- bos_token }}` and its file sets

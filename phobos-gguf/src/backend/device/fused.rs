@@ -80,6 +80,10 @@ impl DeviceBackend {
     /// the grid barrier deadlocks. So the grid starts at the thread ceiling
     /// and shrinks until the driver's occupancy answer allows it.
     pub(super) fn fused_plan(&self, chain: &Chain) -> Result<Option<ChainKey>> {
+        // The chains read a weight as one `i8` an element.
+        if chain.weights().any(|w| self.is_q50(w)) {
+            return Ok(None);
+        }
         let settled = self.fused_blocks.get();
         if settled != 0 {
             let key = chain.key(settled);

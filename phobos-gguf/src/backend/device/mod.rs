@@ -42,6 +42,7 @@ mod matmul;
 mod matmul_f32;
 mod mem;
 mod norm;
+mod q50;
 mod qmma_raw;
 mod raw;
 mod residency;
@@ -94,6 +95,11 @@ type OwnedRaw = (
     Option<DeviceBuffer<u16>>,
 );
 
+/// Quant bytes from which a Q8_0-family weight goes into the bulk arena
+/// rather than allocations of its own: a 4096 by 13696 down projection, not
+/// the attention projections of the small models.
+const BULK_QUANT_BYTES: usize = 32 << 20;
+
 /// A device-resident Q8_0 weight: the addresses of its int8 blocks and its
 /// two scale layouts, and its output width. Raw pointers, because the
 /// [`arena::Arena`] or `owned_quants` owns the memory.
@@ -102,6 +108,9 @@ struct DeviceQuant {
     scales: u64,
     row_scales: u64,
     n: usize,
+    /// `qs` holds Q5_0 blocks less their scale rather than one byte an
+    /// element; see `q50.rs`.
+    q50: bool,
 }
 
 use raw::DeviceRaw;
@@ -171,6 +180,9 @@ pub struct DeviceBackend {
     /// accumulates. Only built with `PHOBOS_PERSIST_QDOT`. See
     /// [`q8_qdot_persist_src`].
     q8_qdot_persist: RefCell<HashMap<(usize, bool), Module>>,
+    /// The Q5_0 projections, compiled on first use: `q50_qmma` keyed by its
+    /// tile's depth and width, `q50_qdot` by zero and whether it adds.
+    q50_kernels: RefCell<HashMap<(usize, usize), Module>>,
     /// Blocks a persistent matvec may use, from the occupancy API. Zero until
     /// first compiled.
     persist_blocks: Cell<u32>,

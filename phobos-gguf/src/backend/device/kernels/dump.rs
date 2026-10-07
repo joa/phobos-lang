@@ -74,6 +74,13 @@ fn dump_raw_kernel_sources() {
         sources.push((format!("{name}_qdot_i8_matvec_{wide}"), src(wide)));
         sources.push((format!("{name}_qdot_i8_matvec_{narrow}"), src(narrow)));
     }
+    for accumulate in [false, true] {
+        sources.push((format!("q50_qdot_{accumulate}"), q50_qdot_src(accumulate)));
+    }
+    for tn in Q8_QMMA_WIDTHS {
+        sources.push((format!("q50_qmma_{tn}"), q50_qmma_src(Q8_QMMA_CTA, Q8_QMMA_TM, tn)));
+    }
+    sources.push(("q50_qmma_shallow".into(), q50_qmma_src(Q8_QMMA_CTA, Q8_QMMA_SHALLOW, Q8_QMMA_TN)));
     for (name, src) in sources {
         std::fs::write(dir.join(format!("{name}.ph")), src).unwrap();
     }

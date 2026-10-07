@@ -28,6 +28,16 @@ kernel add_into(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
 
 @launch(256)
 @autotune(TILE in [1024])
+kernel add_rows(X: tensor<f32>[M, N], B: tensor<f32>[1, N]) {
+  let p = program_id(0)
+  let r = program_id(1)
+  var x = X[r :+ 1, p * TILE :+ TILE]
+  var b = B[0 :+ 1, p * TILE :+ TILE]
+  X[r :+ 1, p * TILE :+ TILE] = x + b
+}
+
+@launch(256)
+@autotune(TILE in [1024])
 kernel swiglu(G: tensor<f32>[M, N], U: tensor<f32>[M, N], O: tensor<f32>[M, N]) {
   let p = program_id(0)
   var g = G[0 :+ 1, p * TILE :+ TILE]

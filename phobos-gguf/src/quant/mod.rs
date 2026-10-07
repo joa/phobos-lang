@@ -120,6 +120,10 @@ impl Quant {
     /// from the separate plane `constant_raw` uploads. Q6_K drops its
     /// trailing `d` the same way, so 210 bytes become 208, sixteen-aligned.
     ///
+    /// Q5_0 drops its `d` as well, leaving the `qh` word and the nibbles,
+    /// 20 four-aligned bytes, which `q50_qdot_t` and `q50_qmma_t` read beside
+    /// the scale planes of [`Spec::planes`].
+    ///
     /// Q4_K and Q5_K keep their headers. 144 and 176 are already
     /// sixteen-aligned, and the kernels read `d` and `dmin` in the same load
     /// as the scales. PTQ1_0 keeps its size, but [`Packed::device_blocks`]
@@ -129,6 +133,7 @@ impl Quant {
         match self {
             Quant::Q3_K => (0, 112),
             Quant::Q6_K => (0, 208),
+            Quant::Q5_0 => (2, 20),
             Quant::IQ1_S | Quant::IQ2_XXS | Quant::IQ2_S => (2, bytes - 2),
             Quant::IQ2_XS | Quant::IQ3_XXS | Quant::IQ3_S => (2, bytes - 2),
             _ => (0, bytes),
@@ -319,6 +324,7 @@ impl Packed {
     pub fn quant(&self) -> Quant {
         self.quant
     }
+
 
     pub fn spec(&self) -> &'static Spec {
         self.quant.spec()

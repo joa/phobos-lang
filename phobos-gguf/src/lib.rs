@@ -3,6 +3,7 @@ pub mod bpe;
 pub mod experts;
 pub mod hadamard;
 mod layers;
+pub mod glm4;
 pub mod llama;
 pub mod meta;
 pub mod model;

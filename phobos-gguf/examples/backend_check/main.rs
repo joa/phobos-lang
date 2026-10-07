@@ -180,6 +180,19 @@ fn main() -> Result<()> {
     };
     check("add_into [3072]", &run_add(&host)?, &run_add(&gpu)?);
 
+    // A projection bias down every row: GLM-4's key and value width, its
+    // query width, and a width that leaves a partial tile.
+    for (bias_rows, bias_width) in [(1, 256), (7, 4096), (3, 1000)] {
+        let xs: Vec<f32> = (0..bias_rows * bias_width).map(|_| next()).collect();
+        let bias: Vec<f32> = (0..bias_width).map(|_| next()).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let xb = b.upload(&xs)?;
+            b.add_rows(xb, bias_rows, bias_width, b.upload(&bias)?)?;
+            read_vec(b, xb, xs.len())
+        };
+        check(&format!("add_rows [{bias_rows} x {bias_width}]"), &run(&host)?, &run(&gpu)?);
+    }
+
     // At the FFN width and at a length that is not a tile multiple. A nonzero
     // `at` reads the second half of a shared buffer, as the fused
     // gate-and-up projection does.
@@ -407,6 +420,35 @@ fn main() -> Result<()> {
             &run(&host)?,
             &run(&gpu)?,
         );
+    }
+
+    // Q5_0 through `q50_qdot_t` and `q50_qmma_t`, at GLM-4's down projection
+    // (k = 13696, no multiple of 256). 200 = 128 + 64 + 8 rows gives the deep
+    // tile, the shallow one and the matvec rows each a share.
+    for (m, k, n, add) in [(1, 13696, 4096, false), (1, 13696, 4096, true), (200, 13696, 4096, false), (64, 1024, 48, false)] {
+        let blocks: Vec<u8> = (0..k / 32 * n)
+            .flat_map(|_| {
+                let d = phobos_base::half::f32_to_f16(next().abs() * 0.01 + 0.001).to_le_bytes();
+                let rest: Vec<u8> = (0..20).map(|_| (next().abs() * 256.0) as u8).collect();
+                d.into_iter().chain(rest)
+            })
+            .collect();
+        let packed = Packed::new(Quant::Q5_0, blocks, k, n)?;
+        let a: Vec<f32> = (0..m * k).map(|_| next()).collect();
+        let base: Vec<f32> = (0..m * n).map(|_| next()).collect();
+        let run = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let ab = b.upload(&a)?;
+            let wb = b.constant_quant(&format!("q50_{m}x{k}x{n}"), &packed)?;
+            let out = b.upload(&base)?;
+            let act = b.quantize_act(ab, m, k)?;
+            match add {
+                true => b.matmul_quant_add(act, m, k, wb, n, out)?,
+                false => b.matmul_quant_act(act, m, k, wb, n, out)?,
+            }
+            read_vec(b, out, m * n)
+        };
+        let what = if add { "matmul_quant_add" } else { "matmul_quant" };
+        check_within(&format!("{what} Q5_0 [{m} x {k} x {n}]"), 1e-3, &run(&host)?, &run(&gpu)?);
     }
 
     // `matmul_raw` for every raw-kernel format: random weight bytes through

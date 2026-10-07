@@ -68,12 +68,13 @@ impl Config {
 /// Refuses a file whose rotary frequencies are rescaled. Context extension
 /// rescales the angles without changing the graph, so such a file would load,
 /// run, and be quietly wrong at long context.
-fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
+pub(crate) fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
     let m = gguf.metadata();
+    let arch = gguf.architecture()?;
     if let Some(kind) = m.arch_get("rope.scaling.type").and_then(|v| v.as_str()) {
         ensure!(
             kind == "none",
-            "rope scaling '{kind}' is not implemented for the llama architecture"
+            "rope scaling '{kind}' is not implemented for the {arch} architecture"
         );
     }
 
@@ -81,7 +82,7 @@ fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
         if let Some(factor) = m.arch_get(key).and_then(|v| v.as_float()) {
             ensure!(
                 factor == 1.0,
-                "'{key}' is {factor}; rope scaling is not implemented for the llama architecture"
+                "'{key}' is {factor}; rope scaling is not implemented for the {arch} architecture"
             );
         }
     }
@@ -89,7 +90,7 @@ fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
     ensure!(
         gguf.tensor("rope_freqs.weight").is_none()
             && gguf.tensor("blk.0.rope_freqs.weight").is_none(),
-        "model carries a rope_freqs table; rope scaling is not implemented for the llama architecture"
+        "model carries a rope_freqs table; rope scaling is not implemented for the {arch} architecture"
     );
 
     Ok(())
@@ -106,7 +107,7 @@ fn check_no_rope_scaling(gguf: &Gguf) -> Result<()> {
 ///
 /// Applied to the query and key weights once at load. Channels past
 /// `rope_dim` stay in place.
-fn neox_order(heads: usize, head_dim: usize, rope_dim: usize) -> Vec<usize> {
+pub(crate) fn neox_order(heads: usize, head_dim: usize, rope_dim: usize) -> Vec<usize> {
     let half = rope_dim / 2;
     (0..heads * head_dim)
         .map(|j| {
@@ -121,7 +122,7 @@ fn neox_order(heads: usize, head_dim: usize, rope_dim: usize) -> Vec<usize> {
         .collect()
 }
 
-fn dense_plane(buf: Buf, width: usize) -> Plane {
+pub(crate) fn dense_plane(buf: Buf, width: usize) -> Plane {
     Plane {
         buf,
         offset: 0,
@@ -264,12 +265,7 @@ impl Model {
 
     /// Fresh generation state.
     pub fn new_state(&self) -> State {
-        State {
-            pos: 0,
-            caches: (0..self.config.n_block)
-                .map(|_| KvCache::default())
-                .collect(),
-        }
+        State::new(self.config.n_block)
     }
 
     /// Runs `tokens`, advancing `state`, and returns the final position's
@@ -318,18 +314,7 @@ impl Model {
         let cfg = &self.config;
         let (d, rows) = (cfg.d_model, tokens.len());
 
-        let mut host_x = vec![0.0f32; rows * d];
-        for (t, &token) in tokens.iter().enumerate() {
-            let id = token as usize;
-            ensure!(
-                id < cfg.vocab,
-                "token id {id} is outside the {}-entry vocabulary",
-                cfg.vocab
-            );
-            self.embed.row_into(id, &mut host_x[t * d..(t + 1) * d])?;
-        }
-
-        let x = backend.upload(&host_x)?;
+        let x = backend.upload(&embed_rows(&self.embed, tokens, d, cfg.vocab)?)?;
         let normed = backend.alloc(rows * d)?;
 
         // Everything from here to the logits is device-only.
@@ -381,34 +366,8 @@ impl Model {
 
         state.pos += rows;
 
-        backend.rms_norm(
-            x,
-            rows,
-            d,
-            self.output_norm.buf(backend)?,
-            cfg.rms_eps,
-            normed,
-        )?;
-
-        // Only the final position goes through the LM head, the largest weight
-        // in the model; the other normalized rows are unused.
-        let last = backend.alloc(d)?;
-        backend.copy(normed, (rows - 1) * d, last, 0, d)?;
-
-        let logits = backend.alloc(cfg.vocab)?;
-        self.head.project_into(backend, last, 1, logits)?;
-
-        backend.end_pass()?;
-
-        Ok((
-            ForwardBufs {
-                x,
-                normed,
-                last,
-                logits,
-            },
-            cfg,
-        ))
+        let bufs = head_logits(backend, x, rows, &self.output_norm, cfg.rms_eps, &self.head, normed)?;
+        Ok((bufs, cfg))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -517,13 +476,57 @@ impl Model {
     }
 }
 
+/// The embedding rows of `tokens`, gathered on the host.
+pub(crate) fn embed_rows(embed: &Linear, tokens: &[u32], d: usize, vocab: usize) -> Result<Vec<f32>> {
+    let mut host_x = vec![0.0f32; tokens.len() * d];
+    for (row, &token) in host_x.chunks_exact_mut(d).zip(tokens) {
+        let id = token as usize;
+        ensure!(id < vocab, "token id {id} is outside the {vocab}-entry vocabulary");
+        embed.row_into(id, row)?;
+    }
+    Ok(host_x)
+}
+
+/// The end of a pass: the final norm of the residual stream `x` into
+/// `normed`, the LM head over the last row, and `end_pass`.
+pub(crate) fn head_logits(
+    backend: &dyn Backend,
+    x: Buf,
+    rows: usize,
+    output_norm: &Gain,
+    eps: f32,
+    head: &Linear,
+    normed: Buf,
+) -> Result<ForwardBufs> {
+    let d = head.in_dim;
+    backend.rms_norm(x, rows, d, output_norm.buf(backend)?, eps, normed)?;
+
+    // Only the final position goes through the LM head, the largest weight
+    // in the model; the other normalized rows are unused.
+    let last = backend.alloc(d)?;
+    backend.copy(normed, (rows - 1) * d, last, 0, d)?;
+
+    let logits = backend.alloc(head.out_dim)?;
+    head.project_into(backend, last, 1, logits)?;
+
+    backend.end_pass()?;
+    Ok(ForwardBufs { x, normed, last, logits })
+}
+
 /// State is one key/value cache per block.
 pub struct State {
-    pos: usize,
-    caches: Vec<KvCache>,
+    pub(crate) pos: usize,
+    pub(crate) caches: Vec<KvCache>,
 }
 
 impl State {
+    pub(crate) fn new(n_block: usize) -> State {
+        State {
+            pos: 0,
+            caches: (0..n_block).map(|_| KvCache::default()).collect(),
+        }
+    }
+
     /// Tokens consumed so far.
     pub fn len(&self) -> usize {
         self.pos

@@ -523,6 +523,7 @@ impl DeviceBackend {
             q8_qdot,
             q8_qdot_add,
             q8_qdot_persist: RefCell::new(HashMap::new()),
+            q50_kernels: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
             persist_qdot: env_flag("PHOBOS_PERSIST_QDOT"),
             iq1s_dp4a: Cell::new(env_flag_on("PHOBOS_IQ1S_DP4A")),
