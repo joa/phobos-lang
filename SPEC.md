@@ -221,6 +221,7 @@ Symbols used below: `K` is the contraction length, a multiple of 256 unless stat
 |---|---|---|
 | `qdot_t(a, a_scales, w, w_scales)` | `[M, K] i8 x [N, K] i8 -> [M, N] f32` | `out[i, j] = sum_b a_scales[i, b] * w_scales[j, b] * sum_{k in b} a[i, k] * w[j, k]`. Scales `[M, K/32]` and `[N, K/32]`. `K` may be dynamic. |
 | `qmma_t(a, a_scales, w, w_scales)` | same | Same sum on integer tensor cores. `M`, `N` multiples of 8. `w_scales` is `[K/32, N]` (transposed relative to `qdot_t`). Statement or value. |
+| `q50_qdot_t(a, a_scales, w, w_scales)`, `q50_qmma_t(..)` | `[M, K] i8 x [N, K/32 * 20] i8 -> [M, N] f32` | `qdot_t` and `qmma_t` against a Q5_0 weight held as its blocks without their `f16` scale: per 32 elements, the `qh` word, then 16 bytes holding elements `e` and `e + 16` in the low and high nibbles of byte `e`. Each element is `q - 16`, widened as it is loaded. The scales are as for `qdot_t` and `qmma_t`. |
 | `rms_norm_q_t(x, gain, eps, [out,] q, scales)` | row as `[K/32, 32]` | `y = x * gain / sqrt(mean(x^2) + eps)`, written to `out` if given, and quantized to Q8_0 into `q` (`i8`) and `scales` (`[K/32, 1]` `f32`). Returns `1 / rms` as `f32`. Operands must be in-bounds tensor slices (use `@aligned`). |
 
 ### Raw-format families
