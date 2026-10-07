@@ -280,6 +280,8 @@ fn intrinsic_names_round_trip() {
     let mut all = vec![
         Intrinsic::QdotT,
         Intrinsic::QmmaT,
+        Intrinsic::Q50dotT,
+        Intrinsic::Q50mmaT,
         Intrinsic::Gather,
         Intrinsic::ArgSel,
         Intrinsic::RmsNormQ,

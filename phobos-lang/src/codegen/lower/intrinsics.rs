@@ -5,7 +5,7 @@ use melior::{
 };
 
 use super::{Lowered, dims};
-use crate::codegen::tile::{QFormat, QgFormat};
+use crate::codegen::tile::{QFormat, QWeight, QgFormat};
 use crate::codegen::matmul::GemmScale;
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
@@ -167,8 +167,10 @@ impl<'c> Codegen<'c> {
             cg.alloc_tile_shaped(block, elem, &dims(&ty.shape))
         };
         Ok(match i {
-            Intrinsic::QdotT => self.tile_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
-            Intrinsic::QmmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3])?,
+            Intrinsic::QdotT => self.tile_qdot_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::I8)?,
+            Intrinsic::QmmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::I8)?,
+            Intrinsic::Q50dotT => self.tile_qdot_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50)?,
+            Intrinsic::Q50mmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50)?,
             Intrinsic::RawQdotI8(fmt) => {
                 let qg = qg_format(fmt, &i)?;
                 self.tile_qdot_i8_reg_t(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..])?
@@ -229,7 +231,8 @@ impl<'c> Codegen<'c> {
         dst: &MemVal<'c>,
     ) -> Result<()> {
         match i {
-            Intrinsic::QmmaT => self.qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], dst),
+            Intrinsic::QmmaT => self.qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], QWeight::I8, dst),
+            Intrinsic::Q50mmaT => self.qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50, dst),
             Intrinsic::RawQmma(RawFmt::Iq1s) => {
                 self.iq1s_qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], &t[4], dst)
             }

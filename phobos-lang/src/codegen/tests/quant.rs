@@ -306,3 +306,37 @@ fn iq1s_qmma_t_needs_whole_tensor_core_tiles() {
         "unexpected error: {err}"
     );
 }
+
+const Q50_QDOT: &str = "@launch(256)
+        @autotune(TN in [8])
+        @aligned(N = TN)
+        kernel q50dot(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                      W: tensor<i8>[N, KW], WS: tensor<f32>[N, KB],
+                      C: tensor<f32>[M, N]) {
+            let pn = program_id(0)
+            C[0 :+ 1, pn * TN :+ TN] = q50_qdot_t(A[0 :+ 1, :], AS[0 :+ 1, :],
+                                                  W[pn * TN :+ TN, :], WS[pn * TN :+ TN, :])
+        }";
+
+/// The multiplier that spreads four `qh` bits one to a byte, 0x00204081.
+const Q50_SPREAD: &str = "arith.constant 2113665 : i32";
+
+#[test]
+fn q50_qdot_t_widens_its_weight_before_the_four_way_dot() {
+    let mlir = emit_mlir(Q50_QDOT);
+    assert_contains(&mlir, &["nvvm.dot.accumulate.4way", Q50_SPREAD, "arith.xori"]);
+}
+
+#[test]
+fn q50_qmma_t_widens_into_the_tensor_core_fragments() {
+    let src = Q8_QMMA
+        .replace("qmma_t(", "q50_qmma_t(")
+        .replace("W: tensor<i8>[N, K]", "W: tensor<i8>[N, KW]");
+    let mlir = emit_mlir(&src);
+    assert_contains(&mlir, &["nvgpu.mma.sync", "vector<1x4xi8>", Q50_SPREAD]);
+}
+
+#[test]
+fn qmma_t_reads_its_weight_as_is() {
+    assert!(!emit_mlir(Q8_QMMA).contains(Q50_SPREAD));
+}

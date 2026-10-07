@@ -46,6 +46,7 @@ mod vector;
 mod warp_attn;
 
 pub(in crate::codegen) use qdecode::QFormat;
+pub(in crate::codegen) use qdot::QWeight;
 pub(in crate::codegen) use qgemm::QgFormat;
 
 /// Activations a lane loads at once in the quantized matvecs. A lane owns a
