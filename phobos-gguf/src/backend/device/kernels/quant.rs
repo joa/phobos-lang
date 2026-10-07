@@ -213,6 +213,28 @@ kernel q8_qdot_add(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
 
+/// [`Q8_QDOT_SRC`], or [`Q8_QDOT_ADD_SRC`] when it adds, against a Q5_0
+/// weight held as its blocks less the scale: `q50_qdot_t`.
+pub(crate) fn q50_qdot_src(accumulate: bool) -> String {
+    q50_of(if accumulate { Q8_QDOT_ADD_SRC } else { Q8_QDOT_SRC })
+}
+
+/// [`q8_qmma_src`] against the same weight, its tile fixed at `tm` by `tn`.
+pub(crate) fn q50_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    q50_of(&q8_qmma_src(block)).replace(
+        "@autotune(TM in [64], TN in [64])",
+        &format!("@autotune(TM in [{tm}], TN in [{tn}])"),
+    )
+}
+
+/// A Q8_0 kernel source turned onto a Q5_0 weight, `[N, K / 32 * 20]`.
+fn q50_of(src: &str) -> String {
+    src.replace("kernel q8_", "kernel q50_")
+        .replace("W: tensor<i8>[N, K]", "W: tensor<i8>[N, KW]")
+        .replace("qdot_t(", "q50_qdot_t(")
+        .replace("qmma_t(", "q50_qmma_t(")
+}
+
 /// Outputs per CTA in [`Q8_QDOT_SRC`], one per warp.
 pub(crate) const Q8_QDOT_TN: usize = 8;
 

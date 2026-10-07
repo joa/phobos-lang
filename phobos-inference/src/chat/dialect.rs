@@ -2,7 +2,9 @@ pub(crate) const THINK_START: &str = "<think>";
 
 pub(crate) const THINK_END: &str = "</think>";
 
-/// What opens every turn, in both dialects.
+use super::glm::{GLM_ASSISTANT, GLM_OPENER};
+
+/// What opens every turn in the ChatML dialects, Qwen and MiniCPM.
 pub(crate) const TURN_START: &str = "<|im_start|>";
 
 pub(crate) const TOOL_CALL_START: &str = "<tool_call>";
@@ -39,23 +41,37 @@ pub enum Dialect {
     /// with `<param name="...">` children and CDATA for awkward values.
     /// Nothing is prefilled when thinking is off.
     MiniCpm,
+    /// GLM-4. Opens with `[gMASK]<sop>`, turns have no closing marker, and
+    /// calls are `<tool_call>name` with `<arg_key>`/`<arg_value>` pairs. An
+    /// empty think block is prefilled when thinking is off.
+    Glm,
 }
 
 impl Dialect {
     pub fn detect(template: Option<&str>) -> Dialect {
         match template {
             Some(template) if template.contains(MINICPM_FUNCTION_START) => Dialect::MiniCpm,
+            Some(template) if template.contains(GLM_OPENER) => Dialect::Glm,
             _ => Dialect::Qwen,
         }
     }
 
     pub(crate) fn prefills_empty_think(self) -> bool {
-        self == Dialect::Qwen
+        matches!(self, Dialect::Qwen | Dialect::Glm)
+    }
+
+    /// The marker the generation prompt's turn opens with, which the server
+    /// checkpoints a session at.
+    pub(crate) fn turn_start(self) -> &'static str {
+        match self {
+            Dialect::Qwen | Dialect::MiniCpm => TURN_START,
+            Dialect::Glm => GLM_ASSISTANT,
+        }
     }
 
     pub(crate) fn call_markers(self) -> (&'static str, &'static str) {
         match self {
-            Dialect::Qwen => (TOOL_CALL_START, TOOL_CALL_END),
+            Dialect::Qwen | Dialect::Glm => (TOOL_CALL_START, TOOL_CALL_END),
             Dialect::MiniCpm => (MINICPM_FUNCTION_START, FUNCTION_END),
         }
     }

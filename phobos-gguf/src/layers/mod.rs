@@ -207,7 +207,13 @@ impl Linear {
         let (bytes, dense) = match &self.weight {
             Weights::Quant(packed) if packed.has_planes() => {
                 let scales = elems / packed.spec().scale_run;
-                (elems + 2 * scales * size_of::<f32>(), false)
+                // Q5_0 goes up as its blocks less the scale, see
+                // `Quant::device_block`.
+                let quants = match packed.quant() {
+                    Quant::Q5_0 => elems / packed.spec().block * Quant::Q5_0.device_block_bytes(),
+                    _ => elems,
+                };
+                (quants + 2 * scales * size_of::<f32>(), false)
             }
             Weights::Quant(packed) if packed.has_raw_scales() => {
                 let blocks = elems / packed.spec().block;
@@ -280,6 +286,15 @@ impl Linear {
                     && ps.iter().all(|p| p.quant() == ps[0].quant())
             }
         }
+    }
+
+    /// Whether these parts stack with [`Linear::fuse`] and keep their format:
+    /// [`Linear::should_fuse`], or one raw format across all of them. A raw
+    /// weight's rows are whole blocks, so stacking them changes no block.
+    pub(crate) fn stacks(parts: &[&Linear]) -> bool {
+        let raw = parts[0].raw_quant();
+        Linear::should_fuse(parts)
+            || (raw.is_some() && Linear::same_fold(parts) && parts.iter().all(|p| p.raw_quant() == raw))
     }
 
     /// Whether every part reads its input through the same transform, or
@@ -438,6 +453,19 @@ impl Linear {
         out: Buf,
     ) -> Result<()> {
         self.project_shared(backend, x, None, rows, out)
+    }
+
+    /// [`Linear::project_into`] against an already quantized activation, as
+    /// [`Linear::forward_act`] takes one.
+    pub(crate) fn project_into_act(
+        &self,
+        backend: &dyn Backend,
+        x: Buf,
+        act: Option<QAct>,
+        rows: usize,
+        out: Buf,
+    ) -> Result<()> {
+        self.project_shared(backend, x, act, rows, out)
     }
 
     /// Projects and adds into `dest`, the residual connection's epilogue. The

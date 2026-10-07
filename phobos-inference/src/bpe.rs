@@ -35,6 +35,9 @@ pub const END_OF_TURN: &[&str] = &[
     "<|return|>",
     "<end_of_turn>",
     "</s>",
+    // GLM ends a turn by opening the next one, the user's or a tool's.
+    "<|user|>",
+    "<|observation|>",
 ];
 
 /// Tokens matched literally rather than merged, control markers among them.
@@ -77,7 +80,8 @@ impl PreTokenizer {
     pub fn from_name(name: Option<&str>) -> PreTokenizer {
         match name {
             Some(n) if n.starts_with("qwen") => PreTokenizer::Qwen,
-            Some("llama3" | "llama-v3" | "llama-bpe") => PreTokenizer::Llama3,
+            // GLM's is the Llama 3 regex, and it ignores merges the same way.
+            Some("llama3" | "llama-v3" | "llama-bpe" | "glm4" | "glm5") => PreTokenizer::Llama3,
             _ => PreTokenizer::Gpt2,
         }
     }

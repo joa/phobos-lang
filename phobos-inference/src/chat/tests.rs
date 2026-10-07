@@ -537,3 +537,99 @@ fn max_completion_tokens_outranks_max_tokens() {
             .unwrap();
     assert_eq!(req.max_completion_tokens.or(req.max_tokens), Some(20));
 }
+
+const GLM_TEMPLATE: &str = "[gMASK]<sop>\n{%- if tools -%}";
+
+#[test]
+fn glm_is_detected_by_its_opener_and_renders_with_no_bos() {
+    assert_eq!(Dialect::detect(Some(GLM_TEMPLATE)), Dialect::Glm);
+    assert_eq!(
+        user_turn("hi", Some(GLM_TEMPLATE), Some("<|endoftext|>"), Thinking::Off),
+        "[gMASK]<sop><|user|>\nhi/nothink<|assistant|>\n<think></think>\n"
+    );
+}
+
+/// The tool loop as GLM-4.6V's own template renders it under jinja2, with
+/// the call's arguments as a mapping.
+#[test]
+fn a_glm_tool_loop_matches_its_template() {
+    let call = ToolCall {
+        id: "call_0".to_string(),
+        call_type: "function".to_string(),
+        function: ToolCallFunction {
+            name: "bash".to_string(),
+            arguments: "{\"command\":\"ls\",\"timeout\":30}".to_string(),
+        },
+    };
+    let message = |role: &str, text: &str| ChatMessage {
+        role: role.to_string(),
+        content: Some(MessageContent::Text(text.to_string())),
+        ..ChatMessage::default()
+    };
+    let prompt = format_chat(
+        &[
+            message("system", "Be brief."),
+            user("list the files"),
+            ChatMessage {
+                tool_calls: Some(vec![call]),
+                ..message("assistant", "<think>I should list.</think>")
+            },
+            message("tool", "a.txt"),
+            message("tool", "b.txt"),
+        ],
+        Some(&bash_tools()),
+        None,
+        Thinking::Off,
+        Dialect::Glm,
+        None,
+    );
+    assert_eq!(
+        prompt,
+        "[gMASK]<sop><|system|>\n# Tools\n\nYou may call one or more functions to assist with the user query.\n\nYou are provided with function signatures within <tools></tools> XML tags:\n<tools>\n{\"type\": \"function\", \"function\": {\"name\": \"bash\", \"description\": \"Run a shell command\", \"parameters\": {\"type\": \"object\", \"properties\": {\"command\": {\"type\": \"string\"}, \"timeout\": {\"type\": \"integer\"}}}}}\n</tools>\n\nFor each function call, output the function name and arguments within the following XML format:\n<tool_call>{function-name}\n<arg_key>{arg-key-1}</arg_key>\n<arg_value>{arg-value-1}</arg_value>\n<arg_key>{arg-key-2}</arg_key>\n<arg_value>{arg-value-2}</arg_value>\n...\n</tool_call><|system|>\nBe brief.<|user|>\nlist the files/nothink<|assistant|>\n<think>I should list.</think>\n<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>ls</arg_value>\n<arg_key>timeout</arg_key>\n<arg_value>30</arg_value>\n</tool_call><|observation|>\n<tool_response>\na.txt\n</tool_response>\n\n<tool_response>\nb.txt\n</tool_response>\n<|assistant|>\n<think></think>\n"
+    );
+}
+
+#[test]
+fn an_earlier_glm_turn_keeps_an_empty_think_block() {
+    let prompt = format_chat(
+        &[
+            user("hi"),
+            ChatMessage {
+                role: "assistant".to_string(),
+                content: Some(MessageContent::Text("<think>pondering</think>hello".to_string())),
+                ..ChatMessage::default()
+            },
+            user("again"),
+        ],
+        None,
+        None,
+        Thinking::Open,
+        Dialect::Glm,
+        None,
+    );
+    // The template ends at `<|assistant|>\n`; the open block is ours, so the
+    // parser starts inside the reasoning.
+    assert_eq!(
+        prompt,
+        "[gMASK]<sop><|user|>\nhi<|assistant|>\n<think></think>\nhello<|user|>\nagain<|assistant|>\n<think>"
+    );
+}
+
+#[test]
+fn a_glm_call_parses_and_renders_back_as_written() {
+    let written = "Listing.\n<tool_call>bash\n<arg_key>command</arg_key>\n<arg_value>ls -la</arg_value>\n<arg_key>timeout</arg_key>\n<arg_value>30</arg_value>\n</tool_call>";
+    let out = AssistantOutput::collect(written, Some(bash_tools()), false, Dialect::Glm);
+    assert_eq!(out.content, "Listing.");
+    let [call] = &out.tool_calls[..] else {
+        panic!("one call, got {:?}", out.tool_calls);
+    };
+    assert_eq!(call.function.name, "bash");
+    assert_eq!(
+        serde_json::from_str::<Value>(&call.function.arguments).unwrap(),
+        json!({"command": "ls -la", "timeout": 30})
+    );
+
+    let mut prompt = String::new();
+    render_tool_calls(&mut prompt, &out.tool_calls, false, Dialect::Glm);
+    assert_eq!(prompt, written.trim_start_matches("Listing."));
+}

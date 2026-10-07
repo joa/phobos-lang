@@ -1,10 +1,11 @@
 use anyhow::{Result, bail};
 
 use crate::backend::{Backend, Buf};
-use crate::{Gguf, llama, qwen35};
+use crate::{Gguf, glm4, llama, qwen35};
 
 pub enum Decoder {
     Llama(Box<llama::Model>),
+    Glm4(Box<glm4::Model>),
     Qwen35(Box<qwen35::Model>),
 }
 
@@ -61,6 +62,7 @@ impl Decoder {
     pub fn load(gguf: &Gguf) -> Result<Decoder> {
         Ok(match gguf.architecture()? {
             "llama" => Decoder::Llama(Box::new(llama::Model::load(gguf)?)),
+            "glm4" => Decoder::Glm4(Box::new(glm4::Model::load(gguf)?)),
             "qwen35" | "qwen35moe" => Decoder::Qwen35(Box::new(qwen35::Model::load(gguf)?)),
             other => bail!("no forward pass is implemented for the '{other}' architecture"),
         })
@@ -69,6 +71,7 @@ impl Decoder {
     pub fn architecture(&self) -> &'static str {
         match self {
             Decoder::Llama(_) => "llama",
+            Decoder::Glm4(_) => "glm4",
             Decoder::Qwen35(m) => m.config.arch,
         }
     }
@@ -76,6 +79,7 @@ impl Decoder {
     pub fn vocab(&self) -> usize {
         match self {
             Decoder::Llama(m) => m.config.vocab,
+            Decoder::Glm4(m) => m.config.vocab,
             Decoder::Qwen35(m) => m.config.vocab,
         }
     }
@@ -84,6 +88,7 @@ impl Decoder {
     pub fn context_length(&self) -> usize {
         match self {
             Decoder::Llama(m) => m.config.context_length,
+            Decoder::Glm4(m) => m.config.context_length,
             Decoder::Qwen35(m) => m.config.context_length,
         }
     }
@@ -93,6 +98,7 @@ impl Decoder {
     pub fn footprint(&self, positions: usize) -> Footprint {
         let (uploads, kv_bytes_per_token) = match self {
             Decoder::Llama(m) => (m.footprint(positions), m.kv_bytes_per_token()),
+            Decoder::Glm4(m) => (m.footprint(positions), m.kv_bytes_per_token()),
             Decoder::Qwen35(m) => (m.footprint(positions), m.kv_bytes_per_token()),
         };
         Footprint {
@@ -105,12 +111,20 @@ impl Decoder {
 
     /// The shape of the network, for display.
     ///
-    /// A llama model is all attention. A qwen35 model interleaves attention
+    /// A llama or glm4 model is all attention. A qwen35 model interleaves attention
     /// and recurrent blocks. Only attention blocks cost memory per position,
     /// so their share decides whether a long context fits.
     pub fn layout(&self) -> phobos_inference::Architecture {
         match self {
             Decoder::Llama(m) => phobos_inference::Architecture {
+                d_model: m.config.d_model,
+                d_ff: m.config.d_ff,
+                n_head: m.config.n_head,
+                n_head_kv: m.config.n_head_kv,
+                head_dim: m.config.head_dim,
+                blocks: vec![phobos_inference::BlockKind::Attention; m.config.n_block],
+            },
+            Decoder::Glm4(m) => phobos_inference::Architecture {
                 d_model: m.config.d_model,
                 d_ff: m.config.d_ff,
                 n_head: m.config.n_head,
@@ -141,6 +155,7 @@ impl Decoder {
     pub fn summary(&self) -> String {
         match self {
             Decoder::Llama(m) => format!("{:?}", m.config),
+            Decoder::Glm4(m) => format!("{:?}", m.config),
             Decoder::Qwen35(m) => format!("{:?}", m.config),
         }
     }
@@ -148,6 +163,7 @@ impl Decoder {
     pub fn new_state(&self) -> State {
         match self {
             Decoder::Llama(m) => State::Llama(Box::new(m.new_state())),
+            Decoder::Glm4(m) => State::Llama(Box::new(m.new_state())),
             Decoder::Qwen35(m) => State::Qwen35(Box::new(m.new_state())),
         }
     }
@@ -161,6 +177,7 @@ impl Decoder {
     ) -> Result<Vec<f32>> {
         match (self, state) {
             (Decoder::Llama(m), State::Llama(s)) => m.forward(s, tokens, backend),
+            (Decoder::Glm4(m), State::Llama(s)) => m.forward(s, tokens, backend),
             (Decoder::Qwen35(m), State::Qwen35(s)) => m.forward(s, tokens, backend),
             _ => bail!("generation state does not belong to the loaded architecture"),
         }
@@ -177,7 +194,9 @@ impl Decoder {
     ) -> Result<(Vec<f32>, qwen35::RouteTrace)> {
         match (self, state) {
             (Decoder::Qwen35(m), State::Qwen35(s)) => m.forward_traced(s, tokens, backend),
-            (Decoder::Llama(_), State::Llama(_)) => bail!("a llama model has no routers to trace"),
+            (Decoder::Llama(_) | Decoder::Glm4(_), State::Llama(_)) => {
+                bail!("a dense attention model has no routers to trace")
+            }
             _ => bail!("generation state does not belong to the loaded architecture"),
         }
     }
@@ -192,6 +211,7 @@ impl Decoder {
     ) -> Result<i64> {
         match (self, state) {
             (Decoder::Llama(m), State::Llama(s)) => m.forward_greedy(s, tokens, backend),
+            (Decoder::Glm4(m), State::Llama(s)) => m.forward_greedy(s, tokens, backend),
             (Decoder::Qwen35(m), State::Qwen35(s)) => m.forward_greedy(s, tokens, backend),
             _ => bail!("generation state does not belong to the loaded architecture"),
         }

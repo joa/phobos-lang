@@ -2,6 +2,7 @@ use serde_json::Value;
 
 use super::ToolCall;
 use super::dialect::{Dialect, FUNCTION_START, THINK_END, THINK_START};
+use super::glm::parse_glm_call;
 use super::tools::{parse_function_block, parse_json_call, parse_minicpm_function};
 
 #[derive(Debug, PartialEq, Eq)]
@@ -137,6 +138,9 @@ impl OutputParser {
             return parse_minicpm_function(raw, self.tools.as_ref(), self.calls);
         }
         let raw = raw.trim();
+        if self.dialect == Dialect::Glm && !raw.starts_with('{') {
+            return parse_glm_call(raw, self.tools.as_ref(), self.calls);
+        }
         if raw.contains(FUNCTION_START) {
             return parse_function_block(raw, self.tools.as_ref(), self.calls);
         }

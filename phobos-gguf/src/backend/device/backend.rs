@@ -263,7 +263,11 @@ impl Backend for DeviceBackend {
             return Ok(buf);
         }
         let (k, n) = (packed.k(), packed.n());
-        let planes = packed.planes()?;
+        let mut planes = packed.planes()?;
+        let q50 = packed.quant() == Quant::Q5_0;
+        if q50 {
+            planes.qs = packed.device_blocks();
+        }
         let blocks = k / Q8_BLOCK;
         let mut row_scales = vec![0.0f32; planes.scales.len()];
         for (b, row) in planes.scales.chunks_exact(n).enumerate() {
@@ -271,12 +275,21 @@ impl Backend for DeviceBackend {
                 row_scales[j * blocks + b] = s;
             }
         }
-        let uploaded = if self.arena_const {
+        // A large weight is bulk like any raw one and joins the arena, since
+        // WDDM keeps a few large allocations resident where it fails many.
+        // A small one stays apart: in a slab it drags the slab resident.
+        let arena = match () {
+            _ if self.arena_weights && planes.qs.len() >= BULK_QUANT_BYTES => Some(&self.arena),
+            _ if self.arena_const => Some(&self.hot),
+            _ => None,
+        };
+        let uploaded = if let Some(arena) = arena {
             DeviceQuant {
-                qs: self.hot.upload(&planes.qs)?,
-                scales: self.hot.upload(&planes.scales)?,
-                row_scales: self.hot.upload(&row_scales)?,
+                qs: arena.upload(&planes.qs)?,
+                scales: arena.upload(&planes.scales)?,
+                row_scales: arena.upload(&row_scales)?,
                 n,
+                q50,
             }
         } else {
             let owned = (
@@ -289,6 +302,7 @@ impl Backend for DeviceBackend {
                 scales: owned.1.as_device_ptr().as_raw(),
                 row_scales: owned.2.as_device_ptr().as_raw(),
                 n,
+                q50,
             };
             self.owned_quants.borrow_mut().push(owned);
             at
@@ -735,6 +749,39 @@ impl Backend for DeviceBackend {
     fn add_into(&self, acc: Buf, add: Buf) -> Result<()> {
         let len = self.len_of(acc)?.min(self.len_of(add)?);
         self.pointwise("add_into", &[(acc, 0), (add, 0)], len)
+    }
+
+    fn rms_norm_add(
+        &self,
+        y: Buf,
+        rows: usize,
+        width: usize,
+        gain: Buf,
+        eps: f32,
+        normed: Buf,
+        x: Buf,
+    ) -> Result<()> {
+        // At one row the plain norm costs three times the quantizing one,
+        // whose quantized copy then goes to a slot nothing reads.
+        if rows == 1 && norm_q_cta(width).is_some() {
+            self.rms_norm_q(y, rows, width, gain, eps, normed)?;
+        } else {
+            self.rms_norm(y, rows, width, gain, eps, normed)?;
+        }
+        self.add_into(x, normed)
+    }
+
+    fn add_rows(&self, x: Buf, rows: usize, width: usize, bias: Buf) -> Result<()> {
+        self.check_distinct("add_rows", x, &[bias]);
+        self.launch(
+            &self.pointwise,
+            "add_rows",
+            &[
+                (self.ptr(x, 0)?, [rows as i64, width as i64]),
+                (self.ptr(bias, 0)?, [1, width as i64]),
+            ],
+            (width.div_ceil(ELEM_TILE) as u32, rows as u32, 1),
+        )
     }
 
     fn swiglu_q(

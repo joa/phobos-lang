@@ -50,6 +50,16 @@ impl Ffn {
         })
     }
 
+    /// [`Ffn::load`] for a file that stores gate and up as one
+    /// `{prefix}.ffn_up.weight` of `2 * d_ff` outputs, gate first: the
+    /// layout [`GateUp::Fused`] already reads.
+    pub(crate) fn load_stacked(gguf: &Gguf, prefix: &str, d_model: usize, d_ff: usize) -> Result<Ffn> {
+        Ok(Ffn {
+            gate_up: GateUp::Fused(Linear::load(gguf, &format!("{prefix}.ffn_up.weight"), d_model, 2 * d_ff)?),
+            down: Linear::load(gguf, &format!("{prefix}.ffn_down.weight"), d_ff, d_model)?,
+        })
+    }
+
     pub(crate) fn footprint(&self, into: &mut Uploads) {
         match &self.gate_up {
             GateUp::Fused(gate_up) => gate_up.footprint(into),
@@ -139,6 +149,16 @@ impl Ffn {
     /// shared by [`Ffn::input`]. The two wide intermediates stay on the
     /// backend.
     pub(crate) fn forward(&self, backend: &dyn Backend, x: Shared, rows: usize, dest: Buf) -> Result<()> {
+        self.run(backend, x, rows, dest, true)
+    }
+
+    /// [`Ffn::forward`] writing into `out` instead of adding into it, for an
+    /// architecture that normalizes the result before the residual add.
+    pub(crate) fn forward_into(&self, backend: &dyn Backend, x: Shared, rows: usize, out: Buf) -> Result<()> {
+        self.run(backend, x, rows, out, false)
+    }
+
+    fn run(&self, backend: &dyn Backend, x: Shared, rows: usize, dest: Buf, add: bool) -> Result<()> {
         let width = self.down.in_dim;
         let joined = backend.alloc(rows * width)?;
         let dense = |buf| Plane { buf, offset: 0, pitch: width };
@@ -166,13 +186,19 @@ impl Ffn {
             let act =
                 backend.swiglu_q(gate_p.buf, gate_p.offset, up_p.buf, up_p.offset, joined, width)?;
             release_once(backend, release);
-            self.down.add_into_act(backend, joined, Some(act), rows, dest)?;
+            match add {
+                true => self.down.add_into_act(backend, joined, Some(act), rows, dest)?,
+                false => self.down.project_into_act(backend, joined, Some(act), rows, dest)?,
+            }
             backend.release(joined);
             return Ok(());
         }
         backend.swiglu_planes(gate_p, up_p, joined, rows, width)?;
         release_once(backend, release);
-        self.down.add_into(backend, joined, rows, dest)?;
+        match add {
+            true => self.down.add_into(backend, joined, rows, dest)?,
+            false => self.down.project_into(backend, joined, rows, dest)?,
+        }
         backend.release(joined);
         Ok(())
     }
