@@ -396,6 +396,11 @@ pub enum Intrinsic {
     QdotT,
     /// `qmma_t`: the same, batched over rows on the integer tensor cores.
     QmmaT,
+    /// `q50_qdot_t`: `qdot_t` against a Q5_0 weight held as its blocks
+    /// without their scale.
+    Q50dotT,
+    /// `q50_qmma_t`: `qmma_t` against the same.
+    Q50mmaT,
     /// `<fmt>_qdot_t`: a raw format's matvec with its decode folded in.
     RawQdot(RawFmt),
     /// `<fmt>_qdot_i8_t`: the dp4a decode matvec.
@@ -427,6 +432,8 @@ impl Intrinsic {
         match self {
             Intrinsic::QdotT => "qdot_t".into(),
             Intrinsic::QmmaT => "qmma_t".into(),
+            Intrinsic::Q50dotT => "q50_qdot_t".into(),
+            Intrinsic::Q50mmaT => "q50_qmma_t".into(),
             Intrinsic::RawQdot(f) => format!("{}_qdot_t", f.name()),
             Intrinsic::RawQdotI8(f) => format!("{}_qdot_i8_t", f.name()),
             Intrinsic::RawQmma(f) => format!("{}_qmma_t", f.name()),
@@ -444,6 +451,8 @@ impl Intrinsic {
         match callee {
             "qdot_t" => return Some(Intrinsic::QdotT),
             "qmma_t" => return Some(Intrinsic::QmmaT),
+            "q50_qdot_t" => return Some(Intrinsic::Q50dotT),
+            "q50_qmma_t" => return Some(Intrinsic::Q50mmaT),
             "gather" => return Some(Intrinsic::Gather),
             "argsel" => return Some(Intrinsic::ArgSel),
             "rms_norm_q_t" => return Some(Intrinsic::RmsNormQ),

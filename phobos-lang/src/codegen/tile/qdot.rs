@@ -1,8 +1,79 @@
 // The fused Q8_0 dot: scales folded into the contraction.
+//
+// The weight is either one `i8` per element or Q5_0's blocks without their
+// scale (`QWeight::Q50`), 20 bytes per 32 elements: the `qh` word, then 16
+// bytes whose byte `e` holds element `e` in its low nibble and `e + 16` in
+// its high one. Bit `e` of `qh` is element `e`'s fifth bit. Four elements
+// widen to the `q - 16` bytes the contraction reads with no carry across
+// bytes: the four `qh` bits spread one to a byte, and a clear bit puts 0xF0
+// over the nibble.
 
 use super::*;
 
+/// Bytes of a Q5_0 block without its two-byte scale.
+const Q50_BLOCK_BYTES: i64 = 20;
+
+/// How `qdot_t` and `qmma_t` hold their weight.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(in crate::codegen) enum QWeight {
+    /// One `i8` per element.
+    I8,
+    /// Q5_0 blocks without their scale; see the module comment.
+    Q50,
+}
+
 impl<'c> Codegen<'c> {
+    /// Weight bytes `k .. k + 4` of row `j` as `vector<4xi8>`. `k` is a
+    /// multiple of four.
+    pub(super) fn qweight_word(
+        &self,
+        block: &Block<'c>,
+        w: &MemVal<'c>,
+        form: QWeight,
+        j: Value<'c, 'c>,
+        k: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let vec4_i8 = Type::vector(&[4], self.i8_t);
+        if form == QWeight::I8 {
+            return self.vec_load_al(block, w.mem, &[j, k], vec4_i8, 4);
+        }
+        let word_t = Type::vector(&[1], self.i32_t);
+        let word_at = |at: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
+            let v = self.vec_load_al(block, w.mem, &[j, at], vec4_i8, 4)?;
+            let v = self.vec_bitcast(block, v, word_t)?;
+            self.vec_extract(block, v, &[0], self.i32_t)
+        };
+        let blk = self.const_index(block, Q8_BLOCK)?;
+        let half_blk = self.const_index(block, Q8_BLOCK / 2)?;
+        let four = self.const_index(block, 4)?;
+        let b = self.divui(block, k, blk)?;
+        let e = self.remui(block, k, blk)?;
+        let bytes = self.const_index(block, Q50_BLOCK_BYTES)?;
+        let base = self.muli(block, b, bytes)?;
+        let qh = word_at(base)?;
+        let at = self.remui(block, e, half_blk)?;
+        let qs_at = self.addi(block, base, four)?;
+        let qs_at = self.addi(block, qs_at, at)?;
+        let qs = word_at(qs_at)?;
+
+        let half = self.divui(block, e, half_blk)?;
+        let shift = self.muli(block, half, four)?;
+        let shift = self.numeric_cast(block, shift, self.i32_t)?;
+        let low = self.kq_bits_dyn(block, qs, shift, 0x0F0F_0F0F)?;
+        let e = self.numeric_cast(block, e, self.i32_t)?;
+        let bits = self.kq_bits_dyn(block, qh, e, 0xF)?;
+        let spread_mul = self.const_i32(block, 0x0020_4081)?;
+        let spread = self.push(block, arith::muli(bits, spread_mul, self.loc))?;
+        let ones = self.const_i32(block, 0x0101_0101)?;
+        let spread = self.push(block, arith::andi(spread, ones, self.loc))?;
+        let clear = self.push(block, arith::xori(spread, ones, self.loc))?;
+        let f0 = self.const_i32(block, 0xF0)?;
+        let high = self.push(block, arith::muli(clear, f0, self.loc))?;
+        let word = self.push(block, arith::ori(low, high, self.loc))?;
+        let word = self.vec_broadcast(block, word, word_t)?;
+        self.vec_bitcast(block, word, vec4_i8)
+    }
+
     /// out[i, j] = sum_b (sum_{k in block b} a[i, k] * w[j, k]) * asc[i, b] * wsc[j, b]:
     /// the whole Q8_0 contraction, block scales included, as one operation.
     ///
@@ -21,6 +92,7 @@ impl<'c> Codegen<'c> {
         asc: &MemVal<'c>,
         w: &MemVal<'c>,
         wsc: &MemVal<'c>,
+        form: QWeight,
     ) -> Result<MemVal<'c>> {
         for (v, what) in [
             (a, "qdot_t a"),
@@ -104,7 +176,7 @@ impl<'c> Codegen<'c> {
             let at = self.const_index(&then, c * 4)?;
             let k = self.addi(&then, koff, at)?;
             let va = self.vec_load_al(&then, a.mem, &[i, k], vec4_i8, 4)?;
-            let vb = self.vec_load_al(&then, w.mem, &[j, k], vec4_i8, 4)?;
+            let vb = self.qweight_word(&then, w, form, j, k)?;
             dots = self.dot4_accumulate(&then, va, vb, dots)?;
         }
         let blk_w = self.const_index(&then, Q8_BLOCK)?;

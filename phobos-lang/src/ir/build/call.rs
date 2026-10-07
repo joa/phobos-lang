@@ -46,23 +46,25 @@ impl Build {
                 let ty = self.shared_ty(acc_elem, &shape);
                 Ok(Rv::Tile(self.value(OpKind::Dot { transpose: true }, &[a, b], ty)))
             }
-            "qdot_t" => {
+            "qdot_t" | "q50_qdot_t" => {
                 let [a, asc, w, wsc] = args else {
-                    bail!("qdot_t expects (a, a_scales, w, w_scales)");
+                    bail!("{callee} expects (a, a_scales, w, w_scales)");
                 };
-                let a = self.tile_operand(a, "qdot_t")?;
-                let asc = self.tile_operand(asc, "qdot_t")?;
-                let w = self.tile_operand(w, "qdot_t")?;
-                let wsc = self.tile_operand(wsc, "qdot_t")?;
+                let a = self.tile_operand(a, callee)?;
+                let asc = self.tile_operand(asc, callee)?;
+                let w = self.tile_operand(w, callee)?;
+                let wsc = self.tile_operand(wsc, callee)?;
                 let shape = [self.shape(a)[0], self.shape(w)[0]];
                 let ty = self.shared_ty(Scalar::F32, &shape);
-                Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::QdotT), &[a, asc, w, wsc], ty)))
+                let op = Intrinsic::from_name(callee).expect("matched above");
+                Ok(Rv::Tile(self.value(OpKind::Intrinsic(op), &[a, asc, w, wsc], ty)))
             }
-            "qmma_t" => {
+            "qmma_t" | "q50_qmma_t" => {
                 let [a, asc, w, wsc] = self.qmma_operands(args)?;
                 let shape = [self.shape(a)[0], self.shape(w)[0]];
                 let ty = self.shared_ty(Scalar::F32, &shape);
-                Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::QmmaT), &[a, asc, w, wsc], ty)))
+                let op = Intrinsic::from_name(callee).expect("matched above");
+                Ok(Rv::Tile(self.value(OpKind::Intrinsic(op), &[a, asc, w, wsc], ty)))
             }
             _ if matches!(Intrinsic::from_name(callee), Some(Intrinsic::RawQdotI8(_))) => {
                 let Some(Intrinsic::RawQdotI8(fmt)) = Intrinsic::from_name(callee) else {

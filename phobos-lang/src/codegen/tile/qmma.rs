@@ -64,13 +64,14 @@ impl<'c> Codegen<'c> {
         asc: &MemVal<'c>,
         w: &MemVal<'c>,
         wsc: &MemVal<'c>,
+        form: QWeight,
     ) -> Result<MemVal<'c>> {
         let (md, nd) = (a.shape[0], w.shape[0]);
         if md == DYN || nd == DYN {
             bail!("qmma_t needs a static output shape");
         }
         let out = self.alloc_tile_shaped(block, self.f32_t, &[md, nd])?;
-        self.qmma_t_into(block, a, asc, w, wsc, &out)?;
+        self.qmma_t_into(block, a, asc, w, wsc, form, &out)?;
         Ok(out)
     }
 
@@ -80,6 +81,7 @@ impl<'c> Codegen<'c> {
     /// The destination is normally a slice of the output tensor, written
     /// straight from the accumulator registers. A shared output tile would
     /// cost 32 KB for `[128, 64]` f32 and limit occupancy.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn qmma_t_into(
         &mut self,
         block: &Block<'c>,
@@ -87,6 +89,7 @@ impl<'c> Codegen<'c> {
         asc: &MemVal<'c>,
         w: &MemVal<'c>,
         wsc: &MemVal<'c>,
+        form: QWeight,
         out: &MemVal<'c>,
     ) -> Result<()> {
         if out.elem != self.f32_t {
@@ -223,7 +226,7 @@ impl<'c> Codegen<'c> {
         let mut w_frags = Vec::new();
         for row in &w_rows {
             for col in &k_cols {
-                let v = self.vec_load_al(&kb, w.mem, &[*row, *col], vec4_i8, 4)?;
+                let v = self.qweight_word(&kb, w, form, *row, *col)?;
                 w_frags.push(self.vec_shape_cast(&kb, v, frag_t)?);
             }
         }
