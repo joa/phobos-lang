@@ -12,9 +12,10 @@ recorded length. See [BENCHMARKS.md](../BENCHMARKS.md) for the results.
 | `pelican` | draw a pelican riding a bicycle as SVG  | one long answer, mostly decode        | `pelican.svg` parses       |
 | `law`     | summarize a German law                  | one long document, mostly prompt      | none                       |
 
-The law is the Tierschutz-Hundeverordnung, taken from
-[bundestag/gesetze](https://github.com/bundestag/gesetze). As an official work
-it is not under copyright (Section 5 UrhG).
+The law is the Tierschutz-Hundeverordnung from
+[gesetze-im-internet.de](https://www.gesetze-im-internet.de/tierschhuv/BJNR083800001.html),
+converted to Markdown. As an official work it is not under copyright
+(Section 5 UrhG).
 
 A task is completed when pi's last message contains DONE, and correct when its
 check passes. Whether the pelican is a pelican takes a look at the SVG, which
