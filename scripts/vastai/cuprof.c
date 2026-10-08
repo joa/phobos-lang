@@ -1,7 +1,8 @@
 // LD_PRELOAD shim: with CUPROF set, replays each graph launch as the same
-// kernels launched one at a time, timed with events, and prints GPU time per
-// kernel at exit. Assumes every kernel parameter is at most 8 bytes, which
-// holds for phobos's exploded-memref ABI. Needs no CUDA headers.
+// kernels launched one at a time, times those and every plain launch with
+// events, and prints GPU time per kernel at exit. Assumes every kernel
+// parameter is at most 8 bytes, which holds for phobos's exploded-memref ABI.
+// Needs no CUDA headers.
 //
 //     gcc -O2 -shared -fPIC -o cuprof.so cuprof.c -ldl
 //     CUPROF=1 LD_PRELOAD=./cuprof.so phobos-bench -m MODEL -p 16 -n 32 -r 1 --no-warmup
@@ -124,6 +125,34 @@ static void add(const char *name, double ms) {
             return;
         }
     if (nstats < 512) stats[nstats++] = (Stat){name, ms, 1};
+}
+
+// A prompt pass is not recorded, so its kernels arrive as plain launches.
+int cuLaunchKernel(void *fn, unsigned gx, unsigned gy, unsigned gz, unsigned bx, unsigned by, unsigned bz,
+                   unsigned shared, void *stream, void **params, void **extra) {
+    static int (*real)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void *,
+                       void **, void **);
+    if (!real) real = sym("cuLaunchKernel");
+    if (profile < 0) profile = getenv("CUPROF") != NULL;
+    if (!profile) return real(fn, gx, gy, gz, bx, by, bz, shared, stream, params, extra);
+    int (*ev_create)(void **, unsigned) = sym("cuEventCreate");
+    int (*ev_record)(void *, void *) = sym("cuEventRecord");
+    int (*ev_sync)(void *) = sym("cuEventSynchronize");
+    int (*ev_elapsed)(float *, void *, void *) = sym("cuEventElapsedTime");
+    int (*fname)(const char **, void *) = sym("cuFuncGetName");
+    static void *e0, *e1;
+    if (!e0) ev_create(&e0, 0), ev_create(&e1, 0);
+    ev_record(e0, stream);
+    int r = real(fn, gx, gy, gz, bx, by, bz, shared, stream, params, extra);
+    if (r) return r;
+    ev_record(e1, stream);
+    ev_sync(e1);
+    float ms = 0;
+    ev_elapsed(&ms, e0, e1);
+    const char *name = "?";
+    fname(&name, fn);
+    add(name, ms);
+    return 0;
 }
 
 int cuGraphLaunch(void *exec, void *stream) {
