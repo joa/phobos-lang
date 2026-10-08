@@ -68,11 +68,11 @@ Inference has been tested with:
 
 - [MiniCPM5-1B-Q8_0](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF)
 - [Qwen3.5-0.8B-Q8_0](https://huggingface.co/ggml-org/Qwen3.5-0.8B-GGUF)
-- Qwen3.5-4B-Q4_K_M
-- Qwen3.8-27B-UD-IQ1_M
-- Ternary-Bonsai-2-27B-PTQ1_0
-- Qwen3.6-35B-A3B-UD-Q4_K_M
-- GLM-4.6V-Flash-Q4_K_M (text only)
+- [Qwen3.5-4B-Q4_K_M](https://huggingface.co/unsloth/Qwen3.5-4B-GGUF)
+- [Qwen3.8-27B-UD-IQ1_M](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF)
+- [Ternary-Bonsai-2-27B-PTQ1_0](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf)
+- [Qwen3.6-35B-A3B-UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
+- [GLM-4.6V-Flash-Q4_K_M](https://huggingface.co/unsloth/GLM-4.6V-Flash-GGUF) (text only)
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
 
 **Note:**
