@@ -11,6 +11,8 @@ For each engine, one server at a time on the port the agent is configured for:
  3. For each child, run `pi -p @<child>/prompt.md` in the child's folder.
     The task finishes when pi exits. It counts as completed when the agent's
     last message contains DONE, and as correct when the child's check passes.
+    The agent's folder stays under the results as `<engine>-rep<N>/<child>`,
+    which is where to look at what pelican drew.
  4. Read the server's log for the run: per-request prompt and decode rates,
     how much of each prompt was cached, and for phobos the expert cache's
     hit rates.
