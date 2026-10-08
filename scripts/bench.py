@@ -27,8 +27,10 @@ Usage:
     python scripts/bench.py -p 128 512 -n 32 128 512 -r 3 -R 6 --csv bench.csv
     python scripts/bench.py --llama-bench C:/path/to/llama-bench.exe --force
     python scripts/bench.py --cuda-lib C:/path/to/cuda/bin
+    python scripts/bench.py --phobos-bench /root/phobos-linux-x64/phobos-bench
 
-Needs nvidia-smi and cargo on PATH, and an NVIDIA card. No third-party imports.
+Needs nvidia-smi on PATH and an NVIDIA card, plus cargo unless --phobos-bench
+names a built one. No third-party imports.
 """
 
 import argparse
@@ -312,9 +314,31 @@ def best_backend(engine, model, libs):
     return None, why
 
 
+def phobos_build(args):
+    """The checkout's commit, or for a given phobos-bench its version and the
+    package directory it runs from, since a fix build keeps its release's
+    version."""
+    if args.phobos_bench:
+        cmd = [args.phobos_bench, "--version"]
+    else:
+        cmd = ["git", "rev-parse", "--short", "HEAD"]
+    try:
+        out = subprocess.run(cmd, cwd=ROOT, capture_output=True, text=True).stdout.strip()
+    except OSError:
+        return ""
+    if args.phobos_bench and out:
+        out = f"{out} [{Path(args.phobos_bench).parent.name}]"
+    return out
+
+
 def build_phobos(args):
     """Compile phobos-bench before anything is timed, so no repetition
     pays for a cargo build or a first-use kernel compile."""
+    if args.phobos_bench:
+        exe = Path(args.phobos_bench)
+        if not exe.is_file():
+            sys.exit(f"no such phobos-bench: {exe}")
+        return exe
     exe = ROOT / "target" / "release" / (
         "phobos-bench.exe" if os.name == "nt" else "phobos-bench"
     )
@@ -459,12 +483,7 @@ def preflight(args):
         f" {state['power']:.0f} W, {now['temp']:.0f} C,"
         f" {len(apps)} compute apps"
     )
-    commit = subprocess.run(
-        ["git", "rev-parse", "--short", "HEAD"],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    commit = phobos_build(args)
     why = busy(state, args)
     if why:
         print(f"\nthe card is not free: {why}")
@@ -777,6 +796,12 @@ def parse_args():
     )
     ap.add_argument("--no-build", action="store_true", help="use the existing bench.exe")
     ap.add_argument(
+        "--phobos-bench",
+        metavar="EXE",
+        help="phobos-bench to run instead of building one, such as a release"
+        " package's, which has to stay beside its kernel-cache/",
+    )
+    ap.add_argument(
         "--warm-secs", type=float, default=45.0, help="cap on the warmup (default 45)"
     )
     ap.add_argument(
@@ -801,6 +826,8 @@ def parse_args():
     args.models = [
         str(p if Path(p).is_absolute() else ROOT / p) for p in args.models
     ]
+    if args.phobos_bench:
+        args.phobos_bench = str(Path(args.phobos_bench).resolve())
     for model in args.models:
         if not Path(model).is_file():
             sys.exit(f"no such model: {model}")
