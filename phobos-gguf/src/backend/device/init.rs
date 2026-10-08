@@ -143,7 +143,7 @@ impl DeviceBackend {
             persist_blocks: Cell::new(0),
             persist_qdot: env_flag("PHOBOS_PERSIST_QDOT"),
             iq1s_dp4a: Cell::new(env_flag_on("PHOBOS_IQ1S_DP4A")),
-            qmma_split: env_flag("PHOBOS_QMMA_SPLIT"),
+            qmma_split: env_flag_on("PHOBOS_QMMA_SPLIT"),
             qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),
             fused_plans: RefCell::new(HashMap::new()),
             fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),

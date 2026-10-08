@@ -195,7 +195,7 @@ pub struct DeviceBackend {
     /// judge this path. `backend_check` compares both device paths instead.
     iq1s_dp4a: Cell<bool>,
     /// Whether `q8_qmma`'s deep tile takes the split-K path on a starved grid.
-    /// `PHOBOS_QMMA_SPLIT=1` opts in.
+    /// On by default; `PHOBOS_QMMA_SPLIT=0` opts out.
     qmma_split: bool,
     /// Whether `q8_qmma`'s deep tile takes the narrow-CTA path.
     /// `PHOBOS_QMMA_NARROW=1` opts in. See
