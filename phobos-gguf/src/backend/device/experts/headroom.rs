@@ -25,6 +25,7 @@ use anyhow::Result;
 
 use super::super::DeviceBackend;
 use super::super::kernels::MOE_USED;
+use super::super::mem::card_memory;
 use super::{Experts, NONE, Slab};
 
 /// When free memory drops below this, the cache shrinks. It sits above the
@@ -78,7 +79,7 @@ impl DeviceBackend {
         let Some(slabs) = experts.slabs.as_ref() else {
             return Ok(());
         };
-        let free = free_bytes()?;
+        let (free, _) = card_memory()?;
         let slab_bytes: usize = slabs.values().map(Slab::held_bytes).sum();
         // The bytes one more slot in every block costs.
         let per_row = slab_bytes / (experts.per_block + 1);
@@ -117,10 +118,4 @@ impl DeviceBackend {
         experts.since_checked = HEADROOM_EVERY;
         Ok(())
     }
-}
-
-/// Free device memory, the whole card's where NVML can say.
-pub(in super::super) fn free_bytes() -> Result<usize> {
-    let (own, _) = cust::memory::mem_get_info()?;
-    Ok(phobos_kernels::nvml::card_free_bytes().map_or(own, |card| card.min(own)))
 }

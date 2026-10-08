@@ -15,6 +15,10 @@ impl Backend for DeviceBackend {
         cust::memory::mem_get_info().ok()
     }
 
+    fn card_memory(&self) -> Option<(usize, usize)> {
+        mem::card_memory().ok()
+    }
+
     fn device_info(&self) -> Option<phobos_inference::DeviceInfo> {
         super::init::device_info()
     }

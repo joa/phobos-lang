@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// Free and total bytes on the card. Free is the whole card's where NVML can
+/// say, since the process's own figure does not see another program fill it.
+/// Under WDDM it stops a few hundred MiB short of zero once the card is
+/// over-subscribed, so a reading near that floor means full.
+pub(super) fn card_memory() -> Result<(usize, usize)> {
+    let (own_free, total) = cust::memory::mem_get_info()?;
+    let free = phobos_kernels::nvml::card_free_bytes().map_or(own_free, |card| card.min(own_free));
+    Ok((free, total))
+}
+
 /// What a [`Buf`] handle points at: an owned buffer that goes back to the
 /// pool, or a region of an arena.
 ///

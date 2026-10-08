@@ -320,6 +320,12 @@ pub trait Backend {
         None
     }
 
+    /// Free and total bytes on the whole card, other programs included, for
+    /// display. Defaults to [`Backend::device_memory`].
+    fn card_memory(&self) -> Option<(usize, usize)> {
+        self.device_memory()
+    }
+
     /// The card this backend computes on, or `None` for a host backend.
     fn device_info(&self) -> Option<phobos_inference::DeviceInfo> {
         None

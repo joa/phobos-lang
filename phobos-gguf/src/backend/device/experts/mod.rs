@@ -30,6 +30,7 @@ use phobos_kernels::cuda_ok;
 
 use super::DeviceBackend;
 use super::kernels::MOE_USED;
+use super::mem::card_memory;
 use crate::backend::ExpertsBuf;
 use crate::experts::{ExpertSet, ExpertStack, Stack};
 use crate::quant::Quant;
@@ -393,7 +394,7 @@ impl DeviceBackend {
         if self.experts.borrow().budget.is_some() {
             return Ok(());
         }
-        let free = headroom::free_bytes()?;
+        let (free, _) = card_memory()?;
         let room = free.saturating_sub(resident_bytes).saturating_sub(crate::runtime::RESERVE_BYTES);
         let budget = match self.experts.borrow().limit {
             Some(asked) if asked > room => {

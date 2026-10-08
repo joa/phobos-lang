@@ -176,7 +176,7 @@ impl Model for GgufModel {
     }
 
     fn device_memory(&self) -> Option<DeviceMemory> {
-        let (free_bytes, total_bytes) = self.backend.device_memory()?;
+        let (free_bytes, total_bytes) = self.backend.card_memory()?;
         Some(DeviceMemory {
             free_bytes: free_bytes as u64,
             total_bytes: total_bytes as u64,
