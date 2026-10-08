@@ -9,74 +9,84 @@ card for contention first.
 
 ![Phobos vs llama.cpp, tokens per second](results/inference.svg)
 
+![Phobos vs llama.cpp on a coding agent's replayed work](results/agent.svg)
+
 ![Phobos vs cuBLAS, achieved GFLOP/s](results/bench.svg)
 
-Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
+Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test   | llama.cpp CUDA[^1]  | Phobos GPU         |
 | ------ | ------------------: | -----------------: |
-| pp128  |  6865.64 +/-  20.15 | 5598.11 +/- 192.96 |
-| pp512  | 10871.30 +/-   9.37 | 8491.03 +/-  17.11 |
-| tg32   |   241.50 +/-   0.18 |  329.45 +/-   0.27 |
-| tg128  |   260.12 +/-   0.09 |  328.37 +/-   0.14 |
-| tg512  |   263.78 +/-   0.10 |  328.63 +/-   0.05 |
-| tg1024 |   263.35 +/-   0.09 |  327.67 +/-   0.07 |
-| tg2048 |   262.47 +/-   0.05 |  326.14 +/-   0.08 |
+| pp128  |  6723.91 +/-  12.97 | 5976.29 +/- 179.57 |
+| pp512  | 10729.32 +/-  26.75 | 8693.19 +/-  38.57 |
+| tg32   |   229.87 +/-   0.22 |  325.00 +/-   0.66 |
+| tg128  |   246.98 +/-   0.03 |  323.94 +/-   0.11 |
+| tg512  |   250.23 +/-   0.05 |  324.50 +/-   0.06 |
+| tg1024 |   249.84 +/-   0.12 |  323.53 +/-   0.14 |
+| tg2048 |   248.61 +/-   0.07 |  322.09 +/-   0.10 |
 
-MiniCPM5-1B-Q8_0 on an RTX 2080 SUPER, driver 610.88, tokens per second:
+MiniCPM5-1B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test   | llama.cpp CUDA[^1]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  8613.27 +/-  30.14 |  7574.73 +/-  27.89 |
-| pp512  | 16235.99 +/-  34.08 | 10114.45 +/-  20.40 |
-| tg32   |   280.79 +/-   0.15 |   318.95 +/-   0.33 |
-| tg128  |   281.81 +/-   0.18 |   317.78 +/-   0.18 |
-| tg512  |   280.80 +/-   0.13 |   316.35 +/-   0.12 |
-| tg1024 |   280.01 +/-   0.16 |   313.77 +/-   0.13 |
-| tg2048 |   277.07 +/-   0.14 |   308.68 +/-   0.12 |
+| pp128  |  8569.34 +/-  16.46 |  7574.73 +/-  27.89 |
+| pp512  | 16164.09 +/-  20.50 | 10086.13 +/-  26.26 |
+| tg32   |   270.33 +/-   0.27 |   315.18 +/-   0.25 |
+| tg128  |   270.89 +/-   0.19 |   314.19 +/-   0.15 |
+| tg512  |   269.83 +/-   0.17 |   313.14 +/-   0.11 |
+| tg1024 |   268.98 +/-   0.28 |   310.84 +/-   0.05 |
+| tg2048 |   266.84 +/-   0.20 |   304.84 +/-   1.00 |
 
-Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
+Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test   | llama.cpp CUDA[^1] | Phobos GPU         |
 | ------ | -----------------: | -----------------: |
-| pp128  | 2317.77 +/-   1.83 | 2307.98 +/-   3.33 |
-| pp512  | 2956.77 +/-   3.66 | 2352.83 +/-  24.31 |
-| tg32   |  107.04 +/-   0.07 |  113.53 +/-   0.08 |
-| tg128  |  110.07 +/-   0.06 |  113.29 +/-   0.05 |
-| tg512  |  110.59 +/-   0.04 |  113.30 +/-   0.04 |
-| tg1024 |  110.44 +/-   0.05 |  113.15 +/-   0.06 |
-| tg2048 |  109.87 +/-   0.03 |  112.60 +/-   0.05 |
+| pp128  | 2296.17 +/-   3.53 | 2305.30 +/-   3.32 |
+| pp512  | 2956.21 +/-   1.31 | 2372.05 +/-   2.44 |
+| tg32   |  103.60 +/-   0.08 |  111.92 +/-   0.14 |
+| tg128  |  106.54 +/-   0.11 |  111.75 +/-   0.14 |
+| tg512  |  106.77 +/-   0.29 |  111.54 +/-   0.42 |
+| tg1024 |  107.01 +/-   0.12 |  111.59 +/-   0.26 |
+| tg2048 |  106.50 +/-   0.12 |  111.43 +/-   0.10 |
 
-Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 610.88, tokens per second:
+GLM-4.6V-Flash-Q4_K_M, text only, on an RTX 2080 SUPER, driver 617.14, tokens per second:
+
+| test  | llama.cpp CUDA[^1] | Phobos GPU         |
+| ----- | -----------------: | -----------------: |
+| pp128 | 1665.23 +/-  63.55 | 1384.87 +/-   1.66 |
+| pp512 | 1974.65 +/-   8.10 | 1160.08 +/-   2.47 |
+| tg128 |   63.23 +/-   0.01 |   59.69 +/-   0.02 |
+
+Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test  | llama.cpp CUDA[^1] | Phobos GPU      |
 | ----- | -----------------: | --------------: |
-| pp128 |   476.96 +/-  1.56 | 532.60 +/- 0.74 |
-| tg128 |    22.00 +/-  0.00 |  31.36 +/- 0.09 |
+| pp128 |   473.17 +/-  0.85 | 537.82 +/- 0.00 |
+| tg128 |    21.69 +/-  0.00 |  30.98 +/- 0.01 |
 
 Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test  | llama.cpp-prism CUDA[^2] | Phobos GPU       |
-| ----- | -----------------------: | ---------------: |
-| pp128 |         472.38 +/-  1.33 | 599.10 +/-  3.36 |
-| tg128 |          48.83 +/-  0.00 |  45.24 +/-  0.04 |
+| test  | llama.cpp-prism CUDA[^2] | Phobos GPU        |
+| ----- | -----------------------: | ----------------: |
+| pp128 |         469.76 +/-  0.40 | 583.99 +/- 10.82  |
+| tg128 |          48.54 +/-  0.23 |  45.25 +/-  0.23  |
 
 The two 27B models need 6.27 GiB (IQ1_M) and 5.53 GiB (PTQ1_0) for their
 weights, which leaves little of the card's 8 GiB. Their numbers only hold while
-the desktop uses little VRAM: 1377 MiB was in use before the IQ1_M run, and
-1308 MiB before the PTQ1_0 run. If the desktop uses much more, the model no
+the desktop uses little VRAM: 886 MiB was in use before the IQ1_M run, and
+682 MiB before the PTQ1_0 run. If the desktop uses much more, the model no
 longer fits and the driver pages it over PCIe. An earlier session measured
 that at 7 t/s.
 
 ## Mixture of Experts
 
-Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the card, on an RTX 2080 SUPER, driver 610.88, tokens per second:
+Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the card, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test  | llama.cpp CUDA[^1], `-ncmoe 31 -t 8` | Phobos GPU       |
 | ----- | -----------------------------------: | ---------------: |
-| pp128 |                      75.68 +/-  0.32 | 329.33 +/- 0.75  |
-| pp512 |                     256.91 +/-  0.55 | 598.85 +/- 2.13  |
-| tg128 |                      31.41 +/-  0.75 |  55.52 +/- 0.15  |
+| pp128 |                      76.25 +/-  0.12 | 311.55 +/- 4.16  |
+| pp512 |                     257.57 +/-  0.55 | 577.88 +/- 1.13  |
+| tg128 |                      29.88 +/-  1.64 |  54.32 +/- 0.19  |
 
 Both engines keep everything except the experts on the GPU. They differ in
 where the experts go.
@@ -114,34 +124,44 @@ measures a real workload instead:
    differs.
 
 The model is Qwen3.6-35B-A3B. Both engines use the same sampler, a 16k context
-and one slot, and llama.cpp uses the settings above. Results for the fib task,
-8 requests, three rounds each:
+and one slot, and llama.cpp uses the settings above. One recording of each task
+in `bench/`, replayed three rounds each, without thinking:
 
-| no thinking      | wall   | prompt    | decode     |
-| ---------------- | -----: | --------: | ---------: |
-| llama.cpp CUDA   | 71.9 s | 132 t/s   | 29.9 t/s   |
-| Phobos GPU       | 44.0 s | 237 t/s   | 42.3 t/s   |
+| task      | requests | engine         | wall    | prompt  | decode   |
+| --------- | -------: | -------------- | ------: | ------: | -------: |
+| `fib`     |        6 | llama.cpp CUDA |  53.2 s | 105 t/s | 30.7 t/s |
+|           |          | Phobos GPU     |  26.9 s | 254 t/s | 42.3 t/s |
+| `law`     |        2 | llama.cpp CUDA |  66.6 s | 148 t/s | 30.0 t/s |
+|           |          | Phobos GPU     |  47.2 s | 246 t/s | 42.5 t/s |
+| `pelican` |        2 | llama.cpp CUDA | 132.8 s | 149 t/s | 29.3 t/s |
+|           |          | Phobos GPU     |  81.2 s | 347 t/s | 47.4 t/s |
+
+The replay caps each answer at its recorded length, but it cannot make an
+engine keep going. On `fib` Phobos ends one answer early and writes 636 tokens
+a round to llama.cpp's 733, so its wall time there covers a little less work.
+The rates are per token and compare as they are.
+
+The context grows to 3k tokens on `fib`, 6.6k on `law` and 4.9k on `pelican`.
+That is why decode is slower here than in the benchmark tables.
+
+An earlier session replayed an 8-request `fib` recording with thinking:
 
 | thinking         | wall    | prompt    | decode     | tokens/round |
 | ---------------- | ------: | --------: | ---------: | -----------: |
 | llama.cpp CUDA   | 149.1 s | 105 t/s   | 30.1 t/s   |        2,005 |
 | Phobos GPU       | 147.8 s | 193 t/s   | 42.0 t/s   |       ~4,400 |
 
-With thinking, the two wall times cover different amounts of work. The replay
-caps each answer at its recorded length, but it cannot make an engine keep
-going. llama.cpp ends the long reasoning turn early, so Phobos writes about
-twice as many tokens in the same time.
-
-The context grows to 4k tokens without thinking and 8.6k with it. That is why
-decode is slower here than in the benchmark tables.
+With thinking, the two wall times cover different amounts of work. llama.cpp
+ends the long reasoning turn early, so Phobos writes about twice as many tokens
+in the same time.
 
 ## Under Memory Pressure
 
 A desktop does not leave the card alone. A browser, a game or a second model
-can take a share of its memory at any time. The same fib replay, but before
-the fourth of its eight requests another process takes 2 GiB of the card's 8
-and keeps writing to it until the task ends. Both engines loaded against the
-whole card. Three rounds each:
+can take a share of its memory at any time. An earlier session replayed its
+8-request fib recording, and before the fourth request another process took
+2 GiB of the card's 8 and kept writing to it until the task ended. Both engines
+loaded against the whole card. Three rounds each:
 
 | engine         | wall    | prompt  | decode   |
 | -------------- | ------: | ------: | -------: |
@@ -200,6 +220,14 @@ python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --csv results/bench.csv --json results/bench.json
 ```
 
+GLM-4.6V-Flash fills most of the card, so it measures two prompt sizes and one
+generation size.
+
+```bash
+python scripts/bench.py -m models/GLM-4.6V-Flash-Q4_K_M.gguf -p 128 512 -n 128 \
+  -r 3 -R 3 --csv results/bench-glm.csv --json results/bench-glm.json
+```
+
 The Qwen 27B is slow, so this run uses fewer sizes and repetitions. It is also
 close to the card's memory limit, so it measures only one prompt size and one
 generation size.
@@ -227,12 +255,16 @@ python scripts/bench.py -m models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -p 128 512 -n 1
   --csv results/bench-qwen36moe.csv --json results/bench-qwen36moe.json
 ```
 
-Record a [pi](https://pi.dev) session, then replay it to both engines.
+Record a [pi](https://pi.dev) session of every task, then replay it to both
+engines and plot the result.
 
 ```bash
-python scripts/agent_bench.py --engines phobos -r 1 [--thinking]
-python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-fib.requests.jsonl \
-  --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8
+python scripts/agent_bench.py --engines phobos -r 1 --out RUN [--thinking]
+python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-*.requests.jsonl \
+  --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8 --out REPLAY
+cp REPLAY/results.json results/agent.json
+python scripts/plot_agent.py results/agent.json -o results/agent.svg --context \
+  "Qwen3.6-35B-A3B-UD-Q4_K_M on an RTX 2080 SUPER, phobos 3eec883, llama.cpp -ncmoe 31 -t 8, no thinking"
 ```
 
 The same replay with 2 GiB of the card taken by another process from the
@@ -247,7 +279,7 @@ python scripts/agent_bench.py -r 3 --replay RUN/phobos-rep1-fib.requests.jsonl -
 Producing the SVG for the results.
 
 ```bash
-python scripts/plot.py results/bench.json results/bench-qwen38.json \
+python scripts/plot.py results/bench.json results/bench-glm.json results/bench-qwen38.json \
   results/bench-bonsai.json results/bench-qwen36moe.json -o results/inference.svg
 ```
 

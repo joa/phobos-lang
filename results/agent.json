@@ -1,0 +1,876 @@
+{
+ "meta": {
+  "phobos": {
+   "expert_cache": "expert cache: 1600 slots of up to 1.94 MiB, 40 a block, 2988 MiB in 4 slabs"
+  },
+  "llama.cpp": {
+   "fit": "experts of 31 blocks on the CPU, as given"
+  }
+ },
+ "tasks": [
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-fib",
+   "rep": 1,
+   "wall_secs": 27.26209620013833,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 6,
+   "requests": [
+    {
+     "prompt": 1697,
+     "reused": 0,
+     "generated": 39,
+     "prompt_secs": 5.223145583256387,
+     "decode_secs": 0.9558823529411765
+    },
+    {
+     "prompt": 1893,
+     "reused": 1690,
+     "generated": 99,
+     "prompt_secs": 1.1092896174863387,
+     "decode_secs": 2.3349056603773586
+    },
+    {
+     "prompt": 2165,
+     "reused": 1992,
+     "generated": 222,
+     "prompt_secs": 0.9801699716713881,
+     "decode_secs": 5.285714285714286
+    },
+    {
+     "prompt": 2587,
+     "reused": 2158,
+     "generated": 35,
+     "prompt_secs": 1.9953488372093022,
+     "decode_secs": 0.8816120906801007
+    },
+    {
+     "prompt": 2717,
+     "reused": 2580,
+     "generated": 232,
+     "prompt_secs": 0.8589341692789969,
+     "decode_secs": 5.37037037037037
+    },
+    {
+     "prompt": 3044,
+     "reused": 2710,
+     "generated": 9,
+     "prompt_secs": 1.7377731529656608,
+     "decode_secs": 0.26548672566371684
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.5707657232704403,
+    "prompt_hit": 0.37820012956164983,
+    "copied_gb": 74.31
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     396,
+     40,
+     31
+    ],
+    [
+     2269,
+     31,
+     40
+    ]
+   ]
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-law",
+   "rep": 1,
+   "wall_secs": 45.68749500019476,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1652,
+     "reused": 0,
+     "generated": 102,
+     "prompt_secs": 5.015179113539769,
+     "decode_secs": 2.4170616113744074
+    },
+    {
+     "prompt": 6566,
+     "reused": 1645,
+     "generated": 705,
+     "prompt_secs": 21.6784140969163,
+     "decode_secs": 16.510538641686182
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.5984609665427508,
+    "prompt_hit": 0.2279891900881424,
+    "copied_gb": 103.81
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     330,
+     40,
+     30
+    ],
+    [
+     2343,
+     30,
+     40
+    ],
+    [
+     463,
+     40,
+     32
+    ]
+   ]
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-pelican",
+   "rep": 1,
+   "wall_secs": 82.22960590012372,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1647,
+     "reused": 0,
+     "generated": 3168,
+     "prompt_secs": 4.8584070796460175,
+     "decode_secs": 68.27586206896552
+    },
+    {
+     "prompt": 4915,
+     "reused": 1640,
+     "generated": 1,
+     "prompt_secs": 9.039470052442727,
+     "decode_secs": 0.033112582781456956
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.67491827074787,
+    "prompt_hit": 0.2553532037926783,
+    "copied_gb": 233.5
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     2187,
+     32,
+     40
+    ],
+    [
+     471,
+     40,
+     32
+    ]
+   ]
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-fib",
+   "rep": 1,
+   "wall_secs": 53.42524130013771,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 6,
+   "requests": [
+    {
+     "prompt": 1792,
+     "reused": 0,
+     "generated": 39,
+     "prompt_secs": 16.54854,
+     "decode_secs": 1.2153699999999998
+    },
+    {
+     "prompt": 1988,
+     "reused": 1788,
+     "generated": 99,
+     "prompt_secs": 2.46733,
+     "decode_secs": 3.15075
+    },
+    {
+     "prompt": 2260,
+     "reused": 2086,
+     "generated": 318,
+     "prompt_secs": 1.93359,
+     "decode_secs": 10.621889999999999
+    },
+    {
+     "prompt": 2682,
+     "reused": 2256,
+     "generated": 36,
+     "prompt_secs": 3.22379,
+     "decode_secs": 1.07452
+    },
+    {
+     "prompt": 2812,
+     "reused": 2678,
+     "generated": 232,
+     "prompt_secs": 1.96633,
+     "decode_secs": 7.78221
+    },
+    {
+     "prompt": 3139,
+     "reused": 2808,
+     "generated": 9,
+     "prompt_secs": 2.93611,
+     "decode_secs": 0.25639999999999996
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-law",
+   "rep": 1,
+   "wall_secs": 66.51398769998923,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1747,
+     "reused": 1276,
+     "generated": 103,
+     "prompt_secs": 4.60391,
+     "decode_secs": 3.13441
+    },
+    {
+     "prompt": 6661,
+     "reused": 1743,
+     "generated": 799,
+     "prompt_secs": 31.83888,
+     "decode_secs": 26.86924
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-pelican",
+   "rep": 1,
+   "wall_secs": 132.1286045999732,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1742,
+     "reused": 1276,
+     "generated": 3154,
+     "prompt_secs": 4.51479,
+     "decode_secs": 106.83386
+    },
+    {
+     "prompt": 5010,
+     "reused": 1738,
+     "generated": 1,
+     "prompt_secs": 20.52828,
+     "decode_secs": 0.0
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-fib",
+   "rep": 2,
+   "wall_secs": 52.979069099994376,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 6,
+   "requests": [
+    {
+     "prompt": 1792,
+     "reused": 0,
+     "generated": 39,
+     "prompt_secs": 16.54873,
+     "decode_secs": 1.17348
+    },
+    {
+     "prompt": 1988,
+     "reused": 1788,
+     "generated": 99,
+     "prompt_secs": 2.47438,
+     "decode_secs": 3.11436
+    },
+    {
+     "prompt": 2260,
+     "reused": 2086,
+     "generated": 318,
+     "prompt_secs": 1.9371500000000001,
+     "decode_secs": 10.341280000000001
+    },
+    {
+     "prompt": 2682,
+     "reused": 2256,
+     "generated": 36,
+     "prompt_secs": 3.21715,
+     "decode_secs": 1.09524
+    },
+    {
+     "prompt": 2812,
+     "reused": 2678,
+     "generated": 232,
+     "prompt_secs": 1.9669,
+     "decode_secs": 7.68163
+    },
+    {
+     "prompt": 3139,
+     "reused": 2808,
+     "generated": 9,
+     "prompt_secs": 2.94164,
+     "decode_secs": 0.26631
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-law",
+   "rep": 2,
+   "wall_secs": 66.79492749995552,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1747,
+     "reused": 1276,
+     "generated": 103,
+     "prompt_secs": 4.5948,
+     "decode_secs": 3.2455700000000003
+    },
+    {
+     "prompt": 6661,
+     "reused": 1743,
+     "generated": 799,
+     "prompt_secs": 31.82348,
+     "decode_secs": 27.05836
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-pelican",
+   "rep": 2,
+   "wall_secs": 132.94501579995267,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1742,
+     "reused": 1276,
+     "generated": 3154,
+     "prompt_secs": 4.52665,
+     "decode_secs": 107.66496000000001
+    },
+    {
+     "prompt": 5010,
+     "reused": 1738,
+     "generated": 1,
+     "prompt_secs": 20.50899,
+     "decode_secs": 0.0
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-fib",
+   "rep": 2,
+   "wall_secs": 25.984433500096202,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 6,
+   "requests": [
+    {
+     "prompt": 1697,
+     "reused": 0,
+     "generated": 39,
+     "prompt_secs": 4.9590882524839275,
+     "decode_secs": 0.9774436090225564
+    },
+    {
+     "prompt": 1893,
+     "reused": 1690,
+     "generated": 99,
+     "prompt_secs": 1.1302895322939868,
+     "decode_secs": 2.3130841121495327
+    },
+    {
+     "prompt": 2165,
+     "reused": 1992,
+     "generated": 228,
+     "prompt_secs": 0.9740990990990991,
+     "decode_secs": 5.314685314685315
+    },
+    {
+     "prompt": 2587,
+     "reused": 2158,
+     "generated": 35,
+     "prompt_secs": 1.9962773382968821,
+     "decode_secs": 0.8883248730964467
+    },
+    {
+     "prompt": 2717,
+     "reused": 2580,
+     "generated": 189,
+     "prompt_secs": 0.8659924146649811,
+     "decode_secs": 4.305239179954442
+    },
+    {
+     "prompt": 3044,
+     "reused": 2710,
+     "generated": 9,
+     "prompt_secs": 1.7597471022128555,
+     "decode_secs": 0.2719033232628399
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.5821051752921536,
+    "prompt_hit": 0.4280215602836879,
+    "copied_gb": 70.53999999999999
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-law",
+   "rep": 2,
+   "wall_secs": 47.99930929997936,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1652,
+     "reused": 0,
+     "generated": 103,
+     "prompt_secs": 4.9789029535864975,
+     "decode_secs": 2.4523809523809526
+    },
+    {
+     "prompt": 6566,
+     "reused": 1645,
+     "generated": 800,
+     "prompt_secs": 21.716681376875552,
+     "decode_secs": 18.73536299765808
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.6013233665559247,
+    "prompt_hit": 0.23300762753838536,
+    "copied_gb": 110.51
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     494,
+     40,
+     32
+    ],
+    [
+     2191,
+     32,
+     40
+    ],
+    [
+     461,
+     40,
+     32
+    ]
+   ]
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-pelican",
+   "rep": 2,
+   "wall_secs": 80.8740135000553,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1647,
+     "reused": 0,
+     "generated": 3168,
+     "prompt_secs": 4.887240356083086,
+     "decode_secs": 66.41509433962264
+    },
+    {
+     "prompt": 4915,
+     "reused": 1640,
+     "generated": 1,
+     "prompt_secs": 9.419039401783147,
+     "decode_secs": 0.03076923076923077
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.7009504575575891,
+    "prompt_hit": 0.2112457927175766,
+    "copied_gb": 228.38000000000002
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     2189,
+     32,
+     40
+    ],
+    [
+     357,
+     40,
+     30
+    ],
+    [
+     2219,
+     30,
+     39
+    ]
+   ]
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-fib",
+   "rep": 3,
+   "wall_secs": 27.350196599960327,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 6,
+   "requests": [
+    {
+     "prompt": 1697,
+     "reused": 0,
+     "generated": 39,
+     "prompt_secs": 4.904624277456647,
+     "decode_secs": 0.9701492537313432
+    },
+    {
+     "prompt": 1893,
+     "reused": 1690,
+     "generated": 99,
+     "prompt_secs": 1.1172261970280684,
+     "decode_secs": 2.3294117647058825
+    },
+    {
+     "prompt": 2165,
+     "reused": 1992,
+     "generated": 195,
+     "prompt_secs": 0.9664804469273743,
+     "decode_secs": 4.6539379474940334
+    },
+    {
+     "prompt": 2587,
+     "reused": 2158,
+     "generated": 110,
+     "prompt_secs": 1.9669876203576342,
+     "decode_secs": 2.6252983293556085
+    },
+    {
+     "prompt": 2717,
+     "reused": 2697,
+     "generated": 225,
+     "prompt_secs": 0.4106776180698152,
+     "decode_secs": 5.172413793103448
+    },
+    {
+     "prompt": 3044,
+     "reused": 2710,
+     "generated": 9,
+     "prompt_secs": 1.7569700157811678,
+     "decode_secs": 0.27439024390243905
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.5717075332348597,
+    "prompt_hit": 0.42711381697000766,
+    "copied_gb": 75.27000000000001
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-law",
+   "rep": 3,
+   "wall_secs": 47.80708250007592,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1652,
+     "reused": 0,
+     "generated": 103,
+     "prompt_secs": 5.072152287381026,
+     "decode_secs": 2.4465558194774344
+    },
+    {
+     "prompt": 6566,
+     "reused": 1755,
+     "generated": 800,
+     "prompt_secs": 21.32535460992908,
+     "decode_secs": 18.867924528301888
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.5875171650055371,
+    "prompt_hit": 0.23757580715168108,
+    "copied_gb": 110.24000000000001
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     494,
+     40,
+     32
+    ],
+    [
+     2191,
+     32,
+     40
+    ],
+    [
+     462,
+     40,
+     32
+    ]
+   ]
+  },
+  {
+   "engine": "phobos",
+   "child": "phobos-rep1-pelican",
+   "rep": 3,
+   "wall_secs": 80.48839229997247,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1647,
+     "reused": 0,
+     "generated": 3168,
+     "prompt_secs": 4.916417910447761,
+     "decode_secs": 66.0
+    },
+    {
+     "prompt": 4915,
+     "reused": 1640,
+     "generated": 1,
+     "prompt_secs": 9.468054350968488,
+     "decode_secs": 0.031545741324921134
+    }
+   ],
+   "experts": {
+    "decode_hit": 0.6999498264436731,
+    "prompt_hit": 0.20973416062221445,
+    "copied_gb": 229.35
+   },
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": [
+    [
+     2189,
+     32,
+     40
+    ],
+    [
+     357,
+     40,
+     30
+    ],
+    [
+     2217,
+     30,
+     39
+    ]
+   ]
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-fib",
+   "rep": 3,
+   "wall_secs": 53.266979599837214,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 6,
+   "requests": [
+    {
+     "prompt": 1792,
+     "reused": 0,
+     "generated": 39,
+     "prompt_secs": 16.57083,
+     "decode_secs": 1.2021700000000002
+    },
+    {
+     "prompt": 1988,
+     "reused": 1788,
+     "generated": 99,
+     "prompt_secs": 2.46755,
+     "decode_secs": 3.0778000000000003
+    },
+    {
+     "prompt": 2260,
+     "reused": 2086,
+     "generated": 318,
+     "prompt_secs": 1.9349,
+     "decode_secs": 10.61422
+    },
+    {
+     "prompt": 2682,
+     "reused": 2256,
+     "generated": 36,
+     "prompt_secs": 3.2136199999999997,
+     "decode_secs": 1.0723099999999999
+    },
+    {
+     "prompt": 2812,
+     "reused": 2678,
+     "generated": 232,
+     "prompt_secs": 1.96615,
+     "decode_secs": 7.7293400000000005
+    },
+    {
+     "prompt": 3139,
+     "reused": 2808,
+     "generated": 9,
+     "prompt_secs": 2.93858,
+     "decode_secs": 0.25988
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-law",
+   "rep": 3,
+   "wall_secs": 66.58842170005664,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1747,
+     "reused": 1276,
+     "generated": 103,
+     "prompt_secs": 4.594180000000001,
+     "decode_secs": 3.2714600000000003
+    },
+    {
+     "prompt": 6661,
+     "reused": 1743,
+     "generated": 799,
+     "prompt_secs": 31.92323,
+     "decode_secs": 26.74578
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  },
+  {
+   "engine": "llama.cpp",
+   "child": "phobos-rep1-pelican",
+   "rep": 3,
+   "wall_secs": 133.45401559979655,
+   "exited": "ok",
+   "said_done": true,
+   "check": "none",
+   "turns": 2,
+   "requests": [
+    {
+     "prompt": 1742,
+     "reused": 1276,
+     "generated": 3154,
+     "prompt_secs": 4.53293,
+     "decode_secs": 108.1096
+    },
+    {
+     "prompt": 5010,
+     "reused": 1738,
+     "generated": 1,
+     "prompt_secs": 20.58315,
+     "decode_secs": 0.0
+    }
+   ],
+   "experts": null,
+   "squeezed_at": 0,
+   "squeeze_ended": 0,
+   "squeeze": "",
+   "resizes": []
+  }
+ ]
+}

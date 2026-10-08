@@ -3,7 +3,7 @@
     "card": "NVIDIA GeForce RTX 2080 SUPER",
     "driver": "617.14",
     "clock_max": "2145",
-    "commit": "634d64a"
+    "commit": "3eec883"
   },
   "args": {
     "models": "['Ternary-Bonsai-2-27B-PTQ1_0']",
@@ -16,14 +16,14 @@
     "llama_args": "",
     "no_llama": "False",
     "no_phobos": "False",
-    "no_build": "False",
+    "no_build": "True",
     "warm_secs": "45.0",
     "max_idle_util": "45.0",
     "max_idle_power": "120.0",
     "poll": "0.5",
     "force": "False",
-    "csv": "C:/Users/joaeb/AppData/Local/Temp/claude/C--Users-joaeb-code-phobos/81fec1a6-9ebf-4f66-9ff8-f780f059b3ce/scratchpad/bonsai.csv",
-    "json": "C:/Users/joaeb/AppData/Local/Temp/claude/C--Users-joaeb-code-phobos/81fec1a6-9ebf-4f66-9ff8-f780f059b3ce/scratchpad/bonsai.json"
+    "csv": "results/bench-bonsai.csv",
+    "json": "results/bench-bonsai.json"
   },
   "backends": {
     "phobos": "CUDA",
@@ -34,7 +34,7 @@
     "phobos/Ternary-Bonsai-2-27B-PTQ1_0": "qwen35 26.9B PTQ1_0"
   },
   "summary": {
-    "median_clock": 1287.730117820324,
+    "median_clock": 1279.9030612244899,
     "uncontended_rounds": [
       1,
       2,
@@ -46,23 +46,23 @@
       3
     ],
     "drift": {
-      "1": -0.004190243007201777,
-      "2": 0.0030847254297924342,
-      "3": -0.0006341787828464673
+      "1": -0.0017894074063282972,
+      "2": 0.0007171128765606771,
+      "3": -0.009911894273127775
     }
   },
   "health": {
     "1": {
-      "util": 0.5,
-      "power": 19.86
+      "util": 0.0,
+      "power": 38.644999999999996
     },
     "2": {
-      "util": 1.5,
-      "power": 21.525
+      "util": 0.0,
+      "power": 38.295
     },
     "3": {
-      "util": 1.0,
-      "power": 38.32
+      "util": 0.0,
+      "power": 38.605000000000004
     }
   },
   "samples": [
@@ -74,8 +74,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 470.428,
-      "clock": 1865.357142857143
+      "rate": 468.991,
+      "clock": 1882.0
     },
     {
       "round": 1,
@@ -85,99 +85,11 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 48.8315,
-      "clock": 1865.357142857143
+      "rate": 48.0683,
+      "clock": 1882.0
     },
     {
       "round": 1,
-      "slot": 1,
-      "engine": "phobos",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "pp128",
-      "rep": 0,
-      "rate": 592.5925925925926,
-      "clock": 704.234693877551
-    },
-    {
-      "round": 1,
-      "slot": 1,
-      "engine": "phobos",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "tg128",
-      "rep": 0,
-      "rate": 45.26166902404526,
-      "clock": 704.234693877551
-    },
-    {
-      "round": 2,
-      "slot": 0,
-      "engine": "phobos",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "pp128",
-      "rep": 0,
-      "rate": 603.7735849056604,
-      "clock": 671.7525773195877
-    },
-    {
-      "round": 2,
-      "slot": 0,
-      "engine": "phobos",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "tg128",
-      "rep": 0,
-      "rate": 45.29370134465676,
-      "clock": 671.7525773195877
-    },
-    {
-      "round": 2,
-      "slot": 1,
-      "engine": "llama.cpp-prism CUDA",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "pp128",
-      "rep": 0,
-      "rate": 474.931,
-      "clock": 2019.642857142857
-    },
-    {
-      "round": 2,
-      "slot": 1,
-      "engine": "llama.cpp-prism CUDA",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "tg128",
-      "rep": 0,
-      "rate": 48.8433,
-      "clock": 2019.642857142857
-    },
-    {
-      "round": 3,
-      "slot": 0,
-      "engine": "llama.cpp-prism CUDA",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "pp128",
-      "rep": 0,
-      "rate": 471.783,
-      "clock": 1865.357142857143
-    },
-    {
-      "round": 3,
-      "slot": 0,
-      "engine": "llama.cpp-prism CUDA",
-      "backend": "CUDA",
-      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
-      "test": "tg128",
-      "rep": 0,
-      "rate": 48.8282,
-      "clock": 1865.357142857143
-    },
-    {
-      "round": 3,
       "slot": 1,
       "engine": "phobos",
       "backend": "CUDA",
@@ -185,7 +97,95 @@
       "test": "pp128",
       "rep": 0,
       "rate": 600.9389671361503,
-      "clock": 710.1030927835052
+      "clock": 682.1212121212121
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 44.786564030790764,
+      "clock": 682.1212121212121
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 587.1559633027523,
+      "clock": 644.0909090909091
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 45.48685145700071,
+      "clock": 644.0909090909091
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp-prism CUDA",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 470.33,
+      "clock": 1994.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp-prism CUDA",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 48.8114,
+      "clock": 1994.0
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp-prism CUDA",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 469.962,
+      "clock": 1877.0
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp-prism CUDA",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 48.7271,
+      "clock": 1877.0
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "Ternary-Bonsai-2-27B-PTQ1_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 563.8766519823788,
+      "clock": 682.8061224489796
     },
     {
       "round": 3,
@@ -195,8 +195,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 45.14991181657848,
-      "clock": 710.1030927835052
+      "rate": 45.47069271758437,
+      "clock": 682.8061224489796
     }
   ]
 }

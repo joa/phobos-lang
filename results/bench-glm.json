@@ -1,0 +1,664 @@
+{
+  "meta": {
+    "card": "NVIDIA GeForce RTX 2080 SUPER",
+    "driver": "617.14",
+    "clock_max": "2145",
+    "commit": "3eec883"
+  },
+  "args": {
+    "models": "['GLM-4.6V-Flash-Q4_K_M']",
+    "prompt_tokens": "[128, 512]",
+    "gen_tokens": "[128]",
+    "reps": "3",
+    "rounds": "3",
+    "llama_bench": "[]",
+    "cuda_lib": "[]",
+    "llama_args": "",
+    "no_llama": "False",
+    "no_phobos": "False",
+    "no_build": "True",
+    "warm_secs": "45.0",
+    "max_idle_util": "45.0",
+    "max_idle_power": "120.0",
+    "poll": "0.5",
+    "force": "False",
+    "csv": "results/bench-glm.csv",
+    "json": "results/bench-glm.json"
+  },
+  "backends": {
+    "phobos": "CUDA",
+    "llama.cpp CUDA": "CUDA"
+  },
+  "labels": {
+    "llama.cpp CUDA/GLM-4.6V-Flash-Q4_K_M": "glm4 9B Q4_K - Medium",
+    "phobos/GLM-4.6V-Flash-Q4_K_M": "glm4 9.4B Q4_K"
+  },
+  "summary": {
+    "median_clock": 1826.8181818181818,
+    "uncontended_rounds": [
+      1,
+      2,
+      3
+    ],
+    "rounds": [
+      1,
+      2,
+      3
+    ],
+    "drift": {
+      "1": -0.0018453546883580214,
+      "2": -0.018910868941102704,
+      "3": 0.0005016314152002099
+    }
+  },
+  "health": {
+    "1": {
+      "util": 0.0,
+      "power": 19.145
+    },
+    "2": {
+      "util": 0.0,
+      "power": 38.525000000000006
+    },
+    "3": {
+      "util": 0.0,
+      "power": 29.87
+    }
+  },
+  "samples": [
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 1622.98,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 1792.81,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 1783.35,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 1873.24,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 1,
+      "rate": 1994.25,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 2,
+      "rate": 2008.44,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 63.1127,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 1,
+      "rate": 63.2629,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 2,
+      "rate": 63.2543,
+      "clock": 2007.9545454545455
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 1361.7021276595744,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 1376.3440860215053,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 1406.5934065934066,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 1185.1851851851852,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 1,
+      "rate": 1147.982062780269,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 2,
+      "rate": 1153.1531531531532,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 59.56258724988366,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 1,
+      "rate": 59.70149253731343,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 2,
+      "rate": 59.67365967365967,
+      "clock": 1724.090909090909
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 1361.7021276595744,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 1391.304347826087,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 1406.5934065934066,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 1177.0114942528735,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 1,
+      "rate": 1132.7433628318583,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 2,
+      "rate": 1155.7562076749437,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 59.64585274930103,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 1,
+      "rate": 59.729351376574904,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 2,
+      "rate": 59.81308411214953,
+      "clock": 1648.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 1069.42,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 1760.86,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 1784.42,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 1954.44,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 1,
+      "rate": 1990.89,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 2,
+      "rate": 1996.18,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 63.1542,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 1,
+      "rate": 63.282,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 2,
+      "rate": 63.2918,
+      "clock": 2008.6363636363637
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 1622.32,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 1762.73,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 1788.16,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 1955.12,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 1,
+      "rate": 2003.4,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 2,
+      "rate": 1995.9,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 63.1437,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 1,
+      "rate": 63.299,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 2,
+      "rate": 63.3037,
+      "clock": 1929.5454545454545
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 1361.7021276595744,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 1,
+      "rate": 1391.304347826087,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp128",
+      "rep": 2,
+      "rate": 1406.5934065934066,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 1185.1851851851852,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 1,
+      "rate": 1153.1531531531532,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "pp512",
+      "rep": 2,
+      "rate": 1150.561797752809,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 59.70149253731343,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 1,
+      "rate": 59.81308411214953,
+      "clock": 1677.7272727272727
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "GLM-4.6V-Flash-Q4_K_M",
+      "test": "tg128",
+      "rep": 2,
+      "rate": 59.59031657355679,
+      "clock": 1677.7272727272727
+    }
+  ]
+}
