@@ -611,6 +611,12 @@ impl Isa for Nvidia {
         mem: &MemVal<'c>,
         indices: &[Value<'c, 'c>],
     ) -> Result<()> {
+        // The address is formed in `index`, so a 32-bit index truncates the
+        // pointer. On sm_89 and sm_120 a prefetch of that unmapped address
+        // serializes the kernel's blocks across the whole GPU.
+        if self.index_bits < 64 {
+            return Ok(());
+        }
         let rank = indices.len();
         let bytes = cg
             .elem_bytes(mem.elem)
