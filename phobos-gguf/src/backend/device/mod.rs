@@ -31,6 +31,7 @@ mod backend;
 mod delta;
 mod dense;
 mod elem;
+mod formats;
 mod fused;
 mod graph;
 mod hadamard;
@@ -383,76 +384,10 @@ pub struct DeviceBackend {
     owned_quants: RefCell<Vec<OwnedQuant>>,
     owned_raw: RefCell<Vec<OwnedRaw>>,
     raw_constants: RefCell<HashMap<String, RawBuf>>,
-    /// Every raw format's matvec, compiled once in parallel. Shapes are
-    /// kernel parameters, not baked in.
-    q2k_matvec: Module,
-    q3k_matvec: Module,
-    iq1s_matvec: Module,
-    iq2xxs_matvec: Module,
-    iq1m_matvec: Module,
-    iq2s_matvec: Module,
-    iq2xs_matvec: Module,
-    iq3xxs_matvec: Module,
-    iq3s_matvec: Module,
-    iq4xs_matvec: Module,
-    /// Each format's `m == 1` decode as one `*_qdot_t` call, with no
-    /// shared-memory staging. Needs `N` to be a multiple of its `TN`;
-    /// otherwise `project_raw` uses the plain matvec.
-    iq1s_qdot_matvec: Module,
-    /// The dp4a decode matvecs: wide tile, then narrow for a ragged `n`.
-    /// See `I8_NARROW_TN`.
-    iq1s_qdot_i8: [Module; 2],
-    iq3s_qdot_i8: [Module; 2],
-    iq3xxs_qdot_i8: [Module; 2],
-    iq2xxs_qdot_i8: [Module; 2],
-    iq1m_qdot_i8: [Module; 2],
-    iq2xs_qdot_i8: [Module; 2],
-    iq2s_qdot_i8: [Module; 2],
-    q4k_qdot_i8: [Module; 2],
-    q5k_qdot_i8: [Module; 2],
-    q6k_qdot_i8: [Module; 2],
-    ptq1_qdot_i8: [Module; 2],
-    iq2xxs_qdot_matvec: Module,
-    iq1m_qdot_matvec: Module,
-    iq2s_qdot_matvec: Module,
-    iq2xs_qdot_matvec: Module,
-    iq3xxs_qdot_matvec: Module,
-    iq3s_qdot_matvec: Module,
-    iq4xs_qdot_matvec: Module,
-    q2k_qdot_matvec: Module,
-    q3k_qdot_matvec: Module,
-    /// Each raw format's decode without the reduction. Writes a `[K, N]`
-    /// strip of dequantized weight for [`DeviceBackend::project_raw_dense`].
-    iq1s_dequant: Module,
-    iq2xxs_dequant: Module,
-    iq1m_dequant: Module,
-    iq2s_dequant: Module,
-    iq2xs_dequant: Module,
-    iq3xxs_dequant: Module,
-    iq3s_dequant: Module,
-    iq4xs_dequant: Module,
-    /// The warp-collective form of the `_dequant` kernels above: one
-    /// `*_qdecode_t` call, no staging, no barrier. Needs a strip that is a
-    /// multiple of its `TN`.
-    iq1s_qdecode: Module,
-    iq2xxs_qdecode: Module,
-    iq1m_qdecode: Module,
-    iq2s_qdecode: Module,
-    iq2xs_qdecode: Module,
-    iq3xxs_qdecode: Module,
-    iq3s_qdecode: Module,
-    /// The same seven writing an f16 strip, used only when the matmul is
-    /// entirely tensor-core. See `project_raw_dense`.
-    iq1s_qdecode_f16: Module,
-    iq2xxs_qdecode_f16: Module,
-    iq1m_qdecode_f16: Module,
-    iq2s_qdecode_f16: Module,
-    iq2xs_qdecode_f16: Module,
-    iq3xxs_qdecode_f16: Module,
-    iq3s_qdecode_f16: Module,
-    /// Q2_K's dequant, like the block above. Q3_K has none, since it only
-    /// runs at `m == 1`.
-    q2k_dequant: Module,
+    /// The raw-format kernels, by format, for the formats the model holds.
+    /// Never changed after construction, since a launch keys its function
+    /// cache on the module's address.
+    formats: HashMap<Quant, formats::FormatKernels>,
     /// IQ1_S's grid, [`crate::quant::iq1s_flat_grid`] at one `i32` per
     /// lane. Shared by every IQ1_S and IQ1_M weight.
     iq1s_grid: DeviceBuffer<i32>,
@@ -481,17 +416,6 @@ pub struct DeviceBackend {
     /// The IQ1_S grid with the delta and signs folded in, giving an exact
     /// `i8` weight. See `quant::iq1s_signed_grid`.
     iq1s_signed_grid: DeviceBuffer<i8>,
-    /// IQ1_S's prompt projection, decoding inside an integer tensor-core
-    /// contraction. See `qmma_raw.rs`.
-    iq1s_qmma: Module,
-    /// IQ2_XXS's prompt projection, and the two formats that share its
-    /// decode but scale per sixteen elements.
-    iq2xxs_qmma: Module,
-    iq2s_qmma: Module,
-    iq2xs_qmma: Module,
-    /// The two formats whose grid entry is four bytes rather than eight.
-    iq3xxs_qmma: Module,
-    iq3s_qmma: Module,
     /// Whether the fused prompt projection is used. On by default,
     /// `PHOBOS_RAW_QMMA=0` turns it off.
     raw_qmma: Cell<bool>,

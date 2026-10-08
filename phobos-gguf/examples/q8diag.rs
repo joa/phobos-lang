@@ -13,7 +13,7 @@ use phobos_gguf::quant::pack_q8_0;
 use phobos_gguf::backend::device;
 
 fn main() -> Result<()> {
-    let gpu = device::DeviceBackend::new()?;
+    let gpu = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
     let host = HostBackend::new();
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = || {

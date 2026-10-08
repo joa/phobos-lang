@@ -13,6 +13,7 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use phobos_gguf::Decoder;
 use phobos_gguf::Gguf;
+use phobos_gguf::Quant;
 use phobos_gguf::backend::Backend;
 
 #[cfg(feature = "cuda")]
@@ -126,10 +127,12 @@ fn parse_args() -> Result<Args> {
     Ok(args)
 }
 
-fn make_backend() -> Result<Box<dyn Backend>> {
+/// The backend for a model whose weights are stored in `quants`.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+fn make_backend(quants: &[Quant]) -> Result<Box<dyn Backend>> {
     #[cfg(feature = "cuda")]
     {
-        Ok(Box::new(device::DeviceBackend::new()?))
+        Ok(Box::new(device::DeviceBackend::new(quants)?))
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -163,7 +166,7 @@ fn main() -> Result<()> {
         gguf.parameter_count() as f64 / 1e9,
     );
     let model = Decoder::load(&gguf)?;
-    let backend = make_backend()?;
+    let backend = make_backend(&gguf.quants())?;
     if let Some(bytes) = args.expert_cache_bytes {
         backend.limit_expert_cache(bytes as usize)?;
     }

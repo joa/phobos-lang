@@ -4,7 +4,9 @@ use super::*;
 
 /// A dp4a decode matvec picked for one weight: the module, its name, the
 /// output tile, and the lookup tables it takes after the block operands.
-type I8Kernel<'a> = (&'a Module, &'static str, usize, Vec<(u64, i64)>);
+/// A dp4a decode matvec and the lookup tables it reads, as (address,
+/// length) pairs.
+type I8Kernel<'a> = (&'a formats::Kernel, Vec<(u64, i64)>);
 
 
 /// Blocks below which a decode matvec takes its narrow tile; see `i8_pick`.
@@ -313,168 +315,25 @@ impl DeviceBackend {
             *stored_n == n,
             "raw weight was uploaded with n = {stored_n}, used with n = {n}"
         );
+        let kernels = self.format_kernels(*quant)?;
         // The qdot_t kernels are `@aligned(N = TN)`, so they need n to be a
         // whole number of tiles. A ragged n takes the masked body.
-        let iq1s_qdot_eligible = *quant == Quant::IQ1_S && m == 1 && n.is_multiple_of(IQ1S_TN);
-        let iq2xxs_qdot_eligible =
-            *quant == Quant::IQ2_XXS && m == 1 && n.is_multiple_of(IQ2XXS_TN);
-        let iq1m_qdot_eligible = *quant == Quant::IQ1_M && m == 1 && n.is_multiple_of(IQ1M_TN);
-        let iq2s_qdot_eligible = *quant == Quant::IQ2_S && m == 1 && n.is_multiple_of(IQ2S_TN);
-        let iq2xs_qdot_eligible = *quant == Quant::IQ2_XS && m == 1 && n.is_multiple_of(IQ2XS_TN);
-        let iq3xxs_qdot_eligible =
-            *quant == Quant::IQ3_XXS && m == 1 && n.is_multiple_of(IQ3XXS_TN);
-        let iq3s_qdot_eligible = *quant == Quant::IQ3_S && m == 1 && n.is_multiple_of(IQ3S_TN);
-        let iq4xs_qdot_eligible = *quant == Quant::IQ4_XS && m == 1 && n.is_multiple_of(IQ4XS_TN);
-        let q2k_qdot_eligible = *quant == Quant::Q2_K && m == 1 && n.is_multiple_of(Q2K_TN);
-        let q3k_qdot_eligible = *quant == Quant::Q3_K && m == 1 && n.is_multiple_of(Q3K_TN);
+        let qdot = kernels
+            .qdot
+            .as_ref()
+            .filter(|qdot| m == 1 && n.is_multiple_of(qdot.tn));
+        let qdot_eligible = qdot.is_some();
 
-        // The wide tile whenever it divides n into enough blocks. A
-        // projection only a few wide tiles across, such as a 256-wide key,
-        // takes the narrow one at four times the blocks.
-        let wide_tile = |tn: usize| n.is_multiple_of(tn) && n / tn >= WIDE_TILE_MIN_BLOCKS;
         // The dp4a decode matvecs. The format picks the output tile and the
         // lookup tables. It quantizes the activation, which the host
         // reference does not.
-        let i8_pick: Option<I8Kernel<'_>> = if self.iq1s_dp4a.get() && m == 1 {
-            let grid = |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw(), len as i64);
-            // The mask half sits one table past the +/-1 one.
-            let mask = |b: &DeviceBuffer<i8>, len: usize| {
-                (b.as_device_ptr().as_raw() + len as u64, len as i64)
-            };
-            match quant {
-                Quant::IQ1_S if n.is_multiple_of(IQ1S_I8_NARROW_TN) => Some((
-                    &self.iq1s_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ1S_I8_TN)))],
-                    "iq1s_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ1S_I8_TN)) {
-                        qdot_i8_tn(IQ1S_I8_TN)
-                    } else {
-                        IQ1S_I8_NARROW_TN
-                    },
-                    vec![(self.qgemm.grid4()?, IQ1_GRID4_LEN as i64)],
-                )),
-                Quant::IQ1_M if n.is_multiple_of(IQ1M_I8_NARROW_TN) => Some((
-                    &self.iq1m_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ1M_I8_TN)))],
-                    "iq1m_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ1M_I8_TN)) {
-                        qdot_i8_tn(IQ1M_I8_TN)
-                    } else {
-                        IQ1M_I8_NARROW_TN
-                    },
-                    vec![(self.qgemm.grid4()?, IQ1_GRID4_LEN as i64)],
-                )),
-                Quant::IQ2_XXS if n.is_multiple_of(IQ2XXS_I8_NARROW_TN) => Some((
-                    &self.iq2xxs_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ2XXS_I8_TN)))],
-                    "iq2xxs_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ2XXS_I8_TN)) {
-                        qdot_i8_tn(IQ2XXS_I8_TN)
-                    } else {
-                        IQ2XXS_I8_NARROW_TN
-                    },
-                    vec![
-                        grid(&self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN),
-                        mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
-                    ],
-                )),
-                Quant::IQ2_S if n.is_multiple_of(IQ2S_I8_NARROW_TN) => Some((
-                    &self.iq2s_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ2S_I8_TN)))],
-                    "iq2s_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ2S_I8_TN)) {
-                        qdot_i8_tn(IQ2S_I8_TN)
-                    } else {
-                        IQ2S_I8_NARROW_TN
-                    },
-                    vec![
-                        grid(&self.iq2s_grid_packed, IQ2S_GRID_LEN),
-                        mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
-                    ],
-                )),
-                Quant::IQ2_XS if n.is_multiple_of(IQ2XS_I8_NARROW_TN) => Some((
-                    &self.iq2xs_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ2XS_I8_TN)))],
-                    "iq2xs_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ2XS_I8_TN)) {
-                        qdot_i8_tn(IQ2XS_I8_TN)
-                    } else {
-                        IQ2XS_I8_NARROW_TN
-                    },
-                    vec![
-                        grid(&self.iq2xs_grid_packed, IQ2XS_GRID_LEN),
-                        mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
-                    ],
-                )),
-                Quant::IQ3_XXS if n.is_multiple_of(IQ3XXS_I8_NARROW_TN) => Some((
-                    &self.iq3xxs_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ3XXS_I8_TN)))],
-                    "iq3xxs_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ3XXS_I8_TN)) {
-                        qdot_i8_tn(IQ3XXS_I8_TN)
-                    } else {
-                        IQ3XXS_I8_NARROW_TN
-                    },
-                    vec![
-                        grid(&self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN),
-                        mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
-                    ],
-                )),
-                Quant::IQ3_S if n.is_multiple_of(IQ3S_I8_NARROW_TN) => Some((
-                    &self.iq3s_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(IQ3S_I8_TN)))],
-                    "iq3s_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(IQ3S_I8_TN)) {
-                        qdot_i8_tn(IQ3S_I8_TN)
-                    } else {
-                        IQ3S_I8_NARROW_TN
-                    },
-                    vec![
-                        grid(&self.iq3s_grid_packed, IQ3S_GRID_LEN),
-                        mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
-                    ],
-                )),
-                // The K-quants have no other path, so a ragged n runs padded
-                // below.
-                Quant::Q4_K => Some((
-                    &self.q4k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q4K_I8_TN)))],
-                    "q4k_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(Q4K_I8_TN)) {
-                        qdot_i8_tn(Q4K_I8_TN)
-                    } else {
-                        Q4K_I8_NARROW_TN
-                    },
-                    Vec::new(),
-                )),
-                Quant::Q5_K => Some((
-                    &self.q5k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q5K_I8_TN)))],
-                    "q5k_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(Q5K_I8_TN)) {
-                        qdot_i8_tn(Q5K_I8_TN)
-                    } else {
-                        Q5K_I8_NARROW_TN
-                    },
-                    Vec::new(),
-                )),
-                Quant::Q6_K => Some((
-                    &self.q6k_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(Q6K_I8_TN)))],
-                    "q6k_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(Q6K_I8_TN)) {
-                        qdot_i8_tn(Q6K_I8_TN)
-                    } else {
-                        Q6K_I8_NARROW_TN
-                    },
-                    Vec::new(),
-                )),
-                Quant::PTQ1_0 => Some((
-                    &self.ptq1_qdot_i8[usize::from(!wide_tile(qdot_i8_tn(PTQ1_I8_TN)))],
-                    "ptq1_qdot_i8_matvec",
-                    if wide_tile(qdot_i8_tn(PTQ1_I8_TN)) {
-                        qdot_i8_tn(PTQ1_I8_TN)
-                    } else {
-                        PTQ1_I8_NARROW_TN
-                    },
-                    Vec::new(),
-                )),
-                _ => None,
-            }
+        let i8_pick = if self.iq1s_dp4a.get() && m == 1 {
+            self.pick_qdot_i8(kernels, *quant, n)?
         } else {
             None
         };
-        if let Some((module, name, tn, tables)) = i8_pick {
+        if let Some((kernel, tables)) = i8_pick {
+            let tn = kernel.tn;
             let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
             let rb = *nb * quant.device_block_bytes();
             let (nb, n_blocks) = (*nb as i64, k / Q8_BLOCK);
@@ -499,7 +358,7 @@ impl DeviceBackend {
             ];
             operands.extend(tables.into_iter().map(|(ptr, len)| (ptr, [1, len])));
             operands.push((self.ptr(dest, 0)?, [1, n_pad as i64]));
-            self.launch(module, name, &operands, ((n_pad / tn) as u32, 1, 1))?;
+            self.launch(&kernel.module, kernel.name, &operands, ((n_pad / tn) as u32, 1, 1))?;
             if n_pad != n {
                 let src = Plane {
                     buf: dest,
@@ -515,44 +374,14 @@ impl DeviceBackend {
             }
             return Ok(());
         }
-        let (module, name, tn) = if iq1s_qdot_eligible {
-            (&self.iq1s_qdot_matvec, "iq1s_qdot_matvec", IQ1S_TN)
-        } else if iq2xxs_qdot_eligible {
-            (&self.iq2xxs_qdot_matvec, "iq2xxs_qdot_matvec", IQ2XXS_TN)
-        } else if iq1m_qdot_eligible {
-            (&self.iq1m_qdot_matvec, "iq1m_qdot_matvec", IQ1M_TN)
-        } else if iq2s_qdot_eligible {
-            (&self.iq2s_qdot_matvec, "iq2s_qdot_matvec", IQ2S_TN)
-        } else if iq2xs_qdot_eligible {
-            (&self.iq2xs_qdot_matvec, "iq2xs_qdot_matvec", IQ2XS_TN)
-        } else if iq3xxs_qdot_eligible {
-            (&self.iq3xxs_qdot_matvec, "iq3xxs_qdot_matvec", IQ3XXS_TN)
-        } else if iq3s_qdot_eligible {
-            (&self.iq3s_qdot_matvec, "iq3s_qdot_matvec", IQ3S_TN)
-        } else if iq4xs_qdot_eligible {
-            (&self.iq4xs_qdot_matvec, "iq4xs_qdot_matvec", IQ4XS_TN)
-        } else if q2k_qdot_eligible {
-            (&self.q2k_qdot_matvec, "q2k_qdot_matvec", Q2K_TN)
-        } else if q3k_qdot_eligible {
-            (&self.q3k_qdot_matvec, "q3k_qdot_matvec", Q3K_TN)
-        } else {
+        let kernel = match qdot {
+            Some(qdot) => qdot,
             // A grouped format has no masked body; a ragged width goes dense.
-            if quant.grouped_rows() {
-                return self.project_raw_dense(a, m, k, w, n, out);
-            }
-            match quant {
-                Quant::Q2_K => (&self.q2k_matvec, "q2k_matvec", Q2K_TN),
-                Quant::Q3_K => (&self.q3k_matvec, "q3k_matvec", Q3K_TN),
-                Quant::IQ1_S => (&self.iq1s_matvec, "iq1s_matvec", IQ1S_TN),
-                Quant::IQ2_XXS => (&self.iq2xxs_matvec, "iq2xxs_matvec", IQ2XXS_TN),
-                Quant::IQ1_M => (&self.iq1m_matvec, "iq1m_matvec", IQ1M_TN),
-                Quant::IQ2_S => (&self.iq2s_matvec, "iq2s_matvec", IQ2S_TN),
-                Quant::IQ2_XS => (&self.iq2xs_matvec, "iq2xs_matvec", IQ2XS_TN),
-                Quant::IQ3_XXS => (&self.iq3xxs_matvec, "iq3xxs_matvec", IQ3XXS_TN),
-                Quant::IQ3_S => (&self.iq3s_matvec, "iq3s_matvec", IQ3S_TN),
-                Quant::IQ4_XS => (&self.iq4xs_matvec, "iq4xs_matvec", IQ4XS_TN),
-                other => anyhow::bail!("no raw kernel launches {}", other.name()),
-            }
+            None if quant.grouped_rows() => return self.project_raw_dense(a, m, k, w, n, out),
+            None => kernels
+                .matvec
+                .as_ref()
+                .with_context(|| format!("no raw kernel launches {}", quant.name()))?,
         };
         let rb = nb * quant.device_block_bytes();
         let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
@@ -567,7 +396,7 @@ impl DeviceBackend {
             operands.push((dmin, [n as i64, *nb as i64]));
         }
         match quant {
-            Quant::IQ1_S if iq1s_qdot_eligible => {
+            Quant::IQ1_S if qdot_eligible => {
                 // The qdot bodies compute their own byte offsets and take
                 // no iota8 operand.
                 operands.push((
@@ -575,7 +404,7 @@ impl DeviceBackend {
                     [1, IQ1S_GRID_LEN as i64],
                 ));
             }
-            Quant::IQ1_M if iq1m_qdot_eligible => {
+            Quant::IQ1_M if qdot_eligible => {
                 operands.push((
                     self.iq1s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ1S_GRID_LEN as i64],
@@ -588,7 +417,7 @@ impl DeviceBackend {
                 ));
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
-            Quant::IQ2_XXS if iq2xxs_qdot_eligible => {
+            Quant::IQ2_XXS if qdot_eligible => {
                 operands.push((
                     self.iq2xxs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2XXS_GRID_LEN as i64],
@@ -609,7 +438,7 @@ impl DeviceBackend {
                 ));
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
-            Quant::IQ2_S if iq2s_qdot_eligible => {
+            Quant::IQ2_S if qdot_eligible => {
                 operands.push((
                     self.iq2s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2S_GRID_LEN as i64],
@@ -630,7 +459,7 @@ impl DeviceBackend {
                 ));
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
-            Quant::IQ2_XS if iq2xs_qdot_eligible => {
+            Quant::IQ2_XS if qdot_eligible => {
                 operands.push((
                     self.iq2xs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ2XS_GRID_LEN as i64],
@@ -651,7 +480,7 @@ impl DeviceBackend {
                 ));
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
-            Quant::IQ3_XXS if iq3xxs_qdot_eligible => {
+            Quant::IQ3_XXS if qdot_eligible => {
                 operands.push((
                     self.iq3xxs_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ3XXS_GRID_LEN as i64],
@@ -672,7 +501,7 @@ impl DeviceBackend {
                 ));
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
-            Quant::IQ3_S if iq3s_qdot_eligible => {
+            Quant::IQ3_S if qdot_eligible => {
                 operands.push((
                     self.iq3s_grid_packed.as_device_ptr().as_raw(),
                     [1, IQ3S_GRID_LEN as i64],
@@ -703,11 +532,66 @@ impl DeviceBackend {
         }
         operands.push((out_ptr, [m as i64, n as i64]));
         self.launch(
-            module,
-            name,
+            &kernel.module,
+            kernel.name,
             &operands,
-            (n.div_ceil(tn) as u32, m as u32, 1),
+            (n.div_ceil(kernel.tn) as u32, m as u32, 1),
         )
+    }
+
+    /// The dp4a decode matvec for an `n`-wide projection in `quant`, if the
+    /// format has one that fits.
+    fn pick_qdot_i8<'a>(
+        &self,
+        kernels: &'a formats::FormatKernels,
+        quant: Quant,
+        n: usize,
+    ) -> Result<Option<I8Kernel<'a>>> {
+        let [Some(wide), Some(narrow)] = &kernels.qdot_i8 else {
+            return Ok(None);
+        };
+        // The K-quants have no other path, so a ragged n runs padded.
+        let padded = matches!(quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K | Quant::PTQ1_0);
+        if !padded && !n.is_multiple_of(narrow.tn) {
+            return Ok(None);
+        }
+        // The wide tile whenever it divides n into enough blocks. A
+        // projection only a few wide tiles across, such as a 256-wide key,
+        // takes the narrow one at four times the blocks.
+        let kernel = if n.is_multiple_of(wide.tn) && n / wide.tn >= WIDE_TILE_MIN_BLOCKS {
+            wide
+        } else {
+            narrow
+        };
+        let grid = |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw(), len as i64);
+        // The mask half sits one table past the +/-1 one.
+        let mask =
+            |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw() + len as u64, len as i64);
+        let tables = match quant {
+            Quant::IQ1_S | Quant::IQ1_M => vec![(self.qgemm.grid4()?, IQ1_GRID4_LEN as i64)],
+            Quant::IQ2_XXS => vec![
+                grid(&self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN),
+                mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
+            ],
+            Quant::IQ2_S => vec![
+                grid(&self.iq2s_grid_packed, IQ2S_GRID_LEN),
+                mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
+            ],
+            Quant::IQ2_XS => vec![
+                grid(&self.iq2xs_grid_packed, IQ2XS_GRID_LEN),
+                mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
+            ],
+            Quant::IQ3_XXS => vec![
+                grid(&self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN),
+                mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
+            ],
+            Quant::IQ3_S => vec![
+                grid(&self.iq3s_grid_packed, IQ3S_GRID_LEN),
+                mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
+            ],
+            _ => Vec::new(),
+        };
+        Ok(Some((kernel, tables)))
     }
 
     /// Whether `w`'s format has a dequant kernel in [`Self::project_raw_dense`].

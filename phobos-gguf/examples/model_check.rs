@@ -34,7 +34,7 @@ fn main() -> Result<()> {
     }
 
     let host = HostBackend::new();
-    let gpu = device::DeviceBackend::new()?;
+    let gpu = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
 
     // The prompt pass takes the tiled path, then two decode steps take the
     // single-row one.

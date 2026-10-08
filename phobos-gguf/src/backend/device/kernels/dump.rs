@@ -8,6 +8,10 @@
 use super::*;
 use crate::quant::Quant;
 
+/// One dp4a decode matvec: the source builder, its wide and narrow output
+/// tiles, and the kernel's name.
+type I8Row = (fn(usize) -> String, usize, usize, &'static str);
+
 #[test]
 #[ignore = "writes files; run by hand with PHOBOS_DUMP_DIR set"]
 fn dump_raw_kernel_sources() {

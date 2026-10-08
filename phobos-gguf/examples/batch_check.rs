@@ -37,7 +37,7 @@ fn main() -> Result<()> {
     let mut failed = false;
     let host = HostBackend::new();
     #[cfg(feature = "cuda")]
-    let gpu = device::DeviceBackend::new()?;
+    let gpu = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
 
     for prompt in prompts {
         let tokens = bpe.encode(prompt)?;

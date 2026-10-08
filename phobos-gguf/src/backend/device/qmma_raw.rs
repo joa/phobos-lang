@@ -190,15 +190,7 @@ impl DeviceBackend {
             }
             return Ok(());
         }
-        let (module, name) = match quant {
-            Quant::IQ1_S => (&self.iq1s_qmma, "iq1s_qmma"),
-            Quant::IQ2_XXS => (&self.iq2xxs_qmma, "iq2xxs_qmma"),
-            Quant::IQ2_S => (&self.iq2s_qmma, "iq2s_qmma"),
-            Quant::IQ2_XS => (&self.iq2xs_qmma, "iq2xs_qmma"),
-            Quant::IQ3_XXS => (&self.iq3xxs_qmma, "iq3xxs_qmma"),
-            Quant::IQ3_S => (&self.iq3s_qmma, "iq3s_qmma"),
-            other => bail!("project_raw_qmma has no fused kernel for {}", other.name()),
-        };
+        let kernel = formats::need(&self.format_kernels(quant)?.qmma, quant, "fused prompt projection")?;
 
         // Reuse the caller's quantized rows when there are some.
         let act = match act {
@@ -265,8 +257,8 @@ impl DeviceBackend {
         }
         operands.push((self.ptr(out, 0)?, [m as i64, n as i64]));
         self.launch(
-            module,
-            name,
+            &kernel.module,
+            kernel.name,
             &operands,
             ((m / qtm) as u32, (n / qtn) as u32, 1),
         )

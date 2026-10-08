@@ -5,12 +5,15 @@ use phobos_inference::{DeviceMemory, Model, ModelInfo, Session, Tokenizer};
 
 use crate::backend::Backend;
 use crate::model::State;
-use crate::{Bpe, Decoder, Gguf};
+use crate::{Bpe, Decoder, Gguf, Quant};
 
-fn make_backend() -> Result<Box<dyn Backend>> {
+/// The backend for a model whose weights are stored in `quants`. The device
+/// one compiles kernels for those formats only.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+fn make_backend(quants: &[Quant]) -> Result<Box<dyn Backend>> {
     #[cfg(feature = "cuda")]
     {
-        Ok(Box::new(crate::backend::DeviceBackend::new()?))
+        Ok(Box::new(crate::backend::DeviceBackend::new(quants)?))
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -70,7 +73,7 @@ impl GgufModel {
             .with_context(|| format!("build tokenizer for a '{architecture}' model"))?;
         let decoder =
             Decoder::load(&gguf).with_context(|| format!("load '{architecture}' weights"))?;
-        let backend = make_backend()?;
+        let backend = make_backend(&gguf.quants())?;
         check_fits(backend.as_ref(), &decoder)?;
         if let Some(bytes) = options.expert_cache_bytes {
             let bytes = usize::try_from(bytes).context("expert cache size")?;

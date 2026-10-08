@@ -133,7 +133,7 @@ fn length_wanted(length: usize) -> bool {
 }
 
 fn main() -> Result<()> {
-    let backend = DeviceBackend::new()?;
+    let backend = DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
     let bandwidth = copy_bandwidth(&backend, 6.0)?;
     println!("device copy bandwidth {:.0} GB/s\n", bandwidth / 1e9);
 

@@ -43,49 +43,17 @@ impl DeviceBackend {
             "raw weight was uploaded with n = {stored_n}, used with n = {n}"
         );
 
-        // Keep in sync with project_raw's match table.
-        let (dequant, dequant_name, tn) = match quant {
-            Quant::IQ1_S => (&self.iq1s_dequant, "iq1s_dequant", IQ1S_TN),
-            Quant::IQ2_XXS => (&self.iq2xxs_dequant, "iq2xxs_dequant", IQ2XXS_TN),
-            Quant::IQ1_M => (&self.iq1m_dequant, "iq1m_dequant", IQ1M_TN),
-            Quant::IQ2_S => (&self.iq2s_dequant, "iq2s_dequant", IQ2S_TN),
-            Quant::IQ2_XS => (&self.iq2xs_dequant, "iq2xs_dequant", IQ2XS_TN),
-            Quant::IQ3_XXS => (&self.iq3xxs_dequant, "iq3xxs_dequant", IQ3XXS_TN),
-            Quant::IQ3_S => (&self.iq3s_dequant, "iq3s_dequant", IQ3S_TN),
-            Quant::IQ4_XS => (&self.iq4xs_dequant, "iq4xs_dequant", IQ4XS_TN),
-            Quant::Q2_K => (&self.q2k_dequant, "q2k_dequant", Q2K_TN),
-            other => anyhow::bail!(
-                "project_raw_dense has no dequant kernel for {}",
-                other.name()
-            ),
-        };
+        let kernels = self.format_kernels(*quant)?;
+        let dequant = formats::need(&kernels.dequant, *quant, "dequant")?;
+        let tn = dequant.tn;
         // `_dequant` above is the masked fallback, for a ragged last strip
         // and for formats with no `_qdecode`. An f16 strip is only used when
         // the matmul is entirely tensor-core. The plain tile contracts in f32
-        // and would lose precision on an f16 weight.
+        // and would lose precision on an f16 weight. Q2_K and IQ4_XS use a
+        // different lane geometry and have no `_qdecode`.
         let all_tc = m.is_multiple_of(TC_TILE_M) && k.is_multiple_of(TC_TILE_K);
-        let qdecode = match quant {
-            Quant::IQ1_S => Some((&self.iq1s_qdecode, &self.iq1s_qdecode_f16, "iq1s_qdecode")),
-            Quant::IQ2_XXS => Some((
-                &self.iq2xxs_qdecode,
-                &self.iq2xxs_qdecode_f16,
-                "iq2xxs_qdecode",
-            )),
-            Quant::IQ1_M => Some((&self.iq1m_qdecode, &self.iq1m_qdecode_f16, "iq1m_qdecode")),
-            Quant::IQ2_S => Some((&self.iq2s_qdecode, &self.iq2s_qdecode_f16, "iq2s_qdecode")),
-            Quant::IQ2_XS => Some((
-                &self.iq2xs_qdecode,
-                &self.iq2xs_qdecode_f16,
-                "iq2xs_qdecode",
-            )),
-            Quant::IQ3_XXS => Some((
-                &self.iq3xxs_qdecode,
-                &self.iq3xxs_qdecode_f16,
-                "iq3xxs_qdecode",
-            )),
-            Quant::IQ3_S => Some((&self.iq3s_qdecode, &self.iq3s_qdecode_f16, "iq3s_qdecode")),
-            // Q2_K and IQ4_XS use a different lane geometry and keep
-            // `_dequant`.
+        let qdecode = match &kernels.qdecode {
+            [Some(wide), Some(half)] => Some((wide, half)),
             _ => None,
         };
         let rb = nb * quant.device_block_bytes();
@@ -134,9 +102,10 @@ impl DeviceBackend {
                     [cur as i64, *nb as i64],
                 ));
             }
-            let (module, name) = match expand {
-                Some((wide, half, name)) => (if narrow { half } else { wide }, name),
-                None => (dequant, dequant_name),
+            let kernel = match expand {
+                Some((_, half)) if narrow => half,
+                Some((wide, _)) => wide,
+                None => dequant,
             };
             // A `_qdecode` reads the packed i8 tables and a `_dequant` the i32
             // ones. Only the pointer differs.
@@ -211,7 +180,8 @@ impl DeviceBackend {
                 operands.push((self.iota8.as_device_ptr().as_raw(), [1, 8]));
             }
             operands.push((self.ptr(scratch_w, 0)?, [k as i64, dec as i64]));
-            self.launch(module, name, &operands, (dec.div_ceil(tn) as u32, 1, 1))?;
+            let grid = (dec.div_ceil(tn) as u32, 1, 1);
+            self.launch(&kernel.module, kernel.name, &operands, grid)?;
 
             if narrow {
                 self.matmul_f16_weight(

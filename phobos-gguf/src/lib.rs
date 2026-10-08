@@ -144,6 +144,17 @@ impl Gguf {
         &self.tensors
     }
 
+    /// The quantized formats the tensors are stored in, each once.
+    pub fn quants(&self) -> Vec<Quant> {
+        let mut quants: Vec<Quant> = Vec::new();
+        for quant in self.tensors.iter().filter_map(|t| t.ggml_type.quant()) {
+            if !quants.contains(&quant) {
+                quants.push(quant);
+            }
+        }
+        quants
+    }
+
     pub fn tensor(&self, name: &str) -> Option<&TensorInfo> {
         self.index.get(name).map(|&at| &self.tensors[at])
     }

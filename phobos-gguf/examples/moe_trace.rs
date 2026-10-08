@@ -24,7 +24,7 @@ use phobos_gguf::{Bpe, Decoder, Gguf};
 fn make_backend() -> Result<Box<dyn Backend>> {
     #[cfg(feature = "cuda")]
     {
-        Ok(Box::new(phobos_gguf::backend::device::DeviceBackend::new()?))
+        Ok(Box::new(phobos_gguf::backend::device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?))
     }
     #[cfg(not(feature = "cuda"))]
     {

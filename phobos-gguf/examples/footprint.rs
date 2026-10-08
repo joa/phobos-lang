@@ -42,7 +42,7 @@ fn main() -> Result<()> {
     #[cfg(feature = "cuda")]
     {
         use phobos_gguf::backend::Backend;
-        let backend = phobos_gguf::backend::DeviceBackend::new()?;
+        let backend = phobos_gguf::backend::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
         match backend.device_memory() {
             Some((free_bytes, total_bytes)) => println!(
                 "  device           {:.2} GiB free of {:.2} GiB",

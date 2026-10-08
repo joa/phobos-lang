@@ -45,7 +45,7 @@ fn main() -> Result<()> {
     // One backend, one set of weights, two states. The recorded pass is keyed
     // by its launch list, so alternating configurations rebuilds the graph
     // every pass. That only costs time.
-    let mut gpu = device::DeviceBackend::new()?;
+    let mut gpu = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
     let mut plain_state = model.new_state();
     let mut fused_state = model.new_state();
 

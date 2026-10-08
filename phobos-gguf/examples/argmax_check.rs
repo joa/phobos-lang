@@ -30,8 +30,8 @@ fn main() -> Result<()> {
     // (`Decoder::forward`), the other takes the fast path
     // (`Decoder::forward_greedy`). Each has its own backend and state so
     // scratch reuse cannot leak between them.
-    let full_backend = device::DeviceBackend::new()?;
-    let fast_backend = device::DeviceBackend::new()?;
+    let full_backend = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
+    let fast_backend = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
     let mut full_state = model.new_state();
     let mut fast_state = model.new_state();
 

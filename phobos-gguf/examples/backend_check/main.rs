@@ -20,7 +20,7 @@ mod raw;
 use raw::{check_hadamard, check_raw_formats};
 
 fn main() -> Result<()> {
-    let gpu = device::DeviceBackend::new()?;
+    let gpu = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
     let host = HostBackend::new();
     // Cells so that every checker closure below can update them.
     let worst = std::cell::Cell::new(0.0f32);
