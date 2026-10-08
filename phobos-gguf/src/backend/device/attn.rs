@@ -371,22 +371,35 @@ impl DeviceBackend {
                 ATTN_WARP_SPLITS,
                 blocks,
             );
-            let module = self.compile_dynamic(&src, "attention_persist")?;
-            let func = module.get_function("attention_persist")?.to_raw();
-            let dynamic_shared = self.shared_of(func) as usize;
-            // SAFETY: func belongs to a module alive for this call.
-            let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, dynamic_shared)? };
-            if allowed >= blocks {
-                self.func_shared
-                    .borrow_mut()
-                    .remove(&(probe_module.get_function("attention_persist")?.to_raw() as usize));
-                (module, splits)
-            } else {
-                // More splits need more shared memory than the grid allows.
-                // Fall back to the probe module, which is safe for
-                // `grid_barrier` but leaves some blocks idle in phase one.
-                self.func_shared.borrow_mut().remove(&(func as usize));
-                (probe_module, probe_splits)
+            // The merge holds a `[splits, head_dim]` tile, so on a card with
+            // many multiprocessors the split count can outgrow what one block
+            // may hold at all.
+            let fitted = match self.compile_dynamic_within(&src, "attention_persist")? {
+                Some(module) => {
+                    let func = module.get_function("attention_persist")?.to_raw();
+                    let dynamic_shared = self.shared_of(func) as usize;
+                    // SAFETY: func belongs to a module alive for this call.
+                    let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, dynamic_shared)? };
+                    if allowed >= blocks {
+                        Some(module)
+                    } else {
+                        self.func_shared.borrow_mut().remove(&(func as usize));
+                        None
+                    }
+                }
+                None => None,
+            };
+            match fitted {
+                Some(module) => {
+                    self.func_shared
+                        .borrow_mut()
+                        .remove(&(probe_module.get_function("attention_persist")?.to_raw() as usize));
+                    (module, splits)
+                }
+                // More splits need more shared memory than the grid or the
+                // card allows. Fall back to the probe module, which is safe
+                // for `grid_barrier` but leaves some blocks idle in phase one.
+                None => (probe_module, probe_splits),
             }
         };
         let decision = Some((module, blocks, splits));

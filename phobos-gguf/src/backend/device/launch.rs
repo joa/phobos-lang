@@ -138,7 +138,19 @@ impl DeviceBackend {
     /// Compiles a module whose kernels may use dynamic shared memory. Records
     /// each kernel's need and raises the limit for those past 48 KB.
     pub(super) fn compile_dynamic(&self, source: &str, what: &'static str) -> Result<Module> {
+        self.compile_dynamic_within(source, what)?
+            .with_context(|| format!("{what} needs more shared memory per block than the card allows"))
+    }
+
+    /// [`Self::compile_dynamic`], or `None` when a kernel needs more shared
+    /// memory per block than the card allows. A kernel sized to the card,
+    /// such as a persistent grid's, takes that as a size to back off from.
+    pub(super) fn compile_dynamic_within(&self, source: &str, what: &'static str) -> Result<Option<Module>> {
         let (module, shared) = compile_shared(source, &[], what)?;
+        let ceiling_bytes = shared_ceiling_bytes()?;
+        if shared.iter().any(|&(_, bytes)| bytes > ceiling_bytes) {
+            return Ok(None);
+        }
         for (name, bytes) in shared {
             let func = module.get_function(&name)?.to_raw();
             if bytes > STATIC_SHARED_LIMIT {
@@ -159,6 +171,24 @@ impl DeviceBackend {
                 .borrow_mut()
                 .insert(func as usize, bytes as u32);
         }
-        Ok(module)
+        Ok(Some(module))
     }
+}
+
+/// The most shared memory one block may opt into on this card.
+fn shared_ceiling_bytes() -> Result<usize> {
+    let device = cust::device::Device::get_device(0)?;
+    let mut bytes = 0;
+    // SAFETY: bytes outlives the call and device is a live handle.
+    cuda_ok(
+        unsafe {
+            cust::sys::cuDeviceGetAttribute(
+                &mut bytes,
+                cust::sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                device.as_raw(),
+            )
+        },
+        "reading the card's shared memory ceiling",
+    )?;
+    Ok(bytes.max(0) as usize)
 }
