@@ -290,10 +290,13 @@ impl DeviceBackend {
             .get(at)
             .is_none_or(|slot| slot.q_len < m * k || slot.s_len < m * blocks);
         if too_small {
+            // A pass that grows slots is one that allocates, so issue what
+            // it has recorded and let the device work while the host does.
+            self.flush_pending()?;
             // A grown slot takes a new region and the old one stays allocated
-            // until the slots are cleared, so recorded launches reading it
-            // stay valid. Whatever fills the slot writes every element before
-            // the projection reads it.
+            // until the slots are cleared, so launches reading it stay valid.
+            // Whatever fills the slot writes every element before the
+            // projection reads it.
             let grown = ActSlot {
                 q: self.act_arena.take(m * k)?,
                 q_len: m * k,
