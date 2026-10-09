@@ -784,35 +784,18 @@ impl Backend for DeviceBackend {
         out: Buf,
         len: usize,
     ) -> Result<QAct> {
-        self.check_distinct("swiglu_q", out, &[gate, up]);
-        ensure!(
-            len.is_multiple_of(ELEM_TILE),
-            "a quantizing SwiGLU needs a length ({len}) that is a multiple of {ELEM_TILE}"
-        );
-        let (act, qa_ptr, das_ptr) = self.act_slot(1, len)?;
-        let rb = (len / RMS_LANE) as i64;
-        let lane = RMS_LANE as i64;
-        self.with_kernel(
-            &self.gated_swiglu,
-            SWIGLU_Q_BLOCKS,
-            "swiglu_q",
-            || swiglu_q_src(SWIGLU_Q_BLOCKS),
-            |module| {
-                self.launch(
-                    module,
-                    "swiglu_q",
-                    &[
-                        (self.ptr(gate, gate_at)?, [rb, lane]),
-                        (self.ptr(up, up_at)?, [rb, lane]),
-                        (self.ptr(out, 0)?, [rb, lane]),
-                        (qa_ptr, [rb, lane]),
-                        (das_ptr, [rb, 1]),
-                    ],
-                    ((len / ELEM_TILE) as u32, 1, 1),
-                )
-            },
-        )?;
-        Ok(act)
+        let slot = self.act_slot(1, len)?;
+        self.swiglu_q_into(slot, (gate, gate_at), (up, up_at), out, len, ELEM_TILE)
+    }
+
+    fn swiglu_q_rows(&self, gate: Buf, up: Buf, out: Buf, rows: usize, width: usize) -> Result<QAct> {
+        // Both operands are dense, so the rows run as one flat span, and the
+        // quantized rows land in a slot laid out the same way. A prompt's span
+        // takes the wide tile, as the wide quantize does.
+        let slot = self.act_slot_transient(rows, width)?;
+        let len = rows * width;
+        let tile = if len.is_multiple_of(ELEM_TILE_WIDE) { ELEM_TILE_WIDE } else { ELEM_TILE };
+        self.swiglu_q_into(slot, (gate, 0), (up, 0), out, len, tile)
     }
 
     fn swiglu(
