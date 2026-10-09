@@ -10,6 +10,8 @@ impl DeviceBackend {
         let _ctx = cust::quick_init().context("initializing CUDA")?;
         let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
         let copy_stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+        let sms = cust::device::Device::get_device(0)?
+            .get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)? as usize;
         residency::vram_mark("cuda context up");
 
         let matmul = Variants::compile(
@@ -124,6 +126,7 @@ impl DeviceBackend {
         residency::vram_mark("kernels compiled and loaded");
         Ok(DeviceBackend {
             stream,
+            sms,
             matmul,
             matmul_tc,
             matmul_f16w,

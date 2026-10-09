@@ -137,6 +137,8 @@ type AttnPersistEntry = (Module, u32, usize);
 /// memory and synchronizes once, to read the logits.
 pub struct DeviceBackend {
     stream: Stream,
+    /// Multiprocessors on the card, which sizes `q8_qmma`'s split gate.
+    sms: usize,
     /// Copies that run beside the compute stream, such as prefetched
     /// experts. See `experts/`.
     copy_stream: Stream,
