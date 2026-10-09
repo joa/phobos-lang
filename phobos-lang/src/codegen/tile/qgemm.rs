@@ -228,14 +228,24 @@ impl<'c> Codegen<'c> {
                 .build()?,
         );
 
+        // A lane's two adjacent columns go out as one 8-byte store when the
+        // rows keep them aligned, so a warp's store fills whole sectors.
+        let paired = out.align_div == 0 || out.align_div % 2 == 0;
+        let pair_t = Type::vector(&[2], f32_t);
         let (rows, cols) = self.qgemm_patch_coords(block, &lanes)?;
         for (r, row) in rows.iter().enumerate() {
             for (c, col) in cols.iter().enumerate() {
-                for dj in 0..2usize {
-                    let off = self.const_index(block, dj as i64)?;
-                    let at = self.addi(block, *col, off)?;
-                    let slot = (r * PATCH as usize + c) * 2 + dj;
-                    let value = detach(loop_op.result(slot)?.into());
+                let slot = (r * PATCH as usize + c) * 2;
+                let lo = detach(loop_op.result(slot)?.into());
+                let hi = detach(loop_op.result(slot + 1)?.into());
+                if paired {
+                    let v = self.vec_broadcast(block, lo, pair_t)?;
+                    let v = self.vec_insert(block, hi, v, &[1])?;
+                    self.vec_store_al(block, v, out.mem, &[*row, *col], 8)?;
+                    continue;
+                }
+                for (dj, value) in [lo, hi].into_iter().enumerate() {
+                    let at = self.addi(block, *col, self.const_index(block, dj as i64)?)?;
                     block.append_operation(memref::store(value, out.mem, &[*row, at], self.loc));
                 }
             }
