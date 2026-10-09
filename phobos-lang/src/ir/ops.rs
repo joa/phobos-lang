@@ -421,6 +421,7 @@ pub enum Intrinsic {
     /// `rms_norm_q_t(x, gain, eps, [out,] q, scales)`: writes its outputs
     /// and yields the f32 inverse rms.
     RmsNormQ,
+    RmsNormGatedQ,
     /// `warp_partial(q, K, V, WM, WL, WACC, scale, lo, hi, col)`, the
     /// buffers first and the scalars in evaluation order; yields the zero
     /// the source sees.
@@ -446,6 +447,7 @@ impl Intrinsic {
             Intrinsic::Gather => "gather".into(),
             Intrinsic::ArgSel => "argsel".into(),
             Intrinsic::RmsNormQ => "rms_norm_q_t".into(),
+            Intrinsic::RmsNormGatedQ => "rms_norm_gated_q_t".into(),
             Intrinsic::WarpPartial => "warp_partial".into(),
             Intrinsic::DeltaScan => "delta_scan_t".into(),
         }
@@ -460,6 +462,7 @@ impl Intrinsic {
             "gather" => return Some(Intrinsic::Gather),
             "argsel" => return Some(Intrinsic::ArgSel),
             "rms_norm_q_t" => return Some(Intrinsic::RmsNormQ),
+            "rms_norm_gated_q_t" => return Some(Intrinsic::RmsNormGatedQ),
             "warp_partial" => return Some(Intrinsic::WarpPartial),
             "delta_scan_t" => return Some(Intrinsic::DeltaScan),
             _ => {}
@@ -783,8 +786,10 @@ impl OpKind {
             // Both of these may rewrite their operand in place.
             OpKind::Reduce(Reduce::Tril) => vec![0],
             OpKind::Map(Map::Unary(ElemStep::Exp)) => vec![0],
-            // rms_norm_q_t writes every tile after the gain and eps.
+            // rms_norm_q_t writes every tile after the gain and eps, and the
+            // gated form every tile after the gate, the gain and eps.
             OpKind::Intrinsic(Intrinsic::RmsNormQ) => (3..operand_count).collect(),
+            OpKind::Intrinsic(Intrinsic::RmsNormGatedQ) => (4..operand_count).collect(),
             _ => Vec::new(),
         }
     }

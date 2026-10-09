@@ -86,6 +86,7 @@ impl Membar<'_> {
                 | OpKind::Intrinsic(crate::ir::Intrinsic::WarpPartial)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::DeltaScan)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::RmsNormQ)
+                | OpKind::Intrinsic(crate::ir::Intrinsic::RmsNormGatedQ)
         ) && !self.ir.kind(op).has_blocks()
     }
 
