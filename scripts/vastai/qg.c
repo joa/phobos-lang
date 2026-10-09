@@ -8,6 +8,12 @@
 // 144 for Q4_K, 176 for Q5_K, 208 for Q6_K. With REF.ptx both kernels run on
 // the same random operands and the worst difference is printed: a numeric
 // check of a new code path against the one it replaces.
+//
+// QG_SPLIT_DIR=DIR with QG_SPLITS="2 3 4" also times the split-K form of each
+// shape: DIR/<fmt>_split_n<N>_k<K>_s<S>.ptx (kernel NAME_split, partials as
+// one [M, S * N] output, the split in grid y) followed by
+// DIR/reduce_n<N>_s<S>.ptx (q8_qmma_reduce), and checks their sum against
+// KERNEL. A split count with no kernel for a shape is skipped.
 #include <cuda.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -67,6 +73,40 @@ static CUdeviceptr scales_f32(size_t count) {
 static void push(unsigned long long *slots, int *at, CUdeviceptr ptr, long d0, long d1) {
     unsigned long long v[7] = {ptr, ptr, 0, (unsigned long long)d0, (unsigned long long)d1, (unsigned long long)d1, 1};
     for (int i = 0; i < 7; i++) slots[(*at)++] = v[i];
+}
+
+static CUfunction load_fn(const char *path, const char *name) {
+    CUmodule mod;
+    CK(cuModuleLoadData(&mod, read_file(path)));
+    CUfunction fn;
+    CK(cuModuleGetFunction(&fn, mod, name));
+    return fn;
+}
+
+static float time_us(CUfunction fn, unsigned gx, unsigned gy, unsigned gz, unsigned threads, void **args, int reps) {
+    CUevent e0, e1;
+    CK(cuEventCreate(&e0, 0));
+    CK(cuEventCreate(&e1, 0));
+    CK(cuEventRecord(e0, 0));
+    for (int i = 0; i < reps; i++) CK(cuLaunchKernel(fn, gx, gy, gz, threads, 1, 1, 0, 0, args, NULL));
+    CK(cuEventRecord(e1, 0));
+    CK(cuEventSynchronize(e1));
+    float ms;
+    CK(cuEventElapsedTime(&ms, e0, e1));
+    cuEventDestroy(e0), cuEventDestroy(e1);
+    return 1000.0f * ms / reps;
+}
+
+static double worst_rel(const float *got, const float *want, size_t count) {
+    double worst = 0, top = 0;
+    for (size_t i = 0; i < count; i++) {
+        double w = want[i] < 0 ? -want[i] : want[i], e = got[i] - want[i];
+        e = e < 0 ? -e : e;
+        if (e != e) e = 1e30;
+        top = w > top ? w : top;
+        worst = e > worst ? e : worst;
+    }
+    return top > 0 ? worst / top : worst;
 }
 
 int main(int argc, char **argv) {
@@ -159,6 +199,62 @@ int main(int argc, char **argv) {
             free(got), free(want);
         }
         printf("\n");
+        const char *split_dir = getenv("QG_SPLIT_DIR"), *splits = getenv("QG_SPLITS");
+        int used;
+        for (int sp; split_dir && splits && sscanf(splits, "%d%n", &sp, &used) == 1; splits += used) {
+            char path[512], name[128];
+            snprintf(path, sizeof path, "%s/%.*s_split_n%ld_k%ld_s%d.ptx", split_dir,
+                     (int)(strchr(argv[2], '_') - argv[2]), argv[2], n, k, sp);
+            FILE *probe = fopen(path, "rb");
+            if (!probe) continue;
+            fclose(probe);
+            snprintf(name, sizeof name, "%s_split", argv[2]);
+            CUfunction split = load_fn(path, name);
+            snprintf(path, sizeof path, "%s/reduce_n%ld_s%d.ptx", split_dir, n, sp);
+            CUfunction reduce = load_fn(path, "q8_qmma_reduce");
+            CUdeviceptr part;
+            unsigned long long ss[128], rs[128];
+            int sat = 0, rat = 0;
+            push(ss, &sat, a, m, k);
+            push(ss, &sat, as, m, kb);
+            push(ss, &sat, qb, n, rb);
+            push(ss, &sat, d, n, nb);
+            CK(cuMemAlloc(&part, (size_t)m * n * sp * 4));
+            push(ss, &sat, part, m, n * sp);
+            push(rs, &rat, part, m, n * sp);
+            push(rs, &rat, c, m, n);
+            void *sargs[128], *rargs[128];
+            for (int i = 0; i < 128; i++) sargs[i] = &ss[i], rargs[i] = &rs[i];
+            unsigned rx = (unsigned)m, ry = (unsigned)(n / 64);
+            CK(cuLaunchKernel(split, gx, gy * sp, 1, 256, 1, 1, 0, 0, sargs, NULL));
+            CK(cuLaunchKernel(reduce, rx, ry, 1, 128, 1, 1, 0, 0, rargs, NULL));
+            CK(cuCtxSynchronize());
+            float split_us = time_us(split, gx, gy * sp, 1, 256, sargs, reps);
+            float reduce_us = time_us(reduce, rx, ry, 1, 128, rargs, reps);
+            CUevent e2, e3;
+            CK(cuEventCreate(&e2, 0));
+            CK(cuEventCreate(&e3, 0));
+            CK(cuEventRecord(e2, 0));
+            for (int i = 0; i < reps; i++) {
+                CK(cuLaunchKernel(split, gx, gy * sp, 1, 256, 1, 1, 0, 0, sargs, NULL));
+                CK(cuLaunchKernel(reduce, rx, ry, 1, 128, 1, 1, 0, 0, rargs, NULL));
+            }
+            CK(cuEventRecord(e3, 0));
+            CK(cuEventSynchronize(e3));
+            float both_ms;
+            CK(cuEventElapsedTime(&both_ms, e2, e3));
+            double both_us = 1000.0 * both_ms / reps;
+            size_t count = (size_t)m * n;
+            float *got = malloc(count * 4), *want = malloc(count * 4);
+            CK(cuMemcpyDtoH(got, c, count * 4));
+            CK(cuLaunchKernel(fn, gx, gy, 1, 256, 1, 1, 0, 0, args, NULL));
+            CK(cuMemcpyDtoH(want, c, count * 4));
+            printf("    split %d: %5u CTAs, split %7.1f us + reduce %6.1f us = %7.1f us, %6.1f TOPS (%+.0f%%), diff %.2e\n",
+                   sp, gx * gy * sp, split_us, reduce_us, both_us, ops / (both_us * 1e-6) / 1e12,
+                   100.0 * (us / both_us - 1), worst_rel(got, want, count));
+            free(got), free(want);
+            cuMemFree(part);
+        }
         cuMemFree(a), cuMemFree(as), cuMemFree(qb), cuMemFree(d), cuMemFree(c);
     }
     printf("  all three: %.1f TOPS\n", total_ops / (total_us * 1e-6) / 1e12);
