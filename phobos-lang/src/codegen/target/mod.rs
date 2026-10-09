@@ -495,7 +495,10 @@ impl<'c> Codegen<'c> {
         width: i64,
     ) -> Result<()> {
         // The target decides whether the copy skips L1 by its size in bytes.
-        let elem_bytes = if dst.elem == self.f16_t { 2 } else { 4 };
+        let elem_bytes = self
+            .elem_bytes(dst.elem)
+            .map(i64::from)
+            .ok_or_else(|| anyhow!("async copy of an element of unknown size"))?;
         self.isa.async_copy(
             self, block, src.mem, src_idx, dst.mem, dst_idx, width, elem_bytes,
         )

@@ -102,11 +102,12 @@ impl<'c> Codegen<'c> {
             );
         }
 
-        // An aligned copy moves 16 bytes per lane: four f32 or eight f16.
-        // Staging is bound by load count, not bytes, so width goes by bytes.
+        // An aligned copy moves 16 bytes per lane: four f32, eight f16 or
+        // sixteen i8. Staging is bound by load count, not bytes, so width
+        // goes by bytes.
         //
-        // Only f16 goes to eight. Four elements of any type is always legal,
-        // while a wider access needs the divisibility proof `@aligned` gives.
+        // Four elements of any type is always legal, while a wider access
+        // needs the divisibility proof `@aligned` gives.
         let elem_bytes = self.elem_bytes(dst.elem);
         let last = *dst.shape.last().expect("tile values are not rank-0");
         let vec_ok = !src.is_masked()
@@ -117,10 +118,10 @@ impl<'c> Codegen<'c> {
             && dst.vectorizes(4)
             && last % 4 == 0;
         // Both sides share an element type, checked above.
-        let wide =
-            dst.elem == self.f16_t && src.vectorizes(8) && dst.vectorizes(8) && last % 8 == 0;
+        let full = elem_bytes.map_or(4, |bytes| 16 / i64::from(bytes).max(1));
+        let wide = full > 4 && src.vectorizes(full) && dst.vectorizes(full) && last % full == 0;
         let width = match (vec_ok, wide) {
-            (true, true) => 8,
+            (true, true) => full,
             (true, false) => 4,
             _ => 1,
         };
