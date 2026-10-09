@@ -3,7 +3,8 @@
 use super::*;
 
 impl DeviceBackend {
-    /// The quantizing SwiGLU over a flat span of `len`, into `slot`.
+    /// The quantizing SwiGLU over a flat span of `len`, into `slot`, `tile`
+    /// elements a CTA.
     pub(super) fn swiglu_q_into(
         &self,
         slot: (QAct, u64, u64),
@@ -11,20 +12,22 @@ impl DeviceBackend {
         (up, up_at): (Buf, usize),
         out: Buf,
         len: usize,
+        tile: usize,
     ) -> Result<QAct> {
         self.check_distinct("swiglu_q", out, &[gate, up]);
         ensure!(
-            len.is_multiple_of(ELEM_TILE),
-            "a quantizing SwiGLU needs a length ({len}) that is a multiple of {ELEM_TILE}"
+            len.is_multiple_of(tile),
+            "a quantizing SwiGLU needs a length ({len}) that is a multiple of {tile}"
         );
+        let blocks = tile / RMS_LANE;
         let (act, qa_ptr, das_ptr) = slot;
         let rb = (len / RMS_LANE) as i64;
         let lane = RMS_LANE as i64;
         self.with_kernel(
             &self.gated_swiglu,
-            SWIGLU_Q_BLOCKS,
+            blocks,
             "swiglu_q",
-            || swiglu_q_src(SWIGLU_Q_BLOCKS),
+            || swiglu_q_src(blocks),
             |module| {
                 self.launch(
                     module,
@@ -36,7 +39,7 @@ impl DeviceBackend {
                         (qa_ptr, [rb, lane]),
                         (das_ptr, [rb, 1]),
                     ],
-                    ((len / ELEM_TILE) as u32, 1, 1),
+                    ((len / tile) as u32, 1, 1),
                 )
             },
         )?;
