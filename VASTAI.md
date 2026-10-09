@@ -72,7 +72,15 @@ vastai create instance OFFER_ID --image nvidia/cuda:12.8.1-base-ubuntu24.04 --di
 vastai show instance INSTANCE_ID --raw   # poll until actual_status is "running", about a minute
                                          # intended_status "stopped" means the container died: destroy, next offer
 vastai ssh-url INSTANCE_ID               # ssh://root@HOST:PORT
+vastai show instances --raw              # after every create, even a failed one
 ```
+
+A `create` that answers `success: False` can still leave an instance behind,
+loading and billing, so list instances after each one. A host that still
+answers `Permission denied (publickey)` three minutes after it reports
+running never takes the key, even though `vastai attach ssh` says it is
+attached: destroy it and take another offer. So does one that sits in
+`loading` for more than ten minutes.
 
 ### Checking the link before anything else
 
