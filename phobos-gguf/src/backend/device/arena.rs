@@ -26,6 +26,10 @@ fn slab_bytes() -> usize {
 /// Small slabs of their own avoid both.
 pub(super) const HOT_SLAB_BYTES: usize = 4 * 1024 * 1024;
 
+/// Slab size for the quantized-activation slots. A prompt pass takes about a
+/// hundred of a few MiB each; a decode pass a few small ones.
+pub(super) const ACT_SLAB_BYTES: usize = 16 * 1024 * 1024;
+
 /// Alignment of every region. 256 bytes keeps each region on a sector
 /// boundary, so a neighbour never costs a tensor an extra sector.
 const ALIGN: usize = 256;
@@ -83,6 +87,29 @@ impl Arena {
             unsafe { cust::sys::cuMemcpyHtoD_v2(at, data.as_ptr().cast(), bytes) },
             "uploading a weight into the arena",
         )?;
+        Ok(at)
+    }
+
+    /// `bytes` of uninitialized device memory, returned as its address.
+    pub(super) fn take(&self, bytes: usize) -> Result<u64> {
+        let want = bytes.max(1).next_multiple_of(ALIGN);
+        let mut slabs = self.slabs.borrow_mut();
+        let at = match slabs.iter().position(|(s, used)| s.len() - used >= want) {
+            Some(at) => at,
+            None => {
+                let slab = match self.slab.get() {
+                    0 => slab_bytes(),
+                    n => n,
+                };
+                // SAFETY: the caller writes a region before reading it.
+                slabs.push((unsafe { DeviceBuffer::uninitialized(want.max(slab))? }, 0));
+                slabs.len() - 1
+            }
+        };
+        let (slab, used) = &mut slabs[at];
+        let at = slab.as_device_ptr().as_raw() + *used as u64;
+        *used += want;
+        self.handed.set(self.handed.get() + want);
         Ok(at)
     }
 

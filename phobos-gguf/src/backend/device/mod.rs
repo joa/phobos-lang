@@ -120,6 +120,16 @@ use raw::DeviceRaw;
 /// [`kernels::q8_qmma_split_src`].
 type QmmaSplitKey = (usize, usize, usize);
 
+/// A quantized-activation slot in [`DeviceBackend::act_scratch`]: the int8
+/// values and the per-block scales, each an address and an element count.
+#[derive(Clone, Copy)]
+struct ActSlot {
+    q: u64,
+    q_len: usize,
+    s: u64,
+    s_len: usize,
+}
+
 /// Heads, grouped heads, head dimension, taps, head stride, normalize, query
 /// scale and rows per program: everything [`delta_conv_src`] bakes in. The
 /// row count is a launch parameter, so a new prompt length compiles nothing.
@@ -457,7 +467,10 @@ pub struct DeviceBackend {
     /// One entry per `quantize_act` in a pass, each grown to the largest
     /// projection seen. Several are live at once, and a pass takes them in
     /// the same order every time.
-    act_scratch: RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>,
+    act_scratch: RefCell<Vec<ActSlot>>,
+    /// Where the `act_scratch` slots live, so a prompt's hundred slots are a
+    /// few allocations. Reset whenever the slots are cleared.
+    act_arena: arena::Arena,
     /// Which of the first few `act_scratch` slots the next transient
     /// activation takes. See [`DeviceBackend::act_slot_transient`].
     act_ring: Cell<usize>,

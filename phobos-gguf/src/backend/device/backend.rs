@@ -169,7 +169,7 @@ impl Backend for DeviceBackend {
 
     fn begin_pass(&self, rows: usize) -> Result<()> {
         self.trim_after_prompt(rows)?;
-        self.trim_after_dense()?;
+        self.trim_after_dense(rows)?;
         self.keep_headroom(rows)?;
         self.mark_pass_vram();
         // Restart the rings, so each step records the same slots and the

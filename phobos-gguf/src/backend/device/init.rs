@@ -278,6 +278,7 @@ impl DeviceBackend {
             iq3s_grid_packed,
             iota8,
             act_scratch: RefCell::new(Vec::new()),
+            act_arena: arena::Arena::with_slab(arena::ACT_SLAB_BYTES),
             act_ring: Cell::new(0),
             act_shared: Cell::new(mem::ACT_RING),
             act_next: Cell::new(0),
