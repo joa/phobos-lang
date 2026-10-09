@@ -4,6 +4,7 @@
 // emitter. The default target, in `emit_mlir`, is sm_75.
 
 mod basic;
+mod delta;
 mod dot;
 mod iq1m_qdot;
 mod iq1s_qdot;

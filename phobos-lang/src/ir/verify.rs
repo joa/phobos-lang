@@ -818,7 +818,7 @@ impl Verifier<'_> {
                             self.err(op, "result must be the f32 inverse rms");
                         }
                     }
-                    Intrinsic::WarpPartial => {
+                    Intrinsic::WarpPartial | Intrinsic::DeltaScan => {
                         if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::Index) {
                             self.err(op, "result must be index");
                         }

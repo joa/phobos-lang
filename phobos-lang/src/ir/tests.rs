@@ -286,6 +286,7 @@ fn intrinsic_names_round_trip() {
         Intrinsic::ArgSel,
         Intrinsic::RmsNormQ,
         Intrinsic::WarpPartial,
+        Intrinsic::DeltaScan,
     ];
     for fmt in RawFmt::ALL {
         all.extend([
