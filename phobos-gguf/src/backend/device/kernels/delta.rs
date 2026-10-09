@@ -197,8 +197,8 @@ kernel delta_scan(Q:   tensor<f32>[N, QW],
 }
 
 /// State columns one program of [`delta_scan_reg_src`] owns: two warps of
-/// two columns each.
-pub(crate) const DELTA_REG_COLS: usize = 4;
+/// four columns each.
+pub(crate) const DELTA_REG_COLS: usize = 8;
 
 /// The gated delta rule over a prompt with the state in registers: one
 /// program per head and [`DELTA_REG_COLS`] state columns, walking the
@@ -209,7 +209,7 @@ pub(crate) const DELTA_REG_COLS: usize = 4;
 /// `[N, heads]`, the state as `[heads * D, D]`.
 pub(crate) fn delta_scan_reg_src(head_dim: usize) -> String {
     let cols = DELTA_REG_COLS;
-    let threads = cols / 2 * 32;
+    let threads = cols / 4 * 32;
     format!(
         "@launch({threads})
 @autotune(D in [{head_dim}], C in [{cols}])
