@@ -265,6 +265,12 @@ pub struct DeviceBackend {
     /// compile-time tile extents.
     deltas: RefCell<HashMap<(usize, usize), Module>>,
     chunks: RefCell<HashMap<(usize, usize), Module>>,
+    /// The register-state scan, by head dimension; see
+    /// [`kernels::delta_scan_reg_src`].
+    delta_reg: RefCell<HashMap<usize, Module>>,
+    /// Whether a prompt's delta rule takes the register-state scan. On by
+    /// default; `PHOBOS_DELTA_SCAN=0` goes back to the chunked form.
+    delta_reg_on: bool,
     identities: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
     /// Delta convolution kernels, keyed by [`ConvKey`].
     convs: RefCell<HashMap<ConvKey, Module>>,

@@ -192,6 +192,8 @@ impl DeviceBackend {
             swiglu_planes: RefCell::new(HashMap::new()),
             deltas: RefCell::new(HashMap::new()),
             chunks: RefCell::new(HashMap::new()),
+            delta_reg: RefCell::new(HashMap::new()),
+            delta_reg_on: env_flag_on("PHOBOS_DELTA_SCAN"),
             identities: RefCell::new(HashMap::new()),
             convs: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
