@@ -25,7 +25,13 @@ fn dump_raw_kernel_sources() {
         if let (Some(name), Some(src)) = (qgemm_kernel(quant), qgemm_src(quant)) {
             sources.push((name.to_string(), src));
         }
+        // The 4B's deep projection, split three ways.
+        let block = quant.spec().block;
+        if let (Some(name), Some(src)) = (qgemm_split_kernel(quant), qgemm_split_src(quant, 2560, 9216, block, 3)) {
+            sources.push((name.to_string(), src));
+        }
     }
+    sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3)));
     let i8: [I8Row; 11] = [
         (
             iq1s_qdot_i8_matvec_src,

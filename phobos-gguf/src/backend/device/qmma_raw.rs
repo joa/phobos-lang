@@ -2,8 +2,11 @@ use anyhow::{Context, Result, bail, ensure};
 
 use super::*;
 
+/// Format, padded `n`, `k` and split count: what [`qgemm_split_src`] bakes in.
+type SplitKey = (Quant, usize, usize, usize);
+
 /// The staged projections (`<fmt>_qgemm_t`), built on first use.
-/// `PHOBOS_QGEMM=0` turns them off.
+/// `PHOBOS_QGEMM=0` turns them off, `PHOBOS_QGEMM_SPLIT=0` their split-K form.
 ///
 /// They contract a prompt pass directly against a raw quantized weight, with
 /// no expanded copy. [`super::DeviceBackend::project_raw_dense`] instead
@@ -11,7 +14,10 @@ use super::*;
 /// scratch resident.
 pub(super) struct Qgemm {
     on: bool,
+    split: bool,
     kernels: RefCell<HashMap<Quant, Module>>,
+    /// The split-K kernel and its reduce, by shape.
+    splits: RefCell<HashMap<SplitKey, (Module, Module)>>,
     /// The ternary grid at two bits per lane and at four bits per lane.
     grid2: RefCell<Option<DeviceBuffer<i8>>>,
     grid4: RefCell<Option<DeviceBuffer<i8>>>,
@@ -21,7 +27,9 @@ impl Qgemm {
     pub(super) fn from_env() -> Qgemm {
         Qgemm {
             on: env_flag_on("PHOBOS_QGEMM"),
+            split: env_flag_on("PHOBOS_QGEMM_SPLIT"),
             kernels: RefCell::new(HashMap::new()),
+            splits: RefCell::new(HashMap::new()),
             grid2: RefCell::new(None),
             grid4: RefCell::new(None),
         }
@@ -42,6 +50,27 @@ impl Qgemm {
             self.kernels.borrow_mut().insert(quant, module);
         }
         Ok(std::cell::Ref::map(self.kernels.borrow(), |m| &m[&quant]))
+    }
+
+    /// The split-K kernel and its reduce for this shape; see
+    /// [`qgemm_split_src`].
+    fn split_modules(
+        &self,
+        quant: Quant,
+        n: usize,
+        k: usize,
+        block: usize,
+        s: usize,
+    ) -> Result<std::cell::Ref<'_, (Module, Module)>> {
+        let key = (quant, n, k, s);
+        if !self.splits.borrow().contains_key(&key) {
+            let src = qgemm_split_src(quant, n, k, block, s).context("no staged kernel for this format")?;
+            let name = qgemm_split_kernel(quant).expect("the source exists, so does the name");
+            let split = compile(&src, &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], name)?;
+            let reduce = compile(&qgemm_reduce_src(n, s), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
+            self.splits.borrow_mut().insert(key, (split, reduce));
+        }
+        Ok(std::cell::Ref::map(self.splits.borrow(), |m| &m[&key]))
     }
 
     pub(super) fn grid4(&self) -> Result<u64> {
@@ -166,15 +195,28 @@ impl DeviceBackend {
                 (d_ptr, [n_pad as i64, nb as i64]),
             ];
             operands.extend(self.qgemm_tables(quant)?);
-            operands.push((self.ptr(dest, 0)?, [m_pad as i64, n_pad as i64]));
-            let module = self.qgemm.module(quant)?;
-            let name = qgemm_kernel(quant).expect("takes() checked the format");
-            self.launch(
-                &module,
-                name,
-                &operands,
-                ((m_pad / QGEMM_TM) as u32, (n_pad / QGEMM_TN) as u32, 1),
-            )?;
+            let block = k / nb;
+            let splits = if self.qgemm.split {
+                qgemm_splits(m_pad, n_pad, k, block, self.sms)
+            } else {
+                1
+            };
+            let grid = ((m_pad / QGEMM_TM) as u32, (n_pad / QGEMM_TN) as u32, 1);
+            if splits > 1 {
+                let modules = self.qgemm.split_modules(quant, n_pad, k, block, splits)?;
+                let name = qgemm_split_kernel(quant).expect("takes() checked the format");
+                let partials = self.split_partials(m_pad * n_pad * splits)?;
+                let plane = (partials, [m_pad as i64, (n_pad * splits) as i64]);
+                operands.push(plane);
+                self.launch(&modules.0, name, &operands, (grid.0, grid.1 * splits as u32, 1))?;
+                let reduce = [plane, (self.ptr(dest, 0)?, [m_pad as i64, n_pad as i64])];
+                self.launch(&modules.1, "qgemm_reduce", &reduce, (m_pad as u32, grid.1, 1))?;
+            } else {
+                operands.push((self.ptr(dest, 0)?, [m_pad as i64, n_pad as i64]));
+                let module = self.qgemm.module(quant)?;
+                let name = qgemm_kernel(quant).expect("takes() checked the format");
+                self.launch(&module, name, &operands, grid)?;
+            }
             if padded {
                 let src = Plane {
                     buf: dest,
