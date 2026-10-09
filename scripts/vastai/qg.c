@@ -100,9 +100,19 @@ int main(int argc, char **argv) {
     CK(cuEventCreate(&e0, 0));
     CK(cuEventCreate(&e1, 0));
     // (n, k) of the projections: hidden 2560 and ffn 9216 for the 4B.
-    long shapes[][2] = {{2560, 2560}, {9216, 2560}, {2560, 9216}};
+    // QG_SHAPES="N,K N,K ..." replaces them, for another model's or
+    // test-backend-ops' shapes.
+    long shapes[16][2] = {{2560, 2560}, {9216, 2560}, {2560, 9216}};
+    unsigned count = 3;
+    const char *custom = getenv("QG_SHAPES");
+    if (custom) {
+        int used;
+        for (count = 0; count < 16 && sscanf(custom, "%ld,%ld%n", &shapes[count][0], &shapes[count][1], &used) == 2;
+             count++)
+            custom += used;
+    }
     double total_ops = 0, total_us = 0;
-    for (unsigned s = 0; s < sizeof shapes / sizeof *shapes; s++) {
+    for (unsigned s = 0; s < count; s++) {
         long n = shapes[s][0], k = shapes[s][1];
         long nb = k / 256, kb = k / 32, rb = nb * block_bytes;
         CUdeviceptr a = random_bytes((size_t)m * k, 0), as = scales_f32((size_t)m * kb),
