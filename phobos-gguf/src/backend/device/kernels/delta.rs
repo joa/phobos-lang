@@ -200,7 +200,10 @@ kernel delta_scan(Q:   tensor<f32>[N, QW],
 /// limit.
 pub(crate) const DELTA_CHUNK: usize = 16;
 
-pub(crate) const DELTA_CHUNK_TN: usize = 64;
+/// Columns of the state one program of the chunked scan owns. Narrower than
+/// a whole head so the grid holds two programs per head and SM at 32 heads
+/// of 128 on a 128-SM card.
+pub(crate) const DELTA_CHUNK_TN: usize = 32;
 
 /// Columns of the delta-rule state one program owns.
 pub(crate) const DELTA_TN: usize = 16;
