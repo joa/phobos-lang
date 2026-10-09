@@ -90,10 +90,13 @@ pub fn compile_raw(
 
     let kernels = parse(code)?;
 
-    // A kernel that wants `ldmatrix` needs 64-bit indices for the whole module.
+    // A kernel that wants `ldmatrix` needs 64-bit indices for the whole module,
+    // and so does the `@tensorcore` path's `mma.sync` with `cp.async` staging.
+    // That path is taken from sm_80 on; sm_75 stays on WMMA at 32 bits.
     let mut wide;
-    let context = if context.index_bitwidth < 64 && kernels.iter().any(ast::Kernel::wants_ldmatrix)
-    {
+    let wants_wide = kernels.iter().any(ast::Kernel::wants_ldmatrix)
+        || (context.gpu_config.compute_capability() >= 80 && requires_wide_index(&kernels));
+    let context = if context.index_bitwidth < 64 && wants_wide {
         wide = context.clone();
         wide.index_bitwidth = 64;
         &wide

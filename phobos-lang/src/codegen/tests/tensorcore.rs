@@ -340,3 +340,39 @@ fn tensorcore_bails_to_vector_path_when_shape_does_not_fragment() {
         "WMMA emitted for a pre-sm_70 chip:\n{old}"
     );
 }
+
+#[test]
+fn tensorcore_widens_to_mma_sync_from_sm_80() {
+    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
+    // The device path compiles at 32-bit indices. From sm_80 on, a
+    // `@tensorcore` module widens itself to 64 for mma.sync and ldmatrix;
+    // sm_75 stays on WMMA.
+    let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+        @tensorcore
+        @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+        kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f32>[M, N]) {
+            let pm = program_id(0)
+            let pn = program_id(1)
+            var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+            for kt in range(0, K, TILE_K) {
+                let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                acc += dot(a, b)
+            }
+            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+        }";
+    let ptx = |chip: &str| {
+        let ctx = BaseContext {
+            gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
+            ..Default::default()
+        };
+        crate::compile(&ctx, src).expect("compiles")
+    };
+    let ampere = ptx("sm_89");
+    assert!(ampere.contains("mma.sync.aligned.m16n8k16"), "sm_89 should take mma.sync");
+    assert!(ampere.contains("ldmatrix"), "sm_89 should read fragments with ldmatrix");
+    let turing = ptx("sm_75");
+    // WMMA's own PTX is `wmma.mma.sync`, so look for the thread-level shape.
+    assert!(!turing.contains("mma.sync.aligned.m16n8"), "sm_75 should stay on WMMA");
+    assert!(turing.contains("wmma.mma.sync"), "sm_75 should stay on WMMA");
+}

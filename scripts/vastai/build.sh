@@ -5,6 +5,9 @@
 #
 #     bash build.sh [REF]      # default main; a branch, tag or commit
 #
+# EXAMPLES="backend_check model_check" also builds those phobos-gguf examples,
+# into /root/src/target/release/examples.
+#
 # The binaries land in /root/src/target/release. They compile kernels on first
 # use into ~/.phobos/kernel-cache.
 set -euo pipefail
@@ -38,4 +41,7 @@ export LIBCLANG_PATH
 export CUDA_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu
 export PATH="$LLVM/bin:$PATH"
 cargo build -q --release --locked -p phobos-bench -p phobos-cli --features phobos-bench/cuda,phobos-cli/cuda
+for example in ${EXAMPLES:-}; do
+    cargo build -q --release --locked -p phobos-gguf --features cuda --example "$example"
+done
 target/release/phobos-bench --version
