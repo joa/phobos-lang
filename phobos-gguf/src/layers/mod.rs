@@ -548,7 +548,9 @@ impl Linear {
         dest: Buf,
     ) -> Result<()> {
         if !self.is_quantized() {
-            return self.add_dense(backend, x, None, rows, dest);
+            // A raw weight on the integer tensor cores reads `act`; the
+            // dense paths ignore it.
+            return self.add_dense(backend, x, Some(act), rows, dest);
         }
         let w = self.quantized(backend)?;
         backend

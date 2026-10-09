@@ -596,6 +596,13 @@ pub trait Backend {
         self.quantize_act(out, 1, len)
     }
 
+    /// [`Backend::swiglu_q`] over `rows` rows of `width`, from two dense
+    /// buffers. The quantized copy is read once, by the down projection.
+    fn swiglu_q_rows(&self, gate: Buf, up: Buf, out: Buf, rows: usize, width: usize) -> Result<QAct> {
+        self.swiglu(gate, 0, up, 0, out, rows * width)?;
+        self.quantize_act(out, rows, width)
+    }
+
     /// `out = silu(gate) * rms_norm(x)`, also returned quantized. The delta
     /// net's gated readout.
     #[allow(clippy::too_many_arguments)]
