@@ -63,18 +63,22 @@ impl DeviceBackend {
     /// drained first, since recorded launches may still read these buffers.
     ///
     /// Another prompt pass of the same length, the next chunk of a long
-    /// prompt, keeps them: it takes the same slots, and
-    /// [`DeviceBackend::trim_after_prompt`] has already freed them if the
+    /// prompt, keeps the quantized-activation slots: it takes the same ones,
+    /// and [`DeviceBackend::trim_after_prompt`] has already freed them if the
     /// length changed.
     pub(super) fn trim_after_dense(&self, rows: usize) -> Result<()> {
-        if rows > 1 || !self.drop_scratch.replace(false) {
+        if !self.drop_scratch.get() {
             return Ok(());
         }
         self.stream.synchronize()?;
-        // Always free the quantized-activation slots. A prompt pass takes one
-        // per projection.
-        self.clear_act_slots();
-        // Cached pass graphs point into this memory, so drop them too.
+        // A prompt pass takes one slot per projection, so a decode pass
+        // frees them.
+        if rows == 1 {
+            self.drop_scratch.set(false);
+            self.clear_act_slots();
+        }
+        // A prompt runs once, so its pass graph is not worth instantiating.
+        // Cached graphs may also point into the memory freed here.
         self.pass.borrow_mut().clear();
         if !self.trim_after_dense {
             return Ok(());
