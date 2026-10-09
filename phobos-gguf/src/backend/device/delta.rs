@@ -32,11 +32,24 @@ impl DeviceBackend {
         let wy = self.alloc(rows * wy_width)?;
         let result = self.with_kernel(
             &self.chunks,
-            (heads, head_dim * 1_000_000 + chunk_tn * 1000 + chunk),
+            (
+                heads,
+                head_dim * 1_000_000_000
+                    + chunk_tn * 1_000_000
+                    + chunk * 1000
+                    + std::env::var("PHOBOS_EXP_DELTA_TC").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            ),
             "delta_chunk",
             || {
                 let mut source = delta_wy_src(heads, head_dim, chunk);
-                source.push_str(&delta_scan_src(heads, head_dim, chunk_tn, chunk));
+                let mut scan = delta_scan_src(heads, head_dim, chunk_tn, chunk);
+                // Experiment only: PHOBOS_EXP_DELTA_TC=threads puts the scan
+                // on the tensor cores at that CTA size.
+                if let Ok(threads) = std::env::var("PHOBOS_EXP_DELTA_TC") {
+                    scan = scan.replacen("@launch(256)", &format!("@tensorcore
+@launch({threads})"), 1);
+                }
+                source.push_str(&scan);
                 source
             },
             |module| {
