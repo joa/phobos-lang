@@ -34,6 +34,7 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    sources.push(("rms_norm_gated".to_string(), rms_norm_src(128, 1e-6, NormForm::GatedQuantized)));
     let i8: [I8Row; 11] = [
         (
             iq1s_qdot_i8_matvec_src,
