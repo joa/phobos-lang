@@ -33,6 +33,11 @@ fn dump_raw_kernel_sources() {
     }
     sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
+    for (tn, c) in [(16, 16), (32, 16), (64, 16), (16, 32), (32, 32), (64, 32), (32, 64)] {
+        let mut src = delta_wy_src(32, 128, c);
+        src.push_str(&delta_scan_src(32, 128, tn, c));
+        sources.push((format!("delta_{tn}_{c}"), src));
+    }
     let i8: [I8Row; 11] = [
         (
             iq1s_qdot_i8_matvec_src,
