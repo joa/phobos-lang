@@ -276,11 +276,11 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
     hs = h
   }}
   let cb = p * PS + hs * ST
+  var xs = X[t * TB :+ TB + KS - 1, cb :+ D]
   var acc: tile<f32>[TB, D] = 0.0
   for k in range(0, KS, 1) {{
-    var x = X[t * TB + k :+ TB, cb :+ D]
     var w = W[k :+ 1, cb :+ D]
-    acc = acc + x * w
+    acc = acc + xs[k :+ TB, 0 :+ D] * w
   }}
   var s = acc / (1.0 + exp(-acc))
   var g: tile<f32>[TB, 1] = 1.0

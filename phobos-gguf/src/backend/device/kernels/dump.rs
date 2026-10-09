@@ -32,6 +32,12 @@ fn dump_raw_kernel_sources() {
         }
     }
     sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3)));
+    sources.push(("rms_norm_gated8".to_string(), rms_norm_rows_src(128, 1e-6, NormForm::GatedQuantized, 8)));
+    // The 4B's delta-net convolution: 32 value heads over 16 key heads of 128.
+    sources.push((
+        "delta_conv".to_string(),
+        delta_conv_src(32, 16, 128, 4, 128, 2048, DELTA_CONV_ROWS, true, (128f32).sqrt().recip()),
+    ));
     let i8: [I8Row; 11] = [
         (
             iq1s_qdot_i8_matvec_src,
