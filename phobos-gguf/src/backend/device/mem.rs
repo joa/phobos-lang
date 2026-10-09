@@ -288,30 +288,24 @@ impl DeviceBackend {
             .act_scratch
             .borrow()
             .get(at)
-            .is_none_or(|(q, s)| q.len() < m * k || s.len() < m * blocks);
+            .is_none_or(|slot| slot.q_len < m * k || slot.s_len < m * blocks);
         if too_small {
-            // Growing frees a buffer recorded launches point at, so flush
-            // them first.
-            self.flush_pending()?;
-            // SAFETY: whatever fills the slot writes every element before the
-            // projection reads it.
-            let grown = unsafe {
-                (
-                    DeviceBuffer::uninitialized(m * k)?,
-                    DeviceBuffer::uninitialized(m * blocks)?,
-                )
+            // A grown slot takes a new region and the old one stays allocated
+            // until the slots are cleared, so recorded launches reading it
+            // stay valid. Whatever fills the slot writes every element before
+            // the projection reads it.
+            let grown = ActSlot {
+                q: self.act_arena.take(m * k)?,
+                q_len: m * k,
+                s: self.act_arena.take(m * blocks * size_of::<f32>())?,
+                s_len: m * blocks,
             };
             let mut scratch = self.act_scratch.borrow_mut();
-            while scratch.len() < at {
-                // SAFETY: as above. A gap slot is grown by the `too_small`
-                // path before anything reads it.
-                scratch.push(unsafe {
-                    (
-                        DeviceBuffer::uninitialized(1)?,
-                        DeviceBuffer::uninitialized(1)?,
-                    )
-                });
-            }
+            // A gap slot is grown by the `too_small` path before anything
+            // reads it.
+            let gap = ActSlot { q: 0, q_len: 0, s: 0, s_len: 0 };
+            let len = scratch.len().max(at);
+            scratch.resize(len, gap);
             if at == scratch.len() {
                 scratch.push(grown);
             } else {
@@ -325,10 +319,10 @@ impl DeviceBackend {
     /// Device pointers to the quantized activation behind a handle.
     pub(super) fn act_ptrs(&self, act: QAct) -> Result<(u64, u64)> {
         let scratch = self.act_scratch.borrow();
-        let (q, s) = scratch
+        let slot = scratch
             .get(act.0)
             .context("use of an unknown quantized activation handle")?;
-        Ok((q.as_device_ptr().as_raw(), s.as_device_ptr().as_raw()))
+        Ok((slot.q, slot.s))
     }
 
     /// Grows the scratch a plan wants for the values it found crossing a nest.

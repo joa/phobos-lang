@@ -41,11 +41,18 @@ impl DeviceBackend {
             return Ok(());
         }
         self.stream.synchronize()?;
-        self.act_scratch.borrow_mut().clear();
+        self.clear_act_slots();
         // Cached pass graphs point into this memory, so drop them too.
         self.pass.borrow_mut().clear();
         self.pool.trim();
         Ok(())
+    }
+
+    /// Drops every quantized-activation slot and the arena under them. The
+    /// stream must be idle.
+    fn clear_act_slots(&self) {
+        self.act_scratch.borrow_mut().clear();
+        self.act_arena.reset();
     }
 
     /// Frees the prompt scratch and the pool's free list at the start of the
@@ -54,14 +61,19 @@ impl DeviceBackend {
     /// Cached pass graphs hold raw pointers, so they are dropped here too.
     /// The memory goes back to the driver, not the pool. The stream is
     /// drained first, since recorded launches may still read these buffers.
-    pub(super) fn trim_after_dense(&self) -> Result<()> {
-        if !self.drop_scratch.replace(false) {
+    ///
+    /// Another prompt pass of the same length, the next chunk of a long
+    /// prompt, keeps them: it takes the same slots, and
+    /// [`DeviceBackend::trim_after_prompt`] has already freed them if the
+    /// length changed.
+    pub(super) fn trim_after_dense(&self, rows: usize) -> Result<()> {
+        if rows > 1 || !self.drop_scratch.replace(false) {
             return Ok(());
         }
         self.stream.synchronize()?;
-        // Always free the quantized-activation slots. They are not pooled,
-        // and a prompt pass takes one per projection.
-        self.act_scratch.borrow_mut().clear();
+        // Always free the quantized-activation slots. A prompt pass takes one
+        // per projection.
+        self.clear_act_slots();
         // Cached pass graphs point into this memory, so drop them too.
         self.pass.borrow_mut().clear();
         if !self.trim_after_dense {
@@ -176,7 +188,7 @@ impl DeviceBackend {
         let pair = |v: &RefCell<Vec<(DeviceBuffer<i8>, DeviceBuffer<f32>)>>| -> usize {
             v.borrow().iter().map(|(b, s)| b.len() + 4 * s.len()).sum()
         };
-        let act = pair(&self.act_scratch);
+        let act = self.act_arena.bytes().0;
         eprintln!(
             "[vram]   handles: {} constants, {} quants, {} raw, {} slabs, {} hot slabs",
             self.constants.borrow().len(),
