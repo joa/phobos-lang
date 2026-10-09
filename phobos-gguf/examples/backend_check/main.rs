@@ -326,6 +326,8 @@ fn main() -> Result<()> {
         // two backends.
         (48, 16, 128),
         (47, 16, 128),
+        (128, 32, 128),
+        (512, 32, 128),
     ] {
         let n = rows * heads * head_dim;
         let vecs: Vec<Vec<f32>> = (0..3).map(|_| (0..n).map(|_| next()).collect()).collect();
