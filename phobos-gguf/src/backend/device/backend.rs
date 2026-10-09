@@ -430,11 +430,14 @@ impl Backend for DeviceBackend {
         self.check_distinct("rms_norm_gated", out, &[x, gain, gate]);
         let shape = self.norm_shape(width)?;
         let (act, qa_ptr, das_ptr) = self.act_slot(rows, width)?;
+        // Experiment only: PHOBOS_EXP_NORM_RPC rows a program.
+        let per: usize = std::env::var("PHOBOS_EXP_NORM_RPC").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+        let per = if rows.is_multiple_of(per) { per } else { 1 };
         self.with_kernel(
             &self.gated_norms,
-            (width, eps.to_bits()),
+            (width * 1000 + per, eps.to_bits()),
             "rms_norm_gated",
-            || rms_norm_src(width, eps, NormForm::GatedQuantized),
+            || rms_norm_rows_src(width, eps, NormForm::GatedQuantized, per),
             |module| {
                 let rb = (rows as i64) * shape.0;
                 self.launch(
@@ -448,7 +451,7 @@ impl Backend for DeviceBackend {
                         (qa_ptr, [rb, shape.1]),
                         (das_ptr, [rb, 1]),
                     ],
-                    (rows as u32, 1, 1),
+                    ((rows / per) as u32, 1, 1),
                 )
             },
         )?;

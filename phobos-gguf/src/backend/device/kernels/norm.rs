@@ -9,6 +9,11 @@ use phobos_kernels::launch::{CTA_THREADS, WARP_THREADS};
 /// the tile size is a compile-time constant. `@dynshared` because the
 /// footprint grows with `width` past the static 48 KB limit.
 pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
+    rms_norm_rows_src(width, eps, form, 1)
+}
+
+/// [`rms_norm_src`] with `rows` rows a program, in turn.
+pub(crate) fn rms_norm_rows_src(width: usize, eps: f32, form: NormForm, rows: usize) -> String {
     let blocks = width / RMS_LANE;
     let (gated, quantized) = (form.gated(), form.quantized());
     // The quantized, ungated norm is one `rms_norm_q_t` statement when some
@@ -67,14 +72,16 @@ kernel rms_norm_q(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}]
 @dynshared
 kernel {name}(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
               O: tensor<f32>[RB, {RMS_LANE}]{params}) {{
-  let r = program_id(0)
+  var g = G[0 :+ NB, 0 :+ {RMS_LANE}]
+  for ri in range(0, {rows}, 1) {{
+  let r = program_id(0) * {rows} + ri
   var x = X[r * NB :+ NB, 0 :+ {RMS_LANE}]
   var sq: tile<f32>[NB, 1] = rowsum(x * x)
   var tot: tile<f32>[1, 1] = rowsum(transpose(sq))
   var inv: tile<f32>[1, 1] = 1.0 / sqrt(tot / {width}.0 + {eps:.12})
-  var g = G[0 :+ NB, 0 :+ {RMS_LANE}]
   var n: tile<f32>[NB, {RMS_LANE}] = x * inv * g
-{body}}}
+{body}  }}
+}}
 ",
         cta = norm_cta(blocks),
         name = form.kernel()
