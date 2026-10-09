@@ -77,8 +77,7 @@ impl DeviceBackend {
             self.drop_scratch.set(false);
             self.clear_act_slots();
         }
-        // A prompt runs once, so its pass graph is not worth instantiating.
-        // Cached graphs may also point into the memory freed here.
+        // Cached pass graphs point into this memory, so drop them too.
         self.pass.borrow_mut().clear();
         if !self.trim_after_dense {
             return Ok(());

@@ -43,6 +43,11 @@ impl DeviceBackend {
                     shared: slot.shared,
                 });
             }
+            if self.streamed.get() && at + 1 >= STREAM_BATCH {
+                drop(pending);
+                self.flushed.set(true);
+                self.issue_recorded("issuing a streamed pass")?;
+            }
             return Ok(());
         }
 

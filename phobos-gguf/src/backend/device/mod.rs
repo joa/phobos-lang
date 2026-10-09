@@ -120,6 +120,10 @@ use raw::DeviceRaw;
 /// [`kernels::q8_qmma_split_src`].
 type QmmaSplitKey = (usize, usize, usize);
 
+/// Launches a streamed pass records before issuing them; see
+/// [`DeviceBackend::streamed`].
+const STREAM_BATCH: usize = 32;
+
 /// A quantized-activation slot in [`DeviceBackend::act_scratch`]: the int8
 /// values and the per-block scales, each an address and an element count.
 #[derive(Clone, Copy)]
@@ -247,6 +251,11 @@ pub struct DeviceBackend {
     eager: RefCell<Recorded>,
     recording: Cell<bool>,
     flushed: Cell<bool>,
+    /// Whether this pass issues what it records every [`STREAM_BATCH`]
+    /// launches instead of replaying it as a graph at the end. A prompt runs
+    /// once, so its graph is not worth instantiating, and issuing as it goes
+    /// lets the device work while the host records.
+    streamed: Cell<bool>,
     pending: RefCell<Vec<Recorded>>,
     recorded_len: Cell<usize>,
     /// The recorded pass's graphs, one per segment. Each sync point starts a
