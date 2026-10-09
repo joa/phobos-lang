@@ -82,6 +82,105 @@ pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
         && spec.total().is_multiple_of(ATTN_KT_ROWS)
 }
 
+/// Query rows and keys of one [`attn_tc_src`] score tile.
+pub(crate) const ATTN_TC_TILE: usize = 64;
+
+/// Bytes of scores [`attn_tc_src`] may hold at once. Past this a prompt takes
+/// [`attention_block_src`], since the scores of every head are written out
+/// in full.
+pub(crate) const ATTN_TC_SCORE_BYTES: usize = 128 << 20;
+
+/// Whether [`attn_tc_src`] takes this prompt: whole score tiles both ways,
+/// head dimension a multiple of the tile, and the score planes within
+/// [`ATTN_TC_SCORE_BYTES`].
+pub(crate) fn attn_tc_fits(spec: Attn) -> bool {
+    let score_bytes = spec.rows * spec.n_head * spec.total() * size_of::<f32>();
+    spec.rows.is_multiple_of(ATTN_TC_TILE)
+        && spec.start_pos.is_multiple_of(ATTN_TC_TILE)
+        && spec.head_dim.is_multiple_of(ATTN_TC_TILE)
+        && score_bytes <= ATTN_TC_SCORE_BYTES
+}
+
+/// Causal attention for a prompt on the tensor cores: every head's scores,
+/// a softmax over them in place, and the mix, as three launches with heads
+/// on the grid.
+///
+/// `S` is `[R, n_head * NK]`, head `h` in columns `h * NK`. The score kernel
+/// skips tiles wholly past the diagonal. The softmax reads only up to each
+/// row tile's diagonal tile and zeroes its masked half, so the mix must use
+/// the softmax's row tile, [`ATTN_SOFT_TILE`]: a taller one would read
+/// scores the softmax never normalized. Operands round to f16 on the way into
+/// the tensor cores; the softmax and both accumulations stay f32.
+pub(crate) fn attn_tc_src(head_dim: usize, group: usize) -> String {
+    let scale = (head_dim as f32).sqrt().recip();
+    let (tile, step, soft) = (ATTN_TC_TILE, ATTN_GEMM_STEP, ATTN_SOFT_TILE);
+    format!(
+        "@tensorcore
+@launch(256)
+@autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], D in [{head_dim}], G in [{group}])
+@aligned(R = TM, NK = TN, QW = D, KW = D, SW = TN)
+kernel attn_tc_scores(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  let h = program_id(2)
+  if pn * TN < NK - R + pm * TM + TM {{
+    var acc: tile<f32>[TM, TN] = 0.0
+    for kt in range(0, D, TK) {{
+      var a = Q[pm * TM :+ TM, h * D + kt :+ TK]
+      var b = K[pn * TN :+ TN, h / G * D + kt :+ TK]
+      acc += dot_t(a, b)
+    }}
+    S[pm * TM :+ TM, h * NK + pn * TN :+ TN] = acc * {scale:.9}
+  }}
+}}
+
+@launch(256)
+@autotune(TM in [{soft}], TN in [{soft}])
+@aligned(R = TM, NK = TN, SW = TN)
+kernel attn_tc_softmax(K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW], L: tensor<f32>[R, LW]) {{
+  let p = program_id(0)
+  let h = program_id(1)
+  let c = h * NK
+  let diag = NK - R + p * TM
+  var m: tile<f32>[TM, 1] = -300000000.0
+  for j in range(0, diag, TN) {{
+    m = tmax(m, rowmax(S[p * TM :+ TM, c + j :+ TN]))
+  }}
+  var d = S[p * TM :+ TM, c + diag :+ TN]
+  m = tmax(m, rowmax(d))
+  var l: tile<f32>[TM, 1] = 0.0
+  for j in range(0, diag, TN) {{
+    var e = exp(S[p * TM :+ TM, c + j :+ TN] - m)
+    l = l + rowsum(e)
+    S[p * TM :+ TM, c + j :+ TN] = e
+  }}
+  var de = tril(exp(d - m))
+  l = l + rowsum(de)
+  S[p * TM :+ TM, c + diag :+ TN] = de
+  L[p * TM :+ TM, h :+ 1] = l
+}}
+
+@tensorcore
+@launch(256)
+@autotune(TM in [{soft}], TN in [{tile}], TK in [{step}], D in [{head_dim}], G in [{group}])
+@aligned(R = TM, NK = TK, SW = TK, KW = TN, QW = TN)
+kernel attn_tc_mix(S: tensor<f32>[R, SW], V: tensor<f16>[NK, KW], L: tensor<f32>[R, LW],
+                   O: tensor<f32>[R, QW]) {{
+  let pm = program_id(0)
+  let pn = program_id(1)
+  let h = program_id(2)
+  var acc: tile<f32>[TM, TN] = 0.0
+  for kt in range(0, NK - R + pm * TM + TM, TK) {{
+    var a = S[pm * TM :+ TM, h * NK + kt :+ TK]
+    var b = V[kt :+ TK, h / G * D + pn * TN :+ TN]
+    acc += dot(a, b)
+  }}
+  O[pm * TM :+ TM, h * D + pn * TN :+ TN] = acc / L[pm * TM :+ TM, h :+ 1]
+}}
+"
+    )
+}
+
 /// Causal attention for a prompt as a score matmul, a softmax and a mix
 /// matmul, with the full `[rows, keys]` score matrix in between.
 ///

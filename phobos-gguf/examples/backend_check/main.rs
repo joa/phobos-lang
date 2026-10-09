@@ -598,6 +598,14 @@ fn main() -> Result<()> {
         (1, 600, 16, 2, 128),
         (8, 512, 16, 2, 128),
         (88, 512, 16, 2, 128),
+        // The 4B's attention block, sixteen query heads over four key heads:
+        // a pp512 prompt, and a continuation onto a cache two tiles deep.
+        (512, 0, 16, 4, 256),
+        (192, 128, 16, 4, 256),
+        // Ragged prompts: the tensor cores take the whole tiles and the
+        // blocked kernel the rest, continuing from where the tiles end.
+        (300, 0, 16, 4, 256),
+        (65, 64, 8, 4, 256),
     ] {
         let spec = Attn {
             rows,
@@ -640,8 +648,13 @@ fn main() -> Result<()> {
             b.attention(qb, kb, vb, spec, out)?;
             read_vec(b, out, q.len())
         };
-        check(
+        // A prompt of at least one tile onto a cache and with a head dimension
+        // that tile by 64 takes the tensor-core path for its whole tiles,
+        // which rounds the queries, keys and probabilities to f16.
+        let tensor_core = rows >= 64 && start_pos.is_multiple_of(64) && head_dim.is_multiple_of(64);
+        check_within(
             &format!("attention [{rows} @ {start_pos} x {n_head}/{n_kv} x {head_dim}]"),
+            if tensor_core { 3e-3 } else { 1e-4 },
             &run(&host)?,
             &run(&gpu)?,
         );

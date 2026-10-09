@@ -1,8 +1,93 @@
-// The four attention paths: gemm, blocked, decode and row-at-a-time.
+// The five attention paths: tensor-core, gemm, blocked, decode and
+// row-at-a-time.
 
 use super::*;
 
 impl DeviceBackend {
+    /// Picks the attention path for this shape: the tensor cores for a
+    /// prompt's whole tiles, then the blocked kernel, the two-matmul path,
+    /// the decode split, and a row at a time.
+    pub(super) fn attention_any(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+        let block = attention_block_tile(spec.head_dim);
+        // The tensor cores take the whole tiles of the prompt, and the
+        // blocked kernel the rows past them, which continue from where the
+        // tiles end. A tile is a whole number of query blocks.
+        let tiled = Attn {
+            rows: spec.rows / ATTN_TC_TILE * ATTN_TC_TILE,
+            ..spec
+        };
+        if self.attn_tc_on && tiled.rows > 0 && attn_tc_fits(tiled) {
+            self.attention_tc(q, keys, values, tiled, out)?;
+            let rest = Attn {
+                rows: spec.rows - tiled.rows,
+                start_pos: tiled.total(),
+                ..spec
+            };
+            if rest.rows == 0 {
+                return Ok(());
+            }
+            return self.attention_blocked(q, keys, values, rest, block, out, tiled.rows);
+        }
+        // Next the blocked kernel. Its causal mask needs the query blocks
+        // aligned to the tile, so a misaligned start falls through.
+        if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
+            return self.attention_blocked(q, keys, values, spec, block, out, 0);
+        }
+        // Next, the two-matmul path if the shape tiles evenly.
+        if attn_gemm_fits(spec) {
+            return self.attention_gemm(q, keys, values, spec, out);
+        }
+        match spec.rows {
+            1 => self.attention_decode(q, keys, values, spec, out),
+            _ => self.attention_rows(q, keys, values, spec, out),
+        }
+    }
+
+    /// Causal attention for a prompt on the tensor cores, every head at once.
+    /// See [`attn_tc_src`]; the caller checks [`attn_tc_fits`].
+    pub(super) fn attention_tc(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+        let (rows, heads, nk) = (spec.rows, spec.n_head, spec.total());
+        let (r, n) = (rows as i64, nk as i64);
+        let (qw, kw, sw) = ((heads * spec.head_dim) as i64, spec.kv_width() as i64, (heads * nk) as i64);
+        let scores = self.alloc(rows * heads * nk)?;
+        let sums = self.alloc(rows * heads)?;
+        let result = self.with_kernel(
+            &self.attn_tc,
+            (spec.head_dim, spec.group()),
+            "attn_tc",
+            || attn_tc_src(spec.head_dim, spec.group()),
+            |module| {
+                let (k, v) = ((self.hptr(keys, 0)?, [n, kw]), (self.hptr(values, 0)?, [n, kw]));
+                let (s, l) = ((self.ptr(scores, 0)?, [r, sw]), (self.ptr(sums, 0)?, [r, heads as i64]));
+                self.launch(
+                    module,
+                    "attn_tc_scores",
+                    &[(self.ptr(q, 0)?, [r, qw]), k, s],
+                    ((rows / ATTN_TC_TILE) as u32, (nk / ATTN_TC_TILE) as u32, heads as u32),
+                )?;
+                self.launch(
+                    module,
+                    "attn_tc_softmax",
+                    &[k, s, l],
+                    ((rows / ATTN_SOFT_TILE) as u32, heads as u32, 1),
+                )?;
+                self.launch(
+                    module,
+                    "attn_tc_mix",
+                    &[s, v, l, (self.ptr(out, 0)?, [r, qw])],
+                    (
+                        (rows / ATTN_SOFT_TILE) as u32,
+                        (spec.head_dim / ATTN_TC_TILE) as u32,
+                        heads as u32,
+                    ),
+                )
+            },
+        );
+        self.release(scores);
+        self.release(sums);
+        result
+    }
+
     /// Causal attention for a prompt, one head at a time, as two matmuls with
     /// the scores materialized in between. See [`attn_gemm_src`].
     pub(super) fn attention_gemm(
@@ -125,7 +210,9 @@ impl DeviceBackend {
     /// [`attention_block_src`].
     ///
     /// `block` is the query rows per program. The caller ensures the cache
-    /// depth is a multiple of it.
+    /// depth is a multiple of it. The queries and outputs start `row` rows
+    /// into `q` and `out`.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn attention_blocked(
         &self,
         q: Buf,
@@ -134,8 +221,10 @@ impl DeviceBackend {
         spec: Attn,
         block: usize,
         out: Buf,
+        row: usize,
     ) -> Result<()> {
         let (rows, qw) = (spec.rows as i64, (spec.n_head * spec.head_dim) as i64);
+        let at = row * spec.n_head * spec.head_dim;
         let (nk, kw) = (spec.total() as i64, spec.kv_width() as i64);
         self.with_kernel(
             &self.blocked,
@@ -147,10 +236,10 @@ impl DeviceBackend {
                     module,
                     "attention_block",
                     &[
-                        (self.ptr(q, 0)?, [rows, qw]),
+                        (self.ptr(q, at)?, [rows, qw]),
                         (self.hptr(keys, 0)?, [nk, kw]),
                         (self.hptr(values, 0)?, [nk, kw]),
-                        (self.ptr(out, 0)?, [rows, qw]),
+                        (self.ptr(out, at)?, [rows, qw]),
                     ],
                     (spec.rows.div_ceil(block) as u32, spec.n_head as u32, 1),
                 )

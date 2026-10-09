@@ -547,20 +547,7 @@ impl Backend for DeviceBackend {
 
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         self.check_distinct("attention", out, &[q]);
-        // Prefer the blocked kernel. Its causal mask needs the query blocks
-        // aligned to the tile, so a misaligned start falls through.
-        let block = attention_block_tile(spec.head_dim);
-        if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
-            return self.attention_blocked(q, keys, values, spec, block, out);
-        }
-        // Next, the two-matmul path if the shape tiles evenly.
-        if attn_gemm_fits(spec) {
-            return self.attention_gemm(q, keys, values, spec, out);
-        }
-        match spec.rows {
-            1 => self.attention_decode(q, keys, values, spec, out),
-            _ => self.attention_rows(q, keys, values, spec, out),
-        }
+        self.attention_any(q, keys, values, spec, out)
     }
 
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()> {

@@ -314,6 +314,11 @@ pub struct DeviceBackend {
     /// The blocked attention kernels, keyed like `attentions`.
     blocked: RefCell<HashMap<(usize, usize, usize), Module>>,
     attn_gemm: RefCell<HashMap<usize, Module>>,
+    /// The tensor-core prompt attention, by head dimension and group size.
+    attn_tc: RefCell<HashMap<(usize, usize), Module>>,
+    /// Whether a prompt's attention takes [`kernels::attn_tc_src`] where it
+    /// fits. On by default; `PHOBOS_ATTN_TC=0` opts out.
+    attn_tc_on: bool,
     /// Addressed by [`Buf`]; a slot is `None` while free.
     slots: RefCell<Vec<Option<mem::Slot>>>,
     free_slots: RefCell<Vec<usize>>,
