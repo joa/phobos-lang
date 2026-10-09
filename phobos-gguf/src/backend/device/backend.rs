@@ -340,7 +340,7 @@ impl Backend for DeviceBackend {
         // and needs no scratch. See `raw_qmma_eligible` for the shapes it
         // takes.
         if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
-            return self.project_raw_qmma(None, a, m, k, w, n, out);
+            return self.project_raw_qmma(None, a, m, k, w, n, (out, 0));
         }
         if m > 1 && DEQUANT_FORMATS.iter().any(|&q| self.raw_quant_is(w, q)) {
             return self.project_raw_dense(a, m, k, w, n, out);
@@ -359,12 +359,21 @@ impl Backend for DeviceBackend {
         out: Buf,
     ) -> Result<()> {
         if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
-            return self.project_raw_qmma(Some(act), a, m, k, w, n, out);
+            return self.project_raw_qmma(Some(act), a, m, k, w, n, (out, 0));
         }
         if m == 1 {
             return self.project_raw(Some(act), a, m, k, w, n, out);
         }
         self.matmul_raw(a, m, k, w, n, out)
+    }
+
+    fn matmul_raw_at(&self, act: Option<QAct>, at: RawAt) -> Result<bool> {
+        let RawAt { a, m, k, w, n, out } = at;
+        if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
+            self.project_raw_qmma(act, a, m, k, w, n, out)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn zeroed_state(&self, len: usize) -> Result<Buf> {

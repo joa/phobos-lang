@@ -620,16 +620,21 @@ impl Model {
                     }
                     None => {
                         let input = self.norm(backend, resid, rows, gain, normed, qkv)?;
-                        let qkv_buf = qkv.forward_shared(backend, input, rows)?;
-                        copy_qkv_into_history(
-                            backend,
-                            Plane { buf: qkv_buf, offset: 0, pitch: channels },
-                            history,
-                            carried,
-                            rows,
-                            channels,
-                        )?;
-                        backend.release(qkv_buf);
+                        // The convolution reads the new rows right after the
+                        // carried ones, so the projection lands there if the
+                        // backend can, rather than being copied in.
+                        if !qkv.project_into_shared_at(backend, input, rows, (history, carried * channels))? {
+                            let qkv_buf = qkv.forward_shared(backend, input, rows)?;
+                            copy_qkv_into_history(
+                                backend,
+                                Plane { buf: qkv_buf, offset: 0, pitch: channels },
+                                history,
+                                carried,
+                                rows,
+                                channels,
+                            )?;
+                            backend.release(qkv_buf);
+                        }
 
                         let gate_buf = gate.forward_shared(backend, input, rows)?;
                         // The gates read the row unfolded, which `normed` is.
