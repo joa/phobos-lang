@@ -40,6 +40,13 @@ pub(super) trait Isa {
     /// Whether the chip has integer tensor cores.
     fn has_int8_mma(&self) -> bool;
 
+    /// Whether to convert an i32 to f32 with `cvt` rather than an integer
+    /// add and a float add. The pair keeps the conversion off its own
+    /// narrow pipe; from sm_80 on, where an epilogue already fills the float
+    /// and integer pipes, the one instruction measured faster. Untested
+    /// below sm_80.
+    fn cheap_int_to_float(&self) -> bool;
+
     /// Shared memory bytes one SM splits across its resident CTAs, plus the
     /// two other occupancy limits below. Only [`Codegen::wmma_should_pad`]
     /// reads them.
@@ -349,6 +356,10 @@ impl<'c> Codegen<'c> {
 
     pub(super) fn has_int8_mma(&self) -> bool {
         self.isa.has_int8_mma()
+    }
+
+    pub(super) fn cheap_int_to_float(&self) -> bool {
+        self.isa.cheap_int_to_float()
     }
 
     /// The k of the native f16 mma.sync. Call only after

@@ -554,6 +554,16 @@ impl<'c> Codegen<'c> {
                 }
             }
 
+            // -(sa * asum) per row: the minimum term's factor, shared by
+            // every column of the patch.
+            let mut neg_mins = Vec::with_capacity(PATCH as usize);
+            if mw_st.is_some() {
+                for r in 0..PATCH as usize {
+                    let p = self.push(block, arith::mulf(sa[r], asum[r], self.loc))?;
+                    neg_mins.push(self.push(block, arith::negf(p, self.loc))?);
+                }
+            }
+
             let (mut a_frags, mut w_frags) = (Vec::new(), Vec::new());
             for h in 0..halves {
                 let chunk = self.const_index(block, s * halves + h)?;
@@ -610,15 +620,14 @@ impl<'c> Codegen<'c> {
                             let inner = self.elem_mac(block, f32_t, c1, w1, inner)?;
                             self.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
                         } else if mw_st.is_some() {
-                            // acc += sa * (c * sw - asum * mw): the run's
-                            // minimum, weighted by the activation's sum.
+                            // acc += (sa * sw) * c - (sa * asum) * mw: the
+                            // run's minimum, weighted by the activation's sum.
                             let w0 = sw_of(self, 0)?;
                             let as_f = raw_of(self, 0)?;
                             let mw0 = self.vec_extract(block, mw[c as usize], &[dj], f32_t)?;
-                            let inner = self.push(block, arith::mulf(as_f, w0, self.loc))?;
-                            let sub = self.push(block, arith::mulf(asum[r as usize], mw0, self.loc))?;
-                            let inner = self.push(block, arith::subf(inner, sub, self.loc))?;
-                            self.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
+                            let scale = self.push(block, arith::mulf(sa[r as usize], w0, self.loc))?;
+                            let acc = self.elem_mac(block, f32_t, as_f, scale, accs[slot])?;
+                            self.elem_mac(block, f32_t, neg_mins[r as usize], mw0, acc)?
                         } else {
                             let w0 = sw_of(self, 0)?;
                             let scale = self.push(block, arith::mulf(sa[r as usize], w0, self.loc))?;

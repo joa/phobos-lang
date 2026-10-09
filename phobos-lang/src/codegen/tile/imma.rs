@@ -122,20 +122,23 @@ impl<'c> Codegen<'c> {
         Ok(true)
     }
 
-    /// A small signed integer as an f32, without the conversion instruction.
+    /// A small signed integer as an f32.
     ///
-    /// Adding the bits of 1.5 * 2^23 to `value` as an integer gives the f32
-    /// of `1.5 * 2^23 + value`. Subtracting the constant as a float then
+    /// `cvt` where the target's `cheap_int_to_float` says so. Otherwise adding the
+    /// bits of 1.5 * 2^23 to `value` as an integer gives the f32 of
+    /// `1.5 * 2^23 + value`, and subtracting the constant as a float then
     /// leaves the value exactly.
     ///
     /// Requires `|value| < 2^22`. A Q8_0 block guarantees this, since 32
-    /// products of two int8s cannot exceed 32 * 127 * 127. Avoids `cvt`,
-    /// which issues at a quarter rate on Turing.
+    /// products of two int8s cannot exceed 32 * 127 * 127.
     pub(super) fn small_int_to_f32(
         &self,
         block: &Block<'c>,
         value: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
+        if self.cheap_int_to_float() {
+            return self.push(block, arith::sitofp(value, self.f32_t, self.loc));
+        }
         const MAGIC_BITS: i64 = 0x4B40_0000;
         const MAGIC: f64 = 12_582_912.0;
         let bias = self.push(

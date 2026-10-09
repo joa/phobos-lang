@@ -120,6 +120,10 @@ impl Isa for Nvidia {
         self.cc >= 75
     }
 
+    fn cheap_int_to_float(&self) -> bool {
+        self.cc >= 80
+    }
+
     fn smem_per_sm(&self) -> i64 {
         (match self.cc {
             cc if cc >= 90 => 228, // Hopper
