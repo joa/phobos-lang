@@ -65,6 +65,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_FUSED_MIX` | opt-out | on | The delta net's convolution and gates as the tail of the fused projection; costs a barrier, so gated apart. |
 | `PHOBOS_FUSED_ATTN_OUT` | opt-out | on | Attention's output epilogue (quantize, output projection into the residual) as one kernel. |
 | `PHOBOS_FUSED_STORE2D` | opt-out | on | Attention's key and value cache writes in one launch instead of two. |
+| `PHOBOS_DELTA_SCAN` | opt-out | on | A prompt's gated delta rule as the register-state scan (`delta_scan_t`), one pass over the positions with the state in registers. Off, the chunked form (`delta_wy` and `delta_scan`). |
 | `PHOBOS_ATTN_TC` | opt-out | on | The tensor-core prompt attention: every head's scores written out, a softmax in place, and the mix, for a prompt whose rows, cache depth and head dimension tile by 64 and whose scores fit 128 MiB. Off, the blocked kernel. |
 | `PHOBOS_ATTN_PERSIST` | opt-out | on | The decode attention's persistent split-and-merge kernel. Off, the launched split path. Kept apart from `PHOBOS_FUSED` since a `grid_barrier` that does not fit hangs rather than slows; occupancy is checked before it is taken. |
 | `PHOBOS_IQ1S_DP4A` | opt-out | on | The `dp4a` decode matvecs against an int8 activation, for every raw format. Off, the f32 matvec. It quantizes the activation where the host reference does not, so device against host cannot judge it; `backend_check` runs both device ways instead. |

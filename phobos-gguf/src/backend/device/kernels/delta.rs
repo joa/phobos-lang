@@ -196,6 +196,42 @@ kernel delta_scan(Q:   tensor<f32>[N, QW],
     )
 }
 
+/// State columns one program of [`delta_scan_reg_src`] owns: two warps of
+/// two columns each.
+pub(crate) const DELTA_REG_COLS: usize = 4;
+
+/// The gated delta rule over a prompt with the state in registers: one
+/// program per head and [`DELTA_REG_COLS`] state columns, walking the
+/// positions in order. See `delta_scan_t` in SPEC.md.
+///
+/// The operands are the packed planes, one row per position with the heads
+/// side by side: `Q`, `K`, `V`, `O` as `[N, heads * D]`, the gates as
+/// `[N, heads]`, the state as `[heads * D, D]`.
+pub(crate) fn delta_scan_reg_src(head_dim: usize) -> String {
+    let cols = DELTA_REG_COLS;
+    let threads = cols / 2 * 32;
+    format!(
+        "@launch({threads})
+@autotune(D in [{head_dim}], C in [{cols}])
+@aligned(SD = D, SW = C, W = D, GW = 1)
+kernel delta_scan_reg(Q: tensor<f32>[N, W], K: tensor<f32>[N, W], V: tensor<f32>[N, W],
+                  DEC: tensor<f32>[N, GW], BET: tensor<f32>[N, GW],
+                  S: tensor<f32>[SD, SW], O: tensor<f32>[N, W]) {{
+  let h = program_id(0)
+  let jn = program_id(1)
+  let q = Q[:, h * D :+ D]
+  let k = K[:, h * D :+ D]
+  let v = V[:, h * D + jn * C :+ C]
+  let o = O[:, h * D + jn * C :+ C]
+  let dec = DEC[:, h :+ 1]
+  let bet = BET[:, h :+ 1]
+  let st = S[h * D :+ D, jn * C :+ C]
+  delta_scan_t(q, k, v, dec, bet, st, o)
+}}
+"
+    )
+}
+
 /// Positions one chunk covers, bounded by the 48 KB static shared memory
 /// limit.
 pub(crate) const DELTA_CHUNK: usize = 16;
