@@ -180,6 +180,7 @@ impl Backend for DeviceBackend {
         self.recorded_len.set(0);
         self.segment.set(0);
         self.flushed.set(false);
+        self.streamed.set(rows > 1);
         self.recording.set(true);
         if self.report_pass.get() != 0 {
             self.report.borrow_mut().clear();
@@ -190,7 +191,7 @@ impl Backend for DeviceBackend {
     fn end_pass(&self) -> Result<()> {
         // A flushed pass is only partly recorded. Issue the tail as launches
         // and keep the cached graph for the next whole pass to replace.
-        if self.flushed.replace(false) {
+        if self.flushed.replace(false) | self.streamed.replace(false) {
             self.recording.set(false);
             return self.issue_recorded("issuing the tail of a flushed pass");
         }

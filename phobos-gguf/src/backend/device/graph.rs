@@ -227,7 +227,9 @@ impl DeviceBackend {
     /// The launches so far become a cached segment of their own. Later ones
     /// start the next segment.
     pub(super) fn sync_point(&self, meanwhile: impl FnOnce() -> Result<()>) -> Result<()> {
-        if self.recording.get() {
+        if self.streamed.get() {
+            self.issue_recorded("issuing a streamed pass")?;
+        } else if self.recording.get() {
             self.replay_segment()?;
         }
         meanwhile()?;

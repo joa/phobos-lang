@@ -164,6 +164,7 @@ impl DeviceBackend {
             eager: RefCell::new(Recorded::default()),
             recording: Cell::new(false),
             flushed: Cell::new(false),
+            streamed: Cell::new(false),
             pending: RefCell::new(Vec::new()),
             recorded_len: Cell::new(0),
             copy_stream,
