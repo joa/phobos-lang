@@ -48,6 +48,13 @@ impl<'c> Codegen<'c> {
                         let zero = self.const_index(block, 0)?;
                         self.set_ir(ir.result(op), Lowered::Scalar(zero));
                     }
+                    Intrinsic::DeltaScan => {
+                        let tiles = self.tiles_ir(ir, op, 0..7)?;
+                        let refs: [&MemVal<'c>; 7] = std::array::from_fn(|k| &tiles[k]);
+                        self.delta_scan_raw(block, refs)?;
+                        let zero = self.const_index(block, 0)?;
+                        self.set_ir(ir.result(op), Lowered::Scalar(zero));
+                    }
                     other => {
                         let tiles = self.tiles_ir(ir, op, 0..n)?;
                         let out = self.intrinsic_fresh(block, ir, op, other, &tiles)?;
@@ -215,7 +222,7 @@ impl<'c> Codegen<'c> {
                 self.tile_argsel_bc(block, &t[0], &t[1], &t[2], &t[3], &out)?;
                 out
             }
-            Intrinsic::RawQdecode(_) | Intrinsic::RmsNormQ | Intrinsic::WarpPartial => {
+            Intrinsic::RawQdecode(_) | Intrinsic::RmsNormQ | Intrinsic::WarpPartial | Intrinsic::DeltaScan => {
                 bail!("{} yields no fresh buffer", i.name())
             }
         })

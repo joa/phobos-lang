@@ -19,6 +19,7 @@ impl Build {
             "rms_norm_q_t" => self.emit_rms_norm_q(args),
             "grid_barrier" => self.emit_grid_barrier(args),
             "warp_partial" => self.emit_warp_partial(args),
+            "delta_scan_t" => self.emit_delta_scan(args),
             "dot" => {
                 let (a, b) = self.dot_operands(args)?;
                 let (ash, bsh) = (self.shape(a), self.shape(b));
@@ -504,6 +505,20 @@ impl Build {
             &[q, k, v, wm, wl, wacc, scale, lo, hi, col],
             Type::INDEX,
         );
+        Ok(Rv::Scalar(zero))
+    }
+
+    /// `delta_scan_t(q, k, v, dec, bet, st, o)`, every operand a view taken by
+    /// name.
+    fn emit_delta_scan(&mut self, args: &[Expr]) -> Result<Rv> {
+        let [q, k, v, dec, bet, st, o] = args else {
+            bail!("delta_scan_t expects (q, k, v, dec, bet, state, o)");
+        };
+        let mut operands = Vec::with_capacity(7);
+        for (e, what) in [(q, "q"), (k, "k"), (v, "v"), (dec, "dec"), (bet, "bet"), (st, "state"), (o, "o")] {
+            operands.push(self.named_tile(e, &format!("delta_scan_t {what}"))?);
+        }
+        let zero = self.value(OpKind::Intrinsic(Intrinsic::DeltaScan), &operands, Type::INDEX);
         Ok(Rv::Scalar(zero))
     }
 

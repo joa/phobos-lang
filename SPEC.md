@@ -208,6 +208,7 @@ All take a rank-2 tile with a static shape.
 | Built-in | Semantics |
 |---|---|
 | `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)` | Split-key online softmax. Warp `w` takes the `w`-th of `W` equal pieces of keys `[lo, hi)` and, for each query row `i`, computes `s_j = scale * q[i, :] . K[j, col :+ D]`, writing `WM[i, w] = max_j s_j`, `WL[i, w] = sum_j exp(s_j - WM[i, w])`, and `WACC[i * W + w, :] = sum_j exp(s_j - WM[i, w]) * V[j, col :+ D]`. Returns `0`. |
+| `delta_scan_t(q, k, v, dec, bet, st, o)` | The gated delta rule over the rows of `q`, the state in registers. Views: `q`, `k` `[N, D]`; `v`, `o` `[N, C]`; `dec`, `bet` `[N, 1]`; `st` `[D, C]`, read at the start and written at the end. Per row `t`: `S = dec_t * S`, `S += k_t^T (bet_t * (v_t - k_t S))`, `o_t = q_t S`. Warp `w` owns columns `2w, 2w + 1`, so `C` must be twice the CTA's warps; lane `l` owns rows `l * D / 32 ..`, so `D` must be a multiple of 32. Every view must be in bounds. Returns `0`. |
 
 Shapes: `q` a named `[QG, D]` tile, unmasked; `K`, `V` named `f16` tensor parameters; `WM`, `WL` named `[QG, W]` tiles and `WACC` a named `[QG * W, D]` tile; with `D % 32 == 0` and `W` = CTA threads / 32. Merging the `W` partials is the caller's.
 

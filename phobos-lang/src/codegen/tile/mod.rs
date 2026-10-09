@@ -44,6 +44,7 @@ mod qmma_signed;
 mod reduce;
 mod vector;
 mod warp_attn;
+mod delta_scan;
 
 pub(in crate::codegen) use qdecode::QFormat;
 pub(in crate::codegen) use qdot::QWeight;
