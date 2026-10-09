@@ -813,7 +813,7 @@ impl Verifier<'_> {
                 }
                 self.intrinsic_operands(op, *i, n_ops);
                 match i {
-                    Intrinsic::RmsNormQ => {
+                    Intrinsic::RmsNormQ | Intrinsic::RmsNormGatedQ => {
                         if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::F32) {
                             self.err(op, "result must be the f32 inverse rms");
                         }
@@ -840,11 +840,17 @@ impl Verifier<'_> {
 
     /// An intrinsic's own operands, before any destination. Each intrinsic
     /// checks its own shapes when it is emitted. This checks only the shared
-    /// rules: no fragments, and `rms_norm_q_t`'s `eps` is a scalar.
+    /// rules: no fragments, and the `eps` of `rms_norm_q_t` and its gated
+    /// form is a scalar.
     fn intrinsic_operands(&mut self, op: OpId, i: Intrinsic, n: usize) {
         for k in 0..n {
             let v = self.ir.operand(op, k);
-            if matches!(i, Intrinsic::RmsNormQ) && k == 2 {
+            let eps_at = match i {
+                Intrinsic::RmsNormQ => Some(2),
+                Intrinsic::RmsNormGatedQ => Some(3),
+                _ => None,
+            };
+            if eps_at == Some(k) {
                 self.want_scalar(op, k, "eps");
             } else if matches!(self.ir.ty(v), Type::Frags(_) | Type::Gemm(_)) {
                 self.err(op, format!("operand {k} cannot be an accumulator"));

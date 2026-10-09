@@ -1,6 +1,7 @@
 // `rms_norm_q_t(x, g, eps, [o,] q, s)`: one row's RMS normalization with its
 // gain, plus its Q8_0 copy with one scale per 32-element block, as one
-// statement.
+// statement. `rms_norm_gated_q_t(x, z, g, eps, [o,] q, s)` also multiplies
+// the normalized row by `silu(z)` before it is stored and quantized.
 //
 // A thread owns four contiguous elements of every `4 * threads`. The
 // reductions are warp shuffles plus one shared word per warp.
@@ -19,6 +20,7 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         x: MemVal<'c>,
+        z: Option<MemVal<'c>>,
         g: MemVal<'c>,
         eps: Value<'c, 'c>,
         o: Option<MemVal<'c>>,
@@ -30,6 +32,9 @@ impl<'c> Codegen<'c> {
         if let Some(o) = &o {
             checked.push((o, "out"));
         }
+        if let Some(z) = &z {
+            checked.push((z, "gate"));
+        }
         for (t, what) in checked {
             if t.shape.len() != 2 || t.shape.contains(&DYN) {
                 bail!("rms_norm_q_t {what} must be a rank-2 tile of static shape");
@@ -40,8 +45,9 @@ impl<'c> Codegen<'c> {
                 bail!("rms_norm_q_t {what} must be an in-bounds slice of a tensor; `@aligned` promises that");
             }
         }
-        if x.elem != f32_t || g.elem != f32_t || s.elem != f32_t || o.as_ref().is_some_and(|o| o.elem != f32_t) {
-            bail!("rms_norm_q_t x, gain, out and scales must be f32");
+        let not_f32 = |t: &Option<MemVal<'c>>| t.as_ref().is_some_and(|t| t.elem != f32_t);
+        if x.elem != f32_t || g.elem != f32_t || s.elem != f32_t || not_f32(&o) || not_f32(&z) {
+            bail!("rms_norm_q_t x, gate, gain, out and scales must be f32");
         }
         if q.elem != i8_t {
             bail!("rms_norm_q_t q must be int8");
@@ -56,6 +62,9 @@ impl<'c> Codegen<'c> {
         self.check_shapes(&x.shape, &g.shape, "rms_norm_q_t gain")?;
         if let Some(o) = &o {
             self.check_shapes(&x.shape, &o.shape, "rms_norm_q_t out")?;
+        }
+        if let Some(z) = &z {
+            self.check_shapes(&x.shape, &z.shape, "rms_norm_gated_q_t gate")?;
         }
         self.check_shapes(&x.shape, &q.shape, "rms_norm_q_t q")?;
         self.check_shapes(&[nb, 1], &s.shape, "rms_norm_q_t scales")?;
@@ -152,13 +161,26 @@ impl<'c> Codegen<'c> {
         for (row, col, present) in &at {
             let v = self.load4_present(block, x.mem, &[*row, *col], *present)?;
             let gv = self.load4_present(block, g.mem, &[*row, *col], *present)?;
+            let zv = match &z {
+                Some(z) => Some(self.load4_present(block, z.mem, &[*row, *col], *present)?),
+                None => None,
+            };
             let mut n = Vec::with_capacity(4);
             let mut mx = self.zero_scalar(block, f32_t)?;
             for k in 0..4 {
                 let vk = self.vec_extract(block, v, &[k], f32_t)?;
                 let gk = self.vec_extract(block, gv, &[k], f32_t)?;
                 let nk = self.push(block, arith::mulf(vk, inv, self.loc))?;
-                let nk = self.push(block, arith::mulf(nk, gk, self.loc))?;
+                let mut nk = self.push(block, arith::mulf(nk, gk, self.loc))?;
+                if let Some(zv) = zv {
+                    // silu(z) = z / (1 + exp(-z)), as the tile form computes it.
+                    let zk = self.vec_extract(block, zv, &[k], f32_t)?;
+                    let neg_z = self.push(block, arith::negf(zk, self.loc))?;
+                    let e = self.approx_exp(block, neg_z)?;
+                    let denom = self.push(block, arith::addf(one_f, e, self.loc))?;
+                    let silu = self.push(block, arith::divf(zk, denom, self.loc))?;
+                    nk = self.push(block, arith::mulf(nk, silu, self.loc))?;
+                }
                 let neg = self.push(block, arith::negf(nk, self.loc))?;
                 let ak = self.fmax(block, nk, neg)?;
                 mx = self.fmax(block, mx, ak)?;
@@ -210,8 +232,8 @@ impl<'c> Codegen<'c> {
         for t in [&x, &g, &q, &s] {
             self.release(t);
         }
-        if let Some(o) = &o {
-            self.release(o);
+        for t in [&o, &z].into_iter().flatten() {
+            self.release(t);
         }
         self.barrier(block)?;
         Ok(inv)

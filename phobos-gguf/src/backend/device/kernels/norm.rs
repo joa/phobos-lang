@@ -27,6 +27,24 @@ kernel rms_norm_q(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}]
 "
         );
     }
+    // The gated, quantized norm likewise, with the gate read in the same
+    // pass.
+    if quantized && gated && let Some(cta) = norm_q_cta(width) {
+        return format!(
+            "@launch({cta})
+@autotune(NB in [{blocks}])
+@aligned(RB = NB, MB = NB, D1 = 1)
+kernel rms_norm_gated(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
+              O: tensor<f32>[RB, {RMS_LANE}], Z: tensor<f32>[RB, {RMS_LANE}],
+              Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]) {{
+  let r = program_id(0)
+  rms_norm_gated_q_t(X[r * NB :+ NB, 0 :+ {RMS_LANE}], Z[r * NB :+ NB, 0 :+ {RMS_LANE}],
+                     G[0 :+ NB, 0 :+ {RMS_LANE}], {eps:.12}, O[r * NB :+ NB, 0 :+ {RMS_LANE}],
+                     Q[r * NB :+ NB, 0 :+ {RMS_LANE}], S[r * NB :+ NB, 0 :+ 1])
+}}
+"
+        );
+    }
     let mut params = String::new();
     let mut body = String::new();
 

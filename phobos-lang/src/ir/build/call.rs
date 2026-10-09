@@ -17,6 +17,7 @@ impl Build {
             }
             "atomic_add" => self.emit_atomic_add(args),
             "rms_norm_q_t" => self.emit_rms_norm_q(args),
+            "rms_norm_gated_q_t" => self.emit_rms_norm_gated_q(args),
             "grid_barrier" => self.emit_grid_barrier(args),
             "warp_partial" => self.emit_warp_partial(args),
             "delta_scan_t" => self.emit_delta_scan(args),
@@ -455,6 +456,37 @@ impl Build {
 
     /// `rms_norm_q_t(x, gain, eps, [out,] q, scales)`. Yields the f32
     /// inverse rms; the emitter checks the shapes.
+    /// `rms_norm_gated_q_t(x, z, gain, eps, [out,] q, scales)`: operands in
+    /// that order.
+    fn emit_rms_norm_gated_q(&mut self, args: &[Expr]) -> Result<Rv> {
+        let (x, z, g, eps, o, q, s) = match args {
+            [x, z, g, eps, o, q, s] => (x, z, g, eps, Some(o), q, s),
+            [x, z, g, eps, q, s] => (x, z, g, eps, None, q, s),
+            _ => bail!("rms_norm_gated_q_t expects (x, gate, gain, eps, [out,] q, scales)"),
+        };
+        let tile = |cg: &mut Self, e: &Expr, what: &str| match cg.emit_expr(e)? {
+            Rv::Tile(t) => Ok(t),
+            Rv::Scalar(_) => bail!("rms_norm_gated_q_t {what} must be a tile"),
+        };
+        let x = tile(self, x, "x")?;
+        let z = tile(self, z, "gate")?;
+        let g = tile(self, g, "gain")?;
+        let eps = self.emit_scalar(eps)?;
+        let o = o.map(|o| tile(self, o, "out")).transpose()?;
+        let q = tile(self, q, "q")?;
+        let s = tile(self, s, "scales")?;
+        let mut operands = vec![x, z, g, eps];
+        operands.extend(o);
+        operands.push(q);
+        operands.push(s);
+        let inv = self.value(
+            OpKind::Intrinsic(Intrinsic::RmsNormGatedQ),
+            &operands,
+            Type::Scalar(Scalar::F32),
+        );
+        Ok(Rv::Scalar(inv))
+    }
+
     fn emit_rms_norm_q(&mut self, args: &[Expr]) -> Result<Rv> {
         let (x, g, eps, o, q, s) = match args {
             [x, g, eps, o, q, s] => (x, g, eps, Some(o), q, s),
