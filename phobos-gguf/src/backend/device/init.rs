@@ -213,6 +213,8 @@ impl DeviceBackend {
             argmax_scratch: RefCell::new(None),
             blocked: RefCell::new(HashMap::new()),
             attn_gemm: RefCell::new(HashMap::new()),
+            attn_tc: RefCell::new(HashMap::new()),
+            attn_tc_on: env_flag_on("PHOBOS_ATTN_TC"),
             slots: RefCell::new(Vec::new()),
             free_slots: RefCell::new(Vec::new()),
             pool: Pool::new(),
