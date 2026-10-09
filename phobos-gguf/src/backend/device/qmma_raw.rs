@@ -149,7 +149,7 @@ impl DeviceBackend {
         k: usize,
         w: RawBuf,
         n: usize,
-        out: Buf,
+        (out, out_at): (Buf, usize),
     ) -> Result<()> {
         let (qtm, qtn, _) = qmma_tile();
         let raws = self.raw_quants.borrow();
@@ -182,10 +182,10 @@ impl DeviceBackend {
                     self.quantize_act_into(slot, a, m, k)?
                 }
             };
-            let dest = if padded {
-                self.dense_scratch(1, m_pad * n_pad)?
+            let (dest, dest_at) = if padded {
+                (self.dense_scratch(1, m_pad * n_pad)?, 0)
             } else {
-                out
+                (out, out_at)
             };
             let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
             let mut operands = vec![
@@ -209,10 +209,10 @@ impl DeviceBackend {
                 let plane = (partials, [m_pad as i64, (n_pad * splits) as i64]);
                 operands.push(plane);
                 self.launch(&modules.0, name, &operands, (grid.0, grid.1 * splits as u32, 1))?;
-                let reduce = [plane, (self.ptr(dest, 0)?, [m_pad as i64, n_pad as i64])];
+                let reduce = [plane, (self.ptr(dest, dest_at)?, [m_pad as i64, n_pad as i64])];
                 self.launch(&modules.1, "qgemm_reduce", &reduce, (m_pad as u32, grid.1, 1))?;
             } else {
-                operands.push((self.ptr(dest, 0)?, [m_pad as i64, n_pad as i64]));
+                operands.push((self.ptr(dest, dest_at)?, [m_pad as i64, n_pad as i64]));
                 let module = self.qgemm.module(quant)?;
                 let name = qgemm_kernel(quant).expect("takes() checked the format");
                 self.launch(&module, name, &operands, grid)?;
@@ -225,7 +225,7 @@ impl DeviceBackend {
                 };
                 let dst = Plane {
                     buf: out,
-                    offset: 0,
+                    offset: out_at,
                     pitch: n,
                 };
                 self.copy_2d(src, dst, m, n)?;
@@ -297,7 +297,7 @@ impl DeviceBackend {
                 operands.push((signs.as_device_ptr().as_raw(), [1, slen as i64]));
             }
         }
-        operands.push((self.ptr(out, 0)?, [m as i64, n as i64]));
+        operands.push((self.ptr(out, out_at)?, [m as i64, n as i64]));
         self.launch(
             &kernel.module,
             kernel.name,
