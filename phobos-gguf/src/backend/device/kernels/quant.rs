@@ -352,27 +352,41 @@ pub(crate) const Q8_QMMA_SPLIT_TARGET: usize = 96;
 /// compiled variants.
 pub(crate) const Q8_QMMA_SPLIT_MAX: usize = 8;
 
-/// Splits for `q8_qmma`'s deep tile at `rows x n x k`, where 1 means no
-/// split. Only a starved grid splits; see [`Q8_QMMA_SPLIT_THRESHOLD`].
-pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize) -> usize {
+/// When `q8_qmma`'s deep tile splits on a card with `sms`: the block count
+/// below which it splits, the block count it aims for, and the fewest
+/// splits worth their reduction pass.
+///
+/// Up to 48 SMs these are the constants above, tuned on a 48-SM card and
+/// measured even or better on a 24-SM one. Past that the grid starves at
+/// longer prompts too, and two blocks per SM with at least four splits is
+/// what measured best on a 128-SM card: pp512 up to 9 percent faster. Two
+/// splits took the same gain from the projection but slowed the kernels
+/// around it, through the partials' extra traffic.
+pub(crate) fn q8_qmma_split_gate(sms: usize) -> (usize, usize, usize) {
+    if sms <= Q8_QMMA_SPLIT_THRESHOLD {
+        (Q8_QMMA_SPLIT_THRESHOLD, Q8_QMMA_SPLIT_TARGET, Q8_QMMA_SPLIT_MAX)
+    } else {
+        (2 * sms, 2 * sms, 4)
+    }
+}
+
+/// Splits for `q8_qmma`'s deep tile at `rows x n x k` on a card with `sms`,
+/// where 1 means no split. Only a starved grid splits; see
+/// [`q8_qmma_split_gate`].
+pub(crate) fn q8_qmma_splits(rows: usize, n: usize, k: usize, wide: usize, sms: usize) -> usize {
+    let (below, target, fewest) = q8_qmma_split_gate(sms);
     let unsplit = (rows / Q8_QMMA_TM) * (n / wide);
-    if unsplit == 0 || unsplit >= Q8_QMMA_SPLIT_THRESHOLD {
+    if unsplit == 0 || unsplit >= below {
         return 1;
     }
     let blocks = k / Q8_BLOCK;
-    let mut splits = (Q8_QMMA_SPLIT_TARGET / unsplit)
-        .min(Q8_QMMA_SPLIT_MAX)
-        .min(blocks);
+    let mut splits = (target / unsplit).min(Q8_QMMA_SPLIT_MAX).min(blocks);
     while splits > 1 && !blocks.is_multiple_of(splits) {
         splits /= 2;
     }
-    // The reduce pass costs about the same at any split count, so only a
-    // full split pays for it.
-    if splits == Q8_QMMA_SPLIT_MAX {
-        splits
-    } else {
-        1
-    }
+    // The reduce pass costs about the same at any split count, so a split
+    // too shallow to fill the card does not pay for it.
+    if splits >= fewest { splits } else { 1 }
 }
 
 /// CTA threads and column tile of the narrow-CTA deep tile: half of

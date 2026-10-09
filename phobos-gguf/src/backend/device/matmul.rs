@@ -115,7 +115,7 @@ impl DeviceBackend {
                 // always splits, whatever the flag says.
                 let starved = (rows / Q8_QMMA_TM) * (n / wide) <= 2;
                 let splits = if depth == Q8_QMMA_TM && (self.qmma_split || starved) {
-                    q8_qmma_splits(rows, n, k, wide)
+                    q8_qmma_splits(rows, n, k, wide, self.sms)
                 } else {
                     1
                 };
