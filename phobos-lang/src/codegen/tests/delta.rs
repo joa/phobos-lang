@@ -27,16 +27,27 @@ kernel scan(Q: tensor<f32>[N, W], K: tensor<f32>[N, W], V: tensor<f32>[N, W],
 #[test]
 fn the_state_stays_in_registers() {
     let mlir = emit_mlir(&scan_src(64, 128, 4));
-    // Two butterflies of five steps for each of a warp's two columns, the
-    // lane's rows of k and q as 16-byte loads, and no shared memory.
-    assert_eq!(mlir.matches("gpu.shuffle").count(), 20, "{mlir}");
+    // Two warps of two columns: a lane holds one column of a 16-lane row
+    // group, so each of the two butterflies takes four steps. The lane's rows
+    // of k and q come as 16-byte loads, and nothing goes to shared memory.
+    assert_eq!(mlir.matches("gpu.shuffle").count(), 8, "{mlir}");
     assert_contains(&mlir, &["vector.load", "scf.for"]);
     assert!(!mlir.contains("memref.alloc") && !mlir.contains("workgroup"), "{mlir}");
 }
 
 #[test]
-fn the_view_must_match_the_warps() {
-    // 64 threads are two warps, which own four columns, not eight.
-    let err = emit_err(&scan_src(64, 128, 8));
-    assert!(err.contains("must match"), "{err}");
+fn a_warp_can_own_more_columns() {
+    // Four columns a warp leave eight row groups, so three steps a
+    // butterfly: more columns cost fewer shuffles.
+    let mlir = emit_mlir(&scan_src(64, 128, 8));
+    assert_eq!(mlir.matches("gpu.shuffle").count(), 6, "{mlir}");
+}
+
+#[test]
+fn the_view_must_split_over_the_warps() {
+    // Three warps cannot split eight columns, and sixteen each is too many.
+    for (threads, c) in [(96, 8), (64, 32)] {
+        let err = emit_err(&scan_src(threads, 128, c));
+        assert!(err.contains("split evenly"), "{err}");
+    }
 }
