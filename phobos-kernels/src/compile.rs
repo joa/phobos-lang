@@ -65,6 +65,10 @@ fn context_for(shapes: &[Override<'_>]) -> Context {
         gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip())),
         ..Context::default()
     };
+    // Experiment only: the device path at another index width.
+    if let Some(bits) = std::env::var("PHOBOS_INDEX_BITS").ok().and_then(|v| v.parse().ok()) {
+        ctx.index_bitwidth = bits;
+    }
     for &(name, value) in shapes {
         ctx.shape_overrides.insert(name.to_string(), value as i64);
     }
