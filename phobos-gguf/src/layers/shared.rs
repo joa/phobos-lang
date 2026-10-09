@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, ensure};
 
-use crate::backend::{Backend, Buf, HeadPerm, QAct};
+use crate::backend::{Backend, Buf, HeadPerm, QAct, RawAt};
 
 use super::{Fold, Linear};
 
@@ -111,6 +111,24 @@ impl Linear {
         let out = backend.alloc(rows * self.out_dim)?;
         self.project_into_shared(backend, input, rows, out)?;
         Ok(out)
+    }
+
+    /// [`Linear::project_into_shared`] into `out` from an element offset,
+    /// for a raw weight a backend can write there directly. `false` means it
+    /// wrote nothing and the caller should project and copy.
+    pub(crate) fn project_into_shared_at(
+        &self,
+        backend: &dyn Backend,
+        input: Shared,
+        rows: usize,
+        out: (Buf, usize),
+    ) -> Result<bool> {
+        if !self.is_raw() || input.rotation != self.rotation() || self.folded() {
+            return Ok(false);
+        }
+        let w = self.raw(backend)?;
+        let at = RawAt { a: input.x, m: rows, k: self.in_dim, w, n: self.out_dim, out };
+        backend.matmul_raw_at(input.act, at)
     }
 
     /// [`Linear::forward_shared`] into a destination the caller owns.

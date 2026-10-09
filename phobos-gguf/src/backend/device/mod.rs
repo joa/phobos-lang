@@ -20,7 +20,7 @@ use crate::quant::Quant;
 
 use super::{
     Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject,
-    HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, Packed, Plane, Q8_BLOCK, QAct, QBuf, RawBuf, Rope,
+    HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, Packed, Plane, Q8_BLOCK, QAct, RawAt, QBuf, RawBuf, Rope,
 };
 
 mod arena;
