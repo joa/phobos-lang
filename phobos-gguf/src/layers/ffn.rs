@@ -193,11 +193,19 @@ impl Ffn {
             backend.release(joined);
             return Ok(());
         }
-        backend.swiglu_planes(gate_p, up_p, joined, rows, width)?;
+        // Two dense buffers run as one span, quantized on the way for the
+        // down projection. The fused projection's interleaved halves take the
+        // strided SwiGLU and quantize in the projection.
+        let act = if matches!(self.gate_up, GateUp::Split { .. }) {
+            Some(backend.swiglu_q_rows(gate_p.buf, up_p.buf, joined, rows, width)?)
+        } else {
+            backend.swiglu_planes(gate_p, up_p, joined, rows, width)?;
+            None
+        };
         release_once(backend, release);
         match add {
-            true => self.down.add_into(backend, joined, rows, dest)?,
-            false => self.down.project_into(backend, joined, rows, dest)?,
+            true => self.down.add_into_act(backend, joined, act, rows, dest)?,
+            false => self.down.project_into_act(backend, joined, act, rows, dest)?,
         }
         backend.release(joined);
         Ok(())

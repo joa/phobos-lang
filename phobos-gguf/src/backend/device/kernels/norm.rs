@@ -1,6 +1,5 @@
 // RMS norm and its quantizing and gated forms.
 
-use super::*;
 use phobos_kernels::launch::{CTA_THREADS, WARP_THREADS};
 
 /// RMS normalization, one CTA per row.
@@ -125,9 +124,6 @@ kernel swiglu_q(G: tensor<f32>[RB, {RMS_LANE}], U: tensor<f32>[RB, {RMS_LANE}],
 "
     )
 }
-
-/// [`RMS_LANE`] blocks of SwiGLU output one CTA takes.
-pub(crate) const SWIGLU_Q_BLOCKS: usize = ELEM_TILE / RMS_LANE;
 
 /// What a normalization kernel leaves behind besides the normalized row.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
