@@ -99,6 +99,18 @@ pub struct Rope {
     pub start_pos: usize,
 }
 
+/// A raw-weight projection `out[m, n] = a[m, k] . w` whose output starts
+/// `out.1` elements into `out.0`. See [`Backend::matmul_raw_at`].
+#[derive(Clone, Copy, Debug)]
+pub struct RawAt {
+    pub a: Buf,
+    pub m: usize,
+    pub k: usize,
+    pub w: RawBuf,
+    pub n: usize,
+    pub out: (Buf, usize),
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Attn {
     pub rows: usize,
@@ -460,6 +472,14 @@ pub trait Backend {
         out: Buf,
     ) -> Result<()> {
         self.matmul_raw(a, m, k, w, n, out)
+    }
+
+    /// [`Backend::matmul_raw_act`] into `out` starting at an element offset,
+    /// for a destination that holds other rows before it. Returns `false`
+    /// when this backend or shape has no such path; the caller then projects
+    /// into its own buffer and copies.
+    fn matmul_raw_at(&self, _act: Option<QAct>, _at: RawAt) -> Result<bool> {
+        Ok(false)
     }
 
     /// `out[m, n] = a[m, k] @ w[k, n]`, all row-major.
