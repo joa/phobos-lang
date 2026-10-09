@@ -351,7 +351,7 @@ impl<'c> Codegen<'c> {
                     a_buf,
                     &[mi, kbase],
                     a_tiles,
-                    false,
+                    Frag::A,
                     a_frag_t,
                     lane,
                 )?);
@@ -364,13 +364,13 @@ impl<'c> Codegen<'c> {
                 for nn in 0..2 {
                     let c = self.const_index(block, fj * 16 + nn * 8)?;
                     let nj = self.addi(block, n0, c)?;
-                    let (idx, trans) = if transpose_b {
-                        ([nj, kbase], false)
+                    let (idx, layout) = if transpose_b {
+                        ([nj, kbase], Frag::BRowsN)
                     } else {
-                        ([kbase, nj], true)
+                        ([kbase, nj], Frag::BRowsK)
                     };
                     b_frags.push(
-                        self.ldmatrix_frag(block, b_buf, &idx, b_tiles, trans, b_frag_t, lane)?,
+                        self.ldmatrix_frag(block, b_buf, &idx, b_tiles, layout, b_frag_t, lane)?,
                     );
                 }
             }
@@ -400,11 +400,8 @@ impl<'c> Codegen<'c> {
     ///
     /// The lowering does not spread addresses across lanes, so the per-lane
     /// offset is added here. Each lane supplies the start of one 8-element
-    /// row. Non-transpose A is 16 rows by num_tiles/2 k-tiles of 8: row =
-    /// lane % 16, column = (lane / 16) % (num_tiles/2) * 8. Transpose B is
-    /// num_tiles 8x8 tiles stacked along k: row = lane % (8 * num_tiles),
-    /// column unchanged. The column is then swizzled to match the staging
-    /// store.
+    /// row; where that row sits depends on the [`Frag`] layout. The column is
+    /// then swizzled to match the staging store.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn ldmatrix_frag(
         &self,
@@ -412,26 +409,43 @@ impl<'c> Codegen<'c> {
         buf: &MemVal<'c>,
         indices: &[Value<'c, 'c>],
         num_tiles: i64,
-        transpose: bool,
+        layout: Frag,
         frag_t: Type<'c>,
         lane: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
         // Lanes past the used address count (8 per tile) still have their
         // address dereferenced. The row modulus keeps them inside the block,
         // or a read near the end of the buffer could fault.
-        let (row_off, col_off) = if transpose {
-            let rows = self.const_index(block, 8 * num_tiles)?;
-            (self.remui(block, lane, rows)?, None)
-        } else {
-            let rows = self.const_index(block, (8 * num_tiles).min(16))?;
-            let row = self.remui(block, lane, rows)?;
-            let r16 = self.const_index(block, 16)?;
-            let col_tiles = self.const_index(block, (num_tiles / 2).max(1))?;
-            let g = self.divui(block, lane, r16)?;
-            let gt = self.remui(block, g, col_tiles)?;
-            let eight = self.const_index(block, 8)?;
-            (row, Some(self.muli(block, gt, eight)?))
+        // With one tile, B staged [n, k] addresses as A does.
+        let layout = match layout {
+            Frag::BRowsN if num_tiles == 1 => Frag::A,
+            other => other,
         };
+        let (row_off, col_off) = match layout {
+            Frag::BRowsK => {
+                let rows = self.const_index(block, 8 * num_tiles)?;
+                (self.remui(block, lane, rows)?, None)
+            }
+            Frag::A => {
+                let rows = self.const_index(block, (8 * num_tiles).min(16))?;
+                let row = self.remui(block, lane, rows)?;
+                let r16 = self.const_index(block, 16)?;
+                let col_tiles = self.const_index(block, (num_tiles / 2).max(1))?;
+                let g = self.divui(block, lane, r16)?;
+                let gt = self.remui(block, g, col_tiles)?;
+                let eight = self.const_index(block, 8)?;
+                (row, Some(self.muli(block, gt, eight)?))
+            }
+            Frag::BRowsN => {
+                let eight = self.const_index(block, 8)?;
+                let row = self.remui(block, lane, eight)?;
+                let tiles = self.const_index(block, num_tiles)?;
+                let g = self.divui(block, lane, eight)?;
+                let gt = self.remui(block, g, tiles)?;
+                (row, Some(self.muli(block, gt, eight)?))
+            }
+        };
+        let transpose = layout == Frag::BRowsK;
 
         let row = self.addi(block, indices[0], row_off)?;
         let col = match col_off {
@@ -444,4 +458,21 @@ impl<'c> Codegen<'c> {
 
         self.ldmatrix(block, buf.mem, [row, col], num_tiles, transpose, frag_t)
     }
+}
+
+/// How an [`ldmatrix`](Codegen::ldmatrix) operand's 8x8 tiles sit in its
+/// staged buffer, which decides the row each lane addresses.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(in crate::codegen) enum Frag {
+    /// A, staged `[m, k]`: 16 rows by `num_tiles / 2` tiles along k, read as
+    /// is. Lane row `lane % 16`, column `(lane / 16) % (num_tiles / 2) * 8`.
+    A,
+    /// B staged `[k, n]`: `num_tiles` tiles stacked down the rows along k,
+    /// read transposed. Lane row `lane % (8 * num_tiles)`.
+    BRowsK,
+    /// B staged `[n, k]`, as `dot_t` stages it: 8 rows of n by `num_tiles`
+    /// tiles along k, read as is. Lane row `lane % 8`, column
+    /// `(lane / 8) % num_tiles * 8`. With one tile, as on Turing, that is
+    /// A's addressing; with two, from sm_80 on, it is not.
+    BRowsN,
 }
