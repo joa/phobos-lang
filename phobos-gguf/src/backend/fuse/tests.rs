@@ -514,6 +514,16 @@ fn the_raw_mlp_is_declined_for_a_format_without_a_fused_decode() {
     assert!(ragged.is_none());
 }
 
+#[test]
+fn independent_nests_start_on_the_blocks_the_last_left_idle() {
+    // The 4B's projection at 192 blocks: q/k/v takes 128 units, so the gate
+    // projection's 64 start on block 128, and the next nest wraps to 0.
+    let src = qwen_4b_project_plan().source;
+    assert!(src.contains("let u1 = p + i1 * BLOCKS"), "{src}");
+    assert!(src.contains("let u2 = (p + 64) % BLOCKS + i2 * BLOCKS"), "{src}");
+    assert!(src.contains("let u3 = p + i3 * BLOCKS"), "{src}");
+}
+
 /// The 4B's delta-net projection: `attn_qkv` Q5_K and `attn_gate` Q4_K as
 /// raw weights, `ssm_alpha` and `ssm_beta` as Q8_0, into the history and
 /// one stacked buffer of gate operands. The projection only: with 16 key
