@@ -29,7 +29,7 @@ pub(crate) const OUT_TILE: usize = 8;
 /// Outputs per block of a raw-format contraction. Eight warps of eight
 /// columns each. This is two Q8_0 blocks, so quantizing a unit's run writes
 /// two scales.
-pub(crate) const RAW_UNIT: usize = 64;
+pub(crate) const RAW_UNIT: usize = 32;
 
 /// Threads per block. Fixed, since the grid barrier ties the launch shape to
 /// the compiled code.
