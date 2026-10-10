@@ -167,6 +167,9 @@ pub(crate) enum Stage {
         /// Three: the query, the key and the value.
         planes: usize,
         heads: usize,
+        /// Query and key heads. Fewer than `heads` in a grouped-query delta
+        /// net, where each serves `heads / kv_heads` value heads.
+        kv_heads: usize,
         head_dim: usize,
         kernel: usize,
         /// Elements in one position of the convolution's stream.
@@ -250,7 +253,7 @@ impl Stage {
             Stage::Swiglu { .. } => Part::Inherit,
             Stage::ProjAdd { width, .. } => Part::Units(width / OUT_TILE),
             Stage::ProjAddRaw { width, .. } => Part::Units(width / RAW_UNIT),
-            Stage::Conv { planes, heads, .. } => Part::Units(planes * heads),
+            Stage::Conv { heads, kv_heads, .. } => Part::Units(2 * kv_heads + heads),
             Stage::Gates { units, .. } => Part::Units(units),
         }
     }

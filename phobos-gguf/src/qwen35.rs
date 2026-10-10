@@ -489,11 +489,9 @@ impl Model {
         };
 
         // The convolution and gates as the tail of a fused projection, given
-        // where the decay and write strength land. The fused kernel assumes a
-        // single head count, so a grouped-query deltanet takes the unfused
-        // delta_conv/delta_gates path.
+        // where the decay and write strength land.
         let fused_mix = |decay_at: (Buf, usize), beta_at: (Buf, usize)| -> Result<Option<FusedMix>> {
-            if rows != 1 || kv_heads != heads {
+            if rows != 1 || !heads.is_multiple_of(kv_heads) {
                 return Ok(None);
             }
             let (decay, beta) = gates(decay_at, beta_at);

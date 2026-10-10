@@ -11,11 +11,32 @@ fn qwen_plan() -> Plan {
         .expect("a shape the pass fuses")
 }
 
+#[test]
+fn a_grouped_mix_stores_each_key_head_to_the_value_heads_it_serves() {
+    // Eight query and key heads for 16 value heads: 8 + 8 + 16 units, and
+    // each query or key head is written twice.
+    let src = qwen_project_plan_heads(true, 8).source;
+    assert!(src.contains("< 16 {"), "{src}");
+    assert!(src.contains("range(0, 2)"), "{src}");
+    assert!(src.contains("(32 + hd"), "{src}");
+    // The ungrouped form keeps one store a unit.
+    let plain = qwen_project_plan(true).source;
+    assert!(!plain.contains("for gi"), "{plain}");
+}
+
 /// Qwen3.5-0.8B's delta-net input: normalization plus the stacked qkv,
 /// output gate, decay and write strength projection. `mix` adds the
 /// convolution and gates.
 fn qwen_project_plan(mix: bool) -> Plan {
-    let (channels, carried, gates) = (6144, 3 * 6144, 2048 + 2 * 16);
+    qwen_project_plan_heads(mix, 16)
+}
+
+/// [`qwen_project_plan`] over 16 value heads and `kv_heads` query and key
+/// heads, each `kv_heads * 128` wide.
+fn qwen_project_plan_heads(mix: bool, kv_heads: usize) -> Plan {
+    let qk = kv_heads * 128;
+    let (channels, gates) = (2 * qk + 2048, 2048 + 2 * 16);
+    let carried = 3 * channels;
     let runs = [
         ProjRun {
             weight: 0,
@@ -36,9 +57,9 @@ fn qwen_project_plan(mix: bool) -> Plan {
         rows: 1,
         heads: 16,
         head_dim: 128,
-        kv_heads: 16,
+        kv_heads,
         kernel: 4,
-        planes: [0, 2048, 4096],
+        planes: [0, qk, 2 * qk],
         head_stride: 128,
         normalize: true,
         query_scale: (128.0f32).sqrt().recip(),
@@ -48,7 +69,7 @@ fn qwen_project_plan(mix: bool) -> Plan {
         d_model: 1024,
         gain: Buf(1),
         eps: 1e-6,
-        weights: &[(ProjWeight::Q8(QBuf(0)), 8448)],
+        weights: &[(ProjWeight::Q8(QBuf(0)), channels + gates)],
         runs: &runs,
         mix: mix.then_some(FusedMix {
             spec,
@@ -82,6 +103,7 @@ fn fused_source() {
         ("fused_qwen08_mlp", qwen_plan()),
         ("fused_qwen08_project", qwen_project_plan(false)),
         ("fused_qwen08_project_mix", qwen_project_plan(true)),
+        ("fused_grouped_project_mix", qwen_project_plan_heads(true, 8)),
         ("fused_qwen4b_mlp", qwen_4b_plan(64)),
         ("fused_qwen4b_project", qwen_4b_project_plan()),
     ];
@@ -255,6 +277,7 @@ fn the_convolution_alone_still_costs_the_barrier() {
         out: packed,
         planes: 3,
         heads: 16,
+        kv_heads: 16,
         head_dim: 128,
         kernel: 4,
         channels,

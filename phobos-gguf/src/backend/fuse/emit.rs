@@ -589,6 +589,7 @@ impl Emit {
             taps,
             out,
             heads,
+            kv_heads,
             head_dim,
             kernel,
             channels,
@@ -631,19 +632,60 @@ impl Emit {
             })
             .collect();
 
+        // A grouped net's units run over the query heads, the key heads, then
+        // the value heads; each query and key head is stored to every value
+        // head it serves.
+        let (place, store) = match kv_heads == heads {
+            true => (
+                format!("      let pl{s} = {unit} / {nh}
+      let hd{s} = {unit} % {nh}
+"),
+                format!("      {dst}[0 :+ 1, {unit} * {head_dim} :+ {d}] = y{s} * g{s}
+"),
+            ),
+            false => {
+                let (kv, group) = (kv_heads, heads / kv_heads);
+                (
+                    format!(
+                        "      var pl{s}: i32 = 2
+      var hd{s}: i32 = {unit} - {}
+      if {unit} < {} {{
+        pl{s} = 1
+        hd{s} = {unit} - {kv}
+      }}
+      if {unit} < {kv} {{
+        pl{s} = 0
+        hd{s} = {unit}
+      }}
+",
+                        2 * kv,
+                        2 * kv
+                    ),
+                    format!(
+                        "      var o{s} = y{s} * g{s}
+      if pl{s} == 2 {{
+        {dst}[0 :+ 1, ({} + hd{s}) * {head_dim} :+ {d}] = o{s}
+      }} else {{
+        for gi{s} in range(0, {group}) {{
+          {dst}[0 :+ 1, (pl{s} * {nh} + hd{s} + gi{s} * {kv}) * {head_dim} :+ {d}] = o{s}
+        }}
+      }}
+",
+                        2 * heads
+                    ),
+                )
+            }
+        };
         let _ = write!(
             self.body,
-            "      let pl{s} = {unit} / {nh}
-      let hd{s} = {unit} % {nh}
-      let cb{s} = {base}pl{s} * {ps} + hd{s} * {st}
+            "{place}      let cb{s} = {base}pl{s} * {ps} + hd{s} * {st}
       var acc{s}: tile<f32>[1, {d}] = 0.0
       for k{s} in range(0, {ks}) {{
         acc{s} = acc{s} + {hist}[k{s} :+ 1, cb{s} :+ {d}] * {taps}[k{s} :+ 1, cb{s} :+ {d}]
       }}
       var y{s}: tile<f32>[1, {d}] = acc{s} / (1.0 + exp(-acc{s}))
       var g{s}: tile<f32>[1, 1] = 1.0
-{gains}      {dst}[0 :+ 1, {unit} * {head_dim} :+ {d}] = y{s} * g{s}
-"
+{gains}{store}"
         );
         Ok(())
     }
