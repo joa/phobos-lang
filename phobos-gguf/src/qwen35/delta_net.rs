@@ -38,11 +38,7 @@ impl Gates {
         match Linear::stack(&[&alpha, &beta]) {
             Some(both) => Gates::Stacked { both, alpha_w: alpha.out_dim },
             None => {
-                let parts = [&alpha, &beta];
-                let both = match Linear::should_fuse(&parts) {
-                    true => Linear::fuse(&parts).ok(),
-                    false => None,
-                };
+                let both = Linear::stack_quant(&[&alpha, &beta]);
                 Gates::Apart { alpha, beta, both }
             }
         }

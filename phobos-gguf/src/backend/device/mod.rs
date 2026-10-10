@@ -277,7 +277,7 @@ pub struct DeviceBackend {
     norms: RefCell<HashMap<(usize, u32), Module>>,
     quant_norms: RefCell<HashMap<(usize, u32), Module>>,
     gated_norms: RefCell<HashMap<(usize, u32), Module>>,
-    gated_swiglu: RefCell<HashMap<usize, Module>>,
+    gated_swiglu: RefCell<HashMap<(usize, bool), Module>>,
     /// SwiGLU over two planes of a wider buffer, keyed by tile width.
     swiglu_planes: RefCell<HashMap<usize, Module>>,
     /// Delta rule kernels, keyed by head count and head dimension. Both are

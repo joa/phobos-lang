@@ -368,6 +368,14 @@ impl Backend for DeviceBackend {
         self.matmul_raw(a, m, k, w, n, out)
     }
 
+    fn raw_act_suffices(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
+        self.raw_reads_act_only(w, m, k, n)
+    }
+
+    fn swiglu_q_only(&self, gate: Buf, up: Buf, rows: usize, width: usize) -> Result<Option<QAct>> {
+        self.swiglu_q_unkept(gate, up, rows, width)
+    }
+
     fn matmul_raw_at(&self, act: Option<QAct>, at: RawAt) -> Result<bool> {
         let RawAt { a, m, k, w, n, out } = at;
         if m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) {
@@ -805,7 +813,7 @@ impl Backend for DeviceBackend {
         len: usize,
     ) -> Result<QAct> {
         let slot = self.act_slot(1, len)?;
-        self.swiglu_q_into(slot, (gate, gate_at), (up, up_at), out, len, ELEM_TILE)
+        self.swiglu_q_into(slot, (gate, gate_at), (up, up_at), Some(out), len, ELEM_TILE)
     }
 
     fn swiglu_q_rows(&self, gate: Buf, up: Buf, out: Buf, rows: usize, width: usize) -> Result<QAct> {
@@ -815,7 +823,7 @@ impl Backend for DeviceBackend {
         let slot = self.act_slot_transient(rows, width)?;
         let len = rows * width;
         let tile = if len.is_multiple_of(ELEM_TILE_WIDE) { ELEM_TILE_WIDE } else { ELEM_TILE };
-        self.swiglu_q_into(slot, (gate, 0), (up, 0), out, len, tile)
+        self.swiglu_q_into(slot, (gate, 0), (up, 0), Some(out), len, tile)
     }
 
     fn swiglu(

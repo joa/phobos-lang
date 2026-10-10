@@ -474,6 +474,20 @@ pub trait Backend {
         self.matmul_raw(a, m, k, w, n, out)
     }
 
+    /// Whether [`Backend::matmul_raw_act`] on this weight and shape reads only
+    /// the quantized copy, never the f32 rows beside it. A caller that knows
+    /// this can skip writing those rows.
+    fn raw_act_suffices(&self, _w: RawBuf, _m: usize, _k: usize, _n: usize) -> bool {
+        false
+    }
+
+    /// [`Backend::swiglu_q_rows`] without the f32 result, only its quantized
+    /// copy, for a down projection that reads nothing else. `None` when this
+    /// backend has no such form.
+    fn swiglu_q_only(&self, _gate: Buf, _up: Buf, _rows: usize, _width: usize) -> Result<Option<QAct>> {
+        Ok(None)
+    }
+
     /// [`Backend::matmul_raw_act`] into `out` starting at an element offset,
     /// for a destination that holds other rows before it. Returns `false`
     /// when this backend or shape has no such path; the caller then projects

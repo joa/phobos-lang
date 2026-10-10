@@ -197,7 +197,16 @@ impl Ffn {
         // down projection. The fused projection's interleaved halves take the
         // strided SwiGLU and quantize in the projection.
         let act = if matches!(self.gate_up, GateUp::Split { .. }) {
-            Some(backend.swiglu_q_rows(gate_p.buf, up_p.buf, joined, rows, width)?)
+            // A down projection that reads only the quantized copy leaves
+            // `joined` unwritten.
+            let only = match self.down.act_suffices(backend, rows)? {
+                true => backend.swiglu_q_only(gate_p.buf, up_p.buf, rows, width)?,
+                false => None,
+            };
+            match only {
+                Some(act) => Some(act),
+                None => Some(backend.swiglu_q_rows(gate_p.buf, up_p.buf, joined, rows, width)?),
+            }
         } else {
             backend.swiglu_planes(gate_p, up_p, joined, rows, width)?;
             None

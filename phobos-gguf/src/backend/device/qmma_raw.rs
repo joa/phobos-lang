@@ -38,7 +38,7 @@ impl Qgemm {
     /// Whether the staged kernel takes this shape: a format it decodes, more
     /// than one row, and `k` a whole number of blocks. Ragged `m` or `n` is
     /// fine, it runs padded (see [`DeviceBackend::project_raw_qmma`]).
-    fn takes(&self, quant: Quant, m: usize, k: usize, n: usize) -> bool {
+    pub(super) fn takes(&self, quant: Quant, m: usize, k: usize, n: usize) -> bool {
         self.on && qgemm_name(quant).is_some() && m > 1 && k.is_multiple_of(256) && n > 0
     }
 
@@ -133,6 +133,18 @@ impl DeviceBackend {
             let (tm, tn, _) = qmma_tile();
             m.is_multiple_of(tm) && n.is_multiple_of(tn) && k.is_multiple_of(256)
         }
+    }
+
+    /// Whether [`Self::project_raw_qmma`] reads only the caller's quantized
+    /// rows: it quantizes `a` again for a padded shape.
+    pub(super) fn raw_reads_act_only(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
+        let quant = self.raw_quants.borrow().get(w.0).map(|r| r.quant);
+        m > 1
+            && self.raw_qmma.get()
+            && self.raw_qmma_eligible(w, m, k, n)
+            && quant.is_some_and(|q| self.qgemm.takes(q, m, k, n))
+            && m.is_multiple_of(QGEMM_TM)
+            && n.is_multiple_of(QGEMM_TN)
     }
 
     /// `out[m, n] = a[m, k] . w[n, k]` with the weight decode folded into the
