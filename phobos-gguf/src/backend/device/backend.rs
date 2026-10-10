@@ -667,6 +667,7 @@ impl Backend for DeviceBackend {
         decay_at: usize,
         beta_in: Buf,
         beta_at: usize,
+        pitch: usize,
         rate: Buf,
         dt_bias: Buf,
         mix: DeltaMix,
@@ -686,8 +687,8 @@ impl Backend for DeviceBackend {
                     module,
                     "delta_gates",
                     &[
-                        (self.ptr(decay_in, decay_at)?, [r, h]),
-                        (self.ptr(beta_in, beta_at)?, [r, h]),
+                        (self.ptr(decay_in, decay_at)?, [r, pitch as i64]),
+                        (self.ptr(beta_in, beta_at)?, [r, pitch as i64]),
                         (self.ptr(rate, 0)?, [1, h]),
                         (self.ptr(dt_bias, 0)?, [1, h]),
                         (self.ptr(packed, 3 * span)?, [r, h]),

@@ -24,16 +24,27 @@ pub(super) enum Proj {
 
 /// The decay and write-strength projections of a [`Proj::Split`]: stacked
 /// into one launch when [`Linear::stack`] accepts them, else kept apart.
+///
+/// Quantized gates kept apart for decode's fused projection also get a
+/// stacked copy, `both`, which a prompt projects in one launch and reads in
+/// place at its row pitch.
 pub(super) enum Gates {
     Stacked { both: Linear, alpha_w: usize },
-    Apart { alpha: Linear, beta: Linear },
+    Apart { alpha: Linear, beta: Linear, both: Option<Linear> },
 }
 
 impl Gates {
     fn new(alpha: Linear, beta: Linear) -> Gates {
         match Linear::stack(&[&alpha, &beta]) {
             Some(both) => Gates::Stacked { both, alpha_w: alpha.out_dim },
-            None => Gates::Apart { alpha, beta },
+            None => {
+                let parts = [&alpha, &beta];
+                let both = match Linear::should_fuse(&parts) {
+                    true => Linear::fuse(&parts).ok(),
+                    false => None,
+                };
+                Gates::Apart { alpha, beta, both }
+            }
         }
     }
 
@@ -41,7 +52,7 @@ impl Gates {
     pub(super) fn widths(&self) -> (usize, usize) {
         match self {
             Gates::Stacked { both, alpha_w } => (*alpha_w, both.out_dim - alpha_w),
-            Gates::Apart { alpha, beta } => (alpha.out_dim, beta.out_dim),
+            Gates::Apart { alpha, beta, .. } => (alpha.out_dim, beta.out_dim),
         }
     }
 
@@ -49,22 +60,26 @@ impl Gates {
     pub(super) fn apart(&self) -> Option<[&Linear; 2]> {
         match self {
             Gates::Stacked { .. } => None,
-            Gates::Apart { alpha, beta } => Some([alpha, beta]),
+            Gates::Apart { alpha, beta, .. } => Some([alpha, beta]),
         }
     }
 
     pub(super) fn footprint(&self, into: &mut Uploads) {
         match self {
             Gates::Stacked { both, .. } => both.footprint(into),
-            Gates::Apart { alpha, beta } => {
+            Gates::Apart { alpha, beta, both } => {
                 alpha.footprint(into);
                 beta.footprint(into);
+                if let Some(both) = both {
+                    both.footprint(into);
+                }
             }
         }
     }
 
     /// Both projections of `x`, with `act` its quantized copy if any. Returns
-    /// where each lands and the buffers to release once the gates are read.
+    /// where each lands, the row pitch both are read at, and the buffers to
+    /// release once the gates are read.
     #[allow(clippy::type_complexity)]
     pub(super) fn project(
         &self,
@@ -72,13 +87,18 @@ impl Gates {
         x: Buf,
         act: Option<QAct>,
         rows: usize,
-    ) -> Result<((Buf, usize), (Buf, usize), Vec<Buf>)> {
+    ) -> Result<((Buf, usize), (Buf, usize), usize, Vec<Buf>)> {
         let (alpha, beta) = match self {
-            Gates::Apart { alpha, beta } => (alpha, beta),
+            Gates::Apart { alpha, beta, both: Some(both) } if rows > 1 => {
+                let stacked = both.forward_act(backend, x, act, rows)?;
+                let at = alpha.out_dim;
+                return Ok(((stacked, 0), (stacked, at), both.out_dim, vec![stacked]));
+            }
+            Gates::Apart { alpha, beta, .. } => (alpha, beta),
             Gates::Stacked { both, alpha_w } => {
                 let stacked = both.forward_act(backend, x, act, rows)?;
                 if rows == 1 {
-                    return Ok(((stacked, 0), (stacked, *alpha_w), vec![stacked]));
+                    return Ok(((stacked, 0), (stacked, *alpha_w), *alpha_w, vec![stacked]));
                 }
                 // Past one row the two interleave, so copy each into a dense
                 // buffer for the gates.
@@ -90,12 +110,12 @@ impl Gates {
                     parts.push(buf);
                 }
                 backend.release(stacked);
-                return Ok(((parts[0], 0), (parts[1], 0), parts));
+                return Ok(((parts[0], 0), (parts[1], 0), *alpha_w, parts));
             }
         };
         let alpha_buf = alpha.forward_act(backend, x, act, rows)?;
         let beta_buf = beta.forward_act(backend, x, act, rows)?;
-        Ok(((alpha_buf, 0), (beta_buf, 0), vec![alpha_buf, beta_buf]))
+        Ok(((alpha_buf, 0), (beta_buf, 0), alpha.out_dim, vec![alpha_buf, beta_buf]))
     }
 }
 

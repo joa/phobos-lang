@@ -352,7 +352,7 @@ pub(crate) fn delta_gates_src(heads: usize, tile_rows: usize) -> String {
     format!(
         "@launch(256)
 @autotune(H in [{heads}], TR in [{tile_rows}])
-kernel delta_gates(A: tensor<f32>[R, H], B: tensor<f32>[R, H],
+kernel delta_gates(A: tensor<f32>[R, AW], B: tensor<f32>[R, AW],
                    RATE: tensor<f32>[M, H], BIAS: tensor<f32>[M, H],
                    DEC: tensor<f32>[R, H], BET: tensor<f32>[R, H]) {{
   let p = program_id(0)
