@@ -12,10 +12,23 @@ fn qwen_plan() -> Plan {
 }
 
 #[test]
+fn a_shifting_convolution_moves_its_columns_up_after_reading_them() {
+    // Four taps: the three positions after the first move up one, inside
+    // the unit, after the loop over the taps.
+    let src = qwen_project_plan_heads(true, 8, true).source;
+    let (taps, rest) = src.split_once("acc3 = acc3 +").expect("the taps");
+    assert!(!taps.contains("for sh3"), "{src}");
+    assert!(rest.contains("for sh3 in range(0, 3)"), "{src}");
+    assert!(rest.contains("X2G[sh3 :+ 1, cb3 :+ HD3] = X2G[sh3 + 1 :+ 1, cb3 :+ HD3]"), "{src}");
+    // Without the shift the history is left as it was.
+    assert!(!qwen_project_plan_heads(true, 8, false).source.contains("for sh3"));
+}
+
+#[test]
 fn a_grouped_mix_stores_each_key_head_to_the_value_heads_it_serves() {
     // Eight query and key heads for 16 value heads: 8 + 8 + 16 units, and
     // each query or key head is written twice.
-    let src = qwen_project_plan_heads(true, 8).source;
+    let src = qwen_project_plan_heads(true, 8, false).source;
     assert!(src.contains("< 16 {"), "{src}");
     assert!(src.contains("range(0, 2)"), "{src}");
     assert!(src.contains("(32 + hd"), "{src}");
@@ -28,12 +41,12 @@ fn a_grouped_mix_stores_each_key_head_to_the_value_heads_it_serves() {
 /// output gate, decay and write strength projection. `mix` adds the
 /// convolution and gates.
 fn qwen_project_plan(mix: bool) -> Plan {
-    qwen_project_plan_heads(mix, 16)
+    qwen_project_plan_heads(mix, 16, false)
 }
 
 /// [`qwen_project_plan`] over 16 value heads and `kv_heads` query and key
 /// heads, each `kv_heads * 128` wide.
-fn qwen_project_plan_heads(mix: bool, kv_heads: usize) -> Plan {
+fn qwen_project_plan_heads(mix: bool, kv_heads: usize, shift: bool) -> Plan {
     let qk = kv_heads * 128;
     let (channels, gates) = (2 * qk + 2048, 2048 + 2 * 16);
     let carried = 3 * channels;
@@ -74,6 +87,7 @@ fn qwen_project_plan_heads(mix: bool, kv_heads: usize) -> Plan {
         mix: mix.then_some(FusedMix {
             spec,
             history: Buf(2),
+            shift,
             taps: Buf(4),
             // The decay and write strength follow the 2048-wide output gate
             // in the second run.
@@ -103,7 +117,7 @@ fn fused_source() {
         ("fused_qwen08_mlp", qwen_plan()),
         ("fused_qwen08_project", qwen_project_plan(false)),
         ("fused_qwen08_project_mix", qwen_project_plan(true)),
-        ("fused_grouped_project_mix", qwen_project_plan_heads(true, 8)),
+        ("fused_grouped_project_mix", qwen_project_plan_heads(true, 8, true)),
         ("fused_qwen4b_mlp", qwen_4b_plan(64)),
         ("fused_qwen4b_project", qwen_4b_project_plan()),
     ];
@@ -285,6 +299,7 @@ fn the_convolution_alone_still_costs_the_barrier() {
         plane_stride: 2048,
         head_stride: 128,
         normalize: true,
+        shift: false,
         scale_bits: 1.0f32.to_bits(),
     });
     let plan = chain
@@ -376,6 +391,7 @@ fn a_prompt_pass_is_not_recorded() {
         mix: Some(FusedMix {
             spec,
             history: Buf(2),
+            shift: false,
             taps: Buf(4),
             decay: (Buf(3), 0),
             beta: (Buf(3), 16),

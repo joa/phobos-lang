@@ -186,6 +186,9 @@ pub(crate) enum Stage {
         normalize: bool,
         /// The query's scale, as bits so the stage can be hashed.
         scale_bits: u32,
+        /// Move each channel's last `kernel - 1` positions to the front once
+        /// read; see [`super::FusedMix::shift`].
+        shift: bool,
     },
     /// `decay = exp(rate * softplus(a + bias))` and `beta = sigmoid(b)`, one
     /// head per unit, appended after the planes in the same buffer.

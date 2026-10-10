@@ -368,6 +368,10 @@ impl Backend for DeviceBackend {
         self.matmul_raw(a, m, k, w, n, out)
     }
 
+    fn buf_len(&self, buf: Buf) -> Result<usize> {
+        self.len_of(buf)
+    }
+
     fn matmul_raw_act_add(&self, act: QAct, m: usize, k: usize, w: RawBuf, n: usize, dest: Buf) -> Result<bool> {
         self.raw_act_add(act, (m, k), w, n, dest)
     }

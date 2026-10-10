@@ -291,6 +291,7 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
             head_stride: spec.head_stride,
             normalize: spec.normalize,
             scale_bits: spec.query_scale.to_bits(),
+            shift: m.shift,
         });
         chain.push(Stage::Gates {
             raw: val_of(m.decay.0)?,

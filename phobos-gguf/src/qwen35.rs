@@ -463,16 +463,33 @@ impl Model {
 
         let (channels, carried) = (mix.channels(), mix.pad() * mix.channels());
 
-        // History is scratch for this call. The previous call's tail is copied
-        // to the front, so the convolution reads one padded stream with no
-        // boundary case.
-        let history = backend.alloc(mix.history_len())?;
-        match *carry {
-            Some((previous, len)) => backend.copy(previous, len - carried, history, 0, carried)?,
-            None => {
-                let zeros = backend.zeroed(carried)?;
-                backend.copy(zeros, 0, history, 0, carried)?;
-                backend.release(zeros);
+        // The convolution reads one padded stream with no boundary case: the
+        // previous call's tail, then this call's positions. A decode step that
+        // can fuse the convolution keeps that stream in the carry buffer
+        // itself, the tail at its front, and the fused convolution moves the
+        // new tail there as it reads, so nothing is copied. Otherwise the
+        // history is scratch and the tail is copied to its front.
+        let in_place = rows == 1 && carried > 0 && heads.is_multiple_of(kv_heads);
+        let reuse = match *carry {
+            Some((buf, len)) if in_place && len == carried => backend.buf_len(buf)? >= mix.history_len(),
+            _ => false,
+        };
+        let history = match reuse {
+            true => carry.take().expect("checked above").0,
+            false => backend.alloc(mix.history_len())?,
+        };
+        if !reuse {
+            match *carry {
+                Some((previous, len)) => backend.copy(previous, len - carried, history, 0, carried)?,
+                None => {
+                    let zeros = backend.zeroed(carried)?;
+                    backend.copy(zeros, 0, history, 0, carried)?;
+                    backend.release(zeros);
+                }
+            }
+            // The in-place stream replaces the old tail from here on.
+            if in_place && let Some((previous, _)) = carry.take() {
+                backend.release(previous);
             }
         }
 
@@ -498,6 +515,7 @@ impl Model {
             Ok(Some(FusedMix {
                 spec: mix,
                 history,
+                shift: in_place,
                 taps,
                 decay,
                 beta,
@@ -671,20 +689,32 @@ impl Model {
         // carried, in their own buffer that stays put. With the history
         // released, a decode step records the same buffers as the previous
         // one, so the cached pass graph needs no patching for them.
-        if carried > 0 {
-            let tail = match carry.take() {
-                Some((buf, len)) if len == carried => buf,
-                other => {
-                    if let Some((buf, _)) = other {
-                        backend.release(buf);
+        if in_place {
+            // A projection that declined the mix left the shift undone; it
+            // goes through scratch, since the two ranges overlap.
+            if !mix_done {
+                let tail = backend.alloc(carried)?;
+                backend.copy(history, mix.history_len() - carried, tail, 0, carried)?;
+                backend.copy(tail, 0, history, 0, carried)?;
+                backend.release(tail);
+            }
+            *carry = Some((history, carried));
+        } else {
+            if carried > 0 {
+                let tail = match carry.take() {
+                    Some((buf, len)) if len == carried => buf,
+                    other => {
+                        if let Some((buf, _)) = other {
+                            backend.release(buf);
+                        }
+                        backend.alloc(carried)?
                     }
-                    backend.alloc(carried)?
-                }
-            };
-            backend.copy(history, mix.history_len() - carried, tail, 0, carried)?;
-            *carry = Some((tail, carried));
+                };
+                backend.copy(history, mix.history_len() - carried, tail, 0, carried)?;
+                *carry = Some((tail, carried));
+            }
+            backend.release(history);
         }
-        backend.release(history);
 
         // The recurrent state is why this op runs on the backend: a
         // [head_dim, head_dim] matrix per head, which on the host would mean
