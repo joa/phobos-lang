@@ -667,6 +667,13 @@ pub trait Backend {
         Ok(false)
     }
 
+    /// [`Backend::gate_into`] over `[rows, width]` plus the result's
+    /// quantized copy, as [`Backend::quantize_act`] would make it. `None`,
+    /// doing nothing, where the backend has no such form.
+    fn gate_q(&self, _x: Buf, _gate: Buf, _rows: usize, _width: usize) -> Result<Option<QAct>> {
+        Ok(None)
+    }
+
     /// `x *= sigmoid(gate)`, elementwise. The attention output gate.
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()>;
 

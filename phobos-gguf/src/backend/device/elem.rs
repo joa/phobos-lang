@@ -14,6 +14,32 @@ impl DeviceBackend {
         self.swiglu_q_into(slot, (gate, 0), (up, 0), Some(out), len, tile)
     }
 
+    /// `x *= sigmoid(gate)` over `[rows, width]` in place, plus the result's
+    /// quantized copy; see [`Backend::gate_q`]. In place is safe, since a
+    /// CTA reads its whole tile before it stores any of it.
+    pub(super) fn gate_q_span(&self, x: Buf, gate: Buf, rows: usize, width: usize) -> Result<Option<QAct>> {
+        let len = rows * width;
+        let tile = if len.is_multiple_of(ELEM_TILE_WIDE) { ELEM_TILE_WIDE } else { ELEM_TILE };
+        if !self.gate_q_on || !len.is_multiple_of(tile) {
+            return Ok(None);
+        }
+        let (act, qa, das) = self.act_slot_transient(rows, width)?;
+        let blocks = tile / RMS_LANE;
+        let (rb, lane) = ((len / RMS_LANE) as i64, RMS_LANE as i64);
+        self.with_kernel(
+            &self.gated_swiglu,
+            (blocks, true, true),
+            "gate_q",
+            || swiglu_q_src(blocks, true, true),
+            |module| {
+                let x = (self.ptr(x, 0)?, [rb, lane]);
+                let operands = [(self.ptr(gate, 0)?, [rb, lane]), x, x, (qa, [rb, lane]), (das, [rb, 1])];
+                self.launch(module, "gate_q", &operands, ((len / tile) as u32, 1, 1))
+            },
+        )?;
+        Ok(Some(act))
+    }
+
     /// The quantized SwiGLU of two dense `[rows, width]` buffers without the
     /// f32 result, at the tile `swiglu_q_rows` takes.
     pub(super) fn swiglu_q_unkept(&self, gate: Buf, up: Buf, rows: usize, width: usize) -> Result<Option<QAct>> {
@@ -50,9 +76,9 @@ impl DeviceBackend {
         let lane = RMS_LANE as i64;
         self.with_kernel(
             &self.gated_swiglu,
-            (blocks, out.is_some()),
+            (blocks, out.is_some(), false),
             "swiglu_q",
-            || swiglu_q_src(blocks, out.is_some()),
+            || swiglu_q_src(blocks, out.is_some(), false),
             |module| {
                 let mut operands = vec![(self.ptr(gate, gate_at)?, [rb, lane]), (self.ptr(up, up_at)?, [rb, lane])];
                 if let Some(out) = out {

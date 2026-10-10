@@ -188,9 +188,14 @@ impl Model {
 
         let mixed = backend.alloc(rows * width)?;
         backend.attention(q_normed, keys, values, spec, mixed)?;
-        backend.gate_into(mixed, gate)?;
-
-        attn.output.add_into(backend, mixed, rows, dest)?;
+        // The gate can quantize for the output projection as it goes.
+        match backend.gate_q(mixed, gate, rows, width)? {
+            Some(act) => attn.output.add_into_act(backend, mixed, Some(act), rows, dest)?,
+            None => {
+                backend.gate_into(mixed, gate)?;
+                attn.output.add_into(backend, mixed, rows, dest)?;
+            }
+        }
         for buf in [q_gate_buf, k_buf, v_buf, q, gate, q_normed, k_normed, mixed] {
             backend.release(buf);
         }

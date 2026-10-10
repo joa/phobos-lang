@@ -207,6 +207,7 @@ impl DeviceBackend {
             ropes: RefCell::new(HashMap::new()),
             attn_preps: RefCell::new(HashMap::new()),
             attn_prep_on: env_flag_on("PHOBOS_ATTN_PREP"),
+            gate_q_on: env_flag_on("PHOBOS_GATE_Q"),
             rope_gathers: RefCell::new(HashMap::new()),
             attentions: RefCell::new(HashMap::new()),
             split_attn: RefCell::new(HashMap::new()),
