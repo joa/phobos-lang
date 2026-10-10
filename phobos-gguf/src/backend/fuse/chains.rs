@@ -282,6 +282,7 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
             out: val_of(m.packed)?,
             planes: spec.planes.len(),
             heads: spec.heads,
+            kv_heads: spec.kv_heads,
             head_dim: spec.head_dim,
             kernel: spec.kernel,
             channels: spec.channels(),
@@ -299,7 +300,7 @@ pub(crate) fn project_chain(project: &FusedProject) -> Option<Chain> {
             bias: val_of(m.dt_bias)?,
             out: val_of(m.packed)?,
             heads: spec.heads,
-            units: spec.planes.len() * spec.heads,
+            units: 2 * spec.kv_heads + spec.heads,
             span: spec.span(),
         });
     }
