@@ -548,7 +548,7 @@ fn main() -> Result<()> {
             let both = b.upload(&stacked)?;
             let (r, d) = (b.upload(&rate)?, b.upload(&bias)?);
             let packed = b.upload(&zeros)?;
-            b.delta_gates(both, mix.gates(), both, 0, r, d, mix, packed)?;
+            b.delta_gates(both, mix.gates(), both, 0, heads, r, d, mix, packed)?;
             let all = read_vec(b, packed, mix.packed_len())?;
             Ok(all[3 * mix.span()..].to_vec())
         };
@@ -556,6 +556,28 @@ fn main() -> Result<()> {
             &format!("delta_gates [{rows} x {heads}]"),
             &run(&host)?,
             &run(&gpu)?,
+        );
+        // A prompt's stacked projection: rows of decay, beta and padding,
+        // read in place at the stacked pitch.
+        let pitch = 2 * heads + 5;
+        let mut rowwise = vec![7.0f32; rows * pitch];
+        for row in 0..rows {
+            let at = row * pitch;
+            rowwise[at..at + heads].copy_from_slice(&alpha[row * heads..][..heads]);
+            rowwise[at + heads..at + 2 * heads].copy_from_slice(&beta[row * heads..][..heads]);
+        }
+        let pitched = |b: &dyn Backend| -> Result<Vec<f32>> {
+            let both = b.upload(&rowwise)?;
+            let (r, d) = (b.upload(&rate)?, b.upload(&bias)?);
+            let packed = b.upload(&zeros)?;
+            b.delta_gates(both, 0, both, heads, pitch, r, d, mix, packed)?;
+            let all = read_vec(b, packed, mix.packed_len())?;
+            Ok(all[3 * mix.span()..].to_vec())
+        };
+        check(
+            &format!("delta_gates pitched [{rows} x {heads}]"),
+            &pitched(&host)?,
+            &pitched(&gpu)?,
         );
     }
 
