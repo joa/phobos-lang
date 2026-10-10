@@ -9,7 +9,7 @@ pub use crate::quant::quantize_row;
 mod fusion;
 mod moe;
 
-pub use fusion::{Fused, FusedAttnOut, FusedMix, FusedMlp, FusedMlpRaw, FusedProject, ProjRun, ProjWeight};
+pub use fusion::{AttnPrep, Fused, FusedAttnOut, FusedMix, FusedMlp, FusedMlpRaw, FusedProject, ProjRun, ProjWeight};
 pub use moe::{ExpertsBuf, Lookahead, Moe, route};
 
 /// A handle to backend-owned storage, so the bytes can live on a device.
@@ -660,6 +660,19 @@ pub trait Backend {
     /// `0 ..= start_pos + t`, and `group` query heads share each key head.
     /// `out` has `q`'s shape, in f32.
     fn attention(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()>;
+
+    /// [`AttnPrep`] as one pass. `false`, doing nothing, where the backend
+    /// has none and the caller runs the separate ops.
+    fn attn_prep(&self, _prep: AttnPrep) -> Result<bool> {
+        Ok(false)
+    }
+
+    /// [`Backend::gate_into`] over `[rows, width]` plus the result's
+    /// quantized copy, as [`Backend::quantize_act`] would make it. `None`,
+    /// doing nothing, where the backend has no such form.
+    fn gate_q(&self, _x: Buf, _gate: Buf, _rows: usize, _width: usize) -> Result<Option<QAct>> {
+        Ok(None)
+    }
 
     /// `x *= sigmoid(gate)`, elementwise. The attention output gate.
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()>;

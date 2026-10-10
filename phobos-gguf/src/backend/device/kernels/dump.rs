@@ -35,6 +35,12 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    // The 4B's attention heads: 256 wide, 64 of them rotated.
+    for cache in [false, true] {
+        let name = if cache { "attn_prep_kv" } else { "attn_prep_q" };
+        sources.push((name.to_string(), attn_prep_src(256, 32, 1e-6, cache)));
+    }
+    sources.push(("gate_q".to_string(), swiglu_q_src(ELEM_TILE / RMS_LANE, true, true)));
     // The 4B's fused MLP planned for a 170-SM card, its down projection
     // split along k.
     let chain = crate::backend::fuse::mlp_chain_raw(
