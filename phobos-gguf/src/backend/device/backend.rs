@@ -539,30 +539,7 @@ impl Backend for DeviceBackend {
     }
 
     fn rope(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()> {
-        let half = spec.rope_dim / 2;
-        let (r, d) = ((rows * spec.heads) as i64, spec.head_dim as i64);
-        self.with_kernel(
-            &self.ropes,
-            (spec.heads, half),
-            "rope",
-            || rope_src(spec.heads, half),
-            |module| {
-                self.launch(
-                    module,
-                    "rope",
-                    &[
-                        (self.ptr(x, 0)?, [r, d]),
-                        (
-                            // Offset to this call's first position, so the
-                            // kernel indexes the table by row.
-                            self.ptr(table, spec.start_pos * spec.rope_dim)?,
-                            [rows as i64, spec.rope_dim as i64],
-                        ),
-                    ],
-                    (r as u32, 1, 1),
-                )
-            },
-        )
+        self.rope_in_place(x, rows, table, spec)
     }
 
     fn rope_gather(
@@ -583,6 +560,10 @@ impl Backend for DeviceBackend {
 
     fn attn_prep(&self, prep: AttnPrep) -> Result<bool> {
         self.attn_prep_two(prep)
+    }
+
+    fn gate_q(&self, x: Buf, gate: Buf, rows: usize, width: usize) -> Result<Option<QAct>> {
+        self.gate_q_span(x, gate, rows, width)
     }
 
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()> {

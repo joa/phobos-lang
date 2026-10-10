@@ -288,7 +288,9 @@ pub struct DeviceBackend {
     norms: RefCell<HashMap<(usize, u32), Module>>,
     quant_norms: RefCell<HashMap<(usize, u32), Module>>,
     gated_norms: RefCell<HashMap<(usize, u32), Module>>,
-    gated_swiglu: RefCell<HashMap<(usize, bool), Module>>,
+    /// The quantizing SwiGLU, or with the last flag the sigmoid gate, keyed
+    /// by blocks a CTA and whether it keeps the f32 result.
+    gated_swiglu: RefCell<HashMap<(usize, bool, bool), Module>>,
     /// SwiGLU over two planes of a wider buffer, keyed by tile width.
     swiglu_planes: RefCell<HashMap<usize, Module>>,
     /// Delta rule kernels, keyed by head count and head dimension. Both are
@@ -325,6 +327,10 @@ pub struct DeviceBackend {
     /// Whether a decode row prepares its attention operands in two launches.
     /// On by default; `PHOBOS_ATTN_PREP=0` runs the separate ops.
     attn_prep_on: bool,
+    /// Whether attention's output gate quantizes its result for the output
+    /// projection in the same launch. On by default; `PHOBOS_GATE_Q=0`
+    /// gates and quantizes separately.
+    gate_q_on: bool,
     /// [`Backend::rope_gather`] kernels, keyed by head count, half the
     /// rotary width, the source's heads per row, and the head dimension.
     rope_gathers: RefCell<HashMap<(usize, usize, usize, usize), Module>>,

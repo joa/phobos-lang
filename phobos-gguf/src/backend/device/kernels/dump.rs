@@ -40,6 +40,7 @@ fn dump_raw_kernel_sources() {
         let name = if cache { "attn_prep_kv" } else { "attn_prep_q" };
         sources.push((name.to_string(), attn_prep_src(256, 32, 1e-6, cache)));
     }
+    sources.push(("gate_q".to_string(), swiglu_q_src(ELEM_TILE / RMS_LANE, true, true)));
     // The 4B's fused MLP planned for a 170-SM card, its down projection
     // split along k.
     let chain = crate::backend::fuse::mlp_chain_raw(

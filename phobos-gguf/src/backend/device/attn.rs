@@ -4,6 +4,34 @@
 use super::*;
 
 impl DeviceBackend {
+    /// [`Backend::rope`]: one program per head row.
+    pub(super) fn rope_in_place(&self, x: Buf, rows: usize, table: Buf, spec: Rope) -> Result<()> {
+        let half = spec.rope_dim / 2;
+        let (r, d) = ((rows * spec.heads) as i64, spec.head_dim as i64);
+        self.with_kernel(
+            &self.ropes,
+            (spec.heads, half),
+            "rope",
+            || rope_src(spec.heads, half),
+            |module| {
+                self.launch(
+                    module,
+                    "rope",
+                    &[
+                        (self.ptr(x, 0)?, [r, d]),
+                        (
+                            // Offset to this call's first position, so the
+                            // kernel indexes the table by row.
+                            self.ptr(table, spec.start_pos * spec.rope_dim)?,
+                            [rows as i64, spec.rope_dim as i64],
+                        ),
+                    ],
+                    (r as u32, 1, 1),
+                )
+            },
+        )
+    }
+
     /// [`Backend::attn_prep`] as two launches, one program per head: the
     /// query with its gate, then the key with its value into the caches.
     pub(super) fn attn_prep_two(&self, p: AttnPrep) -> Result<bool> {

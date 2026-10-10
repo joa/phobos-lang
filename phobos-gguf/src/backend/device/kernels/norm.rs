@@ -122,8 +122,14 @@ pub(crate) const RMS_LANE: usize = 32;
 
 /// `out = silu(gate) * up`, plus a quantized copy for the next projection.
 /// Reshaped into [`RMS_LANE`] blocks, as in `rms_norm_src`. Without
-/// `with_out`, only the quantized copy is written.
-pub(crate) fn swiglu_q_src(blocks: usize, with_out: bool) -> String {
+/// `with_out`, only the quantized copy is written. With `sigmoid`, the
+/// kernel is `gate_q` and `out = sigmoid(gate) * up`, attention's output
+/// gate.
+pub(crate) fn swiglu_q_src(blocks: usize, with_out: bool, sigmoid: bool) -> String {
+    let (name, gated) = match sigmoid {
+        true => ("gate_q", "u / (1.0 + exp(-g))"),
+        false => ("swiglu_q", "(g / (1.0 + exp(-g))) * u"),
+    };
     let (out_param, out_store) = match with_out {
         true => (
             format!("O: tensor<f32>[RB, {RMS_LANE}], "),
@@ -134,13 +140,13 @@ pub(crate) fn swiglu_q_src(blocks: usize, with_out: bool) -> String {
     format!(
         "@launch(256)
 @autotune(NB in [{blocks}])
-kernel swiglu_q(G: tensor<f32>[RB, {RMS_LANE}], U: tensor<f32>[RB, {RMS_LANE}],
+kernel {name}(G: tensor<f32>[RB, {RMS_LANE}], U: tensor<f32>[RB, {RMS_LANE}],
                 {out_param}Q: tensor<i8>[RB, {RMS_LANE}],
                 S: tensor<f32>[RB, D1]) {{
   let p = program_id(0)
   var g = G[p * NB :+ NB, 0 :+ {RMS_LANE}]
   var u = U[p * NB :+ NB, 0 :+ {RMS_LANE}]
-  var y: tile<f32>[NB, {RMS_LANE}] = (g / (1.0 + exp(-g))) * u
+  var y: tile<f32>[NB, {RMS_LANE}] = {gated}
 {out_store}  var mx: tile<f32>[NB, 1] = rowmax(tmax(y, -y))
   var q = y * (127.0 / (mx + 0.00000001))
   Q[p * NB :+ NB, 0 :+ {RMS_LANE}] = i8(i32(round(q)))
