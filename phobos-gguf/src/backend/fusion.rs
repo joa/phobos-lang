@@ -112,6 +112,10 @@ pub struct FusedMix {
     pub spec: DeltaMix,
     /// `[pad + rows, channels]`, whose last position the projection writes.
     pub history: Buf,
+    /// Whether the convolution, once it has read a channel's positions,
+    /// moves the last `pad` of them to the front, so `history` carries
+    /// itself into the next step.
+    pub shift: bool,
     /// `[kernel, channels]`.
     pub taps: Buf,
     /// The raw decay and write-strength projections, as

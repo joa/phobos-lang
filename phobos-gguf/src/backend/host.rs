@@ -55,6 +55,10 @@ impl HostBackend {
 }
 
 impl Backend for HostBackend {
+    fn buf_len(&self, buf: Buf) -> Result<usize> {
+        Ok(self.slabs.borrow()[buf.0].len())
+    }
+
     fn alloc(&self, len: usize) -> Result<Buf> {
         if let Some(index) = self.free.borrow_mut().pop() {
             let mut slabs = self.slabs.borrow_mut();

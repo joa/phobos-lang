@@ -23,6 +23,7 @@ impl Emit {
             head_stride,
             normalize,
             scale_bits,
+            shift,
             ..
         } = key.stages[s]
         else {
@@ -57,6 +58,15 @@ impl Emit {
             })
             .collect();
 
+        // The unit owns its channels' columns, so it can move them up a
+        // position in place once the taps above have read them.
+        let shifted = match shift {
+            true => format!(
+                "      for sh{s} in range(0, {}) {{\n        {hist}[sh{s} :+ 1, cb{s} :+ {d}] = {hist}[sh{s} + 1 :+ 1, cb{s} :+ {d}]\n      }}\n",
+                kernel - 1
+            ),
+            false => String::new(),
+        };
         // A grouped net's units run over the query heads, the key heads, then
         // the value heads; each query and key head is stored to every value
         // head it serves.
@@ -108,7 +118,7 @@ impl Emit {
       for k{s} in range(0, {ks}) {{
         acc{s} = acc{s} + {hist}[k{s} :+ 1, cb{s} :+ {d}] * {taps}[k{s} :+ 1, cb{s} :+ {d}]
       }}
-      var y{s}: tile<f32>[1, {d}] = acc{s} / (1.0 + exp(-acc{s}))
+{shifted}      var y{s}: tile<f32>[1, {d}] = acc{s} / (1.0 + exp(-acc{s}))
       var g{s}: tile<f32>[1, 1] = 1.0
 {gains}{store}"
         );

@@ -355,6 +355,9 @@ pub trait Backend {
         self.matmul_raw(a, m, k, w, n, out)
     }
 
+    /// Elements `buf` holds, which may be more than a caller last wrote.
+    fn buf_len(&self, buf: Buf) -> Result<usize>;
+
     /// `dest += act . w` for a raw weight, where this backend can add in the
     /// projection itself. Returns `false`, doing nothing, where it cannot;
     /// the caller then projects and adds.
