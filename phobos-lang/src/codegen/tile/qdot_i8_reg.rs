@@ -75,7 +75,9 @@ impl<'c> Codegen<'c> {
             bail!("{label} needs a whole number of 256-element blocks");
         }
         self.check_shapes(&[cols], &[d.shape[0]], "qdot_i8 d rows")?;
-        let depth = fmt.pipeline_depth();
+        // Exp: a deeper pipeline where the launch leaves 128 registers.
+        let budget = self.launch.and_then(|l| l.min_blocks).map_or(255, |b| 65536 / (self.cta_threads * b));
+        let depth = if budget >= 128 && fmt.pipeline_depth() == 2 { 4 } else { fmt.pipeline_depth() };
         let table_bytes = fmt.qdot_tables();
         if tables.len() != table_bytes.len()
             || tables.iter().zip(table_bytes).any(|(t, &want)| t.shape[1] != want)
