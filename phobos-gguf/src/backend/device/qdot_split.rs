@@ -34,15 +34,16 @@ pub(super) struct SplitOperands {
 }
 
 impl DeviceBackend {
-    /// `out[n] = w[n, k] . a` as `s` slices of `k` into partials and a sum;
-    /// see [`kquant_qdot_i8_split_src`]. Returns `false`, launching nothing,
-    /// when the format has no split form or the shape does not take one.
+    /// `out[n] = w[n, k] . a` as `s` slices of `k` into partials and a sum,
+    /// or with `add` `out[n] += ..`; see [`kquant_qdot_i8_split_src`].
+    /// Returns `false`, launching nothing, when the format has no split form
+    /// or the shape does not take one.
     pub(super) fn project_raw_split(
         &self,
         quant: Quant,
         ops: SplitOperands,
         (nb, k, n): (usize, usize, usize),
-        out: Buf,
+        (out, add): (Buf, bool),
     ) -> Result<bool> {
         let tn = Q4K_I8_TN;
         if !self.qdot_split_on || !n.is_multiple_of(tn) {
@@ -51,13 +52,13 @@ impl DeviceBackend {
         let Some(s) = qdot_splits(n / tn, k, self.sms) else {
             return Ok(false);
         };
-        let key = (quant, n, k, s);
+        let key = (quant, n, k, s, add);
         if !self.qdot_split_mods.borrow().contains_key(&key) {
             let Some(src) = kquant_qdot_i8_split_src(quant, n, k, s) else {
                 return Ok(false);
             };
             let split = compile(&src, &[("TN", tn)], kquant_qdot_i8_split_name(quant))?;
-            let reduce = compile(&qgemm_reduce_src(n, s, false), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
+            let reduce = compile(&qgemm_reduce_src(n, s, add), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
             self.qdot_split_mods.borrow_mut().insert(key, (split, reduce));
         }
         let mods = self.qdot_split_mods.borrow();
@@ -77,6 +78,32 @@ impl DeviceBackend {
         let into = [plane, (self.ptr(out, 0)?, [1, n as i64])];
         self.launch(reduce, "qgemm_reduce", &into, (1, (n / QGEMM_TN) as u32, 1))?;
         Ok(true)
+    }
+
+    /// `dest += act . w` for a raw weight where a kernel can add in the
+    /// projection: the split decode matvec for one row, the split prompt
+    /// projection for more. `false` where neither takes the shape.
+    pub(super) fn raw_act_add(&self, act: QAct, (m, k): (usize, usize), w: RawBuf, n: usize, dest: Buf) -> Result<bool> {
+        if m == 1 {
+            return self.project_raw_split_add(act, k, w, n, dest);
+        }
+        Ok(self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) && self.project_raw_qmma_add(act, (m, k), w, n, dest)?)
+    }
+
+    /// `dest[n] += w[n, k] . act` for one row, split as
+    /// [`Self::project_raw_split`] splits it, so the sum lands on `dest`
+    /// with no separate add. `false` when it does not split.
+    pub(super) fn project_raw_split_add(&self, act: QAct, k: usize, w: RawBuf, n: usize, dest: Buf) -> Result<bool> {
+        if !self.iq1s_dp4a.get() {
+            return Ok(false);
+        }
+        let raws = self.raw_quants.borrow();
+        let raw = raws.get(w.0).context("use of an unknown raw weight handle")?;
+        let (quant, nb, bytes, d) = (raw.quant, raw.nb, raw.bytes, raw.d);
+        drop(raws);
+        let (qa, das) = self.act_ptrs(act)?;
+        let ops = SplitOperands { qa, das, bytes, d };
+        self.project_raw_split(quant, ops, (nb, k, n), (dest, true))
     }
 }
 

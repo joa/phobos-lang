@@ -346,7 +346,7 @@ impl DeviceBackend {
             // The upload already padded the weight to match.
             let n_pad = n.next_multiple_of(tn);
             let ops = qdot_split::SplitOperands { qa: qa_ptr, das: das_ptr, bytes: bytes_ptr, d: d_ptr };
-            if n_pad == n && tables.is_empty() && self.project_raw_split(quant, ops, (nb as usize, k, n), out)? {
+            if n_pad == n && tables.is_empty() && self.project_raw_split(quant, ops, (nb as usize, k, n), (out, false))? {
                 return Ok(());
             }
             let dest = if n_pad == n {
