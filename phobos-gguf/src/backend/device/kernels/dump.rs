@@ -35,6 +35,11 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    // The 4B's down projections split six ways.
+    for quant in [Quant::Q4_K, Quant::Q6_K] {
+        let src = kquant_qdot_i8_split_src(quant, 2560, 9216, 6).expect("a K-quant splits");
+        sources.push((kquant_qdot_i8_split_name(quant).to_string(), src));
+    }
     // The 4B's convolution: 32 value heads over 16 key heads, and ungrouped.
     let batch = delta_conv_batch(512);
     let scale = 1.0 / 128f32.sqrt();

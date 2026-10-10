@@ -336,7 +336,7 @@ impl DeviceBackend {
             let tn = kernel.tn;
             let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
             let rb = *nb * quant.device_block_bytes();
-            let (nb, n_blocks) = (*nb as i64, k / Q8_BLOCK);
+            let (nb, n_blocks, quant) = (*nb as i64, k / Q8_BLOCK, *quant);
             drop(raws);
             // Use the caller's quantized activation if it has one.
             let act = act.map_or_else(|| self.quantize_act(a, 1, k), Ok)?;
@@ -345,6 +345,10 @@ impl DeviceBackend {
             // writes a padded scratch row and copies the first n values out.
             // The upload already padded the weight to match.
             let n_pad = n.next_multiple_of(tn);
+            let ops = qdot_split::SplitOperands { qa: qa_ptr, das: das_ptr, bytes: bytes_ptr, d: d_ptr };
+            if n_pad == n && tables.is_empty() && self.project_raw_split(quant, ops, (nb as usize, k, n), out)? {
+                return Ok(());
+            }
             let dest = if n_pad == n {
                 out
             } else {

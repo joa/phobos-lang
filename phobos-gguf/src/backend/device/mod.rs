@@ -44,6 +44,7 @@ mod matmul_f32;
 mod mem;
 mod norm;
 mod q50;
+mod qdot_split;
 mod qmma_raw;
 mod raw;
 mod residency;
@@ -120,6 +121,9 @@ use raw::DeviceRaw;
 /// [`kernels::q8_qmma_split_src`].
 type QmmaSplitKey = (usize, usize, usize);
 
+/// Format, `n`, `k` and slice count of a split decode matvec.
+type QdotSplitKey = (Quant, usize, usize, usize);
+
 /// Launches a streamed pass records before issuing them; see
 /// [`DeviceBackend::streamed`].
 const STREAM_BATCH: usize = 32;
@@ -186,6 +190,12 @@ pub struct DeviceBackend {
     /// The split-K variant of the deep tile and its reduction, keyed by output
     /// width, `k` and split count. Built when the unsplit grid is declined.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
+    /// The K-quant decode matvec split along `k` and its reduce, by format,
+    /// `n`, `k` and slice count; see [`DeviceBackend::project_raw_split`].
+    qdot_split_mods: RefCell<HashMap<QdotSplitKey, (Module, Module)>>,
+    /// Whether a narrow, long K-quant decode matvec splits along `k`. On by
+    /// default; `PHOBOS_QDOT_SPLIT=0` keeps one program per tile.
+    qdot_split_on: bool,
     /// The narrow-CTA variant of the deep tile: half the threads and column
     /// tile, same per-warp patch. Compiled lazily when
     /// [`Self::qmma_narrow`] is set.
