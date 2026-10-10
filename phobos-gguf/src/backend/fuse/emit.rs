@@ -139,6 +139,9 @@ struct Emit {
     /// Whether the kernel has a raw-format contraction, which sets its
     /// launch bound.
     raw: bool,
+    /// Units the nests since the last barrier hand out, so the next
+    /// independent nest starts on the blocks they leave idle.
+    rot: usize,
 }
 
 /// Most slices [`Emit::proj_add_raw_split`] cuts `k` into.
@@ -181,6 +184,7 @@ impl Emit {
             regs: HashMap::new(),
             bar: None,
             raw: false,
+            rot: 0,
         }
     }
 
@@ -326,11 +330,22 @@ impl Emit {
         let it = self.tune_const(format!("IT{n}"), iters);
         let un = self.tune_const(format!("UN{n}"), units);
         let unit = format!("u{n}");
+        // Nests between two barriers are independent, so each starts its
+        // units on the blocks the ones before it left idle.
+        if nest.barrier_before {
+            self.rot = 0;
+        }
+        let rot = self.rot % self.blocks as usize;
+        self.rot += units;
+        let base = match rot {
+            0 => "p".to_string(),
+            rot => format!("(p + {}) % BLOCKS", self.blocks as usize - rot),
+        };
         let _ = write!(
             self.body,
             "
   for i{n} in range(0, {it}) {{
-    let {unit} = p + i{n} * BLOCKS
+    let {unit} = {base} + i{n} * BLOCKS
     if {unit} < {un} {{
 "
         );
