@@ -121,8 +121,9 @@ use raw::DeviceRaw;
 /// [`kernels::q8_qmma_split_src`].
 type QmmaSplitKey = (usize, usize, usize);
 
-/// Format, `n`, `k` and slice count of a split decode matvec.
-type QdotSplitKey = (Quant, usize, usize, usize);
+/// Format, `n`, `k`, slice count, and whether the sum adds into its
+/// destination, of a split decode matvec.
+type QdotSplitKey = (Quant, usize, usize, usize, bool);
 
 /// Launches a streamed pass records before issuing them; see
 /// [`DeviceBackend::streamed`].
