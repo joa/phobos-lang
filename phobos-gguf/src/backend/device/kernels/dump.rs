@@ -35,6 +35,21 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    // The 4B's fused MLP planned for a 170-SM card, its down projection
+    // split along k.
+    let chain = crate::backend::fuse::mlp_chain_raw(
+        crate::backend::Buf(0),
+        crate::backend::Buf(1),
+        (crate::backend::RawBuf(0), Quant::Q4_K),
+        (crate::backend::RawBuf(1), Quant::Q4_K),
+        (crate::backend::RawBuf(2), Quant::Q6_K),
+        2560,
+        9216,
+        1e-6,
+    )
+    .expect("the 4B's formats fuse");
+    let plan = chain.key(340).plan().expect("well-formed").expect("fused");
+    sources.push(("fused_mlp_340".to_string(), plan.source));
     // The 4B's down projections split six ways.
     for quant in [Quant::Q4_K, Quant::Q6_K] {
         let src = kquant_qdot_i8_split_src(quant, 2560, 9216, 6).expect("a K-quant splits");

@@ -82,7 +82,7 @@ fn fused_source() {
         ("fused_qwen08_mlp", qwen_plan()),
         ("fused_qwen08_project", qwen_project_plan(false)),
         ("fused_qwen08_project_mix", qwen_project_plan(true)),
-        ("fused_qwen4b_mlp", qwen_4b_plan()),
+        ("fused_qwen4b_mlp", qwen_4b_plan(64)),
         ("fused_qwen4b_project", qwen_4b_project_plan()),
     ];
     // With PHOBOS_DUMP_DIR set, each is also written there as a `.ph`.
@@ -429,8 +429,8 @@ fn a_register_crossing_a_nest_is_declined() {
 }
 
 /// Qwen3.5-4B-Q4_K_M's MLP: gate and up as separate Q4_K weights, the down
-/// projection Q6_K, at 192 blocks.
-fn qwen_4b_plan() -> Plan {
+/// projection Q6_K, at `blocks` blocks.
+fn qwen_4b_plan(blocks: u32) -> Plan {
     let chain = mlp_chain_raw(
         Buf(0),
         Buf(1),
@@ -443,7 +443,7 @@ fn qwen_4b_plan() -> Plan {
     )
     .expect("three formats with a fused decode");
     chain
-        .key(192)
+        .key(blocks)
         .plan()
         .expect("a well-formed chain")
         .expect("a shape the pass fuses")
@@ -451,7 +451,8 @@ fn qwen_4b_plan() -> Plan {
 
 #[test]
 fn the_raw_mlp_decodes_each_weight_with_its_own_intrinsic() {
-    let plan = qwen_4b_plan();
+    // At 64 blocks the down projection's 40 tiles keep the grid busy.
+    let plan = qwen_4b_plan(64);
     assert_eq!(plan.barriers, 1);
     let src = &plan.source;
     assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 2, "gate and up");
@@ -469,6 +470,22 @@ fn the_raw_mlp_decodes_each_weight_with_its_own_intrinsic() {
     assert!(src.contains("* 2 + 1 :+ 1, 0 :+ 32]"), "{src}");
     // Two CTAs per SM with a raw decode.
     assert!(src.starts_with("@launch(256, 2)"), "{src}");
+}
+
+#[test]
+fn a_wide_grid_splits_the_down_projection_along_k() {
+    // 340 blocks against 40 tiles: k's 36 blocks split six ways into
+    // partials, and after a second barrier the tiles add them onto x.
+    let plan = qwen_4b_plan(340);
+    assert_eq!(plan.barriers, 2);
+    let src = &plan.source;
+    assert_eq!(src.matches("= q6k_qdot_i8_t(").count(), 1, "{src}");
+    assert!(!src.contains("+= q6k_qdot_i8_t("), "{src}");
+    assert!(src.contains("P5: tensor<f32>[1, 15360]"), "{src}");
+    assert!(src.contains("if u5 < 240"), "{src}");
+    // The sum reads all six slices.
+    assert!(src.contains("P5[0 :+ 1, 12800 + r5 :+ RT]"), "{src}");
+    assert!(plan.scratch.iter().any(|s| s.scales == 15360), "{:?}", plan.scratch);
 }
 
 #[test]
