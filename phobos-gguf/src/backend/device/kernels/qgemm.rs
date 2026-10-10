@@ -204,10 +204,13 @@ kernel {name}_qgemm_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 
 /// Sums [`qgemm_split_src`]'s `s` partial column tiles into `C`, one row per
 /// program.
-pub(crate) fn qgemm_reduce_src(n: usize, s: usize) -> String {
+pub(crate) fn qgemm_reduce_src(n: usize, s: usize, add: bool) -> String {
     let gn = n / QGEMM_TN;
-    let sum: Vec<String> = (0..s)
-        .map(|i| format!("P[pm :+ 1, (pn + {}) * TN :+ TN]", i * gn))
+    // With `add`, the sum lands on what `C` holds, a residual it updates.
+    let base = add.then(|| "C[pm :+ 1, pn * TN :+ TN]".to_string());
+    let sum: Vec<String> = base
+        .into_iter()
+        .chain((0..s).map(|i| format!("P[pm :+ 1, (pn + {}) * TN :+ TN]", i * gn)))
         .collect();
     format!(
         "@launch(128)
