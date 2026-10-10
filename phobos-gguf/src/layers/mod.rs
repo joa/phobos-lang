@@ -382,6 +382,25 @@ impl Linear {
         })
     }
 
+    /// Stacks quantized parts of one format sharing an input along the output
+    /// axis, unpadded, so a narrow stack stays narrow. `None` unless
+    /// [`Linear::should_fuse`] accepts them as quantized.
+    pub(crate) fn stack_quant(parts: &[&Linear]) -> Option<Linear> {
+        let packed = packed_parts(parts)?;
+        if !Linear::should_fuse(parts) {
+            return None;
+        }
+        let out_dim = parts.iter().map(|p| p.out_dim).sum();
+        let key = parts.iter().map(|p| p.key.as_str()).collect::<Vec<_>>().join("+");
+        Some(Linear {
+            weight: Weights::Quant(Packed::stack(&packed, out_dim).ok()?),
+            in_dim: parts[0].in_dim,
+            out_dim,
+            key,
+            fold: parts[0].fold.clone(),
+        })
+    }
+
     /// Stacks dense parts sharing an input along the output axis, unpadded,
     /// into one projection narrow enough for [`Backend::matmul_rows`]. `None`
     /// if any part is held otherwise or the stack is too wide.
@@ -525,6 +544,15 @@ impl Linear {
 
     /// [`Linear::add_into`] against an already quantized activation. `x` is
     /// what `act` quantizes, for a weight that must be contracted densely.
+    /// Whether projecting `rows` rows reads only a caller's quantized copy,
+    /// so the f32 rows passed beside it need not hold anything.
+    pub(crate) fn act_suffices(&self, backend: &dyn Backend, rows: usize) -> Result<bool> {
+        if self.folded() || self.is_quantized() || !self.is_raw() {
+            return Ok(false);
+        }
+        Ok(backend.raw_act_suffices(self.raw(backend)?, rows, self.in_dim, self.out_dim))
+    }
+
     pub(crate) fn add_into_act(
         &self,
         backend: &dyn Backend,

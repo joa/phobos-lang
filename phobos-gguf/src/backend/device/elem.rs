@@ -3,18 +3,32 @@
 use super::*;
 
 impl DeviceBackend {
+    /// The quantized SwiGLU of two dense `[rows, width]` buffers without the
+    /// f32 result, at the tile `swiglu_q_rows` takes.
+    pub(super) fn swiglu_q_unkept(&self, gate: Buf, up: Buf, rows: usize, width: usize) -> Result<Option<QAct>> {
+        let len = rows * width;
+        let tile = if len.is_multiple_of(ELEM_TILE_WIDE) { ELEM_TILE_WIDE } else { ELEM_TILE };
+        if !len.is_multiple_of(tile) {
+            return Ok(None);
+        }
+        let slot = self.act_slot_transient(rows, width)?;
+        Ok(Some(self.swiglu_q_into(slot, (gate, 0), (up, 0), None, len, tile)?))
+    }
+
     /// The quantizing SwiGLU over a flat span of `len`, into `slot`, `tile`
-    /// elements a CTA.
+    /// elements a CTA. `out` gets the f32 result too, if given.
     pub(super) fn swiglu_q_into(
         &self,
         slot: (QAct, u64, u64),
         (gate, gate_at): (Buf, usize),
         (up, up_at): (Buf, usize),
-        out: Buf,
+        out: Option<Buf>,
         len: usize,
         tile: usize,
     ) -> Result<QAct> {
-        self.check_distinct("swiglu_q", out, &[gate, up]);
+        if let Some(out) = out {
+            self.check_distinct("swiglu_q", out, &[gate, up]);
+        }
         ensure!(
             len.is_multiple_of(tile),
             "a quantizing SwiGLU needs a length ({len}) that is a multiple of {tile}"
@@ -25,22 +39,16 @@ impl DeviceBackend {
         let lane = RMS_LANE as i64;
         self.with_kernel(
             &self.gated_swiglu,
-            blocks,
+            (blocks, out.is_some()),
             "swiglu_q",
-            || swiglu_q_src(blocks),
+            || swiglu_q_src(blocks, out.is_some()),
             |module| {
-                self.launch(
-                    module,
-                    "swiglu_q",
-                    &[
-                        (self.ptr(gate, gate_at)?, [rb, lane]),
-                        (self.ptr(up, up_at)?, [rb, lane]),
-                        (self.ptr(out, 0)?, [rb, lane]),
-                        (qa_ptr, [rb, lane]),
-                        (das_ptr, [rb, 1]),
-                    ],
-                    ((len / tile) as u32, 1, 1),
-                )
+                let mut operands = vec![(self.ptr(gate, gate_at)?, [rb, lane]), (self.ptr(up, up_at)?, [rb, lane])];
+                if let Some(out) = out {
+                    operands.push((self.ptr(out, 0)?, [rb, lane]));
+                }
+                operands.extend([(qa_ptr, [rb, lane]), (das_ptr, [rb, 1])]);
+                self.launch(module, "swiglu_q", &operands, ((len / tile) as u32, 1, 1))
             },
         )?;
         Ok(act)
