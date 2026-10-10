@@ -577,8 +577,14 @@ impl Linear {
         dest: Buf,
     ) -> Result<()> {
         if !self.is_quantized() {
-            // A raw weight on the integer tensor cores reads `act`; the
-            // dense paths ignore it.
+            // A raw weight may add in its own projection. Otherwise one on the
+            // integer tensor cores reads `act`, and the dense paths ignore it.
+            if self.is_raw() {
+                let w = self.raw(backend)?;
+                if backend.matmul_raw_act_add(act, rows, self.in_dim, w, self.out_dim, dest)? {
+                    return Ok(());
+                }
+            }
             return self.add_dense(backend, x, Some(act), rows, dest);
         }
         let w = self.quantized(backend)?;

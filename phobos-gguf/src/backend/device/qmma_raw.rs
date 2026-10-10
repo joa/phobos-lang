@@ -18,6 +18,9 @@ pub(super) struct Qgemm {
     kernels: RefCell<HashMap<Quant, Module>>,
     /// The split-K kernel and its reduce, by shape.
     splits: RefCell<HashMap<SplitKey, (Module, Module)>>,
+    /// The reduce that adds into its destination, by padded `n` and split
+    /// count.
+    reduce_adds: RefCell<HashMap<(usize, usize), Module>>,
     /// The ternary grid at two bits per lane and at four bits per lane.
     grid2: RefCell<Option<DeviceBuffer<i8>>>,
     grid4: RefCell<Option<DeviceBuffer<i8>>>,
@@ -30,6 +33,7 @@ impl Qgemm {
             split: env_flag_on("PHOBOS_QGEMM_SPLIT"),
             kernels: RefCell::new(HashMap::new()),
             splits: RefCell::new(HashMap::new()),
+            reduce_adds: RefCell::new(HashMap::new()),
             grid2: RefCell::new(None),
             grid4: RefCell::new(None),
         }
@@ -67,10 +71,19 @@ impl Qgemm {
             let src = qgemm_split_src(quant, n, k, block, s).context("no staged kernel for this format")?;
             let name = qgemm_split_kernel(quant).expect("the source exists, so does the name");
             let split = compile(&src, &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], name)?;
-            let reduce = compile(&qgemm_reduce_src(n, s), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
+            let reduce = compile(&qgemm_reduce_src(n, s, false), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
             self.splits.borrow_mut().insert(key, (split, reduce));
         }
         Ok(std::cell::Ref::map(self.splits.borrow(), |m| &m[&key]))
+    }
+
+    /// The reduce of [`Self::split_modules`] that adds into its destination.
+    fn reduce_add(&self, n: usize, s: usize) -> Result<std::cell::Ref<'_, Module>> {
+        if !self.reduce_adds.borrow().contains_key(&(n, s)) {
+            let module = compile(&qgemm_reduce_src(n, s, true), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
+            self.reduce_adds.borrow_mut().insert((n, s), module);
+        }
+        Ok(std::cell::Ref::map(self.reduce_adds.borrow(), |m| &m[&(n, s)]))
     }
 
     pub(super) fn grid4(&self) -> Result<u64> {
@@ -133,6 +146,53 @@ impl DeviceBackend {
             let (tm, tn, _) = qmma_tile();
             m.is_multiple_of(tm) && n.is_multiple_of(tn) && k.is_multiple_of(256)
         }
+    }
+
+    /// `dest[m, n] += act . w[n, k]` as the split-K projection with a reduce
+    /// that adds, so a residual update needs no separate sum. Returns `false`,
+    /// doing nothing, unless the shape runs unpadded and split.
+    pub(super) fn project_raw_qmma_add(
+        &self,
+        act: QAct,
+        (m, k): (usize, usize),
+        w: RawBuf,
+        n: usize,
+        dest: Buf,
+    ) -> Result<bool> {
+        let raws = self.raw_quants.borrow();
+        let raw = raws.get(w.0).context("use of an unknown raw weight handle")?;
+        let (nb, rb) = (raw.nb, raw.nb * raw.quant.device_block_bytes());
+        let (bytes_ptr, d_ptr, quant) = (raw.bytes, raw.d, raw.quant);
+        drop(raws);
+        let unpadded = m.is_multiple_of(QGEMM_TM) && n.is_multiple_of(QGEMM_TN);
+        if !self.qgemm.takes(quant, m, k, n) || !unpadded || !self.qgemm.split {
+            return Ok(false);
+        }
+        let block = k / nb;
+        let splits = qgemm_splits(m, n, k, block, self.sms);
+        if splits < 2 {
+            return Ok(false);
+        }
+        let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
+        let mut operands = vec![
+            (qa_ptr, [m as i64, k as i64]),
+            (das_ptr, [m as i64, (k / Q8_BLOCK) as i64]),
+            (bytes_ptr, [n as i64, rb as i64]),
+            (d_ptr, [n as i64, nb as i64]),
+        ];
+        operands.extend(self.qgemm_tables(quant)?);
+        let (tm, tn) = ((m / QGEMM_TM) as u32, (n / QGEMM_TN) as u32);
+        let modules = self.qgemm.split_modules(quant, n, k, block, splits)?;
+        let name = qgemm_split_kernel(quant).expect("takes() checked the format");
+        let partials = self.split_partials(m * n * splits)?;
+        let plane = (partials, [m as i64, (n * splits) as i64]);
+        operands.push(plane);
+        self.launch(&modules.0, name, &operands, (tm, tn * splits as u32, 1))?;
+        drop(modules);
+        let reduce = self.qgemm.reduce_add(n, splits)?;
+        let into = [plane, (self.ptr(dest, 0)?, [m as i64, n as i64])];
+        self.launch(&reduce, "qgemm_reduce", &into, (m as u32, tn, 1))?;
+        Ok(true)
     }
 
     /// Whether [`Self::project_raw_qmma`] reads only the caller's quantized

@@ -368,6 +368,10 @@ impl Backend for DeviceBackend {
         self.matmul_raw(a, m, k, w, n, out)
     }
 
+    fn matmul_raw_act_add(&self, act: QAct, m: usize, k: usize, w: RawBuf, n: usize, dest: Buf) -> Result<bool> {
+        Ok(m > 1 && self.raw_qmma.get() && self.raw_qmma_eligible(w, m, k, n) && self.project_raw_qmma_add(act, (m, k), w, n, dest)?)
+    }
+
     fn raw_act_suffices(&self, w: RawBuf, m: usize, k: usize, n: usize) -> bool {
         self.raw_reads_act_only(w, m, k, n)
     }
