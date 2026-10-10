@@ -137,6 +137,8 @@ impl DeviceBackend {
             q8_qmma,
             q8_qmma_deep,
             q8_qmma_split: RefCell::new(HashMap::new()),
+            qdot_split_mods: RefCell::new(HashMap::new()),
+            qdot_split_on: env_flag_on("PHOBOS_QDOT_SPLIT"),
             q8_qmma_narrow: RefCell::new(None),
             q8_split,
             q8_qdot,

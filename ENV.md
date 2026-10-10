@@ -78,6 +78,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_QMMA_STAGE` | opt-out | on | The staged (shared-memory) form of IQ1_S's fused projection. `0` goes back to the register form. |
 | `PHOBOS_QDOT_I8_TN` | a power of two, 8 to 256 | 64 | Columns a `dp4a` decode matvec's tile covers, for a sweep. Each value is a distinct compiled kernel. |
 | `PHOBOS_QDOT_I8_CTA` | threads | 256 | Threads those matvecs launch with, clamped so a warp's columns fill the CTA whole. Wider reads faster alone and loses in the model. |
+| `PHOBOS_QDOT_SPLIT` | opt-out | on | A K-quant decode matvec over a `k` of 4096 or more whose tiles give fewer than two programs a multiprocessor splits along `k` into partials and a sum. Off, one program per tile walks all of `k`. |
 | `PHOBOS_PERSIST_QDOT` | opt-in | off | The persistent (card-sized grid) form of the Q8_0 decode matvec, which exists to be measured against the launched one. |
 | `PHOBOS_PERSIST_BLOCKS` | a block count | the occupancy answer | Forces that grid's block count, to ask what a matvec loses at the count a fused kernel is stuck with. |
 
