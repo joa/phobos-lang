@@ -47,6 +47,11 @@ pub(super) trait Isa {
     /// below sm_80.
     fn cheap_int_to_float(&self) -> bool;
 
+    /// The k of the int8 `mma.sync` the integer intrinsics issue: 16
+    /// (`m8n8k16`) through Hopper, 32 (`m16n8k32`) from Blackwell on, which
+    /// has no native `m8n8k16` and runs it as a half-used `m16n8k16`.
+    fn int8_mma_k(&self) -> i64;
+
     /// Shared memory bytes one SM splits across its resident CTAs, plus the
     /// two other occupancy limits below. Only [`Codegen::wmma_should_pad`]
     /// reads them.
@@ -360,6 +365,10 @@ impl<'c> Codegen<'c> {
 
     pub(super) fn cheap_int_to_float(&self) -> bool {
         self.isa.cheap_int_to_float()
+    }
+
+    pub(super) fn int8_mma_k(&self) -> i64 {
+        self.isa.int8_mma_k()
     }
 
     /// The k of the native f16 mma.sync. Call only after

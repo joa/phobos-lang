@@ -141,3 +141,17 @@ fn qgemm_refuses_the_wrong_table() {
     let err = emit_err(&qgemm_src("iq2xxs", &[2048, 512], "256, 2"));
     assert!(err.contains("tables of"), "{err}");
 }
+
+#[test]
+fn blackwell_contracts_with_m16n8k32_at_one_cta_an_sm() {
+    // sm_120 has no native m8n8k16 and runs it as a half-used m16n8k16, so
+    // the int8 contraction takes the wide shape there, and the fragments it
+    // holds ask for one CTA an SM. Ada keeps the narrow shape and two.
+    let src = qgemm_src("q4k", &[], "256, 2");
+    let ada = emit_mlir_sync(&src, "sm_89");
+    let blackwell = emit_mlir_sync(&src, "sm_120");
+    assert!(ada.contains("mmaShape = [8, 8, 16]") && !ada.contains("mmaShape = [16, 8, 32]"), "{ada}");
+    assert!(blackwell.contains("mmaShape = [16, 8, 32]") && !blackwell.contains("mmaShape = [8, 8, 16]"), "{blackwell}");
+    assert!(ada.contains("nvvm.minctasm = 2"), "{ada}");
+    assert!(blackwell.contains("nvvm.minctasm = 1"), "{blackwell}");
+}

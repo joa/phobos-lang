@@ -124,6 +124,10 @@ impl Isa for Nvidia {
         self.cc >= 80
     }
 
+    fn int8_mma_k(&self) -> i64 {
+        if self.cc >= 100 { 32 } else { 16 }
+    }
+
     fn smem_per_sm(&self) -> i64 {
         (match self.cc {
             cc if cc >= 90 => 228, // Hopper

@@ -179,6 +179,14 @@ impl<'c> Codegen<'c> {
         let kt_w = self.const_index(block, QGEMM_KT)?;
         let nk = self.divui(block, kd, kt_w)?;
 
+        // The m16n8k32 regrouping holds about twice the fragment registers.
+        // At two CTAs an SM it spills, at one it does not and runs faster, so
+        // the kernel asks for one whatever its `@launch` says.
+        if self.int8_mma_k() == 32
+            && let Some(launch) = self.launch.as_mut()
+        {
+            launch.min_blocks = Some(1);
+        }
         let lanes = self.qgemm_lanes(block)?;
 
         // Stage the first tile before the loop. The loop stages the next one
@@ -590,60 +598,110 @@ impl<'c> Codegen<'c> {
             }
             let frag = |h: i64, t: i64| (h * PATCH + t) as usize;
 
-            for r in 0..PATCH {
-                for c in 0..PATCH {
-                    // One accumulator over both halves when a scale covers
-                    // the group, otherwise one per half.
-                    let mut sums = Vec::with_capacity(per_col as usize);
-                    let mut sum = empty;
-                    for h in 0..halves {
-                        let seed = if split { empty } else { sum };
-                        sum = self.mma_sync(
-                            block,
-                            a_frags[frag(h, r)],
-                            w_frags[frag(h, c)],
-                            seed,
-                            shape,
-                            acc_t,
-                        )?;
-                        if split {
-                            sums.push(sum);
+            // One tile's epilogue over its accumulators: one over both halves
+            // when a scale covers the group, otherwise one per half, each the
+            // vector and the row of it this tile's lane values sit in.
+            let epilogue = |cg: &mut Self, accs: &mut [Value<'c, 'c>], r: i64, c: i64, sums: &[(Value<'c, 'c>, i64)]| -> Result<()> {
+                for dj in 0..2i64 {
+                    let slot = ((r * PATCH + c) * 2 + dj) as usize;
+                    let sw_of = |cg: &mut Self, h: usize| {
+                        cg.vec_extract(block, sw[c as usize * per_col as usize + h], &[dj], f32_t)
+                    };
+                    let raw_of = |cg: &mut Self, h: usize| -> Result<Value<'c, 'c>> {
+                        let (sum, row) = sums[h];
+                        let raw = cg.vec_extract(block, sum, &[row, dj], i32_t)?;
+                        cg.small_int_to_f32(block, raw)
+                    };
+                    accs[slot] = if split {
+                        // acc += sa * (c0 * sw0 + c1 * sw1).
+                        let (w0, w1) = (sw_of(cg, 0)?, sw_of(cg, 1)?);
+                        let (c0, c1) = (raw_of(cg, 0)?, raw_of(cg, 1)?);
+                        let inner = cg.push(block, arith::mulf(c0, w0, cg.loc))?;
+                        let inner = cg.elem_mac(block, f32_t, c1, w1, inner)?;
+                        cg.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
+                    } else if mw_st.is_some() {
+                        // acc += (sa * sw) * c - (sa * asum) * mw: the
+                        // run's minimum, weighted by the activation's sum.
+                        let w0 = sw_of(cg, 0)?;
+                        let as_f = raw_of(cg, 0)?;
+                        let mw0 = cg.vec_extract(block, mw[c as usize], &[dj], f32_t)?;
+                        let scale = cg.push(block, arith::mulf(sa[r as usize], w0, cg.loc))?;
+                        let acc = cg.elem_mac(block, f32_t, as_f, scale, accs[slot])?;
+                        cg.elem_mac(block, f32_t, neg_mins[r as usize], mw0, acc)?
+                    } else {
+                        let w0 = sw_of(cg, 0)?;
+                        let scale = cg.push(block, arith::mulf(sa[r as usize], w0, cg.loc))?;
+                        let as_f = raw_of(cg, 0)?;
+                        cg.elem_mac(block, f32_t, as_f, scale, accs[slot])?
+                    };
+                }
+                Ok(())
+            };
+            if self.int8_mma_k() == 32 {
+                // m16n8k32 takes two row tiles and both halves in one op, and
+                // its fragments are the m8n8k16 ones regrouped: A as rows
+                // (g, g + 8) of the first half, then of the second; B as the
+                // first half, then the second. A split format keeps the
+                // halves apart with m16n8k16.
+                let k = if split { IMMA_K } else { Q8_BLOCK };
+                let a_t = Type::vector(&[(2 * k / IMMA_K) as u64, 4], i8_t);
+                let b_t = Type::vector(&[(k / IMMA_K) as u64, 4], i8_t);
+                let d_t = Type::vector(&[2, 2], i32_t);
+                let wide = self.mma_shape(2 * IMMA_TILE, IMMA_TILE, k)?;
+                let zero_d = self.vec_broadcast(block, zero_i, d_t)?;
+                let zero_i8 = self.zero_scalar(block, i8_t)?;
+                let parts: Vec<Vec<i64>> = if split {
+                    (0..halves).map(|h| vec![h]).collect()
+                } else {
+                    vec![(0..halves).collect()]
+                };
+                for rp in 0..PATCH / 2 {
+                    let (r0, r1) = (2 * rp, 2 * rp + 1);
+                    for c in 0..PATCH {
+                        let (mut sums0, mut sums1) = (Vec::new(), Vec::new());
+                        for part in &parts {
+                            let mut a = self.vec_broadcast(block, zero_i8, a_t)?;
+                            let mut b = self.vec_broadcast(block, zero_i8, b_t)?;
+                            for (i, &h) in part.iter().enumerate() {
+                                for (j, r) in [r0, r1].into_iter().enumerate() {
+                                    let piece = self.vec_shape_cast(block, a_frags[frag(h, r)], four_i8)?;
+                                    a = self.vec_insert(block, piece, a, &[(2 * i + j) as i64])?;
+                                }
+                                let piece = self.vec_shape_cast(block, w_frags[frag(h, c)], four_i8)?;
+                                b = self.vec_insert(block, piece, b, &[i as i64])?;
+                            }
+                            let d = self.mma_sync(block, a, b, zero_d, wide, d_t)?;
+                            sums0.push((d, 0));
+                            sums1.push((d, 1));
                         }
+                        epilogue(self, &mut accs, r0, c, &sums0)?;
+                        epilogue(self, &mut accs, r1, c, &sums1)?;
                     }
-                    if !split {
-                        sums.push(sum);
-                    }
-                    for dj in 0..2i64 {
-                        let slot = ((r * PATCH + c) * 2 + dj) as usize;
-                        let sw_of = |cg: &mut Self, h: usize| {
-                            cg.vec_extract(block, sw[c as usize * per_col as usize + h], &[dj], f32_t)
-                        };
-                        let raw_of = |cg: &mut Self, h: usize| -> Result<Value<'c, 'c>> {
-                            let raw = cg.vec_extract(block, sums[h], &[0, dj], i32_t)?;
-                            cg.small_int_to_f32(block, raw)
-                        };
-                        accs[slot] = if split {
-                            // acc += sa * (c0 * sw0 + c1 * sw1).
-                            let (w0, w1) = (sw_of(self, 0)?, sw_of(self, 1)?);
-                            let (c0, c1) = (raw_of(self, 0)?, raw_of(self, 1)?);
-                            let inner = self.push(block, arith::mulf(c0, w0, self.loc))?;
-                            let inner = self.elem_mac(block, f32_t, c1, w1, inner)?;
-                            self.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
-                        } else if mw_st.is_some() {
-                            // acc += (sa * sw) * c - (sa * asum) * mw: the
-                            // run's minimum, weighted by the activation's sum.
-                            let w0 = sw_of(self, 0)?;
-                            let as_f = raw_of(self, 0)?;
-                            let mw0 = self.vec_extract(block, mw[c as usize], &[dj], f32_t)?;
-                            let scale = self.push(block, arith::mulf(sa[r as usize], w0, self.loc))?;
-                            let acc = self.elem_mac(block, f32_t, as_f, scale, accs[slot])?;
-                            self.elem_mac(block, f32_t, neg_mins[r as usize], mw0, acc)?
-                        } else {
-                            let w0 = sw_of(self, 0)?;
-                            let scale = self.push(block, arith::mulf(sa[r as usize], w0, self.loc))?;
-                            let as_f = raw_of(self, 0)?;
-                            self.elem_mac(block, f32_t, as_f, scale, accs[slot])?
-                        };
+                }
+            } else {
+                // The tile's mma, then its epilogue, one tile at a time.
+                for r in 0..PATCH {
+                    for c in 0..PATCH {
+                        let mut sums = Vec::with_capacity(per_col as usize);
+                        let mut sum = empty;
+                        for h in 0..halves {
+                            let seed = if split { empty } else { sum };
+                            sum = self.mma_sync(
+                                block,
+                                a_frags[frag(h, r)],
+                                w_frags[frag(h, c)],
+                                seed,
+                                shape,
+                                acc_t,
+                            )?;
+                            if split {
+                                sums.push((sum, 0));
+                            }
+                        }
+                        if !split {
+                            sums.push((sum, 0));
+                        }
+                        epilogue(self, &mut accs, r, c, &sums)?;
                     }
                 }
             }
