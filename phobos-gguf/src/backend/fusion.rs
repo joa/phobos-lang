@@ -3,6 +3,34 @@
 
 use super::*;
 
+/// One decode row's attention operands made ready in one pass: each query
+/// and key head RMS-normalized and rotated, the output gate split out
+/// beside the query, and the key and value stored into the caches at the
+/// rotation's `start_pos`. See [`Backend::attn_prep`].
+#[derive(Clone, Copy, Debug)]
+pub struct AttnPrep {
+    /// The query heads and their output gate, `rope.heads` rows of
+    /// `head_dim` each, at each plane's pitch.
+    pub q: Plane,
+    pub gate: Plane,
+    /// The key and value heads, `kv_heads` dense rows of `head_dim`.
+    pub k: Buf,
+    pub v: Buf,
+    pub kv_heads: usize,
+    /// The per-head normalization gains, `head_dim` each.
+    pub q_gain: Buf,
+    pub k_gain: Buf,
+    pub eps: f32,
+    /// `[positions, rope_dim]` cosines then sines, as [`Backend::rope`] reads.
+    pub table: Buf,
+    pub rope: Rope,
+    /// The dense query and gate, `[rope.heads, head_dim]`.
+    pub q_out: Buf,
+    pub gate_out: Buf,
+    pub keys: HBuf,
+    pub values: HBuf,
+}
+
 /// A whole decode MLP, for a backend that can run it as one kernel.
 ///
 /// `x` is the residual row and also the destination, since the down

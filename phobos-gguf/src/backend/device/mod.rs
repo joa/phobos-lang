@@ -19,7 +19,7 @@ use phobos_kernels::launch::{CTA_THREADS, STATIC_SHARED_LIMIT, persistent_grid};
 use crate::quant::Quant;
 
 use super::{
-    Attn, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject,
+    Attn, AttnPrep, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject,
     HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, Packed, Plane, Q8_BLOCK, QAct, RawAt, QBuf, RawBuf, Rope,
 };
 
@@ -318,6 +318,13 @@ pub struct DeviceBackend {
     store_pairs: RefCell<HashMap<(usize, bool), Module>>,
     /// Rotary kernels, keyed by head count and half the rotary width.
     ropes: RefCell<HashMap<(usize, usize), Module>>,
+    /// [`Backend::attn_prep`]'s two kernels, keyed by head dimension, half
+    /// the rotary width, the norm's epsilon as bits, and whether it stores
+    /// into the caches.
+    attn_preps: RefCell<HashMap<(usize, usize, u32, bool), Module>>,
+    /// Whether a decode row prepares its attention operands in two launches.
+    /// On by default; `PHOBOS_ATTN_PREP=0` runs the separate ops.
+    attn_prep_on: bool,
     /// [`Backend::rope_gather`] kernels, keyed by head count, half the
     /// rotary width, the source's heads per row, and the head dimension.
     rope_gathers: RefCell<HashMap<(usize, usize, usize, usize), Module>>,
