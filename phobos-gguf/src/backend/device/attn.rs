@@ -4,6 +4,47 @@
 use super::*;
 
 impl DeviceBackend {
+    /// [`Backend::attn_prep`] as two launches, one program per head: the
+    /// query with its gate, then the key with its value into the caches.
+    pub(super) fn attn_prep_two(&self, p: AttnPrep) -> Result<bool> {
+        if !self.attn_prep_on {
+            return Ok(false);
+        }
+        let (dim, half) = (p.rope.head_dim, p.rope.rope_dim / 2);
+        let (heads, kv) = (p.rope.heads as i64, p.kv_heads as i64);
+        let row = p.rope.start_pos * p.kv_heads * dim;
+        let table = (self.ptr(p.table, p.rope.start_pos * p.rope.rope_dim)?, [1, p.rope.rope_dim as i64]);
+        let gains = |g| -> Result<_> { Ok((self.ptr(g, 0)?, [1, dim as i64])) };
+        let plane = |pl: Plane| -> Result<_> { Ok((self.ptr(pl.buf, pl.offset)?, [heads, pl.pitch as i64])) };
+        let query = [
+            plane(p.q)?,
+            gains(p.q_gain)?,
+            table,
+            (self.ptr(p.q_out, 0)?, [heads, dim as i64]),
+            plane(p.gate)?,
+            (self.ptr(p.gate_out, 0)?, [heads, dim as i64]),
+        ];
+        let key = [
+            (self.ptr(p.k, 0)?, [kv, dim as i64]),
+            gains(p.k_gain)?,
+            table,
+            (self.hptr(p.keys, row)?, [kv, dim as i64]),
+            (self.ptr(p.v, 0)?, [kv, dim as i64]),
+            (self.hptr(p.values, row)?, [kv, dim as i64]),
+        ];
+        for (cache, operands, programs) in [(false, query, heads), (true, key, kv)] {
+            let name = if cache { "attn_prep_kv" } else { "attn_prep_q" };
+            self.with_kernel(
+                &self.attn_preps,
+                (dim, half, p.eps.to_bits(), cache),
+                name,
+                || attn_prep_src(dim, half, p.eps, cache),
+                |module| self.launch(module, name, &operands, (programs as u32, 1, 1)),
+            )?;
+        }
+        Ok(true)
+    }
+
     /// Picks the attention path for this shape: the tensor cores for a
     /// prompt's whole tiles, then the blocked kernel, the two-matmul path,
     /// the decode split, and a row at a time.

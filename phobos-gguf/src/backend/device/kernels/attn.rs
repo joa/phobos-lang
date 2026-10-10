@@ -366,6 +366,52 @@ kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
     )
 }
 
+/// A decode row's attention preparation, one program per head `h`: head
+/// `h` of `S` RMS-normalized by the gains `G`, its first `2 * half`
+/// channels rotated by the table row `T`, stored to `O`, and row `h` of `C`
+/// copied to `E`. The query runs it with its output gate as the copy; the
+/// key, with `cache`, with its value, both stored as f16 into the caches.
+pub(crate) fn attn_prep_src(dim: usize, half: usize, eps: f32, cache: bool) -> String {
+    let (name, ty) = match cache {
+        true => ("attn_prep_kv", "f16"),
+        false => ("attn_prep_q", "f32"),
+    };
+    let store = |v: String| if cache { format!("f16({v})") } else { v };
+    let (rd, tail) = (2 * half, dim - 2 * half);
+    let (rest_load, rest_sum, rest_store) = match tail {
+        0 => (String::new(), String::new(), String::new()),
+        _ => (
+            format!("  var t = S[h :+ 1, {rd} :+ {tail}]
+"),
+            " + rowsum(t * t)".to_string(),
+            format!("  O[h :+ 1, {rd} :+ {tail}] = {}
+", store(format!("t * inv * G[0 :+ 1, {rd} :+ {tail}]"))),
+        ),
+    };
+    format!(
+        "@launch(256)
+kernel {name}(S: tensor<f32>[H, SP], G: tensor<f32>[GR, GD], T: tensor<f32>[P, RD],
+              O: tensor<{ty}>[H, OP], C: tensor<f32>[H, CP], E: tensor<{ty}>[H, EP]) {{
+  let h = program_id(0)
+  var a = S[h :+ 1, 0 :+ {half}]
+  var b = S[h :+ 1, {half} :+ {half}]
+{rest_load}  var ss: tile<f32>[1, 1] = rowsum(a * a) + rowsum(b * b){rest_sum}
+  var inv: tile<f32>[1, 1] = 1.0 / sqrt(ss / {dim}.0 + {eps:.12})
+  var na = a * inv * G[0 :+ 1, 0 :+ {half}]
+  var nb = b * inv * G[0 :+ 1, {half} :+ {half}]
+  var c = T[0 :+ 1, 0 :+ {half}]
+  var s = T[0 :+ 1, {half} :+ {half}]
+  O[h :+ 1, 0 :+ {half}] = {lo}
+  O[h :+ 1, {half} :+ {half}] = {hi}
+{rest_store}  E[h :+ 1, 0 :+ {dim}] = {copy}
+}}
+",
+        lo = store("na * c - nb * s".into()),
+        hi = store("na * s + nb * c".into()),
+        copy = store(format!("C[h :+ 1, 0 :+ {dim}]")),
+    )
+}
+
 /// [`rope_src`] that reads a strided window of a fused QKV projection and
 /// writes a dense destination. A prompt's query and key both need this,
 /// since past one row the projection's three parts interleave.

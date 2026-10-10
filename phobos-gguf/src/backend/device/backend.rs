@@ -581,6 +581,10 @@ impl Backend for DeviceBackend {
         self.attention_any(q, keys, values, spec, out)
     }
 
+    fn attn_prep(&self, prep: AttnPrep) -> Result<bool> {
+        self.attn_prep_two(prep)
+    }
+
     fn gate_into(&self, x: Buf, gate: Buf) -> Result<()> {
         let len = self.len_of(x)?.min(self.len_of(gate)?);
         self.pointwise("gate_into", &[(x, 0), (gate, 0)], len)
