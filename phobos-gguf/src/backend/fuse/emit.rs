@@ -776,8 +776,9 @@ impl Emit {
             .join(", ");
         let params = self.params.join(",\n             ");
         // Two CTAs per SM with a raw decode in the kernel. Three would spill.
+        let ctas = std::env::var("PHOBOS_EXP_FUSED_CTAS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2);
         let launch = match self.raw {
-            true => format!("{CTA}, 2"),
+            true => format!("{CTA}, {ctas}"),
             false => CTA.to_string(),
         };
         // Shared declarations go first, so every tile is in scope before the
