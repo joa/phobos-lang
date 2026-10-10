@@ -812,8 +812,9 @@ pub trait Backend {
 
     /// The delta rule's per-head gates, written into `packed` after the planes.
     ///
-    /// `decay_in` and `beta_in` are the raw `[rows, heads]` projections and
-    /// `rate` and `dt_bias` are `[heads]`. The decay is
+    /// `decay_in` and `beta_in` are the raw `[rows, heads]` projections, each
+    /// row `pitch` elements after the last (`heads` when dense), and `rate`
+    /// and `dt_bias` are `[heads]`. The decay is
     /// `exp(rate * softplus(decay_in + dt_bias))` and the write strength is
     /// `sigmoid(beta_in)`.
     #[allow(clippy::too_many_arguments)]
@@ -823,6 +824,7 @@ pub trait Backend {
         decay_at: usize,
         beta_in: Buf,
         beta_at: usize,
+        pitch: usize,
         rate: Buf,
         dt_bias: Buf,
         mix: DeltaMix,

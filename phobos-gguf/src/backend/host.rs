@@ -581,18 +581,20 @@ impl Backend for HostBackend {
         decay_at: usize,
         beta_in: Buf,
         beta_at: usize,
+        pitch: usize,
         rate: Buf,
         dt_bias: Buf,
         mix: DeltaMix,
         packed: Buf,
     ) -> Result<()> {
         let (heads, span, gates) = (mix.heads, mix.span(), mix.gates());
+        let read_len = (mix.rows - 1) * pitch + heads;
         self.writing(packed, |slabs, dst| {
             let (a, b) = (&slabs[decay_in.0][decay_at..], &slabs[beta_in.0][beta_at..]);
             let (r, bias) = (&slabs[rate.0], &slabs[dt_bias.0]);
             ensure!(
-                a.len() >= gates
-                    && b.len() >= gates
+                a.len() >= read_len
+                    && b.len() >= read_len
                     && r.len() >= heads
                     && bias.len() >= heads
                     && dst.len() >= mix.packed_len(),
@@ -600,8 +602,9 @@ impl Backend for HostBackend {
             );
             for i in 0..gates {
                 let h = i % heads;
-                dst[3 * span + i] = (r[h] * softplus(a[i] + bias[h])).exp();
-                dst[3 * span + gates + i] = sigmoid(b[i]);
+                let at = i / heads * pitch + h;
+                dst[3 * span + i] = (r[h] * softplus(a[at] + bias[h])).exp();
+                dst[3 * span + gates + i] = sigmoid(b[at]);
             }
             Ok(())
         })

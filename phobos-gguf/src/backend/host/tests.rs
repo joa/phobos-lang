@@ -234,7 +234,7 @@ fn delta_gates_hold_up_where_the_direct_softplus_overflows() {
     let bias = backend.upload(&[0.0]).unwrap();
     let packed = backend.alloc(mix.packed_len()).unwrap();
     backend
-        .delta_gates(decay_in, 0, beta_in, 0, rate, bias, mix, packed)
+        .delta_gates(decay_in, 0, beta_in, 0, 1, rate, bias, mix, packed)
         .unwrap();
 
     let out = read_vec(&backend, packed, mix.packed_len()).unwrap();
@@ -245,6 +245,37 @@ fn delta_gates_hold_up_where_the_direct_softplus_overflows() {
     // softplus(0) is ln(2), so the decay is a half.
     assert!((out[at + 1] - 0.5).abs() < 1e-6);
     assert_eq!(&out[at + 2..at + 4], &[0.5, 0.5]);
+}
+
+#[test]
+fn delta_gates_read_a_stacked_projection_at_its_pitch() {
+    let backend = HostBackend::new();
+    let mix = DeltaMix {
+        rows: 2,
+        heads: 1,
+        head_dim: 2,
+        kv_heads: 1,
+        kernel: 1,
+        planes: [0, 2, 4],
+        head_stride: 2,
+        normalize: false,
+        query_scale: 1.0,
+    };
+    // Rows of [decay, beta, padding]: the gates read columns 0 and 1 only.
+    let stacked = backend.upload(&[0.0, 0.0, 9.0, 0.0, 200.0, 9.0]).unwrap();
+    let rate = backend.upload(&[-1.0]).unwrap();
+    let bias = backend.upload(&[0.0]).unwrap();
+    let packed = backend.alloc(mix.packed_len()).unwrap();
+    backend
+        .delta_gates(stacked, 0, stacked, 1, 3, rate, bias, mix, packed)
+        .unwrap();
+
+    let out = read_vec(&backend, packed, mix.packed_len()).unwrap();
+    let at = 3 * mix.span();
+    assert!((out[at] - 0.5).abs() < 1e-6 && (out[at + 1] - 0.5).abs() < 1e-6);
+    // The second row's beta input is 200, so its write strength is one.
+    assert_eq!(out[at + 2], 0.5);
+    assert!((out[at + 3] - 1.0).abs() < 1e-6);
 }
 
 #[test]

@@ -513,7 +513,9 @@ impl Model {
         // operands together. [`Proj::Split`] is the four separate tensors a
         // raw file holds: one fused kernel where the backend has a stage for
         // each format, four launches where it does not.
-        let (z, alpha_op, beta_op, mix_done, mut release) = match &delta.proj {
+        // `gate_pitch` is the row pitch the decay and write strength are read
+        // at: their width when they sit in buffers of their own.
+        let (z, alpha_op, beta_op, gate_pitch, mix_done, mut release) = match &delta.proj {
             Proj::Fused { linear, parts } => {
                 let width = linear.out_dim;
                 let stacked = backend.alloc(rows * width)?;
@@ -575,7 +577,7 @@ impl Model {
                 }
                 let [z, alpha_op, beta_op] = planes;
                 extracted.push(stacked);
-                (z, alpha_op, beta_op, fused.mix, extracted)
+                (z, alpha_op, beta_op, parts[2].1, fused.mix, extracted)
             }
             Proj::Split { qkv, gate, gates: decay_gates } => {
                 // The three gate operands in one buffer, as the fused layout
@@ -616,7 +618,7 @@ impl Model {
                 }
                 match fused {
                     Some((stacked, mix_done)) => {
-                        ((stacked, 0), (stacked, alpha_at), (stacked, beta_at), mix_done, vec![stacked])
+                        ((stacked, 0), (stacked, alpha_at), (stacked, beta_at), alpha_w, mix_done, vec![stacked])
                     }
                     None => {
                         let input = self.norm(backend, resid, rows, gain, normed, qkv)?;
@@ -640,9 +642,10 @@ impl Model {
                         // The gates read the row unfolded, which `normed` is.
                         let act = input.plain_act();
                         input.release(backend);
-                        let (alpha_op, beta_op, mut release) = decay_gates.project(backend, normed, act, rows)?;
+                        let (alpha_op, beta_op, pitch, mut release) =
+                            decay_gates.project(backend, normed, act, rows)?;
                         release.push(gate_buf);
-                        ((gate_buf, 0), alpha_op, beta_op, false, release)
+                        ((gate_buf, 0), alpha_op, beta_op, pitch, false, release)
                     }
                 }
             }
@@ -658,6 +661,7 @@ impl Model {
                 decay.1,
                 beta.0,
                 beta.1,
+                gate_pitch,
                 delta.rate(backend, variants.decay_from_log)?,
                 delta.dt_bias.buf(backend)?,
                 mix,
