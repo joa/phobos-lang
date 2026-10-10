@@ -35,6 +35,11 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    // The 4B's convolution: 32 value heads over 16 key heads, and ungrouped.
+    let batch = delta_conv_batch(512);
+    let scale = 1.0 / 128f32.sqrt();
+    sources.push(("delta_conv".to_string(), delta_conv_src(32, 16, 128, 4, 128, 2048, batch, true, scale)));
+    sources.push(("delta_conv_mha".to_string(), delta_conv_src(16, 16, 128, 4, 128, 2048, batch, true, scale)));
     sources.push(("rms_norm_gated".to_string(), rms_norm_src(128, 1e-6, NormForm::GatedQuantized)));
     let i8: [I8Row; 11] = [
         (

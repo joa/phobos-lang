@@ -630,6 +630,10 @@ impl Backend for DeviceBackend {
             mix.planes == [0, plane_stride, 2 * plane_stride],
             "delta_conv expects evenly spaced query, key and value planes"
         );
+        ensure!(
+            mix.heads.is_multiple_of(mix.kv_heads),
+            "delta_conv expects the value heads to be whole groups of the key heads"
+        );
         let key = (
             mix.heads,
             mix.kv_heads,
@@ -666,7 +670,7 @@ impl Backend for DeviceBackend {
                         (self.ptr(taps, 0)?, [mix.kernel as i64, c]),
                         (self.ptr(packed, 0)?, [planes, width]),
                     ],
-                    ((mix.rows / batch) as u32, mix.heads as u32, 3),
+                    ((mix.rows / batch) as u32, (2 * mix.kv_heads + mix.heads) as u32, 1),
                 )
             },
         )
