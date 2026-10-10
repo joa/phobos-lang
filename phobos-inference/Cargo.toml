@@ -1,6 +1,6 @@
 [package]
 name = "phobos-inference"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 description = "Inference runtime: the model traits, sampling, chat and an OpenAI-compatible server"
 readme.workspace = true

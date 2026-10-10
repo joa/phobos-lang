@@ -1,6 +1,6 @@
 [package]
 name = "phobos-cluster"
-version = "0.1.1"
+version = "0.1.2"
 edition.workspace = true
 description = "Cluster IR, node ISA, and the cluster compiler for Phobos"
 readme.workspace = true
