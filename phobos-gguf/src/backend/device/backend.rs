@@ -829,13 +829,7 @@ impl Backend for DeviceBackend {
     }
 
     fn swiglu_q_rows(&self, gate: Buf, up: Buf, out: Buf, rows: usize, width: usize) -> Result<QAct> {
-        // Both operands are dense, so the rows run as one flat span, and the
-        // quantized rows land in a slot laid out the same way. A prompt's span
-        // takes the wide tile, as the wide quantize does.
-        let slot = self.act_slot_transient(rows, width)?;
-        let len = rows * width;
-        let tile = if len.is_multiple_of(ELEM_TILE_WIDE) { ELEM_TILE_WIDE } else { ELEM_TILE };
-        self.swiglu_q_into(slot, (gate, 0), (up, 0), Some(out), len, tile)
+        self.swiglu_q_span(gate, up, out, rows, width)
     }
 
     fn swiglu(
