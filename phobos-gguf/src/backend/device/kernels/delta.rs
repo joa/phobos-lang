@@ -252,11 +252,13 @@ pub(crate) const DELTA_TN: usize = 16;
 /// call's trailing positions ahead of this call's, so tap `k` of position
 /// `t` is row `t + k` with no boundary case. Taps are `[KS, C]`, transposed
 /// from the file, so one tap over a run of channels is a contiguous load.
-/// The plane is the grid's third axis, to save two launches.
+/// One launch covers all three planes.
 ///
-/// The head axis `h` covers the value heads. In a grouped-query deltanet,
-/// query and key have only `kv_heads` heads, so those planes read head
-/// `h % kv_heads`, matching upstream's `ggml_repeat_4d`.
+/// The grid's second axis runs over `kv_heads` query heads, `kv_heads` key
+/// heads, then the value heads. In a grouped-query deltanet the scan reads a
+/// query and key per value head, value head `h` taking head `h % kv_heads`
+/// as upstream's `ggml_repeat_4d` does, so each query and key head is
+/// computed once and stored to every value head that shares it.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn delta_conv_src(
     heads: usize,
@@ -301,18 +303,24 @@ pub(crate) fn delta_conv_src(
         )
     };
 
+    let (qk, group) = (2 * kv_heads, heads / kv_heads);
     format!(
         "@launch(256)
 @autotune(H in [{heads}], D in [{head_dim}], KS in [{kernel}], ST in [{stride}], PS in [{plane_stride}], TB in [{batch}])
 @aligned(C = D, HD = D)
 kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R3, HD]) {{
   let t = program_id(0)
-  let h = program_id(1)
-  let p = program_id(2)
+  let j = program_id(1)
   let r = R3 / 3
-  var hs: i32 = h % {kv_heads}
-  if p == 2 {{
-    hs = h
+  var p: i32 = 2
+  var hs: i32 = j - {qk}
+  if j < {qk} {{
+    p = 1
+    hs = j - {kv_heads}
+  }}
+  if j < {kv_heads} {{
+    p = 0
+    hs = j
   }}
   let cb = p * PS + hs * ST
   var acc: tile<f32>[TB, D] = 0.0
@@ -325,7 +333,14 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
   var g: tile<f32>[TB, 1] = 1.0
   if p == 0 {{
 {query}  }}
-{key_case}  O[p * r + t * TB :+ TB, h * D :+ D] = s * g
+{key_case}  var y = s * g
+  if p == 2 {{
+    O[2 * r + t * TB :+ TB, hs * D :+ D] = y
+  }} else {{
+    for i in range(0, {group}, 1) {{
+      O[p * r + t * TB :+ TB, (hs + i * {kv_heads}) * D :+ D] = y
+    }}
+  }}
 }}
 "
     )
