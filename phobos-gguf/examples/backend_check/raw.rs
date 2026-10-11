@@ -79,7 +79,7 @@ fn raw_shape_is_tc(m: usize, k: usize, n: usize) -> bool {
 type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 
 /// `check_tc`'s signature.
-type CheckTc<'a> = dyn Fn(&str, usize, &[f32], &[f32]) + 'a;
+type CheckTc<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 
 /// `check_spread`'s signature. Unlike [`CheckWithin`] it takes no tolerance.
 type CheckSpread<'a> = dyn Fn(&str, &[f32], &[f32]) + 'a;
@@ -125,7 +125,7 @@ fn check_matmul_raw(
         set_qmma(false);
         let (want, float_path) = (run(host)?, run(gpu)?);
         if raw_shape_is_tc(m, k, n) {
-            check_tc(&label, k, &want, &float_path);
+            check_tc(&label, super::dot_rms(k, &a, &packed.dense()), &want, &float_path);
         } else {
             check_within(&label, 1e-3, &want, &float_path);
         }

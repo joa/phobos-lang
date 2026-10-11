@@ -19,6 +19,14 @@ mod raw;
 
 use raw::{check_hadamard, check_raw_formats};
 
+/// The RMS magnitude of a length-`k` dot of an element of `a` with one of
+/// `w`: sqrt(k) times the two operands' RMS. A quantized format's weights
+/// are nowhere near unit size, so this is measured rather than assumed.
+fn dot_rms(k: usize, a: &[f32], w: &[f32]) -> f32 {
+    let rms = |x: &[f32]| (x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32).sqrt();
+    (k as f32).sqrt() * rms(a) * rms(w)
+}
+
 fn main() -> Result<()> {
     let gpu = device::DeviceBackend::new(&phobos_gguf::Quant::ALL)?;
     let host = HostBackend::new();
@@ -91,10 +99,9 @@ fn main() -> Result<()> {
     let check = |name: &str, want: &[f32], got: &[f32]| check_within(name, 1e-4, want, got);
 
     // Tensor-core matmul rounds inputs to fp16, so the error is relative to
-    // the dot's RMS magnitude, sqrt(K)/3. Same rule as `verify_matmul` in
-    // phobos-kbench/src/gemm.rs.
-    let check_tc = |name: &str, k: usize, want: &[f32], got: &[f32]| {
-        let floor = (k as f32).sqrt() / 3.0;
+    // the dot's RMS magnitude, `dot_rms`. On uniform(-1, 1) operands that is
+    // sqrt(K)/3, the rule `verify_matmul` in phobos-kbench/src/gemm.rs uses.
+    let check_tc = |name: &str, floor: f32, want: &[f32], got: &[f32]| {
         let error = want
             .iter()
             .zip(got)
@@ -310,7 +317,7 @@ fn main() -> Result<()> {
         };
         check_tc(
             &format!("matmul_tc [{m} x {k} x {n}]"),
-            k,
+            dot_rms(k, &a, &w),
             &run(&host)?,
             &run(&gpu)?,
         );
