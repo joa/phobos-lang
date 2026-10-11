@@ -104,7 +104,7 @@ impl<'c> Codegen<'c> {
         let butterfly = |cg: &mut Self, blk: &Block<'c>, x: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
             let (mut x, mut mask) = (x, WARP / 2);
             while mask >= cols {
-                let other = cg.shfl_xor_f32(blk, x, mask)?;
+                let other = cg.shfl_xor(blk, x, mask)?;
                 x = cg.push(blk, arith::addf(x, other, cg.loc))?;
                 mask /= 2;
             }

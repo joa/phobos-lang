@@ -488,7 +488,7 @@ impl<'c> Codegen<'c> {
                 let seed = self.zero_scalar(block, self.i32_t)?;
                 let half = self.kq_byte_sum(block, &words, seed)?;
                 let as_f = self.push(block, arith::bitcast(half, self.f32_t, self.loc))?;
-                let other = self.shfl_xor_f32(block, as_f, 1)?;
+                let other = self.shfl_xor(block, as_f, 1)?;
                 let other = self.push(block, arith::bitcast(other, self.i32_t, self.loc))?;
                 let sum = self.push(block, arith::addi(half, other, self.loc))?;
                 let group = self.divui(block, *chunk, group_w)?;

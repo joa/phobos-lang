@@ -119,7 +119,7 @@ impl<'c> Codegen<'c> {
         }
         let mut mask = WARP / 2;
         while mask >= 1 {
-            let other = self.shfl_xor_f32(block, acc, mask)?;
+            let other = self.shfl_xor(block, acc, mask)?;
             acc = self.push(block, arith::addf(acc, other, self.loc))?;
             mask /= 2;
         }
@@ -191,7 +191,7 @@ impl<'c> Codegen<'c> {
                 out = self.vec_insert(block, *nk, out, &[k as i64])?;
             }
             for m in [4, 2, 1] {
-                let other = self.shfl_xor_f32(block, mx, m)?;
+                let other = self.shfl_xor(block, mx, m)?;
                 mx = self.fmax(block, mx, other)?;
             }
             let denom = self.push(block, arith::addf(mx, tiny, self.loc))?;

@@ -120,7 +120,7 @@ pub(super) trait Isa {
 
     /// The value of v on the lane whose id differs in the given xor mask bits.
     /// Every lane of the executing warp must reach this.
-    fn shfl_xor_f32<'c>(
+    fn shfl_xor<'c>(
         &self,
         cg: &Codegen<'c>,
         block: &Block<'c>,
@@ -461,13 +461,13 @@ impl<'c> Codegen<'c> {
 
     // ---- what a warp can share ----
 
-    pub(in crate::codegen) fn shfl_xor_f32(
+    pub(in crate::codegen) fn shfl_xor(
         &self,
         block: &Block<'c>,
         v: Value<'c, 'c>,
         mask: i64,
     ) -> Result<Value<'c, 'c>> {
-        self.isa.shfl_xor_f32(self, block, v, mask)
+        self.isa.shfl_xor(self, block, v, mask)
     }
 
 

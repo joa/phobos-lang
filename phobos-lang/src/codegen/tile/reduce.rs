@@ -57,7 +57,7 @@ impl<'c> Codegen<'c> {
         let out = self.alloc_tile_shaped(block, elem, &[rows, 1])?;
         match self.reduce_lanes(rows) {
             // gpu.shuffle carries a 32-bit payload; f16 keeps the serial path.
-            Some(lanes) if elem == self.f32_t => {
+            Some(lanes) if elem == self.f32_t || elem == self.i32_t => {
                 self.rowreduce_warp(block, src, &out, kind, lanes)?
             }
             _ => self.rowreduce_serial(block, src, &out, kind)?,
@@ -81,6 +81,23 @@ impl<'c> Codegen<'c> {
                 let v = self.eval_fused(block, tree, &[row, j], shape, 1, vec_t)?;
                 self.coerce(block, v, elem)
             }
+        }
+    }
+
+    /// One step of the fold. An integer sums in its own type, so a narrow
+    /// one can wrap.
+    fn fold(
+        &self,
+        block: &Block<'c>,
+        kind: Reduce,
+        elem: Type<'c>,
+        acc: Value<'c, 'c>,
+        v: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        match kind {
+            Reduce::Sum => self.push(block, self.elem_arith(BinOp::Add, elem, acc, v)?),
+            Reduce::Max if self.is_int(elem) => self.push(block, self.minmax(BinOp::Max, "si", acc, v)?),
+            Reduce::Max => self.fmax(block, acc, v),
         }
     }
 
@@ -166,12 +183,7 @@ impl<'c> Codegen<'c> {
             let j = detach(jb.argument(0)?.into());
             let v = cg.row_elem(&jb, src, i, j, elem)?;
             let cur = cg.push(&jb, memref::load(slot, &[], cg.loc))?;
-            // An integer sums in its own type, so a narrow one can wrap.
-            let nv = match kind {
-                Reduce::Sum => cg.push(&jb, cg.elem_arith(BinOp::Add, elem, cur, v)?)?,
-                Reduce::Max if cg.is_int(elem) => cg.push(&jb, cg.minmax(BinOp::Max, "si", cur, v)?)?,
-                Reduce::Max => cg.fmax(&jb, cur, v)?,
-            };
+            let nv = cg.fold(&jb, kind, elem, cur, v)?;
             jb.append_operation(memref::store(nv, slot, &[], cg.loc));
             jb.append_operation(scf::r#yield(&[], cg.loc));
             let region = Region::new();
@@ -212,16 +224,14 @@ impl<'c> Codegen<'c> {
         let lane = self.remui(&body, li, lanes_v)?;
 
         // This lane's strided slice of the row, folded in a register.
-        let init = self.reduce_identity(&body, self.f32_t, kind)?;
+        let elem = out.elem;
+        let init = self.reduce_identity(&body, elem, kind)?;
         let hi = self.const_index(&body, cols)?;
-        let jb = Block::new(&[(self.index_t, self.loc), (self.f32_t, self.loc)]);
+        let jb = Block::new(&[(self.index_t, self.loc), (elem, self.loc)]);
         let j = detach(jb.argument(0)?.into());
         let cur = detach(jb.argument(1)?.into());
-        let v = self.row_elem(&jb, src, row, j, self.f32_t)?;
-        let nv = match kind {
-            Reduce::Sum => self.push(&jb, arith::addf(cur, v, self.loc))?,
-            Reduce::Max => self.fmax(&jb, cur, v)?,
-        };
+        let v = self.row_elem(&jb, src, row, j, elem)?;
+        let nv = self.fold(&jb, kind, elem, cur, v)?;
         jb.append_operation(scf::r#yield(&[nv], self.loc));
         let jr = Region::new();
         jr.append_block(jb);
@@ -229,18 +239,15 @@ impl<'c> Codegen<'c> {
             &body,
             OperationBuilder::new("scf.for", self.loc)
                 .add_operands(&[lane, hi, lanes_v, init])
-                .add_results(&[self.f32_t])
+                .add_results(&[elem])
                 .add_regions([jr])
                 .build()?,
         )?;
 
         let mut mask = lanes / 2;
         while mask >= 1 {
-            let other = self.shfl_xor_f32(&body, acc, mask)?;
-            acc = match kind {
-                Reduce::Sum => self.push(&body, arith::addf(acc, other, self.loc))?,
-                Reduce::Max => self.fmax(&body, acc, other)?,
-            };
+            let other = self.shfl_xor(&body, acc, mask)?;
+            acc = self.fold(&body, kind, elem, acc, other)?;
             mask /= 2;
         }
 

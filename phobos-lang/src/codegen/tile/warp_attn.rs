@@ -196,7 +196,7 @@ impl<'c> Codegen<'c> {
                 let mut s = partial;
                 let mut mask = WARP / 2;
                 while mask >= 1 {
-                    let other = cg.shfl_xor_f32(lblk, s, mask)?;
+                    let other = cg.shfl_xor(lblk, s, mask)?;
                     s = cg.push(lblk, arith::addf(s, other, cg.loc))?;
                     mask /= 2;
                 }

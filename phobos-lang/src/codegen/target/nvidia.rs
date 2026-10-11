@@ -248,7 +248,7 @@ impl Isa for Nvidia {
     // ---- what a warp can share ----
 
     /// gpu.shuffle xor, which is shfl.sync.bfly after convert-gpu-to-nvvm.
-    fn shfl_xor_f32<'c>(
+    fn shfl_xor<'c>(
         &self,
         cg: &Codegen<'c>,
         block: &Block<'c>,
@@ -269,7 +269,7 @@ impl Isa for Nvidia {
             OperationBuilder::new("gpu.shuffle", cg.loc)
                 .add_operands(&[v, offset, width])
                 .add_attributes(&[(cg.id("mode"), cg.parse_attr("#gpu<shuffle_mode xor>")?)])
-                .add_results(&[cg.f32_t, cg.bool_t])
+                .add_results(&[v.r#type(), cg.bool_t])
                 .build()?,
         )
     }
