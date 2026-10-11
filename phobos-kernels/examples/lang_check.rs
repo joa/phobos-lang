@@ -107,6 +107,7 @@ fn main() -> Result<()> {
     let mut failures = 0;
     argmax(&mut failures)?;
     integer_rows(&mut failures)?;
+    wide_rows(&mut failures)?;
     atomics(&mut failures)?;
     jumps(&mut failures)?;
     pow(&mut failures)?;
@@ -201,6 +202,41 @@ fn integer_rows(failures: &mut u32) -> Result<()> {
     let want_m: Vec<i32> = x.chunks(cols).map(|r| *r.iter().max().unwrap()).collect();
     report("rowsum i32 (warp)", s.read()? == want_s, String::new(), failures);
     report("rowmax i32 (warp)", m.read()? == want_m, String::new(), failures);
+    Ok(())
+}
+
+fn wide_rows(failures: &mut u32) -> Result<()> {
+    // Few rows, many columns: several warps share each row.
+    for (rows, cols) in [(1usize, 2560usize), (2, 1024)] {
+        let x = noise(rows * cols, 11);
+        let xi: Vec<i32> = (0..rows * cols).map(|k| ((k * 37) % 101) as i32 - 50).collect();
+        let src = format!(
+            "@launch(256)
+            kernel k(X: tensor<f32>[{rows}, {cols}], I: tensor<i32>[{rows}, {cols}], S: tensor<f32>[{rows}, 1], M: tensor<f32>[{rows}, 1], T: tensor<i32>[{rows}, 1]) {{
+                var x = X[0 :+ {rows}, 0 :+ {cols}]
+                var i = I[0 :+ {rows}, 0 :+ {cols}]
+                var s: tile<f32>[{rows}, 1] = rowsum(x)
+                var m: tile<f32>[{rows}, 1] = rowmax(abs(x))
+                var t: tile<i32>[{rows}, 1] = rowsum(i)
+                S[0 :+ {rows}, 0 :+ 1] = s
+                M[0 :+ {rows}, 0 :+ 1] = m
+                T[0 :+ {rows}, 0 :+ 1] = t
+            }}"
+        );
+        let (gx, gi) = (Arg::new(&x, rows, cols)?, Arg::new(&xi, rows, cols)?);
+        let (s, m, t) = (Arg::<f32>::zeroed(rows, 1)?, Arg::<f32>::zeroed(rows, 1)?, Arg::<i32>::zeroed(rows, 1)?);
+        let mut slots = Vec::new();
+        for push in [&gx as &dyn Push, &gi, &s, &m, &t] {
+            push.push_to(&mut slots);
+        }
+        run(&src, "k", 1, &mut slots)?;
+        let want_s: Vec<f32> = x.chunks(cols).map(|r| r.iter().sum()).collect();
+        let want_m: Vec<f32> = x.chunks(cols).map(|r| r.iter().fold(0.0f32, |a, v| a.max(v.abs()))).collect();
+        let want_t: Vec<i32> = xi.chunks(cols).map(|r| r.iter().sum()).collect();
+        let sum_err = s.read()?.iter().zip(&want_s).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
+        let ok = sum_err < 1e-3 && m.read()? == want_m && t.read()? == want_t;
+        report(&format!("{rows} x {cols} rows, warps"), ok, format!("sum err {sum_err:.2e}"), failures);
+    }
     Ok(())
 }
 

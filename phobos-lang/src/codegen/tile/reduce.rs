@@ -58,11 +58,24 @@ impl<'c> Codegen<'c> {
         match self.reduce_lanes(rows) {
             // gpu.shuffle carries a 32-bit payload; f16 keeps the serial path.
             Some(lanes) if elem == self.f32_t || elem == self.i32_t => {
+                let lanes = lanes * self.row_warps(rows, cols, lanes);
                 self.rowreduce_warp(block, src, &out, kind, lanes)?
             }
             _ => self.rowreduce_serial(block, src, &out, kind)?,
         }
         Ok(out)
+    }
+
+    /// Warps sharing one row: more than one only when a full warp per row
+    /// leaves warps idle and every lane still folds four columns or more.
+    fn row_warps(&self, rows: i64, cols: i64, lanes: i64) -> i64 {
+        if lanes < WARP {
+            return 1;
+        }
+        let spare = self.cta_threads / (rows.max(1) * WARP);
+        let wide = cols / (WARP * 4);
+        let warps = spare.min(wide);
+        if warps < 2 { 1 } else { 1 << warps.ilog2() }
     }
 
     /// The element at `[row, j]` of a row reduction's source, as `elem`.
@@ -199,11 +212,13 @@ impl<'c> Codegen<'c> {
     /// Warp-cooperative row reduction. A group of `lanes` consecutive lanes
     /// folds one row, each lane a strided slice of the columns. An xor
     /// butterfly then combines the partials, and the group's lane 0 stores
-    /// the result.
+    /// the result. A group wider than a warp leaves one partial per warp in
+    /// shared memory, and after a barrier one thread per row folds those.
     ///
     /// rows * lanes covers whole warps and the block dim is a warp multiple,
     /// so every warp reaching the shuffle has all 32 lanes present. The xor
-    /// masks stay below `lanes`, so a group never exchanges outside itself.
+    /// masks stay below `lanes` and a warp, so a group never exchanges
+    /// outside itself.
     pub(super) fn rowreduce_warp(
         &mut self,
         block: &Block<'c>,
@@ -244,20 +259,36 @@ impl<'c> Codegen<'c> {
                 .build()?,
         )?;
 
-        let mut mask = lanes / 2;
+        let mut mask = lanes.min(WARP) / 2;
         while mask >= 1 {
             let other = self.shfl_xor(&body, acc, mask)?;
             acc = self.fold(&body, kind, elem, acc, other)?;
             mask /= 2;
         }
 
+        // One partial per warp of a wider group, at [row, warp].
+        let warps = lanes / WARP;
+        let partials = if warps > 1 {
+            Some(self.alloc_tile_shaped(block, elem, &[rows, warps])?)
+        } else {
+            None
+        };
         let zero = self.const_index(&body, 0)?;
+        let (lead, mem, at) = match &partials {
+            Some(p) => {
+                let warp_v = self.const_index(&body, WARP)?;
+                let lead = self.remui(&body, lane, warp_v)?;
+                let warp = self.divui(&body, lane, warp_v)?;
+                (lead, p.mem, [row, warp])
+            }
+            None => (lane, out.mem, [row, zero]),
+        };
         let is_lead = self.push(
             &body,
-            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lane, zero, self.loc),
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lead, zero, self.loc),
         )?;
         let then = Block::new(&[]);
-        then.append_operation(memref::store(acc, out.mem, &[row, zero], self.loc));
+        then.append_operation(memref::store(acc, mem, &at, self.loc));
         then.append_operation(scf::r#yield(&[], self.loc));
         let tr = Region::new();
         tr.append_block(then);
@@ -268,6 +299,22 @@ impl<'c> Codegen<'c> {
         region.append_block(body);
         block.append_operation(scf::r#for(tid, total, bdim, region, self.loc));
         self.barrier(block)?;
+
+        // Fold each row's warp partials, in warp order.
+        if let Some(partials) = partials {
+            self.distribute(block, out, 1, true, |cg, blk, idx| {
+                let first = cg.const_index(blk, 0)?;
+                let mut acc = cg.push(blk, memref::load(partials.mem, &[idx[0], first], cg.loc))?;
+                for w in 1..warps {
+                    let at = cg.const_index(blk, w)?;
+                    let v = cg.push(blk, memref::load(partials.mem, &[idx[0], at], cg.loc))?;
+                    acc = cg.fold(blk, kind, elem, acc, v)?;
+                }
+                blk.append_operation(memref::store(acc, out.mem, idx, cg.loc));
+                Ok(())
+            })?;
+            self.release(&partials);
+        }
         Ok(())
     }
 }
