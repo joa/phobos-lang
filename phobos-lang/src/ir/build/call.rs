@@ -17,6 +17,7 @@ impl Build {
             }
             "atomic_add" => self.emit_atomic_add(args),
             "atomic_cas" => self.emit_atomic_cas(args),
+            "load_acquire" | "store_release" => self.emit_system_scope(callee, args),
             "rms_norm_q_t" => self.emit_rms_norm_q(args),
             "rms_norm_gated_q_t" => self.emit_rms_norm_gated_q(args),
             "grid_barrier" => self.emit_grid_barrier(args),
@@ -505,6 +506,28 @@ impl Build {
         }
         let old = self.value(OpKind::AtomicCas, &operands, Type::Scalar(Scalar::I32));
         Ok(Rv::Scalar(old))
+    }
+
+    /// `load_acquire(t, i)` or `store_release(t, i, v)` on an `i32` tensor.
+    fn emit_system_scope(&mut self, callee: &str, args: &[Expr]) -> Result<Rv> {
+        let store = callee == "store_release";
+        let (t, i, v) = match (store, args) {
+            (false, [t, i]) => (t, i, None),
+            (true, [t, i, v]) => (t, i, Some(v)),
+            (false, _) => bail!("load_acquire expects (tensor, index)"),
+            (true, _) => bail!("store_release expects (tensor, index, value)"),
+        };
+        let (mem, name) = self.atomic_tensor(t, callee)?;
+        if self.elem(mem) != Scalar::I32 {
+            bail!("{callee} expects an i32 tensor, but '{name}' holds {}", self.elem(mem).mlir_name());
+        }
+        let mut operands = vec![mem, self.emit_index(i, callee)?];
+        let Some(v) = v else {
+            return Ok(Rv::Scalar(self.value(OpKind::LoadAcquire, &operands, Type::Scalar(Scalar::I32))));
+        };
+        let v = self.emit_scalar(v)?;
+        operands.push(self.coerce(v, Scalar::I32)?);
+        Ok(Rv::Scalar(self.value(OpKind::StoreRelease, &operands, Type::INDEX)))
     }
 
     /// An atomic's tensor operand: a named tensor parameter.

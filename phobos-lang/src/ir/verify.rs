@@ -486,6 +486,23 @@ impl Verifier<'_> {
                 self.want_operands(op, 0);
                 self.want_results(op, 0);
             }
+            OpKind::LoadAcquire | OpKind::StoreRelease => {
+                let store = matches!(kind, OpKind::StoreRelease);
+                if self.want_operands(op, if store { 3 } else { 2 }) {
+                    match ir.ty(ir.operand(op, 0)) {
+                        Type::Tensor(t) if t.elem == Scalar::I32 => {}
+                        other => self.err(op, format!("operand 0 must be an i32 tensor, is {other}")),
+                    }
+                    self.want_type(op, 1, &Type::INDEX, "slot");
+                    if store {
+                        self.want_type(op, 2, &Type::Scalar(Scalar::I32), "value");
+                    }
+                }
+                let want = if store { Scalar::Index } else { Scalar::I32 };
+                if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(want) {
+                    self.err(op, format!("result must be {want}"));
+                }
+            }
             OpKind::GridBarrier => {
                 if self.want_operands(op, 1) {
                     match ir.ty(ir.operand(op, 0)) {

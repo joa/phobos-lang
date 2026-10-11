@@ -231,11 +231,22 @@ impl Kernel {
     /// Whether the kernel calls an intrinsic that uses `ldmatrix`, which
     /// needs the module indexed at 64 bits.
     pub fn wants_ldmatrix(&self) -> bool {
+        self.calls(|callee| callee.ends_with("_qgemm_t"))
+    }
+
+    /// True when the kernel reads or writes at system scope, which forms
+    /// full 64-bit addresses.
+    pub fn wants_system_scope(&self) -> bool {
+        self.calls(|callee| matches!(callee, "load_acquire" | "store_release"))
+    }
+
+    /// Whether the body calls a built-in `pick` accepts.
+    fn calls(&self, pick: impl Fn(&str) -> bool) -> bool {
         let mut found = false;
         for stmt in &self.body {
             stmt.walk_exprs(&mut |e| {
                 if let Expr::Call { callee, .. } = e
-                    && callee.ends_with("_qgemm_t")
+                    && pick(callee)
                 {
                     found = true;
                 }

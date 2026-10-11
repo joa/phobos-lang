@@ -124,6 +124,24 @@ impl<'c> Codegen<'c> {
     ) -> Result<Value<'c, 'c>> {
         let slot = self.alloc_tile_shaped(block, elem, &[1])?;
         self.barrier(block)?;
+        let zero = self.const_index(block, 0)?;
+        self.leader(block, |cg, then| {
+            let old = rmw(cg, then)?;
+            then.append_operation(memref::store(old, slot.mem, &[zero], cg.loc));
+            Ok(())
+        })?;
+        self.barrier(block)?;
+        let old = self.push(block, memref::load(slot.mem, &[zero], self.loc))?;
+        self.release(&slot);
+        Ok(old)
+    }
+
+    /// Emits `body` into a branch only thread 0 takes.
+    pub(super) fn leader(
+        &mut self,
+        block: &Block<'c>,
+        body: impl FnOnce(&mut Self, &Block<'c>) -> Result<()>,
+    ) -> Result<()> {
         let tid = self.thread_id(block)?;
         let zero = self.const_index(block, 0)?;
         let is_leader = self.push(
@@ -131,16 +149,12 @@ impl<'c> Codegen<'c> {
             arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, tid, zero, self.loc),
         )?;
         let then = Block::new(&[]);
-        let old = rmw(self, &then)?;
-        then.append_operation(memref::store(old, slot.mem, &[zero], self.loc));
+        body(self, &then)?;
         then.append_operation(scf::r#yield(&[], self.loc));
         let then_region = Region::new();
         then_region.append_block(then);
         block.append_operation(scf::r#if(is_leader, &[], then_region, Region::new(), self.loc));
-        self.barrier(block)?;
-        let old = self.push(block, memref::load(slot.mem, &[zero], self.loc))?;
-        self.release(&slot);
-        Ok(old)
+        Ok(())
     }
 
     /// The barrier itself, over a resolved state tensor of `rank`.

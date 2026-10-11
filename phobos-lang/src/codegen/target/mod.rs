@@ -109,6 +109,28 @@ pub(super) trait Isa {
 
     // ---- what a warp can share ----
 
+    /// A system-scope acquire load of the `i32` at `mem[indices]`.
+    fn load_acquire_sys<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<Value<'c, 'c>>;
+
+    /// A system-scope release store of the `i32` `v` to `mem[indices]`.
+    fn store_release_sys<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+        v: Value<'c, 'c>,
+    ) -> Result<()>;
+
+    /// A system-scope acquire-release fence for the executing thread.
+    fn fence_sys<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()>;
+
     /// Prefetches the line holding `mem[indices]` into L2.
     fn prefetch_read<'c>(
         &self,
@@ -656,6 +678,29 @@ impl<'c> Codegen<'c> {
         indices: &[Value<'c, 'c>],
     ) -> Result<()> {
         self.isa.prefetch_read(self, block, mem, indices)
+    }
+
+    pub(in crate::codegen) fn load_acquire_sys(
+        &self,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<Value<'c, 'c>> {
+        self.isa.load_acquire_sys(self, block, mem, indices)
+    }
+
+    pub(in crate::codegen) fn store_release_sys(
+        &self,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+        v: Value<'c, 'c>,
+    ) -> Result<()> {
+        self.isa.store_release_sys(self, block, mem, indices, v)
+    }
+
+    pub(in crate::codegen) fn fence_sys(&self, block: &Block<'c>) -> Result<()> {
+        self.isa.fence_sys(self, block)
     }
 
     pub(in crate::codegen) fn dot4_accumulate(

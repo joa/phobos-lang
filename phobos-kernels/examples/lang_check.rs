@@ -113,6 +113,7 @@ fn main() -> Result<()> {
     unsigned(&mut failures)?;
     flat_write(&mut failures)?;
     ragged_k(&mut failures)?;
+    handoff(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -397,6 +398,32 @@ fn ragged_k(failures: &mut u32) -> Result<()> {
         let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(name, worst < 1e-2, format!("max abs err {worst:.3e}"), failures);
     }
+    Ok(())
+}
+
+fn handoff(failures: &mut u32) -> Result<()> {
+    // The flag is raised before the launch, so the wait passes at once; the
+    // kernel adds the row and lowers the flag.
+    let src = "@launch(256)
+        kernel k(F: tensor<i32>[1, 1], Y: tensor<f32>[1, 64], D: tensor<f32>[1, 64]) {
+            while load_acquire(F, 0) == 0 {
+            }
+            var y = Y[0 :+ 1, 0 :+ 64]
+            var d = D[0 :+ 1, 0 :+ 64]
+            D[0 :+ 1, 0 :+ 64] = d + y
+            store_release(F, 0, 0)
+        }";
+    let (y, d0) = (noise(64, 9), noise(64, 10));
+    let f = Arg::new(&[1i32], 1, 1)?;
+    let (gy, gd) = (Arg::new(&y, 1, 64)?, Arg::new(&d0, 1, 64)?);
+    let mut slots = Vec::new();
+    f.push(&mut slots);
+    gy.push(&mut slots);
+    gd.push(&mut slots);
+    run(src, "k", 1, &mut slots)?;
+    let want: Vec<f32> = d0.iter().zip(&y).map(|(a, b)| a + b).collect();
+    let ok = gd.read()? == want && f.read()? == [0];
+    report("acquire, add, release", ok, String::new(), failures);
     Ok(())
 }
 
