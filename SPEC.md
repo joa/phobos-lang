@@ -212,7 +212,7 @@ Each math call takes a tile or a scalar. On a scalar it computes in `f32`; `abs`
 
 ### Reductions and shape
 
-All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` or `rowargmax` may be an elementwise expression over declared tiles of one element type, such as `rowmax(abs(x))` or `rowsum(x * x)`: it is evaluated per element inside the reduction and never stored.
+All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` or `rowargmax` may be an elementwise expression over declared tiles and statically shaped tensor slices of one element type, such as `rowmax(abs(x))` or `rowsum(x * x)`: it is evaluated per element inside the reduction and never stored.
 
 | Built-in | Shape | Semantics |
 |---|---|---|
