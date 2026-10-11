@@ -376,7 +376,7 @@ kernel delta_gates(A: tensor<f32>[R, AW], B: tensor<f32>[R, AW],
   var rate = RATE[0 :+ 1, 0 :+ H]
   var x = a + bias
   var zero: tile<f32>[TR, H] = 0.0
-  var mag = tmax(x, -x)
+  var mag = abs(x)
   var sp = tmax(x, zero) + log(1.0 + exp(-mag))
   DEC[p * TR :+ TR, 0 :+ H] = exp(rate * sp)
   var b = B[p * TR :+ TR, 0 :+ H]
