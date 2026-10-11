@@ -70,6 +70,9 @@ impl Build {
                 .then_some(0),
                 _ => None,
             },
+            // A statically shaped tensor slice is a leaf too; one that runs
+            // past the tensor is materialized, masked, before the sweep.
+            Expr::Index { .. } => self.slice_leaf(value).map(|_| 0),
             Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
             }
@@ -111,26 +114,27 @@ impl Build {
     }
 
     fn decl_leaves(&self, value: &Expr, found: &mut Option<(Scalar, Vec<i64>)>) -> bool {
+        let mut meet = |elem: Scalar, shape: Vec<i64>| {
+            let Some((seen_elem, seen_shape)) = found else {
+                *found = Some((elem, shape));
+                return true;
+            };
+            if *seen_elem != elem || seen_shape.len() != shape.len() {
+                return false;
+            }
+            match super::broadcast_shape(seen_shape, &shape) {
+                Some(joined) => {
+                    *seen_shape = joined;
+                    true
+                }
+                None => false,
+            }
+        };
         match value {
             Expr::Int(_) | Expr::Float(_) => true,
+            Expr::Index { .. } => self.slice_leaf(value).is_some_and(|(elem, shape)| meet(elem, shape)),
             Expr::Var(name) => match self.lookup(name) {
-                Some(Binding::Tile(t) | Binding::View(t)) => {
-                    let (elem, shape) = (self.elem(t), self.shape(t));
-                    let Some((seen_elem, seen_shape)) = found else {
-                        *found = Some((elem, shape));
-                        return true;
-                    };
-                    if *seen_elem != elem || seen_shape.len() != shape.len() {
-                        return false;
-                    }
-                    match super::broadcast_shape(seen_shape, &shape) {
-                        Some(joined) => {
-                            *seen_shape = joined;
-                            true
-                        }
-                        None => false,
-                    }
-                }
+                Some(Binding::Tile(t) | Binding::View(t)) => meet(self.elem(t), self.shape(t)),
                 _ => true,
             },
             Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
@@ -153,6 +157,14 @@ impl Build {
             },
             _ => false,
         }
+    }
+
+    /// The element type and static shape of a tensor slice a sweep can read
+    /// as a leaf; None for a point load, a dynamic shape or unsigned storage.
+    fn slice_leaf(&self, value: &Expr) -> Option<(Scalar, Vec<i64>)> {
+        let shape = self.slice_static_shape(value)?;
+        let elem = self.slice_tensor_elem(value)?;
+        (!elem.is_unsigned()).then_some((elem, shape))
     }
 
     /// Whether `callee(arg)` converts a named, fusable unsigned tile, which

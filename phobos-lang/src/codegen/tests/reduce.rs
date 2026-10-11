@@ -46,16 +46,18 @@ fn a_sum_of_squares_fuses_on_the_serial_path() {
 }
 
 #[test]
-fn a_reduction_of_a_slice_still_materializes() {
-    // A tree over an unnamed slice is not typed up front, so it keeps the
-    // tile path and still reduces correctly shaped.
+fn a_reduction_of_a_slice_reads_the_tensor_in_its_loop() {
+    // The slice is a leaf of the fused argument: only the result takes a
+    // tile, and no barrier precedes the reduction.
     let mlir = emit_mlir(
         "kernel k(X: tensor<f32>[16, 64], O: tensor<f32>[16, 1]) {
             var m: tile<f32>[16, 1] = rowsum(X[0 :+ 16, 0 :+ 64] * 2.0)
             O[0 :+ 16, 0 :+ 1] = m
         }",
     );
-    assert_contains(&mlir, &["arith.mulf", "arith.addf"]);
+    assert_contains(&mlir, &["arith.mulf", "gpu.shuffle"]);
+    assert_eq!(shared_bytes(&mlir), 16 * 4, "
+{mlir}");
 }
 
 #[test]
