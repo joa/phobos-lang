@@ -1,6 +1,26 @@
 // Row reductions, serial and warp-cooperative.
 
 use super::*;
+use crate::codegen::elemwise::Fused;
+
+/// What a row reduction folds: a tile, or a per-element tree evaluated in
+/// the reduction's loop over a `[rows, cols]` extent.
+pub(in crate::codegen) enum RowSrc<'a, 'c> {
+    Tile(&'a MemVal<'c>),
+    Tree {
+        tree: &'a Fused<'c>,
+        shape: [i64; 2],
+    },
+}
+
+impl RowSrc<'_, '_> {
+    fn shape(&self) -> [i64; 2] {
+        match self {
+            RowSrc::Tile(t) => [t.shape[0], t.shape[1]],
+            RowSrc::Tree { shape, .. } => *shape,
+        }
+    }
+}
 
 impl<'c> Codegen<'c> {
     /// Reduces a rank-2 tile over its last (column) dim into a [rows, 1]
@@ -16,11 +36,21 @@ impl<'c> Codegen<'c> {
         if src.shape.len() != 2 {
             bail!("row reduction expects a rank-2 tile");
         }
-        let (rows, cols) = (src.shape[0], src.shape[1]);
+        self.rowreduce(block, &RowSrc::Tile(src), src.elem, kind)
+    }
+
+    /// [`Self::tile_rowreduce`] over either kind of source.
+    pub(in crate::codegen) fn rowreduce(
+        &mut self,
+        block: &Block<'c>,
+        src: &RowSrc<'_, 'c>,
+        elem: Type<'c>,
+        kind: Reduce,
+    ) -> Result<MemVal<'c>> {
+        let [rows, cols] = src.shape();
         if rows == DYN || cols == DYN {
             bail!("row reduction needs a static tile shape");
         }
-        let elem = src.elem;
         if !self.is_float(elem) && !self.is_int(elem) {
             bail!("row reduction needs a numeric element type, got {elem}");
         }
@@ -33,6 +63,25 @@ impl<'c> Codegen<'c> {
             _ => self.rowreduce_serial(block, src, &out, kind)?,
         }
         Ok(out)
+    }
+
+    /// The element at `[row, j]` of a row reduction's source, as `elem`.
+    fn row_elem(
+        &mut self,
+        block: &Block<'c>,
+        src: &RowSrc<'_, 'c>,
+        row: Value<'c, 'c>,
+        j: Value<'c, 'c>,
+        elem: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        match src {
+            RowSrc::Tile(t) => self.push(block, memref::load(t.mem, &[row, j], self.loc)),
+            RowSrc::Tree { tree, shape, .. } => {
+                let vec_t = Type::vector(&[4], elem);
+                let v = self.eval_fused(block, tree, &[row, j], shape, 1, vec_t)?;
+                self.coerce(block, v, elem)
+            }
+        }
     }
 
     /// The fold identity: 0 for sum, and for max a floor below any finite
@@ -97,12 +146,12 @@ impl<'c> Codegen<'c> {
     pub(super) fn rowreduce_serial(
         &mut self,
         block: &Block<'c>,
-        src: &MemVal<'c>,
+        src: &RowSrc<'_, 'c>,
         out: &MemVal<'c>,
         kind: Reduce,
     ) -> Result<()> {
-        let cols = src.shape[1];
-        let elem = src.elem;
+        let cols = src.shape()[1];
+        let elem = out.elem;
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let i = idx[0];
             let slot_t = MemRefType::new(elem, &[], None, None);
@@ -115,7 +164,7 @@ impl<'c> Codegen<'c> {
             let st = cg.const_index(blk, 1)?;
             let jb = Block::new(&[(cg.index_t, cg.loc)]);
             let j = detach(jb.argument(0)?.into());
-            let v = cg.push(&jb, memref::load(src.mem, &[i, j], cg.loc))?;
+            let v = cg.row_elem(&jb, src, i, j, elem)?;
             let cur = cg.push(&jb, memref::load(slot, &[], cg.loc))?;
             // An integer sums in its own type, so a narrow one can wrap.
             let nv = match kind {
@@ -146,12 +195,12 @@ impl<'c> Codegen<'c> {
     pub(super) fn rowreduce_warp(
         &mut self,
         block: &Block<'c>,
-        src: &MemVal<'c>,
+        src: &RowSrc<'_, 'c>,
         out: &MemVal<'c>,
         kind: Reduce,
         lanes: i64,
     ) -> Result<()> {
-        let (rows, cols) = (src.shape[0], src.shape[1]);
+        let [rows, cols] = src.shape();
         let total = self.const_index(block, rows * lanes)?;
         let tid = self.thread_id(block)?;
         let bdim = self.block_dim(block)?;
@@ -168,7 +217,7 @@ impl<'c> Codegen<'c> {
         let jb = Block::new(&[(self.index_t, self.loc), (self.f32_t, self.loc)]);
         let j = detach(jb.argument(0)?.into());
         let cur = detach(jb.argument(1)?.into());
-        let v = self.push(&jb, memref::load(src.mem, &[row, j], self.loc))?;
+        let v = self.row_elem(&jb, src, row, j, self.f32_t)?;
         let nv = match kind {
             Reduce::Sum => self.push(&jb, arith::addf(cur, v, self.loc))?,
             Reduce::Max => self.fmax(&jb, cur, v)?,

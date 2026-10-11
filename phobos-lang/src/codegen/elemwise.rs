@@ -190,7 +190,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// One element of the tree, in registers.
-    fn eval_fused(
+    pub(in crate::codegen) fn eval_fused(
         &mut self,
         block: &Block<'c>,
         node: &Fused<'c>,

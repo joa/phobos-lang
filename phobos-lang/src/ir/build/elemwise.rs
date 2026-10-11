@@ -2,7 +2,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, fmt_shape};
 use crate::ast::{AssignOp, BinOp, Expr, UnOp};
-use crate::ir::{ElemStep, OpKind, Scalar, Tree, ValueId};
+use crate::ir::{ElemStep, OpKind, Reduce, Scalar, Tree, ValueId};
 
 /// What planning a fused tree collects: the operands in order, and which
 /// of them are tiles.
@@ -291,15 +291,55 @@ impl Build {
                 Box::new(tree),
             );
         }
-        for &leaf in &leaves {
+        self.check_leaves(&leaves, &tshape)?;
+        operands.push(target);
+        self.stmt(OpKind::Fused(tree), &operands);
+        Ok(true)
+    }
+
+    /// `rowmax(e)` or `rowsum(e)` with `e` evaluated per element inside the
+    /// reduction's loop, never stored. None when `e` is not a fusable tree
+    /// over named tiles of one type and rank 2.
+    pub(crate) fn reduce_fused(&mut self, how: Reduce, arg: &Expr) -> Result<Option<ValueId>> {
+        if self.fusable_nodes(arg).unwrap_or(0) < 1 {
+            return Ok(None);
+        }
+        let Some((elem, shape)) = self.fused_decl_type(arg) else {
+            return Ok(None);
+        };
+        if shape.len() != 2 || shape.contains(&DYN) || !(elem.is_float() || elem.is_int()) {
+            return Ok(None);
+        }
+        let mut plan = Plan {
+            elem,
+            in_compare: false,
+            rank: 2,
+            operands: Vec::new(),
+            leaves: Vec::new(),
+        };
+        let tree = self.plan_fused(arg, &mut plan)?;
+        self.check_leaves(&plan.leaves, &shape)?;
+        let ty = self.shared_ty(elem, &[shape[0], 1]);
+        let kind = OpKind::ReduceFused {
+            how,
+            tree,
+            cols: shape[1],
+        };
+        Ok(Some(self.value(kind, &plan.operands, ty)))
+    }
+
+    /// Every tile leaf broadcasts to `shape` and is unmasked: the sweep
+    /// indexes by `shape` and ignores masks.
+    fn check_leaves(&self, leaves: &[ValueId], shape: &[i64]) -> Result<()> {
+        for &leaf in leaves {
             let lshape = self.shape(leaf);
-            let fits = lshape.len() == tshape.len()
-                && lshape.iter().zip(&tshape).all(|(&s, &t)| s == t || s == 1);
+            let fits = lshape.len() == shape.len()
+                && lshape.iter().zip(shape).all(|(&s, &t)| s == t || s == 1);
             ensure!(
                 fits,
                 "fused elementwise op: operand shape {} does not broadcast to {}",
                 fmt_shape(&lshape),
-                fmt_shape(&tshape)
+                fmt_shape(shape)
             );
             ensure!(
                 !self.is_masked(leaf),
@@ -307,8 +347,6 @@ impl Build {
                  materialized before it can be read against the target's extent"
             );
         }
-        operands.push(target);
-        self.stmt(OpKind::Fused(tree), &operands);
-        Ok(true)
+        Ok(())
     }
 }

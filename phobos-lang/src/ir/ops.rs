@@ -432,6 +432,9 @@ pub enum OpKind {
     /// `(s1, t1, s2, t2, dst)`: `dst = s1 * t1 + s2 * t2`.
     ScaledAdd,
     Reduce(Reduce),
+    /// `(leaves..) -> [rows, 1]`: a row reduction of the tree, evaluated
+    /// per element of `[rows, cols]` with no tile of its own.
+    ReduceFused { how: Reduce, tree: Tree, cols: i64 },
     /// `(a, b) -> a * b`, or `a * b^T`.
     Dot { transpose: bool },
     /// `(a, b, dst)`. `aliased` when `dst` is one of the operands, which
@@ -559,6 +562,7 @@ impl OpKind {
             }
             OpKind::ScaledAdd => "scaled_add".into(),
             OpKind::Reduce(r) => r.name().into(),
+            OpKind::ReduceFused { how, tree, cols } => format!("{} {cols} fused {tree}", how.name()),
             OpKind::Dot { transpose } => if *transpose { "dot_t" } else { "dot" }.into(),
             OpKind::DotInto {
                 transpose,
@@ -615,6 +619,7 @@ impl OpKind {
                 | OpKind::HoistStage
                 | OpKind::Map(_)
                 | OpKind::Reduce(_)
+                | OpKind::ReduceFused { .. }
                 | OpKind::Dot { .. }
                 | OpKind::Intrinsic(_)
         )
