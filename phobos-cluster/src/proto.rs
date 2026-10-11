@@ -16,6 +16,9 @@ pub fn data_type_to_i32(d: tile::DataType) -> i32 {
         I32 => 6,
         I64 => 7,
         Bool => 8,
+        U8 => 9,
+        U16 => 10,
+        U32 => 11,
     }
 }
 
@@ -30,6 +33,9 @@ pub fn data_type_from_i32(v: i32) -> Result<tile::DataType> {
         6 => I32,
         7 => I64,
         8 => Bool,
+        9 => U8,
+        10 => U16,
+        11 => U32,
         _ => bail!("unknown DataType {v}"),
     })
 }

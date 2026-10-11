@@ -1,7 +1,10 @@
 use anyhow::{Result, bail};
 use melior::{
     dialect::{arith, memref},
-    ir::{Block, BlockLike, ValueLike, attribute::FloatAttribute, r#type::MemRefType},
+    ir::{
+        Block, BlockLike, ValueLike, attribute::FloatAttribute, operation::OperationBuilder,
+        r#type::MemRefType,
+    },
 };
 
 use super::Lowered;
@@ -62,12 +65,26 @@ impl<'c> Codegen<'c> {
             OpKind::Cast(want) => {
                 let v = self.scalar_ir(ir.operand(op, 0))?;
                 let want = self.ir_scalar_type(want);
-                self.numeric_cast(block, v, want)?
+                if Self::ir_unsigned(ir, ir.operand(op, 0)) {
+                    self.unsigned_cast(block, v, want)?
+                } else {
+                    self.numeric_cast(block, v, want)?
+                }
             }
             OpKind::IndexCast(want) => {
                 let v = self.scalar_ir(ir.operand(op, 0))?;
                 let want = self.ir_scalar_type(want);
-                self.push(block, arith::index_cast(v, want, self.loc))?
+                if Self::ir_unsigned(ir, ir.operand(op, 0)) {
+                    self.push(
+                        block,
+                        OperationBuilder::new("arith.index_castui", self.loc)
+                            .add_operands(&[v])
+                            .add_results(&[want])
+                            .build()?,
+                    )?
+                } else {
+                    self.push(block, arith::index_cast(v, want, self.loc))?
+                }
             }
             OpKind::Math(step) => {
                 let v = self.scalar_ir(ir.operand(op, 0))?;

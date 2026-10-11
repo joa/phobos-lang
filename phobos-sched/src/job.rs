@@ -116,6 +116,9 @@ fn parse_data_type(s: &str) -> std::result::Result<DataType, String> {
         "i8" => Ok(DataType::I8),
         "i32" => Ok(DataType::I32),
         "i64" => Ok(DataType::I64),
+        "u8" => Ok(DataType::U8),
+        "u16" => Ok(DataType::U16),
+        "u32" => Ok(DataType::U32),
         "bool" => Ok(DataType::Bool),
         _ => Err(format!("unknown data type '{s}'")),
     }

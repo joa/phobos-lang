@@ -63,9 +63,11 @@ impl Build {
             Expr::Int(_) | Expr::Float(_) => Some(0),
             Expr::Var(name) => match self.lookup(name)? {
                 Binding::Let { .. } | Binding::Var { .. } => Some(0),
-                Binding::Tile(t) | Binding::View(t) => {
-                    (!self.is_masked(t) && !self.shape(t).contains(&DYN)).then_some(0)
-                }
+                // An unsigned tile is read only through a cast, below.
+                Binding::Tile(t) | Binding::View(t) => (!self.is_masked(t)
+                    && !self.shape(t).contains(&DYN)
+                    && !self.elem(t).is_unsigned())
+                .then_some(0),
                 _ => None,
             },
             Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
@@ -81,6 +83,7 @@ impl Build {
                 rhs,
             } => Some(1 + self.fusable_nodes(rhs)?),
             Expr::Call { callee, args } => match &args[..] {
+                [arg] if self.is_unsigned_cast(callee, arg) => Some(1),
                 [arg] if ElemStep::from_callee(callee).is_some() => {
                     Some(1 + self.fusable_nodes(arg)?)
                 }
@@ -150,6 +153,21 @@ impl Build {
             },
             _ => false,
         }
+    }
+
+    /// Whether `callee(arg)` converts a named, fusable unsigned tile, which
+    /// the sweep reads zero-extended.
+    fn is_unsigned_cast(&self, callee: &str, arg: &Expr) -> bool {
+        let Expr::Var(name) = arg else {
+            return false;
+        };
+        let Some(Binding::Tile(t) | Binding::View(t)) = self.lookup(name) else {
+            return false;
+        };
+        matches!(ElemStep::from_callee(callee), Some(ElemStep::Cast(_)))
+            && self.elem(t).is_unsigned()
+            && !self.is_masked(t)
+            && !self.shape(t).contains(&DYN)
     }
 
     /// Interior nodes of a `where` condition: comparisons of fusable trees,

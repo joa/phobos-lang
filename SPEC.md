@@ -34,7 +34,7 @@ param       = ident ":" type ;
 type        = scalar
             | "tensor" "<" scalar ">" "[" dims "]"
             | "tile"   "<" scalar ">" "[" dims "]" ;
-scalar      = "f16" | "bf16" | "f32" | "f64" | "i8" | "i32" | "i64" | "bool" ;
+scalar      = "f16" | "bf16" | "f32" | "f64" | "i8" | "i32" | "i64" | "u8" | "u16" | "u32" | "bool" ;
 dims        = dim { "," dim } ;
 dim         = ident | int ;                            (* symbolic size (M, TILE_K) or literal *)
 
@@ -100,8 +100,9 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `f16` | IEEE binary16. Float literals are f32, rounded to f16 on store. |
 | `bf16` | 8-bit exponent, 7-bit mantissa. Works on every target (native conversion from sm_80, emulated below). |
 | `f32`, `f64` | IEEE binary32 / binary64. |
-| `i8` | Signed byte. Loads sign-extend. There is no `u8`. |
+| `i8` | Signed byte. Loads sign-extend. |
 | `i32`, `i64` | Signed integers. |
+| `u8`, `u16`, `u32` | Unsigned storage for tensors and tiles. Every read zero-extends: a scalar load gives a non-negative index (a `u32` above `2^31` needs 64-bit indices), and `i32(t)` or `f32(t)` converts a tile, fused into the sweep. No arithmetic directly on them; convert first, as in `(i32(b) >> 4) & 15`. |
 | `bool` | Comparison result. No conversion to or from it. |
 | `tensor<T>[dims]` | Global memory, kernel parameters only. Dims are literals or symbolic names bound at launch or by `@autotune`. |
 | `tile<T>[dims]` | A block of shared memory owned by the CTA. See [Tiles and shared memory](#tiles-and-shared-memory). |

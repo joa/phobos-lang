@@ -38,15 +38,18 @@ pub enum DataType {
     I8,
     I32,
     I64,
+    U8,
+    U16,
+    U32,
     Bool,
 }
 
 impl DataType {
     pub fn bytes(self) -> usize {
         match self {
-            DataType::I8 | DataType::Bool => 1,
-            DataType::F16 | DataType::BF16 => 2,
-            DataType::F32 | DataType::I32 => 4,
+            DataType::I8 | DataType::U8 | DataType::Bool => 1,
+            DataType::F16 | DataType::BF16 | DataType::U16 => 2,
+            DataType::F32 | DataType::I32 | DataType::U32 => 4,
             DataType::F64 | DataType::I64 => 8,
         }
     }

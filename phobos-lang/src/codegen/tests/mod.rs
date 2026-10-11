@@ -35,6 +35,7 @@ mod select;
 mod sync;
 mod tensorcore;
 mod tile;
+mod unsigned;
 
 use melior::{
     Context,

@@ -12,6 +12,9 @@ enum DataType {
   DATA_TYPE_I32 = 6;
   DATA_TYPE_I64 = 7;
   DATA_TYPE_BOOL = 8;
+  DATA_TYPE_U8 = 9;
+  DATA_TYPE_U16 = 10;
+  DATA_TYPE_U32 = 11;
 }
 
 enum AccessMode {

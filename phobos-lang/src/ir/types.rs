@@ -12,6 +12,11 @@ pub enum Scalar {
     I8,
     I32,
     I64,
+    /// Unsigned storage: loaded, stored and converted, zero-extending, but
+    /// computed with only after a conversion.
+    U8,
+    U16,
+    U32,
     Bool,
     Index,
 }
@@ -27,6 +32,9 @@ impl Scalar {
             A::I8 => Scalar::I8,
             A::I32 => Scalar::I32,
             A::I64 => Scalar::I64,
+            A::U8 => Scalar::U8,
+            A::U16 => Scalar::U16,
+            A::U32 => Scalar::U32,
             A::Bool => Scalar::Bool,
         }
     }
@@ -40,6 +48,9 @@ impl Scalar {
             Scalar::I8 => "i8",
             Scalar::I32 => "i32",
             Scalar::I64 => "i64",
+            Scalar::U8 => "u8",
+            Scalar::U16 => "u16",
+            Scalar::U32 => "u32",
             Scalar::Bool => "bool",
             Scalar::Index => "index",
         }
@@ -63,6 +74,11 @@ impl Scalar {
         matches!(self, Scalar::I8 | Scalar::I32 | Scalar::I64)
     }
 
+    /// The unsigned storage types.
+    pub fn is_unsigned(self) -> bool {
+        matches!(self, Scalar::U8 | Scalar::U16 | Scalar::U32)
+    }
+
     pub fn is_numeric(self) -> bool {
         self.is_float() || self.is_int() || self == Scalar::Index
     }
@@ -70,9 +86,9 @@ impl Scalar {
     /// Width of an element in bytes; None for the unsized `Bool` and `Index`.
     pub fn bytes(self) -> Option<i64> {
         Some(match self {
-            Scalar::I8 => 1,
-            Scalar::F16 | Scalar::BF16 => 2,
-            Scalar::F32 | Scalar::I32 => 4,
+            Scalar::I8 | Scalar::U8 => 1,
+            Scalar::F16 | Scalar::BF16 | Scalar::U16 => 2,
+            Scalar::F32 | Scalar::I32 | Scalar::U32 => 4,
             Scalar::F64 | Scalar::I64 => 8,
             Scalar::Bool | Scalar::Index => return None,
         })

@@ -45,6 +45,7 @@ impl<'c> Codegen<'c> {
         };
         match step {
             ElemStep::Cast(want) => self.numeric_cast(block, v, want),
+            ElemStep::CastUnsigned(want) => self.unsigned_cast(block, v, want),
             ElemStep::Round => {
                 let f = float_arg(self, "round")?;
                 self.round_even(block, f)
@@ -87,6 +88,8 @@ impl<'c> Codegen<'c> {
 #[derive(Clone, Copy)]
 pub(in crate::codegen) enum ElemStep<'c> {
     Cast(Type<'c>),
+    /// A cast reading an unsigned element, which zero-extends.
+    CastUnsigned(Type<'c>),
     Round,
     Sqrt,
     Exp,
