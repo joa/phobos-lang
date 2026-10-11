@@ -1,4 +1,5 @@
 mod control;
+mod epilogue;
 mod intrinsics;
 mod pipeline;
 mod regs;
@@ -6,6 +7,8 @@ pub(super) mod membar;
 pub(super) mod plan;
 mod scalar;
 mod tiles;
+
+use epilogue::Fill;
 
 use std::collections::HashMap;
 

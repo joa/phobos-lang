@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 use melior::ir::Block;
 
-use super::{Lowered, dims};
+use super::{Fill, Lowered, dims};
 use crate::ast::{AssignOp, BinOp};
 use crate::codegen::elemwise::{ElemStep, Fused};
 use crate::codegen::tile::RowSrc;
@@ -135,7 +135,7 @@ impl<'c> Codegen<'c> {
                 let dst_id = ir.operand(op, n - 1);
                 let target = self.tile_ir(ir, dst_id)?;
                 let mut leaves = Vec::new();
-                let fused = self.fused_from_tree(ir, op, &tree, dst_id, &mut leaves, None)?;
+                let fused = self.fused_from_tree(ir, op, &tree, dst_id, &mut leaves, Fill::None)?;
                 self.fused_sweep(block, &target, &fused, &leaves)?;
                 for leaf in &leaves {
                     self.release(leaf);
@@ -186,7 +186,7 @@ impl<'c> Codegen<'c> {
                 let (elem, rows) = (self.ir_scalar_type(arg), dims(&t.shape)[0]);
                 // The result is never an operand, so no leaf is skipped.
                 let mut leaves = Vec::new();
-                let tree = self.fused_from_tree(ir, op, &tree, ir.result(op), &mut leaves, None)?;
+                let tree = self.fused_from_tree(ir, op, &tree, ir.result(op), &mut leaves, Fill::None)?;
                 let src = RowSrc::Tree {
                     tree: &tree,
                     shape: [rows, cols],
@@ -225,6 +225,11 @@ impl<'c> Codegen<'c> {
                 self.release(&b);
                 self.set_ir(ir.result(op), Lowered::Tile(out));
             }
+            OpKind::DotFused {
+                transpose,
+                tree,
+                in_place,
+            } => self.emit_dot_fused(block, ir, op, transpose, &tree, in_place)?,
             OpKind::DotInto {
                 transpose,
                 accumulate,
@@ -337,7 +342,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// Stores a dot into `target`, once the self-alias check has passed.
-    fn dot_into(
+    pub(super) fn dot_into(
         &mut self,
         block: &Block<'c>,
         a: &MemVal<'c>,
@@ -414,13 +419,22 @@ impl<'c> Codegen<'c> {
         tree: &Tree,
         target: ir::ValueId,
         leaves: &mut Vec<MemVal<'c>>,
-        reg_elem: Option<usize>,
+        fill: Fill<'_, 'c>,
     ) -> Result<Fused<'c>> {
-        let go = |t: &Tree, leaves: &mut Vec<MemVal<'c>>| self.fused_from_tree(ir, op, t, target, leaves, reg_elem);
+        let go = |t: &Tree, leaves: &mut Vec<MemVal<'c>>| self.fused_from_tree(ir, op, t, target, leaves, fill);
         Ok(match tree {
+            Tree::Leaf(0) if matches!(ir.kind(op), OpKind::DotFused { .. }) => match fill {
+                Fill::Product { tile, release } => {
+                    if release {
+                        leaves.push(tile.clone());
+                    }
+                    Fused::Tile(tile.clone())
+                }
+                _ => Fused::Hole,
+            },
             // A register tile is one value per element: the one being built.
             Tree::Leaf(i) if matches!(ir.ty(ir.operand(op, *i)), ir::Type::Regs(_)) => {
-                let Some(e) = reg_elem else {
+                let Fill::RegElem(e) = fill else {
                     bail!("a register tile read outside a register-tile op");
                 };
                 Fused::Scalar(self.regs_ir(ir.operand(op, *i))?.vals[e])

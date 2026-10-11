@@ -210,6 +210,15 @@ impl<'c> Codegen<'c> {
         }
     }
 
+    /// Whether [`Self::wmma_dot`] takes these operands.
+    pub(in crate::codegen) fn wmma_takes(&self, a: &MemVal<'c>, b: &MemVal<'c>, out: &MemVal<'c>) -> bool {
+        self.has_wmma()
+            && shape::wmma_plan(out.shape[0], out.shape[1], a.shape[1], self.cta_threads).is_some()
+            && out.elem == self.f32_t
+            && self.is_f16_or_f32(a.elem)
+            && self.is_f16_or_f32(b.elem)
+    }
+
     /// Tile-by-tile matmul on the tensor cores: out = a @ b (NN), or
     /// out = a @ b.T (NT, `transpose_b`).
     ///

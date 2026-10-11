@@ -472,6 +472,16 @@ pub enum OpKind {
         accumulate: bool,
         aliased: bool,
     },
+    /// `(a, b, leaves.., dst)`: `dst = tree`, evaluated per element as the
+    /// product is written out, where `Leaf(0)` is the product's element and
+    /// every other leaf an operand. `in_place` when the product went to `dst`
+    /// before the fusion, which keeps that a path with no fused write-out
+    /// emits what it did.
+    DotFused {
+        transpose: bool,
+        tree: Tree,
+        in_place: bool,
+    },
     /// `(src, dst)`: `dst += src`, element-wise.
     Accumulate,
     Intrinsic(Intrinsic),
@@ -615,6 +625,11 @@ impl OpKind {
                 }
                 out
             }
+            OpKind::DotFused { transpose, tree, in_place } => {
+                let name = if *transpose { "dot_t_fused" } else { "dot_fused" };
+                let place = if *in_place { " in_place" } else { "" };
+                format!("{name}{place} {tree}")
+            }
             OpKind::Accumulate => "accumulate".into(),
             OpKind::Intrinsic(i) => i.name(),
             OpKind::IntrinsicInto(i) => format!("{}_into", i.name()),
@@ -691,6 +706,7 @@ impl OpKind {
             | OpKind::Chain(_)
             | OpKind::ScaledAdd
             | OpKind::DotInto { .. }
+            | OpKind::DotFused { .. }
             | OpKind::Accumulate
             | OpKind::IntrinsicInto(_)
             | OpKind::FragStore => vec![last],

@@ -100,6 +100,7 @@ pub(in crate::codegen) enum ElemStep<'c> {
 
 /// A per-element expression tree, evaluated in registers by a single sweep of
 /// the target.
+#[derive(Clone)]
 pub(super) enum Fused<'c> {
     /// A materialized operand, read with broadcasting.
     Tile(MemVal<'c>),
@@ -113,15 +114,30 @@ pub(super) enum Fused<'c> {
     Select(Box<Fused<'c>>, Box<Fused<'c>>, Box<Fused<'c>>),
     /// The element's position along an axis of the target, as an i32.
     Iota(usize),
+    /// A fused dot's product, which its write-out fills in per element.
+    Hole,
 }
 
-impl Fused<'_> {
+impl<'c> Fused<'c> {
+    /// The tree with every hole replaced by `with`.
+    pub(super) fn fill_hole(&self, with: &Fused<'c>) -> Fused<'c> {
+        let go = |x: &Fused<'c>| Box::new(x.fill_hole(with));
+        match self {
+            Fused::Hole => with.clone(),
+            Fused::Tile(_) | Fused::Scalar(_) | Fused::Iota(_) => self.clone(),
+            Fused::Unary(step, x) => Fused::Unary(*step, go(x)),
+            Fused::Binary(op, a, b) => Fused::Binary(*op, go(a), go(b)),
+            Fused::Max(a, b) => Fused::Max(go(a), go(b)),
+            Fused::Select(c, a, b) => Fused::Select(go(c), go(a), go(b)),
+        }
+    }
+
     /// Whether the tree has a unary step or a select. Those work on one
     /// element at a time, so such a tree cannot be swept four elements per
     /// thread.
     fn scalar_only(&self) -> bool {
         match self {
-            Fused::Tile(_) | Fused::Scalar(_) => false,
+            Fused::Tile(_) | Fused::Scalar(_) | Fused::Hole => false,
             Fused::Unary(..) | Fused::Select(..) | Fused::Iota(_) => true,
             Fused::Binary(_, a, b) | Fused::Max(a, b) => a.scalar_only() || b.scalar_only(),
         }
@@ -146,27 +162,7 @@ impl<'c> Codegen<'c> {
         tree: &Fused<'c>,
         leaves: &[MemVal<'c>],
     ) -> Result<()> {
-        for leaf in leaves {
-            let fits = leaf.shape.len() == target.shape.len()
-                && leaf
-                    .shape
-                    .iter()
-                    .zip(&target.shape)
-                    .all(|(&s, &t)| s == t || s == 1);
-            ensure!(
-                fits,
-                "fused elementwise op: operand shape {} does not broadcast to {}",
-                fmt_shape(&leaf.shape),
-                fmt_shape(&target.shape)
-            );
-            // `fusable_nodes` screens named operands. This catches an emitted
-            // one, since the sweep indexes by the target and ignores masks.
-            ensure!(
-                !leaf.is_masked(),
-                "fused elementwise op: a partially out-of-bounds operand must be \
-                 materialized before it can be read against the target's extent"
-            );
-        }
+        Self::check_sweep_leaves(target, leaves)?;
 
         // Four elements per thread only when nothing broadcasts and nothing
         // needs the scalar transcendentals. A broadcast operand's innermost
@@ -190,6 +186,33 @@ impl<'c> Codegen<'c> {
             };
             cg.elem_store(blk, v, target.mem, idx, width)
         })
+    }
+
+    /// Every tile leaf of a tree evaluated against `target` broadcasts to it
+    /// and is unmasked.
+    pub(super) fn check_sweep_leaves(target: &MemVal<'c>, leaves: &[MemVal<'c>]) -> Result<()> {
+        for leaf in leaves {
+            let fits = leaf.shape.len() == target.shape.len()
+                && leaf
+                    .shape
+                    .iter()
+                    .zip(&target.shape)
+                    .all(|(&s, &t)| s == t || s == 1);
+            ensure!(
+                fits,
+                "fused elementwise op: operand shape {} does not broadcast to {}",
+                fmt_shape(&leaf.shape),
+                fmt_shape(&target.shape)
+            );
+            // `fusable_nodes` screens named operands. This catches an emitted
+            // one, since the sweep indexes by the target and ignores masks.
+            ensure!(
+                !leaf.is_masked(),
+                "fused elementwise op: a partially out-of-bounds operand must be \
+                 materialized before it can be read against the target's extent"
+            );
+        }
+        Ok(())
     }
 
     /// One element of the tree, in registers.
@@ -238,6 +261,7 @@ impl<'c> Codegen<'c> {
                 }
             }
             Fused::Iota(d) => self.push(block, arith::index_cast(idx[*d], self.i32_t, self.loc)),
+            Fused::Hole => bail!("a fused dot's product read outside its write-out"),
             Fused::Select(c, a, b) => {
                 let cond = self.eval_fused(block, c, idx, out_shape, width, vec_t)?;
                 let x = self.eval_fused(block, a, idx, out_shape, width, vec_t)?;
