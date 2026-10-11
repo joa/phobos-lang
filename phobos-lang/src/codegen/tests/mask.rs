@@ -79,10 +79,12 @@ fn an_aligned_declaration_drops_the_dynamic_bounds_mask() {
         }",
     );
     assert!(
-        !mlir.contains("scf.if"),
+        !mlir.contains("arith.cmpi ult"),
         "unexpected bounds guard for a declared-aligned extent:
 {mlir}"
     );
+    // The promise itself is checked once, at entry.
+    assert_contains(&mlir, &["arith.remsi", "llvm.intr.trap"]);
 }
 
 #[test]
@@ -258,4 +260,15 @@ fn split_main_loop_keeps_wmma_and_needs_no_mask() {
         remainder.contains("arith.cmpi ult"),
         "the ragged remainder is unguarded:\n{mlir}"
     );
+}
+
+#[test]
+fn an_aligned_promise_on_a_static_extent_is_not_checked() {
+    let mlir = emit_mlir(
+        "@aligned(N = 32)
+        kernel copy(A: tensor<f32>[4, 64], B: tensor<f32>[4, 64]) {
+            B[0 :+ 1, 0 :+ 32] = A[0 :+ 1, 0 :+ 32]
+        }",
+    );
+    assert!(!mlir.contains("llvm.intr.trap"), "\n{mlir}");
 }

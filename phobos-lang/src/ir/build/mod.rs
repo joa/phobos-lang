@@ -20,7 +20,7 @@ use super::{
     Builder, Extent, Ir, KernelInfo, Layout, OpId, OpKind, Scalar, Space, TensorType, TileType,
     Type, ValueId,
 };
-use crate::ast::{AttrArg, Dim, Kernel, Literal as AstLiteral, Type as AstType};
+use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Type as AstType};
 
 pub(crate) use crate::shape::DYN;
 
@@ -216,9 +216,60 @@ impl Build {
                 }
             }
         }
+        self.check_aligned(kernel)?;
         self.emit_stmts(&kernel.body)?;
         self.scopes.pop();
         Ok(())
+    }
+
+    /// Traps at entry when a launch breaks an `@aligned(DIM = tile)` promise
+    /// on a dynamic dimension, before anything is written past a tensor.
+    fn check_aligned(&mut self, kernel: &Kernel) -> Result<()> {
+        for (name, div) in self.aligned_promises(kernel)? {
+            let Some(Binding::Let { value: size, .. }) = self.lookup(&name) else {
+                continue;
+            };
+            if div <= 1 {
+                continue;
+            }
+            let div = self.const_index(div);
+            let rem = self.value(OpKind::Binary(BinOp::Rem), &[size, div], Type::INDEX);
+            let zero = self.const_index(0);
+            let broken = self.value(OpKind::Binary(BinOp::Ne), &[rem, zero], Type::Scalar(Scalar::Bool));
+            let then = self.ir.new_block(&[]);
+            self.in_block(then, |b| {
+                b.stmt(OpKind::Trap, &[]);
+                b.stmt(OpKind::Yield, &[]);
+            });
+            self.op(OpKind::If, &[broken], Vec::new(), vec![then]);
+        }
+        Ok(())
+    }
+
+    /// Every `@aligned(NAME = tile)` pair, the tile resolved to its value.
+    fn aligned_promises(&self, kernel: &Kernel) -> Result<Vec<(String, i64)>> {
+        let Some(attr) = kernel.attrs.iter().find(|a| a.name == "aligned") else {
+            return Ok(Vec::new());
+        };
+        attr.args
+            .iter()
+            .filter_map(|a| match a {
+                AttrArg::KeyValue { key, value } => Some((key, value)),
+                _ => None,
+            })
+            .map(|(name, value)| {
+                let div = match value {
+                    AstLiteral::Int(n) => *n,
+                    AstLiteral::Ident(sym) => *self
+                        .shape_env
+                        .get(sym)
+                        .ok_or_else(|| anyhow!("@aligned({name} = {sym}): unknown constant"))?,
+                    other => bail!("@aligned({name}): expected an integer, found {other:?}"),
+                };
+                anyhow::ensure!(div > 0, "@aligned({name}): the divisor must be positive");
+                Ok((name.clone(), div))
+            })
+            .collect()
     }
 
     fn param_type(&self, kernel: &Kernel, ty: &AstType) -> Result<Type> {
@@ -238,32 +289,14 @@ impl Build {
 
     /// Per-dimension divisors promised by `@aligned(NAME = tile)`.
     fn declared_divs(&self, kernel: &Kernel, dims: &[Dim]) -> Result<Vec<i64>> {
-        let Some(attr) = kernel.attrs.iter().find(|a| a.name == "aligned") else {
-            return Ok(vec![1; dims.len()]);
-        };
-        dims.iter()
-            .map(|dim| {
-                let Dim::Sym(name) = dim else {
-                    return Ok(1);
-                };
-                let Some(AttrArg::KeyValue { value, .. }) = attr.args.iter().find(|a| match a {
-                    AttrArg::KeyValue { key, .. } => key == name,
-                    _ => false,
-                }) else {
-                    return Ok(1);
-                };
-                let div = match value {
-                    AstLiteral::Int(n) => *n,
-                    AstLiteral::Ident(sym) => *self
-                        .shape_env
-                        .get(sym)
-                        .ok_or_else(|| anyhow!("@aligned({name} = {sym}): unknown constant"))?,
-                    other => bail!("@aligned({name}): expected an integer, found {other:?}"),
-                };
-                anyhow::ensure!(div > 0, "@aligned({name}): the divisor must be positive");
-                Ok(div)
+        let promises = self.aligned_promises(kernel)?;
+        Ok(dims
+            .iter()
+            .map(|dim| match dim {
+                Dim::Sym(name) => promises.iter().find(|(n, _)| n == name).map_or(1, |&(_, div)| div),
+                Dim::Int(_) => 1,
             })
-            .collect()
+            .collect())
     }
 
     // Op creation at the current block.

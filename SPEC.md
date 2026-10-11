@@ -169,7 +169,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | Dynamic extent indexed by `program_id` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
 | Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask: `s = where(iota(1) < n, s, -1.0e30)`. |
 
-`@aligned(DIM = tile)` is unchecked. A wrong promise writes past the tensor, into the following rows.
+`@aligned(DIM = tile)` on a dynamic `DIM` is checked once at entry: a launch that breaks it traps, and the next synchronize fails, instead of writing past the tensor.
 
 ## Tiles and shared memory
 
@@ -330,7 +330,7 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 |---|---|
 | `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Three or more: an explicit list. The first choice seeds the shape environment. |
 | `@cluster(X in [..], ...)` | Super-tile dimensions and search space for cluster tuning. |
-| `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. Unchecked. |
+| `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. A dynamic `DIM` that breaks the promise traps at entry. |
 | `@launch(threads[, min_blocks[, max_regs]])` | CTA size (default 256), PTX `.maxntid`, `.minnctapersm`, `.maxnreg`. `max_regs` (16..255) is a hard cap; `min_blocks` is advisory. |
 | `@tensorcore` | `dot`/`dot_t` and the GEMM run on tensor cores (sm_70+), operands rounded to f16, f32 accumulation. Uses `mma.sync` + `ldmatrix` with swizzled staging (sm_75+, 64-bit index), else WMMA m16n16k16. Falls back to the f32 path unless tile dims and the k-slice are multiples of 16 and the CTA's warps tile the 16x16 fragment grid; `PHOBOS_LOG=debug` names each dot that does, and why. |
 | `@tensorcore(wmma)` | Forces the WMMA m16n16k16 path. |
