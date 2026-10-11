@@ -207,6 +207,11 @@ impl Build {
             "argsel" => self.emit_argsel(args),
             "rowmax" | "rowsum" => {
                 let how = if callee == "rowmax" { Reduce::RowMax } else { Reduce::RowSum };
+                if let [arg] = args
+                    && let Some(out) = self.reduce_fused(how, arg)?
+                {
+                    return Ok(Rv::Tile(out));
+                }
                 let t = self.reduce_arg(args, callee)?;
                 let shape = self.shape(t);
                 if shape.len() != 2 {

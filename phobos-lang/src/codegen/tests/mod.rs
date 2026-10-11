@@ -29,6 +29,7 @@ mod q3k_qdot;
 mod qdecode;
 mod qgemm;
 mod quant;
+mod reduce;
 mod select;
 mod sync;
 mod tensorcore;

@@ -4,6 +4,7 @@ use melior::ir::Block;
 use super::{Lowered, dims};
 use crate::ast::{AssignOp, BinOp};
 use crate::codegen::elemwise::{ElemStep, Fused};
+use crate::codegen::tile::RowSrc;
 use crate::codegen::{Codegen, MemVal, Reduce as CgReduce};
 use crate::ir::{self, Ir, Map, OpId, OpKind, Reduce, Tree};
 
@@ -164,6 +165,25 @@ impl<'c> Codegen<'c> {
                 };
                 if how != Reduce::Tril {
                     self.release(&t);
+                }
+                self.set_ir(ir.result(op), Lowered::Tile(out));
+            }
+            OpKind::ReduceFused { how, tree, cols } => {
+                let ir::Type::Tile(t) = ir.ty(ir.result(op)) else {
+                    bail!("fused reduction to a non-tile");
+                };
+                let (elem, rows) = (self.ir_scalar_type(t.elem), dims(&t.shape)[0]);
+                // The result is never an operand, so no leaf is skipped.
+                let mut leaves = Vec::new();
+                let tree = self.fused_from_tree(ir, op, &tree, ir.result(op), &mut leaves)?;
+                let src = RowSrc::Tree {
+                    tree: &tree,
+                    shape: [rows, cols],
+                };
+                let kind = if how == Reduce::RowMax { CgReduce::Max } else { CgReduce::Sum };
+                let out = self.rowreduce(block, &src, elem, kind)?;
+                for leaf in &leaves {
+                    self.release(leaf);
                 }
                 self.set_ir(ir.result(op), Lowered::Tile(out));
             }

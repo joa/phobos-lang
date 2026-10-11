@@ -1,8 +1,8 @@
 use anyhow::{Result, anyhow};
 
 use super::{
-    BlockId, Bounds, Coeff, Def, GemmType, Intrinsic, Ir, Map, OpId, OpKind, Scalar, Space, Type,
-    ValueId,
+    BlockId, Bounds, Coeff, Def, GemmType, Intrinsic, Ir, Map, OpId, OpKind, Reduce, Scalar, Space,
+    Type, ValueId,
 };
 
 /// Checks every structural invariant: the arena, the use lists, dominance,
@@ -706,6 +706,18 @@ impl Verifier<'_> {
                 }
                 self.want_results(op, 0);
             }
+            OpKind::ReduceFused { how, tree, .. } => {
+                if !matches!(how, Reduce::RowMax | Reduce::RowSum) {
+                    self.err(op, format!("{} does not take a fused argument", how.name()));
+                }
+                let mut read = Vec::new();
+                tree.operands(&mut read);
+                if read.iter().any(|&i| i >= n_ops) {
+                    self.err(op, "tree reads past the operands");
+                }
+                self.check_tree(op, tree);
+                self.want_tile_result(op);
+            }
             OpKind::Reduce(_) => {
                 if self.want_operands(op, 1) {
                     self.want_tiles(op, 0..1);
@@ -792,9 +804,12 @@ impl Verifier<'_> {
                 }
             }
             super::Tree::Iota(d) => {
-                if let Some(&target) = self.ir.operands(op).last()
-                    && *d >= self.rank(target)
-                {
+                // A fused reduction sweeps a rank-2 argument and has no target.
+                let rank = match self.ir.kind(op) {
+                    OpKind::ReduceFused { .. } => Some(2),
+                    _ => self.ir.operands(op).last().map(|&t| self.rank(t)),
+                };
+                if rank.is_some_and(|rank| *d >= rank) {
                     self.err(op, format!("iota axis {d} past the target's rank"));
                 }
             }
