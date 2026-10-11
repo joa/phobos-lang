@@ -43,6 +43,9 @@ helpers rather than a spelling of its own.
   changes the generated code is not a refactor, so diff this over every `.ph` in
   the tree, under each of those targets, before and after
 - `cargo run -p phobos-kbench`: Full GPU smoke test
+- `cargo run --release -p phobos-kernels --features cuda --example lang_check`: the
+  language's semantics on the device, one probe kernel per feature against a host
+  reference. The codegen tests check what a construct emits; this checks what it computes
 
 The model path on the GPU needs `--features cuda`, and always `--release`: a
 forward pass is a few hundred GFLOP and the debug build is unusable. Its checks

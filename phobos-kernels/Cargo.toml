@@ -26,3 +26,7 @@ cuda = ["compiler", "dep:cust", "dep:libloading"]
 [[example]]
 name = "barrier_bench"
 required-features = ["cuda"]
+
+[[example]]
+name = "lang_check"
+required-features = ["cuda"]
