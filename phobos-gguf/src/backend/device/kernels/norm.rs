@@ -71,7 +71,7 @@ kernel rms_norm_gated(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LA
             ", Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]"
         ));
         body.push_str(&format!(
-            "  var mx: tile<f32>[NB, 1] = rowmax(tmax(y, -y))
+            "  var mx: tile<f32>[NB, 1] = rowmax(abs(y))
                var q = y * (127.0 / (mx + 0.00000001))
                Q[r * NB :+ NB, 0 :+ {RMS_LANE}] = i8(i32(round(q)))
                S[r * NB :+ NB, 0 :+ 1] = mx / 127.0
@@ -147,7 +147,7 @@ kernel {name}(G: tensor<f32>[RB, {RMS_LANE}], U: tensor<f32>[RB, {RMS_LANE}],
   var g = G[p * NB :+ NB, 0 :+ {RMS_LANE}]
   var u = U[p * NB :+ NB, 0 :+ {RMS_LANE}]
   var y: tile<f32>[NB, {RMS_LANE}] = {gated}
-{out_store}  var mx: tile<f32>[NB, 1] = rowmax(tmax(y, -y))
+{out_store}  var mx: tile<f32>[NB, 1] = rowmax(abs(y))
   var q = y * (127.0 / (mx + 0.00000001))
   Q[p * NB :+ NB, 0 :+ {RMS_LANE}] = i8(i32(round(q)))
   S[p * NB :+ NB, 0 :+ 1] = mx / 127.0

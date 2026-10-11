@@ -103,7 +103,7 @@ pub(crate) fn hadamard_src(width: usize, perm: Option<HeadPerm>, form: HadamardF
         params.push_str(&format!(",
                 Q: tensor<i8>[R, {side}], D: tensor<f32>[R, D1]"));
         store = format!(
-            "  var mx: tile<f32>[{side}, 1] = rowmax(tmax(y, -y))
+            "  var mx: tile<f32>[{side}, 1] = rowmax(abs(y))
   var inq = 127.0 / (mx + 0.00000001)
   var yq = y * inq
   Q[p * {side} :+ {side}, :] = i8(i32(round(yq)))
