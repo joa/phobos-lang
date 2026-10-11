@@ -2,7 +2,9 @@ use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
 use crate::ast::{Expr, Scalar as AstScalar};
-use crate::ir::{ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Type, ValueId};
+use crate::ir::{
+    ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, Type, ValueId,
+};
 
 impl Build {
     /// Each arm evaluates its operands in source order and produces one op
@@ -336,7 +338,34 @@ impl Build {
         let Rv::Tile(b) = self.emit_expr(rhs)? else {
             bail!("dot expects tile operands");
         };
-        Ok((a, b))
+        if self.has_wmma() {
+            // The tensor-core paths stage both operands as f16 themselves.
+            return Ok((a, b));
+        }
+        // a is [m, k]; b is [k, n] for `dot` and [n, k] for `dot_t`.
+        let (a_reads, b_reads) = match (&self.shape(a)[..], &self.shape(b)[..]) {
+            (&[m, k], &[b0, b1]) => (if b0 == k { b1 } else { b0 }, m),
+            _ => (1, 1),
+        };
+        Ok((self.stage_reused(a, a_reads), self.stage_reused(b, b_reads)))
+    }
+
+    /// An operand a contraction reads `reads` times, copied into shared
+    /// memory when it is a view of global memory: a slice read once wants to
+    /// stay a view, one read many times wants the staging whether or not a
+    /// mask forced it.
+    fn stage_reused(&mut self, v: ValueId, reads: i64) -> ValueId {
+        let Type::Tile(t) = self.ir.ty(v) else {
+            return v;
+        };
+        let shape = self.shape(v);
+        if reads < 2 || t.space != Space::Global || self.is_masked(v) || shape.contains(&DYN) {
+            return v;
+        }
+        let elem = self.elem(v);
+        let pad = self.should_pad_stage(elem, &shape);
+        let ty = if pad { self.padded_ty(elem, &shape) } else { self.shared_ty(elem, &shape) };
+        self.value(OpKind::Stage(Stage { pad, sync: true }), &[v], ty)
     }
 
     pub(crate) fn reduce_arg(&mut self, args: &[Expr], name: &str) -> Result<ValueId> {

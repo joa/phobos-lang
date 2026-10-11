@@ -356,3 +356,22 @@ fn tensorcore_dot_accumulate_rides_in_fragments() {
         "legacy WMMA ops left on the mma.sync dot accumulate path:\n{mlir}"
     );
 }
+
+#[test]
+fn a_reused_dot_operand_is_staged_without_a_mask() {
+    // `a` is an unmasked view read once per output column, so it is copied
+    // into shared memory; a [1, k] row times a [k, 1] column is read once.
+    let src = |n: usize| {
+        format!(
+            "kernel k(A: tensor<f32>[1, 64], W: tensor<f32>[64, {n}], O: tensor<f32>[1, {n}]) {{
+                let a = A[0 :+ 1, 0 :+ 64]
+                let w = W[0 :+ 64, 0 :+ {n}]
+                var o: tile<f32>[1, {n}] = dot(a, w)
+                O[0 :+ 1, 0 :+ {n}] = o
+            }}"
+        )
+    };
+    let staged = |mlir: &str| mlir.matches("memref<1x64xf32, 3>").count();
+    assert!(staged(&emit_mlir(&src(32))) > 0);
+    assert_eq!(staged(&emit_mlir(&src(1))), 0);
+}
