@@ -159,6 +159,7 @@ impl<'c> Codegen<'c> {
                 let out = match how {
                     Reduce::RowMax => self.tile_rowreduce(block, &t, CgReduce::Max)?,
                     Reduce::RowSum => self.tile_rowreduce(block, &t, CgReduce::Sum)?,
+                    Reduce::RowArgMax => self.rowargmax(block, &RowSrc::Tile(&t), t.elem)?,
                     Reduce::CumSum => self.tile_cumsum(block, &t)?,
                     Reduce::Tril => self.tile_tril(block, &t)?,
                     Reduce::Transpose => self.tile_transpose(block, &t)?,
@@ -168,11 +169,11 @@ impl<'c> Codegen<'c> {
                 }
                 self.set_ir(ir.result(op), Lowered::Tile(out));
             }
-            OpKind::ReduceFused { how, tree, cols } => {
+            OpKind::ReduceFused { how, tree, cols, arg } => {
                 let ir::Type::Tile(t) = ir.ty(ir.result(op)) else {
                     bail!("fused reduction to a non-tile");
                 };
-                let (elem, rows) = (self.ir_scalar_type(t.elem), dims(&t.shape)[0]);
+                let (elem, rows) = (self.ir_scalar_type(arg), dims(&t.shape)[0]);
                 // The result is never an operand, so no leaf is skipped.
                 let mut leaves = Vec::new();
                 let tree = self.fused_from_tree(ir, op, &tree, ir.result(op), &mut leaves)?;
@@ -180,8 +181,11 @@ impl<'c> Codegen<'c> {
                     tree: &tree,
                     shape: [rows, cols],
                 };
-                let kind = if how == Reduce::RowMax { CgReduce::Max } else { CgReduce::Sum };
-                let out = self.rowreduce(block, &src, elem, kind)?;
+                let out = match how {
+                    Reduce::RowArgMax => self.rowargmax(block, &src, elem)?,
+                    Reduce::RowMax => self.rowreduce(block, &src, elem, CgReduce::Max)?,
+                    _ => self.rowreduce(block, &src, elem, CgReduce::Sum)?,
+                };
                 for leaf in &leaves {
                     self.release(leaf);
                 }

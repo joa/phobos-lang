@@ -297,7 +297,7 @@ impl Build {
         Ok(true)
     }
 
-    /// `rowmax(e)` or `rowsum(e)` with `e` evaluated per element inside the
+    /// `rowmax(e)`, `rowsum(e)` or `rowargmax(e)` with `e` evaluated per element inside the
     /// reduction's loop, never stored. None when `e` is not a fusable tree
     /// over named tiles of one type and rank 2.
     pub(crate) fn reduce_fused(&mut self, how: Reduce, arg: &Expr) -> Result<Option<ValueId>> {
@@ -319,11 +319,13 @@ impl Build {
         };
         let tree = self.plan_fused(arg, &mut plan)?;
         self.check_leaves(&plan.leaves, &shape)?;
-        let ty = self.shared_ty(elem, &[shape[0], 1]);
+        let out = if how == Reduce::RowArgMax { Scalar::I32 } else { elem };
+        let ty = self.shared_ty(out, &[shape[0], 1]);
         let kind = OpKind::ReduceFused {
             how,
             tree,
             cols: shape[1],
+            arg: elem,
         };
         Ok(Some(self.value(kind, &plan.operands, ty)))
     }

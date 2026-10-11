@@ -5,6 +5,7 @@
 use super::*;
 
 mod alloc;
+mod argmax;
 mod check;
 mod contract;
 mod dp4a;

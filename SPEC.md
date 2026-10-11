@@ -207,16 +207,17 @@ Each math call takes a tile or a scalar. On a scalar it computes in `f32`; `abs`
 | `where(c, a, b)` | `c ? a : b` per element | `c` compares values, joined by `&&` and `\|\|`. On tiles it must be the value of a tile assignment, `t = where(..)`, `t += where(..)` or a `var` whose `a` or `b` reads a tile, which it is swept into. On scalars it is a select. |
 | `iota(d)` | The element's index along axis `d` of the tile being assigned, as an `i32` | Only inside a tile assignment's value. `d` a literal below the tile's rank. |
 | `tmax(a, b)` | `max(a, b)` | Broadcasts. Same element type. |
-| `argsel(va, vb, ia, ib)` | `va >= vb ? ia : ib` | Broadcasts. `va`, `vb` share a float type; `ia`, `ib` share the result type. Fold with `tmax` to build an argmax. Carry indices as floats (exact up to `2^24`). |
+| `argsel(va, vb, ia, ib)` | `va >= vb ? ia : ib` | Broadcasts. `va`, `vb` share a float type; `ia`, `ib` share the result type. `rowargmax` is the row reduction; `argsel` is for folding pairs by hand. |
 
 ### Reductions and shape
 
-All take a rank-2 tile with a static shape. The argument of `rowmax` or `rowsum` may be an elementwise expression over declared tiles of one element type, such as `rowmax(abs(x))` or `rowsum(x * x)`: it is evaluated per element inside the reduction and never stored.
+All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` or `rowargmax` may be an elementwise expression over declared tiles of one element type, such as `rowmax(abs(x))` or `rowsum(x * x)`: it is evaluated per element inside the reduction and never stored.
 
 | Built-in | Shape | Semantics |
 |---|---|---|
 | `rowmax(t)` | `[R, C] -> [R, 1]` | `max_j t[i, j]`. Float or integer. |
 | `rowsum(t)` | `[R, C] -> [R, 1]` | `sum_j t[i, j]`. Float or integer; an integer sums in its own type, so a narrow one wraps. |
+| `rowargmax(t)` | `[R, C] -> [R, 1] i32` | The `j` of `max_j t[i, j]`, the smallest on a tie. Float or integer. Top-k is `k` rounds of it, each masking its pick with `t = where(iota(1) == idx, -1.0e30, t)`. |
 | `cumsum(t)` | `[R, C] -> [R, C]` | `out[i, j] = sum_{r <= i} t[r, j]`, down the rows. Float only. |
 | `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
 | `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
