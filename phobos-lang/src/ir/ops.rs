@@ -388,6 +388,13 @@ pub enum OpKind {
     AtomicCas,
     /// Aborts the kernel: a launch broke a promise the code relies on.
     Trap,
+    /// `(value) -> regs`: every element of a register tile set to a scalar.
+    RegsFill,
+    /// `(leaves..) -> regs`: the tree per element of a register tile. A leaf
+    /// is a tile, read at the element, or a register tile of the same shape.
+    RegsFused(Tree),
+    /// `(regs, dst)`: a register tile written to a shared tile.
+    RegsStore,
     /// `(tensor, slot) -> value`: a system-scope acquire load of an `i32`
     /// slot, once per CTA, so that what the host wrote before raising it is
     /// visible to every thread.
@@ -523,6 +530,9 @@ impl OpKind {
             OpKind::AtomicAdd => "atomic_add".into(),
             OpKind::AtomicCas => "atomic_cas".into(),
             OpKind::Trap => "trap".into(),
+            OpKind::RegsFill => "regs_fill".into(),
+            OpKind::RegsFused(tree) => format!("regs_fused {tree}"),
+            OpKind::RegsStore => "regs_store".into(),
             OpKind::LoadAcquire => "load_acquire".into(),
             OpKind::StoreRelease => "store_release".into(),
             OpKind::For(info) => {
@@ -672,6 +682,7 @@ impl OpKind {
             OpKind::Store => vec![1],
             OpKind::AtomicAdd | OpKind::AtomicCas => vec![0],
             OpKind::GridBarrier | OpKind::StoreRelease => vec![0],
+            OpKind::RegsStore => vec![1],
             OpKind::Copy { .. }
             | OpKind::Convert
             | OpKind::Fill

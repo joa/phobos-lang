@@ -2,14 +2,14 @@ use anyhow::{Result, anyhow, bail};
 use melior::{
     dialect::{arith, scf},
     ir::{
-        Attribute, Block, BlockLike, Region, RegionLike, Type, ValueLike,
+        Attribute, Block, BlockLike, Region, RegionLike, Type, Value, ValueLike,
         attribute::IntegerAttribute, operation::OperationBuilder,
     },
 };
 
 use super::Lowered;
 use crate::codegen::matmul::GemmSource;
-use crate::codegen::{Codegen, FragAcc, detach};
+use crate::codegen::{Codegen, detach};
 use crate::ir::{self, Bounds, ForInfo, Ir, OpId, OpKind};
 
 impl<'c> Codegen<'c> {
@@ -123,14 +123,11 @@ impl<'c> Codegen<'c> {
         let st = self.scalar_ir(ir.operand(op, 2))?;
         let body = ir.blocks_of(op)[0];
         let carried = &ir.operands(op)[3..3 + info.carried];
-        let accs: Vec<FragAcc<'c>> = carried
-            .iter()
-            .map(|&v| self.frags_ir(v))
-            .collect::<Result<_>>()?;
-        let mut inits = Vec::new();
-        for fa in &accs {
-            inits.extend(fa.frags.iter().copied());
-        }
+        // Each carried value is a fragment accumulator or a register tile;
+        // the loop sees only its registers.
+        let likes: Vec<Lowered<'c>> = carried.iter().map(|&v| self.get_ir(v).cloned()).collect::<Result<_>>()?;
+        let groups: Vec<Vec<Value<'c, 'c>>> = carried.iter().map(|&v| self.carried_vals(v)).collect::<Result<_>>()?;
+        let inits: Vec<Value<'c, 'c>> = groups.iter().flatten().copied().collect();
 
         let mut args = vec![(self.index_t, self.loc)];
         args.extend(inits.iter().map(|v| (v.r#type(), self.loc)));
@@ -138,25 +135,20 @@ impl<'c> Codegen<'c> {
         let iv = detach(body_block.argument(0)?.into());
         self.set_ir(ir.args(body)[0], Lowered::Scalar(iv));
         let mut off = 1;
-        for (k, fa) in accs.iter().enumerate() {
-            let mut frags = Vec::with_capacity(fa.frags.len());
-            for j in 0..fa.frags.len() {
-                frags.push(detach(body_block.argument(off + j)?.into()));
+        for (k, (like, group)) in likes.iter().zip(&groups).enumerate() {
+            let mut vals = Vec::with_capacity(group.len());
+            for j in 0..group.len() {
+                vals.push(detach(body_block.argument(off + j)?.into()));
             }
-            off += fa.frags.len();
-            self.set_ir(
-                ir.args(body)[1 + k],
-                Lowered::Frags(FragAcc {
-                    frags,
-                    ..fa.clone()
-                }),
-            );
+            off += group.len();
+            let lowered = self.with_vals(like, vals)?;
+            self.set_ir(ir.args(body)[1 + k], lowered);
         }
 
         self.emit_ops(&body_block, ir, ir.ops(body))?;
         let mut finals = Vec::with_capacity(inits.len());
         for v in self.yielded(ir, body)? {
-            finals.extend(self.frags_ir(v)?.frags);
+            finals.extend(self.carried_vals(v)?);
         }
         body_block.append_operation(scf::r#yield(&finals, self.loc));
 
@@ -174,19 +166,14 @@ impl<'c> Codegen<'c> {
         );
 
         let mut off = 0;
-        for (k, fa) in accs.iter().enumerate() {
-            let mut frags = Vec::with_capacity(fa.frags.len());
-            for j in 0..fa.frags.len() {
-                frags.push(detach(loop_op.result(off + j)?.into()));
+        for (k, (like, group)) in likes.iter().zip(&groups).enumerate() {
+            let mut vals = Vec::with_capacity(group.len());
+            for j in 0..group.len() {
+                vals.push(detach(loop_op.result(off + j)?.into()));
             }
-            off += fa.frags.len();
-            self.set_ir(
-                ir.results(op)[k],
-                Lowered::Frags(FragAcc {
-                    frags,
-                    ..fa.clone()
-                }),
-            );
+            off += group.len();
+            let lowered = self.with_vals(like, vals)?;
+            self.set_ir(ir.results(op)[k], lowered);
         }
         Ok(())
     }

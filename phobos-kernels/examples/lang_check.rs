@@ -116,6 +116,7 @@ fn main() -> Result<()> {
     ragged_k(&mut failures)?;
     handoff(&mut failures)?;
     pipelined_tail(&mut failures)?;
+    register_tile(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -435,6 +436,42 @@ fn ragged_k(failures: &mut u32) -> Result<()> {
         let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(name, worst < 1e-2, format!("max abs err {worst:.3e}"), failures);
     }
+    Ok(())
+}
+
+fn register_tile(failures: &mut u32) -> Result<()> {
+    // A sum of squares over k held in registers, then stored and reduced.
+    let (rows, k) = (16, 192);
+    let x = noise(rows * k, 14);
+    let src = "@launch(256)
+        @registers(acc)
+        kernel k(X: tensor<f32>[16, K], O: tensor<f32>[16, 64], S: tensor<f32>[16, 1]) {
+            var acc: tile<f32>[16, 64] = 0.0
+            for kt in range(0, K, 64) {
+                var x = X[0 :+ 16, kt :+ 64]
+                acc += x * x
+            }
+            O[0 :+ 16, 0 :+ 64] = acc
+            var s: tile<f32>[16, 1] = rowsum(acc)
+            S[0 :+ 16, 0 :+ 1] = s
+        }";
+    let mut want = vec![0.0f32; rows * 64];
+    for r in 0..rows {
+        for j in 0..k {
+            want[r * 64 + j % 64] += x[r * k + j] * x[r * k + j];
+        }
+    }
+    let want_s: Vec<f32> = want.chunks(64).map(|r| r.iter().sum()).collect();
+    let gx = Arg::new(&x, rows, k)?;
+    let (o, s) = (Arg::<f32>::zeroed(rows, 64)?, Arg::<f32>::zeroed(rows, 1)?);
+    let mut slots = Vec::new();
+    gx.push(&mut slots);
+    o.push(&mut slots);
+    s.push(&mut slots);
+    run(src, "k", 1, &mut slots)?;
+    let err = |got: Vec<f32>, want: &[f32]| got.iter().zip(want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
+    let (eo, es) = (err(o.read()?, &want), err(s.read()?, &want_s));
+    report("@registers accumulator", eo < 1e-5 && es < 1e-4, format!("err {eo:.1e} / {es:.1e}"), failures);
     Ok(())
 }
 

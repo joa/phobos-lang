@@ -5,6 +5,7 @@ mod frag;
 mod hoist;
 mod matmul;
 mod pipeline;
+mod regs;
 mod slice;
 mod stmt;
 mod store;
@@ -58,6 +59,8 @@ pub(crate) enum Binding {
     /// A writable tile buffer.
     Tile(ValueId),
     Frags(ValueId),
+    /// A tile held in registers; see `regs.rs`.
+    Regs(ValueId),
 }
 
 /// The result of an expression.
@@ -91,6 +94,12 @@ pub(crate) struct Build {
     pub(crate) pad_stage: bool,
     pub(crate) pipeline_assert: bool,
     pub(crate) cta_threads: i64,
+    /// The tiles `@registers` names, and those declared so far.
+    pub(crate) registers: Vec<String>,
+    pub(crate) regs_declared: Vec<String>,
+    /// Set while planning a register tile's update, the one tree a register
+    /// tile may be a leaf of.
+    pub(crate) fusing_regs: bool,
 }
 
 /// Builds one kernel's graph. Names are resolved here and nowhere else,
@@ -154,6 +163,9 @@ pub fn build(
         pad_stage: info.pad_stage,
         pipeline_assert: info.pipeline_assert,
         cta_threads,
+        registers: kernel.register_tiles(),
+        regs_declared: Vec::new(),
+        fusing_regs: false,
     };
     let params = kernel
         .params
@@ -220,6 +232,9 @@ impl Build {
         }
         self.check_aligned(kernel)?;
         self.emit_stmts(&kernel.body)?;
+        if let Some(name) = self.registers.iter().find(|n| !self.regs_declared.contains(n)) {
+            bail!("@registers({name}) names no `var {name}: tile<..>[..]` of the kernel");
+        }
         self.scopes.pop();
         Ok(())
     }
@@ -354,7 +369,7 @@ impl Build {
     /// records as the value's name (see `Ir::name`).
     pub(crate) fn bind(&mut self, name: &str, binding: Binding) {
         match &binding {
-            Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Tensor(v) => {
+            Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) | Binding::Tensor(v) => {
                 if self.ir.name(*v).is_none() {
                     self.ir.set_name(*v, name);
                 }

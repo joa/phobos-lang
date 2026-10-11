@@ -272,6 +272,15 @@ pub struct GemmType {
     pub k: i64,
 }
 
+/// A tile held in registers: each thread keeps the elements `t`,
+/// `t + threads`, ... of the row-major order, the mapping a plain sweep
+/// uses, so a sweep reads it without moving data between threads.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct RegsType {
+    pub elem: Scalar,
+    pub shape: Vec<i64>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Scalar(Scalar),
@@ -279,6 +288,7 @@ pub enum Type {
     Tile(TileType),
     Frags(FragType),
     Gemm(GemmType),
+    Regs(RegsType),
 }
 
 impl Type {
@@ -316,7 +326,7 @@ impl Type {
     /// The element type of anything addressable.
     pub fn elem(&self) -> Option<Scalar> {
         match self {
-            Type::Scalar(_) | Type::Frags(_) | Type::Gemm(_) => None,
+            Type::Scalar(_) | Type::Frags(_) | Type::Gemm(_) | Type::Regs(_) => None,
             Type::Tensor(t) => Some(t.elem),
             Type::Tile(t) => Some(t.elem),
         }
@@ -325,7 +335,7 @@ impl Type {
     /// The shape of anything addressable.
     pub fn shape(&self) -> Option<&[Extent]> {
         match self {
-            Type::Scalar(_) | Type::Frags(_) | Type::Gemm(_) => None,
+            Type::Scalar(_) | Type::Frags(_) | Type::Gemm(_) | Type::Regs(_) => None,
             Type::Tensor(t) => Some(&t.shape),
             Type::Tile(t) => Some(&t.shape),
         }
@@ -375,6 +385,10 @@ impl fmt::Display for Type {
             }
             Type::Frags(fr) => write!(f, "frags[{}, {}]/{}x{}", fr.m, fr.n, fr.wm, fr.wn),
             Type::Gemm(g) => write!(f, "gemm<{}>[{}, {}]/{}", g.acc, g.m, g.n, g.k),
+            Type::Regs(r) => {
+                let dims: Vec<String> = r.shape.iter().map(i64::to_string).collect();
+                write!(f, "regs<{}>[{}]", r.elem, dims.join(", "))
+            }
         }
     }
 }

@@ -135,7 +135,7 @@ impl<'c> Codegen<'c> {
                 let dst_id = ir.operand(op, n - 1);
                 let target = self.tile_ir(ir, dst_id)?;
                 let mut leaves = Vec::new();
-                let fused = self.fused_from_tree(ir, op, &tree, dst_id, &mut leaves)?;
+                let fused = self.fused_from_tree(ir, op, &tree, dst_id, &mut leaves, None)?;
                 self.fused_sweep(block, &target, &fused, &leaves)?;
                 for leaf in &leaves {
                     self.release(leaf);
@@ -186,7 +186,7 @@ impl<'c> Codegen<'c> {
                 let (elem, rows) = (self.ir_scalar_type(arg), dims(&t.shape)[0]);
                 // The result is never an operand, so no leaf is skipped.
                 let mut leaves = Vec::new();
-                let tree = self.fused_from_tree(ir, op, &tree, ir.result(op), &mut leaves)?;
+                let tree = self.fused_from_tree(ir, op, &tree, ir.result(op), &mut leaves, None)?;
                 let src = RowSrc::Tree {
                     tree: &tree,
                     shape: [rows, cols],
@@ -407,15 +407,24 @@ impl<'c> Codegen<'c> {
 
     /// Converts the op's fused tree into the emitter's. Every tile leaf other
     /// than the target is pushed to `leaves` for release, once per mention.
-    fn fused_from_tree(
+    pub(super) fn fused_from_tree(
         &self,
         ir: &Ir,
         op: OpId,
         tree: &Tree,
         target: ir::ValueId,
         leaves: &mut Vec<MemVal<'c>>,
+        reg_elem: Option<usize>,
     ) -> Result<Fused<'c>> {
+        let go = |t: &Tree, leaves: &mut Vec<MemVal<'c>>| self.fused_from_tree(ir, op, t, target, leaves, reg_elem);
         Ok(match tree {
+            // A register tile is one value per element: the one being built.
+            Tree::Leaf(i) if matches!(ir.ty(ir.operand(op, *i)), ir::Type::Regs(_)) => {
+                let Some(e) = reg_elem else {
+                    bail!("a register tile read outside a register-tile op");
+                };
+                Fused::Scalar(self.regs_ir(ir.operand(op, *i))?.vals[e])
+            }
             Tree::Leaf(i) => {
                 let v = ir.operand(op, *i);
                 let mv = self.tile_ir(ir, v)?;
@@ -433,22 +442,15 @@ impl<'c> Codegen<'c> {
                 {
                     step = ElemStep::CastUnsigned(want);
                 }
-                Fused::Unary(step, Box::new(self.fused_from_tree(ir, op, x, target, leaves)?))
+                Fused::Unary(step, Box::new(go(x, leaves)?))
             }
-            Tree::Binary(bop, a, b) => Fused::Binary(
-                *bop,
-                Box::new(self.fused_from_tree(ir, op, a, target, leaves)?),
-                Box::new(self.fused_from_tree(ir, op, b, target, leaves)?),
-            ),
-            Tree::Max(a, b) => Fused::Max(
-                Box::new(self.fused_from_tree(ir, op, a, target, leaves)?),
-                Box::new(self.fused_from_tree(ir, op, b, target, leaves)?),
-            ),
+            Tree::Binary(bop, a, b) => Fused::Binary(*bop, Box::new(go(a, leaves)?), Box::new(go(b, leaves)?)),
+            Tree::Max(a, b) => Fused::Max(Box::new(go(a, leaves)?), Box::new(go(b, leaves)?)),
             Tree::Iota(d) => Fused::Iota(*d),
             Tree::Select(c, a, b) => Fused::Select(
-                Box::new(self.fused_from_tree(ir, op, c, target, leaves)?),
-                Box::new(self.fused_from_tree(ir, op, a, target, leaves)?),
-                Box::new(self.fused_from_tree(ir, op, b, target, leaves)?),
+                Box::new(go(c, leaves)?),
+                Box::new(go(a, leaves)?),
+                Box::new(go(b, leaves)?),
             ),
         })
     }
