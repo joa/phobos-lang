@@ -204,3 +204,43 @@ fn every_snapshot_source_builds() {
     println!("{built} kernels built");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Attention's two updates of a product: the scores scaled in place, and the
+/// output rescaled before the next block's product is added.
+const DOT_UPDATES: &str = "kernel k(Q: tensor<f32>[16, 64], K: tensor<f32>[16, 64], V: tensor<f32>[16, 64], O: tensor<f32>[16, 64]) {
+    var q = Q[0 :+ 16, 0 :+ 64]
+    var k = K[0 :+ 16, 0 :+ 64]
+    var v = V[0 :+ 16, 0 :+ 64]
+    var acc: tile<f32>[16, 64] = 0.0
+    var c: tile<f32>[16, 1] = 2.0
+    var s: tile<f32>[16, 16] = dot_t(q, k)
+    s = s * 0.125
+    acc = acc * c + dot(s, v)
+    O[0 :+ 16, 0 :+ 64] = acc
+}
+";
+
+#[test]
+fn a_dot_fuses_the_update_of_its_product() {
+    let out = build_src(DOT_UPDATES);
+    assert_contains(&out, &["dot_t_fused in_place (mul #0 s#2)", "dot_fused (add (mul #2 #3) #0)"]);
+    assert!(!out.contains(" = dot ") && !out.contains("dot_t_into"), "{out}");
+}
+
+#[test]
+fn a_dot_keeps_its_product_when_it_is_read_again_or_feeds_its_target() {
+    // `p` is read twice, and `s` is both a factor and the target.
+    let out = build_src(
+        "kernel k(A: tensor<f32>[16, 16], O: tensor<f32>[16, 16]) {
+    var a = A[0 :+ 16, 0 :+ 16]
+    var s: tile<f32>[16, 16] = 1.0
+    var p = dot(a, a)
+    s = s + p
+    O[0 :+ 16, 0 :+ 16] = p
+    s = s * 0.5 + dot(s, a)
+    O[0 :+ 16, 0 :+ 16] = s
+}
+",
+    );
+    assert!(!out.contains("dot_fused"), "{out}");
+}

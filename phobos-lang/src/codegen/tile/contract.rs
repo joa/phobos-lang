@@ -5,12 +5,12 @@ use super::*;
 
 use crate::shape;
 
+/// What a fused dot's write-out stores for each finished element, given the
+/// product and the element's index.
+pub(in crate::codegen) type Epilogue<'a, 'c> =
+    &'a dyn Fn(&mut Codegen<'c>, &Block<'c>, Value<'c, 'c>, &[Value<'c, 'c>]) -> Result<Value<'c, 'c>>;
+
 impl<'c> Codegen<'c> {
-    /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind
-    /// `dot_t`. It contracts the last dim of both operands.
-    ///
-    /// Int8 operands try the tensor cores first, then `dp4a`. Everything else
-    /// is a scalar reduction with one thread per output.
     pub(in crate::codegen) fn tile_matmul_t(
         &mut self,
         block: &Block<'c>,
@@ -19,14 +19,33 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
         accumulate: bool,
     ) -> Result<()> {
+        self.tile_matmul_t_with(block, a, b, out, accumulate, None)
+    }
+
+    /// out[i, j] = sum_k(a[i, k] * b[j, k]), the transposed matmul behind
+    /// `dot_t`. It contracts the last dim of both operands.
+    ///
+    /// Int8 operands try the tensor cores first, then `dp4a`. Everything else
+    /// is a scalar reduction with one thread per output, which passes each
+    /// finished element through `epilogue` when there is one.
+    pub(in crate::codegen) fn tile_matmul_t_with(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        b: &MemVal<'c>,
+        out: &MemVal<'c>,
+        accumulate: bool,
+        epilogue: Option<Epilogue<'_, 'c>>,
+    ) -> Result<()> {
         self.check_matmul_elems(a, b, out, "dot_t")?;
         let kd = a.shape[1];
         if kd == DYN {
             bail!("dot_t needs a static contraction dim");
         }
 
-        if self.tile_matmul_t_imma(block, a, b, out, kd, accumulate)?
-            || self.tile_matmul_t_dp4a(block, a, b, out, kd, accumulate)?
+        if epilogue.is_none()
+            && (self.tile_matmul_t_imma(block, a, b, out, kd, accumulate)?
+                || self.tile_matmul_t_dp4a(block, a, b, out, kd, accumulate)?)
         {
             return Ok(());
         }
@@ -56,7 +75,14 @@ impl<'c> Codegen<'c> {
             blk.append_operation(scf::r#for(lo, hi, st, region, cg.loc));
 
             let fin = cg.push(blk, memref::load(slot, &[], cg.loc))?;
-            cg.store_dot_element(blk, fin, out, idx, accumulate)
+            match epilogue {
+                Some(f) => {
+                    let v = f(cg, blk, fin, idx)?;
+                    blk.append_operation(memref::store(v, out.mem, idx, cg.loc));
+                    Ok(())
+                }
+                None => cg.store_dot_element(blk, fin, out, idx, accumulate),
+            }
         })
     }
 
@@ -248,6 +274,20 @@ impl<'c> Codegen<'c> {
         b: &MemVal<'c>,
         out: &MemVal<'c>,
     ) -> Result<()> {
+        self.tile_matmul_with(block, a, b, out, None)
+    }
+
+    /// [`Self::tile_matmul`], or with an `epilogue` out = epilogue(a @ b):
+    /// the accumulators start from zero rather than from `out`, and each
+    /// finished element passes through it on its way out.
+    pub(in crate::codegen) fn tile_matmul_with(
+        &mut self,
+        block: &Block<'c>,
+        a: &MemVal<'c>,
+        b: &MemVal<'c>,
+        out: &MemVal<'c>,
+        epilogue: Option<Epilogue<'_, 'c>>,
+    ) -> Result<()> {
         self.check_matmul_elems(a, b, out, "dot")?;
         let k_extent = if a.shape[1] == DYN {
             let pos = self.const_index(block, 1)?;
@@ -257,6 +297,9 @@ impl<'c> Codegen<'c> {
         };
         let (m, n) = (out.shape[0], out.shape[1]);
         if m == DYN || n == DYN {
+            if epilogue.is_some() {
+                bail!("a fused dot needs a static output shape");
+            }
             return self.tile_matmul_dynamic(block, a, b, out, k_extent);
         }
         let elem = out.elem;
@@ -350,7 +393,7 @@ impl<'c> Codegen<'c> {
         // Seed the accumulator from the current output values, for the +=.
         let zero = self.zero_scalar(&body, elem)?;
         let mut acc = self.vec_broadcast(&body, zero, acc_t)?;
-        for (i, mi) in ms.iter().enumerate() {
+        for (i, mi) in ms.iter().enumerate().filter(|_| epilogue.is_none()) {
             if vec_out {
                 let v = self.vec_load(&body, out.mem, &[*mi, n0], row_t)?;
                 acc = self.vec_insert(&body, v, acc, &[i as i64])?;
@@ -400,7 +443,13 @@ impl<'c> Codegen<'c> {
 
         for (i, mi) in ms.iter().enumerate() {
             let row = self.vec_extract(&body, finals[0], &[i as i64], row_t)?;
-            if vec_out {
+            if let Some(f) = epilogue {
+                for (j, nj) in ns.iter().enumerate() {
+                    let e = self.vec_extract(&body, row, &[j as i64], elem)?;
+                    let v = f(self, &body, e, &[*mi, *nj])?;
+                    body.append_operation(memref::store(v, out.mem, &[*mi, *nj], self.loc));
+                }
+            } else if vec_out {
                 self.vec_store(&body, row, out.mem, &[*mi, n0])?;
             } else {
                 for (j, nj) in ns.iter().enumerate() {

@@ -117,6 +117,7 @@ fn main() -> Result<()> {
     handoff(&mut failures)?;
     pipelined_tail(&mut failures)?;
     register_tile(&mut failures)?;
+    dot_epilogue(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -534,6 +535,76 @@ fn handoff(failures: &mut u32) -> Result<()> {
     let want: Vec<f32> = d0.iter().zip(&y).map(|(a, b)| a + b).collect();
     let ok = gd.read()? == want && f.read()? == [0];
     report("acquire, add, release", ok, String::new(), failures);
+    Ok(())
+}
+
+fn dot_epilogue(failures: &mut u32) -> Result<()> {
+    // Attention's two updates of a product: without @tensorcore both run as
+    // the product is written out, with it the dots take the tensor cores and
+    // the updates their own sweeps.
+    let (r, d) = (32, 64);
+    let (q, k, v, c) = (noise(r * d, 15), noise(r * d, 16), noise(r * d, 17), noise(r, 18));
+    for (attrs, elem) in [("", "f32"), ("@tensorcore", "f16")] {
+        let src = format!(
+            "{attrs}
+            @launch(256)
+            kernel k(Q: tensor<{elem}>[32, 64], K: tensor<{elem}>[32, 64], V: tensor<{elem}>[32, 64],
+                     C: tensor<f32>[32, 1], O: tensor<f32>[32, 64]) {{
+                var q = Q[0 :+ 32, 0 :+ 64]
+                var k = K[0 :+ 32, 0 :+ 64]
+                var v = V[0 :+ 32, 0 :+ 64]
+                var c = C[0 :+ 32, 0 :+ 1]
+                var acc: tile<f32>[32, 64] = 1.0
+                var s: tile<f32>[32, 32] = dot_t(q, k)
+                s = s * 0.125
+                acc = acc * c + dot(s, v)
+                O[0 :+ 32, 0 :+ 64] = acc
+            }}"
+        );
+        let half = elem == "f16";
+        let round = |x: &[f32]| -> Vec<f32> {
+            x.iter()
+                .map(|&v| if half { phobos_base::half::f16_to_f32(phobos_base::half::f32_to_f16(v)) } else { v })
+                .collect()
+        };
+        let (hq, hk, hv) = (round(&q), round(&k), round(&v));
+        let mut want = vec![0.0f32; r * d];
+        for i in 0..r {
+            let s: Vec<f32> = (0..r)
+                .map(|j| 0.125 * (0..d).map(|x| hq[i * d + x] * hk[j * d + x]).sum::<f32>())
+                .collect();
+            for n in 0..d {
+                want[i * d + n] = c[i] + (0..r).map(|j| s[j] * hv[j * d + n]).sum::<f32>();
+            }
+        }
+        let gc = Arg::new(&c, r, 1)?;
+        let out = Arg::<f32>::zeroed(r, d)?;
+        let mut slots = Vec::new();
+        if half {
+            let h = |x: &[f32]| -> Vec<u16> { x.iter().map(|&v| phobos_base::half::f32_to_f16(v)).collect() };
+            let (gq, gk, gv) = (Arg::new(&h(&q), r, d)?, Arg::new(&h(&k), r, d)?, Arg::new(&h(&v), r, d)?);
+            for a in [&gq, &gk, &gv] {
+                a.push(&mut slots);
+            }
+            gc.push(&mut slots);
+            out.push(&mut slots);
+            run(&src, "k", 1, &mut slots)?;
+        } else {
+            let (gq, gk, gv) = (Arg::new(&q, r, d)?, Arg::new(&k, r, d)?, Arg::new(&v, r, d)?);
+            for a in [&gq, &gk, &gv] {
+                a.push(&mut slots);
+            }
+            gc.push(&mut slots);
+            out.push(&mut slots);
+            run(&src, "k", 1, &mut slots)?;
+        }
+        let got = out.read()?;
+        let scale = want.iter().fold(0.0f32, |m, w| m.max(w.abs()));
+        let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max) / scale;
+        // The tensor cores round the scores to f16 before the second dot.
+        let tol = if half { 1e-2 } else { 1e-5 };
+        report(&format!("dot epilogue {elem}"), worst < tol, format!("rel err {worst:.2e}"), failures);
+    }
     Ok(())
 }
 

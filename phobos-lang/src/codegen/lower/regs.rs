@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 use melior::dialect::memref;
 use melior::ir::{Block, BlockLike, Type, Value};
 
-use super::Lowered;
+use super::{Fill, Lowered};
 use crate::codegen::{Codegen, FragAcc};
 use crate::ir::{self, Ir, OpId, OpKind, ValueId};
 
@@ -64,7 +64,7 @@ impl<'c> Codegen<'c> {
                     let idx = self.reg_index(block, &ty.shape, e)?;
                     // Tile leaves are the same for every element; keep one copy.
                     let mut seen = Vec::new();
-                    let fused = self.fused_from_tree(ir, op, tree, ir.result(op), &mut seen, Some(e))?;
+                    let fused = self.fused_from_tree(ir, op, tree, ir.result(op), &mut seen, Fill::RegElem(e))?;
                     if e == 0 {
                         leaves = seen;
                     }

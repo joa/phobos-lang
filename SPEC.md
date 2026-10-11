@@ -247,6 +247,8 @@ All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` o
 | `dot(a, b)` | `[M, K] x [K, N] -> [M, N]` | `a @ b` |
 | `dot_t(a, b)` | `[M, K] x [N, K] -> [M, N]` | `a @ b^T` |
 
+A product that only feeds the elementwise statement after it, as in `var s: tile<f32>[M, N] = dot_t(q, k)` then `s = s * scale`, or `acc = acc * corr + dot(p, v)`, is updated per element as it is written out instead of stored and swept again, when the dot runs on FMA. The statement's target must be a declared tile of the product's type and shape that neither operand reads.
+
 | Operands | Accumulator | Hardware path |
 |---|---|---|
 | `f32` | `f32` | Tiled FMA, or tensor cores under `@tensorcore` (operands rounded to f16). |
