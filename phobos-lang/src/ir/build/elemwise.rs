@@ -71,12 +71,15 @@ impl Build {
             Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
             }
-            // A negated literal is a constant leaf. Negating a tile in the
-            // tree would also fuse, but it changes kernels that already work.
+            // A negated literal is a constant leaf; anything else is a node.
             Expr::Unary {
                 op: UnOp::Neg | UnOp::BitNot,
                 rhs,
             } if matches!(**rhs, Expr::Int(_) | Expr::Float(_)) => Some(0),
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::BitNot,
+                rhs,
+            } => Some(1 + self.fusable_nodes(rhs)?),
             Expr::Call { callee, args } => match &args[..] {
                 [arg] if ElemStep::from_callee(callee).is_some() => {
                     Some(1 + self.fusable_nodes(arg)?)
@@ -120,6 +123,22 @@ impl Build {
                 let b = self.plan_fused(rhs, plan)?;
                 Tree::Binary(*op, Box::new(a), Box::new(b))
             }
+            // -x is 0 - x and ~x is x ^ -1, against a scalar leaf.
+            Expr::Unary {
+                op: op @ (UnOp::Neg | UnOp::BitNot),
+                rhs,
+            } if !matches!(**rhs, Expr::Int(_) | Expr::Float(_)) => {
+                let x = Box::new(self.plan_fused(rhs, plan)?);
+                if *op == UnOp::Neg {
+                    let zero = self.const_index(0);
+                    let zero = Box::new(self.scalar_leaf(zero, plan)?);
+                    Tree::Binary(BinOp::Sub, zero, x)
+                } else {
+                    let ones = self.const_index(-1);
+                    let ones = Box::new(self.scalar_leaf(ones, plan)?);
+                    Tree::Binary(BinOp::BitXor, x, ones)
+                }
+            }
             Expr::Call { callee, args } if args.len() == 1 && ElemStep::from_callee(callee).is_some() => {
                 let step = ElemStep::from_callee(callee).expect("checked above");
                 let inner = self.plan_fused(&args[0], plan)?;
@@ -148,15 +167,7 @@ impl Build {
                 Tree::Max(Box::new(a), Box::new(b))
             }
             other => match self.emit_expr(other)? {
-                Rv::Scalar(v) => {
-                    let v = match self.scalar_of(v) {
-                        Scalar::Index if plan.in_compare => self.coerce(v, Scalar::I32)?,
-                        _ if plan.in_compare => v,
-                        _ => self.coerce(v, plan.elem)?,
-                    };
-                    plan.operands.push(v);
-                    Tree::Scalar(plan.operands.len() - 1)
-                }
+                Rv::Scalar(v) => self.scalar_leaf(v, plan)?,
                 Rv::Tile(t) => {
                     plan.leaves.push(t);
                     plan.operands.push(t);
@@ -164,6 +175,18 @@ impl Build {
                 }
             },
         })
+    }
+
+    /// A scalar operand of the tree, coerced to the target's element type
+    /// outside a comparison and kept at its own width inside one.
+    fn scalar_leaf(&mut self, v: ValueId, plan: &mut Plan) -> Result<Tree> {
+        let v = match self.scalar_of(v) {
+            Scalar::Index if plan.in_compare => self.coerce(v, Scalar::I32)?,
+            _ if plan.in_compare => v,
+            _ => self.coerce(v, plan.elem)?,
+        };
+        plan.operands.push(v);
+        Ok(Tree::Scalar(plan.operands.len() - 1))
     }
 
     /// A `where` condition's tree, which `fusable_cond` accepted.
