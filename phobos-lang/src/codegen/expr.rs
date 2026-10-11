@@ -28,7 +28,7 @@ impl<'c> Codegen<'c> {
                 BinOp::Min | BinOp::Max => self.minmax(op, "f", lhs, rhs)?,
                 _ => bail!("`{}` does not take float operands", op.symbol()),
             }
-        } else if t == self.index_t {
+        } else if t == self.index_t || self.is_int(t) {
             match op {
                 BinOp::Add => arith::addi(lhs, rhs, loc),
                 BinOp::Sub => arith::subi(lhs, rhs, loc),

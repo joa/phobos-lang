@@ -71,6 +71,78 @@ impl<'c> Codegen<'c> {
         )
     }
 
+    /// A compare-and-swap on slot `idx`: `val` is stored when the slot holds
+    /// `expected`, and the old value comes back either way. A
+    /// `memref.generic_atomic_rmw`, which lowers to a `cmpxchg` loop.
+    pub(super) fn atomic_cas_raw(
+        &self,
+        block: &Block<'c>,
+        mem: Value<'c, 'c>,
+        rank: usize,
+        idx: Value<'c, 'c>,
+        expected: Value<'c, 'c>,
+        val: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let elem = val.r#type();
+        let mut operands = vec![mem, idx];
+        for _ in 1..rank {
+            operands.push(self.const_index(block, 0)?);
+        }
+        let body = Block::new(&[(elem, self.loc)]);
+        let cur = detach(body.argument(0)?.into());
+        let hit = self.push(
+            &body,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, cur, expected, self.loc),
+        )?;
+        let new = self.push(&body, arith::select(hit, val, cur, self.loc))?;
+        body.append_operation(
+            OperationBuilder::new("memref.atomic_yield", self.loc)
+                .add_operands(&[new])
+                .build()?,
+        );
+        let region = Region::new();
+        region.append_block(body);
+        self.push(
+            block,
+            OperationBuilder::new("memref.generic_atomic_rmw", self.loc)
+                .add_operands(&operands)
+                .add_results(&[elem])
+                .add_regions([region])
+                .build()?,
+        )
+    }
+
+    /// One atomic for the whole CTA, which `rmw` emits into thread 0's
+    /// branch. Every thread gets its result through shared memory, so what
+    /// follows stays CTA-uniform. The leading barrier orders the CTA's
+    /// earlier writes before the atomic.
+    pub(super) fn cta_atomic(
+        &mut self,
+        block: &Block<'c>,
+        elem: Type<'c>,
+        rmw: impl FnOnce(&mut Self, &Block<'c>) -> Result<Value<'c, 'c>>,
+    ) -> Result<Value<'c, 'c>> {
+        let slot = self.alloc_tile_shaped(block, elem, &[1])?;
+        self.barrier(block)?;
+        let tid = self.thread_id(block)?;
+        let zero = self.const_index(block, 0)?;
+        let is_leader = self.push(
+            block,
+            arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, tid, zero, self.loc),
+        )?;
+        let then = Block::new(&[]);
+        let old = rmw(self, &then)?;
+        then.append_operation(memref::store(old, slot.mem, &[zero], self.loc));
+        then.append_operation(scf::r#yield(&[], self.loc));
+        let then_region = Region::new();
+        then_region.append_block(then);
+        block.append_operation(scf::r#if(is_leader, &[], then_region, Region::new(), self.loc));
+        self.barrier(block)?;
+        let old = self.push(block, memref::load(slot.mem, &[zero], self.loc))?;
+        self.release(&slot);
+        Ok(old)
+    }
+
     /// The barrier itself, over a resolved state tensor of `rank`.
     pub(super) fn grid_barrier_raw(
         &mut self,

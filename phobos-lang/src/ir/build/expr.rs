@@ -138,10 +138,19 @@ impl Build {
     }
 
     pub(crate) fn emit_binop(&mut self, op: BinOp, lhs: ValueId, rhs: ValueId) -> Result<ValueId> {
+        // A comparison narrows an index to the sized integer on the other
+        // side, so `atomic_cas(..) == 0` reads naturally. Never the other
+        // way: a sized integer must not become an index, or a loop bound.
+        let (lhs, rhs) = match (self.scalar_of(lhs), self.scalar_of(rhs)) {
+            (Scalar::Index, t) if op.is_compare() && t.is_int() => (self.coerce(lhs, t)?, rhs),
+            (t, Scalar::Index) if op.is_compare() && t.is_int() => (lhs, self.coerce(rhs, t)?),
+            _ => (lhs, rhs),
+        };
         let (lhs, rhs) = self.unify(lhs, rhs)?;
         let t = self.scalar_of(lhs);
         // A sized integer is an element type; a scalar integer is an index.
-        let result = op.result(t).filter(|_| !t.is_int()).ok_or_else(|| {
+        // Only a comparison takes sized integers, which yields a bool.
+        let result = op.result(t).filter(|_| !t.is_int() || op.is_compare()).ok_or_else(|| {
             anyhow!("`{}` does not take {} operands", op.symbol(), t.mlir_name())
         })?;
         Ok(self.value(OpKind::Binary(op), &[lhs, rhs], Type::Scalar(result)))

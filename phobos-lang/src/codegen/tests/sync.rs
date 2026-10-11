@@ -214,3 +214,44 @@ fn a_hazard_across_the_iteration_boundary_keeps_the_last_ops_barrier() {
     let write = mlir.rfind("arith.mulf").expect("the scaling sweep");
     assert!(barriers[1] > write, "the write's own barrier must stay:\n{mlir}");
 }
+
+#[test]
+fn an_atomic_runs_once_per_cta_and_broadcasts() {
+    let mlir = emit_mlir(
+        "kernel claim(L: tensor<i32>[1], OUT: tensor<i32>[N]) {
+            let i = program_id(0)
+            OUT[i] = atomic_cas(L, 0, 0, i)
+            OUT[0] = atomic_add(L, 0, 0)
+        }",
+    );
+    assert_contains(&mlir, &["memref.generic_atomic_rmw", "memref.atomic_yield", "gpu.thread_id"]);
+    // A barrier on each side of each atomic.
+    assert_eq!(mlir.matches("gpu.barrier").count(), 4, "\n{mlir}");
+    assert_eq!(mlir.matches("scf.if").count(), 2, "\n{mlir}");
+}
+
+#[test]
+fn atomic_cas_takes_only_an_i32_tensor() {
+    let e = emit_err(
+        "kernel k(L: tensor<f32>[1]) {
+            let old = atomic_cas(L, 0, 0, 1)
+        }",
+    );
+    assert!(e.contains("atomic_cas expects an i32 tensor"), "got: {e}");
+}
+
+#[test]
+fn a_claimed_slot_steers_uniform_control_flow() {
+    // The CAS result is the same on every thread, so it may decide an `if`
+    // that holds a barrier.
+    let mlir = emit_mlir(
+        "kernel k(L: tensor<i32>[1], X: tensor<f32>[16, 64]) {
+            if atomic_cas(L, 0, 0, 1) == 0 {
+                var x = X[0 :+ 16, 0 :+ 64]
+                var m: tile<f32>[16, 1] = rowmax(x)
+                X[0 :+ 16, 0 :+ 1] = m
+            }
+        }",
+    );
+    assert_contains(&mlir, &["memref.generic_atomic_rmw", "gpu.shuffle"]);
+}

@@ -377,8 +377,12 @@ pub enum OpKind {
     Load,
     /// `(value, mem, indices..)`.
     Store,
-    /// `(tensor, slot, value) -> old`, over an `i32` tensor.
+    /// `(tensor, slot, value) -> old`, over an `i32` or `f32` tensor, once
+    /// per CTA.
     AtomicAdd,
+    /// `(tensor, slot, expected, value) -> old`, over an `i32` tensor, once
+    /// per CTA: `value` is stored only when the slot held `expected`.
+    AtomicCas,
 
     // Control. Each owns blocks; the body's terminator carries the
     // loop-carried values back.
@@ -500,6 +504,7 @@ impl OpKind {
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),
             OpKind::AtomicAdd => "atomic_add".into(),
+            OpKind::AtomicCas => "atomic_cas".into(),
             OpKind::For(info) => {
                 let mut out = match info.bounds {
                     Bounds::Affine { lo, hi, step } => format!("for {lo}..{hi} step {step}"),
@@ -643,7 +648,7 @@ impl OpKind {
         let last = operand_count.saturating_sub(1);
         match self {
             OpKind::Store => vec![1],
-            OpKind::AtomicAdd => vec![0],
+            OpKind::AtomicAdd | OpKind::AtomicCas => vec![0],
             OpKind::GridBarrier => vec![0],
             OpKind::Copy { .. }
             | OpKind::Convert

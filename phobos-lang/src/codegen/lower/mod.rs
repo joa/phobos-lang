@@ -263,6 +263,7 @@ impl<'c> Codegen<'c> {
             | OpKind::Load
             | OpKind::Store
             | OpKind::AtomicAdd
+            | OpKind::AtomicCas
             | OpKind::Barrier
             | OpKind::GridBarrier => self.emit_scalar_op(block, ir, op),
             OpKind::For(_) | OpKind::While | OpKind::If => self.emit_control_op(block, ir, op),

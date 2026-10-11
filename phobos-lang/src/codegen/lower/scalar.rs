@@ -125,7 +125,20 @@ impl<'c> Codegen<'c> {
                 let mv = self.tile_ir(ir, ir.operand(op, 0))?;
                 let idx = self.scalar_ir(ir.operand(op, 1))?;
                 let val = self.scalar_ir(ir.operand(op, 2))?;
-                self.atomic_add_raw(block, mv.mem, mv.shape.len(), idx, val)?
+                let rank = mv.shape.len();
+                self.cta_atomic(block, val.r#type(), |cg, blk| {
+                    cg.atomic_add_raw(blk, mv.mem, rank, idx, val)
+                })?
+            }
+            OpKind::AtomicCas => {
+                let mv = self.tile_ir(ir, ir.operand(op, 0))?;
+                let idx = self.scalar_ir(ir.operand(op, 1))?;
+                let expected = self.scalar_ir(ir.operand(op, 2))?;
+                let val = self.scalar_ir(ir.operand(op, 3))?;
+                let rank = mv.shape.len();
+                self.cta_atomic(block, val.r#type(), |cg, blk| {
+                    cg.atomic_cas_raw(blk, mv.mem, rank, idx, expected, val)
+                })?
             }
             OpKind::Barrier => {
                 self.barrier(block)?;
