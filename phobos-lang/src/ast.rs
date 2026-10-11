@@ -176,6 +176,32 @@ impl Kernel {
         Ok(Some(launch))
     }
 
+    /// Fails on an attribute the compiler does not read, which would
+    /// otherwise be silently ignored. `@cluster` is read by the cluster
+    /// codegen ahead of this one.
+    pub fn check_attributes(&self) -> Result<(), String> {
+        const KNOWN: &[&str] = &[
+            "aligned",
+            "autotune",
+            "cluster",
+            "dynshared",
+            "launch",
+            "padstage",
+            "persistent",
+            "pipeline",
+            "tensorcore",
+        ];
+        match self.attrs.iter().find(|a| !KNOWN.contains(&a.name.as_str())) {
+            Some(a) => Err(format!(
+                "kernel '{}': unknown attribute @{}; the compiler reads @{}",
+                self.name,
+                a.name,
+                KNOWN.join(", @")
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn cta_threads(&self) -> Result<i64, String> {
         Ok(self
             .launch()?
@@ -270,6 +296,7 @@ pub enum Sub {
     Point(Expr),                      // A[i]
     Range { start: Expr, end: Expr }, // A[start : end]  (end-exclusive)
     Span { start: Expr, len: Expr },  // A[start :+ len] (start + len)
+    From(Expr),                       // A[start :]      (to the end)
     Full,                             // A[:]
 }
 
@@ -302,6 +329,8 @@ pub enum Expr {
 pub enum UnOp {
     Neg,
     Not,
+    /// `~`, every bit of an integer flipped.
+    BitNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -317,6 +346,20 @@ pub enum BinOp {
     Le,
     Gt,
     Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    /// `>>`, arithmetic: the in-kernel integer is signed.
+    Shr,
+    /// `&&` and `||` on bools. Both sides are evaluated, which is safe since
+    /// an expression has no side effects.
+    And,
+    Or,
+    /// `min(a, b)` and `max(a, b)`, which the parser turns into operators so
+    /// they work wherever `+` does.
+    Min,
+    Max,
 }
 
 impl Sub {
@@ -326,6 +369,7 @@ impl Sub {
             Sub::Point(e) => e.uses_name(name),
             Sub::Range { start, end } => start.uses_name(name) || end.uses_name(name),
             Sub::Span { start, len } => start.uses_name(name) || len.uses_name(name),
+            Sub::From(start) => start.uses_name(name),
             Sub::Full => false,
         }
     }
@@ -346,7 +390,7 @@ impl Expr {
                 base.walk(f);
                 for sub in subs {
                     match sub {
-                        Sub::Point(e) => e.walk(f),
+                        Sub::Point(e) | Sub::From(e) => e.walk(f),
                         Sub::Range { start, end } => {
                             start.walk(f);
                             end.walk(f);

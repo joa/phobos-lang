@@ -1,14 +1,22 @@
-use anyhow::{Result, ensure};
+use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, fmt_shape};
-use crate::ast::{AssignOp, BinOp, Expr};
-use crate::ir::{ElemStep, OpKind, Tree, ValueId};
+use crate::ast::{AssignOp, BinOp, Expr, UnOp};
+use crate::ir::{ElemStep, OpKind, Scalar, Tree, ValueId};
 
-fn is_arith(op: BinOp) -> bool {
-    matches!(
-        op,
-        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
-    )
+/// What planning a fused tree collects: the operands in order, and which
+/// of them are tiles.
+struct Plan {
+    /// The target's element type, which scalar leaves are coerced to.
+    elem: Scalar,
+    /// Whether the planner is inside a comparison, where a scalar keeps its
+    /// own type: an `n` compared against `iota` must not round to an f16
+    /// target.
+    in_compare: bool,
+    /// The target's rank, which bounds an `iota` axis.
+    rank: usize,
+    operands: Vec<ValueId>,
+    leaves: Vec<ValueId>,
 }
 
 impl Build {
@@ -60,9 +68,15 @@ impl Build {
                 }
                 _ => None,
             },
-            Expr::Binary { op, lhs, rhs } if is_arith(*op) => {
+            Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
             }
+            // A negated literal is a constant leaf. Negating a tile in the
+            // tree would also fuse, but it changes kernels that already work.
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::BitNot,
+                rhs,
+            } if matches!(**rhs, Expr::Int(_) | Expr::Float(_)) => Some(0),
             Expr::Call { callee, args } => match &args[..] {
                 [arg] if ElemStep::from_callee(callee).is_some() => {
                     Some(1 + self.fusable_nodes(arg)?)
@@ -70,51 +84,102 @@ impl Build {
                 [a, b] if callee == "tmax" => {
                     Some(1 + self.fusable_nodes(a)? + self.fusable_nodes(b)?)
                 }
+                [Expr::Int(_)] if callee == "iota" => Some(1),
+                [c, a, b] if callee == "where" => Some(
+                    1 + self.fusable_cond(c)? + self.fusable_nodes(a)? + self.fusable_nodes(b)?,
+                ),
                 _ => Some(0),
             },
             _ => None,
         }
     }
 
+    /// Interior nodes of a `where` condition: comparisons of fusable trees,
+    /// joined by `&&` and `||`.
+    fn fusable_cond(&self, cond: &Expr) -> Option<usize> {
+        match cond {
+            Expr::Binary {
+                op: BinOp::And | BinOp::Or,
+                lhs,
+                rhs,
+            } => Some(1 + self.fusable_cond(lhs)? + self.fusable_cond(rhs)?),
+            Expr::Binary { op, lhs, rhs } if op.is_compare() => {
+                Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
+            }
+            _ => None,
+        }
+    }
+
     /// Builds the tree, emitting the operands that cannot be fused. Every
     /// leaf becomes an operand of the fused op; a scalar leaf is coerced to
-    /// `elem` here.
-    fn plan_fused(
-        &mut self,
-        value: &Expr,
-        elem: crate::ir::Scalar,
-        operands: &mut Vec<ValueId>,
-        leaves: &mut Vec<ValueId>,
-    ) -> Result<Tree> {
+    /// the target's element type here.
+    fn plan_fused(&mut self, value: &Expr, plan: &mut Plan) -> Result<Tree> {
         Ok(match value {
-            Expr::Binary { op, lhs, rhs } if is_arith(*op) => {
-                let a = self.plan_fused(lhs, elem, operands, leaves)?;
-                let b = self.plan_fused(rhs, elem, operands, leaves)?;
+            Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
+                let a = self.plan_fused(lhs, plan)?;
+                let b = self.plan_fused(rhs, plan)?;
                 Tree::Binary(*op, Box::new(a), Box::new(b))
             }
             Expr::Call { callee, args } if args.len() == 1 && ElemStep::from_callee(callee).is_some() => {
                 let step = ElemStep::from_callee(callee).expect("checked above");
-                let inner = self.plan_fused(&args[0], elem, operands, leaves)?;
+                let inner = self.plan_fused(&args[0], plan)?;
                 Tree::Unary(step, Box::new(inner))
             }
+            Expr::Call { callee, args } if callee == "iota" => {
+                let [Expr::Int(d)] = args[..] else {
+                    bail!("iota expects one literal axis");
+                };
+                let rank = plan.rank;
+                ensure!(
+                    usize::try_from(d).is_ok_and(|d| d < rank),
+                    "iota axis {d} is past the assigned tile's rank {rank}"
+                );
+                Tree::Iota(d as usize)
+            }
+            Expr::Call { callee, args } if args.len() == 3 && callee == "where" => {
+                let c = self.plan_cond(&args[0], plan)?;
+                let a = self.plan_fused(&args[1], plan)?;
+                let b = self.plan_fused(&args[2], plan)?;
+                Tree::Select(Box::new(c), Box::new(a), Box::new(b))
+            }
             Expr::Call { callee, args } if args.len() == 2 && callee == "tmax" => {
-                let a = self.plan_fused(&args[0], elem, operands, leaves)?;
-                let b = self.plan_fused(&args[1], elem, operands, leaves)?;
+                let a = self.plan_fused(&args[0], plan)?;
+                let b = self.plan_fused(&args[1], plan)?;
                 Tree::Max(Box::new(a), Box::new(b))
             }
             other => match self.emit_expr(other)? {
                 Rv::Scalar(v) => {
-                    let v = self.coerce(v, elem)?;
-                    operands.push(v);
-                    Tree::Scalar(operands.len() - 1)
+                    let v = match self.scalar_of(v) {
+                        Scalar::Index if plan.in_compare => self.coerce(v, Scalar::I32)?,
+                        _ if plan.in_compare => v,
+                        _ => self.coerce(v, plan.elem)?,
+                    };
+                    plan.operands.push(v);
+                    Tree::Scalar(plan.operands.len() - 1)
                 }
                 Rv::Tile(t) => {
-                    leaves.push(t);
-                    operands.push(t);
-                    Tree::Leaf(operands.len() - 1)
+                    plan.leaves.push(t);
+                    plan.operands.push(t);
+                    Tree::Leaf(plan.operands.len() - 1)
                 }
             },
         })
+    }
+
+    /// A `where` condition's tree, which `fusable_cond` accepted.
+    fn plan_cond(&mut self, cond: &Expr, plan: &mut Plan) -> Result<Tree> {
+        let Expr::Binary { op, lhs, rhs } = cond else {
+            bail!("a `where` condition must be a comparison");
+        };
+        let (a, b) = if op.is_compare() {
+            let outer = std::mem::replace(&mut plan.in_compare, true);
+            let sides = (self.plan_fused(lhs, plan)?, self.plan_fused(rhs, plan)?);
+            plan.in_compare = outer;
+            sides
+        } else {
+            (self.plan_cond(lhs, plan)?, self.plan_cond(rhs, plan)?)
+        };
+        Ok(Tree::Binary(*op, Box::new(a), Box::new(b)))
     }
 
     /// `target op= <per-element expression>` in one sweep, or false when the
@@ -124,11 +189,20 @@ impl Build {
         if tshape.contains(&DYN) || self.fusable_nodes(value).unwrap_or(0) < 1 {
             return Ok(false);
         }
-        let elem = self.elem(target);
-        let mut operands = Vec::new();
-        let mut leaves = Vec::new();
-        let mut tree = self.plan_fused(value, elem, &mut operands, &mut leaves)?;
-        if leaves.is_empty() {
+        let mut plan = Plan {
+            elem: self.elem(target),
+            in_compare: false,
+            rank: tshape.len(),
+            operands: Vec::new(),
+            leaves: Vec::new(),
+        };
+        let mut tree = self.plan_fused(value, &mut plan)?;
+        let Plan {
+            mut operands,
+            leaves,
+            ..
+        } = plan;
+        if leaves.is_empty() && !tree.has_iota() {
             return Ok(false);
         }
         if op == AssignOp::Add {

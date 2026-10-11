@@ -31,7 +31,7 @@ impl<'c> Codegen<'c> {
 
     /// Applies one step to one element. The transcendentals need a float,
     /// which they widen to f32. An earlier cast may have left a non-float.
-    fn apply_elem_step(
+    pub(in crate::codegen) fn apply_elem_step(
         &mut self,
         block: &Block<'c>,
         v: Value<'c, 'c>,
@@ -65,6 +65,19 @@ impl<'c> Codegen<'c> {
                 let f = float_arg(self, "tanh")?;
                 self.approx_tanh(block, f)
             }
+            // max(x, -x) on an integer, which has no instruction of its own here.
+            ElemStep::Math(crate::ir::MathFn::Abs) if !self.is_float(v.r#type()) => {
+                let zero = self.push(
+                    block,
+                    arith::constant(self.ctx, IntegerAttribute::new(v.r#type(), 0).into(), self.loc),
+                )?;
+                let neg = self.push(block, arith::subi(zero, v, self.loc))?;
+                self.push(block, self.minmax(BinOp::Max, "si", v, neg)?)
+            }
+            ElemStep::Math(m) => {
+                let f = float_arg(self, m.name())?;
+                self.math_f32(block, m, f)
+            }
         }
     }
 }
@@ -79,6 +92,7 @@ pub(in crate::codegen) enum ElemStep<'c> {
     Exp,
     Log,
     Tanh,
+    Math(crate::ir::MathFn),
 }
 
 /// A per-element expression tree, evaluated in registers by a single sweep of
@@ -92,16 +106,21 @@ pub(super) enum Fused<'c> {
     Binary(BinOp, Box<Fused<'c>>, Box<Fused<'c>>),
     /// `tmax`, emitted as a compare and a select.
     Max(Box<Fused<'c>>, Box<Fused<'c>>),
+    /// `where(cond, a, b)`.
+    Select(Box<Fused<'c>>, Box<Fused<'c>>, Box<Fused<'c>>),
+    /// The element's position along an axis of the target, as an i32.
+    Iota(usize),
 }
 
 impl Fused<'_> {
-    /// Whether the tree has a unary step. Those work on one f32 at a time, so
-    /// such a tree cannot be swept four elements per thread.
-    fn has_unary(&self) -> bool {
+    /// Whether the tree has a unary step or a select. Those work on one
+    /// element at a time, so such a tree cannot be swept four elements per
+    /// thread.
+    fn scalar_only(&self) -> bool {
         match self {
             Fused::Tile(_) | Fused::Scalar(_) => false,
-            Fused::Unary(..) => true,
-            Fused::Binary(_, a, b) | Fused::Max(a, b) => a.has_unary() || b.has_unary(),
+            Fused::Unary(..) | Fused::Select(..) | Fused::Iota(_) => true,
+            Fused::Binary(_, a, b) | Fused::Max(a, b) => a.scalar_only() || b.scalar_only(),
         }
     }
 }
@@ -149,7 +168,7 @@ impl<'c> Codegen<'c> {
         // Four elements per thread only when nothing broadcasts and nothing
         // needs the scalar transcendentals. A broadcast operand's innermost
         // access is not contiguous.
-        let dense = leaves.iter().all(|l| l.shape == target.shape) && !tree.has_unary();
+        let dense = leaves.iter().all(|l| l.shape == target.shape) && !tree.scalar_only();
         let mut operands: Vec<&MemVal<'c>> = leaves.iter().collect();
         operands.push(target);
         let width = if dense {
@@ -205,8 +224,23 @@ impl<'c> Codegen<'c> {
             Fused::Binary(op, a, b) => {
                 let x = self.eval_fused(block, a, idx, out_shape, width, vec_t)?;
                 let y = self.eval_fused(block, b, idx, out_shape, width, vec_t)?;
-                let (x, y, elem) = self.fuse_pair(block, x, y, width)?;
-                self.push(block, self.elem_arith(*op, elem, x, y)?)
+                match op {
+                    // Both sides are already i1.
+                    BinOp::And => self.push(block, arith::andi(x, y, self.loc)),
+                    BinOp::Or => self.push(block, arith::ori(x, y, self.loc)),
+                    _ => {
+                        let (x, y, elem) = self.fuse_pair(block, x, y, width)?;
+                        self.push(block, self.elem_arith(*op, elem, x, y)?)
+                    }
+                }
+            }
+            Fused::Iota(d) => self.push(block, arith::index_cast(idx[*d], self.i32_t, self.loc)),
+            Fused::Select(c, a, b) => {
+                let cond = self.eval_fused(block, c, idx, out_shape, width, vec_t)?;
+                let x = self.eval_fused(block, a, idx, out_shape, width, vec_t)?;
+                let y = self.eval_fused(block, b, idx, out_shape, width, vec_t)?;
+                let (x, y, _) = self.fuse_pair(block, x, y, width)?;
+                self.select(block, cond, x, y)
             }
             Fused::Max(a, b) => {
                 let x = self.eval_fused(block, a, idx, out_shape, width, vec_t)?;

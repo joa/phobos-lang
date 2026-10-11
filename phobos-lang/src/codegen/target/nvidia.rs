@@ -333,6 +333,25 @@ impl Isa for Nvidia {
         self.ptx_f32(cg, block, "tanh.approx.f32 $0, $1;", x)
     }
 
+    fn math_f32<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        f: crate::ir::MathFn,
+        x: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        use crate::ir::MathFn;
+        let asm = match f {
+            MathFn::Abs => "abs.f32 $0, $1;",
+            MathFn::Floor => "cvt.rmi.f32.f32 $0, $1;",
+            MathFn::Ceil => "cvt.rpi.f32.f32 $0, $1;",
+            MathFn::Rsqrt => "rsqrt.approx.f32 $0, $1;",
+            MathFn::Sin => "sin.approx.f32 $0, $1;",
+            MathFn::Cos => "cos.approx.f32 $0, $1;",
+        };
+        self.ptx_f32(cg, block, asm, x)
+    }
+
     /// The hardware's own rounding, which is exact. Biasing into a positive
     /// range and truncating would lose low mantissa bits.
     fn round_even<'c>(

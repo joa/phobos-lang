@@ -90,13 +90,8 @@ pub fn compile_raw(
 
     let kernels = parse(code)?;
 
-    // A kernel that wants `ldmatrix` needs 64-bit indices for the whole module,
-    // and so does the `@tensorcore` path's `mma.sync` with `cp.async` staging.
-    // That path is taken from sm_80 on; sm_75 stays on WMMA at 32 bits.
     let mut wide;
-    let wants_wide = kernels.iter().any(ast::Kernel::wants_ldmatrix)
-        || (context.gpu_config.compute_capability() >= 80 && requires_wide_index(&kernels));
-    let context = if context.index_bitwidth < 64 && wants_wide {
+    let context = if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {
         wide = context.clone();
         wide.index_bitwidth = 64;
         &wide
@@ -140,6 +135,16 @@ pub struct CompileOutput {
     pub code: String,
     pub shared: Vec<(String, usize)>,
     pub pipeline_failures: Vec<(String, Vec<String>)>,
+}
+
+/// Whether a module of `kernels` has to be indexed at 64 bits on the
+/// context's chip, whatever width was asked for. A kernel that wants
+/// `ldmatrix` needs it, and so does the `@tensorcore` path's `mma.sync` with
+/// `cp.async` staging. That path is taken from sm_80 on; sm_75 stays on WMMA
+/// at 32 bits.
+pub fn needs_wide_index(context: &phobos_base::context::Context, kernels: &[ast::Kernel]) -> bool {
+    kernels.iter().any(ast::Kernel::wants_ldmatrix)
+        || (context.gpu_config.compute_capability() >= 80 && requires_wide_index(kernels))
 }
 
 pub fn requires_wide_index(kernels: &[ast::Kernel]) -> bool {

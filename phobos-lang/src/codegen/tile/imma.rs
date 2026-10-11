@@ -19,6 +19,7 @@ impl<'c> Codegen<'c> {
         b: &MemVal<'c>,
         out: &MemVal<'c>,
         kd: i64,
+        accumulate: bool,
     ) -> Result<bool> {
         let (md, nd) = (out.shape[0], out.shape[1]);
         let applies = a.elem == self.i8_t
@@ -111,7 +112,7 @@ impl<'c> Codegen<'c> {
             let e = self.vec_extract(&tb, fin, &[0, dj], i32_t)?;
             let off = self.const_index(&tb, dj)?;
             let col = self.addi(&tb, out_col, off)?;
-            tb.append_operation(memref::store(e, out.mem, &[a_row, col], self.loc));
+            self.store_dot_element(&tb, e, out, &[a_row, col], accumulate)?;
         }
         tb.append_operation(scf::r#yield(&[], self.loc));
 

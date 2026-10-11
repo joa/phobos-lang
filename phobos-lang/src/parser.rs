@@ -299,17 +299,26 @@ impl Parser {
             _ => {
                 let (line, col) = self.pos();
                 let expr = self.parse_expr()?;
-                let op = if self.consume(&Tok::Eq) {
-                    Some(AssignOp::Set)
-                } else if self.consume(&Tok::PlusEq) {
-                    Some(AssignOp::Add)
-                } else {
-                    None
+                // `x op= e` other than `+=` is `x = x op e`; `+=` stays an
+                // accumulate, which a dot or a fragment lowers on its own.
+                let (op, compound) = match self.peek().clone() {
+                    Tok::Eq => (Some(AssignOp::Set), None),
+                    Tok::PlusEq => (Some(AssignOp::Add), None),
+                    Tok::OpEq(bop) => (Some(AssignOp::Set), Some(bop)),
+                    _ => (None, None),
                 };
                 match op {
                     Some(op) => {
+                        self.advance();
                         ensure_lvalue(&expr).map_err(|m| format!("{line}:{col}: {m}"))?;
-                        let value = self.parse_expr()?;
+                        let mut value = self.parse_expr()?;
+                        if let Some(bop) = compound {
+                            value = Expr::Binary {
+                                op: bop,
+                                lhs: Box::new(expr.clone()),
+                                rhs: Box::new(value),
+                            };
+                        }
                         self.end_stmt()?;
                         Ok(Stmt::Assign {
                             target: expr,
@@ -417,86 +426,80 @@ impl Parser {
 
 impl Parser {
     fn parse_expr(&mut self) -> Result<Expr, String> {
-        self.equality()
+        self.logical_or()
+    }
+
+    /// One left-associative level of binary operators: `ops` maps a token to
+    /// its operator, `next` parses the tighter level.
+    fn binary_level(
+        &mut self,
+        ops: &[(Tok, BinOp)],
+        next: fn(&mut Self) -> Result<Expr, String>,
+    ) -> Result<Expr, String> {
+        let mut lhs = next(self)?;
+        while let Some(&(_, op)) = ops.iter().find(|(t, _)| self.matches(t)) {
+            self.advance();
+            let rhs = next(self)?;
+            lhs = Expr::Binary {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn logical_or(&mut self) -> Result<Expr, String> {
+        self.binary_level(&[(Tok::PipePipe, BinOp::Or)], Self::logical_and)
+    }
+
+    fn logical_and(&mut self) -> Result<Expr, String> {
+        self.binary_level(&[(Tok::AmpAmp, BinOp::And)], Self::equality)
     }
 
     fn equality(&mut self) -> Result<Expr, String> {
-        let mut lhs = self.comparison()?;
-        loop {
-            let op = match self.peek() {
-                Tok::EqEq => BinOp::Eq,
-                Tok::NotEq => BinOp::Ne,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.comparison()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
+        self.binary_level(&[(Tok::EqEq, BinOp::Eq), (Tok::NotEq, BinOp::Ne)], Self::comparison)
     }
 
     fn comparison(&mut self) -> Result<Expr, String> {
-        let mut lhs = self.term()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Lt => BinOp::Lt,
-                Tok::Le => BinOp::Le,
-                Tok::Gt => BinOp::Gt,
-                Tok::Ge => BinOp::Ge,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.term()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
+        let ops = [
+            (Tok::Lt, BinOp::Lt),
+            (Tok::Le, BinOp::Le),
+            (Tok::Gt, BinOp::Gt),
+            (Tok::Ge, BinOp::Ge),
+        ];
+        self.binary_level(&ops, Self::bit_or)
+    }
+
+    // Bitwise operators bind tighter than comparisons, as in Rust, so
+    // `x & 15 == 3` tests the masked value.
+    fn bit_or(&mut self) -> Result<Expr, String> {
+        self.binary_level(&[(Tok::Pipe, BinOp::BitOr)], Self::bit_xor)
+    }
+
+    fn bit_xor(&mut self) -> Result<Expr, String> {
+        self.binary_level(&[(Tok::Caret, BinOp::BitXor)], Self::bit_and)
+    }
+
+    fn bit_and(&mut self) -> Result<Expr, String> {
+        self.binary_level(&[(Tok::Amp, BinOp::BitAnd)], Self::shift)
+    }
+
+    fn shift(&mut self) -> Result<Expr, String> {
+        self.binary_level(&[(Tok::Shl, BinOp::Shl), (Tok::Shr, BinOp::Shr)], Self::term)
     }
 
     fn term(&mut self) -> Result<Expr, String> {
-        let mut lhs = self.factor()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Plus => BinOp::Add,
-                Tok::Minus => BinOp::Sub,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.factor()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
+        self.binary_level(&[(Tok::Plus, BinOp::Add), (Tok::Minus, BinOp::Sub)], Self::factor)
     }
 
     fn factor(&mut self) -> Result<Expr, String> {
-        let mut lhs = self.unary()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Star => BinOp::Mul,
-                Tok::Slash => BinOp::Div,
-                Tok::Percent => BinOp::Rem,
-                _ => break,
-            };
-            self.advance();
-            let rhs = self.unary()?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
-        }
-        Ok(lhs)
+        let ops = [
+            (Tok::Star, BinOp::Mul),
+            (Tok::Slash, BinOp::Div),
+            (Tok::Percent, BinOp::Rem),
+        ];
+        self.binary_level(&ops, Self::unary)
     }
 
     fn unary(&mut self) -> Result<Expr, String> {
@@ -512,6 +515,13 @@ impl Parser {
                 self.advance();
                 Ok(Expr::Unary {
                     op: UnOp::Not,
+                    rhs: Box::new(self.unary()?),
+                })
+            }
+            Tok::Tilde => {
+                self.advance();
+                Ok(Expr::Unary {
+                    op: UnOp::BitNot,
                     rhs: Box::new(self.unary()?),
                 })
             }
@@ -538,7 +548,16 @@ impl Parser {
                         self.parse_args()?
                     };
                     self.expect(Tok::RParen)?;
-                    expr = Expr::Call { callee: name, args };
+                    expr = if matches!(name.as_str(), "min" | "max") && args.len() == 2 {
+                        let [lhs, rhs] = <[Expr; 2]>::try_from(args).expect("two arguments");
+                        Expr::Binary {
+                            op: if name == "min" { BinOp::Min } else { BinOp::Max },
+                            lhs: Box::new(lhs),
+                            rhs: Box::new(rhs),
+                        }
+                    } else {
+                        Expr::Call { callee: name, args }
+                    };
                 } else {
                     return Err(self.err_msg("call target must be an identifier"));
                 }
@@ -555,6 +574,9 @@ impl Parser {
         }
         let start = self.parse_expr()?;
         if self.consume(&Tok::Colon) {
+            if self.matches(&Tok::RBracket) || self.matches(&Tok::Comma) {
+                return Ok(Sub::From(start)); // A[start :]
+            }
             let end = self.parse_expr()?;
             Ok(Sub::Range { start, end }) // A[start : end]
         } else if self.consume(&Tok::ColonPlus) {

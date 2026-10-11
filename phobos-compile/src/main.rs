@@ -3,8 +3,8 @@
 //     phobos-compile FILE.ph [--chip sm_86] [--index-bits 64] [-o OUT.ptx]
 //
 // `--chip` defaults to sm_75, which every supported card can run.
-// `--index-bits` defaults to 32. `PHOBOS_PRINT_PHASES` prints the IR after
-// each lowering phase.
+// `--index-bits` defaults to 32, and is raised to 64 for a module the runtime
+// would widen. `PHOBOS_PRINT_PHASES` prints the IR after each lowering phase.
 
 use std::path::PathBuf;
 
@@ -45,6 +45,11 @@ fn main() -> Result<()> {
 
     let src = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
     let kernels = phobos_lang::parse(&src)?;
+    // Widen as the runtime does, so a kernel compiles here exactly when it
+    // compiles there.
+    if ctx.index_bitwidth < 64 && phobos_lang::needs_wide_index(&ctx, &kernels) {
+        ctx.index_bitwidth = 64;
+    }
     let ptx = phobos_mlir::gen_ptx(&ctx, |base, context, module| {
         phobos_lang::codegen::emit(base, &kernels, context, module).map(|_| ())
     })?;

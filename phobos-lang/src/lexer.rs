@@ -1,3 +1,4 @@
+use super::ast::BinOp;
 use super::token::{Tok, Token};
 
 pub struct Lexer<'a> {
@@ -80,7 +81,7 @@ impl<'a> Lexer<'a> {
                         }
                         continue;
                     }
-                    Tok::Slash
+                    self.op_eq(BinOp::Div, Tok::Slash)
                 }
                 '(' => {
                     self.advance();
@@ -120,11 +121,35 @@ impl<'a> Lexer<'a> {
                 }
                 '*' => {
                     self.advance();
-                    Tok::Star
+                    self.op_eq(BinOp::Mul, Tok::Star)
                 }
                 '%' => {
                     self.advance();
-                    Tok::Percent
+                    self.op_eq(BinOp::Rem, Tok::Percent)
+                }
+                '&' => {
+                    self.advance();
+                    if self.consume('&') {
+                        Tok::AmpAmp
+                    } else {
+                        self.op_eq(BinOp::BitAnd, Tok::Amp)
+                    }
+                }
+                '|' => {
+                    self.advance();
+                    if self.consume('|') {
+                        Tok::PipePipe
+                    } else {
+                        self.op_eq(BinOp::BitOr, Tok::Pipe)
+                    }
+                }
+                '^' => {
+                    self.advance();
+                    self.op_eq(BinOp::BitXor, Tok::Caret)
+                }
+                '~' => {
+                    self.advance();
+                    Tok::Tilde
                 }
                 '+' => {
                     self.advance();
@@ -136,7 +161,7 @@ impl<'a> Lexer<'a> {
                 }
                 '-' => {
                     self.advance();
-                    Tok::Minus
+                    self.op_eq(BinOp::Sub, Tok::Minus)
                 }
                 ':' => {
                     self.advance();
@@ -148,11 +173,23 @@ impl<'a> Lexer<'a> {
                 }
                 '<' => {
                     self.advance();
-                    if self.consume('=') { Tok::Le } else { Tok::Lt }
+                    if self.consume('<') {
+                        self.op_eq(BinOp::Shl, Tok::Shl)
+                    } else if self.consume('=') {
+                        Tok::Le
+                    } else {
+                        Tok::Lt
+                    }
                 }
                 '>' => {
                     self.advance();
-                    if self.consume('=') { Tok::Ge } else { Tok::Gt }
+                    if self.consume('>') {
+                        self.op_eq(BinOp::Shr, Tok::Shr)
+                    } else if self.consume('=') {
+                        Tok::Ge
+                    } else {
+                        Tok::Gt
+                    }
                 }
                 '=' => {
                     self.advance();
@@ -191,6 +228,11 @@ impl<'a> Lexer<'a> {
         Ok(out)
     }
 
+    /// `tok`, or its compound assignment when an `=` follows.
+    fn op_eq(&mut self, op: BinOp, tok: Tok) -> Tok {
+        if self.consume('=') { Tok::OpEq(op) } else { tok }
+    }
+
     fn number(&mut self) -> Result<Tok, String> {
         let mut s = String::new();
         let mut is_float = false;
@@ -204,6 +246,23 @@ impl<'a> Lexer<'a> {
                 self.advance();
             } else {
                 break;
+            }
+        }
+        // An exponent, `1e-6` or `2.5E3`, makes a float of any number.
+        if matches!(self.peek, Some('e' | 'E')) {
+            is_float = true;
+            s.push('e');
+            self.advance();
+            if let Some(sign @ ('+' | '-')) = self.peek {
+                s.push(sign);
+                self.advance();
+            }
+            if !self.peek.is_some_and(|c| c.is_ascii_digit()) {
+                return Err(format!("{}:{}: exponent without digits in '{s}'", self.line, self.col));
+            }
+            while let Some(c) = self.peek.filter(char::is_ascii_digit) {
+                s.push(c);
+                self.advance();
             }
         }
         if is_float {

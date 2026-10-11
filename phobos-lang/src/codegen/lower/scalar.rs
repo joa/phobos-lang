@@ -36,6 +36,10 @@ impl<'c> Codegen<'c> {
                         let one = self.const_bool(block, true)?;
                         self.push(block, arith::xori(v, one, self.loc))?
                     }
+                    UnOp::BitNot => {
+                        let ones = self.const_index(block, -1)?;
+                        self.push(block, arith::xori(v, ones, self.loc))?
+                    }
                 }
             }
             OpKind::Binary(bin) => {
@@ -64,6 +68,22 @@ impl<'c> Codegen<'c> {
                 let v = self.scalar_ir(ir.operand(op, 0))?;
                 let want = self.ir_scalar_type(want);
                 self.push(block, arith::index_cast(v, want, self.loc))?
+            }
+            OpKind::Math(step) => {
+                let v = self.scalar_ir(ir.operand(op, 0))?;
+                let step = self.ir_elem_step(step);
+                let r = self.apply_elem_step(block, v, step)?;
+                let ir::Type::Scalar(want) = ir.ty(ir.result(op)) else {
+                    bail!("math to a non-scalar");
+                };
+                let want = self.ir_scalar_type(*want);
+                self.numeric_cast(block, r, want)?
+            }
+            OpKind::Select => {
+                let c = self.scalar_ir(ir.operand(op, 0))?;
+                let a = self.scalar_ir(ir.operand(op, 1))?;
+                let b = self.scalar_ir(ir.operand(op, 2))?;
+                self.select(block, c, a, b)?
             }
             OpKind::ProgramId(d) => self.block_id(block, ["x", "y", "z"][d as usize])?,
             OpKind::Dim(d) => {

@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
 use crate::ast::{Expr, Scalar as AstScalar};
-use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Reduce, Scalar, Type, ValueId};
+use crate::ir::{ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Type, ValueId};
 
 impl Build {
     /// Each arm evaluates its operands in source order and produces one op
@@ -147,23 +147,48 @@ impl Build {
                 };
                 Ok(Rv::Tile(self.tile_flat(t)?))
             }
-            "exp" | "log" | "round" | "sqrt" | "tanh" => {
+            _ if ElemStep::from_callee(callee).is_some_and(|s| !matches!(s, ElemStep::Cast(_))) => {
                 let [arg] = args else {
-                    bail!("{callee} expects one tile argument");
-                };
-                let Rv::Tile(t) = self.emit_expr(arg)? else {
-                    bail!("{callee} expects a tile argument");
+                    bail!("{callee} expects one argument");
                 };
                 let step = ElemStep::from_callee(callee).expect("a math call");
+                let t = match self.emit_expr(arg)? {
+                    Rv::Tile(t) => t,
+                    Rv::Scalar(v) => return Ok(Rv::Scalar(self.scalar_math(callee, step, v)?)),
+                };
                 // The emitter may rewrite an owned temp in place. The result
                 // type is the source's either way.
                 let shape = self.shape(t);
-                if !self.owned(t) && shape.contains(&DYN) {
+                let in_place = self.owned(t) && !matches!(step, ElemStep::Math(_));
+                if !in_place && shape.contains(&DYN) {
                     bail!("{callee} needs a static tile shape");
                 }
                 let ty = self.like(t);
                 Ok(Rv::Tile(self.value(OpKind::Map(Map::Unary(step)), &[t], ty)))
             }
+            "where" => {
+                let [cond, a, b] = args else {
+                    bail!("where expects (condition, a, b)");
+                };
+                let mut reads_tile = false;
+                cond.walk(&mut |e| reads_tile |= self.is_tile_expr(e) || self.is_slice_expr(e));
+                if reads_tile {
+                    bail!(
+                        "a `where` over tiles has to be the value of a tile assignment, \
+                         `t = where(..)`, so it can be swept into `t`"
+                    );
+                }
+                let cond = self.emit_scalar(cond)?;
+                let cond = self.expect_bool(cond, "where's condition")?;
+                let (a, b) = (self.emit_scalar(a)?, self.emit_scalar(b)?);
+                let (a, b) = self.unify(a, b)?;
+                let ty = Type::Scalar(self.scalar_of(a));
+                Ok(Rv::Scalar(self.value(OpKind::Select, &[cond, a, b], ty)))
+            }
+            "iota" => bail!(
+                "iota(d) is an element's position in a tile assignment, so it belongs in \
+                 the value of one: `t = where(iota(1) < n, t, 0.0)`"
+            ),
             "tmax" => {
                 let [x, y] = args else {
                     bail!("tmax expects two tile arguments");
@@ -190,8 +215,8 @@ impl Build {
                 if shape.contains(&DYN) {
                     bail!("row reduction needs a static tile shape");
                 }
-                if !self.elem(t).is_float() {
-                    bail!("row reduction needs a float element type");
+                if !self.elem(t).is_float() && !self.elem(t).is_int() {
+                    bail!("row reduction needs a numeric element type");
                 }
                 let ty = self.shared_ty(self.elem(t), &[shape[0], 1]);
                 Ok(Rv::Tile(self.value(OpKind::Reduce(how), &[t], ty)))
@@ -253,6 +278,18 @@ impl Build {
             ),
             other => bail!("unknown function '{other}'"),
         }
+    }
+
+    /// A math call on one scalar. Only `abs` takes an integer; the rest take
+    /// a float and give an f32, the width the target computes in.
+    fn scalar_math(&mut self, callee: &str, step: ElemStep, v: ValueId) -> Result<ValueId> {
+        let t = self.scalar_of(v);
+        let result = match t {
+            Scalar::Index if step == ElemStep::Math(MathFn::Abs) => Scalar::Index,
+            t if t.is_float() => Scalar::F32,
+            t => bail!("{callee} needs a float operand, got {}", t.mlir_name()),
+        };
+        Ok(self.value(OpKind::Math(step), &[v], Type::Scalar(result)))
     }
 
     /// A `<fmt>_qdot_t` call: `n` tile operands, a `[1, qb rows]` result.
@@ -415,17 +452,27 @@ impl Build {
         let [t, i, v] = args else {
             bail!("atomic_add expects (tensor, index, value)");
         };
-        let mem = self.barrier_tensor(t, "atomic_add")?;
+        let Expr::Var(name) = t else {
+            bail!("atomic_add expects a named tensor parameter");
+        };
+        let Some(Binding::Tensor(mem)) = self.lookup(name) else {
+            bail!("atomic_add expects a tensor parameter, but '{name}' is not one");
+        };
+        let elem = self.elem(mem);
+        if !matches!(elem, Scalar::I32 | Scalar::F32) {
+            bail!("atomic_add expects an i32 or f32 tensor, but '{name}' holds {}", elem.mlir_name());
+        }
         let idx = self.emit_index(i, "atomic_add index")?;
         let val = self.emit_scalar(v)?;
-        let val = match self.scalar_of(val) {
-            Scalar::I32 => val,
-            Scalar::Index | Scalar::I8 | Scalar::I64 => {
+        let val = match (elem, self.scalar_of(val)) {
+            (Scalar::I32, Scalar::I32) | (Scalar::F32, Scalar::F32) => val,
+            (Scalar::I32, Scalar::Index | Scalar::I8 | Scalar::I64) => {
                 self.value(OpKind::IndexCast(Scalar::I32), &[val], Type::Scalar(Scalar::I32))
             }
-            t => bail!("atomic_add value must be an integer, got {}", t.mlir_name()),
+            (Scalar::F32, t) if t.is_numeric() => self.numeric_cast(val, Scalar::F32),
+            (_, t) => bail!("atomic_add into {} cannot take a {} value", elem.mlir_name(), t.mlir_name()),
         };
-        let old = self.value(OpKind::AtomicAdd, &[mem, idx, val], Type::Scalar(Scalar::I32));
+        let old = self.value(OpKind::AtomicAdd, &[mem, idx, val], Type::Scalar(elem));
         Ok(Rv::Scalar(old))
     }
 

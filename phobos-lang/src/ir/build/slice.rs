@@ -108,8 +108,13 @@ impl Build {
         };
         for (i, sub) in subs.iter().enumerate() {
             match sub {
-                Sub::Point(_) => {
-                    bail!("mixing point and slice subscripts is not supported yet")
+                // A point among slices keeps its axis, as `p :+ 1` would.
+                Sub::Point(p) => {
+                    ragged[i] = rides_ragged(self, p);
+                    offsets.push(self.emit_index(p, "subscript")?);
+                    off_divs.push(self.expr_div(p));
+                    proven[i] = self.dyn_in_bounds(p, 1, self.div_of(src, i), &[]);
+                    static_sizes.push(1);
                 }
                 Sub::Span { start, len } => {
                     ragged[i] = rides_ragged(self, start);
@@ -138,6 +143,29 @@ impl Build {
                         }
                         _ => {
                             let end_v = self.emit_index(end, "slice end")?;
+                            let size = self.value(OpKind::Binary(BinOp::Sub), &[end_v, off], Type::INDEX);
+                            dyn_sizes.push(size);
+                            static_sizes.push(DYN);
+                        }
+                    }
+                }
+                // The rest of the dimension, so never past its end.
+                Sub::From(start) => {
+                    let off = self.emit_index(start, "slice start")?;
+                    offsets.push(off);
+                    off_divs.push(self.expr_div(start));
+                    proven[i] = true;
+                    match (src_shape[i], self.const_fold(start)) {
+                        (n, Some(a)) if n != DYN && !(0..=n).contains(&a) => {
+                            bail!("slice start {a} is outside the extent {n}")
+                        }
+                        (n, Some(a)) if n != DYN => static_sizes.push(n - a),
+                        _ => {
+                            let end_v = if src_shape[i] == DYN {
+                                self.dim_of(src, i)
+                            } else {
+                                self.const_index(src_shape[i])
+                            };
                             let size = self.value(OpKind::Binary(BinOp::Sub), &[end_v, off], Type::INDEX);
                             dyn_sizes.push(size);
                             static_sizes.push(DYN);
@@ -260,12 +288,13 @@ impl Build {
             _ => return false,
         };
         let shape = self.shape(mv);
-        if subs.len() != shape.len() {
+        if subs.len() != shape.len() || is_point_load(subs) {
             return false;
         }
         subs.iter().enumerate().any(|(d, s)| {
             let (start, size) = match s {
-                Sub::Full | Sub::Point(_) => return false,
+                Sub::Full | Sub::From(_) => return false,
+                Sub::Point(p) => (p, 1),
                 Sub::Span { start, len } => (start, self.const_fold(len).unwrap_or(DYN)),
                 Sub::Range { start, end } => {
                     let size = match (self.const_fold(start), self.const_fold(end)) {
@@ -294,7 +323,7 @@ impl Build {
             return None;
         };
         let shape = self.shape(src);
-        if subs.len() != shape.len() {
+        if subs.len() != shape.len() || is_point_load(subs) {
             return None;
         }
         subs.iter()
@@ -303,7 +332,11 @@ impl Build {
                 Sub::Span { len, .. } => self.const_fold(len),
                 Sub::Range { start, end } => Some(self.const_fold(end)? - self.const_fold(start)?),
                 Sub::Full => (shape[d] != DYN).then_some(shape[d]),
-                Sub::Point(_) => None,
+                Sub::From(start) => {
+                    let a = self.const_fold(start)?;
+                    (shape[d] != DYN && (0..=shape[d]).contains(&a)).then(|| shape[d] - a)
+                }
+                Sub::Point(_) => Some(1),
             })
             .collect()
     }
@@ -321,4 +354,10 @@ impl Build {
             _ => None,
         }
     }
+}
+
+/// Whether every subscript is a point, which loads one element rather than
+/// slicing.
+pub(crate) fn is_point_load(subs: &[Sub]) -> bool {
+    subs.iter().all(|s| matches!(s, Sub::Point(_)))
 }

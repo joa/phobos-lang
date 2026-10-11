@@ -2,6 +2,7 @@ use std::fmt;
 
 pub use crate::ast::{AssignOp, BinOp, UnOp};
 
+use super::elem::{ElemStep, Map, Tree, binop_name};
 use super::types::{Extent, Scalar};
 
 /// Index arithmetic the language has no operator for, which the loop
@@ -166,50 +167,6 @@ impl RawFmt {
     }
 }
 
-/// A per-element unary step: what `exp(x)`, `round(x)` and `i8(x)` do to
-/// one element.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ElemStep {
-    Cast(Scalar),
-    Round,
-    Sqrt,
-    Exp,
-    Log,
-    Tanh,
-}
-
-impl ElemStep {
-    pub fn from_callee(callee: &str) -> Option<ElemStep> {
-        Some(match callee {
-            "round" => ElemStep::Round,
-            "sqrt" => ElemStep::Sqrt,
-            "exp" => ElemStep::Exp,
-            "log" => ElemStep::Log,
-            "tanh" => ElemStep::Tanh,
-            other => {
-                let scalar = Scalar::from_ast(crate::ast::Scalar::from_name(other)?);
-                if scalar == Scalar::Bool {
-                    return None;
-                }
-                ElemStep::Cast(scalar)
-            }
-        })
-    }
-}
-
-impl fmt::Display for ElemStep {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ElemStep::Cast(s) => write!(f, "{s}"),
-            ElemStep::Round => f.write_str("round"),
-            ElemStep::Sqrt => f.write_str("sqrt"),
-            ElemStep::Exp => f.write_str("exp"),
-            ElemStep::Log => f.write_str("log"),
-            ElemStep::Tanh => f.write_str("tanh"),
-        }
-    }
-}
-
 /// A whole-tile operation with one tile in and one out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reduce {
@@ -232,101 +189,6 @@ impl Reduce {
             Reduce::Tril => "tril",
             Reduce::Transpose => "transpose",
         }
-    }
-}
-
-/// A per-element map into a fresh tile, or into a given one.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Map {
-    /// Two tiles, broadcasting.
-    Binary(BinOp),
-    /// A tile and a scalar; `scalar_left` for `s op t`.
-    Scalar { op: BinOp, scalar_left: bool },
-    Unary(ElemStep),
-    /// `tmax`, broadcasting.
-    Max,
-}
-
-impl Map {
-    /// How many tile operands precede a `MapInto`'s destination.
-    pub fn tile_operands(self) -> usize {
-        match self {
-            Map::Binary(_) | Map::Max => 2,
-            Map::Scalar { .. } | Map::Unary(_) => 1,
-        }
-    }
-}
-
-/// A per-element expression tree over a `Fused` op's operands, evaluated
-/// in registers by one sweep of the destination. Leaves index the op's
-/// operands.
-#[derive(Clone, Debug, PartialEq)]
-pub enum Tree {
-    /// A tile operand, read with broadcasting.
-    Leaf(usize),
-    /// A scalar operand, one value for every element.
-    Scalar(usize),
-    Unary(ElemStep, Box<Tree>),
-    Binary(BinOp, Box<Tree>, Box<Tree>),
-    Max(Box<Tree>, Box<Tree>),
-}
-
-impl Tree {
-    /// Every operand index the tree reads.
-    pub fn operands(&self, out: &mut Vec<usize>) {
-        match self {
-            Tree::Leaf(i) | Tree::Scalar(i) => out.push(*i),
-            Tree::Unary(_, x) => x.operands(out),
-            Tree::Binary(_, a, b) | Tree::Max(a, b) => {
-                a.operands(out);
-                b.operands(out);
-            }
-        }
-    }
-
-    pub fn has_unary(&self) -> bool {
-        match self {
-            Tree::Leaf(_) | Tree::Scalar(_) => false,
-            Tree::Unary(..) => true,
-            Tree::Binary(_, a, b) | Tree::Max(a, b) => a.has_unary() || b.has_unary(),
-        }
-    }
-}
-
-impl fmt::Display for Tree {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Tree::Leaf(i) => write!(f, "#{i}"),
-            Tree::Scalar(i) => write!(f, "s#{i}"),
-            Tree::Unary(step, x) => write!(f, "({step} {x})"),
-            Tree::Binary(op, a, b) => write!(f, "({} {a} {b})", binop_name(*op)),
-            Tree::Max(a, b) => write!(f, "(max {a} {b})"),
-        }
-    }
-}
-
-pub fn binop_name(op: BinOp) -> &'static str {
-    match op {
-        BinOp::Add => "add",
-        BinOp::Sub => "sub",
-        BinOp::Mul => "mul",
-        BinOp::Div => "div",
-        BinOp::Rem => "rem",
-        BinOp::Eq => "eq",
-        BinOp::Ne => "ne",
-        BinOp::Lt => "lt",
-        BinOp::Le => "le",
-        BinOp::Gt => "gt",
-        BinOp::Ge => "ge",
-    }
-}
-
-impl BinOp {
-    pub fn is_compare(self) -> bool {
-        matches!(
-            self,
-            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge
-        )
     }
 }
 
@@ -505,6 +367,10 @@ pub enum OpKind {
     /// `arith.index_cast`: between `index` and a sized integer, one op.
     IndexCast(Scalar),
     ProgramId(u8),
+    /// One scalar through a per-element step: `exp(x)` on a scalar.
+    Math(ElemStep),
+    /// `(cond, a, b) -> a or b`, the scalar `where`.
+    Select,
     /// The runtime extent of a tensor's dimension.
     Dim(usize),
     /// `(mem, indices..) -> elem`; a private slot takes no indices.
@@ -619,10 +485,13 @@ impl OpKind {
             OpKind::Const(_) => "const".into(),
             OpKind::Unary(UnOp::Neg) => "neg".into(),
             OpKind::Unary(UnOp::Not) => "not".into(),
+            OpKind::Unary(UnOp::BitNot) => "bitnot".into(),
             OpKind::Binary(op) => binop_name(*op).into(),
             OpKind::IndexOp(op) => op.name().into(),
             OpKind::Cast(s) => format!("cast {s}"),
             OpKind::IndexCast(s) => format!("index_cast {s}"),
+            OpKind::Math(step) => format!("math {step}"),
+            OpKind::Select => "select".into(),
             OpKind::ProgramId(d) => format!("program_id {d}"),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),

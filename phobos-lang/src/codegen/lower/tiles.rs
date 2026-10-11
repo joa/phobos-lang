@@ -177,7 +177,7 @@ impl<'c> Codegen<'c> {
                 let out = self.alloc_tile_shaped(block, elem, &dims(&t.shape))?;
                 if transpose {
                     if !self.wmma_dot(block, &a, &b, &out, true, false)? {
-                        self.tile_matmul_t(block, &a, &b, &out)?;
+                        self.tile_matmul_t(block, &a, &b, &out, false)?;
                     }
                 } else {
                     self.check_matmul_shapes(&a, &b, &out)?;
@@ -271,6 +271,13 @@ impl<'c> Codegen<'c> {
                     (ir::ElemStep::Round, None) => self.tile_round(block, &t),
                     (ir::ElemStep::Sqrt, None) => self.tile_sqrt(block, &t),
                     (ir::ElemStep::Tanh, None) => self.tile_tanh(block, &t),
+                    (ir::ElemStep::Math(_), None) => {
+                        let out = fresh(self)?;
+                        let step = self.ir_elem_step(step);
+                        self.elem_chain_sweep(block, &t, &out, &[step])?;
+                        self.release(&t);
+                        Ok(out)
+                    }
                 }
             }
             Map::Max => {
@@ -304,10 +311,7 @@ impl<'c> Codegen<'c> {
             return Ok(());
         }
         if transpose {
-            if op == AssignOp::Add {
-                bail!("`tile += dot_t(...)` is not supported; assign with `=`");
-            }
-            self.tile_matmul_t(block, a, b, target)?;
+            self.tile_matmul_t(block, a, b, target, op == AssignOp::Add)?;
         } else {
             if op == AssignOp::Set {
                 let zero = self.zero_scalar(block, target.elem)?;
@@ -332,7 +336,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<()> {
         let temp = self.alloc_tile_shaped(block, target.elem, &target.shape)?;
         if transpose {
-            self.tile_matmul_t(block, a, b, &temp)?;
+            self.tile_matmul_t(block, a, b, &temp, false)?;
         } else {
             let zero = self.zero_scalar(block, temp.elem)?;
             self.tile_fill(block, zero, &temp)?;
@@ -348,7 +352,7 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    fn ir_elem_step(&self, step: ir::ElemStep) -> ElemStep<'c> {
+    pub(super) fn ir_elem_step(&self, step: ir::ElemStep) -> ElemStep<'c> {
         match step {
             ir::ElemStep::Cast(s) => ElemStep::Cast(self.ir_scalar_type(s)),
             ir::ElemStep::Round => ElemStep::Round,
@@ -356,6 +360,7 @@ impl<'c> Codegen<'c> {
             ir::ElemStep::Exp => ElemStep::Exp,
             ir::ElemStep::Log => ElemStep::Log,
             ir::ElemStep::Tanh => ElemStep::Tanh,
+            ir::ElemStep::Math(f) => ElemStep::Math(f),
         }
     }
 
@@ -389,6 +394,12 @@ impl<'c> Codegen<'c> {
                 Box::new(self.fused_from_tree(ir, op, b, target, leaves)?),
             ),
             Tree::Max(a, b) => Fused::Max(
+                Box::new(self.fused_from_tree(ir, op, a, target, leaves)?),
+                Box::new(self.fused_from_tree(ir, op, b, target, leaves)?),
+            ),
+            Tree::Iota(d) => Fused::Iota(*d),
+            Tree::Select(c, a, b) => Fused::Select(
+                Box::new(self.fused_from_tree(ir, op, c, target, leaves)?),
                 Box::new(self.fused_from_tree(ir, op, a, target, leaves)?),
                 Box::new(self.fused_from_tree(ir, op, b, target, leaves)?),
             ),

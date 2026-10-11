@@ -328,3 +328,105 @@ fn error_messages_carry_line_and_column() {
     let e = parse_err("kernel k(\n  a: widget[N]) { }");
     assert!(e.starts_with("2:"), "expected a line:col prefix, got: {e}");
 }
+
+/// The value of the first `let` in a one-statement kernel.
+fn let_value(src: &str) -> Expr {
+    let p = parse(&format!("kernel k(a: i32, b: i32, c: i32) {{ {src} }}"));
+    match &p[0].body[0] {
+        Stmt::Let { value, .. } => value.clone(),
+        other => panic!("expected a let, got {other:?}"),
+    }
+}
+
+/// The operator at the root of an expression and its two operands.
+fn binary(e: &Expr) -> (BinOp, &Expr, &Expr) {
+    match e {
+        Expr::Binary { op, lhs, rhs } => (*op, lhs, rhs),
+        other => panic!("expected a binary expression, got {other:?}"),
+    }
+}
+
+#[test]
+fn bitwise_binds_tighter_than_comparison_and_looser_than_arithmetic() {
+    // ((a + b) << 2) & 7
+    let e = let_value("let x = a + b << 2 & 7");
+    let (op, lhs, rhs) = binary(&e);
+    assert_eq!(op, BinOp::BitAnd);
+    assert!(matches!(rhs, Expr::Int(7)));
+    let (op, lhs, _) = binary(lhs);
+    assert_eq!(op, BinOp::Shl);
+    assert_eq!(binary(lhs).0, BinOp::Add);
+
+    // (a & 15) == 3
+    let e = let_value("let x = a & 15 == 3");
+    let (op, lhs, _) = binary(&e);
+    assert_eq!(op, BinOp::Eq);
+    assert_eq!(binary(lhs).0, BinOp::BitAnd);
+}
+
+#[test]
+fn bitwise_levels_order_and_then_xor_then_or() {
+    // a | (b ^ (c & 1))
+    let e = let_value("let x = a | b ^ c & 1");
+    let (op, _, rhs) = binary(&e);
+    assert_eq!(op, BinOp::BitOr);
+    let (op, _, rhs) = binary(rhs);
+    assert_eq!(op, BinOp::BitXor);
+    assert_eq!(binary(rhs).0, BinOp::BitAnd);
+}
+
+#[test]
+fn logical_and_binds_tighter_than_or() {
+    // (a < b && b < c) || a == c
+    let e = let_value("let x = a < b && b < c || a == c");
+    let (op, lhs, rhs) = binary(&e);
+    assert_eq!(op, BinOp::Or);
+    assert_eq!(binary(lhs).0, BinOp::And);
+    assert_eq!(binary(rhs).0, BinOp::Eq);
+}
+
+#[test]
+fn bit_not_is_unary() {
+    let e = let_value("let x = ~a & 3");
+    let (op, lhs, _) = binary(&e);
+    assert_eq!(op, BinOp::BitAnd);
+    assert!(matches!(lhs, Expr::Unary { op: UnOp::BitNot, .. }));
+}
+
+#[test]
+fn compound_assignment_becomes_a_set() {
+    let p = parse("kernel k(a: i32) { var x = a\n x -= 2\n x <<= 1 }");
+    for (stmt, want) in p[0].body[1..].iter().zip([BinOp::Sub, BinOp::Shl]) {
+        let Stmt::Assign { target, op, value } = stmt else {
+            panic!("expected an assignment, got {stmt:?}");
+        };
+        assert_eq!(*op, AssignOp::Set);
+        let (bop, lhs, _) = binary(value);
+        assert_eq!(bop, want);
+        assert!(matches!((target, lhs), (Expr::Var(t), Expr::Var(l)) if t == "x" && l == "x"));
+    }
+}
+
+#[test]
+fn min_and_max_calls_become_operators() {
+    let e = let_value("let x = min(a, max(b, c))");
+    let (op, _, rhs) = binary(&e);
+    assert_eq!(op, BinOp::Min);
+    assert_eq!(binary(rhs).0, BinOp::Max);
+    // Other arities stay calls, for the builder to reject.
+    assert!(matches!(let_value("let x = max(a)"), Expr::Call { .. }));
+}
+
+#[test]
+fn open_ended_range_subscript() {
+    let p = parse("kernel k(A: tensor<f32>[M, N]) { let r = A[2:, 0 :+ 4] }");
+    let Stmt::Let {
+        value: Expr::Index { subs, .. },
+        ..
+    } = &p[0].body[0]
+    else {
+        panic!("expected an indexed let");
+    };
+    assert!(matches!(subs[0], Sub::From(Expr::Int(2))));
+    assert!(matches!(subs[1], Sub::Span { .. }));
+}

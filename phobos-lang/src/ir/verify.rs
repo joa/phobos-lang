@@ -28,6 +28,8 @@ pub fn verify(ir: &Ir) -> Result<()> {
     }
 }
 
+mod scalar;
+
 struct Verifier<'a> {
     ir: &'a Ir,
     errors: Vec<String>,
@@ -304,103 +306,15 @@ impl Verifier<'_> {
             self.err(op, "owns blocks");
         }
         match &kind {
-            OpKind::Const(lit) => {
-                self.want_operands(op, 0);
-                if self.want_results(op, 1) {
-                    let want = match lit {
-                        super::Literal::Int(_) => Scalar::Index,
-                        super::Literal::Float(_) => Scalar::F32,
-                        super::Literal::Bool(_) => Scalar::Bool,
-                    };
-                    if self.scalar(ir.result(op)) != Some(want) {
-                        self.err(op, format!("result must be {want}"));
-                    }
-                }
-            }
-            OpKind::Unary(un) => {
-                if self.want_operands(op, 1) && self.want_results(op, 1) {
-                    let s = self.want_scalar(op, 0, "operand");
-                    let ok = match (un, s) {
-                        (super::UnOp::Neg, Some(s)) => s.is_numeric(),
-                        (super::UnOp::Not, Some(s)) => s == Scalar::Bool,
-                        _ => true,
-                    };
-                    if !ok {
-                        self.err(op, "operand type does not take this operator");
-                    }
-                    if ir.ty(ir.result(op)) != ir.ty(ir.operand(op, 0)) {
-                        self.err(op, "result type differs from the operand's");
-                    }
-                }
-            }
-            OpKind::Binary(bin) => {
-                if self.want_operands(op, 2) && self.want_results(op, 1) {
-                    let (a, b) = (self.want_scalar(op, 0, "lhs"), self.want_scalar(op, 1, "rhs"));
-                    if let (Some(a), Some(b)) = (a, b) {
-                        if a != b {
-                            self.err(op, format!("operands differ: {a} vs {b}"));
-                        }
-                        let want = if bin.is_compare() { Scalar::Bool } else { a };
-                        if self.scalar(ir.result(op)) != Some(want) {
-                            self.err(op, format!("result must be {want}"));
-                        }
-                        if a == Scalar::Bool && !matches!(bin, super::BinOp::Eq | super::BinOp::Ne) {
-                            self.err(op, "bool operands take only eq and ne");
-                        }
-                        if !a.is_numeric() && a != Scalar::Bool {
-                            self.err(op, "operands are not arithmetic");
-                        }
-                    }
-                }
-            }
-            OpKind::IndexOp(iop) => {
-                if self.want_operands(op, 2) && self.want_results(op, 1) {
-                    self.want_type(op, 0, &Type::INDEX, "lhs");
-                    self.want_type(op, 1, &Type::INDEX, "rhs");
-                    let want = match iop {
-                        super::IndexOp::CmpUlt => Scalar::Bool,
-                        _ => Scalar::Index,
-                    };
-                    if self.scalar(ir.result(op)) != Some(want) {
-                        self.err(op, format!("result must be {want}"));
-                    }
-                }
-            }
-            OpKind::Cast(want) => {
-                if self.want_operands(op, 1) && self.want_results(op, 1) {
-                    if let Some(s) = self.want_scalar(op, 0, "operand")
-                        && !(s.is_numeric() && want.is_numeric())
-                    {
-                        self.err(op, format!("cannot convert {s} to {want}"));
-                    }
-                    if self.scalar(ir.result(op)) != Some(*want) {
-                        self.err(op, format!("result must be {want}"));
-                    }
-                }
-            }
-            OpKind::IndexCast(want) => {
-                if self.want_operands(op, 1) && self.want_results(op, 1) {
-                    if let Some(s) = self.want_scalar(op, 0, "operand") {
-                        let ok = (s == Scalar::Index && want.is_int())
-                            || (s.is_int() && *want == Scalar::Index);
-                        if !ok {
-                            self.err(op, format!("index_cast does not go from {s} to {want}"));
-                        }
-                    }
-                    if self.scalar(ir.result(op)) != Some(*want) {
-                        self.err(op, format!("result must be {want}"));
-                    }
-                }
-            }
-            OpKind::ProgramId(d) => {
-                self.want_operands(op, 0);
-                if *d > 2 {
-                    self.err(op, "dimension past z");
-                }
-                if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::Index) {
-                    self.err(op, "result must be index");
-                }
-            }
+            OpKind::Const(_)
+            | OpKind::Unary(_)
+            | OpKind::Binary(_)
+            | OpKind::IndexOp(_)
+            | OpKind::Cast(_)
+            | OpKind::IndexCast(_)
+            | OpKind::ProgramId(_)
+            | OpKind::Math(_)
+            | OpKind::Select => self.scalar_kind(op, &kind),
             OpKind::Dim(d) => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
                     match ir.ty(ir.operand(op, 0)) {
@@ -447,16 +361,19 @@ impl Verifier<'_> {
                 self.want_results(op, 0);
             }
             OpKind::AtomicAdd => {
+                let mut elem = None;
                 if self.want_operands(op, 3) {
                     match ir.ty(ir.operand(op, 0)) {
-                        Type::Tensor(t) if t.elem == Scalar::I32 => {}
-                        other => self.err(op, format!("operand 0 must be an i32 tensor, is {other}")),
+                        Type::Tensor(t) if matches!(t.elem, Scalar::I32 | Scalar::F32) => {
+                            elem = Some(t.elem);
+                            self.want_type(op, 2, &Type::Scalar(t.elem), "value");
+                        }
+                        other => self.err(op, format!("operand 0 must be an i32 or f32 tensor, is {other}")),
                     }
                     self.want_type(op, 1, &Type::INDEX, "slot");
-                    self.want_type(op, 2, &Type::Scalar(Scalar::I32), "value");
                 }
-                if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::I32) {
-                    self.err(op, "result must be i32");
+                if self.want_results(op, 1) && elem.is_some() && self.scalar(ir.result(op)) != elem {
+                    self.err(op, "result must be the tensor's element type");
                 }
             }
             OpKind::For(info) => {
@@ -874,11 +791,46 @@ impl Verifier<'_> {
                     self.err(op, format!("tree scalar {i} must be a scalar"));
                 }
             }
+            super::Tree::Iota(d) => {
+                if let Some(&target) = self.ir.operands(op).last()
+                    && *d >= self.rank(target)
+                {
+                    self.err(op, format!("iota axis {d} past the target's rank"));
+                }
+            }
             super::Tree::Unary(_, x) => self.check_tree(op, x),
-            super::Tree::Binary(_, a, b) | super::Tree::Max(a, b) => {
+            super::Tree::Binary(bop, a, b) => {
+                if !bop.is_elementwise() {
+                    self.err(op, format!("`{}` outside a select's condition", bop.symbol()));
+                }
                 self.check_tree(op, a);
                 self.check_tree(op, b);
             }
+            super::Tree::Max(a, b) => {
+                self.check_tree(op, a);
+                self.check_tree(op, b);
+            }
+            super::Tree::Select(c, a, b) => {
+                self.check_cond(op, c);
+                self.check_tree(op, a);
+                self.check_tree(op, b);
+            }
+        }
+    }
+
+    /// A select's condition: comparisons of value trees, joined by `&&`
+    /// and `||`.
+    fn check_cond(&mut self, op: OpId, cond: &super::Tree) {
+        match cond {
+            super::Tree::Binary(super::BinOp::And | super::BinOp::Or, a, b) => {
+                self.check_cond(op, a);
+                self.check_cond(op, b);
+            }
+            super::Tree::Binary(bop, a, b) if bop.is_compare() => {
+                self.check_tree(op, a);
+                self.check_tree(op, b);
+            }
+            _ => self.err(op, "a select's condition must be a comparison"),
         }
     }
 }

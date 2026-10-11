@@ -25,6 +25,8 @@ impl<'c> Codegen<'c> {
                 BinOp::Le => arith::cmpf(self.ctx, arith::CmpfPredicate::Ole, lhs, rhs, loc),
                 BinOp::Gt => arith::cmpf(self.ctx, arith::CmpfPredicate::Ogt, lhs, rhs, loc),
                 BinOp::Ge => arith::cmpf(self.ctx, arith::CmpfPredicate::Oge, lhs, rhs, loc),
+                BinOp::Min | BinOp::Max => self.minmax(op, "f", lhs, rhs)?,
+                _ => bail!("`{}` does not take float operands", op.symbol()),
             }
         } else if t == self.index_t {
             match op {
@@ -39,12 +41,21 @@ impl<'c> Codegen<'c> {
                 BinOp::Le => arith::cmpi(self.ctx, arith::CmpiPredicate::Sle, lhs, rhs, loc),
                 BinOp::Gt => arith::cmpi(self.ctx, arith::CmpiPredicate::Sgt, lhs, rhs, loc),
                 BinOp::Ge => arith::cmpi(self.ctx, arith::CmpiPredicate::Sge, lhs, rhs, loc),
+                BinOp::BitAnd => arith::andi(lhs, rhs, loc),
+                BinOp::BitOr => arith::ori(lhs, rhs, loc),
+                BinOp::BitXor => arith::xori(lhs, rhs, loc),
+                BinOp::Shl => arith::shli(lhs, rhs, loc),
+                BinOp::Shr => arith::shrsi(lhs, rhs, loc),
+                BinOp::Min | BinOp::Max => self.minmax(op, "si", lhs, rhs)?,
+                BinOp::And | BinOp::Or => bail!("`{}` needs bool operands", op.symbol()),
             }
         } else if t == self.bool_t {
             match op {
                 BinOp::Eq => arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, lhs, rhs, loc),
                 BinOp::Ne => arith::cmpi(self.ctx, arith::CmpiPredicate::Ne, lhs, rhs, loc),
-                _ => bail!("operator not supported for bool operands"),
+                BinOp::And => arith::andi(lhs, rhs, loc),
+                BinOp::Or => arith::ori(lhs, rhs, loc),
+                _ => bail!("`{}` does not take bool operands", op.symbol()),
             }
         } else {
             bail!("operator not supported for operands of type {t}");
