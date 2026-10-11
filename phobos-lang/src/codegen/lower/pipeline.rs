@@ -105,6 +105,10 @@ impl<'c> Codegen<'c> {
         let two = self.const_index(block, 2)?;
         let st2 = self.muli(block, st, two)?;
         block.append_operation(scf::r#for(lo, hi, st2, region, self.loc));
+        // Each half ends in a barrier, so what follows may reuse the buffers.
+        for buf in bufs0.iter().chain(&bufs1) {
+            self.release(buf);
+        }
         Ok(())
     }
 

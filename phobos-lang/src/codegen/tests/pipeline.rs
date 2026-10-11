@@ -313,3 +313,61 @@ fn atomic_add_cannot_reach_a_loop_bound() {
         "an i32/index binary op should not silently promote to index: {err}"
     );
 }
+
+#[test]
+fn a_dynshared_kernel_pipelines_past_the_static_ceiling() {
+    // Two 64 x 64 f32 stages are 32 KB, doubled 64 KB: over the 48 KB a
+    // static kernel may hold, within what a dynamic launch opts into.
+    let src = |attrs: &str| {
+        format!(
+            "@pipeline @aligned(K = 64) {attrs}
+            kernel k(A: tensor<f32>[64, K], B: tensor<f32>[64, K], C: tensor<f32>[64, 64]) {{
+                var acc: tile<f32>[64, 64] = 0.0
+                for kt in range(0, K, 64) {{
+                    var a = A[0 :+ 64, kt :+ 64]
+                    var b = B[0 :+ 64, kt :+ 64]
+                    acc += a * b
+                }}
+                C[0 :+ 64, 0 :+ 64] = acc
+            }}"
+        )
+    };
+    use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+    let ctx = Context {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
+        ..Context::default()
+    };
+    let fails = |attrs: &str| crate::compile_raw(&ctx, &src(attrs)).unwrap().pipeline_failures;
+    let static_fails = fails("");
+    assert!(
+        static_fails.iter().any(|(_, why)| why.iter().any(|w| w.contains("49152-byte ceiling"))),
+        "{static_fails:?}"
+    );
+    assert!(fails("@dynshared").is_empty());
+}
+
+#[test]
+fn a_dynamic_extent_pipelines_its_whole_tiles() {
+    // K is only known at launch: the whole tiles pipeline, and the ragged
+    // rest runs once, masked.
+    let src = "@pipeline
+        kernel k(A: tensor<f32>[64, K], B: tensor<f32>[64, K], C: tensor<f32>[64, 32]) {
+            var acc: tile<f32>[64, 32] = 0.0
+            for kt in range(0, K, 32) {
+                var a = A[0 :+ 64, kt :+ 32]
+                var b = B[0 :+ 64, kt :+ 32]
+                acc += a * b
+            }
+            C[0 :+ 64, 0 :+ 32] = acc
+        }";
+    use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+    let ctx = Context {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_80")),
+        ..Context::default()
+    };
+    let out = crate::compile_raw(&ctx, src).unwrap();
+    assert!(out.pipeline_failures.is_empty(), "{:?}", out.pipeline_failures);
+    // The remainder stages into the loop's buffers: the accumulator and
+    // four 8 KiB stages, not two more beside them.
+    assert_eq!(shared_bytes(&emit_mlir_on(src, "sm_80")), 40960);
+}

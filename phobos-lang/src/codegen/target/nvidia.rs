@@ -217,13 +217,19 @@ impl Isa for Nvidia {
         self.cc >= 80
     }
 
+    fn smem_per_block(&self) -> i64 {
+        // From Ampere on, 1 KB per SM is reserved for the system.
+        if self.cc >= 80 { self.smem_per_sm() - 1024 } else { self.smem_per_sm() }
+    }
+
     fn int8_mma_k(&self) -> i64 {
         if self.cc >= 100 { 32 } else { 16 }
     }
 
     fn smem_per_sm(&self) -> i64 {
         (match self.cc {
-            cc if cc >= 90 => 228, // Hopper
+            cc if cc >= 120 => 100, // consumer Blackwell
+            cc if cc >= 90 => 228,  // Hopper, datacenter Blackwell
             87 => 164,             // Orin
             cc if cc >= 86 => 100, // Ada / GA10x
             cc if cc >= 80 => 164, // A100

@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 
+use super::pipeline::PipelineDecline;
 use super::{Binding, Build, DYN, Rv, gcd};
 use crate::ast::{AssignOp, BinOp, Dim, Expr, Scalar as AstScalar, Stmt, Sub, Type as AstType};
 use crate::ir::{
@@ -289,6 +290,23 @@ impl Build {
         match self.pipeline_candidate(body) {
             Ok((staged, rest, info)) => {
                 return self.emit_pipelined_for(var, start, end, step, &staged, rest, info, hoisted);
+            }
+            // A dynamic extent: the slices tile evenly once the loop is
+            // trimmed, so the whole tiles pipeline and the rest runs plain.
+            // Only on request, since doubling the stages costs occupancy.
+            Err(PipelineDecline::PartialSlice) if self.pipeline_assert && self.needs_ragged_epilogue(body, var) => {
+                self.trimmed_ivs.push(var.to_string());
+                let trimmed = self.pipeline_candidate(body);
+                self.trimmed_ivs.pop();
+                match trimmed {
+                    Ok((staged, rest, info)) => {
+                        return self.emit_pipelined_split_for(var, start, end, step, body, &staged, rest, info, hoisted);
+                    }
+                    Err(decline) if self.pipeline_assert => {
+                        self.report.pipeline_declines.push(format!("loop `{var}`: {decline}"));
+                    }
+                    Err(_) => {}
+                }
             }
             Err(decline) => {
                 if self.pipeline_assert {

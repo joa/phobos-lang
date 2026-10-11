@@ -115,6 +115,7 @@ fn main() -> Result<()> {
     flat_write(&mut failures)?;
     ragged_k(&mut failures)?;
     handoff(&mut failures)?;
+    pipelined_tail(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -433,6 +434,42 @@ fn ragged_k(failures: &mut u32) -> Result<()> {
         run_at(bits, &src, "k", 1, &mut slots)?;
         let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(name, worst < 1e-2, format!("max abs err {worst:.3e}"), failures);
+    }
+    Ok(())
+}
+
+fn pipelined_tail(failures: &mut u32) -> Result<()> {
+    // K = 72 against 32-wide stages: two whole tiles pipelined, then 8
+    // columns of remainder, masked.
+    let (rows, k) = (64, 72);
+    let (a, b) = (noise(rows * k, 12), noise(rows * k, 13));
+    let src = "@launch(256)
+        @pipeline
+        kernel k(A: tensor<f32>[64, K], B: tensor<f32>[64, K], C: tensor<f32>[64, 32]) {
+            var acc: tile<f32>[64, 32] = 0.0
+            for kt in range(0, K, 32) {
+                var a = A[0 :+ 64, kt :+ 32]
+                var b = B[0 :+ 64, kt :+ 32]
+                acc += a * b
+            }
+            C[0 :+ 64, 0 :+ 32] = acc
+        }";
+    let mut want = vec![0.0f32; rows * 32];
+    for r in 0..rows {
+        for j in 0..k {
+            want[r * 32 + j % 32] += a[r * k + j] * b[r * k + j];
+        }
+    }
+    for bits in [32, 64] {
+        let (ga, gb) = (Arg::new(&a, rows, k)?, Arg::new(&b, rows, k)?);
+        let c = Arg::<f32>::zeroed(rows, 32)?;
+        let mut slots = Vec::new();
+        ga.push(&mut slots);
+        gb.push(&mut slots);
+        c.push(&mut slots);
+        run_at(bits, src, "k", 1, &mut slots)?;
+        let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
+        report(&format!("pipelined ragged k, {bits}-bit"), worst < 1e-5, format!("max abs err {worst:.2e}"), failures);
     }
     Ok(())
 }
