@@ -113,6 +113,8 @@ fn main() -> Result<()> {
     unsigned(&mut failures)?;
     flat_write(&mut failures)?;
     ragged_k(&mut failures)?;
+    // Last: a trap leaves the context unusable.
+    aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
     println!("every probe agrees with the host");
     Ok(())
@@ -395,6 +397,30 @@ fn ragged_k(failures: &mut u32) -> Result<()> {
         let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(name, worst < 1e-2, format!("max abs err {worst:.3e}"), failures);
     }
+    Ok(())
+}
+
+fn aligned_promise(failures: &mut u32) -> Result<()> {
+    let src = "@launch(256)
+        @aligned(N = 32)
+        kernel k(A: tensor<f32>[1, N], B: tensor<f32>[1, N]) {
+            let p = program_id(0)
+            B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
+        }";
+    let launch = |cols: usize| -> Result<Vec<f32>> {
+        let a = Arg::new(&noise(cols, 8), 1, cols)?;
+        let b = Arg::<f32>::zeroed(1, cols)?;
+        let mut slots = Vec::new();
+        a.push(&mut slots);
+        b.push(&mut slots);
+        run(src, "k", (cols / 32) as u32, &mut slots)?;
+        b.read()
+    };
+    let kept = launch(64)?;
+    report("@aligned kept runs", kept == noise(64, 8), String::new(), failures);
+    let broken = launch(48);
+    let trapped = broken.is_err();
+    report("@aligned broken traps", trapped, format!("{:?}", broken.err()), failures);
     Ok(())
 }
 

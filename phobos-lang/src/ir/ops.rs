@@ -386,6 +386,8 @@ pub enum OpKind {
     /// `(tensor, slot, expected, value) -> old`, over an `i32` tensor, once
     /// per CTA: `value` is stored only when the slot held `expected`.
     AtomicCas,
+    /// Aborts the kernel: a launch broke a promise the code relies on.
+    Trap,
 
     // Control. Each owns blocks; the body's terminator carries the
     // loop-carried values back.
@@ -513,6 +515,7 @@ impl OpKind {
             OpKind::Store => "store".into(),
             OpKind::AtomicAdd => "atomic_add".into(),
             OpKind::AtomicCas => "atomic_cas".into(),
+            OpKind::Trap => "trap".into(),
             OpKind::For(info) => {
                 let mut out = match info.bounds {
                     Bounds::Affine { lo, hi, step } => format!("for {lo}..{hi} step {step}"),

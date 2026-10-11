@@ -161,6 +161,10 @@ impl<'c> Codegen<'c> {
                 self.barrier(block)?;
                 return Ok(());
             }
+            OpKind::Trap => {
+                block.append_operation(OperationBuilder::new("llvm.intr.trap", self.loc).build()?);
+                return Ok(());
+            }
             OpKind::GridBarrier => {
                 let mv = self.tile_ir(ir, ir.operand(op, 0))?;
                 self.grid_barrier_raw(block, mv.mem, mv.shape.len())?;

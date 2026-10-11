@@ -482,7 +482,7 @@ impl Verifier<'_> {
                     self.err(op, "does not end a block of the op that takes it");
                 }
             }
-            OpKind::Barrier => {
+            OpKind::Barrier | OpKind::Trap => {
                 self.want_operands(op, 0);
                 self.want_results(op, 0);
             }
