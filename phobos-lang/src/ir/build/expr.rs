@@ -305,8 +305,11 @@ impl Build {
 
     /// Fails unless a slice of this binding is a subview the type system can name.
     pub(crate) fn check_sliceable(&self, mv: ValueId, binding: &Binding) -> Result<()> {
-        if !matches!(binding, Binding::Tensor(_) | Binding::Tile(_)) {
-            bail!("only tensors and tiles can be sliced");
+        if !matches!(binding, Binding::Tensor(_) | Binding::Tile(_) | Binding::View(_)) {
+            bail!("only tensors, tiles and their views can be sliced");
+        }
+        if matches!(binding, Binding::View(_)) && self.is_masked(mv) {
+            bail!("a partially out-of-bounds view cannot be sliced; slice the tensor it views instead");
         }
         if let Type::Tile(t) = self.ir.ty(mv) {
             if t.layout.row_stride.is_some() {

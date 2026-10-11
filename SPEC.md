@@ -110,7 +110,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 
 | Form | Meaning |
 |---|---|
-| `let x = e` | Immutable binding. Initializer required. A tensor slice bound with `let` is a view, not a copy. |
+| `let x = e` | Immutable binding. Initializer required. A tensor slice bound with `let` is a view, not a copy: it can be sliced again, and `x[...] = e` writes the bytes it views. Only `x = e` itself is refused. |
 | `let x: T = e` | Same, with a declared type. |
 | `var x = e` | Mutable binding. `var t = A[...]` copies the slice into a tile. An elementwise `e` over tiles of one element type and rank takes their type and broadcast shape and is computed in one sweep, as a typed declaration is. |
 | `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
@@ -221,7 +221,7 @@ All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` o
 | `cumsum(t)` | `[R, C] -> [R, C]` | `out[i, j] = sum_{r <= i} t[r, j]`, down the rows. Float only. |
 | `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
 | `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
-| `flat(t)` | `[R, C] -> [1, R * C]` | Row-major view of the same bytes, read-only. `t` must be a declared tile, not a slice. |
+| `flat(t)` | `[R, C] -> [1, R * C]` | Row-major view of the same bytes; writing through it writes `t`. `t` must be a declared tile, not a slice. |
 | `gather(table, idx)` | `idx.shape` | `out[i] = table[idx[i]]`. `table` is `[n]` or `[1, n]`; result has `table`'s element type. |
 
 ### Dense contraction

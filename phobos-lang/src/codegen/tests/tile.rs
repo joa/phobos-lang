@@ -353,3 +353,29 @@ fn warp_partial_probe(d: i64, wct: i64, qw: i64) -> String {
     )
 }
 
+
+#[test]
+fn a_view_of_a_view_keeps_the_tensor_stride() {
+    let mlir = emit_mlir(
+        "kernel k(A: tensor<f32>[64, 64], O: tensor<f32>[16, 16]) {
+            let v = A[0 :+ 32, 0 :+ 32]
+            let w = v[0 :+ 16, 16 :+ 16]
+            var t: tile<f32>[16, 16] = w
+            O[0 :+ 16, 0 :+ 16] = t
+        }",
+    );
+    assert_contains(&mlir, &["memref<16x16xf32, strided<[64, 1], offset: ?>, 1>"]);
+}
+
+#[test]
+fn a_flat_view_writes_its_tile() {
+    let mlir = emit_mlir(
+        "kernel k(A: tensor<f32>[16, 16], O: tensor<f32>[16, 16]) {
+            var t: tile<f32>[16, 16] = A[0 :+ 16, 0 :+ 16]
+            let f = flat(t)
+            f[0 :+ 1, 0 :+ 128] = 0.0
+            O[0 :+ 16, 0 :+ 16] = t
+        }",
+    );
+    assert_contains(&mlir, &["memref.reinterpret_cast", "to memref<1x128xf32, strided<[256, 1]"]);
+}
