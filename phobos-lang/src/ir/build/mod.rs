@@ -34,6 +34,8 @@ pub struct Target {
     pub mma_sync_k: Option<i64>,
     pub has_dp4a: bool,
     pub has_int8_mma: bool,
+    /// The most shared memory a block may opt into.
+    pub smem_per_block: i64,
 }
 
 /// What the build learned for the emitter and the caller to report: the

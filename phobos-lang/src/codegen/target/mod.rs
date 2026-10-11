@@ -56,6 +56,10 @@ pub(super) trait Isa {
     /// two other occupancy limits below. Only [`Codegen::wmma_should_pad`]
     /// reads them.
     fn smem_per_sm(&self) -> i64;
+
+    /// The most shared memory one block may opt into, which a `@dynshared`
+    /// launch raises its limit to.
+    fn smem_per_block(&self) -> i64;
     fn regs_per_sm(&self) -> i64;
     fn max_warps_per_sm(&self) -> i64;
 
@@ -735,5 +739,6 @@ pub fn build_target(base: &phobos_base::context::Context) -> crate::ir::build::T
         mma_sync_k: isa.mma_sync_k(),
         has_dp4a: isa.has_dp4a(),
         has_int8_mma: isa.has_int8_mma(),
+        smem_per_block: isa.smem_per_block(),
     }
 }

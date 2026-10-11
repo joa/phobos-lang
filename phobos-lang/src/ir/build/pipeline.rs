@@ -4,9 +4,11 @@ use anyhow::{Result, bail};
 
 use super::{Binding, Build, Rv};
 use crate::ast::{Expr, Stmt, Sub, Type as AstType};
-use crate::ir::{Bounds, ForInfo, OpKind, Pipeline, Stage, ValueId};
+use crate::ast::BinOp;
+use crate::ir::{Bounds, ForInfo, IndexOp, OpKind, Pipeline, Scalar, Stage, Type, ValueId};
 
-const PIPELINE_SHARED_LIMIT_BYTES: i64 = 48 * 1024;
+/// What a block may hold in static shared memory, on every chip.
+const STATIC_SHARED_LIMIT_BYTES: i64 = 48 * 1024;
 
 /// Why a loop body was not turned into a pipelined loop.
 pub(crate) enum PipelineDecline {
@@ -98,10 +100,16 @@ impl Build {
             needed_bytes += (bytes + 15) & !15;
         }
         let doubled = needed_bytes * 2;
-        if doubled > PIPELINE_SHARED_LIMIT_BYTES {
+        // A `@dynshared` launch opts into the chip's whole per-block budget.
+        let limit_bytes = if self.ir.kernel.dynamic_shared {
+            self.target.smem_per_block
+        } else {
+            STATIC_SHARED_LIMIT_BYTES
+        };
+        if doubled > limit_bytes {
             return Err(PipelineDecline::SharedMemoryBudget {
                 needed_bytes: doubled,
-                limit_bytes: PIPELINE_SHARED_LIMIT_BYTES,
+                limit_bytes,
             });
         }
         let info = Pipeline {
@@ -128,6 +136,61 @@ impl Build {
         hoisted: &[ValueId],
     ) -> Result<()> {
         let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
+        self.emit_pipelined_loop(var, [lo, hi, st], iv_div, staged, rest, info, hoisted)
+    }
+
+    /// A loop over a dynamic extent whose staged slices tile evenly only
+    /// once it is trimmed: the whole tiles pipelined, then the ragged rest
+    /// as one plain, masked iteration.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_pipelined_split_for(
+        &mut self,
+        var: &str,
+        start: &Expr,
+        end: &Expr,
+        step: Option<&Expr>,
+        body: &[Stmt],
+        staged: &[(&str, &Expr)],
+        rest: &[Stmt],
+        info: Pipeline,
+        hoisted: &[ValueId],
+    ) -> Result<()> {
+        let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
+        let span = self.value(OpKind::Binary(BinOp::Sub), &[hi, lo], Type::INDEX);
+        let chunks = self.value(OpKind::IndexOp(IndexOp::DivU), &[span, st], Type::INDEX);
+        let covered = self.value(OpKind::Binary(BinOp::Mul), &[chunks, st], Type::INDEX);
+        let full = self.value(OpKind::Binary(BinOp::Add), &[lo, covered], Type::INDEX);
+
+        self.trimmed_ivs.push(var.to_string());
+        let main = self.emit_pipelined_loop(var, [lo, full, st], iv_div, staged, rest, info, hoisted);
+        self.trimmed_ivs.pop();
+        main?;
+
+        let ragged = self.value(OpKind::Binary(BinOp::Lt), &[full, hi], Type::Scalar(Scalar::Bool));
+        let tail = self.ir.new_block(&[]);
+        let outer = self.ragged_iv.replace(var.to_string());
+        let built = self.in_block(tail, |b| {
+            b.emit_scope(&[(var, Binding::Let { value: full, div: iv_div })], body)?;
+            b.stmt(OpKind::Yield, &[]);
+            Ok::<(), anyhow::Error>(())
+        });
+        self.ragged_iv = outer;
+        built?;
+        self.op(OpKind::If, &[ragged], Vec::new(), vec![tail]);
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_pipelined_loop(
+        &mut self,
+        var: &str,
+        [lo, hi, st]: [ValueId; 3],
+        iv_div: i64,
+        staged: &[(&str, &Expr)],
+        rest: &[Stmt],
+        info: Pipeline,
+        hoisted: &[ValueId],
+    ) -> Result<()> {
         let block = self.ir.new_block(&[crate::ir::Type::INDEX]);
         let iv = self.ir.args(block)[0];
         self.ir.set_name(iv, var);

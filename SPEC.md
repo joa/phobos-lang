@@ -178,7 +178,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 |---|---|
 | Slice past the end | Out-of-bounds elements read as `0`; their stores are skipped. |
 | Static extent | Masked in place. |
-| Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. Only spans with a static length split; loops with `mma.sync` accumulators or that are pipelined stay masked unless `@aligned` covers the dimension. |
+| Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. Only spans with a static length split; loops with `mma.sync` accumulators stay masked unless `@aligned` covers the dimension. Under `@pipeline`, the whole tiles are pipelined and the remainder runs once, unpipelined. |
 | Dynamic extent indexed by `program_id` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
 | Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask: `s = where(iota(1) < n, s, -1.0e30)`. |
 
@@ -199,8 +199,8 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 |---|---|---|---|
 | `program_id(d)` | index | Block index along grid axis `d`. | `d` a literal `0`, `1` or `2`. |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
-| `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
-| `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |
+| `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block, between two CTA barriers. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
+| `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block between two CTA barriers, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |
 | `load_acquire(t, i)` | `i32` | `t[i]` read at system scope with acquire ordering, once per block, every thread getting it; what the host wrote before raising `t[i]` is visible afterwards. `while load_acquire(F, 0) == 0 {}` waits on a host flag. | `t` a named `i32` tensor parameter. Compiles at 64-bit indices. |
 | `store_release(t, i, v)` | index `0` | `t[i] = v` at system scope with release ordering, once per block, after every thread's earlier writes. | As `load_acquire`. |
 
@@ -345,12 +345,12 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 |---|---|
 | `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Three or more: an explicit list. The first choice seeds the shape environment. |
 | `@cluster(X in [..], ...)` | Super-tile dimensions and search space for cluster tuning. |
-| `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. A dynamic `DIM` that breaks the promise traps at entry. |
+| `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. A dynamic `DIM` that breaks the promise traps at entry; in a `@persistent` kernel with `grid_barrier`, the other blocks then wait at the barrier for good. |
 | `@launch(threads[, min_blocks[, max_regs]])` | CTA size (default 256), PTX `.maxntid`, `.minnctapersm`, `.maxnreg`. `max_regs` (16..255) is a hard cap; `min_blocks` is advisory. |
 | `@tensorcore` | `dot`/`dot_t` and the GEMM run on tensor cores (sm_70+), operands rounded to f16, f32 accumulation. Uses `mma.sync` + `ldmatrix` with swizzled staging (sm_75+, 64-bit index), else WMMA m16n16k16. Falls back to the f32 path unless tile dims and the k-slice are multiples of 16 and the CTA's warps tile the 16x16 fragment grid; `PHOBOS_LOG=debug` names each dot that does, and why. |
 | `@tensorcore(wmma)` | Forces the WMMA m16n16k16 path. |
 | `@tensorcore(sync)` | Same as `@tensorcore`. |
-| `@pipeline` | Double-buffered staging is on by default for every eligible loop. The attribute asserts it: compilation fails if nothing is pipelined. It also enables double buffering for the GEMM's own operand pairs. |
+| `@pipeline` | Double-buffered staging is on by default for every eligible loop. The attribute asserts it: compilation fails if nothing is pipelined. It also enables double buffering for the GEMM's own operand pairs, and pipelines a loop over a dynamic extent that only tiles evenly once its remainder is split off. The doubled stages must fit 48 KB, or under `@dynshared` the chip's per-block limit (64 KB on sm_75, 163 KB on sm_80, 99 KB on sm_86/89/120). |
 | `@padstage` | Pads `var t = <tensor slice>` staging tiles whose row pitch is a multiple of 128 bytes, to avoid bank conflicts. Other tiles are unchanged. |
 | `@dynshared` | Dynamic shared memory instead of the static 48 KB; the launch must supply the size. The allocator resets once every tile is released, so phases separated by a barrier share one footprint. |
 | `@persistent` | The grid must be co-resident (required by `grid_barrier`). The launcher sizes it from the occupancy API (`phobos_kernels::launch::persistent_grid`). |
