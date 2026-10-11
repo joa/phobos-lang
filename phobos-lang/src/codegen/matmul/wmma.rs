@@ -198,6 +198,18 @@ impl<'c> Codegen<'c> {
         Ok(acc)
     }
 
+    /// Names a `@tensorcore` dot that runs on FMA instead, at debug level. A
+    /// chip without tensor cores falls back by design and says nothing, and
+    /// so does the recording emission, which would repeat every line.
+    fn report_fma_fallback(&self, m: i64, n: i64, k: i64, why: &str) {
+        if self.tensorcore && self.isa.has_wmma() && !matches!(self.policy, SharedPolicy::Record) {
+            phobos_base::phdebug!(
+                "kernel `{}`: @tensorcore dot [{m} x {k}] x [{k} x {n}] runs on FMA: {why}",
+                self.kernel_name
+            );
+        }
+    }
+
     /// Tile-by-tile matmul on the tensor cores: out = a @ b (NN), or
     /// out = a @ b.T (NT, `transpose_b`).
     ///
@@ -220,12 +232,14 @@ impl<'c> Codegen<'c> {
         let (m, n) = (out.shape[0], out.shape[1]);
         let kk = a.shape[1];
         let Some((wm, wn)) = self.has_wmma().then(|| shape::wmma_plan(m, n, kk, self.cta_threads)).flatten() else {
+            self.report_fma_fallback(m, n, kk, "the dims, the k-slice or the warps do not tile 16x16 fragments");
             return Ok(false);
         };
 
         // out must be f32, since the tensor cores accumulate in f32. Operands
         // may be f16 or f32, rounded to f16 when staged.
         if out.elem != self.f32_t || !self.is_f16_or_f32(a.elem) || !self.is_f16_or_f32(b.elem) {
+            self.report_fma_fallback(m, n, kk, "the output is not f32 or an operand is not f16 or f32");
             return Ok(false);
         }
         let (fm, fnn) = ((m / 16) / wm, (n / 16) / wn);

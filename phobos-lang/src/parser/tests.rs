@@ -430,3 +430,78 @@ fn open_ended_range_subscript() {
     assert!(matches!(subs[0], Sub::From(Expr::Int(2))));
     assert!(matches!(subs[1], Sub::Span { .. }));
 }
+
+#[test]
+fn range_to_subscript_starts_at_zero() {
+    let p = parse("kernel k(A: tensor<f32>[M, N]) { let r = A[:4, :] }");
+    let Stmt::Let {
+        value: Expr::Index { subs, .. },
+        ..
+    } = &p[0].body[0]
+    else {
+        panic!("expected an indexed let");
+    };
+    assert!(matches!(
+        subs[0],
+        Sub::Range {
+            start: Expr::Int(0),
+            end: Expr::Int(4)
+        }
+    ));
+    assert!(matches!(subs[1], Sub::Full));
+}
+
+#[test]
+fn break_becomes_a_flag_the_loop_tests() {
+    let b = body(
+        "kernel k(A: tensor<f32>[N], n: i32) {
+            var i = 0
+            while i < n {
+                if A[i] > 0.0 {
+                    break
+                }
+                i = i + 1
+            }
+        }",
+    );
+    // var i, var #break1, while.
+    let [_, Stmt::Var { name: flag, .. }, Stmt::While { cond, body }] = &b[..] else {
+        panic!("unexpected shape: {b:?}");
+    };
+    assert_eq!(flag, "#break1");
+    let Expr::Binary { op: BinOp::And, rhs, .. } = cond else {
+        panic!("the condition does not test the flag: {cond:?}");
+    };
+    assert!(matches!(**rhs, Expr::Unary { op: UnOp::Not, .. }));
+    // The increment runs only when the `if` did not break.
+    let [Stmt::If { then, .. }, Stmt::If { then: rest, r#else: None, .. }] = &body[..] else {
+        panic!("unexpected loop body: {body:?}");
+    };
+    assert!(matches!(&then[..], [Stmt::Assign { .. }]));
+    assert!(matches!(&rest[..], [Stmt::Assign { .. }]));
+}
+
+#[test]
+fn continue_is_cleared_each_iteration() {
+    let b = body(
+        "kernel k(A: tensor<f32>[N], n: i32) {
+            for i in range(0, n) {
+                if A[i] < 0.0 {
+                    continue
+                }
+                A[i] = 1.0
+            }
+        }",
+    );
+    let [Stmt::Var { name: flag, .. }, Stmt::For { body, .. }] = &b[..] else {
+        panic!("unexpected shape: {b:?}");
+    };
+    assert_eq!(flag, "#continue1");
+    let Stmt::Assign {
+        value: Expr::Bool(false),
+        ..
+    } = &body[0]
+    else {
+        panic!("the flag is not cleared first: {body:?}");
+    };
+}

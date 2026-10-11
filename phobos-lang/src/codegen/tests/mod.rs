@@ -14,6 +14,7 @@ mod iq2xxs_qdot;
 mod iq3s_qdot;
 mod iq3xxs_qdot;
 mod iq4xs_qdot;
+mod jumps;
 mod launch;
 mod mask;
 mod math;

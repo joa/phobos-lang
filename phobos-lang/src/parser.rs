@@ -1,6 +1,8 @@
 use super::ast::*;
 use super::token::{Tok, Token};
 
+mod jumps;
+
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
@@ -141,7 +143,7 @@ impl Parser {
         };
         self.expect(Tok::RParen)?;
 
-        let body = self.parse_block()?;
+        let body = jumps::desugar(self.parse_block()?).map_err(|e| format!("kernel `{name}`: {e}"))?;
         Ok(Kernel {
             attrs,
             name,
@@ -296,6 +298,15 @@ impl Parser {
             Tok::If => self.parse_if(),
             Tok::For => self.parse_for(),
             Tok::While => self.parse_while(),
+            Tok::Break | Tok::Continue | Tok::Return => {
+                let which = match self.advance() {
+                    Tok::Break => jumps::BREAK,
+                    Tok::Continue => jumps::CONTINUE,
+                    _ => jumps::RETURN,
+                };
+                self.end_stmt()?;
+                Ok(jumps::jump(which))
+            }
             _ => {
                 let (line, col) = self.pos();
                 let expr = self.parse_expr()?;
@@ -555,6 +566,21 @@ impl Parser {
                             lhs: Box::new(lhs),
                             rhs: Box::new(rhs),
                         }
+                    } else if name == "pow" && args.len() == 2 {
+                        // a^b = e^(b ln a), so it fuses like any per-element tree.
+                        let [base, exponent] = <[Expr; 2]>::try_from(args).expect("two arguments");
+                        let ln = Expr::Call {
+                            callee: "log".into(),
+                            args: vec![base],
+                        };
+                        Expr::Call {
+                            callee: "exp".into(),
+                            args: vec![Expr::Binary {
+                                op: BinOp::Mul,
+                                lhs: Box::new(exponent),
+                                rhs: Box::new(ln),
+                            }],
+                        }
                     } else {
                         Expr::Call { callee: name, args }
                     };
@@ -570,7 +596,14 @@ impl Parser {
 
     fn parse_sub(&mut self) -> Result<Sub, String> {
         if self.consume(&Tok::Colon) {
-            return Ok(Sub::Full); // A[:]
+            if self.matches(&Tok::RBracket) || self.matches(&Tok::Comma) {
+                return Ok(Sub::Full); // A[:]
+            }
+            let end = self.parse_expr()?;
+            return Ok(Sub::Range {
+                start: Expr::Int(0),
+                end,
+            }); // A[: end]
         }
         let start = self.parse_expr()?;
         if self.consume(&Tok::Colon) {
