@@ -49,6 +49,7 @@ mod delta_scan;
 pub(in crate::codegen) use qdecode::QFormat;
 pub(in crate::codegen) use qdot::QWeight;
 pub(in crate::codegen) use qgemm::QgFormat;
+pub(in crate::codegen) use reduce::RowSrc;
 
 /// Activations a lane loads at once in the quantized matvecs. A lane owns a
 /// contiguous run, so a warp covers 1024 bytes in two loads.
