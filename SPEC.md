@@ -40,7 +40,7 @@ dim         = ident | int ;                            (* symbolic size (M, TILE
 
 block       = "{" { stmt } "}" ;
 stmt        = let_stmt | var_stmt | assign_stmt
-            | for_stmt | while_stmt | if_stmt | expr_stmt ;
+            | for_stmt | while_stmt | if_stmt | jump_stmt | expr_stmt ;
 
 let_stmt    = "let" ident [ ":" type ] "=" expr terminator ;
 var_stmt    = "var" ident ( ":" type [ "=" expr ] | "=" expr ) terminator ;
@@ -50,6 +50,7 @@ lvalue      = ident [ "[" subscripts "]" ] ;           (* a name or an indexed n
 for_stmt    = "for" ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
 while_stmt  = "while" expr block ;
 if_stmt     = "if" expr block [ "else" ( block | if_stmt ) ] ;
+jump_stmt   = ( "break" | "continue" | "return" ) terminator ;
 expr_stmt   = expr terminator ;
 
 terminator  = newline | ";" ;                          (* may be omitted before "}" or EOF *)
@@ -72,6 +73,7 @@ primary     = int | float | "true" | "false" | ident | "(" expr ")" ;
 
 subscripts  = subscript { "," subscript } ;
 subscript   = ":"                                      (* full range:  A[:] *)
+            | ":" expr                                 (* from zero:   A[: end] *)
             | expr ":"                                 (* to the end:  A[start :] *)
             | expr [ ( ":" | ":+" ) expr ] ;           (* point A[i] ; range A[start : end] ; span A[start :+ length] *)
 
@@ -85,7 +87,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 
 | Item | Rule |
 |---|---|
-| Keywords | `kernel let var if else for in while true false` |
+| Keywords | `kernel let var if else for in while break continue return true false` |
 | Contextual identifiers | `tensor`, `tile`, `range`, every built-in and every scalar type name. Ordinary identifiers outside their position; `range` is only special inside `for ... in range(...)`. |
 | Comments | `// ...` to end of line. |
 | Statement end | A newline or `;`. Optional before `}` or end of file. |
@@ -118,6 +120,8 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `x op= e` | `x = x op e`, for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. The target is read again, so an indexed target's subscripts are evaluated twice. |
 | `for i in range(lo, hi[, step])` | `i` runs over `lo, lo + step, ...` while `< hi`. `step` defaults to 1. |
 | `while c { }`, `if c { } else { }` | Scalar condition. |
+| `break`, `continue` | Leave the innermost loop, or its current iteration. A `for` runs its remaining iterations as no-ops after a `break`; a `while` stops at its next test. |
+| `return` | Skips the rest of the kernel. |
 
 ## Subscripts
 
@@ -128,6 +132,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `A[s :+ n]` | `s <= i < s + n`, same as `A[s : s + n]` | `A[pm * TM :+ TM, :]` |
 | `A[:]` | The whole dimension | `Q[row :+ BR, :]` |
 | `A[s:]` | `s <= i <` the extent. Never masked. | `A[16:]` |
+| `A[:e]` | `0 <= i < e`, same as `A[0 : e]` | `A[:16]` |
 | `A[:j]` | Not supported; write `A[0 : j]`. | |
 
 All points load one element. A point among slices selects one index and keeps its axis with extent 1, as `i :+ 1` would: `A[i, 0 :+ 64]` is a `[1, 64]` tile.
@@ -190,6 +195,7 @@ Each math call takes a tile or a scalar. On a scalar it computes in `f32`; `abs`
 |---|---|---|
 | `exp(t)` | `e^x` | Approximate (`ex2.approx`). |
 | `log(t)` | `ln x` | Approximate (`lg2.approx`). |
+| `pow(a, b)` | `a^b` | `exp(b * log(a))`, so approximate and for `a > 0`. |
 | `sqrt(t)` | `sqrt(x)` | Approximate (`sqrt.approx.f32`). |
 | `tanh(t)` | `tanh(x)` | Approximate (`tanh.approx.f32`). |
 | `round(t)` | Nearest integer, ties to even | Exact (`cvt.rni`). |
@@ -323,7 +329,7 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 | `@cluster(X in [..], ...)` | Super-tile dimensions and search space for cluster tuning. |
 | `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. Unchecked. |
 | `@launch(threads[, min_blocks[, max_regs]])` | CTA size (default 256), PTX `.maxntid`, `.minnctapersm`, `.maxnreg`. `max_regs` (16..255) is a hard cap; `min_blocks` is advisory. |
-| `@tensorcore` | `dot`/`dot_t` and the GEMM run on tensor cores (sm_70+), operands rounded to f16, f32 accumulation. Uses `mma.sync` + `ldmatrix` with swizzled staging (sm_75+, 64-bit index), else WMMA m16n16k16. Falls back to the f32 path silently unless tile dims and the k-slice are multiples of 16 and the CTA's warps tile the 16x16 fragment grid. |
+| `@tensorcore` | `dot`/`dot_t` and the GEMM run on tensor cores (sm_70+), operands rounded to f16, f32 accumulation. Uses `mma.sync` + `ldmatrix` with swizzled staging (sm_75+, 64-bit index), else WMMA m16n16k16. Falls back to the f32 path unless tile dims and the k-slice are multiples of 16 and the CTA's warps tile the 16x16 fragment grid; `PHOBOS_LOG=debug` names each dot that does, and why. |
 | `@tensorcore(wmma)` | Forces the WMMA m16n16k16 path. |
 | `@tensorcore(sync)` | Same as `@tensorcore`. |
 | `@pipeline` | Double-buffered staging is on by default for every eligible loop. The attribute asserts it: compilation fails if nothing is pipelined. It also enables double buffering for the GEMM's own operand pairs. |

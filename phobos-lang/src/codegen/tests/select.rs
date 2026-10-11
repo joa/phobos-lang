@@ -177,3 +177,17 @@ fn an_untyped_var_takes_a_where() {
     );
     assert_contains(&mlir, &["arith.cmpf ogt", "arith.select"]);
 }
+
+#[test]
+fn pow_is_exp_of_a_scaled_log_on_tiles_and_scalars() {
+    let mlir = emit_mlir(
+        "kernel k(X: tensor<f32>[16, 64], Y: tensor<f32>[16, 64], S: tensor<f32>[N]) {
+            let i = program_id(0)
+            S[i] = pow(S[i], 0.5)
+            var x = X[0 :+ 16, 0 :+ 64]
+            var y = pow(x, 2.2)
+            Y[0 :+ 16, 0 :+ 64] = y
+        }",
+    );
+    assert_contains(&mlir, &["ex2.approx", "lg2.approx"]);
+}
