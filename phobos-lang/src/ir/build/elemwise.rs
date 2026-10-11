@@ -97,6 +97,61 @@ impl Build {
         }
     }
 
+    /// The element type and shape an untyped `var name = value` takes when
+    /// it fuses, read off the named tiles it computes with. None when there
+    /// is no such tile, when they differ in type or rank, or when the tree
+    /// casts: there the unfused path's widening decides the type.
+    pub(crate) fn fused_decl_type(&self, value: &Expr) -> Option<(Scalar, Vec<i64>)> {
+        let mut found = None;
+        self.decl_leaves(value, &mut found).then_some(())?;
+        found
+    }
+
+    fn decl_leaves(&self, value: &Expr, found: &mut Option<(Scalar, Vec<i64>)>) -> bool {
+        match value {
+            Expr::Int(_) | Expr::Float(_) => true,
+            Expr::Var(name) => match self.lookup(name) {
+                Some(Binding::Tile(t) | Binding::View(t)) => {
+                    let (elem, shape) = (self.elem(t), self.shape(t));
+                    let Some((seen_elem, seen_shape)) = found else {
+                        *found = Some((elem, shape));
+                        return true;
+                    };
+                    if *seen_elem != elem || seen_shape.len() != shape.len() {
+                        return false;
+                    }
+                    match super::broadcast_shape(seen_shape, &shape) {
+                        Some(joined) => {
+                            *seen_shape = joined;
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                _ => true,
+            },
+            Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
+                self.decl_leaves(lhs, found) && self.decl_leaves(rhs, found)
+            }
+            Expr::Unary {
+                op: UnOp::Neg | UnOp::BitNot,
+                rhs,
+            } => self.decl_leaves(rhs, found),
+            Expr::Call { callee, args } => match (callee.as_str(), &args[..]) {
+                ("iota", _) => true,
+                ("tmax", [a, b]) | ("where", [_, a, b]) => {
+                    self.decl_leaves(a, found) && self.decl_leaves(b, found)
+                }
+                (callee, [a]) => {
+                    matches!(ElemStep::from_callee(callee), Some(s) if !matches!(s, ElemStep::Cast(_)))
+                        && self.decl_leaves(a, found)
+                }
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
     /// Interior nodes of a `where` condition: comparisons of fusable trees,
     /// joined by `&&` and `||`.
     fn fusable_cond(&self, cond: &Expr) -> Option<usize> {
