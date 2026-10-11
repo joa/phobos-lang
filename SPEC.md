@@ -188,6 +188,8 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
 | `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
 | `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |
+| `load_acquire(t, i)` | `i32` | `t[i]` read at system scope with acquire ordering, once per block, every thread getting it; what the host wrote before raising `t[i]` is visible afterwards. `while load_acquire(F, 0) == 0 {}` waits on a host flag. | `t` a named `i32` tensor parameter. Compiles at 64-bit indices. |
+| `store_release(t, i, v)` | index `0` | `t[i] = v` at system scope with release ordering, once per block, after every thread's earlier writes. | As `load_acquire`. |
 
 ### Elementwise
 

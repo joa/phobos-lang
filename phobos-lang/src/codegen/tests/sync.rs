@@ -255,3 +255,31 @@ fn a_claimed_slot_steers_uniform_control_flow() {
     );
     assert_contains(&mlir, &["memref.generic_atomic_rmw", "gpu.shuffle"]);
 }
+
+/// A device-side wait on a flag the host raises, then a release that lowers
+/// it: the expert hand-off's shape.
+const HANDOFF: &str = "kernel wait(F: tensor<i32>[1, 1], Y: tensor<f32>[1, 64], D: tensor<f32>[1, 64]) {
+    while load_acquire(F, 0) == 0 {
+    }
+    var y = Y[0 :+ 1, 0 :+ 64]
+    var d = D[0 :+ 1, 0 :+ 64]
+    D[0 :+ 1, 0 :+ 64] = d + y
+    store_release(F, 0, 0)
+}";
+
+#[test]
+fn system_scope_access_is_one_thread_and_a_fence() {
+    let mlir = emit_mlir_sync(HANDOFF, "sm_75");
+    assert_contains(
+        &mlir,
+        &["ld.acquire.sys.global.u32", "fence.acq_rel.sys", "st.release.sys.global.u32", "scf.while"],
+    );
+}
+
+#[test]
+fn system_scope_access_widens_the_index() {
+    let kernels = crate::parse(HANDOFF).unwrap();
+    assert!(crate::needs_wide_index(&phobos_base::context::Context::default(), &kernels));
+    let e = emit_err(HANDOFF);
+    assert!(e.contains("needs 64-bit indices"), "got: {e}");
+}

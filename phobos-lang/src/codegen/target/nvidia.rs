@@ -32,6 +32,99 @@ impl Nvidia {
         Nvidia { cc, index_bits }
     }
 
+    /// The global address of `mem[indices]` as an `!llvm.ptr`, from the
+    /// memref's aligned base, offset and strides. Formed in `index`, so it
+    /// is only whole at 64-bit indices.
+    fn element_ptr<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<Value<'c, 'c>> {
+        if self.index_bits < 64 {
+            bail!("a system-scope access forms a 64-bit address and needs 64-bit indices");
+        }
+        let rank = indices.len();
+        let bytes = cg
+            .elem_bytes(mem.elem)
+            .ok_or_else(|| anyhow!("prefetch of an element of unknown size"))?;
+        let index_t = cg.index_t;
+        let space = MemRefType::try_from(mem.mem.r#type())
+            .ok()
+            .and_then(|t| t.memory_space());
+        let base_t: Type<'c> = MemRefType::new(mem.elem, &[], None, space).into();
+        let mut results = vec![base_t, index_t];
+        results.extend(std::iter::repeat_n(index_t, 2 * rank));
+        let meta = block.append_operation(
+            OperationBuilder::new("memref.extract_strided_metadata", cg.loc)
+                .add_operands(&[mem.mem])
+                .add_results(&results)
+                .build()?,
+        );
+        let result = |k: usize| -> Result<Value<'c, 'c>> { Ok(detach(meta.result(k)?.into())) };
+        let mut elem_off = result(1)?;
+        for (k, &idx) in indices.iter().enumerate() {
+            let stride = result(2 + rank + k)?;
+            let step = cg.muli(block, idx, stride)?;
+            elem_off = cg.addi(block, elem_off, step)?;
+        }
+        let byte_off = if bytes == 1 {
+            elem_off
+        } else {
+            let scale = cg.const_index(block, i64::from(bytes))?;
+            cg.muli(block, elem_off, scale)?
+        };
+        let base = cg.push(
+            block,
+            OperationBuilder::new("memref.extract_aligned_pointer_as_index", cg.loc)
+                .add_operands(&[mem.mem])
+                .add_results(&[index_t])
+                .build()?,
+        )?;
+        let addr = cg.addi(block, base, byte_off)?;
+        let i64_t: Type<'c> = IntegerType::new(cg.ctx, 64).into();
+        let addr = cg.push(block, arith::index_cast(addr, i64_t, cg.loc))?;
+        let ptr_t = cg.parse_type("!llvm.ptr")?;
+        let ptr = cg.push(
+            block,
+            OperationBuilder::new("llvm.inttoptr", cg.loc)
+                .add_operands(&[addr])
+                .add_results(&[ptr_t])
+                .build()?,
+        )?;
+        Ok(ptr)
+    }
+
+    /// One side-effecting inline PTX statement, with a result when `result`
+    /// is given.
+    fn asm<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        operands: &[Value<'c, 'c>],
+        text: &str,
+        constraints: &str,
+        result: Option<Type<'c>>,
+    ) -> Result<Option<Value<'c, 'c>>> {
+        let op = OperationBuilder::new("llvm.inline_asm", cg.loc)
+            .add_operands(operands)
+            .add_attributes(&[
+                (cg.id("asm_string"), cg.parse_attr(&format!("\"{text}\""))?),
+                (cg.id("constraints"), cg.parse_attr(&format!("\"{constraints}\""))?),
+                (cg.id("has_side_effects"), cg.parse_attr("unit")?),
+            ])
+            .add_results(result.as_slice())
+            .build()?;
+        match result {
+            Some(_) => Ok(Some(cg.push(block, op)?)),
+            None => {
+                block.append_operation(op);
+                Ok(None)
+            }
+        }
+    }
+
     /// One PTX instruction over an f32, through llvm.inline_asm.
     ///
     /// The math dialect cannot be used here. convert-math-to-llvm runs first
@@ -628,9 +721,8 @@ impl Isa for Nvidia {
         )
     }
 
-    /// `prefetch.L2` on the byte address of `mem[indices]`, computed from the
-    /// memref's aligned base, offset and strides. `memref.prefetch` is not
-    /// used because NVPTX drops the `llvm.prefetch` it lowers to.
+    /// `prefetch.L2` on the byte address of `mem[indices]`. `memref.prefetch`
+    /// is not used because NVPTX drops the `llvm.prefetch` it lowers to.
     fn prefetch_read<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -644,65 +736,39 @@ impl Isa for Nvidia {
         if self.index_bits < 64 {
             return Ok(());
         }
-        let rank = indices.len();
-        let bytes = cg
-            .elem_bytes(mem.elem)
-            .ok_or_else(|| anyhow!("prefetch of an element of unknown size"))?;
-        let index_t = cg.index_t;
-        let space = MemRefType::try_from(mem.mem.r#type())
-            .ok()
-            .and_then(|t| t.memory_space());
-        let base_t: Type<'c> = MemRefType::new(mem.elem, &[], None, space).into();
-        let mut results = vec![base_t, index_t];
-        results.extend(std::iter::repeat_n(index_t, 2 * rank));
-        let meta = block.append_operation(
-            OperationBuilder::new("memref.extract_strided_metadata", cg.loc)
-                .add_operands(&[mem.mem])
-                .add_results(&results)
-                .build()?,
-        );
-        let result = |k: usize| -> Result<Value<'c, 'c>> { Ok(detach(meta.result(k)?.into())) };
-        let mut elem_off = result(1)?;
-        for (k, &idx) in indices.iter().enumerate() {
-            let stride = result(2 + rank + k)?;
-            let step = cg.muli(block, idx, stride)?;
-            elem_off = cg.addi(block, elem_off, step)?;
-        }
-        let byte_off = if bytes == 1 {
-            elem_off
-        } else {
-            let scale = cg.const_index(block, i64::from(bytes))?;
-            cg.muli(block, elem_off, scale)?
-        };
-        let base = cg.push(
-            block,
-            OperationBuilder::new("memref.extract_aligned_pointer_as_index", cg.loc)
-                .add_operands(&[mem.mem])
-                .add_results(&[index_t])
-                .build()?,
-        )?;
-        let addr = cg.addi(block, base, byte_off)?;
-        let i64_t: Type<'c> = IntegerType::new(cg.ctx, 64).into();
-        let addr = cg.push(block, arith::index_cast(addr, i64_t, cg.loc))?;
-        let ptr_t = cg.parse_type("!llvm.ptr")?;
-        let ptr = cg.push(
-            block,
-            OperationBuilder::new("llvm.inttoptr", cg.loc)
-                .add_operands(&[addr])
-                .add_results(&[ptr_t])
-                .build()?,
-        )?;
+        let ptr = self.element_ptr(cg, block, mem, indices)?;
         // Inline PTX: `nvvm.prefetch`'s cache-level attribute has no text form.
-        block.append_operation(
-            OperationBuilder::new("llvm.inline_asm", cg.loc)
-                .add_operands(&[ptr])
-                .add_attributes(&[
-                    (cg.id("asm_string"), cg.parse_attr("\"prefetch.L2 [$0];\"")?),
-                    (cg.id("constraints"), cg.parse_attr("\"l\"")?),
-                    (cg.id("has_side_effects"), cg.parse_attr("unit")?),
-                ])
-                .build()?,
-        );
+        self.asm(cg, block, &[ptr], "prefetch.L2 [$0];", "l", None)?;
+        Ok(())
+    }
+
+    fn load_acquire_sys<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+    ) -> Result<Value<'c, 'c>> {
+        let ptr = self.element_ptr(cg, block, mem, indices)?;
+        let v = self.asm(cg, block, &[ptr], "ld.acquire.sys.global.u32 $0, [$1];", "=r,l,~{memory}", Some(cg.i32_t))?;
+        Ok(v.expect("the load has a result"))
+    }
+
+    fn store_release_sys<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        indices: &[Value<'c, 'c>],
+        v: Value<'c, 'c>,
+    ) -> Result<()> {
+        let ptr = self.element_ptr(cg, block, mem, indices)?;
+        self.asm(cg, block, &[ptr, v], "st.release.sys.global.u32 [$0], $1;", "l,r,~{memory}", None)?;
+        Ok(())
+    }
+
+    fn fence_sys<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()> {
+        self.asm(cg, block, &[], "fence.acq_rel.sys;", "~{memory}", None)?;
         Ok(())
     }
 

@@ -100,3 +100,16 @@ fn unsigned_reads_zero_extend_in_ptx() {
         assert!(!code.contains(".s8") && !code.contains(".s16"), "{chip}: a signed narrow read in:\n{code}");
     }
 }
+
+#[test]
+fn system_scope_reaches_ptx_widened() {
+    // Asked for 32 bits, compiled at 64, since the address must be whole.
+    let src = "kernel k(F: tensor<i32>[1, 1], O: tensor<i32>[1, 1]) {
+        O[0, 0] = load_acquire(F, 0)
+        store_release(F, 0, 0)
+    }";
+    let code = ptx(src, "sm_75", 32);
+    for want in ["ld.acquire.sys.global.u32", "st.release.sys.global.u32", "fence.acq_rel.sys"] {
+        assert!(code.contains(want), "no {want} in:\n{code}");
+    }
+}

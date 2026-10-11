@@ -388,6 +388,13 @@ pub enum OpKind {
     AtomicCas,
     /// Aborts the kernel: a launch broke a promise the code relies on.
     Trap,
+    /// `(tensor, slot) -> value`: a system-scope acquire load of an `i32`
+    /// slot, once per CTA, so that what the host wrote before raising it is
+    /// visible to every thread.
+    LoadAcquire,
+    /// `(tensor, slot, value) -> 0`: a system-scope release store, once per
+    /// CTA, after every thread's earlier writes.
+    StoreRelease,
 
     // Control. Each owns blocks; the body's terminator carries the
     // loop-carried values back.
@@ -516,6 +523,8 @@ impl OpKind {
             OpKind::AtomicAdd => "atomic_add".into(),
             OpKind::AtomicCas => "atomic_cas".into(),
             OpKind::Trap => "trap".into(),
+            OpKind::LoadAcquire => "load_acquire".into(),
+            OpKind::StoreRelease => "store_release".into(),
             OpKind::For(info) => {
                 let mut out = match info.bounds {
                     Bounds::Affine { lo, hi, step } => format!("for {lo}..{hi} step {step}"),
@@ -662,7 +671,7 @@ impl OpKind {
         match self {
             OpKind::Store => vec![1],
             OpKind::AtomicAdd | OpKind::AtomicCas => vec![0],
-            OpKind::GridBarrier => vec![0],
+            OpKind::GridBarrier | OpKind::StoreRelease => vec![0],
             OpKind::Copy { .. }
             | OpKind::Convert
             | OpKind::Fill

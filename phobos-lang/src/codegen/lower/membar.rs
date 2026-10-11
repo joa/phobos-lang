@@ -85,6 +85,8 @@ impl Membar<'_> {
                 | OpKind::Barrier
                 | OpKind::AtomicAdd
                 | OpKind::AtomicCas
+                | OpKind::LoadAcquire
+                | OpKind::StoreRelease
                 | OpKind::Intrinsic(crate::ir::Intrinsic::WarpPartial)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::DeltaScan)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::RmsNormQ)

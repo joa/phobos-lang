@@ -165,6 +165,24 @@ impl<'c> Codegen<'c> {
                 block.append_operation(OperationBuilder::new("llvm.intr.trap", self.loc).build()?);
                 return Ok(());
             }
+            OpKind::LoadAcquire | OpKind::StoreRelease => {
+                let mv = self.tile_ir(ir, ir.operand(op, 0))?;
+                let idx = self.scalar_ir(ir.operand(op, 1))?;
+                let mut at = vec![idx];
+                for _ in 1..mv.shape.len() {
+                    at.push(self.const_index(block, 0)?);
+                }
+                if matches!(ir.kind(op), OpKind::StoreRelease) {
+                    let v = self.scalar_ir(ir.operand(op, 2))?;
+                    self.barrier(block)?;
+                    self.leader(block, |cg, blk| cg.store_release_sys(blk, &mv, &at, v))?;
+                    self.const_index(block, 0)?
+                } else {
+                    let v = self.cta_atomic(block, self.i32_t, |cg, blk| cg.load_acquire_sys(blk, &mv, &at))?;
+                    self.fence_sys(block)?;
+                    v
+                }
+            }
             OpKind::GridBarrier => {
                 let mv = self.tile_ir(ir, ir.operand(op, 0))?;
                 self.grid_barrier_raw(block, mv.mem, mv.shape.len())?;

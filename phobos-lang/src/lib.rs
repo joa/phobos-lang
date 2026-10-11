@@ -139,11 +139,12 @@ pub struct CompileOutput {
 
 /// Whether a module of `kernels` has to be indexed at 64 bits on the
 /// context's chip, whatever width was asked for. A kernel that wants
-/// `ldmatrix` needs it, and so does the `@tensorcore` path's `mma.sync` with
+/// `ldmatrix` needs it, as does a system-scope load or store, and so does
+/// the `@tensorcore` path's `mma.sync` with
 /// `cp.async` staging. That path is taken from sm_80 on; sm_75 stays on WMMA
 /// at 32 bits.
 pub fn needs_wide_index(context: &phobos_base::context::Context, kernels: &[ast::Kernel]) -> bool {
-    kernels.iter().any(ast::Kernel::wants_ldmatrix)
+    kernels.iter().any(|k| k.wants_ldmatrix() || k.wants_system_scope())
         || (context.gpu_config.compute_capability() >= 80 && requires_wide_index(kernels))
 }
 
