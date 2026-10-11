@@ -63,6 +63,7 @@ impl Build {
             Expr::Int(_) | Expr::Float(_) => Some(0),
             Expr::Var(name) => match self.lookup(name)? {
                 Binding::Let { .. } | Binding::Var { .. } => Some(0),
+                Binding::Regs(_) => self.fusing_regs.then_some(0),
                 // An unsigned tile is read only through a cast, below.
                 Binding::Tile(t) | Binding::View(t) => (!self.is_masked(t)
                     && !self.shape(t).contains(&DYN)
@@ -251,6 +252,13 @@ impl Build {
                 let b = self.plan_fused(&args[1], plan)?;
                 Tree::Max(Box::new(a), Box::new(b))
             }
+            Expr::Var(name) if self.fusing_regs && matches!(self.lookup(name), Some(Binding::Regs(_))) => {
+                let Some(Binding::Regs(r)) = self.lookup(name) else {
+                    unreachable!("matched above");
+                };
+                plan.operands.push(r);
+                Tree::Leaf(plan.operands.len() - 1)
+            }
             other => match self.emit_expr(other)? {
                 Rv::Scalar(v) => self.scalar_leaf(v, plan)?,
                 Rv::Tile(t) => {
@@ -360,9 +368,33 @@ impl Build {
         Ok(Some(self.value(kind, &plan.operands, ty)))
     }
 
+    /// The tree and operands of a register tile's update, or None when
+    /// `value` is not per-element. Only here may a register tile be a leaf.
+    pub(crate) fn plan_regs(&mut self, value: &Expr, elem: Scalar, shape: &[i64]) -> Result<Option<(Tree, Vec<ValueId>)>> {
+        self.fusing_regs = true;
+        let planned = if self.fusable_nodes(value).is_some() {
+            let mut plan = Plan {
+                elem,
+                in_compare: false,
+                rank: shape.len(),
+                operands: Vec::new(),
+                leaves: Vec::new(),
+            };
+            self.plan_fused(value, &mut plan).map(|tree| Some((tree, plan)))
+        } else {
+            Ok(None)
+        };
+        self.fusing_regs = false;
+        let Some((tree, plan)) = planned? else {
+            return Ok(None);
+        };
+        self.check_leaves(&plan.leaves, shape)?;
+        Ok(Some((tree, plan.operands)))
+    }
+
     /// Every tile leaf broadcasts to `shape` and is unmasked: the sweep
     /// indexes by `shape` and ignores masks.
-    fn check_leaves(&self, leaves: &[ValueId], shape: &[i64]) -> Result<()> {
+    pub(crate) fn check_leaves(&self, leaves: &[ValueId], shape: &[i64]) -> Result<()> {
         for &leaf in leaves {
             let lshape = self.shape(leaf);
             let fits = lshape.len() == shape.len()

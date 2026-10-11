@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use super::{Binding, Build, Rv};
 use crate::ast::{AssignOp, BinOp, Expr};
-use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, ValueId};
+use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, Type, ValueId};
 
 impl Build {
     /// Lowers `target op= value` for a tile-shaped target.
@@ -10,6 +10,17 @@ impl Build {
     /// Tries a cascade of forms in order. The first that matches decides
     /// which emitter runs.
     pub(crate) fn store_tile(&mut self, target: ValueId, op: AssignOp, value: &Expr) -> Result<()> {
+        // <slice or tile> = a register tile of its shape: each thread writes
+        // its own elements.
+        if let Expr::Var(n) = value
+            && let Some(Binding::Regs(r)) = self.lookup(n)
+            && op == AssignOp::Set
+            && !self.is_masked(target)
+            && matches!(self.ir.ty(r), Type::Regs(t) if t.shape == self.shape(target))
+        {
+            self.stmt(OpKind::RegsStore, &[r, target]);
+            return Ok(());
+        }
         // <tensor slice> = acc for a fragment accumulator.
         if let Expr::Var(n) = value
             && let Some(Binding::Frags(fa)) = self.lookup(n)

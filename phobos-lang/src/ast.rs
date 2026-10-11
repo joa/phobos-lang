@@ -198,6 +198,7 @@ impl Kernel {
             "padstage",
             "persistent",
             "pipeline",
+            "registers",
             "tensorcore",
         ];
         match self.attrs.iter().find(|a| !KNOWN.contains(&a.name.as_str())) {
@@ -232,6 +233,19 @@ impl Kernel {
     /// needs the module indexed at 64 bits.
     pub fn wants_ldmatrix(&self) -> bool {
         self.calls(|callee| callee.ends_with("_qgemm_t"))
+    }
+
+    /// The tiles `@registers(a, b, ..)` asks to keep in registers.
+    pub fn register_tiles(&self) -> Vec<String> {
+        self.attrs
+            .iter()
+            .filter(|a| a.name == "registers")
+            .flat_map(|a| a.args.iter())
+            .filter_map(|arg| match arg {
+                AttrArg::Positional(Literal::Ident(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     /// True when the kernel reads or writes at system scope, which forms

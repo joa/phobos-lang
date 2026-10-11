@@ -28,6 +28,7 @@ pub fn verify(ir: &Ir) -> Result<()> {
     }
 }
 
+mod regs;
 mod scalar;
 
 struct Verifier<'a> {
@@ -482,6 +483,7 @@ impl Verifier<'_> {
                     self.err(op, "does not end a block of the op that takes it");
                 }
             }
+            OpKind::RegsFill | OpKind::RegsFused(_) | OpKind::RegsStore => self.regs(op, &kind),
             OpKind::Barrier | OpKind::Trap => {
                 self.want_operands(op, 0);
                 self.want_results(op, 0);
@@ -823,6 +825,7 @@ impl Verifier<'_> {
             super::Tree::Leaf(i) => {
                 if let Some(&v) = self.ir.operands(op).get(*i)
                     && !self.is_tile(v)
+                    && !matches!(self.ir.ty(v), Type::Regs(_))
                 {
                     self.err(op, format!("tree leaf {i} must be a tile"));
                 }
@@ -838,6 +841,10 @@ impl Verifier<'_> {
                 // A fused reduction sweeps a rank-2 argument and has no target.
                 let rank = match self.ir.kind(op) {
                     OpKind::ReduceFused { .. } => Some(2),
+                    OpKind::RegsFused(_) => match self.ir.ty(self.ir.result(op)) {
+                        Type::Regs(r) => Some(r.shape.len()),
+                        _ => None,
+                    },
                     _ => self.ir.operands(op).last().map(|&t| self.rank(t)),
                 };
                 if rank.is_some_and(|rank| *d >= rank) {

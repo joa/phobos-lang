@@ -22,6 +22,7 @@ impl Build {
                 Some(Binding::Frags(_)) => bail!(
                     "fragment accumulator '{name}' can only be scaled, dot-accumulated, or stored"
                 ),
+                Some(Binding::Regs(r)) => Ok(Rv::Tile(self.materialize_regs(r)?)),
                 None => match self.shape_env.get(name) {
                     Some(&v) => Ok(Rv::Scalar(self.const_index(v))),
                     None => bail!("unknown identifier '{name}'"),

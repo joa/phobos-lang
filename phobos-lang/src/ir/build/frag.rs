@@ -297,7 +297,7 @@ impl Build {
                     target: Expr::Var(n),
                     ..
                 } if !names.contains(n) => {
-                    if matches!(self.lookup(n), Some(Binding::Frags(_))) {
+                    if matches!(self.lookup(n), Some(Binding::Frags(_) | Binding::Regs(_))) {
                         names.push(n.clone());
                     }
                 }
@@ -321,13 +321,18 @@ impl Build {
         hoisted: &[ValueId],
     ) -> Result<()> {
         let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
+        // Fragments and register tiles both ride the loop as carried values.
         let mut inits = Vec::new();
+        let mut kinds = Vec::new();
         for name in names {
-            let Some(Binding::Frags(fa)) = self.lookup(name) else {
-                bail!("'{name}' is not fragment-bound");
-            };
-            inits.push(fa);
+            match self.lookup(name) {
+                Some(Binding::Frags(fa)) => inits.push(fa),
+                Some(Binding::Regs(r)) => inits.push(r),
+                _ => bail!("'{name}' is not register-bound"),
+            }
+            kinds.push(matches!(self.lookup(name), Some(Binding::Regs(_))));
         }
+        let rebind = |regs: bool, v: ValueId| if regs { Binding::Regs(v) } else { Binding::Frags(v) };
         let mut arg_types = vec![Type::INDEX];
         arg_types.extend(inits.iter().map(|&v| self.ir.ty(v).clone()));
         let block = self.ir.new_block(&arg_types);
@@ -337,14 +342,14 @@ impl Build {
         let finals = self.in_block(block, |b| {
             b.push_scope();
             b.bind(var, Binding::Let { value: iv, div: iv_div });
-            for (name, &arg) in names.iter().zip(&args) {
-                b.bind(name, Binding::Frags(arg));
+            for ((name, &arg), &regs) in names.iter().zip(&args).zip(&kinds) {
+                b.bind(name, rebind(regs, arg));
             }
             let finals = b.emit_stmts(body).and_then(|()| {
                 let mut finals = Vec::with_capacity(names.len());
                 for name in names {
-                    let Some(Binding::Frags(fa)) = b.lookup(name) else {
-                        bail!("'{name}' lost its fragment binding in the loop body");
+                    let (Some(Binding::Frags(fa)) | Some(Binding::Regs(fa))) = b.lookup(name) else {
+                        bail!("'{name}' lost its register binding in the loop body");
                     };
                     finals.push(fa);
                 }
@@ -373,8 +378,8 @@ impl Build {
             vec![block],
         );
         let results = self.ir.results(op).to_vec();
-        for (name, result) in names.iter().zip(results) {
-            self.update_binding(name, Binding::Frags(result));
+        for ((name, result), &regs) in names.iter().zip(results).zip(&kinds) {
+            self.update_binding(name, rebind(regs, result));
         }
         Ok(())
     }

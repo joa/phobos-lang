@@ -1,6 +1,7 @@
 mod control;
 mod intrinsics;
 mod pipeline;
+mod regs;
 pub(super) mod membar;
 pub(super) mod plan;
 mod scalar;
@@ -29,6 +30,7 @@ pub(super) enum Lowered<'c> {
     Tile(MemVal<'c>),
     Frags(FragAcc<'c>),
     Gemm(GemmAcc<'c>),
+    Regs(regs::RegTile<'c>),
 }
 
 impl<'c> Codegen<'c> {
@@ -295,6 +297,7 @@ impl<'c> Codegen<'c> {
             | OpKind::FragStore
             | OpKind::GemmInit
             | OpKind::GemmStore { .. } => self.emit_intrinsic_op(block, ir, op),
+            OpKind::RegsFill | OpKind::RegsFused(_) | OpKind::RegsStore => self.emit_regs_op(block, ir, op),
             _ => self.emit_tile_op(block, ir, op),
         }
     }

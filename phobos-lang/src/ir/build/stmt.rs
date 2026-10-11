@@ -26,7 +26,11 @@ impl Build {
                 }
             }
             Stmt::Var { name, ty, value } => {
-                if let Some(AstType::Tile(scalar, dims)) = ty {
+                if let Some(AstType::Tile(scalar, dims)) = ty
+                    && self.registers.contains(name)
+                {
+                    self.emit_regs_decl(name, *scalar, dims, value.as_ref())?;
+                } else if let Some(AstType::Tile(scalar, dims)) = ty {
                     let tile = match value {
                         Some(value) => self.emit_tile_decl(*scalar, dims, value)?,
                         None => self.alloc_tile(*scalar, dims)?,
@@ -222,6 +226,7 @@ impl Build {
                 }
                 Some(Binding::Tile(tile)) => self.store_tile(tile, op, value)?,
                 Some(Binding::Frags(fa)) => self.emit_frag_assign(name, fa, op, value)?,
+                Some(Binding::Regs(r)) => self.emit_regs_assign(name, r, op, value)?,
                 Some(Binding::View(_)) => {
                     bail!("'{name}' is a read-only view; declare it with `var` to assign")
                 }
@@ -470,6 +475,7 @@ impl Build {
     }
 
     fn emit_while(&mut self, cond: &Expr, body: &[Stmt]) -> Result<()> {
+        self.check_regs_unassigned(body, "a `while`")?;
         let before = self.ir.new_block(&[]);
         self.in_block(before, |b| {
             let c = b.emit_scalar(cond)?;
@@ -488,6 +494,8 @@ impl Build {
     }
 
     fn emit_if(&mut self, cond: &Expr, then: &[Stmt], els: Option<&[Stmt]>) -> Result<()> {
+        self.check_regs_unassigned(then, "an `if`")?;
+        self.check_regs_unassigned(els.unwrap_or_default(), "an `if`")?;
         let c = self.emit_scalar(cond)?;
         let c = self.expect_bool(c, "if condition")?;
         let then_block = self.ir.new_block(&[]);
