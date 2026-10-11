@@ -6,6 +6,7 @@
 mod basic;
 mod delta;
 mod dot;
+mod functions;
 mod iq1m_qdot;
 mod iq1s_qdot;
 mod iq2s_qdot;

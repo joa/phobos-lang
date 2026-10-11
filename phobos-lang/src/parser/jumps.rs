@@ -42,6 +42,15 @@ struct Desugar {
     ret: Option<String>,
 }
 
+/// The jump in a function body that would leave it: a `return`, or a
+/// `break` or `continue` outside the body's own loops.
+pub(super) fn escaping(body: &[Stmt]) -> Option<&'static str> {
+    [RETURN, BREAK, CONTINUE]
+        .into_iter()
+        .find(|&which| body.iter().any(|s| uses(s, which, which == RETURN)))
+        .map(|which| &which[1..])
+}
+
 /// Lowers every jump in a kernel body.
 pub(super) fn desugar(body: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
     let any = |which| body.iter().any(|s| uses(s, which, true));

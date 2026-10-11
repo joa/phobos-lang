@@ -288,6 +288,7 @@ impl<'a> Lexer<'a> {
         }
         match s.as_str() {
             "kernel" => Tok::Kernel,
+            "fn" => Tok::Fn,
             "let" => Tok::Let,
             "var" => Tok::Var,
             "if" => Tok::If,

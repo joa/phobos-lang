@@ -1,6 +1,7 @@
 use super::ast::*;
 use super::token::{Tok, Token};
 
+mod functions;
 mod jumps;
 
 pub struct Parser {
@@ -110,15 +111,52 @@ impl Parser {
     }
 
     pub fn parse_program(&mut self) -> Result<Vec<Kernel>, String> {
-        let mut out = Vec::new();
+        let mut kernels = Vec::new();
+        let mut fns = Vec::new();
         while !self.matches(&Tok::Eof) {
             // tolerate terminators between kernels (e.g. after a body's '}')
             if self.consume(&Tok::Semicolon) {
                 continue;
             }
-            out.push(self.parse_kernel()?);
+            if self.matches(&Tok::Fn) {
+                fns.push(self.parse_function()?);
+            } else {
+                kernels.push(self.parse_kernel()?);
+            }
         }
-        Ok(out)
+        // Functions are inlined first, so a jump they splice in is lowered
+        // with the caller's loops.
+        functions::inline(&mut kernels, &fns)?;
+        for kernel in &mut kernels {
+            let body = std::mem::take(&mut kernel.body);
+            kernel.body = jumps::desugar(body).map_err(|e| format!("kernel `{}`: {e}", kernel.name))?;
+        }
+        Ok(kernels)
+    }
+
+    /// `fn name(params) = expr` or `fn name(params) { stmts }`.
+    fn parse_function(&mut self) -> Result<functions::Function, String> {
+        self.expect(Tok::Fn)?;
+        let name = self.ident()?;
+        self.expect(Tok::LParen)?;
+        let params = if self.matches(&Tok::RParen) {
+            Vec::new()
+        } else {
+            self.comma_separated(Self::ident)?
+        };
+        self.expect(Tok::RParen)?;
+        let body = if self.consume(&Tok::Eq) {
+            let e = self.parse_expr()?;
+            self.end_stmt()?;
+            functions::Body::Expr(e)
+        } else {
+            let body = self.parse_block()?;
+            if let Some(jump) = jumps::escaping(&body) {
+                return Err(format!("function `{name}`: `{jump}` would leave the function body"));
+            }
+            functions::Body::Stmts(body)
+        };
+        Ok(functions::Function { name, params, body })
     }
 
     fn parse_kernel(&mut self) -> Result<Kernel, String> {
@@ -143,7 +181,7 @@ impl Parser {
         };
         self.expect(Tok::RParen)?;
 
-        let body = jumps::desugar(self.parse_block()?).map_err(|e| format!("kernel `{name}`: {e}"))?;
+        let body = self.parse_block()?;
         Ok(Kernel {
             attrs,
             name,
