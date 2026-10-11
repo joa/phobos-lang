@@ -116,7 +116,7 @@ impl<'c> Codegen<'c> {
 
         let mut mask = WARP / 2;
         while mask >= 1 {
-            let other = self.shfl_xor_f32(&body, acc, mask)?;
+            let other = self.shfl_xor(&body, acc, mask)?;
             acc = self.push(&body, arith::addf(acc, other, self.loc))?;
             mask /= 2;
         }

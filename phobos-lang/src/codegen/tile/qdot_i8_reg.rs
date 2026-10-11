@@ -221,7 +221,7 @@ impl<'c> Codegen<'c> {
 
         // Sum the column's four quarters.
         for mask in [1, 2] {
-            let other = self.shfl_xor_f32(&body, acc, mask)?;
+            let other = self.shfl_xor(&body, acc, mask)?;
             acc = self.push(&body, arith::addf(acc, other, self.loc))?;
         }
         let is_lead = self.push(

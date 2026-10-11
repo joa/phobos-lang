@@ -57,3 +57,13 @@ fn a_reduction_of_a_slice_still_materializes() {
     );
     assert_contains(&mlir, &["arith.mulf", "arith.addf"]);
 }
+
+#[test]
+fn an_integer_row_reduction_shuffles() {
+    for (reduce, op) in [("rowsum", "arith.addi"), ("rowmax", "arith.maxsi")] {
+        let mlir = emit_mlir(&reduce_kernel("i32", reduce, "x"));
+        assert_contains(&mlir, &[": i32", op]);
+        let shuffles_i32 = mlir.lines().any(|l| l.contains("gpu.shuffle") && l.ends_with(": i32"));
+        assert!(shuffles_i32, "{reduce}:\n{mlir}");
+    }
+}
