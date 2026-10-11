@@ -386,7 +386,7 @@ impl Emit {
                     let _ = write!(
                         self.body,
                         "      var h{s}_{b}: tile<f32>[1, {q8}] = {hn}[0 :+ 1, {off} :+ {q8}]
-      var m{s}_{b}: tile<f32>[1, 1] = rowmax(tmax(h{s}_{b}, -h{s}_{b}))
+      var m{s}_{b}: tile<f32>[1, 1] = rowmax(abs(h{s}_{b}))
       var q{s}_{b} = h{s}_{b} * (127.0 / (m{s}_{b} + {QUANT_EPS}))
       {qs}[{row} :+ 1, 0 :+ {q8}] = i8(i32(round(q{s}_{b})))
       {sc}[{row} :+ 1, 0 :+ 1] = m{s}_{b} / 127.0
@@ -410,7 +410,7 @@ impl Emit {
                 // fusion needs a named tile, not an expression.
                 let _ = write!(
                     self.body,
-                    "      var m{s}: tile<f32>[1, 1] = rowmax(tmax({hn}, -{hn}))
+                    "      var m{s}: tile<f32>[1, 1] = rowmax(abs({hn}))
       var q{s} = {hn} * (127.0 / (m{s} + {QUANT_EPS}))
       {qs}[{unit} :+ 1, 0 :+ {q8}] = i8(i32(round(q{s})))
       {sc}[{unit} :+ 1, 0 :+ 1] = m{s} / 127.0
@@ -481,7 +481,7 @@ impl Emit {
         var a{s}: tile<f32>[1, 1] = {src}[0 :+ 1, {da} + {unit} :+ 1] \
 + {bs}[0 :+ 1, {unit} :+ 1]
         var z{s}: tile<f32>[1, 1] = 0.0
-        var sp{s}: tile<f32>[1, 1] = tmax(a{s}, z{s}) + log(1.0 + exp(-tmax(a{s}, -a{s})))
+        var sp{s}: tile<f32>[1, 1] = tmax(a{s}, z{s}) + log(1.0 + exp(-abs(a{s})))
         {dst}[0 :+ 1, {dec} + {unit} :+ 1] = exp({rt}[0 :+ 1, {unit} :+ 1] * sp{s})
         var b{s}: tile<f32>[1, 1] = {src}[0 :+ 1, {ba} + {unit} :+ 1]
         {dst}[0 :+ 1, {bet} + {unit} :+ 1] = 1.0 / (1.0 + exp(-b{s}))

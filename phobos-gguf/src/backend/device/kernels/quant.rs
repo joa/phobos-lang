@@ -32,7 +32,7 @@ pub(crate) const QUANTIZE_SRC: &str = "\
 kernel quantize(X: tensor<f32>[R, 32], Q: tensor<i8>[R, 32], S: tensor<f32>[R, D]) {
   let p = program_id(0)
   var x = X[p * TB :+ TB, 0 :+ 32]
-  var mx: tile<f32>[TB, 1] = rowmax(tmax(x, -x))
+  var mx: tile<f32>[TB, 1] = rowmax(abs(x))
   var inv = 127.0 / (mx + 0.00000001)
   var y = x * inv
   Q[p * TB :+ TB, 0 :+ 32] = i8(i32(round(y)))

@@ -67,6 +67,18 @@ fn dump_raw_kernel_sources() {
     sources.push(("delta_conv".to_string(), delta_conv_src(32, 16, 128, 4, 128, 2048, batch, true, scale)));
     sources.push(("delta_conv_mha".to_string(), delta_conv_src(16, 16, 128, 4, 128, 2048, batch, true, scale)));
     sources.push(("rms_norm_gated".to_string(), rms_norm_src(128, 1e-6, NormForm::GatedQuantized)));
+    // The kernels that take an absmax or a SiLU in tile form: the 4B's
+    // widths, and 160, which no intrinsic norm divides.
+    sources.push(("quantize".to_string(), QUANTIZE_SRC.to_string()));
+    sources.push(("pointwise".to_string(), POINTWISE_SRC.to_string()));
+    sources.push(("delta".to_string(), DELTA_SRC.to_string()));
+    for width in [2560, 160] {
+        for (form, name) in [(NormForm::Plain, "plain"), (NormForm::Quantized, "q"), (NormForm::GatedQuantized, "gated")] {
+            sources.push((format!("rms_norm_{name}_{width}"), rms_norm_src(width, 1e-6, form)));
+        }
+    }
+    sources.push(("delta_gates".to_string(), delta_gates_src(32, (ELEM_TILE / 4 / 32).max(1))));
+    sources.push(("hadamard_q".to_string(), hadamard_src(2560, None, HadamardForm::Quantized)));
     let i8: [I8Row; 11] = [
         (
             iq1s_qdot_i8_matvec_src,
