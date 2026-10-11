@@ -251,3 +251,27 @@ fn tile_plus_eq_scalar_keeps_its_target_alive() {
         "t and u share bytes: offsets {offsets:?}\n{mlir}"
     );
 }
+
+/// A SiLU-gated product over `[4, 32]` tiles, with `gate` as the exponent.
+fn silu_kernel(gate: &str) -> String {
+    format!(
+        "kernel k(G: tensor<f32>[4, 32], U: tensor<f32>[4, 32], O: tensor<f32>[4, 32]) {{
+            let g = G[0 :+ 4, 0 :+ 32]
+            let u = U[0 :+ 4, 0 :+ 32]
+            var y: tile<f32>[4, 32] = u / (1.0 + exp({gate}))
+            O[0 :+ 4, 0 :+ 32] = y
+        }}"
+    )
+}
+
+#[test]
+fn a_negated_tile_fuses_into_the_sweep() {
+    // `-g` costs no tile and no barrier of its own.
+    let negated = emit_mlir(&silu_kernel("-g"));
+    let plain = emit_mlir(&silu_kernel("g"));
+    assert_eq!(shared_bytes(&negated), shared_bytes(&plain), "
+{negated}");
+    let barriers = |m: &str| m.matches("gpu.barrier").count();
+    assert_eq!(barriers(&negated), barriers(&plain), "
+{negated}");
+}
