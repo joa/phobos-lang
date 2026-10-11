@@ -9,7 +9,8 @@
 use anyhow::{Result, ensure};
 use cust::memory::DeviceCopy;
 use cust::prelude::*;
-use phobos_kernels::{compile, cuda_ok, push_descriptor};
+use phobos_kernels::compile::context_for;
+use phobos_kernels::{compile_in, cuda_ok, push_descriptor};
 
 const THREADS: u32 = 256;
 
@@ -45,7 +46,14 @@ impl<T: DeviceCopy + Default + Clone> Arg<T> {
 
 /// Compiles `src` and launches its kernel `name` over `blocks` blocks.
 fn run(src: &str, name: &str, blocks: u32, slots: &mut [u64]) -> Result<()> {
-    let module = compile(src, &[], name)?;
+    run_at(32, src, name, blocks, slots)
+}
+
+/// [`run`] at an index width: 64 bits is what reaches mma.sync and cp.async.
+fn run_at(index_bitwidth: u32, src: &str, name: &str, blocks: u32, slots: &mut [u64]) -> Result<()> {
+    let mut ctx = context_for(&[]);
+    ctx.index_bitwidth = index_bitwidth;
+    let module = compile_in(&ctx, src, name)?.0;
     let func = module.get_function(name)?.to_raw();
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
     let mut argv: Vec<*mut std::ffi::c_void> = slots
@@ -104,6 +112,7 @@ fn main() -> Result<()> {
     pow(&mut failures)?;
     unsigned(&mut failures)?;
     flat_write(&mut failures)?;
+    ragged_k(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
     println!("every probe agrees with the host");
     Ok(())
@@ -338,6 +347,54 @@ fn flat_write(failures: &mut u32) -> Result<()> {
     run(src, "k", 1, &mut slots)?;
     let want: Vec<f32> = x.iter().enumerate().map(|(k, &v)| if k < 128 { 0.0 } else { v }).collect();
     report("write through flat()", o.read()? == want, String::new(), failures);
+    Ok(())
+}
+
+fn ragged_k(failures: &mut u32) -> Result<()> {
+    // K = 40 against a 16-wide k-slice: the last slice is partial, on the
+    // tensor cores and off them.
+    let (m, k, n) = (64, 40, 64);
+    let a = noise(m * k, 6);
+    let b = noise(k * n, 7);
+    let round = |v: f32| phobos_base::half::f16_to_f32(phobos_base::half::f32_to_f16(v));
+    let mut want = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            want[i * n + j] = (0..k).map(|p| round(a[i * k + p]) * round(b[p * n + j])).sum();
+        }
+    }
+    // Static K, then K known only at launch, with and without @pipeline.
+    for (attrs, kdim, name, bits) in [
+        ("@tensorcore", "40", "ragged k, tensor cores", 32),
+        ("", "40", "ragged k, fma", 32),
+        ("@tensorcore", "K", "ragged dynamic k, tc", 32),
+        ("@tensorcore @pipeline", "K", "ragged k, tc pipelined", 32),
+        ("@tensorcore", "40", "ragged k, mma.sync", 64),
+        ("@tensorcore @pipeline", "K", "ragged k, mma.sync pipelined", 64),
+    ] {
+        let src = format!(
+            "@launch(256)
+            {attrs}
+            kernel k(A: tensor<f32>[64, {kdim}], B: tensor<f32>[{kdim}, 64], C: tensor<f32>[64, 64]) {{
+                var acc: tile<f32>[64, 64] = 0.0
+                for kt in range(0, {kdim}, 16) {{
+                    var a = A[0 :+ 64, kt :+ 16]
+                    var b = B[kt :+ 16, 0 :+ 64]
+                    acc += dot(a, b)
+                }}
+                C[0 :+ 64, 0 :+ 64] = acc
+            }}"
+        );
+        let (ga, gb) = (Arg::new(&a, m, k)?, Arg::new(&b, k, n)?);
+        let c = Arg::<f32>::zeroed(m, n)?;
+        let mut slots = Vec::new();
+        ga.push(&mut slots);
+        gb.push(&mut slots);
+        c.push(&mut slots);
+        run_at(bits, &src, "k", 1, &mut slots)?;
+        let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
+        report(name, worst < 1e-2, format!("max abs err {worst:.3e}"), failures);
+    }
     Ok(())
 }
 

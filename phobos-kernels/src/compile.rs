@@ -60,7 +60,7 @@ fn best_chip(capability: u32) -> &'static str {
 
 /// A compilation context for the card, with `shapes` bound as `@autotune`
 /// overrides.
-fn context_for(shapes: &[Override<'_>]) -> Context {
+pub fn context_for(shapes: &[Override<'_>]) -> Context {
     let mut ctx = Context {
         gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip())),
         ..Context::default()
