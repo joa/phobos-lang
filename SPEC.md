@@ -113,7 +113,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 
 | Form | Meaning |
 |---|---|
-| `let x = e` | Immutable binding. Initializer required. A tensor slice bound with `let` is a view, not a copy: it can be sliced again, and `x[...] = e` writes the bytes it views. Only `x = e` itself is refused. |
+| `let x = e` | Immutable binding. Initializer required. A tensor slice bound with `let` is a view, not a copy (a `dot` that reads it more than once stages it anyway): it can be sliced again, and `x[...] = e` writes the bytes it views. Only `x = e` itself is refused. |
 | `let x: T = e` | Same, with a declared type. |
 | `var x = e` | Mutable binding. `var t = A[...]` copies the slice into a tile. An elementwise `e` over tiles of one element type and rank takes their type and broadcast shape and is computed in one sweep, as a typed declaration is. |
 | `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
