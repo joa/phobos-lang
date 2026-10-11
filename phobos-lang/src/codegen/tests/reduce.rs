@@ -118,3 +118,20 @@ fn top_k_is_rounds_of_rowargmax() {
     );
     assert_contains(&mlir, &["arith.cmpi eq", "arith.select", "gpu.shuffle"]);
 }
+
+#[test]
+fn a_wide_row_is_shared_by_warps() {
+    // 256 threads on one 2560-wide row: eight warps, each leaving a partial.
+    let mlir = emit_mlir(
+        "@launch(256)
+        kernel k(X: tensor<f32>[1, 2560], S: tensor<f32>[1, 1]) {
+            var x = X[0 :+ 1, 0 :+ 2560]
+            var s: tile<f32>[1, 1] = rowsum(x)
+            S[0 :+ 1, 0 :+ 1] = s
+        }",
+    );
+    assert_contains(&mlir, &["memref<1x8xf32, 3>"]);
+    // A narrow row keeps one warp.
+    let narrow = emit_mlir(&reduce_kernel("f32", "rowsum", "x"));
+    assert!(!narrow.contains("x2xf32, 3>"), "\n{narrow}");
+}
