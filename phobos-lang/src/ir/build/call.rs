@@ -206,8 +206,12 @@ impl Build {
                 Ok(Rv::Tile(self.value(OpKind::Map(Map::Max), &[a, b], ty)))
             }
             "argsel" => self.emit_argsel(args),
-            "rowmax" | "rowsum" => {
-                let how = if callee == "rowmax" { Reduce::RowMax } else { Reduce::RowSum };
+            "rowmax" | "rowsum" | "rowargmax" => {
+                let how = match callee {
+                    "rowmax" => Reduce::RowMax,
+                    "rowsum" => Reduce::RowSum,
+                    _ => Reduce::RowArgMax,
+                };
                 if let [arg] = args
                     && let Some(out) = self.reduce_fused(how, arg)?
                 {
@@ -224,7 +228,8 @@ impl Build {
                 if !self.elem(t).is_float() && !self.elem(t).is_int() {
                     bail!("row reduction needs a numeric element type");
                 }
-                let ty = self.shared_ty(self.elem(t), &[shape[0], 1]);
+                let out = if how == Reduce::RowArgMax { Scalar::I32 } else { self.elem(t) };
+                let ty = self.shared_ty(out, &[shape[0], 1]);
                 Ok(Rv::Tile(self.value(OpKind::Reduce(how), &[t], ty)))
             }
             "cumsum" => {

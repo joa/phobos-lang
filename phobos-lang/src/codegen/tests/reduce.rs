@@ -67,3 +67,52 @@ fn an_integer_row_reduction_shuffles() {
         assert!(shuffles_i32, "{reduce}:\n{mlir}");
     }
 }
+
+/// `rowargmax(arg)` over a `[16, 64]` tile `x` of `elem` into `[16, 1]` i32.
+fn argmax_kernel(elem: &str, arg: &str) -> String {
+    format!(
+        "kernel k(X: tensor<{elem}>[16, 64], O: tensor<i32>[16, 1]) {{
+            var x = X[0 :+ 16, 0 :+ 64]
+            var m: tile<i32>[16, 1] = rowargmax({arg})
+            O[0 :+ 16, 0 :+ 1] = m
+        }}"
+    )
+}
+
+#[test]
+fn rowargmax_carries_the_column_through_the_butterfly() {
+    let mlir = emit_mlir(&argmax_kernel("f32", "x"));
+    assert_contains(&mlir, &["arith.cmpf ogt", "arith.cmpf oeq", "arith.cmpi slt", "arith.index_cast"]);
+    // A value and an index per butterfly step.
+    let shuffles = mlir.matches("gpu.shuffle").count();
+    assert!(shuffles >= 2 && shuffles.is_multiple_of(2), "\n{mlir}");
+}
+
+#[test]
+fn rowargmax_of_a_tree_reads_no_tile_of_its_own() {
+    let fused = emit_mlir(&argmax_kernel("f32", "abs(x)"));
+    let plain = emit_mlir(&argmax_kernel("f32", "x"));
+    assert_eq!(shared_bytes(&fused), shared_bytes(&plain), "\n{fused}");
+}
+
+#[test]
+fn rowargmax_on_f16_is_serial() {
+    let mlir = emit_mlir(&argmax_kernel("f16", "x"));
+    assert!(!mlir.contains("gpu.shuffle"), "\n{mlir}");
+    assert_contains(&mlir, &["arith.cmpf ogt", "arith.select"]);
+}
+
+#[test]
+fn top_k_is_rounds_of_rowargmax() {
+    let mlir = emit_mlir(
+        "kernel topk(X: tensor<f32>[16, 64], O: tensor<i32>[16, 2]) {
+            var x = X[0 :+ 16, 0 :+ 64]
+            for r in range(0, 2) {
+                var idx: tile<i32>[16, 1] = rowargmax(x)
+                O[0 :+ 16, r :+ 1] = idx
+                x = where(iota(1) == idx, -1.0e30, x)
+            }
+        }",
+    );
+    assert_contains(&mlir, &["arith.cmpi eq", "arith.select", "gpu.shuffle"]);
+}

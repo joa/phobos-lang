@@ -161,7 +161,7 @@ impl Build {
         let unfused = matches!(
             value,
             Expr::Call { callee, .. } if matches!(callee.as_str(),
-                "exp" | "log" | "round" | "sqrt" | "tanh" | "tmax" | "rowmax" | "rowsum" | "cumsum"
+                "exp" | "log" | "round" | "sqrt" | "tanh" | "tmax" | "rowmax" | "rowsum" | "rowargmax" | "cumsum"
                 | "tril" | "transpose")
         ) && self.fusable_nodes(value).unwrap_or(0) < 1;
         if !unfused {

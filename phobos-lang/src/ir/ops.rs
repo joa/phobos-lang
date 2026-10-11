@@ -173,6 +173,8 @@ pub enum Reduce {
     /// Reduce the last axis to a `[rows, 1]` column.
     RowMax,
     RowSum,
+    /// The `i32` column of each row's maximum, the first on a tie.
+    RowArgMax,
     /// Inclusive prefix sum down the rows.
     CumSum,
     /// Causal lower-triangular mask.
@@ -185,6 +187,7 @@ impl Reduce {
         match self {
             Reduce::RowMax => "rowmax",
             Reduce::RowSum => "rowsum",
+            Reduce::RowArgMax => "rowargmax",
             Reduce::CumSum => "cumsum",
             Reduce::Tril => "tril",
             Reduce::Transpose => "transpose",
@@ -437,8 +440,13 @@ pub enum OpKind {
     ScaledAdd,
     Reduce(Reduce),
     /// `(leaves..) -> [rows, 1]`: a row reduction of the tree, evaluated
-    /// per element of `[rows, cols]` with no tile of its own.
-    ReduceFused { how: Reduce, tree: Tree, cols: i64 },
+    /// per element of `[rows, cols]` as `arg` with no tile of its own.
+    ReduceFused {
+        how: Reduce,
+        tree: Tree,
+        cols: i64,
+        arg: Scalar,
+    },
     /// `(a, b) -> a * b`, or `a * b^T`.
     Dot { transpose: bool },
     /// `(a, b, dst)`. `aliased` when `dst` is one of the operands, which
@@ -567,7 +575,9 @@ impl OpKind {
             }
             OpKind::ScaledAdd => "scaled_add".into(),
             OpKind::Reduce(r) => r.name().into(),
-            OpKind::ReduceFused { how, tree, cols } => format!("{} {cols} fused {tree}", how.name()),
+            OpKind::ReduceFused { how, tree, cols, arg } => {
+                format!("{} {cols} {} fused {tree}", how.name(), arg.mlir_name())
+            }
             OpKind::Dot { transpose } => if *transpose { "dot_t" } else { "dot" }.into(),
             OpKind::DotInto {
                 transpose,

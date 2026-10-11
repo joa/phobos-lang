@@ -14,7 +14,7 @@ pub(in crate::codegen) enum RowSrc<'a, 'c> {
 }
 
 impl RowSrc<'_, '_> {
-    fn shape(&self) -> [i64; 2] {
+    pub(super) fn shape(&self) -> [i64; 2] {
         match self {
             RowSrc::Tile(t) => [t.shape[0], t.shape[1]],
             RowSrc::Tree { shape, .. } => *shape,
@@ -66,7 +66,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// The element at `[row, j]` of a row reduction's source, as `elem`.
-    fn row_elem(
+    pub(super) fn row_elem(
         &mut self,
         block: &Block<'c>,
         src: &RowSrc<'_, 'c>,

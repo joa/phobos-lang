@@ -721,7 +721,7 @@ impl Verifier<'_> {
                 self.want_results(op, 0);
             }
             OpKind::ReduceFused { how, tree, .. } => {
-                if !matches!(how, Reduce::RowMax | Reduce::RowSum) {
+                if !matches!(how, Reduce::RowMax | Reduce::RowSum | Reduce::RowArgMax) {
                     self.err(op, format!("{} does not take a fused argument", how.name()));
                 }
                 let mut read = Vec::new();
