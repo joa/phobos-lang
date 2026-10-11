@@ -110,7 +110,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 |---|---|
 | `let x = e` | Immutable binding. Initializer required. A tensor slice bound with `let` is a view, not a copy. |
 | `let x: T = e` | Same, with a declared type. |
-| `var x = e` | Mutable binding. `var t = A[...]` copies the slice into a tile. |
+| `var x = e` | Mutable binding. `var t = A[...]` copies the slice into a tile. An elementwise `e` over tiles of one element type and rank takes their type and broadcast shape and is computed in one sweep, as a typed declaration is. |
 | `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
 | `var t: tile<T>[R, C]` | Uninitialized tile. The type is required and must be a tile. |
 | `x = e`, `x[...] = e` | Assign a whole value or a slice. Tiles and tensors are sliced the same way. |
@@ -197,7 +197,7 @@ Each math call takes a tile or a scalar. On a scalar it computes in `f32`; `abs`
 | `abs(t)` | `\|x\|` | Exact. An integer takes `max(x, -x)`. |
 | `rsqrt(t)` | `1 / sqrt(x)` | Approximate (`rsqrt.approx.f32`). |
 | `sin(t)`, `cos(t)` | Radians | Approximate (`sin.approx.f32`, `cos.approx.f32`), least accurate far from zero. |
-| `where(c, a, b)` | `c ? a : b` per element | `c` compares values, joined by `&&` and `\|\|`. On tiles it must be the value of a tile assignment, `t = where(..)` or `t += where(..)`, which it is swept into. On scalars it is a select. |
+| `where(c, a, b)` | `c ? a : b` per element | `c` compares values, joined by `&&` and `\|\|`. On tiles it must be the value of a tile assignment, `t = where(..)`, `t += where(..)` or a `var` whose `a` or `b` reads a tile, which it is swept into. On scalars it is a select. |
 | `iota(d)` | The element's index along axis `d` of the tile being assigned, as an `i32` | Only inside a tile assignment's value. `d` a literal below the tile's rank. |
 | `tmax(a, b)` | `max(a, b)` | Broadcasts. Same element type. |
 | `argsel(va, vb, ia, ib)` | `va >= vb ? ia : ib` | Broadcasts. `va`, `vb` share a float type; `ia`, `ib` share the result type. Fold with `tmax` to build an argmax. Carry indices as floats (exact up to `2^24`). |

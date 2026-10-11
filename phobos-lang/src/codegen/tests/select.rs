@@ -165,3 +165,15 @@ fn where_messages_name_the_real_problem() {
     let e = emit_err("kernel k(A: tensor<f32>[N]) { let x = where(missing < 1, 1.0, 0.0) }");
     assert!(e.contains("unknown identifier 'missing'"), "got: {e}");
 }
+
+#[test]
+fn an_untyped_var_takes_a_where() {
+    let mlir = emit_mlir(
+        "kernel k(X: tensor<f32>[16, 64], Y: tensor<f32>[16, 64]) {
+            var x = X[0 :+ 16, 0 :+ 64]
+            var y = where(x > 0.0, x, 0.1 * x)
+            Y[0 :+ 16, 0 :+ 64] = y
+        }",
+    );
+    assert_contains(&mlir, &["arith.cmpf ogt", "arith.select"]);
+}

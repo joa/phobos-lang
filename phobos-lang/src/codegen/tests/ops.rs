@@ -254,11 +254,16 @@ fn tile_plus_eq_scalar_keeps_its_target_alive() {
 
 /// A SiLU-gated product over `[4, 32]` tiles, with `gate` as the exponent.
 fn silu_kernel(gate: &str) -> String {
+    silu_decl(&format!("var y: tile<f32>[4, 32] = u / (1.0 + exp({gate}))"))
+}
+
+/// The same product, declared by `decl`.
+fn silu_decl(decl: &str) -> String {
     format!(
         "kernel k(G: tensor<f32>[4, 32], U: tensor<f32>[4, 32], O: tensor<f32>[4, 32]) {{
             let g = G[0 :+ 4, 0 :+ 32]
             let u = U[0 :+ 4, 0 :+ 32]
-            var y: tile<f32>[4, 32] = u / (1.0 + exp({gate}))
+            {decl}
             O[0 :+ 4, 0 :+ 32] = y
         }}"
     )
@@ -269,9 +274,30 @@ fn a_negated_tile_fuses_into_the_sweep() {
     // `-g` costs no tile and no barrier of its own.
     let negated = emit_mlir(&silu_kernel("-g"));
     let plain = emit_mlir(&silu_kernel("g"));
-    assert_eq!(shared_bytes(&negated), shared_bytes(&plain), "
-{negated}");
+    assert_eq!(shared_bytes(&negated), shared_bytes(&plain), "\n{negated}");
     let barriers = |m: &str| m.matches("gpu.barrier").count();
-    assert_eq!(barriers(&negated), barriers(&plain), "
-{negated}");
+    assert_eq!(barriers(&negated), barriers(&plain), "\n{negated}");
+}
+
+#[test]
+fn an_untyped_var_fuses_like_a_typed_one() {
+    let untyped = emit_mlir(&silu_decl("var y = u / (1.0 + exp(-g))"));
+    let typed = emit_mlir(&silu_kernel("-g"));
+    assert_eq!(shared_bytes(&untyped), shared_bytes(&typed), "\n{untyped}");
+    let barriers = |m: &str| m.matches("gpu.barrier").count();
+    assert_eq!(barriers(&untyped), barriers(&typed), "\n{untyped}");
+}
+
+#[test]
+fn an_untyped_var_over_mixed_types_still_widens() {
+    // An f16 tile against an f32 one takes the unfused path, which widens.
+    let mlir = emit_mlir(
+        "kernel k(A: tensor<f16>[4, 32], B: tensor<f32>[4, 32], O: tensor<f32>[4, 32]) {
+            var a = A[0 :+ 4, 0 :+ 32]
+            var b = B[0 :+ 4, 0 :+ 32]
+            var y = a * b + 1.0
+            O[0 :+ 4, 0 :+ 32] = y
+        }",
+    );
+    assert_contains(&mlir, &["arith.extf"]);
 }

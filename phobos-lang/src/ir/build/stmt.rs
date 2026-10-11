@@ -35,6 +35,14 @@ impl Build {
                     let Some(value) = value else {
                         bail!("'var {name}' without an initializer needs a tile type");
                     };
+                    let fused = self.fusable_nodes(value).unwrap_or(0) >= 1;
+                    if let Some((elem, shape)) = self.fused_decl_type(value).filter(|_| fused) {
+                        let ty = self.shared_ty(elem, &shape);
+                        let tile = self.value(OpKind::Alloc, &[], ty);
+                        self.store_tile(tile, AssignOp::Set, value)?;
+                        self.bind(name, Binding::Tile(tile));
+                        return Ok(());
+                    }
                     match self.emit_expr(value)? {
                         Rv::Scalar(v) => {
                             let elem = self.scalar_of(v);
