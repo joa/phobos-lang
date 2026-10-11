@@ -84,3 +84,19 @@ fn atomics_reach_atom_instructions() {
         }
     }
 }
+
+#[test]
+fn unsigned_reads_zero_extend_in_ptx() {
+    let src = "kernel k(B: tensor<u8>[16, 64], H: tensor<u16>[N], O: tensor<i32>[16, 64], P: tensor<f32>[N]) {
+        let i = program_id(0)
+        P[i] = f32(H[i])
+        var b = B[0 :+ 16, 0 :+ 64]
+        var q: tile<i32>[16, 64] = (i32(b) >> 4) & 15
+        O[0 :+ 16, 0 :+ 64] = q
+    }";
+    for (chip, bits) in [("sm_75", 32), ("sm_120", 64)] {
+        let code = ptx(src, chip, bits);
+        assert!(!code.contains("__nv_"), "{chip}: a libdevice call in:\n{code}");
+        assert!(!code.contains(".s8") && !code.contains(".s16"), "{chip}: a signed narrow read in:\n{code}");
+    }
+}

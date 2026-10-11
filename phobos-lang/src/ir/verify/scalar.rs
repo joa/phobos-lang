@@ -85,8 +85,9 @@ impl Verifier<'_> {
             OpKind::IndexCast(want) => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
                     if let Some(s) = self.want_scalar(op, 0, "operand") {
-                        let ok = (s == Scalar::Index && want.is_int())
-                            || (s.is_int() && *want == Scalar::Index);
+                        let sized = |t: Scalar| t.is_int() || t.is_unsigned();
+                        let ok = (s == Scalar::Index && sized(*want))
+                            || (sized(s) && *want == Scalar::Index);
                         if !ok {
                             self.err(op, format!("index_cast does not go from {s} to {want}"));
                         }

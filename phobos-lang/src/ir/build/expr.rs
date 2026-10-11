@@ -240,7 +240,7 @@ impl Build {
             Ok(value)
         } else if t.is_float() && want.is_float() {
             Ok(self.float_cast(value, want))
-        } else if t == Scalar::Index && want.is_int() {
+        } else if t == Scalar::Index && (want.is_int() || want.is_unsigned()) {
             Ok(self.value(OpKind::IndexCast(want), &[value], Type::Scalar(want)))
         } else if t == Scalar::Index && want.is_float() {
             Ok(self.numeric_cast(value, want))
@@ -296,7 +296,7 @@ impl Build {
         let mut operands = vec![mem];
         operands.extend_from_slice(indices);
         let v = self.value(OpKind::Load, &operands, Type::Scalar(elem));
-        if elem.is_int() {
+        if elem.is_int() || elem.is_unsigned() {
             self.value(OpKind::IndexCast(Scalar::Index), &[v], Type::INDEX)
         } else {
             v
@@ -371,6 +371,12 @@ impl Build {
 
 /// Fails unless a tile of `elem` takes `op` element by element.
 pub(crate) fn check_tile_op(op: BinOp, elem: Scalar) -> Result<()> {
+    if elem.is_unsigned() {
+        bail!(
+            "a {elem} tile is storage: convert it first, as in `i32(t) {} ...`",
+            op.symbol()
+        );
+    }
     if op.is_compare() || matches!(op, BinOp::And | BinOp::Or) {
         bail!(
             "`{}` on tiles has no bool tile to produce; select with \

@@ -272,7 +272,7 @@ impl<'c> Codegen<'c> {
     }
 
     pub(super) fn is_int(&self, t: Type<'c>) -> bool {
-        t == self.i8_t || t == self.i32_t || t == self.i64_t
+        t == self.i8_t || t == self.i16_t || t == self.i32_t || t == self.i64_t
     }
 
     /// Converts between any two numeric element types. Integers are treated
@@ -282,6 +282,27 @@ impl<'c> Codegen<'c> {
         block: &Block<'c>,
         value: Value<'c, 'c>,
         want: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.convert(block, value, want, false)
+    }
+
+    /// [`Self::numeric_cast`] reading `value` as unsigned, which
+    /// zero-extends: a `u8`, `u16` or `u32` element.
+    pub(super) fn unsigned_cast(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+        want: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.convert(block, value, want, true)
+    }
+
+    fn convert(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+        want: Type<'c>,
+        unsigned: bool,
     ) -> Result<Value<'c, 'c>> {
         let from = value.r#type();
         if from == want {
@@ -297,15 +318,18 @@ impl<'c> Codegen<'c> {
             return self.numeric_cast(block, as_int, want);
         }
         if want == self.index_t {
-            let as_int = self.numeric_cast(block, value, self.i64_t)?;
+            let as_int = self.convert(block, value, self.i64_t, unsigned)?;
             return self.push(block, arith::index_cast(as_int, self.index_t, self.loc));
         }
         let op = match (from_float, want_float) {
             (true, false) => "arith.fptosi",
+            (false, true) if unsigned => "arith.uitofp",
             (false, true) => "arith.sitofp",
             (false, false) => {
                 let (lo, hi) = (self.int_bits(from)?, self.int_bits(want)?);
-                if hi > lo {
+                if hi > lo && unsigned {
+                    "arith.extui"
+                } else if hi > lo {
                     "arith.extsi"
                 } else {
                     "arith.trunci"
@@ -336,6 +360,8 @@ impl<'c> Codegen<'c> {
             Ok(1)
         } else if t == self.i8_t {
             Ok(8)
+        } else if t == self.i16_t {
+            Ok(16)
         } else if t == self.i32_t {
             Ok(32)
         } else if t == self.i64_t {

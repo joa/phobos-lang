@@ -109,11 +109,23 @@ impl<'c> Codegen<'c> {
             ir::Scalar::BF16 => self.bf16_t,
             ir::Scalar::F32 => self.f32_t,
             ir::Scalar::F64 => self.f64_t,
-            ir::Scalar::I8 => self.i8_t,
-            ir::Scalar::I32 => self.i32_t,
+            ir::Scalar::I8 | ir::Scalar::U8 => self.i8_t,
+            ir::Scalar::U16 => self.i16_t,
+            ir::Scalar::I32 | ir::Scalar::U32 => self.i32_t,
             ir::Scalar::I64 => self.i64_t,
             ir::Scalar::Bool => self.bool_t,
             ir::Scalar::Index => self.index_t,
+        }
+    }
+
+    /// Whether `v` is or holds an unsigned element, which a conversion reads
+    /// zero-extended.
+    pub(super) fn ir_unsigned(ir: &Ir, v: ir::ValueId) -> bool {
+        match ir.ty(v) {
+            ir::Type::Scalar(s) => s.is_unsigned(),
+            ir::Type::Tile(t) => t.elem.is_unsigned(),
+            ir::Type::Tensor(t) => t.elem.is_unsigned(),
+            _ => false,
         }
     }
 

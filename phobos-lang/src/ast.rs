@@ -7,6 +7,9 @@ pub enum Scalar {
     I8,
     I32,
     I64,
+    U8,
+    U16,
+    U32,
     Bool,
 }
 
@@ -20,6 +23,9 @@ impl Scalar {
             "i8" => Scalar::I8,
             "i32" => Scalar::I32,
             "i64" => Scalar::I64,
+            "u8" => Scalar::U8,
+            "u16" => Scalar::U16,
+            "u32" => Scalar::U32,
             "bool" => Scalar::Bool,
             _ => return None,
         })
@@ -34,6 +40,9 @@ impl Scalar {
             Scalar::I8 => "i8",
             Scalar::I32 => "i32",
             Scalar::I64 => "i64",
+            Scalar::U8 => "u8",
+            Scalar::U16 => "u16",
+            Scalar::U32 => "u32",
             Scalar::Bool => "bool",
         }
     }

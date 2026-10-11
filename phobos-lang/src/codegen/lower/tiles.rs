@@ -103,7 +103,11 @@ impl<'c> Codegen<'c> {
             OpKind::Convert => {
                 let src = self.tile_ir(ir, ir.operand(op, 0))?;
                 let dst = self.tile_ir(ir, ir.operand(op, 1))?;
-                self.tile_convert(block, &src, &dst)?;
+                if Self::ir_unsigned(ir, ir.operand(op, 0)) {
+                    self.elem_chain_sweep(block, &src, &dst, &[ElemStep::CastUnsigned(dst.elem)])?;
+                } else {
+                    self.tile_convert(block, &src, &dst)?;
+                }
                 self.release(&src);
             }
             OpKind::Fill => {
@@ -140,7 +144,13 @@ impl<'c> Codegen<'c> {
             OpKind::Chain(steps) => {
                 let src = self.tile_ir(ir, ir.operand(op, 0))?;
                 let dst = self.tile_ir(ir, ir.operand(op, 1))?;
-                let steps: Vec<ElemStep<'c>> = steps.iter().map(|s| self.ir_elem_step(*s)).collect();
+                let mut steps: Vec<ElemStep<'c>> = steps.iter().map(|s| self.ir_elem_step(*s)).collect();
+                // Steps apply innermost first, so the first reads the source.
+                if Self::ir_unsigned(ir, ir.operand(op, 0))
+                    && let Some(ElemStep::Cast(want)) = steps.first().copied()
+                {
+                    steps[0] = ElemStep::CastUnsigned(want);
+                }
                 self.elem_chain_sweep(block, &src, &dst, &steps)?;
                 self.release(&src);
             }
@@ -284,6 +294,13 @@ impl<'c> Codegen<'c> {
                         Ok(dst)
                     }
                     (_, Some(_)) => bail!("no in-place form of {step}"),
+                    (ir::ElemStep::Cast(want), None) if Self::ir_unsigned(ir, ir.operand(op, 0)) => {
+                        let want = self.ir_scalar_type(want);
+                        let out = self.alloc_tile_shaped(block, want, &t.shape)?;
+                        self.elem_chain_sweep(block, &t, &out, &[ElemStep::CastUnsigned(want)])?;
+                        self.release(&t);
+                        Ok(out)
+                    }
                     (ir::ElemStep::Cast(want), None) => {
                         let want = self.ir_scalar_type(want);
                         let out = self.tile_cast(block, &t, want)?;
@@ -408,10 +425,16 @@ impl<'c> Codegen<'c> {
                 Fused::Tile(mv)
             }
             Tree::Scalar(i) => Fused::Scalar(self.scalar_ir(ir.operand(op, *i))?),
-            Tree::Unary(step, x) => Fused::Unary(
-                self.ir_elem_step(*step),
-                Box::new(self.fused_from_tree(ir, op, x, target, leaves)?),
-            ),
+            Tree::Unary(step, x) => {
+                let mut step = self.ir_elem_step(*step);
+                // A cast straight off an unsigned leaf zero-extends it.
+                if let (ElemStep::Cast(want), Tree::Leaf(i)) = (step, &**x)
+                    && Self::ir_unsigned(ir, ir.operand(op, *i))
+                {
+                    step = ElemStep::CastUnsigned(want);
+                }
+                Fused::Unary(step, Box::new(self.fused_from_tree(ir, op, x, target, leaves)?))
+            }
             Tree::Binary(bop, a, b) => Fused::Binary(
                 *bop,
                 Box::new(self.fused_from_tree(ir, op, a, target, leaves)?),

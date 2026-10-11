@@ -36,6 +36,9 @@ fn data_type(s: Scalar) -> DataType {
         Scalar::I8 => DataType::I8,
         Scalar::I32 => DataType::I32,
         Scalar::I64 => DataType::I64,
+        Scalar::U8 => DataType::U8,
+        Scalar::U16 => DataType::U16,
+        Scalar::U32 => DataType::U32,
         Scalar::Bool => DataType::Bool,
     }
 }
