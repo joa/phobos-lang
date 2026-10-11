@@ -72,6 +72,7 @@ pub fn emit<'c>(
     let mut pipeline_failures = Vec::new();
 
     for kernel in kernels {
+        kernel.check_attributes().map_err(anyhow::Error::msg)?;
         let mut cg = Codegen::new(base, context, kernel)?;
         let func = {
             let target = target::build_target(base);

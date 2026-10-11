@@ -1,5 +1,6 @@
 pub mod build;
 pub mod builder;
+pub mod elem;
 pub mod ops;
 pub mod print;
 pub mod types;
@@ -11,6 +12,7 @@ mod tests;
 use std::collections::BTreeMap;
 
 pub use builder::{At, Builder};
+pub use elem::*;
 pub use ops::*;
 pub use types::*;
 

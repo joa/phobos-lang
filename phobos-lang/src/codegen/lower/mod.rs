@@ -257,6 +257,8 @@ impl<'c> Codegen<'c> {
             | OpKind::Cast(_)
             | OpKind::IndexCast(_)
             | OpKind::ProgramId(_)
+            | OpKind::Math(_)
+            | OpKind::Select
             | OpKind::Dim(_)
             | OpKind::Load
             | OpKind::Store

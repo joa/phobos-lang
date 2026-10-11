@@ -75,7 +75,7 @@ impl<'a> Analyzer<'a> {
                         self.tensors[tensor].name
                     );
                 }
-                Sub::Point(_) | Sub::Range { .. } => bail!(
+                Sub::Point(_) | Sub::Range { .. } | Sub::From(_) => bail!(
                     "only `start :+ len` spans and `:` full slices are supported under \
                      @cluster (slice of '{}')",
                     self.tensors[tensor].name

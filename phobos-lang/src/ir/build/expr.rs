@@ -35,6 +35,12 @@ impl Build {
                         let out = self.emit_tile_scalar(BinOp::Sub, t, zero, true)?;
                         return Ok(Rv::Tile(out));
                     }
+                    // ~t becomes t ^ -1
+                    (UnOp::BitNot, Rv::Tile(t)) => {
+                        let ones = self.const_index(-1);
+                        let out = self.emit_tile_scalar(BinOp::BitXor, t, ones, false)?;
+                        return Ok(Rv::Tile(out));
+                    }
                     (UnOp::Not, Rv::Tile(_)) => bail!("`!` needs a bool operand, got a tile"),
                     (_, Rv::Scalar(v)) => v,
                 };
@@ -42,11 +48,13 @@ impl Build {
                 let ok = match op {
                     UnOp::Neg => t.is_float() || t == Scalar::Index,
                     UnOp::Not => t == Scalar::Bool,
+                    UnOp::BitNot => t == Scalar::Index,
                 };
                 if !ok {
                     match op {
                         UnOp::Neg => bail!("`-` needs a numeric operand, got {}", t.mlir_name()),
                         UnOp::Not => bail!("`!` needs a bool operand, got {}", t.mlir_name()),
+                        UnOp::BitNot => bail!("`~` needs an integer operand, got {}", t.mlir_name()),
                     }
                 }
                 Ok(Rv::Scalar(self.value(OpKind::Unary(*op), &[v], Type::Scalar(t))))
@@ -67,7 +75,7 @@ impl Build {
             }
             Expr::Index { base, subs } => {
                 let (mv, binding) = self.mem_base(base)?;
-                if subs.iter().all(|s| matches!(s, Sub::Point(_))) {
+                if super::slice::is_point_load(subs) {
                     let indices = self.emit_indices(subs, self.shape(mv).len())?;
                     Ok(Rv::Scalar(self.load_scalar(mv, &indices)))
                 } else {
@@ -132,16 +140,10 @@ impl Build {
     pub(crate) fn emit_binop(&mut self, op: BinOp, lhs: ValueId, rhs: ValueId) -> Result<ValueId> {
         let (lhs, rhs) = self.unify(lhs, rhs)?;
         let t = self.scalar_of(lhs);
-        let result = if t.is_float() || t == Scalar::Index {
-            if op.is_compare() { Scalar::Bool } else { t }
-        } else if t == Scalar::Bool {
-            if !matches!(op, BinOp::Eq | BinOp::Ne) {
-                bail!("operator not supported for bool operands");
-            }
-            Scalar::Bool
-        } else {
-            bail!("operator not supported for operands of type {}", t.mlir_name());
-        };
+        // A sized integer is an element type; a scalar integer is an index.
+        let result = op.result(t).filter(|_| !t.is_int()).ok_or_else(|| {
+            anyhow!("`{}` does not take {} operands", op.symbol(), t.mlir_name())
+        })?;
         Ok(self.value(OpKind::Binary(op), &[lhs, rhs], Type::Scalar(result)))
     }
 
@@ -159,6 +161,7 @@ impl Build {
             bail!("elementwise tile result shape must be static");
         }
         let (wa, wb) = self.widen_pair(a, b)?;
+        check_tile_op(op, self.elem(wa))?;
         let ty = self.shared_ty(self.elem(wa), &shape);
         Ok(self.value(OpKind::Map(Map::Binary(op)), &[wa, wb], ty))
     }
@@ -205,6 +208,7 @@ impl Build {
         scalar: ValueId,
         scalar_left: bool,
     ) -> Result<ValueId> {
+        check_tile_op(op, self.elem(tile))?;
         let ty = self.like(tile);
         Ok(self.value(OpKind::Map(Map::Scalar { op, scalar_left }), &[tile, scalar], ty))
     }
@@ -272,7 +276,7 @@ impl Build {
         subs.iter()
             .map(|sub| match sub {
                 Sub::Point(e) => self.emit_index(e, "subscript"),
-                _ => bail!("mixing point and slice subscripts is not supported yet"),
+                _ => bail!("a scalar load takes a point subscript in every dimension"),
             })
             .collect()
     }
@@ -337,6 +341,11 @@ impl Build {
         }
     }
 
+    /// Whether `expr` slices a tensor or tile rather than loading one element.
+    pub(crate) fn is_slice_expr(&self, expr: &Expr) -> bool {
+        matches!(expr, Expr::Index { subs, .. } if !super::slice::is_point_load(subs))
+    }
+
     pub(crate) fn is_tile_expr(&self, expr: &Expr) -> bool {
         match expr {
             Expr::Var(name) => matches!(
@@ -346,6 +355,22 @@ impl Build {
             _ => false,
         }
     }
+}
+
+/// Fails unless a tile of `elem` takes `op` element by element.
+pub(crate) fn check_tile_op(op: BinOp, elem: Scalar) -> Result<()> {
+    if op.is_compare() || matches!(op, BinOp::And | BinOp::Or) {
+        bail!(
+            "`{}` on tiles has no bool tile to produce; select with \
+             `where(a {} b, x, y)` instead",
+            op.symbol(),
+            op.symbol()
+        );
+    }
+    if op.is_bitwise() && !elem.is_int() {
+        bail!("`{}` needs integer tile elements, got {}", op.symbol(), elem.mlir_name());
+    }
+    Ok(())
 }
 
 /// The narrowest float type both operands convert into without loss; f16

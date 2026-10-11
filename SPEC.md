@@ -44,7 +44,8 @@ stmt        = let_stmt | var_stmt | assign_stmt
 
 let_stmt    = "let" ident [ ":" type ] "=" expr terminator ;
 var_stmt    = "var" ident ( ":" type [ "=" expr ] | "=" expr ) terminator ;
-assign_stmt = lvalue ( "=" | "+=" ) expr terminator ;
+assign_stmt = lvalue ( "=" | "+=" | op_assign ) expr terminator ;
+op_assign   = "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
 lvalue      = ident [ "[" subscripts "]" ] ;           (* a name or an indexed name *)
 for_stmt    = "for" ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
 while_stmt  = "while" expr block ;
@@ -53,23 +54,31 @@ expr_stmt   = expr terminator ;
 
 terminator  = newline | ";" ;                          (* may be omitted before "}" or EOF *)
 
-expr        = equality ;
+expr        = or ;
+or          = and { "||" and } ;
+and         = equality { "&&" equality } ;
 equality    = comparison { ( "==" | "!=" ) comparison } ;
-comparison  = term { ( "<" | "<=" | ">" | ">=" ) term } ;
+comparison  = bit_or { ( "<" | "<=" | ">" | ">=" ) bit_or } ;
+bit_or      = bit_xor { "|" bit_xor } ;
+bit_xor     = bit_and { "^" bit_and } ;
+bit_and     = shift { "&" shift } ;
+shift       = term { ( "<<" | ">>" ) term } ;
 term        = factor { ( "+" | "-" ) factor } ;
 factor      = unary { ( "*" | "/" | "%" ) unary } ;
-unary       = [ "-" | "!" ] postfix ;
+unary       = [ "-" | "!" | "~" ] postfix ;
 postfix     = primary { "[" subscripts "]" | "(" [ args ] ")" } ;
 args        = expr { "," expr } ;
 primary     = int | float | "true" | "false" | ident | "(" expr ")" ;
 
 subscripts  = subscript { "," subscript } ;
 subscript   = ":"                                      (* full range:  A[:] *)
+            | expr ":"                                 (* to the end:  A[start :] *)
             | expr [ ( ":" | ":+" ) expr ] ;           (* point A[i] ; range A[start : end] ; span A[start :+ length] *)
 
 ident       = ( letter | "_" ) { letter | digit | "_" } ;
 int         = digit { digit } ;
-float       = digit { digit } "." { digit } ;
+float       = digit { digit } ( "." { digit } [ exponent ] | exponent ) ;
+exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 ```
 
 ## Lexical
@@ -105,7 +114,8 @@ float       = digit { digit } "." { digit } ;
 | `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
 | `var t: tile<T>[R, C]` | Uninitialized tile. The type is required and must be a tile. |
 | `x = e`, `x[...] = e` | Assign a whole value or a slice. Tiles and tensors are sliced the same way. |
-| `x += e`, `x[...] += e` | Accumulate. |
+| `x += e`, `x[...] += e` | Accumulate. A tile takes a scalar, and `acc += dot_t(a, b)` adds the product in place. |
+| `x op= e` | `x = x op e`, for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. The target is read again, so an indexed target's subscripts are evaluated twice. |
 | `for i in range(lo, hi[, step])` | `i` runs over `lo, lo + step, ...` while `< hi`. `step` defaults to 1. |
 | `while c { }`, `if c { } else { }` | Scalar condition. |
 
@@ -117,7 +127,10 @@ float       = digit { digit } "." { digit } ;
 | `A[s : e]` | `s <= i < e` | `A[0 : 64, :]` |
 | `A[s :+ n]` | `s <= i < s + n`, same as `A[s : s + n]` | `A[pm * TM :+ TM, :]` |
 | `A[:]` | The whole dimension | `Q[row :+ BR, :]` |
-| `A[i:]`, `A[:j]` | Not supported. `:` needs an end, `:+` a length. | |
+| `A[s:]` | `s <= i <` the extent. Never masked. | `A[16:]` |
+| `A[:j]` | Not supported; write `A[0 : j]`. | |
+
+All points load one element. A point among slices selects one index and keeps its axis with extent 1, as `i :+ 1` would: `A[i, 0 :+ 64]` is a `[1, 64]` tile.
 
 ## Operators and conversions
 
@@ -127,6 +140,11 @@ float       = digit { digit } "." { digit } ;
 | Broadcasting | NumPy-style over axes of extent 1: `[R, C] op [R, 1]` stretches the column. |
 | Unary `-` | On a tile, elementwise `0 - t`. |
 | Unary `!` | Scalars only. |
+| Precedence | Loosest first: `\|\|`, `&&`, `==` `!=`, `<` `<=` `>` `>=`, `\|`, `^`, `&`, `<<` `>>`, `+` `-`, `*` `/` `%`, unary. All left-associative. Bitwise operators bind tighter than comparisons, so `x & 15 == 3` tests the masked value. |
+| `&` `\|` `^` `<<` `>>` `~` | On integers: index scalars and integer tiles. `>>` is arithmetic, since integers are signed; mask after it to read an unsigned field, as in `(q >> 4) & 15`. A float operand is an error. |
+| `&&` `\|\|` | On bools. Both sides are evaluated; an expression has no side effects. |
+| `min(a, b)`, `max(a, b)` | Operators spelled as calls: scalars, tiles, or one of each. Float `min` and `max` return the other operand when one is NaN. |
+| Comparisons on tiles | Only inside `where`; there is no bool tile. |
 | Mixed types | Both operands convert to their join first. Float with float: the wider one. `f16` with `bf16`: `f32`. Integer with float: the float. |
 | `T(x)` conversion | `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`, `i64(x)`. Tile or scalar. |
 | Float to float | Rounds to nearest. |
@@ -143,7 +161,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | Static extent | Masked in place. |
 | Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. Only spans with a static length split; loops with `mma.sync` accumulators or that are pipelined stay masked unless `@aligned` covers the dimension. |
 | Dynamic extent indexed by `program_id` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
-| Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask. |
+| Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask: `s = where(iota(1) < n, s, -1.0e30)`. |
 
 `@aligned(DIM = tile)` is unchecked. A wrong promise writes past the tensor, into the following rows.
 
@@ -162,9 +180,11 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 |---|---|---|---|
 | `program_id(d)` | index | Block index along grid axis `d`. | `d` a literal `0`, `1` or `2`. |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
-| `atomic_add(t, i, v)` | `i32` | `old = t[i]; t[i] += v` atomically across the device. | `t` a named `i32` tensor parameter; `v` an integer. |
+| `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
 
 ### Elementwise
+
+Each math call takes a tile or a scalar. On a scalar it computes in `f32`; `abs` alone also takes an integer.
 
 | Built-in | Semantics | Notes |
 |---|---|---|
@@ -173,6 +193,12 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | `sqrt(t)` | `sqrt(x)` | Approximate (`sqrt.approx.f32`). |
 | `tanh(t)` | `tanh(x)` | Approximate (`tanh.approx.f32`). |
 | `round(t)` | Nearest integer, ties to even | Exact (`cvt.rni`). |
+| `floor(t)`, `ceil(t)` | Toward minus or plus infinity | Exact (`cvt.rmi`, `cvt.rpi`). |
+| `abs(t)` | `\|x\|` | Exact. An integer takes `max(x, -x)`. |
+| `rsqrt(t)` | `1 / sqrt(x)` | Approximate (`rsqrt.approx.f32`). |
+| `sin(t)`, `cos(t)` | Radians | Approximate (`sin.approx.f32`, `cos.approx.f32`), least accurate far from zero. |
+| `where(c, a, b)` | `c ? a : b` per element | `c` compares values, joined by `&&` and `\|\|`. On tiles it must be the value of a tile assignment, `t = where(..)` or `t += where(..)`, which it is swept into. On scalars it is a select. |
+| `iota(d)` | The element's index along axis `d` of the tile being assigned, as an `i32` | Only inside a tile assignment's value. `d` a literal below the tile's rank. |
 | `tmax(a, b)` | `max(a, b)` | Broadcasts. Same element type. |
 | `argsel(va, vb, ia, ib)` | `va >= vb ? ia : ib` | Broadcasts. `va`, `vb` share a float type; `ia`, `ib` share the result type. Fold with `tmax` to build an argmax. Carry indices as floats (exact up to `2^24`). |
 
@@ -182,8 +208,8 @@ All take a rank-2 tile with a static shape.
 
 | Built-in | Shape | Semantics |
 |---|---|---|
-| `rowmax(t)` | `[R, C] -> [R, 1]` | `max_j t[i, j]`. Float only. |
-| `rowsum(t)` | `[R, C] -> [R, 1]` | `sum_j t[i, j]`. Float only. |
+| `rowmax(t)` | `[R, C] -> [R, 1]` | `max_j t[i, j]`. Float or integer. |
+| `rowsum(t)` | `[R, C] -> [R, 1]` | `sum_j t[i, j]`. Float or integer; an integer sums in its own type, so a narrow one wraps. |
 | `cumsum(t)` | `[R, C] -> [R, C]` | `out[i, j] = sum_{r <= i} t[r, j]`, down the rows. Float only. |
 | `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
 | `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
@@ -304,11 +330,11 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 | `@padstage` | Pads `var t = <tensor slice>` staging tiles whose row pitch is a multiple of 128 bytes, to avoid bank conflicts. Other tiles are unchanged. |
 | `@dynshared` | Dynamic shared memory instead of the static 48 KB; the launch must supply the size. The allocator resets once every tile is released, so phases separated by a barrier share one footprint. |
 | `@persistent` | The grid must be co-resident (required by `grid_barrier`). The launcher sizes it from the occupancy API (`phobos_kernels::launch::persistent_grid`). |
-| Unknown | Parsed and ignored, with a note. |
+| Unknown | An error at compile time. |
 
 GEMM tile sizes (`TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM`, `TILE_TN`) come from `@autotune` or the shape environment.
 
-Planned: `@readonly`, `@unroll` (parameter and loop level), `@fast_math`, `@assert_coalesced`.
+Planned, and an error until then: `@readonly`, `@unroll` (parameter and loop level), `@fast_math`, `@assert_coalesced`.
 
 ## Examples
 

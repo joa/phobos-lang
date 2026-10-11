@@ -47,7 +47,7 @@ impl<'c> Codegen<'c> {
         idx: Value<'c, 'c>,
         val: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
-        let i32_t: Type<'c> = IntegerType::new(self.ctx, 32).into();
+        let elem = val.r#type();
         let mut operands = vec![val, mem, idx];
         for _ in 1..rank {
             operands.push(self.const_index(block, 0)?);
@@ -56,13 +56,17 @@ impl<'c> Codegen<'c> {
             block,
             OperationBuilder::new("memref.atomic_rmw", self.loc)
                 // AtomicRMWKindAttr is an I64EnumAttr, so the kind is a plain
-                // i64. addi is case 1 (mlir Arith/IR/ArithBase.td).
+                // i64. addf is case 0 and addi case 1 (mlir Arith/IR/ArithBase.td).
                 .add_attributes(&[(
                     self.id("kind"),
-                    IntegerAttribute::new(IntegerType::new(self.ctx, 64).into(), 1).into(),
+                    IntegerAttribute::new(
+                        IntegerType::new(self.ctx, 64).into(),
+                        if self.is_float(elem) { 0 } else { 1 },
+                    )
+                    .into(),
                 )])
                 .add_operands(&operands)
-                .add_results(&[i32_t])
+                .add_results(&[elem])
                 .build()?,
         )
     }

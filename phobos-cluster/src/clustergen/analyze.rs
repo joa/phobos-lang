@@ -224,7 +224,7 @@ impl<'a> Analyzer<'a> {
                     self.scan_reads(base, refs, reads)?;
                     for s in subs {
                         match s {
-                            Sub::Point(x) => self.scan_reads(x, refs, reads)?,
+                            Sub::Point(x) | Sub::From(x) => self.scan_reads(x, refs, reads)?,
                             Sub::Range { start, end } => {
                                 self.scan_reads(start, refs, reads)?;
                                 self.scan_reads(end, refs, reads)?;

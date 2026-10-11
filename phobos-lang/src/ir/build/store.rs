@@ -195,6 +195,7 @@ impl Build {
             let l = self.emit_expr(lhs)?;
             return match (l, self.emit_expr(rhs)?) {
                 (Rv::Tile(a), Rv::Tile(b)) => {
+                    super::expr::check_tile_op(*bop, self.elem(a))?;
                     self.stmt(OpKind::MapInto(Map::Binary(*bop)), &[a, b, target]);
                     Ok(())
                 }
@@ -205,6 +206,7 @@ impl Build {
                     Ok(())
                 }
                 (Rv::Tile(a), Rv::Scalar(b)) => {
+                    super::expr::check_tile_op(*bop, self.elem(a))?;
                     self.stmt(
                         OpKind::MapInto(Map::Scalar {
                             op: *bop,
@@ -215,6 +217,7 @@ impl Build {
                     Ok(())
                 }
                 (Rv::Scalar(a), Rv::Tile(b)) => {
+                    super::expr::check_tile_op(*bop, self.elem(b))?;
                     self.stmt(
                         OpKind::MapInto(Map::Scalar {
                             op: *bop,
@@ -233,8 +236,13 @@ impl Build {
                 self.stmt(OpKind::Fill, &[v, target]);
                 Ok(())
             }
-            (AssignOp::Add, Rv::Scalar(_)) => {
-                bail!("`tile += scalar` is not supported; use a tile-typed operand")
+            (AssignOp::Add, Rv::Scalar(v)) => {
+                let map = Map::Scalar {
+                    op: BinOp::Add,
+                    scalar_left: false,
+                };
+                self.stmt(OpKind::MapInto(map), &[target, v, target]);
+                Ok(())
             }
             (AssignOp::Set, Rv::Tile(src)) => {
                 self.check_shapes(&self.shape(src), &self.shape(target), "tile store")?;

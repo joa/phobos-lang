@@ -37,6 +37,8 @@ pub enum Tok {
     Percent,
     Eq,
     PlusEq,
+    /// `-=`, `*=` and the like: a compound assignment other than `+=`.
+    OpEq(crate::ast::BinOp),
     EqEq,
     NotEq,
     Lt,
@@ -44,6 +46,14 @@ pub enum Tok {
     Gt,
     Ge,
     Bang,
+    Amp,
+    AmpAmp,
+    Pipe,
+    PipePipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
 
     Eof,
 }
@@ -82,6 +92,7 @@ impl std::fmt::Display for Tok {
             Tok::Percent => "'%'",
             Tok::Eq => "'='",
             Tok::PlusEq => "'+='",
+            Tok::OpEq(op) => return write!(f, "'{}='", op.symbol()),
             Tok::EqEq => "'=='",
             Tok::NotEq => "'!='",
             Tok::Lt => "'<'",
@@ -89,6 +100,14 @@ impl std::fmt::Display for Tok {
             Tok::Gt => "'>'",
             Tok::Ge => "'>='",
             Tok::Bang => "'!'",
+            Tok::Amp => "'&'",
+            Tok::AmpAmp => "'&&'",
+            Tok::Pipe => "'|'",
+            Tok::PipePipe => "'||'",
+            Tok::Caret => "'^'",
+            Tok::Tilde => "'~'",
+            Tok::Shl => "'<<'",
+            Tok::Shr => "'>>'",
             Tok::Eof => "end of file",
         };
         f.write_str(s)

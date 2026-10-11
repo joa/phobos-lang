@@ -17,6 +17,7 @@ impl<'c> Codegen<'c> {
         a: &MemVal<'c>,
         b: &MemVal<'c>,
         out: &MemVal<'c>,
+        accumulate: bool,
     ) -> Result<()> {
         self.check_matmul_elems(a, b, out, "dot_t")?;
         let kd = a.shape[1];
@@ -24,8 +25,8 @@ impl<'c> Codegen<'c> {
             bail!("dot_t needs a static contraction dim");
         }
 
-        if self.tile_matmul_t_imma(block, a, b, out, kd)?
-            || self.tile_matmul_t_dp4a(block, a, b, out, kd)?
+        if self.tile_matmul_t_imma(block, a, b, out, kd, accumulate)?
+            || self.tile_matmul_t_dp4a(block, a, b, out, kd, accumulate)?
         {
             return Ok(());
         }
@@ -55,9 +56,28 @@ impl<'c> Codegen<'c> {
             blk.append_operation(scf::r#for(lo, hi, st, region, cg.loc));
 
             let fin = cg.push(blk, memref::load(slot, &[], cg.loc))?;
-            blk.append_operation(memref::store(fin, out.mem, idx, cg.loc));
-            Ok(())
+            cg.store_dot_element(blk, fin, out, idx, accumulate)
         })
+    }
+
+    /// Stores one finished element of a `dot_t`, added to what `out` holds
+    /// when accumulating. Each element has one owner, so the read is safe.
+    pub(super) fn store_dot_element(
+        &self,
+        block: &Block<'c>,
+        v: Value<'c, 'c>,
+        out: &MemVal<'c>,
+        idx: &[Value<'c, 'c>],
+        accumulate: bool,
+    ) -> Result<()> {
+        let v = if accumulate {
+            let old = self.push(block, memref::load(out.mem, idx, self.loc))?;
+            self.push(block, self.elem_arith(BinOp::Add, out.elem, old, v)?)?
+        } else {
+            v
+        };
+        block.append_operation(memref::store(v, out.mem, idx, self.loc));
+        Ok(())
     }
 
     /// out[i, j] = sum_{r <= i} src[r, j], an inclusive prefix sum down the
@@ -511,6 +531,29 @@ impl<'c> Codegen<'c> {
         }
     }
 
+    /// Min or max: `kind` is `f` for floats or `si` for signed integers.
+    /// Floats take the LLVM intrinsic, a single `min.f32`; the GPU lowering
+    /// would turn `arith.minnumf` into a libdevice call nothing links.
+    pub(in crate::codegen) fn minmax(
+        &self,
+        op: BinOp,
+        kind: &str,
+        a: Value<'c, '_>,
+        b: Value<'c, '_>,
+    ) -> Result<Operation<'c>> {
+        let name = match (op, kind) {
+            (BinOp::Min, "f") => "llvm.intr.minnum",
+            (BinOp::Max, "f") => "llvm.intr.maxnum",
+            (BinOp::Min, _) => "arith.minsi",
+            (BinOp::Max, _) => "arith.maxsi",
+            _ => bail!("`{}` is not min or max", op.symbol()),
+        };
+        Ok(OperationBuilder::new(name, self.loc)
+            .add_operands(&[a, b])
+            .add_results(&[a.r#type()])
+            .build()?)
+    }
+
     /// The arith op for a tile loop body, on the element type.
     pub(in crate::codegen) fn elem_arith(
         &self,
@@ -527,7 +570,14 @@ impl<'c> Codegen<'c> {
                 BinOp::Mul => arith::mulf(a, b, loc),
                 BinOp::Div => arith::divf(a, b, loc),
                 BinOp::Rem => arith::remf(a, b, loc),
-                _ => bail!("operator not supported for tile operands"),
+                BinOp::Min | BinOp::Max => self.minmax(op, "f", a, b)?,
+                BinOp::Eq => arith::cmpf(self.ctx, arith::CmpfPredicate::Oeq, a, b, loc),
+                BinOp::Ne => arith::cmpf(self.ctx, arith::CmpfPredicate::One, a, b, loc),
+                BinOp::Lt => arith::cmpf(self.ctx, arith::CmpfPredicate::Olt, a, b, loc),
+                BinOp::Le => arith::cmpf(self.ctx, arith::CmpfPredicate::Ole, a, b, loc),
+                BinOp::Gt => arith::cmpf(self.ctx, arith::CmpfPredicate::Ogt, a, b, loc),
+                BinOp::Ge => arith::cmpf(self.ctx, arith::CmpfPredicate::Oge, a, b, loc),
+                _ => bail!("`{}` does not take float tile elements", op.symbol()),
             }
         } else if self.is_int(elem) {
             match op {
@@ -536,7 +586,19 @@ impl<'c> Codegen<'c> {
                 BinOp::Mul => arith::muli(a, b, loc),
                 BinOp::Div => arith::divsi(a, b, loc),
                 BinOp::Rem => arith::remsi(a, b, loc),
-                _ => bail!("operator not supported for tile operands"),
+                BinOp::BitAnd => arith::andi(a, b, loc),
+                BinOp::BitOr => arith::ori(a, b, loc),
+                BinOp::BitXor => arith::xori(a, b, loc),
+                BinOp::Shl => arith::shli(a, b, loc),
+                BinOp::Shr => arith::shrsi(a, b, loc),
+                BinOp::Min | BinOp::Max => self.minmax(op, "si", a, b)?,
+                BinOp::Eq => arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, a, b, loc),
+                BinOp::Ne => arith::cmpi(self.ctx, arith::CmpiPredicate::Ne, a, b, loc),
+                BinOp::Lt => arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, a, b, loc),
+                BinOp::Le => arith::cmpi(self.ctx, arith::CmpiPredicate::Sle, a, b, loc),
+                BinOp::Gt => arith::cmpi(self.ctx, arith::CmpiPredicate::Sgt, a, b, loc),
+                BinOp::Ge => arith::cmpi(self.ctx, arith::CmpiPredicate::Sge, a, b, loc),
+                _ => bail!("`{}` does not take integer tile elements", op.symbol()),
             }
         } else {
             bail!("tile ops need a numeric element type, got {elem}")

@@ -183,3 +183,70 @@ fn no_terminator_after_a_binary_operator() {
     assert_eq!(k[2], Tok::Ident("y".into())); // no terminator inserted after `+`
     assert_eq!(k.iter().filter(|t| **t == Tok::Semicolon).count(), 1);
 }
+
+#[test]
+fn lexes_bitwise_logical_and_shift_operators() {
+    assert_eq!(
+        kinds("a & b | c ^ ~d << 2 >> 1 && e || f"),
+        vec![
+            Tok::Ident("a".into()),
+            Tok::Amp,
+            Tok::Ident("b".into()),
+            Tok::Pipe,
+            Tok::Ident("c".into()),
+            Tok::Caret,
+            Tok::Tilde,
+            Tok::Ident("d".into()),
+            Tok::Shl,
+            Tok::Int(2),
+            Tok::Shr,
+            Tok::Int(1),
+            Tok::AmpAmp,
+            Tok::Ident("e".into()),
+            Tok::PipePipe,
+            Tok::Ident("f".into()),
+            Tok::Semicolon,
+            Tok::Eof,
+        ]
+    );
+}
+
+#[test]
+fn lexes_compound_assignments() {
+    use crate::ast::BinOp;
+    let ops: Vec<Tok> = kinds("-= *= /= %= &= |= ^= <<= >>= +=")
+        .into_iter()
+        .filter(|t| *t != Tok::Eof)
+        .collect();
+    assert_eq!(
+        ops,
+        vec![
+            Tok::OpEq(BinOp::Sub),
+            Tok::OpEq(BinOp::Mul),
+            Tok::OpEq(BinOp::Div),
+            Tok::OpEq(BinOp::Rem),
+            Tok::OpEq(BinOp::BitAnd),
+            Tok::OpEq(BinOp::BitOr),
+            Tok::OpEq(BinOp::BitXor),
+            Tok::OpEq(BinOp::Shl),
+            Tok::OpEq(BinOp::Shr),
+            Tok::PlusEq,
+        ]
+    );
+}
+
+#[test]
+fn shifts_do_not_disturb_comparisons_or_types() {
+    assert_eq!(kinds("a <= b")[1], Tok::Le);
+    assert_eq!(kinds("a >= b")[1], Tok::Ge);
+    // `tile<f32>[..]` closes its element type with a lone `>`.
+    assert!(kinds("x: tile<f32>[4]").contains(&Tok::Gt));
+}
+
+#[test]
+fn lexes_float_exponents() {
+    assert_eq!(kinds("1.0e30")[0], Tok::Float(1.0e30));
+    assert_eq!(kinds("1e-6")[0], Tok::Float(1e-6));
+    assert_eq!(kinds("2.5E+3")[0], Tok::Float(2500.0));
+    assert!(Lexer::new("1e").tokenize().unwrap_err().contains("exponent"));
+}

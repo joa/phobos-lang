@@ -11,6 +11,7 @@ impl<'c> Codegen<'c> {
         b: &MemVal<'c>,
         out: &MemVal<'c>,
         kd: i64,
+        accumulate: bool,
     ) -> Result<bool> {
         let applies = a.elem == self.i8_t
             && b.elem == self.i8_t
@@ -54,8 +55,7 @@ impl<'c> Codegen<'c> {
             blk.append_operation(scf::r#for(lo, hi, st, region, cg.loc));
 
             let fin = cg.push(blk, memref::load(slot, &[], cg.loc))?;
-            blk.append_operation(memref::store(fin, out.mem, idx, cg.loc));
-            Ok(())
+            cg.store_dot_element(blk, fin, out, idx, accumulate)
         })?;
         Ok(true)
     }

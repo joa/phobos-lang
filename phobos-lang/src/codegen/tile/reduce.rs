@@ -21,8 +21,8 @@ impl<'c> Codegen<'c> {
             bail!("row reduction needs a static tile shape");
         }
         let elem = src.elem;
-        if !self.is_float(elem) {
-            bail!("row reduction needs a float element type");
+        if !self.is_float(elem) && !self.is_int(elem) {
+            bail!("row reduction needs a numeric element type, got {elem}");
         }
         let out = self.alloc_tile_shaped(block, elem, &[rows, 1])?;
         match self.reduce_lanes(rows) {
@@ -36,7 +36,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// The fold identity: 0 for sum, and for max a floor below any finite
-    /// input. For f16 the floor is -65504, the lowest representable value.
+    /// input. For f16 the floor is -65504, the lowest representable value,
+    /// and for an integer it is the type's minimum.
     pub(super) fn reduce_identity(
         &self,
         block: &Block<'c>,
@@ -45,6 +46,14 @@ impl<'c> Codegen<'c> {
     ) -> Result<Value<'c, 'c>> {
         match kind {
             Reduce::Sum => self.zero_scalar(block, elem),
+            Reduce::Max if self.is_int(elem) => {
+                let bits = IntegerType::try_from(elem)?.width();
+                let floor = i64::MIN >> (64 - bits);
+                self.push(
+                    block,
+                    arith::constant(self.ctx, IntegerAttribute::new(elem, floor).into(), self.loc),
+                )
+            }
             Reduce::Max => {
                 let floor = if elem == self.f16_t {
                     -65504.0
@@ -108,8 +117,10 @@ impl<'c> Codegen<'c> {
             let j = detach(jb.argument(0)?.into());
             let v = cg.push(&jb, memref::load(src.mem, &[i, j], cg.loc))?;
             let cur = cg.push(&jb, memref::load(slot, &[], cg.loc))?;
+            // An integer sums in its own type, so a narrow one can wrap.
             let nv = match kind {
-                Reduce::Sum => cg.push(&jb, arith::addf(cur, v, cg.loc))?,
+                Reduce::Sum => cg.push(&jb, cg.elem_arith(BinOp::Add, elem, cur, v)?)?,
+                Reduce::Max if cg.is_int(elem) => cg.push(&jb, cg.minmax(BinOp::Max, "si", cur, v)?)?,
                 Reduce::Max => cg.fmax(&jb, cur, v)?,
             };
             jb.append_operation(memref::store(nv, slot, &[], cg.loc));

@@ -161,6 +161,16 @@ pub(super) trait Isa {
         x: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>>;
 
+    /// One f32 through `f`. Abs, floor and ceil must be exact; the others
+    /// may be approximate.
+    fn math_f32<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        f: crate::ir::MathFn,
+        x: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>>;
+
     /// The nearest integer to an f32, ties to even, as an f32. This must be
     /// exact, because quantization rounds with it.
     fn round_even<'c>(
@@ -493,6 +503,15 @@ impl<'c> Codegen<'c> {
         x: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
         self.isa.approx_tanh(self, block, x)
+    }
+
+    pub(in crate::codegen) fn math_f32(
+        &self,
+        block: &Block<'c>,
+        f: crate::ir::MathFn,
+        x: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.isa.math_f32(self, block, f, x)
     }
 
     pub(in crate::codegen) fn round_even(
