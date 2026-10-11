@@ -6,6 +6,7 @@ pub enum Tok {
 
     // keywords
     Kernel,
+    Fn,
     Let,
     Var,
     If,
@@ -75,6 +76,7 @@ impl std::fmt::Display for Tok {
             Tok::For => "'for'",
             Tok::In => "'in'",
             Tok::While => "'while'",
+            Tok::Fn => "'fn'",
             Tok::Break => "'break'",
             Tok::Continue => "'continue'",
             Tok::Return => "'return'",

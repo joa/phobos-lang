@@ -4,6 +4,7 @@
 2. [Lexical](#lexical)
 3. [Types](#types)
 4. [Statements](#statements)
+   - [Functions](#functions)
 5. [Subscripts](#subscripts)
 6. [Operators and conversions](#operators-and-conversions)
 7. [Bounds and masking](#bounds-and-masking)
@@ -18,9 +19,10 @@
 Notation: `{ x }` = zero or more, `[ x ]` = optional, `( ... )` = grouping, `"x"` = literal token, `(* ... *)` = comment.
 
 ```ebnf
-program     = { kernel } ;
+program     = { kernel | function } ;
 
 kernel      = { attribute } "kernel" ident "(" [ params ] ")" block ;
+function    = "fn" ident "(" [ ident { "," ident } ] ")" ( "=" expr terminator | block ) ;
 
 attribute   = "@" ident [ "(" [ attr_arg { "," attr_arg } ] ")" ] ;
 attr_arg    = ident "in" "[" int { "," int } "]"       (* autotune search dim: TILE_M in [64,128] *)
@@ -87,7 +89,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 
 | Item | Rule |
 |---|---|
-| Keywords | `kernel let var if else for in while break continue return true false` |
+| Keywords | `kernel fn let var if else for in while break continue return true false` |
 | Contextual identifiers | `tensor`, `tile`, `range`, every built-in and every scalar type name. Ordinary identifiers outside their position; `range` is only special inside `for ... in range(...)`. |
 | Comments | `// ...` to end of line. |
 | Statement end | A newline or `;`. Optional before `}` or end of file. |
@@ -123,6 +125,17 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `while c { }`, `if c { } else { }` | Scalar condition. |
 | `break`, `continue` | Leave the innermost loop, or its current iteration. A `for` runs its remaining iterations as no-ops after a `break`; a `while` stops at its next test. |
 | `return` | Skips the rest of the kernel. |
+
+### Functions
+
+A function is inlined at every call; there is no call at run time.
+
+| Form | Meaning |
+|---|---|
+| `fn f(a, b) = e` | An expression. `f(x, y)` is `e` with `x` and `y` in place of `a` and `b`, so a per-element body fuses into the caller's sweep. An argument used twice is evaluated twice. |
+| `fn f(a, b) { ... }` | A statement, called as one: `f(x, y)` splices the body in. A parameter passed a name aliases it, so a tile handed in can be written; a parameter that is indexed or assigned must be passed a name. |
+
+The body's own `let`s, `var`s and loop variables never meet the caller's. Any other name in a body resolves at the call, as a macro's would. A statement body may not `return`, nor `break` or `continue` outside its own loops. A function calling itself, directly or not, is an error.
 
 ## Subscripts
 
