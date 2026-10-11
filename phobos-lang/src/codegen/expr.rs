@@ -174,9 +174,9 @@ impl<'c> Codegen<'c> {
     }
 
     /// The subview result type MLIR infers: the slice's shape with the
-    /// source's row-major strides and a dynamic offset.
+    /// source's strides and a dynamic offset.
     pub(super) fn subview_type(&self, src: &MemVal<'c>, sizes: &[i64]) -> Result<Type<'c>> {
-        let strides = row_major_strides(&src.shape);
+        let strides = mem_strides(src);
         let dims: String = sizes.iter().map(|&d| format!("{}x", fmt_dim(d))).collect();
         let strides: Vec<String> = strides.iter().map(|&s| fmt_dim(s)).collect();
         let text = format!(
@@ -187,4 +187,16 @@ impl<'c> Codegen<'c> {
         );
         Type::parse(self.ctx, &text).ok_or_else(|| anyhow!("failed to parse type '{text}'"))
     }
+}
+
+/// A memref's strides: those of its strided layout when it is a view of a
+/// wider buffer, row-major over its shape otherwise.
+fn mem_strides(src: &MemVal<'_>) -> Vec<i64> {
+    let text = src.mem.r#type().to_string();
+    let Some((list, _)) = text.split_once("strided<[").and_then(|(_, rest)| rest.split_once(']')) else {
+        return row_major_strides(&src.shape);
+    };
+    list.split(',')
+        .map(|s| s.trim().parse().unwrap_or(DYN))
+        .collect()
 }

@@ -230,9 +230,6 @@ impl Build {
             Expr::Index { base, subs } => {
                 let (mv, binding) = self.mem_base(base)?;
                 if subs.iter().all(|s| matches!(s, Sub::Point(_))) {
-                    if matches!(binding, Binding::View(_)) {
-                        bail!("cannot assign through a read-only view");
-                    }
                     let indices = self.emit_indices(subs, self.shape(mv).len())?;
                     let rhs = self.emit_scalar(value)?;
                     let rhs = match op {
@@ -247,9 +244,6 @@ impl Build {
                     operands.extend_from_slice(&indices);
                     self.stmt(OpKind::Store, &operands);
                 } else {
-                    if matches!(binding, Binding::View(_)) {
-                        bail!("cannot assign through a read-only view");
-                    }
                     self.check_sliceable(mv, &binding)?;
                     let view = self.emit_subview(mv, subs)?;
                     self.store_tile(view, op, value)?;
