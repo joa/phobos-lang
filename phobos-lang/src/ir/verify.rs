@@ -376,6 +376,20 @@ impl Verifier<'_> {
                     self.err(op, "result must be the tensor's element type");
                 }
             }
+            OpKind::AtomicCas => {
+                if self.want_operands(op, 4) {
+                    match ir.ty(ir.operand(op, 0)) {
+                        Type::Tensor(t) if t.elem == Scalar::I32 => {}
+                        other => self.err(op, format!("operand 0 must be an i32 tensor, is {other}")),
+                    }
+                    self.want_type(op, 1, &Type::INDEX, "slot");
+                    self.want_type(op, 2, &Type::Scalar(Scalar::I32), "expected");
+                    self.want_type(op, 3, &Type::Scalar(Scalar::I32), "value");
+                }
+                if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::I32) {
+                    self.err(op, "result must be i32");
+                }
+            }
             OpKind::For(info) => {
                 if !self.want_operands(op, info.operand_count()) {
                     return;

@@ -185,7 +185,8 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 |---|---|---|---|
 | `program_id(d)` | index | Block index along grid axis `d`. | `d` a literal `0`, `1` or `2`. |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
-| `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
+| `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
+| `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |
 
 ### Elementwise
 

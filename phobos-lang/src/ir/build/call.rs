@@ -16,6 +16,7 @@ impl Build {
                 Ok(Rv::Scalar(self.value(OpKind::ProgramId(*d as u8), &[], Type::INDEX)))
             }
             "atomic_add" => self.emit_atomic_add(args),
+            "atomic_cas" => self.emit_atomic_cas(args),
             "rms_norm_q_t" => self.emit_rms_norm_q(args),
             "rms_norm_gated_q_t" => self.emit_rms_norm_gated_q(args),
             "grid_barrier" => self.emit_grid_barrier(args),
@@ -457,12 +458,7 @@ impl Build {
         let [t, i, v] = args else {
             bail!("atomic_add expects (tensor, index, value)");
         };
-        let Expr::Var(name) = t else {
-            bail!("atomic_add expects a named tensor parameter");
-        };
-        let Some(Binding::Tensor(mem)) = self.lookup(name) else {
-            bail!("atomic_add expects a tensor parameter, but '{name}' is not one");
-        };
+        let (mem, name) = self.atomic_tensor(t, "atomic_add")?;
         let elem = self.elem(mem);
         if !matches!(elem, Scalar::I32 | Scalar::F32) {
             bail!("atomic_add expects an i32 or f32 tensor, but '{name}' holds {}", elem.mlir_name());
@@ -479,6 +475,42 @@ impl Build {
         };
         let old = self.value(OpKind::AtomicAdd, &[mem, idx, val], Type::Scalar(elem));
         Ok(Rv::Scalar(old))
+    }
+
+    fn emit_atomic_cas(&mut self, args: &[Expr]) -> Result<Rv> {
+        let [t, i, expected, v] = args else {
+            bail!("atomic_cas expects (tensor, index, expected, value)");
+        };
+        let (mem, name) = self.atomic_tensor(t, "atomic_cas")?;
+        let elem = self.elem(mem);
+        if elem != Scalar::I32 {
+            bail!("atomic_cas expects an i32 tensor, but '{name}' holds {}", elem.mlir_name());
+        }
+        let idx = self.emit_index(i, "atomic_cas index")?;
+        let mut operands = vec![mem, idx];
+        for e in [expected, v] {
+            let s = self.emit_scalar(e)?;
+            operands.push(match self.scalar_of(s) {
+                Scalar::I32 => s,
+                Scalar::Index | Scalar::I8 | Scalar::I64 => {
+                    self.value(OpKind::IndexCast(Scalar::I32), &[s], Type::Scalar(Scalar::I32))
+                }
+                t => bail!("atomic_cas into i32 cannot take a {} value", t.mlir_name()),
+            });
+        }
+        let old = self.value(OpKind::AtomicCas, &operands, Type::Scalar(Scalar::I32));
+        Ok(Rv::Scalar(old))
+    }
+
+    /// An atomic's tensor operand: a named tensor parameter.
+    fn atomic_tensor<'e>(&self, t: &'e Expr, what: &str) -> Result<(ValueId, &'e str)> {
+        let Expr::Var(name) = t else {
+            bail!("{what} expects a named tensor parameter");
+        };
+        let Some(Binding::Tensor(mem)) = self.lookup(name) else {
+            bail!("{what} expects a tensor parameter, but '{name}' is not one");
+        };
+        Ok((mem, name))
     }
 
     /// The atomic-state operand: a named `i32` tensor parameter.

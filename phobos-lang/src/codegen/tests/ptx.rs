@@ -65,3 +65,22 @@ fn a_qgemm_module_needs_a_wide_index() {
     let plain = crate::parse("kernel k(A: tensor<f32>[N]) { let i = program_id(0) }").unwrap();
     assert!(!crate::needs_wide_index(&Context::default(), &plain));
 }
+
+#[test]
+fn atomics_reach_atom_instructions() {
+    let src = "kernel k(L: tensor<i32>[2], F: tensor<f32>[1], OUT: tensor<i32>[N]) {
+        let i = program_id(0)
+        OUT[i] = atomic_cas(L, 0, 0, i)
+        OUT[0] = atomic_add(L, 1, 1)
+        F[0] = atomic_add(F, 0, 0.5)
+    }";
+    for (chip, bits) in [("sm_75", 32), ("sm_120", 64)] {
+        let code = ptx(src, chip, bits);
+        assert!(!code.contains("__nv_"), "{chip}: a libdevice call in:
+{code}");
+        for want in [".global.cas.b32", "atom.global.add.u32", "atom.global.add.f32"] {
+            assert!(code.contains(want), "{chip}: no {want} in:
+{code}");
+        }
+    }
+}

@@ -83,6 +83,8 @@ impl Membar<'_> {
             self.ir.kind(op),
             OpKind::GridBarrier
                 | OpKind::Barrier
+                | OpKind::AtomicAdd
+                | OpKind::AtomicCas
                 | OpKind::Intrinsic(crate::ir::Intrinsic::WarpPartial)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::DeltaScan)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::RmsNormQ)
