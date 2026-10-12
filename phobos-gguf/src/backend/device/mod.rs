@@ -201,7 +201,7 @@ pub struct DeviceBackend {
     /// tile, same per-warp patch. Compiled lazily when
     /// [`Self::qmma_narrow`] is set.
     q8_qmma_narrow: RefCell<Option<Module>>,
-    q4k_lanes: RefCell<Option<Module>>,
+    lanes_kernels: RefCell<HashMap<Quant, Module>>,
     q8_split: Variants,
     q8_qdot: Module,
     q8_qdot_add: Module,

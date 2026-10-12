@@ -9,6 +9,7 @@
 // plane (see `Quant::device_block`). PTQ1_0 keeps both scales of a block
 // pair in the re-laid block itself (`quant/ptq1_0.rs`).
 
+use std::fmt::Write as _;
 use super::quant::qdot_i8_cta;
 use crate::quant::Quant;
 use phobos_kernels::launch::WARP_THREADS;
@@ -121,6 +122,159 @@ kernel q4k_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
 }
 "
     .to_string()
+}
+
+/// `0x0F0F_0F0F` and `0x0101_0101`: a nibble and a bit of every byte of a
+/// word, in the decimal `.ph` spells them in.
+const NIBBLES: u32 = 0x0F0F_0F0F;
+const LOW_BITS: u32 = 0x0101_0101;
+
+/// The Q5_K decode matvec written with lanes, Q4_K's mapping
+/// ([`q4k_qdot_lanes_src`]) over the 176-byte block: `d`, `dmin`, the twelve
+/// scale bytes, 32 bytes of `qh` and 128 of nibbles. An element of run `2q`
+/// is its low nibble plus 16 times bit `2q` of its `qh` byte, and of run
+/// `2q + 1` its high nibble and bit `2q + 1`. Each word's four elements are
+/// built on the packed word with `word` and fed to one `dp4a`.
+pub(crate) fn q5k_qdot_lanes_src() -> String {
+    let mut words = String::new();
+    for half in 0..2 {
+        for t in 0..4 {
+            let n = half * 4 + t;
+            let at = 16 * half;
+            let _ = writeln!(
+                words,
+                "  let qw{n} = word(QB[g, o + {at} :+ 16], {t})
+  let hw{n} = word(QB[g, h + {at} :+ 16], {t})
+  lo = dp4a((qw{n} & {NIBBLES}) | (((hw{n} >> (2 * q)) & {LOW_BITS}) << 4), word(AQ[0, a + {at} :+ 16], {t}), lo)
+  hi = dp4a(((qw{n} >> 4) & {NIBBLES}) | (((hw{n} >> (2 * q + 1)) & {LOW_BITS}) << 4), word(AQ[0, a + {lo_at} :+ 16], {t}), hi)",
+                lo_at = 32 + at
+            );
+        }
+    }
+    format!(
+        "// Block `b` of the lane's column into `acc`; the scales as in Q4_K.
+fn q5k_block(b) {{
+  let blk = b * 1408 + c8 * 176
+  let d = f32(f16bits((QB[g, blk] & 255) | ((QB[g, blk + 1] & 255) << 8)))
+  let dmin = f32(f16bits((QB[g, blk + 2] & 255) | ((QB[g, blk + 3] & 255) << 8)))
+  let s = blk + 4
+  let j = 2 * q
+  let x0 = QB[g, s + j] & 255
+  let x1 = QB[g, s + j + 1] & 255
+  let y0 = QB[g, s + j + 4] & 255
+  let y1 = QB[g, s + j + 5] & 255
+  let z0 = QB[g, s + max(j - 4, 0)] & 255
+  let z1 = QB[g, s + max(j - 3, 0)] & 255
+  let first = q < 2
+  let sc0 = where(first, x0 & 63, (y0 & 15) | ((z0 >> 6) << 4))
+  let m0 = where(first, y0 & 63, (y0 >> 4) | ((x0 >> 6) << 4))
+  let sc1 = where(first, x1 & 63, (y1 & 15) | ((z1 >> 6) << 4))
+  let m1 = where(first, y1 & 63, (y1 >> 4) | ((x1 >> 6) << 4))
+  let a = b * 256 + q * 64
+  let o = blk + 48 + q * 32
+  let h = blk + 16
+  var lo = 0
+  var hi = 0
+{words}  let s0 = sum(i32(AQ[0, a :+ 16])) + sum(i32(AQ[0, a + 16 :+ 16]))
+  let s1 = sum(i32(AQ[0, a + 32 :+ 16])) + sum(i32(AQ[0, a + 48 :+ 16]))
+  let r0 = d * f32(sc0) * f32(lo) - dmin * f32(m0) * f32(s0)
+  let r1 = d * f32(sc1) * f32(hi) - dmin * f32(m1) * f32(s1)
+  acc += AS[0, a / 32] * r0 + AS[0, a / 32 + 1] * r1
+}}
+
+@launch(256)
+@aligned(K = 256, GW = 1408)
+kernel q5k_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
+                      QB: tensor<i8>[G, GW], C: tensor<f32>[1, N]) {{
+  let col = ctx.block.x * 64 + ctx.warp * 8 + ctx.lane / 4
+  let q = ctx.lane % 4
+  let g = col / 8
+  let c8 = col % 8
+  var acc: f32 = 0.0
+  for b in range(0, K / 256, 1) {{
+    q5k_block(b)
+  }}
+  let total = sum<over ctx.lane, width 4>(acc)
+  if q == 0 && col < N {{
+    C[0, col] = total
+  }}
+}}
+"
+    )
+}
+
+/// `0x0303_0303`: two bits of every byte of a word.
+const TWO_BITS: u32 = 0x0303_0303;
+
+/// The Q6_K decode matvec written with lanes, `q6k_qdot_i8_t`'s mapping.
+///
+/// The device block is 208 bytes: 128 of `ql`, 64 of `qh`, sixteen signed
+/// scales; its `d` is in the grouped plane `D`, `[N/8, NB * 8]`. Lane `q`
+/// takes half `h = q / 2` at `l0 = 16 (q % 2)`: sixteen elements of each of
+/// the half's four runs `r`, `128 h + 32 r + l0 + i`. Run `r` reads the low
+/// (`r < 2`) or high nibble of `ql[64 h + 32 (r % 2) + l0 + i]` and bits
+/// `2r, 2r + 1` of `qh[32 h + l0 + i]`, less 32, under scale
+/// `8 h + q % 2 + 2r`. A word of four is one `dp4a`; the 32 comes off as 32
+/// times the run's activation sum.
+pub(crate) fn q6k_qdot_lanes_src() -> String {
+    let mut runs = String::new();
+    for r in 0..4 {
+        let ql = if r % 2 == 0 { "ql0" } else { "ql1" };
+        let _ = writeln!(runs, "  var dot{r} = 0");
+        for t in 0..4 {
+            let nibble = if r < 2 {
+                format!("(word(QB[g, {ql} :+ 16], {t}) & {NIBBLES})")
+            } else {
+                format!("((word(QB[g, {ql} :+ 16], {t}) >> 4) & {NIBBLES})")
+            };
+            let _ = writeln!(
+                runs,
+                "  dot{r} = dp4a({nibble} | (((word(QB[g, qh :+ 16], {t}) >> {sh}) & {TWO_BITS}) << 4), word(AQ[0, a + {at} :+ 16], {t}), dot{r})",
+                sh = 2 * r,
+                at = 32 * r
+            );
+        }
+        let _ = writeln!(
+            runs,
+            "  let sum{r} = sum(i32(AQ[0, a + {at} :+ 16]))
+  acc += d * f32(QB[g, sc + {sat}]) * AS[0, b * 8 + 4 * h + {r}] * f32(dot{r} - 32 * sum{r})",
+            at = 32 * r,
+            sat = 2 * r
+        );
+    }
+    format!(
+        "// Block `b` of the lane's column into `acc`.
+fn q6k_block(b) {{
+  let blk = b * 1664 + c8 * 208
+  let d = f32(D[g, b * 8 + c8])
+  let ql0 = blk + 64 * h + l0
+  let ql1 = ql0 + 32
+  let qh = blk + 128 + 32 * h + l0
+  let sc = blk + 192 + 8 * h + q % 2
+  let a = b * 256 + 128 * h + l0
+{runs}}}
+
+@launch(256)
+@aligned(K = 256, GW = 1664, DW = 8)
+kernel q6k_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
+                      QB: tensor<i8>[G, GW], D: tensor<f16>[G, DW], C: tensor<f32>[1, N]) {{
+  let col = ctx.block.x * 64 + ctx.warp * 8 + ctx.lane / 4
+  let q = ctx.lane % 4
+  let h = q / 2
+  let l0 = 16 * (q % 2)
+  let g = col / 8
+  let c8 = col % 8
+  var acc: f32 = 0.0
+  for b in range(0, K / 256, 1) {{
+    q6k_block(b)
+  }}
+  let total = sum<over ctx.lane, width 4>(acc)
+  if q == 0 && col < N {{
+    C[0, col] = total
+  }}
+}}
+"
+    )
 }
 
 pub(crate) fn q4k_qdot_i8_matvec_src(tn: usize) -> String {

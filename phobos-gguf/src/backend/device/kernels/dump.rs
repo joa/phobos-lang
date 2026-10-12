@@ -37,6 +37,10 @@ fn dump_raw_kernel_sources() {
     sources.push(("attn_gemm".to_string(), attn_gemm_src(256, ATTN_GEMM_TILE)));
     sources.push(("q8_split".to_string(), Q8_SPLIT_SRC.replace("{ALIGNED}", "@aligned(N = TN, K = 32)")));
     sources.push(("moe_topk".to_string(), moe_topk_src()));
+    sources.push(("q8_qdot_lanes".to_string(), q8_qdot_lanes_src(false)));
+    sources.push(("q4k_qdot_lanes".to_string(), q4k_qdot_lanes_src()));
+    sources.push(("q5k_qdot_lanes".to_string(), q5k_qdot_lanes_src()));
+    sources.push(("q6k_qdot_lanes".to_string(), q6k_qdot_lanes_src()));
     sources.push(("moe_combine".to_string(), moe_combine_src()));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
     sources.push(("delta_wy".to_string(), delta_wy_src(32, 128, DELTA_CHUNK)));
