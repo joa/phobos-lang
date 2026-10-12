@@ -4,7 +4,9 @@
 // For each 128 elements of `k`, the CTA stages 128 activation rows and 64
 // decoded weight columns as int8 tiles, plus the column scales. It contracts
 // them with `ldmatrix` and `mma.m8n8k16`. The next tile's reads are issued
-// before this one is contracted.
+// before this one is contracted. With `cp.async`, and room for it in the
+// static 48 KB, the activation tile is doubled and copied straight into the
+// half not being contracted, so only the weight passes through registers.
 //
 // Format decode lives in `qgemm_fmt.rs`. The epilogue matches
 // `iq1s_qmma_t`'s, so both agree bit for bit.
@@ -33,6 +35,20 @@ pub(super) const CHUNK_BYTES: i64 = 16;
 
 /// Tiles of 8 x 8 a warp's patch spans, each way.
 const PATCH: i64 = 4;
+
+/// Static shared memory a kernel may hold.
+const STATIC_SHARED_BYTES: i64 = 48 * 1024;
+
+/// Bytes of the stage with the activation tile doubled.
+fn async_stage_bytes(fmt: QgFormat) -> i64 {
+    let scales = QGEMM_KT / fmt.scale_run() * QGEMM_TN * 4;
+    let mins = match fmt.has_min() {
+        true => scales + QGEMM_TM * (QGEMM_KT / KQ_GROUP) * 4,
+        false => 0,
+    };
+    let a = 2 * QGEMM_TM * QGEMM_KT + QGEMM_TM * (QGEMM_KT / Q8_BLOCK) * 4;
+    a + QGEMM_TN * QGEMM_KT + scales + mins + fmt.tables().iter().sum::<i64>()
+}
 
 /// The loop-invariant geometry of one thread.
 pub(super) struct Lanes<'c> {
@@ -146,7 +162,9 @@ impl<'c> Codegen<'c> {
         let scales_per_tile = QGEMM_KT / fmt.scale_run();
 
         // The stage: both operand tiles, the scales of each, and the tables.
-        let a_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TM, QGEMM_KT])?;
+        let a_async = self.has_cp_async() && async_stage_bytes(fmt) <= STATIC_SHARED_BYTES;
+        let a_rows = if a_async { 2 * QGEMM_TM } else { QGEMM_TM };
+        let a_st = self.alloc_tile_shaped(block, i8_t, &[a_rows, QGEMM_KT])?;
         let w_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TN, QGEMM_KT])?;
         let sa_st = self.alloc_tile_shaped(block, f32_t, &[QGEMM_TM, QGEMM_KT / Q8_BLOCK])?;
         let sw_st = self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?;
@@ -192,9 +210,15 @@ impl<'c> Codegen<'c> {
         // Stage the first tile before the loop. The loop stages the next one
         // at the end of every turn.
         let zero_k = self.const_index(block, 0)?;
-        let first = self.qgemm_load(block, fmt, &lanes, aq, asc, qb, d, zero_k)?;
+        let first_half = a_async.then_some(zero_k);
+        let into = first_half.map(|half| (&a_st, half));
+        let (first, group) = self.qgemm_load(block, fmt, &lanes, aq, asc, qb, d, zero_k, into)?;
+        if let Some(group) = group {
+            self.async_wait(block, group)?;
+        }
         let planes = (mw_st.as_ref(), as_st.as_ref());
-        self.qgemm_store(block, fmt, &lanes, &first, &a_st, &w_st, &sa_st, &sw_st, planes, &tabs)?;
+        let stage = (&a_st, &w_st, &sa_st, &sw_st);
+        self.qgemm_store(block, fmt, &lanes, &first, first_half, stage, planes, &tabs)?;
         self.barrier(block)?;
 
         let acc_count = (PATCH * PATCH * 2) as usize;
@@ -212,14 +236,32 @@ impl<'c> Codegen<'c> {
         let last = self.push(&kb, arith::subi(nk, one, self.loc))?;
         let after = self.addi(&kb, kt, one)?;
         let next = self.push(&kb, arith::minui(after, last, self.loc))?;
-        let fetched = self.qgemm_load(&kb, fmt, &lanes, aq, asc, qb, d, next)?;
+        // The activation half this turn contracts, and the one the next
+        // tile is copied into.
+        let halves = match a_async {
+            true => {
+                let two = self.const_index(&kb, 2)?;
+                let tm = self.const_index(&kb, QGEMM_TM)?;
+                let parity = self.remui(&kb, kt, two)?;
+                let cur = self.muli(&kb, parity, tm)?;
+                Some((cur, self.push(&kb, arith::subi(tm, cur, self.loc))?))
+            }
+            false => None,
+        };
+        let into = halves.map(|(_, nxt)| (&a_st, nxt));
+        let (fetched, group) = self.qgemm_load(&kb, fmt, &lanes, aq, asc, qb, d, next, into)?;
 
-        let accs = self.qgemm_contract(&kb, fmt, &lanes, &a_st, &w_st, &sa_st, &sw_st, planes, &accs)?;
+        let cur = halves.map(|(cur, _)| cur);
+        let accs = self.qgemm_contract(&kb, fmt, &lanes, (&a_st, cur), &w_st, &sa_st, &sw_st, planes, &accs)?;
 
         // Every warp must finish with the stage before it is overwritten, and
         // the new stage must be complete before it is read.
         self.barrier(&kb)?;
-        self.qgemm_store(&kb, fmt, &lanes, &fetched, &a_st, &w_st, &sa_st, &sw_st, planes, &tabs)?;
+        if let Some(group) = group {
+            self.async_wait(&kb, group)?;
+        }
+        let nxt = halves.map(|(_, nxt)| nxt);
+        self.qgemm_store(&kb, fmt, &lanes, &fetched, nxt, stage, planes, &tabs)?;
         self.barrier(&kb)?;
         kb.append_operation(scf::r#yield(&accs, self.loc));
 
@@ -414,7 +456,9 @@ impl<'c> Codegen<'c> {
 
     /// The thread's global reads for tile `kt`, into registers: its share of
     /// the activation tile and scales, the column's block scale, then
-    /// whatever the format's decode needs (see `qgemm_fmt.rs`).
+    /// whatever the format's decode needs (see `qgemm_fmt.rs`). With `into`,
+    /// the activation pieces go straight to that stage at that row offset
+    /// instead, as one `cp.async` group, which is returned.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_load(
         &mut self,
@@ -426,16 +470,30 @@ impl<'c> Codegen<'c> {
         qb: &MemVal<'c>,
         d: &MemVal<'c>,
         kt: Value<'c, 'c>,
-    ) -> Result<Vec<Value<'c, 'c>>> {
+        into: Option<(&MemVal<'c>, Value<'c, 'c>)>,
+    ) -> Result<(Vec<Value<'c, 'c>>, Option<Value<'c, 'c>>)> {
         let vec16 = Type::vector(&[CHUNK_BYTES as u64], self.i8_t);
         let vec2_f32 = Type::vector(&[2], self.f32_t);
 
         let kt_w = self.const_index(block, QGEMM_KT)?;
         let kbase = self.muli(block, kt, kt_w)?;
         let mut regs = Vec::with_capacity(lanes.a_rows.len() + 8);
-        for (row, chunk) in lanes.a_rows.iter().zip(&lanes.a_chunks) {
-            let col = self.addi(block, kbase, *chunk)?;
-            regs.push(self.vec_load_al(block, aq.mem, &[*row, col], vec16, CHUNK_BYTES)?);
+        let mut group = None;
+        match into {
+            None => {
+                for (row, chunk) in lanes.a_rows.iter().zip(&lanes.a_chunks) {
+                    let col = self.addi(block, kbase, *chunk)?;
+                    regs.push(self.vec_load_al(block, aq.mem, &[*row, col], vec16, CHUNK_BYTES)?);
+                }
+            }
+            Some((a_st, half)) => {
+                for ((row, chunk), dst) in lanes.a_rows.iter().zip(&lanes.a_chunks).zip(&lanes.a_dst) {
+                    let col = self.addi(block, kbase, *chunk)?;
+                    let at = self.addi(block, *row, half)?;
+                    self.async_copy(block, aq, &[*row, col], a_st, &[at, *dst], CHUNK_BYTES)?;
+                }
+                group = Some(self.async_create_group(block)?);
+            }
         }
         let groups = self.const_index(block, QGEMM_KT / Q8_BLOCK)?;
         let gbase = self.muli(block, kt, groups)?;
@@ -446,13 +504,14 @@ impl<'c> Codegen<'c> {
         let dv = self.push(block, memref::load(d.mem, &[lanes.qb_row, at.d_col], self.loc))?;
         regs.push(self.numeric_cast(block, dv, self.f32_t)?);
         self.qgemm_fmt_load(block, fmt, lanes, qb, &at, &mut regs)?;
-        Ok(regs)
+        Ok((regs, group))
     }
 
     /// The thread's part of a stage: activation pieces and scales copied in,
     /// four weight fragments decoded, column scales written, and for a
     /// format with a minimum, the activation's group sums and column
-    /// minimums beside them.
+    /// minimums beside them. With `copied`, the activation pieces are already
+    /// in the stage at that row offset, and the sums read them back.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_store(
         &mut self,
@@ -460,15 +519,14 @@ impl<'c> Codegen<'c> {
         fmt: QgFormat,
         lanes: &Lanes<'c>,
         regs: &[Value<'c, 'c>],
-        a_st: &MemVal<'c>,
-        w_st: &MemVal<'c>,
-        sa_st: &MemVal<'c>,
-        sw_st: &MemVal<'c>,
+        copied: Option<Value<'c, 'c>>,
+        stage: StageTiles<'_, 'c>,
         planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
         tabs: &[MemVal<'c>],
     ) -> Result<()> {
+        let (a_st, w_st, sa_st, sw_st) = stage;
         let (mw_st, as_st) = planes;
-        let pieces = lanes.a_rows.len();
+        let pieces = if copied.is_some() { 0 } else { lanes.a_rows.len() };
         for ((v, row), dst) in regs[..pieces].iter().zip(&lanes.a_rows).zip(&lanes.a_dst) {
             self.vec_store_al(block, *v, a_st.mem, &[*row, *dst], CHUNK_BYTES)?;
         }
@@ -480,7 +538,19 @@ impl<'c> Codegen<'c> {
             // word.
             let words_t = Type::vector(&[4], self.i32_t);
             let group_w = self.const_index(block, KQ_GROUP)?;
-            for ((v, row), chunk) in regs[..pieces].iter().zip(&lanes.a_rows).zip(&lanes.a_chunks) {
+            let a_pieces = match copied {
+                None => regs[..pieces].to_vec(),
+                Some(half) => {
+                    let vec16 = Type::vector(&[CHUNK_BYTES as u64], self.i8_t);
+                    let mut out = Vec::with_capacity(lanes.a_rows.len());
+                    for (row, dst) in lanes.a_rows.iter().zip(&lanes.a_dst) {
+                        let at = self.addi(block, *row, half)?;
+                        out.push(self.vec_load_al(block, a_st.mem, &[at, *dst], vec16, CHUNK_BYTES)?);
+                    }
+                    out
+                }
+            };
+            for ((v, row), chunk) in a_pieces.iter().zip(&lanes.a_rows).zip(&lanes.a_chunks) {
                 let w = self.vec_bitcast(block, *v, words_t)?;
                 let words: Vec<Value<'c, 'c>> = (0..4)
                     .map(|i| self.vec_extract(block, w, &[i], self.i32_t))
@@ -496,7 +566,7 @@ impl<'c> Codegen<'c> {
             }
         }
         let dv = regs[pieces + 1];
-        let stage = Stage {
+        let decode = Stage {
             lanes,
             w_st,
             sw_st,
@@ -504,7 +574,7 @@ impl<'c> Codegen<'c> {
             tabs,
             dv,
         };
-        self.qgemm_fmt_decode(block, fmt, &stage, &regs[pieces + 2..])
+        self.qgemm_fmt_decode(block, fmt, &decode, &regs[pieces + 2..])
     }
 
     /// The warp's patch over one stage: four 32-element groups, each with two
@@ -516,7 +586,7 @@ impl<'c> Codegen<'c> {
         block: &Block<'c>,
         fmt: QgFormat,
         lanes: &Lanes<'c>,
-        a_st: &MemVal<'c>,
+        a: (&MemVal<'c>, Option<Value<'c, 'c>>),
         w_st: &MemVal<'c>,
         sa_st: &MemVal<'c>,
         sw_st: &MemVal<'c>,
@@ -538,6 +608,12 @@ impl<'c> Codegen<'c> {
         let per_col = if split { halves } else { 1 };
         let (rows, cols) = self.qgemm_patch_coords(block, lanes)?;
         let chunk_w = self.const_index(block, CHUNK_BYTES)?;
+        // The activation stage, and the half of it this turn reads.
+        let (a_st, a_half) = a;
+        let ldm_a_row = match a_half {
+            Some(half) => self.addi(block, lanes.ldm_a_row, half)?,
+            None => lanes.ldm_a_row,
+        };
 
         let mut accs = accs.to_vec();
         for s in 0..(QGEMM_KT / Q8_BLOCK) {
@@ -587,7 +663,7 @@ impl<'c> Codegen<'c> {
                 let chunk = self.const_index(block, s * halves + h)?;
                 let phys = self.push(block, arith::xori(chunk, lanes.ldm_xor, self.loc))?;
                 let col = self.muli(block, phys, chunk_w)?;
-                let a4 = self.ldmatrix(block, a_st.mem, [lanes.ldm_a_row, col], PATCH, false, quad_t)?;
+                let a4 = self.ldmatrix(block, a_st.mem, [ldm_a_row, col], PATCH, false, quad_t)?;
                 let w4 = self.ldmatrix(block, w_st.mem, [lanes.ldm_w_row, col], PATCH, false, quad_t)?;
                 for t in 0..PATCH {
                     let a = self.vec_extract(block, a4, &[t], four_i8)?;
@@ -709,6 +785,9 @@ impl<'c> Codegen<'c> {
         Ok(accs)
     }
 }
+
+/// A stage's activation and weight tiles and their scale planes.
+type StageTiles<'a, 'c> = (&'a MemVal<'c>, &'a MemVal<'c>, &'a MemVal<'c>, &'a MemVal<'c>);
 
 /// What a format's decode writes into: the stage's weight tile and scale
 /// plane, the tables already in shared memory, and the column's block scale.
