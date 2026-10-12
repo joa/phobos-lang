@@ -16,8 +16,10 @@ use phobos_gguf::quant::{Packed, Quant, pack_q8_0};
 
 
 mod raw;
+mod topk;
 
 use raw::{check_hadamard, check_raw_formats};
+use topk::check_topk;
 
 /// The RMS magnitude of a length-`k` dot of an element of `a` with one of
 /// `w`: sqrt(k) times the two operands' RMS. A quantized format's weights
@@ -846,6 +848,7 @@ fn main() -> Result<()> {
         check(&format!("matmul [1 x {k} x {n}]"), &run(&host)?, &run(&gpu)?);
     }
     check_hadamard(&host, &gpu, &check_within, &mut next)?;
+    check_topk(&failures)?;
 
     // The narrow dense projection against a weight held `[n, k]`: a decode
     // row, a prompt of whole tiles, one with a tail, and a width the prompt

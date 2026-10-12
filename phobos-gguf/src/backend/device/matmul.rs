@@ -345,6 +345,16 @@ impl DeviceBackend {
             // writes a padded scratch row and copies the first n values out.
             // The upload already padded the weight to match.
             let n_pad = n.next_multiple_of(tn);
+            if quant == Quant::Q4_K && self.raw_lanes {
+                let groups = n.div_ceil(8) as i64;
+                let operands = [
+                    (qa_ptr, [1, k as i64]),
+                    (das_ptr, [1, n_blocks as i64]),
+                    (bytes_ptr, [groups, nb * 8 * quant.device_block_bytes() as i64]),
+                    (self.ptr(out, 0)?, [1, n as i64]),
+                ];
+                return self.launch_q4k_lanes(&operands, n);
+            }
             let ops = qdot_split::SplitOperands { qa: qa_ptr, das: das_ptr, bytes: bytes_ptr, d: d_ptr };
             if n_pad == n && tables.is_empty() && self.project_raw_split(quant, ops, (nb as usize, k, n), (out, false))? {
                 return Ok(());
@@ -604,6 +614,16 @@ impl DeviceBackend {
             .borrow()
             .get(w.0)
             .is_some_and(|raw| raw.quant == quant)
+    }
+
+    /// The Q4_K decode matvec written with lanes, compiled on first use.
+    fn launch_q4k_lanes(&self, operands: &[(u64, [i64; 2])], n: usize) -> Result<()> {
+        if self.q4k_lanes.borrow().is_none() {
+            *self.q4k_lanes.borrow_mut() = Some(compile(&q4k_qdot_lanes_src(), &[], "q4k_qdot_lanes")?);
+        }
+        let cache = self.q4k_lanes.borrow();
+        let module = cache.as_ref().expect("just compiled above");
+        self.launch(module, "q4k_qdot_lanes", operands, (n.div_ceil(Q4K_LANES_TN) as u32, 1, 1))
     }
 
     /// Narrow-CTA path for `q8_qmma`'s deep tile. The same kernel at half the

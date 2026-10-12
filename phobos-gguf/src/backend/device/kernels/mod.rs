@@ -34,6 +34,7 @@ pub(crate) use attn::*;
 // The attention checks in `examples/` compile these themselves, so they stay
 // reachable at `backend::device::`.
 pub use attn::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
+pub use moe::moe_topk_src;
 pub(crate) use delta::*;
 pub(crate) use elem::*;
 pub(crate) use hadamard::*;

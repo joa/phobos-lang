@@ -82,7 +82,7 @@ impl DeviceBackend {
             "q8_split",
             ("@aligned(N = TN, K = 32)", "@aligned(K = 32)"),
         )?;
-        let (q8_qdot, q8_qdot_add) = if env_flag("PHOBOS_QDOT_LANES") {
+        let (q8_qdot, q8_qdot_add) = if env_flag_on("PHOBOS_QDOT_LANES") {
             (
                 compile(&q8_qdot_lanes_src(false), &[], "q8_qdot")?,
                 compile(&q8_qdot_lanes_src(true), &[], "q8_qdot_add")?,
@@ -149,6 +149,7 @@ impl DeviceBackend {
             qdot_split_mods: RefCell::new(HashMap::new()),
             qdot_split_on: env_flag_on("PHOBOS_QDOT_SPLIT"),
             q8_qmma_narrow: RefCell::new(None),
+            q4k_lanes: RefCell::new(None),
             q8_split,
             q8_qdot,
             q8_qdot_add,
@@ -156,6 +157,7 @@ impl DeviceBackend {
             q50_kernels: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
             persist_qdot: env_flag("PHOBOS_PERSIST_QDOT"),
+            raw_lanes: env_flag_on("PHOBOS_RAW_LANES"),
             iq1s_dp4a: Cell::new(env_flag_on("PHOBOS_IQ1S_DP4A")),
             qmma_split: env_flag_on("PHOBOS_QMMA_SPLIT"),
             qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),

@@ -56,6 +56,73 @@ kernel {name}_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
+/// Columns a CTA of [`q4k_qdot_lanes_src`] covers: eight a warp.
+pub(crate) const Q4K_LANES_TN: usize = 64;
+
+/// The Q4_K decode matvec written with lanes, `q4k_qdot_i8_t`'s mapping in
+/// `.ph`: four lanes a column, each a quarter of every block.
+///
+/// `QB` is the grouped weight as the device holds it, `[N/8, NB * 8 * 144]`:
+/// a group's blocks, each eight columns' 144 bytes (`d`, `dmin`, twelve
+/// bytes of packed 6-bit scales and mins, 128 of nibbles). A lane's quarter
+/// `q` is 32 contiguous bytes of nibbles: the low ones are run `2q`, the high
+/// ones run `2q + 1`, each against 32 activations and one activation scale.
+pub(crate) fn q4k_qdot_lanes_src() -> String {
+    "// Block `b` of the lane's column into `acc`. A run's 6-bit scale and min
+// come from bytes `j`, `j + 4` and `j - 4` of the twelve, by whether the run
+// is in the first four; both forms are read and one kept, so the warp does
+// not split.
+fn q4k_block(b) {
+  let blk = b * 1152 + c8 * 144
+  let d = f32(f16bits((QB[g, blk] & 255) | ((QB[g, blk + 1] & 255) << 8)))
+  let dmin = f32(f16bits((QB[g, blk + 2] & 255) | ((QB[g, blk + 3] & 255) << 8)))
+  let s = blk + 4
+  let j = 2 * q
+  let x0 = QB[g, s + j] & 255
+  let x1 = QB[g, s + j + 1] & 255
+  let y0 = QB[g, s + j + 4] & 255
+  let y1 = QB[g, s + j + 5] & 255
+  let z0 = QB[g, s + max(j - 4, 0)] & 255
+  let z1 = QB[g, s + max(j - 3, 0)] & 255
+  let first = q < 2
+  let sc0 = where(first, x0 & 63, (y0 & 15) | ((z0 >> 6) << 4))
+  let m0 = where(first, y0 & 63, (y0 >> 4) | ((x0 >> 6) << 4))
+  let sc1 = where(first, x1 & 63, (y1 & 15) | ((z1 >> 6) << 4))
+  let m1 = where(first, y1 & 63, (y1 >> 4) | ((x1 >> 6) << 4))
+  let a = b * 256 + q * 64
+  let o = blk + 16 + q * 32
+  let lo0 = sum(i32(QB[g, o :+ 16] & 15) * i32(AQ[0, a :+ 16]))
+  let lo1 = sum(i32(QB[g, o + 16 :+ 16] & 15) * i32(AQ[0, a + 16 :+ 16]))
+  let hi0 = sum(i32((QB[g, o :+ 16] >> 4) & 15) * i32(AQ[0, a + 32 :+ 16]))
+  let hi1 = sum(i32((QB[g, o + 16 :+ 16] >> 4) & 15) * i32(AQ[0, a + 48 :+ 16]))
+  let s0 = sum(i32(AQ[0, a :+ 16])) + sum(i32(AQ[0, a + 16 :+ 16]))
+  let s1 = sum(i32(AQ[0, a + 32 :+ 16])) + sum(i32(AQ[0, a + 48 :+ 16]))
+  let r0 = d * f32(sc0) * f32(lo0 + lo1) - dmin * f32(m0) * f32(s0)
+  let r1 = d * f32(sc1) * f32(hi0 + hi1) - dmin * f32(m1) * f32(s1)
+  acc += AS[0, a / 32] * r0 + AS[0, a / 32 + 1] * r1
+}
+
+@launch(256)
+@aligned(K = 256, GW = 1152)
+kernel q4k_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
+                      QB: tensor<i8>[G, GW], C: tensor<f32>[1, N]) {
+  let col = ctx.block.x * 64 + ctx.warp * 8 + ctx.lane / 4
+  let q = ctx.lane % 4
+  let g = col / 8
+  let c8 = col % 8
+  var acc: f32 = 0.0
+  for b in range(0, K / 256, 1) {
+    q4k_block(b)
+  }
+  let total = sum<over ctx.lane, width 4>(acc)
+  if q == 0 && col < N {
+    C[0, col] = total
+  }
+}
+"
+    .to_string()
+}
+
 pub(crate) fn q4k_qdot_i8_matvec_src(tn: usize) -> String {
     kquant_qdot_i8_matvec_src("q4k", tn, 4)
 }

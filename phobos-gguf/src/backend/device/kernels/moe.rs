@@ -16,43 +16,61 @@ pub(crate) const MOE_QDOT_TN: usize = 64;
 /// Columns one CTA of the combine adds.
 pub(crate) const MOE_COMBINE_TN: usize = 256;
 
-/// Softmax and top-k over each row of `n_expert` router logits, one program
-/// per row.
+/// Softmax and top-k over each row of router logits, one warp per row.
 ///
 /// Writes the `MOE_USED` largest probabilities in descending order: ids to
 /// `TOPK` and weights, renormalized to sum to one, to `W`. This matches
-/// llama.cpp's `build_moe_ffn`. `IO` is the iota row `[0, n_expert)` as f32.
+/// llama.cpp's `build_moe_ffn`, and the host's `route`: a tie goes to the
+/// lower index. `IO`, the iota row, is no longer read.
 ///
-/// Each pick takes the largest probability, then the largest index holding
-/// it. The picked entry is then set to -1 so it is not picked again.
-pub(crate) fn moe_topk_src(n_expert: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(NE in [{n_expert}], U in [{MOE_USED}])
-@aligned(E = NE)
-kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R, U], W: tensor<f32>[R, U]) {{
+/// The lanes stride the experts. Softmax is monotonic, so the picks are the
+/// largest logits, and pick `j` is the largest after pick `j - 1` in
+/// (value descending, index ascending) order, so nothing is marked between
+/// picks. The softmax denominator cancels in the renormalization, which
+/// leaves `exp(l - max)` over the picks' sum.
+pub fn moe_topk_src() -> String {
+    "@launch(32)
+kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R, U], W: tensor<f32>[R, U]) {
   let r = ctx.block.x
-  var p: tile<f32>[1, NE] = L[r :+ 1, 0 :+ NE]
-  let m = rowmax(p)
-  var ex: tile<f32>[1, NE] = exp(p - m)
-  let total = rowsum(ex)
-  p = ex / total
-  var picked: tile<f32>[1, 1] = 0.0
-  var neg: tile<f32>[1, NE] = -1.0
-  var io: tile<f32>[1, NE] = IO[0 :+ 1, 0 :+ NE]
-  for j in range(0, U, 1) {{
-    let v = rowmax(p)
-    let i = rowmax(argsel(p, v, io, neg))
-    W[r :+ 1, j :+ 1] = v
-    TOPK[r :+ 1, j :+ 1] = i32(i)
-    picked += v
-    p = argsel(p, v, neg, p)
-  }}
-  var w: tile<f32>[1, U] = W[r :+ 1, 0 :+ U]
-  W[r :+ 1, 0 :+ U] = w / picked
-}}
+  var top: f32 = -1.0e30
+  for k in range(ctx.lane, E, ctx.lanes) {
+    top = max(top, L[r, k])
+  }
+  let m = max<over ctx.lane>(top)
+  var pv: f32 = 1.0e30
+  var pi = -1
+  var picked: f32 = 0.0
+  for j in range(0, U, 1) {
+    var bv: f32 = -1.0e30
+    var bi = E
+    for k in range(ctx.lane, E, ctx.lanes) {
+      let l = L[r, k]
+      let after = l < pv || (l == pv && k > pi)
+      let better = l > bv || (l == bv && k < bi)
+      if after && better {
+        bv = l
+        bi = k
+      }
+    }
+    let v = max<over ctx.lane>(bv)
+    let i = min<over ctx.lane>(where(bv == v, bi, E))
+    let e = exp(v - m)
+    picked += e
+    if ctx.lane == 0 {
+      W[r, j] = e
+      TOPK[r, j] = i32(i)
+    }
+    pv = v
+    pi = i
+  }
+  if ctx.lane == 0 {
+    for j in range(0, U, 1) {
+      W[r, j] = W[r, j] / picked
+    }
+  }
+}
 "
-    )
+    .to_string()
 }
 
 /// A slot kernel's CTA width and minimum resident blocks per SM, from the
