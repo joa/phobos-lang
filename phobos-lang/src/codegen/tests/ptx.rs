@@ -5,7 +5,7 @@ use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
 
 const OPS: &str = "
 kernel ops(X: tensor<f32>[16, 64], Y: tensor<f32>[16, 64], I: tensor<i32>[N], n: i32) {
-    let i = program_id(0)
+    let i = ctx.block.x
     let q = I[i]
     I[i] = max(q >> 4, abs(q - 3)) | (q << 1) ^ ~(q & 7)
     let x = X[0 :+ 16, 0 :+ 64]
@@ -62,14 +62,14 @@ fn a_qgemm_module_needs_a_wide_index() {
     }";
     let kernels = crate::parse(src).unwrap();
     assert!(crate::needs_wide_index(&Context::default(), &kernels));
-    let plain = crate::parse("kernel k(A: tensor<f32>[N]) { let i = program_id(0) }").unwrap();
+    let plain = crate::parse("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }").unwrap();
     assert!(!crate::needs_wide_index(&Context::default(), &plain));
 }
 
 #[test]
 fn atomics_reach_atom_instructions() {
     let src = "kernel k(L: tensor<i32>[2], F: tensor<f32>[1], OUT: tensor<i32>[N]) {
-        let i = program_id(0)
+        let i = ctx.block.x
         OUT[i] = atomic_cas(L, 0, 0, i)
         OUT[0] = atomic_add(L, 1, 1)
         F[0] = atomic_add(F, 0, 0.5)
@@ -88,7 +88,7 @@ fn atomics_reach_atom_instructions() {
 #[test]
 fn unsigned_reads_zero_extend_in_ptx() {
     let src = "kernel k(B: tensor<u8>[16, 64], H: tensor<u16>[N], O: tensor<i32>[16, 64], P: tensor<f32>[N]) {
-        let i = program_id(0)
+        let i = ctx.block.x
         P[i] = f32(H[i])
         var b = B[0 :+ 16, 0 :+ 64]
         var q: tile<i32>[16, 64] = (i32(b) >> 4) & 15

@@ -60,8 +60,8 @@ pub(crate) fn q2k_matvec_src(tn: usize) -> String {
 kernel q2k_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                   D: tensor<f16>[N, NB], DMIN: tensor<f16>[N, NB],
                   C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
-  let pm = program_id(1)
+  let pn = ctx.block.x
+  let pm = ctx.block.y
   var acc: tile<f32>[1, TN] = 0.0
   for kb in range(0, NB, 1) {{
     var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]
@@ -85,7 +85,7 @@ pub(crate) fn q2k_qdot_matvec_src(tn: usize) -> String {
 kernel q2k_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                        D: tensor<f16>[N, NB], DMIN: tensor<f16>[N, NB],
                        C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q2k_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                         D[pn * TN :+ TN, :], DMIN[pn * TN :+ TN, :])
 }}
@@ -110,7 +110,7 @@ pub(crate) fn q2k_dequant_src(tn: usize) -> String {
 @autotune(TN in [{tn}])
 kernel q2k_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB], DMIN: tensor<f16>[N, NB],
                    SCRATCH: tensor<f32>[K, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   for kb in range(0, NB, 1) {{
     var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]
     let d = D[pn * TN :+ TN, kb :+ 1]

@@ -7,7 +7,7 @@ use super::*;
 fn add_kernel_lowers_to_gpu_func() {
     let mlir = emit_mlir(
         "kernel add(X: tensor<f32>[N], Y: tensor<f32>[N], Z: tensor<f32>[N], n: i32) {
-            let i = program_id(0)
+            let i = ctx.block.x
             if i < n {
                 Z[i] = X[i] + Y[i]
             }
@@ -114,9 +114,34 @@ fn unknown_builtin_is_an_error() {
 }
 
 #[test]
-fn program_id_dimension_must_be_literal_0_to_2() {
-    let err = emit_err("kernel k(A: tensor<f32>[N]) { let x = program_id(3) }");
-    assert!(err.contains("program_id"), "got: {err}");
+fn ctx_names_only_its_own_fields() {
+    for (stmt, want) in [
+        ("let x = ctx.block.w", "axes x, y and z"),
+        ("let x = ctx.block", "needs an axis"),
+        ("let x = ctx.warp_size", "no field `warp_size`"),
+        ("let x = ctx", "through a field"),
+        ("let ctx = 1", "`ctx` is reserved"),
+    ] {
+        let err = crate::parse(&format!("kernel k(A: tensor<f32>[N]) {{ {stmt} }}")).unwrap_err();
+        assert!(err.to_string().contains(want), "{stmt}: {err}");
+    }
+    // `ctx.block` replaced it.
+    let err = emit_err("kernel k(A: tensor<f32>[N]) { let x = program_id(0) }");
+    assert!(err.contains("unknown function"), "got: {err}");
+}
+
+#[test]
+fn ctx_counts_are_constants() {
+    let mlir = emit_mlir(
+        "@launch(128)
+        kernel k(O: tensor<i32>[1, 4]) {
+            O[0, 0] = i32(ctx.threads)
+            O[0, 1] = i32(ctx.warps)
+            O[0, 2] = i32(ctx.lanes)
+            O[0, 3] = i32(ctx.blocks.y)
+        }",
+    );
+    assert_contains(&mlir, &["arith.constant 128", "arith.constant 4 ", "arith.constant 32", "gpu.grid_dim  y"]);
 }
 
 #[test]
@@ -139,7 +164,7 @@ fn cumsum_tril_transpose_lower_and_verify() {
     let mlir = emit_mlir(
         "@autotune(D in [32], C in [32])
         kernel prim(G: tensor<f32>[N, 1], X: tensor<f32>[N, D], O: tensor<f32>[N, D]) {
-            let c = program_id(0)
+            let c = ctx.block.x
             let g = G[c :+ C, :]
             var b: tile<f32>[C, 1] = cumsum(g)
             let x = X[c :+ C, :]

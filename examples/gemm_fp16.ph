@@ -7,8 +7,8 @@ kernel gemm(A: tensor<f16>[M, K],
             C: tensor<f16>[M, N],
             alpha: f32,
             beta: f32) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
 
   var acc: tile<f16>[TILE_M, TILE_N] = 0.0
   

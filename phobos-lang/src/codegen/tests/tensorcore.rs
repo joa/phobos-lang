@@ -11,8 +11,8 @@ fn tensorcore_matmul_uses_wmma() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -58,8 +58,8 @@ fn tensorcore_uses_mma_sync_on_sm75() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -115,8 +115,8 @@ fn tensorcore_sync_widens_k_to_16_on_sm80() {
         @tensorcore(sync)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -149,8 +149,8 @@ fn tensorcore_sync_f16_accumulator() {
         @tensorcore(sync)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -185,8 +185,8 @@ fn tensorcore_wmma_optout_forces_legacy() {
         @tensorcore(wmma)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -213,8 +213,8 @@ fn tensorcore_falls_back_to_wmma_without_wide_index() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -238,8 +238,8 @@ fn tensorcore_pipelines_f16_staging() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -273,8 +273,8 @@ fn tensorcore_drops_padding_only_when_maxregs_admits_a_cta() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -316,8 +316,8 @@ fn tensorcore_bails_to_vector_path_when_shape_does_not_fragment() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -351,8 +351,8 @@ fn tensorcore_widens_to_mma_sync_from_sm_80() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]

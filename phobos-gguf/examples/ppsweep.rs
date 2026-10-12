@@ -28,8 +28,8 @@ const SRC_MMA: &str = "\
 kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
               C: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, K, 32) {
     let b = kt / 32
@@ -56,8 +56,8 @@ const SRC_QMMA: &str = "\
 kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                C: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                            W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
 }

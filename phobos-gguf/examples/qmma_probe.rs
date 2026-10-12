@@ -98,8 +98,8 @@ kernel iq1s_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                  QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                  GRID: tensor<i8>[1, {table_len}],
                  C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm * TM :+ TM, pn * TN :+ TN] = {intrinsic}(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                 QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                                 GRID[0 :+ 1, :])

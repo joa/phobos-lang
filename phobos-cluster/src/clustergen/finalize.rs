@@ -8,11 +8,11 @@ impl<'a> Analyzer<'a> {
         for (i, g) in self.grid.drain(..).enumerate() {
             match g {
                 Some(g) => grid.push(g),
-                None => bail!("program_id({i}) is never used to address a supertile"),
+                None => bail!("`ctx.block` axis {i} is never used to address a supertile"),
             }
         }
         if grid.is_empty() {
-            bail!("kernel addresses no supertiles via program_id");
+            bail!("kernel addresses no supertiles via ctx.block");
         }
         Ok(grid)
     }
@@ -198,7 +198,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// The grid slice `[p0*S0 :+ S0, ..]` of the output supertile, plus the
-    /// `let p{pid} = program_id(pid)` bindings its offsets need.
+    /// `let p{pid} = ctx.block.<pid>` bindings its offsets need.
     pub(super) fn output_slice(&self, d: &Define) -> (Vec<Stmt>, Vec<Sub>) {
         let mut lets = Vec::new();
         let mut declared = HashSet::new();
@@ -212,10 +212,7 @@ impl<'a> Analyzer<'a> {
                 lets.push(Stmt::Let {
                     name: p.clone(),
                     ty: None,
-                    value: Expr::Call {
-                        callee: "program_id".into(),
-                        args: vec![Expr::Int(*pid as i64)],
-                    },
+                    value: phobos_lang::ast::ctx::block(*pid as u8),
                 });
             }
             subs.push(Sub::Span {
@@ -240,7 +237,7 @@ impl<'a> Analyzer<'a> {
     }
 
     /// Synthesize the plain chain's init leaf:
-    /// `kernel {name}_init(C: ..) { let p0 = program_id(0); ..; C[p0*S :+ S, ..] = <init> }`
+    /// `kernel {name}_init(C: ..) { let p0 = ctx.block.x; ..; C[p0*S :+ S, ..] = <init> }`
     pub(super) fn zero_init_leaf(&self, scratch: &Scratch, d: &Define) -> Kernel {
         let (mut body, subs) = self.output_slice(d);
         body.push(Stmt::Assign {

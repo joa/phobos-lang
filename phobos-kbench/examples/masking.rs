@@ -5,14 +5,14 @@ use phobos_base::phinfo;
 // divide evenly. The phobos-kbench kernels take runtime extents, which the
 // row-pitch ABI assumes aligned, so none of them exercise it.
 const CODE_COPY: &str = "kernel copy(A: tensor<f32>[100], B: tensor<f32>[100]) {
-    let p = program_id(0)
+    let p = ctx.block.x
     B[p * 32 :+ 32] = A[p * 32 :+ 32]
 }";
 
 const CODE_MATMUL: &str = "@autotune(TILE_M in [32], TILE_N in [32], TILE_K in [32])
 kernel matmul(A: tensor<f32>[96, 64], B: tensor<f32>[64, 100], C: tensor<f32>[96, 100]) {
-    let pm = program_id(0)
-    let pn = program_id(1)
+    let pm = ctx.block.x
+    let pn = ctx.block.y
     var acc: tile<f32>[TILE_M, TILE_N] = 0.0
     for kt in range(0, 64, TILE_K) {
         var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]

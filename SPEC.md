@@ -71,7 +71,8 @@ factor      = unary { ( "*" | "/" | "%" ) unary } ;
 unary       = [ "-" | "!" | "~" ] postfix ;
 postfix     = primary { "[" subscripts "]" | "(" [ args ] ")" } ;
 args        = expr { "," expr } ;
-primary     = int | float | "true" | "false" | ident | "(" expr ")" ;
+primary     = int | float | "true" | "false" | ctx_field | ident | "(" expr ")" ;
+ctx_field   = "ctx" "." ident [ "." ident ] ;
 
 subscripts  = subscript { "," subscript } ;
 subscript   = ":"                                      (* full range:  A[:] *)
@@ -90,6 +91,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | Item | Rule |
 |---|---|
 | Keywords | `kernel fn let var if else for in while break continue return true false` |
+| Reserved name | `ctx`, which is read only through its fields (see Indexing and synchronization) and may not be bound. |
 | Contextual identifiers | `tensor`, `tile`, `range`, every built-in and every scalar type name. Ordinary identifiers outside their position; `range` is only special inside `for ... in range(...)`. |
 | Comments | `// ...` to end of line. |
 | Statement end | A newline or `;`. Optional before `}` or end of file. |
@@ -179,7 +181,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | Slice past the end | Out-of-bounds elements read as `0`; their stores are skipped. |
 | Static extent | Masked in place. |
 | Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. Only spans with a static length split; loops with `mma.sync` accumulators stay masked unless `@aligned` covers the dimension. Under `@pipeline`, the whole tiles are pipelined and the remainder runs once, unpipelined. |
-| Dynamic extent indexed by `program_id` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
+| Dynamic extent indexed by `ctx.block` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
 | Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask: `s = where(iota(1) < n, s, -1.0e30)`. |
 
 `@aligned(DIM = tile)` on a dynamic `DIM` is checked once at entry: a launch that breaks it traps, and the next synchronize fails, instead of writing past the tensor.
@@ -197,7 +199,11 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 
 | Built-in | Result | Semantics | Requires |
 |---|---|---|---|
-| `program_id(d)` | index | Block index along grid axis `d`. | `d` a literal `0`, `1` or `2`. |
+| `ctx.block.x`, `.y`, `.z` | index | The CTA's index along a grid axis. | |
+| `ctx.blocks.x`, `.y`, `.z` | index | The grid's extent along an axis. | |
+| `ctx.threads` | index | The CTA's thread count, from `@launch`. A compile-time constant. | |
+| `ctx.warps` | index | `ctx.threads / ctx.lanes`. A compile-time constant. | `ctx.threads` a whole number of warps. |
+| `ctx.lanes` | index | Lanes in a warp on the target, 32 on NVIDIA. A compile-time constant. | |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
 | `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block, between two CTA barriers. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
 | `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block between two CTA barriers, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |
@@ -375,8 +381,8 @@ kernel matmul(A: tensor<f32>[M, K],
               C: tensor<f32>[M, N],
               alpha: f32,
               beta: f32) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TILE_M, TILE_N] = 0.0
   for kt in range(0, K, TILE_K) {
     var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -398,7 +404,7 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
                        V: tensor<f32>[Nk, D],
                        O: tensor<f32>[Nq, D],
                        scale: f32) {
-  let pid = program_id(0)
+  let pid = ctx.block.x
   let row = pid * BR
 
   // query tile stays resident; running softmax state for BR rows.

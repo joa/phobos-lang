@@ -115,8 +115,8 @@ fn moe_permute_src(elem: &str, tk: usize) -> String {
 @autotune(TK in [{tk}])
 @aligned(K = TK)
 kernel moe_permute_{elem}_{tk}(PERM: tensor<i32>[1, M], A: tensor<{elem}>[R, K], OUT: tensor<{elem}>[M, K]) {{
-  let p = program_id(0)
-  let pk = program_id(1)
+  let p = ctx.block.x
+  let pk = ctx.block.y
   let r = PERM[0, p]
   OUT[p :+ 1, pk * TK :+ TK] = A[r :+ 1, pk * TK :+ TK]
 }}
@@ -133,8 +133,8 @@ fn moe_qgemm_src(name: &str, ne: usize) -> String {
 @aligned(M = TM, N = TN, NS = NE, K = 256)
 kernel {name}_moe_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB], SCHED: tensor<i32>[2, T],
                        QB: tensor<i8>[NS, RB], D: tensor<f16>[NS, NB], C: tensor<f32>[M, N]) {{
-  let p = program_id(0)
-  let pn = program_id(1)
+  let p = ctx.block.x
+  let pn = ctx.block.y
   let s = SCHED[0, p]
   let t = SCHED[1, p]
   let r = s * NE + pn * TN
@@ -153,8 +153,8 @@ fn moe_gather_add_src() -> String {
 @autotune(TN in [{MOE_COMBINE_TN}], U in [{MOE_USED}])
 @aligned(N = TN)
 kernel moe_gather_add(POS: tensor<i32>[R, U], W: tensor<f32>[R, U], C: tensor<f32>[M, N], X: tensor<f32>[R, N]) {{
-  let r = program_id(0)
-  let pn = program_id(1)
+  let r = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[1, TN] = X[r :+ 1, pn * TN :+ TN]
   for j in range(0, U, 1) {{
     let p = POS[r, j]
@@ -174,8 +174,8 @@ fn moe_shared_src() -> String {
 @autotune(TN in [{MOE_COMBINE_TN}])
 @aligned(N = TN)
 kernel moe_shared(G: tensor<f32>[R, 1], S: tensor<f32>[R, N], X: tensor<f32>[R, N]) {{
-  let r = program_id(0)
-  let pn = program_id(1)
+  let r = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[1, TN] = X[r :+ 1, pn * TN :+ TN]
   var g: tile<f32>[1, 1] = G[r :+ 1, 0 :+ 1]
   g = 1.0 / (1.0 + exp(0.0 - g))

@@ -19,7 +19,7 @@ const STAGE_SRC: &str = "\
 @launch(256)
 @autotune(TILE in [1024])
 kernel stage(X: tensor<f32>[M, N]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   var x = X[0 :+ 1, p * TILE :+ TILE]
   X[0 :+ 1, p * TILE :+ TILE] = x * 1.0000001 + 0.000000001
 }
@@ -33,7 +33,7 @@ const PERSISTENT_SRC: &str = "\
 @persistent
 @autotune(TILE in [1024], STEPS in [484], BLOCKS in [48])
 kernel staged(X: tensor<f32>[M, N], BAR: tensor<i32>[2]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   for s in range(0, STEPS) {
     for t in range(p * TILE, N, BLOCKS * TILE) {
       var x = X[0 :+ 1, t :+ TILE]

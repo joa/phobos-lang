@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
-use crate::ast::{Expr, Scalar as AstScalar};
+use crate::ast::{Expr, Scalar as AstScalar, ctx};
 use crate::ir::{
     ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, Type, ValueId,
 };
@@ -11,11 +11,22 @@ impl Build {
     /// whose result type is the buffer the emitter allocates.
     pub(crate) fn emit_call(&mut self, callee: &str, args: &[Expr]) -> Result<Rv> {
         match callee {
-            "program_id" => {
+            ctx::BLOCK | ctx::BLOCKS => {
                 let [Expr::Int(d @ 0..=2)] = args else {
-                    bail!("program_id expects one literal dimension argument 0..=2");
+                    unreachable!("the parser builds ctx fields with an axis 0..=2");
                 };
-                Ok(Rv::Scalar(self.value(OpKind::ProgramId(*d as u8), &[], Type::INDEX)))
+                let kind = if callee == ctx::BLOCK { OpKind::ProgramId(*d as u8) } else { OpKind::GridDim(*d as u8) };
+                Ok(Rv::Scalar(self.value(kind, &[], Type::INDEX)))
+            }
+            ctx::THREADS | ctx::LANES | ctx::WARPS => {
+                let n = self.ctx_count(callee).ok_or_else(|| {
+                    anyhow!(
+                        "ctx.warps: {} threads are not a whole number of {}-lane warps",
+                        self.cta_threads,
+                        self.target.lanes
+                    )
+                })?;
+                Ok(Rv::Scalar(self.const_index(n)))
             }
             "atomic_add" => self.emit_atomic_add(args),
             "atomic_cas" => self.emit_atomic_cas(args),

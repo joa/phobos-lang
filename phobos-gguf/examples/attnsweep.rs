@@ -25,8 +25,8 @@ const SRC_SCORES: &str = "\
 {TC}
 @aligned(M = TM, N = TN, K = TK)
 kernel scores(Q: tensor<f32>[M, K], W: tensor<f32>[N, K], S: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, K, TK) {
     var a = Q[pm * TM :+ TM, kt :+ TK]
@@ -46,8 +46,8 @@ const SRC_SCORES_T: &str = "@launch({BLOCK})
 {TC}
 @aligned(M = TM, N = TN, K = TK)
 kernel scores_t(Q: tensor<f32>[M, K], W: tensor<f32>[K, N], S: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, K, TK) {
     var a = Q[pm * TM :+ TM, kt :+ TK]
@@ -66,9 +66,9 @@ const SRC_SCORES_H: &str = "@launch({BLOCK})
 {TC}
 @aligned(M = TM, N = TN, K = TK)
 kernel scores_h(Q: tensor<f32>[M, QW], W: tensor<f32>[KW, N], S: tensor<f32>[HM, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
-  let h = program_id(2)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  let h = ctx.block.z
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, D, TK) {
     var a = Q[pm * TM :+ TM, h * D + kt :+ TK]
@@ -85,8 +85,8 @@ const SRC_MIX: &str = "@launch({BLOCK})
 {TC}
 @aligned(M = TM, N = TN, K = TK)
 kernel mix(P: tensor<f32>[M, K], V: tensor<f32>[K, N], O: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, K, TK) {
     var a = P[pm * TM :+ TM, kt :+ TK]

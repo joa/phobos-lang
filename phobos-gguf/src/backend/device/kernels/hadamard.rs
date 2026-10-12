@@ -116,7 +116,7 @@ pub(crate) fn hadamard_src(width: usize, perm: Option<HeadPerm>, form: HadamardF
 @aligned(R = {side}, SR = {side}, D1 = 1)
 kernel {name}(X: tensor<f32>[R, {side}], S: tensor<f32>[SR, {side}],
                 H: tensor<f32>[{side}, {side}], Y: tensor<f32>[R, {side}]{params}) {{
-  let p = program_id(0)
+  let p = ctx.block.x
   let b = p % {blocks}
 {load}  var s = S[b * {side} :+ {side}, :]
   var h = H[:, :]

@@ -71,7 +71,7 @@ impl<'a> Analyzer<'a> {
                     }
                     bail!(
                         "slice offset of '{}' (axis {axis}) is not supertile-aligned: expected \
-                         `program_id(i) * SUPER`, a `:` full slice, or a device-loop var",
+                         `ctx.block.<axis> * SUPER`, a `:` full slice, or a device-loop var",
                         self.tensors[tensor].name
                     );
                 }
@@ -133,7 +133,7 @@ impl<'a> Analyzer<'a> {
             }
             bail!(
                 "slice offset of '{}' (axis {axis}) is not supertile-aligned: \
-                 expected `program_id(i) * {s}` or a cluster-loop var stepping by {s}",
+                 expected `ctx.block.<axis> * {s}` or a cluster-loop var stepping by {s}",
                 self.tensors[tensor].name
             );
         }
@@ -142,9 +142,9 @@ impl<'a> Analyzer<'a> {
 
     pub(super) fn classify_scalar(&self, e: &Expr) -> Result<Option<ScalarValue>> {
         match e {
-            Expr::Call { callee, args } if callee == "program_id" => {
+            Expr::Call { callee, args } if callee == phobos_lang::ast::ctx::BLOCK => {
                 let [Expr::Int(i)] = args.as_slice() else {
-                    bail!("program_id takes one literal axis");
+                    unreachable!("the parser builds ctx.block with one literal axis");
                 };
                 Ok(Some(ScalarValue::Pid(*i as usize)))
             }
@@ -219,7 +219,7 @@ impl<'a> Analyzer<'a> {
             Some(g) => {
                 if g.super_sym != sym || g.dim != dim {
                     bail!(
-                        "program_id({pid}) is used with conflicting supertile shapes: \
+                        "`ctx.block` axis {pid} is used with conflicting supertile shapes: \
                          {:?}/{} vs {:?}/{}",
                         g.dim,
                         g.super_sym,

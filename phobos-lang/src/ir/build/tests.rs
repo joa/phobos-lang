@@ -55,7 +55,7 @@ fn params_and_dims_bind_to_the_entry() {
 #[test]
 fn an_in_bounds_slice_stages() {
     let out = build_src(
-        "@aligned(M = 64, K = 32)\nkernel k(A: tensor<f32>[M, K]) {\n    let p = program_id(0)\n    var t = A[p * 64 :+ 64, 0 :+ 32]\n    t = t * 2.0\n}\n",
+        "@aligned(M = 64, K = 32)\nkernel k(A: tensor<f32>[M, K]) {\n    let p = ctx.block.x\n    var t = A[p * 64 :+ 64, 0 :+ 32]\n    t = t * 2.0\n}\n",
     );
     assert_contains(
         &out,
@@ -72,7 +72,7 @@ fn an_in_bounds_slice_stages() {
 #[test]
 fn an_unproven_slice_is_masked_and_materializes_in_value_position() {
     let out = build_src(
-        "@aligned(K = 32)\nkernel k(A: tensor<f32>[M, K]) {\n    let p = program_id(0)\n    let s = rowsum(A[p * 64 :+ 64, 0 :+ 32])\n}\n",
+        "@aligned(K = 32)\nkernel k(A: tensor<f32>[M, K]) {\n    let p = ctx.block.x\n    let s = rowsum(A[p * 64 :+ 64, 0 :+ 32])\n}\n",
     );
     assert_contains(&out, &["mask [m, -]", "materialize %", "rowsum %"]);
 }
@@ -140,14 +140,14 @@ fn the_diagnostics_moved_with_the_decisions() {
 
 #[test]
 fn the_build_is_deterministic() {
-    let src = "kernel k(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {\n    let pm = program_id(0)\n    var acc: tile<f32>[64, 64] = 0.0\n    for kt in range(0, K, 16) {\n        let a = A[pm * 64 :+ 64, kt :+ 16]\n        let b = B[kt :+ 16, 0 :+ 64]\n        acc += dot(a, b)\n    }\n    C[pm * 64 :+ 64, 0 :+ 64] = acc\n}\n";
+    let src = "kernel k(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {\n    let pm = ctx.block.x\n    var acc: tile<f32>[64, 64] = 0.0\n    for kt in range(0, K, 16) {\n        let a = A[pm * 64 :+ 64, kt :+ 16]\n        let b = B[kt :+ 16, 0 :+ 64]\n        acc += dot(a, b)\n    }\n    C[pm * 64 :+ 64, 0 :+ 64] = acc\n}\n";
     assert_eq!(build_src(src), build_src(src));
 }
 
 #[test]
 fn a_register_matmul_is_a_seeded_loop_and_a_store() {
     let out = build_src(
-        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])\n@aligned(M = TILE_M, N = TILE_N)\nkernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {\n    let pm = program_id(0)\n    let pn = program_id(1)\n    var acc: tile<f32>[TILE_M, TILE_N] = 0.0\n    for kt in range(0, K, TILE_K) {\n        let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n        let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n        acc += dot(a, b)\n    }\n    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc\n}\n",
+        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])\n@aligned(M = TILE_M, N = TILE_N)\nkernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {\n    let pm = ctx.block.x\n    let pn = ctx.block.y\n    var acc: tile<f32>[TILE_M, TILE_N] = 0.0\n    for kt in range(0, K, TILE_K) {\n        let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n        let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n        acc += dot(a, b)\n    }\n    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc\n}\n",
     );
     assert_contains(
         &out,
@@ -164,7 +164,7 @@ fn a_register_matmul_is_a_seeded_loop_and_a_store() {
 #[test]
 fn without_alignment_the_same_matmul_takes_the_generic_path() {
     let out = build_src(
-        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])\nkernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {\n    let pm = program_id(0)\n    let pn = program_id(1)\n    var acc: tile<f32>[TILE_M, TILE_N] = 0.0\n    for kt in range(0, K, TILE_K) {\n        let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n        let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n        acc += dot(a, b)\n    }\n    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc\n}\n",
+        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])\nkernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {\n    let pm = ctx.block.x\n    let pn = ctx.block.y\n    var acc: tile<f32>[TILE_M, TILE_N] = 0.0\n    for kt in range(0, K, TILE_K) {\n        let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n        let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n        acc += dot(a, b)\n    }\n    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc\n}\n",
     );
     assert_contains(&out, &["%acc.", "= alloc", "dot_into acc %"]);
     assert!(!out.contains("gemm"), "{out}");

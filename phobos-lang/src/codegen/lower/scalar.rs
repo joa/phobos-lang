@@ -103,6 +103,7 @@ impl<'c> Codegen<'c> {
                 self.select(block, c, a, b)?
             }
             OpKind::ProgramId(d) => self.block_id(block, ["x", "y", "z"][d as usize])?,
+            OpKind::GridDim(d) => self.grid_dim(block, ["x", "y", "z"][d as usize])?,
             OpKind::Dim(d) => {
                 let mem = self.tile_ir(ir, ir.operand(op, 0))?.mem;
                 let pos = self.const_index(block, d as i64)?;

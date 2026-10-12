@@ -9,8 +9,8 @@ fn pipeline_double_buffers_staged_slices() {
         @pipeline
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -38,8 +38,8 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
         @pipeline
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -88,8 +88,8 @@ fn tensorcore_f16_inputs_pipeline_with_cp_async() {
         @tensorcore(wmma)
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -140,8 +140,8 @@ fn tensorcore_f16_pipeline_register_stages_on_sm75() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -188,7 +188,7 @@ fn generic_pipeline_double_buffers_a_non_matmul_loop() {
         "@pipeline
         @autotune(T in [16])
         kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K]) {
-            let pm = program_id(0)
+            let pm = ctx.block.x
             var acc: tile<f32>[T, T] = 0.0
             for kt in range(0, K, T) {
                 var a = A[pm * T :+ T, kt :+ T]
@@ -215,7 +215,7 @@ fn bare_kernel_auto_pipelines_without_the_attribute() {
         "@autotune(T in [16])
         @aligned(K = T)
         kernel stage(A: tensor<f32>[M, K], C: tensor<f32>[M, K]) {
-            let pm = program_id(0)
+            let pm = ctx.block.x
             var acc: tile<f32>[1, T] = 0.0
             for kt in range(0, M, 1) {
                 var a = A[kt :+ 1, 0 :+ T]
@@ -239,7 +239,7 @@ fn pipeline_assertion_fails_with_the_decline_reason() {
         &phobos_base::context::Context::default(),
         "@pipeline
         kernel flat(A: tensor<f32>[N], C: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             C[i :+ 1] = A[i :+ 1] * 2.0
         }",
     )
@@ -262,7 +262,7 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
         "@autotune(T in [8192])
         @aligned(K = T)
         kernel stage(A: tensor<f32>[64, K], C: tensor<f32>[64, K]) {
-            let pm = program_id(0)
+            let pm = ctx.block.x
             var acc: tile<f32>[1, T] = 0.0
             for kt in range(0, 64, 1) {
                 var a = A[kt :+ 1, 0 :+ T]

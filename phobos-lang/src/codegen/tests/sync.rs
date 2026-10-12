@@ -6,7 +6,7 @@ use super::*;
 fn atomic_add_lowers_to_an_rmw() {
     let mlir = emit_mlir(
         "kernel tally(BAR: tensor<i32>[2], OUT: tensor<i32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             OUT[i] = atomic_add(BAR, 0, 1)
         }",
     );
@@ -18,7 +18,7 @@ fn atomic_add_rejects_a_float_tensor() {
     let err = std::panic::catch_unwind(|| {
         emit_mlir(
             "kernel tally(BAR: tensor<f32>[2], OUT: tensor<i32>[N]) {
-                let i = program_id(0)
+                let i = ctx.block.x
                 OUT[i] = atomic_add(BAR, 0, 1)
             }",
         )
@@ -33,7 +33,7 @@ fn atomic_add_rejects_a_float_tensor() {
 fn grid_barrier_lowers_to_arrive_and_spin() {
     let mlir = emit_mlir(
         "kernel staged(X: tensor<f32>[N], BAR: tensor<i32>[2]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             X[i] = X[i] + 1.0
             grid_barrier(BAR)
             X[i] = X[i] * 2.0
@@ -61,7 +61,7 @@ fn grid_barrier_lowers_to_arrive_and_spin() {
 fn grid_barrier_takes_a_rank_two_column() {
     let mlir = emit_mlir(
         "kernel staged(X: tensor<f32>[N], BAR: tensor<i32>[2, 1]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             X[i] = X[i] + 1.0
             grid_barrier(BAR)
         }",
@@ -112,7 +112,7 @@ fn one_kept_barrier_orders_every_clash() {
             @autotune(TN in [256], U in [8])
             @aligned(N = TN)
             kernel k(W: tensor<f32>[1, U], C: tensor<f32>[U, N], G: tensor<f32>[1, 1], S: tensor<f32>[1, N], X: tensor<f32>[1, N]) {{
-                let pn = program_id(0)
+                let pn = ctx.block.x
                 var acc: tile<f32>[1, TN] = X[0 :+ 1, pn * TN :+ TN]
                 for j in range(0, U, 1) {{
                     let w = W[0, j]
@@ -270,7 +270,7 @@ fn a_hazard_across_the_iteration_boundary_keeps_the_last_ops_barrier() {
 fn an_atomic_runs_once_per_cta_and_broadcasts() {
     let mlir = emit_mlir(
         "kernel claim(L: tensor<i32>[1], OUT: tensor<i32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             OUT[i] = atomic_cas(L, 0, 0, i)
             OUT[0] = atomic_add(L, 0, 0)
         }",

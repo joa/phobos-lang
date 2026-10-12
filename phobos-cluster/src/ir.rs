@@ -45,7 +45,7 @@ pub struct LeafKernel {
 /// Cluster-loop iteration index.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Coord {
-    /// The `program_id(pid)` index into [`ClusterProgram::grid`].
+    /// The `ctx.block` axis indexing [`ClusterProgram::grid`].
     Grid(usize),
     /// Iteration index of the named cluster loop (0-based).
     Loop(String),

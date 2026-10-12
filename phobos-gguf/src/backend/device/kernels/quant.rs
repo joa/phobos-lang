@@ -30,7 +30,7 @@ pub(crate) const QUANTIZE_SRC: &str = "\
 @launch(256)
 @autotune(TB in [8])
 kernel quantize(X: tensor<f32>[R, 32], Q: tensor<i8>[R, 32], S: tensor<f32>[R, D]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   var x = X[p * TB :+ TB, 0 :+ 32]
   var mx: tile<f32>[TB, 1] = rowmax(abs(x))
   var inv = 127.0 / (mx + 0.00000001)
@@ -52,7 +52,7 @@ pub(crate) const Q8_DP4A_SRC: &str = "\
 kernel q8_dp4a(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, TN] = 0.0
   for kt in range(0, K, 32) {
     let b = kt / 32
@@ -78,8 +78,8 @@ pub(crate) const Q8_MMA_SRC: &str = "\
 kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
               C: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, K, 32) {
     let b = kt / 32
@@ -136,8 +136,8 @@ pub(crate) fn q8_qmma_src(block: usize) -> String {
 kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                            W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
 }}
@@ -193,7 +193,7 @@ pub(crate) const Q8_QDOT_SRC: &str = "\
 kernel q8_qdot(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
                C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = qdot_t(A[0 :+ 1, :], AS[0 :+ 1, :],
                                     W[pn * TN :+ TN, :], WS[pn * TN :+ TN, :])
 }
@@ -207,7 +207,7 @@ pub(crate) const Q8_QDOT_ADD_SRC: &str = "@launch(256)
 kernel q8_qdot_add(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                    W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
                    C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] += qdot_t(A[0 :+ 1, :], AS[0 :+ 1, :],
                                      W[pn * TN :+ TN, :], WS[pn * TN :+ TN, :])
 }
@@ -252,7 +252,7 @@ pub(crate) fn q8_qdot_persist_src(iters: usize, blocks: u32, accumulate: bool) -
 kernel {name}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
               W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
               C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   for i in range(0, ITERS) {{
     let t = pn * TN + i * BLOCKS * TN
     if t < N {{
@@ -282,8 +282,8 @@ pub(crate) const Q8_SPLIT_SRC: &str = "\
 kernel q8_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                 W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                 P: tensor<f32>[S, N]) {
-  let pn = program_id(0)
-  let ps = program_id(1)
+  let pn = ctx.block.x
+  let ps = ctx.block.y
   let slice = K / S
   let from = ps * slice
   var acc: tile<f32>[1, TN] = 0.0
@@ -301,7 +301,7 @@ kernel q8_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 @launch(256)
 @autotune(RT in [128])
 kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, RT] = 0.0
   for s in range(0, S, 1) {
     acc += P[s :+ 1, pn * RT :+ RT]
@@ -423,7 +423,7 @@ pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> boo
 /// Each split has its own output operand and `if ps == i` arm rather than
 /// one indexed write. `qmma_t` writes straight to global memory only when
 /// the slice is provably in bounds from its offset, which an offset built
-/// from `program_id(2)` can never be.
+/// from `ctx.block.z` can never be.
 ///
 /// The `k` slice bounds are compiled in as literals, so `@aligned` covers
 /// `A`, `AS`, `W` and `WS` too. The arms branch on a CTA-uniform grid
@@ -451,9 +451,9 @@ pub(crate) fn q8_qmma_split_src(block: usize, k: usize, s: usize) -> String {
 @aligned(M = TM, N = TN, K = {slice}, KB = {sb})
 kernel q8_qmma_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[KB, N]{params}) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
-  let ps = program_id(2)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  let ps = ctx.block.z
 {body}}}
 "
     )
@@ -480,8 +480,8 @@ pub(crate) fn q8_qmma_reduce_src(block: usize, s: usize) -> String {
 @autotune(TN in [64])
 @aligned(N = TN)
 kernel q8_qmma_reduce({params}C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm :+ 1, pn * TN :+ TN] = {sum}
 }}
 "

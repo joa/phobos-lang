@@ -42,7 +42,7 @@ pub(crate) const MATVEC_SRC: &str = "\
 @autotune(TILE_N in [128], TILE_K in [16])
 {ALIGNED}
 kernel matvec(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, TILE_N] = 0.0
   for kt in range(0, K, TILE_K) {
     var a = A[0 :+ 1, kt :+ TILE_K]
@@ -56,8 +56,8 @@ kernel matvec(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 @autotune(TILE_N in [128], TILE_K in [16])
 {ALIGNED}
 kernel matvec_split(A: tensor<f32>[M, K], B: tensor<f32>[K, N], P: tensor<f32>[S, N]) {
-  let pn = program_id(0)
-  let ps = program_id(1)
+  let pn = ctx.block.x
+  let ps = ctx.block.y
   let slice = K / S
   let from = ps * slice
   var acc: tile<f32>[1, TILE_N] = 0.0
@@ -125,8 +125,8 @@ pub(crate) fn matmul_rows_src(tm: usize, tn: usize) -> String {
 @autotune(TM in [{tm}], TN in [{tn}], TK in [16])
 @aligned(M = TM, N = TN, K = TK)
 kernel matmul_rows(A: tensor<f32>[M, K], W: tensor<f32>[N, K], C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, K, TK) {{
     var a = A[pm * TM :+ TM, kt :+ TK]
@@ -147,9 +147,9 @@ pub(crate) fn matmul_rows_split_src(tm: usize, tn: usize) -> String {
 @autotune(TM in [{tm}], TN in [{tn}], TK in [16])
 @aligned(M = TM, N = TN, K = TK)
 kernel matmul_rows_split(A: tensor<f32>[M, K], W: tensor<f32>[N, K], P: tensor<f32>[SM, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
-  let ps = program_id(2)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  let ps = ctx.block.z
   let slice = K / (SM / M)
   let from = ps * slice
   var acc: tile<f32>[TM, TN] = 0.0
@@ -177,7 +177,7 @@ pub(crate) fn matvec_blocks_src(k: usize, tn: usize) -> String {
 @autotune(TN in [{tn}], KB in [{kb}])
 @aligned(AB = KB, WB = KB, N = TN)
 kernel matvec_blocks(A: tensor<f32>[AB, 32], W: tensor<f32>[WB, 32], C: tensor<f32>[N, D1]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var a = A[0 :+ KB, :]
   var parts: tile<f32>[KB, TN] = 0.0
   for j in range(0, TN) {{

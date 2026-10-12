@@ -31,7 +31,7 @@ pub(crate) fn moe_topk_src(n_expert: usize) -> String {
 @autotune(NE in [{n_expert}], U in [{MOE_USED}])
 @aligned(E = NE)
 kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R, U], W: tensor<f32>[R, U]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   var p: tile<f32>[1, NE] = L[r :+ 1, 0 :+ NE]
   let m = rowmax(p)
   var ex: tile<f32>[1, NE] = exp(p - m)
@@ -77,8 +77,8 @@ pub(crate) fn moe_qdot_src(name: &str, ne: usize, act_row: &str, resident: usize
 @aligned(N = TN, NS = NE)
 kernel {name}_moe_qdot(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tensor<i32>[1, U],
                       CB: tensor<i8>[NS, RB], CD: tensor<f16>[NS, NB], C: tensor<f32>[U, N]) {{
-  let pn = program_id(0)
-  let j = program_id(1)
+  let pn = ctx.block.x
+  let j = ctx.block.y
   let r = SLOT[0, j] * NE + pn * TN
   C[j :+ 1, pn * TN :+ TN] = {name}_qdot_i8_t(AQ[{act_row} :+ 1, :], AS[{act_row} :+ 1, :],
                                               CB[r :+ TN, :], CD[r :+ TN, :])
@@ -101,8 +101,8 @@ pub(crate) fn moe_gateup_src(name: &str, ne: usize, resident: usize) -> String {
 kernel {name}_moe_gateup(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tensor<i32>[1, U],
                         GB: tensor<i8>[NS, RB], GD: tensor<f16>[NS, NB],
                         UB: tensor<i8>[NS, RB], UD: tensor<f16>[NS, NB], H: tensor<f32>[U, N]) {{
-  let pn = program_id(0)
-  let j = program_id(1)
+  let pn = ctx.block.x
+  let j = ctx.block.y
   let r = SLOT[0, j] * NE + pn * TN
   var g: tile<f32>[1, TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :], GB[r :+ TN, :], GD[r :+ TN, :])
   var u: tile<f32>[1, TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :], UB[r :+ TN, :], UD[r :+ TN, :])
@@ -122,7 +122,7 @@ pub(crate) fn moe_combine_src() -> String {
 @aligned(N = TN)
 kernel moe_combine(W: tensor<f32>[1, U], C: tensor<f32>[U, N], G: tensor<f32>[1, 1], S: tensor<f32>[1, N],
                    X: tensor<f32>[1, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, TN] = X[0 :+ 1, pn * TN :+ TN]
   for j in range(0, U, 1) {{
     let w = W[0, j]

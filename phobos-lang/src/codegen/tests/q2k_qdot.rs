@@ -9,7 +9,7 @@ const SRC: &str = "\
 kernel q2k_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                        D: tensor<f16>[N, NB], DMIN: tensor<f16>[N, NB],
                        C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q2k_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                         D[pn * TN :+ TN, :], DMIN[pn * TN :+ TN, :])
 }";

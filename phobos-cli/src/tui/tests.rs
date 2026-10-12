@@ -390,7 +390,7 @@ fn formatting_is_readable_at_the_scales_these_reach() {
 fn mid_load(cached: bool) -> Snapshot {
     // A kernel's text is short and its PTX is longer.
     const SOURCE: &str = "kernel iq2s_matvec(A: tensor<f32>[M, K]) {\n\
-                          let pm = program_id(0)\n\
+                          let pm = ctx.block.x\n\
                           var acc: tile<f32>[TM, TN] = 0.0\n\
                           for kt in range(0, K, TK) { acc += dot(a, b) }\n\
                           }\n";
@@ -479,7 +479,7 @@ fn the_compile_screen_shows_the_real_source_and_the_real_ptx() {
     let text = screen(150, 46, &mid_load(false));
     assert!(text.contains("COMPILING"), "{text}");
     assert!(
-        text.contains("program_id"),
+        text.contains("ctx.block"),
         "the source is missing:\n{text}"
     );
     assert!(text.contains("ctaid"), "the ptx is missing:\n{text}");

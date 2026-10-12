@@ -370,6 +370,8 @@ pub enum OpKind {
     /// `arith.index_cast`: between `index` and a sized integer, one op.
     IndexCast(Scalar),
     ProgramId(u8),
+    /// The grid's extent along an axis.
+    GridDim(u8),
     /// One scalar through a per-element step: `exp(x)` on a scalar.
     Math(ElemStep),
     /// `(cond, a, b) -> a or b`, the scalar `where`.
@@ -534,6 +536,7 @@ impl OpKind {
             OpKind::Math(step) => format!("math {step}"),
             OpKind::Select => "select".into(),
             OpKind::ProgramId(d) => format!("program_id {d}"),
+            OpKind::GridDim(d) => format!("grid_dim {d}"),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

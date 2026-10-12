@@ -90,8 +90,8 @@ kernel iq2xxs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                      D: tensor<f16>[N, NB], GRID: tensor<i32>[1, {IQ2XXS_GRID_LEN}],
                      SIGNS: tensor<i32>[1, {IQ2XXS_SIGNS_LEN}], IOTA: tensor<i32>[1, {LANE}],
                      C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
-  let pm = program_id(1)
+  let pn = ctx.block.x
+  let pm = ctx.block.y
   let grid = GRID[0 :+ 1, :]
   let signs = SIGNS[0 :+ 1, :]
   let iota = IOTA[0 :+ 1, :]
@@ -117,7 +117,7 @@ pub(crate) fn iq2xxs_qdot_matvec_src(tn: usize) -> String {
 kernel iq2xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                           D: tensor<f16>[N, NB], GRID: tensor<i8>[1, {IQ2XXS_GRID_LEN}],
                           SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}], C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq2xxs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                            D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }}
@@ -137,7 +137,7 @@ kernel iq2xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                              GRID: tensor<i8>[1, {IQ2XXS_GRID_LEN}],
                              SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
                              C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq2xxs_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                               QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                               GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
@@ -165,7 +165,7 @@ pub(crate) fn iq2xxs_dequant_src(tn: usize) -> String {
 kernel iq2xxs_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                       GRID: tensor<i32>[1, {IQ2XXS_GRID_LEN}], SIGNS: tensor<i32>[1, {IQ2XXS_SIGNS_LEN}],
                       IOTA: tensor<i32>[1, {LANE}], SCRATCH: tensor<f32>[K, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   let grid = GRID[0 :+ 1, :]
   let signs = SIGNS[0 :+ 1, :]
   let iota = IOTA[0 :+ 1, :]
@@ -189,7 +189,7 @@ kernel iq2xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                       GRID: tensor<i8>[1, {IQ2XXS_GRID_LEN}],
                       SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
                       SCRATCH: tensor<f32>[K, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   SCRATCH[:, pn * TN :+ TN] = iq2xxs_qdecode_t(QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                                GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }}
@@ -209,8 +209,8 @@ kernel iq2xxs_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                    GRID: tensor<i8>[1, {IQ2XXS_GRID_LEN}],
                    SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
                    C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm * TM :+ TM, pn * TN :+ TN] = iq2xxs_qmma_staged_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                          QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                                          GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])

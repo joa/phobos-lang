@@ -109,8 +109,8 @@ pub(crate) fn qgemm_src(quant: Quant) -> Option<String> {
 kernel {name}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                   {params}C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm * TM :+ TM, pn * TN :+ TN] = {name}_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                 QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :]{args})
 }}
@@ -190,8 +190,8 @@ pub(crate) fn qgemm_split_src(quant: Quant, n: usize, k: usize, block: usize, s:
 kernel {name}_qgemm_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                   {params}P: tensor<f32>[M, NP]) {{
-  let pm = program_id(0)
-  let pid = program_id(1)
+  let pm = ctx.block.x
+  let pid = ctx.block.y
   let ps = pid / {gn}
   let pn = pid - ps * {gn}
   P[pm * TM :+ TM, pid * TN :+ TN] = {name}_qgemm_t(A[pm * TM :+ TM, ps * {sk} :+ {sk}],
@@ -217,8 +217,8 @@ pub(crate) fn qgemm_reduce_src(n: usize, s: usize, add: bool) -> String {
 @autotune(TN in [{QGEMM_TN}])
 @aligned(N = TN, NP = TN)
 kernel qgemm_reduce(P: tensor<f32>[M, NP], C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm :+ 1, pn * TN :+ TN] = {}
 }}
 ",

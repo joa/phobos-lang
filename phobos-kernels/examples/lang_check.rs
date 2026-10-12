@@ -248,7 +248,7 @@ fn atomics(failures: &mut u32) -> Result<()> {
     let blocks = 8;
     let src = "@launch(256)
         kernel k(C: tensor<i32>[2, 1], L: tensor<i32>[1, 1], O: tensor<i32>[8, 2]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             O[p, 0] = atomic_add(C, 0, 1)
             O[p, 1] = atomic_cas(L, 0, 0, p + 1)
         }";
@@ -279,7 +279,7 @@ fn jumps(failures: &mut u32) -> Result<()> {
     // returns before its write.
     let src = "@launch(256)
         kernel k(X: tensor<f32>[1, 64], O: tensor<i32>[2, 3]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var found = -1
             var j = 0
             while j < 64 {
@@ -618,7 +618,7 @@ fn aligned_promise(failures: &mut u32) -> Result<()> {
     let src = "@launch(256)
         @aligned(N = 32)
         kernel k(A: tensor<f32>[1, N], B: tensor<f32>[1, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
         }";
     let launch = |cols: usize| -> Result<Vec<f32>> {

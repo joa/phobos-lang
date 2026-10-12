@@ -281,6 +281,7 @@ impl Verifier<'_> {
             | OpKind::Cast(_)
             | OpKind::IndexCast(_)
             | OpKind::ProgramId(_)
+            | OpKind::GridDim(_)
             | OpKind::Math(_)
             | OpKind::Select => self.scalar_kind(op, &kind),
             OpKind::Dim(d) => {

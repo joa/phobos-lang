@@ -48,7 +48,7 @@ fn kquant_qdot_i8_matvec_cta_src(name: &str, tn: usize, cta: usize, resident: us
 kernel {name}_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }}
@@ -109,8 +109,8 @@ pub(crate) fn kquant_qdot_i8_split_src(quant: Quant, n: usize, k: usize, s: usiz
 kernel {name}_qdot_i8_split(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           P: tensor<f32>[M, NP]) {{
-  let pn = program_id(0)
-  let ps = program_id(1)
+  let pn = ctx.block.x
+  let ps = ctx.block.y
   P[0 :+ 1, (ps * {gn} + pn) * TN :+ TN] = {name}_qdot_i8_t(AQ[0 :+ 1, ps * {sk} :+ {sk}],
       AS[0 :+ 1, ps * {skb} :+ {skb}], QB[pn * TN :+ TN, ps * {gk} :+ {srb}],
       D[pn * TN :+ TN, ps * {gb} :+ {sb}])

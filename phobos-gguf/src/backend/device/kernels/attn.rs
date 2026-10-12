@@ -120,9 +120,9 @@ pub(crate) fn attn_tc_src(head_dim: usize, group: usize) -> String {
 @autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], D in [{head_dim}], G in [{group}])
 @aligned(R = TM, NK = TN, QW = D, KW = D, SW = TN)
 kernel attn_tc_scores(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
-  let h = program_id(2)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  let h = ctx.block.z
   if pn * TN < NK - R + pm * TM + TM {{
     var acc: tile<f32>[TM, TN] = 0.0
     for kt in range(0, D, TK) {{
@@ -138,8 +138,8 @@ kernel attn_tc_scores(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW], S: tensor<f
 @autotune(TM in [{soft}], TN in [{soft}])
 @aligned(R = TM, NK = TN, SW = TN)
 kernel attn_tc_softmax(K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW], L: tensor<f32>[R, LW]) {{
-  let p = program_id(0)
-  let h = program_id(1)
+  let p = ctx.block.x
+  let h = ctx.block.y
   let c = h * NK
   let diag = NK - R + p * TM
   var m: tile<f32>[TM, 1] = -1.0e30
@@ -166,9 +166,9 @@ kernel attn_tc_softmax(K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW], L: tensor<
 @aligned(R = TM, NK = TK, SW = TK, KW = TN, QW = TN)
 kernel attn_tc_mix(S: tensor<f32>[R, SW], V: tensor<f16>[NK, KW], L: tensor<f32>[R, LW],
                    O: tensor<f32>[R, QW]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
-  let h = program_id(2)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  let h = ctx.block.z
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, NK - R + pm * TM + TM, TK) {{
     var a = S[pm * TM :+ TM, h * NK + kt :+ TK]
@@ -203,7 +203,7 @@ pub fn attn_gemm_src(head_dim: usize, tile: usize) -> String {
 @autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], TB in [{ATTN_KT_ROWS}], HD in [{head_dim}])
 @aligned(NK = TN, KW = HD, DK = TB)
 kernel attn_kt(K: tensor<f16>[NK, KW], T: tensor<f32>[DK, NK]) {{
-  let p = program_id(0)
+  let p = ctx.block.x
   var t = K[p * TB :+ TB, 0 :+ HD]
   T[0 :+ HD, p * TB :+ TB] = f32(transpose(t))
 }}
@@ -212,8 +212,8 @@ kernel attn_kt(K: tensor<f16>[NK, KW], T: tensor<f32>[DK, NK]) {{
 @autotune(TM in [{tile}], TN in [{tile}], TK in [{step}], HD in [{head_dim}])
 @aligned(R = TM, NK = TN, DQ = TK, DK = TK)
 kernel attn_scores(Q: tensor<f32>[R, DQ], KT: tensor<f32>[DK, NK], S: tensor<f32>[R, NK]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   if pn * TN < NK - R + pm * TM + TM {{
     var acc: tile<f32>[TM, TN] = 0.0
     for kt in range(0, DQ, TK) {{
@@ -229,7 +229,7 @@ kernel attn_scores(Q: tensor<f32>[R, DQ], KT: tensor<f32>[DK, NK], S: tensor<f32
 @autotune(TM in [{soft}], TN in [{soft}])
 @aligned(R = TM, NK = TN)
 kernel attn_softmax(S: tensor<f32>[R, NK], L: tensor<f32>[R, 1]) {{
-  let p = program_id(0)
+  let p = ctx.block.x
   let diag = NK - R + p * TM
   var m: tile<f32>[TM, 1] = -1.0e30
   for j in range(0, diag, TN) {{
@@ -255,8 +255,8 @@ kernel attn_softmax(S: tensor<f32>[R, NK], L: tensor<f32>[R, 1]) {{
 @aligned(R = TM, DV = TN, NK = TK)
 kernel attn_mix(P: tensor<f32>[R, NK], V: tensor<f32>[NK, DV], L: tensor<f32>[R, 1],
                 O: tensor<f32>[R, DV]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   var acc: tile<f32>[TM, TN] = 0.0
   for kt in range(0, NK - R + pm * TM + TM, TK) {{
     var a = P[pm * TM :+ TM, kt :+ TK]
@@ -297,8 +297,8 @@ pub(crate) fn attention_block_src(
 @padstage
 kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
                        V: tensor<f16>[NK, KW], O: tensor<f32>[R, QW]) {{
-  let qt = program_id(0)
-  let h = program_id(1)
+  let qt = ctx.block.x
+  let h = ctx.block.y
   let qcol = h * D
   let kcol = h / G * D
   var q = Q[qt * BR :+ BR, qcol :+ D]
@@ -353,7 +353,7 @@ pub(crate) fn rope_src(heads: usize, half: usize) -> String {
         "@launch(256)
 @autotune(H in [{heads}])
 kernel rope(X: tensor<f32>[R, D], T: tensor<f32>[P, RD]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   let p = r / H
   var a = X[r :+ 1, 0 :+ {half}]
   var b = X[r :+ 1, {half} :+ {half}]
@@ -392,7 +392,7 @@ pub(crate) fn attn_prep_src(dim: usize, half: usize, eps: f32, cache: bool) -> S
         "@launch(256)
 kernel {name}(S: tensor<f32>[H, SP], G: tensor<f32>[GR, GD], T: tensor<f32>[P, RD],
               O: tensor<{ty}>[H, OP], C: tensor<f32>[H, CP], E: tensor<{ty}>[H, EP]) {{
-  let h = program_id(0)
+  let h = ctx.block.x
   var a = S[h :+ 1, 0 :+ {half}]
   var b = S[h :+ 1, {half} :+ {half}]
 {rest_load}  var ss: tile<f32>[1, 1] = rowsum(a * a) + rowsum(b * b){rest_sum}
@@ -441,7 +441,7 @@ pub(crate) fn rope_gather_src(
         "@launch(256)
 @autotune(H in [{heads}])
 kernel rope_gather(S: tensor<f32>[RS, {head_dim}], T: tensor<f32>[P, RD], D: tensor<f32>[RD, {head_dim}]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   let p = r / H
   let h = r - p * H
   let row = p * {stride_heads} + h
@@ -495,8 +495,8 @@ pub(crate) fn attention_split_src(
 kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
                        V: tensor<f16>[NK, KW],
                        P: tensor<f32>[SH, D], ML: tensor<f32>[NH, MW]) {{
-  let g = program_id(0)
-  let s = program_id(1)
+  let g = ctx.block.x
+  let s = ctx.block.y
   let h = g * QG
   let col = h / G * D
   var q = Q[h :+ QG, 0 :+ D]
@@ -521,7 +521,7 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
 @autotune(NH in [{n_head}], D in [{head_dim}], S in [{splits}])
 kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
                        O: tensor<f32>[R, D]) {{
-  let h = program_id(0)
+  let h = ctx.block.x
   var mv = ML[h :+ 1, 0 :+ S]
   var m: tile<f32>[1, 1] = rowmax(mv)
   var c: tile<f32>[1, S] = exp(mv - m)
@@ -603,7 +603,7 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
                        P: tensor<f32>[SH, D], PM: tensor<f32>[S, PW],
                        ML: tensor<f32>[NH, MW], O: tensor<f32>[R, D],
                        BAR: tensor<i32>[2, 1]) {{
-  let pid = program_id(0)
+  let pid = ctx.block.x
 
   for i1 in range(0, IT1) {{
     let u = pid + i1 * BLOCKS
@@ -672,8 +672,8 @@ pub(crate) fn attention_src(n_head: usize, group: usize, head_dim: usize, tile: 
 @aligned(KW = D)
 kernel attention(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
                  V: tensor<f16>[NK, KW], O: tensor<f32>[R, D]) {{
-  let t = program_id(0)
-  let h = program_id(1)
+  let t = ctx.block.x
+  let h = ctx.block.y
   let col = h / G * D
   let row = t * NH + h
   var q = Q[row :+ 1, 0 :+ D]

@@ -179,7 +179,7 @@ mod tests {
     fn parses_tensor_kernel() {
         let p = parse(
             "kernel add(X: tensor<f32>[N], Y: tensor<f32>[N], Z: tensor<f32>[N]) {
-                let i = program_id(0)
+                let i = ctx.block.x
                 Z[i] = X[i] + Y[i]
              }",
         )

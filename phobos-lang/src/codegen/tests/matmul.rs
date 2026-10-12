@@ -9,8 +9,8 @@ fn matmul_kernel_lowers_to_subviews_and_distributed_loops() {
         "@autotune(TILE_M in [64, 128], TILE_N in [64, 128], TILE_K in [16, 32])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -55,8 +55,8 @@ fn matmul_accumulates_in_registers() {
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -84,8 +84,8 @@ fn register_fusion_bails_when_acc_outlives_store() {
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -112,8 +112,8 @@ fn matmul_is_warp_tiled() {
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -142,8 +142,8 @@ fn large_tiles_widen_register_blocking() {
             "@autotune(TILE_M in [{tile_m}], TILE_N in [64], TILE_K in [16])
             @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
             kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {{
-                let pm = program_id(0)
-                let pn = program_id(1)
+                let pm = ctx.block.x
+                let pn = ctx.block.y
                 var acc: tile<f32>[TILE_M, TILE_N] = 0.0
                 for kt in range(0, K, TILE_K) {{
                     let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -215,7 +215,7 @@ fn dot_falls_back_to_vector_without_tensorcore() {
         @launch(256)
         @aligned(Nq = BR, Nk = BC)
         kernel qk(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D], S: tensor<f32>[Nq, Nk]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             let k = K[0 :+ BC, :]
@@ -237,8 +237,8 @@ fn a_gemm_epilogue_with_bare_terms_scales_by_one() {
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -260,8 +260,8 @@ fn a_gemm_epilogue_scales_acc_by_its_coefficient_and_c_by_one() {
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]

@@ -54,7 +54,7 @@ fn the_gated_form_reads_the_gate_and_applies_silu() {
 @aligned(RB = NB, MB = NB, D1 = 1)
 kernel norm(X: tensor<f32>[RB, 32], Z: tensor<f32>[RB, 32], G: tensor<f32>[MB, 32],
             O: tensor<f32>[RB, 32], Q: tensor<i8>[RB, 32], S: tensor<f32>[RB, D1]) {
-  let r = program_id(0)
+  let r = ctx.block.x
   rms_norm_gated_q_t(X[r * NB :+ NB, 0 :+ 32], Z[r * NB :+ NB, 0 :+ 32], G[0 :+ NB, 0 :+ 32], 0.000001,
                      O[r * NB :+ NB, 0 :+ 32], Q[r * NB :+ NB, 0 :+ 32], S[r * NB :+ NB, 0 :+ 1])
 }

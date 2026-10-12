@@ -2,8 +2,8 @@
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
 
   var acc: tile<f32>[TILE_M, TILE_N] = 0.0
   

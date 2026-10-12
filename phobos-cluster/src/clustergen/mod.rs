@@ -46,9 +46,9 @@ fn data_type(s: Scalar) -> DataType {
 /// A scalar value at cluster scale.
 #[derive(Clone, Debug)]
 enum ScalarValue {
-    /// `program_id(i)`
+    /// `ctx.block.<axis>`
     Pid(usize),
-    /// `program_id(i) * SUPER`
+    /// `ctx.block.<axis> * SUPER`
     PidSuper(usize, String),
 }
 

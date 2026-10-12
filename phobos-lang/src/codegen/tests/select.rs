@@ -69,7 +69,7 @@ fn iota_outside_a_tile_assignment_is_explained() {
 fn scalar_where_selects() {
     let mlir = emit_mlir(
         "kernel k(A: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             A[i] = where(i < 4, 1.0, A[i])
         }",
     );
@@ -92,7 +92,7 @@ fn tile_comparison_outside_where_is_explained() {
 fn math_on_tiles_and_scalars() {
     let mlir = emit_mlir(
         "kernel k(X: tensor<f32>[64], Y: tensor<f32>[64], S: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             let a = S[i]
             S[i] = abs(a) + floor(a) + ceil(a) + rsqrt(a) + sin(a) * cos(a) + exp(a)
             let x = X[0 :+ 64]
@@ -118,7 +118,7 @@ fn math_on_tiles_and_scalars() {
 fn abs_of_an_integer_has_no_float_round_trip() {
     let mlir = emit_mlir(
         "kernel k(C: tensor<i32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             C[i] = abs(i - 7)
         }",
     );
@@ -131,7 +131,7 @@ fn abs_of_an_integer_has_no_float_round_trip() {
 
 #[test]
 fn math_needs_a_float() {
-    let e = emit_err("kernel k(A: tensor<f32>[N]) { let i = program_id(0)\n let x = sin(i) }");
+    let e = emit_err("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x\n let x = sin(i) }");
     assert!(e.contains("sin needs a float operand"), "got: {e}");
 }
 
@@ -182,7 +182,7 @@ fn an_untyped_var_takes_a_where() {
 fn pow_is_exp_of_a_scaled_log_on_tiles_and_scalars() {
     let mlir = emit_mlir(
         "kernel k(X: tensor<f32>[16, 64], Y: tensor<f32>[16, 64], S: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             S[i] = pow(S[i], 0.5)
             var x = X[0 :+ 16, 0 :+ 64]
             var y = pow(x, 2.2)
