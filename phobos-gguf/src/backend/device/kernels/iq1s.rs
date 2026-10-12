@@ -1,6 +1,6 @@
 // IQ1_S matvec. Decodes straight from the raw block bytes (see q2k.rs) plus
-// a grid lookup. Byte reads go through `(b + 256) % 256` first, so division
-// on signed bytes does not truncate the wrong way.
+// a grid lookup. Fields are read with `>>` and `&`; a whole byte used as an
+// index is `i32(b) & 255`.
 //
 // Per-lane quantities are substituted as text at each use rather than bound
 // to a name, because a name bound to a computed tile is released back to
@@ -34,7 +34,7 @@ const DELTA: f32 = 0.125;
 /// lanes each.
 pub(crate) const IQ1S_GRID_LEN: usize = 2048 * 8;
 
-/// Byte offsets and index divisor for lane `is`, with `ib = is / 4` and
+/// Byte offsets and index shift for lane `is`, with `ib = is / 4` and
 /// `l = is % 4` as in `quant/iq1_s.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let ib = is / 4;
@@ -42,26 +42,26 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let qs_off = QS_OFF + 4 * ib + l;
     let qh_lo_off = QH_OFF + 2 * ib;
     let qh_hi_off = qh_lo_off + 1;
-    let shift_div = 8usize.pow(l as u32);
-    (qs_off, qh_lo_off, qh_hi_off, shift_div)
+    (qs_off, qh_lo_off, qh_hi_off, 3 * l)
 }
 
 /// Emits `let decoded{is} = ...` and returns it with its offset in the
 /// 256-wide k-block.
 fn decoded_lane(is: usize) -> (usize, String) {
-    let (qs_off, qh_lo_off, qh_hi_off, shift_div) = run_geometry(is);
+    let (qs_off, qh_lo_off, qh_hi_off, shift) = run_geometry(is);
     let out_off = is * LANE;
-    let qsb = format!("((i32(qb[:, {qs_off} :+ 1]) + 256) % 256)");
+    let qsb = format!("(i32(qb[:, {qs_off} :+ 1]) & 255)");
+    // Bits 0 to 15 of the word are exact; the high byte's sign extension
+    // lands above them.
     let qh = format!(
-        "(((i32(qb[:, {qh_lo_off} :+ 1]) + 256) % 256) \
-          + ((i32(qb[:, {qh_hi_off} :+ 1]) + 256) % 256) * 256)"
+        "((i32(qb[:, {qh_lo_off} :+ 1]) & 255) + (i32(qb[:, {qh_hi_off} :+ 1]) << 8))"
     );
-    let dl = format!("(f32(d) * f32((({qh} / 4096) % 8) * 2 + 1))");
+    let dl = format!("(f32(d) * f32((({qh} >> 12) & 7) * 2 + 1))");
     let delta = format!(
-        "({DELTA} - {twice_delta} * f32(({qh} / 32768) % 2))",
+        "({DELTA} - {twice_delta} * f32(({qh} >> 15) & 1))",
         twice_delta = 2.0 * DELTA
     );
-    let base_idx = format!("({qsb} + (({qh} / {shift_div}) % 8) * 256)");
+    let base_idx = format!("({qsb} + (({qh} >> {shift}) & 7) * 256)");
     let idx8 = format!("({base_idx} * {LANE} + iota)");
     (
         out_off,

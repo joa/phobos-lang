@@ -1,10 +1,9 @@
 // Q2_K matvec, decoding straight from the raw block bytes.
 //
 // All sixteen runs sit at static offsets, in output order, so the block
-// unrolls into one straight-line expression per run with no `gather`. Every
-// raw byte goes through `(i32(b) + 256) % 256` before any `/` or `%`,
-// because a signed remainder silently gives the wrong bits when bit 7 is
-// set.
+// unrolls into one straight-line expression per run with no `gather`. A
+// field is read as `(i32(b) >> s) & m`: a byte's sign extension only reaches
+// bits above the field.
 //
 // Each run is inlined rather than bound to a name, and the scale is reread
 // rather than bound. A `let` tile never releases its buffer, so naming them
@@ -20,26 +19,26 @@ const RUNS_PER_BLOCK: usize = 256 / RUN;
 const BLOCK_BYTES: usize = 84;
 const QS_OFF: usize = 16;
 
-/// Byte offset and shift divisor for run `is`, split into `h`, `j` and
-/// `half2` as in `quant/q2_k.rs::dequantize`.
+/// Byte offset and shift for run `is`, split into `h`, `j` and `half2` as
+/// in `quant/q2_k.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize) {
     let h = is / 8;
     let rem = is % 8;
     let j = rem / 2;
     let half2 = rem % 2;
-    (QS_OFF + h * 32 + half2 * 16, 4usize.pow(j as u32))
+    (QS_OFF + h * 32 + half2 * 16, 2 * j)
 }
 
 /// One run's decoded value, `let decoded{is} = ...`, and its `out_off`.
 fn decoded_run(is: usize) -> (usize, String) {
-    let (qs_off, shift_div) = run_geometry(is);
+    let (qs_off, shift) = run_geometry(is);
     let out_off = is * RUN;
-    let sc = format!("((i32(qb[:, {is} :+ 1]) + 256) % 256)");
-    let q2 = format!("(((i32(qb[:, {qs_off} :+ {RUN}]) + 256) % 256 / {shift_div}) % 4)");
+    let sc = format!("i32(qb[:, {is} :+ 1])");
+    let q2 = format!("((i32(qb[:, {qs_off} :+ {RUN}]) >> {shift}) & 3)");
     (
         out_off,
         format!(
-            "    let decoded{is} = f32(d) * f32({sc} % 16) * f32({q2}) - f32(dmin) * f32({sc} / 16)\n"
+            "    let decoded{is} = f32(d) * f32({sc} & 15) * f32({q2}) - f32(dmin) * f32(({sc} >> 4) & 15)\n"
         ),
     )
 }

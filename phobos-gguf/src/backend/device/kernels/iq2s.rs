@@ -24,7 +24,7 @@ pub(crate) const IQ2S_GRID_LEN: usize = 1024 * 8;
 /// every byte value.
 pub(crate) const IQ2S_SIGNS_LEN: usize = 256 * 8;
 
-/// Byte offsets and `qh` divisor for lane `is`, with `ib32 = is / 4` and
+/// Byte offsets and `qh` shift for lane `is`, with `ib32 = is / 4` and
 /// `l = is % 4` as in `quant/iq2_s.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize) {
     let ib32 = is / 4;
@@ -33,26 +33,25 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize) {
     let sign_off = SIGNS_OFF + 4 * ib32 + l;
     let qh_off = QH_OFF + ib32;
     let scale_off = SCALES_OFF + ib32;
-    let qh_div = 4usize.pow(l as u32);
-    (grid_off, sign_off, qh_off, scale_off, qh_div)
+    (grid_off, sign_off, qh_off, scale_off, 2 * l)
 }
 
 /// One lane's decoded value, `let decoded{is} = ...`, and its `out_off`.
 fn decoded_lane(is: usize) -> (usize, String) {
-    let (grid_off, sign_off, qh_off, scale_off, qh_div) = run_geometry(is);
+    let (grid_off, sign_off, qh_off, scale_off, qh_shift) = run_geometry(is);
     let out_off = is * LANE;
-    let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
+    let byte = |off: usize| format!("(i32(qb[:, {off} :+ 1]) & 255)");
     let grid_byte = byte(grid_off);
     let sign_byte = byte(sign_off);
     let qh_byte = byte(qh_off);
     let scale_byte = byte(scale_off);
     let nibble = if is % 4 < 2 {
-        format!("({scale_byte} % 16)")
+        format!("({scale_byte} & 15)")
     } else {
-        format!("({scale_byte} / 16)")
+        format!("({scale_byte} >> 4)")
     };
     let dl = format!("(f32(d) * (0.5 + f32({nibble})) * 0.25)");
-    let grid_idx = format!("({grid_byte} + (({qh_byte} / {qh_div}) % 4) * 256)");
+    let grid_idx = format!("({grid_byte} + (({qh_byte} >> {qh_shift}) & 3) * 256)");
     let mag_idx8 = format!("({grid_idx} * {LANE} + iota)");
     let sign_idx8 = format!("({sign_byte} * {LANE} + iota)");
     (

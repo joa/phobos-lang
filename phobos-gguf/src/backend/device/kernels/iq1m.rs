@@ -22,7 +22,7 @@ const QS_OFF: usize = 0;
 const QH_OFF: usize = 32;
 const SCALES_OFF: usize = 48;
 
-/// Byte offsets and bit divisors for lane `is`, with `ib = is / 4` and
+/// Byte offsets and bit shifts for lane `is`, with `ib = is / 4` and
 /// `l = is % 4` as in `quant/iq1_m.rs::dequantize`.
 ///
 /// Lanes 0 and 1 read the group's first `qh` byte, lanes 2 and 3 the
@@ -32,15 +32,11 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let l = is % 4;
     let qs4_off = QS_OFF + 4 * ib + l;
     let qh_off = QH_OFF + 2 * ib + usize::from(l >= 2);
-    let (idx_div, bit_div) = if l.is_multiple_of(2) {
-        (1, 8)
-    } else {
-        (16, 128)
-    };
-    (qs4_off, qh_off, idx_div, bit_div)
+    let (idx_shift, bit_shift) = if l.is_multiple_of(2) { (0, 3) } else { (4, 7) };
+    (qs4_off, qh_off, idx_shift, bit_shift)
 }
 
-/// Scale-word offsets for lane `is`'s group, and the divisor that reaches
+/// Scale-word offsets for lane `is`'s group, and the shift that reaches
 /// its 3-bit scale.
 ///
 /// Two groups share one 16-bit word, six bits each. Within a group, the
@@ -51,22 +47,21 @@ fn dl_geometry(is: usize) -> (usize, usize, usize) {
     let sc_lo_off = SCALES_OFF + 2 * (ib / 2);
     let sc_hi_off = sc_lo_off + 1;
     let shift = 6 * (ib % 2);
-    let dl_div = 2usize.pow((shift + if l < 2 { 0 } else { 3 }) as u32);
-    (sc_lo_off, sc_hi_off, dl_div)
+    (sc_lo_off, sc_hi_off, shift + if l < 2 { 0 } else { 3 })
 }
 
 /// One lane's decoded value, `let decoded{is} = ...`, and its `out_off`.
 fn decoded_lane(is: usize) -> (usize, String) {
-    let (qs4_off, qh_off, idx_div, bit_div) = run_geometry(is);
-    let (sc_lo_off, sc_hi_off, dl_div) = dl_geometry(is);
+    let (qs4_off, qh_off, idx_shift, bit_shift) = run_geometry(is);
+    let (sc_lo_off, sc_hi_off, dl_shift) = dl_geometry(is);
     let out_off = is * LANE;
-    let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
+    let byte = |off: usize| format!("(i32(qb[:, {off} :+ 1]) & 255)");
     let qs4 = byte(qs4_off);
     let qh = byte(qh_off);
     let word = format!("({} + {} * 256)", byte(sc_lo_off), byte(sc_hi_off));
-    let dl = format!("(f32(d) * f32((({word} / {dl_div}) % 8) * 2 + 1))");
-    let idx = format!("({qs4} + (({qh} / {idx_div}) % 8) * 256)");
-    let delta = format!("(0.125 - 0.25 * f32(({qh} / {bit_div}) % 2))");
+    let dl = format!("(f32(d) * f32((({word} >> {dl_shift}) & 7) * 2 + 1))");
+    let idx = format!("({qs4} + (({qh} >> {idx_shift}) & 7) * 256)");
+    let delta = format!("(0.125 - 0.25 * f32(({qh} >> {bit_shift}) & 1))");
     let idx8 = format!("({idx} * {LANE} + iota)");
     (
         out_off,
