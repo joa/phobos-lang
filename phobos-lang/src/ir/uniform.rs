@@ -243,6 +243,8 @@ fn per_thread(kind: &OpKind) -> bool {
             | OpKind::F16Bits
             | OpKind::Word
             | OpKind::Dp4a
+            | OpKind::BytePerm
+            | OpKind::PopCount
             | OpKind::Store
             | OpKind::Trap
             | OpKind::For(_)
