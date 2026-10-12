@@ -334,7 +334,7 @@ fn lower_flash_attention(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Res
          \x20 let row = pid * BR\n\
          \x20 let q = Q[row :+ BR, :]\n\
          \x20 var acc: tile<f32>[BR, D] = 0.0\n\
-         \x20 var m: tile<f32>[BR, 1] = -999999999.0\n\
+         \x20 var m: tile<f32>[BR, 1] = -1.0e30\n\
          \x20 var l: tile<f32>[BR, 1] = 0.0\n\
          \x20 for kt in range(0, Nk, BC) {{\n\
          \x20   let k = K[kt :+ BC, :]\n\

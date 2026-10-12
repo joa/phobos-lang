@@ -45,7 +45,7 @@ pub(crate) fn argmax_reduce_src(w: usize) -> String {
 @autotune(W in [{w}])
 kernel argmax_reduce(A: tensor<f32>[M, N], IO: tensor<f32>[M, W], P: tensor<f32>[2, S]) {{
   let pid = program_id(0)
-  var v: tile<f32>[1, W] = -300000000.0
+  var v: tile<f32>[1, W] = -1.0e30
   var i: tile<f32>[1, W] = -1.0
   let io = IO[0 :+ 1, :]
   for kt in range(pid * W, N, S * W) {{

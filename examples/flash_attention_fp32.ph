@@ -14,7 +14,7 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
   let q = Q[row :+ BR, :]
 
   var acc: tile<f32>[BR, D] = 0.0       // unnormalized output sum p*v
-  var m: tile<f32>[BR, 1] = -300000000.0  // running row max, from a stand-in for -inf
+  var m: tile<f32>[BR, 1] = -1.0e30  // running row max, from a stand-in for -inf
   var l: tile<f32>[BR, 1] = 0.0         // running denominator sum p
 
   for kt in range(0, Nk, BC) {
