@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::{Result, bail};
 
 use super::{BlockId, Def, Ir, OpId, OpKind, Space, ValueId};
+use crate::ast::lanes::Group;
 
 /// How far a value may differ between threads.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
@@ -118,6 +119,13 @@ impl Walk<'_> {
         let operands = ir.operands(op);
         match ir.kind(op) {
             OpKind::Thread(which) => self.set(ir.result(op), which.kind()),
+            // A full-warp butterfly leaves every lane with the same value.
+            OpKind::Converged(Group::Lanes) => self.set(ir.result(op), self.u.of(operands[0]).min(Kind::Warp)),
+            OpKind::Converged(Group::Cta) | OpKind::Exchange => {
+                for &res in ir.results(op) {
+                    self.set(res, Kind::Uniform);
+                }
+            }
             OpKind::Load if is_private(ir, operands[0]) => {
                 self.set(ir.result(op), self.u.of(operands[0]));
             }
@@ -225,6 +233,7 @@ fn per_thread(kind: &OpKind) -> bool {
             | OpKind::ProgramId(_)
             | OpKind::GridDim(_)
             | OpKind::Thread(_)
+            | OpKind::Converged(_)
             | OpKind::Math(_)
             | OpKind::Select
             | OpKind::Dim(_)
@@ -282,6 +291,21 @@ pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
                 written.extend(root(ir, operands[1]));
             }
             continue;
+        }
+        match kind {
+            // A `var`'s slot is each thread's own.
+            OpKind::Alloc if is_private(ir, ir.result(op)) => continue,
+            OpKind::Shuffle { .. } if control > Kind::Warp => bail!(
+                "a shuffle needs every lane of the warp, but the control it sits under {}",
+                control.describe()
+            ),
+            OpKind::Shuffle { .. } => continue,
+            OpKind::Exchange if control != Kind::Uniform => bail!(
+                "a collective over `ctx.thread` needs every thread of the CTA, but the control                  it sits under {}",
+                control.describe()
+            ),
+            OpKind::Exchange => continue,
+            _ => {}
         }
         if per_thread(kind) {
             continue;

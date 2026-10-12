@@ -64,6 +64,8 @@ pub(super) trait Isa {
     fn max_warps_per_sm(&self) -> i64;
     /// Lanes in a warp, what `ctx.lanes` reads.
     fn lanes(&self) -> i64;
+    /// The width `index` lowers to.
+    fn index_bits(&self) -> u32;
 
     // ---- where memory lives ----
 
@@ -156,6 +158,19 @@ pub(super) trait Isa {
         block: &Block<'c>,
         v: Value<'c, 'c>,
         mask: i64,
+    ) -> Result<Value<'c, 'c>>;
+
+    /// The 32-bit `v` from another lane of the warp: lane `src`, or the one
+    /// `src` names as an xor mask or an offset, the lane's own `v` when that
+    /// is past the warp. `src` is an `i32`. Every lane of the executing warp
+    /// must reach this.
+    fn shuffle<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        v: Value<'c, 'c>,
+        mode: crate::ast::lanes::Mode,
+        src: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>>;
 
     // ---- which math is approximate ----

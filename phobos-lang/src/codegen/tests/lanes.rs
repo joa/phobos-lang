@@ -3,16 +3,19 @@
 
 use super::*;
 
-/// A matvec with a warp per column and its lanes splitting k.
+/// A matvec with a warp per column and its lanes splitting k, under control
+/// that differs between warps.
 const MATVEC: &str = "@launch(256)
 kernel mv(A: tensor<f32>[1, K], W: tensor<f32>[N, K], C: tensor<f32>[1, N]) {
     let col = ctx.block.x * ctx.warps + ctx.warp
-    var acc: f32 = 0.0
-    for k in range(ctx.lane, K, ctx.lanes) {
-        acc += W[col, k] * A[0, k]
-    }
-    if ctx.lane == 0 {
-        C[0, col] = acc
+    if col < N {
+        var acc: f32 = 0.0
+        for k in range(ctx.lane, K, ctx.lanes) {
+            acc += W[col, k] * A[0, k]
+        }
+        if ctx.lane == 0 {
+            C[0, col] = acc
+        }
     }
 }";
 
@@ -87,5 +90,106 @@ fn uniform_code_under_uniform_control_is_unchanged() {
         if ctx.lane == 3 { x = 1 }
         t = t * 2.0",
     ));
+    assert!(module_verifies(&mlir));
+}
+
+/// `fold` of one `f32` per thread, written by thread 0.
+fn folded(fold: &str) -> String {
+    format!(
+        "fn mx(a, b) = max(a, b)
+
+        @launch(128)
+        kernel k(A: tensor<f32>[1, 128], O: tensor<f32>[1, 1]) {{
+            let x = A[0, ctx.thread]
+            let r = {fold}
+            if ctx.thread == 0 {{
+                O[0, 0] = f32(r)
+            }}
+        }}"
+    )
+}
+
+#[test]
+fn a_lane_collective_is_a_butterfly_with_no_barrier() {
+    for (fold, shuffles) in [
+        ("sum<over ctx.lane>(x)", 5),
+        ("max<over ctx.lane>(x)", 5),
+        ("min<over ctx.lane, width 8>(x)", 3),
+        ("reduce<over ctx.lane>(x, mx)", 5),
+        // The value and its lane, one shuffle each per step.
+        ("argmax<over ctx.lane>(x)", 10),
+        ("where(any<over ctx.lane>(x > 0.0), 1.0, 0.0)", 5),
+        ("shfl<from 3>(x)", 1),
+        ("shfl<down 1, width 16>(x)", 1),
+    ] {
+        let mlir = emit_mlir(&folded(fold));
+        assert_eq!(mlir.matches("gpu.shuffle").count(), shuffles, "{fold}\n{mlir}");
+        assert!(!mlir.contains("gpu.barrier"), "{fold}\n{mlir}");
+    }
+    let mlir = emit_mlir(&folded("shfl<from 3>(x)"));
+    assert_contains(&mlir, &["gpu.shuffle  idx"]);
+}
+
+#[test]
+fn a_cta_collective_exchanges_each_warps_result() {
+    let mlir = emit_mlir(&folded("sum<over ctx.thread>(x)"));
+    assert_eq!(mlir.matches("gpu.shuffle").count(), 5, "\n{mlir}");
+    // Before the scratch is written, after it is, and after it is read.
+    assert_eq!(mlir.matches("gpu.barrier").count(), 3, "\n{mlir}");
+    assert!(module_verifies(&mlir));
+}
+
+#[test]
+fn a_full_warp_result_is_the_same_in_every_lane() {
+    // A shuffle under control that depends on a warp's total is allowed,
+    // since every lane of the warp agrees on it.
+    let mlir = emit_mlir(&folded(
+        "shfl<xor 1>(where(sum<over ctx.lane>(x) > 0.0, x, 0.0))",
+    ));
+    assert!(module_verifies(&mlir));
+    let src = folded("0.0")
+        .replace("let r = 0.0", "var r = 0.0\n if sum<over ctx.lane>(x) > 0.0 { r = shfl<xor 1>(x) }");
+    assert!(module_verifies(&emit_mlir(&src)));
+}
+
+#[test]
+fn collective_errors_name_the_problem() {
+    for (src, want) in [
+        (
+            folded("0.0").replace("let r = 0.0", "var r = 0.0\n if ctx.lane == 0 { r = sum<over ctx.lane>(x) }"),
+            "every lane of the warp",
+        ),
+        (
+            folded("0.0").replace("let r = 0.0", "var r = 0.0\n if ctx.warp == 0 { r = sum<over ctx.thread>(x) }"),
+            "every thread of the CTA",
+        ),
+        (folded("sum<over ctx.lane, width 3>(x)"), "power of two"),
+        (folded("reduce<over ctx.lane>(x, nothing)"), "none is defined"),
+        (folded("any<over ctx.lane>(x)"), "folds conditions"),
+    ] {
+        let err = emit_err(&src);
+        assert!(err.contains(want), "{src}\ngot: {err}");
+    }
+    for (fold, want) in [
+        ("sum(x)", "unknown function"),
+        ("sum<over ctx.warp>(x)", "takes `ctx.lane` or `ctx.thread`"),
+        ("sum<width 8>(x)", "needs `over"),
+        ("sum<over ctx.thread, width 8>(x)", "takes no `width`"),
+        ("shfl<xor 1, down 2>(x)", "one of `from`"),
+    ] {
+        let src = folded(fold);
+        match crate::parse(&src) {
+            Err(e) => assert!(e.to_string().contains(want), "{fold}: {e}"),
+            Ok(_) => {
+                let err = emit_err(&src);
+                assert!(err.contains(want), "{fold}: {err}");
+            }
+        }
+    }
+}
+
+#[test]
+fn the_settings_are_keywords_only_inside_the_brackets() {
+    let mlir = emit_mlir(&folded("shfl<from 1>(x)").replace("let x =", "let from = 2\n let x = f32(from) * 0.0 +"));
     assert!(module_verifies(&mlir));
 }

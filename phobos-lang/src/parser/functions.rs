@@ -10,6 +10,7 @@
 
 use std::collections::HashMap;
 
+use super::super::ast::lanes::{self, Fold};
 use super::super::ast::{Expr, Kernel, Stmt, Sub};
 
 /// How deep calls may nest before inlining gives up, which also catches
@@ -117,6 +118,22 @@ impl<'a> Inliner<'a> {
     /// Rewrites calls to expression functions inside `e`.
     fn expr(&mut self, e: Expr, depth: usize) -> Result<Expr, String> {
         Ok(match e {
+            Expr::Call { callee, mut args } if is_reduce(&callee, &args) => {
+                // The combine is named, not called: its body over the two
+                // operands the butterfly hands it.
+                if let Some(Expr::Var(name)) = args.last()
+                    && let Some(f) = self.find(name)
+                {
+                    let Body::Expr(body) = &f.body else {
+                        return Err(format!("`{name}` has a statement body and cannot combine a reduce"));
+                    };
+                    let map = bind(f, &[Expr::Var(lanes::COMBINE_A.into()), Expr::Var(lanes::COMBINE_B.into())])?;
+                    let body = subst(body, &map, &HashMap::new())?;
+                    *args.last_mut().expect("a reduce has a combine") = body;
+                }
+                let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
+                Expr::Call { callee, args }
+            }
             Expr::Call { callee, args } => {
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
                 let Some(f) = self.find(&callee) else {
@@ -191,6 +208,10 @@ impl<'a> Inliner<'a> {
             .collect::<Result<Vec<_>, _>>()?;
         self.stmts(body, depth + 1)
     }
+}
+
+fn is_reduce(callee: &str, args: &[Expr]) -> bool {
+    lanes::as_collective(callee, args).is_some_and(|c| c.fold == Fold::Reduce)
 }
 
 /// Each parameter of `f` against its argument.

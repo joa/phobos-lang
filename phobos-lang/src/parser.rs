@@ -1,6 +1,7 @@
 use super::ast::*;
 use super::token::{Tok, Token};
 
+mod collective;
 mod functions;
 mod jumps;
 
@@ -598,6 +599,11 @@ impl Parser {
                     base: Box::new(expr),
                     subs,
                 };
+            } else if let Expr::Var(name) = &expr
+                && self.at_config()
+            {
+                let name = name.clone();
+                expr = self.config_call(&name)?;
             } else if self.matches(&Tok::LParen) {
                 if let Expr::Var(name) = expr {
                     self.advance(); // `(`

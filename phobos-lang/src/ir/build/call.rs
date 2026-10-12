@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
+use crate::ast::lanes::{self, Fold};
 use crate::ast::{Expr, Scalar as AstScalar, ctx};
 use crate::ir::{
     ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, ThreadIndex, Type,
@@ -11,6 +12,15 @@ impl Build {
     /// Each arm evaluates its operands in source order and produces one op
     /// whose result type is the buffer the emitter allocates.
     pub(crate) fn emit_call(&mut self, callee: &str, args: &[Expr]) -> Result<Rv> {
+        if let Some(c) = lanes::as_collective(callee, args) {
+            if c.fold == Fold::Reduce && matches!(c.combine, Some(Expr::Var(_))) {
+                bail!("`reduce<..>(x, f)` combines with a `fn f(a, b) = ..`, and none is defined");
+            }
+            return self.emit_collective(c);
+        }
+        if let Some((mode, value, operand, width)) = lanes::as_shuffle(callee, args) {
+            return self.emit_shuffle(mode, value, operand, width);
+        }
         match callee {
             ctx::BLOCK | ctx::BLOCKS => {
                 let [Expr::Int(d @ 0..=2)] = args else {

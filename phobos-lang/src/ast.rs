@@ -1,4 +1,5 @@
 pub mod ctx;
+pub mod lanes;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Scalar {

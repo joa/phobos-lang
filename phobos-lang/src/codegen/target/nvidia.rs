@@ -3,6 +3,7 @@
 // emitter decides which of them to use.
 
 use super::*;
+use crate::ast::lanes::Mode;
 
 /// Element type and operand role of the wmma fragments, fixed at 16x16 on
 /// every chip that has them.
@@ -255,6 +256,10 @@ impl Isa for Nvidia {
         WARP
     }
 
+    fn index_bits(&self) -> u32 {
+        self.index_bits
+    }
+
     // ---- where memory lives ----
 
     fn global_space<'c>(&self, cg: &Codegen<'c>) -> Attribute<'c> {
@@ -375,12 +380,35 @@ impl Isa for Nvidia {
             )
         };
         let offset = cg.push(block, c_i32(mask))?;
-        let width = cg.push(block, c_i32(WARP))?;
+        self.shuffle(cg, block, v, Mode::Xor, offset)
+    }
+
+    /// gpu.shuffle, which is shfl.sync after convert-gpu-to-nvvm. Its
+    /// width is always the warp's: a narrower one lowers to an active mask
+    /// of only the first `width` lanes, not to pieces of the warp.
+    fn shuffle<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        v: Value<'c, 'c>,
+        mode: Mode,
+        src: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let width = cg.push(
+            block,
+            arith::constant(cg.ctx, IntegerAttribute::new(cg.i32_t, WARP).into(), cg.loc),
+        )?;
+        let mode = match mode {
+            Mode::From => "idx",
+            Mode::Xor => "xor",
+            Mode::Down => "down",
+            Mode::Up => "up",
+        };
         cg.push(
             block,
             OperationBuilder::new("gpu.shuffle", cg.loc)
-                .add_operands(&[v, offset, width])
-                .add_attributes(&[(cg.id("mode"), cg.parse_attr("#gpu<shuffle_mode xor>")?)])
+                .add_operands(&[v, src, width])
+                .add_attributes(&[(cg.id("mode"), cg.parse_attr(&format!("#gpu<shuffle_mode {mode}>"))?)])
                 .add_results(&[v.r#type(), cg.bool_t])
                 .build()?,
         )

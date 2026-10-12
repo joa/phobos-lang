@@ -118,6 +118,8 @@ fn main() -> Result<()> {
     pipelined_tail(&mut failures)?;
     register_tile(&mut failures)?;
     dot_epilogue(&mut failures)?;
+    lanes(&mut failures)?;
+    lane_matvec(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -170,6 +172,119 @@ fn argmax(failures: &mut u32) -> Result<()> {
         let got = out.read()?;
         report(name, got == want, format!("{got:?}"), failures);
     }
+    Ok(())
+}
+
+/// One value per thread from `expr`, over `x` (f32) and `i` (an integer
+/// with planted ties), against `want(thread)`.
+fn lanes(failures: &mut u32) -> Result<()> {
+    let n = THREADS as usize;
+    let x = noise(n, 7);
+    let ints: Vec<i32> = (0..n).map(|t| ((t * 37) % 11) as i32).collect();
+    let lane = |t: usize| t % 32;
+    let group = |t: usize, w: usize| (t / w) * w..(t / w) * w + w;
+    let fold = |r: std::ops::Range<usize>, f: &dyn Fn(f32, f32) -> f32| r.map(|k| x[k]).reduce(f).unwrap();
+    let first_max_in = |r: std::ops::Range<usize>, v: &dyn Fn(usize) -> f64| {
+        let start = r.start;
+        start + first_max(r.map(v)) as usize
+    };
+    #[allow(clippy::type_complexity)]
+    let probes: Vec<(&str, &str, u32, Box<dyn Fn(usize) -> f32>)> = vec![
+        ("lane_sum", "sum<over ctx.lane>(x)", 32, Box::new(|t| fold(group(t, 32), &|a, b| a + b))),
+        ("lane_max_w8", "max<over ctx.lane, width 8>(x)", 32, Box::new(|t| fold(group(t, 8), &f32::max))),
+        ("lane_reduce_fn", "reduce<over ctx.lane>(x, mx)", 32, Box::new(|t| fold(group(t, 32), &f32::max))),
+        (
+            "lane_argmax",
+            "argmax<over ctx.lane>(x)",
+            32,
+            Box::new(|t| lane(first_max_in(group(t, 32), &|k| x[k] as f64)) as f32),
+        ),
+        (
+            "cta_argmax_ties",
+            "argmax<over ctx.thread>(i)",
+            32,
+            Box::new(|_| first_max_in(0..n, &|k| ints[k] as f64) as f32),
+        ),
+        (
+            "cta_argmax_ties_64",
+            "argmax<over ctx.thread>(i)",
+            64,
+            Box::new(|_| first_max_in(0..n, &|k| ints[k] as f64) as f32),
+        ),
+        ("cta_sum", "sum<over ctx.thread>(x)", 32, Box::new(|_| fold(0..n, &|a, b| a + b))),
+        (
+            "lane_any",
+            "where(any<over ctx.lane>(x > 0.9), 1.0, 0.0)",
+            32,
+            Box::new(|t| if group(t, 32).any(|k| x[k] > 0.9) { 1.0 } else { 0.0 }),
+        ),
+        ("shfl_from", "shfl<from 3>(x)", 32, Box::new(|t| x[t - lane(t) + 3])),
+        ("shfl_xor", "shfl<xor 5>(x)", 32, Box::new(|t| x[t ^ 5])),
+        // A source past the 16-lane piece reads the lane's own value.
+        ("shfl_down_w16", "shfl<down 1, width 16>(x)", 32, Box::new(|t| x[if t % 16 == 15 { t } else { t + 1 }])),
+        ("shfl_up", "shfl<up 2>(x)", 32, Box::new(|t| x[if lane(t) < 2 { t } else { t - 2 }])),
+    ];
+    for (name, expr, bits, want) in probes {
+        let src = format!(
+            "fn mx(a, b) = max(a, b)
+
+            @launch({THREADS})
+            kernel k(X: tensor<f32>[1, {n}], I: tensor<i32>[1, {n}], O: tensor<f32>[1, {n}]) {{
+                let x = X[0, ctx.thread]
+                let i = I[0, ctx.thread]
+                O[0, ctx.thread] = f32({expr})
+            }}"
+        );
+        let (xa, ia, out) = (Arg::new(&x, 1, n)?, Arg::new(&ints, 1, n)?, Arg::<f32>::zeroed(1, n)?);
+        let mut slots = Vec::new();
+        xa.push(&mut slots);
+        ia.push(&mut slots);
+        out.push(&mut slots);
+        run_at(bits, &src, "k", 1, &mut slots)?;
+        let got = out.read()?;
+        let worst = (0..n).map(|t| (got[t] - want(t)).abs()).fold(0.0f32, f32::max);
+        report(name, worst <= 1e-5, format!("worst {worst:.2e}"), failures);
+    }
+    Ok(())
+}
+
+/// A warp per output column, its lanes striding k, summed with a shuffle:
+/// per-thread loads, a per-thread `var` and a per-lane store.
+fn lane_matvec(failures: &mut u32) -> Result<()> {
+    let (n, k) = (40usize, 1003usize);
+    let a = noise(k, 11);
+    let w = noise(n * k, 12);
+    let src = format!(
+        "@launch({THREADS})
+        kernel mv(A: tensor<f32>[1, K], W: tensor<f32>[N, K], C: tensor<f32>[1, N]) {{
+            let col = ctx.block.x * ctx.warps + ctx.warp
+            if col < N {{
+                var acc: f32 = 0.0
+                for j in range(ctx.lane, K, ctx.lanes) {{
+                    acc += W[col, j] * A[0, j]
+                }}
+                let total = sum<over ctx.lane>(acc)
+                if ctx.lane == 0 {{
+                    C[0, col] = total
+                }}
+            }}
+        }}"
+    );
+    let (aa, wa, out) = (Arg::new(&a, 1, k)?, Arg::new(&w, n, k)?, Arg::<f32>::zeroed(1, n)?);
+    let mut slots = Vec::new();
+    aa.push(&mut slots);
+    wa.push(&mut slots);
+    out.push(&mut slots);
+    let warps = THREADS as usize / 32;
+    run(&src, "mv", n.div_ceil(warps) as u32, &mut slots)?;
+    let got = out.read()?;
+    let worst = (0..n)
+        .map(|c| {
+            let want: f64 = (0..k).map(|j| w[c * k + j] as f64 * a[j] as f64).sum();
+            (got[c] as f64 - want).abs()
+        })
+        .fold(0.0, f64::max);
+    report("lane_matvec", worst < 1e-4, format!("worst {worst:.2e}"), failures);
     Ok(())
 }
 
