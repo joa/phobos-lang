@@ -119,7 +119,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
 | `var t: tile<T>[R, C]` | Uninitialized tile. The type is required and must be a tile. |
 | `x = e`, `x[...] = e` | Assign a whole value or a slice. Tiles and tensors are sliced the same way. |
-| `x += e`, `x[...] += e` | Accumulate. A tile takes a scalar, and `acc += dot_t(a, b)` adds the product in place. |
+| `x += e`, `x[...] += e` | Accumulate. A tile takes a scalar or a tile that broadcasts to it, a row or a column, and `acc += dot_t(a, b)` adds the product in place. |
 | `x op= e` | `x = x op e`, for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. The target is read again, so an indexed target's subscripts are evaluated twice. |
 | `for i in range(lo, hi[, step])` | `i` runs over `lo, lo + step, ...` while `< hi`. `step` defaults to 1. |
 | `while c { }`, `if c { } else { }` | Scalar condition. |

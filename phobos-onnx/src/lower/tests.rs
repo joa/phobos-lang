@@ -197,7 +197,7 @@ fn lowers_fused_linear_with_gelu_epilogue() {
     let plan = lower_node(&n, &dims_fn(&dims)).unwrap();
     assert_eq!(plan.kernel_name, "fused_linear");
     assert_eq!(plan.grid, (4, 4, 1)); // 128/32, 128/32
-    assert!(plan.source.contains("acc = acc + bias"));
+    assert!(plan.source.contains("acc += bias"));
     assert!(plan.source.contains("1.0 + exp(-1.702 * acc)"));
     // A, B, the [1, N] bias, then C.
     assert_eq!(

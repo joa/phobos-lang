@@ -264,7 +264,7 @@ fn lower_fused_linear(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result
          \x20   acc += dot(a, b)\n\
          \x20 }}\n\
          \x20 var bias: tile<f32>[1, TILE_N] = Bias[0 :+ 1, pn * TILE_N :+ TILE_N]\n\
-         \x20 acc = acc + bias\n\
+         \x20 acc += bias\n\
          {epilogue}\
          }}\n"
     );
