@@ -34,6 +34,10 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3, false)));
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
+    sources.push(("attn_gemm".to_string(), attn_gemm_src(256, ATTN_GEMM_TILE)));
+    sources.push(("q8_split".to_string(), Q8_SPLIT_SRC.replace("{ALIGNED}", "@aligned(N = TN, K = 32)")));
+    sources.push(("moe_topk".to_string(), moe_topk_src(256)));
+    sources.push(("moe_combine".to_string(), moe_combine_src()));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
     sources.push(("delta_wy".to_string(), delta_wy_src(32, 128, DELTA_CHUNK)));
     // The 4B's attention heads: 256 wide, 64 of them rotated.
@@ -72,7 +76,8 @@ fn dump_raw_kernel_sources() {
     // widths, and 160, which no intrinsic norm divides.
     sources.push(("quantize".to_string(), QUANTIZE_SRC.to_string()));
     sources.push(("pointwise".to_string(), POINTWISE_SRC.to_string()));
-    sources.push(("delta".to_string(), DELTA_SRC.to_string()));
+    let delta = DELTA_SRC.replace("{H}", "32").replace("{D}", "128");
+    sources.push(("delta".to_string(), delta.replace("{TN}", &DELTA_TN.to_string())));
     for width in [2560, 160] {
         for (form, name) in [(NormForm::Plain, "plain"), (NormForm::Quantized, "q"), (NormForm::GatedQuantized, "gated")] {
             sources.push((format!("rms_norm_{name}_{width}"), rms_norm_src(width, 1e-6, form)));
