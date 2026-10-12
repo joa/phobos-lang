@@ -217,8 +217,9 @@ pub struct DeviceBackend {
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
     /// `PHOBOS_RAW_LANES`: the raw formats' decode matvecs written with
-    /// lanes, where a format has one.
-    raw_lanes: bool,
+    /// lanes for every format, or for none; unset, where each measured at
+    /// least its intrinsic's speed.
+    raw_lanes: Option<bool>,
     /// Whether the raw decode matvecs contract in `dp4a` against an int8
     /// activation. `PHOBOS_IQ1S_DP4A=0` opts out.
     ///
