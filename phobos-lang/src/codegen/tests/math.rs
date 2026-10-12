@@ -298,3 +298,30 @@ fn elementwise_chain_rejects_rounding_an_integer() {
         "round of an i32 chain step should not compile"
     );
 }
+
+/// `acc += y` with `y` a row or a column of `acc` broadcasts, the same sweep
+/// as `acc = acc + y`; a shape that does not broadcast stays an error.
+#[test]
+fn accumulate_broadcasts_a_row_or_a_column() {
+    let kernel = |decl: &str, update: &str| {
+        format!(
+            "@launch(256)
+            kernel k(X: tensor<f32>[16, 64], B: tensor<f32>[16, 64], O: tensor<f32>[16, 64]) {{
+                var acc: tile<f32>[16, 64] = X[0 :+ 16, 0 :+ 64]
+                {decl}
+                {update}
+                O[0 :+ 16, 0 :+ 64] = acc
+            }}"
+        )
+    };
+    for decl in [
+        "var y: tile<f32>[1, 64] = B[0 :+ 1, 0 :+ 64]",
+        "var y: tile<f32>[16, 1] = B[0 :+ 16, 0 :+ 1]",
+    ] {
+        let add = emit_mlir(&kernel(decl, "acc += y"));
+        assert!(module_verifies(&add), "{decl}\n{add}");
+        assert_eq!(add, emit_mlir(&kernel(decl, "acc = acc + y")), "{decl}");
+    }
+    let err = emit_err(&kernel("var y: tile<f32>[8, 64] = B[0 :+ 8, 0 :+ 64]", "acc += y"));
+    assert!(err.contains("shape mismatch"), "{err}");
+}

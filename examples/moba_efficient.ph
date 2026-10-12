@@ -38,7 +38,7 @@ kernel moba_attention(Q: tensor<f16>[Nq, D],
     // a soft version of top-k chunk routing.
     var s: tile<f32>[BR, CHUNK] = dot_t(q, k)      // [BR, CHUNK] = q @ k.T
     s = s * scale
-    s = s + gate                             // broadcast [BR, 1] over columns
+    s += gate                                // broadcast [BR, 1] over columns
 
     // Online softmax update.
     var mnew: tile<f32>[BR, 1] = rowmax(s)

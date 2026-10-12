@@ -1,8 +1,8 @@
 use anyhow::{Result, bail};
 
-use super::{Binding, Build, Rv};
+use super::{Binding, Build, DYN, Rv};
 use crate::ast::{AssignOp, BinOp, Expr};
-use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, Type, ValueId};
+use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, Tree, Type, ValueId};
 
 impl Build {
     /// Lowers `target op= value` for a tile-shaped target.
@@ -265,7 +265,21 @@ impl Build {
                 Ok(())
             }
             (AssignOp::Add, Rv::Tile(src)) => {
-                self.check_shapes(&self.shape(src), &self.shape(target), "tile accumulate")?;
+                let (sshape, tshape) = (self.shape(src), self.shape(target));
+                // A source that broadcasts, a row or a column, is swept as
+                // `target + src`.
+                if sshape != tshape
+                    && sshape.len() == tshape.len()
+                    && !tshape.contains(&DYN)
+                    && self.elem(src) == self.elem(target)
+                    && sshape.iter().zip(&tshape).all(|(&s, &t)| s == t || s == 1)
+                {
+                    self.check_leaves(&[src], &tshape)?;
+                    let tree = Tree::Binary(BinOp::Add, Box::new(Tree::Leaf(0)), Box::new(Tree::Leaf(1)));
+                    self.stmt(OpKind::Fused(tree), &[target, src, target]);
+                    return Ok(());
+                }
+                self.check_shapes(&sshape, &tshape, "tile accumulate")?;
                 self.stmt(OpKind::Accumulate, &[src, target]);
                 Ok(())
             }

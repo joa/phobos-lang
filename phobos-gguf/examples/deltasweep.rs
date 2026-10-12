@@ -87,7 +87,7 @@ const VARIANTS: &[(&str, &str)] = &[
     ),
     (
         "loop only",
-        "    st = st + dec
+        "    st += dec
     O[r :+ 1, jn * TN :+ TN] = v",
     ),
 ];
