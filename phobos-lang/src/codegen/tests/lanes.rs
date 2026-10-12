@@ -361,3 +361,10 @@ fn run_errors_name_the_problem() {
     let err = emit_err(&lane_runs("Y[0, 0] = elem(X[e / 32, e % 32 :+ 4], 4)"));
     assert!(err.contains("element 4 of a run of 4"), "got: {err}");
 }
+
+#[test]
+fn a_float_multiply_add_may_fuse() {
+    let mlir = emit_mlir(MATVEC);
+    // `acc += W * A`: both halves may contract into one fma.
+    assert_contains(&mlir, &["arith.mulf", "arith.addf", "fastmath<contract>"]);
+}
