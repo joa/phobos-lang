@@ -65,3 +65,16 @@ fn an_unsigned_tile_stores_and_copies() {
     );
     assert_contains(&mlir, &["memref<16x64xi32"]);
 }
+
+#[test]
+fn integer_arithmetic_under_a_float_conversion_stays_integer() {
+    for value in ["f32(i32(b) / 16 % 4) * 0.5", "f32((i32(b) >> 4) & 3) * 0.5"] {
+        let mlir = emit_mlir(&format!(
+            "kernel k(B: tensor<i8>[16, 64], O: tensor<f32>[16, 64]) {{
+                var b = B[0 :+ 16, 0 :+ 64]
+                O[0 :+ 16, 0 :+ 64] = {value}
+            }}"
+        ));
+        assert!(!mlir.contains("arith.divf") && !mlir.contains("arith.remf"), "{value}:\n{mlir}");
+    }
+}

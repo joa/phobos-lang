@@ -344,12 +344,14 @@ fn pow(failures: &mut u32) -> Result<()> {
 fn unsigned(failures: &mut u32) -> Result<()> {
     let b: Vec<u8> = (0..16 * 64).map(|k| (k * 29 % 256) as u8).collect();
     let src = "@launch(256)
-        kernel k(B: tensor<u8>[16, 64], Q: tensor<i32>[16, 64], F: tensor<f32>[16, 64], S: tensor<i32>[1, 64]) {
+        kernel k(B: tensor<u8>[16, 64], Q: tensor<i32>[16, 64], F: tensor<f32>[16, 64], S: tensor<i32>[1, 64],
+                 G: tensor<f32>[16, 64]) {
             var b = B[0 :+ 16, 0 :+ 64]
             var q: tile<i32>[16, 64] = (i32(b) >> 4) & 15
             var f: tile<f32>[16, 64] = f32(b)
             Q[0 :+ 16, 0 :+ 64] = q
             F[0 :+ 16, 0 :+ 64] = f
+            G[0 :+ 16, 0 :+ 64] = f32(i32(b) / 16 % 4) * 0.5
             for j in range(0, 64) {
                 S[0, j] = B[15, j] + 1
             }
@@ -358,8 +360,9 @@ fn unsigned(failures: &mut u32) -> Result<()> {
     let q = Arg::<i32>::zeroed(16, 64)?;
     let f = Arg::<f32>::zeroed(16, 64)?;
     let s = Arg::<i32>::zeroed(1, 64)?;
+    let g = Arg::<f32>::zeroed(16, 64)?;
     let mut slots = Vec::new();
-    for push in [&a as &dyn Push, &q, &f, &s] {
+    for push in [&a as &dyn Push, &q, &f, &s, &g] {
         push.push_to(&mut slots);
     }
     run(src, "k", 1, &mut slots)?;
@@ -369,6 +372,9 @@ fn unsigned(failures: &mut u32) -> Result<()> {
     report("u8 nibble decode", q.read()? == want_q, String::new(), failures);
     report("u8 to f32", f.read()? == want_f, String::new(), failures);
     report("u8 scalar load", s.read()? == want_s, String::new(), failures);
+    // Integer arithmetic under a float conversion stays integer.
+    let want_g: Vec<f32> = b.iter().map(|&v| f32::from(v / 16 % 4) * 0.5).collect();
+    report("integer under f32()", g.read()? == want_g, String::new(), failures);
     Ok(())
 }
 
