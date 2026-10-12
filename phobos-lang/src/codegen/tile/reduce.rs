@@ -317,4 +317,47 @@ impl<'c> Codegen<'c> {
         }
         Ok(())
     }
+
+    /// Each row of a register tile folded where it lives. `vals[e]` sits at
+    /// `idx[e]`, and a row is a run of `cols` lanes of one warp, so a
+    /// butterfly over the run folds it and the run's first lane writes it.
+    pub(in crate::codegen) fn regs_rowreduce(
+        &mut self,
+        block: &Block<'c>,
+        vals: &[Value<'c, 'c>],
+        idx: &[Vec<Value<'c, 'c>>],
+        shape: &[i64],
+        elem: Type<'c>,
+        kind: Reduce,
+    ) -> Result<MemVal<'c>> {
+        let [rows, cols] = shape[..] else {
+            bail!("row reduction expects a rank-2 tile");
+        };
+        if cols > WARP {
+            bail!("a register row reduction folds rows of at most a warp");
+        }
+        let out = self.alloc_tile_shaped(block, elem, &[rows, 1])?;
+        let zero = self.const_index(block, 0)?;
+        for (&v, at) in vals.iter().zip(idx) {
+            let mut acc = v;
+            let mut mask = cols / 2;
+            while mask >= 1 {
+                let other = self.shfl_xor(block, acc, mask)?;
+                acc = self.fold(block, kind, elem, acc, other)?;
+                mask /= 2;
+            }
+            let lead = self.push(
+                block,
+                arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, at[1], zero, self.loc),
+            )?;
+            let then = Block::new(&[]);
+            then.append_operation(memref::store(acc, out.mem, &[at[0], zero], self.loc));
+            then.append_operation(scf::r#yield(&[], self.loc));
+            let region = Region::new();
+            region.append_block(then);
+            block.append_operation(scf::r#if(lead, &[], region, Region::new(), self.loc));
+        }
+        self.barrier(block)?;
+        Ok(out)
+    }
 }

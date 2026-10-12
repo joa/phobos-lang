@@ -8,7 +8,7 @@ use melior::dialect::memref;
 use melior::ir::{Block, BlockLike, Type, Value};
 
 use super::{Fill, Lowered};
-use crate::codegen::{Codegen, FragAcc};
+use crate::codegen::{Codegen, FragAcc, Reduce};
 use crate::ir::{self, Ir, OpId, OpKind, ValueId};
 
 #[derive(Clone)]
@@ -85,6 +85,20 @@ impl<'c> Codegen<'c> {
                     block.append_operation(memref::store(v, dst.mem, &idx, self.loc));
                 }
                 self.barrier(block)?;
+            }
+            OpKind::RegsReduce(how) => {
+                let regs = self.regs_ir(ir.operand(op, 0))?;
+                let kind = match how {
+                    ir::Reduce::RowSum => Reduce::Sum,
+                    ir::Reduce::RowMax => Reduce::Max,
+                    other => bail!("{other:?} of a register tile"),
+                };
+                let mut idx = Vec::new();
+                for e in 0..regs.vals.len() {
+                    idx.push(self.reg_index(block, &regs.shape, e)?);
+                }
+                let out = self.regs_rowreduce(block, &regs.vals, &idx, &regs.shape, regs.elem, kind)?;
+                self.set_ir(ir.result(op), Lowered::Tile(out));
             }
             other => bail!("{} is not a register-tile op", other.name()),
         }

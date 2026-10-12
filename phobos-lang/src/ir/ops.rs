@@ -416,6 +416,9 @@ pub enum OpKind {
     RegsFused(Tree),
     /// `(regs, dst)`: a register tile written to a shared tile.
     RegsStore,
+    /// `(regs) -> [rows, 1]`: `rowsum` or `rowmax` of a register tile,
+    /// folded with shuffles where the elements live.
+    RegsReduce(Reduce),
     /// `(tensor, slot) -> value`: a system-scope acquire load of an `i32`
     /// slot, once per CTA, so that what the host wrote before raising it is
     /// visible to every thread.
@@ -589,6 +592,7 @@ impl OpKind {
             OpKind::Shuffle { mode, width } => format!("shfl {} w{width}", mode.name()),
             OpKind::Converged(g) => format!("converged {g:?}"),
             OpKind::Exchange => "exchange".into(),
+            OpKind::RegsReduce(how) => format!("regs_reduce {how:?}"),
             OpKind::LaneLoad { dim, len, align } => format!("lane_load d{dim} x{len} a{align}"),
             OpKind::Dot4 => "dot4".into(),
             OpKind::Dim(d) => format!("dim {d}"),

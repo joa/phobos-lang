@@ -117,6 +117,7 @@ fn main() -> Result<()> {
     handoff(&mut failures)?;
     pipelined_tail(&mut failures)?;
     register_tile(&mut failures)?;
+    register_rows(&mut failures)?;
     dot_epilogue(&mut failures)?;
     lanes(&mut failures)?;
     lane_matvec(&mut failures)?;
@@ -594,6 +595,47 @@ fn register_tile(failures: &mut u32) -> Result<()> {
     let err = |got: Vec<f32>, want: &[f32]| got.iter().zip(want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
     let (eo, es) = (err(o.read()?, &want), err(s.read()?, &want_s));
     report("@registers accumulator", eo < 1e-5 && es < 1e-4, format!("err {eo:.1e} / {es:.1e}"), failures);
+    Ok(())
+}
+
+/// Row sums and maxima of a register tile whose rows are 16 lanes of a
+/// warp, folded with shuffles where the elements live.
+fn register_rows(failures: &mut u32) -> Result<()> {
+    let (rows, k) = (64, 48);
+    let x = noise(rows * k, 15);
+    for (how, name) in [("rowsum", "@registers rowsum, shuffles"), ("rowmax", "@registers rowmax, shuffles")] {
+        let src = format!(
+            "@launch(256)
+            @registers(acc)
+            kernel k(X: tensor<f32>[64, K], S: tensor<f32>[64, 1]) {{
+                var acc: tile<f32>[64, 16] = 0.0
+                for kt in range(0, K, 16) {{
+                    var x = X[0 :+ 64, kt :+ 16]
+                    acc += x * x
+                }}
+                var s: tile<f32>[64, 1] = {how}(acc)
+                S[0 :+ 64, 0 :+ 1] = s
+            }}"
+        );
+        let mut acc = vec![0.0f32; rows * 16];
+        for r in 0..rows {
+            for j in 0..k {
+                acc[r * 16 + j % 16] += x[r * k + j] * x[r * k + j];
+            }
+        }
+        let want: Vec<f32> = acc
+            .chunks(16)
+            .map(|r| if how == "rowsum" { r.iter().sum() } else { r.iter().copied().fold(f32::MIN, f32::max) })
+            .collect();
+        let gx = Arg::new(&x, rows, k)?;
+        let s = Arg::<f32>::zeroed(rows, 1)?;
+        let mut slots = Vec::new();
+        gx.push(&mut slots);
+        s.push(&mut slots);
+        run(&src, "k", 1, &mut slots)?;
+        let err = s.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
+        report(name, err < 1e-4, format!("err {err:.1e}"), failures);
+    }
     Ok(())
 }
 

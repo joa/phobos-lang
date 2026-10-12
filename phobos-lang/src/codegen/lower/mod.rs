@@ -308,7 +308,9 @@ impl<'c> Codegen<'c> {
             | OpKind::FragStore
             | OpKind::GemmInit
             | OpKind::GemmStore { .. } => self.emit_intrinsic_op(block, ir, op),
-            OpKind::RegsFill | OpKind::RegsFused(_) | OpKind::RegsStore => self.emit_regs_op(block, ir, op),
+            OpKind::RegsFill | OpKind::RegsFused(_) | OpKind::RegsStore | OpKind::RegsReduce(_) => {
+                self.emit_regs_op(block, ir, op)
+            }
             _ => self.emit_tile_op(block, ir, op),
         }
     }

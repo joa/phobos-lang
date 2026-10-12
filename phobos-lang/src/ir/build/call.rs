@@ -246,6 +246,12 @@ impl Build {
                     "rowsum" => Reduce::RowSum,
                     _ => Reduce::RowArgMax,
                 };
+                if let [Expr::Var(name)] = args
+                    && let Some(Binding::Regs(regs)) = self.lookup(name)
+                    && let Some(out) = self.regs_reduce(how, regs)
+                {
+                    return Ok(Rv::Tile(out));
+                }
                 if let [arg] = args
                     && let Some(out) = self.reduce_fused(how, arg)?
                 {

@@ -297,6 +297,16 @@ impl Verifier<'_> {
                     }
                 }
             }
+            OpKind::RegsReduce(_) => {
+                if self.want_operands(op, 1) && self.want_results(op, 1) {
+                    if !matches!(ir.ty(ir.operand(op, 0)), Type::Regs(_)) {
+                        self.err(op, "operand must be a register tile");
+                    }
+                    if !matches!(ir.ty(ir.result(op)), Type::Tile(_)) {
+                        self.err(op, "result must be a tile");
+                    }
+                }
+            }
             OpKind::LaneLoad { len, .. } => {
                 if !matches!(ir.operands(op).first().map(|&t| ir.ty(t)), Some(Type::Tensor(_))) {
                     self.err(op, "operand must be a tensor");
