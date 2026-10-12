@@ -23,7 +23,6 @@ mod mask;
 mod math;
 mod matmul;
 mod narrow;
-mod norm;
 mod ops;
 mod pipeline;
 mod ptq1;

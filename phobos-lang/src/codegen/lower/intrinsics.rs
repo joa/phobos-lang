@@ -16,40 +16,6 @@ impl<'c> Codegen<'c> {
             OpKind::Intrinsic(i) => {
                 let n = ir.operands(op).len();
                 match i {
-                    Intrinsic::RmsNormQ => {
-                        let x = self.tile_ir(ir, ir.operand(op, 0))?;
-                        let g = self.tile_ir(ir, ir.operand(op, 1))?;
-                        let eps = self.scalar_ir(ir.operand(op, 2))?;
-                        let (o, q, s) = if n == 6 {
-                            (
-                                Some(self.tile_ir(ir, ir.operand(op, 3))?),
-                                self.tile_ir(ir, ir.operand(op, 4))?,
-                                self.tile_ir(ir, ir.operand(op, 5))?,
-                            )
-                        } else {
-                            (
-                                None,
-                                self.tile_ir(ir, ir.operand(op, 3))?,
-                                self.tile_ir(ir, ir.operand(op, 4))?,
-                            )
-                        };
-                        let inv = self.rms_norm_q_raw(block, x, None, g, eps, o, q, s)?;
-                        self.set_ir(ir.result(op), Lowered::Scalar(inv));
-                    }
-                    Intrinsic::RmsNormGatedQ => {
-                        let x = self.tile_ir(ir, ir.operand(op, 0))?;
-                        let z = self.tile_ir(ir, ir.operand(op, 1))?;
-                        let g = self.tile_ir(ir, ir.operand(op, 2))?;
-                        let eps = self.scalar_ir(ir.operand(op, 3))?;
-                        let o = match n == 7 {
-                            true => Some(self.tile_ir(ir, ir.operand(op, 4))?),
-                            false => None,
-                        };
-                        let q = self.tile_ir(ir, ir.operand(op, n - 2))?;
-                        let s = self.tile_ir(ir, ir.operand(op, n - 1))?;
-                        let inv = self.rms_norm_q_raw(block, x, Some(z), g, eps, o, q, s)?;
-                        self.set_ir(ir.result(op), Lowered::Scalar(inv));
-                    }
                     Intrinsic::WarpPartial => {
                         let tiles = self.tiles_ir(ir, op, 0..6)?;
                         let scalars = [6, 7, 8, 9]
@@ -237,8 +203,6 @@ impl<'c> Codegen<'c> {
                 out
             }
             Intrinsic::RawQdecode(_)
-            | Intrinsic::RmsNormQ
-            | Intrinsic::RmsNormGatedQ
             | Intrinsic::WarpPartial
             | Intrinsic::DeltaScan => {
                 bail!("{} yields no fresh buffer", i.name())

@@ -284,8 +284,6 @@ fn intrinsic_names_round_trip() {
         Intrinsic::Q50mmaT,
         Intrinsic::Gather,
         Intrinsic::ArgSel,
-        Intrinsic::RmsNormQ,
-        Intrinsic::RmsNormGatedQ,
         Intrinsic::WarpPartial,
         Intrinsic::DeltaScan,
     ];

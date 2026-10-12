@@ -703,13 +703,8 @@ impl Verifier<'_> {
                 if matches!(i, Intrinsic::RawQdecode(_)) {
                     self.err(op, "only writes a destination; use the into form");
                 }
-                self.intrinsic_operands(op, *i, n_ops);
+                self.intrinsic_operands(op, n_ops);
                 match i {
-                    Intrinsic::RmsNormQ | Intrinsic::RmsNormGatedQ => {
-                        if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::F32) {
-                            self.err(op, "result must be the f32 inverse rms");
-                        }
-                    }
                     Intrinsic::WarpPartial | Intrinsic::DeltaScan => {
                         if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::Index) {
                             self.err(op, "result must be index");
@@ -718,11 +713,11 @@ impl Verifier<'_> {
                     _ => self.want_tile_result(op),
                 }
             }
-            OpKind::IntrinsicInto(i) => {
+            OpKind::IntrinsicInto(_) => {
                 if n_ops == 0 {
                     self.err(op, "needs a destination");
                 } else {
-                    self.intrinsic_operands(op, *i, n_ops - 1);
+                    self.intrinsic_operands(op, n_ops - 1);
                     self.want_tiles(op, n_ops - 1..n_ops);
                 }
                 self.want_results(op, 0);
@@ -732,19 +727,11 @@ impl Verifier<'_> {
 
     /// An intrinsic's own operands, before any destination. Each intrinsic
     /// checks its own shapes when it is emitted. This checks only the shared
-    /// rules: no fragments, and the `eps` of `rms_norm_q_t` and its gated
-    /// form is a scalar.
-    fn intrinsic_operands(&mut self, op: OpId, i: Intrinsic, n: usize) {
+    /// rule: no fragments.
+    fn intrinsic_operands(&mut self, op: OpId, n: usize) {
         for k in 0..n {
             let v = self.ir.operand(op, k);
-            let eps_at = match i {
-                Intrinsic::RmsNormQ => Some(2),
-                Intrinsic::RmsNormGatedQ => Some(3),
-                _ => None,
-            };
-            if eps_at == Some(k) {
-                self.want_scalar(op, k, "eps");
-            } else if matches!(self.ir.ty(v), Type::Frags(_) | Type::Gemm(_)) {
+            if matches!(self.ir.ty(v), Type::Frags(_) | Type::Gemm(_)) {
                 self.err(op, format!("operand {k} cannot be an accumulator"));
             }
         }

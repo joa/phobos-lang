@@ -32,7 +32,6 @@ mod kquant;
 mod kquant_qdot;
 mod ptq1;
 mod math;
-mod norm;
 mod q2k_qdot;
 mod q3k_qdot;
 mod qdecode;
