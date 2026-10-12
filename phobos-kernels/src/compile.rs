@@ -104,66 +104,82 @@ pub fn compile_in(
     Ok((module, shared))
 }
 
-/// [`compile`] for several independent sources at once. Each source lowers to
-/// PTX on its own thread, in parallel. Loading the PTX into a `Module` touches
-/// the CUDA driver, so that stays sequential on the calling thread.
-pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Module>> {
-    enum Slot {
-        Hit(String),
-        Miss(std::thread::JoinHandle<Result<Timed>>, Context, String),
-    }
+/// One job of [`compile_parallel`]: found in the cache, waiting for a compile
+/// thread, or lowering on one.
+enum Slot {
+    Hit(String),
+    Waiting(Context),
+    Running(std::thread::JoinHandle<Result<Timed>>, Context),
+}
 
-    let slots = jobs
+/// [`compile`] for several independent sources at once. Each source lowers to
+/// PTX on its own thread, at most one a core at a time: a lowering holds a
+/// whole MLIR and LLVM module, and a cold cache misses every kernel of a
+/// model at once. Loading the PTX into a `Module` touches the CUDA driver, so
+/// that stays sequential on the calling thread.
+pub fn compile_parallel(jobs: &[(&str, &[Override<'_>], &str)]) -> Result<Vec<Module>> {
+    let mut slots: Vec<Slot> = jobs
         .iter()
         .map(|&(source, shapes, what)| {
             let ctx = context_for(shapes);
             manifest::record(&ctx, &[source]);
             match cache::load(&ctx, source) {
-                Some((ptx, _)) => Ok(Slot::Hit(ptx)),
+                Some((ptx, _)) => Slot::Hit(ptx),
                 None => {
-                    // Announced before the spawn, so the whole batch is named
-                    // as soon as it starts.
+                    // Announced up front, so the whole batch is named as soon
+                    // as it starts.
                     progress::started(STAGE, what);
-                    let handle = lower::spawn(&ctx, source)
-                        .with_context(|| format!("spawning the compile thread for {what}"))?;
-                    Ok(Slot::Miss(handle, ctx, source.to_string()))
+                    Slot::Waiting(ctx)
                 }
             }
         })
-        .collect::<Result<Vec<_>>>()?;
+        .collect();
 
+    let limit = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let (mut next, mut running) = (0, 0);
     let total = jobs.len();
-    jobs.iter()
-        .zip(slots)
-        .enumerate()
-        .map(|(i, (&(_, _, what), slot))| {
-            let cached = matches!(slot, Slot::Hit(_));
-            let (ptx, took) = match slot {
-                Slot::Hit(ptx) => (ptx, Duration::ZERO),
-                Slot::Miss(handle, ctx, source) => {
-                    let ((ptx, shared), took) = lower::join(handle, what)?;
-                    cache::store(&ctx, &source, &ptx, &shared);
-                    (ptx, took)
-                }
-            };
-            let module =
-                Module::from_ptx(&ptx, &[]).with_context(|| format!("loading {what} PTX"))?;
-            // Jobs are joined in the order given, so `done` counts progress
-            // along that order, not finished threads. A job that finishes
-            // early is reported only after the ones before it.
-            progress::report(Step {
-                stage: STAGE,
-                item: what,
-                done: i + 1,
-                total,
-                cached,
-                took,
-                source: jobs[i].0,
-                ptx: &ptx,
-            });
-            Ok(module)
-        })
-        .collect()
+    let mut modules = Vec::with_capacity(total);
+    for (i, &(source, _, what)) in jobs.iter().enumerate() {
+        // Threads start in job order, so job `i` is running by now.
+        while running < limit && next < total {
+            if let Slot::Waiting(ctx) = &slots[next] {
+                let (src, name) = (jobs[next].0, jobs[next].2);
+                let handle = lower::spawn(ctx, src)
+                    .with_context(|| format!("spawning the compile thread for {name}"))?;
+                slots[next] = Slot::Running(handle, ctx.clone());
+                running += 1;
+            }
+            next += 1;
+        }
+        let slot = std::mem::replace(&mut slots[i], Slot::Hit(String::new()));
+        let cached = matches!(slot, Slot::Hit(_));
+        let (ptx, took) = match slot {
+            Slot::Hit(ptx) => (ptx, Duration::ZERO),
+            Slot::Running(handle, ctx) => {
+                running -= 1;
+                let ((ptx, shared), took) = lower::join(handle, what)?;
+                cache::store(&ctx, source, &ptx, &shared);
+                (ptx, took)
+            }
+            Slot::Waiting(_) => unreachable!("job {i} started before it is joined"),
+        };
+        let module = Module::from_ptx(&ptx, &[]).with_context(|| format!("loading {what} PTX"))?;
+        // Jobs are joined in the order given, so `done` counts progress
+        // along that order, not finished threads. A job that finishes
+        // early is reported only after the ones before it.
+        progress::report(Step {
+            stage: STAGE,
+            item: what,
+            done: i + 1,
+            total,
+            cached,
+            took,
+            source,
+            ptx: &ptx,
+        });
+        modules.push(module);
+    }
+    Ok(modules)
 }
 
 pub struct Variants {
