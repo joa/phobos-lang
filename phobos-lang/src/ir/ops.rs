@@ -391,6 +391,12 @@ pub enum OpKind {
     Dot4 { a: Bytes, b: Bytes },
     /// `(bits) -> f16`: the half whose bits are the low 16 of an index.
     F16Bits,
+    /// `(b0, b1, b2, b3) -> index`: four `i8` as the little-endian word
+    /// they pack into, unsigned.
+    Word,
+    /// `(x, y, acc) -> acc + sum x_i * y_i` over the four signed bytes of
+    /// the low 32 bits of `x` and `y`: one `dp4a`.
+    Dp4a,
     /// `(value) -> one per warp`: each warp's copy of a warp-uniform value,
     /// in warp order, in every thread. Once per CTA, through shared memory.
     Exchange,
@@ -618,6 +624,8 @@ impl OpKind {
             OpKind::LaneLoad { dim, len, align } => format!("lane_load d{dim} x{len} a{align}"),
             OpKind::Dot4 { a, b } => format!("dot4 {a:?} {b:?}"),
             OpKind::F16Bits => "f16bits".into(),
+            OpKind::Word => "word".into(),
+            OpKind::Dp4a => "dp4a".into(),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

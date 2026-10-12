@@ -274,3 +274,17 @@ fn f16bits_reads_a_half_from_its_bits() {
     );
     assert_contains(&mlir, &["arith.bitcast", "i16 to f16", "arith.extf"]);
 }
+
+#[test]
+fn words_and_dp4a_build_packed_values() {
+    // A 5-bit value from a nibble and a bit at a per-lane shift, one word of
+    // a thread's 16 bytes at a time.
+    let mlir = emit_mlir(&lane_dot(
+        "dp4a((word(W[col, k :+ 16], 1) & 252645135) | (((word(W[col, k :+ 16], 2) >> (2 * (ctx.lane % 4))) & 16843009) << 4), word(A[0, k :+ 16], 1), 0)",
+    ));
+    assert_contains(&mlir, &["arith.index_castui", "nvvm.dot.accumulate.4way"]);
+    let err = emit_err(&lane_dot("word(W[col, k :+ 16], 4)"));
+    assert!(err.contains("holds it"), "got: {err}");
+    let err = emit_err(&lane_dot("word(W[col, k :+ 16], ctx.lane)"));
+    assert!(err.contains("must be a constant"), "got: {err}");
+}

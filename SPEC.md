@@ -166,6 +166,7 @@ All points load one element. A point among slices selects one index and keeps it
 | `&&` `\|\|` | On bools. Both sides are evaluated; an expression has no side effects. |
 | `min(a, b)`, `max(a, b)` | Operators spelled as calls: scalars, tiles, or one of each. Float `min` and `max` return the other operand when one is NaN. |
 | `f16bits(x)` | The `f16` whose bits are the low 16 of the integer `x`, as for a half packed in raw block bytes: `f16bits((B[0, 0] & 255) \| ((B[0, 1] & 255) << 8))`. |
+| `word(T[.., k :+ n], t)`, `dp4a(x, y, acc)` | `word` is bytes `4t .. 4t + 3` of a thread's run of `n` `i8` (a whole number of words; `t` a constant, 0 if left out) as the little-endian word they pack, unsigned; the run is one load, and the words of one run share it. `dp4a` is `acc` plus the sum of the products of the four signed bytes of `x` and of `y`. Together they let a decoder build packed values with `&`, `|`, `<<` and `>>` before one `dp4a` a word. |
 | Comparisons on tiles | Only inside `where`; there is no bool tile. |
 | Mixed types | Both operands convert to their join first. Float with float: the wider one. `f16` with `bf16`: `f32`. Integer with float: the float. |
 | `T(x)` conversion | `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`, `i64(x)`. Tile or scalar. |

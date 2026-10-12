@@ -23,6 +23,19 @@ impl Build {
         }
         match callee {
             "sum" if args.len() == 1 => self.emit_lane_sum(&args[0]),
+            "word" => match args {
+                [slice] => self.emit_word(slice, &Expr::Int(0)),
+                [slice, at] => self.emit_word(slice, at),
+                _ => bail!("word takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
+            },
+            "dp4a" => {
+                let [x, y, acc] = args else {
+                    bail!("dp4a takes two words and an accumulator");
+                };
+                let operands = [self.emit_index(x, "dp4a")?, self.emit_index(y, "dp4a")?, self.emit_index(acc, "dp4a")?];
+                ensure!(self.target.has_dp4a, "dp4a: this target has no dp4a");
+                Ok(Rv::Scalar(self.value(OpKind::Dp4a, &operands, Type::INDEX)))
+            }
             "f16bits" => {
                 let [bits] = args else {
                     bail!("f16bits takes one integer, the half's bits");

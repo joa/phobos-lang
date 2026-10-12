@@ -294,7 +294,9 @@ impl<'c> Codegen<'c> {
             | OpKind::Exchange
             | OpKind::LaneLoad { .. }
             | OpKind::Dot4 { .. }
-            | OpKind::F16Bits => self.emit_lane_op(block, ir, op),
+            | OpKind::F16Bits
+            | OpKind::Word
+            | OpKind::Dp4a => self.emit_lane_op(block, ir, op),
             OpKind::For(_) | OpKind::While | OpKind::If => self.emit_control_op(block, ir, op),
             OpKind::Yield | OpKind::Condition => {
                 bail!("a terminator reached the op walk")
