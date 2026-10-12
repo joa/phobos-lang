@@ -171,7 +171,7 @@ fn collective_errors_name_the_problem() {
         assert!(err.contains(want), "{src}\ngot: {err}");
     }
     for (fold, want) in [
-        ("sum(x)", "unknown function"),
+        ("sum(x)", "one thread's own slice"),
         ("sum<over ctx.warp>(x)", "takes `ctx.lane` or `ctx.thread`"),
         ("sum<width 8>(x)", "needs `over"),
         ("sum<over ctx.thread, width 8>(x)", "takes no `width`"),
@@ -192,4 +192,52 @@ fn collective_errors_name_the_problem() {
 fn the_settings_are_keywords_only_inside_the_brackets() {
     let mlir = emit_mlir(&folded("shfl<from 1>(x)").replace("let x =", "let from = 2\n let x = f32(from) * 0.0 +"));
     assert!(module_verifies(&mlir));
+}
+
+/// One thread's own `i8` slices of `a` and `w`, contracted by `body`.
+fn lane_dot(body: &str) -> String {
+    format!(
+        "@launch(256)
+        @aligned(K = 32)
+        kernel k(A: tensor<i8>[1, K], W: tensor<i8>[N, K], C: tensor<f32>[1, N]) {{
+            let col = ctx.block.x * ctx.warps + ctx.warp
+            var acc: f32 = 0.0
+            for k in range(ctx.lane * 16, K, ctx.lanes * 16) {{
+                acc += f32({body})
+            }}
+            let total = sum<over ctx.lane>(acc)
+            if ctx.lane == 0 {{
+                C[0, col] = total
+            }}
+        }}"
+    )
+}
+
+#[test]
+fn a_thread_reads_its_own_slice_in_one_vector_load() {
+    let mlir = emit_mlir(&lane_dot("sum(i32(A[0, k :+ 16]) * i32(W[col, k :+ 16]))"));
+    // 16 bytes each, aligned since `k` steps by 16 and K by 32. The loop and
+    // its split-off remainder each hold two such loads and four dp4a, and
+    // no load of a single byte.
+    let loads = mlir.matches("vector.load").count();
+    assert!(loads > 0 && loads.is_multiple_of(2), "\n{mlir}");
+    assert_contains(&mlir, &["{alignment = 16 : i64}"]);
+    assert_eq!(mlir.matches("nvvm.dot.accumulate.4way").count(), 2 * loads, "\n{mlir}");
+    assert!(!mlir.lines().any(|l| l.contains("memref.load") && l.contains("xi8, 1>")), "\n{mlir}");
+}
+
+#[test]
+fn a_slice_with_no_alignment_proof_loads_per_element() {
+    // `k + 1` is odd, so the run may straddle a 16-byte line.
+    let mlir = emit_mlir(&lane_dot("sum(f32(A[0, k + 1 :+ 4]) * f32(W[col, k + 1 :+ 4]))"));
+    assert!(!mlir.contains("vector.load"), "\n{mlir}");
+    assert!(!mlir.contains("nvvm.dot.accumulate"), "\n{mlir}");
+    let global_i8 = mlir.lines().filter(|l| l.contains("memref.load") && l.contains("xi8, 1>")).count();
+    assert!(global_i8 > 0 && global_i8.is_multiple_of(8), "\n{mlir}");
+}
+
+#[test]
+fn a_lane_sum_needs_a_slice() {
+    let err = emit_err(&lane_dot("sum(acc)"));
+    assert!(err.contains("one thread's own slice"), "got: {err}");
 }
