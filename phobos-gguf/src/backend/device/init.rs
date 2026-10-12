@@ -149,7 +149,7 @@ impl DeviceBackend {
             qdot_split_mods: RefCell::new(HashMap::new()),
             qdot_split_on: env_flag_on("PHOBOS_QDOT_SPLIT"),
             q8_qmma_narrow: RefCell::new(None),
-            q4k_lanes: RefCell::new(None),
+            lanes_kernels: RefCell::new(HashMap::new()),
             q8_split,
             q8_qdot,
             q8_qdot_add,
