@@ -12,7 +12,7 @@ kernel moba_attention(Q: tensor<f16>[Nq, D],
                       O: tensor<f16>[Nq, D],
                       scale: f32,
                       inv_chunk: f32) {
-  let pid = program_id(0)
+  let pid = ctx.block.x
   let row = pid * BR
   let q = Q[row :+ BR, :]                   // query block stays resident
 

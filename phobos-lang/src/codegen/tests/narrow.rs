@@ -9,7 +9,7 @@ fn narrow_types_convert_on_load_and_store() {
     let mlir = emit_mlir(
         "@launch(256)
         kernel narrow(W: tensor<i8>[M, N], S: tensor<f32>[M, N], C: tensor<bf16>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             let w = W[0 :+ 32, p * 32 :+ 32]
             let s = S[0 :+ 32, p * 32 :+ 32]
             var out: tile<f32>[32, 32] = f32(w) * s
@@ -29,7 +29,7 @@ fn f16_and_bf16_operands_meet_at_f32() {
     let mlir = emit_mlir(
         "@launch(256)
         kernel meet(A: tensor<f16>[M, N], B: tensor<bf16>[M, N], C: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             let a = A[0 :+ 32, p * 32 :+ 32]
             let b = B[0 :+ 32, p * 32 :+ 32]
             C[0 :+ 32, p * 32 :+ 32] = a + b
@@ -48,7 +48,7 @@ fn bf16_is_emulated_below_ampere_and_native_from_ampere() {
     // shift and round-to-nearest-even sequence. sm_80 has cvt.rn.bf16.f32.
     let src = "@launch(256)
         kernel round(A: tensor<f32>[M, N], C: tensor<bf16>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var a = A[0 :+ 32, p * 32 :+ 32]
             C[0 :+ 32, p * 32 :+ 32] = a * 2.0
         }";
@@ -121,8 +121,8 @@ fn f16_matmul_runs_on_tensor_cores() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -160,8 +160,8 @@ fn f16_matmul_accumulates_in_f16_on_tensor_cores() {
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -198,8 +198,8 @@ fn f16_matmul_without_tensorcore_uses_f16_vector_contract() {
         "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
         kernel matmul(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f16>[TILE_M, TILE_N] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -229,7 +229,7 @@ fn f16_flash_attention_runs_on_tensor_cores() {
         @aligned(Nq = BR, Nk = BC)
         kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             var acc: tile<f32>[BR, D] = 0.0
@@ -280,7 +280,7 @@ fn f16_flash_attention_without_tensorcore_widens_to_f32() {
         @aligned(Nq = BR, Nk = BC)
         kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             var acc: tile<f32>[BR, D] = 0.0

@@ -83,8 +83,8 @@ fn lower_matmul(a: &str, b: &str, out: &str, ad: &Dims, bd: &Dims) -> Result<Ker
         "@launch({BLOCK_THREADS})\n\
          @autotune(TILE_M in [{TILE_M}], TILE_N in [{TILE_N}], TILE_K in [{TILE_K}])\n\
          kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {{\n\
-         \x20 let pm = program_id(0)\n\
-         \x20 let pn = program_id(1)\n\
+         \x20 let pm = ctx.block.x\n\
+         \x20 let pn = ctx.block.y\n\
          \x20 var acc: tile<f32>[TILE_M, TILE_N] = 0.0\n\
          \x20 for kt in range(0, K, TILE_K) {{\n\
          \x20   var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n\
@@ -141,7 +141,7 @@ fn lower_elementwise_binary(
         "@launch({BLOCK_THREADS})\n\
          @autotune(BLOCK in [{ELEM_TILE}])\n\
          kernel {kernel_name}(A: tensor<f32>[N], B: tensor<f32>[N], Y: tensor<f32>[N]) {{\n\
-         \x20 let base = program_id(0) * BLOCK\n\
+         \x20 let base = ctx.block.x * BLOCK\n\
          \x20 Y[base :+ BLOCK] = A[base :+ BLOCK] {op} B[base :+ BLOCK]\n\
          }}\n"
     );
@@ -181,7 +181,7 @@ fn lower_relu(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result<KernelP
         "@launch({BLOCK_THREADS})\n\
          @autotune(BLOCK in [{ELEM_TILE}])\n\
          kernel relu(X: tensor<f32>[N], Y: tensor<f32>[N]) {{\n\
-         \x20 let base = program_id(0) * BLOCK\n\
+         \x20 let base = ctx.block.x * BLOCK\n\
          \x20 var zero: tile<f32>[BLOCK] = 0.0\n\
          \x20 Y[base :+ BLOCK] = tmax(X[base :+ BLOCK], zero)\n\
          }}\n"
@@ -255,8 +255,8 @@ fn lower_fused_linear(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result
         "@launch({BLOCK_THREADS})\n\
          @autotune(TILE_M in [{FUSED_TILE}], TILE_N in [{FUSED_TILE}], TILE_K in [{TILE_K}])\n\
          kernel fused_linear(A: tensor<f32>[M, K], B: tensor<f32>[K, N], Bias: tensor<f32>[1, N], C: tensor<f32>[M, N]) {{\n\
-         \x20 let pm = program_id(0)\n\
-         \x20 let pn = program_id(1)\n\
+         \x20 let pm = ctx.block.x\n\
+         \x20 let pn = ctx.block.y\n\
          \x20 var acc: tile<f32>[TILE_M, TILE_N] = 0.0\n\
          \x20 for kt in range(0, K, TILE_K) {{\n\
          \x20   var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n\
@@ -330,7 +330,7 @@ fn lower_flash_attention(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Res
         "@launch({BLOCK_THREADS})\n\
          @autotune(D in [{d}], BR in [{br}], BC in [{bc}])\n\
          kernel flash_attention(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D], V: tensor<f32>[Nk, D], O: tensor<f32>[Nq, D], scale: f32) {{\n\
-         \x20 let pid = program_id(0)\n\
+         \x20 let pid = ctx.block.x\n\
          \x20 let row = pid * BR\n\
          \x20 let q = Q[row :+ BR, :]\n\
          \x20 var acc: tile<f32>[BR, D] = 0.0\n\
@@ -405,7 +405,7 @@ fn lower_gelu(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result<KernelP
         "@launch({BLOCK_THREADS})\n\
          @autotune(BLOCK in [{ELEM_TILE}])\n\
          kernel gelu(X: tensor<f32>[N], Y: tensor<f32>[N]) {{\n\
-         \x20 let base = program_id(0) * BLOCK\n\
+         \x20 let base = ctx.block.x * BLOCK\n\
          \x20 var x: tile<f32>[BLOCK] = X[base :+ BLOCK]\n\
          \x20 var d: tile<f32>[BLOCK] = 1.0 + exp(-{c} * x)\n\
          \x20 Y[base :+ BLOCK] = x / d\n\
@@ -462,7 +462,7 @@ fn lower_add_bias(a: &str, b: &str, out: &str, ad: &Dims, w: i64) -> Result<Kern
     let source = format!(
         "@launch({BLOCK_THREADS})\n\
          kernel add_bias(A: tensor<f32>[M, {w}], B: tensor<f32>[1, {w}], Y: tensor<f32>[M, {w}]) {{\n\
-         \x20 let row = program_id(0) * {tr}\n\
+         \x20 let row = ctx.block.x * {tr}\n\
          \x20 var a: tile<f32>[{tr}, {w}] = A[row :+ {tr}, 0 :+ {w}]\n\
          \x20 var bias: tile<f32>[1, {w}] = B[0 :+ 1, 0 :+ {w}]\n\
          \x20 var y: tile<f32>[{tr}, {w}] = a + bias\n\
@@ -505,7 +505,7 @@ fn lower_softmax(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result<Kern
     let source = format!(
         "@launch({BLOCK_THREADS})\n\
          kernel softmax(X: tensor<f32>[M, {w}], Y: tensor<f32>[M, {w}]) {{\n\
-         \x20 let row = program_id(0) * {tr}\n\
+         \x20 let row = ctx.block.x * {tr}\n\
          \x20 var x: tile<f32>[{tr}, {w}] = X[row :+ {tr}, 0 :+ {w}]\n\
          \x20 var m: tile<f32>[{tr}, 1] = rowmax(x)\n\
          \x20 var e: tile<f32>[{tr}, {w}] = exp(x - m)\n\
@@ -551,7 +551,7 @@ fn lower_layernorm(node: &Node, get: &dyn Fn(&str) -> Result<Dims>) -> Result<Ke
     let source = format!(
         "@launch({BLOCK_THREADS})\n\
          kernel layernorm(X: tensor<f32>[M, {w}], G: tensor<f32>[1, {w}], B: tensor<f32>[1, {w}], Y: tensor<f32>[M, {w}]) {{\n\
-         \x20 let row = program_id(0) * {tr}\n\
+         \x20 let row = ctx.block.x * {tr}\n\
          \x20 var x: tile<f32>[{tr}, {w}] = X[row :+ {tr}, 0 :+ {w}]\n\
          \x20 var s: tile<f32>[{tr}, 1] = rowsum(x)\n\
          \x20 var mu: tile<f32>[{tr}, 1] = s / {wf}\n\

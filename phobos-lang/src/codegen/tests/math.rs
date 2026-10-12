@@ -35,7 +35,7 @@ fn fused_slice_binary_has_no_temp_buffer() {
         "@autotune(BLOCK in [1024])
         @aligned(N = BLOCK)
         kernel add(a: tensor<f32>[N], b: tensor<f32>[N], c: tensor<f32>[N]) {
-            let base = program_id(0) * BLOCK
+            let base = ctx.block.x * BLOCK
             c[base :+ BLOCK] = a[base :+ BLOCK] + b[base :+ BLOCK]
         }",
     );
@@ -69,7 +69,7 @@ fn flash_attention_lowers_softmax_builtins() {
         @aligned(Nq = BR, Nk = BC)
         kernel flash_attention(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D],
                                V: tensor<f32>[Nk, D], O: tensor<f32>[Nq, D], scale: f32) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             var acc: tile<f32>[BR, D] = 0.0
@@ -142,7 +142,7 @@ fn layernorm_lowers_sqrt_to_ptx_intrinsic() {
         "@launch(128)
         @autotune(BR in [32], W in [64])
         kernel layernorm(X: tensor<f32>[N, W], Y: tensor<f32>[N, W]) {
-            let row = program_id(0) * BR
+            let row = ctx.block.x * BR
             var x: tile<f32>[BR, W] = 0.0
             x += X[row :+ BR, :]
             var s: tile<f32>[BR, 1] = rowsum(x)
@@ -165,7 +165,7 @@ fn log_lowers_to_the_ptx_base_two_intrinsic() {
         "@launch(256)
         @autotune(TILE in [64])
         kernel softplus(X: tensor<f32>[M, N], Y: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var x = X[0 :+ 1, p * TILE :+ TILE]
             Y[0 :+ 1, p * TILE :+ TILE] = log(1.0 + exp(x))
         }",
@@ -183,7 +183,7 @@ fn unary_minus_negates_a_tile() {
         "@launch(256)
         @autotune(TILE in [64])
         kernel neg(X: tensor<f32>[M, N], Y: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var x = X[0 :+ 1, p * TILE :+ TILE]
             Y[0 :+ 1, p * TILE :+ TILE] = x / (1.0 + exp(-x))
         }",
@@ -200,7 +200,7 @@ fn rowreduce_cooperates_via_warp_shuffles() {
         "@launch(128)
         @autotune(BR in [32], BC in [64])
         kernel rmax(A: tensor<f32>[N, BC], R: tensor<f32>[N, 1]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             var t: tile<f32>[BR, BC] = 0.0
             t += A[row :+ BR, :]
@@ -219,7 +219,7 @@ fn rowreduce_serial_without_spare_threads() {
         "@launch(128)
         @autotune(BR in [128], BC in [64])
         kernel rsum(A: tensor<f32>[N, BC], R: tensor<f32>[N, 1]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             var t: tile<f32>[BR, BC] = 0.0
             t += A[row :+ BR, :]
@@ -241,7 +241,7 @@ fn elementwise_chain_fuses_into_one_sweep() {
         "@launch(256)
         @autotune(NB in [32])
         kernel narrow(A: tensor<f32>[RB, 32], Q: tensor<i8>[RB, 32]) {
-            let r = program_id(0)
+            let r = ctx.block.x
             var a = A[r * NB :+ NB, 0 :+ 32]
             Q[r * NB :+ NB, 0 :+ 32] = i8(i32(round(a)))
         }",
@@ -271,7 +271,7 @@ fn elementwise_chain_leaves_a_masked_operand_alone() {
     let mlir = emit_mlir(
         "@launch(256)
         kernel narrow(A: tensor<f32>[M, 24], Q: tensor<i8>[M, 24]) {
-            let r = program_id(0)
+            let r = ctx.block.x
             var a = A[r :+ 1, 0 :+ 24]
             Q[r :+ 1, 0 :+ 24] = i8(i32(round(a)))
         }",
@@ -287,7 +287,7 @@ fn elementwise_chain_rejects_rounding_an_integer() {
             "@launch(256)
             @autotune(NB in [32])
             kernel narrow(A: tensor<f32>[RB, 32], O: tensor<f32>[RB, 32]) {
-                let r = program_id(0)
+                let r = ctx.block.x
                 var a = A[r * NB :+ NB, 0 :+ 32]
                 O[r * NB :+ NB, 0 :+ 32] = round(i32(a))
             }",

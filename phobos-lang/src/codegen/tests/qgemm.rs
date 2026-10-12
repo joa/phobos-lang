@@ -18,8 +18,8 @@ pub(super) fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
         kernel {fmt}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           {params}C: tensor<f32>[M, N]) {{
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             C[pm * TM :+ TM, pn * TN :+ TN] = {fmt}_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                          QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :]{args})
         }}"
@@ -35,7 +35,7 @@ pub(super) fn qdot_i8_src(fmt: &str) -> String {
         kernel {fmt}_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                                     QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                                     C: tensor<f32>[M, N]) {{
-            let pn = program_id(0)
+            let pn = ctx.block.x
             C[0 :+ 1, pn * TN :+ TN] = {fmt}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                                      QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
         }}"

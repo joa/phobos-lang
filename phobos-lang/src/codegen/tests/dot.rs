@@ -15,7 +15,7 @@ fn flash_accumulator_rides_in_fragments() {
         @aligned(Nq = BR, Nk = BC)
         kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             var acc: tile<f32>[BR, D] = 0.0
@@ -75,7 +75,7 @@ fn flash_q_staging_hoists_to_the_loop_preheader() {
         @aligned(Nq = BR, Nk = BC)
         kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
                                V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             var acc: tile<f32>[BR, D] = 0.0
@@ -124,7 +124,7 @@ fn dot_staging_stays_in_loop_when_body_stores_global() {
         @launch(128)
         @aligned(Nq = BR, Nk = BC)
         kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], O: tensor<f32>[Nq, BC]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             for kt in range(0, Nk, BC) {
@@ -157,7 +157,7 @@ fn frag_acc_falls_back_on_unsanctioned_reads() {
         @aligned(Nq = BR, Nk = BC)
         kernel pv(P: tensor<f16>[Nq, Nk], V: tensor<f16>[Nk, D],
                   O: tensor<f32>[Nq, D], R: tensor<f32>[Nq, 1]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             var o: tile<f32>[BR, D] = 0.0
             let p = P[row :+ BR, 0 :+ BC]
@@ -183,7 +183,7 @@ fn tensorcore_dot_t_loads_transposed_b() {
         @launch(256)
         @aligned(Nq = BR, Nk = BC)
         kernel qk(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D], S: tensor<f32>[Nq, Nk]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             let k = K[0 :+ BC, :]
@@ -219,7 +219,7 @@ fn tensorcore_f16_dot_stages_vectorized() {
         @launch(256)
         @aligned(Nq = BR, Nk = BC)
         kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], S: tensor<f32>[Nq, Nk]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             let k = K[0 :+ BC, :]
@@ -254,7 +254,7 @@ fn tensorcore_dot_uses_wmma() {
         @launch(256)
         @aligned(Nq = BR, Nk = BC)
         kernel pv(P: tensor<f32>[Nq, Nk], V: tensor<f32>[Nk, D], O: tensor<f32>[Nq, D]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let p = P[row :+ BR, 0 :+ BC]
             let v = V[0 :+ BC, :]
@@ -291,7 +291,7 @@ fn tensorcore_dot_t_uses_mma_sync() {
         @launch(256)
         @aligned(Nq = BR, Nk = BC)
         kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], S: tensor<f32>[Nq, Nk]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             let q = Q[row :+ BR, :]
             let k = K[0 :+ BC, :]
@@ -329,7 +329,7 @@ fn tensorcore_dot_accumulate_rides_in_fragments() {
         @launch(256)
         @aligned(Nq = BR, Nk = BC)
         kernel pv(P: tensor<f16>[Nq, Nk], V: tensor<f16>[Nk, D], O: tensor<f32>[Nq, D]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let row = pid * BR
             var o: tile<f32>[BR, D] = 0.0
             let p = P[row :+ BR, 0 :+ BC]

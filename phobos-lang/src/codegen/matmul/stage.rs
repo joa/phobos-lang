@@ -76,7 +76,7 @@ impl<'c> Codegen<'c> {
     ///
     /// The condition is CTA-uniform, so a barrier inside would be safe. That
     /// holds because every loop bound comes from block-uniform values:
-    /// literals, `program_id`, `memref.dim`, the zero return of
+    /// literals, `ctx.block`, `memref.dim`, the zero return of
     /// `warp_partial` and `grid_barrier`, and arithmetic over those.
     /// `codegen::tests::pipeline::atomic_add_cannot_reach_a_loop_bound` checks
     /// this.

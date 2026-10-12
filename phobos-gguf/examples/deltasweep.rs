@@ -104,8 +104,8 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
                   BET: tensor<f32>[R, 1],
                   S:   tensor<f32>[SD, D],
                   O:   tensor<f32>[R, D]) {{
-  let h = program_id(0)
-  let jn = program_id(1)
+  let h = ctx.block.x
+  let jn = ctx.block.y
   var st: tile<f32>[D, TN] = S[h * D :+ D, jn * TN :+ TN]
 
   for t in range(0, R, H) {{

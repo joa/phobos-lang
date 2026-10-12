@@ -20,7 +20,7 @@ pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
 @aligned(RB = NB, MB = NB, D1 = 1)
 kernel rms_norm_q(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
               O: tensor<f32>[RB, {RMS_LANE}], Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   rms_norm_q_t(X[r * NB :+ NB, 0 :+ {RMS_LANE}], G[0 :+ NB, 0 :+ {RMS_LANE}], {eps:.12},
                O[r * NB :+ NB, 0 :+ {RMS_LANE}], Q[r * NB :+ NB, 0 :+ {RMS_LANE}], S[r * NB :+ NB, 0 :+ 1])
 }}
@@ -37,7 +37,7 @@ kernel rms_norm_q(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}]
 kernel rms_norm_gated(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
               O: tensor<f32>[RB, {RMS_LANE}], Z: tensor<f32>[RB, {RMS_LANE}],
               Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   rms_norm_gated_q_t(X[r * NB :+ NB, 0 :+ {RMS_LANE}], Z[r * NB :+ NB, 0 :+ {RMS_LANE}],
                      G[0 :+ NB, 0 :+ {RMS_LANE}], {eps:.12}, O[r * NB :+ NB, 0 :+ {RMS_LANE}],
                      Q[r * NB :+ NB, 0 :+ {RMS_LANE}], S[r * NB :+ NB, 0 :+ 1])
@@ -85,7 +85,7 @@ kernel rms_norm_gated(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LA
 @dynshared
 kernel {name}(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
               O: tensor<f32>[RB, {RMS_LANE}]{params}) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   var x = X[r * NB :+ NB, 0 :+ {RMS_LANE}]
   var sq: tile<f32>[NB, 1] = rowsum(x * x)
   var tot: tile<f32>[1, 1] = rowsum(transpose(sq))
@@ -143,7 +143,7 @@ pub(crate) fn swiglu_q_src(blocks: usize, with_out: bool, sigmoid: bool) -> Stri
 kernel {name}(G: tensor<f32>[RB, {RMS_LANE}], U: tensor<f32>[RB, {RMS_LANE}],
                 {out_param}Q: tensor<i8>[RB, {RMS_LANE}],
                 S: tensor<f32>[RB, D1]) {{
-  let p = program_id(0)
+  let p = ctx.block.x
   var g = G[p * NB :+ NB, 0 :+ {RMS_LANE}]
   var u = U[p * NB :+ NB, 0 :+ {RMS_LANE}]
   var y: tile<f32>[NB, {RMS_LANE}] = {gated}

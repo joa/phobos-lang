@@ -31,6 +31,7 @@ pub enum Tok {
     Colon,
     Semicolon,
     At,
+    Dot,
 
     // operators
     Plus,
@@ -92,6 +93,7 @@ impl std::fmt::Display for Tok {
             Tok::Colon => "':'",
             Tok::Semicolon => "end of statement",
             Tok::At => "'@'",
+            Tok::Dot => "'.'",
             Tok::Plus => "'+'",
             Tok::ColonPlus => "':+'",
             Tok::Minus => "'-'",

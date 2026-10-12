@@ -119,6 +119,10 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     Tok::At
                 }
+                '.' => {
+                    self.advance();
+                    Tok::Dot
+                }
                 '*' => {
                     self.advance();
                     self.op_eq(BinOp::Mul, Tok::Star)

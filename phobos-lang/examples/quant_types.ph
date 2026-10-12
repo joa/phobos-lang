@@ -4,8 +4,8 @@ kernel quant_types(W: tensor<i8>[M, N],
                    S: tensor<bf16>[M, N],
                    H: tensor<f16>[M, N],
                    C: tensor<f32>[M, N]) {
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
 
   let w = W[pm * 32 :+ 32, pn * 32 :+ 32]
   let s = S[pm * 32 :+ 32, pn * 32 :+ 32]

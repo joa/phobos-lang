@@ -7,7 +7,7 @@ const SRC: &str = "\
 @aligned(N = 8)
 kernel iq1s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                     GRID: tensor<i8>[1, 16384], SCRATCH: tensor<f32>[K, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   SCRATCH[:, pn * 8 :+ 8] = iq1s_qdecode_t(QB[pn * 8 :+ 8, :], D[pn * 8 :+ 8, :],
                                            GRID[0 :+ 1, :])
 }";
@@ -18,7 +18,7 @@ const XXS_SRC: &str = "\
 kernel iq2xxs_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                       GRID: tensor<i8>[1, 2048], SIGNS: tensor<i8>[1, 1024],
                       SCRATCH: tensor<f32>[K, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   SCRATCH[:, pn * 8 :+ 8] = iq2xxs_qdecode_t(QB[pn * 8 :+ 8, :], D[pn * 8 :+ 8, :],
                                              GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }";

@@ -38,6 +38,8 @@ pub struct Target {
     pub has_int8_mma: bool,
     /// The most shared memory a block may opt into.
     pub smem_per_block: i64,
+    /// Lanes in a warp.
+    pub lanes: i64,
 }
 
 /// What the build learned for the emitter and the caller to report: the

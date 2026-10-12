@@ -6,7 +6,7 @@ const I8_DOT_T: &str = "@launch(256)
         @autotune(TN in [32])
         @aligned(K = 32, N = TN)
         kernel i8dot(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<i32>[M, N]) {
-            let pn = program_id(0)
+            let pn = ctx.block.x
             let a = A[0 :+ 1, 0 :+ 32]
             let w = W[pn * TN :+ TN, 0 :+ 32]
             C[0 :+ 1, pn * TN :+ TN] = dot_t(a, w)
@@ -43,8 +43,8 @@ const I8_DOT_T_TILED: &str = "@launch(256)
         @autotune(TM in [16], TN in [32])
         @aligned(M = TM, K = 32, N = TN)
         kernel i8mma(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<i32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             let a = A[pm * TM :+ TM, 0 :+ 32]
             let w = W[pn * TN :+ TN, 0 :+ 32]
             C[pm * TM :+ TM, pn * TN :+ TN] = dot_t(a, w)
@@ -97,8 +97,8 @@ const Q8_QMMA: &str = "            @launch(256)
         kernel qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                     W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                     C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                      W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
         }";
@@ -196,7 +196,7 @@ fn gather_indexes_a_table_per_element() {
     let mlir = emit_mlir(
         "@launch(256)
         kernel gather_test(IDX: tensor<i32>[N, 4], TABLE: tensor<i32>[256], OUT: tensor<i32>[N, 4]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var idx = IDX[p * 32 :+ 32, 0 :+ 4]
             var val = gather(TABLE[:], idx)
             OUT[p * 32 :+ 32, 0 :+ 4] = val
@@ -218,7 +218,7 @@ fn gather_accepts_a_rank_two_table_with_a_leading_one() {
     let mlir = emit_mlir(
         "@launch(256)
         kernel gather_test(IDX: tensor<i32>[N, 4], TABLE: tensor<i32>[1, 256], OUT: tensor<i32>[N, 4]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var idx = IDX[p * 32 :+ 32, 0 :+ 4]
             var val = gather(TABLE[0 :+ 1, :], idx)
             OUT[p * 32 :+ 32, 0 :+ 4] = val
@@ -232,7 +232,7 @@ fn gather_rejects_a_non_integer_index() {
     // A float index has no meaning as a table offset.
     let src = "@launch(256)
         kernel gather_test(IDX: tensor<f32>[N, 4], TABLE: tensor<i32>[256], OUT: tensor<i32>[N, 4]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             var idx = IDX[p * 32 :+ 32, 0 :+ 4]
             var val = gather(TABLE[:], idx)
             OUT[p * 32 :+ 32, 0 :+ 4] = val
@@ -248,8 +248,8 @@ const IQ1S_QMMA: &str = "            @launch(128)
                          QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                          GRID: tensor<i8>[1, 32768],
                          C: tensor<f32>[M, N]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             C[pm * TM :+ TM, pn * TN :+ TN] = iq1s_qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                           QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                                           GRID[0 :+ 1, :])
@@ -313,7 +313,7 @@ const Q50_QDOT: &str = "@launch(256)
         kernel q50dot(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                       W: tensor<i8>[N, KW], WS: tensor<f32>[N, KB],
                       C: tensor<f32>[M, N]) {
-            let pn = program_id(0)
+            let pn = ctx.block.x
             C[0 :+ 1, pn * TN :+ TN] = q50_qdot_t(A[0 :+ 1, :], AS[0 :+ 1, :],
                                                   W[pn * TN :+ TN, :], WS[pn * TN :+ TN, :])
         }";

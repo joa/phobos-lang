@@ -251,6 +251,10 @@ impl Isa for Nvidia {
         }
     }
 
+    fn lanes(&self) -> i64 {
+        WARP
+    }
+
     // ---- where memory lives ----
 
     fn global_space<'c>(&self, cg: &Codegen<'c>) -> Attribute<'c> {
@@ -297,8 +301,8 @@ impl Isa for Nvidia {
         self.gpu_index(cg, block, "gpu.block_dim", "x")
     }
 
-    fn grid_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>> {
-        self.gpu_index(cg, block, "gpu.grid_dim", "x")
+    fn grid_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>, dim: &str) -> Result<Value<'c, 'c>> {
+        self.gpu_index(cg, block, "gpu.grid_dim", dim)
     }
 
     fn block_id<'c>(

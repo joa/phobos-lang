@@ -70,8 +70,8 @@ pub(crate) fn iq4xs_matvec_src(tn: usize) -> String {
 kernel iq4xs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                     D: tensor<f16>[N, NB], CODEBOOK: tensor<i32>[1, {IQ4XS_CODEBOOK_LEN}],
                     C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
-  let pm = program_id(1)
+  let pn = ctx.block.x
+  let pm = ctx.block.y
   let codebook = CODEBOOK[0 :+ 1, :]
   var acc: tile<f32>[1, TN] = 0.0
   for kb in range(0, NB, 1) {{
@@ -95,7 +95,7 @@ pub(crate) fn iq4xs_qdot_matvec_src(tn: usize) -> String {
 kernel iq4xs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                          D: tensor<f16>[N, NB], CODEBOOK: tensor<i32>[1, {IQ4XS_CODEBOOK_LEN}],
                          C: tensor<f32>[M, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq4xs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                           D[pn * TN :+ TN, :], CODEBOOK[0 :+ 1, :])
 }}
@@ -120,7 +120,7 @@ pub(crate) fn iq4xs_dequant_src(tn: usize) -> String {
 @autotune(TN in [{tn}])
 kernel iq4xs_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                      CODEBOOK: tensor<i32>[1, {IQ4XS_CODEBOOK_LEN}], SCRATCH: tensor<f32>[K, N]) {{
-  let pn = program_id(0)
+  let pn = ctx.block.x
   let codebook = CODEBOOK[0 :+ 1, :]
   for kb in range(0, NB, 1) {{
     var qb = QB[pn * TN :+ TN, kb * {BLOCK_BYTES} :+ {BLOCK_BYTES}]

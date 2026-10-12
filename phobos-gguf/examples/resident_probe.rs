@@ -48,7 +48,7 @@ const Q3K: Probe = Probe {
 @aligned(N = TN)
 kernel q3k_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                        D: tensor<f16>[N, NB], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q3k_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }
 ",
@@ -69,7 +69,7 @@ const IQ1S: Probe = Probe {
 kernel iq1s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                         D: tensor<f16>[N, NB], GRID: tensor<i8>[1, 16384],
                         C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                          D[pn * TN :+ TN, :], GRID[0 :+ 1, :])
 }
@@ -90,7 +90,7 @@ const IQ1S_I8: Probe = Probe {
 kernel iq1s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                            QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                            GRID: tensor<i8>[1, 8192], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq1s_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                             QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                             GRID[0 :+ 1, :])
@@ -112,7 +112,7 @@ const IQ2XXS: Probe = Probe {
 kernel iq2xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                           D: tensor<f16>[N, NB], GRID: tensor<i8>[1, 2048],
                           SIGNS: tensor<i8>[1, 1024], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq2xxs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                            D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }
@@ -134,7 +134,7 @@ kernel iq2xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                              QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                              GRID: tensor<i8>[1, 2048], SIGNS: tensor<i8>[1, 1024],
                              C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq2xxs_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                               QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                               GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
@@ -156,7 +156,7 @@ const IQ3XXS: Probe = Probe {
 kernel iq3xxs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
                           D: tensor<f16>[N, NB], GRID: tensor<i8>[1, 1024],
                           SIGNS: tensor<i8>[1, 1024], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq3xxs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
                                            D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
 }
@@ -178,7 +178,7 @@ kernel iq3xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                              QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                              GRID: tensor<i8>[1, 1024], SIGNS: tensor<i8>[1, 1024],
                              C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = iq3xxs_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                               QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
                                               GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
@@ -222,7 +222,7 @@ const Q4K_I8: Probe = kquant_probe(
 kernel q4k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q4k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }
@@ -239,7 +239,7 @@ const Q5K_I8: Probe = kquant_probe(
 kernel q5k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q5k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }
@@ -256,7 +256,7 @@ const Q6K_I8: Probe = kquant_probe(
 kernel q6k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q6k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }
@@ -284,8 +284,8 @@ fn kquant_gemm_src(name: &str) -> String {
 kernel {name}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                   C: tensor<f32>[M, N]) {{
-  let pm = program_id(0)
-  let pn = program_id(1)
+  let pm = ctx.block.x
+  let pn = ctx.block.y
   C[pm * TM :+ TM, pn * TN :+ TN] = {name}_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
                                                 QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }}

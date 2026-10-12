@@ -265,7 +265,7 @@ fn layernorm_src(w: usize) -> (String, usize) {
     let src = format!(
         "@launch(256)\n\
          kernel layernorm(X: tensor<f32>[M, {w}], G: tensor<f32>[1, {w}], B: tensor<f32>[1, {w}], Y: tensor<f32>[M, {w}], eps: f32) {{\n\
-         \x20 let row = program_id(0) * {tr}\n\
+         \x20 let row = ctx.block.x * {tr}\n\
          \x20 var x: tile<f32>[{tr}, {w}] = X[row :+ {tr}, 0 :+ {w}]\n\
          \x20 var s: tile<f32>[{tr}, 1] = rowsum(x)\n\
          \x20 var mu: tile<f32>[{tr}, 1] = s / {wf}\n\

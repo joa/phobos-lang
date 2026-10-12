@@ -316,7 +316,7 @@ impl<'a> Analyzer<'a> {
                 }
                 bail!(
                     "`{name} = ...` is not interpretable at cluster scale \
-                     (expected program_id arithmetic or a supertile slice)"
+                     (expected ctx.block arithmetic or a supertile slice)"
                 );
             }
 

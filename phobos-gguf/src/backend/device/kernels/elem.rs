@@ -20,7 +20,7 @@ pub(crate) const POINTWISE_SRC: &str = "\
 @launch(256)
 @autotune(TILE in [1024])
 kernel add_into(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   var a = A[0 :+ 1, p * TILE :+ TILE]
   var b = B[0 :+ 1, p * TILE :+ TILE]
   A[0 :+ 1, p * TILE :+ TILE] = a + b
@@ -29,8 +29,8 @@ kernel add_into(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
 @launch(256)
 @autotune(TILE in [1024])
 kernel add_rows(X: tensor<f32>[M, N], B: tensor<f32>[1, N]) {
-  let p = program_id(0)
-  let r = program_id(1)
+  let p = ctx.block.x
+  let r = ctx.block.y
   var x = X[r :+ 1, p * TILE :+ TILE]
   var b = B[0 :+ 1, p * TILE :+ TILE]
   X[r :+ 1, p * TILE :+ TILE] = x + b
@@ -39,7 +39,7 @@ kernel add_rows(X: tensor<f32>[M, N], B: tensor<f32>[1, N]) {
 @launch(256)
 @autotune(TILE in [1024])
 kernel swiglu(G: tensor<f32>[M, N], U: tensor<f32>[M, N], O: tensor<f32>[M, N]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   var g = G[0 :+ 1, p * TILE :+ TILE]
   var u = U[0 :+ 1, p * TILE :+ TILE]
   var s = g / (1.0 + exp(-g))
@@ -49,14 +49,14 @@ kernel swiglu(G: tensor<f32>[M, N], U: tensor<f32>[M, N], O: tensor<f32>[M, N]) 
 @launch(256)
 @autotune(TILE in [1024])
 kernel copy(S: tensor<f32>[M, N], D: tensor<f32>[M, N]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   D[0 :+ 1, p * TILE :+ TILE] = S[0 :+ 1, p * TILE :+ TILE]
 }
 
 @launch(256)
 @autotune(TILE in [1024])
 kernel zero(D: tensor<f32>[M, N]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   var z: tile<f32>[1, TILE] = 0.0
   D[0 :+ 1, p * TILE :+ TILE] = z
 }
@@ -64,7 +64,7 @@ kernel zero(D: tensor<f32>[M, N]) {
 @launch(256)
 @autotune(TILE in [1024])
 kernel gate_into(X: tensor<f32>[M, N], G: tensor<f32>[M, N]) {
-  let p = program_id(0)
+  let p = ctx.block.x
   var x = X[0 :+ 1, p * TILE :+ TILE]
   var g = G[0 :+ 1, p * TILE :+ TILE]
   X[0 :+ 1, p * TILE :+ TILE] = x / (1.0 + exp(-g))
@@ -130,7 +130,7 @@ pub(crate) fn copy_2d_src(kind: Strided, width: usize, aligned: bool) -> String 
 @autotune(W in [{width}])
 {claim}
 kernel {name}(S: tensor<{from}>[R, SW], D: tensor<{to}>[R, DW]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   D[r :+ 1, 0 :+ W] = {value}
 }}
 ",
@@ -152,7 +152,7 @@ pub(crate) fn store_2d_pair_src(width: usize, aligned: bool) -> String {
 @autotune(W in [{width}])
 {claim}
 kernel store_2d_pair(S0: tensor<f32>[R, SW0], S1: tensor<f32>[R, SW1], D0: tensor<f16>[R, DW0], D1: tensor<f16>[R, DW1]) {{
-  let r = program_id(0)
+  let r = ctx.block.x
   D0[r :+ 1, 0 :+ W] = f16(S0[r :+ 1, 0 :+ W])
   D1[r :+ 1, 0 :+ W] = f16(S1[r :+ 1, 0 :+ W])
 }}
@@ -171,8 +171,8 @@ pub(crate) fn swiglu_2d_src(tile: usize) -> String {
 @autotune(T in [{tile}])
 @aligned(GW = T, UW = T, OW = T)
 kernel swiglu_2d(G: tensor<f32>[R, GW], U: tensor<f32>[R, UW], O: tensor<f32>[R, OW]) {{
-  let r = program_id(0)
-  let c = program_id(1) * T
+  let r = ctx.block.x
+  let c = ctx.block.y * T
   var g = G[r :+ 1, c :+ T]
   O[r :+ 1, c :+ T] = (g / (1.0 + exp(-g))) * U[r :+ 1, c :+ T]
 }}

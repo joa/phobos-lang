@@ -30,7 +30,7 @@ fn partial_static_slice_is_masked() {
     // with an scf.if on offset + index < extent.
     let mlir = emit_mlir(
         "kernel copy(A: tensor<f32>[100], B: tensor<f32>[100]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             B[p * 32 :+ 32] = A[p * 32 :+ 32]
         }",
     );
@@ -46,13 +46,13 @@ fn partial_static_slice_is_masked() {
 }
 
 #[test]
-fn a_program_id_slice_of_a_dynamic_extent_is_masked() {
+fn a_block_index_slice_of_a_dynamic_extent_is_masked() {
     // The extent is a runtime value, so the last program id can address a
     // tile that runs off the end. Unmasked, it would write past the end of
     // a row into the next one.
     let mlir = emit_mlir(
         "kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
         }",
     );
@@ -74,7 +74,7 @@ fn an_aligned_declaration_drops_the_dynamic_bounds_mask() {
     let mlir = emit_mlir(
         "@aligned(N = 32)
         kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
         }",
     );
@@ -93,7 +93,7 @@ fn an_aligned_declaration_must_cover_the_tile() {
     let mlir = emit_mlir(
         "@aligned(N = 24)
         kernel copy(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             B[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
         }",
     );
@@ -105,7 +105,7 @@ fn an_unknown_aligned_constant_is_rejected() {
     let err = emit_err(
         "@aligned(N = TILE)
         kernel copy(A: tensor<f32>[M, N]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             A[0 :+ 1, p * 32 :+ 32] = A[0 :+ 1, p * 32 :+ 32]
         }",
     );
@@ -118,7 +118,7 @@ fn aligned_static_slice_is_not_masked() {
     // copy vectorizes.
     let mlir = emit_mlir(
         "kernel copy(A: tensor<f32>[128], B: tensor<f32>[128]) {
-            let p = program_id(0)
+            let p = ctx.block.x
             B[p * 32 :+ 32] = A[p * 32 :+ 32]
         }",
     );
@@ -137,8 +137,8 @@ fn partial_matmul_epilogue_is_masked() {
     let mlir = emit_mlir(
         "@autotune(TILE_M in [32], TILE_N in [32], TILE_K in [32])
         kernel matmul(A: tensor<f32>[96, 64], B: tensor<f32>[64, 100], C: tensor<f32>[96, 100]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var acc: tile<f32>[TILE_M, TILE_N] = 0.0
             for kt in range(0, 64, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -157,8 +157,8 @@ fn dot_directly_into_partial_slice_is_rejected() {
     // accumulator tile to carry the bounds guard, so it is a compile error.
     let err = emit_err(
         "kernel matmul(A: tensor<f32>[100, 64], B: tensor<f32>[64, 100], C: tensor<f32>[100, 100]) {
-            let pm = program_id(0)
-            let pn = program_id(1)
+            let pm = ctx.block.x
+            let pn = ctx.block.y
             var a = A[pm * 32 :+ 32, 0 :+ 64]
             var b = B[0 :+ 64, pn * 32 :+ 32]
             C[pm * 32 :+ 32, pn * 32 :+ 32] = dot(a, b)
@@ -228,7 +228,7 @@ fn split_main_loop_keeps_wmma_and_needs_no_mask() {
         @launch(128)
         @aligned(Nq = BR, Nk = BC)
         kernel qk(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], O: tensor<f32>[Nq, BC]) {
-            let pid = program_id(0)
+            let pid = ctx.block.x
             let q = Q[pid * BR :+ BR, :]
             var acc: tile<f32>[BR, BC] = 0.0
             for kt in range(0, Nk, BC) {

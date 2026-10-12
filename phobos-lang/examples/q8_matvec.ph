@@ -12,7 +12,7 @@ kernel q8_matvec(A: tensor<f32>[1, K],
                  W: tensor<i8>[K, N],
                  S: tensor<f32>[KB, N],
                  C: tensor<f32>[1, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, TILE_N] = 0.0
 
   for k in range(0, K, BLK) {

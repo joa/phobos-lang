@@ -9,8 +9,8 @@ fn scan_src(threads: usize, d: usize, c: usize) -> String {
 kernel scan(Q: tensor<f32>[N, W], K: tensor<f32>[N, W], V: tensor<f32>[N, W],
             DEC: tensor<f32>[N, GW], BET: tensor<f32>[N, GW],
             S: tensor<f32>[SD, SW], O: tensor<f32>[N, W]) {{
-  let h = program_id(0)
-  let jn = program_id(1)
+  let h = ctx.block.x
+  let jn = ctx.block.y
   let q = Q[:, h * D :+ D]
   let k = K[:, h * D :+ D]
   let v = V[:, h * D + jn * C :+ C]

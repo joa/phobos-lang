@@ -45,7 +45,7 @@ fn continue_skips_the_rest_of_an_iteration() {
 fn return_skips_the_rest_of_the_kernel_and_its_loops() {
     let mlir = emit_mlir(
         "kernel k(A: tensor<f32>[N], n: i32) {
-            let p = program_id(0)
+            let p = ctx.block.x
             if p >= n {
                 return
             }

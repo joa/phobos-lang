@@ -169,7 +169,7 @@ impl Emit {
             params: Vec::new(),
             slots: Vec::new(),
             scratch: Vec::new(),
-            decls: "  let p = program_id(0)\n".into(),
+            decls: "  let p = ctx.block.x\n".into(),
             body: String::new(),
             barriers: 0,
             views: HashMap::new(),

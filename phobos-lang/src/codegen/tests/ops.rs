@@ -7,7 +7,7 @@ use super::*;
 fn bitwise_and_shift_on_index_scalars() {
     let mlir = emit_mlir(
         "kernel k(A: tensor<i32>[N], B: tensor<i32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             let q = A[i]
             B[i] = ((q >> 4) & 15) | ((q << 2) ^ ~q)
         }",
@@ -56,7 +56,7 @@ fn bitwise_on_a_float_is_rejected() {
 fn logical_operators_join_conditions() {
     let mlir = emit_mlir(
         "kernel k(A: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             if i > 2 && i < 9 || i == 0 {
                 A[i] = 1.0
             }
@@ -67,7 +67,7 @@ fn logical_operators_join_conditions() {
 
 #[test]
 fn logical_operators_need_bools() {
-    let e = emit_err("kernel k(A: tensor<f32>[N]) { let i = program_id(0)\n let x = i && i }");
+    let e = emit_err("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x\n let x = i && i }");
     assert!(e.contains("`&&` does not take index"), "got: {e}");
 }
 
@@ -91,7 +91,7 @@ fn compound_assignment_on_scalars_and_tiles() {
 fn min_and_max_on_scalars_and_tiles() {
     let mlir = emit_mlir(
         "kernel k(A: tensor<f32>[64], B: tensor<f32>[64], C: tensor<i32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             C[i] = max(i, 3) - min(i, 7)
             var t: tile<f32>[64] = A[0 :+ 64]
             t = min(max(t, 0.0), 6.0)
@@ -188,7 +188,7 @@ fn float_dot_t_accumulates() {
 fn a_point_among_slices_keeps_its_axis() {
     let mlir = emit_mlir(
         "kernel k(A: tensor<f32>[M, 64], B: tensor<f32>[M, 64]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             var row: tile<f32>[1, 64] = A[i, 0 :+ 64]
             B[i, 0 :+ 64] = row
         }",
@@ -217,7 +217,7 @@ fn open_ended_slice_past_the_extent_is_rejected() {
 fn atomic_add_on_floats() {
     let mlir = emit_mlir(
         "kernel k(S: tensor<f32>[N], X: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             let old = atomic_add(S, 0, X[i])
         }",
     );
@@ -226,7 +226,7 @@ fn atomic_add_on_floats() {
 
 #[test]
 fn unknown_attribute_is_an_error() {
-    let e = emit_err("@fast_math\nkernel k(A: tensor<f32>[N]) { let i = program_id(0) }");
+    let e = emit_err("@fast_math\nkernel k(A: tensor<f32>[N]) { let i = ctx.block.x }");
     assert!(e.contains("unknown attribute @fast_math"), "got: {e}");
 }
 

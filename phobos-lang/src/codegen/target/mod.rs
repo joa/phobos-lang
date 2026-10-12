@@ -62,6 +62,8 @@ pub(super) trait Isa {
     fn smem_per_block(&self) -> i64;
     fn regs_per_sm(&self) -> i64;
     fn max_warps_per_sm(&self) -> i64;
+    /// Lanes in a warp, what `ctx.lanes` reads.
+    fn lanes(&self) -> i64;
 
     // ---- where memory lives ----
 
@@ -87,9 +89,9 @@ pub(super) trait Isa {
 
     fn thread_id<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
     fn block_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
-    fn grid_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
+    fn grid_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>, dim: &str) -> Result<Value<'c, 'c>>;
 
-    /// The CTA's index in the grid along `dim`, which is what `program_id`
+    /// The CTA's index in the grid along `dim`, which is what `ctx.block`
     /// resolves to.
     fn block_id<'c>(
         &self,
@@ -447,8 +449,8 @@ impl<'c> Codegen<'c> {
         self.isa.block_dim(self, block)
     }
 
-    pub(in crate::codegen) fn grid_dim(&self, block: &Block<'c>) -> Result<Value<'c, 'c>> {
-        self.isa.grid_dim(self, block)
+    pub(in crate::codegen) fn grid_dim(&self, block: &Block<'c>, dim: &str) -> Result<Value<'c, 'c>> {
+        self.isa.grid_dim(self, block, dim)
     }
 
     pub(in crate::codegen) fn block_id(
@@ -740,5 +742,6 @@ pub fn build_target(base: &phobos_base::context::Context) -> crate::ir::build::T
         has_dp4a: isa.has_dp4a(),
         has_int8_mma: isa.has_int8_mma(),
         smem_per_block: isa.smem_per_block(),
+        lanes: isa.lanes(),
     }
 }

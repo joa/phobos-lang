@@ -206,7 +206,7 @@ impl<'c> Codegen<'c> {
 
         // A full barrier is gridDim.x arrivals, so the grid must be
         // one-dimensional.
-        let blocks = self.grid_dim(block)?;
+        let blocks = self.grid_dim(block, "x")?;
         let blocks = self.push(
             block,
             arith::index_cast(blocks, IntegerType::new(self.ctx, 32).into(), self.loc),

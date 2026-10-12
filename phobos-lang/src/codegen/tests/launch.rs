@@ -6,7 +6,7 @@ use super::*;
 fn launch_emits_nvvm_bounds() {
     let mlir = emit_mlir(
         "@launch(128, 2)
-        kernel k(A: tensor<f32>[N]) { let i = program_id(0) }",
+        kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }",
     );
     assert_contains(
         &mlir,
@@ -18,7 +18,7 @@ fn launch_emits_nvvm_bounds() {
 fn launch_min_blocks_optional() {
     let mlir = emit_mlir(
         "@launch(64)
-        kernel k(A: tensor<f32>[N]) { let i = program_id(0) }",
+        kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }",
     );
     assert_contains(&mlir, &["nvvm.maxntid = array<i32: 64>"]);
     assert!(
@@ -33,7 +33,7 @@ fn launch_max_regs_emits_nvvm_maxnreg() {
     // Unlike .minnctapersm, which is only advisory, it forces occupancy.
     let mlir = emit_mlir(
         "@launch(256, 2, 128)
-        kernel k(A: tensor<f32>[N]) { let i = program_id(0) }",
+        kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }",
     );
     assert_contains(
         &mlir,
@@ -49,7 +49,7 @@ fn launch_max_regs_emits_nvvm_maxnreg() {
 fn launch_max_regs_must_be_in_range() {
     let err = emit_err(
         "@launch(256, 2, 8)
-        kernel k(A: tensor<f32>[N]) { let i = program_id(0) }",
+        kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }",
     );
     assert!(
         err.contains("between 16 and 255"),
@@ -59,7 +59,7 @@ fn launch_max_regs_must_be_in_range() {
 
 #[test]
 fn no_launch_emits_no_bounds() {
-    let mlir = emit_mlir("kernel k(A: tensor<f32>[N]) { let i = program_id(0) }");
+    let mlir = emit_mlir("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }");
     assert!(
         !mlir.contains("nvvm.maxntid")
             && !mlir.contains("nvvm.minctasm")
@@ -72,7 +72,7 @@ fn no_launch_emits_no_bounds() {
 fn launch_max_threads_must_be_warp_multiple() {
     let err = emit_err(
         "@launch(100)
-        kernel k(A: tensor<f32>[N]) { let i = program_id(0) }",
+        kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }",
     );
     assert!(err.contains("multiple of 32"), "unexpected error: {err}");
 }

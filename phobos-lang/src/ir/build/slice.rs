@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN, dim_in_bounds, extent, gcd};
-use crate::ast::{BinOp, Expr, Sub, UnOp};
+use crate::ast::{BinOp, Expr, Sub, UnOp, ctx};
 use crate::ir::{Layout, OpKind, Slice, Space, TileType, Type, ValueId};
 
 impl Build {
@@ -52,6 +52,7 @@ impl Build {
                 lhs,
                 rhs,
             } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
+            Expr::Call { .. } => self.const_fold(expr).map_or(1, |n| n.abs().min(CAP)),
             _ => 1,
         }
     }
@@ -62,6 +63,7 @@ impl Build {
         match expr {
             Expr::Int(n) => Some(*n),
             Expr::Var(name) if self.lookup(name).is_none() => self.shape_env.get(name).copied(),
+            Expr::Call { callee, args } if args.is_empty() => self.ctx_count(callee),
             Expr::Unary { op: UnOp::Neg, rhs } => self.const_fold(rhs)?.checked_neg(),
             Expr::Binary { op, lhs, rhs } => {
                 let (a, b) = (self.const_fold(lhs)?, self.const_fold(rhs)?);
@@ -74,6 +76,18 @@ impl Build {
                     _ => None,
                 }
             }
+            _ => None,
+        }
+    }
+
+    /// `ctx.threads`, `ctx.warps` or `ctx.lanes`, which are known when the
+    /// kernel builds.
+    pub(crate) fn ctx_count(&self, callee: &str) -> Option<i64> {
+        let (threads, lanes) = (self.cta_threads, self.target.lanes);
+        match callee {
+            ctx::THREADS => Some(threads),
+            ctx::LANES => Some(lanes),
+            ctx::WARPS => (threads % lanes == 0).then(|| threads / lanes),
             _ => None,
         }
     }

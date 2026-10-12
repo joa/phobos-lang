@@ -6,7 +6,7 @@ use super::*;
 fn a_scalar_load_zero_extends_to_an_index() {
     let mlir = emit_mlir(
         "kernel k(B: tensor<u8>[N], O: tensor<i32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             O[i] = B[i] + 1
         }",
     );

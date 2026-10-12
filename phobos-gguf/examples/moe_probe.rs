@@ -38,7 +38,7 @@ const Q4K_SRC: &str = "@launch(256, 4)
 kernel q4k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                           C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = q4k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
 }

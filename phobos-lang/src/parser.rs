@@ -66,8 +66,18 @@ impl Parser {
     fn ident(&mut self) -> Result<String, String> {
         let (line, col) = self.pos();
         match self.advance() {
+            Tok::Ident(s) if s == ctx::NAME => Err(format!("{line}:{col}: `ctx` is reserved")),
             Tok::Ident(s) => Ok(s),
             other => Err(format!("{line}:{col}: expected identifier, found {other}")),
+        }
+    }
+
+    /// A field name after `.`.
+    fn field(&mut self) -> Result<String, String> {
+        let (line, col) = self.pos();
+        match self.advance() {
+            Tok::Ident(s) => Ok(s),
+            other => Err(format!("{line}:{col}: expected a field name, found {other}")),
         }
     }
 
@@ -669,6 +679,16 @@ impl Parser {
             Tok::Float(f) => Ok(Expr::Float(f)),
             Tok::True => Ok(Expr::Bool(true)),
             Tok::False => Ok(Expr::Bool(false)),
+            Tok::Ident(s) if s == ctx::NAME => {
+                let mut path = Vec::new();
+                while self.consume(&Tok::Dot) {
+                    path.push(self.field()?);
+                }
+                if path.is_empty() {
+                    return Err(format!("{line}:{col}: `ctx` is used through a field, as `ctx.block.x`"));
+                }
+                ctx::field(&path).map_err(|e| format!("{line}:{col}: {e}"))
+            }
             Tok::Ident(s) => Ok(Expr::Var(s)),
             Tok::LParen => {
                 let expr = self.parse_expr()?;

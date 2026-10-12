@@ -21,8 +21,8 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
                   BET: tensor<f32>[R, 1],
                   S:   tensor<f32>[SD, D],
                   O:   tensor<f32>[R, D]) {
-  let h = program_id(0)
-  let jn = program_id(1)
+  let h = ctx.block.x
+  let jn = ctx.block.y
   var st: tile<f32>[D, TN] = S[h * D :+ D, jn * TN :+ TN]
 
   for t in range(0, R, H) {
@@ -117,8 +117,8 @@ kernel delta_wy(Q:   tensor<f32>[N, QW],
                 BET: tensor<f32>[N, GW],
                 E:   tensor<f32>[EC, ED],
                 W:   tensor<f32>[N, WW]) {{
-  let h = program_id(0)
-  let ci = program_id(1)
+  let h = ctx.block.x
+  let ci = ctx.block.y
   let qc = h * D
   let wc = h * 4 * C
   let c = ci * C
@@ -167,8 +167,8 @@ kernel delta_scan(Q:   tensor<f32>[N, QW],
                   W:   tensor<f32>[N, WW],
                   S:   tensor<f32>[SD, D],
                   O:   tensor<f32>[N, OW]) {{
-  let h = program_id(0)
-  let jn = program_id(1)
+  let h = ctx.block.x
+  let jn = ctx.block.y
   let qc = h * D
   let vc = h * D + jn * TN
   let wc = h * 4 * C
@@ -217,8 +217,8 @@ pub(crate) fn delta_scan_reg_src(head_dim: usize) -> String {
 kernel delta_scan_reg(Q: tensor<f32>[N, W], K: tensor<f32>[N, W], V: tensor<f32>[N, W],
                   DEC: tensor<f32>[N, GW], BET: tensor<f32>[N, GW],
                   S: tensor<f32>[SD, SW], O: tensor<f32>[N, W]) {{
-  let h = program_id(0)
-  let jn = program_id(1)
+  let h = ctx.block.x
+  let jn = ctx.block.y
   let q = Q[:, h * D :+ D]
   let k = K[:, h * D :+ D]
   let v = V[:, h * D + jn * C :+ C]
@@ -309,8 +309,8 @@ pub(crate) fn delta_conv_src(
 @autotune(H in [{heads}], D in [{head_dim}], KS in [{kernel}], ST in [{stride}], PS in [{plane_stride}], TB in [{batch}])
 @aligned(C = D, HD = D)
 kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R3, HD]) {{
-  let t = program_id(0)
-  let j = program_id(1)
+  let t = ctx.block.x
+  let j = ctx.block.y
   let r = R3 / 3
   var p: i32 = 2
   var hs: i32 = j - {qk}
@@ -370,7 +370,7 @@ pub(crate) fn delta_gates_src(heads: usize, tile_rows: usize) -> String {
 kernel delta_gates(A: tensor<f32>[R, AW], B: tensor<f32>[R, AW],
                    RATE: tensor<f32>[M, H], BIAS: tensor<f32>[M, H],
                    DEC: tensor<f32>[R, H], BET: tensor<f32>[R, H]) {{
-  let p = program_id(0)
+  let p = ctx.block.x
   var a = A[p * TR :+ TR, 0 :+ H]
   var bias = BIAS[0 :+ 1, 0 :+ H]
   var rate = RATE[0 :+ 1, 0 :+ H]

@@ -97,7 +97,7 @@ impl Verifier<'_> {
                     }
                 }
             }
-            OpKind::ProgramId(d) => {
+            OpKind::ProgramId(d) | OpKind::GridDim(d) => {
                 self.want_operands(op, 0);
                 if *d > 2 {
                     self.err(op, "dimension past z");

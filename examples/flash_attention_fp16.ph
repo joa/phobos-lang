@@ -12,7 +12,7 @@ kernel flash_attention(Q: tensor<f16>[Nq, D],
                        V: tensor<f16>[Nk, D],
                        O: tensor<f16>[Nq, D],
                        scale: f32) {
-  let pid = program_id(0)
+  let pid = ctx.block.x
   
   let row = pid * BR
   let q = Q[row :+ BR, :]

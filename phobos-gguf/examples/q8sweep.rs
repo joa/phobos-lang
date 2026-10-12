@@ -27,7 +27,7 @@ const SRC_WHOLE: &str = "\
 kernel q8_dp4a(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, TN] = 0.0
   for kt in range(0, K, 32) {
     let b = kt / 32
@@ -54,8 +54,8 @@ const SRC_SPLIT: &str = "\
 kernel q8_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                 W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
                 P: tensor<f32>[S, N]) {
-  let pn = program_id(0)
-  let ps = program_id(1)
+  let pn = ctx.block.x
+  let ps = ctx.block.y
   let from = ps * SLICE
   var acc: tile<f32>[1, TN] = 0.0
   for kt in range(from, from + SLICE, 32) {
@@ -72,7 +72,7 @@ kernel q8_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 @launch(256)
 @autotune(RT in [128])
 kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, RT] = 0.0
   for s in range(0, S, 1) {
     acc += P[s :+ 1, pn * RT :+ RT]
@@ -93,7 +93,7 @@ const SRC_QDOT: &str = "\
 kernel q8_qdot(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
                C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   C[0 :+ 1, pn * TN :+ TN] = qdot_t(A[0 :+ 1, :], AS[0 :+ 1, :],
                                     W[pn * TN :+ TN, :], WS[pn * TN :+ TN, :])
 }
@@ -108,8 +108,8 @@ const SRC_QDOT_SPLIT: &str = "\
 kernel q8_qdot_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                      W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
                      P: tensor<f32>[S, N]) {
-  let pn = program_id(0)
-  let ps = program_id(1)
+  let pn = ctx.block.x
+  let ps = ctx.block.y
   let from = ps * SLICE
   let fb = ps * SB
   P[ps :+ 1, pn * TN :+ TN] = qdot_t(A[0 :+ 1, from :+ SLICE], AS[0 :+ 1, fb :+ SB],
@@ -119,7 +119,7 @@ kernel q8_qdot_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 @launch(256)
 @autotune(RT in [128])
 kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
-  let pn = program_id(0)
+  let pn = ctx.block.x
   var acc: tile<f32>[1, RT] = 0.0
   for s in range(0, S, 1) {
     acc += P[s :+ 1, pn * RT :+ RT]

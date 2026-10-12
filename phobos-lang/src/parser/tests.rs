@@ -8,7 +8,7 @@ fn parse(src: &str) -> Vec<Kernel> {
 fn parses_tensor_kernel() {
     let p = parse(
         "kernel add(X: tensor<f32>[N], Y: tensor<f32>[N], Z: tensor<f32>[N]) {
-            let i = program_id(0)
+            let i = ctx.block.x
             Z[i] = X[i] + Y[i]
          }",
     );
@@ -68,7 +68,7 @@ fn parses_attributes() {
     let src = "@fast_math
         @launch_bounds(256, 2) @cache(read_only)
         @target(arch = sm_80)
-        kernel k(A: tensor<f32>[N]) { let i = program_id(0) }";
+        kernel k(A: tensor<f32>[N]) { let i = ctx.block.x }";
     let p = parse(src);
     assert_eq!(p[0].attrs.len(), 4);
     assert_eq!(p[0].attrs[0].name, "fast_math");
@@ -238,10 +238,10 @@ fn all_binary_operators_parse() {
 
 #[test]
 fn calls_with_and_without_args() {
-    let b = body("kernel k(A: tensor<f32>[N]) { let i = program_id(0); let s = dot_t(A, A); }");
+    let b = body("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x; let s = dot_t(A, A); }");
     assert!(matches!(
         &b[0],
-        Stmt::Let { value: Expr::Call { callee, args }, .. } if callee == "program_id" && args.len() == 1
+        Stmt::Let { value: Expr::Call { callee, args }, .. } if callee == ctx::BLOCK && args.len() == 1
     ));
     assert!(matches!(
         &b[1],

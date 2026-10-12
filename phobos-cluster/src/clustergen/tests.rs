@@ -8,8 +8,8 @@ const MATMUL: &str = r#"
 @cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
-let pm = program_id(0)
-let pn = program_id(1)
+let pm = ctx.block.x
+let pn = ctx.block.y
 var acc: tile<f32>[TILE_M, TILE_N] = 0.0
 for kt in range(0, K, TILE_K) {
     let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -23,7 +23,7 @@ const ADD: &str = r#"
 @cluster(BLOCK in [1048576, 16777216])
 @autotune(BLOCK in [16, 4096])
 kernel add(a: tensor<f32>[N], b: tensor<f32>[N], c: tensor<f32>[N]) {
-let base = program_id(0) * BLOCK
+let base = ctx.block.x * BLOCK
 c[base :+ BLOCK] = a[base :+ BLOCK] + b[base :+ BLOCK]
 }"#;
 
@@ -184,8 +184,8 @@ const GEMM: &str = r#"
 @cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32) {
-let pm = program_id(0)
-let pn = program_id(1)
+let pm = ctx.block.x
+let pn = ctx.block.y
 var acc: tile<f32>[TILE_M, TILE_N] = 0.0
 for kt in range(0, K, TILE_K) {
     let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
@@ -339,7 +339,7 @@ kernel attn(Q: tensor<f32>[Nq, D],
         V: tensor<f32>[Nk, D],
         O: tensor<f32>[Nq, D],
         scale: f32) {
-let pid = program_id(0)
+let pid = ctx.block.x
 let row = pid * BR
 let q = Q[row :+ BR, :]
 var acc: tile<f32>[BR, D] = 0.0
@@ -492,8 +492,8 @@ fn rejects_multiple_cluster_computes() {
 @cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel two(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], D: tensor<f32>[M, N]) {
-let pm = program_id(0)
-let pn = program_id(1)
+let pm = ctx.block.x
+let pn = ctx.block.y
 var acc: tile<f32>[TILE_M, TILE_N] = 0.0
 for kt in range(0, K, TILE_K) {
     let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
