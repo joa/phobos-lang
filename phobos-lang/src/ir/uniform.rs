@@ -241,6 +241,8 @@ fn per_thread(kind: &OpKind) -> bool {
             | OpKind::LaneLoad { .. }
             | OpKind::Dot4 { .. }
             | OpKind::F16Bits
+            | OpKind::Word
+            | OpKind::Dp4a
             | OpKind::Store
             | OpKind::Trap
             | OpKind::For(_)

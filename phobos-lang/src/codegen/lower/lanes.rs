@@ -52,6 +52,33 @@ impl<'c> Codegen<'c> {
                 self.set_ir(ir.result(op), Lowered::Scalar(v));
             }
             OpKind::Exchange => self.exchange(block, ir, op)?,
+            OpKind::Word => {
+                let bytes = self.word4(block, ir.operands(op))?;
+                let word = self.vec_bitcast(block, bytes, Type::vector(&[1], self.i32_t))?;
+                let word = self.vec_extract(block, word, &[0], self.i32_t)?;
+                let word = self.push(
+                    block,
+                    melior::ir::operation::OperationBuilder::new("arith.index_castui", self.loc)
+                        .add_operands(&[word])
+                        .add_results(&[self.index_t])
+                        .build()?,
+                )?;
+                self.set_ir(ir.result(op), Lowered::Scalar(word));
+            }
+            OpKind::Dp4a => {
+                let mut words = Vec::new();
+                for &v in &ir.operands(op)[..2] {
+                    let v = self.scalar_ir(v)?;
+                    let v = self.push(block, arith::index_cast(v, self.i32_t, self.loc))?;
+                    let v = self.vec_broadcast(block, v, Type::vector(&[1], self.i32_t))?;
+                    words.push(self.vec_bitcast(block, v, Type::vector(&[4], self.i8_t))?);
+                }
+                let acc = self.scalar_ir(ir.operand(op, 2))?;
+                let acc = self.push(block, arith::index_cast(acc, self.i32_t, self.loc))?;
+                let sum = self.dot4_accumulate(block, words[0], words[1], acc)?;
+                let sum = self.push(block, arith::index_cast(sum, self.index_t, self.loc))?;
+                self.set_ir(ir.result(op), Lowered::Scalar(sum));
+            }
             OpKind::F16Bits => {
                 let v = self.scalar_ir(ir.operand(op, 0))?;
                 let w = self.push(block, arith::index_cast(v, self.i32_t, self.loc))?;

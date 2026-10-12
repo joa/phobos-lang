@@ -86,6 +86,27 @@ impl Build {
         Ok(Rv::Scalar(total.expect("a slice has at least one element")))
     }
 
+    /// `word(T[.., k :+ n], t)`: bytes `4t ..= 4t + 3` of a thread's run of
+    /// `i8`, as the word they pack. The run is loaded whole, so the words of
+    /// one run share its load once LLVM folds the repeats.
+    pub(crate) fn emit_word(&mut self, slice: &Expr, at: &Expr) -> Result<Rv> {
+        ensure!(
+            self.span_elem(slice) == Some(Scalar::I8),
+            "word reads the bytes of an i8 tensor, as `word(B[r, k :+ 4])`"
+        );
+        let Some(t) = self.const_fold(at).filter(|&t| t >= 0) else {
+            bail!("word: which word must be a constant");
+        };
+        let bytes = self.lane_load(slice)?;
+        let from = 4 * t as usize;
+        ensure!(
+            bytes.len().is_multiple_of(4) && from + 4 <= bytes.len(),
+            "word {t} of a run of {} bytes: the run is whole words and holds it",
+            bytes.len()
+        );
+        Ok(Rv::Scalar(self.value(OpKind::Word, &bytes[from..from + 4], Type::INDEX)))
+    }
+
     /// An integer element widened to `index`, as a scalar load gives it.
     fn widen(&mut self, v: ValueId) -> ValueId {
         let elem = self.scalar_of(v);

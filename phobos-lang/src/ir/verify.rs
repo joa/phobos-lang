@@ -324,6 +324,17 @@ impl Verifier<'_> {
                     }
                 }
             }
+            OpKind::Word | OpKind::Dp4a => {
+                let (want, elem) = if matches!(kind, OpKind::Word) { (4, Scalar::I8) } else { (3, Scalar::Index) };
+                if self.want_operands(op, want) && self.want_results(op, 1) {
+                    if ir.operands(op).iter().any(|&v| self.scalar(v) != Some(elem)) {
+                        self.err(op, format!("operands must be {elem}"));
+                    }
+                    if self.scalar(ir.result(op)) != Some(Scalar::Index) {
+                        self.err(op, "result must be index");
+                    }
+                }
+            }
             OpKind::F16Bits => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
                     if self.scalar(ir.operand(op, 0)) != Some(Scalar::Index) {
