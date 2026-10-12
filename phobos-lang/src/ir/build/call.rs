@@ -36,6 +36,24 @@ impl Build {
                 ensure!(self.target.has_dp4a, "dp4a: this target has no dp4a");
                 Ok(Rv::Scalar(self.value(OpKind::Dp4a, &operands, Type::INDEX)))
             }
+            "popcount" => {
+                let [x] = args else {
+                    bail!("popcount takes one integer");
+                };
+                let x = self.emit_index(x, "popcount")?;
+                Ok(Rv::Scalar(self.value(OpKind::PopCount, &[x], Type::INDEX)))
+            }
+            "byteperm" => {
+                let [x, y, sel] = args else {
+                    bail!("byteperm takes two words and a selector");
+                };
+                let operands = [
+                    self.emit_index(x, "byteperm")?,
+                    self.emit_index(y, "byteperm")?,
+                    self.emit_index(sel, "byteperm")?,
+                ];
+                Ok(Rv::Scalar(self.value(OpKind::BytePerm, &operands, Type::INDEX)))
+            }
             "f16bits" => {
                 let [bits] = args else {
                     bail!("f16bits takes one integer, the half's bits");

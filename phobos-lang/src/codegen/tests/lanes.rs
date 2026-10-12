@@ -288,3 +288,11 @@ fn words_and_dp4a_build_packed_values() {
     let err = emit_err(&lane_dot("word(W[col, k :+ 16], ctx.lane)"));
     assert!(err.contains("must be a constant"), "got: {err}");
 }
+
+#[test]
+fn popcount_and_byteperm_take_words() {
+    let mlir = emit_mlir(&lane_dot(
+        "dp4a(byteperm(word(W[col, k :+ 16], 0), popcount(word(A[0, k :+ 16], 1)), 30001), word(A[0, k :+ 16], 0), 0)",
+    ));
+    assert_contains(&mlir, &["math.ctpop", "prmt"]);
+}

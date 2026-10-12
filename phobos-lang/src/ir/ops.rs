@@ -397,6 +397,11 @@ pub enum OpKind {
     /// `(x, y, acc) -> acc + sum x_i * y_i` over the four signed bytes of
     /// the low 32 bits of `x` and `y`: one `dp4a`.
     Dp4a,
+    /// `(x, y, sel) -> index`: byte `i` of the result is byte `sel`'s nibble
+    /// `i` of the eight bytes of `x` (0..3) and `y` (4..7), unsigned.
+    BytePerm,
+    /// `(x) -> index`: the set bits of the low 32 bits of `x`.
+    PopCount,
     /// `(value) -> one per warp`: each warp's copy of a warp-uniform value,
     /// in warp order, in every thread. Once per CTA, through shared memory.
     Exchange,
@@ -626,6 +631,8 @@ impl OpKind {
             OpKind::F16Bits => "f16bits".into(),
             OpKind::Word => "word".into(),
             OpKind::Dp4a => "dp4a".into(),
+            OpKind::BytePerm => "byteperm".into(),
+            OpKind::PopCount => "popcount".into(),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

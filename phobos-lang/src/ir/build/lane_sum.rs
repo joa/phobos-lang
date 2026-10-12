@@ -13,7 +13,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv, gcd};
 use crate::ast::{BinOp, Expr, Sub};
-use crate::ir::{Bytes, Extent, OpKind, Scalar, Type, ValueId};
+use crate::ir::{Bytes, Extent, OpKind, Scalar, Space, Type, ValueId};
 
 /// The most bytes one vector load moves.
 const MAX_VECTOR_BYTES: i64 = 16;
@@ -125,11 +125,30 @@ impl Build {
         let Expr::Var(name) = base.as_ref() else {
             return None;
         };
-        match self.lookup(name)? {
-            Binding::Tensor(t) => match self.ir.ty(t) {
-                Type::Tensor(t) => Some(t.elem),
-                _ => None,
-            },
+        let mem = match self.lookup(name)? {
+            Binding::Tensor(t) | Binding::Tile(t) => t,
+            _ => return None,
+        };
+        self.lane_source(mem).map(|(elem, _)| elem)
+    }
+
+    /// What a thread's own run may be read from: a tensor, or a whole
+    /// shared tile of a static shape. Its element type and, per dimension,
+    /// the extent's known divisor.
+    fn lane_source(&self, mem: ValueId) -> Option<(Scalar, Vec<i64>)> {
+        let divs = |shape: &[Extent], div: &dyn Fn(usize) -> i64| -> Vec<i64> {
+            shape
+                .iter()
+                .enumerate()
+                .map(|(d, e)| match e {
+                    Extent::Fixed(n) => *n,
+                    Extent::Dyn => div(d),
+                })
+                .collect()
+        };
+        match self.ir.ty(mem) {
+            Type::Tensor(t) => Some((t.elem, divs(&t.shape, &|d| t.div[d]))),
+            Type::Tile(t) if t.space == Space::Shared && t.is_static() => Some((t.elem, divs(&t.shape, &|_| 1))),
             _ => None,
         }
     }
@@ -139,14 +158,18 @@ impl Build {
         let Expr::Index { base, subs } = span else {
             unreachable!("collect_spans keeps slices");
         };
-        let (mem, _) = self.mem_base(base)?;
-        let Type::Tensor(t) = self.ir.ty(mem).clone() else {
-            bail!("`sum(e)` reads a thread's own slice of a tensor, not of a tile");
+        let (mem, binding) = self.mem_base(base)?;
+        let source = match binding {
+            Binding::Tensor(_) | Binding::Tile(_) => self.lane_source(mem),
+            _ => None,
+        };
+        let Some((elem, extents)) = source else {
+            bail!("a thread's own run reads a tensor or a whole shared tile, not a view");
         };
         ensure!(
-            subs.len() == t.shape.len(),
+            subs.len() == extents.len(),
             "expected {} subscripts, got {}",
-            t.shape.len(),
+            extents.len(),
             subs.len()
         );
         let mut indices = Vec::new();
@@ -168,19 +191,13 @@ impl Build {
             divs.push(self.expr_div(at));
         }
         let (dim, len) = span_at.expect("collect_spans keeps slices with a span");
-        let elem = t.elem;
         let bytes = elem.bytes().expect("a tensor element has a width");
         // The address in elements is a sum of index times stride, so its
         // divisor is the gcd of each index's divisor times its stride's.
-        let rank = t.shape.len();
+        let rank = extents.len();
         let mut addr_div = 0;
         for (d, div) in divs.iter().enumerate() {
-            let stride: i64 = (d + 1..rank)
-                .map(|j| match t.shape[j] {
-                    Extent::Fixed(n) => n,
-                    Extent::Dyn => t.div[j],
-                })
-                .product();
+            let stride: i64 = extents[d + 1..rank].iter().product();
             addr_div = gcd(addr_div, div.saturating_mul(stride));
         }
         let vector_bytes = len * bytes;

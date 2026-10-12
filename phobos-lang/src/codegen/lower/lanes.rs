@@ -65,6 +65,35 @@ impl<'c> Codegen<'c> {
                 )?;
                 self.set_ir(ir.result(op), Lowered::Scalar(word));
             }
+            OpKind::PopCount => {
+                let v = self.scalar_ir(ir.operand(op, 0))?;
+                let v = self.push(block, arith::index_cast(v, self.i32_t, self.loc))?;
+                let n = self.push(
+                    block,
+                    melior::ir::operation::OperationBuilder::new("math.ctpop", self.loc)
+                        .add_operands(&[v])
+                        .add_results(&[self.i32_t])
+                        .build()?,
+                )?;
+                let n = self.push(block, arith::index_cast(n, self.index_t, self.loc))?;
+                self.set_ir(ir.result(op), Lowered::Scalar(n));
+            }
+            OpKind::BytePerm => {
+                let mut ins = Vec::new();
+                for &v in ir.operands(op) {
+                    let v = self.scalar_ir(v)?;
+                    ins.push(self.push(block, arith::index_cast(v, self.i32_t, self.loc))?);
+                }
+                let out = self.byte_permute(block, ins[0], ins[1], ins[2])?;
+                let out = self.push(
+                    block,
+                    melior::ir::operation::OperationBuilder::new("arith.index_castui", self.loc)
+                        .add_operands(&[out])
+                        .add_results(&[self.index_t])
+                        .build()?,
+                )?;
+                self.set_ir(ir.result(op), Lowered::Scalar(out));
+            }
             OpKind::Dp4a => {
                 let mut words = Vec::new();
                 for &v in &ir.operands(op)[..2] {

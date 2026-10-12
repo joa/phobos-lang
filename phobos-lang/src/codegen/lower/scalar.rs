@@ -3,7 +3,6 @@ use melior::{
     dialect::{arith, memref},
     ir::{
         Block, BlockLike, ValueLike, attribute::FloatAttribute, operation::OperationBuilder,
-        r#type::MemRefType,
     },
 };
 
@@ -196,18 +195,10 @@ impl<'c> Codegen<'c> {
                 self.grid_barrier_raw(block, mv.mem, mv.shape.len())?;
                 self.const_index(block, 0)?
             }
+            // The private slot of a `var` scalar, made in the kernel's entry
+            // block before the body. Shared buffers are tile ops.
             OpKind::Alloc => {
-                // The private slot of a `var` scalar. Shared buffers are tile
-                // ops.
-                let ir::Type::Tile(t) = ir.ty(ir.result(op)) else {
-                    bail!("alloc of a non-tile");
-                };
-                let slot_t = MemRefType::new(self.ir_scalar_type(t.elem), &[], None, None);
-                let slot = self.push(
-                    block,
-                    memref::alloca(self.ctx, slot_t, &[], &[], None, self.loc),
-                )?;
-                self.set_ir(ir.result(op), Lowered::Slot(slot));
+                self.slot_ir(ir.result(op))?;
                 return Ok(());
             }
             other => bail!("{} is not a scalar op", other.name()),

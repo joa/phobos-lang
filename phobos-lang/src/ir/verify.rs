@@ -308,8 +308,8 @@ impl Verifier<'_> {
                 }
             }
             OpKind::LaneLoad { len, .. } => {
-                if !matches!(ir.operands(op).first().map(|&t| ir.ty(t)), Some(Type::Tensor(_))) {
-                    self.err(op, "operand must be a tensor");
+                if !matches!(ir.operands(op).first().map(|&t| ir.ty(t)), Some(Type::Tensor(_) | Type::Tile(_))) {
+                    self.err(op, "operand must be a tensor or a tile");
                 }
                 if ir.results(op).len() != *len as usize {
                     self.err(op, "one result per element");
@@ -324,8 +324,12 @@ impl Verifier<'_> {
                     }
                 }
             }
-            OpKind::Word | OpKind::Dp4a => {
-                let (want, elem) = if matches!(kind, OpKind::Word) { (4, Scalar::I8) } else { (3, Scalar::Index) };
+            OpKind::Word | OpKind::Dp4a | OpKind::BytePerm | OpKind::PopCount => {
+                let (want, elem) = match kind {
+                    OpKind::Word => (4, Scalar::I8),
+                    OpKind::PopCount => (1, Scalar::Index),
+                    _ => (3, Scalar::Index),
+                };
                 if self.want_operands(op, want) && self.want_results(op, 1) {
                     if ir.operands(op).iter().any(|&v| self.scalar(v) != Some(elem)) {
                         self.err(op, format!("operands must be {elem}"));

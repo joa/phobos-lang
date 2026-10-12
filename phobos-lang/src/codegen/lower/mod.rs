@@ -14,6 +14,7 @@ use epilogue::Fill;
 use std::collections::HashMap;
 
 use anyhow::{Result, anyhow, bail};
+use melior::dialect::memref;
 use melior::ir::{
     Attribute, Block, BlockLike, Operation, Region, RegionLike, Type,
     attribute::{StringAttribute, TypeAttribute},
@@ -78,6 +79,19 @@ impl<'c> Codegen<'c> {
                 other => bail!("kernel '{}': a {other} parameter", ir.kernel.name),
             };
             self.set_ir(a, lowered);
+        }
+        // Every `var` slot is an alloca in the entry block, which LLVM
+        // promotes to a register. One declared in a loop body is not, and
+        // stays in local memory.
+        for op in ir.all_ops() {
+            if matches!(ir.kind(op), OpKind::Alloc)
+                && let ir::Type::Tile(t) = ir.ty(ir.result(op))
+                && t.space == ir::Space::Private
+            {
+                let slot_t = MemRefType::new(self.ir_scalar_type(t.elem), &[], None, None);
+                let slot = self.push(&mlir_entry, memref::alloca(self.ctx, slot_t, &[], &[], None, self.loc))?;
+                self.set_ir(ir.result(op), Lowered::Slot(slot));
+            }
         }
 
         let body = self.emit_ops(&mlir_entry, ir, ir.ops(entry));
@@ -296,7 +310,9 @@ impl<'c> Codegen<'c> {
             | OpKind::Dot4 { .. }
             | OpKind::F16Bits
             | OpKind::Word
-            | OpKind::Dp4a => self.emit_lane_op(block, ir, op),
+            | OpKind::Dp4a
+            | OpKind::BytePerm
+            | OpKind::PopCount => self.emit_lane_op(block, ir, op),
             OpKind::For(_) | OpKind::While | OpKind::If => self.emit_control_op(block, ir, op),
             OpKind::Yield | OpKind::Condition => {
                 bail!("a terminator reached the op walk")
