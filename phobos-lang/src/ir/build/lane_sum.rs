@@ -18,6 +18,15 @@ use crate::ir::{Bytes, Extent, OpKind, Scalar, Space, Type, ValueId};
 /// The most bytes one vector load moves.
 const MAX_VECTOR_BYTES: i64 = 16;
 
+/// A thread's run of elements: see [`Build::lane_run`].
+struct LaneRun {
+    operands: Vec<ValueId>,
+    dim: usize,
+    len: i64,
+    align: i64,
+    elem: Scalar,
+}
+
 impl Build {
     pub(crate) fn emit_lane_sum(&mut self, e: &Expr) -> Result<Rv> {
         let mut spans = Vec::new();
@@ -153,10 +162,58 @@ impl Build {
         }
     }
 
-    /// One thread's elements of a tensor slice with one span, unwidened.
+    /// One thread's elements of a run, unwidened.
     fn lane_load(&mut self, span: &Expr) -> Result<Vec<ValueId>> {
+        let run = self.lane_run(span)?;
+        let op = self.op(
+            OpKind::LaneLoad { dim: run.dim, len: run.len, align: run.align },
+            &run.operands,
+            vec![Type::Scalar(run.elem); run.len as usize],
+            Vec::new(),
+        );
+        Ok(self.ir.results(op).to_vec())
+    }
+
+    /// `elem(X[.., k :+ n], i)`: element `i` of a thread's run, widened as a
+    /// scalar load is. The run is loaded whole, so the elements of one run
+    /// share its load once LLVM folds the repeats.
+    pub(crate) fn emit_elem(&mut self, slice: &Expr, at: &Expr) -> Result<Rv> {
+        let Some(i) = self.const_fold(at).filter(|&i| i >= 0) else {
+            bail!("elem: which element must be a constant");
+        };
+        let elems = self.lane_load(slice)?;
+        let Some(&v) = elems.get(i as usize) else {
+            bail!("element {i} of a run of {}", elems.len());
+        };
+        Ok(Rv::Scalar(self.widen(v)))
+    }
+
+    /// `store(Y[.., k :+ n], v0, .., v{n-1})`: a thread's run written, one
+    /// vector store when its address allows it.
+    pub(crate) fn emit_lane_store(&mut self, slice: &Expr, values: &[Expr]) -> Result<Rv> {
+        let run = self.lane_run(slice)?;
+        ensure!(
+            values.len() == run.len as usize,
+            "store: a run of {} takes {} values, got {}",
+            run.len,
+            run.len,
+            values.len()
+        );
+        let mut operands = run.operands;
+        for v in values {
+            let v = self.emit_scalar(v)?;
+            operands.push(self.coerce(v, run.elem)?);
+        }
+        self.stmt(OpKind::LaneStore { dim: run.dim, len: run.len, align: run.align }, &operands);
+        Ok(Rv::Scalar(self.const_index(0)))
+    }
+
+    /// Where a thread's run is: the buffer and its indices as operands, the
+    /// span's dimension and length, and the byte alignment proved for one
+    /// vector access of it (0 for none).
+    fn lane_run(&mut self, span: &Expr) -> Result<LaneRun> {
         let Expr::Index { base, subs } = span else {
-            unreachable!("collect_spans keeps slices");
+            bail!("a thread's run is a slice with one `:+` span, as `X[r, k :+ 4]`");
         };
         let (mem, binding) = self.mem_base(base)?;
         let source = match binding {
@@ -172,7 +229,7 @@ impl Build {
             extents.len(),
             subs.len()
         );
-        let mut indices = Vec::new();
+        let mut operands = vec![mem];
         let mut divs = Vec::new();
         let mut span_at = None;
         for (d, sub) in subs.iter().enumerate() {
@@ -180,17 +237,20 @@ impl Build {
                 Sub::Point(e) => e,
                 Sub::Span { start, len } => {
                     let Some(n) = self.const_fold(len).filter(|&n| n > 0) else {
-                        bail!("`sum(e)`: a thread's slice has a constant length");
+                        bail!("a thread's run has a constant length");
                     };
+                    ensure!(span_at.is_none(), "a thread's run is points and one `:+` span");
                     span_at = Some((d, n));
                     start
                 }
-                _ => bail!("`sum(e)`: a thread's slice is points and one `:+` span"),
+                _ => bail!("a thread's run is points and one `:+` span"),
             };
-            indices.push(self.emit_index(at, "subscript")?);
+            operands.push(self.emit_index(at, "subscript")?);
             divs.push(self.expr_div(at));
         }
-        let (dim, len) = span_at.expect("collect_spans keeps slices with a span");
+        let Some((dim, len)) = span_at else {
+            bail!("a thread's run has one `:+` span");
+        };
         let bytes = elem.bytes().expect("a tensor element has a width");
         // The address in elements is a sum of index times stride, so its
         // divisor is the gcd of each index's divisor times its stride's.
@@ -206,15 +266,7 @@ impl Build {
             && (vector_bytes as u64).is_power_of_two()
             && (addr_div == 0 || (addr_div * bytes) % vector_bytes == 0);
         let align = if aligned { vector_bytes } else { 0 };
-        let mut operands = vec![mem];
-        operands.extend(indices);
-        let op = self.op(
-            OpKind::LaneLoad { dim, len, align },
-            &operands,
-            vec![Type::Scalar(elem); len as usize],
-            Vec::new(),
-        );
-        Ok(self.ir.results(op).to_vec())
+        Ok(LaneRun { operands, dim, len, align, elem })
     }
 }
 

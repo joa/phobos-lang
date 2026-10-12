@@ -307,6 +307,7 @@ impl<'c> Codegen<'c> {
             | OpKind::Converged(_)
             | OpKind::Exchange
             | OpKind::LaneLoad { .. }
+            | OpKind::LaneStore { .. }
             | OpKind::Dot4 { .. }
             | OpKind::F16Bits
             | OpKind::Word

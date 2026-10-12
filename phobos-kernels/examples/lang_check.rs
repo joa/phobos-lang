@@ -121,6 +121,7 @@ fn main() -> Result<()> {
     dot_epilogue(&mut failures)?;
     lanes(&mut failures)?;
     lane_matvec(&mut failures)?;
+    lane_runs(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -286,6 +287,37 @@ fn lane_matvec(failures: &mut u32) -> Result<()> {
         })
         .fold(0.0, f64::max);
     report("lane_matvec", worst < 1e-4, format!("worst {worst:.2e}"), failures);
+    Ok(())
+}
+
+/// Each thread doubles its run of four into a shared tile, and past a
+/// `barrier()` reads its neighbour's: the barrier is what makes the
+/// neighbour's stores visible.
+fn lane_runs(failures: &mut u32) -> Result<()> {
+    let n = THREADS as usize * 4;
+    let x = noise(n, 13);
+    let src = format!(
+        "@launch({THREADS})
+        @aligned(N = {n})
+        kernel runs(X: tensor<f32>[1, N], Y: tensor<f32>[1, N]) {{
+            var t: tile<f32>[1, {n}] = 0.0
+            let e = 4 * ctx.thread
+            store(t[0, e :+ 4], 2.0 * elem(X[0, e :+ 4], 0), 2.0 * elem(X[0, e :+ 4], 1),
+                  2.0 * elem(X[0, e :+ 4], 2), 2.0 * elem(X[0, e :+ 4], 3))
+            barrier()
+            let o = (e + 4) % N
+            store(Y[0, e :+ 4], elem(t[0, o :+ 4], 0), elem(t[0, o :+ 4], 1), elem(t[0, o :+ 4], 2),
+                  elem(t[0, o :+ 4], 3))
+        }}"
+    );
+    let (xa, out) = (Arg::new(&x, 1, n)?, Arg::<f32>::zeroed(1, n)?);
+    let mut slots = Vec::new();
+    xa.push(&mut slots);
+    out.push(&mut slots);
+    run(&src, "runs", 1, &mut slots)?;
+    let got = out.read()?;
+    let bad = (0..n).filter(|&i| got[i] != 2.0 * x[(i + 4) % n]).count();
+    report("lane_runs", bad == 0, format!("{bad} of {n} wrong"), failures);
     Ok(())
 }
 

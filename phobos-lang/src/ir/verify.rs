@@ -28,6 +28,7 @@ pub fn verify(ir: &Ir) -> Result<()> {
 }
 
 mod contract;
+mod lanes;
 mod regs;
 mod scalar;
 
@@ -285,18 +286,17 @@ impl Verifier<'_> {
             | OpKind::Thread(_)
             | OpKind::Math(_)
             | OpKind::Select => self.scalar_kind(op, &kind),
-            OpKind::Shuffle { .. } | OpKind::Converged(_) | OpKind::Exchange => {
-                let want = if matches!(kind, OpKind::Shuffle { .. }) { 2 } else { 1 };
-                if self.want_operands(op, want) {
-                    let t = self.scalar(ir.operand(op, 0));
-                    if t.is_none() {
-                        self.err(op, "operand must be a scalar");
-                    }
-                    if ir.results(op).iter().any(|&r| self.scalar(r) != t) {
-                        self.err(op, "results must have the operand's type");
-                    }
-                }
-            }
+            OpKind::Shuffle { .. }
+            | OpKind::Converged(_)
+            | OpKind::Exchange
+            | OpKind::LaneLoad { .. }
+            | OpKind::LaneStore { .. }
+            | OpKind::Dot4 { .. }
+            | OpKind::Word
+            | OpKind::Dp4a
+            | OpKind::BytePerm
+            | OpKind::PopCount
+            | OpKind::F16Bits => self.lanes(op, &kind),
             OpKind::RegsReduce(_) => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
                     if !matches!(ir.ty(ir.operand(op, 0)), Type::Regs(_)) {
@@ -304,48 +304,6 @@ impl Verifier<'_> {
                     }
                     if !matches!(ir.ty(ir.result(op)), Type::Tile(_)) {
                         self.err(op, "result must be a tile");
-                    }
-                }
-            }
-            OpKind::LaneLoad { len, .. } => {
-                if !matches!(ir.operands(op).first().map(|&t| ir.ty(t)), Some(Type::Tensor(_) | Type::Tile(_))) {
-                    self.err(op, "operand must be a tensor or a tile");
-                }
-                if ir.results(op).len() != *len as usize {
-                    self.err(op, "one result per element");
-                }
-            }
-            OpKind::Dot4 { a, b } => {
-                let bytes = a.operands() + b.operands();
-                if self.want_operands(op, bytes + 1) && self.want_results(op, 1) {
-                    let i8s = ir.operands(op)[..bytes].iter().all(|&v| self.scalar(v) == Some(Scalar::I8));
-                    if !i8s || self.scalar(ir.operand(op, bytes)) != Some(Scalar::Index) {
-                        self.err(op, "takes i8 elements and an index accumulator");
-                    }
-                }
-            }
-            OpKind::Word | OpKind::Dp4a | OpKind::BytePerm | OpKind::PopCount => {
-                let (want, elem) = match kind {
-                    OpKind::Word => (4, Scalar::I8),
-                    OpKind::PopCount => (1, Scalar::Index),
-                    _ => (3, Scalar::Index),
-                };
-                if self.want_operands(op, want) && self.want_results(op, 1) {
-                    if ir.operands(op).iter().any(|&v| self.scalar(v) != Some(elem)) {
-                        self.err(op, format!("operands must be {elem}"));
-                    }
-                    if self.scalar(ir.result(op)) != Some(Scalar::Index) {
-                        self.err(op, "result must be index");
-                    }
-                }
-            }
-            OpKind::F16Bits => {
-                if self.want_operands(op, 1) && self.want_results(op, 1) {
-                    if self.scalar(ir.operand(op, 0)) != Some(Scalar::Index) {
-                        self.err(op, "operand must be index");
-                    }
-                    if self.scalar(ir.result(op)) != Some(Scalar::F16) {
-                        self.err(op, "result must be f16");
                     }
                 }
             }

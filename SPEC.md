@@ -165,6 +165,7 @@ All points load one element. A point among slices selects one index and keeps it
 | `&&` `\|\|` | On bools. Both sides are evaluated; an expression has no side effects. |
 | `min(a, b)`, `max(a, b)` | Operators spelled as calls: scalars, tiles, or one of each. Float `min` and `max` return the other operand when one is NaN. |
 | `f16bits(x)` | The `f16` whose bits are the low 16 of the integer `x`, as for a half packed in raw block bytes: `f16bits((B[0, 0] & 255) \| ((B[0, 1] & 255) << 8))`. |
+| `elem(X[.., k :+ n], i)`, `store(Y[.., k :+ n], v0, .., v{n-1})` | A thread's run read and written element by element: `elem` is element `i` (a constant) widened as a scalar load is, `store` writes `n` values, each one vector access when the address allows it. The elements of one run share its load. A `store` is a per-thread store (see Per-thread values). |
 | `word(T[.., k :+ n], t)`, `dp4a(x, y, acc)` | `word` is bytes `4t .. 4t + 3` of a thread's run of `n` `i8` (a whole number of words; `t` a constant, 0 if left out) as the little-endian word they pack, unsigned; the run is one load, and the words of one run share it. `dp4a` is `acc` plus the sum of the products of the four signed bytes of `x` and of `y`. Together they let a decoder build packed values with `&`, `|`, `<<` and `>>` before one `dp4a` a word. |
 | `byteperm(x, y, sel)` | A word whose byte `i` is byte `n` of the eight bytes of `x` (0..3) then `y` (4..7), `n` the nibble `i` of `sel`; unsigned. A decoder's lane shuffle of packed bytes, `prmt` on NVIDIA. |
 | `popcount(x)` | The number of set bits in the low 32 bits of the integer `x`. |
@@ -214,8 +215,7 @@ The control a statement runs under is as varying as the `if` and `while` conditi
 |---|---|
 | A tile op, a barrier, an atomic, `load_acquire`/`store_release` and the intrinsics run once per CTA: every thread must reach them, so they run only under uniform control. | `` `op` runs once per CTA, so every thread must reach it `` |
 | Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` `op` takes `x`, which differs between lanes `` |
-| A per-thread store (a varying value, index or control) goes to a tensor, never a shared tile, which other threads would read with no barrier between. | `a store into the shared tile ...` |
-| A tensor stored per thread is not read by a tile op in the same kernel. | `` `O` is stored per thread and read by ... `` |
+| A buffer (a tensor or a shared tile) stored per thread, with a varying value, index or control, is read by no CTA-wide op (a tile copy or expression, a contraction) until a `barrier()`: another thread's store may not have landed. A thread's own point and run accesses (`t[i, j]`, `elem`, `sum`, `store`) are not checked, since only their indices tell whether they meet another thread's store; one that does needs a `barrier()` all the same. | `` `op` reads `t` after a per-thread store to it with no `barrier()` between `` |
 
 Scalar loads, scalar arithmetic, scalar stores to tensors and `var`s, and `if`, `for` and `while` run in each thread on its own and are allowed under any control.
 
@@ -254,6 +254,7 @@ A lane collective is an xor butterfly of `log2(width)` shuffles and needs every 
 | `ctx.thread` | index | The thread's index in the CTA. Differs between lanes. | See Per-thread values. |
 | `ctx.warp` | index | `ctx.thread / ctx.lanes`. The same in a warp, differs between warps. | See Per-thread values. |
 | `ctx.lane` | index | The thread's index in its warp. Differs between lanes. | See Per-thread values. |
+| `barrier()` | index `0` | Every thread of the CTA waits for every other, and their earlier stores are visible to all of them. Under uniform control only. | |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
 | `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block, between two CTA barriers. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
 | `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block between two CTA barriers, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |

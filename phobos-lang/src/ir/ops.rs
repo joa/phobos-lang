@@ -3,6 +3,7 @@ use std::fmt;
 pub use crate::ast::{AssignOp, BinOp, UnOp};
 
 use super::elem::{ElemStep, Map, Tree, binop_name};
+use super::lanes::{Bytes, ThreadIndex};
 use super::types::{Extent, Scalar};
 
 /// Index arithmetic the language has no operator for, which the loop
@@ -389,6 +390,9 @@ pub enum OpKind {
     /// side, an `index` accumulator: one `dp4a`. Each side is four `i8`
     /// operands, taken as `a` and `b` say, or none for [`Bytes::Ones`].
     Dot4 { a: Bytes, b: Bytes },
+    /// `(tensor, indices.., values..)`: one thread's own run of `len`
+    /// elements along `dim` written, as [`OpKind::LaneLoad`] reads one.
+    LaneStore { dim: usize, len: i64, align: i64 },
     /// `(bits) -> f16`: the half whose bits are the low 16 of an index.
     F16Bits,
     /// `(b0, b1, b2, b3) -> index`: four `i8` as the little-endian word
@@ -550,54 +554,6 @@ pub enum OpKind {
     GemmStore { alpha: Coeff, beta: Coeff },
 }
 
-/// What one side of a [`OpKind::Dot4`] does to its four bytes before the
-/// product. Every value stays under 128, so a byte reads the same signed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Bytes {
-    /// As loaded.
-    Raw,
-    /// `(byte >> shift) & mask`, done on the packed word.
-    Masked { shift: u8, mask: u8 },
-    /// Four ones, so the product sums the other side.
-    Ones,
-}
-
-impl Bytes {
-    /// The `i8` operands this side takes.
-    pub fn operands(self) -> usize {
-        if self == Bytes::Ones { 0 } else { 4 }
-    }
-}
-
-/// Which index [`OpKind::Thread`] reads.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ThreadIndex {
-    /// `ctx.thread`, in the CTA.
-    Thread,
-    /// `ctx.warp`, the warp's index in the CTA.
-    Warp,
-    /// `ctx.lane`, in the warp.
-    Lane,
-}
-
-impl ThreadIndex {
-    pub fn name(self) -> &'static str {
-        match self {
-            ThreadIndex::Thread => "thread_id",
-            ThreadIndex::Warp => "warp_id",
-            ThreadIndex::Lane => "lane_id",
-        }
-    }
-
-    /// How far the index differs between threads.
-    pub fn kind(self) -> super::uniform::Kind {
-        match self {
-            ThreadIndex::Warp => super::uniform::Kind::Warp,
-            ThreadIndex::Thread | ThreadIndex::Lane => super::uniform::Kind::Varying,
-        }
-    }
-}
-
 /// Which result of an op is a view of which operand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Alias {
@@ -628,6 +584,7 @@ impl OpKind {
             OpKind::RegsReduce(how) => format!("regs_reduce {how:?}"),
             OpKind::LaneLoad { dim, len, align } => format!("lane_load d{dim} x{len} a{align}"),
             OpKind::Dot4 { a, b } => format!("dot4 {a:?} {b:?}"),
+            OpKind::LaneStore { dim, len, align } => format!("lane_store d{dim} x{len} a{align}"),
             OpKind::F16Bits => "f16bits".into(),
             OpKind::Word => "word".into(),
             OpKind::Dp4a => "dp4a".into(),

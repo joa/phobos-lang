@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
-use crate::ast::lanes::{self, Fold};
 use crate::ast::{Expr, Scalar as AstScalar, ctx};
 use crate::ir::{
     ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, ThreadIndex, Type,
@@ -12,55 +11,10 @@ impl Build {
     /// Each arm evaluates its operands in source order and produces one op
     /// whose result type is the buffer the emitter allocates.
     pub(crate) fn emit_call(&mut self, callee: &str, args: &[Expr]) -> Result<Rv> {
-        if let Some(c) = lanes::as_collective(callee, args) {
-            if c.fold == Fold::Reduce && matches!(c.combine, Some(Expr::Var(_))) {
-                bail!("`reduce<..>(x, f)` combines with a `fn f(a, b) = ..`, and none is defined");
-            }
-            return self.emit_collective(c);
-        }
-        if let Some((mode, value, operand, width)) = lanes::as_shuffle(callee, args) {
-            return self.emit_shuffle(mode, value, operand, width);
+        if let Some(rv) = self.emit_lane_builtin(callee, args)? {
+            return Ok(rv);
         }
         match callee {
-            "sum" if args.len() == 1 => self.emit_lane_sum(&args[0]),
-            "word" => match args {
-                [slice] => self.emit_word(slice, &Expr::Int(0)),
-                [slice, at] => self.emit_word(slice, at),
-                _ => bail!("word takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
-            },
-            "dp4a" => {
-                let [x, y, acc] = args else {
-                    bail!("dp4a takes two words and an accumulator");
-                };
-                let operands = [self.emit_index(x, "dp4a")?, self.emit_index(y, "dp4a")?, self.emit_index(acc, "dp4a")?];
-                ensure!(self.target.has_dp4a, "dp4a: this target has no dp4a");
-                Ok(Rv::Scalar(self.value(OpKind::Dp4a, &operands, Type::INDEX)))
-            }
-            "popcount" => {
-                let [x] = args else {
-                    bail!("popcount takes one integer");
-                };
-                let x = self.emit_index(x, "popcount")?;
-                Ok(Rv::Scalar(self.value(OpKind::PopCount, &[x], Type::INDEX)))
-            }
-            "byteperm" => {
-                let [x, y, sel] = args else {
-                    bail!("byteperm takes two words and a selector");
-                };
-                let operands = [
-                    self.emit_index(x, "byteperm")?,
-                    self.emit_index(y, "byteperm")?,
-                    self.emit_index(sel, "byteperm")?,
-                ];
-                Ok(Rv::Scalar(self.value(OpKind::BytePerm, &operands, Type::INDEX)))
-            }
-            "f16bits" => {
-                let [bits] = args else {
-                    bail!("f16bits takes one integer, the half's bits");
-                };
-                let bits = self.emit_index(bits, "f16bits")?;
-                Ok(Rv::Scalar(self.value(OpKind::F16Bits, &[bits], Type::Scalar(Scalar::F16))))
-            }
             ctx::BLOCK | ctx::BLOCKS => {
                 let [Expr::Int(d @ 0..=2)] = args else {
                     unreachable!("the parser builds ctx fields with an axis 0..=2");

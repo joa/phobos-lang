@@ -1,6 +1,7 @@
 pub mod build;
 pub mod builder;
 pub mod elem;
+pub mod lanes;
 pub mod ops;
 pub mod print;
 pub mod types;
@@ -14,6 +15,7 @@ use std::collections::BTreeMap;
 
 pub use builder::{At, Builder};
 pub use elem::*;
+pub use lanes::{Bytes, ThreadIndex};
 pub use ops::*;
 pub use types::*;
 
