@@ -101,6 +101,38 @@ fn same_thread_sweeps_need_no_barrier_between_them() {
     assert_eq!(mlir.matches("gpu.barrier").count(), 0, "{mlir}");
 }
 
+/// One barrier can order several earlier accesses at once, so a sweep that
+/// clashes with more than one keeps only that barrier, whatever order it
+/// names its operands in.
+#[test]
+fn one_kept_barrier_orders_every_clash() {
+    let src = |add: &str| {
+        format!(
+            "@launch(256)
+            @autotune(TN in [256], U in [8])
+            @aligned(N = TN)
+            kernel k(W: tensor<f32>[1, U], C: tensor<f32>[U, N], G: tensor<f32>[1, 1], S: tensor<f32>[1, N], X: tensor<f32>[1, N]) {{
+                let pn = program_id(0)
+                var acc: tile<f32>[1, TN] = X[0 :+ 1, pn * TN :+ TN]
+                for j in range(0, U, 1) {{
+                    let w = W[0, j]
+                    acc {add} C[j :+ 1, pn * TN :+ TN] * w
+                }}
+                var g: tile<f32>[1, 1] = G[0 :+ 1, 0 :+ 1]
+                g = 1.0 / (1.0 + exp(0.0 - g))
+                acc {add} S[0 :+ 1, pn * TN :+ TN] * g
+                X[0 :+ 1, pn * TN :+ TN] = acc
+            }}"
+        )
+    };
+    let spelled = emit_mlir(&src("= acc +"));
+    let compound = emit_mlir(&src("+="));
+    // One barrier publishes `g` and the loop's sweep to the last update,
+    // which reads at another width; one publishes that to the store.
+    assert_eq!(spelled.matches("gpu.barrier").count(), 2, "{spelled}");
+    assert_eq!(compound.matches("gpu.barrier").count(), 2, "{compound}");
+}
+
 /// A reduction reads every column of a row from one thread, so the sweep
 /// that wrote the row has to publish it first.
 #[test]

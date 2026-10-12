@@ -26,8 +26,9 @@ fn a_register_accumulator_rides_the_loop() {
     let shared = emit_mlir(&squares(""));
     // 16 x 64 over 256 threads: four values per thread through the loop.
     assert!(regs.contains("iter_args"), "\n{regs}");
+    assert!(shared_bytes(&regs) < shared_bytes(&shared), "\n{regs}");
     assert!(
-        regs.matches("gpu.barrier").count() < shared.matches("gpu.barrier").count(),
+        regs.matches("gpu.barrier").count() <= shared.matches("gpu.barrier").count(),
         "\n{regs}"
     );
 }

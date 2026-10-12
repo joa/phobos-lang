@@ -188,13 +188,12 @@ impl Membar<'_> {
                 .collect();
             for p in clashes {
                 let above = self.enclosing(p.block);
-                let chosen = self
-                    .candidates
-                    .iter()
-                    .filter(|c| c.seq >= p.seq && c.seq < seq && !self.kept.contains(&c.op))
-                    .filter(|c| above.contains(&c.block))
-                    .max_by_key(|c| c.seq)
-                    .copied();
+                let between = |c: &&Candidate| c.seq >= p.seq && c.seq < seq && above.contains(&c.block);
+                // A barrier kept for an earlier clash may already order this one.
+                if self.candidates.iter().filter(between).any(|c| self.kept.contains(&c.op)) {
+                    continue;
+                }
+                let chosen = self.candidates.iter().filter(between).max_by_key(|c| c.seq).copied();
                 if let Some(c) = chosen {
                     self.keep(c, pending);
                 }
