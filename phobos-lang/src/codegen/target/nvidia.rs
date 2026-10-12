@@ -130,7 +130,7 @@ impl Nvidia {
     ///
     /// The math dialect cannot be used here. convert-math-to-llvm runs first
     /// and turns math.exp and friends into llvm.intr.*, which NVPTX cannot
-    /// select.
+    /// select. The instruction is pure, so loads around it still merge.
     fn ptx_f32<'c>(
         &self,
         cg: &Codegen<'c>,
@@ -151,7 +151,6 @@ impl Nvidia {
                         cg.id("constraints"),
                         StringAttribute::new(cg.ctx, "=f,f").into(),
                     ),
-                    (cg.id("has_side_effects"), Attribute::unit(cg.ctx)),
                 ])
                 .add_results(&[cg.f32_t])
                 .build()?,
