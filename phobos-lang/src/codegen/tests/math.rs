@@ -73,7 +73,7 @@ fn flash_attention_lowers_softmax_builtins() {
             let row = pid * BR
             let q = Q[row :+ BR, :]
             var acc: tile<f32>[BR, D] = 0.0
-            var m: tile<f32>[BR, 1] = -300000000.0
+            var m: tile<f32>[BR, 1] = -1.0e30
             var l: tile<f32>[BR, 1] = 0.0
             for kt in range(0, Nk, BC) {
                 let k = K[kt :+ BC, :]
@@ -114,7 +114,7 @@ fn argsel_folds_a_value_index_pair_alongside_tmax() {
     let mlir = emit_mlir(
         "@autotune(W in [8])
         kernel argmax_step(X: tensor<f32>[M, W], IDX: tensor<f32>[M, W]) {
-            var v: tile<f32>[1, W] = -300000000.0
+            var v: tile<f32>[1, W] = -1.0e30
             var i: tile<f32>[1, W] = -1.0
             let x = X[0 :+ 1, :]
             let idx = IDX[0 :+ 1, :]

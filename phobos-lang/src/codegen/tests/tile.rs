@@ -344,7 +344,7 @@ fn warp_partial_probe(d: i64, wct: i64, qw: i64) -> String {
         kernel wp(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW], V: tensor<f16>[NK, KW],
                   O: tensor<f32>[QW, D]) {{
             var q = Q[0 :+ QG, 0 :+ D]
-            var wm: tile<f32>[QG, WCT] = -300000000.0
+            var wm: tile<f32>[QG, WCT] = -1.0e30
             var wl: tile<f32>[QG, WCT] = 0.0
             var wacc: tile<f32>[QW, D] = 0.0
             warp_partial(q, K, V, 0, NK, 0, wm, wl, wacc, 0.088388347648)

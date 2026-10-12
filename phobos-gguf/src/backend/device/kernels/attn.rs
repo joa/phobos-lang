@@ -142,7 +142,7 @@ kernel attn_tc_softmax(K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW], L: tensor<
   let h = program_id(1)
   let c = h * NK
   let diag = NK - R + p * TM
-  var m: tile<f32>[TM, 1] = -300000000.0
+  var m: tile<f32>[TM, 1] = -1.0e30
   for j in range(0, diag, TN) {{
     m = tmax(m, rowmax(S[p * TM :+ TM, c + j :+ TN]))
   }}
@@ -231,7 +231,7 @@ kernel attn_scores(Q: tensor<f32>[R, DQ], KT: tensor<f32>[DK, NK], S: tensor<f32
 kernel attn_softmax(S: tensor<f32>[R, NK], L: tensor<f32>[R, 1]) {{
   let p = program_id(0)
   let diag = NK - R + p * TM
-  var m: tile<f32>[TM, 1] = -300000000.0
+  var m: tile<f32>[TM, 1] = -1.0e30
   for j in range(0, diag, TN) {{
     m = tmax(m, rowmax(S[p * TM :+ TM, j :+ TN]))
   }}
@@ -304,7 +304,7 @@ kernel attention_block(Q: tensor<f32>[R, QW], K: tensor<f16>[NK, KW],
   var q = Q[qt * BR :+ BR, qcol :+ D]
 
   var acc: tile<f32>[BR, D] = 0.0
-  var m: tile<f32>[BR, 1] = -300000000.0
+  var m: tile<f32>[BR, 1] = -1.0e30
   var l: tile<f32>[BR, 1] = 0.0
 
   let base = NK - R + qt * BR
@@ -511,7 +511,7 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
     hi = NK
   }}
 
-  var wm: tile<f32>[QG, WCT] = -300000000.0
+  var wm: tile<f32>[QG, WCT] = -1.0e30
   var wl: tile<f32>[QG, WCT] = 0.0
   var wacc: tile<f32>[QW, D] = 0.0
   warp_partial(q, K, V, lo, hi, col, wm, wl, wacc, {scale:.9})
@@ -624,7 +624,7 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
         hi = NK
       }}
 
-      var wm: tile<f32>[QG, WCT] = -300000000.0
+      var wm: tile<f32>[QG, WCT] = -1.0e30
       var wl: tile<f32>[QG, WCT] = 0.0
       var wacc: tile<f32>[QW, D] = 0.0
       warp_partial(q, K, V, lo, hi, col, wm, wl, wacc, {scale:.9})
@@ -679,7 +679,7 @@ kernel attention(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
   var q = Q[row :+ 1, 0 :+ D]
 
   var acc: tile<f32>[1, D] = 0.0
-  var m: tile<f32>[1, 1] = -300000000.0
+  var m: tile<f32>[1, 1] = -1.0e30
   var l: tile<f32>[1, 1] = 0.0
 
   let visible = NK - R / NH + t + 1

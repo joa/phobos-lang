@@ -404,7 +404,7 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
   // query tile stays resident; running softmax state for BR rows.
   let q = Q[row :+ BR, :]
   var acc: tile<f32>[BR, D] = 0.0              // unnormalized output sum p*v
-  var m: tile<f32>[BR, 1] = -999999999.0       // running row max
+  var m: tile<f32>[BR, 1] = -1.0e30            // running row max
   var l: tile<f32>[BR, 1] = 0.0                // running denominator sum p
 
   for kt in range(0, Nk, BC) {
@@ -414,6 +414,7 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
     // scaled scores for this tile
     var s: tile<f32>[BR, BC] = dot_t(q, k)     // [BR, BC] = q @ k.T
     s = s * scale
+    s = where(iota(1) < Nk - kt, s, -1.0e30)   // a ragged last tile reads zeros past Nk
 
     // online softmax update
     var mnew: tile<f32>[BR, 1] = rowmax(s)
