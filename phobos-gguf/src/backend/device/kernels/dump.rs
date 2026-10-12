@@ -54,6 +54,16 @@ fn dump_raw_kernel_sources() {
     sources.push(("iq4xs_qdot_lanes".to_string(), iq4xs_qdot_lanes_src()));
     sources.push(("moe_combine".to_string(), moe_combine_src()));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    // Decode attention at the Qwen3.5 head layouts, a 128-wide one and a
+    // 64-wide one: (heads, group, head dim).
+    for (heads, group, head_dim) in [(8, 4, 256), (16, 4, 256), (32, 4, 128), (16, 1, 64)] {
+        let qgroup = attention_qgroup(group);
+        let name = format!("{heads}x{group}x{head_dim}");
+        let split = attention_split_src(heads, group, head_dim, qgroup, ATTN_SPLITS, ATTN_WARP_SPLITS);
+        sources.push((format!("attention_split_{name}"), split));
+        let persist = attention_persist_src(heads, group, head_dim, qgroup, ATTN_SPLITS, ATTN_WARP_SPLITS, 46);
+        sources.push((format!("attention_persist_{name}"), persist));
+    }
     sources.push(("delta_wy".to_string(), delta_wy_src(32, 128, DELTA_CHUNK)));
     // The 4B's attention heads: 256 wide, 64 of them rotated.
     for cache in [false, true] {

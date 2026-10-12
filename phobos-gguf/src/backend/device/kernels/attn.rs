@@ -1,6 +1,8 @@
 // Attention kernel sources: prompt, blocked, split decode and persistent
 // decode variants, plus rope.
 
+use std::fmt::Write as _;
+
 use phobos_kernels::launch::WARP_THREADS;
 
 use crate::backend::Attn;
@@ -484,6 +486,7 @@ pub(crate) fn attention_split_src(
 ) -> String {
     let scale = (head_dim as f32).sqrt().recip();
     let qw = qgroup * wct;
+    let partial = warp_partial_lanes(qgroup, head_dim, scale, "  ");
     let combine = attention_combine(qgroup, "");
     // `warp_partial` requires a launch width of exactly `wct` warps.
     let cta = wct * WARP_THREADS;
@@ -514,8 +517,7 @@ kernel attention_split(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
   var wm: tile<f32>[QG, WCT] = -1.0e30
   var wl: tile<f32>[QG, WCT] = 0.0
   var wacc: tile<f32>[QW, D] = 0.0
-  warp_partial(q, K, V, lo, hi, col, wm, wl, wacc, {scale:.9})
-{combine}}}
+{partial}{combine}}}
 
 @launch(256)
 @autotune(NH in [{n_head}], D in [{head_dim}], S in [{splits}])
@@ -531,6 +533,75 @@ kernel attention_merge(P: tensor<f32>[S, PW], ML: tensor<f32>[NH, MW],
 }}
 "
     )
+}
+
+/// One block's split of the keys `[lo, hi)`, split again across its `WCT`
+/// warps, as statements written with lanes. Warp `w` takes the `w`-th of
+/// `WCT` equal pieces and keeps each query row's online softmax `(m, l,
+/// acc)` in registers, with the head dimension spread over its lanes, `D /
+/// 32` each. A key's score is a lane sum, so the warps never wait on each
+/// other, and the next key's K and V rows load a turn early, still f16.
+///
+/// Each warp then writes its row of `wm`, `wl` and `wacc`, which a
+/// `barrier()` publishes to [`attention_combine`]. `q` is the block's query
+/// rows; `lo`, `hi` and `col` are in scope, and `indent` prefixes every line.
+fn warp_partial_lanes(qgroup: usize, head_dim: usize, scale: f32, indent: &str) -> String {
+    let dpl = head_dim / WARP_THREADS;
+    let each = |f: &dyn Fn(usize) -> String| (0..dpl).map(f).collect::<Vec<_>>();
+    let rows = |f: &dyn Fn(usize) -> String| (0..qgroup).map(f).collect::<String>();
+    // A key's rows of K and V at `at`, declared `{decl}{prefix}k0{ty}`.
+    let kv = |decl: &str, prefix: &str, ty: &str, at: &str| {
+        let mut out = String::new();
+        for j in 0..dpl {
+            let _ = writeln!(out, "{decl}{prefix}k{j}{ty} = elem(K[{at}, kc :+ {dpl}], {j})");
+            let _ = writeln!(out, "{decl}{prefix}v{j}{ty} = elem(V[{at}, kc :+ {dpl}], {j})");
+        }
+        out
+    };
+    let src = format!(
+        "let share = (hi - lo + WCT - 1) / WCT
+let wlo = min(lo + ctx.warp * share, hi)
+let whi = min(wlo + share, hi)
+let kc = col + ctx.lane * {dpl}
+let first = min(wlo, whi - 1)
+{carried}{state}for kt in range(wlo, whi, 1) {{
+  let nt = min(kt + 1, whi - 1)
+{next}{rows}{advance}}}
+{stores}barrier()
+",
+        carried = kv("var ", "", ": f16", "first"),
+        state = rows(&|i| {
+            let acc = each(&|j| format!("var a{i}_{j}: f32 = 0.0\n")).concat();
+            format!("var m{i}: f32 = -3.0e38\nvar l{i}: f32 = 0.0\n{acc}")
+        }),
+        next = kv("  let ", "n", "", "nt"),
+        rows = rows(&|i| {
+            let dot = each(&|j| format!("elem(q[{i}, ctx.lane * {dpl} :+ {dpl}], {j}) * k{j}")).join(" + ");
+            let acc = each(&|j| format!("  a{i}_{j} = a{i}_{j} * c{i} + p{i} * v{j}\n")).concat();
+            format!(
+                "  let s{i} = sum<over ctx.lane>({dot}) * {scale:.9}
+  let mn{i} = max(m{i}, s{i})
+  let c{i} = exp(m{i} - mn{i})
+  let p{i} = exp(s{i} - mn{i})
+  l{i} = l{i} * c{i} + p{i}
+{acc}  m{i} = mn{i}
+"
+            )
+        }),
+        advance = each(&|j| format!("  k{j} = nk{j}\n  v{j} = nv{j}\n")).concat(),
+        stores = rows(&|i| {
+            let acc = each(&|j| format!("a{i}_{j}")).join(", ");
+            format!(
+                "if ctx.lane == 0 {{
+  wm[{i}, ctx.warp] = m{i}
+  wl[{i}, ctx.warp] = l{i}
+}}
+store(wacc[{i} * WCT + ctx.warp, ctx.lane * {dpl} :+ {dpl}], {acc})
+"
+            )
+        }),
+    );
+    src.lines().map(|l| format!("{indent}{l}\n")).collect()
 }
 
 /// The online-softmax merge of the `WCT` warp partials in `wm`, `wl` and
@@ -589,6 +660,7 @@ pub(crate) fn attention_persist_src(
     let it1 = (units1 as u32).div_ceil(blocks);
     let it2 = (n_head as u32).div_ceil(blocks);
     let qw = qgroup * wct;
+    let partial = warp_partial_lanes(qgroup, head_dim, scale, "      ");
     let combine = attention_combine(qgroup, "    ");
     format!(
         "@launch(256)
@@ -627,8 +699,7 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
       var wm: tile<f32>[QG, WCT] = -1.0e30
       var wl: tile<f32>[QG, WCT] = 0.0
       var wacc: tile<f32>[QW, D] = 0.0
-      warp_partial(q, K, V, lo, hi, col, wm, wl, wacc, {scale:.9})
-{combine}    }}
+{partial}{combine}    }}
   }}
 
   grid_barrier(BAR)
