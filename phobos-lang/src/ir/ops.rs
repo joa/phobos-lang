@@ -385,9 +385,12 @@ pub enum OpKind {
     /// elements along `dim` from `indices`. `align` is the byte alignment
     /// proved for one vector load of the run, or 0 for a load per element.
     LaneLoad { dim: usize, len: i64, align: i64 },
-    /// `(a0..a3, b0..b3, acc) -> acc + sum a_i * b_i`, `i8` elements and an
-    /// `index` accumulator: one `dp4a`.
-    Dot4,
+    /// `(a.., b.., acc) -> acc + sum a_i * b_i` over four signed bytes a
+    /// side, an `index` accumulator: one `dp4a`. Each side is four `i8`
+    /// operands, taken as `a` and `b` say, or none for [`Bytes::Ones`].
+    Dot4 { a: Bytes, b: Bytes },
+    /// `(bits) -> f16`: the half whose bits are the low 16 of an index.
+    F16Bits,
     /// `(value) -> one per warp`: each warp's copy of a warp-uniform value,
     /// in warp order, in every thread. Once per CTA, through shared memory.
     Exchange,
@@ -536,6 +539,25 @@ pub enum OpKind {
     GemmStore { alpha: Coeff, beta: Coeff },
 }
 
+/// What one side of a [`OpKind::Dot4`] does to its four bytes before the
+/// product. Every value stays under 128, so a byte reads the same signed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Bytes {
+    /// As loaded.
+    Raw,
+    /// `(byte >> shift) & mask`, done on the packed word.
+    Masked { shift: u8, mask: u8 },
+    /// Four ones, so the product sums the other side.
+    Ones,
+}
+
+impl Bytes {
+    /// The `i8` operands this side takes.
+    pub fn operands(self) -> usize {
+        if self == Bytes::Ones { 0 } else { 4 }
+    }
+}
+
 /// Which index [`OpKind::Thread`] reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadIndex {
@@ -594,7 +616,8 @@ impl OpKind {
             OpKind::Exchange => "exchange".into(),
             OpKind::RegsReduce(how) => format!("regs_reduce {how:?}"),
             OpKind::LaneLoad { dim, len, align } => format!("lane_load d{dim} x{len} a{align}"),
-            OpKind::Dot4 => "dot4".into(),
+            OpKind::Dot4 { a, b } => format!("dot4 {a:?} {b:?}"),
+            OpKind::F16Bits => "f16bits".into(),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

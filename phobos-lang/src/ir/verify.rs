@@ -315,11 +315,22 @@ impl Verifier<'_> {
                     self.err(op, "one result per element");
                 }
             }
-            OpKind::Dot4 => {
-                if self.want_operands(op, 9) && self.want_results(op, 1) {
-                    let i8s = ir.operands(op)[..8].iter().all(|&v| self.scalar(v) == Some(Scalar::I8));
-                    if !i8s || self.scalar(ir.operand(op, 8)) != Some(Scalar::Index) {
-                        self.err(op, "takes eight i8 elements and an index accumulator");
+            OpKind::Dot4 { a, b } => {
+                let bytes = a.operands() + b.operands();
+                if self.want_operands(op, bytes + 1) && self.want_results(op, 1) {
+                    let i8s = ir.operands(op)[..bytes].iter().all(|&v| self.scalar(v) == Some(Scalar::I8));
+                    if !i8s || self.scalar(ir.operand(op, bytes)) != Some(Scalar::Index) {
+                        self.err(op, "takes i8 elements and an index accumulator");
+                    }
+                }
+            }
+            OpKind::F16Bits => {
+                if self.want_operands(op, 1) && self.want_results(op, 1) {
+                    if self.scalar(ir.operand(op, 0)) != Some(Scalar::Index) {
+                        self.err(op, "operand must be index");
+                    }
+                    if self.scalar(ir.result(op)) != Some(Scalar::F16) {
+                        self.err(op, "result must be f16");
                     }
                 }
             }

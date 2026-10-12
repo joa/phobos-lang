@@ -293,7 +293,8 @@ impl<'c> Codegen<'c> {
             | OpKind::Converged(_)
             | OpKind::Exchange
             | OpKind::LaneLoad { .. }
-            | OpKind::Dot4 => self.emit_lane_op(block, ir, op),
+            | OpKind::Dot4 { .. }
+            | OpKind::F16Bits => self.emit_lane_op(block, ir, op),
             OpKind::For(_) | OpKind::While | OpKind::If => self.emit_control_op(block, ir, op),
             OpKind::Yield | OpKind::Condition => {
                 bail!("a terminator reached the op walk")

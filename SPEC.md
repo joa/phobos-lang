@@ -165,6 +165,7 @@ All points load one element. A point among slices selects one index and keeps it
 | `&` `\|` `^` `<<` `>>` `~` | On integers: index scalars and integer tiles. `>>` is arithmetic, since integers are signed; mask after it to read an unsigned field, as in `(q >> 4) & 15`. A float operand is an error. |
 | `&&` `\|\|` | On bools. Both sides are evaluated; an expression has no side effects. |
 | `min(a, b)`, `max(a, b)` | Operators spelled as calls: scalars, tiles, or one of each. Float `min` and `max` return the other operand when one is NaN. |
+| `f16bits(x)` | The `f16` whose bits are the low 16 of the integer `x`, as for a half packed in raw block bytes: `f16bits((B[0, 0] & 255) \| ((B[0, 1] & 255) << 8))`. |
 | Comparisons on tiles | Only inside `where`; there is no bool tile. |
 | Mixed types | Both operands convert to their join first. Float with float: the wider one. `f16` with `bf16`: `f32`. Integer with float: the float. |
 | `T(x)` conversion | `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`, `i64(x)`. Tile or scalar. |
@@ -233,7 +234,7 @@ A collective folds one scalar per thread across a group and gives every thread o
 
 `over` names `ctx.lane` or `ctx.thread`. `width` must fold to a constant; `from`, `xor`, `down` and `up` may be any index. The words inside the brackets are keywords only there, so `from` stays an ordinary name elsewhere.
 
-`sum(e)` with no group sums within the thread: `e` is a per-element expression over tensor slices with one `:+` span of a constant length, `W[col, k :+ 16]`, all of one length, and scalars. Each such slice is the thread's own run of elements, read with one vector load when the span is the last dimension, at most 16 bytes, a power of two in size, and its address provably a multiple of that size (from the subscripts' divisors and `@aligned`), else a load per element. Like a point subscript, it is not masked. `sum(i32(a) * i32(b))` over `i8` slices a multiple of four long is a `dp4a` per four elements, as an index.
+`sum(e)` with no group sums within the thread: `e` is a per-element expression over tensor slices with one `:+` span of a constant length, `W[col, k :+ 16]`, all of one length, and scalars. Each such slice is the thread's own run of elements, read with one vector load when the span is the last dimension, at most 16 bytes, a power of two in size, and its address provably a multiple of that size (from the subscripts' divisors and `@aligned`), else a load per element. Like a point subscript, it is not masked. `sum(i32(a) * i32(b))` over `i8` slices a multiple of four long is a `dp4a` per four elements, as an index. Either side may also be `a & c` or `(a >> s) & c` with `c` below 128 and the shift inside the byte, done on the packed word, so a nibble decode stays one `dp4a` a word; and `sum(i32(a))` alone is a `dp4a` against ones, the run's sum. Any other byte arithmetic is summed per element.
 
 A lane collective is an xor butterfly of `log2(width)` shuffles and needs every lane of its warp: control that is the same across a warp, never per lane. Over the whole warp its result is warp-uniform. A CTA collective adds one exchange of each warp's result through shared memory, three CTA barriers, and needs uniform control; its result is uniform. A shuffle needs every lane of the warp. Values of any scalar type move as 32-bit words, two for a 64-bit one.
 

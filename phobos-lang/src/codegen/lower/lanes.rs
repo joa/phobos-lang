@@ -8,7 +8,7 @@ use melior::ir::{Block, BlockLike, Region, RegionLike, Type, Value, ValueLike, a
 use super::Lowered;
 use crate::codegen::Codegen;
 use crate::ast::lanes::Mode;
-use crate::ir::{Ir, OpId, OpKind};
+use crate::ir::{Bytes, Ir, OpId, OpKind};
 
 /// How a value was packed into words, to undo it.
 #[derive(Clone, Copy)]
@@ -52,12 +52,20 @@ impl<'c> Codegen<'c> {
                 self.set_ir(ir.result(op), Lowered::Scalar(v));
             }
             OpKind::Exchange => self.exchange(block, ir, op)?,
+            OpKind::F16Bits => {
+                let v = self.scalar_ir(ir.operand(op, 0))?;
+                let w = self.push(block, arith::index_cast(v, self.i32_t, self.loc))?;
+                let h = self.push(block, arith::trunci(w, self.i16_t, self.loc))?;
+                let h = self.push(block, arith::bitcast(h, self.f16_t, self.loc))?;
+                self.set_ir(ir.result(op), Lowered::Scalar(h));
+            }
             OpKind::LaneLoad { dim, len, align } => self.lane_load(block, ir, op, dim, len, align)?,
-            OpKind::Dot4 => {
+            OpKind::Dot4 { a, b } => {
                 let ops = ir.operands(op);
-                let a = self.word4(block, &ops[..4])?;
-                let b = self.word4(block, &ops[4..8])?;
-                let acc = self.scalar_ir(ops[8])?;
+                let (na, nb) = (a.operands(), b.operands());
+                let a = self.dot4_side(block, a, &ops[..na])?;
+                let b = self.dot4_side(block, b, &ops[na..na + nb])?;
+                let acc = self.scalar_ir(ops[na + nb])?;
                 let acc = self.push(block, arith::index_cast(acc, self.i32_t, self.loc))?;
                 let sum = self.dot4_accumulate(block, a, b, acc)?;
                 let sum = self.push(block, arith::index_cast(sum, self.index_t, self.loc))?;
@@ -97,6 +105,35 @@ impl<'c> Codegen<'c> {
             self.set_ir(res, Lowered::Scalar(e));
         }
         Ok(())
+    }
+
+    /// One side of a `dp4a` as the `vector<4xi8>` it reads.
+    fn dot4_side(&self, block: &Block<'c>, how: Bytes, from: &[crate::ir::ValueId]) -> Result<Value<'c, 'c>> {
+        let vec4 = Type::vector(&[4], self.i8_t);
+        let word_t = Type::vector(&[1], self.i32_t);
+        let as_bytes = |cg: &Self, w: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
+            let w = cg.vec_broadcast(block, w, word_t)?;
+            cg.vec_bitcast(block, w, vec4)
+        };
+        match how {
+            Bytes::Raw => self.word4(block, from),
+            Bytes::Ones => {
+                let ones = self.const_i32(block, 0x0101_0101)?;
+                as_bytes(self, ones)
+            }
+            Bytes::Masked { shift, mask } => {
+                let v = self.word4(block, from)?;
+                let w = self.vec_bitcast(block, v, word_t)?;
+                let mut w = self.vec_extract(block, w, &[0], self.i32_t)?;
+                if shift > 0 {
+                    let s = self.const_i32(block, i64::from(shift))?;
+                    w = self.push(block, arith::shrui(w, s, self.loc))?;
+                }
+                let m = self.const_i32(block, i64::from(mask) * 0x0101_0101)?;
+                let w = self.push(block, arith::andi(w, m, self.loc))?;
+                as_bytes(self, w)
+            }
+        }
     }
 
     /// Four `i8` scalars as the `vector<4xi8>` a `dp4a` reads. Built from a
