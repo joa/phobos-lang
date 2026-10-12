@@ -286,7 +286,7 @@ Symbols used below: `K` is the contraction length, a multiple of 256 unless stat
 |---|---|---|---|
 | `<fmt>_qdot_t(a, qb, d, tables..)` | `[1, K] f32 x qb -> [1, N] f32` | Matvec, decode folded in: `out[j] = sum_k a[k] * w[j, k]`. `N` a multiple of the CTA's warp count. | value |
 | `<fmt>_qdot_i8_t(aq, a_scales, qb, d, tables..)` | `[1, K] i8 x qb -> [1, N] f32` | Matvec against a Q8_0 activation (`a_scales` `[1, K/32]`). `N` a multiple of 8. | value |
-| `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | Prompt projection on integer tensor cores. Fixed 128 x 64 tile, needs `@launch(256)`. `a_scales` `[128, K/32]`. | statement or value |
+| `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | Prompt projection on integer tensor cores. Fixed 128 x 64 tile, needs `@launch(256)`. `a_scales` `[128, K/32]`. On sm_80+ the activation tile is double-buffered through `cp.async` where both stages fit 48 KB (all but `iq2xs` and `iq2s`). | statement or value |
 | `<fmt>_qdecode_t(qb, d, tables..)` | `qb -> [K, N] f32 or f16` | Dequantize into a scratch tensor slice. Element type follows the destination. `N` a multiple of the destination tile width. | statement |
 | `<fmt>_qmma_staged_t(a, a_scales, qb, d, tables..)` | `[M, K] i8 x qb -> [M, N] f32` | Batched projection on integer tensor cores (sm_75+). `M`, `N` multiples of 8, exactly one patch of 8x8 tiles per warp, the CTA's threads dividing the `N` columns' staging lanes, all operands in bounds. | statement or value |
 | `iq1s_qmma_t(a, a_scales, qb, d, grid)` | same | As above, decoded per warp instead of staged once per CTA. | statement or value |

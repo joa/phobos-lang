@@ -155,3 +155,17 @@ fn blackwell_contracts_with_m16n8k32_at_one_cta_an_sm() {
     assert!(ada.contains("nvvm.minctasm = 2"), "{ada}");
     assert!(blackwell.contains("nvvm.minctasm = 1"), "{blackwell}");
 }
+
+#[test]
+fn sm_80_copies_the_activation_tile_with_cp_async_where_two_fit() {
+    for (fmt, tables) in FORMATS {
+        let src = qgemm_src(fmt, tables, "256, 2");
+        let turing = emit_mlir_sync(&src, "sm_75");
+        let ampere = emit_mlir_sync(&src, "sm_80");
+        assert!(!turing.contains("nvgpu.device_async_copy"), "{fmt}");
+        assert!(shared_bytes(&ampere) <= 48 * 1024, "{fmt}");
+        // The two IQ2 formats with the largest tables keep one stage.
+        let doubled = !matches!(fmt, "iq2xs" | "iq2s");
+        assert_eq!(ampere.matches("nvgpu.device_async_copy").count(), if doubled { 8 } else { 0 }, "{fmt}");
+    }
+}
