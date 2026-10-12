@@ -4,7 +4,7 @@ use super::plan::{Event, Plan, Trace};
 use crate::ir::{BlockId, Ir, Map, OpId, OpKind, ValueId};
 
 /// One shared-memory access by one op.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Access {
     lo: i64,
     hi: i64,
@@ -31,7 +31,7 @@ impl Access {
 
 /// An access not yet ordered by a kept barrier, with its emission order and
 /// block.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Pending {
     seq: usize,
     block: BlockId,
@@ -132,7 +132,7 @@ impl Membar<'_> {
                     // every access out.
                     let entry = pending.clone();
                     self.walk_block(body, pending, false);
-                    pending.extend(entry);
+                    merge(pending, entry);
                     return;
                 }
                 let entry = pending.clone();
@@ -140,7 +140,7 @@ impl Membar<'_> {
                 // Walk the body again so one iteration's trailing accesses
                 // meet the next iteration's head.
                 self.walk_block(body, pending, elide);
-                pending.extend(entry);
+                merge(pending, entry);
                 if info.ragged {
                     self.walk_block(ir.blocks_of(op)[1], pending, elide);
                 }
@@ -152,17 +152,17 @@ impl Membar<'_> {
                         self.walk_block(b, pending, false);
                     }
                 }
-                pending.extend(entry);
+                merge(pending, entry);
             }
             OpKind::If => {
                 let mut after = Vec::new();
                 for &b in ir.blocks_of(op) {
                     let mut branch = pending.clone();
                     self.walk_block(b, &mut branch, false);
-                    after.extend(branch);
+                    merge(&mut after, branch);
                 }
                 if ir.blocks_of(op).len() == 1 {
-                    after.extend(pending.iter().cloned());
+                    merge(&mut after, pending.clone());
                 }
                 *pending = after;
             }
@@ -316,6 +316,17 @@ impl Membar<'_> {
                 self.ir.results(op).get(a.result) == Some(&cur)
             })?;
             cur = self.ir.operand(op, alias.operand);
+        }
+    }
+}
+
+/// Adds the accesses of `more` that `pending` does not already hold. A loop
+/// re-adds what was pending at its entry, for the case it runs no turn;
+/// appending blindly doubled the list at every loop.
+fn merge(pending: &mut Vec<Pending>, more: Vec<Pending>) {
+    for p in more {
+        if !pending.contains(&p) {
+            pending.push(p);
         }
     }
 }

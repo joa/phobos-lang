@@ -140,6 +140,25 @@ fn a_loop_carried_sweep_needs_no_barrier() {
     assert_eq!(mlir.matches("gpu.barrier").count(), 0, "{mlir}");
 }
 
+/// Each loop re-adds what was pending at its entry, in case it runs no
+/// turn. Thirty in a row once doubled the pending list thirty times.
+#[test]
+fn many_loops_in_a_row_stay_cheap() {
+    let loops = "for i in range(0, n) {
+ t = t * 2.0
+ }
+".repeat(30);
+    let mlir = emit_mlir(&format!(
+        "@aligned(M = 8, N = 8)
+        kernel k(A: tensor<f32>[M, N], C: tensor<f32>[M, N], n: i32) {{
+            var t = A[0 :+ 8, 0 :+ 8]
+            {loops}
+            C[0 :+ 8, 0 :+ 8] = t
+        }}"
+    ));
+    assert_eq!(mlir.matches("gpu.barrier").count(), 0, "{mlir}");
+}
+
 /// A loop body that reads its tile with a different mapping than it wrote
 /// it must keep a barrier between iterations.
 #[test]
