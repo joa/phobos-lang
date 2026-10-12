@@ -92,7 +92,6 @@ impl Membar<'_> {
                 | OpKind::RegsStore
                 | OpKind::RegsReduce(_)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::WarpPartial)
-                | OpKind::Intrinsic(crate::ir::Intrinsic::DeltaScan)
         ) && !self.ir.kind(op).has_blocks()
     }
 

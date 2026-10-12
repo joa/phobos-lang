@@ -288,9 +288,6 @@ pub enum Intrinsic {
     /// buffers first and the scalars in evaluation order; yields the zero
     /// the source sees.
     WarpPartial,
-    /// `delta_scan_t(q, k, v, dec, bet, st, o)`: the gated delta rule over the
-    /// rows of `q`, the state view `st` in registers. Yields zero.
-    DeltaScan,
 }
 
 impl Intrinsic {
@@ -309,7 +306,6 @@ impl Intrinsic {
             Intrinsic::Gather => "gather".into(),
             Intrinsic::ArgSel => "argsel".into(),
             Intrinsic::WarpPartial => "warp_partial".into(),
-            Intrinsic::DeltaScan => "delta_scan_t".into(),
         }
     }
 
@@ -322,7 +318,6 @@ impl Intrinsic {
             "gather" => return Some(Intrinsic::Gather),
             "argsel" => return Some(Intrinsic::ArgSel),
             "warp_partial" => return Some(Intrinsic::WarpPartial),
-            "delta_scan_t" => return Some(Intrinsic::DeltaScan),
             _ => {}
         }
         let (fmt, suffix) = callee.split_once('_')?;
