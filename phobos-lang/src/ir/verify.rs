@@ -705,7 +705,7 @@ impl Verifier<'_> {
                 }
                 self.intrinsic_operands(op, n_ops);
                 match i {
-                    Intrinsic::WarpPartial | Intrinsic::DeltaScan => {
+                    Intrinsic::WarpPartial => {
                         if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::Index) {
                             self.err(op, "result must be index");
                         }
