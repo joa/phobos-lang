@@ -163,6 +163,23 @@ impl Build {
 
     /// A tile-typed let/var initializer.
     fn emit_tile_decl(&mut self, scalar: AstScalar, dims: &[Dim], value: &Expr) -> Result<ValueId> {
+        // A tensor slice that may run past its source is materialized into a
+        // fresh tile. One of the declared type is the declared tile, not a
+        // second buffer copied into it.
+        if self.slice_is_partial(value) {
+            let Rv::Tile(src) = self.emit_expr(value)? else {
+                bail!("expected a tile initializer");
+            };
+            let (elem, shape) = (Scalar::from_ast(scalar), self.tile_shape(dims)?);
+            if self.owned(src) && self.elem(src) == elem && self.shape(src) == shape {
+                return Ok(src);
+            }
+            let tile = self.alloc_tile(scalar, dims)?;
+            self.check_shapes(&self.shape(src), &shape, "tile store")?;
+            let kind = if self.elem(src) == elem { OpKind::Copy { sync: true } } else { OpKind::Convert };
+            self.stmt(kind, &[src, tile]);
+            return Ok(tile);
+        }
         let unfused = matches!(
             value,
             Expr::Call { callee, .. } if matches!(callee.as_str(),

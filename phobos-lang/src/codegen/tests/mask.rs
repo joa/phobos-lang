@@ -272,3 +272,22 @@ fn an_aligned_promise_on_a_static_extent_is_not_checked() {
     );
     assert!(!mlir.contains("llvm.intr.trap"), "\n{mlir}");
 }
+
+/// A typed `var` of a slice that may run past its tensor is the materialized
+/// tile itself, as the untyped one is, not a second buffer copied into.
+#[test]
+fn a_typed_var_of_a_partial_slice_allocates_once() {
+    let src = |decl: &str| {
+        format!(
+            "@launch(64)
+            kernel k(A: tensor<i8>[1, L], O: tensor<i8>[1, 64]) {{
+                {decl} = A[0 :+ 1, 0 :+ 64]
+                O[0 :+ 1, 0 :+ 64] = t
+            }}"
+        )
+    };
+    let typed = emit_mlir(&src("var t: tile<i8>[1, 64]"));
+    let untyped = emit_mlir(&src("var t"));
+    assert_eq!(shared_bytes(&typed), 64, "\n{typed}");
+    assert_eq!(shared_bytes(&typed), shared_bytes(&untyped));
+}
