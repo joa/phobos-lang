@@ -216,6 +216,25 @@ The control a statement runs under is as varying as the `if` and `while` conditi
 
 Scalar loads, scalar arithmetic, scalar stores to tensors and `var`s, and `if`, `for` and `while` run in each thread on its own and are allowed under any control.
 
+### Collectives and shuffles
+
+A collective folds one scalar per thread across a group and gives every thread of the group the result. The angle brackets configure it; the parentheses hold the value.
+
+| Form | Result |
+|---|---|
+| `sum<over ctx.lane>(x)`, `max`, `min` | The fold over the warp's lanes. |
+| `any<over ctx.lane>(c)`, `all` | The fold of a condition. |
+| `argmax<over ctx.lane>(x)` | The lane holding the largest `x`, the smallest on a tie, as an index. |
+| `reduce<over ctx.lane>(x, f)` | The fold by `f`, a `fn f(a, b) = e`, which must be associative and commutative. |
+| `op<over ctx.lane, width w>(x)` | The fold over each `w`-lane piece of the warp, `w` a constant power of two dividing `ctx.lanes`. |
+| `op<over ctx.thread>(x)` | The fold over the CTA; `argmax` gives the thread. No `width`. |
+| `shfl<from s>(v)` | `v` from lane `s` of the warp (or of the `width`-lane piece). |
+| `shfl<xor m>(v)`, `shfl<down d>(v)`, `shfl<up d>(v)` | `v` from lane `lane ^ m` (`m` below the width), `lane + d` or `lane - d`; a source past the piece reads the lane's own `v`. |
+
+`over` names `ctx.lane` or `ctx.thread`. `width` must fold to a constant; `from`, `xor`, `down` and `up` may be any index. The words inside the brackets are keywords only there, so `from` stays an ordinary name elsewhere.
+
+A lane collective is an xor butterfly of `log2(width)` shuffles and needs every lane of its warp: control that is the same across a warp, never per lane. Over the whole warp its result is warp-uniform. A CTA collective adds one exchange of each warp's result through shared memory, three CTA barriers, and needs uniform control; its result is uniform. A shuffle needs every lane of the warp. Values of any scalar type move as 32-bit words, two for a 64-bit one.
+
 ## Built-ins
 
 ### Indexing and synchronization

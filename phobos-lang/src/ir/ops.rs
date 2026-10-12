@@ -375,6 +375,15 @@ pub enum OpKind {
     /// One of the executing thread's own indices, which differ between
     /// threads.
     Thread(ThreadIndex),
+    /// `(value, lane) -> value` from another lane of the `width`-lane group:
+    /// lane `lane`, or the one at `lane` as an xor mask or an offset.
+    Shuffle { mode: crate::ast::lanes::Mode, width: i64 },
+    /// `(value) -> value`, unchanged: the result of a reduction every
+    /// thread of the group computed alike.
+    Converged(crate::ast::lanes::Group),
+    /// `(value) -> one per warp`: each warp's copy of a warp-uniform value,
+    /// in warp order, in every thread. Once per CTA, through shared memory.
+    Exchange,
     /// One scalar through a per-element step: `exp(x)` on a scalar.
     Math(ElemStep),
     /// `(cond, a, b) -> a or b`, the scalar `where`.
@@ -570,6 +579,9 @@ impl OpKind {
             OpKind::ProgramId(d) => format!("program_id {d}"),
             OpKind::GridDim(d) => format!("grid_dim {d}"),
             OpKind::Thread(t) => t.name().into(),
+            OpKind::Shuffle { mode, width } => format!("shfl {} w{width}", mode.name()),
+            OpKind::Converged(g) => format!("converged {g:?}"),
+            OpKind::Exchange => "exchange".into(),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

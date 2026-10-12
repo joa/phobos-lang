@@ -83,6 +83,7 @@ impl Membar<'_> {
             self.ir.kind(op),
             OpKind::GridBarrier
                 | OpKind::Barrier
+                | OpKind::Exchange
                 | OpKind::AtomicAdd
                 | OpKind::AtomicCas
                 | OpKind::LoadAcquire

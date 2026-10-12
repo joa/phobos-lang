@@ -285,6 +285,18 @@ impl Verifier<'_> {
             | OpKind::Thread(_)
             | OpKind::Math(_)
             | OpKind::Select => self.scalar_kind(op, &kind),
+            OpKind::Shuffle { .. } | OpKind::Converged(_) | OpKind::Exchange => {
+                let want = if matches!(kind, OpKind::Shuffle { .. }) { 2 } else { 1 };
+                if self.want_operands(op, want) {
+                    let t = self.scalar(ir.operand(op, 0));
+                    if t.is_none() {
+                        self.err(op, "operand must be a scalar");
+                    }
+                    if ir.results(op).iter().any(|&r| self.scalar(r) != t) {
+                        self.err(op, "results must have the operand's type");
+                    }
+                }
+            }
             OpKind::Dim(d) => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
                     match ir.ty(ir.operand(op, 0)) {
