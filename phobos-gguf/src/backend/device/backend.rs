@@ -454,7 +454,7 @@ impl Backend for DeviceBackend {
         out: Buf,
     ) -> Result<QAct> {
         self.check_distinct("rms_norm_gated", out, &[x, gain, gate]);
-        // The one-statement form reads the gate 16 bytes at a time.
+        // The lanes form reads the gate 16 bytes at a time.
         ensure!(
             norm_q_cta(width).is_none() || gate_at.is_multiple_of(4),
             "the gated norm's gate must start on a 16-byte boundary, got element {gate_at}"

@@ -2,6 +2,8 @@
 
 use phobos_kernels::launch::{CTA_THREADS, WARP_THREADS};
 
+use crate::backend::fuse::{NormOperands, rms_norm_q_lanes};
+
 /// RMS normalization, one CTA per row.
 ///
 /// The row is reshaped into blocks of 32, so the reduction runs a warp at a
@@ -11,7 +13,7 @@ use phobos_kernels::launch::{CTA_THREADS, WARP_THREADS};
 pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
     let blocks = width / RMS_LANE;
     let (gated, quantized) = (form.gated(), form.quantized());
-    // The quantized, ungated norm is one `rms_norm_q_t` statement when some
+    // The quantized, ungated norm is written with lanes when some
     // CTA width divides the row; see `norm_q_cta`.
     if quantized && !gated && let Some(cta) = norm_q_cta(width) {
         return format!(
@@ -21,10 +23,14 @@ pub(crate) fn rms_norm_src(width: usize, eps: f32, form: NormForm) -> String {
 kernel rms_norm_q(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LANE}],
               O: tensor<f32>[RB, {RMS_LANE}], Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]) {{
   let r = ctx.block.x
-  rms_norm_q_t(X[r * NB :+ NB, 0 :+ {RMS_LANE}], G[0 :+ NB, 0 :+ {RMS_LANE}], {eps:.12},
-               O[r * NB :+ NB, 0 :+ {RMS_LANE}], Q[r * NB :+ NB, 0 :+ {RMS_LANE}], S[r * NB :+ NB, 0 :+ 1])
-}}
-"
+{norm}}}
+",
+            norm = rms_norm_q_lanes(
+                &NormOperands { x: "X", g: "G", z: None, out: Some("O"), q: "Q", s: "S", row0: "r * NB" },
+                "NB",
+                eps,
+                "n"
+            )
         );
     }
     // The gated, quantized norm likewise, with the gate read in the same
@@ -38,11 +44,14 @@ kernel rms_norm_gated(X: tensor<f32>[RB, {RMS_LANE}], G: tensor<f32>[MB, {RMS_LA
               O: tensor<f32>[RB, {RMS_LANE}], Z: tensor<f32>[RB, {RMS_LANE}],
               Q: tensor<i8>[RB, {RMS_LANE}], S: tensor<f32>[RB, D1]) {{
   let r = ctx.block.x
-  rms_norm_gated_q_t(X[r * NB :+ NB, 0 :+ {RMS_LANE}], Z[r * NB :+ NB, 0 :+ {RMS_LANE}],
-                     G[0 :+ NB, 0 :+ {RMS_LANE}], {eps:.12}, O[r * NB :+ NB, 0 :+ {RMS_LANE}],
-                     Q[r * NB :+ NB, 0 :+ {RMS_LANE}], S[r * NB :+ NB, 0 :+ 1])
-}}
-"
+{norm}}}
+",
+            norm = rms_norm_q_lanes(
+                &NormOperands { x: "X", g: "G", z: Some("Z"), out: Some("O"), q: "Q", s: "S", row0: "r * NB" },
+                "NB",
+                eps,
+                "n"
+            )
         );
     }
     let mut params = String::new();
@@ -105,8 +114,8 @@ pub(crate) fn norm_cta(blocks: usize) -> usize {
     (blocks * RMS_LANE).clamp(WARP_THREADS, CTA_THREADS as usize)
 }
 
-/// CTA width for the one-statement quantized norm: the most whole warps, up
-/// to [`CTA_THREADS`], with `4 * cta` dividing the row. `rms_norm_q_t`
+/// CTA width for the lanes form of the quantized norm: the most whole warps, up
+/// to [`CTA_THREADS`], with `4 * cta` dividing the row. `rms_norm_q_lanes`
 /// gives each thread four elements of every `4 * cta`.
 ///
 /// `None` when no such CTA exists; the tile form is used instead.

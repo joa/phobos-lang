@@ -6,6 +6,7 @@
 
 mod chains;
 mod emit;
+mod norm_q;
 
 #[cfg(test)]
 mod tests;
@@ -13,6 +14,7 @@ mod tests;
 #[cfg(feature = "cuda")]
 pub(crate) use chains::attn_out_chain;
 pub(crate) use chains::{mlp_chain, mlp_chain_raw, project_chain};
+pub(crate) use norm_q::{NormOperands, rms_norm_q_lanes};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
