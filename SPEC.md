@@ -149,7 +149,6 @@ The body's own `let`s, `var`s and loop variables never meet the caller's. Any ot
 | `A[:]` | The whole dimension | `Q[row :+ BR, :]` |
 | `A[s:]` | `s <= i <` the extent. Never masked. | `A[16:]` |
 | `A[:e]` | `0 <= i < e`, same as `A[0 : e]` | `A[:16]` |
-| `A[:j]` | Not supported; write `A[0 : j]`. | |
 
 All points load one element. A point among slices selects one index and keeps its axis with extent 1, as `i :+ 1` would: `A[i, 0 :+ 64]` is a `[1, 64]` tile.
 
