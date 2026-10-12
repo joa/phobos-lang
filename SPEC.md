@@ -317,7 +317,6 @@ A product that only feeds the elementwise statement after it, as in `var s: tile
 
 | Built-in | Semantics |
 |---|---|
-| `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)` | Split-key online softmax. Warp `w` takes the `w`-th of `W` equal pieces of keys `[lo, hi)` and, for each query row `i`, computes `s_j = scale * q[i, :] . K[j, col :+ D]`, writing `WM[i, w] = max_j s_j`, `WL[i, w] = sum_j exp(s_j - WM[i, w])`, and `WACC[i * W + w, :] = sum_j exp(s_j - WM[i, w]) * V[j, col :+ D]`. Returns `0`. |
 
 Shapes: `q` a named `[QG, D]` tile, unmasked; `K`, `V` named `f16` tensor parameters; `WM`, `WL` named `[QG, W]` tiles and `WACC` a named `[QG * W, D]` tile; with `D % 32 == 0` and `W` = CTA threads / 32. Merging the `W` partials is the caller's.
 

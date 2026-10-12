@@ -15,28 +15,12 @@ impl<'c> Codegen<'c> {
         match ir.kind(op).clone() {
             OpKind::Intrinsic(i) => {
                 let n = ir.operands(op).len();
-                match i {
-                    Intrinsic::WarpPartial => {
-                        let tiles = self.tiles_ir(ir, op, 0..6)?;
-                        let scalars = [6, 7, 8, 9]
-                            .map(|k| self.scalar_ir(ir.operand(op, k)))
-                            .into_iter()
-                            .collect::<Result<Vec<_>>>()?;
-                        let refs: [&MemVal<'c>; 6] = std::array::from_fn(|k| &tiles[k]);
-                        let scalars: [_; 4] = std::array::from_fn(|k| scalars[k]);
-                        self.warp_partial_raw(block, refs, scalars)?;
-                        let zero = self.const_index(block, 0)?;
-                        self.set_ir(ir.result(op), Lowered::Scalar(zero));
-                    }
-                    other => {
-                        let tiles = self.tiles_ir(ir, op, 0..n)?;
-                        let out = self.intrinsic_fresh(block, ir, op, other, &tiles)?;
-                        for t in &tiles {
-                            self.release(t);
-                        }
-                        self.set_ir(ir.result(op), Lowered::Tile(out));
-                    }
+                let tiles = self.tiles_ir(ir, op, 0..n)?;
+                let out = self.intrinsic_fresh(block, ir, op, i, &tiles)?;
+                for t in &tiles {
+                    self.release(t);
                 }
+                self.set_ir(ir.result(op), Lowered::Tile(out));
             }
             OpKind::IntrinsicInto(i) => {
                 let n = ir.operands(op).len();
@@ -195,7 +179,7 @@ impl<'c> Codegen<'c> {
                 self.tile_argsel_bc(block, &t[0], &t[1], &t[2], &t[3], &out)?;
                 out
             }
-            Intrinsic::RawQdecode(_) | Intrinsic::WarpPartial => {
+            Intrinsic::RawQdecode(_) => {
                 bail!("{} yields no fresh buffer", i.name())
             }
         })

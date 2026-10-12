@@ -91,7 +91,6 @@ impl Membar<'_> {
                 | OpKind::RegsFused(_)
                 | OpKind::RegsStore
                 | OpKind::RegsReduce(_)
-                | OpKind::Intrinsic(crate::ir::Intrinsic::WarpPartial)
         ) && !self.ir.kind(op).has_blocks()
     }
 

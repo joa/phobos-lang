@@ -284,7 +284,6 @@ fn intrinsic_names_round_trip() {
         Intrinsic::Q50mmaT,
         Intrinsic::Gather,
         Intrinsic::ArgSel,
-        Intrinsic::WarpPartial,
     ];
     for fmt in RawFmt::ALL {
         all.extend([

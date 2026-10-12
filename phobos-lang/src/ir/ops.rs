@@ -284,10 +284,6 @@ pub enum Intrinsic {
     Gather,
     /// `argsel`: a `tmax`-shaped fold's index side.
     ArgSel,
-    /// `warp_partial(q, K, V, WM, WL, WACC, scale, lo, hi, col)`, the
-    /// buffers first and the scalars in evaluation order; yields the zero
-    /// the source sees.
-    WarpPartial,
 }
 
 impl Intrinsic {
@@ -305,7 +301,6 @@ impl Intrinsic {
             Intrinsic::RawQdecode(f) => format!("{}_qdecode_t", f.name()),
             Intrinsic::Gather => "gather".into(),
             Intrinsic::ArgSel => "argsel".into(),
-            Intrinsic::WarpPartial => "warp_partial".into(),
         }
     }
 
@@ -317,7 +312,6 @@ impl Intrinsic {
             "q50_qmma_t" => return Some(Intrinsic::Q50mmaT),
             "gather" => return Some(Intrinsic::Gather),
             "argsel" => return Some(Intrinsic::ArgSel),
-            "warp_partial" => return Some(Intrinsic::WarpPartial),
             _ => {}
         }
         let (fmt, suffix) = callee.split_once('_')?;

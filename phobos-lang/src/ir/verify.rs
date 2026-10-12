@@ -704,14 +704,7 @@ impl Verifier<'_> {
                     self.err(op, "only writes a destination; use the into form");
                 }
                 self.intrinsic_operands(op, n_ops);
-                match i {
-                    Intrinsic::WarpPartial => {
-                        if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::Index) {
-                            self.err(op, "result must be index");
-                        }
-                    }
-                    _ => self.want_tile_result(op),
-                }
+                self.want_tile_result(op);
             }
             OpKind::IntrinsicInto(_) => {
                 if n_ops == 0 {

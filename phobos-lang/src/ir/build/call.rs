@@ -44,7 +44,6 @@ impl Build {
             "atomic_cas" => self.emit_atomic_cas(args),
             "load_acquire" | "store_release" => self.emit_system_scope(callee, args),
             "grid_barrier" => self.emit_grid_barrier(args),
-            "warp_partial" => self.emit_warp_partial(args),
             "dot" => {
                 let (a, b) = self.dot_operands(args)?;
                 let (ash, bsh) = (self.shape(a), self.shape(b));
@@ -621,50 +620,6 @@ impl Build {
         Ok(Rv::Scalar(self.value(OpKind::GridBarrier, &[mem], Type::INDEX)))
     }
 
-    /// `warp_partial(q, K, V, lo, hi, col, WM, WL, WACC, scale)`. Tiles and
-    /// tensors are taken by name. The op's operands are the six buffers, then
-    /// `scale, lo, hi, col`, the order the emitter evaluates the scalars in.
-    fn emit_warp_partial(&mut self, args: &[Expr]) -> Result<Rv> {
-        let [q, k, v, lo, hi, col, wm, wl, wacc, scale] = args else {
-            bail!("warp_partial expects (q, K, V, lo, hi, col, WM, WL, WACC, scale)");
-        };
-        let q = self.named_tile(q, "warp_partial q")?;
-        let k = self.named_tensor(k, "warp_partial K")?;
-        let v = self.named_tensor(v, "warp_partial V")?;
-        let wm = self.named_tile(wm, "warp_partial WM")?;
-        let wl = self.named_tile(wl, "warp_partial WL")?;
-        let wacc = self.named_tile(wacc, "warp_partial WACC")?;
-        let scale = self.emit_scalar(scale)?;
-        let lo = self.emit_index(lo, "warp_partial lo")?;
-        let hi = self.emit_index(hi, "warp_partial hi")?;
-        let col = self.emit_index(col, "warp_partial col")?;
-        let zero = self.value(
-            OpKind::Intrinsic(Intrinsic::WarpPartial),
-            &[q, k, v, wm, wl, wacc, scale, lo, hi, col],
-            Type::INDEX,
-        );
-        Ok(Rv::Scalar(zero))
-    }
-
-    fn named_tile(&self, e: &Expr, what: &str) -> Result<ValueId> {
-        let Expr::Var(name) = e else {
-            bail!("{what} expects a named tile variable");
-        };
-        match self.lookup(name) {
-            Some(Binding::Tile(t) | Binding::View(t)) => Ok(t),
-            _ => bail!("{what}: '{name}' is not a tile"),
-        }
-    }
-
-    fn named_tensor(&self, e: &Expr, what: &str) -> Result<ValueId> {
-        let Expr::Var(name) = e else {
-            bail!("{what} expects a named tensor parameter");
-        };
-        match self.lookup(name) {
-            Some(Binding::Tensor(t)) => Ok(t),
-            _ => bail!("{what}: '{name}' is not a tensor parameter"),
-        }
-    }
 }
 
 /// Table operands after `(a, a_scales, qb, d)` of the grouped raw formats.
