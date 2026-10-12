@@ -188,7 +188,7 @@ impl DeviceBackend {
 
     /// The router's top-k over `rows` rows of `logits`.
     fn launch_topk(&self, logits: u64, rows: usize, n_expert: usize, iota: u64, topk: u64, w: u64) -> Result<()> {
-        self.with_kernel(&self.moe_topk, n_expert, "moe_topk", || moe_topk_src(), |module| {
+        self.with_kernel(&self.moe_topk, n_expert, "moe_topk", moe_topk_src, |module| {
             self.launch(
                 module,
                 "moe_topk",

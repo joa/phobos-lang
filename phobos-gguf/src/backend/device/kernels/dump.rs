@@ -41,6 +41,17 @@ fn dump_raw_kernel_sources() {
     sources.push(("q4k_qdot_lanes".to_string(), q4k_qdot_lanes_src()));
     sources.push(("q5k_qdot_lanes".to_string(), q5k_qdot_lanes_src()));
     sources.push(("q6k_qdot_lanes".to_string(), q6k_qdot_lanes_src()));
+    sources.push(("iq2xxs_qdot_lanes".to_string(), iq2xxs_qdot_lanes_src()));
+    sources.push(("iq2xs_qdot_lanes".to_string(), iq2xs_qdot_lanes_src()));
+    sources.push(("iq2s_qdot_lanes".to_string(), iq2s_qdot_lanes_src()));
+    sources.push(("iq3xxs_qdot_lanes".to_string(), iq3xxs_qdot_lanes_src()));
+    sources.push(("iq3s_qdot_lanes".to_string(), iq3s_qdot_lanes_src()));
+    sources.push(("iq1s_qdot_lanes".to_string(), iq1s_qdot_lanes_src()));
+    sources.push(("iq1m_qdot_lanes".to_string(), iq1m_qdot_lanes_src()));
+    sources.push(("ptq1_qdot_lanes".to_string(), ptq1_qdot_lanes_src()));
+    sources.push(("q2k_qdot_lanes".to_string(), q2k_qdot_lanes_src()));
+    sources.push(("q3k_qdot_lanes".to_string(), q3k_qdot_lanes_src()));
+    sources.push(("iq4xs_qdot_lanes".to_string(), iq4xs_qdot_lanes_src()));
     sources.push(("moe_combine".to_string(), moe_combine_src()));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
     sources.push(("delta_wy".to_string(), delta_wy_src(32, 128, DELTA_CHUNK)));

@@ -345,19 +345,21 @@ impl DeviceBackend {
             // writes a padded scratch row and copies the first n values out.
             // The upload already padded the weight to match.
             let n_pad = n.next_multiple_of(tn);
-            if self.raw_lanes && lanes_kernel(quant).is_some() {
+            if self.lanes_on(quant) && lanes_kernel(quant).is_some() {
                 let groups = n.div_ceil(8) as i64;
                 let mut operands = vec![
                     (qa_ptr, [1, k as i64]),
                     (das_ptr, [1, n_blocks as i64]),
                     (bytes_ptr, [groups, nb * 8 * quant.device_block_bytes() as i64]),
                 ];
-                // Q6_K's `d` left the block for the grouped scale plane.
-                if quant == Quant::Q6_K {
+                // Q6_K's and the IQ formats' `d` is the grouped scale plane.
+                if !matches!(quant, Quant::Q4_K | Quant::Q5_K) {
                     operands.push((d_ptr, [groups, nb * 8]));
                 }
+                // The kernels compute their sign masks; only the grid is read.
+                operands.extend(tables.iter().take(1).map(|&(ptr, len)| (ptr, [1, len])));
                 operands.push((self.ptr(out, 0)?, [1, n as i64]));
-                return self.launch_lanes(quant, &operands, n);
+                return self.launch_lanes(quant, &operands, (n.div_ceil(Q4K_LANES_TN) as u32, 1, 1));
             }
             let ops = qdot_split::SplitOperands { qa: qa_ptr, das: das_ptr, bytes: bytes_ptr, d: d_ptr };
             if n_pad == n && tables.is_empty() && self.project_raw_split(quant, ops, (nb as usize, k, n), (out, false))? {
@@ -549,6 +551,10 @@ impl DeviceBackend {
             _ => {}
         }
         operands.push((out_ptr, [m as i64, n as i64]));
+        if self.lanes_on(*quant) && m == 1 && f32_lanes_kernel(*quant).is_some() {
+            // A warp a column, eight a CTA.
+            return self.launch_lanes(*quant, &operands, (n.div_ceil(8) as u32, 1, 1));
+        }
         self.launch(
             &kernel.module,
             kernel.name,
@@ -620,15 +626,20 @@ impl DeviceBackend {
             .is_some_and(|raw| raw.quant == quant)
     }
 
+    /// Whether `quant`'s decode matvec runs its lanes kernel.
+    fn lanes_on(&self, quant: Quant) -> bool {
+        self.raw_lanes.unwrap_or(LANES_BY_DEFAULT.contains(&quant))
+    }
+
     /// A raw format's decode matvec written with lanes, compiled on first use.
-    fn launch_lanes(&self, quant: Quant, operands: &[(u64, [i64; 2])], n: usize) -> Result<()> {
-        let (src, name) = lanes_kernel(quant).expect("checked by the caller");
+    fn launch_lanes(&self, quant: Quant, operands: &[(u64, [i64; 2])], grid: (u32, u32, u32)) -> Result<()> {
+        let (src, name) = lanes_kernel(quant).or_else(|| f32_lanes_kernel(quant)).expect("checked by the caller");
         if !self.lanes_kernels.borrow().contains_key(&quant) {
             let module = compile(&src(), &[], name)?;
             self.lanes_kernels.borrow_mut().insert(quant, module);
         }
         let cache = self.lanes_kernels.borrow();
-        self.launch(&cache[&quant], name, operands, (n.div_ceil(Q4K_LANES_TN) as u32, 1, 1))
+        self.launch(&cache[&quant], name, operands, grid)
     }
 
     /// Narrow-CTA path for `q8_qmma`'s deep tile. The same kernel at half the
@@ -658,13 +669,50 @@ impl DeviceBackend {
     }
 }
 
+/// A lanes kernel's source builder and kernel name.
+type LanesKernel = (fn() -> String, &'static str);
+
 /// A raw format's decode matvec written with lanes: its source and kernel
 /// name. Each covers [`Q4K_LANES_TN`] columns a CTA over the grouped weight.
-fn lanes_kernel(quant: Quant) -> Option<(fn() -> String, &'static str)> {
+fn lanes_kernel(quant: Quant) -> Option<LanesKernel> {
     match quant {
         Quant::Q4_K => Some((q4k_qdot_lanes_src, "q4k_qdot_lanes")),
         Quant::Q5_K => Some((q5k_qdot_lanes_src, "q5k_qdot_lanes")),
         Quant::Q6_K => Some((q6k_qdot_lanes_src, "q6k_qdot_lanes")),
+        Quant::IQ2_XXS => Some((iq2xxs_qdot_lanes_src, "iq2xxs_qdot_lanes")),
+        Quant::IQ2_XS => Some((iq2xs_qdot_lanes_src, "iq2xs_qdot_lanes")),
+        Quant::IQ2_S => Some((iq2s_qdot_lanes_src, "iq2s_qdot_lanes")),
+        Quant::IQ3_XXS => Some((iq3xxs_qdot_lanes_src, "iq3xxs_qdot_lanes")),
+        Quant::IQ3_S => Some((iq3s_qdot_lanes_src, "iq3s_qdot_lanes")),
+        Quant::IQ1_S => Some((iq1s_qdot_lanes_src, "iq1s_qdot_lanes")),
+        Quant::IQ1_M => Some((iq1m_qdot_lanes_src, "iq1m_qdot_lanes")),
+        Quant::PTQ1_0 => Some((ptq1_qdot_lanes_src, "ptq1_qdot_lanes")),
         _ => None,
     }
 }
+
+/// A row-major format's decode matvec written with lanes, against an `f32`
+/// activation: its source and kernel name.
+fn f32_lanes_kernel(quant: Quant) -> Option<LanesKernel> {
+    match quant {
+        Quant::Q2_K => Some((q2k_qdot_lanes_src, "q2k_qdot_lanes")),
+        Quant::Q3_K => Some((q3k_qdot_lanes_src, "q3k_qdot_lanes")),
+        Quant::IQ4_XS => Some((iq4xs_qdot_lanes_src, "iq4xs_qdot_lanes")),
+        _ => None,
+    }
+}
+
+/// The formats whose lanes kernel runs unless `PHOBOS_RAW_LANES` says
+/// otherwise: those that measured at least their intrinsic's speed, tg128
+/// on Qwen3.5 0.8B quantized to each. IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS and
+/// IQ2_S measured 2 to 17% slower, and PTQ1_0 0.6% on the 27B Bonsai.
+const LANES_BY_DEFAULT: [Quant; 8] = [
+    Quant::Q2_K,
+    Quant::Q3_K,
+    Quant::Q4_K,
+    Quant::Q5_K,
+    Quant::Q6_K,
+    Quant::IQ3_XXS,
+    Quant::IQ3_S,
+    Quant::IQ4_XS,
+];
