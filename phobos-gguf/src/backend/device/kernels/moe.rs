@@ -45,7 +45,7 @@ kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R
     let i = rowmax(argsel(p, v, io, neg))
     W[r :+ 1, j :+ 1] = v
     TOPK[r :+ 1, j :+ 1] = i32(i)
-    picked = picked + v
+    picked += v
     p = argsel(p, v, neg, p)
   }}
   var w: tile<f32>[1, U] = W[r :+ 1, 0 :+ U]
@@ -126,11 +126,11 @@ kernel moe_combine(W: tensor<f32>[1, U], C: tensor<f32>[U, N], G: tensor<f32>[1,
   var acc: tile<f32>[1, TN] = X[0 :+ 1, pn * TN :+ TN]
   for j in range(0, U, 1) {{
     let w = W[0, j]
-    acc = acc + C[j :+ 1, pn * TN :+ TN] * w
+    acc += C[j :+ 1, pn * TN :+ TN] * w
   }}
   var g: tile<f32>[1, 1] = G[0 :+ 1, 0 :+ 1]
   g = 1.0 / (1.0 + exp(0.0 - g))
-  acc = acc + S[0 :+ 1, pn * TN :+ TN] * g
+  acc += S[0 :+ 1, pn * TN :+ TN] * g
   X[0 :+ 1, pn * TN :+ TN] = acc
 }}
 "

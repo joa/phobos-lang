@@ -37,7 +37,7 @@ kernel dots(K: tensor<f32>[N, QW], S: tensor<f32>[SD, TN], O: tensor<f32>[N, OW]
   var acc: tile<f32>[C, TN] = 0.0
   for c in range(0, N, C) {
     var kst: tile<f32>[C, TN] = dot(K[c :+ C, 0 :+ D], st)
-    acc = acc + kst
+    acc += kst
   }
   O[0 :+ C, 0 :+ TN] = acc
 }
@@ -56,7 +56,7 @@ kernel dots(K: tensor<f32>[N, QW], S: tensor<f32>[SD, TN], O: tensor<f32>[N, OW]
     for d in range(0, D, DT) {
       kst += dot(K[c :+ C, d :+ DT], S[d :+ DT, 0 :+ TN])
     }
-    acc = acc + kst
+    acc += kst
   }
   O[0 :+ C, 0 :+ TN] = acc
 }

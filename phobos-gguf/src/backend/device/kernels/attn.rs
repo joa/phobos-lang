@@ -151,11 +151,11 @@ kernel attn_tc_softmax(K: tensor<f16>[NK, KW], S: tensor<f32>[R, SW], L: tensor<
   var l: tile<f32>[TM, 1] = 0.0
   for j in range(0, diag, TN) {{
     var e = exp(S[p * TM :+ TM, c + j :+ TN] - m)
-    l = l + rowsum(e)
+    l += rowsum(e)
     S[p * TM :+ TM, c + j :+ TN] = e
   }}
   var de = tril(exp(d - m))
-  l = l + rowsum(de)
+  l += rowsum(de)
   S[p * TM :+ TM, c + diag :+ TN] = de
   L[p * TM :+ TM, h :+ 1] = l
 }}
@@ -241,11 +241,11 @@ kernel attn_softmax(S: tensor<f32>[R, NK], L: tensor<f32>[R, 1]) {{
   var l: tile<f32>[TM, 1] = 0.0
   for j in range(0, diag, TN) {{
     var e = exp(S[p * TM :+ TM, j :+ TN] - m)
-    l = l + rowsum(e)
+    l += rowsum(e)
     S[p * TM :+ TM, j :+ TN] = e
   }}
   var de = tril(exp(d - m))
-  l = l + rowsum(de)
+  l += rowsum(de)
   S[p * TM :+ TM, diag :+ TN] = de
   L[p * TM :+ TM, 0 :+ 1] = l
 }}

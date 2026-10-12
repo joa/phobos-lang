@@ -159,7 +159,7 @@ kernel moe_gather_add(POS: tensor<i32>[R, U], W: tensor<f32>[R, U], C: tensor<f3
   for j in range(0, U, 1) {{
     let p = POS[r, j]
     let w = W[r, j]
-    acc = acc + C[p :+ 1, pn * TN :+ TN] * w
+    acc += C[p :+ 1, pn * TN :+ TN] * w
   }}
   X[r :+ 1, pn * TN :+ TN] = acc
 }}
@@ -179,7 +179,7 @@ kernel moe_shared(G: tensor<f32>[R, 1], S: tensor<f32>[R, N], X: tensor<f32>[R, 
   var acc: tile<f32>[1, TN] = X[r :+ 1, pn * TN :+ TN]
   var g: tile<f32>[1, 1] = G[r :+ 1, 0 :+ 1]
   g = 1.0 / (1.0 + exp(0.0 - g))
-  acc = acc + S[r :+ 1, pn * TN :+ TN] * g
+  acc += S[r :+ 1, pn * TN :+ TN] * g
   X[r :+ 1, pn * TN :+ TN] = acc
 }}
 "
