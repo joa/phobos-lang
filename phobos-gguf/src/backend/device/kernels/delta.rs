@@ -202,7 +202,17 @@ pub(crate) const DELTA_REG_COLS: usize = 8;
 
 /// The gated delta rule over a prompt with the state in registers: one
 /// program per head and [`DELTA_REG_COLS`] state columns, walking the
-/// positions in order. See `delta_scan_t` in SPEC.md.
+/// positions in order. Per position `t`, with `S` the state:
+///
+///   S = dec_t * S
+///   S = S + k_t^T (bet_t * (v_t - k_t S))
+///   o_t = q_t S
+///
+/// Each warp owns four columns. Lane `l` holds column `l % 4` and the
+/// `head_dim / 8` rows of row group `l / 4` in registers, so the two sums
+/// over rows per position, `k . S` and `q . S`, are xor butterflies across
+/// the row groups only. The shuffles, not the arithmetic, bound the scan on
+/// a card with few SMs.
 ///
 /// The operands are the packed planes, one row per position with the heads
 /// side by side: `Q`, `K`, `V`, `O` as `[N, heads * D]`, the gates as
@@ -210,6 +220,25 @@ pub(crate) const DELTA_REG_COLS: usize = 8;
 pub(crate) fn delta_scan_reg_src(head_dim: usize) -> String {
     let cols = DELTA_REG_COLS;
     let threads = cols / 4 * 32;
+    let rows = head_dim / 8;
+    let lines = |f: &dyn Fn(usize) -> String| (0..rows).map(|r| f(r) + "\n").collect::<String>();
+    let terms = |f: &dyn Fn(usize) -> String| (0..rows).map(f).collect::<Vec<_>>().join(" + ");
+    // A position's inputs, by name and by where they are read at row `{t}`:
+    // the lane's rows of k and q, its column of v, and the two gates.
+    let mut inputs = Vec::new();
+    for r in 0..rows {
+        for m in ["K", "Q"] {
+            let at = format!("elem({m}[{{t}}, kc + {} :+ 4], {})", r / 4 * 4, r % 4);
+            inputs.push((format!("{}{r}", m.to_lowercase()), at));
+        }
+    }
+    inputs.push(("v".into(), "V[{t}, h * D + col]".into()));
+    inputs.push(("dec".into(), "DEC[{t}, h]".into()));
+    inputs.push(("bet".into(), "BET[{t}, h]".into()));
+    let read = |line: &dyn Fn(&str, String) -> String, t: &str| {
+        inputs.iter().map(|(name, at)| line(name, at.replace("{t}", t)) + "\n").collect::<String>()
+    };
+    let butterfly = |x: &str| [16, 8, 4].iter().map(|m| format!("    {x} += shfl<xor {m}>({x})\n")).collect::<String>();
     format!(
         "@launch({threads})
 @autotune(D in [{head_dim}], C in [{cols}])
@@ -218,17 +247,31 @@ kernel delta_scan_reg(Q: tensor<f32>[N, W], K: tensor<f32>[N, W], V: tensor<f32>
                   DEC: tensor<f32>[N, GW], BET: tensor<f32>[N, GW],
                   S: tensor<f32>[SD, SW], O: tensor<f32>[N, W]) {{
   let h = ctx.block.x
-  let jn = ctx.block.y
-  let q = Q[:, h * D :+ D]
-  let k = K[:, h * D :+ D]
-  let v = V[:, h * D + jn * C :+ C]
-  let o = O[:, h * D + jn * C :+ C]
-  let dec = DEC[:, h :+ 1]
-  let bet = BET[:, h :+ 1]
-  let st = S[h * D :+ D, jn * C :+ C]
-  delta_scan_t(q, k, v, dec, bet, st, o)
-}}
-"
+  let col = ctx.block.y * C + ctx.warp * 4 + ctx.lane % 4
+  let row = h * D + ctx.lane / 4 * {rows}
+  let kc = ctx.lane / 4 * {rows} + h * D
+{init}{first}  for t in range(0, N, 1) {{
+    let tn = min(t + 1, N - 1)
+{next}{decay}    var kv: f32 = {kdot}
+{kv_sum}    let u = (v - kv) * bet
+{update}    var out: f32 = {qdot}
+{out_sum}    if ctx.lane < 4 {{
+      O[t, h * D + col] = out
+    }}
+{advance}  }}
+{store}}}
+",
+        init = lines(&|r| format!("  var s{r}: f32 = S[row + {r}, col]")),
+        first = read(&|name, at| format!("  var {name}: f32 = {at}"), "0"),
+        next = read(&|name, at| format!("    let n{name} = {at}"), "tn"),
+        decay = lines(&|r| format!("    s{r} = s{r} * dec")),
+        kdot = terms(&|r| format!("s{r} * k{r}")),
+        kv_sum = butterfly("kv"),
+        update = lines(&|r| format!("    s{r} = s{r} + k{r} * u")),
+        qdot = terms(&|r| format!("s{r} * q{r}")),
+        out_sum = butterfly("out"),
+        advance = read(&|name, _| format!("    {name} = n{name}"), "tn"),
+        store = lines(&|r| format!("  S[row + {r}, col] = s{r}")),
     )
 }
 
