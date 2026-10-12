@@ -3,7 +3,8 @@ use anyhow::{Result, anyhow, bail, ensure};
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
 use crate::ast::{Expr, Scalar as AstScalar, ctx};
 use crate::ir::{
-    ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, Type, ValueId,
+    ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, ThreadIndex, Type,
+    ValueId,
 };
 
 impl Build {
@@ -17,6 +18,14 @@ impl Build {
                 };
                 let kind = if callee == ctx::BLOCK { OpKind::ProgramId(*d as u8) } else { OpKind::GridDim(*d as u8) };
                 Ok(Rv::Scalar(self.value(kind, &[], Type::INDEX)))
+            }
+            ctx::THREAD | ctx::WARP | ctx::LANE => {
+                let which = match callee {
+                    ctx::THREAD => ThreadIndex::Thread,
+                    ctx::WARP => ThreadIndex::Warp,
+                    _ => ThreadIndex::Lane,
+                };
+                Ok(Rv::Scalar(self.value(OpKind::Thread(which), &[], Type::INDEX)))
             }
             ctx::THREADS | ctx::LANES | ctx::WARPS => {
                 let n = self.ctx_count(callee).ok_or_else(|| {

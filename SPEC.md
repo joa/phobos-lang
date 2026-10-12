@@ -193,6 +193,29 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 - A tile declared before one loop and read after another is CTA-private storage carried across both.
 - A CTA barrier follows a tile store only when a later op reads or writes those bytes from other threads. Two elementwise passes at the same vector width need none; a reduction, `dot` or `transpose` after one does.
 
+## Per-thread values
+
+Every value is uniform, the same in every thread of the CTA, until `ctx.thread`, `ctx.warp` or `ctx.lane` flows into it. The compiler infers how far each value may differ, with no annotation:
+
+| Kind | Holds | Sources |
+|---|---|---|
+| uniform | The same value in every thread. | Literals, kernel parameters, `ctx.block`, the `ctx` counts, loads at uniform addresses. |
+| warp-uniform | The same value in every lane of a warp. | `ctx.warp`. |
+| varying | A value per lane. | `ctx.thread`, `ctx.lane`, a load at a varying address. |
+
+An expression is as varying as its most varying operand. A `var` is as varying as anything assigned to it and as the conditions it was assigned under, through every iteration of a loop. A loop variable is as varying as the loop's bounds. A scalar `var` lives in each thread's registers either way, so `var acc: f32 = 0.0` summed over a lane-strided loop is one partial sum per thread.
+
+The control a statement runs under is as varying as the `if` and `while` conditions and the `for` bounds around it, and a `break`, `continue` or `return` under varying control makes the rest of its loop or kernel varying too. The rules:
+
+| Rule | Error when broken |
+|---|---|
+| A tile op, a barrier, an atomic, `load_acquire`/`store_release` and the intrinsics run once per CTA: every thread must reach them, so they run only under uniform control. | `` `op` runs once per CTA, so every thread must reach it `` |
+| Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` `op` takes `x`, which differs between lanes `` |
+| A per-thread store (a varying value, index or control) goes to a tensor, never a shared tile, which other threads would read with no barrier between. | `a store into the shared tile ...` |
+| A tensor stored per thread is not read by a tile op in the same kernel. | `` `O` is stored per thread and read by ... `` |
+
+Scalar loads, scalar arithmetic, scalar stores to tensors and `var`s, and `if`, `for` and `while` run in each thread on its own and are allowed under any control.
+
 ## Built-ins
 
 ### Indexing and synchronization
@@ -204,6 +227,9 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | `ctx.threads` | index | The CTA's thread count, from `@launch`. A compile-time constant. | |
 | `ctx.warps` | index | `ctx.threads / ctx.lanes`. A compile-time constant. | `ctx.threads` a whole number of warps. |
 | `ctx.lanes` | index | Lanes in a warp on the target, 32 on NVIDIA. A compile-time constant. | |
+| `ctx.thread` | index | The thread's index in the CTA. Differs between lanes. | See Per-thread values. |
+| `ctx.warp` | index | `ctx.thread / ctx.lanes`. The same in a warp, differs between warps. | See Per-thread values. |
+| `ctx.lane` | index | The thread's index in its warp. Differs between lanes. | See Per-thread values. |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
 | `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block, between two CTA barriers. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
 | `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block between two CTA barriers, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |

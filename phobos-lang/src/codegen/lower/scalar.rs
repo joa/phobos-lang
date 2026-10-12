@@ -10,7 +10,7 @@ use melior::{
 use super::Lowered;
 use crate::ast::UnOp;
 use crate::codegen::Codegen;
-use crate::ir::{self, IndexOp, Ir, Literal, OpId, OpKind};
+use crate::ir::{self, IndexOp, Ir, Literal, OpId, OpKind, ThreadIndex};
 
 impl<'c> Codegen<'c> {
     pub(super) fn emit_scalar_op(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
@@ -104,6 +104,13 @@ impl<'c> Codegen<'c> {
             }
             OpKind::ProgramId(d) => self.block_id(block, ["x", "y", "z"][d as usize])?,
             OpKind::GridDim(d) => self.grid_dim(block, ["x", "y", "z"][d as usize])?,
+            OpKind::Thread(ThreadIndex::Thread) => self.thread_id(block)?,
+            OpKind::Thread(ThreadIndex::Lane) => self.lane_id(block)?,
+            OpKind::Thread(ThreadIndex::Warp) => {
+                let tid = self.thread_id(block)?;
+                let lanes = self.const_index(block, self.isa.lanes())?;
+                self.divui(block, tid, lanes)?
+            }
             OpKind::Dim(d) => {
                 let mem = self.tile_ir(ir, ir.operand(op, 0))?.mem;
                 let pos = self.const_index(block, d as i64)?;
