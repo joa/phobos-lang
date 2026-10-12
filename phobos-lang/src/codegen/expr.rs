@@ -14,9 +14,9 @@ impl<'c> Codegen<'c> {
         let loc = self.loc;
         let op = if self.is_float(t) {
             match op {
-                BinOp::Add => arith::addf(lhs, rhs, loc),
-                BinOp::Sub => arith::subf(lhs, rhs, loc),
-                BinOp::Mul => arith::mulf(lhs, rhs, loc),
+                BinOp::Add => self.contractable("arith.addf", lhs, rhs)?,
+                BinOp::Sub => self.contractable("arith.subf", lhs, rhs)?,
+                BinOp::Mul => self.contractable("arith.mulf", lhs, rhs)?,
                 BinOp::Div => arith::divf(lhs, rhs, loc),
                 BinOp::Rem => arith::remf(lhs, rhs, loc),
                 BinOp::Eq => arith::cmpf(self.ctx, arith::CmpfPredicate::Oeq, lhs, rhs, loc),
@@ -61,6 +61,16 @@ impl<'c> Codegen<'c> {
             bail!("operator not supported for operands of type {t}");
         };
         self.push(block, op)
+    }
+
+    /// A float add, subtract or multiply that LLVM may fuse with its
+    /// neighbour into one `fma`, as nvcc does by default.
+    fn contractable(&self, name: &str, lhs: Value<'c, 'c>, rhs: Value<'c, 'c>) -> Result<Operation<'c>> {
+        Ok(OperationBuilder::new(name, self.loc)
+            .add_operands(&[lhs, rhs])
+            .add_attributes(&[(self.id("fastmath"), self.parse_attr("#arith.fastmath<contract>")?)])
+            .add_results(&[lhs.r#type()])
+            .build()?)
     }
 
     pub(super) fn unify(

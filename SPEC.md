@@ -159,6 +159,7 @@ All points load one element. A point among slices selects one index and keeps it
 | Arithmetic on tiles | Elementwise. `tile op scalar` and `scalar op tile` broadcast the scalar. |
 | Broadcasting | NumPy-style over axes of extent 1: `[R, C] op [R, 1]` stretches the column. |
 | Unary `-` | On a tile, elementwise `0 - t`. |
+| Float `a * b + c` | May round once, as one fused multiply-add, when the product feeds only the sum: the default of CUDA's `-fmad`. Likewise `c - a * b` and `a * b - c`. |
 | Unary `!` | Scalars only. |
 | Precedence | Loosest first: `\|\|`, `&&`, `==` `!=`, `<` `<=` `>` `>=`, `\|`, `^`, `&`, `<<` `>>`, `+` `-`, `*` `/` `%`, unary. All left-associative. Bitwise operators bind tighter than comparisons, so `x & 15 == 3` tests the masked value. |
 | `&` `\|` `^` `<<` `>>` `~` | On integers: index scalars and integer tiles. `>>` is arithmetic, since integers are signed; mask after it to read an unsigned field, as in `(q >> 4) & 15`. A float operand is an error. |
