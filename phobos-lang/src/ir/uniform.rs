@@ -239,6 +239,7 @@ fn per_thread(kind: &OpKind) -> bool {
             | OpKind::Dim(_)
             | OpKind::Load
             | OpKind::LaneLoad { .. }
+            | OpKind::LaneStore { .. }
             | OpKind::Dot4 { .. }
             | OpKind::F16Bits
             | OpKind::Word
@@ -255,13 +256,15 @@ fn per_thread(kind: &OpKind) -> bool {
     )
 }
 
-/// The tensor parameter a view of global memory reads, if any.
+/// The buffer a view reads: a tensor parameter or a shared tile's
+/// allocation, if any.
 fn root(ir: &Ir, mut value: ValueId) -> Option<ValueId> {
     loop {
         match ir.def(value) {
             Def::Arg { block, .. } => return (block == ir.entry()).then_some(value),
             Def::Result { op, .. } => match ir.kind(op) {
                 OpKind::AssumeAlign | OpKind::Slice(_) | OpKind::Flat => value = ir.operand(op, 0),
+                OpKind::Alloc if is_shared(ir, value) => return Some(value),
                 _ => return None,
             },
         }
@@ -274,31 +277,10 @@ fn describe(ir: &Ir, value: ValueId) -> String {
 
 /// The rules that keep code safe once values differ between threads.
 pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
-    let mut written: HashSet<ValueId> = HashSet::new();
-    let ops = ir.all_ops();
-    for &op in &ops {
+    for op in ir.all_ops() {
         let control = u.control(ir.parent_block(op));
         let kind = ir.kind(op);
         let operands = ir.operands(op);
-        if let OpKind::Store = kind
-            && !is_private(ir, operands[1])
-        {
-            let per_lane = control.max(u.of(operands[0])).max(
-                operands[2..].iter().map(|&i| u.of(i)).max().unwrap_or_default(),
-            );
-            if per_lane != Kind::Uniform {
-                if is_shared(ir, operands[1]) {
-                    bail!(
-                        "a store into the shared tile {} {}: other threads would read it \
-                         with no barrier between; store to a tensor instead",
-                        describe(ir, operands[1]),
-                        per_lane.describe()
-                    );
-                }
-                written.extend(root(ir, operands[1]));
-            }
-            continue;
-        }
         match kind {
             // A `var`'s slot is each thread's own.
             OpKind::Alloc if is_private(ir, ir.result(op)) => continue,
@@ -308,7 +290,8 @@ pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
             ),
             OpKind::Shuffle { .. } => continue,
             OpKind::Exchange if control != Kind::Uniform => bail!(
-                "a collective over `ctx.thread` needs every thread of the CTA, but the control                  it sits under {}",
+                "a collective over `ctx.thread` needs every thread of the CTA, but the control \
+                 it sits under {}",
                 control.describe()
             ),
             OpKind::Exchange => continue,
@@ -334,22 +317,95 @@ pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
             );
         }
     }
-    if written.is_empty() {
-        return Ok(());
+    let mut dirty = HashSet::new();
+    Order { ir, u }.block(ir.entry(), &mut dirty)
+}
+
+/// The buffer a per-thread store writes: a varying value, index or control
+/// stored into a tensor or a shared tile.
+fn per_thread_store(ir: &Ir, u: &Uniformity, op: OpId) -> Option<ValueId> {
+    let operands = ir.operands(op);
+    // A thread's run is its own; any write of one is per thread.
+    if matches!(ir.kind(op), OpKind::LaneStore { .. }) {
+        return root(ir, operands[0]);
     }
-    for &op in &ops {
-        let views = matches!(ir.kind(op), OpKind::AssumeAlign | OpKind::Slice(_) | OpKind::Flat);
-        if views || per_thread(ir.kind(op)) {
-            continue;
+    if !matches!(ir.kind(op), OpKind::Store) || is_private(ir, operands[1]) {
+        return None;
+    }
+    let control = u.control(ir.parent_block(op));
+    let indices = operands[2..].iter().map(|&i| u.of(i)).max().unwrap_or_default();
+    let kind = control.max(u.of(operands[0])).max(indices);
+    (kind != Kind::Uniform).then(|| root(ir, operands[1])).flatten()
+}
+
+/// Buffers stored per thread since the last `barrier()`, walked in program
+/// order. A CTA-wide access to one before a barrier may miss another
+/// thread's store.
+struct Order<'a> {
+    ir: &'a Ir,
+    u: &'a Uniformity,
+}
+
+impl Order<'_> {
+    fn block(&self, block: BlockId, dirty: &mut HashSet<ValueId>) -> Result<()> {
+        for &op in self.ir.ops(block) {
+            self.op(op, dirty)?;
         }
-        if let Some(t) = ir.operands(op).iter().filter_map(|&v| root(ir, v)).find(|t| written.contains(t)) {
+        Ok(())
+    }
+
+    fn op(&self, op: OpId, dirty: &mut HashSet<ValueId>) -> Result<()> {
+        let ir = self.ir;
+        match ir.kind(op) {
+            OpKind::Barrier | OpKind::GridBarrier => {
+                dirty.clear();
+                return Ok(());
+            }
+            // Each branch from the state before it, then their union; with
+            // no `else`, the path that takes neither.
+            OpKind::If => {
+                let blocks = ir.blocks_of(op);
+                let mut out: HashSet<ValueId> = if blocks.len() == 1 { dirty.clone() } else { HashSet::new() };
+                for &b in blocks {
+                    let mut d = dirty.clone();
+                    self.block(b, &mut d)?;
+                    out.extend(d);
+                }
+                *dirty = out;
+                return Ok(());
+            }
+            // Twice, so one iteration's stores meet the next's accesses.
+            OpKind::For(_) | OpKind::While => {
+                for _ in 0..2 {
+                    for &b in ir.blocks_of(op) {
+                        self.block(b, dirty)?;
+                    }
+                }
+                return Ok(());
+            }
+            OpKind::AssumeAlign | OpKind::Slice(_) | OpKind::Flat => return Ok(()),
+            _ => {}
+        }
+        let stored = per_thread_store(ir, self.u, op);
+        // A thread's own point or run may be the one it stored, which only
+        // its indices could tell; those accesses are the source's to fence.
+        if matches!(
+            ir.kind(op),
+            OpKind::Load | OpKind::Store | OpKind::LaneLoad { .. } | OpKind::LaneStore { .. }
+        ) {
+            dirty.extend(stored);
+            return Ok(());
+        }
+        let clash = ir.operands(op).iter().filter_map(|&v| root(ir, v)).find(|r| dirty.contains(r) && Some(*r) != stored);
+        if let Some(buf) = clash {
             bail!(
-                "{} is stored per thread and read by `{}`, which other threads run; \
-                 a per-thread store has no barrier after it",
-                describe(ir, t),
-                ir.kind(op).name()
+                "`{}` reads {} after a per-thread store to it with no `barrier()` between: \
+                 another thread's store may not have landed",
+                ir.kind(op).name(),
+                describe(ir, buf)
             );
         }
+        dirty.extend(stored);
+        Ok(())
     }
-    Ok(())
 }

@@ -7,11 +7,86 @@ use std::collections::HashMap;
 use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv};
-use crate::ast::lanes::{COMBINE_A, COMBINE_B, Collective, Fold, Group, Mode};
+use crate::ast::lanes::{self, COMBINE_A, COMBINE_B, Collective, Fold, Group, Mode};
 use crate::ast::{BinOp, Expr};
 use crate::ir::{OpKind, Scalar, ThreadIndex, Type, ValueId};
 
 impl Build {
+    /// A per-thread builtin: a collective, a shuffle, a thread's run, or a
+    /// word op. None for any other callee.
+    pub(crate) fn emit_lane_builtin(&mut self, callee: &str, args: &[Expr]) -> Result<Option<Rv>> {
+        if let Some(c) = lanes::as_collective(callee, args) {
+            if c.fold == Fold::Reduce && matches!(c.combine, Some(Expr::Var(_))) {
+                bail!("`reduce<..>(x, f)` combines with a `fn f(a, b) = ..`, and none is defined");
+            }
+            return self.emit_collective(c).map(Some);
+        }
+        if let Some((mode, value, operand, width)) = lanes::as_shuffle(callee, args) {
+            return self.emit_shuffle(mode, value, operand, width).map(Some);
+        }
+        Ok(Some(match callee {
+            "sum" if args.len() == 1 => self.emit_lane_sum(&args[0])?,
+            "elem" => {
+                let [slice, at] = args else {
+                    bail!("elem takes a thread's run and which element of it, as `elem(X[r, k :+ 4], 2)`");
+                };
+                self.emit_elem(slice, at)?
+            }
+            // Statements in practice; the zero is what the source sees.
+            "store" => {
+                let [slice, values @ ..] = args else {
+                    bail!("store takes a thread's run and its values, as `store(Y[r, k :+ 2], a, b)`");
+                };
+                self.emit_lane_store(slice, values)?
+            }
+            // A statement in practice; the zero is what the source sees.
+            "barrier" => {
+                ensure!(args.is_empty(), "barrier takes no arguments");
+                self.stmt(OpKind::Barrier, &[]);
+                Rv::Scalar(self.const_index(0))
+            }
+            "word" => match args {
+                [slice] => self.emit_word(slice, &Expr::Int(0))?,
+                [slice, at] => self.emit_word(slice, at)?,
+                _ => bail!("word takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
+            },
+            "dp4a" => {
+                let [x, y, acc] = args else {
+                    bail!("dp4a takes two words and an accumulator");
+                };
+                let operands = [self.emit_index(x, "dp4a")?, self.emit_index(y, "dp4a")?, self.emit_index(acc, "dp4a")?];
+                ensure!(self.target.has_dp4a, "dp4a: this target has no dp4a");
+                Rv::Scalar(self.value(OpKind::Dp4a, &operands, Type::INDEX))
+            }
+            "popcount" => {
+                let [x] = args else {
+                    bail!("popcount takes one integer");
+                };
+                let x = self.emit_index(x, "popcount")?;
+                Rv::Scalar(self.value(OpKind::PopCount, &[x], Type::INDEX))
+            }
+            "byteperm" => {
+                let [x, y, sel] = args else {
+                    bail!("byteperm takes two words and a selector");
+                };
+                let operands = [
+                    self.emit_index(x, "byteperm")?,
+                    self.emit_index(y, "byteperm")?,
+                    self.emit_index(sel, "byteperm")?,
+                ];
+                Rv::Scalar(self.value(OpKind::BytePerm, &operands, Type::INDEX))
+            }
+            "f16bits" => {
+                let [bits] = args else {
+                    bail!("f16bits takes one integer, the half's bits");
+                };
+                let bits = self.emit_index(bits, "f16bits")?;
+                Rv::Scalar(self.value(OpKind::F16Bits, &[bits], Type::Scalar(Scalar::F16)))
+            }
+            _ => return Ok(None),
+        }))
+    }
+
     pub(crate) fn emit_collective(&mut self, c: Collective<'_>) -> Result<Rv> {
         let v = self.emit_scalar(c.value)?;
         let elem = self.scalar_of(v);

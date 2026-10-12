@@ -116,6 +116,7 @@ impl<'c> Codegen<'c> {
                 self.set_ir(ir.result(op), Lowered::Scalar(h));
             }
             OpKind::LaneLoad { dim, len, align } => self.lane_load(block, ir, op, dim, len, align)?,
+            OpKind::LaneStore { dim, len, align } => self.lane_store(block, ir, op, dim, len, align)?,
             OpKind::Dot4 { a, b } => {
                 let ops = ir.operands(op);
                 let (na, nb) = (a.operands(), b.operands());
@@ -190,6 +191,40 @@ impl<'c> Codegen<'c> {
                 as_bytes(self, w)
             }
         }
+    }
+
+    /// One vector store of the run when `align` allows it, else a store per
+    /// element.
+    fn lane_store(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, dim: usize, len: i64, align: i64) -> Result<()> {
+        let operands = ir.operands(op);
+        let mem = self.tile_ir(ir, operands[0])?.mem;
+        let rank = operands.len() - 1 - len as usize;
+        let at = operands[1..=rank]
+            .iter()
+            .map(|&v| self.scalar_ir(v))
+            .collect::<Result<Vec<_>>>()?;
+        let values = operands[rank + 1..]
+            .iter()
+            .map(|&v| self.scalar_ir(v))
+            .collect::<Result<Vec<_>>>()?;
+        if align > 0 {
+            let vec_t = Type::vector(&[len as u64], values[0].r#type());
+            let v = self.push(
+                block,
+                melior::ir::operation::OperationBuilder::new("vector.from_elements", self.loc)
+                    .add_operands(&values)
+                    .add_results(&[vec_t])
+                    .build()?,
+            )?;
+            return self.vec_store_al(block, v, mem, &at, align);
+        }
+        for (i, &v) in values.iter().enumerate() {
+            let mut idx = at.clone();
+            let off = self.const_index(block, i as i64)?;
+            idx[dim] = self.addi(block, at[dim], off)?;
+            block.append_operation(memref::store(v, mem, &idx, self.loc));
+        }
+        Ok(())
     }
 
     /// Four `i8` scalars as the `vector<4xi8>` a `dp4a` reads. Built from a

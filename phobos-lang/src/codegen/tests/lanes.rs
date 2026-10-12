@@ -74,11 +74,32 @@ fn a_cta_wide_op_needs_every_thread_and_the_same_operands() {
 }
 
 #[test]
-fn a_per_thread_store_never_meets_a_cta_read() {
-    let err = emit_err(&kernel("t[0, ctx.lane] = 1.0"));
-    assert!(err.contains("shared tile"), "got: {err}");
-    let err = emit_err(&kernel("O[0, ctx.lane] = 1.0\n t = O[0 :+ 1, 0 :+ 32]"));
-    assert!(err.contains("stored per thread"), "got: {err}");
+fn a_per_thread_store_meets_other_accesses_only_past_a_barrier() {
+    for body in [
+        // The tile `t`, then the tensor `O`, read by the CTA after.
+        "t[0, ctx.lane] = 1.0",
+        "O[0, ctx.lane] = 1.0\n t = O[0 :+ 1, 0 :+ 32]",
+        // One iteration's store and the next's copy.
+        "for i in range(0, 4) {
+            O[0 :+ 1, 0 :+ 32] = t
+            t[0, ctx.lane] = 1.0
+        }",
+    ] {
+        let err = emit_err(&kernel(body));
+        assert!(err.contains("no `barrier()` between"), "{body}\ngot: {err}");
+        let fenced = body.replace("= 1.0", "= 1.0\n barrier()").replace("= x\n", "= x\n barrier()\n");
+        let mlir = emit_mlir(&kernel(&fenced));
+        assert!(module_verifies(&mlir), "{fenced}");
+    }
+    // A thread reading back its own stores is not checked.
+    emit_mlir(&kernel("if ctx.lane == 0 {
+ t[0, 0] = 1.0
+ t[0, 1] = t[0, 0]
+ }
+ barrier()"));
+    // A barrier under per-thread control is no barrier at all.
+    let err = emit_err(&kernel("t[0, ctx.lane] = 1.0\n if ctx.lane == 0 { barrier() }"));
+    assert!(err.contains("runs once per CTA"), "got: {err}");
 }
 
 #[test]
@@ -295,4 +316,48 @@ fn popcount_and_byteperm_take_words() {
         "dp4a(byteperm(word(W[col, k :+ 16], 0), popcount(word(A[0, k :+ 16], 1)), 30001), word(A[0, k :+ 16], 0), 0)",
     ));
     assert_contains(&mlir, &["math.ctpop", "prmt"]);
+}
+
+/// Each thread scales its four elements of every `4 * ctx.threads`, addressed
+/// as `[e / 32, e % 32]` of a row folded into 32-wide blocks.
+fn lane_runs(body: &str) -> String {
+    format!(
+        "@launch(64)
+        @aligned(R = 8)
+        kernel k(X: tensor<f32>[R, 32], Y: tensor<f32>[R, 32]) {{
+            for i in range(0, 1, 1) {{
+                let e = 4 * ctx.thread + i * 4 * ctx.threads
+                {body}
+            }}
+        }}"
+    )
+}
+
+#[test]
+fn elem_and_store_move_a_threads_run_in_one_vector_access() {
+    let mlir = emit_mlir(&lane_runs(
+        "store(Y[e / 32, e % 32 :+ 4], 2.0 * elem(X[e / 32, e % 32 :+ 4], 0), elem(X[e / 32, e % 32 :+ 4], 1),
+               elem(X[e / 32, e % 32 :+ 4], 2), elem(X[e / 32, e % 32 :+ 4], 3))",
+    ));
+    // `e % 32` keeps the divisor 4 of `e`, so both sides are 16-byte
+    // accesses and no element moves alone.
+    assert_contains(&mlir, &["vector.load", "vector.store", "{alignment = 16 : i64}"]);
+    assert!(!mlir.contains("memref.store"), "\n{mlir}");
+}
+
+#[test]
+fn a_run_with_no_alignment_proof_stores_per_element() {
+    let mlir = emit_mlir(&lane_runs("store(Y[e / 32, e % 32 + 1 :+ 2], 1.0, 2.0)"));
+    assert!(!mlir.contains("vector.store"), "\n{mlir}");
+    assert_eq!(mlir.matches("memref.store").count(), 2, "\n{mlir}");
+}
+
+#[test]
+fn run_errors_name_the_problem() {
+    let err = emit_err(&lane_runs("store(Y[e / 32, e % 32 :+ 4], 1.0)"));
+    assert!(err.contains("takes 4 values"), "got: {err}");
+    let err = emit_err(&lane_runs("Y[0, 0] = elem(X[e / 32, e % 32 :+ 4], ctx.lane)"));
+    assert!(err.contains("must be a constant"), "got: {err}");
+    let err = emit_err(&lane_runs("Y[0, 0] = elem(X[e / 32, e % 32 :+ 4], 4)"));
+    assert!(err.contains("element 4 of a run of 4"), "got: {err}");
 }

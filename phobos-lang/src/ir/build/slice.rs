@@ -52,6 +52,12 @@ impl Build {
                 lhs,
                 rhs,
             } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
+            // `a % m` is `a` less a multiple of `m`.
+            Expr::Binary {
+                op: BinOp::Rem,
+                lhs,
+                rhs,
+            } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
             Expr::Call { .. } => self.const_fold(expr).map_or(1, |n| n.abs().min(CAP)),
             _ => 1,
         }
