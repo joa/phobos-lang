@@ -141,7 +141,7 @@ fn the_mlp_chain_needs_exactly_one_barrier() {
     // reads the whole hidden row. The normalization is redundant, so it
     // needs none.
     let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
-    assert!(before.contains("rms_norm_q_t("), "the normalization comes first");
+    assert!(before.contains("sum<over ctx.thread>(ss_s"), "the normalization comes first");
     assert!(before.contains("exp(-v1)"), "the SwiGLU comes first");
     assert!(after.contains("+= qdot_t"), "the accumulation comes after");
 }

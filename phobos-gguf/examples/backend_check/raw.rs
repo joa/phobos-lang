@@ -76,7 +76,7 @@ fn raw_shape_is_tc(m: usize, k: usize, n: usize) -> bool {
 
 /// `check_within`'s signature, named so clippy accepts it as a parameter
 /// type.
-type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
+pub(super) type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 
 /// `check_tc`'s signature.
 type CheckTc<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;

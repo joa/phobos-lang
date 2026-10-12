@@ -15,9 +15,11 @@ use phobos_gguf::backend::device;
 use phobos_gguf::quant::{Packed, Quant, pack_q8_0};
 
 
+mod norm;
 mod raw;
 mod topk;
 
+use norm::check_norms_q;
 use raw::{check_hadamard, check_raw_formats};
 use topk::check_topk;
 
@@ -156,29 +158,7 @@ fn main() -> Result<()> {
         .collect();
     println!("     rms_norm rows disagreeing: {bad_rows:?}");
 
-    // `rms_norm_q`: the normalized rows, and the int8 copy read back through
-    // a Q8_0 projection. At this width and the 27B's.
-    for width_q in [1024usize, 5120] {
-        let x: Vec<f32> = (0..rows * width_q).map(|_| next() * 4.0).collect();
-        let gain: Vec<f32> = (0..width_q).map(|_| next() + 1.5).collect();
-        let n = 64;
-        let qs: Vec<i8> = (0..width_q * n).map(|_| (next() * 127.0) as i8).collect();
-        let scales: Vec<f32> = (0..(width_q / 32) * n).map(|_| next().abs() + 0.01).collect();
-        let packed = pack_q8_0(&qs, &scales, width_q, n)?;
-        let run = |b: &dyn Backend| -> Result<(Vec<f32>, Vec<f32>)> {
-            let xb = b.upload(&x)?;
-            let gb = b.upload(&gain)?;
-            let out = b.alloc(rows * width_q)?;
-            let act = b.rms_norm_q(xb, rows, width_q, gb, eps, out)?;
-            let wb = b.constant_quant(&format!("rmsq{width_q}"), &packed)?;
-            let proj = b.alloc(rows * n)?;
-            b.matmul_quant_act(act, rows, width_q, wb, n, proj)?;
-            Ok((read_vec(b, out, rows * width_q)?, read_vec(b, proj, rows * n)?))
-        };
-        let ((want_o, want_p), (got_o, got_p)) = (run(&host)?, run(&gpu)?);
-        check(&format!("rms_norm_q [{rows} x {width_q}]"), &want_o, &got_o);
-        check_within(&format!("rms_norm_q act [{rows} x {width_q} x {n}]"), 1e-3, &want_p, &got_p);
-    }
+    check_norms_q(&host, &gpu, rows, eps, &check_within, &mut next)?;
 
     let y: Vec<f32> = (0..rows * width).map(|_| next()).collect();
     let run_add = |b: &dyn Backend| -> Result<Vec<f32>> {

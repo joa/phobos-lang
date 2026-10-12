@@ -226,14 +226,8 @@ impl Emit {
         let gf = self.given(gain, key.len_of(gain), View::Folded);
         let (qs, sc) = self.quant_rows(out, key.len_of(out));
         let eps = f32::from_bits(eps_bits);
-        let q8 = Q8_BLOCK;
-        let _ = write!(
-            self.body,
-            "
-  rms_norm_q_t({xf}[0 :+ {nb}, 0 :+ {q8}], {gf}[0 :+ {nb}, 0 :+ {q8}], {eps:.12},
-               {qs}[0 :+ {nb}, 0 :+ {q8}], {sc}[0 :+ {nb}, 0 :+ 1])
-"
-        );
+        let operands = NormOperands { x: &xf, g: &gf, z: None, out: None, q: &qs, s: &sc, row0: "0" };
+        let _ = write!(self.body, "\n{}", rms_norm_q_lanes(&operands, &nb, eps, &format!("s{s}")));
         Ok(true)
     }
 
