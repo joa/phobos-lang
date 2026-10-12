@@ -304,7 +304,7 @@ kernel q8_reduce(P: tensor<f32>[S, N], C: tensor<f32>[M, N]) {
   let pn = program_id(0)
   var acc: tile<f32>[1, RT] = 0.0
   for s in range(0, S, 1) {
-    acc = acc + P[s :+ 1, pn * RT :+ RT]
+    acc += P[s :+ 1, pn * RT :+ RT]
   }
   C[0 :+ 1, pn * RT :+ RT] = acc
 }

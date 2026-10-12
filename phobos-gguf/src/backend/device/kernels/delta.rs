@@ -37,7 +37,7 @@ kernel delta_rule(Q:   tensor<f32>[R, D],
     var e: tile<f32>[1, TN] = dot(k, st)
     e = (v - e) * bet
     var kt: tile<f32>[D, 1] = transpose(k)
-    st = st + kt * e
+    st += kt * e
     O[r :+ 1, jn * TN :+ TN] = dot(q, st)
   }
 
@@ -327,7 +327,7 @@ kernel delta_conv(X: tensor<f32>[PR, C], W: tensor<f32>[KS, C], O: tensor<f32>[R
   for k in range(0, KS, 1) {{
     var x = X[t * TB + k :+ TB, cb :+ D]
     var w = W[k :+ 1, cb :+ D]
-    acc = acc + x * w
+    acc += x * w
   }}
   var s = acc / (1.0 + exp(-acc))
   var g: tile<f32>[TB, 1] = 1.0
