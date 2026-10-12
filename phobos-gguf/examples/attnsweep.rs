@@ -31,7 +31,7 @@ kernel scores(Q: tensor<f32>[M, K], W: tensor<f32>[N, K], S: tensor<f32>[M, N]) 
   for kt in range(0, K, TK) {
     var a = Q[pm * TM :+ TM, kt :+ TK]
     var b = W[pn * TN :+ TN, kt :+ TK]
-    acc = acc + dot_t(a, b)
+    acc += dot_t(a, b)
   }
   S[pm * TM :+ TM, pn * TN :+ TN] = acc
 }

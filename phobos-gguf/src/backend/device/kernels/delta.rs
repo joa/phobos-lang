@@ -88,7 +88,7 @@ pub(crate) fn delta_wy_src(heads: usize, head_dim: usize, chunk: usize) -> Strin
             ("p1", "p0")
         };
 
-        invert.push_str(&format!("  t = t + dot(t, {this})\n"));
+        invert.push_str(&format!("  t += dot(t, {this})\n"));
 
         if round + 1 < rounds {
             let decl = if round == 0 {

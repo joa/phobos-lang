@@ -71,7 +71,7 @@ pub(crate) fn q3k_matvec_src(tn: usize) -> String {
         let _ = writeln!(
             body,
             "{decode}    let a{is} = A[pm :+ 1, kb * 256 + {out_off} :+ {RUN}]
-    acc = acc + dot_t(a{is}, decoded{is})"
+    acc += dot_t(a{is}, decoded{is})"
         );
     }
 

@@ -36,7 +36,7 @@ const VARIANTS: &[(&str, &str)] = &[
     var e: tile<f32>[1, TN] = dot(k, st)
     e = (v - e) * bet
     var kt: tile<f32>[D, 1] = transpose(k)
-    st = st + dot(kt, e)
+    st += dot(kt, e)
     O[r :+ 1, jn * TN :+ TN] = dot(q, st)",
     ),
     (
@@ -62,7 +62,7 @@ const VARIANTS: &[(&str, &str)] = &[
     var e: tile<f32>[1, TN] = dot(k, st)
     e = (v - e) * bet
     var kt: tile<f32>[D, 1] = transpose(k)
-    st = st + dot(kt, e)
+    st += dot(kt, e)
     O[r :+ 1, jn * TN :+ TN] = e",
     ),
     (
@@ -70,7 +70,7 @@ const VARIANTS: &[(&str, &str)] = &[
         "    st = st * dec
     var e: tile<f32>[1, TN] = v * bet
     var kt: tile<f32>[D, 1] = transpose(k)
-    st = st + dot(kt, e)
+    st += dot(kt, e)
     O[r :+ 1, jn * TN :+ TN] = e",
     ),
     (
