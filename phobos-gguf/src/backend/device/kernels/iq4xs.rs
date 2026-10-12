@@ -23,37 +23,31 @@ const QS_OFF: usize = SCALES_L_OFF + 4;
 /// [`crate::quant::iq4xs_flat_codebook`]'s length: sixteen nibble values.
 pub(crate) const IQ4XS_CODEBOOK_LEN: usize = 16;
 
-/// Byte offsets and scale-bit divisors for run `ib`.
-fn run_geometry(ib: usize) -> (usize, usize, usize, usize) {
-    let scale_l_off = SCALES_L_OFF + ib / 2;
-    let scale_l_div = if ib.is_multiple_of(2) { 1 } else { 16 };
-    let scale_h_div = 4usize.pow(ib as u32);
+/// Byte offsets and shifts of run `ib`'s scale bits, low then high, and its
+/// quants' offset.
+fn run_geometry(ib: usize) -> ((usize, usize), (usize, usize), usize) {
+    let scale_l = (SCALES_L_OFF + ib / 2, if ib.is_multiple_of(2) { 0 } else { 4 });
+    let scale_h = (SCALES_H_OFF + ib / 4, 2 * (ib % 4));
     let qs_off = QS_OFF + RUN / 2 * ib;
-    (scale_l_off, scale_l_div, scale_h_div, qs_off)
+    (scale_l, scale_h, qs_off)
 }
 
 /// One run's decode, `var idx{ib}` and `let decoded{ib} = ...`, with its
-/// `out_off`.
+/// `out_off`. A field is read as `(i32(b) >> s) & m`, as in q2k.rs.
 fn decoded_run(ib: usize) -> (usize, String) {
-    let (scale_l_off, scale_l_div, scale_h_div, qs_off) = run_geometry(ib);
+    let ((l_off, l_shift), (h_off, h_shift), qs_off) = run_geometry(ib);
     let out_off = ib * RUN;
-    let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
-    let low = format!("(({} / {scale_l_div}) % 16)", byte(scale_l_off));
-    let scales_h = format!(
-        "({} + {} * 256)",
-        byte(SCALES_H_OFF),
-        byte(SCALES_H_OFF + 1)
-    );
-    let high = format!("(({scales_h} / {scale_h_div}) % 4)");
+    let low = format!("((i32(qb[:, {l_off} :+ 1]) >> {l_shift}) & 15)");
+    let high = format!("((i32(qb[:, {h_off} :+ 1]) >> {h_shift}) & 3)");
     let dl = format!("(f32(d) * f32({low} + {high} * 16 - 32))");
     let half = RUN / 2;
-    let qs16 = format!("((i32(qb[:, {qs_off} :+ {half}]) + 256) % 256)");
+    let qs16 = format!("i32(qb[:, {qs_off} :+ {half}])");
     (
         out_off,
         format!(
             "    var idx{ib}: tile<i32>[TN, {RUN}] = 0
-    idx{ib}[:, 0 :+ {half}] = {qs16} % 16
-    idx{ib}[:, {half} :+ {half}] = {qs16} / 16
+    idx{ib}[:, 0 :+ {half}] = {qs16} & 15
+    idx{ib}[:, {half} :+ {half}] = ({qs16} >> 4) & 15
     let decoded{ib} = {dl} * f32(gather(codebook, idx{ib}))\n"
         ),
     )

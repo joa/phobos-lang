@@ -19,42 +19,39 @@ const BLOCK_BYTES: usize = 112;
 const QS_OFF: usize = 32;
 const SCALES_OFF: usize = 96;
 
-/// Byte offsets and shift divisors for run `is`'s `qs` bits and `hmask`
-/// bit, split as in Q2_K's `run_geometry`.
+/// Byte offsets and shifts for run `is`'s `qs` bits and `hmask` bit, split
+/// as in Q2_K's `run_geometry`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize) {
     let h = is / 8;
     let rem = is % 8;
     let j = rem / 2;
     let half2 = rem % 2;
     let qs_off = QS_OFF + h * 32 + half2 * 16;
-    let qs_div = 4usize.pow(j as u32);
     let hm_off = half2 * 16;
-    let hm_div = 2usize.pow((h * 4 + j) as u32);
-    (qs_off, qs_div, hm_off, hm_div)
+    (qs_off, 2 * j, hm_off, h * 4 + j)
 }
 
-/// Byte offsets and divisors for run `is`'s signed 6-bit scale in the
-/// 12-byte `scales` field, following `unpack_scales`.
+/// Byte offsets and shifts for run `is`'s signed 6-bit scale in the 12-byte
+/// `scales` field, following `unpack_scales`.
 fn scale_geometry(is: usize) -> (usize, usize, usize, usize) {
     let group = is / 4;
     let c = is % 4;
     let lo_off = SCALES_OFF + if group.is_multiple_of(2) { c } else { 4 + c };
-    let lo_div = if group < 2 { 1 } else { 16 };
+    let lo_shift = if group < 2 { 0 } else { 4 };
     let hi_off = SCALES_OFF + 8 + c;
-    let hi_div = 4usize.pow(group as u32);
-    (lo_off, lo_div, hi_off, hi_div)
+    (lo_off, lo_shift, hi_off, 2 * group)
 }
 
 /// One run's decode, `let scale{is}` and `let decoded{is} = ...`, with its
-/// `out_off`.
+/// `out_off`. A field is read as `(i32(b) >> s) & m`, as in q2k.rs.
 fn decoded_run(is: usize) -> (usize, String) {
-    let (qs_off, qs_div, hm_off, hm_div) = run_geometry(is);
-    let (lo_off, lo_div, hi_off, hi_div) = scale_geometry(is);
+    let (qs_off, qs_shift, hm_off, hm_shift) = run_geometry(is);
+    let (lo_off, lo_shift, hi_off, hi_shift) = scale_geometry(is);
     let out_off = is * RUN;
-    let lo = format!("(((i32(qb[:, {lo_off} :+ 1]) + 256) % 256) / {lo_div} % 16)");
-    let hi = format!("(((i32(qb[:, {hi_off} :+ 1]) + 256) % 256) / {hi_div} % 4)");
-    let low2 = format!("(((i32(qb[:, {qs_off} :+ {RUN}]) + 256) % 256) / {qs_div} % 4)");
-    let bit = format!("(((i32(qb[:, {hm_off} :+ {RUN}]) + 256) % 256) / {hm_div} % 2)");
+    let lo = format!("((i32(qb[:, {lo_off} :+ 1]) >> {lo_shift}) & 15)");
+    let hi = format!("((i32(qb[:, {hi_off} :+ 1]) >> {hi_shift}) & 3)");
+    let low2 = format!("((i32(qb[:, {qs_off} :+ {RUN}]) >> {qs_shift}) & 3)");
+    let bit = format!("((i32(qb[:, {hm_off} :+ {RUN}]) >> {hm_shift}) & 1)");
     (
         out_off,
         format!(

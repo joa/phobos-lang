@@ -27,7 +27,7 @@ const SCALES_OFF: usize = SIGNS_OFF + 32;
 /// lanes each.
 pub(crate) const IQ3S_GRID_LEN: usize = 512 * 4;
 
-/// Byte offsets and `qh` divisors for lane `is`, split into group, half and
+/// Byte offsets and `qh` shifts for lane `is`, split into group, half and
 /// lane as in `quant/iq3_s.rs::dequantize`.
 fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize, usize, usize) {
     let o = is / 8;
@@ -38,37 +38,28 @@ fn run_geometry(is: usize) -> (usize, usize, usize, usize, usize, usize, usize) 
     let qh_off = QH_OFF + 2 * o + half;
     let signs_off = SIGNS_OFF + 8 * o + 4 * half + l;
     let scale_off = SCALES_OFF + o;
-    let (qh_div1, qh_div2) = (2usize.pow(2 * l as u32), 2usize.pow(2 * l as u32 + 1));
-    (
-        grid1_off,
-        grid1_off + 1,
-        qh_off,
-        signs_off,
-        scale_off,
-        qh_div1,
-        qh_div2,
-    )
+    (grid1_off, grid1_off + 1, qh_off, signs_off, scale_off, 2 * l, 2 * l + 1)
 }
 
 /// Both of one lane's decoded halves, `let decoded{is}_{half} = ...`, each
 /// with its `out_off`.
 fn decoded_lane(is: usize) -> [(usize, String); 2] {
-    let (g1_off, g2_off, qh_off, signs_off, scale_off, qh_div1, qh_div2) = run_geometry(is);
+    let (g1_off, g2_off, qh_off, signs_off, scale_off, qh_shift1, qh_shift2) = run_geometry(is);
     let out_off = is * 8;
-    let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
+    let byte = |off: usize| format!("(i32(qb[:, {off} :+ 1]) & 255)");
     let qh_byte = byte(qh_off);
     let signs_byte = byte(signs_off);
     let scale_byte = byte(scale_off);
     let nibble = if is % 8 < 4 {
-        format!("({scale_byte} % 16)")
+        format!("({scale_byte} & 15)")
     } else {
-        format!("({scale_byte} / 16)")
+        format!("({scale_byte} >> 4)")
     };
     let db = format!("(f32(d) * f32(1 + 2 * {nibble}))");
-    [(g1_off, qh_div1, 0), (g2_off, qh_div2, 4)].map(|(grid_off, qh_div, sign_shift)| {
+    [(g1_off, qh_shift1, 0), (g2_off, qh_shift2, 4)].map(|(grid_off, qh_shift, sign_shift)| {
         let half = usize::from(sign_shift != 0);
         let iota4 = format!("IOTA[0 :+ 1, 0 :+ {HALF}]");
-        let grid_idx = format!("({} + (({qh_byte} / {qh_div}) % 2) * 256)", byte(grid_off));
+        let grid_idx = format!("({} + (({qh_byte} >> {qh_shift}) & 1) * 256)", byte(grid_off));
         let grid_idx8 = format!("({grid_idx} * {HALF} + {iota4})");
         let sign_idx8 = format!("({signs_byte} * 8 + {sign_shift} + {iota4})");
         (

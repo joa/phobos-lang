@@ -37,17 +37,17 @@ fn run_geometry(is: usize) -> (usize, usize, usize) {
 fn decoded_lane(is: usize) -> (usize, String) {
     let (lo_off, hi_off, scale_off) = run_geometry(is);
     let out_off = is * LANE;
-    let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
+    let byte = |off: usize| format!("(i32(qb[:, {off} :+ 1]) & 255)");
     let q16 = format!("({} + {} * 256)", byte(lo_off), byte(hi_off));
     let scale_byte = byte(scale_off);
     let nibble = if is % 4 < 2 {
-        format!("({scale_byte} % 16)")
+        format!("({scale_byte} & 15)")
     } else {
-        format!("({scale_byte} / 16)")
+        format!("({scale_byte} >> 4)")
     };
     let dl = format!("(f32(d) * (0.5 + f32({nibble})) * 0.25)");
-    let mag_idx8 = format!("(({q16} % 512) * {LANE} + iota)");
-    let sign_idx8 = format!("(({q16} / 512) * {LANE} + iota)");
+    let mag_idx8 = format!("(({q16} & 511) * {LANE} + iota)");
+    let sign_idx8 = format!("(({q16} >> 9) * {LANE} + iota)");
     (
         out_off,
         format!(

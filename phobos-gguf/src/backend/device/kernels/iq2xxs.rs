@@ -40,31 +40,31 @@ fn run_geometry(is: usize) -> (usize, usize, usize, Option<usize>, usize) {
     let aux = chunk + 4;
     let grid_off = chunk + l;
     let scale_off = aux + 3;
-    let (lo_off, hi_off, shift_div) = match l {
-        0 => (aux, None, 1),
-        1 => (aux, Some(aux + 1), 128),
-        2 => (aux + 1, Some(aux + 2), 64),
-        _ => (aux + 2, Some(aux + 3), 32),
+    let (lo_off, hi_off, shift) = match l {
+        0 => (aux, None, 0),
+        1 => (aux, Some(aux + 1), 7),
+        2 => (aux + 1, Some(aux + 2), 6),
+        _ => (aux + 2, Some(aux + 3), 5),
     };
-    (grid_off, scale_off, lo_off, hi_off, shift_div)
+    (grid_off, scale_off, lo_off, hi_off, shift)
 }
 
 /// One lane's decoded value, `let decoded{is} = ...`, and its `out_off`.
 fn decoded_lane(is: usize) -> (usize, String) {
-    let (grid_off, scale_off, lo_off, hi_off, shift_div) = run_geometry(is);
+    let (grid_off, scale_off, lo_off, hi_off, shift) = run_geometry(is);
     let out_off = is * LANE;
-    let byte = |off: usize| format!("((i32(qb[:, {off} :+ 1]) + 256) % 256)");
+    let byte = |off: usize| format!("(i32(qb[:, {off} :+ 1]) & 255)");
     let grid_idx = byte(grid_off);
     let scale = byte(scale_off);
     let lo = byte(lo_off);
     let signs_idx = match hi_off {
-        None => format!("({lo} % 128)"),
+        None => format!("({lo} & 127)"),
         Some(hi_off) => {
             let hi = byte(hi_off);
-            format!("((({lo} + {hi} * 256) / {shift_div}) % 128)")
+            format!("((({lo} + {hi} * 256) >> {shift}) & 127)")
         }
     };
-    let db = format!("(f32(d) * (0.5 + f32({scale} / 16)) * 0.25)");
+    let db = format!("(f32(d) * (0.5 + f32({scale} >> 4)) * 0.25)");
     let mag_idx8 = format!("({grid_idx} * {LANE} + iota)");
     let sign_idx8 = format!("({signs_idx} * {LANE} + iota)");
     (
