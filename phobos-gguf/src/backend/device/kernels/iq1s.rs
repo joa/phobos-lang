@@ -74,7 +74,7 @@ pub(crate) fn iq1s_matvec_src(tn: usize) -> String {
     for is in 0..LANES {
         let (out_off, decode) = decoded_lane(is);
         let a_is = format!("A[pm :+ 1, kb * 256 + {out_off} :+ {LANE}]");
-        let _ = writeln!(body, "{decode}    acc = acc + dot_t({a_is}, decoded{is})");
+        let _ = writeln!(body, "{decode}    acc += dot_t({a_is}, decoded{is})");
     }
 
     format!(

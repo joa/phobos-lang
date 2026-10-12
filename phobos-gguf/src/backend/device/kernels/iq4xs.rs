@@ -66,7 +66,7 @@ pub(crate) fn iq4xs_matvec_src(tn: usize) -> String {
         let _ = writeln!(
             body,
             "{decode}    let a{ib} = A[pm :+ 1, kb * 256 + {out_off} :+ {RUN}]
-    acc = acc + dot_t(a{ib}, decoded{ib})"
+    acc += dot_t(a{ib}, decoded{ib})"
         );
     }
 
