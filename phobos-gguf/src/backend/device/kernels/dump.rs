@@ -35,6 +35,7 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    sources.push(("delta_wy".to_string(), delta_wy_src(32, 128, DELTA_CHUNK)));
     // The 4B's attention heads: 256 wide, 64 of them rotated.
     for cache in [false, true] {
         let name = if cache { "attn_prep_kv" } else { "attn_prep_q" };
@@ -138,6 +139,7 @@ fn dump_raw_kernel_sources() {
         sources.push((format!("q50_qmma_{tn}"), q50_qmma_src(Q8_QMMA_CTA, Q8_QMMA_TM, tn)));
     }
     sources.push(("q50_qmma_shallow".into(), q50_qmma_src(Q8_QMMA_CTA, Q8_QMMA_SHALLOW, Q8_QMMA_TN)));
+    sources.extend(crate::backend::device::formats::all_sources());
     for (name, src) in sources {
         std::fs::write(dir.join(format!("{name}.ph")), src).unwrap();
     }

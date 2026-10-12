@@ -284,6 +284,22 @@ fn jobs(quant: Quant, spec: &Spec, into: &mut Vec<Job>) {
     }
 }
 
+/// Every raw format's kernel sources, each named by its function, tile and
+/// place in the list, for the kernel-source dump.
+#[cfg(test)]
+pub(super) fn all_sources() -> Vec<(String, String)> {
+    let mut all = Vec::new();
+    for quant in Quant::ALL {
+        if let Some(spec) = spec(quant) {
+            jobs(quant, &spec, &mut all);
+        }
+    }
+    all.into_iter()
+        .enumerate()
+        .map(|(i, job)| (format!("{}_{}_{i}", job.name, job.tn), job.source))
+        .collect()
+}
+
 /// Compiles the kernels of every format in `formats` in one parallel batch.
 /// Each format in `formats` gets an entry, empty for one with no kernels.
 pub(super) fn build(formats: &[Quant]) -> Result<HashMap<Quant, FormatKernels>> {
