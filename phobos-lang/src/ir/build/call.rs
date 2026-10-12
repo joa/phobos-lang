@@ -23,6 +23,13 @@ impl Build {
         }
         match callee {
             "sum" if args.len() == 1 => self.emit_lane_sum(&args[0]),
+            "f16bits" => {
+                let [bits] = args else {
+                    bail!("f16bits takes one integer, the half's bits");
+                };
+                let bits = self.emit_index(bits, "f16bits")?;
+                Ok(Rv::Scalar(self.value(OpKind::F16Bits, &[bits], Type::Scalar(Scalar::F16))))
+            }
             ctx::BLOCK | ctx::BLOCKS => {
                 let [Expr::Int(d @ 0..=2)] = args else {
                     unreachable!("the parser builds ctx fields with an axis 0..=2");

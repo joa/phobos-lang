@@ -241,3 +241,36 @@ fn a_lane_sum_needs_a_slice() {
     let err = emit_err(&lane_dot("sum(acc)"));
     assert!(err.contains("one thread's own slice"), "got: {err}");
 }
+
+#[test]
+fn byte_masks_and_run_sums_stay_on_dp4a() {
+    // Low and high nibbles, and the sum of a run, each one dp4a per word.
+    for body in [
+        "sum(i32(W[col, k :+ 16] & 15) * i32(A[0, k :+ 16]))",
+        "sum(i32((W[col, k :+ 16] >> 4) & 15) * i32(A[0, k :+ 16]))",
+        "sum(i32(A[0, k :+ 16]))",
+    ] {
+        let mlir = emit_mlir(&lane_dot(body));
+        let loads = mlir.matches("vector.load").count();
+        assert!(loads > 0, "{body}\n{mlir}");
+        assert!(mlir.contains("nvvm.dot.accumulate.4way"), "{body}\n{mlir}");
+        assert!(!mlir.lines().any(|l| l.contains("memref.load") && l.contains("xi8, 1>")), "{body}\n{mlir}");
+    }
+    // A mask past 127 would read a byte as negative; that one is summed
+    // per element instead.
+    let mlir = emit_mlir(&lane_dot("sum((W[col, k :+ 16] & 255) * A[0, k :+ 16])"));
+    assert!(!mlir.contains("nvvm.dot.accumulate"), "\n{mlir}");
+}
+
+#[test]
+fn f16bits_reads_a_half_from_its_bits() {
+    let mlir = emit_mlir(
+        "@launch(32)
+        kernel k(B: tensor<i8>[1, 2], O: tensor<f32>[1, 1]) {
+            if ctx.lane == 0 {
+                O[0, 0] = f32(f16bits((B[0, 0] & 255) | ((B[0, 1] & 255) << 8)))
+            }
+        }",
+    );
+    assert_contains(&mlir, &["arith.bitcast", "i16 to f16", "arith.extf"]);
+}

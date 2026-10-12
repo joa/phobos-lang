@@ -239,7 +239,8 @@ fn per_thread(kind: &OpKind) -> bool {
             | OpKind::Dim(_)
             | OpKind::Load
             | OpKind::LaneLoad { .. }
-            | OpKind::Dot4
+            | OpKind::Dot4 { .. }
+            | OpKind::F16Bits
             | OpKind::Store
             | OpKind::Trap
             | OpKind::For(_)

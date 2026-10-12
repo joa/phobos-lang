@@ -13,7 +13,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv, gcd};
 use crate::ast::{BinOp, Expr, Sub};
-use crate::ir::{Extent, OpKind, Scalar, Type, ValueId};
+use crate::ir::{Bytes, Extent, OpKind, Scalar, Type, ValueId};
 
 /// The most bytes one vector load moves.
 const MAX_VECTOR_BYTES: i64 = 16;
@@ -27,22 +27,29 @@ impl Build {
             "`sum(e)` without `over` sums one thread's own slice, as `sum(A[0, k :+ 4])`; \
              a tile's rows are `rowsum`"
         );
-        if let Some((a, b)) = dp4a_operands(e)
+        if let Some(sides) = dp4a_sides(e)
             && self.target.has_dp4a
-            && self.span_elem(a) == Some(Scalar::I8)
-            && self.span_elem(b) == Some(Scalar::I8)
+            && sides.iter().flatten().all(|(span, _)| self.span_elem(span) == Some(Scalar::I8))
         {
-            let (xs, ys) = (self.lane_load(a)?, self.lane_load(b)?);
+            let mut runs = Vec::new();
+            for (span, how) in sides.iter().flatten() {
+                runs.push((self.lane_load(span)?, *how));
+            }
+            let n = runs[0].0.len();
             ensure!(
-                xs.len() == ys.len() && xs.len() % 4 == 0,
-                "`sum(i32(a) * i32(b))` over `i8` slices needs both one length, a multiple of four"
+                runs.iter().all(|(r, _)| r.len() == n) && n % 4 == 0,
+                "`sum(..)` over `i8` slices as `dp4a`: every slice one length, a multiple of four"
             );
+            let side = |k: usize| runs.get(k).map_or(Bytes::Ones, |r| r.1);
+            let (a, b) = (side(0), side(1));
             let mut acc = self.const_index(0);
-            for (x, y) in xs.chunks(4).zip(ys.chunks(4)) {
-                let mut operands = x.to_vec();
-                operands.extend_from_slice(y);
+            for q in 0..n / 4 {
+                let mut operands = Vec::new();
+                for (r, _) in &runs {
+                    operands.extend_from_slice(&r[4 * q..4 * q + 4]);
+                }
                 operands.push(acc);
-                acc = self.value(OpKind::Dot4, &operands, Type::INDEX);
+                acc = self.value(OpKind::Dot4 { a, b }, &operands, Type::INDEX);
             }
             return Ok(Rv::Scalar(acc));
         }
@@ -214,27 +221,55 @@ fn substitute(e: &Expr, spans: &[&Expr], names: &[String]) -> Expr {
     }
 }
 
-/// `x` and `y` of `i32(x) * i32(y)`, or of `x * y`.
-fn dp4a_operands(e: &Expr) -> Option<(&Expr, &Expr)> {
-    let Expr::Binary {
+/// The `dp4a` form of `e`: `x * y`, or `x` alone (summed against ones),
+/// each side a slice, optionally under `i32(..)`, as loaded or as
+/// `s & c` or `(s >> k) & c`. A mask keeps every byte under 128, so it reads
+/// the same signed, and a shift stays inside the byte.
+fn dp4a_sides(e: &Expr) -> Option<[Option<(&Expr, Bytes)>; 2]> {
+    if let Expr::Binary {
         op: BinOp::Mul,
         lhs,
         rhs,
     } = e
-    else {
-        return None;
-    };
-    let (a, b) = (dp4a_operand(lhs)?, dp4a_operand(rhs)?);
-    matches!(a, Expr::Index { .. }).then_some(())?;
-    matches!(b, Expr::Index { .. }).then_some(())?;
-    Some((a, b))
+    {
+        return Some([Some(dp4a_side(lhs)?), Some(dp4a_side(rhs)?)]);
+    }
+    Some([Some(dp4a_side(e)?), None])
 }
 
-/// The slice under an `i32(..)`, or the slice itself.
-fn dp4a_operand(x: &Expr) -> Option<&Expr> {
+fn dp4a_side(x: &Expr) -> Option<(&Expr, Bytes)> {
+    let x = match x {
+        Expr::Call { callee, args } if callee == "i32" && args.len() == 1 => &args[0],
+        _ => x,
+    };
+    let int = |e: &Expr| match e {
+        Expr::Int(n) => Some(*n),
+        _ => None,
+    };
     match x {
-        Expr::Call { callee, args } if callee == "i32" && args.len() == 1 => Some(&args[0]),
-        Expr::Index { .. } => Some(x),
+        Expr::Index { .. } => Some((x, Bytes::Raw)),
+        Expr::Binary {
+            op: BinOp::BitAnd,
+            lhs,
+            rhs,
+        } => {
+            let mask = int(rhs).filter(|m| (0..128).contains(m))?;
+            let (span, shift) = match lhs.as_ref() {
+                Expr::Index { .. } => (lhs.as_ref(), 0),
+                Expr::Binary {
+                    op: BinOp::Shr,
+                    lhs: inner,
+                    rhs: by,
+                } if matches!(inner.as_ref(), Expr::Index { .. }) => {
+                    let shift = int(by).filter(|s| (0..8).contains(s))?;
+                    // The bits past the byte's top must be masked off.
+                    (mask < 1 << (8 - shift)).then_some(())?;
+                    (inner.as_ref(), shift)
+                }
+                _ => return None,
+            };
+            Some((span, Bytes::Masked { shift: shift as u8, mask: mask as u8 }))
+        }
         _ => None,
     }
 }
