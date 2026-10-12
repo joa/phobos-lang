@@ -90,6 +90,7 @@ impl Membar<'_> {
                 | OpKind::StoreRelease
                 | OpKind::RegsFused(_)
                 | OpKind::RegsStore
+                | OpKind::RegsReduce(_)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::WarpPartial)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::DeltaScan)
                 | OpKind::Intrinsic(crate::ir::Intrinsic::RmsNormQ)
