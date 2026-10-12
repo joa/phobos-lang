@@ -43,7 +43,6 @@ mod qmma;
 mod qmma_signed;
 mod reduce;
 mod vector;
-mod warp_attn;
 
 pub(in crate::codegen) use qdecode::QFormat;
 pub(in crate::codegen) use qdot::QWeight;

@@ -209,22 +209,6 @@ fn flat_rejects_what_is_not_a_declared_tile() {
     }
 }
 
-/// `warp_partial`'s K/V loads at D = 128 (dpl = 4) come out as one 4xf16
-/// vector load per key per lane, not four scalar ones.
-#[test]
-fn warp_partial_vectorizes_kv_loads_at_dpl_4() {
-    let mlir = emit_mlir(&warp_partial_probe(128, 8, 8));
-    assert_contains(&mlir, &["vector.load", "vector<4xf16>", "alignment = 8"]);
-}
-
-/// The same at D = 256 (dpl = 8), with a lane's whole slice in one 16-byte
-/// load.
-#[test]
-fn warp_partial_vectorizes_kv_loads_at_dpl_8() {
-    let mlir = emit_mlir(&warp_partial_probe(256, 8, 8));
-    assert_contains(&mlir, &["vector.load", "vector<8xf16>", "alignment = 16"]);
-}
-
 /// `@padstage` pads a staging tile whose row pitch is a multiple of the bank
 /// period, via `alloc_tile_padded`. See `Build::should_pad_stage`.
 #[test]
@@ -331,26 +315,6 @@ fn staging_run_stops_before_a_non_slice_statement() {
     assert_eq!(views.len(), 3, "{mlir}");
     let barrier = mlir.find("gpu.barrier").expect("a barrier");
     assert!(views[2] < barrier, "the barrier must follow c's copy:\n{mlir}");
-}
-
-/// A minimal kernel calling `warp_partial` the way `attention_split_src`
-/// does: one program, one warp group of query rows, and the whole cache as
-/// `[lo, hi)`.
-fn warp_partial_probe(d: i64, wct: i64, qw: i64) -> String {
-    format!(
-        "@autotune(D in [{d}], WCT in [{wct}], QG in [1], QW in [{qw}])
-        @launch(256)
-        @aligned(KW = D)
-        kernel wp(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW], V: tensor<f16>[NK, KW],
-                  O: tensor<f32>[QW, D]) {{
-            var q = Q[0 :+ QG, 0 :+ D]
-            var wm: tile<f32>[QG, WCT] = -1.0e30
-            var wl: tile<f32>[QG, WCT] = 0.0
-            var wacc: tile<f32>[QW, D] = 0.0
-            warp_partial(q, K, V, 0, NK, 0, wm, wl, wacc, 0.088388347648)
-            O[0 :+ QW, 0 :+ D] = wacc
-        }}"
-    )
 }
 
 
