@@ -17,6 +17,9 @@ struct Plan {
     rank: usize,
     operands: Vec<ValueId>,
     leaves: Vec<ValueId>,
+    /// Each scalar operand's index and its value before the coercion, so an
+    /// integer subtree can take it at its own type instead.
+    scalars: Vec<(usize, ValueId)>,
 }
 
 impl Build {
@@ -207,6 +210,8 @@ impl Build {
             Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 let a = self.plan_fused(lhs, plan)?;
                 let b = self.plan_fused(rhs, plan)?;
+                self.scalar_to_int_side(&a, &b, plan)?;
+                self.scalar_to_int_side(&b, &a, plan)?;
                 Tree::Binary(*op, Box::new(a), Box::new(b))
             }
             // -x is 0 - x and ~x is x ^ -1, against a scalar leaf.
@@ -273,13 +278,54 @@ impl Build {
     /// A scalar operand of the tree, coerced to the target's element type
     /// outside a comparison and kept at its own width inside one.
     fn scalar_leaf(&mut self, v: ValueId, plan: &mut Plan) -> Result<Tree> {
+        let raw = v;
         let v = match self.scalar_of(v) {
             Scalar::Index if plan.in_compare => self.coerce(v, Scalar::I32)?,
             _ if plan.in_compare => v,
             _ => self.coerce(v, plan.elem)?,
         };
+        plan.scalars.push((plan.operands.len(), raw));
         plan.operands.push(v);
         Ok(Tree::Scalar(plan.operands.len() - 1))
+    }
+
+    /// When `scalar` is a scalar leaf and `other` an integer subtree under a
+    /// target of another type, as in `f32(i32(q) % 256)`, coerces the scalar
+    /// to the subtree's type, so the arithmetic stays integer.
+    fn scalar_to_int_side(&mut self, scalar: &Tree, other: &Tree, plan: &mut Plan) -> Result<()> {
+        let Tree::Scalar(i) = *scalar else {
+            return Ok(());
+        };
+        let Some(want) = self.tree_elem(other, plan) else {
+            return Ok(());
+        };
+        if plan.in_compare || !want.is_int() || want == plan.elem {
+            return Ok(());
+        }
+        let Some(&(_, raw)) = plan.scalars.iter().find(|(at, _)| *at == i) else {
+            return Ok(());
+        };
+        plan.operands[i] = self.coerce(raw, want)?;
+        Ok(())
+    }
+
+    /// The element type a planned subtree computes in, or None when only its
+    /// scalars decide it.
+    fn tree_elem(&self, tree: &Tree, plan: &Plan) -> Option<Scalar> {
+        match tree {
+            Tree::Leaf(i) => Some(self.elem(plan.operands[*i])),
+            Tree::Scalar(_) => None,
+            Tree::Iota(_) => Some(Scalar::I32),
+            Tree::Unary(ElemStep::Cast(to), _) => Some(*to),
+            Tree::Unary(_, x) => self.tree_elem(x, plan),
+            Tree::Binary(op, _, _) if op.is_compare() => None,
+            Tree::Binary(_, a, b) | Tree::Max(a, b) | Tree::Select(_, a, b) => {
+                match (self.tree_elem(a, plan), self.tree_elem(b, plan)) {
+                    (Some(x), Some(y)) if x != y => Some(if x.is_float() { x } else { y }),
+                    (x, y) => x.or(y),
+                }
+            }
+        }
     }
 
     /// A `where` condition's tree, which `fusable_cond` accepted.
@@ -311,6 +357,7 @@ impl Build {
             rank: tshape.len(),
             operands: Vec::new(),
             leaves: Vec::new(),
+            scalars: Vec::new(),
         };
         let mut tree = self.plan_fused(value, &mut plan)?;
         let Plan {
@@ -354,6 +401,7 @@ impl Build {
             rank: 2,
             operands: Vec::new(),
             leaves: Vec::new(),
+            scalars: Vec::new(),
         };
         let tree = self.plan_fused(arg, &mut plan)?;
         self.check_leaves(&plan.leaves, &shape)?;
@@ -379,6 +427,7 @@ impl Build {
                 rank: shape.len(),
                 operands: Vec::new(),
                 leaves: Vec::new(),
+                scalars: Vec::new(),
             };
             self.plan_fused(value, &mut plan).map(|tree| Some((tree, plan)))
         } else {

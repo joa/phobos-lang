@@ -103,7 +103,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `bf16` | 8-bit exponent, 7-bit mantissa. Works on every target (native conversion from sm_80, emulated below). |
 | `f32`, `f64` | IEEE binary32 / binary64. |
 | `i8` | Signed byte. Loads sign-extend. |
-| `i32`, `i64` | Signed integers. |
+| `i32`, `i64` | Signed integers. In a tile expression a scalar takes the type of the integer operand it meets, so `f32(i32(b) / 16 % 4)` divides as integers whatever the destination. |
 | `u8`, `u16`, `u32` | Unsigned storage for tensors and tiles. Every read zero-extends: a scalar load gives a non-negative index (a `u32` above `2^31` needs 64-bit indices), and `i32(t)` or `f32(t)` converts a tile, fused into the sweep. No arithmetic directly on them; convert first, as in `(i32(b) >> 4) & 15`. |
 | `bool` | Comparison result. No conversion to or from it. |
 | `tensor<T>[dims]` | Global memory, kernel parameters only. Dims are literals or symbolic names bound at launch or by `@autotune`. |
