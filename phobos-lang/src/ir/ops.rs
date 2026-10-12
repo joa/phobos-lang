@@ -732,7 +732,7 @@ impl OpKind {
         let last = operand_count.saturating_sub(1);
         match self {
             OpKind::Store => vec![1],
-            OpKind::AtomicAdd | OpKind::AtomicCas => vec![0],
+            OpKind::AtomicAdd | OpKind::AtomicCas | OpKind::LaneStore { .. } => vec![0],
             OpKind::GridBarrier | OpKind::StoreRelease => vec![0],
             OpKind::RegsStore => vec![1],
             OpKind::Copy { .. }
