@@ -381,6 +381,13 @@ pub enum OpKind {
     /// `(value) -> value`, unchanged: the result of a reduction every
     /// thread of the group computed alike.
     Converged(crate::ast::lanes::Group),
+    /// `(tensor, indices..) -> len elements`: one thread's own run of `len`
+    /// elements along `dim` from `indices`. `align` is the byte alignment
+    /// proved for one vector load of the run, or 0 for a load per element.
+    LaneLoad { dim: usize, len: i64, align: i64 },
+    /// `(a0..a3, b0..b3, acc) -> acc + sum a_i * b_i`, `i8` elements and an
+    /// `index` accumulator: one `dp4a`.
+    Dot4,
     /// `(value) -> one per warp`: each warp's copy of a warp-uniform value,
     /// in warp order, in every thread. Once per CTA, through shared memory.
     Exchange,
@@ -582,6 +589,8 @@ impl OpKind {
             OpKind::Shuffle { mode, width } => format!("shfl {} w{width}", mode.name()),
             OpKind::Converged(g) => format!("converged {g:?}"),
             OpKind::Exchange => "exchange".into(),
+            OpKind::LaneLoad { dim, len, align } => format!("lane_load d{dim} x{len} a{align}"),
+            OpKind::Dot4 => "dot4".into(),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

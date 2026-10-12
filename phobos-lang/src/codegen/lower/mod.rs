@@ -289,7 +289,11 @@ impl<'c> Codegen<'c> {
             | OpKind::StoreRelease
             | OpKind::Barrier
             | OpKind::GridBarrier => self.emit_scalar_op(block, ir, op),
-            OpKind::Shuffle { .. } | OpKind::Converged(_) | OpKind::Exchange => self.emit_lane_op(block, ir, op),
+            OpKind::Shuffle { .. }
+            | OpKind::Converged(_)
+            | OpKind::Exchange
+            | OpKind::LaneLoad { .. }
+            | OpKind::Dot4 => self.emit_lane_op(block, ir, op),
             OpKind::For(_) | OpKind::While | OpKind::If => self.emit_control_op(block, ir, op),
             OpKind::Yield | OpKind::Condition => {
                 bail!("a terminator reached the op walk")

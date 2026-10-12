@@ -82,8 +82,17 @@ impl DeviceBackend {
             "q8_split",
             ("@aligned(N = TN, K = 32)", "@aligned(K = 32)"),
         )?;
-        let q8_qdot = compile(Q8_QDOT_SRC, &[("TN", Q8_QDOT_TN)], "q8_qdot")?;
-        let q8_qdot_add = compile(Q8_QDOT_ADD_SRC, &[("TN", Q8_QDOT_TN)], "q8_qdot_add")?;
+        let (q8_qdot, q8_qdot_add) = if env_flag("PHOBOS_QDOT_LANES") {
+            (
+                compile(&q8_qdot_lanes_src(false), &[], "q8_qdot")?,
+                compile(&q8_qdot_lanes_src(true), &[], "q8_qdot_add")?,
+            )
+        } else {
+            (
+                compile(Q8_QDOT_SRC, &[("TN", Q8_QDOT_TN)], "q8_qdot")?,
+                compile(Q8_QDOT_ADD_SRC, &[("TN", Q8_QDOT_TN)], "q8_qdot_add")?,
+            )
+        };
         let quantize = compile(QUANTIZE_SRC, &[("TB", QUANT_TB)], "quantize")?;
         let quantize_wide = compile(QUANTIZE_SRC, &[("TB", QUANT_TB_WIDE)], "quantize")?;
         let pointwise = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE)], "pointwise")?;

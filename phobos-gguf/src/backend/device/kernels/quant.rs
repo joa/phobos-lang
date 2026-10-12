@@ -235,6 +235,35 @@ fn q50_of(src: &str) -> String {
         .replace("qmma_t(", "q50_qmma_t(")
 }
 
+/// [`Q8_QDOT_SRC`] written with lanes instead of `qdot_t`: a warp per
+/// output, each lane 16 bytes of `k` as four `dp4a` under one scale pair,
+/// and a shuffle sum. `+=` when it adds into its destination.
+pub(crate) fn q8_qdot_lanes_src(accumulate: bool) -> String {
+    let (name, assign) = if accumulate { ("q8_qdot_add", "+=") } else { ("q8_qdot", "=") };
+    format!(
+        "@launch(256)
+@aligned(K = 32)
+kernel {name}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+              W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
+              C: tensor<f32>[M, N]) {{
+  let col = ctx.block.x * ctx.warps + ctx.warp
+  if col < N {{
+    var acc: f32 = 0.0
+    for k in range(ctx.lane * 16, K, ctx.lanes * 16) {{
+      let b = k / 32
+      let dots = sum(i32(A[0, k :+ 16]) * i32(W[col, k :+ 16]))
+      acc += f32(dots) * AS[0, b] * WS[col, b]
+    }}
+    let total = sum<over ctx.lane>(acc)
+    if ctx.lane == 0 {{
+      C[0, col] {assign} total
+    }}
+  }}
+}}
+"
+    )
+}
+
 /// Outputs per CTA in [`Q8_QDOT_SRC`], one per warp.
 pub(crate) const Q8_QDOT_TN: usize = 8;
 

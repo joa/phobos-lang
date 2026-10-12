@@ -297,6 +297,22 @@ impl Verifier<'_> {
                     }
                 }
             }
+            OpKind::LaneLoad { len, .. } => {
+                if !matches!(ir.operands(op).first().map(|&t| ir.ty(t)), Some(Type::Tensor(_))) {
+                    self.err(op, "operand must be a tensor");
+                }
+                if ir.results(op).len() != *len as usize {
+                    self.err(op, "one result per element");
+                }
+            }
+            OpKind::Dot4 => {
+                if self.want_operands(op, 9) && self.want_results(op, 1) {
+                    let i8s = ir.operands(op)[..8].iter().all(|&v| self.scalar(v) == Some(Scalar::I8));
+                    if !i8s || self.scalar(ir.operand(op, 8)) != Some(Scalar::Index) {
+                        self.err(op, "takes eight i8 elements and an index accumulator");
+                    }
+                }
+            }
             OpKind::Dim(d) => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
                     match ir.ty(ir.operand(op, 0)) {

@@ -233,6 +233,8 @@ A collective folds one scalar per thread across a group and gives every thread o
 
 `over` names `ctx.lane` or `ctx.thread`. `width` must fold to a constant; `from`, `xor`, `down` and `up` may be any index. The words inside the brackets are keywords only there, so `from` stays an ordinary name elsewhere.
 
+`sum(e)` with no group sums within the thread: `e` is a per-element expression over tensor slices with one `:+` span of a constant length, `W[col, k :+ 16]`, all of one length, and scalars. Each such slice is the thread's own run of elements, read with one vector load when the span is the last dimension, at most 16 bytes, a power of two in size, and its address provably a multiple of that size (from the subscripts' divisors and `@aligned`), else a load per element. Like a point subscript, it is not masked. `sum(i32(a) * i32(b))` over `i8` slices a multiple of four long is a `dp4a` per four elements, as an index.
+
 A lane collective is an xor butterfly of `log2(width)` shuffles and needs every lane of its warp: control that is the same across a warp, never per lane. Over the whole warp its result is warp-uniform. A CTA collective adds one exchange of each warp's result through shared memory, three CTA barriers, and needs uniform control; its result is uniform. A shuffle needs every lane of the warp. Values of any scalar type move as 32-bit words, two for a 64-bit one.
 
 ## Built-ins

@@ -4,6 +4,7 @@ mod epilogue;
 mod expr;
 mod frag;
 mod hoist;
+mod lane_sum;
 mod lanes;
 mod matmul;
 mod pipeline;

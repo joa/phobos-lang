@@ -22,6 +22,7 @@ impl Build {
             return self.emit_shuffle(mode, value, operand, width);
         }
         match callee {
+            "sum" if args.len() == 1 => self.emit_lane_sum(&args[0]),
             ctx::BLOCK | ctx::BLOCKS => {
                 let [Expr::Int(d @ 0..=2)] = args else {
                     unreachable!("the parser builds ctx fields with an axis 0..=2");

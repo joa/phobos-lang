@@ -52,9 +52,64 @@ impl<'c> Codegen<'c> {
                 self.set_ir(ir.result(op), Lowered::Scalar(v));
             }
             OpKind::Exchange => self.exchange(block, ir, op)?,
+            OpKind::LaneLoad { dim, len, align } => self.lane_load(block, ir, op, dim, len, align)?,
+            OpKind::Dot4 => {
+                let ops = ir.operands(op);
+                let a = self.word4(block, &ops[..4])?;
+                let b = self.word4(block, &ops[4..8])?;
+                let acc = self.scalar_ir(ops[8])?;
+                let acc = self.push(block, arith::index_cast(acc, self.i32_t, self.loc))?;
+                let sum = self.dot4_accumulate(block, a, b, acc)?;
+                let sum = self.push(block, arith::index_cast(sum, self.index_t, self.loc))?;
+                self.set_ir(ir.result(op), Lowered::Scalar(sum));
+            }
             other => unreachable!("{} is not a lane op", other.name()),
         }
         Ok(())
+    }
+
+    /// One vector load extracted per element when `align` allows it, else a
+    /// load per element.
+    fn lane_load(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, dim: usize, len: i64, align: i64) -> Result<()> {
+        let mem = self.tile_ir(ir, ir.operand(op, 0))?.mem;
+        let at = ir.operands(op)[1..]
+            .iter()
+            .map(|&v| self.scalar_ir(v))
+            .collect::<Result<Vec<_>>>()?;
+        let elem = match ir.ty(ir.results(op)[0]) {
+            crate::ir::Type::Scalar(s) => self.ir_scalar_type(*s),
+            other => unreachable!("a lane load yields scalars, not {other}"),
+        };
+        if align > 0 {
+            let vec_t = Type::vector(&[len as u64], elem);
+            let v = self.vec_load_al(block, mem, &at, vec_t, align)?;
+            for (i, &res) in ir.results(op).iter().enumerate() {
+                let e = self.vec_extract(block, v, &[i as i64], elem)?;
+                self.set_ir(res, Lowered::Scalar(e));
+            }
+            return Ok(());
+        }
+        for (i, &res) in ir.results(op).iter().enumerate() {
+            let mut idx = at.clone();
+            let off = self.const_index(block, i as i64)?;
+            idx[dim] = self.addi(block, at[dim], off)?;
+            let e = self.push(block, memref::load(mem, &idx, self.loc))?;
+            self.set_ir(res, Lowered::Scalar(e));
+        }
+        Ok(())
+    }
+
+    /// Four `i8` scalars as the `vector<4xi8>` a `dp4a` reads. Built from a
+    /// vector load's own elements, LLVM folds it back to the load.
+    fn word4(&self, block: &Block<'c>, from: &[crate::ir::ValueId]) -> Result<Value<'c, 'c>> {
+        let elems = from.iter().map(|&v| self.scalar_ir(v)).collect::<Result<Vec<_>>>()?;
+        self.push(
+            block,
+            melior::ir::operation::OperationBuilder::new("vector.from_elements", self.loc)
+                .add_operands(&elems)
+                .add_results(&[Type::vector(&[4], self.i8_t)])
+                .build()?,
+        )
     }
 
     /// A shuffle runs across the whole warp; a `width`-lane piece of it is
