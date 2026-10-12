@@ -4,6 +4,7 @@ pub mod elem;
 pub mod ops;
 pub mod print;
 pub mod types;
+pub mod uniform;
 pub mod verify;
 
 #[cfg(test)]

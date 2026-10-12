@@ -16,6 +16,12 @@ pub const THREADS: &str = "#ctx.threads";
 pub const WARPS: &str = "#ctx.warps";
 /// `ctx.lanes`: the target's warp width.
 pub const LANES: &str = "#ctx.lanes";
+/// `ctx.thread`: the thread's index in the CTA.
+pub const THREAD: &str = "#ctx.thread";
+/// `ctx.warp`: the warp's index in the CTA.
+pub const WARP: &str = "#ctx.warp";
+/// `ctx.lane`: the thread's index in its warp.
+pub const LANE: &str = "#ctx.lane";
 
 /// The name `ctx` is reserved for.
 pub const NAME: &str = "ctx";
@@ -54,6 +60,9 @@ pub fn field(path: &[String]) -> Result<Expr, String> {
         ["threads"] => bare(THREADS),
         ["warps"] => bare(WARPS),
         ["lanes"] => bare(LANES),
+        ["thread"] => bare(THREAD),
+        ["warp"] => bare(WARP),
+        ["lane"] => bare(LANE),
         _ => return Err(format!("`ctx` has no field `{}`", path.join("."))),
     })
 }
@@ -70,6 +79,9 @@ pub fn spelling(callee: &str, args: &[Expr]) -> Option<String> {
         THREADS => "ctx.threads".into(),
         WARPS => "ctx.warps".into(),
         LANES => "ctx.lanes".into(),
+        THREAD => "ctx.thread".into(),
+        WARP => "ctx.warp".into(),
+        LANE => "ctx.lane".into(),
         _ => return None,
     })
 }

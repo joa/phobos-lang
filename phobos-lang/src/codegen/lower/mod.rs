@@ -275,6 +275,7 @@ impl<'c> Codegen<'c> {
             | OpKind::IndexCast(_)
             | OpKind::ProgramId(_)
             | OpKind::GridDim(_)
+            | OpKind::Thread(_)
             | OpKind::Math(_)
             | OpKind::Select
             | OpKind::Dim(_)

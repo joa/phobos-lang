@@ -178,6 +178,7 @@ pub fn build(
     b.ir = Ir::new(info, &params);
     b.block = b.ir.entry();
     b.emit_kernel(kernel)?;
+    super::uniform::check(&b.ir, &super::uniform::analyze(&b.ir))?;
     epilogue::fuse_dot_epilogues(&mut b.ir);
     Ok((b.ir, b.report))
 }

@@ -88,6 +88,8 @@ pub(super) trait Isa {
     // ---- how a thread finds itself ----
 
     fn thread_id<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
+    /// The thread's index in its warp.
+    fn lane_id<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
     fn block_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>>;
     fn grid_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>, dim: &str) -> Result<Value<'c, 'c>>;
 
@@ -443,6 +445,10 @@ impl<'c> Codegen<'c> {
 
     pub(in crate::codegen) fn thread_id(&self, block: &Block<'c>) -> Result<Value<'c, 'c>> {
         self.isa.thread_id(self, block)
+    }
+
+    pub(in crate::codegen) fn lane_id(&self, block: &Block<'c>) -> Result<Value<'c, 'c>> {
+        self.isa.lane_id(self, block)
     }
 
     pub(in crate::codegen) fn block_dim(&self, block: &Block<'c>) -> Result<Value<'c, 'c>> {

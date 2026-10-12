@@ -297,6 +297,15 @@ impl Isa for Nvidia {
         self.gpu_index(cg, block, "gpu.thread_id", "x")
     }
 
+    fn lane_id<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>> {
+        cg.push(
+            block,
+            OperationBuilder::new("gpu.lane_id", cg.loc)
+                .add_results(&[cg.index_t])
+                .build()?,
+        )
+    }
+
     fn block_dim<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<Value<'c, 'c>> {
         self.gpu_index(cg, block, "gpu.block_dim", "x")
     }

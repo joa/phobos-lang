@@ -372,6 +372,9 @@ pub enum OpKind {
     ProgramId(u8),
     /// The grid's extent along an axis.
     GridDim(u8),
+    /// One of the executing thread's own indices, which differ between
+    /// threads.
+    Thread(ThreadIndex),
     /// One scalar through a per-element step: `exp(x)` on a scalar.
     Math(ElemStep),
     /// `(cond, a, b) -> a or b`, the scalar `where`.
@@ -514,6 +517,35 @@ pub enum OpKind {
     GemmStore { alpha: Coeff, beta: Coeff },
 }
 
+/// Which index [`OpKind::Thread`] reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ThreadIndex {
+    /// `ctx.thread`, in the CTA.
+    Thread,
+    /// `ctx.warp`, the warp's index in the CTA.
+    Warp,
+    /// `ctx.lane`, in the warp.
+    Lane,
+}
+
+impl ThreadIndex {
+    pub fn name(self) -> &'static str {
+        match self {
+            ThreadIndex::Thread => "thread_id",
+            ThreadIndex::Warp => "warp_id",
+            ThreadIndex::Lane => "lane_id",
+        }
+    }
+
+    /// How far the index differs between threads.
+    pub fn kind(self) -> super::uniform::Kind {
+        match self {
+            ThreadIndex::Warp => super::uniform::Kind::Warp,
+            ThreadIndex::Thread | ThreadIndex::Lane => super::uniform::Kind::Varying,
+        }
+    }
+}
+
 /// Which result of an op is a view of which operand.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Alias {
@@ -537,6 +569,7 @@ impl OpKind {
             OpKind::Select => "select".into(),
             OpKind::ProgramId(d) => format!("program_id {d}"),
             OpKind::GridDim(d) => format!("grid_dim {d}"),
+            OpKind::Thread(t) => t.name().into(),
             OpKind::Dim(d) => format!("dim {d}"),
             OpKind::Load => "load".into(),
             OpKind::Store => "store".into(),

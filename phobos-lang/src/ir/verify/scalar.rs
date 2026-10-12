@@ -97,6 +97,12 @@ impl Verifier<'_> {
                     }
                 }
             }
+            OpKind::Thread(_) => {
+                self.want_operands(op, 0);
+                if self.want_results(op, 1) && self.scalar(ir.result(op)) != Some(Scalar::Index) {
+                    self.err(op, "result must be index");
+                }
+            }
             OpKind::ProgramId(d) | OpKind::GridDim(d) => {
                 self.want_operands(op, 0);
                 if *d > 2 {
