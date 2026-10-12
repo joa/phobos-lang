@@ -55,7 +55,7 @@ use fused::*;
 // unqualified below. See kernels/mod.rs.
 use kernels::*;
 
-pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
+pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src, moe_topk_src};
 
 /// The formats `PHOBOS_RAW_QMMA` enables for the fused prompt projection.
 /// It takes a comma-separated list of format names, or a plain on/off flag.
@@ -201,6 +201,7 @@ pub struct DeviceBackend {
     /// tile, same per-warp patch. Compiled lazily when
     /// [`Self::qmma_narrow`] is set.
     q8_qmma_narrow: RefCell<Option<Module>>,
+    q4k_lanes: RefCell<Option<Module>>,
     q8_split: Variants,
     q8_qdot: Module,
     q8_qdot_add: Module,
@@ -215,6 +216,9 @@ pub struct DeviceBackend {
     /// first compiled.
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
+    /// `PHOBOS_RAW_LANES`: the raw formats' decode matvecs written with
+    /// lanes, where a format has one.
+    raw_lanes: bool,
     /// Whether the raw decode matvecs contract in `dp4a` against an int8
     /// activation. `PHOBOS_IQ1S_DP4A=0` opts out.
     ///
