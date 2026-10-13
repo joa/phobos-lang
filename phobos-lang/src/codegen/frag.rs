@@ -15,6 +15,11 @@ struct ImmaLane<'c> {
     cols: Vec<Value<'c, 'c>>,
     w_rows: Vec<Value<'c, 'c>>,
     k_off: Value<'c, 'c>,
+    /// The warp's patch origin, and the lane's row of an `ldmatrix` over
+    /// four tiles from it.
+    m0: Value<'c, 'c>,
+    n0: Value<'c, 'c>,
+    lane: Value<'c, 'c>,
 }
 
 impl<'c> Codegen<'c> {
@@ -125,6 +130,9 @@ impl<'c> Codegen<'c> {
             cols: at(col0, fnn)?,
             w_rows: at(w_row0, fnn)?,
             k_off,
+            m0,
+            n0,
+            lane,
         })
     }
 
@@ -172,6 +180,54 @@ impl<'c> Codegen<'c> {
         self.vec_shape_cast(block, word, Type::vector(&[1, 4], self.i8_t))
     }
 
+    /// An operand's fragments for its `rows.len()` tiles from row `origin`,
+    /// tile-major then by k step. From shared memory four tiles at a time
+    /// are one `ldmatrix.x4` a k step, lane `l` addressing row `origin + l`
+    /// of the four: its non-transposed 16-bit layout is the `m8n8k16`
+    /// fragment's. `ldmatrix` lowers only in a module indexed at 64 bits,
+    /// which `ast::Kernel::wants_ldmatrix` asks for. Otherwise a word load
+    /// each.
+    fn imma_frags(
+        &self,
+        block: &Block<'c>,
+        v: &ImmaOperand<'c>,
+        rows: &[Value<'c, 'c>],
+        origin: Value<'c, 'c>,
+        lane: Value<'c, 'c>,
+        k_cols: &[Value<'c, 'c>],
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let steps = k_cols.len();
+        let frag_t = Type::vector(&[1, 4], self.i8_t);
+        let ldmatrix = self.isa.index_bits() == 64 && v.view.shared && v.view.vectorizes(16);
+        if !(ldmatrix && rows.len() % 4 == 0) {
+            let mut frags = Vec::with_capacity(rows.len() * steps);
+            for &row in rows {
+                for &col in k_cols {
+                    frags.push(self.imma_word(block, v, row, col)?);
+                }
+            }
+            return Ok(frags);
+        }
+        let quad_t = Type::vector(&[4, 4], self.i8_t);
+        let four_i8 = Type::vector(&[4], self.i8_t);
+        let mut frags = vec![None; rows.len() * steps];
+        for g in 0..rows.len() / 4 {
+            let off = self.const_index(block, (4 * g) as i64 * IMMA_TILE)?;
+            let first = self.addi(block, origin, off)?;
+            let row = self.addi(block, first, lane)?;
+            for h in 0..steps {
+                let col = self.const_index(block, h as i64 * IMMA_K)?;
+                let (mem, at) = self.imma_at(block, v, row, col)?;
+                let quad = self.ldmatrix(block, mem, at, 4, false, quad_t)?;
+                for t in 0..4 {
+                    let word = self.vec_extract(block, quad, &[t as i64], four_i8)?;
+                    frags[(4 * g + t) * steps + h] = Some(self.vec_shape_cast(block, word, frag_t)?);
+                }
+            }
+        }
+        Ok(frags.into_iter().map(|f| f.expect("every tile and step loaded")).collect())
+    }
+
     /// The fragments of `fa += f32(dot_t(a, w)) * s1 * s2` for int8 `a` and
     /// `w`, one scale a `[m, 1]` row broadcast and the other `[1, n]`. Each
     /// 8x8 tile's sum stays in i32 over the whole k, and its elements are
@@ -212,18 +268,8 @@ impl<'c> Codegen<'c> {
             let off = self.const_index(block, h * IMMA_K)?;
             k_cols.push(self.addi(block, lane.k_off, off)?);
         }
-        let mut a_frags = Vec::new();
-        for &row in &lane.rows {
-            for &col in &k_cols {
-                a_frags.push(self.imma_word(block, a, row, col)?);
-            }
-        }
-        let mut w_frags = Vec::new();
-        for &row in &lane.w_rows {
-            for &col in &k_cols {
-                w_frags.push(self.imma_word(block, w, row, col)?);
-            }
-        }
+        let a_frags = self.imma_frags(block, a, &lane.rows, lane.m0, lane.lane, &k_cols)?;
+        let w_frags = self.imma_frags(block, w, &lane.w_rows, lane.n0, lane.lane, &k_cols)?;
 
         // A column scale's values for the patch's output columns, loaded up
         // front; a row scale is loaded with its patch row, as qmma_t does.

@@ -238,10 +238,12 @@ impl Kernel {
         self.attrs.iter().any(|a| a.name == "padstage")
     }
 
-    /// Whether the kernel calls an intrinsic that uses `ldmatrix`, which
-    /// needs the module indexed at 64 bits.
+    /// Whether the kernel may use `ldmatrix`, which needs the module indexed
+    /// at 64 bits: an intrinsic that does, or a `dot_t` with an int8 tile
+    /// declared to stage an operand in.
     pub fn wants_ldmatrix(&self) -> bool {
         self.calls(|callee| callee.ends_with("_qgemm_t"))
+            || (self.calls(|callee| callee == "dot_t") && declares_tile(&self.body, Scalar::I8))
     }
 
     /// The tiles `@registers(a, b, ..)` asks to keep in registers.
@@ -289,6 +291,21 @@ impl Kernel {
                     .any(|arg| matches!(arg, AttrArg::Positional(Literal::Ident(f)) if f == "wmma"))
         })
     }
+}
+
+/// Whether `stmts`, at any depth, declare a `var` tile of `elem`.
+fn declares_tile(stmts: &[Stmt], elem: Scalar) -> bool {
+    stmts.iter().any(|stmt| match stmt {
+        Stmt::Var {
+            ty: Some(Type::Tile(e, _)),
+            ..
+        } => *e == elem,
+        Stmt::For { body, .. } | Stmt::While { body, .. } => declares_tile(body, elem),
+        Stmt::If { then, r#else, .. } => {
+            declares_tile(then, elem) || r#else.as_deref().is_some_and(|e| declares_tile(e, elem))
+        }
+        _ => false,
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
