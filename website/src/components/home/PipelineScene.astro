@@ -1,224 +1,154 @@
 ---
-// Scene 3: one compiler, source to PTX. Stations on an arc; a star packet travels between them as the
-// page scrolls, and the card below shows the current station's excerpt.
-//   Scroll mode (scroll-driven animations, wide, motion allowed): the scene pins for about two
-//   screens and everything follows the scroll; a click on a station scrolls to it.
-//   Click mode (script, otherwise): the packet plays through once when the scene comes into view, then
-//   a click on a station shows its excerpt.
-//   No script and no scroll timelines: every station lit and every excerpt listed.
-// On narrow screens the stations stack as a list with their excerpts, in natural flow.
-import { ARC_HEIGHT_UNITS, ARC_PATH, ARC_WIDTH_UNITS, stationKeyframes, stationPoints } from "./pipeline-arc"
-import { EXCERPT_PLACEHOLDER, pipelineStages } from "./pipeline-stages"
+// Scene 3: one compiler, source to PTX, as a journey through seven stations for examples/gemm_fp32.ph.
+// Each station is drawn from the compiler's real output (src/data/pipeline/gemm_fp32.json): the source
+// lines, the AST as a tree, the graph IR as its DAG, the shared-memory passes, the MLIR region tree,
+// the PTX instruction mix and the launch. A point cloud behind the drawings carries the data from one
+// station to the next; a ring of stations above shows where the journey is and jumps on a click.
+// Without script or motion the scene is the graph IR with the ring, drawn at build time.
+import "../../styles/chart.css"
+import { shapesMarkup } from "./pipeline/markup"
+import { ringPaths, ringSpot } from "./pipeline/ring"
+import { allGeometry, OVERVIEW_STATION, STATIONS } from "./pipeline/stations"
+import { FRAMES, TONES, type Layout } from "./pipeline/types"
 
-const stages = pipelineStages()
-const stations = stationPoints(stages.length)
-const count = stages.length
-
-const range = "animation-timeline: --pipe; animation-range: contain 0% contain 100%"
-const scrollRules = stages
-  .map((_, index) =>
-    [
-      `.pipeline .lit-${index} { animation: pipe-lit-${index} linear both; ${range} }`,
-      `.pipeline .ex-${index} { animation: pipe-ex-${index} linear both; ${range} }`,
-    ].join("\n")
-  )
-  .join("\n")
-const clickRules = stages
-  .map((_, index) =>
-    [
-      `.pipeline[data-selected="${index}"] .ex-${index} { opacity: 1; visibility: visible }`,
-      `.pipeline[data-selected="${index}"] .pipe-packet { offset-distance: ${Math.round(stations[index].fraction * 10000) / 100}% }`,
-      `.pipeline[data-selected="${index}"] .st-${index} .st-name-lit { opacity: 1 }`,
-      ...stages.slice(0, index + 1).map((__, lit) => `.pipeline[data-reached="${index}"] .lit-${lit} { opacity: 1 }`),
-    ].join("\n")
-  )
-  .join("\n")
-const generatedCss = `
-${stationKeyframes(count)}
-@supports (animation-timeline: view()) {
-  @media (min-width: 900px) and (prefers-reduced-motion: no-preference) {
-    .pipe-track { height: 300vh; view-timeline: --pipe block; }
-    .pipe-pin { position: sticky; top: 3.5rem; min-height: calc(100svh - 3.5rem); display: grid; align-content: center; }
-    .pipeline .pipe-packet { animation: pipe-travel linear both; ${range} }
-    .pipeline .lit { opacity: 0; }
-    .pipeline .pipe-excerpts { display: grid; }
-    .pipeline .excerpt { grid-area: 1 / 1; }
-${scrollRules}
-  }
+const layouts: Layout[] = ["wide", "narrow"]
+const drawings = layouts.map(layout => ({
+  layout,
+  frame: FRAMES[layout],
+  stations: allGeometry(layout).map((geometry, index) => ({
+    markup: shapesMarkup(geometry.shapes),
+    plate: STATIONS[index].plate,
+  })),
+}))
+const ring = ringPaths()
+const count = STATIONS.length
+const spots = STATIONS.map((_, index) => ringSpot(index, count, OVERVIEW_STATION))
+const tick = (width: number, height: number) => {
+  const l = 10
+  return [
+    `M0 ${l}V0H${l}`,
+    `M${width - l} 0H${width}V${l}`,
+    `M${width} ${height - l}V${height}H${width - l}`,
+    `M${l} ${height}H0V${height - l}`,
+  ].join("")
 }
-@media (min-width: 900px) {
-.pipeline[data-mode="click"] .lit { opacity: 0; }
-.pipeline[data-mode="click"] .pipe-excerpts { display: grid; }
-.pipeline[data-mode="click"] .excerpt { grid-area: 1 / 1; opacity: 0; visibility: hidden; }
-${clickRules}
-}
-`
+const desc =
+  "The compiler's stations for the gemm kernel: the source lines, the AST, the graph IR as a graph of ops and values with the k loop as a region and its carried accumulator, the shared-memory passes, the MLIR region tree, the PTX instruction mix and the launch grid."
 ---
 
 <section class="scene pipeline" id="compiler" aria-labelledby="pipeline-title">
-  <div class="pipe-track">
-    <div class="pipe-pin">
-      <div class="wrap">
-        <div class="scene-head">
-          <h2 class="scene-title" id="pipeline-title">One compiler, source to PTX</h2>
-          <p class="scene-intro">
-            Seven stations between a kernel file and the card, shown for <code>gemm_fp32.ph</code>, with what the
-            compiler holds at each one.
-          </p>
-        </div>
+  <div class="wrap">
+    <div class="scene-head">
+      <h2 class="scene-title" id="pipeline-title">One compiler, source to PTX</h2>
+      <p class="scene-intro">
+        Seven stations between a kernel file and the card, for <code>gemm_fp32.ph</code>, each drawn from what the
+        compiler holds there. The same points travel the whole way.
+      </p>
+    </div>
 
-        <div class="pipe-arc">
-          <svg class="pipe-svg" viewBox={`0 0 ${ARC_WIDTH_UNITS} ${ARC_HEIGHT_UNITS}`} aria-hidden="true">
-            <defs>
-              <radialGradient id="pipe-glow">
-                <stop offset="0" class="pipe-glow-stop" stop-opacity="0.6"></stop>
-                <stop offset="0.45" class="pipe-glow-stop" stop-opacity="0.18"></stop>
-                <stop offset="1" class="pipe-glow-stop" stop-opacity="0"></stop>
-              </radialGradient>
-            </defs>
-            <path class="pipe-path" d={ARC_PATH}></path>
-            {
-              stations.map(({ point }, index) => (
-                <g>
-                  <circle class="st-dot" cx={point.x} cy={point.y} r="4" />
-                  <circle class={`st-dot-lit lit lit-${index}`} cx={point.x} cy={point.y} r="4" />
-                </g>
-              ))
-            }
-            <g class="pipe-packet" style={`offset-path: path("${ARC_PATH}")`}>
-              <circle class="pipe-packet-glow" r="22"></circle>
-              <path class="pipe-packet-flare" d="M-9 0H9M0 -9V9"></path>
-              <circle class="pipe-packet-core" r="3.5"></circle>
-            </g>
-          </svg>
-          <ol class="pipe-stations">
-            {
-              stages.map((stage, index) => (
-                <li
-                  class={`st st-${index}`}
-                  style={`left: ${(stations[index].point.x / ARC_WIDTH_UNITS) * 100}%; top: ${(stations[index].point.y / ARC_HEIGHT_UNITS) * 100}%`}
-                >
-                  <button type="button" data-station={index} aria-controls={`excerpt-${stage.id}`}>
-                    <span class="st-name">{stage.label}</span>
-                    <span class={`st-name st-name-lit lit lit-${index}`} aria-hidden="true">
-                      {stage.label}
-                    </span>
-                  </button>
-                </li>
-              ))
-            }
-          </ol>
-        </div>
-
-        <div class="pipe-excerpts">
+    <div class="pp" data-station={STATIONS[OVERVIEW_STATION].id} data-overview={OVERVIEW_STATION}>
+      <nav class="pp-ring" aria-label="Compiler stations">
+        <svg class="pp-ring-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+          <path class="pp-ring-back" d={ring.back}></path>
+          <path class="pp-ring-front" d={ring.front}></path>
+        </svg>
+        <ol class="pp-spots">
           {
-            stages.map((stage, index) => (
-              <article class={`excerpt ex-${index}`} id={`excerpt-${stage.id}`} aria-labelledby={`excerpt-${stage.id}-title`}>
-                <header>
-                  <h3 id={`excerpt-${stage.id}-title`}>{stage.label}</h3>
-                  <p>{stage.detail}</p>
-                </header>
-                {stage.excerpt ? (
-                  <pre>
-                    <code>{stage.excerpt}</code>
-                  </pre>
-                ) : (
-                  <p class="excerpt-pending">{EXCERPT_PLACEHOLDER}</p>
-                )}
-              </article>
-            ))
-          }
-        </div>
-
-        <ol class="pipe-list">
-          {
-            stages.map(stage => (
-              <li>
-                <h3>{stage.label}</h3>
-                <p>{stage.detail}</p>
-                {stage.excerpt ? (
-                  <pre>
-                    <code>{stage.excerpt}</code>
-                  </pre>
-                ) : (
-                  <p class="excerpt-pending">{EXCERPT_PLACEHOLDER}</p>
-                )}
+            STATIONS.map((station, index) => (
+              <li
+                class="pp-spot"
+                style={`--x: ${spots[index].x}%; --y: ${spots[index].y}%; --depth: ${spots[index].depth}; z-index: ${Math.round(spots[index].depth * 10)}`}
+              >
+                <button type="button" data-goto={index} aria-pressed={index === OVERVIEW_STATION ? "true" : "false"}>
+                  <span class="pp-dot" aria-hidden="true">
+                    <svg viewBox="0 0 20 20">
+                      <circle class="pp-dot-core" cx="10" cy="10" r="3.5"></circle>
+                      <circle class="pp-dot-progress" cx="10" cy="10" r="8" pathLength="1"></circle>
+                    </svg>
+                  </span>
+                  <span class="pp-name">{station.label}</span>
+                </button>
               </li>
             ))
           }
         </ol>
+      </nav>
+
+      <div class="pp-stage chart">
+        <canvas class="pp-canvas" aria-hidden="true"></canvas>
+        {
+          drawings.map(({ layout, frame, stations }) => (
+            <svg
+              class={`pp-svg is-${layout}`}
+              viewBox={`0 0 ${frame.width} ${frame.height}`}
+              role="img"
+              aria-labelledby={`pp-title-${layout} pp-desc-${layout}`}
+            >
+              <title id={`pp-title-${layout}`}>The compiler's stations for gemm_fp32.ph</title>
+              <desc id={`pp-desc-${layout}`}>{desc}</desc>
+              <path class="pp-ticks" d={tick(frame.width, frame.height)} />
+              {stations.map(({ markup, plate }, index) => (
+                <g class:list={["pp-st", { "is-on": index === OVERVIEW_STATION }]} data-st={STATIONS[index].id}>
+                  <text class="pp-plate" x="16" y="24">
+                    {layout === "wide" ? plate : plate.replace(/^FIG \/ GEMM_FP32( WITHOUT @ALIGNED)? \/ /, "")}
+                  </text>
+                  <Fragment set:html={markup} />
+                </g>
+              ))}
+            </svg>
+          ))
+        }
+        <div class="pp-probes" aria-hidden="true">
+          {TONES.map(tone => <span class={`t-${tone}`} />)}
+        </div>
       </div>
+
+      <div class="pp-caps">
+        {
+          STATIONS.map((station, index) => (
+            <p class:list={["pp-cap", { "is-on": index === OVERVIEW_STATION }]}>
+              <strong>{station.label}</strong>
+              <span>{station.caption}</span>
+            </p>
+          ))
+        }
+      </div>
+
+      <ol class="pp-sr">
+        {
+          STATIONS.map(station => (
+            <li>
+              {station.label}: {station.caption}
+            </li>
+          ))
+        }
+      </ol>
     </div>
   </div>
 </section>
 
-<Fragment set:html={`<style>${generatedCss}</style>`} />
-
 <script>
-  const STEP_MS = 650
+  import { mountPipeline } from "./pipeline/scene"
 
-  for (const scene of document.querySelectorAll<HTMLElement>(".pipeline")) {
-    const buttons = [...scene.querySelectorAll<HTMLButtonElement>("[data-station]")]
-    const last = buttons.length - 1
-    const scrollMode =
-      CSS.supports("animation-timeline: view()") &&
-      matchMedia("(min-width: 900px) and (prefers-reduced-motion: no-preference)").matches
-    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
-    const track = scene.querySelector<HTMLElement>(".pipe-track")
-    let timer = 0
-
-    const select = (station: number, reached = station) => {
-      scene.dataset.selected = String(station)
-      scene.dataset.reached = String(Math.max(Number(scene.dataset.reached ?? -1), reached))
-    }
-
-    for (const button of buttons) {
-      button.addEventListener("click", () => {
-        const station = Number(button.dataset.station)
-        if (scrollMode && track) {
-          const travelPx = track.offsetHeight - window.innerHeight
-          const topPx = track.getBoundingClientRect().top + window.scrollY
-          window.scrollTo({ top: topPx + (station / last) * travelPx, behavior: "smooth" })
-          return
-        }
-        clearInterval(timer)
-        select(station, last)
-      })
-    }
-
-    if (!scrollMode) {
-      scene.dataset.mode = "click"
-      if (reduced) {
-        select(0, last)
-      } else {
-        select(0, 0)
-        const observer = new IntersectionObserver(
-          entries => {
-            if (!entries.some(entry => entry.isIntersecting)) return
-            observer.disconnect()
-            let station = 0
-            timer = window.setInterval(() => {
-              station += 1
-              select(station)
-              if (station >= last) clearInterval(timer)
-            }, STEP_MS)
-          },
-          { threshold: 0.45 }
-        )
-        observer.observe(scene.querySelector(".pipe-arc") ?? scene)
-      }
-    }
-  }
+  for (const root of document.querySelectorAll<HTMLElement>(".pp")) mountPipeline(root)
 </script>
 
 <style>
-  .pipe-arc {
-    position: relative;
-    aspect-ratio: 1000 / 250;
-    margin-top: 1rem;
+  .pp {
+    container-type: inline-size;
+    --p: 0;
   }
 
-  .pipe-svg {
+  /* The ring of stations */
+
+  .pp-ring {
+    position: relative;
+    height: 7.5rem;
+    margin: 0 auto 0.5rem;
+    max-width: 52rem;
+  }
+
+  .pp-ring-svg {
     position: absolute;
     inset: 0;
     width: 100%;
@@ -226,205 +156,603 @@ ${clickRules}
     overflow: visible;
   }
 
-  .pipe-path {
+  .pp-ring-back,
+  .pp-ring-front {
     fill: none;
+    vector-effect: non-scaling-stroke;
+    stroke-width: 1;
+  }
+
+  .pp-ring-back {
     stroke: var(--sky-line);
-    stroke-width: 1;
+    stroke-dasharray: 2 4;
   }
 
-  .st-dot {
-    fill: var(--sky-0);
-    stroke: var(--dust);
-    stroke-width: 1;
+  .pp-ring-front {
+    stroke: color-mix(in srgb, var(--brand) 45%, var(--sky-line));
   }
 
-  .st-dot-lit {
-    fill: var(--brand);
-  }
-
-  .pipe-glow-stop {
-    stop-color: var(--brand);
-  }
-
-  .pipe-packet {
-    offset-rotate: 0deg;
-    offset-distance: 100%;
-    transition: offset-distance var(--dur-3) var(--ease-in-out);
-  }
-
-  .pipe-packet-glow {
-    fill: url(#pipe-glow);
-  }
-
-  .pipe-packet-flare {
-    fill: none;
-    stroke: var(--brand);
-    stroke-width: 1.2;
-    stroke-linecap: round;
-  }
-
-  .pipe-packet-core {
-    fill: color-mix(in srgb, var(--brand) 50%, var(--star));
-  }
-
-  @keyframes pipe-travel {
-    from {
-      offset-distance: 0%;
-    }
-    to {
-      offset-distance: 100%;
-    }
-  }
-
-  .pipe-stations {
+  .pp-spots {
     margin: 0;
     padding: 0;
     list-style: none;
   }
 
-  .st {
+  .pp-spot {
     position: absolute;
-    translate: -50% 14px;
+    left: var(--x);
+    top: var(--y);
+    translate: -50% -10px;
   }
 
-  .st button {
+  .pp-spot button {
     display: grid;
-    padding: 0.25rem 0.5rem;
+    justify-items: center;
+    gap: 0.125rem;
+    padding: 0 0.375rem 0.25rem;
     border: 0;
     background: transparent;
     font-family: var(--font-mono);
     font-size: 0.8125rem;
     white-space: nowrap;
     cursor: pointer;
-  }
-
-  .st-name {
-    grid-area: 1 / 1;
     color: var(--dust);
+    opacity: calc(0.3 + 0.7 * var(--depth));
   }
 
-  .st-name-lit {
+  .pp-spot button:hover,
+  .pp-spot button:focus-visible {
     color: var(--star);
-  }
-
-  .st button:hover .st-name {
-    color: var(--star);
-  }
-
-  .lit {
     opacity: 1;
-    transition: opacity var(--dur-2) var(--ease-out);
   }
 
-  .pipe-excerpts {
-    margin-top: 1.5rem;
+  .pp-dot {
+    display: block;
+    width: 20px;
+    height: 20px;
+    scale: calc(0.6 + 0.4 * var(--depth));
   }
 
-  .excerpt {
-    padding: 1.25rem 1.5rem;
-    border: 1px solid var(--sky-line);
-    background: var(--sky-1);
-    transition:
-      opacity var(--dur-2) var(--ease-out),
-      visibility var(--dur-2);
+  .pp-dot svg {
+    display: block;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
   }
 
-  .excerpt + .excerpt {
-    margin-top: 0.75rem;
+  .pp-dot-core {
+    fill: var(--sky-0);
+    stroke: var(--dust);
+    stroke-width: 1.2;
   }
 
-  .pipeline[data-mode="click"] .excerpt + .excerpt {
-    margin-top: 0;
+  .pp-dot-progress {
+    fill: none;
+    stroke: var(--brand);
+    stroke-width: 1.2;
+    stroke-dasharray: 1 1;
+    stroke-dashoffset: 1;
+    transform: rotate(-90deg);
+    transform-origin: center;
+    opacity: 0;
   }
 
-  .excerpt header {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.25rem 1rem;
-  }
-
-  .excerpt h3,
-  .pipe-list h3 {
-    font-family: var(--font-mono);
-    font-size: 0.9375rem;
-    font-weight: 500;
-  }
-
-  .excerpt header p,
-  .pipe-list p {
-    margin: 0;
-    color: var(--dust);
-    font-size: 0.9375rem;
-  }
-
-  .excerpt pre,
-  .pipe-list pre {
-    margin: 1rem 0 0;
-    overflow-x: auto;
+  .pp-spot button[aria-pressed="true"] {
     color: var(--star);
-    font-size: 0.8125rem;
-    line-height: 1.55;
   }
 
-  .excerpt-pending {
-    margin: 1rem 0 0 !important;
-    padding: 0.75rem 1rem;
-    border: 1px dashed var(--sky-line);
-    color: var(--dust);
-    font-family: var(--font-mono);
-    font-size: 0.8125rem;
+  .pp-spot button[aria-pressed="true"] .pp-dot-core {
+    fill: var(--brand);
+    stroke: var(--brand);
   }
 
-  /* Narrow: a plain list on a hairline */
-  .pipe-list {
+  .pp[data-live="motion"] .pp-spot button[aria-pressed="true"] .pp-dot-progress {
+    opacity: 1;
+    stroke-dashoffset: calc(1 - var(--p));
+  }
+
+  /* The stage: a dotted plate, the cloud, the drawing */
+
+  .pp-stage {
+    position: relative;
+    margin: 0;
+    background:
+      radial-gradient(ellipse at 50% 50%, color-mix(in srgb, var(--brand) 7%, transparent), transparent 70%),
+      radial-gradient(circle, var(--sky-line) 0.7px, transparent 1px) center / 20px 20px;
+  }
+
+  .pp-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     display: none;
+  }
+
+  .pp[data-live] .pp-canvas {
+    display: block;
+  }
+
+  .pp-svg {
     position: relative;
-    margin: 1.5rem 0 0;
-    padding: 0 0 0 1.75rem;
-    list-style: none;
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+    font-family: var(--font-mono);
   }
 
-  .pipe-list::before {
-    content: "";
-    position: absolute;
-    left: 5px;
-    top: 0.6rem;
-    bottom: 0.6rem;
-    border-left: 1px solid var(--sky-line);
+  .pp-svg.is-narrow {
+    display: none;
   }
 
-  .pipe-list li {
-    position: relative;
-    padding-bottom: 1.75rem;
-  }
-
-  .pipe-list li::before {
-    content: "";
-    position: absolute;
-    left: calc(-1.75rem + 1px);
-    top: 0.45rem;
-    width: 9px;
-    height: 9px;
-    border-radius: 50%;
-    background: var(--brand);
-  }
-
-  @media (max-width: 899px) {
-    .pipe-arc,
-    .pipe-excerpts {
+  @container (width < 600px) {
+    .pp-svg.is-wide {
       display: none;
     }
 
-    .pipe-list {
+    .pp-svg.is-narrow {
       display: block;
+    }
+
+    .pp-ring {
+      height: 6.5rem;
+    }
+
+    .pp-spot button {
+      font-size: 0.75rem;
+    }
+
+    .pp-spot:not(:has(button[aria-pressed="true"])) .pp-name {
+      opacity: calc((var(--depth) - 0.55) * 3);
     }
   }
 
+  .pp-probes {
+    display: none;
+  }
+
+  .pp-probes span {
+    color: var(--c);
+  }
+
+  .pp-ticks {
+    fill: none;
+    stroke: var(--dust);
+    stroke-width: 1;
+  }
+
+  .pp-plate {
+    fill: var(--dust);
+    font-size: 12.5px;
+    letter-spacing: 0.14em;
+  }
+
+  .pp-st {
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity 280ms var(--ease-out),
+      visibility 0s linear 280ms;
+  }
+
+  .pp-st.is-on {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity 280ms var(--ease-out);
+  }
+
+  /* Tones: where the data lives (global, shared, registers), cost, and the quiet ones */
+
+  .pp :global(.t-global) {
+    --c: var(--brand);
+  }
+
+  .pp :global(.t-shared) {
+    --c: var(--nebula);
+  }
+
+  .pp :global(.t-reg) {
+    --c: var(--star);
+  }
+
+  .pp :global(.t-cost) {
+    --c: var(--mars);
+  }
+
+  .pp :global(.t-dust) {
+    --c: var(--dust);
+  }
+
+  .pp :global(.t-line) {
+    --c: var(--sky-line);
+  }
+
+  .pp :global(.t-hi) {
+    --c: var(--brand-hi);
+  }
+
+  /* Shapes */
+
+  .pp-svg :global(.pp-label) {
+    fill: var(--c, var(--dust));
+    font-size: 12.5px;
+    font-variant-numeric: tabular-nums;
+    white-space: pre;
+    paint-order: stroke;
+    stroke: var(--sky-0);
+    stroke-width: 6px;
+    stroke-linejoin: round;
+  }
+
+  .pp-svg :global(.pp-label.is-strong) {
+    fill: var(--c, var(--star));
+  }
+
+  .pp-svg :global(.is-faint) {
+    opacity: 0.72;
+  }
+
+  .pp-svg :global(.pp-code) {
+    font-size: 17px;
+    white-space: pre;
+  }
+
+  .pp-svg :global(.pp-code.is-small) {
+    font-size: 12.5px;
+  }
+
+  .pp-svg :global(.pp-code tspan) {
+    fill: var(--c);
+  }
+
+  .pp-svg :global(.pp-code .t-line) {
+    fill: none;
+  }
+
+  .pp-svg :global(.pp-band) {
+    fill: var(--brand-fill);
+  }
+
+  .pp-svg :global(.pp-glyph) {
+    fill: var(--c);
+    stroke: var(--c);
+    stroke-width: 1;
+  }
+
+  .pp-svg :global(.pp-glyph.is-ring) {
+    fill: var(--sky-0);
+    stroke-width: 1.3;
+  }
+
+  .pp-svg :global(.pp-wire) {
+    fill: none;
+    stroke: color-mix(in srgb, var(--c, var(--dust)) 50%, transparent);
+    stroke-width: 1;
+  }
+
+  .pp-svg :global(.pp-wire.is-faint) {
+    stroke: color-mix(in srgb, var(--c, var(--dust)) 30%, transparent);
+    opacity: 1;
+  }
+
+  .pp-svg :global(.pp-wire.is-strong),
+  .pp-svg :global(.pp-wire.is-back) {
+    stroke: var(--c);
+    stroke-width: 1.4;
+  }
+
+  .pp-svg :global(.pp-region) {
+    fill: color-mix(in srgb, var(--star) 3%, transparent);
+    stroke: color-mix(in srgb, var(--star) 35%, transparent);
+    stroke-dasharray: 3 4;
+  }
+
+  .pp-svg :global(.pp-region-box) {
+    fill: color-mix(in srgb, var(--star) 2.5%, transparent);
+    stroke: var(--sky-line);
+  }
+
+  .pp-svg :global(.pp-region-box.is-loop) {
+    stroke: color-mix(in srgb, var(--brand) 55%, transparent);
+  }
+
+  .pp-svg :global(.pp-region-box.is-contract) {
+    stroke: color-mix(in srgb, var(--star) 45%, transparent);
+  }
+
+  .pp-svg :global(.pp-region-box.is-copy) {
+    stroke: color-mix(in srgb, var(--nebula) 50%, transparent);
+  }
+
+  .pp-svg :global(.pp-region-box.is-guard) {
+    stroke: color-mix(in srgb, var(--mars) 50%, transparent);
+  }
+
+  .pp-svg :global(.pp-strip) {
+    fill: none;
+    stroke: color-mix(in srgb, var(--nebula) 55%, transparent);
+  }
+
+  .pp-svg :global(.pp-op) {
+    stroke: color-mix(in srgb, var(--c) 75%, transparent);
+    stroke-width: 1.5;
+  }
+
+  .pp-svg :global(.pp-tick) {
+    stroke: var(--dust);
+  }
+
+  .pp-svg :global(.pp-buf) {
+    fill: var(--nebula-fill-on);
+    stroke: var(--nebula);
+  }
+
+  .pp-svg :global(.pp-buf.is-retiring) {
+    fill-opacity: 0;
+    stroke-opacity: 0.55;
+    stroke-dasharray: 3 3;
+  }
+
+  .pp-svg :global(.pp-buf-label) {
+    fill: var(--star);
+    stroke: none;
+  }
+
+  .pp-svg :global(.pp-buf-label.is-retiring) {
+    opacity: 0.5;
+  }
+
+  .pp-svg :global(.pp-barrier) {
+    stroke-width: 2;
+  }
+
+  .pp-svg :global(.pp-barrier.is-kept) {
+    stroke: var(--nebula);
+  }
+
+  .pp-svg :global(.pp-barrier.is-elided) {
+    stroke: var(--dust);
+    stroke-dasharray: 2 3;
+    opacity: 0.45;
+  }
+
+  .pp-svg :global(.pp-cursor) {
+    stroke: var(--star);
+    stroke-width: 1;
+    opacity: 0;
+  }
+
+  .pp-svg :global(.pp-bar) {
+    fill: color-mix(in srgb, var(--c) 12%, transparent);
+  }
+
+  .pp-svg :global(.pp-cta) {
+    fill: color-mix(in srgb, var(--brand) 3%, transparent);
+    stroke: color-mix(in srgb, var(--brand) 40%, var(--sky-line));
+  }
+
+  .pp-svg :global(.pp-warp) {
+    fill: none;
+    stroke: color-mix(in srgb, var(--brand) 30%, transparent);
+  }
+
+  /* Entrances, only while the journey runs: each station draws itself in when it comes on */
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-in) {
+    animation: pp-fade 700ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-glyph.pp-in) {
+    transform-box: fill-box;
+    transform-origin: center;
+    animation: pp-pop 600ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-draw) {
+    stroke-dasharray: 1 1;
+    animation: pp-draw 900ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-cursor) {
+    animation: pp-sweep 4600ms linear var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-barrier.is-kept:not(.is-static)) {
+    animation: pp-kept 900ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-barrier.is-elided:not(.is-static)) {
+    animation: pp-elided 1100ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-buf) {
+    animation: pp-drop 700ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-buf.is-retiring) {
+    animation:
+      pp-drop 700ms var(--ease-out) var(--d, 0ms) both,
+      pp-retire 600ms var(--ease-out) var(--l, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-buf-label) {
+    animation: pp-fade 500ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-buf-label.is-retiring) {
+    animation:
+      pp-fade 500ms var(--ease-out) var(--d, 0ms) both,
+      pp-label-retire 600ms var(--ease-out) var(--l, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-grow) {
+    transform-box: fill-box;
+    transform-origin: left center;
+    animation: pp-grow 900ms var(--ease-out) var(--d, 0ms) both;
+  }
+
+  .pp[data-live="motion"] .pp-st.is-on :global(.pp-warp) {
+    animation:
+      pp-fade 500ms var(--ease-out) var(--d, 0ms) both,
+      pp-warp-light 900ms var(--ease-out) var(--l, 0ms) both;
+  }
+
+  @keyframes pp-fade {
+    from {
+      opacity: 0;
+    }
+  }
+
+  @keyframes pp-pop {
+    from {
+      opacity: 0;
+      transform: scale(0.2);
+    }
+  }
+
+  @keyframes pp-draw {
+    from {
+      stroke-dashoffset: 1;
+    }
+    to {
+      stroke-dashoffset: 0;
+    }
+  }
+
+  @keyframes pp-sweep {
+    0% {
+      transform: translateX(0);
+      opacity: 0;
+    }
+    4%,
+    94% {
+      opacity: 0.85;
+    }
+    100% {
+      transform: translateX(var(--sweep));
+      opacity: 0;
+    }
+  }
+
+  @keyframes pp-kept {
+    from {
+      opacity: 0.12;
+      stroke-width: 2;
+    }
+    30% {
+      opacity: 1;
+      stroke-width: 5;
+    }
+    to {
+      opacity: 1;
+      stroke-width: 2;
+    }
+  }
+
+  @keyframes pp-elided {
+    from {
+      opacity: 0.12;
+    }
+    25% {
+      opacity: 0.9;
+    }
+    to {
+      opacity: 0.45;
+    }
+  }
+
+  @keyframes pp-drop {
+    from {
+      opacity: 0;
+      transform: translateY(-90px);
+    }
+  }
+
+  @keyframes pp-retire {
+    from {
+      fill-opacity: 1;
+      stroke-opacity: 1;
+      stroke-dasharray: none;
+    }
+    to {
+      fill-opacity: 0;
+      stroke-opacity: 0.55;
+      stroke-dasharray: 3 3;
+    }
+  }
+
+  @keyframes pp-label-retire {
+    from {
+      opacity: 1;
+    }
+    to {
+      opacity: 0.5;
+    }
+  }
+
+  @keyframes pp-grow {
+    from {
+      transform: scaleX(0);
+    }
+  }
+
+  @keyframes pp-warp-light {
+    from {
+      stroke: color-mix(in srgb, var(--brand) 8%, transparent);
+    }
+    30% {
+      stroke: color-mix(in srgb, var(--brand) 70%, transparent);
+    }
+  }
+
+  /* Captions: all in one cell, so the tallest sets the height and nothing shifts */
+
+  .pp-caps {
+    display: grid;
+    margin-top: 1rem;
+    max-width: 54rem;
+  }
+
+  .pp-cap {
+    grid-area: 1 / 1;
+    margin: 0;
+    color: var(--dust);
+    font-size: 0.9375rem;
+    line-height: 1.55;
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      visibility 0s linear var(--dur-2);
+  }
+
+  .pp-cap.is-on {
+    opacity: 1;
+    visibility: visible;
+    transition: opacity var(--dur-3) var(--ease-out);
+  }
+
+  .pp-cap strong {
+    margin-right: 0.75rem;
+    color: var(--star);
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    font-weight: 500;
+  }
+
+  .pp-sr {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
   @media (prefers-reduced-motion: reduce) {
-    .pipe-packet,
-    .lit,
-    .excerpt {
+    .pp-st,
+    .pp-cap {
       transition: none;
     }
   }
