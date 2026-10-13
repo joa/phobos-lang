@@ -82,7 +82,7 @@ pub(super) type CheckWithin<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 type CheckTc<'a> = dyn Fn(&str, f32, &[f32], &[f32]) + 'a;
 
 /// `check_spread`'s signature. Unlike [`CheckWithin`] it takes no tolerance.
-type CheckSpread<'a> = dyn Fn(&str, &[f32], &[f32]) + 'a;
+pub(super) type CheckSpread<'a> = dyn Fn(&str, &[f32], &[f32]) + 'a;
 
 /// A raw-kernel format's device path against the host reference
 /// (`Packed::dense`), across every shape in [`RAW_SHAPES`]. `gen_block`
@@ -366,6 +366,7 @@ pub(super) fn check_hadamard(
     host: &dyn Backend,
     gpu: &dyn Backend,
     check_within: &CheckWithin,
+    check_spread: &CheckSpread,
     next: &mut dyn FnMut() -> f32,
 ) -> Result<()> {
     let regroup = HeadPerm { head_dim: 128, groups: 16, repeat: 3 };
@@ -420,7 +421,11 @@ pub(super) fn check_hadamard(
         let label = format!("{} [{rows} x {width}]", if norm { "rms_norm_hadamard_q" } else { "hadamard_q" });
         check_within(&format!("{label} normed"), 1e-4, &want_n, &got_n);
         check_within(&label, 1e-4, &want_o, &got_o);
-        check_within(&format!("{label} act x {n}"), 1e-3, &want_p, &got_p);
+        // Host and device can round an element on a .5 tie to neighbouring
+        // int8 values, since their pre-quantization values may differ in the
+        // last bit. One such step, through the projection, can exceed a
+        // per-element bound, so the projection is judged by its spread.
+        check_spread(&format!("{label} act x {n}"), &want_p, &got_p);
     }
     Ok(())
 }

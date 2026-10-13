@@ -2,7 +2,7 @@
 // through a Q8_0 projection.
 
 use super::*;
-use raw::CheckWithin;
+use raw::{CheckSpread, CheckWithin};
 
 pub(super) fn check_norms_q(
     host: &dyn Backend,
@@ -10,6 +10,7 @@ pub(super) fn check_norms_q(
     rows: usize,
     eps: f32,
     check_within: &CheckWithin,
+    check_spread: &CheckSpread,
     next: &mut dyn FnMut() -> f32,
 ) -> Result<()> {
     // `rms_norm_q`: the normalized rows, and the int8 copy read back through
@@ -33,7 +34,9 @@ pub(super) fn check_norms_q(
         };
         let ((want_o, want_p), (got_o, got_p)) = (run(host)?, run(gpu)?);
         check_within(&format!("rms_norm_q [{rows} x {width_q}]"), 1e-4, &want_o, &got_o);
-        check_within(&format!("rms_norm_q act [{rows} x {width_q} x {n}]"), 1e-3, &want_p, &got_p);
+        // A .5 tie may round to neighbouring int8 values on host and device;
+        // see `check_hadamard`.
+        check_spread(&format!("rms_norm_q act [{rows} x {width_q} x {n}]"), &want_p, &got_p);
     }
 
     // `rms_norm_gated`: the delta net's readout, at its head width, with the
@@ -60,7 +63,7 @@ pub(super) fn check_norms_q(
         };
         let ((want_o, want_p), (got_o, got_p)) = (run(host)?, run(gpu)?);
         check_within(&format!("rms_norm_gated [{rows} x {width_g}]"), 1e-4, &want_o, &got_o);
-        check_within(&format!("rms_norm_gated act [{rows} x {width_g} x {n}]"), 1e-3, &want_p, &got_p);
+        check_spread(&format!("rms_norm_gated act [{rows} x {width_g} x {n}]"), &want_p, &got_p);
     }
     Ok(())
 }
