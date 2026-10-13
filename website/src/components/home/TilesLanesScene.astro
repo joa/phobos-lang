@@ -1,0 +1,32 @@
+---
+// Scene 2: tiles and lanes. One looping picture in two beats, drawn from the compiler's traces:
+// gemm tiles lifted through the memory hierarchy, then one warp's lanes trading partial sums.
+import TilesLanes from "./tiles-lanes/TilesLanes.astro"
+---
+
+<section class="scene tl-scene" id="tiles-and-lanes" aria-labelledby="tl-scene-title">
+  <div class="wrap">
+    <div class="scene-head">
+      <h2 class="scene-title" id="tl-scene-title">Tiles and lanes</h2>
+      <p class="scene-intro">
+        Whole tiles, as in Triton, and warps and lanes, as in Gluon, in one language. Both pictures are sized
+        from the compiler's own traces.
+      </p>
+    </div>
+    <TilesLanes />
+    <p class="tl-links">
+      <a href="/viz/gemm_fp32/">Step through it in the visualizer</a>
+      <a href="/docs/ctx/">ctx in the docs</a>
+    </p>
+  </div>
+</section>
+
+<style>
+  .tl-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.75rem;
+    margin: 1.75rem 0 0;
+    font-size: 0.9375rem;
+  }
+</style>
