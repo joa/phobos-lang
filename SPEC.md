@@ -49,7 +49,7 @@ var_stmt    = "var" ident ( ":" type [ "=" expr ] | "=" expr ) terminator ;
 assign_stmt = lvalue ( "=" | "+=" | op_assign ) expr terminator ;
 op_assign   = "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
 lvalue      = ident [ "[" subscripts "]" ] ;           (* a name or an indexed name *)
-for_stmt    = "for" ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
+for_stmt    = "for" [ "<" "unroll" expr ">" ] ident "in" "range" "(" expr "," expr [ "," expr ] ")" block ;
 while_stmt  = "while" expr block ;
 if_stmt     = "if" expr block [ "else" ( block | if_stmt ) ] ;
 jump_stmt   = ( "break" | "continue" | "return" ) terminator ;
@@ -124,6 +124,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `x += e`, `x[...] += e` | Accumulate. A tile takes a scalar or a tile that broadcasts to it, a row or a column, and `acc += dot_t(a, b)` adds the product in place. |
 | `x op= e` | `x = x op e`, for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. The target is read again, so an indexed target's subscripts are evaluated twice. |
 | `for i in range(lo, hi[, step])` | `i` runs over `lo, lo + step, ...` while `< hi`. `step` defaults to 1. |
+| `for<unroll n> i in range(lo, hi[, step])` | The same iterations, the body built `n` times a turn (`i`, `i + step`, ..., each copy in its own scope) while a whole turn fits, then the rest one at a time. `n` and `step` are constants, `step` positive; `n` may be an `@autotune` name, so `@autotune(U in [1, 2, 4])` tries each (1 is the plain loop). Not for a loop that carries tensor-core accumulators. |
 | `while c { }`, `if c { } else { }` | Scalar condition. |
 | `break`, `continue` | Leave the innermost loop, or its current iteration. A `for` runs its remaining iterations as no-ops after a `break`; a `while` stops at its next test. |
 | `return` | Skips the rest of the kernel. |
@@ -406,7 +407,7 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 
 GEMM tile sizes (`TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM`, `TILE_TN`) come from `@autotune` or the shape environment.
 
-Planned, and an error until then: `@readonly`, `@unroll` (parameter and loop level), `@fast_math`, `@assert_coalesced`.
+Planned, and an error until then: `@readonly`, `@fast_math`, `@assert_coalesced`. Loop unrolling is `for<unroll n>`.
 
 ## Examples
 

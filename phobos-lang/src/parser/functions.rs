@@ -94,12 +94,14 @@ impl<'a> Inliner<'a> {
                 start,
                 end,
                 step,
+                unroll,
                 body,
             } => Stmt::For {
                 var,
                 start: self.expr(start, depth)?,
                 end: self.expr(end, depth)?,
                 step: step.map(|s| self.expr(s, depth)).transpose()?,
+                unroll: unroll.map(|u| self.expr(u, depth)).transpose()?,
                 body: self.stmts(body, depth)?,
             },
             Stmt::While { cond, body } => Stmt::While {
@@ -337,12 +339,14 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
             start,
             end,
             step,
+            unroll,
             body,
         } => Stmt::For {
             var: rename(var),
             start: go(start)?,
             end: go(end)?,
             step: step.as_ref().map(go).transpose()?,
+            unroll: unroll.as_ref().map(go).transpose()?,
             body: block(body)?,
         },
         Stmt::While { cond, body } => Stmt::While {

@@ -26,6 +26,7 @@ mod select;
 mod sync;
 mod tensorcore;
 mod tile;
+mod unroll;
 mod unsigned;
 
 use melior::{

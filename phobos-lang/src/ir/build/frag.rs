@@ -124,6 +124,7 @@ impl Build {
                     end,
                     step,
                     body,
+                    ..
                 } => {
                     if var == name
                         || start.uses_name(name)

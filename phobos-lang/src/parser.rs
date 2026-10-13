@@ -452,6 +452,19 @@ impl Parser {
 
     fn parse_for(&mut self) -> Result<Stmt, String> {
         self.advance();
+        // `for<unroll n>`: the one setting a loop takes.
+        let unroll = if self.consume(&Tok::Lt) {
+            let (line, col) = self.pos();
+            let word = self.field()?;
+            if word != "unroll" {
+                return Err(format!("{line}:{col}: `{word}` is not a setting of `for<..>`; it takes `unroll`"));
+            }
+            let n = self.term()?;
+            self.expect(Tok::Gt)?;
+            Some(n)
+        } else {
+            None
+        };
         let var = self.ident()?;
         self.expect(Tok::In)?;
         let (line, col) = self.pos();
@@ -477,6 +490,7 @@ impl Parser {
             start,
             end,
             step,
+            unroll,
             body,
         })
     }

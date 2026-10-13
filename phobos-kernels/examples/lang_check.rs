@@ -122,6 +122,7 @@ fn main() -> Result<()> {
     lanes(&mut failures)?;
     lane_matvec(&mut failures)?;
     lane_runs(&mut failures)?;
+    unrolled_sum(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
@@ -318,6 +319,38 @@ fn lane_runs(failures: &mut u32) -> Result<()> {
     let got = out.read()?;
     let bad = (0..n).filter(|&i| got[i] != 2.0 * x[(i + 4) % n]).count();
     report("lane_runs", bad == 0, format!("{bad} of {n} wrong"), failures);
+    Ok(())
+}
+
+/// Each thread sums its strided elements with `for<unroll 3>`: a dynamic
+/// length that leaves every thread a remainder after the whole turns.
+fn unrolled_sum(failures: &mut u32) -> Result<()> {
+    let n = 1000;
+    let x = noise(n, 14);
+    let src = format!(
+        "@launch({THREADS})
+        kernel unrolled(X: tensor<f32>[1, N], O: tensor<f32>[1, T]) {{
+            var acc: f32 = 0.0
+            for<unroll 3> i in range(ctx.thread, N, {THREADS}) {{
+                acc += X[0, i]
+            }}
+            O[0, ctx.thread] = acc
+        }}"
+    );
+    let threads = THREADS as usize;
+    let (xa, out) = (Arg::new(&x, 1, n)?, Arg::<f32>::zeroed(1, threads)?);
+    let mut slots = Vec::new();
+    xa.push(&mut slots);
+    out.push(&mut slots);
+    run(&src, "unrolled", 1, &mut slots)?;
+    let got = out.read()?;
+    let worst = (0..threads)
+        .map(|t| {
+            let want: f32 = (t..n).step_by(threads).map(|i| x[i]).sum();
+            (got[t] - want).abs()
+        })
+        .fold(0.0f32, f32::max);
+    report("unrolled_sum", worst < 1e-5, format!("worst {worst:.2e}"), failures);
     Ok(())
 }
 

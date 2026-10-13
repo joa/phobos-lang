@@ -12,6 +12,7 @@ mod regs;
 mod slice;
 mod stmt;
 mod store;
+mod unroll;
 
 #[cfg(test)]
 mod tests;
