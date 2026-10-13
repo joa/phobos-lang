@@ -135,7 +135,7 @@ impl Build {
             return None;
         };
         let mem = match self.lookup(name)? {
-            Binding::Tensor(t) | Binding::Tile(t) => t,
+            Binding::Tensor(t) | Binding::Tile(t) | Binding::View(t) => t,
             _ => return None,
         };
         self.lane_source(mem).map(|(elem, _)| elem)
@@ -216,12 +216,15 @@ impl Build {
             bail!("a thread's run is a slice with one `:+` span, as `X[r, k :+ 4]`");
         };
         let (mem, binding) = self.mem_base(base)?;
+        // A `flat()` view is its tile's whole buffer in row-major order.
+        let flat = self.ir.def_op(mem).is_some_and(|op| matches!(self.ir.kind(op), OpKind::Flat));
         let source = match binding {
             Binding::Tensor(_) | Binding::Tile(_) => self.lane_source(mem),
+            Binding::View(_) if flat => self.lane_source(mem),
             _ => None,
         };
         let Some((elem, extents)) = source else {
-            bail!("a thread's own run reads a tensor or a whole shared tile, not a view");
+            bail!("a thread's own run reads a tensor, a whole shared tile or its flat() view, not a slice");
         };
         ensure!(
             subs.len() == extents.len(),
