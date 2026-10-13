@@ -7,10 +7,31 @@ use melior::{
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::{GemmPath, GemmScale};
+use crate::codegen::frag::ImmaOperand;
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
 impl<'c> Codegen<'c> {
+    /// The buffer an unmasked rank-2 slice was taken from, and where it
+    /// starts there. None for anything else.
+    fn slice_origin(
+        &self,
+        ir: &Ir,
+        v: ir::ValueId,
+    ) -> Result<Option<(melior::ir::Value<'c, 'c>, [melior::ir::Value<'c, 'c>; 2])>> {
+        let Some(def) = ir.def_op(v) else { return Ok(None) };
+        let OpKind::Slice(s) = ir.kind(def) else { return Ok(None) };
+        if s.rank() != 2 || s.masked.iter().any(|&m| m) {
+            return Ok(None);
+        }
+        let src = self.tile_ir(ir, ir.operand(def, 0))?;
+        if src.swizzle.is_some() || src.shape.len() != 2 {
+            return Ok(None);
+        }
+        let starts = [self.scalar_ir(ir.operand(def, 1))?, self.scalar_ir(ir.operand(def, 2))?];
+        Ok(Some((src.mem, starts)))
+    }
+
     pub(super) fn emit_intrinsic_op(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
         match ir.kind(op).clone() {
             OpKind::Intrinsic(i) => {
@@ -79,8 +100,13 @@ impl<'c> Codegen<'c> {
             OpKind::FragDotScaled => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
                 let tiles = self.tiles_ir(ir, op, 1..5)?;
+                let mut operands = Vec::with_capacity(4);
+                for (i, view) in tiles.iter().enumerate() {
+                    let from = self.slice_origin(ir, ir.operand(op, 1 + i))?;
+                    operands.push(ImmaOperand { view: view.clone(), from });
+                }
                 self.record_contract("mma.sync");
-                let frags = self.frag_dot_scaled_raw(block, &fa, &tiles)?;
+                let frags = self.frag_dot_scaled_raw(block, &fa, &operands)?;
                 for t in &tiles {
                     self.release(t);
                 }

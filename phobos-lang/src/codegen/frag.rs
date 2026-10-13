@@ -1,5 +1,14 @@
 use super::*;
 
+/// An operand of the scaled dot. When it is a slice, `from` is the buffer
+/// it was sliced from and where it starts there, which is what is read: a
+/// slice taken each iteration has its offset rebuilt per load, and the
+/// buffer it came from does not.
+pub(super) struct ImmaOperand<'c> {
+    pub(super) view: MemVal<'c>,
+    pub(super) from: Option<(Value<'c, 'c>, [Value<'c, 'c>; 2])>,
+}
+
 /// See [`Codegen::imma_lane`].
 struct ImmaLane<'c> {
     rows: Vec<Value<'c, 'c>>,
@@ -119,22 +128,38 @@ impl<'c> Codegen<'c> {
         })
     }
 
+    /// Where element `[row, col]` of an operand is read: its memref and
+    /// indices into it.
+    fn imma_at(
+        &self,
+        block: &Block<'c>,
+        v: &ImmaOperand<'c>,
+        row: Value<'c, 'c>,
+        col: Value<'c, 'c>,
+    ) -> Result<(Value<'c, 'c>, [Value<'c, 'c>; 2])> {
+        Ok(match v.from {
+            Some((mem, [r0, c0])) => (mem, [self.addi(block, r0, row)?, self.addi(block, c0, col)?]),
+            None => (v.view.mem, [row, col]),
+        })
+    }
+
     /// Four bytes of an int8 operand's row as an `m8n8k16` A or B fragment.
     fn imma_word(
         &self,
         block: &Block<'c>,
-        v: &MemVal<'c>,
+        v: &ImmaOperand<'c>,
         row: Value<'c, 'c>,
         col: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
-        let word = if v.vectorizes(4) {
-            self.vec_load_al(block, v.mem, &[row, col], Type::vector(&[4], self.i8_t), 4)?
+        let (mem, at) = self.imma_at(block, v, row, col)?;
+        let word = if v.view.vectorizes(4) {
+            self.vec_load_al(block, mem, &at, Type::vector(&[4], self.i8_t), 4)?
         } else {
             let mut bytes = Vec::with_capacity(4);
             for i in 0..4 {
                 let off = self.const_index(block, i)?;
-                let c = self.addi(block, col, off)?;
-                bytes.push(self.push(block, memref::load(v.mem, &[row, c], self.loc))?);
+                let c = self.addi(block, at[1], off)?;
+                bytes.push(self.push(block, memref::load(mem, &[at[0], c], self.loc))?);
             }
             self.push(
                 block,
@@ -156,26 +181,26 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         fa: &FragAcc<'c>,
-        tiles: &[MemVal<'c>],
+        operands: &[ImmaOperand<'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
-        let [a, w, s1, s2] = tiles else {
+        let [a, w, s1, s2] = operands else {
             bail!("fragment scaled dot takes four operands");
         };
         if !fa.imma {
             bail!("internal: scaled dot on a 16x16 fragment accumulator");
         }
-        let kk = a.shape[1];
-        self.check_shapes(&a.shape, &[fa.m, kk], "fragment scaled dot lhs")?;
-        self.check_shapes(&w.shape, &[fa.n, kk], "fragment scaled dot rhs")?;
-        if a.elem != self.i8_t || w.elem != self.i8_t || kk % IMMA_K != 0 {
+        let kk = a.view.shape[1];
+        self.check_shapes(&a.view.shape, &[fa.m, kk], "fragment scaled dot lhs")?;
+        self.check_shapes(&w.view.shape, &[fa.n, kk], "fragment scaled dot rhs")?;
+        if a.view.elem != self.i8_t || w.view.elem != self.i8_t || kk % IMMA_K != 0 {
             bail!("fragment scaled dot contracts int8 operands over a k that is a multiple of {IMMA_K}");
         }
-        for v in tiles {
+        for v in operands.iter().map(|o| &o.view) {
             if v.is_masked() || v.swizzle.is_some() {
                 bail!("internal: fragment scaled dot reached a partial or swizzled operand");
             }
         }
-        let is_row = |s: &MemVal<'c>| s.shape == [fa.m, 1];
+        let is_row = |s: &ImmaOperand<'c>| s.view.shape == [fa.m, 1];
         let (fm, fnn) = fa.warp_frags();
         let lane = self.imma_lane(block, fa)?;
         let zero = self.const_index(block, 0)?;
@@ -201,11 +226,12 @@ impl<'c> Codegen<'c> {
 
         // Each scale's value for every slot of the patch: a row scale by
         // patch row, a column scale by output column.
-        let scale_at = |s: &MemVal<'c>| -> Result<Vec<Value<'c, 'c>>> {
+        let scale_at = |s: &ImmaOperand<'c>| -> Result<Vec<Value<'c, 'c>>> {
             let mut by_slot = Vec::with_capacity((fm * fnn * 2) as usize);
             if is_row(s) {
                 for &row in &lane.rows {
-                    let v = self.load_as(block, s.mem, &[row, zero], self.f32_t)?;
+                    let (mem, at) = self.imma_at(block, s, row, zero)?;
+                    let v = self.load_as(block, mem, &at, self.f32_t)?;
                     by_slot.extend(std::iter::repeat_n(v, (fnn * 2) as usize));
                 }
             } else {
@@ -214,7 +240,8 @@ impl<'c> Codegen<'c> {
                     for dj in 0..2 {
                         let off = self.const_index(block, dj)?;
                         let c = self.addi(block, col, off)?;
-                        by_col.push(self.load_as(block, s.mem, &[zero, c], self.f32_t)?);
+                        let (mem, at) = self.imma_at(block, s, zero, c)?;
+                        by_col.push(self.load_as(block, mem, &at, self.f32_t)?);
                     }
                 }
                 for _ in 0..fm {
