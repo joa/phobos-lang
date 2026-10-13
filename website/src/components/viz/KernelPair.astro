@@ -1,0 +1,119 @@
+---
+// A before/after pair of visualizers, such as a kernel without and with an attribute, or one kernel
+// on two chips. Side by side on a wide container, one at a time behind a toggle on a narrow one.
+// The two step in lockstep: a step on either moves the other to the same statement and iteration,
+// matched by the statement's text, since a variant shifts line numbers.
+import Kernel from "../Kernel.astro"
+
+interface Props {
+  beforeTrace: string
+  beforeChip?: string
+  beforeLabel: string
+  afterTrace: string
+  afterChip?: string
+  afterLabel: string
+}
+
+const { beforeTrace, beforeChip, beforeLabel, afterTrace, afterChip, afterLabel } = Astro.props
+const sides = [
+  { key: "before", trace: beforeTrace, chip: beforeChip, label: beforeLabel },
+  { key: "after", trace: afterTrace, chip: afterChip, label: afterLabel },
+]
+---
+
+<div class="viz-pair" data-viz-pair data-show="after">
+  <div class="chart-group viz-pair-switch" role="group" aria-label="Variant">
+    {
+      sides.map(side => (
+        <button type="button" class="chart-btn" data-side={side.key} aria-pressed={side.key === "after" ? "true" : "false"}>
+          {side.label}
+        </button>
+      ))
+    }
+  </div>
+  <div class="viz-pair-sides">
+    {
+      sides.map(side => (
+        <section class="viz-pair-side" data-side={side.key} aria-label={side.label}>
+          <p class="viz-pair-label">{side.label}</p>
+          <Kernel trace={side.trace} chip={side.chip} stack />
+        </section>
+      ))
+    }
+  </div>
+  {Astro.slots.has("default") && <p class="viz-pair-caption"><slot /></p>}
+</div>
+
+<script>
+  for (const pair of document.querySelectorAll<HTMLElement>("[data-viz-pair]")) {
+    const sides = [...pair.querySelectorAll<HTMLElement>(".viz-pair-side")]
+    for (const side of sides) {
+      side.addEventListener("viz:step", event => {
+        const detail = (event as CustomEvent).detail
+        for (const other of sides) {
+          if (other === side) continue
+          other.querySelector("[data-chart-figure]")?.dispatchEvent(new CustomEvent("viz:follow", { detail }))
+        }
+      })
+    }
+    const buttons = pair.querySelectorAll<HTMLButtonElement>(".viz-pair-switch button")
+    for (const button of buttons) {
+      button.addEventListener("click", () => {
+        pair.dataset.show = button.dataset.side ?? "after"
+        for (const other of buttons) other.setAttribute("aria-pressed", String(other === button))
+      })
+    }
+  }
+</script>
+
+<style>
+  .viz-pair {
+    container: viz-pair / inline-size;
+    margin-block: 1.5rem;
+  }
+
+  .viz-pair-switch {
+    margin-bottom: 0.75rem;
+  }
+
+  .viz-pair-label {
+    margin: 0 0 0.5rem;
+    color: var(--star);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  .viz-pair-sides {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .viz-pair-side :global(.viz) {
+    margin-block: 0;
+  }
+
+  .viz-pair[data-show="after"] .viz-pair-side[data-side="before"],
+  .viz-pair[data-show="before"] .viz-pair-side[data-side="after"] {
+    display: none;
+  }
+
+  .viz-pair-caption {
+    margin-top: 0.75rem;
+    color: var(--dust);
+    font-size: 0.875rem;
+  }
+
+  @container viz-pair (min-width: 680px) {
+    .viz-pair-switch {
+      display: none;
+    }
+
+    .viz-pair-sides {
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    }
+
+    .viz-pair[data-show] .viz-pair-side {
+      display: block;
+    }
+  }
+</style>

@@ -37,6 +37,10 @@ ragged edge, and the slices are read and written whole.
 
 {/* figure: attr-aligned-pair */}
 
+import KernelPair from "../../../../components/viz/KernelPair.astro"
+
+<KernelPair beforeTrace="gemm_fp32_no_aligned" beforeLabel="without @aligned" afterTrace="gemm_fp32" afterLabel="with @aligned" />
+
 ## What it changes
 
 | Without `@aligned` | With `@aligned(DIM = tile)` |

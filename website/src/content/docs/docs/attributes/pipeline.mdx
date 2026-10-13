@@ -44,6 +44,12 @@ doubled stage buffers must fit in 48 KB of shared memory, or under
 
 {/* figure: attr-pipeline-pair */}
 
+import KernelPair from "../../../../components/viz/KernelPair.astro"
+
+<KernelPair beforeTrace="gemm_fp32_no_pipeline" beforeLabel="gemm f32 without @pipeline" afterTrace="gemm_fp32" afterLabel="gemm f32 with @pipeline" />
+
+<KernelPair beforeTrace="gemm_fp16" beforeChip="sm_80" beforeLabel="gemm f16 on sm_80, single-buffered" afterTrace="gemm_fp16_pipeline" afterChip="sm_80" afterLabel="gemm f16 on sm_80 with @pipeline: cp.async" />
+
 The figure pair shows a loop with and without double buffering: one stage
 buffer that the copy and the compute take turns on, against two that they
 alternate between.

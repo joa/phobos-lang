@@ -62,6 +62,10 @@ condition holds, so the product runs on WMMA. A complete kernel with
 
 {/* figure: attr-tensorcore-pair */}
 
+import KernelPair from "../../../../components/viz/KernelPair.astro"
+
+<KernelPair beforeTrace="gemm_fp16tc_fp32acc" beforeChip="sm_75" beforeLabel="sm_75: wmma" afterTrace="gemm_fp16tc_fp32acc" afterChip="sm_80" afterLabel="sm_80: mma.sync" />
+
 The figure pair shows the same product on FMA and on tensor cores: how each
 warp's share of the output is cut into fragments and fed from shared memory.
 

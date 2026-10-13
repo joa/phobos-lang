@@ -53,6 +53,10 @@ instead, the tile would stay as declared.
 
 {/* figure: attr-padstage-pair */}
 
+import KernelPair from "../../../../components/viz/KernelPair.astro"
+
+<KernelPair beforeTrace="q8_matvec" beforeLabel="without @padstage" afterTrace="q8_matvec_padstage" afterLabel="with @padstage" />
+
 The figure pair shows the same tile's rows laid over the banks, unpadded and
 padded, with the accesses of one column read.
 

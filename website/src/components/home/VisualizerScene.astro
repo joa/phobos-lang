@@ -1,14 +1,9 @@
 ---
-// Scene 2: the slot for the kernel visualizer. Until it lands, the stage is an empty plate and the code
-// panel shows examples/gemm_fp32.ph, read from the repository at build time. The visualizer attaches to
-// [data-visualizer-stage] and [data-visualizer-controls] and reads the pressed kernel from the
-// segmented control ([data-kernel] buttons).
-import { readFileSync } from "node:fs"
-import { resolve } from "node:path"
-import { Code } from "astro-expressive-code/components"
-
-const GEMM_PATH = "examples/gemm_fp32.ph"
-const gemmSource = readFileSync(resolve(process.cwd(), "..", GEMM_PATH), "utf8").replace(/\r\n/g, "\n").trimEnd()
+// Scene 2: the kernel visualizer, live. The Tiles/Lanes switch picks examples/gemm_fp32.ph or the lanes
+// matvec of the ctx docs; each visualizer has its own zoom between the CTA level and the lane level.
+// A short tour plays when the scene comes into view, and the reader's first click or key ends it.
+// Without JavaScript the gemm kernel shows as highlighted code.
+import Kernel from "../Kernel.astro"
 ---
 
 <section class="scene viz-scene" id="tiles-and-lanes" aria-labelledby="viz-title" data-kernel="gemm">
@@ -18,36 +13,21 @@ const gemmSource = readFileSync(resolve(process.cwd(), "..", GEMM_PATH), "utf8")
       <p class="scene-intro">
         A Phobos kernel works at two levels. Tiles, as in Triton: a CTA loads, multiplies and stores whole tiles.
         Warps and lanes, as in Gluon: each thread holds its own values and trades them with shuffles. The drawing
-        beside the code follows the kernel one statement at a time.
+        beside the code follows the kernel one statement at a time, as the compiler built it.
       </p>
     </div>
 
     <div class="segmented viz-switch" role="group" aria-label="Kernel">
       <button type="button" data-kernel="gemm" aria-pressed="true">Tiles: <code>gemm</code></button>
-      <button type="button" data-kernel="matvec" aria-pressed="false">Lanes: <code>matvec</code></button>
+      <button type="button" data-kernel="matvec" aria-pressed="false">Lanes: <code>lanes_matvec</code></button>
     </div>
 
-    <div class="viz-body">
-      <div class="viz-code">
-        <div class="viz-panel" data-panel="gemm">
-          <p class="viz-file"><code>{GEMM_PATH}</code></p>
-          <Code code={gemmSource} lang="phobos" />
-        </div>
-        <div class="viz-panel" data-panel="matvec" hidden>
-          <p class="viz-file">lanes matvec</p>
-          <p class="viz-pending">
-            The lanes matvec is written in the <a href="/docs/ctx/">execution context</a> section and shows here once
-            it is traced.
-          </p>
-        </div>
-      </div>
-      <div class="viz-stage" data-visualizer-stage>
-        <div class="slot-plate">
-          <p>The step-through drawing of this kernel attaches here.</p>
-        </div>
-      </div>
+    <div class="viz-panel" data-panel="gemm">
+      <Kernel file="examples/gemm_fp32.ph" tour />
     </div>
-    <div class="viz-controls" data-visualizer-controls></div>
+    <div class="viz-panel" data-panel="matvec" hidden>
+      <Kernel trace="lanes_matvec" tour caption="The lanes matvec from the execution context docs" />
+    </div>
   </div>
 </section>
 
@@ -77,69 +57,11 @@ const gemmSource = readFileSync(resolve(process.cwd(), "..", GEMM_PATH), "utf8")
     margin-bottom: 1.25rem;
   }
 
-  .viz-body {
-    display: grid;
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    gap: var(--grid-gap);
-    align-items: start;
+  .viz-panel {
+    view-transition-name: viz-panel;
   }
 
-  .viz-code {
-    grid-column: span 4;
-    min-width: 0;
-    view-transition-name: viz-code;
-  }
-
-  .viz-stage {
-    grid-column: span 8;
-    display: grid;
-    min-height: 30rem;
-  }
-
-  .viz-stage .slot-plate {
-    min-height: 100%;
-  }
-
-  .viz-file {
-    margin: 0 0 0.5rem;
-    color: var(--dust);
-    font-family: var(--font-mono);
-    font-size: 0.75rem;
-  }
-
-  .viz-file code {
-    font-size: 1em;
-  }
-
-  .viz-pending {
-    margin: 0;
-    padding: 1rem;
-    border: 1px solid var(--sky-line);
-    background: var(--sky-1);
-    color: var(--dust);
-    font-size: 0.9375rem;
-  }
-
-  .viz-code :global(.expressive-code) {
-    font-size: 0.8125rem;
-  }
-
-  .viz-code :global(.expressive-code pre) {
-    max-height: 32rem;
-  }
-
-  .viz-controls:empty {
-    display: none;
-  }
-
-  @media (max-width: 900px) {
-    .viz-code,
-    .viz-stage {
-      grid-column: 1 / -1;
-    }
-
-    .viz-stage {
-      min-height: 18rem;
-    }
+  .viz-panel :global(.viz) {
+    margin-block: 0;
   }
 </style>

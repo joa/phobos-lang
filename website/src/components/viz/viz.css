@@ -1,0 +1,248 @@
+/* The kernel visualizer: the code panel beside or above the star chart drawing. Colors come from the
+ * tokens and chart.css; the classes here are the visualizer's own states. */
+
+.viz {
+  container: viz / inline-size;
+  margin-block: 1.5rem;
+}
+
+/* Starlight spaces every sibling in a docs page apart; the visualizer sets its own spacing. */
+.viz.viz * {
+  margin-top: 0;
+}
+
+.viz.viz .chart-readout {
+  margin-top: 0.75rem;
+}
+
+.viz.viz .viz-controls {
+  margin-top: 0.75rem;
+}
+
+.viz.viz .chart-legend {
+  margin-top: 0.75rem;
+}
+
+.viz.viz .viz-caption {
+  margin-top: 0.4rem;
+}
+
+.viz-body {
+  display: grid;
+  gap: 1rem;
+  align-items: start;
+}
+
+.viz-source {
+  min-width: 0;
+}
+
+.viz-code {
+  position: relative;
+  min-width: 0;
+}
+
+.viz-code .expressive-code {
+  margin: 0;
+}
+
+.viz-marker {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 2;
+  height: 1.5rem;
+  border-left: 2px solid var(--brand);
+  background: var(--brand-fill);
+  pointer-events: none;
+  opacity: 0;
+  transition:
+    transform var(--dur-3) var(--ease-in-out),
+    opacity var(--dur-2) var(--ease-out);
+}
+
+.viz-marker.is-on {
+  opacity: 1;
+}
+
+.viz-caption {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0.4rem 0 0;
+  color: var(--dust);
+  font-size: var(--sl-text-xs, 0.75rem);
+}
+
+.viz-caption code {
+  font-size: inherit;
+}
+
+.viz-variant {
+  font-family: var(--font-mono);
+}
+
+.viz-full {
+  margin-left: auto;
+}
+
+/* Without JavaScript, or until the trace has loaded, the reader sees the code alone. */
+.viz:not([data-viz-live]) .viz-figure {
+  display: none;
+}
+
+.viz-figure {
+  margin: 0;
+  min-width: 0;
+}
+
+/* Stacked: the lines around the current statement stay in a short window above the drawing. */
+.viz[data-viz-live] .viz-code {
+  max-height: 11.5rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+@container viz (min-width: 960px) {
+  .viz.is-auto .viz-body {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+    gap: var(--grid-gap, 2rem);
+  }
+
+  .viz.is-auto[data-viz-live] .viz-code {
+    max-height: 36rem;
+  }
+}
+
+.viz-controls {
+  display: grid;
+  gap: 0.625rem;
+  margin-top: 0.75rem;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.625rem 1.25rem;
+}
+
+.viz .chart.viz-figure[data-layout] .viz-row > .chart-group {
+  margin-left: 0;
+}
+
+.viz-icon {
+  min-width: 32px;
+  padding: 0 0.5rem;
+}
+
+.viz-cta-value {
+  min-width: 8ch;
+  text-align: center;
+}
+
+.viz-controls .viz-value {
+  min-width: 9ch;
+  color: var(--star);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.viz-scrub {
+  flex: 1 1 16rem;
+  flex-wrap: nowrap;
+}
+
+.viz-scrub .chart-range {
+  flex: 1 1 8rem;
+}
+
+.viz-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.viz-play {
+  min-width: 4.5rem;
+}
+
+.viz-figure .chart-readout {
+  min-height: 4.5em;
+}
+
+/* Drawing states */
+
+.viz-figure .viz-off {
+  visibility: hidden;
+}
+
+.viz-figure .viz-follow {
+  transition:
+    transform var(--dur-3) var(--ease-in-out),
+    opacity var(--dur-2) var(--ease-out);
+}
+
+.viz-figure .viz-cta {
+  cursor: pointer;
+}
+
+.viz-figure .chart-node.is-hot {
+  fill: var(--space);
+}
+
+.viz-figure .viz-cells {
+  stroke: none;
+}
+
+.viz-figure .chart-box.viz-other {
+  stroke: var(--space);
+  stroke-width: 1;
+  opacity: 0.4;
+}
+
+.viz-figure .chart-box.viz-other.is-hidden {
+  opacity: 0;
+}
+
+.viz-figure .chart-box.viz-written {
+  stroke: none;
+}
+
+.viz-figure .viz-elided .chart-wire {
+  stroke: var(--dust);
+  stroke-dasharray: 2 3;
+}
+
+.viz-figure .viz-elided .chart-node {
+  fill: var(--dust);
+}
+
+.viz-figure .viz-current .chart-wire {
+  stroke-width: 2.25;
+}
+
+.viz-figure .viz-elided.viz-current .chart-wire {
+  stroke: var(--star);
+}
+
+.viz-figure .viz-arc {
+  stroke-linecap: round;
+}
+
+.viz-figure .viz-arc.is-on {
+  stroke-width: 1.5;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .viz-marker,
+  .viz-figure .viz-follow {
+    transition: none;
+  }
+}

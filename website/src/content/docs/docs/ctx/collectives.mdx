@@ -9,6 +9,10 @@ import LanesMatvec from "./_lanes-matvec.mdx"
 
 {/* figure: ctx-collectives */}
 
+import Kernel from "../../../../components/Kernel.astro"
+
+<Kernel trace="lanes_matvec" zoom="lane" step={3} stack caption="The lanes matvec, written at the end of this page" />
+
 A lane-strided loop leaves one partial result in every thread. A collective
 folds those values across a group of threads and gives every thread of the
 group the result. A shuffle moves one value from one lane to another. The
