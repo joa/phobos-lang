@@ -32,7 +32,9 @@ const legendLabels: Record<Space, string> = {
   reg: "registers",
   cost: "cost",
 }
-const hasControls = Astro.slots.has("default")
+// Rendered first so a slot holding only whitespace draws no empty control row
+const controls = Astro.slots.has("default") ? (await Astro.slots.render("default")).trim() : ""
+const hasControls = controls.length > 0
 const hasCaption = Astro.slots.has("caption")
 ---
 
@@ -58,9 +60,7 @@ const hasCaption = Astro.slots.has("caption")
   }
   {
     hasControls && (
-      <div class="chart-controls">
-        <slot />
-      </div>
+      <div class="chart-controls" set:html={controls} />
     )
   }
   {

@@ -38,7 +38,6 @@ const { id = "fig-ctx-indices" } = Astro.props
     <button type="button" class="chart-btn" data-group="mode" data-value="indices" aria-pressed="true">Indices</button>
     <button type="button" class="chart-btn" data-group="mode" data-value="loop" aria-pressed="false">Lane-strided loop</button>
   </div>
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic. <code>@launch(256)</code> on NVIDIA, 32 lanes a warp. Hover or focus a thread, or use the arrow
     keys on the grid; the loop reads one row of <code>W</code> with <code>K = 128</code>.

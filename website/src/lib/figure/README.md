@@ -65,7 +65,6 @@ vitest.
        <button type="button" class="chart-btn" data-group="mode" data-value="a" aria-pressed="true">A</button>
        <button type="button" class="chart-btn" data-group="mode" data-value="b" aria-pressed="false">B</button>
      </div>
-     <button type="button" class="chart-btn" data-action="replay">Replay</button>
      <Fragment slot="caption">Schematic. A caption.</Fragment>
    </ChartFigure>
    ```
@@ -144,8 +143,8 @@ them at run time; under reduced motion they shrink to 120 ms or 0. In a frame lo
   default, at most 24), each with a fixed lag and offset from a seeded generator, so the static render matches. It
   gathers to a point at both ends of its line. Keep `count` small where many packets move at once (the visualizer's
   32 lanes use 6).
-- **Loop.** Nothing to do in a figure with a Replay button or a tour: the base holds the end state, cross-fades and
-  calls `replay()`.
+- **Loop.** Nothing to do in a figure with a tour or a `replay` action: the base holds the end state, cross-fades
+  and calls `replay()`. Figures carry no Replay button; the loop is the replay.
 - **Arrival glow.** Either `this.motion.pulse(glowElement)` (fire and forget, 300 ms), or, inside a seekable timeline,
   a `glow` with class `is-pulse` whose `--pulse` property (0 to 1) you set per frame, as `cta-copy` does.
 - **Breathing.** `setBreathing(glowElement, true)`: opacity between 0.85 and 1 over 2.4 s, paused while the figure is

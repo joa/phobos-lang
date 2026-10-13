@@ -16,7 +16,6 @@ const { id = "fig-cluster-tiles" } = Astro.props
   title="The cluster level, experimental: super-tiles, nodes, grids"
   desc="Schematic. Above the grid, drawn dashed as experimental, the cluster splits an output tensor into four super-tiles and deals one to each of four nodes. Each node runs the leaf kernel as an ordinary grid of CTAs over its super-tile. One CTA of the last node opens into 8 warps of 32 lanes. @cluster sizes the super-tile; @autotune sizes the CTA tile inside it."
 >
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic, and experimental: the dashed tiers are the cluster path. Four super-tiles on four nodes; with more
     super-tiles than nodes, the scheduler deals them round robin and a node runs several, one launch each.

@@ -29,7 +29,6 @@ const card = RUN.card.replace(/^NVIDIA\s+(GeForce\s+)?/, "")
   ]}
   class="elastic-cache"
 >
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     {RUN.model} on an {card}, <a href={`${REPO_URL}/blob/main/${RUN.file}`}>results committed {shortDate(RUN.date)}</a>,
     median wall time of the replay, decode rates the mean over {phobos.reps} and {other.reps} replays. Cache sizes are the
