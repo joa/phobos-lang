@@ -203,7 +203,7 @@ impl Build {
             Some(AstType::Tile(sc, dims)) => {
                 self.tile_shape(dims).ok().map(|s| (Scalar::from_ast(*sc), s))
             }
-            None => match (self.slice_static_shape(value), self.slice_tensor_elem(value)) {
+            None => match (self.slice_shape_of(value, true), self.slice_elem_of(value, true)) {
                 (Some(s), Some(e)) => Some((e, s)),
                 _ => None,
             },
