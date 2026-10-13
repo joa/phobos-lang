@@ -130,23 +130,11 @@ kernel iq3s_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq3s_matvec_src`] for `m == 1`, as one `iq3s_qdot_t` call; mirrors
-/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
-/// `iq3s_qdot_t` needs its `qb` and `d` slices provably in bounds.
+/// [`iq3s_matvec_src`] for `m == 1`, written with lanes; see `iq_f32.rs`.
+/// [`crate::backend::device::DeviceBackend::project_raw`] ensures `N` is a
+/// multiple of `tn`, and falls back to [`iq3s_matvec_src`] otherwise.
 pub(crate) fn iq3s_qdot_matvec_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq3s_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                        D: tensor<f16>[N, NB], GRID: tensor<i8>[1, {IQ3S_GRID_LEN}],
-                        SIGNS: tensor<i8>[1, {IQ2S_SIGNS_LEN}], C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = iq3s_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
-                                         D[pn * TN :+ TN, :], GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
-}}
-"
-    )
+    super::qdot_matvec_src(super::IqFmt::Iq3s, tn)
 }
 
 /// [`iq3s_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
@@ -180,25 +168,11 @@ kernel iq3s_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq3s_dequant_src`]'s decode as one `iq3s_qdecode_t` call. Mirrors
-/// `iq1s_qdecode_src` in `iq1s.rs`.
+/// [`iq3s_dequant_src`]'s decode, written with lanes; see `iq_f32.rs`.
+/// [`crate::backend::device::DeviceBackend::project_raw_dense`] uses
+/// [`iq3s_dequant_src`] for a strip that is not a whole number of `TN`.
 pub(crate) fn iq3s_qdecode_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq3s_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                    GRID: tensor<i8>[1, {IQ3S_GRID_LEN}],
-                    SIGNS: tensor<i8>[1, {IQ2S_SIGNS_LEN}],
-                    SCRATCH: tensor<f32>[K, N]) {{
-  let pn = ctx.block.x
-  SCRATCH[:, pn * TN :+ TN] = iq3s_qdecode_t(QB[pn * TN :+ TN, :],
-                                             D[pn * TN :+ TN, :],
-                                             GRID[0 :+ 1, :],
-                                             SIGNS[0 :+ 1, :])
-}}
-"
-    )
+    super::qdecode_src(super::IqFmt::Iq3s, tn)
 }
 
 /// IQ3_S's prompt projection, decode and contraction in one kernel.

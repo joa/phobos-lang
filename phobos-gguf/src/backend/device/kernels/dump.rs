@@ -10,6 +10,9 @@ use crate::quant::Quant;
 
 /// One dp4a decode matvec: the source builder, its wide and narrow output
 /// tiles, and the kernel's name.
+/// A source builder taking its tile width.
+type Src = fn(usize) -> String;
+
 type I8Row = (fn(usize) -> String, usize, usize, &'static str);
 
 #[test]
@@ -54,6 +57,20 @@ fn dump_raw_kernel_sources() {
     sources.push(("iq4xs_qdot_lanes".to_string(), iq4xs_qdot_lanes_src()));
     sources.push(("moe_combine".to_string(), moe_combine_src()));
     sources.push(("delta_scan_reg".to_string(), delta_scan_reg_src(128)));
+    // The IQ formats' f32 decode matvecs and weight expansions.
+    let iq: [(&str, Src, Src, usize); 7] = [
+        ("iq1s", iq1s_qdot_matvec_src, iq1s_qdecode_src, IQ1S_TN),
+        ("iq1m", iq1m_qdot_matvec_src, iq1m_qdecode_src, IQ1M_TN),
+        ("iq2xxs", iq2xxs_qdot_matvec_src, iq2xxs_qdecode_src, IQ2XXS_TN),
+        ("iq2xs", iq2xs_qdot_matvec_src, iq2xs_qdecode_src, IQ2XS_TN),
+        ("iq2s", iq2s_qdot_matvec_src, iq2s_qdecode_src, IQ2S_TN),
+        ("iq3xxs", iq3xxs_qdot_matvec_src, iq3xxs_qdecode_src, IQ3XXS_TN),
+        ("iq3s", iq3s_qdot_matvec_src, iq3s_qdecode_src, IQ3S_TN),
+    ];
+    for (name, qdot, qdecode, tn) in iq {
+        sources.push((format!("{name}_qdot_matvec"), qdot(tn)));
+        sources.push((format!("{name}_qdecode"), qdecode(tn)));
+    }
     // Decode attention at the Qwen3.5 head layouts, a 128-wide one and a
     // 64-wide one: (heads, group, head dim).
     for (heads, group, head_dim) in [(8, 4, 256), (16, 4, 256), (32, 4, 128), (16, 1, 64)] {
