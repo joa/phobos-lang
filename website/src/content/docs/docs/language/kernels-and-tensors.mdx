@@ -1,0 +1,157 @@
+---
+title: Kernels and tensors
+description: The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements and functions.
+sidebar:
+  order: 1
+---
+
+A source file holds kernels and functions. A kernel is the entry point the
+host launches; a function is inlined wherever it is called.
+
+```phobos
+@launch(256)
+kernel scale_rows(X: tensor<f32>[M, 64], S: tensor<f32>[M, 1], Y: tensor<f32>[M, 64]) {
+  let r = ctx.block.x * 32
+  var x = X[r :+ 32, :]
+  var s = S[r :+ 32, :]
+  Y[r :+ 32, :] = x * s
+}
+```
+
+The parts, in order:
+
+| Part | In the example | Meaning |
+| --- | --- | --- |
+| Attributes | `@launch(256)` | Optional settings for the kernel; see [Attributes](/docs/attributes/) |
+| `kernel` and a name | `scale_rows` | The symbol the host launches |
+| Parameters | `X: tensor<f32>[M, 64]` | Tensors in global memory, and scalars |
+| Body | `{ .. }` | Statements, run by every CTA of the grid |
+
+The grammar is in the spec under [Grammar](/docs/reference/spec/#grammar), and
+the statements under [Statements](/docs/reference/spec/#statements).
+
+## Tensor parameters
+
+A tensor is an array in global memory, passed by the host. Its type names the
+element type and one entry per dimension:
+
+```phobos fragment
+A: tensor<f32>[M, K]       // two symbolic dimensions
+B: tensor<i8>[N, 4096]     // a literal dimension
+G: tensor<f32>[N, 1]       // a column
+```
+
+Tensors exist only as kernel parameters. A kernel reads and writes them
+through subscripts (see [Slicing, bounds and masking](/docs/language/slicing-bounds-masking/));
+a tensor named alone, as in `let x = A`, is an error. Rows are laid out one
+after another (row-major).
+
+## Symbolic dimensions
+
+A dimension written as a name is symbolic. The name is bound in one of two
+ways:
+
+| Bound by | Example | Value known |
+| --- | --- | --- |
+| `@autotune` | `@autotune(TILE_K in [4, 32])` then `tensor<f32>[M, TILE_K]` | At compile time, one value per compiled variant |
+| The launch | `M` in `tensor<f32>[M, K]` with no `@autotune` entry | At run time, from the tensor the host passes |
+
+A runtime dimension is available in the body under its name, as an index:
+`for kt in range(0, K, TILE_K)` loops to the tensor's actual extent. The same
+name used in several parameters refers to one value.
+
+Runtime extents are assumed to be multiples of 4 elements. They need not be
+multiples of a tile; the edges are masked (see
+[Slicing, bounds and masking](/docs/language/slicing-bounds-masking/#masking)).
+
+## Scalar parameters
+
+A parameter with a scalar type is a single value, the same in every thread:
+
+```phobos fragment
+kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32)
+```
+
+## Types
+
+| Type | Meaning |
+| --- | --- |
+| `f16` | IEEE binary16. Float literals are `f32`, rounded to `f16` on store. |
+| `bf16` | 8-bit exponent, 7-bit mantissa. Works on every target: native conversion from sm_80, emulated below. |
+| `f32`, `f64` | IEEE binary32 and binary64. |
+| `i8` | Signed byte. Loads sign-extend. |
+| `i32`, `i64` | Signed integers. |
+| `u8`, `u16`, `u32` | Unsigned storage for tensors and tiles. Every read zero-extends. No arithmetic directly on them; convert first, as in `(i32(b) >> 4) & 15`. |
+| `bool` | The result of a comparison. No conversion to or from it. |
+| `tensor<T>[dims]` | Global memory, kernel parameters only. |
+| `tile<T>[dims]` | A block of shared memory owned by the CTA. See [Tiles and shared memory](/docs/language/tiles-and-shared-memory/). |
+
+Indices, loop variables and the `ctx` fields are of an index type, the
+integer width the target addresses memory with. The spec's
+[Types](/docs/reference/spec/#types) section has the normative table.
+
+## Statements
+
+| Form | Meaning |
+| --- | --- |
+| `let x = e` | An immutable binding. The initializer is required. |
+| `let x: T = e` | The same, with a declared type. |
+| `var x = e` | A mutable binding. `var t = A[...]` copies a tensor slice into a tile. |
+| `var t: tile<T>[R, C] = e` | A mutable tile, filled with `e`; a scalar broadcasts. |
+| `var t: tile<T>[R, C]` | An uninitialized tile. |
+| `x = e`, `x[...] = e` | Assign a whole value or a slice. |
+| `x += e`, `x[...] += e` | Accumulate. |
+| `x op= e` | `x = x op e` for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. An indexed target's subscripts are evaluated twice. |
+| `for i in range(lo, hi[, step])` | `i` runs over `lo`, `lo + step`, ... while below `hi`. `step` defaults to 1. |
+| `while c { }`, `if c { } else { }` | Branch and loop on a scalar condition. |
+| `break`, `continue` | Leave the innermost loop, or its current iteration. |
+| `return` | Skip the rest of the kernel. |
+
+A statement ends at a newline or a `;`, which may be left out before `}`.
+Comments run from `//` to the end of the line. An `else` must follow the `}`
+of its `if` on the same line; a newline there ends the `if`.
+
+Two details of loops are worth knowing. A `for` runs its remaining iterations
+as no-ops after a `break`, while a `while` stops at its next test. And a loop
+whose bounds differ between threads is allowed, but the code inside it then
+runs under per-thread control; see
+[Uniform, warp-uniform and varying](/docs/ctx/uniformity/).
+
+## Functions
+
+A function is inlined at every call; there is no call at run time. There are
+two forms.
+
+An expression function is a formula. Its body fuses into the caller's
+elementwise sweep, so it costs nothing beyond its arithmetic:
+
+```phobos
+fn silu(x) = x / (1.0 + exp(-x))
+
+@autotune(TILE in [1024])
+kernel act(X: tensor<f32>[N], Y: tensor<f32>[N]) {
+  let base = ctx.block.x * TILE
+  var x = X[base :+ TILE]
+  Y[base :+ TILE] = silu(x)
+}
+```
+
+A statement function is a block, spliced in where it is called. A parameter
+passed a name aliases it, so a tile handed in can be written:
+
+```phobos fragment
+fn scale_in_place(t, s) {
+  t = t * s
+}
+// ...
+scale_in_place(acc, 0.5)
+```
+
+| Rule | Detail |
+| --- | --- |
+| Arguments | An argument used twice in an expression function is evaluated twice. A parameter that a statement function indexes or assigns must be passed a name. |
+| Names | The body's own `let`s, `var`s and loop variables never meet the caller's. Any other name in the body resolves at the call, as a macro's would. |
+| Jumps | A statement body may not `return`, nor `break` or `continue` outside its own loops. |
+| Recursion | A function calling itself, directly or not, is an error. |
+
+See [Functions](/docs/reference/spec/#functions) in the spec.

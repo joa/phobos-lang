@@ -1,0 +1,116 @@
+---
+title: ctx.thread, ctx.warp, ctx.lane
+description: The per-thread indices, how they relate, and the lane-strided loop.
+sidebar:
+  order: 4
+---
+
+{/* figure: ctx-indices */}
+
+Inside a CTA every thread has an index, and so does its warp and its place in
+the warp. The figure lays one CTA out as rows of warps; hovering a thread
+shows how its three indices relate.
+
+| Field | Result | Same in |
+| --- | --- | --- |
+| `ctx.thread` | The thread's index in the CTA, 0 to `ctx.threads - 1`. | nothing: it differs between lanes |
+| `ctx.warp` | `ctx.thread / ctx.lanes`, 0 to `ctx.warps - 1`. | every lane of a warp |
+| `ctx.lane` | The thread's index in its warp, 0 to `ctx.lanes - 1`. | nothing: it differs between lanes |
+
+They are related by
+
+```text
+ctx.thread = ctx.warp * ctx.lanes + ctx.lane
+```
+
+so with `@launch(256)` on NVIDIA, thread 113 is lane 17 of warp 3, and lane 0
+of warp 5 is thread 160.
+
+These are the only sources of per-thread values in Phobos. Everything a kernel
+computes is the same in every thread until one of them flows into it. The
+compiler tracks how far each value may differ, and the next page,
+[Uniform, warp-uniform and varying](/docs/ctx/uniformity/), lists the rules
+that follow. The spec covers the fields under
+[Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization)
+and their consequences under [Per-thread values](/docs/reference/spec/#per-thread-values).
+
+## The lane-strided loop
+
+The most common use of `ctx.lane` is a loop that starts at the lane and steps
+by the warp width. Lane 0 takes elements 0, 32, 64 and so on, lane 1 takes 1,
+33, 65, and together the 32 lanes cover the row once:
+
+```phobos fragment
+var acc: f32 = 0.0
+for k in range(ctx.lane, K, ctx.lanes) {
+  acc += W[col, k] * A[0, k]
+}
+```
+
+On each iteration the 32 lanes read 32 neighboring elements, so a warp's loads
+fall on as few memory lines as possible. The loop variable `k` differs between
+lanes because its start does, and `acc` is a scalar `var`, which lives in each
+thread's registers: after the loop every lane holds its own partial sum.
+
+The same shape works over the whole CTA with `ctx.thread` and `ctx.threads`.
+This kernel sums each row of `X`, one CTA per row; each thread adds every
+256th element, and a collective over the CTA folds the 256 partial sums:
+
+```phobos
+@launch(256)
+kernel row_sum(X: tensor<f32>[R, K], O: tensor<f32>[R, 1]) {
+  let r = ctx.block.x
+  var acc: f32 = 0.0
+  for k in range(ctx.thread, K, ctx.threads) {
+    acc += X[r, k]
+  }
+  let total = sum<over ctx.thread>(acc)
+  if ctx.thread == 0 {
+    O[r, 0] = total
+  }
+}
+```
+
+`total` is the same in every thread, but only thread 0 stores it, so the
+tensor sees one store instead of 256 identical ones. The collective is
+explained on [Collectives and shuffles](/docs/ctx/collectives/).
+
+## One warp per output
+
+`ctx.warp` is the index to use when each warp takes one piece of work. A
+matvec with one warp per output column computes its column as
+
+```phobos fragment
+let col = ctx.block.x * ctx.warps + ctx.warp
+```
+
+so a CTA of 8 warps handles 8 consecutive columns and the grid needs
+`ceil(N / 8)` CTAs. `col` is warp-uniform: every lane of a warp agrees on it,
+which is exactly what a lane collective over that warp needs. An `if col < N`
+around the work skips the warps past the last column without splitting any
+warp.
+
+## A thread's own run
+
+A per-thread loop can also read several neighboring elements at once. A
+subscript with a constant `:+` length inside `sum(..)`, `elem(..)`,
+`word(..)` or `store(..)` is the thread's own run of elements, loaded with one
+vector access when the alignment can be proven:
+
+```phobos fragment
+for k in range(ctx.lane * 16, K, ctx.lanes * 16) {
+  acc += f32(sum(i32(A[0, k :+ 16]) * i32(W[col, k :+ 16])))
+}
+```
+
+Each lane now owns 16 consecutive `i8` values per step instead of one. The
+details, including when this becomes a `dp4a` per four bytes, are on
+[Collectives and shuffles](/docs/ctx/collectives/#sums-within-a-thread).
+
+## What the indices do not change
+
+A tile operation in a kernel that also uses the indices is unchanged: it still
+runs once per CTA, spread over all threads by the compiler. What changes is
+where it may appear. A tile operation inside `if ctx.lane == 0 { .. }` would
+be reached by only some threads, and the compiler rejects it. The rules are
+on the [next page](/docs/ctx/uniformity/).

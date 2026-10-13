@@ -1,0 +1,91 @@
+---
+title: "@registers"
+description: Keeps named tiles in each thread's registers instead of shared memory.
+sidebar:
+  order: 7
+---
+
+A tile normally lives in shared memory. An accumulator that is only ever
+updated element by element does not need to: each thread can keep its own
+elements in registers, where reading and writing them costs nothing and no
+barrier is needed. `@registers` asks for that.
+
+```text
+@registers(t, ...)
+```
+
+Each argument names a `var t: tile<T>[dims] = e` of the kernel. See the
+[Attributes](/docs/reference/spec/#attributes) table in the spec.
+
+## How the elements are spread
+
+Every thread holds the elements `tid`, `tid + threads`, `tid + 2 * threads`
+and so on of the tile in row-major order, where `tid` is `ctx.thread` and
+`threads` is `ctx.threads`. A `[16, 64]` tile in a CTA of 256 threads is 1024
+elements, four per thread. A thread may hold at most 64 elements of one
+register tile.
+
+## What stays in registers
+
+| Use of `t` | Effect |
+| --- | --- |
+| `t = e` or `t += e` reading `t` only at the element it writes | Stays in registers. A `for` carries `t` through its iterations. |
+| `rowsum(t)` or `rowmax(t)` of an `f32` or `i32` tile whose rows are a power of two of at most `ctx.lanes` elements | Each row is a run of lanes of one warp, folded with shuffles where it lives. |
+| Anything else: a store to a tensor, another reduction, a `dot` | `t` is first stored to a shared tile. |
+
+## A minimal kernel
+
+A sum of squares over `K`, held in registers through the loop:
+
+```phobos
+@launch(256)
+@registers(acc)
+kernel squares(X: tensor<f32>[16, K], O: tensor<f32>[16, 64], S: tensor<f32>[16, 1]) {
+  var acc: tile<f32>[16, 64] = 0.0
+  for kt in range(0, K, 64) {
+    var x = X[0 :+ 16, kt :+ 64]
+    acc += x * x
+  }
+  O[0 :+ 16, 0 :+ 64] = acc
+  var s: tile<f32>[16, 1] = rowsum(acc)
+  S[0 :+ 16, 0 :+ 1] = s
+}
+```
+
+`acc += x * x` reads `acc` only at the element it writes, so it stays in
+registers for the whole loop. The store to `O` and the `rowsum` over 64-wide
+rows read it otherwise, so it is stored to a shared tile once after the loop,
+instead of being read and written in shared memory on every iteration.
+
+{/* figure: attr-registers-pair */}
+
+The figure pair shows the accumulator in shared memory and in registers,
+with the loop's accesses to it.
+
+## When it is rejected
+
+| Case | Problem |
+| --- | --- |
+| `@registers(t)` with no `var t: tile<..>[..]` in the kernel | the name refers to nothing |
+| The element count does not divide evenly by `ctx.threads` | every thread must hold the same number of elements |
+| More than 64 elements per thread | the cap for one register tile |
+| A declaration without an initial value | a register tile needs one |
+| An update of `t` inside an `if` or a `while` | not supported |
+
+```phobos expect-error
+@launch(256)
+@registers(acc)
+kernel k(O: tensor<f32>[3, 5]) {
+  var acc: tile<f32>[3, 5] = 0.0
+  O[0 :+ 3, 0 :+ 5] = acc
+}
+```
+
+A `[3, 5]` tile has 15 elements, which 256 threads cannot share evenly.
+
+## Interactions
+
+- [`@launch`](/docs/attributes/launch/) sets `ctx.threads`, which decides
+  both the divisibility and the elements per thread.
+- Freeing an accumulator's shared memory can let a larger tile set fit, or let
+  [`@pipeline`](/docs/attributes/pipeline/) double the stages.

@@ -1,0 +1,69 @@
+---
+title: "@padstage"
+description: Pads staging tiles whose row pitch is a multiple of 128 bytes, to avoid shared-memory bank conflicts.
+sidebar:
+  order: 5
+---
+
+Shared memory is split into banks, and two threads that hit the same bank in
+the same access wait for each other. The bank of an address repeats every 128
+bytes, so in a tile whose rows are a multiple of 128 bytes long, the same
+column of every row lies in the same bank. Reading a column, as a `dot` or a
+`transpose` does, then serializes.
+
+`@padstage` adds a few unused elements to the end of each row of such a tile.
+The rows then start in different banks, and a column spreads across them.
+
+```text
+@padstage
+```
+
+It takes no arguments. See the [Attributes](/docs/reference/spec/#attributes)
+table in the spec.
+
+## Which tiles it reaches
+
+Only staging tiles, and only those whose rows would collide:
+
+- The tile is a copy of a tensor slice: `var t = <tensor slice>`. A `let`
+  view of a tensor that a `dot` reads more than once is staged by the
+  compiler anyway, and that staging tile counts too.
+- Its row pitch, the last dimension times the element size, is a static
+  multiple of 128 bytes.
+
+Every other tile is unchanged: a tile filled from an expression, an
+accumulator, or a staging tile whose rows are, say, 64 bytes.
+
+The padding is 8 elements per row. It is invisible to the source: the tile
+keeps its shape, and only its allocation and its row stride grow.
+
+## A minimal kernel
+
+```phobos
+@padstage
+kernel stage(K: tensor<f16>[64, 128], O: tensor<f16>[8, 128]) {
+  var k = K[0 :+ 8, 0 :+ 128]
+  O[0 :+ 8, 0 :+ 128] = k
+}
+```
+
+`k` is `[8, 128]` `f16`, 256 bytes per row, a multiple of 128. Under
+`@padstage` its allocation is `[8, 136]`. With rows of 32 `f16` (64 bytes)
+instead, the tile would stay as declared.
+
+{/* figure: attr-padstage-pair */}
+
+The figure pair shows the same tile's rows laid over the banks, unpadded and
+padded, with the accesses of one column read.
+
+## Cost and interactions
+
+The padding costs shared memory: `8 * rows` elements per padded tile. A
+kernel at the edge of the 48 KB budget can fail to fit, or lose double
+buffering under [`@pipeline`](/docs/attributes/pipeline/), once its stages
+grow.
+
+A kernel benefits when it reads its staged tiles by column. Attention, which
+contracts a staged key tile with `dot_t`, is the typical case: the GGUF
+backend's attention kernel carries `@padstage`. A kernel that only streams
+rows through elementwise sweeps reads every row whole and gains nothing.

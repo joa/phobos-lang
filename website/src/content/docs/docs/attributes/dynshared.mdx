@@ -1,0 +1,70 @@
+---
+title: "@dynshared"
+description: Dynamic shared memory sized at launch instead of the static 48 KB.
+sidebar:
+  order: 6
+---
+
+By default a kernel's tiles live in static shared memory, which is capped at
+48 KB per CTA. Most NVIDIA chips have more per block, but a kernel only gets
+it by asking for dynamic shared memory at launch. `@dynshared` switches the
+kernel to that.
+
+```text
+@dynshared
+```
+
+It takes no arguments. See the [Attributes](/docs/reference/spec/#attributes)
+table in the spec.
+
+## What it changes
+
+| | Static (default) | `@dynshared` |
+| --- | --- | --- |
+| Limit | 48 KB | The chip's per-block limit |
+| Size known | At compile time | At compile time, and passed by the host at launch |
+| Placement | One static buffer | One dynamic buffer; the allocator resets once every tile is released |
+
+The compiler still plans every tile's offset itself and computes the peak
+the kernel needs. Compiling reports that number for each `@dynshared` kernel,
+and the launch must supply at least that many bytes.
+
+Because the allocator resets once every tile is released, phases of a kernel
+separated by a barrier share one footprint: a second phase starts again at
+offset 0 instead of after the first phase's tiles.
+
+{/* figure: attr-dynshared-pair */}
+
+The figure pair shows the byte ruler of shared memory for the same kernel,
+static and dynamic.
+
+## A minimal kernel
+
+```phobos
+@dynshared
+kernel chain(X: tensor<f32>[16, 64], Y: tensor<f32>[8, 4],
+             O: tensor<f32>[16, 64], Q: tensor<f32>[8, 4],
+             P: tensor<f32>[1, 8]) {
+  var a: tile<f32>[16, 64] = X[0 :+ 16, 0 :+ 64]
+  O[0 :+ 16, 0 :+ 64] = a
+  var b: tile<f32>[8, 4] = Y[0 :+ 8, 0 :+ 4]
+  Q[0 :+ 8, 0 :+ 4] = b
+  var c: tile<f32>[1, 8] = P[0 :+ 1, 0 :+ 8]
+  P[0 :+ 1, 0 :+ 8] = c
+}
+```
+
+Each tile is dead before the next is declared, so when `c` is allocated
+nothing is live, and `c` starts at offset 0 again. The kernel's footprint is
+the largest of the three tiles, 4 KB, not their sum.
+
+## Interactions
+
+- [`@pipeline`](/docs/attributes/pipeline/): the doubled stages of a
+  pipelined loop must fit 48 KB, or under `@dynshared` the chip's per-block
+  limit: 64 KB on sm_75, 163 KB on sm_80, and 99 KB on sm_86, sm_89 and
+  sm_120. Two 64 x 64 `f32` stages are 32 KB, 64 KB doubled. That is over the
+  static limit and within the dynamic one on sm_80.
+- [`@persistent`](/docs/attributes/persistent/): shared memory bounds how many
+  CTAs fit on a multiprocessor, so a persistent grid is sized with the dynamic
+  shared bytes the kernel needs.

@@ -1,0 +1,126 @@
+---
+title: The hierarchy
+description: Grid, CTA, warp and lane, and every ctx field that addresses them.
+sidebar:
+  order: 1
+---
+
+{/* figure: ctx-hierarchy */}
+
+A kernel launch is a grid of CTAs. Each CTA is a group of threads that share
+one block of shared memory and can wait for each other at a barrier. The
+hardware runs a CTA's threads in warps, and each thread is one lane of its
+warp. The figure zooms from the grid down to one lane and names the fields
+that address each level.
+
+| Level | What it is | Shares |
+| --- | --- | --- |
+| Grid | Every CTA of one launch | Global memory (the tensors) |
+| CTA | `ctx.threads` threads on one multiprocessor | Shared memory (the tiles), `barrier()` |
+| Warp | `ctx.lanes` threads that execute together | Registers, through shuffles |
+| Lane | One thread | Its own registers |
+
+## Every field
+
+`ctx` has eight fields. Two of them, `ctx.block` and `ctx.blocks`, take an
+axis: `.x`, `.y` or `.z`.
+
+| Field | Kind | Addresses | Same in | Known |
+| --- | --- | --- | --- | --- |
+| `ctx.blocks.x`, `.y`, `.z` | count | The grid's extent along an axis | every thread (uniform) | at launch |
+| `ctx.block.x`, `.y`, `.z` | index | This CTA in the grid | every thread of the CTA (uniform) | at launch |
+| `ctx.threads` | count | Threads in a CTA, from `@launch` | every thread (uniform) | at compile time |
+| `ctx.warps` | count | Warps in a CTA, `ctx.threads / ctx.lanes` | every thread (uniform) | at compile time |
+| `ctx.lanes` | count | Lanes in a warp, 32 on NVIDIA | every thread (uniform) | at compile time |
+| `ctx.warp` | index | This thread's warp in the CTA, `ctx.thread / ctx.lanes` | every lane of a warp (warp-uniform) | at run time |
+| `ctx.thread` | index | This thread in the CTA | nothing (varying) | at run time |
+| `ctx.lane` | index | This thread in its warp | nothing (varying) | at run time |
+
+The counts are the extents of the indices: `ctx.block.x` runs from 0 to
+`ctx.blocks.x - 1`, `ctx.thread` from 0 to `ctx.threads - 1`, `ctx.warp` from
+0 to `ctx.warps - 1`, and `ctx.lane` from 0 to `ctx.lanes - 1`.
+
+The "Same in" column is what the compiler tracks for every value of a kernel.
+It decides where a value may be used; see
+[Uniform, warp-uniform and varying](/docs/ctx/uniformity/).
+
+## A worked example
+
+Take a grid of 4 x 3 CTAs, launched with `@launch(256)`, on NVIDIA. Pick the
+CTA in column 2, row 1, and in it the thread with index 113.
+
+| Field | Value | Why |
+| --- | --- | --- |
+| `ctx.blocks.x`, `ctx.blocks.y` | 4, 3 | the grid the host launched |
+| `ctx.block.x`, `ctx.block.y` | 2, 1 | the CTA picked |
+| `ctx.threads` | 256 | `@launch(256)` |
+| `ctx.lanes` | 32 | the target |
+| `ctx.warps` | 8 | 256 / 32 |
+| `ctx.thread` | 113 | the thread picked |
+| `ctx.warp` | 3 | 113 / 32, rounded down |
+| `ctx.lane` | 17 | 113 - 3 * 32 |
+
+So this thread is block (2, 1), warp 3, lane 17, thread 113. The relation that
+ties the indices together is
+
+```text
+ctx.thread = ctx.warp * ctx.lanes + ctx.lane
+```
+
+and it holds for every thread of every CTA.
+
+## Two levels in one kernel
+
+The tile level and the lane level are two ways to use the same hierarchy.
+
+At the tile level a kernel names a CTA's piece of the output with
+`ctx.block` and works on whole tiles. The statement `var a = A[r :+ 64, :]` is
+executed by all `ctx.threads` threads together, and the compiler decides
+which thread copies which element. Nothing in the source mentions a thread.
+
+At the lane level a kernel reads `ctx.warp` and `ctx.lane` and gives each
+thread its own work. This matvec gives each warp one output column and each
+lane every 32nd element of that column's row:
+
+```phobos
+@launch(256)
+kernel mv(A: tensor<f32>[1, K], W: tensor<f32>[N, K], C: tensor<f32>[1, N]) {
+  let col = ctx.block.x * ctx.warps + ctx.warp
+  if col < N {
+    var acc: f32 = 0.0
+    for k in range(ctx.lane, K, ctx.lanes) {
+      acc += W[col, k] * A[0, k]
+    }
+    if ctx.lane == 0 {
+      C[0, col] = acc
+    }
+  }
+}
+```
+
+Here `col` is the same in every lane of a warp and different between warps,
+`acc` is one partial sum per lane, and lane 0 writes only its own partial sum.
+That is not yet the full dot product: folding the 32 partial sums of a warp
+into one is the job of a collective, `sum<over ctx.lane>(acc)`, covered on
+[Collectives and shuffles](/docs/ctx/collectives/), which ends with the
+complete kernel.
+
+A kernel may use both levels, for example a tile copy into shared memory
+followed by per-thread reads of that tile. The compiler checks that tile
+operations still run under control that every thread reaches; see
+[Uniform, warp-uniform and varying](/docs/ctx/uniformity/).
+
+## Reading `ctx`
+
+`ctx` is reserved and read only through a field. Spelling errors are caught
+by the parser:
+
+| Source | Problem |
+| --- | --- |
+| `let x = ctx` | `ctx` is read only through a field |
+| `let x = ctx.block` | `ctx.block` needs an axis, as in `ctx.block.x` |
+| `let x = ctx.warp_size` | there is no such field; the warp width is `ctx.lanes` |
+| `let ctx = 1` | `ctx` is reserved |
+
+See [Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization)
+in the spec for the normative list of fields.

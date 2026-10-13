@@ -1,0 +1,46 @@
+---
+title: Overview
+description: What the execution context ctx is and how this section is organized.
+sidebar:
+  order: 0
+---
+
+A Phobos kernel runs as a grid of CTAs (cooperative thread arrays, the
+blocks of CUDA), and each CTA runs as threads grouped into warps. `ctx` is the
+kernel's read-only view of that hierarchy: which CTA it is, how big the CTA
+is, and which thread, warp and lane a value belongs to.
+
+Most of a tile kernel touches `ctx` once, to pick its CTA's tile:
+
+```phobos fragment
+let pm = ctx.block.x
+let pn = ctx.block.y
+```
+
+Everything after that line works on whole tiles, and the compiler decides
+which thread moves which element. A kernel that wants that control itself,
+one warp per output column, one partial sum per lane, a shuffle to fold them,
+reads `ctx.warp` and `ctx.lane` and writes per-thread code. Both styles mix
+freely in one kernel, and the rules that keep them apart are checked by the
+compiler.
+
+`ctx` is a reserved name. It is read only through its fields, such as
+`ctx.block.x` or `ctx.lane`, and it can never be bound with `let` or `var`.
+
+## Pages in this section
+
+The pages zoom in from the grid to a single lane, then cover the rules for
+values that differ between threads.
+
+| Page | Fields |
+| --- | --- |
+| [The hierarchy](/docs/ctx/hierarchy/) | All of them, in one table |
+| [`ctx.block` and `ctx.blocks`](/docs/ctx/blocks/) | `.x`, `.y`, `.z` |
+| [`ctx.threads`, `ctx.warps`, `ctx.lanes`](/docs/ctx/counts/) | The counts |
+| [`ctx.thread`, `ctx.warp`, `ctx.lane`](/docs/ctx/indices/) | The indices |
+| [Uniform, warp-uniform and varying](/docs/ctx/uniformity/) | How far a value differs between threads |
+| [Collectives and shuffles](/docs/ctx/collectives/) | `over ctx.lane`, `over ctx.thread`, `width`, `shfl` |
+
+The normative text is in the spec under
+[Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization)
+and [Per-thread values](/docs/reference/spec/#per-thread-values).

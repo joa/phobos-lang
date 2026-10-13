@@ -1,0 +1,156 @@
+---
+title: Tiles and shared memory
+description: What a tile is, var and let, how long a tile lives, and where the barriers go.
+sidebar:
+  order: 2
+---
+
+A tile is a block of shared memory owned by one CTA. Shared memory is small
+(48 KB per CTA by default) and fast, and every thread of the CTA can read and
+write all of it. Tiles are where a kernel keeps the data it works on: a panel
+of a matrix, a running maximum, a lookup table.
+
+The type is written like a tensor's, with `tile` in place of `tensor`:
+
+```phobos fragment
+var acc: tile<f32>[64, 64] = 0.0      // 64 * 64 * 4 bytes = 16 KB
+var m: tile<f32>[64, 1] = -1.0e30     // a column, 256 bytes
+```
+
+A tile's dimensions must be constants: literals or names bound by
+`@autotune`. A runtime dimension such as `M` cannot size a tile. Tiles cannot
+be kernel parameters; a kernel receives tensors and makes its own tiles.
+
+The normative rules are in the spec under
+[Tiles and shared memory](/docs/reference/spec/#tiles-and-shared-memory).
+
+## Making a tile
+
+| Statement | Result |
+| --- | --- |
+| `var a = A[r :+ 64, kt :+ 16]` | A tile `[64, 16]` holding a copy of that slice of `A` |
+| `var t: tile<f32>[64, 64] = 0.0` | A tile filled with a scalar |
+| `var p: tile<f32>[64, 64] = exp(s - m)` | A tile holding the value of an expression |
+| `var y = x * 2.0` | An elementwise expression over tiles: it takes their element type and broadcast shape |
+| `var t: tile<f32>[64, 64]` | An uninitialized tile |
+
+{/* figure: tile-copy */}
+
+`var a = A[...]` is the statement that moves data from global memory into a
+tile. All threads of the CTA take part, each copying some of the elements,
+with vector loads where the alignment allows. The figure shows one such copy:
+the slice of the tensor, the tile it lands in, and which thread moves which
+elements.
+
+## `var` and `let`
+
+`var` makes a tile of its own: `var a = A[...]` copies the slice, and the copy
+can be changed without touching `A`.
+
+`let` binds a name to a value without copying. A tensor slice bound with
+`let` is a view of the tensor:
+
+```phobos fragment
+let c_old = C[pm * TM :+ TM, pn * TN :+ TN]   // a view of C, no copy
+C[pm * TM :+ TM, pn * TN :+ TN] = alpha * acc + beta * c_old
+```
+
+A view can be sliced again, and `x[...] = e` writes the bytes it views. Only
+rebinding it with `x = e` is refused. Operations that need the data in shared
+memory still get it there: a `dot` that reads a view more than once stages it
+anyway.
+
+A common choice: `var` for data the kernel reads repeatedly or changes, `let`
+for data it passes through once.
+
+## Slicing a tile
+
+Tiles are sliced exactly like tensors, and a slice of a tile is a window into
+the same bytes:
+
+```phobos fragment
+var aq: tile<i8>[32, 32]
+for b in range(0, 32, 16) {
+  var y: tile<f32>[16, 32] = X[b :+ 16, 0 :+ 32]
+  aq[b :+ 16, 0 :+ 32] = i8(i32(round(y)))
+}
+```
+
+`flat(t)` views a declared `[R, C]` tile as one row, `[1, R * C]`, of the same
+bytes; writing through it writes `t`.
+
+## How long a tile lives
+
+A tile lives from its declaration to its last use, across any loops in
+between. Tiles whose lifetimes do not overlap share bytes, so a kernel's
+shared-memory footprint is the largest set of tiles alive at one time, not
+the sum of all of them.
+
+A tile declared before one loop and read after another is storage the CTA
+carries across both. In flash attention the query tile and the running
+softmax state are declared once and live through the whole key loop:
+
+```phobos fragment
+let q = Q[row :+ BR, :]
+var acc: tile<f32>[BR, D] = 0.0
+var m: tile<f32>[BR, 1] = -1.0e30
+var l: tile<f32>[BR, 1] = 0.0
+for kt in range(0, Nk, BC) {
+  let k = K[kt :+ BC, :]        // lives for one iteration
+  let v = V[kt :+ BC, :]
+  var s: tile<f32>[BR, BC] = dot_t(q, k)
+  // ...
+}
+acc = acc / l
+O[row :+ BR, :] = acc
+```
+
+The static budget is 48 KB per kernel. A kernel that needs more uses
+[`@dynshared`](/docs/attributes/dynshared/), which takes shared memory sized
+at launch up to the chip's per-block limit.
+
+## Barriers
+
+Threads of a CTA run at their own pace, so before one thread reads a tile
+element that another thread wrote, the writer has to be done. The compiler
+places those barriers itself. A CTA barrier follows a tile store only when a
+later operation reads or writes those bytes from other threads:
+
+- Two elementwise passes at the same vector width need none, since each
+  thread touches the same elements both times.
+- A reduction, a `dot` or a `transpose` after a store does need one, since
+  each thread reads elements other threads wrote.
+
+A tile kernel does not write `barrier()` itself. The built-in exists for per-thread
+code that stores into a tile element by element; see
+[Uniform, warp-uniform and varying](/docs/ctx/uniformity/#a-per-thread-store-and-a-cta-wide-read).
+
+## A complete kernel
+
+A row normalization: each CTA takes 8 rows, sums their squares into a column
+tile, and scales the rows by the inverse root and a gain vector.
+
+```phobos
+@autotune(D in [256])
+@launch(256)
+kernel rms_norm(X: tensor<f32>[M, D], G: tensor<f32>[1, D], Y: tensor<f32>[M, D]) {
+  let r = ctx.block.x * 8
+  var x = X[r :+ 8, :]
+  var ss: tile<f32>[8, 1] = rowsum(x * x)
+  var inv: tile<f32>[8, 1] = 1.0 / sqrt(ss / 256.0 + 0.000001)
+  var g = G[0 :+ 1, :]
+  Y[r :+ 8, :] = x * inv * g
+}
+```
+
+Four tiles are declared. `x` is 8 KB and lives to the last line. `ss` is
+last used when `inv` is computed, so its bytes can be reused for `g`. The
+`rowsum` reads elements of `x` that other threads copied, so the compiler puts
+a barrier before it. None of this appears in the source.
+
+## Tiles in registers
+
+Shared memory is not the only place a tile can live. An accumulator that is
+only ever updated element by element can stay in each thread's registers
+instead, which frees its shared memory and skips the barriers. That is what
+[`@registers`](/docs/attributes/registers/) asks for.

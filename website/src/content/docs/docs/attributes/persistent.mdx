@@ -1,0 +1,80 @@
+---
+title: "@persistent"
+description: Declares that every CTA of the grid must be resident at once, as grid_barrier requires.
+sidebar:
+  order: 9
+---
+
+A persistent kernel launches only as many CTAs as the card can run at the
+same time, and each CTA loops over the work instead of owning one tile of it.
+Because every CTA is resident, they can wait for each other with
+`grid_barrier`, and several stages of a computation can run in one launch.
+
+```text
+@persistent
+```
+
+It takes no arguments. See the [Attributes](/docs/reference/spec/#attributes)
+table and `grid_barrier` under
+[Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization)
+in the spec.
+
+## What it promises
+
+`@persistent` is a contract with the host: the grid must be co-resident. A
+CTA that is still waiting for a multiprocessor never reaches a
+`grid_barrier`, and every CTA already at the barrier waits for it forever.
+
+The launcher sizes the grid from the CUDA occupancy API, as the number of
+CTAs that fit on one multiprocessor times the number of multiprocessors
+(`phobos_kernels::launch::persistent_grid`). Shared memory usually bounds
+that number, so the query is made with the kernel's thread count and its
+dynamic shared bytes.
+
+## A minimal kernel
+
+The same stage runs `STEPS` times over a buffer, each pass separated by a
+grid barrier. Every CTA strides the whole row, since the grid is sized by the
+card and not by the data:
+
+```phobos
+@launch(256)
+@persistent
+@autotune(TILE in [1024], STEPS in [16], BLOCKS in [48])
+kernel staged(X: tensor<f32>[M, N], BAR: tensor<i32>[2]) {
+  let p = ctx.block.x
+  for s in range(0, STEPS) {
+    for t in range(p * TILE, N, BLOCKS * TILE) {
+      var x = X[0 :+ 1, t :+ TILE]
+      X[0 :+ 1, t :+ TILE] = x * 1.0000001 + 0.000000001
+    }
+    grid_barrier(BAR)
+  }
+}
+```
+
+`BLOCKS` is the grid size the host launches with. The stride could also be
+written with the grid extent, `ctx.blocks.x * TILE`.
+
+## `grid_barrier`
+
+`grid_barrier(bar)` makes every block of the grid wait for every other. It
+requires:
+
+| Requirement | Note |
+| --- | --- |
+| `bar` is a named `i32` tensor of at least 2 elements | One slot counts arrivals, one releases the waiting blocks. |
+| `bar` is zeroed once before the launch and not shared by concurrent kernels | The barrier keeps its state in it across uses. |
+| A one-dimensional grid | |
+| Every block reaches the call | A block that skips it leaves the rest waiting. |
+| The grid is co-resident | What `@persistent` declares. |
+
+## Interactions
+
+- [`@dynshared`](/docs/attributes/dynshared/): the dynamic shared bytes enter
+  the occupancy query, so a larger footprint means fewer CTAs in the grid.
+- [`@aligned`](/docs/attributes/aligned/): a broken promise on a dynamic
+  dimension traps the CTA that checks it. In a persistent kernel with
+  `grid_barrier`, the other CTAs then wait at the barrier for good.
+- [`@launch`](/docs/attributes/launch/): the thread count enters the
+  occupancy query as well.

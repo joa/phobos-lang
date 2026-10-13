@@ -1,0 +1,143 @@
+---
+title: Elementwise math and reductions
+description: Operators, broadcasting, conversions, math functions, where and iota, and the row reductions.
+sidebar:
+  order: 4
+---
+
+Arithmetic on tiles is elementwise, and a whole expression over tiles is
+computed in one sweep: every thread computes its elements of the result in
+registers, reading each operand once, with no intermediate tiles. Reductions
+fold a tile along its rows.
+
+The normative rules are in the spec under
+[Operators and conversions](/docs/reference/spec/#operators-and-conversions),
+[Elementwise](/docs/reference/spec/#elementwise) and
+[Reductions and shape](/docs/reference/spec/#reductions-and-shape).
+
+## Operators
+
+| Rule | Behavior |
+| --- | --- |
+| Arithmetic on tiles | Elementwise. `tile op scalar` and `scalar op tile` broadcast the scalar. |
+| Broadcasting | NumPy-style over axes of extent 1: `[R, C] op [R, 1]` stretches the column, `[R, C] op [1, C]` the row. |
+| Unary `-` | On a tile, elementwise `0 - t`. |
+| `&` `\|` `^` `<<` `>>` `~` | On integers: index scalars and integer tiles. `>>` is arithmetic, since integers are signed; mask after it, as in `(q >> 4) & 15`. A float operand is an error. |
+| `&&` `\|\|` | On bools. Both sides are evaluated. |
+| Unary `!` | Scalars only. |
+| `min(a, b)`, `max(a, b)` | Scalars, tiles, or one of each. A float `min` or `max` returns the other operand when one is NaN. |
+| Comparisons on tiles | Only inside `where`; there is no bool tile. |
+
+Bitwise operators bind tighter than comparisons, so `x & 15 == 3` tests the
+masked value. The full precedence table is in the spec.
+
+A float `a * b + c` may round once, as one fused multiply-add, when the product
+feeds only the sum. This is CUDA's default (`-fmad`). The same holds for
+`c - a * b` and `a * b - c`.
+
+## Conversions
+
+`f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)` and `i64(x)` convert
+a tile or a scalar. In a sweep the conversion is fused: `f32(w)` over an `i8`
+tile converts each element as it is read.
+
+| From, to | Behavior |
+| --- | --- |
+| Float to float | Rounds to nearest. |
+| Integer to float | Signed conversion. |
+| Float to integer | Truncates toward zero. |
+| Mixed operands | Both convert to their join first: the wider float; `f32` for `f16` with `bf16`; the float for an integer with a float. |
+
+Narrow unsigned types (`u8`, `u16`, `u32`) are storage only: read them through
+a conversion, `i32(b)` or `f32(b)`, and do arithmetic on the result.
+
+## Math functions
+
+Each math call takes a tile or a scalar. On a scalar it computes in `f32`;
+`abs` alone also takes an integer.
+
+| Built-in | Computes | Precision |
+| --- | --- | --- |
+| `exp(t)`, `log(t)` | `e^x`, `ln x` | Approximate (`ex2.approx`, `lg2.approx`) |
+| `pow(a, b)` | `exp(b * log(a))`, for `a > 0` | Approximate |
+| `sqrt(t)`, `rsqrt(t)` | `sqrt(x)`, `1 / sqrt(x)` | Approximate |
+| `tanh(t)`, `sin(t)`, `cos(t)` | radians for `sin` and `cos` | Approximate, `sin` and `cos` least accurate far from zero |
+| `round(t)` | Nearest integer, ties to even | Exact |
+| `floor(t)`, `ceil(t)` | Toward minus or plus infinity | Exact |
+| `abs(t)` | `\|x\|` | Exact |
+| `tmax(a, b)` | `max(a, b)`, broadcasting, same element type | Exact |
+
+## `where` and `iota`
+
+`where(c, a, b)` is `c ? a : b` per element. `c` compares values, joined by
+`&&` and `||`. On tiles it must be the value of a tile assignment:
+
+```phobos fragment
+s = where(iota(1) < Nk - kt, s, -1.0e30)
+var clipped: tile<f32>[64, 64] = where(x > 6.0, 6.0, x)
+```
+
+On scalars `where` is a plain select and may appear anywhere.
+
+`iota(d)` is the index of the element being assigned along axis `d` of the
+tile, as an `i32`. It is only valid inside a tile assignment's value, and `d`
+is a literal below the tile's rank. Together with `where` it masks by
+position: by column with `iota(1)`, below the diagonal with
+`iota(1) <= iota(0)`.
+
+## Reductions
+
+All reductions take a rank-2 tile with a static shape.
+
+| Built-in | Shape | Result |
+| --- | --- | --- |
+| `rowmax(t)` | `[R, C] -> [R, 1]` | `max_j t[i, j]`. Float or integer. |
+| `rowsum(t)` | `[R, C] -> [R, 1]` | `sum_j t[i, j]`. An integer sums in its own type, so a narrow one wraps. |
+| `rowargmax(t)` | `[R, C] -> [R, 1]` `i32` | The `j` of the row maximum, the smallest on a tie. |
+| `cumsum(t)` | `[R, C] -> [R, C]` | The running sum down the rows. Float only. |
+| `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
+| `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
+| `flat(t)` | `[R, C] -> [1, R * C]` | A row-major view of the same bytes. `t` must be a declared tile. |
+| `gather(table, idx)` | `idx.shape` | `out[i] = table[idx[i]]`, `table` being `[n]` or `[1, n]`. |
+
+The argument of `rowmax`, `rowsum` or `rowargmax` may itself be an elementwise
+expression over declared tiles and statically shaped tensor slices of one
+element type. It is evaluated per element inside the reduction and never
+stored:
+
+```phobos fragment
+var ss: tile<f32>[8, 1] = rowsum(x * x)        // no tile for x * x
+var amax: tile<f32>[16, 1] = rowmax(abs(y))
+```
+
+A reduction over a column, rather than a row, transposes first:
+`rowsum(transpose(col))` turns a `[R, 1]` column into its `[1, 1]` total.
+
+Top-k is `k` rounds of `rowargmax`, each masking its pick:
+
+```phobos fragment
+var idx: tile<i32>[1, 1] = rowargmax(t)
+t = where(iota(1) == idx, -1.0e30, t)
+```
+
+## An online softmax
+
+These pieces combine into the inner loop of flash attention: a running row
+maximum, rescaling by the change in the maximum, and a running denominator.
+`mnew` and `corr` are `[BR, 1]` columns that broadcast across the rows of `s`
+and `acc`.
+
+```phobos fragment
+var mnew: tile<f32>[BR, 1] = rowmax(s)
+mnew = tmax(m, mnew)                        // new running max
+var p: tile<f32>[BR, BC] = exp(s - mnew)    // probabilities, broadcast subtraction
+var corr: tile<f32>[BR, 1] = exp(m - mnew)  // rescale factor for the old state
+l = l * corr
+l += rowsum(p)
+acc = acc * corr
+acc += dot(p, v)
+m = mnew
+```
+
+`argsel(va, vb, ia, ib)` is `va >= vb ? ia : ib`, for folding pairs of value
+and index by hand where `rowargmax` does not fit.

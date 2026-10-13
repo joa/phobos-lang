@@ -1,0 +1,120 @@
+---
+title: Slicing, bounds and masking
+description: Subscript forms, what a slice past the end of a tensor does, and how @aligned removes the masks.
+sidebar:
+  order: 3
+---
+
+Tensors and tiles are read and written through subscripts. A subscript is
+either a point, one index, or a slice, a range of indices. Slices are what
+tile code is made of: `A[r :+ 64, kt :+ 16]` is a 64 by 16 tile of `A`.
+
+The normative rules are in the spec under
+[Subscripts](/docs/reference/spec/#subscripts) and
+[Bounds and masking](/docs/reference/spec/#bounds-and-masking).
+
+## Subscript forms
+
+| Form | Selects | Example |
+| --- | --- | --- |
+| `A[i]` | One index | `A[r, c]` |
+| `A[s : e]` | `s <= i < e` | `A[0 : 64, :]` |
+| `A[s :+ n]` | `s <= i < s + n`, the same as `A[s : s + n]` | `A[pm * TM :+ TM, :]` |
+| `A[:]` | The whole dimension | `Q[row :+ BR, :]` |
+| `A[s:]` | `s <= i <` the extent. Never masked. | `A[16:]` |
+| `A[:e]` | `0 <= i < e`, the same as `A[0 : e]` | `A[:16]` |
+
+`:+` is the form tile code uses most. It states the length directly, so the
+length stays a constant even when the start is computed at run time, and a
+constant length is what gives a tile its static shape.
+
+A subscript with only points loads one element. A point among slices selects
+one index and keeps its axis with extent 1, as `i :+ 1` would: `A[i, 0 :+ 64]`
+is a `[1, 64]` tile, not a 64-element vector.
+
+## Masking
+
+{/* figure: masking */}
+
+Tensor extents are assumed to be multiples of 4, but they need not be
+multiples of the tile. A slice may therefore run past the end of a tensor.
+Phobos handles that edge for you:
+
+- Elements past the end read as `0`.
+- Stores to elements past the end are skipped.
+
+The figure shows a tile at the edge of a tensor, with the masked elements
+read as zero and their stores dropped.
+
+How the mask is applied depends on what the compiler knows:
+
+| Case | Behavior |
+| --- | --- |
+| Static extent | Masked in place. |
+| Dynamic extent indexed by `ctx.block` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
+| Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. |
+| `A[s:]` | Never masked. |
+| A point subscript, or a thread's own run in `sum`, `elem` or `store` | Not masked. |
+
+Points are the caller's responsibility: `A[i]` with `i` past the end reads
+past the end. A per-thread loop such as `for k in range(ctx.lane, K,
+ctx.lanes)` keeps its points in bounds by its own condition.
+
+## Loops over a dynamic extent
+
+A `for` that walks a runtime extent in steps of a tile is split in two: a
+loop over the whole tiles, which needs no masks, and one masked iteration for
+the remainder.
+
+```phobos fragment
+for kt in range(0, K, TILE_K) {                  // K known only at run time
+  var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+  var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+  acc += dot(a, b)
+}
+```
+
+For `K = 1000` and `TILE_K = 16` that is 62 unmasked iterations and one masked
+iteration over the last 8 columns. Only spans with a static length split. A
+loop with `mma.sync` accumulators stays masked unless `@aligned` covers the
+dimension. Under [`@pipeline`](/docs/attributes/pipeline/) the whole tiles are
+pipelined and the remainder runs once, unpipelined.
+
+## Promising whole tiles with `@aligned`
+
+Masks cost instructions, and they prevent the widest vector loads. When the
+host guarantees that a dimension is a whole number of tiles, the kernel can
+say so:
+
+```phobos
+@autotune(TM in [64], TN in [64])
+@aligned(M = TM, N = TN)
+kernel copy2d(A: tensor<f32>[M, N], B: tensor<f32>[M, N]) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var a = A[pm * TM :+ TM, pn * TN :+ TN]
+  B[pm * TM :+ TM, pn * TN :+ TN] = a
+}
+```
+
+[`@aligned`](/docs/attributes/aligned/) removes the masks on `M` and `N` and
+allows 16-byte vector access into the rows. It is a promise, and the compiler
+checks it once at kernel entry: a launch that breaks it traps, and the next
+synchronize fails, instead of writing past the tensor.
+
+## Reductions over a ragged tile
+
+Masked elements read as `0`. That is the right fill for a sum, and the wrong
+one for a maximum or a softmax: a row of negative scores with zeros past the
+end has a maximum of 0. Such a reduction needs its own mask, written with
+`where` and `iota`:
+
+```phobos fragment
+var s: tile<f32>[BR, BC] = dot_t(q, k)
+s = where(iota(1) < Nk - kt, s, -1.0e30)    // columns past Nk can never be the max
+var mnew: tile<f32>[BR, 1] = rowmax(s)
+```
+
+`iota(1)` is each element's column index within the tile, so the condition
+keeps the columns that exist and replaces the rest with a value no real score
+reaches. See [Elementwise math and reductions](/docs/language/elementwise-and-reductions/).

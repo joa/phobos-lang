@@ -1,0 +1,77 @@
+---
+title: "@launch"
+description: Sets the CTA size, and optionally an occupancy hint and a register cap.
+sidebar:
+  order: 2
+---
+
+`@launch` sets how many threads a CTA has, and with that the values of
+`ctx.threads` and `ctx.warps`. Two optional arguments pass occupancy hints to
+the PTX assembler.
+
+```text
+@launch(threads[, min_blocks[, max_regs]])
+```
+
+| Argument | PTX directive | Meaning |
+| --- | --- | --- |
+| `threads` | `.maxntid` | The CTA size. 256 when the kernel has no `@launch`. |
+| `min_blocks` | `.minnctapersm` | The CTAs per multiprocessor to aim for. Advisory. |
+| `max_regs` | `.maxnreg` | A hard cap on registers per thread, 16 to 255. |
+
+See the [Attributes](/docs/reference/spec/#attributes) table in the spec, and
+[`ctx.threads`, `ctx.warps`, `ctx.lanes`](/docs/ctx/counts/) for what the
+count means inside the kernel.
+
+## A minimal kernel
+
+```phobos
+@launch(128, 4)
+kernel lanes_and_warps(O: tensor<i32>[1, 2]) {
+  O[0, 0] = i32(ctx.warps)   // 4
+  O[0, 1] = i32(ctx.lanes)   // 32
+}
+```
+
+The kernel runs 128 threads per CTA, which is 4 warps, and asks the assembler
+to fit 4 CTAs on a multiprocessor at once.
+
+## What it promises
+
+The thread count is compiled into the kernel. `ctx.threads` and `ctx.warps`
+are constants, tile operations divide their elements among exactly that many
+threads, and `.maxntid` tells the driver the largest CTA the kernel accepts.
+The host must launch every CTA with exactly `threads` threads.
+
+`min_blocks` is a hint: the assembler limits registers so that many CTAs
+could be resident, but nothing fails when they are not. `max_regs` is a hard
+cap: past it the assembler spills registers to local memory, which is slow
+but correct.
+
+## When it is rejected
+
+The arguments are checked before anything else is compiled:
+
+| Case | Problem |
+| --- | --- |
+| A non-integer argument, or more than three | `@launch` takes 1 to 3 integer arguments |
+| `threads` not a positive multiple of 32 | the CTA would not be a whole number of warps |
+| `min_blocks` zero or negative | it must be positive |
+| `max_regs` outside 16 to 255 | the range `.maxnreg` accepts |
+
+```phobos expect-error
+@launch(48)
+kernel k(O: tensor<i32>[1, 1]) {
+  O[0, 0] = i32(ctx.threads)
+}
+```
+
+## Interactions
+
+- The quantized `<fmt>_qgemm_t` built-ins need `@launch(256)`.
+- [`@registers`](/docs/attributes/registers/) needs the tile's element count
+  to divide evenly by `threads`.
+- [`@tensorcore`](/docs/attributes/tensorcore/) needs the CTA's warps to tile
+  the grid of 16x16 fragments, so `threads` decides which tile shapes qualify.
+- A [`@persistent`](/docs/attributes/persistent/) grid is sized from how many
+  CTAs of this size fit on the card.
