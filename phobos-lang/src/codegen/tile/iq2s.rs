@@ -22,7 +22,6 @@ pub(super) struct Iq2sLane<'c> {
     scale_off: Value<'c, 'c>,
     qh_div: Value<'c, 'c>,
     l_lt_2: Value<'c, 'c>,
-    pub(super) k_lane_off: Value<'c, 'c>,
 }
 
 /// Per-block state: the scaled magnitude, and the lane's grid and sign
@@ -60,7 +59,6 @@ impl<'c> Codegen<'c> {
             arith::cmpi(self.ctx, arith::CmpiPredicate::Ult, l, two_idx, self.loc),
         )?;
 
-        let k_lane_off = self.muli(body, lane, self.const_index(body, IQ2S_LANE)?)?;
         Ok(Iq2sLane {
             grid_off,
             sign_off,
@@ -68,7 +66,6 @@ impl<'c> Codegen<'c> {
             scale_off,
             qh_div,
             l_lt_2,
-            k_lane_off,
         })
     }
 
@@ -118,22 +115,5 @@ impl<'c> Codegen<'c> {
         let grid_v = self.vec_load_al(kb, tables.grid.mem, &[z, grid_idx8], vec_t, 8)?;
         let signs_v = self.vec_load_al(kb, tables.signs.mem, &[z, sign_idx8], vec_t, 8)?;
         Ok(Iq2sBlock { dl, grid_v, signs_v })
-    }
-
-    /// The lane's `y`-th decoded weight, from the entries already in
-    /// registers: a grid magnitude times its sign.
-    pub(super) fn iq2s_decoded(
-        &mut self,
-        kb: &Block<'c>,
-        blk: &Iq2sBlock<'c>,
-        y: i64,
-    ) -> Result<Value<'c, 'c>> {
-        let (i8_t, f32_t) = (self.i8_t, self.f32_t);
-        let mag_val = self.vec_extract(kb, blk.grid_v, &[y], i8_t)?;
-        let sign_val = self.vec_extract(kb, blk.signs_v, &[y], i8_t)?;
-        let mag_f32 = self.numeric_cast(kb, mag_val, f32_t)?;
-        let sign_f32 = self.numeric_cast(kb, sign_val, f32_t)?;
-        let decoded = self.push(kb, arith::mulf(blk.dl, mag_f32, self.loc))?;
-        self.push(kb, arith::mulf(decoded, sign_f32, self.loc))
     }
 }

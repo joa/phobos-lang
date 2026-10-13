@@ -312,9 +312,6 @@ impl Build {
                     Rv::Scalar(v) => Ok(Rv::Scalar(self.numeric_cast(v, want))),
                 }
             }
-            other if super::store::qdecode_format(other).is_some() => bail!(
-                "{other} writes a tensor slice: use it as the whole right-hand side of an assignment"
-            ),
             other => bail!("unknown function '{other}'"),
         }
     }
@@ -447,15 +444,6 @@ impl Build {
         let grid = self.tile_operand(grid, "iq2xxs_qmma_t")?;
         let signs = self.tile_operand(signs, "iq2xxs_qmma_t")?;
         Ok([a, asc, qb, d, grid, signs])
-    }
-
-    /// `(qb, d, tables..)` for a `<fmt>_qdecode_t` call.
-    pub(crate) fn qdecode_operands(&mut self, fmt: RawFmt, callee: &str, args: &[Expr]) -> Result<Vec<ValueId>> {
-        let want = 2 + qdecode_tables(fmt);
-        if args.len() != want {
-            bail!("{callee} expects {want} tile operands");
-        }
-        args.iter().map(|e| self.tile_operand(e, callee)).collect()
     }
 
     fn emit_argsel(&mut self, args: &[Expr]) -> Result<Rv> {
@@ -632,10 +620,3 @@ pub(crate) fn qg_tables(fmt: RawFmt) -> usize {
     }
 }
 
-/// Table operands after `(qb, d)` of a `<fmt>_qdecode_t`.
-pub(crate) fn qdecode_tables(fmt: RawFmt) -> usize {
-    match fmt {
-        RawFmt::Iq1s | RawFmt::Iq1m => 1,
-        _ => 2,
-    }
-}

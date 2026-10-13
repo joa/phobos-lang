@@ -127,6 +127,12 @@ pub enum RawFmt {
 }
 
 impl RawFmt {
+    /// Whether `<fmt>_qdot_t`, the f32 decode matvec, exists. The IQ formats
+    /// write theirs with lanes.
+    pub fn has_f32_qdot(self) -> bool {
+        matches!(self, RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k)
+    }
+
     pub const ALL: [RawFmt; 14] = [
         RawFmt::Iq1s,
         RawFmt::Iq1m,
@@ -277,9 +283,6 @@ pub enum Intrinsic {
     RawQmmaStaged(RawFmt),
     /// `<fmt>_qgemm_t`: the tensor-core GEMM over a raw format.
     RawQgemm(RawFmt),
-    /// `<fmt>_qdecode_t`: a raw format expanded into a scratch tensor.
-    /// Only ever the whole right-hand side of a store, so `Into` only.
-    RawQdecode(RawFmt),
     /// `gather(table, idx)`.
     Gather,
     /// `argsel`: a `tmax`-shaped fold's index side.
@@ -298,7 +301,6 @@ impl Intrinsic {
             Intrinsic::RawQmma(f) => format!("{}_qmma_t", f.name()),
             Intrinsic::RawQmmaStaged(f) => format!("{}_qmma_staged_t", f.name()),
             Intrinsic::RawQgemm(f) => format!("{}_qgemm_t", f.name()),
-            Intrinsic::RawQdecode(f) => format!("{}_qdecode_t", f.name()),
             Intrinsic::Gather => "gather".into(),
             Intrinsic::ArgSel => "argsel".into(),
         }
@@ -317,12 +319,11 @@ impl Intrinsic {
         let (fmt, suffix) = callee.split_once('_')?;
         let fmt = RawFmt::from_name(fmt)?;
         Some(match suffix {
-            "qdot_t" => Intrinsic::RawQdot(fmt),
+            "qdot_t" if fmt.has_f32_qdot() => Intrinsic::RawQdot(fmt),
             "qdot_i8_t" => Intrinsic::RawQdotI8(fmt),
             "qmma_t" => Intrinsic::RawQmma(fmt),
             "qmma_staged_t" => Intrinsic::RawQmmaStaged(fmt),
             "qgemm_t" => Intrinsic::RawQgemm(fmt),
-            "qdecode_t" => Intrinsic::RawQdecode(fmt),
             _ => return None,
         })
     }

@@ -106,17 +106,6 @@ impl Build {
             return Ok(());
         }
 
-        // t = <fmt>_qdecode_t(..) writes the scratch directly.
-        if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
-            && let Some(fmt) = qdecode_format(callee)
-        {
-            let mut operands = self.qdecode_operands(fmt, callee, args)?;
-            operands.push(target);
-            self.stmt(OpKind::IntrinsicInto(Intrinsic::RawQdecode(fmt)), &operands);
-            return Ok(());
-        }
-
         if let Expr::Call { callee, args } = value
             && (callee == "dot" || callee == "dot_t")
         {
@@ -299,14 +288,6 @@ impl Build {
 pub(crate) fn qgemm_format(callee: &str) -> Option<RawFmt> {
     match Intrinsic::from_name(callee)? {
         Intrinsic::RawQgemm(f) => Some(f),
-        _ => None,
-    }
-}
-
-/// The format of a `<fmt>_qdecode_t` intrinsic name.
-pub(crate) fn qdecode_format(callee: &str) -> Option<RawFmt> {
-    match Intrinsic::from_name(callee)? {
-        Intrinsic::RawQdecode(f) => Some(f),
         _ => None,
     }
 }

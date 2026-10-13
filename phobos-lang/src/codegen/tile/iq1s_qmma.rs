@@ -9,8 +9,11 @@
 // same span as one Q8_0 activation block. Both scales land on the same k
 // step, so the accumulators stay in registers.
 
-use super::iq1s::IQ1S_BLOCK_BYTES;
 use super::*;
+
+/// IQ1_S's device block: 48 bytes, the file's leading f16 `d` dropped
+/// (`Quant::device_block`).
+const IQ1S_BLOCK_BYTES: i64 = 48;
 
 /// Where `qh` starts inside a device IQ1_S block, after the 32 `qs` bytes.
 const IQ1S_QH_OFF: i64 = 32;
