@@ -90,19 +90,3 @@ kernel q3k_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`q3k_matvec_src`] for `m == 1`, as one `q3k_qdot_t` call; mirrors
-/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
-/// `q3k_qdot_t` needs its `qb` and `d` slices provably in bounds.
-pub(crate) fn q3k_qdot_matvec_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel q3k_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                       D: tensor<f16>[N, NB], C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = q3k_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
-}}
-"
-    )
-}

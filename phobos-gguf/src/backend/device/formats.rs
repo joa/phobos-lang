@@ -66,14 +66,12 @@ fn spec(quant: Quant) -> Option<Spec> {
         Quant::Q2_K => Spec {
             tn: Q2K_TN,
             matvec: Some((q2k_matvec_src, "q2k_matvec")),
-            qdot: Some((q2k_qdot_matvec_src, "q2k_qdot_matvec")),
             dequant: Some((q2k_dequant_src, "q2k_dequant")),
             ..NONE
         },
         Quant::Q3_K => Spec {
             tn: Q3K_TN,
             matvec: Some((q3k_matvec_src, "q3k_matvec")),
-            qdot: Some((q3k_qdot_matvec_src, "q3k_qdot_matvec")),
             ..NONE
         },
         Quant::IQ1_S => Spec {
@@ -177,7 +175,6 @@ fn spec(quant: Quant) -> Option<Spec> {
         Quant::IQ4_XS => Spec {
             tn: IQ4XS_TN,
             matvec: Some((iq4xs_matvec_src, "iq4xs_matvec")),
-            qdot: Some((iq4xs_qdot_matvec_src, "iq4xs_qdot_matvec")),
             dequant: Some((iq4xs_dequant_src, "iq4xs_dequant")),
             ..NONE
         },
