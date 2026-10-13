@@ -320,6 +320,11 @@ impl Membar<'_> {
     /// Everything the op touches in shared memory.
     fn accesses(&self, op: OpId) -> Vec<Access> {
         let ir = self.ir;
+        // A view names bytes and touches none. Whatever reads or writes
+        // through it records the access.
+        if !ir.kind(op).aliases().is_empty() {
+            return Vec::new();
+        }
         let w = self.windows.get(&op);
         let sweep = match w {
             Some(w) if self.elementwise(op) && w.sweeps.len() == 1 => Some(w.sweeps[0].clone()),

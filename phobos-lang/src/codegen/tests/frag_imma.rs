@@ -111,3 +111,53 @@ fn past_the_warp_tile_cap_keeps_the_shared_accumulator() {
     let mlir = emit_mlir(&projection(256, 128, 128, "@aligned(M = 256, N = 128, K = 32)", "ws * da"));
     assert!(!mlir.contains("math.fma"), "{mlir}");
 }
+
+/// A weight staged into a shared tile once per 64 elements of k, then
+/// contracted 32 at a time through `updates` slices of it.
+fn staged_slices(updates: usize) -> String {
+    let body: String = (0..updates)
+        .map(|s| {
+            format!(
+                "    let a{s} = A[pm * 64 :+ 64, kt + {k} :+ 32]
+    let da{s} = AS[pm * 64 :+ 64, kt / 32 + {s} :+ 1]
+    let w{s} = w[0 :+ 64, {k} :+ 32]
+    let ws{s} = WS[kt / 32 + {s} :+ 1, pn * 64 :+ 64]
+    acc += f32(dot_t(a{s}, w{s})) * ws{s} * da{s}
+",
+                k = 32 * s
+            )
+        })
+        .collect();
+    format!(
+        "@launch(128)
+@aligned(M = 64, N = 64, K = 64)
+kernel staged(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+              W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
+              C: tensor<f32>[M, N]) {{
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var w: tile<i8>[64, 64]
+  var acc: tile<f32>[64, 64] = 0.0
+  for kt in range(0, K, 64) {{
+    w = W[pn * 64 :+ 64, kt :+ 64]
+{body}  }}
+  C[pm * 64 :+ 64, pn * 64 :+ 64] = acc
+}}
+"
+    )
+}
+
+#[test]
+fn slices_of_a_shared_operand_add_no_barriers() {
+    // A view touches no memory, so the second update needs no barrier the
+    // first did not: one orders the copy before the reads, one the reads
+    // before the next copy.
+    let one = emit_mlir(&staged_slices(1));
+    let two = emit_mlir(&staged_slices(2));
+    assert_eq!(two.matches("math.fma").count(), 2 * one.matches("math.fma").count(), "{two}");
+    assert_eq!(
+        two.matches("gpu.barrier").count(),
+        one.matches("gpu.barrier").count(),
+        "{two}"
+    );
+}
