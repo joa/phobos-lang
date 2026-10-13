@@ -84,24 +84,6 @@ kernel iq4xs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`iq4xs_matvec_src`] for `m == 1`, as one `iq4xs_qdot_t` call; mirrors
-/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
-/// `iq4xs_qdot_t` needs its `qb` and `d` slices provably in bounds.
-pub(crate) fn iq4xs_qdot_matvec_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq4xs_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                         D: tensor<f16>[N, NB], CODEBOOK: tensor<i32>[1, {IQ4XS_CODEBOOK_LEN}],
-                         C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = iq4xs_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
-                                          D[pn * TN :+ TN, :], CODEBOOK[0 :+ 1, :])
-}}
-"
-    )
-}
 
 /// [`iq4xs_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
 /// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.

@@ -105,7 +105,7 @@ impl Quant {
     /// Bytes a block occupies once uploaded. Differs from
     /// `spec().block_bytes` where [`Quant::device_block`] pads or trims.
     ///
-    /// Q3_K pads 110 to 112 because `q3k_qdot_t` reads its `qs` and `hmask`
+    /// Q3_K pads 110 to 112 so its device kernels can read the `qs` and `hmask`
     /// planes eight bytes at a time. Disk and host keep 110; only
     /// `constant_raw` and the device kernels see the padding.
     pub fn device_block_bytes(self) -> usize {

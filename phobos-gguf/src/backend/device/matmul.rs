@@ -551,8 +551,9 @@ impl DeviceBackend {
             _ => {}
         }
         operands.push((out_ptr, [m as i64, n as i64]));
-        if self.lanes_on(*quant) && m == 1 && f32_lanes_kernel(*quant).is_some() {
-            // A warp a column, eight a CTA.
+        // A row-major format's single row always takes its lanes kernel, a
+        // warp a column, eight a CTA.
+        if m == 1 && f32_lanes_kernel(*quant).is_some() {
             return self.launch_lanes(*quant, &operands, (n.div_ceil(8) as u32, 1, 1));
         }
         self.launch(

@@ -74,24 +74,6 @@ kernel q2k_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// [`q2k_matvec_src`] for `m == 1`, as one `q2k_qdot_t` call; mirrors
-/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
-/// `q2k_qdot_t` needs its `qb`, `d` and `dmin` slices provably in bounds.
-pub(crate) fn q2k_qdot_matvec_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel q2k_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                       D: tensor<f16>[N, NB], DMIN: tensor<f16>[N, NB],
-                       C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = q2k_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
-                                        D[pn * TN :+ TN, :], DMIN[pn * TN :+ TN, :])
-}}
-"
-    )
-}
 
 /// [`q2k_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
 /// reduced against an activation row; see `iq1s_dequant_src` in `iq1s.rs`.
