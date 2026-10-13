@@ -42,6 +42,8 @@ The thread count is compiled into the kernel. `ctx.threads` and `ctx.warps`
 are constants, tile operations divide their elements among exactly that many
 threads, and `.maxntid` tells the driver the largest CTA the kernel accepts.
 The host must launch every CTA with exactly `threads` threads.
+[Kernel ABI](/docs/reference/abi/#launch-configuration) covers the rest of a
+launch's configuration.
 
 `min_blocks` is a hint: the assembler limits registers so that many CTAs
 could be resident, but nothing fails when they are not. `max_regs` is a hard
