@@ -1,3 +1,22 @@
 {/* The lanes matvec of the ctx section: a whole-kernel fence with trace meta. Owned by the compiler-side work, which compiles and traces it. */}
 
-The lanes matvec kernel is being written.
+Each warp computes one entry of `y = W x`: lane `l` reads four weights at a time from its own run of row `row`, keeps a private partial sum, and `sum<over ctx.lane>` folds the 32 partial sums before lane 0 stores the result.
+
+```phobos trace="lanes_matvec" dims="K=256, N=32" grid="8"
+@launch(128)
+@aligned(K = 128)
+kernel lanes_matvec(W: tensor<f32>[N, K], x: tensor<f32>[1, K], y: tensor<f32>[1, N]) {
+  let row = ctx.block.x * ctx.warps + ctx.warp
+  var acc: f32 = 0.0
+  if row < N {
+    for k in range(0, K, ctx.lanes * 4) {
+      let at = k + ctx.lane * 4
+      acc += sum(W[row, at :+ 4] * x[0, at :+ 4])
+    }
+  }
+  let total = sum<over ctx.lane>(acc)
+  if ctx.lane == 0 && row < N {
+    y[0, row] = total
+  }
+}
+```

@@ -1,0 +1,12 @@
+[
+  "aligned",
+  "autotune",
+  "cluster",
+  "dynshared",
+  "launch",
+  "padstage",
+  "persistent",
+  "pipeline",
+  "registers",
+  "tensorcore"
+]

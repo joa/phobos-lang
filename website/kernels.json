@@ -1,0 +1,88 @@
+{
+  "kernels": [
+    {
+      "name": "saxpy_fp32",
+      "path": "examples/saxpy_fp32.ph",
+      "chips": ["sm_75"],
+      "params": { "BLOCK": 16 },
+      "dims": { "N": 60 },
+      "grid": [4, 1, 1]
+    },
+    {
+      "name": "gemm_fp32",
+      "path": "examples/gemm_fp32.ph",
+      "chips": ["sm_75"],
+      "params": { "TILE_M": 32, "TILE_N": 32, "TILE_K": 4 },
+      "dims": { "M": 64, "N": 64, "K": 64 },
+      "grid": [2, 2, 1]
+    },
+    {
+      "name": "gemm_fp32_no_aligned",
+      "path": "examples/gemm_fp32.ph",
+      "variant": { "drop": "@aligned" },
+      "chips": ["sm_75"],
+      "params": { "TILE_M": 32, "TILE_N": 32, "TILE_K": 4 },
+      "dims": { "M": 64, "N": 64, "K": 64 },
+      "grid": [2, 2, 1]
+    },
+    {
+      "name": "gemm_fp32_no_pipeline",
+      "path": "examples/gemm_fp32.ph",
+      "variant": { "drop": "@pipeline" },
+      "chips": ["sm_75"],
+      "params": { "TILE_M": 32, "TILE_N": 32, "TILE_K": 4 },
+      "dims": { "M": 64, "N": 64, "K": 64 },
+      "grid": [2, 2, 1]
+    },
+    {
+      "name": "q8_matvec",
+      "path": "phobos-lang/examples/q8_matvec.ph",
+      "chips": ["sm_75"],
+      "params": { "TILE_N": 64, "BLK": 32 },
+      "dims": { "K": 256, "KB": 8, "N": 128 },
+      "grid": [2, 1, 1]
+    },
+    {
+      "name": "q8_matvec_padstage",
+      "path": "phobos-lang/examples/q8_matvec.ph",
+      "variant": { "add": "@padstage" },
+      "chips": ["sm_75"],
+      "params": { "TILE_N": 64, "BLK": 32 },
+      "dims": { "K": 256, "KB": 8, "N": 128 },
+      "grid": [2, 1, 1]
+    },
+    {
+      "name": "flash_attention_fp32",
+      "path": "examples/flash_attention_fp32.ph",
+      "chips": ["sm_75"],
+      "params": { "D": 64, "BR": 16, "BC": 16 },
+      "dims": { "Nq": 64, "Nk": 64 },
+      "grid": [4, 1, 1]
+    },
+    {
+      "name": "gemm_fp16tc_fp32acc",
+      "path": "examples/gemm_fp16tc_fp32acc.ph",
+      "chips": ["sm_75", "sm_80"],
+      "params": { "TILE_M": 64, "TILE_N": 64, "TILE_K": 16 },
+      "dims": { "M": 128, "N": 128, "K": 128 },
+      "grid": [2, 2, 1]
+    },
+    {
+      "name": "gemm_fp16",
+      "path": "examples/gemm_fp16.ph",
+      "chips": ["sm_75", "sm_80"],
+      "params": { "TILE_M": 64, "TILE_N": 64, "TILE_K": 16 },
+      "dims": { "M": 128, "N": 128, "K": 128 },
+      "grid": [2, 2, 1]
+    },
+    {
+      "name": "gemm_fp16_pipeline",
+      "path": "examples/gemm_fp16.ph",
+      "variant": { "add": "@pipeline" },
+      "chips": ["sm_75", "sm_80"],
+      "params": { "TILE_M": 64, "TILE_N": 64, "TILE_K": 16 },
+      "dims": { "M": 128, "N": 128, "K": 128 },
+      "grid": [2, 2, 1]
+    }
+  ]
+}

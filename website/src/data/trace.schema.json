@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://phobos-lang.dev/trace.schema.json",
+  "title": "Phobos kernel trace, version 1",
+  "description": "What the compiler decided about one kernel on one chip. Mirrors website/src/lib/viz/trace.ts; additions are optional fields only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "name", "kernel", "source", "compiler", "params", "dims", "launch", "tensors", "ops", "buffers", "ctas", "steps"],
+  "properties": {
+    "schema": { "const": 1 },
+    "name": { "type": "string" },
+    "kernel": { "type": "string" },
+    "source": { "$ref": "#/$defs/source" },
+    "compiler": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commit", "chip", "indexBits"],
+      "properties": {
+        "commit": { "type": "string" },
+        "chip": { "type": "string" },
+        "indexBits": { "type": "integer" }
+      }
+    },
+    "params": { "$ref": "#/$defs/counts" },
+    "dims": { "$ref": "#/$defs/counts" },
+    "launch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["grid", "threads", "lanes", "warps"],
+      "properties": {
+        "grid": { "$ref": "#/$defs/cta" },
+        "threads": { "type": "integer" },
+        "lanes": { "type": "integer" },
+        "warps": { "type": "integer" }
+      }
+    },
+    "tensors": { "type": "array", "items": { "$ref": "#/$defs/tensor" } },
+    "ops": { "type": "array", "items": { "$ref": "#/$defs/op" } },
+    "buffers": { "type": "array", "items": { "$ref": "#/$defs/buffer" } },
+    "barriers": { "type": "array", "items": { "$ref": "#/$defs/barrier" } },
+    "sharedPeakBytes": { "type": "integer" },
+    "ctas": { "type": "array", "items": { "$ref": "#/$defs/cta" } },
+    "steps": { "type": "array", "items": { "$ref": "#/$defs/step" } },
+    "summaries": { "type": "array", "items": { "$ref": "#/$defs/summary" } }
+  },
+  "$defs": {
+    "counts": { "type": "object", "additionalProperties": { "type": "integer" } },
+    "cta": { "type": "array", "items": { "type": "integer" }, "minItems": 3, "maxItems": 3 },
+    "range": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 },
+    "uniformity": { "enum": ["uniform", "warp", "varying"] },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "path", "text", "sha256"],
+      "properties": {
+        "origin": { "enum": ["file", "fence"] },
+        "path": { "type": "string" },
+        "fence": { "type": "string" },
+        "text": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "hiddenLines": { "type": "array", "items": { "type": "integer" } },
+        "variant": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "add": { "type": "string" },
+            "drop": { "type": "string" }
+          }
+        }
+      }
+    },
+    "tensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "elem", "elemBytes", "shape", "role"],
+      "properties": {
+        "name": { "type": "string" },
+        "elem": { "type": "string" },
+        "elemBytes": { "type": "integer" },
+        "shape": { "type": "array", "items": { "type": "integer" } },
+        "role": { "enum": ["in", "out", "inout"] }
+      }
+    },
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "col", "endLine", "endCol"],
+      "properties": {
+        "line": { "type": "integer" },
+        "col": { "type": "integer" },
+        "endLine": { "type": "integer" },
+        "endCol": { "type": "integer" }
+      }
+    },
+    "op": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "ir"],
+      "properties": {
+        "id": { "type": "integer" },
+        "kind": { "type": "string" },
+        "span": { "$ref": "#/$defs/span" },
+        "ir": { "type": "string" },
+        "uniformity": { "$ref": "#/$defs/uniformity" },
+        "instr": { "type": "string" }
+      }
+    },
+    "buffer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "bytes", "firstOp", "lastOp", "scratch"],
+      "properties": {
+        "id": { "type": "integer" },
+        "name": { "type": "string" },
+        "bytes": { "type": "integer" },
+        "offsetBytes": { "type": "integer" },
+        "firstOp": { "type": "integer" },
+        "lastOp": { "type": "integer" },
+        "scratch": { "type": "boolean" },
+        "elem": { "type": "string" },
+        "shape": { "type": "array", "items": { "type": "integer" } }
+      }
+    },
+    "barrier": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["afterOp", "kept"],
+      "properties": {
+        "afterOp": { "type": "integer" },
+        "kept": { "type": "boolean" }
+      }
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["box"],
+      "properties": {
+        "tensor": { "type": "string" },
+        "buffer": { "type": "integer" },
+        "box": { "type": "array", "items": { "$ref": "#/$defs/range" } },
+        "bytes": { "$ref": "#/$defs/range" },
+        "maskedElems": { "type": "integer" }
+      }
+    },
+    "accesses": { "type": "array", "items": { "$ref": "#/$defs/access" } },
+    "threadMap": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["shape", "width", "threads", "vectorBytes"],
+      "properties": {
+        "shape": { "type": "array", "items": { "type": "integer" } },
+        "width": { "type": "integer" },
+        "threads": { "type": "integer" },
+        "vectorBytes": { "type": "integer" },
+        "async": { "type": "boolean" }
+      }
+    },
+    "laneEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "width"],
+      "properties": {
+        "kind": { "enum": ["shuffle", "collective", "exchange", "lane_load", "lane_store", "dp4a"] },
+        "mode": { "enum": ["xor", "down", "up", "from"] },
+        "width": { "type": "integer" },
+        "partners": { "type": "array", "items": { "type": "integer" } },
+        "stages": { "type": "array", "items": { "type": "array", "items": { "type": "integer" } } },
+        "runs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["lane", "access"],
+            "properties": {
+              "lane": { "type": "integer" },
+              "access": { "$ref": "#/$defs/access" }
+            }
+          }
+        },
+        "vectorBytes": { "type": "integer" },
+        "alignBytes": { "type": "integer" },
+        "barriers": { "type": "integer" }
+      }
+    },
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["op", "cta", "iter"],
+      "properties": {
+        "op": { "type": "integer" },
+        "cta": { "$ref": "#/$defs/cta" },
+        "iter": { "$ref": "#/$defs/counts" },
+        "reads": { "$ref": "#/$defs/accesses" },
+        "writes": { "$ref": "#/$defs/accesses" },
+        "map": { "$ref": "#/$defs/threadMap" },
+        "lanes": { "$ref": "#/$defs/laneEvent" },
+        "barrier": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kept"],
+          "properties": { "kept": { "type": "boolean" } }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cta", "op", "iter"],
+      "properties": {
+        "cta": { "$ref": "#/$defs/cta" },
+        "op": { "type": "integer" },
+        "iter": { "$ref": "#/$defs/counts" },
+        "reads": { "$ref": "#/$defs/accesses" },
+        "writes": { "$ref": "#/$defs/accesses" }
+      }
+    }
+  }
+}
