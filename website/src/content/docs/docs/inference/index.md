@@ -1,7 +1,120 @@
 ---
-title: Overview
+title: Quickstart
+description: Run a GGUF model with phobos-cli, on a prompt, in a REPL, or as an OpenAI-compatible server.
 sidebar:
   order: 0
 ---
 
-This section is being written.
+`phobos-cli` runs GGUF models on the GPU, on Phobos kernels. This page gets a
+small model answering in a few minutes. You need an NVIDIA GPU of compute
+capability 7.5 or newer and a recent driver; see
+[Install](/docs/getting-started/install/).
+
+## 1. Get the binary
+
+Download a release from the
+[releases page](https://github.com/joa/phobos-lang/releases) and unpack it,
+keeping `kernel-cache/` beside the binaries. Or build from a checkout, always
+with the `cuda` feature and in release mode:
+
+```sh
+cargo build --release --features cuda -p phobos-cli
+```
+
+The examples below call `phobos-cli` directly. From a checkout, use
+`cargo run --features cuda -r -p phobos-cli --` in its place.
+
+## 2. Get a model
+
+Any GGUF file of a [supported architecture](/docs/inference/models-and-formats/)
+works. A small one to start with is MiniCPM5-1B at Q8_0: download
+`minicpm5-1b-Q8_0.gguf` from
+[Abiray/MiniCPM5-1B-GGUF](https://huggingface.co/Abiray/MiniCPM5-1B-GGUF) on
+Hugging Face.
+
+## 3. Ask it something
+
+With a prompt, `phobos-cli` prints the answer and exits:
+
+```sh
+phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf "Why is the sky blue?"
+```
+
+The model loads, its kernels load from the cache (or compile, the first time
+a kernel is missing), and the answer streams to the terminal. If the file
+carries a chat template, as most chat models do, your text is sent as a user
+turn through it. `--raw` sends the text as typed and prints the model's
+continuation instead, for base models or a prompt you formatted yourself.
+
+By default the output is greedy: the most likely token every time. Sampling
+is set with flags such as `--temp` and `--top-p`; see
+[Sampling and chat](/docs/inference/sampling/).
+
+## 4. Keep it loaded
+
+Without a prompt, `phobos-cli` starts a REPL. The model stays loaded, and each
+line you type is answered on its own, with no memory of earlier lines:
+
+```sh
+phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf
+```
+
+## 5. Serve it
+
+`--listen` starts an OpenAI-compatible HTTP server, and a dashboard takes over
+the terminal. These are the settings the README recommends for this model:
+
+```sh
+phobos-cli --listen 127.0.0.1:8080 --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
+```
+
+The sampling flags become the defaults for every request, and a request can
+override them. `-n 32768` lets an answer run up to 32768 tokens. Test it with
+`curl`:
+
+```sh
+curl http://127.0.0.1:8080/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "Hello"}]}'
+```
+
+Any client of the OpenAI API can point at `http://127.0.0.1:8080/v1`. For
+example, this is an entry for the [pi](https://pi.dev) coding agent's
+`~/.pi/agent/models.json`:
+
+```json
+{
+  "providers": {
+    "ollama": {
+      "baseUrl": "http://127.0.0.1:8080/v1",
+      "api": "openai-completions",
+      "apiKey": "phobos",
+      "models": [
+        {
+          "id": "minicpm5-1b-Q8_0",
+          "input": ["text"],
+          "compat": {
+            "supportsDeveloperRole": false
+          },
+          "contextWindow": 65536,
+          "maxTokens": 32768,
+          "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+        }
+      ]
+    }
+  }
+}
+```
+
+The server ignores the API key and accepts any model name. Press `q` in the
+dashboard to stop it. [Serving](/docs/inference/serving/) covers the endpoints,
+the request fields and the dashboard.
+
+## Next
+
+- [Models and formats](/docs/inference/models-and-formats/): which
+  architectures and quantizations load.
+- [Benchmarking](/docs/inference/benchmarking/): measure a model with
+  `phobos-bench`.
+- [Troubleshooting](/docs/inference/troubleshooting/): memory, paging and
+  slow numbers.

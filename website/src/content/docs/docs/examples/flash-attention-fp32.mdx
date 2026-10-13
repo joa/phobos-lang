@@ -1,0 +1,151 @@
+---
+title: Flash attention, f32
+description: Attention over blocks of keys with an online softmax, carrying three tiles across the loop.
+sidebar:
+  order: 5
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+Attention computes `O = softmax(Q @ K^T * scale) @ V`. Written naively, it
+builds the whole `Nq x Nk` matrix of scores, which for long sequences is far
+larger than the inputs. Flash attention never builds it: each CTA walks the
+keys in blocks and keeps a running softmax, so its memory stays the size of
+one block. This kernel follows FlashAttention-2 in `f32`, for one attention
+head.
+
+<Kernel file="examples/flash_attention_fp32.ph" />
+
+## The attributes
+
+| Attribute | What it does here |
+| --- | --- |
+| [`@tensorcore`](/docs/attributes/tensorcore/) | Runs both products, `dot_t(q, k)` and `dot(s, v)`, on tensor cores where their shapes qualify, with operands rounded to `f16` and `f32` accumulation. A product whose tiles are not multiples of 16 stays on the FMA path. |
+| [`@launch`](/docs/attributes/launch/) | `(128)`: 128 threads, 4 warps, per CTA. |
+| [`@autotune`](/docs/attributes/autotune/) | `(D in [64], BR in [4, 128], BC in [4, 128])`: the head dimension is pinned at 64. `BR`, the query rows per CTA, and `BC`, the keys per step, each try 4, 8, 16, 32, 64 and 128. |
+| [`@aligned`](/docs/attributes/aligned/) | `(Nq = BR, Nk = BC)` promises whole blocks of queries and keys, so nothing is masked. |
+
+## One block of queries per CTA
+
+```phobos fragment
+let pid = ctx.block.x
+let row = pid * BR
+let q = Q[row :+ BR, :]
+```
+
+CTA `pid` computes the output for `BR` query rows starting at `row`. The grid
+is one-dimensional, `Nq / BR` CTAs. `q` is a view of those rows; `:` takes
+the whole head dimension `D`.
+
+Three tiles carry the state of the running softmax for those rows. They are
+declared before the loop and live across all its iterations:
+
+```phobos fragment
+var acc: tile<f32>[BR, D] = 0.0       // unnormalized output sum p*v
+var m: tile<f32>[BR, 1] = -1.0e30  // running row max, from a stand-in for -inf
+var l: tile<f32>[BR, 1] = 0.0         // running denominator sum p
+```
+
+`m` and `l` are columns, one value per query row. `-1.0e30` stands in for
+minus infinity, the maximum of an empty set.
+
+## The loop over keys
+
+Each iteration takes the next `BC` keys and values:
+
+```phobos fragment
+let k = K[kt :+ BC, :]
+let v = V[kt :+ BC, :]
+
+var s: tile<f32>[BR, BC] = dot_t(q, k)   // [BR, BC] = q @ k.T
+s = s * scale
+```
+
+`dot_t(q, k)` is `q @ k^T`: it contracts the last axis of both, so `K` can be
+read in its natural row layout. `s` holds this block's scores, one row per
+query and one column per key.
+
+### Online softmax
+
+The softmax of a row needs the row's maximum, for numerical safety, and the
+sum of its exponentials. Neither is known until every key has been seen. The
+online softmax keeps both as running values and corrects what it has already
+accumulated whenever the maximum grows:
+
+```phobos fragment
+var mnew: tile<f32>[BR, 1] = rowmax(s)
+mnew = tmax(m, mnew)
+s = exp(s - mnew)                         // unnormalized probabilities
+var corr: tile<f32>[BR, 1] = exp(m - mnew) // rescales the carried state
+```
+
+1. `rowmax(s)` reduces each row of the block to its maximum, a `[BR, 1]`
+   column. `tmax(m, mnew)` takes the larger of the old running maximum and the
+   new one, element by element.
+2. `exp(s - mnew)` subtracts each row's maximum from that row's scores and
+   exponentiates. `s` is `[BR, BC]` and `mnew` is `[BR, 1]`: the column
+   broadcasts across the row. The result overwrites `s`.
+3. `corr = exp(m - mnew)` is the factor by which everything accumulated under
+   the old maximum has to shrink. It is 1 where the maximum did not change.
+
+```phobos fragment
+l = l * corr
+l += rowsum(s)
+
+acc = acc * corr                         // rescale carried output
+acc += dot(s, v)                         // add this block's contribution
+
+m = mnew
+```
+
+4. The denominator is rescaled, then this block's sums are added: `rowsum(s)`
+   is another `[BR, 1]` reduction.
+5. The output is rescaled the same way, then the block's probabilities times
+   its values are added: `dot(s, v)` is `[BR, BC] x [BC, D]`.
+6. The new maximum becomes the running one.
+
+### After the loop
+
+```phobos fragment
+acc = acc / l
+O[row :+ BR, :] = acc
+```
+
+Dividing by the denominator normalizes each row, `[BR, D] / [BR, 1]` with the
+column broadcast, and the CTA stores its rows of `O`.
+
+## Why there is no mask
+
+The spec's version of this kernel, under
+[Examples](/docs/reference/spec/#examples), has one more line in the loop:
+
+```phobos fragment
+s = where(iota(1) < Nk - kt, s, -1.0e30)   // a ragged last tile reads zeros past Nk
+```
+
+Out-of-bounds keys read as zero, which gives them a score of zero, not minus
+infinity, so a ragged last block would leak weight into the softmax. The
+`where` pushes those scores to `-1.0e30`. This file promises with
+`@aligned(Nq = BR, Nk = BC)` that both lengths are whole blocks, so there is
+no ragged block and the line is not needed. See the spec's
+[Bounds and masking](/docs/reference/spec/#bounds-and-masking) on reductions
+over ragged tiles.
+
+## Shared memory
+
+A tile is a block of the CTA's shared memory, and static shared memory is
+capped at 48 KB without [`@dynshared`](/docs/attributes/dynshared/). This
+kernel holds several tiles at once, and their sizes grow with `BR`, `BC` and
+`D`, so not every configuration in the search space fits; the tuner skips
+any that fails. Tiles whose lifetimes do not overlap share bytes. See
+[Tiles and shared memory](/docs/language/tiles-and-shared-memory/) and
+[Elementwise math and reductions](/docs/language/elementwise-and-reductions/).
+
+## Run it
+
+```sh
+cargo run -r -p phobos-kbench -- --bench flash_fp32
+```
+
+`phobos-kbench` runs it at `Nq = Nk = 4096`. `flash_fp16` is the same
+algorithm with `f16` inputs and output and `f32` softmax state.

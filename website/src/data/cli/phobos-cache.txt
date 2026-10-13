@@ -1,0 +1,1 @@
+usage: phobos-cache <warm|list|clear|prune> [--chip CHIP]... [--dir CACHE] [--manifest DIR]... [--jobs N] [--force] [--ptxas PATH | --no-ptxas] [KERNEL...]

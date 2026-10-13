@@ -1,0 +1,115 @@
+---
+title: Q8_0 matvec
+description: A matrix-vector product that reads its weights as 8-bit integers with one scale per block of 32.
+sidebar:
+  order: 3
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+When a language model generates a token, most of the work is matrix-vector
+products: one activation row against a large weight matrix. Reading the
+weights dominates the time, so models are stored quantized. This kernel reads
+weights in the Q8_0 layout: signed bytes, with one `f32` scale for every block
+of 32 values along the contraction axis. The bytes are a quarter of the data
+an `f32` copy of the weights would be.
+
+<Kernel file="phobos-lang/examples/q8_matvec.ph" />
+
+This is the tile-level form of the computation, kept in the repository as an
+example. The inference engine's own Q8_0 decode matvec is written with lanes
+instead, at the warp and lane level; see
+[Collectives and shuffles](/docs/ctx/collectives/) for that style.
+
+## The tensors
+
+| Parameter | Shape | Holds |
+| --- | --- | --- |
+| `A` | `[1, K]` `f32` | The activation, one row. |
+| `W` | `[K, N]` `i8` | The quantized weights, one column per output. |
+| `S` | `[KB, N]` `f32` | The scales: row `b` scales rows `32 * b` up to `32 * b + 32` of `W`. |
+| `C` | `[1, N]` `f32` | The output row. |
+
+The value a weight stands for is `W[k, n] * S[k / 32, n]`. So
+`C[0, n] = sum over k of A[0, k] * W[k, n] * S[k / 32, n]`.
+
+## Factoring out the scale
+
+Inside one block of 32, every weight of a column shares one scale. The sum
+over a block can therefore be computed on the raw bytes and scaled once:
+
+```text
+sum over k in block b of  A[k] * W[k, n] * S[b, n]  =  S[b, n] * (sum over k in block b of  A[k] * W[k, n])
+```
+
+That is what the loop does: one `dot` per block, then one multiply by the
+block's scales, instead of a multiply per weight.
+
+## Line by line
+
+```phobos fragment
+@autotune(TILE_N in [64], BLK in [32])
+@launch(256)
+```
+
+`@autotune` with a single value per name pins the constant: each CTA covers
+`TILE_N = 64` output columns, and `BLK = 32` is the Q8_0 block length. Writing
+them as tile constants keeps the numbers in one place. Each CTA has 256
+threads.
+
+```phobos fragment
+let pn = ctx.block.x
+var acc: tile<f32>[1, TILE_N] = 0.0
+```
+
+CTA `pn` owns columns `pn * 64` up to `pn * 64 + 64` of the output, and `acc`
+holds their running sums. The grid has `N / 64` CTAs, rounded up.
+
+```phobos fragment
+for k in range(0, K, BLK) {
+  let b = k / BLK
+  let a = A[0 :+ 1, k :+ BLK]
+  let w = W[k :+ BLK, pn * TILE_N :+ TILE_N]
+  let s = S[b :+ 1, pn * TILE_N :+ TILE_N]
+```
+
+The loop walks `K` one block at a time. `b` is the block's index, which picks
+the row of scales. The three `let` bindings are views of global memory, not
+copies: `a` is the block's 32 activations (`[1, 32]`), `w` the block's
+`32 x 64` weights for this CTA's columns, and `s` the 64 scales for this block
+and these columns (`[1, 64]`).
+
+```phobos fragment
+  var wf: tile<f32>[BLK, TILE_N] = f32(w)
+  var part: tile<f32>[1, TILE_N] = dot(a, wf)
+  acc += part * s
+}
+```
+
+`f32(w)` converts the bytes to `f32` as they are copied into the tile `wf`.
+`dot(a, wf)` is the `[1, 32] x [32, 64]` product, the unscaled sum of the
+block for each column. `part * s` multiplies two `[1, 64]` tiles element by
+element, applying each column's scale once, and `+=` adds the result into
+`acc`.
+
+```phobos fragment
+C[0 :+ 1, pn * TILE_N :+ TILE_N] = acc
+```
+
+After the last block, the CTA stores its 64 sums.
+
+## Bounds
+
+The kernel has no `@aligned`, so nothing is promised about the sizes. `N` need
+not be a multiple of 64: the last CTA's columns past `N` are masked. The loop
+over `K` has a dynamic extent, so the compiler splits it into whole blocks
+plus one masked remainder. See
+[Slicing, bounds and masking](/docs/language/slicing-bounds-masking/).
+
+## Related
+
+- [Quantized built-ins and formats](/docs/language/quantized/) covers the
+  built-ins that work on quantized data directly, such as `qdot_t`, which
+  takes Q8_0 weights and Q8_0 activations together.
+- [Models and formats](/docs/inference/models-and-formats/) lists the
+  quantized formats the inference engine reads.

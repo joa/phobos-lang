@@ -1,0 +1,75 @@
+---
+// A Phobos kernel rendered as a highlighted code block at build time. Given
+// `file`, the source is read from the repository (a path relative to the repo
+// root) and the caption links it on GitHub; given `code`, the text is used as is.
+//
+// Lines starting with `@cluster` are hidden. `data-hidden-lines` keeps their
+// 1-based line numbers in the original source, and `data-line-map` the original
+// line of every shown line, so a visualizer can map its spans onto what is shown.
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
+import { Code } from "@astrojs/starlight/components"
+
+interface Props {
+  /** Repository-relative path to a `.ph` file, such as `examples/saxpy_fp32.ph`. */
+  file?: string
+  /** The kernel's source, for a kernel that has no file. */
+  code?: string
+  /** Caption for a `code` kernel; a `file` kernel is captioned with its path. */
+  caption?: string
+}
+
+const { file, code, caption } = Astro.props
+const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
+const REPO_URL = "https://github.com/joa/phobos-lang"
+
+if (!file === !code) throw new Error("<Kernel> takes exactly one of `file` or `code`")
+const source = (file ? readFileSync(REPO_ROOT + file, "utf8") : code!).replace(/\r\n?/g, "\n").replace(/\n+$/, "")
+
+const hiddenLines: number[] = []
+const lineMap: number[] = []
+const shown: string[] = []
+source.split("\n").forEach((line, index) => {
+  if (/^\s*@cluster\b/.test(line)) hiddenLines.push(index + 1)
+  else {
+    shown.push(line)
+    lineMap.push(index + 1)
+  }
+})
+---
+
+<figure
+  class="kernel"
+  data-kernel-file={file}
+  data-hidden-lines={JSON.stringify(hiddenLines)}
+  data-line-map={JSON.stringify(lineMap)}
+>
+  <Code code={shown.join("\n")} lang="phobos" />
+  {
+    (file || caption) && (
+      <figcaption>
+        {file ? (
+          <a href={`${REPO_URL}/blob/main/${file}`}>
+            <code>{file}</code>
+          </a>
+        ) : (
+          caption
+        )}
+      </figcaption>
+    )
+  }
+</figure>
+
+<style>
+  .kernel {
+    margin-block: 1.5rem;
+  }
+  .kernel figcaption {
+    margin-top: 0.4rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .kernel figcaption code {
+    font-size: inherit;
+  }
+</style>

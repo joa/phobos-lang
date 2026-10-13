@@ -1,0 +1,51 @@
+---
+title: Documentation
+description: Where to find what in the Phobos documentation.
+sidebar:
+  hidden: true
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components"
+
+Phobos is a tile-based GPU kernel language and an LLM inference engine built
+on it. These pages cover both: writing kernels, and running models.
+
+## Start here
+
+<CardGrid>
+  <LinkCard
+    title="Getting started"
+    description="What Phobos is, how to install it, and a first kernel read line by line."
+    href="/docs/getting-started/"
+  />
+  <LinkCard
+    title="Inference quickstart"
+    description="Run a GGUF model with phobos-cli, from a prompt or as an OpenAI-compatible server."
+    href="/docs/inference/"
+  />
+</CardGrid>
+
+## Writing kernels
+
+- [Language guide](/docs/language/): the language one concept at a time,
+  from kernels and tensors to tiles, slicing, reductions and `dot`.
+- [Execution context](/docs/ctx/): every `ctx` field, from the grid of CTAs
+  down to a single lane, and how per-thread values work.
+- [Attributes](/docs/attributes/): one page for each `@` attribute, such as
+  `@autotune`, `@launch` and `@tensorcore`.
+- [Examples](/docs/examples/): five kernels from the repository, explained.
+
+## Running models
+
+- [Inference](/docs/inference/): quickstart, supported models and formats,
+  serving, sampling, benchmarking, the kernel cache and troubleshooting.
+
+## Reference
+
+- [Language spec](/docs/reference/spec/): the complete language, rendered
+  from `SPEC.md`.
+- [Environment variables](/docs/reference/environment/): every `PHOBOS_*`
+  variable, rendered from `ENV.md`.
+- [Benchmarks](/docs/reference/benchmarks/): measured results against
+  llama.cpp and cuBLAS, rendered from `BENCHMARKS.md`.
+- [Command-line tools](/docs/reference/cli/): the `--help` of every binary.

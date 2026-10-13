@@ -2,6 +2,7 @@
 import { readFileSync } from "node:fs"
 import { defineConfig } from "astro/config"
 import starlight from "@astrojs/starlight"
+import sources from "./integrations/sources.mjs"
 
 const phobosGrammar = JSON.parse(readFileSync(new URL("./src/grammars/phobos.tmLanguage.json", import.meta.url), "utf8"))
 
@@ -11,10 +12,11 @@ export default defineConfig({
   site: "https://phobos-lang.dev",
   trailingSlash: "ignore",
   integrations: [
+    sources(),
     starlight({
       title: "Phobos",
       description: "Tile-based GPU kernel language & LLM inference engine",
-      logo: { src: "./src/assets/mark.svg", alt: "Phobos" },
+      logo: { dark: "./src/assets/mark-night.svg", light: "./src/assets/mark-dawn.svg", alt: "Phobos" },
       favicon: "/favicon.svg",
       social: [{ icon: "github", label: "GitHub", href: REPO_URL }],
       customCss: ["./src/styles/fonts.css", "./src/styles/tokens.css", "./src/styles/starlight.css"],
@@ -42,7 +44,19 @@ export default defineConfig({
         { label: "Attributes", items: [{ autogenerate: { directory: "docs/attributes" } }] },
         { label: "Examples", items: [{ autogenerate: { directory: "docs/examples" } }] },
         { label: "Inference", items: [{ autogenerate: { directory: "docs/inference" } }] },
-        { label: "Reference", items: [{ autogenerate: { directory: "docs/reference" } }] },
+        {
+          label: "Reference",
+          // Listed by slug: the pages rendered from the root files live in a generated folder,
+          // which autogenerate would show as a group of its own.
+          items: [
+            "docs/reference",
+            "docs/reference/spec",
+            "docs/reference/environment",
+            "docs/reference/benchmarks",
+            "docs/reference/cli",
+            "docs/reference/windows",
+          ],
+        },
       ],
     }),
   ],

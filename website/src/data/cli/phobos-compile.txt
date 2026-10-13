@@ -1,0 +1,1 @@
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [-o OUT.ptx]

@@ -1,0 +1,106 @@
+---
+title: Kernel cache
+description: Where compiled kernels are kept, how a release ships them, and phobos-cache warm, list, clear and prune.
+sidebar:
+  order: 5
+---
+
+Every kernel Phobos runs is compiled from Phobos source to PTX the first time
+it is needed. A model needs many kernels, one per shape and format, and
+compiling them all takes minutes. So compiled kernels are kept on disk and
+reused by every later run.
+
+## Where kernels are kept
+
+The cache is split into one folder per GPU architecture (`sm_75/`, `sm_86/`,
+and so on), since a kernel compiles differently for each. A run looks in two
+places:
+
+1. `kernel-cache/` beside the binary. A release ships this folder with every
+   kernel the supported models compile, for `sm_75`, `sm_80`, `sm_86`, `sm_89`,
+   `sm_90` and `sm_120`. It is only read, never written.
+2. `~/.phobos/kernel-cache`. Kernels the shipped cache lacks are compiled on
+   first use and written here.
+
+`PHOBOS_KERNEL_CACHE_DIR` replaces both with one directory, read and written.
+Set to an empty string, it turns caching off.
+
+Every entry is keyed on the compiler's fingerprint, a hash of the build that
+produced it. A different build of Phobos does not read another build's
+entries, so an upgrade never runs a stale kernel; it compiles what it lacks
+instead. `--version` on any of the binaries prints the fingerprint.
+
+## phobos-cache
+
+```text
+usage: phobos-cache <warm|list|clear|prune> [--chip CHIP]... [--dir CACHE] [--manifest DIR]... [--jobs N] [--force] [--ptxas PATH | --no-ptxas] [KERNEL...]
+```
+
+`--dir` picks the cache to work on. It defaults to the one a run writes:
+`~/.phobos/kernel-cache`, or `PHOBOS_KERNEL_CACHE_DIR` when that is set.
+`--chip`, repeatable, limits a command to some architectures; without it,
+every supported chip.
+
+### list
+
+```sh
+phobos-cache list
+phobos-cache list --chip sm_86
+```
+
+Prints every cached kernel by chip and name with its size, then the number of
+entries and their total size.
+
+### clear
+
+```sh
+phobos-cache clear
+phobos-cache clear --chip sm_75 "q4k*"
+```
+
+Deletes cached kernels. Given kernel names, it deletes only those, with `*`
+as the only wildcard. Given none, it clears everything, including entries left
+from before the cache was split by chip.
+
+### warm
+
+```sh
+phobos-cache warm --manifest DIR
+```
+
+Compiles every kernel a manifest asks for, for each chip, with no GPU. A run
+on a card of that chip then starts with every kernel ready. Kernels already in
+the cache are skipped unless `--force` is given. `--jobs N` sets how many
+compile at once, all cores by default.
+
+When `ptxas` is found on the path or under `CUDA_PATH`, each PTX is also
+assembled for its chip before it is stored, as a check that no local card has
+to run. `--ptxas PATH` names one, and `--no-ptxas` skips the check.
+
+### prune
+
+```sh
+phobos-cache prune --manifest DIR
+```
+
+Deletes every entry the given manifests do not ask for.
+
+## Recording a manifest
+
+A manifest is a folder of compile requests, one file each, without the chip.
+Set `PHOBOS_KERNEL_MANIFEST` to a directory, and every run records each kernel
+it asks for into it, whether the cache had it or not:
+
+```sh
+PHOBOS_KERNEL_MANIFEST=manifest phobos-bench -m models/minicpm5-1b-Q8_0.gguf -p 128,512 -n 32
+phobos-cache warm --manifest manifest --chip sm_89
+```
+
+A GGUF run that records compiles every format's kernels, not only those of its
+own model, so one recording covers formats no recorded model holds. Some
+kernels also depend on the prompt length and the context depth; a run that
+covers a short prompt, a full one and decoding at depth records more of them.
+
+From a checkout, `scripts/record_kernels.py` records every GGUF model under
+`models/` this way through `phobos-bench`, and the release process warms its
+shipped cache from such a recording.

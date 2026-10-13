@@ -1,0 +1,77 @@
+---
+title: gemm on tensor cores
+description: "The f32 gemm with @tensorcore: operands rounded to f16, products accumulated in f32 on tensor cores."
+sidebar:
+  order: 4
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+Tensor cores are units on NVIDIA GPUs since Volta that multiply small matrix
+fragments in one instruction, at a much higher rate than ordinary
+multiply-adds. This kernel is the [f32 gemm](/docs/examples/gemm-fp32/) with
+one attribute added, `@tensorcore`, and a different range for `TILE_K`.
+
+<Kernel file="examples/gemm_fp16tc_fp32acc.ph" />
+
+## What changes
+
+The tensors are still `f32`, and the body is the same as the f32 gemm, line
+for line. Two lines differ:
+
+- `@tensorcore` runs `dot` on tensor cores. The operands are rounded to
+  `f16`, and the products are accumulated in `f32`. That is what
+  the file name says: fp16 tensor cores, fp32 accumulation. The rounding loses
+  precision in the inputs, not in the sums.
+- `TILE_K in [16, 64]` searches 16, 32 and 64. Tensor cores work on fragments
+  whose sides are multiples of 16, so a k-slice of 4 or 8 would not qualify.
+
+## When the tensor cores are used
+
+`@tensorcore` is a request, not a guarantee. A `dot` runs on tensor cores only
+when every tile dimension and the k-slice are multiples of 16 and the CTA's
+warps tile the grid of 16x16 fragments. Here every `TILE_M` and `TILE_N` in
+the search space (32 to 256) and every `TILE_K` (16 to 64) is a multiple of
+16, and `@launch(256)` gives 8 warps. A `dot` that does not qualify falls back
+to the f32 FMA path; run with `PHOBOS_LOG=debug` to see which `dot` fell back
+and why.
+
+## Two instruction paths
+
+The compiler has two ways to drive the tensor cores, and which one it takes
+depends on the target:
+
+| Target | Path |
+| --- | --- |
+| 64-bit indices, `sm_75` or newer | `mma.sync` with operands loaded by `ldmatrix` from swizzled shared memory. The fragment is m16n8k8 on `sm_75` and m16n8k16 from `sm_80`. |
+| otherwise | WMMA, with m16n16k16 fragments. |
+
+`phobos-compile` and the runtime compile this kernel with 64-bit indices on
+`sm_80` and newer, where it takes `mma.sync`. On `sm_75` they keep 32-bit
+indices, so it takes WMMA. `@tensorcore(wmma)` forces WMMA everywhere.
+
+From `sm_80`, with 64-bit indices, the copies into shared memory can also use
+`cp.async`, which writes shared memory directly from global memory without
+passing through registers. That suits the double-buffered k loop that
+[`@pipeline`](/docs/attributes/pipeline/) asks for.
+
+To see the difference, print the MLIR for both targets:
+
+```sh
+cargo run -p phobos-lang --example emit -- examples/gemm_fp16tc_fp32acc.ph
+PHOBOS_CHIP=sm_80 PHOBOS_INDEX_BITS=64 cargo run -p phobos-lang --example emit -- examples/gemm_fp16tc_fp32acc.ph
+```
+
+The `emit` example does not widen indices on its own, which is why the second
+command sets `PHOBOS_INDEX_BITS`.
+
+## Run it
+
+```sh
+cargo run -r -p phobos-kbench -- --bench gemm_fp16tc_fp32acc
+```
+
+`phobos-kbench` autotunes it at `M = N = K = 4096`, like the f32 gemm. Its
+`--peak-fp16tcf32acc` flag sets the tensor-core peak the CSV compares
+against. See [dot and tensor cores](/docs/language/dot-and-tensor-cores/) and
+[`@tensorcore`](/docs/attributes/tensorcore/) for the rules in full.

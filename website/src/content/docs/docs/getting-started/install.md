@@ -1,0 +1,146 @@
+---
+title: Install
+description: Download a release, or build Phobos from source with LLVM 22, Rust and CUDA.
+sidebar:
+  order: 1
+---
+
+There are two ways to get Phobos: download a release, or build it from source.
+A release is enough to run models and to compile kernels. Building from source
+is needed to run the examples and benchmarks that live in the repository, such
+as `phobos-kbench`.
+
+## What you need
+
+- An NVIDIA GPU of compute capability 7.5 or newer: Turing, such as the RTX 20
+  series, or later. Compiling a kernel to PTX needs no GPU.
+- A driver from the CUDA 13 line, R580 or newer. Phobos emits PTX ISA 9.0,
+  which older drivers refuse to load.
+- Windows x64, or Linux x64 with glibc 2.28 or newer.
+
+## Download a release
+
+Releases are on the
+[GitHub releases page](https://github.com/joa/phobos-lang/releases). Each
+release has one archive per platform:
+
+- `phobos-<tag>-windows-x64.zip`
+- `phobos-<tag>-linux-x64.tar.gz`
+
+Each archive holds one folder with:
+
+| File | What it is |
+| --- | --- |
+| `phobos-cli` | Runs a GGUF model: on a prompt, as a REPL, or as an OpenAI-compatible server. |
+| `phobos-bench` | Measures a GGUF model's prompt and generation speed, as `llama-bench` does. |
+| `phobos-compile` | Compiles a Phobos kernel source to PTX. |
+| `phobos-cache` | Lists, clears and fills the kernel cache. |
+| `kernel-cache/` | Every kernel the supported models compile, for `sm_75`, `sm_80`, `sm_86`, `sm_89`, `sm_90` and `sm_120`. |
+| `README.txt`, `LICENSE` | |
+
+The Windows archive also carries the Microsoft C++ runtime DLLs the binaries
+were built against, so no redistributable has to be installed.
+
+Unpack the archive anywhere and keep `kernel-cache/` beside the binaries. With
+it, a first run loads its kernels instead of compiling them, which can take
+minutes. Kernels it lacks are compiled on first use and kept in
+`~/.phobos/kernel-cache`. See [Kernel cache](/docs/inference/kernel-cache/).
+
+Check that the binaries run:
+
+```sh
+phobos-cli --version
+phobos-compile saxpy_fp32.ph
+```
+
+The first prints the version and the compiler fingerprint. The second prints
+PTX for a kernel source file; the repository's
+[`examples/`](https://github.com/joa/phobos-lang/tree/main/examples) folder has
+several; [your first kernel](/docs/getting-started/first-kernel/) walks through
+`saxpy_fp32.ph`.
+
+## Build from source
+
+The compiler is Rust on top of LLVM and MLIR. The release builds pin these
+versions:
+
+| Tool | Version |
+| --- | --- |
+| Rust | 1.96.0 (edition 2024) |
+| LLVM and MLIR | 22.1.7, with the `NVPTX` target |
+| CUDA | 13, for the driver API library the `cuda` feature links against |
+
+### LLVM and MLIR
+
+Phobos links against an LLVM install that includes MLIR. You can build one
+yourself or download the prebuilt toolchain the release builds use, attached
+to the `toolchain-llvm-22.1.7` release on the
+[releases page](https://github.com/joa/phobos-lang/releases)
+(`llvm-22.1.7-windows-x64.zip` and `llvm-22.1.7-linux-x64.tar.gz`).
+
+To build it yourself on Windows, follow
+[Building on Windows](/docs/reference/windows/). On Linux, the toolchain
+release is built from the `llvmorg-22.1.7` tag with
+`LLVM_ENABLE_PROJECTS=mlir` and `LLVM_TARGETS_TO_BUILD="X86;NVPTX"`, by
+[`scripts/ci/build_llvm.sh`](https://github.com/joa/phobos-lang/blob/main/scripts/ci/build_llvm.sh).
+
+Then point the build at the install. With the install in `$LLVM`:
+
+```sh
+export LLVM_SYS_221_PREFIX="$LLVM"
+export MLIR_SYS_220_PREFIX="$LLVM"
+export MLIR_SYS_221_PREFIX="$LLVM"
+export TABLEGEN_220_PREFIX="$LLVM"
+export PATH="$LLVM/bin:$PATH"
+```
+
+The build runs `bindgen`, which needs `libclang`. It is found through
+`llvm-config` on the path; set `LIBCLANG_PATH` to use a different one, as the
+Linux release build does with the distribution's `libclang`.
+
+### CUDA
+
+Only the `cuda` feature talks to the GPU, and only it needs CUDA at build
+time: the driver API's import library, not the toolkit's compilers. On
+Windows, a CUDA 13 toolkit install with `cudart` provides `cuda.lib` under
+`CUDA_PATH`. On Linux, the release build installs the driver development
+package (`cuda-driver-devel-13-3`) and links against its stub library through
+`CUDA_LIBRARY_PATH`; at run time the installed driver provides the real one.
+
+### Build
+
+From the repository root:
+
+```sh
+cargo build --release -p phobos-cli -p phobos-bench -p phobos-cache -p phobos-compile \
+  --features phobos-cli/cuda,phobos-bench/cuda
+```
+
+This is the command the release build runs. The binaries land in
+`target/release/`.
+
+Two rules for the model path:
+
+- Build with `--features cuda` to run models on the GPU. Without it,
+  `phobos-cli` runs on the host backend, which exists to verify the GPU path
+  against and is very slow.
+- Build with `--release`. A forward pass is far too much work for a debug
+  build.
+
+Commands in these docs that run from a checkout use `cargo run`, such as
+`cargo run --features cuda -r -p phobos-cli -- ...`. With a release, call the
+binary directly instead.
+
+### Check the build
+
+These run without a GPU:
+
+```sh
+cargo test -p phobos-lang
+cargo run -p phobos-lang --example emit examples/saxpy_fp32.ph
+```
+
+The first runs the parser and code generator tests. The second prints the MLIR
+for a kernel. On a machine with a GPU, `cargo run -r -p phobos-kbench`
+compiles, autotunes and runs the bundled kernels; see
+[Compile and benchmark](/docs/getting-started/compile-and-benchmark/).

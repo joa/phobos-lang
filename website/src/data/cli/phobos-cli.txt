@@ -1,0 +1,55 @@
+usage: phobos-cli --gguf FILE [OPTIONS] [PROMPT]
+
+With a PROMPT: print the model's answer. Without one: start a REPL, which
+answers each line on its own. A model whose file carries a chat template is
+asked in it; --raw sends the text as typed and prints its continuation.
+
+--gguf is required; there is no default model.
+
+OPTIONS:
+      --gguf FILE     run a GGUF model, dispatching on the architecture the
+                      file declares, with the tokenizer the file carries
+      --expert-cache SIZE
+                      device memory for a streamed model's expert cache,
+                      2g, 1500m or bytes; default what the resident weights
+                      leave, less a reserve. Ignored without experts
+  -n, --num N         generate up to N tokens (default: 200; stops early on an
+                      end-of-turn token or the model's context limit)
+  -t, --temp T        sampling temperature; 0 = greedy/argmax (default: 0)
+  -k, --top-k K       sample only from the K highest-logit tokens (default: 0 = off)
+  -p, --top-p P       nucleus sampling threshold (default: 1.0 = off)
+      --min-p P       keep tokens at least P as likely as the best one
+                      (default: 0.0 = off)
+      --presence-penalty P
+                      subtract P from the logit of every token generated so far,
+                      the prompt excluded (default: 0.0 = off)
+      --repetition-penalty P
+                      scale the logit of every token already in the sequence,
+                      prompt included, towards zero by P (default: 1.0 = off)
+      --seed S        PRNG seed for sampling (default: 0)
+      --show K        show the top-K candidates for the first token (default: 5)
+      --raw           send the prompt as typed instead of as a user turn of
+                      the model's chat template, and print its continuation;
+                      for a base model, or text that is already a prompt
+      --prefill-thinking TEXT
+                      open the answer's think block on TEXT and let the
+                      model reason on from it. When serving, this
+                      applies to every chat request, whatever it asks for.
+                      Ignored with --raw or a model with no chat template
+      --listen ADDR   run an OpenAI compatible HTTP server on ADDR (e.g.
+                      127.0.0.1:8080). The sampling options above become what a
+                      request falls back to for every field it does not send.
+      --no-tui        serve without the dashboard, printing the runtime's lines
+                      instead. Implied when stdout is not a terminal, and the
+                      reason is printed whenever that happens
+      --tui           draw the dashboard even where the terminal was not
+                      recognized as one
+      --no-prefix-cache
+                      start every request from an empty cache. By default a
+                      finished request's session is kept and the next request
+                      reuses as much of it as the two prompts agree on, which
+                      is most of a chat. Turning it off costs that and gains
+                      the cache's buffers back for a pass to use as scratch,
+                      which is the difference on a card that only just fits
+  -V, --version       print the version and the compiler fingerprint
+  -h, --help          print this message
