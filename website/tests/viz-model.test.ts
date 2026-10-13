@@ -42,10 +42,39 @@ describe("statement steps", () => {
     const cta = gemm.ctaIndex([1, 0, 0])
     const step = gemm.statements(cta).findIndex(statement => statement.iter.kt === 8)
     const state = gemm.stateAt(cta, step)
-    expect(state.reads.map(access => formatBox(access.tensor ?? "", access.box))).toEqual([
+    const tensors = state.reads.filter(access => access.tensor)
+    expect(tensors.map(access => formatBox(access.tensor ?? "", access.box))).toEqual([
       "A[32:64, 8:12]",
       "B[8:12, 0:32]",
     ])
+  })
+
+  it("alternates the GEMM's staging buffers per iteration under @pipeline", () => {
+    const staged = (step: number) => gemm.stateAt(0, step).writes.map(access => access.buffer)
+    expect(staged(0)).toEqual([0, 1])
+    expect(staged(1)).toEqual([2, 3])
+    expect(staged(2)).toEqual([0, 1])
+    expect(gemm.stateAt(0, 0).barriers).toEqual([{ opId: 39, kept: true }])
+    expect(gemm.ancestry(39)).toEqual([39, 41])
+  })
+
+  it("steps a butterfly one shuffle at a time", () => {
+    const kinds = lanes
+      .statements(0)
+      .map(statement => statement.steps.map(step => step.lanes?.kind ?? "store").join("+"))
+    expect(kinds).toEqual([
+      "lane_load+lane_load",
+      "lane_load+lane_load",
+      "shuffle",
+      "shuffle",
+      "shuffle",
+      "shuffle",
+      "shuffle",
+      "collective",
+      "store",
+    ])
+    expect(lanes.shuffleStage(lanes.statements(0)[3])).toEqual({ index: 2, count: 5 })
+    expect(lanes.stateAt(0, 2).lanes[0].event.partners?.slice(0, 3)).toEqual([16, 17, 18])
   })
 
   it("moves by a loop iteration and leaves the loop at its end", () => {
@@ -149,13 +178,15 @@ describe("readout", () => {
 
   it("describes the GEMM's k step and its coalescing", () => {
     expect(gemm.readout(gemm.ctaIndex([1, 1, 0]), 2)).toBe(
-      "CTA (1, 1), kt = 8: runs a GEMM k step on fma: reads A[32:64, 8:12] and B[8:12, 32:64]; A: 32 of 256 threads, 4 f32 each, 16-byte vectors. Warp 0 touches 32 lines of 128 bytes for 512 bytes; 4 would hold them."
+      "CTA (1, 1), kt = 8: stages A[32:64, 8:12] and B[8:12, 32:64] in shared tile0 (bytes 0 to 511) and shared tile1 (bytes 512 to 1023) for the GEMM's k step on fma; A: 32 of 256 threads, 4 f32 each, 16-byte vectors. Warp 0 touches 32 lines of 128 bytes for 512 bytes; 4 would hold them. A barrier follows."
     )
   })
 
   it("describes lane loads and the butterfly", () => {
-    expect(lanes.readout(0, 2)).toBe(
-      "CTA 0: the lane collective folds warp 0's 32 values in 5 xor shuffle stages (16, 8, 4, 2, 1), and every lane ends with the result."
+    expect(lanes.readout(0, 2)).toBe("CTA 0: shuffle 1 of 5: each lane of warp 0 takes the value of lane xor 16.")
+    expect(lanes.readout(0, 6)).toBe("CTA 0: shuffle 5 of 5: each lane of warp 0 takes the value of lane xor 1.")
+    expect(lanes.readout(0, 7)).toBe(
+      "CTA 0: the lane collective is done: after 5 xor shuffle stages (16, 8, 4, 2, 1), every one of warp 0's 32 lanes holds the result."
     )
     expect(lanes.readout(1, 0)).toContain("warp 0's 32 lanes each load 4 f32 of W[4, 0:128] as one 16-byte vector")
   })
