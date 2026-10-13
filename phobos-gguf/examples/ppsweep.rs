@@ -2,8 +2,9 @@
 //
 //   cargo run --release -p phobos-gguf --features cuda --example ppsweep
 //
-// Times the batched Q8_0 projection a prompt pass runs, `q8_mma` against
-// `q8_qmma`, at the shapes of a 512-token prompt. A batched pass reads the
+// Times the batched Q8_0 projection a prompt pass runs, written as a loop
+// (`q8_mma`) against the `qmma_t` intrinsic (`q8_qmma`), at the shapes of a
+// 512-token prompt. A batched pass reads the
 // weight once per row tile, so the figure reported is integer throughput:
 // how much of the tensor cores the tiling reaches.
 
@@ -19,8 +20,9 @@ use cust::stream::{Stream, StreamFlags};
 use phobos_gguf::backend::quantize_row;
 use phobos_kernels::abi::{self, KernelArg};
 
-/// The shipped batched projection. It tiles the output in both directions and
-/// applies the block scales to a shared-memory accumulator every 32 elements.
+/// The batched projection as a loop over 32-element blocks. It tiles the
+/// output in both directions, and an aligned tile keeps its accumulator in
+/// the tensor cores' registers.
 const SRC_MMA: &str = "\
 @launch({BLOCK})
 @autotune(TM in [{TM}], TN in [{TN}])
@@ -83,9 +85,12 @@ const TILES: &[(usize, usize, usize)] = &[
     (32, 128, 256),
 ];
 
-/// The same for `qmma_t`. Its tile is bounded only by the register file and
-/// the shared-memory result, so it can be much wider.
+/// Wide tiles, bounded only by the register file, for either form. The
+/// first three are the ones prompt passes run.
 const QTILES: &[(usize, usize, usize)] = &[
+    (128, 128, 128),
+    (128, 64, 128),
+    (64, 64, 128),
     (128, 256, 256),
     (128, 128, 256),
     (64, 256, 256),
@@ -93,7 +98,6 @@ const QTILES: &[(usize, usize, usize)] = &[
     // way, so these keep the warps per multiprocessor and change only how
     // many blocks the grid spreads over it.
     (128, 256, 128),
-    (128, 128, 128),
     (64, 128, 128),
     (256, 128, 128),
     (128, 128, 64),
@@ -213,7 +217,8 @@ fn main() -> Result<()> {
         let mut shipped = f64::MAX;
         let mut best = f64::MAX;
         let mut best_at = ("", 0, 0, 0);
-        for (name, source, tiles) in [("q8_mma", SRC_MMA, TILES), ("q8_qmma", SRC_QMMA, QTILES)] {
+        let forms = [("q8_mma", SRC_MMA, TILES), ("q8_mma", SRC_MMA, QTILES), ("q8_qmma", SRC_QMMA, QTILES)];
+        for (name, source, tiles) in forms {
             for &(tm, tn, block) in tiles {
                 let aligned = format!("@aligned(M = {tm}, N = {tn})");
                 // A tile whose accumulator does not fit in shared memory fails
