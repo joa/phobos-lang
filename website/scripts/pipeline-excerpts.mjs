@@ -71,7 +71,11 @@ const passes = [
 
 const stages = {
   source: slice(source, /^\s*for kt in/, 5),
-  ast: compactDebug(slice(read("ast.txt"), /^\s*For \{/, 60)).split("\n").slice(0, 14).join("\n") + "\n...",
+  ast:
+    compactDebug(slice(read("ast.txt"), /^\s*For \{/, 60))
+      .split("\n")
+      .slice(0, 14)
+      .join("\n") + "\n...",
   graph: slice(read("ir.txt"), /= for %/, 10),
   passes,
   mlir: slice(read("mlir.txt"), /= scf\.for .*iter_args/, 9) + "\n...",

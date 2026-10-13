@@ -83,6 +83,13 @@ shared memory, say), times the rest and keeps the fastest. Its
 `--autotune "DIM=VAL ..."` flag pins values and skips the search. See
 [Compile and benchmark](/docs/getting-started/compile-and-benchmark/) for the tools.
 
+import Recording from "../../../../components/inference/Recording.astro"
+
+<Recording name="autotune" label="phobos-kbench logging the time of each tile size combination of a GEMM search" widthPx={670} heightPx={350}>
+  A search in progress: `phobos-kbench` logs each combination of `TILE_M`, `TILE_N` and `TILE_K` with its time, and
+  skips the ones whose PTX the driver fails to compile.
+</Recording>
+
 :::note
 Each combination is a separate compile, so a search space grows by
 multiplication. Two entries with six choices each are 36 compiles; keep the

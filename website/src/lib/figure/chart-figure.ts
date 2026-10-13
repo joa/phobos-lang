@@ -259,15 +259,19 @@ export class ChartFigure {
   #onResize(entries: ResizeObserverEntry[]): void {
     const widthPx = entries[entries.length - 1].contentRect.width
     if (widthPx === 0) return
-    const layout = layoutFor(widthPx)
     cancelAnimationFrame(this.#rebuildFrameId)
     this.#rebuildFrameId = 0
-    if (layout === this.#layout) return
+    if (layoutFor(widthPx) === this.#layout) return
     // Rebuilding resizes the root; doing it inside this callback would trip the browser's
-    // "ResizeObserver loop completed with undelivered notifications" error, so wait a frame.
+    // "ResizeObserver loop completed with undelivered notifications" error, so wait a frame. The width
+    // is measured again then: a transient size (a full-page capture resizing the viewport) is often
+    // gone by the next frame, and rebuilding for it would draw the figure twice.
     this.#rebuildFrameId = requestAnimationFrame(() => {
       this.#rebuildFrameId = 0
-      this.#rebuild(layout)
+      const settledWidthPx = this.#root.getBoundingClientRect().width
+      if (settledWidthPx === 0) return
+      const layout = layoutFor(settledWidthPx)
+      if (layout !== this.#layout) this.#rebuild(layout)
     })
   }
 

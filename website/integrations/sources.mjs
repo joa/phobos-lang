@@ -111,6 +111,24 @@ export function tagFences(text) {
 }
 
 /**
+ * Lifts the headings outside code fences so the shallowest is an H2, the level under the page
+ * title. A file that starts at H3, as WINDOWS.md does, would otherwise skip a level.
+ */
+export function liftHeadings(text) {
+  const heading = /^(#{2,6})(?=\s)/gm
+  let shallowest = 7
+  mapFences(text, {
+    outside(chunk) {
+      for (const [, marks] of chunk.matchAll(heading)) shallowest = Math.min(shallowest, marks.length)
+      return chunk
+    },
+  })
+  if (shallowest === 7 || shallowest === 2) return text
+  const lift = shallowest - 2
+  return mapFences(text, { outside: chunk => chunk.replace(heading, marks => marks.slice(lift)) })
+}
+
+/**
  * Resolves one link target found in a root file. Returns the rewritten target,
  * plus the repository path of an image to copy beside the page when it is one.
  */
@@ -163,7 +181,7 @@ export function render(source, text, options = {}) {
   let body = text.replace(/\r\n?/g, "\n")
   if (source.file === "SPEC.md") body = tagFences(body)
   const { text: linked, copies } = rewriteLinks(body, options)
-  return { page: frontMatter(linked, { ...source, source: source.file }), copies }
+  return { page: frontMatter(liftHeadings(linked), { ...source, source: source.file }), copies }
 }
 
 function isRepoDir(root) {

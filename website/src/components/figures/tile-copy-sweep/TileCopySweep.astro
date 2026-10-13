@@ -12,6 +12,7 @@ const { id = "fig-tile-copy" } = Astro.props
 
 <ChartFigure
   id={id}
+  pickable
   name="tile-copy-sweep"
   figure={TileCopySweepFigure}
   state={{ bind: "var", step: "read", thread: "9" }}

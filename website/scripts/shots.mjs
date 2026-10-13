@@ -1,5 +1,6 @@
 // Screenshots of site routes in {dark, light} x {1280, 390} x {motion, reduced}, a mid frame and an end
-// frame each, for review by eye. Fails on console errors, page errors and horizontal scroll.
+// frame each, for review by eye. Fails on console errors, page errors, horizontal scroll and figure
+// labels under 11 viewBox units; prints the smallest label's rendered size in px.
 //
 //   node scripts/shots.mjs [--base URL] [--out DIR] [--only dark,390,reduced] [--steps] [--nojs] ROUTE...
 //
@@ -27,6 +28,7 @@ const HEIGHT_FOR_WIDTH_PX = { 1280: 800, 390: 844 }
 const MID_FRAME_MS = 650
 const SETTLE_MS = 2200
 const SCROLL_STEP_MS = 450
+const MIN_LABEL_UNITS = 11
 
 // Dev-server chatter that is not a page error.
 const IGNORED_CONSOLE = [/\[vite\]/i, /\[astro\]/i, /Download the React DevTools/i]
@@ -102,10 +104,36 @@ async function shoot(browser, options, route, theme, widthPx, motion) {
     () => document.documentElement.scrollWidth - document.documentElement.clientWidth
   )
   if (overflowPx > 0) problems.push(`horizontal scroll: ${overflowPx}px`)
+  // Figure labels are sized in viewBox units, and none may be under 11 of them (the figure rule). Their
+  // rendered size follows the container, so the smallest one in px is reported beside the shot.
+  const labels = await page.evaluate(() =>
+    [...document.querySelectorAll(".chart svg text")]
+      .filter(text => text.getClientRects().length > 0 && text.textContent.trim() !== "")
+      .filter(text => !text.closest(".is-hidden, .chart-static"))
+      .map(text => {
+        const sizeUnits = parseFloat(getComputedStyle(text).fontSize)
+        // The scale of the text's vertical axis, which holds for rotated labels too.
+        const matrix = text.getScreenCTM()
+        const scale = matrix ? Math.hypot(matrix.c, matrix.d) : 1
+        return {
+          sizeUnits,
+          sizePx: sizeUnits * scale,
+          label: text.textContent.trim().slice(0, 24),
+        }
+      })
+  )
+  const small = labels.filter(({ sizeUnits }) => sizeUnits < MIN_LABEL_UNITS - 0.05)
+  if (small.length > 0) {
+    const sample = small.slice(0, 3).map(({ sizeUnits, label }) => `"${label}" ${sizeUnits} units`)
+    problems.push(`figure text under ${MIN_LABEL_UNITS} units: ${small.length} labels, such as ${sample.join(", ")}`)
+  }
+  // A label scaled to nothing is mid-entrance, not small.
+  const shown = labels.filter(({ sizePx }) => sizePx > 1)
+  const minLabelPx = shown.length > 0 ? Math.min(...shown.map(({ sizePx }) => sizePx)) : null
   // The dev server reports build errors in an overlay rather than the console.
   if (await page.$("vite-error-overlay")) problems.push("dev server error overlay is showing")
   await page.close()
-  return { name, problems }
+  return { name, problems, minLabelPx }
 }
 
 async function main() {
@@ -123,13 +151,14 @@ async function main() {
           for (const motion of MOTIONS) {
             const tags = [theme, String(widthPx), motion]
             if (options.only.length > 0 && !options.only.every(tag => tags.includes(tag))) continue
-            const { name, problems } = await shoot(browser, options, route, theme, widthPx, motion)
+            const { name, problems, minLabelPx } = await shoot(browser, options, route, theme, widthPx, motion)
+            const labelNote = minLabelPx === null ? "" : `  (smallest figure label ${minLabelPx.toFixed(1)} px)`
             if (problems.length === 0) {
-              console.log(`ok    ${name}`)
+              console.log(`ok    ${name}${labelNote}`)
               continue
             }
             failures += 1
-            console.log(`FAIL  ${name}`)
+            console.log(`FAIL  ${name}${labelNote}`)
             for (const problem of problems) console.log(`      ${problem}`)
           }
         }

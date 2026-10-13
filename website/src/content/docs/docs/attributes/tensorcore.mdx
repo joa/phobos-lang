@@ -63,11 +63,20 @@ condition holds, so the product runs on WMMA. A complete kernel with
 {/* figure: attr-tensorcore-pair */}
 
 import KernelPair from "../../../../components/viz/KernelPair.astro"
+import onTuring from "../../../../data/traces/gemm_fp16tc_fp32acc.sm_75.json"
+import onAmpere from "../../../../data/traces/gemm_fp16tc_fp32acc.sm_80.json"
+
+The pair below is one kernel,
+[`examples/gemm_fp16tc_fp32acc.ph`](/docs/examples/gemm-fp16tc-fp32acc/),
+compiled for two chips. On sm_75 at {onTuring.compiler.indexBits}-bit indices it stays on WMMA; on sm_80
+the compiler widens the index to {onAmpere.compiler.indexBits} bits and the product takes
+`mma.sync`. The statements are the same on both sides, and both run on tensor
+cores. What differs is the staging in shared memory: WMMA pads the rows of
+its operand tiles, so the kernel peaks at {onTuring.sharedPeakBytes} bytes, while `mma.sync`
+swizzles them instead and keeps its operand tiles at their declared size, for a
+peak of {onAmpere.sharedPeakBytes} bytes.
 
 <KernelPair beforeTrace="gemm_fp16tc_fp32acc" beforeChip="sm_75" beforeLabel="sm_75: wmma" afterTrace="gemm_fp16tc_fp32acc" afterChip="sm_80" afterLabel="sm_80: mma.sync" />
-
-The figure pair shows the same product on FMA and on tensor cores: how each
-warp's share of the output is cut into fragments and fed from shared memory.
 
 ## When it declines
 

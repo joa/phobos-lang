@@ -7,6 +7,7 @@ import "../styles/site.css"
 import ThemeProvider from "../components/overrides/ThemeProvider.astro"
 import SiteHeader from "../components/SiteHeader.astro"
 import SiteFooter from "../components/SiteFooter.astro"
+import HeadMeta from "../components/HeadMeta.astro"
 
 interface Props {
   title: string
@@ -15,6 +16,7 @@ interface Props {
 }
 
 const { title, description = "Tile-based GPU kernel language & LLM inference engine", noindex = false } = Astro.props
+const canonicalUrl = new URL(Astro.url.pathname, Astro.site).href
 ---
 
 <!doctype html>
@@ -25,7 +27,17 @@ const { title, description = "Tile-based GPU kernel language & LLM inference eng
     <title>{title}</title>
     <meta name="description" content={description} />
     {noindex && <meta name="robots" content="noindex, nofollow" />}
+    <link rel="canonical" href={canonicalUrl} />
+    <link rel="sitemap" href="/sitemap-index.xml" />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:title" content={title} />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content={canonicalUrl} />
+    <meta property="og:locale" content="en" />
+    <meta property="og:description" content={description} />
+    <meta property="og:site_name" content="Phobos" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <HeadMeta />
     <ThemeProvider />
     <slot name="head" />
   </head>

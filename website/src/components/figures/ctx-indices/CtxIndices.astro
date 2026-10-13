@@ -13,6 +13,7 @@ const { id = "fig-ctx-indices" } = Astro.props
 
 <ChartFigure
   id={id}
+  pickable
   name="ctx-indices"
   figure={CtxIndicesFigure}
   state={{ thread: DEFAULT_THREAD, mode: "indices" }}

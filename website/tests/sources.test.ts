@@ -7,6 +7,7 @@ import {
   TREE_URL,
   frontMatter,
   isPhobosCode,
+  liftHeadings,
   render,
   rewriteLinks,
   tagFences,
@@ -121,5 +122,17 @@ describe("render", () => {
     expect(page).toContain('title: "Benchmarks"')
     const links = [...page.matchAll(/\]\(([^)]+)\)/g)].map(m => m[1])
     expect(links.filter(l => !/^(https?:|#|\/|\.\/results\/)/.test(l))).toEqual([])
+  })
+})
+
+describe("liftHeadings", () => {
+  it("lifts a file that starts at H3 so its shallowest heading is an H2", () => {
+    const text = "### Building\n\nText.\n\n#### Step\n\n```sh\n### a comment, not a heading\n```\n"
+    expect(liftHeadings(text)).toBe("## Building\n\nText.\n\n### Step\n\n```sh\n### a comment, not a heading\n```\n")
+  })
+
+  it("leaves a file whose shallowest heading is already an H2", () => {
+    const text = "# Title\n\n## Section\n\n### Sub\n"
+    expect(liftHeadings(text)).toBe(text)
   })
 })
