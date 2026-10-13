@@ -91,22 +91,6 @@ impl Build {
                 let op = Intrinsic::from_name(callee).expect("matched above");
                 Ok(Rv::Tile(self.value(OpKind::Intrinsic(op), &[a, asc, w, wsc], ty)))
             }
-            _ if matches!(Intrinsic::from_name(callee), Some(Intrinsic::RawQdotI8(_))) => {
-                let Some(Intrinsic::RawQdotI8(fmt)) = Intrinsic::from_name(callee) else {
-                    unreachable!("matched above");
-                };
-                let want = 4 + qg_tables(fmt);
-                if args.len() != want {
-                    bail!("{callee} expects {want} operands: (aq, asc, qb, d, tables..)");
-                }
-                let tiles = args
-                    .iter()
-                    .map(|e| self.tile_operand(e, callee))
-                    .collect::<Result<Vec<_>>>()?;
-                let shape = [1, self.shape(tiles[2])[0]];
-                let ty = self.shared_ty(Scalar::F32, &shape);
-                Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::RawQdotI8(fmt)), &tiles, ty)))
-            }
             "iq1s_qmma_t" => {
                 let [a, asc, qb, d, grid] = self.iq1s_qmma_operands(args)?;
                 let shape = [self.shape(a)[0], self.shape(qb)[0]];

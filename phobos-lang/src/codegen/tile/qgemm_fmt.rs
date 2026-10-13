@@ -29,15 +29,6 @@ pub(in crate::codegen) enum QgFormat {
 /// IQ1_S's grid at two bits per lane: 2048 entries of eight.
 pub(in crate::codegen) const IQ1_GRID2_BYTES: i64 = 2048 * 2;
 
-/// The same grid at a nibble per lane, holding `g + 1` in 0..2, which is
-/// already a `prmt` selector. The matvecs read this one.
-pub(in crate::codegen) const IQ1_GRID4_BYTES: i64 = 2048 * 4;
-
-/// The byte tables for the nibble grid. Selector `g + 1` is 0 for -1, 1 for
-/// 0 and 2 for +1, and the byte is `8g + 1` or `8g - 1`.
-pub(super) const IQ1_LUT4_PLUS: i64 = 0x0009_01F9;
-pub(super) const IQ1_LUT4_MINUS: i64 = 0x0007_FFF7;
-
 /// The byte tables `prmt` applies to a ternary lane. A code is `g & 3`: 0
 /// for 0, 1 for +1, 3 for -1. Byte `code` of the table is `8g + 1` or
 /// `8g - 1`. Written as the i32 the register holds, low byte first.
@@ -78,40 +69,6 @@ impl QgFormat {
         }
     }
 
-    /// The format a `<fmt>_qdot_i8_t` call names.
-    pub(in crate::codegen) fn from_qdot_i8(callee: &str) -> Option<Self> {
-        Some(match callee {
-            "iq1s_qdot_i8_t" => Self::Iq1s,
-            "iq1m_qdot_i8_t" => Self::Iq1m,
-            "iq2xxs_qdot_i8_t" => Self::Iq2xxs,
-            "iq2xs_qdot_i8_t" => Self::Iq2xs,
-            "iq2s_qdot_i8_t" => Self::Iq2s,
-            "iq3xxs_qdot_i8_t" => Self::Iq3xxs,
-            "iq3s_qdot_i8_t" => Self::Iq3s,
-            "q4k_qdot_i8_t" => Self::Q4k,
-            "q5k_qdot_i8_t" => Self::Q5k,
-            "q6k_qdot_i8_t" => Self::Q6k,
-            "ptq1_qdot_i8_t" => Self::Ptq1,
-            _ => return None,
-        })
-    }
-
-    pub(in crate::codegen) fn qdot_i8_intrinsic(self) -> &'static str {
-        match self {
-            Self::Iq1s => "iq1s_qdot_i8_t",
-            Self::Iq1m => "iq1m_qdot_i8_t",
-            Self::Iq2xxs => "iq2xxs_qdot_i8_t",
-            Self::Iq2xs => "iq2xs_qdot_i8_t",
-            Self::Iq2s => "iq2s_qdot_i8_t",
-            Self::Iq3xxs => "iq3xxs_qdot_i8_t",
-            Self::Iq3s => "iq3s_qdot_i8_t",
-            Self::Q4k => "q4k_qdot_i8_t",
-            Self::Q5k => "q5k_qdot_i8_t",
-            Self::Q6k => "q6k_qdot_i8_t",
-            Self::Ptq1 => "ptq1_qdot_i8_t",
-        }
-    }
-
     /// The device block size in bytes. It is the file's block without the
     /// IQ formats' leading `d`, and without Q6_K's trailing one, since no
     /// device kernel reads them.
@@ -142,15 +99,6 @@ impl QgFormat {
             Self::Iq3xxs => &[256 * 4, 128 * 8],
             Self::Iq3s => &[512 * 4, 256 * 8],
             Self::Q4k | Self::Q5k | Self::Q6k | Self::Ptq1 => &[],
-        }
-    }
-
-    /// The tables a format's decode matvec reads. The ternary formats use the
-    /// nibble grid, the rest the same tables as the projection.
-    pub(in crate::codegen) fn qdot_tables(self) -> &'static [i64] {
-        match self {
-            Self::Iq1s | Self::Iq1m => &[IQ1_GRID4_BYTES],
-            _ => self.tables(),
         }
     }
 
@@ -285,24 +233,6 @@ impl<'c> Codegen<'c> {
         let c16 = self.const_i32(block, 16)?;
         let x_hi = self.push(block, arith::shrui(x, c16, self.loc))?;
         let w1 = self.byte_permute(block, lut, lut, x_hi)?;
-        Ok((w0, w1))
-    }
-
-    /// A ternary grid entry from the nibble grid, one word already in
-    /// selector form, as the two `8g +- 1` words the byte table `lut`
-    /// describes.
-    pub(super) fn qg_ternary4(
-        &self,
-        block: &Block<'c>,
-        tab: &MemVal<'c>,
-        idx: Value<'c, 'c>,
-        lut: Value<'c, 'c>,
-    ) -> Result<(Value<'c, 'c>, Value<'c, 'c>)> {
-        let e = self.qg_entry(block, tab, idx, 4)?[0];
-        let w0 = self.byte_permute(block, lut, lut, e)?;
-        let c16 = self.const_i32(block, 16)?;
-        let e_hi = self.push(block, arith::shrui(e, c16, self.loc))?;
-        let w1 = self.byte_permute(block, lut, lut, e_hi)?;
         Ok((w0, w1))
     }
 

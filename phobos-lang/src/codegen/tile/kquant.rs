@@ -1,6 +1,5 @@
-// The K-quants Q4_K, Q5_K and Q6_K, for the staged projection (`qgemm.rs`)
-// and the decode matvec (`qdot_i8_reg.rs`): what each loads and decodes, and
-// the arithmetic they share.
+// The K-quants Q4_K, Q5_K and Q6_K, for the staged projection (`qgemm.rs`):
+// what each loads and decodes, and the arithmetic they share.
 //
 // There are no tables. A quant is a nibble, plus one bit of a 32-byte `qh`
 // plane for Q5_K, or two bits of a 64-byte one for Q6_K. Scales are six-bit
@@ -9,9 +8,8 @@
 //
 // Q4_K and Q5_K subtract a minimum, so a run decodes as
 // `d * sc * q - dmin * m`. Against a Q8_0 activation `a = sa * aq`, the
-// contraction is `sa * (d * sc * A - dmin * m * S)`. `A` is the dp4a chain
-// and `S` the activation's sum over the run (see `kquant_qdot.rs` for the
-// decode matvec's).
+// contraction is `sa * (d * sc * A - dmin * m * S)`. `A` is the integer dot
+// product and `S` the activation's sum over the run.
 //
 // Q6_K has no minimum. Its `q - 32` folds into the byte with no carry:
 // `(qh2 + 14) & 15` is `qh2 - 2 mod 16`, so
@@ -28,26 +26,10 @@ use super::*;
 pub(super) const KQ_GROUP: i64 = 32;
 
 impl QgFormat {
-    /// Whether the format is one of the three K-quants here.
-    pub(in crate::codegen) fn is_kquant(self) -> bool {
-        matches!(self, Self::Q4k | Self::Q5k | Self::Q6k)
-    }
-
     /// Whether a run subtracts a minimum, and so the contraction needs the
     /// activation's run sums.
     pub(in crate::codegen) fn has_min(self) -> bool {
         matches!(self, Self::Q4k | Self::Q5k)
-    }
-
-    /// Whether `d` (and `dmin`) sit in the block, read in the same load as
-    /// the scales. The scale plane is then uploaded but never read.
-    pub(in crate::codegen) fn d_in_block(self) -> bool {
-        matches!(self, Self::Q4k | Self::Q5k | Self::Ptq1)
-    }
-
-    /// Blocks the decode matvec's register pipeline holds ahead.
-    pub(in crate::codegen) fn pipeline_depth(self) -> usize {
-        2
     }
 }
 
@@ -101,23 +83,6 @@ impl<'c> Codegen<'c> {
         let picked = self.byte_permute(block, lo, hi, idx)?;
         let mask = self.const_i32(block, 0xFF)?;
         self.push(block, arith::andi(picked, mask, self.loc))
-    }
-
-    /// Byte `idx` (a runtime 0..7) of the pair, sign-extended. The permute
-    /// selector names the byte once and its sign three times.
-    pub(super) fn kq_sbyte_at(
-        &self,
-        block: &Block<'c>,
-        lo: Value<'c, 'c>,
-        hi: Value<'c, 'c>,
-        idx: Value<'c, 'c>,
-    ) -> Result<Value<'c, 'c>> {
-        let eight = self.const_i32(block, 8)?;
-        let signed = self.push(block, arith::ori(idx, eight, self.loc))?;
-        let spread = self.const_i32(block, 0x1110)?;
-        let upper = self.push(block, arith::muli(signed, spread, self.loc))?;
-        let sel = self.push(block, arith::ori(idx, upper, self.loc))?;
-        self.byte_permute(block, lo, hi, sel)
     }
 
     /// Q4_K's and Q5_K's six-bit scale and minimum of run `r` (a runtime

@@ -287,7 +287,6 @@ fn intrinsic_names_round_trip() {
     ];
     for fmt in RawFmt::ALL {
         all.extend([
-            Intrinsic::RawQdotI8(fmt),
             Intrinsic::RawQmma(fmt),
             Intrinsic::RawQmmaStaged(fmt),
             Intrinsic::RawQgemm(fmt),

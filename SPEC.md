@@ -339,26 +339,25 @@ Symbols used below: `K` is the contraction length, a multiple of 256 unless stat
 
 | Built-in | Shape | Semantics | Form |
 |---|---|---|---|
-| `<fmt>_qdot_i8_t(aq, a_scales, qb, d, tables..)` | `[1, K] i8 x qb -> [1, N] f32` | Matvec against a Q8_0 activation (`a_scales` `[1, K/32]`). `N` a multiple of 8. | value |
 | `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | Prompt projection on integer tensor cores. Fixed 128 x 64 tile, needs `@launch(256)`. `a_scales` `[128, K/32]`. On sm_80+ the activation tile is double-buffered through `cp.async` where both stages fit 48 KB (all but `iq2xs` and `iq2s`). | statement or value |
 | `<fmt>_qmma_staged_t(a, a_scales, qb, d, tables..)` | `[M, K] i8 x qb -> [M, N] f32` | Batched projection on integer tensor cores (sm_75+). `M`, `N` multiples of 8, exactly one patch of 8x8 tiles per warp, the CTA's threads dividing the `N` columns' staging lanes, all operands in bounds. | statement or value |
 | `iq1s_qmma_t(a, a_scales, qb, d, grid)` | same | As above, decoded per warp instead of staged once per CTA. | statement or value |
 
 ### Formats
 
-| `<fmt>` | Bytes / 256 | Layout | `qdot_i8_t` | `qgemm_t` | `qmma_staged_t` |
-|---|---|---|---|---|---|
-| `iq1s` | 50 | grouped | yes | yes | yes |
-| `iq1m` | 56 | grouped | yes | yes | |
-| `iq2xxs` | 66 | grouped | yes | yes | yes |
-| `iq2xs` | 74 | grouped | yes | yes | yes |
-| `iq2s` | 82 | grouped | yes | yes | yes |
-| `iq3xxs` | 98 | grouped | yes | yes | yes |
-| `iq3s` | 110 | grouped | yes | yes | yes |
-| `q4k` | 144 | grouped | yes | yes | |
-| `q5k` | 176 | grouped | yes | yes | |
-| `q6k` | 208 | grouped | yes | yes | |
-| `ptq1` | 56 | grouped | yes | yes | |
+| `<fmt>` | Bytes / 256 | Layout | `qgemm_t` | `qmma_staged_t` |
+|---|---|---|---|---|
+| `iq1s` | 50 | grouped | yes | yes |
+| `iq1m` | 56 | grouped | yes | |
+| `iq2xxs` | 66 | grouped | yes | yes |
+| `iq2xs` | 74 | grouped | yes | yes |
+| `iq2s` | 82 | grouped | yes | yes |
+| `iq3xxs` | 98 | grouped | yes | yes |
+| `iq3s` | 110 | grouped | yes | yes |
+| `q4k` | 144 | grouped | yes | |
+| `q5k` | 176 | grouped | yes | |
+| `q6k` | 208 | grouped | yes | |
+| `ptq1` | 56 | grouped | yes | |
 
 The row-major formats (`iq4xs`, `q2k`, `q3k`) have no built-in: their decode is written with lanes. `q6k` moves each block's trailing `d` into the scale plane on the device (208 of 210 bytes). `ptq1` is two 128-weight file blocks per 256, re-laid at upload. For `q4k`, `q5k` and `ptq1` the scales are inside the block: `d` is taken but not read.
 
@@ -366,9 +365,9 @@ The row-major formats (`iq4xs`, `q2k`, `q3k`) have no built-in: their decode is 
 
 Tables are `[1, n]` `i8` tensors, built on the host by `phobos-gguf`'s `quant` module.
 
-| `<fmt>` | `qmma_staged_t` | `qdot_i8_t`, `qgemm_t` |
+| `<fmt>` | `qmma_staged_t` | `qgemm_t` |
 |---|---|---|
-| `iq1s` | `grid` = `iq1s_packed_grid`; `iq1s_signed_grid` for `qmma_staged_t` and `iq1s_qmma_t` | `grid` = `iq1s_grid4` (`qdot_i8_t`), `iq1s_grid2` (`qgemm_t`) |
+| `iq1s` | `grid` = `iq1s_packed_grid`; `iq1s_signed_grid` for `qmma_staged_t` and `iq1s_qmma_t` | `grid` = `iq1s_grid2` |
 | `iq1m` | `grid` = `iq1s_packed_grid` | as `iq1s` |
 | `iq2xxs` | `grid, signs` = `iq2xxs_packed_grid`, `iq2xxs_packed_signs` | `grid, masks` = `iq2xxs_packed_grid`, `iq2xxs_sign_masks` |
 | `iq2xs` | `iq2xs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |

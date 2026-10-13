@@ -1,7 +1,7 @@
-// PTQ1_0's decode matvec and staged projection. Base-three bytes are decoded
-// by multiplying by three in 16-bit lanes and byte-permuting the tops.
+// PTQ1_0's staged projection. Base-three bytes are decoded by multiplying by
+// three in 16-bit lanes and byte-permuting the tops.
 
-use super::qgemm::{qdot_i8_src, qgemm_src};
+use super::qgemm::qgemm_src;
 use super::*;
 
 /// The decode constants. `0x4140` and `0x4342` split a word into two lane
@@ -14,17 +14,6 @@ const DECODE: [&str; 5] = [
     "arith.constant 196609 : i32",
     "arith.constant 1769481 : i32",
 ];
-
-#[test]
-fn the_decode_matvec_contracts_trits_and_subtracts_the_activation_sum() {
-    let mlir = emit_mlir(&qdot_i8_src("ptq1"));
-    assert_contains(&mlir, &["nvvm.prmt", "nvvm.dot.accumulate.4way", "gpu.shuffle", "scf.for"]);
-    assert_contains(&mlir, &DECODE);
-    // The -1 bytes the second dp4a of each word runs against.
-    assert_contains(&mlir, &["arith.constant -1 : i32"]);
-    // No run-sum plane, since the -1 dp4a folds the offset in per lane.
-    assert!(!mlir.contains("xi32, 3>"), "{mlir}");
-}
 
 #[test]
 fn the_staged_projection_writes_signed_trits_and_no_minimum() {

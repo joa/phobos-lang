@@ -19,11 +19,9 @@ mod iq2xxs;
 mod iq3s;
 mod iq3xxs;
 mod kquant;
-mod kquant_qdot;
 mod ptq1;
 mod math;
 mod qdot;
-mod qdot_i8_reg;
 mod qgemm;
 mod qgemm_fmt;
 mod qmma;
@@ -35,10 +33,6 @@ mod vector;
 pub(in crate::codegen) use qdot::QWeight;
 pub(in crate::codegen) use qgemm::QgFormat;
 pub(in crate::codegen) use reduce::RowSrc;
-
-/// Elements of an int8 activation that share one scale. This is the layout
-/// the `quantize` kernel emits.
-pub(super) const ACT_SCALE_BLOCK: i64 = 32;
 
 /// A format's packed lookup tables, one `i8` per slot, so a lane loads its
 /// whole entry in one vector load. `signs` aliases `grid` for the one-table

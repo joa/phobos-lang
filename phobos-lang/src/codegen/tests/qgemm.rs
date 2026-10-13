@@ -26,22 +26,6 @@ pub(super) fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
     )
 }
 
-/// The decode matvec of a format with no tables.
-pub(super) fn qdot_i8_src(fmt: &str) -> String {
-    format!(
-        "@launch(256, 4)
-        @autotune(TN in [64])
-        @aligned(N = TN)
-        kernel {fmt}_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
-                                    QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                                    C: tensor<f32>[M, N]) {{
-            let pn = ctx.block.x
-            C[0 :+ 1, pn * TN :+ TN] = {fmt}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
-                                                     QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
-        }}"
-    )
-}
-
 const FORMATS: [(&str, &[usize]); 11] = [
     ("iq1s", &[4096]),
     ("iq1m", &[4096]),
@@ -90,22 +74,6 @@ fn a_k_quant_with_a_minimum_sums_the_activation_at_stage_time() {
     assert!(!without.contains("gpu.shuffle"), "{without}");
     assert!(without.contains("memref<8x64xf32, 3>"), "{without}");
     assert_contains(&without, &["arith.shrsi"]);
-}
-
-#[test]
-fn the_k_quant_decode_matvecs_sum_each_run_in_its_own_lane() {
-    let dots = |fmt: &str| {
-        let mlir = emit_mlir(&qdot_i8_src(fmt));
-        assert_contains(&mlir, &["nvvm.dot.accumulate.4way", "nvvm.prmt", "gpu.shuffle", "scf.for"]);
-        // No prologue, so no shared i32 run-sum tile.
-        assert!(!mlir.contains("xi32, 3>"), "{fmt}:
-{mlir}");
-        mlir.matches("nvvm.dot.accumulate.4way").count()
-    };
-    // A format with a minimum also dots the activation against ones, so it
-    // has more dots than Q6_K.
-    let (q4k, q5k, q6k) = (dots("q4k"), dots("q5k"), dots("q6k"));
-    assert!(q4k > q6k && q5k > q6k, "q4k {q4k}, q5k {q5k}, q6k {q6k}");
 }
 
 #[test]

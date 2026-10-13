@@ -767,27 +767,6 @@ impl Isa for Nvidia {
         )
     }
 
-    /// `prefetch.L2` on the byte address of `mem[indices]`. `memref.prefetch`
-    /// is not used because NVPTX drops the `llvm.prefetch` it lowers to.
-    fn prefetch_read<'c>(
-        &self,
-        cg: &Codegen<'c>,
-        block: &Block<'c>,
-        mem: &MemVal<'c>,
-        indices: &[Value<'c, 'c>],
-    ) -> Result<()> {
-        // The address is formed in `index`, so a 32-bit index truncates the
-        // pointer. On sm_89 and sm_120 a prefetch of that unmapped address
-        // serializes the kernel's blocks across the whole GPU.
-        if self.index_bits < 64 {
-            return Ok(());
-        }
-        let ptr = self.element_ptr(cg, block, mem, indices)?;
-        // Inline PTX: `nvvm.prefetch`'s cache-level attribute has no text form.
-        self.asm(cg, block, &[ptr], "prefetch.L2 [$0];", "l", None)?;
-        Ok(())
-    }
-
     fn load_acquire_sys<'c>(
         &self,
         cg: &Codegen<'c>,
