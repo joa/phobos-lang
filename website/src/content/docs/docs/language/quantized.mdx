@@ -1,0 +1,135 @@
+---
+title: Quantized built-ins and formats
+description: Contractions that read quantized weights directly, Q8_0 and the GGUF block formats.
+sidebar:
+  order: 6
+---
+
+Quantized model weights are stored as blocks of small integers with a scale
+per block. Phobos contracts against them in that form: a quantized built-in
+reads the raw block bytes, decodes them in registers and accumulates the
+products, so the weights cross the memory bus at their stored size.
+
+The normative rules are in the spec under
+[Quantized built-ins](/docs/reference/spec/#quantized-built-ins).
+
+The spec uses a few symbols throughout:
+
+| Symbol | Meaning |
+| --- | --- |
+| `K` | The contraction length, a multiple of 256 unless stated. |
+| `N` | The number of output columns. |
+| `qb` | The raw block bytes, `[N, K/256 * bytes]` `i8`. |
+| `d` | The per-block scale plane, `[N, K/256]` `f16`. |
+| `a_scales` | Activation scales in Q8_0 form: one `f32` per 32 elements. |
+
+## Q8_0
+
+Q8_0 stores signed bytes with one scale per block of 32 values. The
+activations are quantized the same way, so a product of two Q8_0 rows is a sum
+of integer dot products, each scaled by two block scales.
+
+| Built-in | Shape | Notes |
+| --- | --- | --- |
+| `qdot_t(a, a_scales, w, w_scales)` | `[M, K] i8 x [N, K] i8 -> [M, N] f32` | Scales `[M, K/32]` and `[N, K/32]`. `K` may be dynamic. |
+| `qmma_t(a, a_scales, w, w_scales)` | the same | On integer tensor cores. `M`, `N` multiples of 8. `w_scales` is `[K/32, N]`, transposed relative to `qdot_t`. |
+| `q50_qdot_t(..)`, `q50_qmma_t(..)` | `[M, K] i8 x [N, K/32 * 20] i8 -> [M, N] f32` | The same against a Q5_0 weight held as its blocks without their `f16` scale. |
+
+`qdot_t` computes
+
+```text
+out[i, j] = sum over blocks b of  a_scales[i, b] * w_scales[j, b] * sum over k in b of a[i, k] * w[j, k]
+```
+
+with the inner sum in integers, four bytes at a time with `dp4a`. A decode
+step's projection, one activation row against 64 output columns per CTA:
+
+```phobos
+@launch(256)
+@autotune(TN in [64])
+@aligned(N = TN)
+kernel q8_qdot(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+               W: tensor<i8>[N, K], WS: tensor<f32>[N, KB],
+               C: tensor<f32>[M, N]) {
+  let pn = ctx.block.x
+  C[0 :+ 1, pn * TN :+ TN] = qdot_t(A[0 :+ 1, :], AS[0 :+ 1, :],
+                                    W[pn * TN :+ TN, :], WS[pn * TN :+ TN, :])
+}
+```
+
+`qdot_t` takes its operands as slices that are fully in bounds, which is why
+`@aligned(N = TN)` is there: it promises that every CTA's 64 columns exist.
+
+The same contraction can also be written with plain tiles, converting the
+bytes to `f32` and applying the scale per block; see
+[`phobos-lang/examples/q8_matvec.ph`](/docs/examples/q8-matvec/).
+
+## Raw-format families
+
+The GGUF formats beyond Q8_0 pack their values in format-specific ways. For
+each supported format there is a family of built-ins named after it, with
+`<fmt>` replaced by the format's name, as in `q4k_qdot_i8_t`:
+
+| Built-in | Shape | Use |
+| --- | --- | --- |
+| `<fmt>_qdot_i8_t(aq, a_scales, qb, d, tables..)` | `[1, K] i8 x qb -> [1, N] f32` | A matvec against a Q8_0 activation, `a_scales` `[1, K/32]`. `N` a multiple of 8. A value. |
+| `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | A prompt projection on integer tensor cores. A fixed 128 x 64 tile; needs `@launch(256)`. On sm_80 and later the activation tile is double-buffered through `cp.async` where both stages fit 48 KB, which is every format but `iq2xs` and `iq2s`. |
+| `<fmt>_qmma_staged_t(a, a_scales, qb, d, tables..)` | `[M, K] i8 x qb -> [M, N] f32` | A batched projection on integer tensor cores (sm_75+). `M`, `N` multiples of 8, exactly one patch of 8x8 tiles per warp, all operands in bounds. |
+| `iq1s_qmma_t(a, a_scales, qb, d, grid)` | the same | As above, decoded per warp instead of staged once per CTA. |
+
+## Formats
+
+| `<fmt>` | Bytes per 256 | Layout | `qdot_i8_t` | `qgemm_t` | `qmma_staged_t` |
+| --- | --- | --- | --- | --- | --- |
+| `iq1s` | 50 | grouped | yes | yes | yes |
+| `iq1m` | 56 | grouped | yes | yes | |
+| `iq2xxs` | 66 | grouped | yes | yes | yes |
+| `iq2xs` | 74 | grouped | yes | yes | yes |
+| `iq2s` | 82 | grouped | yes | yes | yes |
+| `iq3xxs` | 98 | grouped | yes | yes | yes |
+| `iq3s` | 110 | grouped | yes | yes | yes |
+| `q4k` | 144 | grouped | yes | yes | |
+| `q5k` | 176 | grouped | yes | yes | |
+| `q6k` | 208 | grouped | yes | yes | |
+| `ptq1` | 56 | grouped | yes | yes | |
+
+A few formats deviate from the plain pattern:
+
+- `q6k` moves each block's trailing `d` into the scale plane on the device, so
+  a block is 208 of its 210 bytes.
+- `ptq1` is two 128-weight file blocks per 256, re-laid when the model is
+  uploaded.
+- For `q4k`, `q5k` and `ptq1` the scales are inside the block: `d` is taken
+  but not read.
+
+The row-major formats, `iq4xs`, `q2k` and `q3k`, have no built-in. Their
+decode is written in Phobos itself, one warp per output column with each lane
+decoding its part of a block, the pattern shown on
+[Collectives and shuffles](/docs/ctx/collectives/).
+
+## Table operands
+
+The IQ formats decode through lookup tables. Tables are `[1, n]` `i8` tensors,
+built on the host by `phobos-gguf`'s `quant` module, and passed after `d`.
+
+| `<fmt>` | `qmma_staged_t` | `qdot_i8_t`, `qgemm_t` |
+| --- | --- | --- |
+| `iq1s` | `grid` = `iq1s_packed_grid`; `iq1s_signed_grid` for `qmma_staged_t` and `iq1s_qmma_t` | `grid` = `iq1s_grid4` (`qdot_i8_t`), `iq1s_grid2` (`qgemm_t`) |
+| `iq1m` | `grid` = `iq1s_packed_grid` | as `iq1s` |
+| `iq2xxs` | `grid, signs` = `iq2xxs_packed_grid`, `iq2xxs_packed_signs` | `grid, masks` = `iq2xxs_packed_grid`, `iq2xxs_sign_masks` |
+| `iq2xs` | `iq2xs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |
+| `iq2s` | `iq2s_packed_grid`, `iq2s_packed_signs` | `iq2s_packed_grid`, `iq2s_sign_masks` |
+| `iq3xxs` | `iq3xxs_packed_grid`, `iq2xxs_packed_signs` | packed grid, 0/-1 sign masks |
+| `iq3s` | `iq3s_packed_grid`, `iq2s_packed_signs` | packed grid, 0/-1 sign masks |
+| `q4k`, `q5k`, `q6k`, `ptq1` | none | none |
+
+## Grouped layout
+
+For the formats marked `grouped`, the device stores columns in groups of 8:
+
+- `qb`, declared `[N, K/256 * bytes]`, is laid out `[N/8][K/256][8][bytes]`.
+- `d`, declared `[N, K/256]`, is laid out `[N/8][K/256][8]`.
+- A last group short of 8 columns is zero-padded.
+
+The host produces this layout when it uploads the weights. The row-major
+formats are stored as declared.

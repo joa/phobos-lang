@@ -1,0 +1,93 @@
+---
+title: ctx.block and ctx.blocks
+description: Which CTA this is, and how many there are along each grid axis.
+sidebar:
+  order: 2
+---
+
+{/* figure: ctx-block */}
+
+A launch is a grid of CTAs with up to three axes. `ctx.block` is this CTA's
+position in the grid, and `ctx.blocks` is the grid's extent. In the figure an
+output tensor is cut into tiles, one per CTA, and picking a CTA outlines the
+tile it owns.
+
+| Field | Result |
+| --- | --- |
+| `ctx.block.x`, `ctx.block.y`, `ctx.block.z` | The CTA's index along a grid axis, from 0. |
+| `ctx.blocks.x`, `ctx.blocks.y`, `ctx.blocks.z` | The grid's extent along that axis. |
+
+Both are uniform: every thread of a CTA reads the same `ctx.block`, and every
+thread of the grid reads the same `ctx.blocks`. Both are runtime values. The
+grid is chosen by whoever launches the kernel, so the kernel only learns it
+when it runs. An axis is required: `ctx.block` alone is an error.
+
+See [Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization)
+in the spec.
+
+## Tiling an output
+
+The usual pattern gives each CTA one tile of the output, so the grid is the
+output's shape divided by the tile shape, rounded up. A one-dimensional
+example, where CTA `i` owns elements `i * BLOCK` up to `i * BLOCK + BLOCK`:
+
+```phobos
+@autotune(BLOCK in [256, 4096])
+kernel add(x: tensor<f32>[N], y: tensor<f32>[N], out: tensor<f32>[N]) {
+  let base = ctx.block.x * BLOCK
+  out[base :+ BLOCK] = x[base :+ BLOCK] + y[base :+ BLOCK]
+}
+```
+
+For `N = 10000` and `BLOCK = 1024` the launch needs 10 CTAs along x. The last
+one owns elements 9216 to 10239, of which only 9216 to 9999 exist. Phobos
+masks that tile against the tensor's runtime extent: the reads past the end
+are `0` and the stores past the end are skipped. See
+[Slicing, bounds and masking](/docs/language/slicing-bounds-masking/).
+
+In two dimensions, `.x` and `.y` pick a row and a column of tiles. This is how
+the gemm example addresses its output:
+
+```phobos fragment
+let pm = ctx.block.x
+let pn = ctx.block.y
+// ...
+C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+```
+
+A grid of `ceil(M / TILE_M)` by `ceil(N / TILE_N)` CTAs then covers `C` once.
+Which grid axis maps to which tensor axis is the kernel's choice; Phobos
+attaches no meaning to x, y or z.
+
+## A third axis
+
+`ctx.block.z` is often used for an axis that is not part of the tile at all,
+such as a batch or a head index, with the tile coordinates on x and y:
+
+```phobos fragment
+let head = ctx.block.z
+let row = head * S + ctx.block.x * BR
+let q = Q[row :+ BR, :]
+```
+
+## Using the grid extent
+
+`ctx.blocks` lets a kernel run correctly on a grid smaller than its data. In a
+grid-stride loop each CTA starts at its own tile and steps by the whole grid:
+
+```phobos
+@autotune(BLOCK in [1024])
+kernel scale(x: tensor<f32>[N], out: tensor<f32>[N], alpha: f32) {
+  for base in range(ctx.block.x * BLOCK, N, ctx.blocks.x * BLOCK) {
+    out[base :+ BLOCK] = alpha * x[base :+ BLOCK]
+  }
+}
+```
+
+The loop bounds are uniform, so every thread of a CTA runs the same
+iterations and the tile operations inside stay legal.
+
+A [`@persistent`](/docs/attributes/persistent/) kernel uses the same pattern
+with a grid sized to the card rather than to the data. `grid_barrier`, which
+makes every CTA of the grid wait for every other, requires a one-dimensional
+grid.

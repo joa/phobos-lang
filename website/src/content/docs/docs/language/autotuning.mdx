@@ -1,0 +1,90 @@
+---
+title: Autotuning
+description: Tile sizes as compile-time constants, the search space @autotune declares, and the shape environment.
+sidebar:
+  order: 7
+---
+
+The best tile size depends on the card, the data type and the problem shape,
+and it is rarely obvious in advance. Phobos lets a kernel name its tile sizes
+as constants, declare the values worth trying, and leave the choice to a
+tuner that compiles and times each combination.
+
+The normative rules are in the spec under
+[Attributes](/docs/reference/spec/#attributes); the attribute itself has its
+own page, [`@autotune`](/docs/attributes/autotune/).
+
+## Constants with a search space
+
+```phobos
+@autotune(TILE_M in [32, 128], TILE_N in [32, 128], TILE_K in [8, 16, 32])
+@launch(256)
+kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+  for kt in range(0, K, TILE_K) {
+    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+    acc += dot(a, b)
+  }
+  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+}
+```
+
+Each entry of `@autotune` binds a name to a list of choices:
+
+| Written | Choices | Rule |
+| --- | --- | --- |
+| `TILE_M in [32, 128]` | 32, 64, 128 | Two values are inclusive bounds, searched in doubling steps. |
+| `TILE_K in [8, 16, 32]` | 8, 16, 32 | Three or more values are the explicit list. |
+| `BLOCK in [16, 8192]` | 16, 32, ..., 4096, 8192 | Doubling from the lower bound. |
+| `X in [16, 48]` | 16, 32, 48 | The upper bound is always included, even off the doubling. |
+| `D in [64]` | 64 | One value: a fixed constant, with nothing to search. |
+
+The example above has 3 x 3 x 3 = 27 combinations, and the tuner tries each.
+
+## The shape environment
+
+Every name declared in `@autotune` is a compile-time constant. Together they
+form the kernel's shape environment, and a compiled kernel is always one
+point of it: one value per name.
+
+- When nothing else picks the values, each name takes its first choice. The
+  kernel above compiles with `TILE_M = 32`, `TILE_N = 32` and `TILE_K = 8`.
+- A tuner, or a host that knows what it wants, overrides names of the
+  environment. Only declared names can be overridden.
+- A dimension name that `@autotune` does not declare, such as `M`, `N` and
+  `K` above, is a runtime value read from the tensors at launch.
+
+The constants can be used wherever a constant is required: as tile
+dimensions, as the length of a `:+` slice, as an `@aligned` divisor. They are
+also ordinary index values in expressions, as in `pm * TILE_M`.
+
+A one-value entry is common for a size the kernel fixes but still wants to
+name, such as the head dimension of attention:
+`@autotune(D in [64], BR in [32, 128], BC in [32, 128])`. It also lets a
+tensor declare that dimension as `D`, which makes it static: `Q[row :+ BR, :]`
+is then a tile of static shape `[BR, 64]`.
+
+## The GEMM's own constants
+
+A loop recognized as a GEMM (see
+[`dot` and tensor cores](/docs/language/dot-and-tensor-cores/)) is tiled by
+the names `TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM` and
+`TILE_TN`. They come from `@autotune` or the shape environment like any
+other constant, so a kernel that declares them gets them searched too.
+
+## Running the search
+
+`phobos-kbench` tunes the kernels it benchmarks. It compiles every
+combination, skips the ones that do not compile (a tile set larger than
+shared memory, say), times the rest and keeps the fastest. Its
+`--autotune "DIM=VAL ..."` flag pins values and skips the search. See
+[Compile and benchmark](/docs/getting-started/compile-and-benchmark/) for the tools.
+
+:::note
+Each combination is a separate compile, so a search space grows by
+multiplication. Two entries with six choices each are 36 compiles; keep the
+ranges to values that are plausible for the kernel.
+:::

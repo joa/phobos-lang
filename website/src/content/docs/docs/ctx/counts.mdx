@@ -1,0 +1,83 @@
+---
+title: ctx.threads, ctx.warps, ctx.lanes
+description: The three counts that size a CTA, all known when the kernel compiles.
+sidebar:
+  order: 3
+---
+
+{/* figure: ctx-counts */}
+
+A CTA is a fixed number of threads, and the hardware runs them in warps of a
+fixed number of lanes. Three `ctx` fields give those numbers. The figure shows
+a CTA regrouping into warps as its thread count changes.
+
+| Field | Value | Known |
+| --- | --- | --- |
+| `ctx.threads` | The CTA's thread count, from `@launch`. 256 when the kernel has no `@launch`. | At compile time |
+| `ctx.lanes` | Lanes in a warp on the target: 32 on NVIDIA. | At compile time |
+| `ctx.warps` | `ctx.threads / ctx.lanes` | At compile time |
+
+All three are [uniform](/docs/ctx/uniformity/): every thread of every CTA sees
+the same value. They are also compile-time constants. The compiler folds them
+into the generated code as literals, so a loop bound or a stride written with
+them costs nothing at run time.
+
+The normative definitions are in the spec under
+[Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization).
+
+## Setting the thread count
+
+[`@launch`](/docs/attributes/launch/) sets `ctx.threads`. Its first argument is
+the CTA size:
+
+```phobos
+@launch(128)
+kernel counts(O: tensor<i32>[1, 4]) {
+  O[0, 0] = i32(ctx.threads)   // 128
+  O[0, 1] = i32(ctx.warps)     // 4
+  O[0, 2] = i32(ctx.lanes)     // 32
+  O[0, 3] = i32(ctx.blocks.y)  // a runtime value, read from the launch
+}
+```
+
+Every thread runs those four stores and every thread writes the same values,
+so the result is well defined. `ctx.blocks.y` is there for contrast: it is the
+grid's extent, which is only known when the kernel is launched (see
+[`ctx.block` and `ctx.blocks`](/docs/ctx/blocks/)).
+
+## A whole number of warps
+
+`ctx.warps` requires `ctx.threads` to be a whole number of warps. On NVIDIA
+that means a multiple of 32, and `@launch` enforces it directly: a thread count
+that is not a positive multiple of 32 is rejected before any code is generated.
+
+```phobos expect-error
+@launch(48)
+kernel half_a_warp(O: tensor<i32>[1, 1]) {
+  O[0, 0] = i32(ctx.warps)
+}
+```
+
+Since the check happens at `@launch`, a kernel can always rely on
+`ctx.threads == ctx.warps * ctx.lanes`.
+
+## Where the counts show up
+
+The counts are what a kernel uses to split work over its threads without
+hard-coding the launch size:
+
+| Pattern | Written as |
+| --- | --- |
+| One warp per output column | `let col = ctx.block.x * ctx.warps + ctx.warp` |
+| A loop whose lanes split a row | `for k in range(ctx.lane, K, ctx.lanes)` |
+| A loop whose threads split a row | `for k in range(ctx.thread, K, ctx.threads)` |
+| A thread's run of four, CTA-strided | `let e = 4 * ctx.thread + i * 4 * ctx.threads` |
+
+The indices in those patterns, `ctx.thread`, `ctx.warp` and `ctx.lane`, are
+the subject of the [next page](/docs/ctx/indices/).
+
+:::note
+Tile-level code does not need the counts. A tile copy, an elementwise sweep or
+a `dot` spreads itself over all `ctx.threads` threads on its own. The counts
+matter once a kernel works per thread.
+:::

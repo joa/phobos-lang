@@ -1,0 +1,106 @@
+---
+title: "@pipeline"
+description: Asserts that the kernel's loops are double-buffered, and enables double buffering for the GEMM.
+sidebar:
+  order: 4
+---
+
+A loop that copies a tile from global memory and then computes on it spends
+part of every iteration waiting for the copy. Double buffering overlaps the
+two: while the CTA computes on one buffer, the copy for the next iteration
+fills the other.
+
+Phobos double-buffers every eligible loop by default. `@pipeline` turns that
+into an assertion, and adds the cases that are not on by default.
+
+```text
+@pipeline
+```
+
+It takes no arguments. See the [Attributes](/docs/reference/spec/#attributes)
+table in the spec.
+
+## Which loops are eligible
+
+A loop is shaped for double buffering when its body opens with copies of
+tensor slices into tiles, `var a = A[...]`, that nothing later in the body
+writes. The copies are the stage; the rest of the body is the compute. The
+doubled stage buffers must fit in 48 KB of shared memory, or under
+[`@dynshared`](/docs/attributes/dynshared/) in the chip's per-block limit:
+
+| Chip | Per-block limit under `@dynshared` |
+| --- | --- |
+| sm_75 | 64 KB |
+| sm_80 | 163 KB |
+| sm_86, sm_89, sm_120 | 99 KB |
+
+## What the attribute adds
+
+| Without `@pipeline` | With `@pipeline` |
+| --- | --- |
+| Eligible loops are double-buffered when their stages fit. | The same, and compilation fails if nothing in the kernel was pipelined. |
+| The GEMM built for a `dot` in a k loop runs single-buffered. | The GEMM double-buffers its own operand pairs. |
+| A loop over a dynamic extent that tiles evenly only once its remainder is split off is not pipelined. | Its whole tiles are pipelined, and the remainder runs once, unpipelined. |
+
+{/* figure: attr-pipeline-pair */}
+
+The figure pair shows a loop with and without double buffering: one stage
+buffer that the copy and the compute take turns on, against two that they
+alternate between.
+
+## A minimal kernel
+
+`K` is known only at launch. The whole 32-column tiles are pipelined, and the
+last, ragged tile runs once, masked:
+
+```phobos
+@launch(256)
+@pipeline
+kernel k(A: tensor<f32>[64, K], B: tensor<f32>[64, K], C: tensor<f32>[64, 32]) {
+  var acc: tile<f32>[64, 32] = 0.0
+  for kt in range(0, K, 32) {
+    var a = A[0 :+ 64, kt :+ 32]
+    var b = B[0 :+ 64, kt :+ 32]
+    acc += a * b
+  }
+  C[0 :+ 64, 0 :+ 32] = acc
+}
+```
+
+The two copies at the top of the loop are its stage: 2 x 8 KB, doubled to
+32 KB, within the static 48 KB.
+
+## When it declines
+
+If no loop in the kernel ends up pipelined, compiling a kernel marked
+`@pipeline` fails. The message names the kernel and the reasons each loop was
+declined; when there is no candidate loop at all, it reads:
+
+```text
+kernel `flat`: @pipeline asserts this kernel can be pipelined, but nothing in it did: no loop in the kernel is shaped for pipelining
+```
+
+```phobos expect-error
+@pipeline
+kernel flat(A: tensor<f32>[N], C: tensor<f32>[N]) {
+  let i = ctx.block.x
+  C[i :+ 1] = A[i :+ 1] * 2.0
+}
+```
+
+A common reason for a decline is size: stages whose doubled buffers exceed
+48 KB. The remedy is smaller tiles or `@dynshared`.
+
+## Interactions
+
+- [`@dynshared`](/docs/attributes/dynshared/) raises the limit the doubled
+  stages must fit, from 48 KB to the chip's per-block limit.
+- [`@aligned`](/docs/attributes/aligned/) on the loop's dimension makes the
+  extent a whole number of tiles, so there is no remainder iteration.
+- [`@autotune`](/docs/attributes/autotune/): a tile set too large to double
+  fails the assertion for that combination, and the tuner skips it.
+- The target: on sm_80 and later, with 64-bit indices, the pipelined copies
+  are asynchronous (`cp.async`), so the next stage loads while the current one
+  is computed on. On sm_75, or at 32-bit indices, no `cp.async` is emitted and
+  the stage moves through registers. This holds for the
+  [`@tensorcore`](/docs/attributes/tensorcore/) GEMM as well.

@@ -1,0 +1,109 @@
+---
+title: dot and tensor cores
+description: Matrix products on tiles, the fused epilogue, and which hardware path each operand type takes.
+sidebar:
+  order: 5
+---
+
+`dot` and `dot_t` multiply two rank-2 tiles. They are the core of every
+matrix multiply, attention and projection written in Phobos, and the compiler
+picks the hardware path for them: FMA units, `dp4a`, or tensor cores.
+
+The normative rules are in the spec under
+[Dense contraction](/docs/reference/spec/#dense-contraction).
+
+| Built-in | Shape | Computes |
+| --- | --- | --- |
+| `dot(a, b)` | `[M, K] x [K, N] -> [M, N]` | `a @ b` |
+| `dot_t(a, b)` | `[M, K] x [N, K] -> [M, N]` | `a @ b^T` |
+
+`dot_t` contracts the last axis of both operands. That is the natural layout
+for attention scores, `q @ k^T`, and for weights stored one output row per
+row, as in a linear layer.
+
+## The k loop
+
+A matrix multiply is a loop over the contraction axis. Each iteration copies a
+panel of `A` and a panel of `B` into shared memory and adds their product into
+an accumulator tile:
+
+{/* figure: dot */}
+
+```phobos fragment
+var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+for kt in range(0, K, TILE_K) {
+  var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+  var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+  acc += dot(a, b)
+}
+```
+
+The figure follows one CTA through this loop: the panels of `A` and `B` moving
+into shared memory at each step, and the product landing in the accumulator.
+`acc += dot(a, b)` adds the product in place; no tile holds the product on its
+own. The complete kernel is
+[`examples/gemm_fp32.ph`](/docs/examples/gemm-fp32/).
+
+The compiler recognizes this loop as a GEMM and emits it with a tiling of its
+own. Its sizes, `TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM`
+and `TILE_TN`, come from `@autotune` or the shape environment (see
+[Autotuning](/docs/language/autotuning/)). Under
+[`@pipeline`](/docs/attributes/pipeline/) the GEMM also double-buffers its
+operand panels, so the copy of the next panel overlaps the math on the
+current one.
+
+## The fused epilogue
+
+A product that only feeds the elementwise statement right after it is updated
+per element as it is written out, instead of being stored and swept again,
+when the dot runs on FMA:
+
+```phobos fragment
+var s: tile<f32>[BR, BC] = dot_t(q, k)
+s = s * scale                     // applied as s is written
+
+acc = acc * corr + dot(p, v)      // one pass over acc
+```
+
+The statement's target must be a declared tile of the product's type and
+shape that neither operand reads.
+
+## Hardware paths
+
+| Operands | Accumulator | Path |
+| --- | --- | --- |
+| `f32` | `f32` | Tiled FMA, or tensor cores under `@tensorcore` (operands rounded to `f16`). |
+| `f16` | `f16`, or `f32` under `@tensorcore` | Tensor cores need all tile dims and the k-slice to be multiples of 16. |
+| `i8` via `dot_t` | `i32` | `mma.m8n8k16.s8` when the output is whole 8x8 blocks and `K % 16 == 0` (sm_75+); else `dp4a` when `K % 4 == 0` (sm_61+); else scalar. |
+
+For `f32` and `f16` the tensor cores are opt-in, with
+[`@tensorcore`](/docs/attributes/tensorcore/). For `i8` the choice is
+automatic: an `i8` `dot_t` runs on the integer tensor cores whenever its shape
+allows.
+
+```phobos
+@launch(256)
+@autotune(TM in [16], TN in [32])
+@aligned(M = TM, K = 32, N = TN)
+kernel i8_gemm(A: tensor<i8>[M, K], W: tensor<i8>[N, K], C: tensor<i32>[M, N]) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  let a = A[pm * TM :+ TM, 0 :+ 32]
+  let w = W[pn * TN :+ TN, 0 :+ 32]
+  C[pm * TM :+ TM, pn * TN :+ TN] = dot_t(a, w)
+}
+```
+
+The output is `[16, 32]`, whole 8x8 blocks, and the contraction is 32, a
+multiple of 16, so this runs on `mma.sync` with the m8n8k16 shape on sm_75 and
+later. A single row (`TM = 1`) cannot fill an 8-row block and takes `dp4a`
+instead. The kernel contracts only the first 32 columns of `K`, to keep the
+example short.
+
+## When tensor cores apply
+
+Under `@tensorcore`, an `f32` or `f16` product runs on tensor cores only when
+every tile dimension and the k-slice are multiples of 16 and the CTA's warps
+tile the grid of 16x16 fragments. A `dot` that does not qualify falls back to
+the FMA path, and `PHOBOS_LOG=debug` names it and gives the reason. The
+attribute page has the details: [`@tensorcore`](/docs/attributes/tensorcore/).

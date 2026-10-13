@@ -1,0 +1,74 @@
+---
+title: "@aligned"
+description: Promises that a dimension is a whole number of tiles, which removes its masks and allows 16-byte vector access.
+sidebar:
+  order: 3
+---
+
+`@aligned` is a promise about the data: a tensor dimension is a whole number
+of tiles. With it the compiler drops the masks on that dimension and may
+access its rows with 16-byte vector loads and stores.
+
+```text
+@aligned(DIM = tile, ...)
+```
+
+`DIM` is a symbolic dimension of the kernel's tensors. `tile` is a literal or
+an [`@autotune`](/docs/attributes/autotune/) constant. See the
+[Attributes](/docs/reference/spec/#attributes) table and
+[Bounds and masking](/docs/reference/spec/#bounds-and-masking) in the spec.
+
+## A minimal kernel
+
+```phobos
+@autotune(TM in [32], TN in [128])
+@aligned(M = TM, N = TN)
+kernel scale(X: tensor<f32>[M, N], Y: tensor<f32>[M, N], alpha: f32) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var x = X[pm * TM :+ TM, pn * TN :+ TN]
+  Y[pm * TM :+ TM, pn * TN :+ TN] = alpha * x
+}
+```
+
+Without the attribute, every CTA's copy and store would be masked against the
+runtime `M` and `N`, in case the CTA sits at the edge. With it, no CTA is at a
+ragged edge, and the slices are read and written whole.
+
+{/* figure: attr-aligned-pair */}
+
+## What it changes
+
+| Without `@aligned` | With `@aligned(DIM = tile)` |
+| --- | --- |
+| A slice along `DIM` indexed by `ctx.block` is masked against the runtime extent. | No mask. |
+| Extents are only assumed to be multiples of 4 elements. | Rows along `DIM` may be accessed with 16-byte vector loads and stores. |
+| A `for` over `DIM` with `mma.sync` accumulators stays masked. | Unmasked. |
+| A thread's run in `sum`, `elem` or `store` is proven aligned only from its subscripts. | The divisor joins the proof, so more runs become single vector accesses. |
+
+The before and after pair above shows the same kernel compiled both ways.
+
+## When the promise is broken
+
+On a dynamic `DIM`, the promise is checked once at kernel entry. A launch that
+breaks it traps, and the next synchronize on the host fails, instead of the
+kernel writing past the end of a tensor. In a
+[`@persistent`](/docs/attributes/persistent/) kernel that uses
+`grid_barrier`, the other blocks then wait at the barrier for good, so a
+broken promise there shows up as a hang rather than an error.
+
+The arguments themselves are checked at compile time: a `tile` that is
+neither a literal nor an `@autotune` constant is an unknown constant, and a
+divisor must be positive.
+
+## Interactions
+
+- [`@autotune`](/docs/attributes/autotune/): the common pairing is
+  `@aligned(M = TILE_M, N = TILE_N, K = TILE_K)`, so the promise follows
+  whatever tile sizes the tuner picks. The host must then pad or pick shapes
+  that keep the promise for every candidate.
+- [`@pipeline`](/docs/attributes/pipeline/): a loop over a dynamic extent
+  covered by `@aligned` is a whole number of tiles, so all of it can be
+  pipelined, with no remainder iteration.
+- [`@tensorcore`](/docs/attributes/tensorcore/): `mma.sync` loops stay masked
+  unless `@aligned` covers the dimension they walk.

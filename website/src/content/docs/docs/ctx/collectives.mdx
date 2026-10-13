@@ -1,0 +1,229 @@
+---
+title: Collectives and shuffles
+description: Folding one value per thread across a warp or a CTA, moving values between lanes, and sums within a thread.
+sidebar:
+  order: 6
+---
+
+import LanesMatvec from "./_lanes-matvec.mdx"
+
+{/* figure: ctx-collectives */}
+
+A lane-strided loop leaves one partial result in every thread. A collective
+folds those values across a group of threads and gives every thread of the
+group the result. A shuffle moves one value from one lane to another. The
+figure puts the 32 lanes of a warp on a line and draws each shuffle as an arc
+between two lanes.
+
+The normative rules are in the spec under
+[Collectives and shuffles](/docs/reference/spec/#collectives-and-shuffles).
+
+## The forms
+
+The angle brackets configure the operation; the parentheses hold the value.
+
+| Form | Result |
+| --- | --- |
+| `sum<over ctx.lane>(x)`, `max`, `min` | The fold over the warp's lanes. |
+| `any<over ctx.lane>(c)`, `all` | The fold of a condition. |
+| `argmax<over ctx.lane>(x)` | The lane holding the largest `x`, the smallest on a tie, as an index. |
+| `reduce<over ctx.lane>(x, f)` | The fold by `f`, a `fn f(a, b) = e`, which must be associative and commutative. |
+| `op<over ctx.lane, width w>(x)` | The fold over each `w`-lane piece of the warp. |
+| `op<over ctx.thread>(x)` | The fold over the CTA; `argmax` gives the thread. No `width`. |
+| `shfl<from s>(v)` | `v` from lane `s` of the warp, or of the `width`-lane piece. |
+| `shfl<xor m>(v)` | `v` from lane `lane ^ m`, with `m` below the width. |
+| `shfl<down d>(v)` | `v` from lane `lane + d`. |
+| `shfl<up d>(v)` | `v` from lane `lane - d`. |
+
+`over` names `ctx.lane` or `ctx.thread`; nothing else is a group. `width`
+must fold to a constant power of two that divides `ctx.lanes`. The operands of
+`from`, `xor`, `down` and `up` may be any index, including a varying one. A
+shuffle whose source lies outside the lane's piece reads the lane's own `v`.
+
+The words inside the brackets, `over`, `width`, `from`, `xor`, `down` and
+`up`, are keywords only there. A kernel can still name a variable `from`.
+
+Values of any scalar type move between lanes as 32-bit words, two for a
+64-bit value.
+
+## A fold over the warp
+
+A lane collective is an xor butterfly of `log2(width)` shuffles. Over a full
+warp of 32 lanes that is five steps. In the first step each lane adds the
+value of the lane 16 away (`lane ^ 16`), then 8, 4, 2 and 1. After the fifth
+step every lane holds the total. Written out by hand with shuffles, a
+`sum<over ctx.lane>(x)` is
+
+```phobos fragment
+var v = x
+v += shfl<xor 16>(v)
+v += shfl<xor 8>(v)
+v += shfl<xor 4>(v)
+v += shfl<xor 2>(v)
+v += shfl<xor 1>(v)
+```
+
+The built-in form is shorter and says what it means. It also gives the
+compiler the right to treat the result as warp-uniform: over the whole warp,
+every lane holds the same total, so the result may steer control that a later
+lane collective sits under.
+
+With `width w` the warp splits into `32 / w` independent pieces of `w` lanes,
+and the butterfly runs `log2(w)` steps inside each one. `min<over ctx.lane,
+width 8>(x)` is three shuffles and leaves each group of 8 lanes with its own
+minimum.
+
+The whole kernel below folds one value per thread with `reduce` and a combine
+function:
+
+```phobos
+fn mx(a, b) = max(a, b)
+
+@launch(128)
+kernel lane_max(A: tensor<f32>[1, 128], O: tensor<f32>[1, 1]) {
+  let x = A[0, ctx.thread]
+  let r = reduce<over ctx.lane>(x, mx)
+  if ctx.thread == 0 {
+    O[0, 0] = f32(r)
+  }
+}
+```
+
+Thread 0 writes the maximum of warp 0's 32 values. The other three warps
+compute their own maxima and discard them.
+
+## A fold over the CTA
+
+`op<over ctx.thread>(x)` folds across every thread of the CTA. It runs a lane
+butterfly in each warp, then exchanges each warp's result through shared
+memory and folds those. That exchange costs three CTA barriers: one before
+the scratch is written, one after it is written and one after it is read.
+Because of the barriers, a CTA collective needs uniform control, and its
+result is uniform. It takes no `width`.
+
+```phobos fragment
+let total = sum<over ctx.thread>(acc)
+```
+
+The [row-sum kernel](/docs/ctx/indices/#the-lane-strided-loop) on the
+indices page uses exactly this line after a thread-strided loop.
+
+## What each one costs
+
+| Operation | Shuffles | Barriers | Needs |
+| --- | --- | --- | --- |
+| `shfl<..>(v)` | 1 | 0 | every lane of the warp |
+| `sum`, `max`, `min`, `any`, `all`, `reduce` over `ctx.lane` | `log2(width)` | 0 | every lane of the warp |
+| `argmax<over ctx.lane>(x)` | `2 * log2(width)`: the value and its lane | 0 | every lane of the warp |
+| `op<over ctx.thread>(x)` | a butterfly per warp | 3, plus the exchange through shared memory | every thread of the CTA |
+
+A lane collective is cheap, a few instructions per step. A CTA collective is
+the same butterfly plus a round trip through shared memory and three points
+where every warp waits for the slowest. In a loop, fold over the lanes first
+and over the CTA once at the end.
+
+## Where they may appear
+
+A shuffle or a lane collective needs every lane of its warp: control that is
+the same across a warp, never per lane. Control that differs only between
+warps, such as `if col < N` with `col` computed from `ctx.warp`, is fine. A
+CTA collective needs uniform control.
+
+```phobos expect-error
+@launch(128)
+kernel k(A: tensor<f32>[1, 128], O: tensor<f32>[1, 1]) {
+  let x = A[0, ctx.thread]
+  var r = 0.0
+  if ctx.lane == 0 {
+    r = sum<over ctx.lane>(x)
+  }
+  if ctx.thread == 0 {
+    O[0, 0] = r
+  }
+}
+```
+
+The compiler rejects this because the shuffles of the butterfly sit under
+control that differs between lanes. The configuration itself is checked too:
+
+| Source | Problem |
+| --- | --- |
+| `sum<over ctx.warp>(x)` | `over` takes `ctx.lane` or `ctx.thread` |
+| `sum<width 8>(x)` | a collective needs `over ctx.lane` or `over ctx.thread` |
+| `sum<over ctx.thread, width 8>(x)` | a CTA collective takes no `width` |
+| `sum<over ctx.lane, width 3>(x)` | `width` must be a power of two |
+| `shfl<xor 1, down 2>(x)` | a shuffle takes exactly one of `from`, `xor`, `down` and `up` |
+| `any<over ctx.lane>(x)` with a float `x` | `any` and `all` fold conditions |
+
+## Sums within a thread
+
+`sum(e)` with no angle brackets is a different operation: it sums within one
+thread, with no exchange between threads at all. `e` is a per-element
+expression over slices that each have one `:+` span of a constant length, all
+of the same length, and scalars:
+
+```phobos fragment
+acc += f32(sum(i32(A[0, k :+ 16]) * i32(W[col, k :+ 16])))
+```
+
+Each slice is the thread's own run of elements. A slice reads a tensor, or a
+whole shared tile such as a lookup table staged once per CTA. The run is read
+with one vector load when
+
+- the span is along the last dimension,
+- it is at most 16 bytes and a power of two in size, and
+- its address is provably a multiple of that size, from the subscripts'
+  divisors and [`@aligned`](/docs/attributes/aligned/);
+
+otherwise it is a load per element. Like a point subscript, a run is not
+masked.
+
+Over `i8` runs whose length is a multiple of four, `sum(i32(a) * i32(b))` is
+one `dp4a` per four elements: a single instruction that multiplies four pairs
+of signed bytes and adds the products. Either side may also be `a & c` or
+`(a >> s) & c` with `c` below 128 and the shift inside the byte, computed on
+the packed word, so a nibble decode stays one `dp4a` per word. `sum(i32(a))`
+alone is a `dp4a` against ones, the run's sum. Any other byte arithmetic is
+summed per element.
+
+A whole lane-level dot product of `i8` rows, one warp per column, 16 bytes
+per lane per step:
+
+```phobos
+@launch(256)
+@aligned(K = 32)
+kernel i8_matvec(A: tensor<i8>[1, K], W: tensor<i8>[N, K], C: tensor<f32>[1, N]) {
+  let col = ctx.block.x * ctx.warps + ctx.warp
+  var acc: f32 = 0.0
+  if col < N {
+    for k in range(ctx.lane * 16, K, ctx.lanes * 16) {
+      acc += f32(sum(i32(A[0, k :+ 16]) * i32(W[col, k :+ 16])))
+    }
+  }
+  let total = sum<over ctx.lane>(acc)
+  if ctx.lane == 0 && col < N {
+    C[0, col] = total
+  }
+}
+```
+
+The start `ctx.lane * 16` and the step `ctx.lanes * 16` are multiples of 16,
+and `@aligned(K = 32)` makes every row start on a multiple of 32 bytes, so
+both runs are proven 16-byte aligned: each step is two vector loads and four
+`dp4a` per lane. The lane collective sits outside the `if`, where every lane
+of every warp reaches it.
+
+The spec's [Operators and conversions](/docs/reference/spec/#operators-and-conversions)
+lists the other run built-ins: `elem` and `store` read and write a thread's
+run element by element, `word` reads four bytes of a run as one packed word,
+and `dp4a`, `byteperm` and `popcount` work on those words, so a decoder can
+build packed values before one `dp4a` per word.
+
+## The lanes matvec
+
+The kernel below puts the section together: one warp per output, each lane
+reading its own run of the weights, and a butterfly of shuffles folding the 32
+partial sums into one. It is also the kernel the front page shows at the lane
+level.
+
+<LanesMatvec />

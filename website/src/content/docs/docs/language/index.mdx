@@ -1,0 +1,52 @@
+---
+title: Overview
+description: What a Phobos kernel is made of, and how this guide is organized.
+sidebar:
+  order: 0
+---
+
+Phobos is a language for GPU kernels. A kernel describes what one CTA (a
+group of threads that share fast on-chip memory) does with its piece of the
+data, and the compiler turns that into PTX for an NVIDIA GPU.
+
+Most of a Phobos kernel is written in tiles. A tile is a block of shared
+memory, and an operation on a tile, such as a copy from a tensor, an
+elementwise expression or a matrix product, is carried out by all threads of
+the CTA together. The compiler decides which thread moves which element, when
+the threads have to wait for each other, and where in shared memory each tile
+lives.
+
+```phobos
+@autotune(TILE in [256, 4096])
+kernel relu(X: tensor<f32>[N], Y: tensor<f32>[N]) {
+  let base = ctx.block.x * TILE
+  var x = X[base :+ TILE]
+  Y[base :+ TILE] = max(x, 0.0)
+}
+```
+
+Each CTA picks its tile of `X` with `ctx.block.x`, copies it into shared
+memory, and writes `max(x, 0.0)` back. Nothing in the source mentions a
+thread.
+
+When a kernel needs that control, it can have it. The execution context
+`ctx` gives every thread its warp and its lane, and per-thread code with
+loops, shuffles and collectives mixes freely with tile code in the same
+kernel. That level is covered in its own section,
+[The execution context, `ctx`](/docs/ctx/).
+
+## Pages in this guide
+
+| Page | Covers |
+| --- | --- |
+| [Kernels and tensors](/docs/language/kernels-and-tensors/) | The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements and functions |
+| [Tiles and shared memory](/docs/language/tiles-and-shared-memory/) | `tile<T>`, `var` and `let`, what lives in shared memory and for how long |
+| [Slicing, bounds and masking](/docs/language/slicing-bounds-masking/) | Subscripts, what happens at the edge of a tensor, `@aligned` |
+| [Elementwise math and reductions](/docs/language/elementwise-and-reductions/) | Operators, conversions, math functions, `where`, row reductions |
+| [`dot` and tensor cores](/docs/language/dot-and-tensor-cores/) | Matrix products and the hardware they run on |
+| [Quantized built-ins and formats](/docs/language/quantized/) | Q8_0 and the GGUF formats as contractions |
+| [Autotuning](/docs/language/autotuning/) | Search spaces and the shape environment |
+
+Each page links the section of the [language spec](/docs/reference/spec/)
+it explains. The spec is the normative text; these pages explain it with
+examples.

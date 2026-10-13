@@ -1,0 +1,99 @@
+---
+title: "@tensorcore"
+description: Runs dot and dot_t on tensor cores, with the wmma and sync forms.
+sidebar:
+  order: 8
+---
+
+Tensor cores multiply small matrix fragments in one instruction, at many
+times the throughput of FMA units. `@tensorcore` moves a kernel's `dot` and
+`dot_t`, and the GEMM the compiler builds for a k loop, onto them.
+
+```text
+@tensorcore
+@tensorcore(sync)
+@tensorcore(wmma)
+```
+
+See the [Attributes](/docs/reference/spec/#attributes) table and
+[Dense contraction](/docs/reference/spec/#dense-contraction) in the spec.
+
+## The forms
+
+| Form | Path |
+| --- | --- |
+| `@tensorcore` | `mma.sync` with `ldmatrix` and swizzled staging (sm_75 and later, 64-bit indices), else WMMA m16n16k16. |
+| `@tensorcore(sync)` | The same as `@tensorcore`. |
+| `@tensorcore(wmma)` | Forces the WMMA m16n16k16 path. |
+
+Tensor cores need sm_70 or later. Operands are rounded to `f16` and
+accumulate in `f32`, so an `f32` kernel trades input precision for speed, and
+an `f16` kernel may keep an `f32` accumulator.
+
+`mma.sync` needs 64-bit indices. From sm_80 on the compiler widens the index
+itself when a kernel carries `@tensorcore` without `wmma`. On sm_75 the path
+depends on the index width the kernel is compiled at: at 32-bit indices it
+stays on WMMA.
+
+## A minimal kernel
+
+```phobos
+@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+@tensorcore(wmma)
+@aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+  for kt in range(0, K, TILE_K) {
+    let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+    let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+    acc += dot(a, b)
+  }
+  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+}
+```
+
+The output tile is 64 x 64, sixteen 16x16 fragments, the k-slice is 16, and
+the default 256 threads are 8 warps that tile the fragment grid. Every
+condition holds, so the product runs on WMMA. A complete kernel with
+`@pipeline` is
+[`examples/gemm_fp16tc_fp32acc.ph`](/docs/examples/gemm-fp16tc-fp32acc/).
+
+{/* figure: attr-tensorcore-pair */}
+
+The figure pair shows the same product on FMA and on tensor cores: how each
+warp's share of the output is cut into fragments and fed from shared memory.
+
+## When it declines
+
+A `dot` runs on tensor cores only when every tile dimension and the k-slice
+are multiples of 16 and the CTA's warps tile the grid of 16x16 fragments.
+Otherwise that `dot` falls back to the FMA path. This is not an error: the
+kernel compiles, and its result is the same up to rounding. With
+`PHOBOS_LOG=debug` the compiler names each `dot` that fell back, and why. For
+a k-slice of 8, for example:
+
+```text
+kernel `matmul`: @tensorcore dot [64 x 8] x [8 x 64] runs on FMA: the dims, the k-slice or the warps do not tile 16x16 fragments
+```
+
+The other reason it can give is "the output is not f32 or an operand is not
+f16 or f32". A chip without tensor cores falls back by design and says
+nothing.
+
+For `i8` the attribute is not needed: an `i8` `dot_t` takes the integer
+tensor cores whenever its shape allows. See
+[`dot` and tensor cores](/docs/language/dot-and-tensor-cores/#hardware-paths).
+
+## Interactions
+
+- [`@launch`](/docs/attributes/launch/) sets the warp count, which has to
+  tile the fragment grid.
+- [`@aligned`](/docs/attributes/aligned/): loops with `mma.sync` accumulators
+  stay masked unless `@aligned` covers the dimension they walk.
+- [`@pipeline`](/docs/attributes/pipeline/): on sm_80 and later with 64-bit
+  indices, the staged operands of the tensor core GEMM load with `cp.async`.
+- [`@autotune`](/docs/attributes/autotune/): tile sizes that are not
+  multiples of 16 compile, but fall back to FMA; keep the search ranges on
+  multiples of 16.

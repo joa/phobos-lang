@@ -1,0 +1,72 @@
+---
+title: "@autotune"
+description: Declares tile constants and the values a tuner searches.
+sidebar:
+  order: 1
+---
+
+`@autotune` binds names to compile-time constants and declares, for each one,
+the values worth trying. A compiled kernel always uses one value per name; a
+tuner compiles and times the combinations and keeps the fastest.
+
+```text
+@autotune(NAME in [a, b], NAME in [c, d, e], ...)
+```
+
+The spec's definition is in the [Attributes](/docs/reference/spec/#attributes)
+table. The [Autotuning](/docs/language/autotuning/) page of the language guide
+explains the shape environment in more detail.
+
+## Choices
+
+| Written | Choices |
+| --- | --- |
+| `[a, b]`, two values | Inclusive bounds, searched in doubling steps: `[16, 256]` gives 16, 32, 64, 128, 256. The upper bound is always included. |
+| `[a, b, c, ...]`, three or more | An explicit list: `[8, 16, 32]` gives exactly those. |
+| `[a]`, one value | A fixed constant, nothing to search. Common for sizes a kernel fixes but still wants to name, such as `D in [64]`. |
+
+The first choice seeds the shape environment: a kernel compiled without a
+tuner takes each name's first value.
+
+## A minimal kernel
+
+```phobos
+@autotune(BLOCK in [256, 4096])
+kernel square(x: tensor<f32>[N], y: tensor<f32>[N]) {
+  let base = ctx.block.x * BLOCK
+  var v = x[base :+ BLOCK]
+  y[base :+ BLOCK] = v * v
+}
+```
+
+`BLOCK` has five choices, 256 through 4096. Compiled on its own the kernel
+uses `BLOCK = 256`; a tuner tries all five.
+
+## What the constants can do
+
+A name declared in `@autotune` is a constant everywhere in the kernel:
+
+- a tile dimension, as in `tile<f32>[TILE_M, TILE_N]`;
+- a tensor dimension, which makes that dimension static: with
+  `D in [64]`, `Q: tensor<f32>[Nq, D]` has 64 columns;
+- the length of a `:+` slice and a loop step;
+- the divisor in [`@aligned`](/docs/attributes/aligned/), as in
+  `@aligned(M = TILE_M)`;
+- an ordinary index value in expressions, as in `pm * TILE_M`.
+
+A tile dimension written as a name that `@autotune` does not declare is an
+error: tile dimensions must be literals or `@autotune` constants.
+
+The names `TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM` and
+`TILE_TN` also size the GEMM the compiler builds for a `dot` in a k loop, so
+declaring them puts the GEMM's tiling into the search.
+
+## Interactions
+
+- A tuner overrides only names declared here. Every other symbolic dimension
+  is a runtime value, read from the tensors at launch.
+- `phobos-kbench` searches the cartesian product of all entries, skips
+  combinations that fail to compile and keeps the fastest. Its
+  `--autotune "DIM=VAL ..."` pins values and skips the search.
+- [`@cluster`](/docs/attributes/cluster/) declares its own search space, for
+  cluster tuning, in the same `NAME in [..]` form.

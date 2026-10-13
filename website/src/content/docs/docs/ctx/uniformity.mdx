@@ -1,0 +1,196 @@
+---
+title: Uniform, warp-uniform and varying
+description: How the compiler infers how far each value differs between threads, and the rules it enforces.
+sidebar:
+  order: 5
+---
+
+{/* figure: ctx-uniformity */}
+
+Every value in a Phobos kernel is the same in every thread of the CTA until
+`ctx.thread`, `ctx.warp` or `ctx.lane` flows into it. The compiler infers, for
+each value, how far it may differ between threads. There is no annotation to
+write. The figure steps through a short kernel and badges each value with its
+kind.
+
+The normative rules are in the spec under
+[Per-thread values](/docs/reference/spec/#per-thread-values).
+
+## The three kinds
+
+| Kind | Holds | Sources |
+| --- | --- | --- |
+| uniform | The same value in every thread of the CTA. | Literals, kernel parameters, `ctx.block`, the `ctx` counts, loads at uniform addresses. |
+| warp-uniform | The same value in every lane of a warp. | `ctx.warp`. |
+| varying | A value per lane. | `ctx.thread`, `ctx.lane`, a load at a varying address. |
+
+The kinds are ordered: uniform, then warp-uniform, then varying. The
+inference always takes the more varying side:
+
+- An expression is as varying as its most varying operand. `ctx.block.x *
+  ctx.warps + ctx.warp` is warp-uniform; `col * K + ctx.lane` is varying.
+- A `var` is as varying as anything assigned to it, and as the conditions it
+  was assigned under, through every iteration of a loop. A `var` that starts
+  uniform and is assigned `ctx.lane` in a later iteration is varying
+  everywhere.
+- A loop variable is as varying as the loop's bounds. `for k in range(ctx.lane,
+  K, ctx.lanes)` makes `k` varying.
+- A scalar `var` lives in each thread's registers either way, so `var acc: f32
+  = 0.0` summed over a lane-strided loop is one partial sum per thread.
+
+```phobos fragment
+let col = ctx.block.x * ctx.warps + ctx.warp   // warp-uniform
+var acc: f32 = 0.0                             // varying: assigned below from varying values
+for k in range(ctx.lane, K, ctx.lanes) {       // k is varying
+  acc += W[col, k] * A[0, k]                   // a load at a varying address
+}
+let total = sum<over ctx.lane>(acc)            // warp-uniform again
+```
+
+The last line shows that a collective lowers the kind again: a fold over the
+whole warp leaves every lane with the same result. See
+[Collectives and shuffles](/docs/ctx/collectives/).
+
+## Control
+
+The control a statement runs under is as varying as the `if` and `while`
+conditions and the `for` bounds around it. Inside `if ctx.lane == 0 { .. }`
+the control is varying; inside `if col < N { .. }` with a warp-uniform `col`
+it is warp-uniform.
+
+A `break`, `continue` or `return` under varying control makes the rest of its
+loop or kernel varying too, because some threads have left and others have
+not.
+
+## What runs anywhere
+
+Scalar loads, scalar arithmetic, scalar stores to tensors and `var`s, and
+`if`, `for` and `while` run in each thread on its own. They are allowed under
+any control. This is the lane level of the language: a thread can branch on
+its own lane, loop to its own bound and store its own result.
+
+## What needs every thread
+
+Some operations run once per CTA and need every thread to take part: a tile
+operation (a copy, an elementwise sweep, a reduction, a `dot`), `barrier()`,
+an atomic, `load_acquire` and `store_release`, and the quantized intrinsics.
+The compiler enforces three rules for them.
+
+| Rule | Error when broken |
+| --- | --- |
+| They run only under uniform control: every thread must reach them. | `` `op` runs once per CTA, so every thread must reach it `` |
+| Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` `op` takes `x`, which differs between lanes `` |
+| A buffer (a tensor or a shared tile) stored per thread, with a varying value, index or control, is read by no CTA-wide op until a `barrier()`. | `` `op` reads `t` after a per-thread store to it with no `barrier()` between `` |
+
+The messages above are the spec's short forms. The compiler's message goes on
+to name what made the control or the operand differ, and names `op` by the
+operation it compiled the statement to.
+
+### A tile operation under per-thread control
+
+Only lane 0 of each warp would reach this sweep, and with it the barrier the
+sweep needs:
+
+```phobos expect-error
+@launch(256)
+kernel k(A: tensor<f32>[1, 32], O: tensor<f32>[1, 32]) {
+  var t: tile<f32>[1, 32] = A[0 :+ 1, 0 :+ 32]
+  if ctx.lane == 0 {
+    t = t * 2.0
+  }
+  O[0 :+ 1, 0 :+ 32] = t
+}
+```
+
+The compiler reports that the operation runs once per CTA, so every thread
+must reach it. The same holds for warp-uniform control: `if ctx.warp == 0 {
+t = t * 2.0 }` is rejected as well, because the other warps never arrive.
+
+A per-thread branch that has closed is no problem. The control after it is
+uniform again:
+
+```phobos
+@launch(256)
+kernel k(A: tensor<f32>[1, 32], O: tensor<f32>[1, 32]) {
+  var t: tile<f32>[1, 32] = A[0 :+ 1, 0 :+ 32]
+  var x = 0
+  if ctx.lane == 3 {
+    x = 1
+  }
+  t = t * 2.0
+  O[0 :+ 1, 0 :+ 32] = t
+}
+```
+
+### A slice at a per-thread offset
+
+A slice is a tile, owned by the CTA, so its offsets must be the same in every
+thread:
+
+```phobos expect-error
+@launch(256)
+kernel k(A: tensor<f32>[1, 32], O: tensor<f32>[1, 32]) {
+  var u = A[0, ctx.lane :+ 1]
+  O[0 :+ 1, 0 :+ 1] = u
+}
+```
+
+The compiler reports that the slice takes a value which differs between
+lanes. A thread that wants its own element reads it with a point subscript,
+`A[0, ctx.lane]`, which is a scalar load and runs anywhere.
+
+### A per-thread store and a CTA-wide read
+
+Each thread may store its own elements into a shared tile. Before the CTA
+reads the tile as a whole, every thread's store has to have landed, which is
+what `barrier()` guarantees. Without it:
+
+```phobos expect-error
+@launch(256)
+kernel k(A: tensor<f32>[1, 32], O: tensor<f32>[1, 32]) {
+  var t: tile<f32>[1, 32] = A[0 :+ 1, 0 :+ 32]
+  t[0, ctx.lane] = 1.0
+  O[0 :+ 1, 0 :+ 32] = t
+}
+```
+
+The compiler reports that the store to `O`, a CTA-wide read of `t`, comes
+after a per-thread store to `t` with no `barrier()` between. With the barrier the kernel compiles:
+
+```phobos
+@launch(256)
+kernel k(A: tensor<f32>[1, 32], O: tensor<f32>[1, 32]) {
+  var t: tile<f32>[1, 32] = A[0 :+ 1, 0 :+ 32]
+  t[0, ctx.lane] = 1.0
+  barrier()
+  O[0 :+ 1, 0 :+ 32] = t
+}
+```
+
+The check follows loops: a store in one iteration and a tile read at the top
+of the next also need a barrier between them.
+
+A thread's own point and run accesses (`t[i, j]`, `elem`, `sum`, `store`) are
+not checked, since only their indices tell whether they meet another thread's
+store. A thread reading back what it stored itself needs no barrier; a thread
+reading what another thread stored needs one all the same, and the compiler
+does not check it.
+
+:::caution
+`barrier()` is itself a CTA-wide operation. A barrier inside `if ctx.lane == 0
+{ .. }` is reached by only some threads and is rejected like any other.
+:::
+
+## Lane-level operations
+
+Shuffles and collectives have rules of their own, between the two above:
+
+| Operation | Needs | Result |
+| --- | --- | --- |
+| `shfl<..>(v)` | Every lane of the warp: control that is the same across a warp | As varying as its operands |
+| `op<over ctx.lane>(x)` | Every lane of the warp | Over the whole warp, warp-uniform |
+| `op<over ctx.thread>(x)` | Every thread of the CTA: uniform control | Uniform |
+
+A lane collective may therefore sit inside `if col < N { .. }` when `col` is
+warp-uniform, but not inside `if ctx.lane < 16 { .. }`. See
+[Collectives and shuffles](/docs/ctx/collectives/).
