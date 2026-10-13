@@ -470,8 +470,8 @@ pub struct DeviceBackend {
     /// IQ4_XS's fixed sixteen-value codebook, indexed directly by each
     /// nibble. See [`crate::quant::iq4xs_flat_codebook`].
     iq4xs_codebook: DeviceBuffer<i32>,
-    /// The same tables at one `i8` per slot, read by every `*_qdot_t` and
-    /// `*_qdecode_t`. The i32 copies above serve the `gather`-based
+    /// The same tables at one `i8` per slot, read by the f32 decode matvecs
+    /// and `qdecode`. The i32 copies above serve the `gather`-based
     /// fallbacks.
     iq1s_grid_packed: DeviceBuffer<i8>,
     /// The IQ1_S grid with the delta and signs folded in, giving an exact

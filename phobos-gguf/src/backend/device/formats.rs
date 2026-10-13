@@ -25,8 +25,8 @@ pub(super) struct FormatKernels {
     /// The decode without the reduction. Writes a `[K, N]` strip of
     /// dequantized weight for [`DeviceBackend::project_raw_dense`].
     pub(super) dequant: Option<Kernel>,
-    /// The warp-collective form of `dequant`, one `*_qdecode_t` call writing
-    /// an f32 strip, then the same writing an f16 one. Needs a strip that is
+    /// The lanes form of `dequant`, writing an f32 strip, then the same
+    /// writing an f16 one. Needs a strip that is
     /// a multiple of its tile.
     pub(super) qdecode: [Option<Kernel>; 2],
     /// The prompt projection, decoding inside an integer tensor-core

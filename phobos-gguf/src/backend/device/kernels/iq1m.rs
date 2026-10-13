@@ -128,23 +128,11 @@ kernel iq1m_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     )
 }
 
-/// [`iq1m_matvec_src`] for `m == 1`, as one `iq1m_qdot_t` call; mirrors
-/// `iq1s_qdot_matvec_src`. `@aligned(N = TN)` is required, because
-/// `iq1m_qdot_t` needs its `qb` and `d` slices provably in bounds.
+/// [`iq1m_matvec_src`] for `m == 1`, written with lanes; see `iq_f32.rs`.
+/// [`crate::backend::device::DeviceBackend::project_raw`] ensures `N` is a
+/// multiple of `tn`, and falls back to [`iq1m_matvec_src`] otherwise.
 pub(crate) fn iq1m_qdot_matvec_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq1m_qdot_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
-                        D: tensor<f16>[N, NB], GRID: tensor<i8>[1, {IQ1S_GRID_LEN}],
-                        C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = iq1m_qdot_t(A[0 :+ 1, :], QB[pn * TN :+ TN, :],
-                                         D[pn * TN :+ TN, :], GRID[0 :+ 1, :])
-}}
-"
-    )
+    super::qdot_matvec_src(super::IqFmt::Iq1m, tn)
 }
 
 /// [`iq1m_matvec_src`]'s decode, stored into a `[K, N]` scratch instead of
@@ -177,21 +165,9 @@ kernel iq1m_dequant(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
     )
 }
 
-/// [`iq1m_dequant_src`]'s decode as one `iq1m_qdecode_t` call. Mirrors
-/// `iq1s_qdecode_src` in `iq1s.rs`, and uses the same grid.
+/// [`iq1m_dequant_src`]'s decode, written with lanes; see `iq_f32.rs`.
+/// [`crate::backend::device::DeviceBackend::project_raw_dense`] uses
+/// [`iq1m_dequant_src`] for a strip that is not a whole number of `TN`.
 pub(crate) fn iq1m_qdecode_src(tn: usize) -> String {
-    format!(
-        "@launch(256)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq1m_qdecode(QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                    GRID: tensor<i8>[1, {IQ1S_GRID_LEN}],
-                    SCRATCH: tensor<f32>[K, N]) {{
-  let pn = ctx.block.x
-  SCRATCH[:, pn * TN :+ TN] = iq1m_qdecode_t(QB[pn * TN :+ TN, :],
-                                             D[pn * TN :+ TN, :],
-                                             GRID[0 :+ 1, :])
-}}
-"
-    )
+    super::qdecode_src(super::IqFmt::Iq1m, tn)
 }
