@@ -259,6 +259,16 @@ pub struct FragType {
     pub n: i64,
     pub wm: i64,
     pub wn: i64,
+    /// Held in the 8x8 tiles of the integer tensor cores' `m8n8k16` rather
+    /// than the 16x16 ones of the f16 path.
+    pub imma: bool,
+}
+
+impl FragType {
+    /// The side of one fragment tile.
+    pub fn tile(&self) -> i64 {
+        if self.imma { 8 } else { 16 }
+    }
 }
 
 /// A register matmul's accumulator: an [m, n] tile of `acc` summed over a
@@ -383,7 +393,13 @@ impl fmt::Display for Type {
                 }
                 Ok(())
             }
-            Type::Frags(fr) => write!(f, "frags[{}, {}]/{}x{}", fr.m, fr.n, fr.wm, fr.wn),
+            Type::Frags(fr) => {
+                write!(f, "frags[{}, {}]/{}x{}", fr.m, fr.n, fr.wm, fr.wn)?;
+                if fr.imma {
+                    write!(f, "/i8")?;
+                }
+                Ok(())
+            }
             Type::Gemm(g) => write!(f, "gemm<{}>[{}, {}]/{}", g.acc, g.m, g.n, g.k),
             Type::Regs(r) => {
                 let dims: Vec<String> = r.shape.iter().map(i64::to_string).collect();

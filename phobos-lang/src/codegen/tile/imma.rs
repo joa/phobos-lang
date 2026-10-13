@@ -132,7 +132,7 @@ impl<'c> Codegen<'c> {
     ///
     /// Requires `|value| < 2^22`. A Q8_0 block guarantees this, since 32
     /// products of two int8s cannot exceed 32 * 127 * 127.
-    pub(super) fn small_int_to_f32(
+    pub(in crate::codegen) fn small_int_to_f32(
         &self,
         block: &Block<'c>,
         value: Value<'c, 'c>,

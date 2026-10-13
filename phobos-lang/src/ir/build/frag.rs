@@ -16,12 +16,44 @@ pub(crate) struct FragAccPlan {
 
 #[derive(Default)]
 struct FragScan {
-    decls: HashMap<String, (bool, Vec<i64>)>,
+    decls: HashMap<String, (Scalar, Vec<i64>)>,
     kk: Option<i64>,
+    /// Whether the updates are the int8 scaled form rather than the f16
+    /// ones. A plan holds one kind.
+    imma: Option<bool>,
 }
 
 fn is_f16_or_f32(s: Scalar) -> bool {
     matches!(s, Scalar::F16 | Scalar::F32)
+}
+
+/// `f32(dot_t(a, w)) * s1 * s2` as its four names.
+fn scaled_dot_parts(value: &Expr) -> Option<[&str; 4]> {
+    let Expr::Binary {
+        op: BinOp::Mul,
+        lhs,
+        rhs,
+    } = value
+    else {
+        return None;
+    };
+    let Expr::Var(s2) = rhs.as_ref() else { return None };
+    let Expr::Binary {
+        op: BinOp::Mul,
+        lhs: cast,
+        rhs: s1,
+    } = lhs.as_ref()
+    else {
+        return None;
+    };
+    let Expr::Var(s1) = s1.as_ref() else { return None };
+    let Expr::Call { callee, args } = cast.as_ref() else { return None };
+    let [Expr::Call { callee: dot, args }] = &args[..] else { return None };
+    if callee != "f32" || dot != "dot_t" {
+        return None;
+    }
+    let [Expr::Var(a), Expr::Var(w)] = &args[..] else { return None };
+    Some([a, w, s1, s2])
 }
 
 impl Build {
@@ -29,7 +61,8 @@ impl Build {
     /// a fragment-representable form.
     ///
     /// Each admitted form becomes one op yielding a new fragment value, which
-    /// the loop carries as an iter arg.
+    /// the loop carries as an iter arg. The forms are either the f16 ones
+    /// (`dot` and row scaling) or the int8 scaled `dot_t`, never both.
     pub(crate) fn frag_acc_candidate(&self, stmts: &[Stmt]) -> Option<FragAccPlan> {
         let [
             Stmt::Var {
@@ -43,20 +76,28 @@ impl Build {
         else {
             return None;
         };
-        if !self.has_mma_sync() {
-            return None;
-        }
         let shape = self.tile_shape(dims).ok()?;
         let &[m, n] = &shape[..] else { return None };
         let mut scan = FragScan::default();
         if !self.frag_uses_ok(name, m, n, rest, &mut scan, &[]) {
             return None;
         }
-        let (wm, wn) = shape::wmma_plan(m, n, scan.kk?, self.cta_threads)?;
+        let imma = scan.imma?;
+        let (wm, wn) = if imma {
+            if !self.target.has_int8_mma {
+                return None;
+            }
+            shape::imma_plan(m, n, self.cta_threads)?
+        } else {
+            if !self.has_mma_sync() {
+                return None;
+            }
+            shape::wmma_plan(m, n, scan.kk?, self.cta_threads)?
+        };
         Some(FragAccPlan {
             name: name.clone(),
             init: *init,
-            frags: FragType { m, n, wm, wn },
+            frags: FragType { m, n, wm, wn, imma },
         })
     }
 
@@ -159,11 +200,11 @@ impl Build {
 
     fn frag_scan_decl(&self, name: &str, ty: Option<&AstType>, value: &Expr, scan: &mut FragScan) {
         let entry = match ty {
-            Some(AstType::Tile(sc @ (AstScalar::F16 | AstScalar::F32), dims)) => {
-                self.tile_shape(dims).ok().map(|s| (*sc == AstScalar::F32, s))
+            Some(AstType::Tile(sc, dims)) => {
+                self.tile_shape(dims).ok().map(|s| (Scalar::from_ast(*sc), s))
             }
             None => match (self.slice_static_shape(value), self.slice_tensor_elem(value)) {
-                (Some(s), Some(e)) if is_f16_or_f32(e) => Some((e == Scalar::F32, s)),
+                (Some(s), Some(e)) => Some((e, s)),
                 _ => None,
             },
             _ => None,
@@ -173,18 +214,56 @@ impl Build {
         }
     }
 
-    fn frag_operand(&self, scan: &FragScan, name: &str) -> Option<(bool, Vec<i64>)> {
+    fn frag_operand(&self, scan: &FragScan, name: &str) -> Option<(Scalar, Vec<i64>)> {
         if let Some(e) = scan.decls.get(name) {
             return Some(e.clone());
         }
         match self.lookup(name)? {
-            Binding::Tile(mv) | Binding::View(mv)
-                if !self.shape(mv).contains(&DYN) && is_f16_or_f32(self.elem(mv)) =>
-            {
-                Some((self.elem(mv) == Scalar::F32, self.shape(mv)))
+            Binding::Tile(mv) | Binding::View(mv) if !self.shape(mv).contains(&DYN) => {
+                Some((self.elem(mv), self.shape(mv)))
             }
             _ => None,
         }
+    }
+
+    /// `acc += f32(dot_t(a, w)) * s1 * s2` with int8 `a` and `w`, and f32
+    /// row and column scales in either order.
+    fn scaled_dot_ok(&self, name: &str, m: i64, n: i64, value: &Expr, scan: &mut FragScan) -> bool {
+        let Some(parts @ [a, w, s1, s2]) = scaled_dot_parts(value) else {
+            return false;
+        };
+        if parts.contains(&name) || scan.imma == Some(false) {
+            return false;
+        }
+        // The fragments are read straight from the operands, with no bounds
+        // guard. A slice declared in the loop was checked with its decl.
+        let masked = |x: &str| {
+            !scan.decls.contains_key(x)
+                && matches!(self.lookup(x), Some(Binding::Tile(v) | Binding::View(v)) if self.is_masked(v))
+        };
+        if parts.into_iter().any(masked) {
+            return false;
+        }
+        let operand = |x: &str| self.frag_operand(scan, x);
+        let (Some((Scalar::I8, ash)), Some((Scalar::I8, wsh))) = (operand(a), operand(w)) else {
+            return false;
+        };
+        let (&[am, ak], &[wn, wk]) = (&ash[..], &wsh[..]) else {
+            return false;
+        };
+        if am != m || wn != n || ak != wk || ak <= 0 || ak % 16 != 0 {
+            return false;
+        }
+        let (Some((Scalar::F32, sh1)), Some((Scalar::F32, sh2))) = (operand(s1), operand(s2)) else {
+            return false;
+        };
+        let (row, col) = (vec![m, 1], vec![1, n]);
+        if !((sh1 == row && sh2 == col) || (sh1 == col && sh2 == row)) {
+            return false;
+        }
+        scan.imma = Some(true);
+        scan.kk.get_or_insert(ak);
+        true
     }
 
     fn frag_form_ok(
@@ -211,11 +290,16 @@ impl Build {
                 if l != name || col == name {
                     return false;
                 }
-                let Some((is_f32, shape)) = self.frag_operand(scan, col) else {
+                let Some((elem, shape)) = self.frag_operand(scan, col) else {
                     return false;
                 };
-                is_f32 && shape == [m, 1]
+                if scan.imma == Some(true) {
+                    return false;
+                }
+                scan.imma = Some(false);
+                elem == Scalar::F32 && shape == [m, 1]
             }
+            (AssignOp::Add, Expr::Binary { .. }) => self.scaled_dot_ok(name, m, n, value, scan),
             (AssignOp::Add, Expr::Call { callee, args }) if callee == "dot" => {
                 let [Expr::Var(a), Expr::Var(b)] = &args[..] else {
                     return false;
@@ -223,11 +307,15 @@ impl Build {
                 if a == name || b == name {
                     return false;
                 }
-                let (Some((_, ash)), Some((_, bsh))) =
+                let (Some((ae, ash)), Some((be, bsh))) =
                     (self.frag_operand(scan, a), self.frag_operand(scan, b))
                 else {
                     return false;
                 };
+                if !is_f16_or_f32(ae) || !is_f16_or_f32(be) || scan.imma == Some(true) {
+                    return false;
+                }
+                scan.imma = Some(false);
                 let (&[am, ak], &[bk, bn]) = (&ash[..], &bsh[..]) else {
                     return false;
                 };
@@ -272,6 +360,21 @@ impl Build {
                     bail!("fragment scale column '{col}' is not a tile");
                 };
                 let next = self.value(OpKind::FragScale(*bop), &[acc, cmv], ty);
+                self.update_binding(name, Binding::Frags(next));
+                Ok(())
+            }
+            (AssignOp::Add, Expr::Binary { .. }) => {
+                let Some(parts) = scaled_dot_parts(value) else {
+                    bail!("fragment accumulator '{name}' takes f32(dot_t(a, w)) * row * col");
+                };
+                let mut operands = vec![acc];
+                for part in parts {
+                    let Some(Binding::Tile(v) | Binding::View(v)) = self.lookup(part) else {
+                        bail!("fragment operand '{part}' is not a tile");
+                    };
+                    operands.push(v);
+                }
+                let next = self.value(OpKind::FragDotScaled, &operands, ty);
                 self.update_binding(name, Binding::Frags(next));
                 Ok(())
             }

@@ -429,6 +429,7 @@ fn kind_name(kind: &OpKind) -> &'static str {
         OpKind::FragInit(_) => "frag_init",
         OpKind::FragScale(_) => "frag_scale",
         OpKind::FragDot => "frag_dot",
+        OpKind::FragDotScaled => "frag_dot_scaled",
         OpKind::FragStore => "frag_store",
         OpKind::GemmInit => "gemm_init",
         OpKind::GemmDot => "gemm_dot",

@@ -506,6 +506,10 @@ pub enum OpKind {
     FragScale(BinOp),
     /// `(acc, a, b) -> frags`: `acc += dot(a, b)`.
     FragDot,
+    /// `(acc, a, w, s1, s2) -> frags`: `acc += f32(dot_t(a, w)) * s1 * s2`
+    /// on int8 operands, one of the scales a `[m, 1]` row broadcast and the
+    /// other a `[1, n]` column one.
+    FragDotScaled,
     /// `(acc, dst)`: the fragments scattered straight to a tensor slice.
     FragStore,
 
@@ -660,6 +664,7 @@ impl OpKind {
             OpKind::FragInit(init) => format!("frag_init {init:?}"),
             OpKind::FragScale(op) => format!("frag_scale {}", binop_name(*op)),
             OpKind::FragDot => "frag_dot".into(),
+            OpKind::FragDotScaled => "frag_dot_scaled".into(),
             OpKind::FragStore => "frag_store".into(),
             OpKind::GemmInit => "gemm_init".into(),
             OpKind::GemmDot => "gemm_dot".into(),

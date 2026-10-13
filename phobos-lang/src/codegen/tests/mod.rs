@@ -6,6 +6,7 @@
 mod basic;
 mod dot;
 mod epilogue;
+mod frag_imma;
 mod functions;
 mod jumps;
 mod lanes;
