@@ -78,6 +78,7 @@
         "elem": { "type": "string" },
         "elemBytes": { "type": "integer" },
         "shape": { "type": "array", "items": { "type": "integer" } },
+        "strides": { "type": "array", "items": { "type": "integer" } },
         "role": { "enum": ["in", "out", "inout"] }
       }
     },
@@ -102,7 +103,17 @@
         "span": { "$ref": "#/$defs/span" },
         "ir": { "type": "string" },
         "uniformity": { "$ref": "#/$defs/uniformity" },
-        "instr": { "type": "string" }
+        "instr": { "type": "string" },
+        "parent": { "type": "integer" },
+        "loop": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["trips"],
+          "properties": {
+            "var": { "type": "string" },
+            "trips": { "type": "integer" }
+          }
+        }
       }
     },
     "buffer": {

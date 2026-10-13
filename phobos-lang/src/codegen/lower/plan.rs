@@ -20,9 +20,12 @@ pub(crate) enum Event {
     Sweep { shape: Vec<i64>, width: i64 },
     /// The sweep that follows is a tile copy moving `vector_bytes` per
     /// access, through cp.async when `async_copy`. Only the trace reads it.
+    /// `dst` names the buffer the copy fills and its shape, when it fills a
+    /// whole one.
     Copy {
         vector_bytes: i64,
         async_copy: bool,
+        dst: Option<(String, Vec<i64>)>,
     },
     /// The instruction family a contraction lowered to. Only the trace
     /// reads it.
@@ -61,10 +64,16 @@ impl Trace {
         self.events.push(Event::Barrier);
     }
 
-    pub(crate) fn copy(&mut self, vector_bytes: i64, async_copy: bool) {
+    pub(crate) fn copy(
+        &mut self,
+        vector_bytes: i64,
+        async_copy: bool,
+        dst: Option<(String, Vec<i64>)>,
+    ) {
         self.events.push(Event::Copy {
             vector_bytes,
             async_copy,
+            dst,
         });
     }
 

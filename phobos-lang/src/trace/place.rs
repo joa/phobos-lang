@@ -29,6 +29,9 @@ pub(super) struct Placement {
     counts: HashMap<OpId, usize>,
     /// The instruction family each contraction lowered to.
     instrs: HashMap<OpId, &'static str>,
+    /// For a register matmul's dot, the staging buffers each iteration
+    /// fills and reads, cycling with the iteration count.
+    staging: HashMap<OpId, Vec<Vec<model::Access>>>,
 }
 
 impl Placement {
@@ -37,12 +40,25 @@ impl Placement {
         let windows = windows(events);
         let op_at = op_at(p.ir, events);
 
-        let mut buffers = Vec::new();
+        let mut buffers: Vec<model::Buffer> = Vec::new();
         let mut alloc_ids = HashMap::new();
+        // The buffer and shape each whole-buffer copy fills, by event.
+        let mut copy_dst: HashMap<usize, (usize, Vec<i64>)> = HashMap::new();
+        let mut latest: HashMap<&str, usize> = HashMap::new();
         for (at, e) in events.iter().enumerate() {
+            if let Event::Copy {
+                dst: Some((name, shape)),
+                ..
+            } = e
+                && let Some(&k) = latest.get(name.as_str())
+            {
+                copy_dst.insert(at, (k, shape.clone()));
+                buffers[k].shape.get_or_insert_with(|| shape.clone());
+            }
             let Event::Alloc { name, bytes } = e else {
                 continue;
             };
+            latest.insert(name, buffers.len());
             let k = buffers.len();
             alloc_ids.insert(at, k);
             let (start, end) = p.plan.lives.get(k).copied().unwrap_or((at, events.len()));
@@ -84,6 +100,7 @@ impl Placement {
         let mut counts = HashMap::new();
         let mut barriers = Vec::new();
         let mut instrs = HashMap::new();
+        let mut staging = HashMap::new();
         for op in p.ir.all_ops() {
             let Some(w) = windows.get(&op) else { continue };
             if let Some(instr) = w.events.iter().find_map(|&i| match events[i] {
@@ -106,21 +123,31 @@ impl Placement {
             } else {
                 own
             };
-            if matches!(p.ir.kind(op), OpKind::For(_)) && !own.is_empty() {
-                let movers =
-                    p.ir.blocks_of(op)
-                        .iter()
-                        .flat_map(|&b| p.ir.ops(b).iter().copied())
-                        .filter(|o| {
-                            !windows.contains_key(o)
-                                && matches!(
-                                    p.ir.kind(*o),
-                                    OpKind::Stage(_) | OpKind::Materialize | OpKind::GemmDot
-                                )
-                        });
-                for (k, mover) in movers.enumerate() {
+            let movers: Vec<OpId> = if matches!(p.ir.kind(op), OpKind::For(_)) {
+                p.ir.blocks_of(op)
+                    .iter()
+                    .flat_map(|&b| p.ir.ops(b).iter().copied())
+                    .filter(|o| {
+                        !windows.contains_key(o)
+                            && matches!(
+                                p.ir.kind(*o),
+                                OpKind::Stage(_) | OpKind::Materialize | OpKind::GemmDot
+                            )
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            for (k, &mover) in movers.iter().enumerate() {
+                if !own.is_empty() {
                     maps.entry(mover)
                         .or_insert_with(|| own[k % own.len()].clone());
+                }
+            }
+            let sets = staging_sets(events, w, &copy_dst, &buffers);
+            for &mover in &movers {
+                if matches!(p.ir.kind(mover), OpKind::GemmDot) && !sets.is_empty() {
+                    staging.insert(mover, sets.clone());
                 }
             }
             let n = w
@@ -133,6 +160,11 @@ impl Placement {
             }
             let kept = !p.elision.skip.contains_key(&op);
             counts.insert(op, n);
+            // The dot of a loop lowered whole stands for the loop's body,
+            // barrier included.
+            for &mover in movers.iter().filter(|m| staging.contains_key(m)) {
+                trailing.insert(mover, kept);
+            }
             if w.events
                 .last()
                 .is_some_and(|&i| events[i] == Event::Barrier)
@@ -178,6 +210,7 @@ impl Placement {
             trailing,
             counts,
             instrs,
+            staging,
         }
     }
 
@@ -188,6 +221,10 @@ impl Placement {
     /// Whether the op ends in a barrier, and if so whether it was kept.
     pub(super) fn trailing_barrier(&self, op: OpId) -> Option<bool> {
         self.trailing.get(&op).copied()
+    }
+
+    pub(super) fn staging(&self, op: OpId) -> Option<&Vec<Vec<model::Access>>> {
+        self.staging.get(&op)
     }
 
     pub(super) fn instr(&self, op: OpId) -> Option<&'static str> {
@@ -264,6 +301,7 @@ fn thread_maps(events: &[Event], w: &Window, threads: i64, elem_bytes: i64) -> V
             Event::Copy {
                 vector_bytes,
                 async_copy,
+                ..
             } => copy = Some((*vector_bytes, *async_copy)),
             Event::Sweep { shape, width } => {
                 let (vector_bytes, async_copy) = copy.take().unwrap_or((width * elem_bytes, false));
@@ -279,4 +317,44 @@ fn thread_maps(events: &[Event], w: &Window, threads: i64, elem_bytes: i64) -> V
         }
     }
     out
+}
+
+/// The buffers a loop's own copies fill, grouped into the sets one iteration
+/// stages: as many copies as come before the window's first barrier, each
+/// set once, in the order the copies first reach it.
+fn staging_sets(
+    events: &[Event],
+    w: &Window,
+    copy_dst: &HashMap<usize, (usize, Vec<i64>)>,
+    buffers: &[model::Buffer],
+) -> Vec<Vec<model::Access>> {
+    let per_set = w
+        .events
+        .iter()
+        .take_while(|&&i| events[i] != Event::Barrier)
+        .filter(|i| copy_dst.contains_key(i))
+        .count()
+        .max(1);
+    let mut seen: Vec<&(usize, Vec<i64>)> = Vec::new();
+    for d in w.events.iter().filter_map(|i| copy_dst.get(i)) {
+        if !seen.iter().any(|s| s.0 == d.0) {
+            seen.push(d);
+        }
+    }
+    seen.chunks(per_set)
+        .map(|set| {
+            set.iter()
+                .map(|(id, shape)| {
+                    let b = &buffers[*id];
+                    model::Access {
+                        tensor: None,
+                        buffer: Some(*id),
+                        region: shape.iter().map(|&d| [0, d]).collect(),
+                        bytes: b.offset_bytes.map(|o| [o, o + b.bytes]),
+                        masked_elems: None,
+                    }
+                })
+                .collect()
+        })
+        .collect()
 }

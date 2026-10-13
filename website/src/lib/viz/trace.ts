@@ -71,6 +71,11 @@ export interface Tensor {
   elem: string
   elemBytes: number
   shape: number[]
+  /**
+   * Strides in elements, outermost first. When absent, the tensor is dense and
+   * row-major, its base on a 128-byte boundary.
+   */
+  strides?: number[]
   role: "in" | "out" | "inout"
 }
 
@@ -92,6 +97,10 @@ export interface Op {
   uniformity?: Uniformity
   /** The instruction family a contraction lowered to: "wmma", "mma.sync" or "fma". */
   instr?: string
+  /** The enclosing `for`, `while` or `if`, by id; absent at the kernel's top level. */
+  parent?: number
+  /** For a `for` or `while`: its variable and how often it ran in the first CTA traced. */
+  loop?: { var?: string; trips: number }
 }
 
 export interface Buffer {
@@ -168,6 +177,12 @@ export interface Step {
   writes?: Access[]
   map?: ThreadMap
   lanes?: LaneEvent
+  /**
+   * The CTA barrier the op ends in. A dot the register matmul lowers together
+   * with its loop stands for the loop body: its step carries the body's
+   * barrier, and reads and writes the staging buffers that iteration's
+   * operands pass through (double-buffered sets alternate by iteration).
+   */
   barrier?: { kept: boolean }
 }
 

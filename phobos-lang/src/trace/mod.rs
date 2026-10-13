@@ -216,8 +216,13 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
     let mut steps = Vec::new();
     let mut summaries = Vec::new();
     let mut roles: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    let mut loops = HashMap::new();
     for (i, &cta) in all.iter().enumerate() {
         let ran = k.run(cta).with_context(|| format!("CTA {cta:?}"))?;
+        if i == 0 {
+            loops = ran.loops;
+        }
+        let ran = ran.steps;
         for s in &ran {
             for (accesses, write) in [(&s.reads, false), (&s.writes, true)] {
                 for t in accesses.iter().filter_map(|a| a.tensor.as_ref()) {
@@ -258,6 +263,18 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
                     Kind::Varying => Uniformity::Varying,
                 }),
                 instr: place.instr(op),
+                parent: ir.parent_op(ir.parent_block(op)).map(|p| p.index()),
+                loop_info: loops.get(&op).map(|&trips| model::LoopInfo {
+                    var: match ir.kind(op) {
+                        OpKind::For(_) => ir
+                            .blocks_of(op)
+                            .first()
+                            .and_then(|&b| ir.name(ir.args(b)[0]))
+                            .map(str::to_string),
+                        _ => None,
+                    },
+                    trips,
+                }),
             }
         })
         .collect();
@@ -273,6 +290,7 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
             model::Tensor {
                 elem_bytes: elem.bytes().unwrap_or(4),
                 elem: elem.mlir_name().to_string(),
+                strides: dense_strides(&shape),
                 shape,
                 role,
                 name,
@@ -331,6 +349,15 @@ fn summarize(s: model::Step) -> Option<model::Summary> {
         reads,
         writes,
     })
+}
+
+/// Row-major strides, in elements, of a dense tensor of `shape`.
+fn dense_strides(shape: &[i64]) -> Vec<i64> {
+    let mut strides = vec![1; shape.len()];
+    for d in (0..shape.len().saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * shape[d + 1];
+    }
+    strides
 }
 
 /// A short stable name for an op's kind.

@@ -48,13 +48,23 @@ struct Cursor<'a, 'k> {
     views: HashMap<ValueId, View>,
     slots: HashMap<ValueId, Lanes>,
     iter: Vec<(String, i64)>,
+    /// The iteration count of each enclosing loop, innermost last.
+    trips: Vec<usize>,
+    /// Iterations each loop ran the first time it was entered.
+    loops: HashMap<OpId, usize>,
     steps: Vec<Step>,
     executed: usize,
 }
 
+/// What one CTA did: its steps, and how many times each loop ran.
+pub(super) struct Ran {
+    pub(super) steps: Vec<Step>,
+    pub(super) loops: HashMap<OpId, usize>,
+}
+
 impl Kernel<'_> {
     /// Every step one CTA takes, in program order.
-    pub(super) fn run(&self, cta: Cta) -> Result<Vec<Step>> {
+    pub(super) fn run(&self, cta: Cta) -> Result<Ran> {
         let mut r = Cursor {
             k: self,
             cta,
@@ -62,6 +72,8 @@ impl Kernel<'_> {
             views: HashMap::new(),
             slots: HashMap::new(),
             iter: Vec::new(),
+            trips: Vec::new(),
+            loops: HashMap::new(),
             steps: Vec::new(),
             executed: 0,
         };
@@ -70,7 +82,10 @@ impl Kernel<'_> {
         }
         let mask = vec![true; self.lanes];
         r.block(self.ir.entry(), &mask)?;
-        Ok(r.steps)
+        Ok(Ran {
+            steps: r.steps,
+            loops: r.loops,
+        })
     }
 }
 
@@ -220,6 +235,7 @@ impl<'a> Cursor<'a, '_> {
         }
 
         let mut iv = lo.clone();
+        let mut trips = 0;
         loop {
             let active: Vec<bool> = (0..mask.len()).map(|l| mask[l] && iv[l] < hi[l]).collect();
             if !any(&active) {
@@ -231,7 +247,10 @@ impl<'a> Cursor<'a, '_> {
                 self.bind(a, r);
             }
             self.enter(&name, &iv, &active);
+            self.trips.push(trips);
             self.block(body, &active)?;
+            self.trips.pop();
+            trips += 1;
             if name.is_some() {
                 self.iter.pop();
             }
@@ -254,7 +273,10 @@ impl<'a> Cursor<'a, '_> {
                     self.bind(a, r);
                 }
                 self.enter(&name, &hi, &active);
+                self.trips.push(trips);
                 self.block(tail, &active)?;
+                self.trips.pop();
+                trips += 1;
                 if name.is_some() {
                     self.iter.pop();
                 }
@@ -263,6 +285,7 @@ impl<'a> Cursor<'a, '_> {
                 }
             }
         }
+        self.loops.entry(op).or_insert(trips);
         Ok(())
     }
 
@@ -280,6 +303,7 @@ impl<'a> Cursor<'a, '_> {
         let results = ir.results(op).to_vec();
         let mut carried: Vec<ValueId> = ir.operands(op).to_vec();
         let mut active = mask.to_vec();
+        let mut trips = 0;
         loop {
             for (&a, &c) in ir.args(before).iter().zip(&carried) {
                 self.bind(a, c);
@@ -297,6 +321,7 @@ impl<'a> Cursor<'a, '_> {
             }
             active = (0..mask.len()).map(|l| active[l] && cond[l] != 0).collect();
             if !any(&active) {
+                self.loops.entry(op).or_insert(trips);
                 return Ok(());
             }
             for (&a, &v) in ir.args(after).iter().zip(&handed[1..]) {
@@ -304,6 +329,7 @@ impl<'a> Cursor<'a, '_> {
             }
             self.block(after, &active)?;
             carried = self.yielded(after);
+            trips += 1;
         }
     }
 
@@ -600,9 +626,6 @@ impl<'a> Cursor<'a, '_> {
                 });
             }
             OpKind::Shuffle { mode, width } => {
-                if self.k.collectives.values().any(|s| s.contains(&op)) {
-                    return Ok(());
-                }
                 let src = self.known(operands[1], mask, op)?;
                 lanes = Some(LaneEvent {
                     mode: Some(mode_of(*mode)),
@@ -678,6 +701,11 @@ impl<'a> Cursor<'a, '_> {
                     }
                 }
             }
+        }
+        if let Some(sets) = self.k.place.staging(op) {
+            let set = &sets[self.trips.last().copied().unwrap_or(0) % sets.len()];
+            reads.extend(set.iter().cloned());
+            writes.extend(set.iter().cloned());
         }
         let map = self.k.place.map(op);
         let barrier = self
