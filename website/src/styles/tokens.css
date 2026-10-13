@@ -26,6 +26,13 @@
   --mars-fill: color-mix(in srgb, var(--mars) 12%, transparent);
   --mars-fill-on: color-mix(in srgb, var(--mars) 26%, transparent);
 
+  /* The hero's Mars limb: a dim, desaturated rust, deliberately far from --mars */
+  --limb: light-dark(#eadcd6, #1d1210);
+  --limb-rim: light-dark(#d9bfb4, #4a2a22);
+  /* Starfield: bright stars by night, a few faint ones at dawn */
+  --starfield: light-dark(#56627a, #e6ecf8);
+  --starfield-opacity: 1;
+
   /* Chart series colors that are not part of the identity */
   --series-cublas: #76b900;
 
@@ -44,6 +51,8 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
+  /* light-dark() takes colors only, so the numbers switch here */
+  --starfield-opacity: 0.3;
 }
 
 @media (prefers-reduced-motion: reduce) {

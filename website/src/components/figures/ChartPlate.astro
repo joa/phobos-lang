@@ -1,0 +1,53 @@
+---
+// A static star-chart plate in SVG for drawings that need no script: the graticule, the corner
+// registration ticks, the plate label and the "schematic" note, with the drawing in the slot. Uses
+// the same geometry helpers and classes as the figure library.
+import "../../styles/chart.css"
+import { GRATICULE_PITCH_UNITS } from "../../lib/figure/draw"
+import { graticulePoints, registrationTicksPath } from "../../lib/figure/layout"
+
+interface Props {
+  id: string
+  widthUnits: number
+  heightUnits: number
+  label?: string
+  schematic?: boolean
+  title: string
+  desc?: string
+  class?: string
+}
+
+const { id, widthUnits, heightUnits, label, schematic = false, title, desc, class: className } = Astro.props
+const pitchUnits = GRATICULE_PITCH_UNITS
+const [first] = graticulePoints(widthUnits, heightUnits, pitchUnits)
+const patternX = first ? first[0] - pitchUnits / 2 : 0
+const patternY = first ? first[1] - pitchUnits / 2 : 0
+---
+
+<svg
+  class:list={["chart-svg", className]}
+  viewBox={`0 0 ${widthUnits} ${heightUnits}`}
+  role="img"
+  aria-labelledby={desc ? `${id}-title ${id}-desc` : `${id}-title`}
+>
+  <title id={`${id}-title`}>{title}</title>
+  {desc && <desc id={`${id}-desc`}>{desc}</desc>}
+  <g class="chart-plate">
+    <defs>
+      <pattern id={`${id}-graticule`} width={pitchUnits} height={pitchUnits} patternUnits="userSpaceOnUse" x={patternX} y={patternY}>
+        <circle class="chart-graticule-dot" cx={pitchUnits / 2} cy={pitchUnits / 2} r="0.75"></circle>
+      </pattern>
+    </defs>
+    <rect class="chart-graticule" width={widthUnits} height={heightUnits} fill={`url(#${id}-graticule)`}></rect>
+    <path class="chart-ticks" d={registrationTicksPath(widthUnits, heightUnits)}></path>
+    {label && <text class="chart-plate-text" x="14" y="20" dominant-baseline="middle">{label}</text>}
+    {
+      schematic && (
+        <text class="chart-plate-note" x={widthUnits - 14} y="20" text-anchor="end" dominant-baseline="middle">
+          schematic
+        </text>
+      )
+    }
+  </g>
+  <slot />
+</svg>

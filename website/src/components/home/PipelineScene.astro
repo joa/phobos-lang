@@ -1,0 +1,431 @@
+---
+// Scene 3: one compiler, source to PTX. Stations on an arc; a star packet travels between them as the
+// page scrolls, and the card below shows the current station's excerpt.
+//   Scroll mode (scroll-driven animations, wide, motion allowed): the scene pins for about two
+//   screens and everything follows the scroll; a click on a station scrolls to it.
+//   Click mode (script, otherwise): the packet plays through once when the scene comes into view, then
+//   a click on a station shows its excerpt.
+//   No script and no scroll timelines: every station lit and every excerpt listed.
+// On narrow screens the stations stack as a list with their excerpts, in natural flow.
+import { ARC_HEIGHT_UNITS, ARC_PATH, ARC_WIDTH_UNITS, stationKeyframes, stationPoints } from "./pipeline-arc"
+import { EXCERPT_PLACEHOLDER, pipelineStages } from "./pipeline-stages"
+
+const stages = pipelineStages()
+const stations = stationPoints(stages.length)
+const count = stages.length
+
+const range = "animation-timeline: --pipe; animation-range: contain 0% contain 100%"
+const scrollRules = stages
+  .map((_, index) =>
+    [
+      `.pipeline .lit-${index} { animation: pipe-lit-${index} linear both; ${range} }`,
+      `.pipeline .ex-${index} { animation: pipe-ex-${index} linear both; ${range} }`,
+    ].join("\n")
+  )
+  .join("\n")
+const clickRules = stages
+  .map((_, index) =>
+    [
+      `.pipeline[data-selected="${index}"] .ex-${index} { opacity: 1; visibility: visible }`,
+      `.pipeline[data-selected="${index}"] .pipe-packet { offset-distance: ${Math.round(stations[index].fraction * 10000) / 100}% }`,
+      `.pipeline[data-selected="${index}"] .st-${index} .st-name-lit { opacity: 1 }`,
+      ...stages.slice(0, index + 1).map((__, lit) => `.pipeline[data-reached="${index}"] .lit-${lit} { opacity: 1 }`),
+    ].join("\n")
+  )
+  .join("\n")
+const generatedCss = `
+${stationKeyframes(count)}
+@supports (animation-timeline: view()) {
+  @media (min-width: 900px) and (prefers-reduced-motion: no-preference) {
+    .pipe-track { height: 300vh; view-timeline: --pipe block; }
+    .pipe-pin { position: sticky; top: 3.5rem; min-height: calc(100svh - 3.5rem); display: grid; align-content: center; }
+    .pipeline .pipe-packet { animation: pipe-travel linear both; ${range} }
+    .pipeline .lit { opacity: 0; }
+    .pipeline .pipe-excerpts { display: grid; }
+    .pipeline .excerpt { grid-area: 1 / 1; }
+${scrollRules}
+  }
+}
+@media (min-width: 900px) {
+.pipeline[data-mode="click"] .lit { opacity: 0; }
+.pipeline[data-mode="click"] .pipe-excerpts { display: grid; }
+.pipeline[data-mode="click"] .excerpt { grid-area: 1 / 1; opacity: 0; visibility: hidden; }
+${clickRules}
+}
+`
+---
+
+<section class="scene pipeline" id="compiler" aria-labelledby="pipeline-title">
+  <div class="pipe-track">
+    <div class="pipe-pin">
+      <div class="wrap">
+        <div class="scene-head">
+          <h2 class="scene-title" id="pipeline-title">One compiler, source to PTX</h2>
+          <p class="scene-intro">
+            Seven stations between a kernel file and the card, shown for <code>gemm_fp32.ph</code>, with what the
+            compiler holds at each one.
+          </p>
+        </div>
+
+        <div class="pipe-arc">
+          <svg class="pipe-svg" viewBox={`0 0 ${ARC_WIDTH_UNITS} ${ARC_HEIGHT_UNITS}`} aria-hidden="true">
+            <defs>
+              <radialGradient id="pipe-glow">
+                <stop offset="0" class="pipe-glow-stop" stop-opacity="0.6"></stop>
+                <stop offset="0.45" class="pipe-glow-stop" stop-opacity="0.18"></stop>
+                <stop offset="1" class="pipe-glow-stop" stop-opacity="0"></stop>
+              </radialGradient>
+            </defs>
+            <path class="pipe-path" d={ARC_PATH}></path>
+            {
+              stations.map(({ point }, index) => (
+                <g>
+                  <circle class="st-dot" cx={point.x} cy={point.y} r="4" />
+                  <circle class={`st-dot-lit lit lit-${index}`} cx={point.x} cy={point.y} r="4" />
+                </g>
+              ))
+            }
+            <g class="pipe-packet" style={`offset-path: path("${ARC_PATH}")`}>
+              <circle class="pipe-packet-glow" r="22"></circle>
+              <path class="pipe-packet-flare" d="M-9 0H9M0 -9V9"></path>
+              <circle class="pipe-packet-core" r="3.5"></circle>
+            </g>
+          </svg>
+          <ol class="pipe-stations">
+            {
+              stages.map((stage, index) => (
+                <li
+                  class={`st st-${index}`}
+                  style={`left: ${(stations[index].point.x / ARC_WIDTH_UNITS) * 100}%; top: ${(stations[index].point.y / ARC_HEIGHT_UNITS) * 100}%`}
+                >
+                  <button type="button" data-station={index} aria-controls={`excerpt-${stage.id}`}>
+                    <span class="st-name">{stage.label}</span>
+                    <span class={`st-name st-name-lit lit lit-${index}`} aria-hidden="true">
+                      {stage.label}
+                    </span>
+                  </button>
+                </li>
+              ))
+            }
+          </ol>
+        </div>
+
+        <div class="pipe-excerpts">
+          {
+            stages.map((stage, index) => (
+              <article class={`excerpt ex-${index}`} id={`excerpt-${stage.id}`} aria-labelledby={`excerpt-${stage.id}-title`}>
+                <header>
+                  <h3 id={`excerpt-${stage.id}-title`}>{stage.label}</h3>
+                  <p>{stage.detail}</p>
+                </header>
+                {stage.excerpt ? (
+                  <pre>
+                    <code>{stage.excerpt}</code>
+                  </pre>
+                ) : (
+                  <p class="excerpt-pending">{EXCERPT_PLACEHOLDER}</p>
+                )}
+              </article>
+            ))
+          }
+        </div>
+
+        <ol class="pipe-list">
+          {
+            stages.map(stage => (
+              <li>
+                <h3>{stage.label}</h3>
+                <p>{stage.detail}</p>
+                {stage.excerpt ? (
+                  <pre>
+                    <code>{stage.excerpt}</code>
+                  </pre>
+                ) : (
+                  <p class="excerpt-pending">{EXCERPT_PLACEHOLDER}</p>
+                )}
+              </li>
+            ))
+          }
+        </ol>
+      </div>
+    </div>
+  </div>
+</section>
+
+<Fragment set:html={`<style>${generatedCss}</style>`} />
+
+<script>
+  const STEP_MS = 650
+
+  for (const scene of document.querySelectorAll<HTMLElement>(".pipeline")) {
+    const buttons = [...scene.querySelectorAll<HTMLButtonElement>("[data-station]")]
+    const last = buttons.length - 1
+    const scrollMode =
+      CSS.supports("animation-timeline: view()") &&
+      matchMedia("(min-width: 900px) and (prefers-reduced-motion: no-preference)").matches
+    const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
+    const track = scene.querySelector<HTMLElement>(".pipe-track")
+    let timer = 0
+
+    const select = (station: number, reached = station) => {
+      scene.dataset.selected = String(station)
+      scene.dataset.reached = String(Math.max(Number(scene.dataset.reached ?? -1), reached))
+    }
+
+    for (const button of buttons) {
+      button.addEventListener("click", () => {
+        const station = Number(button.dataset.station)
+        if (scrollMode && track) {
+          const travelPx = track.offsetHeight - window.innerHeight
+          const topPx = track.getBoundingClientRect().top + window.scrollY
+          window.scrollTo({ top: topPx + (station / last) * travelPx, behavior: "smooth" })
+          return
+        }
+        clearInterval(timer)
+        select(station, last)
+      })
+    }
+
+    if (!scrollMode) {
+      scene.dataset.mode = "click"
+      if (reduced) {
+        select(0, last)
+      } else {
+        select(0, 0)
+        const observer = new IntersectionObserver(
+          entries => {
+            if (!entries.some(entry => entry.isIntersecting)) return
+            observer.disconnect()
+            let station = 0
+            timer = window.setInterval(() => {
+              station += 1
+              select(station)
+              if (station >= last) clearInterval(timer)
+            }, STEP_MS)
+          },
+          { threshold: 0.45 }
+        )
+        observer.observe(scene.querySelector(".pipe-arc") ?? scene)
+      }
+    }
+  }
+</script>
+
+<style>
+  .pipe-arc {
+    position: relative;
+    aspect-ratio: 1000 / 250;
+    margin-top: 1rem;
+  }
+
+  .pipe-svg {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .pipe-path {
+    fill: none;
+    stroke: var(--sky-line);
+    stroke-width: 1;
+  }
+
+  .st-dot {
+    fill: var(--sky-0);
+    stroke: var(--dust);
+    stroke-width: 1;
+  }
+
+  .st-dot-lit {
+    fill: var(--brand);
+  }
+
+  .pipe-glow-stop {
+    stop-color: var(--brand);
+  }
+
+  .pipe-packet {
+    offset-rotate: 0deg;
+    offset-distance: 100%;
+    transition: offset-distance var(--dur-3) var(--ease-in-out);
+  }
+
+  .pipe-packet-glow {
+    fill: url(#pipe-glow);
+  }
+
+  .pipe-packet-flare {
+    fill: none;
+    stroke: var(--brand);
+    stroke-width: 1.2;
+    stroke-linecap: round;
+  }
+
+  .pipe-packet-core {
+    fill: color-mix(in srgb, var(--brand) 50%, var(--star));
+  }
+
+  @keyframes pipe-travel {
+    from {
+      offset-distance: 0%;
+    }
+    to {
+      offset-distance: 100%;
+    }
+  }
+
+  .pipe-stations {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .st {
+    position: absolute;
+    translate: -50% 14px;
+  }
+
+  .st button {
+    display: grid;
+    padding: 0.25rem 0.5rem;
+    border: 0;
+    background: transparent;
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    white-space: nowrap;
+    cursor: pointer;
+  }
+
+  .st-name {
+    grid-area: 1 / 1;
+    color: var(--dust);
+  }
+
+  .st-name-lit {
+    color: var(--star);
+  }
+
+  .st button:hover .st-name {
+    color: var(--star);
+  }
+
+  .lit {
+    opacity: 1;
+    transition: opacity var(--dur-2) var(--ease-out);
+  }
+
+  .pipe-excerpts {
+    margin-top: 1.5rem;
+  }
+
+  .excerpt {
+    padding: 1.25rem 1.5rem;
+    border: 1px solid var(--sky-line);
+    background: var(--sky-1);
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      visibility var(--dur-2);
+  }
+
+  .excerpt + .excerpt {
+    margin-top: 0.75rem;
+  }
+
+  .pipeline[data-mode="click"] .excerpt + .excerpt {
+    margin-top: 0;
+  }
+
+  .excerpt header {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 1rem;
+  }
+
+  .excerpt h3,
+  .pipe-list h3 {
+    font-family: var(--font-mono);
+    font-size: 0.9375rem;
+    font-weight: 500;
+  }
+
+  .excerpt header p,
+  .pipe-list p {
+    margin: 0;
+    color: var(--dust);
+    font-size: 0.9375rem;
+  }
+
+  .excerpt pre,
+  .pipe-list pre {
+    margin: 1rem 0 0;
+    overflow-x: auto;
+    color: var(--star);
+    font-size: 0.8125rem;
+    line-height: 1.55;
+  }
+
+  .excerpt-pending {
+    margin: 1rem 0 0 !important;
+    padding: 0.75rem 1rem;
+    border: 1px dashed var(--sky-line);
+    color: var(--dust);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  /* Narrow: a plain list on a hairline */
+  .pipe-list {
+    display: none;
+    position: relative;
+    margin: 1.5rem 0 0;
+    padding: 0 0 0 1.75rem;
+    list-style: none;
+  }
+
+  .pipe-list::before {
+    content: "";
+    position: absolute;
+    left: 5px;
+    top: 0.6rem;
+    bottom: 0.6rem;
+    border-left: 1px solid var(--sky-line);
+  }
+
+  .pipe-list li {
+    position: relative;
+    padding-bottom: 1.75rem;
+  }
+
+  .pipe-list li::before {
+    content: "";
+    position: absolute;
+    left: calc(-1.75rem + 1px);
+    top: 0.45rem;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--brand);
+  }
+
+  @media (max-width: 899px) {
+    .pipe-arc,
+    .pipe-excerpts {
+      display: none;
+    }
+
+    .pipe-list {
+      display: block;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .pipe-packet,
+    .lit,
+    .excerpt {
+      transition: none;
+    }
+  }
+</style>

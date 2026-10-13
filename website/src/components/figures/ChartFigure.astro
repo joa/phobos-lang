@@ -1,0 +1,75 @@
+---
+// A figure on the chart base. The drawing is rendered at build time in both layouts from the same
+// build() and settle() the browser runs, so without JavaScript the figure shows its end state; with
+// it, the module named by `name` (<name>.figure.ts) takes over. Controls go in the default slot,
+// as buttons with data-group/data-value (aria-pressed on the default) or data-action, and range
+// inputs with data-param; `state` must match the pressed defaults.
+import "../../styles/chart.css"
+import type { ChartFigure as Base, FigureConstructor, StateValue } from "../../lib/figure/chart-figure"
+import type { Space } from "../../lib/figure/draw"
+
+interface Props {
+  id: string
+  name: string
+  figure: FigureConstructor & Pick<typeof Base, "renderStatic">
+  state?: Record<string, StateValue>
+  title: string
+  desc: string
+  legend?: Space[]
+  class?: string
+}
+
+const { id, name, figure, state = {}, title, desc, legend = [], class: className } = Astro.props
+const wide = figure.renderStatic("wide", state, id)
+const narrow = figure.renderStatic("narrow", state, `${id}-narrow`)
+const legendLabels: Record<Space, string> = {
+  global: "global memory",
+  shared: "shared memory",
+  reg: "registers",
+  cost: "cost",
+}
+const hasControls = Astro.slots.has("default")
+const hasCaption = Astro.slots.has("caption")
+---
+
+<figure class:list={["chart", className]} id={id} data-chart-figure={name}>
+  <svg class="chart-svg" role="img" aria-labelledby={`${id}-title ${id}-desc`} viewBox={wide.viewBox}>
+    <title id={`${id}-title`}>{title}</title>
+    <desc id={`${id}-desc`}>{desc}</desc>
+    <g class="chart-drawing" set:html={wide.drawing} />
+  </svg>
+  <svg class="chart-svg chart-static" aria-hidden="true" viewBox={narrow.viewBox}>
+    <g class="chart-drawing" set:html={narrow.drawing} />
+  </svg>
+  <p class="chart-readout" aria-live="polite">{wide.readout}</p>
+  {
+    legend.length > 0 && (
+      <ul class="chart-legend" aria-label="Legend">
+        {legend.map(space => (
+          <li class={`chart-key sp-${space}`}>{legendLabels[space]}</li>
+        ))}
+      </ul>
+    )
+  }
+  {
+    hasControls && (
+      <div class="chart-controls">
+        <slot />
+      </div>
+    )
+  }
+  {
+    hasCaption && (
+      <figcaption>
+        <slot name="caption" />
+      </figcaption>
+    )
+  }
+</figure>
+
+<noscript><style>.chart-controls { display: none; }</style></noscript>
+
+<script>
+  import { startFigures } from "./boot"
+  startFigures()
+</script>

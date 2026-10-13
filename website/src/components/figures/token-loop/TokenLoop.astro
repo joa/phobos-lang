@@ -1,0 +1,20 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import TokenLoopFigure from "./token-loop.figure"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-token-loop" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="token-loop"
+  figure={TokenLoopFigure}
+  title="The decode token loop"
+  desc="Schematic. A GGUF file supplies the weights to the layers. The tokenizer turns the prompt into tokens for the layers, the layers produce logits for the sampler, and each sampled token streams out and goes back into the layers as the next input."
+>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+</ChartFigure>

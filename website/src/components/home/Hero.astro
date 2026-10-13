@@ -1,0 +1,278 @@
+---
+// Scene 1: the night sky, Phobos on a hairline orbit, the limb of Mars along the bottom edge.
+// Everything here is CSS and one build-time SVG per star layer; no script.
+import mark from "../../assets/mark.svg?raw"
+import { makeStarfield, SKY_HEIGHT_UNITS, SKY_WIDTH_UNITS, type Star } from "./starfield"
+
+const REPO_URL = "https://github.com/joa/phobos-lang"
+const { far, near, twinkling } = makeStarfield()
+const viewBox = `0 0 ${SKY_WIDTH_UNITS} ${SKY_HEIGHT_UNITS}`
+const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
+---
+
+<section class="hero" aria-labelledby="hero-title">
+  <div class="sky" aria-hidden="true">
+    <svg class="stars stars-far" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
+      {far.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
+    </svg>
+    <svg class="stars stars-near" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
+      {near.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
+      {
+        twinkling.map(star => (
+          <circle
+            class:list={["tw", tintClass(star)]}
+            cx={star.x}
+            cy={star.y}
+            r={star.radiusUnits}
+            fill-opacity={star.opacity}
+            style={`animation-delay: ${star.delayMs}ms; animation-duration: ${star.periodMs}ms`}
+          />
+        ))
+      }
+    </svg>
+    <div class="orbit">
+      <svg class="orbit-path" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <ellipse cx="50" cy="50" rx="49.9" ry="49.8" vector-effect="non-scaling-stroke"></ellipse>
+      </svg>
+      <span class="moon"><Fragment set:html={mark} /></span>
+    </div>
+    <div class="limb"></div>
+  </div>
+
+  <div class="wrap hero-content">
+    <div class="hero-copy">
+      <h1 id="hero-title">Tile-based GPU kernel language &amp; LLM inference engine</h1>
+      <p class="hero-line">Write tiles like Triton. Set up warps and lanes like Gluon. One language.</p>
+      <div class="hero-actions">
+        <a class="button is-primary" href="/docs/getting-started/">Get started</a>
+        <a class="button" href="/inference/">Inference</a>
+        <a class="button" href={REPO_URL}>GitHub</a>
+      </div>
+    </div>
+  </div>
+</section>
+
+<style>
+  @property --twinkle {
+    syntax: "<number>";
+    inherits: false;
+    initial-value: 1;
+  }
+
+  .hero {
+    position: relative;
+    display: grid;
+    align-items: center;
+    min-height: calc(100svh - 3.5rem);
+    overflow: hidden;
+    isolation: isolate;
+  }
+
+  .sky {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    /* The limb fades into the page instead of ending at the hero's edge */
+    mask-image: linear-gradient(to bottom, #000 72%, transparent);
+  }
+
+  /* A faint atmosphere above the limb */
+  .sky::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0;
+    height: 45%;
+    background: radial-gradient(120% 100% at 50% 100%, color-mix(in srgb, var(--limb-rim) 22%, transparent), transparent 70%);
+    pointer-events: none;
+  }
+
+  .stars {
+    position: absolute;
+    inset: -10% 0 0;
+    width: 100%;
+    height: 110%;
+    fill: var(--starfield);
+    opacity: var(--starfield-opacity);
+  }
+
+  .stars .t-b {
+    fill: var(--brand);
+  }
+
+  .stars .t-n {
+    fill: var(--nebula);
+  }
+
+  .stars-far {
+    opacity: calc(var(--starfield-opacity) * 0.85);
+  }
+
+  .tw {
+    opacity: var(--twinkle);
+    animation: twinkle 5s ease-in-out infinite alternate;
+  }
+
+  @keyframes twinkle {
+    0%,
+    40% {
+      --twinkle: 1;
+    }
+    100% {
+      --twinkle: 0.25;
+    }
+  }
+
+  /* Phobos on its orbit. The lower arc runs behind Mars. */
+  .orbit {
+    position: absolute;
+    left: -8%;
+    right: -8%;
+    top: 30%;
+    height: 62%;
+    rotate: -6deg;
+  }
+
+  @media (max-width: 640px) {
+    .orbit {
+      left: -70%;
+      right: -70%;
+      top: 44%;
+      height: 40%;
+    }
+  }
+
+  .orbit-path {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    overflow: visible;
+  }
+
+  .orbit-path ellipse {
+    fill: none;
+    stroke: var(--sky-line);
+    stroke-width: 1;
+  }
+
+  .moon {
+    position: absolute;
+    left: 78%;
+    top: 4%;
+    width: 22px;
+    height: 22px;
+    color: var(--star);
+    rotate: 6deg;
+  }
+
+  .moon :global(svg) {
+    display: block;
+    width: 100%;
+    height: 100%;
+  }
+
+  .moon :global(.mark-crater) {
+    stroke: var(--brand);
+  }
+
+  @supports (offset-path: ellipse(50% 50% at 50% 50%)) {
+    .moon {
+      left: 0;
+      top: 0;
+      offset-path: ellipse(50% 50% at 50% 50%);
+      offset-rotate: 0deg;
+      offset-anchor: center;
+      offset-distance: 82%;
+      animation: orbit 160s linear infinite;
+      /* Starts 82% of the way round, where the moon sits clear of the headline */
+      animation-delay: -131s;
+    }
+
+    @keyframes orbit {
+      from {
+        offset-distance: 0%;
+      }
+      to {
+        offset-distance: 100%;
+      }
+    }
+  }
+
+  .limb {
+    position: absolute;
+    left: 50%;
+    top: calc(100% - 9svh - 4vw);
+    width: 240vw;
+    aspect-ratio: 1;
+    translate: -50% 0;
+    border-radius: 50%;
+    background: linear-gradient(180deg, color-mix(in srgb, var(--limb-rim) 55%, var(--limb)) 0, var(--limb) 9vh);
+    box-shadow:
+      0 0 0 1px color-mix(in srgb, var(--limb-rim) 80%, transparent),
+      0 -2px 40px -6px color-mix(in srgb, var(--limb-rim) 45%, transparent);
+  }
+
+  .hero-content {
+    position: relative;
+    padding-block: clamp(4rem, 12vh, 8rem) clamp(8rem, 22vh, 12rem);
+  }
+
+  .hero-copy {
+    max-width: 44rem;
+  }
+
+  h1 {
+    font-size: clamp(2.375rem, 5.6vw, 4.25rem);
+    font-weight: 500;
+    line-height: 1.06;
+    letter-spacing: -0.022em;
+  }
+
+  .hero-line {
+    max-width: 34rem;
+    margin: 1.5rem 0 0;
+    color: var(--dust);
+    font-size: clamp(1.0625rem, 1.6vw, 1.25rem);
+    line-height: 1.5;
+  }
+
+  .hero-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 2.25rem;
+  }
+
+  /* Two parallax layers: the far stars drift down faster than the near ones as the page scrolls */
+  @supports (animation-timeline: scroll()) {
+    .stars-far,
+    .stars-near {
+      animation: drift linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 100vh;
+    }
+
+    .stars-far {
+      --drift: 16vh;
+    }
+
+    .stars-near {
+      --drift: 7vh;
+    }
+
+    @keyframes drift {
+      to {
+        translate: 0 var(--drift);
+      }
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .tw,
+    .moon,
+    .stars-far,
+    .stars-near {
+      animation: none;
+    }
+  }
+</style>

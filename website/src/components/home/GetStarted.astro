@@ -1,0 +1,108 @@
+---
+// Scene 6: get started, three steps. Commands follow the README and the release workflow.
+const REPO_URL = "https://github.com/joa/phobos-lang"
+const COMPILE_COMMAND = "cargo run -r -p phobos-compile -- examples/gemm_fp32.ph"
+const SERVE_COMMAND =
+  "cargo run --features cuda -r -p phobos-cli -- --listen 127.0.0.1:8080 --gguf ~\\models\\minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
+---
+
+<section class="scene get-started" id="get-started" aria-labelledby="start-title">
+  <div class="wrap">
+    <div class="scene-head">
+      <h2 class="scene-title" id="start-title">Get started</h2>
+    </div>
+    <ol class="steps">
+      <li class="step">
+        <h3>Download a release</h3>
+        <p>Prebuilt <code>phobos-cli</code>, <code>phobos-compile</code>, <code>phobos-bench</code> and <code>phobos-cache</code> for Windows and Linux, x64.</p>
+        <a class="button" href={`${REPO_URL}/releases/latest`}>Latest release</a>
+      </li>
+      <li class="step">
+        <h3>Compile a kernel</h3>
+        <p>From a checkout: compile a kernel source to PTX, for <code>sm_75</code> by default. No GPU needed.</p>
+        <pre><code>{COMPILE_COMMAND}</code></pre>
+      </li>
+      <li class="step">
+        <h3>Serve a model</h3>
+        <p>
+          Download <a href="https://huggingface.co/Abiray/MiniCPM5-1B-GGUF">MiniCPM5-1B-Q8_0</a>, then start the
+          OpenAI-compatible server with the dashboard on the terminal. Needs an NVIDIA GPU.
+        </p>
+        <pre><code>{SERVE_COMMAND}</code></pre>
+      </li>
+    </ol>
+    <a class="scene-link" href="/docs/getting-started/">Read the getting started guide</a>
+  </div>
+</section>
+
+<style>
+  .steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--grid-gap);
+    margin: 0;
+    padding: 0;
+    list-style: none;
+    counter-reset: step;
+  }
+
+  .step {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+    min-width: 0;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--sky-line);
+    counter-increment: step;
+  }
+
+  .step h3 {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    font-size: 1.1875rem;
+  }
+
+  .step h3::before {
+    content: counter(step);
+    color: var(--brand);
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+  }
+
+  .step p {
+    margin: 0;
+    color: var(--dust);
+    font-size: 0.9375rem;
+  }
+
+  .step p code {
+    color: var(--star);
+  }
+
+  .step pre {
+    width: 100%;
+    margin: 0.25rem 0 0;
+    padding: 0.875rem 1rem;
+    overflow-x: auto;
+    border: 1px solid var(--sky-line);
+    background: var(--sky-1);
+    color: var(--star);
+    font-size: 0.8125rem;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .step .button {
+    margin-top: 0.25rem;
+  }
+
+  @media (max-width: 900px) {
+    .steps {
+      grid-template-columns: minmax(0, 1fr);
+      gap: 2rem;
+    }
+  }
+</style>

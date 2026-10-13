@@ -1,0 +1,160 @@
+---
+// Scene 4: shared memory, packed. A static schematic until the gemm trace drives it: buffers as
+// lifetime intervals (program order across, byte offset down), packed into one byte ruler, with the
+// barriers the planner keeps and the ones it drops. Drawn once per layout; CSS shows the one that fits.
+import ChartPlate from "../figures/ChartPlate.astro"
+
+interface Buffer {
+  name: string
+  // A shorter name for the narrow plate, where the box is too short for the full one
+  shortName?: string
+  from: number
+  to: number
+  top: number
+  bottom: number
+}
+
+// Normalized: from/to along program order, top/bottom along the byte ruler. Illustrative only.
+const BUFFERS: Buffer[] = [
+  { name: "a", from: 0.06, to: 0.56, top: 0, bottom: 0.25 },
+  { name: "b", from: 0.09, to: 0.59, top: 0.25, bottom: 0.5 },
+  { name: "a, next", from: 0.34, to: 0.8, top: 0.5, bottom: 0.75 },
+  { name: "b, next", from: 0.37, to: 0.83, top: 0.75, bottom: 1 },
+  { name: "later tile", shortName: "later", from: 0.86, to: 0.99, top: 0, bottom: 0.5 },
+]
+const BARRIERS = [
+  { at: 0.27, kept: true },
+  { at: 0.47, kept: false },
+  { at: 0.66, kept: true },
+  { at: 0.845, kept: false },
+]
+
+interface Frame {
+  widthUnits: number
+  heightUnits: number
+  left: number
+  right: number
+  top: number
+  bottom: number
+  label: string
+}
+
+const FRAMES: Record<"wide" | "narrow", Frame> = {
+  wide: { widthUnits: 1000, heightUnits: 330, left: 120, right: 970, top: 78, bottom: 270, label: "FIG / GEMM / SHARED" },
+  narrow: { widthUnits: 400, heightUnits: 380, left: 64, right: 386, top: 92, bottom: 300, label: "FIG / GEMM / SHARED" },
+}
+
+function place(frame: Frame) {
+  const x = (t: number) => frame.left + t * (frame.right - frame.left)
+  const y = (o: number) => frame.top + o * (frame.bottom - frame.top)
+  return {
+    buffers: BUFFERS.map(buffer => ({
+      ...buffer,
+      x: x(buffer.from),
+      y: y(buffer.top),
+      width: x(buffer.to) - x(buffer.from),
+      height: y(buffer.bottom) - y(buffer.top),
+    })),
+    barriers: BARRIERS.map(barrier => ({ ...barrier, x: x(barrier.at) })),
+  }
+}
+
+const layouts = (["wide", "narrow"] as const).map(layout => ({ layout, frame: FRAMES[layout], ...place(FRAMES[layout]) }))
+---
+
+<section class="scene packing" id="shared-memory" aria-labelledby="packing-title">
+  <div class="wrap">
+    <div class="scene-head">
+      <h2 class="scene-title" id="packing-title">Shared memory, packed</h2>
+      <p class="scene-intro">
+        Every tile a kernel stages lives in shared memory for part of its run. The planner gives each one an offset
+        so that buffers alive at the same time never overlap and the rest share bytes, then drops every barrier that
+        no longer separates a write from a read.
+      </p>
+    </div>
+    {
+      layouts.map(({ layout, frame, buffers, barriers }) => (
+        <div class={`packing-plate is-${layout}`}>
+          <ChartPlate
+            id={`packing-${layout}`}
+            widthUnits={frame.widthUnits}
+            heightUnits={frame.heightUnits}
+            label={frame.label}
+            schematic
+            title="Shared-memory buffers of a gemm kernel packed by lifetime"
+            desc="Schematic. Buffers drawn as intervals: across is program order, down is the byte offset in shared memory. Buffers alive at the same time sit at different offsets; a later buffer reuses the bytes of two that have ended. Vertical lines mark barriers, solid where one is kept and dashed where one is dropped."
+          >
+            <g class="sp-shared">
+              <path class="chart-wire" d={`M${frame.left - 18} ${frame.top}V${frame.bottom}`} />
+              <path
+                class="chart-ticks"
+                d={[0, 0.25, 0.5, 0.75, 1].map(o => `M${frame.left - 24} ${frame.top + o * (frame.bottom - frame.top)}h12`).join("")}
+              />
+              <text class="chart-label is-small" x={frame.left - 30} y={frame.top} text-anchor="end" dominant-baseline="middle">
+                0
+              </text>
+              <text class="chart-label is-small" x={frame.left - 30} y={frame.bottom} text-anchor="end" dominant-baseline="middle">
+                peak
+              </text>
+              <text class="chart-label is-small" x={frame.left - 18} y={frame.top - 18} text-anchor="middle">
+                bytes
+              </text>
+              {buffers.map(buffer => (
+                <g>
+                  <rect class="chart-box is-on" x={buffer.x} y={buffer.y + 2} width={buffer.width} height={buffer.height - 4} />
+                  <text
+                    class="chart-label is-on"
+                    x={buffer.x + 8}
+                    y={buffer.y + buffer.height / 2}
+                    dominant-baseline="middle"
+                  >
+                    {layout === "narrow" ? (buffer.shortName ?? buffer.name) : buffer.name}
+                  </text>
+                </g>
+              ))}
+            </g>
+            {barriers.map(barrier => (
+              <g class={barrier.kept ? "packing-kept" : "packing-dropped"}>
+                <path class={barrier.kept ? "chart-wire is-on sp-reg" : "chart-wire packing-dash"} d={`M${barrier.x} ${frame.top - 12}V${frame.bottom + 8}`} />
+                <circle class={barrier.kept ? "chart-node is-on sp-reg" : "chart-node"} cx={barrier.x} cy={frame.top - 12} r="2" />
+                <text
+                  class={`chart-label is-small ${barrier.kept ? "is-hot" : ""}`}
+                  x={barrier.x}
+                  y={frame.bottom + 24}
+                  text-anchor="middle"
+                >
+                  {barrier.kept ? "kept" : "dropped"}
+                </text>
+              </g>
+            ))}
+            <path class="chart-wire" d={`M${frame.left} ${frame.bottom + 40}H${frame.right}`} />
+            <text class="chart-label is-small" x={frame.right} y={frame.bottom + 54} text-anchor="end" dominant-baseline="middle">
+              program order
+            </text>
+          </ChartPlate>
+        </div>
+      ))
+    }
+  </div>
+</section>
+
+<style>
+  .packing-plate.is-narrow {
+    display: none;
+  }
+
+  .packing-plate :global(.packing-dash) {
+    stroke: var(--dust);
+    stroke-dasharray: 2 3;
+  }
+
+  @media (max-width: 599px) {
+    .packing-plate.is-wide {
+      display: none;
+    }
+
+    .packing-plate.is-narrow {
+      display: block;
+    }
+  }
+</style>

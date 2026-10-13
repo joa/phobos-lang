@@ -1,0 +1,52 @@
+/* The front page's scenes: shared spacing and the heading block. Each scene's own layout lives in its
+ * component. */
+
+.scene {
+  padding-block: clamp(5rem, 12vw, 9rem) 0;
+}
+
+.scene-head {
+  max-width: 40rem;
+  margin-bottom: clamp(2rem, 4vw, 3rem);
+}
+
+.scene-title {
+  font-size: clamp(1.75rem, 3.4vw, 2.625rem);
+  line-height: 1.12;
+  letter-spacing: -0.015em;
+}
+
+.scene-intro {
+  margin: 1rem 0 0;
+  color: var(--dust);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+}
+
+.scene-link {
+  display: inline-block;
+  margin-top: 1.5rem;
+  font-size: 0.9375rem;
+}
+
+/* A placeholder slot that another part of the site fills later: a plate with a quiet note */
+.slot-plate {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 16rem;
+  padding: 2rem 1.5rem;
+  border: 1px dashed var(--sky-line);
+  background: radial-gradient(circle, var(--sky-line) 0.75px, transparent 1px) center / 16px 16px;
+  color: var(--dust);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  text-align: center;
+}
+
+.slot-plate p {
+  max-width: 28rem;
+  margin: 0;
+  padding: 0.75rem 1rem;
+  background: var(--sky-0);
+}

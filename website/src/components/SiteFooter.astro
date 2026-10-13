@@ -1,0 +1,17 @@
+---
+import mark from "../assets/mark.svg?raw"
+
+const REPO_URL = "https://github.com/joa/phobos-lang"
+---
+
+<footer class="site-footer">
+  <div class="site-footer-inner">
+    <a class="site-mark" href="/" aria-label="Phobos home"><Fragment set:html={mark} /><span>Phobos</span></a>
+    <nav aria-label="Footer">
+      <a href="/docs/">Docs</a>
+      <a href="/inference/">Inference</a>
+      <a href={REPO_URL}>GitHub</a>
+      <a href={`${REPO_URL}/blob/main/LICENSE`}>Apache-2.0</a>
+    </nav>
+  </div>
+</footer>
