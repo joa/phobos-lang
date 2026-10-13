@@ -118,7 +118,7 @@ const desc =
     <p class="packing-note">
       From the trace of <a href={`/viz/${TRACE}/`}><code>examples/gemm_fp32.ph</code> without <code>@aligned</code></a>{" "}
       on {model.chip}. With <code>@aligned</code> the k loop goes to the GEMM lowering instead, which stages its panels
-      in {aligned?.buffers.length ?? 4} buffers that all live across the whole loop.
+      in {aligned?.buffers.length ?? 4} buffers that all live across the whole loop, alternating between two pairs from one iteration to the next.
     </p>
   </div>
 </section>

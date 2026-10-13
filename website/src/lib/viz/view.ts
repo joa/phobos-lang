@@ -64,7 +64,6 @@ export default class KernelViz extends ChartFigure {
   #sweepIndex = -1
   #sweepHoldMs = 0
   #reducedTimer = 0
-  #lastStage = -1
   #codeBox: HTMLElement | null = null
   #codeLines: HTMLElement[] = []
   #marker: HTMLElement | null = null
@@ -85,11 +84,15 @@ export default class KernelViz extends ChartFigure {
     if (!this.#shell?.hasAttribute("data-tour") || !this.#model) return []
     const count = this.#model.stepCount(this.#cta)
     const lanes = this.#model.hasLaneEvents
-    const collective = this.#model
+    const exchanges = this.#model
       .statements(this.#cta)
-      .findIndex(statement => statement.steps.some(step => step.lanes?.kind === "collective"))
-    if (lanes && collective >= 0) {
-      return [{ step: 1 }, { zoom: "lane" }, { step: Math.min(count, 2) }, { step: collective + 1 }, { zoom: "tile" }]
+      .flatMap((statement, index) =>
+        statement.steps.some(step => step.lanes?.kind === "shuffle" || step.lanes?.kind === "collective")
+          ? [index + 1]
+          : []
+      )
+    if (lanes && exchanges.length > 0) {
+      return [{ step: 1 }, { zoom: "lane" }, ...exchanges.map(step => ({ step })), { zoom: "tile" }]
     }
     return [{ step: 1 }, { step: Math.min(count, 2) }, { step: Math.min(count, 3) }, { zoom: "lane" }, { zoom: "tile" }]
   }
@@ -409,9 +412,11 @@ export default class KernelViz extends ChartFigure {
       text?.classList.toggle("is-on", live)
     }
 
-    const statementOps = new Set(state.statement.steps.map(step => step.op))
-    model.barriers.forEach((barrier, index) => {
-      els.barrierTicks[index]?.group.classList.toggle("viz-current", statementOps.has(barrier.afterOp))
+    // A step's barrier stands after its op, or after the loop the op stands for (the GEMM's k step).
+    const ending = new Set(state.statement.steps.flatMap(step => (step.barrier ? model.ancestry(step.op) : [])))
+    const current = model.barriers.findIndex(barrier => ending.has(barrier.afterOp))
+    model.barriers.forEach((_, index) => {
+      els.barrierTicks[index]?.group.classList.toggle("viz-current", index === current)
     })
     const lastOp = state.statement.steps[state.statement.steps.length - 1].op
     const program = tile.program
@@ -513,19 +518,29 @@ export default class KernelViz extends ChartFigure {
       wire.setAttribute("d", `M${round(node.x)} ${round(node.y + 3)}L${round(to.x)} ${round(to.y)}`)
     })
     const collective = state.lanes.find(entry => entry.event.stages)
+    const shuffle = state.lanes.find(entry => entry.event.kind === "shuffle")
     const anyLanes = state.lanes.length > 0 || state.mapped !== null
     els.laneNodes.forEach(node => node.classList.toggle("is-on", anyLanes))
+    // Earlier shuffles of the same statement stay as faint arcs, so the stages can be counted.
+    const earlier = new Set(this.#earlierShuffles(state))
     for (const arcs of els.arcs) {
-      const isCurrent = collective?.opId === arcs.opId
+      const isCurrent = shuffle?.opId === arcs.opId
+      const isShown = isCurrent || earlier.has(arcs.opId) || (!shuffle && collective?.opId === arcs.opId)
       for (const stage of arcs.stages) {
         for (const pair of stage) {
-          pair.path.classList.toggle("is-hidden", !isCurrent)
-          pair.path.classList.remove("is-on")
-          pair.path.classList.toggle("is-idle", isCurrent)
+          pair.path.classList.toggle("is-hidden", !isShown)
+          pair.path.classList.toggle("is-on", isCurrent)
+          pair.path.classList.toggle("is-idle", isShown && !isCurrent)
+          pair.path.setAttribute("stroke-dasharray", "none")
         }
       }
     }
-    els.stageText.textContent = collective ? stagesSentence(collective.event) : "no shuffle at this step"
+    const stage = model.shuffleStage(state.statement)
+    els.stageText.textContent = collective
+      ? stagesSentence(collective.event)
+      : shuffle && stage
+        ? `stage ${stage.index} of ${stage.count}: ${shuffle.event.mode ?? "xor"} ${shuffle.event.partners?.[0] ?? 0}`
+        : "no shuffle at this step"
     els.idleText.textContent =
       state.lanes.length === 0 && !state.mapped ? "this op has no per-lane record in the trace" : ""
     const current = new Set(state.values.map(value => value.name))
@@ -536,9 +551,20 @@ export default class KernelViz extends ChartFigure {
     })
   }
 
+  // The shuffle ops of this statement's line that ran before this step, in this CTA.
+  #earlierShuffles(state: StepState): number[] {
+    const model = this.#model
+    if (!model) return []
+    const line = state.statement.span.line
+    return model
+      .statements(this.#cta)
+      .slice(0, state.statement.index)
+      .filter(statement => statement.span.line === line)
+      .flatMap(statement => statement.steps.filter(step => step.lanes?.kind === "shuffle").map(step => step.op))
+  }
+
   #settleLanes(): void {
     for (const packet of this.#els?.lanePackets ?? []) packet.hide()
-    this.#lastStage = -1
   }
 
   #linesOf(state: StepState): { facts: LineFacts; tensor: string } | null {
@@ -651,7 +677,12 @@ export default class KernelViz extends ChartFigure {
     const spaceOf = (access: Access) => (access.tensor !== undefined ? "global" : "shared")
     const routes: Route[] = []
     state.statement.steps.forEach((step, opIndex) => {
-      const reads = (step.reads ?? []).flatMap(access => {
+      // A buffer the op also writes is updated in place: the data comes from the op's other reads.
+      const written = new Set(
+        (step.writes ?? []).flatMap(access => (access.buffer === undefined ? [] : [access.buffer]))
+      )
+      const fresh = (step.reads ?? []).filter(access => access.buffer === undefined || !written.has(access.buffer))
+      const reads = (fresh.length > 0 ? fresh : (step.reads ?? [])).flatMap(access => {
         const at = port(access)
         return at ? [{ at, space: spaceOf(access) as Route["space"] }] : []
       })
@@ -661,8 +692,10 @@ export default class KernelViz extends ChartFigure {
       })
       const sources = reads.length > 0 ? reads : [{ at: threadsPort, space: "reg" as const }]
       const targets = writes.length > 0 ? writes : [threadsPort]
-      for (const source of sources) {
-        for (const target of targets.slice(0, 2)) {
+      // As many sources as targets: operand i lands in buffer i (the GEMM's two panels).
+      const paired = sources.length === targets.length && sources.length > 1
+      for (const [sourceIndex, source] of sources.entries()) {
+        for (const target of paired ? [targets[sourceIndex]] : targets.slice(0, 2)) {
           if (Math.hypot(source.at.x - target.x, source.at.y - target.y) < 4) continue
           const line = elbow(roundPoint(source.at), roundPoint(target), "v").simplified()
           const travelMs = clamp(line.lengthUnits / SPEED_UNITS_PER_MS, 320, 1100)
@@ -706,51 +739,31 @@ export default class KernelViz extends ChartFigure {
         },
       })
     }
-    const collective = state.lanes.find(entry => entry.event.stages)
-    const arcs = collective ? els.arcs.find(candidate => candidate.opId === collective.opId) : undefined
-    if (collective && arcs) {
-      const stageCount = arcs.stages.length
-      steps.push({
-        durationMs: STAGE_MS * stageCount,
-        apply: progress => this.#applyStages(arcs.stages, collective.event, progress),
-      })
+    const shuffle = state.lanes.find(entry => entry.event.kind === "shuffle")
+    const arcs = shuffle ? els.arcs.find(candidate => candidate.opId === shuffle.opId) : undefined
+    if (shuffle && arcs) {
+      steps.push({ durationMs: STAGE_MS, apply: progress => this.#applyStage(arcs.stages[0], progress) })
     }
     return steps
   }
 
-  #applyStages(stages: VizElements["arcs"][number]["stages"], event: LaneEvent, progress: number): void {
+  // One shuffle: its arcs draw in, a packet rides each arc both ways, and the arcs stay lit.
+  #applyStage(pairs: VizElements["arcs"][number]["stages"][number], progress: number): void {
     const els = this.#els
     if (!els) return
-    const stageFloat = progress * stages.length
-    const current = Math.min(stages.length - 1, Math.floor(stageFloat))
-    const local = progress >= 1 ? 1 : stageFloat - current
-    stages.forEach((stage, index) => {
-      for (const pair of stage) {
-        const isCurrent = index === current && progress < 1
-        pair.path.classList.toggle("is-hidden", index > current && progress < 1)
-        pair.path.classList.toggle("is-on", isCurrent)
-        pair.path.classList.toggle("is-idle", !isCurrent)
-        pair.path.setAttribute("stroke-dashoffset", isCurrent ? String(round(1 - Math.min(1, local / 0.3))) : "0")
-        pair.path.setAttribute("stroke-dasharray", isCurrent ? "1 1" : "none")
-      }
-    })
-    const pairs = stages[current]
+    const drawn = progress >= 1 ? 1 : Math.min(1, progress / 0.3)
+    for (const pair of pairs) {
+      pair.path.setAttribute("stroke-dasharray", progress >= 1 ? "none" : "1 1")
+      pair.path.setAttribute("stroke-dashoffset", String(round(1 - drawn)))
+    }
     els.lanePackets.forEach((packet, index) => {
       const pair = pairs[Math.floor(index / 2)]
       if (!pair || progress >= 1) {
         packet.hide()
         return
       }
-      packet.placeAtFraction(index % 2 === 0 ? pair.line : pair.reverse, (local - 0.22) / 0.6)
+      packet.placeAtFraction(index % 2 === 0 ? pair.line : pair.reverse, (progress - 0.22) / 0.6)
     })
-    if (current !== this.#lastStage || progress >= 1) {
-      this.#lastStage = progress >= 1 ? -1 : current
-      const distance = event.stages?.[current]?.[0] ?? 0
-      els.stageText.textContent =
-        progress >= 1
-          ? stagesSentence(event)
-          : `stage ${current + 1} of ${stages.length}: ${event.mode ?? "xor"} ${distance}`
-    }
   }
 
   #focusPoint(): Point {

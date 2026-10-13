@@ -87,9 +87,10 @@
   margin-left: auto;
 }
 
-/* Without JavaScript, or until the trace has loaded, the reader sees the code alone. */
+/* Until the trace has loaded the figure keeps its place but shows nothing; without JavaScript a
+ * noscript style removes it, so the reader sees the code alone. */
 .viz:not([data-viz-live]) .viz-figure {
-  display: none;
+  visibility: hidden;
 }
 
 .viz-figure {

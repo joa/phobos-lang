@@ -44,7 +44,7 @@ const grid = trace.launch.grid.filter((extent, axis) => axis === 0 || extent > 1
     <h1 class="viz-title"><code>{entry.name}</code></h1>
     <p class="viz-lede">
       The {trace.kernel} kernel{variantText}, as the compiler built it for {trace.compiler.chip} at commit{" "}
-      <code>{trace.compiler.commit}</code>: {params}; a {grid} grid of {trace.launch.threads} threads each.
+      <code>{trace.compiler.commit}</code>: {params}; a grid of {grid} CTAs, {trace.launch.threads} threads each.
     </p>
     <Visualizer
       name={entry.name}

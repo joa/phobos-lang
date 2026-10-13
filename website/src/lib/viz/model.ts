@@ -374,26 +374,48 @@ export class KernelModel {
     return this.buffer(id)?.name ?? `buffer ${id}`
   }
 
+  // Loop and branch extents from each op's `parent`: a region ends at its last descendant. A region
+  // whose direct children include several yields has several bodies (a ragged loop: whole tiles,
+  // then the remainder), each ending at its yield.
   #indexRegions(): void {
     const ops = this.trace.ops
     ops.forEach((op, index) => {
-      if (op.kind !== "for" && op.kind !== "if") return
-      const yields: number[] = []
-      ops.forEach((other, at) => {
-        if (at > index && other.kind === "yield" && other.span && op.span && sameSpan(other.span, op.span)) {
-          yields.push(at)
-        }
-      })
-      if (yields.length === 0) return
-      this.#endOf.set(op.id, yields[yields.length - 1])
+      for (let parent = op.parent; parent !== undefined; parent = this.#opById.get(parent)?.parent) {
+        this.#endOf.set(parent, Math.max(this.#endOf.get(parent) ?? 0, index))
+      }
+    })
+    ops.forEach((op, index) => {
+      if (!this.#endOf.has(op.id)) return
       const bodies: [number, number][] = []
       let from = index + 1
-      for (const at of yields) {
-        bodies.push([from, at])
-        from = at + 1
-      }
+      ops.forEach((child, at) => {
+        if (child.parent === op.id && child.kind === "yield") {
+          bodies.push([from, at])
+          from = at + 1
+        }
+      })
+      if (bodies.length === 0) bodies.push([index + 1, this.#endOf.get(op.id) ?? index])
       this.#bodies.set(op.id, bodies)
     })
+  }
+
+  /** For a shuffle step: which of its statement's shuffles it is, counting from 1, and how many. */
+  shuffleStage(statement: Statement): { index: number; count: number } | null {
+    if (statement.steps[0]?.lanes?.kind !== "shuffle") return null
+    const siblings = this.statements(this.ctaIndex(statement.cta)).filter(
+      other =>
+        other.steps[0]?.lanes?.kind === "shuffle" &&
+        sameSpan(other.span, statement.span) &&
+        sameIter(other.iter, statement.iter)
+    )
+    return { index: siblings.indexOf(statement) + 1, count: siblings.length }
+  }
+
+  /** The op and every `for`, `while` or `if` around it, innermost first. */
+  ancestry(opId: number): number[] {
+    const chain: number[] = []
+    for (let id: number | undefined = opId; id !== undefined; id = this.#opById.get(id)?.parent) chain.push(id)
+    return chain
   }
 
   #namedValues(): ValueKind[] {
@@ -417,7 +439,11 @@ export class KernelModel {
       const span = this.#opById.get(step.op)?.span
       if (!span) continue
       const last = statements[statements.length - 1]
-      if (last && sameSpan(last.span, span) && sameIter(last.iter, step.iter)) {
+      // A shuffle or a collective is its own step, so a butterfly runs one stage per step.
+      const exchanges = (candidate: Step) =>
+        candidate.lanes?.kind === "shuffle" || candidate.lanes?.kind === "collective"
+      const joins = !exchanges(step) && !(last && last.steps.some(exchanges))
+      if (last && joins && sameSpan(last.span, span) && sameIter(last.iter, step.iter)) {
         last.steps.push(step)
         continue
       }
@@ -428,7 +454,7 @@ export class KernelModel {
         iter: step.iter,
         span,
         steps: [step],
-        key: `${text}|${JSON.stringify(sortedIter(step.iter))}`,
+        key: `${text}|${JSON.stringify(sortedIter(step.iter))}|${statements.filter(other => sameSpan(other.span, span) && sameIter(other.iter, step.iter)).length}`,
       })
     }
     return statements
@@ -477,11 +503,12 @@ export class KernelModel {
     return this.#linesFor(access.tensor ?? "", absolute)
   }
 
-  // Assumes the tensor is dense and row-major and starts on a 128-byte boundary, as an allocation does.
+  // Addresses by the tensor's strides (dense row-major when it has none), its base on a 128-byte boundary.
   #linesFor(tensorName: string, laneElements: [number, number][][]): LineFacts | null {
     const tensor = this.tensor(tensorName)
     if (!tensor) return null
-    const cols = tensor.shape[tensor.shape.length - 1]
+    const strides = tensor.strides ?? denseStrides(tensor.shape)
+    const [rowStride, colStride] = strides.length === 1 ? [0, strides[0]] : strides.slice(-2)
     const lineBytes = new Map<number, number>()
     const laneLineNumbers: number[][] = []
     const laneBytes: [number, number][] = []
@@ -490,7 +517,7 @@ export class KernelModel {
       const lines: number[] = []
       let span: [number, number] = [0, 0]
       for (const [row, col] of elements) {
-        const address = (row * cols + col) * tensor.elemBytes
+        const address = (row * rowStride + col * colStride) * tensor.elemBytes
         const line = Math.floor(address / LINE_BYTES)
         lineBytes.set(line, (lineBytes.get(line) ?? 0) + tensor.elemBytes)
         requestedBytes += tensor.elemBytes
@@ -576,6 +603,16 @@ function boxElements(box: Box): [number, number][] {
   return elements
 }
 
+function denseStrides(shape: number[]): number[] {
+  const strides: number[] = []
+  let stride = 1
+  for (let axis = shape.length - 1; axis >= 0; axis -= 1) {
+    strides.unshift(stride)
+    stride *= shape[axis]
+  }
+  return strides
+}
+
 function elemBytesOf(elem: string): number {
   const bits = /(\d+)$/.exec(elem)
   return bits ? Math.max(1, Number(bits[1]) / 8) : 4
@@ -612,7 +649,7 @@ function describeAccess(model: KernelModel, access: Access): string {
 }
 
 // How each op kind reads in a sentence: `into` joins reads to writes, `lead` alone names the op.
-const KIND_PHRASES: Record<string, { verb: string; into?: string }> = {
+const KIND_PHRASES: Record<string, { verb: string; into?: string; after?: string }> = {
   materialize: { verb: "copies", into: "into" },
   copy: { verb: "copies", into: "into" },
   stage: { verb: "stages", into: "into" },
@@ -624,22 +661,26 @@ const KIND_PHRASES: Record<string, { verb: string; into?: string }> = {
   reduce: { verb: "reduces", into: "into" },
   accumulate: { verb: "adds", into: "into" },
   scaled_add: { verb: "computes alpha * acc + beta * c_old from", into: "into" },
-  gemm_dot: { verb: "runs a GEMM k step" },
+  gemm_dot: { verb: "stages", into: "in", after: " for the GEMM's k step" },
   gemm_store: { verb: "runs the GEMM epilogue" },
   store: { verb: "stores", into: "into" },
   load: { verb: "loads", into: "into" },
 }
 
-function describeStep(model: KernelModel, step: Step): string {
-  if (step.lanes) return describeLanes(model, step.lanes)
+function describeStep(model: KernelModel, step: Step, stage?: { index: number; count: number }): string {
+  if (step.lanes) return describeLanes(model, step.lanes, stage)
   const op = model.op(step.op)
   const kind = op?.kind ?? "op"
-  const reads = (step.reads ?? []).map(access => describeAccess(model, access))
+  // The GEMM's staging buffers are read back in place; they are named once, as written.
+  const staged = new Set((step.writes ?? []).flatMap(access => (access.buffer === undefined ? [] : [access.buffer])))
+  const reads = (step.reads ?? [])
+    .filter(access => kind !== "gemm_dot" || access.buffer === undefined || !staged.has(access.buffer))
+    .map(access => describeAccess(model, access))
   const writes = (step.writes ?? []).map(access => describeAccess(model, access))
   const phrase = KIND_PHRASES[kind] ?? { verb: kind.replace(/_/g, " ") }
   const on = op?.instr ? ` on ${op.instr}` : ""
   if (phrase.into && reads.length > 0 && writes.length > 0) {
-    return `${phrase.verb} ${joinList(reads)} ${phrase.into} ${joinList(writes)}${on}`
+    return `${phrase.verb} ${joinList(reads)} ${phrase.into} ${joinList(writes)}${phrase.after ?? ""}${on}`
   }
   if (reads.length === 0 && writes.length > 0 && (phrase.into || phrase.verb === "fills")) {
     return `${phrase.verb} ${joinList(writes)}${on}`
@@ -650,12 +691,12 @@ function describeStep(model: KernelModel, step: Step): string {
   return clause
 }
 
-function describeLanes(model: KernelModel, event: LaneEvent): string {
+function describeLanes(model: KernelModel, event: LaneEvent, stage?: { index: number; count: number }): string {
   const lanes = model.trace.launch.lanes
   if (event.kind === "collective" && event.stages) {
     const distances = event.stages.map(stage => stage[0])
     const pieces = event.width < lanes ? `, in pieces of ${event.width} lanes` : ""
-    return `the lane collective folds warp 0's ${lanes} values in ${event.stages.length} ${event.mode ?? "xor"} shuffle stages (${distances.join(", ")})${pieces}, and every lane ends with the result`
+    return `the lane collective is done: after ${event.stages.length} ${event.mode ?? "xor"} shuffle stages (${distances.join(", ")})${pieces}, every one of warp 0's ${lanes} lanes holds the result`
   }
   if ((event.kind === "lane_load" || event.kind === "lane_store") && event.runs && event.runs.length > 0) {
     const first = event.runs[0].access
@@ -675,8 +716,19 @@ function describeLanes(model: KernelModel, event: LaneEvent): string {
       : ""
     return `warp 0's ${event.runs.length} lanes each ${verb} ${runLength} ${elem} of ${formatBox(first.tensor ?? "?", union)}${vector}${lineText}`
   }
-  if (event.kind === "shuffle")
-    return `a ${event.mode ?? ""} shuffle moves one value between lanes of warp 0`.replace("  ", " ")
+  if (event.kind === "shuffle" && event.partners) {
+    const partners = event.partners
+    const last = partners.length - 1
+    const distance = event.mode === "up" ? last - partners[last] : partners[0]
+    const sources: Record<string, string> = {
+      xor: `lane xor ${distance}`,
+      down: `lane + ${distance}`,
+      up: `lane - ${distance}`,
+    }
+    const source = sources[event.mode ?? ""] ?? `lane ${distance}`
+    const where = stage ? `shuffle ${stage.index} of ${stage.count}: ` : "a shuffle: "
+    return `${where}each lane of warp 0 takes the value of ${source}`
+  }
   return `${event.kind.replace(/_/g, " ")} across warp 0`
 }
 
@@ -701,7 +753,8 @@ function describe(model: KernelModel, state: StepState): string {
   const { statement } = state
   const iter = iterLabel(statement.iter)
   const who = `${model.ctaName(statement.cta)}${iter ? `, ${iter}` : ""}`
-  const clauses = statement.steps.map(step => describeStep(model, step))
+  const stage = model.shuffleStage(statement) ?? undefined
+  const clauses = statement.steps.map(step => describeStep(model, step, stage))
   let sentence = `${who}: ${clauses.join("; then ")}`
   if (state.mapped) {
     const tensor = state.mapped.access.tensor ? model.tensor(state.mapped.access.tensor) : undefined
