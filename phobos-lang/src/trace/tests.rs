@@ -389,3 +389,29 @@ fn a_large_grid_is_summarized() {
             .all(|s| s.reads.iter().chain(&s.writes).all(|a| a.buffer.is_none()))
     );
 }
+
+/// Each copy of an unrolled body carries its own value of the loop
+/// variable, and the remainder runs the iterations a whole turn leaves.
+#[test]
+fn an_unrolled_loop_labels_each_copy() {
+    let src = "@launch(128)
+@autotune(TILE in [256], CHUNK in [2560])
+kernel k(x: tensor<f32>[N], y: tensor<f32>[N]) {
+  let base = ctx.block.x * CHUNK
+  for<unroll 4> t in range(base, min(base + CHUNK, N), TILE) {
+    y[t :+ TILE] = x[t :+ TILE] * 2.0
+  }
+}
+";
+    let t = trace(&request(src, &[], &[("N", 2560)], [1, 1, 1])).unwrap();
+    let mut starts = Vec::new();
+    for s in &t.steps {
+        for a in s.reads.iter().chain(&s.writes).filter(|a| a.tensor.is_some()) {
+            assert_eq!(a.region[0][0], s.iter["t"], "{s:?}");
+        }
+        if starts.last() != Some(&s.iter["t"]) {
+            starts.push(s.iter["t"]);
+        }
+    }
+    assert_eq!(starts, (0..10).map(|i| i * 256).collect::<Vec<_>>());
+}
