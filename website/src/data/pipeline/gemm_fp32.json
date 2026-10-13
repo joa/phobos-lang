@@ -1,10 +1,1258 @@
 {
   "stages": {
     "source": "for kt in range(0, K, TILE_K) {\n  var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n  var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n  acc += dot(a, b)\n}",
-    "ast": "For {\n    var: \"kt\",\n    start: Int(0),\n    end: Var(\"K\"),\n    step: Some(\n        Var(\"TILE_K\"),\n    ),\n    body: [\n        Var {\n            name: \"a\",\n            ty: None,\n            value: Some(\n                Index {\n                    base: Var(\"A\"),\n...",
+    "ast": "For {\n    var: \"kt\",\n    start: Int(0),\n    end: Var(\"K\"),\n    step: Some(\n        Var(\"TILE_K\"),\n    ),\n    unroll: None,\n    body: [\n        Var {\n            name: \"a\",\n            ty: None,\n            value: Some(\n                Index {\n...",
     "graph": "%38: gemm<f32>[32, 32]/4 = for %27, %K.7, %28, %26 {\n^(%kt.29: index, %30: gemm<f32>[32, 32]/4)\n  %31: index = const 32\n  %32: index = mul %pm.23, %31\n  %33: tile<f32>[32, 4]@global{align 4} = slice [32, 4] %A.5, %32, %kt.29\n  %34: index = const 32\n  %35: index = mul %pn.24, %34\n  %36: tile<f32>[4, 32]@global{align 32} = slice [4, 32] %B.8, %kt.29, %35\n  %37: gemm<f32>[32, 32]/4 = gemm_dot %30, %33, %36\n  yield %37",
     "passes": "// TILE_M=32 TILE_N=32 TILE_K=4, sm_75\ntile0   512 B at    0  dot staging\ntile1   512 B at  512  dot staging\ntile2   512 B at 1024  dot staging\ntile3   512 B at 1536  dot staging\npeak 2048 B of shared memory\nbarriers: 1 kept, 0 elided",
     "mlir": "%29 = scf.for %arg5 = %c0_9 to %dim_0 step %28 iter_args(%arg6 = %6) -> (vector<4x4xf32>) {\n  %58 = arith.addi %arg5, %c4_10 : index\n  %59 = arith.cmpi slt, %58, %dim_0 : index\n  scf.if %59 {\n    %c32_46 = arith.constant 32 : index\n    %63 = arith.muli %block_id_x, %c32_46 : index\n    %subview_47 = memref.subview %assume_align[%63, %58] [32, 4] [1, 1] : memref<?x?xf32, 1> to memref<32x4xf32, strided<[?, 1], offset: ?>, 1>\n    %c32_48 = arith.constant 32 : index\n    %64 = arith.muli %block_id_y, %c32_48 : index\n...",
     "ptx": ".target sm_75\n.visible .entry gemm(\n.maxntid 256\n...\nld.global.v4.b32  {%r311, %r312, %r313, %r314}, [%rd55];\nbar.sync  0;\nld.shared.v4.b32  {%r207, %r208, %r209, %r210}, [%rd59+-256];\nfma.rn.f32  %r239, %r207, %r214, %r326;"
+  },
+  "structure": {
+    "source": {
+      "path": "examples/gemm_fp32.ph",
+      "lines": [
+        {
+          "n": 1,
+          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])",
+          "role": "attribute"
+        },
+        { "n": 2, "text": "@launch(256)", "role": "attribute" },
+        { "n": 3, "text": "@pipeline", "role": "attribute" },
+        { "n": 4, "text": "@aligned(M = TILE_M, N = TILE_N, K = TILE_K)", "role": "attribute" },
+        { "n": 5, "text": "kernel gemm(A: tensor<f32>[M, K],", "role": "signature" },
+        { "n": 6, "text": "              B: tensor<f32>[K, N],", "role": "signature" },
+        { "n": 7, "text": "              C: tensor<f32>[M, N],", "role": "signature" },
+        { "n": 8, "text": "              alpha: f32,", "role": "signature" },
+        { "n": 9, "text": "              beta: f32) {", "role": "signature" },
+        { "n": 10, "text": "  let pm = ctx.block.x", "role": "code" },
+        { "n": 11, "text": "  let pn = ctx.block.y", "role": "code" },
+        { "n": 12, "text": "", "role": "blank" },
+        { "n": 13, "text": "  var acc: tile<f32>[TILE_M, TILE_N] = 0.0", "role": "code" },
+        { "n": 14, "text": "", "role": "blank" },
+        { "n": 15, "text": "  for kt in range(0, K, TILE_K) {", "role": "loop-header" },
+        { "n": 16, "text": "    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]", "role": "loop-body" },
+        { "n": 17, "text": "    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]", "role": "loop-body" },
+        { "n": 18, "text": "    acc += dot(a, b)", "role": "loop-body" },
+        { "n": 19, "text": "  }", "role": "loop-end" },
+        { "n": 20, "text": "", "role": "blank" },
+        { "n": 21, "text": "  let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]", "role": "code" },
+        {
+          "n": 22,
+          "text": "  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old",
+          "role": "code"
+        },
+        { "n": 23, "text": "}", "role": "code" }
+      ],
+      "loop": { "header": 15, "body": [16, 17, 18], "end": 19 }
+    },
+    "ast": {
+      "root": {
+        "kind": "Kernel",
+        "label": "gemm",
+        "children": [
+          {
+            "kind": "Attributes",
+            "label": "@autotune @launch @pipeline @aligned",
+            "text": "@autotune @launch @pipeline @aligned",
+            "folded": 4
+          },
+          {
+            "kind": "Params",
+            "label": "A, B, C, alpha, beta",
+            "text": "A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32",
+            "folded": 5
+          },
+          { "kind": "Let", "label": "pm", "text": "let pm = ctx.block(0)", "role": "body", "line": 10, "folded": 2 },
+          { "kind": "Let", "label": "pn", "text": "let pn = ctx.block(1)", "role": "body", "line": 11, "folded": 2 },
+          { "kind": "Var", "label": "acc", "text": "var acc = 0.0", "role": "body", "line": 13, "folded": 1 },
+          {
+            "kind": "For",
+            "label": "kt",
+            "children": [
+              { "kind": "Int", "label": "0", "role": "start" },
+              { "kind": "Var", "label": "K", "role": "end" },
+              { "kind": "Var", "label": "TILE_K", "role": "step" },
+              {
+                "kind": "Var",
+                "label": "a",
+                "children": [
+                  {
+                    "kind": "Index",
+                    "label": "[ ]",
+                    "children": [
+                      { "kind": "Var", "label": "A" },
+                      {
+                        "kind": "Span",
+                        "label": ":+",
+                        "children": [
+                          {
+                            "kind": "Binary",
+                            "label": "*",
+                            "children": [
+                              { "kind": "Var", "label": "pm" },
+                              { "kind": "Var", "label": "TILE_M" }
+                            ],
+                            "role": "start"
+                          },
+                          { "kind": "Var", "label": "TILE_M", "role": "len" }
+                        ]
+                      },
+                      {
+                        "kind": "Span",
+                        "label": ":+",
+                        "children": [
+                          { "kind": "Var", "label": "kt", "role": "start" },
+                          { "kind": "Var", "label": "TILE_K", "role": "len" }
+                        ]
+                      }
+                    ],
+                    "role": "value"
+                  }
+                ],
+                "line": 16,
+                "role": "body"
+              },
+              {
+                "kind": "Var",
+                "label": "b",
+                "children": [
+                  {
+                    "kind": "Index",
+                    "label": "[ ]",
+                    "children": [
+                      { "kind": "Var", "label": "B" },
+                      {
+                        "kind": "Span",
+                        "label": ":+",
+                        "children": [
+                          { "kind": "Var", "label": "kt", "role": "start" },
+                          { "kind": "Var", "label": "TILE_K", "role": "len" }
+                        ]
+                      },
+                      {
+                        "kind": "Span",
+                        "label": ":+",
+                        "children": [
+                          {
+                            "kind": "Binary",
+                            "label": "*",
+                            "children": [
+                              { "kind": "Var", "label": "pn" },
+                              { "kind": "Var", "label": "TILE_N" }
+                            ],
+                            "role": "start"
+                          },
+                          { "kind": "Var", "label": "TILE_N", "role": "len" }
+                        ]
+                      }
+                    ],
+                    "role": "value"
+                  }
+                ],
+                "line": 17,
+                "role": "body"
+              },
+              {
+                "kind": "Assign",
+                "label": "+=",
+                "children": [
+                  { "kind": "Var", "label": "acc", "role": "target" },
+                  {
+                    "kind": "Call",
+                    "label": "dot",
+                    "children": [
+                      { "kind": "Var", "label": "a" },
+                      { "kind": "Var", "label": "b" }
+                    ],
+                    "role": "value"
+                  }
+                ],
+                "line": 18,
+                "role": "body"
+              }
+            ],
+            "line": 15,
+            "role": "body"
+          },
+          {
+            "kind": "Let",
+            "label": "c_old",
+            "text": "let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]",
+            "role": "body",
+            "line": 21,
+            "folded": 12
+          },
+          {
+            "kind": "Assign",
+            "label": "=",
+            "text": "C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old",
+            "role": "body",
+            "line": 22,
+            "folded": 19
+          }
+        ]
+      },
+      "nodeCount": 39,
+      "focus": "For",
+      "pruned": "Source spans, absent options (ty: None, unroll: None) and the attribute and parameter lists are dropped; every statement outside the `for` is one node with its subtree folded (`folded` counts the hidden nodes, `text` spells it out)."
+    },
+    "graph": {
+      "kernel": "gemm",
+      "nodes": [
+        {
+          "id": "%A.0",
+          "kind": "param",
+          "op": "param",
+          "label": "A",
+          "type": "tensor<f32>[?, ?]",
+          "region": null,
+          "layer": 0,
+          "row": 4,
+          "x": 0,
+          "y": 224
+        },
+        {
+          "id": "%B.1",
+          "kind": "param",
+          "op": "param",
+          "label": "B",
+          "type": "tensor<f32>[?, ?]",
+          "region": null,
+          "layer": 0,
+          "row": 6,
+          "x": 0,
+          "y": 336
+        },
+        {
+          "id": "%C.2",
+          "kind": "param",
+          "op": "param",
+          "label": "C",
+          "type": "tensor<f32>[?, ?]",
+          "region": null,
+          "layer": 5,
+          "row": 4,
+          "x": 850,
+          "y": 224
+        },
+        {
+          "id": "%alpha.3",
+          "kind": "param",
+          "op": "param",
+          "label": "alpha",
+          "type": "f32",
+          "region": null,
+          "layer": 7,
+          "row": 5,
+          "x": 1190,
+          "y": 280
+        },
+        {
+          "id": "%beta.4",
+          "kind": "param",
+          "op": "param",
+          "label": "beta",
+          "type": "f32",
+          "region": null,
+          "layer": 7,
+          "row": 6,
+          "x": 1190,
+          "y": 336
+        },
+        {
+          "id": "%A.5",
+          "kind": "op",
+          "op": "assume_align",
+          "label": "assume_align A",
+          "type": "tensor<f32>[?, ?]",
+          "region": null,
+          "layer": 3,
+          "row": 4,
+          "x": 510,
+          "y": 224
+        },
+        {
+          "id": "%M.6",
+          "kind": "op",
+          "op": "dim",
+          "label": "M = dim 0 A",
+          "type": "index",
+          "region": null,
+          "layer": 1,
+          "row": 6,
+          "x": 170,
+          "y": 336
+        },
+        {
+          "id": "%K.7",
+          "kind": "op",
+          "op": "dim",
+          "label": "K = dim 1 A",
+          "type": "index",
+          "region": null,
+          "layer": 1,
+          "row": 7,
+          "x": 170,
+          "y": 392
+        },
+        {
+          "id": "%B.8",
+          "kind": "op",
+          "op": "assume_align",
+          "label": "assume_align B",
+          "type": "tensor<f32>[?, ?]",
+          "region": null,
+          "layer": 3,
+          "row": 5,
+          "x": 510,
+          "y": 280
+        },
+        {
+          "id": "%N.9",
+          "kind": "op",
+          "op": "dim",
+          "label": "N = dim 1 B",
+          "type": "index",
+          "region": null,
+          "layer": 1,
+          "row": 8,
+          "x": 170,
+          "y": 448
+        },
+        {
+          "id": "%C.10",
+          "kind": "op",
+          "op": "assume_align",
+          "label": "assume_align C",
+          "type": "tensor<f32>[?, ?]",
+          "region": null,
+          "layer": 6,
+          "row": 4,
+          "x": 1020,
+          "y": 224
+        },
+        {
+          "id": "guard:#15",
+          "kind": "guard",
+          "op": "if trap",
+          "label": "trap if M % 32 != 0",
+          "type": null,
+          "region": null,
+          "folds": ["%14", "%12", "%11", "%13"],
+          "layer": 2,
+          "row": 5,
+          "x": 340,
+          "y": 280
+        },
+        {
+          "id": "guard:#22",
+          "kind": "guard",
+          "op": "if trap",
+          "label": "trap if N % 32 != 0",
+          "type": null,
+          "region": null,
+          "folds": ["%18", "%16", "%15", "%17"],
+          "layer": 2,
+          "row": 8,
+          "x": 340,
+          "y": 448
+        },
+        {
+          "id": "guard:#29",
+          "kind": "guard",
+          "op": "if trap",
+          "label": "trap if K % 4 != 0",
+          "type": null,
+          "region": null,
+          "folds": ["%22", "%20", "%19", "%21"],
+          "layer": 2,
+          "row": 7,
+          "x": 340,
+          "y": 392
+        },
+        {
+          "id": "%pm.23",
+          "kind": "op",
+          "op": "program_id",
+          "label": "pm = program_id 0",
+          "type": "index",
+          "region": null,
+          "layer": 2,
+          "row": 4,
+          "x": 340,
+          "y": 224
+        },
+        {
+          "id": "%pn.24",
+          "kind": "op",
+          "op": "program_id",
+          "label": "pn = program_id 1",
+          "type": "index",
+          "region": null,
+          "layer": 2,
+          "row": 6,
+          "x": 340,
+          "y": 336
+        },
+        {
+          "id": "%26",
+          "kind": "op",
+          "op": "gemm_init",
+          "label": "gemm_init",
+          "type": "gemm<f32>[32, 32]/4",
+          "region": null,
+          "literals": ["0.0"],
+          "layer": 1,
+          "row": 2,
+          "x": 170,
+          "y": 112
+        },
+        {
+          "id": "for:%38",
+          "kind": "for",
+          "op": "for",
+          "label": "for kt in 0..K step 4",
+          "type": null,
+          "region": null,
+          "layer": 2,
+          "row": 2,
+          "x": 340,
+          "y": 112
+        },
+        {
+          "id": "%kt.29",
+          "kind": "block_arg",
+          "op": "block arg",
+          "label": "kt",
+          "type": "index",
+          "region": "%38",
+          "layer": 3,
+          "row": 0,
+          "x": 510,
+          "y": 0
+        },
+        {
+          "id": "%30",
+          "kind": "block_arg",
+          "op": "block arg",
+          "label": "%30 carried",
+          "type": "gemm<f32>[32, 32]/4",
+          "region": "%38",
+          "layer": 3,
+          "row": 1,
+          "x": 510,
+          "y": 56
+        },
+        {
+          "id": "math:%32",
+          "kind": "math",
+          "op": "index math",
+          "label": "pm * 32",
+          "type": "index",
+          "region": "%38",
+          "folds": ["%32", "%31"],
+          "layer": 3,
+          "row": 2,
+          "x": 510,
+          "y": 112
+        },
+        {
+          "id": "%33",
+          "kind": "op",
+          "op": "slice",
+          "label": "slice A[32, 4]",
+          "type": "tile<f32>[32, 4]@global",
+          "region": "%38",
+          "layer": 4,
+          "row": 1,
+          "x": 680,
+          "y": 56
+        },
+        {
+          "id": "math:%35",
+          "kind": "math",
+          "op": "index math",
+          "label": "pn * 32",
+          "type": "index",
+          "region": "%38",
+          "folds": ["%35", "%34"],
+          "layer": 3,
+          "row": 3,
+          "x": 510,
+          "y": 168
+        },
+        {
+          "id": "%36",
+          "kind": "op",
+          "op": "slice",
+          "label": "slice B[4, 32]",
+          "type": "tile<f32>[4, 32]@global",
+          "region": "%38",
+          "layer": 4,
+          "row": 2,
+          "x": 680,
+          "y": 112
+        },
+        {
+          "id": "%37",
+          "kind": "op",
+          "op": "gemm_dot",
+          "label": "gemm_dot",
+          "type": "gemm<f32>[32, 32]/4",
+          "region": "%38",
+          "layer": 5,
+          "row": 1,
+          "x": 850,
+          "y": 56
+        },
+        {
+          "id": "#48",
+          "kind": "yield",
+          "op": "yield",
+          "label": "yield",
+          "type": null,
+          "region": "%38",
+          "layer": 6,
+          "row": 1,
+          "x": 1020,
+          "y": 56
+        },
+        {
+          "id": "%38",
+          "kind": "for_result",
+          "op": "for result",
+          "label": "%38",
+          "type": "gemm<f32>[32, 32]/4",
+          "region": null,
+          "layer": 7,
+          "row": 2,
+          "x": 1190,
+          "y": 112
+        },
+        {
+          "id": "math:%40",
+          "kind": "math",
+          "op": "index math",
+          "label": "pm * 32",
+          "type": "index",
+          "region": null,
+          "folds": ["%40", "%39"],
+          "layer": 6,
+          "row": 5,
+          "x": 1020,
+          "y": 280
+        },
+        {
+          "id": "math:%42",
+          "kind": "math",
+          "op": "index math",
+          "label": "pn * 32",
+          "type": "index",
+          "region": null,
+          "folds": ["%42", "%41"],
+          "layer": 6,
+          "row": 6,
+          "x": 1020,
+          "y": 336
+        },
+        {
+          "id": "%43",
+          "kind": "op",
+          "op": "slice",
+          "label": "slice C[32, 32]",
+          "type": "tile<f32>[32, 32]@global",
+          "region": null,
+          "layer": 7,
+          "row": 7,
+          "x": 1190,
+          "y": 392
+        },
+        {
+          "id": "#54",
+          "kind": "op",
+          "op": "gemm_store",
+          "label": "gemm_store",
+          "type": null,
+          "region": null,
+          "layer": 8,
+          "row": 5,
+          "x": 1360,
+          "y": 280
+        }
+      ],
+      "edges": [
+        { "from": "%A.0", "to": "%A.5", "kind": "data" },
+        { "from": "%A.0", "to": "%M.6", "kind": "data" },
+        { "from": "%A.0", "to": "%K.7", "kind": "data" },
+        { "from": "%B.1", "to": "%B.8", "kind": "data" },
+        { "from": "%B.1", "to": "%N.9", "kind": "data" },
+        { "from": "%C.2", "to": "%C.10", "kind": "data" },
+        { "from": "%M.6", "to": "guard:#15", "kind": "data" },
+        { "from": "%N.9", "to": "guard:#22", "kind": "data" },
+        { "from": "%K.7", "to": "guard:#29", "kind": "data" },
+        { "from": "%K.7", "to": "for:%38", "kind": "data" },
+        { "from": "%26", "to": "for:%38", "kind": "data" },
+        { "from": "for:%38", "to": "%kt.29", "kind": "data" },
+        { "from": "for:%38", "to": "%30", "kind": "data" },
+        { "from": "%A.5", "to": "%33", "kind": "data" },
+        { "from": "%pm.23", "to": "math:%32", "kind": "data" },
+        { "from": "math:%32", "to": "%33", "kind": "data" },
+        { "from": "%kt.29", "to": "%33", "kind": "data" },
+        { "from": "%B.8", "to": "%36", "kind": "data" },
+        { "from": "%kt.29", "to": "%36", "kind": "data" },
+        { "from": "%pn.24", "to": "math:%35", "kind": "data" },
+        { "from": "math:%35", "to": "%36", "kind": "data" },
+        { "from": "%30", "to": "%37", "kind": "data" },
+        { "from": "%33", "to": "%37", "kind": "data" },
+        { "from": "%36", "to": "%37", "kind": "data" },
+        { "from": "%37", "to": "#48", "kind": "data" },
+        { "from": "%C.10", "to": "%43", "kind": "data" },
+        { "from": "%pm.23", "to": "math:%40", "kind": "data" },
+        { "from": "math:%40", "to": "%43", "kind": "data" },
+        { "from": "%pn.24", "to": "math:%42", "kind": "data" },
+        { "from": "math:%42", "to": "%43", "kind": "data" },
+        { "from": "%38", "to": "#54", "kind": "data" },
+        { "from": "%43", "to": "#54", "kind": "data" },
+        { "from": "%alpha.3", "to": "#54", "kind": "data" },
+        { "from": "%beta.4", "to": "#54", "kind": "data" },
+        { "from": "#48", "to": "%38", "kind": "data" },
+        { "from": "#48", "to": "%30", "kind": "back" }
+      ],
+      "regions": [
+        {
+          "id": "%38",
+          "kind": "for",
+          "header": "for:%38",
+          "result": "%38",
+          "label": "for kt in 0..K step 4",
+          "box": {
+            "x": 425,
+            "y": -28,
+            "width": 680,
+            "height": 224,
+            "firstLayer": 3,
+            "lastLayer": 6,
+            "firstRow": 0,
+            "lastRow": 3
+          }
+        }
+      ],
+      "pruned": {
+        "opsPrinted": 55,
+        "foldedOps": 23,
+        "foldedIds": [
+          "%11",
+          "%12",
+          "%13",
+          "%14",
+          "%15",
+          "%16",
+          "%17",
+          "%18",
+          "%19",
+          "%20",
+          "%21",
+          "%22",
+          "%25",
+          "%27",
+          "%28",
+          "%31",
+          "%32",
+          "%34",
+          "%35",
+          "%39",
+          "%40",
+          "%41",
+          "%42"
+        ],
+        "note": "Constants are inlined into their readers (as `literals`, or into a label); index arithmetic (mul, rem, ne) is folded into one `index math` node per reader, labelled with its expression; each `if { trap }` divisibility check is one `guard` node. The `for` is drawn as a header node, its block arguments, the body and a result node; the yield's edge back to the carried argument is `back` and not layered."
+      },
+      "layout": {
+        "method": "longest-path layering, each node pulled right to just before its earliest reader; barycentric rows, the loop body in one band of rows that other nodes in its layers sit above or below",
+        "direction": "left-to-right",
+        "columnWidth": 170,
+        "rowHeight": 56,
+        "layers": 9,
+        "rows": 9,
+        "width": 1360,
+        "height": 448
+      }
+    },
+    "passes": [
+      {
+        "trace": "gemm_fp32_no_aligned.sm_75",
+        "variant": { "drop": "@aligned" },
+        "chip": "sm_75",
+        "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32 },
+        "peakBytes": 8192,
+        "buffers": [
+          {
+            "id": 0,
+            "name": "acc",
+            "bytes": 4096,
+            "offsetBytes": 0,
+            "firstOp": 8,
+            "lastOp": 59,
+            "scratch": false,
+            "elem": "f32",
+            "shape": [32, 32]
+          },
+          {
+            "id": 1,
+            "name": "a",
+            "bytes": 512,
+            "offsetBytes": 4096,
+            "firstOp": 21,
+            "lastOp": 43,
+            "scratch": false,
+            "elem": "f32",
+            "shape": [32, 4]
+          },
+          {
+            "id": 2,
+            "name": "b",
+            "bytes": 512,
+            "offsetBytes": 4608,
+            "firstOp": 26,
+            "lastOp": 43,
+            "scratch": false,
+            "elem": "f32",
+            "shape": [4, 32]
+          },
+          {
+            "id": 3,
+            "name": "a",
+            "bytes": 512,
+            "offsetBytes": 4096,
+            "firstOp": 34,
+            "lastOp": 43,
+            "scratch": false,
+            "elem": "f32",
+            "shape": [32, 4]
+          },
+          {
+            "id": 4,
+            "name": "b",
+            "bytes": 512,
+            "offsetBytes": 4608,
+            "firstOp": 40,
+            "lastOp": 43,
+            "scratch": false,
+            "elem": "f32",
+            "shape": [4, 32]
+          },
+          {
+            "id": 5,
+            "name": "c_old",
+            "bytes": 4096,
+            "offsetBytes": 4096,
+            "firstOp": 51,
+            "lastOp": 59,
+            "scratch": false,
+            "elem": "f32",
+            "shape": [32, 32]
+          }
+        ],
+        "barriers": [
+          { "afterOp": 10, "opKind": "fill", "kept": true },
+          { "afterOp": 21, "opKind": "materialize", "kept": false },
+          { "afterOp": 26, "opKind": "materialize", "kept": true },
+          { "afterOp": 27, "opKind": "dot_into", "kept": true },
+          { "afterOp": 34, "opKind": "materialize", "kept": false },
+          { "afterOp": 40, "opKind": "materialize", "kept": true },
+          { "afterOp": 41, "opKind": "dot_into", "kept": true },
+          { "afterOp": 51, "opKind": "materialize", "kept": false },
+          { "afterOp": 59, "opKind": "scaled_add", "kept": false }
+        ],
+        "barrierCounts": { "kept": 5, "elided": 4 },
+        "ops": [
+          { "id": 0, "kind": "assume_align" },
+          { "id": 1, "kind": "dim" },
+          { "id": 2, "kind": "dim" },
+          { "id": 3, "kind": "assume_align" },
+          { "id": 4, "kind": "dim" },
+          { "id": 5, "kind": "assume_align" },
+          { "id": 6, "kind": "program_id" },
+          { "id": 7, "kind": "program_id" },
+          { "id": 8, "kind": "alloc" },
+          { "id": 9, "kind": "const" },
+          { "id": 10, "kind": "fill" },
+          { "id": 11, "kind": "const" },
+          { "id": 12, "kind": "const" },
+          { "id": 13, "kind": "binary" },
+          { "id": 14, "kind": "index" },
+          { "id": 15, "kind": "binary" },
+          { "id": 16, "kind": "binary" },
+          { "id": 17, "kind": "const", "parent": 43 },
+          { "id": 18, "kind": "binary", "parent": 43 },
+          { "id": 19, "kind": "dim", "parent": 43 },
+          { "id": 20, "kind": "slice", "parent": 43 },
+          { "id": 21, "kind": "materialize", "parent": 43 },
+          { "id": 22, "kind": "const", "parent": 43 },
+          { "id": 23, "kind": "binary", "parent": 43 },
+          { "id": 24, "kind": "dim", "parent": 43 },
+          { "id": 25, "kind": "slice", "parent": 43 },
+          { "id": 26, "kind": "materialize", "parent": 43 },
+          { "id": 27, "kind": "dot_into", "parent": 43 },
+          { "id": 28, "kind": "yield", "parent": 43 },
+          { "id": 29, "kind": "const", "parent": 43 },
+          { "id": 30, "kind": "binary", "parent": 43 },
+          { "id": 31, "kind": "dim", "parent": 43 },
+          { "id": 32, "kind": "dim", "parent": 43 },
+          { "id": 33, "kind": "slice", "parent": 43 },
+          { "id": 34, "kind": "materialize", "parent": 43 },
+          { "id": 35, "kind": "const", "parent": 43 },
+          { "id": 36, "kind": "binary", "parent": 43 },
+          { "id": 37, "kind": "dim", "parent": 43 },
+          { "id": 38, "kind": "dim", "parent": 43 },
+          { "id": 39, "kind": "slice", "parent": 43 },
+          { "id": 40, "kind": "materialize", "parent": 43 },
+          { "id": 41, "kind": "dot_into", "parent": 43 },
+          { "id": 42, "kind": "yield", "parent": 43 },
+          { "id": 43, "kind": "for" },
+          { "id": 44, "kind": "const" },
+          { "id": 45, "kind": "binary" },
+          { "id": 46, "kind": "const" },
+          { "id": 47, "kind": "binary" },
+          { "id": 48, "kind": "dim" },
+          { "id": 49, "kind": "dim" },
+          { "id": 50, "kind": "slice" },
+          { "id": 51, "kind": "materialize" },
+          { "id": 52, "kind": "const" },
+          { "id": 53, "kind": "binary" },
+          { "id": 54, "kind": "const" },
+          { "id": 55, "kind": "binary" },
+          { "id": 56, "kind": "dim" },
+          { "id": 57, "kind": "dim" },
+          { "id": 58, "kind": "slice" },
+          { "id": 59, "kind": "scaled_add" }
+        ],
+        "loops": [{ "id": 43, "var": "kt", "trips": 16, "firstOp": 17, "lastOp": 43 }],
+        "recommended": true
+      },
+      {
+        "trace": "gemm_fp32.sm_75",
+        "variant": null,
+        "chip": "sm_75",
+        "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32 },
+        "peakBytes": 2048,
+        "buffers": [
+          {
+            "id": 0,
+            "name": "tile0",
+            "bytes": 512,
+            "offsetBytes": 0,
+            "firstOp": 41,
+            "lastOp": 47,
+            "scratch": true,
+            "shape": [4, 32]
+          },
+          {
+            "id": 1,
+            "name": "tile1",
+            "bytes": 512,
+            "offsetBytes": 512,
+            "firstOp": 41,
+            "lastOp": 47,
+            "scratch": true,
+            "shape": [4, 32]
+          },
+          {
+            "id": 2,
+            "name": "tile2",
+            "bytes": 512,
+            "offsetBytes": 1024,
+            "firstOp": 41,
+            "lastOp": 47,
+            "scratch": true,
+            "shape": [4, 32]
+          },
+          {
+            "id": 3,
+            "name": "tile3",
+            "bytes": 512,
+            "offsetBytes": 1536,
+            "firstOp": 41,
+            "lastOp": 47,
+            "scratch": true,
+            "shape": [4, 32]
+          }
+        ],
+        "barriers": [{ "afterOp": 41, "opKind": "for", "kept": true }],
+        "barrierCounts": { "kept": 1, "elided": 0 },
+        "ops": [
+          { "id": 0, "kind": "assume_align" },
+          { "id": 1, "kind": "dim" },
+          { "id": 2, "kind": "dim" },
+          { "id": 3, "kind": "assume_align" },
+          { "id": 4, "kind": "dim" },
+          { "id": 5, "kind": "assume_align" },
+          { "id": 6, "kind": "const" },
+          { "id": 7, "kind": "binary" },
+          { "id": 8, "kind": "const" },
+          { "id": 9, "kind": "binary" },
+          { "id": 10, "kind": "trap", "parent": 12 },
+          { "id": 11, "kind": "yield", "parent": 12 },
+          { "id": 12, "kind": "if" },
+          { "id": 13, "kind": "const" },
+          { "id": 14, "kind": "binary" },
+          { "id": 15, "kind": "const" },
+          { "id": 16, "kind": "binary" },
+          { "id": 17, "kind": "trap", "parent": 19 },
+          { "id": 18, "kind": "yield", "parent": 19 },
+          { "id": 19, "kind": "if" },
+          { "id": 20, "kind": "const" },
+          { "id": 21, "kind": "binary" },
+          { "id": 22, "kind": "const" },
+          { "id": 23, "kind": "binary" },
+          { "id": 24, "kind": "trap", "parent": 26 },
+          { "id": 25, "kind": "yield", "parent": 26 },
+          { "id": 26, "kind": "if" },
+          { "id": 27, "kind": "program_id" },
+          { "id": 28, "kind": "program_id" },
+          { "id": 29, "kind": "const" },
+          { "id": 30, "kind": "gemm_init" },
+          { "id": 31, "kind": "const" },
+          { "id": 32, "kind": "const" },
+          { "id": 33, "kind": "const", "parent": 41 },
+          { "id": 34, "kind": "binary", "parent": 41 },
+          { "id": 35, "kind": "slice", "parent": 41 },
+          { "id": 36, "kind": "const", "parent": 41 },
+          { "id": 37, "kind": "binary", "parent": 41 },
+          { "id": 38, "kind": "slice", "parent": 41 },
+          { "id": 39, "kind": "gemm_dot", "parent": 41 },
+          { "id": 40, "kind": "yield", "parent": 41 },
+          { "id": 41, "kind": "for" },
+          { "id": 42, "kind": "const" },
+          { "id": 43, "kind": "binary" },
+          { "id": 44, "kind": "const" },
+          { "id": 45, "kind": "binary" },
+          { "id": 46, "kind": "slice" },
+          { "id": 47, "kind": "gemm_store" }
+        ],
+        "loops": [{ "id": 41, "var": "kt", "trips": 16, "firstOp": 33, "lastOp": 41 }],
+        "recommended": false
+      }
+    ],
+    "mlir": {
+      "root": {
+        "op": "gpu.func",
+        "line": 7,
+        "role": "kernel",
+        "ops": {
+          "memref.assume_alignment": 7,
+          "arith.constant": 39,
+          "memref.dim": 3,
+          "arith.remsi": 3,
+          "arith.cmpi": 3,
+          "gpu.block_id": 2,
+          "vector.broadcast": 3,
+          "gpu.thread_id": 3,
+          "arith.divui": 3,
+          "arith.minsi": 1,
+          "arith.remui": 3,
+          "arith.muli": 11,
+          "arith.addi": 6,
+          "memref.get_global": 4,
+          "memref.view": 4,
+          "memref.subview": 3,
+          "gpu.block_dim": 2,
+          "gpu.barrier": 1,
+          "vector.extract": 4,
+          "vector.load": 4,
+          "arith.mulf": 8,
+          "arith.addf": 4,
+          "vector.store": 4,
+          "gpu.return": 1
+        },
+        "total": 335,
+        "children": [
+          { "op": "scf.if", "line": 21, "role": "guard", "ops": { "llvm.intr.trap": 1 }, "total": 1, "children": [] },
+          { "op": "scf.if", "line": 28, "role": "guard", "ops": { "llvm.intr.trap": 1 }, "total": 1, "children": [] },
+          { "op": "scf.if", "line": 35, "role": "guard", "ops": { "llvm.intr.trap": 1 }, "total": 1, "children": [] },
+          {
+            "op": "scf.for",
+            "line": 94,
+            "role": "copy",
+            "ops": {
+              "arith.remui": 1,
+              "arith.divui": 1,
+              "arith.constant": 5,
+              "arith.muli": 1,
+              "vector.load": 1,
+              "vector.extract": 4,
+              "arith.addi": 4,
+              "memref.store": 4
+            },
+            "total": 21,
+            "children": []
+          },
+          {
+            "op": "scf.for",
+            "line": 123,
+            "role": "copy",
+            "ops": {
+              "arith.remui": 1,
+              "arith.divui": 1,
+              "arith.constant": 1,
+              "arith.muli": 1,
+              "vector.load": 1,
+              "vector.store": 1
+            },
+            "total": 6,
+            "children": []
+          },
+          {
+            "op": "scf.for",
+            "line": 134,
+            "role": "loop",
+            "ops": { "arith.addi": 1, "arith.cmpi": 2, "arith.constant": 3, "gpu.barrier": 1, "scf.yield": 1 },
+            "total": 173,
+            "children": [
+              {
+                "op": "scf.if",
+                "line": 137,
+                "role": "copy",
+                "ops": {
+                  "arith.constant": 8,
+                  "arith.muli": 4,
+                  "memref.subview": 2,
+                  "gpu.thread_id": 2,
+                  "gpu.block_dim": 2
+                },
+                "total": 47,
+                "children": [
+                  {
+                    "op": "scf.for",
+                    "line": 150,
+                    "role": "copy",
+                    "ops": {
+                      "arith.remui": 1,
+                      "arith.divui": 1,
+                      "arith.constant": 5,
+                      "arith.muli": 1,
+                      "vector.load": 1,
+                      "vector.extract": 4,
+                      "arith.addi": 4,
+                      "memref.store": 4
+                    },
+                    "total": 21,
+                    "children": []
+                  },
+                  {
+                    "op": "scf.for",
+                    "line": 179,
+                    "role": "copy",
+                    "ops": {
+                      "arith.remui": 1,
+                      "arith.divui": 1,
+                      "arith.constant": 1,
+                      "arith.muli": 1,
+                      "vector.load": 1,
+                      "vector.store": 1
+                    },
+                    "total": 6,
+                    "children": []
+                  }
+                ]
+              },
+              {
+                "op": "scf.for",
+                "line": 191,
+                "role": "contract",
+                "ops": {
+                  "arith.constant": 5,
+                  "vector.broadcast": 2,
+                  "arith.addi": 4,
+                  "vector.load": 8,
+                  "vector.insert": 8,
+                  "vector.contract": 1,
+                  "scf.yield": 1
+                },
+                "total": 29,
+                "children": [],
+                "iterArgs": true,
+                "resultType": "vector<4x4xf32>"
+              },
+              {
+                "op": "scf.if",
+                "line": 224,
+                "role": "branch",
+                "ops": { "arith.addi": 1, "arith.cmpi": 1, "arith.constant": 3, "gpu.barrier": 1, "scf.yield": 1 },
+                "total": 85,
+                "children": [
+                  {
+                    "op": "scf.if",
+                    "line": 227,
+                    "role": "copy",
+                    "ops": {
+                      "arith.constant": 8,
+                      "arith.muli": 4,
+                      "memref.subview": 2,
+                      "gpu.thread_id": 2,
+                      "gpu.block_dim": 2
+                    },
+                    "total": 47,
+                    "children": [
+                      {
+                        "op": "scf.for",
+                        "line": 240,
+                        "role": "copy",
+                        "ops": {
+                          "arith.remui": 1,
+                          "arith.divui": 1,
+                          "arith.constant": 5,
+                          "arith.muli": 1,
+                          "vector.load": 1,
+                          "vector.extract": 4,
+                          "arith.addi": 4,
+                          "memref.store": 4
+                        },
+                        "total": 21,
+                        "children": []
+                      },
+                      {
+                        "op": "scf.for",
+                        "line": 269,
+                        "role": "copy",
+                        "ops": {
+                          "arith.remui": 1,
+                          "arith.divui": 1,
+                          "arith.constant": 1,
+                          "arith.muli": 1,
+                          "vector.load": 1,
+                          "vector.store": 1
+                        },
+                        "total": 6,
+                        "children": []
+                      }
+                    ]
+                  },
+                  {
+                    "op": "scf.for",
+                    "line": 281,
+                    "role": "contract",
+                    "ops": {
+                      "arith.constant": 5,
+                      "vector.broadcast": 2,
+                      "arith.addi": 4,
+                      "vector.load": 8,
+                      "vector.insert": 8,
+                      "vector.contract": 1,
+                      "scf.yield": 1
+                    },
+                    "total": 29,
+                    "children": [],
+                    "iterArgs": true,
+                    "resultType": "vector<4x4xf32>"
+                  }
+                ],
+                "resultType": "vector<4x4xf32>"
+              },
+              { "op": "else", "line": 314, "role": "branch", "ops": { "scf.yield": 1 }, "total": 1, "children": [] }
+            ],
+            "iterArgs": true,
+            "resultType": "vector<4x4xf32>"
+          }
+        ]
+      },
+      "dialects": { "gpu": 21, "memref": 38, "arith": 182, "scf": 20, "llvm": 3, "vector": 74 },
+      "ops": 338,
+      "constants": 89,
+      "loops": [
+        { "line": 94, "depth": 0, "role": "copy", "iterArgs": false },
+        { "line": 123, "depth": 0, "role": "copy", "iterArgs": false },
+        { "line": 134, "depth": 0, "role": "loop", "iterArgs": true },
+        { "line": 150, "depth": 1, "role": "copy", "iterArgs": false },
+        { "line": 179, "depth": 1, "role": "copy", "iterArgs": false },
+        { "line": 191, "depth": 1, "role": "contract", "iterArgs": true },
+        { "line": 240, "depth": 1, "role": "copy", "iterArgs": false },
+        { "line": 269, "depth": 1, "role": "copy", "iterArgs": false },
+        { "line": 281, "depth": 1, "role": "contract", "iterArgs": true }
+      ],
+      "sharedBytes": 2048,
+      "labels": ["%block_id_x = gpu.block_id  x", "%6 = vector.broadcast %cst : f32 to vector<4x4xf32>", "gpu.barrier"],
+      "note": "Static op counts in the printed module. A region's `ops` counts its own ops by name, `total` includes nested regions; `role` is read off the region's contents. `labels` are real lines, verbatim."
+    },
+    "ptx": {
+      "target": ".target sm_75",
+      "entry": "gemm",
+      "maxntid": ".maxntid 256",
+      "maxThreads": 256,
+      "params": 23,
+      "sharedBytes": 2048,
+      "registers": { "pred": 15, "b32": 343, "b64": 63 },
+      "registersVirtual": true,
+      "instructions": 447,
+      "blocks": 26,
+      "families": [
+        { "name": "ld.global", "group": "memory", "count": 10 },
+        { "name": "st.global", "group": "memory", "count": 4 },
+        { "name": "ld.shared", "group": "memory", "count": 16 },
+        { "name": "st.shared", "group": "memory", "count": 15 },
+        { "name": "ld.param", "group": "memory", "count": 11 },
+        { "name": "fma", "group": "float", "count": 128 },
+        { "name": "mul.f", "group": "float", "count": 32 },
+        { "name": "add.f", "group": "float", "count": 16 },
+        { "name": "cvt", "group": "convert", "count": 0 },
+        { "name": "int", "group": "integer", "count": 124 },
+        { "name": "mov", "group": "move", "count": 40 },
+        { "name": "setp", "group": "control", "count": 14 },
+        { "name": "bra", "group": "control", "count": 30 },
+        { "name": "bar.sync", "group": "sync", "count": 3 },
+        { "name": "trap", "group": "control", "count": 3 },
+        { "name": "ret", "group": "control", "count": 1 }
+      ],
+      "opcodes": {
+        "ld.param.b32": 8,
+        "shr.s32": 3,
+        "shr.u32": 8,
+        "add.s32": 19,
+        "and.b32": 8,
+        "sub.s32": 3,
+        "setp.eq.b32": 3,
+        "bra": 15,
+        "bra.uni": 15,
+        "ld.param.b64": 3,
+        "mov.u32": 4,
+        "min.s32": 1,
+        "shl.b32": 10,
+        "or.b32": 4,
+        "mul.lo.s32": 3,
+        "mul.wide.u32": 5,
+        "mov.b64": 8,
+        "add.s64": 36,
+        "mul.wide.s32": 17,
+        "mov.b32": 28,
+        "setp.gt.s32": 8,
+        "ld.global.v4.b32": 10,
+        "st.shared.b32": 12,
+        "mad.lo.s32": 7,
+        "st.shared.v4.b32": 3,
+        "bar.sync": 3,
+        "setp.ge.s32": 3,
+        "ld.shared.v4.b32": 16,
+        "fma.rn.f32": 128,
+        "mul.rn.f32": 32,
+        "add.rn.f32": 16,
+        "st.global.v4.b32": 4,
+        "ret": 1,
+        "trap": 3
+      },
+      "note": "Static counts over the PTX text, not executed instructions. `registers` are the `.reg` declarations, virtual registers before ptxas allocates; the physical count needs ptxas."
+    },
+    "gpu": {
+      "trace": "gemm_fp32.sm_75",
+      "chip": "sm_75",
+      "grid": [2, 2, 1],
+      "threads": 256,
+      "warps": 8,
+      "lanes": 32,
+      "ctas": 4,
+      "dims": { "K": 64, "M": 64, "N": 64 },
+      "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32 },
+      "sharedBytesPerCta": 2048,
+      "note": "The grid is the host's choice for the trace's dims (website/kernels.json), not part of the kernel."
+    }
   }
 }
