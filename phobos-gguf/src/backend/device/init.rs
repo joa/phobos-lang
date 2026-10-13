@@ -149,7 +149,6 @@ impl DeviceBackend {
             persist_blocks: Cell::new(0),
             persist_qdot: env_flag("PHOBOS_PERSIST_QDOT"),
             raw_lanes: phobos_base::env::flag_set("PHOBOS_RAW_LANES"),
-            pre_ampere: compute_capability()? < 80,
             iq1s_dp4a: Cell::new(env_flag_on("PHOBOS_IQ1S_DP4A")),
             qmma_split: env_flag_on("PHOBOS_QMMA_SPLIT"),
             qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),
@@ -337,13 +336,4 @@ fn display_driver() -> Option<String> {
     let text = String::from_utf8(out.stdout).ok()?;
     let line = text.lines().next()?.trim();
     (!line.is_empty()).then(|| line.to_string())
-}
-
-/// The card's compute capability as `10 * major + minor`.
-fn compute_capability() -> Result<u32> {
-    use cust::device::DeviceAttribute;
-    let device = cust::device::Device::get_device(0)?;
-    let major = device.get_attribute(DeviceAttribute::ComputeCapabilityMajor)?;
-    let minor = device.get_attribute(DeviceAttribute::ComputeCapabilityMinor)?;
-    Ok((10 * major + minor).max(0) as u32)
 }

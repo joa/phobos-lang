@@ -630,15 +630,13 @@ impl DeviceBackend {
     /// Whether `quant`'s decode matvec runs its lanes kernel.
     ///
     /// The K-quants always do: they measured at parity with their intrinsics
-    /// on sm_75, sm_86 and sm_89. The IQ formats do by default below sm_80,
-    /// where they measured faster; from sm_80 on they measured 2 to 10%
-    /// slower. PTQ1_0 keeps its intrinsic by default. `PHOBOS_RAW_LANES`
-    /// overrides the default for the IQ formats and PTQ1_0.
+    /// on sm_75, sm_86 and sm_89. The IQ formats and PTQ1_0 do unless
+    /// `PHOBOS_RAW_LANES` is off: they measured level with or faster than
+    /// their intrinsics on all three.
     fn lanes_on(&self, quant: Quant) -> bool {
         match quant {
             Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => true,
-            Quant::PTQ1_0 => self.raw_lanes.unwrap_or(false),
-            _ => self.raw_lanes.unwrap_or(self.pre_ampere),
+            _ => self.raw_lanes.unwrap_or(true),
         }
     }
 
