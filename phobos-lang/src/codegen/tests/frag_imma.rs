@@ -103,3 +103,11 @@ kernel tcs(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     let before = mlir[..yield_at].trim_end();
     assert!(before.ends_with("gpu.barrier"), "no barrier before the next rewrite:\n{mlir}");
 }
+
+#[test]
+fn past_the_warp_tile_cap_keeps_the_shared_accumulator() {
+    // 256x128 over four warps is 128 tiles a warp, past the 64 a warp
+    // carries without spilling.
+    let mlir = emit_mlir(&projection(256, 128, 128, "@aligned(M = 256, N = 128, K = 32)", "ws * da"));
+    assert!(!mlir.contains("math.fma"), "{mlir}");
+}

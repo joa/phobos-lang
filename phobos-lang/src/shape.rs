@@ -19,13 +19,19 @@ pub(crate) fn wmma_plan(m: i64, n: i64, kk: i64, cta_threads: i64) -> Option<(i6
 
 /// The (WM, WN) warp block of an int8 accumulator's 8x8-tile grid, chosen
 /// as [`wmma_plan`] chooses. Every warp owns the same tiles for the whole
-/// loop, since the accumulator is carried in its registers.
+/// loop, since the accumulator is carried in its registers. None past
+/// [`IMMA_WARP_TILES`] tiles a warp.
 pub(crate) fn imma_plan(m: i64, n: i64, cta_threads: i64) -> Option<(i64, i64)> {
     if m == DYN || n == DYN || m % 8 != 0 || n % 8 != 0 {
         return None;
     }
-    warp_grid(m / 8, n / 8, cta_threads)
+    let (wm, wn) = warp_grid(m / 8, n / 8, cta_threads)?;
+    ((m / 8 / wm) * (n / 8 / wn) <= IMMA_WARP_TILES).then_some((wm, wn))
 }
+
+/// The most 8x8 tiles one warp carries, two f32 a lane each: the patch
+/// `qmma_t` caps at, beyond which the registers spill.
+const IMMA_WARP_TILES: i64 = 64;
 
 fn warp_grid(gm: i64, gn: i64, cta_threads: i64) -> Option<(i64, i64)> {
     let warps = cta_threads / 32;
