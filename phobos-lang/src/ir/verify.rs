@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 
 use super::{
-    BlockId, Bounds, Def, Intrinsic, Ir, Map, OpId, OpKind, Reduce, Scalar, Space, Type, ValueId,
+    BlockId, Bounds, Def, Ir, Map, OpId, OpKind, Reduce, Scalar, Space, Type, ValueId,
 };
 
 /// Checks every structural invariant: the arena, the use lists, dominance,
@@ -699,10 +699,7 @@ impl Verifier<'_> {
                 }
                 self.want_tile_result(op);
             }
-            OpKind::Intrinsic(i) => {
-                if matches!(i, Intrinsic::RawQdecode(_)) {
-                    self.err(op, "only writes a destination; use the into form");
-                }
+            OpKind::Intrinsic(_) => {
                 self.intrinsic_operands(op, n_ops);
                 self.want_tile_result(op);
             }

@@ -286,19 +286,21 @@ fn intrinsic_names_round_trip() {
         Intrinsic::ArgSel,
     ];
     for fmt in RawFmt::ALL {
+        if fmt.has_f32_qdot() {
+            all.push(Intrinsic::RawQdot(fmt));
+        }
         all.extend([
-            Intrinsic::RawQdot(fmt),
             Intrinsic::RawQdotI8(fmt),
             Intrinsic::RawQmma(fmt),
             Intrinsic::RawQmmaStaged(fmt),
             Intrinsic::RawQgemm(fmt),
-            Intrinsic::RawQdecode(fmt),
         ]);
     }
     for i in all {
         assert_eq!(Intrinsic::from_name(&i.name()), Some(i), "{}", i.name());
     }
     assert_eq!(Intrinsic::from_name("wobble"), None);
+    assert_eq!(Intrinsic::from_name("iq2xxs_qdot_t"), None);
     assert_eq!(Intrinsic::from_name("q9k_qdot_t"), None);
 }
 

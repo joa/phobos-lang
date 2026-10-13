@@ -5,7 +5,7 @@ use melior::{
 };
 
 use super::{Lowered, dims};
-use crate::codegen::tile::{QFormat, QWeight, QgFormat};
+use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::GemmScale;
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
@@ -140,19 +140,6 @@ impl<'c> Codegen<'c> {
                 self.tile_qdot_i8_reg_t(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..])?
             }
             Intrinsic::RawQdot(fmt) => match fmt {
-                RawFmt::Iq1s => self.tile_iq1s_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
-                RawFmt::Iq1m => self.tile_iq1m_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
-                RawFmt::Iq2xxs => {
-                    self.tile_iq2xxs_qdot_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?
-                }
-                RawFmt::Iq2s => self.tile_iq2s_qdot_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?,
-                RawFmt::Iq2xs => {
-                    self.tile_iq2xs_qdot_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?
-                }
-                RawFmt::Iq3xxs => {
-                    self.tile_iq3xxs_qdot_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?
-                }
-                RawFmt::Iq3s => self.tile_iq3s_qdot_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?,
                 RawFmt::Iq4xs => self.tile_iq4xs_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
                 RawFmt::Q2k => self.tile_q2k_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
                 RawFmt::Q3k => self.tile_q3k_qdot_t(block, &t[0], &t[1], &t[2])?,
@@ -179,9 +166,6 @@ impl<'c> Codegen<'c> {
                 self.tile_argsel_bc(block, &t[0], &t[1], &t[2], &t[3], &out)?;
                 out
             }
-            Intrinsic::RawQdecode(_) => {
-                bail!("{} yields no fresh buffer", i.name())
-            }
         })
     }
 
@@ -205,11 +189,6 @@ impl<'c> Codegen<'c> {
                 self.qgemm_into(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..], dst)
             }
             Intrinsic::RawQmmaStaged(fmt) => self.qmma_staged_into(block, fmt, t, dst),
-            Intrinsic::RawQdecode(fmt) => {
-                let qf = QFormat::from_intrinsic(&i.name())
-                    .ok_or_else(|| anyhow!("no decode for {}", fmt.name()))?;
-                self.qdecode_t_into(block, qf, &t[0], &t[1], &t[2..], dst)
-            }
             other => bail!("{} has no into form", other.name()),
         }
     }

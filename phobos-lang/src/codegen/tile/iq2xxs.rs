@@ -20,7 +20,6 @@ pub(super) struct Iq2xxsLane<'c> {
     hi_off: Value<'c, 'c>,
     pub(super) zero_idx: Value<'c, 'c>,
     eight_idx: Value<'c, 'c>,
-    pub(super) k_lane_off: Value<'c, 'c>,
 }
 
 /// Per-block state: the scaled magnitude, and the lane's grid and sign
@@ -69,7 +68,6 @@ impl<'c> Codegen<'c> {
         let lo_off = self.addi(body, aux, self.subi(body, l_or_1, one_idx)?)?;
         let hi_off = self.addi(body, aux, l)?;
 
-        let k_lane_off = self.muli(body, lane, self.const_index(body, IQ2XXS_LANE)?)?;
         Ok(Iq2xxsLane {
             l,
             grid_off,
@@ -78,7 +76,6 @@ impl<'c> Codegen<'c> {
             hi_off,
             zero_idx,
             eight_idx,
-            k_lane_off,
         })
     }
 
@@ -154,22 +151,5 @@ impl<'c> Codegen<'c> {
             grid_v,
             signs_v,
         })
-    }
-
-    /// The lane's `y`-th decoded weight, from the entries already in
-    /// registers: a grid magnitude times its sign.
-    pub(super) fn iq2xxs_decoded(
-        &mut self,
-        kb: &Block<'c>,
-        blk: &Iq2xxsBlock<'c>,
-        y: i64,
-    ) -> Result<Value<'c, 'c>> {
-        let (i8_t, f32_t) = (self.i8_t, self.f32_t);
-        let mag_val = self.vec_extract(kb, blk.grid_v, &[y], i8_t)?;
-        let sign_val = self.vec_extract(kb, blk.signs_v, &[y], i8_t)?;
-        let mag_f32 = self.numeric_cast(kb, mag_val, f32_t)?;
-        let sign_f32 = self.numeric_cast(kb, sign_val, f32_t)?;
-        let decoded = self.push(kb, arith::mulf(blk.db, mag_f32, self.loc))?;
-        self.push(kb, arith::mulf(decoded, sign_f32, self.loc))
     }
 }

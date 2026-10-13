@@ -29,8 +29,6 @@ pub(super) struct Iq3sLane<'c> {
     qh_div1: Value<'c, 'c>,
     qh_div2: Value<'c, 'c>,
     half_is_0: Value<'c, 'c>,
-    pub(super) zero_idx: Value<'c, 'c>,
-    pub(super) k_lane_off: Value<'c, 'c>,
 }
 
 /// Per-block state: the scaled magnitude, two four-wide grid entries and one
@@ -84,7 +82,6 @@ impl<'c> Codegen<'c> {
             arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, half, zero_idx, self.loc),
         )?;
 
-        let k_lane_off = self.muli(body, lane, eight_idx)?;
         Ok(Iq3sLane {
             grid1_off,
             grid2_off,
@@ -94,8 +91,6 @@ impl<'c> Codegen<'c> {
             qh_div1,
             qh_div2,
             half_is_0,
-            zero_idx,
-            k_lane_off,
         })
     }
 
@@ -159,25 +154,5 @@ impl<'c> Codegen<'c> {
             g2_v,
             signs_v,
         })
-    }
-
-    /// One decoded weight: element `y` of grid entry `entry` (0 or 1), signed
-    /// by the matching half of the lane's sign entry, both already in
-    /// registers.
-    pub(super) fn iq3s_decoded(
-        &mut self,
-        kb: &Block<'c>,
-        blk: &Iq3sBlock<'c>,
-        entry: i64,
-        y: i64,
-    ) -> Result<Value<'c, 'c>> {
-        let (i8_t, f32_t) = (self.i8_t, self.f32_t);
-        let g_v = if entry == 0 { blk.g1_v } else { blk.g2_v };
-        let mag_val = self.vec_extract(kb, g_v, &[y], i8_t)?;
-        let sign_val = self.vec_extract(kb, blk.signs_v, &[entry * IQ3S_HALF + y], i8_t)?;
-        let mag_f32 = self.numeric_cast(kb, mag_val, f32_t)?;
-        let sign_f32 = self.numeric_cast(kb, sign_val, f32_t)?;
-        let decoded = self.push(kb, arith::mulf(blk.db, mag_f32, self.loc))?;
-        self.push(kb, arith::mulf(decoded, sign_f32, self.loc))
     }
 }

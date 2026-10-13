@@ -27,8 +27,6 @@ pub(super) struct Iq3xxsLane<'c> {
     lo_off: Value<'c, 'c>,
     hi_off: Value<'c, 'c>,
     eight_idx: Value<'c, 'c>,
-    pub(super) zero_idx: Value<'c, 'c>,
-    pub(super) k_lane_off: Value<'c, 'c>,
 }
 
 /// Per-block state: the scaled magnitude, two four-wide grid entries and one
@@ -51,11 +49,11 @@ impl<'c> Codegen<'c> {
     ) -> Result<Iq3xxsLane<'c>> {
         let four = self.const_index(body, 4)?;
         let eight_idx = self.const_index(body, 8)?;
-        let zero_idx = self.const_index(body, 0)?;
         let one_idx = self.const_index(body, 1)?;
         let two_idx = self.const_index(body, 2)?;
         let ib32 = self.divui(body, lane, four)?;
         let l = self.remui(body, lane, four)?;
+        let zero_idx = self.const_index(body, 0)?;
         let is_l0 = self.push(
             body,
             arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, l, zero_idx, self.loc),
@@ -81,7 +79,6 @@ impl<'c> Codegen<'c> {
         let lo_off = self.addi(body, aux, self.subi(body, l_or_1, one_idx)?)?;
         let hi_off = self.addi(body, aux, l)?;
 
-        let k_lane_off = self.muli(body, lane, eight_idx)?;
         Ok(Iq3xxsLane {
             l,
             g1_off,
@@ -90,8 +87,6 @@ impl<'c> Codegen<'c> {
             lo_off,
             hi_off,
             eight_idx,
-            zero_idx,
-            k_lane_off,
         })
     }
 
@@ -170,25 +165,5 @@ impl<'c> Codegen<'c> {
             g2_v,
             signs_v,
         })
-    }
-
-    /// One decoded weight: element `y` of grid entry `entry` (0 or 1), signed
-    /// by the matching half of the lane's sign entry, both already in
-    /// registers.
-    pub(super) fn iq3xxs_decoded(
-        &mut self,
-        kb: &Block<'c>,
-        blk: &Iq3xxsBlock<'c>,
-        entry: i64,
-        y: i64,
-    ) -> Result<Value<'c, 'c>> {
-        let (i8_t, f32_t) = (self.i8_t, self.f32_t);
-        let g_v = if entry == 0 { blk.g1_v } else { blk.g2_v };
-        let mag_val = self.vec_extract(kb, g_v, &[y], i8_t)?;
-        let sign_val = self.vec_extract(kb, blk.signs_v, &[entry * IQ3XXS_HALF + y], i8_t)?;
-        let mag_f32 = self.numeric_cast(kb, mag_val, f32_t)?;
-        let sign_f32 = self.numeric_cast(kb, sign_val, f32_t)?;
-        let decoded = self.push(kb, arith::mulf(blk.db, mag_f32, self.loc))?;
-        self.push(kb, arith::mulf(decoded, sign_f32, self.loc))
     }
 }

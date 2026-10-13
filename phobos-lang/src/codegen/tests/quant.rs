@@ -275,7 +275,7 @@ fn iq1s_qmma_t_decodes_into_the_tensor_core_fragments() {
 
 #[test]
 fn iq1s_qmma_t_writes_no_expanded_weight() {
-    // Unlike `_qdecode`, this path never stores the expanded weight.
+    // The weight is decoded into the contraction and never stored.
     let mlir = emit_mlir(IQ1S_QMMA);
     let stores = mlir.matches("memref.store").count();
     // Two accumulator halves per tile of the warp's patch, written once
