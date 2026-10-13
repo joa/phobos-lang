@@ -1,11 +1,12 @@
-// Plays the tiles-and-lanes scene in the browser: beat 1, a camera move, beat 2, a camera move back,
-// forever. The frame loop runs only while 30% of the scene is on screen in a visible tab. Under
-// reduced motion nothing moves and both beats show their settled frames side by side, as without
-// JavaScript. The two pills jump to a beat, which then plays twice before the loop moves on.
+// Plays the tiles-and-lanes scene in the browser: beat 1, 2 and 3, each handed to the next by a
+// camera move, forever. The frame loop runs only while 30% of the scene is on screen in a visible
+// tab. Under reduced motion nothing moves and the beats show their settled frames side by side, as
+// without JavaScript. The pills jump to a beat, which then plays twice before the loop moves on.
 
 import { clamp, easeInOut } from "../../../lib/figure/math"
 import { lerpCamera, lerpView, type Camera, type View } from "./camera"
 import type { SceneData } from "./data"
+import { mixedBeat } from "./mixed"
 import { StageCanvas } from "./stage-canvas"
 import {
   lanesBeat,
@@ -22,6 +23,7 @@ const VISIBLE_RATIO = 0.3
 const MAX_FRAME_DELTA_MS = 50
 const TRANSITION_MS = 1500
 const REPLAY_MS = 700
+const ORDER: BeatName[] = ["tiles", "lanes", "mixed"]
 
 interface Stage {
   beat: Beat
@@ -68,13 +70,14 @@ export class TilesLanesPlayer {
     this.#stages = {
       tiles: this.#stage(tilesBeat(data.tiles), data.tilesCode.marks),
       lanes: this.#stage(lanesBeat(data.lanes), data.lanesCode.marks),
+      mixed: this.#stage(mixedBeat(data.mixed), data.mixedCode.marks),
     }
   }
 
   start(): void {
     this.#reducedMotion.addEventListener("change", () => this.#applyMotionPreference())
     document.addEventListener("visibilitychange", () => this.#schedule())
-    for (const name of ["tiles", "lanes"] as const) {
+    for (const name of ORDER) {
       this.#stages[name].tab?.addEventListener("click", () => this.#jump(name))
     }
     new IntersectionObserver(
@@ -140,7 +143,8 @@ export class TilesLanesPlayer {
       this.#root.removeAttribute("data-live")
       this.#stop()
       for (const stage of Object.values(this.#stages)) {
-        this.#render(stage, stage.beat.settledMs, stage.beat.rest.camera, stage.beat.rest.view, 1)
+        const { camera, view } = stage.beat.shot(stage.beat.settledMs)
+        this.#render(stage, stage.beat.settledMs, camera, view, 1)
       }
     }
     this.#schedule()
@@ -198,7 +202,7 @@ export class TilesLanesPlayer {
     }
     this.#timeMs += dtMs
     if (this.#timeMs < this.#stages[this.#current].beat.durationMs) return
-    const next: BeatName = this.#replays > 0 ? this.#current : this.#current === "tiles" ? "lanes" : "tiles"
+    const next = this.#replays > 0 ? this.#current : ORDER[(ORDER.indexOf(this.#current) + 1) % ORDER.length]
     this.#replays = Math.max(0, this.#replays - 1)
     this.#transition = { from: this.#current, to: next, elapsedMs: 0 }
   }
@@ -211,39 +215,45 @@ export class TilesLanesPlayer {
     const transition = this.#transition
     if (!transition) {
       const stage = this.#stages[this.#current]
-      const other = this.#stages[this.#current === "tiles" ? "lanes" : "tiles"]
-      this.#render(stage, this.#timeMs, stage.beat.rest.camera, stage.beat.rest.view, 1)
-      this.#setOpacity(other, 0)
+      const { camera, view } = stage.beat.shot(this.#timeMs)
+      this.#render(stage, this.#timeMs, camera, view, 1)
+      for (const other of Object.values(this.#stages)) if (other !== stage) this.#setOpacity(other, 0)
       this.#setProgress(stage, this.#timeMs / stage.beat.durationMs)
       return
     }
+    for (const other of Object.values(this.#stages))
+      if (other.beat.name !== transition.from && other.beat.name !== transition.to) this.#setOpacity(other, 0)
     const p = clamp(transition.elapsedMs / this.#transitionMs(transition), 0, 1)
     const from = this.#stages[transition.from]
     const to = this.#stages[transition.to]
     if (from === to) {
-      // A replay: fade out on the end, fade in on the start, the camera at rest.
-      const { camera, view } = from.beat.rest
-      if (p < 0.5) this.#render(from, from.beat.durationMs, camera, view, 1 - easeInOut(p * 2))
-      else this.#render(to, 0, camera, view, easeInOut(p * 2 - 1))
+      // A replay: fade out on the end, fade in on the start, the camera where each leaves it.
+      const end = from.beat.shot(from.beat.durationMs)
+      const start = from.beat.shot(0)
+      if (p < 0.5) this.#render(from, from.beat.durationMs, end.camera, end.view, 1 - easeInOut(p * 2))
+      else this.#render(to, 0, start.camera, start.view, easeInOut(p * 2 - 1))
       return
     }
-    // The outgoing beat moves its camera away as it fades; the incoming one arrives from its away
-    // camera, so the move reads as one: into the accumulator, out at the warp, and back.
+    // The outgoing beat moves its camera toward its exit as it fades; the incoming one arrives from
+    // its entrance, so each move reads as one: into the accumulator and out at the warp, out over the
+    // CTA's floors, and down through a warp into the tiles again.
     const eased = easeInOut(p)
     const outgoing = 1 - easeInOut(clamp(p / 0.6, 0, 1))
     const incoming = easeInOut(clamp((p - 0.4) / 0.6, 0, 1))
+    const leaving = from.beat.shot(from.beat.durationMs)
+    const arriving = to.beat.shot(0)
     this.#render(
       from,
       from.beat.durationMs,
-      lerpCamera(from.beat.rest.camera, from.beat.away.camera, eased),
-      lerpView(from.beat.rest.view, from.beat.away.view, eased),
+      lerpCamera(leaving.camera, from.beat.exit.camera, eased),
+      lerpView(leaving.view, from.beat.exit.view, eased),
       outgoing
     )
     this.#render(
       to,
       0,
-      lerpCamera(to.beat.away.camera, to.beat.rest.camera, eased),
-      lerpView(to.beat.away.view, to.beat.rest.view, eased),
+      lerpCamera(to.beat.enter.camera, arriving.camera, eased),
+      lerpView(to.beat.enter.view, arriving.view, eased),
       incoming
     )
     this.#setProgress(to, 0)
@@ -333,7 +343,6 @@ export class TilesLanesPlayer {
 function setAttribute(element: Element, name: string, value: string): void {
   if (element.getAttribute(name) !== value) element.setAttribute(name, value)
 }
-
 
 function applyCircles(circles: SVGCircleElement[], states: ParticleState[]): void {
   states.forEach((state, index) => {

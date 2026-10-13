@@ -1,22 +1,26 @@
 ---
 // The tiles-and-lanes scene: beat 1 lifts gemm tiles from global into shared memory and into the
-// accumulator, beat 2 trades one warp's partial sums across its lanes. The build renders each beat's
-// settled frame from the same functions the browser plays, so without JavaScript, and under reduced
-// motion, both beats stand side by side; with motion they take turns on one stage.
+// accumulator, beat 2 trades one warp's partial sums across its lanes, beat 3 does both in one
+// kernel. The build renders each beat's settled frame from the same functions the browser plays, so
+// without JavaScript, and under reduced motion, the beats stand side by side; with motion they take
+// turns on one stage.
 import "../../../styles/chart.css"
 import { traceEntry } from "../../../lib/viz/catalog"
 import { sceneData } from "./data"
 import { tokenize } from "./highlight"
+import { mixedBeat } from "./mixed"
 import { lanesBeat, tilesBeat, VIEW_HEIGHT_UNITS, VIEW_WIDTH_UNITS, type Beat, type PathState } from "./scene"
 
 const gemm = traceEntry("gemm_fp32")?.traces["sm_75"]
 const matvec = traceEntry("lanes_matvec")?.traces["sm_75"]
-if (!gemm || !matvec) throw new Error("the tiles-and-lanes scene needs the gemm_fp32 and lanes_matvec traces")
-const data = sceneData(gemm, matvec)
-const { tiles, lanes } = data
+const staged = traceEntry("staged_matvec")?.traces["sm_75"]
+if (!gemm || !matvec || !staged)
+  throw new Error("the tiles-and-lanes scene needs the gemm_fp32, lanes_matvec and staged_matvec traces")
+const data = sceneData(gemm, matvec, staged)
+const { tiles, lanes, mixed } = data
 
 function settled(beat: Beat) {
-  const { camera, view } = beat.rest
+  const { camera, view } = beat.shot(beat.settledMs)
   const still = beat.still(camera, view)
   const frame = beat.frame(beat.settledMs, camera, view)
   const paths: Record<string, PathState> = { ...still }
@@ -46,6 +50,14 @@ const beats = [
     label: `Lanes. In ${lanes.kernel} on ${lanes.chip}, each of a warp's ${lanes.lanes} lanes loads its own run of ${lanes.runElems} elements of W and x per step and keeps a partial sum; sum over ctx.lane then trades the sums between lanes in ${lanes.masks.length} xor stages, ${lanes.masks.join(", ")}.`,
     meta: lanes.masks.map(mask => `xor ${mask}`),
     note: `${lanes.lanes} lanes, ${lanes.runElems} elements each per step, schematic`,
+  },
+  {
+    beat: mixedBeat(mixed),
+    title: "Mixed, like Phobos",
+    code: data.mixedCode,
+    label: `Both in one kernel. In ${mixed.kernel} on ${mixed.chip}, the CTA's threads copy x, ${mixed.tileElems} elements, into a tile xs in shared memory, ${mixed.copyWidth} at a time, and a barrier follows. Then each lane of warp 0 reads its own runs of ${mixed.runElems} elements from xs, and from its row of W in global memory, and sum over ctx.lane folds the partial sums in ${mixed.masks.length} xor stages.`,
+    meta: [`xs: ${mixed.copyThreads} threads x ${mixed.copyWidth}`, ...mixed.kSteps.map(k => `k = ${k}`), `xor ${mixed.masks.join(", ")}`],
+    note: `${mixed.warps} warps share one tile of x, schematic`,
   },
 ].map(entry => ({ ...entry, ...settled(entry.beat) }))
 ---
@@ -194,7 +206,7 @@ const beats = [
 
   .tl-beats {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: var(--tl-gap);
   }
 
@@ -214,6 +226,7 @@ const beats = [
 
   .tl-stage {
     position: relative;
+    container-type: inline-size;
     opacity: var(--stage-opacity, 1);
   }
 
@@ -539,8 +552,11 @@ const beats = [
     .tl-line {
       padding: 0 0.65rem;
     }
+  }
 
-    /* The drawing leaves its labels a narrow margin here, so they wrap */
+  /* A narrow stage, on a phone or one of three side by side, leaves its labels a narrow margin, so
+     they wrap */
+  @container (max-width: 460px) {
     .tl-label {
       width: max-content;
       max-width: 9.5ch;

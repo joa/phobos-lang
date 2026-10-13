@@ -231,3 +231,38 @@ partial sums into one. It is also the kernel the front page shows at the lane
 level.
 
 <LanesMatvec />
+
+## Tiles and lanes in one kernel
+
+Tile statements and per-lane code share a kernel body. In the lanes matvec
+every warp reads `x` from global memory for itself. Below, the CTA stages
+`x` once as a tile in shared memory, and each lane reads its runs from that
+tile:
+
+```phobos trace="staged_matvec" params="K=256" dims="N=32" grid="8"
+@autotune(K in [256])
+@launch(128)
+kernel staged_matvec(W: tensor<f32>[N, K], x: tensor<f32>[1, K], y: tensor<f32>[1, N]) {
+  var xs = x[0 :+ 1, :]
+  let row = ctx.block.x * ctx.warps + ctx.warp
+  var acc: f32 = 0.0
+  if row < N {
+    for k in range(0, K, ctx.lanes * 4) {
+      let at = k + ctx.lane * 4
+      acc += sum(W[row, at :+ 4] * xs[0, at :+ 4])
+    }
+  }
+  let total = sum<over ctx.lane>(acc)
+  if ctx.lane == 0 && row < N {
+    y[0, row] = total
+  }
+}
+```
+
+`var xs = x[0 :+ 1, :]` is a tile copy, written for the whole CTA: its
+threads move the 256 elements together, four at a time, and the compiler
+puts a barrier after it, since each lane then reads elements other threads
+copied. From there the code is per lane, as before: a run of `W` from global
+memory, the same run of `xs` from shared memory, and the butterfly. The four
+warps of the CTA read `x` from global memory once between them rather than
+once each. It is the kernel the front page shows mixing the two levels.

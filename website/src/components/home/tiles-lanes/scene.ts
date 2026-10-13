@@ -1,4 +1,4 @@
-// The two beats of the front page's tiles-and-lanes scene, as pure functions of time. A beat lists
+// The three beats of the front page's tiles-and-lanes scene, as pure functions of time. A beat lists
 // the elements it draws (dot layers, outlines, a pool of particles, labels), and frame(t) says where
 // each one is: positions in viewBox units, opacities, the code line to highlight. The build renders
 // a settled frame into the page; the browser calls the same functions every frame.
@@ -6,7 +6,8 @@
 // Beat 1, tiles: three floors stacked in depth, global memory, shared memory and registers. A tile
 // of A and one of B lift out of global memory as point clouds into shared memory, then flow into the
 // accumulator, one k step after another. Beat 2, lanes: one warp's 32 lanes in a row. Each lane loads
-// its own run of W and x, then the partial sums cross between lanes over five xor stages.
+// its own run of W and x, then the partial sums cross between lanes over five xor stages. Beat 3,
+// one kernel at both levels, is in mixed.ts and draws with the helpers exported here.
 //
 // World units are tensor elements; one dot of a matrix stands for STRIDE x STRIDE of them.
 
@@ -18,15 +19,20 @@ export const VIEW_WIDTH_UNITS = 600
 export const VIEW_HEIGHT_UNITS = 400
 // Floor labels sit left of their floors, so the drawing leaves them a margin.
 const LABEL_MARGIN_UNITS = 128
-const FIT_BOX: Box = {
+export const FIT_BOX: Box = {
   x: LABEL_MARGIN_UNITS,
   y: 20,
   width: VIEW_WIDTH_UNITS - LABEL_MARGIN_UNITS - 14,
   height: VIEW_HEIGHT_UNITS - 40,
 }
 
-export type BeatName = "tiles" | "lanes"
+export type BeatName = "tiles" | "lanes" | "mixed"
 export type Space = "global" | "shared" | "reg"
+
+export interface Shot {
+  camera: Camera
+  view: View
+}
 
 export interface PathSpec {
   key: string
@@ -88,22 +94,24 @@ export interface Beat {
   particles: ParticleSpec[]
   glows: Space[]
   labels: LabelSpec[]
-  rest: { camera: Camera; view: View }
-  // The camera the beat hands over from or to in a transition.
-  away: { camera: Camera; view: View }
+  // Where the camera is at a moment of the beat.
+  shot(tMs: number): Shot
+  // The cameras the beat arrives from and leaves toward in a transition.
+  enter: Shot
+  exit: Shot
   // Paths that change only with the camera.
   still(camera: Camera, view: View): Record<string, PathState>
   // Everything that moves with time.
   frame(tMs: number, camera: Camera, view: View): Frame
 }
 
-const HIDDEN: ParticleState = { x: 0, y: 0, r: 0, opacity: 0 }
+export const HIDDEN: ParticleState = { x: 0, y: 0, r: 0, opacity: 0 }
 const PARTICLE_RADIUS_UNITS = [1.1, 1.8, 2.6]
 const DOT_WIDTH_UNITS = 2.1
 const GLOW_RADIUS_UNITS = 26
 
 // Path data for a dot at each point: a zero-length segment that a round cap draws as a dot.
-function dots(points: Vec3[], camera: Camera, view: View): string {
+export function dots(points: Vec3[], camera: Camera, view: View): string {
   let d = ""
   for (const point of points) {
     const p = project(point, camera, view)
@@ -112,7 +120,7 @@ function dots(points: Vec3[], camera: Camera, view: View): string {
   return d
 }
 
-function polygon(points: Vec3[], camera: Camera, view: View): string {
+export function polygon(points: Vec3[], camera: Camera, view: View): string {
   return (
     points
       .map((point, index) => {
@@ -124,7 +132,7 @@ function polygon(points: Vec3[], camera: Camera, view: View): string {
 }
 
 // A rectangle on a floor at height y, spanning x0..x1 across and z0..z1 in depth.
-function rect(x0: number, x1: number, z0: number, z1: number, y: number): Vec3[] {
+export function rect(x0: number, x1: number, z0: number, z1: number, y: number): Vec3[] {
   return [vec(x0, y, z0), vec(x1, y, z0), vec(x1, y, z1), vec(x0, y, z1)]
 }
 
@@ -135,18 +143,18 @@ function grid(x0: number, z0: number, cols: number, rows: number, pitch: number,
   return points
 }
 
-function centroid(points: Vec3[]): Vec3 {
+export function centroid(points: Vec3[]): Vec3 {
   const sum = points.reduce((acc, p) => vec(acc.x + p.x, acc.y + p.y, acc.z + p.z), vec(0, 0, 0))
   return vec(sum.x / points.length, sum.y / points.length, sum.z / points.length)
 }
 
 // How far a particle with this delay is along a flow at progress f: 0 before it leaves, 1 once landed.
-function travel(f: number, delay: number, span: number): number {
+export function travel(f: number, delay: number, span: number): number {
   return easeInOutSine(clamp((f - delay) / span, 0, 1))
 }
 
 // A particle on its curve: visible only in flight, fading in and out at the ends.
-function inFlight(
+export function inFlight(
   from: Vec3,
   control: Vec3,
   to: Vec3,
@@ -166,7 +174,7 @@ function inFlight(
 }
 
 // The glow behind a cloud: at the mean of its visible particles, as bright as they are on average.
-function glowOf(cloud: ParticleState[], view: View): ParticleState {
+export function glowOf(cloud: ParticleState[], view: View): ParticleState {
   const shown = cloud.filter(particle => particle.opacity > 0)
   if (shown.length < 3) return HIDDEN
   const x = shown.reduce((sum, p) => sum + p.x, 0) / shown.length
@@ -175,17 +183,17 @@ function glowOf(cloud: ParticleState[], view: View): ParticleState {
   return { x: round(x), y: round(y), r: round(GLOW_RADIUS_UNITS * (view.scale / 2.2)), opacity: round(presence * 0.9) }
 }
 
-function depthOf(random: () => number): 0 | 1 | 2 {
+export function depthOf(random: () => number): 0 | 1 | 2 {
   const value = random()
   return value < 0.2 ? 2 : value < 0.55 ? 1 : 0
 }
 
-function phase(tMs: number, startMs: number, durationMs: number): number {
+export function phase(tMs: number, startMs: number, durationMs: number): number {
   return clamp((tMs - startMs) / durationMs, 0, 1)
 }
 
 // Dimensions in labels keep together when a narrow stage wraps them.
-const dims = (rows: number, cols: number) => `${rows}\u00a0x\u00a0${cols}`
+export const dims = (rows: number, cols: number) => `${rows}\u00a0x\u00a0${cols}`
 
 // Beat 1: tiles.
 
@@ -193,7 +201,7 @@ const STRIDE = 2
 const GAP = 6
 const Y_SHARED = 56
 const Y_REG = 106
-const FLOOR_PAD = 4
+export const FLOOR_PAD = 4
 const ITERATIONS = 3
 const ITER_MS = 2600
 const INTRO_MS = 300
@@ -323,8 +331,9 @@ export function tilesBeat(data: TilesData): Beat {
       { key: "shared", text: "shared memory", detail: `a ${dims(tileM, tileK)}, b ${dims(tileK, tileN)}`, space: "shared", anchor: "end" },
       { key: "global", text: "global memory", detail: M === N && N === K ? `A, B, C ${dims(M, M)}` : `A ${dims(M, K)}, B ${dims(K, N)}`, space: "global", anchor: "end" },
     ],
-    rest: { camera: restCamera, view: restView },
-    away: { camera: awayCamera, view: awayView },
+    shot: () => ({ camera: restCamera, view: restView }),
+    enter: { camera: awayCamera, view: awayView },
+    exit: { camera: awayCamera, view: awayView },
     still(camera, view) {
       const width = (point: Vec3) => round(DOT_WIDTH_UNITS * (view.scale / 2.2) * project(point, camera, view).near)
       return {
@@ -408,7 +417,7 @@ export function tilesBeat(data: TilesData): Beat {
 }
 
 // A floor's label: left of its leftmost corner.
-function leftOf(points: Vec3[], camera: Camera, view: View): LabelState {
+export function leftOf(points: Vec3[], camera: Camera, view: View): LabelState {
   const projected = points.map(point => project(point, camera, view))
   const left = projected.reduce((best, p) => (p.x < best.x ? p : best))
   return { x: round(left.x - 12), y: round(left.y), opacity: 1 }
@@ -496,8 +505,9 @@ export function lanesBeat(data: LanesData): Beat {
       { key: "lane0", text: "lane 0", space: "reg", anchor: "middle" },
       { key: "lastLane", text: `lane ${lanes - 1}`, space: "reg", anchor: "middle" },
     ],
-    rest: { camera: restCamera, view: restView },
-    away: { camera: awayCamera, view: awayView },
+    shot: () => ({ camera: restCamera, view: restView }),
+    enter: { camera: awayCamera, view: awayView },
+    exit: { camera: awayCamera, view: awayView },
     still(camera, view) {
       const dotWidth = (point: Vec3) => round(1.5 * (view.scale / 2.2) * project(point, camera, view).near)
       return {
@@ -581,9 +591,8 @@ export function lanesBeat(data: LanesData): Beat {
       }
     },
   }
-
 }
 
-function round(value: number): number {
+export function round(value: number): number {
   return Math.round(value * 10) / 10
 }
