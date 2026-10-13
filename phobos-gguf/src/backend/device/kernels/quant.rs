@@ -93,35 +93,6 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
 
-/// Threads the `dp4a` decode matvecs launch with: 256 unless
-/// `PHOBOS_QDOT_I8_CTA` overrides it. Clamped to between 256 and 1024, and
-/// to at most `tn * 32` so each warp owns at least one column.
-pub(crate) fn qdot_i8_cta(tn: usize) -> usize {
-    static CTA: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    let want = CTA
-        .get_or_init(|| std::env::var("PHOBOS_QDOT_I8_CTA").ok().and_then(|v| v.parse().ok()))
-        .unwrap_or(256);
-    want.clamp(256, tn * 32).min(1024)
-}
-
-/// Columns a `dp4a` decode matvec's tile covers: `default` unless
-/// `PHOBOS_QDOT_I8_TN` overrides it with a power of two in `8..=256`.
-///
-/// A warp owns `tn * 32 / threads` columns, so sweep this together with
-/// [`qdot_i8_cta`].
-pub(crate) fn qdot_i8_tn(default: usize) -> usize {
-    // Read once: every decode matvec asks, and reading the environment
-    // takes a process-wide lock.
-    static TN: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
-    TN.get_or_init(|| {
-        std::env::var("PHOBOS_QDOT_I8_TN")
-            .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|&tn| tn.is_power_of_two() && (8..=256).contains(&tn))
-    })
-    .unwrap_or(default)
-}
-
 /// The Q8_0 projection as a single `qmma_t`, used by prompt passes.
 ///
 /// Unlike [`Q8_MMA_SRC`], which applies block scales every 32 elements and

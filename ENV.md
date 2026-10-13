@@ -76,12 +76,10 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_QMMA_NARROW` | opt-in | off | The narrow-CTA form of the Q8_0 prompt projection's deep tile. Wins at pp128, regresses pp512 on some models; opt-in for that reason. |
 | `PHOBOS_QMMA_TILE` | `TMxTNxCTA`, e.g. `128x64x256` | the format's | The fused prompt projection's tile and CTA, for a sweep without a rebuild. Each distinct value is a distinct compiled kernel. |
 | `PHOBOS_QMMA_STAGE` | opt-out | on | The staged (shared-memory) form of IQ1_S's fused projection. `0` goes back to the register form. |
-| `PHOBOS_QDOT_I8_TN` | a power of two, 8 to 256 | 64 | Columns a `dp4a` decode matvec's tile covers, for a sweep. Each value is a distinct compiled kernel. |
 | `PHOBOS_QDOT_I8_CTA` | threads | 256 | Threads those matvecs launch with, clamped so a warp's columns fill the CTA whole. Wider reads faster alone and loses in the model. |
 | `PHOBOS_ATTN_PREP` | opt-out | on | A decode row's query and key normalization, rotation, gate split and cache stores run as two launches, one program per head. Off, they run as the eight separate ops. |
 | `PHOBOS_GATE_Q` | opt-out | on | Attention's output gate writes the quantized copy the output projection reads in the same launch. Off, the gate and the quantization are two launches. |
 | `PHOBOS_QDOT_SPLIT` | opt-out | on | A K-quant decode matvec over a `k` of 4096 or more whose tiles give fewer than two programs a multiprocessor splits along `k` into partials and a sum. Off, one program per tile walks all of `k`. |
-| `PHOBOS_RAW_LANES` | opt-out, unset told apart | per format and card | The IQ formats' and PTQ1_0's decode matvecs written in `.ph` with lanes, in place of their `<fmt>_qdot_i8_t` intrinsics. Unset or on, they run them (level with or faster than the intrinsics on sm_75, sm_86 and sm_89); off, the intrinsics. The K-quants, Q8_0 and the row-major formats always run their lanes matvec. |
 | `PHOBOS_PERSIST_QDOT` | opt-in | off | The persistent (card-sized grid) form of the Q8_0 decode matvec, which exists to be measured against the launched one. |
 | `PHOBOS_PERSIST_BLOCKS` | a block count | the occupancy answer | Forces that grid's block count, to ask what a matvec loses at the count a fused kernel is stuck with. |
 

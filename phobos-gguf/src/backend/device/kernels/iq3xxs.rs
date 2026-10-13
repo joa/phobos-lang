@@ -105,31 +105,6 @@ kernel iq3xxs_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     )
 }
 
-/// Output tile for the dp4a variant, and the narrower one for an `n` that
-/// does not divide it.
-pub(crate) const IQ3XXS_I8_TN: usize = 64;
-pub(crate) const IQ3XXS_I8_NARROW_TN: usize = 16;
-
-/// [`iq3xxs_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
-pub(crate) fn iq3xxs_qdot_i8_matvec_src(tn: usize) -> String {
-    format!(
-        "@launch(256, 4)
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq3xxs_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
-                             QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                             GRID: tensor<i8>[1, {IQ3XXS_GRID_LEN}],
-                             SIGNS: tensor<i8>[1, {IQ2XXS_SIGNS_LEN}],
-                             C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = iq3xxs_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
-                                              QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
-                                              GRID[0 :+ 1, :], SIGNS[0 :+ 1, :])
-}}
-"
-    )
-}
-
 /// [`iq3xxs_matvec_src`] for `m == 1`, written with lanes; see `iq_f32.rs`.
 /// [`crate::backend::device::DeviceBackend::project_raw`] ensures `N` is a
 /// multiple of `tn`, and falls back to [`iq3xxs_matvec_src`] otherwise.

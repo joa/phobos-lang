@@ -198,6 +198,44 @@ fn check_matmul_kquant(
         let (want, got) = (run(host, &seen)?, run(gpu, &a)?);
         check_within(&format!("matmul_raw {name} [{m} x {k} x {n}]"), 1e-3, &want, &got);
     }
+    if quant == Quant::PTQ1_0 {
+        return Ok(());
+    }
+    // The residual add of one row, which a K-quant splits along a long `k`
+    // into partials and a sum onto the residual. It draws from its own
+    // stream, so the checks after it see the inputs they always did.
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64 ^ quant as u64;
+    let next = &mut || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed >> 40) as f32 / 8388608.0 - 1.0
+    };
+    for (k, n) in [(4096usize, 128usize), (9216, 2560)] {
+        let blocks: Vec<u8> = (0..n * k / 256).flat_map(|_| gen_block(next)).collect();
+        let packed = Packed::new(quant, blocks, k, n)?;
+        let a: Vec<f32> = (0..k).map(|_| next()).collect();
+        let base: Vec<f32> = (0..n).map(|_| next()).collect();
+        let mut seen = vec![0.0f32; k];
+        let mut qs = vec![0i8; 32];
+        for (row, from) in seen.chunks_mut(32).zip(a.chunks(32)) {
+            let scale = quantize_row(from, &mut qs);
+            for (y, &q) in row.iter_mut().zip(&qs) {
+                *y = f32::from(q) * scale;
+            }
+        }
+        let key = format!("raw_add{name}{k}x{n}");
+        let wh = host.constant_raw(&key, &packed)?;
+        let out = host.alloc(n)?;
+        host.matmul_raw(host.upload(&seen)?, 1, k, wh, n, out)?;
+        let want: Vec<f32> = read_vec(host, out, n)?.iter().zip(&base).map(|(p, b)| p + b).collect();
+        let wg = gpu.constant_raw(&key, &packed)?;
+        let dest = gpu.upload(&base)?;
+        let act = gpu.quantize_act(gpu.upload(&a)?, 1, k)?;
+        let split = gpu.matmul_raw_act_add(act, 1, k, wg, n, dest)?;
+        let label = format!("matmul_raw_act_add {name} [1 x {k} x {n}]{}", if split { "" } else { " (not split)" });
+        check_within(&label, 1e-3, &want, &read_vec(gpu, dest, n)?);
+    }
     Ok(())
 }
 

@@ -5,8 +5,6 @@
 // `quant/iq1_m.rs::raw_scales` rebuilds the equivalent word on the host, so
 // `d` here is still a plain per-block read.
 
-use super::qgemm::IQ1_GRID4_LEN;
-use super::quant::qdot_i8_cta;
 
 use std::fmt::Write as _;
 
@@ -93,36 +91,6 @@ kernel iq1m_matvec(A: tensor<f32>[M, K], QB: tensor<i8>[N, RB],
     let d = D[pn * TN :+ TN, kb :+ 1]
 {body}  }}
   C[pm :+ 1, pn * TN :+ TN] = acc
-}}
-"
-    )
-}
-
-/// Output tile for the dp4a variant. A warp takes eight columns at the
-/// default 256-thread CTA.
-pub(crate) const IQ1M_I8_TN: usize = 64;
-
-/// The tile for an `n` that 64 does not divide. A warp then takes two
-/// columns rather than eight, which beats the float fallback.
-pub(crate) const IQ1M_I8_NARROW_TN: usize = 16;
-
-/// [`iq1m_qdot_matvec_src`] against an int8-quantized activation, in dp4a.
-pub(crate) fn iq1m_qdot_i8_matvec_src(tn: usize) -> String {
-    let cta = qdot_i8_cta(tn);
-    // Four resident CTAs of 256 threads, so 64 registers per thread.
-    let min_blocks = 1024 / cta;
-    format!(
-        "@launch({cta}, {min_blocks})
-@autotune(TN in [{tn}])
-@aligned(N = TN)
-kernel iq1m_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
-                           QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                           GRID: tensor<i8>[1, {IQ1_GRID4_LEN}],
-                           C: tensor<f32>[M, N]) {{
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = iq1m_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
-                                            QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :],
-                                            GRID[0 :+ 1, :])
 }}
 "
     )

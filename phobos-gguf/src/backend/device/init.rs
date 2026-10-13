@@ -148,7 +148,6 @@ impl DeviceBackend {
             q50_kernels: RefCell::new(HashMap::new()),
             persist_blocks: Cell::new(0),
             persist_qdot: env_flag("PHOBOS_PERSIST_QDOT"),
-            raw_lanes: phobos_base::env::flag_set("PHOBOS_RAW_LANES"),
             iq1s_dp4a: Cell::new(env_flag_on("PHOBOS_IQ1S_DP4A")),
             qmma_split: env_flag_on("PHOBOS_QMMA_SPLIT"),
             qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),
