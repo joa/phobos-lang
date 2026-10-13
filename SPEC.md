@@ -416,6 +416,7 @@ SGEMM
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 @launch(256)
 @pipeline
+@aligned(M = TILE_M, N = TILE_N, K = TILE_K)
 kernel matmul(A: tensor<f32>[M, K],
               B: tensor<f32>[K, N],
               C: tensor<f32>[M, N],
