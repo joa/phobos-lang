@@ -1,6 +1,6 @@
 ---
 title: Kernels and tensors
-description: The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements and functions.
+description: The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements, unrolled loops and functions.
 sidebar:
   order: 1
 ---
@@ -103,6 +103,7 @@ integer width the target addresses memory with. The spec's
 | `x += e`, `x[...] += e` | Accumulate. |
 | `x op= e` | `x = x op e` for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. An indexed target's subscripts are evaluated twice. |
 | `for i in range(lo, hi[, step])` | `i` runs over `lo`, `lo + step`, ... while below `hi`. `step` defaults to 1. |
+| `for<unroll n> i in range(lo, hi[, step])` | The same iterations, with the body built `n` times a turn. See [Unrolling a loop](#unrolling-a-loop). |
 | `while c { }`, `if c { } else { }` | Branch and loop on a scalar condition. |
 | `break`, `continue` | Leave the innermost loop, or its current iteration. |
 | `return` | Skip the rest of the kernel. |
@@ -116,6 +117,50 @@ as no-ops after a `break`, while a `while` stops at its next test. And a loop
 whose bounds differ between threads is allowed, but the code inside it then
 runs under per-thread control; see
 [Uniform, warp-uniform and varying](/docs/ctx/uniformity/).
+
+## Unrolling a loop
+
+`for<unroll n>` runs the same iterations as the plain `for`, but builds the
+body `n` times in each turn of the loop. Each thread here sums every 256th
+element of a row, four of them a turn:
+
+```phobos
+@launch(256)
+kernel partial_sums(X: tensor<f32>[1, N], O: tensor<f32>[1, 256]) {
+  var acc: f32 = 0.0
+  for<unroll 4> i in range(ctx.thread, N, 256) {
+    acc += X[0, i]
+  }
+  O[0, ctx.thread] = acc
+}
+```
+
+The compiler turns it into two loops: one whose body holds the `n` copies,
+taking `i`, `i + step`, ... in turn, for as long as a whole turn fits below
+`hi`, and one that runs whatever is left one iteration at a time:
+
+```text
+for i in range(lo, mid, 4 * step) {   // whole turns
+  body(i)
+  body(i + step)
+  body(i + 2 * step)
+  body(i + 3 * step)
+}
+for i in range(mid, hi, step) {       // the rest
+  body(i)
+}
+```
+
+`mid` is where the last whole turn ends. Fewer turns mean fewer loop
+tests, and the copies give the hardware independent loads to have in flight
+at once. Each copy is its own scope, so a `let` in the body does not clash
+with the next copy's.
+
+| Rule | Detail |
+| --- | --- |
+| `n` | A constant of at least 1, or an [`@autotune`](/docs/language/autotuning/#tuning-the-unroll-factor) name. `for<unroll 1>` is the plain loop. |
+| `step` | A positive constant; `lo` and `hi` may be anything a `for` takes. |
+| GEMM loops | Not for a loop that carries tensor-core accumulators. An unrolled loop is never recognized as a GEMM, so a GEMM's k loop stays a plain `for`. |
 
 ## Functions
 

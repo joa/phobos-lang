@@ -39,6 +39,23 @@
             "2": { "name": "entity.name.function.phobos" }
           }
         },
+        {
+          "begin": "\\b(for)\\s*(<)\\s*(unroll)\\b",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.phobos" },
+            "2": { "name": "keyword.control.phobos punctuation.definition.unroll.begin.phobos" },
+            "3": { "name": "keyword.control.unroll.phobos" }
+          },
+          "end": ">",
+          "endCaptures": { "0": { "name": "keyword.control.phobos punctuation.definition.unroll.end.phobos" } },
+          "patterns": [
+            { "include": "#ctx" },
+            { "include": "#numbers" },
+            { "include": "#functions" },
+            { "include": "#operators" },
+            { "include": "#identifiers" }
+          ]
+        },
         { "name": "keyword.control.phobos", "match": "\\b(if|else|for|in|while|break|continue|return)\\b" },
         { "name": "storage.type.phobos", "match": "\\b(kernel|fn|let|var)\\b" },
         { "name": "constant.language.boolean.phobos", "match": "\\b(true|false)\\b" }

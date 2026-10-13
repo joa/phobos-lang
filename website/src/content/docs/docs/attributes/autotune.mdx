@@ -50,6 +50,8 @@ A name declared in `@autotune` is a constant everywhere in the kernel:
 - a tensor dimension, which makes that dimension static: with
   `D in [64]`, `Q: tensor<f32>[Nq, D]` has 64 columns;
 - the length of a `:+` slice and a loop step;
+- the factor of [`for<unroll n>`](/docs/language/autotuning/#tuning-the-unroll-factor),
+  so `U in [1, 8]` times the plain loop against 2, 4 and 8 copies;
 - the divisor in [`@aligned`](/docs/attributes/aligned/), as in
   `@aligned(M = TILE_M)`;
 - an ordinary index value in expressions, as in `pm * TILE_M`.

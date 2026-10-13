@@ -39,13 +39,13 @@ kernel. That level is covered in its own section,
 
 | Page | Covers |
 | --- | --- |
-| [Kernels and tensors](/docs/language/kernels-and-tensors/) | The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements and functions |
+| [Kernels and tensors](/docs/language/kernels-and-tensors/) | The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements, unrolled loops and functions |
 | [Tiles and shared memory](/docs/language/tiles-and-shared-memory/) | `tile<T>`, `var` and `let`, what lives in shared memory and for how long |
 | [Slicing, bounds and masking](/docs/language/slicing-bounds-masking/) | Subscripts, what happens at the edge of a tensor, `@aligned` |
 | [Elementwise math and reductions](/docs/language/elementwise-and-reductions/) | Operators, conversions, math functions, `where`, row reductions |
 | [`dot` and tensor cores](/docs/language/dot-and-tensor-cores/) | Matrix products and the hardware they run on |
 | [Quantized built-ins and formats](/docs/language/quantized/) | Q8_0 and the GGUF formats as contractions |
-| [Autotuning](/docs/language/autotuning/) | Search spaces and the shape environment |
+| [Autotuning](/docs/language/autotuning/) | Search spaces, the shape environment and tuned unroll factors |
 
 Each page links the section of the [language spec](/docs/reference/spec/)
 it explains. The spec is the normative text; these pages explain it with
