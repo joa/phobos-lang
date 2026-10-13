@@ -368,3 +368,35 @@ fn a_float_multiply_add_may_fuse() {
     // `acc += W * A`: both halves may contract into one fma.
     assert_contains(&mlir, &["arith.mulf", "arith.addf", "fastmath<contract>"]);
 }
+
+/// A shared tile's thread runs, read through its `flat()` view or a slice.
+fn flat_runs(view: &str, body: &str) -> String {
+    format!(
+        "@launch(256)
+        @aligned(K = 128)
+        kernel k(A: tensor<i8>[4, 32], W: tensor<i8>[N, K], C: tensor<f32>[1, N]) {{
+            var T: tile<i8>[4, 32] = A[0 :+ 4, 0 :+ 32]
+            let V = {view}
+            let col = ctx.block.x * ctx.warps + ctx.warp
+            let k = ctx.lane % 8 * 16
+            let total = sum<over ctx.lane>(f32({body}))
+            if ctx.lane == 0 {{
+                C[0, col] = total
+            }}
+        }}"
+    )
+}
+
+#[test]
+fn a_run_reads_a_shared_tile_through_its_flat_view() {
+    let mlir = emit_mlir(&flat_runs(
+        "flat(T)",
+        "sum(i32(V[0, k :+ 16]) * i32(W[col, k :+ 16])) + dp4a(word(V[0, k :+ 16], 1), 16843009, 0)",
+    ));
+    // The view is the tile's buffer in row-major order, so `k`'s divisor of
+    // 16 proves a 16-byte access on it as on the tensor.
+    assert_contains(&mlir, &["{alignment = 16 : i64}", "nvvm.dot.accumulate.4way"]);
+    assert!(!mlir.lines().any(|l| l.contains("memref.load") && l.contains("xi8")), "\n{mlir}");
+    let err = emit_err(&flat_runs("T[0 :+ 2, :]", "sum(i32(V[0, k :+ 16]))"));
+    assert!(err.contains("not a slice"), "got: {err}");
+}
