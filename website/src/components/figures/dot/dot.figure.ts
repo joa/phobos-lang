@@ -138,7 +138,7 @@ export default class DotFigure extends ChartFigure {
     this.#rulerLabel = this.#addLabel(root, geometry.ruler.label, "is-small")
 
     this.#tensorcore = this.#addLabel(root, geometry.tensorcore)
-    this.#code = geometry.code.map(at => this.#addLabel(root, at))
+    this.#code = geometry.code.map(at => this.#addLabel(root, at, "is-small"))
     this.#notes = geometry.notes.map(at => this.#addLabel(root, at, "is-small"))
 
     this.#packetsA = Array.from({ length: FRAGMENTS }, () => new StarPacket(root, { space: "global" }))

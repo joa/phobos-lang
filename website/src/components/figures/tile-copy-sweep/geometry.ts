@@ -133,11 +133,11 @@ const SPECS: Record<Layout, Spec> = {
   wide: {
     heightUnits: 300,
     tensor: { x: 36, y: 78, cell: 6, pitch: 7 },
-    tile: { x: 316, y: 78, cell: 12, pitch: 13 },
+    tile: { x: 340, y: 78, cell: 12, pitch: 13 },
     programX: 36,
     programY: 232,
     programPitch: 20,
-    ruler: { x: 316, width: 320, y: 222 },
+    ruler: { x: 340, width: 320, y: 222 },
   },
   narrow: {
     heightUnits: 540,

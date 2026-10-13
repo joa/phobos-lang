@@ -2,14 +2,17 @@
 
 export type Layout = "wide" | "narrow"
 
-// Below this container width a figure draws its narrow layout. At 600 px an 11-unit label in the
-// 720-unit wide viewBox still renders at about 9 px.
+// Below this container width a figure draws its narrow layout. At 600 px a 12.5-unit label in the
+// 720-unit wide viewBox still renders at about 10.4 px, and at 11 px from a 640 px docs column up.
 export const NARROW_BELOW_PX = 600
 
 export const VIEW_WIDTH_UNITS: Record<Layout, number> = { wide: 720, narrow: 400 }
 
-// Labels never render below this many viewBox units.
-export const MIN_LABEL_UNITS = 11
+// Labels never render below this many viewBox units (.chart-label.is-small in chart.css).
+export const MIN_LABEL_UNITS = 12.5
+
+// .chart-label's size, for measuring a label that is not small.
+export const LABEL_UNITS = 13.5
 
 export function layoutFor(widthPx: number): Layout {
   return widthPx < NARROW_BELOW_PX ? "narrow" : "wide"

@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest"
 import { cubicBezier, easeInOut, easeInOutSine, easeOut, easeOutCubic, mulberry32 } from "../src/lib/figure/math"
-import { graticulePoints, layoutFor, NARROW_BELOW_PX, pxPerUnit, registrationTicksPath } from "../src/lib/figure/layout"
+import {
+  graticulePoints,
+  layoutFor,
+  MIN_LABEL_UNITS,
+  NARROW_BELOW_PX,
+  pxPerUnit,
+  registrationTicksPath,
+} from "../src/lib/figure/layout"
 import { elbow, Polyline } from "../src/lib/figure/polyline"
-import { Timeline } from "../src/lib/figure/timeline"
+import { LOOP_HOLD_MS, LoopClock, Timeline } from "../src/lib/figure/timeline"
 import { parseDurationMs } from "../src/lib/figure/motion"
 import { ChartFigure } from "../src/lib/figure/chart-figure"
 import { plate } from "../src/lib/figure/draw"
-import { StarPacket } from "../src/lib/figure/packet"
+import { cloudParticles, cloudSpread, MAX_PARTICLES, StarPacket } from "../src/lib/figure/packet"
 
 describe("Timeline", () => {
   function recorder() {
@@ -63,6 +70,71 @@ describe("Timeline", () => {
   })
 })
 
+describe("LoopClock", () => {
+  it("stays idle until the figure has run", () => {
+    const clock = new LoopClock()
+    expect(clock.tick(false, 5000)).toBe("idle")
+  })
+
+  it("holds the end state, then restarts once", () => {
+    const clock = new LoopClock({ holdMs: 1500 })
+    expect(clock.tick(true, 16)).toBe("run")
+    expect(clock.tick(false, 1000)).toBe("hold")
+    expect(clock.tick(false, 499)).toBe("hold")
+    expect(clock.tick(false, 1)).toBe("restart")
+    // A restart that played nothing does not loop again.
+    expect(clock.tick(false, 5000)).toBe("idle")
+  })
+
+  it("starts the hold over when the figure runs again", () => {
+    const clock = new LoopClock({ holdMs: 1500 })
+    clock.tick(true, 16)
+    clock.tick(false, 1400)
+    expect(clock.tick(true, 16)).toBe("run")
+    expect(clock.tick(false, 1400)).toBe("hold")
+    expect(clock.heldMs).toBe(1400)
+  })
+
+  it("holds for about a second and a half by default", () => {
+    expect(LOOP_HOLD_MS).toBe(1500)
+  })
+})
+
+describe("packet cloud", () => {
+  it("is deterministic per seed and capped", () => {
+    expect(cloudParticles(14, 7)).toEqual(cloudParticles(14, 7))
+    expect(cloudParticles(14, 7)).not.toEqual(cloudParticles(14, 8))
+    expect(cloudParticles(500, 1)).toHaveLength(MAX_PARTICLES)
+    expect(cloudParticles(0, 1)).toHaveLength(1)
+  })
+
+  it("puts particles on three depth layers, far first, sized and faded by depth", () => {
+    const particles = cloudParticles(18, 3)
+    expect(new Set(particles.map(particle => particle.layer))).toEqual(new Set([0, 1, 2]))
+    expect(particles.map(particle => particle.layer)).toEqual([...particles.map(particle => particle.layer)].sort())
+    for (const particle of particles) {
+      expect(particle.radiusUnits).toBeGreaterThanOrEqual(0.8)
+      expect(particle.radiusUnits).toBeLessThanOrEqual(2.2)
+      expect(particle.opacity).toBeGreaterThan(0)
+      expect(particle.opacity).toBeLessThanOrEqual(1)
+      expect(particle.lagUnits).toBeGreaterThanOrEqual(0)
+    }
+    const near = particles.filter(particle => particle.layer === 2)
+    const far = particles.filter(particle => particle.layer === 0)
+    expect(Math.max(...near.map(particle => particle.radiusUnits))).toBeGreaterThan(
+      Math.max(...far.map(particle => particle.radiusUnits))
+    )
+  })
+
+  it("gathers to a point at both ends of a line", () => {
+    expect(cloudSpread(0, 100, 13.5)).toBe(0)
+    expect(cloudSpread(100, 100, 13.5)).toBe(0)
+    expect(cloudSpread(50, 100, 13.5)).toBe(1)
+    expect(cloudSpread(5, 100, 13.5)).toBeGreaterThan(0)
+    expect(cloudSpread(5, 100, 13.5)).toBeLessThan(1)
+  })
+})
+
 describe("easing", () => {
   const easings = { easeInOutSine, easeOutCubic, easeOut, easeInOut }
   for (const [name, easing] of Object.entries(easings)) {
@@ -116,9 +188,13 @@ describe("layout", () => {
     expect(layoutFor(390)).toBe("narrow")
   })
 
-  it("keeps an 11-unit label at 9 px or more at either side of the breakpoint", () => {
-    expect(11 * pxPerUnit(NARROW_BELOW_PX)).toBeGreaterThanOrEqual(9)
-    expect(11 * pxPerUnit(340)).toBeGreaterThanOrEqual(9)
+  it("keeps the smallest label at 10 px or more at either side of the breakpoint", () => {
+    expect(MIN_LABEL_UNITS * pxPerUnit(NARROW_BELOW_PX)).toBeGreaterThanOrEqual(10)
+    expect(MIN_LABEL_UNITS * pxPerUnit(340)).toBeGreaterThanOrEqual(10)
+  })
+
+  it("renders the smallest label at 11 px in a 640 px docs column", () => {
+    expect(MIN_LABEL_UNITS * pxPerUnit(640)).toBeGreaterThanOrEqual(11)
   })
 
   it("centers the graticule", () => {

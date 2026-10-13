@@ -2,7 +2,7 @@
 
 The base for every figure on the site: the visualizer, the `ctx` figures, the front page and inference figures.
 Figures are drawn as a star chart: a dotted graticule plate with corner registration ticks and a mono plate label,
-1-unit hairlines that end in dots, square corners, star packets, Noto Sans Mono labels. The look lives in
+1-unit hairlines that end in dots, square corners, point-cloud packets, Noto Sans Mono labels. The look lives in
 `src/styles/chart.css`; this folder holds the mechanics.
 
 ## Rules
@@ -14,12 +14,14 @@ Figures are drawn as a star chart: a dotted graticule plate with corner registra
 - States: `.is-on` (active, in its space's hue), `.is-hot` (look here), `.is-warn` (cost: `--mars`, always dashed),
   `.is-idle` (dimmed), `.is-hidden`. No state class is the resting look: `--sky-line` hairlines.
 - Hue never carries meaning alone: each space has its own place in the layout and a label; cost is also dashed.
-- Labels are mono, sentence case, at least 11 units (`.chart-label`, `.chart-label.is-small` is 11). Only plate labels
-  are uppercase.
+- Labels are mono, sentence case, at least 12.5 units (`.chart-label` is 13.5, `.chart-label.is-small` 12.5), so the
+  smallest renders at 11 px in a 640 px docs column. Only plate labels are uppercase.
 - Anything illustrative is marked: `plate(..., { schematic: true })` prints "schematic" on the plate. Never invent a
   number; a figure that states one reads it from data.
 - Motion: only while at least 30% of the figure is on screen in a visible tab; under `prefers-reduced-motion` nothing
-  moves and the figure shows its settled end state, with no tour.
+  moves and the figure shows its settled end state, with no tour and no loop.
+- Figures loop. Once a run (and its tour) has finished, the end state holds for 1.5 s, then cross-fades into the next
+  run. Off screen or in a hidden tab the hold pauses with the frame loop.
 
 ## Files
 
@@ -27,9 +29,9 @@ Figures are drawn as a star chart: a dotted graticule plate with corner registra
 | --- | --- |
 | `chart-figure.ts` | `ChartFigure`, the base class: lifecycle, layouts, frame loop, state from controls, tours, readout, static rendering |
 | `draw.ts` | Star chart primitives: `plate`, `box`, `cellGrid`, `wire`, `node`, `label`, `glow`, the space classes |
-| `packet.ts` | `StarPacket`: a moving star with a four-point flare, a glow and a three-copy comet trail |
+| `packet.ts` | `StarPacket`: a point cloud of particles on three depth layers behind a glow |
 | `motion.ts` | `Motion` (draw-in, entrances, FLIP glide, arrival pulse), `viewTransition`, `setBreathing`, `sweepWire`, the motion tokens |
-| `timeline.ts` | `Timeline`: steps run back to back, each a pure function of its progress |
+| `timeline.ts` | `Timeline`: steps run back to back, each a pure function of its progress; `LoopClock`, the loop's hold |
 | `polyline.ts` | `Polyline` (constant-speed paths), `elbow` (right-angled routes) |
 | `layout.ts` | `layoutFor` (600 px breakpoint), `VIEW_WIDTH_UNITS`, graticule and tick geometry |
 | `math.ts` | `mulberry32`, `clamp`, `lerp`, easings, `cubicBezier`, `easeOut` / `easeInOut` matching the CSS tokens |
@@ -92,8 +94,14 @@ Subclass hooks:
   tour. Override it to add a draw-in, then call `super.onFirstVisible()`.
 - `get tour()`: state patches such as `[{ phase: "tile" }, { phase: "load" }]`, applied as if clicked, each held
   1.4 s after its animation ends. Any reader input cancels it; reduced motion skips it.
+- `replay()`: starts a loop's next run. The default plays the tour again while the reader has not touched the figure,
+  else fires the `replay` action. A figure with neither stops after one run; override it to loop anyway. If it starts
+  nothing, the loop rests until the next change.
+- `get loops()` and `get loopFades()` (both `true` by default): turn the loop, or its cross-fade, off. A figure whose
+  end and start look the same (only packets move) can skip the fade.
 
-Helpers and getters: `play()` (starts the frame loop, or settles under reduced motion), `pause()`,
+Helpers and getters: `play()` (starts the frame loop, or settles under reduced motion), `pause()`, `crossfade()`
+(lays a copy of the drawing over it that fades out while the drawing fades in; call it before changing state),
 `setReadout(text)` (writes the `aria-live` readout; call it on a state change, never per frame), `setViewBox`,
 `setState(patch)` (changes state and controls without calling hooks), `root`, `id`, `svg`, `drawing`, `layout`,
 `state`, `motion`, `reducedMotion`, `isVisible`, `hasInteracted`.
@@ -130,9 +138,14 @@ them at run time; under reduced motion they shrink to 120 ms or 0. In a frame lo
   (attributes or classes), then glides each from where it was over `--dur-3`. Works for SVG and HTML; a glide started
   mid-glide continues from where the element is. For an HTML layout swap, `viewTransition(() => swap())` uses
   `document.startViewTransition` where the browser has it (Chrome does not capture SVG children, so SVG uses FLIP).
-- **Packets.** `new StarPacket(parent, { space })`, then in a timeline step `packet.placeAtFraction(line, progress)`
-  (hidden outside 0 to 1) or `packet.place(line, distanceUnits)`. Constant speed: give the step a duration of
-  `line.lengthUnits / speed`.
+- **Packets.** `new StarPacket(parent, { space, count })`, then in a timeline step
+  `packet.placeAtFraction(line, progress)` (hidden outside 0 to 1) or `packet.place(line, distanceUnits)`. Constant
+  speed: give the step a duration of `line.lengthUnits / speed`. A packet is a cloud of `count` particles (14 by
+  default, at most 24), each with a fixed lag and offset from a seeded generator, so the static render matches. It
+  gathers to a point at both ends of its line. Keep `count` small where many packets move at once (the visualizer's
+  32 lanes use 6).
+- **Loop.** Nothing to do in a figure with a Replay button or a tour: the base holds the end state, cross-fades and
+  calls `replay()`.
 - **Arrival glow.** Either `this.motion.pulse(glowElement)` (fire and forget, 300 ms), or, inside a seekable timeline,
   a `glow` with class `is-pulse` whose `--pulse` property (0 to 1) you set per frame, as `cta-copy` does.
 - **Breathing.** `setBreathing(glowElement, true)`: opacity between 0.85 and 1 over 2.4 s, paused while the figure is
@@ -143,8 +156,12 @@ them at run time; under reduced motion they shrink to 120 ms or 0. In a frame lo
 - **Glow** is one pre-blurred radial gradient per space, defined once per document (`ensureGlowDefs()`, called by
   `boot.ts`), never an SVG filter per element.
 
-Budget: animate only transforms, opacity and dash or gradient offsets; one frame loop per playing figure, stopped as
-soon as `update()` returns `false`; no element creation per frame.
+- **Depth.** The plate has a faint glow at its heart (`.chart-vignette`) and its graticule drifts a few units against
+  the scroll (a scroll-driven CSS animation where the browser has one), so the dots read as a layer behind the drawing.
+  Labels never get a 3D transform.
+
+Budget: animate only transforms, opacity and dash or gradient offsets; one frame loop per playing figure, stopped once
+the figure has finished and its loop's hold has run out; no element creation per frame.
 
 ## Static plates
 

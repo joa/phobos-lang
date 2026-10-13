@@ -2,7 +2,7 @@ import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { boxRect, slotRects, vizGeometry, type Rect } from "../src/lib/viz/geometry"
-import { formatBox, KernelModel } from "../src/lib/viz/model"
+import { extraLines, formatBox, KernelModel, type LineFacts } from "../src/lib/viz/model"
 import { packing } from "../src/lib/viz/packing"
 import { shownSource } from "../src/lib/viz/shown"
 import type { Trace } from "../src/lib/viz/trace"
@@ -82,6 +82,22 @@ describe("statement steps", () => {
     expect(gemm.iterationStep(0, 15, 1)).toBe(16)
     expect(gemm.iterationStep(0, 16, -1)).toBe(15)
     expect(q8.statements(0)[q8.iterationStep(0, 1, 1)].iter.k).toBe(32)
+  })
+
+  it("marks only the lines past the fewest that hold the bytes as extra", () => {
+    const facts = (used: number[], requestedBytes: number): LineFacts => ({
+      lines: used.length,
+      idealLines: Math.ceil(requestedBytes / 128),
+      requestedBytes,
+      touched: used.map((usedBytes, line) => ({ line, usedBytes })),
+      laneLines: [],
+      laneBytes: [],
+    })
+    // 8 half-used lines for 512 bytes: 4 needed, the last 4 extra.
+    expect([...extraLines(facts([64, 64, 64, 64, 64, 64, 64, 64], 512))].sort()).toEqual([4, 5, 6, 7])
+    // A misaligned run: the least used line is the extra one.
+    expect([...extraLines(facts([32, 128, 128, 128, 96], 512))]).toEqual([0])
+    expect(extraLines(facts([128, 128], 256)).size).toBe(0)
   })
 
   it("matches statements across a variant by text and iteration", () => {
@@ -178,7 +194,7 @@ describe("readout", () => {
 
   it("describes the GEMM's k step and its coalescing", () => {
     expect(gemm.readout(gemm.ctaIndex([1, 1, 0]), 2)).toBe(
-      "CTA (1, 1), kt = 8: stages A[32:64, 8:12] and B[8:12, 32:64] in shared tile0 (bytes 0 to 511) and shared tile1 (bytes 512 to 1023) for the GEMM's k step on fma; A: 32 of 256 threads, 4 f32 each, 16-byte vectors. Warp 0 touches 32 lines of 128 bytes for 512 bytes; 4 would hold them. A barrier follows."
+      "CTA (1, 1), kt = 8: stages A[32:64, 8:12] and B[8:12, 32:64] in shared tile0 (bytes 0 to 511) and shared tile1 (bytes 512 to 1023) for the GEMM's k step on fma; A: 32 of 256 threads, 4 f32 each, 16-byte vectors. Warp 0 touches 32 memory lines of 128 bytes for 512 bytes, where 4 would hold them; the 28 extra lines are drawn dashed in orange. A barrier follows."
     )
   })
 

@@ -62,6 +62,15 @@
   height: auto;
   overflow: visible;
   font-family: var(--font-mono);
+  /* The loop's cross-fade blends inside the drawing only (see .chart-ghost) */
+  isolation: isolate;
+}
+
+/* A loop's restart: a copy of the end state over the drawing, fading out while the drawing fades in.
+ * plus-lighter adds the two, so what both show stays at full strength. */
+.chart-ghost {
+  mix-blend-mode: plus-lighter;
+  pointer-events: none;
 }
 
 .chart-svg * {
@@ -99,6 +108,35 @@
   fill: var(--sky-line);
 }
 
+/* Depth: a faint glow at the plate's heart behind everything, and the graticule drifting a few units
+ * against the scroll, so the dots read as a layer behind the drawing. Labels never move. */
+.chart-vignette {
+  fill: url(#chart-plate-vignette);
+  pointer-events: none;
+}
+
+.chart-vignette-stop {
+  stop-color: var(--brand);
+}
+
+@supports (animation-timeline: view()) {
+  @media (prefers-reduced-motion: no-preference) {
+    .chart-graticule {
+      animation: chart-parallax linear both;
+      animation-timeline: view();
+    }
+  }
+}
+
+@keyframes chart-parallax {
+  from {
+    transform: translateY(-6px);
+  }
+  to {
+    transform: translateY(6px);
+  }
+}
+
 .chart-ticks {
   fill: none;
   stroke: var(--dust);
@@ -109,7 +147,7 @@
 .chart-plate-note {
   fill: var(--dust);
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 12.5px;
 }
 
 .chart-plate-text {
@@ -140,15 +178,16 @@
   fill: var(--sky-line);
 }
 
+/* Sizes in viewBox units. In a 640 px docs column (0.89 px a unit) the small size renders at 11 px. */
 .chart-label {
   fill: var(--dust);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13.5px;
   font-variant-numeric: tabular-nums;
 }
 
 .chart-label.is-small {
-  font-size: 11px;
+  font-size: 12.5px;
 }
 
 /* States */
@@ -267,8 +306,8 @@
   }
 }
 
-/* Star packets: a core, a four-point flare, a glow and a comet trail. They move every frame, so
- * nothing in them transitions. */
+/* Packets: a cloud of particles on three depth layers behind a soft glow. Opacity per particle is
+ * set once (depth and place in the trail); they move every frame, so nothing in them transitions. */
 
 .chart-packet,
 .chart-packet * {
@@ -276,38 +315,19 @@
 }
 
 .chart-packet .chart-glow {
-  opacity: var(--glow-strength);
+  opacity: calc(0.8 * var(--glow-strength));
 }
 
-.chart-star-core {
-  fill: color-mix(in srgb, var(--space) 55%, var(--star));
-}
-
-.chart-star-flare {
-  fill: none;
-  stroke: var(--space);
-  stroke-width: 1;
-  stroke-linecap: round;
-}
-
-.chart-star-trail {
+.chart-particle {
   fill: var(--space);
 }
 
-.chart-star-trail.is-trail-1 {
-  opacity: 0.45;
+.chart-particle.is-depth-1 {
+  fill: color-mix(in srgb, var(--space) 75%, var(--star));
 }
 
-.chart-star-trail.is-trail-2 {
-  opacity: 0.25;
-}
-
-.chart-star-trail.is-trail-3 {
-  opacity: 0.12;
-}
-
-.chart-star-trail.is-hidden {
-  opacity: 0;
+.chart-particle.is-depth-2 {
+  fill: color-mix(in srgb, var(--space) 50%, var(--star));
 }
 
 /* Light sweep along an active wire: a short bright dash over a copy of the wire (pathLength 1) */
@@ -424,50 +444,164 @@
   border-top-style: dashed;
 }
 
-.chart-controls,
-.chart-group {
+/* Controls: a glass bar of segmented groups. Each group is one capsule with a gradient hairline
+ * (brand to nebula through the sky line); its buttons sit inside, and the pressed one lights from
+ * within. A lone button wears the same capsule. Icons are 16 px glyphs in currentColor. */
+
+.chart-controls {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 0.375rem;
-}
-
-.chart-controls {
+  gap: 0.625rem 0.75rem;
   margin-top: 0.75rem;
-  row-gap: 0.625rem;
 }
 
-.chart[data-layout="wide"] .chart-group + .chart-group,
-.chart[data-layout="wide"] .chart-group + .chart-btn {
-  margin-left: 0.75rem;
+/* On the root, so a control group outside a figure (a kernel pair's switch) wears them too */
+:root {
+  --control-bg: color-mix(in srgb, var(--sky-2) 72%, transparent);
+  --control-rim: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--brand) 55%, var(--sky-line)),
+    var(--sky-line) 45%,
+    color-mix(in srgb, var(--nebula) 45%, var(--sky-line))
+  );
+  --control-sheen: inset 0 1px 0 color-mix(in srgb, var(--star) 7%, transparent);
+  --control-lit: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--brand) 30%, transparent),
+    color-mix(in srgb, var(--nebula) 16%, transparent)
+  );
+  --control-radius: 10px;
+}
+
+/* Starlight spaces sibling blocks in a docs page apart; controls set their own spacing */
+:is(.chart, .viz-pair) :is(.chart-controls, .chart-group, .chart-range-label) > * {
+  margin-top: 0;
+}
+
+.chart-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: var(--control-radius);
+  background:
+    linear-gradient(var(--control-bg), var(--control-bg)) padding-box,
+    var(--control-rim) border-box;
+  box-shadow:
+    var(--control-sheen),
+    0 6px 18px -12px var(--glow);
 }
 
 .chart-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
   min-height: 32px;
+  min-width: 32px;
   padding: 0 0.75rem;
-  border: 1px solid var(--sky-line);
-  border-radius: 0;
+  border: 1px solid transparent;
+  border-radius: calc(var(--control-radius) - 2px);
   background: transparent;
   color: var(--dust);
   font-family: var(--font-mono);
   font-size: 0.75rem;
   line-height: 1.2;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
   transition:
-    border-color var(--dur-1) var(--ease-out),
     background-color var(--dur-2) var(--ease-out),
-    color var(--dur-1) var(--ease-out);
+    box-shadow var(--dur-2) var(--ease-out),
+    color var(--dur-1) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+/* A button outside a group carries the capsule itself */
+.chart-btn:not(.chart-group > .chart-btn) {
+  border-radius: var(--control-radius);
+  background:
+    linear-gradient(var(--control-bg), var(--control-bg)) padding-box,
+    var(--control-rim) border-box;
+  box-shadow: var(--control-sheen);
 }
 
 .chart-btn:hover {
-  border-color: var(--brand);
   color: var(--star);
+  background-color: color-mix(in srgb, var(--brand) 10%, transparent);
+}
+
+.chart-btn:not(.chart-group > .chart-btn):hover {
+  background:
+    linear-gradient(
+        color-mix(in srgb, var(--brand) 10%, var(--control-bg)),
+        color-mix(in srgb, var(--brand) 10%, var(--control-bg))
+      )
+      padding-box,
+    var(--control-rim) border-box;
+  box-shadow:
+    var(--control-sheen),
+    0 0 14px -4px var(--glow);
+}
+
+.chart-btn:active {
+  transform: translateY(1px);
 }
 
 .chart-btn[aria-pressed="true"] {
-  border-color: var(--brand);
-  background: var(--brand-fill-on);
   color: var(--star);
+  background: var(--control-lit);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--brand-hi) 40%, transparent),
+    inset 0 0 0 1px color-mix(in srgb, var(--brand) 45%, transparent),
+    0 0 16px -4px var(--glow);
+}
+
+.chart-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Icon buttons: square, the glyph centered */
+.chart-icon {
+  padding: 0;
+  width: 32px;
+}
+
+.chart-glyph {
+  display: block;
+  width: 16px;
+  height: 16px;
+  overflow: visible;
+}
+
+.chart-glyph path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chart-glyph path.is-filled {
+  fill: currentColor;
+}
+
+/* Play and pause share a button; aria-pressed says which glyph shows */
+.chart-play .is-pause,
+.chart-play[aria-pressed="true"] .is-play {
+  display: none;
+}
+
+.chart-play[aria-pressed="true"] .is-pause {
+  display: block;
+}
+
+.chart-play {
+  color: var(--brand-hi);
 }
 
 .chart-btn:focus-visible,
@@ -475,6 +609,9 @@
   outline: 2px solid var(--brand);
   outline-offset: 2px;
 }
+
+/* Step slider: a thin track filled brand to nebula up to the thumb (--fill, set by the figure), cut
+ * into segments at each step when there are few enough (--ticks), and a star for a thumb. */
 
 .chart-range-label {
   display: inline-flex;
@@ -488,8 +625,113 @@
 }
 
 .chart-range {
+  --track: color-mix(in srgb, var(--sky-line) 85%, transparent);
+  --track-fill: linear-gradient(90deg, var(--brand), var(--nebula));
+  --track-ticks: none;
   width: min(16rem, 100%);
-  accent-color: var(--brand);
+  height: 32px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.chart-range[data-ticked] {
+  --track-ticks: repeating-linear-gradient(
+    90deg,
+    transparent 0,
+    transparent calc(100% / var(--ticks) - 2px),
+    var(--sky-1) calc(100% / var(--ticks) - 2px),
+    var(--sky-1) calc(100% / var(--ticks))
+  );
+}
+
+.chart-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background:
+    var(--track-ticks),
+    var(--track-fill) 0 0 / var(--fill, 0%) 100% no-repeat,
+    var(--track);
+}
+
+.chart-range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background:
+    var(--track-ticks),
+    var(--track-fill) 0 0 / var(--fill, 0%) 100% no-repeat,
+    var(--track);
+}
+
+.chart-range::-webkit-slider-thumb {
+  width: 18px;
+  height: 18px;
+  margin-top: -6px;
+  border: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    var(--sky-1) 0 18%,
+    var(--brand-hi) 30%,
+    var(--brand) 62%,
+    color-mix(in srgb, var(--brand) 40%, transparent) 72%,
+    transparent 74%
+  );
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--brand) 16%, transparent),
+    0 0 14px 2px var(--glow);
+  appearance: none;
+  -webkit-appearance: none;
+  transition:
+    box-shadow var(--dur-2) var(--ease-out),
+    transform var(--dur-1) var(--ease-out);
+}
+
+.chart-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle,
+    var(--sky-1) 0 18%,
+    var(--brand-hi) 30%,
+    var(--brand) 62%,
+    color-mix(in srgb, var(--brand) 40%, transparent) 72%,
+    transparent 74%
+  );
+  box-shadow:
+    0 0 0 4px color-mix(in srgb, var(--brand) 16%, transparent),
+    0 0 14px 2px var(--glow);
+}
+
+.chart-range:hover::-webkit-slider-thumb,
+.chart-range:focus-visible::-webkit-slider-thumb {
+  transform: scale(1.12);
+  box-shadow:
+    0 0 0 6px color-mix(in srgb, var(--brand) 20%, transparent),
+    0 0 20px 4px var(--glow);
+}
+
+.chart-range:active::-webkit-slider-thumb {
+  transform: scale(0.96);
+}
+
+.chart-range:focus-visible {
+  border-radius: 999px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-btn,
+  .chart-range::-webkit-slider-thumb {
+    transition: none;
+  }
+
+  .chart-btn:active {
+    transform: none;
+  }
 }
 
 .chart figcaption {

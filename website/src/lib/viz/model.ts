@@ -546,6 +546,16 @@ export class KernelModel {
   }
 }
 
+// The lines a warp touches beyond the fewest that could hold its bytes: as many as the excess, taken
+// from the least used, later lines first on a tie. Indexes into facts.touched.
+export function extraLines(facts: LineFacts): Set<number> {
+  const excess = Math.max(0, facts.touched.length - facts.idealLines)
+  const order = facts.touched
+    .map((line, index) => ({ usedBytes: line.usedBytes, index }))
+    .sort((a, b) => a.usedBytes - b.usedBytes || b.index - a.index)
+  return new Set(order.slice(0, excess).map(entry => entry.index))
+}
+
 const QUIET_KINDS = new Set(["const", "yield", "dim", "assume_align"])
 
 export function sameSpan(a: Span, b: Span): boolean {
@@ -712,7 +722,9 @@ function describeLanes(model: KernelModel, event: LaneEvent, stage?: { index: nu
     const vector = event.vectorBytes ? ` as one ${event.vectorBytes}-byte vector` : ""
     const lines = model.laneRunLines(event)
     const lineText = lines
-      ? `; ${plural(lines.lines, "line")} of ${LINE_BYTES} bytes for ${lines.requestedBytes} bytes`
+      ? `; ${plural(lines.lines, "memory line")} of ${LINE_BYTES} bytes for ${lines.requestedBytes} bytes${
+          lines.lines > lines.idealLines ? `, ${lines.idealLines} needed` : ""
+        }`
       : ""
     return `warp 0's ${event.runs.length} lanes each ${verb} ${runLength} ${elem} of ${formatBox(first.tensor ?? "?", union)}${vector}${lineText}`
   }
@@ -766,7 +778,8 @@ function describe(model: KernelModel, state: StepState): string {
   sentence += "."
   const lines = state.mapped?.lines
   if (lines && lines.lines > lines.idealLines) {
-    sentence += ` Warp 0 touches ${plural(lines.lines, "line")} of ${LINE_BYTES} bytes for ${lines.requestedBytes} bytes; ${lines.idealLines} would hold them.`
+    const extra = lines.lines - lines.idealLines
+    sentence += ` Warp 0 touches ${plural(lines.lines, "memory line")} of ${LINE_BYTES} bytes for ${lines.requestedBytes} bytes, where ${lines.idealLines} would hold them; the ${plural(extra, "extra line")} ${extra === 1 ? "is" : "are"} drawn dashed in orange.`
   }
   const kept = state.barriers.filter(barrier => barrier.kept).length
   const elided = state.barriers.length - kept

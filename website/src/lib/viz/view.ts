@@ -7,14 +7,14 @@
 // loads it, then starts the figure base. Packets move in the frame loop; every other change is a class
 // or a transform that CSS transitions. Readouts change per step, never per frame.
 
-import { ChartFigure, type StateValue } from "../figure/chart-figure"
+import { ChartFigure, syncRangeFill, type StateValue } from "../figure/chart-figure"
 import type { Layout } from "../figure/layout"
 import { clamp } from "../figure/math"
 import { elbow, Polyline, type Point } from "../figure/polyline"
 import { Timeline, type TimelineStep } from "../figure/timeline"
 import { buildElements, setRect, type SlotElements, type VizElements } from "./elements"
 import { boxRect, kindName, slotRects, vizGeometry, type Rect, type VizGeometry } from "./geometry"
-import { iterLabel, KernelModel, LINE_BYTES, type LineFacts, type StepState } from "./model"
+import { extraLines, iterLabel, KernelModel, LINE_BYTES, type LineFacts, type StepState } from "./model"
 import { precomputed, type TraceSource } from "./source"
 import type { Access, Cta, LaneEvent } from "./trace"
 
@@ -28,6 +28,8 @@ const LANE_TRAVEL_MS = 520
 const LANE_STAGGER_MS = 12
 const STAGE_MS = 760
 const PLAY_HOLD_MS = 950
+// Play rests longer on the last step before it wraps to the first.
+const PLAY_WRAP_HOLD_MS = 1500
 const SWEEP_HOLD_MS = 700
 const REDUCED_PLAY_MS = 1400
 const LANE_SLOT_UNITS = 150
@@ -95,6 +97,17 @@ export default class KernelViz extends ChartFigure {
       return [{ step: 1 }, { zoom: "lane" }, ...exchanges.map(step => ({ step })), { zoom: "tile" }]
     }
     return [{ step: 1 }, { step: Math.min(count, 2) }, { step: Math.min(count, 3) }, { zoom: "lane" }, { zoom: "tile" }]
+  }
+
+  // Between tours, and once the reader has taken over, the loop replays the current step's packets.
+  // Their end and start look the same, so only a tour's restart needs the cross-fade.
+  override get loopFades(): boolean {
+    return this.tour.length > 0 && !this.hasInteracted
+  }
+
+  override replay(): void {
+    if (this.tour.length > 0 && !this.hasInteracted) super.replay()
+    else this.#animateStep()
   }
 
   async #boot(): Promise<void> {
@@ -167,7 +180,7 @@ export default class KernelViz extends ChartFigure {
     }
     if (this.#isAutoPlaying) {
       this.#autoHoldMs += dtMs
-      if (this.#autoHoldMs < PLAY_HOLD_MS) return true
+      if (this.#autoHoldMs < this.#playHoldMs()) return true
       this.#autoHoldMs = 0
       this.#advancePlay()
       return this.#isAutoPlaying || this.#timeline !== null
@@ -212,12 +225,6 @@ export default class KernelViz extends ChartFigure {
         break
       case "first":
         this.#go(0, "reader")
-        break
-      case "iter-next":
-        this.#go(model.iterationStep(this.#cta, this.#step, 1), "reader")
-        break
-      case "iter-prev":
-        this.#go(model.iterationStep(this.#cta, this.#step, -1), "reader")
         break
       case "cta-next":
         this.#pickCta((this.#cta + 1) % model.ctas.length, "reader")
@@ -325,10 +332,10 @@ export default class KernelViz extends ChartFigure {
     this.#sync()
   }
 
+  // Play steps on until paused, from the last step around to the first.
   #startPlay(): void {
     const model = this.#model
     if (!model) return
-    if (this.#step >= model.stepCount(this.#cta) - 1) this.#go(0, "reader")
     this.#isAutoPlaying = true
     this.#autoHoldMs = 0
     this.#playButton(true)
@@ -346,11 +353,19 @@ export default class KernelViz extends ChartFigure {
 
   #advancePlay(): void {
     const model = this.#model
-    if (!model || this.#step >= model.stepCount(this.#cta) - 1) {
+    if (!model) {
       this.#stopPlay()
       return
     }
-    this.#go(this.#step + 1, "reader")
+    this.#go(this.#isLastStep() ? 0 : this.#step + 1, "reader")
+  }
+
+  #isLastStep(): boolean {
+    return this.#model !== null && this.#step >= this.#model.stepCount(this.#cta) - 1
+  }
+
+  #playHoldMs(): number {
+    return this.#isLastStep() ? PLAY_WRAP_HOLD_MS : PLAY_HOLD_MS
   }
 
   #stopPlay(): void {
@@ -363,7 +378,7 @@ export default class KernelViz extends ChartFigure {
     const button = this.root.querySelector<HTMLElement>('[data-action="play"]')
     if (!button) return
     button.setAttribute("aria-pressed", String(isPlaying))
-    button.textContent = isPlaying ? "Pause" : "Play"
+    button.setAttribute("aria-label", isPlaying ? "Pause" : "Play")
   }
 
   #toggleSweep(): void {
@@ -398,7 +413,10 @@ export default class KernelViz extends ChartFigure {
     const picked = tile.grid.nodes[this.#cta]
     const firstNode = tile.grid.nodes[0]
     moveTo(els.ctaGlow, picked.x - firstNode.x, picked.y - firstNode.y)
-    els.ctaText.textContent = `${model.ctaName(model.ctas[this.#cta])}, ${this.#cta + 1} of ${model.ctas.length}`
+    // Narrow, the grid is too small for the name, which the CTA control shows anyway.
+    const count = `${this.#cta + 1} of ${model.ctas.length}`
+    els.ctaText.textContent =
+      this.layout === "narrow" ? `${count} CTAs` : `${model.ctaName(model.ctas[this.#cta])}, ${count}`
 
     this.#applyTensors(state)
     const touchedBuffers = new Set(
@@ -583,6 +601,7 @@ export default class KernelViz extends ChartFigure {
   #applySlots(pool: SlotElements[], region: Rect, facts: LineFacts | null, maxUnits = 26): Rect[] {
     const count = Math.min(pool.length, facts?.touched.length ?? 0)
     const rects = slotRects(region, count, maxUnits)
+    const extra = facts ? extraLines(facts) : new Set<number>()
     pool.forEach((slot, index) => {
       const rect = rects[index]
       const line = facts?.touched[index]
@@ -590,10 +609,10 @@ export default class KernelViz extends ChartFigure {
       if (!rect || !line) return
       setRect(slot.outline, rect)
       setRect(slot.used, { ...rect, width: Math.max(1, (rect.width * line.usedBytes) / LINE_BYTES) })
-      const wasted = line.usedBytes < LINE_BYTES
-      slot.outline.classList.toggle("is-warn", wasted)
-      slot.group.classList.toggle("sp-cost", wasted)
-      slot.group.classList.toggle("sp-global", !wasted)
+      const isExtra = extra.has(index)
+      slot.outline.classList.toggle("is-warn", isExtra)
+      slot.group.classList.toggle("sp-cost", isExtra)
+      slot.group.classList.toggle("sp-global", !isExtra)
     })
     return rects
   }
@@ -886,8 +905,6 @@ export default class KernelViz extends ChartFigure {
       ArrowRight: "next",
       ArrowLeft: "prev",
       " ": "play",
-      "]": "iter-next",
-      "[": "iter-prev",
     }
     const action = actions[event.key]
     if (!action) return
@@ -931,6 +948,7 @@ export default class KernelViz extends ChartFigure {
     if (!model || !range) return
     range.max = String(model.stepCount(this.#cta))
     range.value = String(this.#step + 1)
+    syncRangeFill(range)
   }
 }
 
@@ -953,9 +971,9 @@ function laneTarget(slot: Rect, bytes: [number, number] | undefined): Point {
 }
 
 function linesSentence(facts: LineFacts, tensor: string): string {
-  const lines = `${facts.lines} line${facts.lines === 1 ? "" : "s"}`
-  const extra = facts.lines > facts.idealLines ? `, ${facts.idealLines} would do` : ""
-  return `warp 0, ${tensor}: ${lines} for ${facts.requestedBytes} bytes${extra}`
+  const lines = `${facts.lines} memory line${facts.lines === 1 ? "" : "s"} of ${LINE_BYTES} B`
+  const needed = facts.lines > facts.idealLines ? `, ${facts.idealLines} needed` : ""
+  return `warp 0, ${tensor}: ${lines}${needed}`
 }
 
 function stagesSentence(event: LaneEvent): string {

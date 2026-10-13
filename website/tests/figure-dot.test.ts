@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { LABEL_UNITS, MIN_LABEL_UNITS } from "../src/lib/figure/layout"
 import DotFigure from "../src/components/figures/dot/dot.figure"
 import {
   dotGeometry,
@@ -94,7 +95,8 @@ for (const layout of ["wide", "narrow"] as const) {
         ...geometry.code,
       ]
       for (const at of labels) {
-        const widthUnits = textWidthUnits(at.text)
+        // The code lines are small labels.
+        const widthUnits = textWidthUnits(at.text, geometry.code.includes(at) ? MIN_LABEL_UNITS : LABEL_UNITS)
         const left = at.anchor === "end" ? at.x - widthUnits : at.x
         expect(left).toBeGreaterThanOrEqual(8)
         expect(left + widthUnits).toBeLessThanOrEqual(geometry.widthUnits - 8)

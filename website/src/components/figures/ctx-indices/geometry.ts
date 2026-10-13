@@ -75,13 +75,13 @@ interface Spec {
 const SPECS: Record<Layout, Spec> = {
   wide: {
     heightUnits: 316,
-    cellsX: 84,
+    cellsX: 72,
     cellUnits: 11,
     pitchUnits: 12,
     rowPitchUnits: 15,
     ctaY: 82,
     stripY: 238,
-    panelX: 500,
+    panelX: 476,
     panelY: 82,
   },
   narrow: {
@@ -138,7 +138,8 @@ export function indicesGeometry(layout: Layout): IndicesGeometry {
     stripTitle: {
       x: isWide ? spec.cellsX : 18,
       y: spec.stripY - STRIP_TITLE_RISE_UNITS,
-      text: `W[col, 0:${K}]  for k in range(ctx.lane, K, ctx.lanes)`,
+      // The narrow plate has room for the loop only.
+      text: `${isWide ? `W[col, 0:${K}]  ` : ""}for k in range(ctx.lane, K, ctx.lanes)`,
     },
     panel: {
       x: spec.panelX,
