@@ -158,7 +158,7 @@ fn main() -> Result<()> {
         .collect();
     println!("     rms_norm rows disagreeing: {bad_rows:?}");
 
-    check_norms_q(&host, &gpu, rows, eps, &check_within, &mut next)?;
+    check_norms_q(&host, &gpu, rows, eps, &check_within, &check_spread, &mut next)?;
 
     let y: Vec<f32> = (0..rows * width).map(|_| next()).collect();
     let run_add = |b: &dyn Backend| -> Result<Vec<f32>> {
@@ -610,7 +610,10 @@ fn main() -> Result<()> {
         (8, 512, 16, 2, 128),
         (88, 512, 16, 2, 128),
         // The 4B's attention block, sixteen query heads over four key heads:
-        // a pp512 prompt, and a continuation onto a cache two tiles deep.
+        // decoding, a pp512 prompt, and a continuation onto a cache two tiles
+        // deep.
+        (1, 300, 16, 4, 256),
+        (1, 1000, 16, 4, 256),
         (512, 0, 16, 4, 256),
         (192, 128, 16, 4, 256),
         // Ragged prompts: the tensor cores take the whole tiles and the
@@ -827,7 +830,7 @@ fn main() -> Result<()> {
         };
         check(&format!("matmul [1 x {k} x {n}]"), &run(&host)?, &run(&gpu)?);
     }
-    check_hadamard(&host, &gpu, &check_within, &mut next)?;
+    check_hadamard(&host, &gpu, &check_within, &check_spread, &mut next)?;
     check_topk(&failures)?;
 
     // The narrow dense projection against a weight held `[n, k]`: a decode
