@@ -135,10 +135,6 @@ impl<'c> Codegen<'c> {
             Intrinsic::QmmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::I8)?,
             Intrinsic::Q50dotT => self.tile_qdot_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50)?,
             Intrinsic::Q50mmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50)?,
-            Intrinsic::RawQdotI8(fmt) => {
-                let qg = qg_format(fmt, &i)?;
-                self.tile_qdot_i8_reg_t(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..])?
-            }
             Intrinsic::RawQmma(RawFmt::Iq1s) => {
                 self.tile_iq1s_qmma_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?
             }
@@ -221,6 +217,5 @@ impl<'c> Codegen<'c> {
 fn qg_format(fmt: RawFmt, i: &Intrinsic) -> Result<QgFormat> {
     let name = i.name();
     QgFormat::from_intrinsic(&name)
-        .or_else(|| QgFormat::from_qdot_i8(&name))
         .ok_or_else(|| anyhow!("{} is not a grouped raw format", fmt.name()))
 }

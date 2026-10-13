@@ -267,8 +267,6 @@ pub enum Intrinsic {
     Q50dotT,
     /// `q50_qmma_t`: `qmma_t` against the same.
     Q50mmaT,
-    /// `<fmt>_qdot_i8_t`: the dp4a decode matvec.
-    RawQdotI8(RawFmt),
     /// `<fmt>_qmma_t`: a raw format's batched projection.
     RawQmma(RawFmt),
     /// `<fmt>_qmma_staged_t`: the same with the decoded weight staged.
@@ -288,7 +286,6 @@ impl Intrinsic {
             Intrinsic::QmmaT => "qmma_t".into(),
             Intrinsic::Q50dotT => "q50_qdot_t".into(),
             Intrinsic::Q50mmaT => "q50_qmma_t".into(),
-            Intrinsic::RawQdotI8(f) => format!("{}_qdot_i8_t", f.name()),
             Intrinsic::RawQmma(f) => format!("{}_qmma_t", f.name()),
             Intrinsic::RawQmmaStaged(f) => format!("{}_qmma_staged_t", f.name()),
             Intrinsic::RawQgemm(f) => format!("{}_qgemm_t", f.name()),
@@ -310,7 +307,6 @@ impl Intrinsic {
         let (fmt, suffix) = callee.split_once('_')?;
         let fmt = RawFmt::from_name(fmt)?;
         Some(match suffix {
-            "qdot_i8_t" => Intrinsic::RawQdotI8(fmt),
             "qmma_t" => Intrinsic::RawQmma(fmt),
             "qmma_staged_t" => Intrinsic::RawQmmaStaged(fmt),
             "qgemm_t" => Intrinsic::RawQgemm(fmt),

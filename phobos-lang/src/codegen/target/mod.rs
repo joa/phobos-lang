@@ -146,14 +146,6 @@ pub(super) trait Isa {
     /// reads after it see what other blocks fenced before.
     fn fence_gpu<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()>;
 
-    /// Prefetches the line holding `mem[indices]` into L2.
-    fn prefetch_read<'c>(
-        &self,
-        cg: &Codegen<'c>,
-        block: &Block<'c>,
-        mem: &MemVal<'c>,
-        indices: &[Value<'c, 'c>],
-    ) -> Result<()>;
 
     /// The value of v on the lane whose id differs in the given xor mask bits.
     /// Every lane of the executing warp must reach this.
@@ -702,15 +694,6 @@ impl<'c> Codegen<'c> {
     }
 
     // ---- the four-way integer dot ----
-
-    pub(in crate::codegen) fn prefetch_read(
-        &self,
-        block: &Block<'c>,
-        mem: &MemVal<'c>,
-        indices: &[Value<'c, 'c>],
-    ) -> Result<()> {
-        self.isa.prefetch_read(self, block, mem, indices)
-    }
 
     pub(in crate::codegen) fn load_acquire_sys(
         &self,

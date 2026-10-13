@@ -1,5 +1,4 @@
-// PTQ1_0 in the staged projection (`qgemm.rs`) and the decode matvec
-// (`qdot_i8_reg.rs`).
+// PTQ1_0 in the staged projection (`qgemm.rs`).
 //
 // The device block is 256 weights in 56 bytes. Quarter `q` owns the three
 // words at `12 q`, the tail byte at `48 + q`, and the `f16` scale at
@@ -13,12 +12,9 @@
 // 16-bit lanes that cannot carry into each other. Each trit then costs one
 // `* 3`, one `prmt` of the high bytes, and one mask.
 //
-// Trits are 0..2, for weights `d * (t - 1)`. The matvec feeds `t` to the
-// `dp4a` and subtracts the activation's sum with one more `dp4a` against -1
-// bytes. The projection writes `t - 1` per byte as `(t + 0x7F) ^ 0x80`, which
-// never carries.
+// Trits are 0..2, for weights `d * (t - 1)`. The projection writes `t - 1`
+// per byte as `(t + 0x7F) ^ 0x80`, which never carries.
 
-use super::qdot_i8_reg::Piece;
 use super::qgemm::{Lanes, Stage, TileAt};
 use super::*;
 
@@ -156,73 +152,5 @@ impl<'c> Codegen<'c> {
         }
         let d = self.pt_scale(block, *scales, *q)?;
         self.qgemm_put_scale(block, stage, 1, 0, d)
-    }
-
-    /// The loads of a decode lane's quarter: its three words, then the
-    /// tails and scales the column's four lanes share through L1.
-    pub(super) fn pt_pieces(&mut self, body: &Block<'c>, quarter: Value<'c, 'c>) -> Result<Vec<Piece<'c>>> {
-        let twelve = self.const_index(body, 12)?;
-        let base = self.muli(body, quarter, twelve)?;
-        let mut pieces = Vec::with_capacity(4);
-        for w in 0..3 {
-            let off = self.const_index(body, 4 * w)?;
-            pieces.push(Piece { off: self.addi(body, base, off)?, width: 4 });
-        }
-        pieces.push(Piece { off: self.const_index(body, PT_TAILS)?, width: 8 });
-        Ok(pieces)
-    }
-
-    /// `carry` plus one block of a decode lane's quarter, against the
-    /// activations from `k_off`. `regs` is laid out as [`Self::pt_pieces`]
-    /// loaded it. Each of the two groups runs eight `dp4a` against the trits
-    /// and eight against -1, which sum to the exact `sum (t - 1) a`.
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn pt_qdot_block(
-        &mut self,
-        kb: &Block<'c>,
-        regs: &[Value<'c, 'c>],
-        aq: &MemVal<'c>,
-        asc: &MemVal<'c>,
-        k_off: Value<'c, 'c>,
-        carry: Value<'c, 'c>,
-    ) -> Result<Value<'c, 'c>> {
-        let [w0, w1, w2, tails, scales] = regs else {
-            bail!("ptq1_qdot_i8_t decodes five registers, got {}", regs.len());
-        };
-        let (act, sa) = self.qr_act(kb, QgFormat::Ptq1, aq, asc, k_off)?;
-        let block_w = self.const_index(kb, 256)?;
-        let quarter_w = self.const_index(kb, 64)?;
-        let in_block = self.remui(kb, k_off, block_w)?;
-        let q = self.divui(kb, in_block, quarter_w)?;
-        let q = self.numeric_cast(kb, q, self.i32_t)?;
-
-        let mut words = Vec::with_capacity(16);
-        for w in [*w0, *w1, *w2] {
-            words.extend(self.pt_planes(kb, w, 5)?);
-        }
-        words.push(self.pt_tail(kb, *tails, q)?);
-        let quad_t = Type::vector(&[4], self.i8_t);
-        let one_i32 = Type::vector(&[1], self.i32_t);
-        let as_bytes = |cg: &Self, w: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
-            let v = cg.vec_broadcast(kb, w, one_i32)?;
-            cg.vec_bitcast(kb, v, quad_t)
-        };
-        let minus = self.const_i32(kb, -1)?;
-        let minus = as_bytes(self, minus)?;
-
-        let d = self.pt_scale(kb, *scales, q)?;
-        let mut acc = carry;
-        for (g, &s) in sa.iter().enumerate() {
-            let mut dot = self.zero_scalar(kb, self.i32_t)?;
-            for o in 8 * g..8 * g + 8 {
-                let t = as_bytes(self, words[o])?;
-                dot = self.dot4_accumulate(kb, t, act[o], dot)?;
-                dot = self.dot4_accumulate(kb, minus, act[o], dot)?;
-            }
-            let dot = self.small_int_to_f32(kb, dot)?;
-            let weight = self.push(kb, arith::mulf(d, s, self.loc))?;
-            acc = self.elem_mac(kb, self.f32_t, dot, weight, acc)?;
-        }
-        Ok(acc)
     }
 }
