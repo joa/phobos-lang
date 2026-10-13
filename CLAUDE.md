@@ -46,6 +46,14 @@ helpers rather than a spelling of its own.
 - `cargo run --release -p phobos-kernels --features cuda --example lang_check`: the
   language's semantics on the device, one probe kernel per feature against a host
   reference. The codegen tests check what a construct emits; this checks what it computes
+- `cargo run -p phobos-lang --features trace --example site -- check`: compiles
+  every whole-kernel `phobos` fence in the website's docs (the rendered SPEC
+  included) and checks that `expect-error` fences fail. `-- traces` regenerates
+  the visualizer's traces from `website/kernels.json` and the docs' `trace`
+  fences; a change to a traced kernel, or to codegen that moves a trace,
+  regenerates them in the same change. `-- attributes` refreshes the attribute
+  list the docs are checked against
+- `npm run check` in `website/`: the site's tests and type checks, as CI runs them
 
 The model path on the GPU needs `--features cuda`, and always `--release`: a
 forward pass is a few hundred GFLOP and the debug build is unusable. Its checks
@@ -101,4 +109,5 @@ remembered figure and has to be labelled as such.
 - **phobos-gguf**: GGUF container, byte-level BPE, the `qwen35` and `llama` forward passes, `quant/` with one file per quantized format behind a `Quant`/`Spec` registry, and `backend/` with the host and device implementations plus `fuse/`, the pass that lowers a chain of decode stages into one persistent kernel. A format with no kernel dequantizes at upload and takes the dense path, so a new one lands correct before it lands fast
 - **phobos-onnx**: ONNX proto -> graph IR -> shape inference, folding, fusion -> Phobos kernels, and `backend/` with the host interpreter as the oracle alongside the device paths
 - **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server, plus `telemetry::Meter`, the shared record the engine writes progress into and a viewer reads snapshots of. What a front end can report about itself, and what it cannot, is the default-`None` half of the `Model` trait: `footprint`, `device_memory`, `device_info`, `architecture`, `cache_stats`, and `Session::truncate`, whose default accepts only the request that drops nothing, so a backend that cannot rewind still gets prefix reuse by extension
+- **website**: phobos-lang.dev, Astro + Starlight, deployed to GitHub Pages by `.github/workflows/website.yml` with Node only. `SPEC.md`, `ENV.md`, `BENCHMARKS.md` and `WINDOWS.md` render in place, so they stay the source; everything the compiler produces for the site (traces, CLI help, attribute list, expected errors) is generated with the toolchain and committed under `website/src/data/`
 - **phobos-cli**: Argument parsing, the REPL, the one `match` that decides GGUF or ONNX, and `tui/`, the full-screen dashboard `--listen` puts on the terminal. The dashboard runs on its own thread and reads only a `Meter`, so it never names a model format and never blocks a decode; `--no-tui`, or output that is not a terminal, turns it off
