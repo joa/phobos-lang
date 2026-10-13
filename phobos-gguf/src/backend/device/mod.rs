@@ -216,10 +216,12 @@ pub struct DeviceBackend {
     /// first compiled.
     persist_blocks: Cell<u32>,
     persist_qdot: bool,
-    /// `PHOBOS_RAW_LANES`: the raw formats' decode matvecs written with
-    /// lanes for every format, or for none; unset, where each measured at
-    /// least its intrinsic's speed.
+    /// `PHOBOS_RAW_LANES`: the IQ formats' and PTQ1_0's decode matvecs
+    /// written with lanes, or their intrinsics; unset, see [`Self::lanes_on`].
     raw_lanes: Option<bool>,
+    /// The card is older than sm_80, where the IQ lanes matvecs beat their
+    /// intrinsics; from sm_80 on they measured slower.
+    pre_ampere: bool,
     /// Whether the raw decode matvecs contract in `dp4a` against an int8
     /// activation. `PHOBOS_IQ1S_DP4A=0` opts out.
     ///

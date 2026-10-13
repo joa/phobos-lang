@@ -180,9 +180,9 @@ pub(crate) fn qmma_width(n: usize) -> usize {
         .unwrap_or(Q8_QMMA_TN)
 }
 
-/// The Q8_0 projection as a single `qdot_t`: decoding's with
-/// `PHOBOS_QDOT_LANES` off ([`q8_qdot_lanes_src`] otherwise), and Q5_0's
-/// through [`q50_qdot_src`]. The tile is eight outputs, one per warp.
+/// A projection as a single `qdot_t`, the source of Q5_0's through
+/// [`q50_qdot_src`] (Q8_0 decodes with [`q8_qdot_lanes_src`]). The tile is
+/// eight outputs, one per warp.
 ///
 /// `qdot_t` folds the block scales in. A warp owns an output and its lanes
 /// split `k`, so a warp reads contiguous bytes with nothing staged. No
