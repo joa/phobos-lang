@@ -196,7 +196,31 @@ impl<'a> Cursor<'a, '_> {
             _ => {}
         }
         self.scalar(op, &kind, mask)?;
+        self.rebind_iter(op, mask);
         self.step(op, &kind, mask)
+    }
+
+    /// A value named for the loop variable in the loop's own body binds it
+    /// anew, as each copy of an unrolled body does with `iv + k * step`; the
+    /// steps after it carry that value.
+    fn rebind_iter(&mut self, op: OpId, mask: &[bool]) {
+        let ir = self.k.ir;
+        let [result] = ir.results(op) else {
+            return;
+        };
+        let in_loop_body = ir
+            .parent_op(ir.parent_block(op))
+            .is_some_and(|p| matches!(ir.kind(p), OpKind::For(_)));
+        let Some(name) = ir.name(*result).filter(|_| in_loop_body) else {
+            return;
+        };
+        let at = mask.iter().position(|&m| m).unwrap_or(0);
+        let value = self.vals.get(result).and_then(|v| v.get(at).copied().flatten());
+        if let (Some(last), Some(value)) = (self.iter.last_mut(), value)
+            && last.0 == name
+        {
+            last.1 = value;
+        }
     }
 
     fn for_op(&mut self, op: OpId, info: crate::ir::ForInfo, mask: &[bool]) -> Result<()> {
