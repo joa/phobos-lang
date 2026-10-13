@@ -1,4 +1,4 @@
-// The moving parts: falling glyphs, a block font, bars, and easing.
+// The moving parts: bars, plots, and easing.
 //
 // Nothing here reads the engine. Everything is a function of the frame
 // counter and the values the panels pass in, so rendering is deterministic
@@ -8,119 +8,6 @@ use ratatui::style::Color;
 use ratatui::text::Span;
 
 use super::theme;
-
-/// The glyphs the rain falls in: single width and present in any terminal
-/// font.
-const RAIN_GLYPHS: &[u8] = b"0123456789ABCDEF<>[]{}/\\|=+*-";
-
-/// Frames a drop waits between steps, at its slowest and at its fastest. Each
-/// column picks one and keeps it, which gives the field depth.
-const SLOWEST: u64 = 9;
-const FASTEST: u64 = 3;
-
-/// How far behind the head a drop stays lit.
-const TAIL: i32 = 5;
-
-/// How many columns in sixteen carry a drop. Kept sparse so the backdrop does
-/// not compete with what is drawn over it.
-const DENSITY: u32 = 5;
-
-/// A field of falling glyphs, one drop per column.
-///
-/// Rebuilt when its area changes, so a resize leaves no drops outside the
-/// panel.
-pub struct Rain {
-    width: u16,
-    height: u16,
-    /// One entry per column, `None` where no drop falls.
-    columns: Vec<Option<Column>>,
-    /// Columns the rain stays out of, so text drawn there reads cleanly.
-    clear: std::ops::Range<u16>,
-}
-
-#[derive(Clone, Copy)]
-struct Column {
-    /// The head's row. Starts above the top, at a random offset, so columns
-    /// do not all fall together.
-    head: i32,
-    period: u64,
-    /// The column's starting glyph. Each row offsets from it, so a column's
-    /// pattern stays stable as the head moves.
-    seed: u32,
-}
-
-impl Rain {
-    pub fn new() -> Rain {
-        Rain {
-            width: 0,
-            height: 0,
-            columns: Vec::new(),
-            clear: 0..0,
-        }
-    }
-
-    /// Keep the drops out of `columns`, where something opaque will be drawn.
-    pub fn clear_lane(&mut self, columns: std::ops::Range<u16>) {
-        self.clear = columns;
-    }
-
-    /// Fit the field to `width` by `height`, rebuilding only on a change.
-    pub fn resize(&mut self, width: u16, height: u16) {
-        if self.width == width && self.height == height {
-            return;
-        }
-        self.width = width;
-        self.height = height;
-        let mut rng = Xorshift::new(0x9e3779b97f4a7c15);
-        self.columns = (0..width as usize)
-            .map(|_| {
-                (rng.below(16) < DENSITY).then(|| Column {
-                    head: -(rng.below(height as u32 * 2 + 1) as i32),
-                    period: FASTEST + rng.below((SLOWEST - FASTEST + 1) as u32) as u64,
-                    seed: rng.next() as u32,
-                })
-            })
-            .collect();
-    }
-
-    /// Advance every column that is due on this frame.
-    pub fn tick(&mut self, frame: u64) {
-        let height = self.height as i32;
-        for column in self.columns.iter_mut().flatten() {
-            if !frame.is_multiple_of(column.period) {
-                continue;
-            }
-            column.head += 1;
-            if column.head - TAIL > height {
-                column.head = -((column.seed % 12) as i32);
-            }
-        }
-    }
-
-    /// What to draw at `(x, y)` within the field, if anything.
-    ///
-    /// The head is brightest and the tail fades to the faintest green.
-    pub fn cell(&self, x: u16, y: u16) -> Option<Span<'static>> {
-        if self.clear.contains(&x) {
-            return None;
-        }
-        let column = self.columns.get(x as usize)?.as_ref()?;
-        let behind = column.head - y as i32;
-        if !(0..=TAIL).contains(&behind) {
-            return None;
-        }
-        let glyph = RAIN_GLYPHS[(column.seed as usize + y as usize * 7) % RAIN_GLYPHS.len()];
-        let color = if behind == 0 {
-            theme::GREEN_DIM
-        } else {
-            theme::mix(theme::GREEN_FAINT, theme::BG, behind as f32 / TAIL as f32)
-        };
-        Some(Span::styled(
-            (glyph as char).to_string(),
-            ratatui::style::Style::default().fg(color),
-        ))
-    }
-}
 
 /// Move `current` a fraction of the way to `target`.
 ///
@@ -232,65 +119,7 @@ pub fn stacked(parts: &[(f64, Color)], width: usize) -> Vec<Span<'static>> {
     spans
 }
 
-/// Rows the block font is drawn in.
-pub const FONT_HEIGHT: usize = 5;
-
-/// `text` in the block font, as [`FONT_HEIGHT`] rows of equal length.
-///
-/// Only the characters for throughput figures and the wordmark exist. Any
-/// other character renders as a three-cell blank.
-pub fn block_text(text: &str) -> Vec<String> {
-    let mut rows = vec![String::new(); FONT_HEIGHT];
-    for ch in text.chars() {
-        let glyph = glyph(ch);
-        for (row, cut) in rows.iter_mut().zip(glyph) {
-            if !row.is_empty() {
-                row.push(' ');
-            }
-            for cell in cut.chars() {
-                row.push(if cell == '#' { theme::FULL } else { ' ' });
-            }
-        }
-    }
-    rows
-}
-
-/// Width [`block_text`] will produce for `text`, in cells.
-pub fn block_width(text: &str) -> usize {
-    let count = text.chars().count();
-    if count == 0 {
-        return 0;
-    }
-    text.chars().map(|c| glyph(c)[0].len()).sum::<usize>() + count - 1
-}
-
-/// One character of the block font, [`FONT_HEIGHT`] rows of `#` and space.
-///
-/// Three cells wide, the narrowest that keeps digits distinct. A period is
-/// one cell wide.
-fn glyph(ch: char) -> [&'static str; FONT_HEIGHT] {
-    match ch.to_ascii_uppercase() {
-        '0' => ["###", "# #", "# #", "# #", "###"],
-        '1' => ["  #", "  #", "  #", "  #", "  #"],
-        '2' => ["###", "  #", "###", "#  ", "###"],
-        '3' => ["###", "  #", "###", "  #", "###"],
-        '4' => ["# #", "# #", "###", "  #", "  #"],
-        '5' => ["###", "#  ", "###", "  #", "###"],
-        '6' => ["###", "#  ", "###", "# #", "###"],
-        '7' => ["###", "  #", "  #", "  #", "  #"],
-        '8' => ["###", "# #", "###", "# #", "###"],
-        '9' => ["###", "# #", "###", "  #", "###"],
-        '.' => [" ", " ", " ", " ", "#"],
-        'B' => ["## ", "# #", "## ", "# #", "## "],
-        'H' => ["# #", "# #", "###", "# #", "# #"],
-        'O' => ["###", "# #", "# #", "# #", "###"],
-        'P' => ["###", "# #", "###", "#  ", "#  "],
-        'S' => ["###", "#  ", "###", "  #", "###"],
-        _ => ["   ", "   ", "   ", "   ", "   "],
-    }
-}
-
-/// Format a rate for the block font, with at most one decimal place and none
+/// Format a rate for the display font, with at most one decimal place and none
 /// from 100 up.
 pub fn rate_text(rate: f64) -> String {
     if !rate.is_finite() || rate <= 0.0 {
@@ -303,36 +132,11 @@ pub fn rate_text(rate: f64) -> String {
     }
 }
 
-/// A 64-bit xorshift for laying out the rain. Fixed-seeded, so the field
-/// looks the same every run.
-struct Xorshift(u64);
-
-impl Xorshift {
-    fn new(seed: u64) -> Xorshift {
-        Xorshift(seed | 1)
-    }
-
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, bound: u32) -> u32 {
-        if bound == 0 {
-            0
-        } else {
-            (self.next() % bound as u64) as u32
-        }
-    }
-}
-
 /// A color for a figure relative to the run's best: bright at the best, dim
 /// as it falls away.
 pub fn relative(value: f64, best: f64, color: Color) -> Color {
     if best <= 0.0 || value <= 0.0 {
-        return theme::GREEN_DIM;
+        return theme::BRAND_DIM;
     }
-    theme::mix(theme::GREEN_DIM, color, (value / best) as f32)
+    theme::mix(theme::BRAND_DIM, color, (value / best) as f32)
 }

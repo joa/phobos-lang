@@ -30,7 +30,7 @@ const STAGE_WIDTH: u16 = 11;
 
 /// The whole compile panel: source, stages, PTX and hex.
 pub(super) fn compiling(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
-    let block = panel("COMPILING", theme::CYAN, true);
+    let block = panel("COMPILING", theme::BRAND, true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -73,10 +73,10 @@ pub(super) fn compiling(frame: &mut Frame, view: &View, snap: &Snapshot, area: R
         &load.source,
         scroll,
         height,
-        theme::GREEN,
+        theme::BRAND_HI,
     );
     stages(frame, view, columns[1]);
-    text_column(frame, columns[2], &load.ptx, scroll, height, theme::CYAN);
+    text_column(frame, columns[2], &load.ptx, scroll, height, theme::BRAND);
     hex_column(frame, columns[3], &load.ptx, scroll, height);
 }
 
@@ -85,11 +85,11 @@ fn headline(load: &Loading) -> Line<'static> {
     // Only a finished kernel has source and PTX to show.
     let mut spans = vec![
         Span::styled("built ", theme::muted()),
-        Span::styled(load.item.clone(), theme::accent(theme::CYAN)),
+        Span::styled(load.item.clone(), theme::accent(theme::BRAND)),
         Span::styled("   ", theme::muted()),
         Span::styled(bytes(load.source.len() as u64), theme::text()),
         Span::styled(" source", theme::muted()),
-        Span::styled("  ->  ", Style::default().fg(theme::GREEN_FAINT)),
+        Span::styled("  ->  ", Style::default().fg(theme::FAINT)),
         Span::styled(bytes(load.ptx.len() as u64), theme::text()),
         Span::styled(" ptx", theme::muted()),
     ];
@@ -97,7 +97,7 @@ fn headline(load: &Loading) -> Line<'static> {
         spans.push(Span::styled("   ", theme::muted()));
         spans.push(Span::styled(
             format!("{:.2}s", load.took.as_secs_f64()),
-            theme::accent(theme::MAGENTA),
+            theme::accent(theme::NEBULA),
         ));
     }
     Line::from(spans)
@@ -156,7 +156,7 @@ fn hex_column(frame: &mut Frame, area: Rect, ptx: &str, scroll: usize, height: u
             let edge = (row as f32 / height as f32 - 0.5).abs() * 2.0;
             Line::from(Span::styled(
                 hex,
-                Style::default().fg(theme::mix(theme::MAGENTA, theme::BG, edge * 0.7)),
+                Style::default().fg(theme::mix(theme::NEBULA, theme::BG, edge * 0.7)),
             ))
         })
         .collect();
@@ -176,11 +176,11 @@ fn stages(frame: &mut Frame, view: &View, area: Rect) {
                 Some(stage) => {
                     let i = row - top;
                     let style = if i == lit {
-                        theme::accent(theme::CYAN)
+                        theme::accent(theme::BRAND)
                     } else if i < lit {
-                        Style::default().fg(theme::GREEN_DIM)
+                        Style::default().fg(theme::BRAND_DIM)
                     } else {
-                        Style::default().fg(theme::GREEN_FAINT)
+                        Style::default().fg(theme::FAINT)
                     };
                     Line::from(Span::styled(format!("{stage:^11}"), style))
                 }
@@ -190,7 +190,7 @@ fn stages(frame: &mut Frame, view: &View, area: Rect) {
                         theme::SHADES[(row + (view.frame / 6) as usize) % theme::SHADES.len()];
                     Line::from(Span::styled(
                         shade.to_string().repeat(area.width as usize),
-                        Style::default().fg(theme::GREEN_FAINT),
+                        Style::default().fg(theme::FAINT),
                     ))
                 }
             },
@@ -204,7 +204,7 @@ fn stages(frame: &mut Frame, view: &View, area: Rect) {
 /// Shows whether a cold start's time went to many fast kernels or a few slow
 /// ones.
 pub(super) fn histogram(frame: &mut Frame, snap: &Snapshot, area: Rect) {
-    let block = panel("COMPILE TIMES", theme::MAGENTA, false);
+    let block = panel("COMPILE TIMES", theme::NEBULA, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -229,7 +229,7 @@ pub(super) fn histogram(frame: &mut Frame, snap: &Snapshot, area: Rect) {
                 Span::styled(format!("{label:>9} "), theme::muted()),
                 Span::styled(
                     anim::bar(n as f64 / peak as f64, track),
-                    Style::default().fg(theme::mix(theme::GREEN_DIM, theme::MAGENTA, 0.6)),
+                    Style::default().fg(theme::mix(theme::BRAND_DIM, theme::NEBULA, 0.6)),
                 ),
                 Span::styled(format!(" {n}"), theme::text()),
             ])
@@ -245,7 +245,7 @@ pub(super) fn histogram(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     ]));
     if let Some(expansion) = load.expansion() {
         lines.push(Line::from(vec![
-            Span::styled(format!("{expansion:.1}x"), theme::accent(theme::GREEN)),
+            Span::styled(format!("{expansion:.1}x"), theme::accent(theme::BRAND_HI)),
             Span::styled(" ptx to source", theme::muted()),
         ]));
     }
@@ -265,7 +265,7 @@ pub(super) fn histogram(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             Span::styled(
                 load.slowest.clone(),
                 Style::default()
-                    .fg(theme::AMBER)
+                    .fg(theme::GOLD)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(

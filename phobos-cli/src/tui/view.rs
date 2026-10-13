@@ -1,9 +1,10 @@
 // What the dashboard remembers between frames.
 //
 // A snapshot is the engine's state. This is the screen's state: eased gauge
-// values, peaks, the rain, and the frame counter.
+// values, peaks, the sky, and the frame counter.
 
-use super::anim::Rain;
+use super::mark::Mark;
+use super::sky::Sky;
 
 pub struct View {
     /// Frames of splash left to draw. Counts down to zero and stays there.
@@ -11,7 +12,10 @@ pub struct View {
     /// Frames since the dashboard opened. Every animation is a function of
     /// this.
     pub frame: u64,
-    pub rain: Rain,
+    pub sky: Sky,
+    /// The mark at the height last asked for, kept since tracing it is the
+    /// costliest thing a frame does.
+    mark: Option<Mark>,
     /// Eased readings, each the fraction of its gauge that is filled.
     pub vram: f64,
     pub context: f64,
@@ -35,7 +39,8 @@ impl View {
         View {
             splash: super::splash::FRAMES,
             frame: 0,
-            rain: Rain::new(),
+            sky: Sky::new(),
+            mark: None,
             vram: 0.0,
             context: 0.0,
             prefill: 0.0,
@@ -48,7 +53,14 @@ impl View {
     pub fn tick(&mut self) {
         self.frame = self.frame.wrapping_add(1);
         self.splash = self.splash.saturating_sub(1);
-        self.rain.tick(self.frame);
+    }
+
+    /// The mark drawn `rows` rows high.
+    pub fn mark(&mut self, rows: u16) -> &Mark {
+        if self.mark.as_ref().is_none_or(|m| m.rows != rows) {
+            self.mark = Some(Mark::new(rows));
+        }
+        self.mark.as_ref().expect("just built")
     }
 
     pub fn replay_splash(&mut self) {

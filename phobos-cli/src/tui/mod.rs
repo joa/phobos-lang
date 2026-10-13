@@ -12,8 +12,11 @@
 
 mod anim;
 mod cinema;
+mod font;
+mod mark;
 mod meters;
 mod panels;
+mod sky;
 mod splash;
 mod theme;
 mod view;

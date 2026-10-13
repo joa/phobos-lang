@@ -128,13 +128,13 @@ fn screen(width: u16, height: u16, snap: &Snapshot) -> String {
 
 /// The splash covers the panels while it runs, then hands the screen back.
 #[test]
-fn the_splash_draws_the_moon_and_then_gets_out_of_the_way() {
+fn the_splash_draws_the_mark_and_then_gets_out_of_the_way() {
     let snap = loaded();
     let mut terminal = Terminal::new(TestBackend::new(100, 46)).unwrap();
     let mut view = View::new();
 
-    // Far enough for the reveal to reach the bottom.
-    for _ in 0..60 {
+    // Far enough for everything to be drawn.
+    for _ in 0..110 {
         terminal
             .draw(|frame| panels::render(frame, &mut view, &snap))
             .unwrap();
@@ -152,13 +152,12 @@ fn the_splash_draws_the_moon_and_then_gets_out_of_the_way() {
             "
 ",
         );
-    // The wordmark worked into the bottom of the image.
+    // The outline, then the headline under the wordmark.
+    assert!(text.contains("/"), "the mark is not on screen:\n{text}");
     assert!(
-        text.contains("P          H                O"),
-        "the moon is not on screen:
-{text}"
+        text.contains("Tile-based GPU kernel language & LLM inference engine"),
+        "{text}"
     );
-    assert!(text.contains("tile-based GPU kernel language"), "{text}");
     assert!(
         !text.contains("THROUGHPUT"),
         "the panels drew under the splash"
@@ -186,10 +185,20 @@ fn the_splash_draws_the_moon_and_then_gets_out_of_the_way() {
     );
 }
 
-/// A terminal too small for the whole image goes straight to the panels.
+/// A terminal too small for the whole splash goes straight to the panels.
 #[test]
 fn a_small_terminal_skips_the_splash_entirely() {
-    let text = screen(80, 24, &loaded());
+    let snap = loaded();
+    let mut terminal = Terminal::new(TestBackend::new(60, 16)).unwrap();
+    let mut view = View::new();
+    terminal
+        .draw(|frame| panels::render(frame, &mut view, &snap))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    let text: String = (0..16)
+        .map(|y| (0..60).map(|x| buffer[(x, y)].symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
     assert!(text.contains("THROUGHPUT"), "{text}");
 }
 
