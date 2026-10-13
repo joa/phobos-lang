@@ -5,6 +5,8 @@ sidebar:
   order: 3
 ---
 
+import Masking from "../../../../components/figures/masking/Masking.astro"
+
 Tensors and tiles are read and written through subscripts. A subscript is
 either a point, one index, or a slice, a range of indices. Slices are what
 tile code is made of: `A[r :+ 64, kt :+ 16]` is a 64 by 16 tile of `A`.
@@ -34,7 +36,7 @@ is a `[1, 64]` tile, not a 64-element vector.
 
 ## Masking
 
-{/* figure: masking */}
+<Masking />
 
 Tensor extents are assumed to be multiples of 4, but they need not be
 multiples of the tile. A slice may therefore run past the end of a tensor.

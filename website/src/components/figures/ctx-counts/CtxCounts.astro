@@ -1,0 +1,43 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import CtxCountsFigure from "./ctx-counts.figure"
+import { DEFAULT_THREADS, LANES, MAX_THREADS } from "../ctx-hierarchy/rules"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-ctx-counts" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="ctx-counts"
+  figure={CtxCountsFigure}
+  state={{ threads: DEFAULT_THREADS, launch: "ok" }}
+  title="A CTA regrouping into warps as @launch changes its thread count"
+  desc="Schematic. The CTA's threads drawn as rows of 32 cells, one row per warp. The thread count runs from 32 to 1024 in steps of 32, and the number of warps follows as the count divided by 32. ctx.threads, ctx.lanes and ctx.warps are marked as compile-time constants. With @launch(48) the second warp is half empty, drawn as cost, and the compiler's error is shown."
+  legend={["cost"]}
+>
+  <label class="chart-range-label">
+    <span>@launch(<output data-for="threads">{DEFAULT_THREADS}</output>)</span>
+    <input
+      type="range"
+      class="chart-range"
+      data-param="threads"
+      min={LANES}
+      max={MAX_THREADS}
+      step={LANES}
+      value={DEFAULT_THREADS}
+      aria-label="Threads per CTA"
+    />
+  </label>
+  <div class="chart-group" role="group" aria-label="Thread count">
+    <button type="button" class="chart-btn" data-group="launch" data-value="ok" aria-pressed="true">Whole warps</button>
+    <button type="button" class="chart-btn" data-group="launch" data-value="48" aria-pressed="false">@launch(48)</button>
+  </div>
+  <Fragment slot="caption">
+    Schematic. Each row is one warp of <code>ctx.lanes</code> threads; <code>ctx.warps</code> is
+    <code>ctx.threads / ctx.lanes</code>. The error is the compiler's own, from the example below.
+  </Fragment>
+</ChartFigure>

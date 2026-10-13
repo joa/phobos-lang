@@ -1,0 +1,26 @@
+/* Pickable cells in the ctx and language figures (see pick.ts). */
+
+.chart-pick {
+  cursor: pointer;
+}
+
+.chart-pick:focus {
+  outline: none;
+}
+
+.chart-pick:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+/* Nothing hidden takes a click meant for what is drawn under it */
+.chart-svg .is-hidden,
+.chart-svg .is-hidden * {
+  pointer-events: none;
+}
+
+/* A transparent hit area over a cell drawn by other elements */
+.chart-hit {
+  fill: transparent;
+  stroke: none;
+}

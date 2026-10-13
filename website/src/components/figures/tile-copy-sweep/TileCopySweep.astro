@@ -1,0 +1,35 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import TileCopySweepFigure from "./tile-copy-sweep.figure"
+import "../ctx-hierarchy/pick.css"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-tile-copy" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="tile-copy-sweep"
+  figure={TileCopySweepFigure}
+  state={{ bind: "var", step: "read", thread: "9" }}
+  title="A slice of a tensor staged into a shared tile, and the tile's lifetime"
+  desc="Schematic. A 16 by 32 tensor A with the slice A[8 :+ 8, 16 :+ 16] outlined. With var, the slice is copied into a shared tile a of 8 by 16 f32, 512 bytes, by 32 threads that each move 4 adjacent values with one 16-byte load. A three-line program steps a through its lifetime on a ruler of shared-memory bytes: allocated and filled, live until rowsum(a), its last use, then released, and the next tile b takes the same bytes while s keeps its own. With let, a is a view of A: nothing is copied and it takes no shared memory."
+  legend={["global", "shared"]}
+>
+  <div class="chart-group" role="group" aria-label="Binding">
+    <button type="button" class="chart-btn" data-group="bind" data-value="var" aria-pressed="true">var</button>
+    <button type="button" class="chart-btn" data-group="bind" data-value="let" aria-pressed="false">let</button>
+  </div>
+  <div class="chart-group" role="group" aria-label="Program line">
+    <button type="button" class="chart-btn" data-group="step" data-value="copy" aria-pressed="false">Line 1</button>
+    <button type="button" class="chart-btn" data-group="step" data-value="read" aria-pressed="true">Line 2</button>
+    <button type="button" class="chart-btn" data-group="step" data-value="reuse" aria-pressed="false">Line 3</button>
+  </div>
+  <Fragment slot="caption">
+    Schematic. Hover or focus a run of the shared tile to see the thread that moves it; the arrow keys move
+    between runs. The ruler shows the bytes each tile holds after the line.
+  </Fragment>
+</ChartFigure>

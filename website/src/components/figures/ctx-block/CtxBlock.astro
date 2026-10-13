@@ -1,0 +1,57 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import CtxBlockFigure from "./ctx-block.figure"
+import { DEFAULT_M, DEFAULT_N, DEFAULT_PICK, EXTENT_STEP, MAX_EXTENT, MIN_EXTENT, TILE } from "./geometry"
+import "../ctx-hierarchy/pick.css"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-ctx-block" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="ctx-block"
+  figure={CtxBlockFigure}
+  state={{ m: DEFAULT_M, n: DEFAULT_N, cta: DEFAULT_PICK, z: "off" }}
+  title="An output tensor tiled into CTAs, one tile per ctx.block"
+  desc={`Schematic. An output tensor C of M rows and N columns cut into ${TILE} by ${TILE} tiles, one per CTA. ctx.block.x picks a row of tiles and ctx.block.y a column, as gemm does. The grid is M and N divided by ${TILE}, rounded up, so the last row and column of tiles can reach past C; that part is masked. Picking a CTA outlines the tile it owns. A batch axis stacks one grid per batch along z.`}
+  legend={["global", "cost"]}
+>
+  <label class="chart-range-label">
+    <span>M = <output data-for="m">{DEFAULT_M}</output></span>
+    <input
+      type="range"
+      class="chart-range"
+      data-param="m"
+      min={MIN_EXTENT}
+      max={MAX_EXTENT}
+      step={EXTENT_STEP}
+      value={DEFAULT_M}
+      aria-label="Rows of C, M"
+    />
+  </label>
+  <label class="chart-range-label">
+    <span>N = <output data-for="n">{DEFAULT_N}</output></span>
+    <input
+      type="range"
+      class="chart-range"
+      data-param="n"
+      min={MIN_EXTENT}
+      max={MAX_EXTENT}
+      step={EXTENT_STEP}
+      value={DEFAULT_N}
+      aria-label="Columns of C, N"
+    />
+  </label>
+  <div class="chart-group" role="group" aria-label="Batch axis">
+    <button type="button" class="chart-btn" data-group="z" data-value="off" aria-pressed="true">2D grid</button>
+    <button type="button" class="chart-btn" data-group="z" data-value="on" aria-pressed="false">Batch on z</button>
+  </div>
+  <Fragment slot="caption">
+    Schematic. <code>C[pm * 64 :+ 64, pn * 64 :+ 64]</code> with <code>pm = ctx.block.x</code> and
+    <code>pn = ctx.block.y</code>. Click a tile, or use the arrow keys and Enter, to pick its CTA.
+  </Fragment>
+</ChartFigure>

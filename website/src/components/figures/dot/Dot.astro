@@ -1,0 +1,48 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import DotFigure from "./dot.figure"
+import { K_STEPS, TILE_K } from "./geometry"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-dot" } = Astro.props
+const kSteps = Array.from({ length: K_STEPS }, (_, kStep) => kStep)
+const last = K_STEPS - 1
+---
+
+<ChartFigure
+  id={id}
+  name="dot"
+  figure={DotFigure}
+  state={{ kt: String(last), path: "fma" }}
+  title="One CTA through the k loop of a matrix multiply"
+  desc="Schematic. A 64-row band of A and a 64-column band of B in global memory, each cut into four panels of 16 along k. At each k step one panel of A and one of B are copied into the shared tiles a and b, and acc += dot(a, b) adds their product into the 64 by 64 accumulator. A toggle switches the accumulator's overlay between the FMA path, one block of acc per thread, and the tensor-core path, a grid of 16 by 16 fragments shared out over 8 warps."
+  legend={["global", "shared", "reg"]}
+>
+  <div class="chart-group" role="group" aria-label="k step">
+    {
+      kSteps.map(kStep => (
+        <button
+          type="button"
+          class="chart-btn"
+          data-group="kt"
+          data-value={String(kStep)}
+          aria-pressed={kStep === last ? "true" : "false"}
+        >
+          kt {kStep * TILE_K}
+        </button>
+      ))
+    }
+  </div>
+  <div class="chart-group" role="group" aria-label="Hardware path">
+    <button type="button" class="chart-btn" data-group="path" data-value="fma" aria-pressed="true">f32 FMA</button>
+    <button type="button" class="chart-btn" data-group="path" data-value="tc" aria-pressed="false">@tensorcore</button>
+  </div>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    Schematic. Gemm's k loop with <code>TILE_M = TILE_N = 64</code>, <code>TILE_K = 16</code> and <code>K = 64</code>
+    for one CTA: four k steps, each adding one product into <code>acc</code>.
+  </Fragment>
+</ChartFigure>

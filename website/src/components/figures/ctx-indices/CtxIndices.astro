@@ -1,0 +1,45 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import CtxIndicesFigure from "./ctx-indices.figure"
+import { DEFAULT_THREAD, THREADS } from "./geometry"
+import "../ctx-hierarchy/pick.css"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-ctx-indices" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="ctx-indices"
+  figure={CtxIndicesFigure}
+  state={{ thread: DEFAULT_THREAD, mode: "indices" }}
+  title="One CTA as rows of warps, and the indices of one thread"
+  desc="Schematic. A CTA of 256 threads drawn as 8 rows of 32 cells, one row per warp. Thread 113 is picked: it is lane 17 of warp 3, and 113 = 3 * 32 + 17. In the loop mode, a row of 128 elements of W is drawn as 4 rows of 32 under the lane columns; the loop for k in range(ctx.lane, K, ctx.lanes) gives lane 17 the elements 17, 49, 81 and 113, and each iteration the warp reads 32 neighboring elements."
+  legend={["global", "reg"]}
+>
+  <label class="chart-range-label">
+    <span>thread <output data-for="thread">{DEFAULT_THREAD}</output></span>
+    <input
+      type="range"
+      class="chart-range"
+      data-param="thread"
+      min="0"
+      max={THREADS - 1}
+      step="1"
+      value={DEFAULT_THREAD}
+      aria-label="Thread index"
+    />
+  </label>
+  <div class="chart-group" role="group" aria-label="Mode">
+    <button type="button" class="chart-btn" data-group="mode" data-value="indices" aria-pressed="true">Indices</button>
+    <button type="button" class="chart-btn" data-group="mode" data-value="loop" aria-pressed="false">Lane-strided loop</button>
+  </div>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    Schematic. <code>@launch(256)</code> on NVIDIA, 32 lanes a warp. Hover or focus a thread, or use the arrow
+    keys on the grid; the loop reads one row of <code>W</code> with <code>K = 128</code>.
+  </Fragment>
+</ChartFigure>
