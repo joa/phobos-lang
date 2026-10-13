@@ -5,6 +5,8 @@ sidebar:
   order: 2
 ---
 
+import TileCopySweep from "../../../../components/figures/tile-copy-sweep/TileCopySweep.astro"
+
 A tile is a block of shared memory owned by one CTA. Shared memory is small
 (48 KB per CTA by default) and fast, and every thread of the CTA can read and
 write all of it. Tiles are where a kernel keeps the data it works on: a panel
@@ -34,7 +36,7 @@ The normative rules are in the spec under
 | `var y = x * 2.0` | An elementwise expression over tiles: it takes their element type and broadcast shape |
 | `var t: tile<f32>[64, 64]` | An uninitialized tile |
 
-{/* figure: tile-copy */}
+<TileCopySweep />
 
 `var a = A[...]` is the statement that moves data from global memory into a
 tile. All threads of the CTA take part, each copying some of the elements,

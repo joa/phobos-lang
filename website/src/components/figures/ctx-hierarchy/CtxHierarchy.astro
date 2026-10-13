@@ -1,0 +1,43 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import CtxHierarchyFigure from "./ctx-hierarchy.figure"
+import { DEFAULT_PATH } from "./geometry"
+import "./pick.css"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-ctx-hierarchy" } = Astro.props
+const { block, warp, lane } = DEFAULT_PATH
+const levels = [
+  ["grid", "Grid"],
+  ["cta", "CTA"],
+  ["warp", "Warp"],
+  ["lane", "Lane"],
+]
+---
+
+<ChartFigure
+  id={id}
+  name="ctx-hierarchy"
+  figure={CtxHierarchyFigure}
+  state={{ level: "grid", block: `${block.x},${block.y}`, warp: String(warp), lane: String(lane) }}
+  title="The ctx hierarchy: grid, CTA, warp and lane"
+  desc="Schematic. A grid of 4 by 3 CTAs launched with @launch(256). Zooming in, one CTA is 8 warps of 32 lanes, one warp is 32 lanes, and one lane is a thread with its own registers. A panel lists the ctx fields that address each level. The picked thread is block (2, 1), warp 3, lane 17, thread 113."
+  legend={["reg"]}
+>
+  <div class="chart-group" role="group" aria-label="Zoom level">
+    {
+      levels.map(([value, name]) => (
+        <button type="button" class="chart-btn" data-group="level" data-value={value} aria-pressed={value === "grid" ? "true" : "false"}>
+          {name}
+        </button>
+      ))
+    }
+  </div>
+  <Fragment slot="caption">
+    Schematic. A 4 x 3 grid launched with <code>@launch(256)</code> on NVIDIA. Click a cell, or focus the drawing and use the
+    arrow keys and Enter, to zoom in on it; the buttons and Escape zoom back out.
+  </Fragment>
+</ChartFigure>

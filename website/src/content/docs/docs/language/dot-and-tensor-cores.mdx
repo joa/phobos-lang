@@ -5,6 +5,8 @@ sidebar:
   order: 5
 ---
 
+import Dot from "../../../../components/figures/dot/Dot.astro"
+
 `dot` and `dot_t` multiply two rank-2 tiles. They are the core of every
 matrix multiply, attention and projection written in Phobos, and the compiler
 picks the hardware path for them: FMA units, `dp4a`, or tensor cores.
@@ -27,7 +29,7 @@ A matrix multiply is a loop over the contraction axis. Each iteration copies a
 panel of `A` and a panel of `B` into shared memory and adds their product into
 an accumulator tile:
 
-{/* figure: dot */}
+<Dot />
 
 ```phobos fragment
 var acc: tile<f32>[TILE_M, TILE_N] = 0.0
