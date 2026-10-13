@@ -1,7 +1,14 @@
 ---
-// Scene 5: the same language runs LLMs. The token loop figure beside the numbers; the numbers panel is a
-// slot ("numbers") that a component reading results/*.json fills, and shows a placeholder until then.
+// Scene 5: the same language runs LLMs. Two figures side by side, the token loop and the elastic
+// expert cache, each with a short head, and below them the numbers panel: a slot ("numbers") that a
+// component reading results/*.json fills, with a placeholder until then.
 import TokenLoop from "../figures/token-loop/TokenLoop.astro"
+import ElasticCache from "../figures/elastic-cache/ElasticCache.astro"
+import { RUN } from "../figures/elastic-cache/elastic-cache.figure"
+import { formatGiB, formatRate } from "../figures/elastic-cache/geometry"
+
+const [phobos, other] = RUN.engines
+const taken = formatGiB(RUN.squeezeMiB / 1024)
 ---
 
 <section class="scene inference" id="inference" aria-labelledby="inference-title">
@@ -14,42 +21,71 @@ import TokenLoop from "../figures/token-loop/TokenLoop.astro"
         CPU.
       </p>
     </div>
-    <div class="inference-body">
+    <div class="inference-figures">
       <div class="inference-figure">
+        <h3>One token at a time</h3>
+        <p>
+          The layers turn the last token into logits, the sampler picks the next one, and it goes back in. Decode fuses
+          a chain of layer stages into one persistent kernel.
+        </p>
         <TokenLoop />
       </div>
-      <div class="inference-numbers">
-        <slot name="numbers">
-          <div class="slot-plate">
-            <p>Decode and prefill against llama.cpp, per model, read from the benchmark results with card and date.</p>
-          </div>
-        </slot>
+      <div class="inference-figure">
+        <h3>An elastic expert cache</h3>
+        <p>
+          When another program takes {taken} of the card, the cache gives the memory back and the CPU threads take
+          more of the misses, so nothing is paged: {phobos.label} decodes at {formatRate(phobos.decode[1])} tokens/s while{" "}
+          {other.label} drops to {formatRate(other.decode[1])}. Once the memory is free, the cache grows back.
+        </p>
+        <ElasticCache id="fig-home-elastic-cache" />
       </div>
+    </div>
+    <div class="inference-numbers">
+      <slot name="numbers">
+        <div class="slot-plate">
+          <p>Decode and prefill against llama.cpp, per model, read from the benchmark results with card and date.</p>
+        </div>
+      </slot>
     </div>
     <a class="scene-link" href="/inference/">Models, formats and benchmarks</a>
   </div>
 </section>
 
 <style>
-  .inference-body {
+  .inference-figures {
     display: grid;
-    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--grid-gap);
     align-items: start;
   }
 
   .inference-figure {
-    grid-column: span 5;
+    display: flex;
+    flex-direction: column;
     min-width: 0;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--sky-line);
+  }
+
+  .inference-figure h3 {
+    font-size: 1.1875rem;
+  }
+
+  .inference-figure p {
+    max-width: 34rem;
+    margin: 0.5rem 0 0;
+    color: var(--dust);
+    font-size: 0.9375rem;
+    line-height: 1.55;
   }
 
   .inference-figure :global(.chart) {
-    margin: 0;
+    margin: 1.25rem 0 0;
   }
 
   .inference-numbers {
-    grid-column: span 7;
     min-width: 0;
+    margin-top: clamp(2.5rem, 5vw, 4rem);
   }
 
   .inference-numbers .slot-plate {
@@ -57,9 +93,9 @@ import TokenLoop from "../figures/token-loop/TokenLoop.astro"
   }
 
   @media (max-width: 900px) {
-    .inference-figure,
-    .inference-numbers {
-      grid-column: 1 / -1;
+    .inference-figures {
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: 2.5rem;
     }
   }
 </style>

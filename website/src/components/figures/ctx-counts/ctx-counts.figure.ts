@@ -159,6 +159,13 @@ export default class CtxCountsFigure extends ChartFigure {
     if (group === "launch") this.#run()
   }
 
+  // Once the reader has taken over, a loop grows the CTA from one warp to their count again.
+  override replay(): void {
+    if (!this.hasInteracted) return super.replay()
+    this.#shownRows = 1
+    this.#run()
+  }
+
   #run(): void {
     this.#timeline = this.#makeTimeline()
     this.play()

@@ -1,5 +1,5 @@
 ---
-// The body of /inference/: what the engine is, the numbers, the four figures, the token loop, the models
+// The body of /inference/: what the engine is, the numbers, the five figures, the token loop, the models
 // and formats, and a quickstart that ends in the inference docs.
 import BenchChart from "./BenchChart.astro"
 import BenchSummary from "./BenchSummary.astro"
@@ -8,6 +8,7 @@ import Recording from "./Recording.astro"
 import BandwidthBound from "../figures/bandwidth-bound/BandwidthBound.astro"
 import QdotMapping from "../figures/qdot-mapping/QdotMapping.astro"
 import ExpertCache from "../figures/expert-cache/ExpertCache.astro"
+import ElasticCache from "../figures/elastic-cache/ElasticCache.astro"
 import HadamardRotation from "../figures/hadamard-rotation/HadamardRotation.astro"
 import TokenLoop from "../figures/token-loop/TokenLoop.astro"
 import { REPO_URL } from "../../lib/bench/load"
@@ -73,7 +74,7 @@ const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky 
   </section>
 
   <section class="inf-section" aria-labelledby="why">
-    <h2 id="why">Four ideas behind the numbers</h2>
+    <h2 id="why">Five ideas behind the numbers</h2>
 
     <div class="inf-figure">
       <div class="inf-figure-text">
@@ -112,6 +113,20 @@ const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky 
         </p>
       </div>
       <ExpertCache />
+    </div>
+
+    <div class="inf-figure">
+      <div class="inf-figure-text">
+        <h3>Giving the memory back</h3>
+        <p>
+          The cache is sized from the card's free memory, and Phobos reads the whole card's free memory again between
+          passes. When another program fills the card, the cache shrinks instead of letting the driver page buffers to
+          host memory, and more of the misses go to the CPU threads. When the memory is free again, the cache grows
+          back. llama.cpp fixes its split at load time, so the same squeeze pages its buffers and every token reads them
+          back over PCIe.
+        </p>
+      </div>
+      <ElasticCache id="fig-inference-elastic-cache" />
     </div>
 
     <div class="inf-figure">

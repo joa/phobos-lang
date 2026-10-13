@@ -1,6 +1,6 @@
-// Records, for every results/bench*.json without a meta.date, the date of the last commit that touched it,
-// into src/lib/bench/dates.json. CI checks out one commit, so git history is not there at build time; run
-// this after committing a new results file that predates bench.py's date field.
+// Records, for every results/bench*.json and results/agent*.json without a meta.date, the date of the
+// last commit that touched it, into src/lib/bench/dates.json. CI checks out one commit, so git history
+// is not there at build time; run this after committing a new results file that has no date field.
 //
 //   node scripts/bench-dates.mjs
 
@@ -15,7 +15,7 @@ const outPath = resolve(websiteDir, "src/lib/bench/dates.json")
 
 const dates = {}
 for (const name of readdirSync(resolve(repoRoot, "results")).sort()) {
-  if (!/^bench.*\.json$/.test(name)) continue
+  if (!/^(bench|agent).*\.json$/.test(name)) continue
   const file = `results/${name}`
   const run = JSON.parse(readFileSync(resolve(repoRoot, file), "utf8"))
   if (run.meta?.date) continue

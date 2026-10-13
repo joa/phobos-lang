@@ -199,6 +199,13 @@ export default class CtxBlockFigure extends ChartFigure {
     }
   }
 
+  // Once the reader has taken over, a loop grows C from one tile to their extents again.
+  override replay(): void {
+    if (!this.hasInteracted) return super.replay()
+    this.#shown = { m: MIN_EXTENT, n: MIN_EXTENT }
+    this.#run()
+  }
+
   #run(): void {
     this.#timeline = this.#makeTimeline()
     this.play()

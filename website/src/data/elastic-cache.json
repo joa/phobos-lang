@@ -1,0 +1,47 @@
+{
+  "file": "results/agent-squeeze-release.json",
+  "date": "2026-10-06T20:42:40+02:00",
+  "card": "NVIDIA GeForce RTX 2080 SUPER",
+  "model": "Qwen3.6-35B-A3B",
+  "cardGiB": 8,
+  "usedBeforeGiB": 6.02,
+  "squeezeMiB": 2048,
+  "requests": 8,
+  "squeezedAt": 3,
+  "squeezeEndedAt": 6,
+  "cache": {
+    "blocks": 40,
+    "slotMiB": 1.8592,
+    "mostPerBlock": 49,
+    "before": 38,
+    "shrinks": [
+      24,
+      14
+    ],
+    "after": 39
+  },
+  "engines": [
+    {
+      "engine": "phobos",
+      "label": "Phobos",
+      "reps": 2,
+      "wallSecs": 52.402,
+      "decode": [
+        45.839,
+        30.821,
+        44.573
+      ]
+    },
+    {
+      "engine": "llama.cpp",
+      "label": "llama.cpp",
+      "reps": 3,
+      "wallSecs": 131.748,
+      "decode": [
+        31.051,
+        8.966,
+        31.229
+      ]
+    }
+  ]
+}

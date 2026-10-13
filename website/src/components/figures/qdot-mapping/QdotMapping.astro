@@ -17,7 +17,7 @@ const { id = "fig-qdot-mapping" } = Astro.props
   state={{ mapping: "warp" }}
   title="Two ways to map a matrix-vector product onto a warp"
   desc={`Schematic. With one thread per output, each of a warp's ${LANES} threads walks its own row of weights, so one load touches ${LANES} rows. With one warp per output, the ${LANES} lanes read ${BYTES_PER_LANE} bytes each, ${STEP_BYTES} contiguous bytes of one row per step, then add up their partial sums in ${SHUFFLE_MASKS.length} stages of xor shuffles.`}
-  legend={["global", "reg", "cost"]}
+  legend={["global", "reg", ["cost", "scattered reads"]]}
   class="fig-tall-readout"
 >
   <div class="chart-group" role="group" aria-label="Mapping">

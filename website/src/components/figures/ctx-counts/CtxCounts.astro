@@ -16,8 +16,8 @@ const { id = "fig-ctx-counts" } = Astro.props
   figure={CtxCountsFigure}
   state={{ threads: DEFAULT_THREADS, launch: "ok" }}
   title="A CTA regrouping into warps as @launch changes its thread count"
-  desc="Schematic. The CTA's threads drawn as rows of 32 cells, one row per warp. The thread count runs from 32 to 1024 in steps of 32, and the number of warps follows as the count divided by 32. ctx.threads, ctx.lanes and ctx.warps are marked as compile-time constants. With @launch(48) the second warp is half empty, drawn as cost, and the compiler's error is shown."
-  legend={["cost"]}
+  desc="Schematic. The CTA's threads drawn as rows of 32 cells, one row per warp. The thread count runs from 32 to 1024 in steps of 32, and the number of warps follows as the count divided by 32. ctx.threads, ctx.lanes and ctx.warps are marked as compile-time constants. With @launch(48) the second warp is half empty, drawn dashed, and the compiler's error is shown."
+  legend={[["cost", "not a whole warp"]]}
 >
   <label class="chart-range-label">
     <span>@launch(<output data-for="threads">{DEFAULT_THREADS}</output>)</span>

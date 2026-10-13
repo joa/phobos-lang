@@ -164,6 +164,12 @@ export default class MaskingFigure extends ChartFigure {
     if (group === "aligned") this.#run(true)
   }
 
+  // Once the reader has taken over, a loop stages their tile again.
+  override replay(): void {
+    if (!this.hasInteracted) return super.replay()
+    this.#run(false)
+  }
+
   #run(animateExtents: boolean): void {
     this.#timeline = this.#makeTimeline(animateExtents)
     this.play()

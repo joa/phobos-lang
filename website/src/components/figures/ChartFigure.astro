@@ -17,7 +17,8 @@ interface Props {
   state?: Record<string, StateValue>
   title: string
   desc: string
-  legend?: Space[]
+  // A space, or a space and what its hue means in this figure.
+  legend?: (Space | [Space, string])[]
   pickable?: boolean
   class?: string
 }
@@ -48,9 +49,10 @@ const hasCaption = Astro.slots.has("caption")
   {
     legend.length > 0 && (
       <ul class="chart-legend" aria-label="Legend">
-        {legend.map(space => (
-          <li class={`chart-key sp-${space}`}>{legendLabels[space]}</li>
-        ))}
+        {legend.map(entry => {
+          const [space, text] = typeof entry === "string" ? [entry, legendLabels[entry]] : entry
+          return <li class={`chart-key sp-${space}`}>{text}</li>
+        })}
       </ul>
     )
   }
