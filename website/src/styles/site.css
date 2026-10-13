@@ -213,41 +213,81 @@ p {
   color: var(--star);
 }
 
-/* Buttons and links that act like them: square corners, like the figures */
+/* Buttons and links that act like them: glass with a brand-to-nebula hairline, like the figure
+ * controls, and a lit primary */
 
 .button {
+  --button-bg: color-mix(in srgb, var(--sky-2) 62%, transparent);
+  --button-rim: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--brand) 60%, var(--sky-line)),
+    var(--sky-line) 45%,
+    color-mix(in srgb, var(--nebula) 50%, var(--sky-line))
+  );
   display: inline-flex;
   align-items: center;
   gap: 0.5rem;
   min-height: 2.75rem;
-  padding: 0 1.15rem;
-  border: 1px solid var(--sky-line);
-  background: color-mix(in srgb, var(--sky-0) 40%, transparent);
+  padding: 0 1.25rem;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background:
+    linear-gradient(var(--button-bg), var(--button-bg)) padding-box,
+    var(--button-rim) border-box;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--star) 8%, transparent),
+    0 8px 24px -16px var(--glow);
+  backdrop-filter: blur(8px);
   color: var(--star);
   font-size: 0.9375rem;
   font-weight: 500;
   text-decoration: none;
   transition:
-    border-color var(--dur-1) var(--ease-out),
-    background-color var(--dur-1) var(--ease-out),
+    box-shadow var(--dur-2) var(--ease-out),
+    transform var(--dur-2) var(--ease-out),
     color var(--dur-1) var(--ease-out);
 }
 
 .button:hover {
-  border-color: var(--brand);
+  --button-bg: color-mix(in srgb, var(--brand) 12%, var(--sky-2));
   color: var(--star);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--star) 12%, transparent),
+    0 10px 30px -14px var(--glow);
+  transform: translateY(-1px);
+}
+
+.button:active {
+  transform: translateY(0);
 }
 
 .button.is-primary {
-  border-color: var(--brand);
-  background: var(--brand);
+  --button-rim: linear-gradient(135deg, var(--brand-hi), var(--nebula));
+  background:
+    linear-gradient(135deg, var(--brand), color-mix(in srgb, var(--brand) 72%, var(--nebula))) padding-box,
+    var(--button-rim) border-box;
   color: var(--sky-0);
+  font-weight: 600;
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 35%, transparent),
+    0 10px 30px -12px color-mix(in srgb, var(--brand) 70%, transparent);
 }
 
 .button.is-primary:hover {
-  border-color: var(--brand-hi);
-  background: var(--brand-hi);
+  background:
+    linear-gradient(135deg, var(--brand-hi), color-mix(in srgb, var(--brand-hi) 72%, var(--nebula))) padding-box,
+    var(--button-rim) border-box;
   color: var(--sky-0);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 45%, transparent),
+    0 12px 36px -10px color-mix(in srgb, var(--brand) 80%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .button,
+  .button:hover {
+    transform: none;
+  }
 }
 
 /* Segmented control: a row of pressed/unpressed buttons sharing one hairline */

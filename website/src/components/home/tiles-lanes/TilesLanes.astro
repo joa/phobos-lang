@@ -511,17 +511,16 @@ const beats = [
     color: var(--dust);
   }
 
+  /* Steps ahead stay at --dust, which still meets contrast; progress brightens toward --star */
   .tl-meta span {
-    opacity: 0.45;
-    transition: opacity var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+    transition: color var(--dur-2) var(--ease-out);
   }
 
   .tl-meta span.is-done {
-    opacity: 0.75;
+    color: color-mix(in srgb, var(--dust) 55%, var(--star));
   }
 
   .tl-meta span.is-current {
-    opacity: 1;
     color: var(--star);
   }
 
