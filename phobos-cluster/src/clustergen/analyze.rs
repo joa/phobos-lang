@@ -167,6 +167,7 @@ impl<'a> Analyzer<'a> {
                     end,
                     step,
                     body,
+                    ..
                 } => {
                     if !matches!(start, Expr::Int(0)) {
                         bail!("device-level loops must start at 0");
@@ -326,6 +327,7 @@ impl<'a> Analyzer<'a> {
                 end,
                 step,
                 body,
+                ..
             } => {
                 if in_loop {
                     bail!("nested cluster-level loops are not supported yet");
