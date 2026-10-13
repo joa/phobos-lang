@@ -90,6 +90,7 @@ The loop bounds are uniform, so every thread of a CTA runs the same
 iterations and the tile operations inside stay legal.
 
 A [`@persistent`](/docs/attributes/persistent/) kernel uses the same pattern
-with a grid sized to the card rather than to the data. `grid_barrier`, which
-makes every CTA of the grid wait for every other, requires a one-dimensional
+with a grid sized to the card rather than to the data. `grid_barrier`
+makes every CTA of the grid wait for every other, and their global writes
+before it are visible to all of them after it. It requires a one-dimensional
 grid.

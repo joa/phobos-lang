@@ -56,11 +56,11 @@ kernel copy(x: tensor<f32>[N], y: tensor<f32>[N]) {
 ```
 
 The message names the kernel, the attribute it did not recognize, and every
-attribute it does read.
+attribute it does read. Unrolling is not an attribute: a loop asks for it
+itself, as [`for<unroll n>`](/docs/language/kernels-and-tensors/#unrolling-a-loop).
 
 ## Planned attributes
 
-The spec lists four attributes as planned: `@readonly`, `@unroll` (at the
-parameter and the loop level), `@fast_math` and `@assert_coalesced`. None of
-them is implemented yet, and each is a compile-time error until it is, as the
-example above shows for `@unroll`.
+The spec lists three attributes as planned: `@readonly`, `@fast_math` and
+`@assert_coalesced`. None of them is implemented yet, and each is a
+compile-time error until it is, the same error as for `@unroll` above.

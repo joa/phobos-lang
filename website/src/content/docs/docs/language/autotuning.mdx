@@ -1,6 +1,6 @@
 ---
 title: Autotuning
-description: Tile sizes as compile-time constants, the search space @autotune declares, and the shape environment.
+description: Tile sizes as compile-time constants, the search space @autotune declares, the shape environment, and tuning how far a loop unrolls.
 sidebar:
   order: 7
 ---
@@ -66,6 +66,35 @@ name, such as the head dimension of attention:
 `@autotune(D in [64], BR in [32, 128], BC in [32, 128])`. It also lets a
 tensor declare that dimension as `D`, which makes it static: `Q[row :+ BR, :]`
 is then a tile of static shape `[BR, 64]`.
+
+## Tuning the unroll factor
+
+The factor of [`for<unroll n>`](/docs/language/kernels-and-tensors/#unrolling-a-loop)
+may be an `@autotune` name, which makes how far to unroll a loop one more
+dimension of the search:
+
+```phobos
+@autotune(U in [1, 8])
+@launch(256)
+kernel partial_sums(X: tensor<f32>[1, N], O: tensor<f32>[1, 256]) {
+  var acc: f32 = 0.0
+  for<unroll U> i in range(ctx.thread, N, 256) {
+    acc += X[0, i]
+  }
+  O[0, ctx.thread] = acc
+}
+```
+
+`U in [1, 8]` searches 1, 2, 4 and 8 by the doubling rule above, and
+`U in [1, 2, 4]` lists the values outright. `U = 1` is the plain loop, so
+putting 1 in the list puts not unrolling at all in the search. Each point unrolls the
+same iterations, so every choice computes the same result and only the time
+differs.
+
+The right factor is hard to guess. More copies mean fewer loop tests and
+more loads in flight, but also more registers per thread, which can cost
+resident warps. A factor that wins on one card can lose on another, which is
+what the tuner is for.
 
 ## The GEMM's own constants
 

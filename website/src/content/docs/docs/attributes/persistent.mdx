@@ -58,8 +58,10 @@ written with the grid extent, `ctx.blocks.x * TILE`.
 
 ## `grid_barrier`
 
-`grid_barrier(bar)` makes every block of the grid wait for every other. It
-requires:
+`grid_barrier(bar)` makes every block of the grid wait for every other, and
+orders memory across it: every block's global writes before the barrier are
+visible to every block after it. One stage can therefore read what another
+block wrote in the stage before. It requires:
 
 | Requirement | Note |
 | --- | --- |
