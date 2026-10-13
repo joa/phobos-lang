@@ -1,0 +1,39 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import QdotMappingFigure from "./qdot-mapping.figure"
+import { BYTES_PER_LANE, LANES, SHUFFLE_MASKS, STEP_BYTES } from "./geometry"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-qdot-mapping" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="qdot-mapping"
+  figure={QdotMappingFigure}
+  state={{ mapping: "warp" }}
+  title="Two ways to map a matrix-vector product onto a warp"
+  desc={`Schematic. With one thread per output, each of a warp's ${LANES} threads walks its own row of weights, so one load touches ${LANES} rows. With one warp per output, the ${LANES} lanes read ${BYTES_PER_LANE} bytes each, ${STEP_BYTES} contiguous bytes of one row per step, then add up their partial sums in ${SHUFFLE_MASKS.length} stages of xor shuffles.`}
+  legend={["global", "reg", "cost"]}
+  class="fig-tall-readout"
+>
+  <div class="chart-group" role="group" aria-label="Mapping">
+    <button type="button" class="chart-btn" data-group="mapping" data-value="thread" aria-pressed="false">Thread per output</button>
+    <button type="button" class="chart-btn" data-group="mapping" data-value="warp" aria-pressed="true">Warp per output</button>
+  </div>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    Schematic. The warp form is the Q8_0 decode matvec as phobos-gguf writes it with lanes:{" "}
+    <code>for k in range(ctx.lane * 16, K, ctx.lanes * 16)</code>, then <code>sum&lt;over ctx.lane&gt;(acc)</code>,
+    and lane 0 stores the output.
+  </Fragment>
+</ChartFigure>
+
+<style>
+  :global(.qm-boundaries) {
+    opacity: 0.5;
+  }
+</style>

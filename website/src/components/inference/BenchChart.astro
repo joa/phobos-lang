@@ -1,0 +1,481 @@
+---
+// Decode and prefill, Phobos against llama.cpp, one row per model, read from results/bench*.json at build
+// time. Each pair of bars has its own scale, since rates differ by two orders of magnitude between
+// models and between tests. Every bar carries its value; the table below repeats every number with its
+// standard error. `compact` is the front page's panel: decode and one prompt size, no table.
+import { displayName, testedModels } from "../../lib/bench/catalog"
+import {
+  commitUrl,
+  engineLabel,
+  formatRate,
+  loadRuns,
+  modelRows,
+  ratioOf,
+  REPO_URL,
+  shortDate,
+  testsOf,
+  type Comparison,
+  type ModelRow,
+} from "../../lib/bench/load"
+
+interface Props {
+  compact?: boolean
+  id?: string
+}
+
+const { compact = false, id = "bench" } = Astro.props
+const runs = loadRuns()
+const rows = modelRows(runs)
+const tested = testedModels()
+
+const decodeTest = "tg128"
+const promptTests = compact ? ["pp128"] : testsOf(rows, "pp")
+const columns = [decodeTest, ...promptTests]
+const allTests = [...testsOf(rows, "pp"), ...testsOf(rows, "tg")]
+
+const distinct = (values: string[]) => [...new Set(values)]
+const cards = distinct(runs.map(run => run.card))
+const drivers = distinct(runs.map(run => run.driver))
+const commits = distinct(runs.map(run => run.commit))
+const dates = distinct(runs.map(run => shortDate(run.date))).sort()
+const dateRange = dates.length === 1 ? dates[0] : `${dates[0]} to ${dates[dates.length - 1]}`
+const fromGit = runs.some(run => run.dateSource === "git")
+const otherEngines = distinct(runs.map(run => engineLabel(run.otherEngine)))
+
+function kindOf(test: string): string {
+  return test.startsWith("tg") ? "decode" : "prefill"
+}
+
+function barsOf(comparison: Comparison) {
+  const { phobos, other } = comparison
+  const scale = Math.max(phobos!.mean, other!.mean)
+  const widthPercent = (mean: number) => `${((mean / scale) * 100).toFixed(1)}%`
+  return { phobos: phobos!, other: other!, phobosWidth: widthPercent(phobos!.mean), otherWidth: widthPercent(other!.mean) }
+}
+
+function cellLabel(row: ModelRow, test: string, comparison: Comparison): string {
+  const ratio = ratioOf(comparison)!
+  return (
+    `${displayName(row.model, tested)}, ${test} ${kindOf(test)}: Phobos ${formatRate(comparison.phobos!.mean)} tokens/s, ` +
+    `${engineLabel(row.run.otherEngine)} ${formatRate(comparison.other!.mean)} tokens/s, ratio ${ratio.toFixed(2)}`
+  )
+}
+
+function isFork(row: ModelRow): boolean {
+  return engineLabel(row.run.otherEngine) !== "llama.cpp"
+}
+
+function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`
+}
+---
+
+<div class="bench-wrap">
+<figure class:list={["bench", { "is-compact": compact }]} id={id} aria-labelledby={`${id}-title`}>
+  <figcaption class="bench-head">
+    <p class="bench-title" id={`${id}-title`}>
+      {compact ? "Tokens per second against llama.cpp" : "Phobos against llama.cpp, tokens per second, higher is better"}
+    </p>
+    <p class="bench-meta">
+      {cards.join(", ")}, driver {drivers.join(", ")}, Phobos{" "}
+      {commits.map((commit, index) => (
+        <>
+          {index > 0 && ", "}
+          <a href={commitUrl(commit)}>{commit}</a>
+        </>
+      ))}, {fromGit ? "results committed" : "measured"} {dateRange}
+    </p>
+    <ul class="bench-legend" aria-label="Legend">
+      <li class="bench-key is-phobos">Phobos</li>
+      <li class="bench-key is-other">{otherEngines.length > 1 ? "llama.cpp, or the fork its row names" : otherEngines[0]}</li>
+    </ul>
+  </figcaption>
+
+  <div class="bench-grid" style={`--columns: ${columns.length}`}>
+    <div class="bench-row is-header" aria-hidden="true">
+      <span class="bench-model"></span>
+      {
+        columns.map(test => (
+          <span class="bench-col-head">
+            {kindOf(test)} <span class="bench-test">{test}</span>
+          </span>
+        ))
+      }
+    </div>
+    {
+      rows.map(row => (
+        <div class="bench-row" role="group" aria-label={displayName(row.model, tested)}>
+          <div class="bench-model">
+            <span class="bench-model-name">{displayName(row.model, tested)}</span>
+            {!compact && (
+              <span class="bench-model-meta">
+                <a href={`${REPO_URL}/blob/main/${row.run.file}`}>{row.run.file.replace("results/", "")}</a>,{" "}
+                {plural(row.run.rounds, "round")} x {plural(row.run.reps, "rep")}
+                {row.run.otherArgs && <>, llama.cpp {row.run.otherArgs}</>}
+                {isFork(row) && <>, against {engineLabel(row.run.otherEngine)}</>}
+              </span>
+            )}
+            {compact && isFork(row) && <span class="bench-model-meta">against {engineLabel(row.run.otherEngine)}</span>}
+          </div>
+          {columns.map(test => {
+            const comparison = row.tests[test]
+            if (!comparison?.phobos || !comparison.other) {
+              return (
+                <div class="bench-cell is-empty">
+                  <span class="bench-cell-head">
+                    {kindOf(test)} {test}
+                  </span>
+                  <span class="bench-none">not measured</span>
+                </div>
+              )
+            }
+            const bars = barsOf(comparison)
+            return (
+              <div class="bench-cell" role="img" aria-label={cellLabel(row, test, comparison)}>
+                <span class="bench-cell-head" aria-hidden="true">
+                  {kindOf(test)} {test}
+                </span>
+                <span class="bench-ratio" aria-hidden="true">
+                  {ratioOf(comparison)!.toFixed(2)}x
+                </span>
+                <span class="bench-bar-row" aria-hidden="true">
+                  <span class="bench-track">
+                    <span class="bench-bar is-phobos" style={`width: ${bars.phobosWidth}`} />
+                  </span>
+                  <span class="bench-value">{formatRate(bars.phobos.mean)}</span>
+                </span>
+                <span class="bench-bar-row" aria-hidden="true">
+                  <span class="bench-track">
+                    <span class="bench-bar is-other" style={`width: ${bars.otherWidth}`} />
+                  </span>
+                  <span class="bench-value">{formatRate(bars.other.mean)}</span>
+                </span>
+              </div>
+            )
+          })}
+        </div>
+      ))
+    }
+  </div>
+
+  <p class="bench-note">
+    {
+      compact
+        ? "Decode over 128 tokens and a 128-token prompt. Each pair of bars has its own scale. The ratio is Phobos's rate over llama.cpp's."
+        : "Each pair of bars has its own scale, so bars compare the two engines on one model and one test, not across models. The ratio is Phobos's rate over the other engine's. Rates are the mean over the rounds bench.py found uncontended, each round the mean of its repetitions."
+    }
+  </p>
+
+  {
+    !compact && (
+      <details class="bench-table">
+        <summary>All numbers, with standard error</summary>
+        <div class="bench-scroll">
+          <table>
+            <caption class="sr-only">Tokens per second for every model and test, mean and standard error over rounds</caption>
+            <thead>
+              <tr>
+                <th scope="col">model</th>
+                <th scope="col">test</th>
+                <th scope="col">Phobos</th>
+                <th scope="col">other engine</th>
+                <th scope="col">ratio</th>
+                <th scope="col">source</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.flatMap(row =>
+                allTests
+                  .filter(test => row.tests[test]?.phobos && row.tests[test]?.other)
+                  .map((test, index) => {
+                    const comparison = row.tests[test]
+                    return (
+                      <tr>
+                        <th scope="row">{index === 0 ? displayName(row.model, tested) : ""}</th>
+                        <td>{test}</td>
+                        <td class="num">
+                          {comparison.phobos!.mean.toFixed(2)} +/- {comparison.phobos!.stderr.toFixed(2)}
+                        </td>
+                        <td class="num">
+                          {comparison.other!.mean.toFixed(2)} +/- {comparison.other!.stderr.toFixed(2)}
+                          {index === 0 && <span class="engine"> {engineLabel(row.run.otherEngine)}</span>}
+                        </td>
+                        <td class="num">{ratioOf(comparison)!.toFixed(2)}</td>
+                        <td>
+                          {index === 0 && (
+                            <>
+                              {row.run.file}, {row.run.card}, driver {row.run.driver}, {row.run.commit},{" "}
+                              {shortDate(row.run.date)}
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })
+              )}
+            </tbody>
+          </table>
+        </div>
+      </details>
+    )
+  }
+</figure>
+</div>
+
+<style>
+  .bench-wrap {
+    container: bench / inline-size;
+  }
+
+  .bench {
+    /* The second engine's color: an amber that passes the categorical checks against --brand in both
+     * themes. cuBLAS, where it appears, is --series-cublas. */
+    --series-phobos: var(--brand);
+    --series-other: light-dark(#a0640a, #d9a441);
+    margin: 0;
+    font-family: var(--font-mono);
+    color: var(--star);
+  }
+
+  .bench-head {
+    display: grid;
+    gap: 0.375rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .bench-title {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--star);
+  }
+
+  .bench-meta,
+  .bench-note,
+  .bench-model-meta {
+    margin: 0;
+    color: var(--dust);
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .bench-note {
+    margin-top: 1rem;
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    text-wrap: pretty;
+  }
+
+  .bench-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.25rem;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    list-style: none;
+    color: var(--dust);
+    font-size: 0.75rem;
+  }
+
+  .bench-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .bench-key::before {
+    content: "";
+    width: 1rem;
+    height: 6px;
+    background: var(--series-phobos);
+  }
+
+  .bench-key.is-other::before {
+    background: var(--series-other);
+  }
+
+  .bench-grid {
+    display: grid;
+    grid-template-columns: minmax(10rem, 1.2fr) repeat(var(--columns), minmax(0, 1fr));
+    column-gap: 1.5rem;
+  }
+
+  .bench-row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: subgrid;
+    align-items: start;
+    padding-block: 0.875rem;
+    border-top: 1px solid var(--sky-line);
+  }
+
+  .bench-row.is-header {
+    padding-block: 0 0.5rem;
+    border-top: none;
+    color: var(--dust);
+    font-size: 0.75rem;
+  }
+
+  .bench-test {
+    color: var(--star);
+  }
+
+  .bench-model {
+    display: grid;
+    gap: 0.25rem;
+    min-width: 0;
+  }
+
+  .bench-model-name {
+    font-size: 0.8125rem;
+    overflow-wrap: anywhere;
+  }
+
+  .bench-cell {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    row-gap: 0.25rem;
+    min-width: 0;
+  }
+
+  .bench-cell-head {
+    display: none;
+    color: var(--dust);
+    font-size: 0.75rem;
+  }
+
+  .bench-ratio {
+    grid-column: 1 / -1;
+    color: var(--star);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .bench-bar-row {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: 1fr 3.75rem;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .bench-track {
+    height: 8px;
+  }
+
+  .bench-bar {
+    display: block;
+    height: 100%;
+    background: var(--series-phobos);
+  }
+
+  .bench-bar.is-other {
+    background: var(--series-other);
+  }
+
+  .bench-value {
+    color: var(--dust);
+    font-size: 0.75rem;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  .bench-none {
+    grid-column: 1 / -1;
+    color: var(--dust);
+    font-size: 0.75rem;
+  }
+
+  .bench-table {
+    margin-top: 1.25rem;
+    font-size: 0.75rem;
+  }
+
+  .bench-table summary {
+    cursor: pointer;
+    color: var(--brand);
+  }
+
+  .bench-scroll {
+    overflow-x: auto;
+    margin-top: 0.75rem;
+  }
+
+  .bench-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .bench-table th,
+  .bench-table td {
+    padding: 0.375rem 0.75rem 0.375rem 0;
+    border-bottom: 1px solid var(--sky-line);
+    text-align: left;
+    vertical-align: top;
+    white-space: nowrap;
+  }
+
+  .bench-table thead th {
+    color: var(--dust);
+    font-weight: 400;
+  }
+
+  .bench-table .num {
+    text-align: right;
+  }
+
+  .bench-table .engine {
+    color: var(--dust);
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* Narrow: each model stacks its cells, and each cell names its test */
+  @container bench (width < 640px) {
+    .bench-grid {
+      grid-template-columns: repeat(var(--columns), minmax(0, 1fr));
+      column-gap: 1rem;
+    }
+
+    .bench-row.is-header {
+      display: none;
+    }
+
+    .bench-model {
+      grid-column: 1 / -1;
+      margin-bottom: 0.5rem;
+    }
+
+    .bench-cell-head {
+      display: block;
+    }
+
+    .bench-ratio {
+      grid-column: 2;
+      grid-row: 1;
+    }
+
+    .bench-bar-row {
+      grid-template-columns: 1fr 2.75rem;
+    }
+  }
+
+  @container bench (width < 420px) {
+    .bench-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .bench-cell + .bench-cell {
+      margin-top: 0.625rem;
+    }
+  }
+</style>

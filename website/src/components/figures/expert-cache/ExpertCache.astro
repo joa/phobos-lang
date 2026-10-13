@@ -1,0 +1,33 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import ExpertCacheFigure from "./expert-cache.figure"
+import { EXPERT_COUNT, PICKS_PER_TOKEN } from "./simulation"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-expert-cache" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="expert-cache"
+  figure={ExpertCacheFigure}
+  state={{ path: "decode" }}
+  title="An expert cache on the card"
+  desc={`Simulated. For every token the router picks ${PICKS_PER_TOKEN} of ${EXPERT_COUNT} experts in one layer. Picks already in the cache on the GPU run there. In decode the CPU computes the misses from host memory and one miss is copied into the cache for later tokens; a prompt copies its misses over PCIe into the least recently used slots.`}
+  legend={["global", "reg", "cost"]}
+  class="fig-tall-readout"
+>
+  <div class="chart-group" role="group" aria-label="Misses">
+    <button type="button" class="chart-btn" data-group="path" data-value="decode" aria-pressed="true">Decode: CPU computes misses</button>
+    <button type="button" class="chart-btn" data-group="path" data-value="prompt" aria-pressed="false">Prompt: copy over PCIe</button>
+  </div>
+  <button type="button" class="chart-btn motion-only" data-action="toggle" aria-pressed="false">Pause</button>
+  <button type="button" class="chart-btn" data-action="step">Step</button>
+  <Fragment slot="caption">
+    One layer of Qwen3.6-35B-A3B. The routing is simulated, so the hit rate shown is the simulation's, not the
+    model's. A prompt also runs part of its misses on the CPU while the copies cross the link.
+  </Fragment>
+</ChartFigure>

@@ -46,6 +46,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -500,6 +501,7 @@ def preflight(args):
         "driver": driver,
         "clock_max": clock_max,
         "commit": commit or "?",
+        "date": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
 
 

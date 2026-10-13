@@ -7,6 +7,7 @@ import PipelineScene from "../components/home/PipelineScene.astro"
 import PackingScene from "../components/home/PackingScene.astro"
 import InferenceScene from "../components/home/InferenceScene.astro"
 import GetStarted from "../components/home/GetStarted.astro"
+import BenchChart from "../components/inference/BenchChart.astro"
 ---
 
 <Site title="Phobos: tile-based GPU kernel language & LLM inference engine">
@@ -14,6 +15,8 @@ import GetStarted from "../components/home/GetStarted.astro"
   <VisualizerScene />
   <PipelineScene />
   <PackingScene />
-  <InferenceScene />
+  <InferenceScene>
+    <Fragment slot="numbers"><BenchChart compact id="bench-home" /></Fragment>
+  </InferenceScene>
   <GetStarted />
 </Site>

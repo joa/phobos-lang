@@ -1,0 +1,68 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import BandwidthBoundFigure from "./bandwidth-bound.figure"
+import {
+  BALANCE_OPS_PER_BYTE,
+  BANDWIDTH_LABEL,
+  CARD,
+  DECODE_OPS_PER_BYTE,
+  PEAK_TFLOPS_LABEL,
+  PROMPT_OPS_PER_BYTE,
+  PROMPT_TOKENS,
+  Q8_0_BLOCK_BYTES,
+  Q8_0_BLOCK_WEIGHTS,
+  approx,
+} from "./model"
+import { formatRate, loadRuns, modelRows, shortDate } from "../../../lib/bench/load"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-bandwidth-bound" } = Astro.props
+const card = CARD.name.replace(/^NVIDIA\s+(GeForce\s+)?/, "")
+// The Q8_0 model the arithmetic describes, as measured.
+const q8 = modelRows(loadRuns()).find(row => /0\.8B-Q8_0$/i.test(row.model))
+const measured = q8?.tests.tg128?.phobos
+---
+
+<ChartFigure
+  id={id}
+  name="bandwidth-bound"
+  figure={BandwidthBoundFigure}
+  state={{ phase: "decode" }}
+  title="Why decoding is bound by memory bandwidth"
+  desc={`Schematic. Weights stream from VRAM over the memory bus to the card's ${CARD.smCount} SMs. Decoding reads every weight once per token for about ${approx(DECODE_OPS_PER_BYTE)} operations per byte, so the bus is always busy while most SMs wait. A ${PROMPT_TOKENS}-token prompt reuses every weight for about ${approx(PROMPT_OPS_PER_BYTE)} operations per byte, so the SMs are busy and the bus mostly idle. A log scale of operations per byte marks the card's balance point at about ${approx(BALANCE_OPS_PER_BYTE)}.`}
+  legend={["global", "reg", "cost"]}
+  class="fig-tall-readout"
+>
+  <div class="chart-group" role="group" aria-label="Phase">
+    <button type="button" class="chart-btn" data-group="phase" data-value="decode" aria-pressed="true">Decode, 1 token</button>
+    <button type="button" class="chart-btn" data-group="phase" data-value="prompt" aria-pressed="false">Prompt, {PROMPT_TOKENS} tokens</button>
+  </div>
+  <button type="button" class="chart-btn motion-only" data-action="toggle" aria-pressed="false">Pause</button>
+  <Fragment slot="caption">
+    Schematic timing. Q8_0 stores {Q8_0_BLOCK_WEIGHTS} weights in {Q8_0_BLOCK_BYTES} bytes, and a token does one multiply-add per weight. The {card}'s{" "}
+    {PEAK_TFLOPS_LABEL} TFLOP/s fp32 and {BANDWIDTH_LABEL} are from its specifications.
+    {
+      q8 && measured && (
+        <>
+          {" "}
+          Measured on the {card}, Phobos decodes {q8.model} at {formatRate(measured.mean)} tokens/s over 128 tokens ({q8.run.file}, driver {q8.run.driver}, Phobos {q8.run.commit}, {shortDate(q8.run.date)}).
+        </>
+      )
+    }
+  </Fragment>
+</ChartFigure>
+
+<style>
+  :global(.fig-tall-readout .chart-readout) {
+    min-height: 4.5em;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    :global(.motion-only) {
+      display: none;
+    }
+  }
+</style>

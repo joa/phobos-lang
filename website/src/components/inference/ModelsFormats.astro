@@ -1,0 +1,110 @@
+---
+// The tested models from the README and the quantized formats from phobos-gguf/src/quant/, read at build
+// time, beside each other.
+import { formatFamilies, quantFormats, testedModels } from "../../lib/bench/catalog"
+
+const models = testedModels()
+const families = formatFamilies(quantFormats())
+const formatCount = families.reduce((sum, family) => sum + family.formats.length, 0)
+---
+
+<div class="models-formats">
+  <section aria-labelledby="tested-models">
+    <h3 id="tested-models">Tested models</h3>
+    <ul class="mf-list">
+      {
+        models.map(model => (
+          <li>
+            <a href={model.url}>{model.name}</a>
+            {model.note && <span class="mf-note"> {model.note}</span>}
+          </li>
+        ))
+      }
+    </ul>
+  </section>
+  <section aria-labelledby="quant-formats">
+    <h3 id="quant-formats">{formatCount} quantized formats</h3>
+    <dl class="mf-families">
+      {
+        families.map(family => (
+          <div class="mf-family">
+            <dt>{family.family}</dt>
+            <dd>
+              {family.formats.map(format => (
+                <code>{format}</code>
+              ))}
+            </dd>
+          </div>
+        ))
+      }
+    </dl>
+    <p class="mf-aside">
+      One file per format in <code>phobos-gguf/src/quant/</code>. A file can mix formats from tensor to tensor, and
+      activations are quantized to Q8_0 whatever the weight's format.
+    </p>
+  </section>
+</div>
+
+<style>
+  .models-formats {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+    gap: 2rem 3rem;
+    margin-top: 1.5rem;
+  }
+
+  h3 {
+    margin: 0 0 0.75rem;
+    font-size: 1rem;
+  }
+
+  .mf-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .mf-list li {
+    margin: 0;
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--sky-line);
+    font-family: var(--font-mono);
+    font-size: 0.875rem;
+    overflow-wrap: anywhere;
+  }
+
+  .mf-note {
+    color: var(--dust);
+  }
+
+  .mf-families {
+    margin: 0;
+  }
+
+  .mf-family {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: 0.75rem;
+    margin: 0;
+    padding: 0.5rem 0;
+    border-top: 1px solid var(--sky-line);
+  }
+
+  .mf-family dt {
+    color: var(--dust);
+    font-size: 0.875rem;
+  }
+
+  .mf-family dd {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.375rem;
+    margin: 0;
+  }
+
+  .mf-aside {
+    margin-top: 1rem;
+    color: var(--dust);
+    font-size: 0.875rem;
+  }
+</style>
