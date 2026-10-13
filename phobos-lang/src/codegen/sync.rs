@@ -174,8 +174,13 @@ impl<'c> Codegen<'c> {
             arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, tid, zero_i, self.loc),
         )?;
 
+        // The fences make the barrier order memory as well as time: every
+        // block's global writes before it are visible to every block after.
+        // Without them a block may read another's results from a stale cache.
         let then = Block::new(&[]);
+        self.fence_gpu(&then)?;
         self.emit_arrive_and_wait(&then, mem, rank)?;
+        self.fence_gpu(&then)?;
         then.append_operation(scf::r#yield(&[], self.loc));
         let then_region = Region::new();
         then_region.append_block(then);
