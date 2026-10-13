@@ -7,7 +7,7 @@
 // 1-based line numbers in the original source, and `data-line-map` the original
 // line of every shown line, so a visualizer can map its spans onto what is shown.
 import { readFileSync } from "node:fs"
-import { fileURLToPath } from "node:url"
+import { resolve } from "node:path"
 import { Code } from "@astrojs/starlight/components"
 
 interface Props {
@@ -20,7 +20,8 @@ interface Props {
 }
 
 const { file, code, caption } = Astro.props
-const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
+// Builds run from website/; import.meta.url points into the bundle, not the source tree
+const REPO_ROOT = resolve(process.cwd(), "..") + "/"
 const REPO_URL = "https://github.com/joa/phobos-lang"
 
 if (!file === !code) throw new Error("<Kernel> takes exactly one of `file` or `code`")
