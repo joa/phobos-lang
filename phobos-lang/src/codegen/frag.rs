@@ -175,8 +175,9 @@ impl<'c> Codegen<'c> {
     /// The fragments of `fa += f32(dot_t(a, w)) * s1 * s2` for int8 `a` and
     /// `w`, one scale a `[m, 1]` row broadcast and the other `[1, n]`. Each
     /// 8x8 tile's sum stays in i32 over the whole k, and its elements are
-    /// converted, scaled and added to the accumulator in registers.
-    /// Rebinds nothing.
+    /// converted and added as `acc + d * (s1 * s2)` in registers. With the
+    /// scale product independent of the mma, ptxas issues every operand load
+    /// ahead of the first one. Rebinds nothing.
     pub(super) fn frag_dot_scaled_raw(
         &mut self,
         block: &Block<'c>,
@@ -224,34 +225,22 @@ impl<'c> Codegen<'c> {
             }
         }
 
-        // Each scale's value for every slot of the patch: a row scale by
-        // patch row, a column scale by output column.
-        let scale_at = |s: &ImmaOperand<'c>| -> Result<Vec<Value<'c, 'c>>> {
-            let mut by_slot = Vec::with_capacity((fm * fnn * 2) as usize);
-            if is_row(s) {
-                for &row in &lane.rows {
-                    let (mem, at) = self.imma_at(block, s, row, zero)?;
-                    let v = self.load_as(block, mem, &at, self.f32_t)?;
-                    by_slot.extend(std::iter::repeat_n(v, (fnn * 2) as usize));
-                }
-            } else {
-                let mut by_col = Vec::with_capacity((fnn * 2) as usize);
-                for &col in &lane.cols {
-                    for dj in 0..2 {
-                        let off = self.const_index(block, dj)?;
-                        let c = self.addi(block, col, off)?;
-                        let (mem, at) = self.imma_at(block, s, zero, c)?;
-                        by_col.push(self.load_as(block, mem, &at, self.f32_t)?);
-                    }
-                }
-                for _ in 0..fm {
-                    by_slot.extend_from_slice(&by_col);
+        // A column scale's values for the patch's output columns, loaded up
+        // front; a row scale is loaded with its patch row, as qmma_t does.
+        let cols_of = |s: &ImmaOperand<'c>| -> Result<Vec<Value<'c, 'c>>> {
+            let mut by_col = Vec::with_capacity((fnn * 2) as usize);
+            for &col in &lane.cols {
+                for dj in 0..2 {
+                    let off = self.const_index(block, dj)?;
+                    let c = self.addi(block, col, off)?;
+                    let (mem, at) = self.imma_at(block, s, zero, c)?;
+                    by_col.push(self.load_as(block, mem, &at, self.f32_t)?);
                 }
             }
-            Ok(by_slot)
+            Ok(by_col)
         };
-        let first = scale_at(s1)?;
-        let second = scale_at(s2)?;
+        let first_cols = if is_row(s1) { Vec::new() } else { cols_of(s1)? };
+        let second_cols = if is_row(s2) { Vec::new() } else { cols_of(s2)? };
 
         // The magic-constant conversion holds for |sum| < 2^22.
         let small = kk * 128 * 128 < 1 << 22;
@@ -261,6 +250,14 @@ impl<'c> Codegen<'c> {
         let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
         let mut frags = fa.frags.clone();
         for r in 0..fm as usize {
+            let row_of = |s: &ImmaOperand<'c>| -> Result<Option<Value<'c, 'c>>> {
+                if !is_row(s) {
+                    return Ok(None);
+                }
+                let (mem, at) = self.imma_at(block, s, lane.rows[r], zero)?;
+                Ok(Some(self.load_as(block, mem, &at, self.f32_t)?))
+            };
+            let (first_row, second_row) = (row_of(s1)?, row_of(s2)?);
             for c in 0..fnn as usize {
                 let mut sum = empty;
                 for h in 0..steps as usize {
@@ -275,8 +272,10 @@ impl<'c> Codegen<'c> {
                     } else {
                         self.push(block, arith::sitofp(raw, self.f32_t, self.loc))?
                     };
-                    let t = self.push(block, arith::mulf(as_f, first[slot], self.loc))?;
-                    frags[slot] = self.elem_mac(block, self.f32_t, t, second[slot], frags[slot])?;
+                    let first = first_row.unwrap_or_else(|| first_cols[c * 2 + dj]);
+                    let second = second_row.unwrap_or_else(|| second_cols[c * 2 + dj]);
+                    let t = self.push(block, arith::mulf(first, second, self.loc))?;
+                    frags[slot] = self.elem_mac(block, self.f32_t, as_f, t, frags[slot])?;
                 }
             }
         }
