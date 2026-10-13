@@ -13,15 +13,18 @@ use ratatui::widgets::{Block, BorderType, Borders, Paragraph};
 use phobos_base::log::Level;
 use phobos_inference::telemetry::{Phase, Snapshot};
 
-use super::anim::{self, FONT_HEIGHT};
+use super::anim;
 use super::cinema;
+use super::font;
+use super::mark::Part;
 use super::meters;
 use super::splash;
 use super::theme;
 use super::view::View;
 
-/// Rows the wordmark banner needs: the font plus a line of air under it.
-const HEADER_ROWS: u16 = FONT_HEIGHT as u16 + 2;
+/// Rows the banner needs: the font with a line of air above and below, which
+/// is the height the mark beside it is drawn at.
+const HEADER_ROWS: u16 = font::HEIGHT as u16 + 2;
 
 /// Below this many rows the banner becomes a single title line.
 const TALL_ENOUGH: u16 = 26;
@@ -62,7 +65,7 @@ pub fn render(frame: &mut Frame, view: &mut View, snap: &Snapshot) {
     } else {
         frame.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("PHOBOS", theme::accent(theme::GREEN)),
+                Span::styled("Phobos", theme::accent(theme::BRAND_HI)),
                 Span::styled("  inference dashboard", theme::muted()),
             ])),
             rows[0],
@@ -97,67 +100,93 @@ fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     cinema::histogram(frame, snap, columns[1]);
 }
 
-/// The wordmark, with the rain falling around it and a highlight sweeping
-/// across it.
+/// The mark and the wordmark under the night sky, with a highlight sweeping
+/// across both now and then.
 fn header(frame: &mut Frame, view: &mut View, area: Rect) {
-    view.rain.resize(area.width, area.height);
-    let glyphs = anim::block_text("PHOBOS");
-    let mark_width = anim::block_width("PHOBOS") as u16;
-    let left = area.width.saturating_sub(mark_width) / 2;
-    // Keep the rain clear of the wordmark, with a margin.
-    view.rain
-        .clear_lane(left.saturating_sub(3)..(left + mark_width + 3));
-    // The sweep runs a little past both edges.
-    let span = area.width as i64 + 24;
-    let sweep = (view.frame as i64 / 2) % span - 12;
+    const GAP: u16 = 4;
+    let word_width = font::width("Phobos") as u16;
+    view.sky.resize(area.width, area.height);
+    let frame_no = view.frame;
+    // A row short of the banner, the size at which the crater still reads.
+    let mark_rows = area.height.saturating_sub(1);
+    let mark = view.mark(mark_rows);
+    // The mark goes first when there is no room for both.
+    let (mark_width, mark_height) = (mark.width, mark.height);
+    let with_mark = area.width >= mark_width + GAP + word_width + 8;
+    let group = if with_mark {
+        mark_width + GAP + word_width
+    } else {
+        word_width
+    };
+    let left = area.width.saturating_sub(group) / 2;
+    let word_left = if with_mark {
+        left + mark_width + GAP
+    } else {
+        left
+    };
+    // The sweep runs a little past both edges, once every eight seconds.
+    let sweep = (frame_no as i64 % 240) * 2 - 30;
+    let heat = |x: u16| {
+        let distance = (x as i64 - sweep).abs() as f32;
+        (1.0 - distance / 10.0).clamp(0.0, 1.0).powi(2)
+    };
 
-    let mut lines = Vec::with_capacity(area.height as usize);
-    for y in 0..area.height {
-        let mut spans = Vec::with_capacity(area.width as usize);
-        let row = (y as usize).checked_sub(1).and_then(|r| glyphs.get(r));
-        for x in 0..area.width {
-            let lit = row
-                .and_then(|row| {
-                    x.checked_sub(left)
-                        .and_then(|i| row.chars().nth(i as usize))
-                })
-                .is_some_and(|cell| cell == theme::FULL);
-            if lit {
-                // Brightest at the sweep, fading over a few cells either side.
-                let distance = (x as i64 - sweep).abs() as f32;
-                let heat = (1.0 - distance / 14.0).clamp(0.0, 1.0);
-                let color = theme::mix(theme::GREEN_DIM, theme::CYAN, heat.powi(2));
-                spans.push(Span::styled(
-                    theme::FULL.to_string(),
-                    Style::default().fg(color),
-                ));
-            } else if let Some(drop) = view.rain.cell(x, y) {
-                spans.push(drop);
-            } else {
-                spans.push(Span::raw(" "));
+    view.sky
+        .clear_lane(left.saturating_sub(3)..left + group + 3);
+    let lights = view.sky.lights(frame_no);
+    let mark = view.mark(mark_rows);
+    let buf = frame.buffer_mut();
+    for (x, y, glyph, color) in lights {
+        splash::put(buf, area.x + x, area.y + y, glyph, color);
+    }
+
+    if with_mark {
+        let top = area.y + area.height.saturating_sub(mark_height) / 2;
+        let wash = theme::mix(theme::BG, theme::BRAND, 0.08);
+        let outline = theme::mix(theme::BRAND_DIM, theme::TEXT, 0.6);
+        for y in 0..mark_height {
+            for x in 0..mark_width {
+                if mark.inside(x, y) {
+                    splash::bg(buf, area.x + left + x, top + y, wash);
+                }
             }
         }
-        lines.push(Line::from(spans));
+        for stroke in &mark.strokes {
+            let rest = match stroke.part {
+                Part::Crater => theme::BRAND,
+                Part::Body | Part::Pit => outline,
+            };
+            let x = left + stroke.x;
+            let color = theme::mix(rest, theme::BRAND_HI, heat(x));
+            splash::put(buf, area.x + x, top + stroke.y, stroke.glyph, color);
+        }
     }
-    frame.render_widget(Paragraph::new(lines), area);
+
+    let word_top = area.y + area.height.saturating_sub(font::HEIGHT as u16) / 2;
+    for (row, line) in font::render("Phobos").iter().enumerate() {
+        for (col, cell) in line.chars().enumerate() {
+            if cell == ' ' {
+                continue;
+            }
+            let x = word_left + col as u16;
+            let color = theme::mix(theme::BRAND, theme::BRAND_HI, heat(x));
+            splash::put(buf, area.x + x, word_top + row as u16, cell, color);
+        }
+    }
 }
 
 /// The status line: phase, uptime, and totals.
 fn status(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let (label, color) = match snap.phase {
         Phase::Idle => ("IDLE", theme::MUTED),
-        Phase::Prefill => ("PREFILL", theme::CYAN),
-        Phase::Decode => ("DECODE", theme::MAGENTA),
+        Phase::Prefill => ("PREFILL", theme::BRAND),
+        Phase::Decode => ("DECODE", theme::NEBULA),
     };
     // The lamp pulses only while there is work.
     let lamp = if snap.phase == Phase::Idle {
         Style::default().fg(theme::MUTED)
     } else {
-        Style::default().fg(theme::mix(
-            theme::GREEN_FAINT,
-            color,
-            anim::pulse(view.frame, 24),
-        ))
+        Style::default().fg(theme::mix(theme::FAINT, color, anim::pulse(view.frame, 24)))
     };
 
     let mut spans = vec![
@@ -179,7 +208,7 @@ fn status(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
         spans.push(Span::styled("  | ", theme::muted()));
         spans.push(Span::styled(
             format!("http://{listen}"),
-            theme::accent(theme::AMBER),
+            theme::accent(theme::GOLD),
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -254,8 +283,8 @@ fn body(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
 fn model(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let fixed = &snap.fixed;
     let mut lines = vec![
-        field("engine", &fixed.label, theme::GREEN),
-        field("backend", &fixed.backend, theme::CYAN),
+        field("engine", &fixed.label, theme::BRAND_HI),
+        field("backend", &fixed.backend, theme::BRAND),
         field("vocab", &count(fixed.vocab_size as u64), theme::TEXT),
         field("context", &count(fixed.context_limit as u64), theme::TEXT),
     ];
@@ -264,7 +293,7 @@ fn model(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             lines.push(field(
                 "weights",
                 &bytes(footprint.weight_bytes),
-                theme::AMBER,
+                theme::GOLD,
             ));
             if footprint.dense_bytes > 0 {
                 lines.push(field(
@@ -288,7 +317,7 @@ fn model(frame: &mut Frame, snap: &Snapshot, area: Rect) {
         )),
     }
     frame.render_widget(
-        Paragraph::new(lines).block(panel("MODEL", theme::GREEN_DIM, false)),
+        Paragraph::new(lines).block(panel("MODEL", theme::BRAND_DIM, false)),
         area,
     );
 }
@@ -298,7 +327,7 @@ fn activity(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     let mut lines = Vec::new();
     if let Some(active) = snap.active {
         lines.push(Line::from(vec![
-            Span::styled(format!("{} ", theme::CARET), theme::accent(theme::MAGENTA)),
+            Span::styled(format!("{} ", theme::CARET), theme::accent(theme::NEBULA)),
             Span::styled(
                 format!("{} ", count(active.prompt_tokens as u64)),
                 theme::text(),
@@ -312,8 +341,8 @@ fn activity(frame: &mut Frame, snap: &Snapshot, area: Rect) {
     if !snap.recent.is_empty() {
         lines.push(Line::from(vec![
             Span::styled("   prompt    out", theme::muted()),
-            Span::styled("       pp", Style::default().fg(theme::CYAN)),
-            Span::styled("       tg", Style::default().fg(theme::MAGENTA)),
+            Span::styled("       pp", Style::default().fg(theme::BRAND)),
+            Span::styled("       tg", Style::default().fg(theme::NEBULA)),
             Span::styled("   stopped on", theme::muted()),
         ]));
     }
@@ -333,11 +362,11 @@ fn activity(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             ),
             Span::styled(
                 format!("{:>9}", anim::rate_text(request.prefill_rate)),
-                Style::default().fg(theme::CYAN),
+                Style::default().fg(theme::BRAND),
             ),
             Span::styled(
                 format!("{:>9}", anim::rate_text(request.decode_rate)),
-                Style::default().fg(theme::MAGENTA),
+                Style::default().fg(theme::NEBULA),
             ),
             Span::styled(format!("   {}", request.reason), theme::muted()),
         ]));
@@ -349,7 +378,7 @@ fn activity(frame: &mut Frame, snap: &Snapshot, area: Rect) {
         )));
     }
     frame.render_widget(
-        Paragraph::new(lines).block(panel("ACTIVITY", theme::MAGENTA, snap.active.is_some())),
+        Paragraph::new(lines).block(panel("ACTIVITY", theme::NEBULA, snap.active.is_some())),
         area,
     );
 }
@@ -365,32 +394,32 @@ fn log(frame: &mut Frame, snap: &Snapshot, area: Rect) {
             let color = match line.level {
                 Level::Off | Level::Info => theme::TEXT,
                 Level::Debug => theme::MUTED,
-                Level::Trace => theme::GREEN_FAINT,
+                Level::Trace => theme::FAINT,
             };
             Line::from(vec![
                 Span::styled(
                     format!("{:>7.2}s ", line.at.as_secs_f64()),
-                    Style::default().fg(theme::GREEN_FAINT),
+                    Style::default().fg(theme::FAINT),
                 ),
                 Span::styled(line.text.clone(), Style::default().fg(color)),
             ])
         })
         .collect();
     frame.render_widget(
-        Paragraph::new(lines).block(panel("LOG", theme::GREEN_DIM, false)),
+        Paragraph::new(lines).block(panel("LOG", theme::BRAND_DIM, false)),
         area,
     );
 }
 
 fn footer(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let keys = Line::from(vec![
-        Span::styled(" q ", theme::accent(theme::GREEN)),
+        Span::styled(" q ", theme::accent(theme::BRAND_HI)),
         Span::styled("quit    ", theme::muted()),
-        Span::styled(" c ", theme::accent(theme::GREEN)),
+        Span::styled(" c ", theme::accent(theme::BRAND_HI)),
         Span::styled("clear the log    ", theme::muted()),
-        Span::styled(" r ", theme::accent(theme::GREEN)),
+        Span::styled(" r ", theme::accent(theme::BRAND_HI)),
         Span::styled("reset the peaks    ", theme::muted()),
-        Span::styled(" p ", theme::accent(theme::GREEN)),
+        Span::styled(" p ", theme::accent(theme::BRAND_HI)),
         Span::styled("splash", theme::muted()),
     ]);
     frame.render_widget(Paragraph::new(keys), area);
@@ -400,7 +429,7 @@ fn footer(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
         Span::styled(snap.fixed.backend.clone(), theme::muted()),
         Span::styled(
             format!(" {} ", theme::DOT),
-            Style::default().fg(theme::mix(theme::GREEN_FAINT, theme::GREEN, heat)),
+            Style::default().fg(theme::mix(theme::FAINT, theme::BRAND_HI, heat)),
         ),
     ]);
     frame.render_widget(Paragraph::new(tail).alignment(Alignment::Right), area);

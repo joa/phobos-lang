@@ -1,33 +1,40 @@
 // The dashboard's palette and its glyph vocabulary.
 //
-// Colors are RGB rather than the sixteen named ones, so the dashboard looks
-// the same under any terminal theme. Non-ASCII glyphs are written as escapes
-// to keep the source ASCII.
+// The palette is the website's night sky (`website/src/styles/tokens.css`,
+// dark theme): a near-black blue sky, starlight for text, a pale blue brand,
+// a violet nebula and Mars for the warm end. Colors are RGB rather than the
+// sixteen named ones, so the dashboard looks the same under any terminal
+// theme. Non-ASCII glyphs are written as escapes to keep the source ASCII.
 
 use ratatui::style::{Color, Modifier, Style};
 
-/// Near black, faintly green, so the colors do not depend on the terminal's
+/// The night sky, `--sky-0`, so the colors do not depend on the terminal's
 /// background.
-pub const BG: Color = Color::Rgb(8, 12, 10);
+pub const BG: Color = Color::Rgb(5, 7, 15);
 
-/// The primary: a bright phosphor green.
-pub const GREEN: Color = Color::Rgb(57, 255, 106);
-/// The primary, at rest.
-pub const GREEN_DIM: Color = Color::Rgb(31, 138, 76);
-/// The primary, barely lit. What the digital rain fades into.
-pub const GREEN_FAINT: Color = Color::Rgb(18, 58, 34);
+/// The brand blue, `--brand`.
+pub const BRAND: Color = Color::Rgb(106, 184, 255);
+/// The brand lit, `--brand-hi`. The primary for figures and keys.
+pub const BRAND_HI: Color = Color::Rgb(169, 214, 255);
+/// The brand, at rest.
+pub const BRAND_DIM: Color = Color::Rgb(52, 92, 140);
+/// Barely lit, for hints and what an animation fades into.
+pub const FAINT: Color = Color::Rgb(48, 64, 98);
 
-pub const CYAN: Color = Color::Rgb(34, 211, 238);
-pub const MAGENTA: Color = Color::Rgb(255, 47, 191);
-pub const AMBER: Color = Color::Rgb(255, 182, 66);
-pub const RED: Color = Color::Rgb(255, 77, 94);
+/// The nebula violet, `--nebula`.
+pub const NEBULA: Color = Color::Rgb(160, 140, 255);
+/// A gold star, the warm hue between the brand and Mars.
+pub const GOLD: Color = Color::Rgb(255, 198, 107);
+/// Mars, `--mars`.
+pub const MARS: Color = Color::Rgb(255, 138, 107);
 
-/// Body text.
-pub const TEXT: Color = Color::Rgb(200, 247, 212);
-/// Labels and units, quieter than the figures beside them.
-pub const MUTED: Color = Color::Rgb(90, 130, 105);
-/// A panel's edge when nothing is happening in it.
-pub const BORDER: Color = Color::Rgb(31, 59, 42);
+/// Starlight, `--star`. Body text.
+pub const TEXT: Color = Color::Rgb(230, 236, 248);
+/// Dust, `--dust`. Labels and units, quieter than the figures beside them.
+pub const MUTED: Color = Color::Rgb(141, 154, 179);
+/// The sky's hairline, `--sky-line`. A panel's edge when nothing is
+/// happening in it.
+pub const BORDER: Color = Color::Rgb(28, 42, 72);
 
 pub fn text() -> Style {
     Style::default().fg(TEXT)
@@ -52,19 +59,19 @@ pub fn mix(from: Color, to: Color, t: f32) -> Color {
     Color::Rgb(lerp(r1, r2), lerp(g1, g2), lerp(b1, b2))
 }
 
-/// Green while there is room, amber as it runs out, red once it has.
+/// The brand while there is room, gold as it runs out, Mars once it has.
 ///
 /// The thresholds sit below full, since paging starts well before the last
 /// byte is used.
 pub fn pressure(ratio: f64) -> Color {
     match ratio {
-        r if r >= 0.92 => RED,
-        r if r >= 0.78 => AMBER,
-        _ => GREEN,
+        r if r >= 0.92 => MARS,
+        r if r >= 0.78 => GOLD,
+        _ => BRAND_HI,
     }
 }
 
-/// Solid block, used by both bars and the block font.
+/// Solid block, for bars and strips.
 pub const FULL: char = '\u{2588}';
 
 /// Eighth-height blocks, shortest first, for the spark plots.
@@ -94,17 +101,17 @@ mod tests {
 
     #[test]
     fn mixing_lands_on_the_ends() {
-        assert_eq!(mix(GREEN, RED, 0.0), GREEN);
-        assert_eq!(mix(GREEN, RED, 1.0), RED);
+        assert_eq!(mix(BRAND_HI, MARS, 0.0), BRAND_HI);
+        assert_eq!(mix(BRAND_HI, MARS, 1.0), MARS);
         // Out of range is clamped rather than extrapolated.
-        assert_eq!(mix(GREEN, RED, -3.0), GREEN);
-        assert_eq!(mix(GREEN, RED, 9.0), RED);
+        assert_eq!(mix(BRAND_HI, MARS, -3.0), BRAND_HI);
+        assert_eq!(mix(BRAND_HI, MARS, 9.0), MARS);
     }
 
     #[test]
     fn pressure_climbs_through_the_three_colors() {
-        assert_eq!(pressure(0.10), GREEN);
-        assert_eq!(pressure(0.80), AMBER);
-        assert_eq!(pressure(0.99), RED);
+        assert_eq!(pressure(0.10), BRAND_HI);
+        assert_eq!(pressure(0.80), GOLD);
+        assert_eq!(pressure(0.99), MARS);
     }
 }

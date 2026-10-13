@@ -10,7 +10,8 @@ use ratatui::widgets::Paragraph;
 use phobos_inference::BlockKind;
 use phobos_inference::telemetry::{Phase, Snapshot};
 
-use super::anim::{self, FONT_HEIGHT};
+use super::anim;
+use super::font;
 use super::panels::{bytes, count, panel};
 use super::theme;
 use super::view::View;
@@ -18,7 +19,7 @@ use super::view::View;
 /// Device memory as one stacked bar: weights, KV cache, and everything else
 /// in use, all shares of the same total.
 pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
-    let block = panel("MEMORY", theme::AMBER, false);
+    let block = panel("MEMORY", theme::GOLD, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -51,9 +52,9 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
                 let mut spans = vec![Span::styled("card      ", theme::muted())];
                 spans.extend(anim::stacked(
                     &[
-                        (weights, theme::AMBER),
-                        (cache, theme::MAGENTA),
-                        (elsewhere, theme::CYAN),
+                        (weights, theme::GOLD),
+                        (cache, theme::NEBULA),
+                        (elsewhere, theme::BRAND),
                     ],
                     track,
                 ));
@@ -73,7 +74,7 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
 
             let held = snap.fixed.footprint.map(|f| f.weight_bytes).unwrap_or(0);
             lines.push(key(
-                theme::AMBER,
+                theme::GOLD,
                 "weights",
                 if resident {
                     bytes(held)
@@ -83,12 +84,12 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
                 },
             ));
             lines.push(key(
-                theme::MAGENTA,
+                theme::NEBULA,
                 "kv cache",
                 snap.cache_bytes.map(bytes).unwrap_or("idle".to_string()),
             ));
             lines.push(key(
-                theme::CYAN,
+                theme::BRAND,
                 "elsewhere",
                 bytes((elsewhere * total) as u64),
             ));
@@ -96,20 +97,20 @@ pub(super) fn memory(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: 
                 Span::raw("  "),
                 Span::styled(theme::DOT_HOLLOW.to_string(), theme::muted()),
                 Span::styled(format!(" {:<10}", "free"), theme::muted()),
-                Span::styled(bytes(device.free_bytes), theme::accent(theme::GREEN)),
+                Span::styled(bytes(device.free_bytes), theme::accent(theme::BRAND_HI)),
             ]));
             lines.push(Line::from(vec![
                 Span::raw("    "),
                 Span::styled(
                     "scratch, driver, other processes",
-                    Style::default().fg(theme::GREEN_FAINT),
+                    Style::default().fg(theme::FAINT),
                 ),
             ]));
         }
         _ => {
             lines.push(Line::from(Span::styled(
                 "no device to read",
-                theme::accent(theme::AMBER),
+                theme::accent(theme::GOLD),
             )));
             lines.push(Line::from(Span::styled(
                 "a host backend competes with the whole machine",
@@ -188,7 +189,7 @@ fn context(view: &mut View, snap: &Snapshot, track: usize) -> Vec<Line<'static>>
                 Span::raw("          "),
                 Span::styled(
                     count(device.free_bytes / per_token),
-                    theme::accent(theme::GREEN),
+                    theme::accent(theme::BRAND_HI),
                 ),
                 Span::styled(" more fit in what is free", theme::muted()),
             ]));
@@ -197,9 +198,9 @@ fn context(view: &mut View, snap: &Snapshot, track: usize) -> Vec<Line<'static>>
     lines
 }
 
-/// The two rates, each as a block-font figure over a plot of its history.
+/// The two rates, each as a display-font figure over a plot of its history.
 pub(super) fn throughput(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
-    let block = panel("THROUGHPUT", theme::CYAN, snap.phase != Phase::Idle);
+    let block = panel("THROUGHPUT", theme::BRAND, snap.phase != Phase::Idle);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -220,7 +221,7 @@ pub(super) fn throughput(frame: &mut Frame, view: &mut View, snap: &Snapshot, ar
         view.prefill,
         view.best_prefill,
         &snap.prefill_history,
-        theme::CYAN,
+        theme::BRAND,
     );
     rate(
         frame,
@@ -229,7 +230,7 @@ pub(super) fn throughput(frame: &mut Frame, view: &mut View, snap: &Snapshot, ar
         view.decode,
         view.best_decode,
         &snap.decode_history,
-        theme::MAGENTA,
+        theme::NEBULA,
     );
 }
 
@@ -253,13 +254,13 @@ fn rate(
         Span::styled("tok/s", theme::muted()),
         Span::styled(
             format!("   peak {}", anim::rate_text(best)),
-            Style::default().fg(theme::GREEN_FAINT),
+            Style::default().fg(theme::FAINT),
         ),
     ])];
 
-    // The block font when it fits, one bold line otherwise.
-    if area.height as usize >= FONT_HEIGHT + 2 && anim::block_width(&text) <= area.width as usize {
-        for row in anim::block_text(&text) {
+    // The display font when it fits, one bold line otherwise.
+    if area.height as usize >= font::HEIGHT + 2 && font::width(&text) <= area.width as usize {
+        for row in font::render(&text) {
             lines.push(Line::from(Span::styled(row, Style::default().fg(lit))));
         }
     } else {
@@ -272,7 +273,7 @@ fn rate(
     if lines.len() < area.height as usize {
         lines.push(Line::from(Span::styled(
             anim::spark(history, area.width as usize),
-            Style::default().fg(theme::mix(theme::GREEN_FAINT, color, 0.6)),
+            Style::default().fg(theme::mix(theme::FAINT, color, 0.6)),
         )));
     }
     frame.render_widget(Paragraph::new(lines), area);
@@ -284,7 +285,7 @@ fn rate(
 /// colours shows how much a long context costs.
 pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
     let working = snap.phase != Phase::Idle;
-    let block = panel("NETWORK", theme::GREEN, working);
+    let block = panel("NETWORK", theme::BRAND_HI, working);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -302,7 +303,10 @@ pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect
     let attention = arch.count(BlockKind::Attention);
     let recurrent = arch.count(BlockKind::Recurrent);
     let mut lines = vec![Line::from(vec![
-        Span::styled(count(arch.blocks.len() as u64), theme::accent(theme::GREEN)),
+        Span::styled(
+            count(arch.blocks.len() as u64),
+            theme::accent(theme::BRAND_HI),
+        ),
         Span::styled(" blocks    ", theme::muted()),
         Span::styled("d_model ", theme::muted()),
         Span::styled(count(arch.d_model as u64), theme::text()),
@@ -327,9 +331,9 @@ pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect
     lines.push(Line::from(strip(&arch.blocks, inner.width as usize, wash)));
 
     lines.push(Line::from(vec![
-        Span::styled(theme::DOT.to_string(), Style::default().fg(theme::CYAN)),
+        Span::styled(theme::DOT.to_string(), Style::default().fg(theme::BRAND)),
         Span::styled(format!(" attention {attention:<6}"), theme::muted()),
-        Span::styled(theme::DOT.to_string(), Style::default().fg(theme::MAGENTA)),
+        Span::styled(theme::DOT.to_string(), Style::default().fg(theme::NEBULA)),
         Span::styled(format!(" recurrent {recurrent:<6}"), theme::muted()),
         Span::styled(
             if recurrent > 0 {
@@ -337,7 +341,7 @@ pub(super) fn layers(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect
             } else {
                 "every block caches keys and values per position"
             },
-            Style::default().fg(theme::GREEN_FAINT),
+            Style::default().fg(theme::FAINT),
         ),
     ]));
     frame.render_widget(Paragraph::new(lines), inner);
@@ -353,8 +357,8 @@ fn strip(blocks: &[BlockKind], width: usize, wash: f32) -> Vec<Span<'static>> {
         .map(|i| {
             let block = blocks[i * blocks.len() / width];
             let color = match block {
-                BlockKind::Attention => theme::CYAN,
-                BlockKind::Recurrent => theme::MAGENTA,
+                BlockKind::Attention => theme::BRAND,
+                BlockKind::Recurrent => theme::NEBULA,
             };
             Span::styled(
                 theme::FULL.to_string(),
@@ -369,14 +373,14 @@ fn strip(blocks: &[BlockKind], width: usize, wash: f32) -> Vec<Span<'static>> {
 /// The clocks are the card's rated maxima, not live readings. Peak bandwidth
 /// is shown because decode is bound by it.
 pub(super) fn card(frame: &mut Frame, snap: &Snapshot, area: Rect) {
-    let block = panel("CARD", theme::CYAN, false);
+    let block = panel("CARD", theme::BRAND, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
     let Some(card) = snap.fixed.card.as_ref() else {
         frame.render_widget(
             Paragraph::new(vec![
-                Line::from(Span::styled("no card", theme::accent(theme::AMBER))),
+                Line::from(Span::styled("no card", theme::accent(theme::GOLD))),
                 Line::from(Span::styled(
                     "this backend runs on the host",
                     theme::muted(),
@@ -401,13 +405,13 @@ pub(super) fn card(frame: &mut Frame, snap: &Snapshot, area: Rect) {
         driver.push(Span::styled("   ", theme::muted()));
         driver.push(Span::styled(
             format!("sm_{major}{minor}"),
-            theme::accent(theme::GREEN),
+            theme::accent(theme::BRAND_HI),
         ));
     }
 
     frame.render_widget(
         Paragraph::new(vec![
-            Line::from(Span::styled(card.name.clone(), theme::accent(theme::CYAN))),
+            Line::from(Span::styled(card.name.clone(), theme::accent(theme::BRAND))),
             Line::from(driver),
             Line::from(vec![
                 Span::styled(card.multiprocessors.to_string(), theme::text()),
@@ -424,7 +428,7 @@ pub(super) fn card(frame: &mut Frame, snap: &Snapshot, area: Rect) {
                 ),
                 Span::styled(
                     format!("{:.0} GB/s", card.peak_bandwidth() as f64 / 1e9),
-                    theme::accent(theme::MAGENTA),
+                    theme::accent(theme::NEBULA),
                 ),
                 Span::styled(" peak, at its rated clocks", theme::muted()),
             ]),
@@ -452,7 +456,7 @@ fn mhz(khz: u32) -> String {
 ///
 /// Kernels are not shown, since they all compile during the load.
 pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
-    let block = panel("CACHES", theme::GREEN_DIM, false);
+    let block = panel("CACHES", theme::BRAND_DIM, false);
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let width = inner.width as usize;
@@ -463,7 +467,7 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
         rate_of(snap.prompt_reused, snap.prompt_tokens),
         format!(" of {} prompt tokens", count(snap.prompt_tokens)),
         width,
-        theme::GREEN,
+        theme::BRAND_HI,
     )];
 
     let Some(stats) = snap.caches else {
@@ -473,7 +477,7 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
         )));
         lines.push(Line::from(Span::styled(
             "it compiles nothing and pools nothing",
-            Style::default().fg(theme::GREEN_FAINT),
+            Style::default().fg(theme::FAINT),
         )));
         frame.render_widget(Paragraph::new(lines), inner);
         return;
@@ -489,15 +493,12 @@ pub(super) fn caches(frame: &mut Frame, snap: &Snapshot, area: Rect) {
                 count(stats.expert_hits + stats.expert_misses)
             ),
             width,
-            theme::AMBER,
+            theme::GOLD,
         ));
     }
     lines.push(Line::from(vec![
         Span::styled(format!("{:<12}", "buffers"), theme::muted()),
-        Span::styled(
-            bytes(stats.buffer_live_bytes),
-            theme::accent(theme::MAGENTA),
-        ),
+        Span::styled(bytes(stats.buffer_live_bytes), theme::accent(theme::NEBULA)),
         Span::styled(" in use, ", theme::muted()),
         Span::styled(bytes(stats.buffer_idle_bytes), theme::text()),
         Span::styled(" idle", theme::muted()),
@@ -549,7 +550,7 @@ fn hit_rate(
 /// Built and cached kernels are counted separately, which tells a cold start
 /// from a warm one.
 pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
-    let block = panel("LOADING", theme::CYAN, true);
+    let block = panel("LOADING", theme::BRAND, true);
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -558,7 +559,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
             Paragraph::new(vec![
                 Line::from(Span::styled(
                     "reading the model",
-                    theme::accent(theme::CYAN),
+                    theme::accent(theme::BRAND),
                 )),
                 Line::from(Span::styled(
                     "nothing has been compiled yet",
@@ -574,14 +575,14 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
     // Names what is running, not what last finished.
     let mut lines = vec![
         match load.in_flight.as_slice() {
-            [] => Line::from(Span::styled("loading", theme::accent(theme::CYAN))),
+            [] => Line::from(Span::styled("loading", theme::accent(theme::BRAND))),
             [(name, _)] => Line::from(vec![
                 Span::styled("compiling ", theme::muted()),
-                Span::styled(name.clone(), theme::accent(theme::CYAN)),
+                Span::styled(name.clone(), theme::accent(theme::BRAND)),
             ]),
             many => Line::from(vec![
                 Span::styled("lowering ", theme::muted()),
-                Span::styled(count(many.len() as u64), theme::accent(theme::CYAN)),
+                Span::styled(count(many.len() as u64), theme::accent(theme::BRAND)),
                 Span::styled(" kernels at once", theme::muted()),
             ]),
         },
@@ -591,10 +592,10 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
     // A progress bar only for a batch of more than one.
     match load.ratio() {
         Some(ratio) => lines.push(Line::from(vec![
-            Span::styled(anim::bar(ratio, track), Style::default().fg(theme::CYAN)),
+            Span::styled(anim::bar(ratio, track), Style::default().fg(theme::BRAND)),
             Span::styled(
                 format!("  {:>6.2}%", ratio * 100.0),
-                theme::accent(theme::CYAN),
+                theme::accent(theme::BRAND),
             ),
             Span::styled(
                 format!("   {} of {}", load.done, load.total),
@@ -604,7 +605,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
         None => lines.push(Line::from(vec![
             Span::styled(
                 anim::bar(anim::pulse(view.frame, 40) as f64, track),
-                Style::default().fg(theme::GREEN_DIM),
+                Style::default().fg(theme::BRAND_DIM),
             ),
             Span::styled("   one at a time", theme::muted()),
         ])),
@@ -614,7 +615,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
     if let Some((name, waiting)) = load.longest() {
         lines.push(Line::from(vec![
             Span::styled("waiting on ", theme::muted()),
-            Span::styled(name.clone(), theme::accent(theme::AMBER)),
+            Span::styled(name.clone(), theme::accent(theme::GOLD)),
             Span::styled(
                 format!("  {} and counting", super::panels::duration(*waiting)),
                 theme::text(),
@@ -624,11 +625,11 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
 
     lines.push(Line::raw(""));
     lines.push(Line::from(vec![
-        Span::styled(count(load.finished()), theme::accent(theme::GREEN)),
+        Span::styled(count(load.finished()), theme::accent(theme::BRAND_HI)),
         Span::styled(" kernels ready", theme::muted()),
         Span::styled(
             format!("   {} ", count(load.built)),
-            Style::default().fg(theme::AMBER),
+            Style::default().fg(theme::GOLD),
         ),
         Span::styled("built", theme::muted()),
         Span::styled(format!("   {} ", count(load.cached)), theme::text()),
@@ -642,7 +643,7 @@ pub(super) fn loading(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rec
         lines.push(Line::raw(""));
         lines.push(Line::from(Span::styled(
             "a cold start builds every kernel from source; the next one reads them back",
-            Style::default().fg(theme::GREEN_FAINT),
+            Style::default().fg(theme::FAINT),
         )));
     }
     frame.render_widget(Paragraph::new(lines), inner);
