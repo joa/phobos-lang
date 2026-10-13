@@ -1,0 +1,22 @@
+---
+// Dark by default: unlike Starlight's provider, a missing preference means dark,
+// not the OS setting. The front page reads and writes the same storage key.
+---
+
+<script is:inline>
+  window.StarlightThemeProvider = (() => {
+    let storedTheme = null
+    try {
+      storedTheme = localStorage.getItem("starlight-theme")
+    } catch {}
+    const theme = storedTheme === "light" ? "light" : "dark"
+    document.documentElement.dataset.theme = theme
+    return {
+      updatePickers(next = theme) {
+        document.querySelectorAll("phobos-theme-toggle button").forEach((button) => {
+          button.setAttribute("aria-pressed", String(next === "light"))
+        })
+      },
+    }
+  })()
+</script>

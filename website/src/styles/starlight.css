@@ -1,0 +1,44 @@
+/* Starlight's variables mapped onto the Phobos tokens. Dark is Starlight's :root,
+ * light is :root[data-theme="light"]; light-dark() resolves both from one rule. */
+
+:root,
+:root[data-theme="light"] {
+  --sl-font: var(--font-sans);
+  --sl-font-mono: var(--font-mono);
+
+  --sl-color-accent-low: color-mix(in srgb, var(--brand) 22%, var(--sky-0));
+  --sl-color-accent: var(--brand);
+  --sl-color-accent-high: var(--brand-hi);
+
+  --sl-color-white: var(--star);
+  --sl-color-gray-1: color-mix(in srgb, var(--star) 92%, var(--sky-0));
+  --sl-color-gray-2: color-mix(in srgb, var(--star) 80%, var(--sky-0));
+  --sl-color-gray-3: var(--dust);
+  --sl-color-gray-4: color-mix(in srgb, var(--dust) 60%, var(--sky-0));
+  --sl-color-gray-5: var(--sky-line);
+  --sl-color-gray-6: var(--sky-1);
+  --sl-color-gray-7: var(--sky-2);
+  --sl-color-black: var(--sky-0);
+
+  --sl-color-text: color-mix(in srgb, var(--star) 86%, var(--sky-0));
+  --sl-color-bg: var(--sky-0);
+  --sl-color-bg-nav: color-mix(in srgb, var(--sky-0) 82%, transparent);
+  --sl-color-bg-sidebar: var(--sky-0);
+  --sl-color-bg-inline-code: var(--sky-2);
+  --sl-color-hairline-light: var(--sky-line);
+  --sl-color-hairline: var(--sky-line);
+  --sl-color-hairline-shade: var(--sky-0);
+}
+
+header.header {
+  backdrop-filter: blur(10px);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--brand) 35%, transparent);
+}
+
+/* Cross-document view transitions, where the browser has them */
+@view-transition {
+  navigation: auto;
+}

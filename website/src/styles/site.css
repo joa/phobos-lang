@@ -1,0 +1,77 @@
+/* Base styles of the custom (non-Starlight) pages. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--sky-0);
+  color: var(--star);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+  min-height: 100svh;
+  background: var(--sky-0);
+}
+
+a {
+  color: var(--brand);
+}
+
+@view-transition {
+  navigation: auto;
+}
+
+.site-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  height: 3.5rem;
+  padding: 0 max(16px, calc((100vw - 1200px) / 2));
+  background: color-mix(in srgb, var(--sky-0) 70%, transparent);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px solid color-mix(in srgb, var(--sky-line) 60%, transparent);
+}
+
+.site-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--star);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-decoration: none;
+  view-transition-name: site-mark;
+}
+
+.site-mark :global(svg),
+.site-mark svg {
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.site-header nav {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.75rem, 2vw, 1.5rem);
+}
+
+.site-header nav a {
+  color: var(--dust);
+  font-size: 0.9rem;
+  text-decoration: none;
+  transition: color var(--dur-1) var(--ease-out);
+}
+
+.site-header nav a:hover {
+  color: var(--star);
+}

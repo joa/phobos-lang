@@ -1,0 +1,32 @@
+---
+// The shell of the custom pages (front page, full-view visualizer): same tokens,
+// fonts and theme as the Starlight pages, with the site header.
+import "../styles/fonts.css"
+import "../styles/tokens.css"
+import "../styles/site.css"
+import ThemeProvider from "../components/overrides/ThemeProvider.astro"
+import SiteHeader from "../components/SiteHeader.astro"
+
+interface Props {
+  title: string
+  description?: string
+}
+
+const { title, description = "Tile-based GPU kernel language & LLM inference engine" } = Astro.props
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <ThemeProvider />
+  </head>
+  <body>
+    <SiteHeader />
+    <slot />
+  </body>
+</html>

@@ -1,0 +1,14 @@
+---
+import ThemeSelect from "./overrides/ThemeSelect.astro"
+import mark from "../assets/mark.svg?raw"
+---
+
+<header class="site-header">
+  <a class="site-mark" href="/" aria-label="Phobos home"><Fragment set:html={mark} /><span>Phobos</span></a>
+  <nav aria-label="Main">
+    <a href="/docs/">Docs</a>
+    <a href="/inference/">Inference</a>
+    <a href="https://github.com/joa/phobos-lang">GitHub</a>
+    <ThemeSelect />
+  </nav>
+</header>
