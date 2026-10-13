@@ -1,0 +1,144 @@
+---
+// A terminal recording from results/, converted to webm and mp4 with a poster frame in public/media/.
+// It plays, muted and looping, only while at least a third of it is on screen in a visible tab; under
+// prefers-reduced-motion it shows the poster and a play button, and plays only when asked.
+
+interface Props {
+  // The basename in public/media/: <name>.webm, <name>.mp4, <name>-poster.webp.
+  name: string
+  label: string
+  widthPx: number
+  heightPx: number
+}
+
+const { name, label, widthPx, heightPx } = Astro.props
+---
+
+<figure class="recording" data-recording>
+  <div class="recording-frame">
+    <video
+      muted
+      loop
+      playsinline
+      preload="none"
+      width={widthPx}
+      height={heightPx}
+      poster={`/media/${name}-poster.webp`}
+      aria-label={label}
+    >
+      <source src={`/media/${name}.webm`} type="video/webm" />
+      <source src={`/media/${name}.mp4`} type="video/mp4" />
+    </video>
+    <button type="button" class="recording-toggle" aria-pressed="false" hidden>Play</button>
+  </div>
+  <figcaption><slot /></figcaption>
+</figure>
+
+<script>
+  const VISIBLE_RATIO = 0.33
+
+  class Recording {
+    #video: HTMLVideoElement
+    #toggle: HTMLButtonElement
+    #reduced = matchMedia("(prefers-reduced-motion: reduce)")
+    #inView = false
+    #pausedByReader = false
+    #playedByReader = false
+
+    constructor(root: HTMLElement) {
+      this.#video = root.querySelector("video")!
+      this.#toggle = root.querySelector(".recording-toggle")!
+      this.#toggle.hidden = false
+      this.#toggle.addEventListener("click", () => this.#onToggle())
+      this.#reduced.addEventListener("change", () => this.#sync())
+      document.addEventListener("visibilitychange", () => this.#sync())
+      new IntersectionObserver(
+        entries => {
+          const entry = entries[entries.length - 1]
+          this.#inView = entry.isIntersecting && entry.intersectionRatio >= VISIBLE_RATIO - 0.001
+          this.#sync()
+        },
+        { threshold: [0, VISIBLE_RATIO] }
+      ).observe(root)
+    }
+
+    get #wantsPlay(): boolean {
+      if (!this.#inView || document.visibilityState !== "visible") return false
+      if (this.#reduced.matches) return this.#playedByReader
+      return !this.#pausedByReader
+    }
+
+    #onToggle(): void {
+      const playing = !this.#video.paused
+      this.#pausedByReader = playing
+      this.#playedByReader = !playing
+      this.#sync()
+    }
+
+    #sync(): void {
+      if (this.#wantsPlay) {
+        if (this.#video.preload === "none") this.#video.preload = "auto"
+        this.#video.play().catch(() => {})
+      } else {
+        this.#video.pause()
+      }
+      const playing = this.#wantsPlay
+      this.#toggle.textContent = playing ? "Pause" : "Play"
+      this.#toggle.setAttribute("aria-pressed", String(playing))
+    }
+  }
+
+  for (const root of document.querySelectorAll<HTMLElement>("[data-recording]:not([data-live])")) {
+    root.setAttribute("data-live", "")
+    new Recording(root)
+  }
+</script>
+
+<style>
+  .recording {
+    margin: 0;
+  }
+
+  .recording-frame {
+    position: relative;
+    border: 1px solid var(--sky-line);
+    background: var(--sky-1);
+  }
+
+  video {
+    display: block;
+    width: 100%;
+    height: auto;
+  }
+
+  .recording-toggle {
+    position: absolute;
+    right: 0.5rem;
+    bottom: 0.5rem;
+    min-height: 32px;
+    padding: 0 0.75rem;
+    border: 1px solid var(--sky-line);
+    border-radius: 0;
+    background: var(--sky-1);
+    color: var(--star);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+
+  .recording-toggle:hover {
+    border-color: var(--brand);
+  }
+
+  .recording-toggle:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  figcaption {
+    margin-top: 0.75rem;
+    color: var(--dust);
+    font-size: 0.875rem;
+    line-height: 1.5;
+  }
+</style>

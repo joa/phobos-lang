@@ -1,0 +1,46 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import HadamardRotationFigure from "./hadamard-rotation.figure"
+import { FITS, LANE_COUNT, MODEL_BLOCK, MODEL_STAGES, PTQ1_0_BLOCK_BYTES, PTQ1_0_BLOCK_WEIGHTS, STAGE_COUNT } from "./model"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-hadamard-rotation" } = Astro.props
+const errorAsIs = Math.round(FITS.off.fit.error * 100)
+const errorRotated = Math.round(FITS.on.fit.error * 100)
+const zerosAsIs = FITS.off.fit.codes.filter(code => code === 0).length
+---
+
+<ChartFigure
+  id={id}
+  name="hadamard-rotation"
+  figure={HadamardRotationFigure}
+  state={{ rotation: "on" }}
+  title="Rotating before rounding"
+  desc={`Schematic. A row of ${LANE_COUNT} weights with one large outlier is rounded to ternary values, once as it is and once after a Hadamard rotation. As it is, the best scale fits the outlier and ${zerosAsIs} of the ${LANE_COUNT} weights round to zero. The rotation, random sign flips followed by ${STAGE_COUNT} stages of additions and subtractions, spreads the outlier over all ${LANE_COUNT} values, and the rounding error drops from ${errorAsIs} to ${errorRotated} percent.`}
+  legend={["global", "reg", "cost"]}
+  class="fig-tall-readout"
+>
+  <div class="chart-group" role="group" aria-label="Rotation">
+    <button type="button" class="chart-btn" data-group="rotation" data-value="off" aria-pressed="false">Round as is</button>
+    <button type="button" class="chart-btn" data-group="rotation" data-value="on" aria-pressed="true">Rotate, then round</button>
+  </div>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    Schematic: a seeded {LANE_COUNT}-wide toy row with one outlier, rounded with the best ternary scale. PTQ1_0, the
+    format of Ternary-Bonsai, holds {PTQ1_0_BLOCK_WEIGHTS} weights of -1, 0 or +1 and one scale in {PTQ1_0_BLOCK_BYTES} bytes; phobos-gguf rotates the
+    activations in blocks of {MODEL_BLOCK.toLocaleString("en-US")}, {MODEL_STAGES} stages.
+  </Fragment>
+</ChartFigure>
+
+<style>
+  :global(.hr-level) {
+    stroke-dasharray: 2 3;
+  }
+
+  :global(.hr-tick) {
+    stroke-width: 2;
+  }
+</style>

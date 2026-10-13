@@ -1,0 +1,38 @@
+---
+// Two sentences over the benchmark results, every number computed from results/bench*.json.
+import { displayName, testedModels } from "../../lib/bench/catalog"
+import { engineLabel, loadRuns, modelRows, ratioOf } from "../../lib/bench/load"
+
+const rows = modelRows(loadRuns())
+const tested = testedModels()
+const ratios = (test: string) =>
+  rows.flatMap(row => {
+    const ratio = ratioOf(row.tests[test])
+    return ratio === undefined ? [] : [{ row, ratio }]
+  })
+const decode = ratios("tg128")
+const prompt = ratios("pp128")
+const ahead = decode.filter(entry => entry.ratio >= 1)
+const behind = decode.filter(entry => entry.ratio < 1)
+const span = (entries: { ratio: number }[]) => {
+  const values = entries.map(entry => entry.ratio)
+  return `${Math.min(...values).toFixed(2)}x to ${Math.max(...values).toFixed(2)}x`
+}
+const card = [...new Set(rows.map(row => row.run.card.replace(/^NVIDIA\s+(GeForce\s+)?/, "")))].join(", ")
+const behindText = behind
+  .map(({ row }) => `${engineLabel(row.run.otherEngine)} on ${displayName(row.model, tested)}`)
+  .join(" and ")
+---
+
+<p class="bench-summary">
+  On an {card}, Phobos decodes at {span(decode)} the rate of llama.cpp over 128 tokens, and at or above it on{" "}
+  {ahead.length} of {decode.length} models{behind.length > 0 && <>; the faster engine is {behindText}</>}. A 128-token
+  prompt runs at {span(prompt)} the other engine's rate.
+</p>
+
+<style>
+  .bench-summary {
+    max-width: 46rem;
+    text-wrap: pretty;
+  }
+</style>

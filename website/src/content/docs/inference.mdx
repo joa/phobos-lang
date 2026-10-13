@@ -1,7 +1,19 @@
 ---
 title: Inference
 template: splash
-description: LLM inference on Phobos kernels
+description: GGUF models end to end on kernels written in Phobos, served through an OpenAI-compatible API, built for cards with little VRAM.
+hero:
+  title: LLM inference on Phobos kernels
+  tagline: Quantized GGUF models run end to end on kernels written in the language, behind an OpenAI-compatible server. Built and measured on an 8 GB card.
+  actions:
+    - text: Quickstart
+      link: /docs/inference/
+      icon: right-arrow
+    - text: Benchmarks
+      link: "#numbers"
+      variant: minimal
 ---
 
-This page is being written.
+import InferencePage from "../../components/inference/InferencePage.astro"
+
+<InferencePage />

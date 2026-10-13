@@ -1,0 +1,323 @@
+---
+// The body of /inference/: what the engine is, the numbers, the four figures, the token loop, the models
+// and formats, and a quickstart that ends in the inference docs.
+import BenchChart from "./BenchChart.astro"
+import BenchSummary from "./BenchSummary.astro"
+import ModelsFormats from "./ModelsFormats.astro"
+import Recording from "./Recording.astro"
+import BandwidthBound from "../figures/bandwidth-bound/BandwidthBound.astro"
+import QdotMapping from "../figures/qdot-mapping/QdotMapping.astro"
+import ExpertCache from "../figures/expert-cache/ExpertCache.astro"
+import HadamardRotation from "../figures/hadamard-rotation/HadamardRotation.astro"
+import TokenLoop from "../figures/token-loop/TokenLoop.astro"
+import { REPO_URL } from "../../lib/bench/load"
+
+const SERVE_COMMAND = "phobos-cli --gguf minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080"
+const BUILD_COMMAND = "cargo build --release --features cuda -p phobos-cli"
+const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky dark at night?"'
+---
+
+<div class="inference">
+  <section class="inf-section" aria-labelledby="engine">
+    <h2 id="engine">What it is</h2>
+    <div class="inf-split">
+      <ul class="inf-points">
+        <li>
+          <h3>GGUF models on Phobos kernels</h3>
+          <p>
+            <code>phobos-cli</code> loads a GGUF file, picks the forward pass from the architecture it names, and runs
+            every layer on kernels written in Phobos and compiled for the card. Decode fuses a chain of layer stages
+            into one persistent kernel.
+          </p>
+        </li>
+        <li>
+          <h3>An OpenAI-compatible server</h3>
+          <p>
+            <code>--listen</code> serves <code>/v1/chat/completions</code>, <code>/v1/completions</code> and
+            <code>/v1/models</code>, renders conversations and tools with the model's own chat template, streams chat
+            over server-sent events, and puts a dashboard on the terminal.
+          </p>
+        </li>
+        <li>
+          <h3>Made for little VRAM</h3>
+          <p>
+            Written and measured on an 8 GB card, on which two 27B models at under two bits a weight fit with room for
+            their context.
+          </p>
+        </li>
+        <li>
+          <h3>Experts streamed from host memory</h3>
+          <p>
+            A mixture-of-experts model that does not fit keeps a cache of experts on the card and computes the misses
+            on the CPU, with no manual split between the two. The cache gives memory back when another program fills the
+            card, and takes it again once it is free.
+          </p>
+        </li>
+      </ul>
+      <Recording name="phobos-cli" label="phobos-cli starting with --listen and drawing its dashboard" widthPx={640} heightPx={360}>
+        <code>phobos-cli --listen</code>: the splash, then the dashboard with the model, the memory on the card, the
+        network of layers and the log.
+      </Recording>
+    </div>
+  </section>
+
+  <section class="inf-section" aria-labelledby="numbers">
+    <h2 id="numbers">Decode and prefill against llama.cpp</h2>
+    <BenchSummary />
+    <BenchChart />
+    <p class="inf-more">
+      How these runs were measured, the 35B on a replayed coding-agent session, and what happens when another program
+      takes part of the card: <a href="/docs/reference/benchmarks/">Benchmarks</a>. To measure your own card:{" "}
+      <a href="/docs/inference/benchmarking/">Benchmarking</a>.
+    </p>
+  </section>
+
+  <section class="inf-section" aria-labelledby="why">
+    <h2 id="why">Four ideas behind the numbers</h2>
+
+    <div class="inf-figure">
+      <div class="inf-figure-text">
+        <h3>Decode waits on memory</h3>
+        <p>
+          A decode step reads every weight once and does one multiply-add with it. That is about two operations per
+          byte, and the card needs roughly ten times that before its math units, not its memory bus, set the pace. A
+          prompt reuses each weight for every token in it, and the bottleneck flips. Decode kernels are written to
+          keep the bus busy, not the math units.
+        </p>
+      </div>
+      <BandwidthBound />
+    </div>
+
+    <div class="inf-figure">
+      <div class="inf-figure-text">
+        <h3>One warp per output</h3>
+        <p>
+          Every output of a decode matrix-vector product is one row of weights dotted with the activation. Giving each
+          thread its own row scatters a warp's reads over 32 rows. The lanes matvecs give a whole warp one row instead:
+          its 32 lanes read one contiguous run, and <code>sum&lt;over ctx.lane&gt;</code> folds their partial sums
+          in five shuffle stages.
+        </p>
+      </div>
+      <QdotMapping />
+    </div>
+
+    <div class="inf-figure">
+      <div class="inf-figure-text">
+        <h3>A model that does not fit</h3>
+        <p>
+          Qwen3.6-35B-A3B routes every token to 8 of 256 experts per layer, and its experts alone do not fit on the
+          card. Phobos keeps the experts in host memory and a cache of them on the card, least recently
+          used out first. On a decode step the CPU computes the misses straight from host memory while the card runs
+          the hits; a prompt copies its misses over PCIe.
+        </p>
+      </div>
+      <ExpertCache />
+    </div>
+
+    <div class="inf-figure">
+      <div class="inf-figure-text">
+        <h3>Rotate before rounding</h3>
+        <p>
+          Ternary weights share one scale per block, so one outlier can ruin it: the best scale fits the outlier and
+          the small weights round to zero. A Hadamard rotation spreads the outlier over the block before rounding. The
+          activations get the same rotation at run time, so the product does not change, and one rotation serves every
+          projection that reads the same input.
+        </p>
+      </div>
+      <HadamardRotation />
+    </div>
+  </section>
+
+  <section class="inf-section" aria-labelledby="loop">
+    <h2 id="loop">One token at a time</h2>
+    <div class="inf-split is-figure">
+      <p>
+        Decoding is a loop: the tokenizer turns the prompt into tokens, the layers turn the last token into logits,
+        the sampler picks the next token, and that token streams out and goes back in. Every pass reads all the
+        weights the token needs from the card's memory, which is why the ideas above matter.
+      </p>
+      <TokenLoop id="fig-inference-token-loop" />
+    </div>
+  </section>
+
+  <section class="inf-section" aria-labelledby="models">
+    <h2 id="models">Models and formats</h2>
+    <p>
+      The architectures are <code>llama</code>, <code>qwen35</code>, <code>qwen35moe</code> and <code>glm4</code>.
+      These files have been checked against llama.cpp, token for token where greedy decoding is stable. Every format
+      below decodes on the card; see <a href="/docs/inference/models-and-formats/">Models and formats</a> for what each
+      architecture covers.
+    </p>
+    <ModelsFormats />
+  </section>
+
+  <section class="inf-section" aria-labelledby="quickstart">
+    <h2 id="quickstart">Quickstart</h2>
+    <ol class="inf-steps">
+      <li>
+        <h3>Get the binary</h3>
+        <p>
+          Download a <a href={`${REPO_URL}/releases/latest`}>release</a> and keep <code>kernel-cache/</code> beside the
+          binaries, or build from a checkout:
+        </p>
+        <pre><code>{BUILD_COMMAND}</code></pre>
+      </li>
+      <li>
+        <h3>Ask a question</h3>
+        <p>
+          Download <a href="https://huggingface.co/Abiray/MiniCPM5-1B-GGUF">MiniCPM5-1B-Q8_0</a> and pass a prompt.
+          Without one, <code>phobos-cli</code> starts a REPL.
+        </p>
+        <pre><code>{PROMPT_COMMAND}</code></pre>
+      </li>
+      <li>
+        <h3>Serve it</h3>
+        <p>Point any OpenAI client at <code>http://127.0.0.1:8080/v1</code>.</p>
+        <pre><code>{SERVE_COMMAND}</code></pre>
+      </li>
+    </ol>
+    <ul class="inf-links">
+      <li><a href="/docs/inference/">Quickstart</a></li>
+      <li><a href="/docs/inference/models-and-formats/">Models and formats</a></li>
+      <li><a href="/docs/inference/serving/">Serving</a></li>
+      <li><a href="/docs/inference/sampling/">Sampling</a></li>
+      <li><a href="/docs/inference/benchmarking/">Benchmarking</a></li>
+      <li><a href="/docs/inference/kernel-cache/">Kernel cache</a></li>
+      <li><a href="/docs/inference/troubleshooting/">Troubleshooting</a></li>
+    </ul>
+  </section>
+</div>
+
+<style>
+  .inference {
+    display: grid;
+    gap: clamp(3.5rem, 8vw, 6rem);
+    margin-top: 1rem;
+  }
+
+  .inf-section > :global(* + *) {
+    margin-top: 1rem;
+  }
+
+  .inf-section h2 {
+    font-size: clamp(1.5rem, 3vw, 2rem);
+  }
+
+  .inf-section h3 {
+    font-size: 1.0625rem;
+  }
+
+  .inf-split {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: 2rem 3rem;
+    align-items: start;
+    margin-top: 1.5rem;
+  }
+
+  .inf-points {
+    display: grid;
+    gap: 1.25rem;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .inf-points li {
+    margin: 0;
+  }
+
+  .inf-points h3 {
+    margin: 0 0 0.375rem;
+  }
+
+  .inf-points p {
+    margin: 0;
+    color: var(--dust);
+  }
+
+  .inf-more {
+    color: var(--dust);
+    font-size: 0.9375rem;
+  }
+
+  .inf-figure {
+    margin-top: 3rem;
+  }
+
+  .inf-figure-text {
+    max-width: 46rem;
+  }
+
+  .inf-figure-text p {
+    margin-top: 0.5rem;
+  }
+
+  .inf-figure :global(.chart) {
+    margin-top: 1.25rem;
+  }
+
+  .inf-split.is-figure {
+    grid-template-columns: minmax(0, 4fr) minmax(0, 8fr);
+  }
+
+  .inf-split.is-figure :global(.chart) {
+    margin: 0;
+  }
+
+  .inf-steps {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 1.5rem 2rem;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .inf-steps li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    min-width: 0;
+    margin: 0;
+    padding-top: 1rem;
+    border-top: 1px solid var(--sky-line);
+  }
+
+  .inf-steps h3,
+  .inf-steps p {
+    margin: 0;
+  }
+
+  .inf-steps pre {
+    margin: auto 0 0;
+    padding: 0.75rem;
+    overflow-x: auto;
+    border: 1px solid var(--sky-line);
+    background: var(--sky-1);
+    font-size: 0.8125rem;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .inf-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    margin: 1.5rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .inf-links li {
+    margin: 0;
+  }
+
+  @media (max-width: 900px) {
+    .inf-split,
+    .inf-split.is-figure,
+    .inf-steps {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>
