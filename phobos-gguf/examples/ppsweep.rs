@@ -220,7 +220,7 @@ fn main() -> Result<()> {
         let forms = [("q8_mma", SRC_MMA, TILES), ("q8_mma", SRC_MMA, QTILES), ("q8_qmma", SRC_QMMA, QTILES)];
         for (name, source, tiles) in forms {
             for &(tm, tn, block) in tiles {
-                let aligned = format!("@aligned(M = {tm}, N = {tn})");
+                let aligned = format!("@aligned(M = {tm}, N = {tn}, K = 32)");
                 // A tile whose accumulator does not fit in shared memory fails
                 // to build, which keeps `q8_mma`'s tile small.
                 let Ok(module) = compile(
