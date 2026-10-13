@@ -1,0 +1,398 @@
+---
+// Scene 4: what the compiler gets out of the card. The kernel benchmark against cuBLAS from
+// results/results.csv, then six things the compiler does on its own, each with one number read from the
+// committed traces, the CSV or the source, and a small looping cue drawn from the same data.
+import KernelBars from "./compiler-numbers/KernelBars.astro"
+import { barriers, compilerFacts, configCount, placement, searchSpace, supportedChips } from "./compiler-numbers/facts"
+import {
+  barrierCue,
+  chipCue,
+  CUE_HEIGHT,
+  CUE_PERIOD_MS,
+  CUE_WIDTH,
+  pipelineCue,
+  placementCue,
+  searchCue,
+  tensorCoreCue,
+  type Cue,
+} from "./compiler-numbers/cues"
+import { cublasRatio, formatPercent, kernelBench, loadKernelResults } from "../../lib/bench/kernels"
+
+const results = loadKernelResults()
+const sgemm = formatPercent(cublasRatio(kernelBench(results, "gemm_fp32"))!)
+const facts = compilerFacts(results)
+const place = placement()
+const gemmSource = place.trace.source.text
+const cues: Record<string, Cue> = {
+  placement: placementCue("cn-place", place),
+  barriers: barrierCue(barriers()),
+  pipeline: pipelineCue(),
+  tensorcore: tensorCoreCue(),
+  autotune: searchCue(configCount(searchSpace(gemmSource))),
+  chips: chipCue(supportedChips()),
+}
+const keyframes = Object.values(cues)
+  .map(cue => cue.css)
+  .filter(Boolean)
+  .join("\n")
+---
+
+<section class="scene kernels" id="kernels" aria-labelledby="kernels-title">
+  <div class="wrap">
+    <div class="scene-head">
+      <h2 class="scene-title" id="kernels-title">Measured against cuBLAS</h2>
+      <p class="scene-intro">
+        Each bundled kernel is autotuned and timed beside cuBLAS on the same card, in the same run. The f32 gemm runs at
+        {sgemm} of <code>cublasSgemm_v2</code>.
+      </p>
+    </div>
+
+    <KernelBars id="kernels-home" />
+
+    <div class="cn" style={`--cn-period: ${CUE_PERIOD_MS}ms`}>
+      <h3 class="cn-title">What the compiler does on its own</h3>
+      <ul class="cn-facts">
+        {
+          facts.map(fact => (
+            <li class="cn-fact">
+              <svg
+                class={`cn-cue is-${fact.id}`}
+                viewBox={`0 0 ${CUE_WIDTH} ${CUE_HEIGHT}`}
+                aria-hidden="true"
+                focusable="false"
+              >
+                <Fragment set:html={cues[fact.id].markup} />
+              </svg>
+              <p class="cn-label">{fact.label}</p>
+              <p class="cn-figure">{fact.figure}</p>
+              <p class="cn-text">{fact.text}</p>
+              <a class="cn-link" href={fact.href}>
+                {fact.linkText}
+              </a>
+            </li>
+          ))
+        }
+      </ul>
+      <p class="cn-source">
+        Tile, barrier and copy counts are from the committed compiler traces (commit {place.trace.compiler.commit}, small
+        problem sizes); the speed-up is from the benchmark above.
+      </p>
+    </div>
+  </div>
+</section>
+
+<style is:inline set:html={keyframes}></style>
+
+<script>
+  // Cues move only while a third of the facts is on screen, and never under reduced motion.
+  const reduced = matchMedia("(prefers-reduced-motion: reduce)")
+  for (const root of document.querySelectorAll<HTMLElement>(".cn")) {
+    let visible = false
+    const apply = () => {
+      if (visible && !reduced.matches) root.dataset.live = "motion"
+      else delete root.dataset.live
+    }
+    new IntersectionObserver(
+      entries => {
+        visible = entries.some(entry => entry.isIntersecting)
+        apply()
+      },
+      { threshold: 0.3 }
+    ).observe(root.querySelector(".cn-facts") ?? root)
+    reduced.addEventListener("change", apply)
+  }
+</script>
+
+<style>
+  .cn {
+    margin-top: clamp(3rem, 6vw, 4.5rem);
+  }
+
+  .cn-title {
+    font-size: 1.1875rem;
+  }
+
+  .cn-facts {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 2.25rem var(--grid-gap);
+    margin: 1.5rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .cn-fact {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding-top: 1rem;
+    border-top: 1px solid var(--sky-line);
+  }
+
+  .cn-cue {
+    display: block;
+    width: 100%;
+    max-width: 15rem;
+    height: auto;
+    margin-bottom: 0.875rem;
+    overflow: visible;
+  }
+
+  .cn-label {
+    margin: 0;
+    color: var(--dust);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+  }
+
+  .cn-figure {
+    margin: 0.25rem 0 0;
+    color: var(--star);
+    font-size: 1.1875rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.35;
+  }
+
+  .cn-text {
+    margin: 0.5rem 0 0;
+    color: var(--dust);
+    font-size: 0.875rem;
+    line-height: 1.55;
+    text-wrap: pretty;
+  }
+
+  .cn-link {
+    margin-top: 0.625rem;
+    font-size: 0.875rem;
+  }
+
+  .cn-source {
+    max-width: 52rem;
+    margin: 2rem 0 0;
+    color: var(--dust);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+  }
+
+  /* Cue strokes and fills: shared memory in nebula, global in brand, the rest dust */
+
+  .cn-cue :global(.cn-axis) {
+    stroke: var(--sky-line);
+    stroke-width: 1;
+  }
+
+  .cn-cue :global(.cn-sweep) {
+    stroke: var(--star);
+    stroke-width: 1;
+    opacity: 0;
+  }
+
+  .cn-cue :global(.cn-tile) {
+    fill: var(--nebula);
+    fill-opacity: 0.3;
+    stroke: var(--nebula);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .cn-cue :global(.cn-barrier) {
+    stroke-width: 1.5;
+  }
+
+  .cn-cue :global(.cn-barrier.is-kept) {
+    stroke: var(--nebula);
+  }
+
+  .cn-cue :global(.cn-barrier.is-elided) {
+    stroke: var(--dust);
+    stroke-dasharray: 2 3;
+    opacity: 0.6;
+  }
+
+  .cn-cue :global(.cn-slot) {
+    fill: none;
+    stroke: var(--nebula);
+    stroke-width: 1;
+  }
+
+  .cn-cue :global(.cn-fill) {
+    fill: var(--brand-fill-on);
+    transform-box: fill-box;
+    transform-origin: bottom;
+  }
+
+  .cn-cue :global(.cn-fill.is-slot-1) {
+    transform: scaleY(0.5);
+  }
+
+  .cn-cue :global(.cn-frag) {
+    fill: var(--brand-fill);
+    stroke: color-mix(in srgb, var(--brand) 55%, transparent);
+    stroke-width: 1;
+  }
+
+  .cn-cue :global(.cn-config) {
+    fill: var(--dust);
+    opacity: 0.6;
+  }
+
+  .cn-cue :global(.cn-chip) {
+    fill: var(--sky-0);
+    stroke: var(--brand);
+    stroke-width: 1.3;
+  }
+
+  .cn-cue :global(.cn-chip-name) {
+    fill: var(--dust);
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+
+  /* Motion, only while live: one period for every cue */
+
+  .cn[data-live="motion"] :global(.cn-sweep) {
+    animation: cn-sweep var(--cn-period) linear infinite;
+  }
+
+  .cn[data-live="motion"] :global(.cn-tile) {
+    animation-duration: var(--cn-period);
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+
+  .cn[data-live="motion"] :global(.cn-barrier.is-kept) {
+    animation: cn-pulse var(--cn-period) var(--ease-out) infinite backwards;
+  }
+
+  .cn[data-live="motion"] :global(.cn-fill) {
+    animation: cn-stage calc(var(--cn-period) / 2) var(--ease-in-out) infinite;
+  }
+
+  .cn[data-live="motion"] :global(.cn-fill.is-slot-1) {
+    animation-delay: calc(var(--cn-period) / -4);
+  }
+
+  .cn[data-live="motion"] :global(.cn-frag) {
+    animation: cn-frag calc(var(--cn-period) / 2) var(--ease-out) infinite backwards;
+  }
+
+  .cn[data-live="motion"] :global(.cn-config) {
+    animation: cn-visit var(--cn-period) var(--ease-out) infinite backwards;
+  }
+
+  .cn[data-live="motion"] :global(.cn-chip) {
+    animation: cn-warm var(--cn-period) var(--ease-out) infinite backwards;
+  }
+
+  @keyframes cn-sweep {
+    0%,
+    5% {
+      transform: translateX(0);
+      opacity: 0;
+    }
+    8%,
+    82% {
+      opacity: 0.7;
+    }
+    85% {
+      transform: translateX(184px);
+      opacity: 0;
+    }
+    100% {
+      transform: translateX(184px);
+      opacity: 0;
+    }
+  }
+
+  @keyframes cn-pulse {
+    0% {
+      stroke-width: 1.5;
+      stroke: var(--nebula);
+    }
+    3% {
+      stroke-width: 3.5;
+      stroke: var(--star);
+    }
+    12%,
+    100% {
+      stroke-width: 1.5;
+      stroke: var(--nebula);
+    }
+  }
+
+  /* One slot fills while the other drains; a half period apart */
+  @keyframes cn-stage {
+    0% {
+      transform: scaleY(0);
+      fill: var(--brand-fill-on);
+    }
+    45% {
+      transform: scaleY(1);
+      fill: var(--brand-fill-on);
+    }
+    55% {
+      transform: scaleY(1);
+      fill: var(--nebula-fill-on);
+    }
+    100% {
+      transform: scaleY(0);
+      fill: var(--nebula-fill);
+    }
+  }
+
+  @keyframes cn-frag {
+    0%,
+    100% {
+      fill: var(--brand-fill);
+    }
+    12% {
+      fill: color-mix(in srgb, var(--brand) 55%, transparent);
+    }
+    40% {
+      fill: var(--brand-fill);
+    }
+  }
+
+  @keyframes cn-visit {
+    0% {
+      fill: var(--dust);
+      opacity: 0.6;
+    }
+    2% {
+      fill: var(--brand);
+      opacity: 1;
+    }
+    30%,
+    100% {
+      fill: var(--dust);
+      opacity: 0.6;
+    }
+  }
+
+  @keyframes cn-warm {
+    0% {
+      fill: var(--sky-0);
+    }
+    4%,
+    60% {
+      fill: var(--brand);
+    }
+    80%,
+    100% {
+      fill: var(--sky-0);
+    }
+  }
+
+  @media (max-width: 1100px) {
+    .cn-facts {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+
+  @media (max-width: 620px) {
+    .cn-facts {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

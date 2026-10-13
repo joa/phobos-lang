@@ -6,11 +6,14 @@ sidebar:
 ---
 
 import Kernel from "../../../../components/Kernel.astro"
+import KernelResult from "../../../../components/home/compiler-numbers/KernelResult.astro"
 
 Tensor cores are units on NVIDIA GPUs since Volta that multiply small matrix
 fragments in one instruction, at a much higher rate than ordinary
 multiply-adds. This kernel is the [f32 gemm](/docs/examples/gemm-fp32/) with
 one attribute added, `@tensorcore`, and a different range for `TILE_K`.
+
+<KernelResult bench="gemm_fp16tc_fp32acc" />
 
 <Kernel file="examples/gemm_fp16tc_fp32acc.ph" />
 

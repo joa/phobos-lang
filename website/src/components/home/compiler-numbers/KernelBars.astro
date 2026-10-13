@@ -1,0 +1,310 @@
+---
+// The kernel benchmark, Phobos against cuBLAS, one row per kernel from results/results.csv. A row's track is
+// the peak phobos-kbench derives for its precision, so a bar's length is its share of that peak and the
+// two bars of a row share one scale. saxpy is memory-bound and drawn in GB/s against the faster of the two.
+// cuBLAS gets a bar only where it ran at the kernel's own precision.
+import {
+  bandwidthGBs,
+  cublasRatio,
+  formatGflops,
+  formatPercent,
+  loadKernelResults,
+  precisionLabel,
+  type KernelBench,
+  type KernelMeasure,
+} from "../../../lib/bench/kernels"
+import { REPO_URL, shortDate } from "../../../lib/bench/load"
+
+interface Props {
+  id?: string
+}
+
+const { id = "kernels" } = Astro.props
+const results = loadKernelResults()
+
+interface Bar {
+  impl: "phobos" | "cublas"
+  widthPercent: number
+  value: string
+  share: string
+}
+
+interface Row {
+  bench: KernelBench
+  headline: string
+  bars: Bar[]
+  aside?: string
+  scale: string
+  label: string
+}
+
+const gbs = (value: number) => `${Math.round(value)} GB/s`
+
+function rowOf(bench: KernelBench): Row {
+  const ratio = cublasRatio(bench)
+  const bandwidth = bench.bytesPerFlop !== undefined
+  const measures: [Bar["impl"], KernelMeasure][] = [["phobos", bench.phobos]]
+  if (bench.cublas && bench.comparable) measures.push(["cublas", bench.cublas])
+
+  let bars: Bar[]
+  let scale: string
+  if (bandwidth) {
+    const rates = measures.map(([, measure]) => bandwidthGBs(bench, measure)!)
+    const top = Math.max(...rates)
+    bars = measures.map(([impl], index) => ({
+      impl,
+      widthPercent: (rates[index] / top) * 100,
+      value: gbs(rates[index]),
+      share: "",
+    }))
+    scale = "memory-bound, in GB/s"
+  } else {
+    bars = measures.map(([impl, measure]) => ({
+      impl,
+      widthPercent: measure.pctOfPeak,
+      value: formatGflops(measure.gflops),
+      share: `${Math.round(measure.pctOfPeak)}%`,
+    }))
+    scale = `${precisionLabel(bench.phobos.precision)}, peak ${formatGflops(bench.phobos.peakGflops)}`
+  }
+
+  let headline: string
+  let aside: string | undefined
+  if (ratio !== undefined) {
+    headline = `${formatPercent(ratio)} of cuBLAS`
+  } else if (bench.cublas) {
+    headline = "no like-for-like cuBLAS"
+    aside = `cuBLAS in this run is ${bench.cublasCall} in f32 on CUDA cores, ${formatGflops(bench.cublas.gflops)}: another precision, so no bar`
+  } else {
+    headline = "no cuBLAS counterpart"
+  }
+
+  const parts = [bench.size, scale]
+  const spoken = bars.map(bar => `${bar.impl === "phobos" ? "Phobos" : "cuBLAS"} ${bar.value}${bar.share ? `, ${bar.share} of peak` : ""}`)
+  const label = [...parts, ...spoken, headline, ...(aside ? [aside] : [])].join("; ")
+  return { bench, headline, bars, aside, scale, label }
+}
+
+const rows = results.benches.map(rowOf)
+const cublasCalls = [...new Set(results.benches.filter(bench => bench.comparable).map(bench => bench.cublasCall))]
+---
+
+<div class="kb-wrap">
+  <figure class="kb" id={id} aria-labelledby={`${id}-title`}>
+    <figcaption class="kb-head">
+      <p class="kb-title" id={`${id}-title`}>Kernel throughput against cuBLAS, higher is better</p>
+      <p class="kb-meta">
+        {results.card}, one <a href="/docs/getting-started/compile-and-benchmark/">phobos-kbench</a> run, each kernel
+        autotuned, <a href={`${REPO_URL}/blob/main/${results.file}`}>{results.file}</a> committed {shortDate(results.date)}
+      </p>
+      <ul class="kb-legend" aria-label="Legend">
+        <li class="kb-key is-phobos">Phobos</li>
+        <li class="kb-key is-cublas">cuBLAS ({cublasCalls.join(", ")})</li>
+      </ul>
+    </figcaption>
+
+    <div class="kb-rows">
+      {
+        rows.map(row => (
+          <div class="kb-row" role="group" aria-label={row.bench.label}>
+            <div class="kb-name">
+              {row.bench.example ? <a href={row.bench.example}>{row.bench.label}</a> : <span>{row.bench.label}</span>}
+              <span class="kb-size">
+                {row.bench.size}, {row.scale}
+              </span>
+            </div>
+            <div class="kb-plot" role="img" aria-label={row.label}>
+              <span class:list={["kb-headline", { "is-quiet": !row.bench.comparable }]} aria-hidden="true">{row.headline}</span>
+              {row.bars.map(bar => (
+                <span class="kb-bar-row" aria-hidden="true">
+                  <span class="kb-track">
+                    <span class={`kb-bar is-${bar.impl}`} style={`width: ${bar.widthPercent.toFixed(1)}%`} />
+                  </span>
+                  <span class="kb-value">
+                    {bar.value}
+                    {bar.share && <span class="kb-share">, {bar.share}<span class="kb-of-peak"> of peak</span></span>}
+                  </span>
+                </span>
+              ))}
+              {row.aside && <span class="kb-aside" aria-hidden="true">{row.aside}</span>}
+            </div>
+          </div>
+        ))
+      }
+    </div>
+
+    <p class="kb-note">
+      A track is the card's peak for the kernel's precision as phobos-kbench derives it from SM count and clock, so a
+      bar's length is its share of that peak; saxpy's track is the faster of its two rates. The flash attention kernels carry <code>@tensorcore</code> and run their
+      products on tensor cores where the tile shapes qualify; phobos-kbench rates the f32 one against the f32 peak.
+      Measured once per kernel, so there are no error bars.
+    </p>
+  </figure>
+</div>
+
+<style>
+  .kb-wrap {
+    container: kb / inline-size;
+  }
+
+  .kb {
+    --series-phobos: var(--brand);
+    margin: 0;
+    font-family: var(--font-mono);
+    color: var(--star);
+  }
+
+  .kb-head {
+    display: grid;
+    gap: 0.375rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .kb-title {
+    margin: 0;
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .kb-meta,
+  .kb-size,
+  .kb-legend,
+  .kb-value,
+  .kb-aside {
+    color: var(--dust);
+    font-size: 0.75rem;
+    line-height: 1.5;
+  }
+
+  .kb-meta {
+    margin: 0;
+  }
+
+  .kb-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1.25rem;
+    margin: 0.25rem 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .kb-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  .kb-key::before {
+    content: "";
+    width: 1rem;
+    height: 6px;
+    background: var(--series-phobos);
+  }
+
+  .kb-key.is-cublas::before {
+    background: var(--series-cublas);
+  }
+
+  .kb-row {
+    display: grid;
+    grid-template-columns: minmax(12rem, 1fr) minmax(0, 1.6fr);
+    column-gap: 2rem;
+    align-items: start;
+    padding-block: 0.875rem;
+    border-top: 1px solid var(--sky-line);
+  }
+
+  .kb-name {
+    display: grid;
+    gap: 0.25rem;
+    min-width: 0;
+    font-size: 0.8125rem;
+  }
+
+  .kb-name a {
+    color: var(--star);
+    text-decoration-color: var(--sky-line);
+    text-underline-offset: 0.2em;
+  }
+
+  .kb-name a:hover {
+    text-decoration-color: var(--brand);
+  }
+
+  .kb-plot {
+    display: grid;
+    row-gap: 0.3125rem;
+    min-width: 0;
+  }
+
+  .kb-headline {
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .kb-headline.is-quiet {
+    color: var(--dust);
+  }
+
+  .kb-bar-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 12rem;
+    align-items: center;
+    gap: 0.75rem;
+  }
+
+  /* The track is the peak: a hairline to its end, so an empty stretch reads as headroom */
+  .kb-track {
+    position: relative;
+    height: 8px;
+    background: linear-gradient(var(--sky-line), var(--sky-line)) left center / 100% 1px no-repeat;
+    border-right: 1px solid var(--sky-line);
+  }
+
+  .kb-bar {
+    display: block;
+    height: 100%;
+    background: var(--series-phobos);
+  }
+
+  .kb-bar.is-cublas {
+    background: var(--series-cublas);
+  }
+
+  .kb-value {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .kb-aside {
+    max-width: 34rem;
+    font-family: var(--font-sans);
+  }
+
+  .kb-note {
+    max-width: 52rem;
+    margin: 1rem 0 0;
+    color: var(--dust);
+    font-family: var(--font-sans);
+    font-size: 0.8125rem;
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+
+  @container kb (width < 640px) {
+    .kb-row {
+      grid-template-columns: minmax(0, 1fr);
+      row-gap: 0.5rem;
+    }
+
+    .kb-bar-row {
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .kb-of-peak {
+      display: none;
+    }
+  }
+</style>
