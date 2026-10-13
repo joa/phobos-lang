@@ -1,0 +1,505 @@
+/* Figures drawn as a star chart: a dotted graticule plate with registration ticks, 1-unit hairlines
+ * ending in dots, square corners, star packets, mono labels.
+ *
+ * Legend by memory space. A space class sets --space; the state classes read it, so a figure that sets
+ * no space draws in --brand.
+ *   .sp-global  --brand    global memory
+ *   .sp-shared  --nebula   shared memory
+ *   .sp-reg     --star     registers, a thread's own values
+ *   .sp-cost    --mars     cost: masked lanes, extra lines, a barrier wait (always dashed too)
+ * States: .is-on (active, in its space's hue), .is-hot (look here), .is-warn (cost, --mars, dashed),
+ * .is-idle (dimmed), .is-hidden. No class is the resting state: --sky-line hairlines.
+ * JS never writes a color: every visual state is a class. */
+
+@property --sweep {
+  syntax: "<percentage>";
+  inherits: false;
+  initial-value: 0%;
+}
+
+.chart {
+  --space: var(--brand);
+  --space-fill: var(--brand-fill);
+  --space-fill-on: var(--brand-fill-on);
+  --glow-strength: 1;
+  container: chart / inline-size;
+  margin: 1.5rem 0;
+}
+
+:root[data-theme="light"] .chart {
+  --glow-strength: 0.55;
+}
+
+.sp-global {
+  --space: var(--brand);
+  --space-fill: var(--brand-fill);
+  --space-fill-on: var(--brand-fill-on);
+}
+
+.sp-shared {
+  --space: var(--nebula);
+  --space-fill: var(--nebula-fill);
+  --space-fill-on: var(--nebula-fill-on);
+}
+
+.sp-reg {
+  --space: var(--star);
+  --space-fill: color-mix(in srgb, var(--star) 7%, transparent);
+  --space-fill-on: color-mix(in srgb, var(--star) 16%, transparent);
+}
+
+.sp-cost {
+  --space: var(--mars);
+  --space-fill: var(--mars-fill);
+  --space-fill-on: var(--mars-fill-on);
+}
+
+/* Drawing */
+
+.chart-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+  font-family: var(--font-mono);
+}
+
+.chart-svg * {
+  transition:
+    fill var(--dur-2) var(--ease-out),
+    stroke var(--dur-2) var(--ease-out),
+    opacity var(--dur-2) var(--ease-out);
+}
+
+/* Static end-state drawings for readers without JavaScript; the live figure removes them */
+.chart-static {
+  display: none;
+}
+
+@container chart (width < 600px) {
+  .chart:not([data-live]) .chart-svg:not(.chart-static) {
+    display: none;
+  }
+
+  .chart:not([data-live]) .chart-static {
+    display: block;
+  }
+}
+
+.chart-defs {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* Plate */
+
+.chart-graticule-dot {
+  fill: var(--sky-line);
+}
+
+.chart-ticks {
+  fill: none;
+  stroke: var(--dust);
+  stroke-width: 1;
+}
+
+.chart-plate-text,
+.chart-plate-note {
+  fill: var(--dust);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.chart-plate-text {
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+/* Shapes. Hairlines are 1 unit, corners square. */
+
+.chart-box {
+  fill: none;
+  stroke: var(--sky-line);
+  stroke-width: 1;
+}
+
+.chart-cell {
+  fill: color-mix(in srgb, var(--sky-line) 55%, transparent);
+  stroke: none;
+}
+
+.chart-wire {
+  fill: none;
+  stroke: var(--sky-line);
+  stroke-width: 1;
+}
+
+.chart-node {
+  fill: var(--sky-line);
+}
+
+.chart-label {
+  fill: var(--dust);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-label.is-small {
+  font-size: 11px;
+}
+
+/* States */
+
+.chart-box.is-on {
+  stroke: var(--space);
+  fill: var(--space-fill);
+}
+
+.chart-box.is-hot {
+  stroke: var(--space);
+  fill: var(--space-fill-on);
+  stroke-width: 1.5;
+}
+
+.chart-box.is-outline {
+  fill: none;
+}
+
+.chart-cell.is-on {
+  fill: color-mix(in srgb, var(--space) 34%, transparent);
+}
+
+.chart-cell.is-hot {
+  fill: color-mix(in srgb, var(--space) 62%, transparent);
+}
+
+.chart-wire.is-on,
+.is-on > .chart-wire {
+  stroke: var(--space);
+}
+
+.chart-node.is-on,
+.is-on > .chart-node {
+  fill: var(--space);
+}
+
+.chart-label.is-on {
+  fill: var(--space);
+}
+
+.chart-label.is-hot {
+  fill: var(--star);
+}
+
+.is-warn,
+.is-warn > .chart-wire,
+.chart-box.is-warn {
+  stroke: var(--mars);
+  stroke-dasharray: 3 2.5;
+}
+
+.chart-box.is-warn {
+  fill: var(--mars-fill);
+}
+
+.chart-node.is-warn,
+.is-warn > .chart-node,
+.chart-label.is-warn {
+  fill: var(--mars);
+  stroke: none;
+}
+
+.is-idle {
+  opacity: 0.45;
+}
+
+.is-hidden {
+  opacity: 0;
+}
+
+/* Glow: one pre-blurred radial gradient per space, never an SVG filter */
+
+.chart-glow-stop {
+  stop-color: var(--space);
+}
+
+.chart-glow {
+  fill: url(#chart-glow-global);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chart-glow.sp-shared {
+  fill: url(#chart-glow-shared);
+}
+
+.chart-glow.sp-reg {
+  fill: url(#chart-glow-reg);
+}
+
+.chart-glow.sp-cost {
+  fill: url(#chart-glow-cost);
+}
+
+.chart-glow.is-on {
+  opacity: var(--glow-strength);
+}
+
+/* An arrival glow driven frame by frame through --pulse (0 to 1) */
+.chart-glow.is-pulse {
+  opacity: calc(var(--pulse, 0) * var(--glow-strength));
+  transition: none;
+}
+
+.chart-glow.is-breathing {
+  animation: chart-breathe 2.4s var(--ease-in-out) infinite alternate;
+}
+
+@keyframes chart-breathe {
+  from {
+    opacity: calc(0.85 * var(--glow-strength));
+  }
+  to {
+    opacity: var(--glow-strength);
+  }
+}
+
+/* Star packets: a core, a four-point flare, a glow and a comet trail. They move every frame, so
+ * nothing in them transitions. */
+
+.chart-packet,
+.chart-packet * {
+  transition: none;
+}
+
+.chart-packet .chart-glow {
+  opacity: var(--glow-strength);
+}
+
+.chart-star-core {
+  fill: color-mix(in srgb, var(--space) 55%, var(--star));
+}
+
+.chart-star-flare {
+  fill: none;
+  stroke: var(--space);
+  stroke-width: 1;
+  stroke-linecap: round;
+}
+
+.chart-star-trail {
+  fill: var(--space);
+}
+
+.chart-star-trail.is-trail-1 {
+  opacity: 0.45;
+}
+
+.chart-star-trail.is-trail-2 {
+  opacity: 0.25;
+}
+
+.chart-star-trail.is-trail-3 {
+  opacity: 0.12;
+}
+
+.chart-star-trail.is-hidden {
+  opacity: 0;
+}
+
+/* Light sweep along an active wire: a short bright dash over a copy of the wire (pathLength 1) */
+
+.chart-sweep {
+  fill: none;
+  stroke: var(--space);
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-dasharray: 0.08 0.92;
+  stroke-dashoffset: 0.08;
+  opacity: 0;
+}
+
+.chart-sweep.is-on {
+  opacity: 0.9;
+  animation: chart-sweep 2.8s linear infinite;
+}
+
+@keyframes chart-sweep {
+  from {
+    stroke-dashoffset: 0.08;
+  }
+  to {
+    stroke-dashoffset: -0.92;
+  }
+}
+
+/* The same sweep for an HTML hairline: a gradient whose offset is the typed --sweep property */
+
+.sweep-line {
+  height: 1px;
+  background:
+    linear-gradient(
+        90deg,
+        transparent calc(var(--sweep) - 14%),
+        var(--space) var(--sweep),
+        transparent calc(var(--sweep) + 14%)
+      )
+      no-repeat,
+    var(--sky-line);
+}
+
+.sweep-line.is-on {
+  animation: sweep-line 3.2s linear infinite;
+}
+
+@keyframes sweep-line {
+  from {
+    --sweep: -14%;
+  }
+  to {
+    --sweep: 114%;
+  }
+}
+
+/* Off screen nothing breathes or sweeps */
+.chart:not([data-visible]) .is-breathing,
+.chart:not([data-visible]) .chart-sweep.is-on,
+.chart:not([data-visible]) .sweep-line.is-on {
+  animation-play-state: paused;
+}
+
+/* HTML parts: readout, legend, controls */
+
+.chart-readout {
+  min-height: 3em;
+  margin: 0.75rem 0 0;
+  color: var(--star);
+  font-family: var(--font-mono);
+  font-size: 0.8125rem;
+  line-height: 1.5;
+  font-variant-numeric: tabular-nums;
+  text-wrap: pretty;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  margin: 0.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  color: var(--dust);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.chart-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.chart-key::before {
+  content: "";
+  width: 1.25rem;
+  border-top: 1px solid var(--space);
+}
+
+.chart-key.sp-cost::before {
+  border-top-style: dashed;
+}
+
+.chart-controls,
+.chart-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.375rem;
+}
+
+.chart-controls {
+  margin-top: 0.75rem;
+  row-gap: 0.625rem;
+}
+
+.chart[data-layout="wide"] .chart-group + .chart-group,
+.chart[data-layout="wide"] .chart-group + .chart-btn {
+  margin-left: 0.75rem;
+}
+
+.chart-btn {
+  min-height: 32px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--sky-line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--dust);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+  line-height: 1.2;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-1) var(--ease-out),
+    background-color var(--dur-2) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.chart-btn:hover {
+  border-color: var(--brand);
+  color: var(--star);
+}
+
+.chart-btn[aria-pressed="true"] {
+  border-color: var(--brand);
+  background: var(--brand-fill-on);
+  color: var(--star);
+}
+
+.chart-btn:focus-visible,
+.chart-range:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 2px;
+}
+
+.chart-range-label {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem;
+  min-height: 32px;
+  color: var(--dust);
+  font-family: var(--font-mono);
+  font-size: 0.75rem;
+}
+
+.chart-range {
+  width: min(16rem, 100%);
+  accent-color: var(--brand);
+}
+
+.chart figcaption {
+  margin-top: 0.75rem;
+  color: var(--dust);
+  font-size: 0.875rem;
+  line-height: 1.5;
+}
+
+.chart-noscript {
+  color: var(--dust);
+  font-size: 0.75rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-glow.is-breathing,
+  .chart-sweep.is-on,
+  .sweep-line.is-on {
+    animation: none;
+  }
+
+  .chart-sweep.is-on {
+    opacity: 0;
+  }
+}

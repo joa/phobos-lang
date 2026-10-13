@@ -1,4 +1,4 @@
-/* Base styles of the custom (non-Starlight) pages. */
+/* Base styles of the custom (non-Starlight) pages: the shell, the type scale and the shared controls. */
 
 *,
 *::before,
@@ -6,26 +6,108 @@
   box-sizing: border-box;
 }
 
+:root {
+  --gutter: max(16px, 3vw);
+  --grid-gap: clamp(16px, 2.4vw, 32px);
+}
+
 html {
   background: var(--sky-0);
   color: var(--star);
   font-family: var(--font-sans);
+  font-size: 100%;
   -webkit-font-smoothing: antialiased;
+  text-size-adjust: 100%;
 }
 
 body {
   margin: 0;
   min-height: 100svh;
+  display: flex;
+  flex-direction: column;
   background: var(--sky-0);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  overflow-x: clip;
+}
+
+main {
+  flex: 1;
 }
 
 a {
   color: var(--brand);
+  text-underline-offset: 0.18em;
+  text-decoration-thickness: 1px;
+  transition: color var(--dur-1) var(--ease-out);
+}
+
+a:hover {
+  color: var(--brand-hi);
+}
+
+:focus-visible {
+  outline: 2px solid var(--brand);
+  outline-offset: 3px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--brand) 35%, transparent);
+}
+
+code,
+kbd,
+pre {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-weight: 500;
+  text-wrap: balance;
+}
+
+p {
+  text-wrap: pretty;
 }
 
 @view-transition {
   navigation: auto;
 }
+
+.skip-link {
+  position: absolute;
+  left: 16px;
+  top: -3rem;
+  padding: 0.5rem 0.75rem;
+  background: var(--sky-1);
+  border: 1px solid var(--brand);
+  z-index: 20;
+}
+
+.skip-link:focus {
+  top: 0.5rem;
+}
+
+/* One column of at most 1200 px with the gutter, and the 12-column grid inside it */
+
+.wrap {
+  width: 100%;
+  max-width: calc(1200px + 2 * var(--gutter));
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.grid-12 {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--grid-gap);
+}
+
+/* Header */
 
 .site-header {
   position: sticky;
@@ -36,42 +118,173 @@ a {
   justify-content: space-between;
   gap: 1rem;
   height: 3.5rem;
-  padding: 0 max(16px, calc((100vw - 1200px) / 2));
-  background: color-mix(in srgb, var(--sky-0) 70%, transparent);
+  padding: 0 max(var(--gutter), calc((100vw - 1200px) / 2));
+  background: color-mix(in srgb, var(--sky-0) 72%, transparent);
   backdrop-filter: blur(10px);
-  border-bottom: 1px solid color-mix(in srgb, var(--sky-line) 60%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--sky-line) 70%, transparent);
 }
 
 .site-mark {
   display: inline-flex;
   align-items: center;
-  gap: 0.5rem;
+  gap: 0.55rem;
   color: var(--star);
+  font-size: 1.05rem;
   font-weight: 600;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.01em;
   text-decoration: none;
+}
+
+.site-header .site-mark {
   view-transition-name: site-mark;
 }
 
-.site-mark :global(svg),
+.site-mark:hover {
+  color: var(--star);
+}
+
 .site-mark svg {
-  width: 1.75rem;
-  height: 1.75rem;
+  width: 1.85rem;
+  height: 1.85rem;
+  flex: none;
+}
+
+.site-mark .mark-crater {
+  stroke: var(--brand);
 }
 
 .site-header nav {
   display: flex;
   align-items: center;
-  gap: clamp(0.75rem, 2vw, 1.5rem);
+  gap: clamp(0.85rem, 2.2vw, 1.75rem);
 }
 
 .site-header nav a {
   color: var(--dust);
-  font-size: 0.9rem;
+  font-size: 0.9375rem;
   text-decoration: none;
-  transition: color var(--dur-1) var(--ease-out);
 }
 
 .site-header nav a:hover {
   color: var(--star);
+}
+
+/* Footer */
+
+.site-footer {
+  margin-top: clamp(4rem, 10vw, 8rem);
+  border-top: 1px solid var(--sky-line);
+}
+
+.site-footer-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem 2rem;
+  max-width: calc(1200px + 2 * var(--gutter));
+  margin-inline: auto;
+  padding: 2rem var(--gutter) 2.5rem;
+}
+
+.site-footer .site-mark {
+  font-size: 0.95rem;
+  color: var(--dust);
+}
+
+.site-footer .site-mark svg {
+  width: 1.5rem;
+  height: 1.5rem;
+}
+
+.site-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1.5rem;
+}
+
+.site-footer nav a {
+  color: var(--dust);
+  font-size: 0.875rem;
+  text-decoration: none;
+}
+
+.site-footer nav a:hover {
+  color: var(--star);
+}
+
+/* Buttons and links that act like them: square corners, like the figures */
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0 1.15rem;
+  border: 1px solid var(--sky-line);
+  background: color-mix(in srgb, var(--sky-0) 40%, transparent);
+  color: var(--star);
+  font-size: 0.9375rem;
+  font-weight: 500;
+  text-decoration: none;
+  transition:
+    border-color var(--dur-1) var(--ease-out),
+    background-color var(--dur-1) var(--ease-out),
+    color var(--dur-1) var(--ease-out);
+}
+
+.button:hover {
+  border-color: var(--brand);
+  color: var(--star);
+}
+
+.button.is-primary {
+  border-color: var(--brand);
+  background: var(--brand);
+  color: var(--sky-0);
+}
+
+.button.is-primary:hover {
+  border-color: var(--brand-hi);
+  background: var(--brand-hi);
+  color: var(--sky-0);
+}
+
+/* Segmented control: a row of pressed/unpressed buttons sharing one hairline */
+
+.segmented {
+  display: inline-flex;
+  flex-wrap: wrap;
+  border: 1px solid var(--sky-line);
+}
+
+.segmented button {
+  min-height: 2.25rem;
+  padding: 0 0.9rem;
+  border: 0;
+  background: transparent;
+  color: var(--dust);
+  font: inherit;
+  font-size: 0.875rem;
+  cursor: pointer;
+  transition:
+    color var(--dur-1) var(--ease-out),
+    background-color var(--dur-2) var(--ease-out);
+}
+
+.segmented button + button {
+  border-left: 1px solid var(--sky-line);
+}
+
+.segmented button:hover {
+  color: var(--star);
+}
+
+.segmented button[aria-pressed="true"] {
+  background: var(--brand-fill-on);
+  color: var(--star);
+}
+
+.segmented button code {
+  font-size: 0.85em;
 }

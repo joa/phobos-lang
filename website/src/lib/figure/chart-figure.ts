@@ -1,0 +1,369 @@
+// The figure base. Lifecycle: start() reads the state from the markup, builds the current layout and
+// settles it. The frame loop runs only while the figure wants to play and at least 30% of it is on
+// screen in a visible tab. Subclasses override build, update, settle, the on* hooks and optionally
+// get tour(). Nothing here touches the DOM at module level, so figure modules import in Node.
+
+import { clamp } from "./math"
+import { layoutFor, type Layout } from "./layout"
+import { Motion } from "./motion"
+import { svgEl, withElementFactory } from "./svg"
+import { StaticElement, staticFactory } from "./static"
+
+const VISIBLE_RATIO = 0.3
+const MAX_FRAME_DELTA_MS = 50
+const TOUR_HOLD_MS = 1400
+
+export type StateValue = string | number
+export type FigureState = Readonly<Record<string, StateValue>>
+
+export interface StaticRender {
+  viewBox: string
+  drawing: string
+  readout: string
+}
+
+export type FigureConstructor = new (root: Element) => ChartFigure
+
+export class ChartFigure {
+  #root: Element
+  #svg: SVGSVGElement
+  #readout: Element | null
+  #drawing: SVGGElement | null = null
+  #layout: Layout | null = null
+  #state: FigureState = Object.freeze({})
+  #motion: Motion
+  #reducedMotionQuery: MediaQueryList | null = null
+  #isInView = false
+  #isTabVisible = true
+  #hasBeenVisible = false
+  #hasInteracted = false
+  #isPlaying = false
+  #isInFrame = false
+  #frameId = 0
+  #lastFrameMs: number | null = null
+  #rebuildFrameId = 0
+  #activeTour: { patches: Record<string, StateValue>[]; index: number; heldMs: number } | null = null
+
+  constructor(root: Element) {
+    this.#root = root
+    const svg = root.querySelector(".chart-svg")
+    if (!svg) throw new Error(`#${root.id} has no .chart-svg`)
+    this.#svg = svg as SVGSVGElement
+    this.#readout = root.querySelector(".chart-readout")
+    this.#motion = new Motion({ isReduced: () => this.reducedMotion })
+  }
+
+  // Runs build() and settle() for one layout and state without a browser, for the page's no-script
+  // end state. id prefixes the ids inside the drawing and must be unique on the page. See static.ts
+  // for what build() and settle() may use.
+  static renderStatic(
+    this: FigureConstructor,
+    layout: Layout,
+    state: Record<string, StateValue>,
+    id = "static"
+  ): StaticRender {
+    return withElementFactory(staticFactory, () => {
+      const root = new StaticElement("figure")
+      root.setAttribute("id", id)
+      const svg = new StaticElement("svg")
+      svg.classList.add("chart-svg")
+      const readout = new StaticElement("p")
+      readout.classList.add("chart-readout")
+      root.append(svg, readout)
+      const figure = new this(root as unknown as Element)
+      figure.#state = Object.freeze({ ...state })
+      figure.#rebuild(layout)
+      const drawing = figure.#drawing as unknown as StaticElement
+      return {
+        viewBox: svg.getAttribute("viewBox") ?? "0 0 0 0",
+        drawing: drawing.innerHTML,
+        readout: readout.textContent,
+      }
+    })
+  }
+
+  get root(): Element {
+    return this.#root
+  }
+
+  // The root's id, unique on the page, for ids inside the drawing (gradients, patterns).
+  get id(): string {
+    return this.#root.id || "chart"
+  }
+
+  get svg(): SVGSVGElement {
+    return this.#svg
+  }
+
+  get drawing(): SVGGElement {
+    if (!this.#drawing) throw new Error("drawing is only available from build() on")
+    return this.#drawing
+  }
+
+  get layout(): Layout {
+    return this.#layout ?? "wide"
+  }
+
+  get state(): FigureState {
+    return this.#state
+  }
+
+  get motion(): Motion {
+    return this.#motion
+  }
+
+  get reducedMotion(): boolean {
+    return this.#reducedMotionQuery?.matches ?? false
+  }
+
+  get isVisible(): boolean {
+    return this.#isInView && this.#isTabVisible
+  }
+
+  get hasInteracted(): boolean {
+    return this.#hasInteracted
+  }
+
+  get tour(): Record<string, StateValue>[] {
+    return []
+  }
+
+  start(): void {
+    for (const stale of this.#root.querySelectorAll(".chart-static")) stale.remove()
+    this.#state = Object.freeze(this.#readMarkupState())
+    this.#syncControls(this.#state)
+    this.#reducedMotionQuery = matchMedia("(prefers-reduced-motion: reduce)")
+    this.#reducedMotionQuery.addEventListener("change", () => this.#onReducedMotionChange())
+    this.#isTabVisible = document.visibilityState === "visible"
+    document.addEventListener("visibilitychange", () => this.#onTabVisibilityChange())
+    this.#root.addEventListener("click", event => this.#onClick(event))
+    this.#root.addEventListener("input", event => this.#onInputEvent(event))
+    this.#rebuild(layoutFor(this.#root.getBoundingClientRect().width))
+    this.#root.setAttribute("data-live", "")
+    new ResizeObserver(entries => this.#onResize(entries)).observe(this.#root)
+    new IntersectionObserver(entries => this.#onIntersection(entries), {
+      threshold: [0, VISIBLE_RATIO],
+    }).observe(this.#root)
+  }
+
+  // Draws everything for this layout into the fresh drawing group, sets the viewBox and restores the
+  // visuals of the current state.
+  build(_layout: Layout): void {}
+
+  // Advances animations; returns true to keep the frame loop alive.
+  update(_dtMs: number): boolean {
+    return false
+  }
+
+  // Jumps to the end state of whatever is playing.
+  settle(): void {}
+
+  onChange(_group: string, _value: string): void {}
+
+  onAction(_action: string): void {}
+
+  onInput(_param: string, _value: number): void {}
+
+  onFirstVisible(): void {
+    this.#startTour()
+  }
+
+  play(): void {
+    if (this.reducedMotion) {
+      this.settle()
+      return
+    }
+    this.#isPlaying = true
+    this.#startLoop()
+  }
+
+  pause(): void {
+    this.#isPlaying = false
+    this.#stopLoop()
+  }
+
+  setReadout(text: string): void {
+    if (this.#readout && this.#readout.textContent !== text) this.#readout.textContent = text
+  }
+
+  setViewBox(widthUnits: number, heightUnits: number): void {
+    this.#svg.setAttribute("viewBox", `0 0 ${widthUnits} ${heightUnits}`)
+  }
+
+  // Programmatic state change: updates state and the controls, calls no hook.
+  setState(patch: Record<string, StateValue>): void {
+    this.#state = Object.freeze({ ...this.#state, ...patch })
+    this.#syncControls(patch)
+  }
+
+  #readMarkupState(): Record<string, StateValue> {
+    const state: Record<string, StateValue> = {}
+    for (const button of this.#root.querySelectorAll<HTMLElement>("[data-group][data-value]")) {
+      const { group, value } = button.dataset
+      if (group === undefined || value === undefined) continue
+      if (!Object.hasOwn(state, group) || button.getAttribute("aria-pressed") === "true") state[group] = value
+    }
+    for (const input of this.#root.querySelectorAll<HTMLInputElement>("input[data-param]")) {
+      if (input.dataset.param) state[input.dataset.param] = Number(input.value)
+    }
+    return state
+  }
+
+  #syncControls(patch: Record<string, StateValue>): void {
+    for (const button of this.#root.querySelectorAll<HTMLElement>("[data-group][data-value]")) {
+      const { group, value } = button.dataset
+      if (group !== undefined && Object.hasOwn(patch, group))
+        button.setAttribute("aria-pressed", String(value === patch[group]))
+    }
+    for (const input of this.#root.querySelectorAll<HTMLInputElement>("input[data-param]")) {
+      const param = input.dataset.param
+      if (param !== undefined && Object.hasOwn(patch, param) && Number(input.value) !== patch[param]) {
+        input.value = String(patch[param])
+      }
+    }
+  }
+
+  // Tour patches and clicks go through here, so a patch fires its hooks even when a value is unchanged.
+  #applyPatch(patch: Record<string, StateValue>): void {
+    this.setState(patch)
+    for (const [key, value] of Object.entries(patch)) {
+      if (typeof value === "number") this.onInput(key, value)
+      else this.onChange(key, value)
+    }
+  }
+
+  #onClick(event: Event): void {
+    const target = event.target as Element | null
+    const control = target?.closest<HTMLButtonElement>("[data-group][data-value], [data-action]")
+    if (!control || !this.#root.contains(control) || control.disabled) return
+    this.#noteReaderInput()
+    const { action, group, value } = control.dataset
+    if (action) this.onAction(action)
+    else if (group !== undefined && value !== undefined) this.#applyPatch({ [group]: value })
+  }
+
+  #onInputEvent(event: Event): void {
+    const input = event.target as HTMLInputElement
+    if (!input.matches("input[data-param]") || !input.dataset.param) return
+    this.#noteReaderInput()
+    const value = Number(input.value)
+    this.#state = Object.freeze({ ...this.#state, [input.dataset.param]: value })
+    this.onInput(input.dataset.param, value)
+  }
+
+  #noteReaderInput(): void {
+    this.#hasInteracted = true
+    this.#activeTour = null
+  }
+
+  #onResize(entries: ResizeObserverEntry[]): void {
+    const widthPx = entries[entries.length - 1].contentRect.width
+    if (widthPx === 0) return
+    const layout = layoutFor(widthPx)
+    cancelAnimationFrame(this.#rebuildFrameId)
+    this.#rebuildFrameId = 0
+    if (layout === this.#layout) return
+    // Rebuilding resizes the root; doing it inside this callback would trip the browser's
+    // "ResizeObserver loop completed with undelivered notifications" error, so wait a frame.
+    this.#rebuildFrameId = requestAnimationFrame(() => {
+      this.#rebuildFrameId = 0
+      this.#rebuild(layout)
+    })
+  }
+
+  #rebuild(layout: Layout): void {
+    this.#motion.cancelAll()
+    this.#layout = layout
+    this.#root.setAttribute("data-layout", layout)
+    this.#drawing?.remove()
+    for (const stale of this.#svg.querySelectorAll(":scope > .chart-drawing")) stale.remove()
+    this.#drawing = svgEl("g", { class: "chart-drawing" }, this.#svg)
+    this.build(layout)
+    this.settle()
+  }
+
+  #onIntersection(entries: IntersectionObserverEntry[]): void {
+    const entry = entries[entries.length - 1]
+    // The ratio reported at the threshold crossing can round to just below it.
+    this.#isInView = entry.isIntersecting && entry.intersectionRatio >= VISIBLE_RATIO - 0.001
+    this.#onVisibilityChange()
+  }
+
+  #onTabVisibilityChange(): void {
+    this.#isTabVisible = document.visibilityState === "visible"
+    this.#onVisibilityChange()
+  }
+
+  #onVisibilityChange(): void {
+    // CSS pauses breathing and sweeps while the figure is off screen.
+    this.#root.toggleAttribute("data-visible", this.isVisible)
+    if (!this.isVisible) {
+      this.#stopLoop()
+      return
+    }
+    if (!this.#hasBeenVisible) {
+      this.#hasBeenVisible = true
+      this.onFirstVisible()
+    }
+    this.#startLoop()
+  }
+
+  #onReducedMotionChange(): void {
+    if (!this.reducedMotion) return
+    this.#activeTour = null
+    this.pause()
+    this.#motion.finishAll()
+    this.settle()
+  }
+
+  #startLoop(): void {
+    if (this.#frameId !== 0 || this.#isInFrame || !this.#isPlaying || !this.isVisible) return
+    this.#lastFrameMs = null
+    this.#frameId = requestAnimationFrame(nowMs => this.#onFrame(nowMs))
+  }
+
+  #stopLoop(): void {
+    cancelAnimationFrame(this.#frameId)
+    this.#frameId = 0
+  }
+
+  #onFrame(nowMs: number): void {
+    this.#frameId = 0
+    const dtMs = this.#lastFrameMs === null ? 0 : clamp(nowMs - this.#lastFrameMs, 0, MAX_FRAME_DELTA_MS)
+    this.#lastFrameMs = nowMs
+    // Re-armed below by update() or the tour, or by a play() call made during this frame.
+    this.#isPlaying = false
+    this.#isInFrame = true
+    try {
+      if (this.update(dtMs) || (this.#activeTour !== null && this.#advanceTour(dtMs))) this.#isPlaying = true
+    } finally {
+      this.#isInFrame = false
+    }
+    if (this.#isPlaying && this.isVisible) this.#frameId = requestAnimationFrame(next => this.#onFrame(next))
+  }
+
+  #startTour(): void {
+    const patches = this.tour
+    if (patches.length === 0 || this.reducedMotion || this.#hasInteracted) return
+    this.#activeTour = { patches, index: 0, heldMs: 0 }
+    this.#applyPatch(patches[0])
+    this.#isPlaying = true
+    this.#startLoop()
+  }
+
+  // Runs once the current patch's animation has finished: hold, then apply the next patch.
+  #advanceTour(dtMs: number): boolean {
+    const tour = this.#activeTour
+    if (!tour) return false
+    if (tour.index === tour.patches.length - 1) {
+      this.#activeTour = null
+      return false
+    }
+    tour.heldMs += dtMs
+    if (tour.heldMs < TOUR_HOLD_MS) return true
+    tour.index += 1
+    tour.heldMs = 0
+    this.#applyPatch(tour.patches[tour.index])
+    return true
+  }
+}

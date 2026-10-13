@@ -1,0 +1,65 @@
+---
+// Scene 5: the same language runs LLMs. The token loop figure beside the numbers; the numbers panel is a
+// slot ("numbers") that a component reading results/*.json fills, and shows a placeholder until then.
+import TokenLoop from "../figures/token-loop/TokenLoop.astro"
+---
+
+<section class="scene inference" id="inference" aria-labelledby="inference-title">
+  <div class="wrap">
+    <div class="scene-head">
+      <h2 class="scene-title" id="inference-title">The same language runs LLMs</h2>
+      <p class="scene-intro">
+        Quantized GGUF models run end to end on kernels written in Phobos, served through an OpenAI-compatible API.
+        Mixture-of-experts models that do not fit in VRAM keep an expert cache on the card and compute misses on the
+        CPU.
+      </p>
+    </div>
+    <div class="inference-body">
+      <div class="inference-figure">
+        <TokenLoop />
+      </div>
+      <div class="inference-numbers">
+        <slot name="numbers">
+          <div class="slot-plate">
+            <p>Decode and prefill against llama.cpp, per model, read from the benchmark results with card and date.</p>
+          </div>
+        </slot>
+      </div>
+    </div>
+    <a class="scene-link" href="/inference/">Models, formats and benchmarks</a>
+  </div>
+</section>
+
+<style>
+  .inference-body {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    gap: var(--grid-gap);
+    align-items: start;
+  }
+
+  .inference-figure {
+    grid-column: span 5;
+    min-width: 0;
+  }
+
+  .inference-figure :global(.chart) {
+    margin: 0;
+  }
+
+  .inference-numbers {
+    grid-column: span 7;
+    min-width: 0;
+  }
+
+  .inference-numbers .slot-plate {
+    min-height: 22rem;
+  }
+
+  @media (max-width: 900px) {
+    .inference-figure,
+    .inference-numbers {
+      grid-column: 1 / -1;
+    }
+  }
+</style>

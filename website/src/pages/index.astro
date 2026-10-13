@@ -1,10 +1,19 @@
 ---
 import Site from "../layouts/Site.astro"
+import "../styles/home.css"
+import Hero from "../components/home/Hero.astro"
+import VisualizerScene from "../components/home/VisualizerScene.astro"
+import PipelineScene from "../components/home/PipelineScene.astro"
+import PackingScene from "../components/home/PackingScene.astro"
+import InferenceScene from "../components/home/InferenceScene.astro"
+import GetStarted from "../components/home/GetStarted.astro"
 ---
 
 <Site title="Phobos: tile-based GPU kernel language & LLM inference engine">
-  <main style="padding: 4rem 16px; max-width: 1200px; margin: 0 auto">
-    <h1>Tile-based GPU kernel language &amp; LLM inference engine</h1>
-    <p><a href="/docs/">Docs</a> · <a href="/inference/">Inference</a></p>
-  </main>
+  <Hero />
+  <VisualizerScene />
+  <PipelineScene />
+  <PackingScene />
+  <InferenceScene />
+  <GetStarted />
 </Site>

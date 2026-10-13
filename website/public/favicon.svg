@@ -1,5 +1,17 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none">
-  <path d="M6.2 17.8c-.9-4.6 1.6-9.6 6.4-11.5 4.3-1.7 9.6-.9 12.4 2.6 2.4 3 2.6 7.3.6 10.7-2.2 3.7-6.6 6.4-11.1 6.1-4.2-.3-7.5-3.5-8.3-7.9Z" fill="#6ab8ff" fill-opacity=".14" stroke="#6ab8ff" stroke-width="1.6" stroke-linejoin="round"/>
-  <circle cx="20.6" cy="13.2" r="3.4" stroke="#6ab8ff" stroke-width="1.4"/>
-  <circle cx="11.6" cy="19.4" r="1.2" fill="#6ab8ff"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" fill="none" stroke-linejoin="round">
+  <style>
+    .body { fill: #0e1730; fill-opacity: .12; stroke: #0e1730 }
+    .crater { stroke: #1f5fae }
+    .pit { stroke: #0e1730 }
+    .dot { fill: #0e1730 }
+    @media (prefers-color-scheme: dark) {
+      .body { fill: #e6ecf8; stroke: #e6ecf8 }
+      .crater { stroke: #6ab8ff }
+      .pit { stroke: #e6ecf8 }
+      .dot { fill: #e6ecf8 }
+    }
+  </style>
+  <path class="body" d="M4.4 18.6c-.8-4.3 1.4-8.4 5.5-10.3 3-1.4 6.1-1 9-1.5 4.1-.6 8.2 1.4 9.3 5.4 1 3.5-.2 7-2.9 9.6-2.9 2.8-7 4-11 3.6-2.9-.3-4.8-1.2-6.7-2.4-1.7-1.1-2.9-2.6-3.2-4.4Z" stroke-width="2"/>
+  <circle class="crater" cx="21.2" cy="13.8" r="4.3" stroke-width="2"/>
+  <circle class="pit" cx="11" cy="18.7" r="1.3" stroke-width="1.6"/>
 </svg>

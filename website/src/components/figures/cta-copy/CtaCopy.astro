@@ -1,0 +1,42 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import CtaCopyFigure from "./cta-copy.figure"
+import { K_STEPS, TILE } from "./geometry"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-cta-copy" } = Astro.props
+const kSteps = Array.from({ length: K_STEPS }, (_, kStep) => kStep)
+---
+
+<ChartFigure
+  id={id}
+  name="cta-copy"
+  figure={CtaCopyFigure}
+  state={{ phase: "store", kt: "0" }}
+  title="One CTA copies a tile of global memory into shared memory"
+  desc="Schematic. A 24 by 32 tensor A in global memory with one 8 by 8 tile outlined. Thirty-two threads each load two adjacent values of the tile into registers, then store them into the shared tile a. A barrier waits until all threads have stored."
+  legend={["global", "reg", "shared", "cost"]}
+>
+  <div class="chart-group" role="group" aria-label="Step">
+    <button type="button" class="chart-btn" data-group="phase" data-value="tile" aria-pressed="false">Tile in global</button>
+    <button type="button" class="chart-btn" data-group="phase" data-value="load" aria-pressed="false">Load to registers</button>
+    <button type="button" class="chart-btn" data-group="phase" data-value="store" aria-pressed="true">Store to shared</button>
+  </div>
+  <div class="chart-group" role="group" aria-label="k step">
+    {
+      kSteps.map(kStep => (
+        <button type="button" class="chart-btn" data-group="kt" data-value={String(kStep)} aria-pressed={kStep === 0 ? "true" : "false"}>
+          kt {kStep * TILE}
+        </button>
+      ))
+    }
+  </div>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    Schematic. Gemm's <code>var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]</code> with 8 x 8 tiles: each k step
+    moves the tile one panel to the right.
+  </Fragment>
+</ChartFigure>

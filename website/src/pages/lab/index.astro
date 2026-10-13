@@ -1,0 +1,46 @@
+---
+// Unlisted review page for the figure style. Not linked from anywhere, not indexed.
+import Site from "../../layouts/Site.astro"
+import CtaCopy from "../../components/figures/cta-copy/CtaCopy.astro"
+---
+
+<Site title="Lab: figure style" noindex>
+  <div class="wrap lab">
+    <h1>Figure style</h1>
+    <p>
+      A sample figure on the star chart base, for review in both themes and both layouts. The drawing below is
+      rendered at build time in its end state and replaced by the live figure when JavaScript runs.
+    </p>
+    <CtaCopy />
+    <h2>Narrow layout</h2>
+    <p>The same figure in a container under 600 px.</p>
+    <div class="lab-narrow">
+      <CtaCopy id="fig-cta-copy-narrow" />
+    </div>
+  </div>
+</Site>
+
+<style>
+  .lab {
+    max-width: calc(820px + 2 * var(--gutter));
+    padding-top: 3rem;
+  }
+
+  h1 {
+    font-size: 2rem;
+  }
+
+  h2 {
+    margin-top: 4rem;
+    font-size: 1.375rem;
+  }
+
+  p {
+    color: var(--dust);
+    max-width: 62ch;
+  }
+
+  .lab-narrow {
+    max-width: 380px;
+  }
+</style>
