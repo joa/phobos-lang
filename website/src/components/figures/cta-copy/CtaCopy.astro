@@ -18,7 +18,7 @@ const kSteps = Array.from({ length: K_STEPS }, (_, kStep) => kStep)
   state={{ phase: "store", kt: "0" }}
   title="One CTA copies a tile of global memory into shared memory"
   desc="Schematic. A 24 by 32 tensor A in global memory with one 8 by 8 tile outlined. Thirty-two threads each load two adjacent values of the tile into registers, then store them into the shared tile a. A barrier waits until all threads have stored."
-  legend={["global", "reg", "shared", "cost"]}
+  legend={["global", "reg", "shared", ["cost", "waiting at the barrier"]]}
 >
   <div class="chart-group" role="group" aria-label="Step">
     <button type="button" class="chart-btn" data-group="phase" data-value="tile" aria-pressed="false">Tile in global</button>

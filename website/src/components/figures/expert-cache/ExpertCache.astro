@@ -17,7 +17,7 @@ const { id = "fig-expert-cache" } = Astro.props
   state={{ path: "decode" }}
   title="An expert cache on the card"
   desc={`Simulated. For every token the router picks ${PICKS_PER_TOKEN} of ${EXPERT_COUNT} experts in one layer. Picks already in the cache on the GPU run there. In decode the CPU computes the misses from host memory and one miss is copied into the cache for later tokens; a prompt copies its misses over PCIe into the least recently used slots.`}
-  legend={["global", "reg", "cost"]}
+  legend={["global", "reg", ["cost", "misses"]]}
   class="fig-tall-readout"
 >
   <div class="chart-group" role="group" aria-label="Misses">

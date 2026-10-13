@@ -19,7 +19,7 @@ const { id = "fig-ctx-block" } = Astro.props
   state={{ m: DEFAULT_M, n: DEFAULT_N, cta: DEFAULT_PICK, z: "off" }}
   title="An output tensor tiled into CTAs, one tile per ctx.block"
   desc={`Schematic. An output tensor C of M rows and N columns cut into ${TILE} by ${TILE} tiles, one per CTA. ctx.block.x picks a row of tiles and ctx.block.y a column, as gemm does. The grid is M and N divided by ${TILE}, rounded up, so the last row and column of tiles can reach past C; that part is masked. Picking a CTA outlines the tile it owns. A batch axis stacks one grid per batch along z.`}
-  legend={["global", "cost"]}
+  legend={["global", ["cost", "past C, masked"]]}
 >
   <label class="chart-range-label">
     <span>M = <output data-for="m">{DEFAULT_M}</output></span>

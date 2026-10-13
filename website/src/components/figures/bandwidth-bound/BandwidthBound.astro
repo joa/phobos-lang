@@ -33,7 +33,7 @@ const measured = q8?.tests.tg128?.phobos
   state={{ phase: "decode" }}
   title="Why decoding is bound by memory bandwidth"
   desc={`Schematic. Weights stream from VRAM over the memory bus to the card's ${CARD.smCount} SMs. Decoding reads every weight once per token for about ${approx(DECODE_OPS_PER_BYTE)} operations per byte, so the bus is always busy while most SMs wait. A ${PROMPT_TOKENS}-token prompt reuses every weight for about ${approx(PROMPT_OPS_PER_BYTE)} operations per byte, so the SMs are busy and the bus mostly idle. A log scale of operations per byte marks the card's balance point at about ${approx(BALANCE_OPS_PER_BYTE)}.`}
-  legend={["global", "reg", "cost"]}
+  legend={["global", "reg", ["cost", "memory-bound"]]}
   class="fig-tall-readout"
 >
   <div class="chart-group" role="group" aria-label="Phase">

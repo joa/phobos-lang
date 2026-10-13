@@ -1,0 +1,73 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import ElasticCacheFigure, { RUN } from "./elastic-cache.figure"
+import { formatGiB, formatRate } from "./geometry"
+import { REPO_URL, shortDate } from "../../../lib/bench/load"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-elastic-cache" } = Astro.props
+const [phobos, other] = RUN.engines
+const smallest = RUN.cache.shrinks.at(-1) ?? RUN.cache.before
+const taken = formatGiB(RUN.squeezeMiB / 1024)
+const rates = (engine: typeof phobos) => engine.decode.map(formatRate).join(", ")
+const card = RUN.card.replace(/^NVIDIA\s+(GeForce\s+)?/, "")
+---
+
+<ChartFigure
+  id={id}
+  name="elastic-cache"
+  figure={ElasticCacheFigure}
+  title="An elastic expert cache"
+  desc={`Measured on ${RUN.model}, replaying a coding agent's session. The card's ${formatGiB(RUN.cardGiB)} hold the rest of the model, its context and an expert cache of ${RUN.cache.before} experts a block. Another process takes ${taken}; the cache shrinks in steps to ${smallest} experts a block and the CPU threads compute more of the misses. When the process exits the cache grows back to ${RUN.cache.after}. Decode before, during and after: ${phobos.label} ${rates(phobos)} tokens/s, ${other.label} ${rates(other)}.`}
+  legend={[
+    ["global", "the card"],
+    ["reg", "CPU, misses"],
+    ["cost", "another process"],
+  ]}
+  class="elastic-cache"
+>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    {RUN.model} on an {card}, <a href={`${REPO_URL}/blob/main/${RUN.file}`}>results committed {shortDate(RUN.date)}</a>,
+    median wall time of the replay, decode rates the mean over {phobos.reps} and {other.reps} replays. Cache sizes are the
+    ones the run logged; the flow of misses is drawn, not measured.
+  </Fragment>
+</ChartFigure>
+
+<style is:global>
+  .elastic-cache {
+    --series-phobos: var(--brand);
+    /* llama.cpp's amber, as the benchmark charts draw it. */
+    --series-other: light-dark(#a0640a, #d9a441);
+  }
+
+  .elastic-cache .ec-series {
+    fill: none;
+    stroke-width: 1.5;
+    stroke-linecap: square;
+  }
+
+  .elastic-cache .ec-series.is-phobos {
+    stroke: var(--series-phobos);
+  }
+
+  .elastic-cache .ec-series.is-other {
+    stroke: var(--series-other);
+  }
+
+  .elastic-cache .chart-label.ec-text.is-phobos {
+    fill: var(--series-phobos);
+  }
+
+  .elastic-cache .chart-label.ec-text.is-other {
+    fill: var(--series-other);
+  }
+
+  .elastic-cache .chart-box.ec-band {
+    fill: color-mix(in srgb, var(--mars) 6%, transparent);
+    stroke-opacity: 0.6;
+  }
+</style>

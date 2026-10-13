@@ -20,7 +20,7 @@ const zerosAsIs = FITS.off.fit.codes.filter(code => code === 0).length
   state={{ rotation: "on" }}
   title="Rotating before rounding"
   desc={`Schematic. A row of ${LANE_COUNT} weights with one large outlier is rounded to ternary values, once as it is and once after a Hadamard rotation. As it is, the best scale fits the outlier and ${zerosAsIs} of the ${LANE_COUNT} weights round to zero. The rotation, random sign flips followed by ${STAGE_COUNT} stages of additions and subtractions, spreads the outlier over all ${LANE_COUNT} values, and the rounding error drops from ${errorAsIs} to ${errorRotated} percent.`}
-  legend={["global", "reg", "cost"]}
+  legend={["global", "reg", ["cost", "outlier, rounding error"]]}
   class="fig-tall-readout"
 >
   <div class="chart-group" role="group" aria-label="Rotation">

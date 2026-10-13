@@ -18,7 +18,7 @@ const { id = "fig-masking" } = Astro.props
   state={{ tile: "2,3", aligned: "off" }}
   title="A tile crossing the edge of a tensor, masked or promised whole"
   desc="Schematic. A 20 by 28 tensor A cut into 8 by 8 tiles, a grid of 3 by 4 CTAs. The corner tile is staged into a shared tile a: 16 of its 64 elements are in bounds, and the other 48 are masked, read as 0 with their stores skipped. With @aligned(M = 8, N = 8) the extents are promised to be whole tiles, nothing is masked, rows load as 16-byte vectors, and the promise is checked once at entry."
-  legend={["global", "shared", "cost"]}
+  legend={["global", "shared", ["cost", "masked"]]}
 >
   <div class="chart-group" role="group" aria-label="Alignment">
     <button type="button" class="chart-btn" data-group="aligned" data-value="off" aria-pressed="true">Masked</button>
