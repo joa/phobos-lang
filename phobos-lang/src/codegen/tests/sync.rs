@@ -51,6 +51,9 @@ fn grid_barrier_lowers_to_arrive_and_spin() {
     // Five atomics: the generation read, the arrival, the counter reset, the
     // release, and the spin's read.
     assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5);
+    // A device-scope fence on each side of the arrival, so the barrier
+    // orders the blocks' global writes as well as their progress.
+    assert_eq!(mlir.matches("fence.acq_rel.gpu").count(), 2, "{mlir}");
 }
 
 /// The same barrier as a `[2, 1]` column, for a host whose launch ABI passes

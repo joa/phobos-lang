@@ -818,6 +818,11 @@ impl Isa for Nvidia {
         Ok(())
     }
 
+    fn fence_gpu<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()> {
+        self.asm(cg, block, &[], "fence.acq_rel.gpu;", "~{memory}", None)?;
+        Ok(())
+    }
+
     // ---- dp4a ----
 
     fn dot4_accumulate<'c>(

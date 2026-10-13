@@ -141,6 +141,11 @@ pub(super) trait Isa {
     /// A system-scope acquire-release fence for the executing thread.
     fn fence_sys<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()>;
 
+    /// A device-scope acquire-release fence for the executing thread: its
+    /// global writes before it are visible to every block after, and its
+    /// reads after it see what other blocks fenced before.
+    fn fence_gpu<'c>(&self, cg: &Codegen<'c>, block: &Block<'c>) -> Result<()>;
+
     /// Prefetches the line holding `mem[indices]` into L2.
     fn prefetch_read<'c>(
         &self,
@@ -728,6 +733,10 @@ impl<'c> Codegen<'c> {
 
     pub(in crate::codegen) fn fence_sys(&self, block: &Block<'c>) -> Result<()> {
         self.isa.fence_sys(self, block)
+    }
+
+    pub(in crate::codegen) fn fence_gpu(&self, block: &Block<'c>) -> Result<()> {
+        self.isa.fence_gpu(self, block)
     }
 
     pub(in crate::codegen) fn dot4_accumulate(
