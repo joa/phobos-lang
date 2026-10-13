@@ -99,6 +99,7 @@ pub struct Tensor {
     pub elem: String,
     pub elem_bytes: i64,
     pub shape: Vec<i64>,
+    pub strides: Vec<i64>,
     pub role: Role,
 }
 
@@ -130,6 +131,18 @@ pub struct Op {
     pub uniformity: Option<Uniformity>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub instr: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<usize>,
+    #[serde(rename = "loop", skip_serializing_if = "Option::is_none")]
+    pub loop_info: Option<LoopInfo>,
+}
+
+/// A `for` or `while`: its induction variable and how often it ran.
+#[derive(Clone, Debug, Serialize)]
+pub struct LoopInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub var: Option<String>,
+    pub trips: usize,
 }
 
 #[derive(Clone, Debug, Serialize)]

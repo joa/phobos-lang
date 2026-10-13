@@ -177,9 +177,15 @@ impl<'c> Codegen<'c> {
     }
 
     /// Records that the next sweep is a tile copy, for the trace.
-    pub(in crate::codegen) fn record_copy(&mut self, vector_bytes: i64, async_copy: bool) {
+    pub(in crate::codegen) fn record_copy(
+        &mut self,
+        vector_bytes: i64,
+        async_copy: bool,
+        dst: &MemVal<'c>,
+    ) {
         if matches!(self.policy, SharedPolicy::Record) {
-            self.trace.copy(vector_bytes, async_copy);
+            let dst = dst.global.clone().map(|name| (name, dst.shape.clone()));
+            self.trace.copy(vector_bytes, async_copy, dst);
         }
     }
 

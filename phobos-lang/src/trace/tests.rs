@@ -133,6 +133,28 @@ fn gemm_boxes_match_a_brute_force_reference() {
             assert_eq!(elements(&store.writes, "C"), c);
         }
     }
+    // The pipelined staging alternates between two buffer sets, each
+    // iteration ending in the loop's barrier.
+    let dots = steps_of(&t, "gemm_dot");
+    let set = |s: &Step| -> Vec<usize> { s.writes.iter().filter_map(|a| a.buffer).collect() };
+    assert_eq!(set(dots[0]).len(), 2);
+    assert_ne!(set(dots[0]), set(dots[1]));
+    assert_eq!(set(dots[0]), set(dots[2]));
+    assert!(
+        dots.iter()
+            .all(|s| s.barrier.as_ref().is_some_and(|b| b.kept))
+    );
+    let lp = t
+        .ops
+        .iter()
+        .find(|o| o.kind == "for" && o.loop_info.is_some())
+        .unwrap();
+    assert_eq!(
+        lp.loop_info.as_ref().map(|l| (l.var.as_deref(), l.trips)),
+        Some((Some("kt"), 16))
+    );
+    let dot_op = t.ops.iter().find(|o| o.kind == "gemm_dot").unwrap();
+    assert_eq!(dot_op.parent, Some(lp.id));
     let roles: BTreeMap<&str, Role> = t
         .tensors
         .iter()
@@ -197,6 +219,13 @@ fn lanes_kernel_uniformity_runs_and_butterfly() {
     for (stage, m) in stages.iter().zip([16, 8, 4, 2, 1]) {
         assert_eq!(*stage, (0..32).map(|l| l ^ m).collect::<Vec<i64>>());
     }
+    // Each shuffle of the fold is a step of its own with the same partners.
+    let shuffles: Vec<Vec<i64>> = steps_of(&t, "shuffle")
+        .iter()
+        .filter(|s| s.cta == [0, 0, 0])
+        .map(|s| s.lanes.as_ref().unwrap().partners.clone().unwrap())
+        .collect();
+    assert_eq!(shuffles, stages);
     // Only lane 0 stores.
     let store = steps_of(&t, "store")
         .into_iter()

@@ -234,7 +234,7 @@ impl<'c> Codegen<'c> {
         let v32_t = Type::vector(&[4], self.f32_t);
         let v16_t = Type::vector(&[4], self.f16_t);
 
-        self.record_copy(width * 4, false);
+        self.record_copy(width * 4, false, dst);
         self.distribute(block, dst, width, false, |cg, blk, idx| {
             // Only the destination is swizzled.
             let didx = cg.swizzled_index(blk, dst, idx)?;
