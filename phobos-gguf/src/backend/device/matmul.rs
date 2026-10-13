@@ -704,14 +704,19 @@ fn f32_lanes_kernel(quant: Quant) -> Option<LanesKernel> {
 
 /// The formats whose lanes kernel runs unless `PHOBOS_RAW_LANES` says
 /// otherwise: those that measured at least their intrinsic's speed, tg128
-/// on Qwen3.5 0.8B quantized to each. IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS and
-/// IQ2_S measured 2 to 17% slower, and PTQ1_0 0.6% on the 27B Bonsai.
-const LANES_BY_DEFAULT: [Quant; 8] = [
+/// on Qwen3.5 0.8B quantized to each. PTQ1_0 measured 0.6% slower on the
+/// 27B Bonsai.
+const LANES_BY_DEFAULT: [Quant; 13] = [
     Quant::Q2_K,
     Quant::Q3_K,
     Quant::Q4_K,
     Quant::Q5_K,
     Quant::Q6_K,
+    Quant::IQ1_S,
+    Quant::IQ1_M,
+    Quant::IQ2_XXS,
+    Quant::IQ2_XS,
+    Quant::IQ2_S,
     Quant::IQ3_XXS,
     Quant::IQ3_S,
     Quant::IQ4_XS,
