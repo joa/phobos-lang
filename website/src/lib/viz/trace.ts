@@ -5,8 +5,15 @@
 //
 // Conventions:
 // - Every box is half-open per dimension: [[row0, row1], [col0, col1]].
-// - Line and column numbers are 1-based, as the lexer counts them.
-// - `sha256` is over the source text with CRLF normalized to LF.
+// - Line and column numbers are 1-based, as the lexer counts them. A span's end
+//   is exclusive, and a compound statement's span is its header, up to its `{`.
+// - `sha256` is over the source text with CRLF normalized to LF. For a variant
+//   it is over the original text (normalized the same way) followed by the
+//   variant as compact JSON, `add` before `drop`, such as `{"add":"@padstage"}`.
+//   For a fence it is over `source.text` exactly: the fence body with the
+//   opening fence's indentation stripped, lines joined by LF, one trailing LF.
+// - The grid is not in the kernel: the host picks it. It comes from
+//   `website/kernels.json` or a fence's `grid` meta.
 // - Placement fields (`Buffer.offsetBytes`, `barriers`) are optional so a future
 //   in-browser build without the MLIR emitter can still produce a trace.
 
@@ -83,6 +90,8 @@ export interface Op {
   ir: string
   /** How far the op's result may differ between threads (`ir/uniform.rs`). */
   uniformity?: Uniformity
+  /** The instruction family a contraction lowered to: "wmma", "mma.sync" or "fma". */
+  instr?: string
 }
 
 export interface Buffer {
@@ -146,6 +155,8 @@ export interface LaneEvent {
   runs?: { lane: number; access: Access }[]
   vectorBytes?: number
   alignBytes?: number
+  /** For an exchange: the CTA barriers it takes. */
+  barriers?: number
 }
 
 export interface Step {
