@@ -184,6 +184,7 @@ impl Desugar {
                 start,
                 end,
                 step,
+                unroll,
                 body,
             } => {
                 let (mut out, inner) = self.enter(&body);
@@ -201,6 +202,7 @@ impl Desugar {
                     start,
                     end,
                     step,
+                    unroll,
                     body,
                 });
                 out

@@ -121,6 +121,7 @@ impl Build {
                 start,
                 end,
                 step,
+                unroll: None,
                 body,
             },
             tail @ ..,

@@ -313,6 +313,8 @@ pub enum Stmt {
         start: Expr,
         end: Expr,
         step: Option<Expr>,
+        /// `for<unroll n>`: the body built `n` times a turn.
+        unroll: Option<Expr>,
         body: Vec<Stmt>,
     },
     While {
@@ -483,6 +485,7 @@ impl Stmt {
                 end,
                 step,
                 body,
+                ..
             } => {
                 var == name
                     || start.uses_name(name)
