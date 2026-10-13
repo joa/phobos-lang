@@ -286,9 +286,6 @@ fn intrinsic_names_round_trip() {
         Intrinsic::ArgSel,
     ];
     for fmt in RawFmt::ALL {
-        if fmt.has_f32_qdot() {
-            all.push(Intrinsic::RawQdot(fmt));
-        }
         all.extend([
             Intrinsic::RawQdotI8(fmt),
             Intrinsic::RawQmma(fmt),

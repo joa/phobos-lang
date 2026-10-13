@@ -107,7 +107,6 @@ impl Build {
                 let ty = self.shared_ty(Scalar::F32, &shape);
                 Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::RawQdotI8(fmt)), &tiles, ty)))
             }
-            "iq1s_qdot_t" => self.raw_qdot(callee, RawFmt::Iq1s, args, "(a, qb, d, grid)", 4),
             "iq1s_qmma_t" => {
                 let [a, asc, qb, d, grid] = self.iq1s_qmma_operands(args)?;
                 let shape = [self.shape(a)[0], self.shape(qb)[0]];
@@ -142,15 +141,6 @@ impl Build {
                 let ty = self.shared_ty(Scalar::F32, &shape);
                 Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::RawQmmaStaged(fmt)), &ops, ty)))
             }
-            "iq1m_qdot_t" => self.raw_qdot(callee, RawFmt::Iq1m, args, "(a, qb, d, grid)", 4),
-            "iq2xxs_qdot_t" => self.raw_qdot(callee, RawFmt::Iq2xxs, args, "(a, qb, d, grid, signs)", 5),
-            "iq2s_qdot_t" => self.raw_qdot(callee, RawFmt::Iq2s, args, "(a, qb, d, grid, signs)", 5),
-            "iq2xs_qdot_t" => self.raw_qdot(callee, RawFmt::Iq2xs, args, "(a, qb, d, grid, signs)", 5),
-            "iq3xxs_qdot_t" => self.raw_qdot(callee, RawFmt::Iq3xxs, args, "(a, qb, d, grid, signs)", 5),
-            "iq3s_qdot_t" => self.raw_qdot(callee, RawFmt::Iq3s, args, "(a, qb, d, grid, signs)", 5),
-            "iq4xs_qdot_t" => self.raw_qdot(callee, RawFmt::Iq4xs, args, "(a, qb, d, codebook)", 4),
-            "q2k_qdot_t" => self.raw_qdot(callee, RawFmt::Q2k, args, "(a, qb, d, dmin)", 4),
-            "q3k_qdot_t" => self.raw_qdot(callee, RawFmt::Q3k, args, "(a, qb, d)", 3),
             "gather" => {
                 let [table, idx] = args else {
                     bail!("gather expects (table, idx)");
@@ -328,19 +318,6 @@ impl Build {
         Ok(self.value(OpKind::Math(step), &[v], Type::Scalar(result)))
     }
 
-    /// A `<fmt>_qdot_t` call: `n` tile operands, a `[1, qb rows]` result.
-    fn raw_qdot(&mut self, callee: &str, fmt: RawFmt, args: &[Expr], sig: &str, n: usize) -> Result<Rv> {
-        if args.len() != n {
-            bail!("{callee} expects {sig}");
-        }
-        let tiles = args
-            .iter()
-            .map(|e| self.tile_operand(e, callee))
-            .collect::<Result<Vec<_>>>()?;
-        let shape = [1, self.shape(tiles[1])[0]];
-        let ty = self.shared_ty(Scalar::F32, &shape);
-        Ok(Rv::Tile(self.value(OpKind::Intrinsic(Intrinsic::RawQdot(fmt)), &tiles, ty)))
-    }
 
     /// An operand that has to be a tile: `"{what} expects tile operands"`.
     pub(crate) fn tile_operand(&mut self, e: &Expr, what: &str) -> Result<ValueId> {

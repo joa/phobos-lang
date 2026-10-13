@@ -139,12 +139,6 @@ impl<'c> Codegen<'c> {
                 let qg = qg_format(fmt, &i)?;
                 self.tile_qdot_i8_reg_t(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..])?
             }
-            Intrinsic::RawQdot(fmt) => match fmt {
-                RawFmt::Iq4xs => self.tile_iq4xs_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
-                RawFmt::Q2k => self.tile_q2k_qdot_t(block, &t[0], &t[1], &t[2], &t[3])?,
-                RawFmt::Q3k => self.tile_q3k_qdot_t(block, &t[0], &t[1], &t[2])?,
-                other => bail!("no {}_qdot_t", other.name()),
-            },
             Intrinsic::RawQmma(RawFmt::Iq1s) => {
                 self.tile_iq1s_qmma_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?
             }

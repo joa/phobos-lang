@@ -127,12 +127,6 @@ pub enum RawFmt {
 }
 
 impl RawFmt {
-    /// Whether `<fmt>_qdot_t`, the f32 decode matvec, exists. The IQ formats
-    /// write theirs with lanes.
-    pub fn has_f32_qdot(self) -> bool {
-        matches!(self, RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k)
-    }
-
     pub const ALL: [RawFmt; 14] = [
         RawFmt::Iq1s,
         RawFmt::Iq1m,
@@ -273,8 +267,6 @@ pub enum Intrinsic {
     Q50dotT,
     /// `q50_qmma_t`: `qmma_t` against the same.
     Q50mmaT,
-    /// `<fmt>_qdot_t`: a raw format's matvec with its decode folded in.
-    RawQdot(RawFmt),
     /// `<fmt>_qdot_i8_t`: the dp4a decode matvec.
     RawQdotI8(RawFmt),
     /// `<fmt>_qmma_t`: a raw format's batched projection.
@@ -296,7 +288,6 @@ impl Intrinsic {
             Intrinsic::QmmaT => "qmma_t".into(),
             Intrinsic::Q50dotT => "q50_qdot_t".into(),
             Intrinsic::Q50mmaT => "q50_qmma_t".into(),
-            Intrinsic::RawQdot(f) => format!("{}_qdot_t", f.name()),
             Intrinsic::RawQdotI8(f) => format!("{}_qdot_i8_t", f.name()),
             Intrinsic::RawQmma(f) => format!("{}_qmma_t", f.name()),
             Intrinsic::RawQmmaStaged(f) => format!("{}_qmma_staged_t", f.name()),
@@ -319,7 +310,6 @@ impl Intrinsic {
         let (fmt, suffix) = callee.split_once('_')?;
         let fmt = RawFmt::from_name(fmt)?;
         Some(match suffix {
-            "qdot_t" if fmt.has_f32_qdot() => Intrinsic::RawQdot(fmt),
             "qdot_i8_t" => Intrinsic::RawQdotI8(fmt),
             "qmma_t" => Intrinsic::RawQmma(fmt),
             "qmma_staged_t" => Intrinsic::RawQmmaStaged(fmt),

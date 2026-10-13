@@ -18,13 +18,10 @@ mod iq2xs;
 mod iq2xxs;
 mod iq3s;
 mod iq3xxs;
-mod iq4xs_qdot;
 mod kquant;
 mod kquant_qdot;
 mod ptq1;
 mod math;
-mod q2k_qdot;
-mod q3k_qdot;
 mod qdot;
 mod qdot_i8_reg;
 mod qgemm;
@@ -38,10 +35,6 @@ mod vector;
 pub(in crate::codegen) use qdot::QWeight;
 pub(in crate::codegen) use qgemm::QgFormat;
 pub(in crate::codegen) use reduce::RowSrc;
-
-/// Activations a lane loads at once in the quantized matvecs. A lane owns a
-/// contiguous run, so a warp covers 1024 bytes in two loads.
-pub(super) const ACT_VEC: i64 = 4;
 
 /// Elements of an int8 activation that share one scale. This is the layout
 /// the `quantize` kernel emits.
