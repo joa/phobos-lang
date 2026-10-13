@@ -82,7 +82,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_GATE_Q` | opt-out | on | Attention's output gate writes the quantized copy the output projection reads in the same launch. Off, the gate and the quantization are two launches. |
 | `PHOBOS_QDOT_SPLIT` | opt-out | on | A K-quant decode matvec over a `k` of 4096 or more whose tiles give fewer than two programs a multiprocessor splits along `k` into partials and a sum. Off, one program per tile walks all of `k`. |
 | `PHOBOS_QDOT_LANES` | opt-out | on | The launched Q8_0 decode matvec written in `.ph` with lanes (`ctx.lane`, `sum(..)`, `sum<over ctx.lane>`). Off, the `qdot_t` intrinsic it replaced, to measure one against the other. |
-| `PHOBOS_RAW_LANES` | opt-out, unset told apart | per format | The raw formats' decode matvecs written in `.ph` with lanes, unsplit, in place of their `<fmt>_qdot_t` and `<fmt>_qdot_i8_t` intrinsics. Unset, each format that measured at least its intrinsic's speed runs them (all but IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S and PTQ1_0); on, every format; off, none. |
+| `PHOBOS_RAW_LANES` | opt-out, unset told apart | per format | The raw formats' decode matvecs written in `.ph` with lanes, unsplit, in place of their `<fmt>_qdot_t` and `<fmt>_qdot_i8_t` intrinsics. Unset, each format that measured at least its intrinsic's speed runs them (all but PTQ1_0); on, every format; off, none. |
 | `PHOBOS_PERSIST_QDOT` | opt-in | off | The persistent (card-sized grid) form of the Q8_0 decode matvec, which exists to be measured against the launched one. |
 | `PHOBOS_PERSIST_BLOCKS` | a block count | the occupancy answer | Forces that grid's block count, to ask what a matvec loses at the count a fused kernel is stuck with. |
 
