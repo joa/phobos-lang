@@ -1,15 +1,18 @@
-// Screenshots of site routes in {dark, light} x {1280, 390} x {motion, reduced}, a mid frame and an end
-// frame each, for review by eye. Fails on console errors, page errors, horizontal scroll and figure
-// labels under 11 viewBox units; prints the smallest label's rendered size in px.
+// Screenshots of site routes in {dark, light} x {1920, 1280, 390} x {motion, reduced}, a mid frame and
+// an end frame each, for review by eye. Fails on console errors, page errors, horizontal scroll and
+// figure labels under 12.5 viewBox units; prints the smallest label's rendered size in px.
 //
-//   node scripts/shots.mjs [--base URL] [--out DIR] [--only dark,390,reduced] [--steps] [--nojs] ROUTE...
+//   node scripts/shots.mjs [--base URL] [--dist DIR] [--out DIR] [--only dark,390,reduced] [--steps] [--nojs] ROUTE...
 //
+// --dist serves a built site (astro build's dist/) to the browser itself, with no server running.
+// Figures loop, so a moving page has no end. The end frame is taken after switching the page to
+// reduced motion, which settles every figure on its end state: the same state in both motion runs.
 // --steps also saves one viewport shot per screen while scrolling down, for scroll-driven scenes.
 // --nojs turns JavaScript off (the theme then stays dark), to check the pages' no-script end state.
 // Uses puppeteer-core with the system Chrome; set CHROME_PATH to point elsewhere.
 
-import { existsSync, mkdirSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, mkdirSync, readFileSync, statSync } from "node:fs"
+import { extname, join } from "node:path"
 import puppeteer from "puppeteer-core"
 
 const CHROME_CANDIDATES = [
@@ -22,23 +25,64 @@ const CHROME_CANDIDATES = [
 ]
 
 const THEMES = ["dark", "light"]
-const WIDTHS_PX = [1280, 390]
+const WIDTHS_PX = [1920, 1280, 390]
 const MOTIONS = ["motion", "reduced"]
-const HEIGHT_FOR_WIDTH_PX = { 1280: 800, 390: 844 }
+const HEIGHT_FOR_WIDTH_PX = { 1920: 1080, 1280: 800, 390: 844 }
 const MID_FRAME_MS = 650
 const SETTLE_MS = 2200
 const SCROLL_STEP_MS = 450
-const MIN_LABEL_UNITS = 11
+const MIN_LABEL_UNITS = 12.5
 
 // Dev-server chatter that is not a page error.
 const IGNORED_CONSOLE = [/\[vite\]/i, /\[astro\]/i, /Download the React DevTools/i]
 
+const CONTENT_TYPES = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript",
+  ".mjs": "text/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".webp": "image/webp",
+  ".woff2": "font/woff2",
+  ".woff": "font/woff",
+  ".xml": "application/xml",
+  ".txt": "text/plain",
+}
+
+// Answers the page's requests to the base origin from a built site on disk.
+async function serveFrom(page, dist, base) {
+  const origin = new URL(base).origin
+  await page.setRequestInterception(true)
+  page.on("request", request => {
+    const url = new URL(request.url())
+    if (url.origin !== origin) return request.continue()
+    let path = join(dist, decodeURIComponent(url.pathname))
+    if (existsSync(path) && statSync(path).isDirectory()) path = join(path, "index.html")
+    else if (!existsSync(path) && existsSync(`${path}.html`)) path = `${path}.html`
+    if (!existsSync(path)) return request.respond({ status: 404, contentType: "text/plain", body: "not found" })
+    const contentType = CONTENT_TYPES[extname(path)] ?? "application/octet-stream"
+    return request.respond({ status: 200, contentType, body: readFileSync(path) })
+  })
+}
+
 function parseArgs(argv) {
-  const options = { base: "http://localhost:4401", out: "shots", only: [], steps: false, noJs: false, routes: [] }
+  const options = {
+    base: "http://localhost:4401",
+    dist: null,
+    out: "shots",
+    only: [],
+    steps: false,
+    noJs: false,
+    routes: [],
+  }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === "--base") options.base = argv[++index]
     else if (arg === "--out") options.out = argv[++index]
+    else if (arg === "--dist") options.dist = argv[++index]
     else if (arg === "--only") options.only = argv[++index].split(",")
     else if (arg === "--steps") options.steps = true
     else if (arg === "--nojs") options.noJs = true
@@ -79,6 +123,7 @@ async function shoot(browser, options, route, theme, widthPx, motion) {
   }, theme)
 
   if (options.noJs) await page.setJavaScriptEnabled(false)
+  if (options.dist) await serveFrom(page, options.dist, options.base)
   const name = `${slug(route)}.${theme}.${widthPx}.${motion}${options.noJs ? ".nojs" : ""}`
   await page.goto(new URL(route, options.base).href, { waitUntil: "networkidle0" })
   await page.evaluate(() => document.fonts.ready)
@@ -97,6 +142,7 @@ async function shoot(browser, options, route, theme, widthPx, motion) {
     step += 1
   }
   await page.evaluate(() => window.scrollTo(0, 0))
+  await page.emulateMediaFeatures([{ name: "prefers-reduced-motion", value: "reduce" }])
   await wait(SETTLE_MS)
   await page.screenshot({ path: join(options.out, `${name}.end.png`), fullPage: true })
 

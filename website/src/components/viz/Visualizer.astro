@@ -9,6 +9,7 @@ import "./viz.css"
 import { KernelModel } from "../../lib/viz/model"
 import type { Trace } from "../../lib/viz/trace"
 import { nextVizId } from "./ids"
+import Glyph from "./Glyph.astro"
 
 interface Props {
   /** The trace's base name, such as `gemm_fp32` or `gemm_fp32_no_aligned`. */
@@ -112,13 +113,16 @@ const desc =
       <div class="viz-controls">
         <div class="viz-row">
           <div class="chart-group" role="group" aria-label="Step">
-            <button type="button" class="chart-btn" data-action="prev" aria-label="Back one step">Back</button>
-            <button type="button" class="chart-btn viz-play" data-action="play" aria-pressed="false">Play</button>
-            <button type="button" class="chart-btn" data-action="next" aria-label="Next step">Next</button>
-          </div>
-          <div class="chart-group" role="group" aria-label="Loop iteration">
-            <button type="button" class="chart-btn" data-action="iter-prev" aria-label="Previous loop iteration">[ iter</button>
-            <button type="button" class="chart-btn" data-action="iter-next" aria-label="Next loop iteration">iter ]</button>
+            <button type="button" class="chart-btn chart-icon" data-action="prev" aria-label="Back one step" title="Back (left arrow)">
+              <Glyph name="back" />
+            </button>
+            <button type="button" class="chart-btn chart-icon chart-play viz-play" data-action="play" aria-pressed="false" aria-label="Play" title="Play or pause (space)">
+              <Glyph name="play" />
+              <Glyph name="pause" />
+            </button>
+            <button type="button" class="chart-btn chart-icon" data-action="next" aria-label="Next step" title="Next (right arrow)">
+              <Glyph name="next" />
+            </button>
           </div>
           <label class="chart-range-label viz-scrub">
             <span class="viz-sr">Step</span>
@@ -128,9 +132,13 @@ const desc =
         </div>
         <div class="viz-row">
           <div class="chart-group" role="group" aria-label="CTA">
-            <button type="button" class="chart-btn viz-icon" data-action="cta-prev" aria-label="Previous CTA">&lt;</button>
+            <button type="button" class="chart-btn chart-icon" data-action="cta-prev" aria-label="Previous CTA">
+              <Glyph name="left" />
+            </button>
             <span class="viz-value viz-cta-value" data-viz-cta>{model.ctaName(trace.ctas[0])}</span>
-            <button type="button" class="chart-btn viz-icon" data-action="cta-next" aria-label="Next CTA">&gt;</button>
+            <button type="button" class="chart-btn chart-icon" data-action="cta-next" aria-label="Next CTA">
+              <Glyph name="right" />
+            </button>
             <button type="button" class="chart-btn" data-action="sweep" aria-pressed="false">All CTAs</button>
           </div>
           <div class="chart-group" role="group" aria-label="Zoom">
@@ -160,7 +168,7 @@ const desc =
         <li class="chart-key sp-global">global memory</li>
         <li class="chart-key sp-shared">shared memory</li>
         <li class="chart-key sp-reg">threads and lanes</li>
-        <li class="chart-key sp-cost">cost</li>
+        <li class="chart-key sp-cost">extra 128-byte lines, masked elements</li>
       </ul>
     </figure>
   </div>

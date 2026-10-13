@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { LABEL_UNITS, MIN_LABEL_UNITS } from "../src/lib/figure/layout"
 import CtxIndicesFigure from "../src/components/figures/ctx-indices/ctx-indices.figure"
 import {
   boundsOf,
@@ -52,15 +53,17 @@ for (const layout of ["wide", "narrow"] as const) {
 
     it("fits the panel's longest lines", () => {
       const longest = ["thread = warp * lanes + lane", "ctx.lane = 255 - 7 * 32 = 31"]
-      expect(geometry.panel.x + textWidthUnits(longest[0])).toBeLessThanOrEqual(geometry.widthUnits - 8)
-      expect(geometry.panel.x + textWidthUnits(longest[1], 11)).toBeLessThanOrEqual(geometry.widthUnits - 8)
+      expect(geometry.panel.x + textWidthUnits(longest[0], LABEL_UNITS)).toBeLessThanOrEqual(geometry.widthUnits - 8)
+      expect(geometry.panel.x + textWidthUnits(longest[1], MIN_LABEL_UNITS)).toBeLessThanOrEqual(
+        geometry.widthUnits - 8
+      )
       const title = geometry.stripTitle
-      const fontUnits = layout === "wide" ? 12 : 11
+      const fontUnits = layout === "wide" ? LABEL_UNITS : MIN_LABEL_UNITS
       expect(title.x + textWidthUnits(title.text, fontUnits)).toBeLessThanOrEqual(geometry.widthUnits - 8)
     })
 
     it("keeps the warp labels left of the cells and on the plate", () => {
-      for (const at of geometry.warpLabels) expect(at.x - textWidthUnits(at.text, 11)).toBeGreaterThan(4)
+      for (const at of geometry.warpLabels) expect(at.x - textWidthUnits(at.text, MIN_LABEL_UNITS)).toBeGreaterThan(4)
     })
   })
 }

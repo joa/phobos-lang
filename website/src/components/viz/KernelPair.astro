@@ -1,6 +1,8 @@
 ---
 // A before/after pair of visualizers, such as a kernel without and with an attribute, or one kernel
-// on two chips. Side by side on a wide container, one at a time behind a toggle on a narrow one.
+// on two chips. One at a time behind a toggle, each at the full width of the column; with `sideBySide`
+// (for a full-width page, never a docs column) the two stand next to each other on a container of
+// 1200 px or more.
 // The two step in lockstep: a step on either moves the other to the same statement and iteration,
 // matched by the statement's text, since a variant shifts line numbers.
 import Kernel from "../Kernel.astro"
@@ -12,16 +14,17 @@ interface Props {
   afterTrace: string
   afterChip?: string
   afterLabel: string
+  sideBySide?: boolean
 }
 
-const { beforeTrace, beforeChip, beforeLabel, afterTrace, afterChip, afterLabel } = Astro.props
+const { beforeTrace, beforeChip, beforeLabel, afterTrace, afterChip, afterLabel, sideBySide = false } = Astro.props
 const sides = [
   { key: "before", trace: beforeTrace, chip: beforeChip, label: beforeLabel },
   { key: "after", trace: afterTrace, chip: afterChip, label: afterLabel },
 ]
 ---
 
-<div class="viz-pair" data-viz-pair data-show="after">
+<div class:list={["viz-pair", { "is-side-by-side": sideBySide }]} data-viz-pair data-show="after">
   <div class="chart-group viz-pair-switch" role="group" aria-label="Variant">
     {
       sides.map(side => (
@@ -76,7 +79,9 @@ const sides = [
     margin-bottom: 0.75rem;
   }
 
+  /* The switch names the side shown; the label is for side by side only */
   .viz-pair-label {
+    display: none;
     margin: 0 0 0.5rem;
     color: var(--star);
     font-family: var(--font-mono);
@@ -103,16 +108,17 @@ const sides = [
     font-size: 0.875rem;
   }
 
-  @container viz-pair (min-width: 680px) {
-    .viz-pair-switch {
+  @container viz-pair (min-width: 1200px) {
+    .is-side-by-side .viz-pair-switch {
       display: none;
     }
 
-    .viz-pair-sides {
+    .is-side-by-side .viz-pair-sides {
       grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     }
 
-    .viz-pair[data-show] .viz-pair-side {
+    .is-side-by-side[data-show] .viz-pair-side,
+    .is-side-by-side .viz-pair-label {
       display: block;
     }
   }

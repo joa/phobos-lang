@@ -2,12 +2,17 @@
 // settles it. The frame loop runs only while the figure wants to play and at least 30% of it is on
 // screen in a visible tab. Subclasses override build, update, settle, the on* hooks and optionally
 // get tour(). Nothing here touches the DOM at module level, so figure modules import in Node.
+//
+// Figures loop: once update() and the tour have finished, the end state holds for LOOP_HOLD_MS, then
+// cross-fades into a fresh run started by replay(). Under reduced motion nothing loops and the figure
+// keeps its settled end state.
 
 import { clamp } from "./math"
 import { layoutFor, type Layout } from "./layout"
 import { Motion } from "./motion"
 import { svgEl, withElementFactory } from "./svg"
 import { StaticElement, staticFactory } from "./static"
+import { LOOP_FADE_MS, LoopClock } from "./timeline"
 
 const VISIBLE_RATIO = 0.3
 const MAX_FRAME_DELTA_MS = 50
@@ -23,6 +28,24 @@ export interface StaticRender {
 }
 
 export type FigureConstructor = new (root: Element) => ChartFigure
+
+// A range's track fills up to its thumb (--fill) and, with few enough values, is cut into one segment
+// per value (--ticks, data-ticked); chart.css draws both.
+const MAX_TICKS = 40
+
+export function syncRangeFill(input: HTMLInputElement): void {
+  const min = Number(input.min || 0)
+  const max = Number(input.max || 100)
+  const span = max - min
+  const fraction = span > 0 ? (Number(input.value) - min) / span : 0
+  input.style.setProperty("--fill", `${Math.round(clamp(fraction, 0, 1) * 1000) / 10}%`)
+  const step = Number(input.step || 1)
+  const ticks = step > 0 ? Math.round(span / step) : 0
+  const isTicked = ticks > 1 && ticks <= MAX_TICKS
+  input.toggleAttribute("data-ticked", isTicked)
+  if (isTicked) input.style.setProperty("--ticks", String(ticks))
+  else input.style.removeProperty("--ticks")
+}
 
 export class ChartFigure {
   #root: Element
@@ -43,6 +66,8 @@ export class ChartFigure {
   #lastFrameMs: number | null = null
   #rebuildFrameId = 0
   #activeTour: { patches: Record<string, StateValue>[]; index: number; heldMs: number } | null = null
+  #loopClock = new LoopClock()
+  #ghost: SVGGElement | null = null
 
   constructor(root: Element) {
     this.#root = root
@@ -128,6 +153,18 @@ export class ChartFigure {
     return []
   }
 
+  // Whether the figure plays again after it has finished. A figure that runs forever never finishes,
+  // so it needs no opt-out; one whose replay would be wrong to repeat returns false.
+  get loops(): boolean {
+    return true
+  }
+
+  // Whether a loop's restart cross-fades from the end state. A figure whose end and start look the
+  // same (only packets move) can skip the fade.
+  get loopFades(): boolean {
+    return true
+  }
+
   start(): void {
     for (const stale of this.#root.querySelectorAll(".chart-static")) stale.remove()
     this.#state = Object.freeze(this.#readMarkupState())
@@ -168,6 +205,46 @@ export class ChartFigure {
     this.#startTour()
   }
 
+  // Starts the next run of a loop: the tour again while the reader has not taken over, else the
+  // figure's own replay action.
+  replay(): void {
+    if (this.tour.length > 0 && !this.#hasInteracted) this.#startTour()
+    else this.onAction("replay")
+  }
+
+  // Cross-fades from what the drawing shows now to whatever it shows next: a copy of the drawing is
+  // laid over it and fades out while the drawing fades in. The two blend with plus-lighter inside the
+  // isolated svg, so what both show stays at full strength and only what changes fades.
+  crossfade({ durationMs = LOOP_FADE_MS }: { durationMs?: number } = {}): void {
+    const drawing = this.#drawing
+    if (!drawing || this.reducedMotion || typeof drawing.animate !== "function") return
+    this.#dropGhost()
+    const ghost = drawing.cloneNode(true) as SVGGElement
+    ghost.setAttribute("class", "chart-drawing chart-ghost")
+    ghost.setAttribute("aria-hidden", "true")
+    // The copy is a picture: no ids, no focus stops, nothing a click handler would take for a control.
+    for (const element of ghost.querySelectorAll("[id], [tabindex], [data-group], [data-value]")) {
+      for (const name of ["id", "tabindex", "data-group", "data-value", "role", "aria-label"])
+        element.removeAttribute(name)
+    }
+    drawing.after(ghost)
+    this.#ghost = ghost
+    const easing = this.#motion.tokens.easeInOut
+    const fadeOut = this.#motion.animate(ghost, [{ opacity: 1 }, { opacity: 0 }], {
+      duration: durationMs,
+      easing,
+      fill: "forwards",
+    })
+    this.#motion.animate(drawing, [{ opacity: 0 }, { opacity: 1 }], { duration: durationMs, easing })
+    if (!fadeOut) {
+      this.#dropGhost()
+      return
+    }
+    const drop = () => this.#dropGhost(ghost)
+    fadeOut.addEventListener("finish", drop)
+    fadeOut.addEventListener("cancel", drop)
+  }
+
   play(): void {
     if (this.reducedMotion) {
       this.settle()
@@ -205,6 +282,7 @@ export class ChartFigure {
     }
     for (const input of this.#root.querySelectorAll<HTMLInputElement>("input[data-param]")) {
       if (input.dataset.param) state[input.dataset.param] = Number(input.value)
+      if (input.type === "range") syncRangeFill(input)
     }
     return state
   }
@@ -219,6 +297,7 @@ export class ChartFigure {
       const param = input.dataset.param
       if (param !== undefined && Object.hasOwn(patch, param) && Number(input.value) !== patch[param]) {
         input.value = String(patch[param])
+        if (input.type === "range") syncRangeFill(input)
       }
     }
   }
@@ -246,6 +325,7 @@ export class ChartFigure {
     const input = event.target as HTMLInputElement
     if (!input.matches("input[data-param]") || !input.dataset.param) return
     this.#noteReaderInput()
+    if (input.type === "range") syncRangeFill(input)
     const value = Number(input.value)
     this.#state = Object.freeze({ ...this.#state, [input.dataset.param]: value })
     this.onInput(input.dataset.param, value)
@@ -277,6 +357,8 @@ export class ChartFigure {
 
   #rebuild(layout: Layout): void {
     this.#motion.cancelAll()
+    this.#dropGhost()
+    this.#loopClock.reset()
     this.#layout = layout
     this.#root.setAttribute("data-layout", layout)
     this.#drawing?.remove()
@@ -316,8 +398,16 @@ export class ChartFigure {
     if (!this.reducedMotion) return
     this.#activeTour = null
     this.pause()
+    this.#loopClock.reset()
     this.#motion.finishAll()
+    this.#dropGhost()
     this.settle()
+  }
+
+  #dropGhost(ghost: SVGGElement | null = this.#ghost): void {
+    if (!ghost) return
+    ghost.remove()
+    if (ghost === this.#ghost) this.#ghost = null
   }
 
   #startLoop(): void {
@@ -339,11 +429,28 @@ export class ChartFigure {
     this.#isPlaying = false
     this.#isInFrame = true
     try {
-      if (this.update(dtMs) || (this.#activeTour !== null && this.#advanceTour(dtMs))) this.#isPlaying = true
+      const isRunning = this.update(dtMs) || (this.#activeTour !== null && this.#advanceTour(dtMs))
+      if (isRunning) this.#isPlaying = true
+      if (this.loops && !this.reducedMotion) {
+        const tick = this.#loopClock.tick(isRunning, dtMs)
+        if (tick === "hold") this.#isPlaying = true
+        else if (tick === "restart") this.#restartLoop()
+      }
     } finally {
       this.#isInFrame = false
     }
     if (this.#isPlaying && this.isVisible) this.#frameId = requestAnimationFrame(next => this.#onFrame(next))
+  }
+
+  // Called inside a frame; replay() re-arms the loop through play() when it starts something. When it
+  // starts nothing, the copy laid over the drawing goes at once, since the two are the same.
+  #restartLoop(): void {
+    if (this.loopFades) this.crossfade()
+    this.replay()
+    if (!this.#isPlaying) {
+      this.#motion.finishAll()
+      this.#dropGhost()
+    }
   }
 
   #startTour(): void {

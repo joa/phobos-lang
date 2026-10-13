@@ -81,9 +81,11 @@ export interface VizGeometry {
 }
 
 const MARGIN = 14
+// Where both levels start, past the widest band label (THREADS, SHUFFLE in letter-spaced caps).
+const BAND_X = 92
 const MIN_THICK_UNITS = 6
 const TARGET_CELL_UNITS = 5
-const ROW_UNITS = 13
+const ROW_UNITS = 15
 const KIND_ROWS_MAX = 6
 
 export function vizGeometry(model: KernelModel, layout: Layout): VizGeometry {
@@ -116,7 +118,7 @@ function tileLevel(model: KernelModel, layout: Layout, widthUnits: number): { le
     { x: globalX, y: 46, text: "global" },
   ]
 
-  const x0 = wide ? 76 : 84
+  const x0 = BAND_X
   const sharedTop = tensorsBottom + 34
   const placed = placeBuffers(model)
   const rows = Math.max(1, ...placed.map(entry => entry.row + 1))
@@ -170,13 +172,14 @@ function tileLevel(model: KernelModel, layout: Layout, widthUnits: number): { le
   if (wide) {
     const slotsX = x0 + lanes * dotPitch + 40
     slots = { x: slotsX, y: threadsTop - 3, width: right - slotsX, height: 14 }
+    // The lines sentence gets its own line: beside the threads sentence the two can meet.
     threadsText = { x: x0, y: dotsBottom + 18, text: "" }
-    slotsText = { x: slotsX, y: dotsBottom + 18, text: "" }
-    bottom = dotsBottom + 18
+    slotsText = { x: slotsX, y: dotsBottom + 36, text: "" }
+    bottom = dotsBottom + 36
   } else {
     threadsText = { x: x0, y: dotsBottom + 16, text: "" }
     slots = { x: x0, y: dotsBottom + 30, width: right - x0, height: 14 }
-    slotsText = { x: x0, y: dotsBottom + 58, text: "" }
+    slotsText = { x: MARGIN, y: dotsBottom + 58, text: "" }
     bandLabels.push({ x: MARGIN, y: dotsBottom + 37, text: "lines" })
     bottom = dotsBottom + 58
   }
@@ -217,7 +220,7 @@ function tileLevel(model: KernelModel, layout: Layout, widthUnits: number): { le
 function laneLevel(model: KernelModel, layout: Layout, widthUnits: number): { level: LaneLevel; bottom: number } {
   const wide = layout === "wide"
   const right = widthUnits - MARGIN
-  const x0 = wide ? 76 : 84
+  const x0 = BAND_X
   const warps = model.trace.launch.warps
   const lanes = model.trace.launch.lanes
   const foldPitch = wide ? 5.5 : 4.6
@@ -276,7 +279,8 @@ function laneLevel(model: KernelModel, layout: Layout, widthUnits: number): { le
       laneLabels,
       arcMaxUnits,
       slots,
-      slotsText: { x: x0, y: slotsY + 30, text: "" },
+      // Narrow, the sentence starts at the margin so it fits the plate.
+      slotsText: { x: wide ? x0 : MARGIN, y: slotsY + 30, text: "" },
       stageText: { x: right, y: laneY - arcMaxUnits - 8, text: "", anchor: "end" },
       kinds,
       idleText: { x: x0, y: laneY - arcMaxUnits / 2, text: "" },
@@ -318,7 +322,7 @@ function placeTensors(model: KernelModel, area: Rect, layout: Layout): TensorPla
   const gap = 16
   const columnWidth = (area.width - (perRow - 1) * gap) / perRow
   const boxHeight = wide ? 92 : 58
-  const rowPitch = boxHeight + 40
+  const rowPitch = boxHeight + 46
   return tensors.map((tensor, index) => {
     const column = index % perRow
     const row = Math.floor(index / perRow)
@@ -352,8 +356,12 @@ function placeTensors(model: KernelModel, area: Rect, layout: Layout): TensorPla
       sy,
       cellRows,
       cellCols,
-      label: { x, y: y + height + 13, text: `${tensor.name}  ${tensor.elem}[${tensor.shape.join(", ")}]` },
-      note: { x, y: y + height + 26, text: cellNote },
+      label: {
+        x,
+        y: y + height + 15,
+        text: `${tensor.name}${wide ? "  " : " "}${tensor.elem}[${tensor.shape.join(", ")}]`,
+      },
+      note: { x, y: y + height + 31, text: cellNote },
     }
   })
 }

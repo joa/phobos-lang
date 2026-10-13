@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest"
+import { LABEL_UNITS } from "../src/lib/figure/layout"
 import TileCopySweepFigure from "../src/components/figures/tile-copy-sweep/tile-copy-sweep.figure"
 import {
   footprintBytes,
@@ -108,7 +109,7 @@ for (const layout of ["wide", "narrow"] as const) {
     })
 
     it("fits the program and the ruler", () => {
-      const longest = Math.max(...[...PROGRAM.var, ...PROGRAM.let].map(line => textWidthUnits(line)))
+      const longest = Math.max(...[...PROGRAM.var, ...PROGRAM.let].map(line => textWidthUnits(line, LABEL_UNITS)))
       for (const line of geometry.program) {
         const box = { x: line.text.x, y: line.text.y - 7, width: longest, height: 14 }
         expect(box.x + box.width).toBeLessThanOrEqual(geometry.widthUnits - 8)

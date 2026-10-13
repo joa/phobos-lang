@@ -2,7 +2,9 @@
 // whose default export extends ChartFigure; the markup names it with data-chart-figure="<name>".
 // Modules load lazily, one chunk each, and only once a figure comes within a screen of the viewport,
 // so a page pays only for the figures the reader gets near; until then the build-time drawing shows
-// the end state. One broken figure must not take the others down.
+// the end state. One broken figure must not take the others down. Once started, each figure watches
+// itself (chart-figure.ts): its frame loop, and with it its loop's hold, runs only while 30% of it is
+// on screen in a visible tab, and resumes where it stopped.
 
 import { ensureGlowDefs } from "../../lib/figure/draw"
 import type { FigureConstructor } from "../../lib/figure/chart-figure"

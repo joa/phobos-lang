@@ -54,6 +54,7 @@ export function plate(parent: Element, idPrefix: string, options: PlateOptions):
     defs
   )
   svgEl("circle", { class: "chart-graticule-dot", cx: pitchUnits / 2, cy: pitchUnits / 2, r: 0.75 }, pattern)
+  svgEl("rect", { class: "chart-vignette", width: widthUnits, height: heightUnits }, group)
   svgEl("rect", { class: "chart-graticule", width: widthUnits, height: heightUnits, fill: `url(#${patternId})` }, group)
   svgEl("path", { class: "chart-ticks", d: registrationTicksPath(widthUnits, heightUnits) }, group)
   if (label) {
@@ -213,7 +214,11 @@ export function glowDefsMarkup(): string {
       `<stop offset="0.45" class="chart-glow-stop sp-${space}" stop-opacity="0.12"/>` +
       `<stop offset="1" class="chart-glow-stop sp-${space}" stop-opacity="0"/></radialGradient>`
   ).join("")
-  return `<svg id="${GLOW_DEFS_ID}" class="chart-defs" aria-hidden="true" width="0" height="0"><defs>${gradients}</defs></svg>`
+  const vignette =
+    `<radialGradient id="chart-plate-vignette" cx="0.5" cy="0.45" r="0.6">` +
+    `<stop offset="0" class="chart-vignette-stop" stop-opacity="0.07"/>` +
+    `<stop offset="1" class="chart-vignette-stop" stop-opacity="0"/></radialGradient>`
+  return `<svg id="${GLOW_DEFS_ID}" class="chart-defs" aria-hidden="true" width="0" height="0"><defs>${gradients}${vignette}</defs></svg>`
 }
 
 export function ensureGlowDefs(): void {

@@ -132,7 +132,7 @@ export function buildElements(root: SVGGElement, id: string, model: KernelModel,
       svgEl("rect", { class: "chart-box is-on viz-written is-hidden" }, group)
     )
     const current = range(CURRENT_POOL).map(() => svgEl("rect", { class: "chart-box is-hot is-hidden" }, group))
-    entrance.push(text(group, place.label, "chart-label"))
+    entrance.push(text(group, place.label, "chart-label is-small"))
     entrance.push(text(group, place.note, "chart-label is-small"))
     const masked = text(
       group,
@@ -159,7 +159,7 @@ export function buildElements(root: SVGGElement, id: string, model: KernelModel,
     const buffer = model.buffer(placed.id)
     const rect = svgEl("rect", { class: "chart-box", ...rectAttrs(placed.rect) }, sharedGroup)
     const name = buffer?.name ?? ""
-    const fits = placed.rect.width >= name.length * 6.8 + 6
+    const fits = placed.rect.width >= name.length * 7.6 + 6
     const nameText = fits
       ? text(
           sharedGroup,
@@ -234,7 +234,7 @@ export function buildElements(root: SVGGElement, id: string, model: KernelModel,
   for (const laneLabel of lane.laneLabels) text(laneGroup, laneLabel, "chart-label is-small")
   const stageText = text(laneGroup, lane.stageText, "chart-label is-small")
   const idleText = text(laneGroup, lane.idleText, "chart-label is-small")
-  const lanePackets = lane.lanes.map(() => new StarPacket(laneGroup, { space: "reg", trailGapUnits: 3 }))
+  const lanePackets = lane.lanes.map(() => new StarPacket(laneGroup, { space: "reg", trailGapUnits: 3, count: 6 }))
 
   const kindGroup = svgEl("g", { class: "sp-reg" }, laneGroup)
   const kindNames: SVGTextElement[] = []

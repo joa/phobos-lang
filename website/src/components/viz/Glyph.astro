@@ -1,0 +1,24 @@
+---
+// A 16 x 16 control glyph drawn in currentColor, for icon buttons. The button carries the
+// accessible name; the glyph is decoration.
+interface Props {
+  name: "back" | "next" | "play" | "pause" | "left" | "right" | "replay"
+}
+
+const PATHS: Record<Props["name"], string> = {
+  back: "M4 3.5v9M12.5 3.5 6.5 8l6 4.5z",
+  next: "M12 3.5v9M3.5 3.5 9.5 8l-6 4.5z",
+  play: "M5 3v10l8.5-5z",
+  pause: "M5 3.5v9M11 3.5v9",
+  left: "M10 3.5 5.5 8l4.5 4.5",
+  right: "M6 3.5 10.5 8 6 12.5",
+  replay: "M3.5 8a4.5 4.5 0 1 0 1.4-3.3M3.5 2.5v2.6h2.6",
+}
+// Triangles are filled; strokes stay hairlines.
+const FILLED = new Set<Props["name"]>(["back", "next", "play"])
+const { name } = Astro.props
+---
+
+<svg class:list={["chart-glyph", `is-${name}`]} viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+  <path d={PATHS[name]} class:list={{ "is-filled": FILLED.has(name) }} />
+</svg>

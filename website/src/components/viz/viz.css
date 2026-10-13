@@ -134,11 +134,6 @@
   margin-left: 0;
 }
 
-.viz-icon {
-  min-width: 32px;
-  padding: 0 0.5rem;
-}
-
 .viz-cta-value {
   min-width: 8ch;
   text-align: center;
@@ -168,10 +163,6 @@
   overflow: hidden;
   clip-path: inset(50%);
   white-space: nowrap;
-}
-
-.viz-play {
-  min-width: 4.5rem;
 }
 
 .viz-figure .chart-readout {

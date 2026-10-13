@@ -8,7 +8,8 @@
 // - pulse: the soft glow on arrival, fading back over 300 ms.
 // - breathe and sweep are pure CSS (.is-breathing, .chart-sweep, .sweep-line in chart.css), paused
 //   while their figure is off screen; setBreathing() and sweepWire() only add the classes or element.
-// - Star packets with comet trails live in packet.ts; they move in the figure's frame loop.
+// - Packets, point clouds of particles, live in packet.ts; they move in the figure's frame loop.
+// - The loop's hold and cross-fade live in timeline.ts (LoopClock) and chart-figure.ts (crossfade).
 
 import type { Space } from "./draw"
 import { svgEl } from "./svg"

@@ -59,3 +59,46 @@ export class Timeline {
     this.#heldMs = this.#holdMs
   }
 }
+
+// How long a figure rests on its end state before it plays again, and how long the end state takes
+// to cross-fade into the start of the next run.
+export const LOOP_HOLD_MS = 1500
+export const LOOP_FADE_MS = 900
+
+export type LoopTick = "idle" | "run" | "hold" | "restart"
+
+// Decides when a figure that has finished playing plays again. The figure reports every frame
+// whether it animated; once it stops, the clock holds for holdMs and then says "restart". A figure
+// that never animated since its last restart stays idle, so a run that turned out to have nothing to
+// play does not restart forever. Pure, driven by dtMs, so it pauses with the frame loop.
+export class LoopClock {
+  #holdMs: number
+  #heldMs = 0
+  #hasRun = false
+
+  constructor({ holdMs = LOOP_HOLD_MS }: { holdMs?: number } = {}) {
+    this.#holdMs = holdMs
+  }
+
+  get heldMs(): number {
+    return this.#heldMs
+  }
+
+  reset(): void {
+    this.#heldMs = 0
+    this.#hasRun = false
+  }
+
+  tick(isRunning: boolean, dtMs: number): LoopTick {
+    if (isRunning) {
+      this.#hasRun = true
+      this.#heldMs = 0
+      return "run"
+    }
+    if (!this.#hasRun) return "idle"
+    this.#heldMs += Math.max(0, dtMs)
+    if (this.#heldMs < this.#holdMs) return "hold"
+    this.reset()
+    return "restart"
+  }
+}
