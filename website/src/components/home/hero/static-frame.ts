@@ -40,8 +40,8 @@ export function staticFrame(bodyCount = 2600): StaticFrame {
   return { paths, silhouette: { ...frame.silhouette } }
 }
 
-// The ink as CSS, from the theme's variables.
-export function inkCss(ink: Ink): string {
+// The ink as CSS, from the theme's variables. Takes any ink whose tokens name CSS variables.
+export function inkCss(ink: Pick<Ink, "mix"> & { from: string; to: string }): string {
   const to = Math.round(ink.mix * 100)
   return `color-mix(in srgb, var(--${ink.to}) ${to}%, var(--${ink.from}))`
 }
