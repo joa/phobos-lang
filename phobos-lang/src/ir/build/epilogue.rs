@@ -14,7 +14,10 @@ use crate::ir::{At, Ir, OpId, OpKind, Space, Tree, Type, ValueId};
 /// Only scalar ops may sit between the two. The destination is a shared tile
 /// of its own, since the write-out has no bounds guard, and neither factor
 /// reads it, since a factor is read across the whole contraction.
-pub(super) fn fuse_dot_epilogues(ir: &mut Ir) {
+///
+/// Returns each fused op with the dot it replaced.
+pub(super) fn fuse_dot_epilogues(ir: &mut Ir) -> Vec<(OpId, OpId)> {
+    let mut fused = Vec::new();
     let dots: Vec<OpId> = ir
         .all_ops()
         .into_iter()
@@ -33,10 +36,12 @@ pub(super) fn fuse_dot_epilogues(ir: &mut Ir) {
     for dot in dots {
         let Some(update) = next_tile_op(ir, dot) else { continue };
         let Some((kind, operands)) = plan(ir, dot, update) else { continue };
-        ir.create_op(At::Before(update), kind, &operands, Vec::new(), Vec::new());
+        let op = ir.create_op(At::Before(update), kind, &operands, Vec::new(), Vec::new());
         ir.erase_op(update);
         ir.erase_op(dot);
+        fused.push((op, dot));
     }
+    fused
 }
 
 /// The op after `dot`, past any scalar ops.

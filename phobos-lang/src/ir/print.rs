@@ -29,6 +29,19 @@ impl fmt::Display for Ir {
     }
 }
 
+impl Ir {
+    /// One op's line as the printer shows it, without its blocks.
+    pub fn print_op(&self, op: OpId) -> String {
+        let mut p = Printer {
+            ir: self,
+            out: String::new(),
+            depth: 0,
+        };
+        p.head(op);
+        p.out
+    }
+}
+
 struct Printer<'a> {
     ir: &'a Ir,
     out: String,
@@ -74,8 +87,8 @@ impl Printer<'_> {
         }
     }
 
-    fn op(&mut self, op: OpId) {
-        self.indent();
+    /// The op's own line: its results, kind and operands.
+    fn head(&mut self, op: OpId) {
         let results = self.ir.results(op);
         if !results.is_empty() {
             let rs: Vec<String> = results
@@ -90,6 +103,11 @@ impl Printer<'_> {
             let os: Vec<String> = operands.iter().map(|&v| self.value(v)).collect();
             let _ = write!(self.out, " {}", os.join(", "));
         }
+    }
+
+    fn op(&mut self, op: OpId) {
+        self.indent();
+        self.head(op);
         let blocks = self.ir.blocks_of(op).to_vec();
         if blocks.is_empty() {
             self.out.push('\n');

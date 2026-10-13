@@ -244,3 +244,26 @@ fn a_dot_keeps_its_product_when_it_is_read_again_or_feeds_its_target() {
     );
     assert!(!out.contains("dot_fused"), "{out}");
 }
+
+/// Each op carries the line of the statement it came from, a loop its
+/// header's.
+#[test]
+fn ops_carry_their_statement_spans() {
+    let src = "@aligned(N = 64)\nkernel k(A: tensor<f32>[N], B: tensor<f32>[N]) {\n  let p = ctx.block.x * 64\n  for i in range(0, 2) {\n    B[p :+ 64] = A[p :+ 64] * 2.0\n  }\n}\n";
+    let kernels = crate::parse(src).unwrap();
+    let base = phobos_base::context::Context::default();
+    let (ir, report) = build(&base, target(), &kernels[0]).unwrap();
+    let line_of = |pick: &dyn Fn(&OpKind) -> bool| {
+        let op = ir
+            .all_ops()
+            .into_iter()
+            .find(|&op| pick(ir.kind(op)))
+            .expect("op present");
+        report.spans.get(&op).map(|s| s.line)
+    };
+    assert_eq!(line_of(&|k| matches!(k, OpKind::ProgramId(0))), Some(3));
+    assert_eq!(line_of(&|k| matches!(k, OpKind::For(_))), Some(4));
+    assert_eq!(line_of(&|k| matches!(k, OpKind::Slice(_))), Some(5));
+    // The parameter bindings come from no statement.
+    assert_eq!(line_of(&|k| matches!(k, OpKind::AssumeAlign)), None);
+}

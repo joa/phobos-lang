@@ -403,6 +403,7 @@ fn windows(trace: &Trace) -> HashMap<OpId, Window> {
                     top.last_was_barrier = false;
                 }
             }
+            Event::Copy { .. } | Event::Contract { .. } => {}
         }
     }
     out

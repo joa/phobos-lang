@@ -60,7 +60,7 @@ impl<'a> Inliner<'a> {
     fn stmts(&mut self, stmts: Vec<Stmt>, depth: usize) -> Result<Vec<Stmt>, String> {
         let mut out = Vec::new();
         for stmt in stmts {
-            if let Stmt::Expr(Expr::Call { callee, args }) = &stmt
+            if let Stmt::Expr(Expr::Call { callee, args }, _) = &stmt
                 && let Some(f) = self.find(callee)
                 && let Body::Stmts(_) = f.body
             {
@@ -74,20 +74,38 @@ impl<'a> Inliner<'a> {
 
     fn stmt(&mut self, stmt: Stmt, depth: usize) -> Result<Stmt, String> {
         Ok(match stmt {
-            Stmt::Let { name, ty, value } => Stmt::Let {
+            Stmt::Let {
+                name,
+                ty,
+                value,
+                span,
+            } => Stmt::Let {
                 name,
                 ty,
                 value: self.expr(value, depth)?,
+                span,
             },
-            Stmt::Var { name, ty, value } => Stmt::Var {
+            Stmt::Var {
+                name,
+                ty,
+                value,
+                span,
+            } => Stmt::Var {
                 name,
                 ty,
                 value: value.map(|v| self.expr(v, depth)).transpose()?,
+                span,
             },
-            Stmt::Assign { target, op, value } => Stmt::Assign {
+            Stmt::Assign {
+                target,
+                op,
+                value,
+                span,
+            } => Stmt::Assign {
                 target: self.expr(target, depth)?,
                 op,
                 value: self.expr(value, depth)?,
+                span,
             },
             Stmt::For {
                 var,
@@ -96,6 +114,7 @@ impl<'a> Inliner<'a> {
                 step,
                 unroll,
                 body,
+                span,
             } => Stmt::For {
                 var,
                 start: self.expr(start, depth)?,
@@ -103,17 +122,25 @@ impl<'a> Inliner<'a> {
                 step: step.map(|s| self.expr(s, depth)).transpose()?,
                 unroll: unroll.map(|u| self.expr(u, depth)).transpose()?,
                 body: self.stmts(body, depth)?,
+                span,
             },
-            Stmt::While { cond, body } => Stmt::While {
+            Stmt::While { cond, body, span } => Stmt::While {
                 cond: self.expr(cond, depth)?,
                 body: self.stmts(body, depth)?,
+                span,
             },
-            Stmt::If { cond, then, r#else } => Stmt::If {
+            Stmt::If {
+                cond,
+                then,
+                r#else,
+                span,
+            } => Stmt::If {
                 cond: self.expr(cond, depth)?,
                 then: self.stmts(then, depth)?,
                 r#else: r#else.map(|e| self.stmts(e, depth)).transpose()?,
+                span,
             },
-            Stmt::Expr(e) => Stmt::Expr(self.expr(e, depth)?),
+            Stmt::Expr(e, span) => Stmt::Expr(self.expr(e, depth)?, span),
         })
     }
 
@@ -244,7 +271,7 @@ fn locals(body: &[Stmt]) -> Vec<String> {
                 out.extend(locals(then));
                 out.extend(locals(r#else.as_deref().unwrap_or_default()));
             }
-            Stmt::Assign { .. } | Stmt::Expr(_) => {}
+            Stmt::Assign { .. } | Stmt::Expr(..) => {}
         }
     }
     out
@@ -308,17 +335,34 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
     let rename = |name: &String| renames.get(name).cloned().unwrap_or_else(|| name.clone());
     let block = |b: &[Stmt]| b.iter().map(|s| subst_stmt(s, args, renames)).collect::<Result<Vec<_>, _>>();
     Ok(match stmt {
-        Stmt::Let { name, ty, value } => Stmt::Let {
+        Stmt::Let {
+            name,
+            ty,
+            value,
+            span,
+        } => Stmt::Let {
             name: rename(name),
             ty: ty.clone(),
             value: go(value)?,
+            span: *span,
         },
-        Stmt::Var { name, ty, value } => Stmt::Var {
+        Stmt::Var {
+            name,
+            ty,
+            value,
+            span,
+        } => Stmt::Var {
             name: rename(name),
             ty: ty.clone(),
             value: value.as_ref().map(go).transpose()?,
+            span: *span,
         },
-        Stmt::Assign { target, op, value } => {
+        Stmt::Assign {
+            target,
+            op,
+            value,
+            span,
+        } => {
             let target = go(target)?;
             let lvalue = match &target {
                 Expr::Var(_) => true,
@@ -332,6 +376,7 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
                 target,
                 op: *op,
                 value: go(value)?,
+                span: *span,
             }
         }
         Stmt::For {
@@ -341,6 +386,7 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
             step,
             unroll,
             body,
+            span,
         } => Stmt::For {
             var: rename(var),
             start: go(start)?,
@@ -348,16 +394,24 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
             step: step.as_ref().map(go).transpose()?,
             unroll: unroll.as_ref().map(go).transpose()?,
             body: block(body)?,
+            span: *span,
         },
-        Stmt::While { cond, body } => Stmt::While {
+        Stmt::While { cond, body, span } => Stmt::While {
             cond: go(cond)?,
             body: block(body)?,
+            span: *span,
         },
-        Stmt::If { cond, then, r#else } => Stmt::If {
+        Stmt::If {
+            cond,
+            then,
+            r#else,
+            span,
+        } => Stmt::If {
             cond: go(cond)?,
             then: block(then)?,
             r#else: r#else.as_deref().map(block).transpose()?,
+            span: *span,
         },
-        Stmt::Expr(e) => Stmt::Expr(go(e)?),
+        Stmt::Expr(e, span) => Stmt::Expr(go(e)?, *span),
     })
 }

@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, Rv};
-use crate::ast::{AssignOp, BinOp, Expr, Scalar as AstScalar, Stmt, Type as AstType};
+use crate::ast::{AssignOp, BinOp, Expr, Scalar as AstScalar, Span, Stmt, Type as AstType};
 use crate::ir::{Bounds, Coeff, ForInfo, GemmType, OpKind, Scalar, Type};
 use crate::shape;
 
@@ -58,53 +58,78 @@ impl Build {
         };
         let seed = self.value(OpKind::GemmInit, &[init], ty.clone());
 
-        let (lo, hi, st, iv_div) = self.loop_bounds(m.start, m.end, m.step)?;
-        let body = self.ir.new_block(&[Type::INDEX, ty.clone()]);
-        let iv = self.ir.args(body)[0];
-        self.ir.set_name(iv, m.kt);
-        let acc_arg = self.ir.args(body)[1];
-        self.in_block(body, |b| {
-            b.push_scope();
-            b.bind(m.kt, Binding::Let { value: iv, div: iv_div });
-            let folded = (|| {
-                let a = b.tile_operand(m.a_slice, "a register matmul's a operand")?;
-                let bb = b.tile_operand(m.b_slice, "a register matmul's b operand")?;
-                Ok::<_, anyhow::Error>(b.value(OpKind::GemmDot, &[acc_arg, a, bb], ty.clone()))
-            })();
-            b.pop_scope();
-            let folded = folded?;
-            b.stmt(OpKind::Yield, &[folded]);
-            Ok::<(), anyhow::Error>(())
+        // Each op takes the line of the statement it stands for.
+        let Stmt::For {
+            body: loop_body, ..
+        } = &stmts[1]
+        else {
+            bail!("a register matmul without its loop");
+        };
+        let spans: Vec<Span> = loop_body.iter().map(Stmt::span).collect();
+        let op = self.spanned(stmts[1].span(), |b| {
+            let (lo, hi, st, iv_div) = b.loop_bounds(m.start, m.end, m.step)?;
+            let body = b.ir.new_block(&[Type::INDEX, ty.clone()]);
+            let iv = b.ir.args(body)[0];
+            b.ir.set_name(iv, m.kt);
+            let acc_arg = b.ir.args(body)[1];
+            b.in_block(body, |b| {
+                b.push_scope();
+                b.bind(
+                    m.kt,
+                    Binding::Let {
+                        value: iv,
+                        div: iv_div,
+                    },
+                );
+                let folded = (|| {
+                    let a = b.spanned(spans[0], |b| {
+                        b.tile_operand(m.a_slice, "a register matmul's a operand")
+                    })?;
+                    let bb = b.spanned(spans[1], |b| {
+                        b.tile_operand(m.b_slice, "a register matmul's b operand")
+                    })?;
+                    b.spanned(spans[2], |b| {
+                        Ok(b.value(OpKind::GemmDot, &[acc_arg, a, bb], ty.clone()))
+                    })
+                })();
+                b.pop_scope();
+                let folded = folded?;
+                b.stmt(OpKind::Yield, &[folded]);
+                Ok::<(), anyhow::Error>(())
+            })?;
+            Ok(b.op(
+                OpKind::For(ForInfo {
+                    bounds: Bounds::Dynamic,
+                    ragged: false,
+                    carried: 1,
+                    hoisted: 0,
+                    pipeline: None,
+                }),
+                &[lo, hi, st, seed],
+                vec![ty],
+                vec![body],
+            ))
         })?;
-        let op = self.op(
-            OpKind::For(ForInfo {
-                bounds: Bounds::Dynamic,
-                ragged: false,
-                carried: 1,
-                hoisted: 0,
-                pipeline: None,
-            }),
-            &[lo, hi, st, seed],
-            vec![ty],
-            vec![body],
-        );
         let acc = self.ir.results(op)[0];
 
-        let view = self.tile_operand(m.target, "a register matmul's target")?;
-        let mut operands = vec![acc, view];
-        for e in [m.alpha_expr, m.beta_expr].into_iter().flatten() {
-            let Rv::Scalar(v) = self.emit_expr(e)? else {
-                bail!("a register matmul's scaling is not a scalar");
-            };
-            operands.push(v);
-        }
-        self.stmt(
-            OpKind::GemmStore {
-                alpha: m.alpha,
-                beta: m.beta,
-            },
-            &operands,
-        );
+        self.spanned(stmts[m.consumed - 1].span(), |b| {
+            let view = b.tile_operand(m.target, "a register matmul's target")?;
+            let mut operands = vec![acc, view];
+            for e in [m.alpha_expr, m.beta_expr].into_iter().flatten() {
+                let Rv::Scalar(v) = b.emit_expr(e)? else {
+                    bail!("a register matmul's scaling is not a scalar");
+                };
+                operands.push(v);
+            }
+            b.stmt(
+                OpKind::GemmStore {
+                    alpha: m.alpha,
+                    beta: m.beta,
+                },
+                &operands,
+            );
+            Ok(())
+        })?;
         Ok(Some(m.consumed))
     }
 
@@ -115,6 +140,7 @@ impl Build {
                 name: acc,
                 ty: Some(AstType::Tile(acc_scalar, dims)),
                 value: Some(init),
+                ..
             },
             Stmt::For {
                 var: kt,
@@ -123,6 +149,7 @@ impl Build {
                 step,
                 unroll: None,
                 body,
+                ..
             },
             tail @ ..,
         ] = stmts
@@ -142,11 +169,13 @@ impl Build {
                     name: prev_load_name,
                     ty: None,
                     value: _,
+                    ..
                 },
                 Stmt::Assign {
                     target,
                     op: AssignOp::Set,
                     value: epi,
+                    ..
                 },
                 ..,
             ] => (target, epi, Some(prev_load_name.as_str()), 4usize),
@@ -155,6 +184,7 @@ impl Build {
                     target,
                     op: AssignOp::Set,
                     value: epi,
+                    ..
                 },
                 ..,
             ] => (target, epi, None, 3usize),
@@ -247,6 +277,7 @@ impl Build {
                 target: Expr::Var(t),
                 op: AssignOp::Add,
                 value: Expr::Call { callee, args },
+                ..
             },
         ] = &body[..]
         else {

@@ -139,7 +139,7 @@ impl<'a> Analyzer<'a> {
                         self.symbols.insert(name.to_string(), Binding::Scalar(sv));
                     }
                 }
-                Stmt::Assign { target, op, value } => {
+                Stmt::Assign { target, op, value, .. } => {
                     self.scan_reads(value, refs, reads)?;
                     match target {
                         Expr::Index { base, subs } => {
@@ -167,6 +167,7 @@ impl<'a> Analyzer<'a> {
                     end,
                     step,
                     body,
+                    ..
                 } => {
                     if !matches!(start, Expr::Int(0)) {
                         bail!("device-level loops must start at 0");
@@ -187,18 +188,18 @@ impl<'a> Analyzer<'a> {
                     self.walk_single(body, refs, reads, writes)?;
                     self.symbols.remove(var);
                 }
-                Stmt::While { cond, body } => {
+                Stmt::While { cond, body, .. } => {
                     self.scan_reads(cond, refs, reads)?;
                     self.walk_single(body, refs, reads, writes)?;
                 }
-                Stmt::If { cond, then, r#else } => {
+                Stmt::If { cond, then, r#else, .. } => {
                     self.scan_reads(cond, refs, reads)?;
                     self.walk_single(then, refs, reads, writes)?;
                     if let Some(e) = r#else {
                         self.walk_single(e, refs, reads, writes)?;
                     }
                 }
-                Stmt::Expr(e) => self.scan_reads(e, refs, reads)?,
+                Stmt::Expr(e, _) => self.scan_reads(e, refs, reads)?,
             }
         }
         Ok(())
@@ -265,6 +266,7 @@ impl<'a> Analyzer<'a> {
                 name,
                 ty: Some(AstType::Tile(_, dims)),
                 value,
+                ..
             } => {
                 if in_loop {
                     bail!("tile declarations inside a cluster loop are not supported");
@@ -326,6 +328,7 @@ impl<'a> Analyzer<'a> {
                 end,
                 step,
                 body,
+                ..
             } => {
                 if in_loop {
                     bail!("nested cluster-level loops are not supported yet");
@@ -360,9 +363,9 @@ impl<'a> Analyzer<'a> {
                 }))
             }
 
-            Stmt::Assign { target, op, value } => self.assign(target, *op, value, idx, in_loop),
+            Stmt::Assign { target, op, value, .. } => self.assign(target, *op, value, idx, in_loop),
 
-            Stmt::While { .. } | Stmt::If { .. } | Stmt::Expr(_) => {
+            Stmt::While { .. } | Stmt::If { .. } | Stmt::Expr(..) => {
                 bail!("`while`/`if`/expression statements are not supported under @cluster yet")
             }
         }

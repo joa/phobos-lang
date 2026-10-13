@@ -194,6 +194,11 @@ impl Ir {
             .unwrap_or_else(|| panic!("{block} is erased or was never created"))
     }
 
+    /// Every op id handed out so far is below this, erased ones included.
+    pub fn op_count(&self) -> usize {
+        self.ops.len()
+    }
+
     pub fn is_alive(&self, op: OpId) -> bool {
         self.ops.get(op.index()).is_some_and(Option::is_some)
     }

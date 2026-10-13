@@ -13,7 +13,9 @@ const SHARED_BANK_BYTES: i64 = 128;
 impl Build {
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt) -> Result<()> {
         match stmt {
-            Stmt::Let { name, ty, value } => {
+            Stmt::Let {
+                name, ty, value, ..
+            } => {
                 if let Some(AstType::Tile(scalar, dims)) = ty {
                     let tile = self.emit_tile_decl(*scalar, dims, value)?;
                     self.bind(name, Binding::View(tile));
@@ -25,7 +27,9 @@ impl Build {
                     }
                 }
             }
-            Stmt::Var { name, ty, value } => {
+            Stmt::Var {
+                name, ty, value, ..
+            } => {
                 if let Some(AstType::Tile(scalar, dims)) = ty
                     && self.registers.contains(name)
                 {
@@ -65,7 +69,9 @@ impl Build {
                     }
                 }
             }
-            Stmt::Assign { target, op, value } => self.emit_assign(target, *op, value)?,
+            Stmt::Assign {
+                target, op, value, ..
+            } => self.emit_assign(target, *op, value)?,
             Stmt::For {
                 var,
                 start,
@@ -73,6 +79,7 @@ impl Build {
                 step,
                 unroll: Some(unroll),
                 body,
+                ..
             } => self.emit_unrolled_for(var, start, end, step.as_ref(), unroll, body)?,
             Stmt::For {
                 var,
@@ -81,10 +88,13 @@ impl Build {
                 step,
                 unroll: None,
                 body,
+                ..
             } => self.emit_for(var, start, end, step.as_ref(), body)?,
-            Stmt::While { cond, body } => self.emit_while(cond, body)?,
-            Stmt::If { cond, then, r#else } => self.emit_if(cond, then, r#else.as_deref())?,
-            Stmt::Expr(e) => {
+            Stmt::While { cond, body, .. } => self.emit_while(cond, body)?,
+            Stmt::If {
+                cond, then, r#else, ..
+            } => self.emit_if(cond, then, r#else.as_deref())?,
+            Stmt::Expr(e, _) => {
                 self.emit_expr(e)?;
             }
         }
@@ -156,10 +166,10 @@ impl Build {
             else {
                 bail!("stage_run matched a statement emit_staging_run cannot emit");
             };
-            match self.emit_expr(value)? {
-                Rv::Tile(src) => self.bind_staged_tile(name, src, j == last)?,
+            self.spanned(s.span(), |b| match b.emit_expr(value)? {
+                Rv::Tile(src) => b.bind_staged_tile(name, src, j == last),
                 Rv::Scalar(_) => bail!("stage_run matched a scalar-valued statement"),
-            }
+            })?;
         }
         Ok(())
     }
@@ -558,21 +568,23 @@ impl Build {
     pub(crate) fn emit_stmts(&mut self, stmts: &[Stmt]) -> Result<()> {
         let mut i = 0;
         while i < stmts.len() {
-            let consumed = if let Some(consumed) = self.matmul_candidate(&stmts[i..])? {
-                consumed
-            } else if let Some(plan) = self.frag_acc_candidate(&stmts[i..]) {
-                self.bind_frag_acc(&plan);
-                1
-            } else {
-                let run = self.stage_run(&stmts[i..]);
-                if run >= 2 {
-                    self.emit_staging_run(&stmts[i..i + run])?;
-                    run
-                } else {
-                    self.emit_stmt(&stmts[i])?;
+            let consumed = self.spanned(stmts[i].span(), |b| {
+                Ok(if let Some(consumed) = b.matmul_candidate(&stmts[i..])? {
+                    consumed
+                } else if let Some(plan) = b.frag_acc_candidate(&stmts[i..]) {
+                    b.bind_frag_acc(&plan);
                     1
-                }
-            };
+                } else {
+                    let run = b.stage_run(&stmts[i..]);
+                    if run >= 2 {
+                        b.emit_staging_run(&stmts[i..i + run])?;
+                        run
+                    } else {
+                        b.emit_stmt(&stmts[i])?;
+                        1
+                    }
+                })
+            })?;
             i += consumed;
         }
         Ok(())

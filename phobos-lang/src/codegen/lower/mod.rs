@@ -4,8 +4,8 @@ mod intrinsics;
 mod lanes;
 mod pipeline;
 mod regs;
-pub(super) mod membar;
-pub(super) mod plan;
+pub(crate) mod membar;
+pub(crate) mod plan;
 mod scalar;
 mod tiles;
 

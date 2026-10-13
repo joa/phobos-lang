@@ -122,6 +122,20 @@ pub struct Kernel {
 
 pub const DEFAULT_CTA_THREADS: i64 = 256;
 
+/// The kernel attributes the compiler reads, without their `@`.
+pub const ATTRIBUTES: &[&str] = &[
+    "aligned",
+    "autotune",
+    "cluster",
+    "dynshared",
+    "launch",
+    "padstage",
+    "persistent",
+    "pipeline",
+    "registers",
+    "tensorcore",
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Launch {
     pub max_threads: i64,
@@ -192,24 +206,16 @@ impl Kernel {
     /// otherwise be silently ignored. `@cluster` is read by the cluster
     /// codegen ahead of this one.
     pub fn check_attributes(&self) -> Result<(), String> {
-        const KNOWN: &[&str] = &[
-            "aligned",
-            "autotune",
-            "cluster",
-            "dynshared",
-            "launch",
-            "padstage",
-            "persistent",
-            "pipeline",
-            "registers",
-            "tensorcore",
-        ];
-        match self.attrs.iter().find(|a| !KNOWN.contains(&a.name.as_str())) {
+        match self
+            .attrs
+            .iter()
+            .find(|a| !ATTRIBUTES.contains(&a.name.as_str()))
+        {
             Some(a) => Err(format!(
                 "kernel '{}': unknown attribute @{}; the compiler reads @{}",
                 self.name,
                 a.name,
-                KNOWN.join(", @")
+                ATTRIBUTES.join(", @")
             )),
             None => Ok(()),
         }
@@ -291,22 +297,36 @@ pub enum AssignOp {
     Add,
 }
 
+/// Where a statement sits in the source: lines and columns from 1, as the
+/// lexer counts them, the end exclusive. A compound statement's span is its
+/// header, up to its `{`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Span {
+    pub line: u32,
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
 #[derive(Debug, Clone)]
 pub enum Stmt {
     Let {
         name: String,
         ty: Option<Type>,
         value: Expr,
+        span: Span,
     },
     Var {
         name: String,
         ty: Option<Type>,
         value: Option<Expr>,
+        span: Span,
     },
     Assign {
         target: Expr,
         op: AssignOp,
         value: Expr,
+        span: Span,
     },
     For {
         var: String,
@@ -316,17 +336,20 @@ pub enum Stmt {
         /// `for<unroll n>`: the body built `n` times a turn.
         unroll: Option<Expr>,
         body: Vec<Stmt>,
+        span: Span,
     },
     While {
         cond: Expr,
         body: Vec<Stmt>,
+        span: Span,
     },
     If {
         cond: Expr,
         then: Vec<Stmt>,
         r#else: Option<Vec<Stmt>>,
+        span: Span,
     },
-    Expr(Expr),
+    Expr(Expr, Span),
 }
 
 /// Subscript inside A[ ... ].
@@ -463,10 +486,26 @@ impl Expr {
 }
 
 impl Stmt {
+    pub fn span(&self) -> Span {
+        match self {
+            Stmt::Let { span, .. }
+            | Stmt::Var { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::For { span, .. }
+            | Stmt::While { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::Expr(_, span) => *span,
+        }
+    }
+
     pub fn as_decl(&self) -> Option<(&str, Option<&Type>, Option<&Expr>)> {
         match self {
-            Stmt::Let { name, ty, value } => Some((name, ty.as_ref(), Some(value))),
-            Stmt::Var { name, ty, value } => Some((name, ty.as_ref(), value.as_ref())),
+            Stmt::Let {
+                name, ty, value, ..
+            } => Some((name, ty.as_ref(), Some(value))),
+            Stmt::Var {
+                name, ty, value, ..
+            } => Some((name, ty.as_ref(), value.as_ref())),
             _ => None,
         }
     }
@@ -493,11 +532,11 @@ impl Stmt {
                     || step.as_ref().is_some_and(|e| e.uses_name(name))
                     || block(body)
             }
-            Stmt::While { cond, body } => cond.uses_name(name) || block(body),
-            Stmt::If { cond, then, r#else } => {
-                cond.uses_name(name) || block(then) || r#else.as_deref().is_some_and(block)
-            }
-            Stmt::Expr(e) => e.uses_name(name),
+            Stmt::While { cond, body, .. } => cond.uses_name(name) || block(body),
+            Stmt::If {
+                cond, then, r#else, ..
+            } => cond.uses_name(name) || block(then) || r#else.as_deref().is_some_and(block),
+            Stmt::Expr(e, _) => e.uses_name(name),
         }
     }
 
@@ -531,19 +570,21 @@ impl Stmt {
                     stmt.walk_exprs(f);
                 }
             }
-            Stmt::While { cond, body } => {
+            Stmt::While { cond, body, .. } => {
                 cond.walk(f);
                 for stmt in body {
                     stmt.walk_exprs(f);
                 }
             }
-            Stmt::If { cond, then, r#else } => {
+            Stmt::If {
+                cond, then, r#else, ..
+            } => {
                 cond.walk(f);
                 for stmt in then.iter().chain(r#else.iter().flatten()) {
                     stmt.walk_exprs(f);
                 }
             }
-            Stmt::Expr(e) => e.walk(f),
+            Stmt::Expr(e, _) => e.walk(f),
         }
     }
 
@@ -561,7 +602,7 @@ impl Stmt {
             Stmt::Let { name, .. } | Stmt::Var { name, .. } => hits(name),
             Stmt::For { body, .. } | Stmt::While { body, .. } => block(body),
             Stmt::If { then, r#else, .. } => block(then) || r#else.as_deref().is_some_and(block),
-            Stmt::Expr(_) => false,
+            Stmt::Expr(..) => false,
         }
     }
 }

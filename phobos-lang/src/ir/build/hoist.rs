@@ -123,7 +123,7 @@ impl Build {
                         return false;
                     }
                 }
-                Stmt::Expr(_) => {}
+                Stmt::Expr(..) => {}
             }
         }
         true

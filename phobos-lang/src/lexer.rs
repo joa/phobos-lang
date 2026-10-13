@@ -68,6 +68,7 @@ impl<'a> Lexer<'a> {
                             tok: Tok::Semicolon,
                             line,
                             col,
+                            end_col: col,
                         });
                     }
                     self.advance();
@@ -215,19 +216,26 @@ impl<'a> Lexer<'a> {
                 c if c.is_alphabetic() || c == '_' => self.ident_or_keyword(),
                 other => return Err(format!("{}:{}: unexpected char '{}'", line, col, other)),
             };
-            out.push(Token { tok, line, col });
+            out.push(Token {
+                tok,
+                line,
+                col,
+                end_col: self.col,
+            });
         }
         if out.last().is_some_and(|t| Self::ends_stmt(&t.tok)) {
             out.push(Token {
                 tok: Tok::Semicolon,
                 line: self.line,
                 col: self.col,
+                end_col: self.col,
             });
         }
         out.push(Token {
             tok: Tok::Eof,
             line: self.line,
             col: self.col,
+            end_col: self.col,
         });
         Ok(out)
     }

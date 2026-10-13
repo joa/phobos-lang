@@ -18,7 +18,7 @@ use crate::ast::{BinOp, Kernel, Launch};
 mod elemwise;
 mod expr;
 mod frag;
-mod lower;
+pub(crate) mod lower;
 mod matmul;
 mod sync;
 pub mod target;
@@ -60,11 +60,34 @@ pub struct EmitOutput {
     pub pipeline_failures: Vec<(String, Vec<String>)>,
 }
 
+/// What one kernel's planning decided, shown to an observer of [`emit_observed`]
+/// between the recording emission and the one that is kept.
+#[cfg_attr(not(feature = "trace"), allow(dead_code))]
+pub(crate) struct Planned<'a> {
+    pub(crate) kernel: &'a Kernel,
+    pub(crate) ir: &'a crate::ir::Ir,
+    pub(crate) report: &'a crate::ir::build::Report,
+    pub(crate) trace: &'a lower::plan::Trace,
+    pub(crate) plan: &'a lower::plan::Plan,
+    pub(crate) elision: &'a lower::membar::Elision,
+}
+
 pub fn emit<'c>(
     base: &phobos_base::context::Context,
     kernels: &[Kernel],
     context: &'c Context,
     module: &Module<'c>,
+) -> Result<EmitOutput> {
+    emit_observed(base, kernels, context, module, &mut |_| {})
+}
+
+/// [`emit`], showing `observe` each kernel's plan.
+pub(crate) fn emit_observed<'c>(
+    base: &phobos_base::context::Context,
+    kernels: &[Kernel],
+    context: &'c Context,
+    module: &Module<'c>,
+    observe: &mut dyn FnMut(&Planned<'_>),
 ) -> Result<EmitOutput> {
     let loc = Location::unknown(context);
     let gpu_block = Block::new(&[]);
@@ -89,6 +112,14 @@ pub fn emit<'c>(
             drop(recorder.emit_kernel_ir(&ir)?);
             let plan = lower::plan::Plan::compute(&ir, &recorder.trace);
             let elision = lower::membar::Elision::decide(&ir, &recorder.trace, &plan);
+            observe(&Planned {
+                kernel,
+                ir: &ir,
+                report: &report,
+                trace: &recorder.trace,
+                plan: &plan,
+                elision: &elision,
+            });
 
             cg.elided = elision.skip;
             cg.policy = SharedPolicy::Replay(plan);

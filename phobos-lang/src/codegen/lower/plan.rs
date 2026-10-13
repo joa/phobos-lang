@@ -18,6 +18,17 @@ pub(crate) enum Event {
     /// An elementwise sweep of a tile of `shape`, `width` elements per
     /// thread, as `distribute` runs it. All its accesses share this mapping.
     Sweep { shape: Vec<i64>, width: i64 },
+    /// The sweep that follows is a tile copy moving `vector_bytes` per
+    /// access, through cp.async when `async_copy`. Only the trace reads it.
+    Copy {
+        vector_bytes: i64,
+        async_copy: bool,
+    },
+    /// The instruction family a contraction lowered to. Only the trace
+    /// reads it.
+    Contract {
+        instr: &'static str,
+    },
 }
 
 /// What the first emission recorded.
@@ -48,6 +59,17 @@ impl Trace {
 
     pub(crate) fn barrier(&mut self) {
         self.events.push(Event::Barrier);
+    }
+
+    pub(crate) fn copy(&mut self, vector_bytes: i64, async_copy: bool) {
+        self.events.push(Event::Copy {
+            vector_bytes,
+            async_copy,
+        });
+    }
+
+    pub(crate) fn contract(&mut self, instr: &'static str) {
+        self.events.push(Event::Contract { instr });
     }
 
     pub(crate) fn sweep(&mut self, shape: &[i64], width: i64) {
@@ -102,6 +124,9 @@ impl Trace {
 pub(crate) struct Plan {
     pub(crate) offsets: Vec<i64>,
     pub(crate) peak: i64,
+    /// Each allocation's life as the half-open range of event indices it
+    /// was placed under, in allocation order.
+    pub(crate) lives: Vec<(usize, usize)>,
 }
 
 /// One buffer's life on the event timeline and its size.
@@ -231,7 +256,12 @@ impl Plan {
             peak = peak.max(offset + iv.bytes);
             placed.push((k, offset, offset + iv.bytes));
         }
-        Plan { offsets, peak }
+        let lives = intervals.iter().map(|iv| (iv.start, iv.end)).collect();
+        Plan {
+            offsets,
+            peak,
+            lives,
+        }
     }
 }
 

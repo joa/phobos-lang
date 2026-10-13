@@ -397,7 +397,10 @@ fn bit_not_is_unary() {
 fn compound_assignment_becomes_a_set() {
     let p = parse("kernel k(a: i32) { var x = a\n x -= 2\n x <<= 1 }");
     for (stmt, want) in p[0].body[1..].iter().zip([BinOp::Sub, BinOp::Shl]) {
-        let Stmt::Assign { target, op, value } = stmt else {
+        let Stmt::Assign {
+            target, op, value, ..
+        } = stmt
+        else {
             panic!("expected an assignment, got {stmt:?}");
         };
         assert_eq!(*op, AssignOp::Set);
@@ -465,7 +468,12 @@ fn break_becomes_a_flag_the_loop_tests() {
         }",
     );
     // var i, var #break1, while.
-    let [_, Stmt::Var { name: flag, .. }, Stmt::While { cond, body }] = &b[..] else {
+    let [
+        _,
+        Stmt::Var { name: flag, .. },
+        Stmt::While { cond, body, .. },
+    ] = &b[..]
+    else {
         panic!("unexpected shape: {b:?}");
     };
     assert_eq!(flag, "#break1");
@@ -504,4 +512,63 @@ fn continue_is_cleared_each_iteration() {
     else {
         panic!("the flag is not cleared first: {body:?}");
     };
+}
+
+fn span(line: u32, col: u32, end_line: u32, end_col: u32) -> Span {
+    Span {
+        line,
+        col,
+        end_line,
+        end_col,
+    }
+}
+
+#[test]
+fn statements_carry_their_spans() {
+    let b = body(
+        "kernel k(A: tensor<f32>[N]) {
+  let i = ctx.block.x // the block
+  for j in range(0, N, 4) {
+    A[j] = 1.0;
+  }
+}",
+    );
+    assert_eq!(b[0].span(), span(2, 3, 2, 22));
+    // A compound statement's span is its header.
+    assert_eq!(b[1].span(), span(3, 3, 3, 26));
+    let Stmt::For { body: inner, .. } = &b[1] else {
+        panic!("expected a for: {b:?}");
+    };
+    assert_eq!(inner[0].span(), span(4, 5, 4, 15));
+}
+
+#[test]
+fn spans_survive_inlining_and_jumps() {
+    let b = body(
+        "fn bump(t) {
+  t[0] = 2.0
+}
+kernel k(A: tensor<f32>[N]) {
+  for i in range(0, N) {
+    break
+  }
+  bump(A)
+}",
+    );
+    // The break's flag is declared at its loop and set at the break.
+    let [
+        Stmt::Var { span: decl, .. },
+        Stmt::For { body: inner, .. },
+        inlined,
+    ] = &b[..]
+    else {
+        panic!("unexpected shape: {b:?}");
+    };
+    assert_eq!(*decl, span(5, 3, 5, 23));
+    let Stmt::If { then, .. } = &inner[0] else {
+        panic!("expected the guarded body: {inner:?}");
+    };
+    assert_eq!(then[0].span(), span(6, 5, 6, 10));
+    // A spliced statement keeps the line it was written on.
+    assert_eq!(inlined.span(), span(2, 3, 2, 13));
 }
