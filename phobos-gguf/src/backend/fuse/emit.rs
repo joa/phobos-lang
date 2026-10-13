@@ -4,6 +4,7 @@
 use super::*;
 
 mod conv;
+mod lanes;
 mod split;
 
 /// A run of stages sharing a partition, and whether a barrier has to precede it.
@@ -72,6 +73,8 @@ impl ChainKey {
         for (n, nest) in nests.iter().enumerate() {
             if nest.barrier_before {
                 emit.barrier();
+            } else {
+                emit.land_lane_stores();
             }
             if !emit.nest(self, nest, n)? {
                 return Ok(None);
@@ -137,6 +140,13 @@ struct Emit {
     shared: HashSet<Val>,
     /// Tile variables holding a value that never leaves its nest.
     regs: HashMap<Val, String>,
+    /// Per-lane column sums of a raw contraction, by value, until a tile
+    /// stage reads one.
+    lanes: HashMap<Val, String>,
+    /// The block decodes the raw contractions call, by format.
+    lane_fns: std::collections::BTreeMap<&'static str, String>,
+    /// Whether a per-lane store has had no barrier since.
+    lane_stores: bool,
     /// The barrier state's parameter, once a nest needs one.
     bar: Option<String>,
     /// Whether the kernel has a raw-format contraction, which sets its
@@ -178,6 +188,9 @@ impl Emit {
             redundant,
             shared: HashSet::new(),
             regs: HashMap::new(),
+            lanes: HashMap::new(),
+            lane_fns: Default::default(),
+            lane_stores: false,
             bar: None,
             raw: false,
             rot: 0,
@@ -315,19 +328,13 @@ impl Emit {
             Stage::ProjRaw {
                 a, w, out, row_off, ..
             } => {
-                let (aq, asc) = self.quant_row(a, key.len_of(a));
+                let act = self.quant(a, key.len_of(a), false);
                 let (rq, rd, fmt) = self.raw_weight(key, w)?;
                 let at = self.strided(format!("OF{s}"), row_off, unit, RAW_UNIT);
-                let name = self.reg(out, s);
-                let head = format!("      var {name}: tile<f32>[1, {RAW_UNIT}] = {fmt}_qdot_i8_t(");
-                let pad = " ".repeat(head.len());
-                let _ = write!(
-                    self.body,
-                    "      let at{s} = {at}
-{head}{aq}, {asc},
-{pad}{rq}[at{s} :+ {RAW_UNIT}, :], {rd}[at{s} :+ {RAW_UNIT}, :])
-"
-                );
+                let _ = writeln!(self.body, "      let at{s} = {at}");
+                let nb = key.len_of(a) / 256;
+                let tot = self.raw_lanes(s, fmt, &rq, &rd, (&act.0, &act.1), &format!("at{s}"), "0", nb);
+                self.lanes.insert(out, tot);
             }
             Stage::ProjRawF {
                 a,
@@ -338,28 +345,21 @@ impl Emit {
                 row_off,
                 ..
             } => {
-                let (aq, asc) = self.quant_row(a, key.len_of(a));
+                let act = self.quant(a, key.len_of(a), false);
                 let (rq, rd, fmt) = self.raw_weight(key, w)?;
                 let dst = self.given(out, key.len_of(out), View::Flat);
                 let at = self.strided(format!("OF{s}"), row_off, unit, RAW_UNIT);
                 let to = self.strided(format!("DO{s}"), out_off, unit, RAW_UNIT);
                 let _ = writeln!(self.body, "      let at{s} = {at}\n      let to{s} = {to}");
-                // A whole unit stores straight from the intrinsic. A
-                // remainder decodes a whole unit and stores only its head.
-                let head = match width == RAW_UNIT {
-                    true => format!("      {dst}[0 :+ 1, to{s} :+ {RAW_UNIT}] = {fmt}_qdot_i8_t("),
-                    false => format!("      var v{s}: tile<f32>[1, {RAW_UNIT}] = {fmt}_qdot_i8_t("),
-                };
-                let pad = " ".repeat(head.len());
-                let _ = write!(
-                    self.body,
-                    "{head}{aq}, {asc},
-{pad}{rq}[at{s} :+ {RAW_UNIT}, :], {rd}[at{s} :+ {RAW_UNIT}, :])
-"
-                );
-                if width != RAW_UNIT {
-                    let _ = writeln!(self.body, "      {dst}[0 :+ 1, to{s} :+ {width}] = v{s}[0 :+ 1, 0 :+ {width}]");
-                }
+                // A remainder decodes a whole unit and stores only its head.
+                let nb = key.len_of(a) / 256;
+                let tot = self.raw_lanes(s, fmt, &rq, &rd, (&act.0, &act.1), &format!("at{s}"), "0", nb);
+                self.store_lanes(&dst, &format!("to{s}"), &tot, width);
+            }
+            Stage::Swiglu { g, u, out } if self.lanes.contains_key(&g) && self.lanes.contains_key(&u) => {
+                let (gn, un) = (self.lanes[&g].clone(), self.lanes[&u].clone());
+                let _ = writeln!(self.body, "      let sw{s} = {gn} / (1.0 + exp(0.0 - {gn})) * {un}");
+                self.lanes.insert(out, format!("sw{s}"));
             }
             Stage::Swiglu { g, u, out } => {
                 let (gn, un) = (self.reg_of(g)?, self.reg_of(u)?);
@@ -392,9 +392,9 @@ impl Emit {
                 // `h` is either a register from this nest, like the SwiGLU
                 // output, or a caller buffer, like attention's mixed heads.
                 // The two are read differently.
-                let hn = match self.regs.get(&h) {
-                    Some(reg) => reg.clone(),
-                    None => {
+                let hn = match self.regs.contains_key(&h) || self.lanes.contains_key(&h) {
+                    true => self.reg_of(h)?,
+                    false => {
                         let flat = self.given(h, key.len_of(h), View::Flat);
                         format!("{flat}[0 :+ 1, {unit} * {q8} :+ {q8}]")
                     }
@@ -433,19 +433,13 @@ impl Emit {
                 if !width.is_multiple_of(RAW_UNIT) {
                     return Ok(false);
                 }
-                let (aq, asc) = self.quant_row(a, key.len_of(a));
+                let act = self.quant(a, key.len_of(a), false);
                 let (rq, rd, fmt) = self.raw_weight(key, w)?;
                 let yn = self.given(y, key.len_of(y), View::Flat);
-                let rt = self.tune_const("RT".into(), RAW_UNIT);
-                let head = format!("      {yn}[0 :+ 1, t{s} :+ {rt}] += {fmt}_qdot_i8_t(");
-                let pad = " ".repeat(head.len());
-                let _ = write!(
-                    self.body,
-                    "      let t{s} = {unit} * {rt}
-{head}{aq}, {asc},
-{pad}{rq}[t{s} :+ {rt}, :], {rd}[t{s} :+ {rt}, :])
-"
-                );
+                let _ = writeln!(self.body, "      let t{s} = {unit} * {RAW_UNIT}");
+                let nb = key.len_of(a) / 256;
+                let tot = self.raw_lanes(s, fmt, &rq, &rd, (&act.0, &act.1), &format!("t{s}"), "0", nb);
+                self.store_lanes(&yn, &format!("t{s}"), &format!("{yn}[0, t{s} + cu] + {tot}"), RAW_UNIT);
             }
             Stage::Conv { .. } => self.conv(key, s, unit)?,
             Stage::Gates {
@@ -504,11 +498,14 @@ impl Emit {
         name
     }
 
-    fn reg_of(&self, val: Val) -> Result<String> {
-        self.regs
-            .get(&val)
-            .cloned()
-            .ok_or_else(|| anyhow::anyhow!("value {} is read before its nest writes it", val.0))
+    fn reg_of(&mut self, val: Val) -> Result<String> {
+        if let Some(reg) = self.regs.get(&val) {
+            return Ok(reg.clone());
+        }
+        match self.lanes.get(&val).cloned() {
+            Some(lane) => Ok(self.lanes_tile(val, &lane)),
+            None => bail!("value {} is read before its nest writes it", val.0),
+        }
     }
 
     /// Emits a grid barrier. One counter and generation pair serves every
@@ -523,6 +520,7 @@ impl Emit {
             }
         };
         let _ = writeln!(self.body, "\n  grid_barrier({bar})");
+        self.lane_stores = false;
         self.barriers += 1;
     }
 
@@ -729,8 +727,9 @@ impl Emit {
         };
         // Shared declarations go first, so every tile is in scope before the
         // loop that fills it.
+        let fns: String = self.lane_fns.values().map(|f| format!("{f}\n")).collect();
         let source = format!(
-            "@launch({launch})\n@persistent\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
+            "{fns}@launch({launch})\n@persistent\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
             self.decls, self.body
         );
         Plan {

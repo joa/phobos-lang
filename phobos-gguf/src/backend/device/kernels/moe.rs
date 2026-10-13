@@ -5,7 +5,7 @@
 // runs, so the matvec's only per-token input besides the activation is a
 // slot table.
 
-use super::quant::qdot_i8_cta;
+use crate::backend::fuse::{kquant_block_call, kquant_lanes_block};
 
 /// Experts a token goes through, baked into the kernels as `U`.
 pub(crate) const MOE_USED: usize = 8;
@@ -73,35 +73,34 @@ kernel moe_topk(L: tensor<f32>[R, E], IO: tensor<f32>[1, E], TOPK: tensor<i32>[R
     .to_string()
 }
 
-/// A slot kernel's CTA width and minimum resident blocks per SM, from the
-/// format's register budget.
-fn slot_launch(resident: usize) -> (usize, usize) {
-    let cta = qdot_i8_cta(MOE_QDOT_TN);
-    (cta, (1024 / cta * resident / 4).max(1))
-}
-
-/// `kquant.rs`'s decode matvec over a cache slab.
+/// `kquant.rs`'s lanes decode matvec over a cache slab.
 ///
 /// Program `j` on the second grid axis reads slot `SLOT[j]`, `NE` rows per
 /// slot, and writes row `j` of `C`. `AQ` and `AS` hold `U` rows of
 /// quantized activation. `act_row` picks the row a program reads: `0` when
 /// all experts share one (gate and up), `j` when each has its own (down).
-/// `resident` is the per-format CTA count from `kquant.rs`.
-pub(crate) fn moe_qdot_src(name: &str, ne: usize, act_row: &str, resident: usize) -> String {
-    let (cta, min_blocks) = slot_launch(resident);
+pub fn moe_qdot_src(name: &str, ne: usize, act_row: &str) -> String {
+    let (block, bytes, setup) = kquant_lanes_block(name);
+    let call = kquant_block_call(name, "CB", "CD", "AQ", "AS", act_row, "g", "acc", "b");
     format!(
-        "@launch({cta}, {min_blocks})
-@autotune(TN in [{MOE_QDOT_TN}], NE in [{ne}])
-@aligned(N = TN, NS = NE)
+        "{block}
+@launch(256)
+@autotune(NE in [{ne}])
+@aligned(N = {MOE_QDOT_TN}, NS = NE, K = 256, RB = {bytes})
 kernel {name}_moe_qdot(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tensor<i32>[1, U],
                       CB: tensor<i8>[NS, RB], CD: tensor<f16>[NS, NB], C: tensor<f32>[U, N]) {{
-  let pn = ctx.block.x
   let j = ctx.block.y
-  let r = SLOT[0, j] * NE + pn * TN
-  C[j :+ 1, pn * TN :+ TN] = {name}_qdot_i8_t(AQ[{act_row} :+ 1, :], AS[{act_row} :+ 1, :],
-                                              CB[r :+ TN, :], CD[r :+ TN, :])
+{lanes}{setup}  var acc: f32 = 0.0
+  for b in range(0, K / 256, 1) {{
+    {call}
+  }}
+  let total = sum<over ctx.lane, width 4>(acc)
+  if q == 0 {{
+    C[j, col] = total
+  }}
 }}
-"
+",
+        lanes = slot_lanes()
     )
 }
 
@@ -110,24 +109,44 @@ kernel {name}_moe_qdot(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tenso
 /// Program `j` on the second grid axis contracts the shared activation row
 /// against slot `SLOT[j]` of both the gate and up slabs, which share a
 /// format. It writes `silu(gate) * up` as row `j` of `H`.
-pub(crate) fn moe_gateup_src(name: &str, ne: usize, resident: usize) -> String {
-    let (cta, min_blocks) = slot_launch(resident);
+pub fn moe_gateup_src(name: &str, ne: usize) -> String {
+    let (block, bytes, setup) = kquant_lanes_block(name);
+    let gate = kquant_block_call(name, "GB", "GD", "AQ", "AS", "0", "g", "ag", "b");
+    let up = kquant_block_call(name, "UB", "UD", "AQ", "AS", "0", "g", "au", "b");
     format!(
-        "@launch({cta}, {min_blocks})
-@autotune(TN in [{MOE_QDOT_TN}], NE in [{ne}])
-@aligned(N = TN, NS = NE)
+        "{block}
+@launch(256)
+@autotune(NE in [{ne}])
+@aligned(N = {MOE_QDOT_TN}, NS = NE, K = 256, RB = {bytes})
 kernel {name}_moe_gateup(AQ: tensor<i8>[U, K], AS: tensor<f32>[U, KB], SLOT: tensor<i32>[1, U],
                         GB: tensor<i8>[NS, RB], GD: tensor<f16>[NS, NB],
                         UB: tensor<i8>[NS, RB], UD: tensor<f16>[NS, NB], H: tensor<f32>[U, N]) {{
-  let pn = ctx.block.x
   let j = ctx.block.y
-  let r = SLOT[0, j] * NE + pn * TN
-  var g: tile<f32>[1, TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :], GB[r :+ TN, :], GD[r :+ TN, :])
-  var u: tile<f32>[1, TN] = {name}_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :], UB[r :+ TN, :], UD[r :+ TN, :])
-  H[j :+ 1, pn * TN :+ TN] = g / (1.0 + exp(0.0 - g)) * u
+{lanes}{setup}  var ag: f32 = 0.0
+  var au: f32 = 0.0
+  for b in range(0, K / 256, 1) {{
+    {gate}
+    {up}
+  }}
+  let gv = sum<over ctx.lane, width 4>(ag)
+  let uv = sum<over ctx.lane, width 4>(au)
+  if q == 0 {{
+    H[j, col] = gv / (1.0 + exp(0.0 - gv)) * uv
+  }}
 }}
-"
+",
+        lanes = slot_lanes()
     )
+}
+
+/// A slot kernel's lanes: four to a column, eight columns a warp, and `g`
+/// the first row of the column's group of eight in slot `SLOT[j]`.
+fn slot_lanes() -> &'static str {
+    "  let col = ctx.block.x * 64 + ctx.warp * 8 + ctx.lane / 4
+  let q = ctx.lane % 4
+  let g = SLOT[0, j] * NE + col / 8 * 8
+  let c8 = col % 8
+"
 }
 
 /// `X += sum_j W[j] * C[j, :] + sigmoid(G) * S`: the routed experts' down

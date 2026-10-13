@@ -6,7 +6,7 @@ use phobos_gguf::quant::quantize_row;
 
 /// A raw-format super-block: full-range random bytes, with a real (small,
 /// finite) `d`/`dmin` header written at the given offsets afterward.
-fn random_raw_block(
+pub(super) fn random_raw_block(
     next: &mut (impl FnMut() -> f32 + ?Sized),
     block_bytes: usize,
     d_off: usize,

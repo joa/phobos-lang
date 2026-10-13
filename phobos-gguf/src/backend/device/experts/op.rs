@@ -34,24 +34,22 @@ pub(super) const U: i64 = MOE_USED as i64;
 /// Bytes of one row's eight table entries.
 const ROW_BYTES: usize = MOE_USED * size_of::<i32>();
 
-/// A format's slot kernels: the source prefix, the kernel names, and the
-/// resident CTA count for the register budget.
+/// A format's slot kernels: the source prefix and the kernel names.
 pub(super) struct Kernels {
     pub(super) prefix: &'static str,
     pub(super) qdot: &'static str,
     pub(super) gateup: &'static str,
     pub(super) qgemm: &'static str,
-    pub(super) resident: usize,
 }
 
 pub(super) fn kernels(quant: Quant) -> Result<Kernels> {
-    let (prefix, qdot, gateup, qgemm, resident) = match quant {
-        Quant::Q4_K => ("q4k", "q4k_moe_qdot", "q4k_moe_gateup", "q4k_moe_qgemm", 4),
-        Quant::Q5_K => ("q5k", "q5k_moe_qdot", "q5k_moe_gateup", "q5k_moe_qgemm", 3),
-        Quant::Q6_K => ("q6k", "q6k_moe_qdot", "q6k_moe_gateup", "q6k_moe_qgemm", 3),
+    let (prefix, qdot, gateup, qgemm) = match quant {
+        Quant::Q4_K => ("q4k", "q4k_moe_qdot", "q4k_moe_gateup", "q4k_moe_qgemm"),
+        Quant::Q5_K => ("q5k", "q5k_moe_qdot", "q5k_moe_gateup", "q5k_moe_qgemm"),
+        Quant::Q6_K => ("q6k", "q6k_moe_qdot", "q6k_moe_gateup", "q6k_moe_qgemm"),
         other => bail!("no expert kernels for {} experts", other.name()),
     };
-    Ok(Kernels { prefix, qdot, gateup, qgemm, resident })
+    Ok(Kernels { prefix, qdot, gateup, qgemm })
 }
 
 /// An expert the host computes for a row: its rank among the row's eight,
@@ -296,7 +294,7 @@ impl DeviceBackend {
         let kernels = kernels(b.set.stack(stack).quant())?;
         let act_row = if rows == 1 { "0" } else { "j" };
         let [bytes, d] = experts.slab_operands(block, stack);
-        self.with_kernel(&self.moe_qdot, (kernels.prefix, n, rows == 1), "moe_qdot", || moe_qdot_src(kernels.prefix, n, act_row, kernels.resident), |module| {
+        self.with_kernel(&self.moe_qdot, (kernels.prefix, n, rows == 1), "moe_qdot", || moe_qdot_src(kernels.prefix, n, act_row), |module| {
             self.launch(
                 module,
                 kernels.qdot,
@@ -318,7 +316,7 @@ impl DeviceBackend {
         let kernels = kernels(b.set.gate.quant())?;
         let [gb, gd] = experts.slab_operands(block, Stack::Gate);
         let [ub, ud] = experts.slab_operands(block, Stack::Up);
-        self.with_kernel(&self.moe_gateup, (kernels.prefix, n), "moe_gateup", || moe_gateup_src(kernels.prefix, n, kernels.resident), |module| {
+        self.with_kernel(&self.moe_gateup, (kernels.prefix, n), "moe_gateup", || moe_gateup_src(kernels.prefix, n), |module| {
             self.launch(
                 module,
                 kernels.gateup,
