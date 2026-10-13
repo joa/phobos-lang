@@ -1,0 +1,118 @@
+---
+title: gemm, f32
+description: C = alpha * A @ B + beta * C in f32, with a k loop over shared-memory tiles and dot.
+sidebar:
+  order: 2
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+This kernel computes the general matrix multiply `C = alpha * A @ B + beta * C`
+for `f32` matrices `A` (`M x K`), `B` (`K x N`) and `C` (`M x N`). It is the
+kernel `phobos-kbench` compares against cuBLAS's `cublasSgemm`.
+
+<Kernel file="examples/gemm_fp32.ph" />
+
+## The attributes
+
+Four attributes sit above the kernel. None changes what it computes; each
+changes how it is compiled.
+
+| Attribute | What it does here |
+| --- | --- |
+| [`@autotune`](/docs/attributes/autotune/) | `(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])` makes the three tile sizes tuning parameters. Two values are bounds searched in doubling steps, so `TILE_M` and `TILE_N` try 32, 64, 128 and 256, and `TILE_K` tries 4, 8, 16 and 32. |
+| [`@launch`](/docs/attributes/launch/) | `(256)` runs each CTA with 256 threads, which is also the default. |
+| [`@pipeline`](/docs/attributes/pipeline/) | Asserts that the k loop is double-buffered: while the CTA computes on one pair of panels, the next pair is being copied in. Compilation fails if nothing gets pipelined. |
+| [`@aligned`](/docs/attributes/aligned/) | `(M = TILE_M, N = TILE_N, K = TILE_K)` promises that each dimension is a whole number of tiles. The compiler drops the masks on those dimensions and may use 16-byte vector loads. A launch that breaks the promise traps at entry instead of writing past the tensors. |
+
+## One output tile per CTA
+
+The kernel runs on a two-dimensional grid. CTA `(pm, pn)` owns the output
+tile of `C` at rows `pm * TILE_M` and columns `pn * TILE_N`, so the launcher
+starts `M / TILE_M` by `N / TILE_N` CTAs:
+
+```phobos fragment
+let pm = ctx.block.x
+let pn = ctx.block.y
+```
+
+Each CTA computes its tile from a strip of `TILE_M` rows of `A` and a strip of
+`TILE_N` columns of `B`, both `K` long. See
+[`ctx.block` and `ctx.blocks`](/docs/ctx/blocks/) for how the grid is
+addressed.
+
+## The k loop
+
+The strips are too long to hold at once, so the CTA walks `K` in steps of
+`TILE_K`:
+
+```phobos fragment
+var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+
+for kt in range(0, K, TILE_K) {
+  var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+  var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+  acc += dot(a, b)
+}
+```
+
+- `acc` is the accumulator, a `TILE_M x TILE_N` tile filled with zeros. It is
+  declared before the loop and lives across all its iterations.
+- `var a = A[...]` copies a `TILE_M x TILE_K` panel of `A` into a tile in
+  shared memory, and `var b = B[...]` a `TILE_K x TILE_N` panel of `B`. All
+  threads of the CTA take part in each copy.
+- `acc += dot(a, b)` multiplies the two panels and adds the product into
+  `acc` in place.
+
+The compiler recognizes this loop as a GEMM and lowers it with a tiling of
+its own, splitting the output tile further over warps and threads. Under
+`@pipeline` it also double-buffers the operand panels, so the copy of the next
+`a` and `b` overlaps the math on the current ones. The barriers between a copy
+and the `dot` that reads it are placed by the compiler, not written in the
+source. See [Tiles and shared memory](/docs/language/tiles-and-shared-memory/)
+and [dot and tensor cores](/docs/language/dot-and-tensor-cores/).
+
+## The epilogue
+
+```phobos fragment
+let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+```
+
+`let c_old = C[...]` binds a view of the output tile, not a copy: `let` on a
+tensor slice reads the bytes where they are. The last line computes
+`alpha * acc + beta * c_old` element by element and stores it over the same
+tile of `C`.
+
+## Tuning
+
+With four values for each of three sizes, there are 64 configurations.
+Larger output tiles reuse each loaded element of `A` and `B` more often but
+leave fewer CTAs to spread over the card, so the best choice depends on the
+card and on the matrix sizes.
+
+`phobos-kbench` searches the space at `M = N = K = 4096` in two stages. First
+it compiles every configuration and times a few launches of each, skipping
+any that fails. Then it times the fastest few again over many rounds, one
+launch of each per round, so that all finalists run under the same clocks and
+temperature:
+
+```sh
+cargo run -r -p phobos-kbench -- --bench gemm_fp32
+```
+
+To skip the search and run one configuration, pin it:
+
+```sh
+cargo run -r -p phobos-kbench -- --bench gemm_fp32 --autotune "TILE_M=128 TILE_N=128 TILE_K=8"
+```
+
+The measured throughput against cuBLAS is in
+[Benchmarks](/docs/reference/benchmarks/).
+
+## Related
+
+- [gemm on tensor cores](/docs/examples/gemm-fp16tc-fp32acc/) is this kernel
+  with `@tensorcore` added.
+- The spec's [SGEMM example](/docs/reference/spec/#examples) is the same
+  kernel without `@aligned`, so it masks ragged edges.

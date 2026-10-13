@@ -1,0 +1,75 @@
+---
+title: saxpy
+description: out = alpha * x + y over one-dimensional tensors, one slice per CTA.
+sidebar:
+  order: 1
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+saxpy computes `out = alpha * x + y` for vectors `x`, `y` and `out` of length
+`N` and a scalar `alpha`. It is the smallest kernel in the repository, and the
+first one `phobos-kbench` runs.
+
+<Kernel file="examples/saxpy_fp32.ph" />
+
+[Your first kernel](/docs/getting-started/first-kernel/) reads it line by
+line. This page looks at what happens when it runs.
+
+## One slice per CTA
+
+The kernel is launched as a one-dimensional grid. Every CTA runs the same two
+lines, and `ctx.block.x` tells each one which part of the vectors is its own:
+CTA `i` handles elements `i * BLOCK` up to `(i + 1) * BLOCK`. The launcher
+starts `N / BLOCK` CTAs, rounded up, so the slices tile the vectors with no
+gaps and no overlap.
+
+```text
+x:    [ CTA 0: 0 .. BLOCK ) [ CTA 1: BLOCK .. 2*BLOCK ) ... [ last CTA, may be short )
+```
+
+Inside a CTA, the `BLOCK` elements are shared among its threads, 256 by
+default (see [`@launch`](/docs/attributes/launch/)). With `BLOCK = 4096`, each
+thread handles 16 elements. You never write that split; the compiler derives
+it from the slice length and the thread count.
+
+The kernel declares no tile: the expression reads slices of `x` and `y`
+and the assignment writes a slice of `out`. Expressions over slices are
+covered in
+[Elementwise math and reductions](/docs/language/elementwise-and-reductions/).
+
+## Choosing BLOCK
+
+`@autotune(BLOCK in [16, 8192])` makes `BLOCK` a tuning parameter: 16, 32, 64
+and so on up to 8192, doubling at each step. A small `BLOCK` gives many small
+CTAs; a large one gives fewer CTAs that each do more. Which one is fastest
+depends on the card, so `phobos-kbench` measures them all and keeps the best.
+See [Autotuning](/docs/language/autotuning/) and
+[`@autotune`](/docs/attributes/autotune/).
+
+saxpy does one multiply and one add per element, against two loads and a
+store. Its speed is set by how fast the card moves memory, not by how fast it
+computes.
+
+## The ragged end
+
+`N` is only known at launch, and it need not be a multiple of `BLOCK`. The
+last CTA's slices can then run past the end of the vectors. Because the slice
+offset comes from `ctx.block` and the extent `N` is dynamic, the compiler masks
+the access against the runtime length: elements past the end read as zero, and
+their stores are skipped. Tensor extents are assumed to be multiples of 4.
+
+A kernel that can promise whole slices removes the mask with
+[`@aligned`](/docs/attributes/aligned/), as the gemm example does. The rules
+are in [Slicing, bounds and masking](/docs/language/slicing-bounds-masking/)
+and the spec's [Bounds and masking](/docs/reference/spec/#bounds-and-masking).
+
+## Run it
+
+```sh
+phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx
+cargo run -r -p phobos-kbench -- --bench saxpy_fp32
+```
+
+The first needs no GPU. The second autotunes `BLOCK` on the GPU and prints the
+throughput of the winner.

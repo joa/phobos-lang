@@ -1,0 +1,18 @@
+usage: phobos-bench [OPTIONS]
+
+OPTIONS:
+  -m, --model FILE      the GGUF file to run (default: models/Qwen3.5-0.8B-Q8_0.gguf)
+  -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
+  -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
+  -d, --depth N,...     positions in the context before each tg row starts,
+                        one set of tg rows per depth (default: 0)
+  -r, --repetitions N   timed repetitions per row (default: 3)
+      --no-warmup       skip the warmup pass, which leaves each kernel's first
+                        compile inside the repetition it lands in
+      --expert-cache SIZE
+                        device memory for a streamed model's expert cache
+                        (2g, 1500m, bytes); default, what the weights leave
+  -h, --help            print this message
+
+  -p and -n take a comma-separated list, and repeat, so -p 128,512 and
+  -p 128 -p 512 both ask for the same two rows.

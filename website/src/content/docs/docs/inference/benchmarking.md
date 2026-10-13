@@ -1,0 +1,110 @@
+---
+title: Benchmarking
+description: Measure a model's prompt and generation speed with phobos-bench, and compare it with llama.cpp using scripts/bench.py.
+sidebar:
+  order: 4
+---
+
+Two tools measure inference speed. `phobos-bench` measures one model the way
+`llama-bench` measures llama.cpp, in the same units. `scripts/bench.py` runs
+both on the same models in one session and compares them, with checks that
+make the comparison fair.
+
+## phobos-bench
+
+```sh
+phobos-bench -m models/Qwen3.5-0.8B-Q8_0.gguf -p 128,512 -n 32,128 -r 3
+```
+
+It reports two kinds of rows, in tokens per second:
+
+- `pp<N>`, prompt processing: an `N`-token prompt fed into a fresh state at
+  once.
+- `tg<N>`, text generation: `N` tokens produced one at a time.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `-m`, `--model FILE` | `models/Qwen3.5-0.8B-Q8_0.gguf` | The GGUF file to run. |
+| `-p`, `--n-prompt N,...` | `128` | Prompt sizes, one `pp` row each. |
+| `-n`, `--n-gen N,...` | `32` | Generation lengths, one `tg` row each. |
+| `-d`, `--depth N,...` | `0` | Tokens already in the context before each `tg` row starts; one set of `tg` rows per depth. |
+| `-r`, `--repetitions N` | `3` | Timed repetitions per row. |
+| `--no-warmup` | | Skip the warmup pass. A kernel's first compile then lands inside the repetition that first needs it. |
+| `--expert-cache SIZE` | what the weights leave | Device memory for a mixture-of-experts model's expert cache, as `2g`, `1500m` or bytes. |
+
+`-p`, `-n` and `-d` take a comma-separated list and can be repeated, so
+`-p 128,512` and `-p 128 -p 512` ask for the same two rows. Progress goes to
+standard error, and the result is a Markdown table on standard output.
+
+From a checkout, build it with the `cuda` feature and in release mode:
+
+```sh
+cargo run --features cuda --release -p phobos-bench -- -m MODEL.gguf -p 512 -n 128 -r 10
+```
+
+## Comparing with llama.cpp
+
+`scripts/bench.py` runs `phobos-bench` and `llama-bench` over the same models
+with the same sizes, and reports one table with the ratio of the two per row.
+It needs Python, `nvidia-smi` on the path and an NVIDIA card. Beyond running
+both, it:
+
+1. Refuses to start when the card is already busy, judged by its utilization
+   and power draw. `--max-idle-util` and `--max-idle-power` set the limits.
+2. Warms the card and waits until its clock has settled.
+3. Interleaves the two engines. Every round runs each engine once per model,
+   and the order flips on alternate rounds, so neither always goes first.
+4. Checks the card between rounds for other work, and reports the summary
+   twice if it found any.
+5. Makes sure llama.cpp is running on the GPU, not silently on the CPU.
+6. Records each engine's build and runtime, and any `PHOBOS_*` variable set in
+   the environment.
+
+```sh
+python scripts/bench.py -p 128 512 -n 32 128 512 -r 3 -R 5 --csv bench.csv --json bench.json
+```
+
+| Option | Default | Effect |
+| --- | --- | --- |
+| `-m`, `--models` | three small models under `models/` | GGUF files to measure. |
+| `-p`, `--prompt-tokens` | `128 512` | Prompt sizes. |
+| `-n`, `--gen-tokens` | `32 128 512` | Generation lengths. |
+| `-r`, `--reps` | `3` | Repetitions per run. |
+| `-R`, `--rounds` | `5` | Interleaved rounds. |
+| `--llama-bench EXE` | found beside the checkout or on the path | The `llama-bench` to use. |
+| `--cuda-lib DIR` | | A folder with the CUDA runtime `llama-bench` needs on its path. |
+| `--llama-args FLAGS` | | Extra flags for `llama-bench`, as one string. Recorded in the report. |
+| `--phobos-bench EXE` | builds one | A `phobos-bench` to use instead, such as a release's, which must stay beside its `kernel-cache/`. |
+| `--no-llama`, `--no-phobos` | | Measure one engine only. |
+| `--force` | | Measure on a busy card anyway. |
+| `--csv`, `--json` | | Write every repetition, or the whole run with its summary, to a file. |
+
+llama.cpp runs with its own defaults: an `f16` KV cache, and flash attention
+where the card supports it. The two columns therefore differ in configuration
+as well as engine. `--llama-args "-ctk f32 -ctv f32"` puts llama.cpp's KV
+cache in `f32`, as Phobos keeps it.
+
+The published comparisons, with the exact commands, card and driver, are on
+the [Benchmarks](/docs/reference/benchmarks/) page.
+
+## Getting numbers you can trust
+
+- **Compare within one session.** A number is only comparable with one
+  measured in the same session on the same card. This is what `bench.py`'s
+  interleaving is for.
+- **Keep the card to yourself.** Any other program working on the same GPU
+  lowers the figures. `bench.py` checks for this before and between rounds; a
+  hand-run `phobos-bench` does not.
+- **Check the environment.** A `PHOBOS_*` variable left set in the shell
+  changes what is measured. `bench.py` prints the ones it finds as
+  `phobos env:` before it starts; read that line. See
+  [Environment variables](/docs/reference/environment/).
+- **Mind the memory.** A model that barely fits can be paged out by the
+  driver when the desktop needs more video memory, and then runs many times
+  slower. See [Troubleshooting](/docs/inference/troubleshooting/).
+
+## Kernel benchmarks
+
+`phobos-kbench` measures single kernels, such as the gemm and flash attention
+examples, against cuBLAS rather than whole models. See
+[Compile and benchmark](/docs/getting-started/compile-and-benchmark/).

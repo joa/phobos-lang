@@ -1,0 +1,123 @@
+---
+title: Your first kernel
+description: saxpy, out = alpha * x + y, read line by line.
+sidebar:
+  order: 2
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+The smallest useful kernel is saxpy: given two vectors `x` and `y` and a
+scalar `alpha`, compute `out = alpha * x + y`, one element at a time. This is
+`examples/saxpy_fp32.ph` from the repository, the first kernel
+`phobos-kbench` runs:
+
+<Kernel file="examples/saxpy_fp32.ph" />
+
+Four lines. Here is what each one says, and what the compiler does with it.
+
+## Line 1: a tile size to tune
+
+```phobos fragment
+@autotune(BLOCK in [16, 8192])
+```
+
+`BLOCK` is the number of elements one CTA handles. It is not fixed in the
+source: `@autotune` declares a search space for it. With two values, the
+range is searched in doubling steps, so `BLOCK` takes 16, 32, 64 and so on up
+to 8192. A tuner such as `phobos-kbench` compiles the kernel for each value,
+times them on the GPU and keeps the fastest. When nothing tunes it, as with
+`phobos-compile`, the first value in the range, 16, is used.
+
+See [`@autotune`](/docs/attributes/autotune/) for the forms the search space
+can take.
+
+## Line 2: the signature
+
+```phobos fragment
+kernel saxpy(x: tensor<f32>[N], y: tensor<f32>[N], out: tensor<f32>[N], alpha: f32) {
+```
+
+A kernel takes tensors and scalars. `tensor<f32>[N]` is a one-dimensional
+array of `f32` in global memory. `N` is a symbolic size: the kernel does not
+know it at compile time, it is bound when the kernel is launched. All three
+tensors share `N`, so they have the same length. `alpha` is a plain `f32`
+scalar.
+
+## Line 3: where this CTA starts
+
+```phobos fragment
+let base = ctx.block.x * BLOCK
+```
+
+A kernel runs as a grid of CTAs, and every CTA runs the same code.
+`ctx.block.x` is this CTA's index along the grid's x axis, so CTA 0 starts at
+element 0, CTA 1 at element `BLOCK`, and so on. `let` binds an immutable name.
+
+The grid itself is chosen by whoever launches the kernel. For saxpy, the
+launcher starts `N / BLOCK` CTAs, rounded up, so that together they cover the
+whole vector.
+
+## Line 4: the work
+
+```phobos fragment
+out[base :+ BLOCK] = alpha * x[base :+ BLOCK] + y[base :+ BLOCK]
+```
+
+`x[base :+ BLOCK]` is a slice: the `BLOCK` elements starting at `base`. The
+`:+` form gives a start and a length; `x[s : e]` gives a start and an end
+instead. The right-hand side is elementwise arithmetic over slices: the scalar
+`alpha` is broadcast to every element, multiplied with the slice of `x`, and
+added to the slice of `y`. The assignment stores the result into the same
+range of `out`.
+
+Nothing in the line says which thread computes which element. The compiler
+spreads the `BLOCK` elements over the CTA's threads, 256 of them unless a
+[`@launch`](/docs/attributes/launch/) attribute says otherwise, and each thread
+loads, computes and stores its share.
+
+### The last CTA
+
+`N` does not have to be a multiple of `BLOCK`. When it is not, the last CTA's
+slices run past the end of the tensors. Phobos masks them: elements past the
+end read as `0`, and their stores are skipped. Because `N` is only known at
+launch, the mask compares against the runtime length. The one assumption is
+that tensor extents are multiples of 4.
+
+Where you can promise that every slice is whole,
+[`@aligned`](/docs/attributes/aligned/) removes the mask. The spec's
+[Bounds and masking](/docs/reference/spec/#bounds-and-masking) section has
+the full rules.
+
+## A variation
+
+The same shape works for any elementwise operation. This kernel clamps
+negative values to zero. `max` takes a tile and a scalar, as the arithmetic
+operators do:
+
+```phobos
+@autotune(BLOCK in [16, 8192])
+kernel relu(x: tensor<f32>[N], out: tensor<f32>[N]) {
+  let base = ctx.block.x * BLOCK
+  out[base :+ BLOCK] = max(x[base :+ BLOCK], 0.0)
+}
+```
+
+## Run it
+
+Compile saxpy to PTX. This needs no GPU:
+
+```sh
+phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx
+```
+
+From a checkout with a GPU, `phobos-kbench` autotunes it on vectors of 2^25
+elements and prints its throughput:
+
+```sh
+cargo run -r -p phobos-kbench -- --bench saxpy_fp32
+```
+
+[Compile and benchmark](/docs/getting-started/compile-and-benchmark/) covers
+both tools and how to look at the generated MLIR. The
+[saxpy example page](/docs/examples/saxpy-fp32/) goes on from here.

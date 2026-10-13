@@ -1,0 +1,53 @@
+---
+title: Command-line tools
+description: The --help of phobos-cli, phobos-compile, phobos-bench and phobos-cache.
+sidebar:
+  label: CLI
+  order: 4
+---
+
+import { Code } from "@astrojs/starlight/components"
+import cli from "../../../../data/cli/phobos-cli.txt?raw"
+import compile from "../../../../data/cli/phobos-compile.txt?raw"
+import bench from "../../../../data/cli/phobos-bench.txt?raw"
+import cache from "../../../../data/cli/phobos-cache.txt?raw"
+
+A release ships four binaries. This page shows what each prints for `--help`,
+captured from the binaries by `website/scripts/capture-cli.mjs`. The guides
+explain them in context: [inference quickstart](/docs/inference/),
+[compile and benchmark](/docs/getting-started/compile-and-benchmark/),
+[benchmarking](/docs/inference/benchmarking/) and
+[kernel cache](/docs/inference/kernel-cache/).
+
+## phobos-cli
+
+Runs a GGUF model: on a prompt, as a REPL, or as a server with `--listen`.
+The options shown are the ones this site covers.
+
+<Code code={cli} lang="text" />
+
+## phobos-compile
+
+Compiles a kernel source file to PTX. No GPU is needed. The PTX goes to
+standard output unless `-o` names a file. `--chip` defaults to `sm_75`, which
+every supported card runs, and `--index-bits` to 32, raised to 64 when the
+module needs it, as the runtime would. Set `PHOBOS_PRINT_PHASES=1` to print
+the IR of each lowering phase.
+
+<Code code={compile} lang="text" />
+
+## phobos-bench
+
+Measures a GGUF model's prompt processing (`pp<N>`) and text generation
+(`tg<N>`) in tokens per second, as `llama-bench` does. It needs a GPU.
+
+<Code code={bench} lang="text" />
+
+## phobos-cache
+
+Fills, lists and clears the compiled-kernel cache. The subcommands are
+explained on the [kernel cache](/docs/inference/kernel-cache/) page.
+
+<Code code={cache} lang="text" />
+
+All four print the version and the compiler fingerprint with `--version`.

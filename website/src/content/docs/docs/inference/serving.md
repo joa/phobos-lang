@@ -1,0 +1,107 @@
+---
+title: Serving
+description: The OpenAI-compatible server behind --listen, its endpoints and request fields, and the terminal dashboard.
+sidebar:
+  order: 2
+---
+
+`phobos-cli --listen ADDR` serves the loaded model over HTTP with an API that
+OpenAI clients understand, and draws a dashboard on the terminal while it
+runs.
+
+```sh
+phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080
+```
+
+The listener opens before the weights are uploaded, so requests that arrive
+during loading wait in a queue instead of failing. The server runs one
+request at a time; others wait their turn.
+
+## Endpoints
+
+| Method and path | Does |
+| --- | --- |
+| `POST /v1/chat/completions` | A chat turn: messages in, the assistant's message out. Streams with `"stream": true`. |
+| `POST /v1/completions` | Plain text completion of a `prompt`. Not streamed. |
+| `GET /v1/models` | Lists the one loaded model. |
+| `GET /` | Answers `phobos-inference`, as a health check. |
+
+Any other path answers `404` and is noted in the server's log. The server
+does not check API keys, so a client may send any.
+
+The model's id in `/v1/models` is a label of the form `GGUF, <architecture>`.
+A request can name any model; the response echoes the name it was sent, and
+the loaded model answers.
+
+## Chat requests
+
+A chat request is formatted in the model's own chat format before it reaches
+the model. Phobos detects the format from the chat template in the GGUF file
+and handles the Qwen, MiniCPM and GLM conventions, including their ways of
+writing tool calls.
+
+These fields of a request are read; the rest are ignored:
+
+| Field | Effect |
+| --- | --- |
+| `messages` | The conversation: `role` and `content`, plus `tool_calls` and `tool_call_id` for tool use. |
+| `max_tokens`, `max_completion_tokens` | The most tokens to generate. The second wins when both are sent. |
+| `temperature`, `top_k`, `top_p`, `min_p`, `presence_penalty`, `repetition_penalty` | Sampling for this request; see [Sampling and chat](/docs/inference/sampling/). |
+| `seed` | The sampling seed for this request. |
+| `stream` | Send the answer as server-sent events, chunk by chunk. |
+| `stream_options.include_usage` | Add a final chunk with the token counts. |
+| `tools`, `tool_choice` | Tool definitions the model may call. `tool_choice` `"none"` hides them; `"required"` or a named function tells the model in its prompt that it must call one. |
+| `chat_template_kwargs.enable_thinking` | Turn the model's reasoning on or off. |
+| `reasoning_effort` | `low`, `medium` or `high` turn reasoning on, when `enable_thinking` is not sent. |
+
+A field a request does not send falls back to the flag `phobos-cli` was
+started with. Reasoning is off unless a request asks for it, or the server
+was started with `--prefill-thinking TEXT`, which opens every chat answer's
+reasoning on that text, whatever the request says.
+
+The response carries the answer in `content`, the model's reasoning, if any,
+in `reasoning_content`, and tool calls in `tool_calls`. `finish_reason` is
+`stop`, `length` when the token limit cut the answer off, or `tool_calls`.
+
+A plain completion request (`/v1/completions`) reads `prompt`, `max_tokens`,
+the sampling fields and `seed`, and sends the prompt to the model as it is,
+with no chat format around it.
+
+## Prefix reuse
+
+A chat grows by appending: each request repeats the conversation so far and
+adds one turn. Phobos keeps the session of the last request and, for the
+next one, reuses as much of it as the two prompts share, so only the new part
+of the prompt is processed. That is most of a chat.
+
+`--no-prefix-cache` starts every request from an empty session instead. It
+costs the reuse, and gives the session's buffers back for a pass to use as
+scratch, which can make the difference on a card that only just fits the
+model.
+
+## The dashboard
+
+While serving, `phobos-cli` takes over the terminal with a dashboard. It
+shows a loading screen while kernels load or compile, then panels for the
+model, memory, throughput, the card, the caches, the requests in progress and
+the log. It runs on its own thread and only reads what the engine reports, so
+drawing it never slows a request down.
+
+| Key | Does |
+| --- | --- |
+| `q`, `Esc`, `Ctrl-C` | Stop the server and quit. |
+| `c` | Clear the log panel. |
+| `r` | Reset the peak readings. |
+| `p` | Replay the opening animation. |
+
+The dashboard is off, and the runtime's log lines go to the terminal instead,
+when:
+
+- `--no-tui` is given;
+- standard output is not a terminal, for example when it is redirected to a
+  file; or
+- `PHOBOS_VRAM` or `PHOBOS_PASS_REPORT` is set, since their reports print
+  straight to the terminal and would draw over the dashboard.
+
+Each time, `phobos-cli` prints why. `--tui` draws the dashboard even where the
+terminal was not recognized as one.

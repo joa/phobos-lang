@@ -1,0 +1,74 @@
+---
+title: Introduction
+description: What Phobos is, and the two levels a Phobos kernel works at.
+sidebar:
+  order: 0
+---
+
+import Kernel from "../../../../components/Kernel.astro"
+
+Phobos is a GPU kernel language and an LLM inference engine built on it. You
+write a kernel in a small language of tiles and tensors, and the Phobos
+compiler lowers it through MLIR and LLVM to PTX, which runs on NVIDIA GPUs
+through CUDA. The inference engine runs quantized GGUF models on kernels
+written in that same language.
+
+Phobos was written on an 8 GB card, an RTX 2080 SUPER, so it targets machines
+with little video memory.
+
+## Two levels in one language
+
+Most of a Phobos kernel is written at the level of a CTA, a block of threads
+that runs together on one multiprocessor. You copy a slice of a tensor into a
+tile, combine tiles with elementwise math, reductions and `dot`, and store the
+result back. You do not say which thread does what. This is the level
+[Triton](https://triton-lang.org) works at. Here is a whole kernel, `out = alpha * x + y`:
+
+<Kernel file="examples/saxpy_fp32.ph" />
+
+When a kernel needs control over single threads, the same language reaches
+down to warps and lanes, the level Triton's lower-level dialect
+[Gluon](https://github.com/triton-lang/triton) exposes. `ctx.warp` and
+`ctx.lane` say where a thread is, a scalar `var` lives in each thread's
+registers, and collectives such as `sum<over ctx.lane>` fold one value per lane
+across the warp with shuffles. This fragment sums one row of a matrix-vector
+product, each of the 32 lanes taking every 32nd run of 16 weights:
+
+```phobos fragment
+var acc: f32 = 0.0
+for k in range(ctx.lane * 16, K, ctx.lanes * 16) {
+  acc += sum(W[col, k :+ 16] * x[0, k :+ 16])
+}
+let total = sum<over ctx.lane>(acc)
+```
+
+The compiler tracks which values differ between threads, and it refuses a tile
+operation that not every thread of the CTA reaches. The rules are in the spec
+under [Per-thread values](/docs/reference/spec/#per-thread-values), and the
+[execution context](/docs/ctx/) pages explain every `ctx` field.
+
+## What is in the box
+
+- **The compiler.** A `.ph` source file holds one or more kernels. Attributes
+  such as `@autotune`, `@launch`, `@pipeline` and `@tensorcore` change how a
+  kernel is compiled, not what it computes. `phobos-compile` turns a source
+  file into PTX with no GPU at all. See
+  [Compile and benchmark](/docs/getting-started/compile-and-benchmark/).
+- **The inference engine.** `phobos-cli` runs a GGUF model on a prompt, as a
+  REPL, or as an OpenAI-compatible server with a dashboard in the terminal.
+  `phobos-bench` measures it the way `llama-bench` measures llama.cpp. See the
+  [inference quickstart](/docs/inference/).
+- **The kernel cache.** Compiled kernels are cached on disk, one folder per GPU
+  architecture, and a release ships a warm cache, so a first run loads its
+  kernels instead of compiling them. See
+  [Kernel cache](/docs/inference/kernel-cache/).
+
+Phobos targets NVIDIA GPUs only, from compute capability 7.5 (Turing) on.
+
+## Where to go next
+
+1. [Install](/docs/getting-started/install/) a release, or build from source.
+2. Read [your first kernel](/docs/getting-started/first-kernel/) line by line.
+3. [Compile and benchmark](/docs/getting-started/compile-and-benchmark/) it.
+4. Continue with the [language guide](/docs/language/), or browse the
+   [examples](/docs/examples/).
