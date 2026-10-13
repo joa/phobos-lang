@@ -620,13 +620,18 @@ pub(crate) fn broadcast_shape(a: &[i64], b: &[i64]) -> Option<Vec<i64>> {
         .collect()
 }
 
-/// Whether a slice dimension provably never reaches past the source extent.
-pub(crate) fn dim_in_bounds(extent: i64, size: i64, off_div: i64) -> bool {
+/// Whether a slice dimension provably never reaches past the source extent:
+/// from the offset's divisor, or from the offset itself when it is the
+/// constant `start`.
+pub(crate) fn dim_in_bounds(extent: i64, size: i64, off_div: i64, start: Option<i64>) -> bool {
     if extent == DYN {
         return true;
     }
     if size == DYN {
         return false;
+    }
+    if start.is_some_and(|s| s >= 0 && s + size <= extent) {
+        return true;
     }
     extent % size == 0 && off_div % size == 0
 }

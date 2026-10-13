@@ -130,6 +130,21 @@ fn aligned_static_slice_is_not_masked() {
 }
 
 #[test]
+fn a_constant_start_inside_the_extent_is_not_masked() {
+    // 32 does not divide 48, but 16 + 32 stays inside it.
+    let mlir = emit_mlir(
+        "kernel copy(A: tensor<f32>[1, 48], B: tensor<f32>[1, 32]) {
+            B[0 :+ 1, 0 :+ 32] = A[0 :+ 1, 16 :+ 32]
+        }",
+    );
+    assert!(
+        !mlir.contains("scf.if") && !mlir.contains("arith.select"),
+        "unexpected bounds mask for a slice inside its extent:
+{mlir}"
+    );
+}
+
+#[test]
 fn partial_matmul_epilogue_is_masked() {
     // N = 100 is not a multiple of TILE_N = 32. The fused register matmul
     // has no bounds guard, so it declines, and the generic tiled path runs

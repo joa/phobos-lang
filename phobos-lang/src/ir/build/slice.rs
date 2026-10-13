@@ -117,6 +117,7 @@ impl Build {
 
         let mut offsets = Vec::with_capacity(rank);
         let mut off_divs = Vec::with_capacity(rank);
+        let mut starts = Vec::with_capacity(rank);
         let mut dyn_sizes = Vec::new();
         let mut static_sizes = Vec::with_capacity(rank);
         let mut ragged = vec![false; rank];
@@ -133,6 +134,7 @@ impl Build {
                     ragged[i] = rides_ragged(self, p);
                     offsets.push(self.emit_index(p, "subscript")?);
                     off_divs.push(self.expr_div(p));
+                    starts.push(self.const_fold(p));
                     proven[i] = self.dyn_in_bounds(p, 1, self.div_of(src, i), &[]);
                     static_sizes.push(1);
                 }
@@ -140,6 +142,7 @@ impl Build {
                     ragged[i] = rides_ragged(self, start);
                     offsets.push(self.emit_index(start, "slice start")?);
                     off_divs.push(self.expr_div(start));
+                    starts.push(self.const_fold(start));
                     match self.const_fold(len) {
                         Some(n) => {
                             proven[i] = self.dyn_in_bounds(start, n, self.div_of(src, i), &[]);
@@ -156,6 +159,7 @@ impl Build {
                     let off = self.emit_index(start, "slice start")?;
                     offsets.push(off);
                     off_divs.push(self.expr_div(start));
+                    starts.push(self.const_fold(start));
                     match (self.const_fold(start), self.const_fold(end)) {
                         (Some(a), Some(b)) => {
                             proven[i] = self.dyn_in_bounds(start, b - a, self.div_of(src, i), &[]);
@@ -174,6 +178,7 @@ impl Build {
                     let off = self.emit_index(start, "slice start")?;
                     offsets.push(off);
                     off_divs.push(self.expr_div(start));
+                    starts.push(self.const_fold(start));
                     proven[i] = true;
                     match (src_shape[i], self.const_fold(start)) {
                         (n, Some(a)) if n != DYN && !(0..=n).contains(&a) => {
@@ -195,6 +200,7 @@ impl Build {
                 Sub::Full => {
                     offsets.push(self.const_index(0));
                     off_divs.push(0);
+                    starts.push(Some(0));
                     if src_shape[i] != DYN {
                         static_sizes.push(src_shape[i]);
                     } else {
@@ -228,7 +234,7 @@ impl Build {
         let mut extents = Vec::new();
         for i in 0..rank {
             if src_shape[i] != DYN {
-                if dim_in_bounds(src_shape[i], static_sizes[i], off_divs[i]) {
+                if dim_in_bounds(src_shape[i], static_sizes[i], off_divs[i], starts[i]) {
                     continue;
                 }
                 extents.push(self.const_index(src_shape[i]));
@@ -327,20 +333,28 @@ impl Build {
             if shape[d] == DYN {
                 return size != DYN && !self.dyn_in_bounds(start, size, self.div_of(mv, d), ivs);
             }
-            !dim_in_bounds(shape[d], size, self.expr_div(start))
+            !dim_in_bounds(shape[d], size, self.expr_div(start), self.const_fold(start))
         })
     }
 
     /// The static shape of a tensor-slice expression, if it has one.
     pub(crate) fn slice_static_shape(&self, expr: &Expr) -> Option<Vec<i64>> {
+        self.slice_shape_of(expr, false)
+    }
+
+    /// [`Self::slice_static_shape`] of a slice of a tensor or, with `tiles`,
+    /// also of a declared tile or view.
+    pub(crate) fn slice_shape_of(&self, expr: &Expr, tiles: bool) -> Option<Vec<i64>> {
         let Expr::Index { base, subs } = expr else {
             return None;
         };
         let Expr::Var(name) = &**base else {
             return None;
         };
-        let Some(Binding::Tensor(src)) = self.lookup(name) else {
-            return None;
+        let src = match self.lookup(name)? {
+            Binding::Tensor(src) => src,
+            Binding::Tile(src) | Binding::View(src) if tiles => src,
+            _ => return None,
         };
         let shape = self.shape(src);
         if subs.len() != shape.len() || is_point_load(subs) {
@@ -363,6 +377,11 @@ impl Build {
 
     /// The element type of the tensor an `A[...]` slice reads from.
     pub(crate) fn slice_tensor_elem(&self, expr: &Expr) -> Option<crate::ir::Scalar> {
+        self.slice_elem_of(expr, false)
+    }
+
+    /// [`Self::slice_tensor_elem`], with `tiles` also of a tile or view.
+    pub(crate) fn slice_elem_of(&self, expr: &Expr, tiles: bool) -> Option<crate::ir::Scalar> {
         let Expr::Index { base, .. } = expr else {
             return None;
         };
@@ -371,6 +390,7 @@ impl Build {
         };
         match self.lookup(name)? {
             Binding::Tensor(src) => Some(self.elem(src)),
+            Binding::Tile(src) | Binding::View(src) if tiles => Some(self.elem(src)),
             _ => None,
         }
     }
