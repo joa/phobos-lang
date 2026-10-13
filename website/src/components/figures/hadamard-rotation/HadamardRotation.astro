@@ -27,7 +27,6 @@ const zerosAsIs = FITS.off.fit.codes.filter(code => code === 0).length
     <button type="button" class="chart-btn" data-group="rotation" data-value="off" aria-pressed="false">Round as is</button>
     <button type="button" class="chart-btn" data-group="rotation" data-value="on" aria-pressed="true">Rotate, then round</button>
   </div>
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic: a seeded {LANE_COUNT}-wide toy row with one outlier, rounded with the best ternary scale. PTQ1_0, the
     format of Ternary-Bonsai, holds {PTQ1_0_BLOCK_WEIGHTS} weights of -1, 0 or +1 and one scale in {PTQ1_0_BLOCK_BYTES} bytes; phobos-gguf rotates the

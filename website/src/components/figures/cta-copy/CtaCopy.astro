@@ -34,7 +34,6 @@ const kSteps = Array.from({ length: K_STEPS }, (_, kStep) => kStep)
       ))
     }
   </div>
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic. Gemm's <code>var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]</code> with 8 x 8 tiles: each k step
     moves the tile one panel to the right.

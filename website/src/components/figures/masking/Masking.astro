@@ -24,7 +24,6 @@ const { id = "fig-masking" } = Astro.props
     <button type="button" class="chart-btn" data-group="aligned" data-value="off" aria-pressed="true">Masked</button>
     <button type="button" class="chart-btn" data-group="aligned" data-value="on" aria-pressed="false">@aligned(M = 8, N = 8)</button>
   </div>
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic. Pick a tile of <code>A</code> to stage it with <code>var a = A[pm * 8 :+ 8, pn * 8 :+ 8]</code>;
     the arrow keys move between tiles.

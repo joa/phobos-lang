@@ -26,7 +26,6 @@ const { id = "fig-abi-descriptor" } = Astro.props
     <button type="button" class="chart-btn" data-group="bits" data-value="32" aria-pressed="true">32-bit index</button>
     <button type="button" class="chart-btn" data-group="bits" data-value="64" aria-pressed="false">64-bit index</button>
   </div>
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic. Box widths are to scale in bytes. A tensor of rank <code>r</code> takes <code>3 + 2r</code> arguments,
     whatever its dimensions are named.

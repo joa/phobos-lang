@@ -40,7 +40,6 @@ const last = K_STEPS - 1
     <button type="button" class="chart-btn" data-group="path" data-value="fma" aria-pressed="true">f32 FMA</button>
     <button type="button" class="chart-btn" data-group="path" data-value="tc" aria-pressed="false">@tensorcore</button>
   </div>
-  <button type="button" class="chart-btn" data-action="replay">Replay</button>
   <Fragment slot="caption">
     Schematic. Gemm's k loop with <code>TILE_M = TILE_N = 64</code>, <code>TILE_K = 16</code> and <code>K = 64</code>
     for one CTA: four k steps, each adding one product into <code>acc</code>.
