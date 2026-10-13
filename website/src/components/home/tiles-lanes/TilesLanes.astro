@@ -1,0 +1,561 @@
+---
+// The tiles-and-lanes scene: beat 1 lifts gemm tiles from global into shared memory and into the
+// accumulator, beat 2 trades one warp's partial sums across its lanes. The build renders each beat's
+// settled frame from the same functions the browser plays, so without JavaScript, and under reduced
+// motion, both beats stand side by side; with motion they take turns on one stage.
+import "../../../styles/chart.css"
+import { traceEntry } from "../../../lib/viz/catalog"
+import { sceneData } from "./data"
+import { tokenize } from "./highlight"
+import { lanesBeat, tilesBeat, VIEW_HEIGHT_UNITS, VIEW_WIDTH_UNITS, type Beat, type PathState } from "./scene"
+
+const gemm = traceEntry("gemm_fp32")?.traces["sm_75"]
+const matvec = traceEntry("lanes_matvec")?.traces["sm_75"]
+if (!gemm || !matvec) throw new Error("the tiles-and-lanes scene needs the gemm_fp32 and lanes_matvec traces")
+const data = sceneData(gemm, matvec)
+const { tiles, lanes } = data
+
+function settled(beat: Beat) {
+  const { camera, view } = beat.rest
+  const still = beat.still(camera, view)
+  const frame = beat.frame(beat.settledMs, camera, view)
+  const paths: Record<string, PathState> = { ...still }
+  for (const [key, state] of Object.entries(frame.paths))
+    paths[key] = { ...paths[key], ...state, d: state.d ?? paths[key]?.d }
+  // Paths a frame changes go in a layer of their own over the rest, so the dense, still dot fields
+  // are not painted again every frame.
+  const moving = new Set(Object.keys(frame.paths))
+  return { paths, frame, moving }
+}
+
+const pct = (value: number, of: number) => `${Math.round((value / of) * 10000) / 100}%`
+
+const beats = [
+  {
+    beat: tilesBeat(tiles),
+    title: "Tiles, like Triton",
+    code: data.tilesCode,
+    label: `Tiles. In ${tiles.kernel} on ${tiles.chip}, each k step lifts a ${tiles.tileM} x ${tiles.tileK} tile of A and a ${tiles.tileK} x ${tiles.tileN} tile of B from global memory into shared memory, and dot(a, b) adds their product into a ${tiles.tileM} x ${tiles.tileN} accumulator in registers.`,
+    meta: tiles.kts.slice(0, 3).map(kt => `kt = ${kt}`),
+    note: `TILE_M ${tiles.tileM}, TILE_N ${tiles.tileN}, TILE_K ${tiles.tileK}, ${tiles.threads} threads, schematic`,
+  },
+  {
+    beat: lanesBeat(lanes),
+    title: "Lanes, like Gluon",
+    code: data.lanesCode,
+    label: `Lanes. In ${lanes.kernel} on ${lanes.chip}, each of a warp's ${lanes.lanes} lanes loads its own run of ${lanes.runElems} elements of W and x per step and keeps a partial sum; sum over ctx.lane then trades the sums between lanes in ${lanes.masks.length} xor stages, ${lanes.masks.join(", ")}.`,
+    meta: lanes.masks.map(mask => `xor ${mask}`),
+    note: `${lanes.lanes} lanes, ${lanes.runElems} elements each per step, schematic`,
+  },
+].map(entry => ({ ...entry, ...settled(entry.beat) }))
+---
+
+<div class="tl" data-active="tiles">
+  <div class="tl-tabs" role="group" aria-label="Show">
+    {
+      beats.map(({ beat, title }, index) => (
+        <button type="button" class="tl-tab" data-beat={beat.name} aria-pressed={index === 0 ? "true" : "false"}>
+          {title}
+        </button>
+      ))
+    }
+  </div>
+  <div class="tl-beats">
+    {
+      beats.map(({ beat, title, code, label, meta, note, paths, frame, moving }, index) => (
+        <section class:list={["tl-beat", { "is-active": index === 0 }]} data-beat={beat.name} aria-label={title}>
+          <h3 class="tl-title">{title}</h3>
+          <div class="tl-stage" role="img" aria-label={label}>
+            <svg class="tl-svg" viewBox={`0 0 ${VIEW_WIDTH_UNITS} ${VIEW_HEIGHT_UNITS}`} aria-hidden="true">
+              {beat.paths.filter(spec => !moving.has(spec.key)).map(spec => (
+                <path
+                  data-key={spec.key}
+                  class={spec.className}
+                  d={paths[spec.key]?.d ?? ""}
+                  stroke-width={paths[spec.key]?.width}
+                  style={`opacity:${paths[spec.key]?.opacity ?? 1}`}
+                />
+              ))}
+            </svg>
+            <svg class="tl-svg tl-svg-over tl-svg-moving" viewBox={`0 0 ${VIEW_WIDTH_UNITS} ${VIEW_HEIGHT_UNITS}`} aria-hidden="true">
+              {beat.paths.filter(spec => moving.has(spec.key)).map(spec => (
+                <path
+                  data-key={spec.key}
+                  class={spec.className}
+                  d={paths[spec.key]?.d ?? ""}
+                  stroke-width={paths[spec.key]?.width}
+                  style={`opacity:${paths[spec.key]?.opacity ?? 1}`}
+                />
+              ))}
+            </svg>
+            <svg class="tl-svg tl-svg-over tl-svg-live" viewBox={`0 0 ${VIEW_WIDTH_UNITS} ${VIEW_HEIGHT_UNITS}`} aria-hidden="true">
+              <defs>
+                {(["global", "shared", "reg"] as const).map(space => (
+                  <radialGradient id={`tl-glow-${beat.name}-${space}`} class={`sp-${space}`}>
+                    <stop offset="0" class="tl-glow-stop" stop-opacity="0.32" />
+                    <stop offset="0.45" class="tl-glow-stop" stop-opacity="0.1" />
+                    <stop offset="1" class="tl-glow-stop" stop-opacity="0" />
+                  </radialGradient>
+                ))}
+              </defs>
+              <g class="tl-glows">
+                {beat.glows.map((space, glow) => {
+                  const state = frame.glows[glow]
+                  return (
+                    <circle
+                      class="tl-glow"
+                      fill={`url(#tl-glow-${beat.name}-${space})`}
+                      cx={state.x}
+                      cy={state.y}
+                      r={state.r}
+                      opacity={state.opacity}
+                    />
+                  )
+                })}
+              </g>
+              <g class="tl-particles">
+                {beat.particles.map((spec, particle) => {
+                  const state = frame.particles[particle]
+                  return (
+                    <circle
+                      class={`tl-p sp-${spec.space} is-depth-${spec.depth}`}
+                      cx={state.x}
+                      cy={state.y}
+                      r={state.r}
+                      opacity={state.opacity}
+                    />
+                  )
+                })}
+              </g>
+            </svg>
+            <canvas class="tl-canvas" aria-hidden="true"></canvas>
+            <div class="tl-labels" aria-hidden="true">
+              {beat.labels.map(spec => {
+                const state = frame.labels[spec.key]
+                return (
+                  <span
+                    class={`tl-label sp-${spec.space ?? "global"} is-${spec.anchor ?? "start"}`}
+                    data-key={spec.key}
+                    style={`left:${pct(state.x, VIEW_WIDTH_UNITS)};top:${pct(state.y, VIEW_HEIGHT_UNITS)}`}
+                  >
+                    {spec.text}
+                    {spec.detail && <span class="tl-detail">{spec.detail}</span>}
+                  </span>
+                )
+              })}
+            </div>
+          </div>
+          <div class="tl-code">
+            <pre><code>{code.lines.map((line, lineIndex) => (
+              <span class:list={["tl-line", { "is-current": frame.mark !== null && lineIndex === code.marks[frame.mark] }]}>{tokenize(line).map(token => token.kind === "plain" ? token.text : <span class={`tk-${token.kind}`}>{token.text}</span>)}</span>
+            ))}</code></pre>
+            <p class="tl-meta" aria-hidden="true">
+              {meta.map((text, metaIndex) => (
+                <span
+                  data-meta={metaIndex}
+                  class:list={{ "is-current": metaIndex === frame.metaIndex, "is-done": metaIndex < frame.metaIndex }}
+                >
+                  {text}
+                </span>
+              ))}
+            </p>
+            <p class="tl-note">{note}</p>
+          </div>
+        </section>
+      ))
+    }
+  </div>
+  <script type="application/json" class="tl-data" set:html={JSON.stringify(data)} />
+</div>
+
+<script>
+  import { TilesLanesPlayer } from "./player"
+  import type { SceneData } from "./data"
+
+  for (const root of document.querySelectorAll<HTMLElement>(".tl")) {
+    try {
+      const data = JSON.parse(root.querySelector(".tl-data")?.textContent ?? "") as SceneData
+      new TilesLanesPlayer(root, data).start()
+    } catch (error) {
+      console.error("The tiles-and-lanes scene failed to start", error)
+    }
+  }
+</script>
+
+<style>
+  .tl {
+    --tl-gap: clamp(1.25rem, 3vw, 2.5rem);
+  }
+
+  /* Static: both beats side by side, each its title, stage and code */
+  .tl-tabs {
+    display: none;
+  }
+
+  .tl-beats {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--tl-gap);
+  }
+
+  .tl-beat {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    min-width: 0;
+  }
+
+  .tl-title {
+    margin: 0;
+    font-size: 1.0625rem;
+    font-weight: 600;
+    color: var(--star);
+  }
+
+  .tl-stage {
+    position: relative;
+    opacity: var(--stage-opacity, 1);
+  }
+
+  .tl-svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+  }
+
+  .tl-svg-over {
+    position: absolute;
+    inset: 0;
+  }
+
+  /* While playing, what moves is drawn on the canvas (see stage-canvas.ts) */
+  .tl-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    display: none;
+    pointer-events: none;
+  }
+
+  .tl[data-live] .tl-canvas {
+    display: block;
+  }
+
+  /* Hidden but still styled: the canvas reads its colors from these */
+  .tl[data-live] .tl-svg-over {
+    visibility: hidden;
+  }
+
+  /* Live: one stage, the beats take turns in it */
+  .tl[data-live] .tl-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin-bottom: 1.25rem;
+  }
+
+  .tl[data-live] .tl-beats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tl[data-live] .tl-beat {
+    grid-area: 1 / 1;
+    display: grid;
+    grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+    align-items: center;
+    gap: var(--tl-gap);
+  }
+
+  .tl[data-live] .tl-title {
+    display: none;
+  }
+
+  .tl[data-live] .tl-beat:not(.is-active) {
+    pointer-events: none;
+  }
+
+  .tl[data-live] .tl-code {
+    transition:
+      opacity var(--dur-3) var(--ease-out),
+      visibility 0s linear 0s;
+  }
+
+  .tl[data-live] .tl-beat:not(.is-active) .tl-code {
+    opacity: 0;
+    visibility: hidden;
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      visibility 0s linear var(--dur-2);
+  }
+
+  @media (max-width: 899px) {
+    .tl-beats {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .tl[data-live] .tl-beat {
+      grid-template-columns: minmax(0, 1fr);
+      align-items: start;
+    }
+  }
+
+  /* Pills */
+  .tl-tab {
+    position: relative;
+    overflow: hidden;
+    padding: 0.4rem 0.95rem;
+    border: 1px solid var(--sky-line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--dust);
+    font: inherit;
+    font-size: 0.875rem;
+    cursor: pointer;
+    transition:
+      color var(--dur-2) var(--ease-out),
+      border-color var(--dur-2) var(--ease-out),
+      background-color var(--dur-2) var(--ease-out);
+  }
+
+  .tl-tab:hover {
+    color: var(--star);
+  }
+
+  .tl-tab:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  .tl-tab[aria-pressed="true"] {
+    border-color: color-mix(in srgb, var(--brand) 55%, var(--sky-line));
+    background: var(--brand-fill);
+    color: var(--star);
+  }
+
+  /* How far the beat has played, as a hairline along the pill's foot */
+  .tl-tab::after {
+    content: "";
+    position: absolute;
+    inset: auto 0.95rem 0.2rem;
+    height: 1px;
+    background: var(--brand);
+    opacity: 0.7;
+    transform: scaleX(var(--progress, 0));
+    transform-origin: left;
+  }
+
+  .tl-tab[aria-pressed="false"]::after {
+    opacity: 0;
+  }
+
+  /* Drawing: JS writes positions and opacities, never colors */
+  .tl-floor {
+    fill: var(--space-fill);
+    fill-opacity: 0.55;
+    stroke: var(--space);
+    stroke-opacity: 0.32;
+    stroke-width: 1;
+    stroke-linejoin: round;
+  }
+
+  .tl-guide {
+    fill: none;
+    stroke: var(--dust);
+    stroke-opacity: 0.3;
+    stroke-width: 0.8;
+    stroke-dasharray: 2 4;
+  }
+
+  .tl-dots {
+    fill: none;
+    stroke: var(--space);
+    stroke-linecap: round;
+  }
+
+  .tl-faint {
+    stroke-opacity: 0.35;
+  }
+
+  .tl-outline {
+    fill: var(--space-fill-on);
+    stroke: var(--space);
+    stroke-width: 1.2;
+    stroke-linejoin: round;
+  }
+
+  .tl-outline.tl-faint {
+    fill: none;
+    stroke-dasharray: 3 3;
+  }
+
+  .tl-arc {
+    fill: none;
+    stroke: var(--space);
+    stroke-width: 0.7;
+    stroke-opacity: 0.32;
+  }
+
+  .tl-p {
+    fill: var(--space);
+  }
+
+  .tl-glow-stop {
+    stop-color: var(--space);
+  }
+
+  .tl-p.is-depth-1 {
+    fill: color-mix(in srgb, var(--space) 75%, var(--star));
+  }
+
+  .tl-p.is-depth-2 {
+    fill: color-mix(in srgb, var(--space) 50%, var(--star));
+  }
+
+  /* Labels are HTML over the drawing: crisp at any size, placed at projected anchors */
+  .tl-labels {
+    position: absolute;
+    inset: 0;
+    pointer-events: none;
+  }
+
+  .tl-label {
+    position: absolute;
+    translate: 0 -50%;
+    white-space: nowrap;
+    color: color-mix(in srgb, var(--space) 70%, var(--dust));
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1;
+  }
+
+  .tl-detail {
+    display: block;
+    margin-top: 0.3rem;
+    color: var(--dust);
+    opacity: 0.8;
+  }
+
+  .tl-label.is-end .tl-detail {
+    text-align: right;
+  }
+
+  .tl-label.is-middle {
+    translate: -50% -50%;
+  }
+
+  .tl-label.is-end {
+    translate: -100% -50%;
+  }
+
+  /* Code */
+  .tl-code {
+    min-width: 0;
+  }
+
+  .tl-code pre {
+    margin: 0;
+    padding: 0.85rem 0;
+    overflow-x: auto;
+    border: 1px solid var(--sky-line);
+    background: var(--sky-1);
+    font-family: var(--font-mono);
+    font-size: 0.8125rem;
+    line-height: 1.75;
+  }
+
+  .tl-code code {
+    display: block;
+    min-width: max-content;
+  }
+
+  .tl-line {
+    display: block;
+    padding: 0 1rem;
+    border-left: 2px solid transparent;
+    color: var(--dust);
+    white-space: pre;
+    transition:
+      background-color var(--dur-3) var(--ease-out),
+      border-color var(--dur-3) var(--ease-out),
+      color var(--dur-3) var(--ease-out);
+  }
+
+  .tl-line.is-current {
+    border-left-color: var(--brand);
+    background: var(--brand-fill);
+    color: var(--star);
+  }
+
+  .tk-kw {
+    color: var(--nebula);
+  }
+
+  .tk-fn,
+  .tk-ctx {
+    color: var(--brand);
+  }
+
+  .tk-num {
+    color: var(--mars);
+  }
+
+  .tl-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.35rem 0.9rem;
+    margin: 0.85rem 0 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--dust);
+  }
+
+  .tl-meta span {
+    opacity: 0.45;
+    transition: opacity var(--dur-2) var(--ease-out), color var(--dur-2) var(--ease-out);
+  }
+
+  .tl-meta span.is-done {
+    opacity: 0.75;
+  }
+
+  .tl-meta span.is-current {
+    opacity: 1;
+    color: var(--star);
+  }
+
+  .tl-note {
+    margin: 0.35rem 0 0;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--dust);
+  }
+
+  @media (max-width: 599px) {
+    .tl-code pre {
+      font-size: 0.6875rem;
+    }
+
+    .tl-line {
+      padding: 0 0.65rem;
+    }
+
+    /* The drawing leaves its labels a narrow margin here, so they wrap */
+    .tl-label {
+      width: max-content;
+      max-width: 9.5ch;
+      white-space: normal;
+      font-size: 0.625rem;
+      line-height: 1.15;
+    }
+
+    .tl-label.is-end {
+      text-align: right;
+    }
+
+    .tl-detail {
+      margin-top: 0.15rem;
+    }
+  }
+</style>
