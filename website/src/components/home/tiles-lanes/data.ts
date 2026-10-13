@@ -1,7 +1,8 @@
 // What the front page's tiles-and-lanes scene draws, read from the compiler's traces so the picture
-// matches what was compiled: the gemm's tile sizes, thread count and k steps, and the lanes matvec's
-// per-lane runs and the xor masks its sum<over ctx.lane> lowers to. Pure; Astro frontmatter calls it
-// and passes the result to the page as JSON, so no trace ships to the browser.
+// matches what was compiled: the gemm's tile sizes, thread count and k steps, the lanes matvec's
+// per-lane runs and the xor masks its sum<over ctx.lane> lowers to, and the staged matvec's tile
+// copy into shared memory with the runs its lanes then read from that tile. Pure; Astro frontmatter
+// calls it and passes the result to the page as JSON, so no trace ships to the browser.
 
 import type { Trace } from "../../../lib/viz/trace"
 
@@ -31,6 +32,27 @@ export interface LanesData {
   masks: number[]
 }
 
+export interface MixedData {
+  kernel: string
+  chip: string
+  K: number
+  threads: number
+  lanes: number
+  warps: number
+  // The tile copy: elements staged, elements per thread per pass, the threads that take part, and
+  // whether a barrier follows it.
+  tileElems: number
+  copyWidth: number
+  copyThreads: number
+  copyBarrier: boolean
+  // Per k step, where each lane of warp 0 starts its run in the shared tile and in its row of W.
+  runElems: number
+  kSteps: number[]
+  tileRuns: number[][]
+  weightRuns: number[][]
+  masks: number[]
+}
+
 export interface CodeExcerpt {
   lines: string[]
   // Line index (0-based) of each beat moment within `lines`.
@@ -40,8 +62,10 @@ export interface CodeExcerpt {
 export interface SceneData {
   tiles: TilesData
   lanes: LanesData
+  mixed: MixedData
   tilesCode: CodeExcerpt
   lanesCode: CodeExcerpt
+  mixedCode: CodeExcerpt
 }
 
 export function tilesData(trace: Trace): TilesData {
@@ -94,6 +118,43 @@ export function lanesData(trace: Trace): LanesData {
   }
 }
 
+export function mixedData(trace: Trace): MixedData {
+  const firstCta = trace.ctas[0].join()
+  const steps = trace.steps.filter(step => step.cta.join() === firstCta)
+  const kindOf = new Map(trace.ops.map(op => [op.id, op.kind]))
+  const copy = steps.find(step => kindOf.get(step.op) === "stage" && step.map && step.writes?.some(w => w.buffer !== undefined))
+  if (!copy?.map) throw new Error(`${trace.name} stages no tile`)
+  const tileBuffer = copy.writes!.find(w => w.buffer !== undefined)!.buffer!
+  const collective = steps.find(step => step.lanes?.kind === "collective" && step.lanes.stages)
+  if (!collective?.lanes?.stages) throw new Error(`${trace.name} has no collective`)
+  const loads = steps.filter(step => step.lanes?.kind === "lane_load" && step.lanes.runs)
+  const fromTile = loads.filter(step => step.lanes!.runs!.every(run => run.access.buffer === tileBuffer))
+  const fromWeights = loads.filter(step => step.lanes!.runs!.every(run => run.access.tensor === "W"))
+  if (fromTile.length === 0 || fromTile.length !== fromWeights.length)
+    throw new Error(`${trace.name}: lanes read ${fromTile.length} runs of the tile and ${fromWeights.length} of W`)
+  const starts = (step: (typeof loads)[number]) =>
+    [...step.lanes!.runs!].sort((a, b) => a.lane - b.lane).map(run => run.access.box[1][0])
+  const box = fromTile[0].lanes!.runs![0].access.box
+  const elems = copy.map.shape.reduce((product, extent) => product * extent, 1)
+  return {
+    kernel: trace.name,
+    chip: trace.compiler.chip,
+    K: trace.params.K,
+    threads: trace.launch.threads,
+    lanes: trace.launch.lanes,
+    warps: trace.launch.warps,
+    tileElems: elems,
+    copyWidth: copy.map.width,
+    copyThreads: Math.min(copy.map.threads, elems / copy.map.width),
+    copyBarrier: copy.barrier?.kept === true,
+    runElems: box[1][1] - box[1][0],
+    kSteps: fromTile.map(step => step.iter.k),
+    tileRuns: fromTile.map(starts),
+    weightRuns: fromWeights.map(starts),
+    masks: collective.lanes.stages.map(xorMask),
+  }
+}
+
 // Source lines picked in order, each the first line after the previous pick whose trimmed text starts
 // with its prefix, dedented by the first pick's indent; a line indented less starts at column 0. A
 // mark names the first picked line containing its text.
@@ -119,10 +180,11 @@ export function excerpt(source: string, prefixes: string[], marks: Record<string
   return { lines, marks: found }
 }
 
-export function sceneData(gemm: Trace, matvec: Trace): SceneData {
+export function sceneData(gemm: Trace, matvec: Trace, staged: Trace): SceneData {
   return {
     tiles: tilesData(gemm),
     lanes: lanesData(matvec),
+    mixed: mixedData(staged),
     tilesCode: excerpt(gemm.source.text, ["for kt", "var a", "var b", "acc += dot", "}"], {
       a: "var a =",
       b: "var b =",
@@ -133,5 +195,10 @@ export function sceneData(gemm: Trace, matvec: Trace): SceneData {
       acc: "acc += sum(",
       sum: "sum<over ctx.lane>",
     }),
+    mixedCode: excerpt(
+      staged.source.text,
+      ["var xs", "if row", "for k in", "let at", "acc += sum", "}", "}", "let total"],
+      { stage: "var xs =", at: "let at =", acc: "acc += sum(", sum: "sum<over ctx.lane>" }
+    ),
   }
 }
