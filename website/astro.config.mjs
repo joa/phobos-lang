@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs"
 import { defineConfig } from "astro/config"
 import starlight from "@astrojs/starlight"
 import sources from "./integrations/sources.mjs"
+import traceFences from "./integrations/remark-trace-fences.mjs"
 
 const phobosGrammar = JSON.parse(readFileSync(new URL("./src/grammars/phobos.tmLanguage.json", import.meta.url), "utf8"))
 
@@ -13,6 +14,7 @@ export default defineConfig({
   trailingSlash: "ignore",
   integrations: [
     sources(),
+    traceFences(),
     starlight({
       title: "Phobos",
       description: "Tile-based GPU kernel language & LLM inference engine",

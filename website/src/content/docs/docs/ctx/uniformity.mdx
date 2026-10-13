@@ -7,6 +7,10 @@ sidebar:
 
 {/* figure: ctx-uniformity */}
 
+import Kernel from "../../../../components/Kernel.astro"
+
+<Kernel trace="lanes_matvec" zoom="lane" stack caption="The lanes matvec from Collectives and shuffles" />
+
 Every value in a Phobos kernel is the same in every thread of the CTA until
 `ctx.thread`, `ctx.warp` or `ctx.lane` flows into it. The compiler infers, for
 each value, how far it may differ between threads. There is no annotation to

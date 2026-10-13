@@ -1,65 +1,49 @@
 ---
-// Scene 4: shared memory, packed. A static schematic until the gemm trace drives it: buffers as
-// lifetime intervals (program order across, byte offset down), packed into one byte ruler, with the
-// barriers the planner keeps and the ones it drops. Drawn once per layout; CSS shows the one that fits.
+// Scene 4: shared memory, packed, drawn from a trace at build time: each buffer as a lifetime interval
+// (program order across, byte offset down) at the offset the planner chose, and each barrier at its
+// place in program order, kept or elided. It uses the gemm kernel without @aligned: with @aligned the
+// k loop goes to the GEMM lowering, whose four panel buffers all live across the whole loop, so
+// nothing there shares bytes. Drawn once per layout; CSS shows the one that fits. No script.
 import ChartPlate from "../figures/ChartPlate.astro"
+import { traceEntry } from "../../lib/viz/catalog"
+import { KernelModel } from "../../lib/viz/model"
+import { packing, type PackingFrame } from "../../lib/viz/packing"
 
-interface Buffer {
-  name: string
-  // A shorter name for the narrow plate, where the box is too short for the full one
-  shortName?: string
-  from: number
-  to: number
-  top: number
-  bottom: number
-}
+const TRACE = "gemm_fp32_no_aligned"
+const entry = traceEntry(TRACE)
+if (!entry) throw new Error(`PackingScene needs the ${TRACE} trace`)
+const model = new KernelModel(entry.traces["sm_75"] ?? entry.traces[entry.chips[0]])
+const aligned = traceEntry("gemm_fp32")?.traces["sm_75"]
 
-// Normalized: from/to along program order, top/bottom along the byte ruler. Illustrative only.
-const BUFFERS: Buffer[] = [
-  { name: "a", from: 0.06, to: 0.56, top: 0, bottom: 0.25 },
-  { name: "b", from: 0.09, to: 0.59, top: 0.25, bottom: 0.5 },
-  { name: "a, next", from: 0.34, to: 0.8, top: 0.5, bottom: 0.75 },
-  { name: "b, next", from: 0.37, to: 0.83, top: 0.75, bottom: 1 },
-  { name: "later tile", shortName: "later", from: 0.86, to: 0.99, top: 0, bottom: 0.5 },
-]
-const BARRIERS = [
-  { at: 0.27, kept: true },
-  { at: 0.47, kept: false },
-  { at: 0.66, kept: true },
-  { at: 0.845, kept: false },
-]
-
-interface Frame {
+interface Frame extends PackingFrame {
   widthUnits: number
   heightUnits: number
-  left: number
-  right: number
-  top: number
-  bottom: number
-  label: string
+  charUnits: number
 }
 
 const FRAMES: Record<"wide" | "narrow", Frame> = {
-  wide: { widthUnits: 1000, heightUnits: 330, left: 120, right: 970, top: 78, bottom: 270, label: "FIG / GEMM / SHARED" },
-  narrow: { widthUnits: 400, heightUnits: 380, left: 64, right: 386, top: 92, bottom: 300, label: "FIG / GEMM / SHARED" },
+  wide: { widthUnits: 1000, heightUnits: 330, left: 120, right: 970, top: 70, bottom: 262, charUnits: 7.3 },
+  narrow: { widthUnits: 400, heightUnits: 380, left: 64, right: 386, top: 84, bottom: 292, charUnits: 7.3 },
 }
 
-function place(frame: Frame) {
-  const x = (t: number) => frame.left + t * (frame.right - frame.left)
-  const y = (o: number) => frame.top + o * (frame.bottom - frame.top)
-  return {
-    buffers: BUFFERS.map(buffer => ({
-      ...buffer,
-      x: x(buffer.from),
-      y: y(buffer.top),
-      width: x(buffer.to) - x(buffer.from),
-      height: y(buffer.bottom) - y(buffer.top),
-    })),
-    barriers: BARRIERS.map(barrier => ({ ...barrier, x: x(barrier.at) })),
-  }
-}
-
-const layouts = (["wide", "narrow"] as const).map(layout => ({ layout, frame: FRAMES[layout], ...place(FRAMES[layout]) }))
+const kept = model.barriers.filter(barrier => barrier.kept).length
+const elided = model.barriers.length - kept
+const label = "FIG / GEMM WITHOUT @ALIGNED / SHARED"
+const layouts = (["wide", "narrow"] as const).map(layout => {
+  const frame = FRAMES[layout]
+  const packed = packing(model, frame)
+  const fits = (text: string, width: number) => text.length * frame.charUnits + 10 <= width
+  const buffers = packed.buffers.map(buffer => {
+    const short = buffer.name.replace(/, remainder$/, "")
+    const text = fits(buffer.name, buffer.width) ? buffer.name : fits(short, buffer.width) ? short : ""
+    return { ...buffer, text }
+  })
+  return { layout, frame, buffers, barriers: packed.barriers, peakBytes: packed.peakBytes }
+})
+const desc =
+  `${model.buffers.length} shared-memory buffers of the gemm kernel without @aligned, from its trace, drawn as intervals: across is program order, down is the byte offset, ${model.sharedPeakBytes} bytes at the peak. ` +
+  `Buffers alive at the same time sit at different offsets; c_old reuses the bytes of the panels a and b once they have ended. ` +
+  `Vertical lines mark the ${model.barriers.length} barriers: ${kept} kept, solid, and ${elided} elided, dashed.`
 ---
 
 <section class="scene packing" id="shared-memory" aria-labelledby="packing-title">
@@ -73,68 +57,69 @@ const layouts = (["wide", "narrow"] as const).map(layout => ({ layout, frame: FR
       </p>
     </div>
     {
-      layouts.map(({ layout, frame, buffers, barriers }) => (
+      layouts.map(({ layout, frame, buffers, barriers, peakBytes }) => (
         <div class={`packing-plate is-${layout}`}>
           <ChartPlate
             id={`packing-${layout}`}
             widthUnits={frame.widthUnits}
             heightUnits={frame.heightUnits}
-            label={frame.label}
-            schematic
+            label={label}
             title="Shared-memory buffers of a gemm kernel packed by lifetime"
-            desc="Schematic. Buffers drawn as intervals: across is program order, down is the byte offset in shared memory. Buffers alive at the same time sit at different offsets; a later buffer reuses the bytes of two that have ended. Vertical lines mark barriers, solid where one is kept and dashed where one is dropped."
+            desc={desc}
           >
             <g class="sp-shared">
               <path class="chart-wire" d={`M${frame.left - 18} ${frame.top}V${frame.bottom}`} />
-              <path
-                class="chart-ticks"
-                d={[0, 0.25, 0.5, 0.75, 1].map(o => `M${frame.left - 24} ${frame.top + o * (frame.bottom - frame.top)}h12`).join("")}
-              />
+              <path class="chart-ticks" d={`M${frame.left - 24} ${frame.top}h12M${frame.left - 24} ${frame.bottom}h12`} />
               <text class="chart-label is-small" x={frame.left - 30} y={frame.top} text-anchor="end" dominant-baseline="middle">
                 0
               </text>
               <text class="chart-label is-small" x={frame.left - 30} y={frame.bottom} text-anchor="end" dominant-baseline="middle">
-                peak
+                {layout === "wide" ? `${peakBytes} bytes` : `${peakBytes}`}
               </text>
               <text class="chart-label is-small" x={frame.left - 18} y={frame.top - 18} text-anchor="middle">
                 bytes
               </text>
               {buffers.map(buffer => (
                 <g>
-                  <rect class="chart-box is-on" x={buffer.x} y={buffer.y + 2} width={buffer.width} height={buffer.height - 4} />
-                  <text
-                    class="chart-label is-on"
-                    x={buffer.x + 8}
-                    y={buffer.y + buffer.height / 2}
-                    dominant-baseline="middle"
-                  >
-                    {layout === "narrow" ? (buffer.shortName ?? buffer.name) : buffer.name}
-                  </text>
+                  <rect class="chart-box is-on" x={buffer.x} y={buffer.y + 1} width={buffer.width} height={buffer.height - 2} />
+                  {buffer.text && (
+                    <text
+                      class="chart-label is-small is-on"
+                      x={buffer.x + 5}
+                      y={buffer.y + buffer.height / 2 + 0.5}
+                      dominant-baseline="middle"
+                    >
+                      {buffer.text}
+                    </text>
+                  )}
                 </g>
               ))}
             </g>
             {barriers.map(barrier => (
-              <g class={barrier.kept ? "packing-kept" : "packing-dropped"}>
-                <path class={barrier.kept ? "chart-wire is-on sp-reg" : "chart-wire packing-dash"} d={`M${barrier.x} ${frame.top - 12}V${frame.bottom + 8}`} />
+              <g>
+                <path
+                  class={barrier.kept ? "chart-wire is-on sp-reg" : "chart-wire packing-dash"}
+                  d={`M${barrier.x} ${frame.top - 12}V${frame.bottom + 8}`}
+                />
                 <circle class={barrier.kept ? "chart-node is-on sp-reg" : "chart-node"} cx={barrier.x} cy={frame.top - 12} r="2" />
-                <text
-                  class={`chart-label is-small ${barrier.kept ? "is-hot" : ""}`}
-                  x={barrier.x}
-                  y={frame.bottom + 24}
-                  text-anchor="middle"
-                >
-                  {barrier.kept ? "kept" : "dropped"}
-                </text>
               </g>
             ))}
-            <path class="chart-wire" d={`M${frame.left} ${frame.bottom + 40}H${frame.right}`} />
-            <text class="chart-label is-small" x={frame.right} y={frame.bottom + 54} text-anchor="end" dominant-baseline="middle">
+            <path class="chart-wire" d={`M${frame.left} ${frame.bottom + 30}H${frame.right}`} />
+            <text class="chart-label is-small" x={frame.left} y={frame.bottom + 46} dominant-baseline="middle">
+              {`barriers: ${kept} kept, solid; ${elided} elided, dashed`}
+            </text>
+            <text class="chart-label is-small" x={frame.right} y={frame.bottom + 64} text-anchor="end" dominant-baseline="middle">
               program order
             </text>
           </ChartPlate>
         </div>
       ))
     }
+    <p class="packing-note">
+      From the trace of <a href={`/viz/${TRACE}/`}><code>examples/gemm_fp32.ph</code> without <code>@aligned</code></a>{" "}
+      on {model.chip}. With <code>@aligned</code> the k loop goes to the GEMM lowering instead, which stages its panels
+      in {aligned?.buffers.length ?? 4} buffers that all live across the whole loop.
+    </p>
   </div>
 </section>
 
@@ -146,6 +131,13 @@ const layouts = (["wide", "narrow"] as const).map(layout => ({ layout, frame: FR
   .packing-plate :global(.packing-dash) {
     stroke: var(--dust);
     stroke-dasharray: 2 3;
+  }
+
+  .packing-note {
+    max-width: 48rem;
+    margin: 1rem 0 0;
+    color: var(--dust);
+    font-size: 0.875rem;
   }
 
   @media (max-width: 599px) {

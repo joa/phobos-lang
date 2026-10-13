@@ -1,0 +1,103 @@
+---
+// The visualizer full width, one page per traced kernel or variant: the code beside the drawing,
+// the keyboard on the whole page, and the step, CTA and zoom in the URL.
+import { readdirSync } from "node:fs"
+import { resolve } from "node:path"
+import Site from "../../layouts/Site.astro"
+import Visualizer from "../../components/viz/Visualizer.astro"
+import { defaultChip, traceEntries, traceEntry } from "../../lib/viz/catalog"
+import { shownSource } from "../../lib/viz/shown"
+
+export function getStaticPaths() {
+  return traceEntries().map(entry => ({ params: { kernel: entry.name } }))
+}
+
+const { kernel } = Astro.params
+const entry = traceEntry(kernel)!
+const trace = entry.traces[defaultChip(entry)]
+const source = trace.source
+const { code, lineMap, hiddenLines } = shownSource(source.text)
+const file = source.origin === "file" ? source.path : undefined
+const variant = source.variant
+const attribute = (variant?.add ?? variant?.drop)?.replace(/^@/, "")
+const exampleSlug = file?.slice(file.lastIndexOf("/") + 1, -".ph".length).replace(/_/g, "-")
+const examplePages = readdirSync(resolve(process.cwd(), "src/content/docs/docs/examples")).map(name =>
+  name.replace(/\.mdx?$/, "")
+)
+const docs = attribute
+  ? { href: `/docs/attributes/${attribute}/`, text: `@${attribute}` }
+  : exampleSlug && examplePages.includes(exampleSlug)
+    ? { href: `/docs/examples/${exampleSlug}/`, text: "the example's page" }
+    : source.origin === "fence"
+      ? { href: "/docs/ctx/collectives/", text: "Collectives and shuffles" }
+      : { href: "/docs/examples/", text: "the examples" }
+const variantText = variant ? (variant.add ? `, with ${variant.add} added` : `, with ${variant.drop} dropped`) : ""
+const params = Object.entries({ ...trace.params, ...trace.dims })
+  .map(([name, value]) => `${name} = ${value}`)
+  .join(", ")
+const grid = trace.launch.grid.filter((extent, axis) => axis === 0 || extent > 1).join(" x ")
+---
+
+<Site title={`${entry.name}: kernel visualizer`} description={`The ${trace.kernel} kernel stepped through as compiled.`}>
+  <div class="wrap viz-page">
+    <p class="viz-crumb"><a href={docs.href}>Back to {docs.text}</a></p>
+    <h1 class="viz-title"><code>{entry.name}</code></h1>
+    <p class="viz-lede">
+      The {trace.kernel} kernel{variantText}, as the compiler built it for {trace.compiler.chip} at commit{" "}
+      <code>{trace.compiler.commit}</code>: {params}; a {grid} grid of {trace.launch.threads} threads each.
+    </p>
+    <Visualizer
+      name={entry.name}
+      trace={trace}
+      chips={entry.chips}
+      code={code}
+      lineMap={lineMap}
+      hiddenLines={hiddenLines}
+      file={file}
+      caption={source.origin === "fence" ? "A kernel written in the docs" : undefined}
+      urlState
+      globalKeys
+      fullView={false}
+    />
+    <p class="viz-keys">
+      Keys: left and right arrows step, space plays and pauses, <kbd>[</kbd> and <kbd>]</kbd> move by a loop iteration.
+      The address of this page keeps the step, the CTA and the zoom.
+    </p>
+  </div>
+</Site>
+
+<style>
+  .viz-page {
+    padding-block: 2.5rem 4rem;
+  }
+
+  .viz-crumb {
+    margin: 0 0 1rem;
+    font-size: 0.875rem;
+  }
+
+  .viz-title {
+    margin: 0;
+    font-size: clamp(1.5rem, 3vw, 2rem);
+  }
+
+  .viz-title code {
+    font-size: 1em;
+  }
+
+  .viz-lede {
+    max-width: 48rem;
+    margin: 0.75rem 0 1.5rem;
+    color: var(--dust);
+  }
+
+  .viz-keys {
+    margin-top: 1.5rem;
+    color: var(--dust);
+    font-size: 0.875rem;
+  }
+
+  .viz-keys kbd {
+    font-family: var(--font-mono);
+  }
+</style>

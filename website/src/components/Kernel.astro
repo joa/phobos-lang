@@ -6,9 +6,17 @@
 // Lines starting with `@cluster` are hidden. `data-hidden-lines` keeps their
 // 1-based line numbers in the original source, and `data-line-map` the original
 // line of every shown line, so a visualizer can map its spans onto what is shown.
+//
+// When a trace exists for the kernel (the file's entry in kernels.json, or the
+// `trace` prop, which also names a variant), the visualizer attaches around the
+// code: sm_75 with a chip switch when the trace has several chips, or the one `chip` given.
+// Without JavaScript it stays a code block.
 import { readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import { Code } from "@astrojs/starlight/components"
+import Visualizer from "./viz/Visualizer.astro"
+import { defaultChip, traceEntry, traceForFile } from "../lib/viz/catalog"
+import { shownSource } from "../lib/viz/shown"
 
 interface Props {
   /** Repository-relative path to a `.ph` file, such as `examples/saxpy_fp32.ph`. */
@@ -17,49 +25,77 @@ interface Props {
   code?: string
   /** Caption for a `code` kernel; a `file` kernel is captioned with its path. */
   caption?: string
+  /** A trace by base name, such as `gemm_fp32_no_aligned`, for a variant or a docs fence. */
+  trace?: string
+  /** One chip only, with no chip switch; otherwise sm_75 with a switch when there are several. */
+  chip?: string
+  /** Keep the code above the drawing at any width. */
+  stack?: boolean
+  /** The visualizer's level to open on, tiles or lanes. */
+  zoom?: "tile" | "lane"
+  /** The visualizer's step to open on, from 1. */
+  step?: number
+  /** Play the visualizer's short tour when it first comes into view. */
+  tour?: boolean
 }
 
-const { file, code, caption } = Astro.props
+const { file, code, caption, trace, chip, stack = false, zoom, step, tour = false } = Astro.props
 // Builds run from website/; import.meta.url points into the bundle, not the source tree
 const REPO_ROOT = resolve(process.cwd(), "..") + "/"
 const REPO_URL = "https://github.com/joa/phobos-lang"
 
-if (!file === !code) throw new Error("<Kernel> takes exactly one of `file` or `code`")
-const source = (file ? readFileSync(REPO_ROOT + file, "utf8") : code!).replace(/\r\n?/g, "\n").replace(/\n+$/, "")
-
-const hiddenLines: number[] = []
-const lineMap: number[] = []
-const shown: string[] = []
-source.split("\n").forEach((line, index) => {
-  if (/^\s*@cluster\b/.test(line)) hiddenLines.push(index + 1)
-  else {
-    shown.push(line)
-    lineMap.push(index + 1)
-  }
-})
+if (!file === !code && !trace) throw new Error("<Kernel> takes exactly one of `file` or `code`")
+const entry = trace ? traceEntry(trace) : file ? traceForFile(file) : undefined
+const traced = entry ? entry.traces[chip && entry.chips.includes(chip) ? chip : defaultChip(entry)] : undefined
+// A variant shows the source exactly as compiled; otherwise the file or the fence is the source.
+const raw = traced?.source.variant
+  ? traced.source.text
+  : file
+    ? readFileSync(REPO_ROOT + file, "utf8")
+    : (code ?? traced?.source.text ?? "")
+const shownFile = file ?? (traced?.source.origin === "file" ? traced.source.path : undefined)
+const { code: shownCode, lineMap, hiddenLines } = shownSource(raw)
 ---
 
-<figure
-  class="kernel"
-  data-kernel-file={file}
-  data-hidden-lines={JSON.stringify(hiddenLines)}
-  data-line-map={JSON.stringify(lineMap)}
->
-  <Code code={shown.join("\n")} lang="phobos" />
-  {
-    (file || caption) && (
-      <figcaption>
-        {file ? (
-          <a href={`${REPO_URL}/blob/main/${file}`}>
-            <code>{file}</code>
-          </a>
-        ) : (
-          caption
-        )}
-      </figcaption>
-    )
-  }
-</figure>
+{
+  entry && traced ? (
+    <Visualizer
+      class="kernel"
+      name={entry.name}
+      trace={traced}
+      chips={chip ? [traced.compiler.chip] : entry.chips}
+      code={shownCode}
+      lineMap={lineMap}
+      hiddenLines={hiddenLines}
+      file={shownFile}
+      caption={caption}
+      arrange={stack ? "stack" : "auto"}
+      zoom={zoom}
+      step={step}
+      tour={tour}
+    />
+  ) : (
+    <figure
+      class="kernel"
+      data-kernel-file={file}
+      data-hidden-lines={JSON.stringify(hiddenLines)}
+      data-line-map={JSON.stringify(lineMap)}
+    >
+      <Code code={shownCode} lang="phobos" />
+      {(file || caption) && (
+        <figcaption>
+          {file ? (
+            <a href={`${REPO_URL}/blob/main/${file}`}>
+              <code>{file}</code>
+            </a>
+          ) : (
+            caption
+          )}
+        </figcaption>
+      )}
+    </figure>
+  )
+}
 
 <style>
   .kernel {

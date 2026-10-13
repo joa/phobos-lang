@@ -1,0 +1,172 @@
+---
+// The kernel visualizer around a highlighted code block. Without JavaScript the reader sees the code
+// and its caption; with it, kernel-viz.figure.ts loads the trace named by data-trace and data-chip
+// and attaches the drawing, the readout and the controls. On a wide container the code sits to the
+// left of the drawing; on a narrow one it shows the lines around the current statement above it.
+import { Code } from "@astrojs/starlight/components"
+import "../../styles/chart.css"
+import "./viz.css"
+import { KernelModel } from "../../lib/viz/model"
+import type { Trace } from "../../lib/viz/trace"
+import { nextVizId } from "./ids"
+
+interface Props {
+  /** The trace's base name, such as `gemm_fp32` or `gemm_fp32_no_aligned`. */
+  name: string
+  trace: Trace
+  /** Chips the reader can switch between; the first pressed is `trace`'s. */
+  chips?: string[]
+  /** The code as shown, `@cluster` lines removed. */
+  code: string
+  /** The original line number of every shown line. */
+  lineMap: number[]
+  hiddenLines?: number[]
+  file?: string
+  caption?: string
+  tour?: boolean
+  urlState?: boolean
+  globalKeys?: boolean
+  fullView?: boolean
+  /** The level to open on. */
+  zoom?: "tile" | "lane"
+  /** The step to open on, from 1. */
+  step?: number
+  /** "auto" follows the container; "stack" keeps the code above the drawing at any width. */
+  arrange?: "auto" | "stack"
+  class?: string
+}
+
+const {
+  name,
+  trace,
+  chips = [trace.compiler.chip],
+  code,
+  lineMap,
+  hiddenLines = [],
+  file,
+  caption,
+  tour = false,
+  urlState = false,
+  globalKeys = false,
+  fullView = true,
+  arrange = "auto",
+  zoom = "tile",
+  step = 1,
+  class: className,
+} = Astro.props
+const REPO_URL = "https://github.com/joa/phobos-lang"
+const chip = trace.compiler.chip
+const model = new KernelModel(trace)
+const steps = model.stepCount(0)
+const id = nextVizId(name)
+const variant = trace.source.variant
+const variantNote = variant ? (variant.add ? ` with ${variant.add} added` : ` with ${variant.drop} dropped`) : ""
+const grid = trace.launch.grid.filter((extent, axis) => axis === 0 || extent > 1).join(" x ")
+const title = `The ${trace.kernel} kernel${variantNote}, stepped through as the compiler built it for ${chip}`
+const desc =
+  `A ${grid} grid of CTAs with ${trace.launch.threads} threads each. ` +
+  `The drawing shows the tensors ${trace.tensors.map(tensor => tensor.name).join(", ")} in global memory with the picked CTA's current boxes, ` +
+  `shared memory as a byte ruler of ${model.sharedPeakBytes} bytes with each buffer at its planned offset, the barriers kept and elided, ` +
+  `and how the CTA's threads and warp 0's lanes take part. The readout below describes each step.`
+---
+
+<div
+  class:list={["viz", `is-${arrange}`, className]}
+  data-viz
+  data-trace={name}
+  data-chip={chip}
+  data-line-map={JSON.stringify(lineMap)}
+  data-hidden-lines={JSON.stringify(hiddenLines)}
+  data-kernel-file={file}
+  data-tour={tour ? "" : undefined}
+  data-url-state={urlState ? "" : undefined}
+  data-global-keys={globalKeys ? "" : undefined}
+  data-step={step > 1 ? step : undefined}
+>
+  <div class="viz-body">
+    <div class="viz-source">
+      <div class="viz-code" data-viz-code>
+        <div class="viz-marker" aria-hidden="true"></div>
+        <Code code={code} lang="phobos" />
+      </div>
+      <p class="viz-caption">
+        {
+          file ? (
+            <a href={`${REPO_URL}/blob/main/${file}`}>
+              <code>{file}</code>
+            </a>
+          ) : (
+            caption && <span>{caption}</span>
+          )
+        }
+        {variant && <span class="viz-variant">{variant.add ? `${variant.add} added` : `${variant.drop} dropped`}</span>}
+        {fullView && <a class="viz-full" href={`/viz/${name}/`}>Open full view</a>}
+      </p>
+    </div>
+    <figure class="chart viz-figure" id={id} data-chart-figure="kernel-viz">
+      <svg class="chart-svg" role="img" aria-labelledby={`${id}-title ${id}-desc`} viewBox="0 0 720 360">
+        <title id={`${id}-title`}>{title}</title>
+        <desc id={`${id}-desc`}>{desc}</desc>
+      </svg>
+      <p class="chart-readout" aria-live="polite"></p>
+      <div class="viz-controls">
+        <div class="viz-row">
+          <div class="chart-group" role="group" aria-label="Step">
+            <button type="button" class="chart-btn" data-action="prev" aria-label="Previous step">Back</button>
+            <button type="button" class="chart-btn viz-play" data-action="play" aria-pressed="false">Play</button>
+            <button type="button" class="chart-btn" data-action="next" aria-label="Next step">Next</button>
+          </div>
+          <div class="chart-group" role="group" aria-label="Loop iteration">
+            <button type="button" class="chart-btn" data-action="iter-prev" aria-label="Previous loop iteration">[ iter</button>
+            <button type="button" class="chart-btn" data-action="iter-next" aria-label="Next loop iteration">iter ]</button>
+          </div>
+          <label class="chart-range-label viz-scrub">
+            <span class="viz-sr">Step</span>
+            <input type="range" class="chart-range" min="1" max={steps} step="1" value="1" data-param="step" />
+            <span class="viz-value" data-viz-pos>step 1 of {steps}</span>
+          </label>
+        </div>
+        <div class="viz-row">
+          <div class="chart-group" role="group" aria-label="CTA">
+            <button type="button" class="chart-btn viz-icon" data-action="cta-prev" aria-label="Previous CTA">&lt;</button>
+            <span class="viz-value viz-cta-value" data-viz-cta>{model.ctaName(trace.ctas[0])}</span>
+            <button type="button" class="chart-btn viz-icon" data-action="cta-next" aria-label="Next CTA">&gt;</button>
+            <button type="button" class="chart-btn" data-action="sweep" aria-pressed="false">All CTAs</button>
+          </div>
+          <div class="chart-group" role="group" aria-label="Zoom">
+            <button type="button" class="chart-btn" data-group="zoom" data-value="tile" aria-pressed={zoom === "tile" ? "true" : "false"}>Tiles</button>
+            <button type="button" class="chart-btn" data-group="zoom" data-value="lane" aria-pressed={zoom === "lane" ? "true" : "false"}>Lanes</button>
+          </div>
+          {
+            chips.length > 1 && (
+              <div class="chart-group" role="group" aria-label="Chip">
+                {chips.map(option => (
+                  <button
+                    type="button"
+                    class="chart-btn"
+                    data-group="chip"
+                    data-value={option}
+                    aria-pressed={option === chip ? "true" : "false"}
+                  >
+                    {option}
+                  </button>
+                ))}
+              </div>
+            )
+          }
+        </div>
+      </div>
+      <ul class="chart-legend" aria-label="Legend">
+        <li class="chart-key sp-global">global memory</li>
+        <li class="chart-key sp-shared">shared memory</li>
+        <li class="chart-key sp-reg">threads and lanes</li>
+        <li class="chart-key sp-cost">cost</li>
+      </ul>
+    </figure>
+  </div>
+</div>
+
+<script>
+  import { startFigures } from "../figures/boot"
+  startFigures()
+</script>
