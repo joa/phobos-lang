@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://phobos-lang.dev/sitemap-index.xml

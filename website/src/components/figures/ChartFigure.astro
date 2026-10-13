@@ -3,7 +3,9 @@
 // build() and settle() the browser runs, so without JavaScript the figure shows its end state; with
 // it, the module named by `name` (<name>.figure.ts) takes over. Controls go in the default slot,
 // as buttons with data-group/data-value (aria-pressed on the default) or data-action, and range
-// inputs with data-param; `state` must match the pressed defaults.
+// inputs with data-param; `state` must match the pressed defaults. A `pickable` figure has
+// focusable cells inside its drawing (see ctx-hierarchy/pick.ts), so the drawing is a group
+// rather than an image, which may not contain controls.
 import "../../styles/chart.css"
 import type { ChartFigure as Base, FigureConstructor, StateValue } from "../../lib/figure/chart-figure"
 import type { Space } from "../../lib/figure/draw"
@@ -16,10 +18,11 @@ interface Props {
   title: string
   desc: string
   legend?: Space[]
+  pickable?: boolean
   class?: string
 }
 
-const { id, name, figure, state = {}, title, desc, legend = [], class: className } = Astro.props
+const { id, name, figure, state = {}, title, desc, legend = [], pickable = false, class: className } = Astro.props
 const wide = figure.renderStatic("wide", state, id)
 const narrow = figure.renderStatic("narrow", state, `${id}-narrow`)
 const legendLabels: Record<Space, string> = {
@@ -32,8 +35,8 @@ const hasControls = Astro.slots.has("default")
 const hasCaption = Astro.slots.has("caption")
 ---
 
-<figure class:list={["chart", className]} id={id} data-chart-figure={name}>
-  <svg class="chart-svg" role="img" aria-labelledby={`${id}-title ${id}-desc`} viewBox={wide.viewBox}>
+<figure class:list={["chart", { "chart-pickable": pickable }, className]} id={id} data-chart-figure={name}>
+  <svg class="chart-svg" role={pickable ? "group" : "img"} aria-labelledby={`${id}-title ${id}-desc`} viewBox={wide.viewBox}>
     <title id={`${id}-title`}>{title}</title>
     <desc id={`${id}-desc`}>{desc}</desc>
     <g class="chart-drawing" set:html={wide.drawing} />

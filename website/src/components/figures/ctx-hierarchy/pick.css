@@ -8,14 +8,15 @@
   outline: none;
 }
 
-.chart-pick:focus-visible {
+.chart-pick:focus-visible,
+.chart-pickable .chart-svg:focus-visible {
   outline: 2px solid var(--brand);
   outline-offset: 1px;
 }
 
-/* Nothing hidden takes a click meant for what is drawn under it */
-.chart-svg .is-hidden,
-.chart-svg .is-hidden * {
+/* In a figure with pickable cells, nothing hidden takes a click meant for what is drawn under it */
+.chart-pickable .chart-svg .is-hidden,
+.chart-pickable .chart-svg .is-hidden * {
   pointer-events: none;
 }
 

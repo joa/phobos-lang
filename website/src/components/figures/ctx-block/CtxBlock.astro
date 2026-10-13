@@ -13,6 +13,7 @@ const { id = "fig-ctx-block" } = Astro.props
 
 <ChartFigure
   id={id}
+  pickable
   name="ctx-block"
   figure={CtxBlockFigure}
   state={{ m: DEFAULT_M, n: DEFAULT_N, cta: DEFAULT_PICK, z: "off" }}

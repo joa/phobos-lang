@@ -1,0 +1,19 @@
+---
+// Head tags every page shares, on the custom layout and the Starlight pages alike: the section's
+// social card image, rendered by scripts/og-images.mjs, and a preload of the two fonts the first
+// screen needs, so text does not reflow when they arrive.
+import sansUrl from "@fontsource/noto-sans/files/noto-sans-latin-400-normal.woff2?url"
+import monoUrl from "@fontsource/noto-sans-mono/files/noto-sans-mono-latin-400-normal.woff2?url"
+
+const path = Astro.url.pathname
+const section = path.startsWith("/inference") ? "inference" : /^\/(docs|viz)\//.test(path) ? "docs" : "home"
+const imageUrl = new URL(`/og/${section}.png`, Astro.site).href
+const imageAlt = "The Phobos mark on a dotted star chart, with the line: Tile-based GPU kernel language and LLM inference engine"
+---
+
+<link rel="preload" href={sansUrl} as="font" type="font/woff2" crossorigin />
+<link rel="preload" href={monoUrl} as="font" type="font/woff2" crossorigin />
+<meta property="og:image" content={imageUrl} />
+<meta property="og:image:alt" content={imageAlt} />
+<meta name="twitter:image" content={imageUrl} />
+<meta name="twitter:image:alt" content={imageAlt} />

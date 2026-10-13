@@ -12,6 +12,7 @@ const { id = "fig-masking" } = Astro.props
 
 <ChartFigure
   id={id}
+  pickable
   name="masking"
   figure={MaskingFigure}
   state={{ tile: "2,3", aligned: "off" }}

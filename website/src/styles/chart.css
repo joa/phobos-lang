@@ -373,6 +373,18 @@
 
 /* HTML parts: readout, legend, controls */
 
+/* A figure whose readout runs to three lines keeps room for them, so the controls do not jump */
+.fig-tall-readout .chart-readout {
+  min-height: 4.5em;
+}
+
+/* A control that only drives motion, such as Pause, has nothing to do under reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .motion-only {
+    display: none;
+  }
+}
+
 .chart-readout {
   min-height: 3em;
   margin: 0.75rem 0 0;

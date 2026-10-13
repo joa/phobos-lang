@@ -54,11 +54,23 @@ instead, the tile would stay as declared.
 {/* figure: attr-padstage-pair */}
 
 import KernelPair from "../../../../components/viz/KernelPair.astro"
+import plain from "../../../../data/traces/q8_matvec.sm_75.json"
+import padded from "../../../../data/traces/q8_matvec_padstage.sm_75.json"
+
+export const stageOf = trace => {
+  const stage = trace.ops.find(op => op.kind === "stage")
+  return trace.buffers.find(buffer => buffer.firstOp === stage.id)
+}
+
+The pair below is [`q8_matvec`](/docs/examples/q8-matvec/) without and with
+`@padstage`. Its `dot` reads `a`, a `let` view of the activations, so the
+compiler stages `a` into a shared tile of {stageOf(plain).shape.join(" x ")} `f32`, one row of
+{stageOf(plain).bytes} bytes. That pitch is a multiple of 128 bytes, so under
+`@padstage` the stage buffer grows to {stageOf(padded).bytes} bytes, and every other buffer
+keeps its size. Step to the `dot` on either side to see the stage filled and
+read.
 
 <KernelPair beforeTrace="q8_matvec" beforeLabel="without @padstage" afterTrace="q8_matvec_padstage" afterLabel="with @padstage" />
-
-The figure pair shows the same tile's rows laid over the banks, unpadded and
-padded, with the accesses of one column read.
 
 ## Cost and interactions
 

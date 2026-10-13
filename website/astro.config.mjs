@@ -1,11 +1,15 @@
 // @ts-check
 import { readFileSync } from "node:fs"
 import { defineConfig } from "astro/config"
+import sitemap from "@astrojs/sitemap"
 import starlight from "@astrojs/starlight"
+import starlightLinksValidator from "starlight-links-validator"
 import sources from "./integrations/sources.mjs"
 import traceFences from "./integrations/remark-trace-fences.mjs"
 
-const phobosGrammar = JSON.parse(readFileSync(new URL("./src/grammars/phobos.tmLanguage.json", import.meta.url), "utf8"))
+const phobosGrammar = JSON.parse(
+  readFileSync(new URL("./src/grammars/phobos.tmLanguage.json", import.meta.url), "utf8")
+)
 
 const REPO_URL = "https://github.com/joa/phobos-lang"
 
@@ -13,18 +17,32 @@ export default defineConfig({
   site: "https://phobos-lang.dev",
   trailingSlash: "ignore",
   integrations: [
+    // Starlight adds the sitemap itself unless one is configured; this one leaves out the
+    // unlisted lab page, which is marked noindex.
+    sitemap({ filter: page => !page.includes("/lab/") }),
     sources(),
     traceFences(),
     starlight({
       title: "Phobos",
+      plugins: [
+        starlightLinksValidator({
+          // The validator sees only Markdown: not the custom pages (the front page, /viz/), and not
+          // the inference page's headings, which InferencePage.astro draws. tests/links.test.ts
+          // checks those links in the built site.
+          exclude: ({ slug, link }) =>
+            link === "/" || link.startsWith("/viz/") || (slug === "inference" && link === "#numbers"),
+        }),
+      ],
       description: "Tile-based GPU kernel language & LLM inference engine",
-      logo: { dark: "./src/assets/mark-night.svg", light: "./src/assets/mark-dawn.svg", alt: "Phobos" },
+      // No alt: the site title beside the mark already names the link.
+      logo: { dark: "./src/assets/mark-night.svg", light: "./src/assets/mark-dawn.svg", alt: "" },
       favicon: "/favicon.svg",
       social: [{ icon: "github", label: "GitHub", href: REPO_URL }],
       customCss: ["./src/styles/fonts.css", "./src/styles/tokens.css", "./src/styles/starlight.css"],
       components: {
         ThemeProvider: "./src/components/overrides/ThemeProvider.astro",
         ThemeSelect: "./src/components/overrides/ThemeSelect.astro",
+        Head: "./src/components/overrides/Head.astro",
       },
       expressiveCode: {
         themes: ["github-dark-default", "github-light-default"],
