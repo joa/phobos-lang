@@ -32,13 +32,14 @@ const SPREAD: u32 = 0x0020_4081;
 /// `body` the decode, which reads the fetched names and `a`, the lane's first
 /// activation, and adds into `acc`.
 fn lanes_matvec(name: &str, bytes: usize, grid: Option<usize>, fetch: &[(&str, String)], body: &str) -> String {
-    let (param, stage, aligned) = match grid {
+    // The table's static length proves the staging copy in bounds, which is
+    // what lets it move sixteen bytes at a time.
+    let (param, stage) = match grid {
         Some(len) => (
-            "GRID: tensor<i8>[1, GL], ".to_string(),
+            format!("GRID: tensor<i8>[1, {len}], "),
             format!("  var grid = GRID[0 :+ 1, 0 :+ {len}]\n"),
-            ", GL = 8",
         ),
-        None => (String::new(), String::new(), ""),
+        None => (String::new(), String::new()),
     };
     let gw = bytes * 8;
     let at = |bb: &str, expr: &str| {
@@ -54,7 +55,7 @@ fn lanes_matvec(name: &str, bytes: usize, grid: Option<usize>, fetch: &[(&str, S
 {body}}}
 
 @launch(256)
-@aligned(K = 256, GW = {gw}, DW = 8{aligned})
+@aligned(K = 256, GW = {gw}, DW = 8)
 kernel {name}_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
                          QB: tensor<i8>[G, GW], D: tensor<f16>[G, DW], {param}C: tensor<f32>[1, N]) {{
 {stage}  let col = ctx.block.x * 64 + ctx.warp * 8 + ctx.lane / 4
