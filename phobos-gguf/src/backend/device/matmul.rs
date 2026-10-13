@@ -628,8 +628,18 @@ impl DeviceBackend {
     }
 
     /// Whether `quant`'s decode matvec runs its lanes kernel.
+    ///
+    /// The K-quants always do: they measured at parity with their intrinsics
+    /// on sm_75, sm_86 and sm_89. The IQ formats do by default below sm_80,
+    /// where they measured faster; from sm_80 on they measured 2 to 10%
+    /// slower. PTQ1_0 keeps its intrinsic by default. `PHOBOS_RAW_LANES`
+    /// overrides the default for the IQ formats and PTQ1_0.
     fn lanes_on(&self, quant: Quant) -> bool {
-        self.raw_lanes.unwrap_or(LANES_BY_DEFAULT.contains(&quant))
+        match quant {
+            Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => true,
+            Quant::PTQ1_0 => self.raw_lanes.unwrap_or(false),
+            _ => self.raw_lanes.unwrap_or(self.pre_ampere),
+        }
     }
 
     /// A raw format's decode matvec written with lanes, compiled on first use.
@@ -703,22 +713,3 @@ fn f32_lanes_kernel(quant: Quant) -> Option<LanesKernel> {
     }
 }
 
-/// The formats whose lanes kernel runs unless `PHOBOS_RAW_LANES` says
-/// otherwise: those that measured at least their intrinsic's speed, tg128
-/// on Qwen3.5 0.8B quantized to each. PTQ1_0 measured 0.6% slower on the
-/// 27B Bonsai.
-const LANES_BY_DEFAULT: [Quant; 13] = [
-    Quant::Q2_K,
-    Quant::Q3_K,
-    Quant::Q4_K,
-    Quant::Q5_K,
-    Quant::Q6_K,
-    Quant::IQ1_S,
-    Quant::IQ1_M,
-    Quant::IQ2_XXS,
-    Quant::IQ2_XS,
-    Quant::IQ2_S,
-    Quant::IQ3_XXS,
-    Quant::IQ3_S,
-    Quant::IQ4_XS,
-];
