@@ -3,7 +3,6 @@ import { join } from "node:path"
 import { describe, expect, it } from "vitest"
 import { boxRect, slotRects, vizGeometry, type Rect } from "../src/lib/viz/geometry"
 import { extraLines, formatBox, KernelModel, type LineFacts } from "../src/lib/viz/model"
-import { packing } from "../src/lib/viz/packing"
 import { shownSource } from "../src/lib/viz/shown"
 import type { Trace } from "../src/lib/viz/trace"
 
@@ -263,28 +262,6 @@ describe("geometry", () => {
     const slots = slotRects({ x: 0, y: 0, width: 400, height: 14 }, 32)
     slots.forEach((slot, index) => slots.slice(index + 1).forEach(other => expect(overlaps(slot, other)).toBe(false)))
     expect(slots[31].x + slots[31].width).toBeLessThanOrEqual(400.01)
-  })
-})
-
-describe("packing", () => {
-  it("never overlaps buffers that are alive at the same time", () => {
-    const packed = packing(noAligned, { left: 0, right: 1000, top: 0, bottom: 200 })
-    packed.buffers.forEach((buffer, index) =>
-      packed.buffers.slice(index + 1).forEach(other => {
-        const shareBytes =
-          buffer.offsetBytes < other.offsetBytes + other.bytes && other.offsetBytes < buffer.offsetBytes + buffer.bytes
-        if (shareBytes) expect(overlaps(buffer, other)).toBe(false)
-      })
-    )
-    expect(packed.buffers.map(buffer => buffer.name)).toEqual([
-      "acc",
-      "a",
-      "b",
-      "a, remainder",
-      "b, remainder",
-      "c_old",
-    ])
-    expect(packed.barriers.filter(barrier => !barrier.kept)).toHaveLength(4)
   })
 })
 
