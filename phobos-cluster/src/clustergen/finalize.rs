@@ -213,6 +213,7 @@ impl<'a> Analyzer<'a> {
                     name: p.clone(),
                     ty: None,
                     value: phobos_lang::ast::ctx::block(*pid as u8),
+                    span: Span::default(),
                 });
             }
             subs.push(Sub::Span {
@@ -247,6 +248,7 @@ impl<'a> Analyzer<'a> {
             },
             op: AssignOp::Set,
             value: scratch.init.clone(),
+            span: Span::default(),
         });
         Kernel {
             attrs: self.init_attrs(),
@@ -301,6 +303,7 @@ impl<'a> Analyzer<'a> {
                 base: Box::new(Expr::Var(cname.clone())),
                 subs: subs.clone(),
             },
+            span: Span::default(),
         });
         body.push(Stmt::Assign {
             target: Expr::Index {
@@ -313,6 +316,7 @@ impl<'a> Analyzer<'a> {
                 lhs: Box::new(beta.clone()),
                 rhs: Box::new(Expr::Var(c_old.to_string())),
             },
+            span: Span::default(),
         });
 
         let kernel = Kernel {

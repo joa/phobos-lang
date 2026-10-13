@@ -36,6 +36,7 @@ impl Build {
                 name,
                 ty: Some(AstType::Tile(AstScalar::F32, dims)),
                 value: Some(Expr::Float(init)),
+                ..
             },
             rest @ ..,
         ] = stmts
@@ -86,6 +87,7 @@ impl Build {
                     target: Expr::Var(t),
                     op,
                     value,
+                    ..
                 } if t == name => {
                     if !self.frag_form_ok(name, m, n, *op, value, scan) {
                         return false;
@@ -95,6 +97,7 @@ impl Build {
                     target: target @ Expr::Index { base, subs },
                     op: AssignOp::Set,
                     value: Expr::Var(v),
+                    ..
                 } if v == name => {
                     let Expr::Var(t) = &**base else { return false };
                     let Some(Binding::Tensor(c)) = self.lookup(t) else {
@@ -144,7 +147,7 @@ impl Build {
                         return false;
                     }
                 }
-                Stmt::Expr(e) => {
+                Stmt::Expr(e, _) => {
                     if e.uses_name(name) {
                         return false;
                     }

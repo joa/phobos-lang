@@ -129,4 +129,6 @@ pub struct Token {
     pub tok: Tok,
     pub line: u32,
     pub col: u32,
+    /// The column just past the token, which never spans lines.
+    pub end_col: u32,
 }

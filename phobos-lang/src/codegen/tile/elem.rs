@@ -136,6 +136,7 @@ impl<'c> Codegen<'c> {
             && (dst.elem == self.f32_t || (width > 1 && matches!(align, 4 | 8 | 16)));
         let vec_t = Type::vector(&[width.max(4) as u64], dst.elem);
 
+        self.record_copy(width * i64::from(elem_bytes.unwrap_or(4)), use_async);
         self.distribute(block, dst, width, sync, |cg, blk, idx| {
             let didx = cg.swizzled_index(blk, dst, idx)?;
 
@@ -197,6 +198,15 @@ impl<'c> Codegen<'c> {
         }
         let width = self.elementwise_width(&[src]);
         let vec_t = Type::vector(&[4], src.elem);
+        let elem_bytes = i64::from(self.elem_bytes(src.elem).unwrap_or(4));
+        self.record_copy(
+            if async_copy {
+                elem_bytes
+            } else {
+                width * elem_bytes
+            },
+            async_copy,
+        );
         self.distribute(block, src, width, false, |cg, blk, idx| {
             let (mi, k0) = (idx[0], idx[1]);
             if async_copy {

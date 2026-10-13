@@ -6,7 +6,7 @@ use melior::{
 
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
-use crate::codegen::matmul::GemmScale;
+use crate::codegen::matmul::{GemmPath, GemmScale};
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
@@ -66,6 +66,7 @@ impl<'c> Codegen<'c> {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
                 let a = self.tile_ir(ir, ir.operand(op, 1))?;
                 let b = self.tile_ir(ir, ir.operand(op, 2))?;
+                self.record_contract("mma.sync");
                 let frags = self.frag_dot_raw(block, &fa, &a, &b)?;
                 self.release(&a);
                 self.release(&b);
@@ -81,6 +82,11 @@ impl<'c> Codegen<'c> {
                     bail!("gemm_init of a non-accumulator");
                 };
                 let plan = self.gemm_plan(g.m, g.n, g.k, self.ir_scalar_type(g.acc))?;
+                self.record_contract(match plan.path {
+                    GemmPath::Reg { .. } => "fma",
+                    GemmPath::Wmma { .. } => "wmma",
+                    GemmPath::MmaSync { .. } => "mma.sync",
+                });
                 let init = self.scalar_ir(ir.operand(op, 0))?;
                 let acc = self.gemm_seed(block, plan, init)?;
                 self.set_ir(ir.result(op), Lowered::Gemm(acc));

@@ -65,6 +65,7 @@ impl Build {
                 name,
                 ty: None,
                 value: Some(value),
+                ..
             },
             tail @ ..,
         ] = rest

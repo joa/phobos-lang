@@ -176,6 +176,21 @@ impl<'c> Codegen<'c> {
         self.push(block, arith::select(cond, a, b, self.loc))
     }
 
+    /// Records that the next sweep is a tile copy, for the trace.
+    pub(in crate::codegen) fn record_copy(&mut self, vector_bytes: i64, async_copy: bool) {
+        if matches!(self.policy, SharedPolicy::Record) {
+            self.trace.copy(vector_bytes, async_copy);
+        }
+    }
+
+    /// Records the instruction family a contraction lowered to, for the
+    /// trace.
+    pub(in crate::codegen) fn record_contract(&mut self, instr: &'static str) {
+        if matches!(self.policy, SharedPolicy::Record) {
+            self.trace.contract(instr);
+        }
+    }
+
     /// Emits body once per element of out, distributed across the CTA. With
     /// width > 1 it runs once per innermost segment of width elements. The
     /// caller guarantees a static innermost extent divisible by width.

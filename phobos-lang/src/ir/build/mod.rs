@@ -25,7 +25,7 @@ use super::{
     Builder, Extent, Ir, KernelInfo, Layout, OpId, OpKind, Scalar, Space, TensorType, TileType,
     Type, ValueId,
 };
-use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Type as AstType};
+use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Span, Type as AstType};
 
 pub(crate) use crate::shape::DYN;
 
@@ -46,10 +46,12 @@ pub struct Target {
 }
 
 /// What the build learned for the emitter and the caller to report: the
-/// loop shapes the pipeline declined, before any budget was counted.
+/// loop shapes the pipeline declined, before any budget was counted, and the
+/// statement each op came from. An op a pass made after the build has no span.
 #[derive(Debug, Default)]
 pub struct Report {
     pub pipeline_declines: Vec<String>,
+    pub spans: BTreeMap<OpId, Span>,
 }
 
 /// What a name in scope resolves to.
@@ -182,7 +184,12 @@ pub fn build(
     b.block = b.ir.entry();
     b.emit_kernel(kernel)?;
     super::uniform::check(&b.ir, &super::uniform::analyze(&b.ir))?;
-    epilogue::fuse_dot_epilogues(&mut b.ir);
+    for (fused, dot) in epilogue::fuse_dot_epilogues(&mut b.ir) {
+        if let Some(&span) = b.report.spans.get(&dot) {
+            b.report.spans.insert(fused, span);
+        }
+    }
+    b.report.spans.retain(|&op, _| b.ir.is_alive(op));
     Ok((b.ir, b.report))
 }
 
@@ -322,6 +329,23 @@ impl Build {
                 Dim::Int(_) => 1,
             })
             .collect())
+    }
+
+    /// Runs `f`, giving every op it made that has no span yet `span`. A
+    /// statement nested inside claims its own ops first.
+    pub(crate) fn spanned<T>(
+        &mut self,
+        span: Span,
+        f: impl FnOnce(&mut Self) -> Result<T>,
+    ) -> Result<T> {
+        let first = self.ir.op_count();
+        let out = f(self);
+        if span != Span::default() {
+            for op in (first..self.ir.op_count()).map(OpId::from_index) {
+                self.report.spans.entry(op).or_insert(span);
+            }
+        }
+        out
     }
 
     // Op creation at the current block.

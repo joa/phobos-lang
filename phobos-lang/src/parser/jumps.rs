@@ -7,7 +7,7 @@
 // keeps its counted form, and the alignment proofs that come with it, and
 // runs its remaining iterations as no-ops.
 
-use super::super::ast::{AssignOp, BinOp, Expr, Stmt, UnOp};
+use super::super::ast::{AssignOp, BinOp, Expr, Span, Stmt, UnOp};
 
 /// The placeholders the parser emits for the three jumps. A name the lexer
 /// cannot produce, so no source can spell one.
@@ -16,13 +16,13 @@ pub(super) const CONTINUE: &str = "#continue";
 pub(super) const RETURN: &str = "#return";
 
 /// A jump statement as the parser emits it.
-pub(super) fn jump(which: &str) -> Stmt {
-    Stmt::Expr(Expr::Var(which.into()))
+pub(super) fn jump(which: &str, span: Span) -> Stmt {
+    Stmt::Expr(Expr::Var(which.into()), span)
 }
 
 fn jump_of(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Expr(Expr::Var(name)) if [BREAK, CONTINUE, RETURN].contains(&name.as_str()) => {
+        Stmt::Expr(Expr::Var(name), _) if [BREAK, CONTINUE, RETURN].contains(&name.as_str()) => {
             Some(name.as_str())
         }
         _ => None,
@@ -61,7 +61,7 @@ pub(super) fn desugar(body: Vec<Stmt>) -> Result<Vec<Stmt>, String> {
     let mut out = Vec::new();
     if body.iter().any(|s| uses(s, RETURN, true)) {
         let flag = d.fresh("return");
-        out.push(declare(&flag));
+        out.push(declare(&flag, Span::default()));
         d.ret = Some(flag);
     }
     out.extend(d.block(body, None)?);
@@ -85,19 +85,21 @@ fn uses(stmt: &Stmt, which: &str, through_loops: bool) -> bool {
     }
 }
 
-fn declare(flag: &str) -> Stmt {
+fn declare(flag: &str, span: Span) -> Stmt {
     Stmt::Var {
         name: flag.into(),
         ty: None,
         value: Some(Expr::Bool(false)),
+        span,
     }
 }
 
-fn set(flag: &str, value: bool) -> Stmt {
+fn set(flag: &str, value: bool, span: Span) -> Stmt {
     Stmt::Assign {
         target: Expr::Var(flag.into()),
         op: AssignOp::Set,
         value: Expr::Bool(value),
+        span,
     }
 }
 
@@ -145,6 +147,7 @@ impl Desugar {
         let mut rest = stmts.into_iter();
         while let Some(stmt) = rest.next() {
             let jumps = Self::may_jump(&stmt);
+            let span = stmt.span();
             out.extend(self.stmt(stmt, lp)?);
             if jumps && rest.len() > 0 {
                 let tail: Vec<Stmt> = rest.collect();
@@ -154,6 +157,7 @@ impl Desugar {
                     cond,
                     then,
                     r#else: None,
+                    span,
                 });
                 return Ok(out);
             }
@@ -171,13 +175,19 @@ impl Desugar {
             let Some(flag) = flag else {
                 return Err(format!("`{}` outside a loop", &which[1..]));
             };
-            return Ok(vec![set(&flag, true)]);
+            return Ok(vec![set(&flag, true, stmt.span())]);
         }
         Ok(match stmt {
-            Stmt::If { cond, then, r#else } => vec![Stmt::If {
+            Stmt::If {
+                cond,
+                then,
+                r#else,
+                span,
+            } => vec![Stmt::If {
                 cond,
                 then: self.block(then, lp)?,
                 r#else: r#else.map(|e| self.block(e, lp)).transpose()?,
+                span,
             }],
             Stmt::For {
                 var,
@@ -186,15 +196,17 @@ impl Desugar {
                 step,
                 unroll,
                 body,
+                span,
             } => {
-                let (mut out, inner) = self.enter(&body);
-                let mut body = self.loop_body(body, &inner)?;
+                let (mut out, inner) = self.enter(&body, span);
+                let mut body = self.loop_body(body, &inner, span)?;
                 let stops: Vec<&String> = inner.brk.iter().chain(self.ret.iter()).collect();
                 if !stops.is_empty() {
                     body = vec![Stmt::If {
                         cond: none_set(&stops),
                         then: body,
                         r#else: None,
+                        span,
                     }];
                 }
                 out.push(Stmt::For {
@@ -204,12 +216,13 @@ impl Desugar {
                     step,
                     unroll,
                     body,
+                    span,
                 });
                 out
             }
-            Stmt::While { cond, body } => {
-                let (mut out, inner) = self.enter(&body);
-                let body = self.loop_body(body, &inner)?;
+            Stmt::While { cond, body, span } => {
+                let (mut out, inner) = self.enter(&body, span);
+                let body = self.loop_body(body, &inner, span)?;
                 let stops: Vec<&String> = inner.brk.iter().chain(self.ret.iter()).collect();
                 let cond = if stops.is_empty() {
                     cond
@@ -220,7 +233,7 @@ impl Desugar {
                         rhs: Box::new(none_set(&stops)),
                     }
                 };
-                out.push(Stmt::While { cond, body });
+                out.push(Stmt::While { cond, body, span });
                 out
             }
             other => vec![other],
@@ -228,17 +241,21 @@ impl Desugar {
     }
 
     /// Declares the flags a loop's own jumps need, ahead of the loop.
-    fn enter(&mut self, body: &[Stmt]) -> (Vec<Stmt>, Loop) {
+    fn enter(&mut self, body: &[Stmt], span: Span) -> (Vec<Stmt>, Loop) {
         let own = |which| body.iter().any(|s| uses(s, which, false));
         let brk = own(BREAK).then(|| self.fresh("break"));
         let cont = own(CONTINUE).then(|| self.fresh("continue"));
-        let decls = brk.iter().chain(cont.iter()).map(|f| declare(f)).collect();
+        let decls = brk
+            .iter()
+            .chain(cont.iter())
+            .map(|f| declare(f, span))
+            .collect();
         (decls, Loop { brk, cont })
     }
 
     /// A loop body, its `continue` flag cleared at the top of each iteration.
-    fn loop_body(&mut self, body: Vec<Stmt>, lp: &Loop) -> Result<Vec<Stmt>, String> {
-        let mut out: Vec<Stmt> = lp.cont.iter().map(|f| set(f, false)).collect();
+    fn loop_body(&mut self, body: Vec<Stmt>, lp: &Loop, span: Span) -> Result<Vec<Stmt>, String> {
+        let mut out: Vec<Stmt> = lp.cont.iter().map(|f| set(f, false, span)).collect();
         out.extend(self.block(body, Some(lp))?);
         Ok(out)
     }

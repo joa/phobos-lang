@@ -5,6 +5,8 @@ pub mod lexer;
 pub mod parser;
 pub(crate) mod shape;
 pub mod token;
+#[cfg(feature = "trace")]
+pub mod trace;
 
 pub fn parse(src: &str) -> anyhow::Result<Vec<ast::Kernel>> {
     let toks = lexer::Lexer::new(src)
