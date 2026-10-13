@@ -1,0 +1,56 @@
+/* Phobos design tokens: a night sky by default, a light "dawn" theme on request.
+ * Every color is a light-dark() pair resolved by color-scheme, which follows the
+ * data-theme attribute that Starlight's theme provider (overridden to default to
+ * dark) writes on <html>. Starlight's own variables are mapped in starlight.css. */
+
+:root {
+  color-scheme: dark;
+
+  --sky-0: light-dark(#f5f7fb, #05070f);
+  --sky-1: light-dark(#ffffff, #0a1020);
+  --sky-2: light-dark(#eef2f9, #101a30);
+  --sky-line: light-dark(#d5ddeb, #1c2a48);
+  --star: light-dark(#0e1730, #e6ecf8);
+  --dust: light-dark(#56627a, #8d9ab3);
+  --brand: light-dark(#1f5fae, #6ab8ff);
+  --brand-hi: light-dark(#164a8a, #a9d6ff);
+  --nebula: light-dark(#5a48d6, #a08cff);
+  --mars: light-dark(#b0442c, #ff8a6b);
+  --glow: light-dark(rgba(31, 95, 174, 0.25), rgba(106, 184, 255, 0.45));
+
+  /* Fills derived from the hues, for figure boxes and highlighted rows */
+  --brand-fill: color-mix(in srgb, var(--brand) 10%, transparent);
+  --brand-fill-on: color-mix(in srgb, var(--brand) 22%, transparent);
+  --nebula-fill: color-mix(in srgb, var(--nebula) 10%, transparent);
+  --nebula-fill-on: color-mix(in srgb, var(--nebula) 22%, transparent);
+  --mars-fill: color-mix(in srgb, var(--mars) 12%, transparent);
+  --mars-fill-on: color-mix(in srgb, var(--mars) 26%, transparent);
+
+  /* Chart series colors that are not part of the identity */
+  --series-cublas: #76b900;
+
+  --font-sans: "Noto Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "Noto Sans Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* Motion */
+  --dur-1: 120ms;
+  --dur-2: 240ms;
+  --dur-3: 480ms;
+  --dur-4: 900ms;
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --stagger: 30ms;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-2: var(--dur-1);
+    --dur-3: 0ms;
+    --dur-4: 0ms;
+    --stagger: 0ms;
+  }
+}

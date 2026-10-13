@@ -1,0 +1,97 @@
+---
+// A two-state toggle between night (default) and dawn. Shared by Starlight's header
+// and the custom front page header.
+---
+
+<phobos-theme-toggle>
+  <button type="button" class="theme-toggle" aria-pressed="false" aria-label="Light theme">
+    <svg class="moon" viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5Z"></path>
+    </svg>
+    <svg class="sun" viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="4"></circle>
+      <path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"
+      ></path>
+    </svg>
+  </button>
+</phobos-theme-toggle>
+
+<script>
+  const storageKey = "starlight-theme"
+
+  function applyTheme(theme: "dark" | "light") {
+    document.documentElement.dataset.theme = theme
+    try {
+      localStorage.setItem(storageKey, theme)
+    } catch {}
+    document.querySelectorAll("phobos-theme-toggle button").forEach((button) => {
+      button.setAttribute("aria-pressed", String(theme === "light"))
+    })
+  }
+
+  class PhobosThemeToggle extends HTMLElement {
+    connectedCallback() {
+      const button = this.querySelector("button")
+      if (!button) return
+      button.setAttribute("aria-pressed", String(document.documentElement.dataset.theme === "light"))
+      button.addEventListener("click", () => {
+        const next = document.documentElement.dataset.theme === "light" ? "dark" : "light"
+        const doc = document as Document & { startViewTransition?: (cb: () => void) => unknown }
+        const reduced = matchMedia("(prefers-reduced-motion: reduce)").matches
+        if (doc.startViewTransition && !reduced) doc.startViewTransition(() => applyTheme(next))
+        else applyTheme(next)
+      })
+    }
+  }
+  if (!customElements.get("phobos-theme-toggle")) customElements.define("phobos-theme-toggle", PhobosThemeToggle)
+</script>
+
+<style>
+  .theme-toggle {
+    display: inline-grid;
+    place-items: center;
+    width: 2rem;
+    height: 2rem;
+    padding: 0;
+    border: 1px solid var(--sky-line);
+    border-radius: 999px;
+    background: transparent;
+    color: var(--dust);
+    cursor: pointer;
+    transition:
+      color var(--dur-1) var(--ease-out),
+      border-color var(--dur-1) var(--ease-out);
+  }
+  .theme-toggle:hover {
+    color: var(--brand);
+    border-color: var(--brand);
+  }
+  .theme-toggle:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+  svg {
+    grid-area: 1 / 1;
+    width: 1rem;
+    height: 1rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    transition:
+      opacity var(--dur-2) var(--ease-out),
+      transform var(--dur-2) var(--ease-out);
+  }
+  .sun {
+    opacity: 0;
+    transform: rotate(-45deg) scale(0.6);
+  }
+  [aria-pressed="true"] .sun {
+    opacity: 1;
+    transform: none;
+  }
+  [aria-pressed="true"] .moon {
+    opacity: 0;
+    transform: rotate(45deg) scale(0.6);
+  }
+</style>

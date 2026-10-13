@@ -1,0 +1,94 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "phobos",
+  "displayName": "Phobos",
+  "scopeName": "source.phobos",
+  "aliases": ["ph"],
+  "fileTypes": ["ph"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#ctx" },
+    { "include": "#numbers" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.phobos", "match": "//.*$" },
+        { "name": "comment.block.phobos", "begin": "/\\*", "end": "\\*/" }
+      ]
+    },
+    "attributes": {
+      "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "punctuation.definition.annotation.phobos" },
+        "2": { "name": "entity.name.function.decorator.phobos" }
+      }
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "match": "\\b(kernel|fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "storage.type.function.phobos" },
+            "2": { "name": "entity.name.function.phobos" }
+          }
+        },
+        { "name": "keyword.control.phobos", "match": "\\b(if|else|for|in|while|break|continue|return)\\b" },
+        { "name": "storage.type.phobos", "match": "\\b(kernel|fn|let|var)\\b" },
+        { "name": "constant.language.boolean.phobos", "match": "\\b(true|false)\\b" }
+      ]
+    },
+    "types": {
+      "patterns": [
+        { "name": "support.type.container.phobos", "match": "\\b(tensor|tile)\\b" },
+        {
+          "name": "support.type.primitive.phobos",
+          "match": "\\b(f16|bf16|f32|f64|i8|i32|i64|u8|u16|u32|bool|index)\\b"
+        }
+      ]
+    },
+    "ctx": {
+      "match": "\\b(ctx)(\\.)(block|blocks|threads|warps|lanes|thread|warp|lane)\\b",
+      "captures": {
+        "1": { "name": "variable.language.ctx.phobos" },
+        "2": { "name": "punctuation.accessor.phobos" },
+        "3": { "name": "variable.other.property.ctx.phobos" }
+      }
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.float.phobos", "match": "\\b[0-9]+\\.[0-9]+([eE][+-]?[0-9]+)?\\b" },
+        { "name": "constant.numeric.float.phobos", "match": "\\b[0-9]+[eE][+-]?[0-9]+\\b" },
+        { "name": "constant.numeric.hex.phobos", "match": "\\b0[xX][0-9A-Fa-f_]+\\b" },
+        { "name": "constant.numeric.integer.phobos", "match": "\\b[0-9][0-9_]*\\b" }
+      ]
+    },
+    "functions": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=[(<])",
+      "captures": { "1": { "name": "entity.name.function.call.phobos" } }
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.span.phobos", "match": ":\\+" },
+        { "name": "keyword.operator.assignment.compound.phobos", "match": "(\\+|-|\\*|/|%|&|\\||\\^|<<|>>)=" },
+        { "name": "keyword.operator.comparison.phobos", "match": "==|!=|<=|>=" },
+        { "name": "keyword.operator.logical.phobos", "match": "&&|\\|\\||!" },
+        { "name": "keyword.operator.bitwise.phobos", "match": "<<|>>|&|\\||\\^|~" },
+        { "name": "keyword.operator.arithmetic.phobos", "match": "\\+|-|\\*|/|%" },
+        { "name": "keyword.operator.assignment.phobos", "match": "=" }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        { "name": "variable.other.constant.phobos", "match": "\\b[A-Z][A-Z0-9_]*\\b" },
+        { "name": "variable.other.phobos", "match": "\\b[a-z_][A-Za-z0-9_]*\\b" }
+      ]
+    }
+  }
+}
