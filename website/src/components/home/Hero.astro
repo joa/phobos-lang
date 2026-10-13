@@ -1,47 +1,94 @@
 ---
-// Scene 1: the night sky, Phobos on a hairline orbit, the limb of Mars along the bottom edge.
-// Everything here is CSS and one build-time SVG per star layer; no script.
-import mark from "../../assets/mark.svg?raw"
+// Scene 1: the night sky in three depth layers, Phobos as a turning point cloud on a tilted orbit, the
+// limb of Mars along the bottom edge. The build draws the opening frame as SVG, which is all a page
+// without script shows; once the page is idle a canvas takes over from the same pose and keeps going.
 import { makeStarfield, SKY_HEIGHT_UNITS, SKY_WIDTH_UNITS, type Star } from "./starfield"
+import { inkCss, staticFrame } from "./hero/static-frame"
+import { VIEW_UNITS } from "./hero/geometry"
+import { LIGHT } from "./hero/frame"
 
 const REPO_URL = "https://github.com/joa/phobos-lang"
-const { far, near, twinkling } = makeStarfield()
+const { far, middle, near, twinkling } = makeStarfield()
 const viewBox = `0 0 ${SKY_WIDTH_UNITS} ${SKY_HEIGHT_UNITS}`
 const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
+const moon = staticFrame()
+const moonViewBox = `0 0 ${VIEW_UNITS} ${VIEW_UNITS}`
+const { silhouette } = moon
+const silhouetteTransform = `translate(${silhouette.x.toFixed(1)} ${silhouette.y.toFixed(1)}) rotate(${((silhouette.angle * 180) / Math.PI).toFixed(1)})`
+// The lit side's wash, as the canvas draws it by night.
+const washReach = Math.max(silhouette.rx, silhouette.ry)
+const wash = {
+  x: (silhouette.x + LIGHT[0] * washReach * 0.55).toFixed(1),
+  y: (silhouette.y - LIGHT[1] * washReach * 0.55).toFixed(1),
+  r: (washReach * 1.25).toFixed(1),
+}
 ---
 
 <section class="hero" aria-labelledby="hero-title">
   <div class="sky" aria-hidden="true">
-    <svg class="stars stars-far" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
-      {far.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
-    </svg>
-    <svg class="stars stars-near" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
-      {near.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
-      {
-        twinkling.map(star => (
-          <circle
-            class:list={["tw", tintClass(star)]}
-            cx={star.x}
-            cy={star.y}
-            r={star.radiusUnits}
-            fill-opacity={star.opacity}
-            style={`animation-delay: ${star.delayMs}ms; animation-duration: ${star.periodMs}ms`}
-          />
-        ))
-      }
-    </svg>
-    <div class="orbit">
-      <svg class="orbit-path" viewBox="0 0 100 100" preserveAspectRatio="none">
-        <ellipse cx="50" cy="50" rx="49.9" ry="49.8" vector-effect="non-scaling-stroke"></ellipse>
+    <div class="layer layer-far" data-depth="5">
+      <svg class="stars stars-far" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
+        {far.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
       </svg>
-      <span class="moon"><Fragment set:html={mark} /></span>
+    </div>
+    <div class="layer layer-middle" data-depth="12">
+      <svg class="stars stars-middle" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
+        {middle.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
+        {
+          twinkling.map(star => (
+            <circle
+              class:list={["tw", tintClass(star)]}
+              cx={star.x}
+              cy={star.y}
+              r={star.radiusUnits}
+              fill-opacity={star.opacity}
+              style={`animation-delay: ${star.delayMs}ms; animation-duration: ${star.periodMs}ms`}
+            />
+          ))
+        }
+      </svg>
+    </div>
+    <div class="layer layer-near" data-depth="26">
+      <svg class="stars stars-near" viewBox={viewBox} preserveAspectRatio="xMidYMid slice">
+        {near.map(star => <circle class={tintClass(star)} cx={star.x} cy={star.y} r={star.radiusUnits} fill-opacity={star.opacity} />)}
+      </svg>
     </div>
     <div class="limb"></div>
   </div>
 
+  <div class="moon" aria-hidden="true">
+    <svg class="moon-static" viewBox={moonViewBox}>
+      <defs>
+        <radialGradient id="hero-occluder">
+          <stop offset="0.8" class="occluder-core"></stop>
+          <stop offset="1" class="occluder-edge"></stop>
+        </radialGradient>
+        <radialGradient id="hero-wash" gradientUnits="userSpaceOnUse" cx={wash.x} cy={wash.y} r={wash.r}>
+          <stop offset="0" class="wash-core"></stop>
+          <stop offset="1" class="wash-edge"></stop>
+        </radialGradient>
+        <clipPath id="hero-body">
+          <ellipse transform={silhouetteTransform} rx={(silhouette.rx * 0.98).toFixed(1)} ry={(silhouette.ry * 0.98).toFixed(1)}></ellipse>
+        </clipPath>
+      </defs>
+      <ellipse
+        transform={silhouetteTransform}
+        rx={(silhouette.rx * 1.06).toFixed(1)}
+        ry={(silhouette.ry * 1.06).toFixed(1)}
+        fill="url(#hero-occluder)"></ellipse>
+      <rect width={VIEW_UNITS} height={VIEW_UNITS} fill="url(#hero-wash)" clip-path="url(#hero-body)"></rect>
+      {
+        moon.paths.map(path => (
+          <path d={path.d} stroke-width={path.widthUnits} style={`stroke: ${inkCss(path.ink)}; stroke-opacity: ${path.ink.alpha}`} />
+        ))
+      }
+    </svg>
+    <canvas class="hero-canvas"></canvas>
+  </div>
+
   <div class="wrap hero-content">
     <div class="hero-copy">
-      <h1 id="hero-title">Tile-based GPU kernel language &amp; LLM inference engine</h1>
+      <h1 id="hero-title"><span class="headline">Tile-based GPU kernel language &amp; LLM inference engine</span></h1>
       <p class="hero-line">Write tiles like Triton. Set up warps and lanes like Gluon. One language.</p>
       <div class="hero-actions">
         <a class="button is-primary" href="/docs/getting-started/">Get started</a>
@@ -52,14 +99,29 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
   </div>
 </section>
 
-<style>
-  @property --twinkle {
-    syntax: "<number>";
-    inherits: false;
-    initial-value: 1;
+<script>
+  // The scene's code is its own chunk, fetched once the page has loaded and gone idle.
+  const root = document.querySelector<HTMLElement>(".hero")
+  if (root) {
+    const boot = () => {
+      import("./hero/scene").then(module => module.start(root)).catch(() => {})
+    }
+    const idle = () => {
+      if ("requestIdleCallback" in window) requestIdleCallback(boot, { timeout: 2000 })
+      else setTimeout(boot, 300)
+    }
+    if (document.readyState === "complete") idle()
+    else window.addEventListener("load", idle, { once: true })
   }
+</script>
 
+<style>
   .hero {
+    /* The moon's box: a square the canvas fills, right of the headline on wide screens */
+    --moon-size: clamp(560px, 60vw, 1120px);
+    --moon-halo: color-mix(in srgb, var(--brand) 16%, transparent);
+    --headline-glow: color-mix(in srgb, var(--brand) 26%, transparent);
+    --limb-scatter: color-mix(in srgb, var(--brand) 14%, transparent);
     position: relative;
     display: grid;
     align-items: center;
@@ -68,22 +130,45 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
     isolation: isolate;
   }
 
+  :global(:root[data-theme="light"]) .hero {
+    --moon-halo: color-mix(in srgb, var(--brand) 9%, transparent);
+    --headline-glow: color-mix(in srgb, var(--brand) 10%, transparent);
+    --limb-scatter: color-mix(in srgb, var(--brand) 7%, transparent);
+  }
+
   .sky {
     position: absolute;
     inset: 0;
-    z-index: -1;
+    z-index: -2;
     /* The limb fades into the page instead of ending at the hero's edge */
     mask-image: linear-gradient(to bottom, #000 72%, transparent);
   }
 
-  /* A faint atmosphere above the limb */
+  /* A cold glow high in the sky, where the moon stands, and a warm one above the limb */
+  .sky::before,
   .sky::after {
     content: "";
     position: absolute;
+    pointer-events: none;
+  }
+
+  .sky::before {
+    inset: 0;
+    background: radial-gradient(60% 55% at 72% 42%, var(--moon-halo), transparent 70%);
+  }
+
+  .sky::after {
     inset: auto 0 0;
     height: 45%;
-    background: radial-gradient(120% 100% at 50% 100%, color-mix(in srgb, var(--limb-rim) 22%, transparent), transparent 70%);
-    pointer-events: none;
+    background: radial-gradient(120% 100% at 50% 100%, color-mix(in srgb, var(--limb-rim) 24%, transparent), transparent 70%);
+  }
+
+  /* Each star layer drifts on its own slow loop and follows the pointer by its depth (the scene script
+   * sets the layer's transform); the far layer moves least. */
+  .layer {
+    position: absolute;
+    inset: -3%;
+    will-change: transform;
   }
 
   .stars {
@@ -93,6 +178,7 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
     height: 110%;
     fill: var(--starfield);
     opacity: var(--starfield-opacity);
+    animation: sky-drift var(--drift-period, 160s) ease-in-out infinite;
   }
 
   .stars .t-b {
@@ -104,100 +190,56 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
   }
 
   .stars-far {
-    opacity: calc(var(--starfield-opacity) * 0.85);
+    --drift-x: 6px;
+    --drift-y: 3px;
+    --drift-period: 190s;
+    opacity: calc(var(--starfield-opacity) * 0.8);
+  }
+
+  .stars-middle {
+    --drift-x: 14px;
+    --drift-y: 6px;
+    --drift-period: 150s;
+  }
+
+  .stars-near {
+    --drift-x: 30px;
+    --drift-y: 12px;
+    --drift-period: 120s;
+  }
+
+  /* A closed loop, so the drift never jumps */
+  @keyframes sky-drift {
+    0%,
+    100% {
+      transform: translate3d(0, 0, 0);
+    }
+    25% {
+      transform: translate3d(var(--drift-x), calc(var(--drift-y) * -1), 0);
+    }
+    50% {
+      transform: translate3d(0, calc(var(--drift-y) * -2), 0);
+    }
+    75% {
+      transform: translate3d(calc(var(--drift-x) * -1), calc(var(--drift-y) * -1), 0);
+    }
   }
 
   .tw {
-    opacity: var(--twinkle);
     animation: twinkle 5s ease-in-out infinite alternate;
   }
 
   @keyframes twinkle {
     0%,
     40% {
-      --twinkle: 1;
+      opacity: 1;
     }
     100% {
-      --twinkle: 0.25;
+      opacity: 0.2;
     }
   }
 
-  /* Phobos on its orbit. The lower arc runs behind Mars. */
-  .orbit {
-    position: absolute;
-    left: -8%;
-    right: -8%;
-    top: 30%;
-    height: 62%;
-    rotate: -6deg;
-  }
-
-  @media (max-width: 640px) {
-    .orbit {
-      left: -70%;
-      right: -70%;
-      top: 44%;
-      height: 40%;
-    }
-  }
-
-  .orbit-path {
-    position: absolute;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    overflow: visible;
-  }
-
-  .orbit-path ellipse {
-    fill: none;
-    stroke: var(--sky-line);
-    stroke-width: 1;
-  }
-
-  .moon {
-    position: absolute;
-    left: 78%;
-    top: 4%;
-    width: 22px;
-    height: 22px;
-    color: var(--star);
-    rotate: 6deg;
-  }
-
-  .moon :global(svg) {
-    display: block;
-    width: 100%;
-    height: 100%;
-  }
-
-  .moon :global(.mark-crater) {
-    stroke: var(--brand);
-  }
-
-  @supports (offset-path: ellipse(50% 50% at 50% 50%)) {
-    .moon {
-      left: 0;
-      top: 0;
-      offset-path: ellipse(50% 50% at 50% 50%);
-      offset-rotate: 0deg;
-      offset-anchor: center;
-      offset-distance: 82%;
-      animation: orbit 160s linear infinite;
-      /* Starts 82% of the way round, where the moon sits clear of the headline */
-      animation-delay: -131s;
-    }
-
-    @keyframes orbit {
-      from {
-        offset-distance: 0%;
-      }
-      to {
-        offset-distance: 100%;
-      }
-    }
-  }
-
+  /* Mars: a lit disc with depth, a thin bright rim of atmosphere, and a scattering haze that breathes */
   .limb {
     position: absolute;
     left: 50%;
@@ -206,10 +248,108 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
     aspect-ratio: 1;
     translate: -50% 0;
     border-radius: 50%;
-    background: linear-gradient(180deg, color-mix(in srgb, var(--limb-rim) 55%, var(--limb)) 0, var(--limb) 9vh);
+    background:
+      radial-gradient(52% 6% at 50% 0%, color-mix(in srgb, var(--limb-rim) 70%, transparent), transparent),
+      linear-gradient(180deg, color-mix(in srgb, var(--limb-rim) 55%, var(--limb)) 0, var(--limb) 11vh);
     box-shadow:
-      0 0 0 1px color-mix(in srgb, var(--limb-rim) 80%, transparent),
-      0 -2px 40px -6px color-mix(in srgb, var(--limb-rim) 45%, transparent);
+      0 0 0 1px color-mix(in srgb, var(--limb-rim) 85%, transparent),
+      inset 0 10px 24px -12px color-mix(in srgb, var(--limb-rim) 90%, transparent),
+      0 -2px 26px -4px color-mix(in srgb, var(--limb-rim) 55%, transparent);
+  }
+
+  .limb::before,
+  .limb::after {
+    content: "";
+    position: absolute;
+    border-radius: 50%;
+    pointer-events: none;
+  }
+
+  /* Haze: a wider ring of light just above the surface */
+  .limb::before {
+    inset: -1.6vw;
+    background: radial-gradient(closest-side, transparent 97.4%, color-mix(in srgb, var(--limb-rim) 32%, transparent) 98.8%, transparent);
+    animation: breathe 9s ease-in-out infinite alternate;
+  }
+
+  /* Scatter: a faint cold fringe beyond it, as the sky of Mars turns blue near the sun */
+  .limb::after {
+    inset: -3.2vw;
+    background: radial-gradient(closest-side, transparent 96.8%, var(--limb-scatter) 98.4%, transparent);
+    animation: breathe 13s ease-in-out -4s infinite alternate;
+  }
+
+  @keyframes breathe {
+    from {
+      opacity: 0.55;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
+  /* The moon. Its box is square; the canvas and the build-time frame both fill it. */
+  .moon {
+    position: absolute;
+    z-index: -1;
+    top: 50%;
+    right: calc(var(--moon-size) * -0.1);
+    width: var(--moon-size);
+    aspect-ratio: 1;
+    translate: 0 -50%;
+    pointer-events: none;
+  }
+
+  .moon-static,
+  .hero-canvas {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .moon-static {
+    fill: none;
+    stroke-linecap: round;
+    transition: opacity 1.4s var(--ease-out);
+  }
+
+  .occluder-core {
+    stop-color: var(--sky-0);
+    stop-opacity: 0.92;
+  }
+
+  .occluder-edge {
+    stop-color: var(--sky-0);
+    stop-opacity: 0;
+  }
+
+  .wash-core {
+    stop-color: var(--brand-hi);
+    stop-opacity: 0.2;
+  }
+
+  .wash-edge {
+    stop-color: var(--brand-hi);
+    stop-opacity: 0;
+  }
+
+  /* The opening frame is drawn for the night sky; at dawn the canvas draws its own */
+  :global(:root[data-theme="light"]) .moon-static {
+    display: none;
+  }
+
+  .hero-canvas {
+    opacity: 0;
+    transition: opacity 1.4s var(--ease-out);
+  }
+
+  .hero[data-live] .hero-canvas {
+    opacity: 1;
+  }
+
+  .hero[data-live] .moon-static {
+    opacity: 0;
   }
 
   .hero-content {
@@ -221,11 +361,27 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
     max-width: 44rem;
   }
 
+  /* Star white into the brand's blue, with a soft glow */
   h1 {
-    font-size: clamp(2.375rem, 5.6vw, 4.25rem);
+    font-size: clamp(2.375rem, 5.6vw, 4.5rem);
     font-weight: 500;
-    line-height: 1.06;
-    letter-spacing: -0.022em;
+    line-height: 1.04;
+    letter-spacing: -0.032em;
+    filter: drop-shadow(0 0 28px var(--headline-glow));
+  }
+
+  /* An inline box, so the gradient runs along the reading order across the lines */
+  .headline {
+    background: linear-gradient(
+      90deg,
+      var(--star) 0%,
+      var(--star) 42%,
+      color-mix(in srgb, var(--brand-hi) 80%, var(--star)) 72%,
+      var(--brand) 100%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
   .hero-line {
@@ -243,36 +399,132 @@ const tintClass = (star: Star) => (star.tint ? `t-${star.tint}` : undefined)
     margin-top: 2.25rem;
   }
 
-  /* Two parallax layers: the far stars drift down faster than the near ones as the page scrolls */
+  .hero-actions .button.is-primary {
+    transition:
+      border-color var(--dur-1) var(--ease-out),
+      background-color var(--dur-1) var(--ease-out),
+      box-shadow var(--dur-2) var(--ease-out);
+  }
+
+  .hero-actions .button.is-primary:hover {
+    box-shadow: 0 0 28px -4px color-mix(in srgb, var(--brand) 60%, transparent);
+  }
+
+  /* The entrance, once: the headline uncovers from the left, then the line and the buttons rise in turn */
+  .hero-line {
+    animation: rise 900ms var(--ease-out) 160ms both;
+  }
+
+  h1 {
+    animation: rise 900ms var(--ease-out) both;
+  }
+
+  .headline {
+    animation: uncover 1400ms var(--ease-out) both;
+  }
+
+  .hero-actions > * {
+    animation: rise 800ms var(--ease-out) both;
+  }
+
+  .hero-actions > :nth-child(1) {
+    animation-delay: 300ms;
+  }
+
+  .hero-actions > :nth-child(2) {
+    animation-delay: 360ms;
+  }
+
+  .hero-actions > :nth-child(3) {
+    animation-delay: 420ms;
+  }
+
+  @keyframes rise {
+    from {
+      opacity: 0;
+      translate: 0 14px;
+    }
+  }
+
+  @keyframes uncover {
+    from {
+      mask-image: linear-gradient(90deg, #000 40%, transparent 60%);
+      mask-size: 250% 100%;
+      mask-position: 100% 0;
+    }
+    to {
+      mask-image: linear-gradient(90deg, #000 40%, transparent 60%);
+      mask-size: 250% 100%;
+      mask-position: 0 0;
+    }
+  }
+
+  /* Narrow screens: the moon stands above the headline, the copy sits low */
+  @media (max-width: 820px) {
+    .hero {
+      --moon-size: min(132vw, 640px);
+      align-items: end;
+    }
+
+    .moon {
+      top: 0;
+      right: auto;
+      left: 50%;
+      translate: -50% -4%;
+    }
+
+    .sky::before {
+      background: radial-gradient(80% 40% at 50% 26%, var(--moon-halo), transparent 70%);
+    }
+
+    .hero-content {
+      padding-block: calc(var(--moon-size) * 0.62) clamp(6rem, 16vh, 9rem);
+    }
+  }
+
+  /* Scroll parallax: the far stars sink faster than the near ones as the page scrolls */
   @supports (animation-timeline: scroll()) {
-    .stars-far,
-    .stars-near {
-      animation: drift linear both;
+    .layer {
+      animation: sink linear both;
       animation-timeline: scroll(root);
       animation-range: 0 100vh;
     }
 
-    .stars-far {
-      --drift: 16vh;
+    .layer-far {
+      --sink: 16vh;
     }
 
-    .stars-near {
-      --drift: 7vh;
+    .layer-middle {
+      --sink: 10vh;
     }
 
-    @keyframes drift {
+    .layer-near {
+      --sink: 5vh;
+    }
+
+    @keyframes sink {
       to {
-        translate: 0 var(--drift);
+        translate: 0 var(--sink);
       }
     }
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .stars,
     .tw,
-    .moon,
-    .stars-far,
-    .stars-near {
+    .layer,
+    .limb::before,
+    .limb::after,
+    .hero-line,
+    .hero-actions > *,
+    .headline,
+    h1 {
       animation: none;
+    }
+
+    .moon-static,
+    .hero-canvas {
+      transition: none;
     }
   }
 </style>

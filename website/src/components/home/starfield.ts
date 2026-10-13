@@ -18,14 +18,18 @@ export interface Star {
   periodMs?: number
 }
 
+// Three depth layers, far to near: each drifts and follows the pointer by its own amount, so the sky
+// has parallax. Twinkling stars ride the middle layer.
 export interface Starfield {
   far: Star[]
+  middle: Star[]
   near: Star[]
   twinkling: Star[]
 }
 
-const FAR_COUNT = 300
-const NEAR_COUNT = 100
+const FAR_COUNT = 320
+const MIDDLE_COUNT = 140
+const NEAR_COUNT = 42
 const TWINKLE_COUNT = 40
 
 function round(value: number, digits = 1): number {
@@ -46,15 +50,22 @@ export function makeStarfield(seed = 0x9a0b05): Starfield {
   const far = Array.from({ length: FAR_COUNT }, () => ({
     x: x(),
     y: y(),
-    radiusUnits: round(0.45 + random() * 0.6, 2),
-    opacity: round(0.25 + random() * 0.45, 2),
+    radiusUnits: round(0.4 + random() * 0.5, 2),
+    opacity: round(0.2 + random() * 0.4, 2),
+    tint: tint(),
+  }))
+  const middle = Array.from({ length: MIDDLE_COUNT }, () => ({
+    x: x(),
+    y: y(),
+    radiusUnits: round(0.75 + random() * 0.6, 2),
+    opacity: round(0.45 + random() * 0.4, 2),
     tint: tint(),
   }))
   const near = Array.from({ length: NEAR_COUNT }, () => ({
     x: x(),
     y: y(),
-    radiusUnits: round(0.8 + random() * 0.7, 2),
-    opacity: round(0.5 + random() * 0.45, 2),
+    radiusUnits: round(1.2 + random() * 0.8, 2),
+    opacity: round(0.6 + random() * 0.35, 2),
     tint: tint(),
   }))
   const twinkling = Array.from({ length: TWINKLE_COUNT }, (_, index) => ({
@@ -66,5 +77,5 @@ export function makeStarfield(seed = 0x9a0b05): Starfield {
     delayMs: Math.round(-index * 397 - random() * 300),
     periodMs: Math.round(3800 + random() * 3400),
   }))
-  return { far, near, twinkling }
+  return { far, middle, near, twinkling }
 }
