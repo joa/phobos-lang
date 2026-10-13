@@ -50,11 +50,13 @@ fn lanes_matvec(name: &str, bytes: usize, grid: Option<usize>, fetch: &[(&str, S
     for (v, expr) in fetch {
         let _ = writeln!(take, "    let {v} = {}", at("b", expr));
     }
+    // Two blocks a turn, at four CTAs an SM: what keeps enough loads in
+    // flight on a card with Ampere's or Ada's bandwidth.
     format!(
         "fn {name}_block(b) {{
 {body}}}
 
-@launch(256)
+@launch(256, 4)
 @aligned(K = 256, GW = {gw}, DW = 8)
 kernel {name}_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
                          QB: tensor<i8>[G, GW], D: tensor<f16>[G, DW], {param}C: tensor<f32>[1, N]) {{
@@ -64,7 +66,7 @@ kernel {name}_qdot_lanes(AQ: tensor<i8>[1, K], AS: tensor<f32>[1, KB],
   let c8 = col % 8
   let nb = K / 256
   var acc: f32 = 0.0
-  for b in range(0, nb, 1) {{
+  for<unroll 2> b in range(0, nb, 1) {{
 {take}    let a = b * 256 + 64 * q
     {name}_block(b)
   }}
