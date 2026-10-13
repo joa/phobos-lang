@@ -133,6 +133,23 @@ fn dump_raw_kernel_sources() {
         sources.push((format!("q50_qmma_{tn}"), q50_qmma_src(Q8_QMMA_CTA, Q8_QMMA_TM, tn)));
     }
     sources.push(("q50_qmma_shallow".into(), q50_qmma_src(Q8_QMMA_CTA, Q8_QMMA_SHALLOW, Q8_QMMA_TN)));
+    // The Q8_0 prompt projections, at the tiles init.rs and matmul.rs set.
+    let tile = |src: String, tm: usize, tn: usize| {
+        src.replace(
+            "@autotune(TM in [64], TN in [64])",
+            &format!("@autotune(TM in [{tm}], TN in [{tn}])"),
+        )
+    };
+    for tn in Q8_QMMA_WIDTHS {
+        sources.push((format!("q8_qmma_{tn}"), tile(q8_qmma_src(Q8_QMMA_CTA), Q8_QMMA_TM, tn)));
+    }
+    sources.push(("q8_qmma_shallow".into(), q8_qmma_src(Q8_QMMA_CTA)));
+    let narrow = tile(q8_qmma_src(Q8_QMMA_NARROW_CTA), Q8_QMMA_TM, Q8_QMMA_NARROW_TN);
+    sources.push(("q8_qmma_narrow".into(), narrow));
+    let split = tile(q8_qmma_split_src(Q8_QMMA_CTA, 2560, 4), Q8_QMMA_TM, Q8_QMMA_WIDTHS[0]);
+    sources.push(("q8_qmma_split".into(), split));
+    let mma = Q8_MMA_SRC.replace("{ALIGNED}", "@aligned(M = TM, N = TN, K = 32)");
+    sources.push(("q8_mma".into(), mma));
     sources.extend(crate::backend::device::formats::all_sources());
     for (name, src) in sources {
         std::fs::write(dir.join(format!("{name}.ph")), src).unwrap();

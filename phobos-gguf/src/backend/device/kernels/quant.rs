@@ -93,12 +93,28 @@ kernel q8_mma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
 
-/// The Q8_0 projection as a single `qmma_t`, used by prompt passes.
-///
-/// Unlike [`Q8_MMA_SRC`], which applies block scales every 32 elements and
-/// so stages through shared memory, `qmma_t` folds the scales in. The whole
-/// of `k` is one operation, with accumulators in registers and no barrier
-/// in the loop.
+/// The Q8_0 contraction of `k` in `[from, to)` into `out`'s `[TM, TN]`
+/// tile, block scales folded in: an int8 accumulator the integer tensor
+/// cores keep in registers across the loop.
+fn q8_qmma_loop(from: &str, to: &str, out: &str, indent: &str) -> String {
+    let body = format!(
+        "var acc: tile<f32>[TM, TN] = 0.0
+for kt in range({from}, {to}, 32) {{
+  let b = kt / 32
+  let a = A[pm * TM :+ TM, kt :+ 32]
+  let w = W[pn * TN :+ TN, kt :+ 32]
+  let ws = WS[b :+ 1, pn * TN :+ TN]
+  let da = AS[pm * TM :+ TM, b :+ 1]
+  acc += f32(dot_t(a, w)) * ws * da
+}}
+{out}[pm * TM :+ TM, pn * TN :+ TN] = acc
+"
+    );
+    body.lines().map(|l| format!("{indent}{l}
+")).collect()
+}
+
+/// The Q8_0 projection prompt passes run on the integer tensor cores.
 pub(crate) fn q8_qmma_src(block: usize) -> String {
     format!(
         "@launch({block})
@@ -109,14 +125,13 @@ kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                C: tensor<f32>[M, N]) {{
   let pm = ctx.block.x
   let pn = ctx.block.y
-  C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
-                                           W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
-}}
-"
+{}}}
+",
+        q8_qmma_loop("0", "K", "C", "  ")
     )
 }
 
-/// Output tiles of the `qmma_t` projection: the depth, and the available
+/// Output tiles of the `q8_qmma` projection: the depth, and the available
 /// widths, widest first.
 ///
 /// The output tile bounds a warp's patch of tensor-core tiles, which is
@@ -191,9 +206,24 @@ pub(crate) fn q50_qdot_src(accumulate: bool) -> String {
     q50_of(if accumulate { Q8_QDOT_ADD_SRC } else { Q8_QDOT_SRC })
 }
 
-/// [`q8_qmma_src`] against the same weight, its tile fixed at `tm` by `tn`.
+/// The prompt projection against a Q5_0 weight, its tile fixed at `tm` by
+/// `tn`: `q50_qmma_t`.
 pub(crate) fn q50_qmma_src(block: usize, tm: usize, tn: usize) -> String {
-    q50_of(&q8_qmma_src(block)).replace(
+    let src = format!(
+        "@launch({block})
+@autotune(TM in [64], TN in [64])
+@aligned(M = TM, N = TN, K = 32)
+kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N],
+               C: tensor<f32>[M, N]) {{
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  C[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                           W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
+}}
+"
+    );
+    q50_of(&src).replace(
         "@autotune(TM in [64], TN in [64])",
         &format!("@autotune(TM in [{tm}], TN in [{tn}])"),
     )
@@ -422,9 +452,9 @@ pub(crate) fn q8_qmma_narrow_eligible(rows: usize, n: usize, wide: usize) -> boo
 /// [`q8_qmma_splits`] returns more than one.
 ///
 /// Each split has its own output operand and `if ps == i` arm rather than
-/// one indexed write. `qmma_t` writes straight to global memory only when
-/// the slice is provably in bounds from its offset, which an offset built
-/// from `ctx.block.z` can never be.
+/// one indexed write. The accumulator is written straight to global memory
+/// only when the slice is provably in bounds from its offset, which an
+/// offset built from `ctx.block.z` can never be.
 ///
 /// The `k` slice bounds are compiled in as literals, so `@aligned` covers
 /// `A`, `AS`, `W` and `WS` too. The arms branch on a CTA-uniform grid
@@ -436,15 +466,11 @@ pub(crate) fn q8_qmma_split_src(block: usize, k: usize, s: usize) -> String {
     let mut body = String::new();
     for i in 0..s {
         let from = i * slice;
-        let fb = from / Q8_BLOCK;
         params.push_str(&format!(", P{i}: tensor<f32>[M, N]"));
-        body.push_str(&format!(
-            "  if ps == {i} {{
-    P{i}[pm * TM :+ TM, pn * TN :+ TN] = qmma_t(A[pm * TM :+ TM, {from} :+ {slice}], AS[pm * TM :+ TM, {fb} :+ {sb}],
-                                             W[pn * TN :+ TN, {from} :+ {slice}], WS[{fb} :+ {sb}, pn * TN :+ TN])
-  }}
-"
-        ));
+        let arm = q8_qmma_loop(&from.to_string(), &(from + slice).to_string(), &format!("P{i}"), "    ");
+        body.push_str(&format!("  if ps == {i} {{
+{arm}  }}
+"));
     }
     format!(
         "@launch({block})

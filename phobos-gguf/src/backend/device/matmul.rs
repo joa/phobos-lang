@@ -87,7 +87,7 @@ impl DeviceBackend {
         };
 
         // Deepest tile first. Each kernel takes the whole tiles it can and
-        // passes the remaining rows on: qmma_t at two depths, then q8_mma,
+        // passes the remaining rows on: q8_qmma at two depths, then q8_mma,
         // then a matvec per leftover row.
         let mut qmma_rows = 0;
         if qmma_takes(n) {
