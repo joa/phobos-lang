@@ -1,0 +1,52 @@
+---
+// One sentence for an example page: what phobos-kbench measured for this kernel, read from
+// results/results.csv, with the card, size and date, and cuBLAS beside it only where the comparison holds.
+import {
+  bandwidthGBs,
+  cublasRatio,
+  formatGflops,
+  formatPercent,
+  kernelBench,
+  loadKernelResults,
+  precisionLabel,
+} from "../../../lib/bench/kernels"
+import { shortDate } from "../../../lib/bench/load"
+
+interface Props {
+  bench: string
+}
+
+const results = loadKernelResults()
+const bench = kernelBench(results, Astro.props.bench)
+const { phobos, cublas } = bench
+const ratio = cublasRatio(bench)
+const where = `On an ${results.card} at ${bench.size}`
+const peakName: Record<string, string> = {
+  f32: "f32 peak",
+  "f16-tc": "f16 tensor-core peak",
+  "f16-tc-f32-acc": "tensor-core peak with f32 accumulation",
+}
+const peak = `${Math.round(phobos.pctOfPeak)}% of the card's ${peakName[phobos.precision] ?? `${precisionLabel(phobos.precision)} peak`}`
+
+let sentence: string
+if (bench.bytesPerFlop !== undefined && cublas) {
+  const ours = Math.round(bandwidthGBs(bench, phobos)!)
+  const theirs = Math.round(bandwidthGBs(bench, cublas)!)
+  sentence = `${where}, phobos-kbench measured this kernel moving ${ours} GB/s against ${theirs} GB/s for ${bench.cublasCall}, ${formatPercent(ratio!)} of it. saxpy is memory-bound, so bandwidth, not GFLOP/s, is its measure.`
+} else if (ratio !== undefined && cublas) {
+  sentence = `${where}, phobos-kbench measured this kernel at ${formatGflops(phobos.gflops)}, ${formatPercent(ratio)} of ${bench.cublasCall} (${formatGflops(cublas.gflops)}) and ${peak}.`
+} else if (cublas) {
+  sentence = `${where}, phobos-kbench measured this kernel at ${formatGflops(phobos.gflops)}, ${peak}. The cuBLAS run beside it is ${bench.cublasCall} in ${cublas.precision} on CUDA cores (${formatGflops(cublas.gflops)}), another precision, so the two do not compare like for like.`
+} else {
+  sentence = `${where}, phobos-kbench measured this kernel at ${formatGflops(phobos.gflops)}, ${peak}, which is what phobos-kbench rates it against. cuBLAS has no counterpart to time beside it.`
+}
+---
+
+<p class="kernel-result">
+  {sentence}{" "}
+  <span class="kernel-result-source">
+    From <code>{results.file}</code>, committed {shortDate(results.date)}; all kernels are on the <a href="/#kernels"
+      >front page</a
+    >.
+  </span>
+</p>

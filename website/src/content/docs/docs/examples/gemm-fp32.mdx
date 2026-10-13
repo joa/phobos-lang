@@ -6,10 +6,13 @@ sidebar:
 ---
 
 import Kernel from "../../../../components/Kernel.astro"
+import KernelResult from "../../../../components/home/compiler-numbers/KernelResult.astro"
 
 This kernel computes the general matrix multiply `C = alpha * A @ B + beta * C`
 for `f32` matrices `A` (`M x K`), `B` (`K x N`) and `C` (`M x N`). It is the
 kernel `phobos-kbench` compares against cuBLAS's `cublasSgemm`.
+
+<KernelResult bench="gemm_fp32" />
 
 <Kernel file="examples/gemm_fp32.ph" />
 

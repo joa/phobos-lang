@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Kernel from "../../../../components/Kernel.astro"
+import KernelResult from "../../../../components/home/compiler-numbers/KernelResult.astro"
 
 Attention computes `O = softmax(Q @ K^T * scale) @ V`. Written naively, it
 builds the whole `Nq x Nk` matrix of scores, which for long sequences is far
@@ -13,6 +14,8 @@ larger than the inputs. Flash attention never builds it: each CTA walks the
 keys in blocks and keeps a running softmax, so its memory stays the size of
 one block. This kernel follows FlashAttention-2 in `f32`, for one attention
 head.
+
+<KernelResult bench="flash_fp32" />
 
 <Kernel file="examples/flash_attention_fp32.ph" />
 

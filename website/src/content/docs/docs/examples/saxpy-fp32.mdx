@@ -6,10 +6,13 @@ sidebar:
 ---
 
 import Kernel from "../../../../components/Kernel.astro"
+import KernelResult from "../../../../components/home/compiler-numbers/KernelResult.astro"
 
 saxpy computes `out = alpha * x + y` for vectors `x`, `y` and `out` of length
 `N` and a scalar `alpha`. It is the smallest kernel in the repository, and the
 first one `phobos-kbench` runs.
+
+<KernelResult bench="saxpy_fp32" />
 
 <Kernel file="examples/saxpy_fp32.ph" />
 

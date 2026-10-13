@@ -1,5 +1,6 @@
-// Records, for every results/bench*.json and results/agent*.json without a meta.date, the date of the
-// last commit that touched it, into src/lib/bench/dates.json. CI checks out one commit, so git history
+// Records, for every results/bench*.json and results/agent*.json without a meta.date, and for
+// results/results.csv (phobos-kbench's output, which has no date field), the date of the last commit
+// that touched it, into src/lib/bench/dates.json. CI checks out one commit, so git history
 // is not there at build time; run this after committing a new results file that has no date field.
 //
 //   node scripts/bench-dates.mjs
@@ -15,10 +16,10 @@ const outPath = resolve(websiteDir, "src/lib/bench/dates.json")
 
 const dates = {}
 for (const name of readdirSync(resolve(repoRoot, "results")).sort()) {
-  if (!/^(bench|agent).*\.json$/.test(name)) continue
+  const isRun = /^(bench|agent).*\.json$/.test(name)
+  if (!isRun && name !== "results.csv") continue
   const file = `results/${name}`
-  const run = JSON.parse(readFileSync(resolve(repoRoot, file), "utf8"))
-  if (run.meta?.date) continue
+  if (isRun && JSON.parse(readFileSync(resolve(repoRoot, file), "utf8")).meta?.date) continue
   const date = execFileSync("git", ["-C", repoRoot, "log", "-1", "--format=%cI", "--", file], {
     encoding: "utf8",
   }).trim()
