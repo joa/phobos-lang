@@ -35,7 +35,6 @@ impl<'c> Codegen<'c> {
                 let ir::Type::Frags(f) = ir.ty(ir.result(op)) else {
                     bail!("frag_init of a non-fragment");
                 };
-                let acc_t = Type::vector(&[2, 2], self.f32_t);
                 let init = self.push(
                     block,
                     arith::constant(
@@ -44,13 +43,18 @@ impl<'c> Codegen<'c> {
                         self.loc,
                     ),
                 )?;
-                let seed = self.vec_broadcast(block, init, acc_t)?;
+                let seed = if f.imma {
+                    init
+                } else {
+                    self.vec_broadcast(block, init, Type::vector(&[2, 2], self.f32_t))?
+                };
                 let fa = FragAcc {
                     frags: Vec::new(),
                     m: f.m,
                     n: f.n,
                     wm: f.wm,
                     wn: f.wn,
+                    imma: f.imma,
                 };
                 let (fm, fnn) = fa.warp_frags();
                 let frags = vec![seed; (fm * fnn * 2) as usize];
@@ -70,6 +74,16 @@ impl<'c> Codegen<'c> {
                 let frags = self.frag_dot_raw(block, &fa, &a, &b)?;
                 self.release(&a);
                 self.release(&b);
+                self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
+            }
+            OpKind::FragDotScaled => {
+                let fa = self.frags_ir(ir.operand(op, 0))?;
+                let tiles = self.tiles_ir(ir, op, 1..5)?;
+                self.record_contract("mma.sync");
+                let frags = self.frag_dot_scaled_raw(block, &fa, &tiles)?;
+                for t in &tiles {
+                    self.release(t);
+                }
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
             OpKind::FragStore => {

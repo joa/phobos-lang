@@ -513,6 +513,7 @@ impl Verifier<'_> {
             | OpKind::FragInit(_)
             | OpKind::FragScale(_)
             | OpKind::FragDot
+            | OpKind::FragDotScaled
             | OpKind::FragStore
             | OpKind::Dot { .. }
             | OpKind::DotInto { .. }

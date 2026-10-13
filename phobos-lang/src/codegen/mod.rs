@@ -227,8 +227,9 @@ impl<'c> MemVal<'c> {
 /// memory, as in flash attention.
 ///
 /// Each warp of the wm x wn grid holds fm*fnn*2 vector<2x2xf32> fragments of
-/// its [m, n] slice. The values ride enclosing loops as scf.for iter_args.
-/// See codegen/frag.rs.
+/// its [m, n] slice, or for `imma` fm*fnn*2 f32 scalars, a lane's two
+/// elements of each m8n8k16 output tile. The values ride enclosing loops as
+/// scf.for iter_args. See codegen/frag.rs.
 #[derive(Clone)]
 struct FragAcc<'c> {
     frags: Vec<Value<'c, 'c>>,
@@ -236,12 +237,14 @@ struct FragAcc<'c> {
     n: i64,
     wm: i64,
     wn: i64,
+    imma: bool,
 }
 
 impl FragAcc<'_> {
     /// The warp's fragment-grid extents (fm, fnn).
     fn warp_frags(&self) -> (i64, i64) {
-        ((self.m / 16) / self.wm, (self.n / 16) / self.wn)
+        let tile = if self.imma { IMMA_TILE } else { 16 };
+        ((self.m / tile) / self.wm, (self.n / tile) / self.wn)
     }
 }
 
