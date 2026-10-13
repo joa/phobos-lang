@@ -20,8 +20,6 @@ pub(super) struct FormatKernels {
     /// The `m == 1` decode as one `*_qdot_t` call, with no shared-memory
     /// staging. Needs `n` to be a multiple of its tile.
     pub(super) qdot: Option<Kernel>,
-    /// The dp4a decode matvec, wide tile then narrow. See `I8_NARROW_TN`.
-    pub(super) qdot_i8: [Option<Kernel>; 2],
     /// The decode without the reduction. Writes a `[K, N]` strip of
     /// dequantized weight for [`DeviceBackend::project_raw_dense`].
     pub(super) dequant: Option<Kernel>,
@@ -38,12 +36,10 @@ type Src = fn(usize) -> String;
 type QmmaSrc = fn(usize, usize, usize) -> String;
 
 /// A format's kernel sources: each builder with the function it defines.
-/// The dp4a matvec also carries its wide and narrow tiles.
 struct Spec {
     tn: usize,
     matvec: Option<(Src, &'static str)>,
     qdot: Option<(Src, &'static str)>,
-    qdot_i8: Option<(Src, usize, usize, &'static str)>,
     dequant: Option<(Src, &'static str)>,
     qdecode: Option<(Src, &'static str)>,
     qmma: Option<(QmmaSrc, &'static str)>,
@@ -53,7 +49,6 @@ const NONE: Spec = Spec {
     tn: 0,
     matvec: None,
     qdot: None,
-    qdot_i8: None,
     dequant: None,
     qdecode: None,
     qmma: None,
@@ -78,12 +73,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ1S_TN,
             matvec: Some((iq1s_matvec_src, "iq1s_matvec")),
             qdot: Some((iq1s_qdot_matvec_src, "iq1s_qdot_matvec")),
-            qdot_i8: Some((
-                iq1s_qdot_i8_matvec_src,
-                IQ1S_I8_TN,
-                IQ1S_I8_NARROW_TN,
-                "iq1s_qdot_i8_matvec",
-            )),
             dequant: Some((iq1s_dequant_src, "iq1s_dequant")),
             qdecode: Some((iq1s_qdecode_src, "iq1s_qdecode")),
             qmma: Some((iq1s_qmma_src, "iq1s_qmma")),
@@ -92,12 +81,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ1M_TN,
             matvec: Some((iq1m_matvec_src, "iq1m_matvec")),
             qdot: Some((iq1m_qdot_matvec_src, "iq1m_qdot_matvec")),
-            qdot_i8: Some((
-                iq1m_qdot_i8_matvec_src,
-                IQ1M_I8_TN,
-                IQ1M_I8_NARROW_TN,
-                "iq1m_qdot_i8_matvec",
-            )),
             dequant: Some((iq1m_dequant_src, "iq1m_dequant")),
             qdecode: Some((iq1m_qdecode_src, "iq1m_qdecode")),
             qmma: None,
@@ -106,12 +89,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ2XXS_TN,
             matvec: Some((iq2xxs_matvec_src, "iq2xxs_matvec")),
             qdot: Some((iq2xxs_qdot_matvec_src, "iq2xxs_qdot_matvec")),
-            qdot_i8: Some((
-                iq2xxs_qdot_i8_matvec_src,
-                IQ2XXS_I8_TN,
-                IQ2XXS_I8_NARROW_TN,
-                "iq2xxs_qdot_i8_matvec",
-            )),
             dequant: Some((iq2xxs_dequant_src, "iq2xxs_dequant")),
             qdecode: Some((iq2xxs_qdecode_src, "iq2xxs_qdecode")),
             qmma: Some((iq2xxs_qmma_src, "iq2xxs_qmma")),
@@ -120,12 +97,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ2XS_TN,
             matvec: Some((iq2xs_matvec_src, "iq2xs_matvec")),
             qdot: Some((iq2xs_qdot_matvec_src, "iq2xs_qdot_matvec")),
-            qdot_i8: Some((
-                iq2xs_qdot_i8_matvec_src,
-                IQ2XS_I8_TN,
-                IQ2XS_I8_NARROW_TN,
-                "iq2xs_qdot_i8_matvec",
-            )),
             dequant: Some((iq2xs_dequant_src, "iq2xs_dequant")),
             qdecode: Some((iq2xs_qdecode_src, "iq2xs_qdecode")),
             qmma: Some((iq2xs_qmma_src, "iq2xs_qmma")),
@@ -134,12 +105,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ2S_TN,
             matvec: Some((iq2s_matvec_src, "iq2s_matvec")),
             qdot: Some((iq2s_qdot_matvec_src, "iq2s_qdot_matvec")),
-            qdot_i8: Some((
-                iq2s_qdot_i8_matvec_src,
-                IQ2S_I8_TN,
-                IQ2S_I8_NARROW_TN,
-                "iq2s_qdot_i8_matvec",
-            )),
             dequant: Some((iq2s_dequant_src, "iq2s_dequant")),
             qdecode: Some((iq2s_qdecode_src, "iq2s_qdecode")),
             qmma: Some((iq2s_qmma_src, "iq2s_qmma")),
@@ -148,12 +113,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ3XXS_TN,
             matvec: Some((iq3xxs_matvec_src, "iq3xxs_matvec")),
             qdot: Some((iq3xxs_qdot_matvec_src, "iq3xxs_qdot_matvec")),
-            qdot_i8: Some((
-                iq3xxs_qdot_i8_matvec_src,
-                IQ3XXS_I8_TN,
-                IQ3XXS_I8_NARROW_TN,
-                "iq3xxs_qdot_i8_matvec",
-            )),
             dequant: Some((iq3xxs_dequant_src, "iq3xxs_dequant")),
             qdecode: Some((iq3xxs_qdecode_src, "iq3xxs_qdecode")),
             qmma: Some((iq3xxs_qmma_src, "iq3xxs_qmma")),
@@ -162,12 +121,6 @@ fn spec(quant: Quant) -> Option<Spec> {
             tn: IQ3S_TN,
             matvec: Some((iq3s_matvec_src, "iq3s_matvec")),
             qdot: Some((iq3s_qdot_matvec_src, "iq3s_qdot_matvec")),
-            qdot_i8: Some((
-                iq3s_qdot_i8_matvec_src,
-                IQ3S_I8_TN,
-                IQ3S_I8_NARROW_TN,
-                "iq3s_qdot_i8_matvec",
-            )),
             dequant: Some((iq3s_dequant_src, "iq3s_dequant")),
             qdecode: Some((iq3s_qdecode_src, "iq3s_qdecode")),
             qmma: Some((iq3s_qmma_src, "iq3s_qmma")),
@@ -178,47 +131,14 @@ fn spec(quant: Quant) -> Option<Spec> {
             dequant: Some((iq4xs_dequant_src, "iq4xs_dequant")),
             ..NONE
         },
-        Quant::Q4_K => i8_only(
-            q4k_qdot_i8_matvec_src,
-            Q4K_I8_TN,
-            Q4K_I8_NARROW_TN,
-            "q4k_qdot_i8_matvec",
-        ),
-        Quant::Q5_K => i8_only(
-            q5k_qdot_i8_matvec_src,
-            Q5K_I8_TN,
-            Q5K_I8_NARROW_TN,
-            "q5k_qdot_i8_matvec",
-        ),
-        Quant::Q6_K => i8_only(
-            q6k_qdot_i8_matvec_src,
-            Q6K_I8_TN,
-            Q6K_I8_NARROW_TN,
-            "q6k_qdot_i8_matvec",
-        ),
-        Quant::PTQ1_0 => i8_only(
-            ptq1_qdot_i8_matvec_src,
-            PTQ1_I8_TN,
-            PTQ1_I8_NARROW_TN,
-            "ptq1_qdot_i8_matvec",
-        ),
         _ => return None,
     })
-}
-
-/// A format whose only kernel is the dp4a decode matvec.
-fn i8_only(src: Src, wide: usize, narrow: usize, name: &'static str) -> Spec {
-    Spec {
-        qdot_i8: Some((src, wide, narrow, name)),
-        ..NONE
-    }
 }
 
 #[derive(Clone, Copy)]
 enum Slot {
     Matvec,
     Qdot,
-    QdotI8(usize),
     Dequant,
     Qdecode(usize),
     Qmma,
@@ -253,11 +173,6 @@ fn jobs(quant: Quant, spec: &Spec, into: &mut Vec<Job>) {
     }
     if let Some((src, name)) = spec.qdot {
         push(Slot::Qdot, src(tn), one(tn), name, tn);
-    }
-    if let Some((src, wide, narrow, name)) = spec.qdot_i8 {
-        let wide = qdot_i8_tn(wide);
-        push(Slot::QdotI8(0), src(wide), one(wide), name, wide);
-        push(Slot::QdotI8(1), src(narrow), one(narrow), name, narrow);
     }
     if let Some((src, name)) = spec.dequant {
         push(Slot::Dequant, src(tn), one(tn), name, tn);
@@ -328,7 +243,6 @@ pub(super) fn build(formats: &[Quant]) -> Result<HashMap<Quant, FormatKernels>> 
         match job.slot {
             Slot::Matvec => set.matvec = kernel,
             Slot::Qdot => set.qdot = kernel,
-            Slot::QdotI8(i) => set.qdot_i8[i] = kernel,
             Slot::Dequant => set.dequant = kernel,
             Slot::Qdecode(i) => set.qdecode[i] = kernel,
             Slot::Qmma => set.qmma = kernel,

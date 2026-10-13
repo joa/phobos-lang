@@ -2,16 +2,6 @@
 
 use super::*;
 
-/// A dp4a decode matvec picked for one weight: the module, its name, the
-/// output tile, and the lookup tables it takes after the block operands.
-/// A dp4a decode matvec and the lookup tables it reads, as (address,
-/// length) pairs.
-type I8Kernel<'a> = (&'a formats::Kernel, Vec<(u64, i64)>);
-
-
-/// Blocks below which a decode matvec takes its narrow tile; see `i8_pick`.
-const WIDE_TILE_MIN_BLOCKS: usize = 8;
-
 /// The five buffers every batched Q8_0 kernel contracts over. The weight
 /// pair is passed whole. The others are offset to each launch's row band.
 struct Q8Tiles {
@@ -324,75 +314,29 @@ impl DeviceBackend {
             .filter(|qdot| m == 1 && n.is_multiple_of(qdot.tn));
         let qdot_eligible = qdot.is_some();
 
-        // The dp4a decode matvecs. The format picks the output tile and the
-        // lookup tables. It quantizes the activation, which the host
-        // reference does not.
-        let i8_pick = if self.iq1s_dp4a.get() && m == 1 {
-            self.pick_qdot_i8(kernels, *quant, n)?
-        } else {
-            None
-        };
-        if let Some((kernel, tables)) = i8_pick {
-            let tn = kernel.tn;
-            let (bytes_ptr, d_ptr) = (raw.bytes, raw.d);
-            let rb = *nb * quant.device_block_bytes();
-            let (nb, n_blocks, quant) = (*nb as i64, k / Q8_BLOCK, *quant);
+        // The int8 decode matvecs, written with lanes. They quantize the
+        // activation, which the host reference does not.
+        if self.iq1s_dp4a.get() && m == 1 && lanes_kernel(*quant).is_some() {
+            let (bytes_ptr, d_ptr, nb, quant) = (raw.bytes, raw.d, *nb as i64, *quant);
             drop(raws);
             // Use the caller's quantized activation if it has one.
             let act = act.map_or_else(|| self.quantize_act(a, 1, k), Ok)?;
             let (qa_ptr, das_ptr) = self.act_ptrs(act)?;
-            // The tile is `@aligned` and stores whole tiles. A ragged n
-            // writes a padded scratch row and copies the first n values out.
-            // The upload already padded the weight to match.
-            let n_pad = n.next_multiple_of(tn);
-            if self.lanes_on(quant) && lanes_kernel(quant).is_some() {
-                let groups = n.div_ceil(8) as i64;
-                let mut operands = vec![
-                    (qa_ptr, [1, k as i64]),
-                    (das_ptr, [1, n_blocks as i64]),
-                    (bytes_ptr, [groups, nb * 8 * quant.device_block_bytes() as i64]),
-                ];
-                // Q6_K's and the IQ formats' `d` is the grouped scale plane.
-                if !matches!(quant, Quant::Q4_K | Quant::Q5_K) {
-                    operands.push((d_ptr, [groups, nb * 8]));
-                }
-                // The kernels compute their sign masks; only the grid is read.
-                operands.extend(tables.iter().take(1).map(|&(ptr, len)| (ptr, [1, len])));
-                operands.push((self.ptr(out, 0)?, [1, n as i64]));
-                return self.launch_lanes(quant, &operands, (n.div_ceil(Q4K_LANES_TN) as u32, 1, 1));
-            }
-            let ops = qdot_split::SplitOperands { qa: qa_ptr, das: das_ptr, bytes: bytes_ptr, d: d_ptr };
-            if n_pad == n && tables.is_empty() && self.project_raw_split(quant, ops, (nb as usize, k, n), (out, false))? {
-                return Ok(());
-            }
-            let dest = if n_pad == n {
-                out
-            } else {
-                self.dense_scratch(1, n_pad)?
-            };
+            let groups = n.div_ceil(8) as i64;
             let mut operands = vec![
                 (qa_ptr, [1, k as i64]),
-                (das_ptr, [1, n_blocks as i64]),
-                (bytes_ptr, [n_pad as i64, rb as i64]),
-                (d_ptr, [n_pad as i64, nb]),
+                (das_ptr, [1, (k / Q8_BLOCK) as i64]),
+                (bytes_ptr, [groups, nb * 8 * quant.device_block_bytes() as i64]),
             ];
-            operands.extend(tables.into_iter().map(|(ptr, len)| (ptr, [1, len])));
-            operands.push((self.ptr(dest, 0)?, [1, n_pad as i64]));
-            self.launch(&kernel.module, kernel.name, &operands, ((n_pad / tn) as u32, 1, 1))?;
-            if n_pad != n {
-                let src = Plane {
-                    buf: dest,
-                    offset: 0,
-                    pitch: n_pad,
-                };
-                let dst = Plane {
-                    buf: out,
-                    offset: 0,
-                    pitch: n,
-                };
-                self.copy_2d(src, dst, 1, n)?;
+            // Q6_K's and the IQ formats' `d` is the grouped scale plane.
+            if !matches!(quant, Quant::Q4_K | Quant::Q5_K) {
+                operands.push((d_ptr, [groups, nb * 8]));
             }
-            return Ok(());
+            if let Some(grid) = self.lanes_grid(quant)? {
+                operands.push(grid);
+            }
+            operands.push((self.ptr(out, 0)?, [1, n as i64]));
+            return self.launch_lanes(quant, &operands, (n.div_ceil(Q4K_LANES_TN) as u32, 1, 1));
         }
         let kernel = match qdot {
             Some(qdot) => qdot,
@@ -564,59 +508,19 @@ impl DeviceBackend {
         )
     }
 
-    /// The dp4a decode matvec for an `n`-wide projection in `quant`, if the
-    /// format has one that fits.
-    fn pick_qdot_i8<'a>(
-        &self,
-        kernels: &'a formats::FormatKernels,
-        quant: Quant,
-        n: usize,
-    ) -> Result<Option<I8Kernel<'a>>> {
-        let [Some(wide), Some(narrow)] = &kernels.qdot_i8 else {
-            return Ok(None);
-        };
-        // The K-quants have no other path, so a ragged n runs padded.
-        let padded = matches!(quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K | Quant::PTQ1_0);
-        if !padded && !n.is_multiple_of(narrow.tn) {
-            return Ok(None);
-        }
-        // The wide tile whenever it divides n into enough blocks. A
-        // projection only a few wide tiles across, such as a 256-wide key,
-        // takes the narrow one at four times the blocks.
-        let kernel = if n.is_multiple_of(wide.tn) && n / wide.tn >= WIDE_TILE_MIN_BLOCKS {
-            wide
-        } else {
-            narrow
-        };
-        let grid = |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw(), len as i64);
-        // The mask half sits one table past the +/-1 one.
-        let mask =
-            |b: &DeviceBuffer<i8>, len: usize| (b.as_device_ptr().as_raw() + len as u64, len as i64);
-        let tables = match quant {
-            Quant::IQ1_S | Quant::IQ1_M => vec![(self.qgemm.grid4()?, IQ1_GRID4_LEN as i64)],
-            Quant::IQ2_XXS => vec![
-                grid(&self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN),
-                mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
-            ],
-            Quant::IQ2_S => vec![
-                grid(&self.iq2s_grid_packed, IQ2S_GRID_LEN),
-                mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
-            ],
-            Quant::IQ2_XS => vec![
-                grid(&self.iq2xs_grid_packed, IQ2XS_GRID_LEN),
-                mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
-            ],
-            Quant::IQ3_XXS => vec![
-                grid(&self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN),
-                mask(&self.iq2xxs_signs_packed, IQ2XXS_SIGNS_LEN),
-            ],
-            Quant::IQ3_S => vec![
-                grid(&self.iq3s_grid_packed, IQ3S_GRID_LEN),
-                mask(&self.iq2s_signs_packed, IQ2S_SIGNS_LEN),
-            ],
-            _ => Vec::new(),
-        };
-        Ok(Some((kernel, tables)))
+    /// The packed grid an IQ format's lanes matvec stages, as (address,
+    /// length). `None` for a format that reads no table.
+    fn lanes_grid(&self, quant: Quant) -> Result<Option<(u64, [i64; 2])>> {
+        let grid = |b: &DeviceBuffer<i8>, len: usize| Some((b.as_device_ptr().as_raw(), [1, len as i64]));
+        Ok(match quant {
+            Quant::IQ1_S | Quant::IQ1_M => Some((self.qgemm.grid4()?, [1, IQ1_GRID4_LEN as i64])),
+            Quant::IQ2_XXS => grid(&self.iq2xxs_grid_packed, IQ2XXS_GRID_LEN),
+            Quant::IQ2_XS => grid(&self.iq2xs_grid_packed, IQ2XS_GRID_LEN),
+            Quant::IQ2_S => grid(&self.iq2s_grid_packed, IQ2S_GRID_LEN),
+            Quant::IQ3_XXS => grid(&self.iq3xxs_grid_packed, IQ3XXS_GRID_LEN),
+            Quant::IQ3_S => grid(&self.iq3s_grid_packed, IQ3S_GRID_LEN),
+            _ => None,
+        })
     }
 
     /// Whether `w`'s format has a dequant kernel in [`Self::project_raw_dense`].
@@ -625,19 +529,6 @@ impl DeviceBackend {
             .borrow()
             .get(w.0)
             .is_some_and(|raw| raw.quant == quant)
-    }
-
-    /// Whether `quant`'s decode matvec runs its lanes kernel.
-    ///
-    /// The K-quants always do: they measured at parity with their intrinsics
-    /// on sm_75, sm_86 and sm_89. The IQ formats and PTQ1_0 do unless
-    /// `PHOBOS_RAW_LANES` is off: they measured level with or faster than
-    /// their intrinsics on all three.
-    fn lanes_on(&self, quant: Quant) -> bool {
-        match quant {
-            Quant::Q4_K | Quant::Q5_K | Quant::Q6_K => true,
-            _ => self.raw_lanes.unwrap_or(true),
-        }
     }
 
     /// A raw format's decode matvec written with lanes, compiled on first use.

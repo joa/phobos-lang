@@ -20,6 +20,7 @@ use anyhow::{Context, Result, bail};
 use cust::event::{Event, EventFlags};
 use cust::prelude::*;
 use cust::sys;
+use phobos_gguf::backend::device::q4k_qdot_lanes_src;
 use phobos_kernels::{compile, cuda_ok, push_descriptor};
 
 /// One expert's gate and up matrices, Q4_K, `[512, 2048]` each.
@@ -32,17 +33,6 @@ const USED: usize = 8;
 /// Bytes of one expert's three matrices, the copy engine's chunk.
 const EXPERT_BYTES: usize = 1_900_544;
 
-const Q4K_SRC: &str = "@launch(256, 4)
-@autotune(TN in [64])
-@aligned(N = TN)
-kernel q4k_qdot_i8_matvec(AQ: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
-                          QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
-                          C: tensor<f32>[M, N]) {
-  let pn = ctx.block.x
-  C[0 :+ 1, pn * TN :+ TN] = q4k_qdot_i8_t(AQ[0 :+ 1, :], AS[0 :+ 1, :],
-                                           QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :])
-}
-";
 
 fn main() -> Result<()> {
     let mirror_gib: usize = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(20);
@@ -147,27 +137,21 @@ struct Matvec {
     function: sys::CUfunction,
     n: usize,
     slots: Vec<u64>,
-    _keep: [DeviceBuffer<u8>; 4],
+    _keep: [DeviceBuffer<u8>; 3],
 }
 
 impl Matvec {
     fn new(function: sys::CUfunction, qb: u64, n: usize) -> Result<Matvec> {
         let aq: Vec<u8> = (0..K).map(|i| ((i % 17) as i32 - 8) as u8).collect();
         let asc: Vec<u8> = vec![0.01f32; K / 32].iter().flat_map(|v| v.to_le_bytes()).collect();
-        let d: Vec<u8> = vec![0x3400u16; n * NB].iter().flat_map(|v| v.to_le_bytes()).collect();
         let c = vec![0u8; n * 4];
-        let keep = [
-            DeviceBuffer::from_slice(&aq)?,
-            DeviceBuffer::from_slice(&asc)?,
-            DeviceBuffer::from_slice(&d)?,
-            DeviceBuffer::from_slice(&c)?,
-        ];
+        let keep = [DeviceBuffer::from_slice(&aq)?, DeviceBuffer::from_slice(&asc)?, DeviceBuffer::from_slice(&c)?];
+        // The weight in the grouped layout: eight rows' blocks to a group.
         let mut slots = Vec::new();
         push_descriptor(&mut slots, keep[0].as_device_ptr().as_raw(), [1, K as i64]);
         push_descriptor(&mut slots, keep[1].as_device_ptr().as_raw(), [1, (K / 32) as i64]);
-        push_descriptor(&mut slots, qb, [n as i64, RB as i64]);
-        push_descriptor(&mut slots, keep[2].as_device_ptr().as_raw(), [n as i64, NB as i64]);
-        push_descriptor(&mut slots, keep[3].as_device_ptr().as_raw(), [1, n as i64]);
+        push_descriptor(&mut slots, qb, [(n / 8) as i64, (8 * RB) as i64]);
+        push_descriptor(&mut slots, keep[2].as_device_ptr().as_raw(), [1, n as i64]);
         Ok(Matvec { function, n, slots, _keep: keep })
     }
 
@@ -216,8 +200,8 @@ fn time_matvec(stream: &Stream, function: sys::CUfunction, qb: u64, n: usize, re
 fn probe_zero_copy(stream: &Stream, mapped: Option<&Mapped>) -> Result<()> {
     let n = USED * EXPERT_ROWS;
     let bytes: Vec<i8> = (0..n * RB).map(|i| (i.wrapping_mul(2654435761) >> 13) as i8).collect();
-    let module = compile(Q4K_SRC, &[("TN", 64)], "q4k probe")?;
-    let function = module.get_function("q4k_qdot_i8_matvec")?.to_raw();
+    let module = compile(&q4k_qdot_lanes_src(), &[], "q4k probe")?;
+    let function = module.get_function("q4k_qdot_lanes")?.to_raw();
 
     let resident = DeviceBuffer::from_slice(&bytes)?;
     let ms = time_matvec(stream, function, resident.as_device_ptr().as_raw(), n, 50)?;
@@ -308,8 +292,8 @@ fn probe_dma(stream: &Stream, copy_stream: &Stream) -> Result<()> {
 fn probe_overlap(stream: &Stream, copy_stream: &Stream) -> Result<()> {
     let n = USED * EXPERT_ROWS;
     let bytes: Vec<i8> = (0..n * RB).map(|i| (i.wrapping_mul(2654435761) >> 13) as i8).collect();
-    let module = compile(Q4K_SRC, &[("TN", 64)], "q4k probe")?;
-    let function = module.get_function("q4k_qdot_i8_matvec")?.to_raw();
+    let module = compile(&q4k_qdot_lanes_src(), &[], "q4k probe")?;
+    let function = module.get_function("q4k_qdot_lanes")?.to_raw();
     let resident = DeviceBuffer::from_slice(&bytes)?;
     let chunks = 64;
     let dst = DeviceBuffer::from_slice(&vec![0u8; chunks * EXPERT_BYTES])?;

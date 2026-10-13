@@ -13,7 +13,6 @@ use crate::quant::Quant;
 /// A source builder taking its tile width.
 type Src = fn(usize) -> String;
 
-type I8Row = (fn(usize) -> String, usize, usize, &'static str);
 
 #[test]
 #[ignore = "writes files; run by hand with PHOBOS_DUMP_DIR set"]
@@ -105,8 +104,8 @@ fn dump_raw_kernel_sources() {
     sources.push(("fused_mlp_340".to_string(), plan.source));
     // The 4B's down projections split six ways.
     for quant in [Quant::Q4_K, Quant::Q6_K] {
-        let src = kquant_qdot_i8_split_src(quant, 2560, 9216, 6).expect("a K-quant splits");
-        sources.push((kquant_qdot_i8_split_name(quant).to_string(), src));
+        let src = kquant_lanes_split_src(quant, 2560, 9216, 6).expect("a K-quant splits");
+        sources.push((kquant_lanes_split_name(quant).to_string(), src));
     }
     // The 4B's convolution: 32 value heads over 16 key heads, and ungrouped.
     let batch = delta_conv_batch(512);
@@ -127,58 +126,6 @@ fn dump_raw_kernel_sources() {
     }
     sources.push(("delta_gates".to_string(), delta_gates_src(32, (ELEM_TILE / 4 / 32).max(1))));
     sources.push(("hadamard_q".to_string(), hadamard_src(2560, None, HadamardForm::Quantized)));
-    let i8: [I8Row; 11] = [
-        (
-            iq1s_qdot_i8_matvec_src,
-            IQ1S_I8_TN,
-            IQ1S_I8_NARROW_TN,
-            "iq1s",
-        ),
-        (
-            iq1m_qdot_i8_matvec_src,
-            IQ1M_I8_TN,
-            IQ1M_I8_NARROW_TN,
-            "iq1m",
-        ),
-        (
-            iq2xxs_qdot_i8_matvec_src,
-            IQ2XXS_I8_TN,
-            IQ2XXS_I8_NARROW_TN,
-            "iq2xxs",
-        ),
-        (
-            iq2xs_qdot_i8_matvec_src,
-            IQ2XS_I8_TN,
-            IQ2XS_I8_NARROW_TN,
-            "iq2xs",
-        ),
-        (
-            iq2s_qdot_i8_matvec_src,
-            IQ2S_I8_TN,
-            IQ2S_I8_NARROW_TN,
-            "iq2s",
-        ),
-        (
-            iq3xxs_qdot_i8_matvec_src,
-            IQ3XXS_I8_TN,
-            IQ3XXS_I8_NARROW_TN,
-            "iq3xxs",
-        ),
-        (
-            iq3s_qdot_i8_matvec_src,
-            IQ3S_I8_TN,
-            IQ3S_I8_NARROW_TN,
-            "iq3s",
-        ),
-        (q4k_qdot_i8_matvec_src, Q4K_I8_TN, Q4K_I8_NARROW_TN, "q4k"),
-        (ptq1_qdot_i8_matvec_src, PTQ1_I8_TN, PTQ1_I8_NARROW_TN, "ptq1"),
-        (q5k_qdot_i8_matvec_src, Q5K_I8_TN, Q5K_I8_NARROW_TN, "q5k"),
-        (q6k_qdot_i8_matvec_src, Q6K_I8_TN, Q6K_I8_NARROW_TN, "q6k"),
-    ];
-    for (src, wide, narrow, name) in i8 {
-        sources.push((format!("{name}_qdot_i8_matvec_{wide}"), src(wide)));
-        sources.push((format!("{name}_qdot_i8_matvec_{narrow}"), src(narrow)));
-    }
     for accumulate in [false, true] {
         sources.push((format!("q50_qdot_{accumulate}"), q50_qdot_src(accumulate)));
     }

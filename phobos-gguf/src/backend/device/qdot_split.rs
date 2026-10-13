@@ -35,7 +35,7 @@ pub(super) struct SplitOperands {
 
 impl DeviceBackend {
     /// `out[n] = w[n, k] . a` as `s` slices of `k` into partials and a sum,
-    /// or with `add` `out[n] += ..`; see [`kquant_qdot_i8_split_src`].
+    /// or with `add` `out[n] += ..`; see [`kquant_lanes_split_src`].
     /// Returns `false`, launching nothing, when the format has no split form
     /// or the shape does not take one.
     pub(super) fn project_raw_split(
@@ -45,7 +45,7 @@ impl DeviceBackend {
         (nb, k, n): (usize, usize, usize),
         (out, add): (Buf, bool),
     ) -> Result<bool> {
-        let tn = Q4K_I8_TN;
+        let tn = Q4K_LANES_TN;
         if !self.qdot_split_on || !n.is_multiple_of(tn) {
             return Ok(false);
         }
@@ -54,26 +54,29 @@ impl DeviceBackend {
         };
         let key = (quant, n, k, s, add);
         if !self.qdot_split_mods.borrow().contains_key(&key) {
-            let Some(src) = kquant_qdot_i8_split_src(quant, n, k, s) else {
+            let Some(src) = kquant_lanes_split_src(quant, n, k, s) else {
                 return Ok(false);
             };
-            let split = compile(&src, &[("TN", tn)], kquant_qdot_i8_split_name(quant))?;
+            let split = compile(&src, &[], kquant_lanes_split_name(quant))?;
             let reduce = compile(&qgemm_reduce_src(n, s, add), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
             self.qdot_split_mods.borrow_mut().insert(key, (split, reduce));
         }
         let mods = self.qdot_split_mods.borrow();
         let (split, reduce) = &mods[&key];
-        let rb = nb * quant.device_block_bytes();
+        let groups = (n / 8) as i64;
         let partials = self.split_partials(s * n)?;
         let plane = (partials, [1, (s * n) as i64]);
-        let operands = [
+        let mut operands = vec![
             (ops.qa, [1, k as i64]),
             (ops.das, [1, (k / Q8_BLOCK) as i64]),
-            (ops.bytes, [n as i64, rb as i64]),
-            (ops.d, [n as i64, nb as i64]),
-            plane,
+            (ops.bytes, [groups, (nb * 8 * quant.device_block_bytes()) as i64]),
         ];
-        let name = kquant_qdot_i8_split_name(quant);
+        // Q6_K's `d` is the grouped scale plane.
+        if quant == Quant::Q6_K {
+            operands.push((ops.d, [groups, (nb * 8) as i64]));
+        }
+        operands.push(plane);
+        let name = kquant_lanes_split_name(quant);
         self.launch(split, name, &operands, ((n / tn) as u32, s as u32, 1))?;
         let into = [plane, (self.ptr(out, 0)?, [1, n as i64])];
         self.launch(reduce, "qgemm_reduce", &into, (1, (n / QGEMM_TN) as u32, 1))?;
