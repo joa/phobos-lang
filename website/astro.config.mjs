@@ -71,6 +71,7 @@ export default defineConfig({
           items: [
             "docs/reference",
             "docs/reference/spec",
+            "docs/reference/abi",
             "docs/reference/environment",
             "docs/reference/benchmarks",
             "docs/reference/cli",

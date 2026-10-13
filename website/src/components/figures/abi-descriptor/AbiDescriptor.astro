@@ -1,0 +1,34 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import AbiDescriptorFigure from "./abi-descriptor.figure"
+import { totalBytes } from "./geometry"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-abi-descriptor" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="abi-descriptor"
+  figure={AbiDescriptorFigure}
+  state={{ bits: "32" }}
+  title="One tensor parameter becomes seven kernel arguments"
+  desc={`Schematic. The parameter A: tensor<f32>[M, K] lowers to seven arguments in order: the allocated pointer, the aligned pointer, the offset 0, the sizes M and K, and the strides K and 1. The pointers are 8 bytes each. The five index fields are 4 bytes at the default 32-bit index, ${totalBytes(32)} bytes in all, and 8 bytes at 64-bit index, ${totalBytes(64)} bytes in all.`}
+  legend={[
+    ["global", "pointers into global memory"],
+    ["reg", "index fields"],
+  ]}
+>
+  <div class="chart-group" role="group" aria-label="Index width">
+    <button type="button" class="chart-btn" data-group="bits" data-value="32" aria-pressed="true">32-bit index</button>
+    <button type="button" class="chart-btn" data-group="bits" data-value="64" aria-pressed="false">64-bit index</button>
+  </div>
+  <button type="button" class="chart-btn" data-action="replay">Replay</button>
+  <Fragment slot="caption">
+    Schematic. Box widths are to scale in bytes. A tensor of rank <code>r</code> takes <code>3 + 2r</code> arguments,
+    whatever its dimensions are named.
+  </Fragment>
+</ChartFigure>

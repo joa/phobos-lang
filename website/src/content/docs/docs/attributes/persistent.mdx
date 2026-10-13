@@ -29,7 +29,8 @@ The launcher sizes the grid from the CUDA occupancy API, as the number of
 CTAs that fit on one multiprocessor times the number of multiprocessors
 (`phobos_kernels::launch::persistent_grid`). Shared memory usually bounds
 that number, so the query is made with the kernel's thread count and its
-dynamic shared bytes.
+dynamic shared bytes. [Kernel ABI](/docs/reference/abi/#persistent-kernels)
+shows the launch from the host's side.
 
 ## A minimal kernel
 

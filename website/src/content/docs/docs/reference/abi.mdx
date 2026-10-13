@@ -1,0 +1,419 @@
+---
+title: Kernel ABI
+description: How a kernel's parameters become PTX arguments, how to size its launch, and how to call it from Rust or the CUDA driver.
+sidebar:
+  order: 2
+---
+
+import AbiDescriptor from "../../../../components/figures/abi-descriptor/AbiDescriptor.astro"
+
+A Phobos kernel compiles to a PTX entry point that the CUDA driver loads and
+launches like any other. This page is what a host program needs to call one:
+the argument list each parameter lowers to, the launch configuration, and the
+assumptions the compiled code makes about the memory it is given.
+
+The ABI is not stable. It is the argument layout MLIR's GPU lowering emits for
+the kernel's parameters, and it changes when that lowering does. The
+[`phobos-kernels`](https://github.com/joa/phobos-lang/tree/main/phobos-kernels)
+crate's `abi` module is the one place Phobos itself builds argument lists, so
+code that goes through it follows the layout of the compiler it was built
+with.
+
+## From source to launch
+
+1. The compiler turns a source file into one PTX module with one `.entry` per
+   kernel, named after the kernel: `kernel saxpy(..)` becomes
+   `.visible .entry saxpy(..)`. `phobos-compile` writes the PTX to a file; in
+   a program, `phobos_lang::compile_shared` returns it together with the
+   dynamic shared memory each `@dynshared` kernel needs.
+2. The host loads the module (`cuModuleLoadData`) and looks the entry up by
+   name (`cuModuleGetFunction`).
+3. The host allocates device buffers, builds the argument list described
+   below, and calls `cuLaunchKernel` with a grid, a block and a dynamic shared
+   memory size.
+
+The PTX names one target chip (`.target sm_75`). A release supports `sm_75`,
+`sm_80`, `sm_86`, `sm_89`, `sm_90` and `sm_120`, and PTX for an older chip
+runs on newer cards. `phobos-compile` takes the chip from `--chip` (see
+[Compile and benchmark](/docs/getting-started/compile-and-benchmark/)); the
+`phobos-kernels` compile functions take `PHOBOS_CHIP`, or else the newest
+supported chip the card in the machine can run.
+
+Everything the kernel needs to know about its operands arrives as arguments.
+There are no globals to set and no constant memory to fill.
+
+## Parameter lowering
+
+Parameters lower in declaration order. A scalar parameter is one argument; a
+tensor parameter is several.
+
+### Tensors
+
+A tensor parameter of rank `r` is a memref descriptor flattened into
+`3 + 2r` arguments:
+
+| Position | Argument | PTX type | Value the host passes |
+| --- | --- | --- | --- |
+| 1 | allocated pointer | `.u64` | The device address of element 0 |
+| 2 | aligned pointer | `.u64` | The same address again |
+| 3 | offset | index | `0` |
+| next `r` | sizes | index | The extent of each axis, outermost first |
+| last `r` | strides | index | The row-major stride of each axis, in elements; the last is `1` |
+
+The index type is `.u32` at the default 32-bit index and `.u64` at 64-bit
+index (see [Index width](#index-width)). A rank-1 `tensor<f32>[N]` is
+`ptr, ptr, 0, N, 1`; a rank-2 `tensor<f32>[M, K]` is
+`ptr, ptr, 0, M, K, K, 1`.
+
+<AbiDescriptor />
+
+Some fields are present but never read. The kernel addresses memory through
+the aligned pointer, so the allocated pointer only fills its slot, and the
+offset is always taken to be 0. Pass the values in the table anyway: which
+fields a kernel reads depends on its code and on the compiler version.
+
+Every axis has its two slots, whether its extent is a name or a literal. A
+literal extent is compiled in and its size slot is ignored; `tensor<i32>[2]`
+is still `ptr, ptr, 0, 2, 1`. A named extent that `@autotune` binds is compiled
+in the same way.
+
+A named extent that nothing else binds is read from the launch: from the size
+slot of the first tensor parameter that names it. A later tensor that uses the
+same name does not rebind it, but each tensor still bounds its own slices by
+its own size slots, so pass the true extents in every descriptor.
+
+### Scalars
+
+A scalar parameter is one argument of its own type, at its position in the
+list:
+
+| Parameter type | PTX parameter | Bytes |
+| --- | --- | --- |
+| `f32` | `.f32` | 4 |
+| `i32` | `.u32` | 4 |
+| `f64` | `.f64` | 8 |
+| `i64` | `.u64` | 8 |
+| `f16`, `bf16` | `.align 2 .b8 [2]` | 2 |
+| `i8` | `.u8` | 1 |
+
+Scalars keep their declared width at either index width: an `i64` is 8 bytes
+even in a 32-bit-index kernel. Integer scalars convert to the index type on
+entry, so at 32-bit index only the low 32 bits of an `i64` take part in index
+arithmetic.
+
+### Per index width
+
+| Argument | 32-bit index | 64-bit index |
+| --- | --- | --- |
+| Pointer | 8 bytes | 8 bytes |
+| Offset, size, stride | 4 bytes, `i32` | 8 bytes, `i64` |
+| A rank-1 tensor | 5 arguments, 28 bytes | 5 arguments, 40 bytes |
+| A rank-2 tensor | 7 arguments, 36 bytes | 7 arguments, 56 bytes |
+| A scalar | its own width | its own width |
+
+## Index width
+
+The index width is the integer width of index arithmetic, and with it the
+width of every offset, size and stride argument. It is 32 bits unless the
+module needs 64. A module is widened to 64 bits as a whole when any kernel in
+it:
+
+| Uses | On | Why |
+| --- | --- | --- |
+| A `<fmt>_qgemm_t` built-in | every chip | It loads operands with `ldmatrix` |
+| `load_acquire` or `store_release` | every chip | System-scope memory operations |
+| `@tensorcore`, not `@tensorcore(wmma)` | `sm_80` and newer | The `mma.sync` path with `cp.async` staging; `sm_75` stays on WMMA at 32 bits |
+
+The same source can therefore take 32-bit arguments on one chip and 64-bit
+ones on another: `examples/gemm_fp16tc_fp32acc.ph` compiles at 32 bits for
+`sm_75` and at 64 bits for `sm_80`. Asking for 64 bits is always allowed
+(`phobos-compile --index-bits 64`, or `index_bitwidth` in the compiler's
+`Context`); asking for 32 never narrows a module that needs 64.
+
+To see which width a PTX file was compiled at, read the entry's parameter
+list: a tensor's third parameter, its offset, is `.u32` or `.u64`.
+
+A launch that passes the wrong width does not fail. Every argument after the
+first index field lands in the wrong place, and the kernel reads garbage
+sizes. Phobos's own launchers avoid the question by giving every argument an
+8-byte slot that holds the value zero-extended: the driver copies as many
+bytes as each parameter declares, so on a little-endian host one list of
+slots serves both widths, as long as no size or stride is negative.
+
+## Worked examples
+
+### saxpy
+
+`examples/saxpy_fp32.ph`:
+
+```phobos
+@autotune(BLOCK in [16, 8192])
+kernel saxpy(x: tensor<f32>[N], y: tensor<f32>[N], out: tensor<f32>[N], alpha: f32) {
+  let base = ctx.block.x * BLOCK
+  out[base :+ BLOCK] = alpha * x[base :+ BLOCK] + y[base :+ BLOCK]
+}
+```
+
+For `N = 1048576` and `alpha = 2.0`, at the 32-bit index it compiles at, the
+entry takes 16 arguments:
+
+| # | Parameter | Argument | Type |
+| --- | --- | --- | --- |
+| 0 | `x` | `x_ptr` | `.u64` |
+| 1 | | `x_ptr` | `.u64` |
+| 2 | | `0` | `.u32` |
+| 3 | | `1048576` | `.u32` |
+| 4 | | `1` | `.u32` |
+| 5 to 9 | `y` | `y_ptr, y_ptr, 0, 1048576, 1` | as for `x` |
+| 10 to 14 | `out` | `out_ptr, out_ptr, 0, 1048576, 1` | as for `x` |
+| 15 | `alpha` | `2.0` | `.f32` |
+
+`BLOCK` is compiled in, so the grid depends on the value it was compiled with:
+`N / BLOCK` CTAs along x, rounded up. `phobos-compile` takes the first value
+of an `@autotune` range, here 16, which gives 65536 CTAs.
+
+### gemm
+
+`examples/gemm_fp32.ph` declares:
+
+```phobos fragment
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
+@launch(256)
+@pipeline
+@aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32)
+```
+
+Three rank-2 tensors and two scalars make 23 arguments. For `M = 512`,
+`N = 256` and `K = 1024`:
+
+| # | Parameter | Arguments |
+| --- | --- | --- |
+| 0 to 6 | `A` | `a_ptr, a_ptr, 0, 512, 1024, 1024, 1` |
+| 7 to 13 | `B` | `b_ptr, b_ptr, 0, 1024, 256, 256, 1` |
+| 14 to 20 | `C` | `c_ptr, c_ptr, 0, 512, 256, 256, 1` |
+| 21 | `alpha` | `.f32` |
+| 22 | `beta` | `.f32` |
+
+The kernel reads `ctx.block.x` as the row tile and `ctx.block.y` as the column
+tile, so the grid is `(M / TILE_M, N / TILE_N)`: with the first values,
+`(16, 8)` CTAs of 256 threads. The `@aligned` promise means `M`, `N` and `K`
+must be whole multiples of their tiles, or the launch traps
+([Entry checks](#entry-checks)).
+
+The tensor-core variant, `examples/gemm_fp16tc_fp32acc.ph`, has the same
+parameter list. Compiled for `sm_80` it takes 64-bit index fields:
+`a_ptr, a_ptr, 0i64, 512i64, 1024i64, 1024i64, 1i64` and so on.
+
+## Launch configuration
+
+The kernel does not choose its launch; the host does, and the kernel trusts
+it.
+
+| Setting | Comes from | Note |
+| --- | --- | --- |
+| Grid | The host | Usually the problem size over the tile size. `ctx.block` and `ctx.blocks` read it back. `grid_barrier` needs a one-dimensional grid. |
+| Block | `@launch(threads)`, 256 without it | Launch exactly this many threads, along x. `@launch` puts it in the PTX as `.maxntid`; without `@launch` the PTX declares no bound, but the code is still compiled for 256. |
+| Dynamic shared memory | `@dynshared` | The byte count `compile_shared` reports for the kernel. 0 for any other kernel, whose tiles are static. |
+
+### Dynamic shared memory
+
+A `@dynshared` kernel declares an external shared buffer and expects the
+launch to size it. `phobos_lang::compile_shared` returns the PTX together with
+a `(kernel name, bytes)` pair for each `@dynshared` kernel; pass at least that
+many bytes as the launch's shared memory size. Past 48 KB the driver also
+needs the kernel's ceiling raised first:
+
+```rust
+// SAFETY: func comes from a loaded module.
+unsafe {
+    cust::sys::cuFuncSetAttribute(
+        func,
+        cust::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+        bytes as i32,
+    )
+};
+```
+
+The value may go up to the card's `CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`.
+`phobos-compile` does not support `@dynshared` kernels yet: it reports no byte
+count and does not declare the buffer external, so compile those through
+`phobos_lang::compile_shared`.
+
+### Persistent kernels
+
+A `@persistent` kernel must be launched with a grid whose CTAs are all
+resident at once. `phobos_kernels::launch::persistent_grid(func, threads,
+dynamic_shared)` asks the occupancy API how many CTAs of that size fit on a
+multiprocessor and multiplies by the multiprocessor count; it returns that
+grid size and the per-multiprocessor count, and fails if not even one CTA
+fits. A kernel that reads the grid size as an `@autotune` constant, as the
+[`@persistent`](/docs/attributes/persistent/) example's `BLOCKS` does, must be
+compiled with the value the launch will use.
+
+The tensor `grid_barrier` takes is an ordinary `tensor<i32>` argument. It
+needs at least 2 elements, zeroed once before the first launch, and must not
+be shared by kernels that run at the same time.
+
+## Memory layout and alignment
+
+| Requirement | Applies to | What breaks it |
+| --- | --- | --- |
+| Row-major, densely packed | Every tensor | Strides other than the row-major ones are not supported |
+| Base address 16-byte aligned | `f32`, `f16`, `bf16` and `i8` tensors | The compiler assumes it so rows can be read with vector loads. `cuMemAlloc` returns 256-byte aligned memory; a pointer into the middle of a buffer must keep 16. |
+| Runtime extents a multiple of 4 elements | Every named extent read from the launch | The masking and the vector widths are planned on it |
+| Extent a whole number of tiles | Each dimension `@aligned` names | Traps at entry, see below |
+| Grouped layout | `qb` and `d` of the `grouped` quantized formats | See below |
+
+Extents need not be multiples of a tile otherwise: slices past the end are
+masked (see [Slicing, bounds and masking](/docs/language/slicing-bounds-masking/)).
+
+### Grouped quantized layouts
+
+The quantized built-ins marked `grouped` in the
+[format table](/docs/reference/spec/#formats) read their weights in a layout
+other than the one their parameter declares. The declaration still sets the
+descriptor:
+
+- `qb`, declared `[N, K/256 * bytes]`, is stored `[N/8][K/256][8][bytes]`.
+- `d`, declared `[N, K/256]`, is stored `[N/8][K/256][8]`.
+- A last group short of 8 columns is zero-padded.
+
+`phobos-gguf` produces this at upload (`Quant::grouped_rows`). The row-major
+formats are stored as declared. See
+[Grouped layout](/docs/reference/spec/#grouped-layout) in the spec.
+
+## Entry checks
+
+`@aligned(DIM = tile)` on a dimension read from the launch is checked once at
+entry. If the extent is not a whole number of tiles, the kernel executes
+`trap` before it reads or writes anything. The launch itself returns
+successfully; the next synchronize on the stream fails, and the CUDA
+context is unusable afterwards. Only extents read from the launch are
+checked; a literal or `@autotune` extent is not.
+
+In a `@persistent` kernel that uses `grid_barrier`, a trapping CTA never
+reaches the barrier, so the CTAs that do wait there for good.
+
+No other argument is checked. A size larger than the buffer behind the
+pointer reads and writes past it.
+
+## `@autotune` and the compiled kernel
+
+Every `@autotune` name is a compile-time constant. Each choice of values is a
+different PTX module, and the host has to launch the one it compiled with a
+grid that matches its constants. A compile that does not choose takes the
+first value of each name. In the crate, the choice is a list of overrides:
+
+```rust
+let module = phobos_kernels::compile(&source, &[("BLOCK", 8192)], "saxpy")?;
+```
+
+`phobos-kbench` searches the space on the GPU and launches the winner; it is
+the place to see a tuner drive the overrides and the grid together.
+
+The kernel cache keys every compiled module on the compiler's fingerprint, the
+chip, its features and target triple, the requested index width, the
+overrides and the source text. A kernel compiled with other constants, for
+another chip or by another build of the compiler is another entry; see
+[Kernel cache](/docs/inference/kernel-cache/).
+
+## Launching from Rust
+
+`phobos-kernels` with the `cuda` feature compiles for the card in the machine,
+caches the PTX and loads it as a `cust` module. `abi::push_tensor_descriptor`
+appends a tensor's descriptor at 32-bit index and `KernelArg::slot` turns each
+argument into the 8-byte slot the driver reads:
+
+```rust
+use std::ffi::c_void;
+
+use anyhow::Result;
+use cust::prelude::*;
+use phobos_kernels::abi::{KernelArg, push_tensor_descriptor};
+
+fn main() -> Result<()> {
+    let _ctx = cust::quick_init()?;
+    let source = std::fs::read_to_string("examples/saxpy_fp32.ph")?;
+    let block = 8192;
+    let module = phobos_kernels::compile(&source, &[("BLOCK", block)], "saxpy")?;
+    let func = module.get_function("saxpy")?;
+
+    let n = 1 << 20;
+    let x = DeviceBuffer::from_slice(&vec![1.0f32; n])?;
+    let y = DeviceBuffer::from_slice(&vec![2.0f32; n])?;
+    let out = DeviceBuffer::from_slice(&vec![0.0f32; n])?;
+
+    let mut args = Vec::new();
+    for buf in [&x, &y, &out] {
+        push_tensor_descriptor(&mut args, buf.as_device_ptr().as_raw(), &[n as i64]);
+    }
+    args.push(KernelArg::F32(3.0));
+
+    // The driver reads through these pointers, so `slots` outlives the launch.
+    let mut slots: Vec<u64> = args.iter().map(|a| a.slot()).collect();
+    let argv: Vec<*mut c_void> = slots.iter_mut().map(|s| s as *mut u64 as *mut c_void).collect();
+
+    let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+    let grid = n.div_ceil(block) as u32;
+    // SAFETY: argv matches saxpy's parameter list at 32-bit index.
+    unsafe { stream.launch(&func, grid, 256, 0, &argv)? };
+    stream.synchronize()?;
+
+    let mut host = vec![0.0f32; n];
+    out.copy_to(&mut host)?;
+    assert!(host.iter().all(|&v| v == 5.0));
+    Ok(())
+}
+```
+
+`phobos_kernels::compile` returns only the module. Use `compile_shared` for a
+`@dynshared` kernel, which also returns its byte count, and `compile_in` to
+compile with a `Context` of your own, such as one with `index_bitwidth` set.
+`push_tensor_descriptor` writes 32-bit index fields; through the 8-byte slots
+they also serve a 64-bit kernel, as [Index width](#index-width) explains.
+
+## Launching from the CUDA driver
+
+Any language that can call the driver API launches the PTX the same way. The
+argument array holds one pointer per parameter of the entry, each pointing at
+a value of that parameter's width. For saxpy compiled by `phobos-compile`, so
+with `BLOCK = 16`:
+
+```c
+CUmodule module;
+CUfunction saxpy;
+cuModuleLoadData(&module, ptx);
+cuModuleGetFunction(&saxpy, module, "saxpy");
+
+CUdeviceptr x, y, out;           /* cuMemAlloc'd, n floats each */
+int32_t zero = 0, size = n, one = 1;
+float alpha = 2.0f;
+void *args[] = {
+    &x,   &x,   &zero, &size, &one,
+    &y,   &y,   &zero, &size, &one,
+    &out, &out, &zero, &size, &one,
+    &alpha,
+};
+cuLaunchKernel(saxpy, (n + 15) / 16, 1, 1, /* grid */
+               256, 1, 1,                  /* block */
+               0, stream, args, NULL);
+```
+
+At 64-bit index, `zero`, `size` and `one` become `int64_t`. Pass the
+arguments as `kernelParams`, one pointer each. Packing them into a single
+buffer through `extra` also works, but then each argument must sit at its own
+alignment, which leaves a 4-byte gap before a pointer that follows an odd
+number of 32-bit fields.
+
+## Related
+
+- [Compile and benchmark](/docs/getting-started/compile-and-benchmark/):
+  `phobos-compile`'s options, and the `emit` example for reading the MLIR,
+  where the `gpu.func` signature shows each tensor as a `memref`.
+- [`@launch`](/docs/attributes/launch/), [`@dynshared`](/docs/attributes/dynshared/),
+  [`@persistent`](/docs/attributes/persistent/) and
+  [`@aligned`](/docs/attributes/aligned/): the attributes that shape a launch.
+- [Environment variables](/docs/reference/environment/): `PHOBOS_CHIP` picks
+  the chip the device path compiles for, and `PHOBOS_INDEX_BITS` the index
+  width of the `emit` and `ir` examples.

@@ -49,7 +49,9 @@ space, since nothing is tuned here.
 The PTX is what the CUDA driver loads. To launch it from your own program you
 need the argument layout Phobos uses, which the
 [`phobos-kernels`](https://github.com/joa/phobos-lang/tree/main/phobos-kernels)
-crate implements together with a launcher.
+crate implements together with a launcher. [Kernel ABI](/docs/reference/abi/)
+lists the arguments each parameter lowers to and shows a launch in Rust and
+through the CUDA driver.
 
 ## Read the MLIR
 

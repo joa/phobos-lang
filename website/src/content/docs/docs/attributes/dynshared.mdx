@@ -27,7 +27,9 @@ table in the spec.
 
 The compiler still plans every tile's offset itself and computes the peak
 the kernel needs. Compiling reports that number for each `@dynshared` kernel,
-and the launch must supply at least that many bytes.
+and the launch must supply at least that many bytes; see
+[Kernel ABI](/docs/reference/abi/#dynamic-shared-memory) for how a host
+passes it.
 
 Because the allocator resets once every tile is released, phases of a kernel
 separated by a barrier share one footprint: a second phase starts again at
