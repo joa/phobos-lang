@@ -489,13 +489,22 @@ fn qwen_4b_plan(blocks: u32) -> Plan {
 }
 
 #[test]
-fn the_raw_mlp_decodes_each_weight_with_its_own_intrinsic() {
+fn the_raw_mlp_decodes_each_weight_with_its_own_block_decode() {
     // At 64 blocks the down projection's 40 tiles keep the grid busy.
     let plan = qwen_4b_plan(64);
     assert_eq!(plan.barriers, 1);
     let src = &plan.source;
-    assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 2, "gate and up");
-    assert_eq!(src.matches("+= q6k_qdot_i8_t(").count(), 1, "the down projection");
+    // Each format's decode is carried once and called per weight.
+    assert_eq!(src.matches("fn q4k_block(").count(), 1, "{src}");
+    assert_eq!(src.matches("fn q6k_block(").count(), 1, "{src}");
+    assert_eq!(src.matches("q4k_block(Rq").count(), 2, "gate and up");
+    assert_eq!(src.matches("q6k_block(Rq").count(), 1, "the down projection");
+    // Gate and up meet in SwiGLU per lane; only its result goes through a
+    // tile, behind one CTA barrier, for the quantization to read.
+    assert!(src.contains("let sw3 = tot1 / (1.0 + exp(0.0 - tot1)) * tot2"), "{src}");
+    assert_eq!(src.matches("      barrier()").count(), 1, "{src}");
+    // The down projection adds its column onto the residual.
+    assert!(src.contains("X0[0, t5 + cu] = X0[0, t5 + cu] + tot5"), "{src}");
     // Block bytes and `d` plane. A 2560-wide row is ten Q4_K blocks of 144
     // bytes; a 9216-wide row is 36 Q6_K blocks of 208.
     assert!(src.contains("Rq3: tensor<i8>[9216, 1440]"), "{src}");
@@ -508,7 +517,7 @@ fn the_raw_mlp_decodes_each_weight_with_its_own_intrinsic() {
     assert!(src.contains("[0 :+ 1, 32 :+ 32]"), "{src}");
     assert!(src.contains("* 2 + 1 :+ 1, 0 :+ 32]"), "{src}");
     // Two CTAs per SM with a raw decode.
-    assert!(src.starts_with("@launch(256, 2)"), "{src}");
+    assert!(src.contains("@launch(256, 2)\n@persistent"), "{src}");
 }
 
 #[test]
@@ -518,8 +527,9 @@ fn a_wide_grid_splits_the_down_projection_along_k() {
     let plan = qwen_4b_plan(340);
     assert_eq!(plan.barriers, 2);
     let src = &plan.source;
-    assert_eq!(src.matches("= q6k_qdot_i8_t(").count(), 1, "{src}");
-    assert!(!src.contains("+= q6k_qdot_i8_t("), "{src}");
+    assert_eq!(src.matches("q6k_block(Rq").count(), 1, "{src}");
+    assert!(src.contains("for b5 in range(ps5 * 6, ps5 * 6 + 6)"), "{src}");
+    assert!(src.contains("P5[0, ps5 * 2560 + t5 + cu] = tot5"), "{src}");
     assert!(src.contains("P5: tensor<f32>[1, 15360]"), "{src}");
     assert!(src.contains("if u5 < 240"), "{src}");
     // The sum reads all six slices.
@@ -604,10 +614,13 @@ fn the_split_projection_mixes_raw_and_q8_weights() {
     let plan = qwen_4b_project_plan();
     assert_eq!(plan.barriers, 0);
     let src = &plan.source;
-    assert_eq!(src.matches("= q5k_qdot_i8_t(").count(), 1, "{src}");
-    assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 1, "{src}");
+    assert_eq!(src.matches("q5k_block(Rq").count(), 1, "{src}");
+    assert_eq!(src.matches("q4k_block(Rq").count(), 1, "{src}");
     assert_eq!(src.matches("= qdot_t(").count(), 2, "{src}");
-    assert!(src.starts_with("@launch(256, 2)"), "{src}");
+    // The Q8_0 projections' tile stores share a buffer with a raw one's
+    // per-lane stores, so a CTA barrier lands those first.
+    assert!(src.contains("  }\n\n  barrier()\n\n  for i3"), "{src}");
+    assert!(src.contains("@launch(256, 2)\n@persistent"), "{src}");
     // 128 and 64 units of the raw weights, one block each of the Q8_0 ones.
     assert!(src.contains("UN1 in [128]"), "{src}");
     assert!(src.contains("UN2 in [64]"), "{src}");
@@ -636,6 +649,6 @@ fn a_ragged_raw_run_stores_its_remainder() {
         .expect("a shape the pass fuses");
     let src = &plan.source;
     assert!(src.contains("Rq4: tensor<i8>[128, 576]"), "{src}");
-    assert_eq!(src.matches("= q4k_qdot_i8_t(").count(), 2, "{src}");
-    assert!(src.contains(":+ 32] = v2[0 :+ 1, 0 :+ 32]"), "{src}");
+    assert_eq!(src.matches("q4k_block(Rq").count(), 2, "{src}");
+    assert!(src.contains("if q == 0 && cu < 32 {"), "{src}");
 }

@@ -22,9 +22,9 @@ impl Emit {
         let Stage::ProjAddRaw { a, w, y, width } = key.stages[s] else {
             return Ok(None);
         };
-        let Kind::Raw { quant, .. } = key.vals[w.0] else {
+        if !matches!(key.vals[w.0], Kind::Raw { .. }) {
             return Ok(None);
-        };
+        }
         let (k, blocks) = (key.len_of(a), self.blocks as usize);
         let tiles = width / RAW_UNIT;
         if !width.is_multiple_of(RAW_UNIT) || self.shared.contains(&a) || 2 * tiles > blocks {
@@ -47,11 +47,7 @@ impl Emit {
         let at = self.scratch.len() - 1;
         let pp = self.slot(format!("P{s}"), "f32", [1, (splits * width) as i64], Bound::ScratchScales(at));
         let rt = self.tune_const("RT".into(), RAW_UNIT);
-        // A slice's bytes and scales start at eight times its block offset,
-        // since the weight is grouped by eight rows.
         let sb = nb / splits;
-        let (sk, skb, srb) = (sb * 256, sb * 256 / Q8_BLOCK, sb * quant.device_block_bytes());
-        let (gk, gb) = (8 * srb, 8 * sb);
         let units = tiles * splits;
         let iters = units.div_ceil(blocks);
         let _ = write!(
@@ -62,13 +58,13 @@ impl Emit {
     if u{s} < {units} {{
       let ps{s} = u{s} / {tiles}
       let t{s} = (u{s} - ps{s} * {tiles}) * {rt}
-      {pp}[0 :+ 1, ps{s} * {width} + t{s} :+ {rt}] = {fmt}_qdot_i8_t({aq}[0 :+ 1, ps{s} * {sk} :+ {sk}],
-          {asc}[0 :+ 1, ps{s} * {skb} :+ {skb}], {rq}[t{s} :+ {rt}, ps{s} * {gk} :+ {srb}],
-          {rd}[t{s} :+ {rt}, ps{s} * {gb} :+ {sb}])
-    }}
-  }}
 "
         );
+        let tot = self.raw_lanes(s, fmt, &rq, &rd, (&aq, &asc), &format!("t{s}"), &format!("ps{s} * {sb}"), sb);
+        self.store_lanes(&pp, &format!("ps{s} * {width} + t{s}"), &tot, RAW_UNIT);
+        let _ = write!(self.body, "    }}
+  }}
+");
         self.barrier();
         let sum = (0..splits)
             .map(|sp| format!("{pp}[0 :+ 1, {} + r{s} :+ {rt}]", sp * width))

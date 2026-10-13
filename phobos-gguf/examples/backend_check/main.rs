@@ -15,10 +15,12 @@ use phobos_gguf::backend::device;
 use phobos_gguf::quant::{Packed, Quant, pack_q8_0};
 
 
+mod moe;
 mod norm;
 mod raw;
 mod topk;
 
+use moe::check_moe_slots;
 use norm::check_norms_q;
 use raw::{check_hadamard, check_raw_formats};
 use topk::check_topk;
@@ -832,6 +834,7 @@ fn main() -> Result<()> {
     }
     check_hadamard(&host, &gpu, &check_within, &check_spread, &mut next)?;
     check_topk(&failures)?;
+    check_moe_slots(&failures, &mut next)?;
 
     // The narrow dense projection against a weight held `[n, k]`: a decode
     // row, a prompt of whole tiles, one with a tail, and a width the prompt

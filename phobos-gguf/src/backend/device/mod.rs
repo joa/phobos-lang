@@ -55,7 +55,7 @@ use fused::*;
 // unqualified below. See kernels/mod.rs.
 use kernels::*;
 
-pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src, moe_topk_src};
+pub use kernels::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src, moe_gateup_src, moe_qdot_src, moe_topk_src};
 
 /// The formats `PHOBOS_RAW_QMMA` enables for the fused prompt projection.
 /// It takes a comma-separated list of format names, or a plain on/off flag.
