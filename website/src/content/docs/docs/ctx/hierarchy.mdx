@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import CtxHierarchy from "../../../../components/figures/ctx-hierarchy/CtxHierarchy.astro"
+import ClusterTiles from "../../../../components/figures/cluster-tiles/ClusterTiles.astro"
 
 <CtxHierarchy />
 
@@ -111,6 +112,19 @@ A kernel may use both levels, for example a tile copy into shared memory
 followed by per-thread reads of that tile. The compiler checks that tile
 operations still run under control that every thread reaches; see
 [Uniform, warp-uniform and varying](/docs/ctx/uniformity/).
+
+## Above the grid: the cluster
+
+The [`@cluster`](/docs/attributes/cluster/) attribute, experimental, adds a
+level above the grid. The problem is split into super-tiles, each node of a
+cluster runs some of them, and on each node the kernel runs as an ordinary
+grid over its super-tile, with every field above as on one GPU.
+
+<ClusterTiles />
+
+`ctx` has no field for the cluster level. Inside a node, `ctx.block` counts
+the CTAs of the super-tile that launch runs on, and nothing names the
+super-tile or the node.
 
 ## Reading `ctx`
 

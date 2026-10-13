@@ -1,5 +1,6 @@
 ---
 title: "@cluster"
+description: Experimental. Sizes the super-tile one node of a cluster owns, and declares the sizes the cluster tuner searches.
 sidebar:
   order: 10
   badge:
@@ -7,6 +8,188 @@ sidebar:
     variant: caution
 ---
 
+import { Aside } from "@astrojs/starlight/components"
+import ClusterTiles from "../../../../components/figures/cluster-tiles/ClusterTiles.astro"
+
 Super-tile dimensions and search space for cluster tuning.
 
-{/* Text by Joa: @cluster is experimental. */}
+<Aside type="caution" title="Experimental">
+`@cluster` and the cluster path behind it are experimental. The attribute,
+the kernels the cluster compiler accepts and the way the runtime places work
+on nodes may all change.
+</Aside>
+
+On one GPU a kernel is a grid of CTAs, and [`@autotune`](/docs/attributes/autotune/)
+sizes the tile each CTA owns. A cluster adds one level above the grid: the
+problem is split into super-tiles, and each node, one GPU, owns some of them.
+`@cluster` sizes the super-tile.
+
+```text
+@cluster(NAME in [a, b], ...)
+```
+
+Every argument is a search dimension, in the same form as `@autotune`: two
+values are inclusive bounds searched in doubling steps, three or more are an
+explicit list. Every name must also be an `@autotune` name. See the
+[Attributes](/docs/reference/spec/#attributes) table in the spec.
+
+<ClusterTiles />
+
+## A minimal kernel
+
+```phobos
+@cluster(BLOCK in [1048576, 16777216])
+@autotune(BLOCK in [16, 4096])
+kernel add(a: tensor<f32>[N], b: tensor<f32>[N], c: tensor<f32>[N]) {
+  let base = ctx.block.x * BLOCK
+  c[base :+ BLOCK] = a[base :+ BLOCK] + b[base :+ BLOCK]
+}
+```
+
+The kernel is read twice. The cluster compiler reads `BLOCK` as the
+`@cluster` value: `ctx.block.x` counts super-tiles of at least 1048576
+elements, and each one is a unit of work for one node. On the node, the same
+source runs as an ordinary kernel, the leaf, with `@cluster` removed. There
+the tensors are the super-tile, `BLOCK` is the `@autotune` value, and
+`ctx.block.x` counts the CTAs inside the super-tile.
+
+## The same names at two levels
+
+The spec's Flash Attention example declares its row block at both levels:
+
+```phobos fragment
+@cluster(BR in [1024, 4096], BC in [1024, 4096])
+@autotune(D in [64], BR in [32, 128], BC in [32, 128])
+kernel flash_attention(Q: tensor<f32>[Nq, D], K: tensor<f32>[Nk, D], V: tensor<f32>[Nk, D], O: tensor<f32>[Nq, D], scale: f32) {
+```
+
+`BR` counts query rows. Under `@cluster` it is the block of rows one node
+owns, 1024 to 4096. Under `@autotune` it is the block of rows one CTA owns
+inside that, 32 to 128. The body writes `let row = ctx.block.x * BR` once and
+means both:
+
+| In the source | At the cluster level | In the leaf, on one node |
+| --- | --- | --- |
+| `BR` | Rows of a super-tile, from `@cluster` | Rows of a CTA tile, from `@autotune` |
+| `ctx.block.x` | This super-tile | This CTA in the super-tile |
+| `Q`, `O` | The whole tensors, in storage | One super-tile of rows each |
+| `Nq` | The full query count | The super-tile's row count |
+
+A tensor the kernel only slices whole along an axis, with `:` or inside a
+loop over the full extent, is not split along that axis. In Flash Attention
+every node reads all of `K` and `V`.
+
+Listing `BC` under `@cluster` as well turns the key loop into a cluster loop,
+which the cluster compiler accepts only for the accumulator shape below. Its
+tests, and its tuner's, take the form with `BR` alone:
+
+```phobos fragment
+@cluster(BR in [1024, 4096])
+@autotune(D in [64], BR in [32, 128], BC in [32, 128])
+```
+
+## What the cluster compiler accepts
+
+The cluster compiler turns an `@cluster` kernel into a cluster program: the
+super-tiles each unit of work reads and writes, and the leaf kernels that do
+the work. It accepts two shapes.
+
+Without a cluster loop, the whole kernel is one leaf. A grid axis comes from
+a slice offset `ctx.block.<axis> * S` with extent `S`, where `S` is an
+`@cluster` name. Every point of the super-tile grid is one launch of the
+leaf, on one super-tile.
+
+With a cluster loop, a `for` whose step is an `@cluster` name, the loop runs
+across super-tiles:
+
+```phobos
+@cluster(TILE_M in [4096, 16384], TILE_N in [4096, 16384], TILE_K in [4096, 16384])
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
+@aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+  for kt in range(0, K, TILE_K) {
+    let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+    let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+    acc += dot(a, b)
+  }
+  let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+}
+```
+
+This shape is accepted for an accumulator: a tile summed over the loop and
+stored once, as `C[..] = acc` or `C[..] = alpha * acc + beta * c_old`. The
+compiler splits it into two leaves. The init leaf zeroes the output
+super-tile, or scales it by `beta`, and the step leaf adds one chunk of `K`
+per launch. The accumulator lives in the output's own buffer.
+
+Either way, the compiler rejects:
+
+- a `@cluster` argument that is not a search dimension, or a name that is not
+  also an `@autotune` name;
+- a tensor read at two different super-tile coordinates in one unit of work,
+  which would need an exchange of halos between nodes;
+- a tile parameter;
+- a loop inside the leaf that does not start at 0, or whose bound is not a
+  symbolic dimension.
+
+## What runs today
+
+The cluster runtime is two programs. `phobos-sched`, the scheduler, takes a
+job file: the kernel source, a value for every dimension, the scalars, and a
+`file://` URI per tensor. It binds the `@cluster` dimensions, unrolls the
+cluster program into instructions per node (allocate, load, fetch from a
+peer, compute, store, free), compiles the leaves to PTX and sends each node
+its share. `phobos-pod`, one per node, runs its instructions as their
+dependencies complete, and fetches a tile it does not hold from the node that
+does.
+
+- Placement. Work goes to the node that owns its output super-tile, and the
+  output super-tiles are dealt round robin over the nodes by their row-major
+  index. With more super-tiles than nodes, a node runs several, one launch
+  each.
+- Tuning. Without `--autotune`, each `@cluster` dimension takes its first
+  value. With it, the scheduler plans every combination, drops those whose
+  working set does not fit a node's VRAM or that leave a node without a
+  super-tile, and ranks the rest by a model of the busiest node's compute and
+  transfer time, from figures given on the command line. Nothing is run to
+  measure.
+- The leaf. A leaf launches with the first `@autotune` value of each grid
+  dimension, not a tuned one. Its grid is the super-tile divided by that
+  value along each axis, at most three axes, and its CTA is the thread count
+  from [`@launch`](/docs/attributes/launch/), 256 by default.
+- Data. The pods move tiles as `f32`, and `file://`, the only storage, holds
+  tensors of rank 1 or 2.
+- Failure. When a node misses its heartbeat, the scheduler re-plans the
+  outputs it had not stored onto the nodes that are left, from inputs loaded
+  again from storage.
+
+A leaf does not know where it is in the cluster. Its tensors are the
+super-tile, `ctx.block` counts CTAs inside it, and no `ctx` field names the
+super-tile or the node. A body that needs an absolute position, such as a
+causal mask over absolute rows, cannot form one inside a leaf today.
+
+## On one GPU
+
+The single-GPU compiler checks that `@cluster` is a known attribute and reads
+nothing else from it. The kernel compiles with its `@autotune` values, as if
+the line were not there, so an `@cluster` kernel is also an ordinary kernel.
+The visualizer hides the line from its code panel.
+
+## Cost and interactions
+
+- [`@autotune`](/docs/attributes/autotune/): every `@cluster` name needs an
+  `@autotune` entry, and the scheduler requires each super-tile extent along
+  a grid axis to be a whole multiple of the leaf's first `@autotune` value.
+  A dimension of the problem must likewise be a whole multiple of its
+  super-tile.
+- [`@aligned`](/docs/attributes/aligned/): in the leaf, the promise is about
+  the `@autotune` tile, and along a grid axis the super-tiles are cut to keep
+  it.
+- [`@launch`](/docs/attributes/launch/) sets the leaf's CTA size.
+- A tensor that is not split is read whole by every node that uses it, so its
+  size counts against every node's memory and, where it is fetched, against
+  the links between them.
