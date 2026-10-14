@@ -88,6 +88,7 @@ fn declare(flag: &str, span: Span) -> Stmt {
         name: flag.into(),
         name_span: crate::diag::Span::default(),
         ty: None,
+        ty_span: crate::diag::Span::default(),
         value: Some(Expr::bool(false)),
         span,
     }

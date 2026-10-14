@@ -350,6 +350,8 @@ pub enum Stmt {
         name: String,
         name_span: crate::diag::Span,
         ty: Option<Type>,
+        /// Where `ty` is written; empty when it is not.
+        ty_span: crate::diag::Span,
         value: Expr,
         span: Span,
     },
@@ -357,6 +359,8 @@ pub enum Stmt {
         name: String,
         name_span: crate::diag::Span,
         ty: Option<Type>,
+        /// Where `ty` is written; empty when it is not.
+        ty_span: crate::diag::Span,
         value: Option<Expr>,
         span: Span,
     },

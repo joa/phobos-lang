@@ -7,6 +7,12 @@ use super::paint::{Class, Paint, Role};
 use super::{Colors, Diagnostic, Diagnostics, Edit, Severity, SourceFile, Span};
 
 const TAB_WIDTH: usize = 4;
+/// The display columns of a source line shown whole; a longer one is cut
+/// to a window around its labels.
+const MAX_LINE_WIDTH: usize = 120;
+/// Columns kept left of a cut line's first label.
+const CUT_CONTEXT: usize = 20;
+const ELLIPSIS: &str = "...";
 
 /// Every diagnostic of `ds`, then rustc's closing count.
 pub(super) fn render_all(ds: &Diagnostics, colors: Colors) -> String {
@@ -79,6 +85,26 @@ struct Mark<'a> {
 impl Mark<'_> {
     fn multi(&self) -> bool {
         self.line1 > self.line0
+    }
+}
+
+/// The display columns of a line that are drawn: `start..end`, each cut
+/// end marked by an ellipsis.
+#[derive(Clone, Copy)]
+struct Window {
+    start: usize,
+    end: usize,
+    width: usize,
+}
+
+impl Window {
+    fn lead(self) -> usize {
+        if self.start > 0 { ELLIPSIS.len() } else { 0 }
+    }
+
+    /// Where display column `col` of the line is drawn.
+    fn at(self, col: usize) -> usize {
+        col.saturating_sub(self.start) + self.lead()
     }
 }
 
@@ -236,9 +262,10 @@ impl Renderer<'_> {
                     row.put(2 * m.depth, '|', m.role);
                 }
             }
-            self.source_row(&mut row, margin, line);
+            let window = self.window(marks, line);
+            self.source_row(&mut row, margin, line, window);
             self.gutter(width, &line.to_string(), '|', row);
-            for r in self.annotations(marks, line, margin) {
+            for r in self.annotations(marks, line, margin, window) {
                 self.gutter(width, "", '|', r);
             }
         }
@@ -251,17 +278,50 @@ impl Renderer<'_> {
         m.col0 <= display_width(&text[..text.len() - text.trim_start().len()])
     }
 
-    /// Line `line`'s text into `row` after the margin, highlighted.
-    fn source_row(&self, row: &mut Row, margin: usize, line: u32) {
+    /// What of line `line` is drawn: all of it, or for a long line the
+    /// stretch its labels sit on.
+    fn window(&self, marks: &[Mark], line: u32) -> Window {
+        let width = display_width(self.file.line_text(line));
+        if width <= MAX_LINE_WIDTH {
+            return Window { start: 0, end: width, width };
+        }
+        let cols = marks.iter().flat_map(|m| {
+            let starts = (m.line0 == line).then_some(m.col0);
+            let ends = (m.line1 == line).then_some(m.col1);
+            starts.into_iter().chain(ends)
+        });
+        let (lo, hi) = cols.fold((usize::MAX, 0), |(lo, hi), c| (lo.min(c), hi.max(c)));
+        let start = if lo == usize::MAX || lo <= CUT_CONTEXT + ELLIPSIS.len() { 0 } else { lo - CUT_CONTEXT };
+        let end = (start + MAX_LINE_WIDTH).max(hi + CUT_CONTEXT).min(width);
+        Window { start, end, width }
+    }
+
+    /// Line `line`'s text into `row` after the margin, highlighted, cut to
+    /// `window`.
+    fn source_row(&self, row: &mut Row, margin: usize, line: u32, window: Window) {
         let start = self.file.line_start(line);
         let text = self.file.line_text(line);
-        put_source(row, margin, text, start, self.classes);
+        let mut whole = Row::default();
+        put_source(&mut whole, 0, text, start, self.classes);
+        let mut at = margin;
+        if window.start > 0 {
+            row.put_str(at, ELLIPSIS, Role::Chrome);
+            at += ELLIPSIS.len();
+        }
+        for &(c, role) in whole.0.get(window.start..window.end).unwrap_or_default() {
+            row.put(at, c, role);
+            at += 1;
+        }
+        if window.end < window.width {
+            row.put_str(at, ELLIPSIS, Role::Chrome);
+        }
     }
 
     /// The rows under line `line`: where a spanning label starts, the
     /// underlines and texts of the labels on it, and where a spanning label
     /// ends.
-    fn annotations(&self, marks: &[Mark], line: u32, margin: usize) -> Vec<Row> {
+    fn annotations(&self, marks: &[Mark], line: u32, margin: usize, window: Window) -> Vec<Row> {
+        let col = |c: usize| margin + window.at(c);
         let below = |m: &Mark| {
             m.multi() && line < m.line1 && (m.line0 < line || (m.line0 == line && self.starts_line(m)))
         };
@@ -274,21 +334,24 @@ impl Renderer<'_> {
         for m in marks.iter().filter(|m| m.multi() && m.line0 == line && !self.starts_line(m)) {
             let mut row = Row::default();
             rails(&mut row);
-            for at in 2 * m.depth + 1..margin + m.col0 {
+            for at in 2 * m.depth + 1..col(m.col0) {
                 row.put(at, '_', m.role);
             }
-            row.put(margin + m.col0, if m.primary { '^' } else { '-' }, m.role);
+            row.put(col(m.col0), if m.primary { '^' } else { '-' }, m.role);
             rows.push(row);
         }
         let mut singles: Vec<&Mark> = marks.iter().filter(|m| !m.multi() && m.line0 == line).collect();
         if !singles.is_empty() {
-            // Secondaries first, so a primary's `^` wins where they overlap.
-            singles.sort_by_key(|m| (m.primary, m.col0));
+            // Wider spans first, so one nested in another still shows; of
+            // two the same, the primary's `^` wins.
+            singles.sort_by_key(|m| (std::cmp::Reverse(m.col1 - m.col0), m.primary, m.col0));
             let mut underline = Row::default();
             rails(&mut underline);
+            // A line not cut on the right keeps a label just past its end.
+            let limit = if window.end < window.width { window.end } else { usize::MAX };
             for m in &singles {
-                for col in m.col0..m.col1 {
-                    underline.put(margin + col, if m.primary { '^' } else { '-' }, m.role);
+                for c in m.col0.max(window.start)..m.col1.min(limit) {
+                    underline.put(col(c), if m.primary { '^' } else { '-' }, m.role);
                 }
             }
             singles.sort_by_key(|m| (m.col0, m.col1));
@@ -296,7 +359,7 @@ impl Renderer<'_> {
             let reach = singles.iter().map(|m| m.col1).max().unwrap_or(0);
             let inline = (!last.text.is_empty() && last.col1 == reach).then_some(last);
             if let Some(m) = inline {
-                underline.put_str(margin + m.col1 + 1, m.text, m.role);
+                underline.put_str(col(m.col1) + 1, m.text, m.role);
             }
             rows.push(underline);
             let mut pending: Vec<&Mark> = singles
@@ -309,7 +372,7 @@ impl Renderer<'_> {
                 let mut connector = Row::default();
                 rails(&mut connector);
                 for m in &pending {
-                    connector.put(margin + m.col0, '|', m.role);
+                    connector.put(col(m.col0), '|', m.role);
                 }
                 rows.push(connector);
                 while !pending.is_empty() {
@@ -317,9 +380,9 @@ impl Renderer<'_> {
                     let mut row = Row::default();
                     rails(&mut row);
                     for left in &pending {
-                        row.put(margin + left.col0, '|', left.role);
+                        row.put(col(left.col0), '|', left.role);
                     }
-                    row.put_str(margin + m.col0, m.text, m.role);
+                    row.put_str(col(m.col0), m.text, m.role);
                     rows.push(row);
                 }
             }
@@ -328,7 +391,7 @@ impl Renderer<'_> {
             let mut row = Row::default();
             rails(&mut row);
             row.put(2 * m.depth, '|', m.role);
-            let caret = margin + m.col1.max(1) - 1;
+            let caret = col(m.col1.max(1) - 1);
             for at in 2 * m.depth + 1..caret {
                 row.put(at, '_', m.role);
             }

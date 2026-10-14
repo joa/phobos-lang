@@ -1,0 +1,30 @@
+error: cannot assign to `x`, which is declared with `let`
+ --> tests/ui/declared_here.ph:6:5
+  |
+5 |     let x = A[ctx.thread]
+  |     --------------------- declared with `let` here
+6 |     x = 2.0
+  |     ^^^^^^^ cannot assign
+help: declare `x` with `var` to assign to it
+  |
+5 |     var x = A[ctx.thread]
+  |     ~~~
+
+error: type mismatch: cannot store f32 where index is expected
+ --> tests/ui/declared_here.ph:8:5
+  |
+7 |     var m = 0
+  |             - `m` takes its type from this
+8 |     m = x
+  |     ^^^^^
+
+error: type mismatch: cannot store f32 where i32 is expected
+ --> tests/ui/declared_here.ph:9:5
+  |
+4 | kernel k(A: tensor<f32>[N], B: tensor<i32>[N]) {
+  |                                -------------- `B` is declared with this type
+...
+9 |     B[ctx.thread] = x
+  |     ^^^^^^^^^^^^^^^^^
+
+error: aborting due to 3 previous errors

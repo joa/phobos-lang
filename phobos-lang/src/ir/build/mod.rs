@@ -6,6 +6,7 @@ mod frag;
 mod hoist;
 mod lane_sum;
 mod lanes;
+mod decl;
 mod matmul;
 mod names;
 mod pipeline;
@@ -31,6 +32,7 @@ use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Span, Stmt,
 use crate::diag::{Diagnostic, Diagnostics, SourceFile};
 
 pub(crate) use super::at_op::locate;
+pub(crate) use decl::Decl;
 pub(crate) use crate::shape::DYN;
 
 /// What the build asks the chip. The `@tensorcore` attributes are folded
@@ -75,6 +77,17 @@ pub(crate) enum Binding {
     Frags(ValueId),
     /// A tile held in registers; see `regs.rs`.
     Regs(ValueId),
+}
+
+impl Binding {
+    /// The value the name stands for: the slot of a `var`.
+    fn value(&self) -> ValueId {
+        match *self {
+            Binding::Let { value, .. } => value,
+            Binding::Var { slot, .. } => slot,
+            Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) => v,
+        }
+    }
 }
 
 /// The result of an expression.
@@ -123,6 +136,12 @@ pub(crate) struct Build {
     errors: Vec<Diagnostic>,
     /// Names whose declaration failed; see [`Poisoned`].
     poisoned: HashSet<String>,
+    /// Where each binding was declared, for an error about a use of it:
+    /// by name and value, since shadowing rebinds a name and `let b = a`
+    /// binds a value twice.
+    decls: HashMap<(String, ValueId), Decl>,
+    /// The declaration the next [`Build::bind`] of its name records.
+    pub(crate) declaring: Option<(String, Decl)>,
 }
 
 /// A name used whose declaration already failed. It is reported once, at
@@ -221,6 +240,8 @@ pub fn build(
         source: kernel.source.clone(),
         errors: Vec::new(),
         poisoned: HashSet::new(),
+        decls: HashMap::new(),
+        declaring: None,
     };
     let params = kernel
         .params
@@ -242,6 +263,10 @@ pub fn build(
         return Err(Diagnostics::new(b.source.clone(), std::mem::take(&mut b.errors)).into());
     }
     super::uniform::check(&b.ir, &super::uniform::analyze(&b.ir))
+        .map_err(|e| match e.downcast::<super::AtOp>() {
+            Ok(at) => at.place_line(&kernel.source, &b.report.spans).into(),
+            Err(e) => e,
+        })
         .map_err(|e| locate(&kernel.source, &b.ir, e, kernel.name_span))?;
     for (fused, dot) in epilogue::fuse_dot_epilogues(&mut b.ir) {
         if let Some(&span) = b.report.spans.get(&dot) {
@@ -289,6 +314,12 @@ impl Build {
                 AstType::Tensor(..) => Binding::Tensor(arg),
                 AstType::Tile(..) => bail!("a kernel parameter cannot be a tile; declare it as a `tensor`"),
             };
+            let decl = Decl {
+                at: param.span,
+                ty: Decl::held(Some(&param.ty), param.ty_span),
+                value: Span::default(),
+            };
+            self.declaring = Some((param.name.clone(), decl));
             self.bind(&param.name, binding);
 
             if let AstType::Tensor(_, dims) = &param.ty {
@@ -456,6 +487,7 @@ impl Build {
         self.trimmed_ivs.truncate(saved.trimmed_ivs);
         self.pending_ivs.truncate(saved.pending_ivs);
         self.fusing_regs = saved.fusing_regs;
+        self.declaring = None;
     }
 
     /// Keeps a placed error for the end of the build, up to
@@ -532,6 +564,9 @@ impl Build {
     /// Binds a name. A named tile is never an owned temp, which the graph
     /// records as the value's name (see `Ir::name`).
     pub(crate) fn bind(&mut self, name: &str, binding: Binding) {
+        if let Some((_, decl)) = self.declaring.take_if(|(n, _)| n == name) {
+            self.decls.insert((name.to_string(), binding.value()), decl);
+        }
         match &binding {
             Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) | Binding::Tensor(v) => {
                 if self.ir.name(*v).is_none() {

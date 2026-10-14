@@ -144,6 +144,26 @@ fn tabs_expand_and_the_underline_follows() {
 }
 
 #[test]
+fn a_label_inside_another_keeps_its_underline() {
+    let src = "var u = A[0, ctx.lane :+ 1]\n";
+    let d = Diagnostic::error("nested")
+        .primary(at(src, "A[0, ctx.lane :+ 1]"), "outer")
+        .secondary(at(src, "ctx.lane"), "inner");
+    let out = render(src, d);
+    assert!(out.contains("1 | var u = A[0, ctx.lane :+ 1]\n  |         ^^^^^--------^^^^^^\n"), "{out}");
+}
+
+#[test]
+fn a_long_line_is_cut_around_its_labels() {
+    let src = format!("let x = {} + y + {}\n", "a + ".repeat(40), "b + ".repeat(40));
+    let out = render(&src, Diagnostic::error("long").primary(at(&src, "y"), "here"));
+    let rows: Vec<&str> = out.lines().skip(3).take(2).collect();
+    let shown = &src[src.find('y').unwrap() - 20..src.find('y').unwrap() + 100];
+    assert_eq!(rows[0], format!("1 | ...{shown}..."), "{out}");
+    assert_eq!(rows[1], format!("  | {}^ here", " ".repeat(23)), "{out}");
+}
+
+#[test]
 fn colors_paint_the_source_and_the_labels() {
     let d = Diagnostic::error("colored")
         .primary(at(GEMM, "dot"), "here")

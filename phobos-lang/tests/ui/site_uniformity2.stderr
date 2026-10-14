@@ -2,7 +2,7 @@ error: a CTA-wide op takes a value that differs between lanes
  --> tests/ui/site_uniformity2.ph:4:11
   |
 4 |   var u = A[0, ctx.lane :+ 1]
-  |           ^^^^^^^^^^^^^^^^^^^
+  |           ^^^^^--------^^^^^^
   |           |    |
   |           |    this differs between lanes
   |           needs the same value in every thread
