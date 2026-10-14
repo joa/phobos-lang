@@ -34,14 +34,18 @@ const ALIGNED: &str = "@aligned(M = 128, N = 64, K = 32)";
 #[test]
 fn scaled_int8_accumulator_rides_in_registers() {
     // 128x64 over four warps: each warp owns a 32x64 patch of 8x8 tiles,
-    // 32 tiles of two elements a lane, carried by the k loop.
+    // 32 tiles of two elements a lane, carried by the k loop. Blackwell
+    // takes two row tiles over both k steps in one m16n8k32.
     let src = projection(128, 64, 128, ALIGNED, "ws * da");
-    for mlir in [emit_mlir(&src), emit_mlir_sync(&src, "sm_120")] {
+    for (mlir, shape, mmas) in [
+        (emit_mlir(&src), "mmaShape = [8, 8, 16]", 64),
+        (emit_mlir_sync(&src, "sm_120"), "mmaShape = [16, 8, 32]", 16),
+    ] {
         assert!(
             !mlir.contains("memref.global"),
             "int8 accumulator materialized in shared memory:\n{mlir}"
         );
-        assert_eq!(mlir.matches("mmaShape = [8, 8, 16]").count(), 64, "{mlir}");
+        assert_eq!(mlir.matches(shape).count(), mmas, "{mlir}");
         assert_eq!(mlir.matches("math.fma").count(), 64, "{mlir}");
         let carried = format!("-> ({})", vec!["f32"; 64].join(", "));
         assert!(mlir.contains(&carried), "k loop does not carry 64 f32:\n{mlir}");
