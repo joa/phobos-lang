@@ -128,6 +128,8 @@ pub struct Kernel {
     pub name_span: crate::diag::Span,
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
+    /// The source the spans point into.
+    pub source: std::sync::Arc<crate::diag::SourceFile>,
 }
 
 pub const DEFAULT_CTA_THREADS: i64 = 256;
@@ -216,20 +218,39 @@ impl Kernel {
     /// Fails on an attribute the compiler does not read, which would
     /// otherwise be silently ignored. `@cluster` is read by the cluster
     /// codegen ahead of this one.
-    pub fn check_attributes(&self) -> Result<(), String> {
-        match self
+    pub fn check_attributes(&self) -> Result<(), crate::diag::Diagnostics> {
+        use crate::diag::{Diagnostic, Diagnostics};
+        let list: Vec<Diagnostic> = self
             .attrs
             .iter()
-            .find(|a| !ATTRIBUTES.contains(&a.name.as_str()))
-        {
-            Some(a) => Err(format!(
-                "kernel '{}': unknown attribute @{}; the compiler reads @{}",
-                self.name,
-                a.name,
-                ATTRIBUTES.join(", @")
-            )),
-            None => Ok(()),
+            .filter(|a| !ATTRIBUTES.contains(&a.name.as_str()))
+            .map(|a| {
+                let d = Diagnostic::error(format!(
+                    "kernel '{}': unknown attribute @{}; the compiler reads @{}",
+                    self.name,
+                    a.name,
+                    ATTRIBUTES.join(", @")
+                ))
+                .primary(a.span, "");
+                match crate::diag::similar(&a.name, ATTRIBUTES.iter().copied()) {
+                    Some(near) => {
+                        let at = crate::diag::Span::new(a.span.lo + 1, a.span.lo + 1 + a.name.len() as u32);
+                        d.suggest(format!("a similar attribute exists: `@{near}`"), at, near)
+                    }
+                    None => d,
+                }
+            })
+            .collect();
+        if list.is_empty() {
+            Ok(())
+        } else {
+            Err(Diagnostics::new(self.source.clone(), list))
         }
+    }
+
+    /// The attribute `@name`, if written.
+    pub fn attr(&self, name: &str) -> Option<&Attribute> {
+        self.attrs.iter().find(|a| a.name == name)
     }
 
     pub fn cta_threads(&self) -> Result<i64, String> {
@@ -323,16 +344,9 @@ pub enum AssignOp {
     Add,
 }
 
-/// Where a statement sits in the source: lines and columns from 1, as the
-/// lexer counts them, the end exclusive. A compound statement's span is its
+/// Where a statement sits in the source. A compound statement's span is its
 /// header, up to its `{`.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct Span {
-    pub line: u32,
-    pub col: u32,
-    pub end_line: u32,
-    pub end_col: u32,
-}
+pub use crate::diag::Span;
 
 #[derive(Debug, Clone)]
 pub enum Stmt {

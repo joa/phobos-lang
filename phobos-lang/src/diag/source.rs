@@ -2,11 +2,17 @@ use std::sync::Arc;
 
 /// A kernel source and where its lines start, so a byte offset turns into a
 /// line and a column only when something is shown.
-#[derive(Debug)]
 pub struct SourceFile {
     name: String,
     text: String,
     line_starts: Vec<u32>,
+}
+
+/// The name and size, not the text, which a kernel's `Debug` would repeat.
+impl std::fmt::Debug for SourceFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SourceFile({:?}, {} bytes)", self.name, self.text.len())
+    }
 }
 
 impl SourceFile {

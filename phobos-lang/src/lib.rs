@@ -20,7 +20,7 @@ pub fn parse(src: &str) -> anyhow::Result<Vec<ast::Kernel>> {
 pub fn parse_source(file: &std::sync::Arc<diag::SourceFile>) -> anyhow::Result<Vec<ast::Kernel>> {
     let fail = |list| anyhow::Error::new(diag::Diagnostics::new(file.clone(), list));
     let toks = lexer::Lexer::new(file.text()).tokenize().map_err(fail)?;
-    parser::Parser::new(toks).parse_program().map_err(fail)
+    parser::Parser::new(toks, file.clone()).parse_program().map_err(fail)
 }
 
 /// Compiles the given code.
@@ -50,19 +50,21 @@ pub fn compile_shared(
 
 /// Fails on the first kernel whose `@pipeline` assertion went unsatisfied,
 /// as [`codegen::EmitOutput`] reports them.
-pub fn assert_pipelined(failures: &[(String, Vec<String>)]) -> anyhow::Result<()> {
-    let Some((name, reasons)) = failures.first() else {
+pub fn assert_pipelined(failures: &[codegen::PipelineFailure]) -> anyhow::Result<()> {
+    let Some(failure) = failures.first() else {
         return Ok(());
     };
-    let why = if reasons.is_empty() {
+    let why = if failure.reasons.is_empty() {
         "no loop in the kernel is shaped for pipelining".to_string()
     } else {
-        reasons.join("; ")
+        failure.reasons.join("; ")
     };
-    anyhow::bail!(
-        "kernel `{name}`: @pipeline asserts this kernel can be pipelined, but nothing in it \
-         did: {why}"
-    )
+    let message = format!(
+        "kernel `{}`: @pipeline asserts this kernel can be pipelined, but nothing in it did: {why}",
+        failure.kernel
+    );
+    let d = diag::Diagnostic::error(message).primary(failure.span, "");
+    Err(diag::Diagnostics::new(failure.source.clone(), vec![d]).into())
 }
 
 /// With `PHOBOS_DUMP_DIR` set, writes every compiled source there as a `.ph`
@@ -96,6 +98,15 @@ pub fn compile_raw(
     context: &phobos_base::context::Context,
     code: &str,
 ) -> anyhow::Result<CompileOutput> {
+    compile_source(context, &diag::SourceFile::new("", code))
+}
+
+/// [`compile_raw`] of `file`, so an error names it.
+pub fn compile_source(
+    context: &phobos_base::context::Context,
+    file: &std::sync::Arc<diag::SourceFile>,
+) -> anyhow::Result<CompileOutput> {
+    let code = file.text();
     dump_source(code);
     if context.print_phases {
         println!("=== SOURCE ========================");
@@ -103,7 +114,7 @@ pub fn compile_raw(
         println!("===================================");
     }
 
-    let kernels = parse(code)?;
+    let kernels = parse_source(file)?;
 
     let mut wide;
     let context = if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {
@@ -149,7 +160,7 @@ pub fn compile_raw(
 pub struct CompileOutput {
     pub code: String,
     pub shared: Vec<(String, usize)>,
-    pub pipeline_failures: Vec<(String, Vec<String>)>,
+    pub pipeline_failures: Vec<codegen::PipelineFailure>,
 }
 
 /// Whether a module of `kernels` has to be indexed at 64 bits on the

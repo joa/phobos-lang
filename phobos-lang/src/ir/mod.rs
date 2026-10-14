@@ -71,6 +71,8 @@ pub enum Def {
 #[derive(Debug)]
 struct OpData {
     kind: OpKind,
+    /// The source the op stands for; empty for one with none.
+    span: crate::diag::Span,
     operands: Vec<ValueId>,
     results: Vec<ValueId>,
     blocks: Vec<BlockId>,
@@ -95,6 +97,30 @@ struct BlockData {
     /// None only for the entry block, and for a block created but not yet
     /// handed to an op.
     parent: Option<OpId>,
+}
+
+/// An error about one op, which the build places at the op's span.
+#[derive(Debug)]
+pub struct AtOp {
+    pub op: OpId,
+    pub message: String,
+}
+
+impl std::fmt::Display for AtOp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for AtOp {}
+
+/// [`AtOp`] as an error.
+pub fn at_op(op: OpId, message: impl Into<String>) -> anyhow::Error {
+    AtOp {
+        op,
+        message: message.into(),
+    }
+    .into()
 }
 
 /// What a kernel is, apart from its body: everything the attributes said.
@@ -129,6 +155,8 @@ pub struct Ir {
     blocks: Vec<Option<BlockData>>,
     entry: BlockId,
     pub kernel: KernelInfo,
+    /// The span an op takes when it is created.
+    span: crate::diag::Span,
 }
 
 impl Ir {
@@ -141,6 +169,7 @@ impl Ir {
             blocks: Vec::new(),
             entry: BlockId(0),
             kernel,
+            span: crate::diag::Span::default(),
         };
         ir.entry = ir.new_block(params);
         ir
@@ -211,6 +240,17 @@ impl Ir {
     /// The kind is the op's attribute store, so a pass that records a
     /// decision (an offset, a plan) writes it here. Operands, results and
     /// blocks are not reachable this way.
+    /// The source `op` stands for, empty when it has none.
+    pub fn span(&self, op: OpId) -> crate::diag::Span {
+        self.op_data(op).span
+    }
+
+    /// Sets the span ops created from now on take, returning the one it
+    /// replaces.
+    pub fn set_span(&mut self, span: crate::diag::Span) -> crate::diag::Span {
+        std::mem::replace(&mut self.span, span)
+    }
+
     pub fn kind_mut(&mut self, op: OpId) -> &mut OpKind {
         &mut self.op_data_mut(op).kind
     }
@@ -385,6 +425,7 @@ impl Ir {
             .collect();
         self.ops.push(Some(OpData {
             kind,
+            span: self.span,
             operands: operands.to_vec(),
             results,
             blocks: blocks.clone(),

@@ -9,12 +9,10 @@ use phobos_lang::diag::{self, Colors, SourceFile};
 
 fn printed(name: &str, src: &str) -> Result<String, String> {
     let file = SourceFile::new(name, src);
-    let err = match phobos_lang::parse_source(&file) {
-        Err(e) => e,
-        Ok(_) => match phobos_lang::compile(&Context::default(), src) {
-            Err(e) => e,
-            Ok(_) => return Err(format!("{name}: compiles, but a UI test must fail")),
-        },
+    let compiled = phobos_lang::compile_source(&Context::default(), &file)
+        .and_then(|out| phobos_lang::assert_pipelined(&out.pipeline_failures));
+    let Err(err) = compiled else {
+        return Err(format!("{name}: compiles, but a UI test must fail"));
     };
     Ok(diag::render_error(&err, Colors::Off))
 }

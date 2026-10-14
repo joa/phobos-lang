@@ -1,0 +1,7 @@
+error: kernel 'copy': unknown attribute @unroll; the compiler reads @aligned, @autotune, @cluster, @dynshared, @launch, @padstage, @persistent, @pipeline, @registers, @swizzle, @tensorcore
+ --> tests/ui/site_attributes.ph:2:1
+  |
+2 | @unroll
+  | ^^^^^^^
+
+error: aborting due to 1 previous error

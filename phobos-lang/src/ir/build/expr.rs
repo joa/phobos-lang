@@ -6,6 +6,10 @@ use crate::ir::{Map, OpKind, Scalar, Type, ValueId};
 
 impl Build {
     pub(crate) fn emit_expr(&mut self, expr: &Expr) -> Result<Rv> {
+        self.at_span(expr.span, |b| b.emit_expr_kind(expr))
+    }
+
+    fn emit_expr_kind(&mut self, expr: &Expr) -> Result<Rv> {
         match &expr.kind {
             ExprKind::Int(n) => Ok(Rv::Scalar(self.const_index(*n))),
             ExprKind::Float(v) => Ok(Rv::Scalar(self.const_f32(*v))),
@@ -25,7 +29,7 @@ impl Build {
                 Some(Binding::Regs(r)) => Ok(Rv::Tile(self.materialize_regs(r)?)),
                 None => match self.shape_env.get(name) {
                     Some(&v) => Ok(Rv::Scalar(self.const_index(v))),
-                    None => bail!("unknown identifier '{name}'"),
+                    None => Err(self.unknown(name)),
                 },
             },
             ExprKind::Unary { op, rhs } => {
@@ -275,7 +279,7 @@ impl Build {
                 Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) => Ok((*v, binding.clone())),
                 _ => bail!("'{name}' is not a tensor or tile"),
             },
-            None => bail!("unknown identifier '{name}'"),
+            None => Err(self.unknown(name)),
         }
     }
 

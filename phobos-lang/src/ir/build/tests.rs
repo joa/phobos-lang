@@ -22,7 +22,11 @@ fn build_err(src: &str) -> String {
     let base = phobos_base::context::Context::default();
     match build(&base, target(), &kernels[0]) {
         Ok((ir, _)) => panic!("expected the build to fail:\n{ir}"),
-        Err(e) => format!("{e:#}"),
+        // The message alone: where it points is the UI tests' to check.
+        Err(e) => match e.downcast_ref::<crate::diag::Diagnostics>() {
+            Some(ds) => ds.list().iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("\n"),
+            None => format!("{e:#}"),
+        },
     }
 }
 
@@ -259,11 +263,32 @@ fn ops_carry_their_statement_spans() {
             .into_iter()
             .find(|&op| pick(ir.kind(op)))
             .expect("op present");
-        report.spans.get(&op).map(|s| s.line)
+        report.spans.get(&op).map(|s| kernels[0].source.line_of(s.lo))
     };
     assert_eq!(line_of(&|k| matches!(k, OpKind::ProgramId(0))), Some(3));
     assert_eq!(line_of(&|k| matches!(k, OpKind::For(_))), Some(4));
     assert_eq!(line_of(&|k| matches!(k, OpKind::Slice(_))), Some(5));
     // The parameter bindings come from no statement.
     assert_eq!(line_of(&|k| matches!(k, OpKind::AssumeAlign)), None);
+}
+
+/// Each op stands for the innermost source it was built from: a slice for
+/// its subscript, an arithmetic op for its operator's expression.
+#[test]
+fn ops_carry_the_expression_they_stand_for() {
+    let src = "kernel k(A: tensor<f32>[N], B: tensor<f32>[N]) {\n  let p = ctx.block.x * 64 + 1\n  B[p :+ 64] = A[p :+ 64] * 2.0\n}\n";
+    let kernels = crate::parse(src).unwrap();
+    let base = phobos_base::context::Context::default();
+    let (ir, _) = build(&base, target(), &kernels[0]).unwrap();
+    let text = |op| {
+        let s = ir.span(op);
+        &src[s.lo as usize..s.hi as usize]
+    };
+    let ops = ir.all_ops();
+    let find = |pick: &dyn Fn(&OpKind) -> bool| *ops.iter().find(|&&op| pick(ir.kind(op))).expect("op present");
+    assert_eq!(text(find(&|k| matches!(k, OpKind::ProgramId(0)))), "ctx.block.x");
+    assert_eq!(text(find(&|k| matches!(k, OpKind::Binary(BinOp::Mul)))), "ctx.block.x * 64");
+    assert_eq!(text(find(&|k| matches!(k, OpKind::Binary(BinOp::Add)))), "ctx.block.x * 64 + 1");
+    let slices: Vec<&str> = ops.iter().filter(|&&op| matches!(ir.kind(op), OpKind::Slice(_))).map(|&op| text(op)).collect();
+    assert!(slices.contains(&"A[p :+ 64]") && slices.contains(&"B[p :+ 64]"), "{slices:?}");
 }

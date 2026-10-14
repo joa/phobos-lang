@@ -250,11 +250,15 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
             model::Op {
                 id: op.index(),
                 kind: kind_name(ir.kind(op)),
-                span: p.report.spans.get(&op).map(|s| model::Span {
-                    line: s.line,
-                    col: s.col,
-                    end_line: s.end_line,
-                    end_col: s.end_col,
+                span: p.report.spans.get(&op).map(|s| {
+                    let source = &p.kernel.source;
+                    let ((line, col), (end_line, end_col)) = (source.line_col(s.lo), source.line_col(s.hi));
+                    model::Span {
+                        line,
+                        col,
+                        end_line,
+                        end_col,
+                    }
                 }),
                 ir: ir.print_op(op),
                 uniformity: Some(match kind {

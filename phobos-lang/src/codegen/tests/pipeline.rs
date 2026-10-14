@@ -340,7 +340,7 @@ fn a_dynshared_kernel_pipelines_past_the_static_ceiling() {
     let fails = |attrs: &str| crate::compile_raw(&ctx, &src(attrs)).unwrap().pipeline_failures;
     let static_fails = fails("");
     assert!(
-        static_fails.iter().any(|(_, why)| why.iter().any(|w| w.contains("49152-byte ceiling"))),
+        static_fails.iter().any(|f| f.reasons.iter().any(|w| w.contains("49152-byte ceiling"))),
         "{static_fails:?}"
     );
     assert!(fails("@dynshared").is_empty());

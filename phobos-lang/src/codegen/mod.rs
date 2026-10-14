@@ -57,7 +57,18 @@ const WMMA_SMEM_PAD: i64 = 8;
 #[derive(Debug)]
 pub struct EmitOutput {
     pub shared: Vec<(String, usize)>,
-    pub pipeline_failures: Vec<(String, Vec<String>)>,
+    pub pipeline_failures: Vec<PipelineFailure>,
+}
+
+/// A kernel whose `@pipeline` assertion did not hold, and why: the loop
+/// shapes the pipeline declined, empty when no loop was shaped for it.
+#[derive(Debug, Clone)]
+pub struct PipelineFailure {
+    pub kernel: String,
+    pub reasons: Vec<String>,
+    /// The `@pipeline` attribute.
+    pub source: std::sync::Arc<crate::diag::SourceFile>,
+    pub span: crate::diag::Span,
 }
 
 /// What one kernel's planning decided, shown to an observer of [`emit_observed`]
@@ -93,42 +104,25 @@ pub(crate) fn emit_observed<'c>(
     let gpu_block = Block::new(&[]);
     let mut shared = Vec::new();
     let mut pipeline_failures = Vec::new();
+    let mut failed: Option<crate::diag::Diagnostics> = None;
 
     for kernel in kernels {
-        kernel.check_attributes().map_err(anyhow::Error::msg)?;
-        let mut cg = Codegen::new(base, context, kernel)?;
-        let func = {
-            let target = target::build_target(base);
-            let (ir, report) = crate::ir::build::build(base, target, kernel)?;
-            #[cfg(debug_assertions)]
-            crate::ir::verify::verify(&ir)?;
-
-            // A throwaway first emission records every buffer the emitters
-            // allocate. The plan places them, and the second emission uses
-            // those offsets. See `lower::plan`.
-            let mut recorder = Codegen::new(base, context, kernel)?;
-            recorder.policy = SharedPolicy::Record;
-            recorder.pipeline_declines = report.pipeline_declines.clone();
-            drop(recorder.emit_kernel_ir(&ir)?);
-            let plan = lower::plan::Plan::compute(&ir, &recorder.trace);
-            let elision = lower::membar::Elision::decide(&ir, &recorder.trace, &plan);
-            observe(&Planned {
-                kernel,
-                ir: &ir,
-                report: &report,
-                trace: &recorder.trace,
-                plan: &plan,
-                elision: &elision,
-            });
-
-            cg.elided = elision.skip;
-            cg.barrier_before = elision.before;
-            cg.policy = SharedPolicy::Replay(plan);
-            cg.pipeline_declines = report.pipeline_declines;
-            let func = cg.emit_kernel_ir(&ir)?;
-            anyhow::ensure!(cg.deferred.is_empty(), "internal: a deferred stage never reached its barrier");
-            cg.finish_shared_buffer()?;
-            func
+        // A kernel that fails is reported with the others, and placed at
+        // its name when nothing inside it placed the error.
+        let emitted = emit_kernel(base, kernel, context, &mut *observe).map_err(|e| {
+            let empty = crate::ir::Ir::new(Default::default(), &[]);
+            crate::ir::build::locate(&kernel.source, &empty, e, kernel.name_span)
+        });
+        let (mut cg, func) = match emitted {
+            Ok(done) => done,
+            Err(e) => {
+                let ds = e.downcast::<crate::diag::Diagnostics>()?;
+                match &mut failed {
+                    Some(all) => all.extend(ds),
+                    None => failed = Some(ds),
+                }
+                continue;
+            }
         };
         if cg.dynamic_shared {
             let peak = match &cg.policy {
@@ -138,7 +132,12 @@ pub(crate) fn emit_observed<'c>(
             shared.push((kernel.name.clone(), peak as usize));
         }
         if cg.pipeline_assert && !cg.pipelined_any {
-            pipeline_failures.push((kernel.name.clone(), cg.pipeline_declines));
+            pipeline_failures.push(PipelineFailure {
+                kernel: kernel.name.clone(),
+                reasons: cg.pipeline_declines.clone(),
+                source: kernel.source.clone(),
+                span: kernel.attr("pipeline").map_or(kernel.name_span, |a| a.span),
+            });
         }
 
         // shared-memory tile buffers are module-level globals
@@ -146,6 +145,9 @@ pub(crate) fn emit_observed<'c>(
             gpu_block.append_operation(global);
         }
         gpu_block.append_operation(func);
+    }
+    if let Some(failed) = failed {
+        return Err(failed.into());
     }
 
     let gpu_region = Region::new();
@@ -165,6 +167,49 @@ pub(crate) fn emit_observed<'c>(
         shared,
         pipeline_failures,
     })
+}
+
+/// One kernel, built, planned and emitted: the emitter that holds what it
+/// learned, and the function.
+fn emit_kernel<'c>(
+    base: &phobos_base::context::Context,
+    kernel: &Kernel,
+    context: &'c Context,
+    observe: &mut dyn FnMut(&Planned<'_>),
+) -> Result<(Codegen<'c>, Operation<'c>)> {
+    kernel.check_attributes()?;
+    let mut cg = Codegen::new(base, context, kernel)?;
+    let target = target::build_target(base);
+    let (ir, report) = crate::ir::build::build(base, target, kernel)?;
+    #[cfg(debug_assertions)]
+    crate::ir::verify::verify(&ir)?;
+
+    // A throwaway first emission records every buffer the emitters
+    // allocate. The plan places them, and the second emission uses
+    // those offsets. See `lower::plan`.
+    let mut recorder = Codegen::new(base, context, kernel)?;
+    recorder.policy = SharedPolicy::Record;
+    recorder.pipeline_declines = report.pipeline_declines.clone();
+    drop(recorder.emit_kernel_ir(&ir)?);
+    let plan = lower::plan::Plan::compute(&ir, &recorder.trace);
+    let elision = lower::membar::Elision::decide(&ir, &recorder.trace, &plan);
+    observe(&Planned {
+        kernel,
+        ir: &ir,
+        report: &report,
+        trace: &recorder.trace,
+        plan: &plan,
+        elision: &elision,
+    });
+
+    cg.elided = elision.skip;
+    cg.barrier_before = elision.before;
+    cg.policy = SharedPolicy::Replay(plan);
+    cg.pipeline_declines = report.pipeline_declines;
+    let func = cg.emit_kernel_ir(&ir)?;
+    anyhow::ensure!(cg.deferred.is_empty(), "internal: a deferred stage never reached its barrier");
+    cg.finish_shared_buffer()?;
+    Ok((cg, func))
 }
 
 /// XOR column swizzle for mma.sync staging buffers.
@@ -256,6 +301,8 @@ struct Codegen<'c> {
     isa: Box<dyn target::Isa>,
     ctx: &'c Context,
     loc: Location<'c>,
+    /// The kernel's source, which an op's error is placed in.
+    source: std::sync::Arc<crate::diag::SourceFile>,
     index_t: Type<'c>,
     f16_t: Type<'c>,
     bf16_t: Type<'c>,
@@ -349,13 +396,18 @@ impl<'c> Codegen<'c> {
         ctx: &'c Context,
         kernel: &Kernel,
     ) -> Result<Self> {
-        let launch = kernel.launch().map_err(|e| anyhow!(e))?;
+        let launch = kernel.launch().map_err(|e| {
+            let empty = crate::ir::Ir::new(Default::default(), &[]);
+            let at = kernel.attr("launch").map_or(kernel.name_span, |a| a.span);
+            crate::ir::build::locate(&kernel.source, &empty, anyhow!(e), at)
+        })?;
         let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
 
         Ok(Codegen {
             isa: target::isa_for(base),
             ctx,
             loc: Location::unknown(ctx),
+            source: kernel.source.clone(),
             index_t: Type::index(ctx),
             f16_t: Type::float16(ctx),
             bf16_t: Type::bfloat16(ctx),

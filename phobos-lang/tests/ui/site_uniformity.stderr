@@ -1,0 +1,7 @@
+error: `fused (mul #0 s#1)` runs once per CTA, so every thread must reach it, but the control it sits under differs between lanes
+ --> tests/ui/site_uniformity.ph:6:5
+  |
+6 |     t = t * 2.0
+  |     ^^^^^^^^^^^
+
+error: aborting due to 1 previous error

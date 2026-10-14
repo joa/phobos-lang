@@ -10,7 +10,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 
 use super::{BlockId, Def, Ir, OpId, OpKind, Space, ValueId};
 use crate::ast::lanes::Group;
@@ -284,16 +284,16 @@ pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
         match kind {
             // A `var`'s slot is each thread's own.
             OpKind::Alloc if is_private(ir, ir.result(op)) => continue,
-            OpKind::Shuffle { .. } if control > Kind::Warp => bail!(
+            OpKind::Shuffle { .. } if control > Kind::Warp => return Err(super::at_op(op, format!(
                 "a shuffle needs every lane of the warp, but the control it sits under {}",
                 control.describe()
-            ),
+            ))),
             OpKind::Shuffle { .. } => continue,
-            OpKind::Exchange if control != Kind::Uniform => bail!(
+            OpKind::Exchange if control != Kind::Uniform => return Err(super::at_op(op, format!(
                 "a collective over `ctx.thread` needs every thread of the CTA, but the control \
                  it sits under {}",
                 control.describe()
-            ),
+            ))),
             OpKind::Exchange => continue,
             _ => {}
         }
@@ -301,20 +301,20 @@ pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
             continue;
         }
         if control != Kind::Uniform {
-            bail!(
+            return Err(super::at_op(op, format!(
                 "`{}` runs once per CTA, so every thread must reach it, but the control \
                  it sits under {}",
                 kind.name(),
                 control.describe()
-            );
+            )));
         }
         if let Some(&v) = operands.iter().find(|&&v| u.of(v) != Kind::Uniform) {
-            bail!(
+            return Err(super::at_op(op, format!(
                 "`{}` takes {}, which {}; a CTA-wide op needs the same value in every thread",
                 kind.name(),
                 describe(ir, v),
                 u.of(v).describe()
-            );
+            )));
         }
     }
     let mut dirty = HashSet::new();
@@ -398,12 +398,12 @@ impl Order<'_> {
         }
         let clash = ir.operands(op).iter().filter_map(|&v| root(ir, v)).find(|r| dirty.contains(r) && Some(*r) != stored);
         if let Some(buf) = clash {
-            bail!(
+            return Err(super::at_op(op, format!(
                 "`{}` reads {} after a per-thread store to it with no `barrier()` between: \
                  another thread's store may not have landed",
                 ir.kind(op).name(),
                 describe(ir, buf)
-            );
+            )));
         }
         dirty.extend(stored);
         Ok(())
