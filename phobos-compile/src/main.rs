@@ -51,7 +51,7 @@ fn main() -> Result<()> {
         ctx.index_bitwidth = 64;
     }
     let ptx = phobos_mlir::gen_ptx(&ctx, |base, context, module| {
-        phobos_lang::codegen::emit(base, &kernels, context, module).map(|_| ())
+        phobos_lang::assert_pipelined(&phobos_lang::codegen::emit(base, &kernels, context, module)?.pipeline_failures)
     })?;
     match out {
         Some(out) => std::fs::write(&out, ptx).with_context(|| format!("writing {}", out.display()))?,
