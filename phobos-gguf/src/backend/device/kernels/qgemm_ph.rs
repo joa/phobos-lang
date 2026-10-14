@@ -56,7 +56,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
 /// where the stages are carried in registers. From sm_80 on they copy with
 /// `cp.async`, and sm_120 contracts with a half-used `m16n8k16` where the
 /// intrinsics take `m16n8k32`.
-fn measured_on(chip: &str) -> bool {
+pub(crate) fn measured_on(chip: &str) -> bool {
     chip == "sm_75"
 }
 
