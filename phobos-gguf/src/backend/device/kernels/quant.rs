@@ -207,8 +207,12 @@ pub(crate) fn q50_qdot_src(accumulate: bool) -> String {
 }
 
 /// The prompt projection against a Q5_0 weight, its tile fixed at `tm` by
-/// `tn`: `q50_qmma_t`.
+/// `tn`: `q50_qmma_t`, or on a chip the `.ph` projections are measured on,
+/// [`q50_qmma_ph_src`].
 pub(crate) fn q50_qmma_src(block: usize, tm: usize, tn: usize) -> String {
+    if super::qgemm_ph::measured_on(phobos_kernels::compile::chip()) {
+        return q50_qmma_ph_src(block, tm, tn);
+    }
     let src = format!(
         "@launch({block})
 @autotune(TM in [64], TN in [64])
@@ -226,6 +230,58 @@ kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
     q50_of(&src).replace(
         "@autotune(TM in [64], TN in [64])",
         &format!("@autotune(TM in [{tm}], TN in [{tn}])"),
+    )
+}
+
+/// [`q50_qmma_src`] as a loop: each 32-element block of the weight decoded
+/// into an int8 tile, four threads a column and eight elements each, then
+/// contracted against the activation as [`q8_qmma_src`] does. A block is a
+/// word of fifth bits and 16 bytes of nibbles: element `e` is nibble `e / 16`
+/// of byte `e % 16` under bit `e` of the word, less 16.
+fn q50_qmma_ph_src(block: usize, tm: usize, tn: usize) -> String {
+    let chunks = (4 * tn).div_ceil(block);
+    format!(
+        "@launch({block})
+@autotune(TM in [{tm}], TN in [{tn}])
+@aligned(M = TM, N = TN, K = 32)
+kernel q50_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                W: tensor<i8>[N, KW], WS: tensor<f32>[KB, N],
+                C: tensor<f32>[M, N]) {{
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var w: tile<i8>[TN, 32]
+  var acc: tile<f32>[TM, TN] = 0.0
+  for kt in range(0, K, 32) {{
+    let b = kt / 32
+    for<unroll {chunks}> i in range(0, {chunks}, 1) {{
+      let c = ctx.thread + {block} * i
+      if c < TN * 4 {{
+        let j = c / 4
+        let o = c % 4
+        let qh = word(W[pn * TN + j, b * 20 :+ 4], 0)
+        let qa = word(W[pn * TN + j, b * 20 + 4 + 8 * (o % 2) :+ 8], 0)
+        let qb = word(W[pn * TN + j, b * 20 + 4 + 8 * (o % 2) :+ 8], 1)
+        let ha = ((((qh >> (8 * o)) & 15) * {SPREAD}) & {LOW}) << 4
+        let hb = ((((qh >> (8 * o + 4)) & 15) * {SPREAD}) & {LOW}) << 4
+        let va = ((qa >> (4 * (o / 2))) & {NIB}) | ha
+        let vb = ((qb >> (4 * (o / 2))) & {NIB}) | hb
+        store(w[j, 8 * o :+ 8], ((va | {HIGH}) - {SIXTEEN}) ^ {HIGH}, ((vb | {HIGH}) - {SIXTEEN}) ^ {HIGH})
+      }}
+    }}
+    barrier()
+    let a = A[pm * TM :+ TM, kt :+ 32]
+    let ws = WS[b :+ 1, pn * TN :+ TN]
+    let da = AS[pm * TM :+ TM, b :+ 1]
+    acc += f32(dot_t(a, w)) * ws * da
+  }}
+  C[pm * TM :+ TM, pn * TN :+ TN] = acc
+}}
+",
+        SPREAD = super::iq_lanes::SPREAD,
+        LOW = super::iq_lanes::LOW_BITS,
+        NIB = 0x0F0F_0F0Fu32,
+        HIGH = 0x8080_8080u32,
+        SIXTEEN = 0x1010_1010u32,
     )
 }
 
