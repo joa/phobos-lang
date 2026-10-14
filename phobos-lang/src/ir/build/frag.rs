@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN};
-use crate::ast::{AssignOp, BinOp, Expr, ExprKind, Scalar as AstScalar, Stmt, Type as AstType};
+use crate::ast::{AssignOp, BinOp, Expr, ExprKind, Scalar as AstScalar, Stmt, Sub, Type as AstType};
 use crate::ir::{Bounds, ForInfo, MmaAcc, OpKind, Scalar, Type, ValueId};
 use crate::shape;
 
@@ -21,6 +21,54 @@ struct FragScan {
     /// Whether the updates are the int8 scaled form rather than the f16
     /// ones. A plan holds one kind.
     imma: Option<bool>,
+    /// The scanned body's scalar `let`s, which a later slice's bounds are
+    /// checked through, since nothing binds them yet.
+    lets: HashMap<String, Expr>,
+}
+
+/// `e` with each name `lets` binds replaced by its expression.
+fn substituted(e: &Expr, lets: &HashMap<String, Expr>) -> Expr {
+    if lets.is_empty() {
+        return e.clone();
+    }
+    let go = |e: &Expr| Box::new(substituted(e, lets));
+    let kind = match &e.kind {
+        ExprKind::Var(name) => match lets.get(name) {
+            Some(bound) => return bound.clone(),
+            None => return e.clone(),
+        },
+        ExprKind::Unary { op, rhs } => ExprKind::Unary { op: *op, rhs: go(rhs) },
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+            op: *op,
+            lhs: go(lhs),
+            rhs: go(rhs),
+        },
+        ExprKind::Index { base, subs } => ExprKind::Index {
+            base: base.clone(),
+            subs: subs
+                .iter()
+                .map(|s| match s {
+                    Sub::Point(p) => Sub::Point(*go(p)),
+                    Sub::From(p) => Sub::From(*go(p)),
+                    Sub::Range { start, end } => Sub::Range {
+                        start: *go(start),
+                        end: *go(end),
+                    },
+                    Sub::Span { start, len } => Sub::Span {
+                        start: *go(start),
+                        len: *go(len),
+                    },
+                    Sub::Full => Sub::Full,
+                })
+                .collect(),
+        },
+        ExprKind::Call { callee, args } => ExprKind::Call {
+            callee: callee.clone(),
+            args: args.iter().map(|a| *go(a)).collect(),
+        },
+        _ => return e.clone(),
+    };
+    Expr::new(kind, e.span)
 }
 
 fn is_f16_or_f32(s: Scalar) -> bool {
@@ -144,8 +192,13 @@ impl Build {
                     if n2 == name || value.is_some_and(|v| v.uses_name(name)) {
                         return false;
                     }
-                    if value.is_some_and(|v| self.slice_is_partial_within(v, ivs)) {
+                    if value.is_some_and(|v| self.slice_is_partial_within(&substituted(v, &scan.lets), ivs)) {
                         return false;
+                    }
+                    if let (Stmt::Let { value, .. }, None) = (stmt, ty)
+                        && !matches!(value.kind, ExprKind::Index { .. } | ExprKind::Generate(_))
+                    {
+                        scan.lets.insert(n2.to_string(), substituted(value, &scan.lets));
                     }
                     self.frag_scan_decl(n2, ty, value, scan);
                 }
@@ -178,7 +231,7 @@ impl Build {
                     if shape != [m, n] {
                         return false;
                     }
-                    if self.slice_is_partial_within(target, ivs) {
+                    if self.slice_is_partial_within(&substituted(target, &scan.lets), ivs) {
                         return false;
                     }
                 }
