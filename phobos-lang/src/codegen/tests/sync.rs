@@ -374,6 +374,19 @@ fn a_claimed_slot_steers_uniform_control_flow() {
         }",
     );
     assert_contains(&mlir, &["memref.generic_atomic_rmw", "gpu.shuffle"]);
+    // Every thread reads the claimed value from a shared slot after the
+    // atomic's last barrier. The staged tile reuses those bytes, so a
+    // barrier sits between the read and the copy.
+    let read = mlir
+        .match_indices("memref.load")
+        .map(|(at, _)| at)
+        .find(|&at| mlir[at..].lines().next().is_some_and(|l| l.contains("memref<1xi32, 3>")))
+        .expect("the slot read");
+    let copy = read + mlir[read..].find("memref<16x64xf32, 3>").expect("the staging copy");
+    assert!(
+        mlir.match_indices("gpu.barrier").any(|(b, _)| read < b && b < copy),
+        "the copy must wait for every thread's read of the slot:\n{mlir}"
+    );
 }
 
 /// A device-side wait on a flag the host raises, then a release that lowers

@@ -140,3 +140,20 @@ fn every_kernel_in_the_tree_is_race_free() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// A claimed value every thread reads from a shared slot, then a staged
+/// tile over the slot's bytes: the copy waits for every warp's read.
+#[test]
+fn a_claimed_slot_is_read_before_its_bytes_are_reused() {
+    let r = one(
+        "kernel k(L: tensor<i32>[1], X: tensor<f32>[16, 64]) {
+            if atomic_cas(L, 0, 0, 1) == 0 {
+                var x = X[0 :+ 16, 0 :+ 64]
+                var m: tile<f32>[16, 1] = rowmax(x)
+                X[0 :+ 16, 0 :+ 1] = m
+            }
+        }",
+    );
+    assert!(r.clean(), "{r:#?}");
+    assert!(r.warp_races.is_empty(), "{r:#?}");
+}
