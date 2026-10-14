@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, Rv};
-use crate::ast::{AssignOp, BinOp, Expr, Scalar as AstScalar, Span, Stmt, Type as AstType};
+use crate::ast::{AssignOp, BinOp, Expr, ExprKind, Scalar as AstScalar, Span, Stmt, Type as AstType};
 use crate::ir::{Bounds, Coeff, ForInfo, GemmType, OpKind, Scalar, Type};
 use crate::shape;
 
@@ -160,7 +160,7 @@ impl Build {
         if !matches!(acc_scalar, AstScalar::F32 | AstScalar::F16) {
             return None;
         }
-        if kt == acc || !(matches!(init, Expr::Float(_)) || self.const_fold(init).is_some()) {
+        if kt == acc || !(matches!(&init.kind, ExprKind::Float(_)) || self.const_fold(init).is_some()) {
             return None;
         }
         let (target, epilogue_val, prev_load_let, consumed) = match tail {
@@ -190,10 +190,10 @@ impl Build {
             ] => (target, epi, None, 3usize),
             _ => return None,
         };
-        let Expr::Index { base, subs } = target else {
+        let ExprKind::Index { base, subs } = &target.kind else {
             return None;
         };
-        let Expr::Var(out) = base.as_ref() else {
+        let ExprKind::Var(out) = &base.kind else {
             return None;
         };
         let Some(Binding::Tensor(c)) = self.lookup(out) else {
@@ -211,23 +211,25 @@ impl Build {
         // coefficient is the other factor of its product, or one when the
         // side is the bare name and the epilogue has a prev_load.
         let scaled = |expr: &'a Expr, name: &str| -> Option<Option<&'a Expr>> {
-            match expr {
-                Expr::Var(n) if n.as_str() == name => Some(None),
-                Expr::Binary {
+            match &expr.kind {
+                ExprKind::Var(n) if n.as_str() == name => Some(None),
+                ExprKind::Binary {
                     op: BinOp::Mul,
                     lhs,
                     rhs,
-                } => match (lhs.as_ref(), rhs.as_ref()) {
-                    (Expr::Var(n), s) | (s, Expr::Var(n)) if n.as_str() == name => Some(Some(s)),
-                    _ => None,
-                },
+                } if lhs.as_var() == Some(name) => Some(Some(rhs.as_ref())),
+                ExprKind::Binary {
+                    op: BinOp::Mul,
+                    lhs,
+                    rhs,
+                } if rhs.as_var() == Some(name) => Some(Some(lhs.as_ref())),
                 _ => None,
             }
         };
-        let (alpha_expr, prev_load): (Option<&'a Expr>, Option<Option<&'a Expr>>) = match epilogue_val {
-            Expr::Var(n) if n.as_str() == acc => (None, None),
-            Expr::Binary { op: BinOp::Mul, .. } => (scaled(epilogue_val, acc)?, None),
-            Expr::Binary {
+        let (alpha_expr, prev_load): (Option<&'a Expr>, Option<Option<&'a Expr>>) = match &epilogue_val.kind {
+            ExprKind::Var(n) if n.as_str() == acc => (None, None),
+            ExprKind::Binary { op: BinOp::Mul, .. } => (scaled(epilogue_val, acc)?, None),
+            ExprKind::Binary {
                 op: BinOp::Add,
                 lhs,
                 rhs,
@@ -261,10 +263,10 @@ impl Build {
             let (name, None, Some(value)) = s.as_decl()? else {
                 return None;
             };
-            let Expr::Index { base, .. } = value else {
+            let ExprKind::Index { base, .. } = &value.kind else {
                 return None;
             };
-            let Expr::Var(src) = &**base else { return None };
+            let ExprKind::Var(src) = &base.kind else { return None };
             let Some(Binding::Tensor(t)) = self.lookup(src) else {
                 return None;
             };
@@ -274,9 +276,9 @@ impl Build {
             sa,
             sb,
             Stmt::Assign {
-                target: Expr::Var(t),
+                target: Expr { kind: ExprKind::Var(t), .. },
                 op: AssignOp::Add,
-                value: Expr::Call { callee, args },
+                value: Expr { kind: ExprKind::Call { callee, args }, .. },
                 ..
             },
         ] = &body[..]
@@ -287,7 +289,7 @@ impl Build {
         if t != acc || callee != "dot" || an == bn {
             return None;
         }
-        let [Expr::Var(d0), Expr::Var(d1)] = &args[..] else {
+        let [Expr { kind: ExprKind::Var(d0), .. }, Expr { kind: ExprKind::Var(d1), .. }] = &args[..] else {
             return None;
         };
         let (a_slice, b_slice) = if d0 == an && d1 == bn {

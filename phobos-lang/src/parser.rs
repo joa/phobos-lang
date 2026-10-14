@@ -233,6 +233,7 @@ impl Parser {
             return Err(self.unexpected(what));
         }
         self.advance();
+        let name_span = self.here();
         let name = self.ident()?;
 
         let open = self.here();
@@ -248,26 +249,38 @@ impl Parser {
         Ok(Kernel {
             attrs,
             name,
+            name_span,
             params,
             body,
         })
     }
 
     fn parse_attribute(&mut self) -> PResult<Attribute> {
+        let lo = self.current().lo;
         self.expect(Tok::At)?;
 
         let name = self.ident()?;
 
         let mut args = Vec::new();
+        let mut arg_spans = Vec::new();
         let open = self.here();
         if self.consume(&Tok::LParen) {
             if !self.matches(&Tok::RParen) {
-                args = self.comma_separated(Self::parse_attr_arg)?;
+                let spanned = self.comma_separated(|p| {
+                    let lo = p.current().lo;
+                    Ok((p.parse_attr_arg()?, p.since(lo)))
+                })?;
+                (args, arg_spans) = spanned.into_iter().unzip();
             }
             self.expect_close(Tok::RParen, open)?;
         }
 
-        Ok(Attribute { name, args })
+        Ok(Attribute {
+            name,
+            args,
+            span: self.since(lo),
+            arg_spans,
+        })
     }
 
     fn parse_attr_arg(&mut self) -> PResult<AttrArg> {
@@ -309,10 +322,17 @@ impl Parser {
 
     fn parse_params(&mut self) -> PResult<Vec<Param>> {
         self.comma_separated(|p| {
+            let span = p.here();
             let name = p.ident()?;
             p.expect(Tok::Colon)?;
+            let lo = p.current().lo;
             let ty = p.parse_type()?;
-            Ok(Param { name, ty })
+            Ok(Param {
+                name,
+                ty,
+                span,
+                ty_span: p.since(lo),
+            })
         })
     }
 }
@@ -422,6 +442,7 @@ impl Parser {
             Tok::For => self.parse_for(),
             Tok::While => self.parse_while(),
             Tok::Break | Tok::Continue | Tok::Return => {
+                let at = self.here();
                 let which = match self.advance() {
                     Tok::Break => jumps::BREAK,
                     Tok::Continue => jumps::CONTINUE,
@@ -429,12 +450,10 @@ impl Parser {
                 };
                 let span = self.span_from(start);
                 self.end_stmt()?;
-                Ok(jumps::jump(which, span))
+                Ok(jumps::jump(which, span, at))
             }
             _ => {
-                let lo = self.current().lo;
                 let expr = self.parse_expr()?;
-                let target = diag::Span::new(lo, self.last_hi);
                 // `x op= e` other than `+=` is `x = x op e`; `+=` stays an
                 // accumulate, which a dot or a fragment lowers on its own.
                 let (op, compound) = match self.peek().clone() {
@@ -446,14 +465,11 @@ impl Parser {
                 match op {
                     Some(op) => {
                         self.advance();
-                        ensure_lvalue(&expr).map_err(|m| Diagnostic::error(m).primary(target, "cannot be assigned"))?;
+                        ensure_lvalue(&expr).map_err(|m| Diagnostic::error(m).primary(expr.span, "cannot be assigned"))?;
                         let mut value = self.parse_expr()?;
                         if let Some(bop) = compound {
-                            value = Expr::Binary {
-                                op: bop,
-                                lhs: Box::new(expr.clone()),
-                                rhs: Box::new(value),
-                            };
+                            let span = expr.span.to(value.span);
+                            value = Expr::binary(bop, expr.clone(), value).at(span);
                         }
                         let span = self.span_from(start);
                         self.end_stmt()?;
@@ -477,6 +493,7 @@ impl Parser {
     fn parse_let_or_var(&mut self, is_var: bool) -> PResult<Stmt> {
         let start = self.pos();
         self.advance();
+        let name_span = self.here();
         let name = self.ident()?;
         let ty = if self.consume(&Tok::Colon) {
             Some(self.parse_type()?)
@@ -490,6 +507,7 @@ impl Parser {
             self.end_stmt()?;
             return Ok(Stmt::Var {
                 name,
+                name_span,
                 ty,
                 value: None,
                 span,
@@ -502,6 +520,7 @@ impl Parser {
         Ok(if is_var {
             Stmt::Var {
                 name,
+                name_span,
                 ty,
                 value: Some(value),
                 span,
@@ -509,6 +528,7 @@ impl Parser {
         } else {
             Stmt::Let {
                 name,
+                name_span,
                 ty,
                 value,
                 span,
@@ -566,6 +586,7 @@ impl Parser {
         } else {
             None
         };
+        let var_span = self.here();
         let var = self.ident()?;
         self.expect(Tok::In)?;
         let at = self.here();
@@ -590,6 +611,7 @@ impl Parser {
         let body = self.parse_block()?;
         Ok(Stmt::For {
             var,
+            var_span,
             start,
             end,
             step,
@@ -618,11 +640,8 @@ impl Parser {
         while let Some(&(_, op)) = ops.iter().find(|(t, _)| self.matches(t)) {
             self.advance();
             let rhs = next(self)?;
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            };
+            let span = lhs.span.to(rhs.span);
+            lhs = Expr::binary(op, lhs, rhs).at(span);
         }
         Ok(lhs)
     }
@@ -681,30 +700,21 @@ impl Parser {
     }
 
     fn unary(&mut self) -> PResult<Expr> {
-        match self.peek() {
-            Tok::Minus => {
-                self.advance();
-                Ok(Expr::Unary {
-                    op: UnOp::Neg,
-                    rhs: Box::new(self.unary()?),
-                })
-            }
-            Tok::Bang => {
-                self.advance();
-                Ok(Expr::Unary {
-                    op: UnOp::Not,
-                    rhs: Box::new(self.unary()?),
-                })
-            }
-            Tok::Tilde => {
-                self.advance();
-                Ok(Expr::Unary {
-                    op: UnOp::BitNot,
-                    rhs: Box::new(self.unary()?),
-                })
-            }
-            _ => self.postfix(),
-        }
+        let op = match self.peek() {
+            Tok::Minus => UnOp::Neg,
+            Tok::Bang => UnOp::Not,
+            Tok::Tilde => UnOp::BitNot,
+            _ => return self.postfix(),
+        };
+        let lo = self.current().lo;
+        self.advance();
+        let rhs = self.unary()?;
+        Ok(Expr::unary(op, rhs).at(self.since(lo)))
+    }
+
+    /// From byte `lo` to the end of the last token consumed.
+    fn since(&self, lo: u32) -> diag::Span {
+        diag::Span::new(lo, self.last_hi)
     }
 
     fn postfix(&mut self) -> PResult<Expr> {
@@ -715,17 +725,15 @@ impl Parser {
             if self.consume(&Tok::LBracket) {
                 let subs = self.comma_separated(Self::parse_sub)?;
                 self.expect_close(Tok::RBracket, open)?;
-                expr = Expr::Index {
-                    base: Box::new(expr),
-                    subs,
-                };
-            } else if let Expr::Var(name) = &expr
+                expr = Expr::index(expr, subs).at(self.since(lo));
+            } else if let ExprKind::Var(name) = &expr.kind
                 && self.at_config()
             {
                 let name = name.clone();
-                expr = self.config_call(&name)?;
+                expr = self.config_call(&name)?.at(self.since(lo));
             } else if self.matches(&Tok::LParen) {
-                if let Expr::Var(name) = expr {
+                if let ExprKind::Var(name) = &expr.kind {
+                    let name = name.clone();
                     self.advance(); // `(`
                     let args = if self.matches(&Tok::RParen) {
                         Vec::new()
@@ -733,34 +741,23 @@ impl Parser {
                         self.parse_args()?
                     };
                     self.expect_close(Tok::RParen, open)?;
+                    let span = self.since(lo);
                     expr = if matches!(name.as_str(), "min" | "max") && args.len() == 2 {
                         let [lhs, rhs] = <[Expr; 2]>::try_from(args).expect("two arguments");
-                        Expr::Binary {
-                            op: if name == "min" { BinOp::Min } else { BinOp::Max },
-                            lhs: Box::new(lhs),
-                            rhs: Box::new(rhs),
-                        }
+                        let op = if name == "min" { BinOp::Min } else { BinOp::Max };
+                        Expr::binary(op, lhs, rhs).at(span)
                     } else if name == "pow" && args.len() == 2 {
                         // a^b = e^(b ln a), so it fuses like any per-element tree.
                         let [base, exponent] = <[Expr; 2]>::try_from(args).expect("two arguments");
-                        let ln = Expr::Call {
-                            callee: "log".into(),
-                            args: vec![base],
-                        };
-                        Expr::Call {
-                            callee: "exp".into(),
-                            args: vec![Expr::Binary {
-                                op: BinOp::Mul,
-                                lhs: Box::new(exponent),
-                                rhs: Box::new(ln),
-                            }],
-                        }
+                        let ln = Expr::call("log", vec![base]).at(span);
+                        let product = Expr::binary(BinOp::Mul, exponent, ln).at(span);
+                        Expr::call("exp", vec![product]).at(span)
                     } else {
-                        Expr::Call { callee: name, args }
+                        Expr::call(name, args).at(span)
                     };
                 } else {
                     return Err(Diagnostic::error("call target must be an identifier")
-                        .primary(diag::Span::new(lo, self.last_hi), "this is not a name")
+                        .primary(self.since(lo), "this is not a name")
                         .secondary(open, "called here"));
                 }
             } else {
@@ -777,7 +774,7 @@ impl Parser {
             }
             let end = self.parse_expr()?;
             return Ok(Sub::Range {
-                start: Expr::Int(0),
+                start: Expr::int(0).at(diag::Span::new(end.span.lo, end.span.lo)),
                 end,
             }); // A[: end]
         }
@@ -809,11 +806,11 @@ impl Parser {
             return Err(Diagnostic::error(format!("expected an expression, found {}", self.found()))
                 .primary(self.here(), "expected an expression"));
         }
-        match self.advance() {
-            Tok::Int(n) => Ok(Expr::Int(n)),
-            Tok::Float(f) => Ok(Expr::Float(f)),
-            Tok::True => Ok(Expr::Bool(true)),
-            Tok::False => Ok(Expr::Bool(false)),
+        let kind = match self.advance() {
+            Tok::Int(n) => ExprKind::Int(n),
+            Tok::Float(f) => ExprKind::Float(f),
+            Tok::True => ExprKind::Bool(true),
+            Tok::False => ExprKind::Bool(false),
             Tok::Ident(s) if s == ctx::NAME => {
                 let mut path = Vec::new();
                 while self.consume(&Tok::Dot) {
@@ -824,8 +821,8 @@ impl Parser {
                         .primary(at, "")
                         .help("read a field, as `ctx.block.x` or `ctx.lane`"));
                 }
-                let whole = diag::Span::new(at.lo, self.last_hi);
-                ctx::field(&path).map_err(|e| {
+                let whole = self.since(at.lo);
+                return ctx::field(&path).map(|e| e.at(whole)).map_err(|e| {
                     let d = Diagnostic::error(e).primary(whole, "");
                     match path[..] {
                         [ref field] => {
@@ -834,24 +831,26 @@ impl Parser {
                         }
                         _ => d,
                     }
-                })
+                });
             }
-            Tok::Ident(s) => Ok(Expr::Var(s)),
+            Tok::Ident(s) => ExprKind::Var(s),
             Tok::LParen => {
                 let expr = self.parse_expr()?;
                 self.expect_close(Tok::RParen, at)?;
-                Ok(expr)
+                // The parentheses are part of what the expression spans.
+                return Ok(expr.at(self.since(at.lo)));
             }
             _ => unreachable!("checked above"),
-        }
+        };
+        Ok(Expr::new(kind, at))
     }
 }
 
 fn ensure_lvalue(e: &Expr) -> Result<(), String> {
-    match e {
-        Expr::Var(_) => Ok(()),
-        Expr::Index { base, .. } => match base.as_ref() {
-            Expr::Var(_) => Ok(()),
+    match &e.kind {
+        ExprKind::Var(_) => Ok(()),
+        ExprKind::Index { base, .. } => match &base.kind {
+            ExprKind::Var(_) => Ok(()),
             _ => Err("assignment target must be a name or an indexed name".to_string()),
         },
         _ => Err("invalid assignment target".to_string()),

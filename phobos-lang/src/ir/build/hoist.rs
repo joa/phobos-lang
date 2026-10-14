@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use anyhow::Result;
 
 use super::{Binding, Build, DYN};
-use crate::ast::{Expr, Scalar as AstScalar, Stmt, Type as AstType};
+use crate::ast::{Expr, ExprKind, Scalar as AstScalar, Stmt, Type as AstType};
 use crate::ir::{Layout, OpKind, Scalar, Space, Swizzle, TileType, Type, ValueId};
 use crate::shape;
 
@@ -69,7 +69,7 @@ impl Build {
                     let Some((name, ty, Some(value))) = stmt.as_decl() else {
                         continue;
                     };
-                    if let Expr::Call { callee, args } = value
+                    if let ExprKind::Call { callee, args } = &value.kind
                         && (callee == "dot" || callee == "dot_t")
                     {
                         let out_f32 = match ty {
@@ -88,11 +88,11 @@ impl Build {
                     if self.is_global_store(target) {
                         return false;
                     }
-                    if let Expr::Call { callee, args } = value
+                    if let ExprKind::Call { callee, args } = &value.kind
                         && (callee == "dot" || callee == "dot_t")
                     {
-                        let out_f32 = match target {
-                            Expr::Var(n) => match scan.decls.get(n) {
+                        let out_f32 = match &target.kind {
+                            ExprKind::Var(n) => match scan.decls.get(n) {
                                 Some((is_f32, _)) => *is_f32,
                                 None => match self.lookup(n) {
                                     Some(Binding::Tile(mv)) => self.elem(mv) == Scalar::F32,
@@ -100,7 +100,7 @@ impl Build {
                                     _ => false,
                                 },
                             },
-                            t @ Expr::Index { .. } => self.slice_tensor_elem(t) == Some(Scalar::F32),
+                            ExprKind::Index { .. } => self.slice_tensor_elem(target) == Some(Scalar::F32),
                             _ => false,
                         };
                         self.hoist_consider(scan, cands, callee == "dot_t", args, out_f32);
@@ -155,7 +155,7 @@ impl Build {
             return;
         }
         for e in [ae, be] {
-            if let Expr::Var(name) = e
+            if let ExprKind::Var(name) = &e.kind
                 && !scan.declared.contains(name)
                 && let Some(Binding::View(mv)) = self.lookup(name)
                 && self.shape(mv).len() == 2
@@ -187,7 +187,7 @@ impl Build {
     }
 
     fn hoist_operand(&self, scan: &HoistScan, expr: &Expr) -> Option<(bool, Vec<i64>)> {
-        let Expr::Var(name) = expr else { return None };
+        let ExprKind::Var(name) = &expr.kind else { return None };
         if let Some(e) = scan.decls.get(name) {
             return Some(e.clone());
         }
@@ -207,8 +207,8 @@ impl Build {
     pub(crate) fn is_global_store(&self, target: &Expr) -> bool {
         matches!(
             target,
-            Expr::Index { base, .. }
-                if matches!(&**base, Expr::Var(t)
+            Expr { kind: ExprKind::Index { base, .. }, .. }
+                if matches!(&base.kind, ExprKind::Var(t)
                     if matches!(self.lookup(t), Some(Binding::Tensor(_))))
         )
     }

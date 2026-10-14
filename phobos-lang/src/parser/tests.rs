@@ -93,11 +93,11 @@ fn parses_attributes() {
 fn full_range_subscript() {
     let p = parse("kernel k(A: tensor<f32>[M, N]) { let r = A[0, :]; }");
     if let Stmt::Let {
-        value: Expr::Index { subs, .. },
+        value: Expr { kind: ExprKind::Index { subs, .. }, .. },
         ..
     } = &p[0].body[0]
     {
-        assert!(matches!(subs[0], Sub::Point(Expr::Int(0))));
+        assert!(matches!(subs[0], Sub::Point(Expr { kind: ExprKind::Int(0), .. })));
         assert!(matches!(subs[1], Sub::Full));
     } else {
         panic!("expected indexed let");
@@ -108,7 +108,7 @@ fn full_range_subscript() {
 fn range_and_span_subscripts() {
     let p = parse("kernel k(A: tensor<f32>[M, N]) { let r = A[i : j, i :+ n]; }");
     if let Stmt::Let {
-        value: Expr::Index { subs, .. },
+        value: Expr { kind: ExprKind::Index { subs, .. }, .. },
         ..
     } = &p[0].body[0]
     {
@@ -195,14 +195,14 @@ fn unary_neg_and_not() {
     assert!(matches!(
         &b[0],
         Stmt::Let {
-            value: Expr::Unary { op: UnOp::Neg, .. },
+            value: Expr { kind: ExprKind::Unary { op: UnOp::Neg, .. }, .. },
             ..
         }
     ));
     assert!(matches!(
         &b[1],
         Stmt::Let {
-            value: Expr::Unary { op: UnOp::Not, .. },
+            value: Expr { kind: ExprKind::Unary { op: UnOp::Not, .. }, .. },
             ..
         }
     ));
@@ -213,12 +213,12 @@ fn precedence_mul_binds_tighter_than_add() {
     let b = body("kernel k(x: i32) { let a = 1 + 2 * 3; }");
     // 1 + (2 * 3): top node is Add, its rhs is a Mul
     if let Stmt::Let {
-        value: Expr::Binary { op, rhs, .. },
+        value: Expr { kind: ExprKind::Binary { op, rhs, .. }, .. },
         ..
     } = &b[0]
     {
         assert_eq!(*op, BinOp::Add);
-        assert!(matches!(rhs.as_ref(), Expr::Binary { op: BinOp::Mul, .. }));
+        assert!(matches!(&rhs.kind, ExprKind::Binary { op: BinOp::Mul, .. }));
     } else {
         panic!("expected binary let");
     }
@@ -241,11 +241,17 @@ fn calls_with_and_without_args() {
     let b = body("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x; let s = dot_t(A, A); }");
     assert!(matches!(
         &b[0],
-        Stmt::Let { value: Expr::Call { callee, args }, .. } if callee == ctx::BLOCK && args.len() == 1
+        Stmt::Let {
+            value: Expr { kind: ExprKind::Call { callee, args }, .. },
+            ..
+        } if callee == ctx::BLOCK && args.len() == 1
     ));
     assert!(matches!(
         &b[1],
-        Stmt::Let { value: Expr::Call { callee, args }, .. } if callee == "dot_t" && args.len() == 2
+        Stmt::Let {
+            value: Expr { kind: ExprKind::Call { callee, args }, .. },
+            ..
+        } if callee == "dot_t" && args.len() == 2
     ));
 }
 
@@ -340,8 +346,8 @@ fn let_value(src: &str) -> Expr {
 
 /// The operator at the root of an expression and its two operands.
 fn binary(e: &Expr) -> (BinOp, &Expr, &Expr) {
-    match e {
-        Expr::Binary { op, lhs, rhs } => (*op, lhs, rhs),
+    match &e.kind {
+        ExprKind::Binary { op, lhs, rhs } => (*op, lhs, rhs),
         other => panic!("expected a binary expression, got {other:?}"),
     }
 }
@@ -352,7 +358,7 @@ fn bitwise_binds_tighter_than_comparison_and_looser_than_arithmetic() {
     let e = let_value("let x = a + b << 2 & 7");
     let (op, lhs, rhs) = binary(&e);
     assert_eq!(op, BinOp::BitAnd);
-    assert!(matches!(rhs, Expr::Int(7)));
+    assert!(matches!(&rhs.kind, ExprKind::Int(7)));
     let (op, lhs, _) = binary(lhs);
     assert_eq!(op, BinOp::Shl);
     assert_eq!(binary(lhs).0, BinOp::Add);
@@ -390,7 +396,7 @@ fn bit_not_is_unary() {
     let e = let_value("let x = ~a & 3");
     let (op, lhs, _) = binary(&e);
     assert_eq!(op, BinOp::BitAnd);
-    assert!(matches!(lhs, Expr::Unary { op: UnOp::BitNot, .. }));
+    assert!(matches!(&lhs.kind, ExprKind::Unary { op: UnOp::BitNot, .. }));
 }
 
 #[test]
@@ -406,7 +412,7 @@ fn compound_assignment_becomes_a_set() {
         assert_eq!(*op, AssignOp::Set);
         let (bop, lhs, _) = binary(value);
         assert_eq!(bop, want);
-        assert!(matches!((target, lhs), (Expr::Var(t), Expr::Var(l)) if t == "x" && l == "x"));
+        assert_eq!((target.as_var(), lhs.as_var()), (Some("x"), Some("x")));
     }
 }
 
@@ -417,20 +423,20 @@ fn min_and_max_calls_become_operators() {
     assert_eq!(op, BinOp::Min);
     assert_eq!(binary(rhs).0, BinOp::Max);
     // Other arities stay calls, for the builder to reject.
-    assert!(matches!(let_value("let x = max(a)"), Expr::Call { .. }));
+    assert!(matches!(let_value("let x = max(a)"), Expr { kind: ExprKind::Call { .. }, .. }));
 }
 
 #[test]
 fn open_ended_range_subscript() {
     let p = parse("kernel k(A: tensor<f32>[M, N]) { let r = A[2:, 0 :+ 4] }");
     let Stmt::Let {
-        value: Expr::Index { subs, .. },
+        value: Expr { kind: ExprKind::Index { subs, .. }, .. },
         ..
     } = &p[0].body[0]
     else {
         panic!("expected an indexed let");
     };
-    assert!(matches!(subs[0], Sub::From(Expr::Int(2))));
+    assert!(matches!(subs[0], Sub::From(Expr { kind: ExprKind::Int(2), .. })));
     assert!(matches!(subs[1], Sub::Span { .. }));
 }
 
@@ -438,7 +444,7 @@ fn open_ended_range_subscript() {
 fn range_to_subscript_starts_at_zero() {
     let p = parse("kernel k(A: tensor<f32>[M, N]) { let r = A[:4, :] }");
     let Stmt::Let {
-        value: Expr::Index { subs, .. },
+        value: Expr { kind: ExprKind::Index { subs, .. }, .. },
         ..
     } = &p[0].body[0]
     else {
@@ -447,8 +453,8 @@ fn range_to_subscript_starts_at_zero() {
     assert!(matches!(
         subs[0],
         Sub::Range {
-            start: Expr::Int(0),
-            end: Expr::Int(4)
+            start: Expr { kind: ExprKind::Int(0), .. },
+            end: Expr { kind: ExprKind::Int(4), .. }
         }
     ));
     assert!(matches!(subs[1], Sub::Full));
@@ -477,10 +483,10 @@ fn break_becomes_a_flag_the_loop_tests() {
         panic!("unexpected shape: {b:?}");
     };
     assert_eq!(flag, "#break1");
-    let Expr::Binary { op: BinOp::And, rhs, .. } = cond else {
+    let ExprKind::Binary { op: BinOp::And, rhs, .. } = &cond.kind else {
         panic!("the condition does not test the flag: {cond:?}");
     };
-    assert!(matches!(**rhs, Expr::Unary { op: UnOp::Not, .. }));
+    assert!(matches!(&rhs.kind, ExprKind::Unary { op: UnOp::Not, .. }));
     // The increment runs only when the `if` did not break.
     let [Stmt::If { then, .. }, Stmt::If { then: rest, r#else: None, .. }] = &body[..] else {
         panic!("unexpected loop body: {body:?}");
@@ -506,7 +512,7 @@ fn continue_is_cleared_each_iteration() {
     };
     assert_eq!(flag, "#continue1");
     let Stmt::Assign {
-        value: Expr::Bool(false),
+        value: Expr { kind: ExprKind::Bool(false), .. },
         ..
     } = &body[0]
     else {
@@ -571,4 +577,76 @@ kernel k(A: tensor<f32>[N]) {
     assert_eq!(then[0].span(), span(6, 5, 6, 10));
     // A spliced statement keeps the line it was written on.
     assert_eq!(inlined.span(), span(2, 3, 2, 13));
+}
+
+/// The source a span covers.
+fn spanned(src: &str, span: crate::diag::Span) -> &str {
+    &src[span.lo as usize..span.hi as usize]
+}
+
+#[test]
+fn expressions_span_their_source() {
+    let src = "kernel k(A: tensor<f32>[N], b: f32, c: i32) {
+    let x = -b + exp(A[c, 0 :+ 4]) * (c - 1)
+    let y = ctx.block.x + min(c, 2)
+}";
+    let p = parse(src);
+    let Stmt::Let { value, .. } = &p[0].body[0] else { panic!() };
+    assert_eq!(spanned(src, value.span), "-b + exp(A[c, 0 :+ 4]) * (c - 1)");
+    let ExprKind::Binary { lhs, rhs, .. } = &value.kind else { panic!() };
+    assert_eq!(spanned(src, lhs.span), "-b");
+    assert_eq!(spanned(src, rhs.span), "exp(A[c, 0 :+ 4]) * (c - 1)");
+    let ExprKind::Binary { lhs: call, rhs: paren, .. } = &rhs.kind else { panic!() };
+    assert_eq!(spanned(src, call.span), "exp(A[c, 0 :+ 4])");
+    assert_eq!(spanned(src, paren.span), "(c - 1)");
+    let ExprKind::Call { args, .. } = &call.kind else { panic!() };
+    assert_eq!(spanned(src, args[0].span), "A[c, 0 :+ 4]");
+    let ExprKind::Index { subs, .. } = &args[0].kind else { panic!() };
+    let Sub::Span { start, len } = &subs[1] else { panic!() };
+    assert_eq!((spanned(src, start.span), spanned(src, len.span)), ("0", "4"));
+
+    let Stmt::Let { value, .. } = &p[0].body[1] else { panic!() };
+    let ExprKind::Binary { lhs, rhs, .. } = &value.kind else { panic!() };
+    assert_eq!(spanned(src, lhs.span), "ctx.block.x");
+    // `min` becomes an operator, spanning the call it was written as.
+    assert_eq!(spanned(src, rhs.span), "min(c, 2)");
+}
+
+#[test]
+fn compound_assignment_spans_the_statement_it_rewrites() {
+    let src = "kernel k(a: i32) {
+    var x = 1
+    x *= a + 2
+}";
+    let p = parse(src);
+    let Stmt::Assign { target, value, .. } = &p[0].body[1] else { panic!() };
+    assert_eq!(spanned(src, target.span), "x");
+    assert_eq!(spanned(src, value.span), "x *= a + 2");
+}
+
+#[test]
+fn names_attributes_and_params_carry_spans() {
+    let src = "@launch(64, 2)
+@autotune(T in [16, 32])
+kernel copy(X: tensor<f32>[N], s: f32) {
+    let i = ctx.thread
+    for j in range(0, 4) {
+        var t: tile<f32>[4] = 0.0
+    }
+}";
+    let k = &parse(src)[0];
+    assert_eq!(spanned(src, k.name_span), "copy");
+    assert_eq!(spanned(src, k.attrs[0].span), "@launch(64, 2)");
+    let args: Vec<&str> = k.attrs[0].arg_spans.iter().map(|&s| spanned(src, s)).collect();
+    assert_eq!(args, ["64", "2"]);
+    assert_eq!(spanned(src, k.attrs[1].arg_spans[0]), "T in [16, 32]");
+    assert_eq!(spanned(src, k.params[0].span), "X");
+    assert_eq!(spanned(src, k.params[0].ty_span), "tensor<f32>[N]");
+    assert_eq!(spanned(src, k.params[1].ty_span), "f32");
+    let Stmt::Let { name_span, .. } = &k.body[0] else { panic!() };
+    assert_eq!(spanned(src, *name_span), "i");
+    let Stmt::For { var_span, body, .. } = &k.body[1] else { panic!() };
+    assert_eq!(spanned(src, *var_span), "j");
+    let Stmt::Var { name_span, .. } = &body[0] else { panic!() };
+    assert_eq!(spanned(src, *name_span), "t");
 }

@@ -1,7 +1,7 @@
 use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, fmt_shape};
-use crate::ast::{AssignOp, BinOp, Expr, UnOp};
+use crate::ast::{AssignOp, BinOp, Expr, ExprKind, UnOp};
 use crate::ir::{ElemStep, OpKind, Reduce, Scalar, Tree, ValueId};
 
 /// What planning a fused tree collects: the operands in order, and which
@@ -27,7 +27,7 @@ impl Build {
     fn peel_elem_chain<'e>(&self, value: &'e Expr) -> (Vec<ElemStep>, &'e Expr) {
         let mut steps = Vec::new();
         let mut inner = value;
-        while let Expr::Call { callee, args } = inner {
+        while let ExprKind::Call { callee, args } = &inner.kind {
             let [arg] = &args[..] else { break };
             let Some(step) = ElemStep::from_callee(callee) else {
                 break;
@@ -45,7 +45,7 @@ impl Build {
         if steps.is_empty() {
             return Ok(false);
         }
-        let Expr::Var(name) = base else {
+        let ExprKind::Var(name) = &base.kind else {
             return Ok(false);
         };
         let src = match self.lookup(name) {
@@ -62,9 +62,9 @@ impl Build {
 
     /// Interior nodes of a fusable tree, or None when `value` is not one.
     pub(crate) fn fusable_nodes(&self, value: &Expr) -> Option<usize> {
-        match value {
-            Expr::Int(_) | Expr::Float(_) => Some(0),
-            Expr::Var(name) => match self.lookup(name)? {
+        match &value.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) => Some(0),
+            ExprKind::Var(name) => match self.lookup(name)? {
                 Binding::Let { .. } | Binding::Var { .. } => Some(0),
                 Binding::Regs(_) => self.fusing_regs.then_some(0),
                 // An unsigned tile is read only through a cast, below.
@@ -76,20 +76,20 @@ impl Build {
             },
             // A statically shaped tensor slice is a leaf too; one that runs
             // past the tensor is materialized, masked, before the sweep.
-            Expr::Index { .. } => self.slice_leaf(value).map(|_| 0),
-            Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
+            ExprKind::Index { .. } => self.slice_leaf(value).map(|_| 0),
+            ExprKind::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
             }
             // A negated literal is a constant leaf; anything else is a node.
-            Expr::Unary {
+            ExprKind::Unary {
                 op: UnOp::Neg | UnOp::BitNot,
                 rhs,
-            } if matches!(**rhs, Expr::Int(_) | Expr::Float(_)) => Some(0),
-            Expr::Unary {
+            } if matches!(&rhs.kind, ExprKind::Int(_) | ExprKind::Float(_)) => Some(0),
+            ExprKind::Unary {
                 op: UnOp::Neg | UnOp::BitNot,
                 rhs,
             } => Some(1 + self.fusable_nodes(rhs)?),
-            Expr::Call { callee, args } => match &args[..] {
+            ExprKind::Call { callee, args } => match &args[..] {
                 [arg] if self.is_unsigned_cast(callee, arg) => Some(1),
                 [arg] if ElemStep::from_callee(callee).is_some() => {
                     Some(1 + self.fusable_nodes(arg)?)
@@ -97,7 +97,7 @@ impl Build {
                 [a, b] if callee == "tmax" => {
                     Some(1 + self.fusable_nodes(a)? + self.fusable_nodes(b)?)
                 }
-                [Expr::Int(_)] if callee == "iota" => Some(1),
+                [Expr { kind: ExprKind::Int(_), .. }] if callee == "iota" => Some(1),
                 [c, a, b] if callee == "where" => Some(
                     1 + self.fusable_cond(c)? + self.fusable_nodes(a)? + self.fusable_nodes(b)?,
                 ),
@@ -134,21 +134,21 @@ impl Build {
                 None => false,
             }
         };
-        match value {
-            Expr::Int(_) | Expr::Float(_) => true,
-            Expr::Index { .. } => self.slice_leaf(value).is_some_and(|(elem, shape)| meet(elem, shape)),
-            Expr::Var(name) => match self.lookup(name) {
+        match &value.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) => true,
+            ExprKind::Index { .. } => self.slice_leaf(value).is_some_and(|(elem, shape)| meet(elem, shape)),
+            ExprKind::Var(name) => match self.lookup(name) {
                 Some(Binding::Tile(t) | Binding::View(t)) => meet(self.elem(t), self.shape(t)),
                 _ => true,
             },
-            Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
+            ExprKind::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 self.decl_leaves(lhs, found) && self.decl_leaves(rhs, found)
             }
-            Expr::Unary {
+            ExprKind::Unary {
                 op: UnOp::Neg | UnOp::BitNot,
                 rhs,
             } => self.decl_leaves(rhs, found),
-            Expr::Call { callee, args } => match (callee.as_str(), &args[..]) {
+            ExprKind::Call { callee, args } => match (callee.as_str(), &args[..]) {
                 ("iota", _) => true,
                 ("tmax", [a, b]) | ("where", [_, a, b]) => {
                     self.decl_leaves(a, found) && self.decl_leaves(b, found)
@@ -174,7 +174,7 @@ impl Build {
     /// Whether `callee(arg)` converts a named, fusable unsigned tile, which
     /// the sweep reads zero-extended.
     fn is_unsigned_cast(&self, callee: &str, arg: &Expr) -> bool {
-        let Expr::Var(name) = arg else {
+        let ExprKind::Var(name) = &arg.kind else {
             return false;
         };
         let Some(Binding::Tile(t) | Binding::View(t)) = self.lookup(name) else {
@@ -189,13 +189,13 @@ impl Build {
     /// Interior nodes of a `where` condition: comparisons of fusable trees,
     /// joined by `&&` and `||`.
     fn fusable_cond(&self, cond: &Expr) -> Option<usize> {
-        match cond {
-            Expr::Binary {
+        match &cond.kind {
+            ExprKind::Binary {
                 op: BinOp::And | BinOp::Or,
                 lhs,
                 rhs,
             } => Some(1 + self.fusable_cond(lhs)? + self.fusable_cond(rhs)?),
-            Expr::Binary { op, lhs, rhs } if op.is_compare() => {
+            ExprKind::Binary { op, lhs, rhs } if op.is_compare() => {
                 Some(1 + self.fusable_nodes(lhs)? + self.fusable_nodes(rhs)?)
             }
             _ => None,
@@ -206,8 +206,8 @@ impl Build {
     /// leaf becomes an operand of the fused op; a scalar leaf is coerced to
     /// the target's element type here.
     fn plan_fused(&mut self, value: &Expr, plan: &mut Plan) -> Result<Tree> {
-        Ok(match value {
-            Expr::Binary { op, lhs, rhs } if op.is_elementwise() => {
+        Ok(match &value.kind {
+            ExprKind::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 let a = self.plan_fused(lhs, plan)?;
                 let b = self.plan_fused(rhs, plan)?;
                 self.scalar_to_int_side(&a, &b, plan)?;
@@ -215,10 +215,10 @@ impl Build {
                 Tree::Binary(*op, Box::new(a), Box::new(b))
             }
             // -x is 0 - x and ~x is x ^ -1, against a scalar leaf.
-            Expr::Unary {
+            ExprKind::Unary {
                 op: op @ (UnOp::Neg | UnOp::BitNot),
                 rhs,
-            } if !matches!(**rhs, Expr::Int(_) | Expr::Float(_)) => {
+            } if !matches!(&rhs.kind, ExprKind::Int(_) | ExprKind::Float(_)) => {
                 let x = Box::new(self.plan_fused(rhs, plan)?);
                 if *op == UnOp::Neg {
                     let zero = self.const_index(0);
@@ -230,13 +230,13 @@ impl Build {
                     Tree::Binary(BinOp::BitXor, x, ones)
                 }
             }
-            Expr::Call { callee, args } if args.len() == 1 && ElemStep::from_callee(callee).is_some() => {
+            ExprKind::Call { callee, args } if args.len() == 1 && ElemStep::from_callee(callee).is_some() => {
                 let step = ElemStep::from_callee(callee).expect("checked above");
                 let inner = self.plan_fused(&args[0], plan)?;
                 Tree::Unary(step, Box::new(inner))
             }
-            Expr::Call { callee, args } if callee == "iota" => {
-                let [Expr::Int(d)] = args[..] else {
+            ExprKind::Call { callee, args } if callee == "iota" => {
+                let [Expr { kind: ExprKind::Int(d), .. }] = args[..] else {
                     bail!("iota expects one literal axis");
                 };
                 let rank = plan.rank;
@@ -246,25 +246,25 @@ impl Build {
                 );
                 Tree::Iota(d as usize)
             }
-            Expr::Call { callee, args } if args.len() == 3 && callee == "where" => {
+            ExprKind::Call { callee, args } if args.len() == 3 && callee == "where" => {
                 let c = self.plan_cond(&args[0], plan)?;
                 let a = self.plan_fused(&args[1], plan)?;
                 let b = self.plan_fused(&args[2], plan)?;
                 Tree::Select(Box::new(c), Box::new(a), Box::new(b))
             }
-            Expr::Call { callee, args } if args.len() == 2 && callee == "tmax" => {
+            ExprKind::Call { callee, args } if args.len() == 2 && callee == "tmax" => {
                 let a = self.plan_fused(&args[0], plan)?;
                 let b = self.plan_fused(&args[1], plan)?;
                 Tree::Max(Box::new(a), Box::new(b))
             }
-            Expr::Var(name) if self.fusing_regs && matches!(self.lookup(name), Some(Binding::Regs(_))) => {
+            ExprKind::Var(name) if self.fusing_regs && matches!(self.lookup(name), Some(Binding::Regs(_))) => {
                 let Some(Binding::Regs(r)) = self.lookup(name) else {
                     unreachable!("matched above");
                 };
                 plan.operands.push(r);
                 Tree::Leaf(plan.operands.len() - 1)
             }
-            other => match self.emit_expr(other)? {
+            _ => match self.emit_expr(value)? {
                 Rv::Scalar(v) => self.scalar_leaf(v, plan)?,
                 Rv::Tile(t) => {
                     plan.leaves.push(t);
@@ -330,7 +330,7 @@ impl Build {
 
     /// A `where` condition's tree, which `fusable_cond` accepted.
     fn plan_cond(&mut self, cond: &Expr, plan: &mut Plan) -> Result<Tree> {
-        let Expr::Binary { op, lhs, rhs } = cond else {
+        let ExprKind::Binary { op, lhs, rhs } = &cond.kind else {
             bail!("a `where` condition must be a comparison");
         };
         let (a, b) = if op.is_compare() {

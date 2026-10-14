@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use super::pipeline::PipelineDecline;
 use super::{Binding, Build, DYN, Rv, gcd};
-use crate::ast::{AssignOp, BinOp, Dim, Expr, Scalar as AstScalar, Stmt, Sub, Type as AstType};
+use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Stmt, Sub, Type as AstType};
 use crate::ir::{
     BlockId, Bounds, ForInfo, Layout, OpKind, Scalar, Space, Stage, TileType, Type, ValueId,
 };
@@ -203,7 +203,7 @@ impl Build {
         }
         let unfused = matches!(
             value,
-            Expr::Call { callee, .. } if matches!(callee.as_str(),
+            Expr { kind: ExprKind::Call { callee, .. }, .. } if matches!(callee.as_str(),
                 "exp" | "log" | "round" | "sqrt" | "tanh" | "tmax" | "rowmax" | "rowsum" | "rowargmax" | "cumsum"
                 | "tril" | "transpose")
         ) && self.fusable_nodes(value).unwrap_or(0) < 1;
@@ -248,8 +248,8 @@ impl Build {
     }
 
     pub(crate) fn emit_assign(&mut self, target: &Expr, op: AssignOp, value: &Expr) -> Result<()> {
-        match target {
-            Expr::Var(name) => match self.lookup(name) {
+        match &target.kind {
+            ExprKind::Var(name) => match self.lookup(name) {
                 Some(Binding::Var { slot, elem }) => {
                     let rhs = self.emit_scalar(value)?;
                     let rhs = match op {
@@ -271,7 +271,7 @@ impl Build {
                 Some(_) => bail!("'{name}' is not assignable (declare it with `var`)"),
                 None => bail!("unknown identifier '{name}'"),
             },
-            Expr::Index { base, subs } => {
+            ExprKind::Index { base, subs } => {
                 let (mv, binding) = self.mem_base(base)?;
                 if subs.iter().all(|s| matches!(s, Sub::Point(_))) {
                     let indices = self.emit_indices(subs, self.shape(mv).len())?;
@@ -430,10 +430,10 @@ impl Build {
         let mut found = false;
         for stmt in body {
             stmt.walk_exprs(&mut |e| {
-                let Expr::Index { base, subs } = e else {
+                let ExprKind::Index { base, subs } = &e.kind else {
                     return;
                 };
-                let Expr::Var(name) = &**base else {
+                let ExprKind::Var(name) = &base.kind else {
                     return;
                 };
                 let Some(Binding::Tensor(src)) = self.lookup(name) else {

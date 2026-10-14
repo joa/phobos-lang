@@ -3,7 +3,7 @@ use std::fmt;
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, Rv};
-use crate::ast::{Expr, Stmt, Sub, Type as AstType};
+use crate::ast::{Expr, ExprKind, Stmt, Sub, Type as AstType};
 use crate::ast::BinOp;
 use crate::ir::{Bounds, ForInfo, IndexOp, OpKind, Pipeline, Scalar, Stage, Type, ValueId};
 
@@ -270,9 +270,9 @@ impl Build {
     /// with its own barrier.
     fn ends_with_tile_op(&self, stmts: &[Stmt]) -> bool {
         match stmts.last() {
-            Some(Stmt::Assign { target, .. }) => match target {
-                Expr::Var(n) => matches!(self.lookup(n), Some(Binding::Tile(_))),
-                Expr::Index { subs, .. } => subs.iter().any(|s| !matches!(s, Sub::Point(_))),
+            Some(Stmt::Assign { target, .. }) => match &target.kind {
+                ExprKind::Var(n) => matches!(self.lookup(n), Some(Binding::Tile(_))),
+                ExprKind::Index { subs, .. } => subs.iter().any(|s| !matches!(s, Sub::Point(_))),
                 _ => false,
             },
             Some(Stmt::Var {

@@ -16,21 +16,13 @@ pub(super) fn rewrite_step_store(step: &mut Kernel, d: &Define) {
         return;
     };
     let acc_term = match &epi.alpha {
-        Some(a) => Expr::Binary {
-            op: BinOp::Mul,
-            lhs: Box::new(a.clone()),
-            rhs: Box::new(Expr::Var(epi.acc.clone())),
-        },
-        None => Expr::Var(epi.acc.clone()),
+        Some(a) => Expr::binary(BinOp::Mul, a.clone(), Expr::var(epi.acc.clone())),
+        None => Expr::var(epi.acc.clone()),
     };
     match &epi.prev {
         Some((_, c_old)) => {
             *op = AssignOp::Set;
-            *value = Expr::Binary {
-                op: BinOp::Add,
-                lhs: Box::new(acc_term),
-                rhs: Box::new(Expr::Var(c_old.clone())),
-            };
+            *value = Expr::binary(BinOp::Add, acc_term, Expr::var(c_old.clone()));
         }
         None => {
             *op = AssignOp::Add;
@@ -42,7 +34,7 @@ pub(super) fn rewrite_step_store(step: &mut Kernel, d: &Define) {
 pub(super) fn has_cluster_loop(body: &[Stmt], super_set: &HashSet<String>) -> bool {
     body.iter().any(|s| match s {
         Stmt::For { step, body, .. } => {
-            matches!(step, Some(Expr::Var(v)) if super_set.contains(v))
+            step.as_ref().and_then(Expr::as_var).is_some_and(|v| super_set.contains(v))
                 || has_cluster_loop(body, super_set)
         }
         Stmt::While { body, .. } => has_cluster_loop(body, super_set),

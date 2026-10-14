@@ -1,4 +1,4 @@
-use phobos_lang::ast::{AssignOp, BinOp, Dim, Expr, Kernel, Stmt};
+use phobos_lang::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Kernel, Stmt};
 
 use super::compile;
 use crate::ir::{ClusterStmt, Coord, SuperTile};
@@ -263,10 +263,14 @@ fn gemm_leaves() {
     let Some(Stmt::Assign {
         op: AssignOp::Set,
         value:
-            Expr::Binary {
-                op: BinOp::Add,
-                lhs,
-                rhs,
+            Expr {
+                kind:
+                    ExprKind::Binary {
+                        op: BinOp::Add,
+                        lhs,
+                        rhs,
+                    },
+                ..
             },
         ..
     }) = step.kernel.body.last()
@@ -274,11 +278,11 @@ fn gemm_leaves() {
         panic!("step leaf must end in `C[..] = alpha*acc + c_old`");
     };
     assert!(
-        matches!(lhs.as_ref(), Expr::Binary { op: BinOp::Mul, .. }),
+        matches!(&lhs.kind, ExprKind::Binary { op: BinOp::Mul, .. }),
         "step store's acc term should be alpha*acc"
     );
     assert!(
-        matches!(rhs.as_ref(), Expr::Var(n) if n == "c_old"),
+        matches!(&rhs.kind, ExprKind::Var(n) if n == "c_old"),
         "step store's prior-C term should be c_old with an implicit beta of 1"
     );
 

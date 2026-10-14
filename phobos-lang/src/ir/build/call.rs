@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape};
-use crate::ast::{Expr, Scalar as AstScalar, ctx};
+use crate::ast::{Expr, ExprKind, Scalar as AstScalar, ctx};
 use crate::ir::{
     ElemStep, Intrinsic, Map, MathFn, OpKind, RawFmt, Reduce, Scalar, Space, Stage, ThreadIndex, Type,
     ValueId,
@@ -16,7 +16,7 @@ impl Build {
         }
         match callee {
             ctx::BLOCK | ctx::BLOCKS => {
-                let [Expr::Int(d @ 0..=2)] = args else {
+                let [Expr { kind: ExprKind::Int(d @ 0..=2), .. }] = args else {
                     unreachable!("the parser builds ctx fields with an axis 0..=2");
                 };
                 let kind = if callee == ctx::BLOCK { OpKind::ProgramId(*d as u8) } else { OpKind::GridDim(*d as u8) };
@@ -208,7 +208,7 @@ impl Build {
                     "rowsum" => Reduce::RowSum,
                     _ => Reduce::RowArgMax,
                 };
-                if let [Expr::Var(name)] = args
+                if let [Expr { kind: ExprKind::Var(name), .. }] = args
                     && let Some(Binding::Regs(regs)) = self.lookup(name)
                     && let Some(out) = self.regs_reduce(how, regs)
                 {
@@ -535,7 +535,7 @@ impl Build {
 
     /// An atomic's tensor operand: a named tensor parameter.
     fn atomic_tensor<'e>(&self, t: &'e Expr, what: &str) -> Result<(ValueId, &'e str)> {
-        let Expr::Var(name) = t else {
+        let ExprKind::Var(name) = &t.kind else {
             bail!("{what} expects a named tensor parameter");
         };
         let Some(Binding::Tensor(mem)) = self.lookup(name) else {
@@ -546,7 +546,7 @@ impl Build {
 
     /// The atomic-state operand: a named `i32` tensor parameter.
     fn barrier_tensor(&self, e: &Expr, what: &str) -> Result<ValueId> {
-        let Expr::Var(name) = e else {
+        let ExprKind::Var(name) = &e.kind else {
             bail!("{what} expects a named i32 tensor parameter");
         };
         let Some(Binding::Tensor(mem)) = self.lookup(name) else {

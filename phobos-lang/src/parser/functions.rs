@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use super::super::ast::lanes::{self, Fold};
-use super::super::ast::{Expr, Kernel, Stmt, Sub};
+use super::super::ast::{Expr, ExprKind, Kernel, Stmt, Sub};
 
 /// How deep calls may nest before inlining gives up, which also catches
 /// recursion.
@@ -60,7 +60,7 @@ impl<'a> Inliner<'a> {
     fn stmts(&mut self, stmts: Vec<Stmt>, depth: usize) -> Result<Vec<Stmt>, String> {
         let mut out = Vec::new();
         for stmt in stmts {
-            if let Stmt::Expr(Expr::Call { callee, args }, _) = &stmt
+            if let Stmt::Expr(Expr { kind: ExprKind::Call { callee, args }, .. }, _) = &stmt
                 && let Some(f) = self.find(callee)
                 && let Body::Stmts(_) = f.body
             {
@@ -76,22 +76,26 @@ impl<'a> Inliner<'a> {
         Ok(match stmt {
             Stmt::Let {
                 name,
+                name_span,
                 ty,
                 value,
                 span,
             } => Stmt::Let {
                 name,
+                name_span,
                 ty,
                 value: self.expr(value, depth)?,
                 span,
             },
             Stmt::Var {
                 name,
+                name_span,
                 ty,
                 value,
                 span,
             } => Stmt::Var {
                 name,
+                name_span,
                 ty,
                 value: value.map(|v| self.expr(v, depth)).transpose()?,
                 span,
@@ -109,6 +113,7 @@ impl<'a> Inliner<'a> {
             },
             Stmt::For {
                 var,
+                var_span,
                 start,
                 end,
                 step,
@@ -117,6 +122,7 @@ impl<'a> Inliner<'a> {
                 span,
             } => Stmt::For {
                 var,
+                var_span,
                 start: self.expr(start, depth)?,
                 end: self.expr(end, depth)?,
                 step: step.map(|s| self.expr(s, depth)).transpose()?,
@@ -144,29 +150,31 @@ impl<'a> Inliner<'a> {
         })
     }
 
-    /// Rewrites calls to expression functions inside `e`.
+    /// Rewrites calls to expression functions inside `e`. An inlined body
+    /// keeps the spans of the function it came from.
     fn expr(&mut self, e: Expr, depth: usize) -> Result<Expr, String> {
-        Ok(match e {
-            Expr::Call { callee, mut args } if is_reduce(&callee, &args) => {
+        let span = e.span;
+        let kind = match e.kind {
+            ExprKind::Call { callee, mut args } if is_reduce(&callee, &args) => {
                 // The combine is named, not called: its body over the two
                 // operands the butterfly hands it.
-                if let Some(Expr::Var(name)) = args.last()
+                if let Some(name) = args.last().and_then(Expr::as_var)
                     && let Some(f) = self.find(name)
                 {
                     let Body::Expr(body) = &f.body else {
                         return Err(format!("`{name}` has a statement body and cannot combine a reduce"));
                     };
-                    let map = bind(f, &[Expr::Var(lanes::COMBINE_A.into()), Expr::Var(lanes::COMBINE_B.into())])?;
+                    let map = bind(f, &[Expr::var(lanes::COMBINE_A), Expr::var(lanes::COMBINE_B)])?;
                     let body = subst(body, &map, &HashMap::new())?;
                     *args.last_mut().expect("a reduce has a combine") = body;
                 }
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
-                Expr::Call { callee, args }
+                ExprKind::Call { callee, args }
             }
-            Expr::Call { callee, args } => {
+            ExprKind::Call { callee, args } => {
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
                 let Some(f) = self.find(&callee) else {
-                    return Ok(Expr::Call { callee, args });
+                    return Ok(Expr::new(ExprKind::Call { callee, args }, span));
                 };
                 let Body::Expr(body) = &f.body else {
                     return Err(format!("`{callee}` has a statement body and cannot be used as a value"));
@@ -174,23 +182,24 @@ impl<'a> Inliner<'a> {
                 let map = bind(f, &args)?;
                 let body = subst(body, &map, &HashMap::new())?;
                 self.deeper(depth, &callee)?;
-                self.expr(body, depth + 1)?
+                return self.expr(body, depth + 1);
             }
-            Expr::Unary { op, rhs } => Expr::Unary {
+            ExprKind::Unary { op, rhs } => ExprKind::Unary {
                 op,
                 rhs: Box::new(self.expr(*rhs, depth)?),
             },
-            Expr::Binary { op, lhs, rhs } => Expr::Binary {
+            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
                 op,
                 lhs: Box::new(self.expr(*lhs, depth)?),
                 rhs: Box::new(self.expr(*rhs, depth)?),
             },
-            Expr::Index { base, subs } => Expr::Index {
+            ExprKind::Index { base, subs } => ExprKind::Index {
                 base: Box::new(self.expr(*base, depth)?),
                 subs: subs.into_iter().map(|s| self.sub(s, depth)).collect::<Result<_, _>>()?,
             },
             other => other,
-        })
+        };
+        Ok(Expr::new(kind, span))
     }
 
     fn sub(&mut self, s: Sub, depth: usize) -> Result<Sub, String> {
@@ -280,37 +289,38 @@ fn locals(body: &[Stmt]) -> Vec<String> {
 /// `e` with each parameter replaced by its argument and each local renamed.
 fn subst(e: &Expr, args: &HashMap<String, Expr>, renames: &HashMap<String, String>) -> Result<Expr, String> {
     let go = |e: &Expr| subst(e, args, renames);
-    Ok(match e {
-        Expr::Var(name) => match (renames.get(name), args.get(name)) {
-            (Some(local), _) => Expr::Var(local.clone()),
-            (None, Some(arg)) => arg.clone(),
-            (None, None) => e.clone(),
+    let kind = match &e.kind {
+        ExprKind::Var(name) => match (renames.get(name), args.get(name)) {
+            (Some(local), _) => ExprKind::Var(local.clone()),
+            (None, Some(arg)) => return Ok(arg.clone()),
+            (None, None) => return Ok(e.clone()),
         },
-        Expr::Unary { op, rhs } => Expr::Unary {
+        ExprKind::Unary { op, rhs } => ExprKind::Unary {
             op: *op,
             rhs: Box::new(go(rhs)?),
         },
-        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
             op: *op,
             lhs: Box::new(go(lhs)?),
             rhs: Box::new(go(rhs)?),
         },
-        Expr::Index { base, subs } => {
+        ExprKind::Index { base, subs } => {
             let base = go(base)?;
-            if !matches!(base, Expr::Var(_)) {
+            if base.as_var().is_none() {
                 return Err("a parameter that is indexed must be passed a name".into());
             }
-            Expr::Index {
+            ExprKind::Index {
                 base: Box::new(base),
                 subs: subs.iter().map(|s| subst_sub(s, args, renames)).collect::<Result<_, _>>()?,
             }
         }
-        Expr::Call { callee, args: call_args } => Expr::Call {
+        ExprKind::Call { callee, args: call_args } => ExprKind::Call {
             callee: callee.clone(),
             args: call_args.iter().map(go).collect::<Result<_, _>>()?,
         },
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => e.clone(),
-    })
+        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => return Ok(e.clone()),
+    };
+    Ok(Expr::new(kind, e.span))
 }
 
 fn subst_sub(s: &Sub, args: &HashMap<String, Expr>, renames: &HashMap<String, String>) -> Result<Sub, String> {
@@ -337,22 +347,26 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
     Ok(match stmt {
         Stmt::Let {
             name,
+            name_span,
             ty,
             value,
             span,
         } => Stmt::Let {
             name: rename(name),
+            name_span: *name_span,
             ty: ty.clone(),
             value: go(value)?,
             span: *span,
         },
         Stmt::Var {
             name,
+            name_span,
             ty,
             value,
             span,
         } => Stmt::Var {
             name: rename(name),
+            name_span: *name_span,
             ty: ty.clone(),
             value: value.as_ref().map(go).transpose()?,
             span: *span,
@@ -364,9 +378,9 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
             span,
         } => {
             let target = go(target)?;
-            let lvalue = match &target {
-                Expr::Var(_) => true,
-                Expr::Index { base, .. } => matches!(**base, Expr::Var(_)),
+            let lvalue = match &target.kind {
+                ExprKind::Var(_) => true,
+                ExprKind::Index { base, .. } => matches!(&base.kind, ExprKind::Var(_)),
                 _ => false,
             };
             if !lvalue {
@@ -381,6 +395,7 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
         }
         Stmt::For {
             var,
+            var_span,
             start,
             end,
             step,
@@ -389,6 +404,7 @@ fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<Strin
             span,
         } => Stmt::For {
             var: rename(var),
+            var_span: *var_span,
             start: go(start)?,
             end: go(end)?,
             step: step.as_ref().map(go).transpose()?,

@@ -43,7 +43,7 @@ impl<'a> Analyzer<'a> {
                 }
                 Sub::Span { start, len } => {
                     if let Some(ScalarValue::PidSuper(i, s)) = self.classify_scalar(start)? {
-                        let Expr::Var(ls) = len else {
+                        let ExprKind::Var(ls) = &len.kind else {
                             bail!("grid slice extent must be the @cluster dim '{s}'");
                         };
                         if ls != &s {
@@ -54,7 +54,7 @@ impl<'a> Analyzer<'a> {
                         coords.push(Coord::Grid(i));
                         continue;
                     }
-                    if let Expr::Var(v) = start
+                    if let ExprKind::Var(v) = &start.kind
                         && let Some(Binding::DeviceLoop(swept)) = self.symbols.get(v).cloned()
                     {
                         let sym = self.axis_dim_sym(tensor, axis, &dim)?;
@@ -103,7 +103,7 @@ impl<'a> Analyzer<'a> {
                     self.tensors[tensor].name
                 );
             };
-            let Expr::Var(s) = len else {
+            let ExprKind::Var(s) = &len.kind else {
                 bail!("slice extent must be a @cluster dim");
             };
             if !self.super_set.contains(s) {
@@ -119,7 +119,7 @@ impl<'a> Analyzer<'a> {
                 coords.push(Coord::Grid(i));
                 continue;
             }
-            if let Expr::Var(v) = start
+            if let ExprKind::Var(v) = &start.kind
                 && let Some(Binding::LoopVar(step)) = self.symbols.get(v)
             {
                 if step != s {
@@ -141,25 +141,25 @@ impl<'a> Analyzer<'a> {
     }
 
     pub(super) fn classify_scalar(&self, e: &Expr) -> Result<Option<ScalarValue>> {
-        match e {
-            Expr::Call { callee, args } if callee == phobos_lang::ast::ctx::BLOCK => {
-                let [Expr::Int(i)] = args.as_slice() else {
+        match &e.kind {
+            ExprKind::Call { callee, args } if callee == phobos_lang::ast::ctx::BLOCK => {
+                let [Expr { kind: ExprKind::Int(i), .. }] = args.as_slice() else {
                     unreachable!("the parser builds ctx.block with one literal axis");
                 };
                 Ok(Some(ScalarValue::Pid(*i as usize)))
             }
-            Expr::Var(n) => Ok(match self.symbols.get(n) {
+            ExprKind::Var(n) => Ok(match self.symbols.get(n) {
                 Some(Binding::Scalar(sv)) => Some(sv.clone()),
                 _ => None,
             }),
-            Expr::Binary {
+            ExprKind::Binary {
                 op: BinOp::Mul,
                 lhs,
                 rhs,
             } => {
                 // `pid * SUPER` or `SUPER * pid`
                 for (a, b) in [(lhs, rhs), (rhs, lhs)] {
-                    if let Expr::Var(s) = b.as_ref()
+                    if let ExprKind::Var(s) = &b.kind
                         && self.super_set.contains(s)
                         && let Some(ScalarValue::Pid(i)) = self.classify_scalar(a)?
                     {
@@ -237,9 +237,9 @@ impl<'a> Analyzer<'a> {
         e: &Expr,
         out: &mut Vec<(usize, SuperTile)>,
     ) -> Result<()> {
-        match e {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => Ok(()),
-            Expr::Var(n) => match self.symbols.get(n).cloned() {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => Ok(()),
+            ExprKind::Var(n) => match self.symbols.get(n).cloned() {
                 Some(Binding::Ref(r)) => {
                     out.push((r.tensor, r));
                     Ok(())
@@ -255,8 +255,8 @@ impl<'a> Analyzer<'a> {
                 }
                 None => bail!("unknown identifier '{n}' in a supertile computation"),
             },
-            Expr::Index { base, subs } => {
-                let Expr::Var(t) = base.as_ref() else {
+            ExprKind::Index { base, subs } => {
+                let ExprKind::Var(t) = &base.kind else {
                     bail!("unsupported indexing in a supertile computation");
                 };
                 let Some(&ti) = self.tindex.get(t) else {
@@ -266,18 +266,18 @@ impl<'a> Analyzer<'a> {
                 out.push((ti, r));
                 Ok(())
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { lhs, rhs, .. } => {
                 self.collect_reads(lhs, out)?;
                 self.collect_reads(rhs, out)
             }
-            Expr::Unary { rhs, .. } => self.collect_reads(rhs, out),
-            Expr::Call { callee, args } if callee == "dot" => {
+            ExprKind::Unary { rhs, .. } => self.collect_reads(rhs, out),
+            ExprKind::Call { callee, args } if callee == "dot" => {
                 for a in args {
                     self.collect_reads(a, out)?;
                 }
                 Ok(())
             }
-            Expr::Call { callee, .. } => {
+            ExprKind::Call { callee, .. } => {
                 bail!("call to '{callee}' is not supported in a supertile computation")
             }
         }
@@ -285,11 +285,11 @@ impl<'a> Analyzer<'a> {
 
     /// Whether `e` reads the accumulator scratch tile anywhere.
     pub(super) fn uses_scratch(&self, e: &Expr) -> bool {
-        match e {
-            Expr::Var(n) => matches!(self.symbols.get(n), Some(Binding::Scratch)),
-            Expr::Binary { lhs, rhs, .. } => self.uses_scratch(lhs) || self.uses_scratch(rhs),
-            Expr::Unary { rhs, .. } => self.uses_scratch(rhs),
-            Expr::Call { args, .. } => args.iter().any(|a| self.uses_scratch(a)),
+        match &e.kind {
+            ExprKind::Var(n) => matches!(self.symbols.get(n), Some(Binding::Scratch)),
+            ExprKind::Binary { lhs, rhs, .. } => self.uses_scratch(lhs) || self.uses_scratch(rhs),
+            ExprKind::Unary { rhs, .. } => self.uses_scratch(rhs),
+            ExprKind::Call { args, .. } => args.iter().any(|a| self.uses_scratch(a)),
             _ => false,
         }
     }
@@ -297,9 +297,9 @@ impl<'a> Analyzer<'a> {
     /// Collect the scalar-parameter indices an epilogue coefficient references,
     /// in first-appearance order. Any non-scalar term is an error.
     pub(super) fn collect_scalar_refs(&self, e: &Expr, out: &mut Vec<usize>) -> Result<()> {
-        match e {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => Ok(()),
-            Expr::Var(n) => match self.scalars.iter().position(|s| &s.name == n) {
+        match &e.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => Ok(()),
+            ExprKind::Var(n) => match self.scalars.iter().position(|s| &s.name == n) {
                 Some(i) => {
                     if !out.contains(&i) {
                         out.push(i);
@@ -308,11 +308,11 @@ impl<'a> Analyzer<'a> {
                 }
                 None => bail!("epilogue coefficient '{n}' is not a scalar parameter"),
             },
-            Expr::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { lhs, rhs, .. } => {
                 self.collect_scalar_refs(lhs, out)?;
                 self.collect_scalar_refs(rhs, out)
             }
-            Expr::Unary { rhs, .. } => self.collect_scalar_refs(rhs, out),
+            ExprKind::Unary { rhs, .. } => self.collect_scalar_refs(rhs, out),
             _ => bail!("epilogue coefficients must be arithmetic over scalar parameters"),
         }
     }

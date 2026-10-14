@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN, Rv};
-use crate::ast::{AssignOp, BinOp, Expr};
+use crate::ast::{AssignOp, BinOp, Expr, ExprKind};
 use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, Tree, Type, ValueId};
 
 impl Build {
@@ -12,7 +12,7 @@ impl Build {
     pub(crate) fn store_tile(&mut self, target: ValueId, op: AssignOp, value: &Expr) -> Result<()> {
         // <slice or tile> = a register tile of its shape: each thread writes
         // its own elements.
-        if let Expr::Var(n) = value
+        if let ExprKind::Var(n) = &value.kind
             && let Some(Binding::Regs(r)) = self.lookup(n)
             && op == AssignOp::Set
             && !self.is_masked(target)
@@ -22,7 +22,7 @@ impl Build {
             return Ok(());
         }
         // <tensor slice> = acc for a fragment accumulator.
-        if let Expr::Var(n) = value
+        if let ExprKind::Var(n) = &value.kind
             && let Some(Binding::Frags(fa)) = self.lookup(n)
         {
             if op != AssignOp::Set {
@@ -34,9 +34,9 @@ impl Build {
 
         // t = exp(t) rewrites the tile in place.
         if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
+            && let ExprKind::Call { callee, args } = &value.kind
             && callee == "exp"
-            && let [Expr::Var(n)] = &args[..]
+            && let [Expr { kind: ExprKind::Var(n), .. }] = &args[..]
             && let Some(Binding::Tile(src)) = self.lookup(n)
             && self.is_buffer(src)
             && src == target
@@ -49,7 +49,7 @@ impl Build {
 
         // t = qmma_t(..) writes the accumulators where they are wanted.
         if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
+            && let ExprKind::Call { callee, args } = &value.kind
             && let Some(qmma @ (Intrinsic::QmmaT | Intrinsic::Q50mmaT)) = Intrinsic::from_name(callee)
             && f32_target
         {
@@ -60,7 +60,7 @@ impl Build {
         }
 
         if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
+            && let ExprKind::Call { callee, args } = &value.kind
             && callee == "iq1s_qmma_t"
             && f32_target
         {
@@ -71,7 +71,7 @@ impl Build {
         }
 
         if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
+            && let ExprKind::Call { callee, args } = &value.kind
             && let Some(fmt) = qgemm_format(callee)
             && f32_target
         {
@@ -82,7 +82,7 @@ impl Build {
         }
 
         if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
+            && let ExprKind::Call { callee, args } = &value.kind
             && callee == "iq1s_qmma_staged_t"
             && f32_target
         {
@@ -96,7 +96,7 @@ impl Build {
         }
 
         if op == AssignOp::Set
-            && let Expr::Call { callee, args } = value
+            && let ExprKind::Call { callee, args } = &value.kind
             && let Some(fmt) = staged_qmma_format(callee)
             && f32_target
         {
@@ -106,7 +106,7 @@ impl Build {
             return Ok(());
         }
 
-        if let Expr::Call { callee, args } = value
+        if let ExprKind::Call { callee, args } = &value.kind
             && (callee == "dot" || callee == "dot_t")
         {
             if self.is_masked(target) {
@@ -159,11 +159,11 @@ impl Build {
 
         // Fused GEMM epilogue: target = s1 * t1 + s2 * t2 in one loop.
         if op == AssignOp::Set
-            && let Expr::Binary {
+            && let ExprKind::Binary {
                 op: BinOp::Add,
                 lhs,
                 rhs,
-            } = value
+            } = &value.kind
             && let Some((s1_expr, t1_expr)) = self.as_scale_mul(lhs)
             && let Some((s2_expr, t2_expr)) = self.as_scale_mul(rhs)
         {
@@ -190,7 +190,7 @@ impl Build {
 
         // t = x * y directly into the target without a temp buffer.
         if op == AssignOp::Set
-            && let Expr::Binary { op: bop, lhs, rhs } = value
+            && let ExprKind::Binary { op: bop, lhs, rhs } = &value.kind
         {
             let l = self.emit_expr(lhs)?;
             return match (l, self.emit_expr(rhs)?) {

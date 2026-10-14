@@ -15,16 +15,14 @@ pub(super) const BREAK: &str = "#break";
 pub(super) const CONTINUE: &str = "#continue";
 pub(super) const RETURN: &str = "#return";
 
-/// A jump statement as the parser emits it.
-pub(super) fn jump(which: &str, span: Span) -> Stmt {
-    Stmt::Expr(Expr::Var(which.into()), span)
+/// A jump statement as the parser emits it, the keyword at `at`.
+pub(super) fn jump(which: &str, span: Span, at: crate::diag::Span) -> Stmt {
+    Stmt::Expr(Expr::var(which).at(at), span)
 }
 
 fn jump_of(stmt: &Stmt) -> Option<&str> {
     match stmt {
-        Stmt::Expr(Expr::Var(name), _) if [BREAK, CONTINUE, RETURN].contains(&name.as_str()) => {
-            Some(name.as_str())
-        }
+        Stmt::Expr(e, _) => e.as_var().filter(|name| [BREAK, CONTINUE, RETURN].contains(name)),
         _ => None,
     }
 }
@@ -88,17 +86,18 @@ fn uses(stmt: &Stmt, which: &str, through_loops: bool) -> bool {
 fn declare(flag: &str, span: Span) -> Stmt {
     Stmt::Var {
         name: flag.into(),
+        name_span: crate::diag::Span::default(),
         ty: None,
-        value: Some(Expr::Bool(false)),
+        value: Some(Expr::bool(false)),
         span,
     }
 }
 
 fn set(flag: &str, value: bool, span: Span) -> Stmt {
     Stmt::Assign {
-        target: Expr::Var(flag.into()),
+        target: Expr::var(flag),
         op: AssignOp::Set,
-        value: Expr::Bool(value),
+        value: Expr::bool(value),
         span,
     }
 }
@@ -107,17 +106,10 @@ fn set(flag: &str, value: bool, span: Span) -> Stmt {
 fn none_set(flags: &[&String]) -> Expr {
     let any = flags
         .iter()
-        .map(|f| Expr::Var((*f).clone()))
-        .reduce(|lhs, rhs| Expr::Binary {
-            op: BinOp::Or,
-            lhs: Box::new(lhs),
-            rhs: Box::new(rhs),
-        })
+        .map(|f| Expr::var(*f))
+        .reduce(|lhs, rhs| Expr::binary(BinOp::Or, lhs, rhs))
         .expect("at least one flag");
-    Expr::Unary {
-        op: UnOp::Not,
-        rhs: Box::new(any),
-    }
+    Expr::unary(UnOp::Not, any)
 }
 
 impl Desugar {
@@ -191,6 +183,7 @@ impl Desugar {
             }],
             Stmt::For {
                 var,
+                var_span,
                 start,
                 end,
                 step,
@@ -211,6 +204,7 @@ impl Desugar {
                 }
                 out.push(Stmt::For {
                     var,
+                    var_span,
                     start,
                     end,
                     step,
@@ -227,11 +221,8 @@ impl Desugar {
                 let cond = if stops.is_empty() {
                     cond
                 } else {
-                    Expr::Binary {
-                        op: BinOp::And,
-                        lhs: Box::new(cond),
-                        rhs: Box::new(none_set(&stops)),
-                    }
+                    let span = cond.span;
+                    Expr::binary(BinOp::And, cond, none_set(&stops)).at(span)
                 };
                 out.push(Stmt::While { cond, body, span });
                 out

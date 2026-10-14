@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN};
-use crate::ast::{AssignOp, BinOp, Expr, Scalar as AstScalar, Stmt, Type as AstType};
+use crate::ast::{AssignOp, BinOp, Expr, ExprKind, Scalar as AstScalar, Stmt, Type as AstType};
 use crate::ir::{Bounds, ForInfo, FragType, OpKind, Scalar, Type, ValueId};
 use crate::shape;
 
@@ -29,30 +29,30 @@ fn is_f16_or_f32(s: Scalar) -> bool {
 
 /// `f32(dot_t(a, w)) * s1 * s2` as its four names.
 fn scaled_dot_parts(value: &Expr) -> Option<[&str; 4]> {
-    let Expr::Binary {
+    let ExprKind::Binary {
         op: BinOp::Mul,
         lhs,
         rhs,
-    } = value
+    } = &value.kind
     else {
         return None;
     };
-    let Expr::Var(s2) = rhs.as_ref() else { return None };
-    let Expr::Binary {
+    let ExprKind::Var(s2) = &rhs.kind else { return None };
+    let ExprKind::Binary {
         op: BinOp::Mul,
         lhs: cast,
         rhs: s1,
-    } = lhs.as_ref()
+    } = &lhs.kind
     else {
         return None;
     };
-    let Expr::Var(s1) = s1.as_ref() else { return None };
-    let Expr::Call { callee, args } = cast.as_ref() else { return None };
-    let [Expr::Call { callee: dot, args }] = &args[..] else { return None };
+    let ExprKind::Var(s1) = &s1.kind else { return None };
+    let ExprKind::Call { callee, args } = &cast.kind else { return None };
+    let [Expr { kind: ExprKind::Call { callee: dot, args }, .. }] = &args[..] else { return None };
     if callee != "f32" || dot != "dot_t" {
         return None;
     }
-    let [Expr::Var(a), Expr::Var(w)] = &args[..] else { return None };
+    let [Expr { kind: ExprKind::Var(a), .. }, Expr { kind: ExprKind::Var(w), .. }] = &args[..] else { return None };
     Some([a, w, s1, s2])
 }
 
@@ -68,7 +68,7 @@ impl Build {
             Stmt::Var {
                 name,
                 ty: Some(AstType::Tile(AstScalar::F32, dims)),
-                value: Some(Expr::Float(init)),
+                value: Some(Expr { kind: ExprKind::Float(init), .. }),
                 ..
             },
             rest @ ..,
@@ -125,7 +125,7 @@ impl Build {
                     self.frag_scan_decl(n2, ty, value, scan);
                 }
                 Stmt::Assign {
-                    target: Expr::Var(t),
+                    target: Expr { kind: ExprKind::Var(t), .. },
                     op,
                     value,
                     ..
@@ -135,12 +135,12 @@ impl Build {
                     }
                 }
                 Stmt::Assign {
-                    target: target @ Expr::Index { base, subs },
+                    target: target @ Expr { kind: ExprKind::Index { base, subs }, .. },
                     op: AssignOp::Set,
-                    value: Expr::Var(v),
+                    value: Expr { kind: ExprKind::Var(v), .. },
                     ..
                 } if v == name => {
-                    let Expr::Var(t) = &**base else { return false };
+                    let ExprKind::Var(t) = &base.kind else { return false };
                     let Some(Binding::Tensor(c)) = self.lookup(t) else {
                         return false;
                     };
@@ -206,8 +206,8 @@ impl Build {
             None => value.and_then(|v| {
                 // A slice of a tile declared earlier in the scanned body,
                 // which is not bound yet.
-                if let Expr::Index { base, subs } = v
-                    && let Expr::Var(b) = base.as_ref()
+                if let ExprKind::Index { base, subs } = &v.kind
+                    && let ExprKind::Var(b) = &base.kind
                     && let Some((elem, shape)) = scan.decls.get(b)
                 {
                     return Some((*elem, self.slice_sizes(shape, subs)?));
@@ -285,13 +285,13 @@ impl Build {
         match (op, value) {
             (
                 AssignOp::Set,
-                Expr::Binary {
+                Expr { kind: ExprKind::Binary {
                     op: BinOp::Mul | BinOp::Div,
                     lhs,
                     rhs,
-                },
+                }, .. },
             ) => {
-                let (Expr::Var(l), Expr::Var(col)) = (lhs.as_ref(), rhs.as_ref()) else {
+                let (Some(l), Some(col)) = (lhs.as_var(), rhs.as_var()) else {
                     return false;
                 };
                 if l != name || col == name {
@@ -306,9 +306,9 @@ impl Build {
                 scan.imma = Some(false);
                 elem == Scalar::F32 && shape == [m, 1]
             }
-            (AssignOp::Add, Expr::Binary { .. }) => self.scaled_dot_ok(name, m, n, value, scan),
-            (AssignOp::Add, Expr::Call { callee, args }) if callee == "dot" => {
-                let [Expr::Var(a), Expr::Var(b)] = &args[..] else {
+            (AssignOp::Add, Expr { kind: ExprKind::Binary { .. }, .. }) => self.scaled_dot_ok(name, m, n, value, scan),
+            (AssignOp::Add, Expr { kind: ExprKind::Call { callee, args }, .. }) if callee == "dot" => {
+                let [Expr { kind: ExprKind::Var(a), .. }, Expr { kind: ExprKind::Var(b), .. }] = &args[..] else {
                     return false;
                 };
                 if a == name || b == name {
@@ -354,13 +354,13 @@ impl Build {
         match (op, value) {
             (
                 AssignOp::Set,
-                Expr::Binary {
+                Expr { kind: ExprKind::Binary {
                     op: bop @ (BinOp::Mul | BinOp::Div),
                     rhs,
                     ..
-                },
+                }, .. },
             ) => {
-                let Expr::Var(col) = rhs.as_ref() else {
+                let ExprKind::Var(col) = &rhs.kind else {
                     bail!("fragment scale needs a named column operand");
                 };
                 let Some(Binding::Tile(cmv) | Binding::View(cmv)) = self.lookup(col) else {
@@ -370,7 +370,7 @@ impl Build {
                 self.update_binding(name, Binding::Frags(next));
                 Ok(())
             }
-            (AssignOp::Add, Expr::Binary { .. }) => {
+            (AssignOp::Add, Expr { kind: ExprKind::Binary { .. }, .. }) => {
                 let Some(parts) = scaled_dot_parts(value) else {
                     bail!("fragment accumulator '{name}' takes f32(dot_t(a, w)) * row * col");
                 };
@@ -385,7 +385,7 @@ impl Build {
                 self.update_binding(name, Binding::Frags(next));
                 Ok(())
             }
-            (AssignOp::Add, Expr::Call { args, .. }) => {
+            (AssignOp::Add, Expr { kind: ExprKind::Call { args, .. }, .. }) => {
                 let (a, b) = self.dot_operands(args)?;
                 let next = self.value(OpKind::FragDot, &[acc, a, b], ty);
                 self.update_binding(name, Binding::Frags(next));
@@ -408,7 +408,7 @@ impl Build {
         for stmt in stmts {
             match stmt {
                 Stmt::Assign {
-                    target: Expr::Var(n),
+                    target: Expr { kind: ExprKind::Var(n), .. },
                     ..
                 } if !names.contains(n) => {
                     if matches!(self.lookup(n), Some(Binding::Frags(_) | Binding::Regs(_))) {
