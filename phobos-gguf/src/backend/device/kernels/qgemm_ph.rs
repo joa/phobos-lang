@@ -25,11 +25,14 @@ const _: () = assert!(QGEMM_TN * 4 == QGEMM_CTA);
 /// its group, and the statements that write the group from them. The words
 /// in `fetch` are loaded a stage ahead, those in `now` in their own stage.
 /// `pipelined` carries the next activation stage across the contraction.
+/// With `halves`, each 16 elements of a group has its own scale, row
+/// `2 gl + h` of `ws`.
 struct Decode {
     fetch: Vec<(&'static str, String)>,
     now: Vec<(&'static str, String)>,
     body: String,
     pipelined: bool,
+    halves: bool,
 }
 
 /// A format's `.ph` staged projection, for the formats written so far, whole
@@ -41,6 +44,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
     }
     match quant {
         Quant::IQ2_XXS => Some(staged(quant, "iq2xxs", 64, &iq2xxs_decode(), split)),
+        Quant::IQ2_XS => Some(staged(quant, "iq2xs", 72, &iq2xs_decode(), split)),
         Quant::IQ3_XXS => Some(staged(quant, "iq3xxs", 96, &iq3xxs_decode(), split)),
         _ => None,
     }
@@ -77,6 +81,7 @@ fn iq2xxs_decode() -> Decode {
         ],
         now: Vec::new(),
         pipelined: true,
+        halves: false,
         body: format!(
             "    ws[gl, jj] = d * 0.125 * f32(2 * ((hi >> 28) & 15) + 1)
     for<unroll 4> l in range(0, 4, 1) {{
@@ -130,6 +135,46 @@ fn iq3xxs_decode() -> Decode {
         now: vec![("aux", "word(QB[jr, BO + 64 + 4 * GG :+ 4], 0)".into())],
         body,
         pipelined: false,
+        halves: false,
+    }
+}
+
+/// IQ2_XS: a 32-element group is four halfwords, each a 9-bit grid index
+/// under 7 sign bits, and a scale byte at `64 + g` whose nibble `h` weights
+/// half `h` of the group by `d (2s + 1) / 8`.
+fn iq2xs_decode() -> Decode {
+    let mut body = String::new();
+    for h in 0..2 {
+        let _ = writeln!(body, "    ws[2 * gl + {h}, jj] = d * 0.125 * f32(2 * ((sc >> {}) & 15) + 1)", 4 * h);
+    }
+    for l in 0..4 {
+        let (q, at) = (if l < 2 { "lo" } else { "hi" }, 16 * (l % 2));
+        let _ = write!(
+            body,
+            "    let q{l} = ({q} >> {at}) & 65535
+    let gi{l} = (q{l} & 511) * 8
+    let sv{l} = q{l} >> 9
+    let sb{l} = sv{l} | ((popcount(sv{l}) & 1) << 7)
+{octet}",
+            octet = signed_octet(
+                &format!("w[jj, 32 * gl + {o} :+ 8]", o = 8 * l),
+                &format!("word(grid[0, gi{l} :+ 8], 0)"),
+                &format!("word(grid[0, gi{l} :+ 8], 1)"),
+                &l.to_string(),
+            )
+            .replace("      ", "    ")
+        );
+    }
+    Decode {
+        fetch: vec![
+            ("lo", "word(QB[jr, BO + 8 * GG :+ 8], 0)".into()),
+            ("hi", "word(QB[jr, BO + 8 * GG :+ 8], 1)".into()),
+            ("sc", "elem(QB[jr, BO + 64 + GG :+ 1], 0)".into()),
+        ],
+        now: Vec::new(),
+        body,
+        pipelined: false,
+        halves: true,
     }
 }
 
@@ -207,17 +252,21 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
     for (v, expr) in &decode.now {
         let _ = writeln!(take, "    let {v} = {}", at(expr, "kh"));
     }
+    // One update per scale: per group, or per half group.
+    let per_group = if decode.halves { 2 } else { 1 };
+    let width = 32 / per_group;
     let mut contract = String::new();
-    for s in 0..4 {
+    for s in 0..4 * per_group {
         let _ = write!(
             contract,
-            "    let a{s} = at[0 :+ TM, {k} :+ 32]
-    let da{s} = das[0 :+ TM, {s} :+ 1]
-    let w{s} = w[0 :+ TN, {k} :+ 32]
+            "    let a{s} = at[0 :+ TM, {k} :+ {width}]
+    let da{s} = das[0 :+ TM, {g} :+ 1]
+    let w{s} = w[0 :+ TN, {k} :+ {width}]
     let ws{s} = ws[{s} :+ 1, 0 :+ TN]
     acc += f32(dot_t(a{s}, w{s})) * ws{s} * da{s}
 ",
-            k = 32 * s
+            k = width * s,
+            g = s / per_group
         );
     }
     format!(
@@ -229,7 +278,7 @@ kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                   {params}{out}  let pm = ctx.block.x
 {ids}{grid}  var w: tile<i8>[TN, 128]
-  var ws: tile<f32>[4, TN]
+  var ws: tile<f32>[{scales}, TN]
   var acc: tile<f32>[TM, TN] = 0.0
   let jj = ctx.thread / 4
   let gl = ctx.thread % 4
@@ -249,6 +298,7 @@ kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }}
 ",
         body = decode.body,
+        scales = 4 * per_group,
         pipeline = if decode.pipelined { "@pipeline\n" } else { "" },
     )
 }
