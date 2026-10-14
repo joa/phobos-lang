@@ -203,8 +203,10 @@ impl Build {
                 let Rv::Tile(src) = b.emit_expr(expr)? else {
                     bail!("staged value must be a tensor slice");
                 };
-                let ty = b.like(src);
-                let buf = b.value(OpKind::Stage(Stage { pad: false, sync: true }), &[src], ty);
+                let (elem, shape) = (b.elem(src), b.shape(src));
+                let pad = b.should_pad_stage(elem, &shape);
+                let ty = if pad { b.padded_ty(elem, &shape) } else { b.like(src) };
+                let buf = b.value(OpKind::Stage(Stage { pad, sync: true }), &[src], ty);
                 bindings.push((name, Binding::View(buf)));
             }
             b.emit_scope(&bindings, rest)?;

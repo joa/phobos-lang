@@ -315,10 +315,11 @@ impl<'c> Codegen<'c> {
         Ok(out)
     }
 
-    /// Allocates a shared WMMA staging tile whose innermost dimension is
-    /// padded by [`WMMA_SMEM_PAD`] elements, spreading consecutive rows across
-    /// banks. The tile keeps its logical shape. The padding shows only in the
-    /// allocation and in row_stride, which WMMA reads as leadDimension.
+    /// Allocates a shared staging tile whose innermost dimension is padded
+    /// by [`crate::shape::stage_pad`] elements, spreading consecutive rows
+    /// across banks. The tile keeps its logical shape. The padding shows only
+    /// in the allocation and in row_stride, which WMMA reads as
+    /// leadDimension.
     pub(in crate::codegen) fn alloc_tile_padded(
         &mut self,
         block: &Block<'c>,
@@ -328,7 +329,7 @@ impl<'c> Codegen<'c> {
         let mut phys = shape.to_vec();
         let last = phys.len() - 1;
 
-        phys[last] += WMMA_SMEM_PAD;
+        phys[last] += crate::shape::stage_pad(i64::from(self.elem_bytes(elem).unwrap_or(4)));
 
         // Allocate the padded physical shape, then restore the logical one.
         let mut mv = self.alloc_tile_shaped(block, elem, &phys)?;

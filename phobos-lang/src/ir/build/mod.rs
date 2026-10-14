@@ -548,11 +548,12 @@ impl Build {
         })
     }
 
-    /// A padded staging tile: the row pitch widened by the WMMA pad.
+    /// A padded staging tile: the row pitch widened by
+    /// [`crate::shape::stage_pad`].
     pub(crate) fn padded_ty(&self, elem: Scalar, shape: &[i64]) -> Type {
         let mut phys = shape.to_vec();
         let last = phys.len() - 1;
-        phys[last] += WMMA_SMEM_PAD;
+        phys[last] += crate::shape::stage_pad(elem.bytes().unwrap_or(4));
         Type::Tile(TileType {
             elem,
             shape: shape.iter().map(|&d| extent(d)).collect(),
@@ -582,9 +583,6 @@ impl Build {
     }
 }
 
-/// The WMMA staging pad, in elements; kept in step with
-/// `codegen::WMMA_SMEM_PAD`.
-pub(crate) const WMMA_SMEM_PAD: i64 = 8;
 
 pub(crate) fn extent(d: i64) -> Extent {
     if d == DYN { Extent::Dyn } else { Extent::Fixed(d) }
