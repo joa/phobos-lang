@@ -47,7 +47,7 @@ fn main() -> Result<()> {
     for (rows, k, n) in SHAPES {
         // Random payload bytes with a small finite f16 scale up front. The
         // values do not change the time.
-        let mut blocks = vec![0u8; n * (k / 256) * block_bytes];
+        let mut blocks = vec![0u8; n * (k / quant.spec().block) * block_bytes];
         for chunk in blocks.chunks_exact_mut(block_bytes) {
             for byte in chunk.iter_mut() {
                 *byte = (((next() + 1.0) * 127.5) as i32).clamp(0, 255) as u8;
