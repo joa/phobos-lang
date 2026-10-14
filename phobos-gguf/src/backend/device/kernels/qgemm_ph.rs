@@ -50,6 +50,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
         Quant::IQ2_S => Some(staged(quant, "iq2s", 80, &iq2s_decode(), split)),
         Quant::IQ3_XXS => Some(staged(quant, "iq3xxs", 96, &iq3xxs_decode(), split)),
         Quant::IQ3_S => Some(staged(quant, "iq3s", 108, &iq3s_decode(), split)),
+        Quant::Q6_K => Some(staged(quant, "q6k", 208, &q6k_decode(), split)),
         _ => None,
     }
 }
@@ -140,6 +141,53 @@ fn iq3xxs_decode() -> Decode {
         body,
         pipelined: false,
         halves: false,
+    }
+}
+
+/// Q6_K: group `g` of a block is stream `j = g % 4` of half `n = g / 4`:
+/// its 6-bit values are nibble `j / 2` of the bytes at `64n + 32 (j % 2)`
+/// under bits `2j` of the bytes at `128 + 32n`, less 32, and each 16 of them
+/// is weighted by `d` times a signed scale byte at `192 + 8n + 2j`.
+fn q6k_decode() -> Decode {
+    let mut body = String::new();
+    for h in 0..2 {
+        let _ = writeln!(body, "    ws[2 * gl + {h}, jj] = d * f32(s{h})");
+    }
+    for o in 0..4 {
+        for t in 0..2 {
+            let _ = writeln!(
+                body,
+                "    let q{o}{t} = ((l{o}{t} >> (4 * (gl / 2))) & {LOW4}) | (((h{o}{t} >> (2 * gl)) & {LOW2}) << 4)
+    let v{o}{t} = ((q{o}{t} | {HIGH}) - {SUB}) ^ {HIGH}",
+                LOW4 = 0x0F0F_0F0Fu32,
+                LOW2 = 0x0303_0303u32,
+                HIGH = 0x8080_8080u32,
+                SUB = 0x2020_2020u32,
+            );
+        }
+        let _ = writeln!(body, "    store(w[jj, 32 * gl + {b} :+ 8], v{o}0, v{o}1)", b = 8 * o);
+    }
+    let mut now = Vec::new();
+    for o in 0..4 {
+        for t in 0..2 {
+            now.push((
+                ["l00", "l01", "l10", "l11", "l20", "l21", "l30", "l31"][2 * o + t],
+                format!("word(QB[jr, BO + 64 * (GG / 4) + 32 * (GG % 2) + {b} :+ 8], {t})", b = 8 * o),
+            ));
+            now.push((
+                ["h00", "h01", "h10", "h11", "h20", "h21", "h30", "h31"][2 * o + t],
+                format!("word(QB[jr, BO + 128 + 32 * (GG / 4) + {b} :+ 8], {t})", b = 8 * o),
+            ));
+        }
+    }
+    now.push(("s0", "elem(QB[jr, BO + 192 + 8 * (GG / 4) + 2 * (GG % 4) :+ 2], 0)".into()));
+    now.push(("s1", "elem(QB[jr, BO + 192 + 8 * (GG / 4) + 2 * (GG % 4) :+ 2], 1)".into()));
+    Decode {
+        fetch: Vec::new(),
+        now,
+        body,
+        pipelined: false,
+        halves: true,
     }
 }
 
