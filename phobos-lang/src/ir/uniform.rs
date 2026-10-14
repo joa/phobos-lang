@@ -221,7 +221,7 @@ fn is_shared(ir: &Ir, value: ValueId) -> bool {
 
 /// Whether an op runs in each thread on its own, so it may run under
 /// control that differs between threads.
-fn per_thread(kind: &OpKind) -> bool {
+pub(crate) fn per_thread(kind: &OpKind) -> bool {
     matches!(
         kind,
         OpKind::Const(_)

@@ -251,6 +251,11 @@ impl<'c> Codegen<'c> {
         if recording {
             self.trace.events.push(plan::Event::OpBegin(op));
         }
+        if self.barrier_before.contains(&op) {
+            // Straight to the target, so an elided op around this one does
+            // not count it among its own barriers.
+            self.isa.barrier(self, block)?;
+        }
         let skip = self.elided.get(&op).copied();
         if skip.is_some() {
             self.skip_barrier = skip;

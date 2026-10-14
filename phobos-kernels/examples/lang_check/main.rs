@@ -125,6 +125,7 @@ fn main() -> Result<()> {
     scaled_int8_dot(&mut failures)?;
     lanes(&mut failures)?;
     lane_matvec(&mut failures)?;
+    restaged_lanes(&mut failures)?;
     lane_runs(&mut failures)?;
     unrolled_sum(&mut failures)?;
     // Last: a trap leaves the context unusable.
@@ -292,6 +293,50 @@ fn lane_matvec(failures: &mut u32) -> Result<()> {
         })
         .fold(0.0, f64::max);
     report("lane_matvec", worst < 1e-4, format!("worst {worst:.2e}"), failures);
+    Ok(())
+}
+
+/// A tile staged once per turn and read by lane loads from other threads than
+/// the copy that wrote it. Without a barrier ahead of the next turn's copy,
+/// a warp could overwrite the tile while another still reads it.
+fn restaged_lanes(failures: &mut u32) -> Result<()> {
+    let (n, k) = (1000usize, 4096usize);
+    let x = noise(k, 21);
+    let w = noise(n * k, 22);
+    let src = format!(
+        "@launch({THREADS})
+        @aligned(K = 128)
+        kernel mv(W: tensor<f32>[N, K], X: tensor<f32>[1, K], Y: tensor<f32>[1, N]) {{
+            let row = ctx.block.x * ctx.warps + ctx.warp
+            var acc: f32 = 0.0
+            for kt in range(0, K, 128) {{
+                var xs = X[0 :+ 1, kt :+ 128]
+                let at = ctx.lane * 4
+                if row < N {{
+                    acc += sum(W[row, kt + at :+ 4] * xs[0, at :+ 4])
+                }}
+            }}
+            let total = sum<over ctx.lane>(acc)
+            if ctx.lane == 0 && row < N {{
+                Y[0, row] = total
+            }}
+        }}"
+    );
+    let (wa, xa, out) = (Arg::new(&w, n, k)?, Arg::new(&x, 1, k)?, Arg::<f32>::zeroed(1, n)?);
+    let mut slots = Vec::new();
+    wa.push(&mut slots);
+    xa.push(&mut slots);
+    out.push(&mut slots);
+    let warps = THREADS as usize / 32;
+    run(&src, "mv", n.div_ceil(warps) as u32, &mut slots)?;
+    let got = out.read()?;
+    let worst = (0..n)
+        .map(|r| {
+            let want: f64 = (0..k).map(|j| w[r * k + j] as f64 * x[j] as f64).sum();
+            (got[r] as f64 - want).abs()
+        })
+        .fold(0.0, f64::max);
+    report("restaged_lanes", worst < 1e-3, format!("worst {worst:.2e}"), failures);
     Ok(())
 }
 

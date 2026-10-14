@@ -122,6 +122,7 @@ pub(crate) fn emit_observed<'c>(
             });
 
             cg.elided = elision.skip;
+            cg.barrier_before = elision.before;
             cg.policy = SharedPolicy::Replay(plan);
             cg.pipeline_declines = report.pipeline_declines;
             let func = cg.emit_kernel_ir(&ir)?;
@@ -313,6 +314,8 @@ struct Codegen<'c> {
     /// Ops whose trailing barrier the membar pass elided, with how many
     /// barriers each emits; see `lower::membar`.
     elided: std::collections::BTreeMap<crate::ir::OpId, usize>,
+    /// Ops the membar pass put a barrier ahead of.
+    barrier_before: std::collections::BTreeSet<crate::ir::OpId>,
     /// While emitting an elided op: which barrier call to skip, and how
     /// many have been made.
     skip_barrier: Option<usize>,
@@ -382,6 +385,7 @@ impl<'c> Codegen<'c> {
             trace: lower::plan::Trace::default(),
             replay_next: 0,
             elided: std::collections::BTreeMap::new(),
+            barrier_before: std::collections::BTreeSet::new(),
             skip_barrier: None,
             barrier_calls: 0,
         })
