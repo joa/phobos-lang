@@ -251,10 +251,40 @@ impl TileType {
     }
 }
 
-/// An accumulator held in `mma.sync` fragments across a warp grid rather
-/// than in shared memory.
+/// How a register-resident tile's elements are spread over the lanes that
+/// hold them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct FragType {
+pub enum RegLayout {
+    /// The D fragments of `mma.sync` across a `wm x wn` warp grid, in the
+    /// 8x8 tiles of the integer tensor cores with `imma`, else the 16x16
+    /// ones of the f16 path.
+    MmaAcc { wm: i64, wn: i64, imma: bool },
+}
+
+/// A tile held in registers rather than in a buffer: a value, carried and
+/// updated whole, never sliced.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DistType {
+    pub elem: Scalar,
+    pub shape: Vec<i64>,
+    pub layout: RegLayout,
+}
+
+impl DistType {
+    /// The tile as `mma.sync` accumulator fragments.
+    pub fn mma_acc(&self) -> Option<MmaAcc> {
+        let RegLayout::MmaAcc { wm, wn, imma } = self.layout;
+        let [m, n] = self.shape[..] else {
+            return None;
+        };
+        Some(MmaAcc { m, n, wm, wn, imma })
+    }
+}
+
+/// An `[m, n]` f32 accumulator in `mma.sync` fragments across a `wm x wn`
+/// warp grid: what an `MmaAcc` [`DistType`] holds, unpacked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct MmaAcc {
     pub m: i64,
     pub n: i64,
     pub wm: i64,
@@ -264,10 +294,23 @@ pub struct FragType {
     pub imma: bool,
 }
 
-impl FragType {
+impl MmaAcc {
     /// The side of one fragment tile.
     pub fn tile(&self) -> i64 {
         if self.imma { 8 } else { 16 }
+    }
+
+    /// The register-resident tile these fragments hold.
+    pub fn dist(&self) -> DistType {
+        DistType {
+            elem: Scalar::F32,
+            shape: vec![self.m, self.n],
+            layout: RegLayout::MmaAcc {
+                wm: self.wm,
+                wn: self.wn,
+                imma: self.imma,
+            },
+        }
     }
 }
 
@@ -296,7 +339,7 @@ pub enum Type {
     Scalar(Scalar),
     Tensor(TensorType),
     Tile(TileType),
-    Frags(FragType),
+    Dist(DistType),
     Gemm(GemmType),
     Regs(RegsType),
 }
@@ -336,7 +379,7 @@ impl Type {
     /// The element type of anything addressable.
     pub fn elem(&self) -> Option<Scalar> {
         match self {
-            Type::Scalar(_) | Type::Frags(_) | Type::Gemm(_) | Type::Regs(_) => None,
+            Type::Scalar(_) | Type::Dist(_) | Type::Gemm(_) | Type::Regs(_) => None,
             Type::Tensor(t) => Some(t.elem),
             Type::Tile(t) => Some(t.elem),
         }
@@ -345,7 +388,7 @@ impl Type {
     /// The shape of anything addressable.
     pub fn shape(&self) -> Option<&[Extent]> {
         match self {
-            Type::Scalar(_) | Type::Frags(_) | Type::Gemm(_) | Type::Regs(_) => None,
+            Type::Scalar(_) | Type::Dist(_) | Type::Gemm(_) | Type::Regs(_) => None,
             Type::Tensor(t) => Some(&t.shape),
             Type::Tile(t) => Some(&t.shape),
         }
@@ -393,10 +436,15 @@ impl fmt::Display for Type {
                 }
                 Ok(())
             }
-            Type::Frags(fr) => {
-                write!(f, "frags[{}, {}]/{}x{}", fr.m, fr.n, fr.wm, fr.wn)?;
-                if fr.imma {
-                    write!(f, "/i8")?;
+            Type::Dist(d) => {
+                let dims: Vec<String> = d.shape.iter().map(i64::to_string).collect();
+                match d.layout {
+                    RegLayout::MmaAcc { wm, wn, imma } => {
+                        write!(f, "frags[{}]/{wm}x{wn}", dims.join(", "))?;
+                        if imma {
+                            write!(f, "/i8")?;
+                        }
+                    }
                 }
                 Ok(())
             }

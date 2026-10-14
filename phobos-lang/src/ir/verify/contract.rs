@@ -44,7 +44,7 @@ impl Verifier<'_> {
             }
             OpKind::FragInit(_) => {
                 self.want_operands(op, 0);
-                if self.want_results(op, 1) && !matches!(ir.ty(ir.result(op)), Type::Frags(_)) {
+                if self.want_results(op, 1) && !matches!(ir.ty(ir.result(op)), Type::Dist(_)) {
                     self.err(op, "result must be fragments");
                 }
             }
@@ -55,7 +55,7 @@ impl Verifier<'_> {
                     _ => 2,
                 };
                 if self.want_operands(op, n) {
-                    if !matches!(ir.ty(ir.operand(op, 0)), Type::Frags(_)) {
+                    if !matches!(ir.ty(ir.operand(op, 0)), Type::Dist(_)) {
                         self.err(op, "operand 0 must be fragments");
                     }
                     self.want_tiles(op, 1..n);
