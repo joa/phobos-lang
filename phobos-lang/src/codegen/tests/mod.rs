@@ -24,6 +24,7 @@ mod quant;
 mod reduce;
 mod regs;
 mod select;
+mod staged;
 mod sync;
 mod tensorcore;
 mod tile;
