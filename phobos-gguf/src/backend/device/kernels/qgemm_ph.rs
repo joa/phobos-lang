@@ -17,8 +17,9 @@ use super::iq_lanes::{LOW_BITS, SPREAD};
 use super::{QGEMM_CTA, QGEMM_TM, QGEMM_TN, qgemm_tables};
 use crate::quant::Quant;
 
-// A stage is the 64 columns' four 32-element groups, one a thread.
-const _: () = assert!(QGEMM_TN * 4 == QGEMM_CTA);
+// A stage is the 64 columns' four 32-element groups, one a thread, and a
+// minimum's group sums are a whole number a thread.
+const _: () = assert!(QGEMM_TN * 4 == QGEMM_CTA && (QGEMM_TM * 4).is_multiple_of(QGEMM_CTA));
 
 /// A format's decode: the words it reads from the block, as `(name, expr)`
 /// with `BO` for the block's byte offset in the thread's row and `GG` for
@@ -26,13 +27,16 @@ const _: () = assert!(QGEMM_TN * 4 == QGEMM_CTA);
 /// in `fetch` are loaded a stage ahead, those in `now` in their own stage.
 /// `pipelined` carries the next activation stage across the contraction.
 /// With `halves`, each 16 elements of a group has its own scale, row
-/// `2 gl + h` of `ws`.
+/// `2 gl + h` of `ws`. With `mins`, the decode also writes the group's
+/// minimum into `mw`, which the contraction subtracts against the
+/// activation's group sums.
 struct Decode {
     fetch: Vec<(&'static str, String)>,
     now: Vec<(&'static str, String)>,
     body: String,
     pipelined: bool,
     halves: bool,
+    mins: bool,
 }
 
 /// A format's `.ph` staged projection, for the formats written so far, whole
@@ -50,6 +54,8 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
         Quant::IQ2_S => Some(staged(quant, "iq2s", 80, &iq2s_decode(), split)),
         Quant::IQ3_XXS => Some(staged(quant, "iq3xxs", 96, &iq3xxs_decode(), split)),
         Quant::IQ3_S => Some(staged(quant, "iq3s", 108, &iq3s_decode(), split)),
+        Quant::Q4_K => Some(staged(quant, "q4k", 144, &kquant_decode(false), split)),
+        Quant::Q5_K => Some(staged(quant, "q5k", 176, &kquant_decode(true), split)),
         Quant::Q6_K => Some(staged(quant, "q6k", 208, &q6k_decode(), split)),
         _ => None,
     }
@@ -87,6 +93,7 @@ fn iq2xxs_decode() -> Decode {
         now: Vec::new(),
         pipelined: true,
         halves: false,
+        mins: false,
         body: format!(
             "    ws[gl, jj] = d * 0.125 * f32(2 * ((hi >> 28) & 15) + 1)
     for<unroll 4> l in range(0, 4, 1) {{
@@ -141,6 +148,74 @@ fn iq3xxs_decode() -> Decode {
         body,
         pipelined: false,
         halves: false,
+        mins: false,
+    }
+}
+
+/// Q4_K, or with `high` Q5_K: `d` and `dmin` lead the block as halves, then
+/// twelve bytes pack each group's 6-bit scale `s` and minimum `m`, and group
+/// `g` is nibble `g % 2` of 32 bytes at `16 + 32 (g / 2)`, or for Q5_K at
+/// `48 + 32 (g / 2)` under bit `g` of the 32 bytes at 16. An element is
+/// `d s q - dmin m`. Groups 0-3 keep `s` and `m` in bytes `g` and `g + 4`;
+/// groups 4-7 take their low bits from byte `g + 4` and their top two from
+/// those bytes' spare ones, `gl` and `gl + 4`, so a thread reads bytes `gl`,
+/// `gl + 4` and `gl + 8` either way.
+fn kquant_decode(high: bool) -> Decode {
+    let qs = if high { 48 } else { 16 };
+    let mut body = String::from(
+        "    let dk = f32(f16bits((d0 & 255) | ((d1 & 255) << 8)))
+    let mk = f32(f16bits((d2 & 255) | ((d3 & 255) << 8)))
+    let pa = pa0 & 255
+    let pb = pb0 & 255
+    let pc = pc0 & 255
+    let upper = kh % 2
+    let sk = where(upper == 1, (pc & 15) | ((pa >> 6) << 4), pa & 63)
+    let mn = where(upper == 1, (pc >> 4) | ((pb >> 6) << 4), pb & 63)
+    ws[gl, jj] = dk * f32(sk)
+    mw[gl, jj] = mk * f32(mn)
+"
+    );
+    for o in 0..4 {
+        for t in 0..2 {
+            let hi = if high {
+                format!(" | (((h{o}{t} >> (4 * upper + gl)) & {LOW1}) << 4)", LOW1 = 0x0101_0101u32)
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                body,
+                "    let v{o}{t} = ((l{o}{t} >> (4 * (gl % 2))) & {LOW4}){hi}",
+                LOW4 = 0x0F0F_0F0Fu32
+            );
+        }
+        let _ = writeln!(body, "    store(w[jj, 32 * gl + {b} :+ 8], v{o}0, v{o}1)", b = 8 * o);
+    }
+    let names = ["00", "01", "10", "11", "20", "21", "30", "31"];
+    let lows = ["l00", "l01", "l10", "l11", "l20", "l21", "l30", "l31"];
+    let highs = ["h00", "h01", "h10", "h11", "h20", "h21", "h30", "h31"];
+    let mut now = vec![
+        ("d0", "elem(QB[jr, BO :+ 4], 0)".to_string()),
+        ("d1", "elem(QB[jr, BO :+ 4], 1)".to_string()),
+        ("d2", "elem(QB[jr, BO :+ 4], 2)".to_string()),
+        ("d3", "elem(QB[jr, BO :+ 4], 3)".to_string()),
+        ("pa0", "elem(QB[jr, BO + 4 + GG % 4 :+ 1], 0)".to_string()),
+        ("pb0", "elem(QB[jr, BO + 8 + GG % 4 :+ 1], 0)".to_string()),
+        ("pc0", "elem(QB[jr, BO + 12 + GG % 4 :+ 1], 0)".to_string()),
+    ];
+    for (i, _) in names.iter().enumerate() {
+        let (o, t) = (i / 2, i % 2);
+        now.push((lows[i], format!("word(QB[jr, BO + {qs} + 32 * (GG / 2) + {b} :+ 8], {t})", b = 8 * o)));
+        if high {
+            now.push((highs[i], format!("word(QB[jr, BO + 16 + {b} :+ 8], {t})", b = 8 * o)));
+        }
+    }
+    Decode {
+        fetch: Vec::new(),
+        now,
+        body,
+        pipelined: false,
+        halves: false,
+        mins: true,
     }
 }
 
@@ -188,6 +263,7 @@ fn q6k_decode() -> Decode {
         body,
         pipelined: false,
         halves: true,
+        mins: false,
     }
 }
 
@@ -235,6 +311,7 @@ fn iq1s_decode() -> Decode {
         body: format!("    let qh = (ql & 255) | ((qhh & 255) << 8)\n{body}"),
         pipelined: false,
         halves: false,
+        mins: false,
     }
 }
 
@@ -286,6 +363,7 @@ fn iq1m_decode() -> Decode {
         body,
         pipelined: false,
         halves: true,
+        mins: false,
     }
 }
 
@@ -330,6 +408,7 @@ fn iq3s_decode() -> Decode {
         body,
         pipelined: false,
         halves: false,
+        mins: false,
     }
 }
 
@@ -370,6 +449,7 @@ fn iq2s_decode() -> Decode {
         body,
         pipelined: false,
         halves: true,
+        mins: false,
     }
 }
 
@@ -409,6 +489,7 @@ fn iq2xs_decode() -> Decode {
         body,
         pipelined: false,
         halves: true,
+        mins: false,
     }
 }
 
@@ -488,6 +569,36 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
     }
     // One update per scale: per group, or per half group.
     let per_group = if decode.halves { 2 } else { 1 };
+    // A minimum needs each row's sum over each group of the stage: 4 TM of
+    // them, eight `dp4a` against ones each over two granule-sized runs.
+    let (mins_decl, sums) = if decode.mins {
+        let mut sums = String::new();
+        for i in 0..QGEMM_TM * 4 / QGEMM_CTA {
+            let _ = writeln!(
+                sums,
+                "    let r{i} = (ctx.thread + {o}) / 4
+    let g{i} = (ctx.thread + {o}) % 4",
+                o = i * QGEMM_CTA
+            );
+            let mut acc = "0".to_string();
+            for h in 0..2 {
+                for t in 0..4 {
+                    let _ = writeln!(
+                        sums,
+                        "    let u{i}{h}{t} = dp4a(word(at[r{i}, 32 * g{i} + {o} :+ 16], {t}), {ONES}, {acc})",
+                        o = 16 * h,
+                        ONES = 0x0101_0101u32
+                    );
+                    acc = format!("u{i}{h}{t}");
+                }
+            }
+            let _ = writeln!(sums, "    rsum[r{i}, g{i}] = f32({acc}) * das[r{i}, g{i}]");
+        }
+        sums.push_str("    barrier()\n");
+        ("  var mw: tile<f32>[4, TN]\n  var rsum: tile<f32>[TM, 4]\n".to_string(), sums)
+    } else {
+        (String::new(), String::new())
+    };
     let width = 32 / per_group;
     let mut contract = String::new();
     for s in 0..4 * per_group {
@@ -502,6 +613,15 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
             k = width * s,
             g = s / per_group
         );
+        if decode.mins {
+            let _ = write!(
+                contract,
+                "    let rs{s} = rsum[0 :+ TM, {s} :+ 1]
+    let mw{s} = mw[{s} :+ 1, 0 :+ TN]
+    acc -= rs{s} * mw{s}
+"
+            );
+        }
     }
     format!(
         "@launch({QGEMM_CTA}, 2)
@@ -513,7 +633,7 @@ kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
                   {params}{out}  let pm = ctx.block.x
 {ids}{grid}  var w: tile<i8>[TN, 128]
   var ws: tile<f32>[{scales}, TN]
-  var acc: tile<f32>[TM, TN] = 0.0
+{mins_decl}  var acc: tile<f32>[TM, TN] = 0.0
   let jj = ctx.thread / 4
   let gl = ctx.thread % 4
   let jr = (pn * TN + jj) / 8 * 8
@@ -527,7 +647,7 @@ kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 {next}      dn = D[jr, {d_off}(kh + 1) / 2 * 8 + c8]
     }}
 {body}    barrier()
-{contract}  }}
+{sums}{contract}  }}
   {store}
 }}
 ",
