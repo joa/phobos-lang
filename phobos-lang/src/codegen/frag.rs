@@ -184,9 +184,7 @@ impl<'c> Codegen<'c> {
     /// tile-major then by k step. From shared memory four tiles at a time
     /// are one `ldmatrix.x4` a k step, lane `l` addressing row `origin + l`
     /// of the four: its non-transposed 16-bit layout is the `m8n8k16`
-    /// fragment's. `ldmatrix` lowers only in a module indexed at 64 bits,
-    /// which `ast::Kernel::wants_ldmatrix` asks for. Otherwise a word load
-    /// each.
+    /// fragment's. Otherwise a word load each.
     fn imma_frags(
         &self,
         block: &Block<'c>,
@@ -198,7 +196,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Vec<Value<'c, 'c>>> {
         let steps = k_cols.len();
         let frag_t = Type::vector(&[1, 4], self.i8_t);
-        let ldmatrix = self.isa.index_bits() == 64 && v.view.shared && v.view.vectorizes(16);
+        let ldmatrix = v.view.shared && v.view.vectorizes(16);
         if !(ldmatrix && rows.len().is_multiple_of(4)) {
             let mut frags = Vec::with_capacity(rows.len() * steps);
             for &row in rows {

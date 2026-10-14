@@ -163,22 +163,13 @@ fn slices_of_a_shared_operand_add_no_barriers() {
 }
 
 #[test]
-fn a_shared_operand_loads_by_ldmatrix_at_64_bit_indices() {
+fn a_shared_operand_loads_by_ldmatrix() {
     // Four 8-row tiles of the shared operand a warp reads are one
-    // ldmatrix.x4 per 16 elements of k. At 32-bit indices ldmatrix does not
-    // lower, and the fragments are word loads.
+    // ldmatrix.x4 per 16 elements of k: nvgpu's op at 64-bit indices, nvvm's
+    // on the shared address at 32, where nvgpu's does not lower.
     let src = staged_slices(1);
-    let wide = emit_mlir_sync(&src, "sm_75");
-    assert!(wide.contains("nvgpu.ldmatrix"), "{wide}");
+    assert!(emit_mlir_sync(&src, "sm_75").contains("nvgpu.ldmatrix"));
     let narrow = emit_mlir(&src);
-    assert!(!narrow.contains("nvgpu.ldmatrix"), "{narrow}");
+    assert!(narrow.contains("nvvm.ldmatrix"), "{narrow}");
     assert!(narrow.contains("math.fma"), "{narrow}");
-}
-
-#[test]
-fn an_int8_contraction_from_a_staged_tile_wants_wide_indices() {
-    let kernels = crate::parse(&staged_slices(1)).unwrap();
-    assert!(kernels[0].wants_ldmatrix());
-    let kernels = crate::parse(&projection(128, 64, 128, ALIGNED, "ws * da")).unwrap();
-    assert!(!kernels[0].wants_ldmatrix());
 }

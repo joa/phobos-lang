@@ -48,8 +48,9 @@ fn has_min(fmt: &str) -> bool {
 
 #[test]
 fn every_format_stages_both_operands_and_reads_them_with_ldmatrix() {
+    // At 64-bit indices, which `Kernel::wants_ldmatrix` asks for.
     for (fmt, tables) in FORMATS {
-        let mlir = emit_mlir(&qgemm_src(fmt, tables, "256, 2"));
+        let mlir = emit_mlir_sync(&qgemm_src(fmt, tables, "256, 2"), "sm_75");
         assert_contains(
             &mlir,
             &["nvgpu.ldmatrix", "vector<4x4xi8>", "nvgpu.mma.sync", "gpu.barrier", "iter_args"],

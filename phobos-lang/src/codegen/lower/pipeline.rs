@@ -74,6 +74,12 @@ impl<'c> Codegen<'c> {
         let registers = !self.has_cp_async() && carried > 0;
         let single = registers
             && srcs.iter().zip(&bufs0).all(|(src, buf)| self.reg_copy_plan(src, buf).is_some());
+        // How each stage is copied through registers, the same every turn.
+        let copies: Vec<Option<RegCopy<'c>>> = if registers {
+            srcs.iter().zip(&bufs0).map(|(src, buf)| self.reg_copy_plan(src, buf)).collect()
+        } else {
+            Vec::new()
+        };
         let mut bufs1 = Vec::with_capacity(info.staged);
         if single {
             bufs1.clone_from(&bufs0);
@@ -114,6 +120,7 @@ impl<'c> Codegen<'c> {
             sizes: &sizes,
             registers,
             single,
+            copies: &copies,
         };
         // Half A: compute iteration iv from bufs0, prefetch iv+st into bufs1.
         let after_a = self.emit_pipeline_stage_ir(&body_block, &half, mlir_iv, next, &bufs0, &bufs1, &entry)?;
@@ -311,15 +318,21 @@ impl<'c> Codegen<'c> {
             block,
             arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, prefetch_iv, half.hi, self.loc),
         )?;
+        // Each chunk located once a turn, for both its load and its store.
+        // Hoisted out of the loop they would hold registers across it.
+        let copies: Vec<Option<RegCopy<'c>>> = half
+            .copies
+            .iter()
+            .map(|c| c.clone().map(|plan| self.reg_copy_indexed(block, plan)).transpose())
+            .collect::<Result<_>>()?;
 
         // The loads, in the guarded branch, yielded out of it.
         let then = Block::new(&[]);
         self.lowered.push(HashMap::new());
         self.set_ir(half.iv, Lowered::Scalar(prefetch_iv));
-        let mut plans: Vec<Option<RegCopy<'c>>> = Vec::with_capacity(dst.len());
         let mut elems = Vec::new();
         let loaded = (|| {
-            let mut d = dst.iter();
+            let mut d = dst.iter().zip(&copies);
             let mut vals = Vec::new();
             for &o in half.prefix {
                 if !matches!(ir.kind(o), OpKind::Stage(_)) {
@@ -327,17 +340,13 @@ impl<'c> Codegen<'c> {
                     continue;
                 }
                 let src = self.tile_ir(ir, ir.operand(o, 0))?;
-                let buf = d.next().expect("one buffer per stage");
-                match self.reg_copy_plan(&src, buf) {
-                    Some(plan) => {
-                        vals.extend(self.reg_copy_load(&then, &src, &plan)?);
-                        elems.extend(std::iter::repeat_n(src.elem, plan.per_thread as usize));
-                        plans.push(Some(plan));
+                let (buf, copy) = d.next().expect("one buffer per stage");
+                match copy {
+                    Some(copy) => {
+                        vals.extend(self.reg_copy_load(&then, &src, copy)?);
+                        elems.extend(std::iter::repeat_n(src.elem, copy.at.len()));
                     }
-                    None => {
-                        self.tile_copy(&then, &src, buf, false, false)?;
-                        plans.push(None);
-                    }
+                    None => self.tile_copy(&then, &src, buf, false, false)?,
                 }
             }
             Ok::<_, anyhow::Error>(vals)
@@ -373,10 +382,10 @@ impl<'c> Codegen<'c> {
             }
             let store = Block::new(&[]);
             let mut vals = held.iter();
-            for (plan, buf) in plans.iter().zip(dst) {
-                if let Some(plan) = plan {
-                    let mine: Vec<Value<'c, 'c>> = vals.by_ref().take(plan.per_thread as usize).copied().collect();
-                    self.reg_copy_store(&store, buf, plan, &mine)?;
+            for (copy, buf) in copies.iter().zip(dst) {
+                if let Some(copy) = copy {
+                    let mine: Vec<Value<'c, 'c>> = vals.by_ref().take(copy.at.len()).copied().collect();
+                    self.reg_copy_store(&store, buf, copy, &mine)?;
                 }
             }
             store.append_operation(scf::r#yield(&[], self.loc));
@@ -384,8 +393,37 @@ impl<'c> Codegen<'c> {
             region.append_block(store);
             block.append_operation(scf::r#if(more, &[], region, Region::new(), self.loc));
         }
-        self.barrier(block)?;
+        // The stores must land before the next turn reads them, which a
+        // barrier the body passes before that read already sees to.
+        if !(half.single && Self::fenced_before_stage_reads(half)) {
+            self.barrier(block)?;
+        }
         Ok(out)
+    }
+
+    /// Whether the compute passes an explicit `barrier()` before anything
+    /// reads a staged buffer. A view of one reads nothing itself.
+    fn fenced_before_stage_reads(half: &Half<'c, '_>) -> bool {
+        let ir = half.ir;
+        let mut staged: Vec<ValueId> = half.stages.iter().map(|&s| ir.result(s)).collect();
+        // Any use inside a nested block counts as a read before the fence.
+        fn nested_reads(ir: &Ir, op: OpId, staged: &[ValueId]) -> bool {
+            ir.blocks_of(op).iter().any(|&b| {
+                ir.ops(b).iter().any(|&o| {
+                    ir.operands(o).iter().any(|v| staged.contains(v)) || nested_reads(ir, o, staged)
+                })
+            })
+        }
+        for &op in half.rest {
+            let reads = ir.operands(op).iter().any(|v| staged.contains(v)) || nested_reads(ir, op, &staged);
+            match ir.kind(op) {
+                OpKind::Barrier => return true,
+                kind if reads && !kind.aliases().is_empty() => staged.push(ir.result(op)),
+                _ if reads => return false,
+                _ => {}
+            }
+        }
+        false
     }
 
     /// A buffer for a stage of `src`, padded when the stage asks.
@@ -420,7 +458,14 @@ impl<'c> Codegen<'c> {
             total,
             per_thread: (total + self.cta_threads - 1) / self.cta_threads,
             vec_t: Type::vector(&[width as u64], src.elem),
+            at: Vec::new(),
         })
+    }
+
+    /// `plan` with each of the thread's chunks located.
+    fn reg_copy_indexed(&self, block: &Block<'c>, mut plan: RegCopy<'c>) -> Result<RegCopy<'c>> {
+        plan.at = (0..plan.per_thread).map(|i| self.reg_copy_at(block, &plan, i)).collect::<Result<_>>()?;
+        Ok(plan)
     }
 
     /// The `[row, col]` of the thread's `i`-th chunk, clamped into the tile,
@@ -452,11 +497,9 @@ impl<'c> Codegen<'c> {
     }
 
     fn reg_copy_load(&self, block: &Block<'c>, src: &MemVal<'c>, plan: &RegCopy<'c>) -> Result<Vec<Value<'c, 'c>>> {
-        (0..plan.per_thread)
-            .map(|i| {
-                let (at, _) = self.reg_copy_at(block, plan, i)?;
-                self.vec_load_al(block, src.mem, &at, plan.vec_t, plan.align)
-            })
+        plan.at
+            .iter()
+            .map(|(at, _)| self.vec_load_al(block, src.mem, at, plan.vec_t, plan.align))
             .collect()
     }
 
@@ -467,8 +510,7 @@ impl<'c> Codegen<'c> {
         plan: &RegCopy<'c>,
         vals: &[Value<'c, 'c>],
     ) -> Result<()> {
-        for (i, &v) in vals.iter().enumerate() {
-            let (at, real) = self.reg_copy_at(block, plan, i as i64)?;
+        for (i, (&v, &(at, real))) in vals.iter().zip(&plan.at).enumerate() {
             if (i as i64 + 1) * self.cta_threads <= plan.total {
                 self.vec_store_al(block, v, dst.mem, &at, plan.align)?;
                 continue;
@@ -486,7 +528,9 @@ impl<'c> Codegen<'c> {
 
 /// A thread's share of a staged copy, held in registers: `per_thread`
 /// vectors of `width` elements, chunk `i` the CTA's `tid + i * threads`-th
-/// of `total`, `across` of them to a row.
+/// of `total`, `across` of them to a row. `at` holds each chunk's
+/// `[row, col]` and whether the thread has it, once located.
+#[derive(Clone)]
 struct RegCopy<'c> {
     width: i64,
     align: i64,
@@ -494,6 +538,7 @@ struct RegCopy<'c> {
     total: i64,
     per_thread: i64,
     vec_t: Type<'c>,
+    at: Vec<([Value<'c, 'c>; 2], Value<'c, 'c>)>,
 }
 
 /// What both halves of a pipelined loop share.
@@ -514,4 +559,7 @@ struct Half<'c, 'o> {
     registers: bool,
     /// Each stage has one buffer, refilled from registers after the compute.
     single: bool,
+    /// With `registers`, how each stage is copied through them, or None for
+    /// one copied synchronously.
+    copies: &'o [Option<RegCopy<'c>>],
 }
