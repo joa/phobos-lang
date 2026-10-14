@@ -30,7 +30,7 @@ pub fn compile_shared(
 /// The chip kernels compile for: `PHOBOS_CHIP`, or the newest supported chip
 /// the card can run, since PTX for an older target JITs forward. A card below
 /// every supported chip gets the oldest, which the driver then refuses.
-fn chip() -> &'static str {
+pub fn chip() -> &'static str {
     static CHIP: OnceLock<String> = OnceLock::new();
     CHIP.get_or_init(|| {
         if let Ok(chip) = std::env::var("PHOBOS_CHIP") {
