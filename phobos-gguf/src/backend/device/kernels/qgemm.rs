@@ -91,6 +91,9 @@ pub(crate) fn qgemm_split_kernel(quant: Quant) -> Option<&'static str> {
 /// The source of a format's staged projection, at two CTAs per
 /// multiprocessor (128 registers).
 pub(crate) fn qgemm_src(quant: Quant) -> Option<String> {
+    if let Some(src) = super::qgemm_ph_src(quant, None) {
+        return Some(src);
+    }
     let name = qgemm_name(quant)?;
     let tables = qgemm_tables(quant)?;
     // Each piece carries its own comma, so no tables leaves no stray comma.
@@ -174,6 +177,9 @@ pub(crate) fn qgemm_split_src(quant: Quant, n: usize, k: usize, block: usize, s:
     let gn = n / QGEMM_TN;
     let sb = k / block / s;
     let (sk, skb, srb) = (sb * block, sb * block / 32, sb * bb);
+    if let Some(src) = super::qgemm_ph_src(quant, Some(super::Split { gn, sk, skb, srb, sb })) {
+        return Some(src);
+    }
     let params: String = tables
         .iter()
         .enumerate()

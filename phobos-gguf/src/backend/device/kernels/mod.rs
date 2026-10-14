@@ -30,6 +30,7 @@ mod norm;
 mod q2k;
 mod q3k;
 mod qgemm;
+mod qgemm_ph;
 mod quant;
 
 pub(crate) use argmax::*;
@@ -47,6 +48,7 @@ pub(crate) use f32_lanes::*;
 pub(crate) use iq_lanes::*;
 use iq_f32::{IqFmt, qdecode_src, qdot_matvec_src};
 pub(crate) use qgemm::*;
+pub(crate) use qgemm_ph::{Split, qgemm_ph_src};
 pub(crate) use iq1s::*;
 pub(crate) use iq2s::*;
 pub(crate) use iq2xs::*;

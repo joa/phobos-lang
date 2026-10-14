@@ -21,9 +21,9 @@ use std::fmt::Write as _;
 use super::{IQ1_GRID4_LEN, IQ2S_GRID_LEN, IQ2XS_GRID_LEN, IQ2XXS_GRID_LEN, IQ3S_GRID_LEN, IQ3XXS_GRID_LEN};
 
 /// `0x0101_0101`: one bit of every byte of a word.
-const LOW_BITS: u32 = 0x0101_0101;
+pub(super) const LOW_BITS: u32 = 0x0101_0101;
 /// `0x0020_4081`: a nibble's four bits laid seven apart, one to a byte.
-const SPREAD: u32 = 0x0020_4081;
+pub(super) const SPREAD: u32 = 0x0020_4081;
 
 /// A format's matvec. `bytes` is the device block size; `grid` the length
 /// of the `GRID` table, staged into the shared tile `grid`; `fetch` the
