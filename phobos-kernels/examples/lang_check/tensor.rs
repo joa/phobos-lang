@@ -274,6 +274,14 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
             v
         }}
 
+        fn wsf(i, j) {{
+            WS[b, pn * 64 + j]
+        }}
+
+        fn daf(i, j) {{
+            AS[i, b]
+        }}
+
         @launch(256)
         @aligned(K = 32)
         kernel k(A: tensor<i8>[64, K], AS: tensor<f32>[64, KB],
@@ -294,10 +302,18 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
         )
     };
     let forms = [
-        ("into its fragments", "acc += f32(dot_t(a, w)) * ws * da"),
-        ("materialized", "let w0 = w[0 :+ 64, 0 :+ 32]\n                acc += f32(dot_t(a, w0)) * ws * da"),
+        ("into its fragments", "acc += f32(dot_t(a, w)) * ws * da", &want),
+        ("materialized", "let w0 = w[0 :+ 64, 0 :+ 32]\n                acc += f32(dot_t(a, w0)) * ws * da", &want),
+        (
+            "with generated scales, less a column times a row",
+            "let wsg: tile<f32>[1, 64] = generate(wsf)
+                let dag: tile<f32>[64, 1] = generate(daf)
+                acc += f32(dot_t(a, w)) * wsg * dag
+                acc -= dag * wsg",
+            &want_min,
+        ),
     ];
-    for (what, reads) in forms {
+    for (what, reads, want) in forms {
         let src = generated(reads);
         for index_bitwidth in [32, 64] {
             let (ga, gw) = (Arg::new(&a, m, k)?, Arg::new(&w, n, k)?);
@@ -312,7 +328,7 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
             run_at(index_bitwidth, &src, "k", 2, &mut slots)?;
             let got = out.read()?;
             let scale = want.iter().fold(0.0f64, |s, v| s.max(v.abs()));
-            let worst = got.iter().zip(&want).map(|(&g, w)| (g as f64 - w).abs()).fold(0.0, f64::max) / scale;
+            let worst = got.iter().zip(want).map(|(&g, w)| (g as f64 - w).abs()).fold(0.0, f64::max) / scale;
             let name = format!("generated int8 weight {what} i{index_bitwidth}");
             report(&name, worst < 1e-5, format!("rel err {worst:.2e}"), failures);
         }

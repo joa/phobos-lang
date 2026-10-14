@@ -58,14 +58,15 @@ impl Verifier<'_> {
                     if !matches!(ir.ty(ir.operand(op, 0)), Type::Dist(_)) {
                         self.err(op, "operand 0 must be fragments");
                     }
-                    // A scaled dot's weight may be generated where it is read.
-                    let generated = matches!(kind, OpKind::FragDotScaled)
-                        && matches!(ir.ty(ir.operand(op, 2)), Type::Dist(d) if d.layout == RegLayout::Generated);
-                    if generated {
-                        self.want_tiles(op, 1..2);
-                        self.want_tiles(op, 3..n);
-                    } else {
-                        self.want_tiles(op, 1..n);
+                    // The int8 updates' operands may be generated where they
+                    // are read.
+                    let int8 = matches!(kind, OpKind::FragDotScaled | OpKind::FragOuter { .. });
+                    for i in 1..n {
+                        let generated =
+                            matches!(ir.ty(ir.operand(op, i)), Type::Dist(d) if d.layout == RegLayout::Generated);
+                        if !(int8 && generated) {
+                            self.want_tiles(op, i..i + 1);
+                        }
                     }
                 }
                 if matches!(kind, OpKind::FragStore) {
