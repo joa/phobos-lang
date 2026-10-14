@@ -17,6 +17,15 @@ pub(super) struct SliceOrigin<'c> {
     pub(super) swizzle: Option<Swizzle>,
 }
 
+/// A scaled dot's column scales for the patch's output columns, two a
+/// lane's column, and whether its sums convert exactly through the magic
+/// constant. See [`Codegen::frag_dot_scaled_raw`].
+struct ScaledCols<'a, 'c> {
+    first: &'a [Value<'c, 'c>],
+    second: &'a [Value<'c, 'c>],
+    small: bool,
+}
+
 /// See [`Codegen::imma_lane`].
 struct ImmaLane<'c> {
     rows: Vec<Value<'c, 'c>>,
@@ -360,34 +369,73 @@ impl<'c> Codegen<'c> {
         let zero_i = self.zero_scalar(block, self.i32_t)?;
         let empty = self.vec_broadcast(block, zero_i, acc_t)?;
         let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
+        let row_of = |cg: &Self, s: &ImmaOperand<'c>, r: usize| -> Result<Option<Value<'c, 'c>>> {
+            if !is_row(s) {
+                return Ok(None);
+            }
+            let (mem, at) = cg.imma_at(block, s, lane.rows[r], zero)?;
+            Ok(Some(cg.load_as(block, mem, &at, cg.f32_t)?))
+        };
+        let scales = ScaledCols {
+            first: &first_cols,
+            second: &second_cols,
+            small,
+        };
         let mut frags = fa.frags.clone();
-        for r in 0..fm as usize {
-            let row_of = |s: &ImmaOperand<'c>| -> Result<Option<Value<'c, 'c>>> {
-                if !is_row(s) {
-                    return Ok(None);
+        let (fm, fnn, steps) = (fm as usize, fnn as usize, steps as usize);
+        if self.int8_mma_k() == 32 && fm % 2 == 0 && steps % 2 == 0 {
+            // From Blackwell on, `m8n8k16` runs as a half-used `m16n8k16`.
+            // Two row tiles over two k steps go through one `m16n8k32`
+            // instead, its fragments the `m8n8k16` ones regrouped as
+            // `qgemm_t`'s: A as rows (g, g + 8) of the first step, then of
+            // the second, B as the first step, then the second. Its two rows
+            // of sums are the two tiles' own.
+            let four_i8 = Type::vector(&[4], self.i8_t);
+            let (a_t, b_t) = (Type::vector(&[4, 4], self.i8_t), Type::vector(&[2, 4], self.i8_t));
+            let d_t = Type::vector(&[2, 2], self.i32_t);
+            let wide = self.mma_shape(2 * IMMA_TILE, IMMA_TILE, 2 * IMMA_K)?;
+            let zero_d = self.vec_broadcast(block, zero_i, d_t)?;
+            let zero_i8 = self.zero_scalar(block, self.i8_t)?;
+            for rp in 0..fm / 2 {
+                let rows = [2 * rp, 2 * rp + 1];
+                let row_scales = [
+                    [row_of(self, s1, rows[0])?, row_of(self, s2, rows[0])?],
+                    [row_of(self, s1, rows[1])?, row_of(self, s2, rows[1])?],
+                ];
+                for c in 0..fnn {
+                    let mut d = zero_d;
+                    for hp in 0..steps / 2 {
+                        let mut a = self.vec_broadcast(block, zero_i8, a_t)?;
+                        let mut b = self.vec_broadcast(block, zero_i8, b_t)?;
+                        for i in 0..2 {
+                            let h = 2 * hp + i;
+                            for (j, &r) in rows.iter().enumerate() {
+                                let piece = self.vec_shape_cast(block, a_frags[r * steps + h], four_i8)?;
+                                a = self.vec_insert(block, piece, a, &[(2 * i + j) as i64])?;
+                            }
+                            let piece = self.vec_shape_cast(block, w_frags[c * steps + h], four_i8)?;
+                            b = self.vec_insert(block, piece, b, &[i as i64])?;
+                        }
+                        d = self.mma_sync(block, a, b, d, wide, d_t)?;
+                    }
+                    for (j, &r) in rows.iter().enumerate() {
+                        let slot = (r * fnn + c) * 2;
+                        let sums = (d, j as i64);
+                        self.scaled_dot_epilogue(block, &scales, row_scales[j], c, sums, &mut frags[slot..slot + 2])?;
+                    }
                 }
-                let (mem, at) = self.imma_at(block, s, lane.rows[r], zero)?;
-                Ok(Some(self.load_as(block, mem, &at, self.f32_t)?))
-            };
-            let (first_row, second_row) = (row_of(s1)?, row_of(s2)?);
-            for c in 0..fnn as usize {
-                let mut sum = empty;
-                for h in 0..steps as usize {
-                    let (af, wf) = (a_frags[r * steps as usize + h], w_frags[c * steps as usize + h]);
-                    sum = self.mma_sync(block, af, wf, sum, shape, acc_t)?;
-                }
-                for dj in 0..2 {
-                    let slot = (r * fnn as usize + c) * 2 + dj;
-                    let raw = self.vec_extract(block, sum, &[0, dj as i64], self.i32_t)?;
-                    let as_f = if small {
-                        self.small_int_to_f32(block, raw)?
-                    } else {
-                        self.push(block, arith::sitofp(raw, self.f32_t, self.loc))?
-                    };
-                    let first = first_row.unwrap_or_else(|| first_cols[c * 2 + dj]);
-                    let second = second_row.unwrap_or_else(|| second_cols[c * 2 + dj]);
-                    let t = self.push(block, arith::mulf(first, second, self.loc))?;
-                    frags[slot] = self.elem_mac(block, self.f32_t, as_f, t, frags[slot])?;
+            }
+        } else {
+            for r in 0..fm {
+                let row_scales = [row_of(self, s1, r)?, row_of(self, s2, r)?];
+                for c in 0..fnn {
+                    let mut sum = empty;
+                    for h in 0..steps {
+                        let (af, wf) = (a_frags[r * steps + h], w_frags[c * steps + h]);
+                        sum = self.mma_sync(block, af, wf, sum, shape, acc_t)?;
+                    }
+                    let slot = (r * fnn + c) * 2;
+                    self.scaled_dot_epilogue(block, &scales, row_scales, c, (sum, 0), &mut frags[slot..slot + 2])?;
                 }
             }
         }
@@ -395,6 +443,34 @@ impl<'c> Codegen<'c> {
         // when nothing is.
         self.barrier(block)?;
         Ok(frags)
+    }
+
+    /// A lane's two sums of one 8x8 tile in patch column `c`, row `j` of the
+    /// mma's `d`, into its two accumulator elements, as
+    /// `acc + f32(d) * (s1 * s2)`: a row scale from `rows`, a column scale
+    /// from `cols`.
+    fn scaled_dot_epilogue(
+        &mut self,
+        block: &Block<'c>,
+        cols: &ScaledCols<'_, 'c>,
+        rows: [Option<Value<'c, 'c>>; 2],
+        c: usize,
+        (d, j): (Value<'c, 'c>, i64),
+        acc: &mut [Value<'c, 'c>],
+    ) -> Result<()> {
+        for (dj, acc) in acc.iter_mut().enumerate() {
+            let raw = self.vec_extract(block, d, &[j, dj as i64], self.i32_t)?;
+            let as_f = if cols.small {
+                self.small_int_to_f32(block, raw)?
+            } else {
+                self.push(block, arith::sitofp(raw, self.f32_t, self.loc))?
+            };
+            let first = rows[0].unwrap_or_else(|| cols.first[c * 2 + dj]);
+            let second = rows[1].unwrap_or_else(|| cols.second[c * 2 + dj]);
+            let t = self.push(block, arith::mulf(first, second, self.loc))?;
+            *acc = self.elem_mac(block, self.f32_t, as_f, t, *acc)?;
+        }
+        Ok(())
     }
 
     /// `<tensor slice> = acc`: scatters each lane's fragment elements
