@@ -7,7 +7,7 @@ use melior::{
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::{GemmPath, GemmScale};
-use crate::codegen::frag::{ImmaOperand, SliceOrigin};
+use crate::codegen::frag::{ImmaOperand, ImmaWeight, SliceOrigin};
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
@@ -111,16 +111,33 @@ impl<'c> Codegen<'c> {
                 self.release(&b);
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
+            OpKind::Generate => self.set_ir(ir.result(op), Lowered::Generated(op)),
             OpKind::FragDotScaled => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
-                let tiles = self.tiles_ir(ir, op, 1..5)?;
+                let generated = match self.get_ir(ir.operand(op, 2))? {
+                    Lowered::Generated(g) => Some(*g),
+                    _ => None,
+                };
+                let mut tiles = Vec::with_capacity(4);
                 let mut operands = Vec::with_capacity(4);
-                for (i, view) in tiles.iter().enumerate() {
-                    let from = self.slice_origin(ir, ir.operand(op, 1 + i))?;
+                for i in 1..5 {
+                    if i == 2 && generated.is_some() {
+                        continue;
+                    }
+                    let view = self.tile_ir(ir, ir.operand(op, i))?;
+                    let from = self.slice_origin(ir, ir.operand(op, i))?;
                     operands.push(ImmaOperand { view: view.clone(), from });
+                    tiles.push(view);
                 }
+                let weight = match generated {
+                    Some(op) => ImmaWeight::Generated { ir, op },
+                    None => ImmaWeight::Stored(operands.remove(1)),
+                };
+                let [a, s1, s2] = &operands[..] else {
+                    bail!("internal: a scaled dot without its operands");
+                };
                 self.record_contract("mma.sync");
-                let frags = self.frag_dot_scaled_raw(block, &fa, &operands)?;
+                let frags = self.frag_dot_scaled_raw(block, &fa, a, &weight, [s1, s2])?;
                 for t in &tiles {
                     self.release(t);
                 }

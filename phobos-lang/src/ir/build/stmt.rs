@@ -606,7 +606,9 @@ impl Build {
         while i < stmts.len() {
             let saved = self.save();
             let consumed = self.spanned(stmts[i].span(), |b| {
-                Ok(if let Some(consumed) = b.matmul_candidate(&stmts[i..])? {
+                Ok(if b.generated_let(&stmts[i], &stmts[i + 1..])?.is_some() {
+                    1
+                } else if let Some(consumed) = b.matmul_candidate(&stmts[i..])? {
                     consumed
                 } else if let Some(plan) = b.frag_acc_candidate(&stmts[i..]) {
                     b.bind_frag_acc(&plan);

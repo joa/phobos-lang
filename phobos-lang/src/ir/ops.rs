@@ -518,6 +518,10 @@ pub enum OpKind {
     FragOuter { negate: bool },
     /// `(acc, dst)`: the fragments scattered straight to a tensor slice.
     FragStore,
+    /// `() -> generated`: a tile with no storage. Its one block takes a row
+    /// and a unit and yields that element block: a 4-byte word of an 8-bit
+    /// tile, else one element. Each read evaluates it where it needs it.
+    Generate,
 
     // The register matmul: an accumulator seeded before its k-loop, carried
     // through it as the loop's one iter arg, drained after it.
@@ -675,6 +679,7 @@ impl OpKind {
             OpKind::FragDotScaled => "frag_dot_scaled".into(),
             OpKind::FragOuter { negate } => format!("frag_outer{}", if *negate { " neg" } else { "" }),
             OpKind::FragStore => "frag_store".into(),
+            OpKind::Generate => "generate".into(),
             OpKind::GemmInit => "gemm_init".into(),
             OpKind::GemmDot => "gemm_dot".into(),
             OpKind::GemmStore { alpha, beta } => {
@@ -692,10 +697,10 @@ impl OpKind {
         matches!(self, OpKind::Yield | OpKind::Condition)
     }
 
-    /// Whether the op owns blocks, and so is a region of the structured
-    /// control flow.
+    /// Whether the op owns blocks: a region of the structured control flow,
+    /// or a `Generate`'s element block.
     pub fn has_blocks(&self) -> bool {
-        matches!(self, OpKind::For(_) | OpKind::While | OpKind::If)
+        matches!(self, OpKind::For(_) | OpKind::While | OpKind::If | OpKind::Generate)
     }
 
     /// Whether the result is a fresh buffer of its own, as opposed to a view

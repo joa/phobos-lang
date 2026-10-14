@@ -53,7 +53,7 @@ fn outer_parts(value: &Expr) -> Option<[&str; 2]> {
 }
 
 /// `f32(dot_t(a, w)) * s1 * s2` as its four names.
-fn scaled_dot_parts(value: &Expr) -> Option<[&str; 4]> {
+pub(super) fn scaled_dot_parts(value: &Expr) -> Option<[&str; 4]> {
     let ExprKind::Binary {
         op: BinOp::Mul,
         lhs,
@@ -254,6 +254,7 @@ impl Build {
             Binding::Tile(mv) | Binding::View(mv) if !self.shape(mv).contains(&DYN) => {
                 Some((self.elem(mv), self.shape(mv)))
             }
+            Binding::Generated(t) => Some((t.elem, t.shape.to_vec())),
             _ => None,
         }
     }
@@ -453,8 +454,11 @@ impl Build {
                 };
                 let mut operands = vec![acc];
                 for part in parts {
-                    let Some(Binding::Tile(v) | Binding::View(v)) = self.lookup(part) else {
-                        bail!("fragment operand `{part}` is not a tile");
+                    let v = match self.lookup(part) {
+                        Some(Binding::Tile(v) | Binding::View(v)) => v,
+                        Some(Binding::Generated(t)) => self.emit_generate(&t)?,
+                        None => return Err(self.unknown(part)),
+                        _ => bail!("fragment operand `{part}` is not a tile"),
                     };
                     operands.push(v);
                 }

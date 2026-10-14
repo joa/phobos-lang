@@ -2,7 +2,7 @@
 // register matmul.
 
 use super::Verifier;
-use crate::ir::{Coeff, GemmType, OpId, OpKind, Space, Type};
+use crate::ir::{Coeff, GemmType, OpId, OpKind, RegLayout, Space, Type};
 
 impl Verifier<'_> {
     pub(super) fn contract(&mut self, op: OpId, kind: &OpKind) {
@@ -58,7 +58,15 @@ impl Verifier<'_> {
                     if !matches!(ir.ty(ir.operand(op, 0)), Type::Dist(_)) {
                         self.err(op, "operand 0 must be fragments");
                     }
-                    self.want_tiles(op, 1..n);
+                    // A scaled dot's weight may be generated where it is read.
+                    let generated = matches!(kind, OpKind::FragDotScaled)
+                        && matches!(ir.ty(ir.operand(op, 2)), Type::Dist(d) if d.layout == RegLayout::Generated);
+                    if generated {
+                        self.want_tiles(op, 1..2);
+                        self.want_tiles(op, 3..n);
+                    } else {
+                        self.want_tiles(op, 1..n);
+                    }
                 }
                 if matches!(kind, OpKind::FragStore) {
                     self.want_results(op, 0);
@@ -66,6 +74,38 @@ impl Verifier<'_> {
                     && ir.ty(ir.result(op)) != ir.ty(ir.operand(op, 0))
                 {
                     self.err(op, "result must be the accumulator's type");
+                }
+            }
+            OpKind::Generate => {
+                self.want_operands(op, 0);
+                if !self.want_results(op, 1) {
+                    return;
+                }
+                let Type::Dist(d) = ir.ty(ir.result(op)) else {
+                    self.err(op, "result must be a generated tile");
+                    return;
+                };
+                if d.layout != RegLayout::Generated || d.shape.len() != 2 {
+                    self.err(op, "result must be a generated rank-2 tile");
+                }
+                let block_ty = if d.elem.bytes() == Some(1) { Type::INDEX } else { Type::Scalar(d.elem) };
+                let [block] = ir.blocks_of(op)[..] else {
+                    self.err(op, "owns one block");
+                    return;
+                };
+                self.want_block_args(op, block, &[Type::INDEX, Type::INDEX]);
+                self.want_terminator(op, block, &OpKind::Yield, &[block_ty]);
+                // Every read computes the block afresh, so it may keep
+                // private scalars but write nothing anyone else sees.
+                let mut writes = false;
+                ir.walk(block, &mut |inner| {
+                    let kind = ir.kind(inner);
+                    writes |= kind.writes(ir.operands(inner).len()).iter().any(|&i| {
+                        ir.ty(ir.operand(inner, i)).as_tile().is_none_or(|t| t.space != Space::Private)
+                    });
+                });
+                if writes {
+                    self.err(op, "a generated block writes memory, which it may only read");
                 }
             }
             OpKind::Dot { .. } => {

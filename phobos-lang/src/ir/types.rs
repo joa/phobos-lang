@@ -266,6 +266,9 @@ pub enum RegLayout {
     /// A register matmul's accumulator, summed over `k` a step and spread
     /// by whichever path the target runs it on.
     Gemm { k: i64 },
+    /// Nowhere: each read computes the elements it needs from a
+    /// `Generate` op's block.
+    Generated,
 }
 
 /// A tile held in registers rather than in a buffer: a value, carried and
@@ -427,7 +430,7 @@ impl Type {
     /// Whether this is an accumulator, fragments or a register matmul's,
     /// which only its own ops may read.
     pub fn is_accumulator(&self) -> bool {
-        matches!(self, Type::Dist(d) if d.layout != RegLayout::Blocked)
+        matches!(self, Type::Dist(d) if matches!(d.layout, RegLayout::MmaAcc { .. } | RegLayout::Gemm { .. }))
     }
 
     /// A contiguous shared tile of a static shape, the common allocation.
@@ -483,6 +486,7 @@ impl fmt::Display for Type {
                     }
                     RegLayout::Blocked => write!(f, "regs<{}>[{}]", d.elem, dims.join(", "))?,
                     RegLayout::Gemm { k } => write!(f, "gemm<{}>[{}]/{k}", d.elem, dims.join(", "))?,
+                    RegLayout::Generated => write!(f, "gen<{}>[{}]", d.elem, dims.join(", "))?,
                 }
                 Ok(())
             }

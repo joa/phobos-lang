@@ -437,6 +437,18 @@ pub enum ExprKind {
         callee: String,
         args: Vec<Expr>,
     },
+    /// `generate(f)`: a tile with no storage. The function inliner makes it
+    /// from a statement function whose body ends in an expression.
+    Generate(Box<Generated>),
+}
+
+/// A generated tile's element block at `(row, unit)`: `value` after `body`,
+/// with `params` bound to the two.
+#[derive(Debug, Clone)]
+pub struct Generated {
+    pub params: [String; 2],
+    pub body: Vec<Stmt>,
+    pub value: Expr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -601,6 +613,12 @@ impl Expr {
                 for arg in args {
                     arg.walk(f);
                 }
+            }
+            ExprKind::Generate(g) => {
+                for stmt in &g.body {
+                    stmt.walk_exprs(f);
+                }
+                g.value.walk(f);
             }
         }
     }

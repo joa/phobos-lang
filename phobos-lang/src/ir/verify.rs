@@ -468,7 +468,7 @@ impl Verifier<'_> {
                 let parent = ir.parent_op(ir.parent_block(op));
                 let ok = matches!(
                     (parent.map(|p| ir.kind(p)), &kind),
-                    (Some(OpKind::For(_) | OpKind::If), OpKind::Yield) | (Some(OpKind::While), _)
+                    (Some(OpKind::For(_) | OpKind::If | OpKind::Generate), OpKind::Yield) | (Some(OpKind::While), _)
                 );
                 if !ok {
                     self.err(op, "does not end a block of the op that takes it");
@@ -516,6 +516,7 @@ impl Verifier<'_> {
             | OpKind::FragDotScaled
             | OpKind::FragOuter { .. }
             | OpKind::FragStore
+            | OpKind::Generate
             | OpKind::Dot { .. }
             | OpKind::DotInto { .. }
             | OpKind::DotFused { .. } => self.contract(op, &kind),

@@ -1,6 +1,7 @@
 mod control;
 pub(in crate::codegen) mod defer;
 mod epilogue;
+mod generate;
 mod intrinsics;
 mod lanes;
 mod pipeline;
@@ -37,6 +38,8 @@ pub(super) enum Lowered<'c> {
     Frags(FragAcc<'c>),
     Gemm(GemmAcc<'c>),
     Regs(regs::RegTile<'c>),
+    /// A generated tile: the `Generate` op whose block a read evaluates.
+    Generated(OpId),
 }
 
 impl<'c> Codegen<'c> {
@@ -336,6 +339,7 @@ impl<'c> Codegen<'c> {
             | OpKind::FragDotScaled
             | OpKind::FragOuter { .. }
             | OpKind::FragStore
+            | OpKind::Generate
             | OpKind::GemmInit
             | OpKind::GemmStore { .. } => self.emit_intrinsic_op(block, ir, op),
             OpKind::RegsFill | OpKind::RegsFused(_) | OpKind::RegsStore | OpKind::RegsReduce(_) => {

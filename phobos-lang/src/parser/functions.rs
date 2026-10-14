@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 
 use super::super::ast::lanes::{self, Fold};
-use super::super::ast::{Expr, ExprKind, Kernel, Stmt, Sub};
+use super::super::ast::{Expr, ExprKind, Generated, Kernel, Stmt, Sub};
 
 /// How deep calls may nest before inlining gives up, which also catches
 /// recursion.
@@ -175,6 +175,9 @@ impl<'a> Inliner<'a> {
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
                 ExprKind::Call { callee, args }
             }
+            ExprKind::Call { callee, args } if callee == "generate" => {
+                return self.generate(&args, span, depth);
+            }
             ExprKind::Call { callee, args } => {
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
                 let Some(f) = self.find(&callee) else {
@@ -203,6 +206,40 @@ impl<'a> Inliner<'a> {
             },
             other => other,
         };
+        Ok(Expr::new(kind, span))
+    }
+
+    /// `generate(f)`: `f`'s body with its locals and its two parameters
+    /// renamed apart, its last statement the value.
+    fn generate(&mut self, args: &[Expr], span: crate::diag::Span, depth: usize) -> Result<Expr, String> {
+        let [arg] = args else {
+            return Err("`generate` takes one function, as `generate(f)`".to_string());
+        };
+        let Some(f) = arg.as_var().and_then(|name| self.find(name)) else {
+            return Err("`generate` takes the name of a function, as `generate(f)`".to_string());
+        };
+        let Body::Stmts(body) = &f.body else {
+            return Err(format!("`{}` must have a statement body ending in its value to be generated", f.name));
+        };
+        let Some((Stmt::Expr(value, _), lead)) = body.split_last() else {
+            return Err(format!("`{}` must end in an expression, the value it generates", f.name));
+        };
+        let [row, unit] = &f.params[..] else {
+            return Err(format!("`{}` takes a row and a unit to be generated", f.name));
+        };
+        self.deeper(depth, &f.name)?;
+        self.next += 1;
+        let params = [format!("{row}#{}", self.next), format!("{unit}#{}", self.next)];
+        let map = bind(f, &[Expr::var(params[0].clone()), Expr::var(params[1].clone())])?;
+        let renames: HashMap<String, String> =
+            locals(lead).into_iter().map(|name| (name.clone(), format!("{name}#{}", self.next))).collect();
+        let lead = lead.iter().map(|s| subst_stmt(s, &map, &renames)).collect::<Result<Vec<_>, _>>()?;
+        let value = subst(value, &map, &renames)?;
+        let kind = ExprKind::Generate(Box::new(Generated {
+            params,
+            body: self.stmts(lead, depth + 1)?,
+            value: self.expr(value, depth + 1)?,
+        }));
         Ok(Expr::new(kind, span))
     }
 
@@ -318,6 +355,11 @@ fn subst(e: &Expr, args: &HashMap<String, Expr>, renames: &HashMap<String, Strin
                 subs: subs.iter().map(|s| subst_sub(s, args, renames)).collect::<Result<_, _>>()?,
             }
         }
+        ExprKind::Generate(g) => ExprKind::Generate(Box::new(Generated {
+            params: g.params.clone(),
+            body: g.body.iter().map(|s| subst_stmt(s, args, renames)).collect::<Result<_, _>>()?,
+            value: go(&g.value)?,
+        })),
         ExprKind::Call { callee, args: call_args } => ExprKind::Call {
             callee: callee.clone(),
             args: call_args.iter().map(go).collect::<Result<_, _>>()?,
