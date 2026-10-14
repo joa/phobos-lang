@@ -332,6 +332,7 @@ impl<'c> Codegen<'c> {
             | OpKind::FragScale(_)
             | OpKind::FragDot
             | OpKind::FragDotScaled
+            | OpKind::FragOuter { .. }
             | OpKind::FragStore
             | OpKind::GemmInit
             | OpKind::GemmStore { .. } => self.emit_intrinsic_op(block, ir, op),
