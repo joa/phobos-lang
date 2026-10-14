@@ -1,0 +1,19 @@
+error: `ctx` has no field `lanez`
+ --> tests/ui/ctx_field.ph:2:21
+  |
+2 |     Y[ctx.thread] = ctx.lanez
+  |                     ^^^^^^^^^
+help: a similar name exists: `lanes`
+  |
+2 |     Y[ctx.thread] = ctx.lanes
+  |                         ~~~~~
+
+error: `ctx` is reserved
+ --> tests/ui/ctx_field.ph:3:9
+  |
+3 |     let ctx = 1
+  |         ^^^ a name of its own here
+  |
+  = note: `ctx` is the launch context, read through its fields, as `ctx.block.x`
+
+error: aborting due to 2 previous errors

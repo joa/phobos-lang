@@ -28,6 +28,9 @@ pub const NAME: &str = "ctx";
 
 const AXES: [&str; 3] = ["x", "y", "z"];
 
+/// The fields `ctx` has.
+pub const FIELDS: [&str; 8] = ["block", "blocks", "threads", "warps", "lanes", "thread", "warp", "lane"];
+
 /// `ctx.block.<axis>` for axis 0, 1 or 2.
 pub fn block(axis: u8) -> Expr {
     axis_call(BLOCK, axis)

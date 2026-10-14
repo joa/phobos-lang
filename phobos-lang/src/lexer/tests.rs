@@ -162,17 +162,16 @@ fn tracks_line_and_column() {
 
 #[test]
 fn overflowing_int_literal_is_an_error() {
-    let err = Lexer::new("99999999999999999999999999")
-        .tokenize()
-        .unwrap_err();
-    assert!(err.contains("bad int literal"), "got: {err}");
+    let err = &Lexer::new("99999999999999999999999999").tokenize().unwrap_err()[0];
+    assert!(err.message.contains("too large"), "got: {err:?}");
 }
 
 #[test]
 fn unexpected_char_is_an_error() {
-    let err = Lexer::new("let x = #").tokenize().unwrap_err();
-    assert!(err.contains("unexpected char"), "got: {err}");
-    assert!(err.contains('#'), "got: {err}");
+    let err = &Lexer::new("let x = #").tokenize().unwrap_err()[0];
+    assert!(err.message.contains("unexpected char"), "got: {err:?}");
+    assert!(err.message.contains('#'), "got: {err:?}");
+    assert_eq!(err.span(), Some(Span::new(8, 9)));
 }
 
 #[test]
@@ -248,5 +247,5 @@ fn lexes_float_exponents() {
     assert_eq!(kinds("1.0e30")[0], Tok::Float(1.0e30));
     assert_eq!(kinds("1e-6")[0], Tok::Float(1e-6));
     assert_eq!(kinds("2.5E+3")[0], Tok::Float(2500.0));
-    assert!(Lexer::new("1e").tokenize().unwrap_err().contains("exponent"));
+    assert!(Lexer::new("1e").tokenize().unwrap_err()[0].message.contains("exponent"));
 }

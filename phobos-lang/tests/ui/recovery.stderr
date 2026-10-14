@@ -1,0 +1,25 @@
+error: expected an expression, found `*`
+ --> tests/ui/recovery.ph:4:19
+  |
+4 |     let s = 2.0 * * 3.0
+  |                   ^ expected an expression
+
+error: expected end of statement, found identifier `s`
+ --> tests/ui/recovery.ph:5:45
+  |
+5 |     Y[0, ctx.thread] = X[0, ctx.thread] * s s
+  |                                             ^ expected a newline or `;` before this
+
+error: expected an expression, found `}`
+  --> tests/ui/recovery.ph:12:5
+   |
+12 |     }
+   |     ^ expected an expression
+
+error: expected `:`, found identifier `tensor`
+  --> tests/ui/recovery.ph:15:15
+   |
+15 | kernel fill(Y tensor<f32>[N]) {
+   |               ^^^^^^ expected `:`
+
+error: aborting due to 4 previous errors

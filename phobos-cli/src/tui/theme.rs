@@ -1,40 +1,37 @@
 // The dashboard's palette and its glyph vocabulary.
 //
-// The palette is the website's night sky (`website/src/styles/tokens.css`,
-// dark theme): a near-black blue sky, starlight for text, a pale blue brand,
-// a violet nebula and Mars for the warm end. Colors are RGB rather than the
-// sixteen named ones, so the dashboard looks the same under any terminal
-// theme. Non-ASCII glyphs are written as escapes to keep the source ASCII.
+// The palette is the website's night sky, `phobos_base::palette`: a
+// near-black blue sky, starlight for text, a pale blue brand, a violet nebula
+// and Mars for the warm end. Colors are RGB rather than the sixteen named
+// ones, so the dashboard looks the same under any terminal theme. Non-ASCII
+// glyphs are written as escapes to keep the source ASCII.
 
+use phobos_base::palette::{self, Rgb};
 use ratatui::style::{Color, Modifier, Style};
 
-/// The night sky, `--sky-0`, so the colors do not depend on the terminal's
-/// background.
-pub const BG: Color = Color::Rgb(5, 7, 15);
+const fn rgb((r, g, b): Rgb) -> Color {
+    Color::Rgb(r, g, b)
+}
 
-/// The brand blue, `--brand`.
-pub const BRAND: Color = Color::Rgb(106, 184, 255);
-/// The brand lit, `--brand-hi`. The primary for figures and keys.
-pub const BRAND_HI: Color = Color::Rgb(169, 214, 255);
-/// The brand, at rest.
-pub const BRAND_DIM: Color = Color::Rgb(52, 92, 140);
-/// Barely lit, for hints and what an animation fades into.
-pub const FAINT: Color = Color::Rgb(48, 64, 98);
+/// The night sky, so the colors do not depend on the terminal's background.
+pub const BG: Color = rgb(palette::SKY);
 
-/// The nebula violet, `--nebula`.
-pub const NEBULA: Color = Color::Rgb(160, 140, 255);
-/// A gold star, the warm hue between the brand and Mars.
-pub const GOLD: Color = Color::Rgb(255, 198, 107);
-/// Mars, `--mars`.
-pub const MARS: Color = Color::Rgb(255, 138, 107);
+pub const BRAND: Color = rgb(palette::BRAND);
+/// The primary for figures and keys.
+pub const BRAND_HI: Color = rgb(palette::BRAND_HI);
+pub const BRAND_DIM: Color = rgb(palette::BRAND_DIM);
+pub const FAINT: Color = rgb(palette::FAINT);
 
-/// Starlight, `--star`. Body text.
-pub const TEXT: Color = Color::Rgb(230, 236, 248);
-/// Dust, `--dust`. Labels and units, quieter than the figures beside them.
-pub const MUTED: Color = Color::Rgb(141, 154, 179);
-/// The sky's hairline, `--sky-line`. A panel's edge when nothing is
-/// happening in it.
-pub const BORDER: Color = Color::Rgb(28, 42, 72);
+pub const NEBULA: Color = rgb(palette::NEBULA);
+pub const GOLD: Color = rgb(palette::GOLD);
+pub const MARS: Color = rgb(palette::MARS);
+
+/// Body text.
+pub const TEXT: Color = rgb(palette::STAR);
+/// Labels and units, quieter than the figures beside them.
+pub const MUTED: Color = rgb(palette::DUST);
+/// A panel's edge when nothing is happening in it.
+pub const BORDER: Color = rgb(palette::SKY_LINE);
 
 pub fn text() -> Style {
     Style::default().fg(TEXT)

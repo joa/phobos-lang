@@ -9,16 +9,22 @@
 // first choice. `--all-variants` writes one file per point of the search
 // space left after the pins, named OUT_NAME-value_NAME-value.ptx.
 // `PHOBOS_PRINT_PHASES` prints the IR after each lowering phase.
+// Errors go to stderr as rustc lays them out, colored on a terminal
+// (`--color`), or one JSON object per line with `--error-format json`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
 use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+use phobos_base::term::{self, ColorChoice};
 use phobos_lang::ast::Kernel;
+use phobos_lang::diag::{self, SourceFile};
 
 const USAGE: &str = "usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] \
-                     [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx]";
+                     [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx] \
+                     [--color auto|always|never] [--error-format human|json]";
 
 const HELP: &str = "
   --chip CHIP              target architecture, sm_75 by default
@@ -29,9 +35,33 @@ const HELP: &str = "
                            pins, one file each, named OUT_NAME-value.ptx
                            (OUT from -o, else the source's name); prints a
                            line per file and skips a variant that fails
-  -o, --output OUT.ptx     write the PTX here instead of standard output";
+  -o, --output OUT.ptx     write the PTX here instead of standard output
+  --color WHEN             color errors: auto (on a terminal, unless
+                           NO_COLOR is set), always or never
+  --error-format FORMAT    human, or json for one object per error";
 
-fn main() -> Result<()> {
+#[derive(Default)]
+struct Report {
+    color: ColorChoice,
+    json: bool,
+}
+
+fn main() -> ExitCode {
+    let mut report = Report::default();
+    match run(&mut report) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            if report.json {
+                eprint!("{}", diag::error_json(&e));
+            } else {
+                eprint!("{}", diag::render_error(&e, term::stderr_colors(report.color)));
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+fn run(report: &mut Report) -> Result<()> {
     let mut ctx = Context {
         print_phases: phobos_base::env::flag("PHOBOS_PRINT_PHASES"),
         ..Context::default()
@@ -54,6 +84,14 @@ fn main() -> Result<()> {
             }
             "--all-variants" => all_variants = true,
             "-o" | "--output" => out = Some(value()?.into()),
+            "--color" => report.color = value()?.parse().map_err(anyhow::Error::msg)?,
+            "--error-format" => {
+                report.json = match value()?.as_str() {
+                    "human" => false,
+                    "json" => true,
+                    other => bail!("--error-format takes human or json, not `{other}`"),
+                }
+            }
             "--version" | "-V" => {
                 let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
                 println!("phobos-compile {} (compiler {fingerprint})", env!("CARGO_PKG_VERSION"));
@@ -71,7 +109,7 @@ fn main() -> Result<()> {
     let file = file.context(USAGE)?;
 
     let src = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-    let kernels = phobos_lang::parse(&src)?;
+    let kernels = phobos_lang::parse_source(&SourceFile::new(file.display().to_string(), src))?;
 
     if !all_variants {
         // Each kernel seeds its own first choices, so only the pins' names

@@ -1,15 +1,23 @@
 use super::ast::*;
 use super::token::{Tok, Token};
+use crate::diag::{self, Diagnostic};
 
 mod collective;
 mod functions;
 mod jumps;
+mod recover;
+
+pub(crate) type PResult<T> = Result<T, Diagnostic>;
 
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
     /// Where the last token consumed other than a statement terminator ends.
     last_end: (u32, u32),
+    /// The same, as a byte offset.
+    last_hi: u32,
+    /// What went wrong in the statements and items recovered from.
+    errors: Vec<Diagnostic>,
 }
 
 impl Parser {
@@ -18,6 +26,8 @@ impl Parser {
             toks,
             pos: 0,
             last_end: (1, 1),
+            last_hi: 0,
+            errors: Vec::new(),
         }
     }
 
@@ -38,6 +48,7 @@ impl Parser {
         let t = cur.tok.clone();
         if t != Tok::Semicolon {
             self.last_end = (cur.line, cur.end_col);
+            self.last_hi = cur.hi;
         }
         if self.pos + 1 < self.toks.len() {
             self.pos += 1;
@@ -54,12 +65,11 @@ impl Parser {
         }
     }
 
-    fn expect(&mut self, t: Tok) -> Result<(), String> {
-        if self.matches(&t) {
-            self.advance();
+    fn expect(&mut self, t: Tok) -> PResult<()> {
+        if self.consume(&t) {
             Ok(())
         } else {
-            Err(self.err_msg(format!("expected {}, found {}", t, self.peek())))
+            Err(self.unexpected(&t.to_string()))
         }
     }
 
@@ -80,41 +90,44 @@ impl Parser {
         }
     }
 
-    fn err_msg(&self, msg: impl std::fmt::Display) -> String {
-        let (line, col) = self.pos();
-        format!("{line}:{col}: {msg}")
-    }
-
-    fn ident(&mut self) -> Result<String, String> {
-        let (line, col) = self.pos();
-        match self.advance() {
-            Tok::Ident(s) if s == ctx::NAME => Err(format!("{line}:{col}: `ctx` is reserved")),
-            Tok::Ident(s) => Ok(s),
-            other => Err(format!("{line}:{col}: expected identifier, found {other}")),
+    fn ident(&mut self) -> PResult<String> {
+        match self.peek().clone() {
+            Tok::Ident(s) if s == ctx::NAME => Err(Diagnostic::error("`ctx` is reserved")
+                .primary(self.here(), "a name of its own here")
+                .note("`ctx` is the launch context, read through its fields, as `ctx.block.x`")),
+            Tok::Ident(s) => {
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(self.unexpected("an identifier")),
         }
     }
 
     /// A field name after `.`.
-    fn field(&mut self) -> Result<String, String> {
-        let (line, col) = self.pos();
-        match self.advance() {
-            Tok::Ident(s) => Ok(s),
-            other => Err(format!("{line}:{col}: expected a field name, found {other}")),
+    fn field(&mut self) -> PResult<String> {
+        match self.peek().clone() {
+            Tok::Ident(s) => {
+                self.advance();
+                Ok(s)
+            }
+            _ => Err(self.unexpected("a field name")),
         }
     }
 
-    fn int(&mut self) -> Result<i64, String> {
-        let (line, col) = self.pos();
-        match self.advance() {
-            Tok::Int(n) => Ok(n),
-            other => Err(format!("{line}:{col}: expected integer, found {other}")),
+    fn int(&mut self) -> PResult<i64> {
+        match *self.peek() {
+            Tok::Int(n) => {
+                self.advance();
+                Ok(n)
+            }
+            _ => Err(self.unexpected("an integer")),
         }
     }
 
     fn comma_separated<T>(
         &mut self,
-        mut item: impl FnMut(&mut Self) -> Result<T, String>,
-    ) -> Result<Vec<T>, String> {
+        mut item: impl FnMut(&mut Self) -> PResult<T>,
+    ) -> PResult<Vec<T>> {
         let mut out = vec![item(self)?];
         while self.consume(&Tok::Comma) {
             out.push(item(self)?);
@@ -131,52 +144,63 @@ impl Parser {
     /// A statement ends at a terminator, either newline-inserted or an
     /// explicit ';'. The terminator may be omitted before a closing } or at
     /// EOF.
-    fn end_stmt(&mut self) -> Result<(), String> {
+    fn end_stmt(&mut self) -> PResult<()> {
         if self.consume(&Tok::Semicolon) || self.matches(&Tok::RBrace) || self.matches(&Tok::Eof) {
             Ok(())
         } else {
-            Err(self.err_msg(format!(
-                "expected end of statement (newline), found {}",
-                self.peek()
-            )))
+            Err(Diagnostic::error(format!("expected end of statement, found {}", self.found()))
+                .primary(self.here(), "expected a newline or `;` before this"))
         }
     }
 
-    pub fn parse_program(&mut self) -> Result<Vec<Kernel>, String> {
+    /// Every kernel in the source, or every error found in it: a statement
+    /// or an item that fails to parse is reported and skipped, and parsing
+    /// goes on after it.
+    pub fn parse_program(&mut self) -> Result<Vec<Kernel>, Vec<Diagnostic>> {
         let mut kernels = Vec::new();
         let mut fns = Vec::new();
-        while !self.matches(&Tok::Eof) {
+        while !self.matches(&Tok::Eof) && self.errors.len() < diag::MAX_ERRORS {
             // tolerate terminators between kernels (e.g. after a body's '}')
             if self.consume(&Tok::Semicolon) {
                 continue;
             }
-            if self.matches(&Tok::Fn) {
-                fns.push(self.parse_function()?);
+            let start = self.pos;
+            let item = if self.matches(&Tok::Fn) {
+                self.parse_function().map(|f| fns.push(f))
             } else {
-                kernels.push(self.parse_kernel()?);
+                self.parse_kernel().map(|k| kernels.push(k))
+            };
+            if let Err(d) = item {
+                self.report(d);
+                self.sync_item(start);
             }
+        }
+        if !self.errors.is_empty() {
+            return Err(std::mem::take(&mut self.errors));
         }
         // Functions are inlined first, so a jump they splice in is lowered
         // with the caller's loops.
-        functions::inline(&mut kernels, &fns)?;
+        functions::inline(&mut kernels, &fns).map_err(|e| vec![Diagnostic::error(e)])?;
         for kernel in &mut kernels {
             let body = std::mem::take(&mut kernel.body);
-            kernel.body = jumps::desugar(body).map_err(|e| format!("kernel `{}`: {e}", kernel.name))?;
+            kernel.body = jumps::desugar(body)
+                .map_err(|e| vec![Diagnostic::error(format!("kernel `{}`: {e}", kernel.name))])?;
         }
         Ok(kernels)
     }
 
     /// `fn name(params) = expr` or `fn name(params) { stmts }`.
-    fn parse_function(&mut self) -> Result<functions::Function, String> {
+    fn parse_function(&mut self) -> PResult<functions::Function> {
         self.expect(Tok::Fn)?;
         let name = self.ident()?;
+        let open = self.here();
         self.expect(Tok::LParen)?;
         let params = if self.matches(&Tok::RParen) {
             Vec::new()
         } else {
             self.comma_separated(Self::ident)?
         };
-        self.expect(Tok::RParen)?;
+        self.expect_close(Tok::RParen, open)?;
         let body = if self.consume(&Tok::Eq) {
             let e = self.parse_expr()?;
             self.end_stmt()?;
@@ -184,14 +208,16 @@ impl Parser {
         } else {
             let body = self.parse_block()?;
             if let Some(jump) = jumps::escaping(&body) {
-                return Err(format!("function `{name}`: `{jump}` would leave the function body"));
+                return Err(Diagnostic::error(format!(
+                    "function `{name}`: `{jump}` would leave the function body"
+                )));
             }
             functions::Body::Stmts(body)
         };
         Ok(functions::Function { name, params, body })
     }
 
-    fn parse_kernel(&mut self) -> Result<Kernel, String> {
+    fn parse_kernel(&mut self) -> PResult<Kernel> {
         let mut attrs = Vec::new();
         loop {
             if self.matches(&Tok::At) {
@@ -202,16 +228,21 @@ impl Parser {
             }
         }
 
-        self.expect(Tok::Kernel)?;
+        if !self.matches(&Tok::Kernel) {
+            let what = if attrs.is_empty() { "`kernel` or `fn`" } else { "`kernel` after the attributes" };
+            return Err(self.unexpected(what));
+        }
+        self.advance();
         let name = self.ident()?;
 
+        let open = self.here();
         self.expect(Tok::LParen)?;
         let params = if self.matches(&Tok::RParen) {
             Vec::new()
         } else {
             self.parse_params()?
         };
-        self.expect(Tok::RParen)?;
+        self.expect_close(Tok::RParen, open)?;
 
         let body = self.parse_block()?;
         Ok(Kernel {
@@ -222,31 +253,33 @@ impl Parser {
         })
     }
 
-    fn parse_attribute(&mut self) -> Result<Attribute, String> {
+    fn parse_attribute(&mut self) -> PResult<Attribute> {
         self.expect(Tok::At)?;
 
         let name = self.ident()?;
 
         let mut args = Vec::new();
+        let open = self.here();
         if self.consume(&Tok::LParen) {
             if !self.matches(&Tok::RParen) {
                 args = self.comma_separated(Self::parse_attr_arg)?;
             }
-            self.expect(Tok::RParen)?;
+            self.expect_close(Tok::RParen, open)?;
         }
 
         Ok(Attribute { name, args })
     }
 
-    fn parse_attr_arg(&mut self) -> Result<AttrArg, String> {
+    fn parse_attr_arg(&mut self) -> PResult<AttrArg> {
         // an ident may begin a search dim (x in [..]), a keyword arg (x = v),
         // or a bare positional name; anything else is a positional literal
         if let Tok::Ident(_) = self.peek() {
             let name = self.ident()?;
             if self.consume(&Tok::In) {
+                let open = self.here();
                 self.expect(Tok::LBracket)?;
                 let choices = self.comma_separated(Self::int)?;
-                self.expect(Tok::RBracket)?;
+                self.expect_close(Tok::RBracket, open)?;
                 Ok(AttrArg::Search { name, choices })
             } else if self.consume(&Tok::Eq) {
                 Ok(AttrArg::KeyValue {
@@ -261,19 +294,20 @@ impl Parser {
         }
     }
 
-    fn parse_lit(&mut self) -> Result<Literal, String> {
-        let (line, col) = self.pos();
-        match self.advance() {
-            Tok::Int(n) => Ok(Literal::Int(n)),
-            Tok::Float(f) => Ok(Literal::Float(f)),
-            Tok::True => Ok(Literal::Bool(true)),
-            Tok::False => Ok(Literal::Bool(false)),
-            Tok::Ident(s) => Ok(Literal::Ident(s)),
-            other => Err(format!("{line}:{col}: expected a literal, found {other}")),
-        }
+    fn parse_lit(&mut self) -> PResult<Literal> {
+        let lit = match self.peek().clone() {
+            Tok::Int(n) => Literal::Int(n),
+            Tok::Float(f) => Literal::Float(f),
+            Tok::True => Literal::Bool(true),
+            Tok::False => Literal::Bool(false),
+            Tok::Ident(s) => Literal::Ident(s),
+            _ => return Err(self.unexpected("a literal")),
+        };
+        self.advance();
+        Ok(lit)
     }
 
-    fn parse_params(&mut self) -> Result<Vec<Param>, String> {
+    fn parse_params(&mut self) -> PResult<Vec<Param>> {
         self.comma_separated(|p| {
             let name = p.ident()?;
             p.expect(Tok::Colon)?;
@@ -286,12 +320,12 @@ impl Parser {
 // types
 
 impl Parser {
-    fn parse_type(&mut self) -> Result<Type, String> {
-        let (line, col) = self.pos();
-        let name = match self.advance() {
-            Tok::Ident(s) => s,
-            other => return Err(format!("{line}:{col}: expected a type, found {other}")),
+    fn parse_type(&mut self) -> PResult<Type> {
+        let at = self.here();
+        let Tok::Ident(name) = self.peek().clone() else {
+            return Err(self.unexpected("a type"));
         };
+        self.advance();
 
         if let Some(s) = Scalar::from_name(&name) {
             return Ok(Type::Scalar(s));
@@ -306,62 +340,80 @@ impl Parser {
                 let (elem, dims) = self.parse_aggregate()?;
                 Ok(Type::Tile(elem, dims))
             }
-            other => Err(format!("{line}:{col}: unknown type '{other}'")),
+            other => {
+                let types = Scalar::NAMES.into_iter().chain(["tensor", "tile"]);
+                Err(recover::did_you_mean(
+                    Diagnostic::error(format!("unknown type `{other}`")).primary(at, "not a type"),
+                    at,
+                    other,
+                    types,
+                ))
+            }
         }
     }
 
     // '<' scalar '>' '[' dims ']'
-    fn parse_aggregate(&mut self) -> Result<(Scalar, Vec<Dim>), String> {
+    fn parse_aggregate(&mut self) -> PResult<(Scalar, Vec<Dim>)> {
         self.expect(Tok::Lt)?;
         let elem = self.parse_scalar()?;
         self.expect(Tok::Gt)?;
+        let open = self.here();
         self.expect(Tok::LBracket)?;
         let dims = self.comma_separated(Self::parse_dim)?;
-        self.expect(Tok::RBracket)?;
+        self.expect_close(Tok::RBracket, open)?;
         Ok((elem, dims))
     }
 
-    fn parse_scalar(&mut self) -> Result<Scalar, String> {
-        let (line, col) = self.pos();
-        match self.advance() {
-            Tok::Ident(s) => Scalar::from_name(&s).ok_or_else(|| {
-                format!("{line}:{col}: expected a scalar element type, found '{s}'")
-            }),
-            other => Err(format!(
-                "{line}:{col}: expected a scalar element type, found {other}"
-            )),
-        }
+    fn parse_scalar(&mut self) -> PResult<Scalar> {
+        let at = self.here();
+        let Tok::Ident(s) = self.peek().clone() else {
+            return Err(self.unexpected("a scalar element type"));
+        };
+        let Some(scalar) = Scalar::from_name(&s) else {
+            let d = Diagnostic::error(format!("expected a scalar element type, found `{s}`"))
+                .primary(at, "not a scalar type");
+            return Err(recover::did_you_mean(d, at, &s, Scalar::NAMES));
+        };
+        self.advance();
+        Ok(scalar)
     }
 
-    fn parse_dim(&mut self) -> Result<Dim, String> {
-        let (line, col) = self.pos();
-        match self.advance() {
-            Tok::Ident(s) => Ok(Dim::Sym(s)),
-            Tok::Int(n) => Ok(Dim::Int(n)),
-            other => Err(format!(
-                "{line}:{col}: expected a dimension (name or int), found {other}"
-            )),
-        }
+    fn parse_dim(&mut self) -> PResult<Dim> {
+        let dim = match self.peek().clone() {
+            Tok::Ident(s) => Dim::Sym(s),
+            Tok::Int(n) => Dim::Int(n),
+            _ => return Err(self.unexpected("a dimension, a name or an integer")),
+        };
+        self.advance();
+        Ok(dim)
     }
 }
 
 // statements
 
 impl Parser {
-    fn parse_block(&mut self) -> Result<Vec<Stmt>, String> {
+    /// `{ stmts }`. A statement that fails to parse is reported and skipped.
+    fn parse_block(&mut self) -> PResult<Vec<Stmt>> {
+        let open = self.here();
         self.expect(Tok::LBrace)?;
         let mut stmts = Vec::new();
         while !self.matches(&Tok::RBrace) && !self.matches(&Tok::Eof) {
             if self.consume(&Tok::Semicolon) {
                 continue;
             }
-            stmts.push(self.parse_stmt()?);
+            match self.parse_stmt() {
+                Ok(stmt) => stmts.push(stmt),
+                Err(d) => {
+                    self.report(d);
+                    self.sync_stmt();
+                }
+            }
         }
-        self.expect(Tok::RBrace)?;
+        self.expect_close(Tok::RBrace, open)?;
         Ok(stmts)
     }
 
-    fn parse_stmt(&mut self) -> Result<Stmt, String> {
+    fn parse_stmt(&mut self) -> PResult<Stmt> {
         let start = self.pos();
         match self.peek() {
             Tok::Let => self.parse_let_or_var(false),
@@ -380,8 +432,9 @@ impl Parser {
                 Ok(jumps::jump(which, span))
             }
             _ => {
-                let (line, col) = self.pos();
+                let lo = self.current().lo;
                 let expr = self.parse_expr()?;
+                let target = diag::Span::new(lo, self.last_hi);
                 // `x op= e` other than `+=` is `x = x op e`; `+=` stays an
                 // accumulate, which a dot or a fragment lowers on its own.
                 let (op, compound) = match self.peek().clone() {
@@ -393,7 +446,7 @@ impl Parser {
                 match op {
                     Some(op) => {
                         self.advance();
-                        ensure_lvalue(&expr).map_err(|m| format!("{line}:{col}: {m}"))?;
+                        ensure_lvalue(&expr).map_err(|m| Diagnostic::error(m).primary(target, "cannot be assigned"))?;
                         let mut value = self.parse_expr()?;
                         if let Some(bop) = compound {
                             value = Expr::Binary {
@@ -421,7 +474,7 @@ impl Parser {
         }
     }
 
-    fn parse_let_or_var(&mut self, is_var: bool) -> Result<Stmt, String> {
+    fn parse_let_or_var(&mut self, is_var: bool) -> PResult<Stmt> {
         let start = self.pos();
         self.advance();
         let name = self.ident()?;
@@ -463,7 +516,7 @@ impl Parser {
         })
     }
 
-    fn parse_if(&mut self) -> Result<Stmt, String> {
+    fn parse_if(&mut self) -> PResult<Stmt> {
         let start = self.pos();
         self.advance();
         let cond = self.parse_expr()?;
@@ -486,7 +539,7 @@ impl Parser {
         })
     }
 
-    fn parse_while(&mut self) -> Result<Stmt, String> {
+    fn parse_while(&mut self) -> PResult<Stmt> {
         let start = self.pos();
         self.advance();
         let cond = self.parse_expr()?;
@@ -495,15 +548,17 @@ impl Parser {
         Ok(Stmt::While { cond, body, span })
     }
 
-    fn parse_for(&mut self) -> Result<Stmt, String> {
+    fn parse_for(&mut self) -> PResult<Stmt> {
         let start_pos = self.pos();
         self.advance();
         // `for<unroll n>`: the one setting a loop takes.
         let unroll = if self.consume(&Tok::Lt) {
-            let (line, col) = self.pos();
+            let at = self.here();
             let word = self.field()?;
             if word != "unroll" {
-                return Err(format!("{line}:{col}: `{word}` is not a setting of `for<..>`; it takes `unroll`"));
+                return Err(Diagnostic::error(format!("`{word}` is not a setting of `for<..>`; it takes `unroll`"))
+                    .primary(at, "unknown setting")
+                    .help("unroll a loop as `for<unroll 4> i in range(0, n)`"));
             }
             let n = self.term()?;
             self.expect(Tok::Gt)?;
@@ -513,13 +568,14 @@ impl Parser {
         };
         let var = self.ident()?;
         self.expect(Tok::In)?;
-        let (line, col) = self.pos();
+        let at = self.here();
         let r = self.ident()?;
         if r != "range" {
-            return Err(format!(
-                "{line}:{col}: expected `range(...)` in for-loop, found `{r}`"
-            ));
+            return Err(Diagnostic::error(format!("expected `range(...)` in for-loop, found `{r}`"))
+                .primary(at, "a loop runs over a `range`")
+                .help("write the bounds as `range(start, end)` or `range(start, end, step)`"));
         }
+        let open = self.here();
         self.expect(Tok::LParen)?;
         let start = self.parse_expr()?;
         self.expect(Tok::Comma)?;
@@ -529,7 +585,7 @@ impl Parser {
         } else {
             None
         };
-        self.expect(Tok::RParen)?;
+        self.expect_close(Tok::RParen, open)?;
         let span = self.span_from(start_pos);
         let body = self.parse_block()?;
         Ok(Stmt::For {
@@ -547,7 +603,7 @@ impl Parser {
 // expressions
 
 impl Parser {
-    fn parse_expr(&mut self) -> Result<Expr, String> {
+    fn parse_expr(&mut self) -> PResult<Expr> {
         self.logical_or()
     }
 
@@ -556,8 +612,8 @@ impl Parser {
     fn binary_level(
         &mut self,
         ops: &[(Tok, BinOp)],
-        next: fn(&mut Self) -> Result<Expr, String>,
-    ) -> Result<Expr, String> {
+        next: fn(&mut Self) -> PResult<Expr>,
+    ) -> PResult<Expr> {
         let mut lhs = next(self)?;
         while let Some(&(_, op)) = ops.iter().find(|(t, _)| self.matches(t)) {
             self.advance();
@@ -571,19 +627,19 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn logical_or(&mut self) -> Result<Expr, String> {
+    fn logical_or(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::PipePipe, BinOp::Or)], Self::logical_and)
     }
 
-    fn logical_and(&mut self) -> Result<Expr, String> {
+    fn logical_and(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::AmpAmp, BinOp::And)], Self::equality)
     }
 
-    fn equality(&mut self) -> Result<Expr, String> {
+    fn equality(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::EqEq, BinOp::Eq), (Tok::NotEq, BinOp::Ne)], Self::comparison)
     }
 
-    fn comparison(&mut self) -> Result<Expr, String> {
+    fn comparison(&mut self) -> PResult<Expr> {
         let ops = [
             (Tok::Lt, BinOp::Lt),
             (Tok::Le, BinOp::Le),
@@ -595,27 +651,27 @@ impl Parser {
 
     // Bitwise operators bind tighter than comparisons, as in Rust, so
     // `x & 15 == 3` tests the masked value.
-    fn bit_or(&mut self) -> Result<Expr, String> {
+    fn bit_or(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::Pipe, BinOp::BitOr)], Self::bit_xor)
     }
 
-    fn bit_xor(&mut self) -> Result<Expr, String> {
+    fn bit_xor(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::Caret, BinOp::BitXor)], Self::bit_and)
     }
 
-    fn bit_and(&mut self) -> Result<Expr, String> {
+    fn bit_and(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::Amp, BinOp::BitAnd)], Self::shift)
     }
 
-    fn shift(&mut self) -> Result<Expr, String> {
+    fn shift(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::Shl, BinOp::Shl), (Tok::Shr, BinOp::Shr)], Self::term)
     }
 
-    fn term(&mut self) -> Result<Expr, String> {
+    fn term(&mut self) -> PResult<Expr> {
         self.binary_level(&[(Tok::Plus, BinOp::Add), (Tok::Minus, BinOp::Sub)], Self::factor)
     }
 
-    fn factor(&mut self) -> Result<Expr, String> {
+    fn factor(&mut self) -> PResult<Expr> {
         let ops = [
             (Tok::Star, BinOp::Mul),
             (Tok::Slash, BinOp::Div),
@@ -624,7 +680,7 @@ impl Parser {
         self.binary_level(&ops, Self::unary)
     }
 
-    fn unary(&mut self) -> Result<Expr, String> {
+    fn unary(&mut self) -> PResult<Expr> {
         match self.peek() {
             Tok::Minus => {
                 self.advance();
@@ -651,12 +707,14 @@ impl Parser {
         }
     }
 
-    fn postfix(&mut self) -> Result<Expr, String> {
+    fn postfix(&mut self) -> PResult<Expr> {
+        let lo = self.current().lo;
         let mut expr = self.primary()?;
         loop {
+            let open = self.here();
             if self.consume(&Tok::LBracket) {
                 let subs = self.comma_separated(Self::parse_sub)?;
-                self.expect(Tok::RBracket)?;
+                self.expect_close(Tok::RBracket, open)?;
                 expr = Expr::Index {
                     base: Box::new(expr),
                     subs,
@@ -674,7 +732,7 @@ impl Parser {
                     } else {
                         self.parse_args()?
                     };
-                    self.expect(Tok::RParen)?;
+                    self.expect_close(Tok::RParen, open)?;
                     expr = if matches!(name.as_str(), "min" | "max") && args.len() == 2 {
                         let [lhs, rhs] = <[Expr; 2]>::try_from(args).expect("two arguments");
                         Expr::Binary {
@@ -701,7 +759,9 @@ impl Parser {
                         Expr::Call { callee: name, args }
                     };
                 } else {
-                    return Err(self.err_msg("call target must be an identifier"));
+                    return Err(Diagnostic::error("call target must be an identifier")
+                        .primary(diag::Span::new(lo, self.last_hi), "this is not a name")
+                        .secondary(open, "called here"));
                 }
             } else {
                 break;
@@ -710,7 +770,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_sub(&mut self) -> Result<Sub, String> {
+    fn parse_sub(&mut self) -> PResult<Sub> {
         if self.consume(&Tok::Colon) {
             if self.matches(&Tok::RBracket) || self.matches(&Tok::Comma) {
                 return Ok(Sub::Full); // A[:]
@@ -736,12 +796,19 @@ impl Parser {
         }
     }
 
-    fn parse_args(&mut self) -> Result<Vec<Expr>, String> {
+    fn parse_args(&mut self) -> PResult<Vec<Expr>> {
         self.comma_separated(Self::parse_expr)
     }
 
-    fn primary(&mut self) -> Result<Expr, String> {
-        let (line, col) = self.pos();
+    fn primary(&mut self) -> PResult<Expr> {
+        let at = self.here();
+        if !matches!(
+            self.peek(),
+            Tok::Int(_) | Tok::Float(_) | Tok::True | Tok::False | Tok::Ident(_) | Tok::LParen
+        ) {
+            return Err(Diagnostic::error(format!("expected an expression, found {}", self.found()))
+                .primary(self.here(), "expected an expression"));
+        }
         match self.advance() {
             Tok::Int(n) => Ok(Expr::Int(n)),
             Tok::Float(f) => Ok(Expr::Float(f)),
@@ -753,19 +820,29 @@ impl Parser {
                     path.push(self.field()?);
                 }
                 if path.is_empty() {
-                    return Err(format!("{line}:{col}: `ctx` is used through a field, as `ctx.block.x`"));
+                    return Err(Diagnostic::error("`ctx` is used through a field")
+                        .primary(at, "")
+                        .help("read a field, as `ctx.block.x` or `ctx.lane`"));
                 }
-                ctx::field(&path).map_err(|e| format!("{line}:{col}: {e}"))
+                let whole = diag::Span::new(at.lo, self.last_hi);
+                ctx::field(&path).map_err(|e| {
+                    let d = Diagnostic::error(e).primary(whole, "");
+                    match path[..] {
+                        [ref field] => {
+                            let field_at = diag::Span::new(whole.hi - field.len() as u32, whole.hi);
+                            recover::did_you_mean(d, field_at, field, ctx::FIELDS)
+                        }
+                        _ => d,
+                    }
+                })
             }
             Tok::Ident(s) => Ok(Expr::Var(s)),
             Tok::LParen => {
                 let expr = self.parse_expr()?;
-                self.expect(Tok::RParen)?;
+                self.expect_close(Tok::RParen, at)?;
                 Ok(expr)
             }
-            other => Err(format!(
-                "{line}:{col}: unexpected token in expression: {other}"
-            )),
+            _ => unreachable!("checked above"),
         }
     }
 }
