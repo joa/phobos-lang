@@ -368,6 +368,9 @@ pub enum OpKind {
     /// `(b0, b1, b2, b3) -> index`: four `i8` as the little-endian word
     /// they pack into, unsigned.
     Word,
+    /// `(b0, b1) -> index`: two `i8` as the little-endian halfword they
+    /// pack into, unsigned.
+    HalfWord,
     /// `(x, y, acc) -> acc + sum x_i * y_i` over the four signed bytes of
     /// the low 32 bits of `x` and `y`: one `dp4a`.
     Dp4a,
@@ -567,6 +570,7 @@ impl OpKind {
             }
             OpKind::F16Bits => "f16bits".into(),
             OpKind::Word => "word".into(),
+            OpKind::HalfWord => "hword".into(),
             OpKind::Dp4a => "dp4a".into(),
             OpKind::BytePerm => "byteperm".into(),
             OpKind::PopCount => "popcount".into(),

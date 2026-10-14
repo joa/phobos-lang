@@ -52,10 +52,12 @@ impl<'c> Codegen<'c> {
                 self.set_ir(ir.result(op), Lowered::Scalar(v));
             }
             OpKind::Exchange => self.exchange(block, ir, op)?,
-            OpKind::Word => {
-                let bytes = self.word4(block, ir.operands(op))?;
-                let word = self.vec_bitcast(block, bytes, Type::vector(&[1], self.i32_t))?;
-                let word = self.vec_extract(block, word, &[0], self.i32_t)?;
+            OpKind::Word | OpKind::HalfWord => {
+                let n = ir.operands(op).len() as u64;
+                let int_t: Type<'c> = melior::ir::r#type::IntegerType::new(self.ctx, 8 * n as u32).into();
+                let bytes = self.byte_vector(block, ir.operands(op))?;
+                let word = self.vec_bitcast(block, bytes, Type::vector(&[1], int_t))?;
+                let word = self.vec_extract(block, word, &[0], int_t)?;
                 let word = self.push(
                     block,
                     melior::ir::operation::OperationBuilder::new("arith.index_castui", self.loc)
@@ -177,13 +179,13 @@ impl<'c> Codegen<'c> {
             cg.vec_bitcast(block, w, vec4)
         };
         match how {
-            Bytes::Raw => self.word4(block, from),
+            Bytes::Raw => self.byte_vector(block, from),
             Bytes::Ones => {
                 let ones = self.const_i32(block, 0x0101_0101)?;
                 as_bytes(self, ones)
             }
             Bytes::Masked { shift, mask } => {
-                let v = self.word4(block, from)?;
+                let v = self.byte_vector(block, from)?;
                 let w = self.vec_bitcast(block, v, word_t)?;
                 let mut w = self.vec_extract(block, w, &[0], self.i32_t)?;
                 if shift > 0 {
@@ -259,15 +261,16 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
-    /// Four `i8` scalars as the `vector<4xi8>` a `dp4a` reads. Built from a
-    /// vector load's own elements, LLVM folds it back to the load.
-    fn word4(&self, block: &Block<'c>, from: &[crate::ir::ValueId]) -> Result<Value<'c, 'c>> {
+    /// `i8` scalars as one `vector<nxi8>`, four the `vector<4xi8>` a `dp4a`
+    /// reads. Built from a vector load's own elements, LLVM folds it back to
+    /// the load.
+    fn byte_vector(&self, block: &Block<'c>, from: &[crate::ir::ValueId]) -> Result<Value<'c, 'c>> {
         let elems = from.iter().map(|&v| self.scalar_ir(v)).collect::<Result<Vec<_>>>()?;
         self.push(
             block,
             melior::ir::operation::OperationBuilder::new("vector.from_elements", self.loc)
                 .add_operands(&elems)
-                .add_results(&[Type::vector(&[4], self.i8_t)])
+                .add_results(&[Type::vector(&[elems.len() as u64], self.i8_t)])
                 .build()?,
         )
     }

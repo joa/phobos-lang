@@ -116,6 +116,27 @@ impl Build {
         Ok(Rv::Scalar(self.value(OpKind::Word, &bytes[from..from + 4], Type::INDEX)))
     }
 
+    /// `hword(T[.., k :+ n], t)`: bytes `2t` and `2t + 1` of a thread's run
+    /// of `i8`, as the halfword they pack, unsigned. Like [`Self::emit_word`]
+    /// the run is one load.
+    pub(crate) fn emit_hword(&mut self, slice: &Expr, at: &Expr) -> Result<Rv> {
+        ensure!(
+            self.span_elem(slice) == Some(Scalar::I8),
+            "hword reads the bytes of an i8 tensor, as `hword(B[r, k :+ 2])`"
+        );
+        let Some(t) = self.const_fold(at).filter(|&t| t >= 0) else {
+            bail!("hword: which halfword must be a constant");
+        };
+        let bytes = self.lane_load(slice)?;
+        let from = 2 * t as usize;
+        ensure!(
+            bytes.len().is_multiple_of(2) && from + 2 <= bytes.len(),
+            "hword {t} of a run of {} bytes: the run is whole halfwords and holds it",
+            bytes.len()
+        );
+        Ok(Rv::Scalar(self.value(OpKind::HalfWord, &bytes[from..from + 2], Type::INDEX)))
+    }
+
     /// An integer element widened to `index`, as a scalar load gives it.
     fn widen(&mut self, v: ValueId) -> ValueId {
         let elem = self.scalar_of(v);

@@ -293,6 +293,7 @@ impl Verifier<'_> {
             | OpKind::LaneStore { .. }
             | OpKind::Dot4 { .. }
             | OpKind::Word
+            | OpKind::HalfWord
             | OpKind::Dp4a
             | OpKind::BytePerm
             | OpKind::PopCount

@@ -379,6 +379,7 @@ fn kind_name(kind: &OpKind) -> &'static str {
         OpKind::LaneStore { .. } => "lane_store",
         OpKind::F16Bits => "f16bits",
         OpKind::Word => "word",
+        OpKind::HalfWord => "hword",
         OpKind::BytePerm => "byteperm",
         OpKind::PopCount => "popcount",
         OpKind::Exchange => "exchange",

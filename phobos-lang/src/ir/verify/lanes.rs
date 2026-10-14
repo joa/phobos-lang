@@ -36,9 +36,10 @@ impl Verifier<'_> {
                     }
                 }
             }
-            OpKind::Word | OpKind::Dp4a | OpKind::BytePerm | OpKind::PopCount => {
+            OpKind::Word | OpKind::HalfWord | OpKind::Dp4a | OpKind::BytePerm | OpKind::PopCount => {
                 let (want, elem) = match kind {
                     OpKind::Word => (4, Scalar::I8),
+                    OpKind::HalfWord => (2, Scalar::I8),
                     OpKind::PopCount => (1, Scalar::Index),
                     _ => (3, Scalar::Index),
                 };

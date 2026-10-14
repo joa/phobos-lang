@@ -243,6 +243,7 @@ pub(crate) fn per_thread(kind: &OpKind) -> bool {
             | OpKind::Dot4 { .. }
             | OpKind::F16Bits
             | OpKind::Word
+            | OpKind::HalfWord
             | OpKind::Dp4a
             | OpKind::BytePerm
             | OpKind::PopCount

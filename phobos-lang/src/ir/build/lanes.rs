@@ -50,6 +50,11 @@ impl Build {
                 [slice, at] => self.emit_word(slice, at)?,
                 _ => bail!("word takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
             },
+            "hword" => match args {
+                [slice] => self.emit_hword(slice, &Expr::int(0))?,
+                [slice, at] => self.emit_hword(slice, at)?,
+                _ => bail!("hword takes a thread's bytes and which halfword of them, as `hword(B[r, k :+ 4], 1)`"),
+            },
             "dp4a" => {
                 let [x, y, acc] = args else {
                     bail!("dp4a takes two words and an accumulator");

@@ -311,6 +311,17 @@ fn words_and_dp4a_build_packed_values() {
 }
 
 #[test]
+fn a_halfword_is_two_bytes_zero_extended() {
+    // A 16-bit index from a two-byte-aligned spot, as IQ1_S's high bits are.
+    let mlir = emit_mlir(&lane_dot("dp4a(hword(W[col, k + 2 :+ 2], 0) * 65537, word(A[0, k :+ 16], 1), 0)"));
+    assert_contains(&mlir, &["vector<2xi8> to vector<1xi16>", "arith.index_castui"]);
+    let err = emit_err(&lane_dot("hword(W[col, k :+ 16], 8)"));
+    assert!(err.contains("holds it"), "got: {err}");
+    let err = emit_err(&lane_dot("hword(W[col, k :+ 3], 0)"));
+    assert!(err.contains("whole halfwords"), "got: {err}");
+}
+
+#[test]
 fn popcount_and_byteperm_take_words() {
     let mlir = emit_mlir(&lane_dot(
         "dp4a(byteperm(word(W[col, k :+ 16], 0), popcount(word(A[0, k :+ 16], 1)), 30001), word(A[0, k :+ 16], 0), 0)",

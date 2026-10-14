@@ -317,6 +317,7 @@ impl<'c> Codegen<'c> {
             | OpKind::Dot4 { .. }
             | OpKind::F16Bits
             | OpKind::Word
+            | OpKind::HalfWord
             | OpKind::Dp4a
             | OpKind::BytePerm
             | OpKind::PopCount => self.emit_lane_op(block, ir, op),
