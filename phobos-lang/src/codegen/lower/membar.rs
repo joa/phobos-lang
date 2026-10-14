@@ -12,7 +12,19 @@ struct Access {
     write: bool,
     /// The elementwise sweep the access was made under. None means any
     /// thread might make it.
-    mapping: Option<(Vec<i64>, i64)>,
+    mapping: Option<Sweep>,
+}
+
+/// An elementwise sweep over a whole buffer: thread `t` touches elements
+/// `t, t + blockDim, ...` of the shape, `width` at a time. Two sweeps reach
+/// each byte from the same thread only when the bytes behind each element
+/// match too: the element size and the row pitch, from the same first byte.
+#[derive(Clone, Debug, PartialEq)]
+struct Sweep {
+    shape: Vec<i64>,
+    width: i64,
+    elem_bytes: i64,
+    pitch: i64,
 }
 
 impl Access {
@@ -24,7 +36,7 @@ impl Access {
             return false;
         }
         match (&self.mapping, &other.mapping) {
-            (Some(a), Some(b)) => a != b,
+            (Some(a), Some(b)) => a != b || self.lo != other.lo,
             _ => true,
         }
     }
@@ -284,10 +296,12 @@ impl Membar<'_> {
         let crate::ir::Type::Regs(tile) = self.ir.ty(result) else {
             return false;
         };
-        other
-            .mapping
-            .as_ref()
-            .is_some_and(|(shape, width)| *width == 1 && *shape == tile.shape)
+        other.mapping.as_ref().is_some_and(|m| {
+            m.width == 1
+                && m.shape == tile.shape
+                && Some(m.elem_bytes) == tile.elem.bytes()
+                && tile.shape.last() == Some(&m.pitch)
+        })
     }
 
     /// Adds a barrier ahead of `op` or, when the access it orders against
@@ -384,10 +398,23 @@ impl Membar<'_> {
         }
         for (v, write) in values {
             let Some(ranges) = self.ranges_of(v) else { continue };
+            // A view's bytes are its source's, laid out by the source, so
+            // only a whole buffer's sweep says which thread reaches a byte.
             let mapping = sweep
                 .as_ref()
+                .filter(|_| self.ranges.contains_key(&v))
                 .filter(|(shape, _)| unmasked_shape(ir, v).as_deref() == Some(shape.as_slice()))
-                .cloned();
+                .and_then(|(shape, width)| {
+                    let crate::ir::Type::Tile(t) = ir.ty(v) else {
+                        return None;
+                    };
+                    Some(Sweep {
+                        shape: shape.clone(),
+                        width: *width,
+                        elem_bytes: t.elem.bytes()?,
+                        pitch: t.layout.row_stride.unwrap_or(*shape.last()?),
+                    })
+                });
             for &(lo, hi) in ranges {
                 out.push(Access {
                     lo,
@@ -616,5 +643,42 @@ impl Elision {
         }
         let before = m.added.iter().map(|c| c.op).collect();
         Elision { skip, before }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Access, Sweep};
+
+    fn access(lo: i64, write: bool, elem_bytes: i64) -> Access {
+        let n = 32 * 16;
+        Access {
+            lo,
+            hi: lo + n * elem_bytes,
+            write,
+            mapping: Some(Sweep {
+                shape: vec![32, 16],
+                width: 1,
+                elem_bytes,
+                pitch: 16,
+            }),
+        }
+    }
+
+    #[test]
+    fn one_sweep_over_one_buffer_is_the_same_thread() {
+        assert!(!access(0, false, 4).conflicts(&access(0, true, 4)));
+    }
+
+    /// Element `e` is byte `e` of an i8 tile and bytes `4e..4e + 4` of an
+    /// i32 one, so the same sweep over both reaches a byte from two threads.
+    #[test]
+    fn a_sweep_over_wider_elements_is_another_thread() {
+        assert!(access(0, false, 1).conflicts(&access(0, true, 4)));
+    }
+
+    #[test]
+    fn a_sweep_from_another_first_byte_is_another_thread() {
+        assert!(access(0, false, 4).conflicts(&access(64, true, 4)));
     }
 }
