@@ -57,6 +57,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
         Quant::Q4_K => Some(staged(quant, "q4k", 144, &kquant_decode(false), split)),
         Quant::Q5_K => Some(staged(quant, "q5k", 176, &kquant_decode(true), split)),
         Quant::Q6_K => Some(staged(quant, "q6k", 208, &q6k_decode(), split)),
+        Quant::PTQ1_0 => Some(staged(quant, "ptq1", 56, &ptq1_decode(), split)),
         _ => None,
     }
 }
@@ -216,6 +217,84 @@ fn kquant_decode(high: bool) -> Decode {
         pipelined: false,
         halves: false,
         mins: true,
+    }
+}
+
+/// PTQ1_0: quarter `q = g / 2` of a device block is three words at `12q`,
+/// five base-3 trits a byte, plus the tail byte `48 + q`, and the halfword at
+/// `52 + 2 (q / 2)` is its scale. Trit plane `n` of a word is four weights,
+/// taken a plane a step: a byte in a 16-bit lane times 3 carries its next
+/// trit into the top byte. A quarter's first half is word 0's five planes
+/// and word 1's first three; its second half word 1's last two, word 2's
+/// five and the tail. A trit `t` is the weight `t - 1`.
+fn ptq1_decode() -> Decode {
+    let mut body = String::from(
+        "    let qq = 2 * (kh % 2) + gl / 2
+    let lead = gl % 2 == 0
+    ws[gl, jj] = f32(f16bits((sc >> (16 * (qq / 2))) & 65535))
+    let outer = where(lead, w0, w2)
+",
+    );
+    // A word's two lanes of 16-bit bytes, then five planes.
+    for (name, src) in [("f", "outer"), ("m", "w1")] {
+        let _ = writeln!(
+            body,
+            "    let {name}lo0 = byteperm({src}, 0, {LO})
+    let {name}hi0 = byteperm({src}, 0, {HI})",
+            LO = 0x4140,
+            HI = 0x4342
+        );
+        for n in 0..5 {
+            let _ = writeln!(
+                body,
+                "    let {name}a{n} = {name}lo{n} * 3
+    let {name}b{n} = {name}hi{n} * 3
+    let {name}{n} = byteperm({name}a{n}, {name}b{n}, {TOPS})
+    let {name}lo{m} = {name}a{n} & {MASK}
+    let {name}hi{m} = {name}b{n} & {MASK}",
+                m = n + 1,
+                TOPS = 0x7531,
+                MASK = 0x00FF_00FFu32
+            );
+        }
+    }
+    let _ = writeln!(
+        body,
+        "    let tb = (tl >> (8 * qq)) & 255
+    let ta = (tb * {P0}) & {MASK}
+    let tc = (tb * {P1}) & {MASK}
+    let tail = byteperm(ta * 3, tc * 3, {TOPS})",
+        P0 = 0x0003_0001u32,
+        P1 = 0x001B_0009u32,
+        MASK = 0x00FF_00FFu32,
+        TOPS = 0x7531
+    );
+    let first = ["f0", "f1", "f2", "f3", "f4", "m0", "m1", "m2"];
+    let second = ["m3", "m4", "f0", "f1", "f2", "f3", "f4", "tail"];
+    for (i, (a, b)) in first.iter().zip(second).enumerate() {
+        let _ = writeln!(
+            body,
+            "    let t{i} = (where(lead, {a}, {b}) + {BIAS}) ^ {FLIP}",
+            BIAS = 0x7F7F_7F7Fu32,
+            FLIP = 0x8080_8080u32
+        );
+    }
+    for l in 0..4 {
+        let _ = writeln!(body, "    store(w[jj, 32 * gl + {o} :+ 8], t{a}, t{b})", o = 8 * l, a = 2 * l, b = 2 * l + 1);
+    }
+    Decode {
+        fetch: vec![
+            ("w0", "word(QB[jr, BO + 12 * (GG / 2) :+ 12], 0)".into()),
+            ("w1", "word(QB[jr, BO + 12 * (GG / 2) :+ 12], 1)".into()),
+            ("w2", "word(QB[jr, BO + 12 * (GG / 2) :+ 12], 2)".into()),
+            ("tl", "word(QB[jr, BO + 48 :+ 8], 0)".into()),
+            ("sc", "word(QB[jr, BO + 48 :+ 8], 1)".into()),
+        ],
+        now: Vec::new(),
+        body,
+        pipelined: false,
+        halves: false,
+        mins: false,
     }
 }
 
