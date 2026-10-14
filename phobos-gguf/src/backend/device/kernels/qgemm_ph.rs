@@ -357,8 +357,10 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
             g = s / per_group
         );
     }
+    // Experiment: one CTA an SM on Blackwell, as the intrinsics take there.
+    let ctas = if phobos_kernels::compile::chip().starts_with("sm_12") { 1 } else { 2 };
     format!(
-        "@launch({QGEMM_CTA}, 2)
+        "@launch({QGEMM_CTA}, {ctas})
 {pipeline}@swizzle
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
 @aligned(M = TM, N = TN, {aligned})
