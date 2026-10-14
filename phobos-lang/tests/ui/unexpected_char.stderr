@@ -1,0 +1,21 @@
+error: unexpected character `#`
+ --> tests/ui/unexpected_char.ph:2:25
+  |
+2 |     Y[ctx.thread] = 1.0 # 2.0
+  |                         ^ not a token
+
+error: integer literal is too large
+ --> tests/ui/unexpected_char.ph:3:15
+  |
+3 |     let big = 99999999999999999999
+  |               ^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: an integer literal is a signed 64-bit value
+
+error: expected at least one digit in exponent
+ --> tests/ui/unexpected_char.ph:4:13
+  |
+4 |     let e = 1e
+  |             ^^ `1e` has no digits after its `e`
+
+error: aborting due to 3 previous errors

@@ -1,0 +1,13 @@
+error: expected `(`, found `{`
+ --> tests/ui/missing_paren.ph:2:10
+  |
+2 | kernel k {
+  |          ^ expected `(`
+
+error: expected `kernel` after the attributes, found `let`
+ --> tests/ui/missing_paren.ph:6:1
+  |
+6 | let x = 1
+  | ^^^ expected `kernel` after the attributes
+
+error: aborting due to 2 previous errors

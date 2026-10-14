@@ -1,0 +1,21 @@
+error: expected a scalar element type, found `f23`
+ --> tests/ui/unknown_type.ph:1:20
+  |
+1 | kernel k(X: tensor<f23>[N], Y: tile<f32>[N]) {
+  |                    ^^^ not a scalar type
+help: a similar name exists: `f32`
+  |
+1 | kernel k(X: tensor<f32>[N], Y: tile<f32>[N]) {
+  |                    ~~~
+
+error: unknown type `tensr`
+ --> tests/ui/unknown_type.ph:4:13
+  |
+4 | kernel j(X: tensr<f32>[N]) {
+  |             ^^^^^ not a type
+help: a similar name exists: `tensor`
+  |
+4 | kernel j(X: tensor<f32>[N]) {
+  |             ~~~~~~
+
+error: aborting due to 2 previous errors

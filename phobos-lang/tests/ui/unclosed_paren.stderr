@@ -1,0 +1,9 @@
+error: expected `)`, found end of line
+ --> tests/ui/unclosed_paren.ph:2:44
+  |
+2 |     Y[ctx.thread] = exp(X[ctx.thread] * 2.0
+  |                        -                   ^ expected `)`
+  |                        |
+  |                        unclosed delimiter
+
+error: aborting due to 1 previous error

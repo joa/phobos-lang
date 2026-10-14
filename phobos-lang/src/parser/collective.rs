@@ -4,9 +4,10 @@
 // stays an ordinary name everywhere else. A name followed by `<` and one of
 // them cannot start a comparison, so one token of lookahead decides it.
 
-use super::Parser;
+use super::{PResult, Parser};
 use crate::ast::lanes::{self, Fold, Group, Mode};
 use crate::ast::{Expr, ctx};
+use crate::diag::Diagnostic;
 use crate::token::Tok;
 
 const WORDS: [&str; 6] = ["over", "width", "from", "xor", "down", "up"];
@@ -19,12 +20,14 @@ impl Parser {
     }
 
     /// `name<config>(args)`, the `<` next.
-    pub(super) fn config_call(&mut self, name: &str) -> Result<Expr, String> {
-        let (line, col) = self.pos();
-        let at = |msg: String| format!("{line}:{col}: {msg}");
+    pub(super) fn config_call(&mut self, name: &str) -> PResult<Expr> {
+        let open = self.here();
+        let at = |msg: String| Diagnostic::error(msg).primary(open, "");
         self.expect(Tok::Lt)?;
         let mut items: Vec<(String, Expr)> = Vec::new();
         loop {
+            let word_at = self.here();
+            let at = |msg: String| Diagnostic::error(msg).primary(word_at, "");
             let word = self.field()?;
             if !WORDS.contains(&word.as_str()) {
                 return Err(at(format!("`{word}` is not a setting of `{name}<..>`")));
@@ -42,8 +45,9 @@ impl Parser {
         }
         self.expect(Tok::Gt)?;
         self.expect(Tok::LParen)?;
+        let paren = self.here();
         let args = if self.matches(&Tok::RParen) { Vec::new() } else { self.parse_args()? };
-        self.expect(Tok::RParen)?;
+        self.expect_close(Tok::RParen, paren)?;
 
         let width = take(&mut items, "width").unwrap_or(Expr::Int(0));
         let out = if let Some(fold) = Fold::from_name(name) {

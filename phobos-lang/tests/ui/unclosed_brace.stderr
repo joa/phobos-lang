@@ -1,0 +1,10 @@
+error: this file contains an unclosed delimiter
+ --> tests/ui/unclosed_brace.ph:5:2
+  |
+1 | kernel k(X: tensor<f32>[N], Y: tensor<f32>[N]) {
+  |                                                - unclosed delimiter
+...
+5 | }
+  |  ^
+
+error: aborting due to 1 previous error

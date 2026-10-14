@@ -1,4 +1,4 @@
-usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx]
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx] [--color auto|always|never] [--error-format human|json]
 
   --chip CHIP              target architecture, sm_75 by default
   --index-bits 32|64       index width, raised to 64 where the runtime would
@@ -9,3 +9,6 @@ usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VAL
                            (OUT from -o, else the source's name); prints a
                            line per file and skips a variant that fails
   -o, --output OUT.ptx     write the PTX here instead of standard output
+  --color WHEN             color errors: auto (on a terminal, unless
+                           NO_COLOR is set), always or never
+  --error-format FORMAT    human, or json for one object per error

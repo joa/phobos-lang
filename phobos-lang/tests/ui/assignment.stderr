@@ -1,0 +1,21 @@
+error: invalid assignment target
+ --> tests/ui/assignment.ph:2:5
+  |
+2 |     1 = 2
+  |     ^ cannot be assigned
+
+error: assignment target must be a name or an indexed name
+ --> tests/ui/assignment.ph:3:5
+  |
+3 |     A[0][1] = 1.0
+  |     ^^^^^^^ cannot be assigned
+
+error: expected `)`, found end of line
+ --> tests/ui/assignment.ph:4:23
+  |
+4 |     A[0] = (B[0] + 1.0
+  |            -          ^ expected `)`
+  |            |
+  |            unclosed delimiter
+
+error: aborting due to 3 previous errors

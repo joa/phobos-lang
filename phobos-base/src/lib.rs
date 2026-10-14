@@ -7,6 +7,8 @@ pub mod context;
 pub mod env;
 pub mod half;
 pub mod log;
+pub mod palette;
 pub mod progress;
 pub mod rng;
 pub mod shape;
+pub mod term;

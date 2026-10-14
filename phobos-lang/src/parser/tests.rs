@@ -272,7 +272,7 @@ fn attribute_keyword_and_positional_literals() {
 
 #[test]
 fn err_missing_paren_after_kernel_name() {
-    assert!(parse_err("kernel k { }").contains("expected '('"));
+    assert!(parse_err("kernel k { }").contains("expected `(`"));
 }
 
 #[test]
@@ -312,7 +312,7 @@ fn err_for_requires_range() {
 #[test]
 fn err_unexpected_token_in_expression() {
     let e = parse_err("kernel k(a: i32) { let x = ) }");
-    assert!(e.contains("unexpected token in expression"), "got: {e}");
+    assert!(e.contains("expected an expression, found `)`"), "got: {e}");
 }
 
 #[test]

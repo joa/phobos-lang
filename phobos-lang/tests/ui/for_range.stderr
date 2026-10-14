@@ -1,0 +1,17 @@
+error: expected `range(...)` in for-loop, found `steps`
+ --> tests/ui/for_range.ph:2:14
+  |
+2 |     for i in steps(0, N) {
+  |              ^^^^^ a loop runs over a `range`
+  |
+  = help: write the bounds as `range(start, end)` or `range(start, end, step)`
+
+error: `twice` is not a setting of `for<..>`; it takes `unroll`
+ --> tests/ui/for_range.ph:5:9
+  |
+5 |     for<twice 2> i in range(0, N) {
+  |         ^^^^^ unknown setting
+  |
+  = help: unroll a loop as `for<unroll 4> i in range(0, n)`
+
+error: aborting due to 2 previous errors

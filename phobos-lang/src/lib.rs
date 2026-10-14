@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod codegen;
+pub mod diag;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
@@ -9,13 +10,17 @@ pub mod token;
 #[cfg(feature = "trace")]
 pub mod trace;
 
+/// Parses `src`. A failure is a [`diag::Diagnostics`] whose locations are
+/// bare `line:col`; [`parse_source`] names the file.
 pub fn parse(src: &str) -> anyhow::Result<Vec<ast::Kernel>> {
-    let toks = lexer::Lexer::new(src)
-        .tokenize()
-        .map_err(|e| anyhow::anyhow!(e))?;
-    parser::Parser::new(toks)
-        .parse_program()
-        .map_err(|e| anyhow::anyhow!(e))
+    parse_source(&diag::SourceFile::new("", src))
+}
+
+/// Parses `file`, failing with every error found as [`diag::Diagnostics`].
+pub fn parse_source(file: &std::sync::Arc<diag::SourceFile>) -> anyhow::Result<Vec<ast::Kernel>> {
+    let fail = |list| anyhow::Error::new(diag::Diagnostics::new(file.clone(), list));
+    let toks = lexer::Lexer::new(file.text()).tokenize().map_err(fail)?;
+    parser::Parser::new(toks).parse_program().map_err(fail)
 }
 
 /// Compiles the given code.
