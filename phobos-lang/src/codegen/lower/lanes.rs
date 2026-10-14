@@ -136,11 +136,15 @@ impl<'c> Codegen<'c> {
     /// One vector load extracted per element when `align` allows it, else a
     /// load per element.
     fn lane_load(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, dim: usize, len: i64, align: i64) -> Result<()> {
-        let mem = self.tile_ir(ir, ir.operand(op, 0))?.mem;
+        let tile = self.tile_ir(ir, ir.operand(op, 0))?;
+        let mem = tile.mem;
         let at = ir.operands(op)[1..]
             .iter()
             .map(|&v| self.scalar_ir(v))
             .collect::<Result<Vec<_>>>()?;
+        // A swizzled tile's run sits inside one granule, so permuting where
+        // it starts places all of it.
+        let at = self.swizzled_index(block, &tile, &at)?;
         let elem = match ir.ty(ir.results(op)[0]) {
             crate::ir::Type::Scalar(s) => self.ir_scalar_type(*s),
             other => unreachable!("a lane load yields scalars, not {other}"),
@@ -207,13 +211,15 @@ impl<'c> Codegen<'c> {
         words: bool,
     ) -> Result<()> {
         let operands = ir.operands(op);
-        let mem = self.tile_ir(ir, operands[0])?.mem;
+        let tile = self.tile_ir(ir, operands[0])?;
+        let mem = tile.mem;
         let count = if words { len / 4 } else { len };
         let rank = operands.len() - 1 - count as usize;
         let at = operands[1..=rank]
             .iter()
             .map(|&v| self.scalar_ir(v))
             .collect::<Result<Vec<_>>>()?;
+        let at = self.swizzled_index(block, &tile, &at)?;
         let mut values = operands[rank + 1..]
             .iter()
             .map(|&v| self.scalar_ir(v))

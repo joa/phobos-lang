@@ -71,8 +71,11 @@ impl<'c> Codegen<'c> {
             }
             OpKind::Stage(stage) => {
                 let src = self.tile_ir(ir, ir.operand(op, 0))?;
+                let swizzled = matches!(ir.ty(ir.result(op)), ir::Type::Tile(t) if t.layout.swizzle.is_some());
                 let tile = if stage.pad {
                     self.alloc_tile_padded(block, src.elem, &src.shape)?
+                } else if swizzled {
+                    self.alloc_tile_swizzled(block, src.elem, &src.shape)?
                 } else {
                     self.alloc_tile_shaped(block, src.elem, &src.shape)?
                 };

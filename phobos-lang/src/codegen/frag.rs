@@ -6,7 +6,15 @@ use super::*;
 /// buffer it came from does not.
 pub(super) struct ImmaOperand<'c> {
     pub(super) view: MemVal<'c>,
-    pub(super) from: Option<(Value<'c, 'c>, [Value<'c, 'c>; 2])>,
+    pub(super) from: Option<SliceOrigin<'c>>,
+}
+
+/// Where a slice starts in the buffer it was taken from, and that buffer's
+/// swizzle.
+pub(super) struct SliceOrigin<'c> {
+    pub(super) mem: Value<'c, 'c>,
+    pub(super) starts: [Value<'c, 'c>; 2],
+    pub(super) swizzle: Option<Swizzle>,
 }
 
 /// See [`Codegen::imma_lane`].
@@ -145,10 +153,12 @@ impl<'c> Codegen<'c> {
         row: Value<'c, 'c>,
         col: Value<'c, 'c>,
     ) -> Result<(Value<'c, 'c>, [Value<'c, 'c>; 2])> {
-        Ok(match v.from {
-            Some((mem, [r0, c0])) => (mem, [self.addi(block, r0, row)?, self.addi(block, c0, col)?]),
-            None => (v.view.mem, [row, col]),
-        })
+        let (mem, swizzle, [row, col]) = match &v.from {
+            Some(f) => (f.mem, f.swizzle, [self.addi(block, f.starts[0], row)?, self.addi(block, f.starts[1], col)?]),
+            None => (v.view.mem, v.view.swizzle, [row, col]),
+        };
+        // A fragment's word, and an ldmatrix row, sit inside one granule.
+        Ok((mem, [row, self.swizzle_by(block, swizzle, row, col)?]))
     }
 
     /// Four bytes of an int8 operand's row as an `m8n8k16` A or B fragment.
@@ -251,8 +261,8 @@ impl<'c> Codegen<'c> {
             bail!("fragment scaled dot contracts int8 operands over a k that is a multiple of {IMMA_K}");
         }
         for v in operands.iter().map(|o| &o.view) {
-            if v.is_masked() || v.swizzle.is_some() {
-                bail!("internal: fragment scaled dot reached a partial or swizzled operand");
+            if v.is_masked() {
+                bail!("internal: fragment scaled dot reached a partial operand");
             }
         }
         let is_row = |s: &ImmaOperand<'c>| s.view.shape == [fa.m, 1];

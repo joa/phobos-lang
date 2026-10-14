@@ -8,5 +8,6 @@
   "persistent",
   "pipeline",
   "registers",
+  "swizzle",
   "tensorcore"
 ]

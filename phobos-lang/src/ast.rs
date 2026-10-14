@@ -133,6 +133,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "persistent",
     "pipeline",
     "registers",
+    "swizzle",
     "tensorcore",
 ];
 
@@ -242,6 +243,21 @@ impl Kernel {
     /// 64 bits, as its `cp.async` staging needs.
     pub fn wants_ldmatrix(&self) -> bool {
         self.calls(|callee| callee.ends_with("_qgemm_t"))
+    }
+
+    /// What `@swizzle` asks of the shared tiles the compiler would swizzle:
+    /// None to decide alone, Some(true) for `@swizzle` or `@swizzle(on)`,
+    /// which fails where it cannot, Some(false) for `@swizzle(off)`.
+    pub fn swizzle_mode(&self) -> Result<Option<bool>, String> {
+        let Some(attr) = self.attrs.iter().find(|a| a.name == "swizzle") else {
+            return Ok(None);
+        };
+        match &attr.args[..] {
+            [] => Ok(Some(true)),
+            [AttrArg::Positional(Literal::Ident(v))] if v == "on" => Ok(Some(true)),
+            [AttrArg::Positional(Literal::Ident(v))] if v == "off" => Ok(Some(false)),
+            _ => Err(format!("kernel '{}': @swizzle takes on or off", self.name)),
+        }
     }
 
     /// The tiles `@registers(a, b, ..)` asks to keep in registers.

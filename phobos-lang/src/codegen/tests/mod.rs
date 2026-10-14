@@ -25,6 +25,7 @@ mod reduce;
 mod regs;
 mod select;
 mod staged;
+mod swizzle;
 mod sync;
 mod tensorcore;
 mod tile;

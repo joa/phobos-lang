@@ -280,7 +280,18 @@ impl<'c> Codegen<'c> {
         row: Value<'c, 'c>,
         col: Value<'c, 'c>,
     ) -> Result<Value<'c, 'c>> {
-        let Some(sw) = mv.swizzle else {
+        self.swizzle_by(block, mv.swizzle, row, col)
+    }
+
+    /// [`Codegen::swizzle_col`] by a swizzle given apart from its buffer.
+    pub(in crate::codegen) fn swizzle_by(
+        &self,
+        block: &Block<'c>,
+        swizzle: Option<Swizzle>,
+        row: Value<'c, 'c>,
+        col: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let Some(sw) = swizzle else {
             return Ok(col);
         };
         let mut r = row;

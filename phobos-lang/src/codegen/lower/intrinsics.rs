@@ -7,29 +7,26 @@ use melior::{
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::{GemmPath, GemmScale};
-use crate::codegen::frag::ImmaOperand;
+use crate::codegen::frag::{ImmaOperand, SliceOrigin};
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
 impl<'c> Codegen<'c> {
     /// The buffer an unmasked rank-2 slice was taken from, and where it
-    /// starts there. None for anything else.
-    fn slice_origin(
-        &self,
-        ir: &Ir,
-        v: ir::ValueId,
-    ) -> Result<Option<(melior::ir::Value<'c, 'c>, [melior::ir::Value<'c, 'c>; 2])>> {
+    /// starts there. None for anything else. A swizzled buffer is only read
+    /// this way, since its permutation is of the buffer's own columns.
+    fn slice_origin(&self, ir: &Ir, v: ir::ValueId) -> Result<Option<SliceOrigin<'c>>> {
         let Some(def) = ir.def_op(v) else { return Ok(None) };
         let OpKind::Slice(s) = ir.kind(def) else { return Ok(None) };
-        if s.rank() != 2 || s.masked.iter().any(|&m| m) {
-            return Ok(None);
-        }
         let src = self.tile_ir(ir, ir.operand(def, 0))?;
-        if src.swizzle.is_some() || src.shape.len() != 2 {
+        if s.rank() != 2 || s.masked.iter().any(|&m| m) || src.shape.len() != 2 {
+            if src.swizzle.is_some() {
+                bail!("internal: a partial slice of a swizzled tile reached the scaled dot");
+            }
             return Ok(None);
         }
         let starts = [self.scalar_ir(ir.operand(def, 1))?, self.scalar_ir(ir.operand(def, 2))?];
-        Ok(Some((src.mem, starts)))
+        Ok(Some(SliceOrigin { mem: src.mem, starts, swizzle: src.swizzle }))
     }
 
     pub(super) fn emit_intrinsic_op(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
