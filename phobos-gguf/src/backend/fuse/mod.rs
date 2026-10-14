@@ -16,7 +16,9 @@ mod tests;
 pub(crate) use chains::attn_out_chain;
 pub(crate) use chains::{mlp_chain, mlp_chain_raw, project_chain};
 pub(crate) use norm_q::{NormOperands, rms_norm_q_lanes};
-pub(crate) use kquant_block::{kquant_block_call, kquant_lanes_block, q4k_block_src, q5k_block_src, q6k_block_src};
+pub(crate) use kquant_block::{kquant_block_call, kquant_lanes_block};
+#[cfg(feature = "cuda")]
+pub(crate) use kquant_block::{q4k_block_src, q5k_block_src, q6k_block_src};
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
