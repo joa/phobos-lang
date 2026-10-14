@@ -44,6 +44,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
     }
     match quant {
         Quant::IQ1_S => Some(staged(quant, "iq1s", 48, &iq1s_decode(), split)),
+        Quant::IQ1_M => Some(staged(quant, "iq1m", 56, &iq1m_decode(), split)),
         Quant::IQ2_XXS => Some(staged(quant, "iq2xxs", 64, &iq2xxs_decode(), split)),
         Quant::IQ2_XS => Some(staged(quant, "iq2xs", 72, &iq2xs_decode(), split)),
         Quant::IQ2_S => Some(staged(quant, "iq2s", 80, &iq2s_decode(), split)),
@@ -186,6 +187,57 @@ fn iq1s_decode() -> Decode {
         body: format!("    let qh = (ql & 255) | ((qhh & 255) << 8)\n{body}"),
         pipelined: false,
         halves: false,
+    }
+}
+
+/// IQ1_M: as IQ1_S, but the halfword at `32 + 2g` gives each octet a nibble,
+/// three index bits under its own delta sign, and the halfword at
+/// `48 + 2 (g / 2)` holds two 3-bit scales a group, from bit `6 (g % 2)`,
+/// weighting half `h` by `d (2s + 1) / 8`.
+fn iq1m_decode() -> Decode {
+    let mut body = "    let qh = (qa & 255) | ((qb & 255) << 8)
+    let sc = (sa & 255) | ((sb & 255) << 8)
+"
+    .to_string();
+    for h in 0..2 {
+        let _ = writeln!(
+            body,
+            "    ws[2 * gl + {h}, jj] = d * 0.125 * f32(2 * ((sc >> (6 * (gl % 2) + {sh})) & 7) + 1)",
+            sh = 3 * h
+        );
+    }
+    for l in 0..4 {
+        let _ = write!(
+            body,
+            "    let lut{l} = where(((qh >> {n}) & 1) == 1, {IQ1_MINUS}, {IQ1_PLUS})
+    let gi{l} = (((qs >> {b}) & 255) | (((qh >> {m}) & 7) << 8)) * 2
+    let e{l} = (elem(grid[0, gi{l} :+ 2], 0) & 255) | ((elem(grid[0, gi{l} :+ 2], 1) & 255) << 8)
+    let x{l}a = (e{l} | (e{l} << 8)) & {S8}
+    let x{l}b = (x{l}a | (x{l}a << 4)) & {S4}
+    let x{l} = (x{l}b | (x{l}b << 2)) & {S2}
+    store(w[jj, 32 * gl + {o} :+ 8], byteperm(lut{l}, lut{l}, x{l}), byteperm(lut{l}, lut{l}, x{l} >> 16))
+",
+            b = 8 * l,
+            m = 8 * (l / 2) + 4 * (l % 2),
+            n = 8 * (l / 2) + 4 * (l % 2) + 3,
+            o = 8 * l,
+            S8 = 0x00FF_00FFu32,
+            S4 = 0x0F0F_0F0Fu32,
+            S2 = 0x3333_3333u32,
+        );
+    }
+    Decode {
+        fetch: vec![
+            ("qs", "word(QB[jr, BO + 4 * GG :+ 4], 0)".into()),
+            ("qa", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 0)".into()),
+            ("qb", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 1)".into()),
+            ("sa", "elem(QB[jr, BO + 48 + 2 * (GG / 2) :+ 2], 0)".into()),
+            ("sb", "elem(QB[jr, BO + 48 + 2 * (GG / 2) :+ 2], 1)".into()),
+        ],
+        now: Vec::new(),
+        body,
+        pipelined: false,
+        halves: true,
     }
 }
 
