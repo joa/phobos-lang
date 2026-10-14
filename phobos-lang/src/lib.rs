@@ -38,18 +38,25 @@ pub fn compile_shared(
     code: &str,
 ) -> anyhow::Result<(String, Vec<(String, usize)>)> {
     let out = compile_raw(context, code)?;
-    if let Some((name, reasons)) = out.pipeline_failures.first() {
-        let why = if reasons.is_empty() {
-            "no loop in the kernel is shaped for pipelining".to_string()
-        } else {
-            reasons.join("; ")
-        };
-        anyhow::bail!(
-            "kernel `{name}`: @pipeline asserts this kernel can be pipelined, but nothing in it \
-             did: {why}"
-        );
-    }
+    assert_pipelined(&out.pipeline_failures)?;
     Ok((out.code, out.shared))
+}
+
+/// Fails on the first kernel whose `@pipeline` assertion went unsatisfied,
+/// as [`codegen::EmitOutput`] reports them.
+pub fn assert_pipelined(failures: &[(String, Vec<String>)]) -> anyhow::Result<()> {
+    let Some((name, reasons)) = failures.first() else {
+        return Ok(());
+    };
+    let why = if reasons.is_empty() {
+        "no loop in the kernel is shaped for pipelining".to_string()
+    } else {
+        reasons.join("; ")
+    };
+    anyhow::bail!(
+        "kernel `{name}`: @pipeline asserts this kernel can be pipelined, but nothing in it \
+         did: {why}"
+    )
 }
 
 /// With `PHOBOS_DUMP_DIR` set, writes every compiled source there as a `.ph`

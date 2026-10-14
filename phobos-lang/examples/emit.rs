@@ -35,13 +35,14 @@ fn main() -> anyhow::Result<()> {
 
     let module = Module::new(Location::unknown(&context));
     let kernels = phobos_lang::parse(&src)?;
-    phobos_lang::codegen::emit(&target()?, &kernels, &context, &module)?;
+    let out = phobos_lang::codegen::emit(&target()?, &kernels, &context, &module)?;
 
     if !module.as_operation().verify() {
         anyhow::bail!("emitted module failed verification");
     }
     println!("{}", module.as_operation());
-    Ok(())
+    // Printed first, so a declined pipeline can still be read.
+    phobos_lang::assert_pipelined(&out.pipeline_failures)
 }
 
 /// The chip and index width to emit for, overridable so one invocation can
