@@ -37,9 +37,11 @@ struct Decode {
 
 /// A format's `.ph` staged projection, for the formats written so far, whole
 /// or as one slice of a split `k`. None on a chip it has not been measured
-/// on, which keeps the format's `_qgemm_t` intrinsic.
+/// on, which keeps the format's `_qgemm_t` intrinsic, unless
+/// `PHOBOS_QGEMM_PH` says otherwise.
 pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String> {
-    if !measured_on(phobos_kernels::compile::chip()) {
+    let on = phobos_base::env::flag_set("PHOBOS_QGEMM_PH").unwrap_or_else(|| measured_on(phobos_kernels::compile::chip()));
+    if !on {
         return None;
     }
     match quant {
