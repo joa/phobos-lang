@@ -48,9 +48,9 @@ impl Verifier<'_> {
                     self.err(op, "result must be fragments");
                 }
             }
-            OpKind::FragScale(_) | OpKind::FragDot | OpKind::FragDotScaled | OpKind::FragStore => {
+            OpKind::FragScale(_) | OpKind::FragDot | OpKind::FragDotScaled | OpKind::FragOuter { .. } | OpKind::FragStore => {
                 let n = match kind {
-                    OpKind::FragDot => 3,
+                    OpKind::FragDot | OpKind::FragOuter { .. } => 3,
                     OpKind::FragDotScaled => 5,
                     _ => 2,
                 };

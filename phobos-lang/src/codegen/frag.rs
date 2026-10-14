@@ -236,6 +236,49 @@ impl<'c> Codegen<'c> {
         Ok(frags.into_iter().map(|f| f.expect("every tile and step loaded")).collect())
     }
 
+    /// The fragments of `fa += r * c`, or `fa -= r * c` with `negate`, for a
+    /// `[m, 1]` column `r` and a `[1, n]` row `c`: each element adds its
+    /// row's value of `r` times its column's of `c`. Rebinds nothing.
+    pub(super) fn frag_outer_raw(
+        &mut self,
+        block: &Block<'c>,
+        fa: &FragAcc<'c>,
+        r: &ImmaOperand<'c>,
+        c: &ImmaOperand<'c>,
+        negate: bool,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        if !fa.imma {
+            bail!("internal: an outer product on a 16x16 fragment accumulator");
+        }
+        self.check_shapes(&r.view.shape, &[fa.m, 1], "fragment outer product column")?;
+        self.check_shapes(&c.view.shape, &[1, fa.n], "fragment outer product row")?;
+        let (fm, fnn) = fa.warp_frags();
+        let lane = self.imma_lane(block, fa)?;
+        let zero = self.const_index(block, 0)?;
+        let mut cols = Vec::with_capacity((fnn * 2) as usize);
+        for &col in &lane.cols {
+            for dj in 0..2 {
+                let off = self.const_index(block, dj)?;
+                let at = self.addi(block, col, off)?;
+                let (mem, at) = self.imma_at(block, c, zero, at)?;
+                cols.push(self.load_as(block, mem, &at, self.f32_t)?);
+            }
+        }
+        let mut frags = fa.frags.clone();
+        for i in 0..fm as usize {
+            let (mem, at) = self.imma_at(block, r, lane.rows[i], zero)?;
+            let mut row = self.load_as(block, mem, &at, self.f32_t)?;
+            if negate {
+                row = self.push(block, arith::negf(row, self.loc))?;
+            }
+            for (j, &col) in cols.iter().enumerate() {
+                let slot = i * cols.len() + j;
+                frags[slot] = self.elem_mac(block, self.f32_t, row, col, frags[slot])?;
+            }
+        }
+        Ok(frags)
+    }
+
     /// The fragments of `fa += f32(dot_t(a, w)) * s1 * s2` for int8 `a` and
     /// `w`, one scale a `[m, 1]` row broadcast and the other `[1, n]`. Each
     /// 8x8 tile's sum stays in i32 over the whole k, and its elements are
