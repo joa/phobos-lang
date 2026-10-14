@@ -45,6 +45,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
     match quant {
         Quant::IQ2_XXS => Some(staged(quant, "iq2xxs", 64, &iq2xxs_decode(), split)),
         Quant::IQ2_XS => Some(staged(quant, "iq2xs", 72, &iq2xs_decode(), split)),
+        Quant::IQ2_S => Some(staged(quant, "iq2s", 80, &iq2s_decode(), split)),
         Quant::IQ3_XXS => Some(staged(quant, "iq3xxs", 96, &iq3xxs_decode(), split)),
         _ => None,
     }
@@ -136,6 +137,46 @@ fn iq3xxs_decode() -> Decode {
         body,
         pipelined: false,
         halves: false,
+    }
+}
+
+/// IQ2_S: a 32-element group is four low bytes of 10-bit grid indices at
+/// `4g`, four sign bytes at `32 + 4g`, the indices' high bits two at a time
+/// in byte `64 + g`, and a scale byte at `72 + g` whose nibble `h` weights
+/// half `h` of the group by `d (2s + 1) / 8`.
+fn iq2s_decode() -> Decode {
+    let mut body = String::new();
+    for h in 0..2 {
+        let _ = writeln!(body, "    ws[2 * gl + {h}, jj] = d * 0.125 * f32(2 * ((sc >> {}) & 15) + 1)", 4 * h);
+    }
+    for l in 0..4 {
+        let _ = write!(
+            body,
+            "    let gi{l} = (((qs >> {b}) & 255) | (((qh >> {q}) & 3) << 8)) * 8
+    let sb{l} = (sg >> {b}) & 255
+{octet}",
+            b = 8 * l,
+            q = 2 * l,
+            octet = signed_octet(
+                &format!("w[jj, 32 * gl + {o} :+ 8]", o = 8 * l),
+                &format!("word(grid[0, gi{l} :+ 8], 0)"),
+                &format!("word(grid[0, gi{l} :+ 8], 1)"),
+                &l.to_string(),
+            )
+            .replace("      ", "    ")
+        );
+    }
+    Decode {
+        fetch: vec![
+            ("qs", "word(QB[jr, BO + 4 * GG :+ 4], 0)".into()),
+            ("sg", "word(QB[jr, BO + 32 + 4 * GG :+ 4], 0)".into()),
+            ("qh", "elem(QB[jr, BO + 64 + GG :+ 1], 0)".into()),
+            ("sc", "elem(QB[jr, BO + 72 + GG :+ 1], 0)".into()),
+        ],
+        now: Vec::new(),
+        body,
+        pipelined: false,
+        halves: true,
     }
 }
 
