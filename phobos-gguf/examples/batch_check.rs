@@ -141,10 +141,20 @@ fn report(name: &str, what: &str, reference: &[f32], got: &[f32]) -> Result<bool
             })
             .0
     };
-    let agreed = argmax(batched) == argmax(serial);
+    // A different token agrees when the reference ranks it within the
+    // largest difference seen: a near tie the accumulation order may break
+    // either way.
+    let (want, picked) = (argmax(serial), argmax(batched));
+    let gap = error * spread.max(1.0);
+    let tied = serial[want] - serial[picked] <= gap;
+    let agreed = want == picked || tied;
     println!(
         "{name:>5}: spread err {error:>10.3e}   token {}   over {what}",
-        if agreed { "agrees" } else { "DIFFERS" }
+        match (want == picked, tied) {
+            (true, _) => "agrees",
+            (false, true) => "ties",
+            (false, false) => "DIFFERS",
+        }
     );
     // The device accumulates the two orders differently: one row splits its
     // contraction across the grid, eight or more rows use the tensor cores.
