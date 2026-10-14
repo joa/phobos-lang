@@ -206,9 +206,11 @@ impl Membar<'_> {
             for p in clashes {
                 let above = self.enclosing(p.block);
                 let between = |c: &&Candidate| c.seq >= p.seq && c.seq < seq && above.contains(&c.block);
-                // A barrier kept for an earlier clash may already order this one.
+                // A barrier kept for an earlier clash, or one that is never
+                // elided, may already order this one.
                 if self.candidates.iter().filter(between).any(|c| self.kept.contains(&c.op))
                     || self.added.iter().any(|c| between(&c))
+                    || self.fences.iter().any(|c| between(&c))
                 {
                     continue;
                 }
