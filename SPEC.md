@@ -198,6 +198,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 - A tile lives from its declaration to its last use, across any loops in between. Tiles whose lifetimes do not overlap share bytes.
 - A tile declared before one loop and read after another is CTA-private storage carried across both.
 - A CTA barrier follows a tile store only when a later op reads or writes those bytes from other threads. Two elementwise passes at the same vector width need none; a reduction, `dot` or `transpose` after one does.
+- A `var t = <tensor slice>` copy in an unpipelined loop body, whose readers all follow a `barrier()` in the same block with no write to a tensor before it, loads at the copy and stores to `t` just ahead of that barrier, so the loads' latency overlaps the work in between.
 
 ## Per-thread values
 

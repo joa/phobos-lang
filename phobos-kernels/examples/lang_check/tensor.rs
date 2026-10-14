@@ -196,6 +196,11 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
         }"
         .to_string(),
     ));
+    // The same unpipelined: the stage's loads issue at the copy and its
+    // stores wait for the barrier, past the weight's stores.
+    let deferred = kernels.last().expect("the swizzled kernel").1.replace("@pipeline
+        ", "");
+    kernels.push(("deferred", deferred));
     for (what, src) in kernels {
         for index_bitwidth in [32, 64] {
             let (ga, gw) = (Arg::new(&a, m, k)?, Arg::new(&w, n, k)?);
