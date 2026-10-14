@@ -219,6 +219,17 @@ impl Membar<'_> {
         let block = ir.parent_block(op);
         let accesses = self.accesses(op);
 
+        // A CTA atomic opens with a barrier, which orders everything before
+        // it, and hands its result to every thread through a slot they read
+        // after its last one. So it fences what came before it, and its own
+        // slot read stays pending. Its barriers are always emitted: these
+        // kinds are never candidates (see `candidate_kind`), so none of them
+        // lands in `Elision::skip`.
+        let broadcast = matches!(ir.kind(op), OpKind::AtomicAdd | OpKind::AtomicCas | OpKind::LoadAcquire);
+        if broadcast {
+            self.fences.push(Candidate { op, seq: seq - 1, block });
+        }
+
         // A conflict with a pending access needs a barrier between them.
         // Keep the latest candidate between the two that sits in the pending
         // access's block or an enclosing one, so it lies on every path.
@@ -260,7 +271,7 @@ impl Membar<'_> {
 
         let w = self.windows.get(&op);
         let candidate = w.is_some_and(|w| w.ends_in_barrier && w.instances == 1) && self.candidate_kind(op);
-        if !candidate && w.is_some_and(|w| w.fenced) && !ir.kind(op).has_blocks() {
+        if !candidate && !broadcast && w.is_some_and(|w| w.fenced) && !ir.kind(op).has_blocks() {
             self.fences.push(Candidate { op, seq, block });
         }
         if candidate {
