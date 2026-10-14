@@ -199,7 +199,7 @@ impl<'c> Codegen<'c> {
         let steps = k_cols.len();
         let frag_t = Type::vector(&[1, 4], self.i8_t);
         let ldmatrix = self.isa.index_bits() == 64 && v.view.shared && v.view.vectorizes(16);
-        if !(ldmatrix && rows.len() % 4 == 0) {
+        if !(ldmatrix && rows.len().is_multiple_of(4)) {
             let mut frags = Vec::with_capacity(rows.len() * steps);
             for &row in rows {
                 for &col in k_cols {
