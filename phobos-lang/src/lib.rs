@@ -178,6 +178,53 @@ pub fn search_space(kernel: &ast::Kernel) -> Vec<(String, Vec<i64>)> {
         .collect()
 }
 
+/// The @autotune search dims of a module, merged by name across its kernels.
+/// A choice reaches every kernel declaring the name, so two kernels may share
+/// one only with the same choices.
+pub fn module_search_space(kernels: &[ast::Kernel]) -> anyhow::Result<Vec<(String, Vec<i64>)>> {
+    let mut space: Vec<(String, Vec<i64>)> = Vec::new();
+    for kernel in kernels {
+        for (name, choices) in search_space(kernel) {
+            match space.iter().find(|(n, _)| *n == name) {
+                Some((_, seen)) => anyhow::ensure!(
+                    *seen == choices,
+                    "@autotune `{name}` has choices {seen:?} in one kernel and {choices:?} in `{}`",
+                    kernel.name
+                ),
+                None => space.push((name, choices)),
+            }
+        }
+    }
+    Ok(space)
+}
+
+/// `space` with each pinned dim narrowed to its pinned value, which need not
+/// be one of its choices. A pin naming no dim of `space` is an error, since
+/// codegen would ignore it.
+pub fn pin(
+    space: Vec<(String, Vec<i64>)>,
+    pins: &std::collections::HashMap<String, i64>,
+) -> anyhow::Result<Vec<(String, Vec<i64>)>> {
+    for name in pins.keys() {
+        anyhow::ensure!(
+            space.iter().any(|(n, _)| n == name),
+            "autotune pin '{name}' is not an @autotune parameter here (parameters: {})",
+            space
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    Ok(space
+        .into_iter()
+        .map(|(name, choices)| match pins.get(&name) {
+            Some(&v) => (name, vec![v]),
+            None => (name, choices),
+        })
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{
@@ -198,5 +245,36 @@ mod tests {
         assert_eq!(p[0].name, "add");
         assert_eq!(p[0].params.len(), 3);
         assert!(matches!(p[0].params[0].ty, Type::Tensor(Scalar::F32, _)));
+    }
+
+    #[test]
+    fn module_search_space_merges_kernels_and_pins() {
+        let ks = parse(
+            "@autotune(T in [16, 64], U in [1, 2, 4])
+             kernel a(X: tensor<f32>[N]) { X[0] = 1.0 }
+             @autotune(T in [16, 64], V in [8, 9, 10])
+             kernel b(X: tensor<f32>[N]) { X[0] = 1.0 }",
+        )
+        .unwrap();
+        let space = crate::module_search_space(&ks).unwrap();
+        let names: Vec<_> = space.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["T", "U", "V"]);
+        assert_eq!(space[0].1, [16, 32, 64]);
+
+        let pinned = crate::pin(space.clone(), &[("U".to_string(), 3)].into()).unwrap();
+        assert_eq!(pinned[1].1, [3]);
+        assert!(crate::pin(space, &[("N".to_string(), 8)].into()).is_err());
+    }
+
+    #[test]
+    fn module_search_space_rejects_a_name_with_two_meanings() {
+        let ks = parse(
+            "@autotune(T in [16, 64])
+             kernel a(X: tensor<f32>[N]) { X[0] = 1.0 }
+             @autotune(T in [8, 9, 10])
+             kernel b(X: tensor<f32>[N]) { X[0] = 1.0 }",
+        )
+        .unwrap();
+        assert!(crate::module_search_space(&ks).is_err());
     }
 }

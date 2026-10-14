@@ -74,7 +74,7 @@ pub(crate) fn bench_flash_attention_fp32(
     results: &mut Results,
 ) -> anyhow::Result<()> {
     let kernels = phobos_lang::parse(CODE_FLASH)?;
-    let space = autotune::pin(phobos_lang::search_space(&kernels[0]), pins)?;
+    let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
 
     // Must match the kernel's @autotune(D in [64]).
     let Nq: i32 = 4096;
@@ -201,7 +201,7 @@ pub(crate) fn bench_flash_attention_fp16(
     results: &mut Results,
 ) -> anyhow::Result<()> {
     let kernels = phobos_lang::parse(CODE_FLASH_F16)?;
-    let space = autotune::pin(phobos_lang::search_space(&kernels[0]), pins)?;
+    let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
 
     let Nq: i32 = 4096;
     let Nk: i32 = 4096;

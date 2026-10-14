@@ -53,7 +53,8 @@ point of it: one value per name.
 - When nothing else picks the values, each name takes its first choice. The
   kernel above compiles with `TILE_M = 32`, `TILE_N = 32` and `TILE_K = 8`.
 - A tuner, or a host that knows what it wants, overrides names of the
-  environment. Only declared names can be overridden.
+  environment. Only declared names can be overridden. From the command line,
+  `phobos-compile --set TILE_M=64` does it.
 - A dimension name that `@autotune` does not declare, such as `M`, `N` and
   `K` above, is a runtime value read from the tensors at launch.
 
@@ -124,3 +125,21 @@ Each combination is a separate compile, so a search space grows by
 multiplication. Two entries with six choices each are 36 compiles; keep the
 ranges to values that are plausible for the kernel.
 :::
+
+## Compiling the variants yourself
+
+To tune with a harness of your own, or to read what each choice generates,
+`phobos-compile` writes the PTX of every combination without a GPU. `--set`
+pins a name first, and `--all-variants` compiles what is left, one file per
+point, with the settings appended to the output name:
+
+```sh
+phobos-compile gemm.ph --set TILE_K=16 --all-variants -o gemm.ptx
+```
+
+For the kernel above that is nine files, `gemm_TILE_M-32_TILE_N-32_TILE_K-16.ptx`
+through `gemm_TILE_M-128_TILE_N-128_TILE_K-16.ptx`, and one line per file
+naming its settings. A combination that fails to compile is reported and
+skipped, as the tuner skips it. A pinned value need not be one of the choices,
+but a name the kernel does not declare is an error, since nothing would read
+it.

@@ -14,7 +14,7 @@ next to cuBLAS where there is a comparison. Only the last one needs a GPU.
 ## phobos-compile
 
 ```text
-usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [-o OUT.ptx]
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx]
 ```
 
 `phobos-compile` reads one source file and writes PTX for every kernel in it,
@@ -44,7 +44,23 @@ The options:
   phase.
 
 Tile constants declared with `@autotune` take the first value of their search
-space, since nothing is tuned here.
+space, since nothing is tuned here. `--set NAME=VALUE` pins one to another
+value, and may be repeated. A name the kernel does not declare in `@autotune`
+is an error rather than ignored.
+
+`--all-variants` compiles every combination instead, one file each, with the
+settings appended to the name of `-o` (or of the source file). Pins narrow the
+space first:
+
+```sh
+phobos-compile examples/gemm_fp32.ph --set TILE_K=16 --all-variants -o gemm.ptx
+```
+
+writes `gemm_TILE_M-32_TILE_N-32_TILE_K-16.ptx` and a file for each other
+combination of `TILE_M` and `TILE_N`, and prints one line per file with its
+settings. A combination that fails to compile is reported and skipped, such as
+256 by 256, whose staged buffers are too large for `@pipeline`; the command
+fails only if none compiled.
 
 The PTX is what the CUDA driver loads. To launch it from your own program you
 need the argument layout Phobos uses, which the

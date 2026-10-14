@@ -31,8 +31,10 @@ The options shown are the ones this site covers.
 Compiles a kernel source file to PTX. No GPU is needed. The PTX goes to
 standard output unless `-o` names a file. `--chip` defaults to `sm_75`, which
 every supported card runs, and `--index-bits` to 32, raised to 64 when the
-module needs it, as the runtime would. Set `PHOBOS_PRINT_PHASES=1` to print
-the IR of each lowering phase.
+module needs it, as the runtime would. Each `@autotune` name takes its first
+choice unless `--set NAME=VALUE` pins it, and `--all-variants` writes one file
+per combination left after the pins, named after `-o` with the settings
+appended. Set `PHOBOS_PRINT_PHASES=1` to print the IR of each lowering phase.
 
 <Code code={compile} lang="text" />
 
