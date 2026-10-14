@@ -49,6 +49,8 @@ jobs:
       - run: npm ci
       - run: npm run check
       - run: npm run build
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'
         with:

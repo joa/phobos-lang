@@ -1,7 +1,9 @@
 ---
 import mark from "../assets/mark.svg?raw"
+import { latestReleaseTag } from "../lib/release"
 
 const REPO_URL = "https://github.com/joa/phobos-lang"
+const release = await latestReleaseTag()
 ---
 
 <footer class="site-footer">
@@ -10,6 +12,7 @@ const REPO_URL = "https://github.com/joa/phobos-lang"
     <nav aria-label="Footer">
       <a href="/docs/">Docs</a>
       <a href="/inference/">Inference</a>
+      {release && <a href={`${REPO_URL}/releases/tag/${release}`}>Release {release}</a>}
       <a href={REPO_URL}>GitHub</a>
       <a href={`${REPO_URL}/blob/main/LICENSE`}>Apache-2.0</a>
     </nav>

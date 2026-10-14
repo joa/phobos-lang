@@ -1,0 +1,30 @@
+---
+// The install guide's one-line install, for the release the site was built against.
+import { Code, TabItem, Tabs } from "@astrojs/starlight/components"
+import { installCommands, latestReleaseTag } from "../lib/release"
+
+const tag = await latestReleaseTag()
+---
+
+{
+  tag ? (
+    <>
+      <p>
+        The one-line install downloads release <code>{tag}</code> into a new folder named after it, such as{" "}
+        <code>phobos-{tag}-linux-x64</code>, in the current directory:
+      </p>
+      <Tabs syncKey="os">
+        {installCommands(tag).map(({ os, lang, command }) => (
+          <TabItem label={os}>
+            <Code code={command} lang={lang} />
+          </TabItem>
+        ))}
+      </Tabs>
+    </>
+  ) : (
+    <p>
+      Download the archive for your platform from the{" "}
+      <a href="https://github.com/joa/phobos-lang/releases/latest">latest release</a>.
+    </p>
+  )
+}

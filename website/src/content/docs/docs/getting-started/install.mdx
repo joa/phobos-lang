@@ -5,6 +5,8 @@ sidebar:
   order: 1
 ---
 
+import InstallTabs from "../../../../components/InstallTabs.astro"
+
 There are two ways to get Phobos: download a release, or build it from source.
 A release is enough to run models and to compile kernels. Building from source
 is needed to run the examples and benchmarks that live in the repository, such
@@ -13,12 +15,30 @@ as `phobos-kbench`.
 ## What you need
 
 - An NVIDIA GPU of compute capability 7.5 or newer: Turing, such as the RTX 20
-  series, or later. Compiling a kernel to PTX needs no GPU.
+  series, or later. Compiling a kernel to PTX needs no GPU. See
+  [supported platforms](#supported-platforms) for other vendors.
 - A driver from the CUDA 13 line, R580 or newer. Phobos emits PTX ISA 9.0,
   which older drivers refuse to load.
 - Windows x64, or Linux x64 with glibc 2.28 or newer.
 
+## Supported platforms
+
+Phobos runs only on NVIDIA GPUs today. The compiler lowers through MLIR and
+LLVM to PTX, and the runtime drives the card through CUDA.
+
+- **ROCm and SPIR-V.** Both are LLVM targets, so an AMD backend, or a portable
+  one through SPIR-V, is possible in principle. Neither is planned for now: the
+  author has no hardware to test them on, and a backend that cannot be checked
+  on a real card is not one to ship.
+- **Metal.** Under evaluation. Apple publishes no official documentation of its
+  GPU instruction set, so LLVM and MLIR have no Metal target. A backend would
+  have to emit Metal source and hand it to Apple's compiler, which is not how
+  Phobos generates code elsewhere and would not produce code as efficient as
+  the NVIDIA path.
+
 ## Download a release
+
+<InstallTabs />
 
 Releases are on the
 [GitHub releases page](https://github.com/joa/phobos-lang/releases). Each

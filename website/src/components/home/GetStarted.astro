@@ -1,9 +1,13 @@
 ---
-// Scene 6: get started, three steps. Commands follow the README and the release workflow.
+// Scene 6: get started, three steps. Commands call the binaries a release ships.
+import { installCommands, latestReleaseTag } from "../../lib/release"
+
 const REPO_URL = "https://github.com/joa/phobos-lang"
-const COMPILE_COMMAND = "cargo run -r -p phobos-compile -- examples/gemm_fp32.ph"
+const release = await latestReleaseTag()
+const INSTALL_COMMANDS = release ? installCommands(release) : []
+const COMPILE_COMMAND = "phobos-compile gemm_fp32.ph"
 const SERVE_COMMAND =
-  "cargo run --features cuda -r -p phobos-cli -- --listen 127.0.0.1:8080 --gguf ~\\models\\minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
+  "phobos-cli --listen 127.0.0.1:8080 --gguf minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
 ---
 
 <section class="scene get-started" id="get-started" aria-labelledby="start-title">
@@ -15,11 +19,32 @@ const SERVE_COMMAND =
       <li class="step">
         <h3>Download a release</h3>
         <p>Prebuilt <code>phobos-cli</code>, <code>phobos-compile</code>, <code>phobos-bench</code> and <code>phobos-cache</code> for Windows and Linux, x64.</p>
+        {
+          release && (
+            <div class="install">
+              {
+                INSTALL_COMMANDS.map(({ os }, i) => (
+                  <>
+                    <input type="radio" name="install-os" id={`install-${os}`} checked={i === 0} />
+                    <label for={`install-${os}`}>{os}</label>
+                  </>
+                ))
+              }
+              {INSTALL_COMMANDS.map(({ os, command }) => (
+                <pre data-os={os}><code>{command}</code></pre>
+              ))}
+            </div>
+          )
+        }
         <a class="button" href={`${REPO_URL}/releases/latest`}>Latest release</a>
       </li>
       <li class="step">
         <h3>Compile a kernel</h3>
-        <p>From a checkout: compile a kernel source to PTX, for <code>sm_75</code> by default. No GPU needed.</p>
+        <p>
+          Compile a kernel source, such as{" "}
+          <a href={`${REPO_URL}/blob/main/examples/gemm_fp32.ph`}>gemm_fp32.ph</a> from the repository's examples, to
+          PTX for <code>sm_75</code> by default. No GPU needed.
+        </p>
         <pre><code>{COMPILE_COMMAND}</code></pre>
       </li>
       <li class="step">
@@ -93,6 +118,45 @@ const SERVE_COMMAND =
     line-height: 1.55;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+
+  .install {
+    display: flex;
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .install input {
+    position: absolute;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .install label {
+    padding: 0.25rem 0.75rem;
+    border-bottom: 1px solid transparent;
+    color: var(--dust);
+    font-size: 0.8125rem;
+    cursor: pointer;
+  }
+
+  .install input:checked + label {
+    border-bottom-color: var(--brand);
+    color: var(--star);
+  }
+
+  .install input:focus-visible + label {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  .install pre {
+    display: none;
+  }
+
+  .install:has(#install-Linux:checked) pre[data-os="Linux"],
+  .install:has(#install-Windows:checked) pre[data-os="Windows"] {
+    display: block;
   }
 
   .step .button {

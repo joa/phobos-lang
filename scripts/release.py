@@ -326,6 +326,9 @@ def release(args):
     else:
         flags = [] if args.publish else ["--draft"]
         run(["gh", "release", "create", tag, *assets, *flags, "--title", tag, "--verify-tag", "--generate-notes"])
+    if args.publish:
+        # The site's footer names the latest release, read when it builds.
+        run(["gh", "workflow", "run", "website.yml", "--ref", "main"])
 
 
 def toolchain(args):
