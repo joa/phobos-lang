@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
+pub mod race;
 pub(crate) mod shape;
 pub mod token;
 #[cfg(feature = "trace")]
