@@ -105,7 +105,7 @@ kernel proj(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 ```
 
 ```text
-@swizzle: cannot swizzle tile 'w': copy reads it
+`@swizzle` cannot swizzle tile `w`: something reads it that cannot apply the permutation
 ```
 
 Without the attribute the same kernel compiles, with `w` laid out plainly.

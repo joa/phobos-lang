@@ -1,12 +1,12 @@
 {
-  "website/src/content/docs/docs/attributes/index.mdx#1": "kernel 'copy': unknown attribute @unroll; the compiler reads @aligned, @autotune, @cluster, @dynshared, @launch, @padstage, @persistent, @pipeline, @registers, @swizzle, @tensorcore",
-  "website/src/content/docs/docs/attributes/launch.mdx#1": "@launch maxThreads must be a positive multiple of 32 (got 48)",
-  "website/src/content/docs/docs/attributes/pipeline.mdx#1": "kernel `flat`: @pipeline asserts this kernel can be pipelined, but nothing in it did: no loop in the kernel is shaped for pipelining",
-  "website/src/content/docs/docs/attributes/registers.mdx#1": "@registers(acc): 15 elements do not split evenly over 256 threads",
-  "website/src/content/docs/docs/attributes/swizzle.mdx#1": "@swizzle: cannot swizzle tile 'w': copy reads it",
-  "website/src/content/docs/docs/ctx/collectives.mdx#3": "a shuffle needs every lane of the warp, but the control it sits under differs between lanes",
-  "website/src/content/docs/docs/ctx/counts.mdx#1": "@launch maxThreads must be a positive multiple of 32 (got 48)",
-  "website/src/content/docs/docs/ctx/uniformity.mdx#1": "`fused (mul #0 s#1)` runs once per CTA, so every thread must reach it, but the control it sits under differs between lanes",
-  "website/src/content/docs/docs/ctx/uniformity.mdx#3": "`slice [1, 1]` takes a value, which differs between lanes; a CTA-wide op needs the same value in every thread",
-  "website/src/content/docs/docs/ctx/uniformity.mdx#4": "`copy` reads `t` after a per-thread store to it with no `barrier()` between: another thread's store may not have landed"
+  "website/src/content/docs/docs/attributes/index.mdx#1": "unknown attribute `@unroll`",
+  "website/src/content/docs/docs/attributes/launch.mdx#1": "`@launch` maxThreads must be a positive multiple of 32 (got 48)",
+  "website/src/content/docs/docs/attributes/pipeline.mdx#1": "`@pipeline` found nothing in kernel `flat` to pipeline: no loop in the kernel is shaped for pipelining",
+  "website/src/content/docs/docs/attributes/registers.mdx#1": "`@registers(acc)`: 15 elements do not split evenly over 256 threads",
+  "website/src/content/docs/docs/attributes/swizzle.mdx#1": "`@swizzle` cannot swizzle tile `w`: something reads it that cannot apply the permutation",
+  "website/src/content/docs/docs/ctx/collectives.mdx#3": "a warp collective sits under control that differs between lanes",
+  "website/src/content/docs/docs/ctx/counts.mdx#1": "`@launch` maxThreads must be a positive multiple of 32 (got 48)",
+  "website/src/content/docs/docs/ctx/uniformity.mdx#1": "a CTA-wide op sits under control that differs between lanes",
+  "website/src/content/docs/docs/ctx/uniformity.mdx#3": "a CTA-wide op takes a value that differs between lanes",
+  "website/src/content/docs/docs/ctx/uniformity.mdx#4": "`t` is read after a per-thread store to it with no `barrier()` between"
 }

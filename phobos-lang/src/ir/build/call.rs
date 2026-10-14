@@ -49,7 +49,7 @@ impl Build {
                 let (ash, bsh) = (self.shape(a), self.shape(b));
                 let shape = [ash[0], bsh[1]];
                 if shape.contains(&DYN) {
-                    bail!("dot result shape must be static; assign to a tile-typed var instead");
+                    bail!("`dot` result shape must be static; assign to a tile-typed var instead");
                 }
                 let acc_elem = super::expr::accumulator_elem(self.elem(a), self.elem(b))?;
                 self.check_matmul_shapes(&ash, &bsh, &shape)?;
@@ -60,12 +60,12 @@ impl Build {
                 let (a, b) = self.dot_operands(args)?;
                 let (ash, bsh) = (self.shape(a), self.shape(b));
                 if ash.len() != 2 || bsh.len() != 2 {
-                    bail!("dot_t expects rank-2 tiles");
+                    bail!("`dot_t` expects rank-2 tiles");
                 }
                 self.check_shapes(&[ash[1]], &[bsh[1]], "dot_t contraction dim")?;
                 let shape = [ash[0], bsh[0]];
                 if shape.contains(&DYN) {
-                    bail!("dot_t result shape must be static");
+                    bail!("`dot_t` result shape must be static");
                 }
                 let acc_elem = super::expr::accumulator_elem(self.elem(a), self.elem(b))?;
                 let ty = self.shared_ty(acc_elem, &shape);
@@ -73,7 +73,7 @@ impl Build {
             }
             "qdot_t" | "q50_qdot_t" => {
                 let [a, asc, w, wsc] = args else {
-                    bail!("{callee} expects (a, a_scales, w, w_scales)");
+                    bail!("`{callee}` expects (a, a_scales, w, w_scales)");
                 };
                 let a = self.tile_operand(a, callee)?;
                 let asc = self.tile_operand(asc, callee)?;
@@ -127,7 +127,7 @@ impl Build {
             }
             "gather" => {
                 let [table, idx] = args else {
-                    bail!("gather expects (table, idx)");
+                    bail!("`gather` expects (table, idx)");
                 };
                 let table = self.tile_operand(table, "gather")?;
                 let idx = self.tile_operand(idx, "gather")?;
@@ -137,16 +137,16 @@ impl Build {
             }
             "flat" => {
                 let [arg] = args else {
-                    bail!("flat expects one tile argument");
+                    bail!("`flat` expects one tile argument");
                 };
                 let Rv::Tile(t) = self.emit_expr(arg)? else {
-                    bail!("flat expects a tile argument");
+                    bail!("`flat` expects a tile argument");
                 };
                 Ok(Rv::Tile(self.tile_flat(t)?))
             }
             _ if ElemStep::from_callee(callee).is_some_and(|s| !matches!(s, ElemStep::Cast(_))) => {
                 let [arg] = args else {
-                    bail!("{callee} expects one argument");
+                    bail!("`{callee}` expects one argument");
                 };
                 let step = ElemStep::from_callee(callee).expect("a math call");
                 let t = match self.emit_expr(arg)? {
@@ -158,14 +158,14 @@ impl Build {
                 let shape = self.shape(t);
                 let in_place = self.owned(t) && !matches!(step, ElemStep::Math(_));
                 if !in_place && shape.contains(&DYN) {
-                    bail!("{callee} needs a static tile shape");
+                    bail!("`{callee}` needs a static tile shape");
                 }
                 let ty = self.like(t);
                 Ok(Rv::Tile(self.value(OpKind::Map(Map::Unary(step)), &[t], ty)))
             }
             "where" => {
                 let [cond, a, b] = args else {
-                    bail!("where expects (condition, a, b)");
+                    bail!("`where` expects (condition, a, b)");
                 };
                 let mut reads_tile = false;
                 cond.walk(&mut |e| reads_tile |= self.is_tile_expr(e) || self.is_slice_expr(e));
@@ -183,21 +183,21 @@ impl Build {
                 Ok(Rv::Scalar(self.value(OpKind::Select, &[cond, a, b], ty)))
             }
             "iota" => bail!(
-                "iota(d) is an element's position in a tile assignment, so it belongs in \
+                "`iota(d)` is an element's position in a tile assignment, so it belongs in \
                  the value of one: `t = where(iota(1) < n, t, 0.0)`"
             ),
             "tmax" => {
                 let [x, y] = args else {
-                    bail!("tmax expects two tile arguments");
+                    bail!("`tmax` expects two tile arguments");
                 };
                 let (Rv::Tile(a), Rv::Tile(b)) = (self.emit_expr(x)?, self.emit_expr(y)?) else {
-                    bail!("tmax expects tile arguments");
+                    bail!("`tmax` expects tile arguments");
                 };
                 if self.elem(a) != self.elem(b) {
-                    bail!("tmax operands must share an element type");
+                    bail!("`tmax` operands must share an element type");
                 }
                 let shape = broadcast_shape(&self.shape(a), &self.shape(b))
-                    .ok_or_else(|| anyhow!("tmax operands are not broadcast-compatible"))?;
+                    .ok_or_else(|| anyhow!("`tmax` operands are not broadcast-compatible"))?;
                 let ty = self.shared_ty(self.elem(a), &shape);
                 Ok(Rv::Tile(self.value(OpKind::Map(Map::Max), &[a, b], ty)))
             }
@@ -238,13 +238,13 @@ impl Build {
                 let t = self.reduce_arg(args, "cumsum")?;
                 let shape = self.shape(t);
                 if shape.len() != 2 {
-                    bail!("cumsum expects a rank-2 tile");
+                    bail!("`cumsum` expects a rank-2 tile");
                 }
                 if shape.contains(&DYN) {
-                    bail!("cumsum needs a static tile shape");
+                    bail!("`cumsum` needs a static tile shape");
                 }
                 if !self.elem(t).is_float() {
-                    bail!("cumsum needs a float element type");
+                    bail!("`cumsum` needs a float element type");
                 }
                 let ty = self.like(t);
                 Ok(Rv::Tile(self.value(OpKind::Reduce(Reduce::CumSum), &[t], ty)))
@@ -253,13 +253,13 @@ impl Build {
                 let t = self.reduce_arg(args, "tril")?;
                 let shape = self.shape(t);
                 if shape.len() != 2 {
-                    bail!("tril expects a rank-2 tile");
+                    bail!("`tril` expects a rank-2 tile");
                 }
                 if shape.contains(&DYN) {
-                    bail!("tril needs a static tile shape");
+                    bail!("`tril` needs a static tile shape");
                 }
                 if !self.elem(t).is_float() {
-                    bail!("tril needs a float element type");
+                    bail!("`tril` needs a float element type");
                 }
                 let ty = self.like(t);
                 Ok(Rv::Tile(self.value(OpKind::Reduce(Reduce::Tril), &[t], ty)))
@@ -268,10 +268,10 @@ impl Build {
                 let t = self.reduce_arg(args, "transpose")?;
                 let shape = self.shape(t);
                 if shape.len() != 2 {
-                    bail!("transpose expects a rank-2 tile");
+                    bail!("`transpose` expects a rank-2 tile");
                 }
                 if shape.contains(&DYN) {
-                    bail!("transpose needs a static tile shape");
+                    bail!("`transpose` needs a static tile shape");
                 }
                 let ty = self.shared_ty(self.elem(t), &[shape[1], shape[0]]);
                 Ok(Rv::Tile(self.value(OpKind::Reduce(Reduce::Transpose), &[t], ty)))
@@ -286,7 +286,16 @@ impl Build {
                     Rv::Scalar(v) => Ok(Rv::Scalar(self.numeric_cast(v, want))),
                 }
             }
-            other => bail!("unknown function '{other}'"),
+            // The parser rewrites these with two arguments, so any other
+            // count arrives here.
+            "min" | "max" | "pow" => bail!("`{callee}` takes two arguments, got {}", args.len()),
+            other => {
+                let near = crate::diag::similar(other, super::names::builtins().iter().map(String::as_str));
+                Err(crate::ir::AtOp::unplaced(format!("unknown function `{other}`"))
+                    .label("not a built-in")
+                    .instead(other, near)
+                    .into())
+            }
         }
     }
 
@@ -297,29 +306,29 @@ impl Build {
         let result = match t {
             Scalar::Index if step == ElemStep::Math(MathFn::Abs) => Scalar::Index,
             t if t.is_float() => Scalar::F32,
-            t => bail!("{callee} needs a float operand, got {}", t.mlir_name()),
+            t => bail!("`{callee}` needs a float operand, got {}", t.mlir_name()),
         };
         Ok(self.value(OpKind::Math(step), &[v], Type::Scalar(result)))
     }
 
 
-    /// An operand that has to be a tile: `"{what} expects tile operands"`.
+    /// An operand that has to be a tile: `` "`{what}` expects tile operands" ``.
     pub(crate) fn tile_operand(&mut self, e: &Expr, what: &str) -> Result<ValueId> {
         match self.emit_expr(e)? {
             Rv::Tile(t) => Ok(t),
-            Rv::Scalar(_) => bail!("{what} expects tile operands"),
+            Rv::Scalar(_) => bail!("`{what}` expects tile operands"),
         }
     }
 
     pub(crate) fn dot_operands(&mut self, args: &[Expr]) -> Result<(ValueId, ValueId)> {
         let [lhs, rhs] = args else {
-            bail!("dot expects two tile arguments");
+            bail!("`dot` expects two tile arguments");
         };
         let Rv::Tile(a) = self.emit_expr(lhs)? else {
-            bail!("dot expects tile operands");
+            bail!("`dot` expects tile operands");
         };
         let Rv::Tile(b) = self.emit_expr(rhs)? else {
-            bail!("dot expects tile operands");
+            bail!("`dot` expects tile operands");
         };
         if self.has_wmma() {
             // The tensor-core paths stage both operands as f16 themselves.
@@ -363,7 +372,7 @@ impl Build {
 
     pub(crate) fn qmma_operands(&mut self, args: &[Expr]) -> Result<[ValueId; 4]> {
         let [a, asc, w, wsc] = args else {
-            bail!("qmma_t expects (a, a_scales, w, w_scales)");
+            bail!("`qmma_t` expects (a, a_scales, w, w_scales)");
         };
         let a = self.tile_operand(a, "qmma_t")?;
         let asc = self.tile_operand(asc, "qmma_t")?;
@@ -374,7 +383,7 @@ impl Build {
 
     pub(crate) fn iq1s_qmma_operands(&mut self, args: &[Expr]) -> Result<[ValueId; 5]> {
         let [a, asc, qb, d, grid] = args else {
-            bail!("iq1s_qmma_t expects (a, a_scales, qb, d, grid)");
+            bail!("`iq1s_qmma_t` expects (a, a_scales, qb, d, grid)");
         };
         let a = self.tile_operand(a, "iq1s_qmma_t")?;
         let asc = self.tile_operand(asc, "iq1s_qmma_t")?;
@@ -387,7 +396,7 @@ impl Build {
     pub(crate) fn qgemm_operands(&mut self, fmt: RawFmt, callee: &str, args: &[Expr]) -> Result<Vec<ValueId>> {
         let want = 4 + qg_tables(fmt);
         if args.len() != want {
-            bail!("{callee} expects {want} operands: (a, a_scales, qb, d, tables..)");
+            bail!("`{callee}` expects {want} operands: (a, a_scales, qb, d, tables..)");
         }
         args.iter().map(|e| self.tile_operand(e, callee)).collect()
     }
@@ -396,7 +405,7 @@ impl Build {
     pub(crate) fn iq2xxs_qmma_operands(&mut self, callee: &str, args: &[Expr]) -> Result<[ValueId; 6]> {
         let _ = callee;
         let [a, asc, qb, d, grid, signs] = args else {
-            bail!("iq2xxs_qmma_t expects (a, a_scales, qb, d, grid, signs)");
+            bail!("`iq2xxs_qmma_t` expects (a, a_scales, qb, d, grid, signs)");
         };
         let a = self.tile_operand(a, "iq2xxs_qmma_t")?;
         let asc = self.tile_operand(asc, "iq2xxs_qmma_t")?;
@@ -409,7 +418,7 @@ impl Build {
 
     fn emit_argsel(&mut self, args: &[Expr]) -> Result<Rv> {
         let [va, vb, ia, ib] = args else {
-            bail!("argsel expects four tile arguments (value, value, index, index)");
+            bail!("`argsel` expects four tile arguments (value, value, index, index)");
         };
         let (Rv::Tile(va), Rv::Tile(vb), Rv::Tile(ia), Rv::Tile(ib)) = (
             self.emit_expr(va)?,
@@ -417,15 +426,15 @@ impl Build {
             self.emit_expr(ia)?,
             self.emit_expr(ib)?,
         ) else {
-            bail!("argsel expects tile arguments");
+            bail!("`argsel` expects tile arguments");
         };
         let vshape = broadcast_shape(&self.shape(va), &self.shape(vb))
-            .ok_or_else(|| anyhow!("argsel value operands are not broadcast-compatible"))?;
+            .ok_or_else(|| anyhow!("`argsel` value operands are not broadcast-compatible"))?;
         let ishape = broadcast_shape(&self.shape(ia), &self.shape(ib))
-            .ok_or_else(|| anyhow!("argsel index operands are not broadcast-compatible"))?;
+            .ok_or_else(|| anyhow!("`argsel` index operands are not broadcast-compatible"))?;
         ensure!(
             self.elem(va) == self.elem(vb) && self.elem(ia) == self.elem(ib) && vshape == ishape,
-            "argsel: value and index operands must each share an element type, and both \
+            "`argsel`: value and index operands must each share an element type, and both \
              pairs must broadcast to the same shape"
         );
         let ty = self.shared_ty(self.elem(ia), &ishape);
@@ -436,10 +445,10 @@ impl Build {
     fn tile_flat(&mut self, src: ValueId) -> Result<ValueId> {
         let shape = self.shape(src);
         if shape.len() != 2 {
-            bail!("flat expects a rank-2 tile");
+            bail!("`flat` expects a rank-2 tile");
         }
         if !self.is_buffer(src) {
-            bail!("flat expects a declared tile, not a slice of one");
+            bail!("`flat` expects a declared tile, not a slice of one");
         }
         let t = self.tile(src).clone();
         if t.layout.row_stride.is_some() || t.layout.swizzle.is_some() {
@@ -447,7 +456,7 @@ impl Build {
         }
         let [rows, cols] = [shape[0], shape[1]];
         if rows == DYN || cols == DYN {
-            bail!("flat expects a static tile shape");
+            bail!("`flat` expects a static tile shape");
         }
         let len = rows * cols;
         let ty = Type::Tile(crate::ir::TileType {
@@ -465,12 +474,12 @@ impl Build {
 
     fn emit_atomic_add(&mut self, args: &[Expr]) -> Result<Rv> {
         let [t, i, v] = args else {
-            bail!("atomic_add expects (tensor, index, value)");
+            bail!("`atomic_add` expects (tensor, index, value)");
         };
         let (mem, name) = self.atomic_tensor(t, "atomic_add")?;
         let elem = self.elem(mem);
         if !matches!(elem, Scalar::I32 | Scalar::F32) {
-            bail!("atomic_add expects an i32 or f32 tensor, but '{name}' holds {}", elem.mlir_name());
+            bail!("`atomic_add` expects an i32 or f32 tensor, but `{name}` holds {}", elem.mlir_name());
         }
         let idx = self.emit_index(i, "atomic_add index")?;
         let val = self.emit_scalar(v)?;
@@ -480,7 +489,7 @@ impl Build {
                 self.value(OpKind::IndexCast(Scalar::I32), &[val], Type::Scalar(Scalar::I32))
             }
             (Scalar::F32, t) if t.is_numeric() => self.numeric_cast(val, Scalar::F32),
-            (_, t) => bail!("atomic_add into {} cannot take a {} value", elem.mlir_name(), t.mlir_name()),
+            (_, t) => bail!("`atomic_add` into {} cannot take a {} value", elem.mlir_name(), t.mlir_name()),
         };
         let old = self.value(OpKind::AtomicAdd, &[mem, idx, val], Type::Scalar(elem));
         Ok(Rv::Scalar(old))
@@ -488,12 +497,12 @@ impl Build {
 
     fn emit_atomic_cas(&mut self, args: &[Expr]) -> Result<Rv> {
         let [t, i, expected, v] = args else {
-            bail!("atomic_cas expects (tensor, index, expected, value)");
+            bail!("`atomic_cas` expects (tensor, index, expected, value)");
         };
         let (mem, name) = self.atomic_tensor(t, "atomic_cas")?;
         let elem = self.elem(mem);
         if elem != Scalar::I32 {
-            bail!("atomic_cas expects an i32 tensor, but '{name}' holds {}", elem.mlir_name());
+            bail!("`atomic_cas` expects an i32 tensor, but `{name}` holds {}", elem.mlir_name());
         }
         let idx = self.emit_index(i, "atomic_cas index")?;
         let mut operands = vec![mem, idx];
@@ -504,7 +513,7 @@ impl Build {
                 Scalar::Index | Scalar::I8 | Scalar::I64 => {
                     self.value(OpKind::IndexCast(Scalar::I32), &[s], Type::Scalar(Scalar::I32))
                 }
-                t => bail!("atomic_cas into i32 cannot take a {} value", t.mlir_name()),
+                t => bail!("`atomic_cas` into i32 cannot take a {} value", t.mlir_name()),
             });
         }
         let old = self.value(OpKind::AtomicCas, &operands, Type::Scalar(Scalar::I32));
@@ -517,12 +526,12 @@ impl Build {
         let (t, i, v) = match (store, args) {
             (false, [t, i]) => (t, i, None),
             (true, [t, i, v]) => (t, i, Some(v)),
-            (false, _) => bail!("load_acquire expects (tensor, index)"),
-            (true, _) => bail!("store_release expects (tensor, index, value)"),
+            (false, _) => bail!("`load_acquire` expects (tensor, index)"),
+            (true, _) => bail!("`store_release` expects (tensor, index, value)"),
         };
         let (mem, name) = self.atomic_tensor(t, callee)?;
         if self.elem(mem) != Scalar::I32 {
-            bail!("{callee} expects an i32 tensor, but '{name}' holds {}", self.elem(mem).mlir_name());
+            bail!("`{callee}` expects an i32 tensor, but `{name}` holds {}", self.elem(mem).mlir_name());
         }
         let mut operands = vec![mem, self.emit_index(i, callee)?];
         let Some(v) = v else {
@@ -536,10 +545,10 @@ impl Build {
     /// An atomic's tensor operand: a named tensor parameter.
     fn atomic_tensor<'e>(&self, t: &'e Expr, what: &str) -> Result<(ValueId, &'e str)> {
         let ExprKind::Var(name) = &t.kind else {
-            bail!("{what} expects a named tensor parameter");
+            bail!("`{what}` expects a named tensor parameter");
         };
         let Some(Binding::Tensor(mem)) = self.lookup(name) else {
-            bail!("{what} expects a tensor parameter, but '{name}' is not one");
+            bail!("`{what}` expects a tensor parameter, but `{name}` is not one");
         };
         Ok((mem, name))
     }
@@ -547,14 +556,14 @@ impl Build {
     /// The atomic-state operand: a named `i32` tensor parameter.
     fn barrier_tensor(&self, e: &Expr, what: &str) -> Result<ValueId> {
         let ExprKind::Var(name) = &e.kind else {
-            bail!("{what} expects a named i32 tensor parameter");
+            bail!("`{what}` expects a named i32 tensor parameter");
         };
         let Some(Binding::Tensor(mem)) = self.lookup(name) else {
-            bail!("{what} expects a tensor parameter, but '{name}' is not one");
+            bail!("`{what}` expects a tensor parameter, but `{name}` is not one");
         };
         if self.elem(mem) != Scalar::I32 {
             bail!(
-                "{what} expects an i32 tensor, but '{name}' holds {}",
+                "`{what}` expects an i32 tensor, but `{name}` holds {}",
                 self.elem(mem).mlir_name()
             );
         }
@@ -563,7 +572,7 @@ impl Build {
 
     fn emit_grid_barrier(&mut self, args: &[Expr]) -> Result<Rv> {
         let [bar] = args else {
-            bail!("grid_barrier expects one argument, the barrier tensor");
+            bail!("`grid_barrier` expects one argument, the barrier tensor");
         };
         let mem = self.barrier_tensor(bar, "grid_barrier")?;
         Ok(Rv::Scalar(self.value(OpKind::GridBarrier, &[mem], Type::INDEX)))

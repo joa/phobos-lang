@@ -41,7 +41,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<MemVal<'c>> {
         let (md, nd) = (aq.shape[0], qb.shape[0]);
         if md == DYN || nd == DYN {
-            bail!("iq1s_qmma_t needs a static output shape");
+            bail!("`iq1s_qmma_t` needs a static output shape");
         }
         let out = self.alloc_tile_shaped(block, self.f32_t, &[md, nd])?;
         self.iq1s_qmma_t_into(block, aq, asc, qb, d, grid, &out)?;
@@ -80,38 +80,38 @@ impl<'c> Codegen<'c> {
             }
         }
         if aq.elem != self.i8_t || qb.elem != self.i8_t || grid.elem != self.i8_t {
-            bail!("iq1s_qmma_t contracts an int8 activation against IQ1_S's raw bytes");
+            bail!("`iq1s_qmma_t` contracts an int8 activation against IQ1_S's raw bytes");
         }
         if asc.elem != self.f32_t {
-            bail!("iq1s_qmma_t's activation scale must be f32");
+            bail!("`iq1s_qmma_t`'s activation scale must be f32");
         }
         if d.elem != self.f16_t {
-            bail!("iq1s_qmma_t's block scale must be f16");
+            bail!("`iq1s_qmma_t`'s block scale must be f16");
         }
         if out.elem != self.f32_t {
-            bail!("iq1s_qmma_t produces f32");
+            bail!("`iq1s_qmma_t` produces f32");
         }
         if out.is_masked() {
-            bail!("iq1s_qmma_t needs a fully in-bounds destination");
+            bail!("`iq1s_qmma_t` needs a fully in-bounds destination");
         }
         if !self.has_int8_mma() {
-            bail!("iq1s_qmma_t needs the integer tensor cores (sm_75 or later)");
+            bail!("`iq1s_qmma_t` needs the integer tensor cores (sm_75 or later)");
         }
         if self.cta_threads % WARP != 0 {
-            bail!("iq1s_qmma_t needs a CTA that is a whole number of warps");
+            bail!("`iq1s_qmma_t` needs a CTA that is a whole number of warps");
         }
         let (md, nd) = (aq.shape[0], qb.shape[0]);
         if md == DYN || nd == DYN {
-            bail!("iq1s_qmma_t needs a static output shape");
+            bail!("`iq1s_qmma_t` needs a static output shape");
         }
         self.check_shapes(&[md, nd], &out.shape, "iq1s_qmma_t destination")?;
         if md % IMMA_TILE != 0 || nd % IMMA_TILE != 0 {
-            bail!("iq1s_qmma_t needs an output tile that is a multiple of {IMMA_TILE} both ways");
+            bail!("`iq1s_qmma_t` needs an output tile that is a multiple of {IMMA_TILE} both ways");
         }
         self.check_shapes(&[md], &[asc.shape[0]], "iq1s_qmma_t a scale rows")?;
         self.check_shapes(&[nd], &[d.shape[0]], "iq1s_qmma_t d rows")?;
         if aq.shape[1] != DYN && aq.shape[1] % 256 != 0 {
-            bail!("iq1s_qmma_t needs a whole number of 256-element blocks");
+            bail!("`iq1s_qmma_t` needs a whole number of 256-element blocks");
         }
 
         let (i32_t, f32_t) = (self.i32_t, self.f32_t);
@@ -386,17 +386,17 @@ impl<'c> Codegen<'c> {
     ) -> Result<()> {
         let (md, nd) = (aq.shape[0], qb.shape[0]);
         if md == DYN || nd == DYN {
-            bail!("iq1s_qmma_t needs a static output shape");
+            bail!("`iq1s_qmma_t` needs a static output shape");
         }
         if !self.has_int8_mma() {
-            bail!("iq1s_qmma_t needs the integer tensor cores (sm_75 or later)");
+            bail!("`iq1s_qmma_t` needs the integer tensor cores (sm_75 or later)");
         }
         if self.cta_threads % WARP != 0 {
-            bail!("iq1s_qmma_t needs a CTA that is a whole number of warps");
+            bail!("`iq1s_qmma_t` needs a CTA that is a whole number of warps");
         }
         self.check_shapes(&[md, nd], &out.shape, "iq1s_qmma_t destination")?;
         if md % IMMA_TILE != 0 || nd % IMMA_TILE != 0 {
-            bail!("iq1s_qmma_t needs an output tile that is a multiple of {IMMA_TILE} both ways");
+            bail!("`iq1s_qmma_t` needs an output tile that is a multiple of {IMMA_TILE} both ways");
         }
 
         let (rt, ct) = (md / IMMA_TILE, nd / IMMA_TILE);

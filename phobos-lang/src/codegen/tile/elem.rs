@@ -325,10 +325,10 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if a.elem != out.elem || b.elem != out.elem {
-            bail!("tmax with mismatched element types");
+            bail!("`tmax` with mismatched element types");
         }
         if out.shape.contains(&DYN) {
-            bail!("tmax needs a static result shape");
+            bail!("`tmax` needs a static result shape");
         }
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let ai = cg.bc_index(blk, idx, &out.shape, &a.shape)?;
@@ -356,13 +356,13 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if va.elem != vb.elem {
-            bail!("argsel value operands must share an element type");
+            bail!("`argsel` value operands must share an element type");
         }
         if ia.elem != out.elem || ib.elem != out.elem {
-            bail!("argsel index operands must match the result element type");
+            bail!("`argsel` index operands must match the result element type");
         }
         if out.shape.contains(&DYN) {
-            bail!("argsel needs a static result shape");
+            bail!("`argsel` needs a static result shape");
         }
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let vai = cg.bc_index(blk, idx, &out.shape, &va.shape)?;

@@ -99,7 +99,7 @@ fn a_per_thread_store_meets_other_accesses_only_past_a_barrier() {
  barrier()"));
     // A barrier under per-thread control is no barrier at all.
     let err = emit_err(&kernel("t[0, ctx.lane] = 1.0\n if ctx.lane == 0 { barrier() }"));
-    assert!(err.contains("runs once per CTA"), "got: {err}");
+    assert!(err.contains("`barrier()` sits under control that differs between lanes"), "got: {err}");
 }
 
 #[test]
@@ -178,11 +178,11 @@ fn collective_errors_name_the_problem() {
     for (src, want) in [
         (
             folded("0.0").replace("let r = 0.0", "var r = 0.0\n if ctx.lane == 0 { r = sum<over ctx.lane>(x) }"),
-            "every lane of the warp",
+            "a warp collective sits under control that differs between lanes",
         ),
         (
             folded("0.0").replace("let r = 0.0", "var r = 0.0\n if ctx.warp == 0 { r = sum<over ctx.thread>(x) }"),
-            "every thread of the CTA",
+            "a collective over `ctx.thread` sits under control that differs between warps",
         ),
         (folded("sum<over ctx.lane, width 3>(x)"), "power of two"),
         (folded("reduce<over ctx.lane>(x, nothing)"), "none is defined"),

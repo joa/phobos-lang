@@ -12,7 +12,7 @@
 use anyhow::{Result, bail};
 
 use super::build::alloc_align_div;
-use super::{Ir, OpKind, Space, Swizzle, Type, ValueId};
+use super::{AtOp, Ir, OpId, OpKind, Space, Swizzle, Type, ValueId};
 
 /// Swizzles the tiles that pay and allow it. `mode` is the kernel's
 /// `@swizzle`: None decides alone, Some(true) fails on a tile that would pay
@@ -36,15 +36,20 @@ pub(crate) fn decide(ir: &mut Ir, mode: Option<bool>) -> Result<()> {
         }
         match uses.blocker {
             None => chosen.push((op, tile, swizzle)),
-            Some(why) => declined.push(format!("{}: {why}", describe(ir, tile))),
+            Some(blocker) => declined.push((tile, blocker)),
         }
     }
     if mode == Some(true) {
-        if !declined.is_empty() {
-            bail!("@swizzle: cannot swizzle {}", declined.join("; "));
+        if let Some((tile, first)) = declined.first() {
+            let mut e = AtOp::unplaced(format!("`@swizzle` cannot swizzle {}: {}", describe(ir, *tile), first.why))
+                .label("asserted here");
+            for (tile, b) in &declined {
+                e = e.with(Some(b.op), format!("{} {}", describe(ir, *tile), b.label));
+            }
+            return Err(e.into());
         }
         if chosen.is_empty() {
-            bail!("@swizzle: no shared tile here is read as tensor-core fragments with rows a multiple of 128 bytes");
+            bail!("`@swizzle`: no shared tile here is read as tensor-core fragments with rows a multiple of 128 bytes");
         }
     }
     for (op, tile, swizzle) in chosen {
@@ -84,7 +89,14 @@ fn shape_swizzle(ir: &Ir, tile: ValueId) -> Option<Swizzle> {
 #[derive(Default)]
 struct Uses {
     fragments: bool,
-    blocker: Option<String>,
+    blocker: Option<Blocker>,
+}
+
+/// A use that cannot apply a swizzle: why, and what to label it with.
+struct Blocker {
+    op: OpId,
+    why: &'static str,
+    label: &'static str,
 }
 
 fn walk(ir: &Ir, value: ValueId, uses: &mut Uses) {
@@ -99,17 +111,29 @@ fn walk(ir: &Ir, value: ValueId, uses: &mut Uses) {
                 if ir.uses(slice).iter().all(|s| matches!(ir.kind(s.op), OpKind::FragDotScaled) && (s.index == 1 || s.index == 2)) {
                     uses.fragments |= !ir.uses(slice).is_empty();
                 } else {
-                    uses.blocker.get_or_insert("a slice of it is read by something other than the scaled int8 dot".into());
+                    uses.blocker.get_or_insert(Blocker {
+                        op,
+                        why: "a slice of it is read by something other than the scaled int8 dot",
+                        label: "is sliced here for something else",
+                    });
                 }
             }
             OpKind::LaneStore { len, align, dim, .. } | OpKind::LaneLoad { len, align, dim } if index == 0 => {
                 if !run_in_granule(ir, value, *len, *align, *dim) {
-                    uses.blocker.get_or_insert("a thread's run of it crosses a 16-byte granule".into());
+                    uses.blocker.get_or_insert(Blocker {
+                        op,
+                        why: "a thread's run of it crosses a 16-byte granule",
+                        label: "is read here in a run that crosses a granule",
+                    });
                 }
             }
             kind if kind.writes(ir.operands(op).len()).contains(&index) && is_copy(kind) => {}
-            kind => {
-                uses.blocker.get_or_insert(format!("{} reads it", kind.name()));
+            _ => {
+                uses.blocker.get_or_insert(Blocker {
+                    op,
+                    why: "something reads it that cannot apply the permutation",
+                    label: "is read here without the permutation",
+                });
             }
         }
     }
@@ -132,7 +156,7 @@ fn run_in_granule(ir: &Ir, tile: ValueId, len: i64, align: i64, dim: usize) -> b
 /// A tile as an error message names it.
 fn describe(ir: &Ir, tile: ValueId) -> String {
     match ir.name(tile) {
-        Some(name) => format!("tile '{name}'"),
+        Some(name) => format!("tile `{name}`"),
         None => format!("a staged {}", ir.ty(tile)),
     }
 }

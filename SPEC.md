@@ -216,9 +216,9 @@ The control a statement runs under is as varying as the `if` and `while` conditi
 
 | Rule | Error when broken |
 |---|---|
-| A tile op, a barrier, an atomic, `load_acquire`/`store_release` and the intrinsics run once per CTA: every thread must reach them, so they run only under uniform control. | `` `op` runs once per CTA, so every thread must reach it `` |
-| Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` `op` takes `x`, which differs between lanes `` |
-| A buffer (a tensor or a shared tile) stored per thread, with a varying value, index or control, is read by no CTA-wide op (a tile copy or expression, a contraction) until a `barrier()`: another thread's store may not have landed. A thread's own point and run accesses (`t[i, j]`, `elem`, `sum`, `store`) are not checked, since only their indices tell whether they meet another thread's store; one that does needs a `barrier()` all the same. | `` `op` reads `t` after a per-thread store to it with no `barrier()` between `` |
+| A tile op, a barrier, an atomic, `load_acquire`/`store_release` and the intrinsics run once per CTA: every thread must reach them, so they run only under uniform control. | `` a CTA-wide op sits under control that differs between lanes `` |
+| Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` a CTA-wide op takes `x`, which differs between lanes `` |
+| A buffer (a tensor or a shared tile) stored per thread, with a varying value, index or control, is read by no CTA-wide op (a tile copy or expression, a contraction) until a `barrier()`: another thread's store may not have landed. A thread's own point and run accesses (`t[i, j]`, `elem`, `sum`, `store`) are not checked, since only their indices tell whether they meet another thread's store; one that does needs a `barrier()` all the same. | `` `t` is read after a per-thread store to it with no `barrier()` between `` |
 
 Scalar loads, scalar arithmetic, scalar stores to tensors and `var`s, and `if`, `for` and `while` run in each thread on its own and are allowed under any control.
 

@@ -15,10 +15,10 @@ impl<'c> Codegen<'c> {
     ) -> Result<MemVal<'c>> {
         let [rows, cols] = src.shape();
         if rows == DYN || cols == DYN {
-            bail!("rowargmax needs a static tile shape");
+            bail!("`rowargmax` needs a static tile shape");
         }
         if !self.is_float(elem) && !self.is_int(elem) {
-            bail!("rowargmax needs a numeric element type, got {elem}");
+            bail!("`rowargmax` needs a numeric element type, got {elem}");
         }
         let out = self.alloc_tile_shaped(block, self.i32_t, &[rows, 1])?;
         // gpu.shuffle carries a 32-bit payload.

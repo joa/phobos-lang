@@ -113,37 +113,37 @@ impl<'c> Codegen<'c> {
             .chain(tables.iter().map(|t| (t, "table")))
         {
             if v.shape.len() != 2 {
-                bail!("{name} {what} must be a rank-2 tile");
+                bail!("`{name}` {what} must be a rank-2 tile");
             }
             if v.is_masked() {
-                bail!("{name} {what} must be a fully in-bounds slice");
+                bail!("`{name}` {what} must be a fully in-bounds slice");
             }
             if v.swizzle.is_some() {
-                bail!("{name} {what} must not be swizzled");
+                bail!("`{name}` {what} must not be swizzled");
             }
         }
         if aq.elem != self.i8_t || qb.elem != self.i8_t || tables.iter().any(|t| t.elem != self.i8_t)
         {
-            bail!("{name} contracts an int8 activation against the format's raw bytes");
+            bail!("`{name}` contracts an int8 activation against the format's raw bytes");
         }
         if asc.elem != self.f32_t {
-            bail!("{name}'s activation scale must be f32");
+            bail!("`{name}`'s activation scale must be f32");
         }
         if d.elem != self.f16_t {
-            bail!("{name}'s block scale must be f16");
+            bail!("`{name}`'s block scale must be f16");
         }
         if out.elem != self.f32_t || out.is_masked() {
-            bail!("{name} needs a fully in-bounds f32 destination");
+            bail!("`{name}` needs a fully in-bounds f32 destination");
         }
         if !self.has_int8_mma() {
-            bail!("{name} needs the integer tensor cores (sm_75 or later)");
+            bail!("`{name}` needs the integer tensor cores (sm_75 or later)");
         }
         if self.cta_threads != QGEMM_THREADS {
-            bail!("{name} is written for a CTA of {QGEMM_THREADS} threads");
+            bail!("`{name}` is written for a CTA of {QGEMM_THREADS} threads");
         }
         let (md, nd) = (aq.shape[0], qb.shape[0]);
         if md != QGEMM_TM || nd != QGEMM_TN {
-            bail!("{name} takes a {QGEMM_TM} x {QGEMM_TN} output tile, got {md} x {nd}");
+            bail!("`{name}` takes a {QGEMM_TM} x {QGEMM_TN} output tile, got {md} x {nd}");
         }
         self.check_shapes(&[md, nd], &out.shape, "qgemm destination")?;
         self.check_shapes(&[md], &[asc.shape[0]], "qgemm a scale rows")?;
@@ -152,10 +152,10 @@ impl<'c> Codegen<'c> {
         if tables.len() != table_bytes.len()
             || tables.iter().zip(table_bytes).any(|(t, &want)| t.shape[1] != want)
         {
-            bail!("{name} wants tables of {table_bytes:?} bytes");
+            bail!("`{name}` wants tables of {table_bytes:?} bytes");
         }
         if aq.shape[1] != DYN && aq.shape[1] % 256 != 0 {
-            bail!("{name} needs a whole number of 256-element blocks");
+            bail!("`{name}` needs a whole number of 256-element blocks");
         }
 
         let (i8_t, f32_t) = (self.i8_t, self.f32_t);

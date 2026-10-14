@@ -56,7 +56,7 @@ fn iota_past_the_rank_is_rejected() {
             P[0 :+ 64] = p
         }",
     );
-    assert!(e.contains("iota axis 1 is past"), "got: {e}");
+    assert!(e.contains("`iota` axis 1 is past"), "got: {e}");
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn abs_of_an_integer_has_no_float_round_trip() {
 #[test]
 fn math_needs_a_float() {
     let e = emit_err("kernel k(A: tensor<f32>[N]) { let i = ctx.block.x\n let x = sin(i) }");
-    assert!(e.contains("sin needs a float operand"), "got: {e}");
+    assert!(e.contains("`sin` needs a float operand"), "got: {e}");
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn where_messages_name_the_real_problem() {
     );
     assert!(e.contains("value of a tile assignment"), "got: {e}");
     let e = emit_err("kernel k(A: tensor<f32>[N]) { let x = where(missing < 1, 1.0, 0.0) }");
-    assert!(e.contains("unknown identifier 'missing'"), "got: {e}");
+    assert!(e.contains("unknown identifier `missing`"), "got: {e}");
 }
 
 #[test]

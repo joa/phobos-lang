@@ -101,16 +101,16 @@ impl Build {
     pub(crate) fn emit_word(&mut self, slice: &Expr, at: &Expr) -> Result<Rv> {
         ensure!(
             self.span_elem(slice) == Some(Scalar::I8),
-            "word reads the bytes of an i8 tensor, as `word(B[r, k :+ 4])`"
+            "`word` reads the bytes of an i8 tensor, as `word(B[r, k :+ 4])`"
         );
         let Some(t) = self.const_fold(at).filter(|&t| t >= 0) else {
-            bail!("word: which word must be a constant");
+            bail!("`word`: which word must be a constant");
         };
         let bytes = self.lane_load(slice)?;
         let from = 4 * t as usize;
         ensure!(
             bytes.len().is_multiple_of(4) && from + 4 <= bytes.len(),
-            "word {t} of a run of {} bytes: the run is whole words and holds it",
+            "`word` {t} of a run of {} bytes: the run is whole words and holds it",
             bytes.len()
         );
         Ok(Rv::Scalar(self.value(OpKind::Word, &bytes[from..from + 4], Type::INDEX)))
@@ -179,7 +179,7 @@ impl Build {
     /// share its load once LLVM folds the repeats.
     pub(crate) fn emit_elem(&mut self, slice: &Expr, at: &Expr) -> Result<Rv> {
         let Some(i) = self.const_fold(at).filter(|&i| i >= 0) else {
-            bail!("elem: which element must be a constant");
+            bail!("`elem`: which element must be a constant");
         };
         let elems = self.lane_load(slice)?;
         let Some(&v) = elems.get(i as usize) else {
@@ -197,7 +197,7 @@ impl Build {
         let words = run.elem.bytes() == Some(1) && values.len() * 4 == run.len as usize;
         ensure!(
             words || values.len() == run.len as usize,
-            "store: a run of {} takes {} values, got {}",
+            "`store`: a run of {} takes {} values, got {}",
             run.len,
             run.len,
             values.len()
@@ -228,7 +228,7 @@ impl Build {
             _ => None,
         };
         let Some((elem, extents)) = source else {
-            bail!("a thread's own run reads a tensor, a whole shared tile or its flat() view, not a slice");
+            bail!("a thread's own run reads a tensor, a whole shared tile or its `flat()` view, not a slice");
         };
         ensure!(
             subs.len() == extents.len(),

@@ -16,16 +16,16 @@ impl<'c> Codegen<'c> {
     ) -> Result<MemVal<'c>> {
         let leading_one = table.shape.len() == 2 && table.shape[0] == 1;
         if table.shape.len() != 1 && !leading_one {
-            bail!("gather's table must be a rank-1 tensor, or rank-2 with a leading dim of 1");
+            bail!("`gather`'s table must be a rank-1 tensor, or rank-2 with a leading dim of 1");
         }
         if idx.shape.contains(&DYN) {
-            bail!("gather needs a static index tile shape");
+            bail!("`gather` needs a static index tile shape");
         }
         if !self.is_int(idx.elem) {
-            bail!("gather's index tile must hold integers");
+            bail!("`gather`'s index tile must hold integers");
         }
         if idx.is_masked() {
-            bail!("gather's index tile must be a fully in-bounds slice");
+            bail!("`gather`'s index tile must be a fully in-bounds slice");
         }
 
         let out = self.alloc_tile_shaped(block, table.elem, &idx.shape)?;

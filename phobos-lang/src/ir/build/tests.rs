@@ -126,11 +126,11 @@ fn a_chain_of_conversions_is_one_op() {
 fn the_diagnostics_moved_with_the_decisions() {
     assert_eq!(
         build_err("kernel k(A: tensor<f32>[M, N]) {\n    let x = nope\n}\n"),
-        "unknown identifier 'nope'"
+        "unknown identifier `nope`"
     );
     assert_eq!(
         build_err("kernel k(A: tensor<f32>[M, N]) {\n    let x = wobble(A)\n}\n"),
-        "unknown function 'wobble'"
+        "unknown function `wobble`"
     );
     assert_eq!(
         build_err("kernel k(A: tensor<f32>[M, N], n: i32) {\n    let x = 1.0 + n\n}\n"),
@@ -138,7 +138,7 @@ fn the_diagnostics_moved_with_the_decisions() {
     );
     assert_eq!(
         build_err("kernel k(A: tensor<f32>[M, N]) {\n    let x = A\n}\n"),
-        "tensor 'A' used as a value; index or slice it"
+        "tensor `A` used as a value; index or slice it"
     );
 }
 

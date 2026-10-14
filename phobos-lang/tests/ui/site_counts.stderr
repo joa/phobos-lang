@@ -1,4 +1,4 @@
-error: @launch maxThreads must be a positive multiple of 32 (got 48)
+error: `@launch` maxThreads must be a positive multiple of 32 (got 48)
  --> tests/ui/site_counts.ph:2:1
   |
 2 | @launch(48)

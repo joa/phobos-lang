@@ -202,7 +202,7 @@ impl Build {
             match self.lookup(name) {
                 Some(Binding::Frags(v)) => inits.push(v),
                 Some(Binding::Regs(v)) => inits.push(v),
-                _ => bail!("'{name}' is not register-bound"),
+                _ => bail!("`{name}` is not register-bound"),
             }
             regs.push(matches!(self.lookup(name), Some(Binding::Regs(_))));
         }
@@ -236,7 +236,7 @@ impl Build {
             for name in carried {
                 match b.lookup(name) {
                     Some(Binding::Frags(v) | Binding::Regs(v)) => finals.push(v),
-                    _ => bail!("'{name}' lost its register binding in the loop body"),
+                    _ => bail!("`{name}` lost its register binding in the loop body"),
                 }
             }
             b.pop_scope();

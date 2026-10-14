@@ -420,7 +420,7 @@ impl Build {
                     bail!("fragment scale needs a named column operand");
                 };
                 let Some(Binding::Tile(cmv) | Binding::View(cmv)) = self.lookup(col) else {
-                    bail!("fragment scale column '{col}' is not a tile");
+                    bail!("fragment scale column `{col}` is not a tile");
                 };
                 let next = self.value(OpKind::FragScale(*bop), &[acc, cmv], ty);
                 self.update_binding(name, Binding::Frags(next));
@@ -434,7 +434,7 @@ impl Build {
                 let mut operands = vec![acc];
                 for part in outer_parts(value).expect("checked by the guard") {
                     let Some(Binding::Tile(v) | Binding::View(v)) = self.lookup(part) else {
-                        bail!("fragment operand '{part}' is not a tile");
+                        bail!("fragment operand `{part}` is not a tile");
                     };
                     operands.push(v);
                 }
@@ -449,12 +449,12 @@ impl Build {
             }
             (AssignOp::Add, Expr { kind: ExprKind::Binary { .. }, .. }) => {
                 let Some(parts) = scaled_dot_parts(value) else {
-                    bail!("fragment accumulator '{name}' takes f32(dot_t(a, w)) * row * col");
+                    bail!("fragment accumulator `{name}` takes f32(dot_t(a, w)) * row * col");
                 };
                 let mut operands = vec![acc];
                 for part in parts {
                     let Some(Binding::Tile(v) | Binding::View(v)) = self.lookup(part) else {
-                        bail!("fragment operand '{part}' is not a tile");
+                        bail!("fragment operand `{part}` is not a tile");
                     };
                     operands.push(v);
                 }
@@ -469,7 +469,7 @@ impl Build {
                 Ok(())
             }
             _ => bail!(
-                "fragment accumulator '{name}' only supports scaling, dot-accumulate, and stores"
+                "fragment accumulator `{name}` only supports scaling, dot-accumulate, and stores"
             ),
         }
     }
@@ -519,7 +519,7 @@ impl Build {
             match self.lookup(name) {
                 Some(Binding::Frags(fa)) => inits.push(fa),
                 Some(Binding::Regs(r)) => inits.push(r),
-                _ => bail!("'{name}' is not register-bound"),
+                _ => bail!("`{name}` is not register-bound"),
             }
             kinds.push(matches!(self.lookup(name), Some(Binding::Regs(_))));
         }
@@ -540,7 +540,7 @@ impl Build {
                 let mut finals = Vec::with_capacity(names.len());
                 for name in names {
                     let (Some(Binding::Frags(fa)) | Some(Binding::Regs(fa))) = b.lookup(name) else {
-                        bail!("'{name}' lost its register binding in the loop body");
+                        bail!("`{name}` lost its register binding in the loop body");
                     };
                     finals.push(fa);
                 }

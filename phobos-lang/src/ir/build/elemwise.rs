@@ -237,12 +237,12 @@ impl Build {
             }
             ExprKind::Call { callee, args } if callee == "iota" => {
                 let [Expr { kind: ExprKind::Int(d), .. }] = args[..] else {
-                    bail!("iota expects one literal axis");
+                    bail!("`iota` expects one literal axis");
                 };
                 let rank = plan.rank;
                 ensure!(
                     usize::try_from(d).is_ok_and(|d| d < rank),
-                    "iota axis {d} is past the assigned tile's rank {rank}"
+                    "`iota` axis {d} is past the assigned tile's rank {rank}"
                 );
                 Tree::Iota(d as usize)
             }

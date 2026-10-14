@@ -59,11 +59,8 @@ pub fn assert_pipelined(failures: &[codegen::PipelineFailure]) -> anyhow::Result
     } else {
         failure.reasons.join("; ")
     };
-    let message = format!(
-        "kernel `{}`: @pipeline asserts this kernel can be pipelined, but nothing in it did: {why}",
-        failure.kernel
-    );
-    let d = diag::Diagnostic::error(message).primary(failure.span, "");
+    let message = format!("`@pipeline` found nothing in kernel `{}` to pipeline: {why}", failure.kernel);
+    let d = diag::Diagnostic::error(message).primary(failure.span, "asserted here");
     Err(diag::Diagnostics::new(failure.source.clone(), vec![d]).into())
 }
 
@@ -204,7 +201,7 @@ pub fn module_search_space(kernels: &[ast::Kernel]) -> anyhow::Result<Vec<(Strin
             match space.iter().find(|(n, _)| *n == name) {
                 Some((_, seen)) => anyhow::ensure!(
                     *seen == choices,
-                    "@autotune `{name}` has choices {seen:?} in one kernel and {choices:?} in `{}`",
+                    "`@autotune` parameter `{name}` has choices {seen:?} in one kernel and {choices:?} in `{}`",
                     kernel.name
                 ),
                 None => space.push((name, choices)),
@@ -224,7 +221,7 @@ pub fn pin(
     for name in pins.keys() {
         anyhow::ensure!(
             space.iter().any(|(n, _)| n == name),
-            "autotune pin '{name}' is not an @autotune parameter here (parameters: {})",
+            "autotune pin `{name}` is not an `@autotune` parameter here (parameters: {})",
             space
                 .iter()
                 .map(|(n, _)| n.as_str())

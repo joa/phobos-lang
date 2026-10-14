@@ -204,7 +204,7 @@ impl<'c> Codegen<'c> {
     fn report_fma_fallback(&self, m: i64, n: i64, k: i64, why: &str) {
         if self.tensorcore && self.isa.has_wmma() && !matches!(self.policy, SharedPolicy::Record) {
             phobos_base::phdebug!(
-                "kernel `{}`: @tensorcore dot [{m} x {k}] x [{k} x {n}] runs on FMA: {why}",
+                "kernel `{}`: `@tensorcore` dot [{m} x {k}] x [{k} x {n}] runs on FMA: {why}",
                 self.kernel_name
             );
         }

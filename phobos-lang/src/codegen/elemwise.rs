@@ -39,7 +39,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Value<'c, 'c>> {
         let float_arg = |cg: &mut Self, what: &str| -> Result<Value<'c, 'c>> {
             if !cg.is_float(v.r#type()) {
-                bail!("{what} needs a float operand, got {}", v.r#type());
+                bail!("`{what}` needs a float operand, got {}", v.r#type());
             }
             cg.float_cast(block, v, cg.f32_t)
         };

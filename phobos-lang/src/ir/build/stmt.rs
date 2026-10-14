@@ -42,7 +42,7 @@ impl Build {
                     self.bind(name, Binding::Tile(tile));
                 } else {
                     let Some(value) = value else {
-                        bail!("'var {name}' without an initializer needs a tile type");
+                        bail!("`var {name}` without an initializer needs a tile type");
                     };
                     let fused = self.fusable_nodes(value).unwrap_or(0) >= 1;
                     if let Some((elem, shape)) = self.fused_decl_type(value).filter(|_| fused) {
@@ -266,9 +266,9 @@ impl Build {
                 Some(Binding::Frags(fa)) => self.emit_frag_assign(name, fa, op, value)?,
                 Some(Binding::Regs(r)) => self.emit_regs_assign(name, r, op, value)?,
                 Some(Binding::View(_)) => {
-                    bail!("'{name}' is a read-only view; declare it with `var` to assign")
+                    bail!("`{name}` is a read-only view; declare it with `var` to assign")
                 }
-                Some(_) => bail!("'{name}' is not assignable (declare it with `var`)"),
+                Some(_) => bail!("`{name}` is not assignable (declare it with `var`)"),
                 None => return Err(super::locate(&self.source, &self.ir, self.unknown(name), target.span)),
             },
             ExprKind::Index { base, subs } => {

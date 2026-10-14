@@ -52,3 +52,37 @@ fn every_ui_source_prints_its_stderr() {
     }
     assert!(failures.is_empty(), "{}\nPHOBOS_BLESS=1 rewrites the .stderr files", failures.join("\n"));
 }
+
+/// Whether `text` spells an op as the compiler's printed graph does, a
+/// form the source never has.
+fn names_internal_op(text: &str) -> Option<&'static str> {
+    const SPELLINGS: [&str; 6] = ["fused (", "slice [", "s#", "`copy`", "`fill`", "`fused`"];
+    if let Some(s) = SPELLINGS.into_iter().find(|s| text.contains(s)) {
+        return Some(s);
+    }
+    text.as_bytes()
+        .windows(2)
+        .any(|w| matches!(w[0], b'#' | b'%') && w[1].is_ascii_digit())
+        .then_some("#N or %N")
+}
+
+#[test]
+fn no_message_names_an_internal_op() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    // The messages, not the keys, which name a fence as `page#N`.
+    let expected = std::fs::read_to_string(root.join("../website/src/data/expected-errors.json")).unwrap();
+    let messages = expected.lines().filter_map(|l| l.split_once("\": \"").map(|(_, m)| m)).collect::<Vec<_>>();
+    let mut texts = vec![("website/src/data/expected-errors.json".to_string(), messages.join("\n"))];
+    for entry in std::fs::read_dir(root.join("tests").join("ui")).unwrap().flatten() {
+        let path = entry.path();
+        if path.extension().is_some_and(|e| e == "stderr") {
+            texts.push((path.display().to_string(), std::fs::read_to_string(&path).unwrap()));
+        }
+    }
+    let found: Vec<_> = texts
+        .iter()
+        .flat_map(|(name, text)| text.lines().map(move |line| (name, line)))
+        .filter_map(|(name, line)| names_internal_op(line).map(|s| format!("{name}: `{s}` in: {line}")))
+        .collect();
+    assert!(found.is_empty(), "{}", found.join("\n"));
+}

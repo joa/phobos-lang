@@ -1,7 +1,7 @@
-error: kernel `flat`: @pipeline asserts this kernel can be pipelined, but nothing in it did: no loop in the kernel is shaped for pipelining
+error: `@pipeline` found nothing in kernel `flat` to pipeline: no loop in the kernel is shaped for pipelining
  --> tests/ui/site_pipeline.ph:2:1
   |
 2 | @pipeline
-  | ^^^^^^^^^
+  | ^^^^^^^^^ asserted here
 
 error: aborting due to 1 previous error

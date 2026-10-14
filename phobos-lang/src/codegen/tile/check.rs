@@ -13,7 +13,7 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if a.shape.len() != 2 || b.shape.len() != 2 || out.shape.len() != 2 {
-            bail!("dot expects rank-2 tiles");
+            bail!("`dot` expects rank-2 tiles");
         }
         self.check_shapes(&[a.shape[1]], &[b.shape[0]], "dot contraction dim")?;
         self.check_shapes(&[a.shape[0], b.shape[1]], &out.shape, "dot result")

@@ -195,21 +195,21 @@ impl Kernel {
         };
         if launch.max_threads <= 0 || launch.max_threads % 32 != 0 {
             return Err(format!(
-                "@launch maxThreads must be a positive multiple of 32 (got {})",
+                "`@launch` maxThreads must be a positive multiple of 32 (got {})",
                 launch.max_threads
             ));
         }
         if let Some(b) = launch.min_blocks
             && b <= 0
         {
-            return Err(format!("@launch minBlocks must be positive (got {b})"));
+            return Err(format!("`@launch` minBlocks must be positive (got {b})"));
         }
         // PTX .maxnreg accepts 16..=255 registers per thread
         if let Some(r) = launch.max_nreg
             && !(16..=255).contains(&r)
         {
             return Err(format!(
-                "@launch maxRegs must be between 16 and 255 (got {r})"
+                "`@launch` maxRegs must be between 16 and 255 (got {r})"
             ));
         }
         Ok(Some(launch))
@@ -225,13 +225,9 @@ impl Kernel {
             .iter()
             .filter(|a| !ATTRIBUTES.contains(&a.name.as_str()))
             .map(|a| {
-                let d = Diagnostic::error(format!(
-                    "kernel '{}': unknown attribute @{}; the compiler reads @{}",
-                    self.name,
-                    a.name,
-                    ATTRIBUTES.join(", @")
-                ))
-                .primary(a.span, "");
+                let d = Diagnostic::error(format!("unknown attribute `@{}`", a.name))
+                    .primary(a.span, "the compiler does not read it")
+                    .note(format!("the compiler reads `@{}`", ATTRIBUTES.join("`, `@")));
                 match crate::diag::similar(&a.name, ATTRIBUTES.iter().copied()) {
                     Some(near) => {
                         let at = crate::diag::Span::new(a.span.lo + 1, a.span.lo + 1 + a.name.len() as u32);
@@ -287,7 +283,7 @@ impl Kernel {
             [] => Ok(Some(true)),
             [AttrArg::Positional(Literal::Ident(v))] if v == "on" => Ok(Some(true)),
             [AttrArg::Positional(Literal::Ident(v))] if v == "off" => Ok(Some(false)),
-            _ => Err(format!("kernel '{}': @swizzle takes on or off", self.name)),
+            _ => Err("`@swizzle` takes `on` or `off`".to_string()),
         }
     }
 

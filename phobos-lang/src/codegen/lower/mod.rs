@@ -77,7 +77,7 @@ impl<'c> Codegen<'c> {
                     })
                 }
                 ir::Type::Scalar(_) => Lowered::Scalar(arg),
-                other => bail!("kernel '{}': a {other} parameter", ir.kernel.name),
+                other => bail!("kernel `{}`: a {other} parameter", ir.kernel.name),
             };
             self.set_ir(a, lowered);
         }

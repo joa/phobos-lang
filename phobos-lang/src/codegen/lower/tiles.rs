@@ -210,7 +210,7 @@ impl<'c> Codegen<'c> {
                 let a = self.tile_ir(ir, ir.operand(op, 0))?;
                 let b = self.tile_ir(ir, ir.operand(op, 1))?;
                 let ir::Type::Tile(t) = ir.ty(ir.result(op)) else {
-                    bail!("dot to a non-tile");
+                    bail!("`dot` to a non-tile");
                 };
                 let elem = self.ir_scalar_type(t.elem);
                 let out = self.alloc_tile_shaped(block, elem, &dims(&t.shape))?;
