@@ -173,3 +173,34 @@ fn a_shared_operand_loads_by_ldmatrix() {
     assert!(narrow.contains("nvvm.ldmatrix"), "{narrow}");
     assert!(narrow.contains("math.fma"), "{narrow}");
 }
+
+#[test]
+fn a_column_times_a_row_adds_to_the_accumulator_in_registers() {
+    // The minimum a K-quant subtracts: `acc += rs * mw`, a [M, 1] column
+    // times a [1, N] row, one more fma an element, in either order.
+    for outer in ["rs * mw", "mw * rs"] {
+        let scales = format!(
+            "ws * da
+    let rs = AS[pm * 128 :+ 128, b :+ 1]
+    let mw = WS[b :+ 1, pn * 64 :+ 64]
+    acc += {outer}"
+        );
+        let mlir = emit_mlir(&projection(128, 64, 128, ALIGNED, &scales));
+        assert!(!mlir.contains("memref.global"), "{outer}:\n{mlir}");
+        assert_eq!(mlir.matches("math.fma").count(), 128, "{outer}:\n{mlir}");
+    }
+    // `-=` subtracts it, the row's value negated once.
+    let scales = "ws * da
+    let rs = AS[pm * 128 :+ 128, b :+ 1]
+    let mw = WS[b :+ 1, pn * 64 :+ 64]
+    acc -= rs * mw";
+    let mlir = emit_mlir(&projection(128, 64, 128, ALIGNED, scales));
+    assert!(!mlir.contains("memref.global"), "{mlir}");
+    assert_eq!(mlir.matches("math.fma").count(), 128, "{mlir}");
+    assert!(mlir.contains("arith.negf"), "{mlir}");
+    // Two columns are no outer product: the accumulator stays a tile.
+    let scales = "ws * da
+    let rs = AS[pm * 128 :+ 128, b :+ 1]
+    acc += rs * da";
+    assert!(emit_mlir(&projection(128, 64, 128, ALIGNED, scales)).contains("memref.global"));
+}

@@ -84,6 +84,20 @@ impl<'c> Codegen<'c> {
                 let frags = self.frag_scale_raw(block, &fa, bop, &col)?;
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
+            OpKind::FragOuter { negate } => {
+                let fa = self.frags_ir(ir.operand(op, 0))?;
+                let tiles = self.tiles_ir(ir, op, 1..3)?;
+                let mut operands = Vec::with_capacity(2);
+                for (i, view) in tiles.iter().enumerate() {
+                    let from = self.slice_origin(ir, ir.operand(op, 1 + i))?;
+                    operands.push(ImmaOperand { view: view.clone(), from });
+                }
+                let frags = self.frag_outer_raw(block, &fa, &operands[0], &operands[1], negate)?;
+                for t in &tiles {
+                    self.release(t);
+                }
+                self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
+            }
             OpKind::FragDot => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
                 let a = self.tile_ir(ir, ir.operand(op, 1))?;
