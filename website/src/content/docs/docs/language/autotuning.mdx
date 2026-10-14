@@ -114,6 +114,7 @@ shared memory, say), times the rest and keeps the fastest. Its
 [Compile and benchmark](/docs/getting-started/compile-and-benchmark/) for the tools.
 
 import Recording from "../../../../components/inference/Recording.astro"
+import Command from "../../../../components/Command.astro"
 
 <Recording name="autotune" label="phobos-kbench logging the time of each tile size combination of a GEMM search" widthPx={670} heightPx={350}>
   A search in progress: `phobos-kbench` logs each combination of `TILE_M`, `TILE_N` and `TILE_K` with its time, and
@@ -133,9 +134,10 @@ To tune with a harness of your own, or to read what each choice generates,
 pins a name first, and `--all-variants` compiles what is left, one file per
 point, with the settings appended to the output name:
 
-```sh
-phobos-compile gemm.ph --set TILE_K=16 --all-variants -o gemm.ptx
-```
+<Command
+  release="phobos-compile gemm.ph --set TILE_K=16 --all-variants -o gemm.ptx"
+  checkout="cargo run -r -p phobos-compile -- gemm.ph --set TILE_K=16 --all-variants -o gemm.ptx"
+/>
 
 For the kernel above that is nine files, `gemm_TILE_M-32_TILE_N-32_TILE_K-16.ptx`
 through `gemm_TILE_M-128_TILE_N-128_TILE_K-16.ptx`, and one line per file

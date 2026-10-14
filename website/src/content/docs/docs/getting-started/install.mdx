@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import InstallTabs from "../../../../components/InstallTabs.astro"
+import Command from "../../../../components/Command.astro"
 
 There are two ways to get Phobos: download a release, or build it from source.
 A release is enough to run models and to compile kernels. Building from source
@@ -68,10 +69,10 @@ minutes. Kernels it lacks are compiled on first use and kept in
 
 Check that the binaries run:
 
-```sh
-phobos-cli --version
-phobos-compile saxpy_fp32.ph
-```
+<Command
+  release={"phobos-cli --version\nphobos-compile saxpy_fp32.ph"}
+  checkout={"cargo run --features cuda -r -p phobos-cli -- --version\ncargo run -r -p phobos-compile -- examples/saxpy_fp32.ph"}
+/>
 
 The first prints the version and the compiler fingerprint. The second prints
 PTX for a kernel source file; the repository's

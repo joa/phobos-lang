@@ -7,6 +7,7 @@ sidebar:
 
 import Kernel from "../../../../components/Kernel.astro"
 import KernelResult from "../../../../components/home/compiler-numbers/KernelResult.astro"
+import Command from "../../../../components/Command.astro"
 
 saxpy computes `out = alpha * x + y` for vectors `x`, `y` and `out` of length
 `N` and a scalar `alpha`. It is the smallest kernel in the repository, and the
@@ -69,8 +70,12 @@ and the spec's [Bounds and masking](/docs/reference/spec/#bounds-and-masking).
 
 ## Run it
 
+<Command
+  release={"phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx"}
+  checkout={"cargo run -r -p phobos-compile -- examples/saxpy_fp32.ph -o saxpy.ptx"}
+/>
+
 ```sh
-phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx
 cargo run -r -p phobos-kbench -- --bench saxpy_fp32
 ```
 

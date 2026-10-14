@@ -5,6 +5,8 @@ sidebar:
   order: 5
 ---
 
+import Command from "../../../../components/Command.astro"
+
 Every kernel Phobos runs is compiled from Phobos source to PTX the first time
 it is needed. A model needs many kernels, one per shape and format, and
 compiling them all takes minutes. So compiled kernels are kept on disk and
@@ -43,20 +45,20 @@ every supported chip.
 
 ### list
 
-```sh
-phobos-cache list
-phobos-cache list --chip sm_86
-```
+<Command
+  release={"phobos-cache list\nphobos-cache list --chip sm_86"}
+  checkout={"cargo run -r -p phobos-cache -- list\ncargo run -r -p phobos-cache -- list --chip sm_86"}
+/>
 
 Prints every cached kernel by chip and name with its size, then the number of
 entries and their total size.
 
 ### clear
 
-```sh
-phobos-cache clear
-phobos-cache clear --chip sm_75 "q4k*"
-```
+<Command
+  release={"phobos-cache clear\nphobos-cache clear --chip sm_75 \"q4k*\""}
+  checkout={"cargo run -r -p phobos-cache -- clear\ncargo run -r -p phobos-cache -- clear --chip sm_75 \"q4k*\""}
+/>
 
 Deletes cached kernels. Given kernel names, it deletes only those, with `*`
 as the only wildcard. Given none, it clears everything, including entries left
@@ -64,9 +66,10 @@ from before the cache was split by chip.
 
 ### warm
 
-```sh
-phobos-cache warm --manifest DIR
-```
+<Command
+  release={"phobos-cache warm --manifest DIR"}
+  checkout={"cargo run -r -p phobos-cache -- warm --manifest DIR"}
+/>
 
 Compiles every kernel a manifest asks for, for each chip, with no GPU. A run
 on a card of that chip then starts with every kernel ready. Kernels already in
@@ -79,9 +82,10 @@ to run. `--ptxas PATH` names one, and `--no-ptxas` skips the check.
 
 ### prune
 
-```sh
-phobos-cache prune --manifest DIR
-```
+<Command
+  release={"phobos-cache prune --manifest DIR"}
+  checkout={"cargo run -r -p phobos-cache -- prune --manifest DIR"}
+/>
 
 Deletes every entry the given manifests do not ask for.
 
@@ -91,10 +95,10 @@ A manifest is a folder of compile requests, one file each, without the chip.
 Set `PHOBOS_KERNEL_MANIFEST` to a directory, and every run records each kernel
 it asks for into it, whether the cache had it or not:
 
-```sh
-PHOBOS_KERNEL_MANIFEST=manifest phobos-bench -m models/minicpm5-1b-Q8_0.gguf -p 128,512 -n 32
-phobos-cache warm --manifest manifest --chip sm_89
-```
+<Command
+  release={"PHOBOS_KERNEL_MANIFEST=manifest phobos-bench -m models/minicpm5-1b-Q8_0.gguf -p 128,512 -n 32\nphobos-cache warm --manifest manifest --chip sm_89"}
+  checkout={"PHOBOS_KERNEL_MANIFEST=manifest cargo run --features cuda -r -p phobos-bench -- -m models/minicpm5-1b-Q8_0.gguf -p 128,512 -n 32\ncargo run -r -p phobos-cache -- warm --manifest manifest --chip sm_89"}
+/>
 
 A GGUF run that records compiles every format's kernels, not only those of its
 own model, so one recording covers formats no recorded model holds. Some

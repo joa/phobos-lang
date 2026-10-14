@@ -5,6 +5,8 @@ sidebar:
   order: 1
 ---
 
+import Command from "../../../../components/Command.astro"
+
 `phobos-cli` reads GGUF files. A GGUF file names its architecture and carries
 its own tokenizer and, for most chat models, its own chat template, so one
 `--gguf FILE` is all a model needs.
@@ -65,9 +67,10 @@ same time. There is no manual split to choose.
 The cache takes the device memory the resident weights leave, less a reserve.
 `--expert-cache SIZE` sets it instead, as `2g`, `1500m` or a byte count:
 
-```sh
-phobos-cli --gguf models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --expert-cache 2g
-```
+<Command
+  release={"phobos-cli --gguf models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --expert-cache 2g"}
+  checkout={"cargo run --features cuda -r -p phobos-cli -- --gguf models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf --expert-cache 2g"}
+/>
 
 When another program takes memory on the card while the model runs, the
 cache gives it back, and more experts are computed on the CPU. The

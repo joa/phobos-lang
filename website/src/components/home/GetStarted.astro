@@ -1,13 +1,12 @@
 ---
 // Scene 6: get started, three steps. Commands call the binaries a release ships.
+import Command from "../Command.astro"
 import { installCommands, latestReleaseTag } from "../../lib/release"
 
 const REPO_URL = "https://github.com/joa/phobos-lang"
 const release = await latestReleaseTag()
 const INSTALL_COMMANDS = release ? installCommands(release) : []
-const COMPILE_COMMAND = "phobos-compile gemm_fp32.ph"
-const SERVE_COMMAND =
-  "phobos-cli --listen 127.0.0.1:8080 --gguf minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
+const SERVE_ARGS = "--listen 127.0.0.1:8080 --gguf minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
 ---
 
 <section class="scene get-started" id="get-started" aria-labelledby="start-title">
@@ -45,7 +44,10 @@ const SERVE_COMMAND =
           <a href={`${REPO_URL}/blob/main/examples/gemm_fp32.ph`}>gemm_fp32.ph</a> from the repository's examples, to
           PTX for <code>sm_75</code> by default. No GPU needed.
         </p>
-        <pre><code>{COMPILE_COMMAND}</code></pre>
+        <Command
+          release="phobos-compile gemm_fp32.ph"
+          checkout="cargo run -r -p phobos-compile -- examples/gemm_fp32.ph"
+        />
       </li>
       <li class="step">
         <h3>Serve a model</h3>
@@ -53,7 +55,10 @@ const SERVE_COMMAND =
           Download <a href="https://huggingface.co/Abiray/MiniCPM5-1B-GGUF">MiniCPM5-1B-Q8_0</a>, then start the
           OpenAI-compatible server with the dashboard on the terminal. Needs an NVIDIA GPU.
         </p>
-        <pre><code>{SERVE_COMMAND}</code></pre>
+        <Command
+          release={`phobos-cli ${SERVE_ARGS}`}
+          checkout={`cargo run --features cuda -r -p phobos-cli -- ${SERVE_ARGS}`}
+        />
       </li>
     </ol>
     <a class="scene-link" href="/docs/getting-started/">Read the getting started guide</a>
@@ -118,6 +123,10 @@ const SERVE_COMMAND =
     line-height: 1.55;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+
+  .step :global(.command) {
+    margin-top: 0.25rem;
   }
 
   .install {

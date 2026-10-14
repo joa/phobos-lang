@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Kernel from "../../../../components/Kernel.astro"
+import Command from "../../../../components/Command.astro"
 
 The smallest useful kernel is saxpy: given two vectors `x` and `y` and a
 scalar `alpha`, compute `out = alpha * x + y`, one element at a time. This is
@@ -108,9 +109,10 @@ kernel relu(x: tensor<f32>[N], out: tensor<f32>[N]) {
 
 Compile saxpy to PTX. This needs no GPU:
 
-```sh
-phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx
-```
+<Command
+  release={"phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx"}
+  checkout={"cargo run -r -p phobos-compile -- examples/saxpy_fp32.ph -o saxpy.ptx"}
+/>
 
 From a checkout with a GPU, `phobos-kbench` autotunes it on vectors of 2^25
 elements and prints its throughput:

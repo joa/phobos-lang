@@ -5,13 +5,16 @@ sidebar:
   order: 2
 ---
 
+import Command from "../../../../components/Command.astro"
+
 `phobos-cli --listen ADDR` serves the loaded model over HTTP with an API that
 OpenAI clients understand, and draws a dashboard on the terminal while it
 runs.
 
-```sh
-phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080
-```
+<Command
+  release={"phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080"}
+  checkout={"cargo run --features cuda -r -p phobos-cli -- --gguf models/minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080"}
+/>
 
 The listener opens before the weights are uploaded, so requests that arrive
 during loading wait in a queue instead of failing. The server runs one

@@ -5,6 +5,8 @@ sidebar:
   order: 3
 ---
 
+import Command from "../../../../components/Command.astro"
+
 After each step the model gives a score, a logit, for every token in its
 vocabulary. The sampler turns those scores into one token. `phobos-cli`'s
 flags set how; when serving, they are the defaults a request falls back to
@@ -27,9 +29,10 @@ for any field it does not send.
 The defaults are greedy and deterministic. A chat model usually comes with
 recommended settings in its model card; for MiniCPM5-1B the README uses:
 
-```sh
-phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 "Write a haiku about the moon."
-```
+<Command
+  release={"phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 \"Write a haiku about the moon.\""}
+  checkout={"cargo run --features cuda -r -p phobos-cli -- --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 \"Write a haiku about the moon.\""}
+/>
 
 ## In what order
 

@@ -12,11 +12,13 @@ import ElasticCache from "../figures/elastic-cache/ElasticCache.astro"
 import HadamardRotation from "../figures/hadamard-rotation/HadamardRotation.astro"
 import TokenLoop from "../figures/token-loop/TokenLoop.astro"
 import InferenceHero from "./hero/InferenceHero.astro"
+import Command from "../Command.astro"
 import { REPO_URL } from "../../lib/bench/load"
 
-const SERVE_COMMAND = "phobos-cli --gguf minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080"
+const SERVE_ARGS = "--gguf minicpm5-1b-Q8_0.gguf --listen 127.0.0.1:8080"
 const BUILD_COMMAND = "cargo build --release --features cuda -p phobos-cli"
-const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky dark at night?"'
+const PROMPT_ARGS = '--gguf minicpm5-1b-Q8_0.gguf "Why is the sky dark at night?"'
+const CHECKOUT_CLI = "cargo run --features cuda -r -p phobos-cli --"
 ---
 
 <InferenceHero />
@@ -177,7 +179,7 @@ const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky 
           Download a <a href={`${REPO_URL}/releases/latest`}>release</a> and keep <code>kernel-cache/</code> beside the
           binaries, or build from a checkout:
         </p>
-        <pre><code>{BUILD_COMMAND}</code></pre>
+        <Command checkout={BUILD_COMMAND} />
       </li>
       <li>
         <h3>Ask a question</h3>
@@ -185,12 +187,12 @@ const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky 
           Download <a href="https://huggingface.co/Abiray/MiniCPM5-1B-GGUF">MiniCPM5-1B-Q8_0</a> and pass a prompt.
           Without one, <code>phobos-cli</code> starts a REPL.
         </p>
-        <pre><code>{PROMPT_COMMAND}</code></pre>
+        <Command release={`phobos-cli ${PROMPT_ARGS}`} checkout={`${CHECKOUT_CLI} ${PROMPT_ARGS}`} />
       </li>
       <li>
         <h3>Serve it</h3>
         <p>Point any OpenAI client at <code>http://127.0.0.1:8080/v1</code>.</p>
-        <pre><code>{SERVE_COMMAND}</code></pre>
+        <Command release={`phobos-cli ${SERVE_ARGS}`} checkout={`${CHECKOUT_CLI} ${SERVE_ARGS}`} />
       </li>
     </ol>
     <ul class="inf-links">
@@ -306,15 +308,8 @@ const PROMPT_COMMAND = 'phobos-cli --gguf minicpm5-1b-Q8_0.gguf "Why is the sky 
     margin: 0;
   }
 
-  .inf-steps pre {
-    margin: auto 0 0;
-    padding: 0.75rem;
-    overflow-x: auto;
-    border: 1px solid var(--sky-line);
-    background: var(--sky-1);
-    font-size: 0.8125rem;
-    white-space: pre-wrap;
-    overflow-wrap: anywhere;
+  .inf-steps :global(.command) {
+    margin-top: auto;
   }
 
   .inf-links {

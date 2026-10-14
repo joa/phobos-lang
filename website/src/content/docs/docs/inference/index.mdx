@@ -5,6 +5,8 @@ sidebar:
   order: 0
 ---
 
+import Command from "../../../../components/Command.astro"
+
 `phobos-cli` runs GGUF models on the GPU, on Phobos kernels. This page gets a
 small model answering in a few minutes. You need an NVIDIA GPU of compute
 capability 7.5 or newer and a recent driver; see
@@ -21,8 +23,8 @@ with the `cuda` feature and in release mode:
 cargo build --release --features cuda -p phobos-cli
 ```
 
-The examples below call `phobos-cli` directly. From a checkout, use
-`cargo run --features cuda -r -p phobos-cli --` in its place.
+Each example below shows the release binary and the same command from a
+checkout.
 
 ## 2. Get a model
 
@@ -36,9 +38,10 @@ Hugging Face.
 
 With a prompt, `phobos-cli` prints the answer and exits:
 
-```sh
-phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf "Why is the sky blue?"
-```
+<Command
+  release={'phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf "Why is the sky blue?"'}
+  checkout={'cargo run --features cuda -r -p phobos-cli -- --gguf models/minicpm5-1b-Q8_0.gguf "Why is the sky blue?"'}
+/>
 
 The model loads, its kernels load from the cache (or compile, the first time
 a kernel is missing), and the answer streams to the terminal. If the file
@@ -55,18 +58,20 @@ is set with flags such as `--temp` and `--top-p`; see
 Without a prompt, `phobos-cli` starts a REPL. The model stays loaded, and each
 line you type is answered on its own, with no memory of earlier lines:
 
-```sh
-phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf
-```
+<Command
+  release="phobos-cli --gguf models/minicpm5-1b-Q8_0.gguf"
+  checkout="cargo run --features cuda -r -p phobos-cli -- --gguf models/minicpm5-1b-Q8_0.gguf"
+/>
 
 ## 5. Serve it
 
 `--listen` starts an OpenAI-compatible HTTP server, and a dashboard takes over
 the terminal. These are the settings the README recommends for this model:
 
-```sh
-phobos-cli --listen 127.0.0.1:8080 --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768
-```
+<Command
+  release="phobos-cli --listen 127.0.0.1:8080 --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
+  checkout="cargo run --features cuda -r -p phobos-cli -- --listen 127.0.0.1:8080 --gguf models/minicpm5-1b-Q8_0.gguf --temp 0.9 --top-p 0.95 -n 32768"
+/>
 
 The sampling flags become the defaults for every request, and a request can
 override them. `-n 32768` lets an answer run up to 32768 tokens. Test it with

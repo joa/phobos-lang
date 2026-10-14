@@ -5,6 +5,8 @@ sidebar:
   order: 3
 ---
 
+import Command from "../../../../components/Command.astro"
+
 Three tools take a kernel from source to a number. `phobos-compile` turns a
 source file into PTX. The `emit` example prints the MLIR the compiler
 generates, which is the quickest way to see what a change to a kernel does.
@@ -18,17 +20,13 @@ usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VAL
 ```
 
 `phobos-compile` reads one source file and writes PTX for every kernel in it,
-to standard output or to the file `-o` names:
+to standard output or to the file `-o` names. From a checkout, run it through
+cargo:
 
-```sh
-phobos-compile examples/gemm_fp32.ph -o gemm.ptx
-```
-
-From a checkout, run it through cargo:
-
-```sh
-cargo run -r -p phobos-compile -- examples/gemm_fp32.ph --chip sm_80 -o gemm.ptx
-```
+<Command
+  release="phobos-compile examples/gemm_fp32.ph --chip sm_80 -o gemm.ptx"
+  checkout="cargo run -r -p phobos-compile -- examples/gemm_fp32.ph --chip sm_80 -o gemm.ptx"
+/>
 
 The options:
 
@@ -52,9 +50,10 @@ is an error rather than ignored.
 settings appended to the name of `-o` (or of the source file). Pins narrow the
 space first:
 
-```sh
-phobos-compile examples/gemm_fp32.ph --set TILE_K=16 --all-variants -o gemm.ptx
-```
+<Command
+  release="phobos-compile examples/gemm_fp32.ph --set TILE_K=16 --all-variants -o gemm.ptx"
+  checkout="cargo run -r -p phobos-compile -- examples/gemm_fp32.ph --set TILE_K=16 --all-variants -o gemm.ptx"
+/>
 
 writes `gemm_TILE_M-32_TILE_N-32_TILE_K-16.ptx` and a file for each other
 combination of `TILE_M` and `TILE_N`, and prints one line per file with its

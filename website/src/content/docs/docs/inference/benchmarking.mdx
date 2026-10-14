@@ -5,6 +5,8 @@ sidebar:
   order: 4
 ---
 
+import Command from "../../../../components/Command.astro"
+
 Two tools measure inference speed. `phobos-bench` measures one model the way
 `llama-bench` measures llama.cpp, in the same units. `scripts/bench.py` runs
 both on the same models in one session and compares them, with checks that
@@ -12,9 +14,10 @@ make the comparison fair.
 
 ## phobos-bench
 
-```sh
-phobos-bench -m models/Qwen3.5-0.8B-Q8_0.gguf -p 128,512 -n 32,128 -r 3
-```
+<Command
+  release="phobos-bench -m models/Qwen3.5-0.8B-Q8_0.gguf -p 128,512 -n 32,128 -r 3"
+  checkout="cargo run --features cuda -r -p phobos-bench -- -m models/Qwen3.5-0.8B-Q8_0.gguf -p 128,512 -n 32,128 -r 3"
+/>
 
 It reports two kinds of rows, in tokens per second:
 
@@ -35,12 +38,6 @@ It reports two kinds of rows, in tokens per second:
 `-p`, `-n` and `-d` take a comma-separated list and can be repeated, so
 `-p 128,512` and `-p 128 -p 512` ask for the same two rows. Progress goes to
 standard error, and the result is a Markdown table on standard output.
-
-From a checkout, build it with the `cuda` feature and in release mode:
-
-```sh
-cargo run --features cuda --release -p phobos-bench -- -m MODEL.gguf -p 512 -n 128 -r 10
-```
 
 ## Comparing with llama.cpp
 
