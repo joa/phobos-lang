@@ -279,9 +279,9 @@ fn ptq1_decode() -> Decode {
     }
     Decode {
         fetch: vec![
-            ("w0", "word(QB[jr, BO + 12 * (GG / 2) :+ 12], 0)".into()),
-            ("w1", "word(QB[jr, BO + 12 * (GG / 2) :+ 12], 1)".into()),
-            ("w2", "word(QB[jr, BO + 12 * (GG / 2) :+ 12], 2)".into()),
+            ("w0", "word(QB[jr, BO + 12 * (GG / 2) + 0 :+ 4], 0)".into()),
+            ("w1", "word(QB[jr, BO + 12 * (GG / 2) + 4 :+ 4], 0)".into()),
+            ("w2", "word(QB[jr, BO + 12 * (GG / 2) + 8 :+ 4], 0)".into()),
             ("tl", "word(QB[jr, BO + 48 :+ 8], 0)".into()),
             ("sc", "word(QB[jr, BO + 48 :+ 8], 1)".into()),
         ],
@@ -321,11 +321,11 @@ fn q6k_decode() -> Decode {
         for t in 0..2 {
             now.push((
                 ["l00", "l01", "l10", "l11", "l20", "l21", "l30", "l31"][2 * o + t],
-                format!("word(QB[jr, BO + 64 * (GG / 4) + 32 * (GG % 2) + {b} :+ 8], {t})", b = 8 * o),
+                format!("word(QB[jr, BO + 64 * (GG / 4) + 32 * (GG % 2) + {h} :+ 16], {w})", h = 16 * (o / 2), w = 2 * (o % 2) + t),
             ));
             now.push((
                 ["h00", "h01", "h10", "h11", "h20", "h21", "h30", "h31"][2 * o + t],
-                format!("word(QB[jr, BO + 128 + 32 * (GG / 4) + {b} :+ 8], {t})", b = 8 * o),
+                format!("word(QB[jr, BO + 128 + 32 * (GG / 4) + {h} :+ 16], {w})", h = 16 * (o / 2), w = 2 * (o % 2) + t),
             ));
         }
     }
