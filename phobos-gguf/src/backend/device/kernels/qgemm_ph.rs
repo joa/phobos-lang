@@ -43,6 +43,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
         return None;
     }
     match quant {
+        Quant::IQ1_S => Some(staged(quant, "iq1s", 48, &iq1s_decode(), split)),
         Quant::IQ2_XXS => Some(staged(quant, "iq2xxs", 64, &iq2xxs_decode(), split)),
         Quant::IQ2_XS => Some(staged(quant, "iq2xs", 72, &iq2xs_decode(), split)),
         Quant::IQ2_S => Some(staged(quant, "iq2s", 80, &iq2s_decode(), split)),
@@ -136,6 +137,53 @@ fn iq3xxs_decode() -> Decode {
         ],
         now: vec![("aux", "word(QB[jr, BO + 64 + 4 * GG :+ 4], 0)".into())],
         body,
+        pipelined: false,
+        halves: false,
+    }
+}
+
+/// IQ1's byte tables for `byteperm`: byte `c` of a two-bit code `c` (0, +1
+/// or, as 3, -1) is `8c + 1`, or `8c - 1` under a negative delta.
+const IQ1_PLUS: u32 = 0xF900_0901;
+const IQ1_MINUS: u32 = 0xF700_07FF;
+
+/// IQ1_S: a 32-element group is four low bytes of 11-bit grid indices at
+/// `4g` and a halfword at `32 + 2g` holding their high bits three at a time,
+/// a 3-bit scale `s` and the delta's sign on top, weighting the group by
+/// `d (2s + 1) / 8`. A grid entry is eight two-bit codes, spread into the
+/// nibbles `byteperm` picks each element's `8c +- 1` byte with.
+fn iq1s_decode() -> Decode {
+    let mut body = format!(
+        "    ws[gl, jj] = d * 0.125 * f32(2 * ((qh >> 12) & 7) + 1)
+    let lut = where(((qh >> 15) & 1) == 1, {IQ1_MINUS}, {IQ1_PLUS})
+"
+    );
+    for l in 0..4 {
+        let _ = write!(
+            body,
+            "    let gi{l} = (((qs >> {b}) & 255) | (((qh >> {h}) & 7) << 8)) * 2
+    let e{l} = (elem(grid[0, gi{l} :+ 2], 0) & 255) | ((elem(grid[0, gi{l} :+ 2], 1) & 255) << 8)
+    let x{l}a = (e{l} | (e{l} << 8)) & {S8}
+    let x{l}b = (x{l}a | (x{l}a << 4)) & {S4}
+    let x{l} = (x{l}b | (x{l}b << 2)) & {S2}
+    store(w[jj, 32 * gl + {o} :+ 8], byteperm(lut, lut, x{l}), byteperm(lut, lut, x{l} >> 16))
+",
+            b = 8 * l,
+            h = 3 * l,
+            o = 8 * l,
+            S8 = 0x00FF_00FFu32,
+            S4 = 0x0F0F_0F0Fu32,
+            S2 = 0x3333_3333u32,
+        );
+    }
+    Decode {
+        fetch: vec![
+            ("qs", "word(QB[jr, BO + 4 * GG :+ 4], 0)".into()),
+            ("ql", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 0)".into()),
+            ("qhh", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 1)".into()),
+        ],
+        now: Vec::new(),
+        body: format!("    let qh = (ql & 255) | ((qhh & 255) << 8)\n{body}"),
         pipelined: false,
         halves: false,
     }
