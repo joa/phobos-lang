@@ -12,20 +12,20 @@ pub(crate) type PResult<T> = Result<T, Diagnostic>;
 pub struct Parser {
     toks: Vec<Token>,
     pos: usize,
+    /// The source the tokens came from, which every kernel keeps.
+    source: std::sync::Arc<diag::SourceFile>,
     /// Where the last token consumed other than a statement terminator ends.
-    last_end: (u32, u32),
-    /// The same, as a byte offset.
     last_hi: u32,
     /// What went wrong in the statements and items recovered from.
     errors: Vec<Diagnostic>,
 }
 
 impl Parser {
-    pub fn new(toks: Vec<Token>) -> Self {
+    pub fn new(toks: Vec<Token>, source: std::sync::Arc<diag::SourceFile>) -> Self {
         Parser {
             toks,
             pos: 0,
-            last_end: (1, 1),
+            source,
             last_hi: 0,
             errors: Vec::new(),
         }
@@ -47,7 +47,6 @@ impl Parser {
         let cur = &self.toks[self.pos];
         let t = cur.tok.clone();
         if t != Tok::Semicolon {
-            self.last_end = (cur.line, cur.end_col);
             self.last_hi = cur.hi;
         }
         if self.pos + 1 < self.toks.len() {
@@ -73,21 +72,9 @@ impl Parser {
         }
     }
 
-    /// The (line, column) of the current token.
-    fn pos(&self) -> (u32, u32) {
-        let cur = self.current();
-        (cur.line, cur.col)
-    }
-
-    /// From `start` to the end of the last token consumed.
-    fn span_from(&self, (line, col): (u32, u32)) -> Span {
-        let (end_line, end_col) = self.last_end;
-        Span {
-            line,
-            col,
-            end_line,
-            end_col,
-        }
+    /// Where the current token starts.
+    fn pos(&self) -> u32 {
+        self.current().lo
     }
 
     fn ident(&mut self) -> PResult<String> {
@@ -252,6 +239,7 @@ impl Parser {
             name_span,
             params,
             body,
+            source: self.source.clone(),
         })
     }
 
@@ -448,7 +436,7 @@ impl Parser {
                     Tok::Continue => jumps::CONTINUE,
                     _ => jumps::RETURN,
                 };
-                let span = self.span_from(start);
+                let span = self.since(start);
                 self.end_stmt()?;
                 Ok(jumps::jump(which, span, at))
             }
@@ -471,7 +459,7 @@ impl Parser {
                             let span = expr.span.to(value.span);
                             value = Expr::binary(bop, expr.clone(), value).at(span);
                         }
-                        let span = self.span_from(start);
+                        let span = self.since(start);
                         self.end_stmt()?;
                         Ok(Stmt::Assign {
                             target: expr,
@@ -481,7 +469,7 @@ impl Parser {
                         })
                     }
                     None => {
-                        let span = self.span_from(start);
+                        let span = self.since(start);
                         self.end_stmt()?;
                         Ok(Stmt::Expr(expr, span))
                     }
@@ -503,7 +491,7 @@ impl Parser {
         // A `var` with a type may omit its initializer, which declares a buffer
         // without filling it. A `let` cannot: it would name nothing.
         if is_var && ty.is_some() && !self.matches(&Tok::Eq) {
-            let span = self.span_from(start);
+            let span = self.since(start);
             self.end_stmt()?;
             return Ok(Stmt::Var {
                 name,
@@ -515,7 +503,7 @@ impl Parser {
         }
         self.expect(Tok::Eq)?;
         let value = self.parse_expr()?;
-        let span = self.span_from(start);
+        let span = self.since(start);
         self.end_stmt()?;
         Ok(if is_var {
             Stmt::Var {
@@ -540,7 +528,7 @@ impl Parser {
         let start = self.pos();
         self.advance();
         let cond = self.parse_expr()?;
-        let span = self.span_from(start);
+        let span = self.since(start);
         let then = self.parse_block()?;
         let r#else = if self.consume(&Tok::Else) {
             if self.matches(&Tok::If) {
@@ -563,7 +551,7 @@ impl Parser {
         let start = self.pos();
         self.advance();
         let cond = self.parse_expr()?;
-        let span = self.span_from(start);
+        let span = self.since(start);
         let body = self.parse_block()?;
         Ok(Stmt::While { cond, body, span })
     }
@@ -607,7 +595,7 @@ impl Parser {
             None
         };
         self.expect_close(Tok::RParen, open)?;
-        let span = self.span_from(start_pos);
+        let span = self.since(start_pos);
         let body = self.parse_block()?;
         Ok(Stmt::For {
             var,

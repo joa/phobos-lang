@@ -1,0 +1,19 @@
+error: unknown identifier 'nope'
+ --> tests/ui/build_recovery.ph:4:13
+  |
+4 |     let x = nope + 1
+  |             ^^^^
+
+error: unknown function 'wobble'
+ --> tests/ui/build_recovery.ph:6:13
+  |
+6 |     let z = wobble(A)
+  |             ^^^^^^^^^
+
+error: tensor 'A' used as a value; index or slice it
+ --> tests/ui/build_recovery.ph:8:16
+  |
+8 |         B[i] = A
+  |                ^
+
+error: aborting due to 3 previous errors

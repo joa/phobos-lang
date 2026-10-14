@@ -36,7 +36,10 @@ pub(super) fn fuse_dot_epilogues(ir: &mut Ir) -> Vec<(OpId, OpId)> {
     for dot in dots {
         let Some(update) = next_tile_op(ir, dot) else { continue };
         let Some((kind, operands)) = plan(ir, dot, update) else { continue };
+        // The fused op stands for the dot it absorbs the update into.
+        let outer = ir.set_span(ir.span(dot));
         let op = ir.create_op(At::Before(update), kind, &operands, Vec::new(), Vec::new());
+        ir.set_span(outer);
         ir.erase_op(update);
         ir.erase_op(dot);
         fused.push((op, dot));

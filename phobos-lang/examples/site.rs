@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+use phobos_lang::diag::Diagnostics;
 use phobos_lang::trace::{self, Origin, Request, Variant};
 use serde_json::Value;
 
@@ -182,17 +183,15 @@ fn check(root: &Path) -> Result<()> {
             (Err(e), true) => {
                 expected.insert(
                     format!("{}#{}", fence.page, fence.index),
-                    Value::String(format!("{e:#}")),
+                    Value::String(message(&e)),
                 );
             }
-            (Err(e), false) => {
-                let message = format!("{e:#}");
-                failures.push(format!(
-                    "{}:{}: {message}",
-                    fence.page,
-                    source_line(&fence, &message)
-                ));
-            }
+            (Err(e), false) => failures.push(format!(
+                "{}:{}: {}",
+                fence.page,
+                source_line(&fence, &e),
+                message(&e)
+            )),
         }
     }
     let file = root.join("website/src/data/expected-errors.json");
@@ -221,14 +220,21 @@ fn attributes(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The page line an error points at: the fence's own `line:col` when the
-/// message starts with one, else the opening fence.
-fn source_line(fence: &Fence, message: &str) -> usize {
-    let at = message
-        .split(':')
-        .next()
-        .and_then(|n| n.trim().parse::<usize>().ok());
-    at.map_or(fence.line, |n| fence.line + n)
+/// What an error says, without where: the figures show the message alone.
+fn message(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<Diagnostics>() {
+        Some(ds) => ds.list().iter().map(|d| d.message.as_str()).collect::<Vec<_>>().join("\n"),
+        None => format!("{e:#}"),
+    }
+}
+
+/// The page line an error points at: the line in the fence it is placed
+/// on, else the opening fence.
+fn source_line(fence: &Fence, e: &anyhow::Error) -> usize {
+    let at = e
+        .downcast_ref::<Diagnostics>()
+        .and_then(|ds| Some(ds.source().line_of(ds.list().first()?.span()?.lo)));
+    at.map_or(fence.line, |n| fence.line + n as usize)
 }
 
 /// Every `phobos` fence under the docs, pages in path order.

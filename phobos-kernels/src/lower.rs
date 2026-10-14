@@ -72,16 +72,17 @@ pub fn pair(ctx: &Context, aligned_src: &str, general_src: &str, what: &str) -> 
     let aligned_out = aligned_out.with_context(|| format!("compiling {what} (aligned)"))?;
     let general_out = general_out.with_context(|| format!("compiling {what} (general)"))?;
 
-    for (name, aligned_reasons) in &aligned_out.pipeline_failures {
+    for aligned in &aligned_out.pipeline_failures {
         // A kernel missing from the general variant's failures pipelined
         // there, which satisfies the assertion for the pair.
-        let Some((_, general_reasons)) = general_out
+        let Some(general) = general_out
             .pipeline_failures
             .iter()
-            .find(|(n, _)| n == name)
+            .find(|g| g.kernel == aligned.kernel)
         else {
             continue;
         };
+        let (name, aligned_reasons, general_reasons) = (&aligned.kernel, &aligned.reasons, &general.reasons);
         let why = |reasons: &[String]| match reasons {
             [] => "no loop shaped for pipelining".to_string(),
             _ => reasons.join("; "),

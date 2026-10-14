@@ -1,0 +1,7 @@
+error: @registers(acc): 15 elements do not split evenly over 256 threads
+ --> tests/ui/site_registers.ph:5:3
+  |
+5 |   var acc: tile<f32>[3, 5] = 0.0
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

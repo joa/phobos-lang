@@ -1,0 +1,7 @@
+error: @launch maxThreads must be a positive multiple of 32 (got 48)
+ --> tests/ui/site_launch.ph:2:1
+  |
+2 | @launch(48)
+  | ^^^^^^^^^^^
+
+error: aborting due to 1 previous error

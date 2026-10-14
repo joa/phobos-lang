@@ -269,12 +269,13 @@ impl Build {
                     bail!("'{name}' is a read-only view; declare it with `var` to assign")
                 }
                 Some(_) => bail!("'{name}' is not assignable (declare it with `var`)"),
-                None => bail!("unknown identifier '{name}'"),
+                None => return Err(super::locate(&self.source, &self.ir, self.unknown(name), target.span)),
             },
             ExprKind::Index { base, subs } => {
-                let (mv, binding) = self.mem_base(base)?;
+                let (mv, binding) = self.at_span(base.span, |b| b.mem_base(base))?;
                 if subs.iter().all(|s| matches!(s, Sub::Point(_))) {
-                    let indices = self.emit_indices(subs, self.shape(mv).len())?;
+                    let rank = self.shape(mv).len();
+                    let indices = self.at_span(target.span, |b| b.emit_indices(subs, rank))?;
                     let rhs = self.emit_scalar(value)?;
                     let rhs = match op {
                         AssignOp::Set => rhs,
@@ -288,8 +289,10 @@ impl Build {
                     operands.extend_from_slice(&indices);
                     self.stmt(OpKind::Store, &operands);
                 } else {
-                    self.check_sliceable(mv, &binding)?;
-                    let view = self.emit_subview(mv, subs)?;
+                    let view = self.at_span(target.span, |b| {
+                        b.check_sliceable(mv, &binding)?;
+                        b.emit_subview(mv, subs)
+                    })?;
                     self.store_tile(view, op, value)?;
                 }
             }
@@ -582,9 +585,12 @@ impl Build {
         result
     }
 
+    /// Builds `stmts` in order. One that fails is reported and skipped, and
+    /// the next is built as if it had not been written.
     pub(crate) fn emit_stmts(&mut self, stmts: &[Stmt]) -> Result<()> {
         let mut i = 0;
         while i < stmts.len() {
+            let saved = self.save();
             let consumed = self.spanned(stmts[i].span(), |b| {
                 Ok(if let Some(consumed) = b.matmul_candidate(&stmts[i..])? {
                     consumed
@@ -601,8 +607,14 @@ impl Build {
                         1
                     }
                 })
-            })?;
-            i += consumed;
+            });
+            match consumed {
+                Ok(consumed) => i += consumed,
+                Err(e) => {
+                    self.recover(e, &stmts[i], saved)?;
+                    i += 1;
+                }
+            }
         }
         Ok(())
     }

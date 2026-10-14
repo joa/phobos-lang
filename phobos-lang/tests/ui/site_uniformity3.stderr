@@ -1,0 +1,7 @@
+error: `copy` reads `t` after a per-thread store to it with no `barrier()` between: another thread's store may not have landed
+ --> tests/ui/site_uniformity3.ph:6:3
+  |
+6 |   O[0 :+ 1, 0 :+ 32] = t
+  |   ^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

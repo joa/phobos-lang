@@ -520,38 +520,34 @@ fn continue_is_cleared_each_iteration() {
     };
 }
 
-fn span(line: u32, col: u32, end_line: u32, end_col: u32) -> Span {
-    Span {
-        line,
-        col,
-        end_line,
-        end_col,
-    }
+/// `span` as lines and columns of `src`, both ends.
+fn lines(src: &str, span: Span) -> (u32, u32, u32, u32) {
+    let file = crate::diag::SourceFile::new("", src);
+    let ((line, col), (end_line, end_col)) = (file.line_col(span.lo), file.line_col(span.hi));
+    (line, col, end_line, end_col)
 }
 
 #[test]
 fn statements_carry_their_spans() {
-    let b = body(
-        "kernel k(A: tensor<f32>[N]) {
+    let src = "kernel k(A: tensor<f32>[N]) {
   let i = ctx.block.x // the block
   for j in range(0, N, 4) {
     A[j] = 1.0;
   }
-}",
-    );
-    assert_eq!(b[0].span(), span(2, 3, 2, 22));
+}";
+    let b = body(src);
+    assert_eq!(lines(src, b[0].span()), (2, 3, 2, 22));
     // A compound statement's span is its header.
-    assert_eq!(b[1].span(), span(3, 3, 3, 26));
+    assert_eq!(lines(src, b[1].span()), (3, 3, 3, 26));
     let Stmt::For { body: inner, .. } = &b[1] else {
         panic!("expected a for: {b:?}");
     };
-    assert_eq!(inner[0].span(), span(4, 5, 4, 15));
+    assert_eq!(lines(src, inner[0].span()), (4, 5, 4, 15));
 }
 
 #[test]
 fn spans_survive_inlining_and_jumps() {
-    let b = body(
-        "fn bump(t) {
+    let src = "fn bump(t) {
   t[0] = 2.0
 }
 kernel k(A: tensor<f32>[N]) {
@@ -559,8 +555,8 @@ kernel k(A: tensor<f32>[N]) {
     break
   }
   bump(A)
-}",
-    );
+}";
+    let b = body(src);
     // The break's flag is declared at its loop and set at the break.
     let [
         Stmt::Var { span: decl, .. },
@@ -570,13 +566,13 @@ kernel k(A: tensor<f32>[N]) {
     else {
         panic!("unexpected shape: {b:?}");
     };
-    assert_eq!(*decl, span(5, 3, 5, 23));
+    assert_eq!(lines(src, *decl), (5, 3, 5, 23));
     let Stmt::If { then, .. } = &inner[0] else {
         panic!("expected the guarded body: {inner:?}");
     };
-    assert_eq!(then[0].span(), span(6, 5, 6, 10));
+    assert_eq!(lines(src, then[0].span()), (6, 5, 6, 10));
     // A spliced statement keeps the line it was written on.
-    assert_eq!(inlined.span(), span(2, 3, 2, 13));
+    assert_eq!(lines(src, inlined.span()), (2, 3, 2, 13));
 }
 
 /// The source a span covers.

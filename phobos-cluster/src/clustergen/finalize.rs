@@ -248,6 +248,7 @@ impl<'a> Analyzer<'a> {
             attrs: self.init_attrs(),
             name: format!("{}_init", self.kernel.name),
             name_span: self.kernel.name_span,
+            source: self.kernel.source.clone(),
             params: vec![self.kernel.params[d.tensor].clone()],
             body,
         }
@@ -309,6 +310,7 @@ impl<'a> Analyzer<'a> {
             attrs: self.init_attrs(),
             name: format!("{}_init", self.kernel.name),
             name_span: self.kernel.name_span,
+            source: self.kernel.source.clone(),
             params,
             body,
         };

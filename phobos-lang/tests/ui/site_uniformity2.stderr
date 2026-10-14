@@ -1,0 +1,7 @@
+error: `slice [1, 1]` takes a value, which differs between lanes; a CTA-wide op needs the same value in every thread
+ --> tests/ui/site_uniformity2.ph:4:11
+  |
+4 |   var u = A[0, ctx.lane :+ 1]
+  |           ^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

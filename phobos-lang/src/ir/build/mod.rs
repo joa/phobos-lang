@@ -17,7 +17,8 @@ mod unroll;
 #[cfg(test)]
 mod tests;
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
@@ -25,7 +26,8 @@ use super::{
     Builder, Extent, Ir, KernelInfo, Layout, OpId, OpKind, Scalar, Space, TensorType, TileType,
     Type, ValueId,
 };
-use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Span, Type as AstType};
+use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Span, Stmt, Type as AstType};
+use crate::diag::{Diagnostic, Diagnostics, SourceFile};
 
 pub(crate) use crate::shape::DYN;
 
@@ -47,7 +49,9 @@ pub struct Target {
 
 /// What the build learned for the emitter and the caller to report: the
 /// loop shapes the pipeline declined, before any budget was counted, and the
-/// statement each op came from. An op a pass made after the build has no span.
+/// statement each op came from, which the visualizer highlights. An op a
+/// pass made after the build has no statement; [`Ir::span`] is the innermost
+/// source an op stands for.
 #[derive(Debug, Default)]
 pub struct Report {
     pub pipeline_declines: Vec<String>,
@@ -111,6 +115,57 @@ pub(crate) struct Build {
     /// Set while planning a register tile's update, the one tree a register
     /// tile may be a leaf of.
     pub(crate) fusing_regs: bool,
+    /// The kernel's source, which errors are placed in.
+    pub(crate) source: Arc<SourceFile>,
+    /// What went wrong in the statements recovered from.
+    errors: Vec<Diagnostic>,
+    /// Names whose declaration failed; see [`Poisoned`].
+    poisoned: HashSet<String>,
+}
+
+/// A name used whose declaration already failed. It is reported once, at
+/// the declaration, so a use of it says nothing more.
+#[derive(Debug)]
+pub(crate) struct Poisoned;
+
+impl std::fmt::Display for Poisoned {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("a name whose declaration failed")
+    }
+}
+
+impl std::error::Error for Poisoned {}
+
+/// What a statement that fails may leave behind, put back before the next.
+pub(crate) struct Saved {
+    block: super::BlockId,
+    scopes: usize,
+    hoisted: usize,
+    ragged_iv: Option<String>,
+    trimmed_ivs: usize,
+    pending_ivs: usize,
+    fusing_regs: bool,
+}
+
+/// `e` placed at `span` in `source`: an error about an op at the op's span,
+/// any other at `span`. One placed already, a [`Poisoned`] one, and any at an
+/// empty span pass through, so the innermost place wins.
+pub(crate) fn locate(source: &Arc<SourceFile>, ir: &Ir, e: anyhow::Error, span: Span) -> anyhow::Error {
+    if e.is::<Diagnostics>() || e.is::<Poisoned>() {
+        return e;
+    }
+    let span = match e.downcast_ref::<super::AtOp>() {
+        Some(at) if ir.span(at.op) != Span::default() => ir.span(at.op),
+        _ => span,
+    };
+    if span == Span::default() {
+        return e;
+    }
+    let message = match e.downcast_ref::<super::AtOp>() {
+        Some(at) => at.message.clone(),
+        None => format!("{e:#}"),
+    };
+    Diagnostics::new(source.clone(), vec![Diagnostic::error(message).primary(span, "")]).into()
 }
 
 /// Builds one kernel's graph. Names are resolved here and nowhere else,
@@ -125,7 +180,11 @@ pub fn build(
     target: Target,
     kernel: &Kernel,
 ) -> Result<(Ir, Report)> {
-    let launch = kernel.launch().map_err(|e| anyhow!(e))?;
+    let empty = Ir::new(KernelInfo::default(), &[]);
+    let attr_span = |name: &str| kernel.attr(name).map_or(kernel.name_span, |a| a.span);
+    let launch = kernel
+        .launch()
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("launch")))?;
     let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
 
     let mut shape_env = BTreeMap::new();
@@ -178,23 +237,42 @@ pub fn build(
         registers: kernel.register_tiles(),
         regs_declared: Vec::new(),
         fusing_regs: false,
+        source: kernel.source.clone(),
+        errors: Vec::new(),
+        poisoned: HashSet::new(),
     };
     let params = kernel
         .params
         .iter()
-        .map(|p| b.param_type(kernel, &p.ty))
+        .map(|p| {
+            b.param_type(kernel, &p.ty)
+                .map_err(|e| locate(&kernel.source, &empty, e, p.ty_span))
+        })
         .collect::<Result<Vec<_>>>()?;
     b.ir = Ir::new(info, &params);
     b.block = b.ir.entry();
-    b.emit_kernel(kernel)?;
-    super::uniform::check(&b.ir, &super::uniform::analyze(&b.ir))?;
+    let built = b
+        .emit_kernel(kernel)
+        .map_err(|e| locate(&kernel.source, &b.ir, e, kernel.name_span));
+    if let Err(e) = built {
+        b.report_error(e)?;
+    }
+    if !b.errors.is_empty() {
+        return Err(Diagnostics::new(b.source.clone(), std::mem::take(&mut b.errors)).into());
+    }
+    super::uniform::check(&b.ir, &super::uniform::analyze(&b.ir))
+        .map_err(|e| locate(&kernel.source, &b.ir, e, kernel.name_span))?;
     for (fused, dot) in epilogue::fuse_dot_epilogues(&mut b.ir) {
         if let Some(&span) = b.report.spans.get(&dot) {
             b.report.spans.insert(fused, span);
         }
     }
     b.report.spans.retain(|&op, _| b.ir.is_alive(op));
-    super::swizzle::decide(&mut b.ir, kernel.swizzle_mode().map_err(|e| anyhow!(e))?)?;
+    let swizzle = kernel
+        .swizzle_mode()
+        .map_err(|e| locate(&kernel.source, &b.ir, anyhow!(e), attr_span("swizzle")))?;
+    super::swizzle::decide(&mut b.ir, swizzle)
+        .map_err(|e| locate(&kernel.source, &b.ir, e, attr_span("swizzle")))?;
     Ok((b.ir, b.report))
 }
 
@@ -252,7 +330,9 @@ impl Build {
         }
         self.check_aligned(kernel)?;
         self.emit_stmts(&kernel.body)?;
-        if let Some(name) = self.registers.iter().find(|n| !self.regs_declared.contains(n)) {
+        // A declaration that failed was reported where it was written.
+        let missing = |n: &&String| !self.regs_declared.contains(n) && !self.poisoned.contains(*n);
+        if let Some(name) = self.registers.iter().find(missing) {
             bail!("@registers({name}) names no `var {name}: tile<..>[..]` of the kernel");
         }
         self.scopes.pop();
@@ -336,21 +416,88 @@ impl Build {
             .collect())
     }
 
-    /// Runs `f`, giving every op it made that has no span yet `span`. A
-    /// statement nested inside claims its own ops first.
+    /// Runs `f` for the statement at `span`: every op it made that no
+    /// nested statement claimed comes from it, and an error it returns is
+    /// placed there unless something inside placed it first.
     pub(crate) fn spanned<T>(
         &mut self,
         span: Span,
         f: impl FnOnce(&mut Self) -> Result<T>,
     ) -> Result<T> {
         let first = self.ir.op_count();
-        let out = f(self);
+        let out = self.at_span(span, f);
         if span != Span::default() {
             for op in (first..self.ir.op_count()).map(OpId::from_index) {
                 self.report.spans.entry(op).or_insert(span);
             }
         }
         out
+    }
+
+    /// Runs `f` for the source at `span`, the span the ops it makes take and
+    /// where an error it returns is placed. An empty span changes neither.
+    pub(crate) fn at_span<T>(&mut self, span: Span, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if span == Span::default() {
+            return f(self);
+        }
+        let outer = self.ir.set_span(span);
+        let out = f(self);
+        self.ir.set_span(outer);
+        out.map_err(|e| locate(&self.source, &self.ir, e, span))
+    }
+
+    /// The error for a name nothing in scope binds: [`Poisoned`] when its
+    /// declaration failed.
+    pub(crate) fn unknown(&self, name: &str) -> anyhow::Error {
+        if self.poisoned.contains(name) {
+            return Poisoned.into();
+        }
+        anyhow!("unknown identifier '{name}'")
+    }
+
+    /// The state a failing statement may leave half changed.
+    pub(crate) fn save(&self) -> Saved {
+        Saved {
+            block: self.block,
+            scopes: self.scopes.len(),
+            hoisted: self.hoisted.len(),
+            ragged_iv: self.ragged_iv.clone(),
+            trimmed_ivs: self.trimmed_ivs.len(),
+            pending_ivs: self.pending_ivs.len(),
+            fusing_regs: self.fusing_regs,
+        }
+    }
+
+    fn restore(&mut self, saved: Saved) {
+        self.block = saved.block;
+        self.scopes.truncate(saved.scopes);
+        self.hoisted.truncate(saved.hoisted);
+        self.ragged_iv = saved.ragged_iv;
+        self.trimmed_ivs.truncate(saved.trimmed_ivs);
+        self.pending_ivs.truncate(saved.pending_ivs);
+        self.fusing_regs = saved.fusing_regs;
+    }
+
+    /// Keeps a placed error for the end of the build, up to
+    /// [`crate::diag::MAX_ERRORS`]; one with no place goes on up.
+    fn report_error(&mut self, e: anyhow::Error) -> Result<()> {
+        if e.is::<Poisoned>() {
+            return Ok(());
+        }
+        let ds = e.downcast::<Diagnostics>()?;
+        let room = crate::diag::MAX_ERRORS.saturating_sub(self.errors.len());
+        self.errors.extend(ds.list().iter().take(room).cloned());
+        Ok(())
+    }
+
+    /// Reports why `stmt` failed and puts the build back as it was before
+    /// it, so the next statement builds; the names it declared are poisoned.
+    pub(crate) fn recover(&mut self, e: anyhow::Error, stmt: &Stmt, saved: Saved) -> Result<()> {
+        self.restore(saved);
+        if let Stmt::Let { name, .. } | Stmt::Var { name, .. } = stmt {
+            self.poisoned.insert(name.clone());
+        }
+        self.report_error(e)
     }
 
     // Op creation at the current block.

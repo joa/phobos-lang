@@ -183,6 +183,11 @@ impl Diagnostics {
         &self.list
     }
 
+    /// Adds `other`'s diagnostics, of the same source.
+    pub fn extend(&mut self, other: Diagnostics) {
+        self.list.extend(other.list);
+    }
+
     pub fn errors(&self) -> usize {
         self.list.iter().filter(|d| d.severity == Severity::Error).count()
     }
