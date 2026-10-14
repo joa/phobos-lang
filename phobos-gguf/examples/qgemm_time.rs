@@ -94,9 +94,9 @@ fn main() -> Result<()> {
         let wd = gpu.upload(&wt)?;
         gpu.matmul(ab, rows, k, wd, n, out)?;
         let dense = read_vec(gpu, out, rows * n)?;
-        // Q5_0 is no raw format: it uploads as a quantized weight and
-        // projects through `q50_qmma`.
-        let project: Box<dyn Fn() -> Result<()>> = if quant == Quant::Q5_0 {
+        // Q8_0 and Q5_0 are no raw formats: they upload as quantized
+        // weights and project through `qmma_t` and `q50_qmma`.
+        let project: Box<dyn Fn() -> Result<()>> = if matches!(quant, Quant::Q8_0 | Quant::Q5_0) {
             let wq = gpu.constant_quant(&format!("time{rows}x{k}x{n}"), &packed)?;
             Box::new(move || gpu.matmul_quant(ab, rows, k, wq, n, out))
         } else {
