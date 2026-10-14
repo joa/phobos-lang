@@ -383,17 +383,20 @@ impl<'c> Codegen<'c> {
         };
         let mut frags = fa.frags.clone();
         let (fm, fnn, steps) = (fm as usize, fnn as usize, steps as usize);
-        if self.int8_mma_k() == 32 && fm % 2 == 0 && steps % 2 == 0 {
+        if self.int8_mma_k() == 32 && fm % 2 == 0 {
             // From Blackwell on, `m8n8k16` runs as a half-used `m16n8k16`.
             // Two row tiles over two k steps go through one `m16n8k32`
-            // instead, its fragments the `m8n8k16` ones regrouped as
-            // `qgemm_t`'s: A as rows (g, g + 8) of the first step, then of
-            // the second, B as the first step, then the second. Its two rows
-            // of sums are the two tiles' own.
+            // instead, or over one step through a whole `m16n8k16`, its
+            // fragments the `m8n8k16` ones regrouped as `qgemm_t`'s: A as
+            // rows (g, g + 8) of the first step, then of the second, B as
+            // the first step, then the second. Its two rows of sums are the
+            // two tiles' own.
+            let ks = if steps % 2 == 0 { 2 } else { 1 };
             let four_i8 = Type::vector(&[4], self.i8_t);
-            let (a_t, b_t) = (Type::vector(&[4, 4], self.i8_t), Type::vector(&[2, 4], self.i8_t));
+            let a_t = Type::vector(&[2 * ks as u64, 4], self.i8_t);
+            let b_t = Type::vector(&[ks as u64, 4], self.i8_t);
             let d_t = Type::vector(&[2, 2], self.i32_t);
-            let wide = self.mma_shape(2 * IMMA_TILE, IMMA_TILE, 2 * IMMA_K)?;
+            let wide = self.mma_shape(2 * IMMA_TILE, IMMA_TILE, ks as i64 * IMMA_K)?;
             let zero_d = self.vec_broadcast(block, zero_i, d_t)?;
             let zero_i8 = self.zero_scalar(block, self.i8_t)?;
             for rp in 0..fm / 2 {
@@ -404,11 +407,11 @@ impl<'c> Codegen<'c> {
                 ];
                 for c in 0..fnn {
                     let mut d = zero_d;
-                    for hp in 0..steps / 2 {
+                    for hp in 0..steps / ks {
                         let mut a = self.vec_broadcast(block, zero_i8, a_t)?;
                         let mut b = self.vec_broadcast(block, zero_i8, b_t)?;
-                        for i in 0..2 {
-                            let h = 2 * hp + i;
+                        for i in 0..ks {
+                            let h = ks * hp + i;
                             for (j, &r) in rows.iter().enumerate() {
                                 let piece = self.vec_shape_cast(block, a_frags[r * steps + h], four_i8)?;
                                 a = self.vec_insert(block, piece, a, &[(2 * i + j) as i64])?;
