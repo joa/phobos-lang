@@ -164,11 +164,11 @@ fn iq3xxs_decode() -> Decode {
 fn kquant_decode(high: bool) -> Decode {
     let qs = if high { 48 } else { 16 };
     let mut body = String::from(
-        "    let dk = f32(f16bits((d0 & 255) | ((d1 & 255) << 8)))
-    let mk = f32(f16bits((d2 & 255) | ((d3 & 255) << 8)))
-    let pa = pa0 & 255
-    let pb = pb0 & 255
-    let pc = pc0 & 255
+        "    let dk = f32(f16bits(hd & 65535))
+    let mk = f32(f16bits(hd >> 16))
+    let pa = (sa >> (8 * gl)) & 255
+    let pb = (sb >> (8 * gl)) & 255
+    let pc = (sc >> (8 * gl)) & 255
     let upper = kh % 2
     let sk = where(upper == 1, (pc & 15) | ((pa >> 6) << 4), pa & 63)
     let mn = where(upper == 1, (pc >> 4) | ((pb >> 6) << 4), pb & 63)
@@ -191,23 +191,18 @@ fn kquant_decode(high: bool) -> Decode {
         }
         let _ = writeln!(body, "    store(w[jj, 32 * gl + {b} :+ 8], v{o}0, v{o}1)", b = 8 * o);
     }
-    let names = ["00", "01", "10", "11", "20", "21", "30", "31"];
     let lows = ["l00", "l01", "l10", "l11", "l20", "l21", "l30", "l31"];
     let highs = ["h00", "h01", "h10", "h11", "h20", "h21", "h30", "h31"];
-    let mut now = vec![
-        ("d0", "elem(QB[jr, BO :+ 4], 0)".to_string()),
-        ("d1", "elem(QB[jr, BO :+ 4], 1)".to_string()),
-        ("d2", "elem(QB[jr, BO :+ 4], 2)".to_string()),
-        ("d3", "elem(QB[jr, BO :+ 4], 3)".to_string()),
-        ("pa0", "elem(QB[jr, BO + 4 + GG % 4 :+ 1], 0)".to_string()),
-        ("pb0", "elem(QB[jr, BO + 8 + GG % 4 :+ 1], 0)".to_string()),
-        ("pc0", "elem(QB[jr, BO + 12 + GG % 4 :+ 1], 0)".to_string()),
-    ];
-    for (i, _) in names.iter().enumerate() {
-        let (o, t) = (i / 2, i % 2);
-        now.push((lows[i], format!("word(QB[jr, BO + {qs} + 32 * (GG / 2) + {b} :+ 8], {t})", b = 8 * o)));
+    let mut now: Vec<(&'static str, String)> = ["hd", "sa", "sb", "sc"]
+        .into_iter()
+        .enumerate()
+        .map(|(t, name)| (name, format!("word(QB[jr, BO :+ 16], {t})")))
+        .collect();
+    for i in 0..8 {
+        let (half, t) = (16 * (i / 4), i % 4);
+        now.push((lows[i], format!("word(QB[jr, BO + {qs} + 32 * (GG / 2) + {half} :+ 16], {t})")));
         if high {
-            now.push((highs[i], format!("word(QB[jr, BO + 16 + {b} :+ 8], {t})", b = 8 * o)));
+            now.push((highs[i], format!("word(QB[jr, BO + 16 + {half} :+ 16], {t})")));
         }
     }
     Decode {
@@ -603,7 +598,7 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
     let (kernel, aligned, ids, out, k) = match split {
         None => (
             format!("{name}_qgemm"),
-            "K = 256, KB = 8".to_string(),
+            format!("K = 256, KB = 8, RB = {bytes}"),
             "  let pn = ctx.block.y\n".to_string(),
             "C: tensor<f32>[M, N]) {\n".to_string(),
             "K".to_string(),
