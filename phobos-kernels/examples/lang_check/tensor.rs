@@ -198,8 +198,7 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
     ));
     // The same unpipelined: the stage's loads issue at the copy and its
     // stores wait for the barrier, past the weight's stores.
-    let deferred = kernels.last().expect("the swizzled kernel").1.replace("@pipeline
-        ", "");
+    let deferred = kernels.last().expect("the swizzled kernel").1.replace("@pipeline\n        ", "");
     kernels.push(("deferred", deferred));
     for (what, src) in kernels {
         for index_bitwidth in [32, 64] {
@@ -219,6 +218,51 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
             let name = format!("scaled int8 dot {what} i{index_bitwidth}");
             report(&name, worst < 1e-5, format!("rel err {worst:.2e}"), failures);
         }
+    }
+    // A minimum subtracted in the registers: `acc -= rs * mw` per block,
+    // the activation scale's column times the weight scale's row.
+    let mut want_min = want.clone();
+    for i in 0..m {
+        for j in 0..n {
+            for b in 0..kb {
+                want_min[i * n + j] -= asc[i * kb + b] as f64 * wsc[b * n + j] as f64;
+            }
+        }
+    }
+    let src = "@launch(256)
+        @aligned(K = 32)
+        kernel k(A: tensor<i8>[64, K], AS: tensor<f32>[64, KB],
+                 W: tensor<i8>[128, K], WS: tensor<f32>[KB, 128],
+                 C: tensor<f32>[64, 128]) {
+            let pn = ctx.block.x
+            var acc: tile<f32>[64, 64] = 0.0
+            for kt in range(0, K, 32) {
+                let b = kt / 32
+                let a = A[0 :+ 64, kt :+ 32]
+                let w = W[pn * 64 :+ 64, kt :+ 32]
+                let ws = WS[b :+ 1, pn * 64 :+ 64]
+                let da = AS[0 :+ 64, b :+ 1]
+                acc += f32(dot_t(a, w)) * ws * da
+                acc -= da * ws
+            }
+            C[0 :+ 64, pn * 64 :+ 64] = acc
+        }";
+    for index_bitwidth in [32, 64] {
+        let (ga, gw) = (Arg::new(&a, m, k)?, Arg::new(&w, n, k)?);
+        let (gas, gws) = (Arg::new(&asc, m, kb)?, Arg::new(&wsc, kb, n)?);
+        let out = Arg::<f32>::zeroed(m, n)?;
+        let mut slots = Vec::new();
+        ga.push(&mut slots);
+        gas.push(&mut slots);
+        gw.push(&mut slots);
+        gws.push(&mut slots);
+        out.push(&mut slots);
+        run_at(index_bitwidth, src, "k", 2, &mut slots)?;
+        let got = out.read()?;
+        let scale = want_min.iter().fold(0.0f64, |s, v| s.max(v.abs()));
+        let worst = got.iter().zip(&want_min).map(|(&g, w)| (g as f64 - w).abs()).fold(0.0, f64::max) / scale;
+        let name = format!("int8 accumulator minus a column times a row i{index_bitwidth}");
+        report(&name, worst < 1e-5, format!("rel err {worst:.2e}"), failures);
     }
     Ok(())
 }
