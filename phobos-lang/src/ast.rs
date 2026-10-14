@@ -106,18 +106,26 @@ pub fn search_choices(declared: &[i64]) -> Vec<i64> {
 pub struct Attribute {
     pub name: String,
     pub args: Vec<AttrArg>,
+    /// The whole `@name(..)`.
+    pub span: crate::diag::Span,
+    /// Each of `args`'.
+    pub arg_spans: Vec<crate::diag::Span>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
     pub ty: Type,
+    /// The name's.
+    pub span: crate::diag::Span,
+    pub ty_span: crate::diag::Span,
 }
 
 #[derive(Debug, Clone)]
 pub struct Kernel {
     pub attrs: Vec<Attribute>,
     pub name: String,
+    pub name_span: crate::diag::Span,
     pub params: Vec<Param>,
     pub body: Vec<Stmt>,
 }
@@ -286,7 +294,7 @@ impl Kernel {
         let mut found = false;
         for stmt in &self.body {
             stmt.walk_exprs(&mut |e| {
-                if let Expr::Call { callee, .. } = e
+                if let ExprKind::Call { callee, .. } = &e.kind
                     && pick(callee)
                 {
                     found = true;
@@ -330,12 +338,14 @@ pub struct Span {
 pub enum Stmt {
     Let {
         name: String,
+        name_span: crate::diag::Span,
         ty: Option<Type>,
         value: Expr,
         span: Span,
     },
     Var {
         name: String,
+        name_span: crate::diag::Span,
         ty: Option<Type>,
         value: Option<Expr>,
         span: Span,
@@ -348,6 +358,7 @@ pub enum Stmt {
     },
     For {
         var: String,
+        var_span: crate::diag::Span,
         start: Expr,
         end: Expr,
         step: Option<Expr>,
@@ -380,8 +391,17 @@ pub enum Sub {
     Full,                             // A[:]
 }
 
+/// An expression and the source it was parsed from. One the compiler builds
+/// itself, by desugaring or rewriting, carries the span of the source it
+/// stands for, or none.
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: crate::diag::Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum ExprKind {
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -442,6 +462,16 @@ pub enum BinOp {
     Max,
 }
 
+/// An expression with no source of its own.
+impl From<ExprKind> for Expr {
+    fn from(kind: ExprKind) -> Self {
+        Expr {
+            kind,
+            span: crate::diag::Span::default(),
+        }
+    }
+}
+
 impl Sub {
     /// Whether any expression in this subscript uses the given name.
     pub fn uses_name(&self, name: &str) -> bool {
@@ -456,17 +486,87 @@ impl Sub {
 }
 
 impl Expr {
+    pub fn new(kind: ExprKind, span: crate::diag::Span) -> Self {
+        Expr { kind, span }
+    }
+
+    /// `self` placed at `span`.
+    pub fn at(self, span: crate::diag::Span) -> Self {
+        Expr { span, ..self }
+    }
+
+    pub fn int(n: i64) -> Self {
+        ExprKind::Int(n).into()
+    }
+
+    pub fn float(x: f64) -> Self {
+        ExprKind::Float(x).into()
+    }
+
+    pub fn bool(b: bool) -> Self {
+        ExprKind::Bool(b).into()
+    }
+
+    pub fn var(name: impl Into<String>) -> Self {
+        ExprKind::Var(name.into()).into()
+    }
+
+    pub fn unary(op: UnOp, rhs: Expr) -> Self {
+        ExprKind::Unary { op, rhs: Box::new(rhs) }.into()
+    }
+
+    pub fn binary(op: BinOp, lhs: Expr, rhs: Expr) -> Self {
+        ExprKind::Binary {
+            op,
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }
+        .into()
+    }
+
+    pub fn index(base: Expr, subs: Vec<Sub>) -> Self {
+        ExprKind::Index {
+            base: Box::new(base),
+            subs,
+        }
+        .into()
+    }
+
+    pub fn call(callee: impl Into<String>, args: Vec<Expr>) -> Self {
+        ExprKind::Call {
+            callee: callee.into(),
+            args,
+        }
+        .into()
+    }
+
+    /// The name, if this is a bare one.
+    pub fn as_var(&self) -> Option<&str> {
+        match &self.kind {
+            ExprKind::Var(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// The value, if this is an integer literal.
+    pub fn as_int(&self) -> Option<i64> {
+        match self.kind {
+            ExprKind::Int(n) => Some(n),
+            _ => None,
+        }
+    }
+
     /// Visits this expression and its sub-expressions in pre-order.
     pub fn walk(&self, f: &mut impl FnMut(&Expr)) {
         f(self);
-        match self {
-            Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Var(_) => {}
-            Expr::Unary { rhs, .. } => rhs.walk(f),
-            Expr::Binary { lhs, rhs, .. } => {
+        match &self.kind {
+            ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) | ExprKind::Var(_) => {}
+            ExprKind::Unary { rhs, .. } => rhs.walk(f),
+            ExprKind::Binary { lhs, rhs, .. } => {
                 lhs.walk(f);
                 rhs.walk(f);
             }
-            Expr::Index { base, subs } => {
+            ExprKind::Index { base, subs } => {
                 base.walk(f);
                 for sub in subs {
                     match sub {
@@ -483,7 +583,7 @@ impl Expr {
                     }
                 }
             }
-            Expr::Call { args, .. } => {
+            ExprKind::Call { args, .. } => {
                 for arg in args {
                     arg.walk(f);
                 }
@@ -495,7 +595,7 @@ impl Expr {
     pub fn uses_name(&self, name: &str) -> bool {
         let mut found = false;
         self.walk(&mut |e| {
-            if let Expr::Var(n) = e {
+            if let ExprKind::Var(n) = &e.kind {
                 found |= n == name;
             }
         });
@@ -612,9 +712,9 @@ impl Stmt {
         let hits = |n: &str| names.contains(&n);
         let block = |b: &[Stmt]| b.iter().any(|s| s.writes_any(names));
         match self {
-            Stmt::Assign { target, .. } => match target {
-                Expr::Var(n) => hits(n),
-                Expr::Index { base, .. } => matches!(&**base, Expr::Var(n) if hits(n)),
+            Stmt::Assign { target, .. } => match &target.kind {
+                ExprKind::Var(n) => hits(n),
+                ExprKind::Index { base, .. } => matches!(&base.kind, ExprKind::Var(n) if hits(n)),
                 _ => false,
             },
             Stmt::Let { name, .. } | Stmt::Var { name, .. } => hits(name),

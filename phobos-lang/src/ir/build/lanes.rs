@@ -8,7 +8,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv};
 use crate::ast::lanes::{self, COMBINE_A, COMBINE_B, Collective, Fold, Group, Mode};
-use crate::ast::{BinOp, Expr};
+use crate::ast::{BinOp, Expr, ExprKind};
 use crate::ir::{OpKind, Scalar, ThreadIndex, Type, ValueId};
 
 impl Build {
@@ -16,7 +16,7 @@ impl Build {
     /// word op. None for any other callee.
     pub(crate) fn emit_lane_builtin(&mut self, callee: &str, args: &[Expr]) -> Result<Option<Rv>> {
         if let Some(c) = lanes::as_collective(callee, args) {
-            if c.fold == Fold::Reduce && matches!(c.combine, Some(Expr::Var(_))) {
+            if c.fold == Fold::Reduce && matches!(c.combine, Some(Expr { kind: ExprKind::Var(_), .. })) {
                 bail!("`reduce<..>(x, f)` combines with a `fn f(a, b) = ..`, and none is defined");
             }
             return self.emit_collective(c).map(Some);
@@ -46,7 +46,7 @@ impl Build {
                 Rv::Scalar(self.const_index(0))
             }
             "word" => match args {
-                [slice] => self.emit_word(slice, &Expr::Int(0))?,
+                [slice] => self.emit_word(slice, &Expr::int(0))?,
                 [slice, at] => self.emit_word(slice, at)?,
                 _ => bail!("word takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
             },

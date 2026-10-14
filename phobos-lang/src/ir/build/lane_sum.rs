@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv, gcd};
-use crate::ast::{BinOp, Expr, Sub};
+use crate::ast::{BinOp, Expr, ExprKind, Sub};
 use crate::ir::{Bytes, Extent, OpKind, Scalar, Space, Type, ValueId};
 
 /// The most bytes one vector load moves.
@@ -128,10 +128,10 @@ impl Build {
 
     /// The element type of the tensor a slice reads, emitting nothing.
     fn span_elem(&self, span: &Expr) -> Option<Scalar> {
-        let Expr::Index { base, .. } = span else {
+        let ExprKind::Index { base, .. } = &span.kind else {
             return None;
         };
-        let Expr::Var(name) = base.as_ref() else {
+        let ExprKind::Var(name) = &base.kind else {
             return None;
         };
         let mem = match self.lookup(name)? {
@@ -216,7 +216,7 @@ impl Build {
     /// span's dimension and length, and the byte alignment proved for one
     /// vector access of it (0 for none).
     fn lane_run(&mut self, span: &Expr) -> Result<LaneRun> {
-        let Expr::Index { base, subs } = span else {
+        let ExprKind::Index { base, subs } = &span.kind else {
             bail!("a thread's run is a slice with one `:+` span, as `X[r, k :+ 4]`");
         };
         let (mem, binding) = self.mem_base(base)?;
@@ -279,18 +279,18 @@ impl Build {
 
 /// The tensor slices with one `:+` span in `e`, in order.
 fn collect_spans<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
-    match e {
-        Expr::Index { subs, .. }
+    match &e.kind {
+        ExprKind::Index { subs, .. }
             if subs.iter().filter(|s| matches!(s, Sub::Span { .. })).count() == 1 =>
         {
             out.push(e)
         }
-        Expr::Unary { rhs, .. } => collect_spans(rhs, out),
-        Expr::Binary { lhs, rhs, .. } => {
+        ExprKind::Unary { rhs, .. } => collect_spans(rhs, out),
+        ExprKind::Binary { lhs, rhs, .. } => {
             collect_spans(lhs, out);
             collect_spans(rhs, out);
         }
-        Expr::Call { args, .. } => args.iter().for_each(|a| collect_spans(a, out)),
+        ExprKind::Call { args, .. } => args.iter().for_each(|a| collect_spans(a, out)),
         _ => {}
     }
 }
@@ -298,24 +298,25 @@ fn collect_spans<'e>(e: &'e Expr, out: &mut Vec<&'e Expr>) {
 /// `e` with each slice in `spans` replaced by its name.
 fn substitute(e: &Expr, spans: &[&Expr], names: &[String]) -> Expr {
     if let Some(j) = spans.iter().position(|s| std::ptr::eq(*s, e)) {
-        return Expr::Var(names[j].clone());
+        return Expr::var(names[j].clone()).at(e.span);
     }
-    match e {
-        Expr::Unary { op, rhs } => Expr::Unary {
+    let kind = match &e.kind {
+        ExprKind::Unary { op, rhs } => ExprKind::Unary {
             op: *op,
             rhs: Box::new(substitute(rhs, spans, names)),
         },
-        Expr::Binary { op, lhs, rhs } => Expr::Binary {
+        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
             op: *op,
             lhs: Box::new(substitute(lhs, spans, names)),
             rhs: Box::new(substitute(rhs, spans, names)),
         },
-        Expr::Call { callee, args } => Expr::Call {
+        ExprKind::Call { callee, args } => ExprKind::Call {
             callee: callee.clone(),
             args: args.iter().map(|a| substitute(a, spans, names)).collect(),
         },
-        other => other.clone(),
-    }
+        _ => return e.clone(),
+    };
+    Expr::new(kind, e.span)
 }
 
 /// The `dp4a` form of `e`: `x * y`, or `x` alone (summed against ones),
@@ -323,11 +324,11 @@ fn substitute(e: &Expr, spans: &[&Expr], names: &[String]) -> Expr {
 /// `s & c` or `(s >> k) & c`. A mask keeps every byte under 128, so it reads
 /// the same signed, and a shift stays inside the byte.
 fn dp4a_sides(e: &Expr) -> Option<[Option<(&Expr, Bytes)>; 2]> {
-    if let Expr::Binary {
+    if let ExprKind::Binary {
         op: BinOp::Mul,
         lhs,
         rhs,
-    } = e
+    } = &e.kind
     {
         return Some([Some(dp4a_side(lhs)?), Some(dp4a_side(rhs)?)]);
     }
@@ -335,29 +336,29 @@ fn dp4a_sides(e: &Expr) -> Option<[Option<(&Expr, Bytes)>; 2]> {
 }
 
 fn dp4a_side(x: &Expr) -> Option<(&Expr, Bytes)> {
-    let x = match x {
-        Expr::Call { callee, args } if callee == "i32" && args.len() == 1 => &args[0],
+    let x = match &x.kind {
+        ExprKind::Call { callee, args } if callee == "i32" && args.len() == 1 => &args[0],
         _ => x,
     };
-    let int = |e: &Expr| match e {
-        Expr::Int(n) => Some(*n),
+    let int = |e: &Expr| match &e.kind {
+        ExprKind::Int(n) => Some(*n),
         _ => None,
     };
-    match x {
-        Expr::Index { .. } => Some((x, Bytes::Raw)),
-        Expr::Binary {
+    match &x.kind {
+        ExprKind::Index { .. } => Some((x, Bytes::Raw)),
+        ExprKind::Binary {
             op: BinOp::BitAnd,
             lhs,
             rhs,
         } => {
             let mask = int(rhs).filter(|m| (0..128).contains(m))?;
-            let (span, shift) = match lhs.as_ref() {
-                Expr::Index { .. } => (lhs.as_ref(), 0),
-                Expr::Binary {
+            let (span, shift) = match &lhs.kind {
+                ExprKind::Index { .. } => (lhs.as_ref(), 0),
+                ExprKind::Binary {
                     op: BinOp::Shr,
                     lhs: inner,
                     rhs: by,
-                } if matches!(inner.as_ref(), Expr::Index { .. }) => {
+                } if matches!(&inner.kind, ExprKind::Index { .. }) => {
                     let shift = int(by).filter(|s| (0..8).contains(s))?;
                     // The bits past the byte's top must be masked off.
                     (mask < 1 << (8 - shift)).then_some(())?;

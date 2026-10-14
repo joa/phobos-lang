@@ -6,7 +6,7 @@
 
 use super::{PResult, Parser};
 use crate::ast::lanes::{self, Fold, Group, Mode};
-use crate::ast::{Expr, ctx};
+use crate::ast::{Expr, ExprKind, ctx};
 use crate::diag::Diagnostic;
 use crate::token::Tok;
 
@@ -49,15 +49,15 @@ impl Parser {
         let args = if self.matches(&Tok::RParen) { Vec::new() } else { self.parse_args()? };
         self.expect_close(Tok::RParen, paren)?;
 
-        let width = take(&mut items, "width").unwrap_or(Expr::Int(0));
+        let width = take(&mut items, "width").unwrap_or(Expr::int(0));
         let out = if let Some(fold) = Fold::from_name(name) {
             let group = match take(&mut items, "over") {
-                Some(Expr::Call { callee, .. }) if callee == ctx::LANE => Group::Lanes,
-                Some(Expr::Call { callee, .. }) if callee == ctx::THREAD => Group::Cta,
+                Some(Expr { kind: ExprKind::Call { callee, .. }, .. }) if callee == ctx::LANE => Group::Lanes,
+                Some(Expr { kind: ExprKind::Call { callee, .. }, .. }) if callee == ctx::THREAD => Group::Cta,
                 Some(_) => return Err(at(format!("`{name}<over ..>` takes `ctx.lane` or `ctx.thread`"))),
                 None => return Err(at(format!("`{name}<..>` needs `over ctx.lane` or `over ctx.thread`"))),
             };
-            if group == Group::Cta && !matches!(width, Expr::Int(0)) {
+            if group == Group::Cta && !matches!(&width.kind, ExprKind::Int(0)) {
                 return Err(at(format!("`{name}<over ctx.thread>` runs across the CTA and takes no `width`")));
             }
             let want = if fold == Fold::Reduce { 2 } else { 1 };

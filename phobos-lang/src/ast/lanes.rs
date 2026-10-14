@@ -99,24 +99,18 @@ impl Mode {
 /// A collective call: `[value, group, width]`, and the combine for
 /// `reduce`. `width` 0 means the whole group.
 pub fn collective(fold: Fold, value: Expr, group: Group, width: Expr, combine: Option<Expr>) -> Expr {
-    let group = Expr::Int(match group {
+    let group = Expr::int(match group {
         Group::Lanes => 0,
         Group::Cta => 1,
     });
     let mut args = vec![value, group, width];
     args.extend(combine);
-    Expr::Call {
-        callee: format!("{COLLECTIVE}{}", fold.name()),
-        args,
-    }
+    Expr::call(format!("{COLLECTIVE}{}", fold.name()), args)
 }
 
 /// A shuffle call: `[value, operand, width]`.
 pub fn shuffle(mode: Mode, value: Expr, operand: Expr, width: Expr) -> Expr {
-    Expr::Call {
-        callee: format!("{SHUFFLE}{}", mode.name()),
-        args: vec![value, operand, width],
-    }
+    Expr::call(format!("{SHUFFLE}{}", mode.name()), vec![value, operand, width])
 }
 
 /// The parts of a collective call.
@@ -130,13 +124,13 @@ pub struct Collective<'a> {
 
 pub fn as_collective<'a>(callee: &str, args: &'a [Expr]) -> Option<Collective<'a>> {
     let fold = Fold::from_name(callee.strip_prefix(COLLECTIVE)?)?;
-    let [value, Expr::Int(group), width, rest @ ..] = args else {
+    let [value, group, width, rest @ ..] = args else {
         return None;
     };
     Some(Collective {
         fold,
         value,
-        group: if *group == 0 { Group::Lanes } else { Group::Cta },
+        group: if group.as_int()? == 0 { Group::Lanes } else { Group::Cta },
         width,
         combine: rest.first(),
     })

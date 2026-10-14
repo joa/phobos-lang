@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN, dim_in_bounds, extent, gcd};
-use crate::ast::{BinOp, Expr, Sub, UnOp, ctx};
+use crate::ast::{BinOp, Expr, ExprKind, Sub, UnOp, ctx};
 use crate::ir::{Layout, OpKind, Slice, Space, TileType, Type, ValueId};
 
 impl Build {
@@ -31,9 +31,9 @@ impl Build {
 
     pub(crate) fn expr_div(&self, expr: &Expr) -> i64 {
         const CAP: i64 = 1 << 20;
-        match expr {
-            Expr::Int(n) => n.abs().min(CAP),
-            Expr::Var(name) => match self.lookup(name) {
+        match &expr.kind {
+            ExprKind::Int(n) => n.abs().min(CAP),
+            ExprKind::Var(name) => match self.lookup(name) {
                 Some(Binding::Let { div, .. }) => div,
                 Some(_) => 1,
                 None => match self.pending_ivs.iter().rev().find(|(iv, _)| iv == name) {
@@ -41,8 +41,8 @@ impl Build {
                     None => self.shape_env.get(name).map_or(1, |v| v.abs().min(CAP)),
                 },
             },
-            Expr::Unary { op: UnOp::Neg, rhs } => self.expr_div(rhs),
-            Expr::Binary {
+            ExprKind::Unary { op: UnOp::Neg, rhs } => self.expr_div(rhs),
+            ExprKind::Binary {
                 op: BinOp::Mul,
                 lhs,
                 rhs,
@@ -50,18 +50,18 @@ impl Build {
                 let (a, b) = (self.expr_div(lhs), self.expr_div(rhs));
                 if a == 0 || b == 0 { 0 } else { a.saturating_mul(b).min(CAP) }
             }
-            Expr::Binary {
+            ExprKind::Binary {
                 op: BinOp::Add | BinOp::Sub,
                 lhs,
                 rhs,
             } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
             // `a % m` is `a` less a multiple of `m`.
-            Expr::Binary {
+            ExprKind::Binary {
                 op: BinOp::Rem,
                 lhs,
                 rhs,
             } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
-            Expr::Call { .. } => self.const_fold(expr).map_or(1, |n| n.abs().min(CAP)),
+            ExprKind::Call { .. } => self.const_fold(expr).map_or(1, |n| n.abs().min(CAP)),
             _ => 1,
         }
     }
@@ -69,12 +69,12 @@ impl Build {
     /// Folds an expression to a compile-time constant, through `@autotune`
     /// symbols.
     pub(crate) fn const_fold(&self, expr: &Expr) -> Option<i64> {
-        match expr {
-            Expr::Int(n) => Some(*n),
-            Expr::Var(name) if self.lookup(name).is_none() => self.shape_env.get(name).copied(),
-            Expr::Call { callee, args } if args.is_empty() => self.ctx_count(callee),
-            Expr::Unary { op: UnOp::Neg, rhs } => self.const_fold(rhs)?.checked_neg(),
-            Expr::Binary { op, lhs, rhs } => {
+        match &expr.kind {
+            ExprKind::Int(n) => Some(*n),
+            ExprKind::Var(name) if self.lookup(name).is_none() => self.shape_env.get(name).copied(),
+            ExprKind::Call { callee, args } if args.is_empty() => self.ctx_count(callee),
+            ExprKind::Unary { op: UnOp::Neg, rhs } => self.const_fold(rhs)?.checked_neg(),
+            ExprKind::Binary { op, lhs, rhs } => {
                 let (a, b) = (self.const_fold(lhs)?, self.const_fold(rhs)?);
                 match op {
                     BinOp::Add => a.checked_add(b),
@@ -309,10 +309,10 @@ impl Build {
     /// [`Build::slice_is_partial`] for a slice inside loops whose induction
     /// variables are `ivs` and whose bodies are not built yet.
     pub(crate) fn slice_is_partial_within(&self, expr: &Expr, ivs: &[&str]) -> bool {
-        let Expr::Index { base, subs } = expr else {
+        let ExprKind::Index { base, subs } = &expr.kind else {
             return false;
         };
-        let Expr::Var(name) = &**base else {
+        let ExprKind::Var(name) = &base.kind else {
             return false;
         };
         let mv = match self.lookup(name) {
@@ -351,10 +351,10 @@ impl Build {
     /// [`Self::slice_static_shape`] of a slice of a tensor or, with `tiles`,
     /// also of a declared tile or view.
     pub(crate) fn slice_shape_of(&self, expr: &Expr, tiles: bool) -> Option<Vec<i64>> {
-        let Expr::Index { base, subs } = expr else {
+        let ExprKind::Index { base, subs } = &expr.kind else {
             return None;
         };
-        let Expr::Var(name) = &**base else {
+        let ExprKind::Var(name) = &base.kind else {
             return None;
         };
         let src = match self.lookup(name)? {
@@ -392,10 +392,10 @@ impl Build {
 
     /// [`Self::slice_tensor_elem`], with `tiles` also of a tile or view.
     pub(crate) fn slice_elem_of(&self, expr: &Expr, tiles: bool) -> Option<crate::ir::Scalar> {
-        let Expr::Index { base, .. } = expr else {
+        let ExprKind::Index { base, .. } = &expr.kind else {
             return None;
         };
-        let Expr::Var(name) = &**base else {
+        let ExprKind::Var(name) = &base.kind else {
             return None;
         };
         match self.lookup(name)? {

@@ -141,9 +141,9 @@ impl<'a> Analyzer<'a> {
                 }
                 Stmt::Assign { target, op, value, .. } => {
                     self.scan_reads(value, refs, reads)?;
-                    match target {
-                        Expr::Index { base, subs } => {
-                            let Expr::Var(t) = base.as_ref() else {
+                    match &target.kind {
+                        ExprKind::Index { base, subs } => {
+                            let ExprKind::Var(t) = &base.kind else {
                                 bail!("invalid assignment target under @cluster");
                             };
                             let Some(&ti) = self.tindex.get(t) else {
@@ -157,7 +157,7 @@ impl<'a> Analyzer<'a> {
                             }
                         }
                         // assignment to a tile var (running state) is leaf-internal
-                        Expr::Var(_) => {}
+                        ExprKind::Var(_) => {}
                         _ => bail!("invalid assignment target under @cluster"),
                     }
                 }
@@ -169,15 +169,15 @@ impl<'a> Analyzer<'a> {
                     body,
                     ..
                 } => {
-                    if !matches!(start, Expr::Int(0)) {
+                    if !matches!(&start.kind, ExprKind::Int(0)) {
                         bail!("device-level loops must start at 0");
                     }
-                    if let Some(Expr::Var(s)) = step
+                    if let Some(s) = step.as_ref().and_then(Expr::as_var)
                         && self.super_set.contains(s)
                     {
                         unreachable!("a cluster loop must route to the accumulator path");
                     }
-                    let Expr::Var(d) = end else {
+                    let ExprKind::Var(d) = &end.kind else {
                         bail!(
                             "device-level loop bound must be a symbolic dim so its \
                              slices span a whole supertile axis"
@@ -213,9 +213,9 @@ impl<'a> Analyzer<'a> {
         refs: &mut HashMap<usize, SuperTile>,
         reads: &mut HashSet<usize>,
     ) -> Result<()> {
-        match e {
-            Expr::Index { base, subs } => {
-                if let Expr::Var(t) = base.as_ref()
+        match &e.kind {
+            ExprKind::Index { base, subs } => {
+                if let ExprKind::Var(t) = &base.kind
                     && let Some(&ti) = self.tindex.get(t)
                 {
                     let r = self.classify_ref_leaf(ti, subs)?;
@@ -239,17 +239,17 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
-            Expr::Binary { lhs, rhs, .. } => {
+            ExprKind::Binary { lhs, rhs, .. } => {
                 self.scan_reads(lhs, refs, reads)?;
                 self.scan_reads(rhs, refs, reads)?;
             }
-            Expr::Unary { rhs, .. } => self.scan_reads(rhs, refs, reads)?,
-            Expr::Call { args, .. } => {
+            ExprKind::Unary { rhs, .. } => self.scan_reads(rhs, refs, reads)?,
+            ExprKind::Call { args, .. } => {
                 for a in args {
                     self.scan_reads(a, refs, reads)?;
                 }
             }
-            Expr::Var(_) | Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) => {}
+            ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => {}
         }
         Ok(())
     }
@@ -282,7 +282,8 @@ impl<'a> Analyzer<'a> {
                         bail!("accumulator tile dim '{s}' is not a @cluster dim");
                     }
                 }
-                let Some(init @ (Expr::Int(_) | Expr::Float(_))) = value else {
+                let literal = |v: &&Expr| matches!(v.kind, ExprKind::Int(_) | ExprKind::Float(_));
+                let Some(init) = value.as_ref().filter(literal) else {
                     bail!("accumulator tile must be initialized with a literal");
                 };
                 self.scratch = Some(Scratch { init: init.clone() });
@@ -308,8 +309,8 @@ impl<'a> Analyzer<'a> {
                     self.symbols.insert(name.to_string(), Binding::Scalar(sv));
                     return Ok(None);
                 }
-                if let Expr::Index { base, subs } = value
-                    && let Expr::Var(t) = base.as_ref()
+                if let ExprKind::Index { base, subs } = &value.kind
+                    && let ExprKind::Var(t) = &base.kind
                     && let Some(&ti) = self.tindex.get(t)
                 {
                     let r = self.classify_ref(ti, subs)?;
@@ -333,22 +334,22 @@ impl<'a> Analyzer<'a> {
                 if in_loop {
                     bail!("nested cluster-level loops are not supported yet");
                 }
-                if !matches!(start, Expr::Int(0)) {
+                if !matches!(&start.kind, ExprKind::Int(0)) {
                     bail!("cluster-level loops must start at 0");
                 }
-                let Some(Expr::Var(s)) = step else {
+                let Some(s) = step.as_ref().and_then(Expr::as_var) else {
                     bail!("cluster-level loops must step by a @cluster dim");
                 };
                 if !self.super_set.contains(s) {
                     bail!("loop step '{s}' is not a @cluster dim");
                 }
-                let dim = match end {
-                    Expr::Var(d) => Dim::Sym(d.clone()),
-                    Expr::Int(n) => Dim::Int(*n),
+                let dim = match &end.kind {
+                    ExprKind::Var(d) => Dim::Sym(d.clone()),
+                    ExprKind::Int(n) => Dim::Int(*n),
                     _ => bail!("cluster-level loop bound must be a symbolic dim or literal"),
                 };
                 self.symbols
-                    .insert(var.clone(), Binding::LoopVar(s.clone()));
+                    .insert(var.clone(), Binding::LoopVar(s.to_string()));
                 let mut inner = Vec::new();
                 for st in body {
                     if let Some(b) = self.stmt(st, idx, true)? {
@@ -358,7 +359,7 @@ impl<'a> Analyzer<'a> {
                 Ok(Some(Statement::Loop {
                     var: var.clone(),
                     dim,
-                    super_sym: s.clone(),
+                    super_sym: s.to_string(),
                     body: inner,
                 }))
             }
@@ -379,9 +380,9 @@ impl<'a> Analyzer<'a> {
         idx: usize,
         in_loop: bool,
     ) -> Result<Option<Statement>> {
-        match target {
+        match &target.kind {
             // accumulator update: the rmw chain step
-            Expr::Var(n) if matches!(self.symbols.get(n), Some(Binding::Scratch)) => {
+            ExprKind::Var(n) if matches!(self.symbols.get(n), Some(Binding::Scratch)) => {
                 if op != AssignOp::Add {
                     bail!("the accumulator only supports `+=` updates under @cluster");
                 }
@@ -394,10 +395,10 @@ impl<'a> Analyzer<'a> {
                     uses_scratch: true,
                 })))
             }
-            Expr::Var(n) => bail!("'{n}' is not assignable at cluster scale"),
+            ExprKind::Var(n) => bail!("'{n}' is not assignable at cluster scale"),
 
-            Expr::Index { base, subs } => {
-                let Expr::Var(t) = base.as_ref() else {
+            ExprKind::Index { base, subs } => {
+                let ExprKind::Var(t) = &base.kind else {
                     bail!("invalid assignment target under @cluster");
                 };
                 let Some(&ti) = self.tindex.get(t) else {
@@ -406,7 +407,7 @@ impl<'a> Analyzer<'a> {
 
                 // the chain's final store: C[<grid slice>] = acc
                 if op == AssignOp::Set
-                    && let Expr::Var(v) = value
+                    && let ExprKind::Var(v) = &value.kind
                     && matches!(self.symbols.get(v), Some(Binding::Scratch))
                 {
                     if in_loop {
@@ -425,7 +426,7 @@ impl<'a> Analyzer<'a> {
                             );
                         }
                         let Sub::Span {
-                            len: Expr::Var(s), ..
+                            len: Expr { kind: ExprKind::Var(s), .. }, ..
                         } = sub
                         else {
                             unreachable!("classify_ref accepts only `:+ SYM` spans");
@@ -462,7 +463,7 @@ impl<'a> Analyzer<'a> {
                             );
                         }
                         let Sub::Span {
-                            len: Expr::Var(s), ..
+                            len: Expr { kind: ExprKind::Var(s), .. }, ..
                         } = sub
                         else {
                             unreachable!("classify_ref accepts only `:+ SYM` spans");

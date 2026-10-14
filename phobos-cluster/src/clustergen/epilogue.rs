@@ -7,11 +7,11 @@ impl<'a> Analyzer<'a> {
     /// `c_old` is a prior load of the target supertile. The store's scalars
     /// stay out of the cluster IR and only appear in the leaves.
     pub(super) fn parse_epilogue(&self, value: &Expr, target: &SuperTile) -> Result<Epilogue> {
-        if let Expr::Binary {
+        if let ExprKind::Binary {
             op: BinOp::Add,
             lhs,
             rhs,
-        } = value
+        } = &value.kind
         {
             let (acc_side, prev_side) = if self.uses_scratch(lhs) {
                 (lhs.as_ref(), rhs.as_ref())
@@ -36,19 +36,19 @@ impl<'a> Analyzer<'a> {
 
     /// Peel `acc` or `SCALAR * acc` into (coefficient, acc name).
     pub(super) fn peel_acc(&self, e: &Expr) -> Result<(Option<Expr>, String)> {
-        if let Expr::Var(n) = e
+        if let ExprKind::Var(n) = &e.kind
             && matches!(self.symbols.get(n), Some(Binding::Scratch))
         {
             return Ok((None, n.clone()));
         }
-        if let Expr::Binary {
+        if let ExprKind::Binary {
             op: BinOp::Mul,
             lhs,
             rhs,
-        } = e
+        } = &e.kind
         {
             for (atom, coeff) in [(lhs, rhs), (rhs, lhs)] {
-                if let Expr::Var(n) = atom.as_ref()
+                if let ExprKind::Var(n) = &atom.kind
                     && matches!(self.symbols.get(n), Some(Binding::Scratch))
                 {
                     self.check_invariant(coeff)?;
@@ -62,16 +62,16 @@ impl<'a> Analyzer<'a> {
     /// Peel `c_old` or `SCALAR * c_old` into (coefficient, c_old name).
     /// `c_old` must be a prior load of the supertile the store targets.
     pub(super) fn peel_prev(&self, e: &Expr, target: &SuperTile) -> Result<(Option<Expr>, String)> {
-        let (coeff, name) = match e {
-            Expr::Var(n) => (None, n.clone()),
-            Expr::Binary {
+        let (coeff, name) = match &e.kind {
+            ExprKind::Var(n) => (None, n.clone()),
+            ExprKind::Binary {
                 op: BinOp::Mul,
                 lhs,
                 rhs,
             } => {
                 let mut found = None;
                 for (atom, coeff) in [(lhs, rhs), (rhs, lhs)] {
-                    if let Expr::Var(n) = atom.as_ref()
+                    if let ExprKind::Var(n) = &atom.kind
                         && matches!(self.symbols.get(n), Some(Binding::Ref(_)))
                     {
                         self.check_invariant(coeff)?;

@@ -37,19 +37,13 @@ pub fn block(axis: u8) -> Expr {
 }
 
 fn axis_call(callee: &str, axis: u8) -> Expr {
-    Expr::Call {
-        callee: callee.into(),
-        args: vec![Expr::Int(axis.into())],
-    }
+    Expr::call(callee, vec![Expr::int(axis.into())])
 }
 
 /// The call `ctx.<path>` stands for.
 pub fn field(path: &[String]) -> Result<Expr, String> {
     let path: Vec<&str> = path.iter().map(String::as_str).collect();
-    let bare = |callee: &str| Expr::Call {
-        callee: callee.into(),
-        args: Vec::new(),
-    };
+    let bare = |callee: &str| Expr::call(callee, Vec::new());
     Ok(match path[..] {
         [group @ ("block" | "blocks"), axis] => {
             let Some(d) = AXES.iter().position(|a| *a == axis) else {
@@ -73,7 +67,7 @@ pub fn field(path: &[String]) -> Result<Expr, String> {
 /// How a `ctx` call is spelled in source, for messages.
 pub fn spelling(callee: &str, args: &[Expr]) -> Option<String> {
     let axis = || match args {
-        [Expr::Int(d)] => AXES.get(*d as usize).copied(),
+        [d] => AXES.get(d.as_int()? as usize).copied(),
         _ => None,
     };
     Some(match callee {

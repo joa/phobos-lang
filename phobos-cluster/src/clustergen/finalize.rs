@@ -211,18 +211,15 @@ impl<'a> Analyzer<'a> {
             if declared.insert(*pid) {
                 lets.push(Stmt::Let {
                     name: p.clone(),
+                    name_span: Default::default(),
                     ty: None,
                     value: phobos_lang::ast::ctx::block(*pid as u8),
                     span: Span::default(),
                 });
             }
             subs.push(Sub::Span {
-                start: Expr::Binary {
-                    op: BinOp::Mul,
-                    lhs: Box::new(Expr::Var(p)),
-                    rhs: Box::new(Expr::Var(sym.clone())),
-                },
-                len: Expr::Var(sym.clone()),
+                start: Expr::binary(BinOp::Mul, Expr::var(p), Expr::var(sym.clone())),
+                len: Expr::var(sym.clone()),
             });
         }
         (lets, subs)
@@ -242,10 +239,7 @@ impl<'a> Analyzer<'a> {
     pub(super) fn zero_init_leaf(&self, scratch: &Scratch, d: &Define) -> Kernel {
         let (mut body, subs) = self.output_slice(d);
         body.push(Stmt::Assign {
-            target: Expr::Index {
-                base: Box::new(Expr::Var(self.tensors[d.tensor].name.clone())),
-                subs,
-            },
+            target: Expr::index(Expr::var(self.tensors[d.tensor].name.clone()), subs),
             op: AssignOp::Set,
             value: scratch.init.clone(),
             span: Span::default(),
@@ -253,6 +247,7 @@ impl<'a> Analyzer<'a> {
         Kernel {
             attrs: self.init_attrs(),
             name: format!("{}_init", self.kernel.name),
+            name_span: self.kernel.name_span,
             params: vec![self.kernel.params[d.tensor].clone()],
             body,
         }
@@ -298,30 +293,22 @@ impl<'a> Analyzer<'a> {
         let (mut body, subs) = self.output_slice(d);
         body.push(Stmt::Let {
             name: c_old.to_string(),
+            name_span: Default::default(),
             ty: None,
-            value: Expr::Index {
-                base: Box::new(Expr::Var(cname.clone())),
-                subs: subs.clone(),
-            },
+            value: Expr::index(Expr::var(cname.clone()), subs.clone()),
             span: Span::default(),
         });
         body.push(Stmt::Assign {
-            target: Expr::Index {
-                base: Box::new(Expr::Var(cname)),
-                subs,
-            },
+            target: Expr::index(Expr::var(cname), subs),
             op: AssignOp::Set,
-            value: Expr::Binary {
-                op: BinOp::Mul,
-                lhs: Box::new(beta.clone()),
-                rhs: Box::new(Expr::Var(c_old.to_string())),
-            },
+            value: Expr::binary(BinOp::Mul, beta.clone(), Expr::var(c_old)),
             span: Span::default(),
         });
 
         let kernel = Kernel {
             attrs: self.init_attrs(),
             name: format!("{}_init", self.kernel.name),
+            name_span: self.kernel.name_span,
             params,
             body,
         };

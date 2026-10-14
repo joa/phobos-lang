@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use phobos_lang::ast::{
-    AssignOp, AttrArg, BinOp, Dim, Expr, Kernel, Scalar, Span, Stmt, Sub, Type as AstType,
+    AssignOp, AttrArg, BinOp, Dim, Expr, ExprKind, Kernel, Scalar, Span, Stmt, Sub, Type as AstType,
 };
 
 use crate::ir::{

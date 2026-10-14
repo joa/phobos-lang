@@ -1,16 +1,16 @@
 use anyhow::{Result, anyhow, bail};
 
 use super::{Binding, Build, DYN, Rv, broadcast_shape, fmt_shape};
-use crate::ast::{BinOp, Expr, Sub, UnOp};
+use crate::ast::{BinOp, Expr, ExprKind, Sub, UnOp};
 use crate::ir::{Map, OpKind, Scalar, Type, ValueId};
 
 impl Build {
     pub(crate) fn emit_expr(&mut self, expr: &Expr) -> Result<Rv> {
-        match expr {
-            Expr::Int(n) => Ok(Rv::Scalar(self.const_index(*n))),
-            Expr::Float(v) => Ok(Rv::Scalar(self.const_f32(*v))),
-            Expr::Bool(b) => Ok(Rv::Scalar(self.const_bool(*b))),
-            Expr::Var(name) => match self.lookup(name) {
+        match &expr.kind {
+            ExprKind::Int(n) => Ok(Rv::Scalar(self.const_index(*n))),
+            ExprKind::Float(v) => Ok(Rv::Scalar(self.const_f32(*v))),
+            ExprKind::Bool(b) => Ok(Rv::Scalar(self.const_bool(*b))),
+            ExprKind::Var(name) => match self.lookup(name) {
                 Some(Binding::Let { value, .. }) => Ok(Rv::Scalar(value)),
                 Some(Binding::Var { slot, elem }) => {
                     Ok(Rv::Scalar(self.value(OpKind::Load, &[slot], Type::Scalar(elem))))
@@ -28,7 +28,7 @@ impl Build {
                     None => bail!("unknown identifier '{name}'"),
                 },
             },
-            Expr::Unary { op, rhs } => {
+            ExprKind::Unary { op, rhs } => {
                 let v = match (op, self.emit_expr(rhs)?) {
                     // -t becomes 0 - t
                     (UnOp::Neg, Rv::Tile(t)) => {
@@ -60,7 +60,7 @@ impl Build {
                 }
                 Ok(Rv::Scalar(self.value(OpKind::Unary(*op), &[v], Type::Scalar(t))))
             }
-            Expr::Binary { op, lhs, rhs } => {
+            ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.emit_expr(lhs)?;
                 let r = self.emit_expr(rhs)?;
                 match (l, r) {
@@ -74,7 +74,7 @@ impl Build {
                     }
                 }
             }
-            Expr::Index { base, subs } => {
+            ExprKind::Index { base, subs } => {
                 let (mv, binding) = self.mem_base(base)?;
                 if super::slice::is_point_load(subs) {
                     let indices = self.emit_indices(subs, self.shape(mv).len())?;
@@ -89,7 +89,7 @@ impl Build {
                     }
                 }
             }
-            Expr::Call { callee, args } => self.emit_call(callee, args),
+            ExprKind::Call { callee, args } => self.emit_call(callee, args),
         }
     }
 
@@ -267,7 +267,7 @@ impl Build {
 
     /// Resolves the base of an `A[...]` expression.
     pub(crate) fn mem_base(&self, base: &Expr) -> Result<(ValueId, Binding)> {
-        let Expr::Var(name) = base else {
+        let ExprKind::Var(name) = &base.kind else {
             bail!("only named tensors and tiles can be indexed");
         };
         match self.lookup(name) {
@@ -323,11 +323,11 @@ impl Build {
     // Expression classifiers.
 
     pub(crate) fn as_scale_mul<'a>(&self, expr: &'a Expr) -> Option<(&'a Expr, &'a Expr)> {
-        let Expr::Binary {
+        let ExprKind::Binary {
             op: BinOp::Mul,
             lhs,
             rhs,
-        } = expr
+        } = &expr.kind
         else {
             return None;
         };
@@ -341,9 +341,9 @@ impl Build {
     }
 
     pub(crate) fn is_scalar_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Float(_) | Expr::Int(_) => true,
-            Expr::Var(name) => matches!(
+        match &expr.kind {
+            ExprKind::Float(_) | ExprKind::Int(_) => true,
+            ExprKind::Var(name) => matches!(
                 self.lookup(name),
                 Some(Binding::Let { .. }) | Some(Binding::Var { .. })
             ),
@@ -353,12 +353,12 @@ impl Build {
 
     /// Whether `expr` slices a tensor or tile rather than loading one element.
     pub(crate) fn is_slice_expr(&self, expr: &Expr) -> bool {
-        matches!(expr, Expr::Index { subs, .. } if !super::slice::is_point_load(subs))
+        matches!(&expr.kind, ExprKind::Index { subs, .. } if !super::slice::is_point_load(subs))
     }
 
     pub(crate) fn is_tile_expr(&self, expr: &Expr) -> bool {
-        match expr {
-            Expr::Var(name) => matches!(
+        match &expr.kind {
+            ExprKind::Var(name) => matches!(
                 self.lookup(name),
                 Some(Binding::Tile(_)) | Some(Binding::View(_))
             ),

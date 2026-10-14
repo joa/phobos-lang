@@ -5,7 +5,7 @@
 use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv};
-use crate::ast::{AssignOp, BinOp, Dim, Expr, Scalar as AstScalar, Stmt};
+use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Stmt};
 use crate::ir::{OpKind, Reduce, RegsType, Scalar, Tree, Type, ValueId};
 
 /// Elements one thread may hold of one register tile.
@@ -116,7 +116,7 @@ impl Build {
         for stmt in body {
             match stmt {
                 Stmt::Assign {
-                    target: Expr::Var(n),
+                    target: Expr { kind: ExprKind::Var(n), .. },
                     ..
                 } if matches!(self.lookup(n), Some(Binding::Regs(_))) => {
                     bail!("register tile '{n}' is updated inside {what}; only straight-line code and `for` loops may update one")
