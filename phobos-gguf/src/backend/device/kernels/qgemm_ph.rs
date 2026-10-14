@@ -47,6 +47,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
         Quant::IQ2_XS => Some(staged(quant, "iq2xs", 72, &iq2xs_decode(), split)),
         Quant::IQ2_S => Some(staged(quant, "iq2s", 80, &iq2s_decode(), split)),
         Quant::IQ3_XXS => Some(staged(quant, "iq3xxs", 96, &iq3xxs_decode(), split)),
+        Quant::IQ3_S => Some(staged(quant, "iq3s", 108, &iq3s_decode(), split)),
         _ => None,
     }
 }
@@ -134,6 +135,50 @@ fn iq3xxs_decode() -> Decode {
             ("hi", "word(QB[jr, BO + 8 * GG :+ 8], 1)".into()),
         ],
         now: vec![("aux", "word(QB[jr, BO + 64 + 4 * GG :+ 4], 0)".into())],
+        body,
+        pipelined: false,
+        halves: false,
+    }
+}
+
+/// IQ3_S: a 32-element group is eight low bytes of 9-bit grid indices at
+/// `8g`, each a four-byte entry, their high bits in byte `64 + g`, four sign
+/// bytes at `72 + 4g`, and nibble `g % 2` of byte `104 + g / 2` a scale `s`
+/// weighting the group by `d (2s + 1)`. A block is only four-aligned, so the
+/// index bytes come as two words.
+fn iq3s_decode() -> Decode {
+    let mut body = "    ws[gl, jj] = d * f32(2 * ((sc >> (4 * (gl % 2))) & 15) + 1)\n".to_string();
+    for l in 0..4 {
+        let q = if l < 2 { "lo" } else { "hi" };
+        let at = 16 * (l % 2);
+        let _ = write!(
+            body,
+            "    let g{l}a = ((({q} >> {at}) & 255) | (((qh >> {h}) & 1) << 8)) * 4
+    let g{l}b = ((({q} >> {b}) & 255) | (((qh >> {h1}) & 1) << 8)) * 4
+    let sb{l} = (sg >> {sh}) & 255
+{octet}",
+            b = at + 8,
+            h = 2 * l,
+            h1 = 2 * l + 1,
+            sh = 8 * l,
+            octet = signed_octet(
+                &format!("w[jj, 32 * gl + {o} :+ 8]", o = 8 * l),
+                &format!("word(grid[0, g{l}a :+ 4], 0)"),
+                &format!("word(grid[0, g{l}b :+ 4], 0)"),
+                &l.to_string(),
+            )
+            .replace("      ", "    ")
+        );
+    }
+    Decode {
+        fetch: vec![
+            ("lo", "word(QB[jr, BO + 8 * GG :+ 4], 0)".into()),
+            ("hi", "word(QB[jr, BO + 8 * GG + 4 :+ 4], 0)".into()),
+            ("qh", "elem(QB[jr, BO + 64 + GG :+ 1], 0)".into()),
+            ("sg", "word(QB[jr, BO + 72 + 4 * GG :+ 4], 0)".into()),
+            ("sc", "elem(QB[jr, BO + 104 + GG / 2 :+ 1], 0)".into()),
+        ],
+        now: Vec::new(),
         body,
         pipelined: false,
         halves: false,
