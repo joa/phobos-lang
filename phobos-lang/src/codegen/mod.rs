@@ -126,6 +126,7 @@ pub(crate) fn emit_observed<'c>(
             cg.policy = SharedPolicy::Replay(plan);
             cg.pipeline_declines = report.pipeline_declines;
             let func = cg.emit_kernel_ir(&ir)?;
+            anyhow::ensure!(cg.deferred.is_empty(), "internal: a deferred stage never reached its barrier");
             cg.finish_shared_buffer()?;
             func
         };
@@ -296,6 +297,9 @@ struct Codegen<'c> {
     pipeline_assert: bool,
     /// Whether some loop in the kernel did pipeline, through either path.
     pipelined_any: bool,
+    /// Stages loaded into registers, waiting for the barrier ahead of their
+    /// readers. See `lower::defer`.
+    deferred: Vec<lower::defer::Deferred<'c>>,
     /// Why each loop declined, so a failed `@pipeline` can explain itself.
     pipeline_declines: Vec<String>,
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
@@ -375,6 +379,7 @@ impl<'c> Codegen<'c> {
             hoisted_stages: Vec::new(),
             pipeline_assert: kernel.attrs.iter().any(|a| a.name == "pipeline"),
             pipelined_any: false,
+            deferred: Vec::new(),
             pipeline_declines: Vec::new(),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
             mma_sync: kernel.wants_mma_sync(),

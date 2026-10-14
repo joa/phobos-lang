@@ -396,35 +396,11 @@ impl<'c> Codegen<'c> {
         }
         // The stores must land before the next turn reads them, which a
         // barrier the body passes before that read already sees to.
-        if !(half.single && Self::fenced_before_stage_reads(half)) {
+        let staged = half.stages.iter().map(|&s| ir.result(s)).collect();
+        if !(half.single && fenced_before_reads(ir, half.rest, staged)) {
             self.barrier(block)?;
         }
         Ok(out)
-    }
-
-    /// Whether the compute passes an explicit `barrier()` before anything
-    /// reads a staged buffer. A view of one reads nothing itself.
-    fn fenced_before_stage_reads(half: &Half<'c, '_>) -> bool {
-        let ir = half.ir;
-        let mut staged: Vec<ValueId> = half.stages.iter().map(|&s| ir.result(s)).collect();
-        // Any use inside a nested block counts as a read before the fence.
-        fn nested_reads(ir: &Ir, op: OpId, staged: &[ValueId]) -> bool {
-            ir.blocks_of(op).iter().any(|&b| {
-                ir.ops(b).iter().any(|&o| {
-                    ir.operands(o).iter().any(|v| staged.contains(v)) || nested_reads(ir, o, staged)
-                })
-            })
-        }
-        for &op in half.rest {
-            let reads = ir.operands(op).iter().any(|v| staged.contains(v)) || nested_reads(ir, op, &staged);
-            match ir.kind(op) {
-                OpKind::Barrier => return true,
-                kind if reads && !kind.aliases().is_empty() => staged.push(ir.result(op)),
-                _ if reads => return false,
-                _ => {}
-            }
-        }
-        false
     }
 
     /// A buffer for a stage of `src`, padded when the stage asks.
@@ -440,7 +416,7 @@ impl<'c> Codegen<'c> {
 
     /// How a thread copies its share of `src` into `dst` through registers,
     /// or None when the copy is not a rank-2, unmasked one of static shape.
-    fn reg_copy_plan(&self, src: &MemVal<'c>, dst: &MemVal<'c>) -> Option<RegCopy<'c>> {
+    pub(super) fn reg_copy_plan(&self, src: &MemVal<'c>, dst: &MemVal<'c>) -> Option<RegCopy<'c>> {
         let &[rows, cols] = &src.shape[..] else { return None };
         if dst.shape.len() != 2 {
             return None;
@@ -466,7 +442,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// `plan` with each of the thread's chunks located.
-    fn reg_copy_indexed(&self, block: &Block<'c>, mut plan: RegCopy<'c>) -> Result<RegCopy<'c>> {
+    pub(super) fn reg_copy_indexed(&self, block: &Block<'c>, mut plan: RegCopy<'c>) -> Result<RegCopy<'c>> {
         plan.at = (0..plan.per_thread).map(|i| self.reg_copy_at(block, &plan, i)).collect::<Result<_>>()?;
         Ok(plan)
     }
@@ -499,14 +475,14 @@ impl<'c> Codegen<'c> {
         Ok(([row, col], real))
     }
 
-    fn reg_copy_load(&self, block: &Block<'c>, src: &MemVal<'c>, plan: &RegCopy<'c>) -> Result<Vec<Value<'c, 'c>>> {
+    pub(super) fn reg_copy_load(&self, block: &Block<'c>, src: &MemVal<'c>, plan: &RegCopy<'c>) -> Result<Vec<Value<'c, 'c>>> {
         plan.at
             .iter()
             .map(|(at, _)| self.vec_load_al(block, src.mem, at, plan.vec_t, plan.align))
             .collect()
     }
 
-    fn reg_copy_store(
+    pub(super) fn reg_copy_store(
         &self,
         block: &Block<'c>,
         dst: &MemVal<'c>,
@@ -537,7 +513,7 @@ impl<'c> Codegen<'c> {
 /// of `total`, `across` of them to a row. `at` holds each chunk's
 /// `[row, col]` and whether the thread has it, once located.
 #[derive(Clone)]
-struct RegCopy<'c> {
+pub(super) struct RegCopy<'c> {
     width: i64,
     align: i64,
     across: i64,
@@ -545,6 +521,29 @@ struct RegCopy<'c> {
     per_thread: i64,
     vec_t: Type<'c>,
     at: Vec<([Value<'c, 'c>; 2], Value<'c, 'c>)>,
+}
+
+/// Whether `ops` pass an explicit `barrier()` before anything reads one of
+/// `staged`. A view of one reads nothing itself; any use inside a nested
+/// block counts as a read before the fence.
+pub(super) fn fenced_before_reads(ir: &Ir, ops: &[OpId], mut staged: Vec<ValueId>) -> bool {
+    fn nested_reads(ir: &Ir, op: OpId, staged: &[ValueId]) -> bool {
+        ir.blocks_of(op).iter().any(|&b| {
+            ir.ops(b).iter().any(|&o| {
+                ir.operands(o).iter().any(|v| staged.contains(v)) || nested_reads(ir, o, staged)
+            })
+        })
+    }
+    for &op in ops {
+        let reads = ir.operands(op).iter().any(|v| staged.contains(v)) || nested_reads(ir, op, &staged);
+        match ir.kind(op) {
+            OpKind::Barrier => return true,
+            kind if reads && !kind.aliases().is_empty() => staged.push(ir.result(op)),
+            _ if reads => return false,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// What both halves of a pipelined loop share.

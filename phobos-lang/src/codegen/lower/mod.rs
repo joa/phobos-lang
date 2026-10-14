@@ -1,4 +1,5 @@
 mod control;
+pub(in crate::codegen) mod defer;
 mod epilogue;
 mod intrinsics;
 mod lanes;

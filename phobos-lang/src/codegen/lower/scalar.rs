@@ -165,6 +165,7 @@ impl<'c> Codegen<'c> {
                 })?
             }
             OpKind::Barrier => {
+                self.flush_deferred(block, ir, op)?;
                 self.barrier(block)?;
                 return Ok(());
             }

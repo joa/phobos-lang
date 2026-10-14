@@ -121,3 +121,48 @@ fn a_barrier_before_the_stage_reads_orders_the_stores() {
     let count = |src: &str| emit_mlir_sync(src, "sm_75").matches("gpu.barrier").count();
     assert!(count(&fenced) <= count(PIPELINED));
 }
+
+/// A stage, work on another tile, then `barrier()` before the stage is read;
+/// `between` goes after the work.
+fn deferred_src(between: &str) -> String {
+    format!(
+        "@aligned(K = 64)
+        kernel k(A: tensor<f32>[64, K], W: tensor<f32>[64, 64], C: tensor<f32>[64, 64]) {{
+            var acc: tile<f32>[64, 64] = 0.0
+            var w: tile<f32>[64, 64]
+            for kt in range(0, K, 64) {{
+                var a = A[0 :+ 64, kt :+ 64]
+                w = W[0 :+ 64, 0 :+ 64] * 3.0
+{between}                barrier()
+                acc += a * w
+            }}
+            C[0 :+ 64, 0 :+ 64] = acc
+        }}"
+    )
+}
+
+/// The emitted body from the `kt` loop on, the one stepping by 64.
+fn k_loop(mlir: &str) -> &str {
+    let step = mlir.find("step %c64").expect("the kt loop");
+    &mlir[mlir[..step].rfind("scf.for").expect("its head")..]
+}
+
+#[test]
+fn a_stage_read_past_a_barrier_is_stored_at_it() {
+    // The stage's loads issue at the copy, and its stores wait until the
+    // work on `w`, the scaling by 3, is done, just ahead of the barrier.
+    let mlir = emit_mlir(&deferred_src(""));
+    let body = k_loop(&mlir);
+    let work = body.find("3.000000e+00").expect("the scaling");
+    let fence = work + body[work..].find("gpu.barrier").expect("the barrier");
+    assert!(body[..work].contains("vector.load") && !body[..work].contains("vector.store"), "{body}");
+    assert!(body[work..fence].contains("vector.store"), "{body}");
+    // A global write before the barrier might be the stage's source, so the
+    // copy stays where it is written.
+    let mlir = emit_mlir(&deferred_src("                C[0 :+ 64, 0 :+ 64] = w\n"));
+    let body = k_loop(&mlir);
+    let work = body.find("3.000000e+00").expect("the scaling");
+    let stored = |op: &str| body[..work].contains(&format!("{op} %")) && body[..work].contains("memref<64x64xf32, 3>");
+    assert!(stored("vector.store") || stored("memref.store"), "the stage is stored before the work:
+{body}");
+}

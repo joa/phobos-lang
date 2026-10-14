@@ -79,7 +79,9 @@ impl<'c> Codegen<'c> {
                 } else {
                     self.alloc_tile_shaped(block, src.elem, &src.shape)?
                 };
-                self.tile_copy(block, &src, &tile, stage.sync, false)?;
+                if !self.defer_stage(block, ir, op, &src, &tile)? {
+                    self.tile_copy(block, &src, &tile, stage.sync, false)?;
+                }
                 self.set_ir(ir.result(op), Lowered::Tile(tile));
             }
             OpKind::Materialize => {
