@@ -27,6 +27,31 @@ fn is_f16_or_f32(s: Scalar) -> bool {
     matches!(s, Scalar::F16 | Scalar::F32)
 }
 
+/// `acc -= e` as the parser spells it, `acc = acc - e`: the `e`.
+fn subtracted<'e>(name: &str, value: &'e Expr) -> Option<&'e Expr> {
+    match &value.kind {
+        ExprKind::Binary {
+            op: BinOp::Sub,
+            lhs,
+            rhs,
+        } if lhs.as_var() == Some(name) => Some(rhs),
+        _ => None,
+    }
+}
+
+/// The two names of `r * c`, the outer-product update's operands.
+fn outer_parts(value: &Expr) -> Option<[&str; 2]> {
+    let ExprKind::Binary {
+        op: BinOp::Mul,
+        lhs,
+        rhs,
+    } = &value.kind
+    else {
+        return None;
+    };
+    Some([lhs.as_var()?, rhs.as_var()?])
+}
+
 /// `f32(dot_t(a, w)) * s1 * s2` as its four names.
 fn scaled_dot_parts(value: &Expr) -> Option<[&str; 4]> {
     let ExprKind::Binary {
@@ -233,6 +258,31 @@ impl Build {
         }
     }
 
+    /// `acc += r * c` with an f32 `[m, 1]` column and `[1, n]` row in either
+    /// order, which only the int8 accumulator takes.
+    fn outer_ok(&self, name: &str, m: i64, n: i64, value: &Expr, scan: &mut FragScan) -> bool {
+        let Some(parts) = outer_parts(value) else { return false };
+        if parts.contains(&name) || scan.imma == Some(false) {
+            return false;
+        }
+        let masked = |x: &str| {
+            !scan.decls.contains_key(x)
+                && matches!(self.lookup(x), Some(Binding::Tile(v) | Binding::View(v)) if self.is_masked(v))
+        };
+        if parts.into_iter().any(masked) {
+            return false;
+        }
+        let [Some((Scalar::F32, s1)), Some((Scalar::F32, s2))] = parts.map(|x| self.frag_operand(scan, x)) else {
+            return false;
+        };
+        let (row, col) = (vec![m, 1], vec![1, n]);
+        if !((s1 == row && s2 == col) || (s1 == col && s2 == row)) {
+            return false;
+        }
+        scan.imma = Some(true);
+        true
+    }
+
     /// `acc += f32(dot_t(a, w)) * s1 * s2` with int8 `a` and `w`, and f32
     /// row and column scales in either order.
     fn scaled_dot_ok(&self, name: &str, m: i64, n: i64, value: &Expr, scan: &mut FragScan) -> bool {
@@ -306,6 +356,12 @@ impl Build {
                 scan.imma = Some(false);
                 elem == Scalar::F32 && shape == [m, 1]
             }
+            (AssignOp::Add, Expr { kind: ExprKind::Binary { .. }, .. }) if outer_parts(value).is_some() => {
+                self.outer_ok(name, m, n, value, scan)
+            }
+            (AssignOp::Set, _) if subtracted(name, value).is_some_and(|e| outer_parts(e).is_some()) => {
+                self.outer_ok(name, m, n, subtracted(name, value).expect("checked by the guard"), scan)
+            }
             (AssignOp::Add, Expr { kind: ExprKind::Binary { .. }, .. }) => self.scaled_dot_ok(name, m, n, value, scan),
             (AssignOp::Add, Expr { kind: ExprKind::Call { callee, args }, .. }) if callee == "dot" => {
                 let [Expr { kind: ExprKind::Var(a), .. }, Expr { kind: ExprKind::Var(b), .. }] = &args[..] else {
@@ -367,6 +423,27 @@ impl Build {
                     bail!("fragment scale column '{col}' is not a tile");
                 };
                 let next = self.value(OpKind::FragScale(*bop), &[acc, cmv], ty);
+                self.update_binding(name, Binding::Frags(next));
+                Ok(())
+            }
+            (AssignOp::Add, _) | (AssignOp::Set, _)
+                if outer_parts(value).is_some() || subtracted(name, value).is_some_and(|e| outer_parts(e).is_some()) =>
+            {
+                let negate = op == AssignOp::Set;
+                let value = if negate { subtracted(name, value).expect("checked by the guard") } else { value };
+                let mut operands = vec![acc];
+                for part in outer_parts(value).expect("checked by the guard") {
+                    let Some(Binding::Tile(v) | Binding::View(v)) = self.lookup(part) else {
+                        bail!("fragment operand '{part}' is not a tile");
+                    };
+                    operands.push(v);
+                }
+                // The column first, the row second.
+                let column = |v: ValueId| matches!(self.ir.ty(v), Type::Tile(t) if t.static_shape().is_some_and(|s| s.last() == Some(&1)));
+                if !column(operands[1]) {
+                    operands.swap(1, 2);
+                }
+                let next = self.value(OpKind::FragOuter { negate }, &operands, ty);
                 self.update_binding(name, Binding::Frags(next));
                 Ok(())
             }
