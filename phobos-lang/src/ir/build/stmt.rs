@@ -327,6 +327,21 @@ impl Build {
     ) -> Result<()> {
         let carried = self.frag_carried(body);
         if !carried.is_empty() {
+            // Doubling the stages costs occupancy a register accumulator
+            // already strains, so a carrying loop pipelines on request.
+            if self.pipeline_assert {
+                let iv_div = super::gcd(self.expr_div(start), step.map_or(1, |e| self.expr_div(e)));
+                self.pending_ivs.push((var.to_string(), iv_div));
+                let candidate = self.pipeline_candidate(body);
+                self.pending_ivs.pop();
+                match candidate {
+                    Ok((staged, rest, info)) => {
+                        let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
+                        return self.emit_pipelined_loop(var, [lo, hi, st], iv_div, &staged, rest, info, &carried, hoisted);
+                    }
+                    Err(decline) => self.report.pipeline_declines.push(format!("loop `{var}`: {decline}")),
+                }
+            }
             return self.emit_frag_for(var, start, end, step, body, &carried, hoisted);
         }
 

@@ -42,16 +42,16 @@ impl<'c> Codegen<'c> {
     }
 
     fn emit_for_inner_ir(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, info: ForInfo) -> Result<()> {
+        if let Some(pipeline) = info.pipeline {
+            self.pipelined_any = true;
+            return self.emit_pipelined_for_ir(block, ir, op, pipeline, info.carried);
+        }
         if info.carried > 0 {
             let first = ir.operand(op, info.bound_operands());
             if matches!(ir.ty(first), ir::Type::Gemm(_)) {
                 return self.emit_gemm_for_ir(block, ir, op);
             }
             return self.emit_frag_for_ir(block, ir, op, info);
-        }
-        if let Some(pipeline) = info.pipeline {
-            self.pipelined_any = true;
-            return self.emit_pipelined_for_ir(block, ir, op, pipeline);
         }
         let body = ir.blocks_of(op)[0];
         match info.bounds {

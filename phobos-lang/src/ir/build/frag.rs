@@ -113,13 +113,13 @@ impl Build {
         for stmt in stmts {
             match stmt {
                 Stmt::Let { .. } | Stmt::Var { .. } => {
-                    let Some((n2, ty, Some(value))) = stmt.as_decl() else {
+                    let Some((n2, ty, value)) = stmt.as_decl() else {
                         return false;
                     };
-                    if n2 == name || value.uses_name(name) {
+                    if n2 == name || value.is_some_and(|v| v.uses_name(name)) {
                         return false;
                     }
-                    if self.slice_is_partial_within(value, ivs) {
+                    if value.is_some_and(|v| self.slice_is_partial_within(v, ivs)) {
                         return false;
                     }
                     self.frag_scan_decl(n2, ty, value, scan);
@@ -198,15 +198,22 @@ impl Build {
         true
     }
 
-    fn frag_scan_decl(&self, name: &str, ty: Option<&AstType>, value: &Expr, scan: &mut FragScan) {
+    fn frag_scan_decl(&self, name: &str, ty: Option<&AstType>, value: Option<&Expr>, scan: &mut FragScan) {
         let entry = match ty {
             Some(AstType::Tile(sc, dims)) => {
                 self.tile_shape(dims).ok().map(|s| (Scalar::from_ast(*sc), s))
             }
-            None => match (self.slice_shape_of(value, true), self.slice_elem_of(value, true)) {
-                (Some(s), Some(e)) => Some((e, s)),
-                _ => None,
-            },
+            None => value.and_then(|v| {
+                // A slice of a tile declared earlier in the scanned body,
+                // which is not bound yet.
+                if let Expr::Index { base, subs } = v
+                    && let Expr::Var(b) = base.as_ref()
+                    && let Some((elem, shape)) = scan.decls.get(b)
+                {
+                    return Some((*elem, self.slice_sizes(shape, subs)?));
+                }
+                Some((self.slice_elem_of(v, true)?, self.slice_shape_of(v, true)?))
+            }),
             _ => None,
         };
         if let Some(e) = entry {
