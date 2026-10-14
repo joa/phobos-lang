@@ -52,7 +52,17 @@ fn main() -> Result<()> {
             for byte in chunk.iter_mut() {
                 *byte = (((next() + 1.0) * 127.5) as i32).clamp(0, 255) as u8;
             }
-            chunk[..2].copy_from_slice(&f32_to_f16(0.02 * (next().abs() + 0.1)).to_le_bytes());
+            let d = f32_to_f16(0.02 * (next().abs() + 0.1));
+            if quant == Quant::IQ1_M {
+                // No f16 field: `d` is the top nibbles of the four scale
+                // halfwords that end the block.
+                for i in 0..4 {
+                    let at = block_bytes - 8 + 2 * i + 1;
+                    chunk[at] = (chunk[at] & 0x0F) | (((d >> (4 * i)) & 15) as u8) << 4;
+                }
+            } else {
+                chunk[..2].copy_from_slice(&d.to_le_bytes());
+            }
         }
         let packed = Packed::new(quant, blocks, k, n)?;
         let a: Vec<f32> = (0..rows * k).map(|_| next()).collect();
