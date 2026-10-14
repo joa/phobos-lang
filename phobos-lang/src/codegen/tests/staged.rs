@@ -111,3 +111,13 @@ fn without_cp_async_the_next_stage_rides_in_registers() {
     let store = mlir[fma..].find("vector.store").expect("the stores after it");
     assert!(fetch < fma && store > 0, "{mlir}");
 }
+
+#[test]
+fn a_barrier_before_the_stage_reads_orders_the_stores() {
+    // The refill of `at` lands before the next turn's `barrier()`, which
+    // the reads of `at` follow, so the turn needs no barrier of its own
+    // after the stores: the explicit one replaces it.
+    let fenced = PIPELINED.replace("let a0 = at", "barrier()\n            let a0 = at");
+    let count = |src: &str| emit_mlir_sync(src, "sm_75").matches("gpu.barrier").count();
+    assert!(count(&fenced) <= count(PIPELINED));
+}
