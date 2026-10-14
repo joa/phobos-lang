@@ -1,7 +1,12 @@
-error: `copy` reads `t` after a per-thread store to it with no `barrier()` between: another thread's store may not have landed
+error: `t` is read after a per-thread store to it with no `barrier()` between
  --> tests/ui/site_uniformity3.ph:6:3
   |
+5 |   t[0, ctx.lane] = 1.0
+  |   -------------------- each thread stores its own part here
 6 |   O[0 :+ 1, 0 :+ 32] = t
-  |   ^^^^^^^^^^^^^^^^^^^^^^
+  |   ^^^^^^^^^^^^^^^^^^^^^^ every thread reads `t` here
+  |
+  = note: another thread's store may not have landed when this one reads
+  = help: put a `barrier()` between the store and the read
 
 error: aborting due to 1 previous error

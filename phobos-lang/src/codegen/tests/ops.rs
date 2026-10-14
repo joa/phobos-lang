@@ -227,7 +227,7 @@ fn atomic_add_on_floats() {
 #[test]
 fn unknown_attribute_is_an_error() {
     let e = emit_err("@fast_math\nkernel k(A: tensor<f32>[N]) { let i = ctx.block.x }");
-    assert!(e.contains("unknown attribute @fast_math"), "got: {e}");
+    assert!(e.contains("unknown attribute `@fast_math`"), "got: {e}");
 }
 
 #[test]

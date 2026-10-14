@@ -36,7 +36,7 @@ impl<'c> Codegen<'c> {
             src.clone()
         } else {
             if src.shape.contains(&DYN) {
-                bail!("exp needs a static tile shape");
+                bail!("`exp` needs a static tile shape");
             }
             self.alloc_tile_shaped(block, src.elem, &src.shape)?
         };
@@ -55,7 +55,7 @@ impl<'c> Codegen<'c> {
             src.clone()
         } else {
             if src.shape.contains(&DYN) {
-                bail!("sqrt needs a static tile shape");
+                bail!("`sqrt` needs a static tile shape");
             }
             self.alloc_tile_shaped(block, src.elem, &src.shape)?
         };
@@ -99,11 +99,11 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if !self.is_float(src.elem) {
-            bail!("sqrt needs a float tile, got {}", src.elem);
+            bail!("`sqrt` needs a float tile, got {}", src.elem);
         }
 
         if src.shape.contains(&DYN) {
-            bail!("sqrt needs a static tile shape");
+            bail!("`sqrt` needs a static tile shape");
         }
 
         self.distribute(block, out, 1, true, |cg, blk, idx| {
@@ -125,10 +125,10 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if !self.is_float(src.elem) {
-            bail!("exp needs a float tile, got {}", src.elem);
+            bail!("`exp` needs a float tile, got {}", src.elem);
         }
         if src.shape.contains(&DYN) {
-            bail!("exp needs a static tile shape");
+            bail!("`exp` needs a static tile shape");
         }
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
@@ -150,7 +150,7 @@ impl<'c> Codegen<'c> {
             src.clone()
         } else {
             if src.shape.contains(&DYN) {
-                bail!("log needs a static tile shape");
+                bail!("`log` needs a static tile shape");
             }
             self.alloc_tile_shaped(block, src.elem, &src.shape)?
         };
@@ -168,11 +168,11 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if !self.is_float(src.elem) {
-            bail!("log needs a float tile, got {}", src.elem);
+            bail!("`log` needs a float tile, got {}", src.elem);
         }
 
         if src.shape.contains(&DYN) {
-            bail!("log needs a static tile shape");
+            bail!("`log` needs a static tile shape");
         }
 
         self.distribute(block, out, 1, true, |cg, blk, idx| {
@@ -195,7 +195,7 @@ impl<'c> Codegen<'c> {
             src.clone()
         } else {
             if src.shape.contains(&DYN) {
-                bail!("round needs a static tile shape");
+                bail!("`round` needs a static tile shape");
             }
             self.alloc_tile_shaped(block, src.elem, &src.shape)?
         };
@@ -211,10 +211,10 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if !self.is_float(src.elem) {
-            bail!("round needs a float tile, got {}", src.elem);
+            bail!("`round` needs a float tile, got {}", src.elem);
         }
         if src.shape.contains(&DYN) {
-            bail!("round needs a static tile shape");
+            bail!("`round` needs a static tile shape");
         }
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;
@@ -236,7 +236,7 @@ impl<'c> Codegen<'c> {
             src.clone()
         } else {
             if src.shape.contains(&DYN) {
-                bail!("tanh needs a static tile shape");
+                bail!("`tanh` needs a static tile shape");
             }
             self.alloc_tile_shaped(block, src.elem, &src.shape)?
         };
@@ -252,10 +252,10 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if !self.is_float(src.elem) {
-            bail!("tanh needs a float tile, got {}", src.elem);
+            bail!("`tanh` needs a float tile, got {}", src.elem);
         }
         if src.shape.contains(&DYN) {
-            bail!("tanh needs a static tile shape");
+            bail!("`tanh` needs a static tile shape");
         }
         self.distribute(block, out, 1, true, |cg, blk, idx| {
             let v = cg.push(blk, memref::load(src.mem, idx, cg.loc))?;

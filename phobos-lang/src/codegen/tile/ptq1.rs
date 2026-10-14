@@ -129,7 +129,7 @@ impl<'c> Codegen<'c> {
     /// The second half is word 1's last two, word 2's five, and the tail.
     pub(super) fn pt_gemm_decode(&mut self, block: &Block<'c>, stage: &Stage<'_, 'c>, regs: &[Value<'c, 'c>]) -> Result<()> {
         let [w0, w1, w2, tails, scales, q, half] = regs else {
-            bail!("ptq1_qgemm_t decodes seven registers, got {}", regs.len());
+            bail!("`ptq1_qgemm_t` decodes seven registers, got {}", regs.len());
         };
         let zero = self.const_i32(block, 0)?;
         let first = self.push(

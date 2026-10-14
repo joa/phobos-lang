@@ -757,7 +757,7 @@ impl Verifier<'_> {
                     _ => self.ir.operands(op).last().map(|&t| self.rank(t)),
                 };
                 if rank.is_some_and(|rank| *d >= rank) {
-                    self.err(op, format!("iota axis {d} past the target's rank"));
+                    self.err(op, format!("`iota` axis {d} past the target's rank"));
                 }
             }
             super::Tree::Unary(_, x) => self.check_tree(op, x),

@@ -83,7 +83,7 @@ If no loop in the kernel ends up pipelined, compiling a kernel marked
 declined; when there is no candidate loop at all, it reads:
 
 ```text
-kernel `flat`: @pipeline asserts this kernel can be pipelined, but nothing in it did: no loop in the kernel is shaped for pipelining
+`@pipeline` found nothing in kernel `flat` to pipeline: no loop in the kernel is shaped for pipelining
 ```
 
 ```phobos expect-error

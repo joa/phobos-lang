@@ -26,7 +26,7 @@ impl Build {
             && let Some(Binding::Frags(fa)) = self.lookup(n)
         {
             if op != AssignOp::Set {
-                bail!("fragment accumulator '{n}' cannot be accumulated into a tile");
+                bail!("fragment accumulator `{n}` cannot be accumulated into a tile");
             }
             self.stmt(OpKind::FragStore, &[fa, target]);
             return Ok(());
@@ -134,7 +134,7 @@ impl Build {
             let (ash, bsh, tsh) = (self.shape(a), self.shape(b), self.shape(target));
             if transpose {
                 if ash.len() != 2 || bsh.len() != 2 {
-                    bail!("dot_t expects rank-2 tiles");
+                    bail!("`dot_t` expects rank-2 tiles");
                 }
                 self.check_shapes(&[ash[1]], &[bsh[1]], "dot_t contraction dim")?;
                 self.check_shapes(&[ash[0], bsh[0]], &tsh, "dot_t result")?;
@@ -277,7 +277,7 @@ impl Build {
 
     pub(crate) fn check_matmul_shapes(&self, a: &[i64], b: &[i64], out: &[i64]) -> Result<()> {
         if a.len() != 2 || b.len() != 2 || out.len() != 2 {
-            bail!("dot expects rank-2 tiles");
+            bail!("`dot` expects rank-2 tiles");
         }
         self.check_shapes(&[a[1]], &[b[0]], "dot contraction dim")?;
         self.check_shapes(&[a[0], b[1]], out, "dot result")

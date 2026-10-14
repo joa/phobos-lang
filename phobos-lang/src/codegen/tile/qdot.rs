@@ -108,22 +108,22 @@ impl<'c> Codegen<'c> {
             }
         }
         if a.elem != self.i8_t || w.elem != self.i8_t {
-            bail!("qdot_t contracts int8 operands");
+            bail!("`qdot_t` contracts int8 operands");
         }
         if asc.elem != self.f32_t || wsc.elem != self.f32_t {
-            bail!("qdot_t scales must be f32");
+            bail!("`qdot_t` scales must be f32");
         }
         if !self.has_dp4a() {
-            bail!("qdot_t needs dp4a (sm_61 or later)");
+            bail!("`qdot_t` needs dp4a (sm_61 or later)");
         }
         let (rows, cols) = (a.shape[0], w.shape[0]);
         if rows == DYN || cols == DYN {
-            bail!("qdot_t needs a static output shape");
+            bail!("`qdot_t` needs a static output shape");
         }
         self.check_shapes(&[rows], &[asc.shape[0]], "qdot_t a scale rows")?;
         self.check_shapes(&[cols], &[wsc.shape[0]], "qdot_t w scale rows")?;
         if self.cta_threads % WARP != 0 {
-            bail!("qdot_t needs a CTA that is a whole number of warps");
+            bail!("`qdot_t` needs a CTA that is a whole number of warps");
         }
 
         let out = self.alloc_tile_shaped(block, self.f32_t, &[rows, cols])?;

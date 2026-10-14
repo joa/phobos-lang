@@ -1,0 +1,21 @@
+error: unknown identifier `scael`
+ --> tests/ui/did_you_mean.ph:5:29
+  |
+5 |     let x = A[ctx.thread] * scael
+  |                             ^^^^^ not found in this scope
+help: a similar name exists: `scale`
+  |
+5 |     let x = A[ctx.thread] * scale
+  |                             ~~~~~
+
+error: unknown function `sqtr`
+ --> tests/ui/did_you_mean.ph:6:21
+  |
+6 |     B[ctx.thread] = sqtr(x)
+  |                     ^^^^^^^ not a built-in
+help: a similar name exists: `sqrt`
+  |
+6 |     B[ctx.thread] = sqrt(x)
+  |                     ~~~~
+
+error: aborting due to 2 previous errors

@@ -359,11 +359,11 @@ impl<'c> Codegen<'c> {
         src: &MemVal<'c>,
     ) -> Result<MemVal<'c>> {
         if src.shape.len() != 2 {
-            bail!("flat expects a rank-2 tile");
+            bail!("`flat` expects a rank-2 tile");
         }
 
         if src.global.is_none() {
-            bail!("flat expects a declared tile, not a slice of one");
+            bail!("`flat` expects a declared tile, not a slice of one");
         }
 
         if src.row_stride.is_some() || src.swizzle.is_some() {
@@ -372,7 +372,7 @@ impl<'c> Codegen<'c> {
 
         let [rows, cols] = [src.shape[0], src.shape[1]];
         if rows == DYN || cols == DYN {
-            bail!("flat expects a static tile shape");
+            bail!("`flat` expects a static tile shape");
         }
 
         let len = rows * cols;

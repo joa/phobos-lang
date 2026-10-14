@@ -40,7 +40,7 @@ impl<'c> Codegen<'c> {
         self.check_matmul_elems(a, b, out, "dot_t")?;
         let kd = a.shape[1];
         if kd == DYN {
-            bail!("dot_t needs a static contraction dim");
+            bail!("`dot_t` needs a static contraction dim");
         }
 
         if epilogue.is_none()
@@ -118,17 +118,17 @@ impl<'c> Codegen<'c> {
         src: &MemVal<'c>,
     ) -> Result<MemVal<'c>> {
         if src.shape.len() != 2 {
-            bail!("cumsum expects a rank-2 tile");
+            bail!("`cumsum` expects a rank-2 tile");
         }
 
         let (rows, cols) = (src.shape[0], src.shape[1]);
         if rows == DYN || cols == DYN {
-            bail!("cumsum needs a static tile shape");
+            bail!("`cumsum` needs a static tile shape");
         }
 
         let elem = src.elem;
         if !self.is_float(elem) {
-            bail!("cumsum needs a float element type");
+            bail!("`cumsum` needs a float element type");
         }
 
         let out = self.alloc_tile_shaped(block, elem, &[rows, cols])?;
@@ -184,15 +184,15 @@ impl<'c> Codegen<'c> {
         src: &MemVal<'c>,
     ) -> Result<MemVal<'c>> {
         if src.shape.len() != 2 {
-            bail!("tril expects a rank-2 tile");
+            bail!("`tril` expects a rank-2 tile");
         }
 
         if src.shape.contains(&DYN) {
-            bail!("tril needs a static tile shape");
+            bail!("`tril` needs a static tile shape");
         }
 
         if !self.is_float(src.elem) {
-            bail!("tril needs a float element type");
+            bail!("`tril` needs a float element type");
         }
 
         let out = if src.owned && src.swizzle.is_none() {
@@ -236,12 +236,12 @@ impl<'c> Codegen<'c> {
         src: &MemVal<'c>,
     ) -> Result<MemVal<'c>> {
         if src.shape.len() != 2 {
-            bail!("transpose expects a rank-2 tile");
+            bail!("`transpose` expects a rank-2 tile");
         }
 
         let (rows, cols) = (src.shape[0], src.shape[1]);
         if rows == DYN || cols == DYN {
-            bail!("transpose needs a static tile shape");
+            bail!("`transpose` needs a static tile shape");
         }
 
         let out = self.alloc_tile_shaped(block, src.elem, &[cols, rows])?;

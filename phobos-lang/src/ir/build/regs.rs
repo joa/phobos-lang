@@ -26,15 +26,15 @@ impl Build {
         let threads = self.cta_threads;
         ensure!(
             elems % threads == 0,
-            "@registers({name}): {elems} elements do not split evenly over {threads} threads"
+            "`@registers({name})`: {elems} elements do not split evenly over {threads} threads"
         );
         ensure!(
             elems / threads <= MAX_REGS_PER_THREAD,
-            "@registers({name}): {} elements a thread, over the {MAX_REGS_PER_THREAD} a register tile may hold",
+            "`@registers({name})`: {} elements a thread, over the {MAX_REGS_PER_THREAD} a register tile may hold",
             elems / threads
         );
         let Some(value) = value else {
-            bail!("@registers({name}) needs an initial value");
+            bail!("`@registers({name})` needs an initial value");
         };
         let ty = Type::Regs(RegsType { elem, shape: shape.clone() });
         let regs = match self.emit_expr(value)? {
@@ -55,11 +55,11 @@ impl Build {
     /// `name = value` or `name += value` on a register tile.
     pub(crate) fn emit_regs_assign(&mut self, name: &str, regs: ValueId, op: AssignOp, value: &Expr) -> Result<()> {
         let Type::Regs(ty) = self.ir.ty(regs).clone() else {
-            bail!("'{name}' is not a register tile");
+            bail!("`{name}` is not a register tile");
         };
         let Some((mut tree, mut operands)) = self.plan_regs(value, ty.elem, &ty.shape)? else {
             bail!(
-                "register tile '{name}' takes only updates that read it at the element they write; \
+                "register tile `{name}` takes only updates that read it at the element they write; \
                  store it to a tile for anything else"
             );
         };
@@ -119,7 +119,7 @@ impl Build {
                     target: Expr { kind: ExprKind::Var(n), .. },
                     ..
                 } if matches!(self.lookup(n), Some(Binding::Regs(_))) => {
-                    bail!("register tile '{n}' is updated inside {what}; only straight-line code and `for` loops may update one")
+                    bail!("register tile `{n}` is updated inside {what}; only straight-line code and `for` loops may update one")
                 }
                 Stmt::For { body, .. } | Stmt::While { body, .. } => self.check_regs_unassigned(body, what)?,
                 Stmt::If { then, r#else, .. } => {

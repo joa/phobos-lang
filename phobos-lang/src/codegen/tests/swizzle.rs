@@ -66,7 +66,7 @@ fn swizzle_insists_or_fails_with_the_reason() {
     assert!(emit_mlir_sync(&projection("@swizzle", ""), "sm_75").contains("ldmatrix"));
     // A plain copy out of the tile would read it unpermuted.
     let e = emit_err(&projection("@swizzle(on)", "    E[pn * 64 :+ 64, kt :+ 128] = w\n"));
-    assert!(e.contains("cannot swizzle tile 'w'"), "{e}");
+    assert!(e.contains("cannot swizzle tile `w`"), "{e}");
     // Without the attribute the same kernel compiles, its `w` unswizzled.
     emit_mlir(&projection("", "    E[pn * 64 :+ 64, kt :+ 128] = w\n"));
 }
@@ -93,7 +93,7 @@ kernel proj(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }
 ";
     let e = emit_err(narrow);
-    assert!(e.contains("@swizzle: no shared tile"), "{e}");
+    assert!(e.contains("`@swizzle`: no shared tile"), "{e}");
     let e = emit_err(&projection("@swizzle(sideways)", ""));
-    assert!(e.contains("@swizzle takes on or off"), "{e}");
+    assert!(e.contains("`@swizzle` takes `on` or `off`"), "{e}");
 }

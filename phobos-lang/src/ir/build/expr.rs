@@ -20,11 +20,11 @@ impl Build {
                     Ok(Rv::Scalar(self.value(OpKind::Load, &[slot], Type::Scalar(elem))))
                 }
                 Some(Binding::Tensor(_)) => {
-                    bail!("tensor '{name}' used as a value; index or slice it")
+                    bail!("tensor `{name}` used as a value; index or slice it")
                 }
                 Some(Binding::View(t) | Binding::Tile(t)) => Ok(Rv::Tile(t)),
                 Some(Binding::Frags(_)) => bail!(
-                    "fragment accumulator '{name}' can only be scaled, dot-accumulated, or stored"
+                    "fragment accumulator `{name}` can only be scaled, dot-accumulated, or stored"
                 ),
                 Some(Binding::Regs(r)) => Ok(Rv::Tile(self.materialize_regs(r)?)),
                 None => match self.shape_env.get(name) {
@@ -277,7 +277,7 @@ impl Build {
         match self.lookup(name) {
             Some(binding) => match &binding {
                 Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) => Ok((*v, binding.clone())),
-                _ => bail!("'{name}' is not a tensor or tile"),
+                _ => bail!("`{name}` is not a tensor or tile"),
             },
             None => Err(self.unknown(name)),
         }

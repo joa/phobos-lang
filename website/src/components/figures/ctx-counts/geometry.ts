@@ -10,7 +10,8 @@ import { wrapText } from "../ctx-hierarchy/text"
 
 export const ERROR_KEY = "website/src/content/docs/docs/ctx/counts.mdx#1"
 export const INVALID_THREADS = 48
-export const LAUNCH_ERROR: string = (errors as Record<string, string>)[ERROR_KEY]
+// Drawn as plain text, so without the backticks that mark code.
+export const LAUNCH_ERROR: string = (errors as Record<string, string>)[ERROR_KEY].replaceAll("`", "")
 export const MAX_ROWS = MAX_THREADS / LANES
 
 export type CellState = "on" | "warn" | "off"

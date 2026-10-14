@@ -82,13 +82,13 @@ The compiler enforces three rules for them.
 
 | Rule | Error when broken |
 | --- | --- |
-| They run only under uniform control: every thread must reach them. | `` `op` runs once per CTA, so every thread must reach it `` |
-| Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` `op` takes `x`, which differs between lanes `` |
-| A buffer (a tensor or a shared tile) stored per thread, with a varying value, index or control, is read by no CTA-wide op until a `barrier()`. | `` `op` reads `t` after a per-thread store to it with no `barrier()` between `` |
+| They run only under uniform control: every thread must reach them. | `` a CTA-wide op sits under control that differs between lanes `` |
+| Their scalar operands are uniform, including slice offsets: a slice at a per-thread offset is not a tile. | `` a CTA-wide op takes `x`, which differs between lanes `` |
+| A buffer (a tensor or a shared tile) stored per thread, with a varying value, index or control, is read by no CTA-wide op until a `barrier()`. | `` `t` is read after a per-thread store to it with no `barrier()` between `` |
 
-The messages above are the spec's short forms. The compiler's message goes on
-to name what made the control or the operand differ, and names `op` by the
-operation it compiled the statement to.
+Each message points at the statement, and labels what made it wrong: the
+condition the control differs on, the value that differs, or the per-thread
+store that has not been fenced.
 
 ### A tile operation under per-thread control
 
@@ -106,8 +106,8 @@ kernel k(A: tensor<f32>[1, 32], O: tensor<f32>[1, 32]) {
 }
 ```
 
-The compiler reports that the operation runs once per CTA, so every thread
-must reach it. The same holds for warp-uniform control: `if ctx.warp == 0 {
+The compiler points at the statement, which every thread of the CTA must
+reach, and at the condition `ctx.lane == 0` that lets only some of them. The same holds for warp-uniform control: `if ctx.warp == 0 {
 t = t * 2.0 }` is rejected as well, because the other warps never arrive.
 
 A per-thread branch that has closed is no problem. The control after it is

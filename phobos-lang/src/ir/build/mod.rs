@@ -7,6 +7,7 @@ mod hoist;
 mod lane_sum;
 mod lanes;
 mod matmul;
+mod names;
 mod pipeline;
 mod regs;
 mod slice;
@@ -29,6 +30,7 @@ use super::{
 use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Span, Stmt, Type as AstType};
 use crate::diag::{Diagnostic, Diagnostics, SourceFile};
 
+pub(crate) use super::at_op::locate;
 pub(crate) use crate::shape::DYN;
 
 /// What the build asks the chip. The `@tensorcore` attributes are folded
@@ -145,27 +147,6 @@ pub(crate) struct Saved {
     trimmed_ivs: usize,
     pending_ivs: usize,
     fusing_regs: bool,
-}
-
-/// `e` placed at `span` in `source`: an error about an op at the op's span,
-/// any other at `span`. One placed already, a [`Poisoned`] one, and any at an
-/// empty span pass through, so the innermost place wins.
-pub(crate) fn locate(source: &Arc<SourceFile>, ir: &Ir, e: anyhow::Error, span: Span) -> anyhow::Error {
-    if e.is::<Diagnostics>() || e.is::<Poisoned>() {
-        return e;
-    }
-    let span = match e.downcast_ref::<super::AtOp>() {
-        Some(at) if ir.span(at.op) != Span::default() => ir.span(at.op),
-        _ => span,
-    };
-    if span == Span::default() {
-        return e;
-    }
-    let message = match e.downcast_ref::<super::AtOp>() {
-        Some(at) => at.message.clone(),
-        None => format!("{e:#}"),
-    };
-    Diagnostics::new(source.clone(), vec![Diagnostic::error(message).primary(span, "")]).into()
 }
 
 /// Builds one kernel's graph. Names are resolved here and nowhere else,
@@ -306,10 +287,7 @@ impl Build {
                     Binding::Tensor(self.value(OpKind::AssumeAlign, &[arg], ty))
                 }
                 AstType::Tensor(..) => Binding::Tensor(arg),
-                AstType::Tile(..) => bail!(
-                    "kernel '{}': tile-typed parameters are not supported (use tensor instead)",
-                    kernel.name
-                ),
+                AstType::Tile(..) => bail!("a kernel parameter cannot be a tile; declare it as a `tensor`"),
             };
             self.bind(&param.name, binding);
 
@@ -333,7 +311,7 @@ impl Build {
         // A declaration that failed was reported where it was written.
         let missing = |n: &&String| !self.regs_declared.contains(n) && !self.poisoned.contains(*n);
         if let Some(name) = self.registers.iter().find(missing) {
-            bail!("@registers({name}) names no `var {name}: tile<..>[..]` of the kernel");
+            bail!("`@registers({name})` names no `var {name}: tile<..>[..]` of the kernel");
         }
         self.scopes.pop();
         Ok(())
@@ -380,10 +358,10 @@ impl Build {
                     AstLiteral::Ident(sym) => *self
                         .shape_env
                         .get(sym)
-                        .ok_or_else(|| anyhow!("@aligned({name} = {sym}): unknown constant"))?,
-                    other => bail!("@aligned({name}): expected an integer, found {other:?}"),
+                        .ok_or_else(|| anyhow!("`@aligned({name} = {sym})`: unknown constant"))?,
+                    other => bail!("`@aligned({name})`: expected an integer, found {other:?}"),
                 };
-                anyhow::ensure!(div > 0, "@aligned({name}): the divisor must be positive");
+                anyhow::ensure!(div > 0, "`@aligned({name})`: the divisor must be positive");
                 Ok((name.clone(), div))
             })
             .collect()
@@ -397,10 +375,7 @@ impl Build {
                 shape: self.tensor_shape(dims).iter().map(|&d| extent(d)).collect(),
                 div: self.declared_divs(kernel, dims)?,
             }),
-            AstType::Tile(..) => bail!(
-                "kernel '{}': tile-typed parameters are not supported (use tensor instead)",
-                kernel.name
-            ),
+            AstType::Tile(..) => bail!("a kernel parameter cannot be a tile; declare it as a `tensor`"),
         })
     }
 
@@ -452,7 +427,12 @@ impl Build {
         if self.poisoned.contains(name) {
             return Poisoned.into();
         }
-        anyhow!("unknown identifier '{name}'")
+        let names = self.scopes.iter().flat_map(|s| s.keys()).map(String::as_str);
+        let near = crate::diag::similar(name, names);
+        super::AtOp::unplaced(format!("unknown identifier `{name}`"))
+            .label("not found in this scope")
+            .instead(name, near)
+            .into()
     }
 
     /// The state a failing statement may leave half changed.
@@ -680,7 +660,7 @@ impl Build {
             .map(|d| match d {
                 Dim::Int(n) => Ok(*n),
                 Dim::Sym(name) => self.shape_env.get(name).copied().ok_or_else(|| {
-                    anyhow!("tile dim '{name}' must be a constant (literal or @autotune symbol)")
+                    anyhow!("tile dim `{name}` must be a constant (literal or `@autotune` symbol)")
                 }),
             })
             .collect()

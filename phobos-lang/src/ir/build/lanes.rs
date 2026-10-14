@@ -26,48 +26,49 @@ impl Build {
         }
         Ok(Some(match callee {
             "sum" if args.len() == 1 => self.emit_lane_sum(&args[0])?,
+            "sum" => bail!("`sum` takes one argument, got {}", args.len()),
             "elem" => {
                 let [slice, at] = args else {
-                    bail!("elem takes a thread's run and which element of it, as `elem(X[r, k :+ 4], 2)`");
+                    bail!("`elem` takes a thread's run and which element of it, as `elem(X[r, k :+ 4], 2)`");
                 };
                 self.emit_elem(slice, at)?
             }
             // Statements in practice; the zero is what the source sees.
             "store" => {
                 let [slice, values @ ..] = args else {
-                    bail!("store takes a thread's run and its values, as `store(Y[r, k :+ 2], a, b)`");
+                    bail!("`store` takes a thread's run and its values, as `store(Y[r, k :+ 2], a, b)`");
                 };
                 self.emit_lane_store(slice, values)?
             }
             // A statement in practice; the zero is what the source sees.
             "barrier" => {
-                ensure!(args.is_empty(), "barrier takes no arguments");
+                ensure!(args.is_empty(), "`barrier` takes no arguments");
                 self.stmt(OpKind::Barrier, &[]);
                 Rv::Scalar(self.const_index(0))
             }
             "word" => match args {
                 [slice] => self.emit_word(slice, &Expr::int(0))?,
                 [slice, at] => self.emit_word(slice, at)?,
-                _ => bail!("word takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
+                _ => bail!("`word` takes a thread's bytes and which word of them, as `word(B[r, k :+ 16], 2)`"),
             },
             "dp4a" => {
                 let [x, y, acc] = args else {
-                    bail!("dp4a takes two words and an accumulator");
+                    bail!("`dp4a` takes two words and an accumulator");
                 };
                 let operands = [self.emit_index(x, "dp4a")?, self.emit_index(y, "dp4a")?, self.emit_index(acc, "dp4a")?];
-                ensure!(self.target.has_dp4a, "dp4a: this target has no dp4a");
+                ensure!(self.target.has_dp4a, "`dp4a`: this target has no dp4a");
                 Rv::Scalar(self.value(OpKind::Dp4a, &operands, Type::INDEX))
             }
             "popcount" => {
                 let [x] = args else {
-                    bail!("popcount takes one integer");
+                    bail!("`popcount` takes one integer");
                 };
                 let x = self.emit_index(x, "popcount")?;
                 Rv::Scalar(self.value(OpKind::PopCount, &[x], Type::INDEX))
             }
             "byteperm" => {
                 let [x, y, sel] = args else {
-                    bail!("byteperm takes two words and a selector");
+                    bail!("`byteperm` takes two words and a selector");
                 };
                 let operands = [
                     self.emit_index(x, "byteperm")?,
@@ -78,7 +79,7 @@ impl Build {
             }
             "f16bits" => {
                 let [bits] = args else {
-                    bail!("f16bits takes one integer, the half's bits");
+                    bail!("`f16bits` takes one integer, the half's bits");
                 };
                 let bits = self.emit_index(bits, "f16bits")?;
                 Rv::Scalar(self.value(OpKind::F16Bits, &[bits], Type::Scalar(Scalar::F16)))

@@ -68,7 +68,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<MemVal<'c>> {
         let (md, nd) = (a.shape[0], w.shape[0]);
         if md == DYN || nd == DYN {
-            bail!("qmma_t needs a static output shape");
+            bail!("`qmma_t` needs a static output shape");
         }
         let out = self.alloc_tile_shaped(block, self.f32_t, &[md, nd])?;
         self.qmma_t_into(block, a, asc, w, wsc, form, &out)?;
@@ -93,10 +93,10 @@ impl<'c> Codegen<'c> {
         out: &MemVal<'c>,
     ) -> Result<()> {
         if out.elem != self.f32_t {
-            bail!("qmma_t produces f32");
+            bail!("`qmma_t` produces f32");
         }
         if out.is_masked() {
-            bail!("qmma_t needs a fully in-bounds destination");
+            bail!("`qmma_t` needs a fully in-bounds destination");
         }
         for (v, what) in [
             (a, "qmma_t a"),
@@ -115,26 +115,26 @@ impl<'c> Codegen<'c> {
             }
         }
         if a.elem != self.i8_t || w.elem != self.i8_t {
-            bail!("qmma_t contracts int8 operands");
+            bail!("`qmma_t` contracts int8 operands");
         }
         if asc.elem != self.f32_t || wsc.elem != self.f32_t {
-            bail!("qmma_t scales must be f32");
+            bail!("`qmma_t` scales must be f32");
         }
         if !self.has_int8_mma() {
-            bail!("qmma_t needs the integer tensor cores (sm_75 or later)");
+            bail!("`qmma_t` needs the integer tensor cores (sm_75 or later)");
         }
         let (md, nd) = (a.shape[0], w.shape[0]);
         if md == DYN || nd == DYN {
-            bail!("qmma_t needs a static output shape");
+            bail!("`qmma_t` needs a static output shape");
         }
         self.check_shapes(&[md, nd], &out.shape, "qmma_t destination")?;
         if md % IMMA_TILE != 0 || nd % IMMA_TILE != 0 {
-            bail!("qmma_t needs an output tile that is a multiple of {IMMA_TILE} both ways");
+            bail!("`qmma_t` needs an output tile that is a multiple of {IMMA_TILE} both ways");
         }
         self.check_shapes(&[md], &[asc.shape[0]], "qmma_t a scale rows")?;
         self.check_shapes(&[nd], &[wsc.shape[1]], "qmma_t w scale columns")?;
         if self.cta_threads % WARP != 0 {
-            bail!("qmma_t needs a CTA that is a whole number of warps");
+            bail!("`qmma_t` needs a CTA that is a whole number of warps");
         }
 
         let (i32_t, f32_t) = (self.i32_t, self.f32_t);

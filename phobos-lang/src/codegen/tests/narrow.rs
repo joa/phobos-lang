@@ -66,7 +66,7 @@ fn converting_to_a_non_numeric_type_is_an_error() {
         }",
     );
     assert!(
-        err.contains("unknown function 'bool'"),
+        err.contains("unknown function `bool`"),
         "unexpected error: {err}"
     );
 }

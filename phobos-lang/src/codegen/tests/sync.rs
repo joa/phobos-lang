@@ -357,7 +357,7 @@ fn atomic_cas_takes_only_an_i32_tensor() {
             let old = atomic_cas(L, 0, 0, 1)
         }",
     );
-    assert!(e.contains("atomic_cas expects an i32 tensor"), "got: {e}");
+    assert!(e.contains("`atomic_cas` expects an i32 tensor"), "got: {e}");
 }
 
 #[test]

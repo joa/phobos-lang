@@ -69,7 +69,8 @@ describe("ctx rules", () => {
 
 describe("ctx-counts model", () => {
   it("uses the compiler's error from the docs fence", () => {
-    expect(LAUNCH_ERROR).toBe((errors as Record<string, string>)[ERROR_KEY])
+    expect(LAUNCH_ERROR).toBe((errors as Record<string, string>)[ERROR_KEY].replaceAll("`", ""))
+    expect(LAUNCH_ERROR).not.toContain("`")
     expect(LAUNCH_ERROR).toContain("(got 48)")
   })
 

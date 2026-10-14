@@ -8,11 +8,11 @@
 // bounds. Loops can raise a `var` after it was read, so the analysis runs to
 // a fixed point.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use anyhow::Result;
 
-use super::{BlockId, Def, Ir, OpId, OpKind, Space, ValueId};
+use super::{AtOp, BlockId, Def, Ir, OpId, OpKind, Space, ValueId};
 use crate::ast::lanes::Group;
 
 /// How far a value may differ between threads.
@@ -275,25 +275,55 @@ fn describe(ir: &Ir, value: ValueId) -> String {
     ir.name(value).map_or_else(|| "a value".into(), |n| format!("`{n}`"))
 }
 
+/// The op computing the condition or bound that sets `block`'s control:
+/// the innermost enclosing `if` or loop deciding on a value that varying.
+fn control_source(ir: &Ir, u: &Uniformity, mut block: BlockId) -> Option<OpId> {
+    let kind = u.control(block);
+    while let Some(op) = ir.parent_op(block) {
+        let deciding = match ir.kind(op) {
+            OpKind::If => ir.operands(op)[..1].to_vec(),
+            OpKind::For(info) => ir.operands(op)[..info.bound_operands()].to_vec(),
+            OpKind::While => {
+                let before = ir.blocks_of(op)[0];
+                let cond = ir.ops(before).last().filter(|&&t| ir.kind(t).is_terminator());
+                cond.and_then(|&t| ir.operands(t).first().copied()).into_iter().collect()
+            }
+            _ => Vec::new(),
+        };
+        if let Some(&v) = deciding.iter().find(|&&v| u.of(v) >= kind) {
+            return ir.def_op(v);
+        }
+        block = ir.parent_block(op);
+    }
+    None
+}
+
+const ONCE_PER_CTA: &str = "tile ops, barriers, atomics and the intrinsics run once per CTA, every thread taking part";
+
 /// The rules that keep code safe once values differ between threads.
 pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
     for op in ir.all_ops() {
-        let control = u.control(ir.parent_block(op));
+        let block = ir.parent_block(op);
+        let control = u.control(block);
         let kind = ir.kind(op);
         let operands = ir.operands(op);
+        let diverged = |message: String, label: &str| {
+            AtOp::new(op, message)
+                .label(label)
+                .with(control_source(ir, u, block), format!("this {}", control.describe()))
+        };
         match kind {
             // A `var`'s slot is each thread's own.
             OpKind::Alloc if is_private(ir, ir.result(op)) => continue,
-            OpKind::Shuffle { .. } if control > Kind::Warp => return Err(super::at_op(op, format!(
-                "a shuffle needs every lane of the warp, but the control it sits under {}",
-                control.describe()
-            ))),
+            OpKind::Shuffle { .. } if control > Kind::Warp => {
+                let message = format!("a warp collective sits under control that {}", control.describe());
+                return Err(diverged(message, "every lane of the warp must reach this").into());
+            }
             OpKind::Shuffle { .. } => continue,
-            OpKind::Exchange if control != Kind::Uniform => return Err(super::at_op(op, format!(
-                "a collective over `ctx.thread` needs every thread of the CTA, but the control \
-                 it sits under {}",
-                control.describe()
-            ))),
+            OpKind::Exchange if control != Kind::Uniform => {
+                let message = format!("a collective over `ctx.thread` sits under control that {}", control.describe());
+                return Err(diverged(message, "every thread of the CTA must reach this").into());
+            }
             OpKind::Exchange => continue,
             _ => {}
         }
@@ -301,23 +331,26 @@ pub fn check(ir: &Ir, u: &Uniformity) -> Result<()> {
             continue;
         }
         if control != Kind::Uniform {
-            return Err(super::at_op(op, format!(
-                "`{}` runs once per CTA, so every thread must reach it, but the control \
-                 it sits under {}",
-                kind.name(),
-                control.describe()
-            )));
+            let what = if matches!(kind, OpKind::Barrier) { "`barrier()`" } else { "a CTA-wide op" };
+            let message = format!("{what} sits under control that {}", control.describe());
+            return Err(diverged(message, "every thread of the CTA must reach this")
+                .note(ONCE_PER_CTA)
+                .into());
         }
         if let Some(&v) = operands.iter().find(|&&v| u.of(v) != Kind::Uniform) {
-            return Err(super::at_op(op, format!(
-                "`{}` takes {}, which {}; a CTA-wide op needs the same value in every thread",
-                kind.name(),
-                describe(ir, v),
-                u.of(v).describe()
-            )));
+            let varies = u.of(v).describe();
+            let message = match ir.name(v) {
+                Some(n) => format!("a CTA-wide op takes `{n}`, which {varies}"),
+                None => format!("a CTA-wide op takes a value that {varies}"),
+            };
+            return Err(AtOp::new(op, message)
+                .label("needs the same value in every thread")
+                .with(ir.def_op(v), format!("this {varies}"))
+                .note(ONCE_PER_CTA)
+                .into());
         }
     }
-    let mut dirty = HashSet::new();
+    let mut dirty = Dirty::new();
     Order { ir, u }.block(ir.entry(), &mut dirty)
 }
 
@@ -338,6 +371,10 @@ fn per_thread_store(ir: &Ir, u: &Uniformity, op: OpId) -> Option<ValueId> {
     (kind != Kind::Uniform).then(|| root(ir, operands[1])).flatten()
 }
 
+/// Buffers stored per thread since the last `barrier()`, each with its
+/// latest such store.
+type Dirty = HashMap<ValueId, OpId>;
+
 /// Buffers stored per thread since the last `barrier()`, walked in program
 /// order. A CTA-wide access to one before a barrier may miss another
 /// thread's store.
@@ -347,14 +384,14 @@ struct Order<'a> {
 }
 
 impl Order<'_> {
-    fn block(&self, block: BlockId, dirty: &mut HashSet<ValueId>) -> Result<()> {
+    fn block(&self, block: BlockId, dirty: &mut Dirty) -> Result<()> {
         for &op in self.ir.ops(block) {
             self.op(op, dirty)?;
         }
         Ok(())
     }
 
-    fn op(&self, op: OpId, dirty: &mut HashSet<ValueId>) -> Result<()> {
+    fn op(&self, op: OpId, dirty: &mut Dirty) -> Result<()> {
         let ir = self.ir;
         match ir.kind(op) {
             OpKind::Barrier | OpKind::GridBarrier => {
@@ -365,7 +402,7 @@ impl Order<'_> {
             // no `else`, the path that takes neither.
             OpKind::If => {
                 let blocks = ir.blocks_of(op);
-                let mut out: HashSet<ValueId> = if blocks.len() == 1 { dirty.clone() } else { HashSet::new() };
+                let mut out = if blocks.len() == 1 { dirty.clone() } else { Dirty::new() };
                 for &b in blocks {
                     let mut d = dirty.clone();
                     self.block(b, &mut d)?;
@@ -393,19 +430,20 @@ impl Order<'_> {
             ir.kind(op),
             OpKind::Load | OpKind::Store | OpKind::LaneLoad { .. } | OpKind::LaneStore { .. }
         ) {
-            dirty.extend(stored);
+            dirty.extend(stored.map(|b| (b, op)));
             return Ok(());
         }
-        let clash = ir.operands(op).iter().filter_map(|&v| root(ir, v)).find(|r| dirty.contains(r) && Some(*r) != stored);
+        let clash = ir.operands(op).iter().filter_map(|&v| root(ir, v)).find(|r| dirty.contains_key(r) && Some(*r) != stored);
         if let Some(buf) = clash {
-            return Err(super::at_op(op, format!(
-                "`{}` reads {} after a per-thread store to it with no `barrier()` between: \
-                 another thread's store may not have landed",
-                ir.kind(op).name(),
-                describe(ir, buf)
-            )));
+            let name = describe(ir, buf);
+            return Err(AtOp::new(op, format!("{name} is read after a per-thread store to it with no `barrier()` between"))
+                .label(format!("every thread reads {name} here"))
+                .with(dirty.get(&buf).copied(), "each thread stores its own part here")
+                .note("another thread's store may not have landed when this one reads")
+                .help("put a `barrier()` between the store and the read")
+                .into());
         }
-        dirty.extend(stored);
+        dirty.extend(stored.map(|b| (b, op)));
         Ok(())
     }
 }

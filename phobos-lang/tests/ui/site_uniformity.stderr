@@ -1,7 +1,11 @@
-error: `fused (mul #0 s#1)` runs once per CTA, so every thread must reach it, but the control it sits under differs between lanes
+error: a CTA-wide op sits under control that differs between lanes
  --> tests/ui/site_uniformity.ph:6:5
   |
+5 |   if ctx.lane == 0 {
+  |      ------------- this differs between lanes
 6 |     t = t * 2.0
-  |     ^^^^^^^^^^^
+  |     ^^^^^^^^^^^ every thread of the CTA must reach this
+  |
+  = note: tile ops, barriers, atomics and the intrinsics run once per CTA, every thread taking part
 
 error: aborting due to 1 previous error

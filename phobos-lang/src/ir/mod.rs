@@ -1,3 +1,4 @@
+mod at_op;
 pub mod build;
 pub mod builder;
 pub mod elem;
@@ -14,6 +15,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 
+pub use at_op::{AtOp, at_op};
 pub use builder::{At, Builder};
 pub use elem::*;
 pub use lanes::{Bytes, ThreadIndex};
@@ -97,30 +99,6 @@ struct BlockData {
     /// None only for the entry block, and for a block created but not yet
     /// handed to an op.
     parent: Option<OpId>,
-}
-
-/// An error about one op, which the build places at the op's span.
-#[derive(Debug)]
-pub struct AtOp {
-    pub op: OpId,
-    pub message: String,
-}
-
-impl std::fmt::Display for AtOp {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl std::error::Error for AtOp {}
-
-/// [`AtOp`] as an error.
-pub fn at_op(op: OpId, message: impl Into<String>) -> anyhow::Error {
-    AtOp {
-        op,
-        message: message.into(),
-    }
-    .into()
 }
 
 /// What a kernel is, apart from its body: everything the attributes said.
