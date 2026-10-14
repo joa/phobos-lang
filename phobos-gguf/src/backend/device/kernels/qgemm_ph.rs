@@ -366,7 +366,7 @@ fn iq1s_decode() -> Decode {
         let _ = write!(
             body,
             "    let gi{l} = (((qs >> {b}) & 255) | (((qh >> {h}) & 7) << 8)) * 2
-    let e{l} = (elem(grid[0, gi{l} :+ 2], 0) & 255) | ((elem(grid[0, gi{l} :+ 2], 1) & 255) << 8)
+    let e{l} = hword(grid[0, gi{l} :+ 2], 0)
     let x{l}a = (e{l} | (e{l} << 8)) & {S8}
     let x{l}b = (x{l}a | (x{l}a << 4)) & {S4}
     let x{l} = (x{l}b | (x{l}b << 2)) & {S2}
@@ -383,11 +383,10 @@ fn iq1s_decode() -> Decode {
     Decode {
         fetch: vec![
             ("qs", "word(QB[jr, BO + 4 * GG :+ 4], 0)".into()),
-            ("ql", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 0)".into()),
-            ("qhh", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 1)".into()),
+            ("qh", "hword(QB[jr, BO + 32 + 2 * GG :+ 2], 0)".into()),
         ],
         now: Vec::new(),
-        body: format!("    let qh = (ql & 255) | ((qhh & 255) << 8)\n{body}"),
+        body,
         pipelined: false,
         halves: false,
         mins: false,
@@ -399,10 +398,7 @@ fn iq1s_decode() -> Decode {
 /// `48 + 2 (g / 2)` holds two 3-bit scales a group, from bit `6 (g % 2)`,
 /// weighting half `h` by `d (2s + 1) / 8`.
 fn iq1m_decode() -> Decode {
-    let mut body = "    let qh = (qa & 255) | ((qb & 255) << 8)
-    let sc = (sa & 255) | ((sb & 255) << 8)
-"
-    .to_string();
+    let mut body = String::new();
     for h in 0..2 {
         let _ = writeln!(
             body,
@@ -415,7 +411,7 @@ fn iq1m_decode() -> Decode {
             body,
             "    let lut{l} = where(((qh >> {n}) & 1) == 1, {IQ1_MINUS}, {IQ1_PLUS})
     let gi{l} = (((qs >> {b}) & 255) | (((qh >> {m}) & 7) << 8)) * 2
-    let e{l} = (elem(grid[0, gi{l} :+ 2], 0) & 255) | ((elem(grid[0, gi{l} :+ 2], 1) & 255) << 8)
+    let e{l} = hword(grid[0, gi{l} :+ 2], 0)
     let x{l}a = (e{l} | (e{l} << 8)) & {S8}
     let x{l}b = (x{l}a | (x{l}a << 4)) & {S4}
     let x{l} = (x{l}b | (x{l}b << 2)) & {S2}
@@ -433,10 +429,8 @@ fn iq1m_decode() -> Decode {
     Decode {
         fetch: vec![
             ("qs", "word(QB[jr, BO + 4 * GG :+ 4], 0)".into()),
-            ("qa", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 0)".into()),
-            ("qb", "elem(QB[jr, BO + 32 + 2 * GG :+ 2], 1)".into()),
-            ("sa", "elem(QB[jr, BO + 48 + 2 * (GG / 2) :+ 2], 0)".into()),
-            ("sb", "elem(QB[jr, BO + 48 + 2 * (GG / 2) :+ 2], 1)".into()),
+            ("qh", "hword(QB[jr, BO + 32 + 2 * GG :+ 2], 0)".into()),
+            ("sc", "hword(QB[jr, BO + 48 + 2 * (GG / 2) :+ 2], 0)".into()),
         ],
         now: Vec::new(),
         body,
