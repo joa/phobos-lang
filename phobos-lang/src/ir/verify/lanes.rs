@@ -61,13 +61,14 @@ impl Verifier<'_> {
                     }
                 }
             }
-            OpKind::LaneStore { len, .. } => {
+            OpKind::LaneStore { len, words, .. } => {
                 let operands = ir.operands(op);
                 if !matches!(operands.first().map(|&t| ir.ty(t)), Some(Type::Tensor(_) | Type::Tile(_))) {
                     self.err(op, "operand must be a tensor or a tile");
                 }
-                if operands.len() < *len as usize + 1 {
-                    self.err(op, "one value per element");
+                let values = if *words { *len as usize / 4 } else { *len as usize };
+                if operands.len() < values + 1 {
+                    self.err(op, "one value per element, or per word");
                 }
                 self.want_results(op, 0);
             }

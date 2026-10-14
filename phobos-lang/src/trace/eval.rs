@@ -614,7 +614,7 @@ impl<'a> Cursor<'a, '_> {
                     }
                 }
             }
-            OpKind::LaneLoad { dim, len, align } | OpKind::LaneStore { dim, len, align } => {
+            OpKind::LaneLoad { dim, len, align } | OpKind::LaneStore { dim, len, align, .. } => {
                 let load = matches!(kind, OpKind::LaneLoad { .. });
                 let rank = match ir.ty(operands[0]) {
                     Type::Tensor(t) => t.shape.len(),

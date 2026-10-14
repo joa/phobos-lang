@@ -360,7 +360,9 @@ pub enum OpKind {
     Dot4 { a: Bytes, b: Bytes },
     /// `(tensor, indices.., values..)`: one thread's own run of `len`
     /// elements along `dim` written, as [`OpKind::LaneLoad`] reads one.
-    LaneStore { dim: usize, len: i64, align: i64 },
+    /// With `words`, the values are `len / 4` words, each written as its
+    /// four little-endian bytes.
+    LaneStore { dim: usize, len: i64, align: i64, words: bool },
     /// `(bits) -> f16`: the half whose bits are the low 16 of an index.
     F16Bits,
     /// `(b0, b1, b2, b3) -> index`: four `i8` as the little-endian word
@@ -556,7 +558,9 @@ impl OpKind {
             OpKind::RegsReduce(how) => format!("regs_reduce {how:?}"),
             OpKind::LaneLoad { dim, len, align } => format!("lane_load d{dim} x{len} a{align}"),
             OpKind::Dot4 { a, b } => format!("dot4 {a:?} {b:?}"),
-            OpKind::LaneStore { dim, len, align } => format!("lane_store d{dim} x{len} a{align}"),
+            OpKind::LaneStore { dim, len, align, words } => {
+                format!("lane_store d{dim} x{len} a{align}{}", if *words { " words" } else { "" })
+            }
             OpKind::F16Bits => "f16bits".into(),
             OpKind::Word => "word".into(),
             OpKind::Dp4a => "dp4a".into(),

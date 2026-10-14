@@ -116,7 +116,7 @@ impl<'c> Codegen<'c> {
                 self.set_ir(ir.result(op), Lowered::Scalar(h));
             }
             OpKind::LaneLoad { dim, len, align } => self.lane_load(block, ir, op, dim, len, align)?,
-            OpKind::LaneStore { dim, len, align } => self.lane_store(block, ir, op, dim, len, align)?,
+            OpKind::LaneStore { dim, len, align, words } => self.lane_store(block, ir, op, dim, len, align, words)?,
             OpKind::Dot4 { a, b } => {
                 let ops = ir.operands(op);
                 let (na, nb) = (a.operands(), b.operands());
@@ -195,18 +195,44 @@ impl<'c> Codegen<'c> {
 
     /// One vector store of the run when `align` allows it, else a store per
     /// element.
-    fn lane_store(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, dim: usize, len: i64, align: i64) -> Result<()> {
+    #[allow(clippy::too_many_arguments)]
+    fn lane_store(
+        &mut self,
+        block: &Block<'c>,
+        ir: &Ir,
+        op: OpId,
+        dim: usize,
+        len: i64,
+        align: i64,
+        words: bool,
+    ) -> Result<()> {
         let operands = ir.operands(op);
         let mem = self.tile_ir(ir, operands[0])?.mem;
-        let rank = operands.len() - 1 - len as usize;
+        let count = if words { len / 4 } else { len };
+        let rank = operands.len() - 1 - count as usize;
         let at = operands[1..=rank]
             .iter()
             .map(|&v| self.scalar_ir(v))
             .collect::<Result<Vec<_>>>()?;
-        let values = operands[rank + 1..]
+        let mut values = operands[rank + 1..]
             .iter()
             .map(|&v| self.scalar_ir(v))
             .collect::<Result<Vec<_>>>()?;
+        if words {
+            // The words' bytes, little-endian, as one vector.
+            let packed = self.push(
+                block,
+                melior::ir::operation::OperationBuilder::new("vector.from_elements", self.loc)
+                    .add_operands(&values)
+                    .add_results(&[Type::vector(&[count as u64], self.i32_t)])
+                    .build()?,
+            )?;
+            let bytes = self.vec_bitcast(block, packed, Type::vector(&[len as u64], self.i8_t))?;
+            if align > 0 {
+                return self.vec_store_al(block, bytes, mem, &at, align);
+            }
+            values = (0..len).map(|i| self.vec_extract(block, bytes, &[i], self.i8_t)).collect::<Result<_>>()?;
+        }
         if align > 0 {
             let vec_t = Type::vector(&[len as u64], values[0].r#type());
             let v = self.push(

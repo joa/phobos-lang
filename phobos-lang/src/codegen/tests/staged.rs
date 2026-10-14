@@ -42,3 +42,25 @@ fn a_padded_byte_tile_keeps_its_rows_16_byte_aligned_and_slices() {
     // The slice steps rows at the padded pitch.
     assert!(mlir.contains("strided<[144, 1]"), "{mlir}");
 }
+
+#[test]
+fn store_writes_words_into_a_byte_run() {
+    let src = |values: &str| {
+        format!(
+            "@launch(64)
+            kernel w(A: tensor<i32>[64, 2], C: tensor<i8>[64, 8]) {{
+                var t: tile<i8>[64, 8]
+                let r = ctx.thread
+                let lo = A[r, 0]
+                let hi = A[r, 1]
+                store(t[r, 0 :+ 8], {values})
+                barrier()
+                C[0 :+ 64, 0 :+ 8] = t
+            }}"
+        )
+    };
+    let mlir = emit_mlir(&src("lo, hi"));
+    assert_contains(&mlir, &["vector<2xi32>", "vector.bitcast", "vector<8xi8>"]);
+    let err = emit_err(&src("lo, hi, lo"));
+    assert!(err.contains("a run of 8 takes 8 values, got 3"), "{err}");
+}
