@@ -3,11 +3,13 @@
 // decoded into an int8 tile with their per-32 scales beside it, then
 // contracted 32 elements at a time by `acc += f32(dot_t(a, w)) * ws * da`,
 // an accumulator the integer tensor cores keep in registers across `k`.
-// The activation tile and its scales are the loop's pipelined stages:
-// copied asynchronously on sm_80 and on, carried in registers across the
-// contraction before. The words a thread decodes are loaded a stage ahead
-// the same way, by hand. Both int8 tiles have 128-byte rows, which the
-// compiler swizzles so a fragment's eight rows fall in different banks.
+// The activation tile and its scales are staged each turn. A format with a
+// light decode pipelines them, carried in registers across the contraction;
+// a heavier one, which would spill holding them, has its stage's loads issue
+// at the copy and its stores wait for the barrier, past the decode. The
+// words a thread decodes are loaded a stage ahead by hand. Both int8 tiles
+// have 128-byte rows, which the compiler swizzles so a fragment's eight rows
+// fall in different banks.
 
 use std::fmt::Write as _;
 
@@ -20,10 +22,14 @@ const _: () = assert!(QGEMM_TN * 4 == QGEMM_CTA);
 
 /// A format's decode: the words it reads from the block, as `(name, expr)`
 /// with `BO` for the block's byte offset in the thread's row and `GG` for
-/// its group, and the statements that write the group from them.
+/// its group, and the statements that write the group from them. The words
+/// in `fetch` are loaded a stage ahead, those in `now` in their own stage.
+/// `pipelined` carries the next activation stage across the contraction.
 struct Decode {
     fetch: Vec<(&'static str, String)>,
+    now: Vec<(&'static str, String)>,
     body: String,
+    pipelined: bool,
 }
 
 /// A format's `.ph` staged projection, for the formats written so far, whole
@@ -35,6 +41,7 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
     }
     match quant {
         Quant::IQ2_XXS => Some(staged(quant, "iq2xxs", 64, &iq2xxs_decode(), split)),
+        Quant::IQ3_XXS => Some(staged(quant, "iq3xxs", 96, &iq3xxs_decode(), split)),
         _ => None,
     }
 }
@@ -68,6 +75,8 @@ fn iq2xxs_decode() -> Decode {
             ("lo", "word(QB[jr, BO + 8 * GG :+ 8], 0)".into()),
             ("hi", "word(QB[jr, BO + 8 * GG :+ 8], 1)".into()),
         ],
+        now: Vec::new(),
+        pipelined: true,
         body: format!(
             "    ws[gl, jj] = d * 0.125 * f32(2 * ((hi >> 28) & 15) + 1)
     for<unroll 4> l in range(0, 4, 1) {{
@@ -76,20 +85,64 @@ fn iq2xxs_decode() -> Decode {
       let sb = sv | ((popcount(sv) & 1) << 7)
 {octet}    }}
 ",
-            octet = signed_octet("w[jj, 32 * gl + 8 * l :+ 8]")
+            octet = signed_octet(
+                "w[jj, 32 * gl + 8 * l :+ 8]",
+                "word(grid[0, gi :+ 8], 0)",
+                "word(grid[0, gi :+ 8], 1)",
+                ""
+            )
         ),
     }
 }
 
-/// Stores the octet at grid entry `gi` signed by the eight bits `sb` into
-/// `dst`, as the decode matvecs sign it.
-fn signed_octet(dst: &str) -> String {
+/// IQ3_XXS: a 32-element group is eight grid indices, each a four-byte
+/// entry, and a word at byte `64 + 4g` of four 7-bit sign indices and a
+/// 4-bit scale `s` on top, weighting the group by `d (2s + 1) / 4`.
+fn iq3xxs_decode() -> Decode {
+    let mut body = "    ws[gl, jj] = d * 0.25 * f32(2 * ((aux >> 28) & 15) + 1)\n".to_string();
+    for l in 0..4 {
+        // Octet `l` is grid indices `2l` and `2l + 1`, in `lo` for the first
+        // two octets and `hi` for the last two.
+        let (q, at) = (if l < 2 { "lo" } else { "hi" }, 16 * (l % 2));
+        let _ = write!(
+            body,
+            "    let g{l}a = (({q} >> {at}) & 255) * 4
+    let g{l}b = (({q} >> {b}) & 255) * 4
+    let sv{l} = (aux >> {sh}) & 127
+    let sb{l} = sv{l} | ((popcount(sv{l}) & 1) << 7)
+{octet}",
+            b = at + 8,
+            sh = 7 * l,
+            octet = signed_octet(
+                &format!("w[jj, 32 * gl + {o} :+ 8]", o = 8 * l),
+                &format!("word(grid[0, g{l}a :+ 4], 0)"),
+                &format!("word(grid[0, g{l}b :+ 4], 0)"),
+                &l.to_string(),
+            )
+            .replace("      ", "    ")
+        );
+    }
+    Decode {
+        fetch: vec![
+            ("lo", "word(QB[jr, BO + 8 * GG :+ 8], 0)".into()),
+            ("hi", "word(QB[jr, BO + 8 * GG :+ 8], 1)".into()),
+        ],
+        now: vec![("aux", "word(QB[jr, BO + 64 + 4 * GG :+ 4], 0)".into())],
+        body,
+        pipelined: false,
+    }
+}
+
+/// Stores the octet whose magnitudes are the words `lo` and `hi`, signed by
+/// the eight bits `sb{t}`, into `dst`, as the decode matvecs sign it. `t`
+/// tags its names, for octets written out side by side.
+fn signed_octet(dst: &str, lo: &str, hi: &str, t: &str) -> String {
     format!(
-        "      let m0 = (((sb & 15) * {SPREAD}) & {LOW_BITS}) * 255
-      let m1 = ((((sb >> 4) & 15) * {SPREAD}) & {LOW_BITS}) * 255
-      let s0 = (word(grid[0, gi :+ 8], 0) ^ m0) + (m0 & {LOW_BITS})
-      let s1 = (word(grid[0, gi :+ 8], 1) ^ m1) + (m1 & {LOW_BITS})
-      store({dst}, s0, s1)
+        "      let m{t}lo = (((sb{t} & 15) * {SPREAD}) & {LOW_BITS}) * 255
+      let m{t}hi = ((((sb{t} >> 4) & 15) * {SPREAD}) & {LOW_BITS}) * 255
+      let q{t}lo = ({lo} ^ m{t}lo) + (m{t}lo & {LOW_BITS})
+      let q{t}hi = ({hi} ^ m{t}hi) + (m{t}hi & {LOW_BITS})
+      store({dst}, q{t}lo, q{t}hi)
 "
     )
 }
@@ -151,6 +204,9 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
         let _ = writeln!(next, "      {v}n = {}", at(expr, "kh + 1"));
         let _ = writeln!(take, "    let {v} = {v}n");
     }
+    for (v, expr) in &decode.now {
+        let _ = writeln!(take, "    let {v} = {}", at(expr, "kh"));
+    }
     let mut contract = String::new();
     for s in 0..4 {
         let _ = write!(
@@ -166,8 +222,7 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
     }
     format!(
         "@launch({QGEMM_CTA}, 2)
-@pipeline
-@swizzle
+{pipeline}@swizzle
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
 @aligned(M = TM, N = TN, {aligned})
 kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
@@ -194,5 +249,6 @@ kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 }}
 ",
         body = decode.body,
+        pipeline = if decode.pipelined { "@pipeline\n" } else { "" },
     )
 }
