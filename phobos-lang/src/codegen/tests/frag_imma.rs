@@ -228,3 +228,19 @@ fn a_column_times_a_row_adds_to_the_accumulator_in_registers() {
     acc += rs * da";
     assert!(emit_mlir(&projection(128, 64, 128, ALIGNED, scales)).contains("memref.global"));
 }
+
+#[test]
+fn a_let_in_the_loop_keeps_the_accumulator_in_registers() {
+    // `kt` is bound inside the loop, so its slices' bounds are checked
+    // through what it stands for.
+    let src = projection(128, 64, 128, ALIGNED, "ws * da").replace(
+        "  for kt in range(0, K, 32) {
+    let b = kt / 32",
+        "  for kq in range(0, K / 32, 1) {
+    let kt = kq * 32
+    let b = kt / 32",
+    );
+    let mlir = emit_mlir(&src);
+    assert!(!mlir.contains("memref.global"), "{mlir}");
+    assert_eq!(mlir.matches("mmaShape = [8, 8, 16]").count(), 64, "{mlir}");
+}
