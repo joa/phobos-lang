@@ -185,7 +185,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 | Case | Behavior |
 |---|---|
 | Slice past the end | Out-of-bounds elements read as `0`; their stores are skipped. |
-| Static extent | Masked in place. |
+| Static extent | Masked in place, unless the slice provably stays inside: the extent and the start both multiples of the length, or a constant start with start + length within the extent. |
 | Dynamic extent walked by a `for` | The loop is split into whole tiles plus one masked remainder iteration. Only spans with a static length split; loops with `mma.sync` accumulators stay masked unless `@aligned` covers the dimension. Under `@pipeline`, the whole tiles are pipelined and the remainder runs once, unpipelined. |
 | Dynamic extent indexed by `ctx.block` | Masked against the runtime extent, unless `@aligned` promises whole tiles. |
 | Non-zero reductions | The fill is always `0`. A max or a softmax denominator over a ragged tile needs its own mask: `s = where(iota(1) < n, s, -1.0e30)`. |
