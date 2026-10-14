@@ -440,7 +440,7 @@ impl Order<'_> {
                 .label(format!("every thread reads {name} here"))
                 .with(dirty.get(&buf).copied(), "each thread stores its own part here")
                 .note("another thread's store may not have landed when this one reads")
-                .help("put a `barrier()` between the store and the read")
+                .line_before(op, "put a `barrier()` between the store and the read", "barrier()")
                 .into());
         }
         dirty.extend(stored.map(|b| (b, op)));

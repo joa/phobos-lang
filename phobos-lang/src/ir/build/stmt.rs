@@ -12,6 +12,19 @@ const SHARED_BANK_BYTES: i64 = 128;
 
 impl Build {
     pub(crate) fn emit_stmt(&mut self, stmt: &Stmt) -> Result<()> {
+        if let Stmt::Let { name, ty, ty_span, span, .. } | Stmt::Var { name, ty, ty_span, span, .. } = stmt {
+            let value = match stmt {
+                Stmt::Let { value, .. } => value.span,
+                Stmt::Var { value, .. } => value.as_ref().map(|v| v.span).unwrap_or_default(),
+                _ => unreachable!("matched above"),
+            };
+            let decl = super::Decl {
+                at: *span,
+                ty: super::Decl::held(ty.as_ref(), *ty_span),
+                value,
+            };
+            self.declaring = Some((name.clone(), decl));
+        }
         match stmt {
             Stmt::Let {
                 name, ty, value, ..
@@ -259,16 +272,13 @@ impl Build {
                             self.emit_binop(BinOp::Add, cur, rhs)?
                         }
                     };
-                    let rhs = self.coerce(rhs, elem)?;
+                    let rhs = self.coerce(rhs, elem).map_err(|e| self.declared(name, e))?;
                     self.stmt(OpKind::Store, &[rhs, slot]);
                 }
                 Some(Binding::Tile(tile)) => self.store_tile(tile, op, value)?,
                 Some(Binding::Frags(fa)) => self.emit_frag_assign(name, fa, op, value)?,
                 Some(Binding::Regs(r)) => self.emit_regs_assign(name, r, op, value)?,
-                Some(Binding::View(_)) => {
-                    bail!("`{name}` is a read-only view; declare it with `var` to assign")
-                }
-                Some(_) => bail!("`{name}` is not assignable (declare it with `var`)"),
+                Some(_) => return Err(self.not_assignable(name)),
                 None => return Err(super::locate(&self.source, &self.ir, self.unknown(name), target.span)),
             },
             ExprKind::Index { base, subs } => {
@@ -284,7 +294,11 @@ impl Build {
                             self.emit_binop(BinOp::Add, cur, rhs)?
                         }
                     };
-                    let rhs = self.coerce(rhs, self.elem(mv))?;
+                    let rhs = self.coerce(rhs, self.elem(mv));
+                    let rhs = match base.as_var() {
+                        Some(name) => rhs.map_err(|e| self.declared(name, e))?,
+                        None => rhs?,
+                    };
                     let mut operands = vec![rhs, mv];
                     operands.extend_from_slice(&indices);
                     self.stmt(OpKind::Store, &operands);

@@ -213,6 +213,7 @@ impl<'a> Analyzer<'a> {
                     name: p.clone(),
                     name_span: Default::default(),
                     ty: None,
+                    ty_span: Default::default(),
                     value: phobos_lang::ast::ctx::block(*pid as u8),
                     span: Span::default(),
                 });
@@ -296,6 +297,7 @@ impl<'a> Analyzer<'a> {
             name: c_old.to_string(),
             name_span: Default::default(),
             ty: None,
+            ty_span: Default::default(),
             value: Expr::index(Expr::var(cname.clone()), subs.clone()),
             span: Span::default(),
         });

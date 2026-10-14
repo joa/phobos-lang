@@ -639,10 +639,12 @@ kernel copy(X: tensor<f32>[N], s: f32) {
     assert_eq!(spanned(src, k.params[0].span), "X");
     assert_eq!(spanned(src, k.params[0].ty_span), "tensor<f32>[N]");
     assert_eq!(spanned(src, k.params[1].ty_span), "f32");
-    let Stmt::Let { name_span, .. } = &k.body[0] else { panic!() };
+    let Stmt::Let { name_span, ty_span, .. } = &k.body[0] else { panic!() };
     assert_eq!(spanned(src, *name_span), "i");
+    assert_eq!(*ty_span, crate::diag::Span::default());
     let Stmt::For { var_span, body, .. } = &k.body[1] else { panic!() };
     assert_eq!(spanned(src, *var_span), "j");
-    let Stmt::Var { name_span, .. } = &body[0] else { panic!() };
+    let Stmt::Var { name_span, ty_span, .. } = &body[0] else { panic!() };
     assert_eq!(spanned(src, *name_span), "t");
+    assert_eq!(spanned(src, *ty_span), "tile<f32>[4]");
 }

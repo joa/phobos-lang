@@ -483,10 +483,11 @@ impl Parser {
         self.advance();
         let name_span = self.here();
         let name = self.ident()?;
-        let ty = if self.consume(&Tok::Colon) {
-            Some(self.parse_type()?)
+        let (ty, ty_span) = if self.consume(&Tok::Colon) {
+            let lo = self.pos();
+            (Some(self.parse_type()?), self.since(lo))
         } else {
-            None
+            (None, crate::diag::Span::default())
         };
         // A `var` with a type may omit its initializer, which declares a buffer
         // without filling it. A `let` cannot: it would name nothing.
@@ -497,6 +498,7 @@ impl Parser {
                 name,
                 name_span,
                 ty,
+                ty_span,
                 value: None,
                 span,
             });
@@ -510,6 +512,7 @@ impl Parser {
                 name,
                 name_span,
                 ty,
+                ty_span,
                 value: Some(value),
                 span,
             }
@@ -518,6 +521,7 @@ impl Parser {
                 name,
                 name_span,
                 ty,
+                ty_span,
                 value,
                 span,
             }
