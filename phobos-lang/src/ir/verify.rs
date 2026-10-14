@@ -723,7 +723,7 @@ impl Verifier<'_> {
     fn intrinsic_operands(&mut self, op: OpId, n: usize) {
         for k in 0..n {
             let v = self.ir.operand(op, k);
-            if matches!(self.ir.ty(v), Type::Frags(_) | Type::Gemm(_)) {
+            if matches!(self.ir.ty(v), Type::Dist(_) | Type::Gemm(_)) {
                 self.err(op, format!("operand {k} cannot be an accumulator"));
             }
         }

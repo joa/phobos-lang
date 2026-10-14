@@ -4,14 +4,14 @@ use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN};
 use crate::ast::{AssignOp, BinOp, Expr, ExprKind, Scalar as AstScalar, Stmt, Type as AstType};
-use crate::ir::{Bounds, ForInfo, FragType, OpKind, Scalar, Type, ValueId};
+use crate::ir::{Bounds, ForInfo, MmaAcc, OpKind, Scalar, Type, ValueId};
 use crate::shape;
 
 /// The validated shape of a fragment-accumulator declaration.
 pub(crate) struct FragAccPlan {
     name: String,
     init: f64,
-    frags: FragType,
+    frags: MmaAcc,
 }
 
 #[derive(Default)]
@@ -122,7 +122,7 @@ impl Build {
         Some(FragAccPlan {
             name: name.clone(),
             init: *init,
-            frags: FragType { m, n, wm, wn, imma },
+            frags: MmaAcc { m, n, wm, wn, imma },
         })
     }
 
@@ -394,7 +394,7 @@ impl Build {
 
     /// Seeds the fragment binding for a validated accumulator declaration.
     pub(crate) fn bind_frag_acc(&mut self, plan: &FragAccPlan) {
-        let acc = self.value(OpKind::FragInit(plan.init), &[], Type::Frags(plan.frags));
+        let acc = self.value(OpKind::FragInit(plan.init), &[], Type::Dist(plan.frags.dist()));
         self.bind(&plan.name, Binding::Frags(acc));
     }
 

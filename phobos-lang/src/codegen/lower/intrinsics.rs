@@ -50,7 +50,10 @@ impl<'c> Codegen<'c> {
                 }
             }
             OpKind::FragInit(init) => {
-                let ir::Type::Frags(f) = ir.ty(ir.result(op)) else {
+                let Some(f) = (match ir.ty(ir.result(op)) {
+                    ir::Type::Dist(d) => d.mma_acc(),
+                    _ => None,
+                }) else {
                     bail!("frag_init of a non-fragment");
                 };
                 let init = self.push(
