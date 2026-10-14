@@ -138,8 +138,10 @@ impl Build {
         let Some(width) = elem.bytes() else {
             return false;
         };
+        // Padding spreads rows across banks, so one row gains nothing.
+        let rows: i64 = shape[..shape.len() - 1].iter().product();
         let pitch_bytes = cols * width;
-        pitch_bytes > 0 && pitch_bytes % SHARED_BANK_BYTES == 0
+        rows > 1 && pitch_bytes > 0 && pitch_bytes % SHARED_BANK_BYTES == 0
     }
 
     /// Length of the maximal run at the front of `stmts` of `var name =

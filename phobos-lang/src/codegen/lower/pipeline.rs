@@ -48,10 +48,17 @@ impl<'c> Codegen<'c> {
         self.set_ir(iv, Lowered::Scalar(lo));
         let prologue = (|| {
             for &o in prefix {
-                if matches!(ir.kind(o), OpKind::Stage(_)) {
+                if let OpKind::Stage(stage) = ir.kind(o) {
                     let src = self.tile_ir(ir, ir.operand(o, 0))?;
-                    let b0 = self.alloc_tile_shaped(block, src.elem, &src.shape)?;
-                    bufs1.push(self.alloc_tile_shaped(block, src.elem, &src.shape)?);
+                    let alloc = |cg: &mut Self| {
+                        if stage.pad {
+                            cg.alloc_tile_padded(block, src.elem, &src.shape)
+                        } else {
+                            cg.alloc_tile_shaped(block, src.elem, &src.shape)
+                        }
+                    };
+                    let b0 = alloc(self)?;
+                    bufs1.push(alloc(self)?);
                     self.tile_copy(block, &src, &b0, true, false)?;
                     bufs0.push(b0);
                 } else {

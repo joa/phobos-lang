@@ -211,12 +211,15 @@ impl Build {
             }
         }
 
-        let extent_div = |d: usize| {
-            if src_shape[d] == DYN {
-                self.div_of(src, d).max(4)
-            } else {
-                src_shape[d].abs().max(1)
-            }
+        // A padded tile's rows sit at its row stride, not its width.
+        let pitch = match self.ir.ty(src) {
+            Type::Tile(t) => t.layout.row_stride,
+            _ => None,
+        };
+        let extent_div = |d: usize| match pitch {
+            Some(stride) if d == rank - 1 => stride,
+            _ if src_shape[d] == DYN => self.div_of(src, d).max(4),
+            _ => src_shape[d].abs().max(1),
         };
         let stride_div = |i: usize| {
             (i + 1..rank)

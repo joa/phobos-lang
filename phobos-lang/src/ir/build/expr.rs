@@ -312,13 +312,10 @@ impl Build {
         if matches!(binding, Binding::View(_)) && self.is_masked(mv) {
             bail!("a partially out-of-bounds view cannot be sliced; slice the tensor it views instead");
         }
-        if let Type::Tile(t) = self.ir.ty(mv) {
-            if t.layout.row_stride.is_some() {
-                bail!("a padded staging tile cannot be sliced");
-            }
-            if t.layout.swizzle.is_some() {
-                bail!("a swizzled staging tile cannot be sliced");
-            }
+        if let Type::Tile(t) = self.ir.ty(mv)
+            && t.layout.swizzle.is_some()
+        {
+            bail!("a swizzled staging tile cannot be sliced");
         }
         Ok(())
     }

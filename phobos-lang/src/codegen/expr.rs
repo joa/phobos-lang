@@ -171,7 +171,8 @@ impl<'c> Codegen<'c> {
             mem: self.push(block, op)?,
             elem: src.elem,
             shape: static_sizes,
-            row_stride: None,
+            // A slice of a padded tile keeps its pitch.
+            row_stride: src.row_stride,
             align_div,
             // Swizzled staging buffers are never sliced; ldmatrix reads them
             // directly.
@@ -200,11 +201,16 @@ impl<'c> Codegen<'c> {
 }
 
 /// A memref's strides: those of its strided layout when it is a view of a
-/// wider buffer, row-major over its shape otherwise.
+/// wider buffer, row-major over its shape otherwise, a padded tile's rows
+/// at its row stride.
 fn mem_strides(src: &MemVal<'_>) -> Vec<i64> {
     let text = src.mem.r#type().to_string();
     let Some((list, _)) = text.split_once("strided<[").and_then(|(_, rest)| rest.split_once(']')) else {
-        return row_major_strides(&src.shape);
+        let mut phys = src.shape.clone();
+        if let (Some(stride), Some(last)) = (src.row_stride, phys.last_mut()) {
+            *last = stride;
+        }
+        return row_major_strides(&phys);
     };
     list.split(',')
         .map(|s| s.trim().parse().unwrap_or(DYN))

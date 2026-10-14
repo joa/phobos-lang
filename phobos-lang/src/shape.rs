@@ -4,6 +4,13 @@
 /// MLIR's ShapedType::kDynamic.
 pub(crate) const DYN: i64 = i64::MIN;
 
+/// Elements a padded staging tile adds to each row: eight, the WMMA pad,
+/// or 16 bytes when that is more, so a narrow type's rows stay 16-byte
+/// aligned for vector copies and `ldmatrix`.
+pub(crate) fn stage_pad(elem_bytes: i64) -> i64 {
+    8i64.max(16 / elem_bytes.max(1))
+}
+
 /// The (WM, WN) warp block of the matmul's 16x16-fragment grid.
 ///
 /// None when the shape doesn't split into whole fragments owned by whole
