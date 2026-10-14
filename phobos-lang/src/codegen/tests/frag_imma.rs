@@ -55,6 +55,26 @@ fn scaled_int8_accumulator_rides_in_registers() {
 }
 
 #[test]
+fn a_single_k_step_pairs_row_tiles_on_blackwell() {
+    // A scale every 16 elements: one k step an update, so Blackwell pairs
+    // the row tiles in a whole m16n8k16 rather than two half-used ones.
+    let src = projection(128, 64, 128, ALIGNED, "ws * da").replace(
+        "    acc += f32(dot_t(a, w)) * ws * da\n",
+        "    let a0 = a[0 :+ 128, 0 :+ 16]
+    let w0 = w[0 :+ 64, 0 :+ 16]
+    acc += f32(dot_t(a0, w0)) * ws * da
+    let a1 = a[0 :+ 128, 16 :+ 16]
+    let w1 = w[0 :+ 64, 16 :+ 16]
+    acc += f32(dot_t(a1, w1)) * ws * da
+",
+    );
+    let mlir = emit_mlir_sync(&src, "sm_120");
+    assert_eq!(mlir.matches("mmaShape = [16, 8, 16]").count(), 32, "{mlir}");
+    assert!(!mlir.contains("mmaShape = [8, 8, 16]"), "{mlir}");
+    assert_eq!(mlir.matches("math.fma").count(), 128, "{mlir}");
+}
+
+#[test]
 fn scales_ride_in_either_order() {
     for scales in ["ws * da", "da * ws"] {
         let mlir = emit_mlir(&projection(128, 64, 128, ALIGNED, scales));
