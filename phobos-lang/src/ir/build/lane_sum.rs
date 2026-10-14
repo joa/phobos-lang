@@ -192,19 +192,23 @@ impl Build {
     /// vector store when its address allows it.
     pub(crate) fn emit_lane_store(&mut self, slice: &Expr, values: &[Expr]) -> Result<Rv> {
         let run = self.lane_run(slice)?;
+        // A byte run also takes a quarter as many words, the counterpart of
+        // `word`.
+        let words = run.elem.bytes() == Some(1) && values.len() * 4 == run.len as usize;
         ensure!(
-            values.len() == run.len as usize,
+            words || values.len() == run.len as usize,
             "store: a run of {} takes {} values, got {}",
             run.len,
             run.len,
             values.len()
         );
+        let elem = if words { Scalar::I32 } else { run.elem };
         let mut operands = run.operands;
         for v in values {
             let v = self.emit_scalar(v)?;
-            operands.push(self.coerce(v, run.elem)?);
+            operands.push(self.coerce(v, elem)?);
         }
-        self.stmt(OpKind::LaneStore { dim: run.dim, len: run.len, align: run.align }, &operands);
+        self.stmt(OpKind::LaneStore { dim: run.dim, len: run.len, align: run.align, words }, &operands);
         Ok(Rv::Scalar(self.const_index(0)))
     }
 
