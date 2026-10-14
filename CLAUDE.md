@@ -48,7 +48,8 @@ helpers rather than a spelling of its own.
   elided, over `.ph` sources or emitted `.mlir`, files or directories; the same
   targets as `emit`. `cargo test -p phobos-lang` runs it over every `.ph` in the
   tree; a change to barrier placement also runs it over the generated sources
-  (`PHOBOS_DUMP_DIR`), under each target
+  (`PHOBOS_DUMP_DIR`), under each target. `RACECHECK.md` says what it models
+  and what it does not see yet
 - `cargo run -p phobos-kbench`: Full GPU smoke test
 - `cargo run --release -p phobos-kernels --features cuda --example lang_check`: the
   language's semantics on the device, one probe kernel per feature against a host
