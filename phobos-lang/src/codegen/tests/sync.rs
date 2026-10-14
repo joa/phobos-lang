@@ -269,6 +269,72 @@ fn a_hazard_across_the_iteration_boundary_keeps_the_last_ops_barrier() {
     assert!(barriers[1] > write, "the write's own barrier must stay:\n{mlir}");
 }
 
+/// A tile staged each turn and read by lane loads. The reads come from other
+/// threads than the copy that wrote them, and no tile op between the last
+/// read and the next turn's copy ends in a barrier, so one goes ahead of the
+/// copy.
+#[test]
+fn a_tile_restaged_after_lane_reads_waits_for_them() {
+    let mlir = emit_mlir(
+        "@autotune(K in [256])
+        @launch(128)
+        kernel k(W: tensor<f32>[N, K], x: tensor<f32>[1, K], y: tensor<f32>[1, N]) {
+            let row = ctx.block.x * ctx.warps + ctx.warp
+            var acc: f32 = 0.0
+            for kt in range(0, K, ctx.lanes * 4) {
+                var xs = x[0 :+ 1, kt :+ ctx.lanes * 4]
+                let at = ctx.lane * 4
+                if row < N {
+                    acc += sum(W[row, kt + at :+ 4] * xs[0, at :+ 4])
+                }
+            }
+            let total = sum<over ctx.lane>(acc)
+            if ctx.lane == 0 && row < N {
+                y[0, row] = total
+            }
+        }",
+    );
+    let body = mlir.find("affine.for").expect("the loop");
+    let copy = body + mlir[body..].find("vector.store").expect("the copy into xs");
+    assert!(
+        mlir.match_indices("gpu.barrier").any(|(b, _)| body < b && b < copy),
+        "the next turn's copy must wait for this turn's lane reads:\n{mlir}"
+    );
+}
+
+/// A register tile reads its staged operand in the threads a one-wide sweep
+/// gives each element, so restaging it next turn needs no barrier. The
+/// reduction after the loop writes scratch over the operand's bytes from
+/// other threads, so it waits for the last turn's reads.
+#[test]
+fn a_register_tile_orders_only_what_other_threads_touch() {
+    let mlir = emit_mlir(
+        "@launch(256)
+        @registers(acc)
+        kernel k(X: tensor<f32>[64, K], S: tensor<f32>[64, 1]) {
+            var acc: tile<f32>[64, 16] = 0.0
+            for kt in range(0, K, 16) {
+                var x = X[0 :+ 64, kt :+ 16]
+                acc += x * x
+            }
+            var s: tile<f32>[64, 1] = rowsum(acc)
+            S[0 :+ 64, 0 :+ 1] = s
+        }",
+    );
+    let body = mlir.find("iter_args").expect("the loop");
+    let copy = body + mlir[body..].find("memref<64x16xf32, 3>").expect("the copy into x");
+    assert!(
+        !mlir.match_indices("gpu.barrier").any(|(b, _)| body < b && b < copy),
+        "restaging for the same threads needs no barrier:\n{mlir}"
+    );
+    let end = body + mlir[body..].find("scf.yield").expect("the loop's end");
+    let reduce = mlir.find("gpu.shuffle").expect("the reduction");
+    assert!(
+        mlir.match_indices("gpu.barrier").any(|(b, _)| end < b && b < reduce),
+        "the reduction's scratch must wait for the last turn's reads:\n{mlir}"
+    );
+}
+
 #[test]
 fn an_atomic_runs_once_per_cta_and_broadcasts() {
     let mlir = emit_mlir(

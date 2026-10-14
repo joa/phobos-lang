@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use super::plan::{Event, Plan, Trace};
+use crate::ir::uniform::{self, Kind, Uniformity};
 use crate::ir::{BlockId, Ir, Map, OpId, OpKind, ValueId};
 
 /// One shared-memory access by one op.
@@ -33,6 +34,7 @@ impl Access {
 /// block.
 #[derive(Clone, Debug, PartialEq)]
 struct Pending {
+    op: OpId,
     seq: usize,
     block: BlockId,
     access: Access,
@@ -56,14 +58,19 @@ struct Window {
     sweeps: Vec<(Vec<i64>, i64)>,
     barriers: usize,
     ends_in_barrier: bool,
+    /// Ends in a barrier with nothing after it but scratch going back to
+    /// the pool, in every instance.
+    fenced: bool,
     instances: usize,
 }
 
 /// Which ops skip their trailing barrier, with how many barriers each emits
-/// so the replay knows which call to skip.
+/// so the replay knows which call to skip, and which ops need a barrier ahead
+/// of them that no op's trailing barrier provides.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Elision {
     pub(crate) skip: BTreeMap<OpId, usize>,
+    pub(crate) before: BTreeSet<OpId>,
 }
 
 struct Membar<'a> {
@@ -74,6 +81,15 @@ struct Membar<'a> {
     kept: BTreeSet<OpId>,
     /// Every candidate seen, kept or not.
     candidates: Vec<Candidate>,
+    /// Ops that end in a barrier that is never elided: an explicit
+    /// `barrier()`, a CTA collective, an atomic, an op emitted more than once.
+    fences: Vec<Candidate>,
+    /// Barriers added ahead of an op, each placed as if it trailed the op
+    /// before it.
+    added: Vec<Candidate>,
+    /// Where the latest walk of each op with blocks began.
+    starts: HashMap<OpId, usize>,
+    uniform: Uniformity,
 }
 
 impl Membar<'_> {
@@ -121,6 +137,9 @@ impl Membar<'_> {
 
     fn walk_op(&mut self, op: OpId, pending: &mut Vec<Pending>, elide: bool) {
         let ir = self.ir;
+        if ir.kind(op).has_blocks() {
+            self.starts.insert(op, self.seq + 1);
+        }
         match ir.kind(op) {
             OpKind::For(info) => {
                 let body = ir.blocks_of(op)[0];
@@ -188,24 +207,36 @@ impl Membar<'_> {
                 let above = self.enclosing(p.block);
                 let between = |c: &&Candidate| c.seq >= p.seq && c.seq < seq && above.contains(&c.block);
                 // A barrier kept for an earlier clash may already order this one.
-                if self.candidates.iter().filter(between).any(|c| self.kept.contains(&c.op)) {
+                if self.candidates.iter().filter(between).any(|c| self.kept.contains(&c.op))
+                    || self.added.iter().any(|c| between(&c))
+                {
                     continue;
                 }
                 let chosen = self.candidates.iter().filter(between).max_by_key(|c| c.seq).copied();
                 if let Some(c) = chosen {
                     self.keep(c, pending);
+                } else if self.needs_added(op, a, &p) && !self.fences.iter().any(|c| between(&c)) {
+                    // Nothing between the two accesses ends in a barrier, as
+                    // when a loop's last per-thread read of a tile meets the
+                    // next turn's copy into it.
+                    self.add_before(op, seq, &above);
                 }
             }
         }
 
         pending.extend(accesses.into_iter().map(|access| Pending {
+            op,
             seq,
             block,
             access,
         }));
 
         let w = self.windows.get(&op);
-        if w.is_some_and(|w| w.ends_in_barrier && w.instances == 1) && self.candidate_kind(op) {
+        let candidate = w.is_some_and(|w| w.ends_in_barrier && w.instances == 1) && self.candidate_kind(op);
+        if !candidate && w.is_some_and(|w| w.fenced) && !ir.kind(op).has_blocks() {
+            self.fences.push(Candidate { op, seq, block });
+        }
+        if candidate {
             let c = Candidate { op, seq, block };
             if elide {
                 self.candidates.push(c);
@@ -214,6 +245,62 @@ impl Membar<'_> {
                 self.keep(c, pending);
             }
         }
+    }
+
+    /// Whether a conflict between `op`'s `access` and an `earlier` one that
+    /// no trailing barrier orders needs one added. A view touches no bytes
+    /// itself, and two per-thread accesses are the kernel's to order with
+    /// `barrier()`; what is left involves a CTA-wide op, which the compiler
+    /// orders, unless both sides reach each element from the same thread.
+    fn needs_added(&self, op: OpId, access: &Access, earlier: &Pending) -> bool {
+        let (a, b) = (self.ir.kind(op), self.ir.kind(earlier.op));
+        a.aliases().is_empty()
+            && b.aliases().is_empty()
+            && !(uniform::per_thread(a) && uniform::per_thread(b))
+            && !self.same_thread(op, &earlier.access)
+            && !self.same_thread(earlier.op, access)
+    }
+
+    /// Whether `regs` makes a register tile whose elements each thread holds
+    /// as `other` reaches them. A register tile keeps element `t + e * threads`
+    /// in thread `t`, which is what a one-wide sweep of its shape gives `t`.
+    fn same_thread(&self, regs: OpId, other: &Access) -> bool {
+        let Some(&result) = self.ir.results(regs).first() else {
+            return false;
+        };
+        let crate::ir::Type::Regs(tile) = self.ir.ty(result) else {
+            return false;
+        };
+        other
+            .mapping
+            .as_ref()
+            .is_some_and(|(shape, width)| *width == 1 && *shape == tile.shape)
+    }
+
+    /// Adds a barrier ahead of `op` or, when the access it orders against
+    /// lies outside the block `op` sits in, ahead of the op holding `op` that
+    /// shares a block with that access, so it lies on every path between
+    /// the two. A barrier needs every thread, so under varying control none
+    /// is added, and ordering is the kernel's own `barrier()`.
+    fn add_before(&mut self, op: OpId, seq: usize, above: &[BlockId]) {
+        let ir = self.ir;
+        let mut at = op;
+        while !above.contains(&ir.parent_block(at)) {
+            let Some(holder) = ir.parent_op(ir.parent_block(at)) else {
+                return;
+            };
+            at = holder;
+        }
+        let block = ir.parent_block(at);
+        if self.uniform.control(block) != Kind::Uniform {
+            return;
+        }
+        let start = if at == op { seq } else { self.starts[&at] };
+        self.added.push(Candidate {
+            op: at,
+            seq: start - 1,
+            block,
+        });
     }
 
     /// Keeps a barrier. It orders every earlier pending access in its block
@@ -347,6 +434,7 @@ fn unmasked_shape(ir: &Ir, v: ValueId) -> Option<Vec<i64>> {
 struct Frame {
     op: OpId,
     last_was_barrier: bool,
+    fenced: bool,
     barriers: usize,
     sweeps: Vec<(Vec<i64>, i64)>,
     allocs: Vec<usize>,
@@ -361,6 +449,7 @@ fn windows(trace: &Trace) -> HashMap<OpId, Window> {
             Event::OpBegin(op) => stack.push(Frame {
                 op: *op,
                 last_was_barrier: false,
+                fenced: false,
                 barriers: 0,
                 sweeps: Vec::new(),
                 allocs: Vec::new(),
@@ -374,6 +463,7 @@ fn windows(trace: &Trace) -> HashMap<OpId, Window> {
                 w.instances += 1;
                 w.ends_in_barrier =
                     frame.last_was_barrier && (w.instances == 1 || w.ends_in_barrier);
+                w.fenced = frame.fenced && (w.instances == 1 || w.fenced);
                 w.barriers = frame.barriers;
                 w.sweeps = frame.sweeps;
                 w.scratch_events.extend(frame.allocs);
@@ -381,18 +471,21 @@ fn windows(trace: &Trace) -> HashMap<OpId, Window> {
             Event::Barrier => {
                 if let Some(top) = stack.last_mut() {
                     top.last_was_barrier = true;
+                    top.fenced = true;
                     top.barriers += 1;
                 }
             }
             Event::Sweep { shape, width } => {
                 if let Some(top) = stack.last_mut() {
                     top.last_was_barrier = false;
+                    top.fenced = false;
                     top.sweeps.push((shape.clone(), *width));
                 }
             }
             Event::Alloc { .. } => {
                 if let Some(top) = stack.last_mut() {
                     top.last_was_barrier = false;
+                    top.fenced = false;
                     if !trace.is_assigned(i) {
                         top.allocs.push(i);
                     }
@@ -439,6 +532,9 @@ impl Elision {
     /// so they need no barrier between them. Every other access, such as a
     /// reduction, a dot, a transpose or scratch, may come from any thread.
     ///
+    /// Two accesses with no trailing barrier between them get one ahead of
+    /// the later op, where control lets every thread reach it.
+    ///
     /// Barriers inside an `if`, a `while`, a pipelined loop or the register
     /// matmul's k-loop are never elided. They are not on every path, or the
     /// body is emitted more than once in a different order. Their accesses
@@ -460,6 +556,10 @@ impl Elision {
             seq: 0,
             kept: BTreeSet::new(),
             candidates: Vec::new(),
+            fences: Vec::new(),
+            added: Vec::new(),
+            starts: HashMap::new(),
+            uniform: uniform::analyze(ir),
         };
         let mut pending = Vec::new();
         m.walk_block(ir.entry(), &mut pending, true);
@@ -471,6 +571,7 @@ impl Elision {
                 skip.insert(c.op, w.barriers);
             }
         }
-        Elision { skip }
+        let before = m.added.iter().map(|c| c.op).collect();
+        Elision { skip, before }
     }
 }
