@@ -1,48 +1,86 @@
 ---
-// A shell command in a box with a copy button. Given both forms, the release binary and the cargo
-// command from a checkout, it shows them as two tabs. The choice is one preference for the whole site:
-// HeadMeta restores it before first paint, and picking a tab in any box switches every box.
+// A shell command in a box with a copy button. Several forms of one command show as tabs: the release
+// binary and the cargo command from a checkout, given as `release` and `checkout`, or any others as
+// `tabs`. A choice holds for every box with the same `syncKey`, on every page: it is stored the way
+// Starlight's synced <Tabs> store theirs, so a box and a <Tabs> with one key agree, and it is restored
+// right after each box is parsed, so a box never flips once drawn.
+interface Tab {
+  label: string
+  command: string
+}
+
 interface Props {
   release?: string
   checkout?: string
+  tabs?: Tab[]
+  syncKey?: string
+  /** Names what the tabs choose between, for screen readers. */
+  choice?: string
 }
 
 const { release, checkout } = Astro.props
-const variants = [
-  { source: "release", label: "Release", command: release },
-  { source: "checkout", label: "Checkout", command: checkout },
-].filter((variant): variant is { source: string; label: string; command: string } => variant.command !== undefined)
-if (variants.length === 0) throw new Error("Command needs a release or a checkout command")
+const sourceTabs = [
+  { label: "Release", command: release },
+  { label: "Checkout", command: checkout },
+].filter((tab): tab is Tab => tab.command !== undefined)
+const tabs = Astro.props.tabs ?? sourceTabs
+const syncKey = Astro.props.syncKey ?? (Astro.props.tabs ? undefined : "source")
+const choice = Astro.props.choice ?? "Run from"
+if (tabs.length === 0) throw new Error("Command needs a release, a checkout or tabs")
 
-// Counted per page, so the tab and panel ids are unique on it and the same from build to build.
+// Counted per page, so the tab and panel ids are unique on it and the same from build to build. The
+// first synced box on a page also carries the restore function every synced box calls.
 const countSymbol = Symbol.for("phobos:command-count")
-const locals = Astro.locals as App.Locals & { [countSymbol]?: number }
+const restoreSymbol = Symbol.for("phobos:command-restore")
+const locals = Astro.locals as App.Locals & { [countSymbol]?: number; [restoreSymbol]?: boolean }
 locals[countSymbol] ??= 0
 const id = `command-${locals[countSymbol]++}`
-const tabbed = variants.length > 1
+const tabbed = tabs.length > 1
+const synced = tabbed && syncKey !== undefined
+const renderRestore = synced && !locals[restoreSymbol]
+if (synced) locals[restoreSymbol] = true
 ---
 
-<phobos-command class="command not-content" data-tabbed={tabbed ? "" : undefined}>
+{
+  renderRestore && (
+    <script is:inline>
+      window.phobosCommandRestore = box => {
+        let label = null
+        try {
+          label = localStorage.getItem("starlight-synced-tabs__" + box.dataset.syncKey)
+        } catch {}
+        const tabs = [...box.querySelectorAll("[role='tab']")]
+        if (!label || !tabs.some(tab => tab.textContent.trim() === label)) return
+        tabs.forEach(tab => {
+          const selected = tab.textContent.trim() === label
+          tab.setAttribute("aria-selected", String(selected))
+          tab.tabIndex = selected ? 0 : -1
+          document.getElementById(tab.getAttribute("aria-controls")).hidden = !selected
+        })
+      }
+    </script>
+  )
+}
+<phobos-command class="command not-content" data-sync-key={synced ? syncKey : undefined}>
   <div class="command-bar">
     {
       tabbed ? (
-        <div class="command-tabs" role="tablist" aria-label="Run from">
-          {variants.map(({ source, label }, index) => (
+        <div class="command-tabs" role="tablist" aria-label={choice}>
+          {tabs.map(({ label }, tabIndex) => (
             <button
               type="button"
               role="tab"
-              id={`${id}-${source}-tab`}
-              aria-controls={`${id}-${source}`}
-              aria-selected={index === 0 ? "true" : "false"}
-              tabindex={index === 0 ? 0 : -1}
-              data-source={source}
+              id={`${id}-${tabIndex}-tab`}
+              aria-controls={`${id}-${tabIndex}`}
+              aria-selected={tabIndex === 0 ? "true" : "false"}
+              tabindex={tabIndex === 0 ? 0 : -1}
             >
               {label}
             </button>
           ))}
         </div>
       ) : (
-        <span class="command-label">{variants[0].label}</span>
+        <span class="command-label">{tabs[0].label}</span>
       )
     }
     <button type="button" class="command-copy" aria-label="Copy command">
@@ -54,42 +92,45 @@ const tabbed = variants.length > 1
     </button>
   </div>
   {
-    variants.map(({ source, command }) => (
+    tabs.map(({ command }, tabIndex) => (
       <pre
-        id={`${id}-${source}`}
-        data-source={source}
+        id={`${id}-${tabIndex}`}
         role={tabbed ? "tabpanel" : undefined}
-        aria-labelledby={tabbed ? `${id}-${source}-tab` : undefined}
+        aria-labelledby={tabbed ? `${id}-${tabIndex}-tab` : undefined}
+        hidden={tabIndex > 0}
         tabindex="0"
       ><code>{command}</code></pre>
     ))
   }
 </phobos-command>
+{
+  synced && (
+    <script is:inline>window.phobosCommandRestore(document.currentScript.previousElementSibling)</script>
+  )
+}
 
 <script>
-  const storageKey = "phobos-command-source"
   const copiedMillis = 2000
 
-  function currentSource(): string {
-    return document.documentElement.dataset.commandSource ?? "release"
-  }
-
-  // Panels show by CSS from the root attribute, so this only keeps the tabs' state in step with it.
-  function syncTabs() {
-    const source = currentSource()
-    document.querySelectorAll<HTMLButtonElement>("phobos-command [role='tab']").forEach(tab => {
-      const selected = tab.dataset.source === source
+  function selectTab(box: HTMLElement, label: string) {
+    box.querySelectorAll<HTMLButtonElement>("[role='tab']").forEach(tab => {
+      const selected = tab.textContent?.trim() === label
       tab.setAttribute("aria-selected", String(selected))
       tab.tabIndex = selected ? 0 : -1
+      const panel = document.getElementById(tab.getAttribute("aria-controls") ?? "")
+      if (panel) panel.hidden = !selected
     })
   }
 
-  function select(source: string) {
-    document.documentElement.dataset.commandSource = source
+  function select(box: HTMLElement, label: string) {
+    const syncKey = box.dataset.syncKey
+    if (!syncKey) return selectTab(box, label)
     try {
-      localStorage.setItem(storageKey, source)
+      localStorage.setItem(`starlight-synced-tabs__${syncKey}`, label)
     } catch {}
-    syncTabs()
+    document.querySelectorAll<HTMLElement>("phobos-command").forEach(other => {
+      if (other.dataset.syncKey === syncKey) selectTab(other, label)
+    })
   }
 
   async function copyText(text: string): Promise<boolean> {
@@ -105,24 +146,22 @@ const tabbed = variants.length > 1
     connectedCallback() {
       const tabs = [...this.querySelectorAll<HTMLButtonElement>("[role='tab']")]
       tabs.forEach((tab, index) => {
-        tab.addEventListener("click", () => select(tab.dataset.source ?? "release"))
+        tab.addEventListener("click", () => select(this, tab.textContent?.trim() ?? ""))
         tab.addEventListener("keydown", event => {
           const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key]
           if (step === undefined) return
           event.preventDefault()
           const next = tabs[(index + step + tabs.length) % tabs.length]
-          select(next.dataset.source ?? "release")
+          select(this, next.textContent?.trim() ?? "")
           next.focus()
         })
       })
-      if (tabs.length > 0) syncTabs()
 
       const copy = this.querySelector<HTMLButtonElement>(".command-copy")
       const status = this.querySelector(".command-copy-text")
       let resetTimer: number | undefined
       copy?.addEventListener("click", async () => {
-        const panels = [...this.querySelectorAll<HTMLElement>("pre")]
-        const panel = panels.find(pre => pre.dataset.source === currentSource()) ?? panels[0]
+        const panel = [...this.querySelectorAll<HTMLElement>("pre")].find(pre => !pre.hidden)
         const copied = await copyText(panel?.textContent ?? "")
         if (!status) return
         status.textContent = copied ? "Copied" : "Copy failed"
@@ -188,15 +227,9 @@ const tabbed = variants.length > 1
     color: var(--star);
   }
 
-  .command-tabs button[data-source="release"],
-  :root[data-command-source="checkout"] .command-tabs button[data-source="checkout"] {
+  .command-tabs button[aria-selected="true"] {
     color: var(--star);
     box-shadow: inset 0 -2px 0 var(--brand);
-  }
-
-  :root[data-command-source="checkout"] .command-tabs button[data-source="release"] {
-    color: var(--dust);
-    box-shadow: inset 0 -2px 0 transparent;
   }
 
   .command-tabs button:focus-visible,
@@ -228,20 +261,15 @@ const tabbed = variants.length > 1
     white-space: pre;
   }
 
+  .command pre[hidden] {
+    display: none;
+  }
+
   .command pre code {
     padding: 0;
     border: 0;
     background: none;
     color: inherit;
     font: inherit;
-  }
-
-  .command[data-tabbed] pre[data-source="checkout"],
-  :root[data-command-source="checkout"] .command[data-tabbed] pre[data-source="release"] {
-    display: none;
-  }
-
-  :root[data-command-source="checkout"] .command[data-tabbed] pre[data-source="checkout"] {
-    display: block;
   }
 </style>

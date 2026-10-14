@@ -1,7 +1,7 @@
 ---
 // Head tags every page shares, on the custom layout and the Starlight pages alike: the section's
 // social card image, rendered by scripts/og-images.mjs, and a preload of the two fonts the first
-// screen needs, so text does not reflow when they arrive, and the command tab a reader last picked.
+// screen needs, so text does not reflow when they arrive.
 import sansUrl from "@fontsource/noto-sans/files/noto-sans-latin-400-normal.woff2?url"
 import monoUrl from "@fontsource/noto-sans-mono/files/noto-sans-mono-latin-400-normal.woff2?url"
 
@@ -13,13 +13,6 @@ const imageAlt = "The Phobos mark on a dotted star chart, with the line: Tile-ba
 
 <link rel="preload" href={sansUrl} as="font" type="font/woff2" crossorigin />
 <link rel="preload" href={monoUrl} as="font" type="font/woff2" crossorigin />
-<script is:inline>
-  // Command.astro's release or checkout tab, set before first paint so a box never flips.
-  try {
-    if (localStorage.getItem("phobos-command-source") === "checkout")
-      document.documentElement.dataset.commandSource = "checkout"
-  } catch {}
-</script>
 <meta property="og:image" content={imageUrl} />
 <meta property="og:image:alt" content={imageAlt} />
 <meta name="twitter:image" content={imageUrl} />
