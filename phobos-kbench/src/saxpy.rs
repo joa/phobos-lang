@@ -22,7 +22,7 @@ pub(crate) fn bench_saxpy(
     results: &mut Results,
 ) -> anyhow::Result<()> {
     let kernels = phobos_lang::parse(CODE_SAXPY)?;
-    let space = autotune::pin(phobos_lang::search_space(&kernels[0]), pins)?;
+    let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
 
     let n: i32 = 1 << 25;
     let alpha: f32 = 2.0;

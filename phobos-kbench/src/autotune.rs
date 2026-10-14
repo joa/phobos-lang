@@ -32,30 +32,6 @@ pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
     phobos_lang::compile(&ctx, code)
 }
 
-pub fn pin(
-    space: Vec<(String, Vec<i64>)>,
-    pins: &std::collections::HashMap<String, i64>,
-) -> anyhow::Result<Vec<(String, Vec<i64>)>> {
-    for name in pins.keys() {
-        anyhow::ensure!(
-            space.iter().any(|(n, _)| n == name),
-            "autotune pin '{name}' is not a search dim of this kernel (dims: {})",
-            space
-                .iter()
-                .map(|(n, _)| n.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-    }
-    Ok(space
-        .into_iter()
-        .map(|(name, choices)| match pins.get(&name) {
-            Some(&v) => (name, vec![v]),
-            None => (name, choices),
-        })
-        .collect())
-}
-
 pub fn cfg_value(cfg: &[Setting], name: &str) -> anyhow::Result<i64> {
     cfg.iter()
         .find(|(n, _)| n == name)

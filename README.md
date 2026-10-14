@@ -222,10 +222,10 @@ that is already a complete prompt.
 ### `phobos-compile` (no GPU)
 
 ```plain
-cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY>] [--index-bits 32|64] [-o <out.ptx>]
+cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY>] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o <out.ptx>]
 ```
 
-Compiles a kernel source to PTX, for `sm_75` by default. `PHOBOS_PRINT_PHASES=1` prints the IR of each lowering phase.
+Compiles a kernel source to PTX, for `sm_75` by default. `--set` pins an `@autotune` parameter, which otherwise takes its first choice. `--all-variants` writes one file per remaining combination, `<out>_NAME-value_....ptx`. `PHOBOS_PRINT_PHASES=1` prints the IR of each lowering phase.
 
 ### `phobos-bench` (needs a GPU)
 

@@ -74,5 +74,7 @@ phobos-compile examples/saxpy_fp32.ph -o saxpy.ptx
 cargo run -r -p phobos-kbench -- --bench saxpy_fp32
 ```
 
-The first needs no GPU. The second autotunes `BLOCK` on the GPU and prints the
-throughput of the winner.
+The first needs no GPU and compiles `BLOCK = 16`, the first choice; add
+`--set BLOCK=256` for another, or `--all-variants` for a file per choice,
+`saxpy_BLOCK-16.ptx` through `saxpy_BLOCK-8192.ptx`. The second autotunes
+`BLOCK` on the GPU and prints the throughput of the winner.

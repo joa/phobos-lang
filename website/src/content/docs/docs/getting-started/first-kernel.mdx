@@ -27,7 +27,8 @@ source: `@autotune` declares a search space for it. With two values, the
 range is searched in doubling steps, so `BLOCK` takes 16, 32, 64 and so on up
 to 8192. A tuner such as `phobos-kbench` compiles the kernel for each value,
 times them on the GPU and keeps the fastest. When nothing tunes it, as with
-`phobos-compile`, the first value in the range, 16, is used.
+`phobos-compile`, the first value in the range, 16, is used unless
+`--set BLOCK=256` picks another.
 
 See [`@autotune`](/docs/attributes/autotune/) for the forms the search space
 can take.

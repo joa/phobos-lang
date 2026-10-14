@@ -85,7 +85,7 @@ pub(crate) fn bench_gemm_fp32(
     results: &mut Results,
 ) -> anyhow::Result<()> {
     let kernels = phobos_lang::parse(code)?;
-    let space = autotune::pin(phobos_lang::search_space(&kernels[0]), pins)?;
+    let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
 
     let M: i32 = 4096;
     let N: i32 = 4096;
@@ -312,7 +312,7 @@ pub(crate) fn bench_gemm_fp16(
     results: &mut Results,
 ) -> anyhow::Result<()> {
     let kernels = phobos_lang::parse(code)?;
-    let space = autotune::pin(phobos_lang::search_space(&kernels[0]), pins)?;
+    let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
 
     let M: i32 = 4096;
     let N: i32 = 4096;

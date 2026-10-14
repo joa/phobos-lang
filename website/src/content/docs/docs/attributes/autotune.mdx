@@ -40,7 +40,8 @@ kernel square(x: tensor<f32>[N], y: tensor<f32>[N]) {
 ```
 
 `BLOCK` has five choices, 256 through 4096. Compiled on its own the kernel
-uses `BLOCK = 256`; a tuner tries all five.
+uses `BLOCK = 256`; a tuner tries all five. `phobos-compile --set BLOCK=1024`
+compiles another, and `--all-variants` writes all five.
 
 ## What the constants can do
 
@@ -70,5 +71,9 @@ declaring them puts the GEMM's tiling into the search.
 - `phobos-kbench` searches the cartesian product of all entries, skips
   combinations that fail to compile and keeps the fastest. Its
   `--autotune "DIM=VAL ..."` pins values and skips the search.
+- `phobos-compile` takes the first choices unless `--set NAME=VALUE` pins
+  one, and `--all-variants` writes a file per combination left after the
+  pins. A pinned value need not be one of the choices, but its name has to be
+  declared here, since codegen would ignore any other.
 - [`@cluster`](/docs/attributes/cluster/) declares its own search space, for
   cluster tuning, in the same `NAME in [..]` form.

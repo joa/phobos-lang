@@ -1,1 +1,11 @@
-usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [-o OUT.ptx]
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx]
+
+  --chip CHIP              target architecture, sm_75 by default
+  --index-bits 32|64       index width, raised to 64 where the runtime would
+  --set NAME=VALUE         pin an @autotune parameter, which otherwise takes
+                           its first choice; repeatable
+  --all-variants           compile every @autotune variant left after the
+                           pins, one file each, named OUT_NAME-value.ptx
+                           (OUT from -o, else the source's name); prints a
+                           line per file and skips a variant that fails
+  -o, --output OUT.ptx     write the PTX here instead of standard output
