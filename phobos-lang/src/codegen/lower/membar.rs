@@ -25,6 +25,8 @@ struct Sweep {
     width: i64,
     elem_bytes: i64,
     pitch: i64,
+    /// A swizzled buffer puts another element behind each index.
+    swizzle: Option<crate::ir::Swizzle>,
 }
 
 impl Access {
@@ -301,6 +303,7 @@ impl Membar<'_> {
                 && m.shape == tile.shape
                 && Some(m.elem_bytes) == tile.elem.bytes()
                 && tile.shape.last() == Some(&m.pitch)
+                && m.swizzle.is_none()
         })
     }
 
@@ -413,6 +416,7 @@ impl Membar<'_> {
                         width: *width,
                         elem_bytes: t.elem.bytes()?,
                         pitch: t.layout.row_stride.unwrap_or(*shape.last()?),
+                        swizzle: t.layout.swizzle,
                     })
                 });
             for &(lo, hi) in ranges {
@@ -651,6 +655,10 @@ mod tests {
     use super::{Access, Sweep};
 
     fn access(lo: i64, write: bool, elem_bytes: i64) -> Access {
+        swizzled(lo, write, elem_bytes, None)
+    }
+
+    fn swizzled(lo: i64, write: bool, elem_bytes: i64, swizzle: Option<crate::ir::Swizzle>) -> Access {
         let n = 32 * 16;
         Access {
             lo,
@@ -661,6 +669,7 @@ mod tests {
                 width: 1,
                 elem_bytes,
                 pitch: 16,
+                swizzle,
             }),
         }
     }
@@ -675,6 +684,14 @@ mod tests {
     #[test]
     fn a_sweep_over_wider_elements_is_another_thread() {
         assert!(access(0, false, 1).conflicts(&access(0, true, 4)));
+    }
+
+    /// A swizzle permutes the elements behind a row's indices.
+    #[test]
+    fn a_sweep_over_a_swizzled_buffer_is_another_thread() {
+        let sw = crate::ir::Swizzle { bits: 3, shift: 0, elem_log: 4 };
+        assert!(access(0, false, 1).conflicts(&swizzled(0, true, 1, Some(sw))));
+        assert!(!swizzled(0, false, 1, Some(sw)).conflicts(&swizzled(0, true, 1, Some(sw))));
     }
 
     #[test]
