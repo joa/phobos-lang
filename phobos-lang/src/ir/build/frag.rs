@@ -76,7 +76,7 @@ fn is_f16_or_f32(s: Scalar) -> bool {
 }
 
 /// `acc -= e` as the parser spells it, `acc = acc - e`: the `e`.
-fn subtracted<'e>(name: &str, value: &'e Expr) -> Option<&'e Expr> {
+pub(super) fn subtracted<'e>(name: &str, value: &'e Expr) -> Option<&'e Expr> {
     match &value.kind {
         ExprKind::Binary {
             op: BinOp::Sub,
@@ -88,7 +88,7 @@ fn subtracted<'e>(name: &str, value: &'e Expr) -> Option<&'e Expr> {
 }
 
 /// The two names of `r * c`, the outer-product update's operands.
-fn outer_parts(value: &Expr) -> Option<[&str; 2]> {
+pub(super) fn outer_parts(value: &Expr) -> Option<[&str; 2]> {
     let ExprKind::Binary {
         op: BinOp::Mul,
         lhs,
@@ -487,13 +487,20 @@ impl Build {
                 let value = if negate { subtracted(name, value).expect("checked by the guard") } else { value };
                 let mut operands = vec![acc];
                 for part in outer_parts(value).expect("checked by the guard") {
-                    let Some(Binding::Tile(v) | Binding::View(v)) = self.lookup(part) else {
-                        bail!("fragment operand `{part}` is not a tile");
+                    let v = match self.lookup(part) {
+                        Some(Binding::Tile(v) | Binding::View(v)) => v,
+                        Some(Binding::Generated(t)) => self.emit_generate(&t)?,
+                        None => return Err(self.unknown(part)),
+                        _ => bail!("fragment operand `{part}` is not a tile"),
                     };
                     operands.push(v);
                 }
                 // The column first, the row second.
-                let column = |v: ValueId| matches!(self.ir.ty(v), Type::Tile(t) if t.static_shape().is_some_and(|s| s.last() == Some(&1)));
+                let column = |v: ValueId| match self.ir.ty(v) {
+                    Type::Tile(t) => t.static_shape().is_some_and(|s| s.last() == Some(&1)),
+                    Type::Dist(d) => d.shape.last() == Some(&1),
+                    _ => false,
+                };
                 if !column(operands[1]) {
                     operands.swap(1, 2);
                 }

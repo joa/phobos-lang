@@ -7,11 +7,39 @@ use melior::ir::{Block, Type, Value};
 
 use super::Lowered;
 use crate::codegen::Codegen;
-use crate::ir::{Ir, OpId};
+use crate::codegen::frag::{FragIn, ImmaOperand};
+use crate::ir::{Ir, OpId, ValueId};
 
 impl<'c> Codegen<'c> {
+    /// An int8 accumulator update's operand `v`: generated, or a tile.
+    pub(super) fn frag_in<'a>(&self, ir: &'a Ir, v: ValueId) -> Result<FragIn<'a, 'c>> {
+        if let Lowered::Generated(op) = self.get_ir(v)? {
+            let crate::ir::Type::Dist(d) = ir.ty(v) else {
+                bail!("internal: a generated operand that is not a generated tile");
+            };
+            return Ok(FragIn::Generated {
+                ir,
+                op: *op,
+                shape: d.shape.clone(),
+                elem: d.elem,
+            });
+        }
+        let view = self.tile_ir(ir, v)?;
+        let from = self.slice_origin(ir, v)?;
+        Ok(FragIn::Stored(ImmaOperand { view, from }))
+    }
+
+    /// Releases the tiles among `ins`.
+    pub(super) fn release_frag_ins(&mut self, ins: &[FragIn<'_, 'c>]) {
+        for v in ins {
+            if let FragIn::Stored(v) = v {
+                self.release(&v.view);
+            }
+        }
+    }
+
     /// The value of `op`'s block at `(row, unit)`.
-    fn eval_generate(
+    pub(in crate::codegen) fn eval_generate(
         &mut self,
         block: &Block<'c>,
         ir: &Ir,

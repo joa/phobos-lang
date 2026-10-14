@@ -67,3 +67,32 @@ fn generate_takes_a_function_ending_in_its_value() {
     let err = crate::parse(&src).expect_err("a body ending in a `let` has no value").to_string();
     assert!(err.contains("must end in an expression"), "got: {err}");
 }
+
+#[test]
+fn generated_scales_and_outer_operands_stay_in_registers() {
+    // The scales computed per lane too: a row from `WS`, a column from
+    // `AS`, read as the scaled dot's and the outer product's operands.
+    let src = projection(
+        "    let wsg: tile<f32>[1, 64] = generate(wsf)
+    let dag: tile<f32>[128, 1] = generate(daf)
+    acc += f32(dot_t(a, w)) * wsg * dag
+    acc -= dag * wsg
+",
+    )
+    .replace(
+        "@launch(128)",
+        "fn wsf(i, j) {
+  WS[b, pn * 64 + j]
+}
+
+fn daf(i, j) {
+  AS[pm * 128 + i, b]
+}
+
+@launch(128)",
+    );
+    let mlir = emit_mlir(&src);
+    assert!(!mlir.contains("memref.global"), "{mlir}");
+    assert!(!mlir.contains("gpu.barrier"), "{mlir}");
+    assert_eq!(mlir.matches("mmaShape = [8, 8, 16]").count(), 64, "{mlir}");
+}

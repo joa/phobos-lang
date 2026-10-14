@@ -26,11 +26,32 @@ struct ScaledCols<'a, 'c> {
     small: bool,
 }
 
-/// The weight of a scaled dot: an operand in memory, or a generated tile
-/// whose block each lane evaluates for the fragment words it holds.
-pub(super) enum ImmaWeight<'a, 'c> {
+/// An operand of the int8 accumulator's updates: a tile in memory, or a
+/// generated tile whose block each lane evaluates for the elements it holds.
+pub(super) enum FragIn<'a, 'c> {
     Stored(ImmaOperand<'c>),
-    Generated { ir: &'a crate::ir::Ir, op: crate::ir::OpId },
+    Generated {
+        ir: &'a crate::ir::Ir,
+        op: crate::ir::OpId,
+        shape: Vec<i64>,
+        elem: crate::ir::Scalar,
+    },
+}
+
+impl<'c> FragIn<'_, 'c> {
+    fn shape(&self) -> &[i64] {
+        match self {
+            FragIn::Stored(v) => &v.view.shape,
+            FragIn::Generated { shape, .. } => shape,
+        }
+    }
+
+    fn stored(&self) -> Option<&MemVal<'c>> {
+        match self {
+            FragIn::Stored(v) => Some(&v.view),
+            FragIn::Generated { .. } => None,
+        }
+    }
 }
 
 /// See [`Codegen::imma_lane`].
@@ -231,6 +252,72 @@ impl<'c> Codegen<'c> {
         Ok([pair[0], pair[1]])
     }
 
+    /// Whether an operand holds int8.
+    fn frag_in_is_i8(&self, v: &FragIn<'_, 'c>) -> bool {
+        match v {
+            FragIn::Stored(v) => v.view.elem == self.i8_t,
+            FragIn::Generated { elem, .. } => *elem == crate::ir::Scalar::I8,
+        }
+    }
+
+    /// [`Self::imma_frags`] of either kind of operand.
+    fn frag_in_frags(
+        &mut self,
+        block: &Block<'c>,
+        v: &FragIn<'_, 'c>,
+        rows: &[Value<'c, 'c>],
+        origin: Value<'c, 'c>,
+        lane: Value<'c, 'c>,
+        k_cols: &[Value<'c, 'c>],
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        match v {
+            FragIn::Stored(v) => self.imma_frags(block, v, rows, origin, lane, k_cols),
+            FragIn::Generated { ir, op, .. } => self.generated_frags(block, ir, *op, rows, k_cols),
+        }
+    }
+
+    /// [`Self::imma_pair`] of either kind of operand.
+    fn frag_in_pair(
+        &mut self,
+        block: &Block<'c>,
+        v: &FragIn<'_, 'c>,
+        row: Value<'c, 'c>,
+        col: Value<'c, 'c>,
+    ) -> Result<[Value<'c, 'c>; 2]> {
+        match v {
+            FragIn::Stored(v) => self.imma_pair(block, v, row, col),
+            FragIn::Generated { ir, op, .. } => {
+                let one = self.const_index(block, 1)?;
+                let next = self.addi(block, col, one)?;
+                let first = self.eval_generate(block, ir, *op, row, col)?;
+                Ok([self.coerce(block, first, self.f32_t)?, {
+                    let second = self.eval_generate(block, ir, *op, row, next)?;
+                    self.coerce(block, second, self.f32_t)?
+                }])
+            }
+        }
+    }
+
+    /// Element `[row, col]` of either kind of operand, as f32.
+    fn frag_in_elem(
+        &mut self,
+        block: &Block<'c>,
+        v: &FragIn<'_, 'c>,
+        row: Value<'c, 'c>,
+        col: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        match v {
+            FragIn::Stored(v) => {
+                let (mem, at) = self.imma_at(block, v, row, col)?;
+                self.load_as(block, mem, &at, self.f32_t)
+            }
+            FragIn::Generated { ir, op, .. } => {
+                let e = self.eval_generate(block, ir, *op, row, col)?;
+                self.coerce(block, e, self.f32_t)
+            }
+        }
+    }
+
     /// An operand's fragments for its `rows.len()` tiles from row `origin`,
     /// tile-major then by k step. From shared memory four tiles at a time
     /// are one `ldmatrix.x4` a k step, lane `l` addressing row `origin + l`
@@ -284,26 +371,25 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         fa: &FragAcc<'c>,
-        r: &ImmaOperand<'c>,
-        c: &ImmaOperand<'c>,
+        r: &FragIn<'_, 'c>,
+        c: &FragIn<'_, 'c>,
         negate: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
         if !fa.imma {
             bail!("internal: an outer product on a 16x16 fragment accumulator");
         }
-        self.check_shapes(&r.view.shape, &[fa.m, 1], "fragment outer product column")?;
-        self.check_shapes(&c.view.shape, &[1, fa.n], "fragment outer product row")?;
+        self.check_shapes(r.shape(), &[fa.m, 1], "fragment outer product column")?;
+        self.check_shapes(c.shape(), &[1, fa.n], "fragment outer product row")?;
         let (fm, fnn) = fa.warp_frags();
         let lane = self.imma_lane(block, fa)?;
         let zero = self.const_index(block, 0)?;
         let mut cols = Vec::with_capacity((fnn * 2) as usize);
         for &col in &lane.cols {
-            cols.extend(self.imma_pair(block, c, zero, col)?);
+            cols.extend(self.frag_in_pair(block, c, zero, col)?);
         }
         let mut frags = fa.frags.clone();
         for i in 0..fm as usize {
-            let (mem, at) = self.imma_at(block, r, lane.rows[i], zero)?;
-            let mut row = self.load_as(block, mem, &at, self.f32_t)?;
+            let mut row = self.frag_in_elem(block, r, lane.rows[i], zero)?;
             if negate {
                 row = self.push(block, arith::negf(row, self.loc))?;
             }
@@ -325,36 +411,23 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         fa: &FragAcc<'c>,
-        a: &ImmaOperand<'c>,
-        w: &ImmaWeight<'_, 'c>,
-        [s1, s2]: [&ImmaOperand<'c>; 2],
+        [a, w, s1, s2]: [&FragIn<'_, 'c>; 4],
     ) -> Result<Vec<Value<'c, 'c>>> {
         if !fa.imma {
             bail!("internal: scaled dot on a 16x16 fragment accumulator");
         }
-        let kk = a.view.shape[1];
-        self.check_shapes(&a.view.shape, &[fa.m, kk], "fragment scaled dot lhs")?;
-        let (w_shape, w_i8) = match w {
-            ImmaWeight::Stored(w) => (w.view.shape.clone(), w.view.elem == self.i8_t),
-            ImmaWeight::Generated { ir, op } => match ir.ty(ir.result(*op)) {
-                crate::ir::Type::Dist(d) => (d.shape.clone(), d.elem == crate::ir::Scalar::I8),
-                _ => bail!("internal: a generated weight that is not a generated tile"),
-            },
-        };
-        self.check_shapes(&w_shape, &[fa.n, kk], "fragment scaled dot rhs")?;
-        if a.view.elem != self.i8_t || !w_i8 || kk % IMMA_K != 0 {
+        let kk = a.shape()[1];
+        self.check_shapes(a.shape(), &[fa.m, kk], "fragment scaled dot lhs")?;
+        self.check_shapes(w.shape(), &[fa.n, kk], "fragment scaled dot rhs")?;
+        if !(self.frag_in_is_i8(a) && self.frag_in_is_i8(w)) || kk % IMMA_K != 0 {
             bail!("fragment scaled dot contracts int8 operands over a k that is a multiple of {IMMA_K}");
         }
-        let stored = match w {
-            ImmaWeight::Stored(w) => Some(&w.view),
-            ImmaWeight::Generated { .. } => None,
-        };
-        for v in [Some(&a.view), stored, Some(&s1.view), Some(&s2.view)].into_iter().flatten() {
+        for v in [a, w, s1, s2].into_iter().filter_map(FragIn::stored) {
             if v.is_masked() {
                 bail!("internal: fragment scaled dot reached a partial operand");
             }
         }
-        let is_row = |s: &ImmaOperand<'c>| s.view.shape == [fa.m, 1];
+        let is_row = |s: &FragIn<'_, 'c>| s.shape() == [fa.m, 1];
         let (fm, fnn) = fa.warp_frags();
         let lane = self.imma_lane(block, fa)?;
         let zero = self.const_index(block, 0)?;
@@ -365,23 +438,20 @@ impl<'c> Codegen<'c> {
             let off = self.const_index(block, h * IMMA_K)?;
             k_cols.push(self.addi(block, lane.k_off, off)?);
         }
-        let a_frags = self.imma_frags(block, a, &lane.rows, lane.m0, lane.lane, &k_cols)?;
-        let w_frags = match w {
-            ImmaWeight::Stored(w) => self.imma_frags(block, w, &lane.w_rows, lane.n0, lane.lane, &k_cols)?,
-            ImmaWeight::Generated { ir, op } => self.generated_frags(block, ir, *op, &lane.w_rows, &k_cols)?,
-        };
+        let a_frags = self.frag_in_frags(block, a, &lane.rows, lane.m0, lane.lane, &k_cols)?;
+        let w_frags = self.frag_in_frags(block, w, &lane.w_rows, lane.n0, lane.lane, &k_cols)?;
 
         // A column scale's values for the patch's output columns, loaded up
         // front; a row scale is loaded with its patch row, as qmma_t does.
-        let cols_of = |s: &ImmaOperand<'c>| -> Result<Vec<Value<'c, 'c>>> {
+        let cols_of = |cg: &mut Self, s: &FragIn<'_, 'c>| -> Result<Vec<Value<'c, 'c>>> {
             let mut by_col = Vec::with_capacity((fnn * 2) as usize);
             for &col in &lane.cols {
-                by_col.extend(self.imma_pair(block, s, zero, col)?);
+                by_col.extend(cg.frag_in_pair(block, s, zero, col)?);
             }
             Ok(by_col)
         };
-        let first_cols = if is_row(s1) { Vec::new() } else { cols_of(s1)? };
-        let second_cols = if is_row(s2) { Vec::new() } else { cols_of(s2)? };
+        let first_cols = if is_row(s1) { Vec::new() } else { cols_of(self, s1)? };
+        let second_cols = if is_row(s2) { Vec::new() } else { cols_of(self, s2)? };
 
         // The magic-constant conversion holds for |sum| < 2^22.
         let small = kk * 128 * 128 < 1 << 22;
@@ -389,12 +459,11 @@ impl<'c> Codegen<'c> {
         let zero_i = self.zero_scalar(block, self.i32_t)?;
         let empty = self.vec_broadcast(block, zero_i, acc_t)?;
         let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
-        let row_of = |cg: &Self, s: &ImmaOperand<'c>, r: usize| -> Result<Option<Value<'c, 'c>>> {
+        let row_of = |cg: &mut Self, s: &FragIn<'_, 'c>, r: usize| -> Result<Option<Value<'c, 'c>>> {
             if !is_row(s) {
                 return Ok(None);
             }
-            let (mem, at) = cg.imma_at(block, s, lane.rows[r], zero)?;
-            Ok(Some(cg.load_as(block, mem, &at, cg.f32_t)?))
+            Ok(Some(cg.frag_in_elem(block, s, lane.rows[r], zero)?))
         };
         let scales = ScaledCols {
             first: &first_cols,

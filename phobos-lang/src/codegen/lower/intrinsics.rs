@@ -7,7 +7,7 @@ use melior::{
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::{GemmPath, GemmScale};
-use crate::codegen::frag::{ImmaOperand, ImmaWeight, SliceOrigin};
+use crate::codegen::frag::SliceOrigin;
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
@@ -15,7 +15,7 @@ impl<'c> Codegen<'c> {
     /// The buffer an unmasked rank-2 slice was taken from, and where it
     /// starts there. None for anything else. A swizzled buffer is only read
     /// this way, since its permutation is of the buffer's own columns.
-    fn slice_origin(&self, ir: &Ir, v: ir::ValueId) -> Result<Option<SliceOrigin<'c>>> {
+    pub(super) fn slice_origin(&self, ir: &Ir, v: ir::ValueId) -> Result<Option<SliceOrigin<'c>>> {
         let Some(def) = ir.def_op(v) else { return Ok(None) };
         let OpKind::Slice(s) = ir.kind(def) else { return Ok(None) };
         let src = self.tile_ir(ir, ir.operand(def, 0))?;
@@ -89,16 +89,9 @@ impl<'c> Codegen<'c> {
             }
             OpKind::FragOuter { negate } => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
-                let tiles = self.tiles_ir(ir, op, 1..3)?;
-                let mut operands = Vec::with_capacity(2);
-                for (i, view) in tiles.iter().enumerate() {
-                    let from = self.slice_origin(ir, ir.operand(op, 1 + i))?;
-                    operands.push(ImmaOperand { view: view.clone(), from });
-                }
-                let frags = self.frag_outer_raw(block, &fa, &operands[0], &operands[1], negate)?;
-                for t in &tiles {
-                    self.release(t);
-                }
+                let ins = (1..3).map(|i| self.frag_in(ir, ir.operand(op, i))).collect::<Result<Vec<_>>>()?;
+                let frags = self.frag_outer_raw(block, &fa, &ins[0], &ins[1], negate)?;
+                self.release_frag_ins(&ins);
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
             OpKind::FragDot => {
@@ -114,33 +107,13 @@ impl<'c> Codegen<'c> {
             OpKind::Generate => self.set_ir(ir.result(op), Lowered::Generated(op)),
             OpKind::FragDotScaled => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
-                let generated = match self.get_ir(ir.operand(op, 2))? {
-                    Lowered::Generated(g) => Some(*g),
-                    _ => None,
-                };
-                let mut tiles = Vec::with_capacity(4);
-                let mut operands = Vec::with_capacity(4);
-                for i in 1..5 {
-                    if i == 2 && generated.is_some() {
-                        continue;
-                    }
-                    let view = self.tile_ir(ir, ir.operand(op, i))?;
-                    let from = self.slice_origin(ir, ir.operand(op, i))?;
-                    operands.push(ImmaOperand { view: view.clone(), from });
-                    tiles.push(view);
-                }
-                let weight = match generated {
-                    Some(op) => ImmaWeight::Generated { ir, op },
-                    None => ImmaWeight::Stored(operands.remove(1)),
-                };
-                let [a, s1, s2] = &operands[..] else {
+                let ins = (1..5).map(|i| self.frag_in(ir, ir.operand(op, i))).collect::<Result<Vec<_>>>()?;
+                let [a, w, s1, s2] = &ins[..] else {
                     bail!("internal: a scaled dot without its operands");
                 };
                 self.record_contract("mma.sync");
-                let frags = self.frag_dot_scaled_raw(block, &fa, a, &weight, [s1, s2])?;
-                for t in &tiles {
-                    self.release(t);
-                }
+                let frags = self.frag_dot_scaled_raw(block, &fa, [a, w, s1, s2])?;
+                self.release_frag_ins(&ins);
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
             OpKind::FragStore => {

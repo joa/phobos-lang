@@ -1,10 +1,10 @@
 // `let w: tile<T>[r, c] = generate(f)`: a tile with no storage, each element
 // block computed where it is read.
 //
-// When every later read of `w` is the weight of a fragment accumulator's
-// scaled `dot_t`, `w` stays unmaterialized and each such read emits a
-// `Generate` op right before it, whose region the dot's lowering evaluates
-// once per fragment word. Program order is then the order the reads run in,
+// When every later read of `w` is an operand of a fragment accumulator's
+// update, a scaled `dot_t` or `acc += r * c`, `w` stays unmaterialized and
+// each such read emits a `Generate` op right before it, whose region the
+// update's lowering evaluates once per element block it needs. Program order is then the order the reads run in,
 // which the barrier and race analyses rely on. Any other read materializes
 // `w` into a shared tile where it is declared: each thread evaluates `f` on
 // a strided share of its blocks, stores them, and a barrier follows.
@@ -65,7 +65,7 @@ impl Build {
                 bail!("`{name}` is generated afresh at each read, so its function may read memory but not write it")
             });
         }
-        if self.only_dot_weight(name, rest) {
+        if self.only_fragment_operand(name, rest) {
             self.bind(name, Binding::Generated(Rc::new(tile)));
         } else {
             let t = self.materialize_generated(name, *sc, dims, &tile)?;
@@ -74,25 +74,34 @@ impl Build {
         Ok(Some(()))
     }
 
-    /// Whether every read of `name` in `rest` is the weight of a scaled
-    /// `dot_t` updating a fragment accumulator, each a statement of `rest`
-    /// itself.
-    fn only_dot_weight(&self, name: &str, rest: &[Stmt]) -> bool {
+    /// Whether every read of `name` in `rest` is an operand of an int8
+    /// fragment accumulator's update: `acc += f32(dot_t(a, w)) * s1 * s2`,
+    /// `acc += r * c` or `acc -= r * c`, each a statement of `rest` itself.
+    fn only_fragment_operand(&self, name: &str, rest: &[Stmt]) -> bool {
         let mut any = false;
         for stmt in rest {
             if let Stmt::Assign {
                 target: Expr { kind: ExprKind::Var(acc), .. },
-                op: AssignOp::Add,
+                op,
                 value,
                 ..
             } = stmt
                 && matches!(self.lookup(acc), Some(Binding::Frags(_)))
-                && let Some([a, w, s1, s2]) = super::frag::scaled_dot_parts(value)
-                && w == name
-                && ![a, s1, s2].contains(&name)
             {
-                any = true;
-                continue;
+                let parts: Option<Vec<&str>> = match op {
+                    AssignOp::Add => super::frag::scaled_dot_parts(value)
+                        .map(|p| p.to_vec())
+                        .or_else(|| super::frag::outer_parts(value).map(|p| p.to_vec())),
+                    AssignOp::Set => super::frag::subtracted(acc, value)
+                        .and_then(super::frag::outer_parts)
+                        .map(|p| p.to_vec()),
+                };
+                if let Some(parts) = parts
+                    && parts.contains(&name)
+                {
+                    any = true;
+                    continue;
+                }
             }
             if stmt.uses_name(name) {
                 return false;
