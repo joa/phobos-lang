@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv};
 use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Stmt};
-use crate::ir::{OpKind, Reduce, RegsType, Scalar, Tree, Type, ValueId};
+use crate::ir::{DistType, OpKind, Reduce, RegLayout, Scalar, Tree, Type, ValueId};
 
 /// Elements one thread may hold of one register tile.
 const MAX_REGS_PER_THREAD: i64 = 64;
@@ -36,7 +36,11 @@ impl Build {
         let Some(value) = value else {
             bail!("`@registers({name})` needs an initial value");
         };
-        let ty = Type::Regs(RegsType { elem, shape: shape.clone() });
+        let ty = Type::Dist(DistType {
+            elem,
+            shape: shape.clone(),
+            layout: RegLayout::Blocked,
+        });
         let regs = match self.emit_expr(value)? {
             Rv::Scalar(v) => {
                 let v = self.coerce(v, elem)?;
@@ -54,7 +58,7 @@ impl Build {
 
     /// `name = value` or `name += value` on a register tile.
     pub(crate) fn emit_regs_assign(&mut self, name: &str, regs: ValueId, op: AssignOp, value: &Expr) -> Result<()> {
-        let Type::Regs(ty) = self.ir.ty(regs).clone() else {
+        let Some(ty) = self.ir.ty(regs).regs().cloned() else {
             bail!("`{name}` is not a register tile");
         };
         let Some((mut tree, mut operands)) = self.plan_regs(value, ty.elem, &ty.shape)? else {
@@ -67,7 +71,7 @@ impl Build {
             operands.push(regs);
             tree = Tree::Binary(BinOp::Add, Box::new(Tree::Leaf(operands.len() - 1)), Box::new(tree));
         }
-        let next = self.value(OpKind::RegsFused(tree), &operands, Type::Regs(ty));
+        let next = self.value(OpKind::RegsFused(tree), &operands, Type::Dist(ty));
         self.update_binding(name, Binding::Regs(next));
         Ok(())
     }
@@ -75,7 +79,7 @@ impl Build {
     /// A register tile written out to a fresh shared tile, for a read that
     /// needs one.
     pub(crate) fn materialize_regs(&mut self, regs: ValueId) -> Result<ValueId> {
-        let Type::Regs(ty) = self.ir.ty(regs).clone() else {
+        let Some(ty) = self.ir.ty(regs).regs().cloned() else {
             bail!("not a register tile");
         };
         let tile_ty = self.shared_ty(ty.elem, &ty.shape);
@@ -91,9 +95,7 @@ impl Build {
     /// spans warps, and folding their parts through shared memory costs a
     /// barrier more than storing the tile and reducing that.
     pub(crate) fn regs_reduce(&mut self, how: Reduce, regs: ValueId) -> Option<ValueId> {
-        let Type::Regs(ty) = self.ir.ty(regs).clone() else {
-            return None;
-        };
+        let ty = self.ir.ty(regs).regs().cloned()?;
         let [rows, cols] = ty.shape[..] else {
             return None;
         };

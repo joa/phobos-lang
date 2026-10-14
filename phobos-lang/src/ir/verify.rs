@@ -299,7 +299,7 @@ impl Verifier<'_> {
             | OpKind::F16Bits => self.lanes(op, &kind),
             OpKind::RegsReduce(_) => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
-                    if !matches!(ir.ty(ir.operand(op, 0)), Type::Regs(_)) {
+                    if ir.ty(ir.operand(op, 0)).regs().is_none() {
                         self.err(op, "operand must be a register tile");
                     }
                     if !matches!(ir.ty(ir.result(op)), Type::Tile(_)) {
@@ -407,7 +407,7 @@ impl Verifier<'_> {
                 if results != carried {
                     self.err(op, "results must match the carried operands");
                 }
-                if carried.iter().any(|t| matches!(t, Type::Gemm(_)))
+                if carried.iter().any(|t| t.gemm().is_some())
                     && (info.carried != 1 || info.hoisted != 0 || info.ragged || info.pipeline.is_some())
                 {
                     self.err(op, "a gemm accumulator is carried alone, with nothing hoisted or pipelined");
@@ -723,7 +723,7 @@ impl Verifier<'_> {
     fn intrinsic_operands(&mut self, op: OpId, n: usize) {
         for k in 0..n {
             let v = self.ir.operand(op, k);
-            if matches!(self.ir.ty(v), Type::Dist(_) | Type::Gemm(_)) {
+            if self.ir.ty(v).is_accumulator() {
                 self.err(op, format!("operand {k} cannot be an accumulator"));
             }
         }
@@ -734,7 +734,7 @@ impl Verifier<'_> {
             super::Tree::Leaf(i) => {
                 if let Some(&v) = self.ir.operands(op).get(*i)
                     && !self.is_tile(v)
-                    && !matches!(self.ir.ty(v), Type::Regs(_))
+                    && self.ir.ty(v).regs().is_none()
                 {
                     self.err(op, format!("tree leaf {i} must be a tile"));
                 }
@@ -751,7 +751,7 @@ impl Verifier<'_> {
                 let rank = match self.ir.kind(op) {
                     OpKind::ReduceFused { .. } => Some(2),
                     OpKind::RegsFused(_) => match self.ir.ty(self.ir.result(op)) {
-                        Type::Regs(r) => Some(r.shape.len()),
+                        t @ Type::Dist(_) => t.regs().map(|r| r.shape.len()),
                         _ => None,
                     },
                     _ => self.ir.operands(op).last().map(|&t| self.rank(t)),

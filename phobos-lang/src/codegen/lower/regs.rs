@@ -107,7 +107,7 @@ impl<'c> Codegen<'c> {
 
     /// The register tile `v` is typed as, with no values yet.
     fn regs_type(&self, ir: &Ir, v: ValueId) -> Result<RegTile<'c>> {
-        let ir::Type::Regs(r) = ir.ty(v) else {
+        let Some(r) = ir.ty(v).regs() else {
             bail!("{v} is not typed as a register tile");
         };
         Ok(RegTile {

@@ -231,12 +231,15 @@ fn the_verifier_names_each_broken_rule() {
 
 #[test]
 fn a_gemm_accumulator_is_carried_alone_and_folds_slices() {
-    let gemm = Type::Gemm(GemmType {
-        acc: Scalar::F32,
-        m: 64,
-        n: 64,
-        k: 16,
-    });
+    let gemm = Type::Dist(
+        GemmType {
+            acc: Scalar::F32,
+            m: 64,
+            n: 64,
+            k: 16,
+        }
+        .dist(),
+    );
     let mut ir = kernel(&[]);
     let entry = ir.entry();
     let mut b = Builder::at_end(&mut ir, entry);

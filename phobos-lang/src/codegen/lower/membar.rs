@@ -306,7 +306,7 @@ impl Membar<'_> {
         let Some(&result) = self.ir.results(regs).first() else {
             return false;
         };
-        let crate::ir::Type::Regs(tile) = self.ir.ty(result) else {
+        let Some(tile) = self.ir.ty(result).regs() else {
             return false;
         };
         other.mapping.as_ref().is_some_and(|m| {

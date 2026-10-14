@@ -12,7 +12,7 @@ impl Verifier<'_> {
                 if self.want_operands(op, 1) {
                     self.want_scalar(op, 0, "init");
                 }
-                if self.want_results(op, 1) && !matches!(ir.ty(ir.result(op)), Type::Gemm(_)) {
+                if self.want_results(op, 1) && ir.ty(ir.result(op)).gemm().is_none() {
                     self.err(op, "result must be a gemm accumulator");
                 }
             }
@@ -105,7 +105,7 @@ impl Verifier<'_> {
     /// Operand `i` as the gemm accumulator it must be.
     fn gemm_acc(&mut self, op: OpId, i: usize) -> Option<GemmType> {
         match self.ir.ty(*self.ir.operands(op).get(i)?) {
-            Type::Gemm(g) => Some(*g),
+            t @ Type::Dist(_) => t.gemm(),
             other => {
                 self.err(op, format!("operand {i} must be a gemm accumulator, is {other}"));
                 None
