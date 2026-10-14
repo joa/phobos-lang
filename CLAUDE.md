@@ -42,6 +42,13 @@ helpers rather than a spelling of its own.
   two diverge again between sm_75 and sm_80. A refactor of a code generator that
   changes the generated code is not a refactor, so diff this over every `.ph` in
   the tree, under each of those targets, before and after
+- `cargo run --release -p phobos-lang --example race -- [-v] PATH...`: the
+  shared-memory race check, on the host. It runs every thread of a CTA through
+  the MLIR as emitted, so it checks the barriers the membar pass kept and
+  elided, over `.ph` sources or emitted `.mlir`, files or directories; the same
+  targets as `emit`. `cargo test -p phobos-lang` runs it over every `.ph` in the
+  tree; a change to barrier placement also runs it over the generated sources
+  (`PHOBOS_DUMP_DIR`), under each target
 - `cargo run -p phobos-kbench`: Full GPU smoke test
 - `cargo run --release -p phobos-kernels --features cuda --example lang_check`: the
   language's semantics on the device, one probe kernel per feature against a host
