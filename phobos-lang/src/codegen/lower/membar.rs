@@ -143,6 +143,17 @@ impl Membar<'_> {
         match ir.kind(op) {
             OpKind::For(info) => {
                 let body = ir.blocks_of(op)[0];
+                if info.pipeline.is_some() && self.single_turn(body) {
+                    // One buffer a stage: a turn is the body once, and the
+                    // stages are refilled between two barriers after it, so
+                    // nothing is pending from one turn to the next. The
+                    // stage ops' own accesses are those refills.
+                    let entry = pending.clone();
+                    self.walk_block(body, pending, elide);
+                    pending.clear();
+                    merge(pending, entry);
+                    return;
+                }
                 if info.pipeline.is_some() {
                     // The body is instantiated twice with prefetches
                     // interleaved. Keep every barrier inside, and carry
@@ -319,12 +330,37 @@ impl Membar<'_> {
         out
     }
 
+    /// Whether a pipelined loop's body was emitted once, one buffer a stage
+    /// refilled from registers, rather than as two alternating halves.
+    /// The prefix up to the last stage is emitted for the prologue and for
+    /// every prefetch, so only the compute after it tells.
+    fn single_turn(&self, body: BlockId) -> bool {
+        let ops = self.ir.ops(body);
+        let after = ops
+            .iter()
+            .rposition(|&o| matches!(self.ir.kind(o), OpKind::Stage(_)))
+            .map_or(0, |i| i + 1);
+        ops[after..]
+            .iter()
+            .all(|o| self.windows.get(o).is_none_or(|w| w.instances <= 1))
+    }
+
     /// Everything the op touches in shared memory.
     fn accesses(&self, op: OpId) -> Vec<Access> {
         let ir = self.ir;
         // A view names bytes and touches none. Whatever reads or writes
         // through it records the access.
         if !ir.kind(op).aliases().is_empty() {
+            return Vec::new();
+        }
+        // A single-turn pipelined loop's stage is filled outside its body's
+        // ops, between the lowering's own barriers.
+        let body = ir.parent_block(op);
+        if matches!(ir.kind(op), OpKind::Stage(_))
+            && let Some(owner) = ir.parent_op(body)
+            && matches!(ir.kind(owner), OpKind::For(info) if info.pipeline.is_some())
+            && self.single_turn(body)
+        {
             return Vec::new();
         }
         let w = self.windows.get(&op);

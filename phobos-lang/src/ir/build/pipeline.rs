@@ -137,7 +137,7 @@ impl Build {
         hoisted: &[ValueId],
     ) -> Result<()> {
         let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
-        self.emit_pipelined_loop(var, [lo, hi, st], iv_div, staged, rest, info, hoisted)
+        self.emit_pipelined_loop(var, [lo, hi, st], iv_div, staged, rest, info, &[], hoisted)
     }
 
     /// A loop over a dynamic extent whose staged slices tile evenly only
@@ -163,7 +163,7 @@ impl Build {
         let full = self.value(OpKind::Binary(BinOp::Add), &[lo, covered], Type::INDEX);
 
         self.trimmed_ivs.push(var.to_string());
-        let main = self.emit_pipelined_loop(var, [lo, full, st], iv_div, staged, rest, info, hoisted);
+        let main = self.emit_pipelined_loop(var, [lo, full, st], iv_div, staged, rest, info, &[], hoisted);
         self.trimmed_ivs.pop();
         main?;
 
@@ -181,8 +181,11 @@ impl Build {
         Ok(())
     }
 
+    /// The pipelined loop, threading the register accumulators named in
+    /// `carried` through it as carried values, as [`Self::emit_frag_for`]
+    /// does.
     #[allow(clippy::too_many_arguments)]
-    fn emit_pipelined_loop(
+    pub(crate) fn emit_pipelined_loop(
         &mut self,
         var: &str,
         [lo, hi, st]: [ValueId; 3],
@@ -190,14 +193,33 @@ impl Build {
         staged: &[(&str, &Expr)],
         rest: &[Stmt],
         info: Pipeline,
+        carried: &[String],
         hoisted: &[ValueId],
     ) -> Result<()> {
-        let block = self.ir.new_block(&[crate::ir::Type::INDEX]);
+        let mut inits = Vec::with_capacity(carried.len());
+        let mut regs = Vec::with_capacity(carried.len());
+        for name in carried {
+            match self.lookup(name) {
+                Some(Binding::Frags(v)) => inits.push(v),
+                Some(Binding::Regs(v)) => inits.push(v),
+                _ => bail!("'{name}' is not register-bound"),
+            }
+            regs.push(matches!(self.lookup(name), Some(Binding::Regs(_))));
+        }
+        let rebind = |regs: bool, v: ValueId| if regs { Binding::Regs(v) } else { Binding::Frags(v) };
+        let types: Vec<Type> = inits.iter().map(|&v| self.ir.ty(v).clone()).collect();
+        let mut arg_types = vec![Type::INDEX];
+        arg_types.extend(types.iter().cloned());
+        let block = self.ir.new_block(&arg_types);
         let iv = self.ir.args(block)[0];
         self.ir.set_name(iv, var);
+        let args: Vec<ValueId> = self.ir.args(block)[1..].to_vec();
         self.in_block(block, |b| {
             b.push_scope();
             b.bind(var, Binding::Let { value: iv, div: iv_div });
+            for ((name, &arg), &r) in carried.iter().zip(&args).zip(&regs) {
+                b.bind(name, rebind(r, arg));
+            }
             let mut bindings: Vec<(&str, Binding)> = Vec::new();
             for (name, expr) in staged {
                 let Rv::Tile(src) = b.emit_expr(expr)? else {
@@ -209,25 +231,38 @@ impl Build {
                 let buf = b.value(OpKind::Stage(Stage { pad, sync: true }), &[src], ty);
                 bindings.push((name, Binding::View(buf)));
             }
-            b.emit_scope(&bindings, rest)?;
+            let built = b.emit_scope(&bindings, rest);
+            let mut finals = Vec::with_capacity(carried.len());
+            for name in carried {
+                match b.lookup(name) {
+                    Some(Binding::Frags(v) | Binding::Regs(v)) => finals.push(v),
+                    _ => bail!("'{name}' lost its register binding in the loop body"),
+                }
+            }
             b.pop_scope();
-            b.stmt(OpKind::Yield, &[]);
+            built?;
+            b.stmt(OpKind::Yield, &finals);
             Ok::<(), anyhow::Error>(())
         })?;
         let mut operands = vec![lo, hi, st];
+        operands.extend_from_slice(&inits);
         operands.extend_from_slice(hoisted);
-        self.op(
+        let op = self.op(
             OpKind::For(ForInfo {
                 bounds: Bounds::Dynamic,
                 ragged: false,
-                carried: 0,
+                carried: inits.len(),
                 hoisted: hoisted.len(),
                 pipeline: Some(info),
             }),
             &operands,
-            Vec::new(),
+            types,
             vec![block],
         );
+        let results = self.ir.results(op).to_vec();
+        for ((name, result), &r) in carried.iter().zip(results).zip(&regs) {
+            self.update_binding(name, rebind(r, result));
+        }
         Ok(())
     }
 

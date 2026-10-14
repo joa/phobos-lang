@@ -90,11 +90,12 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
             }
         }
     }
+    let mut kernels = Vec::new();
     for (what, w_decl) in [
         ("global", "let w = W[pn * 64 :+ 64, kt :+ 32]"),
         ("shared", "var w: tile<i8>[64, 32] = W[pn * 64 :+ 64, kt :+ 32]"),
     ] {
-        let src = format!(
+        kernels.push((what, format!(
             "@launch(256)
             @aligned(K = 32)
             kernel k(A: tensor<i8>[64, K], AS: tensor<f32>[64, KB],
@@ -112,7 +113,40 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
                 }}
                 C[0 :+ 64, pn * 64 :+ 64] = acc
             }}"
-        );
+        )));
+    }
+    // The activation and its scales as a pipelined loop's stages, read
+    // through slices: prefetched through registers where there is no
+    // cp.async. The scales are 128 chunks over 256 threads.
+    kernels.push((
+        "pipelined",
+        "@launch(256)
+        @pipeline
+        @aligned(K = 64, KB = 2)
+        kernel k(A: tensor<i8>[64, K], AS: tensor<f32>[64, KB],
+                 W: tensor<i8>[128, K], WS: tensor<f32>[KB, 128],
+                 C: tensor<f32>[64, 128]) {
+            let pn = ctx.block.x
+            var acc: tile<f32>[64, 64] = 0.0
+            for b in range(0, KB, 2) {
+                var at = A[0 :+ 64, b * 32 :+ 64]
+                var das = AS[0 :+ 64, b :+ 2]
+                let a0 = at[0 :+ 64, 0 :+ 32]
+                let a1 = at[0 :+ 64, 32 :+ 32]
+                let w0 = W[pn * 64 :+ 64, b * 32 :+ 32]
+                let w1 = W[pn * 64 :+ 64, b * 32 + 32 :+ 32]
+                let da0 = das[0 :+ 64, 0 :+ 1]
+                let da1 = das[0 :+ 64, 1 :+ 1]
+                let ws0 = WS[b :+ 1, pn * 64 :+ 64]
+                let ws1 = WS[b + 1 :+ 1, pn * 64 :+ 64]
+                acc += f32(dot_t(a0, w0)) * ws0 * da0
+                acc += f32(dot_t(a1, w1)) * ws1 * da1
+            }
+            C[0 :+ 64, pn * 64 :+ 64] = acc
+        }"
+        .to_string(),
+    ));
+    for (what, src) in kernels {
         for index_bitwidth in [32, 64] {
             let (ga, gw) = (Arg::new(&a, m, k)?, Arg::new(&w, n, k)?);
             let (gas, gws) = (Arg::new(&asc, m, kb)?, Arg::new(&wsc, kb, n)?);

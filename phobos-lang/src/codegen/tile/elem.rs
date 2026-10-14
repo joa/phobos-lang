@@ -102,32 +102,8 @@ impl<'c> Codegen<'c> {
             );
         }
 
-        // An aligned copy moves 16 bytes per lane: four f32, eight f16 or
-        // sixteen i8. Staging is bound by load count, not bytes, so width
-        // goes by bytes.
-        //
-        // Four elements of any type is always legal, while a wider access
-        // needs the divisibility proof `@aligned` gives.
         let elem_bytes = self.elem_bytes(dst.elem);
-        let last = *dst.shape.last().expect("tile values are not rank-0");
-        let vec_ok = !src.is_masked()
-            && !dst.is_masked()
-            && last != DYN
-            && elem_bytes.is_some()
-            && src.vectorizes(4)
-            && dst.vectorizes(4)
-            && last % 4 == 0;
-        // Both sides share an element type, checked above.
-        let full = elem_bytes.map_or(4, |bytes| 16 / i64::from(bytes).max(1));
-        let wide = full > 4 && src.vectorizes(full) && dst.vectorizes(full) && last % full == 0;
-        let width = match (vec_ok, wide) {
-            (true, true) => full,
-            (true, false) => 4,
-            _ => 1,
-        };
-        // At least four elements even for a scalar copy, since the f32
-        // cp.async path reads that width.
-        let align = i64::from(elem_bytes.unwrap_or(4)) * width.max(4);
+        let (width, align) = self.copy_width(src, dst);
 
         // cp.async needs a 4, 8 or 16-byte transfer. f32 qualifies at any
         // width. Narrower types qualify only when vectorized.
@@ -150,6 +126,35 @@ impl<'c> Codegen<'c> {
                 cg.elem_store(blk, v, dst.mem, &didx, 1)
             }
         })
+    }
+
+    /// The elements a copy from `src` to `dst` moves per access, and that
+    /// access's alignment in bytes.
+    ///
+    /// An aligned copy moves 16 bytes per lane: four f32, eight f16 or
+    /// sixteen i8. Staging is bound by load count, not bytes, so width goes
+    /// by bytes. Four elements of any type is always legal, while a wider
+    /// access needs the divisibility proof `@aligned` gives. The alignment
+    /// covers at least four elements even for a scalar copy, since the f32
+    /// cp.async path reads that width.
+    pub(in crate::codegen) fn copy_width(&self, src: &MemVal<'c>, dst: &MemVal<'c>) -> (i64, i64) {
+        let elem_bytes = self.elem_bytes(dst.elem);
+        let last = *dst.shape.last().expect("tile values are not rank-0");
+        let vec_ok = !src.is_masked()
+            && !dst.is_masked()
+            && last != DYN
+            && elem_bytes.is_some()
+            && src.vectorizes(4)
+            && dst.vectorizes(4)
+            && last % 4 == 0;
+        let full = elem_bytes.map_or(4, |bytes| 16 / i64::from(bytes).max(1));
+        let wide = full > 4 && src.vectorizes(full) && dst.vectorizes(full) && last % full == 0;
+        let width = match (vec_ok, wide) {
+            (true, true) => full,
+            (true, false) => 4,
+            _ => 1,
+        };
+        (width, i64::from(elem_bytes.unwrap_or(4)) * width.max(4))
     }
 
     /// dst[...] = cast(src[...]) for every element, e.g. an f32 accumulator

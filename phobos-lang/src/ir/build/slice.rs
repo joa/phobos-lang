@@ -36,7 +36,10 @@ impl Build {
             Expr::Var(name) => match self.lookup(name) {
                 Some(Binding::Let { div, .. }) => div,
                 Some(_) => 1,
-                None => self.shape_env.get(name).map_or(1, |v| v.abs().min(CAP)),
+                None => match self.pending_ivs.iter().rev().find(|(iv, _)| iv == name) {
+                    Some(&(_, div)) => div.min(CAP),
+                    None => self.shape_env.get(name).map_or(1, |v| v.abs().min(CAP)),
+                },
             },
             Expr::Unary { op: UnOp::Neg, rhs } => self.expr_div(rhs),
             Expr::Binary {
@@ -359,7 +362,11 @@ impl Build {
             Binding::Tile(src) | Binding::View(src) if tiles => src,
             _ => return None,
         };
-        let shape = self.shape(src);
+        self.slice_sizes(&self.shape(src), subs)
+    }
+
+    /// The static shape `subs` take of a source of `shape`, if it has one.
+    pub(crate) fn slice_sizes(&self, shape: &[i64], subs: &[Sub]) -> Option<Vec<i64>> {
         if subs.len() != shape.len() || is_point_load(subs) {
             return None;
         }

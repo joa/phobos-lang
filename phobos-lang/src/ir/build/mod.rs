@@ -97,6 +97,9 @@ pub(crate) struct Build {
     pub(crate) ragged_iv: Option<String>,
     /// Induction variables of the enclosing trimmed main loops.
     pub(crate) trimmed_ivs: Vec<String>,
+    /// Loop variables a prescan reasons about before their loop binds them,
+    /// with the divisor every value they take has.
+    pub(crate) pending_ivs: Vec<(String, i64)>,
     pub(crate) tensorcore: bool,
     pub(crate) mma_sync: bool,
     pub(crate) pad_stage: bool,
@@ -166,6 +169,7 @@ pub fn build(
         hoisted: Vec::new(),
         ragged_iv: None,
         trimmed_ivs: Vec::new(),
+        pending_ivs: Vec::new(),
         tensorcore: info.tensorcore,
         mma_sync: info.mma_sync,
         pad_stage: info.pad_stage,

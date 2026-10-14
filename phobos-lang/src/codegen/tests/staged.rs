@@ -1,4 +1,5 @@
-// Staging into shared tiles and the barriers around them.
+// Staging into shared tiles: padding, word stores, the barriers around them,
+// and a pipelined loop that carries register accumulators.
 
 use super::*;
 
@@ -63,4 +64,50 @@ fn store_writes_words_into_a_byte_run() {
     assert_contains(&mlir, &["vector<2xi32>", "vector.bitcast", "vector<8xi8>"]);
     let err = emit_err(&src("lo, hi, lo"));
     assert!(err.contains("a run of 8 takes 8 values, got 3"), "{err}");
+}
+
+/// An int8 projection whose activation is the loop's staged prefix, read
+/// through slices, beside a byte tile the loop writes, under `@pipeline`.
+const PIPELINED: &str = "@launch(128)
+    @pipeline
+    @aligned(M = 64, N = 64, K = 64)
+    kernel pl(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+              W: tensor<i8>[N, K], WS: tensor<f32>[KB, N], C: tensor<f32>[M, N]) {
+        let pm = ctx.block.x
+        let pn = ctx.block.y
+        var acc: tile<f32>[64, 64] = 0.0
+        for kt in range(0, K, 64) {
+            var at = A[pm * 64 :+ 64, kt :+ 64]
+            var w: tile<i8>[64, 64]
+            w = W[pn * 64 :+ 64, kt :+ 64]
+            let a0 = at[0 :+ 64, 0 :+ 32]
+            let w0 = w[0 :+ 64, 0 :+ 32]
+            let da = AS[pm * 64 :+ 64, kt / 32 :+ 1]
+            let ws = WS[kt / 32 :+ 1, pn * 64 :+ 64]
+            acc += f32(dot_t(a0, w0)) * ws * da
+        }
+        C[pm * 64 :+ 64, pn * 64 :+ 64] = acc
+    }";
+
+#[test]
+fn a_loop_carrying_registers_pipelines_on_request() {
+    // On sm_80 at 64-bit indices the staged prefix is copied with cp.async
+    // into a pair of buffers, and the accumulators ride the loop.
+    let mlir = emit_mlir_sync(PIPELINED, "sm_80");
+    assert_contains(&mlir, &["nvgpu.device_async_copy", "iter_args", "math.fma"]);
+}
+
+#[test]
+fn without_cp_async_the_next_stage_rides_in_registers() {
+    // On sm_75 the next stage is loaded inside the guarded branch before
+    // the contraction and stored after it, over the one buffer, where
+    // sm_80 copies into a pair.
+    let mlir = emit_mlir_sync(PIPELINED, "sm_75");
+    assert!(!mlir.contains("device_async_copy"), "{mlir}");
+    let pair = tile_views(&emit_mlir_sync(PIPELINED, "sm_80"), "64x64xi8").len();
+    assert!(tile_views(&mlir, "64x64xi8").len() < pair, "{mlir}");
+    let fma = mlir.find("math.fma").expect("the contraction");
+    let fetch = mlir[..fma].rfind("-> (vector<16xi8>").expect("the guarded loads yield their vectors");
+    let store = mlir[fma..].find("vector.store").expect("the stores after it");
+    assert!(fetch < fma && store > 0, "{mlir}");
 }
