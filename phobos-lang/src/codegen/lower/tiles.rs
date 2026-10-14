@@ -438,7 +438,7 @@ impl<'c> Codegen<'c> {
                 _ => Fused::Hole,
             },
             // A register tile is one value per element: the one being built.
-            Tree::Leaf(i) if matches!(ir.ty(ir.operand(op, *i)), ir::Type::Regs(_)) => {
+            Tree::Leaf(i) if ir.ty(ir.operand(op, *i)).regs().is_some() => {
                 let Fill::RegElem(e) = fill else {
                     bail!("a register tile read outside a register-tile op");
                 };

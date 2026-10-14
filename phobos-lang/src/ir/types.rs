@@ -259,6 +259,13 @@ pub enum RegLayout {
     /// 8x8 tiles of the integer tensor cores with `imma`, else the 16x16
     /// ones of the f16 path.
     MmaAcc { wm: i64, wn: i64, imma: bool },
+    /// Elements `t`, `t + threads`, ... of the row-major order on thread
+    /// `t`, the mapping a plain sweep uses, so a sweep reads it without
+    /// moving data between threads.
+    Blocked,
+    /// A register matmul's accumulator, summed over `k` a step and spread
+    /// by whichever path the target runs it on.
+    Gemm { k: i64 },
 }
 
 /// A tile held in registers rather than in a buffer: a value, carried and
@@ -273,11 +280,18 @@ pub struct DistType {
 impl DistType {
     /// The tile as `mma.sync` accumulator fragments.
     pub fn mma_acc(&self) -> Option<MmaAcc> {
-        let RegLayout::MmaAcc { wm, wn, imma } = self.layout;
-        let [m, n] = self.shape[..] else {
+        let (RegLayout::MmaAcc { wm, wn, imma }, &[m, n]) = (self.layout, &self.shape[..]) else {
             return None;
         };
         Some(MmaAcc { m, n, wm, wn, imma })
+    }
+
+    /// The tile as a register matmul's accumulator.
+    pub fn gemm(&self) -> Option<GemmType> {
+        let (RegLayout::Gemm { k }, &[m, n]) = (self.layout, &self.shape[..]) else {
+            return None;
+        };
+        Some(GemmType { acc: self.elem, m, n, k })
     }
 }
 
@@ -325,13 +339,15 @@ pub struct GemmType {
     pub k: i64,
 }
 
-/// A tile held in registers: each thread keeps the elements `t`,
-/// `t + threads`, ... of the row-major order, the mapping a plain sweep
-/// uses, so a sweep reads it without moving data between threads.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct RegsType {
-    pub elem: Scalar,
-    pub shape: Vec<i64>,
+impl GemmType {
+    /// The register-resident tile this accumulator is.
+    pub fn dist(&self) -> DistType {
+        DistType {
+            elem: self.acc,
+            shape: vec![self.m, self.n],
+            layout: RegLayout::Gemm { k: self.k },
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -340,8 +356,6 @@ pub enum Type {
     Tensor(TensorType),
     Tile(TileType),
     Dist(DistType),
-    Gemm(GemmType),
-    Regs(RegsType),
 }
 
 impl Type {
@@ -379,7 +393,7 @@ impl Type {
     /// The element type of anything addressable.
     pub fn elem(&self) -> Option<Scalar> {
         match self {
-            Type::Scalar(_) | Type::Dist(_) | Type::Gemm(_) | Type::Regs(_) => None,
+            Type::Scalar(_) | Type::Dist(_) => None,
             Type::Tensor(t) => Some(t.elem),
             Type::Tile(t) => Some(t.elem),
         }
@@ -388,10 +402,32 @@ impl Type {
     /// The shape of anything addressable.
     pub fn shape(&self) -> Option<&[Extent]> {
         match self {
-            Type::Scalar(_) | Type::Dist(_) | Type::Gemm(_) | Type::Regs(_) => None,
+            Type::Scalar(_) | Type::Dist(_) => None,
             Type::Tensor(t) => Some(&t.shape),
             Type::Tile(t) => Some(&t.shape),
         }
+    }
+
+    /// A `Blocked` register tile, as a sweep holds it.
+    pub fn regs(&self) -> Option<&DistType> {
+        match self {
+            Type::Dist(d) if d.layout == RegLayout::Blocked => Some(d),
+            _ => None,
+        }
+    }
+
+    /// A register matmul's accumulator.
+    pub fn gemm(&self) -> Option<GemmType> {
+        match self {
+            Type::Dist(d) => d.gemm(),
+            _ => None,
+        }
+    }
+
+    /// Whether this is an accumulator, fragments or a register matmul's,
+    /// which only its own ops may read.
+    pub fn is_accumulator(&self) -> bool {
+        matches!(self, Type::Dist(d) if d.layout != RegLayout::Blocked)
     }
 
     /// A contiguous shared tile of a static shape, the common allocation.
@@ -445,13 +481,10 @@ impl fmt::Display for Type {
                             write!(f, "/i8")?;
                         }
                     }
+                    RegLayout::Blocked => write!(f, "regs<{}>[{}]", d.elem, dims.join(", "))?,
+                    RegLayout::Gemm { k } => write!(f, "gemm<{}>[{}]/{k}", d.elem, dims.join(", "))?,
                 }
                 Ok(())
-            }
-            Type::Gemm(g) => write!(f, "gemm<{}>[{}, {}]/{}", g.acc, g.m, g.n, g.k),
-            Type::Regs(r) => {
-                let dims: Vec<String> = r.shape.iter().map(i64::to_string).collect();
-                write!(f, "regs<{}>[{}]", r.elem, dims.join(", "))
             }
         }
     }

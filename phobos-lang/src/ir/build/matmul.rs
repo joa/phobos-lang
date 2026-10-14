@@ -46,12 +46,15 @@ impl Build {
         let &[rows, cols] = &m.shape[..] else {
             bail!("a register matmul with a rank {} accumulator", m.shape.len());
         };
-        let ty = Type::Gemm(GemmType {
-            acc: m.acc,
-            m: rows,
-            n: cols,
-            k: m.kk,
-        });
+        let ty = Type::Dist(
+            GemmType {
+                acc: m.acc,
+                m: rows,
+                n: cols,
+                k: m.kk,
+            }
+            .dist(),
+        );
 
         let Rv::Scalar(init) = self.emit_expr(m.init)? else {
             bail!("a register matmul's init is not a scalar");

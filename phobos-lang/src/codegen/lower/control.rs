@@ -10,7 +10,7 @@ use melior::{
 use super::Lowered;
 use crate::codegen::matmul::GemmSource;
 use crate::codegen::{Codegen, detach};
-use crate::ir::{self, Bounds, ForInfo, Ir, OpId, OpKind};
+use crate::ir::{Bounds, ForInfo, Ir, OpId, OpKind};
 
 impl<'c> Codegen<'c> {
     pub(super) fn emit_control_op(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
@@ -48,7 +48,7 @@ impl<'c> Codegen<'c> {
         }
         if info.carried > 0 {
             let first = ir.operand(op, info.bound_operands());
-            if matches!(ir.ty(first), ir::Type::Gemm(_)) {
+            if ir.ty(first).gemm().is_some() {
                 return self.emit_gemm_for_ir(block, ir, op);
             }
             return self.emit_frag_for_ir(block, ir, op, info);

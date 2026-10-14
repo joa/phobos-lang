@@ -18,7 +18,7 @@ impl Verifier<'_> {
                     return;
                 };
                 for (i, &v) in ir.operands(op).iter().enumerate() {
-                    if let Type::Regs(r) = ir.ty(v)
+                    if let Some(r) = ir.ty(v).regs()
                         && r.shape != shape
                     {
                         self.err(op, format!("register operand {i} has another shape"));
@@ -31,7 +31,7 @@ impl Verifier<'_> {
                 if !self.want_operands(op, 2) {
                     return;
                 }
-                let (Type::Regs(r), Type::Tile(t)) = (ir.ty(ir.operand(op, 0)), ir.ty(ir.operand(op, 1))) else {
+                let (Some(r), Type::Tile(t)) = (ir.ty(ir.operand(op, 0)).regs(), ir.ty(ir.operand(op, 1))) else {
                     self.err(op, "stores a register tile into a tile");
                     return;
                 };
@@ -49,7 +49,7 @@ impl Verifier<'_> {
             return None;
         }
         match self.ir.ty(self.ir.result(op)) {
-            Type::Regs(r) => Some(r.shape.clone()),
+            t @ Type::Dist(_) => t.regs().map(|r| r.shape.clone()),
             other => {
                 self.err(op, format!("result must be a register tile, is {other}"));
                 None

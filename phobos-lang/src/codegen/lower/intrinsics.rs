@@ -132,7 +132,7 @@ impl<'c> Codegen<'c> {
                 self.frag_store(block, &dst, &fa)?;
             }
             OpKind::GemmInit => {
-                let ir::Type::Gemm(g) = ir.ty(ir.result(op)) else {
+                let Some(g) = ir.ty(ir.result(op)).gemm() else {
                     bail!("gemm_init of a non-accumulator");
                 };
                 let plan = self.gemm_plan(g.m, g.n, g.k, self.ir_scalar_type(g.acc))?;

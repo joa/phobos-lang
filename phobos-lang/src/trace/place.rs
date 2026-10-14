@@ -184,7 +184,7 @@ impl Placement {
                 .iter()
                 .chain(p.ir.operands(op))
                 .find_map(|&v| match p.ir.ty(v) {
-                    Type::Gemm(g) => Some(*g),
+                    t @ Type::Dist(_) => t.gemm(),
                     _ => None,
                 })
         };

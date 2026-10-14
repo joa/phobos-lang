@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use super::{Binding, Build, DYN, Rv};
 use crate::ast::{AssignOp, BinOp, Expr, ExprKind};
-use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, Tree, Type, ValueId};
+use crate::ir::{ElemStep, Intrinsic, Map, OpKind, RawFmt, Scalar, Tree, ValueId};
 
 impl Build {
     /// Lowers `target op= value` for a tile-shaped target.
@@ -16,7 +16,7 @@ impl Build {
             && let Some(Binding::Regs(r)) = self.lookup(n)
             && op == AssignOp::Set
             && !self.is_masked(target)
-            && matches!(self.ir.ty(r), Type::Regs(t) if t.shape == self.shape(target))
+            && self.ir.ty(r).regs().is_some_and(|t| t.shape == self.shape(target))
         {
             self.stmt(OpKind::RegsStore, &[r, target]);
             return Ok(());
