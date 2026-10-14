@@ -146,6 +146,56 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
         }"
         .to_string(),
     ));
+    // Both 128-byte-row tiles swizzled: the stage refilled by its copy, the
+    // weight written eight bytes a thread by store, and both read back as
+    // fragments by ldmatrix.
+    kernels.push((
+        "swizzled",
+        "@launch(256)
+        @swizzle
+        @pipeline
+        @aligned(K = 128, KB = 4)
+        kernel k(A: tensor<i8>[64, K], AS: tensor<f32>[64, KB],
+                 W: tensor<i8>[128, K], WS: tensor<f32>[KB, 128],
+                 C: tensor<f32>[64, 128]) {
+            let pn = ctx.block.x
+            var w: tile<i8>[64, 128]
+            var acc: tile<f32>[64, 64] = 0.0
+            for kt in range(0, K, 128) {
+                var at = A[0 :+ 64, kt :+ 128]
+                var das = AS[0 :+ 64, kt / 32 :+ 4]
+                for<unroll 4> i in range(0, 4, 1) {
+                    let o = ctx.thread + 256 * i
+                    let r = o / 16
+                    let c = o % 16 * 8
+                    store(w[r, c :+ 8], word(W[pn * 64 + r, kt + c :+ 8], 0), word(W[pn * 64 + r, kt + c :+ 8], 1))
+                }
+                barrier()
+                let a0 = at[0 :+ 64, 0 :+ 32]
+                let a1 = at[0 :+ 64, 32 :+ 32]
+                let a2 = at[0 :+ 64, 64 :+ 32]
+                let a3 = at[0 :+ 64, 96 :+ 32]
+                let w0 = w[0 :+ 64, 0 :+ 32]
+                let w1 = w[0 :+ 64, 32 :+ 32]
+                let w2 = w[0 :+ 64, 64 :+ 32]
+                let w3 = w[0 :+ 64, 96 :+ 32]
+                let ws0 = WS[kt / 32 :+ 1, pn * 64 :+ 64]
+                let da0 = das[0 :+ 64, 0 :+ 1]
+                acc += f32(dot_t(a0, w0)) * ws0 * da0
+                let ws1 = WS[kt / 32 + 1 :+ 1, pn * 64 :+ 64]
+                let da1 = das[0 :+ 64, 1 :+ 1]
+                acc += f32(dot_t(a1, w1)) * ws1 * da1
+                let ws2 = WS[kt / 32 + 2 :+ 1, pn * 64 :+ 64]
+                let da2 = das[0 :+ 64, 2 :+ 1]
+                acc += f32(dot_t(a2, w2)) * ws2 * da2
+                let ws3 = WS[kt / 32 + 3 :+ 1, pn * 64 :+ 64]
+                let da3 = das[0 :+ 64, 3 :+ 1]
+                acc += f32(dot_t(a3, w3)) * ws3 * da3
+            }
+            C[0 :+ 64, pn * 64 :+ 64] = acc
+        }"
+        .to_string(),
+    ));
     for (what, src) in kernels {
         for index_bitwidth in [32, 64] {
             let (ga, gw) = (Arg::new(&a, m, k)?, Arg::new(&w, n, k)?);

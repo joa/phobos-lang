@@ -194,6 +194,7 @@ pub fn build(
         }
     }
     b.report.spans.retain(|&op, _| b.ir.is_alive(op));
+    super::swizzle::decide(&mut b.ir, kernel.swizzle_mode().map_err(|e| anyhow!(e))?)?;
     Ok((b.ir, b.report))
 }
 

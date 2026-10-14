@@ -4,6 +4,7 @@ pub mod elem;
 pub mod lanes;
 pub mod ops;
 pub mod print;
+pub(crate) mod swizzle;
 pub mod types;
 pub mod uniform;
 pub mod verify;
@@ -281,6 +282,11 @@ impl Ir {
 
     pub fn uses(&self, value: ValueId) -> &[Use] {
         &self.value_data(value).uses
+    }
+
+    /// Retypes a value, as a pass that settles its layout does.
+    pub fn set_ty(&mut self, value: ValueId, ty: Type) {
+        self.value_data_mut(value).ty = ty;
     }
 
     pub fn name(&self, value: ValueId) -> Option<&str> {
