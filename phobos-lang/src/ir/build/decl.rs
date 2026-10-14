@@ -47,7 +47,7 @@ impl Build {
 
     /// Where the binding `name` resolves to was declared.
     fn decl(&self, name: &str) -> Option<Decl> {
-        let value = self.lookup(name)?.value();
+        let value = self.lookup(name)?.value()?;
         self.decls.get(&(name.to_string(), value)).copied()
     }
 

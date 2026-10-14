@@ -196,6 +196,13 @@ impl Membar<'_> {
                 }
                 merge(pending, entry);
             }
+            // A read evaluates the block right after, where the builder
+            // emits it, so its accesses happen here.
+            OpKind::Generate => {
+                for &b in ir.blocks_of(op) {
+                    self.walk_block(b, pending, false);
+                }
+            }
             OpKind::If => {
                 let mut after = Vec::new();
                 for &b in ir.blocks_of(op) {

@@ -137,6 +137,7 @@ A function is inlined at every call; there is no call at run time.
 |---|---|
 | `fn f(a, b) = e` | An expression. `f(x, y)` is `e` with `x` and `y` in place of `a` and `b`, so a per-element body fuses into the caller's sweep. An argument used twice is evaluated twice. |
 | `fn f(a, b) { ... }` | A statement, called as one: `f(x, y)` splices the body in. A parameter passed a name aliases it, so a tile handed in can be written; a parameter that is indexed or assigned must be passed a name. |
+| `let w: tile<T>[r, c] = generate(f)` | A tile with no storage: `f(row, unit)`, a statement function whose body ends in an expression, is its element block at `row` and `unit`, a 4-byte word of an 8-bit tile (bytes `4 unit .. 4 unit + 3`, little-endian, as `word` packs them) and one element otherwise. `f` may read but not write. Each read computes the blocks it needs: as the weight of a fragment accumulator's scaled `dot_t`, each lane computes the words of its own fragments, so the tile never touches shared memory; any other read stores it to a shared tile where it is declared, each thread computing a strided share, with a barrier after. |
 
 The body's own `let`s, `var`s and loop variables never meet the caller's. Any other name in a body resolves at the call, as a macro's would. A statement body may not `return`, nor `break` or `continue` outside its own loops. A function calling itself, directly or not, is an error.
 

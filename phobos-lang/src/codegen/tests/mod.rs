@@ -8,6 +8,7 @@ mod dot;
 mod epilogue;
 mod frag_imma;
 mod functions;
+mod generate;
 mod jumps;
 mod lanes;
 mod launch;

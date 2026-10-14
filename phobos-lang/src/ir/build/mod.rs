@@ -3,6 +3,7 @@ mod elemwise;
 mod epilogue;
 mod expr;
 mod frag;
+mod generate;
 mod hoist;
 mod lane_sum;
 mod lanes;
@@ -77,15 +78,19 @@ pub(crate) enum Binding {
     Frags(ValueId),
     /// A tile held in registers; see `regs.rs`.
     Regs(ValueId),
+    /// A tile with no storage, computed where it is read; see `generate.rs`.
+    Generated(std::rc::Rc<generate::GenTile>),
 }
 
 impl Binding {
-    /// The value the name stands for: the slot of a `var`.
-    fn value(&self) -> ValueId {
+    /// The value the name stands for: the slot of a `var`. None for a
+    /// generated tile, which has none.
+    fn value(&self) -> Option<ValueId> {
         match *self {
-            Binding::Let { value, .. } => value,
-            Binding::Var { slot, .. } => slot,
-            Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) => v,
+            Binding::Let { value, .. } => Some(value),
+            Binding::Var { slot, .. } => Some(slot),
+            Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) => Some(v),
+            Binding::Generated(_) => None,
         }
     }
 }
@@ -564,8 +569,10 @@ impl Build {
     /// Binds a name. A named tile is never an owned temp, which the graph
     /// records as the value's name (see `Ir::name`).
     pub(crate) fn bind(&mut self, name: &str, binding: Binding) {
-        if let Some((_, decl)) = self.declaring.take_if(|(n, _)| n == name) {
-            self.decls.insert((name.to_string(), binding.value()), decl);
+        if let Some((_, decl)) = self.declaring.take_if(|(n, _)| n == name)
+            && let Some(value) = binding.value()
+        {
+            self.decls.insert((name.to_string(), value), decl);
         }
         match &binding {
             Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) | Binding::Tensor(v) => {
@@ -578,6 +585,7 @@ impl Build {
                     self.ir.set_name(*value, name);
                 }
             }
+            Binding::Generated(_) => {}
             Binding::Var { slot, .. } => {
                 if self.ir.name(*slot).is_none() {
                     self.ir.set_name(*slot, name);

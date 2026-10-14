@@ -26,6 +26,13 @@ struct ScaledCols<'a, 'c> {
     small: bool,
 }
 
+/// The weight of a scaled dot: an operand in memory, or a generated tile
+/// whose block each lane evaluates for the fragment words it holds.
+pub(super) enum ImmaWeight<'a, 'c> {
+    Stored(ImmaOperand<'c>),
+    Generated { ir: &'a crate::ir::Ir, op: crate::ir::OpId },
+}
+
 /// See [`Codegen::imma_lane`].
 struct ImmaLane<'c> {
     rows: Vec<Value<'c, 'c>>,
@@ -318,21 +325,31 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         fa: &FragAcc<'c>,
-        operands: &[ImmaOperand<'c>],
+        a: &ImmaOperand<'c>,
+        w: &ImmaWeight<'_, 'c>,
+        [s1, s2]: [&ImmaOperand<'c>; 2],
     ) -> Result<Vec<Value<'c, 'c>>> {
-        let [a, w, s1, s2] = operands else {
-            bail!("fragment scaled dot takes four operands");
-        };
         if !fa.imma {
             bail!("internal: scaled dot on a 16x16 fragment accumulator");
         }
         let kk = a.view.shape[1];
         self.check_shapes(&a.view.shape, &[fa.m, kk], "fragment scaled dot lhs")?;
-        self.check_shapes(&w.view.shape, &[fa.n, kk], "fragment scaled dot rhs")?;
-        if a.view.elem != self.i8_t || w.view.elem != self.i8_t || kk % IMMA_K != 0 {
+        let (w_shape, w_i8) = match w {
+            ImmaWeight::Stored(w) => (w.view.shape.clone(), w.view.elem == self.i8_t),
+            ImmaWeight::Generated { ir, op } => match ir.ty(ir.result(*op)) {
+                crate::ir::Type::Dist(d) => (d.shape.clone(), d.elem == crate::ir::Scalar::I8),
+                _ => bail!("internal: a generated weight that is not a generated tile"),
+            },
+        };
+        self.check_shapes(&w_shape, &[fa.n, kk], "fragment scaled dot rhs")?;
+        if a.view.elem != self.i8_t || !w_i8 || kk % IMMA_K != 0 {
             bail!("fragment scaled dot contracts int8 operands over a k that is a multiple of {IMMA_K}");
         }
-        for v in operands.iter().map(|o| &o.view) {
+        let stored = match w {
+            ImmaWeight::Stored(w) => Some(&w.view),
+            ImmaWeight::Generated { .. } => None,
+        };
+        for v in [Some(&a.view), stored, Some(&s1.view), Some(&s2.view)].into_iter().flatten() {
             if v.is_masked() {
                 bail!("internal: fragment scaled dot reached a partial operand");
             }
@@ -349,7 +366,10 @@ impl<'c> Codegen<'c> {
             k_cols.push(self.addi(block, lane.k_off, off)?);
         }
         let a_frags = self.imma_frags(block, a, &lane.rows, lane.m0, lane.lane, &k_cols)?;
-        let w_frags = self.imma_frags(block, w, &lane.w_rows, lane.n0, lane.lane, &k_cols)?;
+        let w_frags = match w {
+            ImmaWeight::Stored(w) => self.imma_frags(block, w, &lane.w_rows, lane.n0, lane.lane, &k_cols)?,
+            ImmaWeight::Generated { ir, op } => self.generated_frags(block, ir, *op, &lane.w_rows, &k_cols)?,
+        };
 
         // A column scale's values for the patch's output columns, loaded up
         // front; a row scale is loaded with its patch row, as qmma_t does.

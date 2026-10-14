@@ -173,6 +173,16 @@ impl Walk<'_> {
                     self.set(res, kind.max(bound));
                 }
             }
+            OpKind::Generate => {
+                // Each lane evaluates the block for its own elements; the
+                // result stands for the whole tile, as a tile operand does.
+                for &b in ir.blocks_of(op) {
+                    for arg in ir.args(b).to_vec() {
+                        self.set(arg, Kind::Varying);
+                    }
+                    self.block(b, control);
+                }
+            }
             OpKind::While => {
                 let [before, after] = ir.blocks_of(op)[..] else {
                     unreachable!("a while has a before and an after block");

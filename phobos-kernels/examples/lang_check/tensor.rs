@@ -264,5 +264,58 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
         let name = format!("int8 accumulator minus a column times a row i{index_bitwidth}");
         report(&name, worst < 1e-5, format!("rel err {worst:.2e}"), failures);
     }
+    // The weight generated a word at a time from `W` itself: as the scaled
+    // dot's weight each lane computes its own fragments, and read through a
+    // slice it is materialized first. Both are the plain product.
+    let generated = |reads: &str| {
+        format!(
+            "fn wq(j, q) {{
+            let v = word(W[pn * 64 + j, kt + 4 * q :+ 4], 0)
+            v
+        }}
+
+        @launch(256)
+        @aligned(K = 32)
+        kernel k(A: tensor<i8>[64, K], AS: tensor<f32>[64, KB],
+                 W: tensor<i8>[128, K], WS: tensor<f32>[KB, 128],
+                 C: tensor<f32>[64, 128]) {{
+            let pn = ctx.block.x
+            var acc: tile<f32>[64, 64] = 0.0
+            for kt in range(0, K, 32) {{
+                let b = kt / 32
+                let a = A[0 :+ 64, kt :+ 32]
+                let w: tile<i8>[64, 32] = generate(wq)
+                let ws = WS[b :+ 1, pn * 64 :+ 64]
+                let da = AS[0 :+ 64, b :+ 1]
+                {reads}
+            }}
+            C[0 :+ 64, pn * 64 :+ 64] = acc
+        }}"
+        )
+    };
+    let forms = [
+        ("into its fragments", "acc += f32(dot_t(a, w)) * ws * da"),
+        ("materialized", "let w0 = w[0 :+ 64, 0 :+ 32]\n                acc += f32(dot_t(a, w0)) * ws * da"),
+    ];
+    for (what, reads) in forms {
+        let src = generated(reads);
+        for index_bitwidth in [32, 64] {
+            let (ga, gw) = (Arg::new(&a, m, k)?, Arg::new(&w, n, k)?);
+            let (gas, gws) = (Arg::new(&asc, m, kb)?, Arg::new(&wsc, kb, n)?);
+            let out = Arg::<f32>::zeroed(m, n)?;
+            let mut slots = Vec::new();
+            ga.push(&mut slots);
+            gas.push(&mut slots);
+            gw.push(&mut slots);
+            gws.push(&mut slots);
+            out.push(&mut slots);
+            run_at(index_bitwidth, &src, "k", 2, &mut slots)?;
+            let got = out.read()?;
+            let scale = want.iter().fold(0.0f64, |s, v| s.max(v.abs()));
+            let worst = got.iter().zip(&want).map(|(&g, w)| (g as f64 - w).abs()).fold(0.0, f64::max) / scale;
+            let name = format!("generated int8 weight {what} i{index_bitwidth}");
+            report(&name, worst < 1e-5, format!("rel err {worst:.2e}"), failures);
+        }
+    }
     Ok(())
 }
