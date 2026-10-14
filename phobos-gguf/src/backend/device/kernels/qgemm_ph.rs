@@ -60,6 +60,14 @@ fn measured_on(chip: &str) -> bool {
     chip == "sm_75"
 }
 
+/// The CTAs an SM a projection is compiled for. A split grid runs under one
+/// a multiprocessor, so where two would leave Blackwell's `m16n8k32`
+/// regrouping spilling, it takes one; an unsplit grid keeps two, which
+/// measured faster there even so.
+fn ctas_per_sm(split: bool) -> usize {
+    if split && phobos_kernels::compile::chip().starts_with("sm_12") { 1 } else { 2 }
+}
+
 /// A split projection's slice: `gn` column tiles, and a slice's `k`, its
 /// activation scales, its payload bytes in a row and its blocks.
 #[derive(Clone, Copy)]
@@ -355,8 +363,9 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
             g = s / per_group
         );
     }
+    let ctas = ctas_per_sm(split.is_some());
     format!(
-        "@launch({QGEMM_CTA}, 2)
+        "@launch({QGEMM_CTA}, {ctas})
 {pipeline}@swizzle
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
 @aligned(M = TM, N = TN, {aligned})
