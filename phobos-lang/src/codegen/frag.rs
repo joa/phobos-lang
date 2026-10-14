@@ -190,6 +190,31 @@ impl<'c> Codegen<'c> {
         self.vec_shape_cast(block, word, Type::vector(&[1, 4], self.i8_t))
     }
 
+    /// A lane's two adjacent columns of an operand as f32, from an even
+    /// `col`: one 8-byte load when the view keeps them aligned. The pair
+    /// sits inside one swizzle granule, as a fragment's word does.
+    fn imma_pair(
+        &self,
+        block: &Block<'c>,
+        v: &ImmaOperand<'c>,
+        row: Value<'c, 'c>,
+        col: Value<'c, 'c>,
+    ) -> Result<[Value<'c, 'c>; 2]> {
+        if v.view.elem == self.f32_t && v.view.vectorizes(2) {
+            let (mem, at) = self.imma_at(block, v, row, col)?;
+            let pair = self.vec_load_al(block, mem, &at, Type::vector(&[2], self.f32_t), 8)?;
+            return Ok([self.vec_extract(block, pair, &[0], self.f32_t)?, self.vec_extract(block, pair, &[1], self.f32_t)?]);
+        }
+        let mut pair = Vec::with_capacity(2);
+        for dj in 0..2 {
+            let off = self.const_index(block, dj)?;
+            let c = self.addi(block, col, off)?;
+            let (mem, at) = self.imma_at(block, v, row, c)?;
+            pair.push(self.load_as(block, mem, &at, self.f32_t)?);
+        }
+        Ok([pair[0], pair[1]])
+    }
+
     /// An operand's fragments for its `rows.len()` tiles from row `origin`,
     /// tile-major then by k step. From shared memory four tiles at a time
     /// are one `ldmatrix.x4` a k step, lane `l` addressing row `origin + l`
@@ -257,12 +282,7 @@ impl<'c> Codegen<'c> {
         let zero = self.const_index(block, 0)?;
         let mut cols = Vec::with_capacity((fnn * 2) as usize);
         for &col in &lane.cols {
-            for dj in 0..2 {
-                let off = self.const_index(block, dj)?;
-                let at = self.addi(block, col, off)?;
-                let (mem, at) = self.imma_at(block, c, zero, at)?;
-                cols.push(self.load_as(block, mem, &at, self.f32_t)?);
-            }
+            cols.extend(self.imma_pair(block, c, zero, col)?);
         }
         let mut frags = fa.frags.clone();
         for i in 0..fm as usize {
@@ -327,12 +347,7 @@ impl<'c> Codegen<'c> {
         let cols_of = |s: &ImmaOperand<'c>| -> Result<Vec<Value<'c, 'c>>> {
             let mut by_col = Vec::with_capacity((fnn * 2) as usize);
             for &col in &lane.cols {
-                for dj in 0..2 {
-                    let off = self.const_index(block, dj)?;
-                    let c = self.addi(block, col, off)?;
-                    let (mem, at) = self.imma_at(block, s, zero, c)?;
-                    by_col.push(self.load_as(block, mem, &at, self.f32_t)?);
-                }
+                by_col.extend(self.imma_pair(block, s, zero, col)?);
             }
             Ok(by_col)
         };
@@ -394,12 +409,23 @@ impl<'c> Codegen<'c> {
         self.check_shapes(&[fa.m, fa.n], &target.shape, "fragment store")?;
         if fa.imma {
             let lane = self.imma_lane(block, fa)?;
+            // A lane's two adjacent columns go out as one 8-byte store when
+            // the rows keep them aligned, as `qgemm_t`'s do.
+            let paired = target.elem == self.f32_t && target.vectorizes(2) && target.swizzle.is_none();
+            let pair_t = Type::vector(&[2], self.f32_t);
             for (r, &row) in lane.rows.iter().enumerate() {
                 for (c, &col) in lane.cols.iter().enumerate() {
+                    let slot = (r * lane.cols.len() + c) * 2;
+                    if paired {
+                        let v = self.vec_broadcast(block, fa.frags[slot], pair_t)?;
+                        let v = self.vec_insert(block, fa.frags[slot + 1], v, &[1])?;
+                        self.vec_store_al(block, v, target.mem, &[row, col], 8)?;
+                        continue;
+                    }
                     for dj in 0..2 {
                         let off = self.const_index(block, dj)?;
                         let at = self.addi(block, col, off)?;
-                        let e = fa.frags[(r * lane.cols.len() + c) * 2 + dj as usize];
+                        let e = fa.frags[slot + dj as usize];
                         let e = self.coerce(block, e, target.elem)?;
                         block.append_operation(memref::store(e, target.mem, &[row, at], self.loc));
                     }
