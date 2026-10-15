@@ -1,0 +1,89 @@
+---
+title: Supported platforms
+description: The NVIDIA GPUs and operating systems Phobos runs on, the cards it has been tested on, and what differs between chips.
+sidebar:
+  order: 1.5
+---
+
+Phobos runs on NVIDIA GPUs of compute capability 7.5 or newer, Turing and
+every architecture after it, on Windows x64 and Linux x64. Compiling a kernel
+to PTX needs no GPU at all.
+
+## Tested cards
+
+Phobos is developed on an RTX 2080 SUPER, and every number in
+[Benchmarks](/docs/reference/benchmarks/) was measured on it. It has also been
+run and benchmarked on four more cards, rented through vast.ai under Linux:
+
+| Card | Architecture | Chip | Memory | Against llama.cpp, roughly |
+| --- | --- | --- | --- | --- |
+| RTX 2080 SUPER | Turing | `sm_75` | 8 GB | The development card; see [Benchmarks](/docs/reference/benchmarks/) |
+| RTX 3090 | Ampere | `sm_86` | 24 GB | Benchmarked, no head-to-head recorded yet |
+| RTX 4060 | Ada | `sm_89` | 8 GB | Decode at parity, prompt about 1.05x |
+| RTX 4090 | Ada | `sm_89` | 24 GB | Decode about 0.98x, prompt 1.05x to 1.2x |
+| RTX 5090 | Blackwell | `sm_120` | 32 GB | Decode about 0.99x, prompt about 1.1x |
+
+The rented-card figures are rough: Qwen3.5-4B Q4_K_M, decode as `tg128` and
+prompt as `pp128` and `pp512`, each run interleaved with llama.cpp on the same
+card in October 2026. A rented card shares its host, so they are not
+published as benchmarks. The tuning is done on the 2080 SUPER; a default that
+matters for speed is also measured on a 3090 and a 4090 before it ships.
+
+A release also carries compiled kernels for `sm_80` and `sm_90`, the data
+center chips of the Ampere and Hopper generations. They have not been tested
+or tuned on a card. Any other card of compute capability 7.5 or newer runs the
+PTX for its chip, compiled on first use if the release's cache does not have
+it (see [Kernel cache](/docs/inference/kernel-cache/)).
+
+## Operating systems and drivers
+
+- Windows x64, or Linux x64 with glibc 2.28 or newer.
+- A driver from the CUDA 13 line, R580 or newer. Phobos emits PTX ISA 9.0,
+  which older drivers refuse to load.
+
+[Install](/docs/getting-started/install/) lists what a build from source needs
+on each.
+
+## What differs between chips
+
+The language is the same on every chip, and a kernel compiles for any of them;
+`phobos-compile --chip` picks one. The compiler chooses the instructions per
+chip, and the kernel cache keeps one folder of compiled kernels per chip. A few
+differences show through:
+
+- **Asynchronous copies.** From `sm_80` on, a pipelined loop prefetches its
+  next stage with `cp.async`. On `sm_75` each thread holds its share of the
+  next stage in registers instead. See [`@pipeline`](/docs/attributes/pipeline/).
+- **`bf16`** converts natively from `sm_80` on and is emulated on `sm_75`.
+- **Shared memory per block** under [`@dynshared`](/docs/attributes/dynshared/):
+  64 KB on `sm_75`, 163 KB on `sm_80`, 99 KB on `sm_86`, `sm_89` and `sm_120`.
+- **Index width.** Some paths, such as tensor-core loads with `ldmatrix` and
+  `mma.sync` on `sm_80` and newer, need 64-bit indices, and a module that uses
+  them is widened. See
+  [Compile and benchmark](/docs/getting-started/compile-and-benchmark/).
+
+A performance figure holds for the card it was measured on. One measured on
+the 2080 SUPER says little about the speed on another card, so the published
+benchmarks name theirs.
+
+## Other backends
+
+Phobos runs only on NVIDIA GPUs today. The compiler lowers through MLIR and
+LLVM to PTX, and the runtime drives the card through CUDA.
+
+- **ROCm and SPIR-V.** Both are LLVM targets, so an AMD backend, or a portable
+  one through SPIR-V, is possible in principle. Neither is planned for now: the
+  author has no hardware to test them on, and a backend that cannot be checked
+  on a real card is not one to ship.
+- **Metal.** Under evaluation. Apple publishes no official documentation of its
+  GPU instruction set, so LLVM and MLIR have no Metal target. A backend would
+  have to emit Metal source and hand it to Apple's compiler, which is not how
+  Phobos generates code elsewhere and would not produce code as efficient as
+  the NVIDIA path.
+- **WebGPU.** Of interest for teaching rather than speed. As with Metal, a
+  backend would emit source, WGSL, and leave the compiling to the browser, so
+  it would not match the NVIDIA path either. What it would give is a kernel
+  that runs in a browser: trying one with no CUDA install, on any GPU the
+  browser can use, and a
+  [kernel visualizer](/viz/gemm_fp32/) that steps through a kernel as it
+  actually runs rather than through a recorded trace.
