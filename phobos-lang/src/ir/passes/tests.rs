@@ -238,3 +238,27 @@ fn a_grid_stride_loop_hands_out_units() {
     );
     assert!(!passed(&own).contains("grid_barrier"));
 }
+
+#[test]
+fn disjoint_rotated_grid_stride_loops_need_no_barrier() {
+    let src = "@launch(256)
+@persistent(BLOCKS)
+@autotune(BLOCKS in [144])
+kernel k(A: tensor<f32>[1, 4160], X: tensor<f32>[1, 4160]) {
+  let p = ctx.block.x
+  let cu = ctx.warp * 8 + ctx.lane / 4
+  for u2 in range((p + 16) % ctx.blocks.x, 64, ctx.blocks.x) {
+    let to2 = u2 * 64
+    if ctx.lane % 4 == 0 {
+      X[0, to2 + cu] = 1.0
+    }
+  }
+  barrier()
+  for u3 in range((p + 96) % ctx.blocks.x, 1, ctx.blocks.x) {
+    let to3 = 4096 + u3 * 32
+    X[0 :+ 1, to3 :+ 32] = A[0 :+ 1, to3 :+ 32]
+  }
+}";
+    let ir = passed(src);
+    assert!(!ir.contains("grid_barrier"), "{ir}");
+}
