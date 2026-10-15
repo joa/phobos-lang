@@ -7,7 +7,9 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use melior::ir::operation::OperationLike;
-use melior::ir::{BlockLike, OperationRef, RegionLike, Value, ValueLike};
+use melior::ir::{BlockLike, Location, OperationRef, RegionLike, Value, ValueLike};
+
+use super::Loc;
 
 /// A value's index in [`Program::values`].
 pub(super) type Vid = usize;
@@ -41,6 +43,8 @@ pub(super) struct Op {
     pub regions: Vec<Region>,
     /// The op's name and operand types, for a report.
     pub text: String,
+    /// The source the op was emitted for, when the module says.
+    pub loc: Option<Loc>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -298,9 +302,31 @@ impl Builder {
             results,
             regions,
             text,
+            loc: source_loc(op.location()),
         });
         Ok(self.ops.len() - 1)
     }
+}
+
+/// The source range `loc` names, looking inside a fused or named one.
+fn source_loc(loc: Location<'_>) -> Option<Loc> {
+    if loc.is_file_line_col_range() {
+        let file = loc.file_line_col_range_filename();
+        return Some(Loc {
+            file: file.as_string_ref().as_str().ok()?.to_string(),
+            line: loc.file_line_col_range_start_line() as u32,
+            col: loc.file_line_col_range_start_column() as u32,
+            end_line: loc.file_line_col_range_end_line() as u32,
+            end_col: loc.file_line_col_range_end_column() as u32,
+        });
+    }
+    if loc.is_fused() {
+        return (0..loc.fused_num_locations()).find_map(|i| source_loc(loc.fused_location(i)));
+    }
+    if loc.is_name() {
+        return source_loc(loc.name_child_location());
+    }
+    None
 }
 
 fn kind(name: &str, op: &OperationRef<'_, '_>, operands: &[Vid], types: &[Ty]) -> Result<Kind> {

@@ -8,6 +8,8 @@
 // would widen. `--set` pins an `@autotune` parameter, otherwise each takes its
 // first choice. `--all-variants` writes one file per point of the search
 // space left after the pins, named OUT_NAME-value_NAME-value.ptx.
+// `--check-races` runs the host race check (RACECHECK.md) on what it
+// compiles and fails on a race, pointing at the source lines.
 // `PHOBOS_PRINT_PHASES` prints the IR after each lowering phase.
 // Errors go to stderr as rustc lays them out, colored on a terminal
 // (`--color`), or one JSON object per line with `--error-format json`.
@@ -20,10 +22,11 @@ use anyhow::{Context as _, Result, bail};
 use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
 use phobos_base::term::{self, ColorChoice};
 use phobos_lang::ast::Kernel;
-use phobos_lang::diag::{self, SourceFile};
+use phobos_lang::diag::{self, Diagnostics, SourceFile};
+use phobos_lang::race;
 
 const USAGE: &str = "usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] \
-                     [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx] \
+                     [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] \
                      [--color auto|always|never] [--error-format human|json]";
 
 const HELP: &str = "
@@ -35,6 +38,10 @@ const HELP: &str = "
                            pins, one file each, named OUT_NAME-value.ptx
                            (OUT from -o, else the source's name); prints a
                            line per file and skips a variant that fails
+  --check-races            run the host race check on each kernel compiled
+                           and fail on a race between warps, a barrier not
+                           every thread reaches or a shared access outside
+                           its buffer
   -o, --output OUT.ptx     write the PTX here instead of standard output
   --color WHEN             color errors: auto (on a terminal, unless
                            NO_COLOR is set), always or never
@@ -44,6 +51,17 @@ const HELP: &str = "
 struct Report {
     color: ColorChoice,
     json: bool,
+}
+
+impl Report {
+    /// Prints `found` to stderr, as an error is.
+    fn print(&self, found: &Diagnostics) {
+        if self.json {
+            eprint!("{}", found.to_json());
+        } else {
+            eprint!("{}", found.render(term::stderr_colors(self.color)));
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -70,6 +88,7 @@ fn run(report: &mut Report) -> Result<()> {
     let mut out: Option<PathBuf> = None;
     let mut pins: HashMap<String, i64> = HashMap::new();
     let mut all_variants = false;
+    let mut check_races = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = || args.next().with_context(|| format!("{arg} needs a value"));
@@ -83,6 +102,7 @@ fn run(report: &mut Report) -> Result<()> {
                 }
             }
             "--all-variants" => all_variants = true,
+            "--check-races" => check_races = true,
             "-o" | "--output" => out = Some(value()?.into()),
             "--color" => report.color = value()?.parse().map_err(anyhow::Error::msg)?,
             "--error-format" => {
@@ -116,7 +136,11 @@ fn run(report: &mut Report) -> Result<()> {
         // need checking, not whether the kernels' spaces agree.
         let declared = kernels.iter().flat_map(phobos_lang::search_space).collect();
         phobos_lang::pin(declared, &pins)?;
-        let ptx = compile(&ctx, &kernels, pins.into_iter().collect())?;
+        let ctx = target(&ctx, &kernels, pins.into_iter().collect());
+        if check_races && let Some(found) = races(&ctx, &kernels, report)? {
+            return Err(found.into());
+        }
+        let ptx = compile(&ctx, &kernels)?;
         match out {
             Some(out) => {
                 std::fs::write(&out, ptx).with_context(|| format!("writing {}", out.display()))?
@@ -130,6 +154,7 @@ fn run(report: &mut Report) -> Result<()> {
     let stem = out.unwrap_or_else(|| PathBuf::from(file.file_stem().unwrap_or(file.as_os_str())));
     let variants = phobos_base::combo::cartesian_product(&space);
     let mut failed = 0;
+    let mut raced = 0;
     for variant in &variants {
         let path = variant_path(&stem, variant);
         let settings = variant
@@ -137,7 +162,24 @@ fn run(report: &mut Report) -> Result<()> {
             .map(|(n, v)| format!("{n}={v}"))
             .collect::<Vec<_>>()
             .join(" ");
-        let ptx = match compile(&ctx, &kernels, variant.iter().cloned().collect()) {
+        let ctx = target(&ctx, &kernels, variant.iter().cloned().collect());
+        if check_races {
+            match races(&ctx, &kernels, report) {
+                Ok(None) => {}
+                Ok(Some(found)) => {
+                    eprintln!("{settings} races:");
+                    report.print(&found);
+                    raced += 1;
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("skipped {settings}: {e:#}");
+                    failed += 1;
+                    continue;
+                }
+            }
+        }
+        let ptx = match compile(&ctx, &kernels) {
             Ok(ptx) => ptx,
             Err(e) => {
                 eprintln!("skipped {settings}: {e:#}");
@@ -148,27 +190,45 @@ fn run(report: &mut Report) -> Result<()> {
         std::fs::write(&path, ptx).with_context(|| format!("writing {}", path.display()))?;
         println!("{} {settings}", path.display());
     }
+    if raced > 0 {
+        bail!("{raced} of the {} variants race", variants.len());
+    }
     if failed == variants.len() {
         bail!("none of the {failed} variants compiled");
     }
     Ok(())
 }
 
-fn compile(
-    ctx: &Context,
-    kernels: &[Kernel],
-    shape_overrides: HashMap<String, i64>,
-) -> Result<String> {
+/// `ctx` with `shape_overrides` pinned, and widened as the runtime does, so
+/// a kernel compiles here exactly when it compiles there.
+fn target(ctx: &Context, kernels: &[Kernel], shape_overrides: HashMap<String, i64>) -> Context {
     let mut ctx = Context {
         shape_overrides,
         ..ctx.clone()
     };
-    // Widen as the runtime does, so a kernel compiles here exactly when it
-    // compiles there.
     if ctx.index_bitwidth < 64 && phobos_lang::needs_wide_index(&ctx, kernels) {
         ctx.index_bitwidth = 64;
     }
-    phobos_mlir::gen_ptx(&ctx, |base, context, module| {
+    ctx
+}
+
+/// Runs the race check on `kernels`, returning what it found when that
+/// includes an error. A run that stopped early alone is printed as a
+/// warning.
+fn races(ctx: &Context, kernels: &[Kernel], report: &Report) -> Result<Option<Diagnostics>> {
+    let reports = race::check_kernels(ctx, kernels, &race::Config::default())?;
+    let Some(found) = race::diagnostics(kernels, &reports) else {
+        return Ok(None);
+    };
+    if found.errors() > 0 {
+        return Ok(Some(found));
+    }
+    report.print(&found);
+    Ok(None)
+}
+
+fn compile(ctx: &Context, kernels: &[Kernel]) -> Result<String> {
+    phobos_mlir::gen_ptx(ctx, |base, context, module| {
         phobos_lang::assert_pipelined(&phobos_lang::codegen::emit(base, kernels, context, module)?.pipeline_failures)
     })
 }

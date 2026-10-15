@@ -35,8 +35,9 @@ helpers rather than a spelling of its own.
 - `cargo test`: the whole enchilada
 - `cargo test -p phobos-lang`: parser + codegen tests; codegen tests run the MLIR verifier on emitted modules and grep the printed IR. `tests/ui/*.ph` each fail to compile, and what the compiler prints for them, rustc's layout, uncolored, is the `.stderr` beside them; a change to a message reblesses them with `PHOBOS_BLESS=1` and the diff is reviewed
 - `cargo test -p phobos-gguf -p phobos-onnx -p phobos-inference -p phobos-kernels`: the front ends, the host reference paths, the tokenizers, the chat rendering and the sampler. No GPU, no MLIR toolchain
-- `cargo run -p phobos-lang --example emit [file]`: prints the MLIR for a source
-  file; fastest way to eyeball codegen output. `PHOBOS_CHIP` and
+- `cargo run -p phobos-lang --example emit [--loc] [file]`: prints the MLIR for a
+  source file; fastest way to eyeball codegen output. `--loc` prints each op's
+  source location, which emission never changes. `PHOBOS_CHIP` and
   `PHOBOS_INDEX_BITS` override the target, which is how to reach a path the
   default never takes: mma.sync and cp.async both want 64-bit indices, and the
   two diverge again between sm_75 and sm_80. A refactor of a code generator that

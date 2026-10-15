@@ -14,6 +14,7 @@ mod control;
 mod exec;
 mod memory;
 mod program;
+mod report;
 
 #[cfg(test)]
 mod tests;
@@ -31,6 +32,8 @@ use melior::{
 use exec::{Exec, Inputs, Stop};
 use memory::Level;
 use program::{Program, Ty, parse_ty};
+
+pub use report::diagnostics;
 
 /// What a run assumes about the launch.
 #[derive(Clone, Debug)]
@@ -58,12 +61,24 @@ impl Default for Config {
     }
 }
 
+/// Where an op came from, as its MLIR location says: lines and columns
+/// from 1, the end exclusive.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Loc {
+    pub file: String,
+    pub line: u32,
+    pub col: u32,
+    pub end_line: u32,
+    pub end_col: u32,
+}
+
 /// One side of a race: the thread and the op.
 #[derive(Clone, Debug)]
 pub struct Site {
     pub thread: u32,
     pub write: bool,
     pub op: String,
+    pub loc: Option<Loc>,
 }
 
 #[derive(Clone, Debug)]
@@ -88,17 +103,36 @@ pub struct Report {
     pub warp_races: Vec<Race>,
     /// One side's address depended on data, so it covered its whole view.
     pub possible: Vec<Race>,
-    /// Barriers some running threads did not reach: the op, and how many did.
-    pub divergent: Vec<(String, usize)>,
-    pub out_of_bounds: Vec<String>,
+    /// Barriers some running threads did not reach.
+    pub divergent: Vec<Divergent>,
+    pub out_of_bounds: Vec<OutOfBounds>,
     /// Why the run ended early, if it did.
     pub stopped: Option<String>,
+    /// The op it stopped at, for a trap.
+    pub stopped_at: Option<Loc>,
     pub barriers: usize,
     pub bytes: u64,
     pub unfollowed: u64,
     /// Loops that waited on data, such as a flag or a grid barrier, taken
     /// to end after one pass.
     pub waits: u64,
+}
+
+/// A barrier `reached` of the CTA's threads arrived at.
+#[derive(Clone, Debug)]
+pub struct Divergent {
+    pub op: String,
+    pub reached: usize,
+    pub loc: Option<Loc>,
+}
+
+/// A shared access at `byte` of `buffer`, outside it.
+#[derive(Clone, Debug)]
+pub struct OutOfBounds {
+    pub op: String,
+    pub buffer: String,
+    pub byte: i64,
+    pub loc: Option<Loc>,
 }
 
 impl Report {
@@ -118,10 +152,18 @@ pub fn check_source(
     src: &str,
     config: &Config,
 ) -> Result<Vec<Report>> {
+    check_kernels(base, &crate::parse(src)?, config)
+}
+
+/// Compiles `kernels` for `base`'s target and checks each.
+pub fn check_kernels(
+    base: &phobos_base::context::Context,
+    kernels: &[crate::ast::Kernel],
+    config: &Config,
+) -> Result<Vec<Report>> {
     let context = context();
     let module = Module::new(Location::unknown(&context));
-    let kernels = crate::parse(src)?;
-    let out = crate::codegen::emit(base, &kernels, &context, &module)?;
+    let out = crate::codegen::emit(base, kernels, &context, &module)?;
     let mut config = config.clone();
     if let Some(&(_, bytes)) = out.shared.iter().max_by_key(|(_, b)| *b) {
         config.dynamic_bytes = bytes as i64;
@@ -139,22 +181,27 @@ pub fn check_text(text: &str, config: &Config) -> Result<Vec<Report>> {
 }
 
 /// `text` with the one form MLIR prints but does not parse back: an async
-/// copy group with no tokens, which prints as its bare name. The generic
-/// form parses.
+/// copy group with no tokens, which prints as its bare name, before its
+/// location if it has one. The generic form parses.
 fn reparsable(text: &str) -> String {
+    const BARE: &str = "= nvgpu.device_async_create_group";
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
-        match line
-            .trim_end()
-            .strip_suffix("= nvgpu.device_async_create_group")
-        {
-            Some(head) => {
+        let split = line
+            .find(BARE)
+            .map(|at| (&line[..at], line[at + BARE.len()..].trim()));
+        match split {
+            Some((head, rest)) if rest.is_empty() || rest.starts_with("loc(") => {
                 out.push_str(head);
                 out.push_str(
                     "= \"nvgpu.device_async_create_group\"() : () -> !nvgpu.device.async.token",
                 );
+                if !rest.is_empty() {
+                    out.push(' ');
+                    out.push_str(rest);
+                }
             }
-            None => out.push_str(line),
+            _ => out.push_str(line),
         }
         out.push('\n');
     }
@@ -225,21 +272,26 @@ fn run(program: &Program, config: &Config, block: [i64; 3]) -> Report {
         scalar: config.scalar,
     };
     let mut exec = Exec::new(program, inputs, config.dynamic_bytes);
-    let stopped = match exec.run() {
-        Ok(()) => None,
-        Err(Stop::Trap(op)) => Some(format!("trapped at {}", program.ops[op].text)),
-        Err(Stop::Untraceable(why)) => Some(format!("untraceable: {why}")),
+    let (stopped, stopped_at) = match exec.run() {
+        Ok(()) => (None, None),
+        Err(Stop::Trap(op)) => (
+            Some(format!("trapped at {}", program.ops[op].text)),
+            program.ops[op].loc.clone(),
+        ),
+        Err(Stop::Untraceable(why)) => (Some(format!("untraceable: {why}")), None),
     };
     let site = |t: memory::Touch| Site {
         thread: t.thread,
         write: t.write,
         op: program.ops[t.site as usize].text.clone(),
+        loc: program.ops[t.site as usize].loc.clone(),
     };
     let mut report = Report {
         kernel: program.name.clone(),
         threads: program.threads,
         block,
         stopped,
+        stopped_at,
         barriers: exec.mem.epochs - 1,
         bytes: exec.mem.bytes,
         unfollowed: exec.unfollowed,
@@ -247,17 +299,21 @@ fn run(program: &Program, config: &Config, block: [i64; 3]) -> Report {
         divergent: exec
             .divergent
             .iter()
-            .map(|&(op, n)| (program.ops[op].text.clone(), n))
+            .map(|&(op, reached)| Divergent {
+                op: program.ops[op].text.clone(),
+                reached,
+                loc: program.ops[op].loc.clone(),
+            })
             .collect(),
         out_of_bounds: exec
             .mem
             .out_of_bounds
             .iter()
-            .map(|(t, b, at)| {
-                format!(
-                    "{} at byte {at} of {}",
-                    program.ops[t.site as usize].text, exec.mem.names[*b]
-                )
+            .map(|&(t, b, byte)| OutOfBounds {
+                op: program.ops[t.site as usize].text.clone(),
+                buffer: exec.mem.names[b].clone(),
+                byte,
+                loc: program.ops[t.site as usize].loc.clone(),
             })
             .collect(),
         ..Report::default()

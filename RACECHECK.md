@@ -8,22 +8,57 @@ elided them.
 ## Running it
 
 ```
+phobos-compile FILE.ph --check-races [--chip CHIP] [--index-bits 32|64]
+```
+
+checks what it compiles, for the target it compiles for, and with
+`--all-variants` each variant. A race between warps, a barrier not every
+thread reaches, or a shared access outside its buffer is an error on the
+source, as the compiler's own are, and fails the run before any PTX is
+written:
+
+```
+error: a thread reads shared memory another warp writes, with no `barrier()` between
+ --> mirror.ph:5:24
+  |
+4 |     t[0, ctx.thread] = X[0, ctx.thread]
+  |     ----------------------------------- thread 63 writes here
+5 |     Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+  |                        ^^^^^^^^^^^^^^^^^^^^^ thread 0 reads here
+  |
+  = note: seen in CTA [0, 0, 0] of kernel `k`
+help: a barrier between the two orders them
+  |
+5 +     barrier()
+6 |     Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+```
+
+A run that stopped early is a warning. `--error-format json` prints each as
+one JSON object, as for compile errors.
+
+```
 cargo run --release -p phobos-lang --example race -- [-v] PATH...
 ```
 
-`PATH` is a `.ph` source, which it compiles, or emitted `.mlir` as the `emit`
-example prints it, or a directory of either. `PHOBOS_CHIP` and
-`PHOBOS_INDEX_BITS` pick the target, as for `emit`. It exits 1 when a CTA
-races. `-v` also lists the CTAs that stopped early and the findings that
-are only possible or within a warp.
+lists every finding, op by op. `PATH` is a `.ph` source, which it compiles,
+or emitted `.mlir` as the `emit` example prints it, or a directory of either.
+MLIR printed with `emit --loc` carries each op's source location, and the
+example prints it beside the op. `PHOBOS_CHIP` and `PHOBOS_INDEX_BITS` pick
+the target, as for `emit`. It exits 1 when a CTA races. `-v` also lists the
+CTAs that stopped early and the findings that are only possible or within a
+warp.
 
 `cargo test -p phobos-lang` runs it over every `.ph` in the tree on sm_75 at
 32 and 64 bits and sm_80 at 64 bits. The model kernels are generated in Rust;
 dump them with `PHOBOS_DUMP_DIR` (see `ENV.md`) and run the example over the
 dump. A change to barrier placement does both.
 
-From Rust: `race::check_source`, `race::check_text` or `race::check_module`,
-each returning one `Report` per kernel and CTA.
+From Rust: `race::check_source`, `race::check_kernels`, `race::check_text`
+or `race::check_module`, each returning one `Report` per kernel and CTA.
+Every op a finding names carries the source range codegen emitted it for,
+when the module has one, and `race::diagnostics` turns the reports into
+diagnostics on the kernels' source, each finding once however many CTAs
+saw it.
 
 ## What it reports
 
@@ -35,6 +70,10 @@ each returning one `Report` per kernel and CTA.
 | divergent barrier | A barrier some threads of the CTA did not reach. Fails the test. |
 | out of bounds | A shared access outside its buffer. Fails the test. |
 | stopped | A trap, or control the run could not follow. Fails the test. |
+
+`--check-races` fails on what fails the test, except a run that stopped
+early: that is where the check ran out, not a finding about the kernel, so
+there it is a warning.
 
 ## How a run is modelled
 
@@ -53,9 +92,10 @@ each returning one `Report` per kernel and CTA.
 
 ## Known issues
 
-- **Reports name MLIR ops, not source lines.** The emitted MLIR carries no
-  locations. Source spans through the parser, the IR and MLIR are the next
-  piece of work, then a `phobos-compile --check-races` flag.
+- **Locations are as fine as the IR's ops.** An op codegen emits on behalf
+  of a larger one, a loop's staging or a barrier the membar pass placed,
+  points at that op's source. MLIR printed without `--loc` has none, and
+  its findings name only ops.
 - **Long loops are sampled.** A loop with uniform bounds and more than four
   turns runs its first two and last two. A hazard between turns shows between
   neighbouring ones, but one that only appears from some later turn on, say

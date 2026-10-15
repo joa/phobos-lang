@@ -31,7 +31,9 @@ fn main() -> anyhow::Result<()> {
             }
             race::check_text(&text, &config)
         } else {
-            race::check_source(&base, &text, &config)
+            let source = phobos_lang::diag::SourceFile::new(file.display().to_string(), text);
+            phobos_lang::parse_source(&source)
+                .and_then(|kernels| race::check_kernels(&base, &kernels, &config))
         };
         let reports = match checked {
             Ok(r) => r,
@@ -95,24 +97,37 @@ fn print(file: &Path, r: &Report, all: bool) {
                 x.count,
                 x.first.thread,
                 if x.first.write { "writes" } else { "reads" },
-                x.first.op,
+                at(&x.first.op, &x.first.loc),
                 x.second.thread,
                 if x.second.write { "writes" } else { "reads" },
-                x.second.op
+                at(&x.second.op, &x.second.loc)
             );
         }
     };
     show("race", &r.races);
     if all {
-        for (op, n) in &r.divergent {
-            println!("  divergent barrier, {n} threads: {op}");
+        for d in &r.divergent {
+            println!("  divergent barrier, {} threads: {}", d.reached, at(&d.op, &d.loc));
         }
         for o in &r.out_of_bounds {
-            println!("  out of bounds: {o}");
+            println!(
+                "  out of bounds: {} at byte {} of {}",
+                at(&o.op, &o.loc),
+                o.byte,
+                o.buffer
+            );
         }
     } else {
         show("warp", &r.warp_races);
         show("possible", &r.possible);
+    }
+}
+
+/// The op, and the source line it was emitted for when the module says.
+fn at(op: &str, loc: &Option<race::Loc>) -> String {
+    match loc {
+        Some(l) => format!("{op} at {}:{}:{}", l.file, l.line, l.col),
+        None => op.to_string(),
     }
 }
 
