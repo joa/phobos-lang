@@ -40,11 +40,11 @@ kernel. That level is covered in its own section,
 | Page | Covers |
 | --- | --- |
 | [Kernels and tensors](/docs/language/kernels-and-tensors/) | The kernel signature, tensor and scalar parameters, symbolic dimensions, types, statements, unrolled loops and functions |
-| [Tiles and shared memory](/docs/language/tiles-and-shared-memory/) | `tile<T>`, `var` and `let`, what lives in shared memory and for how long |
+| [Tiles and shared memory](/docs/language/tiles-and-shared-memory/) | `tile<T>`, `var` and `let`, what lives in shared memory and for how long, computed tiles with `generate` |
 | [Slicing, bounds and masking](/docs/language/slicing-bounds-masking/) | Subscripts, what happens at the edge of a tensor, `@aligned` |
 | [Elementwise math and reductions](/docs/language/elementwise-and-reductions/) | Operators, conversions, math functions, `where`, row reductions |
 | [`dot` and tensor cores](/docs/language/dot-and-tensor-cores/) | Matrix products and the hardware they run on |
-| [Quantized built-ins and formats](/docs/language/quantized/) | Q8_0 and the GGUF formats as contractions |
+| [Quantized built-ins and formats](/docs/language/quantized/) | Q8_0 and the GGUF formats as contractions, and a weight decoded in the kernel |
 | [Autotuning](/docs/language/autotuning/) | Search spaces, the shape environment and tuned unroll factors |
 | [Shared-memory races](/docs/language/races/) | `barrier()`, what it orders, and the host race check |
 
