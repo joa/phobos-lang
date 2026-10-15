@@ -350,8 +350,8 @@ impl DeviceBackend {
             if fits(&pool, at, n) {
                 continue;
             }
-            // SAFETY: the plan's nest and barrier analysis guarantees every
-            // byte is written by a stage before any stage reads it.
+            // SAFETY: every byte is written by a stage before any stage reads
+            // it, behind the grid barrier the compiler places between them.
             let fresh = unsafe {
                 (
                     DeviceBuffer::uninitialized(n.bytes)?,
