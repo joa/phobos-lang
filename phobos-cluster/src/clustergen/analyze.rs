@@ -250,6 +250,7 @@ impl<'a> Analyzer<'a> {
                 }
             }
             ExprKind::Var(_) | ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => {}
+            ExprKind::Generate(_) => bail!("a generated tile is not supported in a cluster kernel"),
         }
         Ok(())
     }

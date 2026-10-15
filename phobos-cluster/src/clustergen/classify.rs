@@ -280,6 +280,7 @@ impl<'a> Analyzer<'a> {
             ExprKind::Call { callee, .. } => {
                 bail!("call to '{callee}' is not supported in a supertile computation")
             }
+            ExprKind::Generate(_) => bail!("a generated tile is not supported in a supertile computation"),
         }
     }
 
