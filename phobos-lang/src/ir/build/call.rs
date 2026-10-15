@@ -146,6 +146,11 @@ impl Build {
                 let [arg] = args else {
                     bail!("`flat` expects one tile argument");
                 };
+                if let Some(name) = arg.as_var()
+                    && let Some(Binding::Tensor(t)) = self.lookup(name)
+                {
+                    return Ok(Rv::Tile(self.tile_flat(t)?));
+                }
                 let Rv::Tile(t) = self.emit_expr(arg)? else {
                     bail!("`flat` expects a tile argument");
                 };
@@ -454,6 +459,19 @@ impl Build {
         if shape.len() != 2 {
             bail!("`flat` expects a rank-2 tile");
         }
+        // A scratch tensor's flat view: the whole buffer as one row.
+        if let Type::Tensor(t) = self.ir.ty(src).clone() {
+            let [rows, cols] = [shape[0], shape[1]];
+            if rows == DYN || cols == DYN || !self.is_scratch(src) {
+                bail!("`flat` of a tensor takes a scratch tensor, declared in the kernel with a static shape");
+            }
+            let ty = Type::Tensor(crate::ir::TensorType {
+                elem: t.elem,
+                shape: vec![crate::ir::Extent::Fixed(1), crate::ir::Extent::Fixed(rows * cols)],
+                div: vec![1, 1],
+            });
+            return Ok(self.value(OpKind::Flat, &[src], ty));
+        }
         if !self.is_buffer(src) {
             bail!("`flat` expects a declared tile, not a slice of one");
         }
@@ -477,6 +495,11 @@ impl Build {
             space: t.space,
         });
         Ok(self.value(OpKind::Flat, &[src], ty))
+    }
+
+    /// Whether `v` is a scratch tensor's parameter, as its declaration binds it.
+    fn is_scratch(&self, v: ValueId) -> bool {
+        self.scratch.values().any(|&s| s == v)
     }
 
     fn emit_atomic_add(&mut self, args: &[Expr]) -> Result<Rv> {

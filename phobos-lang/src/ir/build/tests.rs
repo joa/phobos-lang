@@ -1,4 +1,5 @@
 use super::*;
+use crate::ast::BinOp;
 use crate::ir::verify::verify;
 
 /// The default target's facts, the same the emitter reads: sm_75 at 32-bit

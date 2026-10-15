@@ -120,6 +120,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | `var x = e` | Mutable binding. `var t = A[...]` copies the slice into a tile. An elementwise `e` over tiles of one element type and rank takes their type and broadcast shape and is computed in one sweep, as a typed declaration is. |
 | `var t: tile<T>[R, C] = e` | Mutable tile, filled with `e` (a scalar broadcasts). |
 | `var t: tile<T>[R, C]` | Uninitialized tile. The type is required and must be a tile. |
+| `var T: tensor<E>[R, C]` | Scratch a `@persistent` launch supplies: uninitialized device memory of a static shape, alive for the launch, one buffer every block shares, so one block can write a part and another read it after `grid_barrier()`. The kernel takes it as a parameter after the declared ones, in declaration order, before the barrier word. An error outside `@persistent`. |
 | `x = e`, `x[...] = e` | Assign a whole value or a slice. Tiles and tensors are sliced the same way. |
 | `x += e`, `x[...] += e` | Accumulate. A tile takes a scalar or a tile that broadcasts to it, a row or a column, and `acc += dot_t(a, b)` adds the product in place. |
 | `x op= e` | `x = x op e`, for `-` `*` `/` `%` `&` `\|` `^` `<<` `>>`. The target is read again, so an indexed target's subscripts are evaluated twice. |
@@ -299,7 +300,7 @@ All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` o
 | `cumsum(t)` | `[R, C] -> [R, C]` | `out[i, j] = sum_{r <= i} t[r, j]`, down the rows. Float only. |
 | `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
 | `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
-| `flat(t)` | `[R, C] -> [1, R * C]` | Row-major view of the same bytes; writing through it writes `t`. `t` must be a declared tile, not a slice. |
+| `flat(t)` | `[R, C] -> [1, R * C]` | Row-major view of the same bytes; writing through it writes `t`. `t` must be a declared tile or scratch tensor, not a slice. |
 | `gather(table, idx)` | `idx.shape` | `out[i] = table[idx[i]]`. `table` is `[n]` or `[1, n]`; result has `table`'s element type. |
 
 ### Dense contraction

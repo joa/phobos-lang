@@ -362,7 +362,8 @@ impl<'c> Codegen<'c> {
             bail!("`flat` expects a rank-2 tile");
         }
 
-        if src.global.is_none() {
+        // A declared tile, or a whole tensor: a scratch one the build let through.
+        if src.global.is_none() && src.shared {
             bail!("`flat` expects a declared tile, not a slice of one");
         }
 
@@ -381,7 +382,7 @@ impl<'c> Codegen<'c> {
             self.aliased.insert(name.clone());
         }
 
-        let text = format!("memref<1x{len}x{}, {}>", src.elem, self.mem_space(true));
+        let text = format!("memref<1x{len}x{}, {}>", src.elem, self.mem_space(src.shared));
         let result =
             Type::parse(self.ctx, &text).ok_or_else(|| anyhow!("failed to parse type '{text}'"))?;
 
@@ -407,7 +408,7 @@ impl<'c> Codegen<'c> {
             align_div: src.align_div,
             swizzle: None,
             global: None, // a view: not owned, so it must not be released
-            shared: true,
+            shared: src.shared,
             owned: false,
             mask: Vec::new(),
         })

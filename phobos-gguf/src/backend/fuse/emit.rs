@@ -122,6 +122,7 @@ struct Emit {
     params: Vec<String>,
     slots: Vec<Slot>,
     scratch: Vec<Scratch>,
+    scratch_args: Vec<ScratchArg>,
     /// Tile declarations and their flat views. They go before all loops.
     decls: String,
     body: String,
@@ -177,6 +178,7 @@ impl Emit {
             params: Vec::new(),
             slots: Vec::new(),
             scratch: Vec::new(),
+            scratch_args: Vec::new(),
             decls: "  let p = ctx.block.x\n".into(),
             body: String::new(),
             barriers: 0,
@@ -640,38 +642,35 @@ impl Emit {
         if self.redundant.contains(&val) {
             return self.quant_shared(val, len, folded);
         }
-        let at = match self.stored.get(&val) {
-            Some(&at) => at,
-            None => {
-                self.scratch.push(Scratch {
-                    bytes: len,
-                    scales: len / Q8_BLOCK,
-                });
-                let at = self.scratch.len() - 1;
-                self.stored.insert(val, at);
-                at
-            }
-        };
-        let rows = (len / Q8_BLOCK) as i64;
-        let (dims_q, dims_s, suffix) = match folded {
-            true => ([rows, Q8_BLOCK as i64], [rows, 1], "F"),
-            false => ([1, len as i64], [1, rows], ""),
-        };
-        let qs = self.slot(
-            format!("Vq{}{suffix}", val.0),
-            "i8",
-            dims_q,
-            Bound::ScratchQs(at),
-        );
-        let scales = self.slot(
-            format!("Vs{}{suffix}", val.0),
-            "f32",
-            dims_s,
-            Bound::ScratchScales(at),
-        );
-        let pair = (qs, scales);
+        // Scratch the launch supplies, declared in the kernel as rows of
+        // `Q8_BLOCK`, with its one-row view beside it.
+        if !self.stored.contains_key(&val) {
+            let at = self.claim_scratch(Scratch {
+                bytes: len,
+                scales: len / Q8_BLOCK,
+            });
+            self.stored.insert(val, at);
+            let (rows, q8, v) = (len / Q8_BLOCK, Q8_BLOCK, val.0);
+            self.declare_scratch(at, false, &format!("Vq{v}F"), "i8", [rows as i64, q8 as i64]);
+            self.declare_scratch(at, true, &format!("Vs{v}F"), "f32", [rows as i64, 1]);
+            let _ = write!(self.decls, "  let Vq{v} = flat(Vq{v}F)\n  let Vs{v} = flat(Vs{v}F)\n");
+        }
+        let suffix = if folded { "F" } else { "" };
+        let pair = (format!("Vq{}{suffix}", val.0), format!("Vs{}{suffix}", val.0));
         self.pairs.insert((val, view), pair.clone());
         pair
+    }
+
+    /// A scratch pair the launch allocates, by index.
+    pub(super) fn claim_scratch(&mut self, need: Scratch) -> usize {
+        self.scratch.push(need);
+        self.scratch.len() - 1
+    }
+
+    /// Declares one buffer of scratch pair `at` as the kernel's tensor `name`.
+    pub(super) fn declare_scratch(&mut self, at: usize, scales: bool, name: &str, elem: &str, dims: [i64; 2]) {
+        let _ = writeln!(self.decls, "  var {name}: tensor<{elem}>[{}, {}]", dims[0], dims[1]);
+        self.scratch_args.push(ScratchArg { at, scales, dims });
     }
 
     /// A redundantly written activation, in shared memory.
@@ -727,6 +726,7 @@ impl Emit {
             held: self.shared.len(),
             slots: self.slots,
             scratch: self.scratch,
+            scratch_args: self.scratch_args,
             blocks: self.blocks,
             barriers: self.barriers,
         }

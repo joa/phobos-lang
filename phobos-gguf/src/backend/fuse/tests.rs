@@ -155,7 +155,11 @@ fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     assert_eq!(plan.scratch[0].scales, 112);
     // The normalized row is held in shared memory per block.
     assert_eq!(plan.held, 1);
-    assert_eq!(plan.source.matches("flat(").count(), 2);
+    assert_eq!(plan.source.matches("flat(A").count(), 2);
+    // The quantized row is scratch the kernel declares, with its flat view.
+    assert!(plan.source.contains("var Vq7F: tensor<i8>[112, 32]"), "{}", plan.source);
+    assert!(plan.source.contains("let Vq7 = flat(Vq7F)"), "{}", plan.source);
+    assert_eq!(plan.scratch_args.len(), 2);
     assert!(
         plan.source.contains("var Aq2: tile<i8>[32, 32]"),
         "the activation should be a tile, not an operand"
@@ -651,4 +655,25 @@ fn a_ragged_raw_run_stores_its_remainder() {
     assert!(src.contains("Rq4: tensor<i8>[128, 576]"), "{src}");
     assert_eq!(src.matches("q4k_block(Rq").count(), 2, "{src}");
     assert!(src.contains("if q == 0 && cu < 32 {"), "{src}");
+}
+
+/// The chains written by hand from the stage library compile to the kernels
+/// the pass writes for them, PTX for PTX.
+#[cfg(feature = "cuda")]
+#[test]
+fn the_hand_written_chains_are_the_planned_ones() {
+    use phobos_kernels::compile::ptx_for;
+    let lib = include_str!("lib.ph");
+    let chains = [
+        ("qwen08_mlp", include_str!("chains/qwen08_mlp.ph"), qwen_plan()),
+        ("qwen08_project", include_str!("chains/qwen08_project.ph"), qwen_project_plan(false)),
+        ("qwen08_project_mix", include_str!("chains/qwen08_project_mix.ph"), qwen_project_plan(true)),
+    ];
+    for (name, chain, plan) in chains {
+        for chip in ["sm_75", "sm_80"] {
+            let hand = ptx_for(chip, &format!("{lib}\n{chain}"), name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            let planned = ptx_for(chip, &plan.source, name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(hand == planned, "{name} on {chip}: the hand-written chain compiles to other PTX");
+        }
+    }
 }

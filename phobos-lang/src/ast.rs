@@ -302,6 +302,33 @@ impl Kernel {
         }
     }
 
+    /// The tensors the body declares, `var HQ: tensor<i8>[1, FF]`: scratch
+    /// the launch owns, in declaration order, with where each is declared.
+    pub fn scratch(&self) -> Vec<(&str, &Type, crate::diag::Span)> {
+        fn walk<'a>(stmts: &'a [Stmt], out: &mut Vec<(&'a str, &'a Type, crate::diag::Span)>) {
+            for stmt in stmts {
+                match stmt {
+                    Stmt::Var {
+                        name,
+                        ty: Some(ty @ Type::Tensor(..)),
+                        value: None,
+                        span,
+                        ..
+                    } => out.push((name, ty, *span)),
+                    Stmt::For { body, .. } | Stmt::While { body, .. } => walk(body, out),
+                    Stmt::If { then, r#else, .. } => {
+                        walk(then, out);
+                        walk(r#else.as_deref().unwrap_or_default(), out);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut out = Vec::new();
+        walk(&self.body, &mut out);
+        out
+    }
+
     /// Whether the body calls `grid_barrier()` with no barrier named, which
     /// takes the one a `@persistent` launch supplies.
     pub fn implicit_grid_barrier(&self) -> bool {

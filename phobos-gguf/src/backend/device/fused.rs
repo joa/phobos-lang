@@ -186,10 +186,17 @@ impl DeviceBackend {
                         _ => r.d,
                     }
                 }
-                Bound::ScratchQs(at) => pool[at].0.as_device_ptr().as_raw(),
-                Bound::ScratchScales(at) => pool[at].1.as_device_ptr().as_raw(),
             };
             operands.push((ptr, slot.dims));
+        }
+        // The scratch the kernel declares, in declaration order.
+        for arg in &plan.scratch_args {
+            let (bytes, scales) = &pool[arg.at];
+            let ptr = match arg.scales {
+                false => bytes.as_device_ptr().as_raw(),
+                true => scales.as_device_ptr().as_raw(),
+            };
+            operands.push((ptr, arg.dims));
         }
         // `grid_barrier()` reads the barrier word a persistent launch appends.
         if plan.barriers > 0 {
