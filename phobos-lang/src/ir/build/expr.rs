@@ -26,13 +26,10 @@ impl Build {
                     bail!("tensor `{name}` used as a value; index or slice it")
                 }
                 Some(Binding::View(t) | Binding::Tile(t)) => Ok(Rv::Tile(t)),
-                Some(Binding::Frags(_)) => bail!(
-                    "fragment accumulator `{name}` can only be scaled, dot-accumulated, or stored"
-                ),
                 Some(Binding::Regs(r)) => Ok(Rv::Tile(self.materialize_regs(r)?)),
-                Some(Binding::Generated(_)) => {
-                    bail!("generated tile `{name}` is read only as a scaled `dot_t`'s weight here")
-                }
+                // Read only as an operand of an int8 accumulator's update,
+                // which the fragment pass takes as it is or materializes.
+                Some(Binding::Generated(t)) => Ok(Rv::Tile(self.emit_generate(&t)?)),
                 None => match self.shape_env.get(name) {
                     Some(&v) => Ok(Rv::Scalar(self.const_index(v))),
                     None => Err(self.unknown(name)),

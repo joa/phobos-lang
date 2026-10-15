@@ -160,7 +160,8 @@ with the next copy's.
 | --- | --- |
 | `n` | A constant of at least 1, or an [`@autotune`](/docs/language/autotuning/#tuning-the-unroll-factor) name. `for<unroll 1>` is the plain loop. |
 | `step` | A positive constant; `lo` and `hi` may be anything a `for` takes. |
-| GEMM loops | Not for a loop that carries tensor-core accumulators. An unrolled loop is never recognized as a GEMM, so a GEMM's k loop stays a plain `for`. |
+| Register tiles | Not for a loop that updates an `@registers` tile. A fragment accumulator is carried through the main loop and the rest alike. |
+| GEMM loops | An unrolled loop is never recognized as a GEMM, so a GEMM's k loop stays a plain `for`. |
 
 ## Functions
 

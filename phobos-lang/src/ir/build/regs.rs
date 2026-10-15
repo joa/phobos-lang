@@ -6,7 +6,7 @@ use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, Rv};
 use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Stmt};
-use crate::ir::{DistType, OpKind, Reduce, RegLayout, Scalar, Tree, Type, ValueId};
+use crate::ir::{Bounds, DistType, ForInfo, OpKind, Reduce, RegLayout, Scalar, Tree, Type, ValueId};
 
 /// Elements one thread may hold of one register tile.
 const MAX_REGS_PER_THREAD: i64 = 64;
@@ -130,6 +130,95 @@ impl Build {
                 }
                 _ => {}
             }
+        }
+        Ok(())
+    }
+
+    /// The register tiles a loop body assigns, in the order it first does.
+    pub(crate) fn regs_carried(&self, body: &[Stmt]) -> Vec<String> {
+        let mut names = Vec::new();
+        self.regs_carried_into(body, &mut names);
+        names
+    }
+
+    fn regs_carried_into(&self, stmts: &[Stmt], names: &mut Vec<String>) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Assign {
+                    target: Expr { kind: ExprKind::Var(n), .. },
+                    ..
+                } if !names.contains(n) && matches!(self.lookup(n), Some(Binding::Regs(_))) => names.push(n.clone()),
+                Stmt::For { body, .. } => self.regs_carried_into(body, names),
+                _ => {}
+            }
+        }
+    }
+
+    /// A loop threading the register tiles the body assigns as carried
+    /// values.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_regs_for(
+        &mut self,
+        var: &str,
+        start: &Expr,
+        end: &Expr,
+        step: Option<&Expr>,
+        body: &[Stmt],
+        names: &[String],
+        hoisted: &[ValueId],
+    ) -> Result<()> {
+        let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
+        let mut inits = Vec::new();
+        for name in names {
+            let Some(Binding::Regs(r)) = self.lookup(name) else {
+                bail!("`{name}` is not register-bound");
+            };
+            inits.push(r);
+        }
+        let types: Vec<Type> = inits.iter().map(|&v| self.ir.ty(v).clone()).collect();
+        let mut arg_types = vec![Type::INDEX];
+        arg_types.extend(types.iter().cloned());
+        let block = self.ir.new_block(&arg_types);
+        let iv = self.ir.args(block)[0];
+        self.ir.set_name(iv, var);
+        let args: Vec<ValueId> = self.ir.args(block)[1..].to_vec();
+        self.in_block(block, |b| {
+            b.push_scope();
+            b.bind(var, Binding::Let { value: iv, div: iv_div });
+            for (name, &arg) in names.iter().zip(&args) {
+                b.bind(name, Binding::Regs(arg));
+            }
+            let finals = b.emit_stmts(body).and_then(|()| {
+                names
+                    .iter()
+                    .map(|name| match b.lookup(name) {
+                        Some(Binding::Regs(r)) => Ok(r),
+                        _ => bail!("`{name}` lost its register binding in the loop body"),
+                    })
+                    .collect::<Result<Vec<_>>>()
+            });
+            b.pop_scope();
+            b.stmt(OpKind::Yield, &finals?);
+            Ok::<(), anyhow::Error>(())
+        })?;
+        let mut operands = vec![lo, hi, st];
+        operands.extend_from_slice(&inits);
+        operands.extend_from_slice(hoisted);
+        let op = self.op(
+            OpKind::For(ForInfo {
+                bounds: Bounds::Dynamic,
+                ragged: false,
+                carried: inits.len(),
+                hoisted: hoisted.len(),
+                pipeline: None,
+            }),
+            &operands,
+            types,
+            vec![block],
+        );
+        let results = self.ir.results(op).to_vec();
+        for (name, result) in names.iter().zip(results) {
+            self.update_binding(name, Binding::Regs(result));
         }
         Ok(())
     }

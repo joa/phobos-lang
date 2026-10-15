@@ -96,7 +96,6 @@ impl Build {
                                 Some((is_f32, _)) => *is_f32,
                                 None => match self.lookup(n) {
                                     Some(Binding::Tile(mv)) => self.elem(mv) == Scalar::F32,
-                                    Some(Binding::Frags(_)) => true,
                                     _ => false,
                                 },
                             },

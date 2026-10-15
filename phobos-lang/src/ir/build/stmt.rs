@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 
 use super::pipeline::PipelineDecline;
 use super::{Binding, Build, DYN, Rv, gcd};
-use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Stmt, Sub, Type as AstType};
+use crate::ast::{AssignOp, BinOp, Dim, Expr, ExprKind, Scalar as AstScalar, Span, Stmt, Sub, Type as AstType};
 use crate::ir::{
     BlockId, Bounds, ForInfo, Layout, OpKind, Scalar, Space, Stage, TileType, Type, ValueId,
 };
@@ -276,7 +276,6 @@ impl Build {
                     self.stmt(OpKind::Store, &[rhs, slot]);
                 }
                 Some(Binding::Tile(tile)) => self.store_tile(tile, op, value)?,
-                Some(Binding::Frags(fa)) => self.emit_frag_assign(name, fa, op, value)?,
                 Some(Binding::Regs(r)) => self.emit_regs_assign(name, r, op, value)?,
                 Some(_) => return Err(self.not_assignable(name)),
                 None => return Err(super::locate(&self.source, &self.ir, self.unknown(name), target.span)),
@@ -342,7 +341,7 @@ impl Build {
         body: &[Stmt],
         hoisted: &[ValueId],
     ) -> Result<()> {
-        let carried = self.frag_carried(body);
+        let carried = self.regs_carried(body);
         if !carried.is_empty() {
             // Doubling the stages costs occupancy a register accumulator
             // already strains, so a carrying loop pipelines on request.
@@ -359,7 +358,7 @@ impl Build {
                     Err(decline) => self.report.pipeline_declines.push(format!("loop `{var}`: {decline}")),
                 }
             }
-            return self.emit_frag_for(var, start, end, step, body, &carried, hoisted);
+            return self.emit_regs_for(var, start, end, step, body, &carried, hoisted);
         }
 
         match self.pipeline_candidate(body) {
@@ -400,7 +399,8 @@ impl Build {
             (self.const_fold(start), self.const_fold(end), const_step)
             && st > 0
         {
-            return self.emit_affine_for(var, lo, hi, st, body, hoisted);
+            let spans = [start.span, end.span, step.map_or(Span::default(), |e| e.span)];
+            return self.emit_affine_for(var, [lo, hi, st], spans, body, hoisted);
         }
 
         let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
@@ -519,17 +519,18 @@ impl Build {
         Ok(())
     }
 
+    /// A loop over constant bounds. `spans` are the source of each bound,
+    /// empty for a step the source left out.
     fn emit_affine_for(
         &mut self,
         var: &str,
-        lo: i64,
-        hi: i64,
-        step: i64,
+        [lo, hi, step]: [i64; 3],
+        spans: [Span; 3],
         body: &[Stmt],
         hoisted: &[ValueId],
     ) -> Result<()> {
         let block = self.body_block(var, gcd(lo, step), body)?;
-        self.op(
+        let op = self.op(
             OpKind::For(ForInfo {
                 bounds: Bounds::Affine { lo, hi, step },
                 ragged: false,
@@ -541,6 +542,7 @@ impl Build {
             Vec::new(),
             vec![block],
         );
+        self.report.bounds.insert(op, spans);
         Ok(())
     }
 
@@ -610,9 +612,6 @@ impl Build {
                     1
                 } else if let Some(consumed) = b.matmul_candidate(&stmts[i..])? {
                     consumed
-                } else if let Some(plan) = b.frag_acc_candidate(&stmts[i..]) {
-                    b.bind_frag_acc(&plan);
-                    1
                 } else {
                     let run = b.stage_run(&stmts[i..]);
                     if run >= 2 {

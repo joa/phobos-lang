@@ -30,8 +30,8 @@ impl Build {
             bail!("`for<unroll n>` needs a constant positive step");
         };
         ensure!(
-            self.frag_carried(body).is_empty(),
-            "`for<unroll n>` does not apply to a loop that carries tensor-core accumulators"
+            self.regs_carried(body).is_empty(),
+            "`for<unroll n>` does not apply to a loop that updates a register tile"
         );
         let (lo, hi, _, iv_div) = self.loop_bounds(start, end, step)?;
 

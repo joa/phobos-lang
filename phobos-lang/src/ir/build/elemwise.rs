@@ -67,6 +67,8 @@ impl Build {
             ExprKind::Var(name) => match self.lookup(name)? {
                 Binding::Let { .. } | Binding::Var { .. } => Some(0),
                 Binding::Regs(_) => self.fusing_regs.then_some(0),
+                // Bound only when every read is an int8 accumulator's update.
+                Binding::Generated(_) => Some(0),
                 // An unsigned tile is read only through a cast, below.
                 Binding::Tile(t) | Binding::View(t) => (!self.is_masked(t)
                     && !self.shape(t).contains(&DYN)

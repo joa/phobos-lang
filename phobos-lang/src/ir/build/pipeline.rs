@@ -3,7 +3,7 @@ use std::fmt;
 use anyhow::{Result, bail};
 
 use super::{Binding, Build, Rv};
-use crate::ast::{Expr, ExprKind, Stmt, Sub, Type as AstType};
+use crate::ast::{Expr, ExprKind, Span, Stmt, Sub, Type as AstType};
 use crate::ast::BinOp;
 use crate::ir::{Bounds, ForInfo, IndexOp, OpKind, Pipeline, Scalar, Stage, Type, ValueId};
 
@@ -46,9 +46,9 @@ impl fmt::Display for PipelineDecline {
     }
 }
 
-/// A matched pipeline candidate: the staged `(name, slice)` prefix, the
+/// A matched pipeline candidate: the staged `(name, slice, statement)` prefix, the
 /// compute statements after it, and what the `For` records.
-pub(crate) type Candidate<'a> = (Vec<(&'a str, &'a Expr)>, &'a [Stmt], Pipeline);
+pub(crate) type Candidate<'a> = (Vec<(&'a str, &'a Expr, Span)>, &'a [Stmt], Pipeline);
 
 impl Build {
     /// Matches a loop body shaped "var t = <static tensor slice>; ...". The
@@ -65,6 +65,7 @@ impl Build {
                 name,
                 ty: None,
                 value: Some(value),
+                span,
                 ..
             },
             tail @ ..,
@@ -73,21 +74,21 @@ impl Build {
             if self.slice_static_shape(value).is_none() {
                 break;
             }
-            staged.push((name.as_str(), value));
+            staged.push((name.as_str(), value, *span));
             rest = tail;
         }
         if staged.is_empty() {
             return Err(PipelineDecline::NoStagedPrefix);
         }
-        if staged.iter().any(|(_, v)| self.slice_is_partial(v)) {
+        if staged.iter().any(|(_, v, _)| self.slice_is_partial(v)) {
             return Err(PipelineDecline::PartialSlice);
         }
-        let names: Vec<&str> = staged.iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = staged.iter().map(|(n, _, _)| *n).collect();
         if rest.iter().any(|s| s.writes_any(&names)) {
             return Err(PipelineDecline::StagedNameWritten);
         }
         let mut needed_bytes = 0i64;
-        for (_, expr) in &staged {
+        for (_, expr, _) in &staged {
             let shape = self
                 .slice_static_shape(expr)
                 .expect("checked above: staged slices have a static shape");
@@ -131,7 +132,7 @@ impl Build {
         start: &Expr,
         end: &Expr,
         step: Option<&Expr>,
-        staged: &[(&str, &Expr)],
+        staged: &[(&str, &Expr, Span)],
         rest: &[Stmt],
         info: Pipeline,
         hoisted: &[ValueId],
@@ -151,7 +152,7 @@ impl Build {
         end: &Expr,
         step: Option<&Expr>,
         body: &[Stmt],
-        staged: &[(&str, &Expr)],
+        staged: &[(&str, &Expr, Span)],
         rest: &[Stmt],
         info: Pipeline,
         hoisted: &[ValueId],
@@ -181,32 +182,27 @@ impl Build {
         Ok(())
     }
 
-    /// The pipelined loop, threading the register accumulators named in
-    /// `carried` through it as carried values, as [`Self::emit_frag_for`]
-    /// does.
+    /// The pipelined loop, threading the register tiles named in `carried`
+    /// through it as carried values, as [`Self::emit_regs_for`] does.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn emit_pipelined_loop(
         &mut self,
         var: &str,
         [lo, hi, st]: [ValueId; 3],
         iv_div: i64,
-        staged: &[(&str, &Expr)],
+        staged: &[(&str, &Expr, Span)],
         rest: &[Stmt],
         info: Pipeline,
         carried: &[String],
         hoisted: &[ValueId],
     ) -> Result<()> {
         let mut inits = Vec::with_capacity(carried.len());
-        let mut regs = Vec::with_capacity(carried.len());
         for name in carried {
-            match self.lookup(name) {
-                Some(Binding::Frags(v)) => inits.push(v),
-                Some(Binding::Regs(v)) => inits.push(v),
-                _ => bail!("`{name}` is not register-bound"),
-            }
-            regs.push(matches!(self.lookup(name), Some(Binding::Regs(_))));
+            let Some(Binding::Regs(v)) = self.lookup(name) else {
+                bail!("`{name}` is not register-bound");
+            };
+            inits.push(v);
         }
-        let rebind = |regs: bool, v: ValueId| if regs { Binding::Regs(v) } else { Binding::Frags(v) };
         let types: Vec<Type> = inits.iter().map(|&v| self.ir.ty(v).clone()).collect();
         let mut arg_types = vec![Type::INDEX];
         arg_types.extend(types.iter().cloned());
@@ -217,25 +213,28 @@ impl Build {
         self.in_block(block, |b| {
             b.push_scope();
             b.bind(var, Binding::Let { value: iv, div: iv_div });
-            for ((name, &arg), &r) in carried.iter().zip(&args).zip(&regs) {
-                b.bind(name, rebind(r, arg));
+            for (name, &arg) in carried.iter().zip(&args) {
+                b.bind(name, Binding::Regs(arg));
             }
             let mut bindings: Vec<(&str, Binding)> = Vec::new();
-            for (name, expr) in staged {
-                let Rv::Tile(src) = b.emit_expr(expr)? else {
-                    bail!("staged value must be a tensor slice");
-                };
-                let (elem, shape) = (b.elem(src), b.shape(src));
-                let pad = b.should_pad_stage(elem, &shape);
-                let ty = if pad { b.padded_ty(elem, &shape) } else { b.like(src) };
-                let buf = b.value(OpKind::Stage(Stage { pad, sync: true }), &[src], ty);
+            // Each stage stands for its own statement, as in a staging run.
+            for &(name, expr, span) in staged {
+                let buf = b.spanned(span, |b| {
+                    let Rv::Tile(src) = b.emit_expr(expr)? else {
+                        bail!("staged value must be a tensor slice");
+                    };
+                    let (elem, shape) = (b.elem(src), b.shape(src));
+                    let pad = b.should_pad_stage(elem, &shape);
+                    let ty = if pad { b.padded_ty(elem, &shape) } else { b.like(src) };
+                    Ok(b.value(OpKind::Stage(Stage { pad, sync: true }), &[src], ty))
+                })?;
                 bindings.push((name, Binding::View(buf)));
             }
             let built = b.emit_scope(&bindings, rest);
             let mut finals = Vec::with_capacity(carried.len());
             for name in carried {
                 match b.lookup(name) {
-                    Some(Binding::Frags(v) | Binding::Regs(v)) => finals.push(v),
+                    Some(Binding::Regs(v)) => finals.push(v),
                     _ => bail!("`{name}` lost its register binding in the loop body"),
                 }
             }
@@ -260,8 +259,8 @@ impl Build {
             vec![block],
         );
         let results = self.ir.results(op).to_vec();
-        for ((name, result), &r) in carried.iter().zip(results).zip(&regs) {
-            self.update_binding(name, rebind(r, result));
+        for (name, result) in carried.iter().zip(results) {
+            self.update_binding(name, Binding::Regs(result));
         }
         Ok(())
     }
