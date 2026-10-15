@@ -1,8 +1,8 @@
-use phobos_base::half::f32_to_f16;
+use phobos_base::half::{f16_to_f32, f32_to_f16};
 
 use super::*;
 use crate::quant::grouped::group_rows;
-use crate::tests::Builder;
+use crate::tests::{Builder, ggml_code};
 
 /// Q4_K's ggml type code.
 pub(crate) const Q4_K: u32 = 12;
@@ -130,4 +130,59 @@ fn a_set_loads_its_three_stacks() {
     assert_eq!((set.down.n(), set.down.k()), (d_model, d_ff));
     assert_eq!(set.expert_bytes(), 3 * (d_ff * d_model / 256) * 144);
     assert_eq!(set.byte_len(), count * set.expert_bytes());
+}
+
+/// `count` experts of `[n, k]` Q8_0 blocks: a small scale, then 32 quants.
+fn q80_stack(count: usize, n: usize, k: usize, seed: u64) -> Vec<u8> {
+    let mut words = crate::tests::xorshift(seed);
+    let mut next = move || (words() >> 56) as u8;
+    let mut out = Vec::with_capacity(count * n * k / 32 * 34);
+    for _ in 0..count * n * k / 32 {
+        out.extend(f32_to_f16(0.001 + f32::from(next()) / 4096.0).to_le_bytes());
+        out.extend((0..32).map(|_| next()));
+    }
+    out
+}
+
+fn q80_file(count: usize, n: usize, k: usize) -> Gguf {
+    let file = Builder::default()
+        .kv_string("general.architecture", "qwen35moe")
+        .tensor_raw("w", &[k as u64, n as u64, count as u64], ggml_code(Quant::Q8_0), &q80_stack(count, n, k, 9))
+        .build();
+    Gguf::from_bytes(file).unwrap()
+}
+
+#[test]
+fn a_q8_0_stack_is_read_in_units_of_eight_blocks() {
+    let (count, n, k) = (2, 16, 512);
+    let gguf = q80_file(count, n, k);
+    let stack = ExpertStack::load(&gguf, "w", count, n, k).unwrap();
+    assert_eq!(stack.unit(), (256, 272));
+    assert_eq!(stack.blocks_per_row(), 2);
+    assert_eq!(stack.expert_bytes(), n * 16 * 34);
+    assert_eq!(stack.grouped_bytes(), 64 * 2 * 272);
+    let mut got = vec![0u8; stack.grouped_bytes()];
+    stack.grouped_into(1, &mut got);
+    assert_eq!(got, group_rows(&q8_0_units(stack.expert(1)), n, 2, 272));
+    // The scales are inside the unit, so the plane stays zero.
+    let mut plane = vec![1u16; stack.grouped_scales()];
+    stack.grouped_scales_into(1, &mut plane);
+    assert!(plane.iter().all(|&s| s == 0));
+    // A unit decodes as the file reader does: scale `r` at byte `2r`, run
+    // `r`'s quants from byte `16 + 32r`.
+    let unit = &q8_0_units(stack.expert(1))[..272];
+    let mut want = vec![0.0f32; n * k];
+    stack.dequantize(1, &mut want).unwrap();
+    for r in 0..8 {
+        let d = f16_to_f32(u16::from_le_bytes([unit[2 * r], unit[2 * r + 1]]));
+        for i in 0..32 {
+            assert_eq!(d * f32::from(unit[16 + 32 * r + i] as i8), want[32 * r + i], "run {r} element {i}");
+        }
+    }
+}
+
+#[test]
+fn a_q8_0_stack_refuses_a_width_short_of_a_unit() {
+    let err = ExpertStack::load(&q80_file(1, 8, 96), "w", 1, 8, 96).err().unwrap();
+    assert!(err.to_string().contains("256 elements at a time"), "{err}");
 }

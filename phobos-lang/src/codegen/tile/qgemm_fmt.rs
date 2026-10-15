@@ -5,7 +5,8 @@
 // IQ1_S and IQ1_M decode from a two-bit grid into `8g +- 1` bytes by `prmt`.
 // The IQ2 and IQ3 grids are already int8, signed by a 0/-1 byte mask as
 // `(m ^ mask) + (mask & 0x01010101)`. The K-quants decode in `kquant.rs` and
-// PTQ1_0 in `ptq1.rs`, neither with tables.
+// PTQ1_0 in `ptq1.rs`, neither with tables. Q8_0's unit is eight file blocks
+// re-laid with the scales first, so its octets are the bytes as stored.
 
 use super::qgemm::{Lanes, Stage, TileAt};
 use super::*;
@@ -23,6 +24,7 @@ pub(in crate::codegen) enum QgFormat {
     Q4k,
     Q5k,
     Q6k,
+    Q80,
     Ptq1,
 }
 
@@ -48,6 +50,7 @@ impl QgFormat {
             "q4k_qgemm_t" => Self::Q4k,
             "q5k_qgemm_t" => Self::Q5k,
             "q6k_qgemm_t" => Self::Q6k,
+            "q80_qgemm_t" => Self::Q80,
             "ptq1_qgemm_t" => Self::Ptq1,
             _ => return None,
         })
@@ -65,13 +68,15 @@ impl QgFormat {
             Self::Q4k => "q4k_qgemm_t",
             Self::Q5k => "q5k_qgemm_t",
             Self::Q6k => "q6k_qgemm_t",
+            Self::Q80 => "q80_qgemm_t",
             Self::Ptq1 => "ptq1_qgemm_t",
         }
     }
 
     /// The device block size in bytes. It is the file's block without the
     /// IQ formats' leading `d`, and without Q6_K's trailing one, since no
-    /// device kernel reads them.
+    /// device kernel reads them. Q8_0's is eight file blocks: sixteen bytes
+    /// of `f16` scales, then the 256 quants.
     pub(in crate::codegen) fn block_bytes(self) -> i64 {
         match self {
             Self::Iq1s => 48,
@@ -84,6 +89,7 @@ impl QgFormat {
             Self::Q4k => 144,
             Self::Q5k => 176,
             Self::Q6k => 208,
+            Self::Q80 => 272,
             Self::Ptq1 => 56,
         }
     }
@@ -98,7 +104,7 @@ impl QgFormat {
             Self::Iq2s => &[1024 * 8, 256 * 8],
             Self::Iq3xxs => &[256 * 4, 128 * 8],
             Self::Iq3s => &[512 * 4, 256 * 8],
-            Self::Q4k | Self::Q5k | Self::Q6k | Self::Ptq1 => &[],
+            Self::Q4k | Self::Q5k | Self::Q6k | Self::Q80 | Self::Ptq1 => &[],
         }
     }
 
@@ -303,6 +309,18 @@ impl<'c> Codegen<'c> {
                 self.kq_gemm_load(block, fmt, lanes, qb, at, regs)?;
             }
             QgFormat::Ptq1 => self.pt_gemm_load(block, lanes, qb, at, regs)?,
+            QgFormat::Q80 => {
+                // Group `ib`'s 32 quants past the sixteen scale bytes, and
+                // its scale.
+                let qs = self.qg_at(block, at, 16, 32)?;
+                for half in [0, 16] {
+                    let step = self.const_index(block, half)?;
+                    let at_qs = self.addi(block, qs, step)?;
+                    regs.extend(self.qg_u128(block, qb, lanes, at_qs)?);
+                }
+                let sc = self.qg_at(block, at, 0, 2)?;
+                regs.push(self.qg_u16(block, qb, lanes, sc)?);
+            }
             QgFormat::Iq1s => {
                 let qs = self.qg_at(block, at, 0, 4)?;
                 let qh = self.qg_at(block, at, 32, 2)?;
@@ -396,6 +414,14 @@ impl<'c> Codegen<'c> {
                 self.kq_gemm_decode(block, fmt, stage, regs)?;
             }
             QgFormat::Ptq1 => self.pt_gemm_decode(block, stage, regs)?,
+            QgFormat::Q80 => {
+                let (qs, sc) = (&regs[..8], regs[8]);
+                let sw = self.kq_f16_of(block, sc, false)?;
+                self.qgemm_put_scale(block, stage, 1, 0, sw)?;
+                for l in 0..4usize {
+                    self.qgemm_put_octet(block, stage, l as i64, qs[2 * l], qs[2 * l + 1])?;
+                }
+            }
             QgFormat::Iq1s => {
                 let (qs, qh) = (regs[0], regs[1]);
                 let n = self.qg_bits(block, qh, 12, 7)?;

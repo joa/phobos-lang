@@ -124,9 +124,10 @@ kernel moe_permute_{elem}_{tk}(PERM: tensor<i32>[1, M], A: tensor<{elem}>[R, K],
     )
 }
 
-/// The K-quant prompt GEMM over a schedule table. Program `p` contracts
-/// activation tile `SCHED[1, p]` against the rows of slot `SCHED[0, p]`.
-fn moe_qgemm_src(name: &str, ne: usize) -> String {
+/// The prompt GEMM over a schedule table, `name`'s `qgemm_t` over the slab.
+/// Program `p` contracts activation tile `SCHED[1, p]` against the rows of
+/// slot `SCHED[0, p]`.
+pub fn moe_qgemm_src(name: &str, ne: usize) -> String {
     format!(
         "@launch(256, 2)
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}], NE in [{ne}])

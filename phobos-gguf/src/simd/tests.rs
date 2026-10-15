@@ -3,10 +3,11 @@ use phobos_base::half::f32_to_f16;
 use super::*;
 use crate::Gguf;
 use crate::quant::grouped::{group_rows, grouped_len};
+use crate::quant::{Q8_0_UNIT_BYTES, q8_0_units};
 use crate::tests::{Builder, ggml_code, xorshift};
 
 /// `n` rows of `k` in `quant`: random bytes, except for small finite
-/// headers. Any other byte pattern is a valid K-quant block.
+/// headers. Any other byte pattern is a valid block.
 fn blocks(quant: Quant, n: usize, k: usize, seed: u64) -> Vec<u8> {
     let mut next = xorshift(seed);
     let spec = quant.spec();
@@ -17,6 +18,7 @@ fn blocks(quant: Quant, n: usize, k: usize, seed: u64) -> Vec<u8> {
         let dmin = f32_to_f16(0.0005 + (next() as u8) as f32 / 8192.0).to_le_bytes();
         match quant {
             Quant::Q6_K => block[208..210].copy_from_slice(&d),
+            Quant::Q8_0 => block[..2].copy_from_slice(&d),
             _ => {
                 block[..2].copy_from_slice(&d);
                 block[2..4].copy_from_slice(&dmin);
@@ -58,7 +60,7 @@ fn check(quant: Quant, isa: Isa) {
     let shape = Shape { quant, n, k };
     let act = Q8Act::quantize(&activation(rows, k, 11), rows, k).unwrap();
     let want = reference(quant, &weight, n, &act);
-    let flat = Weight::Flat { bytes: &weight, block_bytes: quant.spec().block_bytes };
+    let flat = Weight::Flat { bytes: &weight, block_bytes: BLOCK / quant.spec().block * quant.spec().block_bytes };
     let mut got = vec![0.0f32; n * rows];
     gemm(&shape, isa, &flat, 0, &act, &mut got).unwrap();
     let scale = want.iter().fold(0.0f64, |m, v| m.max(v.abs()));
@@ -74,12 +76,17 @@ fn check(quant: Quant, isa: Isa) {
             assert_eq!(single[j], got[j * rows + r], "{} row {r} output {j} alone against batched", quant.name());
         }
     }
-    // The device's layout, with the trailing scale in its own plane, gives
-    // the same result.
+    // The device's layout gives the same result: a K-quant block at its
+    // device stride with the trailing scale in its own plane, Q8_0 re-laid
+    // into units.
     let nb = k / BLOCK;
-    let (skip, unit) = quant.device_block();
-    let trimmed: Vec<u8> = weight.chunks_exact(quant.spec().block_bytes).flat_map(|b| b[skip..skip + unit].to_vec()).collect();
-    let bytes = group_rows(&trimmed, n, nb, unit);
+    let (bytes, unit) = if quant == Quant::Q8_0 {
+        (group_rows(&q8_0_units(&weight), n, nb, Q8_0_UNIT_BYTES), Q8_0_UNIT_BYTES)
+    } else {
+        let (skip, unit) = quant.device_block();
+        let trimmed: Vec<u8> = weight.chunks_exact(quant.spec().block_bytes).flat_map(|b| b[skip..skip + unit].to_vec()).collect();
+        (group_rows(&trimmed, n, nb, unit), unit)
+    };
     let planes: Vec<u16> = match quant.spec().raw_scales {
         Some(split) => group_rows(&split(&weight, k, n).d, n, nb, 1),
         None => vec![0; grouped_len(n, nb, 1)],
@@ -92,7 +99,7 @@ fn check(quant: Quant, isa: Isa) {
 
 #[test]
 fn scalar_kernels_match_the_decoders() {
-    for quant in [Quant::Q4_K, Quant::Q5_K, Quant::Q6_K] {
+    for quant in [Quant::Q4_K, Quant::Q5_K, Quant::Q6_K, Quant::Q8_0] {
         check(quant, Isa::Scalar);
     }
 }
@@ -102,7 +109,7 @@ fn avx2_kernels_match_the_decoders() {
     if !avx2() {
         return;
     }
-    for quant in [Quant::Q4_K, Quant::Q5_K, Quant::Q6_K] {
+    for quant in [Quant::Q4_K, Quant::Q5_K, Quant::Q6_K, Quant::Q8_0] {
         check(quant, Isa::Avx2);
     }
 }
@@ -161,7 +168,7 @@ fn reference_ffn(set: &ExpertSet, e: usize, x: &[f32], rows: usize, weights: &[f
 
 #[test]
 fn jobs_over_the_pool_match_the_reference_within_the_activation_quantization() {
-    for (gate_up, down) in [(Quant::Q4_K, Quant::Q5_K), (Quant::Q4_K, Quant::Q6_K)] {
+    for (gate_up, down) in [(Quant::Q4_K, Quant::Q5_K), (Quant::Q4_K, Quant::Q6_K), (Quant::Q8_0, Quant::Q8_0)] {
         let (count, d, d_ff, rows) = (3, 512, 256, 4);
         let gguf = expert_file(count, d, d_ff, gate_up, down);
         let set = ExpertSet::load(&gguf, "blk.0", count, d, d_ff).unwrap();

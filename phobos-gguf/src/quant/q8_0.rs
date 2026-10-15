@@ -12,6 +12,12 @@ use super::{Packed, Planes, Quant, Spec};
 pub const BLOCK: usize = 32;
 const BLOCK_BYTES: usize = 34;
 
+/// Elements of the unit the expert kernels read Q8_0 in: eight blocks, the
+/// K-quants' super-block, so one lane mapping serves every format.
+pub const UNIT: usize = 8 * BLOCK;
+/// Bytes of that unit: the eight `f16` scales, then the 256 quants.
+pub const UNIT_BYTES: usize = 8 * BLOCK_BYTES;
+
 pub static SPEC: Spec = Spec {
     name: "Q8_0",
     block: BLOCK,
@@ -69,6 +75,24 @@ pub fn pack(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<Packed> {
         }
     }
     Packed::new(Quant::Q8_0, bytes, k, n)
+}
+
+/// Re-lays rows of blocks into units of eight ([`UNIT_BYTES`] each): the
+/// eight scales first, then the 256 quants, so every block's quants sit
+/// sixteen-aligned for the device's vector loads. The rows must be whole
+/// units.
+pub fn units(bytes: &[u8]) -> Vec<u8> {
+    assert!(bytes.len().is_multiple_of(UNIT_BYTES), "{} bytes of Q8_0 are not whole units", bytes.len());
+    let mut out = Vec::with_capacity(bytes.len());
+    for unit in bytes.chunks_exact(UNIT_BYTES) {
+        for block in unit.chunks_exact(BLOCK_BYTES) {
+            out.extend_from_slice(&block[..2]);
+        }
+        for block in unit.chunks_exact(BLOCK_BYTES) {
+            out.extend_from_slice(&block[2..]);
+        }
+    }
+    out
 }
 
 /// Quantizes one block of [`BLOCK`] activations to int8 and returns the

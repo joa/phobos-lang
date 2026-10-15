@@ -834,7 +834,7 @@ fn main() -> Result<()> {
     }
     check_hadamard(&host, &gpu, &check_within, &check_spread, &mut next)?;
     check_topk(&failures)?;
-    check_moe_slots(&failures, &mut next)?;
+    check_moe_slots(&failures)?;
 
     // The narrow dense projection against a weight held `[n, k]`: a decode
     // row, a prompt of whole tiles, one with a tail, and a width the prompt

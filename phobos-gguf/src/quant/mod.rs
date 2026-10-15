@@ -51,7 +51,7 @@ pub(crate) use iq3_s::{flat_grid as iq3s_flat_grid, packed_grid as iq3s_packed_g
 pub(crate) use iq3_xxs::{flat_grid as iq3xxs_flat_grid, packed_grid as iq3xxs_packed_grid};
 #[cfg(feature = "cuda")]
 pub(crate) use iq4_xs::flat_codebook as iq4xs_flat_codebook;
-pub use q8_0::{BLOCK as Q8_0_BLOCK, pack as pack_q8_0, quantize_row};
+pub use q8_0::{BLOCK as Q8_0_BLOCK, UNIT as Q8_0_UNIT, UNIT_BYTES as Q8_0_UNIT_BYTES, pack as pack_q8_0, quantize_row, units as q8_0_units};
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

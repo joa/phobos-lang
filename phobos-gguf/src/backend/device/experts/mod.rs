@@ -35,6 +35,7 @@ use crate::backend::ExpertsBuf;
 use crate::experts::{ExpertSet, ExpertStack, Stack};
 use crate::quant::Quant;
 use crate::simd::StartedRow;
+pub use grouped::moe_qgemm_src;
 use handoff::Handoff;
 use mapped::Mapped;
 use mirror::Mirror;
@@ -159,7 +160,7 @@ struct Slab {
 impl Slab {
     fn new(slots: usize, stack: &ExpertStack) -> Result<Slab> {
         let (n, nb) = (stack.n(), stack.blocks_per_row());
-        let rb = nb * stack.quant().device_block().1;
+        let rb = nb * stack.unit_bytes();
         let bytes = slots * n * rb;
         ensure!(bytes < SLAB_LIMIT, "a slab of {slots} slots would be {bytes} bytes, past the 32-bit index");
         // SAFETY: every slot is written before a kernel reads it.
@@ -425,6 +426,9 @@ impl DeviceBackend {
         let mut experts = self.experts.borrow_mut();
         ensure!(experts.slabs.is_none(), "an expert set registered after the cache was laid out");
         let n_expert = set.count();
+        for stack in Stack::ALL {
+            op::kernels(set.stack(stack).quant()).with_context(|| format!("streaming the experts of {key}"))?;
+        }
         let mirror = Mirror::build(set).with_context(|| format!("mirroring the experts of {key}"))?;
         experts.iota.entry(n_expert).or_insert_with(|| {
             DeviceBuffer::from_slice(&(0..n_expert).map(|i| i as f32).collect::<Vec<_>>()).expect("a few hundred floats")

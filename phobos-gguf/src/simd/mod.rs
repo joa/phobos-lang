@@ -1,7 +1,6 @@
-//! The host's K-quant expert feed-forward: a threaded AVX2 dot of Q4_K,
-//! Q5_K and Q6_K weight blocks against a Q8 activation. It serves the
-//! experts a pass computes on the host instead of copying them to the
-//! device.
+//! The host's expert feed-forward: a threaded AVX2 dot of Q4_K, Q5_K, Q6_K
+//! and Q8_0 weight blocks against a Q8 activation. It serves the experts a
+//! pass computes on the host instead of copying them to the device.
 //!
 //! The activation is quantized to eight bits with one scale per run of 32,
 //! as on the device. It also keeps the sum of each sixteen quants, so a
@@ -28,6 +27,7 @@ mod decode;
 mod q4_k;
 mod q5_k;
 mod q6_k;
+mod q8_0;
 mod team;
 #[cfg(test)]
 mod tests;
@@ -125,11 +125,13 @@ pub struct Shape {
 /// One expert's `[n, k]` blocks, wherever they are.
 #[derive(Clone, Copy)]
 pub enum Weight<'a> {
-    /// The file's layout: row after row, each `nb` whole blocks.
+    /// The file's layout: row after row, each `nb` whole blocks. A block
+    /// is the file's bytes for one unit, eight Q8_0 blocks in a row.
     Flat { bytes: &'a [u8], block_bytes: usize },
     /// The device's layout (see `quant::grouped`): rows in groups of eight,
     /// one block of each side by side, at the format's device stride. Q6_K's
-    /// trailing scale is in `scales`, one per block in the same order.
+    /// trailing scale is in `scales`, one per block in the same order. A
+    /// Q8_0 block is a unit of eight file blocks re-laid, `quant::q8_0_units`.
     Grouped { bytes: &'a [u8], block_bytes: usize, nb: usize, scales: &'a [u16] },
 }
 
@@ -183,14 +185,14 @@ impl Source for ExpertSet {
 
     fn weight(&self, stack: Stack, e: usize) -> Weight<'_> {
         let s = self.stack(stack);
-        Weight::Flat { bytes: s.expert(e), block_bytes: s.quant().spec().block_bytes }
+        Weight::Flat { bytes: s.expert(e), block_bytes: s.file_unit_bytes() }
     }
 }
 
 /// Whether the host kernels can run a source: every stack must be in a
 /// format they implement.
 pub fn supports(source: &impl Source) -> bool {
-    Stack::ALL.iter().all(|&stack| matches!(source.shape(stack).quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K))
+    Stack::ALL.iter().all(|&stack| matches!(source.shape(stack).quant, Quant::Q4_K | Quant::Q5_K | Quant::Q6_K | Quant::Q8_0))
 }
 
 /// One block's quants unpacked to one byte each, in element order, aligned
@@ -404,6 +406,7 @@ fn gemm(shape: &Shape, isa: Isa, weight: &Weight, j0: usize, act: &Q8Act, yt: &m
                 Quant::Q4_K => rows_dot_for::<q4_k::$set>(weight, j0, act, yt, &mut Vec::new()),
                 Quant::Q5_K => rows_dot_for::<q5_k::$set>(weight, j0, act, yt, &mut Vec::new()),
                 Quant::Q6_K => rows_dot_for::<q6_k::$set>(weight, j0, act, yt, &mut Vec::new()),
+                Quant::Q8_0 => rows_dot_for::<q8_0::$set>(weight, j0, act, yt, &mut Vec::new()),
                 other => bail!("no host expert kernel for {}", other.name()),
             }
         };

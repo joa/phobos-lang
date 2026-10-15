@@ -39,6 +39,7 @@ pub(crate) use attn::*;
 // reachable at `backend::device::`.
 pub use attn::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};
 pub use kquant::q4k_qdot_lanes_src;
+pub use qgemm::{QGEMM_TM, QGEMM_TN};
 pub use moe::{moe_gateup_src, moe_qdot_src, moe_topk_src};
 pub(crate) use delta::*;
 pub(crate) use elem::*;

@@ -5,8 +5,8 @@ use crate::quant::Quant;
 
 /// Rows, columns and threads of a `<fmt>_qgemm` kernel, fixed by the
 /// intrinsic.
-pub(crate) const QGEMM_TM: usize = 128;
-pub(crate) const QGEMM_TN: usize = 64;
+pub const QGEMM_TM: usize = 128;
+pub const QGEMM_TN: usize = 64;
 pub(crate) const QGEMM_CTA: usize = 256;
 
 /// Length of the ternary grid at two bits per lane, shared by IQ1_S and

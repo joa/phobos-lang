@@ -2,6 +2,8 @@
 // lanes as the decode matvecs do: four lanes a column, each a quarter of
 // every block, the weight grouped by eight columns as the device holds it.
 // A decode is a `fn` the kernel's source carries and calls once a block.
+// Q8_0 joins them through the expert slabs' unit of eight file blocks,
+// which is a block of 256 in all but name.
 
 use std::fmt::Write as _;
 
@@ -13,6 +15,7 @@ pub(crate) fn kquant_lanes_block(name: &str) -> (String, usize, &'static str) {
         "q4k" => (q4k_block_src(), 144, ""),
         "q5k" => (q5k_block_src(), 176, ""),
         "q6k" => (q6k_block_src(), 208, "  let h = q / 2\n  let l0 = 16 * (q % 2)\n"),
+        "q80" => (q80_block_src(), 272, ""),
         other => unreachable!("no lanes block decode for {other}"),
     }
 }
@@ -69,6 +72,28 @@ fn q4k_block(QB, AQ, AS, ar, g, c8, q, acc, b) {
   let r0 = d * f32(sc0) * f32(lo0 + lo1) - dmin * f32(m0) * f32(s0)
   let r1 = d * f32(sc1) * f32(hi0 + hi1) - dmin * f32(m1) * f32(s1)
   acc += AS[ar, a / 32] * r0 + AS[ar, a / 32 + 1] * r1
+}
+"
+    .to_string()
+}
+
+/// Q8_0's unit decode, `fn q80_block(QB, AQ, AS, ar, g, c8, q, acc, b)`,
+/// with [`q4k_block_src`]'s operands over the 272-byte unit the expert
+/// slabs hold (`quant::q8_0_units`): eight `f16` scales, then 256 signed
+/// quants. Lane quarter `q` takes runs `2q` and `2q + 1`, 32 quants under
+/// one scale each, against the activation's matching run and scale.
+pub(crate) fn q80_block_src() -> String {
+    "// Block `b` of the lane's column into `acc`.
+fn q80_block(QB, AQ, AS, ar, g, c8, q, acc, b) {
+  let blk = b * 2176 + c8 * 272
+  let s = blk + 4 * q
+  let d0 = f32(f16bits((QB[g, s] & 255) | ((QB[g, s + 1] & 255) << 8)))
+  let d1 = f32(f16bits((QB[g, s + 2] & 255) | ((QB[g, s + 3] & 255) << 8)))
+  let a = b * 256 + q * 64
+  let o = blk + 16 + q * 64
+  let r0 = sum(i32(QB[g, o :+ 16]) * i32(AQ[ar, a :+ 16])) + sum(i32(QB[g, o + 16 :+ 16]) * i32(AQ[ar, a + 16 :+ 16]))
+  let r1 = sum(i32(QB[g, o + 32 :+ 16]) * i32(AQ[ar, a + 32 :+ 16])) + sum(i32(QB[g, o + 48 :+ 16]) * i32(AQ[ar, a + 48 :+ 16]))
+  acc += AS[ar, a / 32] * d0 * f32(r0) + AS[ar, a / 32 + 1] * d1 * f32(r1)
 }
 "
     .to_string()

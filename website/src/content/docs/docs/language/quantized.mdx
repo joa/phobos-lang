@@ -152,6 +152,7 @@ each supported format there is a family of built-ins named after it, with
 | `q4k` | 144 | grouped | yes | yes | |
 | `q5k` | 176 | grouped | yes | yes | |
 | `q6k` | 208 | grouped | yes | yes | |
+| `q80` | 272 | grouped | | yes | |
 | `ptq1` | 56 | grouped | yes | yes | |
 
 A few formats deviate from the plain pattern:
@@ -160,8 +161,11 @@ A few formats deviate from the plain pattern:
   a block is 208 of its 210 bytes.
 - `ptq1` is two 128-weight file blocks per 256, re-laid when the model is
   uploaded.
-- For `q4k`, `q5k` and `ptq1` the scales are inside the block: `d` is taken
-  but not read.
+- `q80` is eight Q8_0 file blocks per 256, re-laid when the experts are
+  mirrored: the eight `f16` scales first, then the quants, so each run's 32
+  bytes sit sixteen-aligned.
+- For `q4k`, `q5k`, `q80` and `ptq1` the scales are inside the block: `d` is
+  taken but not read.
 
 The row-major formats, `iq4xs`, `q2k` and `q3k`, have no built-in. Their
 decode is written in Phobos itself, one warp per output column with each lane
