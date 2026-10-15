@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
-use cust::event::{Event, EventFlags};
+use cust::event::{Event, EventFlags, EventStatus};
 use cust::memory::{DeviceBuffer, DeviceCopy, LockedBuffer};
 use cust::stream::Stream;
 use phobos_kernels::cuda_ok;
@@ -139,12 +139,17 @@ struct BlockExperts {
     slots: Mapped<i32>,
     topk: Mapped<i32>,
     weights: Mapped<f32>,
-    /// The previous block's prediction for this one, and the event its
-    /// copies complete at. The kernel must write `look_w`, but nothing
-    /// reads it.
+    /// The previous block's prediction for this one. The kernel must write
+    /// `look_w`, but nothing reads it.
     look: Mapped<i32>,
     look_w: DeviceBuffer<f32>,
+    /// The event the last prefetch's copies complete at, and the slots they
+    /// fill. A chosen expert in one of those slots is a hit only once the
+    /// event has passed.
     fetched: Option<Event>,
+    arriving: Vec<usize>,
+    /// Whether a prefetch was attempted for this block since its last row.
+    predicted: bool,
     /// A decode row's misses on their way to the host and back.
     handoff: Handoff,
 }
@@ -220,6 +225,20 @@ impl BlockExperts {
     /// The least recently used slot not stamped `tick`.
     fn victim(&self, tick: u64) -> Option<usize> {
         (0..self.held.len()).filter(|&s| self.held[s].1 != tick).min_by_key(|&s| self.held[s].1)
+    }
+
+    /// Whether a prefetch into slot `s` is still copying. Once the copies
+    /// have completed, nothing is in flight until the next prefetch.
+    fn in_flight(&mut self, s: usize) -> Result<bool> {
+        let Some(event) = &self.fetched else {
+            return Ok(false);
+        };
+        if event.query()? == EventStatus::Ready {
+            self.fetched = None;
+            self.arriving.clear();
+            return Ok(false);
+        }
+        Ok(self.arriving.contains(&s))
     }
 }
 
@@ -328,14 +347,18 @@ impl Experts {
         Ok(())
     }
 
-    /// Copies the non-resident experts in `ids` of `block` into least
-    /// recently used slots on `stream`. Records the event the block's
-    /// kernels wait on before reading them.
+    /// Copies the first `most` non-resident experts in `ids` of `block`
+    /// into least recently used slots on `stream`. Records the event the
+    /// copies complete at and the slots they fill, which stay in flight
+    /// until a row finds the event passed.
     ///
     /// A slot stamped `tick` is never evicted.
-    fn fetch(&mut self, block: usize, ids: impl IntoIterator<Item = usize>, tick: u64, stream: &Stream) -> Result<()> {
-        let mut copied = false;
+    fn fetch(&mut self, block: usize, ids: impl IntoIterator<Item = usize>, most: usize, tick: u64, stream: &Stream) -> Result<()> {
+        let mut filled = Vec::new();
         for e in ids {
+            if filled.len() == most {
+                break;
+            }
             if self.resident(block, e) {
                 continue;
             }
@@ -345,12 +368,16 @@ impl Experts {
             self.fill(block, e, victim, tick, stream)?;
             self.blocks[block].prefetched[victim] = true;
             self.stats.prefetches += 1;
-            copied = true;
+            filled.push(victim);
         }
-        if copied {
+        if !filled.is_empty() {
+            // Copies on one stream complete in order, so the newest event
+            // covers every slot still arriving.
             let event = Event::new(EventFlags::DISABLE_TIMING)?;
             event.record(stream)?;
-            self.blocks[block].fetched = Some(event);
+            let b = &mut self.blocks[block];
+            b.fetched = Some(event);
+            b.arriving.extend(filled);
         }
         Ok(())
     }
@@ -366,7 +393,7 @@ impl Experts {
     /// busy.
     fn refill(&mut self, stream: &Stream) -> Result<()> {
         for (block, expert, tick) in std::mem::take(&mut self.refills) {
-            self.fetch(block, [expert], tick, stream)?;
+            self.fetch(block, [expert], 1, tick, stream)?;
         }
         Ok(())
     }
@@ -447,6 +474,8 @@ impl DeviceBackend {
             look: Mapped::new(MOE_USED)?,
             look_w: DeviceBuffer::from_slice(&[0f32; MOE_USED])?,
             fetched: None,
+            arriving: Vec::new(),
+            predicted: false,
             handoff: Handoff::new(d)?,
         });
         let buf = ExpertsBuf(experts.blocks.len() - 1);

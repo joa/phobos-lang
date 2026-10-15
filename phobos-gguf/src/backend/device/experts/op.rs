@@ -23,7 +23,7 @@ use cust::stream::StreamWaitEventFlags;
 use super::super::kernels::{MOE_COMBINE_TN, MOE_QDOT_TN, MOE_USED, moe_combine_src, moe_gateup_src, moe_qdot_src, moe_topk_src};
 use super::super::{DeviceBackend, Plane};
 use super::mirror::MirrorSource;
-use super::{Experts, MAX_ROWS};
+use super::{Experts, MAX_ROWS, NONE};
 use crate::backend::{Backend, Buf, Moe};
 use crate::experts::Stack;
 use crate::quant::Quant;
@@ -113,9 +113,14 @@ impl DeviceBackend {
         }
         let next = self.lookahead(experts, req, iota)?;
         self.sync_point(|| experts.refill(&self.copy_stream))?;
-        let b = &mut experts.blocks[block];
-        if let Some(event) = b.fetched.take() {
-            self.stream.wait_event(event, StreamWaitEventFlags::DEFAULT)?;
+        // The grouped path reads slots without a row's arrival check, so a
+        // wide pass waits for the copies here.
+        if rows > 1 {
+            let b = &mut experts.blocks[block];
+            if let Some(event) = b.fetched.take() {
+                b.arriving.clear();
+                self.stream.wait_event(event, StreamWaitEventFlags::DEFAULT)?;
+            }
         }
         if let Some(next) = next {
             self.prefetch(experts, next)?;
@@ -217,8 +222,12 @@ impl DeviceBackend {
         Ok(Some(look.experts.0))
     }
 
-    /// Copies block `next`'s predicted experts into its slots on the copy
-    /// stream. A wrong prediction costs a copy and a slot.
+    /// Copies block `next`'s most heavily weighted predicted miss into a
+    /// slot on the copy stream, in place of the refill that block would
+    /// otherwise queue. A wrong prediction costs that one copy and a slot.
+    ///
+    /// The prediction's eight come in descending weight, so the first that
+    /// is not resident is the copy.
     fn prefetch(&self, experts: &mut Experts, next: usize) -> Result<()> {
         let b = &mut experts.blocks[next];
         let n = b.set.count() as i32;
@@ -227,32 +236,48 @@ impl DeviceBackend {
             ensure!((0..n).contains(&id), "the lookahead chose expert {id} of {n}");
             *p = id as usize;
         }
+        b.predicted = true;
         let tick = experts.step(next, &predicted);
-        experts.fetch(next, predicted, tick, &self.copy_stream)
+        experts.fetch(next, predicted, 1, tick, &self.copy_stream)
     }
 
     /// Places row `r`'s experts into slots and publishes its table row, on
     /// the stream ahead of its kernels.
     ///
     /// With `host_misses`, a miss is left to the host and the zeroed spare
-    /// slot stands in. The heaviest miss is queued as a refill for later
-    /// tokens. `prompt` counts the lookups as a prompt pass's.
+    /// slot stands in; an expert whose copy is still arriving is a miss too,
+    /// and its slot keeps the copy for later tokens. Without, the stream
+    /// waits for the arrivals. The heaviest miss is queued as a refill for
+    /// later tokens, unless a prefetch already spent this block's copy.
+    /// `prompt` counts the lookups as a prompt pass's.
     fn place_row(&self, experts: &mut Experts, block: usize, r: usize, host_misses: bool, prompt: bool) -> Result<Vec<Miss>> {
-        let chosen = experts.blocks[block].chosen(r)?;
+        let b = &mut experts.blocks[block];
+        let chosen = b.chosen(r)?;
+        let predicted = std::mem::take(&mut b.predicted);
         let tick = experts.step(block, &chosen);
         let mut slots = [0i32; MOE_USED];
         let mut misses = Vec::new();
         for (rank, &expert) in chosen.iter().enumerate() {
-            let slot = if host_misses && !experts.resident(block, expert) {
+            let b = &mut experts.blocks[block];
+            let held = b.slot_of[expert];
+            let arriving = held != NONE && b.in_flight(held as usize)?;
+            let slot = if host_misses && (held == NONE || arriving) {
                 experts.stats.misses += 1;
                 misses.push(Miss { rank, expert });
                 experts.per_block
             } else {
+                if arriving && let Some(event) = b.fetched.take() {
+                    b.arriving.clear();
+                    self.stream.wait_event(event, StreamWaitEventFlags::DEFAULT)?;
+                }
                 experts.place(block, expert, tick, &self.stream, prompt)?.ok_or_else(|| anyhow::anyhow!("every slot of the block is in use by this row"))?
             };
             slots[rank] = slot as i32;
         }
         experts.blocks[block].slots.put(r * MOE_USED, &slots);
+        if predicted {
+            return Ok(misses);
+        }
         // Queue the heaviest miss for a slot, copied at the next sync point.
         let weights = &experts.blocks[block].weights.host()[r * MOE_USED..(r + 1) * MOE_USED];
         if let Some(top) = misses.iter().max_by(|a, b| weights[a.rank].total_cmp(&weights[b.rank])) {

@@ -57,6 +57,8 @@ impl Experts {
         for b in &mut self.blocks {
             b.slot_of.fill(NONE);
             b.fetched = None;
+            b.arriving.clear();
+            b.predicted = false;
         }
     }
 }
