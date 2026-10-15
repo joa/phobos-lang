@@ -259,6 +259,12 @@ it found it, so one word serves every launch. `grid_barrier(bar)` takes an
 ordinary `tensor<i32>` parameter of at least 2 elements under the same
 rules.
 
+Each scratch tensor a `@persistent` kernel declares, `var T: tensor<E>[R, C]`,
+is one more argument: a descriptor of that shape over uninitialized device
+memory that lives as long as the launches using it. Scratch arguments follow
+the declared parameters in declaration order and precede the barrier word, so
+the full list is declared parameters, then scratch, then the word.
+
 ## Memory layout and alignment
 
 | Requirement | Applies to | What breaks it |
