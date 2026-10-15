@@ -2,7 +2,7 @@
 // register matmul.
 
 use super::Verifier;
-use crate::ir::{Coeff, GemmType, OpId, OpKind, RegLayout, Space, Type};
+use crate::ir::{Coeff, GemmType, OpId, OpKind, Reduce, RegLayout, Space, Type};
 
 impl Verifier<'_> {
     pub(super) fn contract(&mut self, op: OpId, kind: &OpKind) {
@@ -48,9 +48,9 @@ impl Verifier<'_> {
                     self.err(op, "result must be fragments");
                 }
             }
-            OpKind::FragScale(_) | OpKind::FragDot | OpKind::FragDotScaled | OpKind::FragOuter { .. } | OpKind::FragStore => {
+            OpKind::FragScale(_) | OpKind::FragDot { .. } | OpKind::FragDotScaled | OpKind::FragOuter { .. } | OpKind::FragStore => {
                 let n = match kind {
-                    OpKind::FragDot | OpKind::FragOuter { .. } => 3,
+                    OpKind::FragDot { .. } | OpKind::FragOuter { .. } => 3,
                     OpKind::FragDotScaled => 5,
                     _ => 2,
                 };
@@ -75,6 +75,55 @@ impl Verifier<'_> {
                     && ir.ty(ir.result(op)) != ir.ty(ir.operand(op, 0))
                 {
                     self.err(op, "result must be the accumulator's type");
+                }
+            }
+            OpKind::FragMap(tree) => {
+                if !self.want_results(op, 1) {
+                    return;
+                }
+                let out = ir.ty(ir.result(op));
+                let Some(acc) = mma_acc(out).filter(|a| !a.imma) else {
+                    self.err(op, "result must be f16-path fragments");
+                    return;
+                };
+                let mut leaves = Vec::new();
+                tree.operands(&mut leaves);
+                for i in leaves {
+                    let Some(&v) = ir.operands(op).get(i) else {
+                        self.err(op, format!("tree reads operand {i}, which it does not have"));
+                        continue;
+                    };
+                    let ok = match ir.ty(v) {
+                        t @ Type::Dist(_) => t == out,
+                        Type::Tile(t) => t.static_shape().is_some_and(|s| {
+                            s.len() == 2 && (s[0] == acc.m || s[0] == 1) && (s[1] == acc.n || s[1] == 1)
+                        }),
+                        Type::Scalar(_) => true,
+                        Type::Tensor(_) => false,
+                    };
+                    if !ok {
+                        self.err(op, format!("operand {i} is neither the fragments' layout nor a tile broadcast to them"));
+                    }
+                }
+            }
+            OpKind::FragReduce(how) => {
+                if !matches!(how, Reduce::RowSum | Reduce::RowMax) {
+                    self.err(op, format!("{} is not a row reduction of fragments", how.name()));
+                }
+                if !self.want_operands(op, 1) || !self.want_results(op, 1) {
+                    return;
+                }
+                let Some(acc) = mma_acc(ir.ty(ir.operand(op, 0))) else {
+                    self.err(op, "operand must be fragments");
+                    return;
+                };
+                if acc.imma || acc.wn != 1 {
+                    self.err(op, "only f16-path fragments whose warps own whole rows reduce in their lanes");
+                }
+                let column = matches!(ir.ty(ir.result(op)), Type::Tile(t)
+                    if t.space == Space::Shared && t.static_shape().as_deref() == Some(&[acc.m, 1]));
+                if !column {
+                    self.err(op, "result must be a shared [rows, 1] tile");
                 }
             }
             OpKind::Generate => {
@@ -174,5 +223,13 @@ impl Verifier<'_> {
             }
             other => self.err(op, format!("operand {i} must be an unmasked global slice, is {other}")),
         }
+    }
+}
+
+/// The fragments a value is typed as, if it is.
+fn mma_acc(ty: &Type) -> Option<crate::ir::MmaAcc> {
+    match ty {
+        Type::Dist(d) => d.mma_acc(),
+        _ => None,
     }
 }

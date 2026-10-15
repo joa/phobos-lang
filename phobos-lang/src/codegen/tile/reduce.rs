@@ -99,7 +99,7 @@ impl<'c> Codegen<'c> {
 
     /// One step of the fold. An integer sums in its own type, so a narrow
     /// one can wrap.
-    fn fold(
+    pub(in crate::codegen) fn fold(
         &self,
         block: &Block<'c>,
         kind: Reduce,

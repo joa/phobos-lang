@@ -509,8 +509,15 @@ pub enum OpKind {
     FragInit(f64),
     /// `(acc, col) -> frags`: `acc = acc op col` for a `[m, 1]` column.
     FragScale(BinOp),
-    /// `(acc, a, b) -> frags`: `acc += dot(a, b)`.
-    FragDot,
+    /// `(acc, a, b) -> frags`: `acc += dot(a, b)`, or `acc += dot_t(a, b)`.
+    FragDot { transpose: bool },
+    /// `(leaves..) -> frags`: the tree per element the fragments hold. A
+    /// leaf is fragments of the result's layout, read at the element, or a
+    /// tile broadcast to it.
+    FragMap(Tree),
+    /// `(frags) -> [rows, 1]`: `rowsum` or `rowmax` of fragments whose warp
+    /// grid gives each warp whole rows, folded within each quad of lanes.
+    FragReduce(Reduce),
     /// `(acc, a, w, s1, s2) -> frags`: `acc += f32(dot_t(a, w)) * s1 * s2`
     /// on int8 operands, one of the scales a `[m, 1]` row broadcast and the
     /// other a `[1, n]` column one.
@@ -678,7 +685,9 @@ impl OpKind {
             OpKind::IntrinsicInto(i) => format!("{}_into", i.name()),
             OpKind::FragInit(init) => format!("frag_init {init:?}"),
             OpKind::FragScale(op) => format!("frag_scale {}", binop_name(*op)),
-            OpKind::FragDot => "frag_dot".into(),
+            OpKind::FragDot { transpose } => if *transpose { "frag_dot_t" } else { "frag_dot" }.into(),
+            OpKind::FragMap(tree) => format!("frag_map {tree}"),
+            OpKind::FragReduce(how) => format!("frag_reduce {}", how.name()),
             OpKind::FragDotScaled => "frag_dot_scaled".into(),
             OpKind::FragOuter { negate } => format!("frag_outer{}", if *negate { " neg" } else { "" }),
             OpKind::FragStore => "frag_store".into(),
@@ -720,6 +729,7 @@ impl OpKind {
                 | OpKind::ReduceFused { .. }
                 | OpKind::Dot { .. }
                 | OpKind::Intrinsic(_)
+                | OpKind::FragReduce(_)
         )
     }
 

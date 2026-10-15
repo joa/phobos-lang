@@ -1,6 +1,7 @@
 mod control;
 pub(in crate::codegen) mod defer;
 mod epilogue;
+mod fragments;
 mod generate;
 mod intrinsics;
 mod lanes;
@@ -340,7 +341,9 @@ impl<'c> Codegen<'c> {
             | OpKind::IntrinsicInto(_)
             | OpKind::FragInit(_)
             | OpKind::FragScale(_)
-            | OpKind::FragDot
+            | OpKind::FragDot { .. }
+            | OpKind::FragMap(_)
+            | OpKind::FragReduce(_)
             | OpKind::FragDotScaled
             | OpKind::FragOuter { .. }
             | OpKind::FragStore

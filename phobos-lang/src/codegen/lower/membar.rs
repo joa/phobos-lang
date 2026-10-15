@@ -460,7 +460,7 @@ impl Membar<'_> {
         // its preheader, instead of the ones it names. Count those as reads.
         if matches!(
             ir.kind(op),
-            OpKind::Dot { .. } | OpKind::DotInto { .. } | OpKind::DotFused { .. } | OpKind::FragDot
+            OpKind::Dot { .. } | OpKind::DotInto { .. } | OpKind::DotFused { .. } | OpKind::FragDot { .. }
         ) {
             for (ancestor, _) in ir.ancestors(ir.parent_block(op)) {
                 let OpKind::For(info) = ir.kind(ancestor) else { continue };

@@ -2,6 +2,64 @@
 
 use super::*;
 
+/// The canonical fp16 flash kernel at `BR` query rows and `BC` keys a block.
+fn flash(br: i64, bc: i64) -> String {
+    FLASH.replace("BR in [32], BC in [32]", &format!("BR in [{br}], BC in [{bc}]"))
+}
+
+const FLASH: &str = "@autotune(D in [64], BR in [32], BC in [32])
+        @tensorcore
+        @launch(128)
+        @aligned(Nq = BR, Nk = BC)
+        kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D],
+                               V: tensor<f16>[Nk, D], O: tensor<f16>[Nq, D], scale: f32) {
+            let pid = ctx.block.x
+            let row = pid * BR
+            let q = Q[row :+ BR, :]
+            var acc: tile<f32>[BR, D] = 0.0
+            var m: tile<f32>[BR, 1] = -65504.0
+            var l: tile<f32>[BR, 1] = 0.0
+            for kt in range(0, Nk, BC) {
+                let k = K[kt :+ BC, :]
+                let v = V[kt :+ BC, :]
+                var s: tile<f32>[BR, BC] = dot_t(q, k)
+                s = s * scale
+                var mnew: tile<f32>[BR, 1] = rowmax(s)
+                mnew = tmax(m, mnew)
+                s = exp(s - mnew)
+                var corr: tile<f32>[BR, 1] = exp(m - mnew)
+                l = l * corr
+                l += rowsum(s)
+                acc = acc * corr
+                acc += dot(s, v)
+                m = mnew
+            }
+            acc = acc / l
+            O[row :+ BR, :] = acc
+        }";
+
+#[test]
+fn flash_scores_ride_in_fragments() {
+    // At 64 rows over four warps each warp owns 16 whole rows of the
+    // scores, so they stay in fragments: the scale and the exponent run in
+    // the lanes, each row reduction folds a lane's columns and then its quad
+    // with two xor shuffles, and the scores reach the second dot through one
+    // shared tile.
+    let mlir = emit_mlir_sync(&flash(64, 64), "sm_80");
+    assert_eq!(mlir.matches("gpu.shuffle  xor").count() + mlir.matches("gpu.shuffle xor").count(), 8, "{mlir}");
+    // Two dots, four 16x16 tiles a warp each, two m16n8k16 a tile and four
+    // k steps of 16: one dot's 32 mma.sync, twice.
+    assert_eq!(mlir.matches("nvgpu.mma.sync").count(), 64, "{mlir}");
+}
+
+#[test]
+fn scores_past_the_register_budget_stay_shared() {
+    // At 128 keys a block a lane would hold 128 f32 of scores beside the 64
+    // of the accumulator, over the budget: the scores stay a shared tile.
+    let mlir = emit_mlir_sync(&flash(128, 128), "sm_80");
+    assert!(!mlir.contains("gpu.shuffle"), "{mlir}");
+}
+
 #[test]
 fn flash_accumulator_rides_in_fragments() {
     // The canonical fp16 flash kernel (examples/flash_attention_fp16.ph).

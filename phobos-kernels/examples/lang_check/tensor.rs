@@ -72,6 +72,75 @@ pub(crate) fn dot_epilogue(failures: &mut u32) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn flash_softmax(failures: &mut u32) -> Result<()> {
+    // The online softmax of flash attention over two key blocks, at 64-bit
+    // indices: the scores stay in mma.sync fragments, the scale, the row max,
+    // the exponent and the row sum run in the lanes, and the scores reach
+    // the second dot through one shared tile. The shared-tile form of the
+    // same source needs more than the 48 KB of static shared memory.
+    let (r, keys, d) = (128, 64, 32);
+    let (q, k, v) = (noise(r * d, 21), noise(keys * d, 22), noise(keys * d, 23));
+    let src = "@tensorcore
+        @launch(256)
+        kernel fa(Q: tensor<f16>[128, 32], K: tensor<f16>[64, 32], V: tensor<f16>[64, 32], O: tensor<f32>[128, 32]) {
+            let q = Q[0 :+ 128, 0 :+ 32]
+            var acc: tile<f32>[128, 32] = 0.0
+            var m: tile<f32>[128, 1] = -65504.0
+            var l: tile<f32>[128, 1] = 0.0
+            for kt in range(0, 64, 32) {
+                let k = K[kt :+ 32, 0 :+ 32]
+                let v = V[kt :+ 32, 0 :+ 32]
+                var s: tile<f32>[128, 32] = dot_t(q, k)
+                s = s * 0.125
+                var mnew: tile<f32>[128, 1] = rowmax(s)
+                mnew = tmax(m, mnew)
+                s = exp(s - mnew)
+                var corr: tile<f32>[128, 1] = exp(m - mnew)
+                l = l * corr
+                l += rowsum(s)
+                acc = acc * corr
+                acc += dot(s, v)
+                m = mnew
+            }
+            acc = acc / l
+            O[0 :+ 128, 0 :+ 32] = acc
+        }";
+    let half = |x: &[f32]| -> Vec<f32> {
+        x.iter().map(|&v| phobos_base::half::f16_to_f32(phobos_base::half::f32_to_f16(v))).collect()
+    };
+    let (hq, hk, hv) = (half(&q), half(&k), half(&v));
+    // softmax(q k^T / 8) v, row by row, in f64.
+    let mut want = vec![0.0f32; r * d];
+    for i in 0..r {
+        let s: Vec<f64> = (0..keys)
+            .map(|j| 0.125 * (0..d).map(|x| hq[i * d + x] as f64 * hk[j * d + x] as f64).sum::<f64>())
+            .collect();
+        let top = s.iter().cloned().fold(f64::MIN, f64::max);
+        let p: Vec<f64> = s.iter().map(|&x| (x - top).exp()).collect();
+        let total: f64 = p.iter().sum();
+        for n in 0..d {
+            want[i * d + n] = ((0..keys).map(|j| p[j] * hv[j * d + n] as f64).sum::<f64>() / total) as f32;
+        }
+    }
+    let h = |x: &[f32]| -> Vec<u16> { x.iter().map(|&v| phobos_base::half::f32_to_f16(v)).collect() };
+    {
+        let (gq, gk, gv) = (Arg::new(&h(&q), r, d)?, Arg::new(&h(&k), keys, d)?, Arg::new(&h(&v), keys, d)?);
+        let out = Arg::<f32>::zeroed(r, d)?;
+        let mut slots = Vec::new();
+        for a in [&gq, &gk, &gv] {
+            a.push(&mut slots);
+        }
+        out.push(&mut slots);
+        run_at(64, src, "fa", 1, &mut slots)?;
+        let got = out.read()?;
+        let scale = want.iter().fold(0.0f32, |m, w| m.max(w.abs()));
+        let worst = got.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max) / scale;
+        // The probabilities are rounded to f16 for the second dot.
+        report("flash softmax, mma.sync", worst < 2e-2, format!("rel err {worst:.2e}"), failures);
+    }
+    Ok(())
+}
+
 pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
     // acc += f32(dot_t(a, w)) * row * col held in the integer tensor cores'
     // registers across k, with w read from global memory and from a shared

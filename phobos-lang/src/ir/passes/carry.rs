@@ -30,25 +30,31 @@ struct Carry<'a> {
     loops: BTreeSet<OpId>,
     spans: &'a mut BTreeMap<OpId, Span>,
     bounds: &'a BTreeMap<OpId, [Span; 3]>,
+    /// The shared tile the fragments replace, which a read as a dot's
+    /// operand still wants.
+    tile: ValueId,
 }
 
 pub(super) fn rewrite(ir: &mut Ir, acc: Accumulator, report: &mut Report) {
     let tile = ir.result(acc.alloc);
-    let seed = ir.def_op(ir.operand(acc.fill, 0)).expect("the seed is a const");
     let mut c = Carry {
         ty: acc.ty(),
         updates: acc.updates.into_iter().collect(),
         loops: acc.loops,
         spans: &mut report.spans,
         bounds: &report.bounds,
+        tile,
     };
     let init = c.make(ir, acc.alloc, At::Before(acc.alloc), OpKind::FragInit(acc.init), &[]);
     if let Some(name) = ir.name(tile).map(str::to_owned) {
         ir.set_name(init, name);
     }
     c.thread(ir, ir.parent_block(acc.alloc), init);
-    ir.erase_op(acc.fill);
-    ir.erase_op(seed);
+    if let Some(fill) = acc.fill {
+        let seed = ir.def_op(ir.operand(fill, 0)).expect("the seed is a const");
+        ir.erase_op(fill);
+        ir.erase_op(seed);
+    }
     ir.erase_op(acc.alloc);
 }
 
@@ -105,7 +111,32 @@ impl Carry<'_> {
                 self.make(ir, op, at, OpKind::FragOuter { negate: *negate }, &[&[acc][..], operands].concat())
             }
             Update::Scale { op: bop, col } => self.make(ir, op, at, OpKind::FragScale(*bop), &[acc, *col]),
-            Update::Dot { a, b } => self.make(ir, op, at, OpKind::FragDot, &[acc, *a, *b]),
+            Update::Dot { transpose, a, b, .. } => {
+                self.make(ir, op, at, OpKind::FragDot { transpose: *transpose }, &[acc, *a, *b])
+            }
+            Update::Map { tree, leaves } => {
+                let leaves: Vec<ValueId> = leaves.iter().map(|&v| if v == self.tile { acc } else { v }).collect();
+                self.make(ir, op, at, OpKind::FragMap(tree.clone()), &leaves)
+            }
+            // In place: its result keeps its id, which later uses name.
+            Update::Reduce { how } => {
+                *ir.kind_mut(op) = OpKind::FragReduce(*how);
+                ir.set_operand(op, 0, acc);
+                return acc;
+            }
+            Update::Operand { index } => {
+                // The one conversion: the fragments written to a shared
+                // tile of the same name for the dot to read.
+                let ty = ir.ty(self.tile).clone();
+                let made = self.op(ir, op, at, OpKind::Alloc, &[], vec![ty], Vec::new());
+                let tile = ir.result(made);
+                if let Some(name) = ir.name(self.tile).map(str::to_owned) {
+                    ir.set_name(tile, name);
+                }
+                self.op(ir, op, at, OpKind::FragStore, &[acc, tile], Vec::new(), Vec::new());
+                ir.set_operand(op, *index, tile);
+                return acc;
+            }
             Update::Store { dst } => {
                 self.op(ir, op, at, OpKind::FragStore, &[acc, *dst], Vec::new(), Vec::new());
                 acc

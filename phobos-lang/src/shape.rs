@@ -24,6 +24,27 @@ pub(crate) fn wmma_plan(m: i64, n: i64, kk: i64, cta_threads: i64) -> Option<(i6
     warp_grid(m / 16, n / 16, cta_threads)
 }
 
+/// [`wmma_plan`]'s grid with every warp owning whole rows, `(warps, 1)`, so
+/// a row reduction folds within each warp. None when the rows do not split
+/// over the warps.
+pub(crate) fn wmma_rows_plan(m: i64, n: i64, kk: i64, cta_threads: i64) -> Option<(i64, i64)> {
+    wmma_plan(m, n, kk, cta_threads)?;
+    let warps = cta_threads / 32;
+    ((m / 16) % warps == 0).then_some((warps, 1))
+}
+
+/// The f32 a lane holds of an accumulator in a `wm x wn` warp grid: 8 of
+/// each 16x16 tile of the f16 path, 2 of each 8x8 tile of the int8 one.
+pub(crate) fn frag_lane_f32(m: i64, n: i64, wm: i64, wn: i64, imma: bool) -> i64 {
+    let (tile, per) = if imma { (8, 2) } else { (16, 8) };
+    (m / tile / wm) * (n / tile / wn) * per
+}
+
+/// The most f32 a lane holds across the fragments live at once, beyond
+/// which the registers spill: 64 8x8 tiles a warp of the int8 path, where
+/// the carried accumulator was measured to spill.
+pub(crate) const FRAG_LANE_BUDGET: i64 = 2 * IMMA_WARP_TILES;
+
 /// The (WM, WN) warp block of an int8 accumulator's 8x8-tile grid, chosen
 /// as [`wmma_plan`] chooses. Every warp owns the same tiles for the whole
 /// loop, since the accumulator is carried in its registers. None past
