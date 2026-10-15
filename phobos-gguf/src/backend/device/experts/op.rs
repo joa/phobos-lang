@@ -47,6 +47,7 @@ pub(super) fn kernels(quant: Quant) -> Result<Kernels> {
         Quant::Q4_K => ("q4k", "q4k_moe_qdot", "q4k_moe_gateup", "q4k_moe_qgemm"),
         Quant::Q5_K => ("q5k", "q5k_moe_qdot", "q5k_moe_gateup", "q5k_moe_qgemm"),
         Quant::Q6_K => ("q6k", "q6k_moe_qdot", "q6k_moe_gateup", "q6k_moe_qgemm"),
+        Quant::Q8_0 => ("q80", "q80_moe_qdot", "q80_moe_gateup", "q80_moe_qgemm"),
         other => bail!("no expert kernels for {} experts", other.name()),
     };
     Ok(Kernels { prefix, qdot, gateup, qgemm })

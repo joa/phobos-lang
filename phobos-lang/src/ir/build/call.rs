@@ -585,7 +585,7 @@ pub(crate) fn qg_tables(fmt: RawFmt) -> usize {
     match fmt {
         RawFmt::Iq1s | RawFmt::Iq1m => 1,
         RawFmt::Iq2xxs | RawFmt::Iq2xs | RawFmt::Iq2s | RawFmt::Iq3xxs | RawFmt::Iq3s => 2,
-        RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k | RawFmt::Q4k | RawFmt::Q5k | RawFmt::Q6k => 0,
+        RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k | RawFmt::Q4k | RawFmt::Q5k | RawFmt::Q6k | RawFmt::Q80 => 0,
         RawFmt::Ptq1 => 0,
     }
 }

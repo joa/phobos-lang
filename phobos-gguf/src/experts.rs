@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::quant::Quant;
 use crate::quant::grouped::{group_rows_into, grouped_len};
+use crate::quant::{Q8_0_UNIT, Q8_0_UNIT_BYTES, Quant, q8_0_units};
 use crate::{Gguf, Window};
 
 /// One `[count, n, k]` quantized tensor: `count` experts' `[n, k]` matrices
@@ -44,7 +44,14 @@ impl ExpertStack {
             quant.spec().block
         );
         let bytes = gguf.tensor_window(info)?;
-        Ok(ExpertStack { bytes, quant, count, n, k })
+        let stack = ExpertStack { bytes, quant, count, n, k };
+        ensure!(
+            k.is_multiple_of(stack.unit().0),
+            "'{name}': the kernels read {} experts {} elements at a time, which does not divide k = {k}",
+            quant.name(),
+            stack.unit().0
+        );
+        Ok(stack)
     }
 
     pub fn quant(&self) -> Quant {
@@ -63,15 +70,42 @@ impl ExpertStack {
         self.k
     }
 
-    /// Blocks along one row.
+    /// The unit the device slabs and the host kernels read an expert in,
+    /// as elements and bytes. A K-quant's unit is one block at its device
+    /// stride. Q8_0's is eight file blocks re-laid ([`q8_0_units`]), since
+    /// the kernels take 256 elements at a time with sixteen-aligned loads.
+    pub fn unit(&self) -> (usize, usize) {
+        match self.quant {
+            Quant::Q8_0 => (Q8_0_UNIT, Q8_0_UNIT_BYTES),
+            quant => (quant.spec().block, quant.device_block().1),
+        }
+    }
+
+    /// Bytes of one unit, the stride of the device's grouped layout.
+    pub fn unit_bytes(&self) -> usize {
+        self.unit().1
+    }
+
+    /// Bytes one unit's elements occupy in the file: the blocks it is made
+    /// of, as stored.
+    pub fn file_unit_bytes(&self) -> usize {
+        self.unit().0 / self.quant.spec().block * self.quant.spec().block_bytes
+    }
+
+    /// Units along one row.
     pub fn blocks_per_row(&self) -> usize {
+        self.k / self.unit().0
+    }
+
+    /// The file's blocks along one row.
+    fn file_blocks_per_row(&self) -> usize {
         self.k / self.quant.spec().block
     }
 
     /// Bytes one expert's matrix occupies, which is also the stride between
     /// experts.
     pub fn expert_bytes(&self) -> usize {
-        self.n * self.blocks_per_row() * self.quant.spec().block_bytes
+        self.n * self.file_blocks_per_row() * self.quant.spec().block_bytes
     }
 
     /// Bytes of the whole stack.
@@ -101,15 +135,15 @@ impl ExpertStack {
     }
 
     /// Bytes one expert takes in the grouped layout the device kernels
-    /// read: [`grouped_len`] of its rows at the format's device block.
+    /// read: [`grouped_len`] of its rows at the format's unit.
     pub fn grouped_bytes(&self) -> usize {
-        grouped_len(self.n, self.blocks_per_row(), self.quant.device_block().1)
+        grouped_len(self.n, self.blocks_per_row(), self.unit_bytes())
     }
 
-    /// Elements of one expert's grouped scale plane: one `f16` per block,
+    /// Elements of one expert's grouped scale plane: one `f16` per unit,
     /// rows regrouped by eights like the blocks. Kernels read it only for a
     /// format whose device block lacks the scale (Q6_K). The others take it
-    /// as an operand and ignore it.
+    /// as an operand and ignore it; Q8_0 keeps its scales inside the unit.
     pub fn grouped_scales(&self) -> usize {
         grouped_len(self.n, self.blocks_per_row(), 1)
     }
@@ -128,13 +162,16 @@ impl ExpertStack {
 
     /// Expert `e` in the grouped layout, into a buffer of
     /// [`ExpertStack::grouped_bytes`]: each block trimmed to its device
-    /// window, then rows regrouped by eights. Padding rows past `n` are not
-    /// written.
+    /// window, or Q8_0's re-laid into units, then rows regrouped by eights.
+    /// Padding rows past `n` are not written.
     pub fn grouped_into(&self, e: usize, out: &mut [u8]) {
-        let (skip, dev) = self.quant.device_block();
-        let block_bytes = self.quant.spec().block_bytes;
         let nb = self.blocks_per_row();
         let bytes = self.expert(e);
+        if self.quant == Quant::Q8_0 {
+            return group_rows_into(&q8_0_units(bytes), self.n, nb, Q8_0_UNIT_BYTES, out);
+        }
+        let (skip, dev) = self.quant.device_block();
+        let block_bytes = self.quant.spec().block_bytes;
         if skip == 0 && dev == block_bytes {
             return group_rows_into(bytes, self.n, nb, dev, out);
         }

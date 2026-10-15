@@ -129,7 +129,7 @@ impl Source for MirrorSource<'_> {
             )
         };
         let s = self.set.stack(stack);
-        Weight::Grouped { bytes, block_bytes: s.quant().device_block_bytes(), nb: s.blocks_per_row(), scales }
+        Weight::Grouped { bytes, block_bytes: s.unit_bytes(), nb: s.blocks_per_row(), scales }
     }
 }
 

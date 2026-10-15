@@ -123,11 +123,12 @@ pub enum RawFmt {
     Q4k,
     Q5k,
     Q6k,
+    Q80,
     Ptq1,
 }
 
 impl RawFmt {
-    pub const ALL: [RawFmt; 14] = [
+    pub const ALL: [RawFmt; 15] = [
         RawFmt::Iq1s,
         RawFmt::Iq1m,
         RawFmt::Iq2xxs,
@@ -141,6 +142,7 @@ impl RawFmt {
         RawFmt::Q4k,
         RawFmt::Q5k,
         RawFmt::Q6k,
+        RawFmt::Q80,
         RawFmt::Ptq1,
     ];
 
@@ -159,6 +161,7 @@ impl RawFmt {
             RawFmt::Q4k => "q4k",
             RawFmt::Q5k => "q5k",
             RawFmt::Q6k => "q6k",
+            RawFmt::Q80 => "q80",
             RawFmt::Ptq1 => "ptq1",
         }
     }

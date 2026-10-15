@@ -361,9 +361,10 @@ Symbols used below: `K` is the contraction length, a multiple of 256 unless stat
 | `q4k` | 144 | grouped | yes | |
 | `q5k` | 176 | grouped | yes | |
 | `q6k` | 208 | grouped | yes | |
+| `q80` | 272 | grouped | yes | |
 | `ptq1` | 56 | grouped | yes | |
 
-The row-major formats (`iq4xs`, `q2k`, `q3k`) have no built-in: their decode is written with lanes. `q6k` moves each block's trailing `d` into the scale plane on the device (208 of 210 bytes). `ptq1` is two 128-weight file blocks per 256, re-laid at upload. For `q4k`, `q5k` and `ptq1` the scales are inside the block: `d` is taken but not read.
+The row-major formats (`iq4xs`, `q2k`, `q3k`) have no built-in: their decode is written with lanes. `q6k` moves each block's trailing `d` into the scale plane on the device (208 of 210 bytes). `ptq1` is two 128-weight file blocks per 256, re-laid at upload. `q80` is eight Q8_0 file blocks per 256, re-laid at upload: the eight `f16` scales first, then the quants, so each run's 32 bytes sit sixteen-aligned. For `q4k`, `q5k`, `q80` and `ptq1` the scales are inside the block: `d` is taken but not read.
 
 ### Table operands
 

@@ -26,7 +26,7 @@ pub(super) fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
     )
 }
 
-const FORMATS: [(&str, &[usize]); 11] = [
+const FORMATS: [(&str, &[usize]); 12] = [
     ("iq1s", &[4096]),
     ("iq1m", &[4096]),
     ("iq2xxs", &[2048, 1024]),
@@ -37,6 +37,7 @@ const FORMATS: [(&str, &[usize]); 11] = [
     ("q4k", &[]),
     ("q5k", &[]),
     ("q6k", &[]),
+    ("q80", &[]),
     ("ptq1", &[]),
 ];
 
