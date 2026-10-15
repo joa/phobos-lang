@@ -180,7 +180,8 @@ fn emit_kernel<'c>(
     kernel.check_attributes()?;
     let mut cg = Codegen::new(base, context, kernel)?;
     let target = target::build_target(base);
-    let (ir, report) = crate::ir::build::build(base, target, kernel)?;
+    let (mut ir, mut report) = crate::ir::build::build(base, target, kernel)?;
+    crate::ir::passes::run(&mut ir, &mut report, kernel)?;
     #[cfg(debug_assertions)]
     crate::ir::verify::verify(&ir)?;
 
