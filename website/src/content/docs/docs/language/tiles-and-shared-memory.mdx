@@ -125,7 +125,9 @@ later operation reads or writes those bytes from other threads:
 
 A tile kernel does not write `barrier()` itself. The built-in exists for per-thread
 code that stores into a tile element by element; see
-[Uniform, warp-uniform and varying](/docs/ctx/uniformity/#a-per-thread-store-and-a-cta-wide-read).
+[Uniform, warp-uniform and varying](/docs/ctx/uniformity/#a-per-thread-store-and-a-cta-wide-read),
+and [Shared-memory races](/docs/language/races/) for the host check that finds
+a missing one.
 
 ## A complete kernel
 

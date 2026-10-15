@@ -1,0 +1,15 @@
+error: a thread reads shared memory another warp writes, with no `barrier()` between
+ --> mirror.ph:5:24
+  |
+4 |     t[0, ctx.thread] = X[0, ctx.thread]
+  |     ----------------------------------- thread 63 writes here
+5 |     Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+  |                        ^^^^^^^^^^^^^^^^^^^^^ thread 0 reads here
+  |
+  = note: seen in CTA [0, 0, 0] of kernel `mirror`
+help: a barrier between the two orders them
+  |
+5 +     barrier()
+6 |     Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+
+error: aborting due to 1 previous error

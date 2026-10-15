@@ -1,0 +1,122 @@
+---
+title: Shared-memory races
+description: When threads of a CTA race on a tile, what barrier() orders, and the host race check that finds a race before the GPU does.
+sidebar:
+  order: 8
+---
+
+import { Code } from "@astrojs/starlight/components"
+import RaceMirror from "../../../../components/figures/race-mirror/RaceMirror.astro"
+import mirror from "../../../../data/diagnostics/mirror.txt?raw"
+
+The threads of a CTA run at their own pace, a warp at a time. When one thread
+reads a tile element that a thread of another warp wrote, nothing says the
+write has happened yet unless a barrier stands between the two. Without one
+the kernel races: it reads whatever the element held before, on some runs
+and not on others.
+
+Tile code never races on its own account. The compiler knows which thread
+touches which element of a tile operation, and places a barrier wherever a
+later operation reads or writes bytes other threads wrote (see
+[Barriers](/docs/language/tiles-and-shared-memory/#barriers)). The
+responsibility moves to the kernel where it stores into a tile element by
+element, from per-thread code. That is where `barrier()` comes in, and where
+the race check helps.
+
+## A race
+
+Each of 64 threads stores its own element of a shared tile, then reads its
+mirror's, which a thread of the other warp stored:
+
+```phobos races diagnostic=mirror
+@launch(64)
+kernel mirror(X: tensor<f32>[1, 64], Y: tensor<f32>[1, 64]) {
+    var t: tile<f32>[1, 64] = 0.0
+    t[0, ctx.thread] = X[0, ctx.thread]
+    Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+}
+```
+
+It compiles, and on most runs it may even produce the right answer. But warp
+0 can reach the load before warp 1 has stored, and then thread 0 reads
+`t[0, 63]` before thread 63 has written it:
+
+<RaceMirror />
+
+## Checking for races
+
+`phobos-compile --check-races` runs the race check on what it compiles, on
+the host, with no GPU. A race is an error on the source, laid out as the
+compiler's own errors are:
+
+<Code code={mirror} lang="text" />
+
+The two labels are one pair of threads that met: thread 63 writes `t[0, 63]`,
+thread 0 reads it, and nothing orders the two. The suggested fix is the
+barrier:
+
+```phobos
+@launch(64)
+kernel mirror(X: tensor<f32>[1, 64], Y: tensor<f32>[1, 64]) {
+    var t: tile<f32>[1, 64] = 0.0
+    t[0, ctx.thread] = X[0, ctx.thread]
+    barrier()
+    Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+}
+```
+
+`barrier()` waits until every thread of the CTA has reached it, so every store
+before it is done before any load after it. Every thread has to reach it, so
+the compiler accepts it only under control that is the same for the whole CTA
+(see [Uniform, warp-uniform and varying](/docs/ctx/uniformity/)); a barrier
+some threads still miss is what the check reports as divergent.
+
+The compiler catches part of this on its own: a tile stored per thread and
+then read by a tile operation, a copy or a `dot`, with no `barrier()` between
+is a compile error. A point read such as `t[0, 63 - ctx.thread]` it cannot
+judge, since only the indices tell whether it meets another thread's store.
+That is the race check's part.
+
+With `--all-variants` every variant is checked, and one that races is
+reported and not written. `--error-format json` prints each finding as one
+JSON object, as for compile errors.
+
+## How the check works
+
+The check runs the MLIR the compiler emitted, every thread of one CTA side
+by side, so it sees the barriers exactly as the compiler kept them, and the
+ones it decided to leave out. It computes addresses, never data: a load from
+a tensor or a tile yields no value, and an address built from loaded data
+covers everything its view can reach. Two CTAs run, `[0, 0, 0]` and
+`[1, 1, 0]` of a `[2, 2, 1]` grid, with every dynamic tensor extent at 256
+and every integer scalar at 4. A finding seen in both is reported once.
+
+| Finding | What it means | `--check-races` |
+| --- | --- | --- |
+| race | Threads of two warps touch one shared byte between two barriers, at least one of them writing. | error |
+| divergent barrier | A barrier some threads of the CTA did not reach. The CTA would hang. | error |
+| out of bounds | A shared access outside its buffer. | error |
+| stopped | A trap, or control flow the check could not follow, ended the run early. What comes after is not checked. | warning |
+
+Two kinds of finding are left out of `--check-races`. Two lanes of one warp
+that touch the same byte with no warp-wide operation between them are a
+hazard too, since the lanes of a warp can diverge on Volta and later, but
+they are not reported yet. And where one side's address came from loaded
+data, the check can only say a race is possible.
+
+## What it does not see
+
+- **Long loops are sampled.** A loop with more than four turns runs its first
+  two and its last two, so a race that only appears from some later turn on
+  is missed.
+- **A wait on data runs once.** A loop whose condition comes from loaded data,
+  a flag or a grid barrier's spin, is taken to end after one pass.
+- **One launch shape.** Two CTAs and one extent per dimension: a race that only
+  a ragged last CTA reaches is not seen.
+- **Shared memory only.** Global memory is not checked, nor races between
+  CTAs, nor an atomic against a plain access to the same byte.
+
+From a checkout, `cargo test -p phobos-lang` runs the check over every kernel
+in the repository, on `sm_75` with 32-bit and 64-bit indices and on `sm_80`,
+and the `race` example of `phobos-lang` lists every finding of a file in
+full, including the possible ones.

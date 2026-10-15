@@ -28,13 +28,15 @@ Only staging tiles, and only those whose rows would collide:
 - The tile is a copy of a tensor slice: `var t = <tensor slice>`. A `let`
   view of a tensor that a `dot` reads more than once is staged by the
   compiler anyway, and that staging tile counts too.
+- It has more than one row. A single row has no other row to collide with.
 - Its row pitch, the last dimension times the element size, is a static
   multiple of 128 bytes.
 
 Every other tile is unchanged: a tile filled from an expression, an
 accumulator, or a staging tile whose rows are, say, 64 bytes.
 
-The padding is 8 elements per row. It is invisible to the source: the tile
+The padding is 8 elements per row, or 16 bytes for an element narrower than
+2 bytes, so rows stay 16-byte aligned. It is invisible to the source: the tile
 keeps its shape, and only its allocation and its row stride grow.
 
 ## A minimal kernel
@@ -54,23 +56,20 @@ instead, the tile would stay as declared.
 {/* figure: attr-padstage-pair */}
 
 import KernelPair from "../../../../components/viz/KernelPair.astro"
-import plain from "../../../../data/traces/q8_matvec.sm_75.json"
-import padded from "../../../../data/traces/q8_matvec_padstage.sm_75.json"
+import plain from "../../../../data/traces/stage_rows.sm_75.json"
+import padded from "../../../../data/traces/stage_rows_padstage.sm_75.json"
 
 export const stageOf = trace => {
   const stage = trace.ops.find(op => op.kind === "stage")
   return trace.buffers.find(buffer => buffer.firstOp === stage.id)
 }
 
-The pair below is [`q8_matvec`](/docs/examples/q8-matvec/) without and with
-`@padstage`. Its `dot` reads `a`, a `let` view of the activations, so the
-compiler stages `a` into a shared tile of {stageOf(plain).shape.join(" x ")} `f32`, one row of
-{stageOf(plain).bytes} bytes. That pitch is a multiple of 128 bytes, so under
-`@padstage` the stage buffer grows to {stageOf(padded).bytes} bytes, and every other buffer
-keeps its size. Step to the `dot` on either side to see the stage filled and
-read.
+The pair below is that kernel without and with `@padstage`. `k` is a tile of
+{stageOf(plain).shape.join(" x ")} `f16`, {stageOf(plain).bytes} bytes. Its rows are a multiple of 128
+bytes long, so under `@padstage` the same tile takes {stageOf(padded).bytes} bytes. Step to
+the copy on either side to see the stage filled.
 
-<KernelPair beforeTrace="q8_matvec" beforeLabel="without @padstage" afterTrace="q8_matvec_padstage" afterLabel="with @padstage" />
+<KernelPair beforeTrace="stage_rows" beforeLabel="without @padstage" afterTrace="stage_rows_padstage" afterLabel="with @padstage" />
 
 ## Cost and interactions
 
