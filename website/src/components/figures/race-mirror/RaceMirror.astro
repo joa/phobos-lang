@@ -1,0 +1,29 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import RaceMirrorFigure from "./race-mirror.figure"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-race-mirror" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="race-mirror"
+  figure={RaceMirrorFigure}
+  state={{ order: "none" }}
+  title="Two warps store into a shared tile and load each other's elements"
+  desc="Schematic. 64 threads in two warps of 32. Each thread stores its own element of the shared tile t, then loads the element at 63 minus its index, which a thread of the other warp stored. Without a barrier, warp 0 runs ahead and loads elements 63 down to 32 before warp 1 has stored them; the race check reports thread 63's store and thread 0's load. With barrier() between the store and the load, warp 0 waits until warp 1 has stored, and every load sees a stored value."
+  legend={["reg", "shared", ["cost", "stale load, wait"]]}
+>
+  <div class="chart-group" role="group" aria-label="Order">
+    <button type="button" class="chart-btn" data-group="order" data-value="none" aria-pressed="true">No barrier</button>
+    <button type="button" class="chart-btn" data-group="order" data-value="barrier" aria-pressed="false">barrier()</button>
+  </div>
+  <Fragment slot="caption">
+    Schematic. The kernel above, one CTA of 64 threads. Which warp runs ahead is up to the scheduler;
+    the race check reports the race whichever one does.
+  </Fragment>
+</ChartFigure>

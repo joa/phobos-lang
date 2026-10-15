@@ -5,7 +5,9 @@ sidebar:
   order: 3
 ---
 
+import { Code } from "@astrojs/starlight/components"
 import Command from "../../../../components/Command.astro"
+import scaleErrors from "../../../../data/diagnostics/scale.txt?raw"
 
 Three tools take a kernel from source to a number. `phobos-compile` turns a
 source file into PTX. The `emit` example prints the MLIR the compiler
@@ -16,7 +18,7 @@ next to cuBLAS where there is a comparison. Only the last one needs a GPU.
 ## phobos-compile
 
 ```text
-usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx]
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] [--color auto|always|never] [--error-format human|json]
 ```
 
 `phobos-compile` reads one source file and writes PTX for every kernel in it,
@@ -60,6 +62,41 @@ combination of `TILE_M` and `TILE_N`, and prints one line per file with its
 settings. A combination that fails to compile is reported and skipped, such as
 256 by 256, whose staged buffers are too large for `@pipeline`; the command
 fails only if none compiled.
+
+### Errors
+
+A kernel that does not compile gets its errors laid out the way rustc lays
+them out: the message, the file and line, the source with the spans it is
+about underlined, and a note or a suggested fix where there is one. Every
+error found in one run is reported, not only the first. This kernel assigns
+to a `let` and misspells a built-in:
+
+```phobos expect-error diagnostic=scale
+@launch(256)
+kernel scale(X: tensor<f32>[N], Y: tensor<f32>[N], alpha: f32) {
+    let i = ctx.block.x * ctx.threads + ctx.thread
+    let y = X[i] * alpha
+    y = y + 1.0
+    Y[i] = sqtr(y)
+}
+```
+
+`phobos-compile scale.ph` prints:
+
+<Code code={scaleErrors} lang="text" />
+
+On a terminal the source is highlighted and the labels are colored.
+`--color never` turns that off, `--color always` keeps it when the output
+goes to a pipe or a file, and `NO_COLOR` is honored. `--error-format json`
+prints one JSON object per error instead, with every span as byte offsets,
+lines and columns, and every suggested fix as an edit, for an editor or a
+script.
+
+`--check-races` also runs the host race check on what it compiles and reports
+a race between threads the same way, pointing at the two accesses; see
+[Shared-memory races](/docs/language/races/).
+
+### Using the PTX
 
 The PTX is what the CUDA driver loads. To launch it from your own program you
 need the argument layout Phobos uses, which the

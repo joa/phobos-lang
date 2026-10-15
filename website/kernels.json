@@ -43,13 +43,21 @@
       "grid": [2, 1, 1]
     },
     {
-      "name": "q8_matvec_padstage",
-      "path": "phobos-lang/examples/q8_matvec.ph",
+      "name": "stage_rows",
+      "path": "phobos-lang/examples/stage_rows.ph",
+      "chips": ["sm_75"],
+      "params": {},
+      "dims": {},
+      "grid": [1, 1, 1]
+    },
+    {
+      "name": "stage_rows_padstage",
+      "path": "phobos-lang/examples/stage_rows.ph",
       "variant": { "add": "@padstage" },
       "chips": ["sm_75"],
-      "params": { "TILE_N": 64, "BLK": 32 },
-      "dims": { "K": 256, "KB": 8, "N": 128 },
-      "grid": [2, 1, 1]
+      "params": {},
+      "dims": {},
+      "grid": [1, 1, 1]
     },
     {
       "name": "flash_attention_fp32",

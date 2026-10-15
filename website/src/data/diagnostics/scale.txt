@@ -1,0 +1,23 @@
+error: cannot assign to `y`, which is declared with `let`
+ --> scale.ph:5:5
+  |
+4 |     let y = X[i] * alpha
+  |     -------------------- declared with `let` here
+5 |     y = y + 1.0
+  |     ^^^^^^^^^^^ cannot assign
+help: declare `y` with `var` to assign to it
+  |
+4 |     var y = X[i] * alpha
+  |     ~~~
+
+error: unknown function `sqtr`
+ --> scale.ph:6:12
+  |
+6 |     Y[i] = sqtr(y)
+  |            ^^^^^^^ not a built-in
+help: a similar name exists: `sqrt`
+  |
+6 |     Y[i] = sqrt(y)
+  |            ~~~~
+
+error: aborting due to 2 previous errors

@@ -10,15 +10,19 @@
 // expects the ones marked `expect-error` to fail and records their messages
 // in `website/src/data/expected-errors.json`, keyed `<page>#<n>`: the page's
 // repo-relative path and the fence's index, from 0, among that page's
-// `phobos` fences, fragments included. `attributes` writes the attributes the
-// compiler accepts to `website/src/data/attributes.json`.
+// `phobos` fences, fragments included. A fence with `diagnostic=NAME` also
+// has what `phobos-compile` prints for it, as a file `NAME.ph`, written to
+// `website/src/data/diagnostics/NAME.txt`: its errors, or with `races`, what
+// `--check-races` finds in a fence that compiles. `attributes` writes the
+// attributes the compiler accepts to `website/src/data/attributes.json`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
-use phobos_lang::diag::Diagnostics;
+use phobos_lang::diag::{Colors, Diagnostics, SourceFile};
+use phobos_lang::race;
 use phobos_lang::trace::{self, Origin, Request, Variant};
 use serde_json::Value;
 
@@ -163,6 +167,8 @@ fn check(root: &Path) -> Result<()> {
     let mut failures = Vec::new();
     let mut expected = BTreeMap::new();
     let mut compiled = 0;
+    let diagnostics_dir = root.join("website/src/data/diagnostics");
+    let mut rendered = 0;
     for fence in fences(root)? {
         if fence.flag("fragment") {
             continue;
@@ -174,6 +180,16 @@ fn check(root: &Path) -> Result<()> {
             ..Context::default()
         };
         let outcome = phobos_lang::compile_shared(&context, &fence.text);
+        if let Some(name) = fence.meta.get("diagnostic") {
+            match diagnostic(&context, &fence, name, outcome.as_ref().err()) {
+                Ok(text) => {
+                    std::fs::create_dir_all(&diagnostics_dir)?;
+                    std::fs::write(diagnostics_dir.join(format!("{name}.txt")), text)?;
+                    rendered += 1;
+                }
+                Err(e) => failures.push(format!("{}: {e:#}", fence.at())),
+            }
+        }
         match (outcome, fence.flag("expect-error")) {
             (Ok(_), false) => {}
             (Ok(_), true) => failures.push(format!(
@@ -201,6 +217,9 @@ fn check(root: &Path) -> Result<()> {
         expected.len(),
         rel(root, &file)
     );
+    if rendered > 0 {
+        println!("{rendered} diagnostics rendered in {}", rel(root, &diagnostics_dir));
+    }
     if !failures.is_empty() {
         for f in &failures {
             eprintln!("{f}");
@@ -218,6 +237,31 @@ fn attributes(root: &Path) -> Result<()> {
     )?;
     println!("{}", rel(root, &file));
     Ok(())
+}
+
+/// What `phobos-compile` prints for `fence` as `NAME.ph`, uncolored: the
+/// error `failed` with, or with `races`, what the race check finds.
+fn diagnostic(
+    context: &Context,
+    fence: &Fence,
+    name: &str,
+    failed: Option<&anyhow::Error>,
+) -> Result<String> {
+    let file = SourceFile::new(format!("{name}.ph"), fence.text.clone());
+    if fence.flag("races") {
+        if let Some(e) = failed {
+            bail!("a `races` fence has to compile: {}", message(e));
+        }
+        let kernels = phobos_lang::parse_source(&file)?;
+        let reports = race::check_kernels(context, &kernels, &race::Config::default())?;
+        let found = race::diagnostics(&kernels, &reports).context("the race check found nothing")?;
+        return Ok(found.render(Colors::Off));
+    }
+    let e = failed.context("a `diagnostic` fence fails to compile, or is marked `races`")?;
+    let ds = e
+        .downcast_ref::<Diagnostics>()
+        .with_context(|| format!("the error is not a diagnostic: {e:#}"))?;
+    Ok(Diagnostics::new(file, ds.list().to_vec()).render(Colors::Off))
 }
 
 /// What an error says, without where: the figures show the message alone.
