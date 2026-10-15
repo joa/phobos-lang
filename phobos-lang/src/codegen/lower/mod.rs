@@ -265,9 +265,14 @@ impl<'c> Codegen<'c> {
             self.skip_barrier = skip;
             self.barrier_calls = 0;
         }
+        let outer = self.loc;
+        if let Some(loc) = super::location(self.ctx, &self.source, ir.span(op)) {
+            self.loc = loc;
+        }
         let emitted = self
             .emit_op_inner(block, ir, op)
             .map_err(|e| crate::ir::build::locate(&self.source, ir, e, ir.span(op)));
+        self.loc = outer;
         if skip.is_some() {
             self.skip_barrier = None;
         }

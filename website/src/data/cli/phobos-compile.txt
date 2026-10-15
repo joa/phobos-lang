@@ -1,4 +1,4 @@
-usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o OUT.ptx] [--color auto|always|never] [--error-format human|json]
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] [--color auto|always|never] [--error-format human|json]
 
   --chip CHIP              target architecture, sm_75 by default
   --index-bits 32|64       index width, raised to 64 where the runtime would
@@ -8,6 +8,10 @@ usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VAL
                            pins, one file each, named OUT_NAME-value.ptx
                            (OUT from -o, else the source's name); prints a
                            line per file and skips a variant that fails
+  --check-races            run the host race check on each kernel compiled
+                           and fail on a race between warps, a barrier not
+                           every thread reaches or a shared access outside
+                           its buffer
   -o, --output OUT.ptx     write the PTX here instead of standard output
   --color WHEN             color errors: auto (on a terminal, unless
                            NO_COLOR is set), always or never

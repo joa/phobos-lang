@@ -34,7 +34,9 @@ every supported card runs, and `--index-bits` to 32, raised to 64 when the
 module needs it, as the runtime would. Each `@autotune` name takes its first
 choice unless `--set NAME=VALUE` pins it, and `--all-variants` writes one file
 per combination left after the pins, named after `-o` with the settings
-appended. Set `PHOBOS_PRINT_PHASES=1` to print the IR of each lowering phase.
+appended. `--check-races` runs a host check for shared-memory races on what
+it compiles and fails on one, pointing at the two source lines involved. Set
+`PHOBOS_PRINT_PHASES=1` to print the IR of each lowering phase.
 Errors go to standard error laid out as rustc lays them out, with the source
 highlighted on a terminal; `--color` overrides the choice, which also follows
 `NO_COLOR`, and `--error-format json` prints one JSON object per error instead.

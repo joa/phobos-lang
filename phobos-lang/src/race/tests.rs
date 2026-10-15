@@ -157,3 +157,77 @@ fn a_claimed_slot_is_read_before_its_bytes_are_reused() {
     assert!(r.clean(), "{r:#?}");
     assert!(r.warp_races.is_empty(), "{r:#?}");
 }
+
+const MIRRORED: &str = "@launch(64)
+kernel k(X: tensor<f32>[1, 64], Y: tensor<f32>[1, 64]) {
+    var t: tile<f32>[1, 64] = 0.0
+    t[0, ctx.thread] = X[0, ctx.thread]
+    Y[0, ctx.thread] = t[0, 63 - ctx.thread]
+}
+";
+
+fn mirrored() -> (Vec<crate::ast::Kernel>, Vec<Report>) {
+    let file = crate::diag::SourceFile::new("race.ph", MIRRORED);
+    let kernels = crate::parse_source(&file).expect("the kernel parses");
+    let base = phobos_base::context::Context::default();
+    let reports = check_kernels(&base, &kernels, &Config::default()).expect("the kernel runs");
+    (kernels, reports)
+}
+
+#[test]
+fn a_race_points_at_both_accesses_and_suggests_a_barrier() {
+    let (kernels, reports) = mirrored();
+    let found = diagnostics(&kernels, &reports).expect("the race is reported");
+    // Both CTAs see it; it is reported once.
+    assert_eq!(found.errors(), 1, "{found}");
+    let out = found.render(crate::diag::Colors::Off);
+    assert!(out.starts_with("error: a thread reads shared memory another warp writes, with no `barrier()` between\n --> race.ph:5:"), "{out}");
+    assert!(out.contains("4 |     t[0, ctx.thread] = X[0, ctx.thread]\n"), "{out}");
+    assert!(out.contains("writes here"), "{out}");
+    assert!(out.contains("reads here"), "{out}");
+    assert!(out.contains("help: a barrier between the two orders them\n  |\n5 +     barrier()\n6 |     Y[0, ctx.thread]"), "{out}");
+}
+
+#[test]
+fn a_clean_kernel_has_nothing_to_report() {
+    let src = MIRRORED.replace("    Y[", "    barrier()\n    Y[");
+    let file = crate::diag::SourceFile::new("race.ph", src);
+    let kernels = crate::parse_source(&file).unwrap();
+    let base = phobos_base::context::Context::default();
+    let reports = check_kernels(&base, &kernels, &Config::default()).unwrap();
+    assert!(diagnostics(&kernels, &reports).is_none(), "{reports:#?}");
+}
+
+/// MLIR printed with its locations, as `emit --loc` prints it, parses back
+/// with them.
+#[test]
+fn printed_locations_come_back_from_the_text() {
+    use melior::ir::operation::OperationPrintingFlags;
+
+    let (kernels, emitted) = mirrored();
+    let context = context();
+    let module = Module::new(Location::unknown(&context));
+    let base = phobos_base::context::Context::default();
+    crate::codegen::emit(&base, &kernels, &context, &module).unwrap();
+    let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
+    let text = module.as_operation().to_string_with_flags(flags).unwrap();
+    assert!(text.contains(r#"loc("race.ph":5:"#), "{text}");
+    let parsed = check_text(&text, &Config::default()).unwrap();
+    let (a, b) = (&emitted[0].races[0], &parsed[0].races[0]);
+    assert_eq!((&a.first.loc, &a.second.loc), (&b.first.loc, &b.second.loc));
+    let second = b.second.loc.as_ref().expect("a location");
+    assert_eq!((second.file.as_str(), second.line), ("race.ph", 5));
+}
+
+#[test]
+fn an_async_group_parses_back_with_its_location() {
+    assert_eq!(
+        reparsable("  %1 = nvgpu.device_async_create_group loc(#loc3)\n  %2 = nvgpu.device_async_create_group\n"),
+        concat!(
+            r#"  %1 = "nvgpu.device_async_create_group"() : () -> !nvgpu.device.async.token loc(#loc3)"#,
+            "\n",
+            r#"  %2 = "nvgpu.device_async_create_group"() : () -> !nvgpu.device.async.token"#,
+            "\n",
+        )
+    );
+}

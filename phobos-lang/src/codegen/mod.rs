@@ -390,6 +390,28 @@ fn detach<'c>(value: Value<'c, '_>) -> Value<'c, 'c> {
     unsafe { Value::from_raw(value.to_raw()) }
 }
 
+/// Where `span` of `source` is, as an emitted op's location, or None for
+/// an op with no source. The end column is exclusive, as the span's end is.
+fn location<'c>(
+    ctx: &'c Context,
+    source: &crate::diag::SourceFile,
+    span: crate::diag::Span,
+) -> Option<Location<'c>> {
+    if span == crate::diag::Span::default() {
+        return None;
+    }
+    let (line, col) = source.line_col(span.lo);
+    let (end_line, end_col) = source.line_col(span.hi);
+    Some(Location::file_line_col_range(
+        ctx,
+        source.name(),
+        line as usize,
+        col as usize,
+        end_line as usize,
+        end_col as usize,
+    ))
+}
+
 impl<'c> Codegen<'c> {
     fn new(
         base: &phobos_base::context::Context,
@@ -406,7 +428,8 @@ impl<'c> Codegen<'c> {
         Ok(Codegen {
             isa: target::isa_for(base),
             ctx,
-            loc: Location::unknown(ctx),
+            loc: location(ctx, &kernel.source, kernel.name_span)
+                .unwrap_or_else(|| Location::unknown(ctx)),
             source: kernel.source.clone(),
             index_t: Type::index(ctx),
             f16_t: Type::float16(ctx),

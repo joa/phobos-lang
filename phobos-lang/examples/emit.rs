@@ -1,7 +1,10 @@
 use melior::{
     Context,
     dialect::DialectRegistry,
-    ir::{Location, Module, operation::OperationLike},
+    ir::{
+        Location, Module,
+        operation::{OperationLike, OperationPrintingFlags},
+    },
     utility::register_all_dialects,
 };
 use phobos_base::context::{GpuConfig, NvidiaGpuConfig};
@@ -21,10 +24,14 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
 }
 ";
 
+/// `emit [--loc] [file]`. `--loc` prints each op's source location.
 fn main() -> anyhow::Result<()> {
-    let src = match std::env::args().nth(1) {
-        Some(path) => std::fs::read_to_string(path)?,
-        None => MATMUL.to_string(),
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    let with_locations = args.iter().any(|a| a == "--loc");
+    args.retain(|a| a != "--loc");
+    let file = match args.first() {
+        Some(path) => phobos_lang::diag::SourceFile::new(path.as_str(), std::fs::read_to_string(path)?),
+        None => phobos_lang::diag::SourceFile::new("matmul.ph", MATMUL),
     };
 
     let registry = DialectRegistry::new();
@@ -34,13 +41,18 @@ fn main() -> anyhow::Result<()> {
     context.load_all_available_dialects();
 
     let module = Module::new(Location::unknown(&context));
-    let kernels = phobos_lang::parse(&src)?;
+    let kernels = phobos_lang::parse_source(&file)?;
     let out = phobos_lang::codegen::emit(&target()?, &kernels, &context, &module)?;
 
     if !module.as_operation().verify() {
         anyhow::bail!("emitted module failed verification");
     }
-    println!("{}", module.as_operation());
+    if with_locations {
+        let flags = OperationPrintingFlags::new().enable_debug_info(true, false);
+        println!("{}", module.as_operation().to_string_with_flags(flags)?);
+    } else {
+        println!("{}", module.as_operation());
+    }
     // Printed first, so a declined pipeline can still be read.
     phobos_lang::assert_pipelined(&out.pipeline_failures)
 }
