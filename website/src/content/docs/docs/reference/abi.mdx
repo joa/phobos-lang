@@ -247,13 +247,17 @@ resident at once. `phobos_kernels::launch::persistent_grid(func, threads,
 dynamic_shared)` asks the occupancy API how many CTAs of that size fit on a
 multiprocessor and multiplies by the multiprocessor count; it returns that
 grid size and the per-multiprocessor count, and fails if not even one CTA
-fits. A kernel that reads the grid size as an `@autotune` constant, as the
-[`@persistent`](/docs/attributes/persistent/) example's `BLOCKS` does, must be
-compiled with the value the launch will use.
+fits. A kernel compiled with the grid size, as `@persistent(BLOCKS)` in the
+[`@persistent`](/docs/attributes/persistent/) example does, must be launched
+with that many CTAs.
 
-The tensor `grid_barrier` takes is an ordinary `tensor<i32>` argument. It
-needs at least 2 elements, zeroed once before the first launch, and must not
-be shared by kernels that run at the same time.
+A kernel that calls `grid_barrier()` takes one argument more than it
+declares: the barrier word, an `i32` `[2, 1]` descriptor appended after the
+last parameter. It is zeroed once before the first launch and must not be
+shared by kernels that run at the same time, and every barrier leaves it as
+it found it, so one word serves every launch. `grid_barrier(bar)` takes an
+ordinary `tensor<i32>` parameter of at least 2 elements under the same
+rules.
 
 ## Memory layout and alignment
 

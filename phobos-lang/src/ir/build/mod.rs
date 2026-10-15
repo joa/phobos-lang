@@ -35,6 +35,15 @@ pub(crate) use super::at_op::locate;
 pub(crate) use decl::Decl;
 pub(crate) use crate::shape::DYN;
 
+/// The barrier word a `@persistent` launch appends for `grid_barrier()`,
+/// the `[2, 1]` column `grid_barrier(bar)` takes as a named parameter.
+fn grid_barrier_type() -> AstType {
+    AstType::Tensor(crate::ast::Scalar::I32, vec![Dim::Int(2), Dim::Int(1)])
+}
+
+/// The name the appended barrier word is bound to, which no source spells.
+pub(crate) const GRID_BARRIER_NAME: &str = "#grid_barrier";
+
 /// What the build asks the chip. The `@tensorcore` attributes are folded
 /// in by [`Build::has_wmma`] and [`Build::has_mma_sync`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -212,8 +221,21 @@ pub fn build(
         }
     }
 
+    let persistent = kernel
+        .persistent()
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("persistent")))?;
+    let persistent_blocks = match persistent.clone().flatten() {
+        Some(Dim::Int(n)) => Some(n),
+        Some(Dim::Sym(name)) => Some(shape_env.get(&name).copied().ok_or_else(|| {
+            let e = anyhow!("`@persistent({name})`: `{name}` is not an `@autotune` constant");
+            locate(&kernel.source, &empty, e, attr_span("persistent"))
+        })?),
+        None => None,
+    };
     let info = KernelInfo {
         name: kernel.name.clone(),
+        persistent_blocks,
+        grid_barrier: persistent.is_some() && kernel.implicit_grid_barrier(),
         launch,
         cta_threads,
         dynamic_shared: kernel.wants_dynamic_shared(),
@@ -258,6 +280,10 @@ pub fn build(
                 .map_err(|e| locate(&kernel.source, &empty, e, p.ty_span))
         })
         .collect::<Result<Vec<_>>>()?;
+    let mut params = params;
+    if info.grid_barrier {
+        params.push(b.param_type(kernel, &grid_barrier_type())?);
+    }
     b.ir = Ir::new(info, &params);
     b.block = b.ir.entry();
     let built = b
@@ -284,6 +310,11 @@ impl Build {
     fn emit_kernel(&mut self, kernel: &Kernel) -> Result<()> {
         self.scopes.push(HashMap::new());
         let entry = self.ir.entry();
+        if self.ir.kernel.grid_barrier {
+            let arg = self.ir.args(entry)[kernel.params.len()];
+            self.ir.set_name(arg, "grid_barrier");
+            self.bind(GRID_BARRIER_NAME, Binding::Tensor(arg));
+        }
         for (i, param) in kernel.params.iter().enumerate() {
             let arg = self.ir.args(entry)[i];
             self.ir.set_name(arg, &param.name);

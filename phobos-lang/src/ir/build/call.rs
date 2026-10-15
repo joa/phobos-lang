@@ -19,6 +19,13 @@ impl Build {
                 let [Expr { kind: ExprKind::Int(d @ 0..=2), .. }] = args else {
                     unreachable!("the parser builds ctx fields with an axis 0..=2");
                 };
+                // A persistent grid's block count is compiled in.
+                if callee == ctx::BLOCKS
+                    && *d == 0
+                    && let Some(n) = self.ir.kernel.persistent_blocks
+                {
+                    return Ok(Rv::Scalar(self.const_index(n)));
+                }
                 let kind = if callee == ctx::BLOCK { OpKind::ProgramId(*d as u8) } else { OpKind::GridDim(*d as u8) };
                 Ok(Rv::Scalar(self.value(kind, &[], Type::INDEX)))
             }
@@ -571,10 +578,14 @@ impl Build {
     }
 
     fn emit_grid_barrier(&mut self, args: &[Expr]) -> Result<Rv> {
-        let [bar] = args else {
-            bail!("`grid_barrier` expects one argument, the barrier tensor");
+        let mem = match args {
+            [] => match self.lookup(super::GRID_BARRIER_NAME) {
+                Some(Binding::Tensor(mem)) => mem,
+                _ => bail!("`grid_barrier()` uses the barrier a `@persistent` launch supplies; this kernel is not `@persistent`"),
+            },
+            [bar] => self.barrier_tensor(bar, "grid_barrier")?,
+            _ => bail!("`grid_barrier` takes the barrier tensor, or nothing in a `@persistent` kernel"),
         };
-        let mem = self.barrier_tensor(bar, "grid_barrier")?;
         Ok(Rv::Scalar(self.value(OpKind::GridBarrier, &[mem], Type::INDEX)))
     }
 

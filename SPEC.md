@@ -251,7 +251,7 @@ A lane collective is an xor butterfly of `log2(width)` shuffles and needs every 
 | Built-in | Result | Semantics | Requires |
 |---|---|---|---|
 | `ctx.block.x`, `.y`, `.z` | index | The CTA's index along a grid axis. | |
-| `ctx.blocks.x`, `.y`, `.z` | index | The grid's extent along an axis. | |
+| `ctx.blocks.x`, `.y`, `.z` | index | The grid's extent along an axis. Under `@persistent(n)`, `ctx.blocks.x` is the constant `n`. | |
 | `ctx.threads` | index | The CTA's thread count, from `@launch`. A compile-time constant. | |
 | `ctx.warps` | index | `ctx.threads / ctx.lanes`. A compile-time constant. | `ctx.threads` a whole number of warps. |
 | `ctx.lanes` | index | Lanes in a warp on the target, 32 on NVIDIA. A compile-time constant. | |
@@ -260,6 +260,7 @@ A lane collective is an xor butterfly of `log2(width)` shuffles and needs every 
 | `ctx.lane` | index | The thread's index in its warp. Differs between lanes. | See Per-thread values. |
 | `barrier()` | index `0` | Every thread of the CTA waits for every other, and their earlier stores are visible to all of them. Under uniform control only. | |
 | `grid_barrier(bar)` | index `0` | Every block of the grid waits for every other, and every block's global writes before it are visible to every block after it. | `bar` a named `i32` tensor of at least 2 elements, zeroed once before launch and not shared by concurrent kernels. 1-D grid. Every block reaches the call. Grid co-resident, see `@persistent`. |
+| `grid_barrier()` | index `0` | The same, in a `@persistent` kernel, on a barrier word the launch appends as the kernel's last parameter (an `i32` `[2, 1]` column, zeroed once, not shared by concurrent kernels). | `@persistent`. The rest as for `grid_barrier(bar)`. |
 | `atomic_add(t, i, v)` | `t`'s element type | `old = t[i]; t[i] += v` atomically across the device, once per block, between two CTA barriers. Every thread gets the same `old`, so it may steer control flow, and an `i32` result compares against an integer. | `t` a named `i32` or `f32` tensor parameter; `v` an integer, or any number for `f32`. |
 | `atomic_cas(t, i, e, v)` | `i32` | `old = t[i]; if old == e { t[i] = v }` atomically, once per block between two CTA barriers, every thread getting `old`. | `t` a named `i32` tensor parameter; `e` and `v` integers. |
 | `load_acquire(t, i)` | `i32` | `t[i]` read at system scope with acquire ordering, once per block, every thread getting it; what the host wrote before raising `t[i]` is visible afterwards. `while load_acquire(F, 0) == 0 {}` waits on a host flag. | `t` a named `i32` tensor parameter. Compiles at 64-bit indices. |
@@ -409,7 +410,7 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 | `@padstage` | Pads `var t = <tensor slice>` staging tiles of more than one row whose row pitch is a multiple of 128 bytes, to avoid bank conflicts: eight elements a row, or 16 bytes for a narrower type so rows stay 16-byte aligned. A padded tile slices like any other. Other tiles are unchanged. |
 | `@swizzle` | A shared `int8` or 2-4 byte tile whose rows are a multiple of 128 bytes, read by `acc += f32(dot_t(a, w)) * s1 * s2` (directly or through slices), is laid out XOR-swizzled by default: each row's 16-byte granules are permuted by the row's index mod 8, so a fragment load's eight rows fall in different banks with no padding, and `@padstage` does not pad it. A tile is swizzled only if every other access to it can follow the permutation: a copy into it, and `store` or `word` runs within one 16-byte granule. The attribute (also `@swizzle(on)`) asserts it: compilation fails, naming each tile and the access in the way, if such a tile cannot be swizzled or there is none. `@swizzle(off)` swizzles nothing. |
 | `@dynshared` | Dynamic shared memory instead of the static 48 KB; the launch must supply the size. The allocator resets once every tile is released, so phases separated by a barrier share one footprint. |
-| `@persistent` | The grid must be co-resident (required by `grid_barrier`). The launcher sizes it from the occupancy API (`phobos_kernels::launch::persistent_grid`). |
+| `@persistent` | The grid must be co-resident (required by `grid_barrier`). The launcher sizes it from the occupancy API (`phobos_kernels::launch::persistent_grid`). `@persistent(n)`, with `n` a literal or an `@autotune` constant, also compiles the grid's block count in: `ctx.blocks.x` is `n`, and the launch must use it. In a `@persistent` kernel, `grid_barrier()` takes the barrier word the launch appends. |
 | Unknown | An error at compile time. |
 
 GEMM tile sizes (`TILE_M`, `TILE_N`, `TILE_K`, `WARP_M`, `WARP_N`, `TILE_TM`, `TILE_TN`) come from `@autotune` or the shape environment.

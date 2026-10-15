@@ -413,8 +413,6 @@ pub(crate) enum Bound {
     /// Scratch, by index into [`Plan::scratch`].
     ScratchQs(usize),
     ScratchScales(usize),
-    /// The arrival counter and release generation.
-    Barrier,
 }
 
 /// One tensor parameter of the emitted kernel, in declaration order.

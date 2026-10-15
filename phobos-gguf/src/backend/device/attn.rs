@@ -431,6 +431,7 @@ impl DeviceBackend {
                 (part, wide),
                 (ml, stats),
                 (self.ptr(out, 0)?, [r, d]),
+                // The barrier word `grid_barrier()` reads, appended last.
                 (bar, [2, 1]),
             ],
             (blocks, 1, 1),

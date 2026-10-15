@@ -188,9 +188,12 @@ impl DeviceBackend {
                 }
                 Bound::ScratchQs(at) => pool[at].0.as_device_ptr().as_raw(),
                 Bound::ScratchScales(at) => pool[at].1.as_device_ptr().as_raw(),
-                Bound::Barrier => self.fused_bar()?,
             };
             operands.push((ptr, slot.dims));
+        }
+        // `grid_barrier()` reads the barrier word a persistent launch appends.
+        if plan.barriers > 0 {
+            operands.push((self.fused_bar()?, [2, 1]));
         }
         self.launch(module, FUSED_KERNEL, &operands, (plan.blocks, 1, 1))
     }
