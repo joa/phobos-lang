@@ -240,12 +240,7 @@ impl Emit {
     }
 
     /// A grid-strided nest, one unit of work per block per iteration.
-    ///
-    /// The iteration count is a compile-time constant and the tail is
-    /// guarded, so the loop keeps a static shape.
     fn units(&mut self, key: &ChainKey, nest: &Nest, n: usize, units: usize) -> Result<bool> {
-        let iters = units.div_ceil(self.blocks as usize);
-        let it = self.tune_const(format!("IT{n}"), iters);
         let un = self.tune_const(format!("UN{n}"), units);
         let unit = format!("u{n}");
         // Nests between two barriers are independent, so each starts its
@@ -259,20 +254,13 @@ impl Emit {
             0 => "p".to_string(),
             rot => format!("(p + {}) % ctx.blocks.x", self.blocks as usize - rot),
         };
-        let _ = write!(
-            self.body,
-            "
-  for i{n} in range(0, {it}) {{
-    let {unit} = {base} + i{n} * ctx.blocks.x
-    if {unit} < {un} {{
-"
-        );
+        let _ = write!(self.body, "\n  for {unit} in range({base}, {un}, ctx.blocks.x) {{\n");
         for &s in &nest.stages {
             if !self.unit_stage(key, s, &unit)? {
                 return Ok(false);
             }
         }
-        let _ = write!(self.body, "    }}\n  }}\n");
+        let _ = writeln!(self.body, "  }}");
         Ok(true)
     }
 

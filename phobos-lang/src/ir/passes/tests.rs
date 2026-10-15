@@ -216,3 +216,25 @@ fn a_placed_barrier_takes_the_place_of_a_written_cta_barrier() {
     assert_eq!(ir.matches("grid_barrier %").count(), 1, "{ir}");
     assert_eq!(ir.lines().filter(|l| l.trim() == "barrier").count(), 1, "only the first CTA barrier is left:\n{ir}");
 }
+
+/// [`MLP`] with grid-stride loops in place of the guarded ones.
+fn strided(src: &str) -> String {
+    src.replace(
+        "  for i in range(0, 4) {\n    let u = p + i * ctx.blocks.x\n    if u < 32 {\n",
+        "  for u in range(p, 32, ctx.blocks.x) {\n    if true {\n",
+    )
+}
+
+#[test]
+fn a_grid_stride_loop_hands_out_units() {
+    let src = strided(MLP);
+    assert!(!src.contains("let u"), "{src}");
+    let ir = passed(&src);
+    assert_eq!(ir.matches("grid_barrier %").count(), 1, "{ir}");
+    // Reading only its own unit, the second loop needs none.
+    let own = strided(
+        &MLP.replace(" + V[0 :+ 1, ((u + 1) % 32) * 8 :+ 8]", "")
+            .replace("H[0, ctx.thread] = X[0, ctx.thread] * 2.0", "H[0, ctx.thread] = 2.0"),
+    );
+    assert!(!passed(&own).contains("grid_barrier"));
+}
