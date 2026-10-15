@@ -257,6 +257,19 @@ fn the_figures_reach_the_screen() {
     assert!(text.contains("127.0.0.1:8080"), "the address is missing");
     // Mid-request, so the phase is decode.
     assert!(text.contains("DECODE"), "the phase is missing");
+    // 512 tokens in 400ms then 128 in 90ms: the mean is over the tokens,
+    // 640 in 490ms, not over the two rates.
+    assert!(text.contains("peak 1422"), "the prompt peak is missing");
+    assert!(text.contains("avg 1306"), "the prompt mean is missing");
+}
+
+#[test]
+fn a_reset_starts_the_mean_over_from_that_moment() {
+    let snap = loaded();
+    let mut view = View::new();
+    view.reset_peaks(&snap);
+    assert_eq!(snap.prefill_total.rate_since(view.base_prefill), 0.0);
+    assert_eq!(snap.decode_total.rate_since(view.base_decode), 0.0);
 }
 
 #[test]

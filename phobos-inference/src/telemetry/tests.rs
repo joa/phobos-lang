@@ -54,6 +54,39 @@ fn a_decode_is_rated_over_every_step_it_took() {
         "two tokens rated at {:.1}/s implies a {span:.3}s span",
         done.decode_rate
     );
+    // The total counts steps between tokens, so the first token of a
+    // request adds nothing to it.
+    let total = meter.snapshot().decode_total;
+    assert_eq!(total.tokens, 1);
+    assert!(total.seconds >= 0.04, "{}", total.seconds);
+}
+
+#[test]
+fn the_mean_rate_is_tokens_over_time_and_idle_adds_nothing() {
+    let meter = Meter::new();
+    meter.request_started(128, 0);
+    meter.prefilled(128, Duration::from_millis(100));
+    meter.request_finished("stop");
+    // Idle between the two, which the total must not see.
+    std::thread::sleep(Duration::from_millis(20));
+    meter.request_started(128, 0);
+    meter.prefilled(128, Duration::from_millis(300));
+    meter.request_finished("stop");
+
+    let total = meter.snapshot().prefill_total;
+    assert_eq!(total.tokens, 256);
+    // 256 tokens in 400ms, not the mean of 1280 and 427.
+    let mean = total.rate_since(Total::default());
+    assert!((mean - 640.0).abs() < 1.0, "{mean}");
+    // Differenced against a reading taken after the first pass, only the
+    // second one is left.
+    let base = Total {
+        tokens: 128,
+        seconds: 0.1,
+    };
+    let since = total.rate_since(base);
+    assert!((since - 426.7).abs() < 1.0, "{since}");
+    assert_eq!(total.rate_since(total), 0.0);
 }
 
 fn step(item: &'static str, millis: u64, cached: bool) -> Step<'static> {

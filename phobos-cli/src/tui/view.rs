@@ -3,6 +3,8 @@
 // A snapshot is the engine's state. This is the screen's state: eased gauge
 // values, peaks, the sky, and the frame counter.
 
+use phobos_inference::telemetry::{Snapshot, Total};
+
 use super::mark::Mark;
 use super::sky::Sky;
 
@@ -26,6 +28,10 @@ pub struct View {
     /// against. Only reset by hand.
     pub best_prefill: f64,
     pub best_decode: f64,
+    /// The totals as they stood at the last reset, so the mean rate shown
+    /// covers the same stretch as the peak.
+    pub base_prefill: Total,
+    pub base_decode: Total,
 }
 
 impl Default for View {
@@ -47,6 +53,8 @@ impl View {
             decode: 0.0,
             best_prefill: 0.0,
             best_decode: 0.0,
+            base_prefill: Total::default(),
+            base_decode: Total::default(),
         }
     }
 
@@ -67,8 +75,11 @@ impl View {
         self.splash = super::splash::FRAMES;
     }
 
-    pub fn reset_peaks(&mut self) {
+    /// Start the peaks and the means over from `snap`.
+    pub fn reset_peaks(&mut self, snap: &Snapshot) {
         self.best_prefill = 0.0;
         self.best_decode = 0.0;
+        self.base_prefill = snap.prefill_total;
+        self.base_decode = snap.decode_total;
     }
 }

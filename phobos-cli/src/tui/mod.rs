@@ -188,7 +188,7 @@ pub fn run(meter: Arc<Meter>, ready: SyncSender<Option<String>>) -> Result<()> {
                 // Raw mode swallows the interrupt, so handle Ctrl-C here.
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => break,
                 KeyCode::Char('c') => meter.clear_log(),
-                KeyCode::Char('r') => view.reset_peaks(),
+                KeyCode::Char('r') => view.reset_peaks(&snapshot),
                 KeyCode::Char('p') => view.replay_splash(),
                 _ => {}
             },

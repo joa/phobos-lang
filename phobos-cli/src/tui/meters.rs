@@ -217,43 +217,63 @@ pub(super) fn throughput(frame: &mut Frame, view: &mut View, snap: &Snapshot, ar
     rate(
         frame,
         halves[0],
-        "PROMPT",
-        view.prefill,
-        view.best_prefill,
+        Reading {
+            label: "PROMPT",
+            value: view.prefill,
+            best: view.best_prefill,
+            mean: snap.prefill_total.rate_since(view.base_prefill),
+            color: theme::BRAND,
+        },
         &snap.prefill_history,
-        theme::BRAND,
     );
     rate(
         frame,
         halves[1],
-        "DECODE",
-        view.decode,
-        view.best_decode,
+        Reading {
+            label: "DECODE",
+            value: view.decode,
+            best: view.best_decode,
+            mean: snap.decode_total.rate_since(view.base_decode),
+            color: theme::NEBULA,
+        },
         &snap.decode_history,
-        theme::NEBULA,
     );
 }
 
-/// One rate: the figure, its units, its best so far, and its recent shape.
-fn rate(
-    frame: &mut Frame,
-    area: Rect,
-    label: &str,
+/// One rate as the panel shows it: the eased figure, its peak and its mean
+/// since the last reset, all in tokens per second.
+struct Reading {
+    label: &'static str,
     value: f64,
     best: f64,
-    history: &[f64],
+    mean: f64,
     color: Color,
-) {
+}
+
+/// One rate: the figure, its units, its best and mean so far, and its recent
+/// shape.
+fn rate(frame: &mut Frame, area: Rect, reading: Reading, history: &[f64]) {
     if area.height == 0 {
         return;
     }
+    let Reading {
+        label,
+        value,
+        best,
+        mean,
+        color,
+    } = reading;
     let text = anim::rate_text(value);
     let lit = anim::relative(value, best, color);
     let mut lines = vec![Line::from(vec![
         Span::styled(format!("{label} "), theme::muted()),
         Span::styled("tok/s", theme::muted()),
         Span::styled(
-            format!("   peak {}", anim::rate_text(best)),
+            format!(
+                "   peak {}   avg {}",
+                anim::rate_text(best),
+                anim::rate_text(mean)
+            ),
             Style::default().fg(theme::FAINT),
         ),
     ])];

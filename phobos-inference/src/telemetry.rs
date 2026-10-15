@@ -61,6 +61,36 @@ pub struct Request {
     pub at: Duration,
 }
 
+/// Tokens and the time they took, summed since the meter began. Only the
+/// time spent producing them counts, so a viewer gets the mean rate over
+/// any stretch by differencing two readings.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Total {
+    pub tokens: u64,
+    pub seconds: f64,
+}
+
+impl Total {
+    /// A step that took no time rates as nothing and counts as nothing.
+    fn add(&mut self, tokens: usize, took: Duration) {
+        if took.is_zero() {
+            return;
+        }
+        self.tokens += tokens as u64;
+        self.seconds += took.as_secs_f64();
+    }
+
+    /// The mean rate since `base` was read, or zero when nothing was
+    /// measured in between.
+    pub fn rate_since(self, base: Total) -> f64 {
+        let seconds = self.seconds - base.seconds;
+        if seconds <= 0.0 {
+            return 0.0;
+        }
+        self.tokens.saturating_sub(base.tokens) as f64 / seconds
+    }
+}
+
 /// One log line from the runtime.
 #[derive(Clone, Debug)]
 pub struct LogLine {
@@ -215,6 +245,9 @@ pub struct Snapshot {
     pub decode_rate: f64,
     pub prefill_history: Vec<f64>,
     pub decode_history: Vec<f64>,
+    /// Every prompt token and every decode step so far.
+    pub prefill_total: Total,
+    pub decode_total: Total,
     pub requests: u64,
     pub prompt_tokens: u64,
     /// The part of [`Snapshot::prompt_tokens`] a kept session already held.
@@ -251,6 +284,8 @@ struct Inner {
     decode_rate: f64,
     prefill_history: VecDeque<f64>,
     decode_history: VecDeque<f64>,
+    prefill_total: Total,
+    decode_total: Total,
     requests: u64,
     prompt_tokens: u64,
     prompt_reused: u64,
@@ -299,6 +334,8 @@ impl Meter {
                 decode_rate: 0.0,
                 prefill_history: VecDeque::new(),
                 decode_history: VecDeque::new(),
+                prefill_total: Total::default(),
+                decode_total: Total::default(),
                 requests: 0,
                 prompt_tokens: 0,
                 prompt_reused: 0,
@@ -468,6 +505,7 @@ impl Meter {
         inner.phase = Phase::Decode;
         inner.prefill_rate = rate;
         push_capped(&mut inner.prefill_history, rate, HISTORY);
+        inner.prefill_total.add(tokens, took);
         if let Some(live) = inner.live.as_mut() {
             live.prefill_rate = rate;
             live.decode_started = Some(Instant::now());
@@ -492,9 +530,11 @@ impl Meter {
         // pass is not a decode step.
         let interval = live.last_token.map(|last| now.duration_since(last));
         live.last_token = Some(now);
-        let Some(rate) = interval.map(|d| rate_of(1, d)) else {
+        let Some(interval) = interval else {
             return;
         };
+        inner.decode_total.add(1, interval);
+        let rate = rate_of(1, interval);
         inner.decode_rate = if inner.decode_rate > 0.0 {
             inner.decode_rate + DECODE_SMOOTHING * (rate - inner.decode_rate)
         } else {
@@ -557,6 +597,8 @@ impl Meter {
             decode_rate: inner.decode_rate,
             prefill_history: inner.prefill_history.iter().copied().collect(),
             decode_history: inner.decode_history.iter().copied().collect(),
+            prefill_total: inner.prefill_total,
+            decode_total: inner.decode_total,
             requests: inner.requests,
             prompt_tokens: inner.prompt_tokens,
             prompt_reused: inner.prompt_reused,
