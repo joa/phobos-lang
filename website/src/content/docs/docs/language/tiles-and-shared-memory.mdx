@@ -158,3 +158,51 @@ Shared memory is not the only place a tile can live. An accumulator that is
 only ever updated element by element can stay in each thread's registers
 instead, which frees its shared memory and skips the barriers. That is what
 [`@registers`](/docs/attributes/registers/) asks for.
+
+## Computed tiles: `generate`
+
+A tile does not have to be copied from anywhere. `generate(f)` declares one
+whose elements are computed where the tile is read:
+
+```phobos
+fn dequant(i, j) {
+  let q = f32(Q[r + i, j])
+  q * S[r + i, 0]
+}
+
+@launch(256)
+@aligned(M = 8)
+kernel scale_rows(Q: tensor<i8>[M, 64], S: tensor<f32>[M, 1],
+                  Y: tensor<f32>[M, 64]) {
+  let r = ctx.block.x * 8
+  let w: tile<f32>[8, 64] = generate(dequant)
+  Y[r :+ 8, :] = w * 2.0
+}
+```
+
+The declaration names the tile's element type and shape, `tile<T>[rows,
+cols]`, since nothing else gives them. `f` is a statement function whose body
+ends in an expression, the value at one place in the tile. It is called as
+`f(row, unit)`: for most element types a unit is one element, so `unit` is
+the column. For an 8-bit tile a unit is a 4-byte word, bytes `4 * unit` to
+`4 * unit + 3` packed little-endian the way `word` packs them, and `f` returns
+the word.
+
+The names in `f`'s body other than its own resolve in the kernel's scope:
+`r` above is the kernel's. `f` may read tensors and tiles but not write them.
+When and how often it runs is the compiler's choice, so a `var` it reads
+should not change between the declaration and the tile's reads.
+
+Where a generated tile lives is the compiler's choice, made from how it is
+read. Today it stays in registers in one case: as an operand of an int8
+fragment accumulator's update, the scaled `dot_t`'s activation, weight and
+scales, or the row and column of `acc += r * c`. Each lane then computes only
+the words its own fragments hold, so the tile never touches shared memory and
+needs no barrier. [Quantized built-ins](/docs/language/quantized/#a-weight-decoded-where-it-is-read)
+shows a Q5_0 projection written that way. Any other read, such as `w * 2.0`
+above, stores the tile to a shared tile where it is declared, each thread
+computing a share of it, with a barrier after. The set of reads served from
+registers is expected to grow; a kernel does not change when it does.
+
+A cluster kernel does not accept `generate`. See the `generate` row under
+[Functions](/docs/reference/spec/#functions) in the spec.
