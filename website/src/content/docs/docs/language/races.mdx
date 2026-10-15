@@ -116,7 +116,7 @@ data, the check can only say a race is possible.
 - **Shared memory only.** Global memory is not checked, nor races between
   CTAs, nor an atomic against a plain access to the same byte.
 
-From a checkout, `cargo test -p phobos-lang` runs the check over every kernel
-in the repository, on `sm_75` with 32-bit and 64-bit indices and on `sm_80`,
+From a checkout, `cargo test -p phobos-lang` runs the check over every `.ph`
+file in the repository, on `sm_75` with 32-bit and 64-bit indices and on `sm_80`,
 and the `race` example of `phobos-lang` lists every finding of a file in
 full, including the possible ones.
