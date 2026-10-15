@@ -230,16 +230,6 @@ enum Part {
     Inherit,
 }
 
-/// How much of a value a stage reads.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Read {
-    /// Only the reader's own unit, so nothing crosses a block.
-    Local,
-    /// All of it, as a contraction does. Needs a barrier when the writer
-    /// split the value across the grid.
-    All,
-}
-
 impl Stage {
     pub(crate) fn norm_q(x: Val, gain: Val, out: Val, width: usize, eps: f32) -> Stage {
         Stage::NormQ {
@@ -267,25 +257,20 @@ impl Stage {
         }
     }
 
-    fn reads(&self) -> Vec<(Val, Read)> {
+    fn reads(&self) -> Vec<Val> {
         match *self {
-            Stage::NormQ { x, gain, .. } => vec![(x, Read::All), (gain, Read::All)],
+            Stage::NormQ { x, gain, .. } => vec![x, gain],
             Stage::ProjQ { a, w, .. }
             | Stage::ProjF { a, w, .. }
             | Stage::ProjRaw { a, w, .. }
-            | Stage::ProjRawF { a, w, .. } => vec![(a, Read::All), (w, Read::All)],
-            Stage::Swiglu { g, u, .. } => vec![(g, Read::Local), (u, Read::Local)],
-            Stage::QuantQ { h, .. } => vec![(h, Read::Local)],
-            // `y` is read only where it is written, so it crosses no block.
-            Stage::ProjAdd { a, w, y, .. } | Stage::ProjAddRaw { a, w, y, .. } => {
-                vec![(a, Read::All), (w, Read::All), (y, Read::Local)]
-            }
-            // A head's row spans several projection units, so the stream is
-            // read across blocks.
-            Stage::Conv { history, taps, .. } => vec![(history, Read::All), (taps, Read::All)],
+            | Stage::ProjRawF { a, w, .. } => vec![a, w],
+            Stage::Swiglu { g, u, .. } => vec![g, u],
+            Stage::QuantQ { h, .. } => vec![h],
+            Stage::ProjAdd { a, w, y, .. } | Stage::ProjAddRaw { a, w, y, .. } => vec![a, w, y],
+            Stage::Conv { history, taps, .. } => vec![history, taps],
             Stage::Gates {
                 raw, rate, bias, ..
-            } => vec![(raw, Read::All), (rate, Read::All), (bias, Read::All)],
+            } => vec![raw, rate, bias],
         }
     }
 
@@ -426,10 +411,13 @@ pub(crate) struct Scratch {
     pub(crate) scales: usize,
 }
 
-/// A tensor the fused kernel declares in its body, which the launch appends
-/// after the slots, in declaration order: one buffer of a scratch pair.
-#[derive(Debug, Clone, Copy)]
+/// A tensor the fused kernel declares in its body: one buffer of a scratch
+/// pair. The compiler publishes it or holds it in shared memory, and the
+/// launch appends the published ones after the slots, in the order its
+/// report gives.
+#[derive(Debug, Clone)]
 pub(crate) struct ScratchArg {
+    pub(crate) name: String,
     /// The pair, by index into [`Plan::scratch`].
     pub(crate) at: usize,
     /// The scales buffer rather than the bytes.
@@ -447,8 +435,4 @@ pub(crate) struct Plan {
     /// The scratch tensors the source declares, in order.
     pub(crate) scratch_args: Vec<ScratchArg>,
     pub(crate) blocks: u32,
-    /// Grid barriers the chain needs.
-    pub(crate) barriers: usize,
-    /// Values kept in shared memory rather than published to device memory.
-    pub(crate) held: usize,
 }

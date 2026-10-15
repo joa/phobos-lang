@@ -109,17 +109,18 @@ impl DeviceBackend {
             // SAFETY: the function belongs to a module alive for this call.
             let (allowed, _) = unsafe { persistent_grid(func, CTA_THREADS, 0)? };
             if allowed >= blocks {
+                let launch = Launch::new(&plan)?;
                 phobos_base::phdebug!(
                     "fused kernel: stages={} blocks={blocks} barriers={} published={} held={}",
                     key.stages(),
-                    plan.barriers,
-                    plan.scratch.len(),
-                    plan.held
+                    launch.barriers,
+                    launch.scratch.len(),
+                    launch.held
                 );
                 self.fused_blocks.set(blocks);
                 self.fused_plans
                     .borrow_mut()
-                    .insert(key.clone(), (module, plan));
+                    .insert(key.clone(), (module, plan, launch));
                 return Ok(Some(key));
             }
             blocks = allowed;
@@ -145,7 +146,7 @@ impl DeviceBackend {
     /// Binds a plan's slots and launches it.
     pub(super) fn fused_launch(&self, chain: &Chain, key: &ChainKey) -> Result<()> {
         let plans = self.fused_plans.borrow();
-        let (module, plan) = &plans[key];
+        let (module, plan, launch) = &plans[key];
         self.grow_scratch(&plan.scratch)?;
 
         let quants = self.quants.borrow();
@@ -189,8 +190,8 @@ impl DeviceBackend {
             };
             operands.push((ptr, slot.dims));
         }
-        // The scratch the kernel declares, in declaration order.
-        for arg in &plan.scratch_args {
+        // The scratch the compiler published, in its order.
+        for arg in &launch.scratch {
             let (bytes, scales) = &pool[arg.at];
             let ptr = match arg.scales {
                 false => bytes.as_device_ptr().as_raw(),
@@ -198,11 +199,46 @@ impl DeviceBackend {
             };
             operands.push((ptr, arg.dims));
         }
-        // `grid_barrier()` reads the barrier word a persistent launch appends.
-        if plan.barriers > 0 {
+        // A grid barrier reads the word a persistent launch appends.
+        if launch.word {
             operands.push((self.fused_bar()?, [2, 1]));
         }
         self.launch(module, FUSED_KERNEL, &operands, (plan.blocks, 1, 1))
+    }
+}
+
+/// What a fused kernel takes beyond its slots, as the compiler decided it.
+pub(super) struct Launch {
+    /// The declared scratch the compiler published, in parameter order.
+    scratch: Vec<crate::backend::fuse::ScratchArg>,
+    /// Whether the barrier word follows.
+    word: bool,
+    barriers: usize,
+    /// The held values the kernel asserts `@shared`, bytes and scales.
+    held: usize,
+}
+
+impl Launch {
+    fn new(plan: &Plan) -> Result<Launch> {
+        let report = phobos_kernels::compile::launch_report(&plan.source, FUSED_KERNEL)?;
+        let scratch = report
+            .scratch
+            .iter()
+            .map(|p| {
+                plan.scratch_args
+                    .iter()
+                    .find(|a| a.name == p.name)
+                    .cloned()
+                    .with_context(|| format!("the compiler published `{}`, which the plan never claimed", p.name))
+            })
+            .collect::<Result<_>>()?;
+        let held = plan.source.lines().find_map(|l| l.strip_prefix("@shared(")).map_or(0, |l| l.split(',').count());
+        Ok(Launch {
+            scratch,
+            word: report.barrier_word,
+            barriers: report.grid_barriers.len(),
+            held,
+        })
     }
 }
 

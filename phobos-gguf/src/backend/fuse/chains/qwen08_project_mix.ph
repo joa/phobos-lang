@@ -10,18 +10,18 @@ kernel fused(X0F: tensor<f32>[32, 32],
              X1F: tensor<f32>[32, 32],
              Wq9: tensor<i8>[8224, 1024],
              Ws9: tensor<f32>[8224, 32],
-             X3: tensor<f32>[1, 8224],
              X2G: tensor<f32>[4, 6144],
+             X3: tensor<f32>[1, 8224],
              X4G: tensor<f32>[4, 6144],
              X5: tensor<f32>[1, 6176],
              X6: tensor<f32>[1, 16],
              X7: tensor<f32>[1, 16]) {
   let p = ctx.block.x
-  let X2 = flat(X2G)
   var Aq8: tensor<i8>[32, 32]
   var As8: tensor<f32>[32, 1]
   let Aq8L = flat(Aq8)
   let As8L = flat(As8)
+  let X2 = flat(X2G)
 
   rms_norm_q(X0F, X1F, Aq8, As8, NB0, 0.000001000000)
 
