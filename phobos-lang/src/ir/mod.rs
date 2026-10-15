@@ -349,6 +349,14 @@ impl Ir {
         }
     }
 
+    /// `op`, then every op in its blocks, as [`Ir::walk`] orders them.
+    pub fn walk_from(&self, op: OpId, f: &mut impl FnMut(OpId)) {
+        f(op);
+        for &inner in self.blocks_of(op) {
+            self.walk(inner, f);
+        }
+    }
+
     /// [`Ir::walk`] over the whole kernel, collected.
     pub fn all_ops(&self) -> Vec<OpId> {
         let mut out = Vec::new();
@@ -373,6 +381,18 @@ impl Ir {
             parent: None,
         }));
         block
+    }
+
+    /// A new argument of `block` at `index`, the arguments after it moving
+    /// up one.
+    pub fn insert_arg(&mut self, block: BlockId, index: usize, ty: Type) -> ValueId {
+        let value = self.new_value(ty, Def::Arg { block, index });
+        let args = &mut self.block_data_mut(block).args;
+        args.insert(index, value);
+        for (i, a) in args.clone().into_iter().enumerate().skip(index + 1) {
+            self.value_data_mut(a).def = Def::Arg { block, index: i };
+        }
+        value
     }
 
     fn new_value(&mut self, ty: Type, def: Def) -> ValueId {

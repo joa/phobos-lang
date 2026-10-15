@@ -1,0 +1,21 @@
+---
+title: "@global"
+description: Keeps a persistent kernel's scratch tensor in device memory, where every block shares one copy.
+sidebar:
+  order: 12
+---
+
+A tensor declared in a [`@persistent`](/docs/attributes/persistent/) kernel
+is scratch the launch owns. The compiler holds it in shared memory when
+every block writes all of it alike, and publishes it to device memory
+otherwise.
+
+```text
+@global(H, ..)
+```
+
+`@global` keeps each named scratch tensor in device memory even when it
+could be held: one buffer every block shares, a parameter the launch
+supplies after the declared ones. [`@shared`](/docs/attributes/shared/)
+asserts the opposite. See the [Attributes](/docs/reference/spec/#attributes)
+table in the spec.

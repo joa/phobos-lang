@@ -1,7 +1,8 @@
 // The 0.8B's delta-rule input projection with its mix as one persistent
-// kernel, written from the stage library as the fuse pass plans it: the
-// projection's two runs, a grid barrier, then per head the short
-// convolution and its norms, and per value head the two gates.
+// kernel, written from the stage library: the projection's two runs, then
+// per head the short convolution and its norms, and per value head the two
+// gates. The first run writes the newest row of the history the convolution
+// reads, which is what its grid barrier orders.
 @launch(256)
 @persistent(BLOCKS)
 @autotune(BLOCKS in [192], NB0 in [32], IT1 in [1], UN1 in [192], DO1 in [18432], IT2 in [1], UN2 in [65], OF2 in [6144], DO2 in [6144], IT3 in [1], UN3 in [48], KS in [4], HD in [128], NH in [16], PS in [2048], ST in [128], GH4 in [16])
@@ -9,7 +10,6 @@ kernel fused(X0F: tensor<f32>[32, 32],
              X1F: tensor<f32>[32, 32],
              Wq9: tensor<i8>[8224, 1024],
              Ws9: tensor<f32>[8224, 32],
-             X2: tensor<f32>[1, 24576],
              X3: tensor<f32>[1, 8224],
              X2G: tensor<f32>[4, 6144],
              X4G: tensor<f32>[4, 6144],
@@ -17,8 +17,9 @@ kernel fused(X0F: tensor<f32>[32, 32],
              X6: tensor<f32>[1, 16],
              X7: tensor<f32>[1, 16]) {
   let p = ctx.block.x
-  var Aq8: tile<i8>[32, 32]
-  var As8: tile<f32>[32, 1]
+  let X2 = flat(X2G)
+  var Aq8: tensor<i8>[32, 32]
+  var As8: tensor<f32>[32, 1]
   let Aq8L = flat(Aq8)
   let As8L = flat(As8)
 
@@ -42,7 +43,7 @@ kernel fused(X0F: tensor<f32>[32, 32],
     }
   }
 
-  grid_barrier()
+  // the compiler places a grid barrier here
 
   for i3 in range(0, IT3) {
     let u3 = p + i3 * ctx.blocks.x

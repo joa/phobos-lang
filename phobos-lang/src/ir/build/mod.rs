@@ -152,9 +152,9 @@ pub(crate) struct Build {
     decls: HashMap<(String, ValueId), Decl>,
     /// The declaration the next [`Build::bind`] of its name records.
     pub(crate) declaring: Option<(String, Decl)>,
-    /// Each scratch tensor's parameter, by where it is declared, for its
-    /// declaration to bind.
-    pub(crate) scratch: HashMap<Span, ValueId>,
+    /// Each scratch tensor's type, by where it is declared, for its
+    /// declaration to mark.
+    pub(crate) scratch: HashMap<Span, Type>,
 }
 
 /// A name used whose declaration already failed. It is reported once, at
@@ -279,7 +279,8 @@ pub fn build(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut params = params;
-    // Scratch the launch owns, appended in declaration order.
+    // Scratch the launch owns: a marker where it is declared, which a pass
+    // places in shared or device memory.
     let scratch = kernel.scratch();
     if let Some(&(name, _, at)) = scratch.first()
         && kernel.persistent().ok().flatten().is_none()
@@ -295,7 +296,7 @@ pub fn build(
             let e = anyhow!("scratch tensor `{name}` needs a static shape: literals or `@autotune` constants");
             return Err(locate(&kernel.source, &empty, e, at));
         }
-        params.push(t);
+        b.scratch.insert(at, t);
     }
     if info.grid_barrier {
         params.push(b.param_type(kernel, &params::grid_barrier_type())?);

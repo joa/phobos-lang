@@ -1,7 +1,7 @@
-// The 0.8B's MLP as one persistent kernel, written from the stage library
-// as the fuse pass plans it: the norm held per block, the gate and up
-// projections a 32-column unit each with their SwiGLU quantized to scratch,
-// a grid barrier, then the down projection accumulated into the residual.
+// The 0.8B's MLP as one persistent kernel, written from the stage library:
+// the norm, the gate and up projections a 32-column unit each with their
+// SwiGLU quantized, then the down projection accumulated into the residual.
+// Where each value lives and where the grid barrier goes is the compiler's.
 @launch(256)
 @persistent(BLOCKS)
 @autotune(BLOCKS in [192], NB0 in [32], IT1 in [1], UN1 in [112], OF2 in [3584], IT2 in [1], UN2 in [128], TN in [8])
@@ -10,11 +10,11 @@ kernel fused(X0F: tensor<f32>[32, 32],
              Wq3: tensor<i8>[7168, 1024],
              Ws3: tensor<f32>[7168, 32],
              Wq8: tensor<i8>[1024, 3584],
-             Ws8: tensor<f32>[1024, 112],
-             X0: tensor<f32>[1, 1024]) {
+             Ws8: tensor<f32>[1024, 112]) {
   let p = ctx.block.x
-  var Aq2: tile<i8>[32, 32]
-  var As2: tile<f32>[32, 1]
+  let X0 = flat(X0F)
+  var Aq2: tensor<i8>[32, 32]
+  var As2: tensor<f32>[32, 1]
   let Aq2L = flat(Aq2)
   let As2L = flat(As2)
   var Vq7F: tensor<i8>[112, 32]
@@ -35,7 +35,7 @@ kernel fused(X0F: tensor<f32>[32, 32],
     }
   }
 
-  grid_barrier()
+  // the compiler places a grid barrier here
 
   for i2 in range(0, IT2) {
     let u2 = p + i2 * ctx.blocks.x

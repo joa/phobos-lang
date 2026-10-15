@@ -409,6 +409,7 @@ fn kind_name(kind: &OpKind) -> &'static str {
         OpKind::GridBarrier => "grid_barrier",
         OpKind::AssumeAlign => "assume_align",
         OpKind::Alloc => "alloc",
+        OpKind::Scratch => "scratch",
         OpKind::Slice(_) => "slice",
         OpKind::Flat => "flat",
         OpKind::Stage(_) => "stage",

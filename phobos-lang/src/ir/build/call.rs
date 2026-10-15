@@ -462,8 +462,8 @@ impl Build {
         // A scratch tensor's flat view: the whole buffer as one row.
         if let Type::Tensor(t) = self.ir.ty(src).clone() {
             let [rows, cols] = [shape[0], shape[1]];
-            if rows == DYN || cols == DYN || !self.is_scratch(src) {
-                bail!("`flat` of a tensor takes a scratch tensor, declared in the kernel with a static shape");
+            if rows == DYN || cols == DYN || !self.is_whole_tensor(src) {
+                bail!("`flat` of a tensor takes a whole one of a static shape: a parameter or scratch, not a slice");
             }
             let ty = Type::Tensor(crate::ir::TensorType {
                 elem: t.elem,
@@ -497,9 +497,17 @@ impl Build {
         Ok(self.value(OpKind::Flat, &[src], ty))
     }
 
-    /// Whether `v` is a scratch tensor's parameter, as its declaration binds it.
-    fn is_scratch(&self, v: ValueId) -> bool {
-        self.scratch.values().any(|&s| s == v)
+    /// Whether `v` is a whole tensor, a parameter or scratch, as a name binds
+    /// it: no slice of one.
+    fn is_whole_tensor(&self, v: ValueId) -> bool {
+        match self.ir.def_op(v) {
+            None => true,
+            Some(op) => match self.ir.kind(op) {
+                OpKind::Scratch => true,
+                OpKind::AssumeAlign => self.is_whole_tensor(self.ir.operand(op, 0)),
+                _ => false,
+            },
+        }
     }
 
     fn emit_atomic_add(&mut self, args: &[Expr]) -> Result<Rv> {

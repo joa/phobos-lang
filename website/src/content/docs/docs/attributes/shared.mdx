@@ -1,0 +1,44 @@
+---
+title: "@shared"
+description: Asserts that a persistent kernel's scratch tensor lives in shared memory, one copy per block.
+sidebar:
+  order: 11
+---
+
+A tensor declared in a [`@persistent`](/docs/attributes/persistent/) kernel
+is scratch the launch owns. The compiler holds one in shared memory when
+every block writes all of it alike: each block then has its own complete
+copy and reads only that, so the value never leaves the block. Anything
+else is published to device memory, which another block can read after a
+grid barrier.
+
+```text
+@shared(H, ..)
+```
+
+`@shared` asserts that each named scratch tensor is held, and fails
+compilation if one cannot be: some block writes only part of it, or the held
+scratch together would outgrow the 48 KB of static shared memory.
+[`@global`](/docs/attributes/global/) vetoes holding instead.
+
+```phobos
+@launch(256)
+@persistent(BLOCKS)
+@autotune(BLOCKS in [8])
+@shared(H)
+kernel k(X: tensor<f32>[1, 256], Y: tensor<f32>[1, 256]) {
+  var H: tensor<f32>[1, 256]
+  H[0, ctx.thread] = X[0, ctx.thread] * 2.0
+  barrier()
+  for i in range(0, 4) {
+    let u = ctx.block.x + i * ctx.blocks.x
+    if u < 32 {
+      Y[0 :+ 1, u * 8 :+ 8] = H[0 :+ 1, u * 8 :+ 8] + 1.0
+    }
+  }
+}
+```
+
+Every block writes all of `H` from `X`, so `H` is a shared tile, and its
+reads need no grid barrier. See the [Attributes](/docs/reference/spec/#attributes)
+table in the spec.

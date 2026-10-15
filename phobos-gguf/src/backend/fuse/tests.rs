@@ -657,23 +657,65 @@ fn a_ragged_raw_run_stores_its_remainder() {
     assert!(src.contains("if q == 0 && cu < 32 {"), "{src}");
 }
 
-/// The chains written by hand from the stage library compile to the kernels
-/// the pass writes for them, PTX for PTX.
+/// The chains written by hand from the stage library, with no barrier and
+/// no tile in them, compile to the same PTX as with the barrier each needs
+/// written where its comment says and its held values declared as tiles: the
+/// compiler places both as the pass does.
 #[cfg(feature = "cuda")]
 #[test]
-fn the_hand_written_chains_are_the_planned_ones() {
+fn the_compiler_places_what_the_chains_leave_out() {
     use phobos_kernels::compile::ptx_for;
     let lib = include_str!("lib.ph");
+    let explicit = |stripped: &str| {
+        let mut s = stripped.replace("  // the compiler places a grid barrier here
+", "  grid_barrier()
+");
+        for held in ["Aq2", "As2", "Aq4", "As4", "Aq8", "As8"] {
+            s = s.replace(&format!("var {held}: tensor<"), &format!("var {held}: tile<"));
+        }
+        s
+    };
     let chains = [
-        ("qwen08_mlp", include_str!("chains/qwen08_mlp.ph"), qwen_plan()),
-        ("qwen08_project", include_str!("chains/qwen08_project.ph"), qwen_project_plan(false)),
-        ("qwen08_project_mix", include_str!("chains/qwen08_project_mix.ph"), qwen_project_plan(true)),
+        ("qwen08_mlp", include_str!("chains/qwen08_mlp.ph")),
+        ("qwen08_project", include_str!("chains/qwen08_project.ph")),
+        ("qwen08_project_mix", include_str!("chains/qwen08_project_mix.ph")),
     ];
-    for (name, chain, plan) in chains {
+    for (name, chain) in chains {
         for chip in ["sm_75", "sm_80"] {
-            let hand = ptx_for(chip, &format!("{lib}\n{chain}"), name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
-            let planned = ptx_for(chip, &plan.source, name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
-            assert!(hand == planned, "{name} on {chip}: the hand-written chain compiles to other PTX");
+            let compile = |src: &str| ptx_for(chip, &format!("{lib}
+{src}"), name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(compile(chain) == compile(&explicit(chain)), "{name} on {chip}: the placed chain differs from the written one");
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn the_compiler_places_every_barrier_the_planner_writes() {
+    use phobos_kernels::compile::ptx_for;
+    let plans = [
+        ("qwen08_mlp", qwen_plan()),
+        ("qwen08_project_mix", qwen_project_plan(true)),
+        ("grouped_project_mix", qwen_project_plan_heads(true, 8, true)),
+        ("qwen4b_mlp", qwen_4b_plan(64)),
+        ("qwen4b_mlp_wide", qwen_4b_plan(192)),
+        ("qwen4b_project", qwen_4b_project_plan()),
+    ];
+    // The planner's barriers dropped, and the scratch it holds declared as
+    // a tensor, so the compiler has to place both.
+    let is_held = |line: &str| line.starts_with("  var ") && !line.contains('=') && line.contains(": tile<");
+    let strip = |line: &str| match line {
+        _ if line.trim() == "grid_barrier()" => None,
+        _ if is_held(line) => Some(line.replacen(": tile<", ": tensor<", 1)),
+        _ => Some(line.to_string()),
+    };
+    for (name, plan) in plans {
+        let held = plan.source.lines().filter(|l| is_held(l)).count();
+        assert_eq!(held, 2, "{name}: the planner holds one quantized row, bytes and scales");
+        let stripped: String = plan.source.lines().filter_map(strip).map(|l| format!("{l}\n")).collect();
+        for chip in ["sm_75", "sm_80"] {
+            let compile = |src: &str| ptx_for(chip, src, name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
+            assert!(compile(&plan.source) == compile(&stripped), "{name} on {chip}: the placed barriers or held scratch differ from the planned ones");
         }
     }
 }

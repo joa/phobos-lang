@@ -140,11 +140,14 @@ pub const ATTRIBUTES: &[&str] = &[
     "autotune",
     "cluster",
     "dynshared",
+    "global",
+    "grid_barriers",
     "launch",
     "padstage",
     "persistent",
     "pipeline",
     "registers",
+    "shared",
     "swizzle",
     "tensorcore",
 ];
@@ -339,6 +342,31 @@ impl Kernel {
             });
         }
         found
+    }
+
+    /// The names an attribute lists, as `@shared(a, b)` does.
+    pub fn named_by(&self, attr: &str) -> Vec<String> {
+        self.attrs
+            .iter()
+            .filter(|a| a.name == attr)
+            .flat_map(|a| a.args.iter())
+            .filter_map(|arg| match arg {
+                AttrArg::Positional(Literal::Ident(name)) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `@grid_barriers(n)`: the grid barriers the kernel has, written and
+    /// placed together.
+    pub fn grid_barriers(&self) -> Result<Option<usize>, String> {
+        let Some(attr) = self.attr("grid_barriers") else {
+            return Ok(None);
+        };
+        match &attr.args[..] {
+            [AttrArg::Positional(Literal::Int(n))] if *n >= 0 => Ok(Some(*n as usize)),
+            _ => Err("`@grid_barriers` takes the kernel's barrier count, as `@grid_barriers(1)`".to_string()),
+        }
     }
 
     /// The tiles `@registers(a, b, ..)` asks to keep in registers.

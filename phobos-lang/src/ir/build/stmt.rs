@@ -49,9 +49,14 @@ impl Build {
                 span,
                 ..
             } => {
-                let Some(&t) = self.scratch.get(span) else {
-                    bail!("internal: scratch tensor `{name}` has no parameter");
+                let Some(ty) = self.scratch.get(span).cloned() else {
+                    bail!("internal: scratch tensor `{name}` has no type");
                 };
+                let mark = self.value(OpKind::Scratch, &[], ty.clone());
+                self.ir.set_name(mark, name);
+                // Aligned as a tensor parameter of its element type is.
+                let aligned = ty.elem().is_some_and(|e| matches!(e, Scalar::F32 | Scalar::F16 | Scalar::BF16 | Scalar::I8));
+                let t = if aligned { self.value(OpKind::AssumeAlign, &[mark], ty) } else { mark };
                 self.bind(name, Binding::Tensor(t));
             }
             Stmt::Var {

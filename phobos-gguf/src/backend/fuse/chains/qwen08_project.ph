@@ -1,7 +1,7 @@
 // The 0.8B's delta-rule input projection as one persistent kernel, written
-// from the stage library as the fuse pass plans it: the norm held per block,
-// then the channel and gate runs of one Q8_0 weight, 32 columns a unit,
-// with no barrier between, since every block holds the whole normed row.
+// from the stage library: the norm, then the channel and gate runs of one
+// Q8_0 weight, 32 columns a unit. Every block writes the whole normed row,
+// so it is held and no barrier is needed.
 @launch(256)
 @persistent(BLOCKS)
 @autotune(BLOCKS in [192], NB0 in [32], IT1 in [1], UN1 in [192], DO1 in [18432], IT2 in [1], UN2 in [65], OF2 in [6144], DO2 in [6144])
@@ -12,8 +12,8 @@ kernel fused(X0F: tensor<f32>[32, 32],
              X2: tensor<f32>[1, 24576],
              X3: tensor<f32>[1, 8224]) {
   let p = ctx.block.x
-  var Aq4: tile<i8>[32, 32]
-  var As4: tile<f32>[32, 1]
+  var Aq4: tensor<i8>[32, 32]
+  var As4: tensor<f32>[32, 1]
   let Aq4L = flat(Aq4)
   let As4L = flat(As4)
 

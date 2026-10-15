@@ -3,11 +3,14 @@
   "autotune",
   "cluster",
   "dynshared",
+  "global",
+  "grid_barriers",
   "launch",
   "padstage",
   "persistent",
   "pipeline",
   "registers",
+  "shared",
   "swizzle",
   "tensorcore"
 ]
