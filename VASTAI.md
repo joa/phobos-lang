@@ -181,6 +181,27 @@ processes. That is the reporting, not a tenant, and it is the one case
 so the card's persistent kernels compile outside the timed rounds and a model
 that does not load stops the run within a minute.
 
+### The platforms page
+
+`scripts/vastai/platform.sh REF` produces one card's row of the website's
+supported-platforms page: it builds Phobos and `phobos-kbench` from `REF`,
+runs `bench.py` on Qwen3.5-4B Q4_K_M against llama.cpp b11681 in the
+Benchmarks page's shape, then `phobos-kbench` twice. It needs cuBLAS, so rent
+`nvidia/cuda:12.8.1-devel-ubuntu24.04` with `--disk 50`, and run
+`scripts/vastai/gate.sh` first: it prints the idle readings, the driver's
+power-capping counter and the link speed this file says to check.
+
+```powershell
+scp -P PORT scripts/vastai/gate.sh scripts/vastai/platform.sh scripts/vastai/build.sh scripts/bench.py root@HOST:/root/
+ssh -p PORT root@HOST "bash /root/gate.sh"
+ssh -p PORT root@HOST "nohup bash /root/platform.sh REF > /root/platform.out 2>&1 < /dev/null &"
+```
+
+Each card's files go to `results/platforms/<card>/` beside a `card.json`, with
+`meta.commit` in `bench.json` set to the short commit. A 3090 holds about
+150 W for two seconds after a process exits, which `bench.py`'s between-round
+check reads as another tenant; pass `--max-idle-power 200` after `REF` there.
+
 ### Profiling without ncu
 
 `ncu` fails on these hosts with `ERR_NVGPUCTRPERM`: the container gets no

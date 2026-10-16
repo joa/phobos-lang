@@ -1,0 +1,214 @@
+---
+// The tested cards side by side, from results/platforms/*/card.json: one model against llama.cpp on each,
+// then phobos-kbench against cuBLAS. Every rate is a mean with its standard error, over bench.py's rounds
+// for the model and over kbench runs for the kernels. Ratios compare two engines on one card; nothing
+// here compares cards.
+import { formatGflops } from "../../lib/bench/kernels"
+import { commitUrl, formatRate, ratioOf, REPO_URL, shortDate, type Stat } from "../../lib/bench/load"
+import { loadPlatforms, PLATFORM_MODEL, testOf } from "../../lib/bench/platforms"
+
+const platforms = loadPlatforms()
+const headline = ["tg128", "pp128", "pp512"]
+const allTests = ["pp128", "pp512", "tg32", "tg128", "tg512", "tg1024", "tg2048"]
+const kernels = platforms[0].kernels
+
+const rate = (stat: Stat) => `${formatRate(stat.mean)} +/- ${formatRate(stat.stderr)}`
+const percent = (stat: Stat) =>
+  `${Math.round(stat.mean * 100)}%${stat.rounds > 1 ? ` +/- ${(stat.stderr * 100).toFixed(1)}` : ""}`
+const blob = (file: string) => `${REPO_URL}/blob/main/${file}`
+---
+
+<div class="platforms">
+  <p class="title">{PLATFORM_MODEL}, Phobos against llama.cpp on the same card, tokens per second</p>
+  <table>
+    <caption class="sr-only">{PLATFORM_MODEL}, Phobos against llama.cpp on each card</caption>
+    <thead>
+      <tr>
+        <th scope="col">card</th>
+        {headline.map(test => <th scope="col">{test}</th>)}
+      </tr>
+    </thead>
+    <tbody>
+      {
+        platforms.map(platform => (
+          <tr>
+            <th scope="row">{platform.card}</th>
+            {headline.map(test => {
+              const comparison = testOf(platform, test)
+              if (!comparison?.phobos || !comparison.other) return <td>not measured</td>
+              return (
+                <td class="num">
+                  <strong>{ratioOf(comparison)!.toFixed(2)}x</strong>
+                  <br />
+                  <span class="detail">
+                    Phobos {rate(comparison.phobos)}
+                    <br />
+                    llama.cpp {rate(comparison.other)}
+                  </span>
+                </td>
+              )
+            })}
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+  <p class="note">
+    Each cell is Phobos's rate over llama.cpp's, then both rates, the mean over rounds with its standard
+    error.
+  </p>
+
+  <details>
+    <summary>Every test, every card</summary>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">card</th>
+          <th scope="col">test</th>
+          <th scope="col">Phobos</th>
+          <th scope="col">llama.cpp</th>
+          <th scope="col">ratio</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          platforms.flatMap(platform =>
+            allTests
+              .filter(test => testOf(platform, test)?.phobos && testOf(platform, test)?.other)
+              .map((test, index) => {
+                const comparison = testOf(platform, test)!
+                return (
+                  <tr>
+                    <th scope="row">{index === 0 ? platform.card : ""}</th>
+                    <td>{test}</td>
+                    <td class="num">{rate(comparison.phobos!)}</td>
+                    <td class="num">{rate(comparison.other!)}</td>
+                    <td class="num">{ratioOf(comparison)!.toFixed(2)}</td>
+                  </tr>
+                )
+              })
+          )
+        }
+      </tbody>
+    </table>
+  </details>
+
+  <p class="title">phobos-kbench, Phobos's share of cuBLAS on the same card, then Phobos's own throughput</p>
+  <table>
+    <caption class="sr-only">phobos-kbench against cuBLAS on each card</caption>
+    <thead>
+      <tr>
+        <th scope="col">kernel</th>
+        {platforms.map(platform => <th scope="col">{platform.card}</th>)}
+      </tr>
+    </thead>
+    <tbody>
+      {
+        kernels.map(kernel => (
+          <tr>
+            <th scope="row">{kernel.example ? <a href={kernel.example}>{kernel.label}</a> : kernel.label}</th>
+            {platforms.map(platform => {
+              const own = platform.kernels.find(entry => entry.benchmark === kernel.benchmark)
+              if (!own) return <td>not measured</td>
+              return (
+                <td class="num">
+                  {own.ratio ? (
+                    <strong>{percent(own.ratio)}</strong>
+                  ) : (
+                    <span class="detail">{own.cublasRan ? "no like-for-like cuBLAS" : "no cuBLAS"}</span>
+                  )}
+                  <br />
+                  <span class="detail">{formatGflops(own.phobos.mean)}</span>
+                </td>
+              )
+            })}
+          </tr>
+        ))
+      }
+    </tbody>
+  </table>
+  <p class="note">
+    A share is the mean over phobos-kbench runs of each run's Phobos over cuBLAS, with its standard error; one
+    run has none. Flash attention has no cuBLAS counterpart, and saxpy is memory-bound. The tensor-core f32
+    gemm is timed beside cuBLAS's f32 gemm on CUDA cores, another precision, so it gets no share.
+  </p>
+
+  <details>
+    <summary>Where each card's numbers come from</summary>
+    <table>
+      <thead>
+        <tr>
+          <th scope="col">card</th>
+          <th scope="col">chip</th>
+          <th scope="col">memory</th>
+          <th scope="col">power limit</th>
+          <th scope="col">host</th>
+          <th scope="col">driver</th>
+          <th scope="col">Phobos</th>
+          <th scope="col">runs</th>
+        </tr>
+      </thead>
+      <tbody>
+        {
+          platforms.map(platform => (
+            <tr>
+              <th scope="row">{platform.card}</th>
+              <td>
+                <code>{platform.chip}</code>
+              </td>
+              <td class="num">{platform.memoryGiB} GB</td>
+              <td class="num">{platform.powerLimitWatts} W</td>
+              <td>{platform.host}</td>
+              <td>{platform.driver}</td>
+              <td>
+                <a href={commitUrl(platform.commit)}>{platform.commit}</a>{platform.kbenchCommit !== platform.commit && <> (kbench <a href={commitUrl(platform.kbenchCommit)}>{platform.kbenchCommit}</a>)</>}, {shortDate(platform.benchDate)}
+              </td>
+              <td>
+                <a href={blob(platform.benchFile)}>bench.py</a>, {platform.rounds} rounds x {platform.reps} reps;{" "}
+                {platform.kernelFiles.map((file, index) => (
+                  <>
+                    {index > 0 && ", "}
+                    <a href={blob(file)}>kbench</a>
+                  </>
+                ))}
+              </td>
+            </tr>
+          ))
+        }
+      </tbody>
+    </table>
+  </details>
+</div>
+
+<style>
+  .platforms .num {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  .platforms .detail,
+  .platforms .note {
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-xs);
+  }
+
+  .platforms .title {
+    font-weight: 600;
+    margin-bottom: 0;
+  }
+
+  .platforms .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .platforms table {
+    display: block;
+    overflow-x: auto;
+  }
+</style>

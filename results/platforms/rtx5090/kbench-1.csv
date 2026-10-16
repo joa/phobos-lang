@@ -1,0 +1,11 @@
+benchmark,impl,precision,gflops,peak_gflops,pct_of_peak
+saxpy_fp32,phobos,f32,251.2,115545.6,0.2
+saxpy_fp32,cuBLAS,f32,262.6,115545.6,0.2
+gemm_fp32,phobos,f32,46508.5,115545.6,40.3
+gemm_fp32,cuBLAS,f32,70740.9,115545.6,61.2
+gemm_fp16tc_fp32acc,phobos,f16-tc-f32-acc,90066.4,924364.8,9.7
+gemm_fp16tc_fp32acc,cuBLAS,f32,67993.3,115545.6,58.8
+gemm_fp16,phobos,f16-tc,174101.5,1848729.6,9.4
+gemm_fp16,cuBLAS,f16-tc,287512.0,1848729.6,15.6
+flash_fp32,phobos,f32,17613.9,115545.6,15.2
+flash_fp16,phobos,f16-tc-f32-acc,25714.1,924364.8,2.8

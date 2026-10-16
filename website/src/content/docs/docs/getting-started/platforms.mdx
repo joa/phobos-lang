@@ -5,6 +5,8 @@ sidebar:
   order: 1.5
 ---
 
+import PlatformBench from "../../../../components/platforms/PlatformBench.astro"
+
 Phobos runs on NVIDIA GPUs of compute capability 7.5 or newer, Turing and
 every architecture after it, on Windows x64 and Linux x64. Compiling a kernel
 to PTX needs no GPU at all.
@@ -13,21 +15,44 @@ to PTX needs no GPU at all.
 
 Phobos is developed on an RTX 2080 SUPER, and every number in
 [Benchmarks](/docs/reference/benchmarks/) was measured on it. It has also been
-run and benchmarked on four more cards, rented through vast.ai under Linux:
+run and benchmarked on more cards, rented through vast.ai under Linux:
 
-| Card | Architecture | Chip | Memory | Against llama.cpp, roughly |
-| --- | --- | --- | --- | --- |
-| RTX 2080 SUPER | Turing | `sm_75` | 8 GB | The development card; see [Benchmarks](/docs/reference/benchmarks/) |
-| RTX 3090 | Ampere | `sm_86` | 24 GB | Benchmarked, no head-to-head recorded yet |
-| RTX 4060 | Ada | `sm_89` | 8 GB | Decode at parity, prompt about 1.05x |
-| RTX 4090 | Ada | `sm_89` | 24 GB | Decode about 0.98x, prompt 1.05x to 1.2x |
-| RTX 5090 | Blackwell | `sm_120` | 32 GB | Decode about 0.99x, prompt about 1.1x |
+| Card | Architecture | Chip | Memory |
+| --- | --- | --- | --- |
+| RTX 2080 SUPER | Turing | `sm_75` | 8 GB |
+| RTX 3090 | Ampere | `sm_86` | 24 GB |
+| RTX 4060 | Ada | `sm_89` | 8 GB |
+| RTX 4090 | Ada | `sm_89` | 24 GB |
+| RTX 5090 | Blackwell | `sm_120` | 32 GB |
 
-The rented-card figures are rough: Qwen3.5-4B Q4_K_M, decode as `tg128` and
-prompt as `pp128` and `pp512`, each run interleaved with llama.cpp on the same
-card in October 2026. A rented card shares its host, so they are not
-published as benchmarks. The tuning is done on the 2080 SUPER; a default that
-matters for speed is also measured on a 3090 and a 4090 before it ships.
+The tuning is done on the 2080 SUPER; a default that matters for speed is also
+measured on a 3090 and a 4090 before it ships. The 4060 ran Phobos in October
+2026, but none was available to rent for the measurements below.
+
+## Measured on each card
+
+Each card ran the same two benchmarks in one session. Qwen3.5-4B Q4_K_M ran
+against llama.cpp b11681 through `scripts/bench.py`: five rounds, the engines
+interleaved, three repetitions each, the sizes of the
+[Benchmarks](/docs/reference/benchmarks/) run. Then `phobos-kbench` ran twice,
+each run autotuning its kernels afresh, against cuBLAS. Phobos was built on
+the rented box from the commit each card names. The 2080 SUPER's model figures
+are the ones [Benchmarks](/docs/reference/benchmarks/) publishes; its kbench
+runs were made at the rented cards' commit.
+
+A ratio compares two engines on one card in one session. Rates on different
+cards are not comparable to each other: the hosts differ, and so do the power
+limits a host sets. The 4090 ran at 350 W, below the card's stock 450 W. A
+rented card was checked for another tenant before the run (idle power,
+utilization, and how long the driver has spent capping its power), and
+`bench.py` checks it again between rounds. On the 3090 that check reads the
+card's own power state: it holds about 150 W for two seconds after a process
+exits, at 0% utilization, and is back at 21 W within ten
+([trace](https://github.com/joa/phobos-lang/blob/main/results/platforms/rtx3090/power-decay.txt)).
+Its run therefore raised the check's power threshold from 120 W to 200 W; the
+utilization check was unchanged.
+
+<PlatformBench />
 
 A release also carries compiled kernels for `sm_80` and `sm_90`, the data
 center chips of the Ampere and Hopper generations. They have not been tested

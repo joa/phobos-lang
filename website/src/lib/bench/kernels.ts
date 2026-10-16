@@ -99,8 +99,12 @@ export interface KernelResults {
 
 const COLUMNS = ["benchmark", "impl", "precision", "gflops", "peak_gflops", "pct_of_peak"] as const
 
-export function parseKernelCsv(text: string, date: string | undefined): KernelResults {
-  const file = KERNEL_RESULTS_FILE
+export function parseKernelCsv(
+  text: string,
+  date: string | undefined,
+  file = KERNEL_RESULTS_FILE,
+  card = KERNEL_CARD
+): KernelResults {
   if (!date) throw new Error(`${file}: no entry in src/lib/bench/dates.json; run scripts/bench-dates.mjs`)
   const lines = text
     .replace(/^﻿/, "")
@@ -143,7 +147,7 @@ export function parseKernelCsv(text: string, date: string | undefined): KernelRe
       comparable: cublas !== undefined && cublas.precision === phobos.precision,
     }
   })
-  return { file, date, card: KERNEL_CARD, benches }
+  return { file, date, card, benches }
 }
 
 const DATES = committedDates as Record<string, string>
