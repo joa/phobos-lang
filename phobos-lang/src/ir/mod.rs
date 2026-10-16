@@ -223,6 +223,11 @@ impl Ir {
         self.op_data(op).span
     }
 
+    /// Sets the source `op` stands for.
+    pub fn set_op_span(&mut self, op: OpId, span: crate::diag::Span) {
+        self.op_data_mut(op).span = span;
+    }
+
     /// Sets the span ops created from now on take, returning the one it
     /// replaces.
     pub fn set_span(&mut self, span: crate::diag::Span) -> crate::diag::Span {
@@ -509,6 +514,49 @@ impl Ir {
         let (to, index) = self.resolve(at);
         self.block_data_mut(to).ops.insert(index, op);
         self.op_data_mut(op).parent = to;
+    }
+
+    /// Copies the ops of `block` to `at`, all but its terminator, reading
+    /// each operand through `map` and recording each copied value there.
+    /// Returns the terminator's operands, mapped. Nested blocks are copied
+    /// whole, and each copy keeps its original's span and name.
+    pub fn clone_body(&mut self, block: BlockId, at: At, map: &mut BTreeMap<ValueId, ValueId>) -> Vec<ValueId> {
+        let mut yielded = Vec::new();
+        for op in self.ops(block).to_vec() {
+            if self.kind(op).is_terminator() {
+                yielded = self.operands(op).iter().map(|v| *map.get(v).unwrap_or(v)).collect();
+            } else {
+                self.clone_op(op, at, map);
+            }
+        }
+        yielded
+    }
+
+    fn clone_op(&mut self, op: OpId, at: At, map: &mut BTreeMap<ValueId, ValueId>) -> OpId {
+        let mut blocks = Vec::new();
+        for b in self.blocks_of(op).to_vec() {
+            let arg_types: Vec<Type> = self.args(b).iter().map(|&a| self.ty(a).clone()).collect();
+            let copy = self.new_block(&arg_types);
+            for (&a, &c) in self.args(b).to_vec().iter().zip(&self.args(copy).to_vec()) {
+                map.insert(a, c);
+            }
+            for inner in self.ops(b).to_vec() {
+                self.clone_op(inner, At::End(copy), map);
+            }
+            blocks.push(copy);
+        }
+        let operands: Vec<ValueId> = self.operands(op).iter().map(|v| *map.get(v).unwrap_or(v)).collect();
+        let types: Vec<Type> = self.results(op).iter().map(|&r| self.ty(r).clone()).collect();
+        let outer = self.set_span(self.span(op));
+        let copy = self.create_op(at, self.kind(op).clone(), &operands, types, blocks);
+        self.set_span(outer);
+        for (r, c) in self.results(op).to_vec().into_iter().zip(self.results(copy).to_vec()) {
+            if let Some(name) = self.name(r).map(str::to_owned) {
+                self.set_name(c, name);
+            }
+            map.insert(r, c);
+        }
+        copy
     }
 
     /// Whether `op` textually contains `inner`: `inner` sits in one of its

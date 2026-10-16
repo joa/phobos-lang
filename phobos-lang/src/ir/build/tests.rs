@@ -13,7 +13,7 @@ fn build_src(src: &str) -> String {
     let kernels = crate::parse(src).unwrap();
     let base = phobos_base::context::Context::default();
     let (mut ir, mut report) = build(&base, target(), &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
-    crate::ir::passes::run(&mut ir, &mut report, &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
+    crate::ir::passes::run(&mut ir, &mut report, &target(), &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
     verify(&ir).unwrap_or_else(|e| panic!("{e}\n{ir}"));
     ir.to_string()
 }

@@ -74,9 +74,11 @@ impl Build {
         Ok(Some(()))
     }
 
-    /// Whether every read of `name` in `rest` is an operand of an int8
-    /// fragment accumulator's update: `acc += f32(dot_t(a, w)) * s1 * s2`,
-    /// `acc += r * c` or `acc -= r * c`, each a statement of `rest` itself.
+    /// Whether every read of `name` in `rest` is an operand of an update an
+    /// int8 fragment accumulator takes, `acc += f32(dot_t(a, w)) * s1 * s2`,
+    /// `acc += r * c` or `acc -= r * c` into an f32 tile, each a statement
+    /// of `rest` itself. The fragment pass then reads it where each lane
+    /// needs it, or materializes it if the tile stays in shared memory.
     fn only_fragment_operand(&self, name: &str, rest: &[Stmt]) -> bool {
         let mut any = false;
         for stmt in rest {
@@ -86,7 +88,7 @@ impl Build {
                 value,
                 ..
             } = stmt
-                && matches!(self.lookup(acc), Some(Binding::Frags(_)))
+                && matches!(self.lookup(acc), Some(Binding::Tile(t)) if self.elem(t) == Scalar::F32)
             {
                 let parts: Option<Vec<&str>> = match op {
                     AssignOp::Add => super::frag::scaled_dot_parts(value)

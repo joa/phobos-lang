@@ -32,6 +32,17 @@ kernel proj(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 const ALIGNED: &str = "@aligned(M = 128, N = 64, K = 32)";
 
 #[test]
+fn an_unrolled_k_loop_carries_the_accumulator() {
+    // The main loop and the remainder each carry the fragments.
+    let src = projection(128, 64, 128, ALIGNED, "ws * da").replace("for kt in", "for<unroll 2> kt in");
+    let mlir = emit_mlir(&src);
+    assert!(!mlir.contains("memref.global"), "{mlir}");
+    assert_eq!(mlir.matches("mmaShape = [8, 8, 16]").count(), 3 * 64, "{mlir}");
+    let carried = format!("-> ({})", vec!["f32"; 64].join(", "));
+    assert_eq!(mlir.matches(&carried).count(), 2, "{mlir}");
+}
+
+#[test]
 fn scaled_int8_accumulator_rides_in_registers() {
     // 128x64 over four warps: each warp owns a 32x64 patch of 8x8 tiles,
     // 32 tiles of two elements a lane, carried by the k loop. Blackwell

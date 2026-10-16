@@ -62,6 +62,20 @@ fn any_other_read_materializes_the_tile() {
 }
 
 #[test]
+fn an_accumulator_kept_in_shared_memory_materializes_its_weight() {
+    // A row sum of `acc` is not a read the fragments hold, so the tile stays
+    // in shared memory and the dot reads a weight written out first.
+    let src = projection("    acc += f32(dot_t(a, w)) * ws * da\n")
+        .replace("  C[pm * 128", "  var s: tile<f32>[128, 1] = rowsum(acc)\n  C[pm * 128");
+    let mlir = emit_mlir(&src);
+    let carried = format!("-> ({})", vec!["f32"; 64].join(", "));
+    assert!(!mlir.contains(&carried), "{mlir}");
+    assert!(mlir.contains("memref.global"), "{mlir}");
+    assert!(mlir.contains("gpu.barrier"), "{mlir}");
+    assert!(mlir.contains("memref<64x32xi8, 3>, vector<4xi8>"), "the weight is stored a word at a time:\n{mlir}");
+}
+
+#[test]
 fn generate_takes_a_function_ending_in_its_value() {
     let src = projection("    acc += f32(dot_t(a, w)) * ws * da\n").replace("  v\n}", "  let u = v\n}");
     let err = crate::parse(&src).expect_err("a body ending in a `let` has no value").to_string();

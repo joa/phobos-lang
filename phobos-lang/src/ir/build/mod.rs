@@ -60,6 +60,10 @@ pub struct Target {
 pub struct Report {
     pub pipeline_declines: Vec<String>,
     pub spans: BTreeMap<OpId, Span>,
+    /// The source of each bound of a loop folded to constant bounds, for a
+    /// pass that makes the loop dynamic again; empty for a step the source
+    /// left out.
+    pub bounds: BTreeMap<OpId, [Span; 3]>,
 }
 
 /// What a name in scope resolves to.
@@ -74,7 +78,6 @@ pub(crate) enum Binding {
     View(ValueId),
     /// A writable tile buffer.
     Tile(ValueId),
-    Frags(ValueId),
     /// A tile held in registers; see `regs.rs`.
     Regs(ValueId),
     /// A tile with no storage, computed where it is read; see `generate.rs`.
@@ -88,7 +91,7 @@ impl Binding {
         match *self {
             Binding::Let { value, .. } => Some(value),
             Binding::Var { slot, .. } => Some(slot),
-            Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) => Some(v),
+            Binding::Tensor(v) | Binding::View(v) | Binding::Tile(v) | Binding::Regs(v) => Some(v),
             Binding::Generated(_) => None,
         }
     }
@@ -563,7 +566,7 @@ impl Build {
             self.decls.insert((name.to_string(), value), decl);
         }
         match &binding {
-            Binding::View(v) | Binding::Tile(v) | Binding::Frags(v) | Binding::Regs(v) | Binding::Tensor(v) => {
+            Binding::View(v) | Binding::Tile(v) | Binding::Regs(v) | Binding::Tensor(v) => {
                 if self.ir.name(*v).is_none() {
                     self.ir.set_name(*v, name);
                 }
@@ -615,8 +618,12 @@ impl Build {
         }
     }
 
-    /// The shape with [`DYN`] for dynamic extents, of a tile or tensor.
+    /// The shape with [`DYN`] for dynamic extents, of a tile, a tensor or a
+    /// register-resident tile.
     pub(crate) fn shape(&self, v: ValueId) -> Vec<i64> {
+        if let Type::Dist(d) = self.ir.ty(v) {
+            return d.shape.clone();
+        }
         self.ir
             .ty(v)
             .shape()
@@ -627,6 +634,9 @@ impl Build {
     }
 
     pub(crate) fn elem(&self, v: ValueId) -> Scalar {
+        if let Type::Dist(d) = self.ir.ty(v) {
+            return d.elem;
+        }
         self.ir
             .ty(v)
             .elem()

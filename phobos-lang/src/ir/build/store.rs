@@ -21,16 +21,6 @@ impl Build {
             self.stmt(OpKind::RegsStore, &[r, target]);
             return Ok(());
         }
-        // <tensor slice> = acc for a fragment accumulator.
-        if let ExprKind::Var(n) = &value.kind
-            && let Some(Binding::Frags(fa)) = self.lookup(n)
-        {
-            if op != AssignOp::Set {
-                bail!("fragment accumulator `{n}` cannot be accumulated into a tile");
-            }
-            self.stmt(OpKind::FragStore, &[fa, target]);
-            return Ok(());
-        }
 
         // t = exp(t) rewrites the tile in place.
         if op == AssignOp::Set

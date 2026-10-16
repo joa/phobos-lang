@@ -19,7 +19,7 @@ fn main() -> anyhow::Result<()> {
     let target = phobos_lang::codegen::target::build_target(&base);
     for kernel in phobos_lang::parse(&src)? {
         let (mut ir, mut report) = phobos_lang::ir::build::build(&base, target, &kernel)?;
-        phobos_lang::ir::passes::run(&mut ir, &mut report, &kernel)?;
+        phobos_lang::ir::passes::run(&mut ir, &mut report, &target, &kernel)?;
         phobos_lang::ir::verify::verify(&ir)?;
         print!("{ir}");
         for decline in report.pipeline_declines {
