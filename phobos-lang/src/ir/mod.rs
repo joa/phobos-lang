@@ -112,6 +112,12 @@ pub struct KernelInfo {
     pub tensorcore: bool,
     pub mma_sync: bool,
     pub pipeline_assert: bool,
+    /// The grid's block count `@persistent(n)` compiles in, which
+    /// `ctx.blocks.x` is.
+    pub persistent_blocks: Option<i64>,
+    /// Whether the last parameter is the barrier word a `@persistent`
+    /// launch appends, which `grid_barrier()` uses.
+    pub grid_barrier: bool,
     /// `@autotune` symbols resolved to their chosen value.
     pub shape_env: BTreeMap<String, i64>,
 }

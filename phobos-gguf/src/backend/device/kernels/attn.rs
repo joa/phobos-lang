@@ -642,7 +642,8 @@ fn attention_combine(qgroup: usize, indent: &str) -> String {
 /// kernels.
 ///
 /// All `BLOCKS` blocks must be resident at once or `grid_barrier`
-/// deadlocks, so the caller derives `BLOCKS` from the occupancy API.
+/// deadlocks, so the caller derives `BLOCKS` from the occupancy API, and
+/// appends the barrier word the launch supplies.
 /// `@dynshared` takes the max of the two phases' shared memory, which is
 /// safe because phase two reads only the global `PM` and `ML`.
 pub(crate) fn attention_persist_src(
@@ -664,7 +665,7 @@ pub(crate) fn attention_persist_src(
     let combine = attention_combine(qgroup, "    ");
     format!(
         "@launch(256)
-@persistent
+@persistent(BLOCKS)
 @dynshared
 @autotune(NH in [{n_head}], G in [{group}], QG in [{qgroup}], D in [{head_dim}],
           S in [{splits}], WCT in [{wct}], QW in [{qw}], U1 in [{units1}], IT1 in [{it1}],
@@ -673,12 +674,11 @@ pub(crate) fn attention_persist_src(
 kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
                        V: tensor<f16>[NK, KW],
                        P: tensor<f32>[SH, D], PM: tensor<f32>[S, PW],
-                       ML: tensor<f32>[NH, MW], O: tensor<f32>[R, D],
-                       BAR: tensor<i32>[2, 1]) {{
+                       ML: tensor<f32>[NH, MW], O: tensor<f32>[R, D]) {{
   let pid = ctx.block.x
 
   for i1 in range(0, IT1) {{
-    let u = pid + i1 * BLOCKS
+    let u = pid + i1 * ctx.blocks.x
     if u < U1 {{
       let g = u / S
       let s = u % S
@@ -702,10 +702,10 @@ kernel attention_persist(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
 {partial}{combine}    }}
   }}
 
-  grid_barrier(BAR)
+  grid_barrier()
 
   for i2 in range(0, IT2) {{
-    let u2 = pid + i2 * BLOCKS
+    let u2 = pid + i2 * ctx.blocks.x
     if u2 < NH {{
       var mv = ML[u2 :+ 1, 0 :+ S]
       var mm: tile<f32>[1, 1] = rowmax(mv)

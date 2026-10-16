@@ -12,9 +12,12 @@ Because every CTA is resident, they can wait for each other with
 
 ```text
 @persistent
+@persistent(BLOCKS)
 ```
 
-It takes no arguments. See the [Attributes](/docs/reference/spec/#attributes)
+With an argument, a literal or an `@autotune` constant, it also compiles the
+grid's block count in: `ctx.blocks.x` is that constant, and the launch must
+use it. See the [Attributes](/docs/reference/spec/#attributes)
 table and `grid_barrier` under
 [Indexing and synchronization](/docs/reference/spec/#indexing-and-synchronization)
 in the spec.
@@ -40,34 +43,37 @@ card and not by the data:
 
 ```phobos
 @launch(256)
-@persistent
+@persistent(BLOCKS)
 @autotune(TILE in [1024], STEPS in [16], BLOCKS in [48])
-kernel staged(X: tensor<f32>[M, N], BAR: tensor<i32>[2]) {
+kernel staged(X: tensor<f32>[M, N]) {
   let p = ctx.block.x
   for s in range(0, STEPS) {
-    for t in range(p * TILE, N, BLOCKS * TILE) {
+    for t in range(p * TILE, N, ctx.blocks.x * TILE) {
       var x = X[0 :+ 1, t :+ TILE]
       X[0 :+ 1, t :+ TILE] = x * 1.0000001 + 0.000000001
     }
-    grid_barrier(BAR)
+    grid_barrier()
   }
 }
 ```
 
-`BLOCKS` is the grid size the host launches with. The stride could also be
-written with the grid extent, `ctx.blocks.x * TILE`.
+`BLOCKS` is the grid size the host launches with, and `ctx.blocks.x` is that
+constant here. The launch appends the barrier word after `X`.
 
 ## `grid_barrier`
 
-`grid_barrier(bar)` makes every block of the grid wait for every other, and
+`grid_barrier()` makes every block of the grid wait for every other, and
 orders memory across it: every block's global writes before the barrier are
 visible to every block after it. One stage can therefore read what another
-block wrote in the stage before. It requires:
+block wrote in the stage before. It keeps its state in a barrier word the
+launch appends as the kernel's last parameter. `grid_barrier(bar)` names that
+word as a parameter of its own instead, and works outside `@persistent`. It
+requires:
 
 | Requirement | Note |
 | --- | --- |
-| `bar` is a named `i32` tensor of at least 2 elements | One slot counts arrivals, one releases the waiting blocks. |
-| `bar` is zeroed once before the launch and not shared by concurrent kernels | The barrier keeps its state in it across uses. |
+| The word is an `i32` `[2, 1]` column, or `bar` a named `i32` tensor of at least 2 elements | One slot counts arrivals, one releases the waiting blocks. |
+| It is zeroed once before the launch and not shared by concurrent kernels | The barrier keeps its state in it across uses. |
 | A one-dimensional grid | |
 | Every block reaches the call | A block that skips it leaves the rest waiting. |
 | The grid is co-resident | What `@persistent` declares. |

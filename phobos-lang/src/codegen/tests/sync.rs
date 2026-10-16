@@ -73,6 +73,38 @@ fn grid_barrier_takes_a_rank_two_column() {
     assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5);
 }
 
+/// In a `@persistent` kernel `grid_barrier()` names no tensor: the launch
+/// appends the barrier word as the last parameter, a `[2, 1]` column.
+#[test]
+fn a_persistent_grid_barrier_takes_the_appended_word() {
+    let mlir = emit_mlir(
+        "@persistent
+        kernel staged(X: tensor<f32>[N]) {
+            let i = ctx.block.x
+            X[i] = X[i] + 1.0
+            grid_barrier()
+        }",
+    );
+    assert!(mlir.contains("memref<?xf32, 1>, %arg1: memref<2x1xi32, 1>)"), "{mlir}");
+    assert_eq!(mlir.matches("memref.atomic_rmw").count(), 5, "{mlir}");
+}
+
+/// `@persistent(n)` compiles the block count in, and `ctx.blocks.x` is it.
+#[test]
+fn ctx_blocks_is_the_persistent_count() {
+    let mlir = emit_mlir(
+        "@persistent(BLOCKS)
+        @autotune(BLOCKS in [48])
+        kernel stride(X: tensor<f32>[N]) {
+            for i in range(ctx.block.x, N, ctx.blocks.x) {
+                X[i] = X[i] + 1.0
+            }
+        }",
+    );
+    assert!(!mlir.contains("gpu.grid_dim"), "{mlir}");
+    assert!(mlir.contains("arith.constant 48 : index"), "{mlir}");
+}
+
 #[test]
 fn grid_barrier_rejects_a_non_tensor() {
     let err = std::panic::catch_unwind(|| {

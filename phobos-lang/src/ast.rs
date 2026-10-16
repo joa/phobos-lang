@@ -287,6 +287,33 @@ impl Kernel {
         }
     }
 
+    /// `@persistent`: None when absent, `Some(None)` written bare, and
+    /// `Some(Some(dim))` with the grid's block count, a literal or an
+    /// `@autotune` name, which `ctx.blocks.x` then is.
+    pub fn persistent(&self) -> Result<Option<Option<Dim>>, String> {
+        let Some(attr) = self.attr("persistent") else {
+            return Ok(None);
+        };
+        match &attr.args[..] {
+            [] => Ok(Some(None)),
+            [AttrArg::Positional(Literal::Int(n))] if *n > 0 => Ok(Some(Some(Dim::Int(*n)))),
+            [AttrArg::Positional(Literal::Ident(name))] => Ok(Some(Some(Dim::Sym(name.clone())))),
+            _ => Err("`@persistent` takes the grid's block count, as `@persistent(BLOCKS)`, or nothing".to_string()),
+        }
+    }
+
+    /// Whether the body calls `grid_barrier()` with no barrier named, which
+    /// takes the one a `@persistent` launch supplies.
+    pub fn implicit_grid_barrier(&self) -> bool {
+        let mut found = false;
+        for stmt in &self.body {
+            stmt.walk_exprs(&mut |e| {
+                found |= matches!(&e.kind, ExprKind::Call { callee, args } if callee == "grid_barrier" && args.is_empty());
+            });
+        }
+        found
+    }
+
     /// The tiles `@registers(a, b, ..)` asks to keep in registers.
     pub fn register_tiles(&self) -> Vec<String> {
         self.attrs

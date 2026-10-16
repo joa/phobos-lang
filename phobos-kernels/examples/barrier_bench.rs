@@ -30,16 +30,16 @@ kernel stage(X: tensor<f32>[M, N]) {
 /// card and not by the data.
 const PERSISTENT_SRC: &str = "\
 @launch(256)
-@persistent
+@persistent(BLOCKS)
 @autotune(TILE in [1024], STEPS in [484], BLOCKS in [48])
-kernel staged(X: tensor<f32>[M, N], BAR: tensor<i32>[2]) {
+kernel staged(X: tensor<f32>[M, N]) {
   let p = ctx.block.x
   for s in range(0, STEPS) {
-    for t in range(p * TILE, N, BLOCKS * TILE) {
+    for t in range(p * TILE, N, ctx.blocks.x * TILE) {
       var x = X[0 :+ 1, t :+ TILE]
       X[0 :+ 1, t :+ TILE] = x * 1.0000001 + 0.000000001
     }
-    grid_barrier(BAR)
+    grid_barrier()
   }
 }
 ";
@@ -88,7 +88,8 @@ fn main() -> Result<()> {
     let staged_fn = staged.get_function("staged")?.to_raw();
     let mut slots = Vec::new();
     push_descriptor(&mut slots, x.as_device_ptr().as_raw(), [1, elems as i64]);
-    push_descriptor(&mut slots, bar.as_device_ptr().as_raw(), [1, 2]);
+    // The barrier word `grid_barrier()` reads, appended last.
+    push_descriptor(&mut slots, bar.as_device_ptr().as_raw(), [2, 1]);
     let barrier_millis = time_launch(&stream, staged_fn, grid, &mut slots)?;
     println!(
         "persistent, {STEPS} barriers:            {barrier_millis:7.3} ms -> {:5.2} us per barrier",

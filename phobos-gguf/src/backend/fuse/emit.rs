@@ -147,8 +147,6 @@ struct Emit {
     lane_fns: std::collections::BTreeMap<&'static str, String>,
     /// Whether a per-lane store has had no barrier since.
     lane_stores: bool,
-    /// The barrier state's parameter, once a nest needs one.
-    bar: Option<String>,
     /// Whether the kernel has a raw-format contraction, which sets its
     /// launch bound.
     raw: bool,
@@ -191,7 +189,6 @@ impl Emit {
             lanes: HashMap::new(),
             lane_fns: Default::default(),
             lane_stores: false,
-            bar: None,
             raw: false,
             rot: 0,
         }
@@ -262,13 +259,13 @@ impl Emit {
         self.rot += units;
         let base = match rot {
             0 => "p".to_string(),
-            rot => format!("(p + {}) % BLOCKS", self.blocks as usize - rot),
+            rot => format!("(p + {}) % ctx.blocks.x", self.blocks as usize - rot),
         };
         let _ = write!(
             self.body,
             "
   for i{n} in range(0, {it}) {{
-    let {unit} = {base} + i{n} * BLOCKS
+    let {unit} = {base} + i{n} * ctx.blocks.x
     if {unit} < {un} {{
 "
         );
@@ -508,18 +505,11 @@ impl Emit {
         }
     }
 
-    /// Emits a grid barrier. One counter and generation pair serves every
-    /// barrier, since each barrier leaves both as it found them.
+    /// Emits a grid barrier, on the barrier word the launch appends. One
+    /// counter and generation pair serves every barrier, since each barrier
+    /// leaves both as it found them.
     fn barrier(&mut self) {
-        let bar = match &self.bar {
-            Some(name) => name.clone(),
-            None => {
-                let name = self.slot("BAR".into(), "i32", [2, 1], Bound::Barrier);
-                self.bar = Some(name.clone());
-                name
-            }
-        };
-        let _ = writeln!(self.body, "\n  grid_barrier({bar})");
+        let _ = writeln!(self.body, "\n  grid_barrier()");
         self.lane_stores = false;
         self.barriers += 1;
     }
@@ -729,7 +719,7 @@ impl Emit {
         // loop that fills it.
         let fns: String = self.lane_fns.values().map(|f| format!("{f}\n")).collect();
         let source = format!(
-            "{fns}@launch({launch})\n@persistent\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
+            "{fns}@launch({launch})\n@persistent(BLOCKS)\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
             self.decls, self.body
         );
         Plan {
