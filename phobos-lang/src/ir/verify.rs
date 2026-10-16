@@ -190,10 +190,13 @@ impl Verifier<'_> {
         true
     }
 
+    /// Tiles, or whole tensors of a static shape, which read as one.
     fn want_tiles(&mut self, op: OpId, range: std::ops::Range<usize>) {
         for i in range {
+            let whole = |v: ValueId| matches!(self.ir.ty(v), Type::Tensor(t) if t.shape.iter().all(|e| e.fixed().is_some()));
             if let Some(&v) = self.ir.operands(op).get(i)
                 && !self.is_tile(v)
+                && !whole(v)
             {
                 self.err(op, format!("operand {i} must be a tile, is {}", self.ir.ty(v)));
             }
@@ -530,6 +533,8 @@ impl Verifier<'_> {
                     }
                 }
             }
+            // The passes place every scratch tensor before the verifier runs.
+            OpKind::Scratch => self.err(op, "a scratch tensor no pass placed"),
             OpKind::Alloc => {
                 self.want_operands(op, 0);
                 if self.want_results(op, 1) {

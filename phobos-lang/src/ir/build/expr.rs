@@ -22,6 +22,8 @@ impl Build {
                 Some(Binding::Var { slot, elem }) => {
                     Ok(Rv::Scalar(self.value(OpKind::Load, &[slot], Type::Scalar(elem))))
                 }
+                // A whole tensor of a static shape reads as a tile of it.
+                Some(Binding::Tensor(t)) if !self.shape(t).contains(&DYN) => Ok(Rv::Tile(t)),
                 Some(Binding::Tensor(_)) => {
                     bail!("tensor `{name}` used as a value; index or slice it")
                 }

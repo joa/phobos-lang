@@ -39,6 +39,9 @@ The normative table is in the spec under
 | [`@registers`](/docs/attributes/registers/) | Keeps named tiles in registers instead of shared memory. |
 | [`@tensorcore`](/docs/attributes/tensorcore/) | Runs `dot` and `dot_t` on tensor cores. |
 | [`@persistent`](/docs/attributes/persistent/) | Declares that the grid must be co-resident, as `grid_barrier` needs. |
+| [`@shared`](/docs/attributes/shared/) | Asserts that named scratch tensors are held in shared memory. |
+| [`@global`](/docs/attributes/global/) | Keeps named scratch tensors in device memory. |
+| [`@grid_barriers`](/docs/attributes/grid_barriers/) | Pins the number of grid barriers, written and placed. |
 | [`@cluster`](/docs/attributes/cluster/) | Experimental. Super-tile dimensions for cluster tuning. |
 
 ## Unknown attributes are errors

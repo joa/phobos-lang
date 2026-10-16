@@ -444,6 +444,9 @@ pub enum OpKind {
     AssumeAlign,
     /// A fresh buffer; the result type says where and how big.
     Alloc,
+    /// `() -> tensor`: a scratch tensor where the kernel declares it, which
+    /// `place_scratch` turns into a shared tile or a launch parameter.
+    Scratch,
     Slice(Slice),
     /// A rank-2 tile viewed as one row, no copy.
     Flat,
@@ -619,6 +622,7 @@ impl OpKind {
             OpKind::GridBarrier => "grid_barrier".into(),
             OpKind::AssumeAlign => "assume_align".into(),
             OpKind::Alloc => "alloc".into(),
+            OpKind::Scratch => "scratch".into(),
             OpKind::Slice(s) => {
                 let sizes: Vec<String> = s.sizes.iter().map(|e| e.to_string()).collect();
                 let mut out = format!("slice [{}]", sizes.join(", "));

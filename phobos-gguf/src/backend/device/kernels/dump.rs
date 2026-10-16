@@ -1,6 +1,8 @@
 // Writes the generated raw-format kernel sources to a directory as `.ph`
 // files. `phobos-lang`'s `emit` example can then diff a codegen change over
 // them, which it cannot do for sources built in `format!` strings.
+// The test beside it checks that decode attention compiles the same with
+// its written grid barrier left to the compiler.
 //
 //   PHOBOS_DUMP_DIR=/some/dir cargo test -p phobos-gguf --features cuda \
 //       dump_raw_kernel_sources -- --ignored
@@ -153,5 +155,20 @@ fn dump_raw_kernel_sources() {
     sources.extend(crate::backend::device::formats::all_sources());
     for (name, src) in sources {
         std::fs::write(dir.join(format!("{name}.ph")), src).unwrap();
+    }
+}
+
+/// Decode attention's split and merge order through device memory, so the
+/// compiler has to place the barrier the source writes between them.
+#[test]
+fn the_compiler_places_the_attention_barrier() {
+    use phobos_kernels::compile::ptx_for;
+    for (heads, group, head_dim) in [(8, 4, 256), (16, 4, 256), (32, 4, 128), (16, 1, 64)] {
+        let qgroup = attention_qgroup(group);
+        let src = attention_persist_src(heads, group, head_dim, qgroup, ATTN_SPLITS, ATTN_WARP_SPLITS, 46);
+        let stripped: String = src.lines().filter(|l| l.trim() != "grid_barrier()").map(|l| format!("{l}\n")).collect();
+        assert_ne!(src.len(), stripped.len(), "the source writes a barrier");
+        let compile = |s: &str| ptx_for("sm_75", s, "attention_persist").unwrap_or_else(|e| panic!("{e:#}"));
+        assert!(compile(&src) == compile(&stripped), "{heads}x{group}x{head_dim}: the placed barrier differs");
     }
 }

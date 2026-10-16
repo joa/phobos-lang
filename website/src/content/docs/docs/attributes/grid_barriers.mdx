@@ -1,0 +1,23 @@
+---
+title: "@grid_barriers"
+description: Pins how many grid barriers a persistent kernel has, written and placed together.
+sidebar:
+  order: 13
+---
+
+In a [`@persistent`](/docs/attributes/persistent/) kernel the compiler places
+a grid barrier wherever one block may read or write device memory another
+block wrote since the last one, between two of the kernel's top-level
+statements and never inside a loop that hands out units. Each barrier costs
+every block a wait for the slowest.
+
+```text
+@grid_barriers(n)
+```
+
+`@grid_barriers(n)` asserts the kernel's total, the barriers it writes and
+the ones the compiler places, and fails compilation with both counts when
+they differ. A change that adds a barrier to a chain then fails where the
+chain is compiled, rather than costing time quietly. `PHOBOS_LOG=debug` names
+each placed barrier with the two accesses it orders. See the
+[Attributes](/docs/reference/spec/#attributes) table in the spec.

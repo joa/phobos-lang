@@ -26,9 +26,8 @@ impl Build {
     pub(super) fn emit_kernel(&mut self, kernel: &Kernel) -> Result<()> {
         self.scopes.push(HashMap::new());
         let entry = self.ir.entry();
-        let scratch = kernel.scratch().len();
         if self.ir.kernel.grid_barrier {
-            let arg = self.ir.args(entry)[kernel.params.len() + scratch];
+            let arg = self.ir.args(entry)[kernel.params.len()];
             self.ir.set_name(arg, "grid_barrier");
             self.bind(GRID_BARRIER_NAME, Binding::Tensor(arg));
         }
@@ -80,25 +79,6 @@ impl Build {
                     }
                 }
             }
-        }
-        // Scratch is aligned as a tensor parameter is: the launch allocates it.
-        for (i, (name, ty, at)) in kernel.scratch().into_iter().enumerate() {
-            let arg = self.ir.args(entry)[kernel.params.len() + i];
-            self.ir.set_name(arg, name);
-            let aligned = matches!(
-                ty,
-                AstType::Tensor(
-                    crate::ast::Scalar::F32 | crate::ast::Scalar::F16 | crate::ast::Scalar::BF16 | crate::ast::Scalar::I8,
-                    _
-                )
-            );
-            let v = if aligned {
-                let t = self.ir.ty(arg).clone();
-                self.value(OpKind::AssumeAlign, &[arg], t)
-            } else {
-                arg
-            };
-            self.scratch.insert(at, v);
         }
         self.check_aligned(kernel)?;
         self.emit_stmts(&kernel.body)?;
