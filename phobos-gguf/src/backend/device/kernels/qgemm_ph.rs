@@ -39,7 +39,7 @@ struct Decode {
 /// or as one slice of a split `k`. None on a chip it has not been measured
 /// on, which keeps the format's `_qgemm_t` intrinsic.
 pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String> {
-    if !measured_on(phobos_kernels::compile::chip()) {
+    if !measured_on(phobos_kernels::compile::chip(), quant) {
         return None;
     }
     match quant {
@@ -52,12 +52,16 @@ pub(crate) fn qgemm_ph_src(quant: Quant, split: Option<Split>) -> Option<String>
     }
 }
 
-/// Whether the `.ph` projections are measured on `chip`: sm_75 only so far,
-/// where the stages are carried in registers. From sm_80 on they copy with
-/// `cp.async`, and sm_120 contracts with a half-used `m16n8k16` where the
-/// intrinsics take `m16n8k32`.
-pub(crate) fn measured_on(chip: &str) -> bool {
-    chip == "sm_75"
+/// Whether `quant`'s `.ph` projection measured at least as fast as its
+/// intrinsic on `chip`: every format on sm_75, and on both sm_86 and sm_89
+/// the two that won there, IQ3_XXS and IQ3_S. The others lost on one of
+/// them, and nothing was measured on sm_80 or sm_120 since #111.
+pub(crate) fn measured_on(chip: &str, quant: Quant) -> bool {
+    match chip {
+        "sm_75" => true,
+        "sm_86" | "sm_89" => matches!(quant, Quant::IQ3_XXS | Quant::IQ3_S),
+        _ => false,
+    }
 }
 
 /// The CTAs an SM a projection is compiled for. A split grid runs under one

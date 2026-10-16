@@ -210,7 +210,7 @@ pub(crate) fn q50_qdot_src(accumulate: bool) -> String {
 /// `tn`: `q50_qmma_t`, or on a chip the `.ph` projections are measured on,
 /// [`q50_qmma_ph_src`].
 pub(crate) fn q50_qmma_src(block: usize, tm: usize, tn: usize) -> String {
-    if super::qgemm_ph::measured_on(phobos_kernels::compile::chip()) {
+    if super::qgemm_ph::measured_on(phobos_kernels::compile::chip(), crate::quant::Quant::Q5_0) {
         return q50_qmma_ph_src(block, tm, tn);
     }
     let src = format!(
