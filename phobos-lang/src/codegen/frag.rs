@@ -97,20 +97,23 @@ impl<'c> Codegen<'c> {
         Ok(frags)
     }
 
-    /// The fragments of `fa += dot(a, b)`. Rebinds nothing.
+    /// The fragments of `fa += dot(a, b)`, or of `fa += dot_t(a, b)` with
+    /// `transpose`. Rebinds nothing.
     pub(super) fn frag_dot_raw(
         &mut self,
         block: &Block<'c>,
         fa: &FragAcc<'c>,
         a: &MemVal<'c>,
         b: &MemVal<'c>,
+        transpose: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
         if fa.imma {
             bail!("internal: f16 dot into an int8 fragment accumulator");
         }
         let kk = a.shape[1];
         self.check_shapes(&a.shape, &[fa.m, kk], "fragment dot lhs")?;
-        self.check_shapes(&b.shape, &[kk, fa.n], "fragment dot rhs")?;
+        let b_want = if transpose { [fa.n, kk] } else { [kk, fa.n] };
+        self.check_shapes(&b.shape, &b_want, "fragment dot rhs")?;
         let (fm, fnn) = fa.warp_frags();
 
         let (a_buf, a_hoisted) = self.dot_stage(block, a, &[fa.m, kk], true)?;
@@ -126,7 +129,7 @@ impl<'c> Codegen<'c> {
             m0,
             n0,
             &fa.frags,
-            false,
+            transpose,
         )?;
 
         // Nothing to publish, but the barrier orders the ldmatrix reads

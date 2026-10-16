@@ -94,17 +94,26 @@ impl<'c> Codegen<'c> {
                 self.release_frag_ins(&ins);
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
-            OpKind::FragDot => {
+            OpKind::FragDot { transpose } => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
                 let a = self.tile_ir(ir, ir.operand(op, 1))?;
                 let b = self.tile_ir(ir, ir.operand(op, 2))?;
                 self.record_contract("mma.sync");
-                let frags = self.frag_dot_raw(block, &fa, &a, &b)?;
+                let frags = self.frag_dot_raw(block, &fa, &a, &b, transpose)?;
                 self.release(&a);
                 self.release(&b);
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
             OpKind::Generate => self.set_ir(ir.result(op), Lowered::Generated(op)),
+            OpKind::FragMap(tree) => {
+                let fa = self.frag_map(block, ir, op, &tree)?;
+                self.set_ir(ir.result(op), Lowered::Frags(fa));
+            }
+            OpKind::FragReduce(how) => {
+                let fa = self.frags_ir(ir.operand(op, 0))?;
+                let out = self.frag_reduce(block, &fa, how)?;
+                self.set_ir(ir.result(op), Lowered::Tile(out));
+            }
             OpKind::FragDotScaled => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
                 let ins = (1..5).map(|i| self.frag_in(ir, ir.operand(op, i))).collect::<Result<Vec<_>>>()?;

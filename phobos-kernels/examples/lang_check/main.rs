@@ -13,7 +13,7 @@ use phobos_kernels::compile::context_for;
 use phobos_kernels::{compile_in, cuda_ok, push_descriptor};
 
 mod tensor;
-use tensor::{dot_epilogue, scaled_int8_dot};
+use tensor::{dot_epilogue, flash_softmax, scaled_int8_dot};
 
 const THREADS: u32 = 256;
 
@@ -122,6 +122,7 @@ fn main() -> Result<()> {
     register_tile(&mut failures)?;
     register_rows(&mut failures)?;
     dot_epilogue(&mut failures)?;
+    flash_softmax(&mut failures)?;
     scaled_int8_dot(&mut failures)?;
     lanes(&mut failures)?;
     lane_matvec(&mut failures)?;

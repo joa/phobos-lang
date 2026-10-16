@@ -512,7 +512,9 @@ impl Verifier<'_> {
             | OpKind::GemmStore { .. }
             | OpKind::FragInit(_)
             | OpKind::FragScale(_)
-            | OpKind::FragDot
+            | OpKind::FragDot { .. }
+            | OpKind::FragMap(_)
+            | OpKind::FragReduce(_)
             | OpKind::FragDotScaled
             | OpKind::FragOuter { .. }
             | OpKind::FragStore
