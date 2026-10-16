@@ -9,6 +9,7 @@ mod lanes;
 mod decl;
 mod matmul;
 mod names;
+mod params;
 mod pipeline;
 mod regs;
 mod slice;
@@ -22,27 +23,20 @@ mod tests;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 
 use super::{
-    Builder, Extent, Ir, KernelInfo, Layout, OpId, OpKind, Scalar, Space, TensorType, TileType,
+    Builder, Extent, Ir, KernelInfo, Layout, OpId, OpKind, Scalar, Space, TileType,
     Type, ValueId,
 };
-use crate::ast::{AttrArg, BinOp, Dim, Kernel, Literal as AstLiteral, Span, Stmt, Type as AstType};
+use crate::ast::{AttrArg, Dim, Kernel, Span, Stmt};
 use crate::diag::{Diagnostic, Diagnostics, SourceFile};
 
 pub(crate) use super::at_op::locate;
 pub(crate) use decl::Decl;
+pub(crate) use params::GRID_BARRIER_NAME;
 pub(crate) use crate::shape::DYN;
 
-/// The barrier word a `@persistent` launch appends for `grid_barrier()`,
-/// the `[2, 1]` column `grid_barrier(bar)` takes as a named parameter.
-fn grid_barrier_type() -> AstType {
-    AstType::Tensor(crate::ast::Scalar::I32, vec![Dim::Int(2), Dim::Int(1)])
-}
-
-/// The name the appended barrier word is bound to, which no source spells.
-pub(crate) const GRID_BARRIER_NAME: &str = "#grid_barrier";
 
 /// What the build asks the chip. The `@tensorcore` attributes are folded
 /// in by [`Build::has_wmma`] and [`Build::has_mma_sync`].
@@ -158,6 +152,9 @@ pub(crate) struct Build {
     decls: HashMap<(String, ValueId), Decl>,
     /// The declaration the next [`Build::bind`] of its name records.
     pub(crate) declaring: Option<(String, Decl)>,
+    /// Each scratch tensor's parameter, by where it is declared, for its
+    /// declaration to bind.
+    pub(crate) scratch: HashMap<Span, ValueId>,
 }
 
 /// A name used whose declaration already failed. It is reported once, at
@@ -271,6 +268,7 @@ pub fn build(
         poisoned: HashSet::new(),
         decls: HashMap::new(),
         declaring: None,
+        scratch: HashMap::new(),
     };
     let params = kernel
         .params
@@ -281,8 +279,26 @@ pub fn build(
         })
         .collect::<Result<Vec<_>>>()?;
     let mut params = params;
+    // Scratch the launch owns, appended in declaration order.
+    let scratch = kernel.scratch();
+    if let Some(&(name, _, at)) = scratch.first()
+        && kernel.persistent().ok().flatten().is_none()
+    {
+        let e = anyhow!(
+            "tensor `{name}` is scratch a `@persistent` launch supplies; outside one, no block could read what another wrote"
+        );
+        return Err(locate(&kernel.source, &empty, e, at));
+    }
+    for &(name, ty, at) in &scratch {
+        let t = b.param_type(kernel, ty).map_err(|e| locate(&kernel.source, &empty, e, at))?;
+        if t.shape().is_none_or(|s| s.iter().any(|e| e.fixed().is_none())) {
+            let e = anyhow!("scratch tensor `{name}` needs a static shape: literals or `@autotune` constants");
+            return Err(locate(&kernel.source, &empty, e, at));
+        }
+        params.push(t);
+    }
     if info.grid_barrier {
-        params.push(b.param_type(kernel, &grid_barrier_type())?);
+        params.push(b.param_type(kernel, &params::grid_barrier_type())?);
     }
     b.ir = Ir::new(info, &params);
     b.block = b.ir.entry();
@@ -305,150 +321,6 @@ pub fn build(
 }
 
 impl Build {
-    /// Binds the parameters and the symbolic tensor dims, then builds the
-    /// body.
-    fn emit_kernel(&mut self, kernel: &Kernel) -> Result<()> {
-        self.scopes.push(HashMap::new());
-        let entry = self.ir.entry();
-        if self.ir.kernel.grid_barrier {
-            let arg = self.ir.args(entry)[kernel.params.len()];
-            self.ir.set_name(arg, "grid_barrier");
-            self.bind(GRID_BARRIER_NAME, Binding::Tensor(arg));
-        }
-        for (i, param) in kernel.params.iter().enumerate() {
-            let arg = self.ir.args(entry)[i];
-            self.ir.set_name(arg, &param.name);
-            let binding = match &param.ty {
-                // Integer params convert to index on entry.
-                AstType::Scalar(crate::ast::Scalar::I32 | crate::ast::Scalar::I64) => {
-                    let value = self.value(OpKind::IndexCast(Scalar::Index), &[arg], Type::INDEX);
-                    Binding::Let { value, div: 1 }
-                }
-                AstType::Scalar(_) => Binding::Let { value: arg, div: 1 },
-                // These tensors' base pointers are assumed 16-byte aligned,
-                // as the host allocator guarantees, so their rows can
-                // vectorize.
-                AstType::Tensor(
-                    crate::ast::Scalar::F32
-                    | crate::ast::Scalar::F16
-                    | crate::ast::Scalar::BF16
-                    | crate::ast::Scalar::I8,
-                    _,
-                ) => {
-                    let ty = self.ir.ty(arg).clone();
-                    Binding::Tensor(self.value(OpKind::AssumeAlign, &[arg], ty))
-                }
-                AstType::Tensor(..) => Binding::Tensor(arg),
-                AstType::Tile(..) => bail!("a kernel parameter cannot be a tile; declare it as a `tensor`"),
-            };
-            let decl = Decl {
-                at: param.span,
-                ty: Decl::held(Some(&param.ty), param.ty_span),
-                value: Span::default(),
-            };
-            self.declaring = Some((param.name.clone(), decl));
-            self.bind(&param.name, binding);
-
-            if let AstType::Tensor(_, dims) = &param.ty {
-                for (d, dim) in dims.iter().enumerate() {
-                    if let Dim::Sym(name) = dim
-                        && !self.shape_env.contains_key(name)
-                        && self.lookup(name).is_none()
-                    {
-                        let size = self.value(OpKind::Dim(d), &[arg], Type::INDEX);
-                        self.ir.set_name(size, name);
-                        // Dynamic dims are assumed multiples of 4 elements, the
-                        // 16-byte row-pitch ABI.
-                        self.bind(name, Binding::Let { value: size, div: 4 });
-                    }
-                }
-            }
-        }
-        self.check_aligned(kernel)?;
-        self.emit_stmts(&kernel.body)?;
-        // A declaration that failed was reported where it was written.
-        let missing = |n: &&String| !self.regs_declared.contains(n) && !self.poisoned.contains(*n);
-        if let Some(name) = self.registers.iter().find(missing) {
-            bail!("`@registers({name})` names no `var {name}: tile<..>[..]` of the kernel");
-        }
-        self.scopes.pop();
-        Ok(())
-    }
-
-    /// Traps at entry when a launch breaks an `@aligned(DIM = tile)` promise
-    /// on a dynamic dimension, before anything is written past a tensor.
-    fn check_aligned(&mut self, kernel: &Kernel) -> Result<()> {
-        for (name, div) in self.aligned_promises(kernel)? {
-            let Some(Binding::Let { value: size, .. }) = self.lookup(&name) else {
-                continue;
-            };
-            if div <= 1 {
-                continue;
-            }
-            let div = self.const_index(div);
-            let rem = self.value(OpKind::Binary(BinOp::Rem), &[size, div], Type::INDEX);
-            let zero = self.const_index(0);
-            let broken = self.value(OpKind::Binary(BinOp::Ne), &[rem, zero], Type::Scalar(Scalar::Bool));
-            let then = self.ir.new_block(&[]);
-            self.in_block(then, |b| {
-                b.stmt(OpKind::Trap, &[]);
-                b.stmt(OpKind::Yield, &[]);
-            });
-            self.op(OpKind::If, &[broken], Vec::new(), vec![then]);
-        }
-        Ok(())
-    }
-
-    /// Every `@aligned(NAME = tile)` pair, the tile resolved to its value.
-    fn aligned_promises(&self, kernel: &Kernel) -> Result<Vec<(String, i64)>> {
-        let Some(attr) = kernel.attrs.iter().find(|a| a.name == "aligned") else {
-            return Ok(Vec::new());
-        };
-        attr.args
-            .iter()
-            .filter_map(|a| match a {
-                AttrArg::KeyValue { key, value } => Some((key, value)),
-                _ => None,
-            })
-            .map(|(name, value)| {
-                let div = match value {
-                    AstLiteral::Int(n) => *n,
-                    AstLiteral::Ident(sym) => *self
-                        .shape_env
-                        .get(sym)
-                        .ok_or_else(|| anyhow!("`@aligned({name} = {sym})`: unknown constant"))?,
-                    other => bail!("`@aligned({name})`: expected an integer, found {other:?}"),
-                };
-                anyhow::ensure!(div > 0, "`@aligned({name})`: the divisor must be positive");
-                Ok((name.clone(), div))
-            })
-            .collect()
-    }
-
-    fn param_type(&self, kernel: &Kernel, ty: &AstType) -> Result<Type> {
-        Ok(match ty {
-            AstType::Scalar(s) => Type::Scalar(Scalar::from_ast(*s)),
-            AstType::Tensor(s, dims) => Type::Tensor(TensorType {
-                elem: Scalar::from_ast(*s),
-                shape: self.tensor_shape(dims).iter().map(|&d| extent(d)).collect(),
-                div: self.declared_divs(kernel, dims)?,
-            }),
-            AstType::Tile(..) => bail!("a kernel parameter cannot be a tile; declare it as a `tensor`"),
-        })
-    }
-
-    /// Per-dimension divisors promised by `@aligned(NAME = tile)`.
-    fn declared_divs(&self, kernel: &Kernel, dims: &[Dim]) -> Result<Vec<i64>> {
-        let promises = self.aligned_promises(kernel)?;
-        Ok(dims
-            .iter()
-            .map(|dim| match dim {
-                Dim::Sym(name) => promises.iter().find(|(n, _)| n == name).map_or(1, |&(_, div)| div),
-                Dim::Int(_) => 1,
-            })
-            .collect())
-    }
-
     /// Runs `f` for the statement at `span`: every op it made that no
     /// nested statement claimed comes from it, and an error it returns is
     /// placed there unless something inside placed it first.

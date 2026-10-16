@@ -105,6 +105,35 @@ fn ctx_blocks_is_the_persistent_count() {
     assert!(mlir.contains("arith.constant 48 : index"), "{mlir}");
 }
 
+/// A tensor declared in a `@persistent` kernel is scratch the launch
+/// supplies: a parameter after the declared ones, in declaration order, and
+/// before the barrier word. `flat` views it as one row.
+#[test]
+fn scratch_tensors_follow_the_declared_parameters() {
+    let mlir = emit_mlir(
+        "@persistent(BLOCKS)
+        @autotune(BLOCKS in [8])
+        kernel k(X: tensor<f32>[1, 256], Y: tensor<f32>[1, 256]) {
+            var H: tensor<f32>[8, 32]
+            var S: tensor<i8>[1, 8]
+            let HF = flat(H)
+            for u in range(ctx.block.x, 8, ctx.blocks.x) {
+                H[u :+ 1, 0 :+ 32] = X[0 :+ 1, u * 32 :+ 32] * 2.0
+                S[0, u] = i8(1)
+            }
+            grid_barrier()
+            for u in range(ctx.block.x, 8, ctx.blocks.x) {
+                Y[0 :+ 1, u * 32 :+ 32] = HF[0 :+ 1, ((u + 1) % 8) * 32 :+ 32]
+            }
+        }",
+    );
+    assert!(
+        mlir.contains("%arg2: memref<8x32xf32, 1>, %arg3: memref<1x8xi8, 1>, %arg4: memref<2x1xi32, 1>)"),
+        "{mlir}"
+    );
+    assert!(mlir.contains("memref<8x32xf32, 1> to memref<1x256xf32, 1>"), "{mlir}");
+}
+
 #[test]
 fn grid_barrier_rejects_a_non_tensor() {
     let err = std::panic::catch_unwind(|| {

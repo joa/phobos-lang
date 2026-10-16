@@ -7,6 +7,12 @@
 // control it was stored under; a loop's variable is as varying as its
 // bounds. Loops can raise a `var` after it was read, so the analysis runs to
 // a fixed point.
+//
+// Whether a value differs between blocks is a separate question, answered
+// by the same fixed point with `ctx.block` as its one source
+// (`analyze_blocks`). A store at a thread-varying index can still be made
+// alike by every block, and a load at `ctx.block.x` is uniform in its CTA
+// and differs between blocks, so the two do not order into one chain.
 
 use std::collections::HashMap;
 
@@ -63,19 +69,40 @@ impl Uniformity {
 }
 
 pub fn analyze(ir: &Ir) -> Uniformity {
+    fixed_point(ir, Scope::Threads)
+}
+
+/// Which values and blocks may differ between the blocks of the grid:
+/// `Kind::Varying` for those `ctx.block` flows into, `Kind::Uniform` for the
+/// rest, which every block computes alike. `Kind::Warp` never appears.
+pub fn analyze_blocks(ir: &Ir) -> Uniformity {
+    fixed_point(ir, Scope::Blocks)
+}
+
+fn fixed_point(ir: &Ir, scope: Scope) -> Uniformity {
     let mut u = Uniformity::default();
     loop {
-        let walk = Walk { ir, u: &mut u, changed: false };
+        let walk = Walk { ir, u: &mut u, changed: false, scope };
         if !walk.run() {
             return u;
         }
     }
 }
 
+/// Between what the analysis asks a value may differ.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// The threads of a CTA.
+    Threads,
+    /// The blocks of the grid.
+    Blocks,
+}
+
 struct Walk<'a> {
     ir: &'a Ir,
     u: &'a mut Uniformity,
     changed: bool,
+    scope: Scope,
 }
 
 impl Walk<'_> {
@@ -117,11 +144,15 @@ impl Walk<'_> {
     fn op(&mut self, op: OpId, control: Kind) {
         let ir = self.ir;
         let operands = ir.operands(op);
+        let threads = self.scope == Scope::Threads;
         match ir.kind(op) {
-            OpKind::Thread(which) => self.set(ir.result(op), which.kind()),
+            OpKind::Thread(which) if threads => self.set(ir.result(op), which.kind()),
+            OpKind::ProgramId(_) if !threads => self.set(ir.result(op), Kind::Varying),
             // A full-warp butterfly leaves every lane with the same value.
-            OpKind::Converged(Group::Lanes) => self.set(ir.result(op), self.u.of(operands[0]).min(Kind::Warp)),
-            OpKind::Converged(Group::Cta) | OpKind::Exchange => {
+            OpKind::Converged(Group::Lanes) if threads => {
+                self.set(ir.result(op), self.u.of(operands[0]).min(Kind::Warp))
+            }
+            OpKind::Converged(Group::Cta) | OpKind::Exchange if threads => {
                 for &res in ir.results(op) {
                     self.set(res, Kind::Uniform);
                 }
@@ -176,9 +207,11 @@ impl Walk<'_> {
             OpKind::Generate => {
                 // Each lane evaluates the block for its own elements; the
                 // result stands for the whole tile, as a tile operand does.
+                // Every block reads the same elements.
+                let at = if threads { Kind::Varying } else { Kind::Uniform };
                 for &b in ir.blocks_of(op) {
                     for arg in ir.args(b).to_vec() {
-                        self.set(arg, Kind::Varying);
+                        self.set(arg, at);
                     }
                     self.block(b, control);
                 }
@@ -455,5 +488,83 @@ impl Order<'_> {
         }
         dirty.extend(stored.map(|b| (b, op)));
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The named values of a kernel's first build, with whether each may
+    /// differ between blocks.
+    fn block_varying(src: &str) -> Vec<(String, bool)> {
+        let kernels = crate::parse(src).unwrap();
+        let base = phobos_base::context::Context::default();
+        let target = crate::codegen::target::build_target(&base);
+        let (ir, _) = crate::ir::build::build(&base, target, &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
+        let u = analyze_blocks(&ir);
+        let mut out = Vec::new();
+        for op in ir.all_ops() {
+            for &r in ir.results(op) {
+                if let Some(name) = ir.name(r) {
+                    out.push((name.to_string(), u.of(r) != Kind::Uniform));
+                }
+            }
+            for &b in ir.blocks_of(op) {
+                for &a in ir.args(b) {
+                    if let Some(name) = ir.name(a) {
+                        out.push((name.to_string(), u.of(a) != Kind::Uniform));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn flag(values: &[(String, bool)], name: &str) -> bool {
+        values.iter().find(|(n, _)| n == name).unwrap_or_else(|| panic!("no `{name}` in {values:?}")).1
+    }
+
+    #[test]
+    fn a_loop_from_the_block_differs_between_blocks() {
+        let v = block_varying(
+            "kernel k(X: tensor<f32>[N]) {
+                for u in range(ctx.block.x, N, 64) {
+                    let t = u * 2
+                    X[t] = 1.0
+                }
+            }",
+        );
+        assert!(flag(&v, "u") && flag(&v, "t"), "{v:?}");
+    }
+
+    #[test]
+    fn a_var_set_under_a_block_test_differs_between_blocks() {
+        let v = block_varying(
+            "kernel k(X: tensor<f32>[N]) {
+                var first: i32 = 0
+                if ctx.block.x == 0 {
+                    first = 1
+                }
+                X[0] = f32(first)
+            }",
+        );
+        assert!(flag(&v, "first"), "{v:?}");
+    }
+
+    #[test]
+    fn a_load_at_the_block_differs_between_blocks_and_the_thread_does_not() {
+        let v = block_varying(
+            "kernel k(X: tensor<f32>[N], Y: tensor<f32>[N]) {
+                let x = X[ctx.block.x]
+                let i = ctx.thread
+                let y = Y[i]
+                Y[i] = y + 1.0
+                X[ctx.block.x] = x
+            }",
+        );
+        assert!(flag(&v, "x"), "{v:?}");
+        // A thread's own index, and what it reads there, every block alike.
+        assert!(!flag(&v, "i") && !flag(&v, "y"), "{v:?}");
     }
 }

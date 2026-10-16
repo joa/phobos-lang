@@ -40,12 +40,12 @@ impl Emit {
         let (aq, asc) = self.quant(a, k, false);
         let (rq, rd, fmt) = self.raw_weight(key, w)?;
         let yn = self.given(y, key.len_of(y), View::Flat);
-        self.scratch.push(Scratch {
+        let at = self.claim_scratch(Scratch {
             bytes: Q8_BLOCK,
             scales: splits * width,
         });
-        let at = self.scratch.len() - 1;
-        let pp = self.slot(format!("P{s}"), "f32", [1, (splits * width) as i64], Bound::ScratchScales(at));
+        let pp = format!("P{s}");
+        self.declare_scratch(at, true, &pp, "f32", [1, (splits * width) as i64]);
         let rt = self.tune_const("RT".into(), RAW_UNIT);
         let sb = nb / splits;
         let units = tiles * splits;
@@ -54,7 +54,7 @@ impl Emit {
             self.body,
             "
   for k{s} in range(0, {iters}) {{
-    let u{s} = p + k{s} * BLOCKS
+    let u{s} = p + k{s} * ctx.blocks.x
     if u{s} < {units} {{
       let ps{s} = u{s} / {tiles}
       let t{s} = (u{s} - ps{s} * {tiles}) * {rt}
@@ -74,7 +74,7 @@ impl Emit {
             self.body,
             "
   for j{s} in range(0, {}) {{
-    let v{s} = p + j{s} * BLOCKS
+    let v{s} = p + j{s} * ctx.blocks.x
     if v{s} < {tiles} {{
       let r{s} = v{s} * {rt}
       {yn}[0 :+ 1, r{s} :+ {rt}] += {sum}

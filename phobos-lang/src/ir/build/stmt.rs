@@ -36,9 +36,23 @@ impl Build {
                     let div = self.expr_div(value);
                     match self.emit_expr(value)? {
                         Rv::Scalar(v) => self.bind(name, Binding::Let { value: v, div }),
+                        // A scratch tensor's flat view is a tensor too.
+                        Rv::Tile(t) if matches!(self.ir.ty(t), Type::Tensor(_)) => self.bind(name, Binding::Tensor(t)),
                         Rv::Tile(t) => self.bind(name, Binding::View(t)),
                     }
                 }
+            }
+            Stmt::Var {
+                name,
+                ty: Some(AstType::Tensor(..)),
+                value: None,
+                span,
+                ..
+            } => {
+                let Some(&t) = self.scratch.get(span) else {
+                    bail!("internal: scratch tensor `{name}` has no parameter");
+                };
+                self.bind(name, Binding::Tensor(t));
             }
             Stmt::Var {
                 name, ty, value, ..

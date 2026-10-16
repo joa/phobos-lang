@@ -71,6 +71,16 @@ pub fn context_for(shapes: &[Override<'_>]) -> Context {
     ctx
 }
 
+/// `source` lowered to PTX for `chip` and nothing loaded, so a host test can
+/// tell two sources apart by what they compile to.
+pub fn ptx_for(chip: &str, source: &str, what: &str) -> Result<String> {
+    let ctx = Context {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
+        ..Context::default()
+    };
+    Ok(lower::single(&ctx, source, what)?.0.0)
+}
+
 pub fn compile_in(
     ctx: &Context,
     source: &str,

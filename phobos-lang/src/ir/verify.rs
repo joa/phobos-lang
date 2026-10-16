@@ -583,16 +583,27 @@ impl Verifier<'_> {
             }
             OpKind::Flat => {
                 if self.want_operands(op, 1) && self.want_results(op, 1) {
-                    self.want_tiles(op, 0..1);
                     let (src, out) = (ir.ty(ir.operand(op, 0)), ir.ty(ir.result(op)));
-                    if let (Type::Tile(s), Type::Tile(o)) = (src, out) {
-                        let want = s.static_shape().filter(|sh| sh.len() == 2).map(|sh| sh[0] * sh[1]);
-                        let got = o.static_shape().filter(|sh| sh.len() == 2 && sh[0] == 1).map(|sh| sh[1]);
-                        if want.is_none() || want != got || s.elem != o.elem || s.space != o.space {
-                            self.err(op, "result must be the source viewed as one row");
+                    // A tile, or a whole scratch tensor, as one row of its kind.
+                    let row = |t: &Type| -> Option<(Scalar, Vec<i64>, bool)> {
+                        match t {
+                            Type::Tile(t) => Some((t.elem, t.static_shape()?, t.space == super::Space::Shared)),
+                            Type::Tensor(t) => {
+                                let shape = t.shape.iter().map(|e| e.fixed()).collect::<Option<Vec<_>>>()?;
+                                Some((t.elem, shape, false))
+                            }
+                            _ => None,
                         }
-                    } else {
-                        self.err(op, "result must be a tile");
+                    };
+                    match (row(src), row(out), std::mem::discriminant(src) == std::mem::discriminant(out)) {
+                        (Some((se, ss, sk)), Some((oe, os, ok)), true) => {
+                            let want = (ss.len() == 2).then(|| ss[0] * ss[1]);
+                            let got = (os.len() == 2 && os[0] == 1).then(|| os[1]);
+                            if want.is_none() || want != got || se != oe || sk != ok {
+                                self.err(op, "result must be the source viewed as one row");
+                            }
+                        }
+                        _ => self.err(op, "flattens a tile into a tile, or a tensor into a tensor"),
                     }
                 }
             }

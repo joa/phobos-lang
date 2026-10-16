@@ -410,9 +410,6 @@ pub(crate) enum Bound {
     /// A raw weight's block bytes, then its `d` plane.
     RawBytes(Val),
     RawD(Val),
-    /// Scratch, by index into [`Plan::scratch`].
-    ScratchQs(usize),
-    ScratchScales(usize),
 }
 
 /// One tensor parameter of the emitted kernel, in declaration order.
@@ -429,6 +426,17 @@ pub(crate) struct Scratch {
     pub(crate) scales: usize,
 }
 
+/// A tensor the fused kernel declares in its body, which the launch appends
+/// after the slots, in declaration order: one buffer of a scratch pair.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ScratchArg {
+    /// The pair, by index into [`Plan::scratch`].
+    pub(crate) at: usize,
+    /// The scales buffer rather than the bytes.
+    pub(crate) scales: bool,
+    pub(crate) dims: [i64; 2],
+}
+
 /// The pass's output: source to compile, operands to bind, scratch to
 /// allocate, and the grid size they assume.
 #[derive(Debug)]
@@ -436,6 +444,8 @@ pub(crate) struct Plan {
     pub(crate) source: String,
     pub(crate) slots: Vec<Slot>,
     pub(crate) scratch: Vec<Scratch>,
+    /// The scratch tensors the source declares, in order.
+    pub(crate) scratch_args: Vec<ScratchArg>,
     pub(crate) blocks: u32,
     /// Grid barriers the chain needs.
     pub(crate) barriers: usize,

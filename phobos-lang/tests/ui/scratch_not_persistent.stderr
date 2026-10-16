@@ -1,0 +1,7 @@
+error: tensor `H` is scratch a `@persistent` launch supplies; outside one, no block could read what another wrote
+ --> tests/ui/scratch_not_persistent.ph:2:3
+  |
+2 |   var H: tensor<f32>[8, 32]
+  |   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error
