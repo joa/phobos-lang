@@ -216,3 +216,49 @@ fn a_placed_barrier_takes_the_place_of_a_written_cta_barrier() {
     assert_eq!(ir.matches("grid_barrier %").count(), 1, "{ir}");
     assert_eq!(ir.lines().filter(|l| l.trim() == "barrier").count(), 1, "only the first CTA barrier is left:\n{ir}");
 }
+
+/// [`MLP`] with grid-stride loops in place of the guarded ones.
+fn strided(src: &str) -> String {
+    src.replace(
+        "  for i in range(0, 4) {\n    let u = p + i * ctx.blocks.x\n    if u < 32 {\n",
+        "  for u in range(p, 32, ctx.blocks.x) {\n    if true {\n",
+    )
+}
+
+#[test]
+fn a_grid_stride_loop_hands_out_units() {
+    let src = strided(MLP);
+    assert!(!src.contains("let u"), "{src}");
+    let ir = passed(&src);
+    assert_eq!(ir.matches("grid_barrier %").count(), 1, "{ir}");
+    // Reading only its own unit, the second loop needs none.
+    let own = strided(
+        &MLP.replace(" + V[0 :+ 1, ((u + 1) % 32) * 8 :+ 8]", "")
+            .replace("H[0, ctx.thread] = X[0, ctx.thread] * 2.0", "H[0, ctx.thread] = 2.0"),
+    );
+    assert!(!passed(&own).contains("grid_barrier"));
+}
+
+#[test]
+fn disjoint_rotated_grid_stride_loops_need_no_barrier() {
+    let src = "@launch(256)
+@persistent(BLOCKS)
+@autotune(BLOCKS in [144])
+kernel k(A: tensor<f32>[1, 4160], X: tensor<f32>[1, 4160]) {
+  let p = ctx.block.x
+  let cu = ctx.warp * 8 + ctx.lane / 4
+  for u2 in range((p + 16) % ctx.blocks.x, 64, ctx.blocks.x) {
+    let to2 = u2 * 64
+    if ctx.lane % 4 == 0 {
+      X[0, to2 + cu] = 1.0
+    }
+  }
+  barrier()
+  for u3 in range((p + 96) % ctx.blocks.x, 1, ctx.blocks.x) {
+    let to3 = 4096 + u3 * 32
+    X[0 :+ 1, to3 :+ 32] = A[0 :+ 1, to3 :+ 32]
+  }
+}";
+    let ir = passed(src);
+    assert!(!ir.contains("grid_barrier"), "{ir}");
+}

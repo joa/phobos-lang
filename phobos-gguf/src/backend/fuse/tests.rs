@@ -295,7 +295,7 @@ fn the_convolution_costs_one_barrier_and_the_gates_none() {
     assert!(after.contains("rowsum(y3"), "the convolution");
     assert!(after.contains("exp(X6["), "the gates");
     // Both in one grid-strided loop.
-    assert_eq!(after.matches("in range(0, IT").count(), 1);
+    assert_eq!(after.matches(", ctx.blocks.x) {").count(), 1);
     assert!(after.contains("UN3 in [48]") || plan.source.contains("UN3 in [48]"));
 }
 
@@ -588,7 +588,7 @@ fn a_wide_grid_splits_the_down_projection_along_k() {
     assert!(src.contains("for b5 in range(ps5 * 6, ps5 * 6 + 6)"), "{src}");
     assert!(src.contains("P5[0, ps5 * 2560 + t5 + cu] = tot5"), "{src}");
     assert!(src.contains("P5: tensor<f32>[1, 15360]"), "{src}");
-    assert!(src.contains("if u5 < 240"), "{src}");
+    assert!(src.contains("for u5 in range(p, 240, ctx.blocks.x)"), "{src}");
     // The sum reads all six slices.
     assert!(src.contains("P5[0 :+ 1, 12800 + r5 :+ RT]"), "{src}");
     assert!(plan.scratch.iter().any(|s| s.scales == 15360), "{:?}", plan.scratch);
@@ -625,9 +625,9 @@ fn independent_nests_start_on_the_blocks_the_last_left_idle() {
     // The 4B's projection at 192 blocks: q/k/v takes 128 units, so the gate
     // projection's 64 start on block 128, and the next nest wraps to 0.
     let src = qwen_4b_project_plan().source;
-    assert!(src.contains("let u1 = p + i1 * ctx.blocks.x"), "{src}");
-    assert!(src.contains("let u2 = (p + 64) % ctx.blocks.x + i2 * ctx.blocks.x"), "{src}");
-    assert!(src.contains("let u3 = p + i3 * ctx.blocks.x"), "{src}");
+    assert!(src.contains("for u1 in range(p, UN1, ctx.blocks.x)"), "{src}");
+    assert!(src.contains("for u2 in range((p + 64) % ctx.blocks.x, UN2, ctx.blocks.x)"), "{src}");
+    assert!(src.contains("for u3 in range(p, UN3, ctx.blocks.x)"), "{src}");
 }
 
 /// The 4B's delta-net projection: `attn_qkv` Q5_K and `attn_gate` Q4_K as
@@ -677,7 +677,7 @@ fn the_split_projection_mixes_raw_and_q8_weights() {
     assert_eq!(src.matches("= qdot_t(").count(), 2, "{src}");
     // The Q8_0 projections' tile stores share a buffer with a raw one's
     // per-lane stores, so a CTA barrier lands those first.
-    assert!(src.contains("  }\n\n  barrier()\n\n  for i3"), "{src}");
+    assert!(src.contains("  }\n\n  barrier()\n\n  for u3"), "{src}");
     assert!(src.contains("@launch(256, 2)\n@persistent"), "{src}");
     // 128 and 64 units of the raw weights, one block each of the Q8_0 ones.
     assert!(src.contains("UN1 in [128]"), "{src}");

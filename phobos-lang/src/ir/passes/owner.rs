@@ -2,7 +2,8 @@
 // device memory.
 //
 // A unit loop hands block `p` the units `u = (p + k) % blocks + i * blocks`
-// (`k` zero unrotated), under `if u < UN`. An access whose element is
+// (`k` zero unrotated), under `if u < UN`, or as a grid-stride loop
+// `for u in range((p + k) % blocks, UN, blocks)`. An access whose element is
 // `a * u + b` of its buffer, flattened row-major, is made by the block owning
 // `u`, so two accesses with the same `k`, `a` and `b`, neither spanning more
 // than `|a|` elements, are made by the same block for every unit. An access at block-same indices under block-same
@@ -13,7 +14,7 @@ use std::collections::BTreeMap;
 
 use crate::ast::BinOp;
 use crate::ir::uniform::{Kind, Uniformity};
-use crate::ir::{BlockId, Def, Ir, Literal, OpId, OpKind, ThreadIndex, Type, ValueId};
+use crate::ir::{BlockId, Bounds, Def, ForInfo, Ir, Literal, OpId, OpKind, ThreadIndex, Type, ValueId};
 
 /// Which blocks make an access.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -90,11 +91,12 @@ impl Affine {
     }
 }
 
-/// A unit variable: its loop's rotation, and the units a block takes, from
-/// the guard `u < UN` it is read under.
+/// A unit variable: its loop's rotation, and for a grid-stride loop's
+/// variable, the units the loop runs to.
 #[derive(Clone, Copy, Debug)]
 struct Unit {
     k: i64,
+    to: Option<i64>,
 }
 
 pub(super) struct Owners<'a> {
@@ -112,7 +114,15 @@ impl<'a> Owners<'a> {
             if let Some(&r) = ir.results(op).first()
                 && let Some(k) = o.unit_of(r)
             {
-                o.units.insert(r, Unit { k });
+                o.units.insert(r, Unit { k, to: None });
+            }
+            if let OpKind::For(ForInfo { bounds: Bounds::Dynamic, ragged: false, .. }) = ir.kind(op)
+                && o.constant(ir.operand(op, 2)) == Some(blocks)
+                && let Some(k) = o.rotation(ir.operand(op, 0))
+                && let Some(to) = o.constant(ir.operand(op, 1))
+            {
+                let iv = ir.args(ir.blocks_of(op)[0])[0];
+                o.units.insert(iv, Unit { k, to: Some(to) });
             }
         }
         o
@@ -131,6 +141,13 @@ impl<'a> Owners<'a> {
         if !matches!(ir.def(iv), Def::Arg { .. }) || self.constant(b) != Some(self.blocks) {
             return None;
         }
+        self.rotation(base)
+    }
+
+    /// The rotation `k` of a loop's first unit, the block or
+    /// `(block + c) % blocks`.
+    fn rotation(&self, base: ValueId) -> Option<i64> {
+        let ir = self.ir;
         if self.is_block(base) {
             return Some(0);
         }
@@ -146,12 +163,14 @@ impl<'a> Owners<'a> {
         Some((self.blocks - self.constant(c)?).rem_euclid(self.blocks))
     }
 
-    /// Whether a unit variable steps by the loop variable `iv`.
+    /// Whether `iv` is a unit, or a unit variable steps by the loop
+    /// variable `iv`.
     pub fn hands_out_units(&self, iv: ValueId) -> bool {
-        self.units.keys().any(|&u| {
-            let step = self.ir.def_op(u).map(|op| self.ir.operand(op, 1));
-            step.and_then(|s| self.ir.def_op(s)).is_some_and(|m| self.ir.operand(m, 0) == iv)
-        })
+        self.units.contains_key(&iv)
+            || self.units.keys().any(|&u| {
+                let step = self.ir.def_op(u).map(|op| self.ir.operand(op, 1));
+                step.and_then(|s| self.ir.def_op(s)).is_some_and(|m| self.ir.operand(m, 0) == iv)
+            })
     }
 
     fn is_block(&self, v: ValueId) -> bool {
@@ -233,9 +252,12 @@ impl<'a> Owners<'a> {
         }
     }
 
-    /// The units a block takes of `unit`, from the guard `unit < UN` it is
-    /// read under: `[0, UN)`.
+    /// The units a block takes of `unit`, `[0, UN)`: from its grid-stride
+    /// loop's bound, or the guard `unit < UN` it is read under.
     fn guard(&self, op: OpId, unit: ValueId) -> Option<i64> {
+        if let Some(to) = self.units.get(&unit).and_then(|u| u.to) {
+            return Some(to);
+        }
         let ir = self.ir;
         for (anc, _) in ir.ancestors(ir.parent_block(op)) {
             if !matches!(ir.kind(anc), OpKind::If) {

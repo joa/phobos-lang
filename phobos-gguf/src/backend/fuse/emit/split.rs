@@ -49,22 +49,17 @@ impl Emit {
         let rt = self.tune_const("RT".into(), RAW_UNIT);
         let sb = nb / splits;
         let units = tiles * splits;
-        let iters = units.div_ceil(blocks);
         let _ = write!(
             self.body,
             "
-  for k{s} in range(0, {iters}) {{
-    let u{s} = p + k{s} * ctx.blocks.x
-    if u{s} < {units} {{
+  for u{s} in range(p, {units}, ctx.blocks.x) {{
       let ps{s} = u{s} / {tiles}
       let t{s} = (u{s} - ps{s} * {tiles}) * {rt}
 "
         );
         let tot = self.raw_lanes(s, fmt, &rq, &rd, (&aq, &asc), &format!("t{s}"), &format!("ps{s} * {sb}"), sb);
         self.store_lanes(&pp, &format!("ps{s} * {width} + t{s}"), &tot, RAW_UNIT);
-        let _ = write!(self.body, "    }}
-  }}
-");
+        let _ = writeln!(self.body, "  }}");
         self.land_lane_stores();
         let sum = (0..splits)
             .map(|sp| format!("{pp}[0 :+ 1, {} + r{s} :+ {rt}]", sp * width))
@@ -73,15 +68,11 @@ impl Emit {
         let _ = write!(
             self.body,
             "
-  for j{s} in range(0, {}) {{
-    let v{s} = p + j{s} * ctx.blocks.x
-    if v{s} < {tiles} {{
+  for v{s} in range(p, {tiles}, ctx.blocks.x) {{
       let r{s} = v{s} * {rt}
       {yn}[0 :+ 1, r{s} :+ {rt}] += {sum}
-    }}
   }}
-",
-            tiles.div_ceil(blocks)
+"
         );
         Ok(Some(true))
     }
