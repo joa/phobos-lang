@@ -253,6 +253,7 @@ impl Build {
                 carried: inits.len(),
                 hoisted: hoisted.len(),
                 pipeline: Some(info),
+                unroll: 1,
             }),
             &operands,
             types,

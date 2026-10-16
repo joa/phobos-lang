@@ -185,7 +185,7 @@ export function sceneData(gemm: Trace, matvec: Trace, staged: Trace): SceneData 
     tiles: tilesData(gemm),
     lanes: lanesData(matvec),
     mixed: mixedData(staged),
-    tilesCode: excerpt(gemm.source.text, ["for kt", "var a", "var b", "acc += dot", "}"], {
+    tilesCode: excerpt(gemm.source.text, ["for", "var a", "var b", "acc += dot", "}"], {
       a: "var a =",
       b: "var b =",
       dot: "acc += dot(",

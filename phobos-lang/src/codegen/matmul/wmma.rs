@@ -134,6 +134,7 @@ impl<'c> Codegen<'c> {
         block: &Block<'c>,
         mut acc: GemmAcc<'c>,
         (lo, hi, st): (Value<'c, 'c>, Value<'c, 'c>, Value<'c, 'c>),
+        unroll: i64,
         src: &GemmSource<'_>,
     ) -> Result<GemmAcc<'c>> {
         let GemmPlan { m, n, kk, acc_elem, .. } = acc.plan;
@@ -169,6 +170,7 @@ impl<'c> Codegen<'c> {
         let finals = self.matmul_kloop(
             block,
             (lo, hi, st),
+            unroll,
             &acc.regs,
             &a_bufs,
             &b_bufs,

@@ -26,6 +26,11 @@ impl Build {
         if n == 1 {
             return self.emit_for(var, start, end, step, body);
         }
+        if self.pipeline_assert {
+            self.report
+                .pipeline_declines
+                .push(format!("loop `{var}`: an unrolled loop pipelines only as a register matmul"));
+        }
         let Some(st) = step.map_or(Some(1), |e| self.const_fold(e)).filter(|&s| s > 0) else {
             bail!("`for<unroll n>` needs a constant positive step");
         };
@@ -82,6 +87,7 @@ impl Build {
                 carried: 0,
                 hoisted: 0,
                 pipeline: None,
+                unroll: 1,
             }),
             bounds,
             Vec::new(),

@@ -19,6 +19,8 @@ struct Matched<'a> {
     start: &'a Expr,
     end: &'a Expr,
     step: Option<&'a Expr>,
+    /// The k-loop's `for<unroll n>`, 1 without one.
+    unroll: i64,
     a_slice: &'a Expr,
     b_slice: &'a Expr,
     target: &'a Expr,
@@ -107,6 +109,7 @@ impl Build {
                     carried: 1,
                     hoisted: 0,
                     pipeline: None,
+                    unroll: m.unroll,
                 }),
                 &[lo, hi, st, seed],
                 vec![ty],
@@ -150,7 +153,7 @@ impl Build {
                 start,
                 end,
                 step,
-                unroll: None,
+                unroll,
                 body,
                 ..
             },
@@ -158,6 +161,10 @@ impl Build {
         ] = stmts
         else {
             return None;
+        };
+        let unroll = match unroll {
+            None => 1,
+            Some(e) => self.const_fold(e).filter(|&n| n >= 1)?,
         };
         let acc_scalar = *acc_scalar;
         if !matches!(acc_scalar, AstScalar::F32 | AstScalar::F16) {
@@ -355,6 +362,7 @@ impl Build {
             start,
             end,
             step: step.as_ref(),
+            unroll,
             a_slice,
             b_slice,
             target,

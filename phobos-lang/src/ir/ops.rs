@@ -65,6 +65,10 @@ pub struct ForInfo {
     /// the dots inside, returned to the pool after the loop.
     pub hoisted: usize,
     pub pipeline: Option<Pipeline>,
+    /// Iterations the lowering builds a turn. Only the register matmul's
+    /// k-loop leaves this to the lowering; any other `for<unroll n>` is
+    /// unrolled in the graph and has 1 here.
+    pub unroll: i64,
 }
 
 impl ForInfo {
@@ -608,6 +612,9 @@ impl OpKind {
                 }
                 if info.hoisted > 0 {
                     out.push_str(&format!(" hoisted {}", info.hoisted));
+                }
+                if info.unroll > 1 {
+                    out.push_str(&format!(" unroll {}", info.unroll));
                 }
                 if let Some(p) = info.pipeline {
                     out.push_str(&format!(" pipeline {}", p.staged));

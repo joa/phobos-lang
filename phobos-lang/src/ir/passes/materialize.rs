@@ -102,6 +102,7 @@ fn materialize(ir: &mut Ir, op: OpId) -> crate::ir::ValueId {
         carried: 0,
         hoisted: 0,
         pipeline: None,
+        unroll: 1,
     };
     b.op(OpKind::For(info), &[lo, hi, st], Vec::new(), vec![body]);
     b.stmt(OpKind::Barrier, &[]);

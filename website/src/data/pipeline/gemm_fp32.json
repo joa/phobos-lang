@@ -1,7 +1,7 @@
 {
   "stages": {
-    "source": "for kt in range(0, K, TILE_K) {\n  var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n  var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n  acc += dot(a, b)\n}",
-    "ast": "For {\n    var: \"kt\",\n    start: Int(0),\n    end: Var(\"K\"),\n    step: Some(\n        Var(\"TILE_K\"),\n    ),\n    unroll: None,\n    body: [\n        Var {\n            name: \"a\",\n            ty: None,\n            value: Some(\n                Index {\n...",
+    "source": "for<unroll U> kt in range(0, K, TILE_K) {\n  var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]\n  var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]\n  acc += dot(a, b)\n}",
+    "ast": "For {\n    var: \"kt\",\n    start: Int(0),\n    end: Var(\"K\"),\n    step: Some(\n        Var(\"TILE_K\"),\n    ),\n    unroll: Some(\n        Var(\"U\"),\n    ),\n    body: [\n        Var {\n            name: \"a\",\n            ty: None,\n...",
     "graph": "%38: gemm<f32>[32, 32]/4 = for %27, %K.7, %28, %26 {\n^(%kt.29: index, %30: gemm<f32>[32, 32]/4)\n  %31: index = const 32\n  %32: index = mul %pm.23, %31\n  %33: tile<f32>[32, 4]@global{align 4} = slice [32, 4] %A.5, %32, %kt.29\n  %34: index = const 32\n  %35: index = mul %pn.24, %34\n  %36: tile<f32>[4, 32]@global{align 32} = slice [4, 32] %B.8, %kt.29, %35\n  %37: gemm<f32>[32, 32]/4 = gemm_dot %30, %33, %36\n  yield %37",
     "passes": "// TILE_M=32 TILE_N=32 TILE_K=4, sm_75\ntile0   512 B at    0  dot staging\ntile1   512 B at  512  dot staging\ntile2   512 B at 1024  dot staging\ntile3   512 B at 1536  dot staging\npeak 2048 B of shared memory\nbarriers: 1 kept, 0 elided",
     "mlir": "%29 = scf.for %arg5 = %c0_9 to %dim_0 step %28 iter_args(%arg6 = %6) -> (vector<4x4xf32>) {\n  %58 = arith.addi %arg5, %c4_10 : index\n  %59 = arith.cmpi slt, %58, %dim_0 : index\n  scf.if %59 {\n    %c32_46 = arith.constant 32 : index\n    %63 = arith.muli %block_id_x, %c32_46 : index\n    %subview_47 = memref.subview %assume_align[%63, %58] [32, 4] [1, 1] : memref<?x?xf32, 1> to memref<32x4xf32, strided<[?, 1], offset: ?>, 1>\n    %c32_48 = arith.constant 32 : index\n    %64 = arith.muli %block_id_y, %c32_48 : index\n...",
@@ -13,7 +13,7 @@
       "lines": [
         {
           "n": 1,
-          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])",
+          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8])",
           "role": "attribute"
         },
         { "n": 2, "text": "@launch(256)", "role": "attribute" },
@@ -29,7 +29,7 @@
         { "n": 12, "text": "", "role": "blank" },
         { "n": 13, "text": "  var acc: tile<f32>[TILE_M, TILE_N] = 0.0", "role": "code" },
         { "n": 14, "text": "", "role": "blank" },
-        { "n": 15, "text": "  for kt in range(0, K, TILE_K) {", "role": "loop-header" },
+        { "n": 15, "text": "  for<unroll U> kt in range(0, K, TILE_K) {", "role": "loop-header" },
         { "n": 16, "text": "    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]", "role": "loop-body" },
         { "n": 17, "text": "    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]", "role": "loop-body" },
         { "n": 18, "text": "    acc += dot(a, b)", "role": "loop-body" },
@@ -69,6 +69,7 @@
             "kind": "For",
             "label": "kt",
             "children": [
+              { "kind": "Var", "label": "U", "role": "unroll" },
               { "kind": "Int", "label": "0", "role": "start" },
               { "kind": "Var", "label": "K", "role": "end" },
               { "kind": "Var", "label": "TILE_K", "role": "step" },
@@ -192,9 +193,9 @@
           }
         ]
       },
-      "nodeCount": 39,
+      "nodeCount": 40,
       "focus": "For",
-      "pruned": "Source spans, absent options (ty: None, unroll: None) and the attribute and parameter lists are dropped; every statement outside the `for` is one node with its subtree folded (`folded` counts the hidden nodes, `text` spells it out)."
+      "pruned": "Source spans, absent options (such as ty: None) and the attribute and parameter lists are dropped; every statement outside the `for` is one node with its subtree folded (`folded` counts the hidden nodes, `text` spells it out)."
     },
     "graph": {
       "kernel": "gemm",
@@ -683,7 +684,7 @@
         "trace": "gemm_fp32_no_aligned.sm_75",
         "variant": { "drop": "@aligned" },
         "chip": "sm_75",
-        "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32 },
+        "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
         "peakBytes": 8192,
         "buffers": [
           {
@@ -834,7 +835,7 @@
         "trace": "gemm_fp32.sm_75",
         "variant": null,
         "chip": "sm_75",
-        "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32 },
+        "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
         "peakBytes": 2048,
         "buffers": [
           {
@@ -1250,7 +1251,7 @@
       "lanes": 32,
       "ctas": 4,
       "dims": { "K": 64, "M": 64, "N": 64 },
-      "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32 },
+      "params": { "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
       "sharedBytesPerCta": 2048,
       "note": "The grid is the host's choice for the trace's dims (website/kernels.json), not part of the kernel."
     }

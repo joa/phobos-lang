@@ -49,7 +49,7 @@ impl<'c> Codegen<'c> {
         if info.carried > 0 {
             let first = ir.operand(op, info.bound_operands());
             if ir.ty(first).gemm().is_some() {
-                return self.emit_gemm_for_ir(block, ir, op);
+                return self.emit_gemm_for_ir(block, ir, op, info.unroll);
             }
             return self.emit_frag_for_ir(block, ir, op, info);
         }
@@ -226,7 +226,7 @@ impl<'c> Codegen<'c> {
     /// The register matmul's k-loop. The matmul emitter builds the loop
     /// itself and lowers the body's operand slices afresh each iteration.
     /// The finished accumulator is the loop's result. See `matmul::gemm`.
-    fn emit_gemm_for_ir(&mut self, block: &Block<'c>, ir: &Ir, op: OpId) -> Result<()> {
+    fn emit_gemm_for_ir(&mut self, block: &Block<'c>, ir: &Ir, op: OpId, unroll: i64) -> Result<()> {
         let lo = self.scalar_ir(ir.operand(op, 0))?;
         let hi = self.scalar_ir(ir.operand(op, 1))?;
         let st = self.scalar_ir(ir.operand(op, 2))?;
@@ -253,7 +253,7 @@ impl<'c> Codegen<'c> {
         if self.pipeline_assert {
             self.pipelined_any = true;
         }
-        let acc = self.gemm_loop(block, acc, (lo, hi, st), &src)?;
+        let acc = self.gemm_loop(block, acc, (lo, hi, st), unroll, &src)?;
         self.set_ir(ir.results(op)[0], Lowered::Gemm(acc));
         Ok(())
     }

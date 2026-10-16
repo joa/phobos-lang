@@ -29,6 +29,7 @@ fn carried(n: usize) -> ForInfo {
         carried: n,
         hoisted: 0,
         pipeline: None,
+        unroll: 1,
     }
 }
 

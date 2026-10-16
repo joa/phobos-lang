@@ -373,6 +373,7 @@ mod tests {
                 carried: 0,
                 hoisted: 0,
                 pipeline: None,
+                unroll: 1,
             }),
             &[lo, lo, lo],
             Vec::new(),

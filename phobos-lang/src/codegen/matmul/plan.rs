@@ -6,10 +6,11 @@ impl<'c> Codegen<'c> {
     /// Runs the fused matmul's k-loop and returns the finished accumulators.
     ///
     /// Without `@pipeline`, each iteration stages, barriers, accumulates and
-    /// barriers again. With it, the loop is unrolled by two to double-buffer.
-    /// Each half computes from one buffer pair while prefetching into the
-    /// other. The second half sits in a CTA-uniform scf.if, for an odd
-    /// iteration count.
+    /// barriers again. With it, the loop double-buffers: each half computes
+    /// from one buffer pair while prefetching into the other, so a turn is
+    /// an even number of halves, `unroll` rounded up to even. Either way
+    /// every iteration of a turn after its first sits in a CTA-uniform
+    /// scf.if, for a count the turn does not divide.
     ///
     /// `stage` stages one iteration into a pair, `half` emits one pipelined
     /// half, and `mac` accumulates from one pair.
@@ -18,6 +19,7 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         bounds: (Value<'c, 'c>, Value<'c, 'c>, Value<'c, 'c>),
+        unroll: i64,
         regs: &[Value<'c, 'c>],
         a_bufs: &[MemVal<'c>],
         b_bufs: &[MemVal<'c>],
@@ -41,67 +43,84 @@ impl<'c> Codegen<'c> {
         let (lo, hi, st) = bounds;
 
         if !self.pipeline_assert {
-            return self.carry_loop(block, lo, hi, st, regs, |cg, body, kt, accs| {
+            let turn = if unroll > 1 {
+                let n = self.const_index(block, unroll)?;
+                self.muli(block, st, n)?
+            } else {
+                st
+            };
+            // The first barrier publishes the staging. The second retires
+            // this iteration's reads before the next overwrites them.
+            let one = |cg: &mut Self, body: &Block<'c>, kt, accs: &[Value<'c, 'c>]| {
                 stage(cg, body, kt, &a_bufs[0], &b_bufs[0])?;
-
-                // The first barrier publishes the staging. The second
-                // retires this iteration's reads before the next overwrites.
                 cg.barrier(body)?;
                 let next = mac(cg, body, &a_bufs[0], &b_bufs[0], accs)?;
                 cg.barrier(body)?;
                 Ok(next)
+            };
+            return self.carry_loop(block, lo, hi, turn, regs, |cg, body, kt, accs| {
+                let mut accs = one(cg, body, kt, accs)?;
+                let mut at = kt;
+                for _ in 1..unroll {
+                    at = cg.addi(body, at, st)?;
+                    accs = cg.guarded_iteration(body, at, hi, &accs, |cg, then, accs| one(cg, then, at, accs))?;
+                }
+                Ok(accs)
             });
         }
 
-        // Prologue: stage lo into the first pair, then unroll by two.
+        // Prologue: stage lo into the first pair, then a turn of halves.
         stage(self, block, lo, &a_bufs[0], &b_bufs[0])?;
         self.barrier(block)?;
-        let two = self.const_index(block, 2)?;
-        let st2 = self.muli(block, st, two)?;
-        self.carry_loop(block, lo, hi, st2, regs, |cg, body, kt, accs| {
-            let next = cg.addi(body, kt, st)?;
-            let half_a = half(
-                cg,
-                body,
-                next,
-                (&a_bufs[0], &b_bufs[0]),
-                (&a_bufs[1], &b_bufs[1]),
-                accs,
-            )?;
-
-            // half_b runs only when iteration kt + st exists.
-            let have_b = cg.push(
-                body,
-                arith::cmpi(cg.ctx, arith::CmpiPredicate::Slt, next, hi, cg.loc),
-            )?;
-            let then_block = Block::new(&[]);
-            let next2 = cg.addi(&then_block, next, st)?;
-            let half_b = half(
-                cg,
-                &then_block,
-                next2,
-                (&a_bufs[1], &b_bufs[1]),
-                (&a_bufs[0], &b_bufs[0]),
-                &half_a,
-            )?;
-
-            then_block.append_operation(scf::r#yield(&half_b, cg.loc));
-            let then_region = Region::new();
-            then_region.append_block(then_block);
-
-            let else_block = Block::new(&[]);
-            else_block.append_operation(scf::r#yield(&half_a, cg.loc));
-            let else_region = Region::new();
-            else_region.append_block(else_block);
-
-            let types: Vec<Type<'c>> = half_a.iter().map(|v| v.r#type()).collect();
-            let op =
-                body.append_operation(scf::r#if(have_b, &types, then_region, else_region, cg.loc));
-
-            (0..half_a.len())
-                .map(|i| Ok(detach(op.result(i)?.into())))
-                .collect()
+        let halves = unroll + unroll % 2;
+        let n = self.const_index(block, halves)?;
+        let turn = self.muli(block, st, n)?;
+        self.carry_loop(block, lo, hi, turn, regs, |cg, body, kt, accs| {
+            let pair = |i: i64| {
+                let i = (i % 2) as usize;
+                (&a_bufs[i], &b_bufs[i])
+            };
+            let mut at = cg.addi(body, kt, st)?;
+            let mut accs = half(cg, body, at, pair(0), pair(1), accs)?;
+            // Half i runs only when iteration kt + i * st exists.
+            for i in 1..halves {
+                if i > 1 {
+                    at = cg.addi(body, at, st)?;
+                }
+                accs = cg.guarded_iteration(body, at, hi, &accs, |cg, then, accs| {
+                    let prefetch = cg.addi(then, at, st)?;
+                    half(cg, then, prefetch, pair(i), pair(i + 1), accs)
+                })?;
+            }
+            Ok(accs)
         })
+    }
+
+    /// Emits `if at < hi { f(accs) } else { accs }` and returns its results.
+    /// The condition is CTA-uniform, as [`Self::guarded_prefetch`] says.
+    fn guarded_iteration(
+        &mut self,
+        block: &Block<'c>,
+        at: Value<'c, 'c>,
+        hi: Value<'c, 'c>,
+        accs: &[Value<'c, 'c>],
+        f: impl FnOnce(&mut Self, &Block<'c>, &[Value<'c, 'c>]) -> Result<Vec<Value<'c, 'c>>>,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let more = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, at, hi, self.loc))?;
+        let then_block = Block::new(&[]);
+        let ran = f(self, &then_block, accs)?;
+        then_block.append_operation(scf::r#yield(&ran, self.loc));
+        let then_region = Region::new();
+        then_region.append_block(then_block);
+
+        let else_block = Block::new(&[]);
+        else_block.append_operation(scf::r#yield(accs, self.loc));
+        let else_region = Region::new();
+        else_region.append_block(else_block);
+
+        let types: Vec<Type<'c>> = ran.iter().map(|v| v.r#type()).collect();
+        let op = block.append_operation(scf::r#if(more, &types, then_region, else_region, self.loc));
+        (0..ran.len()).map(|i| Ok(detach(op.result(i)?.into()))).collect()
     }
 
     /// Applies precomputed GEMM scaling to one accumulator value: alpha*acc +

@@ -233,6 +233,7 @@ impl Carry<'_> {
             carried: info.carried + 1,
             hoisted: info.hoisted,
             pipeline,
+            unroll: info.unroll,
         });
         let new = self.op(ir, old, at, kind, &new_operands, types, vec![block]);
         for (&from, &to) in ir.results(old).to_vec().iter().zip(&ir.results(new).to_vec()) {

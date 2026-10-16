@@ -136,19 +136,20 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Runs the k-loop over `bounds`, staging each iteration's operands
-    /// from `src`.
+    /// Runs the k-loop over `bounds`, `unroll` iterations a turn, staging
+    /// each iteration's operands from `src`.
     pub(in crate::codegen) fn gemm_loop(
         &mut self,
         block: &Block<'c>,
         acc: GemmAcc<'c>,
         bounds: (Value<'c, 'c>, Value<'c, 'c>, Value<'c, 'c>),
+        unroll: i64,
         src: &GemmSource<'_>,
     ) -> Result<GemmAcc<'c>> {
         match acc.plan.path {
-            GemmPath::Reg { .. } => self.reg_loop(block, acc, bounds, src),
+            GemmPath::Reg { .. } => self.reg_loop(block, acc, bounds, unroll, src),
             GemmPath::Wmma { .. } | GemmPath::MmaSync { .. } => {
-                self.tc_loop(block, acc, bounds, src)
+                self.tc_loop(block, acc, bounds, unroll, src)
             }
         }
     }

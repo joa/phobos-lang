@@ -87,10 +87,13 @@ const passes = [
   `barriers: ${kept} kept, ${barriers.length - kept} elided`,
 ].join("\n")
 
+const kernel = normalize(parseDebug(readText("ast.txt")).find(v => v.name === "Kernel"))
+const loopStmt = kernel.fields.body.items.find(v => v.name === "For")
+
 const stages = {
-  source: slice(source, /^\s*for kt in/, 5),
+  source: slice(source, /^\s*for(<[^>]*>)? kt in/, 5),
   ast:
-    compactDebug(slice(read("ast.txt"), /^\s*For \{/, 60))
+    compactDebug(printDebug(loopStmt))
       .split("\n")
       .slice(0, 14)
       .join("\n") + "\n...",
@@ -148,6 +151,44 @@ function parseDebug(text) {
   return values
 }
 
+// The dump wraps every expression in `Expr { kind, span }` and spells spans as byte offsets. The
+// display wants neither: an expression is its kind, and a span is the source line it starts on.
+function normalize(v) {
+  if (v.t === "list" || v.t === "tuple") return { ...v, items: v.items.map(normalize) }
+  if (v.t !== "struct") return v
+  if (v.name === "Expr") return normalize(v.fields.kind)
+  const fields = {}
+  for (const [key, field] of Object.entries(v.fields)) {
+    if (key === "span" && field.fields?.lo) {
+      const line = source.join("\n").slice(0, field.fields.lo.v).split("\n").length
+      fields.span = { t: "struct", name: "Span", fields: { line: { t: "num", v: line } } }
+    } else if (!key.endsWith("_span")) fields[key] = normalize(field)
+  }
+  return { ...v, fields }
+}
+
+// Back to the {:#?} layout, without the spans.
+function printDebug(v, indent = "") {
+  const inner = indent + "    "
+  const items = list => list.map(item => `${inner}${item},\n`).join("")
+  switch (v.t) {
+    case "str":
+      return JSON.stringify(v.v)
+    case "num":
+      return String(v.v)
+    case "list":
+      return v.items.length ? `[\n${items(v.items.map(i => printDebug(i, inner)))}${indent}]` : "[]"
+    case "tuple":
+      return `${v.name}(\n${items(v.items.map(i => printDebug(i, inner)))}${indent})`
+    case "struct": {
+      const fields = Object.entries(v.fields).filter(([key]) => key !== "span")
+      return `${v.name} {\n${items(fields.map(([key, f]) => `${key}: ${printDebug(f, inner)}`))}${indent}}`
+    }
+    default:
+      return v.name
+  }
+}
+
 const BINARY = {
   Add: "+",
   Sub: "-",
@@ -203,8 +244,11 @@ function stmtText(v) {
   const f = v.fields
   if (v.name === "Let" || v.name === "Var") return `${v.name.toLowerCase()} ${f.name.v} = ${exprText(some(f.value))}`
   if (v.name === "Assign") return `${exprText(f.target)} ${ASSIGN[f.op.name] ?? f.op.name} ${exprText(f.value)}`
-  if (v.name === "For")
-    return `for ${f.var.v} in range(${exprText(f.start)}, ${exprText(f.end)}, ${exprText(some(f.step))})`
+  if (v.name === "For") {
+    const unroll = some(f.unroll)
+    const head = unroll ? `for<unroll ${exprText(unroll)}>` : "for"
+    return `${head} ${f.var.v} in range(${exprText(f.start)}, ${exprText(f.end)}, ${exprText(some(f.step))})`
+  }
   return v.name
 }
 
@@ -259,10 +303,12 @@ function toAstNode(v) {
       })
     case "For": {
       const step = some(f.step)
+      const unroll = some(f.unroll)
       return withLine({
         kind: "For",
         label: f.var.v,
         children: [
+          ...(unroll ? [astNode(unroll, "unroll")] : []),
           astNode(f.start, "start"),
           astNode(f.end, "end"),
           ...(step ? [astNode(step, "step")] : []),
@@ -298,7 +344,7 @@ function buildAst(kernel) {
     nodeCount: countNodes(root),
     focus: "For",
     pruned:
-      "Source spans, absent options (ty: None, unroll: None) and the attribute and parameter lists are dropped; " +
+      "Source spans, absent options (such as ty: None) and the attribute and parameter lists are dropped; " +
       "every statement outside the `for` is one node with its subtree folded (`folded` counts the hidden nodes, " +
       "`text` spells it out).",
   }
@@ -936,7 +982,6 @@ function buildPtx(lines) {
   }
 }
 
-const kernel = parseDebug(readText("ast.txt")).find(v => v.name === "Kernel")
 const ast = buildAst(kernel)
 const graph = layoutGraph(buildGraph(parseIr(read("ir.txt"))))
 const ptxData = buildPtx(ptx)

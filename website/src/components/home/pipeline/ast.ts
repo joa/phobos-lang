@@ -7,7 +7,7 @@ import { structure } from "./data"
 import { fill } from "./source"
 import { FRAMES, round, target, text, type Layout, type Shape, type StationGeometry, type Target, type Tone } from "./types"
 
-const SHOWN_ROLES = new Set(["start", "end", "step", "len"])
+const SHOWN_ROLES = new Set(["unroll", "start", "end", "step", "len"])
 
 export interface PlacedNode {
   node: AstNode
