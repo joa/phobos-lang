@@ -1,6 +1,5 @@
 mod call;
 mod elemwise;
-mod epilogue;
 mod expr;
 mod frag;
 mod generate;
@@ -273,17 +272,6 @@ pub fn build(
             Err(e) => e,
         })
         .map_err(|e| locate(&kernel.source, &b.ir, e, kernel.name_span))?;
-    for (fused, dot) in epilogue::fuse_dot_epilogues(&mut b.ir) {
-        if let Some(&span) = b.report.spans.get(&dot) {
-            b.report.spans.insert(fused, span);
-        }
-    }
-    b.report.spans.retain(|&op, _| b.ir.is_alive(op));
-    let swizzle = kernel
-        .swizzle_mode()
-        .map_err(|e| locate(&kernel.source, &b.ir, anyhow!(e), attr_span("swizzle")))?;
-    super::swizzle::decide(&mut b.ir, swizzle)
-        .map_err(|e| locate(&kernel.source, &b.ir, e, attr_span("swizzle")))?;
     Ok((b.ir, b.report))
 }
 

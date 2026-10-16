@@ -11,8 +11,8 @@
 
 use anyhow::{Result, bail};
 
-use super::build::alloc_align_div;
-use super::{AtOp, Ir, OpId, OpKind, Space, Swizzle, Type, ValueId};
+use crate::ir::build::alloc_align_div;
+use crate::ir::{AtOp, Ir, OpId, OpKind, Space, Swizzle, Type, ValueId};
 
 /// Swizzles the tiles that pay and allow it. `mode` is the kernel's
 /// `@swizzle`: None decides alone, Some(true) fails on a tile that would pay

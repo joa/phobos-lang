@@ -7,12 +7,13 @@ fn target() -> Target {
     crate::codegen::target::build_target(&phobos_base::context::Context::default())
 }
 
-/// Builds the first kernel of a source and returns its print, after the
-/// verifier has passed.
+/// Builds the first kernel of a source and runs the passes over it, then
+/// returns its print once the verifier has passed.
 fn build_src(src: &str) -> String {
     let kernels = crate::parse(src).unwrap();
     let base = phobos_base::context::Context::default();
-    let (ir, _) = build(&base, target(), &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
+    let (mut ir, mut report) = build(&base, target(), &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
+    crate::ir::passes::run(&mut ir, &mut report, &kernels[0]).unwrap_or_else(|e| panic!("{e:#}"));
     verify(&ir).unwrap_or_else(|e| panic!("{e}\n{ir}"));
     ir.to_string()
 }

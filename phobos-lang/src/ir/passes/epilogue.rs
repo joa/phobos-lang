@@ -16,7 +16,7 @@ use crate::ir::{At, Ir, OpId, OpKind, Space, Tree, Type, ValueId};
 /// reads it, since a factor is read across the whole contraction.
 ///
 /// Returns each fused op with the dot it replaced.
-pub(super) fn fuse_dot_epilogues(ir: &mut Ir) -> Vec<(OpId, OpId)> {
+pub(crate) fn fuse_dot_epilogues(ir: &mut Ir) -> Vec<(OpId, OpId)> {
     let mut fused = Vec::new();
     let dots: Vec<OpId> = ir
         .all_ops()

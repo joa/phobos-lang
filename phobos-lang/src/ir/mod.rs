@@ -5,7 +5,7 @@ pub mod elem;
 pub mod lanes;
 pub mod ops;
 pub mod print;
-pub(crate) mod swizzle;
+pub mod passes;
 pub mod types;
 pub mod uniform;
 pub mod verify;

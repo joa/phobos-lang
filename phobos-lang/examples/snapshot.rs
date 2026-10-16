@@ -23,8 +23,10 @@ use melior::{
 };
 use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
 
-const CHIPS: &[&str] = &["sm_75", "sm_80"];
-const INDEX_BITS: &[u32] = &[32, 64];
+/// The chips and index widths the codegen distinguishes: mma.sync and
+/// cp.async want 64-bit indices, and the instruction choice moves again at
+/// sm_80, sm_89 and sm_120.
+const TARGETS: &[(&str, u32)] = &[("sm_75", 32), ("sm_75", 64), ("sm_80", 64), ("sm_89", 64), ("sm_120", 64)];
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
@@ -50,20 +52,18 @@ fn main() -> anyhow::Result<()> {
     for path in &sources {
         let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
         let src = std::fs::read_to_string(path)?;
-        for &chip in CHIPS {
-            for &bits in INDEX_BITS {
-                let tag = format!("{stem}.{chip}.i{bits}");
-                match emit(&src, chip, bits) {
-                    Ok((mlir, lines)) => {
-                        std::fs::write(out.join(format!("{tag}.mlir")), mlir)?;
-                        for (kernel, dynamic, r#static) in lines {
-                            writeln!(footprint, "{tag} {kernel} dynamic={dynamic} static={static}")?;
-                        }
+        for &(chip, bits) in TARGETS {
+            let tag = format!("{stem}.{chip}.i{bits}");
+            match emit(&src, chip, bits) {
+                Ok((mlir, lines)) => {
+                    std::fs::write(out.join(format!("{tag}.mlir")), mlir)?;
+                    for (kernel, dynamic, r#static) in lines {
+                        writeln!(footprint, "{tag} {kernel} dynamic={dynamic} static={static}")?;
                     }
-                    Err(e) => {
-                        failures += 1;
-                        std::fs::write(out.join(format!("{tag}.err")), format!("{e:#}\n"))?;
-                    }
+                }
+                Err(e) => {
+                    failures += 1;
+                    std::fs::write(out.join(format!("{tag}.err")), format!("{e:#}\n"))?;
                 }
             }
         }
@@ -72,7 +72,7 @@ fn main() -> anyhow::Result<()> {
     println!(
         "{} sources x {} targets, {failures} failures",
         sources.len(),
-        CHIPS.len() * INDEX_BITS.len()
+        TARGETS.len()
     );
     Ok(())
 }
