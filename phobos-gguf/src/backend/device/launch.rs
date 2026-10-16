@@ -101,19 +101,31 @@ impl DeviceBackend {
 
     /// The kernel handle for `name`, resolved once and cached.
     ///
-    /// The cache key is the module and name addresses, not the name text.
-    /// Every caller passes a literal, so the pointer identifies it.
+    /// The cache key is the module's driver handle and the name's address,
+    /// not the name text. Every caller passes a literal, so the pointer
+    /// identifies it. The module's own address would not do: the caches hold
+    /// modules by value in hash maps, which move them as they grow, so a
+    /// later module can sit where another shape's module was and be handed
+    /// that module's kernel.
     #[inline]
     pub(super) fn function(
         &self,
         module: &Module,
         name: &'static str,
     ) -> Result<cust::sys::CUfunction> {
-        let key = (module as *const Module as usize, name.as_ptr() as usize);
+        let handle = module_handle(module);
+        let key = (handle as usize, name.as_ptr() as usize);
         if let Some(&func) = self.functions.borrow().get(&key) {
             return Ok(func);
         }
         let func = module.get_function(name)?.to_raw();
+        let mut owner = std::ptr::null_mut();
+        cuda_ok(
+            // SAFETY: `func` was just resolved from the live `module`.
+            unsafe { cust::sys::cuFuncGetModule(&mut owner, func) },
+            "asking a kernel for its module",
+        )?;
+        ensure!(owner == handle, "a module's driver handle is not where `module_handle` reads it");
         self.functions.borrow_mut().insert(key, func);
         Ok(func)
     }
@@ -196,4 +208,13 @@ fn shared_ceiling_bytes() -> Result<usize> {
         "reading the card's shared memory ceiling",
     )?;
     Ok(bytes.max(0) as usize)
+}
+
+/// The driver handle a [`Module`] wraps. `cust` keeps it private, but the
+/// module is that handle and nothing else, which the assertion holds it to;
+/// [`DeviceBackend::function`] checks the value against the driver too.
+fn module_handle(module: &Module) -> cust::sys::CUmodule {
+    const _: () = assert!(size_of::<Module>() == size_of::<cust::sys::CUmodule>());
+    // SAFETY: a `Module` is exactly one `CUmodule`, per the assertion.
+    unsafe { *(module as *const Module).cast::<cust::sys::CUmodule>() }
 }
