@@ -1,4 +1,4 @@
-@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [16, 64])
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [16, 64], U in [1, 8])
 @launch(256)
 @pipeline
 @tensorcore
@@ -13,7 +13,7 @@ kernel gemm(A: tensor<f32>[M, K],
 
   var acc: tile<f32>[TILE_M, TILE_N] = 0.0
   
-  for kt in range(0, K, TILE_K) {
+  for<unroll U> kt in range(0, K, TILE_K) {
     var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
     var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
     acc += dot(a, b)
