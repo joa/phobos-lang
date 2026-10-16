@@ -4,19 +4,20 @@
   "card": "NVIDIA GeForce RTX 2080 SUPER",
   "model": "Qwen3.6-35B-A3B",
   "cardGiB": 8,
-  "usedBeforeGiB": 6.02,
+  "usedBeforeGiB": 6.09,
   "squeezeMiB": 2048,
-  "requests": 8,
+  "requests": 14,
   "squeezedAt": 3,
   "squeezeEndedAt": 6,
   "cache": {
     "blocks": 40,
-    "slotMiB": 1.8592,
-    "mostPerBlock": 49,
-    "before": 38,
+    "slotMiB": 1.8722,
+    "mostPerBlock": 36,
+    "before": 41,
     "shrinks": [
-      24,
-      14
+      27,
+      13,
+      8
     ],
     "after": 39
   },
@@ -24,23 +25,23 @@
     {
       "engine": "phobos",
       "label": "Phobos",
-      "reps": 2,
-      "wallSecs": 52.402,
+      "reps": 3,
+      "wallSecs": 81.37,
       "decode": [
-        45.839,
-        30.821,
-        44.573
+        44.168,
+        33.241,
+        43.099
       ]
     },
     {
       "engine": "llama.cpp",
       "label": "llama.cpp",
-      "reps": 3,
-      "wallSecs": 131.748,
+      "reps": 5,
+      "wallSecs": 372.744,
       "decode": [
-        31.051,
-        8.966,
-        31.229
+        29.316,
+        5.562,
+        19.347
       ]
     }
   ]

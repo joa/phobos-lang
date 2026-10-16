@@ -11,7 +11,7 @@ import { repoRoot } from "./load"
 
 export const KERNEL_RESULTS_FILE = "results/results.csv"
 
-// README.md: "SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER".
+// README.md: "SGEMM performance is at 77% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER".
 export const KERNEL_CARD = "RTX 2080 SUPER"
 
 export interface KernelMeasure {

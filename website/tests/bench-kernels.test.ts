@@ -49,17 +49,17 @@ describe("kernel results", () => {
     }
   })
 
-  it("puts SGEMM at 76% of cuBLAS, as the README says", () => {
+  it("puts SGEMM at 77% of cuBLAS, as the README says", () => {
     const ratio = cublasRatio(kernelBench(results, "gemm_fp32"))!
     expect(ratio).toBeCloseTo(cell("gemm_fp32", "phobos", "gflops") / cell("gemm_fp32", "cuBLAS", "gflops"), 10)
-    expect(ratio).toBeCloseTo(8309.9 / 10964.4, 10)
-    expect(formatPercent(ratio)).toBe("76%")
+    expect(ratio).toBeCloseTo(8527.9 / 11081.2, 10)
+    expect(formatPercent(ratio)).toBe("77%")
   })
 
   it("compares f16 gemm against cublasHgemm, both on tensor cores", () => {
     const bench = kernelBench(results, "gemm_fp16")
     expect(bench.comparable).toBe(true)
-    expect(formatPercent(cublasRatio(bench)!)).toBe("58%")
+    expect(formatPercent(cublasRatio(bench)!)).toBe("59%")
   })
 
   it("gives no ratio where cuBLAS ran at another precision", () => {
@@ -127,7 +127,7 @@ describe("compiler facts", () => {
 
   it("compares the gemm with and without @tensorcore from the CSV", () => {
     const gain = tensorCoreGain(results)
-    expect(gain.ratio).toBeCloseTo(21442.3 / 8309.9, 10)
+    expect(gain.ratio).toBeCloseTo(21084.1 / 8527.9, 10)
   })
 
   it("gives every fact a figure and an internal link", () => {

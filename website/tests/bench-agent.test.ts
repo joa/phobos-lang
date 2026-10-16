@@ -36,8 +36,8 @@ describe("the squeeze and release replay", () => {
   })
 
   it("finds the shrinks the squeeze caused and the grow after it", () => {
-    expect(data.cache.before).toBe(38)
-    expect(data.cache.shrinks.at(-1)).toBe(14)
+    expect(data.cache.before).toBe(41)
+    expect(data.cache.shrinks.at(-1)).toBe(8)
     expect(data.cache.after).toBe(39)
     expect(benchmarks).toContain(`from ${data.cache.shrinks.at(-1)} back to ${data.cache.after} experts a block`)
     expect(data.squeezeMiB).toBe(2048)
@@ -52,6 +52,20 @@ describe("the squeeze and release replay", () => {
       { freeMiB: 3413, fromPerBlock: 14, toPerBlock: 39 },
     ]
     expect(squeezeResizes(resizes)).toEqual({ before: 38, shrinks: [24, 14], after: 39 })
+  })
+
+  it("tells the squeeze's grow from a context grow on either side of it", () => {
+    const resizes = [
+      { freeMiB: 343, fromPerBlock: 39, toPerBlock: 29 },
+      { freeMiB: 2455, fromPerBlock: 29, toPerBlock: 41 },
+      { freeMiB: 0, fromPerBlock: 41, toPerBlock: 27 },
+      { freeMiB: 0, fromPerBlock: 27, toPerBlock: 13 },
+      { freeMiB: 499, fromPerBlock: 13, toPerBlock: 8 },
+      { freeMiB: 3885, fromPerBlock: 8, toPerBlock: 39 },
+      { freeMiB: 504, fromPerBlock: 39, toPerBlock: 31 },
+      { freeMiB: 2197, fromPerBlock: 31, toPerBlock: 39 },
+    ]
+    expect(squeezeResizes(resizes)).toEqual({ before: 41, shrinks: [27, 13, 8], after: 39 })
   })
 
   it("names the card and model BENCHMARKS.md and the 35B's bench run name", () => {

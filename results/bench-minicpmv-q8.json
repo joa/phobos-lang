@@ -1,0 +1,270 @@
+{
+  "meta": {
+    "card": "NVIDIA GeForce RTX 2080 SUPER",
+    "driver": "617.14",
+    "clock_max": "2145",
+    "commit": "bbc8898",
+    "date": "2026-10-16T07:53:48+00:00"
+  },
+  "args": {
+    "models": "['MiniCPM-V-4_7-35B-A3B-Q8_0']",
+    "prompt_tokens": "[128, 512]",
+    "gen_tokens": "[128]",
+    "reps": "1",
+    "rounds": "3",
+    "llama_bench": "['llama-bench.exe']",
+    "cuda_lib": "[]",
+    "llama_args": "-ncmoe 36 -t 8",
+    "no_llama": "False",
+    "no_phobos": "False",
+    "no_build": "True",
+    "phobos_bench": "None",
+    "warm_secs": "45.0",
+    "max_idle_util": "45.0",
+    "max_idle_power": "120.0",
+    "poll": "0.5",
+    "force": "False",
+    "csv": "results/bench-minicpmv-q8.csv",
+    "json": "results/bench-minicpmv-q8.json"
+  },
+  "backends": {
+    "phobos": "CUDA",
+    "llama.cpp CUDA": "CUDA"
+  },
+  "labels": {
+    "llama.cpp CUDA/MiniCPM-V-4_7-35B-A3B-Q8_0": "qwen35moe 35B.A3B Q8_0",
+    "phobos/MiniCPM-V-4_7-35B-A3B-Q8_0": "qwen35moe 34.7B Q8_0"
+  },
+  "summary": {
+    "median_clock": 1284.2372881355932,
+    "uncontended_rounds": [
+      1,
+      2,
+      3
+    ],
+    "rounds": [
+      1,
+      2,
+      3
+    ],
+    "drift": {
+      "1": 0.0028964620770300376,
+      "2": -0.019629976949509114,
+      "3": 0.0009633911368015502
+    }
+  },
+  "health": {
+    "1": {
+      "util": 9.0,
+      "power": 20.75
+    },
+    "2": {
+      "util": 4.5,
+      "power": 19.560000000000002
+    },
+    "3": {
+      "util": 5.0,
+      "power": 19.225
+    }
+  },
+  "samples": [
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 34.8942,
+      "clock": 1621.5
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 138.634,
+      "clock": 1621.5
+    },
+    {
+      "round": 1,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 19.5343,
+      "clock": 1621.5
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 217.687074829932,
+      "clock": 952.3076923076923
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 490.4214559386973,
+      "clock": 952.3076923076923
+    },
+    {
+      "round": 1,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 39.396737457679286,
+      "clock": 952.3076923076923
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 206.45161290322582,
+      "clock": 965.0
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 463.76811594202894,
+      "clock": 965.0
+    },
+    {
+      "round": 2,
+      "slot": 0,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 37.83624002364765,
+      "clock": 965.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 35.0715,
+      "clock": 1631.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 140.708,
+      "clock": 1631.0
+    },
+    {
+      "round": 2,
+      "slot": 1,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 19.3781,
+      "clock": 1631.0
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 34.9237,
+      "clock": 1603.4745762711864
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 140.304,
+      "clock": 1603.4745762711864
+    },
+    {
+      "round": 3,
+      "slot": 0,
+      "engine": "llama.cpp CUDA",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 19.5043,
+      "clock": 1603.4745762711864
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp128",
+      "rep": 0,
+      "rate": 212.27197346600332,
+      "clock": 934.5731707317074
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "pp512",
+      "rep": 0,
+      "rate": 493.2562620423892,
+      "clock": 934.5731707317074
+    },
+    {
+      "round": 3,
+      "slot": 1,
+      "engine": "phobos",
+      "backend": "CUDA",
+      "model": "MiniCPM-V-4_7-35B-A3B-Q8_0",
+      "test": "tg128",
+      "rep": 0,
+      "rate": 39.27585148818656,
+      "clock": 934.5731707317074
+    }
+  ]
+}

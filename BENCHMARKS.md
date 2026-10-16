@@ -15,89 +15,112 @@ card for contention first.
 
 Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test   | llama.cpp CUDA[^1]  | Phobos GPU         |
-| ------ | ------------------: | -----------------: |
-| pp128  |  6723.91 +/-  12.97 | 5976.29 +/- 179.57 |
-| pp512  | 10729.32 +/-  26.75 | 8693.19 +/-  38.57 |
-| tg32   |   229.87 +/-   0.22 |  325.00 +/-   0.66 |
-| tg128  |   246.98 +/-   0.03 |  323.94 +/-   0.11 |
-| tg512  |   250.23 +/-   0.05 |  324.50 +/-   0.06 |
-| tg1024 |   249.84 +/-   0.12 |  323.53 +/-   0.14 |
-| tg2048 |   248.61 +/-   0.07 |  322.09 +/-   0.10 |
+| test   | llama.cpp CUDA[^1]  | Phobos GPU          |
+| ------ | ------------------: | ------------------: |
+| pp128  |  7064.41 +/-  47.47 |  9272.97 +/- 244.51 |
+| pp512  | 11727.05 +/-  44.16 | 13188.90 +/-  91.65 |
+| tg32   |   221.97 +/-   0.61 |   343.64 +/-   1.67 |
+| tg128  |   238.48 +/-   0.54 |   343.73 +/-   1.15 |
+| tg512  |   241.68 +/-   0.52 |   343.62 +/-   1.00 |
+| tg1024 |   241.34 +/-   0.53 |   343.28 +/-   0.89 |
+| tg2048 |   239.38 +/-   1.14 |   341.18 +/-   0.89 |
 
 MiniCPM5-1B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test   | llama.cpp CUDA[^1]  | Phobos GPU          |
 | ------ | ------------------: | ------------------: |
-| pp128  |  8569.34 +/-  16.46 |  7574.73 +/-  27.89 |
-| pp512  | 16164.09 +/-  20.50 | 10086.13 +/-  26.26 |
-| tg32   |   270.33 +/-   0.27 |   315.18 +/-   0.25 |
-| tg128  |   270.89 +/-   0.19 |   314.19 +/-   0.15 |
-| tg512  |   269.83 +/-   0.17 |   313.14 +/-   0.11 |
-| tg1024 |   268.98 +/-   0.28 |   310.84 +/-   0.05 |
-| tg2048 |   266.84 +/-   0.20 |   304.84 +/-   1.00 |
+| pp128  |  8080.83 +/- 152.45 |  9869.60 +/- 113.65 |
+| pp512  | 15224.11 +/- 134.20 | 12579.49 +/-  39.49 |
+| tg32   |   260.00 +/-   0.50 |   312.11 +/-   0.93 |
+| tg128  |   261.04 +/-   0.69 |   310.34 +/-   0.78 |
+| tg512  |   259.81 +/-   0.44 |   309.22 +/-   0.66 |
+| tg1024 |   257.25 +/-   1.35 |   307.00 +/-   0.71 |
+| tg2048 |   255.75 +/-   0.62 |   302.19 +/-   0.76 |
 
 Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test   | llama.cpp CUDA[^1] | Phobos GPU         |
 | ------ | -----------------: | -----------------: |
-| pp128  | 2296.17 +/-   3.53 | 2305.30 +/-   3.32 |
-| pp512  | 2956.21 +/-   1.31 | 2372.05 +/-   2.44 |
-| tg32   |  103.60 +/-   0.08 |  111.92 +/-   0.14 |
-| tg128  |  106.54 +/-   0.11 |  111.75 +/-   0.14 |
-| tg512  |  106.77 +/-   0.29 |  111.54 +/-   0.42 |
-| tg1024 |  107.01 +/-   0.12 |  111.59 +/-   0.26 |
-| tg2048 |  106.50 +/-   0.12 |  111.43 +/-   0.10 |
+| pp128  | 2380.58 +/-   4.04 | 3299.90 +/-  17.01 |
+| pp512  | 3137.20 +/-   0.97 | 3676.09 +/-   3.19 |
+| tg32   |  101.56 +/-   0.05 |  121.87 +/-   0.41 |
+| tg128  |  104.53 +/-   0.05 |  121.54 +/-   0.28 |
+| tg512  |  105.04 +/-   0.10 |  121.60 +/-   0.26 |
+| tg1024 |  104.76 +/-   0.08 |  121.36 +/-   0.31 |
+| tg2048 |  104.33 +/-   0.07 |  120.93 +/-   0.25 |
 
 GLM-4.6V-Flash-Q4_K_M, text only, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test  | llama.cpp CUDA[^1] | Phobos GPU         |
 | ----- | -----------------: | -----------------: |
-| pp128 | 1665.23 +/-  63.55 | 1384.87 +/-   1.66 |
-| pp512 | 1974.65 +/-   8.10 | 1160.08 +/-   2.47 |
-| tg128 |   63.23 +/-   0.01 |   59.69 +/-   0.02 |
+| pp128 | 1681.87 +/-   1.42 | 1546.50 +/-   4.26 |
+| pp512 | 1937.30 +/-   2.04 | 1763.64 +/-   2.02 |
+| tg128 |   61.94 +/-   0.04 |   59.86 +/-   0.01 |
 
 Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test  | llama.cpp CUDA[^1] | Phobos GPU      |
 | ----- | -----------------: | --------------: |
-| pp128 |   473.17 +/-  0.85 | 537.82 +/- 0.00 |
-| tg128 |    21.69 +/-  0.00 |  30.98 +/- 0.01 |
+| pp128 |   480.84 +/-  1.28 | 641.09 +/- 2.84 |
+| tg128 |    21.26 +/-  0.00 |  30.92 +/- 0.01 |
 
 Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test  | llama.cpp-prism CUDA[^2] | Phobos GPU        |
-| ----- | -----------------------: | ----------------: |
-| pp128 |         469.76 +/-  0.40 | 583.99 +/- 10.82  |
-| tg128 |          48.54 +/-  0.23 |  45.25 +/-  0.23  |
+| test  | llama.cpp-prism CUDA[^2] | Phobos GPU       |
+| ----- | -----------------------: | ---------------: |
+| pp128 |         467.43 +/-  2.10 | 677.29 +/-  3.56 |
+| tg128 |          48.44 +/-  0.02 |  45.61 +/-  0.08 |
 
 The two 27B models need 6.27 GiB (IQ1_M) and 5.53 GiB (PTQ1_0) for their
 weights, which leaves little of the card's 8 GiB. Their numbers only hold while
-the desktop uses little VRAM: 886 MiB was in use before the IQ1_M run, and
-682 MiB before the PTQ1_0 run. If the desktop uses much more, the model no
-longer fits and the driver pages it over PCIe. An earlier session measured
-that at 7 t/s.
+the desktop uses little VRAM: 837 MiB was in use before both runs. If the
+desktop uses much more, the model no longer fits and the driver pages it over
+PCIe. An earlier session measured that at 7 t/s.
 
 ## Mixture of Experts
 
 Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the card, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test  | llama.cpp CUDA[^1], `-ncmoe 31 -t 8` | Phobos GPU       |
+| test  | llama.cpp CUDA[^1], `-ncmoe 31 -t 8` | Phobos GPU        |
+| ----- | -----------------------------------: | ----------------: |
+| pp128 |                      72.61 +/-  0.74 | 246.89 +/- 41.10  |
+| pp512 |                     255.99 +/-  2.44 | 634.16 +/-  8.62  |
+| tg128 |                      31.34 +/-  0.07 |  53.60 +/-  0.64  |
+
+Phobos's pp128 on Qwen3.6 took 208, 203 and 329 t/s in its three rounds. A
+128-token prompt touches few experts, so the rate depends on which ones the
+cache already holds when it starts.
+
+MiniCPM-V-4.7-35B-A3B-Q4_K_M, text only, the same architecture, on an RTX 2080 SUPER, driver 617.14, tokens per second:
+
+| test  | llama.cpp CUDA[^1], `-ncmoe 30 -t 8` | Phobos GPU       |
 | ----- | -----------------------------------: | ---------------: |
-| pp128 |                      76.25 +/-  0.12 | 311.55 +/- 4.16  |
-| pp512 |                     257.57 +/-  0.55 | 577.88 +/- 1.13  |
-| tg128 |                      29.88 +/-  1.64 |  54.32 +/- 0.19  |
+| pp128 |                      82.14 +/-  0.53 | 213.94 +/- 1.19  |
+| pp512 |                     282.32 +/-  0.36 | 703.43 +/- 6.70  |
+| tg128 |                      32.58 +/-  0.82 |  67.01 +/- 0.22  |
+
+MiniCPM-V-4.7-35B-A3B-Q8_0, text only, on an RTX 2080 SUPER, driver 617.14, tokens per second:
+
+| test  | llama.cpp CUDA[^1], `-ncmoe 36 -t 8` | Phobos GPU       |
+| ----- | -----------------------------------: | ---------------: |
+| pp128 |                      34.96 +/-  0.05 | 212.14 +/- 3.24  |
+| pp512 |                     139.88 +/-  0.63 | 482.48 +/- 9.39  |
+| tg128 |                      19.47 +/-  0.05 |  38.84 +/- 0.50  |
 
 Both engines keep everything except the experts on the GPU. They differ in
 where the experts go.
 
 **llama.cpp** decides at load time which layers keep their experts on the CPU.
-We used its fastest setting on this card, found by sweeping `llama-bench` at a
-3k context:
+We swept `llama-bench` at a 3k context for each model and kept one layer of
+margin above the lowest setting that does not page:
 
-- `-ncmoe 31`: experts of the first 31 layers on the CPU. At 30 the card is at
-  the edge of running out of memory, and at 29 it starts paging.
-- `-t 8`: 8 CPU threads decode 12% faster than the default.
+- `-ncmoe 31` on Qwen3.6: experts of the first 31 layers on the CPU. At 30 its
+  prompt rate drops by a third, and at 29 it pages.
+- `-ncmoe 30` on the MiniCPM-V Q4_K_M, which is 0.9 GiB smaller. 29 is a few
+  percent faster, but 28 pages.
+- `-ncmoe 36` on the MiniCPM-V Q8_0. 34 and below page.
+- `-t 8`: 6 to 16 threads measure the same on the Q8_0, and the default (24)
+  decoded 12% slower in an earlier session.
 
 **Phobos** keeps a cache of experts on the GPU, sized so the context still has
 room to grow.
@@ -129,19 +152,20 @@ in `bench/`, replayed three rounds each, without thinking:
 
 | task      | requests | engine         | wall    | prompt  | decode   |
 | --------- | -------: | -------------- | ------: | ------: | -------: |
-| `fib`     |        6 | llama.cpp CUDA |  53.2 s | 105 t/s | 30.7 t/s |
-|           |          | Phobos GPU     |  26.9 s | 254 t/s | 42.3 t/s |
-| `law`     |        2 | llama.cpp CUDA |  66.6 s | 148 t/s | 30.0 t/s |
-|           |          | Phobos GPU     |  47.2 s | 246 t/s | 42.5 t/s |
-| `pelican` |        2 | llama.cpp CUDA | 132.8 s | 149 t/s | 29.3 t/s |
-|           |          | Phobos GPU     |  81.2 s | 347 t/s | 47.4 t/s |
+| `fib`     |       14 | llama.cpp CUDA | 120.4 s | 113 t/s | 30.5 t/s |
+|           |          | Phobos GPU     |  74.9 s | 226 t/s | 42.2 t/s |
+| `law`     |        3 | llama.cpp CUDA |  79.4 s | 162 t/s | 29.9 t/s |
+|           |          | Phobos GPU     |  67.9 s | 222 t/s | 45.7 t/s |
+| `pelican` |        2 | llama.cpp CUDA | 134.2 s | 170 t/s | 29.6 t/s |
+|           |          | Phobos GPU     |  95.9 s | 267 t/s | 48.3 t/s |
 
 The replay caps each answer at its recorded length, but it cannot make an
-engine keep going. On `fib` Phobos ends one answer early and writes 636 tokens
-a round to llama.cpp's 733, so its wall time there covers a little less work.
-The rates are per token and compare as they are.
+engine keep going, and both sample. A round of `fib` has Phobos write 2,200
+tokens to llama.cpp's 2,261, `law` 1,375 to 1,029 and `pelican` 3,501 to
+3,089, so the wall times cover slightly different amounts of work. The rates
+are per token and compare as they are.
 
-The context grows to 3k tokens on `fib`, 6.6k on `law` and 4.9k on `pelican`.
+The context grows to 5.5k tokens on `fib`, 8.5k on `law` and 6.3k on `pelican`.
 That is why decode is slower here than in the benchmark tables.
 
 An earlier session replayed an 8-request `fib` recording with thinking:
@@ -158,66 +182,74 @@ in the same time.
 ## Under Memory Pressure
 
 A desktop does not leave the card alone. A browser, a game or a second model
-can take a share of its memory at any time. An earlier session replayed its
-8-request fib recording, and before the fourth request another process took
-2 GiB of the card's 8 and kept writing to it until the task ended. Both engines
-loaded against the whole card. Three rounds each:
+can take a share of its memory at any time. This replays the `fib` recording
+above, and before the fourth of its 14 requests another process takes 2 GiB of
+the card's 8 and keeps writing to it until the task ends. Both engines loaded
+against the whole card. Three rounds each, median wall time:
 
 | engine         | wall    | prompt  | decode   |
 | -------------- | ------: | ------: | -------: |
-| llama.cpp CUDA | 169.4 s | 55 t/s  | 12.2 t/s |
-| Phobos GPU     |  55.3 s | 191 t/s | 36.4 t/s |
+| llama.cpp CUDA | 352.3 s | 32 t/s  |  6.4 t/s |
+| Phobos GPU     |  96.6 s | 183 t/s | 33.5 t/s |
 
-The same rates split at the squeeze:
+The same rates split at the squeeze, the mean over rounds:
 
 | engine         | decode before | decode after | kept | prompt before | prompt after |
 | -------------- | ------------: | -----------: | ---: | ------------: | -----------: |
-| llama.cpp CUDA |      32.3 t/s |      9.2 t/s |  28% |       126 t/s |       29 t/s |
-| Phobos GPU     |      44.8 t/s |     33.3 t/s |  74% |       289 t/s |      120 t/s |
+| llama.cpp CUDA |      29.8 t/s |      6.7 t/s |  23% |       129 t/s |       23 t/s |
+| Phobos GPU     |      40.7 t/s |     32.3 t/s |  80% |       292 t/s |      138 t/s |
+
+llama.cpp lands in one of two states under the squeeze. In two of the three
+rounds it decoded at 8.5 t/s after the squeeze began, and in the third at
+3.3 t/s, which took that round 844 s.
 
 llama.cpp can buy room for the squeeze up front. With the experts of five more
 layers on the CPU (`-ncmoe 36`), it doesn't notice the squeeze at all, but it
 is slower without one, too:
 
-| engine                    | wall   | decode before | decode after | prompt before | prompt after |
-| ------------------------- | -----: | ------------: | -----------: | ------------: | -----------: |
-| llama.cpp CUDA, `-ncmoe 36` | 78.3 s |      27.7 t/s |     28.2 t/s |       116 t/s |      107 t/s |
+| engine                      | wall    | decode before | decode after | prompt before | prompt after |
+| --------------------------- | ------: | ------------: | -----------: | ------------: | -----------: |
+| llama.cpp CUDA, `-ncmoe 36` | 130.4 s |      26.8 t/s |     26.5 t/s |       117 t/s |      107 t/s |
 
 **llama.cpp** fixed its split at load time. When the card runs out of memory,
 the driver pages its buffers to host memory, and every token reads them back
 over PCIe.
 
 **Phobos** checks the whole card's free memory between passes. When another
-process fills the card, the expert cache gives the memory back. Here that took
-two steps within a few seconds, from 38 to 14 experts a block. More misses go
-to the CPU threads, but nothing is paged. When the memory is free again, the
-cache takes it back.
+process fills the card, the expert cache gives the memory back, here in three
+steps from 41 to 8 or 9 experts a block. More misses go to the CPU threads, but
+nothing is paged. When the memory is free again, the cache takes it back.
 
-Without the squeeze, Phobos replays this trace in 43.5 s.
+Without the squeeze, Phobos replays this trace in 74.9 s.
 
 The other program can also close again. In this run the squeeze starts
-before the third request and ends before the sixth, so each phase gets three
-requests. llama.cpp three rounds, Phobos two:
+before the third request and ends before the sixth. Phobos three rounds,
+llama.cpp five, median wall time and the mean decode rate over rounds:
 
 | engine         | wall    | decode before | during   | after    |
 | -------------- | ------: | ------------: | -------: | -------: |
-| llama.cpp CUDA | 131.7 s |      31.1 t/s |  9.0 t/s | 31.2 t/s |
-| Phobos GPU     |  52.4 s |      45.9 t/s | 30.8 t/s | 44.6 t/s |
+| llama.cpp CUDA | 372.7 s |      29.3 t/s |  5.6 t/s | 19.3 t/s |
+| Phobos GPU     |  81.4 s |      44.2 t/s | 33.2 t/s | 43.1 t/s |
 
-Both engines recover. llama.cpp waits for the driver to page its buffers back
-in. Phobos grows its cache from 14 back to 39 experts a block, the size it had
-before the squeeze.
+Phobos recovers every time: its cache grows from 8 back to 39 experts a block
+once the squeeze ends. llama.cpp recovered in two of its five rounds, decoding
+at 8.6 t/s during the squeeze and 29 t/s after it, in about 176 s. In the other
+three it decoded at 3.5 t/s during the squeeze and only 12 to 14 t/s after it,
+in about 380 s.
 
 The raw results are `results/agent-squeeze.json`, `results/agent-squeeze-ncmoe36.json`
 and `results/agent-squeeze-release.json`.
 
 ## Details
 
+`bench.py` probes every `llama*` build next to the checkout, so each run names
+the one it compares against with `--llama-bench`.
+
 The 0.8B, MiniCPM5-1B and 4B tables come from one run of both engines.
 
 ```bash
 python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
-  --csv results/bench.csv --json results/bench.json
+  --llama-bench ${llama_cpp}/llama-bench.exe --csv results/bench.csv --json results/bench.json
 ```
 
 GLM-4.6V-Flash fills most of the card, so it measures two prompt sizes and one
@@ -225,7 +257,8 @@ generation size.
 
 ```bash
 python scripts/bench.py -m models/GLM-4.6V-Flash-Q4_K_M.gguf -p 128 512 -n 128 \
-  -r 3 -R 3 --csv results/bench-glm.csv --json results/bench-glm.json
+  -r 3 -R 3 --llama-bench ${llama_cpp}/llama-bench.exe \
+  --csv results/bench-glm.csv --json results/bench-glm.json
 ```
 
 The Qwen 27B is slow, so this run uses fewer sizes and repetitions. It is also
@@ -234,7 +267,8 @@ generation size.
 
 ```bash
 python scripts/bench.py -m models/Qwen3.8-27B-UD-IQ1_M.gguf -p 128 -n 128 \
-  -r 1 -R 3 --csv results/bench-qwen38.csv --json results/bench-qwen38.json
+  -r 1 -R 3 --llama-bench ${llama_cpp}/llama-bench.exe \
+  --csv results/bench-qwen38.csv --json results/bench-qwen38.json
 ```
 
 The ternary 27B, against PrismML's llama.cpp fork.
@@ -245,14 +279,26 @@ python scripts/bench.py -m models/Ternary-Bonsai-2-27B-PTQ1_0.gguf -p 128 -n 128
   --csv results/bench-bonsai.csv --json results/bench-bonsai.json
 ```
 
-The 35B mixture of experts model. llama.cpp runs its experts for layers 0 to 30
-on the CPU (`-ncmoe 31`) with 8 threads (`-t 8`). This was its fastest
-setting on the RTX 2080 SUPER at a 3k context.
+The 35B mixture of experts models, each with the llama.cpp setting from
+[Mixture of Experts](#mixture-of-experts).
 
 ```bash
 python scripts/bench.py -m models/Qwen3.6-35B-A3B-UD-Q4_K_M.gguf -p 128 512 -n 128 \
-  -r 1 -R 3 --llama-args="-ncmoe 31 -t 8" \
+  -r 1 -R 3 --llama-bench ${llama_cpp}/llama-bench.exe --llama-args="-ncmoe 31 -t 8" \
   --csv results/bench-qwen36moe.csv --json results/bench-qwen36moe.json
+python scripts/bench.py -m models/MiniCPM-V-4_7-35B-A3B-Q4_K_M.gguf -p 128 512 -n 128 \
+  -r 1 -R 3 --llama-bench ${llama_cpp}/llama-bench.exe --llama-args="-ncmoe 30 -t 8" \
+  --csv results/bench-minicpmv-q4.csv --json results/bench-minicpmv-q4.json
+python scripts/bench.py -m models/MiniCPM-V-4_7-35B-A3B-Q8_0.gguf -p 128 512 -n 128 \
+  -r 1 -R 3 --llama-bench ${llama_cpp}/llama-bench.exe --llama-args="-ncmoe 36 -t 8" \
+  --csv results/bench-minicpmv-q8.csv --json results/bench-minicpmv-q8.json
+```
+
+The sweep behind each setting, here for the Q8_0:
+
+```bash
+llama-bench -m models/MiniCPM-V-4_7-35B-A3B-Q8_0.gguf -p 512 -n 128 -d 3072 -t 8 -r 2 \
+  -ncmoe 33,34,35,36,37,38
 ```
 
 Record a [pi](https://pi.dev) session of every task, then replay it to both
@@ -264,7 +310,7 @@ python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-*.reque
   --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8 --out REPLAY
 cp REPLAY/results.json results/agent.json
 python scripts/plot_agent.py results/agent.json -o results/agent.svg --context \
-  "Qwen3.6-35B-A3B-UD-Q4_K_M on an RTX 2080 SUPER, phobos 3eec883, llama.cpp -ncmoe 31 -t 8, no thinking"
+  "Qwen3.6-35B-A3B-UD-Q4_K_M on an RTX 2080 SUPER, phobos bbc8898, llama.cpp b11681 -ncmoe 31 -t 8, no thinking"
 ```
 
 The same replay with 2 GiB of the card taken by another process from the
@@ -280,7 +326,8 @@ Producing the SVG for the results.
 
 ```bash
 python scripts/plot.py results/bench.json results/bench-glm.json results/bench-qwen38.json \
-  results/bench-bonsai.json results/bench-qwen36moe.json -o results/inference.svg
+  results/bench-bonsai.json results/bench-qwen36moe.json results/bench-minicpmv-q4.json \
+  results/bench-minicpmv-q8.json -o results/inference.svg
 ```
 
 Manually invoking the engines (not a comparison).
@@ -298,5 +345,5 @@ cargo run -r -p phobos-kbench -- --csv results/results.csv
 python scripts/plot_bench.py results/results.csv -o results/bench.svg
 ```
 
-[^1]: build: 4d19b2876 (10636)
-[^2]: [PrismML's llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), build: 2459f68b5 (10754)
+[^1]: build: 5e03a1ff4 (11681)
+[^2]: [PrismML's llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), build: e3de71522 (10777)

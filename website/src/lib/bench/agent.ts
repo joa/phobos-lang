@@ -114,14 +114,17 @@ export function phaseRates(task: RawTask): [number, number, number] {
 }
 
 // The resizes the squeeze caused. The JSON has no times, and the cache also shrinks as the context
-// grows, so the squeeze is told by the free memory it left: its first shrink is the one that read the
-// card fullest, and every shrink after it up to the grow belongs to it.
+// grows and grows when that frees up again, so the squeeze is told by the free memory around it: its
+// end is the grow that read the card emptiest, its shrinks are the unbroken run before that grow, and
+// its first shrink is the one in that run that read the card fullest.
 export function squeezeResizes(resizes: Resize[]): { before: number; shrinks: number[]; after: number } {
-  const grow = resizes.findLastIndex(resize => resize.toPerBlock > resize.fromPerBlock)
-  if (grow < 0) throw new Error("the cache never grew back")
-  const shrinks = resizes.slice(0, grow)
-  if (shrinks.length === 0 || shrinks.some(resize => resize.toPerBlock >= resize.fromPerBlock))
-    throw new Error("expected shrinks before the grow")
+  const grows = resizes.flatMap((resize, index) => (resize.toPerBlock > resize.fromPerBlock ? [index] : []))
+  if (grows.length === 0) throw new Error("the cache never grew back")
+  const grow = grows.reduce((best, index) => (resizes[index].freeMiB > resizes[best].freeMiB ? index : best))
+  let start = grow
+  while (start > 0 && resizes[start - 1].toPerBlock < resizes[start - 1].fromPerBlock) start--
+  const shrinks = resizes.slice(start, grow)
+  if (shrinks.length === 0) throw new Error("expected shrinks before the grow")
   const fullest = Math.min(...shrinks.map(resize => resize.freeMiB))
   const onset = shrinks.findIndex(resize => resize.freeMiB === fullest)
   return {
@@ -172,10 +175,15 @@ export function parseSqueezeRun(
       (task.resizes ?? []).map(([freeMiB, fromPerBlock, toPerBlock]) => ({ freeMiB, fromPerBlock, toPerBlock }))
     )
   )
+  // A repetition can resize a step differently; the figure draws what most of them did.
+  const counts = new Map<string, number>()
   for (const sequence of sequences) {
-    if (JSON.stringify(sequence) !== JSON.stringify(sequences[0]))
-      throw new Error(`${file}: the repetitions resized the cache differently`)
+    const key = JSON.stringify(sequence)
+    counts.set(key, (counts.get(key) ?? 0) + 1)
   }
+  const [common, seen] = [...counts].reduce((best, entry) => (entry[1] > best[1] ? entry : best))
+  if (seen * 2 <= sequences.length) throw new Error(`${file}: no resize sequence is shared by most repetitions`)
+  const sequence = JSON.parse(common) as ReturnType<typeof squeezeResizes>
 
   const summarize = (engineTasks: RawTask[]): EngineSqueeze => {
     const rates = engineTasks.map(phaseRates)
@@ -204,7 +212,7 @@ export function parseSqueezeRun(
       blocks: slots / mostPerBlock,
       slotMiB: round(slabMiB / slots, 4),
       mostPerBlock,
-      ...sequences[0],
+      ...sequence,
     },
     engines: [summarize(phobos), summarize(others)],
   }

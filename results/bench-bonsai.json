@@ -3,7 +3,8 @@
     "card": "NVIDIA GeForce RTX 2080 SUPER",
     "driver": "617.14",
     "clock_max": "2145",
-    "commit": "3eec883"
+    "commit": "bbc8898",
+    "date": "2026-10-16T07:42:34+00:00"
   },
   "args": {
     "models": "['Ternary-Bonsai-2-27B-PTQ1_0']",
@@ -17,6 +18,7 @@
     "no_llama": "False",
     "no_phobos": "False",
     "no_build": "True",
+    "phobos_bench": "None",
     "warm_secs": "45.0",
     "max_idle_util": "45.0",
     "max_idle_power": "120.0",
@@ -34,7 +36,7 @@
     "phobos/Ternary-Bonsai-2-27B-PTQ1_0": "qwen35 26.9B PTQ1_0"
   },
   "summary": {
-    "median_clock": 1279.9030612244899,
+    "median_clock": 1296.5109890109889,
     "uncontended_rounds": [
       1,
       2,
@@ -46,23 +48,23 @@
       3
     ],
     "drift": {
-      "1": -0.0017894074063282972,
-      "2": 0.0007171128765606771,
-      "3": -0.009911894273127775
+      "1": 0.000267857142857153,
+      "2": -0.008690450938512478,
+      "3": 5.624977169937928e-05
     }
   },
   "health": {
     "1": {
-      "util": 0.0,
+      "util": 1.0,
       "power": 38.644999999999996
     },
     "2": {
-      "util": 0.0,
-      "power": 38.295
+      "util": 2.0,
+      "power": 22.06
     },
     "3": {
-      "util": 0.0,
-      "power": 38.605000000000004
+      "util": 1.0,
+      "power": 38.57
     }
   },
   "samples": [
@@ -74,8 +76,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 468.991,
-      "clock": 1882.0
+      "rate": 469.498,
+      "clock": 1864.2857142857142
     },
     {
       "round": 1,
@@ -85,8 +87,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 48.0683,
-      "clock": 1882.0
+      "rate": 48.4511,
+      "clock": 1864.2857142857142
     },
     {
       "round": 1,
@@ -96,8 +98,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 600.9389671361503,
-      "clock": 682.1212121212121
+      "rate": 680.8510638297872,
+      "clock": 718.3333333333334
     },
     {
       "round": 1,
@@ -107,8 +109,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 44.786564030790764,
-      "clock": 682.1212121212121
+      "rate": 45.714285714285715,
+      "clock": 718.3333333333334
     },
     {
       "round": 2,
@@ -118,8 +120,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 587.1559633027523,
-      "clock": 644.0909090909091
+      "rate": 670.1570680628272,
+      "clock": 673.021978021978
     },
     {
       "round": 2,
@@ -129,8 +131,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 45.48685145700071,
-      "clock": 644.0909090909091
+      "rate": 45.45454545454546,
+      "clock": 673.021978021978
     },
     {
       "round": 2,
@@ -140,8 +142,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 470.33,
-      "clock": 1994.0
+      "rate": 463.224,
+      "clock": 2019.642857142857
     },
     {
       "round": 2,
@@ -151,8 +153,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 48.8114,
-      "clock": 1994.0
+      "rate": 48.399,
+      "clock": 2019.642857142857
     },
     {
       "round": 3,
@@ -162,8 +164,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 469.962,
-      "clock": 1877.0
+      "rate": 469.561,
+      "clock": 1870.7142857142858
     },
     {
       "round": 3,
@@ -173,8 +175,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 48.7271,
-      "clock": 1877.0
+      "rate": 48.4555,
+      "clock": 1870.7142857142858
     },
     {
       "round": 3,
@@ -184,8 +186,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "pp128",
       "rep": 0,
-      "rate": 563.8766519823788,
-      "clock": 682.8061224489796
+      "rate": 680.8510638297872,
+      "clock": 728.7362637362637
     },
     {
       "round": 3,
@@ -195,8 +197,8 @@
       "model": "Ternary-Bonsai-2-27B-PTQ1_0",
       "test": "tg128",
       "rep": 0,
-      "rate": 45.47069271758437,
-      "clock": 682.8061224489796
+      "rate": 45.6653585444167,
+      "clock": 728.7362637362637
     }
   ]
 }

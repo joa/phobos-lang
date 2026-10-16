@@ -6,7 +6,7 @@
 
 Phobos is a tile-based GPU kernel language and an LLM inference engine built on it. I wrote it to learn the stack on an RTX 2080 SUPER (8 GB), so it targets low-VRAM machines.
 
-For mixture-of-experts models that don't fit in VRAM, Phobos needs no manual CPU/GPU split. It keeps an expert cache on the card and computes misses on the CPU in parallel. On Qwen3.6-35B-A3B it replays a recorded coding-agent session 1.6x faster than llama.cpp at its best swept configuration. Decode matches or beats llama.cpp on every model tested except Ternary-Bonsai, where PrismML's fork is 7% faster, and GLM-4.6V-Flash, where llama.cpp is 6% faster. Prompt processing on dense models is 60–100% of llama.cpp.
+For mixture-of-experts models that don't fit in VRAM, Phobos needs no manual CPU/GPU split. It keeps an expert cache on the card and computes misses on the CPU in parallel. On Qwen3.6-35B-A3B it replays a recorded coding-agent session 1.4x faster than llama.cpp at its best swept configuration, and on the 35B mixtures of experts it decodes 1.7x to 2.1x as fast. Decode matches or beats llama.cpp on every model tested except Ternary-Bonsai, where PrismML's fork is 6% faster, and GLM-4.6V-Flash, where llama.cpp is 3% faster. Prompt processing on dense models is 0.83x to 1.45x llama.cpp's rate.
 
 I come from compilers and virtual machines, not AI, which shaped several design choices. Phobos will understand your architecture as it performs inference and chooses the best runtime configuration.
 
@@ -14,7 +14,7 @@ Phobos is **very** fast for highly quantized models such as Ternary-Bonsai-2-27B
 
 ## Components
 
-- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 76% SGEMM cuBLAS throughput.
+- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 77% SGEMM cuBLAS throughput.
 - **[Inference](#inference)**: OpenAI compatible server for GGUF models. Kernel fusion, memory management; decodes at or above llama.cpp's rate on most models. 
 - **[Clustering](#clustering)**: Distributed tensor algebra.
 
@@ -44,7 +44,7 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-LLVM/MLIR based compiler. SGEMM performance is at 76% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
+LLVM/MLIR based compiler. SGEMM performance is at 77% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
 
 See [SPEC](./SPEC.md) for details or check out the [`examples/`](./examples).
 
@@ -75,6 +75,8 @@ Inference has been tested with:
 - [Ternary-Bonsai-2-27B-PTQ1_0](https://huggingface.co/prism-ml/Ternary-Bonsai-2-27B-gguf)
 - [Qwen3.6-35B-A3B-UD-Q4_K_M](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF)
 - [GLM-4.6V-Flash-Q4_K_M](https://huggingface.co/unsloth/GLM-4.6V-Flash-GGUF) (text only)
+- [MiniCPM-V-4_7-35B-A3B-Q4_K_M](https://huggingface.co/openbmb/MiniCPM-V-4.7-35B-A3B) (text only)
+- [MiniCPM-V-4_7-35B-A3B-Q8_0](https://huggingface.co/openbmb/MiniCPM-V-4.7-35B-A3B) (text only)
 - [GPT2 (ONNX)](https://github.com/onnx/models/tree/main/validated/text/machine_comprehension/gpt-2)
 
 **Note:**
