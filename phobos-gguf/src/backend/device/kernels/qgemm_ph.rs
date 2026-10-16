@@ -639,9 +639,35 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
     let per_group = if decode.halves { 2 } else { 1 };
     // A minimum needs each row's sum over each group of the stage: 4 TM of
     // them, eight `dp4a` against ones each over two granule-sized runs.
+    let (mut a_first, mut a_next) = (String::new(), String::new());
     let (mins_decl, sums) = if decode.mins {
         let mut sums = String::new();
-        for i in 0..QGEMM_TM * 4 / QGEMM_CTA {
+        for i in 0..QGEMM_TM * 8 / QGEMM_CTA {
+            let o = i * QGEMM_CTA;
+            let piece = format!("  let q{i} = ctx.thread + {o}\n  let ar{i} = q{i} / 8\n  let ac{i} = q{i} % 8\n");
+            a_first.push_str(&piece);
+            for t in 0..4 {
+                let _ = writeln!(a_first, "  var x{i}{t} = word(A[pm * TM + ar{i}, {a_off}ac{i} * 16 :+ 16], {t})");
+                let _ = writeln!(
+                    a_next,
+                    "      x{i}{t} = word(A[pm * TM + ar{i}, {a_off}(kh + 1) * 128 + 16 * ac{i} :+ 16], {t})"
+                );
+            }
+            let _ = write!(
+                sums,
+                "    store(at[ar{i}, 16 * ac{i} :+ 16], x{i}0, x{i}1, x{i}2, x{i}3)
+    let h{i} = dp4a(x{i}3, {ONES}, dp4a(x{i}2, {ONES}, dp4a(x{i}1, {ONES}, dp4a(x{i}0, {ONES}, 0))))
+    let t{i} = h{i} + shfl<xor 1>(h{i})
+    if ac{i} % 2 == 0 {{
+      rsum[ar{i}, ac{i} / 2] = f32(t{i}) * AS[pm * TM + ar{i}, {as_off}kh * 4 + ac{i} / 2]
+    }}
+",
+                ONES = 0x0101_0101u32
+            );
+        }
+        let staged_sums = sums;
+        let mut sums = String::new();
+        for i in 0..0 {
             let _ = writeln!(
                 sums,
                 "    let r{i} = (ctx.thread + {o}) / 4
@@ -662,11 +688,20 @@ fn staged(quant: Quant, name: &str, bytes: usize, decode: &Decode, split: Option
             }
             let _ = writeln!(sums, "    rsum[r{i}, g{i}] = f32({acc}) * das[r{i}, g{i}]");
         }
-        sums.push_str("    barrier()\n");
-        ("  var mw: tile<f32>[4, TN]\n  var rsum: tile<f32>[TM, 4]\n".to_string(), sums)
+        let _ = &mut sums;
+        (
+            "  var mw: tile<f32>[4, TN]\n  var rsum: tile<f32>[TM, 4]\n  var at: tile<i8>[TM, 128]\n".to_string(),
+            staged_sums,
+        )
     } else {
         (String::new(), String::new())
     };
+    // Staged per thread above when the format has minimums; a copy otherwise.
+    let stage_at = match decode.mins {
+        true => sums.clone(),
+        false => format!("    var at = A[pm * TM :+ TM, {a_off}kh * 128 :+ 128]\n"),
+    };
+    let sums = String::new();
     let width = 32 / per_group;
     let mut contract = String::new();
     for s in 0..4 * per_group {
@@ -706,13 +741,12 @@ kernel {kernel}(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
   let gl = ctx.thread % 4
   let jr = (pn * TN + jj) / 8 * 8
   let c8 = jj % 8
-{first}  var dn = D[jr, {d_off}c8]
+{first}{a_first}  var dn = D[jr, {d_off}c8]
   for kh in range(0, {k} / 128, 1) {{
-    var at = A[pm * TM :+ TM, {a_off}kh * 128 :+ 128]
-    var das = AS[pm * TM :+ TM, {as_off}kh * 4 :+ 4]
+{stage_at}    var das = AS[pm * TM :+ TM, {as_off}kh * 4 :+ 4]
 {take}    let d = f32(dn)
     if kh + 1 < {k} / 128 {{
-{next}      dn = D[jr, {d_off}(kh + 1) / 2 * 8 + c8]
+{next}{a_next}      dn = D[jr, {d_off}(kh + 1) / 2 * 8 + c8]
     }}
 {body}    barrier()
 {sums}{contract}  }}
