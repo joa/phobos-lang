@@ -110,6 +110,16 @@ fn qwen_project_plan_heads(mix: bool, kv_heads: usize, shift: bool) -> Plan {
 /// `cargo run -p phobos-lang --example emit`.
 ///
 ///     cargo test -p phobos-gguf fused_source -- --nocapture --ignored
+/// Attention's output epilogue at a 2048-wide mix into a 1024-wide row.
+fn attn_out_plan(blocks: u32) -> Plan {
+    chains::attn_out_chain(Buf(0), QBuf(0), Buf(1), 2048, 1024)
+        .expect("whole Q8_0 blocks")
+        .key(blocks)
+        .plan()
+        .expect("a well-formed chain")
+        .expect("a shape the pass fuses")
+}
+
 #[test]
 #[ignore = "prints the emitted source rather than checking anything"]
 fn fused_source() {
@@ -119,7 +129,11 @@ fn fused_source() {
         ("fused_qwen08_project_mix", qwen_project_plan(true)),
         ("fused_grouped_project_mix", qwen_project_plan_heads(true, 8, true)),
         ("fused_qwen4b_mlp", qwen_4b_plan(64)),
+        ("fused_qwen4b_mlp_96", qwen_4b_plan(96)),
+        ("fused_qwen4b_mlp_192", qwen_4b_plan(192)),
         ("fused_qwen4b_project", qwen_4b_project_plan()),
+        ("fused_attn_out", attn_out_plan(96)),
+        ("fused_attn_out_192", attn_out_plan(192)),
     ];
     // With PHOBOS_DUMP_DIR set, each is also written there as a `.ph`.
     let dir = std::env::var("PHOBOS_DUMP_DIR").ok().map(std::path::PathBuf::from);
@@ -132,15 +146,40 @@ fn fused_source() {
     }
 }
 
+/// What the compiler decides for `plan`: the scratch it publishes and where
+/// its grid barriers fall.
+#[cfg(feature = "cuda")]
+fn report(plan: &Plan) -> phobos_kernels::compile::LaunchReport {
+    phobos_kernels::compile::launch_report(&plan.source, "fused").expect("the fused source compiles")
+}
+
+/// The source before and after the statement the compiler's one grid
+/// barrier precedes.
+#[cfg(feature = "cuda")]
+fn around_barrier(plan: &Plan) -> (String, String) {
+    let lines = report(plan).grid_barriers;
+    let [line] = lines[..] else {
+        panic!("one grid barrier, not {lines:?}:\n{}", plan.source)
+    };
+    let source: Vec<&str> = plan.source.lines().collect();
+    let at = line as usize - 1;
+    (source[..at].join("\n"), source[at..].join("\n"))
+}
+
+#[test]
+fn no_chain_writes_a_barrier() {
+    for plan in [qwen_plan(), qwen_project_plan(true), qwen_4b_plan(340), qwen_4b_project_plan()] {
+        assert!(!plan.source.contains("grid_barrier"), "{}", plan.source);
+    }
+}
+
+#[cfg(feature = "cuda")]
 #[test]
 fn the_mlp_chain_needs_exactly_one_barrier() {
-    let plan = qwen_plan();
-    assert_eq!(plan.barriers, 1);
-    assert_eq!(plan.source.matches("grid_barrier").count(), 1);
     // It sits after the SwiGLU's quantization, since the down projection
     // reads the whole hidden row. The normalization is redundant, so it
     // needs none.
-    let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
+    let (before, after) = around_barrier(&qwen_plan());
     assert!(before.contains("sum<over ctx.thread>(ss_s"), "the normalization comes first");
     assert!(before.contains("exp(-v1)"), "the SwiGLU comes first");
     assert!(after.contains("+= qdot_t"), "the accumulation comes after");
@@ -153,17 +192,21 @@ fn only_a_value_crossing_a_barrier_reaches_global_memory() {
     assert_eq!(plan.scratch.len(), 1);
     assert_eq!(plan.scratch[0].bytes, 3584);
     assert_eq!(plan.scratch[0].scales, 112);
-    // The normalized row is held in shared memory per block.
-    assert_eq!(plan.held, 1);
+    // The normalized row is held in shared memory per block, as the kernel
+    // asserts.
+    assert!(plan.source.contains("@shared(Aq2, As2)"), "{}", plan.source);
     assert_eq!(plan.source.matches("flat(A").count(), 2);
+    assert!(plan.source.contains("var Aq2: tensor<i8>[32, 32]"), "{}", plan.source);
     // The quantized row is scratch the kernel declares, with its flat view.
     assert!(plan.source.contains("var Vq7F: tensor<i8>[112, 32]"), "{}", plan.source);
     assert!(plan.source.contains("let Vq7 = flat(Vq7F)"), "{}", plan.source);
     assert_eq!(plan.scratch_args.len(), 2);
-    assert!(
-        plan.source.contains("var Aq2: tile<i8>[32, 32]"),
-        "the activation should be a tile, not an operand"
-    );
+    // The compiler publishes it, and only it.
+    #[cfg(feature = "cuda")]
+    {
+        let names: Vec<_> = report(&plan).scratch.into_iter().map(|s| s.name).collect();
+        assert_eq!(names, ["Vq7F", "Vs7F"]);
+    }
 }
 
 /// A held value lives in shared memory, so its size does not depend on the
@@ -180,7 +223,7 @@ fn the_held_row_does_not_scale_with_the_grid() {
         let held = plan
             .source
             .lines()
-            .filter(|l| l.contains("tile<i8>") || l.contains("flat("))
+            .filter(|l| l.contains("var Aq") || l.contains("flat("))
             .map(str::trim)
             .map(str::to_string)
             .collect::<Vec<_>>();
@@ -192,9 +235,10 @@ fn the_held_row_does_not_scale_with_the_grid() {
     assert_eq!(small[0].bytes, large[0].bytes);
 }
 
-/// The residual is read folded and accumulated flat, so it is bound twice.
+/// The residual is read folded and accumulated flat: one parameter, folded,
+/// and its flat view.
 #[test]
-fn the_residual_is_bound_under_both_views() {
+fn the_residual_is_one_parameter_under_both_views() {
     let plan = qwen_plan();
     let x: Vec<[i64; 2]> = plan
         .slots
@@ -202,7 +246,8 @@ fn the_residual_is_bound_under_both_views() {
         .filter(|s| matches!(s.bound, Bound::Given(v) if v == Val(0)))
         .map(|s| s.dims)
         .collect();
-    assert_eq!(x, vec![[32, 32], [1, 1024]]);
+    assert_eq!(x, vec![[32, 32]]);
+    assert!(plan.source.contains("let X0 = flat(X0F)"), "{}", plan.source);
 }
 
 /// A mixer's projection needs no barrier. The normalization is redundant
@@ -210,12 +255,15 @@ fn the_residual_is_bound_under_both_views() {
 #[test]
 fn the_mixer_projection_needs_no_barrier() {
     let plan = qwen_project_plan(false);
-    assert_eq!(plan.barriers, 0);
-    assert!(!plan.source.contains("grid_barrier"));
     // Nothing is published. The only value passed between nests is the
     // normalized row, held in shared memory.
     assert!(plan.scratch.is_empty());
-    assert_eq!(plan.held, 1);
+    assert!(plan.source.contains("@shared(Aq4, As4)"), "{}", plan.source);
+    #[cfg(feature = "cuda")]
+    {
+        let report = report(&plan);
+        assert!(report.grid_barriers.is_empty() && report.scratch.is_empty(), "{report:?}");
+    }
 }
 
 #[test]
@@ -237,11 +285,11 @@ fn a_run_is_bound_only_as_far_as_it_writes() {
 
 /// The gates share the convolution's nest, so the convolution's barrier
 /// covers them too.
+#[cfg(feature = "cuda")]
 #[test]
 fn the_convolution_costs_one_barrier_and_the_gates_none() {
     let plan = qwen_project_plan(true);
-    assert_eq!(plan.barriers, 1);
-    let (before, after) = plan.source.split_once("grid_barrier").expect("a barrier");
+    let (before, after) = around_barrier(&plan);
     assert!(before.contains("qdot_t"), "the projection comes first");
     assert!(!before.contains("rowsum(y"), "the convolution comes after");
     assert!(after.contains("rowsum(y3"), "the convolution");
@@ -262,9 +310,10 @@ fn the_stream_is_one_value_under_two_shapes() {
         .filter(|s| matches!(s.bound, Bound::Given(v) if v == Val(2)))
         .map(|s| s.dims)
         .collect();
-    // Flat for the projection's write, by position for the convolution's
-    // taps.
-    assert_eq!(stream, vec![[1, 24576], [4, 6144]]);
+    // By position for the convolution's taps, and flat for the
+    // projection's write, a view of the same parameter.
+    assert_eq!(stream, vec![[4, 6144]]);
+    assert!(plan.source.contains("let X2 = flat(X2G)"), "{}", plan.source);
 }
 
 /// A convolution without gates still needs the barrier, because a head's
@@ -311,7 +360,9 @@ fn the_convolution_alone_still_costs_the_barrier() {
         .plan()
         .expect("well-formed")
         .expect("fusable");
-    assert_eq!(plan.barriers, 1);
+    assert!(plan.source.contains("rowsum(y"), "{}", plan.source);
+    #[cfg(feature = "cuda")]
+    assert_eq!(report(&plan).grid_barriers.len(), 1, "{}", plan.source);
 }
 
 /// The gates go where the delta rule reads them: after the three planes,
@@ -496,7 +547,8 @@ fn qwen_4b_plan(blocks: u32) -> Plan {
 fn the_raw_mlp_decodes_each_weight_with_its_own_block_decode() {
     // At 64 blocks the down projection's 40 tiles keep the grid busy.
     let plan = qwen_4b_plan(64);
-    assert_eq!(plan.barriers, 1);
+    #[cfg(feature = "cuda")]
+    assert_eq!(report(&plan).grid_barriers.len(), 1);
     let src = &plan.source;
     // Each format's decode is carried once and called per weight.
     assert_eq!(src.matches("fn q4k_block(").count(), 1, "{src}");
@@ -529,7 +581,8 @@ fn a_wide_grid_splits_the_down_projection_along_k() {
     // 340 blocks against 40 tiles: k's 36 blocks split six ways into
     // partials, and after a second barrier the tiles add them onto x.
     let plan = qwen_4b_plan(340);
-    assert_eq!(plan.barriers, 2);
+    #[cfg(feature = "cuda")]
+    assert_eq!(report(&plan).grid_barriers.len(), 2);
     let src = &plan.source;
     assert_eq!(src.matches("q6k_block(Rq").count(), 1, "{src}");
     assert!(src.contains("for b5 in range(ps5 * 6, ps5 * 6 + 6)"), "{src}");
@@ -616,7 +669,8 @@ fn qwen_4b_project_plan() -> Plan {
 #[test]
 fn the_split_projection_mixes_raw_and_q8_weights() {
     let plan = qwen_4b_project_plan();
-    assert_eq!(plan.barriers, 0);
+    #[cfg(feature = "cuda")]
+    assert!(report(&plan).grid_barriers.is_empty());
     let src = &plan.source;
     assert_eq!(src.matches("q5k_block(Rq").count(), 1, "{src}");
     assert_eq!(src.matches("q4k_block(Rq").count(), 1, "{src}");
@@ -689,33 +743,22 @@ fn the_compiler_places_what_the_chains_leave_out() {
     }
 }
 
+/// The pass writes the 0.8B's chains as they are written by hand, barrier
+/// and held scratch left to the compiler, PTX for PTX.
 #[cfg(feature = "cuda")]
 #[test]
-fn the_compiler_places_every_barrier_the_planner_writes() {
+fn the_pass_writes_the_hand_written_chains() {
     use phobos_kernels::compile::ptx_for;
-    let plans = [
-        ("qwen08_mlp", qwen_plan()),
-        ("qwen08_project_mix", qwen_project_plan(true)),
-        ("grouped_project_mix", qwen_project_plan_heads(true, 8, true)),
-        ("qwen4b_mlp", qwen_4b_plan(64)),
-        ("qwen4b_mlp_wide", qwen_4b_plan(192)),
-        ("qwen4b_project", qwen_4b_project_plan()),
+    let lib = include_str!("lib.ph");
+    let chains = [
+        ("qwen08_mlp", include_str!("chains/qwen08_mlp.ph"), qwen_plan()),
+        ("qwen08_project", include_str!("chains/qwen08_project.ph"), qwen_project_plan(false)),
+        ("qwen08_project_mix", include_str!("chains/qwen08_project_mix.ph"), qwen_project_plan(true)),
     ];
-    // The planner's barriers dropped, and the scratch it holds declared as
-    // a tensor, so the compiler has to place both.
-    let is_held = |line: &str| line.starts_with("  var ") && !line.contains('=') && line.contains(": tile<");
-    let strip = |line: &str| match line {
-        _ if line.trim() == "grid_barrier()" => None,
-        _ if is_held(line) => Some(line.replacen(": tile<", ": tensor<", 1)),
-        _ => Some(line.to_string()),
-    };
-    for (name, plan) in plans {
-        let held = plan.source.lines().filter(|l| is_held(l)).count();
-        assert_eq!(held, 2, "{name}: the planner holds one quantized row, bytes and scales");
-        let stripped: String = plan.source.lines().filter_map(strip).map(|l| format!("{l}\n")).collect();
+    for (name, chain, plan) in chains {
         for chip in ["sm_75", "sm_80"] {
             let compile = |src: &str| ptx_for(chip, src, name).unwrap_or_else(|e| panic!("{name}: {e:#}"));
-            assert!(compile(&plan.source) == compile(&stripped), "{name} on {chip}: the placed barriers or held scratch differ from the planned ones");
+            assert!(compile(&plan.source) == compile(&format!("{lib}\n{chain}")), "{name} on {chip}: the pass's chain differs from the one written by hand");
         }
     }
 }

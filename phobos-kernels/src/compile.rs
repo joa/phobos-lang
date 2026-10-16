@@ -81,6 +81,15 @@ pub fn ptx_for(chip: &str, source: &str, what: &str) -> Result<String> {
     Ok(lower::single(&ctx, source, what)?.0.0)
 }
 
+pub use phobos_lang::{LaunchReport, ScratchParam};
+
+/// What kernel `name` of `source` takes beyond its declared parameters, as
+/// the compiler decides it for the card: the scratch it publishes and
+/// whether the barrier word follows.
+pub fn launch_report(source: &str, name: &str) -> Result<LaunchReport> {
+    phobos_lang::launch_report(&context_for(&[]), source, name)
+}
+
 pub fn compile_in(
     ctx: &Context,
     source: &str,

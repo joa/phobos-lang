@@ -196,3 +196,23 @@ kernel k(X: tensor<f32>[1, 256], Y: tensor<f32>[1, 256]) {
     );
     assert_eq!(ir.matches("grid_barrier %").count(), 2);
 }
+
+#[test]
+fn the_launch_report_lists_what_the_launch_supplies() {
+    let report = crate::launch_report(&phobos_base::context::Context::default(), MLP, "k").unwrap();
+    let names: Vec<_> = report.scratch.iter().map(|s| (s.name.as_str(), s.dims.clone())).collect();
+    assert_eq!(names, [("V", vec![1, 256])]);
+    assert!(report.barrier_word);
+    // On the line of the second unit loop.
+    let line = MLP.lines().position(|l| l.contains("X[0 :+ 1, u * 8 :+ 8] +=")).unwrap() as u32 + 1;
+    assert_eq!(report.grid_barriers, [line - 3]);
+}
+
+#[test]
+fn a_placed_barrier_takes_the_place_of_a_written_cta_barrier() {
+    let src = MLP.replace("  }\n  for i in range(0, 4) {\n    let u = p + i * ctx.blocks.x\n    if u < 32 {\n      X", "  }\n  barrier()\n  for i in range(0, 4) {\n    let u = p + i * ctx.blocks.x\n    if u < 32 {\n      X");
+    assert!(src.matches("barrier()").count() == 2, "{src}");
+    let ir = passed(&src);
+    assert_eq!(ir.matches("grid_barrier %").count(), 1, "{ir}");
+    assert_eq!(ir.lines().filter(|l| l.trim() == "barrier").count(), 1, "only the first CTA barrier is left:\n{ir}");
+}

@@ -109,6 +109,16 @@ pub(super) fn insert(ir: &mut Ir, placement: &Placement, spans: &mut std::collec
         word
     };
     for (op, ..) in &placement.before {
+        // A grid barrier starts with a CTA barrier, so it takes the place of
+        // one written before it with only index arithmetic between.
+        let block = ir.parent_block(*op);
+        let before = &ir.ops(block)[..ir.position(*op)];
+        let written = before.iter().rev().find(|&&o| !is_arithmetic(ir.kind(o))).copied();
+        if let Some(cta) = written
+            && matches!(ir.kind(cta), OpKind::Barrier)
+        {
+            ir.erase_op(cta);
+        }
         // The barrier stands for the access it orders.
         let outer = ir.set_span(ir.span(*op));
         let made = ir.create_op(At::Before(*op), OpKind::GridBarrier, &[word], vec![Type::INDEX], Vec::new());
@@ -118,4 +128,18 @@ pub(super) fn insert(ir: &mut Ir, placement: &Placement, spans: &mut std::collec
         }
     }
     placement.before.len()
+}
+
+/// An op that computes an index or a constant and touches no memory.
+fn is_arithmetic(kind: &OpKind) -> bool {
+    matches!(
+        kind,
+        OpKind::Const(_)
+            | OpKind::Binary(_)
+            | OpKind::Cast(_)
+            | OpKind::Dim(_)
+            | OpKind::ProgramId(_)
+            | OpKind::Thread(_)
+            | OpKind::GridDim(_)
+    )
 }

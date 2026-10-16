@@ -7,11 +7,12 @@ mod conv;
 mod lanes;
 mod split;
 
-/// A run of stages sharing a partition, and whether a barrier has to precede it.
+/// A run of stages sharing a partition, and whether it starts its units on
+/// block 0 again.
 struct Nest {
     part: Part,
     stages: Vec<usize>,
-    barrier_before: bool,
+    fresh: bool,
 }
 
 impl ChainKey {
@@ -20,67 +21,52 @@ impl ChainKey {
         self.stages.len()
     }
 
-    /// Groups the stages into nests, places the barriers, and emits the
-    /// kernel.
+    /// Groups the stages into nests and writes the kernel. The compiler
+    /// places its grid barriers and decides which scratch it holds.
     ///
     /// `Ok(None)` means the chain has no fused form and the caller should
     /// launch the stages separately. An `Err` means the chain was recorded
     /// wrong.
     pub(crate) fn plan(&self) -> Result<Option<Plan>> {
         let mut nests = self.nests()?;
-        let mut nest_of = vec![usize::MAX; self.stages.len()];
-        for (n, nest) in nests.iter().enumerate() {
-            for &s in &nest.stages {
-                nest_of[s] = n;
+        // A whole-row nest's output is every block's own copy. A nest that
+        // reads what a unit nest wrote since the last fresh one waits at a
+        // grid barrier, so it starts on block 0 rather than on the blocks
+        // the nests before it left idle. Writes count after their stage's
+        // reads, so the residual, read first and written last, is no
+        // dependency of its first reader.
+        let mut redundant: HashSet<Val> = HashSet::new();
+        let mut since: HashSet<Val> = HashSet::new();
+        for nest in &mut nests {
+            let stages = || nest.stages.iter().map(|&s| &self.stages[s]);
+            nest.fresh = stages().any(|stage| stage.reads().iter().any(|v| since.contains(v)));
+            if nest.fresh {
+                since.clear();
+            }
+            let written = stages().map(Stage::writes).collect::<Vec<_>>();
+            match nest.part {
+                Part::Whole(_) => redundant.extend(written),
+                _ => since.extend(written),
             }
         }
 
-        // A value read outside the nest that wrote it must be in memory. It
-        // needs a barrier unless the reader only reads its own block's work.
-        // Writes are recorded after their stage's reads, so a value read
-        // early and written late, like the residual, is not a dependency of
-        // its first reader.
-        let mut redundant: HashSet<Val> = HashSet::new();
-        let mut writer: HashMap<Val, usize> = HashMap::new();
-        for (s, stage) in self.stages.iter().enumerate() {
-            let n = nest_of[s];
-            for (val, read) in stage.reads() {
-                let Some(&w) = writer.get(&val) else { continue };
-                if nest_of[w] == n {
-                    continue;
-                }
-                if matches!(self.vals[val.0], Kind::Temp { .. }) {
-                    // There is no f32 scratch, so a register value cannot
-                    // cross a nest.
+        // Written twice: once to learn the views each caller buffer is read
+        // under, then with each buffer one parameter, so the compiler sees
+        // every access to it.
+        let write = |shapes: Option<HashMap<Val, View>>| -> Result<Option<Emit>> {
+            let mut emit = Emit::new(self.blocks, redundant.clone(), shapes);
+            for (n, nest) in nests.iter().enumerate() {
+                emit.land_lane_stores();
+                if !emit.nest(self, nest, n)? {
                     return Ok(None);
                 }
-                // The barrier can be skipped only when the reading block is
-                // the writing block. That holds for a redundant writer, where
-                // every block wrote its own copy, and for a local read between
-                // nests with the same partition, which give unit `i` to the
-                // same block.
-                let part = nests[nest_of[w]].part;
-                if matches!(part, Part::Whole(_)) {
-                    redundant.insert(val);
-                } else if read == Read::All || part != nests[n].part {
-                    nests[n].barrier_before = true;
-                }
             }
-            writer.insert(stage.writes(), s);
-        }
-
-        let mut emit = Emit::new(self.blocks, redundant);
-        for (n, nest) in nests.iter().enumerate() {
-            if nest.barrier_before {
-                emit.barrier();
-            } else {
-                emit.land_lane_stores();
-            }
-            if !emit.nest(self, nest, n)? {
-                return Ok(None);
-            }
-        }
-        Ok(Some(emit.finish()))
+            Ok(Some(emit))
+        };
+        let Some(shapes) = write(None)?.and_then(|dry| dry.shapes()) else {
+            return Ok(None);
+        };
+        Ok(write(Some(shapes))?.map(Emit::finish))
     }
 
     fn nests(&self) -> Result<Vec<Nest>> {
@@ -100,7 +86,7 @@ impl ChainKey {
                 (false, _) => nests.push(Nest {
                     part,
                     stages: vec![s],
-                    barrier_before: false,
+                    fresh: false,
                 }),
             }
         }
@@ -126,7 +112,10 @@ struct Emit {
     /// Tile declarations and their flat views. They go before all loops.
     decls: String,
     body: String,
-    barriers: usize,
+    /// The shape each caller buffer is declared under, None while learning
+    /// them, and every view asked for.
+    shapes: Option<HashMap<Val, View>>,
+    wanted: HashSet<(Val, View)>,
     /// Parameters already declared, keyed by value and view, so a repeat use
     /// reuses the operand. `pairs` holds the bytes and scales of quantized
     /// values and weights.
@@ -134,11 +123,13 @@ struct Emit {
     pairs: HashMap<(Val, View), (String, String)>,
     /// Scratch already claimed, by value.
     stored: HashMap<Val, usize>,
-    /// Values every block wrote its own copy of. They live in shared memory
-    /// rather than in scratch.
+    /// Values every block wrote its own copy of, which the compiler holds in
+    /// shared memory.
     redundant: HashSet<Val>,
     /// The redundant values already declared in [`Emit::decls`].
     shared: HashSet<Val>,
+    /// Their declared names, which the kernel asserts `@shared`.
+    held: Vec<String>,
     /// Tile variables holding a value that never leaves its nest.
     regs: HashMap<Val, String>,
     /// Per-lane column sums of a raw contraction, by value, until a tile
@@ -171,8 +162,10 @@ enum View {
 }
 
 impl Emit {
-    fn new(blocks: u32, redundant: HashSet<Val>) -> Emit {
+    fn new(blocks: u32, redundant: HashSet<Val>, shapes: Option<HashMap<Val, View>>) -> Emit {
         Emit {
+            shapes,
+            wanted: HashSet::new(),
             blocks,
             tune: vec![("BLOCKS".into(), blocks as usize)],
             params: Vec::new(),
@@ -181,12 +174,12 @@ impl Emit {
             scratch_args: Vec::new(),
             decls: "  let p = ctx.block.x\n".into(),
             body: String::new(),
-            barriers: 0,
             views: HashMap::new(),
             pairs: HashMap::new(),
             stored: HashMap::new(),
             redundant,
             shared: HashSet::new(),
+            held: Vec::new(),
             regs: HashMap::new(),
             lanes: HashMap::new(),
             lane_fns: Default::default(),
@@ -198,6 +191,9 @@ impl Emit {
 
     /// Emits one nest. Returns `false` to decline the chain.
     fn nest(&mut self, key: &ChainKey, nest: &Nest, n: usize) -> Result<bool> {
+        // A register value is in scope only in the nest that writes it.
+        self.regs.clear();
+        self.lanes.clear();
         match nest.part {
             Part::Whole(width) => {
                 let [only] = nest.stages[..] else {
@@ -254,7 +250,7 @@ impl Emit {
         let unit = format!("u{n}");
         // Nests between two barriers are independent, so each starts its
         // units on the blocks the ones before it left idle.
-        if nest.barrier_before {
+        if nest.fresh {
             self.rot = 0;
         }
         let rot = self.rot % self.blocks as usize;
@@ -361,7 +357,9 @@ impl Emit {
                 self.lanes.insert(out, format!("sw{s}"));
             }
             Stage::Swiglu { g, u, out } => {
-                let (gn, un) = (self.reg_of(g)?, self.reg_of(u)?);
+                let (Some(gn), Some(un)) = (self.reg_of(g), self.reg_of(u)) else {
+                    return Ok(false);
+                };
                 let width = key.len_of(out);
                 let name = self.reg(out, s);
                 let _ = writeln!(
@@ -372,7 +370,9 @@ impl Emit {
             Stage::QuantQ { h, out, blocks, .. } if blocks > 1 => {
                 // A raw unit spans several Q8_0 blocks. Each is sliced out,
                 // quantized on its own, and stored to its own scratch row.
-                let hn = self.reg_of(h)?;
+                let Some(hn) = self.reg_of(h) else {
+                    return Ok(false);
+                };
                 let (qs, sc) = self.quant_rows(out, key.len_of(out));
                 for b in 0..blocks {
                     let (off, row) = (b * q8, format!("{unit} * {blocks} + {b}"));
@@ -391,9 +391,10 @@ impl Emit {
                 // `h` is either a register from this nest, like the SwiGLU
                 // output, or a caller buffer, like attention's mixed heads.
                 // The two are read differently.
-                let hn = match self.regs.contains_key(&h) || self.lanes.contains_key(&h) {
-                    true => self.reg_of(h)?,
-                    false => {
+                let hn = match self.reg_of(h) {
+                    Some(reg) => reg,
+                    None if matches!(key.vals[h.0], Kind::Temp { .. }) => return Ok(false),
+                    None => {
                         let flat = self.given(h, key.len_of(h), View::Flat);
                         format!("{flat}[0 :+ 1, {unit} * {q8} :+ {q8}]")
                     }
@@ -497,23 +498,14 @@ impl Emit {
         name
     }
 
-    fn reg_of(&mut self, val: Val) -> Result<String> {
+    /// `val`'s register, or None when no stage of this nest wrote it. There
+    /// is no f32 scratch, so a register value cannot cross a nest.
+    fn reg_of(&mut self, val: Val) -> Option<String> {
         if let Some(reg) = self.regs.get(&val) {
-            return Ok(reg.clone());
+            return Some(reg.clone());
         }
-        match self.lanes.get(&val).cloned() {
-            Some(lane) => Ok(self.lanes_tile(val, &lane)),
-            None => bail!("value {} is read before its nest writes it", val.0),
-        }
-    }
-
-    /// Emits a grid barrier, on the barrier word the launch appends. One
-    /// counter and generation pair serves every barrier, since each barrier
-    /// leaves both as it found them.
-    fn barrier(&mut self) {
-        let _ = writeln!(self.body, "\n  grid_barrier()");
-        self.lane_stores = false;
-        self.barriers += 1;
+        let lane = self.lanes.get(&val).cloned()?;
+        Some(self.lanes_tile(val, &lane))
     }
 
     /// Declares a parameter and records what the backend must bind to it.
@@ -531,10 +523,36 @@ impl Emit {
         name
     }
 
-    /// The parameter a caller buffer is read through, under `view`.
+    /// Each caller buffer's declared shape: the one view other than flat it
+    /// is read under, if any. None when a buffer is read under two.
+    fn shapes(&self) -> Option<HashMap<Val, View>> {
+        let mut shapes = HashMap::new();
+        for &(val, view) in &self.wanted {
+            let shape = shapes.entry(val).or_insert(View::Flat);
+            match (*shape, view) {
+                (_, View::Flat) => {}
+                (View::Flat, _) => *shape = view,
+                (shape, view) if shape == view => {}
+                _ => return None,
+            }
+        }
+        Some(shapes)
+    }
+
+    /// A caller buffer under `view`: its one parameter, or that
+    /// parameter's flat view.
     fn given(&mut self, val: Val, len: usize, view: View) -> String {
         if let Some(name) = self.views.get(&(val, view)) {
             return name.clone();
+        }
+        self.wanted.insert((val, view));
+        let shape = self.shapes.as_ref().and_then(|s| s.get(&val)).copied().unwrap_or(view);
+        if shape != view {
+            let base = self.given(val, len, shape);
+            let name = format!("X{}", val.0);
+            let _ = writeln!(self.decls, "  let {name} = flat({base})");
+            self.views.insert((val, view), name.clone());
+            return name;
         }
         let (dims, suffix) = match view {
             View::Folded => ([(len / Q8_BLOCK) as i64, Q8_BLOCK as i64], "F"),
@@ -670,24 +688,30 @@ impl Emit {
     /// Declares one buffer of scratch pair `at` as the kernel's tensor `name`.
     pub(super) fn declare_scratch(&mut self, at: usize, scales: bool, name: &str, elem: &str, dims: [i64; 2]) {
         let _ = writeln!(self.decls, "  var {name}: tensor<{elem}>[{}, {}]", dims[0], dims[1]);
-        self.scratch_args.push(ScratchArg { at, scales, dims });
+        self.scratch_args.push(ScratchArg {
+            name: name.to_string(),
+            at,
+            scales,
+            dims,
+        });
     }
 
-    /// A redundantly written activation, in shared memory.
+    /// A redundantly written activation, which the compiler holds in shared
+    /// memory since every block writes all of it.
     ///
-    /// The tile has no initializer, since the sweep writes every element. Its
-    /// flat view is declared alongside it, before any loop. Both views are
-    /// the same bytes: the reduction writes the folded one and the
+    /// Its flat view is declared alongside it, before any loop. Both views
+    /// are the same bytes: the reduction writes the folded one and the
     /// contraction reads the flat one.
     fn quant_shared(&mut self, val: Val, len: usize, folded: bool) -> (String, String) {
         let rows = len / Q8_BLOCK;
         let (qs, scales) = (format!("Aq{}", val.0), format!("As{}", val.0));
         if self.shared.insert(val) {
+            self.held.extend([qs.clone(), scales.clone()]);
             let q8 = Q8_BLOCK;
             let _ = write!(
                 self.decls,
-                "  var {qs}: tile<i8>[{rows}, {q8}]
-  var {scales}: tile<f32>[{rows}, 1]
+                "  var {qs}: tensor<i8>[{rows}, {q8}]
+  var {scales}: tensor<f32>[{rows}, 1]
   let {qs}L = flat({qs})
   let {scales}L = flat({scales})
 "
@@ -717,18 +741,20 @@ impl Emit {
         // Shared declarations go first, so every tile is in scope before the
         // loop that fills it.
         let fns: String = self.lane_fns.values().map(|f| format!("{f}\n")).collect();
+        let shared = match self.held.is_empty() {
+            true => String::new(),
+            false => format!("@shared({})\n", self.held.join(", ")),
+        };
         let source = format!(
-            "{fns}@launch({launch})\n@persistent(BLOCKS)\n@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
+            "{fns}@launch({launch})\n@persistent(BLOCKS)\n{shared}@autotune({tune})\nkernel fused({params}) {{\n{}{}}}\n",
             self.decls, self.body
         );
         Plan {
             source,
-            held: self.shared.len(),
             slots: self.slots,
             scratch: self.scratch,
             scratch_args: self.scratch_args,
             blocks: self.blocks,
-            barriers: self.barriers,
         }
     }
 }

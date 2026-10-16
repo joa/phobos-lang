@@ -65,7 +65,7 @@ impl Emit {
         let _ = write!(self.body, "    }}
   }}
 ");
-        self.barrier();
+        self.land_lane_stores();
         let sum = (0..splits)
             .map(|sp| format!("{pp}[0 :+ 1, {} + r{s} :+ {rt}]", sp * width))
             .collect::<Vec<_>>()

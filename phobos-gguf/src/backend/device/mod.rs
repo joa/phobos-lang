@@ -232,7 +232,7 @@ pub struct DeviceBackend {
     qmma_narrow: bool,
     /// Fused kernels the pass has emitted, each with the plan that says what
     /// to bind. See [`fuse`].
-    fused_plans: RefCell<HashMap<ChainKey, (Module, Plan)>>,
+    fused_plans: RefCell<HashMap<ChainKey, (Module, Plan, fused::Launch)>>,
     fused_mlp: bool,
     fused_project: bool,
     /// Whether the delta net's convolution and gates join the projection's
