@@ -48,6 +48,10 @@ pub fn fmt_config(cfg: &[Setting]) -> String {
 
 const WARMUP: u32 = 10;
 
+/// Stage 2 takes one finalist per this many configs in the grid, so a
+/// larger grid, whose short probes rank less reliably, keeps more of them.
+const CONFIGS_PER_FINALIST: usize = 16;
+
 /// Two-stage kernel autotuner.
 pub struct Autotuner<'a, G, L, V>
 where
@@ -61,6 +65,7 @@ where
     pub verify: V,
     pub short_probes: u32,
     pub long_probes: u32,
+    /// The fewest finalists stage 2 takes, whatever the grid's size.
     pub finalists: usize,
 }
 
@@ -93,7 +98,7 @@ where
         // on cooler silicon at higher boost clocks. One launch per finalist
         // per round keeps them all under the same clock and thermal state.
         candidates.sort_by_key(|(_, _, best)| *best);
-        candidates.truncate(self.finalists);
+        candidates.truncate(self.finalists.max(all.len().div_ceil(CONFIGS_PER_FINALIST)));
         anyhow::ensure!(!candidates.is_empty(), "autotune: no config works");
         phinfo!("autotune: long probe of the top {}", candidates.len());
 
