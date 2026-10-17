@@ -31,6 +31,10 @@ kernel proj(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 
 const ALIGNED: &str = "@aligned(M = 128, N = 64, K = 32)";
 
+/// A 64x64 projection whose accumulator, falling back to shared memory,
+/// still fits the 48 KB a block may hold.
+const ALIGNED_64: &str = "@aligned(M = 64, N = 64, K = 32)";
+
 #[test]
 fn an_unrolled_k_loop_carries_the_accumulator() {
     // The main loop and the remainder each carry the fragments.
@@ -98,14 +102,14 @@ fn scales_ride_in_either_order() {
 fn partial_operands_keep_the_shared_accumulator() {
     // Without M and N aligned the slices may be partial, and the fragments
     // are read with no bounds guard.
-    let mlir = emit_mlir(&projection(128, 64, 128, "@aligned(K = 32)", "ws * da"));
+    let mlir = emit_mlir(&projection(64, 64, 128, "@aligned(K = 32)", "ws * da"));
     assert!(mlir.contains("memref.global"), "{mlir}");
     assert!(!mlir.contains("math.fma"), "{mlir}");
 }
 
 #[test]
 fn a_wider_update_keeps_the_shared_accumulator() {
-    let mlir = emit_mlir(&projection(128, 64, 128, ALIGNED, "ws * da + 1.0"));
+    let mlir = emit_mlir(&projection(64, 64, 128, ALIGNED_64, "ws * da + 1.0"));
     assert!(mlir.contains("memref.global"), "{mlir}");
 }
 
@@ -141,9 +145,9 @@ kernel tcs(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 
 #[test]
 fn past_the_warp_tile_cap_keeps_the_shared_accumulator() {
-    // 256x128 over four warps is 128 tiles a warp, past the 64 a warp
-    // carries without spilling.
-    let mlir = emit_mlir(&projection(256, 128, 128, "@aligned(M = 256, N = 128, K = 32)", "ws * da"));
+    // 72x64 on one warp is 72 tiles, past the 64 a warp carries without
+    // spilling.
+    let mlir = emit_mlir(&projection(72, 64, 32, "@aligned(M = 72, N = 64, K = 32)", "ws * da"));
     assert!(!mlir.contains("math.fma"), "{mlir}");
 }
 
@@ -235,9 +239,9 @@ fn a_column_times_a_row_adds_to_the_accumulator_in_registers() {
     assert!(mlir.contains("arith.negf"), "{mlir}");
     // Two columns are no outer product: the accumulator stays a tile.
     let scales = "ws * da
-    let rs = AS[pm * 128 :+ 128, b :+ 1]
+    let rs = AS[pm * 64 :+ 64, b :+ 1]
     acc += rs * da";
-    assert!(emit_mlir(&projection(128, 64, 128, ALIGNED, scales)).contains("memref.global"));
+    assert!(emit_mlir(&projection(64, 64, 128, ALIGNED_64, scales)).contains("memref.global"));
 }
 
 #[test]

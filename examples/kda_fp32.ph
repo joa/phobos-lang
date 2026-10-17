@@ -16,7 +16,7 @@
 //
 // G holds the per-token log forget-gate, log a_t <= 0. `scale` multiplies
 // the queries, the same slot softmax attention uses for its query scale.
-@autotune(D in [64], C in [32, 128])
+@autotune(D in [64], C in [16, 8])
 kernel kda(Q:     tensor<f32>[N, D],
            K:     tensor<f32>[N, D],
            V:     tensor<f32>[N, D],

@@ -210,7 +210,30 @@ fn emit_kernel<'c>(
     let func = cg.emit_kernel_ir(&ir)?;
     anyhow::ensure!(cg.deferred.is_empty(), "internal: a deferred stage never reached its barrier");
     cg.finish_shared_buffer()?;
+    check_shared_budget(kernel, &cg, &target)?;
     Ok((cg, func))
+}
+
+/// Fails a kernel whose tiles need more shared memory than a block may hold:
+/// the static limit, or under `@dynshared` the most the chip lets a launch
+/// opt into. Left alone, the assembler or the launch fails instead.
+fn check_shared_budget(kernel: &Kernel, cg: &Codegen<'_>, target: &crate::ir::build::Target) -> Result<()> {
+    let peak_bytes = match &cg.policy {
+        SharedPolicy::Replay(plan) => plan.peak,
+        _ => cg.shared_bytes_peak,
+    };
+    let (limit_bytes, hint) = if cg.dynamic_shared {
+        (target.smem_per_block, String::new())
+    } else {
+        let hint = format!(" statically; `@dynshared` raises the limit to {}", target.smem_per_block);
+        (target.static_smem_per_block, hint)
+    };
+    anyhow::ensure!(
+        peak_bytes <= limit_bytes,
+        "kernel `{}` needs {peak_bytes} bytes of shared memory, over the {limit_bytes} a block may hold{hint}",
+        kernel.name
+    );
+    Ok(())
 }
 
 /// XOR column swizzle for mma.sync staging buffers.

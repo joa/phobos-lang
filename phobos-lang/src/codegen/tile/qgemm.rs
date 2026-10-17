@@ -36,9 +36,6 @@ pub(super) const CHUNK_BYTES: i64 = 16;
 /// Tiles of 8 x 8 a warp's patch spans, each way.
 const PATCH: i64 = 4;
 
-/// Static shared memory a kernel may hold.
-const STATIC_SHARED_BYTES: i64 = 48 * 1024;
-
 /// Bytes of the stage with the activation tile doubled.
 fn async_stage_bytes(fmt: QgFormat) -> i64 {
     let scales = QGEMM_KT / fmt.scale_run() * QGEMM_TN * 4;
@@ -162,7 +159,7 @@ impl<'c> Codegen<'c> {
         let scales_per_tile = QGEMM_KT / fmt.scale_run();
 
         // The stage: both operand tiles, the scales of each, and the tables.
-        let a_async = self.has_cp_async() && async_stage_bytes(fmt) <= STATIC_SHARED_BYTES;
+        let a_async = self.has_cp_async() && async_stage_bytes(fmt) <= self.static_smem_per_block();
         let a_rows = if a_async { 2 * QGEMM_TM } else { QGEMM_TM };
         let a_st = self.alloc_tile_shaped(block, i8_t, &[a_rows, QGEMM_KT])?;
         let w_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TN, QGEMM_KT])?;

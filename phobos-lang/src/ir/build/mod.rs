@@ -51,6 +51,8 @@ pub struct Target {
     pub has_int8_mma: bool,
     /// The most shared memory a block may opt into.
     pub smem_per_block: i64,
+    /// The most static shared memory a block may hold.
+    pub static_smem_per_block: i64,
     /// Lanes in a warp.
     pub lanes: i64,
 }

@@ -321,6 +321,10 @@ impl Isa for Nvidia {
         if self.cc >= 80 { self.smem_per_sm() - 1024 } else { self.smem_per_sm() }
     }
 
+    fn static_smem_per_block(&self) -> i64 {
+        48 * 1024
+    }
+
     fn int8_mma_k(&self) -> i64 {
         if self.cc >= 100 { 32 } else { 16 }
     }

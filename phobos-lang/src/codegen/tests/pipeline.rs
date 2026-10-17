@@ -258,26 +258,26 @@ fn shared_memory_budget_declines_silently_without_the_attribute() {
     // over the 48 KiB budget. So pipelining declines silently and the plain
     // loop runs. The literal row count keeps the bound affine, which avoids
     // `emit_split_for` and its remainder buffer.
-    let mlir = emit_mlir(
-        "@autotune(T in [8192])
-        @aligned(K = T)
-        kernel stage(A: tensor<f32>[64, K], C: tensor<f32>[64, K]) {
-            let pm = ctx.block.x
-            var acc: tile<f32>[1, T] = 0.0
-            for kt in range(0, 64, 1) {
-                var a = A[kt :+ 1, 0 :+ T]
-                acc += a
-            }
-            C[0 :+ 1, 0 :+ T] = acc
-        }",
-    );
-    // One buffer for `acc` and one for `a`. Pipelining would add a second
-    // for `a`.
+    let stage = |t: i64| {
+        emit_mlir(&format!(
+            "@autotune(T in [{t}])
+            @aligned(K = T)
+            kernel stage(A: tensor<f32>[64, K], C: tensor<f32>[64, K]) {{
+                for kt in range(0, 64, 1) {{
+                    var a = A[kt :+ 1, 0 :+ T]
+                    C[kt :+ 1, 0 :+ T] = a * 2.0
+                }}
+            }}"
+        ))
+    };
+    // One buffer for `a`; pipelining adds a second, as it does at T = 2048.
+    let mlir = stage(8192);
     assert_eq!(
         tile_views(&mlir, "1x8192xf32").len(),
-        2,
+        1,
         "a loop over the shared-memory budget should not get a second buffer:\n{mlir}"
     );
+    assert_eq!(tile_views(&stage(2048), "1x2048xf32").len(), 2);
 }
 
 #[test]

@@ -222,7 +222,7 @@ fn f16_flash_attention_runs_on_tensor_cores() {
     // tensor cores with f32 accumulation, the softmax math stays f32, and
     // the result rounds back to f16 on the store.
     let mlir = emit_mlir(
-        "@autotune(D in [64], BR in [64], BC in [64])
+        "@autotune(D in [64], BR in [64], BC in [32])
         @tensorcore
         @pipeline
         @launch(256)

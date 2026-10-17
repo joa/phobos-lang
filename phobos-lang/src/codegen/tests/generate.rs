@@ -64,11 +64,15 @@ fn any_other_read_materializes_the_tile() {
 #[test]
 fn an_accumulator_kept_in_shared_memory_materializes_its_weight() {
     // A row sum of `acc` is not a read the fragments hold, so the tile stays
-    // in shared memory and the dot reads a weight written out first.
+    // in shared memory and the dot reads a weight written out first. At 64
+    // rows the tile fits the 48 KB a block may hold.
     let src = projection("    acc += f32(dot_t(a, w)) * ws * da\n")
-        .replace("  C[pm * 128", "  var s: tile<f32>[128, 1] = rowsum(acc)\n  C[pm * 128");
+        .replace("M = 128", "M = 64")
+        .replace("[128, 64]", "[64, 64]")
+        .replace("pm * 128 :+ 128", "pm * 64 :+ 64")
+        .replace("  C[pm * 64", "  var s: tile<f32>[64, 1] = rowsum(acc)\n  C[pm * 64");
     let mlir = emit_mlir(&src);
-    let carried = format!("-> ({})", vec!["f32"; 64].join(", "));
+    let carried = format!("-> ({})", vec!["f32"; 32].join(", "));
     assert!(!mlir.contains(&carried), "{mlir}");
     assert!(mlir.contains("memref.global"), "{mlir}");
     assert!(mlir.contains("gpu.barrier"), "{mlir}");

@@ -56,7 +56,9 @@ fn flash_scores_ride_in_fragments() {
 fn scores_past_the_register_budget_stay_shared() {
     // At 128 keys a block a lane would hold 128 f32 of scores beside the 64
     // of the accumulator, over the budget: the scores stay a shared tile.
-    let mlir = emit_mlir_sync(&flash(128, 128), "sm_80");
+    // A shared tile of scores that size takes `@dynshared`.
+    let src = flash(128, 128).replace("@tensorcore", "@dynshared\n        @tensorcore");
+    let mlir = emit_mlir_sync(&src, "sm_80");
     assert!(!mlir.contains("gpu.shuffle"), "{mlir}");
 }
 

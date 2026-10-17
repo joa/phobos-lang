@@ -200,7 +200,7 @@ Tensor extents are assumed to be multiples of 4. They need not be multiples of t
 
 ## Tiles and shared memory
 
-- A tile is a window of one shared-memory buffer per kernel. Static shared memory is capped at 48 KB.
+- A tile is a window of one shared-memory buffer per kernel. Static shared memory is capped at 48 KB: a kernel whose live tiles need more at once fails to compile, naming the bytes it needs. Under `@dynshared` the cap is the most the chip lets a block opt into.
 - A tile lives from its declaration to its last use, across any loops in between. Tiles whose lifetimes do not overlap share bytes.
 - A tile declared before one loop and read after another is CTA-private storage carried across both.
 - A CTA barrier follows a tile store only when a later op reads or writes those bytes from other threads. Two elementwise passes at the same vector width need none; a reduction, `dot` or `transpose` after one does.
@@ -507,7 +507,7 @@ kernel flash_attention(Q: tensor<f32>[Nq, D],
 Gated Linear Attention, chunkwise, using `cumsum`, `tril` and `transpose`. The commented kernel is [`examples/kda_fp32.ph`](./examples/kda_fp32.ph).
 
 ```plain
-@autotune(D in [64], C in [32, 128])
+@autotune(D in [64], C in [16, 8])
 kernel kda(Q: tensor<f32>[N, D], K: tensor<f32>[N, D], V: tensor<f32>[N, D],
            G: tensor<f32>[N, 1], O: tensor<f32>[N, D], scale: f32) {
   var S: tile<f32>[D, D] = 0.0                 // recurrent state (keys x values)

@@ -195,7 +195,7 @@ fn kda_chunkwise_gated_linear_attention_lowers() {
     // tril for the causal mask, transpose for K^T V, exp, and the intra and
     // inter chunk dot products.
     let mlir = emit_mlir(
-        "@autotune(D in [64], C in [32, 128])
+        "@autotune(D in [64], C in [16, 8])
         kernel kda(Q: tensor<f32>[N, D], K: tensor<f32>[N, D], V: tensor<f32>[N, D],
                    G: tensor<f32>[N, 1], O: tensor<f32>[N, D], scale: f32) {
             var S: tile<f32>[D, D] = 0.0

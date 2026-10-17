@@ -60,6 +60,8 @@ pub(super) trait Isa {
     /// The most shared memory one block may opt into, which a `@dynshared`
     /// launch raises its limit to.
     fn smem_per_block(&self) -> i64;
+    /// The most static shared memory one block may hold.
+    fn static_smem_per_block(&self) -> i64;
     fn regs_per_sm(&self) -> i64;
     fn max_warps_per_sm(&self) -> i64;
     /// Lanes in a warp, what `ctx.lanes` reads.
@@ -397,6 +399,10 @@ impl<'c> Codegen<'c> {
 
     pub(super) fn has_cp_async(&self) -> bool {
         self.isa.has_cp_async()
+    }
+
+    pub(super) fn static_smem_per_block(&self) -> i64 {
+        self.isa.static_smem_per_block()
     }
 
     pub(super) fn has_wmma(&self) -> bool {
@@ -755,6 +761,7 @@ pub fn build_target(base: &phobos_base::context::Context) -> crate::ir::build::T
         has_dp4a: isa.has_dp4a(),
         has_int8_mma: isa.has_int8_mma(),
         smem_per_block: isa.smem_per_block(),
+        static_smem_per_block: isa.static_smem_per_block(),
         lanes: isa.lanes(),
     }
 }

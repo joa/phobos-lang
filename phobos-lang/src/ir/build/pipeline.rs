@@ -7,9 +7,6 @@ use crate::ast::{Expr, ExprKind, Span, Stmt, Sub, Type as AstType};
 use crate::ast::BinOp;
 use crate::ir::{Bounds, ForInfo, IndexOp, OpKind, Pipeline, Scalar, Stage, Type, ValueId};
 
-/// What a block may hold in static shared memory, on every chip.
-const STATIC_SHARED_LIMIT_BYTES: i64 = 48 * 1024;
-
 /// Why a loop body was not turned into a pipelined loop.
 pub(crate) enum PipelineDecline {
     NoStagedPrefix,
@@ -106,7 +103,7 @@ impl Build {
         let limit_bytes = if self.ir.kernel.dynamic_shared {
             self.target.smem_per_block
         } else {
-            STATIC_SHARED_LIMIT_BYTES
+            self.target.static_smem_per_block
         };
         if doubled > limit_bytes {
             return Err(PipelineDecline::SharedMemoryBudget {

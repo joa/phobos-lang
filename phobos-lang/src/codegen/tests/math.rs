@@ -217,7 +217,7 @@ fn rowreduce_serial_without_spare_threads() {
     // sweeps its row serially.
     let mlir = emit_mlir(
         "@launch(128)
-        @autotune(BR in [128], BC in [64])
+        @autotune(BR in [128], BC in [32])
         kernel rsum(A: tensor<f32>[N, BC], R: tensor<f32>[N, 1]) {
             let pid = ctx.block.x
             let row = pid * BR
