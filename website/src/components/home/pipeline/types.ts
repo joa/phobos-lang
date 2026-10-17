@@ -6,7 +6,7 @@ import type { Point } from "../../../lib/figure/polyline"
 export type Layout = "wide" | "narrow"
 
 /** Points in the cloud: one per PTX instruction, the most any station needs. */
-export const PARTICLES = 448
+export const PARTICLES = 459
 
 export interface Frame {
   width: number

@@ -426,6 +426,11 @@ function parseIr(lines) {
       regions.pop()
       continue
     }
+    // An `if`'s else block is its second region.
+    if (line === "} else {") {
+      regions.push(regions.pop())
+      continue
+    }
     if ((m = line.match(/^\^\((.*)\)$/))) {
       for (const arg of splitTop(m[1]))
         ops.push({ ...typed(arg), op: "block_arg", operands: [], region: regions.at(-1) })

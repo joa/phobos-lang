@@ -6,8 +6,8 @@ import type { SourceView } from "../pipeline-data"
 import { structure } from "./data"
 import { CHAR_EM, FRAMES, hidden, PARTICLES, round, target, text, type Layout, type Shape, type StationGeometry, type Target, type Tone } from "./types"
 
-/** The lines shown: the accumulator, the loop, and the store. */
-export const SOURCE_LINES = [13, 15, 16, 17, 18, 19, 22]
+/** The lines shown: the accumulator, the loop, and the store a nonzero beta takes. */
+export const SOURCE_LINES = [13, 15, 16, 17, 18, 19, 25]
 
 const KEYWORDS = new Set(["var", "let", "for", "in", "kernel"])
 const CALLS = new Set(["dot", "range"])
@@ -44,8 +44,9 @@ function rows(view: SourceView, wide: boolean): Row[] {
   for (const n of SOURCE_LINES) {
     const line = view.lines.find(entry => entry.n === n)
     if (!line) continue
-    const textLine = line.text.replace(/^ {2}/, "")
     const loop = line.role.startsWith("loop")
+    // The loop keeps its indentation; the store, shown without its `if`, sits flush.
+    const textLine = loop ? line.text.replace(/^ {2}/, "") : line.text.trimStart()
     const limit = 48
     if (!wide && textLine.length > limit) {
       const cut = textLine.lastIndexOf(" = ", limit)

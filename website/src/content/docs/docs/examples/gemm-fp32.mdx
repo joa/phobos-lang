@@ -78,18 +78,29 @@ and [dot and tensor cores](/docs/language/dot-and-tensor-cores/).
 ## The epilogue
 
 ```phobos fragment
-let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
-C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+if beta == 0.0 {
+  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc
+} else {
+  let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+}
 ```
 
 `let c_old = C[...]` binds a view of the output tile, not a copy: `let` on a
-tensor slice reads the bytes where they are. The last line computes
+tensor slice reads the bytes where they are. The `else` line computes
 `alpha * acc + beta * c_old` element by element and stores it over the same
 tile of `C`.
 
+The branch is BLAS's rule: with `beta` zero, `C` is not read at all, so
+whatever it held, NaN included, does not reach the result. Written as the one
+line, `0.0 * c_old` would still be NaN for a NaN in `C`. The compiler takes
+either form as the GEMM's epilogue; the branch is on a scalar, so every
+thread takes the same side.
+
 ## Tuning
 
-With four values for each of three sizes, there are 64 configurations.
+With four values for each of the three sizes and the unroll factor, and two
+block sizes, there are 512 configurations.
 Larger output tiles reuse each loaded element of `A` and `B` more often but
 leave fewer CTAs to spread over the card, so the best choice depends on the
 card and on the matrix sizes.

@@ -27,7 +27,7 @@ describe("statement steps", () => {
     expect(statements.slice(0, 16).map(statement => statement.iter.kt)).toEqual(
       Array.from({ length: 16 }, (_, index) => index * 4)
     )
-    expect(statements[16].span.line).toBe(22)
+    expect(statements[16].span.line).toBe(25)
   })
 
   it("groups the ops of one statement into one step", () => {

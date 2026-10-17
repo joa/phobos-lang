@@ -42,11 +42,16 @@ interface Projection {
 function projection(layout: Layout): Projection {
   if (layout === "wide") {
     const scale = 0.8
-    return { map: p => ({ x: 56 + p.x * scale, y: 92 + (p.y + 80) * scale }), alongScale: scale, wide: true }
+    // Rows run down the frame, the last clear of the legend's line.
+    const down = Math.min(scale, (FRAMES.wide.height - 72 - 92) / (structure.graph.layout.height + 80))
+    return { map: p => ({ x: 56 + p.x * scale, y: 92 + (p.y + 80) * down }), alongScale: scale, wide: true }
   }
+  // Rows run across the narrow frame, as far apart as the frame allows them, 38 at most.
+  const { rows, rowHeight, columnWidth } = structure.graph.layout
+  const across = Math.min(38, (FRAMES.narrow.width - 34) / (rows - 1 + 1.64))
   return {
-    map: p => ({ x: 14 + (p.y / 56 + 1.64) * 38, y: 104 + (p.x / 170) * 60 }),
-    alongScale: 60 / 170,
+    map: p => ({ x: 14 + (p.y / rowHeight + 1.64) * across, y: 104 + (p.x / columnWidth) * 60 }),
+    alongScale: 60 / columnWidth,
     wide: false,
   }
 }
