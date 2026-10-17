@@ -39,6 +39,8 @@ def main(d, base):
     print("| config | M x N x K | arm | phobos median ms per run | median | vs base | phobos/cuBLAS | regs / blocks per SM | checks |")
     print("|---|---|---|---|---|---|---|---|---|")
     for cfg, shape in keys:
+        if (cfg, shape, base) not in runs:
+            continue
         ref = statistics.median(x[0] for x in runs[(cfg, shape, base)])
         for arm in arms:
             xs = runs.get((cfg, shape, arm))
