@@ -169,7 +169,7 @@ impl<'c> Codegen<'c> {
         (hi, st): (Value<'c, 'c>, Value<'c, 'c>),
         cur: (&MemVal<'c>, &MemVal<'c>),
         dst: (&MemVal<'c>, &MemVal<'c>),
-        dims: (i64, i64, i64),
+        dims: (i64, i64, i64, i64),
         m0: Value<'c, 'c>,
         n0: Value<'c, 'c>,
         accs: &[Value<'c, 'c>],

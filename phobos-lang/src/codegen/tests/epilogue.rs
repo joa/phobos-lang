@@ -72,3 +72,19 @@ fn a_surplus_warp_of_the_register_gemm_leaves_c_to_its_block_owner() {
     let whole = emit_mlir(&scaled_gemm(64, 128));
     assert_eq!(stores(&surplus), stores(&whole) + 1, "{surplus}");
 }
+
+#[test]
+fn an_eight_wide_register_sub_tile_reads_and_writes_b_columns_in_two_groups() {
+    // 64x128 at 128 threads is an 8x8 sub-tile a lane on a 4x8 lane grid:
+    // its columns are two groups of four, 32 apart, both in the k-loop's B
+    // reads and in the epilogue's C writes.
+    let src = scaled_gemm(64, 128).replace("@pipeline", "@pipeline\n        @launch(128)");
+    let mlir = emit_mlir(&src);
+    assert!(module_verifies(&mlir), "{mlir}");
+    let (_, body) = split_at_kt_loop(&mlir);
+    assert!(body.contains("vector.shuffle"), "{body}");
+    assert!(body.matches("memref<8x128xf32, 3>, vector<4xf32>").count() >= 2, "{body}");
+    // An 8x4 sub-tile keeps one contiguous run a lane.
+    let narrow = emit_mlir(&scaled_gemm(64, 128));
+    assert!(!split_at_kt_loop(&narrow).1.contains("vector.shuffle"), "{narrow}");
+}

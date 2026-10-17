@@ -41,8 +41,9 @@ impl<'c> Codegen<'c> {
         let ln_v = self.const_index(block, ln)?;
         let lane_m = self.divui(block, lane, ln_v)?;
         let lane_n = self.remui(block, lane, ln_v)?;
+        let (group, split) = Self::reg_col_groups(tn, ln);
         let tm_v = self.const_index(block, tm)?;
-        let tn_v = self.const_index(block, tn)?;
+        let tn_v = self.const_index(block, group)?;
         let off_m = self.muli(block, lane_m, tm_v)?;
         let off_n = self.muli(block, lane_n, tn_v)?;
         let m0 = self.addi(block, wm0, off_m)?;
@@ -57,7 +58,7 @@ impl<'c> Codegen<'c> {
             ))
         })?;
 
-        let dims = (kk, tm, tn);
+        let dims = (kk, tm, tn, split);
         let finals = self.matmul_kloop(
             block,
             (lo, hi, st),
@@ -75,6 +76,16 @@ impl<'c> Codegen<'c> {
         // The drain indexes by the lane's own origin.
         acc.origin = Some((tid, w, wt, m0, n0));
         Ok(acc)
+    }
+
+    /// A lane's columns of a `tn`-wide sub-tile on a lane grid `ln` wide, as
+    /// (group width, distance between groups). An eight-wide row is two
+    /// groups of four, `4 * ln` apart, so at one k the warp's lanes read B in
+    /// consecutive 16-byte runs, which fall in distinct banks; one run of
+    /// eight a lane would put lanes `i` and `i + 4` in the same banks. A
+    /// narrower row is one group, with distance 0.
+    fn reg_col_groups(tn: i64, ln: i64) -> (i64, i64) {
+        if tn > 4 { (4, 4 * ln) } else { (tn, 0) }
     }
 
     /// Each lane writes its finished sub-tile straight to C, optionally
@@ -97,35 +108,51 @@ impl<'c> Codegen<'c> {
         };
         let (tid, w, wt, m0, n0) = Self::gemm_finals(&acc)?;
         let row_t = Type::vector(&[tn as u64], self.f32_t);
+        let (group, split) = Self::reg_col_groups(tn, ln);
+        let group_t = Type::vector(&[group as u64], self.f32_t);
 
         let (alpha_row, beta_row) =
-            self.epilogue_scaling(block, alpha, beta, row_t, view.vectorizes(4))?;
+            self.epilogue_scaling(block, alpha, beta, group_t, view.vectorizes(4))?;
 
         // Warps that own a block, of the CTA's.
         let owners = (acc.plan.m / tm / lm) * (acc.plan.n / tn / ln);
         let guarded = Block::new(&[]);
         let into = if owners < self.cta_threads / 32 { &guarded } else { block };
+        // Each group of the row's elements with the column it starts at.
+        let mut groups = vec![(0, n0)];
+        if split > 0 {
+            let c = self.const_index(into, split)?;
+            groups.push((group, self.addi(into, n0, c)?));
+        }
         for i in 0..tm {
             let ci = self.const_index(into, i)?;
             let mi = self.addi(into, m0, ci)?;
             let row = self.vec_extract(into, acc.regs[0], &[i], row_t)?;
 
-            if view.vectorizes(4) {
-                let out_row = self.apply_scaling(into, row, alpha_row, beta_row, |cg| {
-                    cg.vec_load(into, view.mem, &[mi, n0], row_t)
-                })?;
-
-                self.vec_store(into, out_row, view.mem, &[mi, n0])?;
-            } else {
-                for j in 0..tn {
-                    let cj = self.const_index(into, j)?;
-                    let nj = self.addi(into, n0, cj)?;
-                    let e = self.vec_extract(into, row, &[j], self.f32_t)?;
-                    let out_e = self.apply_scaling(into, e, alpha_row, beta_row, |cg| {
-                        cg.push(into, memref::load(view.mem, &[mi, nj], cg.loc))
+            for &(first, col) in &groups {
+                let part = if split > 0 {
+                    let lanes: Vec<i64> = (first..first + group).collect();
+                    self.vec_shuffle(into, row, row, &lanes, group_t)?
+                } else {
+                    row
+                };
+                if view.vectorizes(4) {
+                    let out = self.apply_scaling(into, part, alpha_row, beta_row, |cg| {
+                        cg.vec_load(into, view.mem, &[mi, col], group_t)
                     })?;
 
-                    into.append_operation(memref::store(out_e, view.mem, &[mi, nj], self.loc));
+                    self.vec_store(into, out, view.mem, &[mi, col])?;
+                } else {
+                    for j in 0..group {
+                        let cj = self.const_index(into, j)?;
+                        let nj = self.addi(into, col, cj)?;
+                        let e = self.vec_extract(into, part, &[j], self.f32_t)?;
+                        let out_e = self.apply_scaling(into, e, alpha_row, beta_row, |cg| {
+                            cg.push(into, memref::load(view.mem, &[mi, nj], cg.loc))
+                        })?;
+
+                        into.append_operation(memref::store(out_e, view.mem, &[mi, nj], self.loc));
+                    }
                 }
             }
         }
@@ -146,18 +173,26 @@ impl<'c> Codegen<'c> {
     /// iteration loads a C x TM and a C x TN chunk and folds them in with one
     /// vector.contract over k. C is the largest of 4, 2, 1 that divides kk.
     /// Both buffers are k-major, so the chunk rows are contiguous loads.
+    /// `dims` is (kk, tm, tn, split): a nonzero split reads each B row as
+    /// two halves that far apart, see [`Self::reg_col_groups`].
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn register_mac(
         &mut self,
         block: &Block<'c>,
         a_t: &MemVal<'c>,
         b_sh: &MemVal<'c>,
-        dims: (i64, i64, i64),
+        dims: (i64, i64, i64, i64),
         m0: Value<'c, 'c>,
         n0: Value<'c, 'c>,
         accs: &[Value<'c, 'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
-        let (kk, tm, tn) = dims;
+        let (kk, tm, tn, split) = dims;
+        let n1 = if split > 0 {
+            let c = self.const_index(block, split)?;
+            Some(self.addi(block, n0, c)?)
+        } else {
+            None
+        };
         let chunk = [4, 2, 1]
             .into_iter()
             .find(|c| kk % c == 0)
@@ -183,7 +218,16 @@ impl<'c> Codegen<'c> {
                 let a_row = cg.vec_load(lblk, a_t.mem, &[kj, m0], a_row_t)?;
                 lhs = cg.vec_insert(lblk, a_row, lhs, &[j])?;
 
-                let b_row = cg.vec_load(lblk, b_sh.mem, &[kj, n0], b_row_t)?;
+                let b_row = match n1 {
+                    Some(n1) => {
+                        let half_t = Type::vector(&[tn as u64 / 2], cg.f32_t);
+                        let lo = cg.vec_load(lblk, b_sh.mem, &[kj, n0], half_t)?;
+                        let hi = cg.vec_load(lblk, b_sh.mem, &[kj, n1], half_t)?;
+                        let lanes: Vec<i64> = (0..tn).collect();
+                        cg.vec_shuffle(lblk, lo, hi, &lanes, b_row_t)?
+                    }
+                    None => cg.vec_load(lblk, b_sh.mem, &[kj, n0], b_row_t)?,
+                };
                 rhs = cg.vec_insert(lblk, b_row, rhs, &[j])?;
             }
 
