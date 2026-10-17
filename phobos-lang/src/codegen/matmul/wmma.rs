@@ -167,11 +167,25 @@ impl<'c> Codegen<'c> {
 
         let (stage_async, reg_stage) = self.staging_mode(src, m, kk, n);
 
+        // Register staging prefetches two tiles ahead, the one in flight
+        // carried with the accumulators: tile lo + st is loaded here.
+        let ahead = reg_stage && self.pipeline_assert;
+        let mut regs = acc.regs.clone();
+        if ahead {
+            let first = self.addi(block, lo, st)?;
+            let last = self.subi(block, hi, st)?;
+            let first = self.minsi(block, first, last)?;
+            let a = self.wmma_load_operand(block, src, GemmOperand::A, first, &a_bufs[0])?;
+            let b = self.wmma_load_operand(block, src, GemmOperand::B, first, &b_bufs[0])?;
+            regs.extend(a.iter().chain(&b).map(|(v, _)| *v));
+        }
+        let fragments = acc.regs.len();
+
         let finals = self.matmul_kloop(
             block,
             (lo, hi, st),
             unroll,
-            &acc.regs,
+            &regs,
             &a_bufs,
             &b_bufs,
             |cg, body, kt, a, b| cg.wmma_stage(body, src, kt, a, b, false),
@@ -189,13 +203,13 @@ impl<'c> Codegen<'c> {
                     n0,
                     accs,
                     stage_async,
-                    reg_stage,
+                    reg_stage.then_some(fragments),
                     mma_sync,
                 )
             },
             |cg, body, a, b, accs| cg.tc_mac(body, a, b, dims, m0, n0, accs, false, mma_sync),
         )?;
-        acc.regs = finals;
+        acc.regs = finals[..fragments].to_vec();
         acc.origin = Some(origin);
         Ok(acc)
     }
@@ -332,8 +346,8 @@ impl<'c> Codegen<'c> {
     }
 
     /// The tensor-core pipelined half: prefetch into dst, MAC from cur. See
-    /// [`Self::pipelined_half`]. `reg_stage` selects
-    /// [`Self::wmma_half_reg_staged`] instead.
+    /// [`Self::pipelined_half`]. `reg_stage`, the accumulators' count among
+    /// `accs`, selects [`Self::wmma_half_reg_staged`] instead.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn wmma_half(
         &mut self,
@@ -349,22 +363,19 @@ impl<'c> Codegen<'c> {
         n0: Value<'c, 'c>,
         accs: &[Value<'c, 'c>],
         async_copy: bool,
-        reg_stage: bool,
+        reg_stage: Option<usize>,
         mma_sync: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
-        if reg_stage {
+        if let Some(fragments) = reg_stage {
             return self.wmma_half_reg_staged(
                 block,
                 src,
                 prefetch_iv,
-                hi,
-                st,
-                cur,
-                dst,
+                (hi, st),
+                (cur, dst),
                 dims,
-                m0,
-                n0,
-                accs,
+                (m0, n0),
+                accs.split_at(fragments),
                 mma_sync,
             );
         }
@@ -381,46 +392,53 @@ impl<'c> Codegen<'c> {
 
     /// The register-staged pipeline half, for chips without cp.async.
     ///
-    /// Loads the next tile from global into registers, computes the current
-    /// tile while those loads are in flight, then stores the registers to
-    /// shared under the prefetch guard. Assumes the block has `cta_threads`
-    /// threads.
+    /// `held` is the next tile, `prefetch_iv`'s, loaded into registers by
+    /// the half before. This half loads the tile after it, computes the
+    /// current tile, stores `held` to `dst` when its tile is real, and
+    /// returns the accumulators with the new loads. A store's data then
+    /// arrives a whole half before it, however the assembler schedules the
+    /// loads, where loaded in the same half it sinks them to the store.
+    /// Assumes the block has `cta_threads` threads.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn wmma_half_reg_staged(
         &mut self,
         block: &Block<'c>,
         src: &GemmSource<'_>,
         prefetch_iv: Value<'c, 'c>,
-        hi: Value<'c, 'c>,
-        st: Value<'c, 'c>,
-        cur: (&MemVal<'c>, &MemVal<'c>),
-        dst: (&MemVal<'c>, &MemVal<'c>),
+        (hi, st): (Value<'c, 'c>, Value<'c, 'c>),
+        (cur, dst): ((&MemVal<'c>, &MemVal<'c>), (&MemVal<'c>, &MemVal<'c>)),
         dims: (i64, i64, i64),
-        m0: Value<'c, 'c>,
-        n0: Value<'c, 'c>,
-        accs: &[Value<'c, 'c>],
+        (m0, n0): (Value<'c, 'c>, Value<'c, 'c>),
+        (accs, held): (&[Value<'c, 'c>], &[Value<'c, 'c>]),
         mma_sync: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
-        // Clamp the prefetch to the last valid tile start. The load runs on
-        // the final iteration too, re-reading the last tile, and the guarded
-        // store below discards it.
+        // Clamp the load to the last valid tile start. Past the end it
+        // re-reads the last tile, which no store keeps.
+        let after = self.addi(block, prefetch_iv, st)?;
         let last = self.subi(block, hi, st)?;
-        let safe = self.minsi(block, prefetch_iv, last)?;
+        let safe = self.minsi(block, after, last)?;
 
         let a_loaded = self.wmma_load_operand(block, src, GemmOperand::A, safe, dst.0)?;
         let b_loaded = self.wmma_load_operand(block, src, GemmOperand::B, safe, dst.1)?;
 
-        let next = self.tc_mac(block, cur.0, cur.1, dims, m0, n0, accs, false, mma_sync)?;
+        let mut next = self.tc_mac(block, cur.0, cur.1, dims, m0, n0, accs, false, mma_sync)?;
 
-        // Store the prefetched tile only when it was real. The barrier then
-        // publishes it and retires the reads of cur.
+        // Each thread's chunks sit at the same places every tile, so the held
+        // values go where the new loads would.
+        let (held_a, held_b) = held.split_at(a_loaded.len());
+        let place = |vals: &[Value<'c, 'c>], at: &[(Value<'c, 'c>, [Value<'c, 'c>; 2])]| -> Vec<_> {
+            vals.iter().zip(at).map(|(&v, (_, idx))| (v, *idx)).collect()
+        };
+        let (held_a, held_b) = (place(held_a, &a_loaded), place(held_b, &b_loaded));
+        // The barrier then publishes the store and retires the reads of cur.
         self.guarded_prefetch(block, prefetch_iv, hi, |cg, then| {
-            cg.wmma_store_operand(then, &a_loaded, dst.0)?;
-            cg.wmma_store_operand(then, &b_loaded, dst.1)
+            cg.wmma_store_operand(then, &held_a, dst.0)?;
+            cg.wmma_store_operand(then, &held_b, dst.1)
         })?;
 
         self.barrier(block)?;
 
+        next.extend(a_loaded.iter().chain(&b_loaded).map(|(v, _)| *v));
         Ok(next)
     }
 
