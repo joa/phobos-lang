@@ -51,6 +51,8 @@ pub(crate) struct Variant {
 /// Every variant of one kind's search space that compiled and can launch.
 pub(crate) struct Variants {
     pub kind: Kind,
+    /// The kernel source the variants were compiled from.
+    pub code: String,
     pub block: u32,
     pub wide: bool,
     pub all: Vec<Variant>,
@@ -59,8 +61,7 @@ pub(crate) struct Variants {
 impl Variants {
     /// Compiles the space on every core, then loads each module and drops
     /// the ones the card cannot launch at all.
-    pub fn build(kind: Kind, pins: &std::collections::HashMap<String, i64>) -> anyhow::Result<Self> {
-        let code = kind.code();
+    pub fn build(kind: Kind, code: &str, pins: &std::collections::HashMap<String, i64>) -> anyhow::Result<Self> {
         let kernels = phobos_lang::parse(code)?;
         let block = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
         let wide = phobos_lang::requires_wide_index(&kernels);
@@ -105,7 +106,13 @@ impl Variants {
         }
         anyhow::ensure!(!all.is_empty(), "{}: no variant compiles and fits", kind.name());
         phinfo!("{}: {} variants loaded", kind.name(), all.len());
-        Ok(Variants { kind, block, wide, all })
+        Ok(Variants {
+            kind,
+            code: code.to_string(),
+            block,
+            wide,
+            all,
+        })
     }
 
     /// The variant with exactly these settings, in any order.
@@ -164,9 +171,9 @@ pub(crate) fn tune(
     for (i, v) in vs.all.iter().enumerate() {
         let probe = (|| {
             let mut t = timed(stream, p, vs, i, scalars)?;
-            timing::interleaved(stream, std::slice::from_mut(&mut t), 0, 1)?;
+            timing::interleaved(stream, std::slice::from_mut(&mut t), (0, 0.0), 1)?;
             check()?;
-            let s = timing::interleaved(stream, std::slice::from_mut(&mut t), 2, SHORT_PROBES)?;
+            let s = timing::interleaved(stream, std::slice::from_mut(&mut t), (2, 0.0), SHORT_PROBES)?;
             Ok::<_, anyhow::Error>(s[0].median())
         })();
         match probe {
@@ -182,7 +189,7 @@ pub(crate) fn tune(
         .iter()
         .map(|&(i, _)| timed(stream, p, vs, i, scalars))
         .collect::<anyhow::Result<_>>()?;
-    let stats = timing::interleaved(stream, &mut items, 3, LONG_ROUNDS)?;
+    let stats = timing::interleaved(stream, &mut items, (3, 200.0), LONG_ROUNDS)?;
     let mut best = 0;
     for (r, s) in stats.iter().enumerate() {
         phinfo!("  {}: {}", fmt_config(&vs.all[ranked[r].0].config), s.summary());
@@ -212,13 +219,13 @@ impl WinnerCache {
         }
     }
 
-    pub fn key(env_key: &str, kind: Kind, (m, n, k): (usize, usize, usize), pins: &std::collections::HashMap<String, i64>) -> String {
+    pub fn key(env_key: &str, vs: &Variants, (m, n, k): (usize, usize, usize), pins: &std::collections::HashMap<String, i64>) -> String {
         let mut pins: Vec<_> = pins.iter().collect();
         pins.sort();
         format!(
             "{env_key}|src {:016x}|{}|{m}x{n}x{k}|pins {pins:?}",
-            fnv1a(kind.code()),
-            kind.name()
+            fnv1a(&vs.code),
+            vs.kind.name()
         )
     }
 

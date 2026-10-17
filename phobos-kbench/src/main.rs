@@ -75,6 +75,7 @@ impl Options {
             rounds: None,
             cache: DEFAULT_TUNE_CACHE.into(),
             retune: false,
+            source: None,
         };
         let mut json = None;
         let mut args = args.peekable();
@@ -91,6 +92,7 @@ impl Options {
                 }
                 "--tune-cache" => gemm.cache = value()?.into(),
                 "--retune" => gemm.retune = true,
+                "--source" => gemm.source = Some(value()?.into()),
                 "--json" => json = Some(value()?.into()),
                 "--csv" | "-csv" => {
                     // Optional value: a following token that is not another flag.
@@ -123,6 +125,7 @@ impl Options {
                          \n  --json PATH                 write the GEMM results, checks and environment as JSON\
                          \n  --tune-cache PATH           GEMM winners remembered across runs (default {DEFAULT_TUNE_CACHE})\
                          \n  --retune                    ignore remembered GEMM winners\
+                         \n  --source FILE               a GEMM kernel source to run in place of --bench's example\
                          \n  --csv [PATH]                write a results CSV (default {DEFAULT_CSV}) of achieved\
                          \n                              GFLOP/s vs theoretical peak\
                          \n  --peak-fp32         TFLOPS  override the detected fp32 CUDA-core peak\
@@ -142,6 +145,10 @@ impl Options {
                 BENCHES.join(", ")
             );
         }
+        anyhow::ensure!(
+            gemm.source.is_none() || bench.as_deref().is_some_and(|b| b.starts_with("gemm")),
+            "--source replaces one GEMM kind's kernel; pass --bench gemm_..."
+        );
         anyhow::ensure!(
             pins.is_empty() || bench.is_some(),
             "--autotune pins are kernel-specific; pass --bench to pick one"

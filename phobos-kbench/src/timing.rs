@@ -87,19 +87,24 @@ pub(crate) fn time_once(stream: &Stream, t: &mut Timed<'_>, start: &Event, end: 
     Ok(f64::from(end.elapsed_time_f32(start)?))
 }
 
-/// Warms every item, then times `rounds` rounds of one launch each, items
-/// interleaved within a round so they share clock and thermal state.
+/// Warms every item for `warmup` rounds and at least `warmup_ms` of wall
+/// clock, then times `rounds` rounds of one launch each, items interleaved
+/// within a round so they share clock and thermal state. An idle card sits
+/// at its lowest clock, so a short warmup measures the ramp.
 pub(crate) fn interleaved(
     stream: &Stream,
     items: &mut [Timed<'_>],
-    warmup: u32,
+    (warmup, warmup_ms): (u32, f64),
     rounds: u32,
 ) -> anyhow::Result<Vec<Stats>> {
     let (start, end) = (Event::new(EventFlags::DEFAULT)?, Event::new(EventFlags::DEFAULT)?);
-    for _ in 0..warmup {
+    let began = Instant::now();
+    let mut done = 0;
+    while done < warmup || began.elapsed().as_secs_f64() * 1e3 < warmup_ms {
         for t in items.iter_mut() {
             time_once(stream, t, &start, &end)?;
         }
+        done += 1;
     }
     let mut out = vec![Stats::default(); items.len()];
     for _ in 0..rounds.max(1) {

@@ -37,6 +37,8 @@ pub(crate) struct Options {
     pub rounds: Option<u32>,
     pub cache: PathBuf,
     pub retune: bool,
+    /// A kernel source to run in place of the kind's example.
+    pub source: Option<PathBuf>,
 }
 
 /// The compact suite: squares, GPT-2 small's prefill projections at 512
@@ -84,7 +86,11 @@ pub(crate) fn run(
     results: &mut Results,
     rows: &mut Vec<serde_json::Value>,
 ) -> anyhow::Result<()> {
-    let variants = tune::Variants::build(kind, pins)?;
+    let code = match &opts.source {
+        Some(path) => std::fs::read_to_string(path)?,
+        None => kind.code().to_string(),
+    };
+    let variants = tune::Variants::build(kind, &code, pins)?;
     let conv = if kind.baseline_converts() {
         Some(Converter::new()?)
     } else {
@@ -160,7 +166,7 @@ fn problem(
         Ok(())
     };
 
-    let key = tune::WinnerCache::key(&env.key, kind, dims, pins);
+    let key = tune::WinnerCache::key(&env.key, vs, dims, pins);
     let cached = if opts.retune { None } else { cache.get(&key).and_then(|c| vs.find(&c)) };
     let (win, tuned) = match cached {
         Some(i) => {
@@ -214,7 +220,7 @@ fn problem(
         (2000.0 / (est_ms * items.len() as f64)).clamp(30.0, 400.0) as u32
     });
     let state_before = env::gpu_state();
-    let stats = timing::interleaved(stream, &mut items, 5, rounds)?;
+    let stats = timing::interleaved(stream, &mut items, (5, 300.0), rounds)?;
     let state_after = env::gpu_state();
     for (name, s) in names.iter().zip(&stats) {
         phinfo!("  {name:>20}: {} = {:.2} TFLOP/s", s.summary(), tflops(dims, s.median()));
@@ -255,6 +261,8 @@ fn problem(
         "contract": kind.contract_json(),
         "baseline": kind.baseline().label(),
         "baseline_converts_ab": kind.baseline_converts(),
+        "source": opts.source.as_ref().map_or("example".to_string(), |p| p.display().to_string()),
+        "source_fnv1a": format!("{:016x}", tune::fnv1a(&vs.code)),
         "shape": {"m": m, "n": n, "k": k},
         "flops": 2.0 * (m * n * k) as f64,
         "timed_scalars": {"alpha": scalars.0, "beta": scalars.1},
