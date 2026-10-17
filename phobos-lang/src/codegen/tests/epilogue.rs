@@ -88,3 +88,52 @@ fn an_eight_wide_register_sub_tile_reads_and_writes_b_columns_in_two_groups() {
     let narrow = emit_mlir(&scaled_gemm(64, 128));
     assert!(!split_at_kt_loop(&narrow).1.contains("vector.shuffle"), "{narrow}");
 }
+
+/// `src` with its epilogue branching on `beta == 0.0`, the BLAS reading in
+/// which a zero beta leaves C unread.
+fn blas_beta(src: &str) -> String {
+    let plain = "let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old";
+    assert!(src.contains(plain), "{src}");
+    src.replace(
+        plain,
+        &format!(
+            "if beta == 0.0 {{
+                C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc
+            }} else {{
+                {plain}
+            }}"
+        ),
+    )
+}
+
+/// Global loads and stores: a memref in address space 1.
+fn global_accesses(mlir: &str) -> (usize, usize) {
+    let count = |op: &str| mlir.lines().filter(|l| l.contains(op) && l.contains(", 1>")).count();
+    (count("load "), count("store "))
+}
+
+#[test]
+fn a_gemm_epilogue_branching_on_beta_stores_without_reading_c() {
+    let plain_src = scaled_gemm(64, 128);
+    let tensor_cores = plain_src
+        .replace("TILE_K in [8]", "TILE_K in [32]")
+        .replace("@pipeline", "@pipeline\n        @tensorcore")
+        .replace("A: tensor<f32>", "A: tensor<f16>")
+        .replace("B: tensor<f32>", "B: tensor<f16>");
+    for (src, emit) in [
+        (plain_src, emit_mlir as fn(&str) -> String),
+        (tensor_cores, |s: &str| emit_mlir_sync(s, "sm_75")),
+    ] {
+        let plain = emit(&src);
+        let branched = emit(&blas_beta(&src));
+        assert_eq!(plain.contains("nvgpu.mma.sync"), src.contains("@tensorcore"), "{plain}");
+        assert!(module_verifies(&branched), "{branched}");
+        // Still the GEMM, whose accumulator is not a shared tile, and the
+        // two arms' drains share their scratch.
+        assert_eq!(shared_bytes(&branched), shared_bytes(&plain), "{branched}");
+        let ((plain_loads, plain_stores), (loads, stores)) = (global_accesses(&plain), global_accesses(&branched));
+        assert!(plain_stores > 0, "{plain}");
+        assert_eq!((loads, stores), (plain_loads, 2 * plain_stores), "{branched}");
+    }
+}

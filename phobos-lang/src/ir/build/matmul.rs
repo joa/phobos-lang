@@ -23,12 +23,38 @@ struct Matched<'a> {
     unroll: i64,
     a_slice: &'a Expr,
     b_slice: &'a Expr,
+    epilogue: Epilogue<'a>,
+    consumed: usize,
+}
+
+/// One store of the finished accumulator, `C[...] = alpha * acc [+ beta *
+/// prev]`.
+struct Arm<'a> {
+    /// The store's statement.
+    span: Span,
     target: &'a Expr,
+    /// The target tensor's element type.
+    elem: Scalar,
     alpha: Coeff,
     beta: Coeff,
     alpha_expr: Option<&'a Expr>,
     beta_expr: Option<&'a Expr>,
-    consumed: usize,
+}
+
+/// What follows the loop: one store, or a branch on a scalar between two,
+/// so a kernel can say `if beta == 0.0` and leave C unread.
+enum Epilogue<'a> {
+    One(Arm<'a>),
+    Branch { cond: &'a Expr, then: Arm<'a>, els: Arm<'a> },
+}
+
+impl<'a> Epilogue<'a> {
+    fn arms(&self) -> impl Iterator<Item = &Arm<'a>> {
+        match self {
+            Epilogue::One(arm) => std::slice::from_ref(arm).iter().chain(None),
+            Epilogue::Branch { then, els, .. } => std::slice::from_ref(then).iter().chain(Some(els)),
+        }
+    }
 }
 
 impl Build {
@@ -41,6 +67,28 @@ impl Build {
     /// `gemm_dot`. Matched statements never reach the rest of the build.
     /// The prev_load's own slice is never built, since the store reads it
     /// back through its target.
+    /// The `GemmStore` of one epilogue arm.
+    fn gemm_store(&mut self, acc: crate::ir::ValueId, arm: &Arm<'_>) -> Result<()> {
+        self.spanned(arm.span, |b| {
+            let view = b.tile_operand(arm.target, "a register matmul's target")?;
+            let mut operands = vec![acc, view];
+            for e in [arm.alpha_expr, arm.beta_expr].into_iter().flatten() {
+                let Rv::Scalar(v) = b.emit_expr(e)? else {
+                    bail!("a register matmul's scaling is not a scalar");
+                };
+                operands.push(v);
+            }
+            b.stmt(
+                OpKind::GemmStore {
+                    alpha: arm.alpha,
+                    beta: arm.beta,
+                },
+                &operands,
+            );
+            Ok(())
+        })
+    }
+
     pub(crate) fn matmul_candidate(&mut self, stmts: &[Stmt]) -> Result<Option<usize>> {
         let Some(m) = self.matmul_matches(stmts) else {
             return Ok(None);
@@ -118,62 +166,32 @@ impl Build {
         })?;
         let acc = self.ir.results(op)[0];
 
-        self.spanned(stmts[m.consumed - 1].span(), |b| {
-            let view = b.tile_operand(m.target, "a register matmul's target")?;
-            let mut operands = vec![acc, view];
-            for e in [m.alpha_expr, m.beta_expr].into_iter().flatten() {
-                let Rv::Scalar(v) = b.emit_expr(e)? else {
-                    bail!("a register matmul's scaling is not a scalar");
-                };
-                operands.push(v);
-            }
-            b.stmt(
-                OpKind::GemmStore {
-                    alpha: m.alpha,
-                    beta: m.beta,
-                },
-                &operands,
-            );
-            Ok(())
-        })?;
+        match &m.epilogue {
+            Epilogue::One(arm) => self.gemm_store(acc, arm)?,
+            Epilogue::Branch { cond, then, els } => self.spanned(stmts[m.consumed - 1].span(), |b| {
+                let c = b.emit_scalar(cond)?;
+                let c = b.expect_bool(c, "if condition")?;
+                let mut blocks = Vec::with_capacity(2);
+                for arm in [then, els] {
+                    let block = b.ir.new_block(&[]);
+                    b.in_block(block, |b| {
+                        b.gemm_store(acc, arm)?;
+                        b.stmt(OpKind::Yield, &[]);
+                        Ok::<(), anyhow::Error>(())
+                    })?;
+                    blocks.push(block);
+                }
+                b.op(OpKind::If, &[c], Vec::new(), blocks);
+                Ok(())
+            })?,
+        }
         Ok(Some(m.consumed))
     }
 
-    /// The statements a register matmul consumes, or None.
-    fn matmul_matches<'a>(&self, stmts: &'a [Stmt]) -> Option<Matched<'a>> {
-        let [
-            Stmt::Var {
-                name: acc,
-                ty: Some(AstType::Tile(acc_scalar, dims)),
-                value: Some(init),
-                ..
-            },
-            Stmt::For {
-                var: kt,
-                start,
-                end,
-                step,
-                unroll,
-                body,
-                ..
-            },
-            tail @ ..,
-        ] = stmts
-        else {
-            return None;
-        };
-        let unroll = match unroll {
-            None => 1,
-            Some(e) => self.const_fold(e).filter(|&n| n >= 1)?,
-        };
-        let acc_scalar = *acc_scalar;
-        if !matches!(acc_scalar, AstScalar::F32 | AstScalar::F16) {
-            return None;
-        }
-        if kt == acc || !(matches!(&init.kind, ExprKind::Float(_)) || self.const_fold(init).is_some()) {
-            return None;
-        }
-        let (target, epilogue_val, prev_load_let, consumed) = match tail {
+    /// One epilogue store at the head of `stmts`, `[let prev;] C[...] =
+    /// alpha * acc [+ beta * prev]`, and how many statements it takes.
+    fn gemm_arm<'a>(&self, stmts: &'a [Stmt], acc: &str, dims: &[crate::ast::Dim]) -> Option<(Arm<'a>, usize)> {
+        let (target, epilogue_val, prev_load_let, consumed) = match stmts {
             [
                 Stmt::Let {
                     name: prev_load_name,
@@ -188,7 +206,7 @@ impl Build {
                     ..
                 },
                 ..,
-            ] => (target, epi, Some(prev_load_name.as_str()), 4usize),
+            ] => (target, epi, Some(prev_load_name.as_str()), 2usize),
             [
                 Stmt::Assign {
                     target,
@@ -197,7 +215,7 @@ impl Build {
                     ..
                 },
                 ..,
-            ] => (target, epi, None, 3usize),
+            ] => (target, epi, None, 1usize),
             _ => return None,
         };
         let ExprKind::Index { base, subs } = &target.kind else {
@@ -213,7 +231,7 @@ impl Build {
             return None;
         }
         let out_shape = self.slice_static_shape(target)?;
-        if out_shape != self.tile_shape(dims).ok()? {
+        if out_shape != self.tile_shape(dims).ok()? || self.slice_is_partial(target) {
             return None;
         }
 
@@ -267,6 +285,68 @@ impl Build {
                 Coeff::Absent,
                 None,
             ),
+        };
+
+        Some((
+            Arm {
+                span: stmts[consumed - 1].span(),
+                target,
+                elem: self.elem(c),
+                alpha,
+                beta,
+                alpha_expr,
+                beta_expr,
+            },
+            consumed,
+        ))
+    }
+
+    /// The statements a register matmul consumes, or None.
+    fn matmul_matches<'a>(&self, stmts: &'a [Stmt]) -> Option<Matched<'a>> {
+        let [
+            Stmt::Var {
+                name: acc,
+                ty: Some(AstType::Tile(acc_scalar, dims)),
+                value: Some(init),
+                ..
+            },
+            Stmt::For {
+                var: kt,
+                start,
+                end,
+                step,
+                unroll,
+                body,
+                ..
+            },
+            tail @ ..,
+        ] = stmts
+        else {
+            return None;
+        };
+        let unroll = match unroll {
+            None => 1,
+            Some(e) => self.const_fold(e).filter(|&n| n >= 1)?,
+        };
+        let acc_scalar = *acc_scalar;
+        if !matches!(acc_scalar, AstScalar::F32 | AstScalar::F16) {
+            return None;
+        }
+        if kt == acc || !(matches!(&init.kind, ExprKind::Float(_)) || self.const_fold(init).is_some()) {
+            return None;
+        }
+        let (epilogue, consumed) = if let Some((arm, n)) = self.gemm_arm(tail, acc, dims) {
+            (Epilogue::One(arm), 2 + n)
+        } else if let [Stmt::If { cond, then, r#else: Some(els), .. }, ..] = tail
+            && !cond.uses_name(acc)
+            && let Some((then_arm, n)) = self.gemm_arm(then, acc, dims)
+            && n == then.len()
+            && let Some((else_arm, n)) = self.gemm_arm(els, acc, dims)
+            && n == els.len()
+        {
+            (Epilogue::Branch { cond, then: then_arm, els: else_arm }, 3)
+        } else {
+            return None;
         };
 
         let staged = |s: &'a Stmt| -> Option<(&'a str, &'a Expr)> {
@@ -326,7 +406,7 @@ impl Build {
             let a_elem = self.slice_tensor_elem(a_slice);
             let b_elem = self.slice_tensor_elem(b_slice);
             if acc_scalar != AstScalar::F32
-                || self.elem(c) != Scalar::F32
+                || epilogue.arms().any(|arm| arm.elem != Scalar::F32)
                 || a_elem != Some(Scalar::F32)
                 || b_elem != Some(Scalar::F32)
             {
@@ -349,7 +429,6 @@ impl Build {
         }
         if self.slice_is_partial_within(a_slice, &[kt.as_str()])
             || self.slice_is_partial_within(b_slice, &[kt.as_str()])
-            || self.slice_is_partial(target)
         {
             return None;
         }
@@ -365,11 +444,7 @@ impl Build {
             unroll,
             a_slice,
             b_slice,
-            target,
-            alpha,
-            beta,
-            alpha_expr,
-            beta_expr,
+            epilogue,
             consumed,
         })
     }

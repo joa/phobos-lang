@@ -114,6 +114,12 @@ impl<'c> Codegen<'c> {
                 // the next fragment from overwriting the slab mid-drain.
                 self.barrier(block)?;
                 self.drain_slab_tile(block, &drain, m0, n0, fi, fj)?;
+                if (fi, fj) == (fm - 1, fnn - 1) {
+                    // Free for the other arm of an epilogue that branches, as
+                    // of the barrier that retires the drain. Released ahead
+                    // of it so the op still ends in that barrier.
+                    self.release(&slab);
+                }
                 self.barrier(block)?;
             }
         }
