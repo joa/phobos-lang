@@ -345,5 +345,28 @@ cargo run -r -p phobos-kbench -- --csv results/results.csv
 python scripts/plot_bench.py results/results.csv -o results/bench.svg
 ```
 
+A GEMM row is timed between CUDA events around the kernel alone, with C
+restored outside them, Phobos and cuBLAS launched alternately, and reports
+the median of the interleaved rounds. Each kind is compared with the cuBLAS
+call that computes the same thing:
+
+| kind | A, B | C | multiply | accumulate | cuBLAS |
+|---|---|---|---|---|---|
+| `gemm_fp32`, `gemm_fp32_unaligned` | f32 | f32 | f32 | f32 | `cublasSgemm` |
+| `gemm_fp16_fp32acc` | f16 | f32 | f16 tensor cores | f32 | `cublasGemmEx` 16F/32F, `COMPUTE_32F` |
+| `gemm_fp16tc_fp32acc` | f32, rounded while staging | f32 | f16 tensor cores | f32 | the same, after converting A and B, the conversion timed in |
+| `gemm_fp16` | f16 | f16 | f16 tensor cores | f16 | `cublasGemmEx` 16F/16F, `COMPUTE_16F` |
+
+`--suite` runs each kind's compact problem set (squares, GPT-2's projections
+at 512 tokens, small M with a long k, and sizes no tile divides), `--shape
+MxNxK` picks problems, and `--json` keeps every timing, winner, resource
+count, correctness check and the environment. Winners are remembered per
+card, driver, compiler and source; `--retune` ignores them.
+
+```bash
+cargo run -r -p phobos-kbench -- --bench gemm_fp32 --suite --retune --json gemm_fp32.json
+python scripts/kbench_table.py gemm_fp32.json
+```
+
 [^1]: build: 5e03a1ff4 (11681)
 [^2]: [PrismML's llama.cpp fork](https://github.com/PrismML-Eng/llama.cpp), build: e3de71522 (10777)
