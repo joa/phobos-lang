@@ -279,3 +279,35 @@ fn a_gemm_epilogue_scales_acc_by_its_coefficient_and_c_by_one() {
     );
     assert_eq!(epilogue.matches("arith.constant 1.000000e+00 : f32").count(), 1, "{epilogue}");
 }
+
+#[test]
+fn an_aligned_dim_is_a_multiple_of_its_promise_in_offsets() {
+    // `ps * M` is a multiple of TILE_M only through `@aligned(M = TILE_M)`,
+    // so the partial's store is whole tiles and the matmul stays in
+    // registers.
+    let src = |aligned: &str| {
+        format!(
+            "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+            @pipeline
+            @aligned({aligned})
+            kernel split(A: tensor<f32>[M, K], B: tensor<f32>[K, N], P: tensor<f32>[SM, N]) {{
+                let pm = ctx.block.x
+                let pn = ctx.block.y
+                let ps = ctx.block.z
+                var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+                for kt in range(0, K, TILE_K) {{
+                    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                    acc += dot(a, b)
+                }}
+                P[ps * M + pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+            }}"
+        )
+    };
+    // The fallback keeps the accumulator as a shared 64x64 tile.
+    let shared_acc = |mlir: &str| mlir.contains("memref<64x64xf32, 3>");
+    let promised = emit_mlir(&src("M = TILE_M, N = TILE_N, K = TILE_K, SM = TILE_M"));
+    assert!(!shared_acc(&promised), "{promised}");
+    let unpromised = emit_mlir(&src("N = TILE_N, K = TILE_K, SM = TILE_M"));
+    assert!(shared_acc(&unpromised), "{unpromised}");
+}

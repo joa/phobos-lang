@@ -24,6 +24,7 @@ impl Build {
     /// Binds the parameters and the symbolic tensor dims, then builds the
     /// body.
     pub(super) fn emit_kernel(&mut self, kernel: &Kernel) -> Result<()> {
+        let promises = self.aligned_promises(kernel)?;
         self.scopes.push(HashMap::new());
         let entry = self.ir.entry();
         if self.ir.kernel.grid_barrier {
@@ -74,8 +75,11 @@ impl Build {
                         let size = self.value(OpKind::Dim(d), &[arg], Type::INDEX);
                         self.ir.set_name(size, name);
                         // Dynamic dims are assumed multiples of 4 elements, the
-                        // 16-byte row-pitch ABI.
-                        self.bind(name, Binding::Let { value: size, div: 4 });
+                        // 16-byte row-pitch ABI, and of what `@aligned`
+                        // promises, which `check_aligned` traps on.
+                        let promised = promises.iter().find(|(n, _)| n == name).map_or(1, |&(_, d)| d);
+                        let div = 4 * promised / super::gcd(4, promised);
+                        self.bind(name, Binding::Let { value: size, div });
                     }
                 }
             }
