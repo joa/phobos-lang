@@ -11,7 +11,7 @@ import { repoRoot } from "./load"
 
 export const KERNEL_RESULTS_FILE = "results/results.csv"
 
-// README.md: "SGEMM performance is at 88% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER".
+// README.md: "SGEMM performance is at 86% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER".
 export const KERNEL_CARD = "RTX 2080 SUPER"
 
 export interface KernelMeasure {
@@ -58,6 +58,13 @@ export const KERNEL_SPECS: Record<string, KernelSpec> = {
     source: "examples/gemm_fp32.ph",
     label: "gemm, f32",
     size: "M = N = K = 4096",
+    cublasCall: "cublasSgemm_v2",
+  },
+  gemm_fp32_splitk: {
+    source: "examples/gemm_fp32_splitk.ph",
+    label: "gemm, f32, split-K",
+    size: "M = 64, N = 1024, K = 16384",
+    inputs: "k split over CTAs, partials summed by a second kernel",
     cublasCall: "cublasSgemm_v2",
   },
   gemm_fp16tc_fp32acc: {
