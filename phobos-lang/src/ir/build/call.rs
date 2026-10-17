@@ -47,6 +47,7 @@ impl Build {
                 })?;
                 Ok(Rv::Scalar(self.const_index(n)))
             }
+            super::extent::EXTENT => Ok(Rv::Scalar(self.emit_extent(args)?)),
             "atomic_add" => self.emit_atomic_add(args),
             "atomic_cas" => self.emit_atomic_cas(args),
             "load_acquire" | "store_release" => self.emit_system_scope(callee, args),

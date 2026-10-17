@@ -13,7 +13,7 @@ const NAMED: &[&str] = &[
     "min", "max", "where", "iota", "tmax", "argsel", "rowmax", "rowsum", "rowargmax", "cumsum",
     "tril", "transpose", "flat", "gather", "dot", "dot_t", "qdot_t", "qmma_t", "q50_qdot_t",
     "q50_qmma_t", "iq1s_qmma_t", "sum", "elem", "store", "word", "dp4a", "popcount", "byteperm",
-    "f16bits",
+    "f16bits", "extent",
 ];
 
 /// Every name a call may take.

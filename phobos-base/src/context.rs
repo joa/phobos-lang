@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct Context {
@@ -12,6 +13,9 @@ pub struct Context {
 
     /// Bit width index values lower to.
     pub index_bitwidth: u32,
+
+    /// The functions every source can call without defining them.
+    pub stdlib: Stdlib,
 }
 
 impl Default for Context {
@@ -21,8 +25,22 @@ impl Default for Context {
             gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::default()),
             shape_overrides: HashMap::new(),
             index_bitwidth: 32,
+            stdlib: Stdlib::Builtin,
         }
     }
+}
+
+/// Where the standard library a source compiles against comes from.
+#[derive(Debug, Clone, Default)]
+pub enum Stdlib {
+    /// The one the compiler ships.
+    #[default]
+    Builtin,
+    /// None: a source calls only its own functions and the built-ins.
+    Off,
+    /// A source of `fn` definitions in place of the shipped one; `name` is
+    /// what an error in it is reported against.
+    Custom { name: String, text: Arc<str> },
 }
 
 #[derive(Debug, Clone)]

@@ -1,6 +1,7 @@
 mod call;
 mod elemwise;
 mod expr;
+mod extent;
 mod frag;
 mod generate;
 mod hoist;

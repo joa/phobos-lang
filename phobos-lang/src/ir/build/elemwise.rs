@@ -1,7 +1,7 @@
 use anyhow::{Result, bail, ensure};
 
 use super::{Binding, Build, DYN, Rv, fmt_shape};
-use crate::ast::{AssignOp, BinOp, Expr, ExprKind, UnOp};
+use crate::ast::{AssignOp, BinOp, Expr, ExprKind, Sub, UnOp};
 use crate::ir::{ElemStep, OpKind, Reduce, Scalar, Tree, ValueId};
 
 /// What planning a fused tree collects: the operands in order, and which
@@ -20,6 +20,10 @@ struct Plan {
     /// Each scalar operand's index and its value before the coercion, so an
     /// integer subtree can take it at its own type instead.
     scalars: Vec<(usize, ValueId)>,
+    /// Each operand expression emitted so far and its value. An expression
+    /// has no side effects, so one the tree repeats, as a function's body
+    /// repeats an argument, is emitted once: a tensor slice is staged once.
+    emitted: Vec<(Expr, Rv)>,
 }
 
 impl Build {
@@ -266,7 +270,7 @@ impl Build {
                 plan.operands.push(r);
                 Tree::Leaf(plan.operands.len() - 1)
             }
-            _ => match self.emit_expr(value)? {
+            _ => match self.emit_operand(value, plan)? {
                 Rv::Scalar(v) => self.scalar_leaf(v, plan)?,
                 Rv::Tile(t) => {
                     plan.leaves.push(t);
@@ -275,6 +279,16 @@ impl Build {
                 }
             },
         })
+    }
+
+    /// `value` emitted, or the value it had where the tree already holds it.
+    fn emit_operand(&mut self, value: &Expr, plan: &mut Plan) -> Result<Rv> {
+        if let Some(&(_, rv)) = plan.emitted.iter().find(|(e, _)| same_expr(e, value)) {
+            return Ok(rv);
+        }
+        let rv = self.emit_expr(value)?;
+        plan.emitted.push((value.clone(), rv));
+        Ok(rv)
     }
 
     /// A scalar operand of the tree, coerced to the target's element type
@@ -360,6 +374,7 @@ impl Build {
             operands: Vec::new(),
             leaves: Vec::new(),
             scalars: Vec::new(),
+            emitted: Vec::new(),
         };
         let mut tree = self.plan_fused(value, &mut plan)?;
         let Plan {
@@ -404,6 +419,7 @@ impl Build {
             operands: Vec::new(),
             leaves: Vec::new(),
             scalars: Vec::new(),
+            emitted: Vec::new(),
         };
         let tree = self.plan_fused(arg, &mut plan)?;
         self.check_leaves(&plan.leaves, &shape)?;
@@ -430,6 +446,7 @@ impl Build {
                 operands: Vec::new(),
                 leaves: Vec::new(),
                 scalars: Vec::new(),
+                emitted: Vec::new(),
             };
             self.plan_fused(value, &mut plan).map(|tree| Some((tree, plan)))
         } else {
@@ -463,5 +480,35 @@ impl Build {
             );
         }
         Ok(())
+    }
+}
+
+/// Whether `a` and `b` are the same expression, wherever each was written.
+fn same_expr(a: &Expr, b: &Expr) -> bool {
+    let all = |a: &[Expr], b: &[Expr]| a.len() == b.len() && a.iter().zip(b).all(|(a, b)| same_expr(a, b));
+    match (&a.kind, &b.kind) {
+        (ExprKind::Int(a), ExprKind::Int(b)) => a == b,
+        (ExprKind::Float(a), ExprKind::Float(b)) => a.to_bits() == b.to_bits(),
+        (ExprKind::Bool(a), ExprKind::Bool(b)) => a == b,
+        (ExprKind::Var(a), ExprKind::Var(b)) => a == b,
+        (ExprKind::Unary { op: p, rhs: a }, ExprKind::Unary { op: q, rhs: b }) => p == q && same_expr(a, b),
+        (ExprKind::Binary { op: p, lhs: a, rhs: c }, ExprKind::Binary { op: q, lhs: b, rhs: d }) => {
+            p == q && same_expr(a, b) && same_expr(c, d)
+        }
+        (ExprKind::Call { callee: f, args: a }, ExprKind::Call { callee: g, args: b }) => f == g && all(a, b),
+        (ExprKind::Index { base: a, subs: s }, ExprKind::Index { base: b, subs: t }) => {
+            same_expr(a, b) && s.len() == t.len() && s.iter().zip(t).all(|(s, t)| same_sub(s, t))
+        }
+        _ => false,
+    }
+}
+
+fn same_sub(a: &Sub, b: &Sub) -> bool {
+    match (a, b) {
+        (Sub::Full, Sub::Full) => true,
+        (Sub::Point(a), Sub::Point(b)) | (Sub::From(a), Sub::From(b)) => same_expr(a, b),
+        (Sub::Range { start: a, end: c }, Sub::Range { start: b, end: d })
+        | (Sub::Span { start: a, len: c }, Sub::Span { start: b, len: d }) => same_expr(a, b) && same_expr(c, d),
+        _ => false,
     }
 }

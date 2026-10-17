@@ -11,35 +11,47 @@
 use std::collections::HashMap;
 
 use super::super::ast::lanes::{self, Fold};
-use super::super::ast::{Expr, ExprKind, Generated, Kernel, Stmt, Sub};
+use super::super::ast::{Dim, Expr, ExprKind, Generated, Kernel, Span, Stmt, Sub, Type};
 
 /// How deep calls may nest before inlining gives up, which also catches
 /// recursion.
 const MAX_DEPTH: usize = 32;
 
-pub(super) enum Body {
+#[derive(Clone)]
+pub(crate) enum Body {
     Expr(Expr),
     Stmts(Vec<Stmt>),
 }
 
-pub(super) struct Function {
-    pub(super) name: String,
-    pub(super) params: Vec<String>,
-    pub(super) body: Body,
+#[derive(Clone)]
+pub(crate) struct Function {
+    pub(crate) name: String,
+    pub(crate) params: Vec<String>,
+    pub(crate) body: Body,
+    /// Its name, where it is defined.
+    pub(crate) span: Span,
+    /// The library file it comes from, empty for a program's own.
+    pub(crate) file: String,
+    /// Whether it comes from a library, whose spans point into a file of
+    /// its own: an inlined body then takes the call's.
+    pub(crate) prelude: bool,
 }
 
-/// Inlines every call to a function in `fns` into each kernel's body.
-pub(super) fn inline(kernels: &mut [Kernel], fns: &[Function]) -> Result<(), String> {
-    if fns.is_empty() {
-        return Ok(());
-    }
+/// Inlines every call to a function in `fns`, or else in `prelude`, into
+/// each kernel's body. A program's function shadows a prelude function of
+/// its name.
+pub(super) fn inline(kernels: &mut [Kernel], fns: &[Function], prelude: &[Function]) -> Result<(), String> {
     let mut seen = HashMap::new();
     for f in fns {
         if seen.insert(f.name.as_str(), ()).is_some() {
             return Err(format!("function `{}` is defined twice", f.name));
         }
     }
-    let mut inliner = Inliner { fns, next: 0 };
+    let fns: Vec<&Function> = fns.iter().chain(prelude.iter().filter(|f| !seen.contains_key(f.name.as_str()))).collect();
+    if fns.is_empty() {
+        return Ok(());
+    }
+    let mut inliner = Inliner { fns: &fns, next: 0 };
     for kernel in kernels {
         let body = std::mem::take(&mut kernel.body);
         kernel.body = inliner.stmts(body, 0).map_err(|e| format!("kernel `{}`: {e}", kernel.name))?;
@@ -48,23 +60,23 @@ pub(super) fn inline(kernels: &mut [Kernel], fns: &[Function]) -> Result<(), Str
 }
 
 struct Inliner<'a> {
-    fns: &'a [Function],
+    fns: &'a [&'a Function],
     next: usize,
 }
 
 impl<'a> Inliner<'a> {
     fn find(&self, name: &str) -> Option<&'a Function> {
-        self.fns.iter().find(|f| f.name == name)
+        self.fns.iter().copied().find(|f| f.name == name)
     }
 
     fn stmts(&mut self, stmts: Vec<Stmt>, depth: usize) -> Result<Vec<Stmt>, String> {
         let mut out = Vec::new();
         for stmt in stmts {
-            if let Stmt::Expr(Expr { kind: ExprKind::Call { callee, args }, .. }, _) = &stmt
+            if let Stmt::Expr(Expr { kind: ExprKind::Call { callee, args }, span }, _) = &stmt
                 && let Some(f) = self.find(callee)
                 && let Body::Stmts(_) = f.body
             {
-                out.extend(self.splice(callee, args, depth)?);
+                out.extend(self.splice(callee, args, *span, depth)?);
                 continue;
             }
             out.push(self.stmt(stmt, depth)?);
@@ -169,7 +181,7 @@ impl<'a> Inliner<'a> {
                         return Err(format!("`{name}` has a statement body and cannot combine a reduce"));
                     };
                     let map = bind(f, &[Expr::var(lanes::COMBINE_A), Expr::var(lanes::COMBINE_B)])?;
-                    let body = subst(body, &map, &HashMap::new())?;
+                    let body = f.subst(&map, &HashMap::new(), span).expr(body)?;
                     *args.last_mut().expect("a reduce has a combine") = body;
                 }
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
@@ -187,7 +199,7 @@ impl<'a> Inliner<'a> {
                     return Err(format!("`{callee}` has a statement body and cannot be used as a value"));
                 };
                 let map = bind(f, &args)?;
-                let body = subst(body, &map, &HashMap::new())?;
+                let body = f.subst(&map, &HashMap::new(), span).expr(body)?;
                 self.deeper(depth, &callee)?;
                 return self.expr(body, depth + 1);
             }
@@ -233,8 +245,9 @@ impl<'a> Inliner<'a> {
         let map = bind(f, &[Expr::var(params[0].clone()), Expr::var(params[1].clone())])?;
         let renames: HashMap<String, String> =
             locals(lead).into_iter().map(|name| (name.clone(), format!("{name}#{}", self.next))).collect();
-        let lead = lead.iter().map(|s| subst_stmt(s, &map, &renames)).collect::<Result<Vec<_>, _>>()?;
-        let value = subst(value, &map, &renames)?;
+        let subst = f.subst(&map, &renames, span);
+        let lead = subst.block(lead)?;
+        let value = subst.expr(value)?;
         let kind = ExprKind::Generate(Box::new(Generated {
             params,
             body: self.stmts(lead, depth + 1)?,
@@ -267,7 +280,7 @@ impl<'a> Inliner<'a> {
     }
 
     /// The statements of a call to the statement function `callee`.
-    fn splice(&mut self, callee: &str, args: &[Expr], depth: usize) -> Result<Vec<Stmt>, String> {
+    fn splice(&mut self, callee: &str, args: &[Expr], span: Span, depth: usize) -> Result<Vec<Stmt>, String> {
         self.deeper(depth, callee)?;
         let f = self.find(callee).expect("checked by the caller");
         let Body::Stmts(body) = &f.body else {
@@ -281,11 +294,19 @@ impl<'a> Inliner<'a> {
         for name in locals(body) {
             renames.insert(name.clone(), format!("{name}#{}", self.next));
         }
-        let body = body
-            .iter()
-            .map(|s| subst_stmt(s, &map, &renames))
-            .collect::<Result<Vec<_>, _>>()?;
+        let body = f.subst(&map, &renames, span).block(body)?;
         self.stmts(body, depth + 1)
+    }
+}
+
+impl Function {
+    /// The substitution of a call to it at `span`.
+    fn subst<'a>(&self, args: &'a HashMap<String, Expr>, renames: &'a HashMap<String, String>, span: Span) -> Subst<'a> {
+        Subst {
+            args,
+            renames,
+            at: self.prelude.then_some(span),
+        }
     }
 }
 
@@ -327,157 +348,202 @@ fn locals(body: &[Stmt]) -> Vec<String> {
     out
 }
 
-/// `e` with each parameter replaced by its argument and each local renamed.
-fn subst(e: &Expr, args: &HashMap<String, Expr>, renames: &HashMap<String, String>) -> Result<Expr, String> {
-    let go = |e: &Expr| subst(e, args, renames);
-    let kind = match &e.kind {
-        ExprKind::Var(name) => match (renames.get(name), args.get(name)) {
-            (Some(local), _) => ExprKind::Var(local.clone()),
-            (None, Some(arg)) => return Ok(arg.clone()),
-            (None, None) => return Ok(e.clone()),
-        },
-        ExprKind::Unary { op, rhs } => ExprKind::Unary {
-            op: *op,
-            rhs: Box::new(go(rhs)?),
-        },
-        ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
-            op: *op,
-            lhs: Box::new(go(lhs)?),
-            rhs: Box::new(go(rhs)?),
-        },
-        ExprKind::Index { base, subs } => {
-            let base = go(base)?;
-            if base.as_var().is_none() {
-                return Err("a parameter that is indexed must be passed a name".into());
-            }
-            ExprKind::Index {
-                base: Box::new(base),
-                subs: subs.iter().map(|s| subst_sub(s, args, renames)).collect::<Result<_, _>>()?,
-            }
+/// A body's substitution at one call: each parameter replaced by its
+/// argument and each local renamed. With `at`, every span the body brings
+/// becomes the call's, as for a prelude function, whose spans point into a
+/// file other than the caller's; the arguments keep theirs.
+struct Subst<'a> {
+    args: &'a HashMap<String, Expr>,
+    renames: &'a HashMap<String, String>,
+    at: Option<Span>,
+}
+
+impl Subst<'_> {
+    /// An empty span stays empty: it marks what the source does not write.
+    fn span(&self, span: Span) -> Span {
+        match self.at {
+            Some(at) if span.lo != span.hi => at,
+            _ => span,
         }
-        ExprKind::Generate(g) => ExprKind::Generate(Box::new(Generated {
-            params: g.params.clone(),
-            body: g.body.iter().map(|s| subst_stmt(s, args, renames)).collect::<Result<_, _>>()?,
-            value: go(&g.value)?,
-        })),
-        ExprKind::Call { callee, args: call_args } => ExprKind::Call {
-            callee: callee.clone(),
-            args: call_args.iter().map(go).collect::<Result<_, _>>()?,
-        },
-        ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_) => return Ok(e.clone()),
-    };
-    Ok(Expr::new(kind, e.span))
-}
+    }
 
-fn subst_sub(s: &Sub, args: &HashMap<String, Expr>, renames: &HashMap<String, String>) -> Result<Sub, String> {
-    let go = |e: &Expr| subst(e, args, renames);
-    Ok(match s {
-        Sub::Point(e) => Sub::Point(go(e)?),
-        Sub::From(e) => Sub::From(go(e)?),
-        Sub::Range { start, end } => Sub::Range {
-            start: go(start)?,
-            end: go(end)?,
-        },
-        Sub::Span { start, len } => Sub::Span {
-            start: go(start)?,
-            len: go(len)?,
-        },
-        Sub::Full => Sub::Full,
-    })
-}
-
-fn subst_stmt(stmt: &Stmt, args: &HashMap<String, Expr>, renames: &HashMap<String, String>) -> Result<Stmt, String> {
-    let go = |e: &Expr| subst(e, args, renames);
-    let rename = |name: &String| renames.get(name).cloned().unwrap_or_else(|| name.clone());
-    let block = |b: &[Stmt]| b.iter().map(|s| subst_stmt(s, args, renames)).collect::<Result<Vec<_>, _>>();
-    Ok(match stmt {
-        Stmt::Let {
-            name,
-            name_span,
-            ty,
-            ty_span,
-            value,
-            span,
-        } => Stmt::Let {
-            name: rename(name),
-            name_span: *name_span,
-            ty: ty.clone(),
-            ty_span: *ty_span,
-            value: go(value)?,
-            span: *span,
-        },
-        Stmt::Var {
-            name,
-            name_span,
-            ty,
-            ty_span,
-            value,
-            span,
-        } => Stmt::Var {
-            name: rename(name),
-            name_span: *name_span,
-            ty: ty.clone(),
-            ty_span: *ty_span,
-            value: value.as_ref().map(go).transpose()?,
-            span: *span,
-        },
-        Stmt::Assign {
-            target,
-            op,
-            value,
-            span,
-        } => {
-            let target = go(target)?;
-            let lvalue = match &target.kind {
-                ExprKind::Var(_) => true,
-                ExprKind::Index { base, .. } => matches!(&base.kind, ExprKind::Var(_)),
-                _ => false,
-            };
-            if !lvalue {
-                return Err("a parameter that is assigned must be passed a name".into());
+    fn expr(&self, e: &Expr) -> Result<Expr, String> {
+        let go = |e: &Expr| self.expr(e);
+        let kind = match &e.kind {
+            ExprKind::Var(name) => match (self.renames.get(name), self.args.get(name)) {
+                (Some(local), _) => ExprKind::Var(local.clone()),
+                (None, Some(arg)) => return Ok(arg.clone()),
+                (None, None) => ExprKind::Var(name.clone()),
+            },
+            ExprKind::Unary { op, rhs } => ExprKind::Unary {
+                op: *op,
+                rhs: Box::new(go(rhs)?),
+            },
+            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+                op: *op,
+                lhs: Box::new(go(lhs)?),
+                rhs: Box::new(go(rhs)?),
+            },
+            ExprKind::Index { base, subs } => {
+                let base = go(base)?;
+                if base.as_var().is_none() {
+                    return Err("a parameter that is indexed must be passed a name".into());
+                }
+                ExprKind::Index {
+                    base: Box::new(base),
+                    subs: subs.iter().map(|s| self.sub(s)).collect::<Result<_, _>>()?,
+                }
             }
+            ExprKind::Generate(g) => ExprKind::Generate(Box::new(Generated {
+                params: g.params.clone(),
+                body: self.block(&g.body)?,
+                value: go(&g.value)?,
+            })),
+            ExprKind::Call { callee, args: call_args } => ExprKind::Call {
+                callee: callee.clone(),
+                args: call_args.iter().map(go).collect::<Result<_, _>>()?,
+            },
+            kind @ (ExprKind::Int(_) | ExprKind::Float(_) | ExprKind::Bool(_)) => kind.clone(),
+        };
+        Ok(Expr::new(kind, self.span(e.span)))
+    }
+
+    fn sub(&self, s: &Sub) -> Result<Sub, String> {
+        let go = |e: &Expr| self.expr(e);
+        Ok(match s {
+            Sub::Point(e) => Sub::Point(go(e)?),
+            Sub::From(e) => Sub::From(go(e)?),
+            Sub::Range { start, end } => Sub::Range {
+                start: go(start)?,
+                end: go(end)?,
+            },
+            Sub::Span { start, len } => Sub::Span {
+                start: go(start)?,
+                len: go(len)?,
+            },
+            Sub::Full => Sub::Full,
+        })
+    }
+
+    /// A declared type, each dim that names a parameter replaced by its
+    /// argument, which must be a name or a literal.
+    fn ty(&self, ty: &Option<Type>) -> Result<Option<Type>, String> {
+        let dims = |dims: &[Dim]| {
+            dims.iter()
+                .map(|d| match d {
+                    Dim::Sym(name) => match self.args.get(name).map(|a| &a.kind) {
+                        None => Ok(d.clone()),
+                        Some(ExprKind::Var(arg)) => Ok(Dim::Sym(arg.clone())),
+                        Some(ExprKind::Int(n)) => Ok(Dim::Int(*n)),
+                        Some(_) => Err(format!("`{name}` sizes a tile, so it must be passed a name or a literal")),
+                    },
+                    Dim::Int(_) => Ok(d.clone()),
+                })
+                .collect::<Result<Vec<_>, _>>()
+        };
+        Ok(match ty {
+            Some(Type::Tile(elem, ds)) => Some(Type::Tile(*elem, dims(ds)?)),
+            Some(Type::Tensor(elem, ds)) => Some(Type::Tensor(*elem, dims(ds)?)),
+            other => other.clone(),
+        })
+    }
+
+    fn block(&self, body: &[Stmt]) -> Result<Vec<Stmt>, String> {
+        body.iter().map(|s| self.stmt(s)).collect()
+    }
+
+    fn stmt(&self, stmt: &Stmt) -> Result<Stmt, String> {
+        let go = |e: &Expr| self.expr(e);
+        let rename = |name: &String| self.renames.get(name).cloned().unwrap_or_else(|| name.clone());
+        Ok(match stmt {
+            Stmt::Let {
+                name,
+                name_span,
+                ty,
+                ty_span,
+                value,
+                span,
+            } => Stmt::Let {
+                name: rename(name),
+                name_span: self.span(*name_span),
+                ty: self.ty(ty)?,
+                ty_span: self.span(*ty_span),
+                value: go(value)?,
+                span: self.span(*span),
+            },
+            Stmt::Var {
+                name,
+                name_span,
+                ty,
+                ty_span,
+                value,
+                span,
+            } => Stmt::Var {
+                name: rename(name),
+                name_span: self.span(*name_span),
+                ty: self.ty(ty)?,
+                ty_span: self.span(*ty_span),
+                value: value.as_ref().map(go).transpose()?,
+                span: self.span(*span),
+            },
             Stmt::Assign {
                 target,
-                op: *op,
-                value: go(value)?,
-                span: *span,
+                op,
+                value,
+                span,
+            } => {
+                let target = go(target)?;
+                let lvalue = match &target.kind {
+                    ExprKind::Var(_) => true,
+                    ExprKind::Index { base, .. } => matches!(&base.kind, ExprKind::Var(_)),
+                    _ => false,
+                };
+                if !lvalue {
+                    return Err("a parameter that is assigned must be passed a name".into());
+                }
+                Stmt::Assign {
+                    target,
+                    op: *op,
+                    value: go(value)?,
+                    span: self.span(*span),
+                }
             }
-        }
-        Stmt::For {
-            var,
-            var_span,
-            start,
-            end,
-            step,
-            unroll,
-            body,
-            span,
-        } => Stmt::For {
-            var: rename(var),
-            var_span: *var_span,
-            start: go(start)?,
-            end: go(end)?,
-            step: step.as_ref().map(go).transpose()?,
-            unroll: unroll.as_ref().map(go).transpose()?,
-            body: block(body)?,
-            span: *span,
-        },
-        Stmt::While { cond, body, span } => Stmt::While {
-            cond: go(cond)?,
-            body: block(body)?,
-            span: *span,
-        },
-        Stmt::If {
-            cond,
-            then,
-            r#else,
-            span,
-        } => Stmt::If {
-            cond: go(cond)?,
-            then: block(then)?,
-            r#else: r#else.as_deref().map(block).transpose()?,
-            span: *span,
-        },
-        Stmt::Expr(e, span) => Stmt::Expr(go(e)?, *span),
-    })
+            Stmt::For {
+                var,
+                var_span,
+                start,
+                end,
+                step,
+                unroll,
+                body,
+                span,
+            } => Stmt::For {
+                var: rename(var),
+                var_span: self.span(*var_span),
+                start: go(start)?,
+                end: go(end)?,
+                step: step.as_ref().map(go).transpose()?,
+                unroll: unroll.as_ref().map(go).transpose()?,
+                body: self.block(body)?,
+                span: self.span(*span),
+            },
+            Stmt::While { cond, body, span } => Stmt::While {
+                cond: go(cond)?,
+                body: self.block(body)?,
+                span: self.span(*span),
+            },
+            Stmt::If {
+                cond,
+                then,
+                r#else,
+                span,
+            } => Stmt::If {
+                cond: go(cond)?,
+                then: self.block(then)?,
+                r#else: r#else.as_deref().map(|b| self.block(b)).transpose()?,
+                span: self.span(*span),
+            },
+            Stmt::Expr(e, span) => Stmt::Expr(go(e)?, self.span(*span)),
+        })
+    }
 }

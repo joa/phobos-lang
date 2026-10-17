@@ -7,6 +7,7 @@ pub mod parser;
 pub mod race;
 mod report;
 pub(crate) mod shape;
+pub mod stdlib;
 pub mod token;
 #[cfg(feature = "trace")]
 pub mod trace;
@@ -19,11 +20,21 @@ pub fn parse(src: &str) -> anyhow::Result<Vec<ast::Kernel>> {
     parse_source(&diag::SourceFile::new("", src))
 }
 
-/// Parses `file`, failing with every error found as [`diag::Diagnostics`].
+/// Parses `file` against the shipped standard library, failing with every
+/// error found as [`diag::Diagnostics`].
 pub fn parse_source(file: &std::sync::Arc<diag::SourceFile>) -> anyhow::Result<Vec<ast::Kernel>> {
+    parse_source_with(file, &phobos_base::context::Stdlib::Builtin)
+}
+
+/// [`parse_source`] against the standard library `stdlib` selects.
+pub fn parse_source_with(
+    file: &std::sync::Arc<diag::SourceFile>,
+    stdlib: &phobos_base::context::Stdlib,
+) -> anyhow::Result<Vec<ast::Kernel>> {
+    let prelude = stdlib::prelude(stdlib)?;
     let fail = |list| anyhow::Error::new(diag::Diagnostics::new(file.clone(), list));
     let toks = lexer::Lexer::new(file.text()).tokenize().map_err(fail)?;
-    parser::Parser::new(toks, file.clone()).parse_program().map_err(fail)
+    parser::Parser::new(toks, file.clone()).parse_program_with(&prelude).map_err(fail)
 }
 
 /// Compiles the given code.
@@ -114,7 +125,7 @@ pub fn compile_source(
         println!("===================================");
     }
 
-    let kernels = parse_source(file)?;
+    let kernels = parse_source_with(file, &context.stdlib)?;
 
     let mut wide;
     let context = if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {

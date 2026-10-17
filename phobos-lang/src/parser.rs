@@ -3,7 +3,9 @@ use super::token::{Tok, Token};
 use crate::diag::{self, Diagnostic};
 
 mod collective;
+mod extent;
 mod functions;
+pub(crate) use functions::Function;
 mod jumps;
 mod recover;
 
@@ -144,6 +146,41 @@ impl Parser {
     /// or an item that fails to parse is reported and skipped, and parsing
     /// goes on after it.
     pub fn parse_program(&mut self) -> Result<Vec<Kernel>, Vec<Diagnostic>> {
+        self.parse_program_with(&[])
+    }
+
+    /// [`Self::parse_program`] with `prelude`'s functions in scope, under
+    /// the program's own.
+    pub(crate) fn parse_program_with(&mut self, prelude: &[Function]) -> Result<Vec<Kernel>, Vec<Diagnostic>> {
+        let (kernels, fns) = self.parse_items()?;
+        let mut kernels = kernels;
+        // Functions are inlined first, so a jump they splice in is lowered
+        // with the caller's loops.
+        functions::inline(&mut kernels, &fns, prelude).map_err(|e| vec![Diagnostic::error(e)])?;
+        for kernel in &mut kernels {
+            extent::resolve(kernel);
+            let body = std::mem::take(&mut kernel.body);
+            kernel.body = jumps::desugar(body)
+                .map_err(|e| vec![Diagnostic::error(format!("kernel `{}`: {e}", kernel.name))])?;
+        }
+        Ok(kernels)
+    }
+
+    /// A library: functions only, each marked as the prelude's.
+    pub(crate) fn parse_library(&mut self) -> Result<Vec<Function>, Vec<Diagnostic>> {
+        let (kernels, mut fns) = self.parse_items()?;
+        if let Some(k) = kernels.first() {
+            let d = Diagnostic::error(format!("a library defines functions only, not kernel `{}`", k.name))
+                .primary(k.name_span, "a kernel");
+            return Err(vec![d]);
+        }
+        for f in &mut fns {
+            f.prelude = true;
+        }
+        Ok(fns)
+    }
+
+    fn parse_items(&mut self) -> Result<(Vec<Kernel>, Vec<Function>), Vec<Diagnostic>> {
         let mut kernels = Vec::new();
         let mut fns = Vec::new();
         while !self.matches(&Tok::Eof) && self.errors.len() < diag::MAX_ERRORS {
@@ -165,20 +202,13 @@ impl Parser {
         if !self.errors.is_empty() {
             return Err(std::mem::take(&mut self.errors));
         }
-        // Functions are inlined first, so a jump they splice in is lowered
-        // with the caller's loops.
-        functions::inline(&mut kernels, &fns).map_err(|e| vec![Diagnostic::error(e)])?;
-        for kernel in &mut kernels {
-            let body = std::mem::take(&mut kernel.body);
-            kernel.body = jumps::desugar(body)
-                .map_err(|e| vec![Diagnostic::error(format!("kernel `{}`: {e}", kernel.name))])?;
-        }
-        Ok(kernels)
+        Ok((kernels, fns))
     }
 
     /// `fn name(params) = expr` or `fn name(params) { stmts }`.
-    fn parse_function(&mut self) -> PResult<functions::Function> {
+    fn parse_function(&mut self) -> PResult<Function> {
         self.expect(Tok::Fn)?;
+        let span = self.here();
         let name = self.ident()?;
         let open = self.here();
         self.expect(Tok::LParen)?;
@@ -201,7 +231,14 @@ impl Parser {
             }
             functions::Body::Stmts(body)
         };
-        Ok(functions::Function { name, params, body })
+        Ok(Function {
+            name,
+            params,
+            body,
+            span,
+            file: String::new(),
+            prelude: false,
+        })
     }
 
     fn parse_kernel(&mut self) -> PResult<Kernel> {

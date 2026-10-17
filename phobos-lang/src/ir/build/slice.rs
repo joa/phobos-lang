@@ -61,6 +61,9 @@ impl Build {
                 lhs,
                 rhs,
             } => gcd(self.expr_div(lhs), self.expr_div(rhs)),
+            ExprKind::Call { callee, args } if callee == super::extent::EXTENT => {
+                self.extent_div(args).map_or(1, |n| n.abs().min(CAP))
+            }
             ExprKind::Call { .. } => self.const_fold(expr).map_or(1, |n| n.abs().min(CAP)),
             _ => 1,
         }
@@ -73,6 +76,7 @@ impl Build {
             ExprKind::Int(n) => Some(*n),
             ExprKind::Var(name) if self.lookup(name).is_none() => self.shape_env.get(name).copied(),
             ExprKind::Call { callee, args } if args.is_empty() => self.ctx_count(callee),
+            ExprKind::Call { callee, args } if callee == super::extent::EXTENT => self.extent_fold(args),
             ExprKind::Unary { op: UnOp::Neg, rhs } => self.const_fold(rhs)?.checked_neg(),
             ExprKind::Binary { op, lhs, rhs } => {
                 let (a, b) = (self.const_fold(lhs)?, self.const_fold(rhs)?);
