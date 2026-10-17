@@ -120,7 +120,8 @@ impl Options {
                          \n  --bench NAME                run only one benchmark: {}\
                          \n  --autotune SPEC             pin autotune dims (skips the search), e.g.\
                          \n                              --bench gemm_fp16 --autotune \"TILE_M=256 TILE_N=128 TILE_K=16\"\
-                         \n  --shape MxNxK               a GEMM problem, repeatable (default 4096x4096x4096)\
+                         \n  --shape MxNxK               a GEMM problem, repeatable (default 4096x4096x4096;\
+                         \n                              split-K 64x1024x16384, unaligned 4000x4000x4000)\
                          \n  --suite                     each GEMM kind's compact problem suite\
                          \n  --rounds N                  interleaved timing rounds of a GEMM final (default: about 2 s)\
                          \n  --json PATH                 write the GEMM results, checks and environment as JSON\

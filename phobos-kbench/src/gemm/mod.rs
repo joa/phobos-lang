@@ -67,7 +67,21 @@ pub(crate) fn suite(kind: Kind) -> Vec<Dims> {
 fn default_shapes(kind: Kind) -> Vec<Dims> {
     match kind {
         Kind::F32Unaligned => vec![(4000, 4000, 4000)],
+        Kind::F32SplitK => vec![SPLIT_K_SHAPE],
         _ => vec![(4096, 4096, 4096)],
+    }
+}
+
+/// Split-K's problem: a small M and a long k, which leave a plain tiling a
+/// fraction of a wave.
+const SPLIT_K_SHAPE: Dims = (64, 1024, 16384);
+
+/// The problem a kind's CSV row reports, if any.
+fn csv_shape(kind: Kind) -> Option<Dims> {
+    match kind {
+        Kind::F32Unaligned => None,
+        Kind::F32SplitK => Some(SPLIT_K_SHAPE),
+        _ => Some((4096, 4096, 4096)),
     }
 }
 
@@ -109,7 +123,7 @@ pub(crate) fn run(
     for dims in shapes {
         match problem(stream, kind, dims, opts, pins, env, blas, conv.as_ref(), &variants, &mut cache) {
             Ok(row) => {
-                if dims == (4096, 4096, 4096) {
+                if Some(dims) == csv_shape(kind) {
                     let t = &row["timing_kernel_only"];
                     let phobos = t["phobos"]["median_ms"].as_f64().unwrap_or(f64::NAN);
                     let blas_ms = t[if kind.baseline_converts() { "cublas_with_convert" } else { "cublas" }]["median_ms"]
