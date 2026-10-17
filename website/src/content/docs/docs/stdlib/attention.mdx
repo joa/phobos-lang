@@ -22,7 +22,7 @@ as [`online_softmax`](#online_softmax) and the whole pass over the keys as
 ```phobos
 @tensorcore
 @launch(128)
-@autotune(D in [64], BR in [64], BC in [64])
+@autotune(D in [64], BR in [64], BC in [32])
 @aligned(Nq = BR)
 kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], V: tensor<f16>[Nk, D],
                        O: tensor<f16>[Nq, D], scale: f32) {

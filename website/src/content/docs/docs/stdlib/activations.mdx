@@ -120,7 +120,7 @@ multiplies the gate's activation into the other. The product is one more
 operation in the same sweep:
 
 ```phobos
-@autotune(R in [16])
+@autotune(R in [8])
 kernel swiglu_rows(G: tensor<f32>[M, 512], U: tensor<f32>[M, 512], H: tensor<f16>[M, 512]) {
   let r = ctx.block.x * R
   H[r :+ R, :] = swiglu(G[r :+ R, :], U[r :+ R, :])

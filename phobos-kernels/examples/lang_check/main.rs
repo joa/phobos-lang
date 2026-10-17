@@ -12,6 +12,7 @@ use cust::prelude::*;
 use phobos_kernels::compile::context_for;
 use phobos_kernels::{compile_in, cuda_ok, push_descriptor};
 
+mod stdlib;
 mod tensor;
 use tensor::{dot_epilogue, flash_softmax, scaled_int8_dot};
 
@@ -129,6 +130,11 @@ fn main() -> Result<()> {
     restaged_lanes(&mut failures)?;
     lane_runs(&mut failures)?;
     unrolled_sum(&mut failures)?;
+    stdlib::activations(&mut failures)?;
+    stdlib::row_functions(&mut failures)?;
+    stdlib::rope_and_quant(&mut failures)?;
+    stdlib::matmuls(&mut failures)?;
+    stdlib::attention(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
