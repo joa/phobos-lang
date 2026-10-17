@@ -134,7 +134,9 @@ export function mlirStation(layout: Layout): StationGeometry & { regions: Placed
     }
     for (const child of placed.region.children) if (child.op !== "else") ops.push(dialectOf(child.op))
     ops.sort((a, b) => DIALECT_ORDER.indexOf(a) - DIALECT_ORDER.indexOf(b))
-    const cell = placed.own
+    // A region too small for its header has no cell of its own; its points
+    // go in its box instead.
+    const cell = placed.own.width > 0 && placed.own.height > 0 ? placed.own : placed.box
     if (ops.length === 0 || cell.width <= 0 || cell.height <= 0) continue
     const cols = Math.max(1, Math.round(Math.sqrt((ops.length * cell.width) / cell.height)))
     const rowsCount = Math.ceil(ops.length / cols)

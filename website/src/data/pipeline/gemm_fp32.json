@@ -4,8 +4,8 @@
     "ast": "For {\n    var: \"kt\",\n    start: Int(0),\n    end: Var(\"K\"),\n    step: Some(\n        Var(\"TILE_K\"),\n    ),\n    unroll: Some(\n        Var(\"U\"),\n    ),\n    body: [\n        Var {\n            name: \"a\",\n            ty: None,\n...",
     "graph": "%38: gemm<f32>[32, 32]/4 = for %27, %K.7, %28, %26 {\n^(%kt.29: index, %30: gemm<f32>[32, 32]/4)\n  %31: index = const 32\n  %32: index = mul %pm.23, %31\n  %33: tile<f32>[32, 4]@global{align 4} = slice [32, 4] %A.5, %32, %kt.29\n  %34: index = const 32\n  %35: index = mul %pn.24, %34\n  %36: tile<f32>[4, 32]@global{align 32} = slice [4, 32] %B.8, %kt.29, %35\n  %37: gemm<f32>[32, 32]/4 = gemm_dot %30, %33, %36\n  yield %37",
     "passes": "// TILE_M=32 TILE_N=32 TILE_K=4, sm_75\ntile0   512 B at    0  dot staging\ntile1   512 B at  512  dot staging\ntile2   512 B at 1024  dot staging\ntile3   512 B at 1536  dot staging\npeak 2048 B of shared memory\nbarriers: 1 kept, 0 elided",
-    "mlir": "%29 = scf.for %arg5 = %c0_9 to %dim_0 step %28 iter_args(%arg6 = %6) -> (vector<4x4xf32>) {\n  %58 = arith.addi %arg5, %c4_10 : index\n  %59 = arith.cmpi slt, %58, %dim_0 : index\n  scf.if %59 {\n    %c32_46 = arith.constant 32 : index\n    %63 = arith.muli %block_id_x, %c32_46 : index\n    %subview_47 = memref.subview %assume_align[%63, %58] [32, 4] [1, 1] : memref<?x?xf32, 1> to memref<32x4xf32, strided<[?, 1], offset: ?>, 1>\n    %c32_48 = arith.constant 32 : index\n    %64 = arith.muli %block_id_y, %c32_48 : index\n...",
-    "ptx": ".target sm_75\n.visible .entry gemm(\n.maxntid 256\n...\nld.global.v4.b32  {%r311, %r312, %r313, %r314}, [%rd55];\nbar.sync  0;\nld.shared.v4.b32  {%r207, %r208, %r209, %r210}, [%rd59+-256];\nfma.rn.f32  %r239, %r207, %r214, %r326;"
+    "mlir": "%29 = scf.for %arg5 = %c0_9 to %dim_0 step %28 iter_args(%arg6 = %6) -> (vector<4x4xf32>) {\n  %36 = arith.addi %arg5, %c4_10 : index\n  %37 = arith.subi %dim_0, %c4_10 : index\n  %38 = arith.minsi %36, %37 : index\n  %c32_40 = arith.constant 32 : index\n  %39 = arith.muli %block_id_x, %c32_40 : index\n  %subview_41 = memref.subview %assume_align[%39, %38] [32, 4] [1, 1] : memref<?x?xf32, 1> to memref<32x4xf32, strided<[?, 1], offset: ?>, 1>\n  %c32_42 = arith.constant 32 : index\n  %40 = arith.muli %block_id_y, %c32_42 : index\n...",
+    "ptx": ".target sm_75\n.visible .entry gemm(\n.maxntid 256\n...\nld.global.v4.b32  {%r309, %r310, %r311, %r312}, [%rd57];\nbar.sync  0;\nld.shared.v4.b32  {%r219, %r220, %r221, %r222}, [%rd60+-256];\nfma.rn.f32  %r251, %r219, %r226, %r321;"
   },
   "structure": {
     "source": {
@@ -13,10 +13,10 @@
       "lines": [
         {
           "n": 1,
-          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8])",
+          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128])",
           "role": "attribute"
         },
-        { "n": 2, "text": "@launch(256)", "role": "attribute" },
+        { "n": 2, "text": "@launch(T)", "role": "attribute" },
         { "n": 3, "text": "@pipeline", "role": "attribute" },
         { "n": 4, "text": "@aligned(M = TILE_M, N = TILE_N, K = TILE_K)", "role": "attribute" },
         { "n": 5, "text": "kernel gemm(A: tensor<f32>[M, K],", "role": "signature" },
@@ -942,31 +942,26 @@
         "role": "kernel",
         "ops": {
           "memref.assume_alignment": 7,
-          "arith.constant": 39,
+          "arith.constant": 35,
           "memref.dim": 3,
           "arith.remsi": 3,
-          "arith.cmpi": 3,
+          "arith.cmpi": 4,
           "gpu.block_id": 2,
           "vector.broadcast": 3,
           "gpu.thread_id": 3,
-          "arith.divui": 3,
+          "arith.divui": 4,
           "arith.minsi": 1,
           "arith.remui": 3,
           "arith.muli": 11,
-          "arith.addi": 6,
+          "arith.addi": 2,
           "memref.get_global": 4,
           "memref.view": 4,
           "memref.subview": 3,
           "gpu.block_dim": 2,
           "gpu.barrier": 1,
-          "vector.extract": 4,
-          "vector.load": 4,
-          "arith.mulf": 8,
-          "arith.addf": 4,
-          "vector.store": 4,
           "gpu.return": 1
         },
-        "total": 335,
+        "total": 346,
         "children": [
           { "op": "scf.if", "line": 21, "role": "guard", "ops": { "llvm.intr.trap": 1 }, "total": 1, "children": [] },
           { "op": "scf.if", "line": 28, "role": "guard", "ops": { "llvm.intr.trap": 1 }, "total": 1, "children": [] },
@@ -1007,59 +1002,26 @@
             "op": "scf.for",
             "line": 134,
             "role": "loop",
-            "ops": { "arith.addi": 1, "arith.cmpi": 2, "arith.constant": 3, "gpu.barrier": 1, "scf.yield": 1 },
-            "total": 173,
+            "ops": {
+              "arith.addi": 3,
+              "arith.subi": 1,
+              "arith.minsi": 3,
+              "arith.constant": 15,
+              "arith.muli": 4,
+              "memref.subview": 2,
+              "gpu.thread_id": 2,
+              "arith.cmpi": 3,
+              "arith.divui": 2,
+              "arith.remui": 2,
+              "vector.load": 2,
+              "gpu.barrier": 1,
+              "scf.yield": 1
+            },
+            "total": 181,
             "children": [
               {
-                "op": "scf.if",
-                "line": 137,
-                "role": "copy",
-                "ops": {
-                  "arith.constant": 8,
-                  "arith.muli": 4,
-                  "memref.subview": 2,
-                  "gpu.thread_id": 2,
-                  "gpu.block_dim": 2
-                },
-                "total": 47,
-                "children": [
-                  {
-                    "op": "scf.for",
-                    "line": 150,
-                    "role": "copy",
-                    "ops": {
-                      "arith.remui": 1,
-                      "arith.divui": 1,
-                      "arith.constant": 5,
-                      "arith.muli": 1,
-                      "vector.load": 1,
-                      "vector.extract": 4,
-                      "arith.addi": 4,
-                      "memref.store": 4
-                    },
-                    "total": 21,
-                    "children": []
-                  },
-                  {
-                    "op": "scf.for",
-                    "line": 179,
-                    "role": "copy",
-                    "ops": {
-                      "arith.remui": 1,
-                      "arith.divui": 1,
-                      "arith.constant": 1,
-                      "arith.muli": 1,
-                      "vector.load": 1,
-                      "vector.store": 1
-                    },
-                    "total": 6,
-                    "children": []
-                  }
-                ]
-              },
-              {
                 "op": "scf.for",
-                "line": 191,
+                "line": 173,
                 "role": "contract",
                 "ops": {
                   "arith.constant": 5,
@@ -1077,61 +1039,44 @@
               },
               {
                 "op": "scf.if",
-                "line": 224,
+                "line": 204,
                 "role": "branch",
-                "ops": { "arith.addi": 1, "arith.cmpi": 1, "arith.constant": 3, "gpu.barrier": 1, "scf.yield": 1 },
-                "total": 85,
+                "ops": { "vector.extract": 4, "arith.constant": 4, "arith.addi": 4, "memref.store": 4 },
+                "total": 16,
+                "children": []
+              },
+              {
+                "op": "scf.if",
+                "line": 222,
+                "role": "branch",
+                "ops": { "vector.store": 1 },
+                "total": 1,
+                "children": []
+              },
+              {
+                "op": "scf.if",
+                "line": 227,
+                "role": "branch",
+                "ops": {
+                  "arith.addi": 3,
+                  "arith.subi": 1,
+                  "arith.minsi": 3,
+                  "arith.constant": 15,
+                  "arith.muli": 4,
+                  "memref.subview": 2,
+                  "gpu.thread_id": 2,
+                  "arith.cmpi": 2,
+                  "arith.divui": 2,
+                  "arith.remui": 2,
+                  "vector.load": 2,
+                  "gpu.barrier": 1,
+                  "scf.yield": 1
+                },
+                "total": 89,
                 "children": [
                   {
-                    "op": "scf.if",
-                    "line": 227,
-                    "role": "copy",
-                    "ops": {
-                      "arith.constant": 8,
-                      "arith.muli": 4,
-                      "memref.subview": 2,
-                      "gpu.thread_id": 2,
-                      "gpu.block_dim": 2
-                    },
-                    "total": 47,
-                    "children": [
-                      {
-                        "op": "scf.for",
-                        "line": 240,
-                        "role": "copy",
-                        "ops": {
-                          "arith.remui": 1,
-                          "arith.divui": 1,
-                          "arith.constant": 5,
-                          "arith.muli": 1,
-                          "vector.load": 1,
-                          "vector.extract": 4,
-                          "arith.addi": 4,
-                          "memref.store": 4
-                        },
-                        "total": 21,
-                        "children": []
-                      },
-                      {
-                        "op": "scf.for",
-                        "line": 269,
-                        "role": "copy",
-                        "ops": {
-                          "arith.remui": 1,
-                          "arith.divui": 1,
-                          "arith.constant": 1,
-                          "arith.muli": 1,
-                          "vector.load": 1,
-                          "vector.store": 1
-                        },
-                        "total": 6,
-                        "children": []
-                      }
-                    ]
-                  },
-                  {
                     "op": "scf.for",
-                    "line": 281,
+                    "line": 266,
                     "role": "contract",
                     "ops": {
                       "arith.constant": 5,
@@ -1146,30 +1091,58 @@
                     "children": [],
                     "iterArgs": true,
                     "resultType": "vector<4x4xf32>"
+                  },
+                  {
+                    "op": "scf.if",
+                    "line": 297,
+                    "role": "branch",
+                    "ops": { "vector.extract": 4, "arith.constant": 4, "arith.addi": 4, "memref.store": 4 },
+                    "total": 16,
+                    "children": []
+                  },
+                  {
+                    "op": "scf.if",
+                    "line": 315,
+                    "role": "branch",
+                    "ops": { "vector.store": 1 },
+                    "total": 1,
+                    "children": []
                   }
                 ],
                 "resultType": "vector<4x4xf32>"
               },
-              { "op": "else", "line": 314, "role": "branch", "ops": { "scf.yield": 1 }, "total": 1, "children": [] }
+              { "op": "else", "line": 320, "role": "branch", "ops": { "scf.yield": 1 }, "total": 1, "children": [] }
             ],
             "iterArgs": true,
             "resultType": "vector<4x4xf32>"
+          },
+          {
+            "op": "scf.if",
+            "line": 334,
+            "role": "branch",
+            "ops": {
+              "arith.constant": 4,
+              "arith.addi": 4,
+              "vector.extract": 4,
+              "vector.load": 4,
+              "arith.mulf": 8,
+              "arith.addf": 4,
+              "vector.store": 4
+            },
+            "total": 32,
+            "children": []
           }
         ]
       },
-      "dialects": { "gpu": 21, "memref": 38, "arith": 182, "scf": 20, "llvm": 3, "vector": 74 },
-      "ops": 338,
-      "constants": 89,
+      "dialects": { "gpu": 17, "memref": 38, "arith": 198, "scf": 19, "llvm": 3, "vector": 74 },
+      "ops": 349,
+      "constants": 93,
       "loops": [
         { "line": 94, "depth": 0, "role": "copy", "iterArgs": false },
         { "line": 123, "depth": 0, "role": "copy", "iterArgs": false },
         { "line": 134, "depth": 0, "role": "loop", "iterArgs": true },
-        { "line": 150, "depth": 1, "role": "copy", "iterArgs": false },
-        { "line": 179, "depth": 1, "role": "copy", "iterArgs": false },
-        { "line": 191, "depth": 1, "role": "contract", "iterArgs": true },
-        { "line": 240, "depth": 1, "role": "copy", "iterArgs": false },
-        { "line": 269, "depth": 1, "role": "copy", "iterArgs": false },
-        { "line": 281, "depth": 1, "role": "contract", "iterArgs": true }
+        { "line": 173, "depth": 1, "role": "contract", "iterArgs": true },
+        { "line": 266, "depth": 1, "role": "contract", "iterArgs": true }
       ],
       "sharedBytes": 2048,
       "labels": ["%block_id_x = gpu.block_id  x", "%6 = vector.broadcast %cst : f32 to vector<4x4xf32>", "gpu.barrier"],
@@ -1182,10 +1155,10 @@
       "maxThreads": 256,
       "params": 23,
       "sharedBytes": 2048,
-      "registers": { "pred": 15, "b32": 343, "b64": 63 },
+      "registers": { "pred": 12, "b32": 335, "b64": 63 },
       "registersVirtual": true,
-      "instructions": 447,
-      "blocks": 26,
+      "instructions": 424,
+      "blocks": 23,
       "families": [
         { "name": "ld.global", "group": "memory", "count": 10 },
         { "name": "st.global", "group": "memory", "count": 4 },
@@ -1195,11 +1168,11 @@
         { "name": "fma", "group": "float", "count": 128 },
         { "name": "mul.f", "group": "float", "count": 32 },
         { "name": "add.f", "group": "float", "count": 16 },
-        { "name": "cvt", "group": "convert", "count": 0 },
-        { "name": "int", "group": "integer", "count": 124 },
-        { "name": "mov", "group": "move", "count": 40 },
-        { "name": "setp", "group": "control", "count": 14 },
-        { "name": "bra", "group": "control", "count": 30 },
+        { "name": "cvt", "group": "convert", "count": 2 },
+        { "name": "int", "group": "integer", "count": 116 },
+        { "name": "mov", "group": "move", "count": 30 },
+        { "name": "setp", "group": "control", "count": 11 },
+        { "name": "bra", "group": "control", "count": 26 },
         { "name": "bar.sync", "group": "sync", "count": 3 },
         { "name": "trap", "group": "control", "count": 3 },
         { "name": "ret", "group": "control", "count": 1 }
@@ -1207,33 +1180,37 @@
       "opcodes": {
         "ld.param.b32": 8,
         "shr.s32": 3,
-        "shr.u32": 8,
-        "add.s32": 19,
-        "and.b32": 8,
+        "shr.u32": 7,
+        "add.s32": 14,
+        "and.b32": 7,
         "sub.s32": 3,
         "setp.eq.b32": 3,
-        "bra": 15,
-        "bra.uni": 15,
+        "bra": 14,
+        "bra.uni": 12,
         "ld.param.b64": 3,
         "mov.u32": 4,
-        "min.s32": 1,
-        "shl.b32": 10,
-        "or.b32": 4,
-        "mul.lo.s32": 3,
-        "mul.wide.u32": 5,
-        "mov.b64": 8,
-        "add.s64": 36,
-        "mul.wide.s32": 17,
-        "mov.b32": 28,
-        "setp.gt.s32": 8,
+        "min.s32": 4,
+        "shl.b32": 8,
+        "or.b32": 3,
+        "mul.lo.s32": 4,
+        "mul.wide.u32": 8,
+        "mov.b64": 5,
+        "add.s64": 34,
+        "mul.wide.s32": 13,
+        "mov.b32": 21,
+        "setp.gt.s32": 4,
         "ld.global.v4.b32": 10,
         "st.shared.b32": 12,
-        "mad.lo.s32": 7,
+        "mad.lo.s32": 6,
         "st.shared.v4.b32": 3,
         "bar.sync": 3,
-        "setp.ge.s32": 3,
+        "setp.gt.u32": 1,
+        "setp.ge.s32": 2,
+        "cvt.s64.s32": 2,
         "ld.shared.v4.b32": 16,
         "fma.rn.f32": 128,
+        "shl.b64": 2,
+        "setp.ne.b32": 1,
         "mul.rn.f32": 32,
         "add.rn.f32": 16,
         "st.global.v4.b32": 4,
