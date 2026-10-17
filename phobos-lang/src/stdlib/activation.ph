@@ -15,6 +15,16 @@ fn leaky_relu(x, slope) = max(x, x * slope)
 // `x` limited to `[-1, 1]`.
 fn hardtanh(x) = clamp(x, -1.0, 1.0)
 
+// `x` where it is above `th`, `value` elsewhere.
+fn threshold(x, th, value) = where(x > th, x, value)
+
+// Shrinkage, as sparse coding uses it: `hardshrink` zeroes `[-l, l]` and
+// keeps `x` outside it, `softshrink` zeroes it and moves the rest `l`
+// toward 0, and `tanhshrink` is `x - tanh(x)`. `l >= 0`.
+fn hardshrink(x, l) = where(abs(x) > l, x, 0.0)
+fn softshrink(x, l) = x - clamp(x, -l, l)
+fn tanhshrink(x) = x - tanh(x)
+
 // `x` for a positive `x`, `alpha * (e^x - 1)` otherwise. `alpha > 0`.
 fn elu(x, alpha) = max(x, 0.0) + min(alpha * (exp(x) - 1.0), 0.0)
 

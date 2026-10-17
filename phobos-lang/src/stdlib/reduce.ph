@@ -13,6 +13,21 @@ fn rowmean(t) = rowsum(t) / f32(extent(t, 1))
 // The minimum of each row, `[R, C] -> [R, 1]`.
 fn rowmin(t) = -rowmax(-t)
 
+// The column of each row's minimum, `[R, C] -> [R, 1]` (`i32`), the
+// smaller column on a tie.
+fn rowargmin(t) = rowargmax(-t)
+
+// The variance of each row, `[R, C] -> [R, 1]`: the mean squared distance
+// from the row's mean, the biased variance a layer norm takes.
+fn rowvar(t) = rowsum(square(t - rowmean(t))) / f32(extent(t, 1))
+
+// Reductions down the columns, `[R, C] -> [1, C]`, as a batch norm folds
+// a batch. Each transposes `t` through shared memory and reduces its rows.
+fn colsum(t) = transpose(rowsum(transpose(t)))
+fn colmax(t) = transpose(rowmax(transpose(t)))
+fn colmin(t) = -colmax(-t)
+fn colmean(t) = colsum(t) / f32(extent(t, 0))
+
 // Each row's softmax, in place: `e^(t - max) / sum e^(t - max)`. The row
 // maximum is taken out first, so no row overflows.
 fn softmax(t) {

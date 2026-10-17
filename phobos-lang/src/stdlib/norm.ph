@@ -21,6 +21,21 @@ fn layer_norm(x, w, b, eps) {
   x = x * r * w + b
 }
 
+// Batch norm as inference applies it: `(x - mean) / sqrt(variance + eps)
+// * w + b`, with `mean`, `variance`, `w` and `b` the running statistics and
+// the affine parameters, each a `[1, C]` row or a scalar. An expression
+// function, so it fuses into the statement that stores it.
+fn batch_norm(x, mean, variance, w, b, eps) = (x - mean) * rsqrt(variance + eps) * w + b
+
+// The batch statistics of the rows of `x`, a batch of `R` samples: each
+// column's mean into `mean` and its biased variance into `variance`, both
+// `[1, C]` names. The statistics of a batch spread over several blocks are
+// the merge of each block's.
+fn batch_norm_stats(mean, variance, x) {
+  mean = colmean(x)
+  variance = colmean(square(x - mean))
+}
+
 // Each row scaled to unit length: `x / max(||x||, eps)`, as
 // `torch.nn.functional.normalize`.
 fn l2_normalize(x, eps) {

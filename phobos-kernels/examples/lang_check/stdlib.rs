@@ -62,6 +62,10 @@ pub(crate) fn activations(failures: &mut u32) -> Result<()> {
         ("relu6(x)", 0.0, Box::new(|x| x.clamp(0.0, 6.0))),
         ("leaky_relu(x, 0.1)", 1e-7, Box::new(|x| if x > 0.0 { x } else { 0.1 * x })),
         ("hardtanh(x)", 0.0, Box::new(|x| x.clamp(-1.0, 1.0))),
+        ("threshold(x, 0.5, -2.0)", 0.0, Box::new(|x| if x > 0.5 { x } else { -2.0 })),
+        ("hardshrink(x, 0.5)", 0.0, Box::new(|x| if x.abs() > 0.5 { x } else { 0.0 })),
+        ("softshrink(x, 0.5)", 1e-7, Box::new(|x| x - x.clamp(-0.5, 0.5))),
+        ("tanhshrink(x)", TANH, Box::new(|x| x - x.tanh())),
         ("elu(x, 1.0)", APPROX, Box::new(move |x| elu(x, 1.0))),
         ("selu(x)", APPROX, Box::new(move |x| 1.0507009873554805 * elu(x, 1.6732632423543772))),
         ("celu(x, 2.0)", APPROX, Box::new(move |x| elu(x / 2.0, 1.0) * 2.0)),
@@ -154,6 +158,24 @@ pub(crate) fn row_functions(failures: &mut u32) -> Result<()> {
     rows("std logsumexp", "logsumexp(Y[0 :+ 16, :], x)", 1, &x, |r| vec![lse(r)], 2e-5, failures)?;
     rows("std rowmean", "Y[0 :+ 16, :] = rowmean(x * x)", 1, &x, |r| vec![r.iter().map(|v| v * v).sum::<f64>() / 64.0], 1e-5, failures)?;
     rows("std rowmin", "Y[0 :+ 16, :] = rowmin(x)", 1, &x, |r| vec![r.iter().cloned().fold(f64::MAX, f64::min)], 0.0, failures)?;
+    rows(
+        "std rowargmin",
+        "Y[0 :+ 16, :] = f32(rowargmin(x))",
+        1,
+        &x,
+        |r| vec![(0..64).fold(0, |m, j| if r[j] < r[m] { j } else { m }) as f64],
+        0.0,
+        failures,
+    )?;
+    rows(
+        "std rowvar",
+        "Y[0 :+ 16, :] = rowvar(x)",
+        1,
+        &x,
+        move |r| vec![r.iter().map(|v| (v - mean(r)).powi(2)).sum::<f64>() / 64.0],
+        1e-5,
+        failures,
+    )?;
     rows(
         "std mask_cols, softmax",
         "mask_cols(x, 37, -1.0e30)\n softmax(x)\n Y[0 :+ 16, :] = x",
@@ -296,6 +318,29 @@ pub(crate) fn rope_and_quant(failures: &mut u32) -> Result<()> {
         }
     }
     report("std rope", worst < 1e-6, format!("err {worst:.2e}"), failures);
+
+    // GPT-J's pairs: `x` as `[16, 32, 2]`, the angles as `[16, 32, 1]`.
+    let src = "kernel k(X: tensor<f32>[16, 32, 2], C: tensor<f32>[16, 32, 1], S: tensor<f32>[16, 32, 1]) {
+            rope_pairs(X[0 :+ 16, :, 0], X[0 :+ 16, :, 1], C[0 :+ 16, :, 0], S[0 :+ 16, :, 0])
+        }";
+    let (a, c, s) = (Arg::new(&x, 16, 64)?, Arg::new(&cos, 16, 32)?, Arg::new(&sin, 16, 32)?);
+    let mut slots = Vec::new();
+    for (arg, last) in [(&a, 2), (&c, 1), (&s, 1)] {
+        let ptr = arg.buf.as_device_ptr().as_raw();
+        slots.extend_from_slice(&[ptr, ptr, 0, 16, 32, last, 32 * last, last, 1]);
+    }
+    run(src, "k", 1, &mut slots)?;
+    let got = a.read()?;
+    let mut worst = 0.0f32;
+    for r in 0..16 {
+        for j in 0..32 {
+            let (p, q) = (x[r * 64 + 2 * j], x[r * 64 + 2 * j + 1]);
+            let (cs, sn) = (cos[r * 32 + j], sin[r * 32 + j]);
+            worst = worst.max((got[r * 64 + 2 * j] - (p * cs - q * sn)).abs());
+            worst = worst.max((got[r * 64 + 2 * j + 1] - (q * cs + p * sn)).abs());
+        }
+    }
+    report("std rope_pairs", worst < 1e-6, format!("err {worst:.2e}"), failures);
 
     // The round trip: quantized within half a step of the row's scale.
     let src = "kernel k(X: tensor<f32>[16, 64], Q: tensor<i8>[16, 64], S: tensor<f32>[16, 1], Y: tensor<f32>[16, 64]) {

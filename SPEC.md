@@ -144,7 +144,7 @@ The body's own `let`s, `var`s and loop variables never meet the caller's. Any ot
 
 ### Standard library
 
-Every program is compiled against the standard library, functions written in Phobos (`phobos-lang/src/stdlib/`) and inlined as the program's own are: activations, row-wise softmax and norms, the online softmax and attention, the GEMM k-loop and int8 quantization. A function the program defines shadows the library's of the same name, and a name starting with `_` is the library's own helper. `phobos-compile --no-std` compiles with no library and `--stdlib FILE` against the functions `FILE` defines instead. The website documents each function.
+Every program is compiled against the standard library, functions written in Phobos (`phobos-lang/src/stdlib/`) and inlined as the program's own are: activations, row and column reductions, softmax and norms, the online softmax, attention and rotary embeddings, the GEMM k-loop, int8 quantization, losses, and counter-based random numbers and dropout. A function the program defines shadows the library's of the same name, and a name starting with `_` is the library's own helper. `phobos-compile --no-std` compiles with no library and `--stdlib FILE` against the functions `FILE` defines instead. The website documents each function.
 
 ## Subscripts
 

@@ -20,6 +20,8 @@ pub const FILES: &[(&str, &str)] = &[
     ("std/attention.ph", include_str!("stdlib/attention.ph")),
     ("std/linalg.ph", include_str!("stdlib/linalg.ph")),
     ("std/quant.ph", include_str!("stdlib/quant.ph")),
+    ("std/loss.ph", include_str!("stdlib/loss.ph")),
+    ("std/random.ph", include_str!("stdlib/random.ph")),
 ];
 
 /// One function of a library, as it is declared.

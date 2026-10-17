@@ -9,7 +9,8 @@ fn probe(body: &str) -> String {
     format!(
         "kernel k(X: tensor<f32>[N, 64], Y: tensor<f32>[N, 64], W: tensor<f32>[1, 64], Z: tensor<f32>[N, 1],
                   C: tensor<f32>[N, 32], S: tensor<f32>[N, 32], Q: tensor<i8>[N, 64],
-                  I: tensor<i32>[N, 4], V: tensor<f32>[N, 4]) {{
+                  I: tensor<i32>[N, 4], V: tensor<f32>[N, 4], T: tensor<i32>[N, 1],
+                  P: tensor<f32>[N, 32, 2], PC: tensor<f32>[N, 32, 1], seed: i32) {{
             let r = ctx.block.x * 16
             var x = X[r :+ 16, :]
             {body}
@@ -23,6 +24,7 @@ const CALLS: &[&str] = &[
     "Y[r :+ 16, :] = square(x) + rcp(x) + clamp(x, -2.0, 2.0) + lerp(x, Y[r :+ 16, :], 0.25)",
     "Y[r :+ 16, :] = exp2(x) + log2(x) + sign(x) + erf(x)",
     "Y[r :+ 16, :] = relu(x) + relu6(x) + leaky_relu(x, 0.01) + hardtanh(x)",
+    "Y[r :+ 16, :] = threshold(x, 0.5, -1.0) + hardshrink(x, 0.5) + softshrink(x, 0.5) + tanhshrink(x)",
     "Y[r :+ 16, :] = elu(x, 1.0) + selu(x) + celu(x, 2.0)",
     "Y[r :+ 16, :] = sigmoid(x) + log_sigmoid(x) + hardsigmoid(x)",
     "Y[r :+ 16, :] = silu(x) + swish(x, 1.5) + hardswish(x)",
@@ -31,6 +33,8 @@ const CALLS: &[&str] = &[
     "Y[r :+ 16, :] = swiglu(x, X[r :+ 16, :]) + geglu(x, x) + geglu_tanh(x, x) + reglu(x, x)",
     "Z[r :+ 16, :] = rowmean(x * x)",
     "Z[r :+ 16, :] = rowmin(x)",
+    "Z[r :+ 16, :] = f32(rowargmin(x)) + rowvar(x)",
+    "W[0 :+ 1, :] = colsum(x) + colmax(x) + colmin(x) + colmean(x)",
     "softmax(x)\n Y[r :+ 16, :] = x",
     "log_softmax(x)\n Y[r :+ 16, :] = x",
     "logsumexp(Z[r :+ 16, :], x)",
@@ -43,7 +47,19 @@ const CALLS: &[&str] = &[
     "rms_norm(x, W[0 :+ 1, :], 0.00001)\n Y[r :+ 16, :] = x",
     "layer_norm(x, W[0 :+ 1, :], 0.5, 0.00001)\n Y[r :+ 16, :] = x",
     "l2_normalize(x, 0.000001)\n Y[r :+ 16, :] = x",
+    "var mu: tile<f32>[1, 64] = 0.0
+     var va: tile<f32>[1, 64] = 0.0
+     batch_norm_stats(mu, va, x)
+     Y[r :+ 16, :] = batch_norm(x, mu, va, W[0 :+ 1, :], 0.5, 0.00001)",
     "rope(x, C[r :+ 16, :], S[r :+ 16, :])\n Y[r :+ 16, :] = x",
+    "rope_pairs(P[r :+ 16, :, 0], P[r :+ 16, :, 1], PC[r :+ 16, :, 0], PC[r :+ 16, :, 0])",
+    "cross_entropy(Z[r :+ 16, :], x, T[r :+ 16, :])
+     Z[r :+ 16, :] = nll_loss(x, T[r :+ 16, :]) + mse_loss(x, Y[r :+ 16, :]) + l1_loss(x, Y[r :+ 16, :])",
+    "Z[r :+ 16, :] = smooth_l1_loss(x, Y[r :+ 16, :], 1.0) + kl_div(x, Y[r :+ 16, :]) +
+         binary_cross_entropy_with_logits(x, Y[r :+ 16, :])",
+    "Y[r :+ 16, :] = uniform(seed, (r + iota(0)) * 64 + iota(1)) + randn(seed, (r + iota(0)) * 64 + iota(1)) +
+         dropout(x, 0.1, seed, (r + iota(0)) * 64 + iota(1))
+     I[r :+ 16, :] = hash32((r + iota(0)) * 4 + iota(1))",
     "var q: tile<i8>[16, 64]
      quantize_i8(q, Z[r :+ 16, :], x)
      Q[r :+ 16, :] = q

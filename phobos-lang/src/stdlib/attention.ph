@@ -44,12 +44,24 @@ fn attention(acc, q, K, V, scale, BR, BC) {
 // Rotary position embedding, in place, in the rotate-half form of GPT-NeoX
 // and Hugging Face's LLaMA: each row of `x` (`[R, D]`) is split into halves
 // `a` and `b`, and becomes `[a cos - b sin, b cos + a sin]`. `cos` and
-// `sin` are `[R, D / 2]`, the angles of each row's position. The form that
-// rotates adjacent pairs, GPT-J's, needs strided access the language does
-// not have yet.
+// `sin` are `[R, D / 2]`, the angles of each row's position. GPT-J's form,
+// which rotates adjacent pairs, is `rope_pairs`.
 fn rope(x, cos, sin) {
   var a = x[:, 0 :+ extent(x, 1) / 2]
   var b = x[:, extent(x, 1) / 2 :+ extent(x, 1) / 2]
   x[:, 0 :+ extent(x, 1) / 2] = a * cos - b * sin
   x[:, extent(x, 1) / 2 :+ extent(x, 1) / 2] = b * cos + a * sin
+}
+
+// Rotary position embedding of the pairs `(x0, x1)`, in place: `x0` becomes
+// `x0 cos - x1 sin` and `x1` becomes `x1 cos + x0 sin`, all four the same
+// shape. GPT-J's interleaved pairs are two names when the kernel declares
+// the heads as `[T, D / 2, 2]`: `x0` is `X[t :+ R, :, 0]` and `x1` is
+// `X[t :+ R, :, 1]`, with `cos` and `sin` declared `[T, D / 2, 1]` and
+// sliced the same way.
+fn rope_pairs(x0, x1, cos, sin) {
+  var a = x0
+  var b = x1
+  x0 = a * cos - b * sin
+  x1 = b * cos + a * sin
 }

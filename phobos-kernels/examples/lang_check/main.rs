@@ -13,6 +13,7 @@ use phobos_kernels::compile::context_for;
 use phobos_kernels::{compile_in, cuda_ok, push_descriptor};
 
 mod stdlib;
+mod stdlib_stats;
 mod tensor;
 use tensor::{dot_epilogue, flash_softmax, scaled_int8_dot};
 
@@ -135,6 +136,9 @@ fn main() -> Result<()> {
     stdlib::rope_and_quant(&mut failures)?;
     stdlib::matmuls(&mut failures)?;
     stdlib::attention(&mut failures)?;
+    stdlib_stats::columns(&mut failures)?;
+    stdlib_stats::losses(&mut failures)?;
+    stdlib_stats::random(&mut failures)?;
     // Last: a trap leaves the context unusable.
     aligned_promise(&mut failures)?;
     ensure!(failures == 0, "{failures} probe(s) failed");
