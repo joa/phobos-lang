@@ -136,11 +136,15 @@ A function is inlined at every call; there is no call at run time.
 
 | Form | Meaning |
 |---|---|
-| `fn f(a, b) = e` | An expression. `f(x, y)` is `e` with `x` and `y` in place of `a` and `b`, so a per-element body fuses into the caller's sweep. An argument used twice is evaluated twice. |
+| `fn f(a, b) = e` | An expression. `f(x, y)` is `e` with `x` and `y` in place of `a` and `b`, so a per-element body fuses into the caller's sweep. An argument used twice is evaluated twice, except that one tile statement reads an operand it repeats once: `gelu(X[r :+ 16, :])` loads the slice once. |
 | `fn f(a, b) { ... }` | A statement, called as one: `f(x, y)` splices the body in. A parameter passed a name aliases it, so a tile handed in can be written; a parameter that is indexed or assigned must be passed a name. |
 | `let w: tile<T>[r, c] = generate(f)` | A tile with no storage: `f(row, unit)`, a statement function whose body ends in an expression, is its element block at `row` and `unit`, a 4-byte word of an 8-bit tile (bytes `4 unit .. 4 unit + 3`, little-endian, as `word` packs them) and one element otherwise. `f` may read but not write. Each read computes the blocks it needs: as an operand of an int8 fragment accumulator's update (the scaled `dot_t`'s activation, weight and scales, or `acc += r * c`'s column and row), each lane computes the blocks it holds, so the tile never touches shared memory; any other read stores it to a shared tile where it is declared, each thread computing a strided share, with a barrier after. When the accumulator such an update feeds stays a shared tile, each update stores the blocks it reads the same way first. |
 
-The body's own `let`s, `var`s and loop variables never meet the caller's. Any other name in a body resolves at the call, as a macro's would. A statement body may not `return`, nor `break` or `continue` outside its own loops. A function calling itself, directly or not, is an error.
+The body's own `let`s, `var`s and loop variables never meet the caller's. Any other name in a body resolves at the call, as a macro's would. A tile or tensor type in a body may be sized by the function's parameters, each passed a name or a literal: `fn f(R) { var t: tile<f32>[R, 4] = 0.0 }` called as `f(BR)`. A statement body may not `return`, nor `break` or `continue` outside its own loops. A function calling itself, directly or not, is an error.
+
+### Standard library
+
+Every program is compiled against the standard library, functions written in Phobos (`phobos-lang/src/stdlib/`) and inlined as the program's own are: activations, row-wise softmax and norms, the online softmax and attention, the GEMM k-loop and int8 quantization. A function the program defines shadows the library's of the same name, and a name starting with `_` is the library's own helper. `phobos-compile --no-std` compiles with no library and `--stdlib FILE` against the functions `FILE` defines instead. The website documents each function.
 
 ## Subscripts
 
@@ -300,6 +304,7 @@ All take a rank-2 tile with a static shape. The argument of `rowmax`, `rowsum` o
 | `cumsum(t)` | `[R, C] -> [R, C]` | `out[i, j] = sum_{r <= i} t[r, j]`, down the rows. Float only. |
 | `tril(t)` | `[R, C] -> [R, C]` | Keeps `t[i, j]` for `j <= i`, zeros the rest. Float only. |
 | `transpose(t)` | `[R, C] -> [C, R]` | `out[i, j] = t[j, i]`. |
+| `extent(x, d)` | index | The extent of axis `d` (a constant) of `x`: a tile, a tensor, a slice of one, or an elementwise expression over them. A constant where the axis is static; a dynamic tensor axis is read at run time. It lets a function size its loops and slices from what it is handed. |
 | `flat(t)` | `[R, C] -> [1, R * C]` | Row-major view of the same bytes; writing through it writes `t`. `t` must be a declared tile, or a whole tensor of static shape (a parameter or scratch), not a slice. |
 | `gather(table, idx)` | `idx.shape` | `out[i] = table[idx[i]]`. `table` is `[n]` or `[1, n]`; result has `table`'s element type. |
 

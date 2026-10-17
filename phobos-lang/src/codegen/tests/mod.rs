@@ -26,6 +26,7 @@ mod reduce;
 mod regs;
 mod select;
 mod staged;
+mod stdlib;
 mod swizzle;
 mod sync;
 mod tensorcore;

@@ -9,7 +9,7 @@ mod lane_sum;
 mod lanes;
 mod decl;
 mod matmul;
-mod names;
+pub(crate) mod names;
 mod params;
 mod pipeline;
 mod regs;

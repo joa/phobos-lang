@@ -171,8 +171,21 @@ pub struct Diagnostics {
 }
 
 impl Diagnostics {
+    /// A diagnostic equal to an earlier one is dropped: a function's body
+    /// is spliced in at its call, so two statements of one library function
+    /// can report the same error at the same call.
     pub fn new(source: Arc<SourceFile>, list: Vec<Diagnostic>) -> Self {
-        Diagnostics { source, list }
+        let mut out = Diagnostics { source, list: Vec::new() };
+        out.push_all(list);
+        out
+    }
+
+    fn push_all(&mut self, list: Vec<Diagnostic>) {
+        for d in list {
+            if !self.list.contains(&d) {
+                self.list.push(d);
+            }
+        }
     }
 
     pub fn source(&self) -> &Arc<SourceFile> {
@@ -185,7 +198,7 @@ impl Diagnostics {
 
     /// Adds `other`'s diagnostics, of the same source.
     pub fn extend(&mut self, other: Diagnostics) {
-        self.list.extend(other.list);
+        self.push_all(other.list);
     }
 
     pub fn errors(&self) -> usize {

@@ -156,7 +156,13 @@ impl Parser {
         let mut kernels = kernels;
         // Functions are inlined first, so a jump they splice in is lowered
         // with the caller's loops.
-        functions::inline(&mut kernels, &fns, prelude).map_err(|e| vec![Diagnostic::error(e)])?;
+        functions::inline(&mut kernels, &fns, prelude).map_err(|e| {
+            let d = Diagnostic::error(e.message);
+            vec![match e.span {
+                Some((span, label)) => d.primary(span, label),
+                None => d,
+            }]
+        })?;
         for kernel in &mut kernels {
             extent::resolve(kernel);
             let body = std::mem::take(&mut kernel.body);

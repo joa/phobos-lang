@@ -47,9 +47,10 @@ mod tests {
 
     #[test]
     fn every_builtin_the_spec_names_is_listed() {
-        // Calls the spec writes that are not built-ins: math in the prose,
-        // and a user `fn f`.
-        const PROSE: [&str; 2] = ["log2", "f"];
+        // Calls the spec writes that are not built-ins: a user `fn f`, and
+        // the standard library's functions.
+        const PROSE: [&str; 1] = ["f"];
+        let library = crate::stdlib::builtin();
         let spec = include_str!("../../../../SPEC.md");
         let missing: Vec<_> = spec
             .split('`')
@@ -58,6 +59,7 @@ mod tests {
             .filter_map(|code| code.split_once('(').map(|(name, _)| name))
             .filter(|name| !name.is_empty() && name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'))
             .filter(|name| !PROSE.contains(name) && !builtins().iter().any(|b| b == name))
+            .filter(|name| !library.iter().any(|f| f.name == *name))
             .collect();
         assert!(missing.is_empty(), "SPEC.md calls these, but the builtin list lacks them: {missing:?}");
     }

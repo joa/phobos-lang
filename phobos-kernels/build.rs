@@ -1,6 +1,7 @@
 // Fingerprints the compiler that turns a kernel source into PTX, so the disk
 // cache can key on it. It hashes every `.rs` under the crates that lower a
-// kernel, plus the toolchain versions from `Cargo.lock`. It changes whenever
+// kernel and every `.ph` there, the standard library's, plus the toolchain
+// versions from `Cargo.lock`. It changes whenever
 // the generated PTX could, and not otherwise. The calling executable is left
 // out, so every binary shares one cache.
 
@@ -26,7 +27,7 @@ fn main() {
         let src = root.join(crate_name).join("src");
         println!("cargo:rerun-if-changed={}", src.display());
         let mut files = Vec::new();
-        collect_rs(&src, &mut files);
+        collect_sources(&src, &mut files);
         files.sort();
         for file in files {
             // Normalize separators and line endings, so one commit keys the
@@ -47,13 +48,13 @@ fn main() {
     println!("cargo:rustc-env=PHOBOS_COMPILER_FINGERPRINT={digest}");
 }
 
-fn collect_rs(dir: &Path, out: &mut Vec<PathBuf>) {
+fn collect_sources(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_rs(&path, out);
-        } else if path.extension().is_some_and(|e| e == "rs") {
+            collect_sources(&path, out);
+        } else if path.extension().is_some_and(|e| e == "rs" || e == "ph") {
             out.push(path);
         }
     }

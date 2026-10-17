@@ -9,7 +9,9 @@
 // first choice. `--all-variants` writes one file per point of the search
 // space left after the pins, named OUT_NAME-value_NAME-value.ptx.
 // `--check-races` runs the host race check (RACECHECK.md) on what it
-// compiles and fails on a race, pointing at the source lines.
+// compiles and fails on a race, pointing at the source lines. The standard
+// library is in scope unless `--no-std`; `--stdlib FILE` puts a source of
+// functions in its place. A flag's value may also follow an `=`.
 // `PHOBOS_PRINT_PHASES` prints the IR after each lowering phase.
 // Errors go to stderr as rustc lays them out, colored on a terminal
 // (`--color`), or one JSON object per line with `--error-format json`.
@@ -19,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context as _, Result, bail};
-use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
+use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig, Stdlib};
 use phobos_base::term::{self, ColorChoice};
 use phobos_lang::ast::Kernel;
 use phobos_lang::diag::{self, Diagnostics, SourceFile};
@@ -27,7 +29,7 @@ use phobos_lang::race;
 
 const USAGE: &str = "usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] \
                      [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] \
-                     [--color auto|always|never] [--error-format human|json]";
+                     [--stdlib FILE | --no-std] [--color auto|always|never] [--error-format human|json]";
 
 const HELP: &str = "
   --chip CHIP              target architecture, sm_75 by default
@@ -43,6 +45,10 @@ const HELP: &str = "
                            every thread reaches or a shared access outside
                            its buffer
   -o, --output OUT.ptx     write the PTX here instead of standard output
+  --stdlib FILE            compile against the functions FILE defines in
+                           place of the standard library
+  --no-std                 compile with no standard library: a source calls
+                           only its own functions and the built-ins
   --color WHEN             color errors: auto (on a terminal, unless
                            NO_COLOR is set), always or never
   --error-format FORMAT    human, or json for one object per error";
@@ -89,9 +95,18 @@ fn run(report: &mut Report) -> Result<()> {
     let mut pins: HashMap<String, i64> = HashMap::new();
     let mut all_variants = false;
     let mut check_races = false;
+    let mut stdlib: Option<PathBuf> = None;
+    let mut no_std = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
-        let mut value = || args.next().with_context(|| format!("{arg} needs a value"));
+        let (arg, inline) = match arg.split_once('=') {
+            Some((flag, v)) if flag.starts_with("--") => (flag.to_string(), Some(v.to_string())),
+            _ => (arg, None),
+        };
+        let mut value = || match inline.clone() {
+            Some(v) => Ok(v),
+            None => args.next().with_context(|| format!("{arg} needs a value")),
+        };
         match arg.as_str() {
             "--chip" => ctx.gpu_config = GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(value()?)),
             "--index-bits" => ctx.index_bitwidth = value()?.parse().context("--index-bits")?,
@@ -103,6 +118,8 @@ fn run(report: &mut Report) -> Result<()> {
             }
             "--all-variants" => all_variants = true,
             "--check-races" => check_races = true,
+            "--stdlib" => stdlib = Some(value()?.into()),
+            "--no-std" => no_std = true,
             "-o" | "--output" => out = Some(value()?.into()),
             "--color" => report.color = value()?.parse().map_err(anyhow::Error::msg)?,
             "--error-format" => {
@@ -127,9 +144,21 @@ fn run(report: &mut Report) -> Result<()> {
         }
     }
     let file = file.context(USAGE)?;
+    ctx.stdlib = match (stdlib, no_std) {
+        (Some(_), true) => bail!("--stdlib and --no-std together"),
+        (Some(path), false) => {
+            let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+            Stdlib::Custom {
+                name: path.display().to_string(),
+                text: text.into(),
+            }
+        }
+        (None, true) => Stdlib::Off,
+        (None, false) => Stdlib::Builtin,
+    };
 
     let src = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-    let kernels = phobos_lang::parse_source(&SourceFile::new(file.display().to_string(), src))?;
+    let kernels = phobos_lang::parse_source_with(&SourceFile::new(file.display().to_string(), src), &ctx.stdlib)?;
 
     if !all_variants {
         // Each kernel seeds its own first choices, so only the pins' names

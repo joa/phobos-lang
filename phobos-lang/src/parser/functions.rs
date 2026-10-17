@@ -40,11 +40,14 @@ pub(crate) struct Function {
 /// Inlines every call to a function in `fns`, or else in `prelude`, into
 /// each kernel's body. A program's function shadows a prelude function of
 /// its name.
-pub(super) fn inline(kernels: &mut [Kernel], fns: &[Function], prelude: &[Function]) -> Result<(), String> {
+pub(super) fn inline(kernels: &mut [Kernel], fns: &[Function], prelude: &[Function]) -> Result<(), InlineError> {
     let mut seen = HashMap::new();
     for f in fns {
         if seen.insert(f.name.as_str(), ()).is_some() {
-            return Err(format!("function `{}` is defined twice", f.name));
+            return Err(InlineError {
+                message: format!("function `{}` is defined twice", f.name),
+                span: Some((f.span, "defined again")),
+            });
         }
     }
     let fns: Vec<&Function> = fns.iter().chain(prelude.iter().filter(|f| !seen.contains_key(f.name.as_str()))).collect();
@@ -54,9 +57,33 @@ pub(super) fn inline(kernels: &mut [Kernel], fns: &[Function], prelude: &[Functi
     let mut inliner = Inliner { fns: &fns, next: 0 };
     for kernel in kernels {
         let body = std::mem::take(&mut kernel.body);
-        kernel.body = inliner.stmts(body, 0).map_err(|e| format!("kernel `{}`: {e}", kernel.name))?;
+        kernel.body = inliner.stmts(body, 0).map_err(|e| match e.span {
+            Some(_) => e,
+            None => format!("kernel `{}`: {}", kernel.name, e.message).into(),
+        })?;
     }
     Ok(())
+}
+
+/// An inlining error, at the call it arose in, or the definition, where
+/// that is known.
+pub(super) struct InlineError {
+    pub(super) message: String,
+    pub(super) span: Option<(Span, &'static str)>,
+}
+
+impl From<String> for InlineError {
+    fn from(message: String) -> Self {
+        InlineError { message, span: None }
+    }
+}
+
+/// An error at the call `span`.
+fn at(span: Span) -> impl FnOnce(String) -> InlineError {
+    move |message| InlineError {
+        message,
+        span: Some((span, "called here")),
+    }
 }
 
 struct Inliner<'a> {
@@ -69,7 +96,7 @@ impl<'a> Inliner<'a> {
         self.fns.iter().copied().find(|f| f.name == name)
     }
 
-    fn stmts(&mut self, stmts: Vec<Stmt>, depth: usize) -> Result<Vec<Stmt>, String> {
+    fn stmts(&mut self, stmts: Vec<Stmt>, depth: usize) -> Result<Vec<Stmt>, InlineError> {
         let mut out = Vec::new();
         for stmt in stmts {
             if let Stmt::Expr(Expr { kind: ExprKind::Call { callee, args }, span }, _) = &stmt
@@ -84,7 +111,7 @@ impl<'a> Inliner<'a> {
         Ok(out)
     }
 
-    fn stmt(&mut self, stmt: Stmt, depth: usize) -> Result<Stmt, String> {
+    fn stmt(&mut self, stmt: Stmt, depth: usize) -> Result<Stmt, InlineError> {
         Ok(match stmt {
             Stmt::Let {
                 name,
@@ -168,7 +195,7 @@ impl<'a> Inliner<'a> {
 
     /// Rewrites calls to expression functions inside `e`. An inlined body
     /// keeps the spans of the function it came from.
-    fn expr(&mut self, e: Expr, depth: usize) -> Result<Expr, String> {
+    fn expr(&mut self, e: Expr, depth: usize) -> Result<Expr, InlineError> {
         let span = e.span;
         let kind = match e.kind {
             ExprKind::Call { callee, mut args } if is_reduce(&callee, &args) => {
@@ -178,10 +205,10 @@ impl<'a> Inliner<'a> {
                     && let Some(f) = self.find(name)
                 {
                     let Body::Expr(body) = &f.body else {
-                        return Err(format!("`{name}` has a statement body and cannot combine a reduce"));
+                        return Err(at(span)(format!("`{name}` has a statement body and cannot combine a reduce")));
                     };
-                    let map = bind(f, &[Expr::var(lanes::COMBINE_A), Expr::var(lanes::COMBINE_B)])?;
-                    let body = f.subst(&map, &HashMap::new(), span).expr(body)?;
+                    let map = bind(f, &[Expr::var(lanes::COMBINE_A), Expr::var(lanes::COMBINE_B)]).map_err(at(span))?;
+                    let body = f.subst(&map, &HashMap::new(), span).expr(body).map_err(at(span))?;
                     *args.last_mut().expect("a reduce has a combine") = body;
                 }
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
@@ -196,11 +223,11 @@ impl<'a> Inliner<'a> {
                     return Ok(Expr::new(ExprKind::Call { callee, args }, span));
                 };
                 let Body::Expr(body) = &f.body else {
-                    return Err(format!("`{callee}` has a statement body and cannot be used as a value"));
+                    return Err(at(span)(format!("`{callee}` has a statement body and cannot be used as a value")));
                 };
-                let map = bind(f, &args)?;
-                let body = f.subst(&map, &HashMap::new(), span).expr(body)?;
-                self.deeper(depth, &callee)?;
+                let map = bind(f, &args).map_err(at(span))?;
+                let body = f.subst(&map, &HashMap::new(), span).expr(body).map_err(at(span))?;
+                self.deeper(depth, &callee).map_err(at(span))?;
                 return self.expr(body, depth + 1);
             }
             ExprKind::Unary { op, rhs } => ExprKind::Unary {
@@ -223,31 +250,31 @@ impl<'a> Inliner<'a> {
 
     /// `generate(f)`: `f`'s body with its locals and its two parameters
     /// renamed apart, its last statement the value.
-    fn generate(&mut self, args: &[Expr], span: crate::diag::Span, depth: usize) -> Result<Expr, String> {
+    fn generate(&mut self, args: &[Expr], span: crate::diag::Span, depth: usize) -> Result<Expr, InlineError> {
         let [arg] = args else {
-            return Err("`generate` takes one function, as `generate(f)`".to_string());
+            return Err(at(span)("`generate` takes one function, as `generate(f)`".to_string()));
         };
         let Some(f) = arg.as_var().and_then(|name| self.find(name)) else {
-            return Err("`generate` takes the name of a function, as `generate(f)`".to_string());
+            return Err(at(span)("`generate` takes the name of a function, as `generate(f)`".to_string()));
         };
         let Body::Stmts(body) = &f.body else {
-            return Err(format!("`{}` must have a statement body ending in its value to be generated", f.name));
+            return Err(at(span)(format!("`{}` must have a statement body ending in its value to be generated", f.name)));
         };
         let Some((Stmt::Expr(value, _), lead)) = body.split_last() else {
-            return Err(format!("`{}` must end in an expression, the value it generates", f.name));
+            return Err(at(span)(format!("`{}` must end in an expression, the value it generates", f.name)));
         };
         let [row, unit] = &f.params[..] else {
-            return Err(format!("`{}` takes a row and a unit to be generated", f.name));
+            return Err(at(span)(format!("`{}` takes a row and a unit to be generated", f.name)));
         };
-        self.deeper(depth, &f.name)?;
+        self.deeper(depth, &f.name).map_err(at(span))?;
         self.next += 1;
         let params = [format!("{row}#{}", self.next), format!("{unit}#{}", self.next)];
-        let map = bind(f, &[Expr::var(params[0].clone()), Expr::var(params[1].clone())])?;
+        let map = bind(f, &[Expr::var(params[0].clone()), Expr::var(params[1].clone())]).map_err(at(span))?;
         let renames: HashMap<String, String> =
             locals(lead).into_iter().map(|name| (name.clone(), format!("{name}#{}", self.next))).collect();
         let subst = f.subst(&map, &renames, span);
-        let lead = subst.block(lead)?;
-        let value = subst.expr(value)?;
+        let lead = subst.block(lead).map_err(at(span))?;
+        let value = subst.expr(value).map_err(at(span))?;
         let kind = ExprKind::Generate(Box::new(Generated {
             params,
             body: self.stmts(lead, depth + 1)?,
@@ -256,7 +283,7 @@ impl<'a> Inliner<'a> {
         Ok(Expr::new(kind, span))
     }
 
-    fn sub(&mut self, s: Sub, depth: usize) -> Result<Sub, String> {
+    fn sub(&mut self, s: Sub, depth: usize) -> Result<Sub, InlineError> {
         Ok(match s {
             Sub::Point(e) => Sub::Point(self.expr(e, depth)?),
             Sub::From(e) => Sub::From(self.expr(e, depth)?),
@@ -280,21 +307,21 @@ impl<'a> Inliner<'a> {
     }
 
     /// The statements of a call to the statement function `callee`.
-    fn splice(&mut self, callee: &str, args: &[Expr], span: Span, depth: usize) -> Result<Vec<Stmt>, String> {
-        self.deeper(depth, callee)?;
+    fn splice(&mut self, callee: &str, args: &[Expr], span: Span, depth: usize) -> Result<Vec<Stmt>, InlineError> {
+        self.deeper(depth, callee).map_err(at(span))?;
         let f = self.find(callee).expect("checked by the caller");
         let Body::Stmts(body) = &f.body else {
             unreachable!("checked by the caller");
         };
         let args = args.iter().cloned().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
-        let map = bind(f, &args)?;
+        let map = bind(f, &args).map_err(at(span))?;
         // Locals become `name#k`, a name no source can spell.
         self.next += 1;
         let mut renames = HashMap::new();
         for name in locals(body) {
             renames.insert(name.clone(), format!("{name}#{}", self.next));
         }
-        let body = f.subst(&map, &renames, span).block(body)?;
+        let body = f.subst(&map, &renames, span).block(body).map_err(at(span))?;
         self.stmts(body, depth + 1)
     }
 }
