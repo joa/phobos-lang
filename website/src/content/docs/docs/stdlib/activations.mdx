@@ -1,0 +1,132 @@
+---
+title: Activations
+description: ReLU, GELU, SiLU and the rest of torch.nn.functional's activations, and the gated linear units, as functions that fuse.
+sidebar:
+  order: 2
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+import ActivationCurves from "../../../../components/figures/activation-curves/ActivationCurves.astro"
+
+The activations of `torch.nn.functional`, as expression functions over a
+tile or a scalar. An activation applied where a result is stored fuses into
+that store: no tile holds the pre-activation, and the activation costs
+arithmetic only.
+
+```phobos
+@autotune(R in [16])
+kernel bias_silu(X: tensor<f32>[M, 256], Bias: tensor<f32>[1, 256], Y: tensor<f32>[M, 256]) {
+  let r = ctx.block.x * R
+  Y[r :+ R, :] = silu(X[r :+ R, :] + Bias[0 :+ 1, :])
+}
+```
+
+The bias row broadcasts over the `R` rows, and the sum, the activation and
+the store are one sweep. `silu` reads its argument twice in its definition,
+`x / (1.0 + exp(-x))`; the compiler stages the slice once all the same.
+
+<ActivationCurves />
+
+## Rectifiers
+
+### `relu`
+
+<Fn name="relu" />
+
+### `relu6`
+
+<Fn name="relu6" />
+
+### `leaky_relu`
+
+<Fn name="leaky_relu" />
+
+### `hardtanh`
+
+<Fn name="hardtanh" />
+
+### `elu`
+
+<Fn name="elu" />
+
+### `selu`
+
+<Fn name="selu" />
+
+### `celu`
+
+<Fn name="celu" />
+
+### `squared_relu`
+
+<Fn name="squared_relu" />
+
+## Sigmoid and its relatives
+
+### `sigmoid`
+
+<Fn name="sigmoid" />
+
+### `log_sigmoid`
+
+<Fn name="log_sigmoid" />
+
+### `hardsigmoid`
+
+<Fn name="hardsigmoid" />
+
+### `softsign`
+
+<Fn name="softsign" />
+
+## GELU and SiLU
+
+### `gelu`
+
+<Fn name="gelu" />
+
+### `gelu_tanh`
+
+<Fn name="gelu_tanh" />
+
+### `quick_gelu`
+
+<Fn name="quick_gelu" />
+
+### `silu`
+
+<Fn name="silu" />
+
+### `swish`
+
+<Fn name="swish" />
+
+### `hardswish`
+
+<Fn name="hardswish" />
+
+### `mish`
+
+<Fn name="mish" />
+
+### `softplus`
+
+<Fn name="softplus" />
+
+## Gated linear units
+
+A transformer's MLP projects its input twice, a gate and an up branch, and
+multiplies the gate's activation into the other. The product is one more
+operation in the same sweep:
+
+```phobos
+@autotune(R in [16])
+kernel swiglu_rows(G: tensor<f32>[M, 512], U: tensor<f32>[M, 512], H: tensor<f16>[M, 512]) {
+  let r = ctx.block.x * R
+  H[r :+ R, :] = swiglu(G[r :+ R, :], U[r :+ R, :])
+}
+```
+
+### `swiglu`, `geglu`, `geglu_tanh`, `reglu`
+
+<Fn names="swiglu geglu geglu_tanh reglu" />

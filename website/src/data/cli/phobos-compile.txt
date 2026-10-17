@@ -1,4 +1,4 @@
-usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] [--color auto|always|never] [--error-format human|json]
+usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] [--stdlib FILE | --no-std] [--color auto|always|never] [--error-format human|json]
 
   --chip CHIP              target architecture, sm_75 by default
   --index-bits 32|64       index width, raised to 64 where the runtime would
@@ -13,6 +13,10 @@ usage: phobos-compile FILE.ph [--chip CHIP] [--index-bits 32|64] [--set NAME=VAL
                            every thread reaches or a shared access outside
                            its buffer
   -o, --output OUT.ptx     write the PTX here instead of standard output
+  --stdlib FILE            compile against the functions FILE defines in
+                           place of the standard library
+  --no-std                 compile with no standard library: a source calls
+                           only its own functions and the built-ins
   --color WHEN             color errors: auto (on a terminal, unless
                            NO_COLOR is set), always or never
   --error-format FORMAT    human, or json for one object per error

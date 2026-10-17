@@ -16,6 +16,8 @@ const REPO_URL = "https://github.com/joa/phobos-lang"
 export default defineConfig({
   site: "https://phobos-lang.dev",
   trailingSlash: "ignore",
+  // The standard library's reference reads its sources from phobos-lang, outside the site.
+  vite: { server: { fs: { allow: [".."] } } },
   integrations: [
     // Starlight adds the sitemap itself unless one is configured; this one leaves out the
     // unlisted lab page, which is marked noindex.
@@ -60,6 +62,7 @@ export default defineConfig({
       sidebar: [
         { label: "Getting started", items: [{ autogenerate: { directory: "docs/getting-started" } }] },
         { label: "Language guide", items: [{ autogenerate: { directory: "docs/language" } }] },
+        { label: "Standard library", items: [{ autogenerate: { directory: "docs/stdlib" } }] },
         { label: "Execution context: ctx", items: [{ autogenerate: { directory: "docs/ctx" } }] },
         { label: "Attributes", items: [{ autogenerate: { directory: "docs/attributes" } }] },
         { label: "Examples", items: [{ autogenerate: { directory: "docs/examples" } }] },

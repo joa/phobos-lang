@@ -1,0 +1,108 @@
+---
+title: Row-wise operations
+description: Softmax, log-softmax, logsumexp, masks and top-k over the rows of a tile.
+sidebar:
+  order: 3
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+Operations on a rank-2 tile `[R, C]`, each row on its own, as a softmax
+over the keys of each query is. They are built from the row reductions
+[`rowmax`, `rowsum` and `rowargmax`](/docs/language/elementwise-and-reductions/),
+which fold a tile to a `[R, 1]` column, and elementwise statements that
+broadcast that column back over the rows.
+
+```phobos
+@autotune(R in [8])
+kernel softmax_rows(S: tensor<f32>[M, 128], P: tensor<f32>[M, 128], n: i32) {
+  let r = ctx.block.x * R
+  var s = S[r :+ R, :]
+  mask_cols(s, n, -1.0e30)
+  softmax(s)
+  P[r :+ R, :] = s
+}
+```
+
+Only the first `n` of the 128 columns hold scores. A maximum and an
+exponential would count the rest, so they are set to `-1.0e30` first and
+`softmax` gives them no weight. A tile that runs past a tensor's end needs
+the same: its slice reads as 0 there, which a sum ignores but a softmax
+does not.
+
+`softmax(s)` is four statements spliced in: a row maximum, `exp(s - m)`
+over the tile with the `[R, 1]` maximum broadcast along its row, a row sum,
+and a scale by its reciprocal, which is computed once a row. A row
+reduction folds each row with warp shuffles, and a barrier separates each
+step from the next, since each reads what the one before stored.
+
+## Reductions
+
+### `rowmean`
+
+<Fn name="rowmean" />
+
+### `rowmin`
+
+<Fn name="rowmin" />
+
+### `logsumexp`
+
+<Fn name="logsumexp" />
+
+`logsumexp` is the normalizer of a log-softmax and the loss of a
+cross-entropy against a target logit:
+
+```phobos
+kernel nll(Logits: tensor<f32>[M, 512], Target: tensor<f32>[M, 1], Loss: tensor<f32>[M, 1]) {
+  let r = ctx.block.x * 8
+  var x = Logits[r :+ 8, :]
+  var lse: tile<f32>[8, 1]
+  logsumexp(lse, x)
+  Loss[r :+ 8, :] = lse - Target[r :+ 8, :]
+}
+```
+
+## Softmax
+
+### `softmax`
+
+<Fn name="softmax" />
+
+### `log_softmax`
+
+<Fn name="log_softmax" />
+
+## Masks
+
+### `mask_cols`
+
+<Fn name="mask_cols" />
+
+### `causal_mask`
+
+<Fn name="causal_mask" />
+
+[Causal attention](/docs/stdlib/attention/#causal-attention) uses it on
+each block of scores.
+
+## Selection
+
+### `topk`
+
+<Fn name="topk" />
+
+`K` rounds of `rowargmax`, each masking its pick, as a sampler's top-k
+needs:
+
+```phobos
+kernel top4(Logits: tensor<f32>[M, 256], Values: tensor<f32>[M, 4], Indices: tensor<i32>[M, 4]) {
+  let r = ctx.block.x * 8
+  var t = Logits[r :+ 8, :]
+  var v: tile<f32>[8, 4]
+  var i: tile<i32>[8, 4]
+  topk(v, i, t)
+  Values[r :+ 8, :] = v
+  Indices[r :+ 8, :] = i
+}
+```

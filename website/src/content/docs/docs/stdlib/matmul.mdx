@@ -1,0 +1,65 @@
+---
+title: Matrix products
+description: The k-loop of a GEMM as a function, A B and A B^T, lowered exactly as the loop written out.
+sidebar:
+  order: 6
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+A matrix product in Phobos is a loop over `k` that stages a slice of each
+operand and accumulates their [`dot`](/docs/language/dot-and-tensor-cores/).
+`matmul` and `matmul_t` are that loop. The kernel around them picks the
+output tile, the grid and the attributes, and the compiler treats the
+inlined loop exactly as one written out: it stages and double-buffers the
+operands under `@pipeline`, keeps the accumulator in registers, lowers to
+tensor cores under `@tensorcore`, and fuses the epilogue that follows.
+
+```phobos
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], T in [256, 128])
+@launch(T)
+@pipeline
+@aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+kernel sgemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32) {
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+  matmul(acc, A, B, pm * TILE_M, pn * TILE_N, TILE_K)
+  let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+}
+```
+
+This is the [spec's SGEMM](/docs/reference/spec/#examples) without its
+`for<unroll U>`, and it compiles to the same MLIR as that kernel's loop
+written out, on every target. The tile sizes come from the kernel: `matmul`
+reads the rows and columns from `acc` and the depth from `A`, with
+[`extent`](/docs/stdlib/#writing-functions-like-the-librarys), and takes only
+the step `BK` it is told.
+
+The same call runs on tensor cores with an `f16` input and an `f32`
+accumulator:
+
+```phobos
+@tensorcore
+@autotune(BM in [64], BN in [64], BK in [32])
+@aligned(M = BM, N = BN, K = BK)
+kernel hgemm(A: tensor<f16>[M, K], B: tensor<f16>[K, N], C: tensor<f16>[M, N]) {
+  let m0 = ctx.block.x * BM
+  let n0 = ctx.block.y * BN
+  var acc: tile<f32>[BM, BN] = 0.0
+  matmul(acc, A, B, m0, n0, BK)
+  C[m0 :+ BM, n0 :+ BN] = acc
+}
+```
+
+### `matmul`
+
+<Fn name="matmul" />
+
+### `matmul_t`
+
+<Fn name="matmul_t" />
+
+The [overview's kernel](/docs/stdlib/) is a linear layer with `matmul_t`
+and a GELU epilogue.

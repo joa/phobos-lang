@@ -10,6 +10,7 @@ fn cdiv(a, b) = (a + b - 1) / b
 // `a` rounded up to a multiple of `b`, for positive integers.
 fn round_up(a, b) = cdiv(a, b) * b
 
+// `x * x`.
 fn square(x) = x * x
 
 // `1 / x`.

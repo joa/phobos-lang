@@ -1,0 +1,69 @@
+---
+title: Math
+description: Integer helpers and the elementwise math the built-ins leave out, among them erf.
+sidebar:
+  order: 1
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+Arithmetic the [built-ins](/docs/language/elementwise-and-reductions/#math-functions)
+leave out. Every function here is an expression function: on a tile it
+fuses into the sweep of the statement that calls it, on a scalar it is plain
+arithmetic.
+
+```phobos
+@autotune(T in [1024])
+kernel blend(A: tensor<f32>[N], B: tensor<f32>[N], Y: tensor<f32>[N], w: f32) {
+  let i = ctx.block.x * T
+  Y[i :+ T] = lerp(A[i :+ T], B[i :+ T], clamp(w, 0.0, 1.0))
+}
+```
+
+`clamp(w, 0.0, 1.0)` is scalar arithmetic on the parameter; `lerp` is
+computed per element in the one sweep that reads `A` and `B` and writes `Y`.
+
+## Integers
+
+### `cdiv`
+
+<Fn name="cdiv" />
+
+### `round_up`
+
+<Fn name="round_up" />
+
+## Elementwise
+
+### `square`
+
+<Fn name="square" />
+
+### `rcp`
+
+<Fn name="rcp" />
+
+### `clamp`
+
+<Fn name="clamp" />
+
+### `lerp`
+
+<Fn name="lerp" />
+
+### `exp2`, `log2`
+
+<Fn names="exp2 log2" />
+
+### `sign`
+
+<Fn name="sign" />
+
+### `erf`
+
+<Fn name="erf" />
+
+The built-ins have no `erf`, since its CUDA form is a libdevice call the
+compiler does not link. The polynomial is the library's own helper,
+`_erf_tail`. The site's tests check this definition against the series of
+`erf` over `[-3, 3]`, where it stays within the stated `1.5e-7`.

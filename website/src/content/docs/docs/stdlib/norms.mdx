@@ -1,0 +1,52 @@
+---
+title: Normalization
+description: RMS norm, layer norm and L2 normalization over the rows of a tile.
+sidebar:
+  order: 4
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+Normalizations over the rows of a rank-2 tile `[R, C]`, in place, as a
+transformer normalizes each token's hidden state. Each row's statistic is a
+row reduction, a `[R, 1]` column, and the normalization one elementwise
+sweep that broadcasts it.
+
+```phobos
+@autotune(R in [4])
+kernel rms_norm_rows(X: tensor<f32>[M, 1024], G: tensor<f32>[1, 1024], Y: tensor<f32>[M, 1024], eps: f32) {
+  let r = ctx.block.x * R
+  var x = X[r :+ R, :]
+  rms_norm(x, G[0 :+ 1, :], eps)
+  Y[r :+ R, :] = x
+}
+```
+
+The weight is a `[1, C]` row, here a slice of the tensor `G` read where the
+sweep needs it. A scalar works too: `rms_norm(x, 1.0, eps)` has no weight.
+
+The sums are taken in the tile's own type. To normalize an `f16`
+activation, widen it into an `f32` tile first; the store narrows it back:
+
+```phobos
+@autotune(R in [4])
+kernel layer_norm_rows(X: tensor<f16>[M, 768], G: tensor<f32>[1, 768], B: tensor<f32>[1, 768],
+                       Y: tensor<f16>[M, 768]) {
+  let r = ctx.block.x * R
+  var x: tile<f32>[R, 768] = f32(X[r :+ R, :])
+  layer_norm(x, G[0 :+ 1, :], B[0 :+ 1, :], 0.00001)
+  Y[r :+ R, :] = x
+}
+```
+
+### `rms_norm`
+
+<Fn name="rms_norm" />
+
+### `layer_norm`
+
+<Fn name="layer_norm" />
+
+### `l2_normalize`
+
+<Fn name="l2_normalize" />

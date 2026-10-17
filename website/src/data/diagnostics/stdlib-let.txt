@@ -1,0 +1,13 @@
+error: cannot assign to `x`, which is declared with `let`
+ --> stdlib-let.ph:3:3
+  |
+2 |   let x = X[0 :+ 16, :]
+  |   --------------------- declared with `let` here
+3 |   softmax(x)
+  |   ^^^^^^^^^^ cannot assign
+help: declare `x` with `var` to assign to it
+  |
+2 |   var x = X[0 :+ 16, :]
+  |   ~~~
+
+error: aborting due to 1 previous error

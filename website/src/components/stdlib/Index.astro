@@ -1,0 +1,55 @@
+---
+// Every public function of the standard library, file by file, each linked to its entry on the
+// page that documents it. Built from the library's source, so it lists what ships.
+import { isHelper } from "../../lib/stdlib/library"
+import { LIBRARY } from "../../lib/stdlib/sources"
+
+// The page documenting each file, and the file's name on it.
+const PAGES: Record<string, { href: string; title: string }> = {
+  "std/math.ph": { href: "/docs/stdlib/math/", title: "Math" },
+  "std/activation.ph": { href: "/docs/stdlib/activations/", title: "Activations" },
+  "std/reduce.ph": { href: "/docs/stdlib/rows/", title: "Row-wise operations" },
+  "std/norm.ph": { href: "/docs/stdlib/norms/", title: "Normalization" },
+  "std/attention.ph": { href: "/docs/stdlib/attention/", title: "Attention" },
+  "std/linalg.ph": { href: "/docs/stdlib/matmul/", title: "Matrix products" },
+  "std/quant.ph": { href: "/docs/stdlib/quantization/", title: "Quantization" },
+}
+for (const file of LIBRARY) if (!PAGES[file.file]) throw new Error(`no stdlib page for ${file.file}`)
+
+// A page's heading for an entry names its functions, as "`exp2`, `log2`"; Starlight's id for it
+// drops the punctuation and joins the words with `-`.
+const anchor = (file: (typeof LIBRARY)[number], docOf: string) =>
+  file.functions
+    .filter(fn => fn.docOf === docOf)
+    .map(fn => fn.name.toLowerCase())
+    .join("-")
+---
+
+<table class="stdlib-index">
+  <thead>
+    <tr><th>Page</th><th>Functions</th></tr>
+  </thead>
+  <tbody>
+    {
+      LIBRARY.map(file => (
+        <tr>
+          <td>
+            <a href={PAGES[file.file].href}>{PAGES[file.file].title}</a>
+          </td>
+          <td>
+            {file.functions
+              .filter(fn => !isHelper(fn.name))
+              .map((fn, i) => (
+                <>
+                  {i > 0 && ", "}
+                  <a href={`${PAGES[file.file].href}#${anchor(file, fn.docOf)}`}>
+                    <code>{fn.name}</code>
+                  </a>
+                </>
+              ))}
+          </td>
+        </tr>
+      ))
+    }
+  </tbody>
+</table>

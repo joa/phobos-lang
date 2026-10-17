@@ -3,6 +3,7 @@
 // fuses into the statement that stores it: `y = silu(acc)` reads `acc` once
 // and writes `y` once, with no tile in between.
 
+// `max(x, 0)`.
 fn relu(x) = max(x, 0.0)
 
 // `relu`, capped at 6.
@@ -23,6 +24,7 @@ fn selu(x) = 1.0507009873554805 * elu(x, 1.6732632423543772)
 // `x` for a positive `x`, `alpha * (e^(x / alpha) - 1)` otherwise. `alpha > 0`.
 fn celu(x, alpha) = max(x, 0.0) + min(alpha * (exp(x / alpha) - 1.0), 0.0)
 
+// The logistic function, `1 / (1 + e^-x)`.
 fn sigmoid(x) = 1.0 / (1.0 + exp(-x))
 
 // `log(sigmoid(x))`, without the overflow of computing it so.

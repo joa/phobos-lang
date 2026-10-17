@@ -1,0 +1,86 @@
+---
+// One entry of the standard library reference, rendered from the library's own source: the
+// signature of each function named, the comment above it as its documentation, and its source,
+// folded, linked to the file on GitHub. Functions that share one comment (`names="exp2 log2"`)
+// share the entry. The page writes the heading, so the table of contents lists it.
+import { Code } from "@astrojs/starlight/components"
+import { libraryFunction } from "../../lib/stdlib/sources"
+
+interface Props {
+  /** One function, or several sharing a comment, separated by spaces. */
+  name?: string
+  names?: string
+}
+
+const { name, names } = Astro.props
+const list = (names ?? name ?? "").split(/\s+/).filter(Boolean)
+if (list.length === 0) throw new Error("<Fn> takes `name` or `names`")
+const fns = list.map(libraryFunction)
+const doc = fns[0].doc
+for (const fn of fns.slice(1)) {
+  if (fn.docOf !== fns[0].docOf) throw new Error(`<Fn names="${list.join(" ")}">: \`${fn.name}\` has a comment of its own`)
+}
+const REPO_URL = "https://github.com/joa/phobos-lang"
+const sourceUrl = `${REPO_URL}/blob/main/phobos-lang/src/stdlib/${fns[0].file.replace("std/", "")}#L${fns[0].line}`
+const kind = fns[0].kind === "expression" ? "expression" : "statement"
+
+// Escapes HTML and sets `code` spans, the only markup the library's comments use.
+function inline(text: string): string {
+  const escaped = text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+  return escaped.replace(/`([^`]+)`/g, "<code>$1</code>")
+}
+---
+
+<div class="stdlib-fn" data-stdlib-fn={list.join(" ")}>
+  <div class="stdlib-sig">
+    {
+      fns.map(fn => (
+        <code class="stdlib-sig-line">
+          <span class="stdlib-kw">fn</span> {fn.name}({fn.params.join(", ")})
+        </code>
+      ))
+    }
+    <span class="stdlib-kind" title={kind === "expression" ? "fuses into the caller's sweep" : "spliced in where it is called"}>{kind}</span>
+  </div>
+  {doc.map(paragraph => <p set:html={inline(paragraph)} />)}
+  <details class="stdlib-src">
+    <summary>Source, <a href={sourceUrl}><code>{fns[0].file}:{fns[0].line}</code></a></summary>
+    <Code code={fns.map(fn => fn.source).join("\n")} lang="phobos" />
+  </details>
+</div>
+
+<style>
+  .stdlib-fn {
+    margin-block: 0.75rem 1.75rem;
+  }
+  .stdlib-sig {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.25rem 0.75rem;
+  }
+  .stdlib-sig-line {
+    font-size: var(--sl-text-sm);
+  }
+  .stdlib-kw {
+    color: var(--sl-color-accent-high);
+  }
+  .stdlib-kind {
+    font-family: var(--font-mono);
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+    border: 1px solid var(--sl-color-hairline);
+    padding: 0 0.4rem;
+  }
+  .stdlib-src {
+    margin-top: 0.5rem;
+  }
+  .stdlib-src summary {
+    cursor: pointer;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .stdlib-src summary code {
+    font-size: inherit;
+  }
+</style>

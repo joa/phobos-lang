@@ -1,0 +1,101 @@
+---
+title: Attention
+description: The online softmax of Flash attention, a whole attention pass, causal attention and rotary embeddings.
+sidebar:
+  order: 5
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+Flash attention streams the keys and values through a CTA one block at a
+time and never holds the whole score matrix. What makes that possible is
+the online softmax: for each row it keeps the largest score seen so far
+`m`, the sum of the exponentials so far `l`, and the output so far `acc`,
+and when a block brings a new maximum it rescales what it has by
+`exp(m - mnew)` before adding the block's share. The library has that step
+as [`online_softmax`](#online_softmax) and the whole pass over the keys as
+[`attention`](#attention).
+
+```phobos
+@tensorcore
+@launch(128)
+@autotune(D in [64], BR in [64], BC in [64])
+@aligned(Nq = BR)
+kernel flash_attention(Q: tensor<f16>[Nq, D], K: tensor<f16>[Nk, D], V: tensor<f16>[Nk, D],
+                       O: tensor<f16>[Nq, D], scale: f32) {
+  let row = ctx.block.x * BR
+  let q = Q[row :+ BR, :]
+  var acc: tile<f32>[BR, D] = 0.0
+  attention(acc, q, K, V, scale, BR, BC)
+  O[row :+ BR, :] = acc
+}
+```
+
+This compiles to the same MLIR as Flash attention written out by hand, as
+in the [Flash attention example](/docs/examples/flash-attention-fp32/) with
+a masked last block, on every target: under `@tensorcore` the scores and
+`acc` stay in the tensor cores' registers through the softmax, as the
+written-out kernel's do. That needs `acc` declared with its `0.0`, which is
+why `attention` takes it zeroed rather than zeroing it itself.
+
+## `online_softmax`
+
+<Fn name="online_softmax" />
+
+## `attention`
+
+<Fn name="attention" />
+
+`attention` takes `BR` although `q` has `BR` rows. Inside a function a tile
+type is sized only by the function's parameters, and the score tile,
+`tile<f32>[BR, BC]`, has to be declared with a type to be `f32` over `f16`
+inputs.
+
+## Causal attention
+
+A decoder's queries attend only to the keys at or before them.
+`online_softmax` is the same step; the kernel stops the loop at its last
+query and masks the scores of each block with
+[`causal_mask`](/docs/stdlib/rows/#causal_mask):
+
+```phobos
+@autotune(D in [64], BR in [32], BC in [32])
+@aligned(N = BR)
+kernel causal_attention(Q: tensor<f32>[N, D], K: tensor<f32>[N, D], V: tensor<f32>[N, D],
+                        O: tensor<f32>[N, D], scale: f32) {
+  let row = ctx.block.x * BR
+  let q = Q[row :+ BR, :]
+  var acc: tile<f32>[BR, D] = 0.0
+  var m: tile<f32>[BR, 1] = -1.0e30
+  var l: tile<f32>[BR, 1] = 0.0
+  // Keys past the block's last query never count, so the loop stops there.
+  for kt in range(0, row + BR, BC) {
+    let k = K[kt :+ BC, :]
+    let v = V[kt :+ BC, :]
+    var s: tile<f32>[BR, BC] = dot_t(q, k)
+    s = s * scale
+    causal_mask(s, row, kt)
+    online_softmax(acc, m, l, s, v)
+  }
+  acc = acc / l
+  O[row :+ BR, :] = acc
+}
+```
+
+## Rotary position embeddings
+
+### `rope`
+
+<Fn name="rope" />
+
+```phobos
+kernel rotary(X: tensor<f32>[T, 128], Cos: tensor<f32>[T, 64], Sin: tensor<f32>[T, 64], Y: tensor<f32>[T, 128]) {
+  let t = ctx.block.x * 8
+  var x = X[t :+ 8, :]
+  rope(x, Cos[t :+ 8, :], Sin[t :+ 8, :])
+  Y[t :+ 8, :] = x
+}
+```
+
+Both halves are copied out of `x` before either is written back, so the
+second half's rotation reads the first half as it was.

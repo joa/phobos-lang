@@ -1,0 +1,35 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import ActivationCurvesFigure from "./activation-curves.figure"
+import { FAMILIES } from "./geometry"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-activation-curves" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="activation-curves"
+  figure={ActivationCurvesFigure}
+  state={{ family: FAMILIES[0].key }}
+  title="The standard library's activation functions"
+  desc="Each activation function of the standard library plotted for x from -4 to 4, in four families: rectifiers (relu, leaky_relu, elu, selu), GELU and its kin (gelu, gelu_tanh, quick_gelu, silu, mish, hardswish), squashing functions (sigmoid, hardsigmoid, softsign, hardtanh) and smooth ones (softplus, log_sigmoid, squared_relu). The curves are computed from the library's Phobos source."
+  legend={[["reg", "per element, in registers"]]}
+>
+  <div class="chart-group" role="group" aria-label="Family">
+    {
+      FAMILIES.map((family, i) => (
+        <button type="button" class="chart-btn" data-group="family" data-value={family.key} aria-pressed={String(i === 0)}>
+          {family.title}
+        </button>
+      ))
+    }
+  </div>
+  <Fragment slot="caption">
+    Computed from the definitions in <code>phobos-lang/src/stdlib/activation.ph</code>, in double precision; on the
+    device <code>exp</code> and <code>tanh</code> are approximate.
+  </Fragment>
+</ChartFigure>

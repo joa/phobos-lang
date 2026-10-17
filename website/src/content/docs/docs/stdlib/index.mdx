@@ -1,0 +1,132 @@
+---
+title: Overview
+description: The functions every Phobos source can call, what they are made of, and how to replace them.
+sidebar:
+  order: 0
+---
+
+import { Code } from "@astrojs/starlight/components"
+import Index from "../../../../components/stdlib/Index.astro"
+import letErrors from "../../../../data/diagnostics/stdlib-let.txt?raw"
+
+The standard library is a set of functions written in Phobos that every
+source can call without defining them: activations, row-wise softmax and
+normalization, the online softmax of Flash attention, the k-loop of a matrix
+product and int8 quantization. They are building blocks, not kernels. A
+kernel still picks its tiles, its grid and its attributes, and calls the
+library inside its own body.
+
+```phobos
+@autotune(BM in [64], BN in [64], BK in [32])
+@aligned(M = BM, N = BN, K = BK)
+kernel linear_gelu(X: tensor<f32>[M, K], W: tensor<f32>[N, K], Y: tensor<f32>[M, N]) {
+  let m0 = ctx.block.x * BM
+  let n0 = ctx.block.y * BN
+  var acc: tile<f32>[BM, BN] = 0.0
+  matmul_t(acc, X, W, m0, n0, BK)
+  Y[m0 :+ BM, n0 :+ BN] = gelu(acc)
+}
+```
+
+`matmul_t` is the k-loop of `Y = X W^T`, and `gelu` the epilogue. Neither
+costs a launch or a round trip through memory: a function is
+[inlined at every call](/docs/reference/spec/#functions), so `gelu(acc)` is
+computed in the sweep that stores `Y`, reading `acc` once and writing `Y`
+once, and the loop `matmul_t` writes is the same loop, staged, pipelined and
+lowered to tensor cores the same way, as one written out by hand. The tests
+hold the library to that: Flash attention through
+[`attention`](/docs/stdlib/attention/#attention) and the SGEMM through
+[`matmul`](/docs/stdlib/matmul/#matmul) compile to exactly the MLIR of
+their hand-written kernels, on every target.
+
+## Two kinds of function
+
+| Kind | Defined as | Called as | Fuses |
+| --- | --- | --- | --- |
+| Expression | `fn silu(x) = x / (1.0 + exp(-x))` | a value: `y = silu(acc) * up` | into the sweep of the statement around it, on a tile or a scalar |
+| Statement | `fn softmax(t) { ... }` | a statement: `softmax(s)` | its statements are spliced in where it is called |
+
+Each reference entry says which one a function is. A statement function
+cannot return a value, so the library follows two conventions:
+
+- A function that keeps the shape works in place, and its argument must be
+  a name declared with `var`: `softmax(s)` leaves the probabilities in `s`,
+  `rms_norm(x, g, eps)` the normalized rows in `x`.
+- A function that makes a new value takes its destination first, as
+  `matmul(acc, A, B, ...)`, `logsumexp(out, t)` and `quantize_i8(q, s, x)`.
+  A destination may be a tile or a tensor slice.
+
+Any other argument may be any expression: a tile, a tensor slice such as
+`G[0 :+ 1, :]`, or a scalar where a row would broadcast, so
+`rms_norm(x, 1.0, eps)` normalizes with no weight. A slice passed to an
+expression function that uses its argument several times, as `gelu` does,
+is still read once.
+
+## In scope, shadowed, or replaced
+
+Every program is compiled against the library. A function the program
+defines itself shadows the library's of the same name, so an existing
+source that already has its own `silu` keeps it, and a name that starts
+with `_` is a helper of the library's own.
+
+```sh
+phobos-compile kernel.ph                     # with the standard library
+phobos-compile kernel.ph --no-std            # without it: only the program's functions and the built-ins
+phobos-compile kernel.ph --stdlib=mine.ph    # with the functions mine.ph defines instead
+```
+
+A library given with `--stdlib` defines functions only. An error in it is
+reported against its own file; an error inside a library function where a
+kernel calls it points at the call:
+
+```phobos expect-error diagnostic=stdlib-let
+kernel k(X: tensor<f32>[N, 64], Y: tensor<f32>[N, 64]) {
+  let x = X[0 :+ 16, :]
+  softmax(x)
+  Y[0 :+ 16, :] = x
+}
+```
+
+`softmax` writes its argument, which a `let` view cannot be, and
+`phobos-compile` says so at the call:
+
+<Code code={letErrors} lang="text" />
+
+## Writing functions like the library's
+
+The library is ordinary Phobos, in
+[`phobos-lang/src/stdlib/`](https://github.com/joa/phobos-lang/tree/main/phobos-lang/src/stdlib),
+and two language features carry most of it. Both work in any program's own
+functions.
+
+- `extent(x, d)` is the extent of axis `d` of a tile, a tensor, a slice or
+  an elementwise expression, so a function sizes its loops and slices from
+  what it is handed. `matmul` loops over `extent(A, 1)` and slices
+  `extent(acc, 0)` rows; where the source writes the type, as for a tensor
+  parameter, the compiler reads the dimension straight from it, so the loop
+  is the one over `K` a kernel would write.
+- A tile type in a function body may be sized by the function's parameters,
+  each passed a name or a literal: `attention` declares its score tile as
+  `tile<f32>[BR, BC]` from the `BR` and `BC` it is called with. This is also
+  why `attention` takes `BR` although `q` has `BR` rows: a type is sized
+  only by parameters, not by `extent`.
+
+## Every function
+
+<Index />
+
+## Not in the library yet
+
+PyTorch's `torch.nn.functional` and Triton's `triton.language` cover more,
+and some of it needs the language to grow first:
+
+- Dropout and random numbers: there is no random-number primitive yet.
+- RoPE that rotates adjacent pairs (GPT-J's, and llama.cpp's default): it
+  needs strided access. [`rope`](/docs/stdlib/attention/#rope) is the
+  rotate-half form.
+- Column-wise reductions, group and batch norm, losses beyond
+  [`logsumexp`](/docs/stdlib/rows/#logsumexp), sorting and scans other than
+  `cumsum`.
+- Activations shaped like a condition, such as `hardshrink`: `where` on
+  tiles is only the value of an assignment, so it cannot sit inside an
+  expression function.

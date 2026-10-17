@@ -1,0 +1,36 @@
+---
+title: Quantization
+description: Symmetric int8 quantization by row, the round trip into an integer dot and back.
+sidebar:
+  order: 7
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+Symmetric int8 quantization by absolute maximum, one scale a row: what a
+kernel does to an `f32` activation before an integer contraction such as
+`dot_t` over `i8` or the [quantized built-ins](/docs/language/quantized/).
+
+```phobos
+kernel int8_linear(X: tensor<f32>[M, 256], Wq: tensor<i8>[N, 256], Ws: tensor<f32>[1, N], Y: tensor<f32>[M, N]) {
+  let m0 = ctx.block.x * 16
+  let n0 = ctx.block.y * 16
+  var xq: tile<i8>[16, 256]
+  var xs: tile<f32>[16, 1]
+  quantize_i8(xq, xs, X[m0 :+ 16, :])
+  var acc: tile<i32>[16, 16] = dot_t(xq, Wq[n0 :+ 16, :])
+  Y[m0 :+ 16, n0 :+ 16] = f32(acc) * xs * Ws[0 :+ 1, n0 :+ 16]
+}
+```
+
+The activation's rows are quantized into shared memory, the product is
+exact in `i32`, and the epilogue scales each element by its row's scale and
+its column's.
+
+### `quantize_i8`
+
+<Fn name="quantize_i8" />
+
+### `dequantize_i8`
+
+<Fn name="dequantize_i8" />
