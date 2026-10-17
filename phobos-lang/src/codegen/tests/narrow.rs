@@ -318,3 +318,23 @@ fn f16_flash_attention_without_tensorcore_widens_to_f32() {
         "WMMA emitted without @tensorcore:\n{mlir}"
     );
 }
+
+#[test]
+fn a_conversions_scalars_take_its_arguments_type() {
+    // Under `i8(..)` the arithmetic is f32, so its literals are f32 whatever
+    // the target: one statement, the same sweep as a declared f32 step.
+    let src = |body: &str| {
+        format!(
+            "kernel k(X: tensor<f32>[16, 64], M: tensor<f32>[16, 1], Q: tensor<i8>[16, 64]) {{
+                var x = X[0 :+ 16, :]
+                var m = M[0 :+ 16, :]
+                var q: tile<i8>[16, 64]
+                {body}
+                Q[0 :+ 16, :] = q
+            }}"
+        )
+    };
+    let mlir = emit_mlir(&src("q = i8(i32(round(x * (127.0 / (m + 1.0e-30)))))"));
+    assert_contains(&mlir, &["arith.constant 1.270000e+02 : f32", "arith.fptosi"]);
+    assert!(emit_err(&src("q = f32(x * 2.0)")).contains("cannot store f32 where i8 is expected"));
+}

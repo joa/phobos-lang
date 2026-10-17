@@ -238,8 +238,17 @@ impl Build {
             }
             ExprKind::Call { callee, args } if args.len() == 1 && ElemStep::from_callee(callee).is_some() => {
                 let step = ElemStep::from_callee(callee).expect("checked above");
-                let inner = self.plan_fused(&args[0], plan)?;
-                Tree::Unary(step, Box::new(inner))
+                // A conversion's argument computes in its own type, so its
+                // scalars take that type, not the target's.
+                let outer = plan.elem;
+                if let ElemStep::Cast(_) = step
+                    && let Some(elem) = self.operand_elem(&args[0])
+                {
+                    plan.elem = elem;
+                }
+                let inner = self.plan_fused(&args[0], plan);
+                plan.elem = outer;
+                Tree::Unary(step, Box::new(inner?))
             }
             ExprKind::Call { callee, args } if callee == "iota" => {
                 let [Expr { kind: ExprKind::Int(d), .. }] = args[..] else {
@@ -279,6 +288,18 @@ impl Build {
                 }
             },
         })
+    }
+
+    /// The element type `value` computes in, where its tiles or a conversion
+    /// around it decide it.
+    fn operand_elem(&self, value: &Expr) -> Option<Scalar> {
+        if let ExprKind::Call { callee, args } = &value.kind
+            && let [_] = &args[..]
+            && let Some(ElemStep::Cast(to)) = ElemStep::from_callee(callee)
+        {
+            return Some(to);
+        }
+        self.fused_decl_type(value).map(|(elem, _)| elem)
     }
 
     /// `value` emitted, or the value it had where the tree already holds it.

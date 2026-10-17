@@ -7,8 +7,7 @@
 // maps to 127. `q` and `s` may be tiles or tensor slices.
 fn quantize_i8(q, s, x) {
   var m = rowmax(abs(x))
-  var scaled = x * (127.0 / (m + 1.0e-30))
-  q = i8(i32(round(scaled)))
+  q = i8(i32(round(x * (127.0 / (m + 1.0e-30)))))
   s = m / 127.0
 }
 
