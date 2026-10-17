@@ -79,6 +79,11 @@ impl<'c> Codegen<'c> {
 
     /// Each lane writes its finished sub-tile straight to C, optionally
     /// computing alpha*acc + beta*prev.
+    ///
+    /// A surplus warp, clamped onto the last block by
+    /// [`Self::warp_block_origin`], holds the same sub-tiles as that block's
+    /// own warp and writes nothing: two read-modify-writes of one C would
+    /// apply beta twice whenever one lands before the other reads.
     pub(super) fn reg_store(
         &mut self,
         block: &Block<'c>,
@@ -87,38 +92,50 @@ impl<'c> Codegen<'c> {
         alpha: Option<GemmScale<'c>>,
         beta: Option<GemmScale<'c>>,
     ) -> Result<()> {
-        let GemmPath::Reg { tm, tn, .. } = acc.plan.path else {
+        let GemmPath::Reg { tm, tn, lm, ln } = acc.plan.path else {
             bail!("reg_store on a tensor-core plan");
         };
-        let (_, _, _, m0, n0) = Self::gemm_finals(&acc)?;
+        let (tid, w, wt, m0, n0) = Self::gemm_finals(&acc)?;
         let row_t = Type::vector(&[tn as u64], self.f32_t);
 
         let (alpha_row, beta_row) =
             self.epilogue_scaling(block, alpha, beta, row_t, view.vectorizes(4))?;
 
+        // Warps that own a block, of the CTA's.
+        let owners = (acc.plan.m / tm / lm) * (acc.plan.n / tn / ln);
+        let guarded = Block::new(&[]);
+        let into = if owners < self.cta_threads / 32 { &guarded } else { block };
         for i in 0..tm {
-            let ci = self.const_index(block, i)?;
-            let mi = self.addi(block, m0, ci)?;
-            let row = self.vec_extract(block, acc.regs[0], &[i], row_t)?;
+            let ci = self.const_index(into, i)?;
+            let mi = self.addi(into, m0, ci)?;
+            let row = self.vec_extract(into, acc.regs[0], &[i], row_t)?;
 
             if view.vectorizes(4) {
-                let out_row = self.apply_scaling(block, row, alpha_row, beta_row, |cg| {
-                    cg.vec_load(block, view.mem, &[mi, n0], row_t)
+                let out_row = self.apply_scaling(into, row, alpha_row, beta_row, |cg| {
+                    cg.vec_load(into, view.mem, &[mi, n0], row_t)
                 })?;
 
-                self.vec_store(block, out_row, view.mem, &[mi, n0])?;
+                self.vec_store(into, out_row, view.mem, &[mi, n0])?;
             } else {
                 for j in 0..tn {
-                    let cj = self.const_index(block, j)?;
-                    let nj = self.addi(block, n0, cj)?;
-                    let e = self.vec_extract(block, row, &[j], self.f32_t)?;
-                    let out_e = self.apply_scaling(block, e, alpha_row, beta_row, |cg| {
-                        cg.push(block, memref::load(view.mem, &[mi, nj], cg.loc))
+                    let cj = self.const_index(into, j)?;
+                    let nj = self.addi(into, n0, cj)?;
+                    let e = self.vec_extract(into, row, &[j], self.f32_t)?;
+                    let out_e = self.apply_scaling(into, e, alpha_row, beta_row, |cg| {
+                        cg.push(into, memref::load(view.mem, &[mi, nj], cg.loc))
                     })?;
 
-                    block.append_operation(memref::store(out_e, view.mem, &[mi, nj], self.loc));
+                    into.append_operation(memref::store(out_e, view.mem, &[mi, nj], self.loc));
                 }
             }
+        }
+        if owners < self.cta_threads / 32 {
+            let warp = self.divui(block, tid, w)?;
+            let owner = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, warp, wt, self.loc))?;
+            guarded.append_operation(scf::r#yield(&[], self.loc));
+            let region = Region::new();
+            region.append_block(guarded);
+            block.append_operation(scf::r#if(owner, &[], region, Region::new(), self.loc));
         }
         Ok(())
     }

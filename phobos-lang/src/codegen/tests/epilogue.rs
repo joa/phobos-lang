@@ -40,3 +40,35 @@ fn the_tensor_cores_take_the_dot_and_then_the_update_sweep() {
     let mlir = emit_mlir(&attention_updates("@tensorcore", "f16"));
     assert!(mlir.contains("gpu.subgroup_mma_compute"), "{mlir}");
 }
+
+/// The register GEMM over a `tm x tn` output tile, with `alpha * acc + beta * C`.
+fn scaled_gemm(tm: i64, tn: i64) -> String {
+    format!(
+        "@autotune(TILE_M in [{tm}], TILE_N in [{tn}], TILE_K in [8])
+        @pipeline
+        @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+        kernel gemm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32) {{
+            let pm = ctx.block.x
+            let pn = ctx.block.y
+            var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+            for kt in range(0, K, TILE_K) {{
+                var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                acc += dot(a, b)
+            }}
+            let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+        }}"
+    )
+}
+
+#[test]
+fn a_surplus_warp_of_the_register_gemm_leaves_c_to_its_block_owner() {
+    // 32x64 is 64 sub-tiles of 8x4 for 256 threads: six warps clamp onto
+    // the last block, and only the owner may read and write its C.
+    let stores = |mlir: &str| mlir.matches("arith.cmpi eq").count();
+    let surplus = emit_mlir(&scaled_gemm(32, 64));
+    assert!(module_verifies(&surplus), "{surplus}");
+    let whole = emit_mlir(&scaled_gemm(64, 128));
+    assert_eq!(stores(&surplus), stores(&whole) + 1, "{surplus}");
+}
