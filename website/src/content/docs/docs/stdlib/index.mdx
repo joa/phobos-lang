@@ -10,9 +10,10 @@ import Index from "../../../../components/stdlib/Index.astro"
 import letErrors from "../../../../data/diagnostics/stdlib-let.txt?raw"
 
 The standard library is a set of functions written in Phobos that every
-source can call without defining them: activations, row-wise softmax and
-normalization, the online softmax of Flash attention, the k-loop of a matrix
-product and int8 quantization. They are building blocks, not kernels. A
+source can call without defining them: activations, softmax, norms and
+other reductions over rows and columns, the online softmax of Flash
+attention, rotary embeddings, the k-loop of a matrix product, int8
+quantization, losses, and random numbers and dropout. They are building blocks, not kernels. A
 kernel still picks its tiles, its grid and its attributes, and calls the
 library inside its own body.
 
@@ -120,13 +121,11 @@ functions.
 PyTorch's `torch.nn.functional` and Triton's `triton.language` cover more,
 and some of it needs the language to grow first:
 
-- Dropout and random numbers: there is no random-number primitive yet.
-- RoPE that rotates adjacent pairs (GPT-J's, and llama.cpp's default): it
-  needs strided access. [`rope`](/docs/stdlib/attention/#rope) is the
-  rotate-half form.
-- Column-wise reductions, group and batch norm, losses beyond
-  [`logsumexp`](/docs/stdlib/rows/#logsumexp), sorting and scans other than
-  `cumsum`.
-- Activations shaped like a condition, such as `hardshrink`: `where` on
-  tiles is only the value of an assignment, so it cannot sit inside an
-  expression function.
+- [`uniform`](/docs/stdlib/random/#uniform) is a counter-based hash, not
+  Philox, so a draw is not the number `torch.rand` gives for a seed. Philox
+  needs the high half of a 32-bit product, which the language does not have.
+- Group and instance norm, whose statistics run over a reshaped view of the
+  tile, and adjacent-pair RoPE on a plain `[R, D]` tile, which needs strided
+  slices. [`rope_pairs`](/docs/stdlib/attention/#rope_pairs) covers a kernel
+  that declares its heads as `[T, D / 2, 2]`.
+- Sorting, and scans other than `cumsum`.

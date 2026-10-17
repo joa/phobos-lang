@@ -16,7 +16,7 @@ const { id = "fig-activation-curves" } = Astro.props
   figure={ActivationCurvesFigure}
   state={{ family: FAMILIES[0].key }}
   title="The standard library's activation functions"
-  desc="Each activation function of the standard library plotted for x from -4 to 4, in four families: rectifiers (relu, leaky_relu, elu, selu), GELU and its kin (gelu, gelu_tanh, quick_gelu, silu, mish, hardswish), squashing functions (sigmoid, hardsigmoid, softsign, hardtanh) and smooth ones (softplus, log_sigmoid, squared_relu). The curves are computed from the library's Phobos source."
+  desc="Each activation function of the standard library plotted for x from -4 to 4, in five families: rectifiers (relu, leaky_relu, elu, selu), GELU and its kin (gelu, gelu_tanh, quick_gelu, silu, mish, hardswish), squashing functions (sigmoid, hardsigmoid, softsign, hardtanh), smooth ones (softplus, log_sigmoid, squared_relu) and shrinkage (hardshrink, softshrink, tanhshrink). The curves are computed from the library's Phobos source."
   legend={[["reg", "per element, in registers"]]}
 >
   <div class="chart-group" role="group" aria-label="Family">

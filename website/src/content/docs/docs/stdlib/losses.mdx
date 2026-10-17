@@ -1,0 +1,62 @@
+---
+title: Losses
+description: Cross-entropy, negative log-likelihood, MSE, L1, smooth L1, KL divergence and binary cross-entropy, one loss a row.
+sidebar:
+  order: 8
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+
+The losses of `torch.nn.functional`, one value a row: a row of a `[R, C]`
+tile is one sample, and each loss leaves its `[R, 1]` column, a sample's
+loss. PyTorch reduces over the batch as well, with `reduction="mean"` or
+`"sum"`; a kernel does that itself, often together with the other blocks'
+rows, so the library stops at the row.
+
+```phobos
+kernel token_loss(Logits: tensor<f32>[M, 512], Target: tensor<i32>[M, 1], Loss: tensor<f32>[M, 1]) {
+  let r = ctx.block.x * 8
+  var x = Logits[r :+ 8, :]
+  cross_entropy(Loss[r :+ 8, :], x, Target[r :+ 8, :])
+}
+```
+
+A target is a column of class indices, `i32`. The logit at each row's class
+is picked by a `where` against `iota(1)` and a row sum, so no thread reads
+a column it does not already hold.
+
+## Classification
+
+### `cross_entropy`
+
+<Fn name="cross_entropy" />
+
+### `nll_loss`
+
+<Fn name="nll_loss" />
+
+### `binary_cross_entropy_with_logits`
+
+<Fn name="binary_cross_entropy_with_logits" />
+
+### `kl_div`
+
+<Fn name="kl_div" />
+
+## Regression
+
+The regression losses are expression functions, each a row mean of an
+elementwise term, so the difference and the term fuse into the reduction's
+sweep.
+
+### `mse_loss`
+
+<Fn name="mse_loss" />
+
+### `l1_loss`
+
+<Fn name="l1_loss" />
+
+### `smooth_l1_loss`
+
+<Fn name="smooth_l1_loss" />

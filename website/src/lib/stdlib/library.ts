@@ -4,8 +4,9 @@
 // own that directly follows another (no blank line between) shares that one's documentation, as
 // `exp2` and `log2` do.
 //
-// `evaluate` runs an expression function on numbers, which is how the activation figure plots what
-// the shipped source computes and how the tests check the formulas against reference values.
+// `evaluator` runs an expression function on numbers, which is how the activation and random-number
+// figures draw what the shipped source computes and how the tests check the formulas against
+// reference values.
 
 export type Kind = "expression" | "statement"
 
@@ -120,16 +121,45 @@ export function isHelper(name: string): boolean {
 
 // Expression evaluation.
 
+// A value as the device holds it: a float, in double precision here, or an `i32`, which wraps as
+// the device's does.
+interface Value {
+  v: number
+  int: boolean
+}
+
+// An `i32` argument, as `uniform(seed, counter)` takes: `f("uniform", int(7), int(0))`.
+export interface IntArg {
+  int: number
+}
+
+export const int = (value: number): IntArg => ({ int: value })
+
+type BinOp = "+" | "-" | "*" | "/" | "%" | "&" | "|" | "^" | "<<" | ">>" | "<" | "<=" | ">" | ">=" | "==" | "!=" | "&&" | "||"
+
 type Node =
-  | { kind: "num"; value: number }
+  | { kind: "num"; value: Value }
   | { kind: "var"; name: string }
-  | { kind: "neg"; arg: Node }
-  | { kind: "bin"; op: "+" | "-" | "*" | "/"; lhs: Node; rhs: Node }
+  | { kind: "unary"; op: "-" | "~" | "!"; arg: Node }
+  | { kind: "bin"; op: BinOp; lhs: Node; rhs: Node }
   | { kind: "call"; callee: string; args: Node[] }
 
+// Loosest first, as SPEC.md's precedence row lists them.
+const LEVELS: BinOp[][] = [
+  ["||"],
+  ["&&"],
+  ["==", "!="],
+  ["<", "<=", ">", ">="],
+  ["|"],
+  ["^"],
+  ["&"],
+  ["<<", ">>"],
+  ["+", "-"],
+  ["*", "/", "%"],
+]
+
 function tokenize(text: string): string[] {
-  const tokens = text.match(/\d+\.?\d*(?:[eE][+-]?\d+)?|[A-Za-z_][A-Za-z0-9_]*|[()+\-*/,]|\S/g) ?? []
-  return tokens
+  return text.match(/\d+\.?\d*(?:[eE][+-]?\d+)?|[A-Za-z_][A-Za-z0-9_]*|<<|>>|<=|>=|==|!=|&&|\|\||[()+\-*/%&|^~!<>,]|\S/g) ?? []
 }
 
 function parseExpression(text: string): Node {
@@ -146,21 +176,21 @@ function parseExpression(text: string): Node {
     const token = take()
     if (token === undefined) throw new Error(`unexpected end of ${text}`)
     if (token === "(") {
-      const inner = sum()
+      const inner = level(0)
       take(")")
       return inner
     }
-    if (token === "-") return { kind: "neg", arg: primary() }
-    if (/^\d/.test(token)) return { kind: "num", value: Number(token) }
+    if (token === "-" || token === "~" || token === "!") return { kind: "unary", op: token, arg: primary() }
+    if (/^\d/.test(token)) return { kind: "num", value: { v: Number(token), int: !/[.eE]/.test(token) } }
     if (/^[A-Za-z_]/.test(token)) {
       if (peek() !== "(") return { kind: "var", name: token }
       take("(")
       const args: Node[] = []
       if (peek() !== ")") {
-        args.push(sum())
+        args.push(level(0))
         while (peek() === ",") {
           take(",")
-          args.push(sum())
+          args.push(level(0))
         }
       }
       take(")")
@@ -168,29 +198,22 @@ function parseExpression(text: string): Node {
     }
     throw new Error(`unexpected \`${token}\` in ${text}`)
   }
-  const product = (): Node => {
-    let lhs = primary()
-    while (peek() === "*" || peek() === "/") {
-      const op = take() as "*" | "/"
-      lhs = { kind: "bin", op, lhs, rhs: primary() }
+  function level(depth: number): Node {
+    if (depth === LEVELS.length) return primary()
+    let lhs = level(depth + 1)
+    while ((LEVELS[depth] as string[]).includes(peek())) {
+      const op = take() as BinOp
+      lhs = { kind: "bin", op, lhs, rhs: level(depth + 1) }
     }
     return lhs
   }
-  function sum(): Node {
-    let lhs = product()
-    while (peek() === "+" || peek() === "-") {
-      const op = take() as "+" | "-"
-      lhs = { kind: "bin", op, lhs, rhs: product() }
-    }
-    return lhs
-  }
-  const node = sum()
+  const node = level(0)
   if (at !== tokens.length) throw new Error(`trailing \`${tokens[at]}\` in ${text}`)
   return node
 }
 
-// The built-ins an expression function may call, exactly where the hardware is: `exp`, `log`,
-// `tanh` and `sqrt` are approximate on the device.
+// The built-ins on floats an expression function may call, exactly where the hardware is: `exp`,
+// `log`, `tanh` and `sqrt` are approximate on the device.
 const BUILTINS: Record<string, (...args: number[]) => number> = {
   exp: Math.exp,
   log: Math.log,
@@ -202,20 +225,68 @@ const BUILTINS: Record<string, (...args: number[]) => number> = {
   cos: Math.cos,
   floor: Math.floor,
   ceil: Math.ceil,
-  min: (a, b) => (Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.min(a, b)),
-  max: (a, b) => (Number.isNaN(a) ? b : Number.isNaN(b) ? a : Math.max(a, b)),
-  f32: x => x,
 }
 
-// An evaluator of the expression functions of `files`, in double precision.
-export function evaluator(files: LibraryFile[]): (name: string, ...args: number[]) => number {
+const float = (v: number): Value => ({ v, int: false })
+const i32 = (v: number): Value => ({ v: v | 0, int: true })
+const bool = (b: boolean): Value => ({ v: b ? 1 : 0, int: true })
+
+function binary(op: BinOp, a: Value, b: Value): Value {
+  const ints = a.int && b.int
+  switch (op) {
+    case "+":
+      return ints ? i32(a.v + b.v) : float(a.v + b.v)
+    case "-":
+      return ints ? i32(a.v - b.v) : float(a.v - b.v)
+    case "*":
+      return ints ? i32(Math.imul(a.v, b.v)) : float(a.v * b.v)
+    case "/":
+      return ints ? i32(Math.trunc(a.v / b.v)) : float(a.v / b.v)
+    case "%":
+      return ints ? i32(a.v % b.v) : float(a.v % b.v)
+    case "<":
+      return bool(a.v < b.v)
+    case "<=":
+      return bool(a.v <= b.v)
+    case ">":
+      return bool(a.v > b.v)
+    case ">=":
+      return bool(a.v >= b.v)
+    case "==":
+      return bool(a.v === b.v)
+    case "!=":
+      return bool(a.v !== b.v)
+    case "&&":
+      return bool(a.v !== 0 && b.v !== 0)
+    case "||":
+      return bool(a.v !== 0 || b.v !== 0)
+  }
+  if (!ints) throw new Error(`\`${op}\` takes integers`)
+  switch (op) {
+    case "&":
+      return i32(a.v & b.v)
+    case "|":
+      return i32(a.v | b.v)
+    case "^":
+      return i32(a.v ^ b.v)
+    case "<<":
+      return i32(a.v << b.v)
+    case ">>":
+      return i32(a.v >> b.v)
+  }
+}
+
+// An evaluator of the expression functions of `files`: floats in double precision, `i32` values
+// wrapping as on the device. A function that reduces a tile, as `rowmean` does, has no value on a
+// number and fails when called.
+export function evaluator(files: LibraryFile[]): (name: string, ...args: (number | IntArg)[]) => number {
   const bodies = new Map<string, { params: string[]; body: Node }>()
   for (const fn of files.flatMap(file => file.functions)) {
     if (fn.kind !== "expression") continue
     const text = fn.source.slice(fn.source.indexOf("=") + 1)
     bodies.set(fn.name, { params: fn.params, body: parseExpression(text) })
   }
-  const run = (node: Node, scope: Map<string, number>): number => {
+  const run = (node: Node, scope: Map<string, Value>): Value => {
     switch (node.kind) {
       case "num":
         return node.value
@@ -224,23 +295,40 @@ export function evaluator(files: LibraryFile[]): (name: string, ...args: number[
         if (value === undefined) throw new Error(`unbound \`${node.name}\``)
         return value
       }
-      case "neg":
-        return -run(node.arg, scope)
-      case "bin": {
-        const [a, b] = [run(node.lhs, scope), run(node.rhs, scope)]
-        return node.op === "+" ? a + b : node.op === "-" ? a - b : node.op === "*" ? a * b : a / b
+      case "unary": {
+        const x = run(node.arg, scope)
+        if (node.op === "!") return bool(x.v === 0)
+        if (node.op === "~") return binary("^", x, i32(-1))
+        return x.int ? i32(-x.v) : float(-x.v)
       }
+      case "bin":
+        return binary(node.op, run(node.lhs, scope), run(node.rhs, scope))
       case "call":
-        return call(node.callee, node.args.map(arg => run(arg, scope)))
+        return call(
+          node.callee,
+          node.args.map(arg => run(arg, scope))
+        )
     }
   }
-  const call = (name: string, args: number[]): number => {
+  const call = (name: string, args: Value[]): Value => {
+    if (name === "where") return args[0].v !== 0 ? args[1] : args[2]
+    if (name === "f32" || name === "f64") return float(args[0].v)
+    if (name === "i32") return i32(Math.trunc(args[0].v))
+    if (name === "min" || name === "max") {
+      const [a, b] = args
+      const pick = Number.isNaN(a.v) ? b : Number.isNaN(b.v) ? a : (name === "min" ? a.v <= b.v : a.v >= b.v) ? a : b
+      return a.int && b.int ? pick : float(pick.v)
+    }
     const builtin = BUILTINS[name]
-    if (builtin) return builtin(...args)
+    if (builtin) return float(builtin(...args.map(arg => arg.v)))
     const fn = bodies.get(name)
     if (!fn) throw new Error(`\`${name}\` is not an expression function or a built-in the evaluator knows`)
     if (fn.params.length !== args.length) throw new Error(`\`${name}\` takes ${fn.params.length} arguments`)
     return run(fn.body, new Map(fn.params.map((param, i) => [param, args[i]])))
   }
-  return (name, ...args) => call(name, args)
+  return (name, ...args) =>
+    call(
+      name,
+      args.map(arg => (typeof arg === "number" ? float(arg) : i32(arg.int)))
+    ).v
 }

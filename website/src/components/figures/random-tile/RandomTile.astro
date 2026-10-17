@@ -1,0 +1,46 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import RandomTileFigure from "./random-tile.figure"
+import { FUNCTIONS, SEEDS, type RandomFunction } from "./geometry"
+
+interface Props {
+  id?: string
+  // The function shown first.
+  fn?: RandomFunction
+}
+
+const { id = "fig-random-tile", fn = "uniform" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="random-tile"
+  figure={RandomTileFigure}
+  state={{ fn, seed: String(SEEDS[0]) }}
+  title="Counter-based random numbers on a tile"
+  desc="A tile of eight rows of 32 elements, twelve rows of 16 on a narrow screen, each shaded by the value the standard library's uniform, randn or dropout gives its counter, the element's flat index, under seed 1, 2 or 3. Uniform shades by the value in [0, 1), randn by the value from -3 to 3, and dropout fills the kept elements and leaves the dropped ones empty. The values are computed from the library's Phobos source."
+  legend={[["reg", "per element, in registers"]]}
+>
+  <div class="chart-group" role="group" aria-label="Function">
+    {
+      FUNCTIONS.map(name => (
+        <button type="button" class="chart-btn" data-group="fn" data-value={name} aria-pressed={name === fn ? "true" : "false"}>
+          {name}
+        </button>
+      ))
+    }
+  </div>
+  <div class="chart-group" role="group" aria-label="Seed">
+    {
+      SEEDS.map((seed, i) => (
+        <button type="button" class="chart-btn" data-group="seed" data-value={String(seed)} aria-pressed={i === 0 ? "true" : "false"}>
+          seed {seed}
+        </button>
+      ))
+    }
+  </div>
+  <Fragment slot="caption">
+    Computed from the definitions in <code>phobos-lang/src/stdlib/random.ph</code>, with the device's wrapping
+    <code>i32</code> arithmetic. The same seed and counters draw the same tile on every run.
+  </Fragment>
+</ChartFigure>

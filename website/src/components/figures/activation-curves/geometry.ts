@@ -1,5 +1,5 @@
 // Layout of the activation figure, pure so the tests can check it: the library's activation
-// functions in four families, each plotted over x in [-4, 4] from the shipped source through
+// functions in five families, each plotted over x in [-4, 4] from the shipped source through
 // `evaluator`, on axes whose range is the family's own, with a legend naming each curve.
 
 import type { Layout } from "../../../lib/figure/layout"
@@ -75,6 +75,11 @@ export const FAMILIES: { key: string; title: string; members: Member[] }[] = [
     key: "smooth",
     title: "Smooth",
     members: [{ name: "softplus" }, { name: "log_sigmoid" }, { name: "squared_relu" }],
+  },
+  {
+    key: "shrink",
+    title: "Shrinkage",
+    members: [{ name: "hardshrink", extra: [1] }, { name: "softshrink", extra: [1] }, { name: "tanhshrink" }],
   },
 ]
 

@@ -1,6 +1,6 @@
 ---
-title: Row-wise operations
-description: Softmax, log-softmax, logsumexp, masks and top-k over the rows of a tile.
+title: Rows and columns
+description: Softmax, log-softmax, logsumexp, variance, masks and top-k over the rows of a tile, and reductions down its columns.
 sidebar:
   order: 3
 ---
@@ -49,12 +49,21 @@ step from the next, since each reads what the one before stored.
 
 <Fn name="rowmin" />
 
+### `rowargmin`
+
+<Fn name="rowargmin" />
+
+### `rowvar`
+
+<Fn name="rowvar" />
+
 ### `logsumexp`
 
 <Fn name="logsumexp" />
 
-`logsumexp` is the normalizer of a log-softmax and the loss of a
-cross-entropy against a target logit:
+`logsumexp` is the normalizer of a log-softmax, and with the target logit
+subtracted a cross-entropy, which
+[`cross_entropy`](/docs/stdlib/losses/#cross_entropy) is:
 
 ```phobos
 kernel nll(Logits: tensor<f32>[M, 512], Target: tensor<f32>[M, 1], Loss: tensor<f32>[M, 1]) {
@@ -88,6 +97,25 @@ kernel nll(Logits: tensor<f32>[M, 512], Target: tensor<f32>[M, 1], Loss: tensor<
 
 [Causal attention](/docs/stdlib/attention/#causal-attention) uses it on
 each block of scores.
+
+## Down the columns
+
+A column reduction folds the rows of a tile into a `[1, C]` row, as a batch
+norm folds a batch of samples. The language reduces rows only, so each of
+these transposes the tile through shared memory first and reduces the rows
+of that: one more copy of the tile than a row reduction.
+
+```phobos
+kernel column_stats(X: tensor<f32>[32, 128], Mean: tensor<f32>[1, 128], Top: tensor<f32>[1, 128]) {
+  var x = X[0 :+ 32, :]
+  Mean[0 :+ 1, :] = colmean(x)
+  Top[0 :+ 1, :] = colmax(x)
+}
+```
+
+### `colsum`, `colmax`, `colmin`, `colmean`
+
+<Fn names="colsum colmax colmin colmean" />
 
 ## Selection
 

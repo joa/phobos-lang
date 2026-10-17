@@ -1,0 +1,56 @@
+---
+title: Random numbers
+description: Counter-based uniform and normal random numbers and dropout, computed where they are used.
+sidebar:
+  order: 9
+---
+
+import Fn from "../../../../components/stdlib/Fn.astro"
+import RandomTile from "../../../../components/figures/random-tile/RandomTile.astro"
+
+Random numbers without a generator's state: each value is a hash of a seed
+and the element's own counter, so a tile of them is a few integer
+instructions an element, fused into the statement that uses them. The same
+seed and counter give the same number, which is how a backward pass redraws
+the dropout mask of its forward pass instead of storing it.
+
+```phobos
+@autotune(R in [16])
+kernel dropout_rows(X: tensor<f32>[M, 256], Y: tensor<f32>[M, 256], seed: i32) {
+  let r = ctx.block.x * R
+  Y[r :+ R, :] = dropout(X[r :+ R, :], 0.1, seed, (r + iota(0)) * 256 + iota(1))
+}
+```
+
+The counter is each element's flat index in the whole tensor, not in the
+block, so no two elements of a launch draw the same number. A fresh draw
+takes a fresh seed, or counters past the ones used: `randn` reads the
+uniforms at `2 c` and `2 c + 1`, so a kernel that takes both `uniform` and
+`randn` from one seed gives them different seeds. A kernel that passes one
+counter to several calls can hold it in a tile,
+`var c: tile<i32>[R, 256] = (r + iota(0)) * 256 + iota(1)`, at the cost of
+the tile's shared memory; a `let` cannot name it, since `iota` is a position
+only in the value of an assignment.
+
+<RandomTile />
+
+### `uniform`
+
+<Fn name="uniform" />
+
+### `randn`
+
+<Fn name="randn" />
+
+### `dropout`
+
+<Fn name="dropout" />
+
+### `hash32`
+
+<Fn name="hash32" />
+
+The hash runs in wrapping `i32` arithmetic, which a counter built from
+`iota` and integers computes in, as `iota` does. Its shifts are logical:
+`>>` is arithmetic on a signed integer, so the bits it copies in are
+masked off.

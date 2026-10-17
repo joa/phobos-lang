@@ -1,6 +1,6 @@
 ---
 title: Normalization
-description: RMS norm, layer norm and L2 normalization over the rows of a tile.
+description: RMS norm, layer norm and L2 normalization over the rows of a tile, and batch norm down its columns.
 sidebar:
   order: 4
 ---
@@ -53,3 +53,31 @@ kernel layer_norm_rows(X: tensor<f16>[M, 768], G: tensor<f32>[1, 768], B: tensor
 ### `l2_normalize`
 
 <Fn name="l2_normalize" />
+
+## Batch norm
+
+A batch norm normalizes each column over the batch, the rows. At inference
+it applies running statistics, an elementwise expression that fuses into the
+store; in training a block whose rows are the whole batch computes them
+first:
+
+```phobos
+kernel batch_norm_train(X: tensor<f32>[32, 64], G: tensor<f32>[1, 64], B: tensor<f32>[1, 64],
+                        Y: tensor<f32>[32, 64], Stats: tensor<f32>[2, 64]) {
+  var x = X[0 :+ 32, :]
+  var mean: tile<f32>[1, 64]
+  var variance: tile<f32>[1, 64]
+  batch_norm_stats(mean, variance, x)
+  Y[0 :+ 32, :] = batch_norm(x, mean, variance, G[0 :+ 1, :], B[0 :+ 1, :], 0.00001)
+  Stats[0 :+ 1, :] = mean
+  Stats[1 :+ 1, :] = variance
+}
+```
+
+### `batch_norm`
+
+<Fn name="batch_norm" />
+
+### `batch_norm_stats`
+
+<Fn name="batch_norm_stats" />

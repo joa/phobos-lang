@@ -8,11 +8,13 @@ import { LIBRARY } from "../../lib/stdlib/sources"
 const PAGES: Record<string, { href: string; title: string }> = {
   "std/math.ph": { href: "/docs/stdlib/math/", title: "Math" },
   "std/activation.ph": { href: "/docs/stdlib/activations/", title: "Activations" },
-  "std/reduce.ph": { href: "/docs/stdlib/rows/", title: "Row-wise operations" },
+  "std/reduce.ph": { href: "/docs/stdlib/rows/", title: "Rows and columns" },
   "std/norm.ph": { href: "/docs/stdlib/norms/", title: "Normalization" },
   "std/attention.ph": { href: "/docs/stdlib/attention/", title: "Attention" },
   "std/linalg.ph": { href: "/docs/stdlib/matmul/", title: "Matrix products" },
   "std/quant.ph": { href: "/docs/stdlib/quantization/", title: "Quantization" },
+  "std/loss.ph": { href: "/docs/stdlib/losses/", title: "Losses" },
+  "std/random.ph": { href: "/docs/stdlib/random/", title: "Random numbers" },
 }
 for (const file of LIBRARY) if (!PAGES[file.file]) throw new Error(`no stdlib page for ${file.file}`)
 

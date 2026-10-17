@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { describe, expect, it } from "vitest"
-import { evaluator, isHelper, parseLibrary, shippedFiles } from "../src/lib/stdlib/library"
+import { evaluator, int, isHelper, parseLibrary, shippedFiles } from "../src/lib/stdlib/library"
 import { FUNCTIONS, LIBRARY } from "../src/lib/stdlib/sources"
 
 const DOCS = join(import.meta.dirname, "../src/content/docs/docs/stdlib")
@@ -63,6 +63,13 @@ describe("the library's expression functions", () => {
     ["relu6", [7], 6, 0],
     ["leaky_relu", [-2, 0.01], -0.02, 1e-15],
     ["hardtanh", [-3], -1, 0],
+    ["threshold", [0.25, 0.5, -2], -2, 0],
+    ["threshold", [0.75, 0.5, -2], 0.75, 0],
+    ["hardshrink", [-0.4, 0.5], 0, 0],
+    ["hardshrink", [-0.6, 0.5], -0.6, 0],
+    ["softshrink", [-0.6, 0.5], -0.1, 1e-15],
+    ["softshrink", [0.3, 0.5], 0, 0],
+    ["tanhshrink", [1], 1 - Math.tanh(1), 1e-15],
     ["elu", [-1, 1], Math.exp(-1) - 1, 1e-15],
     ["selu", [-1], -1.1113307378125625, 1e-12],
     ["selu", [2], 2.101401974710961, 1e-12],
@@ -101,6 +108,36 @@ describe("the library's expression functions", () => {
 
   it.each(cases)("%s(%s)", (name, args, want, tolerance) => {
     expect(Math.abs(f(name, ...args) - want)).toBeLessThanOrEqual(tolerance)
+  })
+
+  it("hashes in wrapping i32 arithmetic, as lowbias32 does", () => {
+    // lowbias32 of 0, 1, 2 and 12345, as signed words.
+    const want: [number, number][] = [[0, 0], [1, 1753845952], [2, -787275391], [12345, -1859191561]]
+    for (const [x, h] of want) expect(f("hash32", int(x))).toBe(h)
+  })
+
+  it("draws uniforms on the 2^-23 grid, bit for bit", () => {
+    const want = [0.3509063720703125, 0.7491462230682373, 0.296217679977417]
+    want.forEach((u, counter) => expect(f("uniform", int(7), int(counter))).toBe(u))
+    for (let counter = 0; counter < 1000; counter += 1) {
+      const u = f("uniform", int(3), int(counter))
+      expect(u).toBeGreaterThanOrEqual(0)
+      expect(u).toBeLessThan(1)
+      expect(Number.isInteger(u * 2 ** 23)).toBe(true)
+    }
+  })
+
+  it("keeps dropout's expectation", () => {
+    let total = 0
+    for (let counter = 0; counter < 20000; counter += 1) total += f("dropout", 2, 0.25, int(11), int(counter))
+    expect(Math.abs(total / 20000 - 2)).toBeLessThan(0.03)
+  })
+
+  it("wraps i32 arithmetic and keeps floats apart", () => {
+    const text = "// T.\n\n// W.\nfn w(x) = x * 65536 * 65536 + 1\n// F.\nfn g(x) = x * 65536.0 * 65536.0 + 1\n"
+    const g = evaluator([parseLibrary("std/t.ph", text)])
+    expect(g("w", int(3))).toBe(1)
+    expect(g("g", 3)).toBe(3 * 2 ** 32 + 1)
   })
 
   it("keeps erf within its stated bound everywhere", () => {

@@ -102,3 +102,18 @@ kernel rotary(X: tensor<f32>[T, 128], Cos: tensor<f32>[T, 64], Sin: tensor<f32>[
 
 Both halves are copied out of `x` before either is written back, so the
 second half's rotation reads the first half as it was.
+
+### `rope_pairs`
+
+<Fn name="rope_pairs" />
+
+GPT-J, and llama.cpp by default, rotate adjacent pairs instead: elements
+`2i` and `2i + 1`. Declared as `[T, D / 2, 2]`, a head's pairs are two
+slices of the last axis, and `rope_pairs` rotates them in the tensor itself:
+
+```phobos
+kernel rotary_pairs(X: tensor<f32>[T, 64, 2], Cos: tensor<f32>[T, 64, 1], Sin: tensor<f32>[T, 64, 1]) {
+  let t = ctx.block.x * 8
+  rope_pairs(X[t :+ 8, :, 0], X[t :+ 8, :, 1], Cos[t :+ 8, :, 0], Sin[t :+ 8, :, 0])
+}
+```

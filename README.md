@@ -58,7 +58,7 @@ Phobos supports autotuning for finding the optimal configuration.
 
 ### Standard library
 
-Every kernel can call the standard library, functions written in Phobos that are inlined where they are called, so they fuse into the kernel around them: activations (`gelu`, `silu`, `swiglu`, ...), `softmax` and `logsumexp`, `rms_norm` and `layer_norm`, Flash attention's `online_softmax` and a whole `attention` pass, `rope`, the GEMM k-loop `matmul`, and int8 quantization.
+Every kernel can call the standard library, functions written in Phobos that are inlined where they are called, so they fuse into the kernel around them: activations (`gelu`, `silu`, `swiglu`, ...), `softmax` and `logsumexp`, `rms_norm` and `layer_norm`, Flash attention's `online_softmax` and a whole `attention` pass, `rope`, the GEMM k-loop `matmul`, int8 quantization, losses such as `cross_entropy`, and counter-based `uniform`, `randn` and `dropout`.
 
 ```plain
 kernel linear_gelu(X: tensor<f32>[M, K], W: tensor<f32>[N, K], Y: tensor<f32>[M, N]) {

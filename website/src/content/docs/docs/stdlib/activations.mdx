@@ -61,6 +61,19 @@ the store are one sweep. `silu` reads its argument twice in its definition,
 
 <Fn name="squared_relu" />
 
+## Thresholds and shrinkage
+
+An activation shaped like a condition is a `where`, which is a value like
+any other inside an expression function, so it fuses the same way.
+
+### `threshold`
+
+<Fn name="threshold" />
+
+### `hardshrink`, `softshrink`, `tanhshrink`
+
+<Fn names="hardshrink softshrink tanhshrink" />
+
 ## Sigmoid and its relatives
 
 ### `sigmoid`
