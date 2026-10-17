@@ -65,13 +65,14 @@ function rowOf(bench: KernelBench): Row {
       value: formatGflops(measure.gflops),
       share: `${Math.round(measure.pctOfPeak)}%`,
     }))
-    scale = `${precisionLabel(bench.phobos.precision)}, peak ${formatGflops(bench.phobos.peakGflops)}`
+    scale = `${bench.inputs ? `${bench.inputs}, ` : ""}${precisionLabel(bench.phobos.precision)}, peak ${formatGflops(bench.phobos.peakGflops)}`
   }
 
   let headline: string
   let aside: string | undefined
   if (ratio !== undefined) {
     headline = `${formatPercent(ratio)} of cuBLAS`
+    aside = bench.cublasNote
   } else if (bench.cublas) {
     headline = "no like-for-like cuBLAS"
     aside = `cuBLAS in this run is ${bench.cublasCall} in f32 on CUDA cores, ${formatGflops(bench.cublas.gflops)}: another precision, so no bar`

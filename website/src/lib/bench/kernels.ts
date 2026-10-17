@@ -30,8 +30,12 @@ export interface KernelSpec {
   label: string
   // The problem phobos-kbench runs, from its source (phobos-kbench/src/{saxpy,gemm/mod,flash}.rs).
   size: string
+  // How A and B are stored, where the precision alone does not say it.
+  inputs?: string
   // What the cuBLAS row times, when there is one.
   cublasCall?: string
+  // What the cuBLAS row's time includes beyond the call, if anything.
+  cublasNote?: string
   // Bytes moved per FLOP, for a kernel whose measure is bandwidth rather than arithmetic.
   bytesPerFlop?: number
 }
@@ -59,20 +63,24 @@ export const KERNEL_SPECS: Record<string, KernelSpec> = {
   gemm_fp16tc_fp32acc: {
     example: "/docs/examples/gemm-fp16tc-fp32acc/",
     source: "examples/gemm_fp16tc_fp32acc.ph",
-    label: "gemm, f32 on tensor cores",
+    label: "gemm, f32 data on tensor cores",
     size: "M = N = K = 4096",
+    inputs: "f32 A and B, rounded to f16 in the kernel",
     cublasCall: "cublasGemmEx on f16 copies of A and B",
+    cublasNote: "cuBLAS's time includes converting A and B to f16 first",
   },
   gemm_fp16_fp32acc: {
     source: "examples/gemm_fp16_fp32acc.ph",
-    label: "gemm, f16 into f32",
+    label: "gemm, f16 data, f32 result",
     size: "M = N = K = 4096",
+    inputs: "f16 A and B",
     cublasCall: "cublasGemmEx",
   },
   gemm_fp16: {
     source: "examples/gemm_fp16.ph",
     label: "gemm, f16",
     size: "M = N = K = 4096",
+    inputs: "f16 A, B and C",
     cublasCall: "cublasGemmEx",
   },
   flash_fp32: {
