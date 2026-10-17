@@ -56,6 +56,22 @@ Phobos supports autotuning for finding the optimal configuration.
 
 ![Running the gemm_fp32 benchmark](results/autotune.gif)
 
+### Standard library
+
+Every kernel can call the standard library, functions written in Phobos that are inlined where they are called, so they fuse into the kernel around them: activations (`gelu`, `silu`, `swiglu`, ...), `softmax` and `logsumexp`, `rms_norm` and `layer_norm`, Flash attention's `online_softmax` and a whole `attention` pass, `rope`, the GEMM k-loop `matmul`, and int8 quantization.
+
+```plain
+kernel linear_gelu(X: tensor<f32>[M, K], W: tensor<f32>[N, K], Y: tensor<f32>[M, N]) {
+  let m0 = ctx.block.x * 64
+  let n0 = ctx.block.y * 64
+  var acc: tile<f32>[64, 64] = 0.0
+  matmul_t(acc, X, W, m0, n0, 32)
+  Y[m0 :+ 64, n0 :+ 64] = gelu(acc)
+}
+```
+
+The library's sources in [`phobos-lang/src/stdlib/`](./phobos-lang/src/stdlib) are short, commented and double as examples of the language: `matmul` and `attention` compile to exactly the kernels written out by hand. A function the program defines itself shadows the library's; `phobos-compile --no-std` leaves the library out and `--stdlib FILE` uses another. The [reference](https://phobos-lang.dev/docs/stdlib/) documents every function.
+
 ## Inference
 
 The same language runs LLM inference end to end. On the RTX 2080 SUPER, quantized GGUF models on Phobos kernels generate text as fast as llama.cpp or faster. This holds for:
@@ -224,7 +240,7 @@ that is already a complete prompt.
 ### `phobos-compile` (no GPU)
 
 ```plain
-cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY>] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [-o <out.ptx>]
+cargo run -r -p phobos-compile -- <file.ph> [--chip <sm_XY>] [--index-bits 32|64] [--set NAME=VALUE]... [--all-variants] [--stdlib <file.ph> | --no-std] [-o <out.ptx>]
 ```
 
 Compiles a kernel source to PTX, for `sm_75` by default. `--set` pins an `@autotune` parameter, which otherwise takes its first choice. `--all-variants` writes one file per remaining combination, `<out>_NAME-value_....ptx`. `PHOBOS_PRINT_PHASES=1` prints the IR of each lowering phase.
