@@ -11,7 +11,9 @@ use ratatui::backend::TestBackend;
 
 use phobos_base::log::Level;
 use phobos_inference::telemetry::{Fixed, Meter, Snapshot};
-use phobos_inference::{Architecture, BlockKind, CacheStats, DeviceInfo, DeviceMemory, Footprint};
+use phobos_inference::{
+    Architecture, BlockKind, CacheStats, DeviceInfo, DeviceMemory, Footprint, Sensors,
+};
 
 use super::panels;
 use super::view::View;
@@ -82,6 +84,13 @@ fn loaded() -> Snapshot {
         free_bytes: 5 << 30,
         total_bytes: 24 << 30,
     }));
+    for (power_watts, temperature_celsius) in [(120.0, 55.0), (180.0, 60.0), (240.0, 65.0)] {
+        meter.sensed(Sensors {
+            power_watts,
+            power_limit_watts: Some(250.0),
+            temperature_celsius,
+        });
+    }
     meter.log(Level::Info, "listening on http://127.0.0.1:8080");
     meter.log(Level::Debug, "POST /v1/chat/completions 412");
 
@@ -270,6 +279,46 @@ fn a_reset_starts_the_mean_over_from_that_moment() {
     view.reset_peaks(&snap);
     assert_eq!(snap.prefill_total.rate_since(view.base_prefill), 0.0);
     assert_eq!(snap.decode_total.rate_since(view.base_decode), 0.0);
+}
+
+#[test]
+fn the_sensors_show_power_and_temperature_with_their_means_and_peaks() {
+    let text = screen(160, 46, &loaded());
+    assert!(text.contains("SENSORS"), "\n{text}");
+    assert!(text.contains("power 240/250 W  avg 180  peak 240"), "\n{text}");
+    assert!(text.contains("temp  65 \u{b0}C  avg 60  peak 65"), "\n{text}");
+}
+
+#[test]
+fn a_reset_starts_the_sensor_means_and_peaks_over() {
+    let snap = loaded();
+    let mut view = View::new();
+    view.best_power = 300.0;
+    view.reset_peaks(&snap);
+    assert_eq!(view.best_power, 0.0);
+    assert_eq!(snap.sensor_total.mean_since(view.base_sensors), None);
+}
+
+#[test]
+fn a_card_without_readings_says_so() {
+    let meter = Meter::new();
+    meter.describe(Fixed {
+        label: "GGUF, qwen35".to_string(),
+        backend: "phobos GPU".to_string(),
+        card: Some(DeviceInfo {
+            name: "NVIDIA GeForce RTX 2080 SUPER".to_string(),
+            capability: (7, 5),
+            multiprocessors: 48,
+            core_clock_khz: 1_815_000,
+            memory_clock_khz: 7_751_000,
+            memory_bus_bits: 256,
+            cuda: (13, 0),
+            driver: None,
+        }),
+        ..Default::default()
+    });
+    let text = screen(160, 46, &meter.snapshot());
+    assert!(text.contains("the driver gives no readings"), "\n{text}");
 }
 
 #[test]

@@ -41,19 +41,27 @@ pub fn pulse(frame: u64, period: u64) -> f32 {
 /// Scaled to the largest value shown rather than a fixed ceiling, since it
 /// shows shape and the absolute figure is printed beside it.
 pub fn spark(values: &[f64], width: usize) -> String {
+    let start = values.len().saturating_sub(width);
+    let max = values[start..].iter().copied().fold(0.0f64, f64::max);
+    spark_in(values, width, 0.0, max)
+}
+
+/// [`spark`] on a fixed scale: `lo` is the lowest bar and `hi` the highest,
+/// so a reading's height says how close it is to a limit.
+pub fn spark_in(values: &[f64], width: usize, lo: f64, hi: f64) -> String {
     if width == 0 {
         return String::new();
     }
     let start = values.len().saturating_sub(width);
     let window = &values[start..];
-    let max = window.iter().copied().fold(0.0f64, f64::max);
     let mut out = " ".repeat(width.saturating_sub(window.len()));
+    let top = (theme::BARS.len() - 1) as f64;
     for &value in window {
-        out.push(if max <= 0.0 {
+        out.push(if hi <= lo {
             theme::BARS[0]
         } else {
-            let step = (value / max * (theme::BARS.len() - 1) as f64).round() as usize;
-            theme::BARS[step.min(theme::BARS.len() - 1)]
+            let step = ((value - lo) / (hi - lo)).clamp(0.0, 1.0) * top;
+            theme::BARS[step.round() as usize]
         });
     }
     out

@@ -220,6 +220,9 @@ pub fn serve(
     let bos = model.tokenizer().bos_text().map(str::to_string);
 
     meter.describe(Fixed::of(model.as_ref(), Some(&addr)));
+    if let Some(source) = model.sensors() {
+        crate::telemetry::watch_sensors(meter.clone(), source);
+    }
     meter.set_device_memory(model.device_memory());
     meter.set_cache_stats(model.cache_stats());
 

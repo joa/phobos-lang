@@ -224,6 +224,12 @@ pub trait Backend {
         None
     }
 
+    /// Live power and temperature readings of that card, or `None` for a host
+    /// backend.
+    fn sensors(&self) -> Option<phobos_inference::SensorSource> {
+        None
+    }
+
     /// Hit statistics for this backend's caches. `None` means the backend
     /// has no caches, not a hit rate of zero.
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {

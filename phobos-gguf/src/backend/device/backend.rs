@@ -23,6 +23,10 @@ impl Backend for DeviceBackend {
         super::init::device_info()
     }
 
+    fn sensors(&self) -> Option<phobos_inference::SensorSource> {
+        mem::sensors()
+    }
+
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
         let (buffers_reused, buffers_allocated) = self.pool.reuse_counts();
         let (buffer_live_bytes, buffer_idle_bytes) = self.pool.byte_counts();

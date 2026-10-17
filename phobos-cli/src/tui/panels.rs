@@ -35,6 +35,12 @@ const WIDE_ENOUGH: u16 = 100;
 /// Rows for the network row, set by what the network and card panels need.
 const NETWORK_ROWS: u16 = 6;
 
+/// The card and sensor panels' widths, each its longest line and the border.
+/// The network strip takes what is left, at least [`NETWORK_MIN_WIDTH`].
+const CARD_WIDTH: u16 = 46;
+const SENSORS_WIDTH: u16 = 38;
+const NETWORK_MIN_WIDTH: u16 = 56;
+
 pub fn render(frame: &mut Frame, view: &mut View, snap: &Snapshot) {
     let area = frame.area();
     frame.render_widget(Block::default().style(Style::default().bg(theme::BG)), area);
@@ -262,12 +268,26 @@ fn body(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
     meters::throughput(frame, view, snap, top[2]);
 
     if rows[1].height > 0 {
+        // The card's fixed description gives way first, the live sensors
+        // stay.
+        let card = if rows[1].width >= NETWORK_MIN_WIDTH + CARD_WIDTH + SENSORS_WIDTH {
+            CARD_WIDTH
+        } else {
+            0
+        };
         let middle = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+            .constraints([
+                Constraint::Min(0),
+                Constraint::Length(card),
+                Constraint::Length(SENSORS_WIDTH),
+            ])
             .split(rows[1]);
         meters::layers(frame, view, snap, middle[0]);
-        meters::card(frame, snap, middle[1]);
+        if card > 0 {
+            meters::card(frame, snap, middle[1]);
+        }
+        meters::sensors(frame, view, snap, middle[2]);
     }
     if rows[2].height == 0 {
         return;

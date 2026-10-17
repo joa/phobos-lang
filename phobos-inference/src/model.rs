@@ -169,6 +169,18 @@ impl DeviceMemory {
     }
 }
 
+/// A live reading of a card's power draw and temperature.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Sensors {
+    pub power_watts: f64,
+    /// The most the card is allowed to draw, when the driver says.
+    pub power_limit_watts: Option<f64>,
+    pub temperature_celsius: f64,
+}
+
+/// Reads a card's sensors, from any thread, without touching the model.
+pub type SensorSource = Box<dyn Fn() -> Option<Sensors> + Send>;
+
 pub trait Model {
     fn info(&self) -> &ModelInfo;
 
@@ -196,6 +208,13 @@ pub trait Model {
     /// The card this model computes on. Fixed, so ask once: finding the
     /// display driver's version may spawn a subprocess.
     fn device_info(&self) -> Option<DeviceInfo> {
+        None
+    }
+
+    /// A source of live sensor readings for this model's card, which a caller
+    /// may poll from another thread while the model runs. A host backend has
+    /// none.
+    fn sensors(&self) -> Option<SensorSource> {
         None
     }
 

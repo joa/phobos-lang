@@ -3,7 +3,7 @@
 // A snapshot is the engine's state. This is the screen's state: eased gauge
 // values, peaks, the sky, and the frame counter.
 
-use phobos_inference::telemetry::{Snapshot, Total};
+use phobos_inference::telemetry::{SensorTotal, Snapshot, Total};
 
 use super::mark::Mark;
 use super::sky::Sky;
@@ -32,6 +32,11 @@ pub struct View {
     /// covers the same stretch as the peak.
     pub base_prefill: Total,
     pub base_decode: Total,
+    /// The highest power draw and temperature read since the last reset, and
+    /// the sensor totals as they stood then, for the means.
+    pub best_power: f64,
+    pub best_temperature: f64,
+    pub base_sensors: SensorTotal,
 }
 
 impl Default for View {
@@ -55,6 +60,9 @@ impl View {
             best_decode: 0.0,
             base_prefill: Total::default(),
             base_decode: Total::default(),
+            best_power: 0.0,
+            best_temperature: 0.0,
+            base_sensors: SensorTotal::default(),
         }
     }
 
@@ -81,5 +89,8 @@ impl View {
         self.best_decode = 0.0;
         self.base_prefill = snap.prefill_total;
         self.base_decode = snap.decode_total;
+        self.best_power = 0.0;
+        self.best_temperature = 0.0;
+        self.base_sensors = snap.sensor_total;
     }
 }

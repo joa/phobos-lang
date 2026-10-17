@@ -224,3 +224,39 @@ fn stopping_is_what_a_viewer_says_to_the_engine() {
     meter.stop();
     assert!(!meter.running());
 }
+
+#[test]
+fn sensor_readings_keep_a_history_and_a_mean_over_any_stretch() {
+    let meter = Meter::new();
+    let reading = |power_watts, temperature_celsius| Sensors {
+        power_watts,
+        power_limit_watts: None,
+        temperature_celsius,
+    };
+    meter.sensed(reading(100.0, 50.0));
+    let base = meter.snapshot().sensor_total;
+    meter.sensed(reading(200.0, 60.0));
+    meter.sensed(reading(300.0, 70.0));
+    let snap = meter.snapshot();
+    assert_eq!(snap.sensors, Some(reading(300.0, 70.0)));
+    assert_eq!(snap.power_history, [100.0, 200.0, 300.0]);
+    assert_eq!(snap.temperature_history, [50.0, 60.0, 70.0]);
+    assert_eq!(snap.sensor_total.mean_since(SensorTotal::default()), Some((200.0, 60.0)));
+    assert_eq!(snap.sensor_total.mean_since(base), Some((250.0, 65.0)));
+    assert_eq!(snap.sensor_total.mean_since(snap.sensor_total), None);
+}
+
+#[test]
+fn the_sensor_history_is_capped() {
+    let meter = Meter::new();
+    for i in 0..HISTORY + 10 {
+        meter.sensed(Sensors {
+            power_watts: i as f64,
+            ..Default::default()
+        });
+    }
+    let snap = meter.snapshot();
+    assert_eq!(snap.power_history.len(), HISTORY);
+    assert_eq!(snap.power_history[0], 10.0);
+    assert_eq!(snap.sensor_total.samples, (HISTORY + 10) as u64);
+}

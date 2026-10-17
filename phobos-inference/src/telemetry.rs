@@ -4,14 +4,16 @@
 // its own clock. Nothing here draws or names a model format.
 
 use std::collections::VecDeque;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use phobos_base::log::Level;
 use phobos_base::progress::Step;
 
-use crate::model::{Architecture, CacheStats, DeviceInfo, DeviceMemory, Footprint, Model};
+use crate::model::{
+    Architecture, CacheStats, DeviceInfo, DeviceMemory, Footprint, Model, SensorSource, Sensors,
+};
 
 /// Samples each rate history keeps.
 const HISTORY: usize = 256;
@@ -24,6 +26,10 @@ const RECENT: usize = 32;
 
 /// Weight of the newest interval in the decode rate's moving average.
 const DECODE_SMOOTHING: f64 = 0.2;
+
+/// How often [`watch_sensors`] reads the card. [`HISTORY`] samples of it
+/// cover about two minutes.
+pub const SENSOR_PERIOD: Duration = Duration::from_millis(500);
 
 /// What the engine is doing right now.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -88,6 +94,33 @@ impl Total {
             return 0.0;
         }
         self.tokens.saturating_sub(base.tokens) as f64 / seconds
+    }
+}
+
+/// Sensor readings summed since the meter began, so a viewer gets the mean
+/// over any stretch by differencing two readings, as with [`Total`].
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct SensorTotal {
+    pub samples: u64,
+    pub power_watts: f64,
+    pub temperature_celsius: f64,
+}
+
+impl SensorTotal {
+    fn add(&mut self, reading: Sensors) {
+        self.samples += 1;
+        self.power_watts += reading.power_watts;
+        self.temperature_celsius += reading.temperature_celsius;
+    }
+
+    /// The mean power and temperature since `base` was read, or `None` when
+    /// no sample came in between.
+    pub fn mean_since(self, base: SensorTotal) -> Option<(f64, f64)> {
+        let samples = self.samples.checked_sub(base.samples).filter(|&n| n > 0)? as f64;
+        Some((
+            (self.power_watts - base.power_watts) / samples,
+            (self.temperature_celsius - base.temperature_celsius) / samples,
+        ))
     }
 }
 
@@ -235,6 +268,12 @@ pub struct Snapshot {
     pub phase: Phase,
     pub fixed: Fixed,
     pub device: Option<DeviceMemory>,
+    /// The card's latest sensor reading, `None` until the first.
+    pub sensors: Option<Sensors>,
+    /// Power draw and temperature, one sample every [`SENSOR_PERIOD`].
+    pub power_history: Vec<f64>,
+    pub temperature_history: Vec<f64>,
+    pub sensor_total: SensorTotal,
     pub caches: Option<CacheStats>,
     /// Startup progress.
     pub loading: Option<Loading>,
@@ -276,6 +315,10 @@ struct Inner {
     phase: Phase,
     fixed: Fixed,
     device: Option<DeviceMemory>,
+    sensors: Option<Sensors>,
+    power_history: VecDeque<f64>,
+    temperature_history: VecDeque<f64>,
+    sensor_total: SensorTotal,
     caches: Option<CacheStats>,
     loading: Option<Loading>,
     cache_tokens: usize,
@@ -326,6 +369,10 @@ impl Meter {
                 phase: Phase::Idle,
                 fixed: Fixed::default(),
                 device: None,
+                sensors: None,
+                power_history: VecDeque::new(),
+                temperature_history: VecDeque::new(),
+                sensor_total: SensorTotal::default(),
                 caches: None,
                 loading: None,
                 cache_tokens: 0,
@@ -448,6 +495,15 @@ impl Meter {
         if let Some(memory) = memory {
             self.lock().device = Some(memory);
         }
+    }
+
+    /// One reading of the card's sensors.
+    pub fn sensed(&self, reading: Sensors) {
+        let mut inner = self.lock();
+        inner.sensors = Some(reading);
+        inner.sensor_total.add(reading);
+        push_capped(&mut inner.power_history, reading.power_watts, HISTORY);
+        push_capped(&mut inner.temperature_history, reading.temperature_celsius, HISTORY);
     }
 
     pub fn log(&self, level: Level, text: impl Into<String>) {
@@ -586,6 +642,10 @@ impl Meter {
             phase: inner.phase,
             fixed: inner.fixed.clone(),
             device: inner.device,
+            sensors: inner.sensors,
+            power_history: inner.power_history.iter().copied().collect(),
+            temperature_history: inner.temperature_history.iter().copied().collect(),
+            sensor_total: inner.sensor_total,
             caches: inner.caches,
             loading: inner.loading.clone().map(|mut loading| {
                 loading.in_flight = in_flight;
@@ -612,6 +672,23 @@ impl Meter {
             recent: inner.recent.iter().rev().cloned().collect(),
             log: inner.log.iter().rev().cloned().collect(),
         }
+    }
+}
+
+/// Reads `source` into `meter` every [`SENSOR_PERIOD`], on a thread of its
+/// own, until the meter stops. A reading that fails is skipped.
+pub fn watch_sensors(meter: Arc<Meter>, source: SensorSource) {
+    let watching = meter.clone();
+    let spawned = std::thread::Builder::new().name("sensors".into()).spawn(move || {
+        while watching.running() {
+            if let Some(reading) = source() {
+                watching.sensed(reading);
+            }
+            std::thread::sleep(SENSOR_PERIOD);
+        }
+    });
+    if let Err(e) = spawned {
+        meter.log(Level::Info, format!("no sensor readings: {e}"));
     }
 }
 

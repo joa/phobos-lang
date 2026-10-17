@@ -9,5 +9,5 @@ pub mod telemetry;
 pub use bpe::{ByteBpe, PreTokenizer};
 pub use model::{
     Architecture, BlockKind, CacheStats, DeviceInfo, DeviceMemory, Footprint, Model, ModelInfo,
-    Session, Tokenizer,
+    SensorSource, Sensors, Session, Tokenizer,
 };

@@ -191,6 +191,10 @@ impl Model for GgufModel {
         self.backend.device_info()
     }
 
+    fn sensors(&self) -> Option<phobos_inference::SensorSource> {
+        self.backend.sensors()
+    }
+
     fn cache_stats(&self) -> Option<phobos_inference::CacheStats> {
         self.backend.cache_stats()
     }

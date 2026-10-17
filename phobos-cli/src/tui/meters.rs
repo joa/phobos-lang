@@ -1,5 +1,5 @@
-// The gauge panels: memory, throughput, network shape, card, caches, and
-// loading progress.
+// The gauge panels: memory, throughput, network shape, card, sensors, caches,
+// and loading progress.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -450,12 +450,107 @@ pub(super) fn card(frame: &mut Frame, snap: &Snapshot, area: Rect) {
                     format!("{:.0} GB/s", card.peak_bandwidth() as f64 / 1e9),
                     theme::accent(theme::NEBULA),
                 ),
-                Span::styled(" peak, at its rated clocks", theme::muted()),
+                Span::styled(" peak at rated clocks", theme::muted()),
             ]),
         ]),
         inner,
     );
 }
+
+/// The temperatures the plot spans, in degrees Celsius: about an idle card's
+/// at the bottom and past where cards throttle at the top.
+const TEMPERATURE_SCALE: (f64, f64) = (20.0, 100.0);
+
+/// The card's power draw and temperature: each as it reads now, with its mean
+/// and peak since the last reset, over a plot of the last two minutes.
+///
+/// Power is plotted against the card's limit and colored by how close it
+/// runs to it; temperature on a fixed scale, gold from 70 C and Mars from 83,
+/// where cards start to throttle.
+pub(super) fn sensors(frame: &mut Frame, view: &mut View, snap: &Snapshot, area: Rect) {
+    let block = panel("SENSORS", theme::GOLD, false);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let Some(now) = snap.sensors else {
+        let why = if snap.fixed.card.is_some() {
+            "the driver gives no readings"
+        } else {
+            "this backend runs on the host"
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled("no sensors", theme::accent(theme::GOLD))),
+                Line::from(Span::styled(why, theme::muted())),
+            ]),
+            inner,
+        );
+        return;
+    };
+
+    view.best_power = view.best_power.max(now.power_watts);
+    view.best_temperature = view.best_temperature.max(now.temperature_celsius);
+    let (mean_power, mean_temperature) = snap
+        .sensor_total
+        .mean_since(view.base_sensors)
+        .unwrap_or((now.power_watts, now.temperature_celsius));
+
+    let width = inner.width as usize;
+    let ceiling = now.power_limit_watts.unwrap_or(view.best_power);
+    let power_color = theme::pressure(now.power_watts / ceiling.max(1.0));
+    let reading = match now.power_limit_watts {
+        Some(limit) => format!("{:.0}/{limit:.0} W", now.power_watts),
+        None => format!("{:.0} W", now.power_watts),
+    };
+    let power = vec![
+        Span::styled("power ", theme::muted()),
+        Span::styled(reading, theme::accent(power_color)),
+        Span::styled(
+            format!("  avg {mean_power:.0}  peak {:.0}", view.best_power),
+            Style::default().fg(theme::FAINT),
+        ),
+    ];
+    let temperature_color = match now.temperature_celsius {
+        t if t >= 83.0 => theme::MARS,
+        t if t >= 70.0 => theme::GOLD,
+        _ => theme::NEBULA,
+    };
+    let temperature = vec![
+        Span::styled("temp  ", theme::muted()),
+        Span::styled(
+            format!("{:.0} {DEGREES}", now.temperature_celsius),
+            theme::accent(temperature_color),
+        ),
+        Span::styled(
+            format!("  avg {mean_temperature:.0}  peak {:.0}", view.best_temperature),
+            Style::default().fg(theme::FAINT),
+        ),
+    ];
+
+    let plot = |text: String, color: Color| {
+        Line::from(Span::styled(
+            text,
+            Style::default().fg(theme::mix(theme::FAINT, color, 0.6)),
+        ))
+    };
+    let (lo, hi) = TEMPERATURE_SCALE;
+    // Each figure over its plot when there is room for both, the figures
+    // alone otherwise.
+    let lines = if inner.height >= 4 {
+        vec![
+            Line::from(power),
+            plot(anim::spark_in(&snap.power_history, width, 0.0, ceiling), theme::GOLD),
+            Line::from(temperature),
+            plot(anim::spark_in(&snap.temperature_history, width, lo, hi), temperature_color),
+        ]
+    } else {
+        vec![Line::from(power), Line::from(temperature)]
+    };
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// Degrees Celsius.
+const DEGREES: &str = "\u{b0}C";
 
 /// A share, or `None` before the first lookup.
 fn rate_of(hits: u64, total: u64) -> Option<f64> {

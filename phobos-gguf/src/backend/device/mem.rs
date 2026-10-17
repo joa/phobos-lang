@@ -13,6 +13,21 @@ pub(super) fn card_memory() -> Result<(usize, usize)> {
     Ok((free, total))
 }
 
+/// A source of the card's power and temperature, or `None` when NVML cannot
+/// read them here.
+pub(super) fn sensors() -> Option<phobos_inference::SensorSource> {
+    let read = || {
+        let card = phobos_kernels::nvml::card_sensors()?;
+        Some(phobos_inference::Sensors {
+            power_watts: card.power_milliwatts as f64 / 1e3,
+            power_limit_watts: card.power_limit_milliwatts.map(|mw| mw as f64 / 1e3),
+            temperature_celsius: card.temperature_celsius as f64,
+        })
+    };
+    read()?;
+    Some(Box::new(read))
+}
+
 /// What a [`Buf`] handle points at: an owned buffer that goes back to the
 /// pool, or a region of an arena.
 ///
