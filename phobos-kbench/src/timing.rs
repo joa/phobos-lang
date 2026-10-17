@@ -87,6 +87,27 @@ pub(crate) fn time_once(stream: &Stream, t: &mut Timed<'_>, start: &Event, end: 
     Ok(f64::from(end.elapsed_time_f32(start)?))
 }
 
+/// Per-launch time of `reps` launches back to back between one pair of
+/// events, after one `prepare`. A short kernel's launch overhead then
+/// amortizes, where one launch between two events can measure it rather
+/// than the kernel. For ranking only: launches after the first see the
+/// output the previous one left.
+pub(crate) fn batched(stream: &Stream, t: &mut Timed<'_>, reps: u32, batches: u32) -> anyhow::Result<Stats> {
+    let (start, end) = (Event::new(EventFlags::DEFAULT)?, Event::new(EventFlags::DEFAULT)?);
+    let mut s = Stats::default();
+    for _ in 0..batches.max(1) {
+        (t.prepare)()?;
+        start.record(stream)?;
+        for _ in 0..reps.max(1) {
+            (t.launch)()?;
+        }
+        end.record(stream)?;
+        end.synchronize()?;
+        s.samples_ms.push(f64::from(end.elapsed_time_f32(&start)?) / f64::from(reps.max(1)));
+    }
+    Ok(s)
+}
+
 /// Warms every item for `warmup` rounds and at least `warmup_ms` of wall
 /// clock, then times `rounds` rounds of one launch each, items interleaved
 /// within a round so they share clock and thermal state. An idle card sits

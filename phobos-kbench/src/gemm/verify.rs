@@ -195,11 +195,18 @@ pub(crate) fn check(
     tol_norm: f64,
 ) -> Errors {
     let (alpha, beta) = (f64::from(alpha), f64::from(beta));
-    // B transposed once, so each dot reads two contiguous rows.
-    let mut bt = vec![0f64; K * N];
-    for k in 0..K {
-        for j in 0..N {
-            bt[j * K + k] = f64::from(mul.round(inp.b[k * N + j]));
+    // The columns of B the check reads, transposed once, so each dot reads
+    // two contiguous rows. Transposing all of B for a sampled check costs
+    // more host time than the probe it gates.
+    let mut cols: Vec<usize> = at.iter().map(|&(_, j)| j).collect();
+    cols.sort_unstable();
+    cols.dedup();
+    let mut slot = vec![usize::MAX; N];
+    let mut bt = vec![0f64; cols.len() * K];
+    for (s, &j) in cols.iter().enumerate() {
+        slot[j] = s;
+        for k in 0..K {
+            bt[s * K + k] = f64::from(mul.round(inp.b[k * N + j]));
         }
     }
     let mut row = vec![0f64; K];
@@ -219,7 +226,7 @@ pub(crate) fn check(
             }
             row_of = i;
         }
-        let col = &bt[j * K..(j + 1) * K];
+        let col = &bt[slot[j] * K..(slot[j] + 1) * K];
         let (mut dot, mut mag) = (0f64, 0f64);
         for (x, y) in row.iter().zip(col) {
             dot += x * y;

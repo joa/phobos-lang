@@ -8,12 +8,20 @@ use crate::timing::{self, Stats, Timed};
 use cust::function::{BlockSize, FunctionAttribute};
 use cust::module::Module;
 use cust::stream::Stream;
-use phobos_base::phinfo;
+use phobos_base::{phdebug, phinfo};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Rounds a stage-1 probe takes. Its median ranks the variants.
-const SHORT_PROBES: u32 = 8;
+/// Batches a stage-1 probe times. Their median ranks the variants.
+const SHORT_PROBES: u32 = 5;
+/// GPU time a stage-1 batch covers at least, so a short kernel's launch
+/// overhead amortizes.
+const SHORT_BATCH_MS: f64 = 4.0;
+/// Wall clock a stage-1 probe warms for after its correctness check. The
+/// card drops to idle clocks during host work, and a short problem's probes
+/// ran in the ramp: 0.3 ms kernels measured 2-4 ms, and a 0.44 ms variant
+/// ranked above a 0.29 ms one.
+const SHORT_WARMUP_MS: f64 = 30.0;
 /// Interleaved rounds of the stage-2 finalists.
 const LONG_ROUNDS: u32 = 30;
 /// Stage 2 takes one finalist per this many runnable variants, and at least
@@ -181,11 +189,15 @@ pub(crate) fn tune(
             let mut t = timed(stream, p, vs, i, scalars)?;
             timing::interleaved(stream, std::slice::from_mut(&mut t), (0, 0.0), 1)?;
             check()?;
-            let s = timing::interleaved(stream, std::slice::from_mut(&mut t), (2, 0.0), SHORT_PROBES)?;
-            Ok::<_, anyhow::Error>(s[0].median())
+            let warm = timing::interleaved(stream, std::slice::from_mut(&mut t), (1, SHORT_WARMUP_MS), 3)?;
+            let reps = (SHORT_BATCH_MS / warm[0].median().max(1e-3)).ceil().min(1000.0) as u32;
+            Ok::<_, anyhow::Error>(timing::batched(stream, &mut t, reps, SHORT_PROBES)?.median())
         })();
         match probe {
-            Ok(ms) => ranked.push((i, ms)),
+            Ok(ms) => {
+                phdebug!("  stage 1 {}: {ms:.4} ms", fmt_config(&v.config));
+                ranked.push((i, ms))
+            }
             Err(e) => phinfo!("  {}: skipped ({e})", fmt_config(&v.config)),
         }
     }
