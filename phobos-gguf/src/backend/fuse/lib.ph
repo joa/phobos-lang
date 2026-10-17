@@ -2,8 +2,8 @@
 // calls. Each body is the text the fuse pass writes for its stage, so a chain
 // written from these compiles to the kernel the pass writes for it.
 //
-// A tile's dims are constants, not parameters, so a stage that declares one
-// names the chain's: `HD`, a head's width.
+// A stage that declares a tile sizes it by the chain's constants, as the pass
+// writes it: `HD`, a head's width.
 
 // One row's RMS norm and its Q8_0 copy into `q` and `s`, `nb` blocks of 32.
 // A thread owns four contiguous elements of every `4 * ctx.threads`: one
