@@ -32,6 +32,7 @@ pub(crate) const BENCHES: &[&str] = &[
     "saxpy_fp32",
     "gemm_fp32",
     "gemm_fp32_unaligned",
+    "gemm_fp32_splitk",
     "gemm_fp16tc_fp32acc",
     "gemm_fp16_fp32acc",
     "gemm_fp16",

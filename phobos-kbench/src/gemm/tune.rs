@@ -10,6 +10,7 @@ use cust::module::Module;
 use cust::stream::Stream;
 use phobos_base::{phdebug, phinfo};
 use std::collections::BTreeMap;
+use std::rc::Rc;
 use std::path::{Path, PathBuf};
 
 /// Batches a stage-1 probe times. Their median ranks the variants.
@@ -51,10 +52,12 @@ impl Resources {
 }
 
 pub(crate) struct Variant {
+    /// The compiled settings, plus `S` for a split-K kind.
     pub config: Vec<Setting>,
     /// Threads a CTA, which `@launch` may take from the config.
     pub block: u32,
-    pub module: Module,
+    /// Shared by the splits of one compiled config.
+    pub module: Rc<Module>,
     pub res: Resources,
 }
 
@@ -106,17 +109,25 @@ impl Variants {
                     let block = kernels[0]
                         .cta_threads_for(&cfg.iter().cloned().collect())
                         .map_err(anyhow::Error::msg)? as u32;
-                    let res = resources(&module, block)?;
+                    let res = resources(&module, kind.kernel(), block)?;
                     anyhow::ensure!(res.blocks_per_sm > 0, "does not fit an SM ({} regs, {} B smem)", res.regs, res.smem_bytes);
-                    Ok(Variant {
-                        config: cfg.clone(),
-                        block,
-                        module,
-                        res,
-                    })
+                    Ok((block, Rc::new(module), res))
                 });
             match loaded {
-                Ok(v) => all.push(v),
+                Ok((block, module, res)) => {
+                    for &split in kind.splits() {
+                        let mut config = cfg.clone();
+                        if kind.splits().len() > 1 {
+                            config.push(("S".into(), i64::from(split)));
+                        }
+                        all.push(Variant {
+                            config,
+                            block,
+                            module: module.clone(),
+                            res,
+                        });
+                    }
+                }
                 Err(e) => phinfo!("  {}: dropped ({e})", fmt_config(&cfg)),
             }
         }
@@ -138,8 +149,8 @@ impl Variants {
     }
 }
 
-fn resources(module: &Module, block: u32) -> anyhow::Result<Resources> {
-    let f = module.get_function("gemm")?;
+fn resources(module: &Module, kernel: &str, block: u32) -> anyhow::Result<Resources> {
+    let f = module.get_function(kernel)?;
     Ok(Resources {
         regs: f.get_attribute(FunctionAttribute::NumRegisters)?,
         smem_bytes: f.get_attribute(FunctionAttribute::SharedMemorySizeBytes)?,
@@ -148,28 +159,42 @@ fn resources(module: &Module, block: u32) -> anyhow::Result<Resources> {
     })
 }
 
-/// The launch grid of `config` over an m x n output, or why it has none.
-pub(crate) fn grid_for(kind: Kind, config: &[Setting], (m, n, k): (usize, usize, usize)) -> anyhow::Result<(u32, u32)> {
+/// The launch grid of `config` over an m x n output, the k splits its
+/// third axis, or why it has none.
+pub(crate) fn grid_for(kind: Kind, config: &[Setting], (m, n, k): (usize, usize, usize)) -> anyhow::Result<(u32, u32, u32)> {
     let tm = crate::autotune::cfg_value(config, "TILE_M")? as usize;
     let tn = crate::autotune::cfg_value(config, "TILE_N")? as usize;
+    let split = crate::autotune::cfg_value(config, "S").unwrap_or(1) as usize;
     if kind.aligned() {
         let tk = crate::autotune::cfg_value(config, "TILE_K")? as usize;
         anyhow::ensure!(
-            m.is_multiple_of(tm) && n.is_multiple_of(tn) && k.is_multiple_of(tk),
+            m.is_multiple_of(tm) && n.is_multiple_of(tn) && k.is_multiple_of(tk * split),
             "tile does not divide the problem"
         );
     }
-    Ok((m.div_ceil(tm) as u32, n.div_ceil(tn) as u32))
+    if kind.splits().len() > 1 {
+        // The reduce works on 32x32 tiles.
+        anyhow::ensure!(m.is_multiple_of(32) && n.is_multiple_of(32), "the reduce's tile does not divide the problem");
+    }
+    Ok((m.div_ceil(tm) as u32, n.div_ceil(tn) as u32, split as u32))
 }
 
 /// One timed launch of variant `v` on `p`, C restored outside the events.
 pub(crate) fn timed<'a>(stream: &'a Stream, p: &'a Problem, vs: &'a Variants, v: usize, scalars: (f32, f32)) -> anyhow::Result<Timed<'a>> {
-    let grid = grid_for(vs.kind, &vs.all[v].config, p.dims)?;
-    let func = vs.all[v].module.get_function("gemm")?;
+    let (gx, gy, split) = grid_for(vs.kind, &vs.all[v].config, p.dims)?;
+    let module = &vs.all[v].module;
     let block = vs.all[v].block;
+    let launch: Box<dyn FnMut() -> anyhow::Result<()> + 'a> = if vs.kind.splits().len() > 1 {
+        anyhow::ensure!(split <= p.max_split, "{split} splits exceed the workspace");
+        let (sk, red) = (module.get_function("gemm_split")?, module.get_function("gemm_reduce")?);
+        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, scalars))
+    } else {
+        let func = module.get_function("gemm")?;
+        Box::new(move || p.launch_phobos(stream, &func, (gx, gy), block, vs.wide, scalars))
+    };
     Ok(Timed {
         prepare: Box::new(move || p.restore(stream, &p.c_phobos)),
-        launch: Box::new(move || p.launch_phobos(stream, &func, grid, block, vs.wide, scalars)),
+        launch,
     })
 }
 

@@ -64,7 +64,13 @@ pub(crate) struct Problem {
     pub c_phobos: DeviceBuffer<u8>,
     pub c_blas: DeviceBuffer<u8>,
     half: Option<(DeviceBuffer<u8>, DeviceBuffer<u8>)>,
+    /// A split-K kind's partials, `[S * M, N]` f32 for up to `max_split`.
+    work: Option<DeviceBuffer<u8>>,
+    pub max_split: u32,
 }
+
+/// The most bytes a split-K workspace takes; larger splits are skipped.
+const WORK_BYTES: usize = 256 << 20;
 
 fn to_bytes(xs: &[f32], elem: Elem) -> Vec<u8> {
     match elem {
@@ -98,9 +104,18 @@ impl Problem {
         } else {
             None
         };
+        let split_k = kind.splits().len() > 1;
+        let max_split = if split_k { (WORK_BYTES / (m * n * 4)).clamp(1, 16) as u32 } else { 1 };
+        let work = if split_k {
+            Some(DeviceBuffer::<u8>::zeroed(max_split as usize * m * n * 4)?)
+        } else {
+            None
+        };
         Ok(Problem {
             kind,
             dims,
+            work,
+            max_split,
             a: zeroed(m * k, kind.ab())?,
             b: zeroed(k * n, kind.ab())?,
             c_init: zeroed(m * n, kind.c())?,
@@ -171,6 +186,44 @@ impl Problem {
             beta,
             wide,
         )
+    }
+
+    /// Enqueues a split-K kind's two kernels into `c_phobos`: `split` writes
+    /// `s` partials over a third grid axis, `reduce` sums them as
+    /// `alpha * sum + beta * C` on 32x32 tiles.
+    #[allow(clippy::too_many_arguments)]
+    pub fn launch_split(
+        &self,
+        stream: &Stream,
+        (split, reduce): (&cust::function::Function, &cust::function::Function),
+        (gx, gy, s): (u32, u32, u32),
+        block: u32,
+        (alpha, beta): (f32, f32),
+    ) -> anyhow::Result<()> {
+        let (m, n, k) = self.dims;
+        anyhow::ensure!(s <= self.max_split, "{s} splits exceed the workspace");
+        let work = self.work.as_ref().ok_or_else(|| anyhow::anyhow!("this kind has no split-K workspace"))?;
+        let (a, b, p, c) = (
+            self.a.as_device_ptr().as_raw(),
+            self.b.as_device_ptr().as_raw(),
+            work.as_device_ptr().as_raw(),
+            self.c_phobos.as_device_ptr().as_raw(),
+        );
+        let (m, n, k, sm) = (m as i32, n as i32, k as i32, s as i32 * m as i32);
+        unsafe {
+            launch!(split<<<(gx, gy, s), block, 0, stream>>>(
+                a, a, 0i32, m, k, k, 1i32,
+                b, b, 0i32, k, n, n, 1i32,
+                p, p, 0i32, sm, n, n, 1i32
+            ))?;
+            launch!(reduce<<<((m / 32) as u32, (n / 32) as u32), 256, 0, stream>>>(
+                p, p, 0i32, sm, n, n, 1i32,
+                c, c, 0i32, m, n, n, 1i32,
+                alpha,
+                beta
+            ))?;
+        }
+        Ok(())
     }
 
     /// Enqueues the f32 to f16 conversion of A and B the converting baseline

@@ -59,6 +59,7 @@ pub(crate) fn suite(kind: Kind) -> Vec<Dims> {
             (64, 1024, 16384),
         ],
         Kind::F32Unaligned => vec![(1000, 1000, 1000), (509, 2304, 771), (4000, 4000, 4000)],
+        Kind::F32SplitK => suite(Kind::F32),
         _ => vec![(1024, 1024, 1024), (4096, 4096, 4096), (512, 3072, 768)],
     }
 }
@@ -269,7 +270,7 @@ fn problem(
         "winner": {
             "config": winner.config.iter().map(|(n, v)| (n.clone(), (*v).into())).collect::<serde_json::Map<_, _>>(),
             "from_cache": !tuned,
-            "grid": [grid.0, grid.1],
+            "grid": [grid.0, grid.1, grid.2],
             "block": winner.block,
             "index_bits": if vs.wide { 64 } else { 32 },
             "resources": winner.res.json(),
@@ -338,8 +339,8 @@ fn correctness(
 }
 
 /// Full checks of the winner on small problems: for an aligned kind, two by
-/// three tiles over an odd number of k-tiles, so an unrolled loop runs its
-/// guarded tail; for the unaligned one, sizes no tile divides.
+/// three tiles over an odd number of k-tiles a split, so an unrolled loop
+/// runs its guarded tail; for the unaligned one, sizes no tile divides.
 fn small_checks(
     stream: &cust::stream::Stream,
     kind: Kind,
@@ -352,7 +353,8 @@ fn small_checks(
     let get = |n: &str| crate::autotune::cfg_value(cfg, n).map(|v| v as usize);
     let shapes: Vec<Dims> = if kind.aligned() {
         let unroll = get("U").unwrap_or(1);
-        vec![(2 * get("TILE_M")?, 3 * get("TILE_N")?, (2 * unroll + 1) * get("TILE_K")?)]
+        let split = get("S").unwrap_or(1);
+        vec![(2 * get("TILE_M")?, 3 * get("TILE_N")?, split * (2 * unroll + 1) * get("TILE_K")?)]
     } else {
         vec![(67, 131, 37), (get("TILE_M")? + 1, get("TILE_N")? - 1, 3 * get("TILE_K")? + 1)]
     };

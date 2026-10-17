@@ -58,6 +58,9 @@ pub(crate) enum Kind {
     F32,
     /// [`Kind::F32`] without `@aligned`/`@pipeline`: any M, N, K.
     F32Unaligned,
+    /// [`Kind::F32`] with k split over a third grid axis, the partials summed
+    /// by a second kernel. One split is the same work plus that sum.
+    F32SplitK,
     /// f32 storage, operands rounded to f16 while staging, tensor-core
     /// multiply, f32 accumulate.
     F32StoreF16Mul,
@@ -70,6 +73,7 @@ pub(crate) enum Kind {
 pub(crate) const KINDS: &[Kind] = &[
     Kind::F32,
     Kind::F32Unaligned,
+    Kind::F32SplitK,
     Kind::F32StoreF16Mul,
     Kind::F16StoreF32Acc,
     Kind::F16Acc,
@@ -81,6 +85,7 @@ impl Kind {
         match self {
             Kind::F32 => "gemm_fp32",
             Kind::F32Unaligned => "gemm_fp32_unaligned",
+            Kind::F32SplitK => "gemm_fp32_splitk",
             Kind::F32StoreF16Mul => "gemm_fp16tc_fp32acc",
             Kind::F16StoreF32Acc => "gemm_fp16_fp32acc",
             Kind::F16Acc => "gemm_fp16",
@@ -91,6 +96,7 @@ impl Kind {
         match self {
             Kind::F32 => include_str!("../../../examples/gemm_fp32.ph"),
             Kind::F32Unaligned => include_str!("../../../examples/gemm_fp32_unaligned.ph"),
+            Kind::F32SplitK => include_str!("../../../examples/gemm_fp32_splitk.ph"),
             Kind::F32StoreF16Mul => include_str!("../../../examples/gemm_fp16tc_fp32acc.ph"),
             Kind::F16StoreF32Acc => include_str!("../../../examples/gemm_fp16_fp32acc.ph"),
             Kind::F16Acc => include_str!("../../../examples/gemm_fp16.ph"),
@@ -100,7 +106,7 @@ impl Kind {
     /// Storage of A and B.
     pub fn ab(self) -> Elem {
         match self {
-            Kind::F32 | Kind::F32Unaligned | Kind::F32StoreF16Mul => Elem::F32,
+            Kind::F32 | Kind::F32Unaligned | Kind::F32SplitK | Kind::F32StoreF16Mul => Elem::F32,
             Kind::F16StoreF32Acc | Kind::F16Acc => Elem::F16,
         }
     }
@@ -116,7 +122,7 @@ impl Kind {
     /// The type the products are formed in.
     pub fn mul(self) -> Elem {
         match self {
-            Kind::F32 | Kind::F32Unaligned => Elem::F32,
+            Kind::F32 | Kind::F32Unaligned | Kind::F32SplitK => Elem::F32,
             _ => Elem::F16,
         }
     }
@@ -132,6 +138,22 @@ impl Kind {
         self.mul() == Elem::F16
     }
 
+    /// The k splits the tuner tries, 1 for a kind without split-K.
+    pub fn splits(self) -> &'static [u32] {
+        match self {
+            Kind::F32SplitK => &[1, 2, 4, 8, 16],
+            _ => &[1],
+        }
+    }
+
+    /// The kernel the tuner times and reads resources from.
+    pub fn kernel(self) -> &'static str {
+        match self {
+            Kind::F32SplitK => "gemm_split",
+            _ => "gemm",
+        }
+    }
+
     /// Whether every dimension must be a multiple of the tile.
     pub fn aligned(self) -> bool {
         self != Kind::F32Unaligned
@@ -139,7 +161,7 @@ impl Kind {
 
     pub fn baseline(self) -> Baseline {
         match self {
-            Kind::F32 | Kind::F32Unaligned => Baseline::Sgemm,
+            Kind::F32 | Kind::F32Unaligned | Kind::F32SplitK => Baseline::Sgemm,
             Kind::F32StoreF16Mul | Kind::F16StoreF32Acc => Baseline::GemmExF16F32,
             Kind::F16Acc => Baseline::GemmExF16F16,
         }
@@ -154,7 +176,7 @@ impl Kind {
     /// The scalars the timed runs use, as the CSV has always recorded them.
     pub fn timed_scalars(self) -> (f32, f32) {
         match self {
-            Kind::F32 | Kind::F32Unaligned => (1.5, 2.5),
+            Kind::F32 | Kind::F32Unaligned | Kind::F32SplitK => (1.5, 2.5),
             _ => (1.0, 1.0),
         }
     }
