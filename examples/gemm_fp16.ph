@@ -18,6 +18,10 @@ kernel gemm(A: tensor<f16>[M, K],
     acc += dot(a, b)
   }
   
-  let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
-  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+  if beta == 0.0 {
+    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc
+  } else {
+    let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+  }
 }

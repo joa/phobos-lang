@@ -238,17 +238,18 @@ fn problem(
 
     let checks = correctness(stream, &mut p, &inp, vs, win, blas, conv)?;
     let small = small_checks(stream, kind, vs, win, blas, conv)?;
+    let nan = nan_c_check(stream, &mut p, &inp, vs, win, blas, conv)?;
     let all_pass = checks
         .iter()
         .chain(&small)
-        .all(|c| c["phobos"]["pass"].as_bool() == Some(true));
+        .all(|c| c["phobos"]["pass"].as_bool() == Some(true))
+        && nan["phobos_nonfinite"].as_u64() == Some(0);
     phinfo!(
-        "  correctness: {} ({} checks on this problem, {} on small ones)",
+        "  correctness: {} ({} checks on this problem, {} on small ones, beta = 0 over a NaN C)",
         if all_pass { "pass" } else { "FAIL" },
         checks.len(),
         small.len()
     );
-    let nan = nan_c_check(stream, &mut p, &inp, vs, win, blas, conv)?;
 
     let mut timing_json = serde_json::Map::new();
     for (name, s) in names.iter().zip(&stats) {
@@ -376,8 +377,8 @@ fn small_checks(
     Ok(out)
 }
 
-/// beta = 0 over a C of NaN. BLAS reads no C at beta = 0; a kernel that
-/// computes beta * C anyway returns NaN. Reported, not gated on.
+/// beta = 0 over a C of NaN. BLAS reads no C at beta = 0, and neither do
+/// the example kernels; one that computes beta * C anyway returns NaN.
 fn nan_c_check(
     stream: &cust::stream::Stream,
     p: &mut Problem,

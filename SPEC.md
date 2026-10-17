@@ -447,8 +447,12 @@ kernel matmul(A: tensor<f32>[M, K],
     var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
     acc += dot(a, b)
   }
-  let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
-  C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+  if beta == 0.0 {
+    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc
+  } else {
+    let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]
+    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old
+  }
 }
 
 ```

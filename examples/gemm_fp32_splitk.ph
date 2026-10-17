@@ -38,6 +38,10 @@ kernel gemm_reduce(P: tensor<f32>[SM, N],
     acc += P[s * M + pm * RM :+ RM, pn * RN :+ RN]
   }
 
-  let c_old = C[pm * RM :+ RM, pn * RN :+ RN]
-  C[pm * RM :+ RM, pn * RN :+ RN] = alpha * acc + beta * c_old
+  if beta == 0.0 {
+    C[pm * RM :+ RM, pn * RN :+ RN] = alpha * acc
+  } else {
+    let c_old = C[pm * RM :+ RM, pn * RN :+ RN]
+    C[pm * RM :+ RM, pn * RN :+ RN] = alpha * acc + beta * c_old
+  }
 }
