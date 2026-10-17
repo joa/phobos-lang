@@ -190,7 +190,7 @@ export function compilerFacts(results: KernelResults = loadKernelResults()): Fac
       id: "autotune",
       label: "A search, not a guess",
       figure: `${configs} gemm configurations`,
-      text: "@autotune names the tile sizes. phobos-kbench compiles and checks every configuration, then races the four fastest over 30 interleaved rounds. for<unroll n> takes a tuned n too.",
+      text: "@autotune names the tile sizes, the unroll and the CTA size. phobos-kbench compiles and checks every configuration, ranks them on warm clocks, then races the fastest over 30 interleaved rounds.",
       href: "/docs/language/autotuning/",
       linkText: "Autotuning",
     },

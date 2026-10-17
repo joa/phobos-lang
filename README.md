@@ -14,7 +14,7 @@ Phobos is **very** fast for highly quantized models such as Ternary-Bonsai-2-27B
 
 ## Components
 
-- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 77% SGEMM cuBLAS throughput.
+- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 88% SGEMM cuBLAS throughput.
 - **[Inference](#inference)**: OpenAI compatible server for GGUF models. Kernel fusion, memory management; decodes at or above llama.cpp's rate on most models. 
 - **[Clustering](#clustering)**: Distributed tensor algebra.
 
@@ -44,7 +44,7 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-LLVM/MLIR based compiler. SGEMM performance is at 77% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
+LLVM/MLIR based compiler. SGEMM performance is at 88% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
 
 See [SPEC](./SPEC.md) for details or check out the [`examples/`](./examples).
 
@@ -250,11 +250,14 @@ cargo run -r -p phobos-kbench
 ```
 
 Compiles and autotunes the bundled kernels at 4096^3 and prints their throughput, next to cuBLAS where a comparison
-exists. The kernels:
+exists. A GEMM is timed alone between CUDA events, interleaved with the cuBLAS call that computes the same thing, and
+checked against an f64 reference. The kernels:
 
 - `saxpy_fp32`
 - `gemm_fp32`
-- `gemm_fp16tc_fp32acc`: tensor cores, f16 inputs, f32 accumulation
+- `gemm_fp32_unaligned`: `gemm_fp32` for sizes no tile divides, at 4000^3
+- `gemm_fp16tc_fp32acc`: f32 inputs rounded to f16 while staging, tensor cores, f32 accumulation
+- `gemm_fp16_fp32acc`: f16 inputs, tensor cores, f32 accumulation and output
 - `gemm_fp16`: f16 inputs, output and accumulation
 - `flash_fp32`
 - `flash_fp16`: f16 Q/K/V/O, f32 online-softmax state
@@ -263,6 +266,7 @@ It runs all of them by default. Useful flags:
 
 - `--bench NAME` runs a single kernel
 - `--autotune "DIM=VAL ..."` fixes the tuning values for the selected `--bench` and skips the search
+- `--shape MxNxK` and `--suite` pick the GEMM problems; `--json PATH` writes every timing, check and winner
 - `--csv [PATH]` writes the achieved throughput to a CSV file
 - `--peak-fp32`, `--peak-fp16tc` and `--peak-fp16tcf32acc TFLOPS` override the detected peak throughput
 - `--help` lists every flag

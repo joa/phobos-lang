@@ -4,7 +4,8 @@
   "memoryGiB": 32,
   "powerLimitWatts": 575,
   "host": "vast.ai, North Carolina",
-  "date": "2026-10-16",
+  "date": "2026-10-17",
+  "kbenchCommit": "4ec8059",
   "bench": "results/platforms/rtx5090/bench.json",
   "kbench": ["results/platforms/rtx5090/kbench-1.csv", "results/platforms/rtx5090/kbench-2.csv"]
 }

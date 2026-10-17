@@ -129,8 +129,11 @@ const blob = (file: string) => `${REPO_URL}/blob/main/${file}`
   </table>
   <p class="note">
     A share is the mean over phobos-kbench runs of each run's Phobos over cuBLAS, with its standard error; one
-    run has none. Flash attention has no cuBLAS counterpart, and saxpy is memory-bound. The tensor-core f32
-    gemm is timed beside cuBLAS's f32 gemm on CUDA cores, another precision, so it gets no share.
+    run has none. Each run times kernels alone between CUDA events and takes the median of rounds in which
+    Phobos and cuBLAS alternate. Each gemm is held against the cuBLAS call with its own storage, multiply and
+    accumulate types; for the tensor-core f32 gemm, which reads f32 and rounds while staging, that is
+    <code>cublasGemmEx</code> on f16 copies of A and B, with the conversion in its time. Flash attention has no
+    cuBLAS counterpart, and saxpy is memory-bound.
   </p>
 
   <details>
@@ -157,8 +160,14 @@ const blob = (file: string) => `${REPO_URL}/blob/main/${file}`
                 <code>{platform.chip}</code>
               </td>
               <td class="num">{platform.memoryGiB} GB</td>
-              <td class="num">{platform.powerLimitWatts} W</td>
-              <td>{platform.host}</td>
+              <td class="num">
+                {platform.powerLimitWatts} W
+                {platform.kbenchPowerLimitWatts !== undefined && platform.kbenchPowerLimitWatts !== platform.powerLimitWatts && <> (kbench {platform.kbenchPowerLimitWatts} W)</>}
+              </td>
+              <td>
+                {platform.host}
+                {platform.kbenchHost !== undefined && platform.kbenchHost !== platform.host && <> (kbench {platform.kbenchHost})</>}
+              </td>
               <td>{platform.driver}</td>
               <td>
                 <a href={commitUrl(platform.commit)}>{platform.commit}</a>{platform.kbenchCommit !== platform.commit && <> (kbench <a href={commitUrl(platform.kbenchCommit)}>{platform.kbenchCommit}</a>)</>}, {shortDate(platform.benchDate)}

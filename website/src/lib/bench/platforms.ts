@@ -25,6 +25,10 @@ interface CardFile {
   date?: string
   // The commit the kbench runs were built from, when it is not the bench.py run's.
   kbenchCommit?: string
+  // Where the kbench runs ran and the card's power limit there, when they ran on another rental
+  // than the bench.py run.
+  kbenchHost?: string
+  kbenchPowerLimitWatts?: number
   bench: string
   kbench: string[]
 }

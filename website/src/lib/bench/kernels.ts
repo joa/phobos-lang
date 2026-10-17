@@ -11,7 +11,7 @@ import { repoRoot } from "./load"
 
 export const KERNEL_RESULTS_FILE = "results/results.csv"
 
-// README.md: "SGEMM performance is at 77% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER".
+// README.md: "SGEMM performance is at 88% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER".
 export const KERNEL_CARD = "RTX 2080 SUPER"
 
 export interface KernelMeasure {
@@ -28,7 +28,7 @@ export interface KernelSpec {
   // The .ph file phobos-kbench compiles.
   source: string
   label: string
-  // The problem phobos-kbench runs, from its source (phobos-kbench/src/{saxpy,gemm,flash}.rs).
+  // The problem phobos-kbench runs, from its source (phobos-kbench/src/{saxpy,gemm/mod,flash}.rs).
   size: string
   // What the cuBLAS row times, when there is one.
   cublasCall?: string
@@ -37,7 +37,9 @@ export interface KernelSpec {
 }
 
 // saxpy reads x and y and writes out, 12 bytes per element for 2 FLOP; cuBLAS's in-place
-// y = alpha * x + y moves the same 12. GEMM counts 2MNK + MN FLOP, flash attention 4 * Nq * Nk * D.
+// y = alpha * x + y moves the same 12. GEMM counts 2MNK FLOP, flash attention 4 * Nq * Nk * D. A GEMM is
+// timed beside the cuBLAS call that computes the same thing: the same storage, multiply and accumulate
+// types (phobos-kbench/src/gemm/contract.rs).
 export const KERNEL_SPECS: Record<string, KernelSpec> = {
   saxpy_fp32: {
     example: "/docs/examples/saxpy-fp32/",
@@ -59,13 +61,19 @@ export const KERNEL_SPECS: Record<string, KernelSpec> = {
     source: "examples/gemm_fp16tc_fp32acc.ph",
     label: "gemm, f32 on tensor cores",
     size: "M = N = K = 4096",
-    cublasCall: "cublasSgemm_v2",
+    cublasCall: "cublasGemmEx on f16 copies of A and B",
+  },
+  gemm_fp16_fp32acc: {
+    source: "examples/gemm_fp16_fp32acc.ph",
+    label: "gemm, f16 into f32",
+    size: "M = N = K = 4096",
+    cublasCall: "cublasGemmEx",
   },
   gemm_fp16: {
     source: "examples/gemm_fp16.ph",
     label: "gemm, f16",
     size: "M = N = K = 4096",
-    cublasCall: "cublasHgemm",
+    cublasCall: "cublasGemmEx",
   },
   flash_fp32: {
     example: "/docs/examples/flash-attention-fp32/",

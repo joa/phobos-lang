@@ -49,23 +49,34 @@ describe("kernel results", () => {
     }
   })
 
-  it("puts SGEMM at 77% of cuBLAS, as the README says", () => {
+  it("puts SGEMM at 88% of cuBLAS, as the README says", () => {
     const ratio = cublasRatio(kernelBench(results, "gemm_fp32"))!
     expect(ratio).toBeCloseTo(cell("gemm_fp32", "phobos", "gflops") / cell("gemm_fp32", "cuBLAS", "gflops"), 10)
-    expect(ratio).toBeCloseTo(8527.9 / 11081.2, 10)
-    expect(formatPercent(ratio)).toBe("77%")
+    expect(ratio).toBeCloseTo(9621.3 / 10957.4, 10)
+    expect(formatPercent(ratio)).toBe("88%")
   })
 
-  it("compares f16 gemm against cublasHgemm, both on tensor cores", () => {
+  it("compares f16 gemm against cublasGemmEx, both on tensor cores", () => {
     const bench = kernelBench(results, "gemm_fp16")
     expect(bench.comparable).toBe(true)
-    expect(formatPercent(cublasRatio(bench)!)).toBe("59%")
+    expect(formatPercent(cublasRatio(bench)!)).toBe("60%")
+  })
+
+  it("holds the tensor-core f32 gemm against cuBLAS on the same contract", () => {
+    const bench = kernelBench(results, "gemm_fp16tc_fp32acc")
+    expect(bench.cublas?.precision).toBe("f16-tc-f32-acc")
+    expect(bench.phobos.precision).toBe("f16-tc-f32-acc")
+    expect(bench.comparable).toBe(true)
+    expect(formatPercent(cublasRatio(bench)!)).toBe("57%")
   })
 
   it("gives no ratio where cuBLAS ran at another precision", () => {
-    const bench = kernelBench(results, "gemm_fp16tc_fp32acc")
-    expect(bench.cublas?.precision).toBe("f32")
-    expect(bench.phobos.precision).toBe("f16-tc-f32-acc")
+    const csv = [
+      "benchmark,impl,precision,gflops,peak_gflops,pct_of_peak",
+      "gemm_fp16tc_fp32acc,phobos,f16-tc-f32-acc,2,4,50",
+      "gemm_fp16tc_fp32acc,cuBLAS,f32,1,2,50",
+    ].join("\n")
+    const bench = kernelBench(parseKernelCsv(csv, "2026-01-01"), "gemm_fp16tc_fp32acc")
     expect(bench.comparable).toBe(false)
     expect(cublasRatio(bench)).toBeUndefined()
   })
@@ -127,7 +138,7 @@ describe("compiler facts", () => {
 
   it("compares the gemm with and without @tensorcore from the CSV", () => {
     const gain = tensorCoreGain(results)
-    expect(gain.ratio).toBeCloseTo(21084.1 / 8527.9, 10)
+    expect(gain.ratio).toBeCloseTo(22002.9 / 9621.3, 10)
   })
 
   it("gives every fact a figure and an internal link", () => {
