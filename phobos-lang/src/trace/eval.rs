@@ -33,6 +33,8 @@ pub(super) struct Kernel<'a> {
     /// The runtime extent of each tensor parameter's dimensions, by entry
     /// argument.
     pub(super) tensors: HashMap<ValueId, (String, Vec<i64>)>,
+    /// The scalar parameters given values, by entry argument.
+    pub(super) args: HashMap<ValueId, i64>,
     pub(super) grid: Cta,
     /// Lanes of warp 0 simulated, and lanes in a warp on the target.
     pub(super) lanes: usize,
@@ -79,6 +81,9 @@ impl Kernel<'_> {
         };
         for (&arg, (_, dims)) in &self.tensors {
             r.views.insert(arg, View::tensor(arg, dims));
+        }
+        for (&arg, &value) in &self.args {
+            r.vals.insert(arg, r.splat(value));
         }
         let mask = vec![true; self.lanes];
         r.block(self.ir.entry(), &mask)?;
@@ -390,6 +395,9 @@ impl<'a> Cursor<'a, '_> {
         let out: Option<Lanes> = match kind {
             OpKind::Const(Literal::Int(n)) => Some(self.splat(*n)),
             OpKind::Const(Literal::Bool(b)) => Some(self.splat(i64::from(*b))),
+            // A whole float compares exactly as an integer, as against a
+            // scalar argument.
+            OpKind::Const(Literal::Float(v)) if v.fract() == 0.0 && v.abs() < 1e15 => Some(self.splat(*v as i64)),
             OpKind::ProgramId(d) => Some(self.splat(self.cta[usize::from(*d)])),
             OpKind::GridDim(d) => Some(self.splat(self.k.grid[usize::from(*d)])),
             OpKind::Thread(which) => Some(

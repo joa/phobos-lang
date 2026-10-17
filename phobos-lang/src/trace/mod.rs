@@ -52,6 +52,9 @@ pub struct Request {
     pub params: BTreeMap<String, i64>,
     /// Runtime extents of the tensors' symbolic dimensions.
     pub dims: BTreeMap<String, i64>,
+    /// Values of scalar parameters, for a kernel that branches on one;
+    /// whole numbers, floats included.
+    pub args: BTreeMap<String, i64>,
     pub grid: Cta,
     pub commit: String,
 }
@@ -191,11 +194,26 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
         ));
     }
 
+    let mut args = HashMap::new();
+    for (name, &value) in &req.args {
+        let Some((_, &arg)) = p
+            .kernel
+            .params
+            .iter()
+            .zip(ir.args(ir.entry()))
+            .find(|(param, _)| param.name == *name && matches!(param.ty, AstType::Scalar(_)))
+        else {
+            bail!("`{name}` is not a scalar parameter of the kernel");
+        };
+        args.insert(arg, value);
+    }
+
     let place = place::Placement::new(p, cta_threads);
     let k = eval::Kernel {
         ir,
         place: &place,
         tensors,
+        args,
         grid: req.grid,
         lanes: usize::try_from(cta_threads.min(warp_lanes)).unwrap_or(1),
         warp_lanes,

@@ -103,6 +103,7 @@ fn traces(root: &Path) -> Result<()> {
                 chip,
                 params: ints(&entry["params"])?,
                 dims: ints(&entry["dims"])?,
+                args: ints(&entry["args"])?,
                 grid: grid(&entry["grid"])?,
                 commit: commit.clone(),
             });
@@ -142,6 +143,7 @@ fn traces(root: &Path) -> Result<()> {
                 .unwrap_or_else(|| DEFAULT_CHIP.to_string()),
             params: pairs_of("params")?,
             dims: pairs_of("dims")?,
+            args: pairs_of("args")?,
             grid: extend(&g),
             commit: commit.clone(),
         });

@@ -16,9 +16,16 @@ fn request(text: &str, params: &[(&str, i64)], dims: &[(&str, i64)], grid: Cta) 
         chip: "sm_75".into(),
         params: params.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
         dims: dims.iter().map(|&(k, v)| (k.to_string(), v)).collect(),
+        args: BTreeMap::new(),
         grid,
         commit: String::new(),
     }
+}
+
+/// The example GEMMs branch on `beta`; a nonzero one reads C.
+fn reading_c(mut req: Request) -> Request {
+    req.args.insert("beta".into(), 1);
+    req
 }
 
 fn example(path: &str) -> String {
@@ -92,12 +99,12 @@ fn saxpy_boxes_match_a_brute_force_reference() {
 #[test]
 fn gemm_boxes_match_a_brute_force_reference() {
     let (tm, tn, tk, size) = (32, 32, 4, 64);
-    let t = trace(&request(
+    let t = trace(&reading_c(request(
         &example("examples/gemm_fp32.ph"),
         &[("TILE_M", tm), ("TILE_N", tn), ("TILE_K", tk)],
         &[("M", size), ("N", size), ("K", size)],
         [2, 2, 1],
-    ))
+    )))
     .unwrap();
     for pm in 0..2 {
         for pn in 0..2 {
@@ -340,12 +347,12 @@ fn conforms(value: &Value, schema: &Value, root: &Value, at: &str) -> Result<(),
 fn traces_conform_to_the_schema() {
     let schema: Value =
         serde_json::from_str(&example("website/src/data/trace.schema.json")).unwrap();
-    let mut gemm = request(
+    let mut gemm = reading_c(request(
         &example("examples/gemm_fp32.ph"),
         &[("TILE_M", 32), ("TILE_N", 32), ("TILE_K", 4)],
         &[("M", 64), ("N", 64), ("K", 64)],
         [2, 2, 1],
-    );
+    ));
     gemm.variant = Some(Variant {
         add: None,
         drop: Some("@aligned".into()),
