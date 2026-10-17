@@ -1,5 +1,5 @@
-@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [16, 64], U in [1, 8])
-@launch(256)
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [16, 64], U in [1, 8], B in [2, 1])
+@launch(256, B)
 @pipeline
 @tensorcore
 @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
