@@ -338,3 +338,17 @@ fn a_conversions_scalars_take_its_arguments_type() {
     assert_contains(&mlir, &["arith.constant 1.270000e+02 : f32", "arith.fptosi"]);
     assert!(emit_err(&src("q = f32(x * 2.0)")).contains("cannot store f32 where i8 is expected"));
 }
+
+#[test]
+fn a_converted_counter_over_iota_computes_in_i32() {
+    // No tile decides `(r + iota(0)) * 64 + iota(1)`'s type, so under
+    // `f32(..)` it computes in i32, as `iota` does, and takes `&` and `>>`.
+    let mlir = emit_mlir(
+        "kernel k(Y: tensor<f32>[N, 64], seed: i32) {
+            let r = ctx.block.x * 16
+            Y[r :+ 16, :] = f32((((r + iota(0)) * 64 + iota(1)) ^ seed) >> 3 & 255)
+        }",
+    );
+    assert_contains(&mlir, &["arith.xori", "arith.shrsi", "arith.andi", "arith.sitofp"]);
+    assert!(!mlir.contains("arith.addf"), "{mlir}");
+}

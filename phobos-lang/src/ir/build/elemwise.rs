@@ -299,7 +299,40 @@ impl Build {
         {
             return Some(to);
         }
-        self.fused_decl_type(value).map(|(elem, _)| elem)
+        self.fused_decl_type(value)
+            .map(|(elem, _)| elem)
+            .or_else(|| self.is_iota_arith(value).then_some(Scalar::I32))
+    }
+
+    /// Whether `value` is integer arithmetic over `iota` with no tile in it,
+    /// as the counter `(r + iota(0)) * C + iota(1)` is. Such a value computes
+    /// in `i32`, as `iota` does.
+    fn is_iota_arith(&self, value: &Expr) -> bool {
+        fn walk(b: &Build, e: &Expr, iota: &mut bool) -> bool {
+            match &e.kind {
+                ExprKind::Int(_) => true,
+                ExprKind::Call { callee, .. } if callee == "iota" => {
+                    *iota = true;
+                    true
+                }
+                ExprKind::Var(name) => match b.lookup(name) {
+                    Some(Binding::Let { value, .. }) => {
+                        let elem = b.scalar_of(value);
+                        elem.is_int() || elem == Scalar::Index
+                    }
+                    Some(Binding::Var { elem, .. }) => elem.is_int() || elem == Scalar::Index,
+                    _ => false,
+                },
+                ExprKind::Binary { op, lhs, rhs } if op.is_elementwise() => walk(b, lhs, iota) && walk(b, rhs, iota),
+                ExprKind::Unary {
+                    op: UnOp::Neg | UnOp::BitNot,
+                    rhs,
+                } => walk(b, rhs, iota),
+                _ => false,
+            }
+        }
+        let mut iota = false;
+        walk(self, value, &mut iota) && iota
     }
 
     /// `value` emitted, or the value it had where the tree already holds it.

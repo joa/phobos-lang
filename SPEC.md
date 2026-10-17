@@ -179,7 +179,7 @@ All points load one element. A point among slices selects one index and keeps it
 | `popcount(x)` | The number of set bits in the low 32 bits of the integer `x`. |
 | Comparisons on tiles | Only inside `where`; there is no bool tile. |
 | Mixed types | Both operands convert to their join first. Float with float: the wider one. `f16` with `bf16`: `f32`. Integer with float: the float. |
-| `T(x)` conversion | `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`, `i64(x)`. Tile or scalar. On tiles, `x` computes in its own operands' type and its scalars take that type, not the target's: `q = i8(i32(round(x * 127.0)))` scales an `f32` `x` in `f32`. |
+| `T(x)` conversion | `f16(x)`, `bf16(x)`, `f32(x)`, `f64(x)`, `i8(x)`, `i32(x)`, `i64(x)`. Tile or scalar. On tiles, `x` computes in its own operands' type and its scalars take that type, not the target's: `q = i8(i32(round(x * 127.0)))` scales an `f32` `x` in `f32`. Integer arithmetic over `iota` with no tile in it computes in `i32`, as `iota` does, so `f32(((r + iota(0)) * 64 + iota(1)) & 255)` masks an integer counter. |
 | Float to float | Rounds to nearest. |
 | Integer to float | Signed conversion. |
 | Float to integer | Truncates toward zero. |
