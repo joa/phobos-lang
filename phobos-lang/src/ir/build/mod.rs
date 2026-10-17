@@ -29,7 +29,7 @@ use super::{
     Builder, Extent, Ir, KernelInfo, Layout, OpId, OpKind, Scalar, Space, TileType,
     Type, ValueId,
 };
-use crate::ast::{AttrArg, Dim, Kernel, Span, Stmt};
+use crate::ast::{Dim, Kernel, Span, Stmt};
 use crate::diag::{Diagnostic, Diagnostics, SourceFile};
 
 pub(crate) use super::at_op::locate;
@@ -195,28 +195,11 @@ pub fn build(
 ) -> Result<(Ir, Report)> {
     let empty = Ir::new(KernelInfo::default(), &[]);
     let attr_span = |name: &str| kernel.attr(name).map_or(kernel.name_span, |a| a.span);
+    let shape_env = kernel.shape_env(&base.shape_overrides);
     let launch = kernel
-        .launch()
+        .launch_in(&shape_env)
         .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("launch")))?;
     let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
-
-    let mut shape_env = BTreeMap::new();
-    for attr in &kernel.attrs {
-        if attr.name == "autotune" {
-            for arg in &attr.args {
-                if let AttrArg::Search { name, choices } = arg
-                    && let Some(&first) = choices.first()
-                {
-                    shape_env.insert(name.clone(), first);
-                }
-            }
-        }
-    }
-    for (name, value) in &base.shape_overrides {
-        if shape_env.contains_key(name) {
-            shape_env.insert(name.clone(), *value);
-        }
-    }
 
     let persistent = kernel
         .persistent()

@@ -184,7 +184,7 @@ fn problem(
     phinfo!(
         "  winner {}: grid {grid:?} x {} threads, {} regs, {} B smem, {} B local, {} blocks/SM",
         crate::autotune::fmt_config(&winner.config),
-        vs.block,
+        winner.block,
         winner.res.regs,
         winner.res.smem_bytes,
         winner.res.local_bytes,
@@ -270,7 +270,7 @@ fn problem(
             "config": winner.config.iter().map(|(n, v)| (n.clone(), (*v).into())).collect::<serde_json::Map<_, _>>(),
             "from_cache": !tuned,
             "grid": [grid.0, grid.1],
-            "block": vs.block,
+            "block": winner.block,
             "index_bits": if vs.wide { 64 } else { 32 },
             "resources": winner.res.json(),
         },

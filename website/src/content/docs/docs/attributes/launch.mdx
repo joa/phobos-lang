@@ -19,6 +19,20 @@ the PTX assembler.
 | `min_blocks` | `.minnctapersm` | The CTAs per multiprocessor to aim for. Advisory. |
 | `max_regs` | `.maxnreg` | A hard cap on registers per thread, 16 to 255. |
 
+Each argument is an integer or an [`@autotune`](/docs/attributes/autotune/)
+constant, so the CTA size and the occupancy hints can be searched like a tile
+size:
+
+```phobos
+@autotune(T in [128, 256], B in [1, 2])
+@launch(T, B)
+kernel tuned_threads(O: tensor<i32>[1, 1]) {
+  O[0, 0] = i32(ctx.threads)   // 128 or 256, whichever variant runs
+}
+```
+
+The host launches each variant with that variant's `threads`.
+
 See the [Attributes](/docs/reference/spec/#attributes) table in the spec, and
 [`ctx.threads`, `ctx.warps`, `ctx.lanes`](/docs/ctx/counts/) for what the
 count means inside the kernel.
@@ -56,7 +70,8 @@ The arguments are checked before anything else is compiled:
 
 | Case | Problem |
 | --- | --- |
-| A non-integer argument, or more than three | `@launch` takes 1 to 3 integer arguments |
+| A non-integer argument, or more than three | `@launch` takes 1 to 3 integers or `@autotune` constants |
+| A name that is not an `@autotune` constant | there is no value to take |
 | `threads` not a positive multiple of 32 | the CTA would not be a whole number of warps |
 | `min_blocks` zero or negative | it must be positive |
 | `max_regs` outside 16 to 255 | the range `.maxnreg` accepts |

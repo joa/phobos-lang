@@ -419,7 +419,7 @@ impl<'c> Codegen<'c> {
         ctx: &'c Context,
         kernel: &Kernel,
     ) -> Result<Self> {
-        let launch = kernel.launch().map_err(|e| {
+        let launch = kernel.launch_in(&kernel.shape_env(&base.shape_overrides)).map_err(|e| {
             let empty = crate::ir::Ir::new(Default::default(), &[]);
             let at = kernel.attr("launch").map_or(kernel.name_span, |a| a.span);
             crate::ir::build::locate(&kernel.source, &empty, anyhow!(e), at)

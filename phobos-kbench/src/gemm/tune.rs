@@ -44,6 +44,8 @@ impl Resources {
 
 pub(crate) struct Variant {
     pub config: Vec<Setting>,
+    /// Threads a CTA, which `@launch` may take from the config.
+    pub block: u32,
     pub module: Module,
     pub res: Resources,
 }
@@ -53,7 +55,6 @@ pub(crate) struct Variants {
     pub kind: Kind,
     /// The kernel source the variants were compiled from.
     pub code: String,
-    pub block: u32,
     pub wide: bool,
     pub all: Vec<Variant>,
 }
@@ -63,7 +64,6 @@ impl Variants {
     /// the ones the card cannot launch at all.
     pub fn build(kind: Kind, code: &str, pins: &std::collections::HashMap<String, i64>) -> anyhow::Result<Self> {
         let kernels = phobos_lang::parse(code)?;
-        let block = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
         let wide = phobos_lang::requires_wide_index(&kernels);
         let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
         let configs = phobos_base::combo::cartesian_product(&space);
@@ -95,9 +95,17 @@ impl Variants {
                 .expect("every slot is filled")
                 .and_then(|ptx| Ok(Module::from_ptx(ptx.as_str(), &[])?))
                 .and_then(|module| {
+                    let block = kernels[0]
+                        .cta_threads_for(&cfg.iter().cloned().collect())
+                        .map_err(anyhow::Error::msg)? as u32;
                     let res = resources(&module, block)?;
                     anyhow::ensure!(res.blocks_per_sm > 0, "does not fit an SM ({} regs, {} B smem)", res.regs, res.smem_bytes);
-                    Ok(Variant { config: cfg.clone(), module, res })
+                    Ok(Variant {
+                        config: cfg.clone(),
+                        block,
+                        module,
+                        res,
+                    })
                 });
             match loaded {
                 Ok(v) => all.push(v),
@@ -109,7 +117,6 @@ impl Variants {
         Ok(Variants {
             kind,
             code: code.to_string(),
-            block,
             wide,
             all,
         })
@@ -151,9 +158,10 @@ pub(crate) fn grid_for(kind: Kind, config: &[Setting], (m, n, k): (usize, usize,
 pub(crate) fn timed<'a>(stream: &'a Stream, p: &'a Problem, vs: &'a Variants, v: usize, scalars: (f32, f32)) -> anyhow::Result<Timed<'a>> {
     let grid = grid_for(vs.kind, &vs.all[v].config, p.dims)?;
     let func = vs.all[v].module.get_function("gemm")?;
+    let block = vs.all[v].block;
     Ok(Timed {
         prepare: Box::new(move || p.restore(stream, &p.c_phobos)),
-        launch: Box::new(move || p.launch_phobos(stream, &func, grid, vs.block, vs.wide, scalars)),
+        launch: Box::new(move || p.launch_phobos(stream, &func, grid, block, vs.wide, scalars)),
     })
 }
 

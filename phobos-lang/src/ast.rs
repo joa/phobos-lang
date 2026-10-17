@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 pub mod ctx;
 pub mod lanes;
 
@@ -160,7 +162,28 @@ pub struct Launch {
 }
 
 impl Kernel {
+    /// Every `@autotune` constant at its first choice, then at its value in
+    /// `overrides` where that names one: the point the autotuner compiles.
+    pub fn shape_env(&self, overrides: &HashMap<String, i64>) -> BTreeMap<String, i64> {
+        let mut env = BTreeMap::new();
+        for arg in self.attrs.iter().filter(|a| a.name == "autotune").flat_map(|a| &a.args) {
+            if let AttrArg::Search { name, choices } = arg
+                && let Some(&first) = choices.first()
+            {
+                env.insert(name.clone(), overrides.get(name).copied().unwrap_or(first));
+            }
+        }
+        env
+    }
+
+    /// `@launch` at the autotune constants' first choices.
     pub fn launch(&self) -> Result<Option<Launch>, String> {
+        self.launch_in(&self.shape_env(&HashMap::new()))
+    }
+
+    /// `@launch` with each argument that names an `@autotune` constant taken
+    /// from `env`.
+    pub fn launch_in(&self, env: &BTreeMap<String, i64>) -> Result<Option<Launch>, String> {
         let Some(attr) = self.attrs.iter().find(|a| a.name == "launch") else {
             return Ok(None);
         };
@@ -169,7 +192,11 @@ impl Kernel {
             .iter()
             .map(|a| match a {
                 AttrArg::Positional(Literal::Int(n)) => Ok(*n),
-                _ => Err("@launch takes integer arguments: \
+                AttrArg::Positional(Literal::Ident(name)) => env
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| format!("`@launch({name})`: `{name}` is not an `@autotune` constant")),
+                _ => Err("@launch takes integers or `@autotune` constants: \
                     @launch(maxThreads[, minBlocks[, maxRegs]])"
                     .to_string()),
             })
@@ -252,9 +279,16 @@ impl Kernel {
         self.attrs.iter().find(|a| a.name == name)
     }
 
+    /// The CTA size at the autotune constants' first choices.
     pub fn cta_threads(&self) -> Result<i64, String> {
+        self.cta_threads_for(&HashMap::new())
+    }
+
+    /// The CTA size of the variant compiled with `overrides`, which a
+    /// `@launch` naming an `@autotune` constant depends on.
+    pub fn cta_threads_for(&self, overrides: &HashMap<String, i64>) -> Result<i64, String> {
         Ok(self
-            .launch()?
+            .launch_in(&self.shape_env(overrides))?
             .map_or(DEFAULT_CTA_THREADS, |l| l.max_threads))
     }
 
