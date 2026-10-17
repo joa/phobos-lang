@@ -166,7 +166,7 @@ impl<'c> Codegen<'c> {
         block: &Block<'c>,
         src: &GemmSource<'_>,
         prefetch_iv: Value<'c, 'c>,
-        hi: Value<'c, 'c>,
+        (hi, st): (Value<'c, 'c>, Value<'c, 'c>),
         cur: (&MemVal<'c>, &MemVal<'c>),
         dst: (&MemVal<'c>, &MemVal<'c>),
         dims: (i64, i64, i64),
@@ -175,14 +175,54 @@ impl<'c> Codegen<'c> {
         accs: &[Value<'c, 'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
         let use_async = self.has_cp_async();
-        self.pipelined_half(
-            block,
-            prefetch_iv,
-            hi,
-            use_async,
-            |cg, then| cg.fused_stage(then, src, prefetch_iv, dst.0, dst.1, use_async),
-            |cg| cg.register_mac(block, cur.0, cur.1, dims, m0, n0, accs),
-        )
+        if use_async {
+            return self.pipelined_half(
+                block,
+                prefetch_iv,
+                hi,
+                use_async,
+                |cg, then| cg.fused_stage(then, src, prefetch_iv, dst.0, dst.1, use_async),
+                |cg| cg.register_mac(block, cur.0, cur.1, dims, m0, n0, accs),
+            );
+        }
+
+        // Without cp.async the next stage is loaded into registers before
+        // the MAC and stored into `dst` after it, so the loads' latency hides
+        // behind the MAC. Neither is guarded: a guard on both sides of the
+        // MAC lets the loads sink to the stores. Past the last iteration the
+        // prefetch rereads the last tile into `dst`, which nothing reads
+        // again. That stays in bounds since a loop that runs has a last
+        // tile. A slice with no register copy plan is staged synchronously
+        // before the MAC instead.
+        let last = self.subi(block, hi, st)?;
+        let at = self.minsi(block, prefetch_iv, last)?;
+        let (a_src, b_src) = self.gemm_operands(block, src, at)?;
+        let plans = self.reg_copy_plan(&a_src, &a_src).zip(self.reg_copy_plan(&b_src, dst.1));
+        let Some((a_plan, b_plan)) = plans else {
+            self.tile_copy_transposed(block, &a_src, dst.0, false)?;
+            self.tile_copy(block, &b_src, dst.1, false, false)?;
+            let next = self.register_mac(block, cur.0, cur.1, dims, m0, n0, accs)?;
+            self.barrier(block)?;
+            return Ok(next);
+        };
+        self.record_copy(4 * a_plan.vec_width(), false, dst.0);
+        self.record_copy(4 * b_plan.vec_width(), false, dst.1);
+
+        // Each chunk located once a half, for both its load and its store.
+        let a_copy = self.reg_copy_indexed(block, a_plan)?;
+        let b_copy = self.reg_copy_indexed(block, b_plan)?;
+        let a_vals = self.reg_copy_load(block, &a_src, &a_copy)?;
+        let b_vals = self.reg_copy_load(block, &b_src, &b_copy)?;
+
+        let next = self.register_mac(block, cur.0, cur.1, dims, m0, n0, accs)?;
+
+        // `dst` was last read by the previous half, which ended in a
+        // barrier, so the stores need none before them.
+        self.reg_copy_store_transposed(block, dst.0, &a_copy, &a_vals)?;
+        self.reg_copy_store(block, dst.1, &b_copy, &b_vals)?;
+        // Publishes the stores and retires this half's reads of `cur`.
+        self.barrier(block)?;
+        Ok(next)
     }
 
     /// Stages an operand into an f16 shared buffer for the tensor cores.

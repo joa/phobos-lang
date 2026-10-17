@@ -80,8 +80,9 @@ fn a_register_matmul_unrolled_once_is_the_plain_loop() {
 #[test]
 fn a_pipelined_register_matmul_runs_an_even_number_of_halves_a_turn() {
     let ifs = |n: &str| emit_mlir(&matmul(n, "@pipeline", "f32")).matches("scf.if").count();
-    // Each half adds its guarded prefetch and the guard that skips it.
-    assert_eq!(ifs("4"), ifs("1") + 4);
+    // Each half adds the guard that skips it. Without cp.async its
+    // prefetch is clamped rather than guarded.
+    assert_eq!(ifs("4"), ifs("1") + 2);
     // Two halves a turn already, and an odd count rounds up.
     assert_eq!(ifs("2"), ifs("1"));
     assert_eq!(emit_mlir(&matmul("3", "@pipeline", "f32")), emit_mlir(&matmul("4", "@pipeline", "f32")));

@@ -67,7 +67,7 @@ impl<'c> Codegen<'c> {
             &b_bufs,
             |cg, body, kt, a, b| cg.fused_stage(body, src, kt, a, b, false),
             |cg, body, piv, cur, dst, accs| {
-                cg.fused_half(body, src, piv, hi, cur, dst, dims, m0, n0, accs)
+                cg.fused_half(body, src, piv, (hi, st), cur, dst, dims, m0, n0, accs)
             },
             |cg, body, a, b, accs| cg.register_mac(body, a, b, dims, m0, n0, accs),
         )?;

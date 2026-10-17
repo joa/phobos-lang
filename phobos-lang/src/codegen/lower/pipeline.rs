@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use melior::{
-    dialect::{arith, scf},
+    dialect::{arith, memref, scf},
     ir::{Block, BlockLike, Region, RegionLike, Type, Value, ValueLike, operation::OperationBuilder},
 };
 
@@ -416,7 +416,7 @@ impl<'c> Codegen<'c> {
 
     /// How a thread copies its share of `src` into `dst` through registers,
     /// or None when the copy is not a rank-2, unmasked one of static shape.
-    pub(super) fn reg_copy_plan(&self, src: &MemVal<'c>, dst: &MemVal<'c>) -> Option<RegCopy<'c>> {
+    pub(in crate::codegen) fn reg_copy_plan(&self, src: &MemVal<'c>, dst: &MemVal<'c>) -> Option<RegCopy<'c>> {
         let &[rows, cols] = &src.shape[..] else { return None };
         if dst.shape.len() != 2 {
             return None;
@@ -442,7 +442,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// `plan` with each of the thread's chunks located.
-    pub(super) fn reg_copy_indexed(&self, block: &Block<'c>, mut plan: RegCopy<'c>) -> Result<RegCopy<'c>> {
+    pub(in crate::codegen) fn reg_copy_indexed(&self, block: &Block<'c>, mut plan: RegCopy<'c>) -> Result<RegCopy<'c>> {
         plan.at = (0..plan.per_thread).map(|i| self.reg_copy_at(block, &plan, i)).collect::<Result<_>>()?;
         Ok(plan)
     }
@@ -475,14 +475,14 @@ impl<'c> Codegen<'c> {
         Ok(([row, col], real))
     }
 
-    pub(super) fn reg_copy_load(&self, block: &Block<'c>, src: &MemVal<'c>, plan: &RegCopy<'c>) -> Result<Vec<Value<'c, 'c>>> {
+    pub(in crate::codegen) fn reg_copy_load(&self, block: &Block<'c>, src: &MemVal<'c>, plan: &RegCopy<'c>) -> Result<Vec<Value<'c, 'c>>> {
         plan.at
             .iter()
             .map(|(at, _)| self.vec_load_al(block, src.mem, at, plan.vec_t, plan.align))
             .collect()
     }
 
-    pub(super) fn reg_copy_store(
+    pub(in crate::codegen) fn reg_copy_store(
         &self,
         block: &Block<'c>,
         dst: &MemVal<'c>,
@@ -506,6 +506,36 @@ impl<'c> Codegen<'c> {
         }
         Ok(())
     }
+
+    /// [`Self::reg_copy_store`] into a k-major `dst`: the chunk read at
+    /// `[m, k]` of an `[m, kk]` source lands as `width` scalars down column
+    /// `m` of `dst[kk, m]`, as `tile_copy_transposed` stores it.
+    pub(in crate::codegen) fn reg_copy_store_transposed(
+        &self,
+        block: &Block<'c>,
+        dst: &MemVal<'c>,
+        plan: &RegCopy<'c>,
+        vals: &[Value<'c, 'c>],
+    ) -> Result<()> {
+        for (i, (&v, &([m, k], real))) in vals.iter().zip(&plan.at).enumerate() {
+            let partial = (i as i64 + 1) * self.cta_threads > plan.total;
+            let guarded = Block::new(&[]);
+            let into = if partial { &guarded } else { block };
+            for j in 0..plan.width {
+                let e = self.vec_extract(into, v, &[j], dst.elem)?;
+                let c = self.const_index(into, j)?;
+                let kj = self.addi(into, k, c)?;
+                into.append_operation(memref::store(e, dst.mem, &[kj, m], self.loc));
+            }
+            if partial {
+                guarded.append_operation(scf::r#yield(&[], self.loc));
+                let region = Region::new();
+                region.append_block(guarded);
+                block.append_operation(scf::r#if(real, &[], region, Region::new(), self.loc));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// A thread's share of a staged copy, held in registers: `per_thread`
@@ -513,7 +543,7 @@ impl<'c> Codegen<'c> {
 /// of `total`, `across` of them to a row. `at` holds each chunk's
 /// `[row, col]` and whether the thread has it, once located.
 #[derive(Clone)]
-pub(super) struct RegCopy<'c> {
+pub(in crate::codegen) struct RegCopy<'c> {
     width: i64,
     align: i64,
     across: i64,
@@ -521,6 +551,13 @@ pub(super) struct RegCopy<'c> {
     per_thread: i64,
     vec_t: Type<'c>,
     at: Vec<([Value<'c, 'c>; 2], Value<'c, 'c>)>,
+}
+
+impl<'c> RegCopy<'c> {
+    /// The elements of one chunk.
+    pub(in crate::codegen) fn vec_width(&self) -> i64 {
+        self.width
+    }
 }
 
 /// Whether `ops` pass an explicit `barrier()` before anything reads one of
