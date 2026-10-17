@@ -1,0 +1,37 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import RowSweepFigure from "./row-sweep.figure"
+import { FUNCTIONS, type RowFunction } from "./geometry"
+
+interface Props {
+  id?: string
+  // The function shown first.
+  fn?: RowFunction
+}
+
+const { id = "fig-row-sweep", fn = "softmax" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="row-sweep"
+  figure={RowSweepFigure}
+  state={{ fn }}
+  title="A row-wise library function, statement by statement"
+  desc="Schematic. A tile of five rows and eight columns in shared memory, a one-column tile beside it, and for the norms a weight row above it. A statement that declares a row reduction folds every row into the column; any other statement sweeps the tile with the column broadcast along its row. The statements are the source of softmax, rms_norm or layer_norm."
+  legend={["shared", ["global", "weight row"]]}
+>
+  <div class="chart-group" role="group" aria-label="Function">
+    {
+      FUNCTIONS.map(name => (
+        <button type="button" class="chart-btn" data-group="fn" data-value={name} aria-pressed={name === fn ? "true" : "false"}>
+          {name}
+        </button>
+      ))
+    }
+  </div>
+  <Fragment slot="caption">
+    Schematic. The statements are the library's source. A barrier separates each from the next, since each
+    reads what the one before stored.
+  </Fragment>
+</ChartFigure>

@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Fn from "../../../../components/stdlib/Fn.astro"
+import RowSweep from "../../../../components/figures/row-sweep/RowSweep.astro"
 
 Operations on a rank-2 tile `[R, C]`, each row on its own, as a softmax
 over the keys of each query is. They are built from the row reductions
@@ -35,6 +36,8 @@ over the tile with the `[R, 1]` maximum broadcast along its row, a row sum,
 and a scale by its reciprocal, which is computed once a row. A row
 reduction folds each row with warp shuffles, and a barrier separates each
 step from the next, since each reads what the one before stored.
+
+<RowSweep />
 
 ## Reductions
 

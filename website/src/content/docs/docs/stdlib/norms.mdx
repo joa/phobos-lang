@@ -6,11 +6,14 @@ sidebar:
 ---
 
 import Fn from "../../../../components/stdlib/Fn.astro"
+import RowSweep from "../../../../components/figures/row-sweep/RowSweep.astro"
 
 Normalizations over the rows of a rank-2 tile `[R, C]`, in place, as a
 transformer normalizes each token's hidden state. Each row's statistic is a
 row reduction, a `[R, 1]` column, and the normalization one elementwise
 sweep that broadcasts it.
+
+<RowSweep fn="rms_norm" />
 
 ```phobos
 @autotune(R in [4])

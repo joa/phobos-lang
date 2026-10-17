@@ -22,7 +22,7 @@ const { id = "fig-activation-curves" } = Astro.props
   <div class="chart-group" role="group" aria-label="Family">
     {
       FAMILIES.map((family, i) => (
-        <button type="button" class="chart-btn" data-group="family" data-value={family.key} aria-pressed={String(i === 0)}>
+        <button type="button" class="chart-btn" data-group="family" data-value={family.key} aria-pressed={i === 0 ? "true" : "false"}>
           {family.title}
         </button>
       ))

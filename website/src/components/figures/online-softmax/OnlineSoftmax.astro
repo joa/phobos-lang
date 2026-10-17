@@ -1,0 +1,25 @@
+---
+import ChartFigure from "../ChartFigure.astro"
+import OnlineSoftmaxFigure from "./online-softmax.figure"
+
+interface Props {
+  id?: string
+}
+
+const { id = "fig-online-softmax" } = Astro.props
+---
+
+<ChartFigure
+  id={id}
+  name="online-softmax"
+  figure={OnlineSoftmaxFigure}
+  title="The online softmax, one block of keys at a time"
+  desc="Schematic. Four blocks of keys and values sit in global memory. For each block in turn, its keys meet the queries and the scores land in a shared tile s; the running row maximum m rises to cover them; s becomes exponentials against it; the denominator l and the output acc are rescaled by exp(m - mnew) and gain the block's row sums and its values weighted by s. After the last block, acc divided by l is the attention output."
+  legend={["global", "shared"]}
+>
+  <Fragment slot="caption">
+    Schematic. Each step names what it computes: the scores are the caller's, the rest is
+    <code>online_softmax</code>, up to two of its statements to a line. Under <code>@tensorcore</code> the
+    scores and <code>acc</code> live in registers instead of shared memory.
+  </Fragment>
+</ChartFigure>

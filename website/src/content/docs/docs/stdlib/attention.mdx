@@ -6,6 +6,7 @@ sidebar:
 ---
 
 import Fn from "../../../../components/stdlib/Fn.astro"
+import OnlineSoftmax from "../../../../components/figures/online-softmax/OnlineSoftmax.astro"
 
 Flash attention streams the keys and values through a CTA one block at a
 time and never holds the whole score matrix. What makes that possible is
@@ -15,6 +16,8 @@ and when a block brings a new maximum it rescales what it has by
 `exp(m - mnew)` before adding the block's share. The library has that step
 as [`online_softmax`](#online_softmax) and the whole pass over the keys as
 [`attention`](#attention).
+
+<OnlineSoftmax />
 
 ```phobos
 @tensorcore
