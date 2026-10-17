@@ -399,7 +399,7 @@ The host produces this at upload (`Quant::grouped_rows`). Row-major formats are 
 
 | Attribute | Effect |
 |---|---|
-| `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Three or more: an explicit list. The first choice seeds the shape environment. |
+| `@autotune(X in [a, b], Y in [c, d, e])` | Search space for tile constants. Two increasing values: inclusive bounds, searched in doubling steps (`[16, 256]` gives 16, 32, 64, 128, 256). Two decreasing values, or three or more: an explicit list, so `[256, 128]` is 256 and 128 with 256 first. The first choice seeds the shape environment. |
 | `@cluster(X in [..], ...)` | Super-tile dimensions and search space for cluster tuning. |
 | `@aligned(DIM = tile, ...)` | Promises `DIM` is a whole number of `tile` (a literal or an `@autotune` constant). Removes masking on that dimension and allows 16-byte vector access into its rows. A dynamic `DIM` that breaks the promise traps at entry; in a `@persistent` kernel with `grid_barrier`, the other blocks then wait at the barrier for good. |
 | `@launch(threads[, min_blocks[, max_regs]])` | CTA size (default 256), PTX `.maxntid`, `.minnctapersm`, `.maxnreg`. `max_regs` (16..255) is a hard cap; `min_blocks` is advisory. Each argument is an integer or an `@autotune` constant, so `@autotune(T in [128, 256]) @launch(T)` searches the CTA size. |
@@ -425,8 +425,8 @@ Planned, and an error until then: `@readonly`, `@fast_math`, `@assert_coalesced`
 
 SGEMM
 ```plain
-@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
-@launch(256)
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128])
+@launch(T)
 @pipeline
 @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
 kernel matmul(A: tensor<f32>[M, K],
@@ -437,7 +437,7 @@ kernel matmul(A: tensor<f32>[M, K],
   let pm = ctx.block.x
   let pn = ctx.block.y
   var acc: tile<f32>[TILE_M, TILE_N] = 0.0
-  for kt in range(0, K, TILE_K) {
+  for<unroll U> kt in range(0, K, TILE_K) {
     var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
     var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
     acc += dot(a, b)
