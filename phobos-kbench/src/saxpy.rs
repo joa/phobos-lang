@@ -48,7 +48,7 @@ pub(crate) fn bench_saxpy(
         code: CODE_SAXPY,
         grid_for: |cfg: &[autotune::Setting]| {
             let block_size = autotune::cfg_value(cfg, "BLOCK")? as u32;
-            Ok(autotune::Grid((n as u32).div_ceil(block_size), 1))
+            Ok(autotune::Grid((n as u32).div_ceil(block_size)))
         },
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
             let func = module.get_function("saxpy")?;

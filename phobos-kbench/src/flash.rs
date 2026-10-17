@@ -123,7 +123,7 @@ pub(crate) fn bench_flash_attention_fp32(
                 (Nq as u32).is_multiple_of(br),
                 "BR does not divide the query length"
             );
-            Ok(autotune::Grid(Nq as u32 / br, 1))
+            Ok(autotune::Grid(Nq as u32 / br))
         },
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
             // The kernel writes all of O, so no memset.
@@ -251,7 +251,7 @@ pub(crate) fn bench_flash_attention_fp16(
                 (Nq as u32).is_multiple_of(br),
                 "BR does not divide the query length"
             );
-            Ok(autotune::Grid(Nq as u32 / br, 1))
+            Ok(autotune::Grid(Nq as u32 / br))
         },
         launch: |module: &cust::module::Module, grid: autotune::Grid| {
             let func = module.get_function("flash_attention")?;

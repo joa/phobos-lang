@@ -1815,9 +1815,11 @@ dependencies = [
  "half",
  "melior",
  "phobos-base",
+ "phobos-kernels",
  "phobos-lang",
  "phobos-mlir",
  "rand",
+ "serde_json",
 ]
 
 [[package]]

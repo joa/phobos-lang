@@ -9,9 +9,9 @@ mod flash;
 mod gemm;
 mod harness;
 mod saxpy;
+mod timing;
 
 use flash::*;
-use gemm::*;
 use saxpy::*;
 mod cublas;
 mod report;
@@ -19,9 +19,6 @@ mod report;
 use report::{Precision, Results};
 
 pub(crate) const CODE_SAXPY: &str = include_str!("../../examples/saxpy_fp32.ph");
-pub(crate) const CODE_MATMUL: &str = include_str!("../../examples/gemm_fp32.ph");
-pub(crate) const CODE_MATMUL_TC: &str = include_str!("../../examples/gemm_fp16tc_fp32acc.ph");
-pub(crate) const CODE_MATMUL_FP16: &str = include_str!("../../examples/gemm_fp16.ph");
 pub(crate) const CODE_FLASH: &str = include_str!("../../examples/flash_attention_fp32.ph");
 pub(crate) const CODE_FLASH_F16: &str = include_str!("../../examples/flash_attention_fp16.ph");
 
@@ -34,7 +31,9 @@ pub(crate) const PROBES_LONG: u32 = 30u32;
 pub(crate) const BENCHES: &[&str] = &[
     "saxpy_fp32",
     "gemm_fp32",
+    "gemm_fp32_unaligned",
     "gemm_fp16tc_fp32acc",
+    "gemm_fp16_fp32acc",
     "gemm_fp16",
     "flash_fp32",
     "flash_fp16",
@@ -51,10 +50,16 @@ struct Options {
     peak_fp32: Option<f64>,
     peak_fp16tc: Option<f64>,
     peak_fp16tcf32acc: Option<f64>,
+    gemm: gemm::Options,
+    /// Where to write the GEMM results as JSON, if --json was given.
+    json: Option<std::path::PathBuf>,
 }
 
 /// Default path used when --csv is passed without an explicit value.
 pub(crate) const DEFAULT_CSV: &str = "phobos-kbench.csv";
+
+/// Where tuned GEMM winners are remembered between runs.
+pub(crate) const DEFAULT_TUNE_CACHE: &str = "target/kbench/gemm-winners.json";
 
 impl Options {
     fn parse(args: impl Iterator<Item = String>) -> anyhow::Result<Options> {
@@ -64,21 +69,29 @@ impl Options {
         let mut peak_fp32 = None;
         let mut peak_fp16tc = None;
         let mut peak_fp16tcf32acc = None;
+        let mut gemm = gemm::Options {
+            shapes: Vec::new(),
+            suite: false,
+            rounds: None,
+            cache: DEFAULT_TUNE_CACHE.into(),
+            retune: false,
+        };
+        let mut json = None;
         let mut args = args.peekable();
         while let Some(arg) = args.next() {
+            let mut value = || args.next().ok_or_else(|| anyhow::anyhow!("{arg} needs a value"));
             match arg.as_str() {
-                "--bench" | "-bench" => {
-                    bench = Some(
-                        args.next()
-                            .ok_or_else(|| anyhow::anyhow!("{arg} needs a benchmark name"))?,
-                    );
+                "--bench" | "-bench" => bench = Some(value()?),
+                "--autotune" | "-autotune" => parse_pins(&value()?, &mut pins)?,
+                "--shape" => gemm.shapes.push(parse_shape(&value()?)?),
+                "--suite" => gemm.suite = true,
+                "--rounds" => {
+                    let v = value()?;
+                    gemm.rounds = Some(v.parse().map_err(|_| anyhow::anyhow!("--rounds '{v}' is not a count"))?);
                 }
-                "--autotune" | "-autotune" => {
-                    let spec = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("{arg} needs a \"NAME=VALUE ...\" spec"))?;
-                    parse_pins(&spec, &mut pins)?;
-                }
+                "--tune-cache" => gemm.cache = value()?.into(),
+                "--retune" => gemm.retune = true,
+                "--json" => json = Some(value()?.into()),
                 "--csv" | "-csv" => {
                     // Optional value: a following token that is not another flag.
                     let path = match args.peek() {
@@ -99,10 +112,17 @@ impl Options {
                 "--help" | "-h" => {
                     println!(
                         "usage: phobos-kbench [--bench NAME] [--autotune \"DIM=VAL ...\"] \
+                         [--shape MxNxK]... [--suite] [--rounds N] [--json PATH] [--tune-cache PATH] [--retune] \
                          [--csv [PATH]] [--peak-fp32 TFLOPS] [--peak-fp16tc TFLOPS] [--peak-fp16tcf32acc TFLOPS]\n\
                          \n  --bench NAME                run only one benchmark: {}\
                          \n  --autotune SPEC             pin autotune dims (skips the search), e.g.\
                          \n                              --bench gemm_fp16 --autotune \"TILE_M=256 TILE_N=128 TILE_K=16\"\
+                         \n  --shape MxNxK               a GEMM problem, repeatable (default 4096x4096x4096)\
+                         \n  --suite                     each GEMM kind's compact problem suite\
+                         \n  --rounds N                  interleaved timing rounds of a GEMM final (default: about 2 s)\
+                         \n  --json PATH                 write the GEMM results, checks and environment as JSON\
+                         \n  --tune-cache PATH           GEMM winners remembered across runs (default {DEFAULT_TUNE_CACHE})\
+                         \n  --retune                    ignore remembered GEMM winners\
                          \n  --csv [PATH]                write a results CSV (default {DEFAULT_CSV}) of achieved\
                          \n                              GFLOP/s vs theoretical peak\
                          \n  --peak-fp32         TFLOPS  override the detected fp32 CUDA-core peak\
@@ -133,6 +153,8 @@ impl Options {
             peak_fp32,
             peak_fp16tc,
             peak_fp16tcf32acc,
+            gemm,
+            json,
         })
     }
 
@@ -150,6 +172,18 @@ fn parse_peak(flag: &str, value: Option<String>) -> anyhow::Result<f64> {
         .map_err(|_| anyhow::anyhow!("{flag} value '{value}' is not a number"))?;
     anyhow::ensure!(tflops > 0.0, "{flag} value must be positive");
     Ok(tflops)
+}
+
+/// Parses an "MxNxK" problem size.
+fn parse_shape(spec: &str) -> anyhow::Result<gemm::Dims> {
+    let dims: Option<Vec<usize>> = spec
+        .split(['x', 'X'])
+        .map(|d| d.parse::<usize>().ok().filter(|&d| d > 0))
+        .collect();
+    match dims.as_deref() {
+        Some(&[m, n, k]) => Ok((m, n, k)),
+        _ => anyhow::bail!("--shape '{spec}' is not MxNxK"),
+    }
 }
 
 /// Parses a "TILE_M=256 TILE_N=128 ..." spec (whitespace- or comma-separated)
@@ -182,44 +216,33 @@ fn main() -> anyhow::Result<()> {
     if opts.wants("saxpy_fp32") {
         bench_saxpy(&stream, pins, &mut results)?;
     }
-    if opts.wants("gemm_fp32") {
-        bench_gemm_fp32(
-            &stream,
-            CODE_MATMUL,
-            "gemm_fp32",
-            "phobos gemm_fp32",
-            false,
-            1.5f32,
-            2.5f32,
-            pins,
-            &mut results,
-        )?;
+
+    let gemm_kinds: Vec<gemm::contract::Kind> = gemm::contract::KINDS
+        .iter()
+        .copied()
+        .filter(|k| opts.wants(k.name()))
+        .collect();
+    if !gemm_kinds.is_empty() {
+        let blas = cublas::CuBlas::new(&stream)?;
+        let env = gemm::env::capture(blas.version()?)?;
+        let mut rows = Vec::new();
+        for kind in gemm_kinds {
+            gemm::run(&stream, kind, &opts.gemm, pins, &env, &blas, &mut results, &mut rows)?;
+        }
+        if let Some(path) = &opts.json {
+            let doc = serde_json::json!({
+                "schema": "phobos-kbench-gemm/1",
+                "timing_scope": "kernel only: CUDA events around each launch, C restored outside them, \
+                                 Phobos and cuBLAS interleaved launch by launch; \
+                                 timing_end_to_end is host wall clock over restore, launch and synchronize",
+                "environment": env.json,
+                "results": rows,
+            });
+            std::fs::write(path, serde_json::to_string_pretty(&doc)?)?;
+            phinfo!("wrote {} GEMM results to {}", rows.len(), path.display());
+        }
     }
-    if opts.wants("gemm_fp16tc_fp32acc") {
-        bench_gemm_fp32(
-            &stream,
-            CODE_MATMUL_TC,
-            "gemm_fp16tc_fp32acc",
-            "phobos gemm_fp16tc_fp32acc",
-            true,
-            1.0f32,
-            1.0f32,
-            pins,
-            &mut results,
-        )?;
-    }
-    if opts.wants("gemm_fp16") {
-        bench_gemm_fp16(
-            &stream,
-            CODE_MATMUL_FP16,
-            "gemm_fp16",
-            "phobos gemm_fp16",
-            1.0f32,
-            1.0f32,
-            pins,
-            &mut results,
-        )?;
-    }
+
     if opts.wants("flash_fp32") {
         bench_flash_attention_fp32(&stream, pins, &mut results)?;
     }

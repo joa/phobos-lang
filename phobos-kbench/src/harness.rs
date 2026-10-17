@@ -31,22 +31,8 @@ pub(crate) fn bench(
     Ok((d, s))
 }
 
-/// Zeroes `bytes` at `ptr`. A byte memset to 0 is +0.0 for both f32 and fp16.
-pub(crate) fn zero_device_async(
-    ptr: cust::sys::CUdeviceptr,
-    bytes: usize,
-    stream: &cust::stream::Stream,
-) -> anyhow::Result<()> {
-    let r = unsafe { cust::sys::cuMemsetD8Async(ptr, 0, bytes, stream.as_inner()) };
-    anyhow::ensure!(
-        r == cust::sys::CUresult::CUDA_SUCCESS,
-        "cuMemsetD8Async failed: {:?}",
-        r
-    );
-    Ok(())
-}
-
-/// Launches a matmul kernel over C[M,N] = A[M,K] @ B[K,N].
+/// Enqueues a matmul kernel over C[M,N] = A[M,K] @ B[K,N], without
+/// synchronizing, so events can bracket the kernel alone.
 ///
 /// `wide` must match the kernel's index width: i64 for the default
 /// @tensorcore mma.sync path, i32 otherwise. A mismatch shifts every
@@ -89,7 +75,6 @@ pub(crate) fn launch_gemm(
             ))?;
         }
     }
-    stream.synchronize()?;
     Ok(())
 }
 

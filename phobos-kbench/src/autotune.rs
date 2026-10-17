@@ -5,7 +5,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 #[derive(Clone, Copy, Debug)]
-pub struct Grid(pub u32, pub u32);
+pub struct Grid(pub u32);
 
 pub type Setting = (String, i64);
 
