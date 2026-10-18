@@ -168,12 +168,21 @@ const blob = (file: string) => `${REPO_URL}/blob/main/${file}`
                 {platform.host}
                 {platform.kbenchHost !== undefined && platform.kbenchHost !== platform.host && <> (kbench {platform.kbenchHost})</>}
               </td>
-              <td>{platform.driver}</td>
+              <td>
+                {platform.driver}
+                {platform.kbenchDriver !== undefined && platform.kbenchDriver !== platform.driver && <> (kbench {platform.kbenchDriver})</>}
+              </td>
               <td>
                 <a href={commitUrl(platform.commit)}>{platform.commit}</a>{platform.kbenchCommit !== platform.commit && <> (kbench <a href={commitUrl(platform.kbenchCommit)}>{platform.kbenchCommit}</a>)</>}, {shortDate(platform.benchDate)}
               </td>
               <td>
-                <a href={blob(platform.benchFile)}>bench.py</a>, {platform.rounds} rounds x {platform.reps} reps;{" "}
+                {platform.benchFile ? (
+                  <>
+                    <a href={blob(platform.benchFile)}>bench.py</a>, {platform.rounds} rounds x {platform.reps} reps;{" "}
+                  </>
+                ) : (
+                  <>no bench.py run; </>
+                )}
                 {platform.kernelFiles.map((file, index) => (
                   <>
                     {index > 0 && ", "}

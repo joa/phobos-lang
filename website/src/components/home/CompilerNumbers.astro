@@ -1,6 +1,6 @@
 ---
-// Scene 4: what the compiler gets out of the card. The kernel benchmark against cuBLAS from
-// results/results.csv, then six things the compiler does on its own, each with one number read from the
+// Scene 4: what the compiler gets out of the card. The kernel benchmark against cuBLAS on each tested card
+// (results/platforms), then six things the compiler does on its own, each with one number read from the
 // committed traces, the CSV or the source, and a small looping cue drawn from the same data.
 import KernelBars from "./compiler-numbers/KernelBars.astro"
 import { barriers, compilerFacts, configCount, placement, searchSpace, supportedChips } from "./compiler-numbers/facts"
@@ -16,11 +16,18 @@ import {
   tensorCoreCue,
   type Cue,
 } from "./compiler-numbers/cues"
-import { cublasRatio, formatPercent, kernelBench, loadKernelResults } from "../../lib/bench/kernels"
+import { formatPercent, loadKernelResults } from "../../lib/bench/kernels"
+import { loadPlatforms } from "../../lib/bench/platforms"
 
-const results = loadKernelResults()
-const sgemm = formatPercent(cublasRatio(kernelBench(results, "gemm_fp32"))!)
-const facts = compilerFacts(results)
+const platforms = loadPlatforms()
+// The f32 gemm's share of cublasSgemm_v2 on each card, shown for whichever card the chart's tab selects.
+const sgemm = platforms.map((platform, index) => ({
+  key: platform.dir.split("/").pop()!,
+  card: platform.card,
+  share: formatPercent(platform.kernels.find(kernel => kernel.benchmark === "gemm_fp32")!.ratio!.mean),
+  initial: index === 0,
+}))
+const facts = compilerFacts(loadKernelResults())
 const place = placement()
 const gemmSource = place.trace.source.text
 const cues: Record<string, Cue> = {
@@ -42,8 +49,14 @@ const keyframes = Object.values(cues)
     <div class="scene-head">
       <h2 class="scene-title" id="kernels-title">Measured against cuBLAS</h2>
       <p class="scene-intro">
-        Each bundled kernel is autotuned and timed beside cuBLAS on the same card, in the same run. The f32 gemm runs at
-        {sgemm} of <code>cublasSgemm_v2</code>.
+        Each bundled kernel is autotuned and timed beside cuBLAS on the same card, in the same run.
+        {
+          sgemm.map(entry => (
+            <span data-kb-card={entry.key} hidden={!entry.initial}>
+              On the {entry.card} the f32 gemm runs at {entry.share} of <code>cublasSgemm_v2</code>.
+            </span>
+          ))
+        }
       </p>
     </div>
 
@@ -75,7 +88,7 @@ const keyframes = Object.values(cues)
       </ul>
       <p class="cn-source">
         Tile, barrier and copy counts are from the committed compiler traces (commit {place.trace.compiler.commit}, small
-        problem sizes); the speed-up is from the benchmark above.
+        problem sizes); the tensor-core speed-up is from the RTX 2080 SUPER's phobos-kbench run in results/results.csv.
       </p>
     </div>
   </div>

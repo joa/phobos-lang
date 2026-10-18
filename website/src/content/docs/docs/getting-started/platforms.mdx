@@ -26,23 +26,26 @@ run and benchmarked on more cards, rented through vast.ai under Linux:
 | RTX 5090 | Blackwell | `sm_120` | 32 GB |
 
 The tuning is done on the 2080 SUPER; a default that matters for speed is also
-measured on a 3090 and a 4090 before it ships. The 4060 ran Phobos in October
-2026, but none was available to rent for the measurements below.
+measured on a 3090 and a 4090 before it ships. The only 4060 for rent ran the
+kernel benchmark and not the model one: a desktop under WSL2 that kept the card
+at 4% utilization and 1.2 GB in use before the run, so its rates carry the
+desktop's share of the card.
 
 ## Measured on each card
 
-Each card ran the same two benchmarks in one session. Qwen3.5-4B Q4_K_M ran
+Every card but the 4060 ran the same two benchmarks. Qwen3.5-4B Q4_K_M ran
 against llama.cpp b11681 through `scripts/bench.py`: five rounds, the engines
 interleaved, three repetitions each, the sizes of the
 [Benchmarks](/docs/reference/benchmarks/) run. Then `phobos-kbench` ran twice,
-each run autotuning its kernels afresh, against cuBLAS. Phobos was built on
-the rented box from the commit each card names. The 2080 SUPER's model figures
-are the ones [Benchmarks](/docs/reference/benchmarks/) publishes; its kbench
-runs were made at the rented cards' commit.
+each run autotuning its kernels afresh, against cuBLAS, compiling them for the
+card's own chip, which its JSON report records. On a rented card it ran on a
+second rental, built from the commit the card names. The 2080 SUPER's model figures
+are the ones [Benchmarks](/docs/reference/benchmarks/) publishes.
 
 A ratio compares two engines on one card in one session. Rates on different
 cards are not comparable to each other: the hosts differ, and so do the power
-limits a host sets. The 4090 ran at 350 W, below the card's stock 450 W. A
+limits a host sets. The 4090's model run was at 350 W, below the card's stock
+450 W; the 3090's kbench runs were at 280 W of its 350 W. A
 rented card was checked for another tenant before the run (idle power,
 utilization, and how long the driver has spent capping its power), and
 `bench.py` checks it again between rounds. On the 3090 that check reads the
