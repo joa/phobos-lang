@@ -113,3 +113,23 @@ fn system_scope_reaches_ptx_widened() {
         assert!(code.contains(want), "no {want} in:\n{code}");
     }
 }
+
+// The f32 gemm stages a k-major, which cp.async could move only four bytes at
+// a time, and no supported chip runs f32x2 arithmetic natively: at 64-bit
+// indices on sm_120 the kernel keeps the 16-byte register staging and scalar
+// FMAs the 32-bit sm_75 build has.
+#[test]
+fn f32_gemm_at_wide_indices_keeps_register_staging() {
+    let pins = [("TILE_M", 64), ("TILE_N", 128), ("TILE_K", 16), ("U", 8), ("T", 128)];
+    let ctx = Context {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip("sm_120")),
+        index_bitwidth: 64,
+        shape_overrides: pins.iter().map(|&(name, value)| (name.to_string(), value)).collect(),
+        ..Context::default()
+    };
+    let code = crate::compile_raw(&ctx, include_str!("../../../../examples/gemm_fp32.ph")).unwrap().code;
+    assert!(!code.contains("f32x2"), "packed f32 arithmetic in:\n{code}");
+    assert!(!code.contains("cp.async"), "cp.async staging in:\n{code}");
+    assert!(code.contains("fma.rn.f32"));
+    assert!(code.contains("ld.global.v4"), "16-byte global loads in:\n{code}");
+}
