@@ -5,6 +5,6 @@
   "powerLimitWatts": 115,
   "host": "vast.ai, Turkey, WSL2 on a Windows desktop",
   "date": "2026-10-18",
-  "kbenchCommit": "4006548",
+  "kbenchCommit": "ea4f66f",
   "kbench": ["results/platforms/rtx4060/kbench-1.csv", "results/platforms/rtx4060/kbench-2.csv"]
 }
