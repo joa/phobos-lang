@@ -51,22 +51,23 @@ pub(crate) fn bench_saxpy(
             let block_size = autotune::cfg_value(cfg, "BLOCK")? as u32;
             Ok(autotune::Grid((n as u32).div_ceil(block_size)))
         },
-        launch: |module: &cust::module::Module, grid: autotune::Grid| {
-            let func = module.get_function("saxpy")?;
+        launch: |loaded: &autotune::Loaded, grid: autotune::Grid| {
+            let func = loaded.module.get_function("saxpy")?;
+            let shared_bytes = loaded.shared_bytes("saxpy");
             let grid_x = grid.0;
             // Kernel params: x, y, out (each tensor<f32>[N] is a 5-scalar
             // memref descriptor), then the alpha scalar.
             let n64 = n as i64;
             unsafe {
                 if wide {
-                    launch!(func<<<grid_x, block, 0, stream>>>(
+                    launch!(func<<<grid_x, block, shared_bytes, stream>>>(
                         x_ptr, x_ptr, 0i64, n64, 1i64,
                         y_ptr, y_ptr, 0i64, n64, 1i64,
                         out_ptr, out_ptr, 0i64, n64, 1i64,
                         alpha
                     ))?;
                 } else {
-                    launch!(func<<<grid_x, block, 0, stream>>>(
+                    launch!(func<<<grid_x, block, shared_bytes, stream>>>(
                         x_ptr, x_ptr, 0i32, n, 1i32,
                         y_ptr, y_ptr, 0i32, n, 1i32,
                         out_ptr, out_ptr, 0i32, n, 1i32,
@@ -89,7 +90,7 @@ pub(crate) fn bench_saxpy(
 
     let winner = tuner.run(&space)?;
 
-    let module = cust::module::Module::from_ptx(winner.ptx.as_str(), &[])?;
+    let module = autotune::Loaded::new(&winner.compiled)?;
     let grid = (tuner.grid_for)(&winner.config)?;
 
     let (phobos_avg, _) = bench("phobos saxpy", || {

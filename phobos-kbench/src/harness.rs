@@ -34,6 +34,7 @@ pub(crate) fn bench(
 /// Enqueues a matmul kernel over C[M,N] = A[M,K] @ B[K,N], without
 /// synchronizing, so events can bracket the kernel alone.
 ///
+/// `shared_bytes` is the dynamic shared memory the kernel launches with.
 /// `wide` must match the kernel's index width: i64 for the default
 /// @tensorcore mma.sync path, i32 otherwise. A mismatch shifts every
 /// descriptor field after the first pointer. Pointers are raw device
@@ -53,12 +54,13 @@ pub(crate) fn launch_gemm(
     K: i32,
     alpha: f32,
     beta: f32,
+    shared_bytes: u32,
     wide: bool,
 ) -> anyhow::Result<()> {
     let (m64, n64, k64) = (M as i64, N as i64, K as i64);
     unsafe {
         if wide {
-            launch!(func<<<grid, block, 0, stream>>>(
+            launch!(func<<<grid, block, shared_bytes, stream>>>(
                 a, a, 0i64, m64, k64, k64, 1i64,
                 b, b, 0i64, k64, n64, n64, 1i64,
                 c, c, 0i64, m64, n64, n64, 1i64,
@@ -66,7 +68,7 @@ pub(crate) fn launch_gemm(
                 beta
             ))?;
         } else {
-            launch!(func<<<grid, block, 0, stream>>>(
+            launch!(func<<<grid, block, shared_bytes, stream>>>(
                 a, a, 0i32, M, K, K, 1i32,
                 b, b, 0i32, K, N, N, 1i32,
                 c, c, 0i32, M, N, N, 1i32,
@@ -95,12 +97,13 @@ pub(crate) fn launch_flash(
     Nk: i32,
     D: i32,
     scale: f32,
+    shared_bytes: u32,
     wide: bool,
 ) -> anyhow::Result<()> {
     let (nq64, nk64, d64) = (Nq as i64, Nk as i64, D as i64);
     unsafe {
         if wide {
-            launch!(func<<<grid_x, block, 0, stream>>>(
+            launch!(func<<<grid_x, block, shared_bytes, stream>>>(
                 q, q, 0i64, nq64, d64, d64, 1i64,
                 k, k, 0i64, nk64, d64, d64, 1i64,
                 v, v, 0i64, nk64, d64, d64, 1i64,
@@ -108,7 +111,7 @@ pub(crate) fn launch_flash(
                 scale
             ))?;
         } else {
-            launch!(func<<<grid_x, block, 0, stream>>>(
+            launch!(func<<<grid_x, block, shared_bytes, stream>>>(
                 q, q, 0i32, Nq, D, D, 1i32,
                 k, k, 0i32, Nk, D, D, 1i32,
                 v, v, 0i32, Nk, D, D, 1i32,

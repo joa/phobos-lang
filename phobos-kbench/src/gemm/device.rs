@@ -31,9 +31,9 @@ impl Converter {
     pub fn new() -> anyhow::Result<Self> {
         let kernels = phobos_lang::parse(CODE_CONVERT)?;
         let block = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
-        let ptx = crate::autotune::compile(CODE_CONVERT, &[("BLOCK".into(), 4096)])?;
+        let compiled = crate::autotune::compile(CODE_CONVERT, &[("BLOCK".into(), 4096)])?;
         Ok(Converter {
-            module: Module::from_ptx(ptx.as_str(), &[])?,
+            module: Module::from_ptx(compiled.ptx.as_str(), &[])?,
             block,
             tile: 4096,
             wide: crate::autotune::wide_index(CODE_CONVERT),
@@ -176,7 +176,7 @@ impl Problem {
         stream: &Stream,
         func: &cust::function::Function,
         grid: (u32, u32),
-        block: u32,
+        (block, shared_bytes): (u32, u32),
         wide: bool,
         (alpha, beta): (f32, f32),
     ) -> anyhow::Result<()> {
@@ -194,6 +194,7 @@ impl Problem {
             k as i32,
             alpha,
             beta,
+            shared_bytes,
             wide,
         )
     }
@@ -208,6 +209,7 @@ impl Problem {
         (split, reduce): (&cust::function::Function, &cust::function::Function),
         (gx, gy, s): (u32, u32, u32),
         block: u32,
+        (split_shared, reduce_shared): (u32, u32),
         (alpha, beta): (f32, f32),
         wide: bool,
     ) -> anyhow::Result<()> {
@@ -224,12 +226,12 @@ impl Problem {
         unsafe {
             if wide {
                 let (m, n, k, sm) = (m as i64, n as i64, k as i64, s as i64 * m as i64);
-                launch!(split<<<(gx, gy, s), block, 0, stream>>>(
+                launch!(split<<<(gx, gy, s), block, split_shared, stream>>>(
                     a, a, 0i64, m, k, k, 1i64,
                     b, b, 0i64, k, n, n, 1i64,
                     p, p, 0i64, sm, n, n, 1i64
                 ))?;
-                launch!(reduce<<<reduce_grid, 256, 0, stream>>>(
+                launch!(reduce<<<reduce_grid, 256, reduce_shared, stream>>>(
                     p, p, 0i64, sm, n, n, 1i64,
                     c, c, 0i64, m, n, n, 1i64,
                     alpha,
@@ -237,12 +239,12 @@ impl Problem {
                 ))?;
             } else {
                 let (m, n, k, sm) = (m as i32, n as i32, k as i32, s as i32 * m as i32);
-                launch!(split<<<(gx, gy, s), block, 0, stream>>>(
+                launch!(split<<<(gx, gy, s), block, split_shared, stream>>>(
                     a, a, 0i32, m, k, k, 1i32,
                     b, b, 0i32, k, n, n, 1i32,
                     p, p, 0i32, sm, n, n, 1i32
                 ))?;
-                launch!(reduce<<<reduce_grid, 256, 0, stream>>>(
+                launch!(reduce<<<reduce_grid, 256, reduce_shared, stream>>>(
                     p, p, 0i32, sm, n, n, 1i32,
                     c, c, 0i32, m, n, n, 1i32,
                     alpha,
