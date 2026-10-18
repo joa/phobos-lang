@@ -57,6 +57,10 @@ pub struct LoadOptions {
     /// instead of everything the resident weights leave. Ignored by a model
     /// with no experts and by a backend with no cache.
     pub expert_cache_bytes: Option<u64>,
+    /// The most tokens of context to serve, instead of what fits on the
+    /// device after the weights and the reserve. Never above the trained
+    /// length.
+    pub context_tokens: Option<usize>,
 }
 
 impl GgufModel {
@@ -79,14 +83,19 @@ impl GgufModel {
             let bytes = usize::try_from(bytes).context("expert cache size")?;
             backend.limit_expert_cache(bytes)?;
         }
+        let footprint = decoder.footprint(PROMPT_BATCH);
+        let trained = decoder.context_length();
+        let context_limit = match options.context_tokens {
+            Some(tokens) => tokens.clamp(1, trained),
+            None => fitting_context(backend.as_ref(), &footprint, trained),
+        };
         let info = ModelInfo {
             label: format!("GGUF, {}", decoder.architecture()),
             backend: backend_name(),
             vocab_size: decoder.vocab(),
-            context_limit: decoder.context_length(),
+            context_limit,
             chat_template,
         };
-        let footprint = decoder.footprint(PROMPT_BATCH);
         Ok(GgufModel {
             decoder,
             bpe,
@@ -95,6 +104,27 @@ impl GgufModel {
             footprint,
         })
     }
+}
+
+/// The longest context whose caches fit on the device after the weights and
+/// [`RESERVE_BYTES`], at most the trained length.
+///
+/// The caches grow by doubling, so the answer is a power of two: any length
+/// up to it reserves no more than it. A model with no per-token cache, or a
+/// backend that cannot read device memory, gets the trained length.
+fn fitting_context(backend: &dyn Backend, footprint: &crate::model::Footprint, trained: usize) -> usize {
+    let Some((free_bytes, _)) = backend.device_memory() else {
+        return trained;
+    };
+    if footprint.kv_bytes_per_token == 0 {
+        return trained;
+    }
+    let room_bytes = free_bytes
+        .saturating_sub(footprint.weight_bytes)
+        .saturating_sub(RESERVE_BYTES);
+    let tokens = (room_bytes / footprint.kv_bytes_per_token).max(1);
+    let fits = 1usize << tokens.ilog2();
+    fits.min(trained)
 }
 
 /// Refuses a model whose weights cannot fit the device, before the first

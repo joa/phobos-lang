@@ -21,8 +21,9 @@ use super::{AppState, GenerationRequest, InferenceResponse, dispatch};
 pub(crate) async fn run_generation(
     state: AppState,
     req: GenerationRequest,
-) -> std::result::Result<GeneratedText, StatusCode> {
-    let mut rx = dispatch(&state, req)?;
+) -> std::result::Result<GeneratedText, Response> {
+    let mut rx = dispatch(&state, req)
+        .map_err(|status| error_response(status, "inference worker is unavailable"))?;
 
     let mut model = state.model;
     let mut text = String::new();
@@ -47,7 +48,15 @@ pub(crate) async fn run_generation(
                 finish_reason = reason;
                 completion_tokens = count;
             }
-            Err(_) => return Err(StatusCode::INTERNAL_SERVER_ERROR),
+            Ok(InferenceResponse::Rejected(message)) => {
+                return Err(error_response(StatusCode::BAD_REQUEST, message));
+            }
+            Err(_) => {
+                return Err(error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "inference failed",
+                ));
+            }
         }
     }
 
@@ -95,7 +104,7 @@ pub(crate) async fn handle_completions(
 
     let generated = match run_generation(state, gen_req).await {
         Ok(generated) => generated,
-        Err(status) => return error_response(status, "inference failed"),
+        Err(response) => return response,
     };
 
     let res = CompletionResponse {
@@ -167,13 +176,14 @@ pub(crate) async fn handle_chat_completions(
             tools,
             reasoning,
             include_usage,
-        );
+        )
+        .await;
     }
 
     let dialect = state.dialect;
     let generated = match run_generation(state, gen_req).await {
         Ok(generated) => generated,
-        Err(status) => return error_response(status, "inference failed"),
+        Err(response) => return response,
     };
 
     let out = AssistantOutput::collect(&generated.text, tools, reasoning, dialect);
@@ -208,7 +218,7 @@ pub(crate) async fn handle_chat_completions(
     Json(chat_resp).into_response()
 }
 
-pub(crate) fn stream_chat(
+pub(crate) async fn stream_chat(
     state: AppState,
     req: GenerationRequest,
     requested_model: Option<String>,
@@ -220,6 +230,12 @@ pub(crate) fn stream_chat(
         Ok(rx) => rx,
         Err(status) => return error_response(status, "inference worker is unavailable"),
     };
+    // The first message says whether the request runs at all. Once the
+    // stream has begun the status is spent, so a rejection is read first.
+    let first = rx.recv().await;
+    if let Some(Ok(InferenceResponse::Rejected(message))) = first {
+        return error_response(StatusCode::BAD_REQUEST, message);
+    }
 
     let id = response_id("chatcmpl");
     let created = unix_timestamp();
@@ -249,8 +265,13 @@ pub(crate) fn stream_chat(
 
         yield chunk(json!({ "role": "assistant", "content": "" }), Value::Null);
 
-        while let Some(msg) = rx.recv().await {
+        let mut next = first;
+        while let Some(msg) = next.take() {
             let events = match msg {
+                Ok(InferenceResponse::Rejected(_)) => {
+                    finish_reason = "error".to_string();
+                    parser.finish()
+                }
                 Ok(InferenceResponse::Start { prompt_tokens: count, .. }) => {
                     prompt_tokens = count;
                     Vec::new()
@@ -281,6 +302,7 @@ pub(crate) fn stream_chat(
                     }
                 }
             }
+            next = rx.recv().await;
         }
 
         let finish = if calls > 0 {

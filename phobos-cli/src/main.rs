@@ -47,6 +47,7 @@ const VALUED: &[&str] = &[
     "--listen",
     "--api-key",
     "--expert-cache",
+    "--ctx",
     "--prefill-thinking",
 ];
 
@@ -141,9 +142,13 @@ fn source(args: &cli::Args) -> Result<Source> {
                 .map(phobos_base::cli::parse_size)
                 .transpose()
                 .context("--expert-cache")?;
+            let context_tokens = args.parse::<usize>("--ctx")?;
             Ok(Source::Gguf(
                 path.into(),
-                phobos_gguf::runtime::LoadOptions { expert_cache_bytes },
+                phobos_gguf::runtime::LoadOptions {
+                    expert_cache_bytes,
+                    context_tokens,
+                },
             ))
         }
         (None, Some(dir)) => Ok(Source::Onnx {
@@ -193,6 +198,9 @@ OPTIONS:
                       device memory for a streamed model's expert cache,
                       2g, 1500m or bytes; default what the resident weights
                       leave, less a reserve. Ignored without experts
+      --ctx TOKENS    the most tokens of context to serve, a longer prompt
+                      being refused; default what fits on the device after
+                      the weights, up to the trained length. GGUF only
       --onnx DIR      run an ONNX export from DIR. A decoder.onnx beside a
                       decoder_with_past.onnx is the KV-cached engine; a
                       model.onnx is the full-recompute one
