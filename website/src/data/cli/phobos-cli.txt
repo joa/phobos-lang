@@ -39,6 +39,9 @@ OPTIONS:
       --listen ADDR   run an OpenAI compatible HTTP server on ADDR (e.g.
                       127.0.0.1:8080). The sampling options above become what a
                       request falls back to for every field it does not send.
+                      Warns when ADDR is not a loopback address and no key is set
+      --api-key KEY   require `Authorization: Bearer KEY` on every route of the
+                      server. Falls back to PHOBOS_API_KEY
       --no-tui        serve without the dashboard, printing the runtime's lines
                       instead. Implied when stdout is not a terminal, and the
                       reason is printed whenever that happens

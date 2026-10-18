@@ -1,3 +1,4 @@
+mod auth;
 pub mod handlers;
 pub mod protocol;
 
@@ -210,6 +211,7 @@ pub fn serve(
     addr: String,
     model: Box<dyn Model>,
     defaults: Defaults,
+    api_key: Option<String>,
     meter: Arc<Meter>,
 ) -> Result<()> {
     let reuse = defaults.prefix_cache;
@@ -241,6 +243,17 @@ pub fn serve(
     );
     meter.log(Level::Info, format!("chat dialect: {dialect:?}"));
 
+    match &api_key {
+        Some(_) => meter.log(Level::Info, "requests need the API key as a bearer token"),
+        None if auth::is_exposed(&addr) => meter.log(
+            Level::Info,
+            format!(
+                "WARNING: {addr} is not a loopback address and no API key is set, so anyone                  who can reach it can run inference (see --api-key)"
+            ),
+        ),
+        None => {}
+    }
+
     let serving = meter.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -249,13 +262,17 @@ pub fn serve(
             .unwrap();
 
         rt.block_on(async move {
-            let app = Router::new()
+            let mut app = Router::new()
                 .route("/", get(root_handler))
                 .route("/v1/completions", post(handle_completions))
                 .route("/v1/chat/completions", post(handle_chat_completions))
                 .route("/v1/models", get(models_handler))
                 .fallback(fallback_handler)
                 .with_state(state);
+            if let Some(key) = api_key {
+                let key: Arc<str> = key.into();
+                app = app.layer(axum::middleware::from_fn_with_state(key, auth::require_key));
+            }
 
             let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
             serving.log(Level::Info, format!("listening on http://{addr}"));

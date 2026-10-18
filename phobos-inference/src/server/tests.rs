@@ -227,8 +227,9 @@ fn the_worker_stops_when_the_meter_says_to() {
     let meter = Arc::new(Meter::new());
     let worker = meter.clone();
     // Port zero, so the test never collides with a port in use.
-    let serving =
-        std::thread::spawn(move || serve("127.0.0.1:0".to_string(), model(), defaults(), worker));
+    let serving = std::thread::spawn(move || {
+        serve("127.0.0.1:0".to_string(), model(), defaults(), None, worker)
+    });
 
     // Long enough for the worker to have reached its wait.
     std::thread::sleep(Duration::from_millis(300));
@@ -310,5 +311,9 @@ fn a_request_reports_decode_and_prompt_lookups_apart() {
         expert_cpu_nanos: 3_000_000,
         ..after
     };
-    assert!(super::describe_experts(&before, &host).unwrap().ends_with("; 25 computed on the host in 3 ms"));
+    assert!(
+        super::describe_experts(&before, &host)
+            .unwrap()
+            .ends_with("; 25 computed on the host in 3 ms")
+    );
 }
