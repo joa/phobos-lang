@@ -20,11 +20,10 @@ pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
     let requires_wide_index = phobos_lang::parse(code)
         .map(|ks| phobos_lang::requires_wide_index(&ks))
         .unwrap_or(false);
-    let mut ctx = phobos_base::context::Context {
-        //print_phases: true,
-        shape_overrides: config.iter().cloned().collect(),
-        ..Default::default()
-    };
+    // The card's chip, as the model path picks it: sm_75 PTX would JIT forward
+    // and run, but never take the newer chips' instructions.
+    let mut ctx = phobos_kernels::compile::context_for(&[]);
+    ctx.shape_overrides = config.iter().cloned().collect();
     if requires_wide_index && ctx.index_bitwidth < 64 {
         phdebug!("widening index_bitwidth to 64");
         ctx.index_bitwidth = 64;

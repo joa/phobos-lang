@@ -16,7 +16,7 @@ half = "2"
 rand = { version = "0.8", features = ["small_rng"] }
 serde_json = "1"
 phobos-base = { path = "../phobos-base" }
-phobos-kernels = { path = "../phobos-kernels" }
+phobos-kernels = { path = "../phobos-kernels", features = ["cuda"] }
 phobos-lang = { path = "../phobos-lang" }
 phobos-mlir = { path = "../phobos-mlir" }
 melior.workspace = true
