@@ -110,10 +110,8 @@ pub(crate) fn bench_flash_attention_fp32(
     // hard error.
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // @tensorcore compiles at 64-bit index, so the host's memref descriptors
-    // must be 64-bit too. That holds even though the dots here run on WMMA
-    // via wmma_dot.
-    let wide = phobos_lang::requires_wide_index(&kernels);
+    // The descriptors' width follows the kernel's index width.
+    let wide = autotune::wide_index(CODE_FLASH);
 
     let mut tuner = autotune::Autotuner {
         code: CODE_FLASH,
@@ -239,9 +237,7 @@ pub(crate) fn bench_flash_attention_fp16(
 
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // @tensorcore compiles at 64-bit index, so the host's memref descriptors
-    // must be 64-bit too.
-    let wide = phobos_lang::requires_wide_index(&kernels);
+    let wide = autotune::wide_index(CODE_FLASH_F16);
 
     let mut tuner = autotune::Autotuner {
         code: CODE_FLASH_F16,

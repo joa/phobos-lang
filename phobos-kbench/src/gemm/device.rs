@@ -24,6 +24,7 @@ pub(crate) struct Converter {
     module: Module,
     block: u32,
     tile: u32,
+    wide: bool,
 }
 
 impl Converter {
@@ -35,6 +36,7 @@ impl Converter {
             module: Module::from_ptx(ptx.as_str(), &[])?,
             block,
             tile: 4096,
+            wide: crate::autotune::wide_index(CODE_CONVERT),
         })
     }
 
@@ -42,11 +44,19 @@ impl Converter {
         let func = self.module.get_function("convert")?;
         let (grid, n) = ((n as u32).div_ceil(self.tile), n as i32);
         let block = self.block;
+        let n64 = n as i64;
         unsafe {
-            launch!(func<<<grid, block, 0, stream>>>(
-                x, x, 0i32, n, 1i32,
-                y, y, 0i32, n, 1i32
-            ))?;
+            if self.wide {
+                launch!(func<<<grid, block, 0, stream>>>(
+                    x, x, 0i64, n64, 1i64,
+                    y, y, 0i64, n64, 1i64
+                ))?;
+            } else {
+                launch!(func<<<grid, block, 0, stream>>>(
+                    x, x, 0i32, n, 1i32,
+                    y, y, 0i32, n, 1i32
+                ))?;
+            }
         }
         Ok(())
     }
@@ -199,6 +209,7 @@ impl Problem {
         (gx, gy, s): (u32, u32, u32),
         block: u32,
         (alpha, beta): (f32, f32),
+        wide: bool,
     ) -> anyhow::Result<()> {
         let (m, n, k) = self.dims;
         anyhow::ensure!(s <= self.max_split, "{s} splits exceed the workspace");
@@ -209,19 +220,35 @@ impl Problem {
             work.as_device_ptr().as_raw(),
             self.c_phobos.as_device_ptr().as_raw(),
         );
-        let (m, n, k, sm) = (m as i32, n as i32, k as i32, s as i32 * m as i32);
+        let reduce_grid = ((m / 32) as u32, (n / 32) as u32);
         unsafe {
-            launch!(split<<<(gx, gy, s), block, 0, stream>>>(
-                a, a, 0i32, m, k, k, 1i32,
-                b, b, 0i32, k, n, n, 1i32,
-                p, p, 0i32, sm, n, n, 1i32
-            ))?;
-            launch!(reduce<<<((m / 32) as u32, (n / 32) as u32), 256, 0, stream>>>(
-                p, p, 0i32, sm, n, n, 1i32,
-                c, c, 0i32, m, n, n, 1i32,
-                alpha,
-                beta
-            ))?;
+            if wide {
+                let (m, n, k, sm) = (m as i64, n as i64, k as i64, s as i64 * m as i64);
+                launch!(split<<<(gx, gy, s), block, 0, stream>>>(
+                    a, a, 0i64, m, k, k, 1i64,
+                    b, b, 0i64, k, n, n, 1i64,
+                    p, p, 0i64, sm, n, n, 1i64
+                ))?;
+                launch!(reduce<<<reduce_grid, 256, 0, stream>>>(
+                    p, p, 0i64, sm, n, n, 1i64,
+                    c, c, 0i64, m, n, n, 1i64,
+                    alpha,
+                    beta
+                ))?;
+            } else {
+                let (m, n, k, sm) = (m as i32, n as i32, k as i32, s as i32 * m as i32);
+                launch!(split<<<(gx, gy, s), block, 0, stream>>>(
+                    a, a, 0i32, m, k, k, 1i32,
+                    b, b, 0i32, k, n, n, 1i32,
+                    p, p, 0i32, sm, n, n, 1i32
+                ))?;
+                launch!(reduce<<<reduce_grid, 256, 0, stream>>>(
+                    p, p, 0i32, sm, n, n, 1i32,
+                    c, c, 0i32, m, n, n, 1i32,
+                    alpha,
+                    beta
+                ))?;
+            }
         }
         Ok(())
     }

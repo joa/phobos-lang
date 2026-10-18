@@ -43,6 +43,7 @@ pub(crate) fn bench_saxpy(
     );
 
     let block: u32 = 1024;
+    let wide = autotune::wide_index(CODE_SAXPY);
 
     let mut tuner = autotune::Autotuner {
         code: CODE_SAXPY,
@@ -55,13 +56,23 @@ pub(crate) fn bench_saxpy(
             let grid_x = grid.0;
             // Kernel params: x, y, out (each tensor<f32>[N] is a 5-scalar
             // memref descriptor), then the alpha scalar.
+            let n64 = n as i64;
             unsafe {
-                launch!(func<<<grid_x, block, 0, stream>>>(
-                    x_ptr, x_ptr, 0i32, n, 1i32,
-                    y_ptr, y_ptr, 0i32, n, 1i32,
-                    out_ptr, out_ptr, 0i32, n, 1i32,
-                    alpha
-                ))?;
+                if wide {
+                    launch!(func<<<grid_x, block, 0, stream>>>(
+                        x_ptr, x_ptr, 0i64, n64, 1i64,
+                        y_ptr, y_ptr, 0i64, n64, 1i64,
+                        out_ptr, out_ptr, 0i64, n64, 1i64,
+                        alpha
+                    ))?;
+                } else {
+                    launch!(func<<<grid_x, block, 0, stream>>>(
+                        x_ptr, x_ptr, 0i32, n, 1i32,
+                        y_ptr, y_ptr, 0i32, n, 1i32,
+                        out_ptr, out_ptr, 0i32, n, 1i32,
+                        alpha
+                    ))?;
+                }
             }
             stream.synchronize()?;
             Ok(())
