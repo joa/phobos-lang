@@ -1,0 +1,101 @@
+# Runs every test that needs no GPU, on each push to main and each pull
+# request. Two jobs, split by what the crates link:
+#
+# - host: the model front ends, the host reference paths, the tokenizers,
+#   the chat rendering, the sampler and the source size cap. These link no
+#   LLVM or MLIR, so they build with Rust alone.
+# - compiler: the parser and codegen tests (MLIR verifier, UI goldens, the
+#   race check over every .ph in the tree) and the cluster planner. These
+#   link LLVM and MLIR, so they take the toolchain release.yml builds with.
+#
+# Left out because they link the CUDA driver at build time or need a card
+# to mean anything: phobos-kbench, phobos-pod, and the `cuda` features.
+
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  LLVM_VERSION: "22.1.7"
+  RUST_VERSION: "1.96.0"
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: "0"
+  # Line tables only would still put LLVM's debug info in every test binary
+  # that links it; none keeps the target directory inside the runner's disk.
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rust
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: host
+
+      - name: Test
+        run: |
+          cargo test --locked \
+            -p phobos-base -p phobos-inference -p phobos-kernels \
+            -p phobos-gguf -p phobos-onnx -p phobos-cli -p phobos-bench
+
+  compiler:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain unpacks to several GB and every test binary links it
+      # statically; these are preinstalled SDKs nothing here uses.
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h /
+
+      - name: Toolchain
+        run: |
+          gh release download "toolchain-llvm-$LLVM_VERSION" -p "llvm-$LLVM_VERSION-linux-x64.tar.gz" -D "$RUNNER_TEMP"
+          tar -C "$RUNNER_TEMP" -xzf "$RUNNER_TEMP/llvm-$LLVM_VERSION-linux-x64.tar.gz"
+          rm "$RUNNER_TEMP/llvm-$LLVM_VERSION-linux-x64.tar.gz"
+          llvm="$RUNNER_TEMP/llvm-install"
+          for v in LLVM_SYS_221_PREFIX MLIR_SYS_220_PREFIX MLIR_SYS_221_PREFIX TABLEGEN_220_PREFIX; do
+            echo "$v=$llvm" >> "$GITHUB_ENV"
+          done
+          echo "$llvm/bin" >> "$GITHUB_PATH"
+          # bindgen parses the MLIR and TableGen headers with any recent
+          # libclang; the toolchain is built without clang, so take Ubuntu's.
+          sudo apt-get install -y -q libclang-18-dev
+          echo "LIBCLANG_PATH=/usr/lib/llvm-18/lib" >> "$GITHUB_ENV"
+          rustup toolchain install "$RUST_VERSION" --profile minimal
+          rustup default "$RUST_VERSION"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: compiler-llvm-${{ env.LLVM_VERSION }}
+
+      - name: Test
+        run: |
+          cargo test --locked \
+            -p phobos-lang -p phobos-mlir -p phobos-cluster \
+            -p phobos-sched -p phobos-compile -p phobos-cache
