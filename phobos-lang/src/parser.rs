@@ -2,7 +2,10 @@ use super::ast::*;
 use super::token::{Tok, Token};
 use crate::diag::{self, Diagnostic};
 
+mod block;
 mod collective;
+mod depth;
+pub(crate) use depth::parse_on_big_stack;
 mod extent;
 mod functions;
 pub(crate) use functions::Function;
@@ -20,6 +23,8 @@ pub struct Parser {
     last_hi: u32,
     /// What went wrong in the statements and items recovered from.
     errors: Vec<Diagnostic>,
+    /// How many expressions and blocks the parse is inside.
+    depth: u32,
 }
 
 impl Parser {
@@ -30,6 +35,7 @@ impl Parser {
             source,
             last_hi: 0,
             errors: Vec::new(),
+            depth: 0,
         }
     }
 
@@ -443,27 +449,6 @@ impl Parser {
 // statements
 
 impl Parser {
-    /// `{ stmts }`. A statement that fails to parse is reported and skipped.
-    fn parse_block(&mut self) -> PResult<Vec<Stmt>> {
-        let open = self.here();
-        self.expect(Tok::LBrace)?;
-        let mut stmts = Vec::new();
-        while !self.matches(&Tok::RBrace) && !self.matches(&Tok::Eof) {
-            if self.consume(&Tok::Semicolon) {
-                continue;
-            }
-            match self.parse_stmt() {
-                Ok(stmt) => stmts.push(stmt),
-                Err(d) => {
-                    self.report(d);
-                    self.sync_stmt();
-                }
-            }
-        }
-        self.expect_close(Tok::RBrace, open)?;
-        Ok(stmts)
-    }
-
     fn parse_stmt(&mut self) -> PResult<Stmt> {
         let start = self.pos();
         match self.peek() {
@@ -661,7 +646,7 @@ impl Parser {
 
 impl Parser {
     fn parse_expr(&mut self) -> PResult<Expr> {
-        self.logical_or()
+        self.nested(Self::logical_or)
     }
 
     /// One left-associative level of binary operators: `ops` maps a token to
@@ -743,7 +728,7 @@ impl Parser {
         };
         let lo = self.current().lo;
         self.advance();
-        let rhs = self.unary()?;
+        let rhs = self.nested(Self::unary)?;
         Ok(Expr::unary(op, rhs).at(self.since(lo)))
     }
 

@@ -96,6 +96,7 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | Comments | `// ...` to end of line. |
 | Statement end | A newline or `;`. Optional before `}` or end of file. |
 | `else` | Must follow the `}` of the then-block on the same line; a newline there ends the `if`. |
+| Nesting | Expressions, unary operators and blocks nest at most 64 levels; deeper source is an error. |
 
 ## Types
 

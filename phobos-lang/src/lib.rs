@@ -34,7 +34,10 @@ pub fn parse_source_with(
     let prelude = stdlib::prelude(stdlib)?;
     let fail = |list| anyhow::Error::new(diag::Diagnostics::new(file.clone(), list));
     let toks = lexer::Lexer::new(file.text()).tokenize().map_err(fail)?;
-    parser::Parser::new(toks, file.clone()).parse_program_with(&prelude).map_err(fail)
+    parser::parse_on_big_stack(|| {
+        parser::Parser::new(toks, file.clone()).parse_program_with(&prelude)
+    })
+    .map_err(fail)
 }
 
 /// Compiles the given code.

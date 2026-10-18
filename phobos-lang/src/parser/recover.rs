@@ -50,6 +50,10 @@ impl Parser {
 
     /// Keeps `d` for the end of the parse, up to [`diag::MAX_ERRORS`].
     pub(super) fn report(&mut self, d: Diagnostic) {
+        // Every enclosing block recovers and meets the same limit again.
+        if d.message == super::depth::TOO_DEEP && self.errors.iter().any(|e| e.message == d.message) {
+            return;
+        }
         if self.errors.len() < diag::MAX_ERRORS {
             self.errors.push(d);
         }
