@@ -257,9 +257,14 @@ fn races(ctx: &Context, kernels: &[Kernel], report: &Report) -> Result<Option<Di
 }
 
 fn compile(ctx: &Context, kernels: &[Kernel]) -> Result<String> {
-    phobos_mlir::gen_ptx(ctx, |base, context, module| {
-        phobos_lang::assert_pipelined(&phobos_lang::codegen::emit(base, kernels, context, module)?.pipeline_failures)
-    })
+    let mut dynamic_shared = false;
+    let ptx = phobos_mlir::gen_ptx(ctx, |base, context, module| {
+        let out = phobos_lang::codegen::emit(base, kernels, context, module)?;
+        dynamic_shared = !out.shared.is_empty();
+        phobos_lang::assert_pipelined(&out.pipeline_failures)
+    })?;
+    // A `@dynshared` kernel's buffer is declared external only here.
+    Ok(ctx.gpu_config.backend().post_process(ptx, dynamic_shared))
 }
 
 fn parse_setting(s: &str) -> Result<(String, i64)> {
@@ -298,6 +303,18 @@ mod tests {
         assert_eq!(variant_path(&Path::new("out").join("gemm.ptx"), &v), want);
         assert_eq!(variant_path(&Path::new("out").join("gemm"), &v), want);
         assert_eq!(variant_path(Path::new("gemm"), &[]), Path::new("gemm.ptx"));
+    }
+
+    #[test]
+    fn a_dynamic_shared_kernel_declares_its_buffer_external() {
+        let src = "@dynshared
+            kernel k(A: tensor<f32>[64, 64], C: tensor<f32>[64, 64]) {
+                var t = A[0 :+ 64, 0 :+ 64]
+                C[0 :+ 64, 0 :+ 64] = t * 2.0
+            }";
+        let kernels = phobos_lang::parse(src).unwrap();
+        let ptx = compile(&Context::default(), &kernels).unwrap();
+        assert!(ptx.contains(".extern .shared .align 16 .b8 __dynamic_shmem__0[];"), "{ptx}");
     }
 
     #[test]
