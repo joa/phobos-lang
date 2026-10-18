@@ -5,7 +5,7 @@
   "powerLimitWatts": 575,
   "host": "vast.ai, North Carolina",
   "date": "2026-10-18",
-  "kbenchCommit": "ea4f66f",
+  "kbenchCommit": "79131b9",
   "kbenchHost": "vast.ai, Italy",
   "kbenchPowerLimitWatts": 560,
   "bench": "results/platforms/rtx5090/bench.json",
