@@ -437,10 +437,7 @@ pub fn serve(
                 // A failed pass leaves the session in an unknown state.
                 drop(session);
                 meter.set_cache(0, None);
-                let _ = responder.send(Ok(InferenceResponse::Done {
-                    reason: "error".to_string(),
-                    completion_tokens: 0,
-                }));
+                let _ = responder.send(Err(format!("generation failed: {e:#}")));
             }
         }
         meter.set_device_memory(model.device_memory());
