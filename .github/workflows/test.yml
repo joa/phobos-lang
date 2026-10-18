@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Rust
         run: |
@@ -69,7 +69,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The toolchain unpacks to several GB and every test binary links it
       # statically; these are preinstalled SDKs nothing here uses.
