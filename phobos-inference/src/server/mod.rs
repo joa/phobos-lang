@@ -42,6 +42,8 @@ pub enum InferenceResponse {
         prompt_tokens: usize,
     },
     Chunk(String),
+    /// The request cannot run, for a reason the client can fix.
+    Rejected(String),
     Done {
         reason: String,
         completion_tokens: usize,
@@ -315,6 +317,18 @@ pub fn serve(
             let _ = responder.send(Err("Failed to encode prompt".to_string()));
             continue;
         };
+        let context_limit = model.info().context_limit;
+        if ids.len() >= context_limit {
+            meter.log(
+                Level::Info,
+                format!("rejected a {} token prompt, context is {context_limit}", ids.len()),
+            );
+            let _ = responder.send(Ok(InferenceResponse::Rejected(format!(
+                "the prompt is {} tokens, but the context holds {context_limit} and must leave room to answer",
+                ids.len()
+            ))));
+            continue;
+        }
         let config = generate::Config {
             sample: req.sample.resolve(&defaults.sample),
             max_tokens: req.max_tokens.unwrap_or(defaults.max_tokens),
