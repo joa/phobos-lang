@@ -14,17 +14,24 @@ pub struct Winner {
     pub ptx: String,
 }
 
+/// Whether `code` compiles at 64-bit index for the card, which every launch
+/// of it has to match in its memref descriptors. mma.sync and cp.async both
+/// need it, and every chip from sm_80 on has cp.async.
+pub fn wide_index(code: &str) -> bool {
+    let chip = phobos_kernels::compile::context_for(&[]).gpu_config.compute_capability();
+    chip >= 80
+        || phobos_lang::parse(code)
+            .map(|ks| phobos_lang::requires_wide_index(&ks))
+            .unwrap_or(false)
+}
+
 /// Compile Phobos source with the given autotune choices pinned.
 pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
-    // mma.sync requires a 64-bit index width.
-    let requires_wide_index = phobos_lang::parse(code)
-        .map(|ks| phobos_lang::requires_wide_index(&ks))
-        .unwrap_or(false);
     // The card's chip, as the model path picks it: sm_75 PTX would JIT forward
     // and run, but never take the newer chips' instructions.
     let mut ctx = phobos_kernels::compile::context_for(&[]);
     ctx.shape_overrides = config.iter().cloned().collect();
-    if requires_wide_index && ctx.index_bitwidth < 64 {
+    if wide_index(code) {
         phdebug!("widening index_bitwidth to 64");
         ctx.index_bitwidth = 64;
     }

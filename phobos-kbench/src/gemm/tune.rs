@@ -75,7 +75,7 @@ impl Variants {
     /// the ones the card cannot launch at all.
     pub fn build(kind: Kind, code: &str, pins: &std::collections::HashMap<String, i64>) -> anyhow::Result<Self> {
         let kernels = phobos_lang::parse(code)?;
-        let wide = phobos_lang::requires_wide_index(&kernels);
+        let wide = crate::autotune::wide_index(code);
         let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
         let configs = phobos_base::combo::cartesian_product(&space);
         phinfo!("{}: compiling {} variants", kind.name(), configs.len());
@@ -187,7 +187,7 @@ pub(crate) fn timed<'a>(stream: &'a Stream, p: &'a Problem, vs: &'a Variants, v:
     let launch: Box<dyn FnMut() -> anyhow::Result<()> + 'a> = if vs.kind.splits().len() > 1 {
         anyhow::ensure!(split <= p.max_split, "{split} splits exceed the workspace");
         let (sk, red) = (module.get_function("gemm_split")?, module.get_function("gemm_reduce")?);
-        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, scalars))
+        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, scalars, vs.wide))
     } else {
         let func = module.get_function("gemm")?;
         Box::new(move || p.launch_phobos(stream, &func, (gx, gy), block, vs.wide, scalars))
