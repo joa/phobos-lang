@@ -318,3 +318,14 @@ fn a_request_reports_decode_and_prompt_lookups_apart() {
             .ends_with("; 25 computed on the host in 3 ms")
     );
 }
+
+#[test]
+fn a_server_failure_is_not_reported_as_a_client_error() {
+    use axum::http::StatusCode;
+    let body = super::protocol::error_body("server_error", "generation failed: boom");
+    assert_eq!(body["error"]["type"], "server_error");
+    assert_eq!(body["error"]["message"], "generation failed: boom");
+
+    let response = super::protocol::error_response(StatusCode::INTERNAL_SERVER_ERROR, "boom");
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}

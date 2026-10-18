@@ -51,11 +51,8 @@ pub(crate) async fn run_generation(
             Ok(InferenceResponse::Rejected(message)) => {
                 return Err(error_response(StatusCode::BAD_REQUEST, message));
             }
-            Err(_) => {
-                return Err(error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "inference failed",
-                ));
+            Err(message) => {
+                return Err(error_response(StatusCode::INTERNAL_SERVER_ERROR, message));
             }
         }
     }
@@ -230,11 +227,23 @@ pub(crate) async fn stream_chat(
         Ok(rx) => rx,
         Err(status) => return error_response(status, failure_message(status)),
     };
-    // The first message says whether the request runs at all. Once the
-    // stream has begun the status is spent, so a rejection is read first.
-    let first = rx.recv().await;
-    if let Some(Ok(InferenceResponse::Rejected(message))) = first {
-        return error_response(StatusCode::BAD_REQUEST, message);
+    // Read up to the first token, or the end. Once the stream has begun the
+    // status is spent, so a rejection or a failed prompt pass is answered
+    // here, as an error status.
+    let mut first = rx.recv().await;
+    let mut started_prompt_tokens = 0usize;
+    if let Some(Ok(InferenceResponse::Start { prompt_tokens, .. })) = first {
+        started_prompt_tokens = prompt_tokens;
+        first = rx.recv().await;
+    }
+    match &first {
+        Some(Ok(InferenceResponse::Rejected(message))) => {
+            return error_response(StatusCode::BAD_REQUEST, message.clone());
+        }
+        Some(Err(message)) => {
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, message.clone());
+        }
+        _ => {}
     }
 
     let id = response_id("chatcmpl");
@@ -259,7 +268,7 @@ pub(crate) async fn stream_chat(
 
         let mut parser = OutputParser::new(tools, thinking, dialect);
         let mut calls = 0usize;
-        let mut prompt_tokens = 0usize;
+        let mut prompt_tokens = started_prompt_tokens;
         let mut completion_tokens = 0usize;
         let mut finish_reason = "stop".to_string();
 
@@ -282,9 +291,12 @@ pub(crate) async fn stream_chat(
                     completion_tokens = count;
                     parser.finish()
                 }
-                Err(_) => {
-                    finish_reason = "error".to_string();
-                    parser.finish()
+                Err(message) => {
+                    // The status went out with the first token, so the
+                    // failure is an error event and the stream just ends,
+                    // with no finish reason a client could take for a stop.
+                    yield Ok(Event::default().data(error_body("server_error", message).to_string()));
+                    return;
                 }
             };
 
