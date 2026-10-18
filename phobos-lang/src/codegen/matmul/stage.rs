@@ -41,9 +41,7 @@ impl<'c> Codegen<'c> {
     }
 
     /// Stages one iteration's a (k-major) and b tiles into shared, without a
-    /// barrier. With `async_copy` the copies are cp.async, and the caller
-    /// creates the group and waits on it.
-    #[allow(clippy::too_many_arguments)]
+    /// barrier.
     pub(in crate::codegen) fn fused_stage(
         &mut self,
         block: &Block<'c>,
@@ -51,12 +49,11 @@ impl<'c> Codegen<'c> {
         kt: Value<'c, 'c>,
         a_buf: &MemVal<'c>,
         b_buf: &MemVal<'c>,
-        async_copy: bool,
     ) -> Result<()> {
         let (a_src, b_src) = self.gemm_operands(block, src, kt)?;
 
-        self.tile_copy_transposed(block, &a_src, a_buf, async_copy)?;
-        self.tile_copy(block, &b_src, b_buf, false, async_copy)
+        self.tile_copy_transposed(block, &a_src, a_buf)?;
+        self.tile_copy(block, &b_src, b_buf, false, false)
     }
 
     /// The preheader-staged f16 buffer for a dot operand, if an enclosing
@@ -174,21 +171,11 @@ impl<'c> Codegen<'c> {
         n0: Value<'c, 'c>,
         accs: &[Value<'c, 'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
-        let use_async = self.has_cp_async();
-        if use_async {
-            return self.pipelined_half(
-                block,
-                prefetch_iv,
-                hi,
-                use_async,
-                |cg, then| cg.fused_stage(then, src, prefetch_iv, dst.0, dst.1, use_async),
-                |cg| cg.register_mac(block, cur.0, cur.1, dims, m0, n0, accs),
-            );
-        }
-
-        // Without cp.async the next stage is loaded into registers before
-        // the MAC and stored into `dst` after it, so the loads' latency hides
-        // behind the MAC. Neither is guarded: a guard on both sides of the
+        // The next stage is loaded into registers before the MAC and stored
+        // into `dst` after it, so the loads' latency hides behind the MAC.
+        // This holds with cp.async too: a is staged k-major, which a cp.async
+        // can only move four bytes at a time, where a register load moves
+        // sixteen. Neither is guarded: a guard on both sides of the
         // MAC lets the loads sink to the stores. Past the last iteration the
         // prefetch rereads the last tile into `dst`, which nothing reads
         // again. That stays in bounds since a loop that runs has a last
@@ -199,7 +186,7 @@ impl<'c> Codegen<'c> {
         let (a_src, b_src) = self.gemm_operands(block, src, at)?;
         let plans = self.reg_copy_plan(&a_src, &a_src).zip(self.reg_copy_plan(&b_src, dst.1));
         let Some((a_plan, b_plan)) = plans else {
-            self.tile_copy_transposed(block, &a_src, dst.0, false)?;
+            self.tile_copy_transposed(block, &a_src, dst.0)?;
             self.tile_copy(block, &b_src, dst.1, false, false)?;
             let next = self.register_mac(block, cur.0, cur.1, dims, m0, n0, accs)?;
             self.barrier(block)?;
