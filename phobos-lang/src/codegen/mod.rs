@@ -131,7 +131,7 @@ pub(crate) fn emit_observed<'c>(
             };
             shared.push((kernel.name.clone(), peak as usize));
         }
-        if cg.pipeline_assert && !cg.pipelined_any {
+        if cg.pipeline == Some(true) && !cg.pipelined_any {
             pipeline_failures.push(PipelineFailure {
                 kernel: kernel.name.clone(),
                 reasons: cg.pipeline_declines.clone(),
@@ -180,19 +180,34 @@ fn emit_kernel<'c>(
     kernel.check_attributes()?;
     let mut cg = Codegen::new(base, context, kernel)?;
     let target = target::build_target(base);
-    let (mut ir, mut report) = crate::ir::build::build(base, target, kernel)?;
-    crate::ir::passes::run(&mut ir, &mut report, &target, kernel)?;
-    #[cfg(debug_assertions)]
-    crate::ir::verify::verify(&ir)?;
+    let limit_bytes = if cg.dynamic_shared { target.smem_per_block } else { target.static_smem_per_block };
 
-    // A throwaway first emission records every buffer the emitters
-    // allocate. The plan places them, and the second emission uses
-    // those offsets. See `lower::plan`.
-    let mut recorder = Codegen::new(base, context, kernel)?;
-    recorder.policy = SharedPolicy::Record;
-    recorder.pipeline_declines = report.pipeline_declines.clone();
-    drop(recorder.emit_kernel_ir(&ir)?);
-    let plan = lower::plan::Plan::compute(&ir, &recorder.trace);
+    // A kernel that leaves pipelining to the compiler is built again
+    // without the loops that default on only where they fit, should they
+    // take it over the budget: their checks cannot see every buffer, such
+    // as an intrinsic's own staging.
+    let mut cautious = false;
+    let (ir, report, recorder, plan) = loop {
+        let (mut ir, mut report) = crate::ir::build::build_cautious(base, target, kernel, cautious)?;
+        crate::ir::passes::run(&mut ir, &mut report, &target, kernel)?;
+        #[cfg(debug_assertions)]
+        crate::ir::verify::verify(&ir)?;
+
+        // A throwaway first emission records every buffer the emitters
+        // allocate. The plan places them, and the second emission uses
+        // those offsets. See `lower::plan`.
+        let mut recorder = Codegen::new(base, context, kernel)?;
+        recorder.policy = SharedPolicy::Record;
+        recorder.pipeline_extended = ir.kernel.extended_pipelining();
+        recorder.pipeline_declines = report.pipeline_declines.clone();
+        drop(recorder.emit_kernel_ir(&ir)?);
+        let plan = lower::plan::Plan::compute(&ir, &recorder.trace);
+        if plan.peak > limit_bytes && ir.kernel.pipeline.is_none() && !cautious {
+            cautious = true;
+            continue;
+        }
+        break (ir, report, recorder, plan);
+    };
     let elision = lower::membar::Elision::decide(&ir, &recorder.trace, &plan);
     observe(&Planned {
         kernel,
@@ -205,6 +220,7 @@ fn emit_kernel<'c>(
 
     cg.elided = elision.skip;
     cg.barrier_before = elision.before;
+    cg.pipeline_extended = ir.kernel.extended_pipelining();
     cg.policy = SharedPolicy::Replay(plan);
     cg.pipeline_declines = report.pipeline_declines;
     let func = cg.emit_kernel_ir(&ir)?;
@@ -362,10 +378,12 @@ struct Codegen<'c> {
     // preheader. One frame per active for loop, each entry being
     // (source view's memref value, staged buffer).
     hoisted_stages: Vec<Vec<(Value<'c, 'c>, MemVal<'c>)>>,
-    /// Whether `@pipeline` was written on this kernel. The generic loop path
-    /// tries every eligible loop regardless. This only gates the fused-GEMM
-    /// backend's double-buffering, see [`Self::staging_pairs`].
-    pipeline_assert: bool,
+    /// `@pipeline`'s mode: None to double-buffer where it fits, Some(true)
+    /// to fail if nothing does, Some(false) to never.
+    pipeline: Option<bool>,
+    /// Whether the GEMM double-buffers, from the build's
+    /// [`crate::ir::KernelInfo::extended_pipelining`].
+    pipeline_extended: bool,
     /// Whether some loop in the kernel did pipeline, through either path.
     pipelined_any: bool,
     /// Stages loaded into registers, waiting for the barrier ahead of their
@@ -476,7 +494,9 @@ impl<'c> Codegen<'c> {
             shared_bytes_peak: 0,
             dynamic_live: 0,
             hoisted_stages: Vec::new(),
-            pipeline_assert: kernel.attrs.iter().any(|a| a.name == "pipeline"),
+            // The build reports a malformed `@pipeline` before codegen runs.
+            pipeline: kernel.pipeline_mode().unwrap_or(None),
+            pipeline_extended: true,
             pipelined_any: false,
             deferred: Vec::new(),
             pipeline_declines: Vec::new(),
@@ -495,13 +515,28 @@ impl<'c> Codegen<'c> {
         })
     }
 
-    /// Staging buffers per operand for the fused-GEMM backend: two to
-    /// double-buffer the k loop under `@pipeline`, one otherwise.
-    ///
-    /// This backend has no legality or budget check of its own, so it is
-    /// never tried without `@pipeline`.
-    fn staging_pairs(&self) -> usize {
-        if self.pipeline_assert { 2 } else { 1 }
+    /// Staging buffers per operand for the fused-GEMM backend, whose one
+    /// pair holds `stage_bytes`: two to double-buffer the k loop where they
+    /// fit beside what the pool already holds, one under `@pipeline(off)` or
+    /// where they do not.
+    fn staging_pairs(&mut self, stage_bytes: i64) -> usize {
+        if !self.pipeline_extended {
+            return 1;
+        }
+        let limit_bytes = if self.dynamic_shared {
+            self.isa.smem_per_block()
+        } else {
+            self.isa.static_smem_per_block()
+        };
+        let needed_bytes = self.shared_bytes + 2 * stage_bytes;
+        if needed_bytes > limit_bytes {
+            self.pipeline_declines.push(format!(
+                "the gemm's doubled staging would need {needed_bytes} bytes of shared memory,                  over the {limit_bytes}-byte ceiling"
+            ));
+            return 1;
+        }
+        self.pipelined_any = true;
+        2
     }
 }
 

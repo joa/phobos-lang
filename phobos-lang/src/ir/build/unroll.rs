@@ -26,7 +26,7 @@ impl Build {
         if n == 1 {
             return self.emit_for(var, start, end, step, body);
         }
-        if self.pipeline_assert {
+        if self.pipeline == Some(true) {
             self.report
                 .pipeline_declines
                 .push(format!("loop `{var}`: an unrolled loop pipelines only as a register matmul"));

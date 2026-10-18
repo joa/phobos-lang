@@ -155,7 +155,9 @@ impl<'c> Codegen<'c> {
         let origin = self.warp_block_origin(block, wm, wn, fm * 16, fnn * 16)?;
         let (_, _, _, m0, n0) = origin;
 
-        let pairs = self.staging_pairs();
+        // A padded pair is the larger, and padding is decided after this.
+        let pad_cols = if mma_sync { 0 } else { WMMA_SMEM_PAD };
+        let pairs = self.staging_pairs(2 * (m * (kk + pad_cols) + kk * (n + pad_cols)));
         // f16 staging: XOR-swizzled for mma.sync's ldmatrix reads, else
         // padded when the CTA budget allows.
         let pad = !mma_sync && self.wmma_should_pad(m, kk, n, acc_elem, pairs as i64);
@@ -175,7 +177,7 @@ impl<'c> Codegen<'c> {
 
         // Register staging prefetches two tiles ahead, the one in flight
         // carried with the accumulators: tile lo + st is loaded here.
-        let ahead = reg_stage && self.pipeline_assert;
+        let ahead = reg_stage && pairs == 2;
         let mut regs = acc.regs.clone();
         if ahead {
             let first = self.addi(block, lo, st)?;

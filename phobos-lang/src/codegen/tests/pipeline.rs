@@ -371,3 +371,85 @@ fn a_dynamic_extent_pipelines_its_whole_tiles() {
     // four 8 KiB stages, not two more beside them.
     assert_eq!(shared_bytes(&emit_mlir_on(src, "sm_80")), 40960);
 }
+
+/// A gemm k-loop over `elem` tiles, with `attrs` above the kernel.
+fn gemm(attrs: &str, elem: &str, tile_k: i64) -> String {
+    format!(
+        "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [{tile_k}])
+        {attrs}
+        @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
+        kernel matmul(A: tensor<{elem}>[M, K], B: tensor<{elem}>[K, N], C: tensor<f32>[M, N]) {{
+            let pm = ctx.block.x
+            let pn = ctx.block.y
+            var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+            for kt in range(0, K, TILE_K) {{
+                var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+                var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
+                acc += dot(a, b)
+            }}
+            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+        }}"
+    )
+}
+
+#[test]
+fn a_gemm_double_buffers_without_the_attribute() {
+    assert_eq!(emit_mlir(&gemm("", "f32", 16)), emit_mlir(&gemm("@pipeline", "f32", 16)));
+    let mlir = emit_mlir(&gemm("", "f32", 16));
+    assert_eq!(tile_views(&mlir, "16x64xf32").len(), 4, "two staging pairs, doubled:\n{mlir}");
+    // On the tensor cores at sm_80 the doubled stages stream through cp.async.
+    let mlir = emit_mlir_sync(&gemm("@tensorcore", "f16", 16), "sm_80");
+    assert_contains(&mlir, &["nvgpu.device_async_copy", "nvgpu.device_async_wait"]);
+}
+
+#[test]
+fn pipeline_off_keeps_one_staging_pair() {
+    let mlir = emit_mlir(&gemm("@pipeline(off)", "f32", 16));
+    assert_eq!(tile_views(&mlir, "16x64xf32").len(), 2, "one staging pair:\n{mlir}");
+    let mlir = emit_mlir_sync(&gemm("@pipeline(off)\n        @tensorcore", "f16", 16), "sm_80");
+    assert!(!mlir.contains("nvgpu.device_async"), "cp.async under @pipeline(off):\n{mlir}");
+}
+
+#[test]
+fn a_gemm_whose_doubled_stages_do_not_fit_stays_single_unless_asserted() {
+    // 64-deep f32 stages are 32 KB a pair: one fits a block, two do not.
+    let mlir = emit_mlir(&gemm("", "f32", 64));
+    assert_eq!(tile_views(&mlir, "64x64xf32").len(), 2, "one staging pair:\n{mlir}");
+    let err = crate::compile_shared(&phobos_base::context::Context::default(), &gemm("@pipeline", "f32", 64))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("doubled staging would need"), "got: {err}");
+}
+
+#[test]
+fn pipeline_takes_on_or_off() {
+    let err = crate::compile_shared(&phobos_base::context::Context::default(), &gemm("@pipeline(sometimes)", "f32", 16))
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`@pipeline` takes `on` or `off`"), "got: {err}");
+}
+
+#[test]
+fn lanes_read_a_staged_tile_the_loop_pipelines() {
+    // The loop carries a register accumulator, so it pipelines by default and
+    // binds `xs` to its stage, which lane runs read as the whole buffer.
+    let src = "@launch(256)
+        @aligned(K = 128)
+        kernel mv(W: tensor<f32>[N, K], X: tensor<f32>[1, K], Y: tensor<f32>[1, N]) {
+            let row = ctx.block.x * ctx.warps + ctx.warp
+            var acc: f32 = 0.0
+            for kt in range(0, K, 128) {
+                var xs = X[0 :+ 1, kt :+ 128]
+                let at = ctx.lane * 4
+                if row < N {
+                    acc += sum(W[row, kt + at :+ 4] * xs[0, at :+ 4])
+                }
+            }
+            let total = sum<over ctx.lane>(acc)
+            if ctx.lane == 0 && row < N {
+                Y[0, row] = total
+            }
+        }";
+    let mlir = emit_mlir_sync(src, "sm_80");
+    assert_contains(&mlir, &["nvgpu.device_async_copy"]);
+}

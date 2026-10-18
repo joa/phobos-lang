@@ -119,6 +119,41 @@ impl Build {
         Ok((staged, rest, info))
     }
 
+    /// Whether a loop the build pipelines by default, though not before (one
+    /// carrying a register accumulator, or a dynamic extent split into whole
+    /// tiles), fits its doubled stages beside the tiles declared so far.
+    /// Those count whole, ignoring liveness and the tiles a later pass moves
+    /// to registers, so this only ever declines a loop that would have fit.
+    /// An asserted loop is not held to it: it pipelines or the kernel fails.
+    pub(crate) fn fits_beside_declared(&self, info: &Pipeline) -> Result<(), PipelineDecline> {
+        if self.pipeline == Some(true) {
+            return Ok(());
+        }
+        let declared_bytes: i64 = self
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.values())
+            .filter_map(|binding| match binding {
+                Binding::Tile(t) => {
+                    let shape = self.shape(*t);
+                    let width = self.elem(*t).bytes()?;
+                    (!shape.contains(&super::DYN)).then(|| (width * shape.iter().product::<i64>() + 15) & !15)
+                }
+                _ => None,
+            })
+            .sum();
+        let limit_bytes = if self.ir.kernel.dynamic_shared {
+            self.target.smem_per_block
+        } else {
+            self.target.static_smem_per_block
+        };
+        let needed_bytes = declared_bytes + info.doubled_bytes;
+        if needed_bytes > limit_bytes {
+            return Err(PipelineDecline::SharedMemoryBudget { needed_bytes, limit_bytes });
+        }
+        Ok(())
+    }
+
     /// A pipelined loop: the staged prefix as stage ops the emitter turns
     /// into its buffer pairs, and the compute built with the staged names
     /// bound as views.

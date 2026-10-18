@@ -324,6 +324,21 @@ impl Kernel {
         }
     }
 
+    /// What `@pipeline` asks of the loops the compiler would double-buffer:
+    /// None to decide alone, Some(true) for `@pipeline` or `@pipeline(on)`,
+    /// which fails where nothing pipelines, Some(false) for `@pipeline(off)`.
+    pub fn pipeline_mode(&self) -> Result<Option<bool>, String> {
+        let Some(attr) = self.attrs.iter().find(|a| a.name == "pipeline") else {
+            return Ok(None);
+        };
+        match &attr.args[..] {
+            [] => Ok(Some(true)),
+            [AttrArg::Positional(Literal::Ident(v))] if v == "on" => Ok(Some(true)),
+            [AttrArg::Positional(Literal::Ident(v))] if v == "off" => Ok(Some(false)),
+            _ => Err("`@pipeline` takes `on` or `off`".to_string()),
+        }
+    }
+
     /// `@persistent`: None when absent, `Some(None)` written bare, and
     /// `Some(Some(dim))` with the grid's block count, a literal or an
     /// `@autotune` name, which `ctx.blocks.x` then is.

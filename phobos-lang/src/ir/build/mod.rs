@@ -135,7 +135,7 @@ pub(crate) struct Build {
     pub(crate) tensorcore: bool,
     pub(crate) mma_sync: bool,
     pub(crate) pad_stage: bool,
-    pub(crate) pipeline_assert: bool,
+    pub(crate) pipeline: Option<bool>,
     pub(crate) cta_threads: i64,
     /// The tiles `@registers` names, and those declared so far.
     pub(crate) registers: Vec<String>,
@@ -196,6 +196,17 @@ pub fn build(
     target: Target,
     kernel: &Kernel,
 ) -> Result<(Ir, Report)> {
+    build_cautious(base, target, kernel, false)
+}
+
+/// [`build`], leaving out the pipelining that only defaults on when
+/// `cautious`, see [`KernelInfo::extended_pipelining`].
+pub fn build_cautious(
+    base: &phobos_base::context::Context,
+    target: Target,
+    kernel: &Kernel,
+    cautious: bool,
+) -> Result<(Ir, Report)> {
     let empty = Ir::new(KernelInfo::default(), &[]);
     let attr_span = |name: &str| kernel.attr(name).map_or(kernel.name_span, |a| a.span);
     let shape_env = kernel.shape_env(&base.shape_overrides);
@@ -204,6 +215,9 @@ pub fn build(
         .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("launch")))?;
     let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
 
+    let pipeline = kernel
+        .pipeline_mode()
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("pipeline")))?;
     let persistent = kernel
         .persistent()
         .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("persistent")))?;
@@ -225,7 +239,8 @@ pub fn build(
         pad_stage: kernel.wants_padded_stage(),
         tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
         mma_sync: kernel.wants_mma_sync(),
-        pipeline_assert: kernel.attrs.iter().any(|a| a.name == "pipeline"),
+        pipeline,
+        pipeline_cautious: cautious,
         shape_env: shape_env.clone(),
     };
 
@@ -244,7 +259,7 @@ pub fn build(
         tensorcore: info.tensorcore,
         mma_sync: info.mma_sync,
         pad_stage: info.pad_stage,
-        pipeline_assert: info.pipeline_assert,
+        pipeline: info.pipeline,
         cta_threads,
         registers: kernel.register_tiles(),
         regs_declared: Vec::new(),

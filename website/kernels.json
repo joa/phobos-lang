@@ -30,7 +30,7 @@
     {
       "name": "gemm_fp32_no_pipeline",
       "path": "examples/gemm_fp32.ph",
-      "variant": { "drop": "@pipeline" },
+      "variant": { "drop": "@pipeline", "add": "@pipeline(off)" },
       "chips": ["sm_75"],
       "params": { "TILE_M": 32, "TILE_N": 32, "TILE_K": 4 },
       "dims": { "M": 64, "N": 64, "K": 64 },
@@ -82,6 +82,16 @@
     {
       "name": "gemm_fp16",
       "path": "examples/gemm_fp16.ph",
+      "chips": ["sm_75", "sm_80"],
+      "params": { "TILE_M": 64, "TILE_N": 64, "TILE_K": 16 },
+      "dims": { "M": 128, "N": 128, "K": 128 },
+      "args": { "beta": 1 },
+      "grid": [2, 2, 1]
+    },
+    {
+      "name": "gemm_fp16_no_pipeline",
+      "path": "examples/gemm_fp16.ph",
+      "variant": { "add": "@pipeline(off)" },
       "chips": ["sm_75", "sm_80"],
       "params": { "TILE_M": 64, "TILE_N": 64, "TILE_K": 16 },
       "dims": { "M": 128, "N": 128, "K": 128 },

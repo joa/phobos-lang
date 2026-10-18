@@ -362,50 +362,58 @@ impl Build {
     ) -> Result<()> {
         let carried = self.regs_carried(body);
         if !carried.is_empty() {
-            // Doubling the stages costs occupancy a register accumulator
-            // already strains, so a carrying loop pipelines on request.
-            if self.pipeline_assert {
+            if self.ir.kernel.extended_pipelining() {
                 let iv_div = super::gcd(self.expr_div(start), step.map_or(1, |e| self.expr_div(e)));
                 self.pending_ivs.push((var.to_string(), iv_div));
-                let candidate = self.pipeline_candidate(body);
+                let candidate = self
+                    .pipeline_candidate(body)
+                    .and_then(|c| self.fits_beside_declared(&c.2).map(|()| c));
                 self.pending_ivs.pop();
                 match candidate {
                     Ok((staged, rest, info)) => {
                         let (lo, hi, st, iv_div) = self.loop_bounds(start, end, step)?;
                         return self.emit_pipelined_loop(var, [lo, hi, st], iv_div, &staged, rest, info, &carried, hoisted);
                     }
-                    Err(decline) => self.report.pipeline_declines.push(format!("loop `{var}`: {decline}")),
-                }
-            }
-            return self.emit_regs_for(var, start, end, step, body, &carried, hoisted);
-        }
-
-        match self.pipeline_candidate(body) {
-            Ok((staged, rest, info)) => {
-                return self.emit_pipelined_for(var, start, end, step, &staged, rest, info, hoisted);
-            }
-            // A dynamic extent: the slices tile evenly once the loop is
-            // trimmed, so the whole tiles pipeline and the rest runs plain.
-            // Only on request, since doubling the stages costs occupancy.
-            Err(PipelineDecline::PartialSlice) if self.pipeline_assert && self.needs_ragged_epilogue(body, var) => {
-                self.trimmed_ivs.push(var.to_string());
-                let trimmed = self.pipeline_candidate(body);
-                self.trimmed_ivs.pop();
-                match trimmed {
-                    Ok((staged, rest, info)) => {
-                        return self.emit_pipelined_split_for(var, start, end, step, body, &staged, rest, info, hoisted);
-                    }
-                    Err(decline) if self.pipeline_assert => {
+                    Err(decline) if self.pipeline == Some(true) => {
                         self.report.pipeline_declines.push(format!("loop `{var}`: {decline}"));
                     }
                     Err(_) => {}
                 }
             }
-            Err(decline) => {
-                if self.pipeline_assert {
-                    self.report
-                        .pipeline_declines
-                        .push(format!("loop `{var}`: {decline}"));
+            return self.emit_regs_for(var, start, end, step, body, &carried, hoisted);
+        }
+
+        if self.pipeline != Some(false) {
+            match self.pipeline_candidate(body) {
+                Ok((staged, rest, info)) => {
+                    return self.emit_pipelined_for(var, start, end, step, &staged, rest, info, hoisted);
+                }
+                // A dynamic extent: the slices tile evenly once the loop is
+                // trimmed, so the whole tiles pipeline and the rest runs plain.
+                Err(PipelineDecline::PartialSlice)
+                    if self.ir.kernel.extended_pipelining() && self.needs_ragged_epilogue(body, var) =>
+                {
+                    self.trimmed_ivs.push(var.to_string());
+                    let trimmed = self
+                        .pipeline_candidate(body)
+                        .and_then(|c| self.fits_beside_declared(&c.2).map(|()| c));
+                    self.trimmed_ivs.pop();
+                    match trimmed {
+                        Ok((staged, rest, info)) => {
+                            return self.emit_pipelined_split_for(var, start, end, step, body, &staged, rest, info, hoisted);
+                        }
+                        Err(decline) if self.pipeline == Some(true) => {
+                            self.report.pipeline_declines.push(format!("loop `{var}`: {decline}"));
+                        }
+                        Err(_) => {}
+                    }
+                }
+                Err(decline) => {
+                    if self.pipeline == Some(true) {
+                        self.report
+                            .pipeline_declines
+                            .push(format!("loop `{var}`: {decline}"));
+                    }
                 }
             }
         }
