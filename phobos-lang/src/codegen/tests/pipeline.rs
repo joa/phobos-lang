@@ -34,19 +34,19 @@ fn pipeline_double_buffers_staged_slices() {
 
 #[test]
 fn pipeline_uses_cp_async_on_supporting_targets() {
-    let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
+    // Not a gemm: the f32 gemm stages a k-major and keeps register staging
+    // on every chip.
+    let src = "@autotune(TILE_M in [64], TILE_K in [16])
         @pipeline
-        @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
-        kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
+        @aligned(M = TILE_M, K = TILE_K)
+        kernel rowsum(A: tensor<f32>[M, K], C: tensor<f32>[M, TILE_K]) {
             let pm = ctx.block.x
-            let pn = ctx.block.y
-            var acc: tile<f32>[TILE_M, TILE_N] = 0.0
+            var acc: tile<f32>[TILE_M, TILE_K] = 0.0
             for kt in range(0, K, TILE_K) {
                 var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
-                var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
-                acc += dot(a, b)
+                acc += a
             }
-            C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
+            C[pm * TILE_M :+ TILE_M, 0 :+ TILE_K] = acc
         }";
     // cp.async also needs 64-bit index lowering, since upstream's
     // convert-nvgpu-to-nvvm hardcodes a 64-bit converter.
