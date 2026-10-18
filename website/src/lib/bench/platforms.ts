@@ -1,12 +1,12 @@
 // Reads results/platforms/*/card.json: one card each, the bench.py run that measured Phobos against
-// llama.cpp on it and the phobos-kbench runs beside it. A card's files may live elsewhere under
-// results/, which is how the development card points at the runs the Benchmarks page already shows.
-// Runs at build time and in vitest.
+// llama.cpp on it and the phobos-kbench runs beside it. A card may have kbench runs and no bench.py run.
+// A card's files may live elsewhere under results/, which is how the development card points at the runs
+// the Benchmarks page already shows. Runs at build time and in vitest.
 
-import { readdirSync, readFileSync } from "node:fs"
+import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { resolve } from "node:path"
 import committedDates from "./dates.json"
-import { parseKernelCsv, type KernelResults } from "./kernels"
+import { KERNEL_SPECS, parseKernelCsv, type KernelResults, type KernelSpec } from "./kernels"
 import { parseRun, repoRoot, type Comparison, type ModelBench, type Stat } from "./load"
 
 export const PLATFORMS_DIR = "results/platforms"
@@ -29,14 +29,15 @@ interface CardFile {
   // than the bench.py run.
   kbenchHost?: string
   kbenchPowerLimitWatts?: number
-  bench: string
+  bench?: string
   kbench: string[]
 }
 
-export interface KernelStat {
+export interface KernelStat extends KernelSpec {
   benchmark: string
-  label: string
-  example?: string
+  // As the CSV spells it, and the peak phobos-kbench derives for it on this card.
+  precision: string
+  peakGflops: number
   phobos: Stat
   cublas?: Stat
   // cuBLAS ran, though maybe at another precision than Phobos.
@@ -47,14 +48,17 @@ export interface KernelStat {
 
 export interface Platform extends Omit<CardFile, "bench" | "kbench" | "kbenchCommit"> {
   dir: string
+  // The bench.py run's driver, or the kbench runs' on a card without one.
   driver: string
+  kbenchDriver?: string
   commit: string
   kbenchCommit: string
   benchDate: string
-  benchFile: string
-  rounds: number
-  reps: number
-  model: ModelBench
+  // The bench.py run, absent on a card measured with phobos-kbench alone.
+  benchFile?: string
+  rounds?: number
+  reps?: number
+  model?: ModelBench
   kernelFiles: string[]
   kernels: KernelStat[]
 }
@@ -79,9 +83,10 @@ export function combineKernelRuns(runs: KernelResults[]): KernelStat[] {
     })
     const comparable = across.every(bench => bench.comparable && bench.cublas)
     return {
+      ...KERNEL_SPECS[first.benchmark],
       benchmark: first.benchmark,
-      label: first.label,
-      example: first.example,
+      precision: first.phobos.precision,
+      peakGflops: first.phobos.peakGflops,
       phobos: statOf(across.map(bench => bench.phobos.gflops)),
       cublasRan: across.every(bench => bench.cublas !== undefined),
       cublas: comparable ? statOf(across.map(bench => bench.cublas!.gflops)) : undefined,
@@ -92,16 +97,34 @@ export function combineKernelRuns(runs: KernelResults[]): KernelStat[] {
 
 const DATES = committedDates as Record<string, string>
 
+// The driver a kbench run recorded in the JSON report beside its CSV, when there is one.
+function kbenchDriver(files: string[], root: string): string | undefined {
+  for (const file of files) {
+    const json = resolve(root, file.replace(/\.csv$/, ".json"))
+    if (!existsSync(json)) continue
+    const driver = (JSON.parse(readFileSync(json, "utf8")) as { environment?: { driver?: string } }).environment?.driver
+    if (driver) return driver
+  }
+  return undefined
+}
+
 export function loadPlatform(dir: string, root = repoRoot()): Platform {
   const read = (file: string) => readFileSync(resolve(root, file), "utf8")
   const { bench, kbench, kbenchCommit, ...card } = JSON.parse(read(`${dir}/card.json`)) as CardFile
+  if (kbench.length === 0) throw new Error(`${dir}/card.json names no kbench run`)
+  const kernelRuns = kbench.map(file => parseKernelCsv(read(file), DATES[file] ?? card.date, file, card.card))
+  const kernels = { kernelFiles: kbench, kernels: combineKernelRuns(kernelRuns), kbenchDriver: kbenchDriver(kbench, root) }
+  if (!bench) {
+    if (!kbenchCommit || !card.date) throw new Error(`${dir}/card.json: a card without bench.py needs kbenchCommit and date`)
+    if (!kernels.kbenchDriver) throw new Error(`${dir}: no kbench JSON names the driver`)
+    return { ...card, ...kernels, dir, driver: kernels.kbenchDriver, commit: kbenchCommit, kbenchCommit, benchDate: card.date }
+  }
   const run = parseRun(bench, read(bench), DATES[bench])
   const model = run.models.find(entry => entry.model === PLATFORM_MODEL)
   if (!model) throw new Error(`${bench} has no ${PLATFORM_MODEL}`)
-  if (kbench.length === 0) throw new Error(`${dir}/card.json names no kbench run`)
-  const kernelRuns = kbench.map(file => parseKernelCsv(read(file), DATES[file] ?? card.date, file, card.card))
   return {
     ...card,
+    ...kernels,
     dir,
     driver: run.driver,
     commit: run.commit,
@@ -111,8 +134,6 @@ export function loadPlatform(dir: string, root = repoRoot()): Platform {
     rounds: run.rounds,
     reps: run.reps,
     model,
-    kernelFiles: kbench,
-    kernels: combineKernelRuns(kernelRuns),
   }
 }
 
@@ -129,5 +150,5 @@ function chipNumber(chip: string): number {
 }
 
 export function testOf(platform: Platform, test: string): Comparison | undefined {
-  return platform.model.tests[test]
+  return platform.model?.tests[test]
 }

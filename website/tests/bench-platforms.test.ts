@@ -14,8 +14,8 @@ describe("platforms", () => {
     expect(platforms[0].card).toBe("RTX 2080 SUPER")
   })
 
-  it("has both engines on the headline tests of every card", () => {
-    for (const platform of platforms) {
+  it("has both engines on the headline tests of every card with a bench.py run", () => {
+    for (const platform of platforms.filter(entry => entry.model)) {
       for (const test of ["tg128", "pp128", "pp512"]) {
         const comparison = testOf(platform, test)
         expect(comparison?.phobos?.rounds, `${platform.card} ${test}`).toBeGreaterThan(1)
@@ -28,7 +28,7 @@ describe("platforms", () => {
     const row = modelRows(loadRuns()).find(
       entry => entry.model === PLATFORM_MODEL && entry.run.file === "results/bench.json"
     )!
-    expect(platforms[0].model.tests).toEqual(row.tests)
+    expect(platforms[0].model?.tests).toEqual(row.tests)
   })
 
   it("averages kbench runs, and the ratio is the mean of each run's ratio", () => {
@@ -46,6 +46,9 @@ describe("platforms", () => {
     expect(gemm.ratio!.mean).toBeCloseTo(0.7, 10)
     expect(flash.cublas).toBeUndefined()
     expect(flash.ratio).toBeUndefined()
+    expect(gemm.label).toBe("gemm, f32")
+    expect(gemm.precision).toBe("f32")
+    expect(gemm.peakGflops).toBe(100)
   })
 
   it("reads every kbench file a card names", () => {

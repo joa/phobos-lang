@@ -1,26 +1,25 @@
 ---
-// The kernel benchmark, Phobos against cuBLAS, one row per kernel from results/results.csv. A row's track is
-// the peak phobos-kbench derives for its precision, so a bar's length is its share of that peak and the
-// two bars of a row share one scale. saxpy is memory-bound and drawn in GB/s against the faster of the two.
-// cuBLAS gets a bar only where it ran at the kernel's own precision.
-import {
-  bandwidthGBs,
-  cublasRatio,
-  formatGflops,
-  formatPercent,
-  loadKernelResults,
-  precisionLabel,
-  type KernelBench,
-  type KernelMeasure,
-} from "../../../lib/bench/kernels"
-import { REPO_URL, shortDate } from "../../../lib/bench/load"
+// The kernel benchmark, Phobos against cuBLAS, one tab per card from results/platforms/*/card.json and one
+// row per kernel. A row's track is the peak phobos-kbench derives for its precision on that card, so a bar's
+// length is its share of that peak and the two bars of a row share one scale. saxpy is memory-bound and
+// drawn in GB/s against the faster of the two. cuBLAS gets a bar only where it ran at the kernel's own
+// precision. Every card's rows are rendered; the tabs only toggle which one shows.
+import { formatGflops, formatPercent, precisionLabel } from "../../../lib/bench/kernels"
+import { commitUrl, REPO_URL, shortDate } from "../../../lib/bench/load"
+import { loadPlatforms, type KernelStat, type Platform } from "../../../lib/bench/platforms"
 
 interface Props {
   id?: string
 }
 
 const { id = "kernels" } = Astro.props
-const results = loadKernelResults()
+const platforms = loadPlatforms()
+// The development card, which the kernels are tuned on.
+const initial = platforms[0]
+
+// The gemms that read f32 or f16 and accumulate in f32 on tensor cores need the explanation their pages
+// give; one bar each says too little, so they stay on the platforms page.
+const HIDDEN = new Set(["gemm_fp16tc_fp32acc", "gemm_fp16_fp32acc"])
 
 interface Bar {
   impl: "phobos" | "cublas"
@@ -30,7 +29,7 @@ interface Bar {
 }
 
 interface Row {
-  bench: KernelBench
+  kernel: KernelStat
   headline: string
   bars: Bar[]
   aside?: string
@@ -40,16 +39,14 @@ interface Row {
 
 const gbs = (value: number) => `${Math.round(value)} GB/s`
 
-function rowOf(bench: KernelBench): Row {
-  const ratio = cublasRatio(bench)
-  const bandwidth = bench.bytesPerFlop !== undefined
-  const measures: [Bar["impl"], KernelMeasure][] = [["phobos", bench.phobos]]
-  if (bench.cublas && bench.comparable) measures.push(["cublas", bench.cublas])
+function rowOf(kernel: KernelStat): Row {
+  const measures: [Bar["impl"], number][] = [["phobos", kernel.phobos.mean]]
+  if (kernel.cublas) measures.push(["cublas", kernel.cublas.mean])
 
   let bars: Bar[]
   let scale: string
-  if (bandwidth) {
-    const rates = measures.map(([, measure]) => bandwidthGBs(bench, measure)!)
+  if (kernel.bytesPerFlop !== undefined) {
+    const rates = measures.map(([, gflops]) => gflops * kernel.bytesPerFlop!)
     const top = Math.max(...rates)
     bars = measures.map(([impl], index) => ({
       impl,
@@ -59,89 +56,179 @@ function rowOf(bench: KernelBench): Row {
     }))
     scale = "memory-bound, in GB/s"
   } else {
-    bars = measures.map(([impl, measure]) => ({
-      impl,
-      widthPercent: measure.pctOfPeak,
-      value: formatGflops(measure.gflops),
-      share: `${Math.round(measure.pctOfPeak)}%`,
-    }))
-    scale = `${bench.inputs ? `${bench.inputs}, ` : ""}${precisionLabel(bench.phobos.precision)}, peak ${formatGflops(bench.phobos.peakGflops)}`
+    bars = measures.map(([impl, gflops]) => {
+      const percent = (gflops / kernel.peakGflops) * 100
+      return { impl, widthPercent: percent, value: formatGflops(gflops), share: `${Math.round(percent)}%` }
+    })
+    scale = `${kernel.inputs ? `${kernel.inputs}, ` : ""}${precisionLabel(kernel.precision)}, peak ${formatGflops(kernel.peakGflops)}`
   }
 
   let headline: string
   let aside: string | undefined
-  if (ratio !== undefined) {
-    headline = `${formatPercent(ratio)} of cuBLAS`
-    aside = bench.cublasNote
-  } else if (bench.cublas) {
+  if (kernel.ratio) {
+    headline = `${formatPercent(kernel.ratio.mean)} of cuBLAS`
+    aside = kernel.cublasNote
+  } else if (kernel.cublasRan) {
     headline = "no like-for-like cuBLAS"
-    aside = `cuBLAS in this run is ${bench.cublasCall} in f32 on CUDA cores, ${formatGflops(bench.cublas.gflops)}: another precision, so no bar`
+    aside = `cuBLAS in this run is ${kernel.cublasCall} at another precision, so no bar`
   } else {
     headline = "no cuBLAS counterpart"
   }
 
-  const parts = [bench.size, scale]
   const spoken = bars.map(bar => `${bar.impl === "phobos" ? "Phobos" : "cuBLAS"} ${bar.value}${bar.share ? `, ${bar.share} of peak` : ""}`)
-  const label = [...parts, ...spoken, headline, ...(aside ? [aside] : [])].join("; ")
-  return { bench, headline, bars, aside, scale, label }
+  const label = [kernel.size, scale, ...spoken, headline, ...(aside ? [aside] : [])].join("; ")
+  return { kernel, headline, bars, aside, scale, label }
 }
 
-const rows = results.benches.map(rowOf)
-const cublasCalls = [...new Set(results.benches.filter(bench => bench.comparable).map(bench => bench.cublasCall))]
+interface Panel {
+  platform: Platform
+  key: string
+  rows: Row[]
+}
+
+const panels: Panel[] = platforms.map(platform => ({
+  platform,
+  key: platform.dir.split("/").pop()!,
+  rows: platform.kernels.filter(kernel => !HIDDEN.has(kernel.benchmark)).map(rowOf),
+}))
+const cublasCalls = [
+  ...new Set(panels.flatMap(panel => panel.rows.filter(row => row.kernel.cublas).map(row => row.kernel.cublasCall))),
+]
+const blob = (file: string) => `${REPO_URL}/blob/main/${file}`
+const runsText = (runs: number) => (runs === 1 ? "one phobos-kbench run" : `the mean of ${runs} phobos-kbench runs`)
 ---
 
 <div class="kb-wrap">
-  <figure class="kb" id={id} aria-labelledby={`${id}-title`}>
+  <figure class="kb" id={id} aria-labelledby={`${id}-title`} data-kb>
     <figcaption class="kb-head">
       <p class="kb-title" id={`${id}-title`}>Kernel throughput against cuBLAS, higher is better</p>
-      <p class="kb-meta">
-        {results.card}, one <a href="/docs/getting-started/compile-and-benchmark/">phobos-kbench</a> run, each kernel
-        autotuned, <a href={`${REPO_URL}/blob/main/${results.file}`}>{results.file}</a> committed {shortDate(results.date)}
-      </p>
+      <div class="kb-tabs" role="tablist" aria-label="Card">
+        {
+          panels.map(panel => (
+            <button
+              type="button"
+              role="tab"
+              class="kb-tab"
+              id={`${id}-tab-${panel.key}`}
+              aria-controls={`${id}-panel-${panel.key}`}
+              aria-selected={panel.platform === initial ? "true" : "false"}
+              tabindex={panel.platform === initial ? 0 : -1}
+              data-kb-tab={panel.key}
+            >
+              {panel.platform.card.replace(/^RTX /, "")}
+            </button>
+          ))
+        }
+      </div>
       <ul class="kb-legend" aria-label="Legend">
         <li class="kb-key is-phobos">Phobos</li>
         <li class="kb-key is-cublas">cuBLAS ({cublasCalls.join(", ")})</li>
       </ul>
     </figcaption>
 
-    <div class="kb-rows">
-      {
-        rows.map(row => (
-          <div class="kb-row" role="group" aria-label={row.bench.label}>
-            <div class="kb-name">
-              {row.bench.example ? <a href={row.bench.example}>{row.bench.label}</a> : <span>{row.bench.label}</span>}
-              <span class="kb-size">
-                {row.bench.size}, {row.scale}
-              </span>
-            </div>
-            <div class="kb-plot" role="img" aria-label={row.label}>
-              <span class:list={["kb-headline", { "is-quiet": !row.bench.comparable }]} aria-hidden="true">{row.headline}</span>
-              {row.bars.map(bar => (
-                <span class="kb-bar-row" aria-hidden="true">
-                  <span class="kb-track">
-                    <span class={`kb-bar is-${bar.impl}`} style={`width: ${bar.widthPercent.toFixed(1)}%`} />
+    {
+      panels.map(({ platform, key, rows }) => (
+        <div
+          class="kb-panel"
+          role="tabpanel"
+          id={`${id}-panel-${key}`}
+          aria-labelledby={`${id}-tab-${key}`}
+          data-kb-panel={key}
+          hidden={platform !== initial}
+        >
+          <p class="kb-meta">
+            {platform.card}, <code>{platform.chip}</code>, {platform.kbenchPowerLimitWatts ?? platform.powerLimitWatts} W
+            limit, {platform.kbenchHost ?? platform.host}; {runsText(platform.kernelFiles.length)}, each kernel
+            autotuned, at <a href={commitUrl(platform.kbenchCommit)}>{platform.kbenchCommit}</a>
+            {platform.date && <>, {shortDate(platform.date)}</>} (
+            {platform.kernelFiles.map((file, index) => (
+              <>
+                {index > 0 && ", "}
+                <a href={blob(file)}>run {index + 1}</a>
+              </>
+            ))}
+            )
+          </p>
+          <div class="kb-rows">
+            {rows.map(row => (
+              <div class="kb-row" role="group" aria-label={row.kernel.label}>
+                <div class="kb-name">
+                  {row.kernel.example ? <a href={row.kernel.example}>{row.kernel.label}</a> : <span>{row.kernel.label}</span>}
+                  <span class="kb-size">
+                    {row.kernel.size}, {row.scale}
                   </span>
-                  <span class="kb-value">
-                    {bar.value}
-                    {bar.share && <span class="kb-share">, {bar.share}<span class="kb-of-peak"> of peak</span></span>}
+                </div>
+                <div class="kb-plot" role="img" aria-label={row.label}>
+                  <span class:list={["kb-headline", { "is-quiet": !row.kernel.ratio }]} aria-hidden="true">
+                    {row.headline}
                   </span>
-                </span>
-              ))}
-              {row.aside && <span class="kb-aside" aria-hidden="true">{row.aside}</span>}
-            </div>
+                  {row.bars.map(bar => (
+                    <span class="kb-bar-row" aria-hidden="true">
+                      <span class="kb-track">
+                        <span class={`kb-bar is-${bar.impl}`} style={`width: ${Math.min(bar.widthPercent, 100).toFixed(1)}%`} />
+                      </span>
+                      <span class="kb-value">
+                        {bar.value}
+                        {bar.share && (
+                          <span class="kb-share">
+                            , {bar.share}
+                            <span class="kb-of-peak"> of peak</span>
+                          </span>
+                        )}
+                      </span>
+                    </span>
+                  ))}
+                  {row.aside && (
+                    <span class="kb-aside" aria-hidden="true">
+                      {row.aside}
+                    </span>
+                  )}
+                </div>
+              </div>
+            ))}
           </div>
-        ))
-      }
-    </div>
+        </div>
+      ))
+    }
 
     <p class="kb-note">
       A track is the card's peak for the kernel's precision as phobos-kbench derives it from SM count and clock, so a
-      bar's length is its share of that peak; saxpy's track is the faster of its two rates. The flash attention kernels carry <code>@tensorcore</code> and run their
-      products on tensor cores where the tile shapes qualify; phobos-kbench rates the f32 one against the f32 peak.
-      Measured once per kernel, so there are no error bars.
+      bar's length is its share of that peak; saxpy's track is the faster of its two rates. Each value is the mean over
+      the card's runs, each of which autotunes afresh. The flash attention kernels carry <code>@tensorcore</code> and run
+      their products on tensor cores where the tile shapes qualify; phobos-kbench rates the f32 one against the f32 peak.
+      Rates on different cards are not comparable: the hosts and their power limits differ. Every kernel on every card is
+      on the <a href="/docs/getting-started/platforms/">supported platforms</a> page.
     </p>
   </figure>
 </div>
+
+<script>
+  // A tab picks a card. Anything on the page marked data-kb-card follows it, such as a sentence quoting the
+  // selected card's numbers.
+  for (const figure of document.querySelectorAll<HTMLElement>("[data-kb]")) {
+    const tabs = [...figure.querySelectorAll<HTMLButtonElement>("[data-kb-tab]")]
+    const select = (tab: HTMLButtonElement) => {
+      const key = tab.dataset.kbTab
+      for (const other of tabs) {
+        other.setAttribute("aria-selected", String(other === tab))
+        other.tabIndex = other === tab ? 0 : -1
+      }
+      for (const panel of figure.querySelectorAll<HTMLElement>("[data-kb-panel]")) panel.hidden = panel.dataset.kbPanel !== key
+      for (const echo of document.querySelectorAll<HTMLElement>("[data-kb-card]")) echo.hidden = echo.dataset.kbCard !== key
+    }
+    tabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => select(tab))
+      tab.addEventListener("keydown", event => {
+        const step = event.key === "ArrowRight" ? 1 : event.key === "ArrowLeft" ? -1 : 0
+        if (step === 0) return
+        event.preventDefault()
+        const next = tabs[(index + step + tabs.length) % tabs.length]
+        next.focus()
+        select(next)
+      })
+    })
+  }
+</script>
 
 <style>
   .kb-wrap {
@@ -179,7 +266,42 @@ const cublasCalls = [...new Set(results.benches.filter(bench => bench.comparable
   }
 
   .kb-meta {
+    margin: 0 0 0.75rem;
+  }
+
+  .kb-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    margin-top: 0.25rem;
+    border-bottom: 1px solid var(--sky-line);
+  }
+
+  .kb-tab {
     margin: 0;
+    padding: 0.375rem 0.875rem;
+    border: 0;
+    background: transparent;
+    box-shadow: inset 0 -2px 0 transparent;
+    color: var(--dust);
+    font: inherit;
+    font-size: 0.8125rem;
+    line-height: 1.4;
+    cursor: pointer;
+    transition: color var(--dur-1) var(--ease-out);
+  }
+
+  .kb-tab:hover {
+    color: var(--star);
+  }
+
+  .kb-tab[aria-selected="true"] {
+    color: var(--star);
+    box-shadow: inset 0 -2px 0 var(--brand);
+  }
+
+  .kb-tab:focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: -2px;
   }
 
   .kb-legend {
