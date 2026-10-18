@@ -29,7 +29,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -78,7 +78,7 @@ jobs:
           & "$out\phobos-cache.exe" --version | Out-File -Encoding ascii "$out\fingerprint.txt"
           Get-Content "$out\fingerprint.txt"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: phobos-windows-x64
           path: dist/
@@ -90,7 +90,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref || github.ref }}
 
@@ -104,7 +104,7 @@ jobs:
           docker run --rm -e RUST_VERSION -v "$PWD:/src" -v "$RUNNER_TEMP/llvm-install:/llvm" -w /src \
             quay.io/pypa/manylinux_2_28_x86_64 bash scripts/ci/build_linux.sh /llvm /src/dist
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: phobos-linux-x64
           path: dist/

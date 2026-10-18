@@ -23,7 +23,7 @@ jobs:
       LLVM_VERSION: ${{ inputs.llvm_version }}
       GH_TOKEN: ${{ github.token }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # An LLVM build tree outgrows the runner's free space; these are
       # preinstalled SDKs nothing here uses.
