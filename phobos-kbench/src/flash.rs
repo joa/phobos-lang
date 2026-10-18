@@ -123,9 +123,9 @@ pub(crate) fn bench_flash_attention_fp32(
             );
             Ok(autotune::Grid(Nq as u32 / br))
         },
-        launch: |module: &cust::module::Module, grid: autotune::Grid| {
+        launch: |loaded: &autotune::Loaded, grid: autotune::Grid| {
             // The kernel writes all of O, so no memset.
-            let func = module.get_function("flash_attention")?;
+            let func = loaded.module.get_function("flash_attention")?;
             launch_flash(
                 &func,
                 grid.0,
@@ -139,6 +139,7 @@ pub(crate) fn bench_flash_attention_fp32(
                 Nk,
                 D,
                 scale,
+                loaded.shared_bytes("flash_attention"),
                 wide,
             )
         },
@@ -161,7 +162,7 @@ pub(crate) fn bench_flash_attention_fp32(
     };
 
     let winner = tuner.run(&space)?;
-    let module = cust::module::Module::from_ptx(winner.ptx.as_str(), &[])?;
+    let module = autotune::Loaded::new(&winner.compiled)?;
     let grid = (tuner.grid_for)(&winner.config)?;
 
     let (phobos_avg, _) = bench("phobos flash", || {
@@ -249,8 +250,8 @@ pub(crate) fn bench_flash_attention_fp16(
             );
             Ok(autotune::Grid(Nq as u32 / br))
         },
-        launch: |module: &cust::module::Module, grid: autotune::Grid| {
-            let func = module.get_function("flash_attention")?;
+        launch: |loaded: &autotune::Loaded, grid: autotune::Grid| {
+            let func = loaded.module.get_function("flash_attention")?;
             launch_flash(
                 &func,
                 grid.0,
@@ -264,6 +265,7 @@ pub(crate) fn bench_flash_attention_fp16(
                 Nk,
                 D,
                 scale,
+                loaded.shared_bytes("flash_attention"),
                 wide,
             )
         },
@@ -287,7 +289,7 @@ pub(crate) fn bench_flash_attention_fp16(
     };
 
     let winner = tuner.run(&space)?;
-    let module = cust::module::Module::from_ptx(winner.ptx.as_str(), &[])?;
+    let module = autotune::Loaded::new(&winner.compiled)?;
     let grid = (tuner.grid_for)(&winner.config)?;
 
     let (phobos_avg, _) = bench("phobos flash_fp16", || {

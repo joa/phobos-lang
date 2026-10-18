@@ -3,10 +3,9 @@
 
 use super::contract::Kind;
 use super::device::Problem;
-use crate::autotune::{Setting, compile, fmt_config};
+use crate::autotune::{Compiled, Loaded, Setting, compile, fmt_config};
 use crate::timing::{self, Stats, Timed};
 use cust::function::{BlockSize, FunctionAttribute};
-use cust::module::Module;
 use cust::stream::Stream;
 use phobos_base::{phdebug, phinfo};
 use std::collections::BTreeMap;
@@ -57,7 +56,7 @@ pub(crate) struct Variant {
     /// Threads a CTA, which `@launch` may take from the config.
     pub block: u32,
     /// Shared by the splits of one compiled config.
-    pub module: Rc<Module>,
+    pub module: Rc<Loaded>,
     pub res: Resources,
 }
 
@@ -82,8 +81,8 @@ impl Variants {
 
         let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
         let next = std::sync::atomic::AtomicUsize::new(0);
-        let mut ptx: Vec<Option<anyhow::Result<String>>> = (0..configs.len()).map(|_| None).collect();
-        let slots = std::sync::Mutex::new(&mut ptx);
+        let mut compiled: Vec<Option<anyhow::Result<Compiled>>> = (0..configs.len()).map(|_| None).collect();
+        let slots = std::sync::Mutex::new(&mut compiled);
         std::thread::scope(|s| {
             for _ in 0..threads {
                 std::thread::Builder::new()
@@ -101,10 +100,10 @@ impl Variants {
         });
 
         let mut all = Vec::new();
-        for (cfg, out) in configs.into_iter().zip(ptx) {
+        for (cfg, out) in configs.into_iter().zip(compiled) {
             let loaded = out
                 .expect("every slot is filled")
-                .and_then(|ptx| Ok(Module::from_ptx(ptx.as_str(), &[])?))
+                .and_then(|compiled| Loaded::new(&compiled))
                 .and_then(|module| {
                     let block = kernels[0]
                         .cta_threads_for(&cfg.iter().cloned().collect())
@@ -149,13 +148,16 @@ impl Variants {
     }
 }
 
-fn resources(module: &Module, kernel: &str, block: u32) -> anyhow::Result<Resources> {
-    let f = module.get_function(kernel)?;
+/// What `kernel` of `loaded` takes from an SM, its dynamic shared memory
+/// counted with its static.
+fn resources(loaded: &Loaded, kernel: &str, block: u32) -> anyhow::Result<Resources> {
+    let f = loaded.module.get_function(kernel)?;
+    let dynamic_bytes = loaded.shared_bytes(kernel);
     Ok(Resources {
         regs: f.get_attribute(FunctionAttribute::NumRegisters)?,
-        smem_bytes: f.get_attribute(FunctionAttribute::SharedMemorySizeBytes)?,
+        smem_bytes: f.get_attribute(FunctionAttribute::SharedMemorySizeBytes)? + dynamic_bytes as i32,
         local_bytes: f.get_attribute(FunctionAttribute::LocalSizeBytes)?,
-        blocks_per_sm: f.max_active_blocks_per_multiprocessor(BlockSize::x(block), 0)?,
+        blocks_per_sm: f.max_active_blocks_per_multiprocessor(BlockSize::x(block), dynamic_bytes as usize)?,
     })
 }
 
@@ -186,11 +188,13 @@ pub(crate) fn timed<'a>(stream: &'a Stream, p: &'a Problem, vs: &'a Variants, v:
     let block = vs.all[v].block;
     let launch: Box<dyn FnMut() -> anyhow::Result<()> + 'a> = if vs.kind.splits().len() > 1 {
         anyhow::ensure!(split <= p.max_split, "{split} splits exceed the workspace");
-        let (sk, red) = (module.get_function("gemm_split")?, module.get_function("gemm_reduce")?);
-        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, scalars, vs.wide))
+        let (sk, red) = (module.module.get_function("gemm_split")?, module.module.get_function("gemm_reduce")?);
+        let shared = (module.shared_bytes("gemm_split"), module.shared_bytes("gemm_reduce"));
+        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, shared, scalars, vs.wide))
     } else {
-        let func = module.get_function("gemm")?;
-        Box::new(move || p.launch_phobos(stream, &func, (gx, gy), block, vs.wide, scalars))
+        let func = module.module.get_function("gemm")?;
+        let shared = module.shared_bytes("gemm");
+        Box::new(move || p.launch_phobos(stream, &func, (gx, gy), (block, shared), vs.wide, scalars))
     };
     Ok(Timed {
         prepare: Box::new(move || p.restore(stream, &p.c_phobos)),

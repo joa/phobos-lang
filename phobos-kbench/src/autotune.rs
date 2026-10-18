@@ -11,7 +11,56 @@ pub type Setting = (String, i64);
 
 pub struct Winner {
     pub config: Vec<Setting>,
+    pub compiled: Compiled,
+}
+
+/// A variant's PTX and the dynamic shared memory each of its kernels
+/// launches with, which only a `@dynshared` kernel has.
+#[derive(Clone)]
+pub struct Compiled {
     pub ptx: String,
+    pub shared: Vec<(String, usize)>,
+}
+
+/// The most shared memory a block may hold without the driver raising its
+/// ceiling.
+const STATIC_SHARED_BYTES: usize = 48 * 1024;
+
+/// A compiled variant in the driver, each kernel's ceiling raised to the
+/// dynamic shared memory it launches with.
+pub struct Loaded {
+    pub module: Module,
+    shared: Vec<(String, usize)>,
+}
+
+impl Loaded {
+    pub fn new(compiled: &Compiled) -> anyhow::Result<Self> {
+        let module = Module::from_ptx(compiled.ptx.as_str(), &[])?;
+        for (name, bytes) in &compiled.shared {
+            if *bytes > STATIC_SHARED_BYTES {
+                let func = module.get_function(name)?;
+                // SAFETY: func comes from the module just loaded, which
+                // outlives this call; the attribute takes a byte count.
+                let result = unsafe {
+                    cust::sys::cuFuncSetAttribute(
+                        func.to_raw(),
+                        cust::sys::CUfunction_attribute::CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                        *bytes as i32,
+                    )
+                };
+                anyhow::ensure!(
+                    result == cust::sys::cudaError_enum::CUDA_SUCCESS,
+                    "raising `{name}`'s dynamic shared memory ceiling to {bytes} bytes: {result:?}"
+                );
+            }
+        }
+        Ok(Loaded { module, shared: compiled.shared.clone() })
+    }
+
+    /// The dynamic shared memory `kernel` launches with, 0 without any.
+    pub fn shared_bytes(&self, kernel: &str) -> u32 {
+        self.shared.iter().find(|(name, _)| name == kernel).map_or(0, |&(_, bytes)| bytes as u32)
+    }
 }
 
 /// Whether `code` compiles at 64-bit index for the card, which every launch
@@ -26,7 +75,7 @@ pub fn wide_index(code: &str) -> bool {
 }
 
 /// Compile Phobos source with the given autotune choices pinned.
-pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
+pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<Compiled> {
     // The card's chip, as the model path picks it: sm_75 PTX would JIT forward
     // and run, but never take the newer chips' instructions.
     let mut ctx = phobos_kernels::compile::context_for(&[]);
@@ -35,7 +84,8 @@ pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<String> {
         phdebug!("widening index_bitwidth to 64");
         ctx.index_bitwidth = 64;
     }
-    phobos_lang::compile(&ctx, code)
+    let (ptx, shared) = phobos_lang::compile_shared(&ctx, code)?;
+    Ok(Compiled { ptx, shared })
 }
 
 pub fn cfg_value(cfg: &[Setting], name: &str) -> anyhow::Result<i64> {
@@ -62,7 +112,7 @@ const CONFIGS_PER_FINALIST: usize = 16;
 pub struct Autotuner<'a, G, L, V>
 where
     G: Fn(&[Setting]) -> anyhow::Result<Grid>,
-    L: FnMut(&Module, Grid) -> anyhow::Result<()>,
+    L: FnMut(&Loaded, Grid) -> anyhow::Result<()>,
     V: FnMut() -> anyhow::Result<()>,
 {
     pub code: &'a str,
@@ -78,7 +128,7 @@ where
 impl<'a, G, L, V> Autotuner<'a, G, L, V>
 where
     G: Fn(&[Setting]) -> anyhow::Result<Grid>,
-    L: FnMut(&Module, Grid) -> anyhow::Result<()>,
+    L: FnMut(&Loaded, Grid) -> anyhow::Result<()>,
     V: FnMut() -> anyhow::Result<()>,
 {
     pub fn run(&mut self, space: &[(String, Vec<i64>)]) -> anyhow::Result<Winner> {
@@ -86,12 +136,12 @@ where
         phinfo!("autotune: {} configs", all.len());
 
         // Stage 1: compile and short-probe every config, ranked by the fastest observed launch.
-        let mut candidates: Vec<(Vec<Setting>, String, Duration)> = Vec::new();
+        let mut candidates: Vec<(Vec<Setting>, Compiled, Duration)> = Vec::new();
         for cfg in &all {
             match self.probe_short(cfg) {
-                Ok((ptx, best)) => {
+                Ok((compiled, best)) => {
                     phinfo!("  {}: {best:.2?}", fmt_config(cfg));
-                    candidates.push((cfg.clone(), ptx, best));
+                    candidates.push((cfg.clone(), compiled, best));
                 }
                 Err(e) => phinfo!("  {}: skipped ({e})", fmt_config(cfg)),
             }
@@ -110,17 +160,15 @@ where
 
         struct Finalist {
             idx: usize,
-            module: Module,
+            module: Loaded,
             grid: Grid,
             min: f64,
             max: f64,
         }
 
         let mut finalists: Vec<Finalist> = Vec::new();
-        for (idx, (cfg, ptx, _)) in candidates.iter().enumerate() {
-            match Module::from_ptx(ptx.as_str(), &[])
-                .map_err(anyhow::Error::from)
-                .and_then(|module| Ok((module, (self.grid_for)(cfg)?)))
+        for (idx, (cfg, compiled, _)) in candidates.iter().enumerate() {
+            match Loaded::new(compiled).and_then(|module| Ok((module, (self.grid_for)(cfg)?)))
             {
                 Ok((module, grid)) => finalists.push(Finalist {
                     idx,
@@ -164,30 +212,30 @@ where
         }
 
         let (best_idx, _) = best.ok_or_else(|| anyhow::anyhow!("autotune: no finalist works"))?;
-        let (best_cfg, best_ptx, _) = candidates.swap_remove(best_idx);
+        let (best_cfg, best_compiled, _) = candidates.swap_remove(best_idx);
         phinfo!("autotune winner: {}", fmt_config(&best_cfg));
 
         Ok(Winner {
             config: best_cfg,
-            ptx: best_ptx,
+            compiled: best_compiled,
         })
     }
 
-    fn probe_short(&mut self, cfg: &[Setting]) -> anyhow::Result<(String, Duration)> {
-        let ptx = compile(self.code, cfg)?;
-        let module = Module::from_ptx(ptx.as_str(), &[])?;
+    fn probe_short(&mut self, cfg: &[Setting]) -> anyhow::Result<(Compiled, Duration)> {
+        let compiled = compile(self.code, cfg)?;
+        let module = Loaded::new(&compiled)?;
         let grid = (self.grid_for)(cfg)?;
 
         // Verify correctness on the first launch (also a warmup).
         (self.launch)(&module, grid)?;
         (self.verify)()?;
         let (fastest, _) = self.time(&module, grid, self.short_probes)?;
-        Ok((ptx, fastest))
+        Ok((compiled, fastest))
     }
 
     fn time(
         &mut self,
-        module: &Module,
+        module: &Loaded,
         grid: Grid,
         probes: u32,
     ) -> anyhow::Result<(Duration, Duration)> {
