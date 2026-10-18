@@ -51,10 +51,12 @@ pub(crate) fn capture(cublas_version: i32) -> anyhow::Result<Env> {
     let llvm = output("llvm-config", &["--version"]);
     let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
     let cuda = format!("{}.{}", cuda_driver.major(), cuda_driver.minor());
+    let chip = phobos_kernels::compile::chip();
 
     let json = serde_json::json!({
         "gpu": name,
         "sm": format!("sm_{cc}"),
+        "compiled_for": chip,
         "sms": sms,
         "max_clock_mhz": clock_khz / 1000,
         "driver": driver,
@@ -69,7 +71,7 @@ pub(crate) fn capture(cublas_version: i32) -> anyhow::Result<Env> {
         "gpu_state_at_start": gpu_state(),
     });
     let key = format!(
-        "{name}|sm_{cc}|driver {}|compiler {fingerprint}",
+        "{name}|sm_{cc}|{chip}|driver {}|compiler {fingerprint}",
         driver.as_deref().unwrap_or(&cuda)
     );
     Ok(Env { json, key })

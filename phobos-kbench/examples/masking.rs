@@ -27,10 +27,8 @@ const SENTINEL: f32 = -12345.0;
 const GUARD: usize = 64;
 
 fn compile(code: &str, config: &[(String, i64)]) -> anyhow::Result<String> {
-    let ctx = phobos_base::context::Context {
-        shape_overrides: config.iter().cloned().collect(),
-        ..Default::default()
-    };
+    let mut ctx = phobos_kernels::compile::context_for(&[]);
+    ctx.shape_overrides = config.iter().cloned().collect();
     phobos_lang::compile(&ctx, code)
 }
 

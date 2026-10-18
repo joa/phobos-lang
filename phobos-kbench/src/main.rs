@@ -219,6 +219,7 @@ fn main() -> anyhow::Result<()> {
 
     let _ctx = cust::quick_init()?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
+    phinfo!("compiling for {}", phobos_kernels::compile::chip());
 
     let mut results = Results::default();
 
