@@ -236,6 +236,7 @@ that is already a complete prompt.
 - responses stream over SSE
 - conversations and tool definitions are rendered with the model's own `tokenizer.chat_template`
 - the sampling flags above become defaults, and a request can override them
+- `--api-key KEY` (or `PHOBOS_API_KEY`) requires `Authorization: Bearer KEY` on every route. Without a key anyone who can reach the address can run inference, so binding a non-loopback address such as `0.0.0.0` with no key logs a warning
 
 ### `phobos-compile` (no GPU)
 

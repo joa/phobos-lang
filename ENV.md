@@ -25,6 +25,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | variable | takes | default | effect |
 | --- | --- | --- | --- |
 | `PHOBOS_LOG` | `off`/`none`/`0`, `info`, `debug`, `trace` | `info` | The level `phobos_base::log` emits at, for every crate's messages. |
+| `PHOBOS_API_KEY` | a string | unset | The bearer token `phobos-cli --listen` requires on every route, when `--api-key` is not given. |
 | `PHOBOS_TRACE` | opt-in | off | Prints each block's per-token activation RMS during a forward pass (`llama`, `qwen35`), a readback per block, so only for a diagnosis. |
 | `PHOBOS_PASS_REPORT` | a replay number, or empty | unset | On the device backend, prints the launch census of that replay of the pass (kernel, launches, blocks, registers, shared memory, occupancy). Empty means the fourth replay, past the prefill and the warmup passes whose scratch is still growing. |
 | `PHOBOS_VRAM` | opt-in | off | Prints free device memory at each pass boundary and every large allocation, constant and scratch, with the pool's free list; how a residency problem is found. |

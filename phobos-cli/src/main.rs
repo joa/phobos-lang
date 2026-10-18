@@ -45,6 +45,7 @@ const VALUED: &[&str] = &[
     "--repetition-penalty",
     "--seed",
     "--listen",
+    "--api-key",
     "--expert-cache",
     "--prefill-thinking",
 ];
@@ -53,12 +54,7 @@ const VALUED: &[&str] = &[
 const REPLAY_LINES: usize = 32;
 
 /// Every flag that is a switch rather than a value. See [`cli::Args::positional_with`].
-const SWITCHES: &[&str] = &[
-    "--no-tui",
-    "--tui",
-    "--no-prefix-cache",
-    "--raw",
-];
+const SWITCHES: &[&str] = &["--no-tui", "--tui", "--no-prefix-cache", "--raw"];
 
 /// Which model to run, and where its tokenizer comes from.
 enum Source {
@@ -77,6 +73,8 @@ struct Args {
     sample: SampleConfig,
     seed: u64,
     listen: Option<String>,
+    /// The bearer token a server request must carry.
+    api_key: Option<String>,
     prompt: Option<String>,
     /// Whether serving should put a dashboard on the terminal.
     tui: bool,
@@ -101,6 +99,11 @@ fn parse_args(args: &cli::Args) -> Result<Args> {
         sample: sampling(args)?,
         seed: args.parse("--seed")?.unwrap_or(0),
         listen: args.value("--listen")?.map(str::to_string),
+        api_key: args
+            .value("--api-key")?
+            .map(str::to_string)
+            .or_else(|| std::env::var("PHOBOS_API_KEY").ok())
+            .filter(|key| !key.is_empty()),
         prompt: (!words.is_empty()).then(|| words.join(" ")),
         // On when there is a terminal to draw on. `--tui` draws anyway, for a
         // terminal that is not recognized.
@@ -138,7 +141,10 @@ fn source(args: &cli::Args) -> Result<Source> {
                 .map(phobos_base::cli::parse_size)
                 .transpose()
                 .context("--expert-cache")?;
-            Ok(Source::Gguf(path.into(), phobos_gguf::runtime::LoadOptions { expert_cache_bytes }))
+            Ok(Source::Gguf(
+                path.into(),
+                phobos_gguf::runtime::LoadOptions { expert_cache_bytes },
+            ))
         }
         (None, Some(dir)) => Ok(Source::Onnx {
             // An ONNX export carries no vocabulary. Its tokenizer files sit
@@ -220,6 +226,9 @@ OPTIONS:
       --listen ADDR   run an OpenAI compatible HTTP server on ADDR (e.g.
                       127.0.0.1:8080). The sampling options above become what a
                       request falls back to for every field it does not send.
+                      Warns when ADDR is not a loopback address and no key is set
+      --api-key KEY   require `Authorization: Bearer KEY` on every route of the
+                      server. Falls back to PHOBOS_API_KEY
       --no-tui        serve without the dashboard, printing the runtime's lines
                       instead. Implied when stdout is not a terminal, and the
                       reason is printed whenever that happens
@@ -245,7 +254,10 @@ fn main() -> Result<()> {
     }
     if raw.has("--version") || raw.has("-V") {
         let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
-        println!("phobos-cli {} (compiler {fingerprint})", env!("CARGO_PKG_VERSION"));
+        println!(
+            "phobos-cli {} (compiler {fingerprint})",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(());
     }
     let args = parse_args(&raw)?;
@@ -291,7 +303,7 @@ fn main() -> Result<()> {
             prefix_cache: args.prefix_cache,
             prefill_thinking: args.prefill_thinking.clone(),
         };
-        return serve(addr, model, defaults, drawing);
+        return serve(addr, model, defaults, args.api_key.clone(), drawing);
     }
 
     match &args.prompt {
@@ -364,17 +376,18 @@ fn serve(
     addr: String,
     model: Box<dyn Model>,
     defaults: server::Defaults,
+    api_key: Option<String>,
     drawing: Option<tui::Dashboard>,
 ) -> Result<()> {
     let Some(drawing) = drawing else {
         // Nothing draws the meter, so its lines go to stderr.
         let meter = Arc::new(Meter::new());
         meter.echo_to_stderr();
-        return server::serve(addr, model, defaults, meter);
+        return server::serve(addr, model, defaults, api_key, meter);
     };
 
     let meter = drawing.meter();
-    let result = server::serve(addr, model, defaults, meter.clone());
+    let result = server::serve(addr, model, defaults, api_key, meter.clone());
     // Whichever finished first, tell the other to stop.
     meter.stop();
     let outcome = drawing.join().and(result);
@@ -408,7 +421,11 @@ fn oneshot(model: &dyn Model, prompt: &str, args: &Args, rng: &mut Rng) -> Resul
     if ids.is_empty() {
         bail!("prompt encoded to zero tokens");
     }
-    let form = if template.is_some() { "chat turn" } else { "raw" };
+    let form = if template.is_some() {
+        "chat turn"
+    } else {
+        "raw"
+    };
     println!("prompt: {prompt:?} ({} tokens, {form})", ids.len());
 
     let mut session = model.session()?;
