@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::http::StatusCode;
-use axum::response::{IntoResponse, Response};
+use axum::response::{AppendHeaders, IntoResponse, Response};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -247,9 +247,15 @@ pub(crate) fn tool_call_delta(index: usize, call: &ToolCall) -> Value {
     })
 }
 
+/// Seconds a client is told to wait when the request queue is full.
+const RETRY_AFTER_SECS: &str = "1";
+
 pub(crate) fn error_response(status: StatusCode, message: impl Into<String>) -> Response {
+    let retry = (status == StatusCode::TOO_MANY_REQUESTS)
+        .then_some((axum::http::header::RETRY_AFTER, RETRY_AFTER_SECS));
     (
         status,
+        AppendHeaders(retry),
         Json(json!({
             "error": {
                 "message": message.into(),
@@ -267,4 +273,12 @@ pub(crate) fn model_name(requested: Option<&str>, loaded: &str) -> String {
         .filter(|name| !name.is_empty())
         .unwrap_or(loaded)
         .to_string()
+}
+
+pub(crate) fn failure_message(status: StatusCode) -> &'static str {
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => "too many queued requests, retry later",
+        StatusCode::SERVICE_UNAVAILABLE => "inference worker is unavailable",
+        _ => "inference failed",
+    }
 }

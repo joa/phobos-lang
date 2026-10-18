@@ -311,6 +311,10 @@ pub fn serve(
         };
         let req = inf_req.req;
         let responder = inf_req.responder;
+        // The client may have gone while the request sat in the queue.
+        if responder.is_closed() {
+            continue;
+        }
 
         let mut rng = Rng::new(req.seed.unwrap_or(defaults.seed));
         let Ok(ids) = model.tokenizer().encode(&req.prompt) else {
@@ -334,6 +338,10 @@ pub fn serve(
             max_tokens: req.max_tokens.unwrap_or(defaults.max_tokens),
             meter: Some(meter.clone()),
             checkpoint_at: last_turn(model.tokenizer(), dialect, &ids),
+            cancelled: {
+                let responder = responder.clone();
+                Some(Arc::new(move || responder.is_closed()))
+            },
         };
         // Reuse the kept session as far as the two prompts agree. It is
         // rewound past that point, or dropped.
@@ -365,10 +373,17 @@ pub fn serve(
 
         meter.request_started(ids.len(), reused);
         let stats_before = model.cache_stats();
-        let _ = responder.send(Ok(InferenceResponse::Start {
-            model: name.clone(),
-            prompt_tokens: ids.len(),
-        }));
+        if responder
+            .send(Ok(InferenceResponse::Start {
+                model: name.clone(),
+                prompt_tokens: ids.len(),
+            }))
+            .is_err()
+        {
+            meter.request_finished("client_disconnect");
+            meter.set_cache(0, None);
+            continue;
+        }
 
         // Stops when the client hangs up or a quit is requested. Checked per
         // token; a prompt pass cannot be interrupted part way.
@@ -445,8 +460,9 @@ pub(crate) fn dispatch(
     StatusCode,
 > {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    match state.tx.send(InferenceRequest { req, responder: tx }) {
+    match state.tx.try_send(InferenceRequest { req, responder: tx }) {
         Ok(()) => Ok(rx),
-        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        Err(mpsc::TrySendError::Full(_)) => Err(StatusCode::TOO_MANY_REQUESTS),
+        Err(mpsc::TrySendError::Disconnected(_)) => Err(StatusCode::SERVICE_UNAVAILABLE),
     }
 }

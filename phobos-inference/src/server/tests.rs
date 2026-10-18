@@ -198,6 +198,7 @@ fn a_generation_reads_the_card_while_it_runs() {
         max_tokens: 4,
         meter: Some(meter.clone()),
         checkpoint_at: None,
+        cancelled: None,
     };
 
     assert_eq!(model.probes.load(Ordering::Relaxed), 0);

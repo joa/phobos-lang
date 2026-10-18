@@ -23,7 +23,7 @@ pub(crate) async fn run_generation(
     req: GenerationRequest,
 ) -> std::result::Result<GeneratedText, Response> {
     let mut rx = dispatch(&state, req)
-        .map_err(|status| error_response(status, "inference worker is unavailable"))?;
+        .map_err(|status| error_response(status, failure_message(status)))?;
 
     let mut model = state.model;
     let mut text = String::new();
@@ -228,7 +228,7 @@ pub(crate) async fn stream_chat(
 ) -> Response {
     let mut rx = match dispatch(&state, req) {
         Ok(rx) => rx,
-        Err(status) => return error_response(status, "inference worker is unavailable"),
+        Err(status) => return error_response(status, failure_message(status)),
     };
     // The first message says whether the request runs at all. Once the
     // stream has begun the status is spent, so a rejection is read first.
