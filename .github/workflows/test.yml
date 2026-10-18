@@ -53,10 +53,15 @@ jobs:
           key: host
 
       - name: Test
+        shell: bash
         run: |
           cargo test --locked \
             -p phobos-base -p phobos-inference -p phobos-kernels \
-            -p phobos-gguf -p phobos-onnx -p phobos-cli -p phobos-bench
+            -p phobos-gguf -p phobos-onnx -p phobos-cli -p phobos-bench 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: Totals
+        if: always()
+        run: bash scripts/ci/test_totals.sh "$RUNNER_TEMP/test.log"
 
   compiler:
     runs-on: ubuntu-24.04
@@ -95,7 +100,12 @@ jobs:
           key: compiler-llvm-${{ env.LLVM_VERSION }}
 
       - name: Test
+        shell: bash
         run: |
           cargo test --locked \
             -p phobos-lang -p phobos-mlir -p phobos-cluster \
-            -p phobos-sched -p phobos-compile -p phobos-cache
+            -p phobos-sched -p phobos-compile -p phobos-cache 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: Totals
+        if: always()
+        run: bash scripts/ci/test_totals.sh "$RUNNER_TEMP/test.log"
