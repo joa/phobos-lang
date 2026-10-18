@@ -5,7 +5,7 @@
   "powerLimitWatts": 350,
   "host": "vast.ai, Spain",
   "date": "2026-10-18",
-  "kbenchCommit": "ea4f66f",
+  "kbenchCommit": "79131b9",
   "kbenchHost": "vast.ai, Poland",
   "kbenchPowerLimitWatts": 450,
   "bench": "results/platforms/rtx4090/bench.json",

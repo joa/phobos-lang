@@ -5,7 +5,7 @@
   "powerLimitWatts": 350,
   "host": "vast.ai, California",
   "date": "2026-10-18",
-  "kbenchCommit": "ea4f66f",
+  "kbenchCommit": "79131b9",
   "kbenchHost": "vast.ai, Utah",
   "kbenchPowerLimitWatts": 300,
   "bench": "results/platforms/rtx3090/bench.json",
