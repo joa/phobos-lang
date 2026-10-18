@@ -1,6 +1,6 @@
 ---
 title: "@pipeline"
-description: Asserts that the kernel's loops are double-buffered, and enables double buffering for the GEMM.
+description: Asserts that the kernel's loops are double-buffered, or vetoes it.
 sidebar:
   order: 4
 ---
@@ -11,14 +11,16 @@ two: while the CTA computes on one buffer, the copy for the next iteration
 fills the other.
 
 Phobos double-buffers every eligible loop by default. `@pipeline` turns that
-into an assertion, and adds the cases that are not on by default.
+into an assertion, and `@pipeline(off)` vetoes it.
 
 ```text
 @pipeline
+@pipeline(on)
+@pipeline(off)
 ```
 
-It takes no arguments. See the [Attributes](/docs/reference/spec/#attributes)
-table in the spec.
+`@pipeline` and `@pipeline(on)` are the same. See the
+[Attributes](/docs/reference/spec/#attributes) table in the spec.
 
 ## Which loops are eligible
 
@@ -34,21 +36,28 @@ doubled stage buffers must fit in 48 KB of shared memory, or under
 | sm_80 | 163 KB |
 | sm_86, sm_89, sm_120 | 99 KB |
 
-## What the attribute adds
+## What is on by default
 
-| Without `@pipeline` | With `@pipeline` |
-| --- | --- |
-| Eligible loops are double-buffered when their stages fit. | The same, and compilation fails if nothing in the kernel was pipelined. |
-| The GEMM built for a `dot` in a k loop runs single-buffered. | The GEMM double-buffers its own operand pairs. |
-| A loop over a dynamic extent that tiles evenly only once its remainder is split off is not pipelined. | Its whole tiles are pipelined, and the remainder runs once, unpipelined. |
+Every eligible loop is double-buffered when its doubled stages fit. That
+covers the GEMM built for a `dot` in a k loop, which double-buffers its own
+operand pairs, a loop over a dynamic extent that tiles evenly only once its
+remainder is split off, whose whole tiles are pipelined while the remainder
+runs once unpipelined, and a loop that carries a register accumulator. The
+last three stay single-buffered when their doubled stages would not fit
+beside the tiles the kernel has already declared, and in a kernel they would
+take over its shared-memory budget.
+
+| Without the attribute | `@pipeline` | `@pipeline(off)` |
+| --- | --- | --- |
+| Eligible loops are double-buffered where they fit. | The same, and compilation fails if nothing in the kernel was pipelined, with each loop's reason. | Every loop stages into one buffer. |
 
 {/* figure: attr-pipeline-pair */}
 
 import KernelPair from "../../../../components/viz/KernelPair.astro"
 
-<KernelPair beforeTrace="gemm_fp32_no_pipeline" beforeLabel="gemm f32 without @pipeline" afterTrace="gemm_fp32" afterLabel="gemm f32 with @pipeline" />
+<KernelPair beforeTrace="gemm_fp32_no_pipeline" beforeLabel="gemm f32 with @pipeline(off)" afterTrace="gemm_fp32" afterLabel="gemm f32, double-buffered" />
 
-<KernelPair beforeTrace="gemm_fp16" beforeChip="sm_80" beforeLabel="gemm f16 on sm_80, single-buffered" afterTrace="gemm_fp16_pipeline" afterChip="sm_80" afterLabel="gemm f16 on sm_80 with @pipeline: cp.async" />
+<KernelPair beforeTrace="gemm_fp16_no_pipeline" beforeChip="sm_80" beforeLabel="gemm f16 on sm_80 with @pipeline(off)" afterTrace="gemm_fp16" afterChip="sm_80" afterLabel="gemm f16 on sm_80, double-buffered: cp.async" />
 
 The figure pair shows a loop with and without double buffering: one stage
 buffer that the copy and the compute take turns on, against two that they

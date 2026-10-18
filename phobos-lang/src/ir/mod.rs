@@ -111,7 +111,12 @@ pub struct KernelInfo {
     pub pad_stage: bool,
     pub tensorcore: bool,
     pub mma_sync: bool,
-    pub pipeline_assert: bool,
+    /// `@pipeline`'s mode, see [`crate::ast::Kernel::pipeline_mode`].
+    pub pipeline: Option<bool>,
+    /// Whether this build leaves out the loops pipelined by default only
+    /// since they may not fit, see [`Self::extended_pipelining`]: set when
+    /// a first build with them came out over the shared-memory budget.
+    pub pipeline_cautious: bool,
     /// The grid's block count `@persistent(n)` compiles in, which
     /// `ctx.blocks.x` is.
     pub persistent_blocks: Option<i64>,
@@ -120,6 +125,16 @@ pub struct KernelInfo {
     pub grid_barrier: bool,
     /// `@autotune` symbols resolved to their chosen value.
     pub shape_env: BTreeMap<String, i64>,
+}
+
+impl KernelInfo {
+    /// Whether the GEMM's operand pairs, a dynamic extent split into whole
+    /// tiles and a loop carrying a register accumulator double-buffer:
+    /// always under `@pipeline`, never under `@pipeline(off)`, and otherwise
+    /// unless the build is cautious.
+    pub fn extended_pipelining(&self) -> bool {
+        self.pipeline.unwrap_or(!self.pipeline_cautious)
+    }
 }
 
 /// One kernel's graph: an SSA arena with structured control flow. Every

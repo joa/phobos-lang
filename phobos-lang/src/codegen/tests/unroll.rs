@@ -92,7 +92,7 @@ fn a_pipelined_register_matmul_runs_an_even_number_of_halves_a_turn() {
 
 #[test]
 fn an_unpipelined_register_matmul_builds_its_mac_n_times_a_turn() {
-    let macs = |n: &str| emit_mlir(&matmul(n, "", "f32")).matches("vector.contract").count();
+    let macs = |n: &str| emit_mlir(&matmul(n, "@pipeline(off)", "f32")).matches("vector.contract").count();
     assert_eq!(macs("3"), 3 * macs("1"));
 }
 

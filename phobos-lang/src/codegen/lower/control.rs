@@ -249,10 +249,6 @@ impl<'c> Codegen<'c> {
             a: ir.operand(dot, 1),
             b: ir.operand(dot, 2),
         };
-        // The fused-GEMM backend always double-buffers under `@pipeline`.
-        if self.pipeline_assert {
-            self.pipelined_any = true;
-        }
         let acc = self.gemm_loop(block, acc, (lo, hi, st), unroll, &src)?;
         self.set_ir(ir.results(op)[0], Lowered::Gemm(acc));
         Ok(())

@@ -42,7 +42,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Vec<Value<'c, 'c>>> {
         let (lo, hi, st) = bounds;
 
-        if !self.pipeline_assert {
+        if a_bufs.len() < 2 {
             let turn = if unroll > 1 {
                 let n = self.const_index(block, unroll)?;
                 self.muli(block, st, n)?

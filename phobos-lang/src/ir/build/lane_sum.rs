@@ -220,11 +220,15 @@ impl Build {
             bail!("a thread's run is a slice with one `:+` span, as `X[r, k :+ 4]`");
         };
         let (mem, binding) = self.mem_base(base)?;
-        // A `flat()` view is its tile's whole buffer in row-major order.
-        let flat = self.ir.def_op(mem).is_some_and(|op| matches!(self.ir.kind(op), OpKind::Flat));
+        // A `flat()` view is its tile's whole buffer in row-major order, and
+        // the name a pipelined loop staged is its stage's whole buffer.
+        let whole = self
+            .ir
+            .def_op(mem)
+            .is_some_and(|op| matches!(self.ir.kind(op), OpKind::Flat | OpKind::Stage(_)));
         let source = match binding {
             Binding::Tensor(_) | Binding::Tile(_) => self.lane_source(mem),
-            Binding::View(_) if flat => self.lane_source(mem),
+            Binding::View(_) if whole => self.lane_source(mem),
             _ => None,
         };
         let Some((elem, extents)) = source else {

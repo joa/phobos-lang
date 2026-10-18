@@ -11,10 +11,11 @@
 //   whole range in the trimmed body, which reads its slices unmasked. That
 //   is what the build's own check promised before this pass existed: a slice
 //   riding the loop variable counted as in bounds.
-// - A loop the build pipelined on its own initiative runs plain, its
-//   staged prefix a staging run. One the kernel asked `@pipeline` of stays
-//   pipelined, over the whole range where the build had split it and
-//   replayed its last iteration in an `if` after it.
+// - A pipelined loop stays pipelined, over the whole range where the build
+//   had split it and replayed its last iteration in an `if` after it, where
+//   the kernel pipelines its extended cases (see
+//   `KernelInfo::extended_pipelining`); elsewhere it runs plain, its staged
+//   prefix a staging run.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -211,7 +212,7 @@ impl Carry<'_> {
             }
         }
         let pipeline = match info.pipeline {
-            Some(p) if !ir.kernel.pipeline_assert => {
+            Some(p) if !ir.kernel.extended_pipelining() => {
                 as_staging_run(ir, block, p.staged);
                 None
             }
