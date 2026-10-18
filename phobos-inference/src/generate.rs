@@ -57,7 +57,12 @@ pub struct Config {
     /// where the next prompt is likely to diverge from this one. `None`, or a
     /// position the pass does not reach, means the end of the prompt.
     pub checkpoint_at: Option<usize>,
+    /// Polled between prompt batches. Once it returns true the prompt pass
+    /// stops and the generation ends as [`Stop::Cancelled`].
+    pub cancelled: Option<Cancel>,
 }
+
+pub type Cancel = Arc<dyn Fn() -> bool + Send + Sync>;
 
 impl Config {
     /// The two fields a generation actually reads, with no meter attached.
@@ -67,6 +72,7 @@ impl Config {
             max_tokens,
             meter: None,
             checkpoint_at: None,
+            cancelled: None,
         }
     }
 }
@@ -117,7 +123,15 @@ pub fn generate(
         .filter(|&at| at > cached && at < prompt.len())
         .map_or(fresh.len(), |at| at - cached);
     let logits = match session.prompt_batch() {
-        Some(batch) => feed_in_batches(session, fresh, split, batch, config.meter.as_deref(), started)?,
+        Some(batch) => {
+            match feed_in_batches(session, fresh, split, batch, config, started)? {
+                Some(logits) => logits,
+                None => {
+                    let held = prompt[..session.len().min(prompt.len())].to_vec();
+                    return Ok(Outcome { stop: Stop::Cancelled, tokens: 0, held });
+                }
+            }
+        }
         None => {
             let logits = prefill(session, fresh)?;
             session.checkpoint()?;
@@ -134,12 +148,16 @@ pub fn generate(
 
 /// Feeds `fresh` a batch at a time, reporting progress between batches, and
 /// checkpoints after the first `split` positions. Returns the last position's
-/// logits.
-fn feed_in_batches(session: &mut dyn Session, fresh: &[i64], split: usize, batch: usize, meter: Option<&Meter>, started: Instant) -> Result<Vec<f32>> {
+/// logits, or `None` if the config cancelled the pass between batches.
+fn feed_in_batches(session: &mut dyn Session, fresh: &[i64], split: usize, batch: usize, config: &Config, started: Instant) -> Result<Option<Vec<f32>>> {
+    let meter = config.meter.as_deref();
     let mut logits = Vec::new();
     let mut done = 0;
     for (i, part) in [&fresh[..split], &fresh[split..]].into_iter().enumerate() {
         for chunk in part.chunks(batch.max(1)) {
+            if config.cancelled.as_ref().is_some_and(|cancelled| cancelled()) {
+                return Ok(None);
+            }
             logits = session.extend(chunk)?;
             done += chunk.len();
             if let Some(meter) = meter {
@@ -150,7 +168,7 @@ fn feed_in_batches(session: &mut dyn Session, fresh: &[i64], split: usize, batch
             session.checkpoint()?;
         }
     }
-    Ok(logits)
+    Ok(Some(logits))
 }
 
 /// Continue a generation, `logits` being those for the position after
