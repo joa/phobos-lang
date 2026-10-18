@@ -28,7 +28,7 @@ run and benchmarked on more cards, rented through vast.ai under Linux:
 The tuning is done on the 2080 SUPER; a default that matters for speed is also
 measured on a 3090 and a 4090 before it ships. The only 4060 for rent ran the
 kernel benchmark and not the model one: a desktop under WSL2 that kept the card
-at 4% utilization and 1.2 GB in use before the run, so its rates carry the
+with 1.2 GB in use and up to 4% utilization when idle, so its rates carry the
 desktop's share of the card.
 
 ## Measured on each card
@@ -38,14 +38,15 @@ against llama.cpp b11681 through `scripts/bench.py`: five rounds, the engines
 interleaved, three repetitions each, the sizes of the
 [Benchmarks](/docs/reference/benchmarks/) run. Then `phobos-kbench` ran twice,
 each run autotuning its kernels afresh, against cuBLAS, compiling them for the
-card's own chip, which its JSON report records. On a rented card it ran on a
+card's own chip, which its JSON report records, with 64-bit indices from
+`sm_80` on. On a rented card it ran on a
 second rental, built from the commit the card names. The 2080 SUPER's model figures
 are the ones [Benchmarks](/docs/reference/benchmarks/) publishes.
 
 A ratio compares two engines on one card in one session. Rates on different
 cards are not comparable to each other: the hosts differ, and so do the power
 limits a host sets. The 4090's model run was at 350 W, below the card's stock
-450 W; the 3090's kbench runs were at 280 W of its 350 W. A
+450 W; the 3090's kbench runs were at 300 W of its 350 W. A
 rented card was checked for another tenant before the run (idle power,
 utilization, and how long the driver has spent capping its power), and
 `bench.py` checks it again between rounds. On the 3090 that check reads the
