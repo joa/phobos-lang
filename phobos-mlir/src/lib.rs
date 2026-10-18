@@ -21,6 +21,14 @@ fn ensure_global_init() {
     INIT.call_once(|| {
         register_all_passes();
         Target::initialize_nvptx(&InitializationConfig::default());
+        // From sm_100 on NVPTX keeps f32 pairs in 64-bit registers and emits
+        // the packed f32x2 arithmetic. No supported chip runs that natively:
+        // sm_120's ptxas splits each one back into two scalar ops and keeps
+        // the packing moves, which cost an FMA-bound loop a tenth of its
+        // issue slots. The option is global to the process, so it is set
+        // once here and wants revisiting with the first chip that has FFMA2.
+        let args = [c"phobos".as_ptr(), c"-nvptx-no-f32x2".as_ptr()];
+        unsafe { llvm_sys::support::LLVMParseCommandLineOptions(2, args.as_ptr(), std::ptr::null()) };
     });
 }
 

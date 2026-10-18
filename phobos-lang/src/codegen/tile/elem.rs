@@ -185,14 +185,13 @@ impl<'c> Codegen<'c> {
     /// k-slice and fragment loads vectorize.
     ///
     /// Iterates the source, so each thread reads a coalesced row and scatters
-    /// it into 4 scalar column writes, or 4-byte cp.async transfers with
-    /// async_copy. Never emits a barrier, the caller owns synchronization.
+    /// it into 4 scalar column writes. Never emits a barrier, the caller owns
+    /// synchronization.
     pub(in crate::codegen) fn tile_copy_transposed(
         &mut self,
         block: &Block<'c>,
         src: &MemVal<'c>,
         dst: &MemVal<'c>,
-        async_copy: bool,
     ) -> Result<()> {
         if src.elem != dst.elem {
             bail!(
@@ -204,24 +203,10 @@ impl<'c> Codegen<'c> {
         let width = self.elementwise_width(&[src]);
         let vec_t = Type::vector(&[4], src.elem);
         let elem_bytes = i64::from(self.elem_bytes(src.elem).unwrap_or(4));
-        self.record_copy(
-            if async_copy {
-                elem_bytes
-            } else {
-                width * elem_bytes
-            },
-            async_copy,
-            dst,
-        );
+        self.record_copy(width * elem_bytes, false, dst);
         self.distribute(block, src, width, false, |cg, blk, idx| {
             let (mi, k0) = (idx[0], idx[1]);
-            if async_copy {
-                for j in 0..width {
-                    let c = cg.const_index(blk, j)?;
-                    let kj = cg.addi(blk, k0, c)?;
-                    cg.async_copy(blk, src, &[mi, kj], dst, &[kj, mi], 1)?;
-                }
-            } else if width > 1 {
+            if width > 1 {
                 let v = cg.vec_load(blk, src.mem, idx, vec_t)?;
                 for j in 0..4 {
                     let e = cg.vec_extract(blk, v, &[j], src.elem)?;
