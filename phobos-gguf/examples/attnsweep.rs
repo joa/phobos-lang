@@ -136,7 +136,7 @@ unsafe fn launch(
 ) -> Result<()> {
     let mut args: Vec<KernelArg> = Vec::new();
     for (ptr, dims) in operands {
-        abi::push_tensor_descriptor(&mut args, *ptr, dims);
+        abi::push_tensor_descriptor(&mut args, *ptr, dims)?;
     }
     let mut slots: Vec<u64> = args.iter().map(|a| a.slot()).collect();
     let raw: Vec<*mut c_void> = slots

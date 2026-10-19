@@ -23,7 +23,7 @@ const MAX_INLINE_TEST_LINES: usize = 150;
 /// to 700.
 const GRANDFATHERED: &[(&str, usize)] = &[
     ("phobos-onnx/src/backend/chain.rs", 911),
-    ("phobos-pod/src/engine.rs", 912),
+    ("phobos-pod/src/engine.rs", 901),
     ("phobos-sched/src/lib.rs", 954),
 ];
 

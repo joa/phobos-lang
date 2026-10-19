@@ -158,23 +158,23 @@ pub fn check_moe_slots(failures: &Cell<u32>) -> Result<()> {
     for (quant, name) in [(Quant::Q4_K, "q4k"), (Quant::Q5_K, "q5k"), (Quant::Q6_K, "q6k"), (Quant::Q8_0, "q80")] {
         let (g, u) = (slab(quant, next)?, slab(quant, next)?);
         let ns = (SLOTS * NE) as i64;
-        let operands = |slots: &mut Vec<u64>, s: &Slab| {
-            push_descriptor(slots, s.bytes.as_device_ptr().as_raw(), [ns, s.rb as i64]);
-            push_descriptor(slots, s.d.as_device_ptr().as_raw(), [ns, (K / 256) as i64]);
+        let operands = |slots: &mut Vec<u64>, s: &Slab| -> Result<()> {
+            push_descriptor(slots, s.bytes.as_device_ptr().as_raw(), [ns, s.rb as i64])?;
+            push_descriptor(slots, s.d.as_device_ptr().as_raw(), [ns, (K / 256) as i64])
         };
-        let head = |slots: &mut Vec<u64>, rows: usize| {
-            push_descriptor(slots, aq.as_device_ptr().as_raw(), [rows as i64, K as i64]);
-            push_descriptor(slots, asc.as_device_ptr().as_raw(), [rows as i64, (K / 32) as i64]);
-            push_descriptor(slots, table.as_device_ptr().as_raw(), [1, USED as i64]);
+        let head = |slots: &mut Vec<u64>, rows: usize| -> Result<()> {
+            push_descriptor(slots, aq.as_device_ptr().as_raw(), [rows as i64, K as i64])?;
+            push_descriptor(slots, asc.as_device_ptr().as_raw(), [rows as i64, (K / 32) as i64])?;
+            push_descriptor(slots, table.as_device_ptr().as_raw(), [1, USED as i64])
         };
 
         // One shared activation row (gate and up), then a row a program (down).
         for (act_row, rows) in [("0", 1usize), ("j", USED)] {
             let out = DeviceBuffer::from_slice(&vec![0f32; USED * NE])?;
             let mut slots = Vec::new();
-            head(&mut slots, rows);
-            operands(&mut slots, &g);
-            push_descriptor(&mut slots, out.as_device_ptr().as_raw(), [USED as i64, NE as i64]);
+            head(&mut slots, rows)?;
+            operands(&mut slots, &g)?;
+            push_descriptor(&mut slots, out.as_device_ptr().as_raw(), [USED as i64, NE as i64])?;
             launch(&moe_qdot_src(name, NE, act_row), &format!("{name}_moe_qdot"), &mut slots, ((NE / 64) as u32, USED as u32))?;
             let mut got = vec![0f32; USED * NE];
             out.copy_to(&mut got)?;
@@ -190,10 +190,10 @@ pub fn check_moe_slots(failures: &Cell<u32>) -> Result<()> {
 
         let out = DeviceBuffer::from_slice(&vec![0f32; USED * NE])?;
         let mut slots = Vec::new();
-        head(&mut slots, 1);
-        operands(&mut slots, &g);
-        operands(&mut slots, &u);
-        push_descriptor(&mut slots, out.as_device_ptr().as_raw(), [USED as i64, NE as i64]);
+        head(&mut slots, 1)?;
+        operands(&mut slots, &g)?;
+        operands(&mut slots, &u)?;
+        push_descriptor(&mut slots, out.as_device_ptr().as_raw(), [USED as i64, NE as i64])?;
         launch(&moe_gateup_src(name, NE), &format!("{name}_moe_gateup"), &mut slots, ((NE / 64) as u32, USED as u32))?;
         let mut got = vec![0f32; USED * NE];
         out.copy_to(&mut got)?;
@@ -210,11 +210,11 @@ pub fn check_moe_slots(failures: &Cell<u32>) -> Result<()> {
         // `SCHED[t]`, every column tile of the expert.
         let out = DeviceBuffer::from_slice(&vec![0f32; m * NE])?;
         let mut slots = Vec::new();
-        push_descriptor(&mut slots, waq.as_device_ptr().as_raw(), [m as i64, K as i64]);
-        push_descriptor(&mut slots, wasc.as_device_ptr().as_raw(), [m as i64, (K / 32) as i64]);
-        push_descriptor(&mut slots, sched.as_device_ptr().as_raw(), [2, SCHED.len() as i64]);
-        operands(&mut slots, &g);
-        push_descriptor(&mut slots, out.as_device_ptr().as_raw(), [m as i64, NE as i64]);
+        push_descriptor(&mut slots, waq.as_device_ptr().as_raw(), [m as i64, K as i64])?;
+        push_descriptor(&mut slots, wasc.as_device_ptr().as_raw(), [m as i64, (K / 32) as i64])?;
+        push_descriptor(&mut slots, sched.as_device_ptr().as_raw(), [2, SCHED.len() as i64])?;
+        operands(&mut slots, &g)?;
+        push_descriptor(&mut slots, out.as_device_ptr().as_raw(), [m as i64, NE as i64])?;
         launch(&moe_qgemm_src(name, NE), &format!("{name}_moe_qgemm"), &mut slots, (SCHED.len() as u32, (NE / QGEMM_TN) as u32))?;
         let mut got = vec![0f32; m * NE];
         out.copy_to(&mut got)?;

@@ -35,7 +35,7 @@ pub(crate) fn columns(failures: &mut u32) -> Result<()> {
     );
     let mut slots = Vec::new();
     for arg in [&gx, &gs, &gw, &gb, &gy] {
-        arg.push(&mut slots);
+        arg.push(&mut slots)?;
     }
     run(src, "k", 1, &mut slots)?;
     let x = &x;
@@ -82,10 +82,10 @@ pub(crate) fn losses(failures: &mut u32) -> Result<()> {
         }";
     let (gx, gp, gt, gl) = (Arg::new(&x, 16, 64)?, Arg::new(&p, 16, 64)?, Arg::new(&target, 16, 1)?, Arg::<f32>::zeroed(16, 8)?);
     let mut slots = Vec::new();
-    gx.push(&mut slots);
-    gp.push(&mut slots);
-    gt.push(&mut slots);
-    gl.push(&mut slots);
+    gx.push(&mut slots)?;
+    gp.push(&mut slots)?;
+    gt.push(&mut slots)?;
+    gl.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let got = gl.read()?;
     let names = ["cross_entropy", "nll_loss", "mse_loss", "l1_loss", "smooth_l1_loss", "kl_div", "binary_cross_entropy_with_logits"];
@@ -151,9 +151,9 @@ pub(crate) fn random(failures: &mut u32) -> Result<()> {
     let gh = Arg::<i32>::zeroed(rows, 64)?;
     let mut slots = Vec::new();
     for arg in [&gx, &gu, &gg, &gd] {
-        arg.push(&mut slots);
+        arg.push(&mut slots)?;
     }
-    gh.push(&mut slots);
+    gh.push(&mut slots)?;
     slots.push(seed as u32 as u64);
     run(src, "k", (rows / 16) as u32, &mut slots)?;
     let (u, g, d, h) = (gu.read()?, gg.read()?, gd.read()?, gh.read()?);

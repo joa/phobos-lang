@@ -44,8 +44,8 @@ impl<T: DeviceCopy + Default + Clone> Arg<T> {
         Ok(out)
     }
 
-    fn push(&self, slots: &mut Vec<u64>) {
-        push_descriptor(slots, self.buf.as_device_ptr().as_raw(), self.dims);
+    fn push(&self, slots: &mut Vec<u64>) -> Result<()> {
+        push_descriptor(slots, self.buf.as_device_ptr().as_raw(), self.dims)
     }
 }
 
@@ -165,16 +165,16 @@ fn argmax(failures: &mut u32) -> Result<()> {
         let want: Vec<i32> = match elem {
             "i32" => {
                 let a = Arg::new(&ties, rows, cols)?;
-                a.push(&mut slots);
-                out.push(&mut slots);
+                a.push(&mut slots)?;
+                out.push(&mut slots)?;
                 run(&src, "k", 1, &mut slots)?;
                 ties.chunks(cols).map(|r| first_max(r.iter().map(|&v| v as f64))).collect()
             }
             "f16" => {
                 let h: Vec<u16> = x.iter().map(|&v| phobos_base::half::f32_to_f16(v)).collect();
                 let a = Arg::new(&h, rows, cols)?;
-                a.push(&mut slots);
-                out.push(&mut slots);
+                a.push(&mut slots)?;
+                out.push(&mut slots)?;
                 run(&src, "k", 1, &mut slots)?;
                 h.chunks(cols)
                     .map(|r| first_max(r.iter().map(|&v| phobos_base::half::f16_to_f32(v) as f64)))
@@ -182,8 +182,8 @@ fn argmax(failures: &mut u32) -> Result<()> {
             }
             _ => {
                 let a = Arg::new(&x, rows, cols)?;
-                a.push(&mut slots);
-                out.push(&mut slots);
+                a.push(&mut slots)?;
+                out.push(&mut slots)?;
                 run(&src, "k", 1, &mut slots)?;
                 x.chunks(cols).map(|r| first_max(r.iter().map(|&v| v as f64))).collect()
             }
@@ -256,9 +256,9 @@ fn lanes(failures: &mut u32) -> Result<()> {
         );
         let (xa, ia, out) = (Arg::new(&x, 1, n)?, Arg::new(&ints, 1, n)?, Arg::<f32>::zeroed(1, n)?);
         let mut slots = Vec::new();
-        xa.push(&mut slots);
-        ia.push(&mut slots);
-        out.push(&mut slots);
+        xa.push(&mut slots)?;
+        ia.push(&mut slots)?;
+        out.push(&mut slots)?;
         run_at(bits, &src, "k", 1, &mut slots)?;
         let got = out.read()?;
         let worst = (0..n).map(|t| (got[t] - want(t)).abs()).fold(0.0f32, f32::max);
@@ -291,9 +291,9 @@ fn lane_matvec(failures: &mut u32) -> Result<()> {
     );
     let (aa, wa, out) = (Arg::new(&a, 1, k)?, Arg::new(&w, n, k)?, Arg::<f32>::zeroed(1, n)?);
     let mut slots = Vec::new();
-    aa.push(&mut slots);
-    wa.push(&mut slots);
-    out.push(&mut slots);
+    aa.push(&mut slots)?;
+    wa.push(&mut slots)?;
+    out.push(&mut slots)?;
     let warps = THREADS as usize / 32;
     run(&src, "mv", n.div_ceil(warps) as u32, &mut slots)?;
     let got = out.read()?;
@@ -335,9 +335,9 @@ fn restaged_lanes(failures: &mut u32) -> Result<()> {
     );
     let (wa, xa, out) = (Arg::new(&w, n, k)?, Arg::new(&x, 1, k)?, Arg::<f32>::zeroed(1, n)?);
     let mut slots = Vec::new();
-    wa.push(&mut slots);
-    xa.push(&mut slots);
-    out.push(&mut slots);
+    wa.push(&mut slots)?;
+    xa.push(&mut slots)?;
+    out.push(&mut slots)?;
     let warps = THREADS as usize / 32;
     run(&src, "mv", n.div_ceil(warps) as u32, &mut slots)?;
     let got = out.read()?;
@@ -373,8 +373,8 @@ fn lane_runs(failures: &mut u32) -> Result<()> {
     );
     let (xa, out) = (Arg::new(&x, 1, n)?, Arg::<f32>::zeroed(1, n)?);
     let mut slots = Vec::new();
-    xa.push(&mut slots);
-    out.push(&mut slots);
+    xa.push(&mut slots)?;
+    out.push(&mut slots)?;
     run(&src, "runs", 1, &mut slots)?;
     let got = out.read()?;
     let bad = (0..n).filter(|&i| got[i] != 2.0 * x[(i + 4) % n]).count();
@@ -400,8 +400,8 @@ fn unrolled_sum(failures: &mut u32) -> Result<()> {
     let threads = THREADS as usize;
     let (xa, out) = (Arg::new(&x, 1, n)?, Arg::<f32>::zeroed(1, threads)?);
     let mut slots = Vec::new();
-    xa.push(&mut slots);
-    out.push(&mut slots);
+    xa.push(&mut slots)?;
+    out.push(&mut slots)?;
     run(&src, "unrolled", 1, &mut slots)?;
     let got = out.read()?;
     let worst = (0..threads)
@@ -438,9 +438,9 @@ fn integer_rows(failures: &mut u32) -> Result<()> {
     let a = Arg::new(&x, rows, cols)?;
     let (s, m) = (Arg::<i32>::zeroed(rows, 1)?, Arg::<i32>::zeroed(rows, 1)?);
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    s.push(&mut slots);
-    m.push(&mut slots);
+    a.push(&mut slots)?;
+    s.push(&mut slots)?;
+    m.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let want_s: Vec<i32> = x.chunks(cols).map(|r| r.iter().sum()).collect();
     let want_m: Vec<i32> = x.chunks(cols).map(|r| *r.iter().max().unwrap()).collect();
@@ -471,7 +471,7 @@ fn wide_rows(failures: &mut u32) -> Result<()> {
         let (s, m, t) = (Arg::<f32>::zeroed(rows, 1)?, Arg::<f32>::zeroed(rows, 1)?, Arg::<i32>::zeroed(rows, 1)?);
         let mut slots = Vec::new();
         for push in [&gx as &dyn Push, &gi, &s, &m, &t] {
-            push.push_to(&mut slots);
+            push.push_to(&mut slots)?;
         }
         run(&src, "k", 1, &mut slots)?;
         let want_s: Vec<f32> = x.chunks(cols).map(|r| r.iter().sum()).collect();
@@ -497,9 +497,9 @@ fn atomics(failures: &mut u32) -> Result<()> {
     let l = Arg::<i32>::zeroed(1, 1)?;
     let o = Arg::<i32>::zeroed(blocks, 2)?;
     let mut slots = Vec::new();
-    c.push(&mut slots);
-    l.push(&mut slots);
-    o.push(&mut slots);
+    c.push(&mut slots)?;
+    l.push(&mut slots)?;
+    o.push(&mut slots)?;
     run(src, "k", blocks as u32, &mut slots)?;
     let (c, l, o) = (c.read()?, l.read()?, o.read()?);
     let mut tickets: Vec<i32> = o.chunks(2).map(|r| r[0]).collect();
@@ -547,8 +547,8 @@ fn jumps(failures: &mut u32) -> Result<()> {
     let a = Arg::new(&x, 1, cols)?;
     let o = Arg::new(&[-9i32; 6], 2, 3)?;
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    o.push(&mut slots);
+    a.push(&mut slots)?;
+    o.push(&mut slots)?;
     run(src, "k", 2, &mut slots)?;
     let got = o.read()?;
     let found = x.iter().position(|&v| v > 0.5).map_or(-1, |j| j as i32);
@@ -569,8 +569,8 @@ fn pow(failures: &mut u32) -> Result<()> {
     let a = Arg::new(&x, 16, 64)?;
     let y = Arg::<f32>::zeroed(16, 64)?;
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    y.push(&mut slots);
+    a.push(&mut slots)?;
+    y.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let worst = y
         .read()?
@@ -604,7 +604,7 @@ fn unsigned(failures: &mut u32) -> Result<()> {
     let g = Arg::<f32>::zeroed(16, 64)?;
     let mut slots = Vec::new();
     for push in [&a as &dyn Push, &q, &f, &s, &g] {
-        push.push_to(&mut slots);
+        push.push_to(&mut slots)?;
     }
     run(src, "k", 1, &mut slots)?;
     let want_q: Vec<i32> = b.iter().map(|&v| i32::from(v >> 4)).collect();
@@ -631,8 +631,8 @@ fn flat_write(failures: &mut u32) -> Result<()> {
     let a = Arg::new(&x, 16, 16)?;
     let o = Arg::<f32>::zeroed(16, 16)?;
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    o.push(&mut slots);
+    a.push(&mut slots)?;
+    o.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let want: Vec<f32> = x.iter().enumerate().map(|(k, &v)| if k < 128 { 0.0 } else { v }).collect();
     report("write through flat()", o.read()? == want, String::new(), failures);
@@ -677,9 +677,9 @@ fn ragged_k(failures: &mut u32) -> Result<()> {
         let (ga, gb) = (Arg::new(&a, m, k)?, Arg::new(&b, k, n)?);
         let c = Arg::<f32>::zeroed(m, n)?;
         let mut slots = Vec::new();
-        ga.push(&mut slots);
-        gb.push(&mut slots);
-        c.push(&mut slots);
+        ga.push(&mut slots)?;
+        gb.push(&mut slots)?;
+        c.push(&mut slots)?;
         run_at(bits, &src, "k", 1, &mut slots)?;
         let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(name, worst < 1e-2, format!("max abs err {worst:.3e}"), failures);
@@ -713,9 +713,9 @@ fn register_tile(failures: &mut u32) -> Result<()> {
     let gx = Arg::new(&x, rows, k)?;
     let (o, s) = (Arg::<f32>::zeroed(rows, 64)?, Arg::<f32>::zeroed(rows, 1)?);
     let mut slots = Vec::new();
-    gx.push(&mut slots);
-    o.push(&mut slots);
-    s.push(&mut slots);
+    gx.push(&mut slots)?;
+    o.push(&mut slots)?;
+    s.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let err = |got: Vec<f32>, want: &[f32]| got.iter().zip(want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
     let (eo, es) = (err(o.read()?, &want), err(s.read()?, &want_s));
@@ -755,8 +755,8 @@ fn register_rows(failures: &mut u32) -> Result<()> {
         let gx = Arg::new(&x, rows, k)?;
         let s = Arg::<f32>::zeroed(rows, 1)?;
         let mut slots = Vec::new();
-        gx.push(&mut slots);
-        s.push(&mut slots);
+        gx.push(&mut slots)?;
+        s.push(&mut slots)?;
         run(&src, "k", 1, &mut slots)?;
         let err = s.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(name, err < 1e-4, format!("err {err:.1e}"), failures);
@@ -790,9 +790,9 @@ fn pipelined_tail(failures: &mut u32) -> Result<()> {
         let (ga, gb) = (Arg::new(&a, rows, k)?, Arg::new(&b, rows, k)?);
         let c = Arg::<f32>::zeroed(rows, 32)?;
         let mut slots = Vec::new();
-        ga.push(&mut slots);
-        gb.push(&mut slots);
-        c.push(&mut slots);
+        ga.push(&mut slots)?;
+        gb.push(&mut slots)?;
+        c.push(&mut slots)?;
         run_at(bits, src, "k", 1, &mut slots)?;
         let worst = c.read()?.iter().zip(&want).map(|(g, w)| (g - w).abs()).fold(0.0f32, f32::max);
         report(&format!("pipelined ragged k, {bits}-bit"), worst < 1e-5, format!("max abs err {worst:.2e}"), failures);
@@ -816,9 +816,9 @@ fn handoff(failures: &mut u32) -> Result<()> {
     let f = Arg::new(&[1i32], 1, 1)?;
     let (gy, gd) = (Arg::new(&y, 1, 64)?, Arg::new(&d0, 1, 64)?);
     let mut slots = Vec::new();
-    f.push(&mut slots);
-    gy.push(&mut slots);
-    gd.push(&mut slots);
+    f.push(&mut slots)?;
+    gy.push(&mut slots)?;
+    gd.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let want: Vec<f32> = d0.iter().zip(&y).map(|(a, b)| a + b).collect();
     let ok = gd.read()? == want && f.read()? == [0];
@@ -837,8 +837,8 @@ fn aligned_promise(failures: &mut u32) -> Result<()> {
         let a = Arg::new(&noise(cols, 8), 1, cols)?;
         let b = Arg::<f32>::zeroed(1, cols)?;
         let mut slots = Vec::new();
-        a.push(&mut slots);
-        b.push(&mut slots);
+        a.push(&mut slots)?;
+        b.push(&mut slots)?;
         run(src, "k", (cols / 32) as u32, &mut slots)?;
         b.read()
     };
@@ -852,11 +852,11 @@ fn aligned_promise(failures: &mut u32) -> Result<()> {
 
 /// Lets buffers of different element types push in one list.
 trait Push {
-    fn push_to(&self, slots: &mut Vec<u64>);
+    fn push_to(&self, slots: &mut Vec<u64>) -> Result<()>;
 }
 
 impl<T: DeviceCopy + Default + Clone> Push for Arg<T> {
-    fn push_to(&self, slots: &mut Vec<u64>) {
-        self.push(slots);
+    fn push_to(&self, slots: &mut Vec<u64>) -> Result<()> {
+        self.push(slots)
     }
 }

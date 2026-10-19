@@ -144,13 +144,13 @@ impl MatmulBackend for GpuBackend {
             &mut args,
             a_dev.as_device_ptr().as_raw(),
             &[mp as i64, kp as i64],
-        );
-        abi::push_tensor_descriptor(&mut args, b_ptr, &[kp as i64, np as i64]);
+        )?;
+        abi::push_tensor_descriptor(&mut args, b_ptr, &[kp as i64, np as i64])?;
         abi::push_tensor_descriptor(
             &mut args,
             c_dev.as_device_ptr().as_raw(),
             &[mp as i64, np as i64],
-        );
+        )?;
         let mut slots: Vec<u64> = args.iter().map(|a| a.slot()).collect();
         let raw: Vec<*mut c_void> = slots
             .iter_mut()
@@ -212,14 +212,14 @@ impl MatmulBackend for GpuBackend {
             &mut args,
             x_dev.as_device_ptr().as_raw(),
             &[rp as i64, w as i64],
-        );
-        abi::push_tensor_descriptor(&mut args, g_dev.as_device_ptr().as_raw(), &[1, w as i64]);
-        abi::push_tensor_descriptor(&mut args, b_dev.as_device_ptr().as_raw(), &[1, w as i64]);
+        )?;
+        abi::push_tensor_descriptor(&mut args, g_dev.as_device_ptr().as_raw(), &[1, w as i64])?;
+        abi::push_tensor_descriptor(&mut args, b_dev.as_device_ptr().as_raw(), &[1, w as i64])?;
         abi::push_tensor_descriptor(
             &mut args,
             y_dev.as_device_ptr().as_raw(),
             &[rp as i64, w as i64],
-        );
+        )?;
         args.push(KernelArg::F32(eps));
         let mut slots: Vec<u64> = args.iter().map(|a| a.slot()).collect();
         let raw: Vec<*mut c_void> = slots
@@ -472,7 +472,7 @@ impl Exec {
                         .get(edge)
                         .with_context(|| format!("no buffer for edge '{edge}'"))?;
                     let addr = buf.as_device_ptr().as_raw();
-                    abi::push_tensor_descriptor(&mut args, addr, view);
+                    abi::push_tensor_descriptor(&mut args, addr, view)?;
                 }
                 Param::ScalarF32(x) => args.push(KernelArg::F32(*x)),
             }

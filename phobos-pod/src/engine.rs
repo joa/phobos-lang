@@ -584,18 +584,7 @@ impl Engine {
 
         for (tile, mode) in args {
             addrs.push(self.store.addr(*tile)?);
-            let shape = self.store.shape(*tile)?;
-            ints.push(0); // offset
-            for &s in &shape {
-                ints.push(s as i32);
-            }
-            let mut stride = 1i64;
-            let mut strides = vec![0i32; shape.len()];
-            for (i, &s) in shape.iter().enumerate().rev() {
-                strides[i] = stride as i32;
-                stride *= s as i64;
-            }
-            ints.extend_from_slice(&strides);
+            ints.extend(crate::marshal::memref_words(&self.store.shape(*tile)?)?);
             if matches!(mode, AccessMode::Write | AccessMode::RMW) {
                 wrote = Some(*tile);
             }

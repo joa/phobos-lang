@@ -1,7 +1,7 @@
 use anyhow::{Context as _, Result};
 use cust::device::DeviceAttribute;
 use cust::module::Module;
-use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig, SUPPORTED_CHIPS};
+use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
 use phobos_base::progress::{self, Step};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -44,18 +44,8 @@ pub fn chip() -> &'static str {
         };
         let capability = attribute(DeviceAttribute::ComputeCapabilityMajor) * 10
             + attribute(DeviceAttribute::ComputeCapabilityMinor);
-        best_chip(capability).to_string()
+        phobos_base::context::best_supported_chip(capability).to_string()
     })
-}
-
-/// The newest of [`SUPPORTED_CHIPS`] at or below `capability`.
-fn best_chip(capability: u32) -> &'static str {
-    SUPPORTED_CHIPS
-        .iter()
-        .copied()
-        .rev()
-        .find(|chip| GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(*chip)).compute_capability() <= capability)
-        .unwrap_or(SUPPORTED_CHIPS[0])
 }
 
 /// A compilation context for the card, with `shapes` bound as `@autotune`
@@ -264,20 +254,5 @@ impl Variants {
         } else {
             &self.general
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::best_chip;
-
-    #[test]
-    fn a_card_gets_the_newest_chip_it_can_run() {
-        assert_eq!(best_chip(75), "sm_75");
-        assert_eq!(best_chip(87), "sm_86");
-        assert_eq!(best_chip(89), "sm_89");
-        assert_eq!(best_chip(100), "sm_90");
-        assert_eq!(best_chip(121), "sm_120");
-        assert_eq!(best_chip(61), "sm_75");
     }
 }

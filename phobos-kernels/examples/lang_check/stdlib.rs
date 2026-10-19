@@ -14,8 +14,8 @@ fn elementwise(name: &str, body: &str, x: &[f32], want: impl Fn(f64) -> f64, tol
     let a = Arg::new(x, 16, 64)?;
     let y = Arg::<f32>::zeroed(16, 64)?;
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    y.push(&mut slots);
+    a.push(&mut slots)?;
+    y.push(&mut slots)?;
     run(&src, "k", 1, &mut slots)?;
     // Absolute below 1, relative above.
     let worst = y
@@ -115,7 +115,7 @@ fn rows(name: &str, body: &str, cols: usize, x: &[f32], want: impl Fn(&[f64]) ->
     let (a, y, gw, gb) = (Arg::new(x, 16, 64)?, Arg::<f32>::zeroed(16, cols)?, Arg::new(&w, 1, 64)?, Arg::new(&b, 1, 64)?);
     let mut slots = Vec::new();
     for arg in [&a, &y, &gw, &gb] {
-        arg.push(&mut slots);
+        arg.push(&mut slots)?;
     }
     run(&src, "k", 1, &mut slots)?;
     let got = y.read()?;
@@ -246,8 +246,8 @@ fn causal(x: &[f32], failures: &mut u32) -> Result<()> {
         }";
     let (a, y) = (Arg::new(x, 16, 64)?, Arg::<f32>::zeroed(16, 64)?);
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    y.push(&mut slots);
+    a.push(&mut slots)?;
+    y.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let got = y.read()?;
     let mut worst = 0.0f32;
@@ -275,9 +275,9 @@ fn topk(x: &[f32], failures: &mut u32) -> Result<()> {
         }";
     let (a, v, i) = (Arg::new(x, 16, 64)?, Arg::<f32>::zeroed(16, 4)?, Arg::<i32>::zeroed(16, 4)?);
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    v.push(&mut slots);
-    i.push(&mut slots);
+    a.push(&mut slots)?;
+    v.push(&mut slots)?;
+    i.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let (vals, idx) = (v.read()?, i.read()?);
     let mut ok = true;
@@ -304,7 +304,7 @@ pub(crate) fn rope_and_quant(failures: &mut u32) -> Result<()> {
     let (a, c, s, y) = (Arg::new(&x, 16, 64)?, Arg::new(&cos, 16, 32)?, Arg::new(&sin, 16, 32)?, Arg::<f32>::zeroed(16, 64)?);
     let mut slots = Vec::new();
     for arg in [&a, &c, &s, &y] {
-        arg.push(&mut slots);
+        arg.push(&mut slots)?;
     }
     run(src, "k", 1, &mut slots)?;
     let got = y.read()?;
@@ -352,10 +352,10 @@ pub(crate) fn rope_and_quant(failures: &mut u32) -> Result<()> {
         }";
     let (a, q, s, y) = (Arg::new(&x, 16, 64)?, Arg::<i8>::zeroed(16, 64)?, Arg::<f32>::zeroed(16, 1)?, Arg::<f32>::zeroed(16, 64)?);
     let mut slots = Vec::new();
-    a.push(&mut slots);
-    q.push(&mut slots);
-    s.push(&mut slots);
-    y.push(&mut slots);
+    a.push(&mut slots)?;
+    q.push(&mut slots)?;
+    s.push(&mut slots)?;
+    y.push(&mut slots)?;
     run(src, "k", 1, &mut slots)?;
     let (qs, ss, ys) = (q.read()?, s.read()?, y.read()?);
     let mut ok = true;
@@ -401,7 +401,7 @@ pub(crate) fn matmuls(failures: &mut u32) -> Result<()> {
         let (ga, gb, gc) = (Arg::new(&a, m, k)?, Arg::new(rhs, rhs_dims.0, rhs_dims.1)?, Arg::<f32>::zeroed(m, n)?);
         let mut slots = Vec::new();
         for arg in [&ga, &gb, &gc] {
-            arg.push(&mut slots);
+            arg.push(&mut slots)?;
         }
         run(&src, "k", 4, &mut slots)?;
         let worst = gc.read()?.iter().zip(&want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0f64, f64::max) as f32;
@@ -443,9 +443,9 @@ pub(crate) fn attention(failures: &mut u32) -> Result<()> {
         let out = Arg::<f32>::zeroed(r, d)?;
         let mut slots = Vec::new();
         for a in [&gq, &gk, &gv] {
-            a.push(&mut slots);
+            a.push(&mut slots)?;
         }
-        out.push(&mut slots);
+        out.push(&mut slots)?;
         run_at(bits, src, "fa", 2, &mut slots)?;
         let got = out.read()?;
         let scale = want.iter().fold(0.0f32, |m, w| m.max(w.abs()));

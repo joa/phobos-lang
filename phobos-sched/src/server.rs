@@ -5,7 +5,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
-use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 use tokio_stream::Stream;
 use tokio_stream::wrappers::UnboundedReceiverStream;
@@ -42,6 +41,8 @@ pub struct DispatchConfig {
 struct NodeConn {
     tx: tokio::sync::mpsc::UnboundedSender<Result<SchedulerMessage, Status>>,
     addr: String,
+    /// The card it reported, as `sm_XY`, or empty.
+    chip: String,
 }
 
 struct ActivePlan {
@@ -393,17 +394,6 @@ impl Scheduler {
             plan.fetch_bytes >> 20,
         );
 
-        let leaves = compile_leaves(&program)?; // (hash, name, ptx) by kernel id
-
-        phinfo!("sched: compiled {} leaf kernel(s)", leaves.len());
-
-        for (i, (hash, name, _)) in leaves.iter().enumerate() {
-            phdebug!(
-                "sched:   leaf {i} '{name}' = {}",
-                &hash[..16.min(hash.len())]
-            );
-        }
-
         let tensors = program
             .tensors
             .iter()
@@ -424,6 +414,23 @@ impl Scheduler {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        phinfo!("sched: waiting for {} node(s) to register", cfg.nodes);
+
+        self.await_nodes(cfg.nodes as usize).await;
+
+        // Leaves compile once the nodes have said which cards they run.
+        let ctx = leaves::leaf_context(self.state().nodes.values().map(|c| c.chip.as_str()));
+        let leaves = leaves::compile_leaves(&program, &ctx)?; // (hash, name, ptx) by kernel id
+
+        phinfo!("sched: compiled {} leaf kernel(s) for {}", leaves.len(), ctx.gpu_config.chip());
+
+        for (i, (hash, name, _)) in leaves.iter().enumerate() {
+            phdebug!(
+                "sched:   leaf {i} '{name}' = {}",
+                &hash[..16.min(hash.len())]
+            );
+        }
+
         let kernels: Vec<KernelEntry> = leaves
             .iter()
             .enumerate()
@@ -443,9 +450,6 @@ impl Scheduler {
             })
             .collect();
 
-        phinfo!("sched: waiting for {} node(s) to register", cfg.nodes);
-
-        self.await_nodes(cfg.nodes as usize).await;
 
         let addrs = self.node_addrs();
 
@@ -692,25 +696,6 @@ fn seg_summary(seg: &Segment) -> String {
         .join(", ")
 }
 
-fn compile_leaves(
-    program: &phobos_cluster::ir::ClusterProgram,
-) -> Result<Vec<(String, String, String)>> {
-    let base = phobos_base::context::Context::default();
-    program
-        .leaves
-        .iter()
-        .map(|l| {
-            let ptx = phobos_mlir::gen_ptx(&base, |b, c, m| {
-                phobos_lang::codegen::emit(b, std::slice::from_ref(&l.kernel), c, m).map(|_| ())
-            })?;
-            let mut h = Sha256::new();
-            h.update(ptx.as_bytes());
-            let hash = format!("{:x}", h.finalize());
-            Ok((hash, l.kernel.name.clone(), ptx)) // the name is the entry point
-        })
-        .collect()
-}
-
 // gRPC service
 
 type SchedulerMessageStream =
@@ -758,6 +743,7 @@ impl SchedulerSvc for Scheduler {
                                 NodeConn {
                                     tx: tx.clone(),
                                     addr: r.address,
+                                    chip: r.sm_architecture,
                                 },
                             );
                         }
@@ -838,6 +824,8 @@ pub fn make_job(source: &str, dims: &[(&str, i64)], tensors: Vec<proto::TensorIn
         scalars: vec![],
     }
 }
+
+mod leaves;
 
 #[cfg(test)]
 mod recovery_tests;

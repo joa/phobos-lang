@@ -288,7 +288,7 @@ impl ChainExec {
                         .device
                         .as_ref()
                         .context("param not on device")?;
-                    abi::push_tensor_descriptor(&mut args, dt.buf.as_device_ptr().as_raw(), view);
+                    abi::push_tensor_descriptor(&mut args, dt.buf.as_device_ptr().as_raw(), view)?;
                 }
                 Param::ScalarF32(x) => args.push(KernelArg::F32(*x)),
             }
@@ -403,13 +403,13 @@ impl ChainExec {
             &mut args,
             a_pad.as_device_ptr().as_raw(),
             &[mp as i64, kp as i64],
-        );
-        abi::push_tensor_descriptor(&mut args, b_ptr, &[kp as i64, np as i64]);
+        )?;
+        abi::push_tensor_descriptor(&mut args, b_ptr, &[kp as i64, np as i64])?;
         abi::push_tensor_descriptor(
             &mut args,
             c_pad.as_device_ptr().as_raw(),
             &[mp as i64, np as i64],
-        );
+        )?;
         let mut slots: Vec<u64> = args.iter().map(|a| a.slot()).collect();
         let raw: Vec<*mut c_void> = slots
             .iter_mut()
@@ -470,17 +470,17 @@ impl ChainExec {
                     &mut args,
                     a_pad.as_device_ptr().as_raw(),
                     &[mp as i64, kp as i64],
-                );
+                )?;
                 abi::push_tensor_descriptor(
                     &mut args,
                     b_pad.as_device_ptr().as_raw(),
                     &[kp as i64, np as i64],
-                );
+                )?;
                 abi::push_tensor_descriptor(
                     &mut args,
                     c_pad.as_device_ptr().as_raw(),
                     &[mp as i64, np as i64],
-                );
+                )?;
                 let mut slots: Vec<u64> = args.iter().map(|a| a.slot()).collect();
                 let raw: Vec<*mut c_void> = slots
                     .iter_mut()

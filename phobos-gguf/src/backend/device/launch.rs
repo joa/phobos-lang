@@ -31,7 +31,7 @@ impl DeviceBackend {
             slot.threads = self.threads_of(func)?;
             slot.slots.clear();
             for &(ptr, dims) in operands {
-                push_descriptor(&mut slot.slots, ptr, dims);
+                push_descriptor(&mut slot.slots, ptr, dims)?;
             }
             self.recorded_len.set(at + 1);
             if self.report_pass.get() != 0 {
@@ -58,7 +58,7 @@ impl DeviceBackend {
         eager.threads = self.threads_of(func)?;
         eager.slots.clear();
         for &(ptr, dims) in operands {
-            push_descriptor(&mut eager.slots, ptr, dims);
+            push_descriptor(&mut eager.slots, ptr, dims)?;
         }
         self.issue(&eager, name)
     }
