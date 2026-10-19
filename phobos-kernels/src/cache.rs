@@ -71,6 +71,12 @@ fn hex(bytes: &[u8]) -> String {
     })
 }
 
+/// The name `source` compiled under `ctx` is cached as, `<kernel>-<hash>`,
+/// in the chip's directory.
+pub fn key(ctx: &Context, source: &str) -> String {
+    hash(ctx, &[source])
+}
+
 /// Where the entry for a `(ctx, texts)` compile lives under `root`: one
 /// directory per chip, so a cache warmed for several cards splits cleanly.
 pub(crate) fn entry(root: &Path, ctx: &Context, texts: &[&str]) -> PathBuf {
@@ -125,7 +131,7 @@ fn roots() -> impl Iterator<Item = PathBuf> {
 /// `PHOBOS_KERNEL_CACHE_DIR` replaces both, and an empty value disables
 /// caching. `print_phases` always disables it, since a hit has nothing to
 /// print.
-pub(crate) fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>)> {
+pub fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>)> {
     if ctx.print_phases {
         return None;
     }
@@ -134,7 +140,7 @@ pub(crate) fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, 
 
 /// Persists one kernel's compiled output. Best-effort: a write failure never
 /// fails a compile that already succeeded.
-pub(crate) fn store(ctx: &Context, source: &str, ptx: &str, shared: &[(String, usize)]) {
+pub fn store(ctx: &Context, source: &str, ptx: &str, shared: &[(String, usize)]) {
     if ctx.print_phases {
         return;
     }

@@ -14,13 +14,13 @@ anyhow = "1"
 melior.workspace = true
 phobos-base = { path = "../phobos-base" }
 phobos-mlir = { path = "../phobos-mlir" }
-serde = { version = "1.0.229", features = ["derive"], optional = true }
-serde_json = { version = "1", optional = true }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
 sha2 = { workspace = true, optional = true }
 
 [features]
 # The kernel visualizer's exporter, `src/trace`, and the `site` tool.
-trace = ["dep:serde", "dep:serde_json", "dep:sha2"]
+trace = ["dep:sha2"]
 
 [[example]]
 name = "site"

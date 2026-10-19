@@ -66,6 +66,9 @@ helpers rather than a spelling of its own.
   regenerates them in the same change. `-- attributes` refreshes the attribute
   list the docs are checked against
 - `npm run check` in `website/`: the site's tests and type checks, as CI runs them
+- `cargo run --release -p phobos-lang --example contract_check -- DIR...`: each
+  kernel's launch contract against the `.entry` it compiled to, over a corpus
+  under the five targets; `cargo test` runs it over the tree
 
 The model path on the GPU needs `--features cuda`, and always `--release`: a
 forward pass is a few hundred GFLOP and the debug build is unusable. Its checks

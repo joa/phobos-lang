@@ -74,6 +74,7 @@ impl<'c> Codegen<'c> {
                     self.shared_bytes += bytes;
                     self.shared_bytes_peak = self.shared_bytes_peak.max(self.shared_bytes);
                 } else {
+                    self.static_shared_bytes += bytes;
                     self.shared_globals.push(memref::global(
                         self.ctx,
                         &name,
@@ -225,6 +226,7 @@ impl<'c> Codegen<'c> {
         let space = self.shared_space()?;
         let byte_t = MemRefType::new(self.i8_t, &[plan.peak], None, Some(space));
         let name = self.shared_buffer_name();
+        self.static_shared_bytes += plan.peak;
         self.shared_globals.push(memref::global(
             self.ctx,
             &name,

@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod codegen;
+pub mod contract;
 pub mod diag;
 pub mod ir;
 pub mod lexer;
@@ -12,6 +13,7 @@ pub mod token;
 #[cfg(feature = "trace")]
 pub mod trace;
 
+pub use contract::Contract;
 pub use report::{LaunchReport, ScratchParam, launch_report};
 
 /// Parses `src`. A failure is a [`diag::Diagnostics`] whose locations are
@@ -166,7 +168,33 @@ pub fn compile_source(
         code,
         shared: out.shared,
         pipeline_failures: out.pipeline_failures,
+        contracts: out.contracts,
     })
+}
+
+/// The launch contract of every kernel `file` compiles to under `context`,
+/// widened as [`compile_source`] widens it, from the emitted module alone:
+/// what a cached PTX was compiled beside, without lowering it again.
+pub fn contracts(
+    context: &phobos_base::context::Context,
+    file: &std::sync::Arc<diag::SourceFile>,
+) -> anyhow::Result<Vec<Contract>> {
+    use melior::dialect::DialectRegistry;
+    use melior::ir::{Location, Module};
+    use melior::utility::register_all_dialects;
+
+    let kernels = parse_source_with(file, &context.stdlib)?;
+    let mut wide = context.clone();
+    if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {
+        wide.index_bitwidth = 64;
+    }
+    let registry = DialectRegistry::new();
+    register_all_dialects(&registry);
+    let mlir = melior::Context::new();
+    mlir.append_dialect_registry(&registry);
+    mlir.load_all_available_dialects();
+    let module = Module::new(Location::unknown(&mlir));
+    Ok(codegen::emit(&wide, &kernels, &mlir, &module)?.contracts)
 }
 
 /// Result of [`compile_raw`]: the generated code plus the sidebands
@@ -175,6 +203,7 @@ pub struct CompileOutput {
     pub code: String,
     pub shared: Vec<(String, usize)>,
     pub pipeline_failures: Vec<codegen::PipelineFailure>,
+    pub contracts: Vec<Contract>,
 }
 
 /// Whether a module of `kernels` has to be indexed at 64 bits on the

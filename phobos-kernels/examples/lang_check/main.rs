@@ -1,7 +1,7 @@
 // The language's semantics on the device, one probe kernel per feature,
 // each against a host reference:
 //
-//   cargo run --release -p phobos-kernels --features cuda --example lang_check
+//   cargo run --release -p phobos-kernels --features cuda --example lang_check [-- --record DIR]
 //
 // The codegen tests check what a construct emits; only a run checks what it
 // computes. Every tensor is rank 2, the launch ABI's descriptor.
@@ -12,6 +12,7 @@ use cust::prelude::*;
 use phobos_kernels::compile::context_for;
 use phobos_kernels::{compile_in, cuda_ok, push_descriptor};
 
+mod record;
 mod stdlib;
 mod stdlib_stats;
 mod tensor;
@@ -60,6 +61,7 @@ fn run_at(index_bitwidth: u32, src: &str, name: &str, blocks: u32, slots: &mut [
     ctx.index_bitwidth = index_bitwidth;
     let module = compile_in(&ctx, src, name)?.0;
     let func = module.get_function(name)?.to_raw();
+    let recording = record::before(&ctx, src, name, [blocks, 1, 1], THREADS, slots)?;
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
     let mut argv: Vec<*mut std::ffi::c_void> = slots
         .iter_mut()
@@ -86,6 +88,9 @@ fn run_at(index_bitwidth: u32, src: &str, name: &str, blocks: u32, slots: &mut [
         name,
     )?;
     stream.synchronize()?;
+    if let Some(recording) = recording {
+        recording.after()?;
+    }
     Ok(())
 }
 
@@ -108,6 +113,7 @@ fn report(name: &str, ok: bool, detail: String, failures: &mut u32) {
 }
 
 fn main() -> Result<()> {
+    record::init()?;
     let _ctx = cust::quick_init()?;
     let mut failures = 0;
     argmax(&mut failures)?;
