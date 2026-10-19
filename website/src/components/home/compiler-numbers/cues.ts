@@ -125,10 +125,14 @@ export function tensorCoreCue(): Cue {
 }
 
 // One dot per configuration, visited in order.
+// The grid takes the box's proportions, so a large search still reads as dots: 64 is 16 by 4, 512 is 45
+// by 12, and a dot shrinks once the spacing gets tight.
 export function searchCue(configs: number): Cue {
-  const columns = Math.min(16, configs)
+  const height = CUE_HEIGHT - 16
+  const columns = Math.max(1, Math.min(configs, Math.ceil(Math.sqrt((configs * INNER) / height))))
   const rows = Math.ceil(configs / columns)
-  const spacing = Math.min(INNER / columns, (CUE_HEIGHT - 16) / Math.max(rows - 1, 1))
+  const spacing = Math.min(INNER / columns, height / Math.max(rows - 1, 1))
+  const radius = fixed(Math.min(2.2, spacing * 0.4))
   const left = (CUE_WIDTH - (columns - 1) * spacing) / 2
   const top = (CUE_HEIGHT - (rows - 1) * spacing) / 2
   const dots: string[] = []
@@ -136,7 +140,7 @@ export function searchCue(configs: number): Cue {
     const delay = Math.round((index / configs) * CUE_PERIOD_MS * 0.8)
     const cx = fixed(left + (index % columns) * spacing)
     const cy = fixed(top + Math.floor(index / columns) * spacing)
-    dots.push(`<circle class="cn-config" style="animation-delay: ${delay}ms" cx="${cx}" cy="${cy}" r="2.2" />`)
+    dots.push(`<circle class="cn-config" style="animation-delay: ${delay}ms" cx="${cx}" cy="${cy}" r="${radius}" />`)
   }
   return { markup: dots.join(""), css: "" }
 }

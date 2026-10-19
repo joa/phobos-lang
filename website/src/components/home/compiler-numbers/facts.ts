@@ -89,18 +89,25 @@ export interface SearchDim {
   values: number[]
 }
 
-// The configurations an @autotune line names: two values are inclusive bounds searched in doubling
-// steps, three or more an explicit list (SPEC.md, Attributes).
+// The configurations an @autotune line names (SPEC.md, Attributes). Two increasing positive values are
+// inclusive bounds searched in doubling steps, the top always included; anything else, two decreasing
+// values among it, is an explicit list. Mirrors `search_choices` in phobos-lang/src/ast.rs.
+export function searchChoices(given: number[]): number[] {
+  const [low, high] = given
+  if (given.length !== 2 || !(low > 0 && high > low)) return given
+  const values: number[] = []
+  for (let value = low; value < high; value *= 2) values.push(value)
+  values.push(high)
+  return values
+}
+
 export function searchSpace(source: string): SearchDim[] {
   const line = source.match(/@autotune\(([^)]*)\)/)
   if (!line) return []
-  return [...line[1].matchAll(/(\w+)\s+in\s+\[([^\]]*)\]/g)].map(([, name, list]) => {
-    const given = list.split(",").map(value => Number(value.trim()))
-    if (given.length !== 2) return { name, values: given }
-    const values: number[] = []
-    for (let value = given[0]; value <= given[1]; value *= 2) values.push(value)
-    return { name, values }
-  })
+  return [...line[1].matchAll(/(\w+)\s+in\s+\[([^\]]*)\]/g)].map(([, name, list]) => ({
+    name,
+    values: searchChoices(list.split(",").map(value => Number(value.trim()))),
+  }))
 }
 
 export function configCount(space: SearchDim[]): number {
