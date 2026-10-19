@@ -1,0 +1,33 @@
+---
+title: "06: Fused attention"
+description: FlashAttention-2 in fp16, forward and backward, causal and not.
+sidebar:
+  order: 6
+---
+
+import PythonModule from "../../../../../components/PythonModule.astro"
+
+[Tutorial 06](https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html)
+is FlashAttention-2: attention computed a block of queries at a time, with
+the softmax carried along the keys so the full score matrix is never stored.
+The port runs in fp16 on the tensor cores with the softmax state and the
+accumulators in `f32`.
+
+<PythonModule file="python/examples/tutorials/t06_fused_attention.py" />
+
+The batch and the heads are flattened into the rows: `Q`, `K` and `V` are
+`[Z H N_CTX, D]`, and a CTA's second grid index, `ctx.block.y`, picks the
+head.
+
+- **`attn_fwd`** takes `BR` queries and walks the keys `BC` at a time,
+  keeping each row's running maximum and sum, and stores each row's
+  log-sum-exp in `L` for the backward pass. Causal attention masks a key past
+  the query and stops the walk at the diagonal.
+- The backward pass recomputes the probabilities from `L` instead of storing
+  them: one kernel for `delta = rowsum(dO * O)`, one for `dK` and `dV` a
+  block of keys at a time over the queries, and one for `dQ` a block of
+  queries at a time over the keys.
+
+The check is the tutorial's `test_op` at Z 1, H 2, N_CTX 1024, HEAD_DIM 64
+and `sm_scale` 0.5, causal and not, forward and backward: the output and the
+three gradients against torch, with an absolute tolerance of 1e-2.

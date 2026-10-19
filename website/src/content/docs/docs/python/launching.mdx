@@ -1,0 +1,118 @@
+---
+title: Launching
+description: Launch a kernel on torch, CuPy or the package's own arrays, with a grid, a stream and what a launch checks.
+sidebar:
+  order: 3
+---
+
+A kernel launches as `kernel[grid](*args)`. The first launch on a card
+compiles it for the card's chip, and the compiled kernel is kept: in the
+process, and in the [kernel cache](/docs/inference/kernel-cache/) for the
+next one.
+
+```python
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.kernel
+@ph.autotune(BLOCK=[1024])
+def add(x: ph.tensor[ph.f32][N], y: ph.tensor[ph.f32][N], out: ph.tensor[ph.f32][N]):
+    base: ph.let = ph.ctx.block.x * BLOCK
+    out[base:+BLOCK] = x[base:+BLOCK] + y[base:+BLOCK]
+```
+
+```python fragment
+import torch
+
+x = torch.rand(98432, device="cuda")
+y = torch.rand(98432, device="cuda")
+out = torch.empty_like(x)
+add[lambda meta: (-(-meta["N"] // meta["BLOCK"]),)](x, y, out)
+torch.cuda.synchronize()
+assert torch.equal(out, x + y)
+```
+
+## The grid
+
+The grid is the number of CTAs along up to three axes:
+
+- a number, `add[96](x, y, out)`;
+- a tuple of one to three numbers, `matmul[(8, 8)](a, b, c)`;
+- a function of `meta`, a dict of the extents the arguments bind and the
+  `@autotune` constants the launch compiles with. `meta["N"]` above is the
+  length of `x`, and `meta["BLOCK"]` the tile size, so the grid follows the
+  variant the autotuner picks.
+
+A [`@persistent`](/docs/attributes/persistent/) kernel sizes its own grid
+and launches as `kernel[()](*args)`.
+
+The CTA size is the kernel's own, from [`@launch`](/docs/attributes/launch/)
+or 256 by default; a launch does not pass one.
+
+## Arguments
+
+A tensor argument is any object with `__cuda_array_interface__`: a torch
+tensor on the GPU, a CuPy array, a Numba device array, or a
+`phobos.DeviceArray`. A scalar argument is a Python number. The launch binds
+the arguments to the kernel's launch contract, which `phobos-compile` writes
+beside the PTX, and checks each one before anything runs:
+
+- the element type and the rank are the declared ones;
+- a fixed extent is the declared one, and a named extent, such as `N`, is the
+  same in every argument that has it;
+- the array is row-major and contiguous, and its address is aligned as the
+  kernel assumes;
+- an extent is a multiple of 4, the row pitch the
+  [kernel ABI](/docs/reference/abi/) requires, or of the tile an
+  [`@aligned`](/docs/attributes/aligned/) promise names;
+- every value fits the kernel's index width.
+
+A mismatch raises `phobos.LaunchError` naming the argument, such as
+``LaunchError: `x` is f32, got typestr <f2``. An array whose rows are not a
+multiple of 4 long can be stored in a wider one and the kernel told the
+length it should use, as [tutorial 02](/docs/python/tutorials/fused-softmax/)
+does.
+
+## Without an array library
+
+`phobos.DeviceArray` allocates device memory and uploads and downloads
+bytes, for a script that has no torch or CuPy:
+
+```python fragment
+import array
+from phobos import DeviceArray
+
+ones = array.array("f", [1.0] * 4096).tobytes()
+x = DeviceArray.from_bytes(ones, (4096,), "f32")
+y = DeviceArray.from_bytes(ones, (4096,), "f32")
+out = DeviceArray((4096,), "f32")
+add[4](x, y, out)
+print(array.array("f", out.to_bytes())[:4])  # array('f', [2.0, 2.0, 2.0, 2.0])
+```
+
+`to_bytes` copies on the legacy default stream, after the launch.
+
+## Streams and synchronization
+
+A launch returns as soon as the kernel is queued. It runs on the legacy
+default stream unless `stream=` names another, a `CUstream` handle such as
+`torch.cuda.current_stream().cuda_stream`. The launch does not wait on an
+array's own stream, so synchronize before reading the results on the host,
+or launch on the stream that produced the inputs.
+
+## Choosing a variant
+
+Each `@autotune` constant takes its first choice unless the
+[autotuner](/docs/python/autotuning/) has picked a winner. `pins=` sets the
+constants for one launch:
+
+```python fragment
+add[lambda meta: (-(-meta["N"] // meta["BLOCK"]),)](x, y, out, pins={"BLOCK": 1024})
+```
+
+`kernel.compile(chip=..., pins=...)` compiles without launching, for a chip
+other than the card's or to look at the result: `.ptx` is the PTX,
+`.kernel().contract` the launch contract, and `.cache_key` the kernel cache
+entry.

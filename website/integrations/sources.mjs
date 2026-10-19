@@ -1,5 +1,5 @@
-// Renders the repository's normative root files (SPEC.md, ENV.md, BENCHMARKS.md,
-// WINDOWS.md) in place as Starlight pages. The files stay the single source: this
+// Renders the repository's normative files (SPEC.md, ENV.md, BENCHMARKS.md,
+// WINDOWS.md, python/README.md) in place as Starlight pages. The files stay the single source: this
 // integration copies them into a gitignored content folder on every start, injects
 // front matter, tags Phobos code fences and rewrites repository-relative links to
 // site routes or GitHub URLs. In dev it watches the root files and rewrites on change.
@@ -24,6 +24,7 @@ export const SOURCES = [
     title: "Building on Windows",
     order: 5,
   },
+  { file: "python/README.md", route: "/docs/python/reference/", label: "Reference", order: 9 },
 ]
 
 const REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url))
@@ -129,10 +130,11 @@ export function liftHeadings(text) {
 }
 
 /**
- * Resolves one link target found in a root file. Returns the rewritten target,
- * plus the repository path of an image to copy beside the page when it is one.
+ * Resolves one link target found in a rendered file, relative to `base`, the
+ * file's directory. Returns the rewritten target, plus the repository path of
+ * an image to copy beside the page when it is one.
  */
-export function rewriteTarget(target, { image = false, isDir = () => false } = {}) {
+export function rewriteTarget(target, { image = false, isDir = () => false, base = "." } = {}) {
   if (/^[a-z][a-z0-9+.-]*:/i.test(target) || target.startsWith("#") || target.startsWith("/")) {
     return { target }
   }
@@ -140,7 +142,7 @@ export function rewriteTarget(target, { image = false, isDir = () => false } = {
   const path = hashAt < 0 ? target : target.slice(0, hashAt)
   const hash = hashAt < 0 ? "" : target.slice(hashAt)
   const normalized = posix
-    .normalize(path.replace(/\\/g, "/"))
+    .join(base, path.replace(/\\/g, "/"))
     .replace(/^(\.\/)+/, "")
     .replace(/\/$/, "")
   if (normalized === "" || normalized === ".") return { target: REPO_URL + hash }
@@ -180,7 +182,7 @@ export function rewriteLinks(text, options = {}) {
 export function render(source, text, options = {}) {
   let body = text.replace(/\r\n?/g, "\n")
   if (source.file === "SPEC.md") body = tagFences(body)
-  const { text: linked, copies } = rewriteLinks(body, options)
+  const { text: linked, copies } = rewriteLinks(body, { ...options, base: posix.dirname(source.file) })
   return { page: frontMatter(liftHeadings(linked), { ...source, source: source.file }), copies }
 }
 

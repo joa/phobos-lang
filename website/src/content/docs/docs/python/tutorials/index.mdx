@@ -1,0 +1,52 @@
+---
+title: Tutorials
+description: Triton's tutorials 01, 02, 03, 05 and 06 ported to Phobos in Python, each checked against torch on the card.
+sidebar:
+  label: Overview
+  order: 0
+---
+
+These are [Triton's tutorials](https://triton-lang.org/main/getting-started/tutorials/index.html)
+ported to Phobos, written in Python. Each is a module under
+`python/examples/tutorials` with its kernels and a `check` that runs them on
+torch tensors and compares the result with torch, with the tolerance the
+Triton tutorial uses. The pages show the files as they are in the
+repository.
+
+| Tutorial | What it computes | What it shows |
+| --- | --- | --- |
+| [01, vector addition](/docs/python/tutorials/vector-add/) | `out = x + y` | A kernel, a grid, a launch; the compiler masks the last block |
+| [02, fused softmax](/docs/python/tutorials/fused-softmax/) | A row softmax | Tiles in shared memory, row reductions, a padded input |
+| [03, matrix multiplication](/docs/python/tutorials/matmul/) | `C = A B` in fp16 | `dot` on the tensor cores with an fp32 accumulator |
+| [05, layer norm](/docs/python/tutorials/layer-norm/) | Forward and backward | Three kernels, a column reduction in place of a lock |
+| [06, fused attention](/docs/python/tutorials/fused-attention/) | FlashAttention-2, forward and backward | Online softmax, causal masking, four kernels |
+
+Tutorial 04, low-memory dropout, is not ported.
+
+## Running them
+
+The checks need a GPU and torch built with CUDA. From a checkout, with the
+compiler built:
+
+```sh
+python python/tests/gpu/tutorials.py                  # all five
+python python/tests/gpu/tutorials.py t03_matmul       # one
+```
+
+Each prints `ok` or `FAIL` with the largest difference from torch. Every
+kernel in the tutorials is also compiled and race-checked on the host by
+`python -m unittest discover -s python/tests`, which needs no GPU.
+
+## Where Phobos differs from Triton
+
+A Triton program is written per block, in vectors of offsets and masks. A
+Phobos kernel is written in tiles: `X[row:+ROWS, 0:+BLOCK]` is a tile, the
+compiler masks what lies past the tensor's end, and the CTA's threads share
+the work of every tile operation. So the ports have no offset arithmetic and
+no masks, except where the tutorial's own logic needs one, such as the
+softmax's ragged last column or attention's causal mask.
+
+A launch takes extents that are multiples of 4, the row pitch of the
+[kernel ABI](/docs/reference/abi/). Where a tutorial's sizes are not, as in
+02 and 05, the port stores the input in a slightly larger tensor and passes
+the true size.

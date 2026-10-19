@@ -1,0 +1,83 @@
+---
+title: From Phobos to Python
+description: ph2py prints a .ph kernel source in its Python spelling, which compiles to the same module.
+sidebar:
+  order: 6
+---
+
+import Command from "../../../../components/Command.astro"
+
+`ph2py` prints a Phobos source in its Python spelling. The Python it prints
+compiles, through the front end, to the same module as the `.ph` file. A
+release ships it beside `phobos-compile`; in a checkout it is the second
+binary of the `phobos-compile` crate. It needs no GPU.
+
+<Command
+  release="ph2py examples/gemm_fp32.ph"
+  checkout="cargo run -p phobos-compile --bin ph2py -- examples/gemm_fp32.ph"
+/>
+
+For the [f32 GEMM](/docs/examples/gemm-fp32/) it prints:
+
+```python
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.kernel
+@ph.autotune(TILE_M=[32, 256], TILE_N=[32, 256], TILE_K=[4, 32], U=[1, 8], T=[256, 128], IB=[32, 64])
+@ph.launch("T")
+@ph.index_bits("IB")
+@ph.pipeline
+@ph.aligned(M="TILE_M", N="TILE_N", K="TILE_K")
+def gemm(A: ph.tensor[ph.f32][M, K], B: ph.tensor[ph.f32][K, N], C: ph.tensor[ph.f32][M, N], alpha: ph.f32, beta: ph.f32):
+    pm: ph.let = ph.ctx.block.x
+    pn: ph.let = ph.ctx.block.y
+    acc: ph.var[ph.tile[ph.f32][TILE_M, TILE_N]] = 0.0
+    for kt in ph.unroll(U, range(0, K, TILE_K)):
+        a: ph.var = A[pm * TILE_M:+TILE_M, kt:+TILE_K]
+        b: ph.var = B[kt:+TILE_K, pn * TILE_N:+TILE_N]
+        acc += ph.dot(a, b)
+    if beta == 0.0:
+        C[pm * TILE_M:+TILE_M, pn * TILE_N:+TILE_N] = alpha * acc
+    else:
+        c_old: ph.let = C[pm * TILE_M:+TILE_M, pn * TILE_N:+TILE_N]
+        C[pm * TILE_M:+TILE_M, pn * TILE_N:+TILE_N] = alpha * acc + beta * c_old
+```
+
+## A directory at a time
+
+`ph2py --out DIR PATH...` writes `DIR/<stem>.py` for each source: a file, or
+every `.ph` in a directory. It prints one line for each source it cannot
+spell, then a count.
+
+<Command
+  release="ph2py --out py examples"
+  checkout="cargo run -p phobos-compile --bin ph2py -- --out py examples"
+/>
+
+## What it changes
+
+The program is the same; a few constructs are respelled so Python reads them
+as Phobos does:
+
+- A `/` that divides integers becomes `//`. Which `/` divides integers is
+  decided by compiling the source at the default target; a `/` no kernel
+  builds stays `/`.
+- A variable or parameter named for a Python keyword, such as `from`, takes a
+  trailing underscore, `from_`. No compiled module sees the difference.
+- The comment a source opens with is kept, as a Python comment; the others
+  are dropped.
+
+Two things have no Python spelling and are errors: a kernel named for a
+Python keyword, and a `fn` whose `/` divides integers at one call and floats
+at another.
+
+## How it is checked
+
+`python/tests/roundtrip.py` prints every `.ph` in the repository, the
+snapshot corpus and the generated kernels through `ph2py`, reads each back
+through the front end, and compares the emitted modules under the five
+targets the compiler is tested at. They are identical for every source that
+parses.

@@ -1,0 +1,25 @@
+---
+title: "02: Fused softmax"
+description: A row softmax kept in shared memory, with the columns past the row's length left out.
+sidebar:
+  order: 2
+---
+
+import PythonModule from "../../../../../components/PythonModule.astro"
+
+[Tutorial 02](https://triton-lang.org/main/getting-started/tutorials/02-fused-softmax.html)
+computes a softmax over each row in one pass over memory: load the row,
+subtract its maximum, exponentiate, divide by the sum, store.
+
+<PythonModule file="python/examples/tutorials/t02_fused_softmax.py" />
+
+A CTA takes `ROWS` whole rows as a `[ROWS, BLOCK]` tile, `x`, which lives in
+shared memory for the rest of the kernel. `ph.iota(1) < n` is true in the
+columns that belong to the row, and `ph.where` sets the others to `-1.0e30`
+so they add nothing to the maximum or the sum. `ph.rowmax` and `ph.rowsum`
+reduce each row to a `[ROWS, 1]` tile, which broadcasts back over the row.
+
+The tutorial's input is 1823 x 781. A launch takes extents that are multiples
+of 4, so the check stores it in a 1824 x 784 tensor, passes `n = 781`, and
+compares the 1823 x 781 that matter with `torch.allclose`'s default
+tolerance.

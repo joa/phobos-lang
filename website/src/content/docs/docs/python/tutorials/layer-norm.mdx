@@ -1,0 +1,29 @@
+---
+title: "05: Layer norm"
+description: Layer norm forward and backward in three kernels, dw and db summed by a column reduction.
+sidebar:
+  order: 5
+---
+
+import PythonModule from "../../../../../components/PythonModule.astro"
+
+[Tutorial 05](https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html)
+normalizes each row of an fp16 matrix and computes the gradients of the
+input, the weight and the bias.
+
+<PythonModule file="python/examples/tutorials/t05_layer_norm.py" />
+
+- **`ln_fwd`** gives each CTA one row. It walks the row in `CB`-column chunks
+  three times: for the mean, for the variance, and to normalize. It keeps the
+  mean and the reciprocal deviation, `Mean` and `Rstd`, for the backward
+  pass. The arithmetic is in `f32`: `ph.f32(X[...])` widens each chunk.
+- **`ln_bwd_dx`** computes `dx` a row a CTA, as the tutorial does.
+- **`ln_bwd_dwdb`** computes `dw` and `db`, which sum over all rows. The
+  tutorial accumulates partial sums under a lock and reduces them in a second
+  kernel; here each CTA owns `CB` columns and walks the rows, `RT` at a time,
+  summing with `ph.colsum`, so no two CTAs write the same column.
+
+The tutorial's input is 1151 x 8192. A launch takes extents that are
+multiples of 4, so the rows are stored 1152 long with a last row of zeros,
+which adds nothing to `dw` and `db`. The check compares `y`, `dx`, `dw` and
+`db` with torch, with an absolute tolerance of 1e-2.
