@@ -23,24 +23,26 @@ const MAX_DEPTH: usize = 32;
 /// their depth, well within [`MAX_DEPTH`].
 const MAX_NODES: usize = 100_000;
 
-#[derive(Clone)]
-pub(crate) enum Body {
+/// A function's body: an expression, or statements spliced in at a call.
+#[derive(Clone, Debug)]
+pub enum Body {
     Expr(Expr),
     Stmts(Vec<Stmt>),
 }
 
-#[derive(Clone)]
-pub(crate) struct Function {
-    pub(crate) name: String,
-    pub(crate) params: Vec<String>,
-    pub(crate) body: Body,
+/// A `fn` as written.
+#[derive(Clone, Debug)]
+pub struct Function {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Body,
     /// Its name, where it is defined.
-    pub(crate) span: Span,
+    pub span: Span,
     /// The library file it comes from, empty for a program's own.
-    pub(crate) file: String,
+    pub file: String,
     /// Whether it comes from a library, whose spans point into a file of
     /// its own: an inlined body then takes the call's.
-    pub(crate) prelude: bool,
+    pub prelude: bool,
 }
 
 /// Inlines every call to a function in `fns`, or else in `prelude`, into

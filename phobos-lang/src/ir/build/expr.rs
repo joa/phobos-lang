@@ -72,6 +72,13 @@ impl Build {
             ExprKind::Binary { op, lhs, rhs } => {
                 let l = self.emit_expr(lhs)?;
                 let r = self.emit_expr(rhs)?;
+                let integer = |v: &Rv| {
+                    let (Rv::Scalar(v) | Rv::Tile(v)) = *v;
+                    let s = self.ir.ty(v).as_scalar().or_else(|| self.ir.ty(v).elem());
+                    s.is_some_and(|s| s.is_int() || s == Scalar::Index)
+                };
+                let both = integer(&l) && integer(&r);
+                self.check_division(*op, lhs, rhs, both)?;
                 match (l, r) {
                     (Rv::Scalar(a), Rv::Scalar(b)) => Ok(Rv::Scalar(self.emit_binop(*op, a, b)?)),
                     (Rv::Tile(a), Rv::Tile(b)) => Ok(Rv::Tile(self.emit_tile_binary(*op, a, b)?)),

@@ -1,0 +1,19 @@
+error: unknown identifier `nope`
+  --> tests/ui/build_recovery.py:11:17
+   |
+11 |     x: ph.let = nope + 1
+   |                 ^^^^ not found in this scope
+
+error: unknown function `wobble`
+  --> tests/ui/build_recovery.py:13:17
+   |
+13 |     z: ph.let = ph.wobble(A)
+   |                 ^^^^^^^^^^^^ not a built-in
+
+error: tensor `A` used as a value; index or slice it
+  --> tests/ui/build_recovery.py:15:16
+   |
+15 |         B[i] = A
+   |                ^
+
+error: aborting due to 3 previous errors

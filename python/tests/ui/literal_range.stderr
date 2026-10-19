@@ -1,0 +1,35 @@
+error: integer literal `5000000000` does not fit a 32-bit index
+  --> tests/ui/literal_range.py:12:15
+   |
+12 |     I[0, 0] = 5000000000 + n
+   |               ^^^^^^^^^^ would be 705032704
+   |
+   = note: an integer literal is an index, 32 bits wide unless the kernel compiles at 64
+   = note: one up to 4294967295 is the 32-bit word of its bits
+
+error: integer literal `4294967296` does not fit a 32-bit index
+  --> tests/ui/literal_range.py:14:15
+   |
+14 |     I[0, 2] = 4294967296 + n
+   |               ^^^^^^^^^^ would be 0
+   |
+   = note: an integer literal is an index, 32 bits wide unless the kernel compiles at 64
+   = note: one up to 4294967295 is the 32-bit word of its bits
+
+error: float literal `1.0e39` is infinite as an `f32`
+  --> tests/ui/literal_range.py:16:15
+   |
+16 |     X[0, 0] = 1.0e39
+   |               ^^^^^^ past what an `f32` holds
+   |
+   = note: a float literal is an `f32`, whatever it meets
+
+error: float literal `1.0e-50` is zero as an `f32`
+  --> tests/ui/literal_range.py:17:15
+   |
+17 |     X[0, 1] = 1.0e-50
+   |               ^^^^^^^ past what an `f32` holds
+   |
+   = note: a float literal is an `f32`, whatever it meets
+
+error: aborting due to 4 previous errors

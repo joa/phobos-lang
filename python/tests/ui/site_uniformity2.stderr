@@ -1,0 +1,12 @@
+error: a CTA-wide op takes a value that differs between lanes
+  --> tests/ui/site_uniformity2.py:11:17
+   |
+11 |     u: ph.var = A[0, ph.ctx.lane:+1]
+   |                 ^^^^^-----------^^^^
+   |                 |    |
+   |                 |    this differs between lanes
+   |                 needs the same value in every thread
+   |
+   = note: tile ops, barriers, atomics and the intrinsics run once per CTA, every thread taking part
+
+error: aborting due to 1 previous error

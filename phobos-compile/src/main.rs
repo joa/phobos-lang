@@ -29,12 +29,13 @@ use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig, Stdlib};
 use phobos_base::term::{self, ColorChoice};
 use phobos_lang::Contract;
 use phobos_lang::ast::Kernel;
-use phobos_lang::diag::{self, Diagnostics, SourceFile};
+use phobos_lang::diag::{self, Diagnostic, Diagnostics, Origin, SourceFile, Span, Spelling};
 use phobos_lang::race;
 
 const USAGE: &str = "usage: phobos-compile FILE.ph [--chip CHIP | --capability CC] [--index-bits 32|64] \
-                     [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] \
-                     [--stdlib FILE | --no-std] [--color auto|always|never] [--error-format human|json]";
+                     [--set NAME=VALUE]... [--all-variants] [--check-races] [-o OUT.ptx] [--origin MAP.json] \
+                     [--stdlib FILE | --no-std] [--color auto|always|never] [--error-format human|json]\n       \
+                     phobos-compile --render DIAG.json [--color auto|always|never] [--error-format human|json]";
 
 const HELP: &str = "
   --chip CHIP              target architecture, sm_75 by default
@@ -53,6 +54,13 @@ const HELP: &str = "
                            its buffer
   -o, --output OUT.ptx     write the PTX here instead of standard output,
                            and each kernel's launch contract to OUT.json
+  --origin MAP.json        FILE was generated from another language's
+                           source: MAP holds that source and where each
+                           construct of FILE came from, and every error,
+                           race and location is reported there
+  --render DIAG.json       print the errors DIAG holds as this compiler
+                           prints its own, and fail; for a front end's
+                           errors before there is a FILE
   --stdlib FILE            compile against the functions FILE defines in
                            place of the standard library
   --no-std                 compile with no standard library: a source calls
@@ -103,6 +111,8 @@ fn run(report: &mut Report) -> Result<()> {
     let mut pins: HashMap<String, i64> = HashMap::new();
     let mut all_variants = false;
     let mut check_races = false;
+    let mut origin: Option<PathBuf> = None;
+    let mut render: Option<PathBuf> = None;
     let mut stdlib: Option<PathBuf> = None;
     let mut no_std = false;
     let mut args = std::env::args().skip(1);
@@ -131,6 +141,8 @@ fn run(report: &mut Report) -> Result<()> {
             }
             "--all-variants" => all_variants = true,
             "--check-races" => check_races = true,
+            "--origin" => origin = Some(value()?.into()),
+            "--render" => render = Some(value()?.into()),
             "--stdlib" => stdlib = Some(value()?.into()),
             "--no-std" => no_std = true,
             "-o" | "--output" => out = Some(value()?.into()),
@@ -156,6 +168,9 @@ fn run(report: &mut Report) -> Result<()> {
             _ => bail!("one source file at a time\n{USAGE}"),
         }
     }
+    if let Some(path) = render {
+        return Err(rendered(&path)?.into());
+    }
     let file = file.context(USAGE)?;
     ctx.stdlib = match (stdlib, no_std) {
         (Some(_), true) => bail!("--stdlib and --no-std together"),
@@ -171,7 +186,10 @@ fn run(report: &mut Report) -> Result<()> {
     };
 
     let src = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-    let source = SourceFile::new(file.display().to_string(), src);
+    let source = match origin {
+        Some(path) => SourceFile::with_origin(file.display().to_string(), src, read_origin(&path)?),
+        None => SourceFile::new(file.display().to_string(), src),
+    };
     let kernels = phobos_lang::parse_source_with(&source, &ctx.stdlib)?;
 
     if !all_variants {
@@ -320,6 +338,67 @@ fn compile(ctx: &Context, source: &Arc<SourceFile>) -> Result<Compiled> {
     let GpuConfig::Nvidia(nv) = &ctx.gpu_config;
     let cache_key = phobos_kernels::cache::key(ctx, source.text());
     Ok(Compiled { ptx, contracts, cache_key, chip: nv.chip().to_string() })
+}
+
+/// The source a front end generated FILE from, and its span map, as the
+/// front end writes them: `{"file", "text", "map": [[lo, hi, from_lo,
+/// from_hi]], "spellings": [[lo, hi, "true_div" | "floor_div"]]}`, offsets
+/// in bytes.
+fn read_origin(path: &Path) -> Result<Origin> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let str_of = |key: &str| json[key].as_str().with_context(|| format!("{}: no `{key}`", path.display()));
+    let span = |v: &serde_json::Value, i: usize| -> Result<Span> {
+        let n = |j: usize| v[j].as_u64().map(|n| n as u32).context("a span bound is not an offset");
+        Ok(Span::new(n(i)?, n(i + 1)?))
+    };
+    let rows = |key: &str| json[key].as_array().cloned().unwrap_or_default();
+    let map = rows("map").iter().map(|r| Ok((span(r, 0)?, span(r, 2)?))).collect::<Result<_>>()?;
+    let spellings = rows("spellings")
+        .iter()
+        .map(|r| {
+            let spelling = match r[2].as_str() {
+                Some("true_div") => Spelling::TrueDiv,
+                Some("floor_div") => Spelling::FloorDiv,
+                other => bail!("{}: unknown spelling {other:?}", path.display()),
+            };
+            Ok((span(r, 0)?, spelling))
+        })
+        .collect::<Result<_>>()?;
+    Ok(Origin { file: SourceFile::new(str_of("file")?, str_of("text")?), map, spellings })
+}
+
+/// The diagnostics a front end found before there was a kernel to compile,
+/// `{"file", "text", "diagnostics": [{"message", "labels": [[lo, hi,
+/// "text", primary]], "notes", "help"}]}`, for the error they make.
+fn rendered(path: &Path) -> Result<Diagnostics> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+    let json: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+    let strings = |v: &serde_json::Value| -> Vec<String> {
+        v.as_array().into_iter().flatten().filter_map(|s| s.as_str().map(str::to_string)).collect()
+    };
+    let list = json["diagnostics"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|d| {
+            let mut out = Diagnostic::error(d["message"].as_str().unwrap_or_default());
+            for l in d["labels"].as_array().into_iter().flatten() {
+                let span = Span::new(l[0].as_u64().unwrap_or(0) as u32, l[1].as_u64().unwrap_or(0) as u32);
+                let label = l[2].as_str().unwrap_or_default();
+                out = if l[3].as_bool().unwrap_or(true) { out.primary(span, label) } else { out.secondary(span, label) };
+            }
+            for n in strings(&d["notes"]) {
+                out = out.note(n);
+            }
+            for h in strings(&d["help"]) {
+                out = out.help(h);
+            }
+            out
+        })
+        .collect();
+    let file = SourceFile::new(json["file"].as_str().unwrap_or_default(), json["text"].as_str().unwrap_or_default());
+    Ok(Diagnostics::new(file, list))
 }
 
 fn parse_setting(s: &str) -> Result<(String, i64)> {

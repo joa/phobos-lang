@@ -3,6 +3,7 @@
 //     cargo run -p phobos-lang --features trace --example site -- traces
 //     cargo run -p phobos-lang --features trace --example site -- check
 //     cargo run -p phobos-lang --features trace --example site -- attributes
+//     cargo run -p phobos-lang --features trace --example site -- stubs
 //
 // `traces` traces every kernel `website/kernels.json` lists and every docs
 // fence with a `trace` meta into `website/src/data/traces/<name>.<chip>.json`.
@@ -15,6 +16,8 @@
 // `website/src/data/diagnostics/NAME.txt`: its errors, or with `races`, what
 // `--check-races` finds in a fence that compiles. `attributes` writes the
 // attributes the compiler accepts to `website/src/data/attributes.json`.
+// `stubs` writes `python/phobos/lang.pyi`, the Python package's list of the
+// attributes, built-ins and library functions, which a test keeps current.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -37,7 +40,8 @@ fn main() -> Result<()> {
         Some("traces") => traces(&root),
         Some("check") => check(&root),
         Some("attributes") => attributes(&root),
-        _ => bail!("usage: site traces | check | attributes"),
+        Some("stubs") => stubs(&root),
+        _ => bail!("usage: site traces | check | attributes | stubs"),
     }
 }
 
@@ -237,6 +241,13 @@ fn attributes(root: &Path) -> Result<()> {
         &file,
         serde_json::to_string_pretty(&phobos_lang::ast::ATTRIBUTES)? + "\n",
     )?;
+    println!("{}", rel(root, &file));
+    Ok(())
+}
+
+fn stubs(root: &Path) -> Result<()> {
+    let file = root.join(phobos_lang::stubs::PATH);
+    std::fs::write(&file, phobos_lang::stubs::python())?;
     println!("{}", rel(root, &file));
     Ok(())
 }

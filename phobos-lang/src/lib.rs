@@ -9,12 +9,13 @@ pub mod race;
 mod report;
 pub(crate) mod shape;
 pub mod stdlib;
+pub mod stubs;
 pub mod token;
 #[cfg(feature = "trace")]
 pub mod trace;
 
 pub use contract::Contract;
-pub use report::{LaunchReport, ScratchParam, launch_report};
+pub use report::{LaunchReport, ScratchParam, launch_report, launch_report_source};
 
 /// Parses `src`. A failure is a [`diag::Diagnostics`] whose locations are
 /// bare `line:col`; [`parse_source`] names the file.
@@ -40,6 +41,31 @@ pub fn parse_source_with(
         parser::Parser::new(toks, file.clone()).parse_program_with(&prelude)
     })
     .map_err(fail)
+}
+
+/// `file`'s kernels and functions as written, before anything is inlined
+/// or lowered: what a printer of the source in another language reads.
+pub fn parse_items(file: &std::sync::Arc<diag::SourceFile>) -> anyhow::Result<(Vec<ast::Kernel>, Vec<parser::Function>)> {
+    let fail = |list| anyhow::Error::new(diag::Diagnostics::new(file.clone(), list));
+    let toks = lexer::Lexer::new(file.text()).tokenize().map_err(fail)?;
+    parser::parse_on_big_stack(|| parser::Parser::new(toks, file.clone()).parse_items()).map_err(fail)
+}
+
+/// Each `/` the kernels of `file` build under `context`, at the source
+/// between its operands, and whether it divides integers there. A kernel
+/// that fails to build gives the ones built before it failed.
+pub fn divisions(context: &phobos_base::context::Context, file: &std::sync::Arc<diag::SourceFile>) -> Vec<(diag::Span, bool)> {
+    let Ok(kernels) = parse_source_with(file, &context.stdlib) else {
+        return Vec::new();
+    };
+    let target = codegen::target::build_target(context);
+    let mut out = Vec::new();
+    for kernel in &kernels {
+        if let Ok((_, report)) = ir::build::build(context, target, kernel) {
+            out.extend(report.divisions);
+        }
+    }
+    out
 }
 
 /// Compiles the given code.

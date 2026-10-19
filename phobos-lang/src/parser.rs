@@ -8,7 +8,7 @@ mod depth;
 pub(crate) use depth::parse_on_big_stack;
 mod extent;
 mod functions;
-pub(crate) use functions::Function;
+pub use functions::{Body, Function};
 mod jumps;
 mod recover;
 mod size;
@@ -193,7 +193,7 @@ impl Parser {
         Ok(fns)
     }
 
-    fn parse_items(&mut self) -> Result<(Vec<Kernel>, Vec<Function>), Vec<Diagnostic>> {
+    pub(crate) fn parse_items(&mut self) -> Result<(Vec<Kernel>, Vec<Function>), Vec<Diagnostic>> {
         let mut kernels = Vec::new();
         let mut fns = Vec::new();
         while !self.matches(&Tok::Eof) && self.errors.len() < diag::MAX_ERRORS {

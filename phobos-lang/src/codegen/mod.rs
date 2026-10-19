@@ -451,11 +451,12 @@ fn location<'c>(
     if span == crate::diag::Span::default() {
         return None;
     }
-    let (line, col) = source.line_col(span.lo);
-    let (end_line, end_col) = source.line_col(span.hi);
+    let (shown, span) = (source.shown(), source.locate(span));
+    let (line, col) = shown.line_col(span.lo);
+    let (end_line, end_col) = shown.line_col(span.hi);
     Some(Location::file_line_col_range(
         ctx,
-        source.name(),
+        shown.name(),
         line as usize,
         col as usize,
         end_line as usize,

@@ -1,0 +1,10 @@
+error: `@swizzle` cannot swizzle tile `w`: something reads it that cannot apply the permutation
+  --> tests/ui/site_swizzle.py:10:2
+   |
+10 | @ph.swizzle
+   |  ^^^^^^^^^^ asserted here
+...
+25 |         E[pn * 64:+64, kt:+128] = w
+   |         --------------------------- tile `w` is read here without the permutation
+
+error: aborting due to 1 previous error

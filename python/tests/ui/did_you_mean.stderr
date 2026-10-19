@@ -1,0 +1,21 @@
+error: unknown identifier `scael`
+  --> tests/ui/did_you_mean.py:12:36
+   |
+12 |     x: ph.let = A[ph.ctx.thread] * scael
+   |                                    ^^^^^ not found in this scope
+help: a similar name exists: `scale`
+   |
+12 |     x: ph.let = A[ph.ctx.thread] * scale
+   |                                    ~~~~~
+
+error: unknown function `sqtr`
+  --> tests/ui/did_you_mean.py:13:24
+   |
+13 |     B[ph.ctx.thread] = ph.sqtr(x)
+   |                        ^^^^^^^^^^ not a built-in
+help: a similar name exists: `sqrt`
+   |
+13 |     B[ph.ctx.thread] = ph.sqrt(x)
+   |                           ~~~~
+
+error: aborting due to 2 previous errors

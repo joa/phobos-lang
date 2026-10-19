@@ -7,6 +7,7 @@ mod generate;
 mod hoist;
 mod lane_sum;
 mod lanes;
+mod literals;
 mod decl;
 mod matmul;
 pub(crate) mod names;
@@ -14,6 +15,7 @@ mod params;
 mod pipeline;
 mod regs;
 mod slice;
+mod spelling;
 mod stmt;
 mod store;
 mod unroll;
@@ -70,6 +72,10 @@ pub struct Report {
     /// pass that makes the loop dynamic again; empty for a step the source
     /// left out.
     pub bounds: BTreeMap<OpId, [Span; 3]>,
+    /// Each `/` built, at the source between its operands, and whether it
+    /// divided integers: what a printer in another language needs to spell
+    /// it.
+    pub divisions: Vec<(Span, bool)>,
 }
 
 /// What a name in scope resolves to.
@@ -265,7 +271,7 @@ pub fn build_cautious(
         regs_declared: Vec::new(),
         fusing_regs: false,
         source: kernel.source.clone(),
-        errors: Vec::new(),
+        errors: literals::check(kernel, base.index_bitwidth),
         poisoned: HashSet::new(),
         decls: HashMap::new(),
         declaring: None,

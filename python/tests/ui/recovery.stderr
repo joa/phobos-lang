@@ -1,0 +1,7 @@
+error: invalid syntax
+  --> tests/ui/recovery.py:10:23
+   |
+10 |     s: ph.let = 2.0 * * 3.0
+   |                       ^
+
+error: aborting due to 1 previous error

@@ -1,0 +1,7 @@
+error: expected '('
+ --> tests/ui/missing_paren.py:8:6
+  |
+8 | def k:
+  |      ^
+
+error: aborting due to 1 previous error

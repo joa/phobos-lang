@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 pub use paint::Class;
 pub use phobos_base::term::Colors;
-pub use source::SourceFile;
+pub use source::{Origin, SourceFile, Spelling};
 
 /// The most errors one run reports; past it the rest are dropped.
 pub const MAX_ERRORS: usize = 20;
@@ -180,6 +180,18 @@ impl Diagnostics {
         out
     }
 
+    /// The diagnostics where they are shown: a generated source's in the
+    /// source it was generated from, where an edit that does not fall on a
+    /// construct copied verbatim stays a plain help.
+    pub fn shown(&self) -> std::borrow::Cow<'_, Diagnostics> {
+        let shown = self.source.display();
+        if Arc::ptr_eq(&shown, &self.source) {
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let list = self.list.iter().cloned().map(|d| locate(&self.source, d)).collect();
+        std::borrow::Cow::Owned(Diagnostics::new(shown, list))
+    }
+
     fn push_all(&mut self, list: Vec<Diagnostic>) {
         for d in list {
             if !self.list.contains(&d) {
@@ -208,19 +220,20 @@ impl Diagnostics {
     /// rustc's layout, every diagnostic and then a count, colored as `colors`
     /// allows.
     pub fn render(&self, colors: Colors) -> String {
-        render::render_all(self, colors)
+        render::render_all(&self.shown(), colors)
     }
 
     /// One JSON object per line, spans as byte ranges and as lines and
     /// columns.
     pub fn to_json(&self) -> String {
-        json::to_json(self)
+        json::to_json(&self.shown())
     }
 
     /// `name:line:col` for `span`, or `line:col` for a source with no name.
     pub fn location(&self, span: Span) -> String {
-        let (line, col) = self.source.line_col(span.lo);
-        match self.source.name() {
+        let (file, span) = (self.source.shown(), self.source.locate(span));
+        let (line, col) = file.line_col(span.lo);
+        match file.name() {
             "" => format!("{line}:{col}"),
             name => format!("{name}:{line}:{col}"),
         }
@@ -246,6 +259,22 @@ impl std::fmt::Display for Diagnostics {
 }
 
 impl std::error::Error for Diagnostics {}
+
+/// `d` with its spans in `source`'s display file.
+fn locate(source: &SourceFile, mut d: Diagnostic) -> Diagnostic {
+    for label in &mut d.labels {
+        label.span = source.locate(label.span);
+    }
+    for help in &mut d.help {
+        match help.edit.take() {
+            Some(edit) if source.verbatim(edit.span) => {
+                help.edit = Some(Edit { span: source.locate(edit.span), ..edit });
+            }
+            _ => {}
+        }
+    }
+    d
+}
 
 /// `e` as rustc would show it: rendered if it is [`Diagnostics`], else its
 /// message chain as one error with no location.
@@ -307,3 +336,6 @@ fn edit_distance(a: &str, b: &str) -> usize {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod origin_tests;

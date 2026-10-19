@@ -1,0 +1,7 @@
+error: `grid_barrier()` uses the barrier a `@persistent` launch supplies; this kernel is not `@persistent`
+  --> tests/ui/grid_barrier_not_persistent.py:10:5
+   |
+10 |     ph.grid_barrier()
+   |     ^^^^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

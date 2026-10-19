@@ -1,0 +1,11 @@
+error: a CTA-wide op sits under control that differs between lanes
+  --> tests/ui/site_uniformity.py:13:9
+   |
+12 |     if ph.ctx.lane == 0:
+   |        ---------------- this differs between lanes
+13 |         t = t * 2.0
+   |         ^^^^^^^^^^^ every thread of the CTA must reach this
+   |
+   = note: tile ops, barriers, atomics and the intrinsics run once per CTA, every thread taking part
+
+error: aborting due to 1 previous error
