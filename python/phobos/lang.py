@@ -62,11 +62,15 @@ def unroll(n, loop):
     return loop
 
 
-def kernel(fn):
-    """`@ph.kernel`: a Phobos kernel, launched as `kernel[grid](*args)`."""
+def kernel(fn=None, *, key=None, reference=None):
+    """`@ph.kernel`: a Phobos kernel. `key` names the extents the autotuner
+    tunes for, one winner per value they take; with `reference`, a launch at
+    key values with no winner yet tunes first. See `phobos.autotune`."""
+    if fn is None:
+        return _functools.partial(kernel, key=key, reference=reference)
     from .jit import Kernel
 
-    return Kernel(fn)
+    return Kernel(fn, key=key, reference=reference)
 
 
 def fn(f=None, *, uses=()):
