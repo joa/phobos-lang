@@ -9,6 +9,21 @@ const MAGIC: [u8; 4] = *b"GGUF";
 const SUPPORTED_VERSIONS: [u32; 2] = [2, 3];
 const DEFAULT_ALIGNMENT: u64 = 32;
 
+/// How deep arrays may nest. ggml writes arrays of scalars and strings, so
+/// one level is all a real file uses; the bound keeps a crafted file from
+/// recursing until the stack overflows.
+const MAX_ARRAY_DEPTH: usize = 4;
+
+/// The fewest bytes one encoded element of each kind takes, which bounds how
+/// many a declared count can be before the file runs out.
+const STRING_MIN_BYTES: usize = 8;
+/// An element type and a count.
+const ARRAY_MIN_BYTES: usize = 12;
+/// A key, a value type and a one-byte value.
+const KV_MIN_BYTES: usize = STRING_MIN_BYTES + 4 + 1;
+/// A name, a dimension count, one dimension, a type and an offset.
+const TENSOR_MIN_BYTES: usize = STRING_MIN_BYTES + 4 + 8 + 4 + 8;
+
 pub struct Container {
     pub version: u32,
     pub metadata: Metadata,
@@ -21,11 +36,13 @@ pub struct Container {
 struct Reader<'a> {
     bytes: &'a [u8],
     pos: usize,
+    /// How many arrays the reader is inside.
+    depth: usize,
 }
 
 impl<'a> Reader<'a> {
     fn new(bytes: &'a [u8]) -> Reader<'a> {
-        Reader { bytes, pos: 0 }
+        Reader { bytes, pos: 0, depth: 0 }
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
@@ -64,12 +81,15 @@ impl<'a> Reader<'a> {
             .map_err(|e| anyhow::anyhow!("GGUF string at offset {} is not UTF-8: {e}", self.pos))
     }
 
-    fn checked_len(&mut self) -> Result<usize> {
+    /// A count of elements that each take at least `min_bytes` in the file.
+    /// A count the rest of the file cannot hold is refused before anything
+    /// is allocated for it.
+    fn checked_len(&mut self, min_bytes: usize) -> Result<usize> {
         let len = usize::try_from(self.u64()?).context_overflow()?;
         let remaining = self.bytes.len() - self.pos;
         ensure!(
-            len <= remaining,
-            "GGUF declares {len} elements but only {remaining} bytes remain"
+            len.checked_mul(min_bytes).is_some_and(|bytes| bytes <= remaining),
+            "GGUF declares {len} elements of at least {min_bytes} bytes but only {remaining} bytes remain"
         );
         Ok(len)
     }
@@ -93,8 +113,20 @@ impl<'a> Reader<'a> {
     }
 
     fn array(&mut self) -> Result<Array> {
+        ensure!(
+            self.depth < MAX_ARRAY_DEPTH,
+            "GGUF arrays nest more than {MAX_ARRAY_DEPTH} deep at offset {}",
+            self.pos
+        );
+        self.depth += 1;
+        let array = self.array_body();
+        self.depth -= 1;
+        array
+    }
+
+    fn array_body(&mut self) -> Result<Array> {
         let elem_type = ValueType::from_code(self.u32()?)?;
-        let len = self.checked_len()?;
+        let len = self.checked_len(elem_type.min_bytes())?;
 
         Ok(match elem_type {
             ValueType::U8 => Array::U8(self.collect(len, Reader::u8)?),
@@ -126,6 +158,20 @@ impl<'a> Reader<'a> {
     }
 }
 
+impl ValueType {
+    /// The fewest bytes one encoded value of this type takes.
+    fn min_bytes(self) -> usize {
+        match self {
+            ValueType::U8 | ValueType::I8 | ValueType::Bool => 1,
+            ValueType::U16 | ValueType::I16 => 2,
+            ValueType::U32 | ValueType::I32 | ValueType::F32 => 4,
+            ValueType::U64 | ValueType::I64 | ValueType::F64 => 8,
+            ValueType::String => STRING_MIN_BYTES,
+            ValueType::Array => ARRAY_MIN_BYTES,
+        }
+    }
+}
+
 trait ContextOverflow<T> {
     fn context_overflow(self) -> Result<T>;
 }
@@ -154,8 +200,8 @@ pub fn parse(bytes: &[u8]) -> Result<Container> {
         "unsupported GGUF version {version}; this reader handles {SUPPORTED_VERSIONS:?}"
     );
 
-    let tensor_count = reader.checked_len()?;
-    let kv_count = reader.checked_len()?;
+    let tensor_count = reader.checked_len(TENSOR_MIN_BYTES)?;
+    let kv_count = reader.checked_len(KV_MIN_BYTES)?;
 
     let mut metadata = Metadata::default();
     for _ in 0..kv_count {
@@ -171,10 +217,14 @@ pub fn parse(bytes: &[u8]) -> Result<Container> {
         let name = reader.string()?;
         let n_dims = reader.u32()? as usize;
         ensure!(
-            n_dims <= 4,
-            "tensor '{name}' declares {n_dims} dimensions; ggml allows at most 4"
+            (1..=4).contains(&n_dims),
+            "tensor '{name}' declares {n_dims} dimensions; ggml allows 1 to 4"
         );
         let dims = reader.collect(n_dims, Reader::u64)?;
+        ensure!(
+            dims.iter().try_fold(1u64, |n, &d| n.checked_mul(d)).is_some(),
+            "tensor '{name}' has dimensions {dims:?}, whose element count overflows 64 bits"
+        );
         let ggml_type = GgmlType::from_code(reader.u32()?)?;
         let offset_bytes = reader.u64()?;
 
@@ -206,7 +256,9 @@ pub fn parse(bytes: &[u8]) -> Result<Container> {
     };
 
     let header_end = reader.pos as u64;
-    let data_offset_bytes = header_end.next_multiple_of(alignment_bytes);
+    let data_offset_bytes = header_end
+        .checked_next_multiple_of(alignment_bytes)
+        .context_overflow()?;
     let data_offset_bytes = usize::try_from(data_offset_bytes).context_overflow()?;
 
     Ok(Container {

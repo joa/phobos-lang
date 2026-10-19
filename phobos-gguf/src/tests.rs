@@ -203,3 +203,85 @@ fn reports_unknown_tensors() {
             .contains("no tensor")
     );
 }
+
+/// A header with no tensors and one key whose value bytes the caller writes,
+/// starting at its value type.
+fn header_with_value(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend(b"GGUF");
+    out.extend(3u32.to_le_bytes());
+    out.extend(0u64.to_le_bytes());
+    out.extend(1u64.to_le_bytes());
+    push_str(&mut out, "k");
+    out.extend(value);
+    out
+}
+
+fn error_of(bytes: Vec<u8>) -> String {
+    match Gguf::from_bytes(bytes) {
+        Ok(_) => panic!("a malformed file parsed"),
+        Err(err) => format!("{err:#}"),
+    }
+}
+
+#[test]
+fn deeply_nested_arrays_are_an_error_not_a_stack_overflow() {
+    // Each level is an array of one array; 12 bytes a level.
+    let levels = 400_000;
+    let mut value = 9u32.to_le_bytes().to_vec();
+    for _ in 0..levels {
+        value.extend(9u32.to_le_bytes());
+        value.extend(1u64.to_le_bytes());
+    }
+    let err = error_of(header_with_value(&value));
+    assert!(err.contains("nest more than"), "{err}");
+}
+
+#[test]
+fn a_count_the_file_cannot_hold_is_refused_before_allocating() {
+    // A million strings in a few bytes: each needs at least its length.
+    let mut value = 9u32.to_le_bytes().to_vec();
+    value.extend(8u32.to_le_bytes());
+    value.extend(1_000_000u64.to_le_bytes());
+    value.extend([0u8; 64]);
+    let err = error_of(header_with_value(&value));
+    assert!(err.contains("elements of at least 8 bytes"), "{err}");
+
+    // A tensor count past what the rest of the file can describe.
+    let mut bytes = b"GGUF".to_vec();
+    bytes.extend(3u32.to_le_bytes());
+    bytes.extend(1_000u64.to_le_bytes());
+    bytes.extend(0u64.to_le_bytes());
+    bytes.extend([0u8; 256]);
+    let err = error_of(bytes);
+    assert!(err.contains("elements of at least"), "{err}");
+}
+
+#[test]
+fn a_tensor_with_no_dimensions_is_refused() {
+    let bytes = Builder::default()
+        .kv_string("general.architecture", "llama")
+        .tensor_f32("token_embd.weight", &[], &[])
+        .build();
+    let err = error_of(bytes);
+    assert!(err.contains("declares 0 dimensions"), "{err}");
+}
+
+#[test]
+fn dimensions_whose_product_overflows_are_refused() {
+    let bytes = Builder::default()
+        .tensor_f32("w", &[1 << 32, 1 << 32, 2], &[])
+        .build();
+    let err = error_of(bytes);
+    assert!(err.contains("overflows 64 bits"), "{err}");
+}
+
+#[test]
+fn a_huge_tensor_fails_before_its_output_is_allocated() {
+    // 2^62 elements, a product that fits, in a file of a few bytes.
+    let bytes = Builder::default()
+        .tensor_f32("w", &[1 << 31, 1 << 31], &[1.0])
+        .build();
+    let gguf = Gguf::from_bytes(bytes).unwrap();
+    assert!(gguf.dequantize("w").is_err());
+}

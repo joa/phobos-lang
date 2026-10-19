@@ -200,6 +200,9 @@ impl Gguf {
     /// fastest-varying axis of [`TensorInfo::dims`] first).
     pub fn dequantize(&self, name: &str) -> Result<Vec<f32>> {
         let info = self.require_tensor(name)?;
+        // The tensor must lie in the file before its output is allocated, so
+        // a directory entry claiming a huge tensor fails rather than aborts.
+        self.tensor_span(info)?;
         let numel =
             usize::try_from(info.numel()).context("tensor is too large for this platform")?;
         let mut out = vec![0.0; numel];
@@ -227,7 +230,7 @@ impl Gguf {
     }
 
     pub fn parameter_count(&self) -> u64 {
-        self.tensors.iter().map(TensorInfo::numel).sum()
+        self.tensors.iter().map(TensorInfo::numel).fold(0, u64::saturating_add)
     }
 }
 

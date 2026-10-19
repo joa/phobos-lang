@@ -193,7 +193,9 @@ impl GgmlType {
             "{} tensor has {numel} elements, not a multiple of the {block}-element block",
             self.name()
         );
-        Ok(numel / block * self.type_size())
+        (numel / block)
+            .checked_mul(self.type_size())
+            .with_context(|| format!("{} tensor of {numel} elements overflows the address space", self.name()))
     }
 }
 
@@ -213,8 +215,11 @@ pub struct TensorInfo {
 }
 
 impl TensorInfo {
+    /// The element count. The reader refuses dimensions whose product
+    /// overflows, so this saturates only for one built by hand, and the
+    /// saturated count then fails any bounds check rather than passing it.
     pub fn numel(&self) -> u64 {
-        self.dims.iter().product()
+        self.dims.iter().fold(1u64, |n, &d| n.saturating_mul(d))
     }
 
     /// Extents outermost-first, the order row-major consumers expect.
