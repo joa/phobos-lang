@@ -31,6 +31,7 @@ The normative table is in the spec under
 | --- | --- |
 | [`@autotune`](/docs/attributes/autotune/) | Declares tile constants and the values a tuner searches. |
 | [`@launch`](/docs/attributes/launch/) | Sets the CTA size, and optionally an occupancy hint and a register cap. |
+| [`@index_bits`](/docs/attributes/index_bits/) | Picks the module's index width, 32 or 64 bits, so a tuner can search it. |
 | [`@aligned`](/docs/attributes/aligned/) | Promises a dimension is a whole number of tiles, which removes its masks. |
 | [`@pipeline`](/docs/attributes/pipeline/) | Asserts that the kernel's loops are double-buffered, and enables it for the GEMM. |
 | [`@padstage`](/docs/attributes/padstage/) | Pads staging tiles whose rows would collide on shared-memory banks. |

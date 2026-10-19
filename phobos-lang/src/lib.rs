@@ -159,12 +159,13 @@ pub fn compile_source(
     let kernels = parse_source_with(file, &context.stdlib)?;
 
     let mut wide;
-    let context = if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {
-        wide = context.clone();
-        wide.index_bitwidth = 64;
-        &wide
-    } else {
-        context
+    let context = match index_bits(context, &kernels)? {
+        bits if bits == context.index_bitwidth => context,
+        bits => {
+            wide = context.clone();
+            wide.index_bitwidth = bits;
+            &wide
+        }
     };
 
     if context.print_phases {
@@ -207,9 +208,7 @@ pub fn contracts(
 ) -> anyhow::Result<Vec<Contract>> {
     let kernels = parse_source_with(file, &context.stdlib)?;
     let mut wide = context.clone();
-    if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {
-        wide.index_bitwidth = 64;
-    }
+    wide.index_bitwidth = index_bits(context, &kernels)?;
     Ok(emit_unlowered(&wide, &kernels)?.contracts)
 }
 
@@ -240,8 +239,52 @@ pub struct CompileOutput {
     pub contracts: Vec<Contract>,
 }
 
+/// The index width a module of `kernels` compiles at under `context`: what
+/// a kernel's `@index_bits` asks for, else 64 where [`needs_wide_index`]
+/// holds, and never narrower than the context asks. The kernels of a module
+/// share one width, and asking for 32 fails where a kernel needs 64.
+pub fn index_bits(context: &phobos_base::context::Context, kernels: &[ast::Kernel]) -> anyhow::Result<u32> {
+    use diag::{Diagnostic, Diagnostics};
+    let fail = |kernel: &ast::Kernel, d: Diagnostic| Diagnostics::new(kernel.source.clone(), vec![d]);
+    let mut pinned: Option<(u32, &ast::Kernel, diag::Span)> = None;
+    for kernel in kernels {
+        let Some(attr) = kernel.attr("index_bits") else {
+            continue;
+        };
+        let Some(bits) = kernel
+            .index_bits_in(&kernel.shape_env(&context.shape_overrides))
+            .map_err(|message| fail(kernel, Diagnostic::error(message).primary(attr.span, "")))?
+        else {
+            continue;
+        };
+        if let Some((first, other, at)) = pinned
+            && first != bits
+        {
+            let d = Diagnostic::error("the kernels of one module share an index width")
+                .primary(attr.span, format!("`{}` asks for {bits} bits", kernel.name))
+                .secondary(at, format!("`{}` asks for {first} bits", other.name));
+            return Err(fail(kernel, d).into());
+        }
+        pinned = Some((bits, kernel, attr.span));
+    }
+    let Some((bits, asking, at)) = pinned else {
+        let auto = if needs_wide_index(context, kernels) { 64 } else { 32 };
+        return Ok(auto.max(context.index_bitwidth));
+    };
+    if bits == 32
+        && let Some((kernel, why)) = kernels.iter().find_map(|k| Some((k, k.wide_index_reason()?)))
+    {
+        let d = Diagnostic::error("`@index_bits(32)` on a module that needs 64-bit indices")
+            .primary(at, "asks for 32 bits")
+            .note(format!("in `{}`, {why}", kernel.name));
+        return Err(fail(asking, d).into());
+    }
+    Ok(bits.max(context.index_bitwidth))
+}
+
 /// Whether a module of `kernels` is indexed at 64 bits on the context's
-/// chip, whatever width was asked for. The `@tensorcore` path's `mma.sync`,
+/// chip, whatever width was asked for, when no kernel says with
+/// `@index_bits`. The `@tensorcore` path's `mma.sync`,
 /// `ldmatrix` and a system-scope load or store need it on any chip. So does
 /// `cp.async` from sm_80 on, which a module is widened for when, emitted at
 /// 64 bits, it copies asynchronously; one that never does keeps the narrower

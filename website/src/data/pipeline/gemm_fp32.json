@@ -13,41 +13,42 @@
       "lines": [
         {
           "n": 1,
-          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128])",
+          "text": "@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128], IB in [32, 64])",
           "role": "attribute"
         },
         { "n": 2, "text": "@launch(T)", "role": "attribute" },
-        { "n": 3, "text": "@pipeline", "role": "attribute" },
-        { "n": 4, "text": "@aligned(M = TILE_M, N = TILE_N, K = TILE_K)", "role": "attribute" },
-        { "n": 5, "text": "kernel gemm(A: tensor<f32>[M, K],", "role": "signature" },
-        { "n": 6, "text": "              B: tensor<f32>[K, N],", "role": "signature" },
-        { "n": 7, "text": "              C: tensor<f32>[M, N],", "role": "signature" },
-        { "n": 8, "text": "              alpha: f32,", "role": "signature" },
-        { "n": 9, "text": "              beta: f32) {", "role": "signature" },
-        { "n": 10, "text": "  let pm = ctx.block.x", "role": "code" },
-        { "n": 11, "text": "  let pn = ctx.block.y", "role": "code" },
-        { "n": 12, "text": "", "role": "blank" },
-        { "n": 13, "text": "  var acc: tile<f32>[TILE_M, TILE_N] = 0.0", "role": "code" },
-        { "n": 14, "text": "", "role": "blank" },
-        { "n": 15, "text": "  for<unroll U> kt in range(0, K, TILE_K) {", "role": "loop-header" },
-        { "n": 16, "text": "    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]", "role": "loop-body" },
-        { "n": 17, "text": "    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]", "role": "loop-body" },
-        { "n": 18, "text": "    acc += dot(a, b)", "role": "loop-body" },
-        { "n": 19, "text": "  }", "role": "loop-end" },
-        { "n": 20, "text": "", "role": "blank" },
-        { "n": 21, "text": "  if beta == 0.0 {", "role": "code" },
-        { "n": 22, "text": "    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc", "role": "code" },
-        { "n": 23, "text": "  } else {", "role": "code" },
-        { "n": 24, "text": "    let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]", "role": "code" },
+        { "n": 3, "text": "@index_bits(IB)", "role": "attribute" },
+        { "n": 4, "text": "@pipeline", "role": "attribute" },
+        { "n": 5, "text": "@aligned(M = TILE_M, N = TILE_N, K = TILE_K)", "role": "attribute" },
+        { "n": 6, "text": "kernel gemm(A: tensor<f32>[M, K],", "role": "signature" },
+        { "n": 7, "text": "              B: tensor<f32>[K, N],", "role": "signature" },
+        { "n": 8, "text": "              C: tensor<f32>[M, N],", "role": "signature" },
+        { "n": 9, "text": "              alpha: f32,", "role": "signature" },
+        { "n": 10, "text": "              beta: f32) {", "role": "signature" },
+        { "n": 11, "text": "  let pm = ctx.block.x", "role": "code" },
+        { "n": 12, "text": "  let pn = ctx.block.y", "role": "code" },
+        { "n": 13, "text": "", "role": "blank" },
+        { "n": 14, "text": "  var acc: tile<f32>[TILE_M, TILE_N] = 0.0", "role": "code" },
+        { "n": 15, "text": "", "role": "blank" },
+        { "n": 16, "text": "  for<unroll U> kt in range(0, K, TILE_K) {", "role": "loop-header" },
+        { "n": 17, "text": "    var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]", "role": "loop-body" },
+        { "n": 18, "text": "    var b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]", "role": "loop-body" },
+        { "n": 19, "text": "    acc += dot(a, b)", "role": "loop-body" },
+        { "n": 20, "text": "  }", "role": "loop-end" },
+        { "n": 21, "text": "", "role": "blank" },
+        { "n": 22, "text": "  if beta == 0.0 {", "role": "code" },
+        { "n": 23, "text": "    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc", "role": "code" },
+        { "n": 24, "text": "  } else {", "role": "code" },
+        { "n": 25, "text": "    let c_old = C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N]", "role": "code" },
         {
-          "n": 25,
+          "n": 26,
           "text": "    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = alpha * acc + beta * c_old",
           "role": "code"
         },
-        { "n": 26, "text": "  }", "role": "code" },
-        { "n": 27, "text": "}", "role": "code" }
+        { "n": 27, "text": "  }", "role": "code" },
+        { "n": 28, "text": "}", "role": "code" }
       ],
-      "loop": { "header": 15, "body": [16, 17, 18], "end": 19 }
+      "loop": { "header": 16, "body": [17, 18, 19], "end": 20 }
     },
     "ast": {
       "root": {
@@ -56,9 +57,9 @@
         "children": [
           {
             "kind": "Attributes",
-            "label": "@autotune @launch @pipeline @aligned",
-            "text": "@autotune @launch @pipeline @aligned",
-            "folded": 4
+            "label": "@autotune @launch @index_bits @pipeline @aligned",
+            "text": "@autotune @launch @index_bits @pipeline @aligned",
+            "folded": 5
           },
           {
             "kind": "Params",
@@ -66,9 +67,9 @@
             "text": "A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N], alpha: f32, beta: f32",
             "folded": 5
           },
-          { "kind": "Let", "label": "pm", "text": "let pm = ctx.block(0)", "role": "body", "line": 10, "folded": 2 },
-          { "kind": "Let", "label": "pn", "text": "let pn = ctx.block(1)", "role": "body", "line": 11, "folded": 2 },
-          { "kind": "Var", "label": "acc", "text": "var acc = 0.0", "role": "body", "line": 13, "folded": 1 },
+          { "kind": "Let", "label": "pm", "text": "let pm = ctx.block(0)", "role": "body", "line": 11, "folded": 2 },
+          { "kind": "Let", "label": "pn", "text": "let pn = ctx.block(1)", "role": "body", "line": 12, "folded": 2 },
+          { "kind": "Var", "label": "acc", "text": "var acc = 0.0", "role": "body", "line": 14, "folded": 1 },
           {
             "kind": "For",
             "label": "kt",
@@ -114,7 +115,7 @@
                     "role": "value"
                   }
                 ],
-                "line": 16,
+                "line": 17,
                 "role": "body"
               },
               {
@@ -154,7 +155,7 @@
                     "role": "value"
                   }
                 ],
-                "line": 17,
+                "line": 18,
                 "role": "body"
               },
               {
@@ -172,11 +173,11 @@
                     "role": "value"
                   }
                 ],
-                "line": 18,
+                "line": 19,
                 "role": "body"
               }
             ],
-            "line": 15,
+            "line": 16,
             "role": "body"
           },
           { "kind": "If", "label": "If", "text": "If", "role": "body" }
@@ -764,7 +765,7 @@
         "trace": "gemm_fp32_no_aligned.sm_75",
         "variant": { "drop": "@aligned" },
         "chip": "sm_75",
-        "params": { "T": 256, "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
+        "params": { "IB": 32, "T": 256, "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
         "peakBytes": 8192,
         "buffers": [
           {
@@ -929,7 +930,7 @@
         "trace": "gemm_fp32.sm_75",
         "variant": null,
         "chip": "sm_75",
-        "params": { "T": 256, "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
+        "params": { "IB": 32, "T": 256, "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
         "peakBytes": 2048,
         "buffers": [
           {
@@ -1381,7 +1382,7 @@
       "lanes": 32,
       "ctas": 4,
       "dims": { "K": 64, "M": 64, "N": 64 },
-      "params": { "T": 256, "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
+      "params": { "IB": 32, "T": 256, "TILE_K": 4, "TILE_M": 32, "TILE_N": 32, "U": 1 },
       "sharedBytesPerCta": 2048,
       "note": "The grid is the host's choice for the trace's dims (website/kernels.json), not part of the kernel."
     }

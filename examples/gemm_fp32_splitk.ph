@@ -1,5 +1,6 @@
-@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128])
+@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128], IB in [32, 64])
 @launch(T)
+@index_bits(IB)
 @pipeline
 @aligned(M = TILE_M, N = TILE_N, K = TILE_K, SM = TILE_M)
 kernel gemm_split(A: tensor<f32>[M, K],

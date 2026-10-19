@@ -4,6 +4,6 @@ error: unknown attribute `@unroll`
 9 | @ph.unroll(4)
   |  ^^^^^^^^^^^^ the compiler does not read it
   |
-  = note: the compiler reads `@aligned`, `@autotune`, `@cluster`, `@dynshared`, `@global`, `@grid_barriers`, `@launch`, `@padstage`, `@persistent`, `@pipeline`, `@registers`, `@shared`, `@swizzle`, `@tensorcore`
+  = note: the compiler reads `@aligned`, `@autotune`, `@cluster`, `@dynshared`, `@global`, `@grid_barriers`, `@index_bits`, `@launch`, `@padstage`, `@persistent`, `@pipeline`, `@registers`, `@shared`, `@swizzle`, `@tensorcore`
 
 error: aborting due to 1 previous error

@@ -4,8 +4,9 @@ import phobos.lang as ph
 
 
 @ph.kernel
-@ph.autotune(TILE_M=[32, 256], TILE_N=[32, 256], TILE_K=[4, 32], U=[1, 8], T=[256, 128])
+@ph.autotune(TILE_M=[32, 256], TILE_N=[32, 256], TILE_K=[4, 32], U=[1, 8], T=[256, 128], IB=[32, 64])
 @ph.launch("T")
+@ph.index_bits("IB")
 @ph.pipeline
 @ph.aligned(M="TILE_M", N="TILE_N", K="TILE_K")
 def gemm(A: ph.tensor[ph.f32][M, K], B: ph.tensor[ph.f32][K, N], C: ph.tensor[ph.f32][M, N], alpha: ph.f32, beta: ph.f32):

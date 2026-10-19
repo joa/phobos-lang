@@ -198,7 +198,7 @@ fn run(report: &mut Report) -> Result<()> {
         let declared = kernels.iter().flat_map(phobos_lang::search_space).collect();
         phobos_lang::pin(declared, &pins)?;
         let pinned = pinned(&ctx, pins.into_iter().collect());
-        if check_races && let Some(found) = races(&target(&pinned, &kernels), &kernels, report)? {
+        if check_races && let Some(found) = races(&target(&pinned, &kernels)?, &kernels, report)? {
             return Err(found.into());
         }
         let compiled = compile(&pinned, &source)?;
@@ -223,7 +223,7 @@ fn run(report: &mut Report) -> Result<()> {
             .join(" ");
         let pinned = pinned(&ctx, variant.iter().cloned().collect());
         if check_races {
-            match races(&target(&pinned, &kernels), &kernels, report) {
+            match races(&target(&pinned, &kernels)?, &kernels, report) {
                 Ok(None) => {}
                 Ok(Some(found)) => {
                     eprintln!("{settings} races:");
@@ -269,12 +269,10 @@ fn pinned(ctx: &Context, shape_overrides: HashMap<String, i64>) -> Context {
 
 /// `ctx` widened as the compile widens it, so a kernel is race-checked as it
 /// compiles.
-fn target(ctx: &Context, kernels: &[Kernel]) -> Context {
+fn target(ctx: &Context, kernels: &[Kernel]) -> Result<Context> {
     let mut ctx = ctx.clone();
-    if ctx.index_bitwidth < 64 && phobos_lang::needs_wide_index(&ctx, kernels) {
-        ctx.index_bitwidth = 64;
-    }
-    ctx
+    ctx.index_bitwidth = phobos_lang::index_bits(&ctx, kernels)?;
+    Ok(ctx)
 }
 
 /// Runs the race check on `kernels`, returning what it found when that

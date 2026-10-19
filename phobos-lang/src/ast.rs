@@ -145,6 +145,7 @@ pub const ATTRIBUTES: &[&str] = &[
     "dynshared",
     "global",
     "grid_barriers",
+    "index_bits",
     "launch",
     "padstage",
     "persistent",
