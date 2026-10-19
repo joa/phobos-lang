@@ -24,8 +24,9 @@ const exampleSlug = file?.slice(file.lastIndexOf("/") + 1, -".ph".length).replac
 const examplePages = readdirSync(resolve(process.cwd(), "src/content/docs/docs/examples")).map(name =>
   name.replace(/\.mdx?$/, "")
 )
+// An attribute's page is named for it without its arguments: `@pipeline(off)` is on `@pipeline`'s.
 const docs = attribute
-  ? { href: `/docs/attributes/${attribute}/`, text: `@${attribute}` }
+  ? { href: `/docs/attributes/${attribute.replace(/\(.*$/, "")}/`, text: `@${attribute}` }
   : exampleSlug && examplePages.includes(exampleSlug)
     ? { href: `/docs/examples/${exampleSlug}/`, text: "the example's page" }
     : source.origin === "fence"
