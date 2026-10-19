@@ -114,8 +114,8 @@ A common reason for a decline is size: stages whose doubled buffers exceed
   extent a whole number of tiles, so there is no remainder iteration.
 - [`@autotune`](/docs/attributes/autotune/): a tile set too large to double
   fails the assertion for that combination, and the tuner skips it.
-- The target: on sm_80 and later, with 64-bit indices, the pipelined copies
-  are asynchronous (`cp.async`), so the next stage loads while the current one
-  is computed on. On sm_75, or at 32-bit indices, no `cp.async` is emitted and
-  the stage moves through registers. This holds for the
+- The target: on sm_80 and later the pipelined copies are asynchronous
+  (`cp.async`), so the next stage loads while the current one is computed on,
+  and the module compiles at 64-bit indices, which `cp.async` needs. On sm_75
+  no `cp.async` is emitted and the stage moves through registers. This holds for the
   [`@tensorcore`](/docs/attributes/tensorcore/) GEMM as well.

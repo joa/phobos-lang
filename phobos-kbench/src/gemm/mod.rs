@@ -287,7 +287,7 @@ fn problem(
             "from_cache": !tuned,
             "grid": [grid.0, grid.1, grid.2],
             "block": winner.block,
-            "index_bits": if vs.wide { 64 } else { 32 },
+            "index_bits": if winner.module.wide { 64 } else { 32 },
             "resources": winner.res.json(),
         },
         "timing_kernel_only": timing_json,

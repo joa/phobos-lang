@@ -205,22 +205,30 @@ pub fn contracts(
     context: &phobos_base::context::Context,
     file: &std::sync::Arc<diag::SourceFile>,
 ) -> anyhow::Result<Vec<Contract>> {
-    use melior::dialect::DialectRegistry;
-    use melior::ir::{Location, Module};
-    use melior::utility::register_all_dialects;
-
     let kernels = parse_source_with(file, &context.stdlib)?;
     let mut wide = context.clone();
     if context.index_bitwidth < 64 && needs_wide_index(context, &kernels) {
         wide.index_bitwidth = 64;
     }
+    Ok(emit_unlowered(&wide, &kernels)?.contracts)
+}
+
+/// [`codegen::emit`] of `kernels` into a module of its own, never lowered.
+fn emit_unlowered(
+    context: &phobos_base::context::Context,
+    kernels: &[ast::Kernel],
+) -> anyhow::Result<codegen::EmitOutput> {
+    use melior::dialect::DialectRegistry;
+    use melior::ir::{Location, Module};
+    use melior::utility::register_all_dialects;
+
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
     let mlir = melior::Context::new();
     mlir.append_dialect_registry(&registry);
     mlir.load_all_available_dialects();
     let module = Module::new(Location::unknown(&mlir));
-    Ok(codegen::emit(&wide, &kernels, &mlir, &module)?.contracts)
+    codegen::emit(context, kernels, &mlir, &module)
 }
 
 /// Result of [`compile_raw`]: the generated code plus the sidebands
@@ -232,15 +240,24 @@ pub struct CompileOutput {
     pub contracts: Vec<Contract>,
 }
 
-/// Whether a module of `kernels` has to be indexed at 64 bits on the
-/// context's chip, whatever width was asked for. A kernel that wants
-/// `ldmatrix` needs it, as does a system-scope load or store, and so does
-/// the `@tensorcore` path's `mma.sync` with
-/// `cp.async` staging. That path is taken from sm_80 on; sm_75 stays on WMMA
-/// at 32 bits.
+/// Whether a module of `kernels` is indexed at 64 bits on the context's
+/// chip, whatever width was asked for. The `@tensorcore` path's `mma.sync`,
+/// `ldmatrix` and a system-scope load or store need it on any chip. So does
+/// `cp.async` from sm_80 on, which a module is widened for when, emitted at
+/// 64 bits, it copies asynchronously; one that never does keeps the narrower
+/// index, which is cheaper.
 pub fn needs_wide_index(context: &phobos_base::context::Context, kernels: &[ast::Kernel]) -> bool {
-    kernels.iter().any(|k| k.wants_ldmatrix() || k.wants_system_scope())
-        || (context.gpu_config.compute_capability() >= 80 && requires_wide_index(kernels))
+    requires_wide_index(kernels)
+        || kernels.iter().any(|k| k.wants_ldmatrix() || k.wants_system_scope())
+        || (context.gpu_config.compute_capability() >= 80 && copies_async_when_wide(context, kernels))
+}
+
+fn copies_async_when_wide(context: &phobos_base::context::Context, kernels: &[ast::Kernel]) -> bool {
+    let mut wide = context.clone();
+    wide.index_bitwidth = 64;
+    // A module that fails to emit fails again in the compile that follows,
+    // which reports it.
+    emit_unlowered(&wide, kernels).is_ok_and(|out| out.copies_async)
 }
 
 pub fn requires_wide_index(kernels: &[ast::Kernel]) -> bool {

@@ -50,15 +50,15 @@ depends on the target:
 | otherwise | WMMA, with m16n16k16 fragments. |
 
 `phobos-compile` and the runtime compile this kernel with 64-bit indices on
-`sm_80` and newer, where it takes `mma.sync`. On `sm_75` they keep 32-bit
-indices, so it takes WMMA. `@tensorcore(wmma)` forces WMMA everywhere.
+every chip, so it takes `mma.sync`. `@tensorcore(wmma)` forces WMMA
+everywhere.
 
 From `sm_80`, with 64-bit indices, the copies into shared memory can also use
 `cp.async`, which writes shared memory directly from global memory without
 passing through registers. That suits the double-buffered k loop that
 [`@pipeline`](/docs/attributes/pipeline/) asks for.
 
-To see the difference, print the MLIR for both targets:
+To see the difference, print the MLIR at both index widths:
 
 ```sh
 cargo run -p phobos-lang --example emit -- examples/gemm_fp16tc_fp32acc.ph

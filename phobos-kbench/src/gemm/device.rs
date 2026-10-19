@@ -36,7 +36,7 @@ impl Converter {
             module: Module::from_ptx(compiled.ptx.as_str(), &[])?,
             block,
             tile: 4096,
-            wide: crate::autotune::wide_index(CODE_CONVERT),
+            wide: compiled.wide,
         })
     }
 

@@ -30,10 +30,9 @@ Tensor cores need sm_70 or later. Operands are rounded to `f16` and
 accumulate in `f32`, so an `f32` kernel trades input precision for speed, and
 an `f16` kernel may keep an `f32` accumulator.
 
-`mma.sync` needs 64-bit indices. From sm_80 on the compiler widens the index
-itself when a kernel carries `@tensorcore` without `wmma`. On sm_75 the path
-depends on the index width the kernel is compiled at: at 32-bit indices it
-stays on WMMA.
+`mma.sync` needs 64-bit indices, so a kernel that carries `@tensorcore`
+without `wmma` widens its module's index to 64 bits on every chip.
+`@tensorcore(wmma)` keeps WMMA.
 
 ## A minimal kernel
 
@@ -63,20 +62,20 @@ condition holds, so the product runs on WMMA. A complete kernel with
 {/* figure: attr-tensorcore-pair */}
 
 import KernelPair from "../../../../components/viz/KernelPair.astro"
-import onTuring from "../../../../data/traces/gemm_fp16tc_fp32acc.sm_75.json"
-import onAmpere from "../../../../data/traces/gemm_fp16tc_fp32acc.sm_80.json"
+import onWmma from "../../../../data/traces/gemm_fp16tc_fp32acc_wmma.sm_75.json"
+import onSync from "../../../../data/traces/gemm_fp16tc_fp32acc.sm_75.json"
 
 The pair below is one kernel,
 [`examples/gemm_fp16tc_fp32acc.ph`](/docs/examples/gemm-fp16tc-fp32acc/),
-compiled for two chips. On sm_75 at {onTuring.compiler.indexBits}-bit indices it stays on WMMA; on sm_80
-the compiler widens the index to {onAmpere.compiler.indexBits} bits and the product takes
-`mma.sync`. The statements are the same on both sides, and both run on tensor
-cores. What differs is the staging in shared memory: WMMA pads the rows of
-its operand tiles, so the kernel peaks at {onTuring.sharedPeakBytes} bytes, while `mma.sync`
-swizzles them instead and keeps its operand tiles at their declared size, for a
-peak of {onAmpere.sharedPeakBytes} bytes.
+compiled for sm_75 twice: with `@tensorcore(wmma)` at {onWmma.compiler.indexBits}-bit indices it
+runs on WMMA, and with `@tensorcore` the compiler widens the index to {onSync.compiler.indexBits} bits
+and the product takes `mma.sync`. The statements are the same on both sides,
+and both run on tensor cores. What differs is the staging in shared memory:
+WMMA pads the rows of its operand tiles, so the kernel peaks at {onWmma.sharedPeakBytes} bytes,
+while `mma.sync` swizzles them instead and keeps its operand tiles at their
+declared size, for a peak of {onSync.sharedPeakBytes} bytes.
 
-<KernelPair beforeTrace="gemm_fp16tc_fp32acc" beforeChip="sm_75" beforeLabel="sm_75: wmma" afterTrace="gemm_fp16tc_fp32acc" afterChip="sm_80" afterLabel="sm_80: mma.sync" />
+<KernelPair beforeTrace="gemm_fp16tc_fp32acc_wmma" beforeChip="sm_75" beforeLabel="@tensorcore(wmma)" afterTrace="gemm_fp16tc_fp32acc" afterChip="sm_75" afterLabel="@tensorcore: mma.sync" />
 
 ## When it declines
 
@@ -105,8 +104,8 @@ tensor cores whenever its shape allows. See
   tile the fragment grid.
 - [`@aligned`](/docs/attributes/aligned/): loops with `mma.sync` accumulators
   stay masked unless `@aligned` covers the dimension they walk.
-- [`@pipeline`](/docs/attributes/pipeline/): on sm_80 and later with 64-bit
-  indices, the staged operands of the tensor core GEMM load with `cp.async`.
+- [`@pipeline`](/docs/attributes/pipeline/): on sm_80 and later the staged
+  operands of the tensor core GEMM load with `cp.async`.
 - [`@autotune`](/docs/attributes/autotune/): tile sizes that are not
   multiples of 16 compile, but fall back to FMA; keep the search ranges on
   multiples of 16.

@@ -301,8 +301,8 @@ impl ChainExec {
 
         let func = self.kernels[&plan.source].get_function(&plan.kernel_name)?;
         // SAFETY: raw points into slots, which outlives the launch, and the
-        // layout matches phobos-mlir's exploded-memref ABI at index_bitwidth
-        // 32.
+        // layout matches phobos-mlir's exploded-memref ABI at either index width,
+        // each slot eight bytes and an extent zero-extended in it.
         unsafe {
             self.stream
                 .launch(&func, plan.grid, (plan.block, 1, 1), 0, &raw)

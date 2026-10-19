@@ -1,6 +1,6 @@
 use cust::module::Module;
 use phobos_base::combo::cartesian_product;
-use phobos_base::{phdebug, phinfo};
+use phobos_base::phinfo;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,12 +14,14 @@ pub struct Winner {
     pub compiled: Compiled,
 }
 
-/// A variant's PTX and the dynamic shared memory each of its kernels
-/// launches with, which only a `@dynshared` kernel has.
+/// A variant's PTX, the dynamic shared memory each of its kernels launches
+/// with, which only a `@dynshared` kernel has, and whether its memref
+/// descriptors are 64-bit.
 #[derive(Clone)]
 pub struct Compiled {
     pub ptx: String,
     pub shared: Vec<(String, usize)>,
+    pub wide: bool,
 }
 
 /// The most shared memory a block may hold without the driver raising its
@@ -31,6 +33,7 @@ const STATIC_SHARED_BYTES: usize = 48 * 1024;
 pub struct Loaded {
     pub module: Module,
     shared: Vec<(String, usize)>,
+    pub wide: bool,
 }
 
 impl Loaded {
@@ -54,7 +57,7 @@ impl Loaded {
                 );
             }
         }
-        Ok(Loaded { module, shared: compiled.shared.clone() })
+        Ok(Loaded { module, shared: compiled.shared.clone(), wide: compiled.wide })
     }
 
     /// The dynamic shared memory `kernel` launches with, 0 without any.
@@ -63,29 +66,17 @@ impl Loaded {
     }
 }
 
-/// Whether `code` compiles at 64-bit index for the card, which every launch
-/// of it has to match in its memref descriptors. mma.sync and cp.async both
-/// need it, and every chip from sm_80 on has cp.async.
-pub fn wide_index(code: &str) -> bool {
-    let chip = phobos_kernels::compile::context_for(&[]).gpu_config.compute_capability();
-    chip >= 80
-        || phobos_lang::parse(code)
-            .map(|ks| phobos_lang::requires_wide_index(&ks))
-            .unwrap_or(false)
-}
-
-/// Compile Phobos source with the given autotune choices pinned.
+/// Compile Phobos source with the given autotune choices pinned. The compile
+/// picks the variant's index width, which its launches read from the result.
 pub fn compile(code: &str, config: &[Setting]) -> anyhow::Result<Compiled> {
     // The card's chip, as the model path picks it: sm_75 PTX would JIT forward
     // and run, but never take the newer chips' instructions.
     let mut ctx = phobos_kernels::compile::context_for(&[]);
     ctx.shape_overrides = config.iter().cloned().collect();
-    if wide_index(code) {
-        phdebug!("widening index_bitwidth to 64");
-        ctx.index_bitwidth = 64;
-    }
-    let (ptx, shared) = phobos_lang::compile_shared(&ctx, code)?;
-    Ok(Compiled { ptx, shared })
+    let out = phobos_lang::compile_raw(&ctx, code)?;
+    phobos_lang::assert_pipelined(&out.pipeline_failures)?;
+    let wide = out.contracts.iter().any(|c| c.index_bits == 64);
+    Ok(Compiled { ptx: out.code, shared: out.shared, wide })
 }
 
 pub fn cfg_value(cfg: &[Setting], name: &str) -> anyhow::Result<i64> {

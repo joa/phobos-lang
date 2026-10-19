@@ -110,9 +110,6 @@ pub(crate) fn bench_flash_attention_fp32(
     // hard error.
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    // The descriptors' width follows the kernel's index width.
-    let wide = autotune::wide_index(CODE_FLASH);
-
     let mut tuner = autotune::Autotuner {
         code: CODE_FLASH,
         grid_for: |cfg: &[autotune::Setting]| {
@@ -140,7 +137,7 @@ pub(crate) fn bench_flash_attention_fp32(
                 D,
                 scale,
                 loaded.shared_bytes("flash_attention"),
-                wide,
+                loaded.wide,
             )
         },
         verify: || {
@@ -238,7 +235,6 @@ pub(crate) fn bench_flash_attention_fp16(
 
     let block: u32 = kernels[0].cta_threads().map_err(anyhow::Error::msg)? as u32;
 
-    let wide = autotune::wide_index(CODE_FLASH_F16);
 
     let mut tuner = autotune::Autotuner {
         code: CODE_FLASH_F16,
@@ -266,7 +262,7 @@ pub(crate) fn bench_flash_attention_fp16(
                 D,
                 scale,
                 loaded.shared_bytes("flash_attention"),
-                wide,
+                loaded.wide,
             )
         },
         verify: || {

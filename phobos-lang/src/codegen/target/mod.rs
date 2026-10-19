@@ -590,6 +590,7 @@ impl<'c> Codegen<'c> {
             .elem_bytes(dst.elem)
             .map(i64::from)
             .ok_or_else(|| anyhow!("async copy of an element of unknown size"))?;
+        self.copied_async.set(true);
         self.isa.async_copy(
             self, block, src.mem, src_idx, dst.mem, dst_idx, width, elem_bytes,
         )

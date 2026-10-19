@@ -160,8 +160,9 @@ impl MatmulBackend for GpuBackend {
         let func = self.module.get_function("matmul")?;
         let grid = ((mp / MM_TM) as u32, (np / MM_TN) as u32, 1u32);
         // SAFETY: raw points into slots, which outlives the call, and the
-        // layout matches phobos-mlir's exploded-memref ABI at index_bitwidth
-        // 32. b_ptr's owner, cache_guard or local_b, lives past the launch.
+        // layout matches phobos-mlir's exploded-memref ABI at either index width,
+        // each slot eight bytes and an extent zero-extended in it. b_ptr's
+        // owner, cache_guard or local_b, lives past the launch.
         unsafe {
             self.stream
                 .launch(&func, grid, (256u32, 1, 1), 0, &raw)
@@ -230,7 +231,8 @@ impl MatmulBackend for GpuBackend {
         let func = ln.module.get_function("layernorm")?;
         let grid = ((rp / ln.tr) as u32, 1u32, 1u32);
         // SAFETY: raw points into slots, which outlives the call, and the ABI
-        // matches phobos-mlir's exploded-memref layout at index_bitwidth 32.
+        // matches phobos-mlir's exploded-memref layout at either index
+        // width, each slot eight bytes and an extent zero-extended in it.
         unsafe {
             self.stream
                 .launch(&func, grid, (256u32, 1, 1), 0, &raw)
@@ -487,8 +489,8 @@ impl Exec {
             .collect();
 
         // SAFETY: `raw` points into `slots`, which outlives this call, and the
-        // layout matches phobos-mlir's exploded-memref ABI at index_bitwidth
-        // 32.
+        // layout matches phobos-mlir's exploded-memref ABI at either index width,
+        // each slot eight bytes and an extent zero-extended in it.
         unsafe {
             self.stream
                 .launch(func, plan.grid, (plan.block, 1, 1), 0, &raw)
