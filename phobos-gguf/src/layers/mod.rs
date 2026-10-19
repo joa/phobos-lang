@@ -18,7 +18,7 @@ mod shared;
 
 pub(crate) use ffn::Ffn;
 pub(crate) use moe::MoeFfn;
-pub(crate) use rope::RopeTable;
+pub(crate) use rope::{RopeTable, check_text_sections};
 pub(crate) use shared::Shared;
 
 /// Output columns [`Linear::fuse`] rounds up to: the widest column tile the

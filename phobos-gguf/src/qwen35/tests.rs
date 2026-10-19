@@ -40,6 +40,11 @@ impl Rng {
 
 /// The file, as bytes.
 pub(crate) fn tiny_moe_file() -> Vec<u8> {
+    tiny_moe_file_with(|_| {})
+}
+
+/// [`tiny_moe_file`] with keys of the caller's added.
+fn tiny_moe_file_with(extra: impl FnOnce(&mut Builder)) -> Vec<u8> {
     let mut rng = Rng(0x5eed_1234_abcd_0001);
     let mut b = Builder::default();
     b.kv_string("general.architecture", "qwen35moe")
@@ -102,7 +107,17 @@ pub(crate) fn tiny_moe_file() -> Vec<u8> {
         b.tensor_f32(&format!("{p}.ffn_up_shexp.weight"), &[D as u64, D_SHARED as u64], &rng.weights(D * D_SHARED, scale));
         b.tensor_f32(&format!("{p}.ffn_down_shexp.weight"), &[D_SHARED as u64, D as u64], &rng.weights(D_SHARED * D, scale));
     }
+    extra(&mut b);
     b.build()
+}
+
+#[test]
+fn a_rope_scaled_file_is_refused() {
+    let file = tiny_moe_file_with(|b| {
+        b.kv_string("qwen35moe.rope.scaling.type", "yarn");
+    });
+    let err = Decoder::load(&Gguf::from_bytes(file).unwrap()).err().expect("a yarn file loaded");
+    assert!(format!("{err:#}").contains("rope scaling 'yarn'"), "{err:#}");
 }
 
 #[test]

@@ -74,6 +74,16 @@ impl Config {
 
         let m = gguf.metadata();
 
+        crate::llama::check_no_rope_scaling(gguf)?;
+        let rope_dim = m.arch_count("rope.dimension_count")?;
+        if let Some(value) = m.arch_get("rope.dimension_sections") {
+            let sections = value
+                .as_array()
+                .and_then(|a| a.to_int_vec())
+                .context("rope.dimension_sections is not an integer array")?;
+            crate::layers::check_text_sections(&sections, rope_dim)?;
+        }
+
         let moe = match arch {
             "qwen35moe" => Some(MoeConfig {
                 n_expert: m.arch_count("expert_count")?,
@@ -139,7 +149,7 @@ impl Config {
             n_head_kv: m.arch_count("attention.head_count_kv")?,
             head_dim: m.arch_count("attention.key_length")?,
             full_attention_interval: m.arch_count("full_attention_interval")?,
-            rope_dim: m.arch_count("rope.dimension_count")?,
+            rope_dim,
             rope_freq_base: m.arch_float("rope.freq_base")?,
             ssm_heads,
             ssm_inner,

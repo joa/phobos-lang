@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 
 use super::Uploads;
 use crate::backend::{Backend, Buf};
@@ -57,5 +57,74 @@ impl RopeTable {
         let rows = positions.next_power_of_two().max(512);
         let key = format!("rope.{}.{}", self.rope_dim, self.freq_base);
         into.add(&key, 2 * rows * self.rope_dim * size_of::<f32>(), true);
+    }
+}
+
+/// Refuses interleaved multimodal rotary sections that a text-only pass does
+/// not reproduce.
+///
+/// qwen35 files declare `rope.dimension_sections`, the rotary pairs given to
+/// the time, height, width and extra positions, interleaved as ggml's
+/// `IMROPE`. A text token's four positions are `[p, p, p, 0]`, so a pair taken
+/// by time, height or width rotates by `p`, which is the plain NeoX rotation
+/// [`RopeTable`] builds, while a pair left to the extra position never
+/// rotates. Only sections that leave no pair to it are the same pass.
+pub(crate) fn check_text_sections(sections: &[i64], rope_dim: usize) -> Result<()> {
+    let pairs = rope_dim / 2;
+    let &[t, h, w, e] = sections else {
+        anyhow::bail!("rope.dimension_sections has {} entries, expected 4", sections.len());
+    };
+    ensure!(
+        sections.iter().all(|&s| s >= 0),
+        "rope.dimension_sections {sections:?} has a negative entry"
+    );
+    let span = t + h + w + e;
+    ensure!(
+        span > 0 && span <= rope_dim as i64,
+        "rope.dimension_sections {sections:?} spans {span} pairs of a {rope_dim}-wide rotation"
+    );
+    // ggml's interleaved assignment of pair `k`, by its sector in the span.
+    let unrotated = (0..pairs as i64).find(|k| {
+        let sector = k % span;
+        let taken = match sector % 3 {
+            0 => sector < 3 * t,
+            1 => sector < 3 * h,
+            _ => sector < 3 * w,
+        };
+        !taken
+    });
+    ensure!(
+        unrotated.is_none(),
+        "rope.dimension_sections {sections:?} leaves rotary pair {} to the extra position,          which only multimodal input moves; text-only decoding does not model it",
+        unrotated.unwrap_or_default()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_text_sections;
+
+    #[test]
+    fn the_sections_every_qwen35_file_ships_are_plain_rotation_for_text() {
+        check_text_sections(&[11, 11, 10, 0], 64).unwrap();
+    }
+
+    #[test]
+    fn sections_that_leave_a_pair_unrotated_are_refused() {
+        // A pair given to the extra position, and a span short of the pairs
+        // with too few width sectors to cover its tail.
+        for sections in [[11, 11, 9, 1], [8, 12, 12, 0], [16, 16, 0, 0]] {
+            let err = check_text_sections(&sections, 64).unwrap_err().to_string();
+            assert!(err.contains("extra position"), "{sections:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn malformed_sections_are_refused() {
+        assert!(check_text_sections(&[11, 11, 10], 64).is_err());
+        assert!(check_text_sections(&[0, 0, 0, 0], 64).is_err());
+        assert!(check_text_sections(&[-1, 11, 10, 0], 64).is_err());
+        assert!(check_text_sections(&[40, 40, 40, 0], 64).is_err());
     }
 }
