@@ -70,6 +70,15 @@ A plain completion request (`/v1/completions`) reads `prompt`, `max_tokens`,
 the sampling fields and `seed`, and sends the prompt to the model as it is,
 with no chat format around it.
 
+## Context length
+
+A GGUF model serves as many tokens of context as fit on the device after its
+weights and a reserve, a power of two since the caches grow by doubling, and
+never more than the length the model was trained for. `--ctx TOKENS` sets the
+limit instead. A request whose prompt fills the context is refused before
+any of it is processed, with a `400` that says so, on the plain and the
+streaming paths alike.
+
 ## Prefix reuse
 
 A chat grows by appending: each request repeats the conversation so far and
