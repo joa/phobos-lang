@@ -1,0 +1,17 @@
+error: unknown type `ph.f23`
+ --> tests/ui/unknown_type.py:7:20
+  |
+7 | def k(X: ph.tensor[ph.f23][N], Y: ph.tile[ph.f32][N]):
+  |                    ^^^^^^ not a type
+  |
+  = help: a similar type exists: `ph.f32`
+
+error: unknown type `ph.tensr`
+  --> tests/ui/unknown_type.py:12:10
+   |
+12 | def j(X: ph.tensr[ph.f32][N]):
+   |          ^^^^^^^^ not a type
+   |
+   = help: a similar type exists: `ph.tensor`
+
+error: aborting due to 2 previous errors

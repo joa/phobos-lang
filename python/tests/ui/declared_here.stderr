@@ -1,0 +1,28 @@
+error: cannot assign to `x`, which is declared with `let`
+  --> tests/ui/declared_here.py:13:5
+   |
+12 |     x: ph.let = A[ph.ctx.thread]
+   |     ---------------------------- declared with `let` here
+13 |     x = 2.0
+   |     ^^^^^^^ cannot assign
+   |
+   = help: declare `x` with `var` to assign to it
+
+error: type mismatch: cannot store f32 where index is expected
+  --> tests/ui/declared_here.py:15:5
+   |
+14 |     m: ph.var = 0
+   |                 - `m` takes its type from this
+15 |     m = x
+   |     ^^^^^
+
+error: type mismatch: cannot store f32 where i32 is expected
+  --> tests/ui/declared_here.py:16:5
+   |
+11 | def k(A: ph.tensor[ph.f32][N], B: ph.tensor[ph.i32][N]):
+   |                                   -------------------- `B` is declared with this type
+...
+16 |     B[ph.ctx.thread] = x
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 3 previous errors

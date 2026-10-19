@@ -1,0 +1,7 @@
+error: `@pipeline` found nothing in kernel `flat` to pipeline: no loop in the kernel is shaped for pipelining
+ --> tests/ui/site_pipeline.py:9:2
+  |
+9 | @ph.pipeline
+  |  ^^^^^^^^^^^ asserted here
+
+error: aborting due to 1 previous error

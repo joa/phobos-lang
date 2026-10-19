@@ -29,7 +29,17 @@ pub struct LaunchReport {
 /// [`LaunchReport`] for kernel `name` of `source`, from the passes the
 /// compile runs, so it matches the PTX `source` compiles to.
 pub fn launch_report(base: &phobos_base::context::Context, source: &str, name: &str) -> Result<LaunchReport> {
-    let kernels = crate::parse(source)?;
+    launch_report_source(base, &crate::diag::SourceFile::new("", source), name)
+}
+
+/// [`launch_report`] of `file`, whose grid barriers are on the lines of the
+/// source it was generated from, if it was.
+pub fn launch_report_source(
+    base: &phobos_base::context::Context,
+    file: &std::sync::Arc<crate::diag::SourceFile>,
+    name: &str,
+) -> Result<LaunchReport> {
+    let kernels = crate::parse_source(file)?;
     let kernel = kernels.iter().find(|k| k.name == name).with_context(|| format!("no kernel `{name}`"))?;
     let target = crate::codegen::target::build_target(base);
     let (mut ir, mut report) = crate::ir::build::build(base, target, kernel)?;
@@ -50,7 +60,7 @@ pub fn launch_report(base: &phobos_base::context::Context, source: &str, name: &
         .all_ops()
         .into_iter()
         .filter(|&op| matches!(ir.kind(op), OpKind::GridBarrier))
-        .map(|op| kernel.source.line_of(ir.span(op).lo))
+        .map(|op| kernel.source.shown().line_of(kernel.source.locate(ir.span(op)).lo))
         .collect();
     Ok(LaunchReport { scratch, barrier_word: word == 1, grid_barriers })
 }

@@ -19,7 +19,10 @@ pub fn diagnostics(kernels: &[Kernel], reports: &[Report]) -> Option<Diagnostics
         let Some(kernel) = kernels.iter().find(|k| k.name == r.kernel) else {
             continue;
         };
-        let file = &kernel.source;
+        // Op locations are where the source is shown, so the report is
+        // made there.
+        let file = &kernel.source.display();
+        let name_span = kernel.source.locate(kernel.name_span);
         let span = |loc: &Option<Loc>| loc.as_ref().map(|l| to_span(file, l));
         let mut new = |kind: u8, a: Option<Span>, b: Option<Span>| {
             seen.insert((r.kernel.clone(), kind, a, b))
@@ -28,7 +31,7 @@ pub fn diagnostics(kernels: &[Kernel], reports: &[Report]) -> Option<Diagnostics
         for race in &r.races {
             let (first, second) = (span(&race.first.loc), span(&race.second.loc));
             if new(0, first, second) {
-                list.push(race_error(file, kernel, r, race, first, second));
+                list.push(race_error(file, kernel, name_span, r, race, first, second));
             }
         }
         for d in &r.divergent {
@@ -36,7 +39,7 @@ pub fn diagnostics(kernels: &[Kernel], reports: &[Report]) -> Option<Diagnostics
                 list.push(
                     Diagnostic::error("not every thread of the CTA reaches a barrier")
                         .primary(
-                            span(&d.loc).unwrap_or(kernel.name_span),
+                            span(&d.loc).unwrap_or(name_span),
                             format!("{} of {} threads reach the barrier here", d.reached, r.threads),
                         )
                         .note("every thread of a CTA has to reach each barrier, or the CTA hangs"),
@@ -48,7 +51,7 @@ pub fn diagnostics(kernels: &[Kernel], reports: &[Report]) -> Option<Diagnostics
                 list.push(
                     Diagnostic::error("a shared memory access outside its buffer")
                         .primary(
-                            span(&o.loc).unwrap_or(kernel.name_span),
+                            span(&o.loc).unwrap_or(name_span),
                             format!("reaches byte {} of its buffer", o.byte),
                         )
                         .note(seen_in(r)),
@@ -61,7 +64,7 @@ pub fn diagnostics(kernels: &[Kernel], reports: &[Report]) -> Option<Diagnostics
             let at = span(&r.stopped_at);
             let label = if at.is_some() { "a thread traps here" } else { "" };
             let mut d = Diagnostic::warning(format!("the race check stopped early in kernel `{}`", r.kernel))
-                .primary(at.unwrap_or(kernel.name_span), label)
+                .primary(at.unwrap_or(name_span), label)
                 .note("what runs after it is not checked");
             if at.is_none() {
                 d = d.note(why.clone());
@@ -83,6 +86,7 @@ pub fn diagnostics(kernels: &[Kernel], reports: &[Report]) -> Option<Diagnostics
 fn race_error(
     file: &SourceFile,
     kernel: &Kernel,
+    name_span: Span,
     r: &Report,
     race: &Race,
     first: Option<Span>,
@@ -111,11 +115,13 @@ fn race_error(
         (Some(a), Some(b)) => d.primary(b, second_text).secondary(a, first_text),
         (None, Some(b)) => d.primary(b, second_text),
         (Some(a), None) => d.primary(a, first_text),
-        (None, None) => d.primary(kernel.name_span, "in this kernel"),
+        (None, None) => d.primary(name_span, "in this kernel"),
     };
     let d = d.note(seen_in(r));
+    // The edit is written in Phobos, so a source generated from another
+    // language gets the help alone.
     match (first, second) {
-        (Some(a), Some(b)) if file.line_of(a.lo) < file.line_of(b.lo) => {
+        (Some(a), Some(b)) if file.line_of(a.lo) < file.line_of(b.lo) && kernel.source.origin().is_none() => {
             let line = file.line_of(b.lo);
             let start = file.line_start(line);
             let indent: String = file

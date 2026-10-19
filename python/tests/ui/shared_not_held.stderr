@@ -1,0 +1,7 @@
+error: `@shared(V)`: `V` cannot live in shared memory, since some block writes part of it, or the held scratch would outgrow 49152 bytes
+ --> tests/ui/shared_not_held.py:9:2
+  |
+9 | @ph.shared("V")
+  |  ^^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

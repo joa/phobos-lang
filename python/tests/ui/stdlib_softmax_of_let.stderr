@@ -1,0 +1,11 @@
+error: cannot assign to `x`, which is declared with `let`
+  --> tests/ui/stdlib_softmax_of_let.py:12:5
+   |
+11 |     x: ph.let = X[0:+16, :]
+   |     ----------------------- declared with `let` here
+12 |     ph.softmax(x)
+   |     ^^^^^^^^^^^^^ cannot assign
+   |
+   = help: declare `x` with `var` to assign to it
+
+error: aborting due to 1 previous error

@@ -1,0 +1,7 @@
+error: '(' was never closed
+ --> tests/ui/unclosed_paren.py:8:30
+  |
+8 |     Y[ph.ctx.thread] = ph.exp(X[ph.ctx.thread] * 2.0
+  |                              ^
+
+error: aborting due to 1 previous error

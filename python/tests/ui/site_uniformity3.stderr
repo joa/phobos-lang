@@ -1,0 +1,15 @@
+error: `t` is read after a per-thread store to it with no `barrier()` between
+  --> tests/ui/site_uniformity3.py:13:5
+   |
+12 |     t[0, ph.ctx.lane] = 1.0
+   |     ----------------------- each thread stores its own part here
+13 |     O[0:+1, 0:+32] = t
+   |     ^^^^^^^^^^^^^^^^^^ every thread reads `t` here
+   |
+   = note: another thread's store may not have landed when this one reads
+help: put a `barrier()` between the store and the read
+   |
+13 +     barrier()
+14 |     O[0:+1, 0:+32] = t
+
+error: aborting due to 1 previous error

@@ -216,6 +216,8 @@ impl Build {
             ExprKind::Binary { op, lhs, rhs } if op.is_elementwise() => {
                 let a = self.plan_fused(lhs, plan)?;
                 let b = self.plan_fused(rhs, plan)?;
+                // The tree computes in its element type.
+                self.check_division(*op, lhs, rhs, plan.elem.is_int())?;
                 self.scalar_to_int_side(&a, &b, plan)?;
                 self.scalar_to_int_side(&b, &a, plan)?;
                 Tree::Binary(*op, Box::new(a), Box::new(b))

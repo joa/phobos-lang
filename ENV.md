@@ -44,7 +44,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_COMPILE` | a path | `phobos-compile` on the PATH, else this checkout's `target/release` build | The compiler the Python package (`python/phobos`) runs. |
 | `PHOBOS_DUMP_DIR` | a directory | unset | Codegen tests and the raw-format kernel dump write every kernel source they compile there as `.ph`, so the emit sweep covers them. |
 | `PHOBOS_SNAPSHOT_SRC` | a directory | unset | The IR builder's test walks every source there and checks each builds, or fails where its `.err` says it should. Skipped without it. |
-| `PHOBOS_BLESS` | opt-in | off | `phobos-lang`'s UI tests (`tests/ui`) rewrite each `.stderr` with what the compiler prints now instead of comparing against it. |
+| `PHOBOS_BLESS` | opt-in | off | `phobos-lang`'s UI tests (`tests/ui`), and the Python package's (`python/tests/ui`), rewrite each `.stderr` with what the compiler prints now instead of comparing against it. |
 
 ## The device backend: memory
 

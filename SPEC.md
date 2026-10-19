@@ -93,6 +93,8 @@ exponent    = ( "e" | "E" ) [ "+" | "-" ] digit { digit } ;
 | Keywords | `kernel fn let var if else for in while break continue return true false` |
 | Reserved name | `ctx`, which is read only through its fields (see Indexing and synchronization) and may not be bound. |
 | Contextual identifiers | `tensor`, `tile`, `range`, every built-in and every scalar type name. Ordinary identifiers outside their position; `range` is only special inside `for ... in range(...)`. |
+| Integer literals | An index, as wide as the kernel's indices: 32 bits unless it compiles at 64. A 32-bit index holds whatever a 32-bit word spells, from `-2147483648` (a negated literal is checked as the negative number) to `4294967295`, which is the word of its bits, so `2155905152` is the mask `0x80808080`; a literal past that is an error. |
+| Float literals | An `f32`, widened where it meets an `f64`, so `0.1` stored to an `f64` tensor is `0.10000000149011612`. A literal that is infinite or, nonzero, zero as an `f32` is an error. |
 | Comments | `// ...` to end of line. |
 | Statement end | A newline or `;`. Optional before `}` or end of file. |
 | `else` | Must follow the `}` of the then-block on the same line; a newline there ends the `if`. |

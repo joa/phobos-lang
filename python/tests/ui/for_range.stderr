@@ -1,0 +1,17 @@
+error: a Phobos loop runs over `range(lo, hi[, step])`
+ --> tests/ui/for_range.py:8:14
+  |
+8 |     for i in steps(0, N):
+  |              ^^^^^^^^^^^ not a range
+  |
+  = help: unroll it with `ph.unroll(n, range(lo, hi))`
+
+error: a Phobos loop runs over `range(lo, hi[, step])`
+  --> tests/ui/for_range.py:10:14
+   |
+10 |     for i in ph.twice(2, range(0, N)):
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^ not a range
+   |
+   = help: unroll it with `ph.unroll(n, range(lo, hi))`
+
+error: aborting due to 2 previous errors

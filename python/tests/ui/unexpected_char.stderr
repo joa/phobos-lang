@@ -1,0 +1,7 @@
+error: invalid decimal literal
+  --> tests/ui/unexpected_char.py:10:17
+   |
+10 |     e: ph.let = 1e
+   |                 ^
+
+error: aborting due to 1 previous error

@@ -123,7 +123,18 @@ pub fn trace(req: &Request) -> Result<Trace> {
         Some(v) => apply_variant(&normalized, v)?,
         None => normalized,
     };
-    let kernels = crate::parse(&text)?;
+    trace_source(req, &crate::diag::SourceFile::new("", text))
+}
+
+/// [`trace`] of `file` in place of the request's text: a source generated
+/// from another language's is traced there, its text and its lines that
+/// source's.
+pub fn trace_source(req: &Request, file: &std::sync::Arc<crate::diag::SourceFile>) -> Result<Trace> {
+    if file.origin().is_some() && req.variant.is_some() {
+        bail!("a variant edits the Phobos text, which a generated source does not show");
+    }
+    let text = file.shown().text().to_string();
+    let kernels = crate::parse_source(file)?;
     let kernel = kernels
         .first()
         .ok_or_else(|| anyhow!("the source holds no kernel"))?;
@@ -269,7 +280,7 @@ fn assemble(req: &Request, text: &str, base: &Context, p: &Planned<'_>) -> Resul
                 id: op.index(),
                 kind: kind_name(ir.kind(op)),
                 span: p.report.spans.get(&op).map(|s| {
-                    let source = &p.kernel.source;
+                    let (source, s) = (p.kernel.source.shown(), p.kernel.source.locate(*s));
                     let ((line, col), (end_line, end_col)) = (source.line_col(s.lo), source.line_col(s.hi));
                     model::Span {
                         line,

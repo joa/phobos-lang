@@ -1,0 +1,7 @@
+error: `rms_norm` takes 3 argument(s), got 2
+ --> tests/ui/stdlib_arity.py:9:5
+  |
+9 |     ph.rms_norm(x, 0.00001)
+  |     ^^^^^^^^^^^^^^^^^^^^^^^ called here
+
+error: aborting due to 1 previous error

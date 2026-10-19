@@ -1,0 +1,9 @@
+error: a warp collective sits under control that differs between lanes
+  --> tests/ui/site_collectives.py:14:13
+   |
+13 |     if ph.ctx.lane == 0:
+   |        ---------------- this differs between lanes
+14 |         r = ph.sum(x, over=ph.ctx.lane)
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ every lane of the warp must reach this
+
+error: aborting due to 1 previous error

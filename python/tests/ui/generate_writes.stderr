@@ -1,0 +1,7 @@
+error: `w` is generated afresh at each read, so its function may read memory but not write it
+  --> tests/ui/generate_writes.py:12:5
+   |
+12 |     C[0, 0] = 1.0
+   |     ^^^^^^^^^^^^^
+
+error: aborting due to 1 previous error

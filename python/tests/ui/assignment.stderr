@@ -1,0 +1,7 @@
+error: cannot assign to literal here. Maybe you meant '==' instead of '='?
+ --> tests/ui/assignment.py:8:5
+  |
+8 |     1 = 2
+  |     ^
+
+error: aborting due to 1 previous error

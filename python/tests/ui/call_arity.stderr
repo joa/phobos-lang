@@ -1,0 +1,7 @@
+error: `pow` takes two arguments, got 1
+  --> tests/ui/call_arity.py:12:24
+   |
+12 |     B[ph.ctx.thread] = ph.pow(x)
+   |                        ^^^^^^^^^
+
+error: aborting due to 1 previous error

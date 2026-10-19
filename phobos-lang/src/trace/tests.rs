@@ -422,3 +422,25 @@ kernel k(x: tensor<f32>[N], y: tensor<f32>[N]) {
     }
     assert_eq!(starts, (0..10).map(|i| i * 256).collect::<Vec<_>>());
 }
+
+/// A source generated from another language's is traced there: the text the
+/// trace carries and every op's lines are that source's.
+#[test]
+fn a_generated_source_is_traced_where_it_was_written() {
+    use crate::diag::{Origin as Map, SourceFile, Span};
+    let phobos = "kernel k(X: tensor<f32>[64], Y: tensor<f32>[64]) {\n    Y[0 :+ 64] = X[0 :+ 64] * 2.0\n}\n";
+    let python = "@ph.kernel\ndef k(X: ph.tensor[ph.f32][64], Y: ph.tensor[ph.f32][64]):\n    # doubles\n    Y[0:+64] = X[0:+64] * 2.0\n";
+    let at = |src: &str, needle: &str| {
+        let lo = src.find(needle).unwrap() as u32;
+        Span::new(lo, lo + needle.len() as u32)
+    };
+    let map = vec![
+        (at(phobos, "k("), at(python, "k(")),
+        (at(phobos, "Y[0 :+ 64] = X[0 :+ 64] * 2.0"), at(python, "Y[0:+64] = X[0:+64] * 2.0")),
+    ];
+    let file = SourceFile::with_origin("k.ph", phobos, Map { file: SourceFile::new("k.py", python), map, spellings: vec![] });
+    let trace = trace_source(&request(phobos, &[], &[], [1, 1, 1]), &file).unwrap();
+    assert_eq!(trace.source.text, python);
+    let lines: BTreeSet<u32> = trace.ops.iter().filter_map(|op| op.span.as_ref().map(|s| s.line)).collect();
+    assert_eq!(lines.into_iter().collect::<Vec<_>>(), vec![4]);
+}

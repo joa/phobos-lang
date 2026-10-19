@@ -66,6 +66,13 @@ helpers rather than a spelling of its own.
   regenerates them in the same change. `-- attributes` refreshes the attribute
   list the docs are checked against
 - `npm run check` in `website/`: the site's tests and type checks, as CI runs them
+- `python -m unittest discover -s python/tests`: the Python front end, the
+  launcher and the autotuner's host side, against a release `phobos-compile`.
+  No GPU. `python python/tests/roundtrip.py [DIR...]` prints every `.ph` in
+  Python with `ph2py`, reads it back through the front end and diffs the emitted
+  modules under the five targets; a change to the parser, the front end or
+  `ph2py` runs it over the tree and the snapshot corpus. The GPU checks are in
+  `python/tests/gpu`
 - `cargo run --release -p phobos-lang --example contract_check -- DIR...`: each
   kernel's launch contract against the `.entry` it compiled to, over a corpus
   under the five targets; `cargo test` runs it over the tree
@@ -125,4 +132,11 @@ remembered figure and has to be labelled as such.
 - **phobos-onnx**: ONNX proto -> graph IR -> shape inference, folding, fusion -> Phobos kernels, and `backend/` with the host interpreter as the oracle alongside the device paths
 - **phobos-inference**: inference traits, the byte-level BPE both front ends merge with (`bpe::ByteBpe`), the sampler, the generation loop, the chat rendering and the OpenAI-compatible server, plus `telemetry::Meter`, the shared record the engine writes progress into and a viewer reads snapshots of. What a front end can report about itself, and what it cannot, is the default-`None` half of the `Model` trait: `footprint`, `device_memory`, `device_info`, `architecture`, `cache_stats`, and `Session::truncate`, whose default accepts only the request that drops nothing, so a backend that cannot rewind still gets prefix reuse by extension
 - **website**: phobos-lang.dev, Astro + Starlight, deployed to GitHub Pages by `.github/workflows/website.yml` with Node only. `SPEC.md`, `ENV.md`, `BENCHMARKS.md` and `WINDOWS.md` render in place, so they stay the source; everything the compiler produces for the site (traces, CLI help, attribute list, expected errors, rendered diagnostics) is generated with the toolchain and committed under `website/src/data/`
+- **python**: the `phobos` package. `phobos.lang` spells Phobos in Python: the
+  front end (`frontend.py`) reads a `@ph.kernel`'s source and writes the Phobos it
+  spells with a span map, which `phobos-compile --origin` holds at the
+  `SourceFile`, so every location the compiler reports is a Python line. A launch
+  binds arguments to the contract `phobos-compile` writes beside the PTX, through
+  ctypes on the driver; the autotuner searches the kernel's own `@autotune`
+  space. `README.md` documents the spellings, not SPEC.md
 - **phobos-cli**: Argument parsing, the REPL, the one `match` that decides GGUF or ONNX, and `tui/`, the full-screen dashboard `--listen` puts on the terminal. The dashboard runs on its own thread and reads only a `Meter`, so it never names a model format and never blocks a decode; `--no-tui`, or output that is not a terminal, turns it off

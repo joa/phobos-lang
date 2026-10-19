@@ -1,0 +1,9 @@
+error: unknown attribute `@unroll`
+ --> tests/ui/site_attributes.py:9:2
+  |
+9 | @ph.unroll
+  |  ^^^^^^^^^ the compiler does not read it
+  |
+  = note: the compiler reads `@aligned`, `@autotune`, `@cluster`, `@dynshared`, `@global`, `@grid_barriers`, `@launch`, `@padstage`, `@persistent`, `@pipeline`, `@registers`, `@shared`, `@swizzle`, `@tensorcore`
+
+error: aborting due to 1 previous error
