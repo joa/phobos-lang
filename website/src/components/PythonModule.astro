@@ -1,0 +1,40 @@
+---
+// A Python file from the repository rendered as a highlighted code block at
+// build time, captioned with a link to it on GitHub. The page shows the file
+// as it is, so it cannot drift from what the tests run.
+import { readFileSync } from "node:fs"
+import { resolve } from "node:path"
+import { Code } from "@astrojs/starlight/components"
+
+interface Props {
+  /** Repository-relative path, such as `python/examples/tutorials/t01_vector_add.py`. */
+  file: string
+}
+
+const { file } = Astro.props
+// Builds run from website/; import.meta.url points into the bundle, not the source tree
+const REPO_ROOT = resolve(process.cwd(), "..") + "/"
+const REPO_URL = "https://github.com/joa/phobos-lang"
+const code = readFileSync(REPO_ROOT + file, "utf8").replace(/\r\n?/g, "\n").trimEnd()
+---
+
+<figure class="python-module">
+  <Code code={code} lang="python" />
+  <figcaption>
+    <a href={`${REPO_URL}/blob/main/${file}`}><code>{file}</code></a>
+  </figcaption>
+</figure>
+
+<style>
+  .python-module {
+    margin-block: 1.5rem;
+  }
+  .python-module figcaption {
+    margin-top: 0.4rem;
+    font-size: var(--sl-text-xs);
+    color: var(--sl-color-gray-3);
+  }
+  .python-module figcaption code {
+    font-size: inherit;
+  }
+</style>

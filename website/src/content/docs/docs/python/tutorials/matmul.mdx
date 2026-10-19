@@ -1,0 +1,32 @@
+---
+title: "03: Matrix multiplication"
+description: C = A B with fp16 operands on the tensor cores and an fp32 accumulator.
+sidebar:
+  order: 3
+---
+
+import PythonModule from "../../../../../components/PythonModule.astro"
+
+[Tutorial 03](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)
+multiplies two fp16 matrices with an fp32 accumulator and stores the result
+in fp16.
+
+<PythonModule file="python/examples/tutorials/t03_matmul.py" />
+
+CTA `(pm, pn)` owns a `TILE_M x TILE_N` tile of `C`. Each turn of the k loop
+copies a panel of `A` and of `B` into shared memory, `a` and `b`, and
+`ph.dot(a, b)` adds their product to the accumulator. `@ph.tensorcore` runs
+the product on the tensor cores, and the accumulator `acc` stays in `f32`
+until it is stored into the `f16` tensor `C`, which narrows it once, as the
+tutorial's `accumulator.to(tl.float16)` does.
+
+`@ph.aligned` promises that each dimension is a whole number of tiles, which
+removes the masks. The compiler double-buffers the k loop on its own; see
+[`@pipeline`](/docs/attributes/pipeline/).
+
+The tutorial autotunes over a list of configurations and orders the blocks
+in groups for L2 reuse. The port compiles one configuration, 64 x 64 x 32; a
+wider `@ph.autotune` space and a `key` make the
+[autotuner](/docs/python/autotuning/) search it. The check is the
+tutorial's: 512 x 512 inputs in [-0.5, 0.5) against `torch.matmul`, with an
+absolute tolerance of 1e-2.

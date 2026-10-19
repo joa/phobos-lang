@@ -1,0 +1,79 @@
+---
+title: Phobos from Python
+description: Write a Phobos kernel as a Python function, launch it on torch or CuPy arrays, and autotune it.
+sidebar:
+  label: Overview
+  order: 0
+---
+
+import { CardGrid, LinkCard } from "@astrojs/starlight/components"
+
+The `phobos` package lets you write a kernel as a Python function and launch
+it from Python. A function decorated with `@ph.kernel` is a Phobos kernel
+spelled in Python. It has Phobos's semantics, not Python's: the package reads
+the function's source and never runs it. Every Python construct the package
+accepts spells one construct of the [language](/docs/reference/spec/), and
+the Python side adds nothing to the language.
+
+```python
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.kernel
+@ph.autotune(BLOCK=[16, 8192])
+def saxpy(x: ph.tensor[ph.f32][N], y: ph.tensor[ph.f32][N], out: ph.tensor[ph.f32][N], alpha: ph.f32):
+    base: ph.let = ph.ctx.block.x * BLOCK
+    out[base:+BLOCK] = alpha * x[base:+BLOCK] + y[base:+BLOCK]
+
+
+print(saxpy.source)
+saxpy[lambda meta: (-(-meta["N"] // meta["BLOCK"]),)](x, y, out, 2.0)  # x, y, out: torch or CuPy arrays
+```
+
+This is [saxpy](/docs/examples/saxpy-fp32/), the same kernel as
+`examples/saxpy_fp32.ph`, and `saxpy.source` prints the Phobos it spells:
+
+```phobos
+@autotune(BLOCK in [16, 8192])
+kernel saxpy(x: tensor<f32>[N], y: tensor<f32>[N], out: tensor<f32>[N], alpha: f32) {
+    let base = ctx.block.x * BLOCK
+    out[base :+ BLOCK] = alpha * x[base :+ BLOCK] + y[base :+ BLOCK]
+}
+```
+
+## How it works
+
+1. **The front end** reads the module's source with Python's `ast`. It writes
+   the Phobos program the kernel spells, with a span map from each construct
+   back to the Python text it came from.
+2. **`phobos-compile`** compiles that program to PTX for the card. It holds
+   the span map, so every error, race report and trace location it prints
+   names a line of the Python file. Beside the PTX it writes the kernel's
+   launch contract: the parameter slots, the index width, the CTA size and
+   the shared memory.
+3. **The launcher** binds the arguments to the contract and launches the
+   kernel through the CUDA driver, with `ctypes`. An argument is any array
+   that offers `__cuda_array_interface__`, so torch, CuPy and Numba arrays all
+   work, and no array library is needed to compile.
+4. **The autotuner** searches the kernel's own `@autotune` space. It checks
+   every variant against a reference and times the ones that pass.
+
+Compiled kernels go in the same kernel cache the inference runtime uses, so
+a kernel compiles once per chip.
+
+## Where to go next
+
+<CardGrid>
+  <LinkCard title="Install" description="Get the package from a release or a checkout." href="/docs/python/install/" />
+  <LinkCard title="Writing kernels" description="How each Phobos construct is spelled in Python, and where Python's meaning differs." href="/docs/python/kernels/" />
+  <LinkCard title="Launching" description="Grids, arguments, streams and what a launch checks." href="/docs/python/launching/" />
+  <LinkCard title="Autotuning" description="Search a kernel's @autotune space against a reference." href="/docs/python/autotuning/" />
+  <LinkCard title="Errors and debugging" description="Errors at the Python line, the Phobos a kernel spells, and the race check." href="/docs/python/errors/" />
+  <LinkCard title="Tutorials" description="Triton's tutorials 01, 02, 03, 05 and 06, ported." href="/docs/python/tutorials/" />
+</CardGrid>
+
+The [Reference](/docs/python/reference/) page has the full spelling table and
+every place where Python's meaning differs from Phobos's. Moving an existing
+`.ph` file to Python is one command: [`ph2py`](/docs/python/ph2py/).

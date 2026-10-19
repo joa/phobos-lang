@@ -67,8 +67,9 @@ helpers rather than a spelling of its own.
   list the docs are checked against
 - `npm run check` in `website/`: the site's tests and type checks, as CI runs them
 - `python -m unittest discover -s python/tests`: the Python front end, the
-  launcher and the autotuner's host side, against a release `phobos-compile`.
-  No GPU. `python python/tests/roundtrip.py [DIR...]` prints every `.ph` in
+  launcher and the autotuner's host side, against a release `phobos-compile`,
+  and every `python` fence of the website's Python pages compiled, as
+  `site -- check` compiles the `phobos` ones. No GPU. `python python/tests/roundtrip.py [DIR...]` prints every `.ph` in
   Python with `ph2py` (phobos-compile's second binary), reads it back through
   the front end and diffs the emitted modules under the five targets; a change to the parser, the front end or
   `ph2py` runs it over the tree and the snapshot corpus. The GPU checks are in

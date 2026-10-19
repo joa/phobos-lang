@@ -172,7 +172,9 @@ first choice until it is tuned.
 - `python -m unittest discover -s python/tests`: no GPU. The launch
   contract against the arguments it binds, the semantics table, the UI
   sources (`tests/ui`, `PHOBOS_BLESS=1` reblesses), the autotuner's host
-  side, and every example kernel compiled race-free.
+  side, every example kernel compiled race-free, and every `python` fence of
+  the website's Python pages compiled (`python fragment` is not,
+  `python expect-error` must fail).
 - `python python/tests/roundtrip.py [DIR...]`: the round trip.
 - On the card, `tests/gpu`: `replay.py` (the Python launcher against the
   Rust one, byte for byte, on recordings `lang_check --record` and

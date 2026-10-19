@@ -1,0 +1,26 @@
+---
+title: "01: Vector addition"
+description: out = x + y, one slice per CTA, with the last block masked by the compiler.
+sidebar:
+  order: 1
+---
+
+import PythonModule from "../../../../../components/PythonModule.astro"
+
+The first of [Triton's tutorials](https://triton-lang.org/main/getting-started/tutorials/01-vector-add.html)
+adds two vectors. Each CTA adds `BLOCK` elements: it takes the slice of `x`
+and of `y` that starts at `ctx.block.x * BLOCK` and stores their sum into
+`out`.
+
+<PythonModule file="python/examples/tutorials/t01_vector_add.py" />
+
+Triton's version computes the offsets of its block and a mask,
+`offsets < n_elements`, so the last block does not read or write past the
+end. Here the slice `x[base:+BLOCK]` is a tile, and the compiler masks the
+part of the last one that lies past `N`.
+
+The grid is a function of `meta`: `meta["N"]` is the length the arguments
+bind, and `meta["BLOCK"]` the tile size the kernel compiled with, so
+`-(-meta["N"] // meta["BLOCK"])` is the number of blocks rounded up. The
+input is 98432 elements, as in the tutorial, and the check expects the sum to
+be exact.

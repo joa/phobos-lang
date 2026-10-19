@@ -1,0 +1,151 @@
+---
+title: Writing kernels
+description: How each Phobos construct is spelled in Python, and where Python's meaning differs from the kernel's.
+sidebar:
+  order: 2
+---
+
+A kernel module is ordinary Python that Python never runs as a kernel. The
+front end reads its source and writes the Phobos program it spells, so what a
+kernel means is what the [language guide](/docs/language/) says, written
+with Python's syntax. This page walks through the spellings; the
+[Reference](/docs/python/reference/) has the full table.
+
+## A module
+
+```python
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.fn
+def scaled(x, s):
+    return x * s
+
+
+@ph.kernel
+@ph.autotune(ROWS=[4, 16], COLS=[64])
+@ph.aligned(M="ROWS", N="COLS")
+def row_means(X: ph.tensor[ph.f32][M, N], OUT: ph.tensor[ph.f32][M, 1]):
+    r: ph.let = ph.ctx.block.x * ROWS
+    total: ph.var[ph.tile[ph.f32][ROWS, 1]] = 0.0
+    for c in range(0, N, COLS):
+        a: ph.var = X[r:+ROWS, c:+COLS]
+        total += ph.rowsum(a)
+    OUT[r:+ROWS, 0:+1] = scaled(total, 1.0 / ph.f32(N))
+```
+
+The module starts with `from __future__ import annotations`, so Python never
+evaluates a parameter's type, and a dimension such as `M` needs to be no name
+Python knows. Names resolve through the module's imports of `phobos.lang`:
+`import phobos.lang as ph`, `from phobos import lang as ph`, or
+`from phobos.lang import let, var, ...` all work.
+
+## Kernels and their parameters
+
+`@ph.kernel` on a `def` makes it a kernel. Each parameter is annotated with
+its type:
+
+| Phobos | Python |
+| --- | --- |
+| `A: tensor<f32>[M, K]` | `A: ph.tensor[ph.f32][M, K]` |
+| `alpha: f32`, `n: i32` | `alpha: ph.f32`, `n: ph.i32` |
+| `tile<f16>[R, C]` | `ph.tile[ph.f16][R, C]` |
+
+A dimension is a name, bound from the arguments at launch, or a number. The
+element types are `ph.f16`, `ph.bf16`, `ph.f32`, `ph.f64`, `ph.i8`,
+`ph.i32`, `ph.i64`, `ph.u8`, `ph.u16`, `ph.u32` and `ph.bool`.
+
+## Attributes
+
+An attribute is a decorator under `@ph.kernel`. A name in an argument is a
+string, since Python would otherwise look it up:
+
+| Phobos | Python |
+| --- | --- |
+| `@autotune(TILE in [32, 256], T in [256, 128])` | `@ph.autotune(TILE=[32, 256], T=[256, 128])` |
+| `@launch(T)` | `@ph.launch("T")` |
+| `@aligned(M = TILE_M)` | `@ph.aligned(M="TILE_M")` |
+| `@tensorcore`, `@pipeline(off)` | `@ph.tensorcore`, `@ph.pipeline("off")` |
+
+Every [attribute](/docs/attributes/) is spelled this way.
+
+## Declarations
+
+A declaration names `ph.let` or `ph.var`, and nothing else declares:
+
+| Phobos | Python |
+| --- | --- |
+| `let x = e` | `x: ph.let = e` |
+| `let x: f32 = e` | `x: ph.let[ph.f32] = e` |
+| `var acc: tile<f32>[R, C] = 0.0` | `acc: ph.var[ph.tile[ph.f32][R, C]] = 0.0` |
+| `var a = A[r :+ R, c :+ C]` | `a: ph.var = A[r:+R, c:+C]` |
+
+`let` binds a value, or a view of a tensor slice; `var` binds a mutable
+value, a tile, or a copy of a slice into a shared tile. A bare `x = e` on a
+name never declared is an assignment, and the compiler refuses it at the
+Python line, so a misspelt name cannot quietly become a new variable.
+
+## Slices
+
+`A[s:+n]` is the Phobos span `A[s :+ n]`: `n` elements starting at `s`.
+`A[s:e]`, `A[s:]`, `A[:e]` and `A[:]` are ranges as in Phobos. Python reads
+`s:+n` as a range ending at `+n`; the front end tells the two apart from the
+source text, so `s:+n` is a span and `s:s+n` is a range.
+
+## Statements and expressions
+
+- `for i in range(lo, hi, step):` is a Phobos `for`, and `range(hi)` starts
+  at 0. `for i in ph.unroll(4, range(lo, hi)):` is `for<unroll 4>`.
+- `while`, `if`, `elif`, `else`, `break`, `continue` and `return` are
+  spelled as in Python.
+- `True`, `False`, `not`, `and` and `or` are Phobos's `true`, `false`, `!`,
+  `&&` and `||`; the arithmetic, bitwise and comparison operators are the same.
+- `ph.ctx` is the [execution context](/docs/ctx/): `ph.ctx.block.x`,
+  `ph.ctx.thread`, `ph.ctx.lane` and the rest.
+- Every built-in and [standard library](/docs/stdlib/) function is `ph.`
+  plus its name: `ph.exp(x)`, `ph.min(a, b)`, `ph.f32(i)`, `ph.dot(a, b)`,
+  `ph.softmax(t)`.
+- A collective takes its axis as a keyword: `sum<over ctx.lane, width 8>(x)`
+  is `ph.sum(x, over=ph.ctx.lane, width=8)`, and `shfl<xor 16>(v)` is
+  `ph.shfl(v, xor=16)`.
+
+## Functions
+
+`@ph.fn` makes a `def` a Phobos `fn`. A body that is one `return e` is
+`fn f(a, b) = e`. A kernel calls a module's functions by name, and every one
+of them is written into the program its kernels compile in. A function body
+that reads a name from its caller lists it: `@ph.fn(uses=("W", "C"))`.
+
+## Where Python's meaning differs
+
+The kernel computes what Phobos computes. Where the Python reading of the
+same text would give another value, the construct is either refused at its
+line or computes as Phobos says:
+
+- `/` of two integers is refused; write `//` to divide as integers. `//`
+  truncates toward zero, so `-7 // 2` is `-3`, where Python gives `-4`.
+- `%` takes the dividend's sign, as C's `fmod` does: `-7 % 3` is `-1`.
+- A float literal is an `f32`, not an `f64`.
+- Integers wrap at the kernel's index width, and `and` and `or` evaluate both
+  sides.
+- `a < b < c` is `a < b and b < c`.
+
+The [Reference](/docs/python/reference/#where-phobos-and-python-differ) has
+every case, each with a test that shows the value. Python constructs with no
+Phobos counterpart, such as `**`, comprehensions, lambdas, `with`, `try`,
+strings and default arguments, are refused where they are written.
+
+```python expect-error
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.kernel
+def halves(out: ph.tensor[ph.i32][N]):
+    i: ph.let = ph.ctx.block.x * ph.ctx.threads + ph.ctx.thread
+    if i < N:
+        out[i] = ph.i32(i / 2)  # refused: `/` of two integers; write `//`
+```

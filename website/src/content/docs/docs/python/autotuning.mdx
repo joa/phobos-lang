@@ -1,0 +1,88 @@
+---
+title: Autotuning
+description: Search a kernel's own @autotune space on the card, every variant checked against a reference, the fastest kept per problem size.
+sidebar:
+  order: 4
+---
+
+A kernel's [`@autotune`](/docs/attributes/autotune/) declares its search
+space, and the autotuner searches that space and nothing else. There is no
+list of configurations to write, and nothing is specialized on an argument's
+value.
+
+```python
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+def reference(x, y, out):
+    return {"out": x + y}
+
+
+@ph.kernel(key=("N",), reference=reference)
+@ph.autotune(BLOCK=[256, 4096])
+def add(x: ph.tensor[ph.f32][N], y: ph.tensor[ph.f32][N], out: ph.tensor[ph.f32][N]):
+    base: ph.let = ph.ctx.block.x * BLOCK
+    out[base:+BLOCK] = x[base:+BLOCK] + y[base:+BLOCK]
+```
+
+```python fragment
+add[lambda meta: (-(-meta["N"] // meta["BLOCK"]),)](x, y, out)   # tunes, then launches the winner
+```
+
+- **`key`** names the extents a winner holds for. Each value `N` takes gets
+  a winner of its own, so a kernel tuned at one size is tuned again at
+  another.
+- **`reference`** computes what the kernel should. It takes the arguments as
+  numpy arrays and scalars, and returns a dict from an output parameter's
+  name to the expected array.
+
+With both on the decorator, the first launch at a new value of the key tunes
+first, then launches the winner. Without a `reference`, a launch takes each
+constant's first choice until `add.tune(grid, *args, reference=f)` runs.
+`tune` takes the same grid and arguments as a launch, and returns the
+result.
+
+## What a tune does
+
+1. **Compiles every variant** in one `phobos-compile --all-variants
+   --check-races` run. A variant that fails to compile, or that the
+   [race check](/docs/python/errors/#the-race-check) finds a race in, is
+   reported and left out.
+2. **Checks every variant.** Each runs once on copies of the arguments, with
+   canary bytes after every tensor. It is accepted only if the canaries are
+   untouched and it computes what `reference` does: an integer output
+   exactly, a float one within the tolerance its type's rounding allows.
+   `rtol=` and `atol=` widen that for a path that rounds more, such as the
+   tensor cores rounding their operands to f16.
+3. **Times the variants that passed** with CUDA events, after a warm-up of at
+   least 300 ms that lets the clocks ramp. The variants take turns, a launch
+   each a round, so they share the card's clock and temperature. A variant's
+   time is the fastest of 20 rounds, kept with every sample and the spread.
+4. **Flushes the L2** before each timed launch, by writing a buffer twice its
+   size outside the timed region, so a variant is timed reading its inputs
+   from memory, as a kernel in a model mostly does. `flush_l2=False` times it
+   warm.
+5. **Keeps the fastest.** The result goes into the kernel cache, under the
+   chip's directory in `autotune/`, keyed by the kernel source, the chip, the
+   card's name and the key values. Another process on the same card finds it
+   there and launches the winner without tuning.
+
+`tune` returns a `Result`: the winner's settings in `.winner`, and every
+variant's samples, median, spread and the reason it was left out in
+`.variants`.
+
+## Choosing what to search
+
+Everything the kernel leaves to `@autotune` is searched together: tile
+sizes, the CTA size through [`@launch`](/docs/attributes/launch/), the
+unroll of a loop, and the index width through
+[`@index_bits`](/docs/attributes/index_bits/). Two increasing values are
+searched in doubling steps, so `BLOCK=[256, 4096]` tries 256, 512, 1024, 2048
+and 4096; three values or more, or two decreasing, are a list.
+
+A variant the hardware cannot run, such as one over the shared memory budget,
+is dropped at compile time, so a wide space costs compile time rather than
+failures. Alignment is what [`@aligned`](/docs/attributes/aligned/) promises,
+not something the tuner infers from the arguments.

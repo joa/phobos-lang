@@ -111,6 +111,11 @@ describe("link rewriting", () => {
   it("maps the repository root to the repository", () => {
     expect(rewriteLinks("[repo](./)").text).toBe(`[repo](${REPO_URL})`)
   })
+
+  it("resolves a link against the directory of the file it is in", () => {
+    const { text } = rewriteLinks("[spec](../SPEC.md) and [jit](phobos/jit.py)", { base: "python" })
+    expect(text).toBe(`[spec](/docs/reference/spec/) and [jit](${BLOB_URL}python/phobos/jit.py)`)
+  })
 })
 
 describe("render", () => {

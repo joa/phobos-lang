@@ -1,0 +1,93 @@
+---
+title: Errors and debugging
+description: Errors reported at the Python line, the Phobos a kernel spells, the race check, and errors as JSON.
+sidebar:
+  order: 5
+---
+
+## Errors at the Python line
+
+Every error is reported at the line of the Python file that caused it,
+whether the front end or the compiler found it. A kernel is translated and
+compiled when it is first launched or compiled, and an error raises
+`phobos.CompileError`, whose message is what the compiler prints:
+
+```python expect-error
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.kernel
+def halves(out: ph.tensor[ph.i32][N]):
+    i: ph.let = ph.ctx.block.x * ph.ctx.threads + ph.ctx.thread
+    if i < N:
+        out[i] = ph.i32(i / 2)
+```
+
+```text
+error: this `/` divides two integers, as integers
+  --> halves.py:10:25
+   |
+10 |         out[i] = ph.i32(i / 2)
+   |                         ^^^^^ rounds toward zero, where the source's `/` gives a fraction
+   |
+   = help: write `//` to divide as integers, or convert an operand to a float type for a fraction
+
+error: aborting due to 1 previous error
+```
+
+The layout is the compiler's own, and so are the messages, so a few still
+name a construct by its Phobos spelling. Python's parser reports a syntax
+error before the front end sees the file, and stops at the first one.
+
+The front end reads a kernel from the file its function is defined in, so a
+kernel lives in a module on disk. One typed at the interactive prompt has no
+file to read, and its first compile says so.
+
+## The Phobos a kernel spells
+
+`kernel.source` is the Phobos program the kernel spells, the same text the
+compiler reads:
+
+```python fragment
+print(halves.source)
+```
+
+It is the quickest way to see what a construct became: a slice, a `//`, a
+chained comparison. The program can be compiled by hand too:
+`kernel.files()` writes it and its span map to a temporary directory, for
+`phobos-compile`'s own options.
+
+## The race check
+
+`phobos-compile --check-races` runs every thread of a CTA through the kernel
+on the host and fails on a race in shared memory between warps, on a barrier
+not every thread reaches, and on a shared access outside its buffer. A race
+is reported at the two Python lines involved. The autotuner runs it on every
+variant it compiles; to run it on one kernel:
+
+```python fragment
+from phobos import compiler
+
+with halves.files() as (ph, origin):
+    compiler.run([str(ph), "--origin", str(origin), "--check-races", "-o", "halves.ptx"])
+```
+
+It needs no GPU. [`--check-races`](/docs/reference/cli/#phobos-compile) is
+on the CLI page.
+
+## Errors as data
+
+`compiler.run(..., error_format="json")` asks the compiler for one JSON
+object per error, which the raised `CompileError` holds in `.diagnostics`.
+Each carries the severity, the message, the Python file, labels with their
+line and column, notes and help, for an editor or a test to read.
+
+## At launch
+
+A launch checks its arguments against the kernel's launch contract before
+anything runs, and raises `phobos.LaunchError` naming the argument and what
+was wrong: a wrong element type, rank or extent, a non-contiguous array, a
+misaligned address, or an extent that is not a multiple of what the kernel
+needs. [Launching](/docs/python/launching/#arguments) lists the checks.

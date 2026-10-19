@@ -1,0 +1,95 @@
+---
+title: Install
+description: The Python package from a release or a checkout, what it needs, and how it finds the compiler.
+sidebar:
+  order: 1
+---
+
+The package is plain Python: the `phobos` directory and nothing to build. It
+runs `phobos-compile` to compile and the CUDA driver to launch, and it needs
+no third-party module for either.
+
+## What you need
+
+- Python 3. The package is tested with Python 3.12.
+- An NVIDIA GPU and driver as for the rest of Phobos: compute capability 7.5
+  or newer and a driver from the CUDA 13 line, R580 or newer
+  ([Install](/docs/getting-started/install/#what-you-need)). Compiling a
+  kernel needs no GPU.
+- numpy, for the autotuner only: it compares each variant's outputs on the
+  host.
+- An array library for your data, such as torch or CuPy, or none. A launch
+  takes any object that offers `__cuda_array_interface__`, and the package's
+  own `phobos.DeviceArray` is one.
+
+## Get the package
+
+### From a release
+
+A [release](/docs/getting-started/install/#download-a-release) holds the
+package in `python/phobos`, beside the binaries. Put its `python` directory
+on the path:
+
+```sh
+export PYTHONPATH=/path/to/phobos-VERSION-linux-x64/python
+```
+
+On Windows, in PowerShell: `$env:PYTHONPATH = "C:\path\to\phobos-VERSION-windows-x64\python"`.
+The package runs the `phobos-compile` in the release directory, two levels
+above it.
+
+### From a checkout
+
+Build the compiler, then put the checkout's `python` directory on the path:
+
+```sh
+cargo build --release -p phobos-compile
+export PYTHONPATH=$PWD/python
+```
+
+The package runs the `phobos-compile` the checkout built under
+`target/release`.
+
+To run another compiler, set `PHOBOS_COMPILE` to its path. The package looks
+for the compiler in this order:
+
+1. `PHOBOS_COMPILE`.
+2. `phobos-compile` on the `PATH`.
+3. The one beside `python/` in a release.
+4. The checkout's `target/release` build, then its `target/debug` one.
+
+## Check it works
+
+Without a GPU, translate a kernel and compile it:
+
+```python
+from __future__ import annotations
+
+import phobos.lang as ph
+
+
+@ph.kernel
+def double(x: ph.tensor[ph.f32][N]):
+    i: ph.let = ph.ctx.block.x * ph.ctx.threads + ph.ctx.thread
+    if i < N:
+        x[i] = 2.0 * x[i]
+
+
+print(double.source)               # the Phobos it spells
+print(double.compile(chip="sm_75").chip)  # compiles with phobos-compile
+```
+
+On a machine with a GPU, launch it on an array:
+
+```python fragment
+import torch
+
+x = torch.ones(1024, device="cuda")
+double[lambda meta: (meta["N"] // 256,)](x)
+torch.cuda.synchronize()
+print(x[:4])  # tensor([2., 2., 2., 2.], device='cuda:0')
+```
+
+The first launch compiles the kernel for the card's chip and keeps it in the
+[kernel cache](/docs/inference/kernel-cache/); later launches, in this
+process or another, load it from there.

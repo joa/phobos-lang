@@ -23,6 +23,11 @@ on it. These pages cover both: writing kernels, and running models.
     description="Run a GGUF model with phobos-cli, from a prompt or as an OpenAI-compatible server."
     href="/docs/inference/"
   />
+  <LinkCard
+    title="Kernels from Python"
+    description="Write a kernel as a Python function, launch it on torch or CuPy arrays, and autotune it."
+    href="/docs/python/"
+  />
 </CardGrid>
 
 ## Writing kernels
@@ -33,6 +38,9 @@ on it. These pages cover both: writing kernels, and running models.
   down to a single lane, and how per-thread values work.
 - [Attributes](/docs/attributes/): one page for each `@` attribute, such as
   `@autotune`, `@launch` and `@tensorcore`.
+- [Python](/docs/python/): the same kernels written as Python functions,
+  launched on torch or CuPy arrays and autotuned, with Triton's tutorials
+  ported.
 - [Examples](/docs/examples/): five kernels from the repository, explained.
 
 ## Running models

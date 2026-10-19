@@ -65,6 +65,22 @@ export default defineConfig({
         { label: "Standard library", items: [{ autogenerate: { directory: "docs/stdlib" } }] },
         { label: "Execution context: ctx", items: [{ autogenerate: { directory: "docs/ctx" } }] },
         { label: "Attributes", items: [{ autogenerate: { directory: "docs/attributes" } }] },
+        {
+          label: "Python",
+          // Listed by slug, so the tutorials are a labelled group of their own and the reference,
+          // python/README.md rendered into the generated folder, comes last.
+          items: [
+            "docs/python",
+            "docs/python/install",
+            "docs/python/kernels",
+            "docs/python/launching",
+            "docs/python/autotuning",
+            "docs/python/errors",
+            "docs/python/ph2py",
+            { label: "Tutorials", items: [{ autogenerate: { directory: "docs/python/tutorials" } }] },
+            "docs/python/reference",
+          ],
+        },
         { label: "Examples", items: [{ autogenerate: { directory: "docs/examples" } }] },
         { label: "Inference", items: [{ autogenerate: { directory: "docs/inference" } }] },
         {
