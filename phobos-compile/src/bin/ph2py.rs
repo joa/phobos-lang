@@ -2,8 +2,8 @@
 // front end (`python/phobos/frontend.py`), so a `.ph` and the `.py` it
 // prints compile to the same module:
 //
-//     cargo run -p phobos-lang --example ph2py -- FILE.ph
-//     cargo run -p phobos-lang --example ph2py -- --out DIR PATH...
+//     ph2py FILE.ph
+//     ph2py --out DIR PATH...
 //
 // The first prints to standard output; the second writes `DIR/<stem>.py`
 // for each source, a file or every `.ph` in a directory, and prints a line
@@ -39,8 +39,32 @@ const CMP: u8 = 4;
 const UNARY: u8 = 11;
 const ATOM: u8 = 13;
 
+const USAGE: &str = "usage: ph2py FILE.ph
+       ph2py --out DIR PATH...
+
+Prints a Phobos source in its Python spelling, which the `phobos` package's
+front end reads back to the same module.
+
+  FILE.ph           print FILE's Python spelling to standard output
+  --out DIR PATH... write DIR/<stem>.py for each source, a file or every .ph
+                    in a directory, and print a line for each it cannot spell
+  -V, --version     print the version and the compiler fingerprint
+  -h, --help        print this";
+
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1).peekable();
+    match args.peek().map(String::as_str) {
+        Some("--help" | "-h") => {
+            println!("{USAGE}");
+            return Ok(());
+        }
+        Some("--version" | "-V") => {
+            let fingerprint = phobos_kernels::COMPILER_FINGERPRINT;
+            println!("ph2py {} (compiler {fingerprint})", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
+    }
     let out = if args.peek().map(String::as_str) == Some("--out") {
         args.next();
         Some(PathBuf::from(args.next().unwrap_or_default()))
@@ -62,7 +86,7 @@ fn main() -> Result<()> {
         }
     }
     if files.is_empty() {
-        bail!("usage: ph2py FILE.ph | ph2py --out DIR PATH...");
+        bail!("{USAGE}");
     }
     let Some(dir) = out else {
         for f in &files {

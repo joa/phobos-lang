@@ -69,8 +69,8 @@ helpers rather than a spelling of its own.
 - `python -m unittest discover -s python/tests`: the Python front end, the
   launcher and the autotuner's host side, against a release `phobos-compile`.
   No GPU. `python python/tests/roundtrip.py [DIR...]` prints every `.ph` in
-  Python with `ph2py`, reads it back through the front end and diffs the emitted
-  modules under the five targets; a change to the parser, the front end or
+  Python with `ph2py` (phobos-compile's second binary), reads it back through
+  the front end and diffs the emitted modules under the five targets; a change to the parser, the front end or
   `ph2py` runs it over the tree and the snapshot corpus. The GPU checks are in
   `python/tests/gpu`
 - `cargo run --release -p phobos-lang --example contract_check -- DIR...`: each

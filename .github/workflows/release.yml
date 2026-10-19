@@ -65,7 +65,7 @@ jobs:
         shell: pwsh
         run: |
           $out = New-Item -ItemType Directory -Force dist
-          foreach ($bin in "phobos-cli", "phobos-bench", "phobos-cache", "phobos-compile") {
+          foreach ($bin in "phobos-cli", "phobos-bench", "phobos-cache", "phobos-compile", "ph2py") {
             Copy-Item "target\release\$bin.exe" $out
           }
           # The C++ runtime LLVM was built against, shipped beside the

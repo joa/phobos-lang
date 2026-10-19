@@ -1,7 +1,8 @@
 """Running `phobos-compile`, the compiler a release ships.
 
 The binary is `PHOBOS_COMPILE` when set, else `phobos-compile` on the PATH,
-else the one this checkout built under `target/release`. It reads and writes
+else the one beside `python/` in a release, else the one this checkout built
+under `target/release`. It reads and writes
 the runtime's kernel cache, so a kernel the Rust side compiled is a cache hit
 here and the other way round.
 """
@@ -31,8 +32,8 @@ def compiler():
     if found:
         return found
     root = Path(__file__).resolve().parents[2]
-    for build in ("release", "debug"):
-        exe = root / "target" / build / ("phobos-compile.exe" if os.name == "nt" else "phobos-compile")
+    name = "phobos-compile.exe" if os.name == "nt" else "phobos-compile"
+    for exe in (root / name, root / "target" / "release" / name, root / "target" / "debug" / name):
         if exe.exists():
             return str(exe)
     raise CompileError("no phobos-compile: set PHOBOS_COMPILE, put it on the PATH, or `cargo build --release -p phobos-compile`")

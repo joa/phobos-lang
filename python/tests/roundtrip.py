@@ -7,8 +7,8 @@ both sides.
     python python/tests/roundtrip.py [--work DIR] [DIR...]
 
 With no DIR, the corpus is every `.ph` git tracks and the fused chains
-against their stage library. Needs no GPU; builds the `ph2py` and
-`snapshot` examples in release.
+against their stage library. Needs no GPU; builds `ph2py` and the
+`snapshot` example in release.
 """
 
 import argparse
@@ -44,6 +44,11 @@ def cargo_example(name, *args):
                           cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
 
 
+def cargo_bin(name, *args):
+    return subprocess.run(["cargo", "run", "-q", "--release", "-p", "phobos-compile", "--bin", name, "--", *args],
+                          cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("dirs", nargs="*")
@@ -60,7 +65,7 @@ def main():
     for stem, text in sources:
         (original / f"{stem}.ph").write_text(text, encoding="utf-8", newline="\n")
 
-    printed = cargo_example("ph2py", "--out", str(python), str(original))
+    printed = cargo_bin("ph2py", "--out", str(python), str(original))
     # One line a source it cannot spell, its first error, starting with the path.
     unspelled = [line for line in printed.stdout.splitlines() if line.startswith(str(original))]
     if printed.returncode != 0:

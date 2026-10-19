@@ -8,10 +8,15 @@ repository.workspace = true
 license.workspace = true
 keywords.workspace = true
 categories = ["compilers", "development-tools"]
+default-run = "phobos-compile"
 
 [[bin]]
 name = "phobos-compile"
 path = "src/main.rs"
+
+[[bin]]
+name = "ph2py"
+path = "src/bin/ph2py.rs"
 
 [dependencies]
 anyhow = "1"

@@ -33,7 +33,7 @@ export LIBCLANG_PATH=/usr/lib64
 export CUDA_LIBRARY_PATH="$cuda/lib64/stubs"
 export PATH="$LLVM/bin:$PATH"
 
-bins=(phobos-cli phobos-bench phobos-cache phobos-compile)
+bins=(phobos-cli phobos-bench phobos-cache phobos-compile ph2py)
 cargo build --release --locked \
     -p phobos-cli -p phobos-bench -p phobos-cache -p phobos-compile \
     --features phobos-cli/cuda,phobos-bench/cuda
