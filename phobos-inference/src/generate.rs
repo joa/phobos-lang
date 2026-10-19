@@ -195,7 +195,7 @@ pub fn continue_from(
     // Bytes short of a complete UTF-8 character; a token can split one.
     let mut pending: Vec<u8> = Vec::new();
     let mut probed = Instant::now();
-    let mut next = choose(logits, &config.sample, sequence.history(), rng);
+    let mut next = choose(logits, &config.sample, sequence.history(), rng)?;
     let mut produced = 0usize;
     let mut emitted = 0usize;
 
@@ -229,7 +229,7 @@ pub fn continue_from(
             session.extend_greedy(&[next])?
         } else {
             let logits = session.extend(&[next])?;
-            choose(&logits, &config.sample, sequence.history(), rng)
+            choose(&logits, &config.sample, sequence.history(), rng)?
         };
         produced += 1;
         if produced >= config.max_tokens {

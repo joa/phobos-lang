@@ -1,5 +1,7 @@
 use std::collections::HashSet;
 
+use anyhow::{Result, bail};
+
 pub struct Sequence {
     tokens: Vec<i64>,
     prompt_len: usize,
@@ -106,7 +108,34 @@ impl SampleConfig {
 /// The generator a sampled run draws from.
 pub use phobos_base::rng::SplitMix64 as Rng;
 
-pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rng) -> i64 {
+/// Picks the next token from `logits`. Fails on logits no correct pass
+/// produces, see [`check_logits`].
+pub fn choose(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rng) -> Result<i64> {
+    check_logits(logits)?;
+    Ok(choose_checked(logits, cfg, history, rng))
+}
+
+/// Fails unless `logits` has a finite maximum: no NaN, no positive infinity,
+/// and not every one negative infinity, which a mask may set some to.
+///
+/// Sampling cannot recover from either. [`argmax`] ranks a NaN highest, and a
+/// non-finite maximum turns every softmax probability into NaN, so a fault in
+/// a kernel would come out as plausible tokens instead of an error.
+pub fn check_logits(logits: &[f32]) -> Result<()> {
+    let mut finite = false;
+    for (id, &logit) in logits.iter().enumerate() {
+        if logit.is_nan() || logit == f32::INFINITY {
+            bail!("the model produced a logit of {logit} for token {id}, a numerical fault in the forward pass");
+        }
+        finite |= logit.is_finite();
+    }
+    if !finite {
+        bail!("the model produced no finite logit among {}", logits.len());
+    }
+    Ok(())
+}
+
+fn choose_checked(logits: &[f32], cfg: &SampleConfig, history: History, rng: &mut Rng) -> i64 {
     // The top-k path applies the penalties in its single pass. Every other
     // path penalizes a copy. Both see the same values.
     if cfg.top_k > 0 && cfg.top_k < logits.len() && !cfg.is_greedy() {
@@ -269,6 +298,8 @@ fn for_each_unique(ids: impl Iterator<Item = i64>, vocab: usize, mut f: impl FnM
     }
 }
 
+/// The index of the largest logit, ties to the last. A NaN ranks highest, so
+/// a caller handed untrusted logits runs [`check_logits`] first.
 pub fn argmax(logits: &[f32]) -> i64 {
     logits
         .iter()

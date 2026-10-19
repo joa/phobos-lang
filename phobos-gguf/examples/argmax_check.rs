@@ -1,4 +1,5 @@
-// Device argmax against host argmax, plus a synthetic edge case:
+// Device argmax against host argmax, plus synthetic edge cases and the
+// faulty rows it must refuse:
 //
 //   cargo run --release -p phobos-gguf --features cuda \
 //       --example argmax_check -- MODEL.gguf [-p PROMPT]
@@ -116,6 +117,28 @@ fn main() -> Result<()> {
         );
         if got != want {
             bail!("synthetic case '{name}' disagrees: device {got} host {want}");
+        }
+    }
+
+    // Rows no correct pass produces must fail, not pick a token. A row with
+    // only some NaN is not among them: the device max skips a NaN.
+    println!("\nrejected rows:");
+    let faults: [(&str, Vec<f32>); 3] = [
+        ("a positive infinity", {
+            let mut v = vec![-1.0f32; 4096];
+            v[17] = f32::INFINITY;
+            v
+        }),
+        ("nothing but NaN", vec![f32::NAN; 4096]),
+        ("nothing but negative infinity", vec![f32::NEG_INFINITY; 4096]),
+    ];
+    for (name, data) in faults {
+        let buf = full_backend.upload(&data)?;
+        let got = full_backend.argmax(buf, data.len());
+        full_backend.release(buf);
+        match got {
+            Err(err) => println!("  {name}: refused ({err})"),
+            Ok(id) => bail!("a row of {name} picked token {id} instead of failing"),
         }
     }
 

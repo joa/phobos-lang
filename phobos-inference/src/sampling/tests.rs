@@ -10,7 +10,7 @@ fn greedy_picks_argmax() {
             &SampleConfig::greedy(),
             History::default(),
             &mut rng
-        ),
+        ).unwrap(),
         1
     );
 }
@@ -26,7 +26,7 @@ fn top_k_one_is_deterministic() {
     };
     let mut rng = Rng::new(42);
     for _ in 0..16 {
-        assert_eq!(choose(&logits, &cfg, History::default(), &mut rng), 1);
+        assert_eq!(choose(&logits, &cfg, History::default(), &mut rng).unwrap(), 1);
     }
 }
 
@@ -46,7 +46,7 @@ fn top_k_keeps_only_the_k_highest_wherever_they_sit() {
     let mut rng = Rng::new(7);
     let mut seen = std::collections::BTreeSet::new();
     for _ in 0..200 {
-        seen.insert(choose(&logits, &cfg, History::default(), &mut rng));
+        seen.insert(choose(&logits, &cfg, History::default(), &mut rng).unwrap());
     }
     assert_eq!(seen.into_iter().collect::<Vec<_>>(), [3, 500, 917]);
 }
@@ -61,7 +61,7 @@ fn sampling_is_seed_reproducible() {
     let draw = |seed| {
         let mut rng = Rng::new(seed);
         (0..8)
-            .map(|_| choose(&logits, &cfg, History::default(), &mut rng))
+            .map(|_| choose(&logits, &cfg, History::default(), &mut rng).unwrap())
             .collect::<Vec<_>>()
     };
     assert_eq!(draw(7), draw(7));
@@ -79,7 +79,7 @@ fn min_p_keeps_only_the_contenders() {
     };
     let mut rng = Rng::new(3);
     for _ in 0..64 {
-        assert!(choose(&logits, &cfg, History::default(), &mut rng) < 2);
+        assert!(choose(&logits, &cfg, History::default(), &mut rng).unwrap() < 2);
     }
 }
 
@@ -93,7 +93,7 @@ fn min_p_of_one_leaves_only_the_best() {
     };
     let mut rng = Rng::new(11);
     for _ in 0..16 {
-        assert_eq!(choose(&logits, &cfg, History::default(), &mut rng), 1);
+        assert_eq!(choose(&logits, &cfg, History::default(), &mut rng).unwrap(), 1);
     }
 }
 
@@ -105,8 +105,8 @@ fn presence_penalty_demotes_a_generated_token() {
         ..SampleConfig::greedy()
     };
     let mut rng = Rng::new(0);
-    assert_eq!(choose(&logits, &cfg, History::default(), &mut rng), 1);
-    assert_eq!(choose(&logits, &cfg, History::new(&[], &[1]), &mut rng), 3);
+    assert_eq!(choose(&logits, &cfg, History::default(), &mut rng).unwrap(), 1);
+    assert_eq!(choose(&logits, &cfg, History::new(&[], &[1]), &mut rng).unwrap(), 3);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn presence_penalty_leaves_the_prompt_alone() {
         ..SampleConfig::greedy()
     };
     let mut rng = Rng::new(0);
-    assert_eq!(choose(&logits, &cfg, History::new(&[1], &[]), &mut rng), 1);
+    assert_eq!(choose(&logits, &cfg, History::new(&[1], &[]), &mut rng).unwrap(), 1);
 }
 
 #[test]
@@ -131,7 +131,7 @@ fn repetition_penalty_counts_the_prompt() {
         ..SampleConfig::greedy()
     };
     let mut rng = Rng::new(0);
-    assert_eq!(choose(&logits, &cfg, History::new(&[1], &[]), &mut rng), 3);
+    assert_eq!(choose(&logits, &cfg, History::new(&[1], &[]), &mut rng).unwrap(), 3);
 }
 
 #[test]
@@ -175,7 +175,7 @@ fn penalties_skip_ids_outside_the_vocab() {
     };
     let mut rng = Rng::new(0);
     assert_eq!(
-        choose(&logits, &cfg, History::new(&[], &[-1, 7]), &mut rng),
+        choose(&logits, &cfg, History::new(&[], &[-1, 7]), &mut rng).unwrap(),
         1
     );
 }
@@ -201,4 +201,24 @@ fn the_penalized_top_k_is_the_top_k_of_the_penalized_vocab() {
     want.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
     want.truncate(20);
     assert_eq!(top_k(&logits, &cfg, history), want);
+}
+
+#[test]
+fn a_faulty_logit_fails_the_draw_instead_of_picking_a_token() {
+    let mut rng = Rng::new(0);
+    let sampled = SampleConfig { temperature: 0.8, ..SampleConfig::greedy() };
+    for cfg in [SampleConfig::greedy(), sampled] {
+        for (name, logits) in [
+            ("a NaN", vec![0.5, f32::NAN, 0.1]),
+            ("a positive infinity", vec![0.5, f32::INFINITY, 0.1]),
+            ("only negative infinity", vec![f32::NEG_INFINITY; 3]),
+            ("nothing", vec![]),
+        ] {
+            let err = choose(&logits, &cfg, History::default(), &mut rng);
+            assert!(err.is_err(), "{name} was sampled as {err:?}");
+        }
+        // A mask's negative infinity is not a fault.
+        let masked = [f32::NEG_INFINITY, 2.0, f32::NEG_INFINITY];
+        assert_eq!(choose(&masked, &cfg, History::default(), &mut rng).unwrap(), 1);
+    }
 }

@@ -66,6 +66,15 @@ impl DeviceBackend {
         self.stream.synchronize()?;
         let mut winner = [0.0f32; 2];
         out.copy_to(&mut winner)?;
-        Ok(winner[1].round() as i64)
+        // The device max skips a NaN, so a row with some NaN logits still
+        // picks among the rest; what it catches is a positive infinity, and a
+        // row of nothing but NaN, which leaves the -1 index the reduction
+        // starts from.
+        let (max, at) = (winner[0], winner[1].round() as i64);
+        ensure!(
+            max.is_finite() && (0..len as i64).contains(&at),
+            "the model produced no usable logit: the device argmax found {max} at {at}, a numerical fault in the forward pass"
+        );
+        Ok(at)
     }
 }

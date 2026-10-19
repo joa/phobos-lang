@@ -248,7 +248,9 @@ pub trait Session {
     /// decoding. A backend can skip copying out the logits. The default is
     /// [`Session::extend`] plus a host-side argmax.
     fn extend_greedy(&mut self, ids: &[i64]) -> Result<i64> {
-        Ok(crate::sampling::argmax(&self.extend(ids)?))
+        let logits = self.extend(ids)?;
+        crate::sampling::check_logits(&logits)?;
+        Ok(crate::sampling::argmax(&logits))
     }
 
     /// Tokens consumed so far, prompt included.
