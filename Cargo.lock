@@ -1716,14 +1716,14 @@ dependencies = [
 
 [[package]]
 name = "phobos-base"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
 ]
 
 [[package]]
 name = "phobos-bench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "phobos-base",
@@ -1734,7 +1734,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-cache"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "phobos-base",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "phobos-base",
@@ -1756,7 +1756,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-cluster"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "melior",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-compile"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "phobos-base",
@@ -1781,7 +1781,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-gguf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cust",
@@ -1795,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-inference"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -1809,7 +1809,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-kbench"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cust",
@@ -1825,7 +1825,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-kernels"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cust",
@@ -1839,7 +1839,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-lang"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "melior",
@@ -1852,7 +1852,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-mlir"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "inkwell",
@@ -1864,7 +1864,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-onnx"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cust",
@@ -1880,7 +1880,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-pod"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "cust",
@@ -1898,7 +1898,7 @@ dependencies = [
 
 [[package]]
 name = "phobos-sched"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "futures",
