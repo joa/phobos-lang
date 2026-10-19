@@ -13,6 +13,9 @@ OPTIONS:
                       device memory for a streamed model's expert cache,
                       2g, 1500m or bytes; default what the resident weights
                       leave, less a reserve. Ignored without experts
+      --ctx TOKENS    the most tokens of context to serve, a longer prompt
+                      being refused; default what fits on the device after
+                      the weights, up to the trained length. GGUF only
   -n, --num N         generate up to N tokens (default: 200; stops early on an
                       end-of-turn token or the model's context limit)
   -t, --temp T        sampling temperature; 0 = greedy/argmax (default: 0)
