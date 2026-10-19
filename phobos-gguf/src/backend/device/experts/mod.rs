@@ -409,6 +409,24 @@ impl Experts {
     }
 }
 
+impl Experts {
+    /// Drops every resident expert. Counters keep running. The caller has
+    /// synchronized the stream, so no copy is still filling a slot.
+    pub(super) fn cool(&mut self) -> Result<()> {
+        self.join_started()?;
+        self.refills.clear();
+        for b in &mut self.blocks {
+            b.slot_of.fill(NONE);
+            b.held.fill((NONE, 0));
+            b.prefetched.fill(false);
+            b.fetched = None;
+            b.arriving.clear();
+            b.predicted = false;
+        }
+        Ok(())
+    }
+}
+
 impl Drop for Experts {
     /// Host misses still read a block's mirror, so join them before it is
     /// freed.

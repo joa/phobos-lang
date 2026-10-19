@@ -15,6 +15,7 @@ use phobos_gguf::Decoder;
 use phobos_gguf::Gguf;
 use phobos_gguf::Quant;
 use phobos_gguf::backend::Backend;
+use phobos_inference::CacheStats;
 
 #[cfg(feature = "cuda")]
 use phobos_gguf::backend::device;
@@ -180,7 +181,10 @@ fn main() -> Result<()> {
     );
 
     // Pseudorandom token ids, as llama-bench uses. A position's cost does not
-    // depend on the token.
+    // depend on the token, but a mixture-of-experts model's does: routing is
+    // deterministic, so repeating a sequence over a warm expert cache measures
+    // a cache that holds exactly what the pass needs. Each repetition gets a
+    // sequence of its own, and starts with the cache empty.
     let longest = args
         .prompt_tokens
         .iter()
@@ -188,7 +192,9 @@ fn main() -> Result<()> {
         .chain(args.gen_tokens.iter().map(|&n| n + args.depths.iter().max().unwrap_or(&0)))
         .max()
         .unwrap_or(0);
-    let tokens = synthetic_tokens(longest.max(128) + 1, vocab);
+    let count = longest.max(128) + 1;
+    let tokens = synthetic_tokens(count, vocab, 0);
+    let rep_tokens: Vec<Vec<u32>> = (1..=args.repetitions as u64).map(|rep| synthetic_tokens(count, vocab, rep)).collect();
 
     if args.warmup {
         eprint!("warmup... ");
@@ -218,16 +224,19 @@ fn main() -> Result<()> {
     let mut rows = Vec::new();
     for &prompt_tokens in &args.prompt_tokens {
         let mut rates = Vec::new();
-        for rep in 0..args.repetitions {
+        for (rep, tokens) in rep_tokens.iter().enumerate() {
+            backend.cool_expert_cache()?;
             let mut state = model.new_state();
+            let before = backend.cache_stats();
             let start = Instant::now();
             // The whole prompt in one pass.
             model.forward(&mut state, &tokens[..prompt_tokens], backend.as_ref())?;
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
             rates.push(prompt_tokens as f64 / secs);
+            let hits = hit_rate(before, backend.cache_stats(), |s| (s.expert_prompt_hits, s.expert_prompt_misses));
             eprintln!(
-                "  pp{prompt_tokens} rep {}/{}: {secs:.3} s",
+                "  pp{prompt_tokens} rep {}/{}: {secs:.3} s{hits}",
                 rep + 1,
                 args.repetitions,
             );
@@ -237,7 +246,8 @@ fn main() -> Result<()> {
     for (&depth, &gen_tokens) in args.depths.iter().flat_map(|d| args.gen_tokens.iter().map(move |n| (d, n))) {
         let test = if depth == 0 { format!("tg{gen_tokens}") } else { format!("tg{gen_tokens} @ d{depth}") };
         let mut rates = Vec::new();
-        for rep in 0..args.repetitions {
+        for (rep, tokens) in rep_tokens.iter().enumerate() {
+            backend.cool_expert_cache()?;
             let mut state = model.new_state();
             // Prime `depth + 1` positions in prompt batches, so the timed
             // loop is pure decoding, as in llama-bench.
@@ -255,13 +265,7 @@ fn main() -> Result<()> {
             state.release(backend.as_ref());
             rates.push(gen_tokens as f64 / secs);
             // A streamed model's decode rate follows its expert hit rate.
-            let hits = match (before, backend.cache_stats()) {
-                (Some(b), Some(a)) if a.expert_hits + a.expert_misses > b.expert_hits + b.expert_misses => {
-                    let (h, m) = (a.expert_hits - b.expert_hits, a.expert_misses - b.expert_misses);
-                    format!(", {:.1}% expert hits", 100.0 * h as f64 / (h + m) as f64)
-                }
-                _ => String::new(),
-            };
+            let hits = hit_rate(before, backend.cache_stats(), |s| (s.expert_hits, s.expert_misses));
             eprintln!("  {test} rep {}/{}: {secs:.3} s{hits}", rep + 1, args.repetitions);
         }
         rows.push((test, rates));
@@ -306,9 +310,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// The expert hit rate between two readings, as a suffix for a progress
+/// line, or nothing when the model streams no experts or none were looked up.
+/// `lookups` picks the counters, the decode or the prompt ones.
+fn hit_rate(
+    before: Option<CacheStats>,
+    after: Option<CacheStats>,
+    lookups: impl Fn(&CacheStats) -> (u64, u64),
+) -> String {
+    let (Some(before), Some(after)) = (before, after) else {
+        return String::new();
+    };
+    let ((bh, bm), (ah, am)) = (lookups(&before), lookups(&after));
+    let (hits, misses) = (ah - bh, am - bm);
+    if hits + misses == 0 {
+        return String::new();
+    }
+    format!(", {:.1}% expert hits", 100.0 * hits as f64 / (hits + misses) as f64)
+}
+
 /// A deterministic spread of valid token ids from an xorshift generator.
-fn synthetic_tokens(count: usize, vocab: usize) -> Vec<u32> {
-    let mut seed = 0x2545_f491_4f6c_dd1du64;
+/// Each `stream` is a different sequence.
+fn synthetic_tokens(count: usize, vocab: usize, stream: u64) -> Vec<u32> {
+    let mut seed = 0x2545_f491_4f6c_dd1du64 ^ stream.wrapping_mul(0x9e37_79b9_7f4a_7c15);
     (0..count)
         .map(|_| {
             seed ^= seed << 13;
