@@ -50,15 +50,20 @@ class Function:
 
 
 class Kernel:
-    """A Phobos kernel, launched as `kernel[grid](*args)`, each `@autotune`
-    constant at its first choice unless a launch pins it."""
+    """A Phobos kernel, launched as `kernel[grid](*args)`.
 
-    def __init__(self, fn):
-        self.fn = fn
+    With `key`, a launch takes the variant the autotuner chose for the
+    values those extents have, from the kernel cache; with no winner yet it
+    tunes first when the kernel has a `reference`, and otherwise takes each
+    `@autotune` constant's first choice until `tune` runs."""
+
+    def __init__(self, fn, key=None, reference=None):
+        self.fn, self.key, self.reference = fn, tuple(key or ()), reference
         self.__name__ = fn.__name__
         self.__doc__ = fn.__doc__
         self._program = None
         self._compiled = {}
+        self._winners = {}
 
     @property
     def program(self):
@@ -102,10 +107,41 @@ class Kernel:
 
         return Files()
 
+    def tune(self, grid, *args, reference=None, **options):
+        """Tunes for the key values `args` bind; see `phobos.autotune.tune`."""
+        from . import autotune
+
+        result = autotune.tune(self, grid, args, reference or self.reference, **options)
+        self._winners[tuple(sorted(result.key.items()))] = result.winner
+        return result
+
+    def winner(self, grid, args):
+        """The `@autotune` settings a launch with `args` takes, or None for
+        each constant's first choice."""
+        from . import autotune, driver
+
+        if not self.key:
+            return None
+        base = self.compile(capability=driver.compute_capability())
+        contract = base.kernel(self.__name__).contract
+        dims = autotune._bind_dims(contract, args)
+        key = {k: dims[k] for k in self.key}
+        at = tuple(sorted(key.items()))
+        if at not in self._winners:
+            found = autotune.load(base.chip, self.__name__, base.cache_key, driver.device_name(), key)
+            if found is not None:
+                self._winners[at] = found.winner
+            elif self.reference is not None:
+                self.tune(grid, *args)
+            else:
+                return None
+        return self._winners[at]
+
     def __getitem__(self, grid):
         def launch(*args, stream=0, pins=None):
             from . import driver
 
+            pins = pins if pins is not None else self.winner(grid, args)
             compiled = self.compile(capability=driver.compute_capability(), pins=pins)
             return compiled.kernel(self.__name__).launch(grid, *args, stream=stream)
 

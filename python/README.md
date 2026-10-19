@@ -6,7 +6,7 @@ never runs it, and writes the Phobos it spells; every Python construct here
 is a spelling of one construct in [SPEC.md](../SPEC.md), and the Python side
 adds nothing to the language. `phobos-compile` compiles it, and a launch
 binds the arguments to the launch contract the compiler writes beside the
-PTX.
+PTX. The autotuner searches the kernel's own `@autotune` space.
 
 ```python
 from __future__ import annotations
@@ -31,7 +31,8 @@ Python knows. Names resolve through the module's imports of `phobos.lang`:
 `import phobos.lang as ph`, `from phobos import lang as ph`, or
 `from phobos.lang import let, var, ...`.
 
-The package needs no third-party module. It runs `phobos-compile`: `PHOBOS_COMPILE`, else
+The package needs no third-party module to compile and launch; the
+autotuner's checks use numpy. It runs `phobos-compile`: `PHOBOS_COMPILE`, else
 the one on the `PATH`, else this checkout's `target/release` build.
 
 ## Spellings
@@ -138,12 +139,42 @@ bound extents and the `@autotune` constants; a `@persistent` kernel takes
 stream unless `stream=` names another; an array's
 `__cuda_array_interface__` stream is not waited on.
 
+## The autotuner
+
+`@ph.kernel(key=("M", "N", "K"))` tunes a kernel over its own `@autotune`
+space, one winner for each value the key extents take: there is no list of
+configurations, nothing specializes on an argument's value, and alignment is
+what `@aligned` promises. `kernel.tune(grid, *args, reference=f)` tunes for
+the arguments given; with `reference` on the decorator, the first launch at
+new key values tunes first, and otherwise a launch takes each constant's
+first choice until it is tuned.
+
+- Every variant compiles in one `phobos-compile --all-variants --check-races`
+  run; one that fails or races is reported and left out.
+- Each runs once on copies of the arguments with canary bytes after every
+  tensor, and must leave the canaries and compute what `reference` does: an
+  integer output exactly, a float one within the tolerance its type's
+  rounding allows (`rtol`, `atol` widen it for a path that rounds more).
+- Timing is CUDA events around each launch, after a warm-up of at least
+  300 ms, the variants taking turns a launch a round so they share the
+  card's clock; each is the fastest of 20 rounds, kept with every sample and
+  the spread.
+- The L2 is flushed before each timed launch by writing a buffer twice its
+  size, outside the events, so a variant is timed reading its inputs from
+  memory; `flush_l2=False` times it warm.
+- The result is kept in the kernel cache, under the chip's directory, in
+  `autotune/`, keyed by the source's cache key, the chip, the card's name and
+  the key values.
+
 ## Tests
 
 - `python -m unittest discover -s python/tests`: no GPU. The launch
-  contract against the arguments it binds, the semantics table and the UI
-  sources (`tests/ui`, `PHOBOS_BLESS=1` reblesses).
+  contract against the arguments it binds, the semantics table, the UI
+  sources (`tests/ui`, `PHOBOS_BLESS=1` reblesses), the autotuner's host
+  side, and every example kernel compiled race-free.
 - `python python/tests/roundtrip.py [DIR...]`: the round trip.
 - On the card, `tests/gpu`: `replay.py` (the Python launcher against the
   Rust one, byte for byte, on recordings `lang_check --record` and
-  `cross_record --record` make) and `semantics.py`.
+  `cross_record --record` make), `semantics.py`, `tutorials.py` (Triton's
+  tutorials 01, 02, 03, 05 and 06 against torch), `autotune_vs_kbench.py` and
+  `memcheck_variants.py`.
