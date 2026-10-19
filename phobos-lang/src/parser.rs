@@ -11,6 +11,7 @@ mod functions;
 pub(crate) use functions::Function;
 mod jumps;
 mod recover;
+mod size;
 
 pub(crate) type PResult<T> = Result<T, Diagnostic>;
 

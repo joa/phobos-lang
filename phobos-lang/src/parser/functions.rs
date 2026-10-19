@@ -10,12 +10,18 @@
 
 use std::collections::HashMap;
 
+use super::size;
 use super::super::ast::lanes::{self, Fold};
 use super::super::ast::{Dim, Expr, ExprKind, Generated, Kernel, Span, Stmt, Sub, Type};
 
 /// How deep calls may nest before inlining gives up, which also catches
 /// recursion.
 const MAX_DEPTH: usize = 32;
+
+/// The most expression nodes one inlined call may bring. A parameter used
+/// twice copies its argument twice, so nested calls grow exponentially with
+/// their depth, well within [`MAX_DEPTH`].
+const MAX_NODES: usize = 100_000;
 
 #[derive(Clone)]
 pub(crate) enum Body {
@@ -209,6 +215,7 @@ impl<'a> Inliner<'a> {
                     };
                     let map = bind(f, &[Expr::var(lanes::COMBINE_A), Expr::var(lanes::COMBINE_B)]).map_err(at(span))?;
                     let body = f.subst(&map, &HashMap::new(), span).expr(body).map_err(at(span))?;
+                    within_budget(&f.name, size::expr(&body)).map_err(at(span))?;
                     *args.last_mut().expect("a reduce has a combine") = body;
                 }
                 let args = args.into_iter().map(|a| self.expr(a, depth)).collect::<Result<Vec<_>, _>>()?;
@@ -227,6 +234,7 @@ impl<'a> Inliner<'a> {
                 };
                 let map = bind(f, &args).map_err(at(span))?;
                 let body = f.subst(&map, &HashMap::new(), span).expr(body).map_err(at(span))?;
+                within_budget(&callee, size::expr(&body)).map_err(at(span))?;
                 self.deeper(depth, &callee).map_err(at(span))?;
                 return self.expr(body, depth + 1);
             }
@@ -275,6 +283,7 @@ impl<'a> Inliner<'a> {
         let subst = f.subst(&map, &renames, span);
         let lead = subst.block(lead).map_err(at(span))?;
         let value = subst.expr(value).map_err(at(span))?;
+        within_budget(&f.name, size::block(&lead) + size::expr(&value)).map_err(at(span))?;
         let kind = ExprKind::Generate(Box::new(Generated {
             params,
             body: self.stmts(lead, depth + 1)?,
@@ -322,6 +331,7 @@ impl<'a> Inliner<'a> {
             renames.insert(name.clone(), format!("{name}#{}", self.next));
         }
         let body = f.subst(&map, &renames, span).block(body).map_err(at(span))?;
+        within_budget(callee, size::block(&body)).map_err(at(span))?;
         self.stmts(body, depth + 1)
     }
 }
@@ -335,6 +345,14 @@ impl Function {
             at: self.prelude.then_some(span),
         }
     }
+}
+
+/// Fails when one call's expansion has `nodes` nodes, past [`MAX_NODES`].
+fn within_budget(callee: &str, nodes: usize) -> Result<(), String> {
+    if nodes > MAX_NODES {
+        return Err(format!("the call to `{callee}` expands to more than {MAX_NODES} nodes"));
+    }
+    Ok(())
 }
 
 fn is_reduce(callee: &str, args: &[Expr]) -> bool {
