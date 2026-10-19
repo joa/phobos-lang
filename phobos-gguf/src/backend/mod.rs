@@ -247,6 +247,7 @@ pub trait Backend {
     fn argmax(&self, buf: Buf, len: usize) -> Result<i64> {
         let mut out = vec![0.0f32; len];
         self.read(buf, &mut out)?;
+        phobos_inference::sampling::check_logits(&out)?;
         Ok(phobos_inference::sampling::argmax(&out))
     }
 
