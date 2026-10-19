@@ -240,9 +240,22 @@ class LlamaCpp:
         return Run(backend=backend, rates=rates, label=label)
 
 
+def batch_flags(args):
+    """The -b and -ub given, for both benches alike. Left out, each bench uses
+    llama-bench's defaults, 2048 and 512, which phobos-bench shares."""
+    flags = []
+    if args.batch_size:
+        flags += ["-b", str(args.batch_size)]
+    if args.ubatch_size:
+        flags += ["-ub", str(args.ubatch_size)]
+    return flags
+
+
 def invoke(engine, model, args, monitor_interval):
     """One engine, one model, both tests, with the card watched throughout."""
     cmd = engine.command(model, args.prompt_tokens, args.gen_tokens, args.reps)
+    # Right after the executable, so --llama-args, appended last, still wins.
+    cmd[1:1] = batch_flags(args)
     with Monitor(monitor_interval) as mon:
         done = subprocess.run(
             cmd, capture_output=True, text=True, cwd=ROOT, env=engine.env
@@ -605,8 +618,10 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
     tight = summarize(samples, clean, engines, models, tests)
 
     print(f"\n{'=' * 78}\n{meta['card']}, driver {meta['driver']}, phobos {meta['commit']}")
+    batches = " ".join(batch_flags(args))
     print(
         f"{args.rounds} rounds x {args.reps} repetitions, {', '.join(tests)}"
+        + (f", {batches}" if batches else "")
     )
     if watched:
         print(
@@ -762,6 +777,21 @@ def parse_args():
         nargs="+",
         default=[32, 128, 512],
         help="decode lengths, one tg row each",
+    )
+    ap.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        metavar="N",
+        help="tokens a prompt is handed over in at a time, given to both benches"
+        " (default: theirs, 2048)",
+    )
+    ap.add_argument(
+        "-ub",
+        "--ubatch-size",
+        type=int,
+        metavar="N",
+        help="tokens in one forward pass, given to both benches (default: theirs, 512)",
     )
     ap.add_argument("-r", "--reps", type=int, default=3, help="repetitions per run")
     ap.add_argument("-R", "--rounds", type=int, default=5, help="interleaved rounds")

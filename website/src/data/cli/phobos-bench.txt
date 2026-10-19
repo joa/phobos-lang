@@ -4,9 +4,13 @@ OPTIONS:
   -m, --model FILE      the GGUF file to run (default: models/Qwen3.5-0.8B-Q8_0.gguf)
   -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
   -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
-  -d, --depth N,...     positions in the context before each tg row starts,
+  -d, --n-depth N,...   positions in the context before each tg row starts,
                         one set of tg rows per depth (default: 0)
   -r, --repetitions N   timed repetitions per row (default: 3)
+  -b, --batch-size N    tokens a prompt is handed over in at a time, its logits
+                        read back after each batch (default: 2048)
+  -ub, --ubatch-size N  tokens in one forward pass, at most the batch size
+                        (default: 512, the runtime's prompt batch)
       --no-warmup       skip the warmup pass, which leaves each kernel's first
                         compile inside the repetition it lands in
       --expert-cache SIZE
@@ -15,4 +19,6 @@ OPTIONS:
   -h, --help            print this message
 
   -p and -n take a comma-separated list, and repeat, so -p 128,512 and
-  -p 128 -p 512 both ask for the same two rows.
+  -p 128 -p 512 both ask for the same two rows. -b and -ub take one value;
+  llama-bench's lists of them, a row per combination, are not supported.
+  A pp<N> row and the positions a -d row primes are fed the same way.
