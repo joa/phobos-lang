@@ -17,6 +17,7 @@ path = "src/main.rs"
 anyhow = "1"
 phobos-base = { path = "../phobos-base" }
 phobos-gguf = { path = "../phobos-gguf" }
+phobos-inference = { path = "../phobos-inference" }
 phobos-kernels = { path = "../phobos-kernels" }
 
 [features]

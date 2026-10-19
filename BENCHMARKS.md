@@ -90,6 +90,7 @@ Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the
 Phobos's pp128 on Qwen3.6 took 208, 203 and 329 t/s in its three rounds. A
 128-token prompt touches few experts, so the rate depends on which ones the
 cache already holds when it starts.
+These rows were measured before `phobos-bench` emptied the expert cache and used a new token sequence for each repetition. Every repetition then reused the same tokens over a cache already holding their experts, which favours Phobos; later runs report the hit rate beside each repetition.
 
 MiniCPM-V-4.7-35B-A3B-Q4_K_M, text only, the same architecture, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 

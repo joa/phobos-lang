@@ -55,6 +55,11 @@ impl Backend for DeviceBackend {
         Ok(())
     }
 
+    fn cool_expert_cache(&self) -> Result<()> {
+        self.stream.synchronize()?;
+        self.experts.borrow_mut().cool()
+    }
+
     fn budget_streamed(&self, resident_bytes: usize, sets: usize) -> Result<()> {
         self.set_streamed_budget(resident_bytes, sets)
     }

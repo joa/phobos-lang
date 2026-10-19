@@ -488,6 +488,14 @@ pub trait Backend {
         Ok(())
     }
 
+    /// Empties the expert cache, so the next pass finds none of its experts
+    /// resident. A benchmark calls this between repetitions, since routing is
+    /// deterministic and a warm cache would hold exactly what the same pass
+    /// needs. Backends with no expert cache ignore it.
+    fn cool_expert_cache(&self) -> Result<()> {
+        Ok(())
+    }
+
     /// Tells an expert-streaming backend the resident weights' size and the
     /// number of expert sets, so it can size its expert cache from what is
     /// left. Called once at load, before any pass. Backends with no expert
