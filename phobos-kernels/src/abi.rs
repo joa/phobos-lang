@@ -1,7 +1,8 @@
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum KernelArg {
     Ptr(u64),
-    /// A memref offset, size or stride. The kernels compile at a 32-bit index.
+    /// A memref offset, size or stride, which a 64-bit-index kernel reads
+    /// from the same eight-byte slot, zero-extended.
     I32(i32),
     F32(f32),
 }

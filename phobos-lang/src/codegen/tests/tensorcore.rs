@@ -342,11 +342,11 @@ fn tensorcore_bails_to_vector_path_when_shape_does_not_fragment() {
 }
 
 #[test]
-fn tensorcore_widens_to_mma_sync_from_sm_80() {
+fn tensorcore_widens_to_mma_sync_on_every_chip() {
     use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
-    // The device path compiles at 32-bit indices. From sm_80 on, a
-    // `@tensorcore` module widens itself to 64 for mma.sync and ldmatrix;
-    // sm_75 stays on WMMA.
+    // The device path compiles at 32-bit indices, and a `@tensorcore` module
+    // widens itself to 64 for mma.sync and ldmatrix on any chip;
+    // `@tensorcore(wmma)` stays on WMMA.
     let src = "@autotune(TILE_M in [64], TILE_N in [64], TILE_K in [16])
         @tensorcore
         @aligned(M = TILE_M, N = TILE_N, K = TILE_K)
@@ -361,18 +361,21 @@ fn tensorcore_widens_to_mma_sync_from_sm_80() {
             }
             C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
         }";
-    let ptx = |chip: &str| {
+    let ptx = |chip: &str, src: &str| {
         let ctx = BaseContext {
             gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
             ..Default::default()
         };
         crate::compile(&ctx, src).expect("compiles")
     };
-    let ampere = ptx("sm_89");
-    assert!(ampere.contains("mma.sync.aligned.m16n8k16"), "sm_89 should take mma.sync");
-    assert!(ampere.contains("ldmatrix"), "sm_89 should read fragments with ldmatrix");
-    let turing = ptx("sm_75");
+    let ada = ptx("sm_89", src);
+    assert!(ada.contains("mma.sync.aligned.m16n8k16"), "sm_89 should take mma.sync");
+    assert!(ada.contains("ldmatrix"), "sm_89 should read fragments with ldmatrix");
+    let turing = ptx("sm_75", src);
+    assert!(turing.contains("mma.sync.aligned.m16n8k8"), "sm_75 should take mma.sync, Turing's shape");
+    assert!(turing.contains("ldmatrix"), "sm_75 should read fragments with ldmatrix");
     // WMMA's own PTX is `wmma.mma.sync`, so look for the thread-level shape.
-    assert!(!turing.contains("mma.sync.aligned.m16n8"), "sm_75 should stay on WMMA");
-    assert!(turing.contains("wmma.mma.sync"), "sm_75 should stay on WMMA");
+    let forced = ptx("sm_75", &src.replace("@tensorcore", "@tensorcore(wmma)"));
+    assert!(!forced.contains("mma.sync.aligned.m16n8"), "`@tensorcore(wmma)` should stay on WMMA");
+    assert!(forced.contains("wmma.mma.sync"), "`@tensorcore(wmma)` should stay on WMMA");
 }

@@ -65,7 +65,6 @@ pub(crate) struct Variants {
     pub kind: Kind,
     /// The kernel source the variants were compiled from.
     pub code: String,
-    pub wide: bool,
     pub all: Vec<Variant>,
 }
 
@@ -74,7 +73,6 @@ impl Variants {
     /// the ones the card cannot launch at all.
     pub fn build(kind: Kind, code: &str, pins: &std::collections::HashMap<String, i64>) -> anyhow::Result<Self> {
         let kernels = phobos_lang::parse(code)?;
-        let wide = crate::autotune::wide_index(code);
         let space = phobos_lang::pin(phobos_lang::search_space(&kernels[0]), pins)?;
         let configs = phobos_base::combo::cartesian_product(&space);
         phinfo!("{}: compiling {} variants", kind.name(), configs.len());
@@ -135,7 +133,6 @@ impl Variants {
         Ok(Variants {
             kind,
             code: code.to_string(),
-            wide,
             all,
         })
     }
@@ -185,16 +182,16 @@ pub(crate) fn grid_for(kind: Kind, config: &[Setting], (m, n, k): (usize, usize,
 pub(crate) fn timed<'a>(stream: &'a Stream, p: &'a Problem, vs: &'a Variants, v: usize, scalars: (f32, f32)) -> anyhow::Result<Timed<'a>> {
     let (gx, gy, split) = grid_for(vs.kind, &vs.all[v].config, p.dims)?;
     let module = &vs.all[v].module;
-    let block = vs.all[v].block;
+    let (block, wide) = (vs.all[v].block, module.wide);
     let launch: Box<dyn FnMut() -> anyhow::Result<()> + 'a> = if vs.kind.splits().len() > 1 {
         anyhow::ensure!(split <= p.max_split, "{split} splits exceed the workspace");
         let (sk, red) = (module.module.get_function("gemm_split")?, module.module.get_function("gemm_reduce")?);
         let shared = (module.shared_bytes("gemm_split"), module.shared_bytes("gemm_reduce"));
-        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, shared, scalars, vs.wide))
+        Box::new(move || p.launch_split(stream, (&sk, &red), (gx, gy, split), block, shared, scalars, wide))
     } else {
         let func = module.module.get_function("gemm")?;
         let shared = module.shared_bytes("gemm");
-        Box::new(move || p.launch_phobos(stream, &func, (gx, gy), (block, shared), vs.wide, scalars))
+        Box::new(move || p.launch_phobos(stream, &func, (gx, gy), (block, shared), wide, scalars))
     };
     Ok(Timed {
         prepare: Box::new(move || p.restore(stream, &p.c_phobos)),

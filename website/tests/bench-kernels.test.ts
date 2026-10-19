@@ -108,8 +108,8 @@ describe("compiler facts", () => {
   it("counts flash attention's barriers", () => {
     const sync = barriers()
     expect(sync.kept + sync.elided).toBe(sync.sites.length)
-    expect(sync.kept).toBe(20)
-    expect(sync.elided).toBe(9)
+    expect(sync.kept).toBe(8)
+    expect(sync.elided).toBe(4)
   })
 
   it("doubles gemm's staging under @pipeline and issues cp.async only on sm_80", () => {

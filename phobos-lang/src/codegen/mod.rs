@@ -60,6 +60,8 @@ pub struct EmitOutput {
     pub pipeline_failures: Vec<PipelineFailure>,
     /// Each kernel's launch contract, in module order.
     pub contracts: Vec<crate::contract::Contract>,
+    /// Whether some kernel copies global to shared memory asynchronously.
+    pub copies_async: bool,
 }
 
 /// A kernel whose `@pipeline` assertion did not hold, and why: the loop
@@ -107,6 +109,7 @@ pub(crate) fn emit_observed<'c>(
     let mut shared = Vec::new();
     let mut pipeline_failures = Vec::new();
     let mut contracts = Vec::new();
+    let mut copies_async = false;
     let mut failed: Option<crate::diag::Diagnostics> = None;
 
     for kernel in kernels {
@@ -131,6 +134,7 @@ pub(crate) fn emit_observed<'c>(
             shared.push((kernel.name.clone(), contract.dynamic_shared_bytes as usize));
         }
         contracts.push(contract);
+        copies_async |= cg.copied_async.get();
         if cg.pipeline == Some(true) && !cg.pipelined_any {
             pipeline_failures.push(PipelineFailure {
                 kernel: kernel.name.clone(),
@@ -167,6 +171,7 @@ pub(crate) fn emit_observed<'c>(
         shared,
         pipeline_failures,
         contracts,
+        copies_async,
     })
 }
 
@@ -395,6 +400,8 @@ struct Codegen<'c> {
     pipeline_extended: bool,
     /// Whether some loop in the kernel did pipeline, through either path.
     pipelined_any: bool,
+    /// Whether the kernel emitted an asynchronous copy.
+    copied_async: std::cell::Cell<bool>,
     /// Stages loaded into registers, waiting for the barrier ahead of their
     /// readers. See `lower::defer`.
     deferred: Vec<lower::defer::Deferred<'c>>,
@@ -509,6 +516,7 @@ impl<'c> Codegen<'c> {
             pipeline: kernel.pipeline_mode().unwrap_or(None),
             pipeline_extended: true,
             pipelined_any: false,
+            copied_async: Default::default(),
             deferred: Vec::new(),
             pipeline_declines: Vec::new(),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),

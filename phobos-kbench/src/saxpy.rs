@@ -43,7 +43,6 @@ pub(crate) fn bench_saxpy(
     );
 
     let block: u32 = 1024;
-    let wide = autotune::wide_index(CODE_SAXPY);
 
     let mut tuner = autotune::Autotuner {
         code: CODE_SAXPY,
@@ -59,7 +58,7 @@ pub(crate) fn bench_saxpy(
             // memref descriptor), then the alpha scalar.
             let n64 = n as i64;
             unsafe {
-                if wide {
+                if loaded.wide {
                     launch!(func<<<grid_x, block, shared_bytes, stream>>>(
                         x_ptr, x_ptr, 0i64, n64, 1i64,
                         y_ptr, y_ptr, 0i64, n64, 1i64,

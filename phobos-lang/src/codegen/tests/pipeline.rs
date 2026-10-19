@@ -32,22 +32,24 @@ fn pipeline_double_buffers_staged_slices() {
     );
 }
 
+// Not a gemm: the f32 gemm stages a k-major and keeps register staging on
+// every chip.
+const ROWSUM: &str = "@autotune(TILE_M in [64], TILE_K in [16])
+    @pipeline
+    @aligned(M = TILE_M, K = TILE_K)
+    kernel rowsum(A: tensor<f32>[M, K], C: tensor<f32>[M, TILE_K]) {
+        let pm = ctx.block.x
+        var acc: tile<f32>[TILE_M, TILE_K] = 0.0
+        for kt in range(0, K, TILE_K) {
+            var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
+            acc += a
+        }
+        C[pm * TILE_M :+ TILE_M, 0 :+ TILE_K] = acc
+    }";
+
 #[test]
 fn pipeline_uses_cp_async_on_supporting_targets() {
-    // Not a gemm: the f32 gemm stages a k-major and keeps register staging
-    // on every chip.
-    let src = "@autotune(TILE_M in [64], TILE_K in [16])
-        @pipeline
-        @aligned(M = TILE_M, K = TILE_K)
-        kernel rowsum(A: tensor<f32>[M, K], C: tensor<f32>[M, TILE_K]) {
-            let pm = ctx.block.x
-            var acc: tile<f32>[TILE_M, TILE_K] = 0.0
-            for kt in range(0, K, TILE_K) {
-                var a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
-                acc += a
-            }
-            C[pm * TILE_M :+ TILE_M, 0 :+ TILE_K] = acc
-        }";
+    let src = ROWSUM;
     // cp.async also needs 64-bit index lowering, since upstream's
     // convert-nvgpu-to-nvvm hardcodes a 64-bit converter.
     use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
@@ -76,6 +78,20 @@ fn pipeline_uses_cp_async_on_supporting_targets() {
         !narrow.contains("nvgpu."),
         "cp.async leaked into a 32-bit-index module:\n{narrow}"
     );
+}
+
+#[test]
+fn only_a_module_that_copies_asynchronously_widens_on_sm_80() {
+    use phobos_base::context::{Context as BaseContext, GpuConfig, NvidiaGpuConfig};
+    let on = |chip: &str| BaseContext {
+        gpu_config: GpuConfig::Nvidia(NvidiaGpuConfig::with_chip(chip)),
+        ..Default::default()
+    };
+    let staged = crate::parse(ROWSUM).unwrap();
+    assert!(crate::needs_wide_index(&on("sm_80"), &staged));
+    assert!(!crate::needs_wide_index(&on("sm_75"), &staged));
+    let plain = crate::parse("kernel k(A: tensor<f32>[N]) { A[ctx.block.x] = 1.0 }").unwrap();
+    assert!(!crate::needs_wide_index(&on("sm_80"), &plain));
 }
 
 #[test]
