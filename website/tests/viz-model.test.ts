@@ -23,11 +23,11 @@ describe("statement steps", () => {
   it("steps gemm through its k loop and its epilogue", () => {
     const statements = gemm.statements(0)
     expect(statements).toHaveLength(17)
-    expect(statements[0].span.line).toBe(18)
+    expect(statements[0].span.line).toBe(19)
     expect(statements.slice(0, 16).map(statement => statement.iter.kt)).toEqual(
       Array.from({ length: 16 }, (_, index) => index * 4)
     )
-    expect(statements[16].span.line).toBe(25)
+    expect(statements[16].span.line).toBe(26)
   })
 
   it("groups the ops of one statement into one step", () => {

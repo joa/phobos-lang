@@ -18,13 +18,14 @@ kernel `phobos-kbench` compares against cuBLAS's `cublasSgemm`.
 
 ## The attributes
 
-Four attributes sit above the kernel. None changes what it computes; each
+Five attributes sit above the kernel. None changes what it computes; each
 changes how it is compiled.
 
 | Attribute | What it does here |
 | --- | --- |
-| [`@autotune`](/docs/attributes/autotune/) | `(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128])` makes the tile sizes, the k loop's unroll and the CTA size tuning parameters. Two increasing values are bounds searched in doubling steps, so `TILE_M` and `TILE_N` try 32, 64, 128 and 256, `TILE_K` tries 4, 8, 16 and 32, and `U` tries 1, 2, 4 and 8. `T in [256, 128]` is a list, 256 first. |
+| [`@autotune`](/docs/attributes/autotune/) | `(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32], U in [1, 8], T in [256, 128], IB in [32, 64])` makes the tile sizes, the k loop's unroll, the CTA size and the index width tuning parameters. Two increasing values are bounds searched in doubling steps, so `TILE_M` and `TILE_N` try 32, 64, 128 and 256, `TILE_K` tries 4, 8, 16 and 32, and `U` tries 1, 2, 4 and 8. `T in [256, 128]` is a list, 256 first. |
 | [`@launch`](/docs/attributes/launch/) | `(T)` runs each CTA with `T` threads. Fewer threads give each one more of the output tile: 64x128 at 128 threads is an 8x8 block a thread, at 256 an 8x4 one. |
+| [`@index_bits`](/docs/attributes/index_bits/) | `(IB)` compiles each variant's index arithmetic at 32 or 64 bits, and the tuner keeps the faster. |
 | [`@pipeline`](/docs/attributes/pipeline/) | Asserts that the k loop is double-buffered: while the CTA computes on one pair of panels, the next pair is being copied in. Compilation fails if nothing gets pipelined. |
 | [`@aligned`](/docs/attributes/aligned/) | `(M = TILE_M, N = TILE_N, K = TILE_K)` promises that each dimension is a whole number of tiles. The compiler drops the masks on those dimensions and may use 16-byte vector loads. A launch that breaks the promise traps at entry instead of writing past the tensors. |
 

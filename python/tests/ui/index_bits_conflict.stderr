@@ -1,0 +1,10 @@
+error: the kernels of one module share an index width
+  --> tests/ui/index_bits_conflict.py:16:2
+   |
+10 | @ph.index_bits("IB")
+   |  ------------------- `first` asks for 32 bits
+...
+16 | @ph.index_bits(64)
+   |  ^^^^^^^^^^^^^^^^^ `second` asks for 64 bits
+
+error: aborting due to 1 previous error

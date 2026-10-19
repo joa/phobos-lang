@@ -1,0 +1,54 @@
+---
+title: "@index_bits"
+description: Picks the module's index width, 32 or 64 bits, in place of the compiler's choice, so a tuner can search it.
+sidebar:
+  order: 14
+---
+
+The index width is the integer width of a kernel's index arithmetic, and with
+it the width of every offset, size and stride argument it takes. The compiler
+picks it per module: 32 bits, or 64 where a kernel needs them, for `mma.sync`,
+`ldmatrix`, a system-scope access or, from sm_80, `cp.async`
+([Index width](/docs/reference/abi/#index-width)). Which width is faster
+otherwise depends on the kernel. Wider addresses take no conversion before
+each access but cost registers, so one GEMM runs faster at 64 bits and
+another at 32. `@index_bits` makes the choice the kernel's.
+
+```text
+@index_bits(n)
+```
+
+`n` is 32 or 64, or an [`@autotune`](/docs/attributes/autotune/) constant,
+so a tuner searches the width like a tile size:
+
+```phobos
+@autotune(IB in [32, 64])
+@index_bits(IB)
+kernel scale(X: tensor<f32>[N], Y: tensor<f32>[N]) {
+  let i = ctx.block.x * ctx.threads + ctx.thread
+  if i < N {
+    Y[i] = X[i] * 2.0
+  }
+}
+```
+
+Each variant's launch contract records the width it compiled at, which its
+launch then passes its arguments in. See the
+[Attributes](/docs/reference/spec/#attributes) table in the spec.
+
+## What it asserts
+
+- The kernels of one module share one width. A kernel without `@index_bits`
+  takes the module's; two asking for different widths is an error, at both.
+- 32 bits where a kernel of the module needs 64 is an error that names the
+  reason. Where 64 bits would only have bought `cp.async`, 32 keeps the
+  pipelined stages in registers instead.
+- A compile asked for 64 bits (`phobos-compile --index-bits 64`) stays at 64.
+
+```phobos expect-error
+@index_bits(32)
+@tensorcore
+kernel k(X: tensor<f32>[N], Y: tensor<f32>[N]) {
+  Y[ctx.thread] = X[ctx.thread] * 2.0
+}
+```

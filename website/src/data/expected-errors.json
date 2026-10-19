@@ -1,5 +1,6 @@
 {
   "website/src/content/docs/docs/attributes/index.mdx#1": "unknown attribute `@unroll`",
+  "website/src/content/docs/docs/attributes/index_bits.mdx#1": "`@index_bits(32)` on a module that needs 64-bit indices",
   "website/src/content/docs/docs/attributes/launch.mdx#2": "`@launch` maxThreads must be a positive multiple of 32 (got 48)",
   "website/src/content/docs/docs/attributes/pipeline.mdx#1": "`@pipeline` found nothing in kernel `flat` to pipeline: no loop in the kernel is shaped for pipelining",
   "website/src/content/docs/docs/attributes/registers.mdx#1": "`@registers(acc)`: 15 elements do not split evenly over 256 threads",

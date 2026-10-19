@@ -1,0 +1,9 @@
+error: `@index_bits(32)` on a module that needs 64-bit indices
+ --> tests/ui/index_bits_needs_wide.py:9:2
+  |
+9 | @ph.index_bits(32)
+  |  ^^^^^^^^^^^^^^^^^ asks for 32 bits
+  |
+  = note: in `scale`, `@tensorcore` takes `mma.sync`
+
+error: aborting due to 1 previous error

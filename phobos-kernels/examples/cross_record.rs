@@ -1,5 +1,5 @@
 // Launches each kernel of `examples/` once from Rust, as the runtime packs a
-// launch (the memref ABI at the index width `needs_wide_index` picks, the
+// launch (the memref ABI at the index width `index_bits` picks, the
 // CTA size `@launch` gives), on deterministic inputs, and records each
 // launch as `lang_check --record` does, for `python/tests/gpu/replay.py` to
 // replay on the same PTX and bytes:
@@ -82,9 +82,7 @@ fn main() -> Result<()> {
         let src = std::fs::read_to_string(format!("{root}/{}", job.file))?.replace('\r', "");
         let mut ctx = context_for(&[]);
         let kernels = phobos_lang::parse(&src)?;
-        if phobos_lang::needs_wide_index(&ctx, &kernels) {
-            ctx.index_bitwidth = 64;
-        }
+        ctx.index_bitwidth = phobos_lang::index_bits(&ctx, &kernels)?;
         let kernel = kernels.iter().find(|k| k.name == job.kernel).context("no such kernel")?;
         let env: BTreeMap<String, i64> = kernel.shape_env(&HashMap::new());
         let dims: HashMap<&str, i64> = job.dims.iter().copied().collect();

@@ -143,6 +143,41 @@ impl Kernel {
             .collect()
     }
 
+    /// `@index_bits(n)`: the index width the kernel asks for, 32 or 64, with
+    /// `n` a literal or an `@autotune` constant taken from `env`.
+    pub fn index_bits_in(&self, env: &BTreeMap<String, i64>) -> Result<Option<u32>, String> {
+        let Some(attr) = self.attr("index_bits") else {
+            return Ok(None);
+        };
+        let bits = match &attr.args[..] {
+            [AttrArg::Positional(Literal::Int(n))] => *n,
+            [AttrArg::Positional(Literal::Ident(name))] => *env
+                .get(name)
+                .ok_or_else(|| format!("`@index_bits({name})`: `{name}` is not an `@autotune` constant"))?,
+            _ => {
+                return Err("`@index_bits` takes 32 or 64, or an `@autotune` constant choosing between them"
+                    .to_string());
+            }
+        };
+        match bits {
+            32 | 64 => Ok(Some(bits as u32)),
+            _ => Err(format!("`@index_bits` takes 32 or 64 (got {bits})")),
+        }
+    }
+
+    /// Why the kernel needs 64-bit indices on every chip, if it does.
+    pub fn wide_index_reason(&self) -> Option<&'static str> {
+        if self.wants_mma_sync() {
+            Some("`@tensorcore` takes `mma.sync`")
+        } else if self.wants_ldmatrix() {
+            Some("a `_qgemm_t` built-in loads its operands with `ldmatrix`")
+        } else if self.wants_system_scope() {
+            Some("`load_acquire` and `store_release` form full 64-bit addresses")
+        } else {
+            None
+        }
+    }
+
     /// True when the kernel reads or writes at system scope, which forms
     /// full 64-bit addresses.
     pub fn wants_system_scope(&self) -> bool {

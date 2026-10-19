@@ -129,7 +129,9 @@ The same source can therefore take 32-bit arguments on one chip and 64-bit
 ones on another, so a launcher reads the width from the kernel's launch
 contract rather than from the source. Asking for 64 bits is always allowed
 (`phobos-compile --index-bits 64`, or `index_bitwidth` in the compiler's
-`Context`); asking for 32 never narrows a module that needs 64.
+`Context`); asking for 32 never narrows a module that needs 64. A kernel's
+[`@index_bits`](/docs/attributes/index_bits/) picks the width in place of the
+table, and with an `@autotune` constant the tuner searches it.
 
 To see which width a PTX file was compiled at, read the entry's parameter
 list: a tensor's third parameter, its offset, is `.u32` or `.u64`.

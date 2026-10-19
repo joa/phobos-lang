@@ -67,6 +67,25 @@ fn a_qgemm_module_needs_a_wide_index() {
 }
 
 #[test]
+fn index_bits_takes_the_tuned_width_over_the_rule() {
+    let src = "@autotune(IB in [32, 64])
+        @index_bits(IB)
+        kernel k(A: tensor<f32>[N]) { A[ctx.block.x] = 1.0 }";
+    let kernels = crate::parse(src).unwrap();
+    let mut ctx = Context::default();
+    assert_eq!(crate::index_bits(&ctx, &kernels).unwrap(), 32);
+    ctx.shape_overrides.insert("IB".to_string(), 64);
+    assert_eq!(crate::index_bits(&ctx, &kernels).unwrap(), 64);
+    // Asking for 64 is a floor the attribute does not lower.
+    ctx.shape_overrides.insert("IB".to_string(), 32);
+    ctx.index_bitwidth = 64;
+    assert_eq!(crate::index_bits(&ctx, &kernels).unwrap(), 64);
+    let odd = crate::parse("@index_bits(48) kernel k(A: tensor<f32>[N]) { A[ctx.block.x] = 1.0 }").unwrap();
+    let err = crate::index_bits(&Context::default(), &odd).unwrap_err();
+    assert!(err.to_string().contains("32 or 64"), "{err}");
+}
+
+#[test]
 fn atomics_reach_atom_instructions() {
     let src = "kernel k(L: tensor<i32>[2], F: tensor<f32>[1], OUT: tensor<i32>[N]) {
         let i = ctx.block.x

@@ -151,9 +151,7 @@ pub fn trace_source(req: &Request, file: &std::sync::Arc<crate::diag::SourceFile
         shape_overrides: req.params.iter().map(|(k, &v)| (k.clone(), v)).collect(),
         ..Context::default()
     };
-    if crate::needs_wide_index(&base, &kernels) {
-        base.index_bitwidth = 64;
-    }
+    base.index_bitwidth = crate::index_bits(&base, &kernels)?;
 
     let registry = DialectRegistry::new();
     register_all_dialects(&registry);
