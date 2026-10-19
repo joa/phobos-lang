@@ -111,8 +111,9 @@ map beside the Phobos, and `phobos-compile --origin MAP` reads it.
 Messages are the compiler's, so some still spell a construct in Phobos.
 Python's own parser stops at the first syntax error.
 
-`cargo run -p phobos-lang --example ph2py -- FILE.ph` prints a Phobos source
-in this spelling; `tests/roundtrip.py` checks that every source in the tree,
+`ph2py FILE.ph`, a binary a release ships (`cargo run -p phobos-compile
+--bin ph2py -- FILE.ph` in a checkout), prints a Phobos source in this
+spelling; `tests/roundtrip.py` checks that every source in the tree,
 the snapshot corpus and the kernel dumps compiles through Python to the
 module it compiles to directly, under every target the emit sweep diffs.
 

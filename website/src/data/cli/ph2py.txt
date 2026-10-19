@@ -1,0 +1,11 @@
+usage: ph2py FILE.ph
+       ph2py --out DIR PATH...
+
+Prints a Phobos source in its Python spelling, which the `phobos` package's
+front end reads back to the same module.
+
+  FILE.ph           print FILE's Python spelling to standard output
+  --out DIR PATH... write DIR/<stem>.py for each source, a file or every .ph
+                    in a directory, and print a line for each it cannot spell
+  -V, --version     print the version and the compiler fingerprint
+  -h, --help        print this

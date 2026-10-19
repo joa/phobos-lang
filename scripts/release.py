@@ -48,7 +48,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TARGET = ROOT / "target"
 EXE = ".exe" if os.name == "nt" else ""
-BINARIES = ["phobos-cli", "phobos-bench", "phobos-cache", "phobos-compile"]
+BINARIES = ["phobos-cli", "phobos-bench", "phobos-cache", "phobos-compile", "ph2py"]
+# The packages that build them: ph2py is phobos-compile's second binary.
+PACKAGES = ["phobos-cli", "phobos-bench", "phobos-cache", "phobos-compile"]
 CRT_DLLS = ["msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"]
 MANIFEST_ASSET = "kernel-manifest.tar.gz"
 LLVM_VERSION = "22.1.7"
@@ -62,6 +64,11 @@ Phobos {tag}, {platform}
                   llama-bench reports it.
   phobos-compile  compiles a Phobos kernel source to PTX.
   phobos-cache    lists and clears the kernel cache.
+  ph2py           prints a Phobos kernel source in its Python spelling.
+
+python/phobos is the Python package: kernels spelled in Python, compiled with
+the phobos-compile beside it, launched on the arrays of any library that
+offers __cuda_array_interface__, and autotuned. Put python/ on PYTHONPATH.
 
 Needs an NVIDIA card of compute capability 7.5 or newer (Turing onwards) and
 a driver from the CUDA 13 line (R580 or newer): the kernels are PTX ISA 9.0,
@@ -134,11 +141,11 @@ def cargo_env(src):
     return BASE_ENV | {"CARGO_TARGET_DIR": str(build_dir(src))}
 
 
-def build(src, binaries):
+def build(src, packages):
     cmd = ["cargo", "build", "--release", "--locked"]
-    for bin in binaries:
-        cmd += ["-p", bin]
-    features = [f"{b}/cuda" for b in binaries if b in ("phobos-cli", "phobos-bench")]
+    for package in packages:
+        cmd += ["-p", package]
+    features = [f"{p}/cuda" for p in packages if p in ("phobos-cli", "phobos-bench")]
     if features:
         cmd += ["--features", ",".join(features)]
     run(cmd, cwd=src, env=cargo_env(src))
@@ -235,7 +242,7 @@ def ci_builds(commit, dist):
 
 def local_build(src, dist):
     """The Windows binaries from the worktree, staged as CI stages them."""
-    build(src, BINARIES)
+    build(src, PACKAGES)
     out = dist / "local" / "windows-x64"
     shutil.rmtree(out, ignore_errors=True)
     out.mkdir(parents=True)
@@ -250,7 +257,7 @@ def local_build(src, dist):
     return {"windows-x64": out}
 
 
-def package(tag, platform, built, cache, fingerprint, dist):
+def package(tag, platform, src, built, cache, fingerprint, dist):
     """`phobos-TAG-PLATFORM.zip` or `.tar.gz` holding one top-level directory."""
     name = f"phobos-{tag}-{platform}"
     stage = dist / "pkg" / name
@@ -260,6 +267,7 @@ def package(tag, platform, built, cache, fingerprint, dist):
         if item.name != "fingerprint.txt":
             shutil.copy2(item, stage)
     shutil.copytree(cache, stage / "kernel-cache")
+    shutil.copytree(src / "python" / "phobos", stage / "python" / "phobos", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(ROOT / "LICENSE", stage)
     readme = PACKAGE_README.format(tag=tag, platform=platform, fingerprint=fingerprint)
     (stage / "README.txt").write_text(readme, newline="\r\n" if platform.startswith("windows") else "\n")
@@ -309,7 +317,7 @@ def release(args):
         if theirs != fingerprint:
             sys.exit(f"{platform} was built under compiler {theirs}, the cache under {fingerprint}")
 
-    assets = [package(tag, p, b, cache, fingerprint, dist) for p, b in sorted(builds.items())]
+    assets = [package(tag, p, src, b, cache, fingerprint, dist) for p, b in sorted(builds.items())]
     manifest_archive = dist / MANIFEST_ASSET
     with tarfile.open(manifest_archive, "w:gz") as t:
         t.add(manifest, arcname="kernel-manifest")

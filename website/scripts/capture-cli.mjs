@@ -1,4 +1,4 @@
-// Captures the --help of the four release binaries into src/data/cli/<tool>.txt,
+// Captures the --help of the five release binaries into src/data/cli/<tool>.txt,
 // which the CLI reference page renders. The output is committed, so the Pages
 // build needs no Rust. ONNX options are dropped from phobos-cli's help, since
 // the site covers GGUF only.
@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
-export const TOOLS = ["phobos-cli", "phobos-compile", "phobos-bench", "phobos-cache"]
+export const TOOLS = ["phobos-cli", "phobos-compile", "phobos-bench", "phobos-cache", "ph2py"]
 
 const WEBSITE = fileURLToPath(new URL("../", import.meta.url))
 const OUT_DIR = join(WEBSITE, "src", "data", "cli")

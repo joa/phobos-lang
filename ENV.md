@@ -41,7 +41,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_CHIP` | an SM target, `sm_75`, `sm_80` | the newest supported chip the card runs, or the context default | The target kernels compile for: on the device path, in `phobos-kbench` and in the Python package, in place of the card's, and in `phobos-lang`'s `emit` and `ir` examples, to reach a code path the default never takes. |
 | `PHOBOS_INDEX_BITS` | `32` or `64` | `32`, widened to 64 by a kernel that wants `ldmatrix` | The index width those examples compile with; `mma.sync` and `cp.async` want 64. |
 | `PHOBOS_PRINT_PHASES` | opt-in | off | `phobos-compile` prints each lowering phase's IR. |
-| `PHOBOS_COMPILE` | a path | `phobos-compile` on the PATH, else this checkout's `target/release` build | The compiler the Python package (`python/phobos`) runs. |
+| `PHOBOS_COMPILE` | a path | `phobos-compile` on the PATH, else the one beside `python/` in a release, else this checkout's `target/release` build | The compiler the Python package (`python/phobos`) runs. |
 | `PHOBOS_DUMP_DIR` | a directory | unset | Codegen tests and the raw-format kernel dump write every kernel source they compile there as `.ph`, so the emit sweep covers them. |
 | `PHOBOS_SNAPSHOT_SRC` | a directory | unset | The IR builder's test walks every source there and checks each builds, or fails where its `.err` says it should. Skipped without it. |
 | `PHOBOS_BLESS` | opt-in | off | `phobos-lang`'s UI tests (`tests/ui`), and the Python package's (`python/tests/ui`), rewrite each `.stderr` with what the compiler prints now instead of comparing against it. |
