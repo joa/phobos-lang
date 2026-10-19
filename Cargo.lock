@@ -1776,7 +1776,7 @@ dependencies = [
  "phobos-base",
  "phobos-kernels",
  "phobos-lang",
- "phobos-mlir",
+ "serde_json",
 ]
 
 [[package]]
@@ -1833,6 +1833,7 @@ dependencies = [
  "phobos-base",
  "phobos-lang",
  "phobos-mlir",
+ "serde_json",
  "sha2",
 ]
 

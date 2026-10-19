@@ -58,6 +58,8 @@ const WMMA_SMEM_PAD: i64 = 8;
 pub struct EmitOutput {
     pub shared: Vec<(String, usize)>,
     pub pipeline_failures: Vec<PipelineFailure>,
+    /// Each kernel's launch contract, in module order.
+    pub contracts: Vec<crate::contract::Contract>,
 }
 
 /// A kernel whose `@pipeline` assertion did not hold, and why: the loop
@@ -104,6 +106,7 @@ pub(crate) fn emit_observed<'c>(
     let gpu_block = Block::new(&[]);
     let mut shared = Vec::new();
     let mut pipeline_failures = Vec::new();
+    let mut contracts = Vec::new();
     let mut failed: Option<crate::diag::Diagnostics> = None;
 
     for kernel in kernels {
@@ -113,7 +116,7 @@ pub(crate) fn emit_observed<'c>(
             let empty = crate::ir::Ir::new(Default::default(), &[]);
             crate::ir::build::locate(&kernel.source, &empty, e, kernel.name_span)
         });
-        let (mut cg, func) = match emitted {
+        let (mut cg, func, contract) = match emitted {
             Ok(done) => done,
             Err(e) => {
                 let ds = e.downcast::<crate::diag::Diagnostics>()?;
@@ -125,12 +128,9 @@ pub(crate) fn emit_observed<'c>(
             }
         };
         if cg.dynamic_shared {
-            let peak = match &cg.policy {
-                SharedPolicy::Replay(plan) => plan.peak,
-                _ => cg.shared_bytes_peak,
-            };
-            shared.push((kernel.name.clone(), peak as usize));
+            shared.push((kernel.name.clone(), contract.dynamic_shared_bytes as usize));
         }
+        contracts.push(contract);
         if cg.pipeline == Some(true) && !cg.pipelined_any {
             pipeline_failures.push(PipelineFailure {
                 kernel: kernel.name.clone(),
@@ -166,17 +166,18 @@ pub(crate) fn emit_observed<'c>(
     Ok(EmitOutput {
         shared,
         pipeline_failures,
+        contracts,
     })
 }
 
 /// One kernel, built, planned and emitted: the emitter that holds what it
-/// learned, and the function.
+/// learned, the function, and its launch contract.
 fn emit_kernel<'c>(
     base: &phobos_base::context::Context,
     kernel: &Kernel,
     context: &'c Context,
     observe: &mut dyn FnMut(&Planned<'_>),
-) -> Result<(Codegen<'c>, Operation<'c>)> {
+) -> Result<(Codegen<'c>, Operation<'c>, crate::contract::Contract)> {
     kernel.check_attributes()?;
     let mut cg = Codegen::new(base, context, kernel)?;
     let target = target::build_target(base);
@@ -227,7 +228,13 @@ fn emit_kernel<'c>(
     anyhow::ensure!(cg.deferred.is_empty(), "internal: a deferred stage never reached its barrier");
     cg.finish_shared_buffer()?;
     check_shared_budget(kernel, &cg, &target)?;
-    Ok((cg, func))
+    let dynamic_bytes = match (&cg.policy, cg.dynamic_shared) {
+        (_, false) => 0,
+        (SharedPolicy::Replay(plan), true) => plan.peak,
+        (_, true) => cg.shared_bytes_peak,
+    };
+    let contract = crate::contract::Contract::of(base, kernel, &ir, cg.static_shared_bytes, dynamic_bytes)?;
+    Ok((cg, func, contract))
 }
 
 /// Fails a kernel whose tiles need more shared memory than a block may hold:
@@ -370,6 +377,8 @@ struct Codegen<'c> {
     shared_bytes: i64,
     /// High-water mark of `shared_bytes`, which the host must reserve.
     shared_bytes_peak: i64,
+    /// Bytes of the `memref.global` buffers in `shared_globals`.
+    static_shared_bytes: i64,
     /// Dynamic tiles allocated and not yet released. At zero the next
     /// allocation restarts at offset 0, so phases separated by a barrier
     /// share the space.
@@ -492,6 +501,7 @@ impl<'c> Codegen<'c> {
             tile_offsets: HashMap::new(),
             shared_bytes: 0,
             shared_bytes_peak: 0,
+            static_shared_bytes: 0,
             dynamic_live: 0,
             hoisted_stages: Vec::new(),
             // The build reports a malformed `@pipeline` before codegen runs.

@@ -6,11 +6,11 @@ pub mod abi;
 pub mod matmul;
 pub mod util;
 
-// Only `compile`, which needs the driver, reads and records through these.
-// A build without it, such as `phobos-cache`, only writes.
+// `compile`, which needs the driver, and `phobos-compile` read and record
+// through these; `phobos-cache` only writes.
 #[cfg(feature = "compiler")]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
-mod cache;
+pub mod cache;
 #[cfg(feature = "compiler")]
 mod lower;
 #[cfg(feature = "compiler")]
