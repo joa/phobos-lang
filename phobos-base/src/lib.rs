@@ -6,6 +6,7 @@ pub mod combo;
 pub mod context;
 pub mod env;
 pub mod half;
+pub mod index;
 pub mod log;
 pub mod palette;
 pub mod progress;

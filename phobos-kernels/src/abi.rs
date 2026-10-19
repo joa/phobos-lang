@@ -16,16 +16,21 @@ impl KernelArg {
     }
 }
 
-pub fn push_tensor_descriptor(out: &mut Vec<KernelArg>, ptr: u64, dims: &[i64]) {
+pub use phobos_base::index::check_extent;
+
+pub fn push_tensor_descriptor(out: &mut Vec<KernelArg>, ptr: u64, dims: &[i64]) -> anyhow::Result<()> {
+    check_extent(dims)?;
     out.push(KernelArg::Ptr(ptr)); // allocated pointer
     out.push(KernelArg::Ptr(ptr)); // aligned pointer
     out.push(KernelArg::I32(0)); // offset
+    // In range, since every extent and stride is at most the element count.
     for &d in dims {
         out.push(KernelArg::I32(d as i32));
     }
     for s in row_major_strides(dims) {
         out.push(KernelArg::I32(s as i32));
     }
+    Ok(())
 }
 
 pub fn row_major_strides(dims: &[i64]) -> Vec<i64> {
@@ -53,7 +58,7 @@ mod tests {
     fn rank1_descriptor_matches_saxpy_abi() {
         // saxpy passes: ptr, ptr, 0i32, n, 1i32
         let mut args = Vec::new();
-        push_tensor_descriptor(&mut args, 0xdead_beef, &[8]);
+        push_tensor_descriptor(&mut args, 0xdead_beef, &[8]).unwrap();
         assert_eq!(
             args,
             vec![
@@ -70,7 +75,7 @@ mod tests {
     fn rank2_descriptor_matches_gemm_abi() {
         // gemm passes A[M,K] as: ptr, ptr, 0i32, M, K, K, 1i32
         let mut args = Vec::new();
-        push_tensor_descriptor(&mut args, 0x1000, &[6, 4]);
+        push_tensor_descriptor(&mut args, 0x1000, &[6, 4]).unwrap();
         assert_eq!(
             args,
             vec![
@@ -90,5 +95,13 @@ mod tests {
         assert_eq!(KernelArg::I32(-1).slot(), 0xffff_ffff);
         assert_eq!(KernelArg::F32(1.0).slot(), 1.0f32.to_bits() as u64);
         assert_eq!(KernelArg::Ptr(0x1234_5678_9abc).slot(), 0x1234_5678_9abc);
+    }
+
+    #[test]
+    fn an_extent_past_a_32_bit_index_is_refused() {
+        // An LM head of 2^31 elements, each extent well inside i32.
+        let mut args = Vec::new();
+        assert!(push_tensor_descriptor(&mut args, 0x1000, &[1 << 18, 1 << 13]).is_err());
+        assert!(args.is_empty(), "nothing is packed for a refused operand");
     }
 }

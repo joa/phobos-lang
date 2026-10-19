@@ -48,18 +48,18 @@ pub(crate) fn dot_epilogue(failures: &mut u32) -> Result<()> {
             let h = |x: &[f32]| -> Vec<u16> { x.iter().map(|&v| phobos_base::half::f32_to_f16(v)).collect() };
             let (gq, gk, gv) = (Arg::new(&h(&q), r, d)?, Arg::new(&h(&k), r, d)?, Arg::new(&h(&v), r, d)?);
             for a in [&gq, &gk, &gv] {
-                a.push(&mut slots);
+                a.push(&mut slots)?;
             }
-            gc.push(&mut slots);
-            out.push(&mut slots);
+            gc.push(&mut slots)?;
+            out.push(&mut slots)?;
             run(&src, "k", 1, &mut slots)?;
         } else {
             let (gq, gk, gv) = (Arg::new(&q, r, d)?, Arg::new(&k, r, d)?, Arg::new(&v, r, d)?);
             for a in [&gq, &gk, &gv] {
-                a.push(&mut slots);
+                a.push(&mut slots)?;
             }
-            gc.push(&mut slots);
-            out.push(&mut slots);
+            gc.push(&mut slots)?;
+            out.push(&mut slots)?;
             run(&src, "k", 1, &mut slots)?;
         }
         let got = out.read()?;
@@ -128,9 +128,9 @@ pub(crate) fn flash_softmax(failures: &mut u32) -> Result<()> {
         let out = Arg::<f32>::zeroed(r, d)?;
         let mut slots = Vec::new();
         for a in [&gq, &gk, &gv] {
-            a.push(&mut slots);
+            a.push(&mut slots)?;
         }
-        out.push(&mut slots);
+        out.push(&mut slots)?;
         run_at(64, src, "fa", 1, &mut slots)?;
         let got = out.read()?;
         let scale = want.iter().fold(0.0f32, |m, w| m.max(w.abs()));
@@ -275,11 +275,11 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
             let (gas, gws) = (Arg::new(&asc, m, kb)?, Arg::new(&wsc, kb, n)?);
             let out = Arg::<f32>::zeroed(m, n)?;
             let mut slots = Vec::new();
-            ga.push(&mut slots);
-            gas.push(&mut slots);
-            gw.push(&mut slots);
-            gws.push(&mut slots);
-            out.push(&mut slots);
+            ga.push(&mut slots)?;
+            gas.push(&mut slots)?;
+            gw.push(&mut slots)?;
+            gws.push(&mut slots)?;
+            out.push(&mut slots)?;
             run_at(index_bitwidth, &src, "k", 2, &mut slots)?;
             let got = out.read()?;
             let scale = want.iter().fold(0.0f64, |s, v| s.max(v.abs()));
@@ -321,11 +321,11 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
         let (gas, gws) = (Arg::new(&asc, m, kb)?, Arg::new(&wsc, kb, n)?);
         let out = Arg::<f32>::zeroed(m, n)?;
         let mut slots = Vec::new();
-        ga.push(&mut slots);
-        gas.push(&mut slots);
-        gw.push(&mut slots);
-        gws.push(&mut slots);
-        out.push(&mut slots);
+        ga.push(&mut slots)?;
+        gas.push(&mut slots)?;
+        gw.push(&mut slots)?;
+        gws.push(&mut slots)?;
+        out.push(&mut slots)?;
         run_at(index_bitwidth, src, "k", 2, &mut slots)?;
         let got = out.read()?;
         let scale = want_min.iter().fold(0.0f64, |s, v| s.max(v.abs()));
@@ -389,11 +389,11 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
             let (gas, gws) = (Arg::new(&asc, m, kb)?, Arg::new(&wsc, kb, n)?);
             let out = Arg::<f32>::zeroed(m, n)?;
             let mut slots = Vec::new();
-            ga.push(&mut slots);
-            gas.push(&mut slots);
-            gw.push(&mut slots);
-            gws.push(&mut slots);
-            out.push(&mut slots);
+            ga.push(&mut slots)?;
+            gas.push(&mut slots)?;
+            gw.push(&mut slots)?;
+            gws.push(&mut slots)?;
+            out.push(&mut slots)?;
             run_at(index_bitwidth, &src, "k", 2, &mut slots)?;
             let got = out.read()?;
             let scale = want.iter().fold(0.0f64, |s, v| s.max(v.abs()));

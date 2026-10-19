@@ -60,7 +60,7 @@ fn main() -> Result<()> {
     let stage_fn = stage.get_function("stage")?.to_raw();
     let blocks = (elems / TILE) as u32;
     let mut slots = Vec::new();
-    push_descriptor(&mut slots, x.as_device_ptr().as_raw(), [1, elems as i64]);
+    push_descriptor(&mut slots, x.as_device_ptr().as_raw(), [1, elems as i64])?;
     let graph_millis = time_graph(&stream, stage_fn, blocks, &mut slots)?;
     println!(
         "graph chain, {STEPS} nodes of {blocks} blocks: {graph_millis:7.3} ms -> {:5.2} us per node",
@@ -87,9 +87,9 @@ fn main() -> Result<()> {
     )?;
     let staged_fn = staged.get_function("staged")?.to_raw();
     let mut slots = Vec::new();
-    push_descriptor(&mut slots, x.as_device_ptr().as_raw(), [1, elems as i64]);
+    push_descriptor(&mut slots, x.as_device_ptr().as_raw(), [1, elems as i64])?;
     // The barrier word `grid_barrier()` reads, appended last.
-    push_descriptor(&mut slots, bar.as_device_ptr().as_raw(), [2, 1]);
+    push_descriptor(&mut slots, bar.as_device_ptr().as_raw(), [2, 1])?;
     let barrier_millis = time_launch(&stream, staged_fn, grid, &mut slots)?;
     println!(
         "persistent, {STEPS} barriers:            {barrier_millis:7.3} ms -> {:5.2} us per barrier",

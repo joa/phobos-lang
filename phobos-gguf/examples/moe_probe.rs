@@ -148,10 +148,10 @@ impl Matvec {
         let keep = [DeviceBuffer::from_slice(&aq)?, DeviceBuffer::from_slice(&asc)?, DeviceBuffer::from_slice(&c)?];
         // The weight in the grouped layout: eight rows' blocks to a group.
         let mut slots = Vec::new();
-        push_descriptor(&mut slots, keep[0].as_device_ptr().as_raw(), [1, K as i64]);
-        push_descriptor(&mut slots, keep[1].as_device_ptr().as_raw(), [1, (K / 32) as i64]);
-        push_descriptor(&mut slots, qb, [(n / 8) as i64, (8 * RB) as i64]);
-        push_descriptor(&mut slots, keep[2].as_device_ptr().as_raw(), [1, n as i64]);
+        push_descriptor(&mut slots, keep[0].as_device_ptr().as_raw(), [1, K as i64])?;
+        push_descriptor(&mut slots, keep[1].as_device_ptr().as_raw(), [1, (K / 32) as i64])?;
+        push_descriptor(&mut slots, qb, [(n / 8) as i64, (8 * RB) as i64])?;
+        push_descriptor(&mut slots, keep[2].as_device_ptr().as_raw(), [1, n as i64])?;
         Ok(Matvec { function, n, slots, _keep: keep })
     }
 

@@ -37,10 +37,10 @@ pub fn check_topk(failures: &std::cell::Cell<u32>) -> Result<()> {
     let w = DeviceBuffer::from_slice(&vec![0f32; rows.len() * USED])?;
     let n = rows.len() as i64;
     let mut slots = Vec::new();
-    push_descriptor(&mut slots, logits.as_device_ptr().as_raw(), [n, EXPERTS as i64]);
-    push_descriptor(&mut slots, io.as_device_ptr().as_raw(), [1, EXPERTS as i64]);
-    push_descriptor(&mut slots, topk.as_device_ptr().as_raw(), [n, USED as i64]);
-    push_descriptor(&mut slots, w.as_device_ptr().as_raw(), [n, USED as i64]);
+    push_descriptor(&mut slots, logits.as_device_ptr().as_raw(), [n, EXPERTS as i64])?;
+    push_descriptor(&mut slots, io.as_device_ptr().as_raw(), [1, EXPERTS as i64])?;
+    push_descriptor(&mut slots, topk.as_device_ptr().as_raw(), [n, USED as i64])?;
+    push_descriptor(&mut slots, w.as_device_ptr().as_raw(), [n, USED as i64])?;
 
     let module = compile(&moe_topk_src(), &[], "moe_topk")?;
     let func = module.get_function("moe_topk")?.to_raw();

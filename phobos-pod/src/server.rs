@@ -77,6 +77,19 @@ impl TileServer for TileService {
 
 /// Connects this node to a scheduler, registers, and pumps messages until
 /// the scheduler closes the stream at the end of the job.
+/// This node's card as `sm_XY`, which the scheduler compiles its leaves for,
+/// or empty when no driver answers, which it reads as unknown.
+fn local_chip() -> String {
+    use cust::device::{Device, DeviceAttribute};
+    let capability = || -> cust::error::CudaResult<i32> {
+        cust::init(cust::CudaFlags::empty())?;
+        let device = Device::get_device(0)?;
+        Ok(device.get_attribute(DeviceAttribute::ComputeCapabilityMajor)? * 10
+            + device.get_attribute(DeviceAttribute::ComputeCapabilityMinor)?)
+    };
+    capability().map(|cc| format!("sm_{cc}")).unwrap_or_default()
+}
+
 pub async fn attach(
     sched_addr: &str,
     node_id: NodeId,
@@ -92,7 +105,7 @@ pub async fn attach(
         payload: Some(proto::node_message::Payload::Register(Register {
             node_id: node_id as u32,
             address: listen_addr.to_string(),
-            sm_architecture: String::new(),
+            sm_architecture: local_chip(),
             vram: 0,
             link_bandwidth: 0.0,
         })),

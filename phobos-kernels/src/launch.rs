@@ -8,10 +8,14 @@ pub fn cuda_ok(status: cust::sys::CUresult, what: &str) -> Result<()> {
     }
 }
 
+/// Packs a rank-2 tensor operand into launch slots. Fails on one a 32-bit
+/// index cannot address, see [`crate::abi::check_extent`].
 #[inline]
-pub fn push_descriptor(slots: &mut Vec<u64>, ptr: u64, dims: [i64; 2]) {
+pub fn push_descriptor(slots: &mut Vec<u64>, ptr: u64, dims: [i64; 2]) -> Result<()> {
+    crate::abi::check_extent(&dims)?;
     let word = |v: i64| v as i32 as u32 as u64;
     slots.extend_from_slice(&[ptr, ptr, 0, word(dims[0]), word(dims[1]), word(dims[1]), 1]);
+    Ok(())
 }
 
 pub const STATIC_SHARED_LIMIT: usize = 48 * 1024;

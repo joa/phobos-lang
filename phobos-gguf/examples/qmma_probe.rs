@@ -182,28 +182,28 @@ impl Operands {
         })
     }
 
-    fn slots(&self, table: Table) -> Vec<u64> {
+    fn slots(&self, table: Table) -> Result<Vec<u64>> {
         let (m, k, n) = (self.m as i64, self.k as i64, self.n as i64);
         let nb = k / 256;
         let mut slots = Vec::new();
-        push_descriptor(&mut slots, self.a.as_device_ptr().as_raw(), [m, k]);
-        push_descriptor(&mut slots, self.a_scales.as_device_ptr().as_raw(), [m, k / 32]);
-        push_descriptor(&mut slots, self.qb.as_device_ptr().as_raw(), [n, nb * BLOCK_BYTES as i64]);
-        push_descriptor(&mut slots, self.d.as_device_ptr().as_raw(), [n, nb]);
+        push_descriptor(&mut slots, self.a.as_device_ptr().as_raw(), [m, k])?;
+        push_descriptor(&mut slots, self.a_scales.as_device_ptr().as_raw(), [m, k / 32])?;
+        push_descriptor(&mut slots, self.qb.as_device_ptr().as_raw(), [n, nb * BLOCK_BYTES as i64])?;
+        push_descriptor(&mut slots, self.d.as_device_ptr().as_raw(), [n, nb])?;
         match table {
             Table::Signed => push_descriptor(
                 &mut slots,
                 self.signed.as_device_ptr().as_raw(),
                 [1, SIGNED_GRID_LEN as i64],
-            ),
+            )?,
             Table::TwoBit => push_descriptor(
                 &mut slots,
                 self.two_bit.as_device_ptr().as_raw(),
                 [1, GRID2_LEN as i64],
-            ),
+            )?,
         }
-        push_descriptor(&mut slots, self.c.as_device_ptr().as_raw(), [m, n]);
-        slots
+        push_descriptor(&mut slots, self.c.as_device_ptr().as_raw(), [m, n])?;
+        Ok(slots)
     }
 }
 
@@ -321,7 +321,7 @@ fn run(stream: &Stream, variant: &Variant, ops: &Operands) -> Result<Vec<f32>> {
         "iq1s_qmma",
     )?;
     let function = module.get_function("iq1s_qmma")?.to_raw();
-    let mut slots = ops.slots(variant.table());
+    let mut slots = ops.slots(variant.table())?;
     let grid = ((ops.m / variant.tm) as u32, (ops.n / variant.tn) as u32);
     let millis = time(stream, function, grid, variant.threads(), &mut slots)?;
     let mut got = vec![0.0f32; ops.m * ops.n];
