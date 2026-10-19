@@ -20,8 +20,11 @@ use phobos_inference::CacheStats;
 #[cfg(feature = "cuda")]
 use phobos_gguf::backend::device;
 
-/// The runtime's prompt batch size, used to prime a depth.
-const PROMPT_BATCH: usize = 512;
+/// llama-bench's defaults for `-b` and `-ub`. The ubatch is also the
+/// runtime's prompt batch, the size `phobos-cli` and the server feed a prompt
+/// in.
+const DEFAULT_BATCH: usize = 2048;
+const DEFAULT_UBATCH: usize = 512;
 
 const DEFAULT_MODEL: &str = "models/Qwen3.5-0.8B-Q8_0.gguf";
 
@@ -33,6 +36,12 @@ struct Args {
     /// llama-bench's `-d`. Each depth gets its own set of tg rows.
     depths: Vec<usize>,
     repetitions: usize,
+    /// Tokens handed over at a time, as llama-bench's `-b`. The logits are
+    /// read back at the end of each such batch.
+    batch: usize,
+    /// Tokens in one forward pass, as llama-bench's `-ub`. Never more than
+    /// `batch`.
+    ubatch: usize,
     warmup: bool,
     /// A cap on a streamed model's expert cache, as `phobos-cli`'s
     /// `--expert-cache`.
@@ -48,9 +57,13 @@ OPTIONS:
   -m, --model FILE      the GGUF file to run (default: {DEFAULT_MODEL})
   -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
   -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
-  -d, --depth N,...     positions in the context before each tg row starts,
+  -d, --n-depth N,...   positions in the context before each tg row starts,
                         one set of tg rows per depth (default: 0)
   -r, --repetitions N   timed repetitions per row (default: 3)
+  -b, --batch-size N    tokens a prompt is handed over in at a time, its logits
+                        read back after each batch (default: {DEFAULT_BATCH})
+  -ub, --ubatch-size N  tokens in one forward pass, at most the batch size
+                        (default: {DEFAULT_UBATCH}, the runtime's prompt batch)
       --no-warmup       skip the warmup pass, which leaves each kernel's first
                         compile inside the repetition it lands in
       --expert-cache SIZE
@@ -59,8 +72,55 @@ OPTIONS:
   -h, --help            print this message
 
   -p and -n take a comma-separated list, and repeat, so -p 128,512 and
-  -p 128 -p 512 both ask for the same two rows."
+  -p 128 -p 512 both ask for the same two rows. -b and -ub take one value;
+  llama-bench's lists of them, a row per combination, are not supported.
+  A pp<N> row and the positions a -d row primes are fed the same way."
     );
+}
+
+/// A batch or ubatch size: one positive token count.
+fn parse_batch(value: &str) -> Result<usize> {
+    let size: usize = value
+        .trim()
+        .parse()
+        .with_context(|| format!("{value:?} is not one token count"))?;
+    anyhow::ensure!(size > 0, "a batch holds at least one token");
+    Ok(size)
+}
+
+/// How a prompt of `len` tokens is fed: batches of `batch` tokens, each run
+/// as forward passes of at most `ubatch`. Each pass's length, and whether it
+/// ends a batch, where the logits are read back.
+fn passes(len: usize, batch: usize, ubatch: usize) -> Vec<(usize, bool)> {
+    let mut out = Vec::new();
+    let mut left = len;
+    while left > 0 {
+        let mut in_batch = left.min(batch);
+        left -= in_batch;
+        while in_batch > 0 {
+            let pass = in_batch.min(ubatch);
+            in_batch -= pass;
+            out.push((pass, in_batch == 0));
+        }
+    }
+    out
+}
+
+/// Runs `tokens` into `state` as [`passes`] lays them out. A pass that ends a
+/// batch reads the logits back, as llama.cpp returns them per decode call;
+/// the others take the greedy path, which reads back only a token id.
+fn feed(model: &Decoder, state: &mut phobos_gguf::model::State, tokens: &[u32], args: &Args, backend: &dyn Backend) -> Result<()> {
+    let mut at = 0;
+    for (len, ends_batch) in passes(tokens.len(), args.batch, args.ubatch) {
+        let chunk = &tokens[at..at + len];
+        if ends_batch {
+            model.forward(state, chunk, backend)?;
+        } else {
+            model.forward_greedy(state, chunk, backend)?;
+        }
+        at += len;
+    }
+    Ok(())
 }
 
 /// One size, or a comma-separated list of them. A zero drops the row, so
@@ -85,6 +145,8 @@ fn parse_args() -> Result<Args> {
         gen_tokens: Vec::new(),
         depths: Vec::new(),
         repetitions: 3,
+        batch: DEFAULT_BATCH,
+        ubatch: DEFAULT_UBATCH,
         warmup: true,
         expert_cache_bytes: None,
     };
@@ -95,8 +157,10 @@ fn parse_args() -> Result<Args> {
             "-m" | "--model" => args.model = next("--model")?.into(),
             "-p" | "--n-prompt" => args.prompt_tokens.extend(parse_sizes(&next("-p")?)?),
             "-n" | "--n-gen" => args.gen_tokens.extend(parse_sizes(&next("-n")?)?),
-            "-d" | "--depth" => args.depths.extend(parse_sizes(&next("-d")?)?),
+            "-d" | "--n-depth" | "--depth" => args.depths.extend(parse_sizes(&next("-d")?)?),
             "-r" | "--repetitions" => args.repetitions = next("-r")?.parse().context("-r")?,
+            "-b" | "--batch-size" => args.batch = parse_batch(&next("-b")?).context("-b")?,
+            "-ub" | "--ubatch-size" => args.ubatch = parse_batch(&next("-ub")?).context("-ub")?,
             "--no-warmup" => args.warmup = false,
             "--expert-cache" => {
                 args.expert_cache_bytes = Some(phobos_base::cli::parse_size(&next("--expert-cache")?)?)
@@ -123,6 +187,8 @@ fn parse_args() -> Result<Args> {
     if args.depths.is_empty() {
         args.depths.push(0);
     }
+    // llama.cpp clamps the ubatch to the batch the same way.
+    args.ubatch = args.ubatch.min(args.batch);
     args.prompt_tokens.retain(|&n| n > 0);
     args.gen_tokens.retain(|&n| n > 0);
     Ok(args)
@@ -174,6 +240,7 @@ fn main() -> Result<()> {
     let load_millis = load_start.elapsed().as_secs_f64() * 1e3;
 
     let vocab = model.vocab();
+    eprintln!("batch {}, ubatch {}", args.batch, args.ubatch);
     eprintln!(
         "model {} ({architecture}, {vocab} vocab), backend {}, load {load_millis:.0} ms",
         args.model.display(),
@@ -200,10 +267,12 @@ fn main() -> Result<()> {
         eprint!("warmup... ");
         // Batch and single-step passes hit different kernels, and each may
         // compile on first use, so both are warmed. A batch needs at least 128
-        // rows to reach the widest batched tile. Each distinct prompt size
-        // gets its own pass, because the first pass at a shape builds its
-        // graph.
-        let mut shapes: Vec<usize> = args.prompt_tokens.iter().map(|&n| n.max(128)).collect();
+        // rows to reach the widest batched tile. Each distinct pass length the
+        // timed runs feed gets its own pass, because the first pass at a shape
+        // builds its graph.
+        let fed = args.prompt_tokens.iter().copied().chain(args.depths.iter().map(|&d| d + 1));
+        let mut shapes: Vec<usize> =
+            fed.flat_map(|n| passes(n, args.batch, args.ubatch)).map(|(len, _)| len).collect();
         shapes.push(128);
         shapes.sort_unstable();
         shapes.dedup();
@@ -229,8 +298,7 @@ fn main() -> Result<()> {
             let mut state = model.new_state();
             let before = backend.cache_stats();
             let start = Instant::now();
-            // The whole prompt in one pass.
-            model.forward(&mut state, &tokens[..prompt_tokens], backend.as_ref())?;
+            feed(&model, &mut state, &tokens[..prompt_tokens], &args, backend.as_ref())?;
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
             rates.push(prompt_tokens as f64 / secs);
@@ -249,11 +317,9 @@ fn main() -> Result<()> {
         for (rep, tokens) in rep_tokens.iter().enumerate() {
             backend.cool_expert_cache()?;
             let mut state = model.new_state();
-            // Prime `depth + 1` positions in prompt batches, so the timed
+            // Prime `depth + 1` positions as a prompt is fed, so the timed
             // loop is pure decoding, as in llama-bench.
-            for chunk in tokens[..depth + 1].chunks(PROMPT_BATCH) {
-                model.forward(&mut state, chunk, backend.as_ref())?;
-            }
+            feed(&model, &mut state, &tokens[..depth + 1], &args, backend.as_ref())?;
             let before = backend.cache_stats();
             let start = Instant::now();
             // The greedy fast path, which temperature-0 decoding takes. It is
@@ -351,4 +417,20 @@ fn mean_stddev(values: &[f64]) -> (f64, f64) {
     let variance =
         values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
     (mean, variance.sqrt())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::passes;
+
+    #[test]
+    fn a_prompt_is_cut_into_batches_then_passes() {
+        // llama-bench's defaults over a prompt of 2048: one batch, four passes.
+        assert_eq!(passes(2048, 2048, 512), [(512, false), (512, false), (512, false), (512, true)]);
+        // A short prompt is one pass.
+        assert_eq!(passes(128, 2048, 512), [(128, true)]);
+        // A batch boundary reads the logits back even mid-ubatch.
+        assert_eq!(passes(700, 600, 512), [(512, false), (88, true), (100, true)]);
+        assert_eq!(passes(0, 2048, 512), []);
+    }
 }

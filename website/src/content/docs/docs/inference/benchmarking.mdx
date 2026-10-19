@@ -21,8 +21,8 @@ make the comparison fair.
 
 It reports two kinds of rows, in tokens per second:
 
-- `pp<N>`, prompt processing: an `N`-token prompt fed into a fresh state at
-  once.
+- `pp<N>`, prompt processing: an `N`-token prompt fed into a fresh state, in
+  forward passes of at most `-ub` tokens, as llama-bench feeds it.
 - `tg<N>`, text generation: `N` tokens produced one at a time.
 
 | Flag | Default | Effect |
@@ -30,13 +30,17 @@ It reports two kinds of rows, in tokens per second:
 | `-m`, `--model FILE` | `models/Qwen3.5-0.8B-Q8_0.gguf` | The GGUF file to run. |
 | `-p`, `--n-prompt N,...` | `128` | Prompt sizes, one `pp` row each. |
 | `-n`, `--n-gen N,...` | `32` | Generation lengths, one `tg` row each. |
-| `-d`, `--depth N,...` | `0` | Tokens already in the context before each `tg` row starts; one set of `tg` rows per depth. |
+| `-d`, `--n-depth N,...` | `0` | Tokens already in the context before each `tg` row starts, fed as a prompt is; one set of `tg` rows per depth. |
 | `-r`, `--repetitions N` | `3` | Timed repetitions per row. |
+| `-b`, `--batch-size N` | `2048` | Tokens a prompt is handed over in at a time; the logits are read back after each batch. |
+| `-ub`, `--ubatch-size N` | `512` | Tokens in one forward pass, at most the batch size. The default is the size `phobos-cli` and the server feed a prompt in. A mixture-of-experts model takes at most 1024. |
 | `--no-warmup` | | Skip the warmup pass. A kernel's first compile then lands inside the repetition that first needs it. |
 | `--expert-cache SIZE` | what the weights leave | Device memory for a mixture-of-experts model's expert cache, as `2g`, `1500m` or bytes. |
 
 `-p`, `-n` and `-d` take a comma-separated list and can be repeated, so
-`-p 128,512` and `-p 128 -p 512` ask for the same two rows. Progress goes to
+`-p 128,512` and `-p 128 -p 512` ask for the same two rows. `-b` and `-ub` take
+one value each, with llama-bench's defaults; llama-bench's lists of them are not
+supported. Progress goes to
 standard error, and the result is a Markdown table on standard output.
 
 ## Comparing with llama.cpp
