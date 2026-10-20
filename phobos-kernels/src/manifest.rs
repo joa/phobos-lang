@@ -128,9 +128,11 @@ impl Request {
         cache::entry(root, &self.context(chip), &self.texts())
     }
 
-    /// Whether `root` already holds this request's entry for `chip`.
+    /// Whether `root` already holds this request's entry for `chip`, from
+    /// the PTX compiler this process would use.
     pub fn is_cached(&self, root: &Path, chip: &str) -> bool {
-        self.entry(root, chip).is_file()
+        std::fs::read(self.entry(root, chip))
+            .is_ok_and(|bytes| cache::is_current(&self.context(chip), self.texts.len(), &bytes))
     }
 
     /// Lowers the request for `chip`, without storing it.

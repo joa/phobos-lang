@@ -20,7 +20,8 @@ vastai show instances   # must be empty before and after a session
 
 The release's kernels are PTX ISA 9.0, which needs a CUDA 13 driver (R580 or
 newer); a host on a 535 or 565 driver refuses to load them, so filter on
-`cuda_max_good>=13.0`.
+`cuda_max_good>=13.0`. sm_120's kernels come from libNVVM as PTX ISA 9.3, so
+an RTX 5090 host needs `cuda_max_good>=13.3`.
 
 | Card     | Chip   | In the shipped cache | v0.1.1 smoke test |
 |----------|--------|----------------------|-------------------|

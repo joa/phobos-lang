@@ -27,6 +27,9 @@ pub fn run(args: &Args) -> Result<()> {
         Some(path) => println!("assembling each PTX with {}", path.display()),
         None => println!("no ptxas: PTX is checked by the MLIR verifier only"),
     }
+    for chip in &chips {
+        println!("{chip}: PTX from {}", phobos_kernels::cache::ptx_compiler(chip));
+    }
 
     let mut seen = HashSet::new();
     let mut requests = Vec::new();

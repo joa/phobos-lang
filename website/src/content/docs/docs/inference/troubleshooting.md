@@ -29,7 +29,8 @@ compiles its own kernels once and keeps them in `~/.phobos/kernel-cache`.
 ## Kernels fail to load
 
 Phobos emits PTX ISA 9.0, which needs a driver from the CUDA 13 line, R580 or
-newer. The GPU must be of compute capability 7.5 or newer (Turing on). Update
+newer. An sm_120 card's kernels, compiled with libNVVM,
+are PTX ISA 9.3 and need a driver that runs CUDA 13.3. The GPU must be of compute capability 7.5 or newer (Turing on). Update
 the driver first.
 
 ## The model does not fit, or barely fits

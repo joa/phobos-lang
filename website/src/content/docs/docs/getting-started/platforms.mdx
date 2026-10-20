@@ -68,7 +68,8 @@ it (see [Kernel cache](/docs/inference/kernel-cache/)).
 
 - Windows x64, or Linux x64 with glibc 2.28 or newer.
 - A driver from the CUDA 13 line, R580 or newer. Phobos emits PTX ISA 9.0,
-  which older drivers refuse to load.
+  which older drivers refuse to load. An sm_120 card's kernels, compiled with libNVVM, are PTX ISA 9.3
+  and need a driver that runs CUDA 13.3.
 
 [Install](/docs/getting-started/install/) lists what a build from source needs
 on each.

@@ -11,6 +11,7 @@ use melior::{
 use inkwell::targets::{InitializationConfig, Target};
 
 mod mlir_flatten;
+pub mod nvvm;
 
 /// Registers the MLIR passes and the NVPTX target, once per process.
 ///
@@ -185,6 +186,15 @@ pub fn lower_mlir_to_ptx<'c>(
 
     llvm_mod.set_data_layout(&target_machine.get_target_data().get_data_layout());
     llvm_mod.set_triple(&target_machine.get_triple());
+
+    // A module libNVVM rejects still has the NVPTX backend, which reads
+    // everything this LLVM writes.
+    if nvvm::compiles(machine.cpu) {
+        match nvvm::compile(&llvm_mod.clone(), machine.cpu) {
+            Ok(ptx) => return Ok(ptx),
+            Err(e) => phobos_base::phinfo!("{e:#}, compiling with NVPTX instead"),
+        }
+    }
 
     let ptx_buf = target_machine
         .write_to_memory_buffer(&llvm_mod, inkwell::targets::FileType::Assembly)
