@@ -72,7 +72,8 @@ offers __cuda_array_interface__, and autotuned. Put python/ on PYTHONPATH.
 
 Needs an NVIDIA card of compute capability 7.5 or newer (Turing onwards) and
 a driver from the CUDA 13 line (R580 or newer): the kernels are PTX ISA 9.0,
-which older drivers refuse to load.
+which older drivers refuse to load. sm_120's, compiled with libNVVM, are PTX
+ISA 9.3 and need a driver that runs CUDA 13.3.
 
 kernel-cache/ holds every kernel the supported models compile, for sm_75,
 sm_80, sm_86, sm_89, sm_90 and sm_120, so a first launch loads instead of

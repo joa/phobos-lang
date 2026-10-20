@@ -16,3 +16,4 @@ melior.workspace = true
 mlir-sys.workspace = true
 inkwell.workspace = true
 llvm-sys.workspace = true
+libloading = "0.8"

@@ -127,7 +127,8 @@ fn roots() -> impl Iterator<Item = PathBuf> {
 /// under a directory per chip, `<dir>/sm_75/<kernel>-<hash>`.
 ///
 /// The bundled cache beside the binary is read first, then
-/// `~/.phobos/kernel-cache`, which is the only one written.
+/// `~/.phobos/kernel-cache`, which is the only one written. An entry another
+/// PTX compiler wrote is passed over where [`current`] says so.
 /// `PHOBOS_KERNEL_CACHE_DIR` replaces both, and an empty value disables
 /// caching. `print_phases` always disables it, since a hit has nothing to
 /// print.
@@ -135,7 +136,9 @@ pub fn load(ctx: &Context, source: &str) -> Option<(String, Vec<(String, usize)>
     if ctx.print_phases {
         return None;
     }
-    lookup(roots(), ctx, &[source], decode_one)
+    lookup(roots(), ctx, &[source], |bytes| {
+        decode_one(bytes).filter(|(ptx, _)| current(ctx, &[ptx]))
+    })
 }
 
 /// Persists one kernel's compiled output. Best-effort: a write failure never
@@ -154,7 +157,30 @@ pub(crate) fn load_pair(ctx: &Context, aligned_src: &str, general_src: &str) -> 
     if ctx.print_phases {
         return None;
     }
-    lookup(roots(), ctx, &[aligned_src, general_src], decode_pair)
+    lookup(roots(), ctx, &[aligned_src, general_src], |bytes| {
+        decode_pair(bytes).filter(|(a, g)| current(ctx, &[a, g]))
+    })
+}
+
+/// The PTX compiler `chip` compiles with here, by name.
+pub fn ptx_compiler(chip: &str) -> &'static str {
+    if phobos_mlir::nvvm::compiles(chip) { "libNVVM" } else { "LLVM NVPTX" }
+}
+
+/// Whether every PTX of an entry came from the compiler this process would
+/// compile the chip with, or one it takes in its place. The key leaves the
+/// PTX compiler out, so a cache warmed with libNVVM serves a machine without
+/// it.
+fn current(ctx: &Context, ptx: &[&str]) -> bool {
+    ptx.iter().all(|ptx| phobos_mlir::nvvm::current(ctx.gpu_config.chip(), ptx))
+}
+
+/// Whether `bytes`, an entry of `texts` sources, decodes and is [`current`].
+pub(crate) fn is_current(ctx: &Context, texts: usize, bytes: &[u8]) -> bool {
+    match texts {
+        1 => decode_one(bytes).is_some_and(|(ptx, _)| current(ctx, &[&ptx])),
+        _ => decode_pair(bytes).is_some_and(|(a, g)| current(ctx, &[&a, &g])),
+    }
 }
 
 /// [`store`] for the aligned/general pair.
