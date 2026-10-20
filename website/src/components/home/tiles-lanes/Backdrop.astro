@@ -1,0 +1,186 @@
+---
+// The bodies behind the tiles-and-lanes scene: one per beat, fused in the third, and a blue line
+// round whichever is lit. The build draws the settled frame as SVG, back to front, which is what a
+// page without script, or under reduced motion, shows; while the scene plays, its player draws every
+// frame on the canvases instead (backdrop-canvas.ts).
+import {
+  BACKDROP_HEIGHT_UNITS,
+  BACKDROP_WIDTH_UNITS,
+  facets,
+  makeMeshes,
+  outlines,
+  settled,
+  silvering,
+  tone,
+} from "./backdrop"
+
+const pct = (value: number) => `${Math.round(value * 1000) / 10}%`
+const { pose, motion } = settled()
+const paths = facets(pose, motion, makeMeshes()).map(facet => {
+  const [tiles, lanes] = facet.weights
+  const firstTwo = tiles + lanes
+  const points = facet.points
+  let d = `M${points[0]} ${points[1]}`
+  for (let at = 2; at < points.length; at += 2) d += `L${points[at]} ${points[at + 1]}`
+  return {
+    d: `${d}Z`,
+    // The mix of the bodies' hues (--a, --b), toward the metal (--m), toward the sky by the facet's
+    // tone by night (--l) and at dawn (--k), toward the shine by its gloss (--s), then past how faint
+    // the bodies are, by its sheen (--h); the CSS does the mixing.
+    style: [
+      `--a:${pct(firstTwo > 0 ? tiles / firstTwo : 1)};--b:${pct(firstTwo)};--m:${pct(silvering(facet))}`,
+      `--l:${pct(tone(facet))};--k:${pct(tone(facet, true))};--s:${pct(facet.gloss)};--h:${pct(facet.sheen)}`,
+    ].join(";"),
+  }
+})
+// The settled frame rings the fused body, so nothing passes in front of its line.
+const lines = outlines(pose, motion).map(outline => {
+  let d = ""
+  const { segments } = outline
+  for (let at = 0; at < segments.length; at += 4)
+    d += `M${segments[at]} ${segments[at + 1]}L${segments[at + 2]} ${segments[at + 3]}`
+  return { d, opacity: outline.opacity }
+})
+const viewBox = `0 0 ${BACKDROP_WIDTH_UNITS} ${BACKDROP_HEIGHT_UNITS}`
+---
+
+<div class="tl-backdrop" aria-hidden="true">
+  <div class="tl-bodies">
+    <svg class="tl-bodies-static" viewBox={viewBox}>
+      {paths.map(path => <path d={path.d} style={path.style} />)}
+    </svg>
+    <canvas class="tl-bodies-canvas"></canvas>
+    <svg class="tl-outline-static" viewBox={viewBox}>
+      {lines.map(line => <path d={line.d} stroke-opacity={line.opacity} />)}
+    </svg>
+    <canvas class="tl-outline-canvas"></canvas>
+  </div>
+</div>
+
+<style>
+  /* Covers the section and clips the bodies to it, so one bleeding past the edge never scrolls the page */
+  .tl-backdrop {
+    --tl-body-0: var(--brand);
+    --tl-body-1: var(--nebula);
+    --tl-body-2: var(--star);
+    --tl-body-sky: var(--sky-0);
+    /* What the fused body turns to: silver, as light by night and as a slate ink at dawn */
+    --tl-body-metal: var(--star);
+    /* What a polished facet's color goes toward: a pale glint by night, the paper at dawn */
+    --tl-body-shine: var(--star);
+    /* 1 draws the bodies as ink, shade on a pale sky, rather than as light */
+    --tl-body-ink: 0;
+    /* How far out of the sky the bodies come; a highlight shines past it */
+    --tl-bodies-opacity: 0.44;
+    /* The line round the lit body sits less far back than the bodies */
+    --tl-outline: var(--brand);
+    --tl-outline-opacity: 0.8;
+    /* How much of both a narrow screen keeps */
+    --tl-backdrop-fade: 1;
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    overflow: hidden;
+    pointer-events: none;
+  }
+
+  /* Right of the heading, where the scene leaves the sky empty. Static, the beats stand side by side
+     under the heading, so the bodies keep to its row; live, the stage and the code start lower and
+     leave them room down to the code. */
+  .tl-bodies {
+    position: absolute;
+    top: var(--tl-bodies-top);
+    right: max(-3vw, calc((100% - 1200px) / 2 - 6vw));
+    width: var(--tl-bodies-width);
+    aspect-ratio: 1000 / 700;
+  }
+
+  .tl-backdrop {
+    --tl-bodies-top: clamp(0.5rem, 2vw, 1.5rem);
+    --tl-bodies-width: clamp(240px, calc(100vw - 760px), 440px);
+  }
+
+  .tl-backdrop[data-live] {
+    --tl-bodies-top: clamp(1rem, 4vw, 3rem);
+    --tl-bodies-width: clamp(320px, calc(100vw - 720px), 640px);
+  }
+
+  :global(:root[data-theme="light"]) .tl-backdrop {
+    --tl-body-ink: 1;
+    --tl-body-metal: color-mix(in srgb, var(--dust) 50%, var(--star));
+    --tl-body-shine: var(--sky-1);
+    --tl-bodies-opacity: 0.4;
+  }
+
+  .tl-bodies > * {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+  }
+
+  .tl-outline-static,
+  .tl-outline-canvas {
+    opacity: calc(var(--tl-outline-opacity) * var(--tl-backdrop-fade));
+  }
+
+  .tl-outline-static path {
+    fill: none;
+    stroke: var(--tl-outline);
+    stroke-width: 1.25;
+    stroke-linecap: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .tl-bodies-static path {
+    --hue: color-mix(
+      in srgb,
+      var(--tl-body-metal) var(--m),
+      color-mix(in srgb, color-mix(in srgb, var(--tl-body-0) var(--a), var(--tl-body-1)) var(--b), var(--tl-body-2))
+    );
+    --base: color-mix(
+      in srgb,
+      var(--hue) calc(var(--l) * (1 - var(--tl-body-ink)) + var(--k) * var(--tl-body-ink)),
+      var(--tl-body-sky)
+    );
+    --glossy: color-mix(in srgb, var(--tl-body-shine) var(--s), var(--base));
+    --faded: color-mix(
+      in srgb,
+      var(--glossy) calc(var(--tl-bodies-opacity) * var(--tl-backdrop-fade) * 100%),
+      var(--tl-body-sky)
+    );
+    --fill: color-mix(in srgb, var(--tl-body-shine) var(--h), var(--faded));
+    fill: var(--fill);
+    stroke: var(--fill);
+    stroke-width: 1;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+  }
+
+  .tl-bodies-canvas,
+  .tl-outline-canvas {
+    display: none;
+  }
+
+  .tl-backdrop[data-live] :is(.tl-bodies-canvas, .tl-outline-canvas) {
+    display: block;
+  }
+
+  .tl-backdrop[data-live] :is(.tl-bodies-static, .tl-outline-static) {
+    display: none;
+  }
+
+  /* One column: the bodies stand behind the heading's right end, fainter */
+  @media (max-width: 899px) {
+    .tl-backdrop,
+    .tl-backdrop[data-live] {
+      --tl-bodies-top: 0px;
+      --tl-bodies-width: min(72vw, 520px);
+      --tl-backdrop-fade: 0.6;
+    }
+
+    .tl-bodies {
+      right: -16vw;
+    }
+  }
+</style>

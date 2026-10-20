@@ -1,11 +1,13 @@
 ---
 // Scene 2: tiles and lanes. One looping picture in three beats, drawn from the compiler's traces:
 // gemm tiles lifted through the memory hierarchy, one warp's lanes trading partial sums, then one
-// kernel that stages a tile for the CTA and reads it lane by lane.
+// kernel that stages a tile for the CTA and reads it lane by lane. Behind it, a body per beat.
+import Backdrop from "./tiles-lanes/Backdrop.astro"
 import TilesLanes from "./tiles-lanes/TilesLanes.astro"
 ---
 
 <section class="scene tl-scene" id="tiles-and-lanes" aria-labelledby="tl-scene-title">
+  <Backdrop />
   <div class="wrap">
     <div class="scene-head">
       <h2 class="scene-title" id="tl-scene-title">Tiles and lanes</h2>
@@ -24,6 +26,11 @@ import TilesLanes from "./tiles-lanes/TilesLanes.astro"
 </section>
 
 <style>
+  .tl-scene {
+    position: relative;
+    isolation: isolate;
+  }
+
   .tl-links {
     display: flex;
     flex-wrap: wrap;
