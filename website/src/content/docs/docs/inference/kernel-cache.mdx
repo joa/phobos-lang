@@ -32,6 +32,14 @@ produced it. A different build of Phobos does not read another build's
 entries, so an upgrade never runs a stale kernel; it compiles what it lacks
 instead. `--version` on any of the binaries prints the fingerprint.
 
+The user's cache also keeps what a run measured about the card. With
+`--batch auto`, the default, `phobos-cli` tries prompt pass lengths from 128
+to 4096 on the passes a prompt makes anyway, separately for each depth of the
+context, since attention's share of a pass grows with depth. What wins is
+written to `<chip>/tuning/`, one file per model file, card and build, so the
+next run starts from it. Delete a file to measure again, or pass
+`--batch SIZE` to pin one length. `phobos-cache` leaves the folder alone.
+
 ## phobos-cache
 
 ```text
