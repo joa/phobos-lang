@@ -2,6 +2,7 @@ use phobos_base::half::{f16_to_f32, f32_to_f16};
 
 use super::*;
 use crate::quant::grouped::group_rows;
+use crate::quant::q8_0_units;
 use crate::tests::{Builder, ggml_code};
 
 /// Q4_K's ggml type code.
@@ -82,6 +83,24 @@ fn a_stack_groups_an_expert_as_the_upload_does() {
     assert_eq!(got, group_rows(stack.expert(1), n, 2, 144));
     // 24 rows pad to 64: the grouped buffer is 64 rows of 2 blocks.
     assert_eq!(got.len(), 64 * 2 * 144);
+}
+
+#[test]
+fn a_q6_k_stack_groups_its_blocks_without_the_trailing_scale() {
+    let (count, n, k) = (2, 16, 512);
+    let mut words = crate::tests::xorshift(13);
+    let bytes: Vec<u8> = (0..count * n * k / 256 * 210).map(|_| (words() >> 56) as u8).collect();
+    let file = Builder::default().tensor_raw("w", &[k as u64, n as u64, count as u64], ggml_code(Quant::Q6_K), &bytes).build();
+    let stack = ExpertStack::load(&Gguf::from_bytes(file).unwrap(), "w", count, n, k).unwrap();
+    let expert = stack.expert(1);
+    let mut got = vec![0u8; stack.grouped_bytes()];
+    stack.grouped_into(1, &mut got);
+    let trimmed: Vec<u8> = expert.chunks_exact(210).flat_map(|b| &b[..208]).copied().collect();
+    assert_eq!(got, group_rows(&trimmed, n, 2, 208));
+    let mut scales = vec![0u16; stack.grouped_scales()];
+    stack.grouped_scales_into(1, &mut scales);
+    let d: Vec<u16> = expert.chunks_exact(210).map(|b| u16::from_le_bytes([b[208], b[209]])).collect();
+    assert_eq!(scales, group_rows(&d, n, 2, 1));
 }
 
 #[test]
