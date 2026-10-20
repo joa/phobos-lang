@@ -84,6 +84,11 @@ impl Decoder {
         }
     }
 
+    /// Whether a feed-forward routes rows to experts.
+    pub fn has_experts(&self) -> bool {
+        matches!(self, Decoder::Qwen35(m) if m.config.moe.is_some())
+    }
+
     /// The trained context length.
     pub fn context_length(&self) -> usize {
         match self {

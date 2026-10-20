@@ -23,6 +23,10 @@ impl Backend for DeviceBackend {
         super::init::device_info()
     }
 
+    fn moe_max_rows(&self) -> usize {
+        super::experts::MAX_ROWS
+    }
+
     fn sensors(&self) -> Option<phobos_inference::SensorSource> {
         mem::sensors()
     }

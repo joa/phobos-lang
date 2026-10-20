@@ -43,9 +43,9 @@ use mirror::Mirror;
 /// Upper bound on a slab's size, since the decode matvec indexes in 32 bits.
 const SLAB_LIMIT: usize = 1 << 31;
 
-/// Most rows one `moe` call may carry. This is twice the runtime's prompt
-/// batch, because the checks feed longer passes.
-const MAX_ROWS: usize = 1024;
+/// Most rows one `moe` call may carry, and so the widest prompt pass the
+/// runtime's batch tuner tries on a model with experts.
+pub(crate) const MAX_ROWS: usize = 1024;
 
 const NONE: u32 = u32::MAX;
 

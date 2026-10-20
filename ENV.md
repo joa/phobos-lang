@@ -35,7 +35,7 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 
 | variable | takes | default | effect |
 | --- | --- | --- | --- |
-| `PHOBOS_KERNEL_CACHE_DIR` | a directory, or empty | `kernel-cache` beside the binary, read-only, then `~/.phobos/kernel-cache` | Where compiled PTX is cached across processes, one subdirectory per chip (`sm_75/`, `sm_86/`, ...). A release ships its cache beside the binary; new entries go to the user's. Set, it is the one cache read and written; empty turns caching off. `phobos-compile` reads and writes it as the runtime does, and the Python autotuner keeps its winners there, under `<chip>/autotune/`. |
+| `PHOBOS_KERNEL_CACHE_DIR` | a directory, or empty | `kernel-cache` beside the binary, read-only, then `~/.phobos/kernel-cache` | Where compiled PTX is cached across processes, one subdirectory per chip (`sm_75/`, `sm_86/`, ...). A release ships its cache beside the binary; new entries go to the user's. Set, it is the one cache read and written; empty turns caching off. `phobos-compile` reads and writes it as the runtime does, and the Python autotuner keeps its winners there, under `<chip>/autotune/`, as the runtime keeps its prompt batch under `<chip>/tuning/`. |
 | `PHOBOS_KERNEL_MANIFEST` | a directory | unset | Records every kernel compile request, hit or miss, into that directory, one file each, without the chip. `phobos-cache warm --manifest DIR` compiles them for every supported chip with no GPU. A GGUF run on the device compiles every format's kernels while it records, not just its model's, so the manifest covers formats no recorded model holds. |
 | `PHOBOS_KERNEL_CACHE_EPOCH` | any string | the compiler's build fingerprint | Replaces the fingerprint that keys the cache, so a stale cache can be forced cold or two builds made to share one. |
 | `PHOBOS_CHIP` | an SM target, `sm_75`, `sm_80` | the newest supported chip the card runs, or the context default | The target kernels compile for: on the device path, in `phobos-kbench` and in the Python package, in place of the card's, and in `phobos-lang`'s `emit` and `ir` examples, to reach a code path the default never takes. |
@@ -85,6 +85,27 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | `PHOBOS_QDOT_SPLIT` | opt-out | on | A K-quant decode matvec over a `k` of 4096 or more whose tiles give fewer than two programs a multiprocessor splits along `k` into partials and a sum. Off, one program per tile walks all of `k`. |
 | `PHOBOS_PERSIST_QDOT` | opt-in | off | The persistent (card-sized grid) form of the Q8_0 decode matvec, which exists to be measured against the launched one. |
 | `PHOBOS_PERSIST_BLOCKS` | a block count | the occupancy answer | Forces that grid's block count, to ask what a matvec loses at the count a fused kernel is stuck with. |
+
+## The device backend: prompt batch
+
+A GGUF session cuts a prompt into passes of at most the prompt batch. On the
+device it is tuned on the passes a run makes anyway: per depth bucket of the
+context (below 2048, then one per doubling), every power of two from 128 to
+4096 (1024 for a model with experts) is measured against the bucket's pick,
+which starts at 512. A pass takes the size nearest the pick that the prompt
+can fill, and only passes of exactly the size under test are timed; a size
+takes over when it is 3% faster, and one twice as slow as the pick is
+dropped after a single pass. Prompt attention changes kernel
+past a score budget on rows times depth, which is why the deeper buckets
+settle on narrower passes. Each pick is kept in the kernel cache, under
+`<chip>/tuning/`, one file per model file, card and compiler, so the next
+process starts from it; deleting the file tunes again. `PHOBOS_LOG=debug`
+prints each step.
+
+| variable | takes | default | effect |
+| --- | --- | --- | --- |
+| `PHOBOS_PROMPT_BATCH` | a token count | unset | Pins the prompt batch and turns tuning off. A model with experts takes at most 1024. |
+| `PHOBOS_BATCH_TUNE` | opt-out | on | The tuner. Off, the prompt batch is 512. |
 
 ## The device backend: streamed experts
 

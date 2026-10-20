@@ -1,10 +1,14 @@
-use std::path::Path;
+use std::cell::RefCell;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use phobos_inference::{DeviceMemory, Model, ModelInfo, Session, Tokenizer};
 
 use crate::backend::Backend;
 use crate::model::State;
+use crate::tune::{self, Tuner};
 use crate::{Bpe, Decoder, Gguf, Quant};
 
 /// The backend for a model whose weights are stored in `quants`. The device
@@ -29,9 +33,13 @@ pub fn backend_name() -> &'static str {
     }
 }
 
-/// Positions one prompt pass covers. A pass sizes its intermediates per
-/// row, and batching pays off most around here.
-pub(crate) const PROMPT_BATCH: usize = 512;
+/// Positions one prompt pass covers when the batch is not tuned, and what
+/// load-time sizing assumes. A pass sizes its intermediates per row.
+pub(crate) const PROMPT_BATCH: usize = tune::DEFAULT_BATCH;
+
+/// Card memory a step up to a wider prompt pass leaves free, beyond the
+/// wider pass's own estimate.
+const ROOM_RESERVE_BYTES: usize = 512 << 20;
 
 /// Device bytes [`check_fits`] leaves for everything that is not a weight: a
 /// pass's intermediates, quantized-activation scratch, split-K partials, a
@@ -48,6 +56,45 @@ pub struct GgufModel {
     /// Computed once at load, at the batch [`check_fits`] uses, so the weight
     /// figure a caller displays matches the fit decision.
     footprint: crate::model::Footprint,
+    batching: Batching,
+}
+
+/// How a prompt is cut into passes.
+enum Batching {
+    Fixed(usize),
+    Tuned(RefCell<Tuned>),
+}
+
+struct Tuned {
+    tuner: Tuner,
+    /// Where the picks are kept, `None` with the kernel cache off.
+    record: Option<PathBuf>,
+    /// Pass lengths this process has run. A length's first pass grows
+    /// scratch that only grows, so it is not a sample.
+    used: BTreeSet<usize>,
+}
+
+impl Batching {
+    /// `PHOBOS_PROMPT_BATCH` if set, else a tuner on a device backend unless
+    /// `PHOBOS_BATCH_TUNE` is off. The host reference is not worth tuning,
+    /// and has no card to key a record on.
+    fn new(gguf: &Gguf, decoder: &Decoder, backend: &dyn Backend) -> Batching {
+        let pinned = std::env::var("PHOBOS_PROMPT_BATCH").ok().and_then(|v| v.trim().parse().ok());
+        if let Some(rows) = pinned.filter(|&rows: &usize| rows > 0) {
+            return Batching::Fixed(rows);
+        }
+        let device = backend.device_info().filter(|_| phobos_base::env::flag_on("PHOBOS_BATCH_TUNE"));
+        let Some(device) = device else {
+            return Batching::Fixed(PROMPT_BATCH);
+        };
+        let limit = if decoder.has_experts() { backend.moe_max_rows() } else { tune::MAX_BATCH };
+        let mut tuner = Tuner::new(limit);
+        let record = tune::record_path(gguf.header(), &device);
+        if let Some(path) = &record {
+            tuner.load(path);
+        }
+        Batching::Tuned(RefCell::new(Tuned { tuner, record, used: BTreeSet::new() }))
+    }
 }
 
 /// What a caller can choose about a load beyond the file.
@@ -79,6 +126,7 @@ impl GgufModel {
             Decoder::load(&gguf).with_context(|| format!("load '{architecture}' weights"))?;
         let backend = make_backend(&gguf.quants())?;
         check_fits(backend.as_ref(), &decoder)?;
+        let batching = Batching::new(&gguf, &decoder, backend.as_ref());
         if let Some(bytes) = options.expert_cache_bytes {
             let bytes = usize::try_from(bytes).context("expert cache size")?;
             backend.limit_expert_cache(bytes)?;
@@ -102,7 +150,59 @@ impl GgufModel {
             backend,
             info,
             footprint,
+            batching,
         })
+    }
+
+    /// The length of the next pass from `start`, `remaining` positions left.
+    fn pass_rows(&self, start: usize, remaining: usize) -> usize {
+        let rows = match &self.batching {
+            Batching::Fixed(rows) => *rows,
+            Batching::Tuned(tuned) => tuned.borrow_mut().tuner.size(start, remaining),
+        };
+        rows.min(remaining)
+    }
+
+    /// Runs `pass`, a pass of `rows` from `start`, and gives its time to the
+    /// tuner. A pass that compiled a kernel, or the first of its length,
+    /// paid a one-time cost and is not timed.
+    fn timed<T>(&self, start: usize, rows: usize, pass: impl FnOnce() -> Result<T>) -> Result<T> {
+        let Batching::Tuned(tuned) = &self.batching else {
+            return pass();
+        };
+        if rows < tune::MIN_BATCH {
+            return pass();
+        }
+        let compiled = || self.backend.cache_stats().map(|s| s.kernels_compiled);
+        let before = compiled();
+        let began = Instant::now();
+        let out = pass()?;
+        let secs = began.elapsed().as_secs_f64();
+        let mut tuned = tuned.borrow_mut();
+        if tuned.used.insert(rows) || compiled() != before {
+            return Ok(out);
+        }
+        // What a wider pass is estimated to add: the pool's idle bytes after
+        // this one are about its intermediates, and twice that per row
+        // covers what the pool does not hold.
+        let idle_bytes = self.backend.cache_stats().map_or(0, |s| s.buffer_idle_bytes as usize);
+        let room = |size: usize| {
+            let Some((free_bytes, _)) = self.backend.card_memory() else {
+                return true;
+            };
+            let wider_bytes = size.saturating_sub(rows) * 2 * (idle_bytes / rows);
+            free_bytes >= wider_bytes + ROOM_RESERVE_BYTES
+        };
+        if tuned.tuner.observe(rows, start, secs, &room) {
+            phobos_base::phdebug!("prompt batch {}", tuned.tuner.describe(start));
+        }
+        if tuned.tuner.take_dirty()
+            && let Some(path) = &tuned.record
+            && let Err(e) = tuned.tuner.save(path)
+        {
+            phobos_base::phdebug!("prompt batch: could not write {}: {e}", path.display());
+        }
+        Ok(out)
     }
 }
 
@@ -258,28 +358,34 @@ pub struct GgufSession<'a> {
 impl Session for GgufSession<'_> {
     fn extend(&mut self, ids: &[i64]) -> Result<Vec<f32>> {
         let ids = to_u32(ids);
+        let model = self.model;
         let mut logits = Vec::new();
-        // A prompt arrives as one call and is split into batches here; a
-        // single generated token is one batch of one.
-        for batch in ids.chunks(PROMPT_BATCH) {
-            logits =
-                self.model
-                    .decoder
-                    .forward(&mut self.state, batch, self.model.backend.as_ref())?;
+        // A prompt arrives as one call and is split into passes here; a
+        // single generated token is one pass of one.
+        let mut at = 0;
+        while at < ids.len() {
+            let start = self.state.len();
+            let rows = model.pass_rows(start, ids.len() - at);
+            let batch = &ids[at..at + rows];
+            logits = model.timed(start, rows, || model.decoder.forward(&mut self.state, batch, model.backend.as_ref()))?;
+            at += rows;
         }
         Ok(logits)
     }
 
     fn extend_greedy(&mut self, ids: &[i64]) -> Result<i64> {
         let ids = to_u32(ids);
+        let model = self.model;
         let mut id = 0i64;
-        // Same split as `extend`. Only the last batch's result is kept;
+        // Same split as `extend`. Only the last pass's result is kept;
         // greedy decoding calls this with one token, so the loop runs once.
-        for batch in ids.chunks(PROMPT_BATCH) {
-            id = self
-                .model
-                .decoder
-                .forward_greedy(&mut self.state, batch, self.model.backend.as_ref())?;
+        let mut at = 0;
+        while at < ids.len() {
+            let start = self.state.len();
+            let rows = model.pass_rows(start, ids.len() - at);
+            let batch = &ids[at..at + rows];
+            id = model.timed(start, rows, || model.decoder.forward_greedy(&mut self.state, batch, model.backend.as_ref()))?;
+            at += rows;
         }
         Ok(id)
     }
@@ -288,8 +394,13 @@ impl Session for GgufSession<'_> {
         self.state.len()
     }
 
+    /// The widest pass the tuner may choose, so the caller's batches never
+    /// cut a pass short.
     fn prompt_batch(&self) -> Option<usize> {
-        Some(PROMPT_BATCH)
+        Some(match &self.model.batching {
+            Batching::Fixed(rows) => *rows,
+            Batching::Tuned(tuned) => tuned.borrow().tuner.limit(),
+        })
     }
 
     fn truncate(&mut self, positions: usize) -> Option<usize> {
