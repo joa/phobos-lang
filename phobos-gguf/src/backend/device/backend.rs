@@ -51,6 +51,7 @@ impl Backend for DeviceBackend {
             expert_prefetch_hits: experts.prefetch_hits,
             expert_cpu_misses: experts.cpu_misses,
             expert_cpu_nanos: experts.cpu_nanos,
+            expert_cpu_mapped: experts.cpu_mapped,
         })
     }
 
