@@ -517,6 +517,11 @@ pub trait Backend {
         bail!("this backend has no mixture-of-experts path")
     }
 
+    /// The most rows one [`Backend::moe`] call takes.
+    fn moe_max_rows(&self) -> usize {
+        usize::MAX
+    }
+
     /// [`Backend::fused_mlp`] over raw-format weights. `false` by default.
     fn fused_mlp_raw(&self, _mlp: FusedMlpRaw) -> Result<bool> {
         Ok(false)

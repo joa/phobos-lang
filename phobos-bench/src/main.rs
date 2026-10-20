@@ -21,8 +21,8 @@ use phobos_inference::CacheStats;
 use phobos_gguf::backend::device;
 
 /// llama-bench's defaults for `-b` and `-ub`. The ubatch is also the
-/// runtime's prompt batch, the size `phobos-cli` and the server feed a prompt
-/// in.
+/// runtime's untuned prompt batch; on the device the runtime tunes its pass
+/// length per depth, which this benchmark does not.
 const DEFAULT_BATCH: usize = 2048;
 const DEFAULT_UBATCH: usize = 512;
 
@@ -63,7 +63,7 @@ OPTIONS:
   -b, --batch-size N    tokens a prompt is handed over in at a time, its logits
                         read back after each batch (default: {DEFAULT_BATCH})
   -ub, --ubatch-size N  tokens in one forward pass, at most the batch size
-                        (default: {DEFAULT_UBATCH}, the runtime's prompt batch)
+                        (default: {DEFAULT_UBATCH}, the runtime's untuned one)
       --no-warmup       skip the warmup pass, which leaves each kernel's first
                         compile inside the repetition it lands in
       --expert-cache SIZE

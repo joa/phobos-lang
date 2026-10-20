@@ -16,6 +16,7 @@ phobos-base = { path = "../phobos-base" }
 phobos-kernels = { path = "../phobos-kernels" }
 phobos-inference = { path = "../phobos-inference" }
 rayon = "1"
+sha2 = { workspace = true }
 cust = { version = "0.3.2", optional = true }
 
 [dev-dependencies]
@@ -46,6 +47,10 @@ required-features = ["cuda"]
 
 [[example]]
 name = "batch_check"
+required-features = ["cuda"]
+
+[[example]]
+name = "batch_tune_check"
 required-features = ["cuda"]
 
 [[example]]

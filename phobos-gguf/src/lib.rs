@@ -13,6 +13,7 @@ pub mod read;
 pub mod runtime;
 pub mod simd;
 pub mod tensor;
+mod tune;
 pub mod vocab;
 
 use std::collections::HashMap;
@@ -119,6 +120,12 @@ impl Gguf {
             index: container.index,
             data_offset_bytes: container.data_offset_bytes,
         })
+    }
+
+    /// The bytes before the tensor data: every metadata entry and the tensor
+    /// table, which together identify a model file.
+    pub fn header(&self) -> &[u8] {
+        &self.backing[..self.data_offset_bytes]
     }
 
     pub fn version(&self) -> u32 {
