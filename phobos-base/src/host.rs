@@ -16,6 +16,12 @@ pub fn memory() -> Option<Memory> {
     imp::memory()
 }
 
+/// Page faults the process has taken so far, soft and hard together.
+/// `None` where the platform does not say.
+pub fn page_faults() -> Option<u64> {
+    imp::page_faults()
+}
+
 /// Refuses a budget of `bytes` the host does not have available. Passes
 /// where the platform does not say.
 pub fn ensure_available(bytes: u64) -> Result<()> {
@@ -54,6 +60,16 @@ fn cgroup(limit: &str, charged: &str, stat: &str, file_key: &str) -> Option<Memo
     Some(Memory { total_bytes: limit, available_bytes: limit.saturating_sub(charged.saturating_sub(file)) })
 }
 
+/// The minor and major faults of a `/proc/self/stat` line, together. The
+/// fields are counted after the command name's closing parenthesis, since
+/// the name may hold spaces.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn stat_faults(stat: &str) -> Option<u64> {
+    let fields: Vec<&str> = stat.get(stat.rfind(')')? + 1..)?.split_whitespace().collect();
+    let field = |i: usize| fields.get(i)?.parse::<u64>().ok();
+    Some(field(7)? + field(9)?)
+}
+
 #[cfg(target_os = "linux")]
 mod imp {
     use std::fs::read_to_string;
@@ -73,6 +89,10 @@ mod imp {
             total_bytes: system.total_bytes.min(group.total_bytes),
             available_bytes: system.available_bytes.min(group.available_bytes),
         })
+    }
+
+    pub(super) fn page_faults() -> Option<u64> {
+        super::stat_faults(&read_to_string("/proc/self/stat").ok()?)
     }
 
     /// The cgroup v2 limit at the namespace's root, which inside a container
@@ -112,9 +132,35 @@ mod imp {
         avail_extended_virtual: u64,
     }
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+    }
+
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GlobalMemoryStatusEx(status: *mut MemoryStatusEx) -> i32;
+        fn GetCurrentProcess() -> *mut std::ffi::c_void;
+        fn K32GetProcessMemoryInfo(process: *mut std::ffi::c_void, counters: *mut ProcessMemoryCounters, cb: u32) -> i32;
+    }
+
+    pub(super) fn page_faults() -> Option<u64> {
+        let cb = size_of::<ProcessMemoryCounters>() as u32;
+        let mut counters = ProcessMemoryCounters { cb, ..Default::default() };
+        // SAFETY: the struct is laid out as the call expects, its size passed;
+        // the current process's pseudo handle needs no closing.
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, cb) } != 0;
+        ok.then_some(u64::from(counters.page_fault_count))
     }
 
     pub(super) fn memory() -> Option<Memory> {
@@ -140,6 +186,10 @@ mod imp {
     pub(super) fn memory() -> Option<super::Memory> {
         None
     }
+
+    pub(super) fn page_faults() -> Option<u64> {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +212,13 @@ mod tests {
         // No limit reads as none, a charge past it as nothing left.
         assert!(cgroup("max\n", "5000\n", stat, "file").is_none());
         assert_eq!(cgroup("4000\n", "9000\n", "", "file").unwrap().available_bytes, 0);
+    }
+
+    #[test]
+    fn stat_faults_counts_after_the_name() {
+        let stat = "1234 (a (b) c) S 1 1234 1234 0 -1 4194560 150 0 7 0 3 1 0 0 20 0";
+        assert_eq!(stat_faults(stat), Some(157));
+        assert_eq!(stat_faults("1234 (cut"), None);
     }
 
     #[test]

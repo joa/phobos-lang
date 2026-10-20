@@ -115,6 +115,8 @@ pub(super) struct ExpertStats {
     pub(super) prefetch_hits: u64,
     pub(super) cpu_misses: u64,
     pub(super) cpu_nanos: u64,
+    /// Host misses the host cache did not hold, read from the mapping.
+    pub(super) cpu_mapped: u64,
 }
 
 /// A pinned host buffer and its device twin. Host writes are copied up
@@ -502,6 +504,8 @@ impl Experts {
             if let Some((s, regions)) = host.hold(block, e) {
                 held.push((e, regions));
                 slots.push(s);
+            } else {
+                self.stats.cpu_mapped += 1;
             }
         }
         (HostSource::new(&self.blocks[block].set, held), slots)

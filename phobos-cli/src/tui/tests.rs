@@ -79,6 +79,7 @@ fn loaded() -> Snapshot {
         expert_prefetch_hits: 0,
         expert_cpu_misses: 0,
         expert_cpu_nanos: 0,
+        expert_cpu_mapped: 0,
     }));
     meter.set_device_memory(Some(DeviceMemory {
         free_bytes: 5 << 30,

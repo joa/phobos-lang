@@ -233,13 +233,14 @@ fn main() -> Result<()> {
 
     let load_start = Instant::now();
     let gguf = Gguf::open(&args.model)?;
-    // The model label llama-bench prints. The quantization is the type of
-    // the largest tensor, since norms are always f32.
-    let quantization = gguf
-        .tensors()
-        .iter()
-        .max_by_key(|t| t.numel())
-        .map_or("?", |t| t.ggml_type.name());
+    // The model label llama-bench prints. The quantization is the type that
+    // holds the most weights: a mixed file's largest single tensor is often
+    // its embedding, kept wider than the rest.
+    let mut by_type: std::collections::BTreeMap<&str, u64> = std::collections::BTreeMap::new();
+    for t in gguf.tensors() {
+        *by_type.entry(t.ggml_type.name()).or_default() += t.numel();
+    }
+    let quantization = by_type.into_iter().max_by_key(|&(_, n)| n).map_or("?", |(name, _)| name);
     let architecture = format!(
         "{} {:.1}B {quantization}",
         gguf.architecture()?,
@@ -337,6 +338,7 @@ fn main() -> Result<()> {
             // loop is pure decoding, as in llama-bench.
             feed(&model, &mut state, &tokens[..depth + 1], &args, backend.as_ref())?;
             let before = backend.cache_stats();
+            let faults = phobos_base::host::page_faults();
             let start = Instant::now();
             // The greedy fast path, which temperature-0 decoding takes. It is
             // fed fixed tokens regardless of what comes back.
@@ -347,8 +349,14 @@ fn main() -> Result<()> {
             state.release(backend.as_ref());
             rates.push(gen_tokens as f64 / secs);
             // A streamed model's decode rate follows its expert hit rate.
-            let hits = hit_rate(before, backend.cache_stats(), |s| (s.expert_hits, s.expert_misses));
-            eprintln!("  {test} rep {}/{}: {secs:.3} s{hits}", rep + 1, args.repetitions);
+            let after = backend.cache_stats();
+            let hits = hit_rate(before, after, |s| (s.expert_hits, s.expert_misses));
+            let host = host_misses(before, after, gen_tokens);
+            let faults = match (faults, phobos_base::host::page_faults()) {
+                (Some(a), Some(b)) => format!(", {:.0} page faults a token", (b - a) as f64 / gen_tokens as f64),
+                _ => String::new(),
+            };
+            eprintln!("  {test} rep {}/{}: {secs:.3} s{hits}{host}{faults}", rep + 1, args.repetitions);
         }
         rows.push((test, rates));
     }
@@ -375,9 +383,10 @@ fn main() -> Result<()> {
         );
         if stats.expert_cpu_misses > 0 {
             println!(
-                "host misses: {}, {:.0} us each",
+                "host misses: {}, {:.0} us each, {} read from the file",
                 stats.expert_cpu_misses,
-                stats.expert_cpu_nanos as f64 / 1e3 / stats.expert_cpu_misses as f64
+                stats.expert_cpu_nanos as f64 / 1e3 / stats.expert_cpu_misses as f64,
+                stats.expert_cpu_mapped
             );
         }
         if stats.expert_prefetches > 0 {
@@ -409,6 +418,25 @@ fn hit_rate(
         return String::new();
     }
     format!(", {:.1}% expert hits", 100.0 * hits as f64 / (hits + misses) as f64)
+}
+
+/// The host misses between two readings of `tokens` decode steps, as a
+/// suffix for a progress line: how many a token, their time each and how
+/// many were read from the file. Nothing when there were none.
+fn host_misses(before: Option<CacheStats>, after: Option<CacheStats>, tokens: usize) -> String {
+    let (Some(before), Some(after)) = (before, after) else {
+        return String::new();
+    };
+    let misses = after.expert_cpu_misses - before.expert_cpu_misses;
+    if misses == 0 {
+        return String::new();
+    }
+    format!(
+        ", {:.1} host misses a token at {:.0} us, {:.0}% from the file",
+        misses as f64 / tokens as f64,
+        (after.expert_cpu_nanos - before.expert_cpu_nanos) as f64 / 1e3 / misses as f64,
+        100.0 * (after.expert_cpu_mapped - before.expert_cpu_mapped) as f64 / misses as f64
+    )
 }
 
 /// A deterministic spread of valid token ids from an xorshift generator.

@@ -99,6 +99,9 @@ pub struct CacheStats {
     /// time they took. Zero unless that path is on.
     pub expert_cpu_misses: u64,
     pub expert_cpu_nanos: u64,
+    /// The host misses read from the model file's mapping, since the host
+    /// cache did not hold them.
+    pub expert_cpu_mapped: u64,
 }
 
 impl CacheStats {
