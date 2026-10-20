@@ -1,9 +1,13 @@
 // Plays the tiles-and-lanes scene in the browser: beat 1, 2 and 3, each handed to the next by a
 // camera move, forever. The frame loop runs only while 30% of the scene is on screen in a visible
 // tab. Under reduced motion nothing moves and the beats show their settled frames side by side, as
-// without JavaScript. The pills jump to a beat, which then plays twice before the loop moves on.
+// without JavaScript. The pills jump to a beat, which then plays twice before the loop moves on. The
+// bodies behind the scene (backdrop.ts) follow the same clock, and keep orbiting and turning across
+// beats and transitions.
 
 import { clamp, easeInOut } from "../../../lib/figure/math"
+import { axisSpeed, beatPose, lerpPose, orbitSpeed, START_MOTION, type Motion, type Pose } from "./backdrop"
+import { BackdropCanvas } from "./backdrop-canvas"
 import { lerpCamera, lerpView, type Camera, type View } from "./camera"
 import type { SceneData } from "./data"
 import { mixedBeat } from "./mixed"
@@ -55,6 +59,10 @@ interface Transition {
 export class TilesLanesPlayer {
   #root: HTMLElement
   #stages: Record<BeatName, Stage>
+  #backdrop: { element: HTMLElement; canvas: BackdropCanvas } | null = null
+  // Never reset: the bodies' orbits and which way they point, at the speeds each pose gives them, and
+  // the clock that turns the bodies.
+  #motion: Motion = { ...START_MOTION }
   #reducedMotion = matchMedia("(prefers-reduced-motion: reduce)")
   #current: BeatName = "tiles"
   #timeMs = 0
@@ -72,6 +80,11 @@ export class TilesLanesPlayer {
       lanes: this.#stage(lanesBeat(data.lanes), data.lanesCode.marks),
       mixed: this.#stage(mixedBeat(data.mixed), data.mixedCode.marks),
     }
+    const backdrop = root.closest(".tl-scene")?.querySelector<HTMLElement>(".tl-backdrop")
+    const bodies = backdrop?.querySelector<HTMLCanvasElement>(".tl-bodies-canvas")
+    const outline = backdrop?.querySelector<HTMLCanvasElement>(".tl-outline-canvas")
+    if (backdrop && bodies && outline)
+      this.#backdrop = { element: backdrop, canvas: new BackdropCanvas(backdrop, bodies, outline) }
   }
 
   start(): void {
@@ -131,6 +144,7 @@ export class TilesLanesPlayer {
   #applyMotionPreference(): void {
     // Live, the moving paths are drawn on the canvas; settled, in the SVG: either way from scratch.
     for (const stage of Object.values(this.#stages)) stage.cameraKey = ""
+    this.#backdrop?.element.toggleAttribute("data-live", this.#isLive)
     if (this.#isLive) {
       this.#root.setAttribute("data-live", "")
       this.#current = "tiles"
@@ -182,6 +196,12 @@ export class TilesLanesPlayer {
     this.#frameId = 0
     const dtMs = this.#lastFrameMs === null ? 0 : clamp(nowMs - this.#lastFrameMs, 0, MAX_FRAME_DELTA_MS)
     this.#lastFrameMs = nowMs
+    const pose = this.#pose()
+    this.#motion = {
+      orbitRad: this.#motion.orbitRad + dtMs * orbitSpeed(pose),
+      axisRad: this.#motion.axisRad + dtMs * axisSpeed(pose),
+      clockMs: this.#motion.clockMs + dtMs,
+    }
     this.#advance(dtMs)
     this.#renderPlaying()
     this.#frameId = requestAnimationFrame(now => this.#onFrame(now))
@@ -212,6 +232,7 @@ export class TilesLanesPlayer {
   }
 
   #renderPlaying(): void {
+    this.#backdrop?.canvas.draw(this.#pose(), this.#motion)
     const transition = this.#transition
     if (!transition) {
       const stage = this.#stages[this.#current]
@@ -257,6 +278,16 @@ export class TilesLanesPlayer {
       incoming
     )
     this.#setProgress(to, 0)
+  }
+
+  // The bodies' pose: the playing beat's, or in a transition one that glides from where the outgoing
+  // beat leaves them to where the incoming one starts.
+  #pose(): Pose {
+    const transition = this.#transition
+    if (!transition) return beatPose(this.#current, this.#timeMs)
+    const p = clamp(transition.elapsedMs / this.#transitionMs(transition), 0, 1)
+    const from = beatPose(transition.from, this.#stages[transition.from].beat.durationMs)
+    return lerpPose(from, beatPose(transition.to, 0), easeInOut(p))
   }
 
   #showActive(name: BeatName, force = false): void {
