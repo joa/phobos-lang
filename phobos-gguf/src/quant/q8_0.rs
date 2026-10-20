@@ -83,16 +83,21 @@ pub fn pack(qs: &[i8], scales: &[f32], k: usize, n: usize) -> Result<Packed> {
 /// units.
 pub fn units(bytes: &[u8]) -> Vec<u8> {
     assert!(bytes.len().is_multiple_of(UNIT_BYTES), "{} bytes of Q8_0 are not whole units", bytes.len());
-    let mut out = Vec::with_capacity(bytes.len());
-    for unit in bytes.chunks_exact(UNIT_BYTES) {
-        for block in unit.chunks_exact(BLOCK_BYTES) {
-            out.extend_from_slice(&block[..2]);
-        }
-        for block in unit.chunks_exact(BLOCK_BYTES) {
-            out.extend_from_slice(&block[2..]);
-        }
+    let mut out = vec![0; bytes.len()];
+    for (unit, into) in bytes.chunks_exact(UNIT_BYTES).zip(out.chunks_exact_mut(UNIT_BYTES)) {
+        unit_into(unit, into);
     }
     out
+}
+
+/// One unit of [`units`]: eight file blocks into `out`, both
+/// [`UNIT_BYTES`] long.
+pub fn unit_into(unit: &[u8], out: &mut [u8]) {
+    let (scales, quants) = out.split_at_mut(2 * UNIT / BLOCK);
+    for ((block, scale), qs) in unit.chunks_exact(BLOCK_BYTES).zip(scales.chunks_exact_mut(2)).zip(quants.chunks_exact_mut(BLOCK)) {
+        scale.copy_from_slice(&block[..2]);
+        qs.copy_from_slice(&block[2..]);
+    }
 }
 
 /// Quantizes one block of [`BLOCK`] activations to int8 and returns the

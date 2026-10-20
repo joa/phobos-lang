@@ -103,7 +103,7 @@ impl Source for GroupedCopy<'_> {
         let (per, plane) = (s.grouped_bytes(), s.grouped_scales());
         Weight::Grouped {
             bytes: &self.bytes[i][e * per..(e + 1) * per],
-            block_bytes: s.quant().device_block_bytes(),
+            block_bytes: s.unit_bytes(),
             nb: s.blocks_per_row(),
             scales: &self.scales[i][e * plane..(e + 1) * plane],
         }
@@ -162,22 +162,44 @@ fn main() -> Result<()> {
         let x: Vec<f32> = (0..d).map(|_| next()).collect();
         let mut out = vec![0.0f32; d];
         let calls = 200;
-        for gap_us in [0, 400] {
-            for n in 1..=4 {
-                let mut took = 0.0;
-                for i in 0..calls {
-                    let misses: Vec<(usize, f32)> = (0..n).map(|k| ((7 * (i * n + k)) % moe.n_expert, 1.0)).collect();
-                    let started = Instant::now();
-                    simd::experts_row(&grouped, &misses, &x, &mut out)?;
-                    took += started.elapsed().as_secs_f64();
-                    let idle = Instant::now();
-                    while idle.elapsed().as_micros() < gap_us {
-                        std::hint::spin_loop();
+        for (label, source) in [("grouped", &grouped as &dyn Source), ("file", &*set as &dyn Source)] {
+            for gap_us in [0, 400] {
+                for n in [1, 4] {
+                    let mut took = 0.0;
+                    let faults = phobos_base::host::page_faults();
+                    for i in 0..calls {
+                        let misses: Vec<(usize, f32)> = (0..n).map(|k| ((7 * (i * n + k)) % moe.n_expert, 1.0)).collect();
+                        let started = Instant::now();
+                        simd::experts_row(&source, &misses, &x, &mut out)?;
+                        took += started.elapsed().as_secs_f64();
+                        let idle = Instant::now();
+                        while idle.elapsed().as_micros() < gap_us {
+                            std::hint::spin_loop();
+                        }
                     }
+                    let faults = phobos_base::host::page_faults().zip(faults).map_or(0, |(a, b)| a - b);
+                    println!(
+                        "{label}: {n} misses of one row, {gap_us} us apart: {:.0} us a call, {:.0} faults a call",
+                        took * 1e6 / calls as f64,
+                        faults as f64 / calls as f64
+                    );
                 }
-                println!("{n} misses of one row, {gap_us} us apart: {:.0} us a call", took * 1e6 / calls as f64);
             }
         }
+
+        // Re-laying one expert into the grouped layout, as the host cache
+        // writes a slot.
+        let mut bytes: Vec<Vec<u8>> = Stack::ALL.iter().map(|&s| vec![0u8; set.stack(s).grouped_bytes()]).collect();
+        let mut planes: Vec<Vec<u16>> = Stack::ALL.iter().map(|&s| vec![0u16; set.stack(s).grouped_scales()]).collect();
+        let count = 64;
+        let started = Instant::now();
+        for e in 0..count {
+            for (i, &stack) in Stack::ALL.iter().enumerate() {
+                set.stack(stack).grouped_into(e, &mut bytes[i]);
+                set.stack(stack).grouped_scales_into(e, &mut planes[i]);
+            }
+        }
+        println!("re-laying an expert: {:.0} us", started.elapsed().as_secs_f64() * 1e6 / count as f64);
 
         // The reference decoder: one expert, one row, one thread.
         let started = Instant::now();

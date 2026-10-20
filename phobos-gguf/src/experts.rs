@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::quant::grouped::{group_rows_into, grouped_len};
-use crate::quant::{Q8_0_UNIT, Q8_0_UNIT_BYTES, Quant, q8_0_units};
+use crate::quant::grouped::{RAW_GROUP, group_rows_into, grouped_len};
+use crate::quant::{Q8_0_UNIT, Q8_0_UNIT_BYTES, Quant, q8_0_unit_into};
 use crate::{Gguf, Window};
 
 /// One `[count, n, k]` quantized tensor: `count` experts' `[n, k]` matrices
@@ -72,7 +72,7 @@ impl ExpertStack {
 
     /// The unit the device slabs and the host kernels read an expert in,
     /// as elements and bytes. A K-quant's unit is one block at its device
-    /// stride. Q8_0's is eight file blocks re-laid ([`q8_0_units`]), since
+    /// stride. Q8_0's is eight file blocks re-laid ([`crate::quant::q8_0_units`]), since
     /// the kernels take 256 elements at a time with sixteen-aligned loads.
     pub fn unit(&self) -> (usize, usize) {
         match self.quant {
@@ -162,25 +162,25 @@ impl ExpertStack {
 
     /// Expert `e` in the grouped layout, into a buffer of
     /// [`ExpertStack::grouped_bytes`]: each block trimmed to its device
-    /// window, or Q8_0's re-laid into units, then rows regrouped by eights.
-    /// Padding rows past `n` are not written.
+    /// window, or Q8_0's re-laid into units, with rows regrouped by eights.
+    /// Each unit goes straight to its place. Padding rows past `n` are not
+    /// written.
     pub fn grouped_into(&self, e: usize, out: &mut [u8]) {
-        let nb = self.blocks_per_row();
-        let bytes = self.expert(e);
-        if self.quant == Quant::Q8_0 {
-            return group_rows_into(&q8_0_units(bytes), self.n, nb, Q8_0_UNIT_BYTES, out);
+        let (nb, unit, file_unit) = (self.blocks_per_row(), self.unit_bytes(), self.file_unit_bytes());
+        assert_eq!(out.len(), self.grouped_bytes(), "grouped buffer is the wrong size");
+        let (skip, _) = self.quant.device_block();
+        for (j, row) in self.expert(e).chunks_exact(nb * file_unit).enumerate() {
+            let (group, in_group) = (j / RAW_GROUP, j % RAW_GROUP);
+            for (b, src) in row.chunks_exact(file_unit).enumerate() {
+                let at = ((group * nb + b) * RAW_GROUP + in_group) * unit;
+                let dst = &mut out[at..at + unit];
+                if self.quant == Quant::Q8_0 {
+                    q8_0_unit_into(src, dst);
+                } else {
+                    dst.copy_from_slice(&src[skip..skip + unit]);
+                }
+            }
         }
-        let (skip, dev) = self.quant.device_block();
-        let block_bytes = self.quant.spec().block_bytes;
-        if skip == 0 && dev == block_bytes {
-            return group_rows_into(bytes, self.n, nb, dev, out);
-        }
-        let trimmed: Vec<u8> = bytes
-            .chunks_exact(block_bytes)
-            .flat_map(|block| &block[skip..skip + dev])
-            .copied()
-            .collect();
-        group_rows_into(&trimmed, self.n, nb, dev, out);
     }
 }
 
