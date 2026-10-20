@@ -13,6 +13,12 @@ OPTIONS:
                       device memory for a streamed model's expert cache,
                       2g, 1500m or bytes; default what the resident weights
                       leave, less a reserve. Ignored without experts
+      --max-ram SIZE  host memory for a streamed model's experts, 10g, 1500m
+                      or bytes, refused when the host has less available;
+                      default all of them when they fit beside a reserve of
+                      a quarter of the host's memory, else what does. The
+                      rest are read from the file as the system pages it.
+                      Ignored without experts
       --ctx TOKENS    the most tokens of context to serve, a longer prompt
                       being refused; default what fits on the device after
                       the weights, up to the trained length. GGUF only

@@ -111,7 +111,8 @@ prints each step.
 ## The device backend: streamed experts
 
 The mixture-of-experts path (`qwen35moe`) keeps a model's experts in a
-pinned host mirror and a device cache; see `docs/MOE-QWEN36-35B-A3B.md` for
+pinned host cache as large as `--max-ram` allows, the file mapping behind
+it, and a device cache; see `docs/MOE-QWEN36-35B-A3B.md` for
 the design and every measurement behind these defaults, on an RTX 2080
 SUPER whose PCIe link runs at x8. The two on by default won the prompt pass
 there; the two opt-ins lost and exist for a wider bus or a faster host.

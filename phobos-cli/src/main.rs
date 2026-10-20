@@ -47,6 +47,7 @@ const VALUED: &[&str] = &[
     "--listen",
     "--api-key",
     "--expert-cache",
+    "--max-ram",
     "--ctx",
     "--batch",
     "--prefill-thinking",
@@ -135,6 +136,16 @@ fn sampling(args: &cli::Args) -> Result<SampleConfig> {
     })
 }
 
+/// `--max-ram`, refused when the host does not have that much available.
+fn max_ram(args: &cli::Args) -> Result<Option<u64>> {
+    let Some(size) = args.value("--max-ram")? else {
+        return Ok(None);
+    };
+    let bytes = phobos_base::cli::parse_size(size).context("--max-ram")?;
+    phobos_base::host::ensure_available(bytes).context("--max-ram")?;
+    Ok(Some(bytes))
+}
+
 fn source(args: &cli::Args) -> Result<Source> {
     match (args.value("--gguf")?, args.value("--onnx")?) {
         (Some(path), None) => {
@@ -143,6 +154,7 @@ fn source(args: &cli::Args) -> Result<Source> {
                 .map(phobos_base::cli::parse_size)
                 .transpose()
                 .context("--expert-cache")?;
+            let host_memory_bytes = max_ram(args)?;
             let context_tokens = args.parse::<usize>("--ctx")?;
             let prompt_batch = match args.value("--batch")? {
                 None | Some("auto") => None,
@@ -155,6 +167,7 @@ fn source(args: &cli::Args) -> Result<Source> {
                 path.into(),
                 phobos_gguf::runtime::LoadOptions {
                     expert_cache_bytes,
+                    host_memory_bytes,
                     context_tokens,
                     prompt_batch,
                 },
@@ -207,6 +220,12 @@ OPTIONS:
                       device memory for a streamed model's expert cache,
                       2g, 1500m or bytes; default what the resident weights
                       leave, less a reserve. Ignored without experts
+      --max-ram SIZE  host memory for a streamed model's experts, 10g, 1500m
+                      or bytes, refused when the host has less available;
+                      default all of them when they fit beside a reserve of
+                      a quarter of the host's memory, else what does. The
+                      rest are read from the file as the system pages it.
+                      Ignored without experts
       --ctx TOKENS    the most tokens of context to serve, a longer prompt
                       being refused; default what fits on the device after
                       the weights, up to the trained length. GGUF only

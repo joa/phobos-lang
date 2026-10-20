@@ -46,6 +46,9 @@ struct Args {
     /// A cap on a streamed model's expert cache, as `phobos-cli`'s
     /// `--expert-cache`.
     expert_cache_bytes: Option<u64>,
+    /// A cap on the host memory a streamed model's experts are held in, as
+    /// `phobos-cli`'s `--max-ram`.
+    host_memory_bytes: Option<u64>,
 }
 
 fn print_usage() {
@@ -69,6 +72,10 @@ OPTIONS:
       --expert-cache SIZE
                         device memory for a streamed model's expert cache
                         (2g, 1500m, bytes); default, what the weights leave
+      --max-ram SIZE    host memory for a streamed model's experts, refused
+                        when the host has less available; default all of
+                        them when they fit beside a quarter of the host's
+                        memory, else what does
   -h, --help            print this message
 
   -p and -n take a comma-separated list, and repeat, so -p 128,512 and
@@ -149,6 +156,7 @@ fn parse_args() -> Result<Args> {
         ubatch: DEFAULT_UBATCH,
         warmup: true,
         expert_cache_bytes: None,
+        host_memory_bytes: None,
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -164,6 +172,11 @@ fn parse_args() -> Result<Args> {
             "--no-warmup" => args.warmup = false,
             "--expert-cache" => {
                 args.expert_cache_bytes = Some(phobos_base::cli::parse_size(&next("--expert-cache")?)?)
+            }
+            "--max-ram" => {
+                let bytes = phobos_base::cli::parse_size(&next("--max-ram")?)?;
+                phobos_base::host::ensure_available(bytes).context("--max-ram")?;
+                args.host_memory_bytes = Some(bytes);
             }
             "-h" | "--help" => {
                 print_usage();
@@ -236,6 +249,9 @@ fn main() -> Result<()> {
     let backend = make_backend(&gguf.quants())?;
     if let Some(bytes) = args.expert_cache_bytes {
         backend.limit_expert_cache(bytes as usize)?;
+    }
+    if let Some(bytes) = args.host_memory_bytes {
+        backend.limit_host_memory(bytes as usize)?;
     }
     let load_millis = load_start.elapsed().as_secs_f64() * 1e3;
 

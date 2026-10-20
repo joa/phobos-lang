@@ -22,7 +22,7 @@ use cust::stream::StreamWaitEventFlags;
 
 use super::super::kernels::{MOE_COMBINE_TN, MOE_QDOT_TN, MOE_USED, moe_combine_src, moe_gateup_src, moe_qdot_src, moe_topk_src};
 use super::super::{DeviceBackend, Plane};
-use super::mirror::MirrorSource;
+use super::host_cache::HostSource;
 use super::{Experts, MAX_ROWS, NONE};
 use crate::backend::{Backend, Buf, Moe};
 use crate::experts::Stack;
@@ -293,18 +293,20 @@ impl DeviceBackend {
         self.moe_host_decode && rows == 1 && simd::supports(&*b.set)
     }
 
-    /// Starts the block's decode misses on the host team, reading the
-    /// mirror and weighting by the router. Joins the last block's first.
+    /// Starts the block's decode misses on the host team, reading the host
+    /// cache or the mapping and weighting by the router. Joins the last block's first.
     fn start_host_misses(&self, experts: &mut Experts, block: usize, misses: &[Miss]) -> Result<()> {
         experts.join_started()?;
         experts.stats.cpu_misses += misses.len() as u64;
-        let b = &mut experts.blocks[block];
-        let weights = &b.weights.host()[..MOE_USED];
+        let weights = &experts.blocks[block].weights.host()[..MOE_USED];
         let jobs = misses.iter().map(|m| (m.expert, weights[m.rank])).collect();
-        // SAFETY: the mirror and the set live as long as the cache, which
-        // joins a started row before it drops.
-        let source = unsafe { std::mem::transmute::<MirrorSource<'_>, MirrorSource<'static>>(b.mirror.source(&b.set)) };
-        experts.started = b.handoff.start(source, jobs)?;
+        let (source, holds) = experts.host_source(block, misses.iter().map(|m| m.expert));
+        // SAFETY: the held slots stay written until `join_started` lets go
+        // of them, and the cache and the set outlive it: the cache joins a
+        // started row before it drops.
+        let source = unsafe { std::mem::transmute::<HostSource<'_>, HostSource<'static>>(source) };
+        let started = experts.blocks[block].handoff.start(source, jobs)?;
+        (experts.started, experts.started_holds) = (started, holds);
         Ok(())
     }
 
