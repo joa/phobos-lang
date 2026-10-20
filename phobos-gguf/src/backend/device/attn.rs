@@ -118,7 +118,12 @@ impl DeviceBackend {
         let (rows, heads, nk) = (spec.rows, spec.n_head, spec.total());
         let (r, n) = (rows as i64, nk as i64);
         let (qw, kw, sw) = ((heads * spec.head_dim) as i64, spec.kv_width() as i64, (heads * nk) as i64);
-        let scores = self.alloc(rows * heads * nk)?;
+        // The scores grow with depth and the pool reuses only a buffer of the
+        // same length, so sized exactly, every pass of a prompt would leave
+        // one behind until the card pages. Rounded up, within the budget the
+        // caller checked, a prompt's passes share a few.
+        let score_len = (rows * heads * nk).next_power_of_two().min(ATTN_TC_SCORE_BYTES / size_of::<f32>());
+        let scores = self.alloc(score_len)?;
         let sums = self.alloc(rows * heads)?;
         let result = self.with_kernel(
             &self.attn_tc,
