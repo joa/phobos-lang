@@ -1,9 +1,12 @@
-// Expert streaming. All of a block's experts live in a pinned host mirror,
-// and some of them also live in device cache slots.
+// Expert streaming. A model's experts live in the file mapping, as many of
+// them as the host budget buys in a pinned host cache in the slabs' layout
+// (`host_cache.rs`), all of them where they fit, and some of them in device
+// cache slots.
 //
-// A decode step computes its misses on the host from the mirror
-// (`handoff.rs`). A prompt pass copies its misses into slots at the block's
-// sync point, or runs some of them on the host instead (`grouped.rs`).
+// A decode step computes its misses on the host, from the host cache or
+// the mapping (`handoff.rs`). A prompt pass copies its misses into slots at the
+// block's sync point, or runs some of them on the host instead
+// (`grouped.rs`).
 //
 // There is one slab per stack and format, since a file can mix formats per
 // block and a slab has one row stride. Each slab is `[slots * n, rb]` in the
@@ -15,8 +18,8 @@
 mod grouped;
 mod handoff;
 mod headroom;
+mod host_cache;
 mod mapped;
-mod mirror;
 mod op;
 
 use std::collections::HashMap;
@@ -38,7 +41,7 @@ use crate::simd::StartedRow;
 pub use grouped::moe_qgemm_src;
 use handoff::Handoff;
 use mapped::Mapped;
-use mirror::Mirror;
+use host_cache::{AHEAD, HostCache, HostSource, Submit, Written};
 
 /// Upper bound on a slab's size, since the decode matvec indexes in 32 bits.
 const SLAB_LIMIT: usize = 1 << 31;
@@ -49,6 +52,17 @@ pub(crate) const MAX_ROWS: usize = 1024;
 
 const NONE: u32 = u32::MAX;
 
+/// Host memory pinned experts leave to everything else, at least: their
+/// pages stay locked for the session, so the rest of the system cannot
+/// reclaim them as it grows.
+const HOST_RESERVE_BYTES: u64 = 4 << 30;
+
+/// The share of the host's memory left to everything else, when larger.
+const HOST_RESERVE_SHARE: u64 = 4;
+
+/// The fewest experts the host cache holds, whatever the budget.
+const HOST_SLOTS_MIN: usize = 256;
+
 pub(super) struct Experts {
     per_block: usize,
     blocks: Vec<BlockExperts>,
@@ -58,6 +72,8 @@ pub(super) struct Experts {
     budget: Option<(usize, usize)>,
     /// The user's cap on the cache, in bytes.
     pub(super) limit: Option<usize>,
+    /// The user's cap on the host memory the experts are held in, in bytes.
+    pub(super) host_limit: Option<usize>,
     /// The iota row the top-k carries, by expert count.
     iota: HashMap<usize, DeviceBuffer<f32>>,
     /// Routing step counter, stamped on a slot when it is used. It advances
@@ -71,10 +87,15 @@ pub(super) struct Experts {
     host_share: f32,
     /// Misses to copy into slots later, as (block, expert, routing tick).
     refills: Vec<(usize, usize, u64)>,
-    /// The last block's misses, still running on the host.
+    /// The last block's misses, still running on the host, and the host
+    /// cache slots they read.
     started: Option<StartedRow>,
+    started_holds: Vec<usize>,
     /// The most slots a block may have while the card is short of memory.
     per_block_cap: Option<usize>,
+
+    /// The experts' host cache, made at the first layout.
+    host: Option<HostCache>,
     /// The most slots a block the budget buys, which a grown cache returns to.
     most_per_block: usize,
     /// Passes since free memory was last queried.
@@ -125,7 +146,6 @@ impl<T: DeviceCopy + Default> Staged<T> {
 
 struct BlockExperts {
     set: Arc<ExpertSet>,
-    mirror: Mirror,
     /// `expert -> slot within the block`, `NONE` where not resident.
     slot_of: Vec<u32>,
     /// Per slot: the expert held and the tick it was last used at.
@@ -250,6 +270,7 @@ impl Experts {
             slabs: None,
             budget: None,
             limit: None,
+            host_limit: None,
             grouped: None,
             host_share: grouped::HOST_SHARE_START,
             iota: HashMap::new(),
@@ -257,7 +278,9 @@ impl Experts {
             stats: ExpertStats::default(),
             refills: Vec::new(),
             started: None,
+            started_holds: Vec::new(),
             per_block_cap: None,
+            host: None,
             most_per_block: 0,
             since_checked: 0,
         }
@@ -313,19 +336,36 @@ impl Experts {
         let Some(victim) = b.victim(tick) else {
             return Ok(None);
         };
-        self.fill(block, e, victim, tick, stream)?;
+        self.fill(block, e, victim, tick, stream, None)?;
         Ok(Some(victim))
     }
 
-    /// Copies expert `e` into slot `victim` of `block` on `stream`.
-    fn fill(&mut self, block: usize, e: usize, victim: usize, tick: u64, stream: &Stream) -> Result<()> {
+    /// Tells the host cache which of `ids` of `block` the next fills will
+    /// be, the ones not resident, so it can write the ones it lacks ahead.
+    /// Call once the ids are stamped, so no fill evicts another of them.
+    fn plan_fills(&mut self, block: usize, ids: &[usize]) {
+        let slot_of = &self.blocks[block].slot_of;
+        if let Some(host) = &mut self.host {
+            host.plan(block, ids.iter().copied().filter(|&e| slot_of[e] == NONE));
+        }
+    }
+
+    /// Copies expert `e` into slot `victim` of `block` on `stream`, from
+    /// host cache slot `from`, or from the one holding it, written now if
+    /// none does.
+    fn fill(&mut self, block: usize, e: usize, victim: usize, tick: u64, stream: &Stream, from: Option<usize>) -> Result<()> {
         let slabs = self.slabs.as_ref().expect("laid out");
+        let host = self.host.as_mut().expect("made with the slabs");
+        let from = match from {
+            Some(s) => s,
+            None => host.ready(block, e)?,
+        };
+        let src = host.regions(from, block);
         let b = &mut self.blocks[block];
         let (old, _) = b.held[victim];
         if old != NONE {
             b.slot_of[old as usize] = NONE;
         }
-        let src = b.mirror.expert(e);
         for (k, stack) in Stack::ALL.into_iter().enumerate() {
             let slab = &slabs[&(stack, b.set.stack(stack).quant())];
             let (bytes_at, d_at) = slab.at(b.base[k] + victim);
@@ -336,11 +376,13 @@ impl Experts {
                 slab.slot_bytes()
             );
             for (dst, (ptr, len)) in [(bytes_at, src[k]), (d_at, src[3 + k])] {
-                // SAFETY: the mirror is pinned and outlives the copy.
+                // SAFETY: the host cache is pinned, and a slot is not
+                // rewritten until its copies have run.
                 unsafe { copy_async(dst, ptr, len, stream)? };
                 self.stats.bytes += len as u64;
             }
         }
+        host.issued(from, stream)?;
         b.held[victim] = (e as u32, tick);
         b.slot_of[e] = victim as u32;
         b.prefetched[victim] = false;
@@ -365,11 +407,17 @@ impl Experts {
             let Some(victim) = self.blocks[block].victim(tick) else {
                 break;
             };
-            self.fill(block, e, victim, tick, stream)?;
+            self.fill(block, e, victim, tick, stream, None)?;
             self.blocks[block].prefetched[victim] = true;
             self.stats.prefetches += 1;
             filled.push(victim);
         }
+        self.arriving(block, filled, stream)
+    }
+
+    /// Records the event the copies into `filled` of `block` complete at;
+    /// see [`Experts::fetch`].
+    fn arriving(&mut self, block: usize, filled: Vec<usize>, stream: &Stream) -> Result<()> {
         if !filled.is_empty() {
             // Copies on one stream complete in order, so the newest event
             // covers every slot still arriving.
@@ -391,30 +439,93 @@ impl Experts {
     ///
     /// Issuing copies costs host time, so call this while the device is
     /// busy.
+    ///
+    /// A refill the host cache does not hold is written on its worker and
+    /// copied at a sync point after it is done. The slots in use at a sync
+    /// point are the last block's at most, whose refills are still with the
+    /// worker, so a late copy never lands in a slot a kernel reads.
     fn refill(&mut self, stream: &Stream) -> Result<()> {
+        let host = self.host.as_mut().expect("made with the slabs");
+        for written in host.written() {
+            if let Written { block, expert, slot, refill: Some(tick) } = written {
+                self.refill_from(block, expert, tick, slot, stream)?;
+            }
+        }
         for (block, expert, tick) in std::mem::take(&mut self.refills) {
-            self.fetch(block, [expert], 1, tick, stream)?;
+            if self.resident(block, expert) {
+                continue;
+            }
+            match self.host.as_mut().expect("as above").submit(block, expert, Some(tick))? {
+                Submit::Held(slot) => self.refill_from(block, expert, tick, slot, stream)?,
+                Submit::Queued => {}
+                Submit::Busy => self.fetch(block, [expert], 1, tick, stream)?,
+            }
         }
         Ok(())
+    }
+
+    /// Copies a refill from host cache slot `slot` into a device slot on
+    /// `stream`, as [`Experts::fetch`] would have, unless the expert arrived
+    /// meanwhile or no device slot is free.
+    fn refill_from(&mut self, block: usize, expert: usize, tick: u64, slot: usize, stream: &Stream) -> Result<()> {
+        if self.resident(block, expert) {
+            return Ok(());
+        }
+        let Some(victim) = self.blocks[block].victim(tick) else {
+            return Ok(());
+        };
+        self.fill(block, expert, victim, tick, stream, Some(slot))?;
+        self.blocks[block].prefetched[victim] = true;
+        self.stats.prefetches += 1;
+        self.arriving(block, vec![victim], stream)
     }
 }
 
 impl Experts {
-    /// Waits for any misses running on the host and counts their time.
+    /// Waits for any misses running on the host, counts their time and
+    /// lets go of the host cache slots they read.
     fn join_started(&mut self) -> Result<()> {
         if let Some(started) = self.started.take() {
             self.stats.cpu_nanos += started.join()?;
         }
+        let holds = std::mem::take(&mut self.started_holds);
+        self.release_holds(holds);
         Ok(())
+    }
+
+    /// Where the host kernels read `block`'s `experts`: the host cache slots
+    /// holding them, kept until [`Experts::release_holds`], else the mapping.
+    fn host_source(&mut self, block: usize, experts: impl IntoIterator<Item = usize>) -> (HostSource<'_>, Vec<usize>) {
+        let host = self.host.as_mut().expect("made with the slabs");
+        let (mut held, mut slots) = (Vec::new(), Vec::new());
+        for e in experts {
+            if let Some((s, regions)) = host.hold(block, e) {
+                held.push((e, regions));
+                slots.push(s);
+            }
+        }
+        (HostSource::new(&self.blocks[block].set, held), slots)
+    }
+
+    fn release_holds(&mut self, slots: Vec<usize>) {
+        if let Some(host) = &mut self.host {
+            for s in slots {
+                host.release(s);
+            }
+        }
     }
 }
 
 impl Experts {
     /// Drops every resident expert. Counters keep running. The caller has
-    /// synchronized the stream, so no copy is still filling a slot.
+    /// synchronized the stream, so no copy is still filling a slot. The host
+    /// cache keeps what it holds, which only decides how fast a fill is.
     pub(super) fn cool(&mut self) -> Result<()> {
         self.join_started()?;
         self.refills.clear();
+        if let Some(host) = &mut self.host {
+            host.settle()?;
+        }
         for b in &mut self.blocks {
             b.slot_of.fill(NONE);
             b.held.fill((NONE, 0));
@@ -428,8 +539,8 @@ impl Experts {
 }
 
 impl Drop for Experts {
-    /// Host misses still read a block's mirror, so join them before it is
-    /// freed.
+    /// Host misses still read the host cache or the mapping, so join them
+    /// before either is freed.
     fn drop(&mut self) {
         let _ = self.join_started();
     }
@@ -462,8 +573,8 @@ impl DeviceBackend {
         Ok(())
     }
 
-    /// Registers a block's experts and builds its mirror. The slabs are
-    /// laid out at the first `moe`, once every block has registered.
+    /// Registers a block's experts. The slabs and the host cache are laid out
+    /// at the first `moe`, once every block has registered.
     pub(super) fn register_experts(&self, key: &str, set: &Arc<ExpertSet>) -> Result<ExpertsBuf> {
         if let Some(&buf) = self.expert_keys.borrow().get(key) {
             return Ok(buf);
@@ -474,14 +585,12 @@ impl DeviceBackend {
         for stack in Stack::ALL {
             op::kernels(set.stack(stack).quant()).with_context(|| format!("streaming the experts of {key}"))?;
         }
-        let mirror = Mirror::build(set).with_context(|| format!("mirroring the experts of {key}"))?;
         experts.iota.entry(n_expert).or_insert_with(|| {
             DeviceBuffer::from_slice(&(0..n_expert).map(|i| i as f32).collect::<Vec<_>>()).expect("a few hundred floats")
         });
         let (table, d) = (MAX_ROWS * MOE_USED, set.gate.k());
         experts.blocks.push(BlockExperts {
             set: Arc::clone(set),
-            mirror,
             slot_of: vec![NONE; n_expert],
             held: Vec::new(),
             prefetched: Vec::new(),
@@ -568,6 +677,9 @@ impl DeviceBackend {
             b.held = vec![(NONE, 0); per_block];
             b.prefetched = vec![false; per_block];
         }
+        if experts.host.is_none() {
+            experts.host = Some(host_cache(experts, most)?);
+        }
         let total: usize = slabs.values().map(|s| s.bytes.len()).sum();
         experts.per_block = per_block;
         experts.slabs = Some(slabs);
@@ -587,4 +699,53 @@ impl DeviceBackend {
     pub(super) fn expert_stats(&self) -> ExpertStats {
         self.experts.borrow().stats
     }
+}
+
+/// The host bytes the experts may be held in, and where that came from:
+/// `limit` when the user set one, else what the host has available beside a
+/// reserve, the larger of [`HOST_RESERVE_BYTES`] and a [`HOST_RESERVE_SHARE`]
+/// of its memory.
+fn host_budget(limit: Option<usize>) -> (usize, String) {
+    let mib = |b: u64| b >> 20;
+    match (limit, phobos_base::host::memory()) {
+        (Some(limit), _) => (limit, "as asked".to_string()),
+        (None, Some(memory)) => {
+            let reserve = HOST_RESERVE_BYTES.max(memory.total_bytes / HOST_RESERVE_SHARE);
+            let room = memory.available_bytes.saturating_sub(reserve);
+            let why = format!("of {} MiB available, {} MiB held back", mib(memory.available_bytes), mib(reserve));
+            (usize::try_from(room).unwrap_or(usize::MAX), why)
+        }
+        (None, None) => (usize::MAX, "with the host's memory unknown".to_string()),
+    }
+}
+
+/// The host cache for `experts`' registered sets: as many slots as the
+/// budget buys, at least enough for a group of `per_block` fills, a token's
+/// refills and a row's host misses in flight together.
+fn host_cache(experts: &Experts, per_block: usize) -> Result<HostCache> {
+    let sets: Vec<Arc<ExpertSet>> = experts.blocks.iter().map(|b| Arc::clone(&b.set)).collect();
+    let slot_bytes = HostCache::slot_bytes(&sets);
+    let floor = HOST_SLOTS_MIN.max(2 * per_block + 2 * sets.len() + AHEAD + MOE_USED);
+    let (budget, why) = host_budget(experts.host_limit);
+    let slots = budget / slot_bytes;
+    if let Some(limit) = experts.host_limit {
+        ensure!(
+            slots >= floor,
+            "a host memory limit of {} MiB holds {slots} experts of this model; it takes at least {floor}, {} MiB",
+            limit >> 20,
+            (floor * slot_bytes) >> 20
+        );
+    }
+    let total: usize = sets.iter().map(|s| s.count()).sum();
+    let host = HostCache::new(sets, slots.max(floor))?;
+    phobos_base::log::emit(
+        phobos_base::log::Level::Info,
+        format_args!(
+            "expert host cache: {} of {total} experts, {} MiB pinned {why}{}",
+            host.slots(),
+            host.bytes() >> 20,
+            if host.complete() { "" } else { "; the rest are read from the file" }
+        ),
+    );
+    Ok(host)
 }

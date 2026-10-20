@@ -489,6 +489,13 @@ pub trait Backend {
         Ok(())
     }
 
+    /// Caps the host memory a streamed model's experts are held in at
+    /// `bytes`, applied before [`Backend::budget_streamed`]. Backends with no
+    /// expert cache ignore it.
+    fn limit_host_memory(&self, _bytes: usize) -> Result<()> {
+        Ok(())
+    }
+
     /// Empties the expert cache, so the next pass finds none of its experts
     /// resident. A benchmark calls this between repetitions, since routing is
     /// deterministic and a warm cache would hold exactly what the same pass

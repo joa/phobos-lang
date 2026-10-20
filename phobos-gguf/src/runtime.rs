@@ -108,6 +108,9 @@ pub struct LoadOptions {
     /// instead of everything the resident weights leave. Ignored by a model
     /// with no experts and by a backend with no cache.
     pub expert_cache_bytes: Option<u64>,
+    /// Host bytes for a streamed model's experts, instead of a share of
+    /// what the host has available. Ignored by a model with no experts.
+    pub host_memory_bytes: Option<u64>,
     /// The most tokens of context to serve, instead of what fits on the
     /// device after the weights and the reserve. Never above the trained
     /// length.
@@ -137,6 +140,9 @@ impl GgufModel {
         if let Some(bytes) = options.expert_cache_bytes {
             let bytes = usize::try_from(bytes).context("expert cache size")?;
             backend.limit_expert_cache(bytes)?;
+        }
+        if let Some(bytes) = options.host_memory_bytes {
+            backend.limit_host_memory(usize::try_from(bytes).context("host memory size")?)?;
         }
         let footprint = decoder.footprint(PROMPT_BATCH);
         let trained = decoder.context_length();

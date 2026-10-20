@@ -293,6 +293,7 @@ impl DeviceBackend {
 
             let ids: Vec<usize> = group.iter().map(|s| s.expert).collect();
             let tick = experts.step(block, &ids);
+            experts.plan_fills(block, &ids);
             let mut sched = [Vec::new(), Vec::new()];
             for seg in group {
                 let slot = experts
@@ -355,8 +356,10 @@ impl DeviceBackend {
             let started = Instant::now();
             let y_host = &mut scratch.y_host.as_mut_slice()[..rows * d];
             y_host.fill(0.0);
-            let b = &experts.blocks[block];
-            simd::experts_ffn(&b.mirror.source(&b.set), &host_jobs, &x_host, rows, y_host)?;
+            let (source, holds) = experts.host_source(block, host_jobs.iter().map(|j| j.expert));
+            let ran = simd::experts_ffn(&source, &host_jobs, &x_host, rows, y_host);
+            experts.release_holds(holds);
+            ran?;
             host_micros = started.elapsed().as_secs_f64() * 1e6;
             experts.stats.cpu_misses += host_jobs.len() as u64;
             experts.stats.cpu_nanos += (host_micros * 1e3) as u64;

@@ -520,7 +520,7 @@ fn default_threads() -> usize {
         .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| (n.get() / 2).max(1)))
 }
 
-fn pool() -> &'static rayon::ThreadPool {
+pub(crate) fn pool() -> &'static rayon::ThreadPool {
     POOL.get_or_init(|| {
         rayon::ThreadPoolBuilder::new()
             .num_threads(default_threads())

@@ -59,6 +59,11 @@ impl Backend for DeviceBackend {
         Ok(())
     }
 
+    fn limit_host_memory(&self, bytes: usize) -> Result<()> {
+        self.experts.borrow_mut().host_limit = Some(bytes);
+        Ok(())
+    }
+
     fn cool_expert_cache(&self) -> Result<()> {
         self.stream.synchronize()?;
         self.experts.borrow_mut().cool()

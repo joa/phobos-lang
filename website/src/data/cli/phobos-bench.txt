@@ -16,6 +16,10 @@ OPTIONS:
       --expert-cache SIZE
                         device memory for a streamed model's expert cache
                         (2g, 1500m, bytes); default, what the weights leave
+      --max-ram SIZE    host memory for a streamed model's experts, refused
+                        when the host has less available; default all of
+                        them when they fit beside a quarter of the host's
+                        memory, else what does
   -h, --help            print this message
 
   -p and -n take a comma-separated list, and repeat, so -p 128,512 and
