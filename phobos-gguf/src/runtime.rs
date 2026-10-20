@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use phobos_inference::{DeviceMemory, Model, ModelInfo, Session, Tokenizer};
 
 use crate::backend::Backend;
@@ -75,25 +75,29 @@ struct Tuned {
 }
 
 impl Batching {
-    /// `PHOBOS_PROMPT_BATCH` if set, else a tuner on a device backend unless
-    /// `PHOBOS_BATCH_TUNE` is off. The host reference is not worth tuning,
-    /// and has no card to key a record on.
-    fn new(gguf: &Gguf, decoder: &Decoder, backend: &dyn Backend) -> Batching {
-        let pinned = std::env::var("PHOBOS_PROMPT_BATCH").ok().and_then(|v| v.trim().parse().ok());
-        if let Some(rows) = pinned.filter(|&rows: &usize| rows > 0) {
-            return Batching::Fixed(rows);
+    /// `pinned`, else `PHOBOS_PROMPT_BATCH` if set, else a tuner on a device
+    /// backend unless `PHOBOS_BATCH_TUNE` is off. The host reference is not
+    /// worth tuning, and has no card to key a record on.
+    fn new(gguf: &Gguf, decoder: &Decoder, backend: &dyn Backend, pinned: Option<usize>) -> Result<Batching> {
+        let rows_max = if decoder.has_experts() { backend.moe_max_rows() } else { usize::MAX };
+        let from_env = || std::env::var("PHOBOS_PROMPT_BATCH").ok().and_then(|v| v.trim().parse().ok());
+        if let Some(rows) = pinned.or_else(from_env).filter(|&rows: &usize| rows > 0) {
+            ensure!(
+                rows <= rows_max,
+                "a prompt batch of {rows} is more than this model's mixture-of-experts pass takes, {rows_max}"
+            );
+            return Ok(Batching::Fixed(rows));
         }
         let device = backend.device_info().filter(|_| phobos_base::env::flag_on("PHOBOS_BATCH_TUNE"));
         let Some(device) = device else {
-            return Batching::Fixed(PROMPT_BATCH);
+            return Ok(Batching::Fixed(PROMPT_BATCH));
         };
-        let limit = if decoder.has_experts() { backend.moe_max_rows() } else { tune::MAX_BATCH };
-        let mut tuner = Tuner::new(limit);
+        let mut tuner = Tuner::new(rows_max.min(tune::MAX_BATCH));
         let record = tune::record_path(gguf.header(), &device);
         if let Some(path) = &record {
             tuner.load(path);
         }
-        Batching::Tuned(RefCell::new(Tuned { tuner, record, used: BTreeSet::new() }))
+        Ok(Batching::Tuned(RefCell::new(Tuned { tuner, record, used: BTreeSet::new() })))
     }
 }
 
@@ -108,6 +112,9 @@ pub struct LoadOptions {
     /// device after the weights and the reserve. Never above the trained
     /// length.
     pub context_tokens: Option<usize>,
+    /// The most positions one prompt pass covers. `None` tunes it on the
+    /// device, per depth of the context, unless the environment pins it.
+    pub prompt_batch: Option<usize>,
 }
 
 impl GgufModel {
@@ -126,7 +133,7 @@ impl GgufModel {
             Decoder::load(&gguf).with_context(|| format!("load '{architecture}' weights"))?;
         let backend = make_backend(&gguf.quants())?;
         check_fits(backend.as_ref(), &decoder)?;
-        let batching = Batching::new(&gguf, &decoder, backend.as_ref());
+        let batching = Batching::new(&gguf, &decoder, backend.as_ref(), options.prompt_batch)?;
         if let Some(bytes) = options.expert_cache_bytes {
             let bytes = usize::try_from(bytes).context("expert cache size")?;
             backend.limit_expert_cache(bytes)?;

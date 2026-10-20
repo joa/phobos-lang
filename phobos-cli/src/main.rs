@@ -48,6 +48,7 @@ const VALUED: &[&str] = &[
     "--api-key",
     "--expert-cache",
     "--ctx",
+    "--batch",
     "--prefill-thinking",
 ];
 
@@ -143,11 +144,19 @@ fn source(args: &cli::Args) -> Result<Source> {
                 .transpose()
                 .context("--expert-cache")?;
             let context_tokens = args.parse::<usize>("--ctx")?;
+            let prompt_batch = match args.value("--batch")? {
+                None | Some("auto") => None,
+                Some(size) => match size.parse::<usize>() {
+                    Ok(rows) if rows > 0 => Some(rows),
+                    _ => bail!("--batch takes a positive token count or auto, not {size:?}"),
+                },
+            };
             Ok(Source::Gguf(
                 path.into(),
                 phobos_gguf::runtime::LoadOptions {
                     expert_cache_bytes,
                     context_tokens,
+                    prompt_batch,
                 },
             ))
         }
@@ -201,6 +210,11 @@ OPTIONS:
       --ctx TOKENS    the most tokens of context to serve, a longer prompt
                       being refused; default what fits on the device after
                       the weights, up to the trained length. GGUF only
+      --batch SIZE    the most prompt tokens one forward pass covers, or
+                      auto (default): on the GPU, each depth of the context
+                      measures the sizes from 128 to 4096 on the passes a
+                      prompt makes anyway, and the ones that win are kept in
+                      the kernel cache for the next run. GGUF only
       --onnx DIR      run an ONNX export from DIR. A decoder.onnx beside a
                       decoder_with_past.onnx is the KV-cached engine; a
                       model.onnx is the full-recompute one
