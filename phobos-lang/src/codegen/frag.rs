@@ -1,5 +1,19 @@
 use super::*;
 
+/// A `[rows, 1]` column an accumulator's rows read: a shared tile, or the
+/// lane's own rows in registers (`RegLayout::MmaRows`).
+pub(super) enum RowCol<'c> {
+    Tile(MemVal<'c>),
+    Regs(Vec<Value<'c, 'c>>),
+}
+
+/// The lane's slot in a fragment-row column for element row half `di` of
+/// D fragment `i` in a warp patch `fnn` fragments wide: two rows a 16-row
+/// block, in `for_each_dfrag`'s order.
+pub(super) fn row_slot(i: usize, fnn: i64, di: i64) -> usize {
+    i / (fnn as usize * 2) * 2 + di as usize
+}
+
 /// An operand of the scaled dot. When it is a slice, `from` is the buffer
 /// it was sliced from and where it starts there, which is what is read: a
 /// slice taken each iteration has its offset rebuilt per load, and the
@@ -76,7 +90,7 @@ impl<'c> Codegen<'c> {
         block: &Block<'c>,
         fa: &FragAcc<'c>,
         op: BinOp,
-        col: &MemVal<'c>,
+        col: &RowCol<'c>,
     ) -> Result<Vec<Value<'c, 'c>>> {
         if fa.imma {
             bail!("internal: row scaling of an int8 fragment accumulator");
@@ -87,7 +101,10 @@ impl<'c> Codegen<'c> {
         let mut frags = fa.frags.clone();
         self.for_each_dfrag(block, (fm, fnn), m0, n0, |cg, i, elems| {
             for ([di, dj], [row, _]) in elems {
-                let c = cg.load_as(block, col.mem, &[*row, zero], cg.f32_t)?;
+                let c = match col {
+                    RowCol::Tile(t) => cg.load_as(block, t.mem, &[*row, zero], cg.f32_t)?,
+                    RowCol::Regs(vals) => vals[row_slot(i, fnn, *di)],
+                };
                 let e = cg.vec_extract(block, frags[i], &[*di, *dj], cg.f32_t)?;
                 let r = cg.push(block, cg.elem_arith(op, cg.f32_t, e, c)?)?;
                 frags[i] = cg.vec_insert(block, r, frags[i], &[*di, *dj])?;

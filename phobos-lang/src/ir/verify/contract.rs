@@ -64,7 +64,10 @@ impl Verifier<'_> {
                     for i in 1..n {
                         let generated =
                             matches!(ir.ty(ir.operand(op, i)), Type::Dist(d) if d.layout == RegLayout::Generated);
-                        if !(int8 && generated) {
+                        // A row scaling may read its column from the lanes.
+                        let rows = matches!(kind, OpKind::FragScale(_))
+                            && rows_of(ir.ty(ir.operand(op, 0))).as_ref() == Some(ir.ty(ir.operand(op, i)));
+                        if !(rows || int8 && generated) {
                             self.want_tiles(op, i..i + 1);
                         }
                     }
@@ -94,7 +97,7 @@ impl Verifier<'_> {
                         continue;
                     };
                     let ok = match ir.ty(v) {
-                        t @ Type::Dist(_) => t == out,
+                        t @ Type::Dist(_) => t == out || rows_of(out).as_ref() == Some(t),
                         Type::Tile(t) => t.static_shape().is_some_and(|s| {
                             s.len() == 2 && (s[0] == acc.m || s[0] == 1) && (s[1] == acc.n || s[1] == 1)
                         }),
@@ -122,8 +125,9 @@ impl Verifier<'_> {
                 }
                 let column = matches!(ir.ty(ir.result(op)), Type::Tile(t)
                     if t.space == Space::Shared && t.static_shape().as_deref() == Some(&[acc.m, 1]));
-                if !column {
-                    self.err(op, "result must be a shared [rows, 1] tile");
+                let rows = rows_of(ir.ty(ir.operand(op, 0))).as_ref() == Some(ir.ty(ir.result(op)));
+                if !column && !rows {
+                    self.err(op, "result must be a shared [rows, 1] tile or the fragments' rows");
                 }
             }
             OpKind::Generate => {
@@ -227,6 +231,17 @@ impl Verifier<'_> {
 }
 
 /// The fragments a value is typed as, if it is.
+/// The fragment-row column of f16-path fragments whose warps own whole
+/// rows, which is the only kind a column can sit beside in the lanes.
+fn rows_of(ty: &Type) -> Option<Type> {
+    let acc = mma_acc(ty).filter(|a| !a.imma && a.wn == 1)?;
+    Some(Type::Dist(crate::ir::DistType {
+        elem: crate::ir::Scalar::F32,
+        shape: vec![acc.m, 1],
+        layout: RegLayout::MmaRows { wm: acc.wm },
+    }))
+}
+
 fn mma_acc(ty: &Type) -> Option<crate::ir::MmaAcc> {
     match ty {
         Type::Dist(d) => d.mma_acc(),

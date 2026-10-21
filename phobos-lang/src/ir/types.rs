@@ -269,6 +269,12 @@ pub enum RegLayout {
     /// Nowhere: each read computes the elements it needs from a
     /// `Generate` op's block.
     Generated,
+    /// A `[rows, 1]` column held where the f16-path fragments of a
+    /// `wm x 1` warp grid hold those rows: each lane the two rows `g` and
+    /// `g + 8` of each of its warp's 16-row blocks, `g = lane / 4`, so the
+    /// four lanes of a quad hold the same values. Element `2 * block + half`
+    /// of a lane is row `16 * block + 8 * half + g` of its warp's rows.
+    MmaRows { wm: i64 },
 }
 
 /// A tile held in registers rather than in a buffer: a value, carried and
@@ -411,10 +417,19 @@ impl Type {
         }
     }
 
-    /// A `Blocked` register tile, as a sweep holds it.
+    /// A register tile: `Blocked` as a sweep holds it, or a column where
+    /// fragments hold its rows.
     pub fn regs(&self) -> Option<&DistType> {
         match self {
-            Type::Dist(d) if d.layout == RegLayout::Blocked => Some(d),
+            Type::Dist(d) if matches!(d.layout, RegLayout::Blocked | RegLayout::MmaRows { .. }) => Some(d),
+            _ => None,
+        }
+    }
+
+    /// The warps a fragment-row column's rows split over.
+    pub fn mma_rows(&self) -> Option<i64> {
+        match self {
+            Type::Dist(DistType { layout: RegLayout::MmaRows { wm }, .. }) => Some(*wm),
             _ => None,
         }
     }
@@ -487,6 +502,7 @@ impl fmt::Display for Type {
                     RegLayout::Blocked => write!(f, "regs<{}>[{}]", d.elem, dims.join(", "))?,
                     RegLayout::Gemm { k } => write!(f, "gemm<{}>[{}]/{k}", d.elem, dims.join(", "))?,
                     RegLayout::Generated => write!(f, "gen<{}>[{}]", d.elem, dims.join(", "))?,
+                    RegLayout::MmaRows { wm } => write!(f, "rows<{}>[{}]/{wm}", d.elem, dims.join(", "))?,
                 }
                 Ok(())
             }

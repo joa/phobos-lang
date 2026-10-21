@@ -7,7 +7,7 @@ use melior::{
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::{GemmPath, GemmScale};
-use crate::codegen::frag::SliceOrigin;
+use crate::codegen::frag::{RowCol, SliceOrigin};
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
@@ -83,7 +83,10 @@ impl<'c> Codegen<'c> {
             }
             OpKind::FragScale(bop) => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
-                let col = self.tile_ir(ir, ir.operand(op, 1))?;
+                let col = match ir.ty(ir.operand(op, 1)).mma_rows() {
+                    Some(_) => RowCol::Regs(self.regs_ir(ir.operand(op, 1))?.vals),
+                    None => RowCol::Tile(self.tile_ir(ir, ir.operand(op, 1))?),
+                };
                 let frags = self.frag_scale_raw(block, &fa, bop, &col)?;
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
@@ -111,8 +114,9 @@ impl<'c> Codegen<'c> {
             }
             OpKind::FragReduce(how) => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
-                let out = self.frag_reduce(block, &fa, how)?;
-                self.set_ir(ir.result(op), Lowered::Tile(out));
+                let to_regs = ir.ty(ir.result(op)).mma_rows().is_some();
+                let out = self.frag_reduce(block, &fa, how, to_regs)?;
+                self.set_ir(ir.result(op), out);
             }
             OpKind::FragDotScaled => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;

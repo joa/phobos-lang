@@ -53,6 +53,15 @@ fn flash_scores_ride_in_fragments() {
 }
 
 #[test]
+fn flash_row_statistics_ride_in_registers() {
+    // Both accumulators give each warp whole rows, so the running max and
+    // sum, the correction and the row sums stay in the lanes that hold
+    // those rows: no [64, 1] column reaches shared memory.
+    let mlir = emit_mlir_sync(&flash(64, 64), "sm_80");
+    assert!(!mlir.contains("64x1xf32"), "{mlir}");
+}
+
+#[test]
 fn scores_past_the_register_budget_stay_shared() {
     // At 128 keys a block a lane would hold 128 f32 of scores beside the 64
     // of the accumulator, over the budget: the scores stay a shared tile.

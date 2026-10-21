@@ -10,7 +10,10 @@ use anyhow::{Result, bail};
 use melior::dialect::{arith, memref, scf};
 use melior::ir::{Block, BlockLike, Region, RegionLike, Type, Value};
 
+use super::Lowered;
+use super::regs::RegTile;
 use crate::codegen::elemwise::Fused;
+use crate::codegen::frag::row_slot;
 use crate::codegen::{Codegen, FragAcc, MemVal, Reduce};
 use crate::ir::{self, Ir, OpId, Tree};
 
@@ -33,11 +36,16 @@ impl<'c> Codegen<'c> {
         };
         let (fm, fnn) = fa.warp_frags();
         let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
-        // Each leaf once: fragments by register, tiles as views.
+        // Each leaf once: fragments and fragment-row columns by register,
+        // tiles as views.
         let mut frags = BTreeMap::new();
+        let mut rows = BTreeMap::new();
         let mut tiles = BTreeMap::new();
         for (i, &v) in ir.operands(op).iter().enumerate() {
             match ir.ty(v) {
+                t @ ir::Type::Dist(_) if t.mma_rows().is_some() => {
+                    rows.insert(i, self.regs_ir(v)?.vals);
+                }
                 ir::Type::Dist(_) => {
                     frags.insert(i, self.frags_ir(v)?.frags);
                 }
@@ -54,7 +62,8 @@ impl<'c> Codegen<'c> {
         let vec_t = Type::vector(&[4], self.f32_t);
         self.for_each_dfrag(block, (fm, fnn), m0, n0, |cg, i, elems| {
             for (at, idx) in elems {
-                let fused = cg.frag_tree(block, ir, op, tree, &frags, &tiles, i, *at)?;
+                let leaves = Leaves { frags: &frags, rows: &rows, tiles: &tiles };
+                let fused = cg.frag_tree(block, ir, op, tree, &leaves, i, row_slot(i, fnn, at[0]), *at)?;
                 let v = cg.eval_fused(block, &fused, idx, &shape, 1, vec_t)?;
                 let v = cg.coerce(block, v, cg.f32_t)?;
                 out[i] = cg.vec_insert(block, v, out[i], at)?;
@@ -68,8 +77,9 @@ impl<'c> Codegen<'c> {
         Ok(fa)
     }
 
-    /// `tree` at one element: each fragment leaf its value there, each tile
-    /// leaf the tile, read where the element sits.
+    /// `tree` at one element: each fragment leaf its value there, each
+    /// fragment-row leaf its value at the element's row slot, each tile leaf
+    /// the tile, read where the element sits.
     #[allow(clippy::too_many_arguments)]
     fn frag_tree(
         &mut self,
@@ -77,19 +87,20 @@ impl<'c> Codegen<'c> {
         ir: &Ir,
         op: OpId,
         tree: &Tree,
-        frags: &BTreeMap<usize, Vec<Value<'c, 'c>>>,
-        tiles: &BTreeMap<usize, MemVal<'c>>,
+        leaves: &Leaves<'_, 'c>,
         frag: usize,
+        slot: usize,
         at: [i64; 2],
     ) -> Result<Fused<'c>> {
         let go = |cg: &mut Self, t: &Tree| -> Result<Box<Fused<'c>>> {
-            Ok(Box::new(cg.frag_tree(block, ir, op, t, frags, tiles, frag, at)?))
+            Ok(Box::new(cg.frag_tree(block, ir, op, t, leaves, frag, slot, at)?))
         };
         Ok(match tree {
-            Tree::Leaf(i) => match (frags.get(i), tiles.get(i)) {
-                (Some(f), _) => Fused::Scalar(self.vec_extract(block, f[frag], &at, self.f32_t)?),
-                (None, Some(t)) => Fused::Tile(t.clone()),
-                (None, None) => bail!("frag_map leaf {i} is neither fragments nor a tile"),
+            Tree::Leaf(i) => match (leaves.frags.get(i), leaves.rows.get(i), leaves.tiles.get(i)) {
+                (Some(f), ..) => Fused::Scalar(self.vec_extract(block, f[frag], &at, self.f32_t)?),
+                (None, Some(r), _) => Fused::Scalar(r[slot]),
+                (None, None, Some(t)) => Fused::Tile(t.clone()),
+                (None, None, None) => bail!("frag_map leaf {i} is neither fragments nor a tile"),
             },
             Tree::Scalar(i) => Fused::Scalar(self.scalar_ir(ir.operand(op, *i))?),
             Tree::Unary(step, x) => Fused::Unary(self.ir_elem_step(*step), go(self, x)?),
@@ -101,10 +112,18 @@ impl<'c> Codegen<'c> {
     }
 
     /// `frag_reduce`: each row folded in the lanes that hold it, the result
-    /// a shared `[rows, 1]` column. Every warp owns whole rows, so a row's
-    /// elements are this lane's and its quad's: a fold over the lane's own
-    /// columns, then two xor shuffles within the quad.
-    pub(super) fn frag_reduce(&mut self, block: &Block<'c>, fa: &FragAcc<'c>, how: ir::Reduce) -> Result<MemVal<'c>> {
+    /// a shared `[rows, 1]` column, or with `to_regs` the lanes' own rows
+    /// in registers. Every warp owns whole rows, so a row's elements are
+    /// this lane's and its quad's: a fold over the lane's own columns, then
+    /// two xor shuffles within the quad, which leave every lane of the quad
+    /// with the row's value.
+    pub(super) fn frag_reduce(
+        &mut self,
+        block: &Block<'c>,
+        fa: &FragAcc<'c>,
+        how: ir::Reduce,
+        to_regs: bool,
+    ) -> Result<Lowered<'c>> {
         let kind = match how {
             ir::Reduce::RowSum => Reduce::Sum,
             ir::Reduce::RowMax => Reduce::Max,
@@ -131,6 +150,19 @@ impl<'c> Codegen<'c> {
             }
             Ok(())
         })?;
+        let mut folded = Vec::with_capacity(rows_per_lane);
+        for part in parts {
+            let Some((mut acc, row)) = part else { bail!("internal: a lane row no fragment holds") };
+            for mask in [1, 2] {
+                let other = self.shfl_xor(block, acc, mask)?;
+                acc = self.fold(block, kind, f32_t, acc, other)?;
+            }
+            folded.push((acc, row));
+        }
+        if to_regs {
+            let vals = folded.into_iter().map(|(v, _)| v).collect();
+            return Ok(Lowered::Regs(RegTile { vals, elem: f32_t, shape: vec![fa.m, 1], rows_wm: Some(fa.wm) }));
+        }
         let out = self.alloc_tile_shaped(block, f32_t, &[fa.m, 1])?;
         let tid = self.thread_id(block)?;
         let four = self.const_index(block, 4)?;
@@ -140,12 +172,7 @@ impl<'c> Codegen<'c> {
             block,
             arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, in_quad, zero, self.loc),
         )?;
-        for part in parts {
-            let Some((mut acc, row)) = part else { continue };
-            for mask in [1, 2] {
-                let other = self.shfl_xor(block, acc, mask)?;
-                acc = self.fold(block, kind, f32_t, acc, other)?;
-            }
+        for (acc, row) in folded {
             // The quad holds the row's value four times; one lane stores it.
             let then = Block::new(&[]);
             then.append_operation(memref::store(acc, out.mem, &[row, zero], self.loc));
@@ -155,6 +182,14 @@ impl<'c> Codegen<'c> {
             block.append_operation(scf::r#if(lead, &[], region, Region::new(), self.loc));
         }
         self.barrier(block)?;
-        Ok(out)
+        Ok(Lowered::Tile(out))
     }
+}
+
+/// A `frag_map`'s leaves by operand: fragments and fragment-row columns as
+/// a lane's registers, tiles as views.
+struct Leaves<'a, 'c> {
+    frags: &'a BTreeMap<usize, Vec<Value<'c, 'c>>>,
+    rows: &'a BTreeMap<usize, Vec<Value<'c, 'c>>>,
+    tiles: &'a BTreeMap<usize, MemVal<'c>>,
 }

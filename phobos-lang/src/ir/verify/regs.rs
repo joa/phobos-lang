@@ -17,11 +17,12 @@ impl Verifier<'_> {
                 let Some(shape) = self.want_regs_result(op) else {
                     return;
                 };
+                let layout = ir.ty(ir.result(op)).regs().map(|r| r.layout);
                 for (i, &v) in ir.operands(op).iter().enumerate() {
                     if let Some(r) = ir.ty(v).regs()
-                        && r.shape != shape
+                        && (r.shape != shape || Some(r.layout) != layout)
                     {
-                        self.err(op, format!("register operand {i} has another shape"));
+                        self.err(op, format!("register operand {i} has another shape or layout"));
                     }
                 }
                 self.check_tree(op, tree);
