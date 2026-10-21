@@ -10,6 +10,7 @@ mod frag;
 mod gridbar;
 mod materialize;
 mod owner;
+mod rows;
 mod scratch;
 mod swizzle;
 
@@ -72,6 +73,7 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
     while let Some(acc) = frag::find(ir, target).into_iter().next() {
         carry::rewrite(ir, acc, report);
     }
+    rows::promote(ir);
     materialize::leftovers(ir, &mut report.spans);
 
     for (fused, dot) in epilogue::fuse_dot_epilogues(ir) {

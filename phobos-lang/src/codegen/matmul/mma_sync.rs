@@ -130,7 +130,7 @@ impl<'c> Codegen<'c> {
     /// The lane's m16n8 D-fragment base within an mma.sync tile, as
     /// (row, col). The row is lane / 4, plus 8 for the second half. The column
     /// is 2 * (lane % 4), plus 1 for the second element of a pair.
-    pub(super) fn mma_sync_dfrag_base(
+    pub(in crate::codegen) fn mma_sync_dfrag_base(
         &self,
         block: &Block<'c>,
         lane: Value<'c, 'c>,

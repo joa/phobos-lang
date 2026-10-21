@@ -1,7 +1,8 @@
 // Register tiles: each thread's share of a tile as values. Element `e` of
 // thread `t` sits at row-major position `t + e * threads`, the mapping a
 // plain sweep uses, so reading a shared tile at the same element needs no
-// exchange between threads.
+// exchange between threads. A fragment-row column instead holds the rows a
+// lane holds of f16-path fragments, see `RegLayout::MmaRows`.
 
 use anyhow::{Result, bail};
 use melior::dialect::memref;
@@ -16,6 +17,8 @@ pub(in crate::codegen) struct RegTile<'c> {
     pub(in crate::codegen) vals: Vec<Value<'c, 'c>>,
     pub(in crate::codegen) elem: Type<'c>,
     pub(in crate::codegen) shape: Vec<i64>,
+    /// The warps of a fragment-row column; None for a blocked tile.
+    pub(in crate::codegen) rows_wm: Option<i64>,
 }
 
 impl<'c> Codegen<'c> {
@@ -51,7 +54,7 @@ impl<'c> Codegen<'c> {
                 let ty = self.regs_type(ir, ir.result(op))?;
                 let v = self.scalar_ir(ir.operand(op, 0))?;
                 let v = self.coerce(block, v, ty.elem)?;
-                let count = self.regs_per_thread(&ty.shape);
+                let count = self.regs_per_thread(&ty);
                 let vals = vec![v; count];
                 self.set_ir(ir.result(op), Lowered::Regs(RegTile { vals, ..ty }));
             }
@@ -60,8 +63,8 @@ impl<'c> Codegen<'c> {
                 let vec_t = Type::vector(&[4], ty.elem);
                 let mut leaves = Vec::new();
                 let mut vals = Vec::new();
-                for e in 0..self.regs_per_thread(&ty.shape) {
-                    let idx = self.reg_index(block, &ty.shape, e)?;
+                for e in 0..self.regs_per_thread(&ty) {
+                    let idx = self.reg_index(block, &ty, e)?;
                     // Tile leaves are the same for every element; keep one copy.
                     let mut seen = Vec::new();
                     let fused = self.fused_from_tree(ir, op, tree, ir.result(op), &mut seen, Fill::RegElem(e))?;
@@ -80,7 +83,7 @@ impl<'c> Codegen<'c> {
                 let regs = self.regs_ir(ir.operand(op, 0))?;
                 let dst = self.tile_ir(ir, ir.operand(op, 1))?;
                 for (e, &v) in regs.vals.iter().enumerate() {
-                    let idx = self.reg_index(block, &regs.shape, e)?;
+                    let idx = self.reg_index(block, &regs, e)?;
                     let v = self.coerce(block, v, dst.elem)?;
                     block.append_operation(memref::store(v, dst.mem, &idx, self.loc));
                 }
@@ -95,7 +98,7 @@ impl<'c> Codegen<'c> {
                 };
                 let mut idx = Vec::new();
                 for e in 0..regs.vals.len() {
-                    idx.push(self.reg_index(block, &regs.shape, e)?);
+                    idx.push(self.reg_index(block, &regs, e)?);
                 }
                 let out = self.regs_rowreduce(block, &regs.vals, &idx, &regs.shape, regs.elem, kind)?;
                 self.set_ir(ir.result(op), Lowered::Tile(out));
@@ -114,15 +117,32 @@ impl<'c> Codegen<'c> {
             vals: Vec::new(),
             elem: self.ir_scalar_type(r.elem),
             shape: r.shape.clone(),
+            rows_wm: ir.ty(v).mma_rows(),
         })
     }
 
-    fn regs_per_thread(&self, shape: &[i64]) -> usize {
-        (shape.iter().product::<i64>() / self.cta_threads) as usize
+    fn regs_per_thread(&self, ty: &RegTile<'c>) -> usize {
+        match ty.rows_wm {
+            Some(wm) => (ty.shape[0] / 16 / wm * 2) as usize,
+            None => (ty.shape.iter().product::<i64>() / self.cta_threads) as usize,
+        }
     }
 
     /// The coordinates of this thread's element `e`.
-    fn reg_index(&self, block: &Block<'c>, shape: &[i64], e: usize) -> Result<Vec<Value<'c, 'c>>> {
+    fn reg_index(&self, block: &Block<'c>, ty: &RegTile<'c>, e: usize) -> Result<Vec<Value<'c, 'c>>> {
+        let shape = &ty.shape[..];
+        if let Some(wm) = ty.rows_wm {
+            let rows = shape[0] / wm;
+            let (.., m0, _) = self.warp_block_origin(block, wm, 1, rows, 1)?;
+            let tid = self.thread_id(block)?;
+            let w = self.const_index(block, 32)?;
+            let lane = self.remui(block, tid, w)?;
+            let (gid, _) = self.mma_sync_dfrag_base(block, lane)?;
+            let off = self.const_index(block, 16 * (e as i64 / 2) + 8 * (e as i64 % 2))?;
+            let row = self.addi(block, m0, off)?;
+            let row = self.addi(block, row, gid)?;
+            return Ok(vec![row, self.const_index(block, 0)?]);
+        }
         let tid = self.thread_id(block)?;
         let off = self.const_index(block, e as i64 * self.cta_threads)?;
         let mut rest = self.addi(block, tid, off)?;

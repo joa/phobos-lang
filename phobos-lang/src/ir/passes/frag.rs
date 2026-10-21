@@ -145,8 +145,14 @@ fn candidate(ir: &Ir, target: &Target, alloc: OpId) -> Option<Accumulator> {
         if !(ir.kernel.mma_sync && target.has_mma_sync) {
             return None;
         }
-        let plan = if scan.rows { shape::wmma_rows_plan } else { shape::wmma_plan };
-        let (wm, wn) = plan(m, n, scan.kk?, ir.kernel.cta_threads)?;
+        let threads = ir.kernel.cta_threads;
+        let (wm, wn) = if scan.rows {
+            shape::wmma_rows_plan(m, n, scan.kk?, threads)?
+        } else if scan.columns {
+            shape::wmma_rows_plan(m, n, scan.kk?, threads).or_else(|| shape::wmma_plan(m, n, scan.kk?, threads))?
+        } else {
+            shape::wmma_plan(m, n, scan.kk?, threads)?
+        };
         MmaAcc { m, n, wm, wn, imma: false }
     };
     if !frags.imma && !fits(ir, alloc, &frags) {
@@ -164,6 +170,9 @@ struct Scan {
     kk: Option<i64>,
     /// Whether a row reduction reads the tile.
     rows: bool,
+    /// Whether an update reads a `[m, 1]` column, which the lanes holding
+    /// its rows can keep in registers when every warp owns whole rows.
+    columns: bool,
 }
 
 impl Scan {
@@ -289,6 +298,7 @@ fn update(ir: &Ir, tile: ValueId, user: OpId, m: i64, n: i64, scan: &mut Scan) -
                     if is_acc(acc) && others(&[col]).is_some_and(|c| column(ir, c[0], m)) =>
                 {
                     scan.kind(false)?;
+                    scan.columns = true;
                     Some(Update::Scale { op: *op, col: others(&[col])?[0] })
                 }
                 _ => map(ir, tile, tree, leaves, m, n, scan),
@@ -373,6 +383,7 @@ fn map(ir: &Ir, tile: ValueId, tree: &Tree, leaves: &[ValueId], m: i64, n: i64, 
         if !ok {
             return None;
         }
+        scan.columns |= v != tile && column(ir, v, m);
     }
     scan.kind(false)?;
     Some(Update::Map { tree: tree.clone(), leaves: leaves.to_vec() })
