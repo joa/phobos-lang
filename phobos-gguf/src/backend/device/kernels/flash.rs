@@ -26,8 +26,11 @@ impl FlashShape {
     /// divides [`FLASH_TILE`], then `p` to assert the pipeline, such as
     /// `resident16p`.
     pub(crate) fn for_chip(chip: &str) -> Self {
-        let form = if chip == "sm_75" { FlashForm::Streamed } else { FlashForm::Resident };
-        let chosen = Self { form, keys: FLASH_KEYS, pipeline: false };
+        // The resident form wins only pipelined, and was measured on sm_86
+        // alone; elsewhere the streamed form is the known one.
+        let resident = chip == "sm_86";
+        let form = if resident { FlashForm::Resident } else { FlashForm::Streamed };
+        let chosen = Self { form, keys: FLASH_KEYS, pipeline: resident };
         let Ok(spec) = std::env::var("PHOBOS_ATTN_FLASH_SHAPE") else {
             return chosen;
         };
@@ -53,7 +56,7 @@ pub(crate) enum FlashForm {
     Streamed,
     /// The query tile held for the whole program and each key tile staged
     /// once, the full head wide. A value slice is the whole head, so the
-    /// scores are computed once. Needs the larger shared memory of sm_80 on.
+    /// scores are computed once, in about three times the shared memory.
     Resident,
 }
 
