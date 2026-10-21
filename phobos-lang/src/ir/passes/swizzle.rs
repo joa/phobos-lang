@@ -69,10 +69,8 @@ pub(crate) fn decide(ir: &mut Ir, mode: Option<bool>) -> Result<()> {
 }
 
 /// The permutation for a rank-2 static shared tile whose rows hold a
-/// multiple of eight 16-byte granules, as `alloc_tile_swizzled` lays it out,
-/// or for an f16 tile of two or four granules a row, as many bits as that
-/// takes: eight rows of four granules span the banks twice over, and a
-/// two-bit permutation by the row spreads them as three bits spread eight.
+/// multiple of eight 16-byte granules, or for an f16 tile of two or four
+/// granules a row, as `alloc_tile_swizzled` lays it out.
 fn shape_swizzle(ir: &Ir, tile: ValueId) -> Option<Swizzle> {
     let Type::Tile(t) = ir.ty(tile) else { return None };
     let shape = t.static_shape()?;
@@ -82,17 +80,13 @@ fn shape_swizzle(ir: &Ir, tile: ValueId) -> Option<Swizzle> {
         return None;
     }
     let granules = cols * bytes / 16;
-    let bits = match granules {
-        g if cols * bytes % 128 == 0 && g >= 8 => 3,
-        2 | 4 if t.elem == Scalar::F16 && cols * bytes % 16 == 0 => granules.trailing_zeros(),
-        _ => return None,
+    let eligible = match granules {
+        g if g >= 8 => cols * bytes % 128 == 0,
+        2 | 4 => t.elem == Scalar::F16 && cols * bytes % 16 == 0,
+        _ => false,
     };
     let granule = (16 / bytes).max(1);
-    Some(Swizzle {
-        bits,
-        shift: 0,
-        elem_log: granule.trailing_zeros(),
-    })
+    eligible.then(|| Swizzle::for_rows(granules, granule.trailing_zeros())).flatten()
 }
 
 /// What a tile's uses allow: whether the scaled dot reads it, and the first

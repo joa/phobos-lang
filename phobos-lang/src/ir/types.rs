@@ -180,6 +180,22 @@ pub struct Swizzle {
     pub elem_log: u32,
 }
 
+impl Swizzle {
+    /// The permutation for rows of `granules` 16-byte granules of
+    /// `1 << elem_log` elements, None for one granule a row. The 32 banks
+    /// hold eight granules, so up to three bits of the row permute the
+    /// granules; rows narrower than that share a bank line, and the rows of
+    /// one line take one permutation, which `shift` drops from the row.
+    pub fn for_rows(granules: i64, elem_log: u32) -> Option<Swizzle> {
+        let bits = granules.trailing_zeros().min(3);
+        if bits == 0 {
+            return None;
+        }
+        let narrow = granules < 8 && (granules as u64).is_power_of_two();
+        Some(Swizzle { bits, shift: if narrow { 3 - bits } else { 0 }, elem_log })
+    }
+}
+
 /// How a tile's elements sit in its bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Layout {

@@ -253,21 +253,15 @@ impl<'c> Codegen<'c> {
         let mut mv = self.alloc_tile_shaped(block, elem, shape)?;
         let width = *shape.last().expect("tile values are not rank-0");
 
-        // Permute the index of each 16-byte granule (eight f16, sixteen i8)
-        // by at most 3 bits: 32 banks over 4 banks per granule gives 8
-        // phases.
+        // Permute the index of each 16-byte granule (eight f16, sixteen i8);
+        // see `Swizzle::for_rows`.
         let bytes = self
             .elem_bytes(elem)
             .ok_or_else(|| anyhow!("swizzled tile of an element of unknown size"))?;
         let granule = i64::from((16 / bytes).max(1));
         let blocks = (width / granule).max(1);
-        let bits = blocks.trailing_zeros().min(3);
-
-        mv.swizzle = (bits > 0).then_some(Swizzle {
-            bits,
-            shift: 0,
-            elem_log: granule.trailing_zeros(),
-        });
+        mv.swizzle = crate::ir::Swizzle::for_rows(blocks, granule.trailing_zeros())
+            .map(|s| Swizzle { bits: s.bits, shift: s.shift, elem_log: s.elem_log });
 
         Ok(mv)
     }
