@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::frag::{Accumulator, Update};
 use crate::ir::build::Report;
 use crate::diag::Span;
-use crate::ir::{At, Bounds, ForInfo, Ir, Literal, OpId, OpKind, Stage, Type, ValueId};
+use crate::ir::{At, Bounds, ForInfo, Ir, Literal, OpId, OpKind, Scalar, Stage, Type, ValueId};
 
 /// What a rewrite reads and records as it goes.
 struct Carry<'a> {
@@ -127,8 +127,12 @@ impl Carry<'_> {
             }
             Update::Operand { index } => {
                 // The one conversion: the fragments written to a shared
-                // tile of the same name for the dot to read.
-                let ty = ir.ty(self.tile).clone();
+                // tile of the same name for the dot to read, in the f16 the
+                // tensor cores take, so the dot reads it where it is.
+                let mut ty = ir.ty(self.tile).clone();
+                if let Type::Tile(t) = &mut ty {
+                    t.elem = Scalar::F16;
+                }
                 let made = self.op(ir, op, at, OpKind::Alloc, &[], vec![ty], Vec::new());
                 let tile = ir.result(made);
                 if let Some(name) = ir.name(self.tile).map(str::to_owned) {

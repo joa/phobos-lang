@@ -653,11 +653,34 @@ impl<'c> Codegen<'c> {
         }
         let (fm, fnn) = fa.warp_frags();
         let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
+        // A lane's two adjacent columns go out as one store where the rows
+        // keep them aligned. A swizzle moves whole granules, so the pair
+        // stays adjacent.
+        let paired = target.vectorizes(2);
+        let pair_t = Type::vector(&[2], target.elem);
+        let bytes = 2 * i64::from(self.elem_bytes(target.elem).unwrap_or(4));
         self.for_each_dfrag(block, (fm, fnn), m0, n0, |cg, i, elems| {
-            for ([di, dj], addr) in elems {
-                let e = cg.vec_extract(block, fa.frags[i], &[*di, *dj], cg.f32_t)?;
-                let e = cg.coerce(block, e, target.elem)?;
-                block.append_operation(memref::store(e, target.mem, addr, cg.loc));
+            for pair in elems.chunks(2) {
+                let ([di, _], [row, col]) = pair[0];
+                let col = cg.swizzle_col(block, target, row, col)?;
+                let vals = pair
+                    .iter()
+                    .map(|([di, dj], _)| {
+                        let e = cg.vec_extract(block, fa.frags[i], &[*di, *dj], cg.f32_t)?;
+                        cg.coerce(block, e, target.elem)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                if paired && pair.len() == 2 && pair[1].0 == [di, 1] {
+                    let v = cg.vec_broadcast(block, vals[0], pair_t)?;
+                    let v = cg.vec_insert(block, vals[1], v, &[1])?;
+                    cg.vec_store_al(block, v, target.mem, &[row, col], bytes)?;
+                    continue;
+                }
+                for (k, &e) in vals.iter().enumerate() {
+                    let off = cg.const_index(block, k as i64)?;
+                    let at = cg.addi(block, col, off)?;
+                    block.append_operation(memref::store(e, target.mem, &[row, at], cg.loc));
+                }
             }
             Ok(())
         })
