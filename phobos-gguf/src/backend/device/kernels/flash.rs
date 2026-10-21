@@ -26,11 +26,13 @@ impl FlashShape {
     /// divides [`FLASH_TILE`], then `p` to assert the pipeline, such as
     /// `resident16p`.
     pub(crate) fn for_chip(chip: &str) -> Self {
-        // The resident form wins only pipelined, and was measured on sm_86
-        // alone; elsewhere the streamed form is the known one.
-        let resident = chip == "sm_86";
-        let form = if resident { FlashForm::Resident } else { FlashForm::Streamed };
-        let chosen = Self { form, keys: FLASH_KEYS, pipeline: resident };
+        // Measured on an sm_86 A40, the resident form in 16-key steps wins,
+        // small enough for two programs a multiprocessor; no other chip has
+        // been measured, and elsewhere the streamed form is the known one.
+        let chosen = match chip {
+            "sm_86" => Self { form: FlashForm::Resident, keys: 16, pipeline: false },
+            _ => Self { form: FlashForm::Streamed, keys: FLASH_KEYS, pipeline: false },
+        };
         let Ok(spec) = std::env::var("PHOBOS_ATTN_FLASH_SHAPE") else {
             return chosen;
         };
