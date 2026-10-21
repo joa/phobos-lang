@@ -38,7 +38,9 @@ fn dump_raw_kernel_sources() {
     sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3, false)));
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
-    sources.push(("attn_flash".to_string(), attn_flash_src(256, 4)));
+    for (name, form) in [("attn_flash", FlashForm::Streamed), ("attn_flash_resident", FlashForm::Resident)] {
+        sources.push((name.to_string(), attn_flash_src(256, 4, FlashShape { form, keys: FLASH_KEYS, pipeline: false })));
+    }
     sources.push(("attn_gemm".to_string(), attn_gemm_src(256, ATTN_GEMM_TILE)));
     sources.push(("q8_split".to_string(), Q8_SPLIT_SRC.replace("{ALIGNED}", "@aligned(N = TN, K = 32)")));
     sources.push(("moe_topk".to_string(), moe_topk_src()));

@@ -375,6 +375,8 @@ pub struct DeviceBackend {
     /// Whether a prompt's attention takes [`kernels::attn_flash_src`] where
     /// it fits. On by default; `PHOBOS_ATTN_FLASH=0` opts out.
     attn_flash_on: bool,
+    /// The flash kernel's form and key step on this chip.
+    flash: kernels::FlashShape,
     /// Addressed by [`Buf`]; a slot is `None` while free.
     slots: RefCell<Vec<Option<mem::Slot>>>,
     free_slots: RefCell<Vec<usize>>,
