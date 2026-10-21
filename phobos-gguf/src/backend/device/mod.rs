@@ -370,6 +370,11 @@ pub struct DeviceBackend {
     /// Whether a prompt's attention takes [`kernels::attn_tc_src`] where it
     /// fits. On by default; `PHOBOS_ATTN_TC=0` opts out.
     attn_tc_on: bool,
+    /// The flash prompt attention, keyed like `attn_tc`.
+    attn_flash: RefCell<HashMap<(usize, usize), Module>>,
+    /// Whether a prompt's attention takes [`kernels::attn_flash_src`] where
+    /// it fits. On by default; `PHOBOS_ATTN_FLASH=0` opts out.
+    attn_flash_on: bool,
     /// Addressed by [`Buf`]; a slot is `None` while free.
     slots: RefCell<Vec<Option<mem::Slot>>>,
     free_slots: RefCell<Vec<usize>>,
