@@ -112,49 +112,56 @@ impl DeviceBackend {
         }
     }
 
-    /// Causal attention for a prompt on the tensor cores, every head at once.
-    /// See [`attn_tc_src`]; the caller checks [`attn_tc_fits`].
+    /// Causal attention for a prompt on the tensor cores, a slab of rows and
+    /// heads at a time. See [`attn_tc_src`] and [`attn_tc_slab`]; the caller
+    /// checks [`attn_tc_fits`].
     pub(super) fn attention_tc(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
-        let (rows, heads, nk) = (spec.rows, spec.n_head, spec.total());
-        let (r, n) = (rows as i64, nk as i64);
-        let (qw, kw, sw) = ((heads * spec.head_dim) as i64, spec.kv_width() as i64, (heads * nk) as i64);
+        let (rows, dim, group) = (spec.rows, spec.head_dim, spec.group());
+        let (qw, kw) = (spec.n_head * dim, spec.kv_width() as i64);
+        let (slab_rows, slab_heads) = attn_tc_slab(spec);
         // The scores grow with depth and the pool reuses only a buffer of the
         // same length, so sized exactly, every pass of a prompt would leave
-        // one behind until the card pages. Rounded up, within the budget the
-        // caller checked, a prompt's passes share a few.
-        let score_len = (rows * heads * nk).next_power_of_two().min(ATTN_TC_SCORE_BYTES / size_of::<f32>());
-        let scores = self.alloc(score_len)?;
-        let sums = self.alloc(rows * heads)?;
+        // one behind until the card pages. Rounded up, a prompt's passes
+        // share a few.
+        let scores = self.alloc(attn_tc_score_len(spec))?;
+        let sums = self.alloc(rows * spec.n_head)?;
         let result = self.with_kernel(
             &self.attn_tc,
-            (spec.head_dim, spec.group()),
+            (dim, group),
             "attn_tc",
-            || attn_tc_src(spec.head_dim, spec.group()),
+            || attn_tc_src(dim, group),
             |module| {
-                let (k, v) = ((self.hptr(keys, 0)?, [n, kw]), (self.hptr(values, 0)?, [n, kw]));
-                let (s, l) = ((self.ptr(scores, 0)?, [r, sw]), (self.ptr(sums, 0)?, [r, heads as i64]));
-                self.launch(
-                    module,
-                    "attn_tc_scores",
-                    &[(self.ptr(q, 0)?, [r, qw]), k, s],
-                    ((rows / ATTN_TC_TILE) as u32, (nk / ATTN_TC_TILE) as u32, heads as u32),
-                )?;
-                self.launch(
-                    module,
-                    "attn_tc_softmax",
-                    &[k, s, l],
-                    ((rows / ATTN_SOFT_TILE) as u32, heads as u32, 1),
-                )?;
-                self.launch(
-                    module,
-                    "attn_tc_mix",
-                    &[s, v, l, (self.ptr(out, 0)?, [r, qw])],
-                    (
-                        (rows / ATTN_SOFT_TILE) as u32,
-                        (spec.head_dim / ATTN_TC_TILE) as u32,
-                        heads as u32,
-                    ),
-                )
+                for h in (0..spec.n_head).step_by(slab_heads) {
+                    for row in (0..rows).step_by(slab_rows) {
+                        // A slab's last query sits at the end of the keys it
+                        // sees, as the kernels take every call's to.
+                        let r = slab_rows.min(rows - row);
+                        let nk = spec.start_pos + row + r;
+                        let (at, kv_at) = (row * qw + h * dim, h / group * dim);
+                        let (ri, n, sw) = (r as i64, nk as i64, (slab_heads * nk) as i64);
+                        let (k, v) = ((self.hptr(keys, kv_at)?, [n, kw]), (self.hptr(values, kv_at)?, [n, kw]));
+                        let (s, l) = ((self.ptr(scores, 0)?, [ri, sw]), (self.ptr(sums, 0)?, [ri, slab_heads as i64]));
+                        self.launch(
+                            module,
+                            "attn_tc_scores",
+                            &[(self.ptr(q, at)?, [ri, qw as i64]), k, s],
+                            ((r / ATTN_TC_TILE) as u32, (nk / ATTN_TC_TILE) as u32, slab_heads as u32),
+                        )?;
+                        self.launch(
+                            module,
+                            "attn_tc_softmax",
+                            &[k, s, l],
+                            ((r / ATTN_SOFT_TILE) as u32, slab_heads as u32, 1),
+                        )?;
+                        self.launch(
+                            module,
+                            "attn_tc_mix",
+                            &[s, v, l, (self.ptr(out, at)?, [ri, qw as i64])],
+                            ((r / ATTN_SOFT_TILE) as u32, (dim / ATTN_TC_TILE) as u32, slab_heads as u32),
+                        )?;
+                    }
+                }
+                Ok(())
             },
         );
         self.release(scores);

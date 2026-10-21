@@ -622,6 +622,10 @@ fn main() -> Result<()> {
         // blocked kernel the rest, continuing from where the tiles end.
         (300, 0, 16, 4, 256),
         (65, 64, 8, 4, 256),
+        // Prompts whose scores outgrow one launch: rows split three ways and
+        // the last slab short, then the 27B's 24 heads split by key group.
+        (512, 8192, 16, 4, 256),
+        (128, 32768, 24, 4, 256),
     ] {
         let spec = Attn {
             rows,
