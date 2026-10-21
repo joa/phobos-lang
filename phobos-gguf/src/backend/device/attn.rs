@@ -87,7 +87,7 @@ impl DeviceBackend {
             ..spec
         };
         const _: () = assert!(FLASH_TILE == ATTN_TC_TILE, "both prompt paths take the same whole tiles");
-        let flash = self.attn_flash_on && attn_flash_fits(tiled);
+        let flash = self.attn_flash_on && attn_flash_fits(tiled, self.flash.form);
         if tiled.rows > 0 && (flash || self.attn_tc_on && attn_tc_fits(tiled)) {
             if flash {
                 self.attention_flash(q, keys, values, tiled, out)?;
@@ -125,7 +125,7 @@ impl DeviceBackend {
     pub(super) fn attention_flash(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         let (rows, dim) = (spec.rows as i64, spec.head_dim);
         let (qw, nk, kw) = ((spec.n_head * dim) as i64, spec.total() as i64, spec.kv_width() as i64);
-        let slices = dim / FLASH_VALUE_COLS.min(dim);
+        let slices = dim / self.flash.form.value_cols(dim);
         // The queries narrow once here rather than at every key step.
         let narrow = self.alloc_h(spec.rows * qw as usize)?;
         let q_ptr = self.hptr(narrow, 0)?;
@@ -134,7 +134,7 @@ impl DeviceBackend {
             &self.attn_flash,
             (dim, spec.group()),
             "attn_flash",
-            || attn_flash_src(dim, spec.group()),
+            || attn_flash_src(dim, spec.group(), self.flash),
             |module| {
                 self.launch(
                     module,
