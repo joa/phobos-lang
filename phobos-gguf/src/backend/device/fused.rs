@@ -13,12 +13,18 @@ pub(super) const FUSED_GRID_TRIES: usize = 4;
 /// cannot see.
 const _: () = assert!(Q8_QDOT_TN == fuse::OUT_TILE);
 
-/// Whether one stage of a decode step goes through the fusion pass.
-///
-/// Switch off via `PHOBOS_FUSED=0`.
-pub(super) fn fused_stage(var: &str) -> bool {
+/// Whether one stage of a decode step goes through the fusion pass: its own
+/// toggle, else `PHOBOS_FUSED`, else `default`.
+pub(super) fn fused_stage(var: &str, default: bool) -> bool {
     use phobos_base::env::flag_set;
-    flag_set(var).or_else(|| flag_set("PHOBOS_FUSED")).unwrap_or(true)
+    flag_set(var).or_else(|| flag_set("PHOBOS_FUSED")).unwrap_or(default)
+}
+
+/// Whether the fused MLP and the fused norm and projection pay on `chip`.
+/// On sm_86, an A6000 and an A40 alike decoded about 3% faster with both
+/// launched apart; every other chip measured runs them fused.
+pub(super) fn fuses_wide_stages(chip: &str) -> bool {
+    chip != "sm_86"
 }
 
 impl DeviceBackend {

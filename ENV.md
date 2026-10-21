@@ -64,8 +64,8 @@ one, as the `PHOBOS_FUSED_*` stages fall back to `PHOBOS_FUSED`).
 | variable | takes | default | effect |
 | --- | --- | --- | --- |
 | `PHOBOS_FUSED` | opt-out | on | The fusion pass as a whole: chains of decode stages lowered into one persistent kernel. Off, every stage launches on its own. |
-| `PHOBOS_FUSED_MLP` | opt-out | on | The decode MLP (norm, gate and up, SwiGLU, down) as one fused kernel. |
-| `PHOBOS_FUSED_PROJ` | opt-out | on | A normalization and the projection reading it as one kernel. |
+| `PHOBOS_FUSED_MLP` | opt-out | on, off on sm_86 | The decode MLP (norm, gate and up, SwiGLU, down) as one fused kernel. Off by default on sm_86, where it decodes slower than launched apart. `1` forces it on there. |
+| `PHOBOS_FUSED_PROJ` | opt-out | on, off on sm_86 | A normalization and the projection reading it as one kernel. Off by default on sm_86, like `PHOBOS_FUSED_MLP`. |
 | `PHOBOS_FUSED_MIX` | opt-out | on | The delta net's convolution and gates as the tail of the fused projection; costs a barrier, so gated apart. |
 | `PHOBOS_FUSED_ATTN_OUT` | opt-out | on | Attention's output epilogue (quantize, output projection into the residual) as one kernel. |
 | `PHOBOS_FUSED_STORE2D` | opt-out | on | Attention's key and value cache writes in one launch instead of two. |
