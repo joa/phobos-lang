@@ -87,20 +87,41 @@ pub(crate) fn attn_gemm_fits(spec: Attn) -> bool {
 /// Query rows and keys of one [`attn_tc_src`] score tile.
 pub(crate) const ATTN_TC_TILE: usize = 64;
 
-/// Bytes of scores [`attn_tc_src`] may hold at once. Past this a prompt takes
-/// [`attention_block_src`], since the scores of every head are written out
-/// in full.
+/// Bytes of scores [`attn_tc_src`] holds at once. A prompt whose scores
+/// would not fit runs in slabs, see [`attn_tc_slab`].
 pub(crate) const ATTN_TC_SCORE_BYTES: usize = 128 << 20;
 
-/// Whether [`attn_tc_src`] takes this prompt: whole score tiles both ways,
-/// head dimension a multiple of the tile, and the score planes within
-/// [`ATTN_TC_SCORE_BYTES`].
+/// Whether [`attn_tc_src`] takes this prompt: whole score tiles both ways
+/// and a head dimension a multiple of the tile.
 pub(crate) fn attn_tc_fits(spec: Attn) -> bool {
-    let score_bytes = spec.rows * spec.n_head * spec.total() * size_of::<f32>();
     spec.rows.is_multiple_of(ATTN_TC_TILE)
         && spec.start_pos.is_multiple_of(ATTN_TC_TILE)
         && spec.head_dim.is_multiple_of(ATTN_TC_TILE)
-        && score_bytes <= ATTN_TC_SCORE_BYTES
+}
+
+/// Elements of the score buffer [`attn_tc_src`] takes for this prompt: its
+/// scores, rounded up so a prompt's passes share a buffer as the cache
+/// deepens, within [`ATTN_TC_SCORE_BYTES`] or the smallest slab where that
+/// is larger.
+pub(crate) fn attn_tc_score_len(spec: Attn) -> usize {
+    let smallest = (ATTN_TC_TILE * spec.group() * spec.total()).next_power_of_two();
+    let cap = (ATTN_TC_SCORE_BYTES / size_of::<f32>()).max(smallest);
+    (spec.rows * spec.n_head * spec.total()).next_power_of_two().min(cap)
+}
+
+/// Query rows and heads of one slab of [`attn_tc_src`], whose scores fit
+/// [`attn_tc_score_len`]: the most heads that fit, in whole key groups
+/// dividing the head count, then the most rows. Every head and row at once
+/// where they fit.
+pub(crate) fn attn_tc_slab(spec: Attn) -> (usize, usize) {
+    let (len, nk, group) = (attn_tc_score_len(spec), spec.total(), spec.group());
+    let heads = (1..=spec.n_head / group)
+        .rev()
+        .map(|groups| groups * group)
+        .find(|&heads| spec.n_head.is_multiple_of(heads) && ATTN_TC_TILE * heads * nk <= len)
+        .unwrap_or(group);
+    let rows = len / (heads * nk) / ATTN_TC_TILE * ATTN_TC_TILE;
+    (rows.clamp(ATTN_TC_TILE, spec.rows), heads)
 }
 
 /// Causal attention for a prompt on the tensor cores: every head's scores,
@@ -784,4 +805,28 @@ kernel attention(Q: tensor<f32>[R, D], K: tensor<f16>[NK, KW],
 }}
 "
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(rows: usize, start_pos: usize, n_head: usize) -> Attn {
+        Attn { rows, start_pos, n_head, n_kv: 4, head_dim: 256 }
+    }
+
+    #[test]
+    fn a_deep_prompt_runs_in_slabs_that_fit_its_scores() {
+        // Every head and row at once where they fit.
+        assert_eq!(attn_tc_slab(spec(512, 0, 16)), (512, 16));
+        // The 4B a pp512 deep: rows split, heads whole.
+        assert_eq!(attn_tc_slab(spec(512, 8192, 16)), (192, 16));
+        // The 27B 32k deep: heads split in whole groups of six, then rows.
+        assert_eq!(attn_tc_slab(spec(512, 32256, 24)), (64, 12));
+        for s in [spec(512, 8192, 16), spec(512, 32256, 24), spec(512, 261632, 24)] {
+            let (rows, heads) = attn_tc_slab(s);
+            assert!(rows * heads * s.total() <= attn_tc_score_len(s), "{s:?}");
+            assert!(rows.is_multiple_of(ATTN_TC_TILE) && heads.is_multiple_of(s.group()));
+        }
+    }
 }
