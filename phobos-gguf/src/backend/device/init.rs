@@ -13,6 +13,7 @@ impl DeviceBackend {
         let sms = cust::device::Device::get_device(0)?
             .get_attribute(cust::device::DeviceAttribute::MultiprocessorCount)? as usize;
         residency::vram_mark("cuda context up");
+        let wide = fused::fuses_wide_stages(phobos_kernels::compile::chip());
 
         let matmul = Variants::compile(
             MATMUL_SRC,
@@ -152,11 +153,11 @@ impl DeviceBackend {
             qmma_split: env_flag_on("PHOBOS_QMMA_SPLIT"),
             qmma_narrow: env_flag("PHOBOS_QMMA_NARROW"),
             fused_plans: RefCell::new(HashMap::new()),
-            fused_mlp: fused_stage("PHOBOS_FUSED_MLP"),
-            fused_project: fused_stage("PHOBOS_FUSED_PROJ"),
-            fused_mix: fused_stage("PHOBOS_FUSED_MIX"),
-            fused_attn_out: fused_stage("PHOBOS_FUSED_ATTN_OUT"),
-            fused_store2d: fused_stage("PHOBOS_FUSED_STORE2D"),
+            fused_mlp: fused_stage("PHOBOS_FUSED_MLP", wide),
+            fused_project: fused_stage("PHOBOS_FUSED_PROJ", wide),
+            fused_mix: fused_stage("PHOBOS_FUSED_MIX", true),
+            fused_attn_out: fused_stage("PHOBOS_FUSED_ATTN_OUT", true),
+            fused_store2d: fused_stage("PHOBOS_FUSED_STORE2D", true),
             fused_blocks: Cell::new(0),
             fused_scratch: RefCell::new(Vec::new()),
             fused_barrier: RefCell::new(None),
