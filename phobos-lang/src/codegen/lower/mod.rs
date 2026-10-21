@@ -7,6 +7,7 @@ mod intrinsics;
 mod lanes;
 mod pipeline;
 mod regs;
+pub(in crate::codegen) mod rotate;
 pub(crate) mod membar;
 pub(crate) mod plan;
 mod scalar;
@@ -278,6 +279,9 @@ impl<'c> Codegen<'c> {
             self.skip_barrier = None;
         }
         emitted?;
+        if self.rotate_after.contains_key(&op) {
+            self.issue_after(block, ir, op)?;
+        }
         if recording {
             self.trace.events.push(plan::Event::OpEnd(op));
             if ir.kind(op).makes_buffer() {

@@ -680,6 +680,23 @@ impl Isa for Nvidia {
         Ok(())
     }
 
+    fn async_wait_pending<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        group: Value<'c, 'c>,
+        pending: u32,
+    ) -> Result<()> {
+        let count = IntegerAttribute::new(cg.i32_t, i64::from(pending));
+        block.append_operation(
+            OperationBuilder::new("nvgpu.device_async_wait", cg.loc)
+                .add_operands(&[group])
+                .add_attributes(&[(cg.id("numGroups"), count.into())])
+                .build()?,
+        );
+        Ok(())
+    }
+
     // ---- wmma ----
 
     fn wmma_a_type<'c>(&self, cg: &Codegen<'c>) -> Result<Type<'c>> {

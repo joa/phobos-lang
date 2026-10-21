@@ -76,7 +76,7 @@ fn defers(ir: &Ir, op: OpId) -> bool {
 }
 
 /// Whether `op`, or an op nested in it, writes a tensor or a view of one.
-fn writes_global(ir: &Ir, op: OpId) -> bool {
+pub(super) fn writes_global(ir: &Ir, op: OpId) -> bool {
     let operands = ir.operands(op);
     let writes = ir.kind(op).writes(operands.len()).into_iter().any(|i| match ir.ty(operands[i]) {
         Type::Tensor(_) => true,

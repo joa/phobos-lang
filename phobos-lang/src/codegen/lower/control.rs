@@ -123,6 +123,13 @@ impl<'c> Codegen<'c> {
         let st = self.scalar_ir(ir.operand(op, 2))?;
         let body = ir.blocks_of(op)[0];
         let carried = &ir.operands(op)[3..3 + info.carried];
+        let rotate = self.has_cp_async() && self.pipeline != Some(false);
+        let rots = if rotate { super::rotate::plan(ir, body) } else { Vec::new() };
+        let rotated = if rots.is_empty() {
+            Vec::new()
+        } else {
+            self.start_rotation(block, ir, ir.args(body)[0], (lo, hi, st), &rots)?
+        };
         // Each carried value is a fragment accumulator or a register tile;
         // the loop sees only its registers.
         let likes: Vec<Lowered<'c>> = carried.iter().map(|&v| self.get_ir(v).cloned()).collect::<Result<_>>()?;
@@ -174,6 +181,9 @@ impl<'c> Codegen<'c> {
             off += group.len();
             let lowered = self.with_vals(like, vals)?;
             self.set_ir(ir.results(op)[k], lowered);
+        }
+        if !rots.is_empty() {
+            self.end_rotation(block, &rots, rotated)?;
         }
         Ok(())
     }

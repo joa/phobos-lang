@@ -255,6 +255,17 @@ pub(super) trait Isa {
         group: Value<'c, 'c>,
     ) -> Result<()>;
 
+    /// Waits until at most `pending` of this thread's committed groups are
+    /// still in flight. `group` is any committed group's token; only the
+    /// count decides what is waited for.
+    fn async_wait_pending<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        group: Value<'c, 'c>,
+        pending: u32,
+    ) -> Result<()>;
+
     // ---- the opaque-fragment tensor path ----
     //
     // Fragments with a per-lane layout only the target knows. The emitter
@@ -609,6 +620,15 @@ impl<'c> Codegen<'c> {
         group: Value<'c, 'c>,
     ) -> Result<()> {
         self.isa.async_wait(self, block, group)
+    }
+
+    pub(in crate::codegen) fn async_wait_pending(
+        &self,
+        block: &Block<'c>,
+        group: Value<'c, 'c>,
+        pending: u32,
+    ) -> Result<()> {
+        self.isa.async_wait_pending(self, block, group, pending)
     }
 
     // ---- the opaque-fragment tensor path ----

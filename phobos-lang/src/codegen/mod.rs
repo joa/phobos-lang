@@ -405,6 +405,10 @@ struct Codegen<'c> {
     /// Stages loaded into registers, waiting for the barrier ahead of their
     /// readers. See `lower::defer`.
     deferred: Vec<lower::defer::Deferred<'c>>,
+    /// Stages whose copy a loop issues a turn early, by stage op, and the
+    /// copies each last reader issues. See `lower::rotate`.
+    rotating: std::collections::HashMap<crate::ir::OpId, lower::rotate::Rotating<'c>>,
+    rotate_after: std::collections::HashMap<crate::ir::OpId, lower::rotate::Issues<'c>>,
     /// Why each loop declined, so a failed `@pipeline` can explain itself.
     pipeline_declines: Vec<String>,
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
@@ -518,6 +522,8 @@ impl<'c> Codegen<'c> {
             pipelined_any: false,
             copied_async: Default::default(),
             deferred: Vec::new(),
+            rotating: Default::default(),
+            rotate_after: Default::default(),
             pipeline_declines: Vec::new(),
             tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
             mma_sync: kernel.wants_mma_sync(),
