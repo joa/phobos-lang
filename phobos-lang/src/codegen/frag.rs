@@ -116,9 +116,11 @@ impl<'c> Codegen<'c> {
         self.check_shapes(&b.shape, &b_want, "fragment dot rhs")?;
         let (fm, fnn) = fa.warp_frags();
 
-        let (a_buf, a_hoisted) = self.dot_stage(block, a, &[fa.m, kk], true)?;
-        let (b_buf, b_hoisted) = self.dot_stage(block, b, &b.shape.clone(), true)?;
-        self.barrier(block)?;
+        let (a_buf, a_kept) = self.frag_dot_operand(block, a)?;
+        let (b_buf, b_kept) = self.frag_dot_operand(block, b)?;
+        if !(a_kept && b_kept) {
+            self.barrier(block)?;
+        }
 
         let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
         let finals = self.mma_sync_mac(
@@ -133,15 +135,43 @@ impl<'c> Codegen<'c> {
         )?;
 
         // Nothing to publish, but the barrier orders the ldmatrix reads
-        // before the staging is reused. Hoisted buffers are not released.
+        // before the staging, or the tile read in place, is written again.
+        // Hoisted and in-place buffers are not released.
         self.barrier(block)?;
-        if !a_hoisted {
+        if !a_kept {
             self.release(&a_buf);
         }
-        if !b_hoisted {
+        if !b_kept {
             self.release(&b_buf);
         }
         Ok(finals)
+    }
+
+    /// The buffer `ldmatrix` reads for an operand of the f16 fragment dot,
+    /// and whether it is kept rather than staged here: the operand itself
+    /// when it is an f16 shared tile laid out for the reads, else the
+    /// preheader's copy or a fresh swizzled one.
+    fn frag_dot_operand(&mut self, block: &Block<'c>, v: &MemVal<'c>) -> Result<(MemVal<'c>, bool)> {
+        if self.ldmatrix_reads_in_place(v) {
+            return Ok((v.clone(), true));
+        }
+        self.dot_stage(block, v, &v.shape.clone(), true)
+    }
+
+    /// Whether `ldmatrix` can read `v` where it is, as fast as a staged
+    /// copy: f16 in shared memory, unmasked and unpadded, every row on a
+    /// 16-byte boundary, and swizzled, since unswizzled rows of a multiple
+    /// of 128 bytes conflict eight ways.
+    fn ldmatrix_reads_in_place(&self, v: &MemVal<'c>) -> bool {
+        let [_, cols] = v.shape[..] else { return false };
+        v.shared
+            && v.elem == self.f16_t
+            && v.swizzle.is_some()
+            && v.row_stride.is_none()
+            && !v.is_masked()
+            && cols != DYN
+            && cols % 8 == 0
+            && (v.align_div == 0 || v.align_div % 8 == 0)
     }
 
     /// A lane's place in its warp's patch of 8x8 tiles, as in
