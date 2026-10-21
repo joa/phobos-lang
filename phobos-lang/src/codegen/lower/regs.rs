@@ -5,8 +5,8 @@
 // lane holds of f16-path fragments, see `RegLayout::MmaRows`.
 
 use anyhow::{Result, bail};
-use melior::dialect::memref;
-use melior::ir::{Block, BlockLike, Type, Value};
+use melior::dialect::{arith, memref, scf};
+use melior::ir::{Block, BlockLike, Region, RegionLike, Type, Value};
 
 use super::{Fill, Lowered};
 use crate::codegen::{Codegen, FragAcc, Reduce};
@@ -82,10 +82,30 @@ impl<'c> Codegen<'c> {
             OpKind::RegsStore => {
                 let regs = self.regs_ir(ir.operand(op, 0))?;
                 let dst = self.tile_ir(ir, ir.operand(op, 1))?;
+                // A fragment-row column's quad holds each row four times;
+                // its first lane stores it.
+                let (body, guard) = match regs.rows_wm {
+                    Some(_) => {
+                        let tid = self.thread_id(block)?;
+                        let four = self.const_index(block, 4)?;
+                        let in_quad = self.remui(block, tid, four)?;
+                        let zero = self.const_index(block, 0)?;
+                        let lead = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, in_quad, zero, self.loc))?;
+                        (Block::new(&[]), Some(lead))
+                    }
+                    None => (Block::new(&[]), None),
+                };
+                let at: &Block<'c> = if guard.is_some() { &body } else { block };
                 for (e, &v) in regs.vals.iter().enumerate() {
-                    let idx = self.reg_index(block, &regs, e)?;
-                    let v = self.coerce(block, v, dst.elem)?;
-                    block.append_operation(memref::store(v, dst.mem, &idx, self.loc));
+                    let idx = self.reg_index(at, &regs, e)?;
+                    let v = self.coerce(at, v, dst.elem)?;
+                    at.append_operation(memref::store(v, dst.mem, &idx, self.loc));
+                }
+                if let Some(lead) = guard {
+                    body.append_operation(scf::r#yield(&[], self.loc));
+                    let region = Region::new();
+                    region.append_block(body);
+                    block.append_operation(scf::r#if(lead, &[], region, Region::new(), self.loc));
                 }
                 self.barrier(block)?;
             }

@@ -1,6 +1,6 @@
 // Fragment-row columns. A `[rows, 1]` f32 tile that row reductions of f16
 // fragments write, and that only fills, elementwise column updates, copies,
-// accumulations, row scalings and fragment maps touch, as flash attention's
+// accumulations, row scalings, fragment maps and stores out touch, as flash attention's
 // running max and sum are, becomes registers in the lanes that hold those
 // rows of the fragments (`RegLayout::MmaRows`). Each write yields a new value and each
 // loop that writes one live before it carries it, so its reads need no
@@ -107,6 +107,10 @@ fn uses_allowed(ir: &Ir, t: ValueId, tiles: &BTreeSet<ValueId>) -> bool {
         let others_ok = || operands.iter().all(|&v| tiles.contains(&v) || matches!(ir.ty(v), Type::Scalar(_)));
         match ir.kind(u.op) {
             OpKind::Fill => u.index == 1,
+            // A store of the column to a tile outside the group.
+            OpKind::Copy { .. } if u.index == 0 && !tiles.contains(&operands[1]) => {
+                matches!(ir.ty(operands[1]), Type::Tile(_))
+            }
             OpKind::Fused(_) | OpKind::Copy { .. } | OpKind::Accumulate => others_ok(),
             OpKind::FragScale(_) => u.index == 1,
             OpKind::FragMap(_) => true,
@@ -224,6 +228,12 @@ impl Promote {
                     let leaves = [self.value(operands[1]), self.value(operands[0])];
                     let v = self.make(ir, op, OpKind::RegsFused(sum), &leaves);
                     self.env.insert(operands[1], v);
+                    ir.erase_op(op);
+                }
+                OpKind::Copy { .. } if self.tiles.contains(&operands[0]) && !self.tiles.contains(&operands[1]) => {
+                    let outer = ir.set_span(ir.span(op));
+                    ir.create_op(At::Before(op), OpKind::RegsStore, &[self.env[&operands[0]], operands[1]], Vec::new(), Vec::new());
+                    ir.set_span(outer);
                     ir.erase_op(op);
                 }
                 OpKind::Copy { .. } if self.tiles.contains(&operands[1]) => {
