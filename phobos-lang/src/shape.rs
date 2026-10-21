@@ -40,10 +40,11 @@ pub(crate) fn frag_lane_f32(m: i64, n: i64, wm: i64, wn: i64, imma: bool) -> i64
     (m / tile / wm) * (n / tile / wn) * per
 }
 
-/// The most f32 a lane holds across the fragments live at once, beyond
-/// which the registers spill: 64 8x8 tiles a warp of the int8 path, where
-/// the carried accumulator was measured to spill.
-pub(crate) const FRAG_LANE_BUDGET: i64 = 2 * IMMA_WARP_TILES;
+/// The most f32 a lane holds across the f16 fragments live at once, beyond
+/// which the registers spill. Flash attention at a head dimension of 256
+/// carries a `[64, 256]` accumulator and `[64, 32]` scores over four warps,
+/// 144 a lane, which ptxas holds without spilling from sm_86 on.
+pub(crate) const FRAG_LANE_BUDGET: i64 = 144;
 
 /// The (WM, WN) warp block of an int8 accumulator's 8x8-tile grid, chosen
 /// as [`wmma_plan`] chooses. Every warp owns the same tiles for the whole
