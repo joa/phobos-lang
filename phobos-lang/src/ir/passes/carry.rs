@@ -125,6 +125,12 @@ impl Carry<'_> {
                 ir.set_operand(op, 0, acc);
                 return acc;
             }
+            Update::Operand { index } if in_registers(ir, op, *index, &self.ty) => {
+                // The A operand of a dot whose warps own the same rows: the
+                // dot reads the fragments where the lanes hold them.
+                ir.set_operand(op, *index, acc);
+                return acc;
+            }
             Update::Operand { index } => {
                 // The one conversion: the fragments written to a shared
                 // tile of the same name for the dot to read, in the f16 the
@@ -257,6 +263,16 @@ impl Carry<'_> {
         }
         *ir.results(new).last().expect("the carried value's result")
     }
+}
+
+/// Whether fragments of type `ty` can be the A operand `index` of `dot`
+/// from registers: an f16 fragment dot into an accumulator whose warps own
+/// the same rows, whole, over a contraction of whole k steps.
+fn in_registers(ir: &Ir, dot: OpId, index: usize, ty: &Type) -> bool {
+    let (OpKind::FragDot { .. }, 1) = (ir.kind(dot), index) else { return false };
+    let (Type::Dist(a), Type::Dist(out)) = (ty, ir.ty(ir.operand(dot, 0))) else { return false };
+    let (Some(a), Some(out)) = (a.mma_acc(), out.mma_acc()) else { return false };
+    !a.imma && !out.imma && a.wn == 1 && out.wn == 1 && a.m == out.m && a.wm == out.wm && a.n % 16 == 0
 }
 
 /// The first `staged` stages of a pipelined loop's body as the staging run

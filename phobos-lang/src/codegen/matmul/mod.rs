@@ -7,6 +7,7 @@
 use super::*;
 
 pub(in crate::codegen) use gemm::{GemmAcc, GemmOperand, GemmPath, GemmPlan, GemmScale, GemmSource};
+pub(in crate::codegen) use mma_sync::AOperand;
 
 /// Width of the vector<Nxf16> global loads used when staging f16 operands.
 const HALF_VEC: i64 = 4;

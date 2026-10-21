@@ -574,7 +574,7 @@ impl<'c> Codegen<'c> {
         mma_sync: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
         if mma_sync {
-            self.mma_sync_mac(block, a_buf, b_buf, dims, m0, n0, accs, transpose_b)
+            self.mma_sync_mac(block, super::mma_sync::AOperand::Staged(a_buf), b_buf, dims, m0, n0, accs, transpose_b)
         } else {
             self.wmma_mac(block, a_buf, b_buf, dims, m0, n0, accs, transpose_b)
         }

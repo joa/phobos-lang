@@ -64,9 +64,14 @@ impl Verifier<'_> {
                     for i in 1..n {
                         let generated =
                             matches!(ir.ty(ir.operand(op, i)), Type::Dist(d) if d.layout == RegLayout::Generated);
-                        // A row scaling may read its column from the lanes.
-                        let rows = matches!(kind, OpKind::FragScale(_))
-                            && rows_of(ir.ty(ir.operand(op, 0))).as_ref() == Some(ir.ty(ir.operand(op, i)));
+                        // A row scaling may read its column from the lanes,
+                        // and a dot its A operand from fragments whose warps
+                        // own the same rows.
+                        let rows = match kind {
+                            OpKind::FragScale(_) => rows_of(ir.ty(ir.operand(op, 0))).as_ref() == Some(ir.ty(ir.operand(op, i))),
+                            OpKind::FragDot { .. } => i == 1 && same_rows(ir.ty(ir.operand(op, 0)), ir.ty(ir.operand(op, i))),
+                            _ => false,
+                        };
                         if !(rows || int8 && generated) {
                             self.want_tiles(op, i..i + 1);
                         }
@@ -231,6 +236,15 @@ impl Verifier<'_> {
 }
 
 /// The fragments a value is typed as, if it is.
+/// Whether f16-path fragments `a` can be a dot's A operand into `out`: the
+/// warps of both own the same whole rows.
+fn same_rows(out: &Type, a: &Type) -> bool {
+    match (mma_acc(out), mma_acc(a)) {
+        (Some(o), Some(a)) => !o.imma && !a.imma && o.wn == 1 && a.wn == 1 && o.m == a.m && o.wm == a.wm,
+        _ => false,
+    }
+}
+
 /// The fragment-row column of f16-path fragments whose warps own whole
 /// rows, which is the only kind a column can sit beside in the lanes.
 fn rows_of(ty: &Type) -> Option<Type> {
