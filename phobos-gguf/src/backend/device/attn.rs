@@ -121,35 +121,61 @@ impl DeviceBackend {
 
     /// Causal attention for a prompt on the tensor cores with the scores
     /// kept in registers. See [`attn_flash_src`]; the caller checks
-    /// [`attn_flash_fits`].
+    /// [`attn_flash_fits`]. A deep prompt splits its keys over
+    /// [`flash_splits`] programs a query tile and merges them after.
     pub(super) fn attention_flash(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
-        let (rows, dim) = (spec.rows as i64, spec.head_dim);
+        let (rows, dim, group) = (spec.rows as i64, spec.head_dim, spec.group());
         let (qw, nk, kw) = ((spec.n_head * dim) as i64, spec.total() as i64, spec.kv_width() as i64);
         let slices = dim / self.flash.form.value_cols(dim);
+        let splits = flash_splits(spec, self.flash.form, self.sms);
         // The queries narrow once here rather than at every key step.
         let narrow = self.alloc_h(spec.rows * qw as usize)?;
         let q_ptr = self.hptr(narrow, 0)?;
         self.strided(Strided::Store, (self.ptr(q, 0)?, qw as usize), (q_ptr, qw as usize), spec.rows, qw as usize)?;
-        let result = self.with_kernel(
-            &self.attn_flash,
-            (dim, spec.group()),
-            "attn_flash",
-            || attn_flash_src(dim, spec.group(), self.flash),
-            |module| {
-                self.launch(
-                    module,
-                    "attn_flash",
-                    &[
-                        (q_ptr, [rows, qw]),
-                        (self.hptr(keys, 0)?, [nk, kw]),
-                        (self.hptr(values, 0)?, [nk, kw]),
-                        (self.ptr(out, 0)?, [rows, qw]),
-                    ],
-                    ((spec.rows / FLASH_TILE) as u32, slices as u32, spec.n_head as u32),
+        let (k, v) = ((self.hptr(keys, 0)?, [nk, kw]), (self.hptr(values, 0)?, [nk, kw]));
+        let grid = ((spec.rows / FLASH_TILE) as u32, (slices * splits) as u32, spec.n_head as u32);
+        if splits == 1 {
+            let result = self.with_kernel(
+                &self.attn_flash,
+                (dim, group, 1),
+                "attn_flash",
+                || attn_flash_src(dim, group, self.flash, 1),
+                |module| self.launch(module, "attn_flash", &[(q_ptr, [rows, qw]), k, v, (self.ptr(out, 0)?, [rows, qw])], grid),
+            );
+            self.release_h(narrow);
+            return result;
+        }
+        let (split_rows, stats) = (splits as i64 * rows, 2 * spec.n_head as i64);
+        let partial = self.alloc(splits * spec.rows * qw as usize)?;
+        let moments = self.alloc(splits * spec.rows * stats as usize)?;
+        let (p, ml) = ((self.ptr(partial, 0)?, [split_rows, qw]), (self.ptr(moments, 0)?, [split_rows, stats]));
+        let result = self
+            .with_kernel(
+                &self.attn_flash,
+                (dim, group, splits),
+                "attn_flash",
+                || attn_flash_src(dim, group, self.flash, splits),
+                |module| self.launch(module, "attn_flash", &[(q_ptr, [rows, qw]), k, v, p, ml], grid),
+            )
+            .and_then(|()| {
+                self.with_kernel(
+                    &self.attn_merge,
+                    (dim, splits),
+                    "attn_merge",
+                    || attn_merge_src(dim, splits),
+                    |module| {
+                        self.launch(
+                            module,
+                            "attn_merge",
+                            &[p, ml, (self.ptr(out, 0)?, [rows, qw])],
+                            ((spec.rows / FLASH_MERGE_ROWS) as u32, spec.n_head as u32, 1),
+                        )
+                    },
                 )
-            },
-        );
+            });
         self.release_h(narrow);
+        self.release(partial);
+        self.release(moments);
         result
     }
 
