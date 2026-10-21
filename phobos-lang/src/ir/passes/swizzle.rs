@@ -4,15 +4,17 @@
 // granule of every row in the same banks, so the eight rows a tensor-core
 // fragment load reads at once conflict eight ways. Permuting each row's
 // granules by its row index spreads them, with no padding. A tile is
-// swizzled when the scaled int8 dot reads it, which is what pays, and every
-// access to it can apply the permutation: the dot's own loads, directly or
-// through slices; `store` and `word` runs inside one granule; and copies
-// into it, a pipelined stage's refills included.
+// swizzled when the scaled int8 dot or the f16 fragment dot reads it, which
+// is what pays (the f16 dot then reads it in place rather than staging a
+// swizzled copy), and every access to it can apply the permutation: the
+// dot's own loads, directly or, for the scaled dot, through slices; `store`
+// and `word` runs inside one granule; and copies into it, a pipelined
+// stage's refills included.
 
 use anyhow::{Result, bail};
 
 use crate::ir::build::alloc_align_div;
-use crate::ir::{AtOp, Ir, OpId, OpKind, Space, Swizzle, Type, ValueId};
+use crate::ir::{AtOp, Ir, OpId, OpKind, Scalar, Space, Swizzle, Type, ValueId};
 
 /// Swizzles the tiles that pay and allow it. `mode` is the kernel's
 /// `@swizzle`: None decides alone, Some(true) fails on a tile that would pay
@@ -104,6 +106,8 @@ fn walk(ir: &Ir, value: ValueId, uses: &mut Uses) {
         let (op, index) = (u.op, u.index);
         match ir.kind(op) {
             OpKind::FragDotScaled if index == 1 || index == 2 => uses.fragments = true,
+            // The f16 dot reads an f16 operand in place; any other it stages.
+            OpKind::FragDot { .. } if (index == 1 || index == 2) && is_f16(ir, value) => uses.fragments = true,
             // Only the scaled dot reads through a slice, from the tile
             // itself at the slice's start.
             OpKind::Slice(_) if index == 0 => {
@@ -137,6 +141,10 @@ fn walk(ir: &Ir, value: ValueId, uses: &mut Uses) {
             }
         }
     }
+}
+
+fn is_f16(ir: &Ir, v: ValueId) -> bool {
+    matches!(ir.ty(v), Type::Tile(t) if t.elem == Scalar::F16)
 }
 
 /// Whether a copy writes the tile, which honors a swizzle.
