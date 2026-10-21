@@ -69,6 +69,7 @@ impl<'c> Codegen<'c> {
                 let mv = self.tile_flat(block, &src)?;
                 self.set_ir(ir.result(op), Lowered::Tile(mv));
             }
+            OpKind::Stage(_) if self.wait_rotation(block, ir, op)? => {}
             OpKind::Stage(stage) => {
                 let src = self.tile_ir(ir, ir.operand(op, 0))?;
                 let swizzled = matches!(ir.ty(ir.result(op)), ir::Type::Tile(t) if t.layout.swizzle.is_some());
