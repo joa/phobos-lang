@@ -225,6 +225,7 @@ impl DeviceBackend {
             attn_tc: RefCell::new(HashMap::new()),
             attn_tc_on: env_flag_on("PHOBOS_ATTN_TC"),
             attn_flash: RefCell::new(HashMap::new()),
+            attn_merge: RefCell::new(HashMap::new()),
             attn_flash_on: env_flag_on("PHOBOS_ATTN_FLASH"),
             flash: FlashShape::for_chip(phobos_kernels::compile::chip()),
             slots: RefCell::new(Vec::new()),

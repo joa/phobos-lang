@@ -371,7 +371,9 @@ pub struct DeviceBackend {
     /// fits. On by default; `PHOBOS_ATTN_TC=0` opts out.
     attn_tc_on: bool,
     /// The flash prompt attention, keyed like `attn_tc`.
-    attn_flash: RefCell<HashMap<(usize, usize), Module>>,
+    attn_flash: RefCell<HashMap<(usize, usize, usize), Module>>,
+    /// The merge of a split flash attention, by head dimension and splits.
+    attn_merge: RefCell<HashMap<(usize, usize), Module>>,
     /// Whether a prompt's attention takes [`kernels::attn_flash_src`] where
     /// it fits. On by default; `PHOBOS_ATTN_FLASH=0` opts out.
     attn_flash_on: bool,

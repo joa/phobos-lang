@@ -109,23 +109,50 @@ fn scores(form: FlashForm, name: &str, at: &str) -> String {
 /// tile's own keys come last, masked. The queries arrive narrowed to f16 and
 /// the scores round to it on the way into the mix; the softmax and both
 /// accumulations stay f32.
-pub(crate) fn attn_flash_src(head_dim: usize, group: usize, shape: FlashShape) -> String {
+///
+/// With `splits` over one, program `(qt, sp * slices + vs, h)` takes the
+/// `sp`-th share of the whole key tiles below the query tile, and the last
+/// share the query tile's own keys too. Each writes its unnormalized
+/// accumulator to `P` and its row max and sum to `ML`, columns `2h` and
+/// `2h + 1`, all at row `sp * R + qrow`, for [`attn_merge_src`] to combine.
+pub(crate) fn attn_flash_src(head_dim: usize, group: usize, shape: FlashShape, splits: usize) -> String {
     let form = shape.form;
     let scale = (head_dim as f32).sqrt().recip();
     let (tile, keys, cols) = (FLASH_TILE, shape.keys, form.value_cols(head_dim));
+    let slices = head_dim / cols;
     let query = if form == FlashForm::Resident { "  var q = Q[qrow :+ BR, qcol :+ D]\n" } else { "" };
     let (step, diag) = (scores(form, "s", "kt"), scores(form, "ds", "base + dt"));
     let pipeline = if shape.pipeline { "@pipeline(on)\n" } else { "" };
+    let split = splits > 1;
+    let (outputs, place, range, diag_len, store) = if split {
+        (
+            "P: tensor<f32>[PR, QW], ML: tensor<f32>[PR, MW]",
+            "  let sp = ctx.block.y / SL\n  let vs = ctx.block.y - sp * SL",
+            "  let tiles = base / BC\n  let per = (tiles + SP - 1) / SP\n  let k0 = min(sp * per, tiles) * BC\n  let k1 = min(sp * per + per, tiles) * BC\n  for kt in range(k0, k1, BC) {",
+            "BR * (sp / (SP - 1))",
+            "  let prow = sp * R + qrow\n  P[prow :+ BR, qcol + vs * DV :+ DV] = acc\n  ML[prow :+ BR, 2 * h :+ 1] = m\n  ML[prow :+ BR, 2 * h + 1 :+ 1] = l",
+        )
+    } else {
+        (
+            "O: tensor<f32>[R, QW]",
+            "  let vs = ctx.block.y",
+            "  for kt in range(0, base, BC) {",
+            "BR",
+            "  acc = acc / l\n  O[qrow :+ BR, qcol + vs * DV :+ DV] = acc",
+        )
+    };
+    let consts = if split { format!(", SP in [{splits}], SL in [{slices}]") } else { String::new() };
+    let aligned = if split { ", PR = BR" } else { "" };
     format!(
         "@tensorcore
 @launch(128)
 @dynshared
-{pipeline}@autotune(BR in [{tile}], BC in [{keys}], TK in [32], D in [{head_dim}], DV in [{cols}], G in [{group}])
-@aligned(R = BR, NK = BR, QW = D, KW = D)
+{pipeline}@autotune(BR in [{tile}], BC in [{keys}], TK in [32], D in [{head_dim}], DV in [{cols}], G in [{group}]{consts})
+@aligned(R = BR, NK = BR, QW = D, KW = D{aligned})
 kernel attn_flash(Q: tensor<f16>[R, QW], K: tensor<f16>[NK, KW], V: tensor<f16>[NK, KW],
-                  O: tensor<f32>[R, QW]) {{
+                  {outputs}) {{
   let qt = ctx.block.x
-  let vs = ctx.block.y
+{place}
   let h = ctx.block.z
   let qrow = qt * BR
   let qcol = h * D
@@ -136,7 +163,7 @@ kernel attn_flash(Q: tensor<f16>[R, QW], K: tensor<f16>[NK, KW], V: tensor<f16>[
   var l: tile<f32>[BR, 1] = 0.0
 
   let base = NK - R + qrow
-  for kt in range(0, base, BC) {{
+{range}
     {step}
     s = s * {scale:.9}
     var mn: tile<f32>[BR, 1] = rowmax(s)
@@ -150,7 +177,7 @@ kernel attn_flash(Q: tensor<f16>[R, QW], K: tensor<f16>[NK, KW], V: tensor<f16>[
     m = mn
   }}
 
-  for dt in range(0, BR, BC) {{
+  for dt in range(0, {diag_len}, BC) {{
     {diag}
     ds = where(iota(1) + dt <= iota(0), ds * {scale:.9}, -1.0e30)
     var dm: tile<f32>[BR, 1] = rowmax(ds)
@@ -164,9 +191,79 @@ kernel attn_flash(Q: tensor<f16>[R, QW], K: tensor<f16>[NK, KW], V: tensor<f16>[
     m = dm
   }}
 
-  acc = acc / l
-  O[qrow :+ BR, qcol + vs * DV :+ DV] = acc
+{store}
 }}
 "
     )
+}
+
+/// Rows one program of [`attn_merge_src`] combines.
+pub(crate) const FLASH_MERGE_ROWS: usize = 16;
+
+/// The splits of [`attn_flash_src`] combined: each split's accumulator
+/// weighed by `exp(m_s - m)` against the largest row max `m`, divided by
+/// the sums weighed alike. One program a block of rows and a head.
+pub(crate) fn attn_merge_src(head_dim: usize, splits: usize) -> String {
+    let rows = FLASH_MERGE_ROWS;
+    format!(
+        "@launch(128)
+@autotune(TR in [{rows}], D in [{head_dim}], SP in [{splits}])
+@aligned(R = TR, PR = TR, QW = D)
+kernel attn_merge(P: tensor<f32>[PR, QW], ML: tensor<f32>[PR, MW], O: tensor<f32>[R, QW]) {{
+  let r0 = ctx.block.x * TR
+  let h = ctx.block.y
+  var mx: tile<f32>[TR, 1] = -1.0e30
+  for s in range(0, SP) {{
+    mx = tmax(mx, ML[s * R + r0 :+ TR, 2 * h :+ 1])
+  }}
+  var den: tile<f32>[TR, 1] = 0.0
+  var acc: tile<f32>[TR, D] = 0.0
+  for s in range(0, SP) {{
+    var w: tile<f32>[TR, 1] = exp(ML[s * R + r0 :+ TR, 2 * h :+ 1] - mx)
+    den += w * ML[s * R + r0 :+ TR, 2 * h + 1 :+ 1]
+    acc += P[s * R + r0 :+ TR, h * D :+ D] * w
+  }}
+  O[r0 :+ TR, h * D :+ D] = acc / den
+}}
+"
+    )
+}
+
+/// Programs a multiprocessor the split aims the grid at: a few waves of
+/// two each, so the last wave's tail is short.
+const FLASH_PROGRAMS_PER_SM: usize = 8;
+
+/// Keys a split takes at least, so its share outweighs the merge.
+const FLASH_SPLIT_KEYS: usize = 1024;
+
+/// Most splits of one query tile's keys.
+const FLASH_MAX_SPLITS: usize = 8;
+
+/// How many ways [`attn_flash_src`] splits this prompt's keys on a card of
+/// `sms` multiprocessors: enough programs for a few waves, while each share
+/// keeps [`FLASH_SPLIT_KEYS`] keys. One at a shallow depth.
+pub(crate) fn flash_splits(spec: Attn, form: FlashForm, sms: usize) -> usize {
+    let programs = spec.rows / FLASH_TILE * (spec.head_dim / form.value_cols(spec.head_dim)) * spec.n_head;
+    let wanted = (FLASH_PROGRAMS_PER_SM * sms).div_ceil(programs.max(1));
+    wanted.min(spec.start_pos / FLASH_SPLIT_KEYS).clamp(1, FLASH_MAX_SPLITS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(rows: usize, start_pos: usize, n_head: usize) -> Attn {
+        Attn { rows, start_pos, n_head, n_kv: 4, head_dim: 256 }
+    }
+
+    #[test]
+    fn a_deep_prompt_splits_its_keys_to_fill_the_card() {
+        // The 27B on an A40: 8 query tiles of 24 heads, a wave and a bit.
+        assert_eq!(flash_splits(spec(512, 32256, 24), FlashForm::Resident, 84), 4);
+        // Shallow: every share would be short.
+        assert_eq!(flash_splits(spec(512, 512, 24), FlashForm::Resident, 84), 1);
+        assert_eq!(flash_splits(spec(512, 2048, 24), FlashForm::Resident, 84), 2);
+        // A grid that already fills the card stays whole.
+        assert_eq!(flash_splits(spec(4096, 32256, 24), FlashForm::Resident, 84), 1);
+    }
 }
