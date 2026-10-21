@@ -189,7 +189,7 @@ impl<'c> Codegen<'c> {
             vec![seed; (fm * fnn * 2) as usize]
         };
 
-        let finals = self.mma_sync_mac(block, &a_buf, &b_buf, dims, m0, n0, &regs, transpose_b)?;
+        let finals = self.mma_sync_mac(block, AOperand::Staged(&a_buf), &b_buf, dims, m0, n0, &regs, transpose_b)?;
 
         self.mma_sync_store_frags(block, out, &finals, (fm, fnn), m0, n0)?;
         self.barrier(block)?;
@@ -319,7 +319,7 @@ impl<'c> Codegen<'c> {
     pub(in crate::codegen) fn mma_sync_mac(
         &mut self,
         block: &Block<'c>,
-        a_buf: &MemVal<'c>,
+        a: AOperand<'_, 'c>,
         b_buf: &MemVal<'c>,
         dims: (i64, i64, i64),
         m0: Value<'c, 'c>,
@@ -350,17 +350,14 @@ impl<'c> Codegen<'c> {
             // A fragments: one m16 x K block per fi.
             let mut a_frags = Vec::with_capacity(fm as usize);
             for fi in 0..fm {
-                let c = self.const_index(block, fi * 16)?;
-                let mi = self.addi(block, m0, c)?;
-                a_frags.push(self.ldmatrix_frag(
-                    block,
-                    a_buf,
-                    &[mi, kbase],
-                    a_tiles,
-                    Frag::A,
-                    a_frag_t,
-                    lane,
-                )?);
+                a_frags.push(match a {
+                    AOperand::Staged(a_buf) => {
+                        let c = self.const_index(block, fi * 16)?;
+                        let mi = self.addi(block, m0, c)?;
+                        self.ldmatrix_frag(block, a_buf, &[mi, kbase], a_tiles, Frag::A, a_frag_t, lane)?
+                    }
+                    AOperand::Frags(src) => self.a_frag_of_acc(block, src, fi, ks, mma_k, a_frag_t)?,
+                });
             }
 
             // B fragments: one K x n8 block per (fj, n8). NN reads the [k, n]
@@ -399,6 +396,40 @@ impl<'c> Codegen<'c> {
             }
         }
         Ok(accs)
+    }
+
+    /// The A fragment of an m16 x K step read from an accumulator's D
+    /// fragments in this lane's registers. Row block `fi` and k step `ks` of
+    /// the operand are row block `fi` and columns `ks * K ..` of `src`,
+    /// whose warps own the same rows. A D tile holds rows `g` and `g + 8` at
+    /// columns `2t` and `2t + 1`, which is where an A tile wants them, so
+    /// each 8x8 tile of the fragment is half a D tile, rounded to f16.
+    fn a_frag_of_acc(
+        &self,
+        block: &Block<'c>,
+        src: &FragAcc<'c>,
+        fi: i64,
+        ks: i64,
+        mma_k: i64,
+        a_frag_t: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        let (_, fnn) = src.warp_frags();
+        let zero = self.zero_scalar(block, self.f16_t)?;
+        let mut frag = self.vec_broadcast(block, zero, a_frag_t)?;
+        // Tile j of the fragment: rows `g + 8 (j % 2)`, columns
+        // `8 (j / 2) ..` of the step, the n8 half `nn` of 16-column block
+        // `fj` of the source.
+        for j in 0..2 * (mma_k / 8) {
+            let col = ks * mma_k + 8 * (j / 2);
+            let (fj, nn, di) = (col / 16, col % 16 / 8, j % 2);
+            let d = src.frags[((fi * fnn + fj) * 2 + nn) as usize];
+            for e in 0..2 {
+                let x = self.vec_extract(block, d, &[di, e], self.f32_t)?;
+                let h = self.truncf(block, x, self.f16_t)?;
+                frag = self.vec_insert(block, h, frag, &[j, e])?;
+            }
+        }
+        Ok(frag)
     }
 
     /// The warp's [`Self::ldmatrix`] operand at the warp-tile origin `indices`
@@ -464,6 +495,14 @@ impl<'c> Codegen<'c> {
 
         self.ldmatrix(block, buf.mem, [row, col], num_tiles, transpose, frag_t)
     }
+}
+
+/// Where an `mma.sync` reads its A operand: a staged f16 buffer through
+/// `ldmatrix`, or an f16-path accumulator's D fragments in registers.
+#[derive(Clone, Copy)]
+pub(in crate::codegen) enum AOperand<'a, 'c> {
+    Staged(&'a MemVal<'c>),
+    Frags(&'a FragAcc<'c>),
 }
 
 /// How an [`ldmatrix`](Codegen::ldmatrix) operand's 8x8 tiles sit in its

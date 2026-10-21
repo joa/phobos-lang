@@ -1,4 +1,12 @@
 use super::*;
+use crate::codegen::matmul::AOperand;
+
+/// The A operand of an f16 fragment dot: a tile, or another accumulator's
+/// fragments whose warps own the same rows.
+pub(super) enum DotA<'c> {
+    Tile(MemVal<'c>),
+    Frags(FragAcc<'c>),
+}
 
 /// A `[rows, 1]` column an accumulator's rows read: a shared tile, or the
 /// lane's own rows in registers (`RegLayout::MmaRows`).
@@ -120,29 +128,50 @@ impl<'c> Codegen<'c> {
         &mut self,
         block: &Block<'c>,
         fa: &FragAcc<'c>,
-        a: &MemVal<'c>,
+        a: &DotA<'c>,
         b: &MemVal<'c>,
         transpose: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
         if fa.imma {
             bail!("internal: f16 dot into an int8 fragment accumulator");
         }
-        let kk = a.shape[1];
-        self.check_shapes(&a.shape, &[fa.m, kk], "fragment dot lhs")?;
+        let kk = match a {
+            DotA::Tile(a) => {
+                self.check_shapes(&a.shape, &[fa.m, a.shape[1]], "fragment dot lhs")?;
+                a.shape[1]
+            }
+            DotA::Frags(src) => {
+                if src.imma || src.m != fa.m || src.wm != fa.wm || src.wn != 1 || fa.wn != 1 {
+                    bail!("internal: a fragment operand whose warps do not own the dot's rows");
+                }
+                src.n
+            }
+        };
         let b_want = if transpose { [fa.n, kk] } else { [kk, fa.n] };
         self.check_shapes(&b.shape, &b_want, "fragment dot rhs")?;
         let (fm, fnn) = fa.warp_frags();
 
-        let (a_buf, a_kept) = self.frag_dot_operand(block, a)?;
+        let (a_buf, a_kept) = match a {
+            DotA::Tile(a) => {
+                let (buf, kept) = self.frag_dot_operand(block, a)?;
+                (Some(buf), kept)
+            }
+            DotA::Frags(_) => (None, true),
+        };
         let (b_buf, b_kept) = self.frag_dot_operand(block, b)?;
         if !(a_kept && b_kept) {
             self.barrier(block)?;
         }
 
         let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
+        let a_op = match (a, &a_buf) {
+            (DotA::Frags(src), _) => AOperand::Frags(src),
+            (DotA::Tile(_), Some(buf)) => AOperand::Staged(buf),
+            (DotA::Tile(_), None) => unreachable!("a tile operand is staged or kept"),
+        };
         let finals = self.mma_sync_mac(
             block,
-            &a_buf,
+            a_op,
             &b_buf,
             (kk, fm, fnn),
             m0,
@@ -155,8 +184,8 @@ impl<'c> Codegen<'c> {
         // before the staging, or the tile read in place, is written again.
         // Hoisted and in-place buffers are not released.
         self.barrier(block)?;
-        if !a_kept {
-            self.release(&a_buf);
+        if let (false, Some(a_buf)) = (a_kept, &a_buf) {
+            self.release(a_buf);
         }
         if !b_kept {
             self.release(&b_buf);

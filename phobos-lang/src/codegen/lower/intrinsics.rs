@@ -7,7 +7,7 @@ use melior::{
 use super::{Lowered, dims};
 use crate::codegen::tile::{QWeight, QgFormat};
 use crate::codegen::matmul::{GemmPath, GemmScale};
-use crate::codegen::frag::{RowCol, SliceOrigin};
+use crate::codegen::frag::{DotA, RowCol, SliceOrigin};
 use crate::codegen::{Codegen, FragAcc, MemVal};
 use crate::ir::{self, Coeff, Intrinsic, Ir, OpId, OpKind, RawFmt};
 
@@ -99,11 +99,16 @@ impl<'c> Codegen<'c> {
             }
             OpKind::FragDot { transpose } => {
                 let fa = self.frags_ir(ir.operand(op, 0))?;
-                let a = self.tile_ir(ir, ir.operand(op, 1))?;
+                let a = match ir.ty(ir.operand(op, 1)) {
+                    ir::Type::Dist(_) => DotA::Frags(self.frags_ir(ir.operand(op, 1))?),
+                    _ => DotA::Tile(self.tile_ir(ir, ir.operand(op, 1))?),
+                };
                 let b = self.tile_ir(ir, ir.operand(op, 2))?;
                 self.record_contract("mma.sync");
                 let frags = self.frag_dot_raw(block, &fa, &a, &b, transpose)?;
-                self.release(&a);
+                if let DotA::Tile(a) = &a {
+                    self.release(a);
+                }
                 self.release(&b);
                 self.set_ir(ir.result(op), Lowered::Frags(FragAcc { frags, ..fa }));
             }
