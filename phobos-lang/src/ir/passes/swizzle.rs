@@ -69,18 +69,27 @@ pub(crate) fn decide(ir: &mut Ir, mode: Option<bool>) -> Result<()> {
 }
 
 /// The permutation for a rank-2 static shared tile whose rows hold a
-/// multiple of eight 16-byte granules, as `alloc_tile_swizzled` lays it out.
+/// multiple of eight 16-byte granules, as `alloc_tile_swizzled` lays it out,
+/// or for an f16 tile of two or four granules a row, as many bits as that
+/// takes: eight rows of four granules span the banks twice over, and a
+/// two-bit permutation by the row spreads them as three bits spread eight.
 fn shape_swizzle(ir: &Ir, tile: ValueId) -> Option<Swizzle> {
     let Type::Tile(t) = ir.ty(tile) else { return None };
     let shape = t.static_shape()?;
     let (&[_, cols], Some(bytes)) = (&shape[..], t.elem.bytes()) else { return None };
     // A wider element would split a copy's 16-byte chunk across granules.
-    if t.space != Space::Shared || t.layout.swizzle.is_some() || bytes > 4 || cols * bytes % 128 != 0 {
+    if t.space != Space::Shared || t.layout.swizzle.is_some() || bytes > 4 {
         return None;
     }
+    let granules = cols * bytes / 16;
+    let bits = match granules {
+        g if cols * bytes % 128 == 0 && g >= 8 => 3,
+        2 | 4 if t.elem == Scalar::F16 && cols * bytes % 16 == 0 => granules.trailing_zeros(),
+        _ => return None,
+    };
     let granule = (16 / bytes).max(1);
     Some(Swizzle {
-        bits: 3,
+        bits,
         shift: 0,
         elem_log: granule.trailing_zeros(),
     })
@@ -132,6 +141,7 @@ fn walk(ir: &Ir, value: ValueId, uses: &mut Uses) {
                 }
             }
             kind if kind.writes(ir.operands(op).len()).contains(&index) && is_copy(kind) => {}
+            OpKind::FragStore if index == 1 => {}
             _ => {
                 uses.blocker.get_or_insert(Blocker {
                     op,
