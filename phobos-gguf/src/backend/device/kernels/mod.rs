@@ -12,6 +12,7 @@ mod delta;
 mod dump;
 mod elem;
 mod f32_lanes;
+mod flash;
 mod hadamard;
 mod iq1m;
 mod iq_f32;
@@ -35,6 +36,7 @@ mod quant;
 
 pub(crate) use argmax::*;
 pub(crate) use attn::*;
+pub(crate) use flash::*;
 // The attention checks in `examples/` compile these themselves, so they stay
 // reachable at `backend::device::`.
 pub use attn::{ATTN_GEMM_TILE, ATTN_SOFT_TILE, attn_gemm_src};

@@ -74,7 +74,8 @@ impl DeviceBackend {
     }
 
     /// Picks the attention path for this shape: the tensor cores for a
-    /// prompt's whole tiles, then the blocked kernel, the two-matmul path,
+    /// prompt's whole tiles, flash where it fits and the written-out scores
+    /// otherwise, then the blocked kernel, the two-matmul path,
     /// the decode split, and a row at a time.
     pub(super) fn attention_any(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
         let block = attention_block_tile(spec.head_dim);
@@ -85,8 +86,14 @@ impl DeviceBackend {
             rows: spec.rows / ATTN_TC_TILE * ATTN_TC_TILE,
             ..spec
         };
-        if self.attn_tc_on && tiled.rows > 0 && attn_tc_fits(tiled) {
-            self.attention_tc(q, keys, values, tiled, out)?;
+        const _: () = assert!(FLASH_TILE == ATTN_TC_TILE, "both prompt paths take the same whole tiles");
+        let flash = self.attn_flash_on && attn_flash_fits(tiled);
+        if tiled.rows > 0 && (flash || self.attn_tc_on && attn_tc_fits(tiled)) {
+            if flash {
+                self.attention_flash(q, keys, values, tiled, out)?;
+            } else {
+                self.attention_tc(q, keys, values, tiled, out)?;
+            }
             let rest = Attn {
                 rows: spec.rows - tiled.rows,
                 start_pos: tiled.total(),
@@ -110,6 +117,40 @@ impl DeviceBackend {
             1 => self.attention_decode(q, keys, values, spec, out),
             _ => self.attention_rows(q, keys, values, spec, out),
         }
+    }
+
+    /// Causal attention for a prompt on the tensor cores with the scores
+    /// kept in registers. See [`attn_flash_src`]; the caller checks
+    /// [`attn_flash_fits`].
+    pub(super) fn attention_flash(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+        let (rows, dim) = (spec.rows as i64, spec.head_dim);
+        let (qw, nk, kw) = ((spec.n_head * dim) as i64, spec.total() as i64, spec.kv_width() as i64);
+        let slices = dim / FLASH_VALUE_COLS.min(dim);
+        // The queries narrow once here rather than at every key step.
+        let narrow = self.alloc_h(spec.rows * qw as usize)?;
+        let q_ptr = self.hptr(narrow, 0)?;
+        self.strided(Strided::Store, (self.ptr(q, 0)?, qw as usize), (q_ptr, qw as usize), spec.rows, qw as usize)?;
+        let result = self.with_kernel(
+            &self.attn_flash,
+            (dim, spec.group()),
+            "attn_flash",
+            || attn_flash_src(dim, spec.group()),
+            |module| {
+                self.launch(
+                    module,
+                    "attn_flash",
+                    &[
+                        (q_ptr, [rows, qw]),
+                        (self.hptr(keys, 0)?, [nk, kw]),
+                        (self.hptr(values, 0)?, [nk, kw]),
+                        (self.ptr(out, 0)?, [rows, qw]),
+                    ],
+                    ((spec.rows / FLASH_TILE) as u32, slices as u32, spec.n_head as u32),
+                )
+            },
+        );
+        self.release_h(narrow);
+        result
     }
 
     /// Causal attention for a prompt on the tensor cores, a slab of rows and
