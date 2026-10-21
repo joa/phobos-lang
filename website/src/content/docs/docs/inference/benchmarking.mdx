@@ -30,7 +30,7 @@ It reports two kinds of rows, in tokens per second:
 | `-m`, `--model FILE` | `models/Qwen3.5-0.8B-Q8_0.gguf` | The GGUF file to run. |
 | `-p`, `--n-prompt N,...` | `128` | Prompt sizes, one `pp` row each. |
 | `-n`, `--n-gen N,...` | `32` | Generation lengths, one `tg` row each. |
-| `-d`, `--n-depth N,...` | `0` | Tokens already in the context before each `tg` row starts, fed as a prompt is; one set of `tg` rows per depth. |
+| `-d`, `--n-depth N,...` | `0` | Tokens already in the context before each `pp` and `tg` row starts, fed as a prompt is and not timed; one set of rows per depth. |
 | `-r`, `--repetitions N` | `3` | Timed repetitions per row. |
 | `-b`, `--batch-size N` | `2048` | Tokens a prompt is handed over in at a time; the logits are read back after each batch. |
 | `-ub`, `--ubatch-size N` | `512` | Tokens in one forward pass, at most the batch size. `phobos-cli` and the server tune theirs per depth of the context instead (`--batch auto`), so pass the size they settled on to compare. A mixture-of-experts model takes at most 1024. |

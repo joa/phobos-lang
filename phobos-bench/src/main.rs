@@ -32,8 +32,8 @@ struct Args {
     model: PathBuf,
     prompt_tokens: Vec<usize>,
     gen_tokens: Vec<usize>,
-    /// Positions already in the context when a tg row starts, as
-    /// llama-bench's `-d`. Each depth gets its own set of tg rows.
+    /// Positions already in the context when a pp or tg row starts, as
+    /// llama-bench's `-d`. Each depth gets its own set of rows.
     depths: Vec<usize>,
     repetitions: usize,
     /// Tokens handed over at a time, as llama-bench's `-b`. The logits are
@@ -60,8 +60,8 @@ OPTIONS:
   -m, --model FILE      the GGUF file to run (default: {DEFAULT_MODEL})
   -p, --n-prompt N,...  prompt-processing tokens, one pp<N> row each (default: 128)
   -n, --n-gen N,...     generated tokens, one tg<N> row each (default: 32)
-  -d, --n-depth N,...   positions in the context before each tg row starts,
-                        one set of tg rows per depth (default: 0)
+  -d, --n-depth N,...   positions in the context before each pp and tg row
+                        starts, one set of rows per depth (default: 0)
   -r, --repetitions N   timed repetitions per row (default: 3)
   -b, --batch-size N    tokens a prompt is handed over in at a time, its logits
                         read back after each batch (default: {DEFAULT_BATCH})
@@ -83,6 +83,12 @@ OPTIONS:
   llama-bench's lists of them, a row per combination, are not supported.
   A pp<N> row and the positions a -d row primes are fed the same way."
     );
+}
+
+/// A row's name as llama-bench prints it: `pp512`, or `pp512 @ d4096` past
+/// an empty context.
+fn at_depth(test: String, depth: usize) -> String {
+    if depth == 0 { test } else { format!("{test} @ d{depth}") }
 }
 
 /// A batch or ubatch size: one positive token count.
@@ -273,8 +279,9 @@ fn main() -> Result<()> {
         .prompt_tokens
         .iter()
         .copied()
-        .chain(args.gen_tokens.iter().map(|&n| n + args.depths.iter().max().unwrap_or(&0)))
+        .chain(args.gen_tokens.iter().copied())
         .max()
+        .map(|n| n + args.depths.iter().max().unwrap_or(&0))
         .unwrap_or(0);
     let count = longest.max(128) + 1;
     let tokens = synthetic_tokens(count, vocab, 0);
@@ -287,7 +294,7 @@ fn main() -> Result<()> {
         // rows to reach the widest batched tile. Each distinct pass length the
         // timed runs feed gets its own pass, because the first pass at a shape
         // builds its graph.
-        let fed = args.prompt_tokens.iter().copied().chain(args.depths.iter().map(|&d| d + 1));
+        let fed = args.prompt_tokens.iter().copied().chain(args.depths.iter().flat_map(|&d| [d, d + 1]));
         let mut shapes: Vec<usize> =
             fed.flat_map(|n| passes(n, args.batch, args.ubatch)).map(|(len, _)| len).collect();
         shapes.push(128);
@@ -308,28 +315,27 @@ fn main() -> Result<()> {
     }
 
     let mut rows = Vec::new();
-    for &prompt_tokens in &args.prompt_tokens {
+    for (&depth, &prompt_tokens) in args.depths.iter().flat_map(|d| args.prompt_tokens.iter().map(move |n| (d, n))) {
+        let test = at_depth(format!("pp{prompt_tokens}"), depth);
         let mut rates = Vec::new();
         for (rep, tokens) in rep_tokens.iter().enumerate() {
             backend.cool_expert_cache()?;
             let mut state = model.new_state();
+            // The context the prompt continues, untimed.
+            feed(&model, &mut state, &tokens[..depth], &args, backend.as_ref())?;
             let before = backend.cache_stats();
             let start = Instant::now();
-            feed(&model, &mut state, &tokens[..prompt_tokens], &args, backend.as_ref())?;
+            feed(&model, &mut state, &tokens[depth..depth + prompt_tokens], &args, backend.as_ref())?;
             let secs = start.elapsed().as_secs_f64();
             state.release(backend.as_ref());
             rates.push(prompt_tokens as f64 / secs);
             let hits = hit_rate(before, backend.cache_stats(), |s| (s.expert_prompt_hits, s.expert_prompt_misses));
-            eprintln!(
-                "  pp{prompt_tokens} rep {}/{}: {secs:.3} s{hits}",
-                rep + 1,
-                args.repetitions,
-            );
+            eprintln!("  {test} rep {}/{}: {secs:.3} s{hits}", rep + 1, args.repetitions);
         }
-        rows.push((format!("pp{prompt_tokens}"), rates));
+        rows.push((test, rates));
     }
     for (&depth, &gen_tokens) in args.depths.iter().flat_map(|d| args.gen_tokens.iter().map(move |n| (d, n))) {
-        let test = if depth == 0 { format!("tg{gen_tokens}") } else { format!("tg{gen_tokens} @ d{depth}") };
+        let test = at_depth(format!("tg{gen_tokens}"), depth);
         let mut rates = Vec::new();
         for (rep, tokens) in rep_tokens.iter().enumerate() {
             backend.cool_expert_cache()?;
