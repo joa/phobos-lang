@@ -23,6 +23,7 @@ mod ptq1;
 mod math;
 mod qdot;
 mod qgemm;
+mod qgemm_contract;
 mod qgemm_fmt;
 mod qmma;
 mod qmma_signed;

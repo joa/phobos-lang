@@ -113,17 +113,41 @@ fn qgemm_refuses_the_wrong_table() {
 }
 
 #[test]
-fn blackwell_contracts_with_m16n8k32_at_one_cta_an_sm() {
-    // sm_120 has no native m8n8k16 and runs it as a half-used m16n8k16, so
-    // the int8 contraction takes the wide shape there, and the fragments it
-    // holds ask for one CTA an SM. Ada keeps the narrow shape and two.
+fn sm_80_on_contracts_with_m16n8k32_and_blackwell_at_one_cta_an_sm() {
+    // From sm_80 the int8 contraction takes the wide shape, its fragments
+    // loaded whole, for a format with a scale per 32 elements. sm_120 has no native m8n8k16 and holds more of them, so
+    // it asks for one CTA an SM; Ada keeps two, and Turing the narrow shape.
     let src = qgemm_src("q4k", &[], "256, 2");
+    let turing = emit_mlir_sync(&src, "sm_75");
     let ada = emit_mlir_sync(&src, "sm_89");
     let blackwell = emit_mlir_sync(&src, "sm_120");
-    assert!(ada.contains("mmaShape = [8, 8, 16]") && !ada.contains("mmaShape = [16, 8, 32]"), "{ada}");
-    assert!(blackwell.contains("mmaShape = [16, 8, 32]") && !blackwell.contains("mmaShape = [8, 8, 16]"), "{blackwell}");
+    assert!(turing.contains("mmaShape = [8, 8, 16]") && !turing.contains("mmaShape = [16, 8, 32]"), "{turing}");
+    for wide in [&ada, &blackwell] {
+        assert!(wide.contains("mmaShape = [16, 8, 32]") && !wide.contains("mmaShape = [8, 8, 16]"), "{wide}");
+    }
     assert!(ada.contains("nvvm.minctasm = 2"), "{ada}");
     assert!(blackwell.contains("nvvm.minctasm = 1"), "{blackwell}");
+    // A scale per 16 elements keeps the native narrow shape until Blackwell.
+    let split = qgemm_src("iq2s", &[8192, 2048], "256, 2");
+    let ada = emit_mlir_sync(&split, "sm_89");
+    let blackwell = emit_mlir_sync(&split, "sm_120");
+    assert!(ada.contains("mmaShape = [8, 8, 16]") && !ada.contains("mmaShape = [16, 8, 16]"), "{ada}");
+    assert!(blackwell.contains("mmaShape = [16, 8, 16]") && !blackwell.contains("mmaShape = [8, 8, 16]"), "{blackwell}");
+}
+
+#[test]
+fn m16n8k32_sums_the_activation_groups_itself() {
+    // A format with a minimum needs each activation group's sum. Turing
+    // stages a plane of them; the wide shape takes them from one more mma
+    // per row pair against ones, as many ldmatrix as before.
+    let src = qgemm_src("q4k", &[], "256, 2");
+    let turing = emit_mlir_sync(&src, "sm_75");
+    let ampere = emit_mlir_sync(&src, "sm_86");
+    assert!(turing.contains("memref<128x4xi32, 3>"), "{turing}");
+    assert!(!ampere.contains("memref<128x4xi32, 3>"), "{ampere}");
+    assert_eq!(turing.matches("nvvm.ldmatrix").count(), ampere.matches("nvvm.ldmatrix").count());
+    // Per group, eight tiles of the patch and two row sums.
+    assert_eq!(ampere.matches("nvgpu.mma.sync").count() % 10, 0, "{ampere}");
 }
 
 #[test]

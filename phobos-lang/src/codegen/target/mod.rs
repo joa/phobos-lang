@@ -52,6 +52,10 @@ pub(super) trait Isa {
     /// has no native `m8n8k16` and runs it as a half-used `m16n8k16`.
     fn int8_mma_k(&self) -> i64;
 
+    /// Whether the chip has the int8 `mma.m16n8k32`, sm_80 on, whatever
+    /// [`Isa::int8_mma_k`] the generic integer dot issues.
+    fn has_int8_mma_k32(&self) -> bool;
+
     /// Shared memory bytes one SM splits across its resident CTAs, plus the
     /// two other occupancy limits below. Only [`Codegen::wmma_should_pad`]
     /// reads them.
@@ -438,6 +442,10 @@ impl<'c> Codegen<'c> {
 
     pub(super) fn int8_mma_k(&self) -> i64 {
         self.isa.int8_mma_k()
+    }
+
+    pub(super) fn has_int8_mma_k32(&self) -> bool {
+        self.isa.has_int8_mma_k32()
     }
 
     /// The k of the native f16 mma.sync. Call only after
