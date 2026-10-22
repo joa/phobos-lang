@@ -317,11 +317,14 @@ impl DeviceBackend {
                 q_len: m * k,
                 s: self.act_arena.take(m * blocks * size_of::<f32>())?,
                 s_len: m * blocks,
+                sums: self.act_arena.take(m * blocks * size_of::<f32>())?,
+                fills: 0,
+                sums_fill: 0,
             };
             let mut scratch = self.act_scratch.borrow_mut();
             // A gap slot is grown by the `too_small` path before anything
             // reads it.
-            let gap = ActSlot { q: 0, q_len: 0, s: 0, s_len: 0 };
+            let gap = ActSlot { q: 0, q_len: 0, s: 0, s_len: 0, sums: 0, fills: 0, sums_fill: 0 };
             let len = scratch.len().max(at);
             scratch.resize(len, gap);
             if at == scratch.len() {
@@ -330,8 +333,38 @@ impl DeviceBackend {
                 scratch[at] = grown;
             }
         }
+        // Every caller fills the slot next, which leaves its sums behind.
+        self.act_scratch.borrow_mut()[at].fills += 1;
         let (q, s) = self.act_ptrs(QAct(at))?;
         Ok((QAct(at), q, s))
+    }
+
+    /// The activation's sum over each block of 32, the integer it is, as
+    /// f32: the minimum term of a staged projection with a minimum. Summed
+    /// from the quantized values once per fill of the slot, by the first
+    /// projection that asks, so the projections sharing an input share it.
+    pub(super) fn act_sums(&self, act: QAct, m: usize, k: usize) -> Result<u64> {
+        let (q, sums, done) = {
+            let scratch = self.act_scratch.borrow();
+            let slot = scratch
+                .get(act.0)
+                .context("use of an unknown quantized activation handle")?;
+            (slot.q, slot.sums, slot.sums_fill == slot.fills)
+        };
+        if done {
+            return Ok(sums);
+        }
+        let rows = m * (k / Q8_BLOCK);
+        self.launch(
+            &self.block_sums,
+            "block_sums",
+            &[(q, [rows as i64, Q8_BLOCK as i64]), (sums, [rows as i64, 1])],
+            (rows.div_ceil(SUMS_TB) as u32, 1, 1),
+        )?;
+        let mut scratch = self.act_scratch.borrow_mut();
+        let slot = &mut scratch[act.0];
+        slot.sums_fill = slot.fills;
+        Ok(sums)
     }
 
     /// Device pointers to the quantized activation behind a handle.

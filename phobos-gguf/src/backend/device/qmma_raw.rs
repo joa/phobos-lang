@@ -6,7 +6,9 @@ use super::*;
 type SplitKey = (Quant, usize, usize, usize);
 
 /// The staged projections (`<fmt>_qgemm_t`), built on first use.
-/// `PHOBOS_QGEMM=0` turns them off, `PHOBOS_QGEMM_SPLIT=0` their split-K form.
+/// `PHOBOS_QGEMM=0` turns them off, `PHOBOS_QGEMM_SPLIT=0` their split-K
+/// form, `PHOBOS_QGEMM_SUMS=0` the block-sum plane a format with a minimum
+/// reads (see [`DeviceBackend::act_sums`]).
 ///
 /// They contract a prompt pass directly against a raw quantized weight, with
 /// no expanded copy. [`super::DeviceBackend::project_raw_dense`] instead
@@ -15,6 +17,7 @@ type SplitKey = (Quant, usize, usize, usize);
 pub(super) struct Qgemm {
     on: bool,
     split: bool,
+    sums: bool,
     kernels: RefCell<HashMap<Quant, Module>>,
     /// The split-K kernel and its reduce, by shape.
     splits: RefCell<HashMap<SplitKey, (Module, Module)>>,
@@ -31,6 +34,7 @@ impl Qgemm {
         Qgemm {
             on: env_flag_on("PHOBOS_QGEMM"),
             split: env_flag_on("PHOBOS_QGEMM_SPLIT"),
+            sums: env_flag_on("PHOBOS_QGEMM_SUMS"),
             kernels: RefCell::new(HashMap::new()),
             splits: RefCell::new(HashMap::new()),
             reduce_adds: RefCell::new(HashMap::new()),
@@ -46,9 +50,14 @@ impl Qgemm {
         self.on && qgemm_name(quant).is_some() && m > 1 && k.is_multiple_of(256) && n > 0
     }
 
+    /// Whether the format's kernel reads the activation's block sums.
+    fn takes_sums(&self, quant: Quant) -> bool {
+        self.sums && qgemm_has_min(quant)
+    }
+
     fn module(&self, quant: Quant) -> Result<std::cell::Ref<'_, Module>> {
         if !self.kernels.borrow().contains_key(&quant) {
-            let src = qgemm_src(quant).context("no staged kernel for this format")?;
+            let src = qgemm_src(quant, self.sums).context("no staged kernel for this format")?;
             let name = qgemm_kernel(quant).expect("the source exists, so does the name");
             let module = compile(&src, &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], name)?;
             self.kernels.borrow_mut().insert(quant, module);
@@ -68,7 +77,7 @@ impl Qgemm {
     ) -> Result<std::cell::Ref<'_, (Module, Module)>> {
         let key = (quant, n, k, s);
         if !self.splits.borrow().contains_key(&key) {
-            let src = qgemm_split_src(quant, n, k, block, s).context("no staged kernel for this format")?;
+            let src = qgemm_split_src(quant, n, k, block, s, self.sums).context("no staged kernel for this format")?;
             let name = qgemm_split_kernel(quant).expect("the source exists, so does the name");
             let split = compile(&src, &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], name)?;
             let reduce = compile(&qgemm_reduce_src(n, s, false), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
@@ -177,9 +186,11 @@ impl DeviceBackend {
         let mut operands = vec![
             (qa_ptr, [m as i64, k as i64]),
             (das_ptr, [m as i64, (k / Q8_BLOCK) as i64]),
-            (bytes_ptr, [n as i64, rb as i64]),
-            (d_ptr, [n as i64, nb as i64]),
         ];
+        if self.qgemm.takes_sums(quant) {
+            operands.push((self.act_sums(act, m, k)?, [m as i64, (k / Q8_BLOCK) as i64]));
+        }
+        operands.extend([(bytes_ptr, [n as i64, rb as i64]), (d_ptr, [n as i64, nb as i64])]);
         operands.extend(self.qgemm_tables(quant)?);
         let (tm, tn) = ((m / QGEMM_TM) as u32, (n / QGEMM_TN) as u32);
         let modules = self.qgemm.split_modules(quant, n, k, block, splits)?;
@@ -263,9 +274,11 @@ impl DeviceBackend {
             let mut operands = vec![
                 (qa_ptr, [m_pad as i64, k as i64]),
                 (das_ptr, [m_pad as i64, (k / Q8_BLOCK) as i64]),
-                (bytes_ptr, [n_pad as i64, rb as i64]),
-                (d_ptr, [n_pad as i64, nb as i64]),
             ];
+            if self.qgemm.takes_sums(quant) {
+                operands.push((self.act_sums(act, m_pad, k)?, [m_pad as i64, (k / Q8_BLOCK) as i64]));
+            }
+            operands.extend([(bytes_ptr, [n_pad as i64, rb as i64]), (d_ptr, [n_pad as i64, nb as i64])]);
             operands.extend(self.qgemm_tables(quant)?);
             let block = k / nb;
             let splits = if self.qgemm.split {

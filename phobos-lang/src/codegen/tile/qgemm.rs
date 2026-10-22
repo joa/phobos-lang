@@ -37,13 +37,22 @@ pub(super) const CHUNK_BYTES: i64 = 16;
 /// Tiles of 8 x 8 a warp's patch spans, each way.
 pub(super) const PATCH: i64 = 4;
 
+/// Words of a row of the (scale, sum) stage: a pair per group, then four of
+/// padding. At 32 bytes a row, the eight rows a warp's quads read for one
+/// group would fall on four banks twice over; at 48 they spread over eight,
+/// four banks apart, so two groups' pairs load as one aligned 16 bytes, and
+/// a load's column is an immediate.
+const PAIR_STRIDE: i64 = 2 * (QGEMM_KT / Q8_BLOCK) + 4;
+
 /// Bytes of the stage with the activation tile doubled, `row_sums` when it
-/// holds the activation's group sums.
-fn async_stage_bytes(fmt: QgFormat, row_sums: bool) -> i64 {
+/// holds the activation's group sums as a plane of its own, `pairs` when
+/// they sit beside the activation scales.
+fn async_stage_bytes(fmt: QgFormat, row_sums: bool, pairs: bool) -> i64 {
     let scales = QGEMM_KT / fmt.scale_run() * QGEMM_TN * 4;
     let sums = if row_sums { QGEMM_TM * (QGEMM_KT / KQ_GROUP) * 4 } else { 0 };
     let mins = if fmt.has_min() { scales + sums } else { 0 };
-    let a = 2 * QGEMM_TM * QGEMM_KT + QGEMM_TM * (QGEMM_KT / Q8_BLOCK) * 4;
+    let sa = QGEMM_TM * 4 * if pairs { PAIR_STRIDE } else { QGEMM_KT / Q8_BLOCK };
+    let a = 2 * QGEMM_TM * QGEMM_KT + sa;
     a + QGEMM_TN * QGEMM_KT + scales + mins + fmt.tables().iter().sum::<i64>()
 }
 
@@ -106,6 +115,12 @@ pub(super) struct TileAt<'c> {
 impl<'c> Codegen<'c> {
     /// out[i, j] = sum_k a[i, k] * w[j, k] with `w` decoded from `fmt`, both
     /// operands staged through shared memory. See the module comment.
+    ///
+    /// For a format with a minimum, `pairs` is the activation's (scale, sum)
+    /// per row and 32-element group, `[128, 2 K/32] f32`, the sum over the
+    /// group's quantized values as the integer it is. Given, the pairs are
+    /// staged as they are, `asc` is not read, and nothing is summed in the
+    /// kernel.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn qgemm_into(
         &mut self,
@@ -116,12 +131,14 @@ impl<'c> Codegen<'c> {
         qb: &MemVal<'c>,
         d: &MemVal<'c>,
         tables: &[MemVal<'c>],
+        pairs: Option<&MemVal<'c>>,
         out: &MemVal<'c>,
     ) -> Result<()> {
         let name = fmt.intrinsic();
         for (v, what) in [(aq, "a"), (asc, "a scales"), (qb, "qb"), (d, "d")]
             .into_iter()
             .chain(tables.iter().map(|t| (t, "table")))
+            .chain(pairs.map(|p| (p, "a pairs")))
         {
             if v.shape.len() != 2 {
                 bail!("`{name}` {what} must be a rank-2 tile");
@@ -139,6 +156,18 @@ impl<'c> Codegen<'c> {
         }
         if asc.elem != self.f32_t {
             bail!("`{name}`'s activation scale must be f32");
+        }
+        if let Some(p) = pairs {
+            if !fmt.has_min() {
+                bail!("`{name}` takes no activation pairs: its format subtracts no minimum");
+            }
+            if p.elem != self.f32_t {
+                bail!("`{name}`'s activation pairs must be f32");
+            }
+            self.check_shapes(&[asc.shape[0]], &[p.shape[0]], "qgemm a pairs rows")?;
+            if asc.shape[1] != DYN && p.shape[1] != DYN && p.shape[1] != 2 * asc.shape[1] {
+                bail!("`{name}`'s activation pairs hold a (scale, sum) per group: twice the scales' columns");
+            }
         }
         if d.elem != self.f16_t {
             bail!("`{name}`'s block scale must be f16");
@@ -173,14 +202,19 @@ impl<'c> Codegen<'c> {
         let scales_per_tile = QGEMM_KT / fmt.scale_run();
 
         // The stage: both operand tiles, the scales of each, and the tables.
-        // With `m16n8k32`, the contraction sums the activation's groups
-        // itself, so the stage holds no sums for a format with a minimum.
-        let row_sums = fmt.has_min() && !self.qgemm_k32(fmt);
-        let a_async = self.has_cp_async() && async_stage_bytes(fmt, row_sums) <= self.static_smem_per_block();
+        // Pairs given are staged as they are, so a row's (scale, sum) for a
+        // group is one load. Otherwise, with `m16n8k32`, the contraction sums
+        // the activation's groups itself, so the stage holds no sums for a
+        // format with a minimum; before it, a plane of them is summed at
+        // stage time.
+        let paired = pairs.is_some();
+        let row_sums = fmt.has_min() && !paired && !self.qgemm_k32(fmt);
+        let a_async = self.has_cp_async() && async_stage_bytes(fmt, row_sums, paired) <= self.static_smem_per_block();
         let a_rows = if a_async { 2 * QGEMM_TM } else { QGEMM_TM };
         let a_st = self.alloc_tile_shaped(block, i8_t, &[a_rows, QGEMM_KT])?;
         let w_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TN, QGEMM_KT])?;
-        let sa_st = self.alloc_tile_shaped(block, f32_t, &[QGEMM_TM, QGEMM_KT / Q8_BLOCK])?;
+        let sa_cols = if paired { PAIR_STRIDE } else { QGEMM_KT / Q8_BLOCK };
+        let sa_st = self.alloc_tile_shaped(block, f32_t, &[QGEMM_TM, sa_cols])?;
         let sw_st = self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?;
         // For a format with a minimum: `dmin * m` per column and group, and
         // the activation's sum per row and group, filled at stage time (see
@@ -226,13 +260,14 @@ impl<'c> Codegen<'c> {
         let zero_k = self.const_index(block, 0)?;
         let first_half = a_async.then_some(zero_k);
         let into = first_half.map(|half| (&a_st, half));
-        let (first, group) = self.qgemm_load(block, fmt, &lanes, aq, asc, qb, d, zero_k, into)?;
+        let operands = QgOperands { aq, asc, pairs, qb, d };
+        let (first, group) = self.qgemm_load(block, fmt, &lanes, &operands, zero_k, into)?;
         if let Some(group) = group {
             self.async_wait(block, group)?;
         }
         let planes = (mw_st.as_ref(), as_st.as_ref());
         let stage = (&a_st, &w_st, &sa_st, &sw_st);
-        self.qgemm_store(block, fmt, &lanes, &first, first_half, stage, planes, &tabs)?;
+        self.qgemm_store(block, fmt, &lanes, &first, first_half, stage, planes, &tabs, paired)?;
         self.barrier(block)?;
 
         let acc_count = (PATCH * PATCH * 2) as usize;
@@ -263,10 +298,10 @@ impl<'c> Codegen<'c> {
             false => None,
         };
         let into = halves.map(|(_, nxt)| (&a_st, nxt));
-        let (fetched, group) = self.qgemm_load(&kb, fmt, &lanes, aq, asc, qb, d, next, into)?;
+        let (fetched, group) = self.qgemm_load(&kb, fmt, &lanes, &operands, next, into)?;
 
         let cur = halves.map(|(cur, _)| cur);
-        let accs = self.qgemm_contract(&kb, fmt, &lanes, (&a_st, cur), &w_st, &sa_st, &sw_st, planes, &accs)?;
+        let accs = self.qgemm_contract(&kb, fmt, &lanes, (&a_st, cur), &w_st, (&sa_st, paired), &sw_st, planes, &accs)?;
 
         // Every warp must finish with the stage before it is overwritten, and
         // the new stage must be complete before it is read.
@@ -275,7 +310,7 @@ impl<'c> Codegen<'c> {
             self.async_wait(&kb, group)?;
         }
         let nxt = halves.map(|(_, nxt)| nxt);
-        self.qgemm_store(&kb, fmt, &lanes, &fetched, nxt, stage, planes, &tabs)?;
+        self.qgemm_store(&kb, fmt, &lanes, &fetched, nxt, stage, planes, &tabs, paired)?;
         self.barrier(&kb)?;
         kb.append_operation(scf::r#yield(&accs, self.loc));
 
@@ -495,25 +530,23 @@ impl<'c> Codegen<'c> {
     }
 
     /// The thread's global reads for tile `kt`, into registers: its share of
-    /// the activation tile and scales, the column's block scale, then
+    /// the activation tile, scales and sums, the column's block scale, then
     /// whatever the format's decode needs (see `qgemm_fmt.rs`). With `into`,
     /// the activation pieces go straight to that stage at that row offset
     /// instead, as one `cp.async` group, which is returned.
-    #[allow(clippy::too_many_arguments)]
     fn qgemm_load(
         &mut self,
         block: &Block<'c>,
         fmt: QgFormat,
         lanes: &Lanes<'c>,
-        aq: &MemVal<'c>,
-        asc: &MemVal<'c>,
-        qb: &MemVal<'c>,
-        d: &MemVal<'c>,
+        operands: &QgOperands<'_, 'c>,
         kt: Value<'c, 'c>,
         into: Option<(&MemVal<'c>, Value<'c, 'c>)>,
     ) -> Result<(Vec<Value<'c, 'c>>, Option<Value<'c, 'c>>)> {
+        let QgOperands { aq, asc, pairs, qb, d } = *operands;
         let vec16 = Type::vector(&[CHUNK_BYTES as u64], self.i8_t);
         let vec2_f32 = Type::vector(&[2], self.f32_t);
+        let vec4_f32 = Type::vector(&[4], self.f32_t);
 
         let kt_w = self.const_index(block, QGEMM_KT)?;
         let kbase = self.muli(block, kt, kt_w)?;
@@ -535,10 +568,18 @@ impl<'c> Codegen<'c> {
                 group = Some(self.async_create_group(block)?);
             }
         }
+        // The thread's two scales, or its two (scale, sum) pairs.
         let groups = self.const_index(block, QGEMM_KT / Q8_BLOCK)?;
         let gbase = self.muli(block, kt, groups)?;
         let sa_col = self.addi(block, gbase, lanes.sa_col)?;
-        regs.push(self.vec_load_al(block, asc.mem, &[lanes.sa_row, sa_col], vec2_f32, 8)?);
+        match pairs {
+            Some(pairs) => {
+                let two = self.const_index(block, 2)?;
+                let col = self.muli(block, sa_col, two)?;
+                regs.push(self.vec_load_al(block, pairs.mem, &[lanes.sa_row, col], vec4_f32, 16)?);
+            }
+            None => regs.push(self.vec_load_al(block, asc.mem, &[lanes.sa_row, sa_col], vec2_f32, 8)?),
+        }
 
         let at = self.qgemm_tile_at(block, fmt, lanes, kt)?;
         let dv = self.push(block, memref::load(d.mem, &[lanes.qb_row, at.d_col], self.loc))?;
@@ -551,7 +592,8 @@ impl<'c> Codegen<'c> {
     /// four weight fragments decoded, column scales written, and for a
     /// format with a minimum, the activation's group sums and column
     /// minimums beside them. With `copied`, the activation pieces are already
-    /// in the stage at that row offset, and the sums read them back.
+    /// in the stage at that row offset, and the sums read them back. With
+    /// `pairs`, the (scale, sum) pairs came in whole and go in as they are.
     #[allow(clippy::too_many_arguments)]
     fn qgemm_store(
         &mut self,
@@ -563,6 +605,7 @@ impl<'c> Codegen<'c> {
         stage: StageTiles<'_, 'c>,
         planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
         tabs: &[MemVal<'c>],
+        pairs: bool,
     ) -> Result<()> {
         let (a_st, w_st, sa_st, sw_st) = stage;
         let (mw_st, as_st) = planes;
@@ -570,7 +613,15 @@ impl<'c> Codegen<'c> {
         for ((v, row), dst) in regs[..pieces].iter().zip(&lanes.a_rows).zip(&lanes.a_dst) {
             self.vec_store_al(block, *v, a_st.mem, &[*row, *dst], CHUNK_BYTES)?;
         }
-        self.vec_store_al(block, regs[pieces], sa_st.mem, &[lanes.sa_row, lanes.sa_col], 8)?;
+        if pairs {
+            // The thread's two (scale, sum) pairs, at twice the group's
+            // column (see `PAIR_STRIDE`).
+            let two = self.const_index(block, 2)?;
+            let col = self.muli(block, lanes.sa_col, two)?;
+            self.vec_store_al(block, regs[pieces], sa_st.mem, &[lanes.sa_row, col], 16)?;
+        } else {
+            self.vec_store_al(block, regs[pieces], sa_st.mem, &[lanes.sa_row, lanes.sa_col], 8)?;
+        }
         if let Some(as_st) = as_st {
             // The activation's sum over each 32-element group. A thread's
             // sixteen-byte piece is half a group, and its neighbour holds the
@@ -620,6 +671,18 @@ impl<'c> Codegen<'c> {
 
 /// A stage's activation and weight tiles and their scale planes.
 type StageTiles<'a, 'c> = (&'a MemVal<'c>, &'a MemVal<'c>, &'a MemVal<'c>, &'a MemVal<'c>);
+
+/// The intrinsic's global operands: the activation, its scales and, for a
+/// format with a minimum, its (scale, sum) pairs if given; the weight and
+/// its block scales.
+#[derive(Clone, Copy)]
+struct QgOperands<'a, 'c> {
+    aq: &'a MemVal<'c>,
+    asc: &'a MemVal<'c>,
+    pairs: Option<&'a MemVal<'c>>,
+    qb: &'a MemVal<'c>,
+    d: &'a MemVal<'c>,
+}
 
 /// What a format's decode writes into: the stage's weight tile and scale
 /// plane, the tables already in shared memory, and the column's block scale.

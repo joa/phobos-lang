@@ -215,7 +215,8 @@ impl<'c> Codegen<'c> {
             Intrinsic::RawQgemm(fmt) => {
                 let out = fresh_out(self)?;
                 let qg = qg_format(fmt, &i)?;
-                self.qgemm_into(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..], &out)?;
+                let (tables, pairs) = qgemm_tail(qg, &t[4..]);
+                self.qgemm_into(block, qg, &t[0], &t[1], &t[2], &t[3], tables, pairs, &out)?;
                 out
             }
             Intrinsic::Gather => self.tile_gather(block, &t[0], &t[1])?,
@@ -244,7 +245,8 @@ impl<'c> Codegen<'c> {
             }
             Intrinsic::RawQgemm(fmt) => {
                 let qg = qg_format(fmt, &i)?;
-                self.qgemm_into(block, qg, &t[0], &t[1], &t[2], &t[3], &t[4..], dst)
+                let (tables, pairs) = qgemm_tail(qg, &t[4..]);
+                self.qgemm_into(block, qg, &t[0], &t[1], &t[2], &t[3], tables, pairs, dst)
             }
             Intrinsic::RawQmmaStaged(fmt) => self.qmma_staged_into(block, fmt, t, dst),
             other => bail!("{} has no into form", other.name()),
@@ -277,6 +279,16 @@ impl<'c> Codegen<'c> {
             }
             other => bail!("no {}_qmma_staged_t", other.name()),
         }
+    }
+}
+
+/// A `qgemm_t`'s operands after `(a, a_scales, qb, d)`: the format's tables,
+/// then the activation's (scale, sum) pairs if they were given.
+fn qgemm_tail<'a, 'c>(fmt: QgFormat, tail: &'a [MemVal<'c>]) -> (&'a [MemVal<'c>], Option<&'a MemVal<'c>>) {
+    let tables = fmt.tables().len();
+    match tail.len() > tables {
+        true => (&tail[..tables], Some(&tail[tables])),
+        false => (tail, None),
     }
 }
 

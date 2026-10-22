@@ -26,12 +26,12 @@ fn dump_raw_kernel_sources() {
     std::fs::create_dir_all(&dir).unwrap();
     let mut sources: Vec<(String, String)> = Vec::new();
     for quant in Quant::ALL {
-        if let (Some(name), Some(src)) = (qgemm_kernel(quant), qgemm_src(quant)) {
+        if let (Some(name), Some(src)) = (qgemm_kernel(quant), qgemm_src(quant, true)) {
             sources.push((name.to_string(), src));
         }
         // The 4B's deep projection, split three ways.
         let block = quant.spec().block;
-        if let (Some(name), Some(src)) = (qgemm_split_kernel(quant), qgemm_split_src(quant, 2560, 9216, block, 3)) {
+        if let (Some(name), Some(src)) = (qgemm_split_kernel(quant), qgemm_split_src(quant, 2560, 9216, block, 3, true)) {
             sources.push((name.to_string(), src));
         }
     }

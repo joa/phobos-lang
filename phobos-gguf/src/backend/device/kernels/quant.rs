@@ -40,6 +40,24 @@ kernel quantize(X: tensor<f32>[R, 32], Q: tensor<i8>[R, 32], S: tensor<f32>[R, D
 }
 ";
 
+/// Blocks summed per CTA in [`BLOCK_SUMS_SRC`].
+pub(crate) const SUMS_TB: usize = 16;
+
+/// Each block's sum of its 32 quantized values, the integer it is, as f32.
+/// Viewed as `[blocks, 32]` like [`QUANTIZE_SRC`]'s input. The staged
+/// projections of a format with a minimum take the plane, in place of
+/// summing the staged tile themselves.
+pub(crate) const BLOCK_SUMS_SRC: &str = "\
+@launch(256)
+@autotune(TB in [16])
+kernel block_sums(Q: tensor<i8>[R, 32], S: tensor<f32>[R, D]) {
+  let p = ctx.block.x
+  var q = Q[p * TB :+ TB, 0 :+ 32]
+  var sum: tile<i32>[TB, 1] = rowsum(i32(q))
+  S[p * TB :+ TB, 0 :+ 1] = f32(sum)
+}
+";
+
 /// The Q8_0 projection with both operands in int8, contracted by `dp4a`.
 ///
 /// `dot_t` contracts the last axis of both, so activation and weight row
