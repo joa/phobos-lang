@@ -3,10 +3,11 @@
 //
 // For each 128 elements of `k`, the CTA stages 128 activation rows and 64
 // decoded weight columns as int8 tiles, plus the column scales. It contracts
-// them with `ldmatrix` and `mma.m8n8k16`. The next tile's reads are issued
-// before this one is contracted. With `cp.async`, and room for it in the
-// static 48 KB, the activation tile is doubled and copied straight into the
-// half not being contracted, so only the weight passes through registers.
+// them with `ldmatrix` and the integer `mma.sync` (see `qgemm_contract.rs`).
+// The next tile's reads are issued before this one is contracted. With
+// `cp.async`, and room for it in the static 48 KB, the activation tile is
+// doubled and copied straight into the half not being contracted, so only
+// the weight passes through registers.
 //
 // Format decode lives in `qgemm_fmt.rs`. The epilogue matches
 // `iq1s_qmma_t`'s, so both agree bit for bit.
@@ -34,15 +35,14 @@ pub(in crate::codegen) const QGEMM_THREADS: i64 = 256;
 pub(super) const CHUNK_BYTES: i64 = 16;
 
 /// Tiles of 8 x 8 a warp's patch spans, each way.
-const PATCH: i64 = 4;
+pub(super) const PATCH: i64 = 4;
 
-/// Bytes of the stage with the activation tile doubled.
-fn async_stage_bytes(fmt: QgFormat) -> i64 {
+/// Bytes of the stage with the activation tile doubled, `row_sums` when it
+/// holds the activation's group sums.
+fn async_stage_bytes(fmt: QgFormat, row_sums: bool) -> i64 {
     let scales = QGEMM_KT / fmt.scale_run() * QGEMM_TN * 4;
-    let mins = match fmt.has_min() {
-        true => scales + QGEMM_TM * (QGEMM_KT / KQ_GROUP) * 4,
-        false => 0,
-    };
+    let sums = if row_sums { QGEMM_TM * (QGEMM_KT / KQ_GROUP) * 4 } else { 0 };
+    let mins = if fmt.has_min() { scales + sums } else { 0 };
     let a = 2 * QGEMM_TM * QGEMM_KT + QGEMM_TM * (QGEMM_KT / Q8_BLOCK) * 4;
     a + QGEMM_TN * QGEMM_KT + scales + mins + fmt.tables().iter().sum::<i64>()
 }
@@ -50,15 +50,17 @@ fn async_stage_bytes(fmt: QgFormat) -> i64 {
 /// The loop-invariant geometry of one thread.
 pub(super) struct Lanes<'c> {
     /// The warp's patch origin and the lane's place in a fragment.
-    i0: Value<'c, 'c>,
-    j0: Value<'c, 'c>,
-    quad: Value<'c, 'c>,
-    in_quad: Value<'c, 'c>,
+    pub(super) i0: Value<'c, 'c>,
+    pub(super) j0: Value<'c, 'c>,
+    pub(super) quad: Value<'c, 'c>,
+    pub(super) in_quad: Value<'c, 'c>,
     /// The `ldmatrix` row this lane addresses in each operand's tile, and
     /// the swizzle its chunk index is permuted by.
-    ldm_a_row: Value<'c, 'c>,
-    ldm_w_row: Value<'c, 'c>,
-    ldm_xor: Value<'c, 'c>,
+    pub(super) ldm_a_row: Value<'c, 'c>,
+    pub(super) ldm_w_row: Value<'c, 'c>,
+    pub(super) ldm_xor: Value<'c, 'c>,
+    /// The same for `m16n8k32`'s whole fragments, on a chip that has it.
+    pub(super) k32: Option<K32Lanes<'c>>,
     /// Activation staging: the row and chunk of each of the thread's four
     /// 16-byte pieces, and the permuted column each lands at.
     a_rows: Vec<Value<'c, 'c>>,
@@ -76,6 +78,18 @@ pub(super) struct Lanes<'c> {
     /// and `j % 8`. See [`RAW_GROUP`].
     pub(super) qb_row: Value<'c, 'c>,
     in_group: Value<'c, 'c>,
+}
+
+/// The `ldmatrix.x4` addresses of `m16n8k32`'s fragments: lanes 0..15 name
+/// A's 16 rows at a group's first half and lanes 16..31 at its second; B's
+/// quad is columns 0..7 at both halves, then columns 8..15.
+pub(super) struct K32Lanes<'c> {
+    /// A's row and the half of the group the lane's octet reads.
+    pub(super) a_row: Value<'c, 'c>,
+    pub(super) a_half: Value<'c, 'c>,
+    /// The same for B.
+    pub(super) w_row: Value<'c, 'c>,
+    pub(super) w_half: Value<'c, 'c>,
 }
 
 /// Where a tile's bytes sit in the weight: the 256-element block, and the
@@ -159,20 +173,23 @@ impl<'c> Codegen<'c> {
         let scales_per_tile = QGEMM_KT / fmt.scale_run();
 
         // The stage: both operand tiles, the scales of each, and the tables.
-        let a_async = self.has_cp_async() && async_stage_bytes(fmt) <= self.static_smem_per_block();
+        // With `m16n8k32`, the contraction sums the activation's groups
+        // itself, so the stage holds no sums for a format with a minimum.
+        let row_sums = fmt.has_min() && !self.qgemm_k32(fmt);
+        let a_async = self.has_cp_async() && async_stage_bytes(fmt, row_sums) <= self.static_smem_per_block();
         let a_rows = if a_async { 2 * QGEMM_TM } else { QGEMM_TM };
         let a_st = self.alloc_tile_shaped(block, i8_t, &[a_rows, QGEMM_KT])?;
         let w_st = self.alloc_tile_shaped(block, i8_t, &[QGEMM_TN, QGEMM_KT])?;
         let sa_st = self.alloc_tile_shaped(block, f32_t, &[QGEMM_TM, QGEMM_KT / Q8_BLOCK])?;
         let sw_st = self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?;
         // For a format with a minimum: `dmin * m` per column and group, and
-        // the activation's sum per row and group. Both are filled at stage
-        // time (see `kquant.rs`).
+        // the activation's sum per row and group, filled at stage time (see
+        // `kquant.rs`).
         let mw_st = match fmt.has_min() {
             true => Some(self.alloc_tile_shaped(block, f32_t, &[scales_per_tile, QGEMM_TN])?),
             false => None,
         };
-        let as_st = match fmt.has_min() {
+        let as_st = match row_sums {
             true => Some(self.alloc_tile_shaped(block, self.i32_t, &[QGEMM_TM, QGEMM_KT / KQ_GROUP])?),
             false => None,
         };
@@ -202,7 +219,7 @@ impl<'c> Codegen<'c> {
         {
             launch.min_blocks = Some(1);
         }
-        let lanes = self.qgemm_lanes(block)?;
+        let lanes = self.qgemm_lanes(block, fmt)?;
 
         // Stage the first tile before the loop. The loop stages the next one
         // at the end of every turn.
@@ -331,9 +348,17 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
+    /// Whether the stage contracts through `m16n8k32` whole fragments. A
+    /// format with a scale per 16 elements would take `m16n8k16` per half,
+    /// slower than the native `m8n8k16`, so it waits for Blackwell, which
+    /// has no native `m8n8k16`.
+    fn qgemm_k32(&self, fmt: QgFormat) -> bool {
+        self.int8_mma_k() == 32 || (self.has_int8_mma_k32() && fmt.scale_run() != IMMA_K)
+    }
+
     /// The thread's place in everything: its fragment lane, its patch, and
     /// which pieces of each stage it copies or decodes.
-    fn qgemm_lanes(&mut self, block: &Block<'c>) -> Result<Lanes<'c>> {
+    fn qgemm_lanes(&mut self, block: &Block<'c>, fmt: QgFormat) -> Result<Lanes<'c>> {
         let tid = self.thread_id(block)?;
         let c = |cg: &mut Self, v: i64| cg.const_index(block, v);
         let warp_w = c(self, WARP)?;
@@ -358,6 +383,23 @@ impl<'c> Codegen<'c> {
         let ldm_a_row = self.addi(block, i0, lane)?;
         let ldm_w_row = self.addi(block, j0, lane)?;
         let ldm_xor = self.remui(block, lane, eight)?;
+        let k32 = match self.qgemm_k32(fmt) {
+            true => {
+                let sixteen = c(self, 16)?;
+                let a_in = self.remui(block, lane, sixteen)?;
+                let a_half = self.divui(block, lane, sixteen)?;
+                let w_pair = self.muli(block, a_half, eight)?;
+                let w_in = self.addi(block, ldm_xor, w_pair)?;
+                let octet = self.divui(block, lane, eight)?;
+                Some(K32Lanes {
+                    a_row: self.addi(block, i0, a_in)?,
+                    a_half,
+                    w_row: self.addi(block, j0, w_in)?,
+                    w_half: self.remui(block, octet, two)?,
+                })
+            }
+            false => None,
+        };
 
         // Activation staging: piece q = tid + 256 i is row q / 8, chunk q % 8.
         let (mut a_rows, mut a_chunks, mut a_dst) = (Vec::new(), Vec::new(), Vec::new());
@@ -394,6 +436,7 @@ impl<'c> Codegen<'c> {
             ldm_a_row,
             ldm_w_row,
             ldm_xor,
+            k32,
             a_rows,
             a_chunks,
             a_dst,
@@ -409,7 +452,7 @@ impl<'c> Codegen<'c> {
 
     /// The rows of A and the even output columns this lane's accumulators
     /// cover: `i0 + 8r + quad` and `j0 + 8c + 2 in_quad`.
-    fn qgemm_patch_coords(
+    pub(super) fn qgemm_patch_coords(
         &mut self,
         block: &Block<'c>,
         lanes: &Lanes<'c>,
@@ -572,214 +615,6 @@ impl<'c> Codegen<'c> {
             dv,
         };
         self.qgemm_fmt_decode(block, fmt, &decode, &regs[pieces + 2..])
-    }
-
-    /// The warp's patch over one stage: four 32-element groups, each with two
-    /// `ldmatrix.x4` per operand, sixteen tensor tiles, and the scale
-    /// epilogue.
-    #[allow(clippy::too_many_arguments)]
-    fn qgemm_contract(
-        &mut self,
-        block: &Block<'c>,
-        fmt: QgFormat,
-        lanes: &Lanes<'c>,
-        a: (&MemVal<'c>, Option<Value<'c, 'c>>),
-        w_st: &MemVal<'c>,
-        sa_st: &MemVal<'c>,
-        sw_st: &MemVal<'c>,
-        planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
-        accs: &[Value<'c, 'c>],
-    ) -> Result<Vec<Value<'c, 'c>>> {
-        let (mw_st, as_st) = planes;
-        let (i8_t, i32_t, f32_t) = (self.i8_t, self.i32_t, self.f32_t);
-        let four_i8 = Type::vector(&[4], i8_t);
-        let frag_t = Type::vector(&[1, 4], i8_t);
-        let quad_t = Type::vector(&[PATCH as u64, 4], i8_t);
-        let acc_t = Type::vector(&[1, 2], i32_t);
-        let two_f32 = Type::vector(&[2], f32_t);
-        let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
-        let zero_i = self.zero_scalar(block, i32_t)?;
-        let empty = self.vec_broadcast(block, zero_i, acc_t)?;
-        let halves = Q8_BLOCK / IMMA_K;
-        let split = fmt.scale_run() == IMMA_K;
-        let per_col = if split { halves } else { 1 };
-        let (rows, cols) = self.qgemm_patch_coords(block, lanes)?;
-        let chunk_w = self.const_index(block, CHUNK_BYTES)?;
-        // The activation stage, and the half of it this turn reads.
-        let (a_st, a_half) = a;
-        let ldm_a_row = match a_half {
-            Some(half) => self.addi(block, lanes.ldm_a_row, half)?,
-            None => lanes.ldm_a_row,
-        };
-
-        let mut accs = accs.to_vec();
-        for s in 0..(QGEMM_KT / Q8_BLOCK) {
-            // The weight scales this group needs: one per column, or one per
-            // column and half.
-            let mut sw = Vec::with_capacity((PATCH * per_col) as usize);
-            for col in &cols {
-                for h in 0..per_col {
-                    let s_idx = self.const_index(block, s * per_col + h)?;
-                    sw.push(self.vec_load_al(block, sw_st.mem, &[s_idx, *col], two_f32, 8)?);
-                }
-            }
-            let s_idx = self.const_index(block, s)?;
-            let mut sa = Vec::with_capacity(PATCH as usize);
-            for row in &rows {
-                sa.push(self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?);
-            }
-            // The minimum term's operands, if the format has one: column
-            // minimums, loaded like the scales, and row sums, loaded like the
-            // activation scales.
-            let mut mw = Vec::with_capacity(PATCH as usize);
-            if let Some(mw_st) = mw_st {
-                for col in &cols {
-                    mw.push(self.vec_load_al(block, mw_st.mem, &[s_idx, *col], two_f32, 8)?);
-                }
-            }
-            let mut asum = Vec::with_capacity(PATCH as usize);
-            if let Some(as_st) = as_st {
-                for row in &rows {
-                    let raw = self.push(block, memref::load(as_st.mem, &[*row, s_idx], self.loc))?;
-                    asum.push(self.small_int_to_f32(block, raw)?);
-                }
-            }
-
-            // -(sa * asum) per row: the minimum term's factor, shared by
-            // every column of the patch.
-            let mut neg_mins = Vec::with_capacity(PATCH as usize);
-            if mw_st.is_some() {
-                for r in 0..PATCH as usize {
-                    let p = self.push(block, arith::mulf(sa[r], asum[r], self.loc))?;
-                    neg_mins.push(self.push(block, arith::negf(p, self.loc))?);
-                }
-            }
-
-            let (mut a_frags, mut w_frags) = (Vec::new(), Vec::new());
-            for h in 0..halves {
-                let chunk = self.const_index(block, s * halves + h)?;
-                let phys = self.push(block, arith::xori(chunk, lanes.ldm_xor, self.loc))?;
-                let col = self.muli(block, phys, chunk_w)?;
-                let a4 = self.ldmatrix(block, a_st.mem, [ldm_a_row, col], PATCH, false, quad_t)?;
-                let w4 = self.ldmatrix(block, w_st.mem, [lanes.ldm_w_row, col], PATCH, false, quad_t)?;
-                for t in 0..PATCH {
-                    let a = self.vec_extract(block, a4, &[t], four_i8)?;
-                    a_frags.push(self.vec_shape_cast(block, a, frag_t)?);
-                    let w = self.vec_extract(block, w4, &[t], four_i8)?;
-                    w_frags.push(self.vec_shape_cast(block, w, frag_t)?);
-                }
-            }
-            let frag = |h: i64, t: i64| (h * PATCH + t) as usize;
-
-            // One tile's epilogue over its accumulators: one over both halves
-            // when a scale covers the group, otherwise one per half, each the
-            // vector and the row of it this tile's lane values sit in.
-            let epilogue = |cg: &mut Self, accs: &mut [Value<'c, 'c>], r: i64, c: i64, sums: &[(Value<'c, 'c>, i64)]| -> Result<()> {
-                for dj in 0..2i64 {
-                    let slot = ((r * PATCH + c) * 2 + dj) as usize;
-                    let sw_of = |cg: &mut Self, h: usize| {
-                        cg.vec_extract(block, sw[c as usize * per_col as usize + h], &[dj], f32_t)
-                    };
-                    let raw_of = |cg: &mut Self, h: usize| -> Result<Value<'c, 'c>> {
-                        let (sum, row) = sums[h];
-                        let raw = cg.vec_extract(block, sum, &[row, dj], i32_t)?;
-                        cg.small_int_to_f32(block, raw)
-                    };
-                    accs[slot] = if split {
-                        // acc += sa * (c0 * sw0 + c1 * sw1).
-                        let (w0, w1) = (sw_of(cg, 0)?, sw_of(cg, 1)?);
-                        let (c0, c1) = (raw_of(cg, 0)?, raw_of(cg, 1)?);
-                        let inner = cg.push(block, arith::mulf(c0, w0, cg.loc))?;
-                        let inner = cg.elem_mac(block, f32_t, c1, w1, inner)?;
-                        cg.elem_mac(block, f32_t, inner, sa[r as usize], accs[slot])?
-                    } else if mw_st.is_some() {
-                        // acc += (sa * sw) * c - (sa * asum) * mw: the
-                        // run's minimum, weighted by the activation's sum.
-                        let w0 = sw_of(cg, 0)?;
-                        let as_f = raw_of(cg, 0)?;
-                        let mw0 = cg.vec_extract(block, mw[c as usize], &[dj], f32_t)?;
-                        let scale = cg.push(block, arith::mulf(sa[r as usize], w0, cg.loc))?;
-                        let acc = cg.elem_mac(block, f32_t, as_f, scale, accs[slot])?;
-                        cg.elem_mac(block, f32_t, neg_mins[r as usize], mw0, acc)?
-                    } else {
-                        let w0 = sw_of(cg, 0)?;
-                        let scale = cg.push(block, arith::mulf(sa[r as usize], w0, cg.loc))?;
-                        let as_f = raw_of(cg, 0)?;
-                        cg.elem_mac(block, f32_t, as_f, scale, accs[slot])?
-                    };
-                }
-                Ok(())
-            };
-            if self.int8_mma_k() == 32 {
-                // m16n8k32 takes two row tiles and both halves in one op, and
-                // its fragments are the m8n8k16 ones regrouped: A as rows
-                // (g, g + 8) of the first half, then of the second; B as the
-                // first half, then the second. A split format keeps the
-                // halves apart with m16n8k16.
-                let k = if split { IMMA_K } else { Q8_BLOCK };
-                let a_t = Type::vector(&[(2 * k / IMMA_K) as u64, 4], i8_t);
-                let b_t = Type::vector(&[(k / IMMA_K) as u64, 4], i8_t);
-                let d_t = Type::vector(&[2, 2], i32_t);
-                let wide = self.mma_shape(2 * IMMA_TILE, IMMA_TILE, k)?;
-                let zero_d = self.vec_broadcast(block, zero_i, d_t)?;
-                let zero_i8 = self.zero_scalar(block, i8_t)?;
-                let parts: Vec<Vec<i64>> = if split {
-                    (0..halves).map(|h| vec![h]).collect()
-                } else {
-                    vec![(0..halves).collect()]
-                };
-                for rp in 0..PATCH / 2 {
-                    let (r0, r1) = (2 * rp, 2 * rp + 1);
-                    for c in 0..PATCH {
-                        let (mut sums0, mut sums1) = (Vec::new(), Vec::new());
-                        for part in &parts {
-                            let mut a = self.vec_broadcast(block, zero_i8, a_t)?;
-                            let mut b = self.vec_broadcast(block, zero_i8, b_t)?;
-                            for (i, &h) in part.iter().enumerate() {
-                                for (j, r) in [r0, r1].into_iter().enumerate() {
-                                    let piece = self.vec_shape_cast(block, a_frags[frag(h, r)], four_i8)?;
-                                    a = self.vec_insert(block, piece, a, &[(2 * i + j) as i64])?;
-                                }
-                                let piece = self.vec_shape_cast(block, w_frags[frag(h, c)], four_i8)?;
-                                b = self.vec_insert(block, piece, b, &[i as i64])?;
-                            }
-                            let d = self.mma_sync(block, a, b, zero_d, wide, d_t)?;
-                            sums0.push((d, 0));
-                            sums1.push((d, 1));
-                        }
-                        epilogue(self, &mut accs, r0, c, &sums0)?;
-                        epilogue(self, &mut accs, r1, c, &sums1)?;
-                    }
-                }
-            } else {
-                // The tile's mma, then its epilogue, one tile at a time.
-                for r in 0..PATCH {
-                    for c in 0..PATCH {
-                        let mut sums = Vec::with_capacity(per_col as usize);
-                        let mut sum = empty;
-                        for h in 0..halves {
-                            let seed = if split { empty } else { sum };
-                            sum = self.mma_sync(
-                                block,
-                                a_frags[frag(h, r)],
-                                w_frags[frag(h, c)],
-                                seed,
-                                shape,
-                                acc_t,
-                            )?;
-                            if split {
-                                sums.push((sum, 0));
-                            }
-                        }
-                        if !split {
-                            sums.push((sum, 0));
-                        }
-                        epilogue(self, &mut accs, r, c, &sums)?;
-                    }
-                }
-            }
-        }
-        Ok(accs)
     }
 }
 

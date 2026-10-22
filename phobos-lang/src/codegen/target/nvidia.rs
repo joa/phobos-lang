@@ -329,6 +329,10 @@ impl Isa for Nvidia {
         if self.cc >= 100 { 32 } else { 16 }
     }
 
+    fn has_int8_mma_k32(&self) -> bool {
+        self.cc >= 80
+    }
+
     fn smem_per_sm(&self) -> i64 {
         (match self.cc {
             cc if cc >= 120 => 100, // consumer Blackwell
