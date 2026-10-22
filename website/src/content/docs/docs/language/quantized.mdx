@@ -33,6 +33,7 @@ of integer dot products, each scaled by two block scales.
 | --- | --- | --- |
 | `qdot_t(a, a_scales, w, w_scales)` | `[M, K] i8 x [N, K] i8 -> [M, N] f32` | Scales `[M, K/32]` and `[N, K/32]`. `K` may be dynamic. |
 | `qmma_t(a, a_scales, w, w_scales)` | the same | On integer tensor cores. `M`, `N` multiples of 8. `w_scales` is `[K/32, N]`, transposed relative to `qdot_t`. |
+| `q8_qgemm_t(a, a_scales, w, w_scales)` | `[128, K] i8 x [64, K] i8 -> [128, 64] f32` | The staged projection of the [raw-format families](#raw-format-families) against a Q8_0 weight held as `qmma_t`'s planes. A fixed 128 x 64 tile; needs `@launch(256)`, `K` a multiple of 256. |
 | `q50_qdot_t(..)`, `q50_qmma_t(..)` | `[M, K] i8 x [N, K/32 * 20] i8 -> [M, N] f32` | The same against a Q5_0 weight held as its blocks without their `f16` scale. |
 
 `qdot_t` computes

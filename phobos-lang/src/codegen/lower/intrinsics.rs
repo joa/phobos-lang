@@ -203,6 +203,11 @@ impl<'c> Codegen<'c> {
             Intrinsic::QmmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::I8)?,
             Intrinsic::Q50dotT => self.tile_qdot_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50)?,
             Intrinsic::Q50mmaT => self.tile_qmma_t(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50)?,
+            Intrinsic::Q8gemmT => {
+                let out = fresh_out(self)?;
+                self.qgemm_into(block, QgFormat::Q8, &t[0], &t[1], &t[2], &t[3], &[], None, &out)?;
+                out
+            }
             Intrinsic::RawQmma(RawFmt::Iq1s) => {
                 self.tile_iq1s_qmma_t(block, &t[0], &t[1], &t[2], &t[3], &t[4])?
             }
@@ -240,6 +245,7 @@ impl<'c> Codegen<'c> {
         match i {
             Intrinsic::QmmaT => self.qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], QWeight::I8, dst),
             Intrinsic::Q50mmaT => self.qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], QWeight::Q50, dst),
+            Intrinsic::Q8gemmT => self.qgemm_into(block, QgFormat::Q8, &t[0], &t[1], &t[2], &t[3], &[], None, dst),
             Intrinsic::RawQmma(RawFmt::Iq1s) => {
                 self.iq1s_qmma_t_into(block, &t[0], &t[1], &t[2], &t[3], &t[4], dst)
             }

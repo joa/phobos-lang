@@ -183,10 +183,21 @@ impl<'c> Codegen<'c> {
         lanes: &Lanes<'c>,
         off: Value<'c, 'c>,
     ) -> Result<[Value<'c, 'c>; 4]> {
+        self.qg_u128_at(block, qb, lanes.qb_row, off)
+    }
+
+    /// Sixteen bytes at a sixteen-aligned offset of `row`, as four words.
+    pub(super) fn qg_u128_at(
+        &self,
+        block: &Block<'c>,
+        mem: &MemVal<'c>,
+        row: Value<'c, 'c>,
+        off: Value<'c, 'c>,
+    ) -> Result<[Value<'c, 'c>; 4]> {
         let v = self.vec_load_al(
             block,
-            qb.mem,
-            &[lanes.qb_row, off],
+            mem.mem,
+            &[row, off],
             Type::vector(&[16], self.i8_t),
             16,
         )?;

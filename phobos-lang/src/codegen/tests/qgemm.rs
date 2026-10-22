@@ -205,3 +205,44 @@ fn sm_80_copies_the_activation_tile_with_cp_async_where_two_fit() {
         assert_eq!(ampere.matches("nvgpu.device_async_copy").count(), if doubled { 8 } else { 0 }, "{fmt}");
     }
 }
+
+/// The Q8_0 projection over the weight's planes, `q8_qgemm_t`.
+fn q8_qgemm_src(launch: &str) -> String {
+    format!(
+        "@launch({launch})
+        @autotune(TM in [128], TN in [64])
+        @aligned(M = TM, N = TN, K = 256)
+        kernel q8_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                        W: tensor<i8>[N, K], WS: tensor<f32>[KB, N], C: tensor<f32>[M, N]) {{
+            let pm = ctx.block.x
+            let pn = ctx.block.y
+            C[pm * TM :+ TM, pn * TN :+ TN] = q8_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                       W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
+        }}"
+    )
+}
+
+#[test]
+fn a_q8_weight_held_as_planes_stages_like_a_grouped_one() {
+    // The quants are copied as they are and the scale read from its f32
+    // plane, so nothing widens an f16. The rest is the family's: ldmatrix
+    // on both operands, the wide shape and the double-buffered activation
+    // from sm_80.
+    let src = q8_qgemm_src("256, 2");
+    let turing = emit_mlir_sync(&src, "sm_75");
+    assert_contains(&turing, &["nvgpu.ldmatrix", "nvgpu.mma.sync", "mmaShape = [8, 8, 16]", "iter_args"]);
+    assert!(!turing.contains("arith.extf"), "{turing}");
+    // Both operand tiles and the two scale planes, nothing more.
+    assert_eq!(turing.matches("memref.view").count(), 4, "{turing}");
+    let ampere = emit_mlir_sync(&src, "sm_80");
+    assert!(ampere.contains("mmaShape = [16, 8, 32]"), "{ampere}");
+    assert_eq!(ampere.matches("nvgpu.device_async_copy").count(), 8, "{ampere}");
+    assert!(shared_bytes(&ampere) <= 48 * 1024);
+}
+
+#[test]
+fn q8_qgemm_refuses_a_grouped_weight() {
+    // The grouped form's f16 block scales are not the planes it reads.
+    let err = emit_err(&qgemm_src("q8", &[], "256, 2"));
+    assert!(err.contains("weight scales must be f32"), "{err}");
+}

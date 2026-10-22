@@ -286,6 +286,7 @@ fn intrinsic_names_round_trip() {
         Intrinsic::QmmaT,
         Intrinsic::Q50dotT,
         Intrinsic::Q50mmaT,
+        Intrinsic::Q8gemmT,
         Intrinsic::Gather,
         Intrinsic::ArgSel,
     ];

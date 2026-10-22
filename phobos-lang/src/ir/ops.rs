@@ -274,6 +274,9 @@ pub enum Intrinsic {
     Q50dotT,
     /// `q50_qmma_t`: `qmma_t` against the same.
     Q50mmaT,
+    /// `q8_qgemm_t`: the staged tensor-core GEMM of the raw formats against
+    /// a Q8_0 weight held as planes.
+    Q8gemmT,
     /// `<fmt>_qmma_t`: a raw format's batched projection.
     RawQmma(RawFmt),
     /// `<fmt>_qmma_staged_t`: the same with the decoded weight staged.
@@ -293,6 +296,7 @@ impl Intrinsic {
             Intrinsic::QmmaT => "qmma_t".into(),
             Intrinsic::Q50dotT => "q50_qdot_t".into(),
             Intrinsic::Q50mmaT => "q50_qmma_t".into(),
+            Intrinsic::Q8gemmT => "q8_qgemm_t".into(),
             Intrinsic::RawQmma(f) => format!("{}_qmma_t", f.name()),
             Intrinsic::RawQmmaStaged(f) => format!("{}_qmma_staged_t", f.name()),
             Intrinsic::RawQgemm(f) => format!("{}_qgemm_t", f.name()),
@@ -307,6 +311,7 @@ impl Intrinsic {
             "qmma_t" => return Some(Intrinsic::QmmaT),
             "q50_qdot_t" => return Some(Intrinsic::Q50dotT),
             "q50_qmma_t" => return Some(Intrinsic::Q50mmaT),
+            "q8_qgemm_t" => return Some(Intrinsic::Q8gemmT),
             "gather" => return Some(Intrinsic::Gather),
             "argsel" => return Some(Intrinsic::ArgSel),
             _ => {}

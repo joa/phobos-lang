@@ -7,8 +7,11 @@
 // `(m ^ mask) + (mask & 0x01010101)`. The K-quants decode in `kquant.rs` and
 // PTQ1_0 in `ptq1.rs`, neither with tables. Q8_0's unit is eight file blocks
 // re-laid with the scales first, so its octets are the bytes as stored.
+// Q8_0 held as planes (`q8_qgemm_t`) is the same bytes read from `[N, K]`,
+// with the group's scale read from the `[K/32, N]` plane in place of a
+// block's `d`.
 
-use super::qgemm::{Lanes, Stage, TileAt};
+use super::qgemm::{Lanes, QGEMM_KT, Stage, TileAt};
 use super::*;
 
 /// A raw format the staged projection decodes.
@@ -26,6 +29,8 @@ pub(in crate::codegen) enum QgFormat {
     Q6k,
     Q80,
     Ptq1,
+    /// Q8_0 as planes: the weight `[N, K]` and its scales `[K/32, N]`.
+    Q8,
 }
 
 /// IQ1_S's grid at two bits per lane: 2048 entries of eight.
@@ -52,6 +57,7 @@ impl QgFormat {
             "q6k_qgemm_t" => Self::Q6k,
             "q80_qgemm_t" => Self::Q80,
             "ptq1_qgemm_t" => Self::Ptq1,
+            "q8_qgemm_t" => Self::Q8,
             _ => return None,
         })
     }
@@ -70,13 +76,15 @@ impl QgFormat {
             Self::Q6k => "q6k_qgemm_t",
             Self::Q80 => "q80_qgemm_t",
             Self::Ptq1 => "ptq1_qgemm_t",
+            Self::Q8 => "q8_qgemm_t",
         }
     }
 
     /// The device block size in bytes. It is the file's block without the
     /// IQ formats' leading `d`, and without Q6_K's trailing one, since no
     /// device kernel reads them. Q8_0's is eight file blocks: sixteen bytes
-    /// of `f16` scales, then the 256 quants.
+    /// of `f16` scales, then the 256 quants. Held as planes it has no block,
+    /// only 32-byte runs, and nothing takes geometry from this.
     pub(in crate::codegen) fn block_bytes(self) -> i64 {
         match self {
             Self::Iq1s => 48,
@@ -91,6 +99,7 @@ impl QgFormat {
             Self::Q6k => 208,
             Self::Q80 => 272,
             Self::Ptq1 => 56,
+            Self::Q8 => Q8_BLOCK,
         }
     }
 
@@ -104,7 +113,7 @@ impl QgFormat {
             Self::Iq2s => &[1024 * 8, 256 * 8],
             Self::Iq3xxs => &[256 * 4, 128 * 8],
             Self::Iq3s => &[512 * 4, 256 * 8],
-            Self::Q4k | Self::Q5k | Self::Q6k | Self::Q80 | Self::Ptq1 => &[],
+            Self::Q4k | Self::Q5k | Self::Q6k | Self::Q80 | Self::Ptq1 | Self::Q8 => &[],
         }
     }
 
@@ -114,6 +123,12 @@ impl QgFormat {
             Self::Iq1m | Self::Iq2xs | Self::Iq2s | Self::Q6k => 16,
             _ => 32,
         }
+    }
+
+    /// Whether the weight comes as planes rather than grouped blocks: the
+    /// tile's bytes are read by row and `k`, its scales from their own plane.
+    pub(in crate::codegen) fn planar(self) -> bool {
+        matches!(self, Self::Q8)
     }
 }
 
@@ -309,6 +324,7 @@ impl<'c> Codegen<'c> {
                 self.kq_gemm_load(block, fmt, lanes, qb, at, regs)?;
             }
             QgFormat::Ptq1 => self.pt_gemm_load(block, lanes, qb, at, regs)?,
+            QgFormat::Q8 => bail!("a plane-held weight is read by `q8_gemm_load`"),
             QgFormat::Q80 => {
                 // Group `ib`'s 32 quants past the sixteen scale bytes, and
                 // its scale.
@@ -399,6 +415,35 @@ impl<'c> Codegen<'c> {
         Ok(())
     }
 
+    /// The reads of a plane-held Q8_0 weight for tile `kt`: the thread's
+    /// group scale, `ws[4 kt + g, j]`, in `dv`'s place, then the group's 32
+    /// quants of its column, `w[j, 128 kt + 32 g ..]`, as eight words.
+    pub(super) fn q8_gemm_load(
+        &mut self,
+        block: &Block<'c>,
+        lanes: &Lanes<'c>,
+        w: &MemVal<'c>,
+        ws: &MemVal<'c>,
+        kt: Value<'c, 'c>,
+        regs: &mut Vec<Value<'c, 'c>>,
+    ) -> Result<()> {
+        let groups = self.const_index(block, QGEMM_KT / Q8_BLOCK)?;
+        let gbase = self.muli(block, kt, groups)?;
+        let s_row = self.addi(block, gbase, lanes.g)?;
+        regs.push(self.push(block, memref::load(ws.mem, &[s_row, lanes.j], self.loc))?);
+        let kt_w = self.const_index(block, QGEMM_KT)?;
+        let run_w = self.const_index(block, Q8_BLOCK)?;
+        let kbase = self.muli(block, kt, kt_w)?;
+        let run = self.muli(block, lanes.g, run_w)?;
+        let col = self.addi(block, kbase, run)?;
+        for half in [0, 16] {
+            let step = self.const_index(block, half)?;
+            let at = self.addi(block, col, step)?;
+            regs.extend(self.qg_u128_at(block, w, lanes.j, at)?);
+        }
+        Ok(())
+    }
+
     /// Decodes the thread's group from the registers `qgemm_fmt_load` filled,
     /// and writes its four octets and its scales into the stage.
     pub(super) fn qgemm_fmt_decode(
@@ -414,6 +459,14 @@ impl<'c> Codegen<'c> {
                 self.kq_gemm_decode(block, fmt, stage, regs)?;
             }
             QgFormat::Ptq1 => self.pt_gemm_decode(block, stage, regs)?,
+            QgFormat::Q8 => {
+                // The group's scale came in `dv`'s place, and its quants are
+                // the bytes as stored.
+                self.qgemm_put_scale(block, stage, 1, 0, dv)?;
+                for l in 0..4usize {
+                    self.qgemm_put_octet(block, stage, l as i64, regs[2 * l], regs[2 * l + 1])?;
+                }
+            }
             QgFormat::Q80 => {
                 let (qs, sc) = (&regs[..8], regs[8]);
                 let sw = self.kq_f16_of(block, sc, false)?;
