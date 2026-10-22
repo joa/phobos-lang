@@ -7,8 +7,8 @@ type SplitKey = (Quant, usize, usize, usize);
 
 /// The staged projections (`<fmt>_qgemm_t`), built on first use.
 /// `PHOBOS_QGEMM=0` turns them off, `PHOBOS_QGEMM_SPLIT=0` their split-K
-/// form, `PHOBOS_QGEMM_SUMS=0` the block-sum plane a format with a minimum
-/// reads (see [`DeviceBackend::act_sums`]).
+/// form, `PHOBOS_QGEMM_SUMS=0` the (scale, sum) plane a format with a
+/// minimum reads (see [`DeviceBackend::act_pairs`]).
 ///
 /// They contract a prompt pass directly against a raw quantized weight, with
 /// no expanded copy. [`super::DeviceBackend::project_raw_dense`] instead
@@ -50,8 +50,8 @@ impl Qgemm {
         self.on && qgemm_name(quant).is_some() && m > 1 && k.is_multiple_of(256) && n > 0
     }
 
-    /// Whether the format's kernel reads the activation's block sums.
-    fn takes_sums(&self, quant: Quant) -> bool {
+    /// Whether the format's kernel reads the activation's (scale, sum) pairs.
+    fn takes_pairs(&self, quant: Quant) -> bool {
         self.sums && qgemm_has_min(quant)
     }
 
@@ -187,8 +187,8 @@ impl DeviceBackend {
             (qa_ptr, [m as i64, k as i64]),
             (das_ptr, [m as i64, (k / Q8_BLOCK) as i64]),
         ];
-        if self.qgemm.takes_sums(quant) {
-            operands.push((self.act_sums(act, m, k)?, [m as i64, (k / Q8_BLOCK) as i64]));
+        if self.qgemm.takes_pairs(quant) {
+            operands.push((self.act_pairs(act, m, k)?, [m as i64, 2 * (k / Q8_BLOCK) as i64]));
         }
         operands.extend([(bytes_ptr, [n as i64, rb as i64]), (d_ptr, [n as i64, nb as i64])]);
         operands.extend(self.qgemm_tables(quant)?);
@@ -275,8 +275,8 @@ impl DeviceBackend {
                 (qa_ptr, [m_pad as i64, k as i64]),
                 (das_ptr, [m_pad as i64, (k / Q8_BLOCK) as i64]),
             ];
-            if self.qgemm.takes_sums(quant) {
-                operands.push((self.act_sums(act, m_pad, k)?, [m_pad as i64, (k / Q8_BLOCK) as i64]));
+            if self.qgemm.takes_pairs(quant) {
+                operands.push((self.act_pairs(act, m_pad, k)?, [m_pad as i64, 2 * (k / Q8_BLOCK) as i64]));
             }
             operands.extend([(bytes_ptr, [n_pad as i64, rb as i64]), (d_ptr, [n_pad as i64, nb as i64])]);
             operands.extend(self.qgemm_tables(quant)?);
