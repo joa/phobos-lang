@@ -280,6 +280,91 @@ impl<'c> Codegen<'c> {
         })
     }
 
+    /// `dst_hi[...], dst_lo[...] = split(src[...])` for `@tensorcore(f32)`:
+    /// each element rounded to 16 bits and the remainder rounded again,
+    /// bf16 with `bf16` (its bits held in the f16 tiles) and f16 otherwise.
+    /// The caller adds the barrier.
+    pub(in crate::codegen) fn tile_copy_split(
+        &mut self,
+        block: &Block<'c>,
+        src: &MemVal<'c>,
+        (hi, lo): (&MemVal<'c>, &MemVal<'c>),
+        bf16: bool,
+    ) -> Result<()> {
+        if !(src.elem == self.f32_t || src.elem == self.f16_t) || hi.elem != self.f16_t || lo.elem != self.f16_t {
+            bail!("split staging takes f16 or f32 into two f16 tiles");
+        }
+        let last = *hi.shape.last().expect("tile values are not rank-0");
+        let width = if src.vectorizes(4) && last != DYN && last % 4 == 0 { 4 } else { 1 };
+        let shape_of = |t: Type<'c>| if width > 1 { Type::vector(&[4], t) } else { t };
+        let src_t = shape_of(src.elem);
+        self.record_copy(width * 4, false, hi);
+        self.record_copy(width * 4, false, lo);
+        self.distribute(block, hi, width, false, |cg, blk, idx| {
+            // The source may be swizzled too: an f16 operand tile a
+            // fragment accumulator was stored to.
+            let at = cg.swizzled_index(blk, hi, idx)?;
+            let from = cg.swizzled_index(blk, src, idx)?;
+            let v = match width > 1 {
+                true => cg.vec_load(blk, src.mem, &from, src_t)?,
+                false => cg.push(blk, memref::load(src.mem, &from, cg.loc))?,
+            };
+            let v = match src.elem == cg.f32_t {
+                true => v,
+                false => cg.extf(blk, v, shape_of(cg.f32_t))?,
+            };
+            let (h, l) = cg.split_parts(blk, v, width, bf16)?;
+            for (part, dst) in [(h, hi), (l, lo)] {
+                match width > 1 {
+                    true => cg.vec_store_al(blk, part, dst.mem, &at, 8)?,
+                    false => {
+                        blk.append_operation(memref::store(part, dst.mem, &at, cg.loc));
+                    }
+                }
+            }
+            Ok(())
+        })
+    }
+
+    /// An f32 value, scalar or a vector of `width`, as its 16-bit rounding
+    /// and the rounding of what that leaves, both as f16 bits: bf16's bits
+    /// with `bf16`, so the f16 operand paths carry them unchanged.
+    pub(in crate::codegen) fn split_parts(
+        &self,
+        block: &Block<'c>,
+        v: Value<'c, 'c>,
+        width: i64,
+        bf16: bool,
+    ) -> Result<(Value<'c, 'c>, Value<'c, 'c>)> {
+        let like = |t: Type<'c>| if width > 1 { Type::vector(&[width as u64], t) } else { t };
+        let half = like(if bf16 { self.bf16_t } else { self.f16_t });
+        let bits = like(self.f16_t);
+        let h = self.truncf(block, v, half)?;
+        let back = self.extf(block, h, v.r#type())?;
+        let rest = self.push(block, arith::subf(v, back, self.loc))?;
+        let l = self.truncf(block, rest, half)?;
+        if !bf16 {
+            return Ok((h, l));
+        }
+        let as_bits = |x| self.push(block, arith::bitcast(x, bits, self.loc));
+        Ok((as_bits(h)?, as_bits(l)?))
+    }
+
+    pub(in crate::codegen) fn extf(
+        &self,
+        block: &Block<'c>,
+        value: Value<'c, 'c>,
+        t: Type<'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.push(
+            block,
+            OperationBuilder::new("arith.extf", self.loc)
+                .add_operands(&[value])
+                .add_results(&[t])
+                .build()?,
+        )
+    }
+
     pub(in crate::codegen) fn truncf(
         &self,
         block: &Block<'c>,

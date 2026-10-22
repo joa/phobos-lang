@@ -296,6 +296,10 @@ impl Isa for Nvidia {
         self.mma_sync_k().is_some() && self.index_bits == 64
     }
 
+    fn has_bf16_mma(&self) -> bool {
+        self.cc >= 80
+    }
+
     fn mma_sync_k(&self) -> Option<i64> {
         match self.cc {
             cc if cc >= 80 => Some(16), // Ampere and later: m16n8k16
@@ -831,6 +835,56 @@ impl Isa for Nvidia {
                 .add_results(&[acc_t])
                 .build()?,
         )
+    }
+
+    fn mma_sync_bf16<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        a: Value<'c, 'c>,
+        b: Value<'c, 'c>,
+        acc: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        // nvgpu.mma.sync lowers no bf16, so this is nvvm's op, which takes
+        // each register of a fragment as an i32 holding two bf16.
+        let words = |v: Value<'c, 'c>, rows: u64| -> Result<Vec<Value<'c, 'c>>> {
+            let as_i32 = cg.vec_bitcast(block, v, Type::vector(&[rows, 1], cg.i32_t))?;
+            (0..rows as i64).map(|r| cg.vec_extract(block, as_i32, &[r, 0], cg.i32_t)).collect()
+        };
+        let mut operands = words(a, 4)?;
+        operands.extend(words(b, 2)?);
+        for (r, c) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+            operands.push(cg.vec_extract(block, acc, &[r, c], cg.f32_t)?);
+        }
+        let attrs = [
+            (cg.id("layoutA"), cg.parse_attr("#nvvm.mma_layout<row>")?),
+            (cg.id("layoutB"), cg.parse_attr("#nvvm.mma_layout<col>")?),
+            (cg.id("multiplicandAPtxType"), cg.parse_attr("#nvvm.mma_type<bf16>")?),
+            (cg.id("multiplicandBPtxType"), cg.parse_attr("#nvvm.mma_type<bf16>")?),
+            (cg.id("shape"), cg.parse_attr("#nvvm.shape<m = 16, n = 8, k = 16>")?),
+            (cg.id("operandSegmentSizes"), cg.parse_attr("array<i32: 4, 2, 4>")?),
+        ];
+        let sum = cg.push(
+            block,
+            OperationBuilder::new("nvvm.mma.sync", cg.loc)
+                .add_operands(&operands)
+                .add_attributes(&attrs)
+                .add_results(&[cg.parse_type("!llvm.struct<(f32, f32, f32, f32)>")?])
+                .build()?,
+        )?;
+        let mut out = acc;
+        for (i, (r, c)) in [(0, 0), (0, 1), (1, 0), (1, 1)].into_iter().enumerate() {
+            let e = cg.push(
+                block,
+                OperationBuilder::new("llvm.extractvalue", cg.loc)
+                    .add_operands(&[sum])
+                    .add_attributes(&[(cg.id("position"), cg.parse_attr(&format!("array<i64: {i}>"))?)])
+                    .add_results(&[cg.f32_t])
+                    .build()?,
+            )?;
+            out = cg.vec_insert(block, e, out, &[r, c])?;
+        }
+        Ok(out)
     }
 
     fn mma_shape<'c>(

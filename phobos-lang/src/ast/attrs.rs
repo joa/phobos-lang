@@ -199,6 +199,22 @@ impl Kernel {
         found
     }
 
+    /// True for `@tensorcore(f32)`: `dot` on the tensor cores at about f32
+    /// accuracy, each f32 operand split into a 16-bit part and the 16-bit
+    /// remainder. Every other `dot` runs on FMA.
+    pub fn tensorcore_split(&self) -> bool {
+        self.attrs.iter().any(|a| {
+            a.name == "tensorcore"
+                && a.args.iter().any(|arg| matches!(arg, AttrArg::Positional(Literal::Ident(f)) if f == "f32"))
+        })
+    }
+
+    /// True for `@tensorcore` whose `dot`s round their operands to f16:
+    /// any but `@tensorcore(f32)`.
+    pub fn tensorcore_f16(&self) -> bool {
+        self.attrs.iter().any(|a| a.name == "tensorcore") && !self.tensorcore_split()
+    }
+
     /// True for `@tensorcore` without the `wmma` argument, which forces the
     /// legacy WMMA path.
     pub fn wants_mma_sync(&self) -> bool {

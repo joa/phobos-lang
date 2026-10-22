@@ -379,3 +379,54 @@ fn tensorcore_widens_to_mma_sync_on_every_chip() {
     assert!(!forced.contains("mma.sync.aligned.m16n8"), "`@tensorcore(wmma)` should stay on WMMA");
     assert!(forced.contains("wmma.mma.sync"), "`@tensorcore(wmma)` should stay on WMMA");
 }
+
+/// A 64x64 f32 product a k loop accumulates, under `attrs`.
+fn split_gemm(attrs: &str) -> String {
+    format!(
+        "{attrs}
+        @launch(128)
+        @aligned(M = 64, N = 64, K = 32)
+        kernel mm(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {{
+            let pm = ctx.block.x
+            let pn = ctx.block.y
+            var acc: tile<f32>[64, 64] = 0.0
+            for kt in range(0, K, 32) {{
+                let a = A[pm * 64 :+ 64, kt :+ 32]
+                let b = B[kt :+ 32, pn * 64 :+ 64]
+                acc += dot(a, b)
+            }}
+            C[pm * 64 :+ 64, pn * 64 :+ 64] = acc
+        }}"
+    )
+}
+
+#[test]
+fn tensorcore_f32_splits_each_operand_into_three_products() {
+    // Each operand staged as a 16-bit part and its remainder, three mma a
+    // tile and step: f16 parts at Turing's k8, bf16 at Ampere's k16 through
+    // nvvm's op, since nvgpu's lowers no bf16.
+    let turing = emit_mlir_sync(&split_gemm("@tensorcore(f32)"), "sm_75");
+    let ampere = emit_mlir_sync(&split_gemm("@tensorcore(f32)"), "sm_86");
+    assert!(turing.contains("mmaShape = [16, 8, 8]") && !turing.contains("bf16"), "{turing}");
+    assert!(turing.contains("arith.subf"), "{turing}");
+    assert!(ampere.contains("nvvm.mma.sync") && ampere.contains("#nvvm.mma_type<bf16>"), "{ampere}");
+    assert!(!ampere.contains("nvgpu.mma.sync"), "{ampere}");
+    // A warp's 32x32 is eight n8 tiles, over four k8 steps, three each.
+    assert_eq!(turing.matches("nvgpu.mma.sync").count(), 8 * 4 * 3, "{turing}");
+}
+
+#[test]
+fn tensorcore_f32_runs_any_other_dot_in_f32() {
+    // A product the warps cannot tile into fragments stays off the tensor
+    // cores, rather than rounding to f16 as `@tensorcore` would.
+    let src = "@tensorcore(f32)
+        @launch(256)
+        kernel k(A: tensor<f32>[16, 16], B: tensor<f32>[16, 16], C: tensor<f32>[16, 16]) {
+            let a = A[0 :+ 16, 0 :+ 16]
+            let b = B[0 :+ 16, 0 :+ 16]
+            var c: tile<f32>[16, 16] = dot(a, b)
+            C[0 :+ 16, 0 :+ 16] = c
+        }";
+    let mlir = emit_mlir_sync(src, "sm_86");
+    assert!(!mlir.contains("mma.sync") && !mlir.contains("f16") && !mlir.contains("wmma"), "{mlir}");
+}

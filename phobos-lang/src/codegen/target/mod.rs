@@ -34,6 +34,9 @@ pub(super) trait Isa {
     /// The k of the native f16 mma.sync, or None on a chip without one.
     fn mma_sync_k(&self) -> Option<i64>;
 
+    /// Whether mma.sync takes bf16 operands, `m16n8k16`, sm_80 on.
+    fn has_bf16_mma(&self) -> bool;
+
     /// Whether the chip has a four-way integer dot product.
     fn has_dp4a(&self) -> bool;
 
@@ -332,6 +335,18 @@ pub(super) trait Isa {
     // ordinary per-lane vectors, so the emitter picks the shape and places
     // the lanes itself.
 
+    /// acc + a * b over one bf16 `m16n8k16`: `a` and `b` are the f16 operand
+    /// fragments [`Isa::mma_sync`] takes, `vector<4x2xf16>` and
+    /// `vector<2x2xf16>`, holding bf16 bits; `acc` is `vector<2x2xf32>`.
+    fn mma_sync_bf16<'c>(
+        &self,
+        cg: &Codegen<'c>,
+        block: &Block<'c>,
+        a: Value<'c, 'c>,
+        b: Value<'c, 'c>,
+        acc: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>>;
+
     /// acc + a * b over one [`Isa::mma_shape`].
     #[allow(clippy::too_many_arguments)]
     fn mma_sync<'c>(
@@ -450,6 +465,20 @@ impl<'c> Codegen<'c> {
 
     /// The k of the native f16 mma.sync. Call only after
     /// [`Self::has_mma_sync`]; a chip without one is an error here.
+    pub(super) fn has_bf16_mma(&self) -> bool {
+        self.isa.has_bf16_mma()
+    }
+
+    pub(in crate::codegen) fn mma_sync_bf16(
+        &self,
+        block: &Block<'c>,
+        a: Value<'c, 'c>,
+        b: Value<'c, 'c>,
+        acc: Value<'c, 'c>,
+    ) -> Result<Value<'c, 'c>> {
+        self.isa.mma_sync_bf16(self, block, a, b, acc)
+    }
+
     pub(super) fn mma_sync_k(&self) -> Result<i64> {
         self.isa
             .mma_sync_k()

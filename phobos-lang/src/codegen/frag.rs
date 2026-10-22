@@ -1,5 +1,5 @@
 use super::*;
-use crate::codegen::matmul::AOperand;
+use crate::codegen::matmul::{AOperand, SplitLo};
 
 /// The A operand of an f16 fragment dot: a tile, or another accumulator's
 /// fragments whose warps own the same rows.
@@ -151,6 +151,10 @@ impl<'c> Codegen<'c> {
         self.check_shapes(&b.shape, &b_want, "fragment dot rhs")?;
         let (fm, fnn) = fa.warp_frags();
 
+        if self.split_dot {
+            let (.., m0, n0) = self.warp_block_origin(block, fa.wm, fa.wn, fm * 16, fnn * 16)?;
+            return self.frag_dot_split(block, fa, a, b, (kk, fm, fnn), (m0, n0), transpose);
+        }
         let (a_buf, a_kept) = match a {
             DotA::Tile(a) => {
                 let (buf, kept) = self.frag_dot_operand(block, a)?;
@@ -189,6 +193,50 @@ impl<'c> Codegen<'c> {
         }
         if !b_kept {
             self.release(&b_buf);
+        }
+        Ok(finals)
+    }
+
+    /// [`Self::frag_dot_raw`] under `@tensorcore(f32)`: each tile operand
+    /// staged as its 16-bit part and the 16-bit remainder, bf16 where the
+    /// chip multiplies it and f16 before, and three products a step.
+    #[allow(clippy::too_many_arguments)]
+    fn frag_dot_split(
+        &mut self,
+        block: &Block<'c>,
+        fa: &FragAcc<'c>,
+        a: &DotA<'c>,
+        b: &MemVal<'c>,
+        dims: (i64, i64, i64),
+        origin: (Value<'c, 'c>, Value<'c, 'c>),
+        transpose: bool,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let bf16 = self.has_bf16_mma();
+        let mut staged = Vec::new();
+        let mut parts = |cg: &mut Self, v: &MemVal<'c>| -> Result<(MemVal<'c>, MemVal<'c>)> {
+            let hi = cg.alloc_tile_swizzled(block, cg.f16_t, &v.shape)?;
+            let lo = cg.alloc_tile_swizzled(block, cg.f16_t, &v.shape)?;
+            cg.tile_copy_split(block, v, (&hi, &lo), bf16)?;
+            staged.extend([hi.clone(), lo.clone()]);
+            Ok((hi, lo))
+        };
+        let a_parts = match a {
+            DotA::Tile(a) => Some(parts(self, a)?),
+            DotA::Frags(_) => None,
+        };
+        let (b_hi, b_lo) = parts(self, b)?;
+        self.barrier(block)?;
+        let a_op = match (a, &a_parts) {
+            (DotA::Frags(src), _) => AOperand::Frags(src),
+            (DotA::Tile(_), Some((hi, _))) => AOperand::Staged(hi),
+            (DotA::Tile(_), None) => unreachable!("a tile operand is staged"),
+        };
+        let lo = SplitLo { a: a_parts.as_ref().map(|(_, lo)| lo), b: &b_lo, bf16 };
+        let finals = self.mma_sync_mac_parts(block, (a_op, &b_hi), Some(lo), dims, origin, &fa.frags, transpose)?;
+        // Orders the reads before the parts are written again.
+        self.barrier(block)?;
+        for buf in &staged {
+            self.release(buf);
         }
         Ok(finals)
     }

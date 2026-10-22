@@ -413,6 +413,9 @@ struct Codegen<'c> {
     pipeline_declines: Vec<String>,
     tensorcore: bool, // whether to use tensor cores (fp16 inputs)
     mma_sync: bool,   // whether to use mma.sync, disable with @tensorcore(wmma)
+    /// `@tensorcore(f32)`: a fragment dot splits each f32 operand into a
+    /// 16-bit part and its 16-bit remainder and issues three products.
+    split_dot: bool,
     launch: Option<Launch>,
     cta_threads: i64,
     /// What each graph value became, one layer per instantiated body; see
@@ -525,7 +528,8 @@ impl<'c> Codegen<'c> {
             rotating: Default::default(),
             rotate_after: Default::default(),
             pipeline_declines: Vec::new(),
-            tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
+            tensorcore: kernel.tensorcore_f16(),
+            split_dot: kernel.tensorcore_split(),
             mma_sync: kernel.wants_mma_sync(),
             launch,
             cta_threads,

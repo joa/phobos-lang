@@ -303,6 +303,9 @@ impl Build {
 
     /// The statements a register matmul consumes, or None.
     fn matmul_matches<'a>(&self, stmts: &'a [Stmt]) -> Option<Matched<'a>> {
+        if self.split_dot {
+            return None;
+        }
         let [
             Stmt::Var {
                 name: acc,

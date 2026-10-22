@@ -139,6 +139,9 @@ pub(crate) struct Build {
     /// with the divisor every value they take has.
     pub(crate) pending_ivs: Vec<(String, i64)>,
     pub(crate) tensorcore: bool,
+    /// `@tensorcore(f32)`, whose dots run in fragments or on FMA, never as
+    /// the register matmul.
+    pub(crate) split_dot: bool,
     pub(crate) mma_sync: bool,
     pub(crate) pad_stage: bool,
     pub(crate) pipeline: Option<bool>,
@@ -243,8 +246,9 @@ pub fn build_cautious(
         cta_threads,
         dynamic_shared: kernel.wants_dynamic_shared(),
         pad_stage: kernel.wants_padded_stage(),
-        tensorcore: kernel.attrs.iter().any(|a| a.name == "tensorcore"),
+        tensorcore: kernel.tensorcore_f16(),
         mma_sync: kernel.wants_mma_sync(),
+        split_dot: kernel.tensorcore_split(),
         pipeline,
         pipeline_cautious: cautious,
         shape_env: shape_env.clone(),
@@ -263,6 +267,7 @@ pub fn build_cautious(
         trimmed_ivs: Vec::new(),
         pending_ivs: Vec::new(),
         tensorcore: info.tensorcore,
+        split_dot: info.split_dot,
         mma_sync: info.mma_sync,
         pad_stage: info.pad_stage,
         pipeline: info.pipeline,

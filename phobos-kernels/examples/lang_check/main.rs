@@ -16,7 +16,7 @@ mod record;
 mod stdlib;
 mod stdlib_stats;
 mod tensor;
-use tensor::{dot_epilogue, flash_softmax, scaled_int8_dot};
+use tensor::{dot_epilogue, flash_softmax, scaled_int8_dot, split_dot};
 
 const THREADS: u32 = 256;
 
@@ -132,6 +132,7 @@ fn main() -> Result<()> {
     dot_epilogue(&mut failures)?;
     flash_softmax(&mut failures)?;
     scaled_int8_dot(&mut failures)?;
+    split_dot(&mut failures)?;
     lanes(&mut failures)?;
     lane_matvec(&mut failures)?;
     restaged_lanes(&mut failures)?;

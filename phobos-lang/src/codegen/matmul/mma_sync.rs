@@ -327,8 +327,28 @@ impl<'c> Codegen<'c> {
         accs: &[Value<'c, 'c>],
         transpose_b: bool,
     ) -> Result<Vec<Value<'c, 'c>>> {
+        self.mma_sync_mac_parts(block, (a, b_buf), None, dims, (m0, n0), accs, transpose_b)
+    }
+
+    /// [`Self::mma_sync_mac`] over operands split by `@tensorcore(f32)`:
+    /// with `lo`, each operand's remainder part beside the 16-bit part, and
+    /// three products a tile and step, `lo * hi + hi * lo + hi * hi`, the
+    /// remainders' own product left out. A fragment A operand splits in each
+    /// lane's registers.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::codegen) fn mma_sync_mac_parts(
+        &mut self,
+        block: &Block<'c>,
+        (a, b_buf): (AOperand<'_, 'c>, &MemVal<'c>),
+        lo: Option<SplitLo<'_, 'c>>,
+        dims: (i64, i64, i64),
+        (m0, n0): (Value<'c, 'c>, Value<'c, 'c>),
+        accs: &[Value<'c, 'c>],
+        transpose_b: bool,
+    ) -> Result<Vec<Value<'c, 'c>>> {
         let (kk, fm, fnn) = dims;
-        let mma_k = self.mma_sync_k()?;
+        let bf16 = lo.as_ref().is_some_and(|l| l.bf16);
+        let mma_k = if bf16 { 16 } else { self.mma_sync_k()? };
         // 8x8 tiles per fragment: A spans m16 x K, B spans K x n8. Each lane
         // holds two f16 per tile.
         let a_tiles = 2 * (mma_k / 8);
@@ -347,22 +367,31 @@ impl<'c> Codegen<'c> {
         for ks in 0..kk / mma_k {
             let kbase = self.const_index(block, ks * mma_k)?;
 
-            // A fragments: one m16 x K block per fi.
-            let mut a_frags = Vec::with_capacity(fm as usize);
+            // A fragments: one m16 x K block per fi, and its remainder.
+            let (mut a_frags, mut a_los) = (Vec::with_capacity(fm as usize), Vec::new());
             for fi in 0..fm {
-                a_frags.push(match a {
+                match a {
                     AOperand::Staged(a_buf) => {
                         let c = self.const_index(block, fi * 16)?;
                         let mi = self.addi(block, m0, c)?;
-                        self.ldmatrix_frag(block, a_buf, &[mi, kbase], a_tiles, Frag::A, a_frag_t, lane)?
+                        a_frags.push(self.ldmatrix_frag(block, a_buf, &[mi, kbase], a_tiles, Frag::A, a_frag_t, lane)?);
+                        if let Some(SplitLo { a: Some(a_lo), .. }) = &lo {
+                            a_los.push(self.ldmatrix_frag(block, a_lo, &[mi, kbase], a_tiles, Frag::A, a_frag_t, lane)?);
+                        }
                     }
-                    AOperand::Frags(src) => self.a_frag_of_acc(block, src, fi, ks, mma_k, a_frag_t)?,
-                });
+                    AOperand::Frags(src) => {
+                        let split = lo.as_ref().map(|l| l.bf16);
+                        let (hi, rest) = self.a_frag_of_acc(block, src, fi, ks, mma_k, a_frag_t, split)?;
+                        a_frags.push(hi);
+                        a_los.extend(rest);
+                    }
+                }
             }
 
             // B fragments: one K x n8 block per (fj, n8). NN reads the [k, n]
             // buffer transposed. NT reads the [n, k] buffer as is.
             let mut b_frags = Vec::with_capacity((fnn * 2) as usize);
+            let mut b_los = Vec::new();
             for fj in 0..fnn {
                 for nn in 0..2 {
                     let c = self.const_index(block, fj * 16 + nn * 8)?;
@@ -375,22 +404,30 @@ impl<'c> Codegen<'c> {
                     b_frags.push(
                         self.ldmatrix_frag(block, b_buf, &idx, b_tiles, layout, b_frag_t, lane)?,
                     );
+                    if let Some(l) = &lo {
+                        b_los.push(self.ldmatrix_frag(block, l.b, &idx, b_tiles, layout, b_frag_t, lane)?);
+                    }
                 }
             }
 
-            for fi in 0..fm {
+            let shape = self.mma_shape(16, 8, mma_k)?;
+            for fi in 0..fm as usize {
                 for fj in 0..fnn {
                     for nn in 0..2 {
-                        let i = ((fi * fnn + fj) * 2 + nn) as usize;
-                        let shape = self.mma_shape(16, 8, mma_k)?;
-                        accs[i] = self.mma_sync(
-                            block,
-                            a_frags[fi as usize],
-                            b_frags[(fj * 2 + nn) as usize],
-                            accs[i],
-                            shape,
-                            acc_t,
-                        )?;
+                        let i = ((fi as i64 * fnn + fj) * 2 + nn) as usize;
+                        let bi = (fj * 2 + nn) as usize;
+                        let mut pairs = Vec::with_capacity(3);
+                        if lo.is_some() {
+                            pairs.push((a_los[fi], b_frags[bi]));
+                            pairs.push((a_frags[fi], b_los[bi]));
+                        }
+                        pairs.push((a_frags[fi], b_frags[bi]));
+                        for (af, bf) in pairs {
+                            accs[i] = match bf16 {
+                                true => self.mma_sync_bf16(block, af, bf, accs[i])?,
+                                false => self.mma_sync(block, af, bf, accs[i], shape, acc_t)?,
+                            };
+                        }
                     }
                 }
             }
@@ -403,7 +440,10 @@ impl<'c> Codegen<'c> {
     /// the operand are row block `fi` and columns `ks * K ..` of `src`,
     /// whose warps own the same rows. A D tile holds rows `g` and `g + 8` at
     /// columns `2t` and `2t + 1`, which is where an A tile wants them, so
-    /// each 8x8 tile of the fragment is half a D tile, rounded to f16.
+    /// each 8x8 tile of the fragment is half a D tile, rounded to f16. With
+    /// `split`, `Some(bf16)`, it is the 16-bit part instead and the second
+    /// fragment the remainder, as [`Self::split_parts`] parts them.
+    #[allow(clippy::too_many_arguments)]
     fn a_frag_of_acc(
         &self,
         block: &Block<'c>,
@@ -412,24 +452,35 @@ impl<'c> Codegen<'c> {
         ks: i64,
         mma_k: i64,
         a_frag_t: Type<'c>,
-    ) -> Result<Value<'c, 'c>> {
+        split: Option<bool>,
+    ) -> Result<(Value<'c, 'c>, Option<Value<'c, 'c>>)> {
         let (_, fnn) = src.warp_frags();
         let zero = self.zero_scalar(block, self.f16_t)?;
         let mut frag = self.vec_broadcast(block, zero, a_frag_t)?;
+        let mut rest = split.map(|_| frag);
         // Tile j of the fragment: rows `g + 8 (j % 2)`, columns
         // `8 (j / 2) ..` of the step, the n8 half `nn` of 16-column block
-        // `fj` of the source.
+        // `fj` of the source. Split, its remainder goes in `rest`.
         for j in 0..2 * (mma_k / 8) {
             let col = ks * mma_k + 8 * (j / 2);
             let (fj, nn, di) = (col / 16, col % 16 / 8, j % 2);
             let d = src.frags[((fi * fnn + fj) * 2 + nn) as usize];
             for e in 0..2 {
                 let x = self.vec_extract(block, d, &[di, e], self.f32_t)?;
-                let h = self.truncf(block, x, self.f16_t)?;
+                let (h, l) = match split {
+                    Some(bf16) => {
+                        let (h, l) = self.split_parts(block, x, 1, bf16)?;
+                        (h, Some(l))
+                    }
+                    None => (self.truncf(block, x, self.f16_t)?, None),
+                };
                 frag = self.vec_insert(block, h, frag, &[j, e])?;
+                if let (Some(r), Some(l)) = (rest.as_mut(), l) {
+                    *r = self.vec_insert(block, l, *r, &[j, e])?;
+                }
             }
         }
-        Ok(frag)
+        Ok((frag, rest))
     }
 
     /// The warp's [`Self::ldmatrix`] operand at the warp-tile origin `indices`
@@ -500,6 +551,15 @@ impl<'c> Codegen<'c> {
 /// Where an `mma.sync` reads its A operand: a staged f16 buffer through
 /// `ldmatrix`, or an f16-path accumulator's D fragments in registers.
 #[derive(Clone, Copy)]
+/// The remainder parts of a split dot's operands, see
+/// [`Codegen::mma_sync_mac_parts`]: A's staged one, None for an A in
+/// fragments, then B's, and whether the parts are bf16.
+pub(in crate::codegen) struct SplitLo<'a, 'c> {
+    pub(in crate::codegen) a: Option<&'a MemVal<'c>>,
+    pub(in crate::codegen) b: &'a MemVal<'c>,
+    pub(in crate::codegen) bf16: bool,
+}
+
 pub(in crate::codegen) enum AOperand<'a, 'c> {
     Staged(&'a MemVal<'c>),
     Frags(&'a FragAcc<'c>),

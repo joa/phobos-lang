@@ -111,6 +111,9 @@ pub struct KernelInfo {
     pub pad_stage: bool,
     pub tensorcore: bool,
     pub mma_sync: bool,
+    /// `@tensorcore(f32)`: fragment dots take f32 operands, which they
+    /// split into two 16-bit parts themselves.
+    pub split_dot: bool,
     /// `@pipeline`'s mode, see [`crate::ast::Kernel::pipeline_mode`].
     pub pipeline: Option<bool>,
     /// Whether this build leaves out the loops pipelined by default only

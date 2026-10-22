@@ -404,3 +404,63 @@ pub(crate) fn scaled_int8_dot(failures: &mut u32) -> Result<()> {
     }
     Ok(())
 }
+
+pub(crate) fn split_dot(failures: &mut u32) -> Result<()> {
+    // `@tensorcore(f32)`: each f32 operand a 16-bit part and the remainder,
+    // three products a step, against f64. A k loop carries one accumulator,
+    // and a product feeds the next dot from the lanes' registers, its warps
+    // owning whole rows. Plain `@tensorcore` beside it rounds to f16.
+    let scaled = |n, seed| -> Vec<f32> { noise(n, seed).iter().map(|v| 4.0 * v).collect() };
+    let (a, b, v) = (scaled(128 * 128, 31), scaled(128 * 64, 32), scaled(32 * 64, 33));
+    let src = |attrs: &str| {
+        format!(
+            "{attrs}
+            @launch(256)
+            kernel k(A: tensor<f32>[128, 128], B: tensor<f32>[128, 64], V: tensor<f32>[32, 64],
+                     O: tensor<f32>[64, 64], P: tensor<f32>[128, 64]) {{
+                var acc: tile<f32>[64, 64] = 0.0
+                for kt in range(0, 128, 32) {{
+                    let x = A[0 :+ 64, kt :+ 32]
+                    let y = B[kt :+ 32, 0 :+ 64]
+                    acc += dot(x, y)
+                }}
+                O[0 :+ 64, 0 :+ 64] = acc
+                let q = A[0 :+ 128, 0 :+ 32]
+                let w = A[0 :+ 32, 64 :+ 32]
+                let vv = V[0 :+ 32, 0 :+ 64]
+                var s: tile<f32>[128, 32] = dot_t(q, w)
+                s = s * 0.125
+                var o: tile<f32>[128, 64] = 0.0
+                o += dot(s, vv)
+                P[0 :+ 128, 0 :+ 64] = o
+            }}"
+        )
+    };
+    let at = |m: &[f32], cols: usize, i: usize, j: usize| m[i * cols + j] as f64;
+    let want_o: Vec<f64> = (0..64 * 64)
+        .map(|ij| (0..128).map(|x| at(&a, 128, ij / 64, x) * at(&b, 64, x, ij % 64)).sum())
+        .collect();
+    let s: Vec<f64> = (0..128 * 32)
+        .map(|ij| 0.125 * (0..32).map(|x| at(&a, 128, ij / 32, x) * at(&a, 128, ij % 32, 64 + x)).sum::<f64>())
+        .collect();
+    let want_p: Vec<f64> = (0..128 * 64)
+        .map(|ij| (0..32).map(|x| s[ij / 64 * 32 + x] * at(&v, 64, x, ij % 64)).sum())
+        .collect();
+    let rel = |got: &[f32], want: &[f64]| {
+        let scale = want.iter().fold(0.0f64, |m, w| m.max(w.abs()));
+        got.iter().zip(want).map(|(g, w)| (*g as f64 - w).abs()).fold(0.0, f64::max) / scale
+    };
+    for (attrs, tol) in [("@tensorcore(f32)", 2e-5), ("@tensorcore", 2e-2)] {
+        let (ga, gb, gv) = (Arg::new(&a, 128, 128)?, Arg::new(&b, 128, 64)?, Arg::new(&v, 32, 64)?);
+        let (go, gp) = (Arg::<f32>::zeroed(64, 64)?, Arg::<f32>::zeroed(128, 64)?);
+        let mut slots = Vec::new();
+        for g in [&ga, &gb, &gv, &go, &gp] {
+            g.push(&mut slots)?;
+        }
+        run_at(64, &src(attrs), "k", 1, &mut slots)?;
+        let (eo, ep) = (rel(&go.read()?, &want_o), rel(&gp.read()?, &want_p));
+        let ok = eo < tol && ep < tol;
+        report(&format!("dot {attrs}"), ok, format!("rel err {eo:.2e}, chained {ep:.2e}"), failures);
+    }
+    Ok(())
+}

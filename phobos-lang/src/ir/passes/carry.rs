@@ -134,9 +134,12 @@ impl Carry<'_> {
             Update::Operand { index } => {
                 // The one conversion: the fragments written to a shared
                 // tile of the same name for the dot to read, in the f16 the
-                // tensor cores take, so the dot reads it where it is.
+                // tensor cores take, so the dot reads it where it is. A
+                // split dot takes f32 and splits it as it stages it.
                 let mut ty = ir.ty(self.tile).clone();
-                if let Type::Tile(t) = &mut ty {
+                if let Type::Tile(t) = &mut ty
+                    && !ir.kernel.split_dot
+                {
                     t.elem = Scalar::F16;
                 }
                 let made = self.op(ir, op, at, OpKind::Alloc, &[], vec![ty], Vec::new());
