@@ -832,7 +832,7 @@ pub(crate) mod fuse;
 #[cfg(feature = "cuda")]
 pub mod device;
 
-pub use host::HostBackend;
+pub use host::{ActError, HostBackend};
 
 #[cfg(feature = "cuda")]
 pub use device::DeviceBackend;

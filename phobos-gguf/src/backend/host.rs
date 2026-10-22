@@ -7,7 +7,7 @@ use phobos_base::half::{f16_to_f32, f32_to_f16};
 use super::{
     Attn, Backend, Buf, DeltaMix, HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, HostQuant, L2_EPS, Packed,
     Plane, Q8_BLOCK, QAct,
-    QBuf, Rope, quantize_row,
+    QBuf, RawBuf, Rope, quantize_row,
 };
 
 /// The reference backend, where every buffer is a `Vec<f32>` on the host.
@@ -32,11 +32,41 @@ pub struct HostBackend {
     /// Expert sets in their file encoding. See `host/moe.rs`.
     experts: RefCell<Vec<std::sync::Arc<crate::experts::ExpertSet>>>,
     expert_keys: RefCell<std::collections::HashMap<String, super::ExpertsBuf>>,
+    /// Elements sharing one int8 scale when a raw-weight matmul's activation
+    /// is rounded first, 0 for the exact pass, and each such product's error.
+    /// See [`HostBackend::round_activations`].
+    act_round: std::cell::Cell<usize>,
+    act_errors: RefCell<Vec<ActError>>,
+}
+
+/// The error one raw-weight matmul took from rounding its activation: the
+/// product's shape and its relative Frobenius error against the exact one.
+#[derive(Clone, Copy, Debug)]
+pub struct ActError {
+    pub m: usize,
+    pub k: usize,
+    pub n: usize,
+    pub rel: f64,
 }
 
 impl HostBackend {
     pub fn new() -> HostBackend {
         HostBackend::default()
+    }
+
+    /// Rounds every raw-weight matmul's activation to int8 with one scale per
+    /// `run` elements before multiplying, as a device kernel reading an int8
+    /// activation does, and keeps each product's error against the exact
+    /// one. 0 restores the exact pass. The errors gathered so far are
+    /// dropped.
+    pub fn round_activations(&self, run: usize) {
+        self.act_round.set(run);
+        self.act_errors.borrow_mut().clear();
+    }
+
+    /// The errors gathered since [`HostBackend::round_activations`].
+    pub fn act_errors(&self) -> Vec<ActError> {
+        self.act_errors.borrow().clone()
     }
 
     /// Moves `dst` out of the slab table so it can be written while the other
@@ -55,6 +85,37 @@ impl HostBackend {
 }
 
 impl Backend for HostBackend {
+    fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
+        let run = self.act_round.get();
+        if run == 0 {
+            return self.matmul(a, m, k, Buf(w.0), n, out);
+        }
+        ensure!(k.is_multiple_of(run), "rounding a [{m}, {k}] activation at one scale per {run}");
+        // The exact product first, then the rounded activation's over it.
+        self.matmul(a, m, k, Buf(w.0), n, out)?;
+        let exact: Vec<f32> = self.slabs.borrow()[out.0][..m * n].to_vec();
+        let rounded = self.alloc(m * k)?;
+        self.writing(rounded, |slabs, dst| {
+            let mut qs = vec![0i8; run];
+            for (block, out) in slabs[a.0][..m * k].chunks_exact(run).zip(dst.chunks_exact_mut(run)) {
+                let d = quantize_row(block, &mut qs);
+                for (o, &q) in out.iter_mut().zip(&qs) {
+                    *o = f32::from(q) * d;
+                }
+            }
+        });
+        self.matmul(rounded, m, k, Buf(w.0), n, out)?;
+        self.release(rounded);
+        let (mut diff, mut norm) = (0.0f64, 0.0f64);
+        for (&y, &x) in self.slabs.borrow()[out.0][..m * n].iter().zip(&exact) {
+            diff += f64::from(y - x).powi(2);
+            norm += f64::from(x).powi(2);
+        }
+        let rel = if norm > 0.0 { (diff / norm).sqrt() } else { 0.0 };
+        self.act_errors.borrow_mut().push(ActError { m, k, n, rel });
+        Ok(())
+    }
+
     fn buf_len(&self, buf: Buf) -> Result<usize> {
         Ok(self.slabs.borrow()[buf.0].len())
     }
