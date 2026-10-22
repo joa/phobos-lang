@@ -122,6 +122,10 @@ use raw::DeviceRaw;
 /// [`kernels::q8_qmma_split_src`].
 type QmmaSplitKey = (usize, usize, usize);
 
+/// `n`, `k` and split count: the parameters of
+/// [`kernels::q8_qgemm_split_src`].
+type Q8gemmSplitKey = (usize, usize, usize);
+
 /// Format, `n`, `k`, slice count, and whether the sum adds into its
 /// destination, of a split decode matvec.
 type QdotSplitKey = (Quant, usize, usize, usize, bool);
@@ -208,6 +212,13 @@ pub struct DeviceBackend {
     /// tile, same per-warp patch. Compiled lazily when
     /// [`Self::qmma_narrow`] is set.
     q8_qmma_narrow: RefCell<Option<Module>>,
+    /// The staged form of the Q8_0 prompt projection (`q8_qgemm_t`), and
+    /// its split-K form with the reduce by `n`, `k` and split count, each
+    /// compiled on first use. `PHOBOS_Q8_QGEMM=0` keeps the deep `q8_qmma`
+    /// tile instead.
+    q8_qgemm: RefCell<Option<Module>>,
+    q8_qgemm_split: RefCell<HashMap<Q8gemmSplitKey, (Module, Module)>>,
+    q8_qgemm_on: bool,
     lanes_kernels: RefCell<HashMap<Quant, Module>>,
     q8_split: Variants,
     q8_qdot: Module,
