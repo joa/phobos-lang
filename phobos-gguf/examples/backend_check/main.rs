@@ -17,11 +17,13 @@ use phobos_gguf::quant::{Packed, Quant, pack_q8_0};
 
 mod moe;
 mod norm;
+mod q8;
 mod raw;
 mod topk;
 
 use moe::check_moe_slots;
 use norm::check_norms_q;
+use q8::check_q8_handoff;
 use raw::{check_hadamard, check_raw_formats};
 use topk::check_topk;
 
@@ -868,6 +870,8 @@ fn main() -> Result<()> {
         };
         check(&format!("rms_norm [{rows} x {width}]"), &run(&host)?, &run(&gpu)?);
     }
+
+    check_q8_handoff(&host, &gpu, &check_within, &mut next)?;
 
     let _ = Buf(0);
     println!("\nworst relative error {:.3e}", worst.get());

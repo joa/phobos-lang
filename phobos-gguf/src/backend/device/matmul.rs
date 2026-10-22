@@ -87,9 +87,14 @@ impl DeviceBackend {
         };
 
         // Deepest tile first. Each kernel takes the whole tiles it can and
-        // passes the remaining rows on: q8_qmma at two depths, then q8_mma,
-        // then a matvec per leftover row.
+        // passes the remaining rows on: the staged kernel where the shape
+        // lets it, q8_qmma at two depths, then q8_mma, then a matvec per
+        // leftover row.
         let mut qmma_rows = 0;
+        if self.q8_qgemm_on && m >= QGEMM_TM && n.is_multiple_of(QGEMM_TN) && k.is_multiple_of(256) {
+            qmma_rows = m - m % QGEMM_TM;
+            self.launch_q8_qgemm(&tiles, qmma_rows)?;
+        }
         if qmma_takes(n) {
             let wide = qmma_width(n);
             for (module, depth, tn) in [
@@ -224,6 +229,39 @@ impl DeviceBackend {
             )?;
         }
         Ok(())
+    }
+
+    /// The staged projection over `rows` whole 128-row tiles of the Q8_0
+    /// planes, split along `k` where the grid is starved (see
+    /// [`qgemm_splits`]) with a reduce summing the partial planes.
+    fn launch_q8_qgemm(&self, tiles: &Q8Tiles, rows: usize) -> Result<()> {
+        let (k, n) = (tiles.k, tiles.n);
+        let band = tiles.band(0, rows);
+        let grid = ((rows / QGEMM_TM) as u32, (n / QGEMM_TN) as u32);
+        let splits = if self.qmma_split { qgemm_splits(rows, n, k, 256, self.sms) } else { 1 };
+        if splits == 1 {
+            if self.q8_qgemm.borrow().is_none() {
+                let module = compile(&q8_qgemm_src(), &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], "q8_qgemm")?;
+                *self.q8_qgemm.borrow_mut() = Some(module);
+            }
+            let cache = self.q8_qgemm.borrow();
+            let module = cache.as_ref().expect("filled just above");
+            return self.launch(module, "q8_qgemm", &band, (grid.0, grid.1, 1));
+        }
+        let key = (n, k, splits);
+        if !self.q8_qgemm_split.borrow().contains_key(&key) {
+            let split = compile(&q8_qgemm_split_src(n, k, splits), &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], "q8_qgemm_split")?;
+            let reduce = compile(&qgemm_reduce_src(n, splits, false), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
+            self.q8_qgemm_split.borrow_mut().insert(key, (split, reduce));
+        }
+        let cache = self.q8_qgemm_split.borrow();
+        let (split, reduce) = &cache[&key];
+        let partials = self.split_partials(rows * n * splits)?;
+        let plane = (partials, [rows as i64, (n * splits) as i64]);
+        let mut operands = band[..4].to_vec();
+        operands.push(plane);
+        self.launch(split, "q8_qgemm_split", &operands, (grid.0, grid.1 * splits as u32, 1))?;
+        self.launch(reduce, "qgemm_reduce", &[plane, band[4]], (rows as u32, grid.1, 1))
     }
 
     /// Split-K path for `q8_qmma`'s deep tile on a small grid. Each of

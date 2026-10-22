@@ -1,6 +1,7 @@
 // Q8_0 kernel sources: the activation quantizer, the dp4a and imma
 // contractions, the fused dot, and the split-k reduction.
 
+use super::qgemm::{QGEMM_CTA, QGEMM_TM, QGEMM_TN};
 use crate::backend::Q8_BLOCK;
 
 /// Output tile along N for the quantized single-row matmul.
@@ -150,6 +151,51 @@ kernel q8_qmma(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
 {}}}
 ",
         q8_qmma_loop("0", "K", "C", "  ")
+    )
+}
+
+/// The staged projection over the Q8_0 planes, `q8_qgemm_t`, for a prompt's
+/// whole 128-row tiles: the raw formats' kernel (see [`super::qgemm`]) with
+/// the quants copied as they are.
+pub(crate) fn q8_qgemm_src() -> String {
+    format!(
+        "@launch({QGEMM_CTA}, 2)
+@autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
+@aligned(M = TM, N = TN, K = 256)
+kernel q8_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+               W: tensor<i8>[N, K], WS: tensor<f32>[KB, N], C: tensor<f32>[M, N]) {{
+  let pm = ctx.block.x
+  let pn = ctx.block.y
+  C[pm * TM :+ TM, pn * TN :+ TN] = q8_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                             W[pn * TN :+ TN, :], WS[:, pn * TN :+ TN])
+}}
+"
+    )
+}
+
+/// [`q8_qgemm_src`] split `s` ways along `k`, as [`super::qgemm_split_src`]
+/// splits the grouped formats: program `(pm, ps * gn + pn)` contracts slice
+/// `ps` into column tile `ps * gn + pn` of the partial `P`, which
+/// [`super::qgemm_reduce_src`] sums.
+pub(crate) fn q8_qgemm_split_src(n: usize, k: usize, s: usize) -> String {
+    let gn = n / QGEMM_TN;
+    let sk = k / s;
+    let skb = sk / Q8_BLOCK;
+    format!(
+        "@launch({QGEMM_CTA}, 2)
+@autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
+@aligned(M = TM, N = TN, K = {sk}, KB = {skb}, NP = TN)
+kernel q8_qgemm_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+                     W: tensor<i8>[N, K], WS: tensor<f32>[KB, N], P: tensor<f32>[M, NP]) {{
+  let pm = ctx.block.x
+  let pid = ctx.block.y
+  let ps = pid / {gn}
+  let pn = pid - ps * {gn}
+  P[pm * TM :+ TM, pid * TN :+ TN] = q8_qgemm_t(A[pm * TM :+ TM, ps * {sk} :+ {sk}],
+      AS[pm * TM :+ TM, ps * {skb} :+ {skb}], W[pn * TN :+ TN, ps * {sk} :+ {sk}],
+      WS[ps * {skb} :+ {skb}, pn * TN :+ TN])
+}}
+"
     )
 }
 

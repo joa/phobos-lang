@@ -37,6 +37,8 @@ fn dump_raw_kernel_sources() {
     }
     sources.push(("qgemm_reduce".to_string(), qgemm_reduce_src(2560, 3, false)));
     sources.push(("qgemm_reduce_add".to_string(), qgemm_reduce_src(2560, 3, true)));
+    sources.push(("q8_qgemm".to_string(), q8_qgemm_src()));
+    sources.push(("q8_qgemm_split".to_string(), q8_qgemm_split_src(2560, 9216, 3)));
     sources.push(("attn_tc".to_string(), attn_tc_src(256, 4)));
     sources.push(("attn_merge".to_string(), attn_merge_src(256, 4)));
     for (name, form) in [("attn_flash", FlashForm::Streamed), ("attn_flash_resident", FlashForm::Resident)] {
