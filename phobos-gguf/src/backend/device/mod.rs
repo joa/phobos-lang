@@ -132,9 +132,9 @@ const STREAM_BATCH: usize = 32;
 
 /// A quantized-activation slot in [`DeviceBackend::act_scratch`]: the int8
 /// values and the per-block scales, each an address and an element count,
-/// and the per-block (scale, sum) pairs, written on demand (see
-/// [`DeviceBackend::act_pairs`]). `fills` counts the slot's fills, and
-/// `pairs_fill` names the fill the pairs were taken from.
+/// and the per-block (scale, sum) pairs, taken and written on demand (see
+/// [`DeviceBackend::act_pairs`]), 0 until then. `fills` counts the slot's
+/// fills, and `pairs_fill` names the fill the pairs were taken from.
 #[derive(Clone, Copy)]
 struct ActSlot {
     q: u64,
