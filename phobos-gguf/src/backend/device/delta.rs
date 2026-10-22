@@ -41,10 +41,13 @@ impl DeviceBackend {
     }
 
     /// The chunked gated delta rule, in two passes; see [`delta_wy_src`].
+    /// With `tc`, the scan is [`delta_scan_tc_src`] at its chunk, else
+    /// [`delta_scan_src`].
     ///
     /// The packed operands are read as one row per position with the heads
     /// side by side. A chunk of one head is then an ordinary tile. The gates
     /// and the first pass's three `[C, C]` matrices use the same layout.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn delta_chunked(
         &self,
         packed: Buf,
@@ -53,24 +56,27 @@ impl DeviceBackend {
         head_dim: usize,
         state: Buf,
         out: Buf,
+        tc: bool,
     ) -> Result<()> {
         let (span, gates) = (rows * heads * head_dim, rows * heads);
         let (n, width) = (rows as i64, (heads * head_dim) as i64);
-        let wy_width = heads * 4 * DELTA_CHUNK;
-        let eye = self.identity(DELTA_CHUNK)?;
+        let (chunk, tn, scan) = match tc {
+            true => (DELTA_TC_CHUNK, DELTA_TC_TN, "delta_scan_tc"),
+            false => (DELTA_CHUNK, DELTA_CHUNK_TN, "delta_scan"),
+        };
+        let wy_width = heads * 4 * chunk;
+        let eye = self.identity(chunk)?;
         let wy = self.alloc(rows * wy_width)?;
         let result = self.with_kernel(
             &self.chunks,
-            (heads, head_dim),
+            (heads, head_dim, tc),
             "delta_chunk",
             || {
-                let mut source = delta_wy_src(heads, head_dim, DELTA_CHUNK);
-                source.push_str(&delta_scan_src(
-                    heads,
-                    head_dim,
-                    DELTA_CHUNK_TN,
-                    DELTA_CHUNK,
-                ));
+                let mut source = delta_wy_src(heads, head_dim, chunk);
+                source.push_str(&match tc {
+                    true => delta_scan_tc_src(heads, head_dim),
+                    false => delta_scan_src(heads, head_dim, tn, chunk),
+                });
                 source
             },
             |module| {
@@ -84,14 +90,14 @@ impl DeviceBackend {
                         (self.ptr(packed, span)?, [n, width]),
                         (self.ptr(packed, 3 * span)?, [n, heads as i64]),
                         (self.ptr(packed, 3 * span + gates)?, [n, heads as i64]),
-                        (eye, [DELTA_CHUNK as i64, DELTA_CHUNK as i64]),
+                        (eye, [chunk as i64, chunk as i64]),
                         (wy_ptr, wy_dims),
                     ],
-                    (heads as u32, (rows / DELTA_CHUNK) as u32, 1),
+                    (heads as u32, (rows / chunk) as u32, 1),
                 )?;
                 self.launch(
                     module,
-                    "delta_scan",
+                    scan,
                     &[
                         (self.ptr(packed, 0)?, [n, width]),
                         (self.ptr(packed, span)?, [n, width]),
@@ -103,7 +109,7 @@ impl DeviceBackend {
                         ),
                         (self.ptr(out, 0)?, [n, width]),
                     ],
-                    (heads as u32, (head_dim / DELTA_CHUNK_TN) as u32, 1),
+                    (heads as u32, (head_dim / tn) as u32, 1),
                 )
             },
         );

@@ -89,6 +89,7 @@ fn dump_raw_kernel_sources() {
         sources.push((format!("attention_persist_{name}"), persist));
     }
     sources.push(("delta_wy".to_string(), delta_wy_src(32, 128, DELTA_CHUNK)));
+    sources.push(("delta_scan_tc".to_string(), delta_scan_tc_src(48, 128)));
     // The 4B's attention heads: 256 wide, 64 of them rotated.
     for cache in [false, true] {
         let name = if cache { "attn_prep_kv" } else { "attn_prep_q" };

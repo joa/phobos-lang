@@ -298,13 +298,19 @@ pub struct DeviceBackend {
     /// Delta rule kernels, keyed by head count and head dimension. Both are
     /// compile-time tile extents.
     deltas: RefCell<HashMap<(usize, usize), Module>>,
-    chunks: RefCell<HashMap<(usize, usize), Module>>,
+    /// The chunked form's two kernels, by head count, head dimension and
+    /// whether the scan is [`kernels::delta_scan_tc_src`].
+    chunks: RefCell<HashMap<(usize, usize, bool), Module>>,
     /// The register-state scan, by head dimension; see
     /// [`kernels::delta_scan_reg_src`].
     delta_reg: RefCell<HashMap<usize, Module>>,
     /// Whether a prompt's delta rule takes the register-state scan. On by
     /// default; `PHOBOS_DELTA_SCAN=0` goes back to the chunked form.
     delta_reg_on: bool,
+    /// Whether a prompt whose rows are whole chunks takes the chunked form
+    /// on the tensor cores, ahead of the register-state scan. On from
+    /// sm_80; `PHOBOS_DELTA_TC` overrides.
+    delta_tc_on: bool,
     identities: RefCell<HashMap<usize, DeviceBuffer<f32>>>,
     /// Delta convolution kernels, keyed by [`ConvKey`].
     convs: RefCell<HashMap<ConvKey, Module>>,

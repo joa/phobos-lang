@@ -317,6 +317,10 @@ fn main() -> Result<()> {
         // two backends.
         (48, 16, 128),
         (47, 16, 128),
+        // Whole chunks of the chunked forms, at a head that fits any card's
+        // shared memory and at the models' own.
+        (256, 4, 64),
+        (512, 8, 128),
     ] {
         let n = rows * heads * head_dim;
         let vecs: Vec<Vec<f32>> = (0..3).map(|_| (0..n).map(|_| next()).collect()).collect();

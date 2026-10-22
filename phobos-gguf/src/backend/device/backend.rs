@@ -742,14 +742,19 @@ impl Backend for DeviceBackend {
         let (span, gates) = (rows * heads * head_dim, rows * heads);
         let (r, d) = ((rows * heads) as i64, head_dim as i64);
 
-        // A prompt takes the register-state scan; failing that, the chunked
-        // form when rows and head dim divide evenly. Everything else,
-        // including decode, uses the sequential kernel.
+        // A prompt of whole chunks takes the chunked form on the tensor
+        // cores where it is on, else the register-state scan; failing that,
+        // the chunked form on FMA when rows and head dim divide evenly.
+        // Everything else, including decode, uses the sequential kernel.
+        let tc = self.delta_tc_on && delta_tc_fits(phobos_kernels::compile::chip(), head_dim);
+        if rows > 1 && tc && rows.is_multiple_of(DELTA_TC_CHUNK) && head_dim.is_multiple_of(DELTA_TC_TN) {
+            return self.delta_chunked(packed, rows, heads, head_dim, state, out, true);
+        }
         if rows > 1 && self.delta_reg_on && head_dim.is_multiple_of(32) && head_dim.is_multiple_of(DELTA_REG_COLS) {
             return self.delta_scan_reg(packed, rows, heads, head_dim, state, out);
         }
         if rows.is_multiple_of(DELTA_CHUNK) && head_dim.is_multiple_of(DELTA_CHUNK_TN) {
-            return self.delta_chunked(packed, rows, heads, head_dim, state, out);
+            return self.delta_chunked(packed, rows, heads, head_dim, state, out, false);
         }
 
         self.with_kernel(

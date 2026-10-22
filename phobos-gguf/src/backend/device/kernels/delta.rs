@@ -196,6 +196,83 @@ kernel delta_scan(Q:   tensor<f32>[N, QW],
     )
 }
 
+/// Positions a chunk of [`delta_scan_tc_src`] covers, and the state columns
+/// one of its programs owns.
+pub(crate) const DELTA_TC_CHUNK: usize = 32;
+pub(crate) const DELTA_TC_TN: usize = 16;
+
+/// Whether a prompt's delta rule takes [`delta_scan_tc_src`] by default on
+/// `chip`: from sm_80, whose tensor cores multiply bf16, which keeps the
+/// state's range.
+pub(crate) fn delta_tc_default(chip: &str) -> bool {
+    compute_capability(chip) >= 80
+}
+
+/// Whether [`delta_scan_tc_src`] at `head_dim` fits `chip`'s shared memory:
+/// below sm_80 a block holds 64 KB, the split operands of a head of 64.
+pub(crate) fn delta_tc_fits(chip: &str, head_dim: usize) -> bool {
+    compute_capability(chip) >= 80 || head_dim <= 64
+}
+
+fn compute_capability(chip: &str) -> u32 {
+    chip.strip_prefix("sm_").and_then(|cc| cc.parse().ok()).unwrap_or(0)
+}
+
+/// [`delta_scan_src`] on the tensor cores at about f32 accuracy
+/// (`@tensorcore(f32)`), over [`DELTA_TC_CHUNK`] positions a chunk and
+/// [`DELTA_TC_TN`] state columns a program of two warps. The state is
+/// carried in the accumulator registers from chunk to chunk, seeded from
+/// `S` by adding it to zero, and every product of a chunk tiles into the
+/// two warps' fragments. `W` is [`delta_wy_src`]'s at the same chunk.
+pub(crate) fn delta_scan_tc_src(heads: usize, head_dim: usize) -> String {
+    format!(
+        "@tensorcore(f32)
+@launch(64)
+@autotune(H in [{heads}], D in [{head_dim}], TN in [{DELTA_TC_TN}], C in [{DELTA_TC_CHUNK}])
+@aligned(N = C, QW = D, VW = TN, OW = TN, WW = C, SD = D)
+@dynshared
+kernel delta_scan_tc(Q:   tensor<f32>[N, QW],
+                     K:   tensor<f32>[N, QW],
+                     V:   tensor<f32>[N, VW],
+                     W:   tensor<f32>[N, WW],
+                     S:   tensor<f32>[SD, D],
+                     O:   tensor<f32>[N, OW]) {{
+  let h = ctx.block.x
+  let jn = ctx.block.y
+  let qc = h * D
+  let vc = h * D + jn * TN
+  let wc = h * 4 * C
+  var st: tile<f32>[D, TN] = 0.0
+  st += S[h * D :+ D, jn * TN :+ TN]
+
+  for c in range(0, N, C) {{
+    let k = K[c :+ C, qc :+ D]
+    let q = Q[c :+ C, qc :+ D]
+    let w0 = W[c :+ C, wc :+ C]
+    let w1 = W[c :+ C, wc + C :+ C]
+    let w2 = W[c :+ C, wc + 2 * C :+ C]
+    let vv = V[c :+ C, vc :+ TN]
+    var kst: tile<f32>[C, TN] = dot(k, st)
+    var uk: tile<f32>[C, TN] = dot(w1, kst)
+    var u: tile<f32>[C, TN] = dot(w0, vv)
+    u = u - uk
+    var qs: tile<f32>[C, TN] = dot(q, st)
+    var mu: tile<f32>[C, TN] = dot(w2, u)
+    qs = qs * W[c :+ C, wc + 3 * C :+ 1]
+    O[c :+ C, vc :+ TN] = qs + mu
+
+    var kt: tile<f32>[D, C] = transpose(k)
+    var ue: tile<f32>[C, TN] = u * W[c :+ C, wc + 3 * C + 1 :+ 1]
+    st = st * W[c :+ 1, wc + 3 * C + 2 :+ 1]
+    st += dot(kt, ue)
+  }}
+
+  S[h * D :+ D, jn * TN :+ TN] = st
+}}
+"
+    )
+}
+
 /// State columns one program of [`delta_scan_reg_src`] owns: two warps of
 /// four columns each.
 pub(crate) const DELTA_REG_COLS: usize = 8;

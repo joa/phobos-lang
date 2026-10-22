@@ -199,6 +199,8 @@ impl DeviceBackend {
             chunks: RefCell::new(HashMap::new()),
             delta_reg: RefCell::new(HashMap::new()),
             delta_reg_on: env_flag_on("PHOBOS_DELTA_SCAN"),
+            delta_tc_on: phobos_base::env::flag_set("PHOBOS_DELTA_TC")
+                .unwrap_or_else(|| delta_tc_default(phobos_kernels::compile::chip())),
             identities: RefCell::new(HashMap::new()),
             convs: RefCell::new(HashMap::new()),
             gates: RefCell::new(HashMap::new()),
