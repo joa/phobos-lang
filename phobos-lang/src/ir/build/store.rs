@@ -40,10 +40,10 @@ impl Build {
         // t = qmma_t(..) writes the accumulators where they are wanted.
         if op == AssignOp::Set
             && let ExprKind::Call { callee, args } = &value.kind
-            && let Some(qmma @ (Intrinsic::QmmaT | Intrinsic::Q50mmaT)) = Intrinsic::from_name(callee)
+            && let Some(qmma @ (Intrinsic::QmmaT | Intrinsic::Q50mmaT | Intrinsic::Q8gemmT)) = Intrinsic::from_name(callee)
             && f32_target
         {
-            let mut operands = self.qmma_operands(args)?.to_vec();
+            let mut operands = self.qmma_operands(callee, args)?.to_vec();
             operands.push(target);
             self.stmt(OpKind::IntrinsicInto(qmma), &operands);
             return Ok(());

@@ -10,7 +10,8 @@
 // the weight passes through registers.
 //
 // Format decode lives in `qgemm_fmt.rs`. The epilogue matches
-// `iq1s_qmma_t`'s, so both agree bit for bit.
+// `iq1s_qmma_t`'s, so both agree bit for bit. `q8_qgemm_t` is the same
+// kernel over a Q8_0 weight held as planes, its quants staged as they are.
 
 use super::kquant::KQ_GROUP;
 use super::*;
@@ -121,6 +122,9 @@ impl<'c> Codegen<'c> {
     /// group's quantized values as the integer it is. Given, the pairs are
     /// staged as they are, `asc` is not read, and nothing is summed in the
     /// kernel.
+    ///
+    /// For a plane-held weight (`q8_qgemm_t`), `qb` is the weight's `[64, K]`
+    /// plane and `d` its `[K/32, 64]` f32 scales.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::codegen) fn qgemm_into(
         &mut self,
@@ -169,7 +173,11 @@ impl<'c> Codegen<'c> {
                 bail!("`{name}`'s activation pairs hold a (scale, sum) per group: twice the scales' columns");
             }
         }
-        if d.elem != self.f16_t {
+        let planar = fmt.planar();
+        if planar && d.elem != self.f32_t {
+            bail!("`{name}`'s weight scales must be f32, one per 32 elements and column");
+        }
+        if !planar && d.elem != self.f16_t {
             bail!("`{name}`'s block scale must be f16");
         }
         if out.elem != self.f32_t || out.is_masked() {
@@ -187,7 +195,18 @@ impl<'c> Codegen<'c> {
         }
         self.check_shapes(&[md, nd], &out.shape, "qgemm destination")?;
         self.check_shapes(&[md], &[asc.shape[0]], "qgemm a scale rows")?;
-        self.check_shapes(&[nd], &[d.shape[0]], "qgemm d rows")?;
+        if planar {
+            // The planes: the weight `[N, K]` and its scales `[K/32, N]`.
+            self.check_shapes(&[nd], &[d.shape[1]], "qgemm weight scale columns")?;
+            if qb.shape[1] != DYN && aq.shape[1] != DYN && qb.shape[1] != aq.shape[1] {
+                bail!("`{name}`'s weight and activation must share K");
+            }
+            if d.shape[0] != DYN && aq.shape[1] != DYN && d.shape[0] * Q8_BLOCK != aq.shape[1] {
+                bail!("`{name}`'s weight scales must cover K/32 rows");
+            }
+        } else {
+            self.check_shapes(&[nd], &[d.shape[0]], "qgemm d rows")?;
+        }
         let table_bytes = fmt.tables();
         if tables.len() != table_bytes.len()
             || tables.iter().zip(table_bytes).any(|(t, &want)| t.shape[1] != want)
@@ -531,7 +550,8 @@ impl<'c> Codegen<'c> {
 
     /// The thread's global reads for tile `kt`, into registers: its share of
     /// the activation tile, scales and sums, the column's block scale, then
-    /// whatever the format's decode needs (see `qgemm_fmt.rs`). With `into`,
+    /// whatever the format's decode needs (see `qgemm_fmt.rs`), or for a
+    /// plane-held weight its group scale and quants. With `into`,
     /// the activation pieces go straight to that stage at that row offset
     /// instead, as one `cp.async` group, which is returned.
     fn qgemm_load(
@@ -581,6 +601,10 @@ impl<'c> Codegen<'c> {
             None => regs.push(self.vec_load_al(block, asc.mem, &[lanes.sa_row, sa_col], vec2_f32, 8)?),
         }
 
+        if fmt.planar() {
+            self.q8_gemm_load(block, lanes, qb, d, kt, &mut regs)?;
+            return Ok((regs, group));
+        }
         let at = self.qgemm_tile_at(block, fmt, lanes, kt)?;
         let dv = self.push(block, memref::load(d.mem, &[lanes.qb_row, at.d_col], self.loc))?;
         regs.push(self.numeric_cast(block, dv, self.f32_t)?);

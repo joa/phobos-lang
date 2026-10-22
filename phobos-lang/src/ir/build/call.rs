@@ -92,8 +92,8 @@ impl Build {
                 let op = Intrinsic::from_name(callee).expect("matched above");
                 Ok(Rv::Tile(self.value(OpKind::Intrinsic(op), &[a, asc, w, wsc], ty)))
             }
-            "qmma_t" | "q50_qmma_t" => {
-                let [a, asc, w, wsc] = self.qmma_operands(args)?;
+            "qmma_t" | "q50_qmma_t" | "q8_qgemm_t" => {
+                let [a, asc, w, wsc] = self.qmma_operands(callee, args)?;
                 let shape = [self.shape(a)[0], self.shape(w)[0]];
                 let ty = self.shared_ty(Scalar::F32, &shape);
                 let op = Intrinsic::from_name(callee).expect("matched above");
@@ -383,14 +383,16 @@ impl Build {
         Ok(t)
     }
 
-    pub(crate) fn qmma_operands(&mut self, args: &[Expr]) -> Result<[ValueId; 4]> {
+    /// `(a, a_scales, w, w_scales)` for the Q8_0 projections: `qmma_t`,
+    /// `q50_qmma_t` and `q8_qgemm_t`.
+    pub(crate) fn qmma_operands(&mut self, callee: &str, args: &[Expr]) -> Result<[ValueId; 4]> {
         let [a, asc, w, wsc] = args else {
-            bail!("`qmma_t` expects (a, a_scales, w, w_scales)");
+            bail!("`{callee}` expects (a, a_scales, w, w_scales)");
         };
-        let a = self.tile_operand(a, "qmma_t")?;
-        let asc = self.tile_operand(asc, "qmma_t")?;
-        let w = self.tile_operand(w, "qmma_t")?;
-        let wsc = self.tile_operand(wsc, "qmma_t")?;
+        let a = self.tile_operand(a, callee)?;
+        let asc = self.tile_operand(asc, callee)?;
+        let w = self.tile_operand(w, callee)?;
+        let wsc = self.tile_operand(wsc, callee)?;
         Ok([a, asc, w, wsc])
     }
 

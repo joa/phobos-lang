@@ -12,7 +12,7 @@ const NAMED: &[&str] = &[
     "exp", "log", "pow", "sqrt", "tanh", "round", "floor", "ceil", "abs", "rsqrt", "sin", "cos",
     "min", "max", "where", "iota", "tmax", "argsel", "rowmax", "rowsum", "rowargmax", "cumsum",
     "tril", "transpose", "flat", "gather", "dot", "dot_t", "qdot_t", "qmma_t", "q50_qdot_t",
-    "q50_qmma_t", "iq1s_qmma_t", "sum", "elem", "store", "word", "dp4a", "popcount", "byteperm",
+    "q50_qmma_t", "q8_qgemm_t", "iq1s_qmma_t", "sum", "elem", "store", "word", "dp4a", "popcount", "byteperm",
     "f16bits", "extent",
 ];
 
