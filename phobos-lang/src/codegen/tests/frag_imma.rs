@@ -49,11 +49,13 @@ fn an_unrolled_k_loop_carries_the_accumulator() {
 #[test]
 fn scaled_int8_accumulator_rides_in_registers() {
     // 128x64 over four warps: each warp owns a 32x64 patch of 8x8 tiles,
-    // 32 tiles of two elements a lane, carried by the k loop. Blackwell
-    // takes two row tiles over both k steps in one m16n8k32.
+    // 32 tiles of two elements a lane, carried by the k loop. From sm_80,
+    // with its fragments loaded a word each, two row tiles over both k
+    // steps go through one m16n8k32.
     let src = projection(128, 64, 128, ALIGNED, "ws * da");
     for (mlir, shape, mmas) in [
         (emit_mlir(&src), "mmaShape = [8, 8, 16]", 64),
+        (emit_mlir_sync(&src, "sm_86"), "mmaShape = [16, 8, 32]", 16),
         (emit_mlir_sync(&src, "sm_120"), "mmaShape = [16, 8, 32]", 16),
     ] {
         assert!(
@@ -211,6 +213,10 @@ fn a_shared_operand_loads_by_ldmatrix() {
     let narrow = emit_mlir(&src);
     assert!(narrow.contains("nvvm.ldmatrix"), "{narrow}");
     assert!(narrow.contains("math.fma"), "{narrow}");
+    // An ldmatrix quad holds four row tiles at one k step, not m16n8k32's
+    // operand, so where m8n8k16 is native the shape stays narrow.
+    let ampere = emit_mlir_sync(&src, "sm_86");
+    assert!(ampere.contains("mmaShape = [8, 8, 16]") && !ampere.contains("mmaShape = [16, 8, 32]"), "{ampere}");
 }
 
 #[test]
