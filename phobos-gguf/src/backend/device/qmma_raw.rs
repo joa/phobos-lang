@@ -50,14 +50,16 @@ impl Qgemm {
         self.on && qgemm_name(quant).is_some() && m > 1 && k.is_multiple_of(256) && n > 0
     }
 
-    /// Whether the format's kernel reads the activation's (scale, sum) pairs.
+    /// Whether the format's kernel reads the activation's (scale, sum) pairs:
+    /// Q4_K. Q5_K's pair form is slower than its own sums, its loop losing
+    /// to the register cap what the pairs save.
     fn takes_pairs(&self, quant: Quant) -> bool {
-        self.sums && qgemm_has_min(quant)
+        self.sums && matches!(quant, Quant::Q4_K)
     }
 
     fn module(&self, quant: Quant) -> Result<std::cell::Ref<'_, Module>> {
         if !self.kernels.borrow().contains_key(&quant) {
-            let src = qgemm_src(quant, self.sums).context("no staged kernel for this format")?;
+            let src = qgemm_src(quant, self.takes_pairs(quant)).context("no staged kernel for this format")?;
             let name = qgemm_kernel(quant).expect("the source exists, so does the name");
             let module = compile(&src, &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], name)?;
             self.kernels.borrow_mut().insert(quant, module);
@@ -77,7 +79,7 @@ impl Qgemm {
     ) -> Result<std::cell::Ref<'_, (Module, Module)>> {
         let key = (quant, n, k, s);
         if !self.splits.borrow().contains_key(&key) {
-            let src = qgemm_split_src(quant, n, k, block, s, self.sums).context("no staged kernel for this format")?;
+            let src = qgemm_split_src(quant, n, k, block, s, self.takes_pairs(quant)).context("no staged kernel for this format")?;
             let name = qgemm_split_kernel(quant).expect("the source exists, so does the name");
             let split = compile(&src, &[("TM", QGEMM_TM), ("TN", QGEMM_TN)], name)?;
             let reduce = compile(&qgemm_reduce_src(n, s, false), &[("TN", QGEMM_TN)], "qgemm_reduce")?;
