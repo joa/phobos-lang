@@ -317,7 +317,7 @@ impl DeviceBackend {
                 q_len: m * k,
                 s: self.act_arena.take(m * blocks * size_of::<f32>())?,
                 s_len: m * blocks,
-                pairs: self.act_arena.take(m * blocks * 2 * size_of::<f32>())?,
+                pairs: 0,
                 fills: 0,
                 pairs_fill: 0,
             };
@@ -343,18 +343,29 @@ impl DeviceBackend {
     /// quantized values as the integer it is, as f32 pairs: what a staged
     /// projection with a minimum reads in place of the scales. Written once
     /// per fill of the slot, by the first projection that asks, so the
-    /// projections sharing an input share it.
+    /// projections sharing an input share it; the plane itself is taken by
+    /// the first such projection ever, sized for the slot, so a slot no such
+    /// projection reads has none.
     pub(super) fn act_pairs(&self, act: QAct, m: usize, k: usize) -> Result<u64> {
-        let (q, s, pairs, done) = {
+        let (q, s, s_len, pairs, done) = {
             let scratch = self.act_scratch.borrow();
             let slot = scratch
                 .get(act.0)
                 .context("use of an unknown quantized activation handle")?;
-            (slot.q, slot.s, slot.pairs, slot.pairs_fill == slot.fills)
+            (slot.q, slot.s, slot.s_len, slot.pairs, slot.pairs != 0 && slot.pairs_fill == slot.fills)
         };
         if done {
             return Ok(pairs);
         }
+        let pairs = if pairs == 0 {
+            // Taking a region may allocate, as growing a slot may.
+            self.flush_pending()?;
+            let plane = self.act_arena.take(s_len * 2 * size_of::<f32>())?;
+            self.act_scratch.borrow_mut()[act.0].pairs = plane;
+            plane
+        } else {
+            pairs
+        };
         let rows = m * (k / Q8_BLOCK);
         self.launch(
             &self.block_pairs,
