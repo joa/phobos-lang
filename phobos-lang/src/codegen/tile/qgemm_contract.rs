@@ -7,7 +7,7 @@
 // fragments of 8 columns, so the registers it fills are the operands as they
 // stand. Before sm_80, `m8n8k16` takes each 8 x 8 tile and half apart.
 
-use super::qgemm::{CHUNK_BYTES, K32Lanes, Lanes, PATCH, QGEMM_KT, QgFormat};
+use super::qgemm::{CHUNK_BYTES, Lanes, PATCH, QGEMM_KT, QgFormat};
 use super::*;
 
 /// A group's `m16n8k32` operands: the A quad of each 16-row pair, then the
@@ -52,11 +52,32 @@ impl<'c> Codegen<'c> {
             Some(half) => self.addi(block, a_row, half)?,
             None => a_row,
         };
+        // Each operand's stage as bytes, and the lane's base in it: its row,
+        // with its swizzle phase (and the half it reads, for whole
+        // fragments) in the chunk bits. A row is a whole bank period, so a
+        // group's chunk is the base xor a constant.
+        let a_flat = self.tile_flat(block, a_st)?;
+        let w_flat = self.tile_flat(block, w_st)?;
+        let kt = self.const_index(block, QGEMM_KT)?;
+        let base = |cg: &mut Self, row: Value<'c, 'c>, phase: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
+            let row_b = cg.muli(block, row, kt)?;
+            let phase_b = cg.muli(block, phase, chunk_w)?;
+            cg.addi(block, row_b, phase_b)
+        };
+        let (a_base, w_base) = match k32 {
+            Some(k32) => {
+                let ax = self.push(block, arith::xori(k32.a_half, lanes.ldm_xor, self.loc))?;
+                let wx = self.push(block, arith::xori(k32.w_half, lanes.ldm_xor, self.loc))?;
+                (base(self, a_row, ax)?, base(self, k32.w_row, wx)?)
+            }
+            None => (base(self, a_row, lanes.ldm_xor)?, base(self, lanes.ldm_w_row, lanes.ldm_xor)?),
+        };
+        let zero = self.const_index(block, 0)?;
 
         let mut accs = accs.to_vec();
         for s in 0..(QGEMM_KT / Q8_BLOCK) {
             let quads = match k32 {
-                Some(k32) => Some(self.qgemm_quads_k32(block, lanes, k32, (a_st, a_row), w_st, s)?),
+                Some(_) => Some(self.qgemm_quads_k32(block, (&a_flat, a_base), (&w_flat, w_base), s)?),
                 None => None,
             };
             // The weight scales this group needs: one per column, or one per
@@ -172,11 +193,11 @@ impl<'c> Codegen<'c> {
             let shape = self.mma_shape(IMMA_TILE, IMMA_TILE, IMMA_K)?;
             let (mut a_frags, mut w_frags) = (Vec::new(), Vec::new());
             for h in 0..halves {
-                let chunk = self.const_index(block, s * halves + h)?;
-                let phys = self.push(block, arith::xori(chunk, lanes.ldm_xor, self.loc))?;
-                let col = self.muli(block, phys, chunk_w)?;
-                let a4 = self.ldmatrix(block, a_st.mem, [a_row, col], PATCH, false, quad_t)?;
-                let w4 = self.ldmatrix(block, w_st.mem, [lanes.ldm_w_row, col], PATCH, false, quad_t)?;
+                let off = self.const_index(block, (s * halves + h) * CHUNK_BYTES)?;
+                let a_at = self.push(block, arith::xori(a_base, off, self.loc))?;
+                let w_at = self.push(block, arith::xori(w_base, off, self.loc))?;
+                let a4 = self.ldmatrix(block, a_flat.mem, [zero, a_at], PATCH, false, quad_t)?;
+                let w4 = self.ldmatrix(block, w_flat.mem, [zero, w_at], PATCH, false, quad_t)?;
                 for t in 0..PATCH {
                     let a = self.vec_extract(block, a4, &[t], four_i8)?;
                     a_frags.push(self.vec_shape_cast(block, a, frag_t)?);
@@ -209,37 +230,31 @@ impl<'c> Codegen<'c> {
 
     /// Group `s`'s operands for `m16n8k32`: per 16-row pair of the patch,
     /// its A fragment over both halves of the group, and per pair of column
-    /// tiles, both their B fragments, each one `ldmatrix.x4`.
+    /// tiles, both their B fragments, each one `ldmatrix.x4`. Each operand
+    /// is its stage as bytes with the lane's base in it.
     fn qgemm_quads_k32(
         &mut self,
         block: &Block<'c>,
-        lanes: &Lanes<'c>,
-        k32: &K32Lanes<'c>,
-        (a_st, a_row): (&MemVal<'c>, Value<'c, 'c>),
-        w_st: &MemVal<'c>,
+        a: (&MemVal<'c>, Value<'c, 'c>),
+        w: (&MemVal<'c>, Value<'c, 'c>),
         s: i64,
     ) -> Result<Quads<'c>> {
         let quad_t = Type::vector(&[4, 4], self.i8_t);
-        let chunk_w = self.const_index(block, CHUNK_BYTES)?;
-        let halves = Q8_BLOCK / IMMA_K;
-        // The quads a lane addresses: its row, and the group's chunk its
-        // octet of lanes reads, permuted by the row's swizzle phase.
-        let quads = |cg: &mut Self, mem: &MemVal<'c>, row: Value<'c, 'c>, half: Value<'c, 'c>| -> Result<Vec<Value<'c, 'c>>> {
-            let first = cg.const_index(block, s * halves)?;
-            let chunk = cg.addi(block, first, half)?;
-            let phys = cg.push(block, arith::xori(chunk, lanes.ldm_xor, cg.loc))?;
-            let col = cg.muli(block, phys, chunk_w)?;
+        let zero = self.const_index(block, 0)?;
+        // The group's chunk pair, from the lane's base; a row pair on is a
+        // whole number of bank periods.
+        let quads = |cg: &mut Self, (mem, base): (&MemVal<'c>, Value<'c, 'c>)| -> Result<Vec<Value<'c, 'c>>> {
+            let off = cg.const_index(block, s * Q8_BLOCK)?;
+            let at = cg.push(block, arith::xori(base, off, cg.loc))?;
             (0..PATCH / 2)
                 .map(|p| {
-                    let off = cg.const_index(block, p * 2 * IMMA_TILE)?;
-                    let at = cg.addi(block, row, off)?;
-                    cg.ldmatrix(block, mem.mem, [at, col], 4, false, quad_t)
+                    let rows = cg.const_index(block, p * 2 * IMMA_TILE * QGEMM_KT)?;
+                    let at = cg.addi(block, at, rows)?;
+                    cg.ldmatrix(block, mem.mem, [zero, at], 4, false, quad_t)
                 })
                 .collect()
         };
-        let a4 = quads(self, a_st, a_row, k32.a_half)?;
-        let w4 = quads(self, w_st, k32.w_row, k32.w_half)?;
-        Ok((a4, w4))
+        Ok((quads(self, a)?, quads(self, w)?))
     }
 
     /// The activation's sum over the group for the lane's two rows of a row
