@@ -40,21 +40,25 @@ kernel quantize(X: tensor<f32>[R, 32], Q: tensor<i8>[R, 32], S: tensor<f32>[R, D
 }
 ";
 
-/// Blocks summed per CTA in [`BLOCK_SUMS_SRC`].
-pub(crate) const SUMS_TB: usize = 16;
+/// Threads of a [`BLOCK_PAIRS_SRC`] CTA, a block each.
+pub(crate) const PAIRS_CTA: usize = 256;
 
-/// Each block's sum of its 32 quantized values, the integer it is, as f32.
-/// Viewed as `[blocks, 32]` like [`QUANTIZE_SRC`]'s input. The staged
-/// projections of a format with a minimum take the plane, in place of
-/// summing the staged tile themselves.
-pub(crate) const BLOCK_SUMS_SRC: &str = "\
+/// Each block's scale beside the sum of its 32 quantized values, the
+/// integer it is, as f32: a (scale, sum) pair per block, viewed as
+/// `[blocks, 32]` like [`QUANTIZE_SRC`]'s input. A lane owns a block, two
+/// 16-byte loads and eight `dp4a`. The staged projections of a format with
+/// a minimum take the plane, in place of summing the staged tile
+/// themselves.
+pub(crate) const BLOCK_PAIRS_SRC: &str = "\
 @launch(256)
-@autotune(TB in [16])
-kernel block_sums(Q: tensor<i8>[R, 32], S: tensor<f32>[R, D]) {
-  let p = ctx.block.x
-  var q = Q[p * TB :+ TB, 0 :+ 32]
-  var sum: tile<i32>[TB, 1] = rowsum(i32(q))
-  S[p * TB :+ TB, 0 :+ 1] = f32(sum)
+@aligned(K = 32)
+kernel block_pairs(Q: tensor<i8>[R, K], AS: tensor<f32>[R, D], P: tensor<f32>[R, D2]) {
+  let b = ctx.block.x * ctx.threads + ctx.thread
+  if b < R {
+    let s = sum(i32(Q[b, 0 :+ 16])) + sum(i32(Q[b, 16 :+ 16]))
+    P[b, 0] = AS[b, 0]
+    P[b, 1] = f32(s)
+  }
 }
 ";
 
