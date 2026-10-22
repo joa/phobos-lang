@@ -413,8 +413,7 @@ impl<'c> Codegen<'c> {
     ) -> Result<Vec<Value<'c, 'c>>> {
         let steps = k_cols.len();
         let frag_t = Type::vector(&[1, 4], self.i8_t);
-        let ldmatrix = v.view.shared && v.view.vectorizes(16);
-        if !(ldmatrix && rows.len().is_multiple_of(4)) {
+        if !imma_by_ldmatrix(v, rows.len()) {
             let mut frags = Vec::with_capacity(rows.len() * steps);
             for &row in rows {
                 for &col in k_cols {
@@ -551,14 +550,22 @@ impl<'c> Codegen<'c> {
         };
         let mut frags = fa.frags.clone();
         let (fm, fnn, steps) = (fm as usize, fnn as usize, steps as usize);
-        if self.int8_mma_k() == 32 && fm % 2 == 0 {
-            // From Blackwell on, `m8n8k16` runs as a half-used `m16n8k16`.
-            // Two row tiles over two k steps go through one `m16n8k32`
-            // instead, or over one step through a whole `m16n8k16`, its
-            // fragments the `m8n8k16` ones regrouped as `qgemm_t`'s: A as
-            // rows (g, g + 8) of the first step, then of the second, B as
-            // the first step, then the second. Its two rows of sums are the
-            // two tiles' own.
+        // From Blackwell on, `m8n8k16` runs as a half-used `m16n8k16`. Two
+        // row tiles over two k steps go through one `m16n8k32` instead, or
+        // over one step through a whole `m16n8k16`, its fragments the
+        // `m8n8k16` ones regrouped: A as rows (g, g + 8) of the first step,
+        // then of the second, B as the first step, then the second. Its two
+        // rows of sums are the two tiles' own. From sm_80, where `m8n8k16`
+        // is native, the wide shape is fewer instructions, and pays when the
+        // fragments are loaded a word each: an `ldmatrix` quad holds them in
+        // another order, which the regrouping would copy out of.
+        let quads = |v: &FragIn<'_, 'c>, rows: &[Value<'c, 'c>]| match v {
+            FragIn::Stored(v) => imma_by_ldmatrix(v, rows.len()),
+            FragIn::Generated { .. } => false,
+        };
+        let regroup = self.int8_mma_k() == 32
+            || (self.has_int8_mma_k32() && !quads(a, &lane.rows) && !quads(w, &lane.w_rows));
+        if regroup && fm % 2 == 0 {
             let ks = if steps % 2 == 0 { 2 } else { 1 };
             let four_i8 = Type::vector(&[4], self.i8_t);
             let a_t = Type::vector(&[2 * ks as u64, 4], self.i8_t);
@@ -715,4 +722,10 @@ impl<'c> Codegen<'c> {
         })
     }
 
+}
+
+/// Whether [`Codegen::imma_frags`] loads `v`'s fragments for `tiles` row
+/// tiles by `ldmatrix.x4`, four tiles a quad, rather than a word each.
+fn imma_by_ldmatrix(v: &ImmaOperand<'_>, tiles: usize) -> bool {
+    v.view.shared && v.view.vectorizes(16) && tiles.is_multiple_of(4)
 }
