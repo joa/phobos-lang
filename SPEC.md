@@ -355,7 +355,7 @@ Symbols used below: `K` is the contraction length, a multiple of 256 unless stat
 
 | Built-in | Shape | Semantics | Form |
 |---|---|---|---|
-| `<fmt>_qgemm_t(a, a_scales, qb, d, tables..)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | Prompt projection on integer tensor cores. Fixed 128 x 64 tile, needs `@launch(256)`. `a_scales` `[128, K/32]`. On sm_80+ the activation tile is double-buffered through `cp.async` where both stages fit 48 KB (all but `iq2xs` and `iq2s`). | statement or value |
+| `<fmt>_qgemm_t(a, a_scales, qb, d, tables.., a_pairs?)` | `[128, K] i8 x [64, ..] -> [128, 64] f32` | Prompt projection on integer tensor cores. Fixed 128 x 64 tile, needs `@launch(256)`. `a_scales` `[128, K/32]`. A format that subtracts a minimum (`q4k`, `q5k`) needs each row's sum over every 32 of `a`, and may take `a_pairs`, `[128, 2 K/32]` `f32` holding each group's (scale, sum) side by side, the sum the integer it is; with it `a_scales` is not read, without it the kernel sums the staged tile itself. On sm_80+ the activation tile is double-buffered through `cp.async` where both stages fit 48 KB (all but `iq2xs` and `iq2s`). | statement or value |
 | `<fmt>_qmma_staged_t(a, a_scales, qb, d, tables..)` | `[M, K] i8 x qb -> [M, N] f32` | Batched projection on integer tensor cores (sm_75+). `M`, `N` multiples of 8, exactly one patch of 8x8 tiles per warp, the CTA's threads dividing the `N` columns' staging lanes, all operands in bounds. | statement or value |
 | `iq1s_qmma_t(a, a_scales, qb, d, grid)` | same | As above, decoded per warp instead of staged once per CTA. | statement or value |
 

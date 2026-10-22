@@ -131,13 +131,19 @@ type QdotSplitKey = (Quant, usize, usize, usize, bool);
 const STREAM_BATCH: usize = 32;
 
 /// A quantized-activation slot in [`DeviceBackend::act_scratch`]: the int8
-/// values and the per-block scales, each an address and an element count.
+/// values and the per-block scales, each an address and an element count,
+/// and the per-block sums, summed on demand (see
+/// [`DeviceBackend::act_sums`]). `fills` counts the slot's fills, and
+/// `sums_fill` names the fill the sums were taken from.
 #[derive(Clone, Copy)]
 struct ActSlot {
     q: u64,
     q_len: usize,
     s: u64,
     s_len: usize,
+    sums: u64,
+    fills: u32,
+    sums_fill: u32,
 }
 
 /// Heads, grouped heads, head dimension, taps, head stride, normalize, query
@@ -284,6 +290,7 @@ pub struct DeviceBackend {
     reported: Cell<usize>,
     quantize: Module,
     quantize_wide: Module,
+    block_sums: Module,
     pointwise: Module,
     pointwise_wide: Module,
     /// RMSNorm kernels, keyed by width and the epsilon's bit pattern.

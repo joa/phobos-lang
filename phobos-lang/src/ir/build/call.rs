@@ -408,7 +408,12 @@ impl Build {
 
     pub(crate) fn qgemm_operands(&mut self, fmt: RawFmt, callee: &str, args: &[Expr]) -> Result<Vec<ValueId>> {
         let want = 4 + qg_tables(fmt);
-        if args.len() != want {
+        // A format that subtracts a minimum may be given the activation's
+        // (scale, sum) pairs, after the tables.
+        if args.len() != want && !(qg_has_min(fmt) && args.len() == want + 1) {
+            if qg_has_min(fmt) {
+                bail!("`{callee}` expects {want} or {} operands: (a, a_scales, qb, d, tables.., a_pairs?)", want + 1);
+            }
             bail!("`{callee}` expects {want} operands: (a, a_scales, qb, d, tables..)");
         }
         args.iter().map(|e| self.tile_operand(e, callee)).collect()
@@ -631,5 +636,12 @@ pub(crate) fn qg_tables(fmt: RawFmt) -> usize {
         RawFmt::Iq4xs | RawFmt::Q2k | RawFmt::Q3k | RawFmt::Q4k | RawFmt::Q5k | RawFmt::Q6k | RawFmt::Q80 => 0,
         RawFmt::Ptq1 => 0,
     }
+}
+
+/// Whether a format's runs subtract a minimum, so its `qgemm_t` needs the
+/// activation's group sums and may take them, paired with the scales, as an
+/// operand.
+pub(crate) fn qg_has_min(fmt: RawFmt) -> bool {
+    matches!(fmt, RawFmt::Q4k | RawFmt::Q5k)
 }
 

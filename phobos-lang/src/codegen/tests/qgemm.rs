@@ -26,6 +26,23 @@ pub(super) fn qgemm_src(fmt: &str, tables: &[usize], launch: &str) -> String {
     )
 }
 
+/// The projection of a format with a minimum, given the activation's
+/// (scale, sum) pairs as its last operand.
+fn qgemm_sums_src(fmt: &str) -> String {
+    format!(
+        "@launch(256, 2)
+        @autotune(TM in [128], TN in [64])
+        @aligned(M = TM, N = TN, K = 256)
+        kernel {fmt}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB], AP: tensor<f32>[M, KP],
+                          QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB], C: tensor<f32>[M, N]) {{
+            let pm = ctx.block.x
+            let pn = ctx.block.y
+            C[pm * TM :+ TM, pn * TN :+ TN] = {fmt}_qgemm_t(A[pm * TM :+ TM, :], AS[pm * TM :+ TM, :],
+                                                         QB[pn * TN :+ TN, :], D[pn * TN :+ TN, :], AP[pm * TM :+ TM, :])
+        }}"
+    )
+}
+
 const FORMATS: [(&str, &[usize]); 12] = [
     ("iq1s", &[4096]),
     ("iq1m", &[4096]),
@@ -76,6 +93,31 @@ fn a_k_quant_with_a_minimum_sums_the_activation_at_stage_time() {
     assert!(!without.contains("gpu.shuffle"), "{without}");
     assert!(without.contains("memref<8x64xf32, 3>"), "{without}");
     assert_contains(&without, &["arith.shrsi"]);
+}
+
+#[test]
+fn a_k_quant_given_its_group_sums_neither_sums_nor_contracts_them() {
+    // With the pairs an operand, the stage holds them as they come, eight
+    // per row plus four of padding, and no plane of sums: Turing stops
+    // summing bytes and shuffling, and from sm_80 the row-sum mma against
+    // ones goes, leaving the patch's eight tiles per group.
+    for fmt in ["q4k", "q5k"] {
+        let turing = emit_mlir_sync(&qgemm_sums_src(fmt), "sm_75");
+        assert!(turing.contains("memref<128x12xf32, 3>"), "{turing}");
+        for absent in ["nvvm.dot.accumulate.4way", "gpu.shuffle", "memref<128x4xi32, 3>"] {
+            assert!(!turing.contains(absent), "{fmt} {absent}:
+{turing}");
+        }
+        let ampere = emit_mlir_sync(&qgemm_sums_src(fmt), "sm_86");
+        let summing = emit_mlir_sync(&qgemm_src(fmt, &[], "256, 2"), "sm_86");
+        let (given, own) = (ampere.matches("nvgpu.mma.sync").count(), summing.matches("nvgpu.mma.sync").count());
+        assert_eq!(given % 8, 0, "{ampere}");
+        assert_eq!(own, given / 8 * 10, "{fmt}: {own} mma with its own sums, {given} given them");
+        assert!(ampere.contains("memref<128x12xf32, 3>"), "{ampere}");
+    }
+    // A format without a minimum has no use for them.
+    let err = emit_err(&qgemm_sums_src("q6k"));
+    assert!(err.contains("4 operands"), "{err}");
 }
 
 #[test]

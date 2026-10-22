@@ -17,7 +17,8 @@ type Quads<'c> = (Vec<Value<'c, 'c>>, Vec<Value<'c, 'c>>);
 impl<'c> Codegen<'c> {
     /// The warp's patch over one stage: four 32-element groups, each with two
     /// `ldmatrix.x4` per operand, the patch's tensor tiles, and the scale
-    /// epilogue.
+    /// epilogue. `sa` is the activation scale stage, and whether each scale
+    /// has the group's activation sum beside it.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn qgemm_contract(
         &mut self,
@@ -26,12 +27,13 @@ impl<'c> Codegen<'c> {
         lanes: &Lanes<'c>,
         a: (&MemVal<'c>, Option<Value<'c, 'c>>),
         w_st: &MemVal<'c>,
-        sa_st: &MemVal<'c>,
+        sa: (&MemVal<'c>, bool),
         sw_st: &MemVal<'c>,
         planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
         accs: &[Value<'c, 'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
         let (mw_st, as_st) = planes;
+        let (sa_st, pairs) = sa;
         let (i32_t, f32_t) = (self.i32_t, self.f32_t);
         let acc_t = Type::vector(&[1, 2], i32_t);
         let two_f32 = Type::vector(&[2], f32_t);
@@ -67,20 +69,29 @@ impl<'c> Codegen<'c> {
                 }
             }
             let s_idx = self.const_index(block, s)?;
+            // The activation scales, one per row, and with them the row sums
+            // when the stage holds the two as a pair.
             let mut sa = Vec::with_capacity(PATCH as usize);
+            let mut asum = Vec::with_capacity(PATCH as usize);
             for row in &rows {
-                sa.push(self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?);
+                if pairs {
+                    let col = self.const_index(block, 2 * s)?;
+                    let pair = self.vec_load_al(block, sa_st.mem, &[*row, col], two_f32, 8)?;
+                    sa.push(self.vec_extract(block, pair, &[0], f32_t)?);
+                    asum.push(self.vec_extract(block, pair, &[1], f32_t)?);
+                } else {
+                    sa.push(self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?);
+                }
             }
             // The minimum term's operands, if the format has one: column
-            // minimums, loaded like the scales, and row sums, loaded like the
-            // activation scales.
+            // minimums, loaded like the scales, and row sums from their own
+            // plane, loaded like the activation scales.
             let mut mw = Vec::with_capacity(PATCH as usize);
             if let Some(mw_st) = mw_st {
                 for col in &cols {
                     mw.push(self.vec_load_al(block, mw_st.mem, &[s_idx, *col], two_f32, 8)?);
                 }
             }
-            let mut asum = Vec::with_capacity(PATCH as usize);
             if let Some(as_st) = as_st {
                 for row in &rows {
                     let raw = self.push(block, memref::load(as_st.mem, &[*row, s_idx], self.loc))?;
@@ -89,8 +100,8 @@ impl<'c> Codegen<'c> {
             }
 
             // -(sa * asum) per row: the minimum term's factor, shared by
-            // every column of the patch. Without a plane of sums, the
-            // `m16n8k32` contraction finds each row pair's as it goes.
+            // every column of the patch. With no sums from a plane or a pair,
+            // the `m16n8k32` contraction finds each row pair's as it goes.
             let neg_min = |cg: &mut Self, r: usize, sum: Value<'c, 'c>| -> Result<Value<'c, 'c>> {
                 let p = cg.push(block, arith::mulf(sa[r], sum, cg.loc))?;
                 cg.push(block, arith::negf(p, cg.loc))
@@ -141,7 +152,7 @@ impl<'c> Codegen<'c> {
             };
             if let Some((a4, w4)) = &quads {
                 for (rp, &a) in a4.iter().enumerate() {
-                    if mw_st.is_some() && as_st.is_none() {
+                    if mw_st.is_some() && asum.is_empty() {
                         for (j, sum) in self.qgemm_row_sums_k32(block, a)?.into_iter().enumerate() {
                             neg_mins.push(neg_min(self, 2 * rp + j, sum)?);
                         }

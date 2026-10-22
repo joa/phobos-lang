@@ -87,6 +87,7 @@ impl DeviceBackend {
         let q8_qdot_add = compile(&q8_qdot_lanes_src(true), &[], "q8_qdot_add")?;
         let quantize = compile(QUANTIZE_SRC, &[("TB", QUANT_TB)], "quantize")?;
         let quantize_wide = compile(QUANTIZE_SRC, &[("TB", QUANT_TB_WIDE)], "quantize")?;
+        let block_sums = compile(BLOCK_SUMS_SRC, &[("TB", SUMS_TB)], "block_sums")?;
         let pointwise = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE)], "pointwise")?;
         let pointwise_wide = compile(POINTWISE_SRC, &[("TILE", ELEM_TILE_WIDE)], "pointwise")?;
         let argmax_finish = compile(&argmax_finish_src(), &[], "argmax_finish")?;
@@ -188,6 +189,7 @@ impl DeviceBackend {
             reported: Cell::new(0),
             quantize,
             quantize_wide,
+            block_sums,
             pointwise,
             pointwise_wide,
             norms: RefCell::new(HashMap::new()),

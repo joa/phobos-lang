@@ -88,28 +88,40 @@ pub(crate) fn qgemm_split_kernel(quant: Quant) -> Option<&'static str> {
     })
 }
 
+/// Whether a format's runs subtract a minimum, so its staged projection
+/// needs the activation's block sums and can take them as a plane.
+pub(crate) fn qgemm_has_min(quant: Quant) -> bool {
+    matches!(quant, Quant::Q4_K | Quant::Q5_K)
+}
+
 /// The source of a format's staged projection, at two CTAs per
-/// multiprocessor (128 registers).
-pub(crate) fn qgemm_src(quant: Quant) -> Option<String> {
+/// multiprocessor (128 registers). With `sums`, a format with a minimum
+/// takes the activation's block sums as a plane `S` beside its scales.
+pub(crate) fn qgemm_src(quant: Quant, sums: bool) -> Option<String> {
     if let Some(src) = super::qgemm_ph_src(quant, None) {
         return Some(src);
     }
     let name = qgemm_name(quant)?;
     let tables = qgemm_tables(quant)?;
+    let sums = sums && qgemm_has_min(quant);
     // Each piece carries its own comma, so no tables leaves no stray comma.
+    let sums_param = if sums { " S: tensor<f32>[M, KB]," } else { "" };
     let params: String = tables
         .iter()
         .enumerate()
         .map(|(i, len)| format!("T{i}: tensor<i8>[1, {len}], "))
         .collect();
-    let args: String = (0..tables.len())
+    let mut args: String = (0..tables.len())
         .map(|i| format!(",\n                                                T{i}[0 :+ 1, :]"))
         .collect();
+    if sums {
+        args.push_str(",\n                                                S[pm * TM :+ TM, :]");
+    }
     Some(format!(
         "@launch({QGEMM_CTA}, 2)
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
 @aligned(M = TM, N = TN, K = 256)
-kernel {name}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+kernel {name}_qgemm(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],{sums_param}
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                   {params}C: tensor<f32>[M, N]) {{
   let pm = ctx.block.x
@@ -170,7 +182,7 @@ pub(crate) fn qgemm_splits(rows: usize, n: usize, k: usize, block: usize, sms: u
 /// eight columns with each group's blocks interleaved along its first row,
 /// so a slice of blocks starts at eight times its block offset there. Every
 /// slice bound is a multiple of its length, which keeps the views unmasked.
-pub(crate) fn qgemm_split_src(quant: Quant, n: usize, k: usize, block: usize, s: usize) -> Option<String> {
+pub(crate) fn qgemm_split_src(quant: Quant, n: usize, k: usize, block: usize, s: usize, sums: bool) -> Option<String> {
     let name = qgemm_name(quant)?;
     let tables = qgemm_tables(quant)?;
     let bb = quant.device_block_bytes();
@@ -180,20 +192,25 @@ pub(crate) fn qgemm_split_src(quant: Quant, n: usize, k: usize, block: usize, s:
     if let Some(src) = super::qgemm_ph_src(quant, Some(super::Split { gn, sk, skb, srb, sb })) {
         return Some(src);
     }
+    let sums = sums && qgemm_has_min(quant);
+    let sums_param = if sums { " S: tensor<f32>[M, KB]," } else { "" };
     let params: String = tables
         .iter()
         .enumerate()
         .map(|(i, len)| format!("T{i}: tensor<i8>[1, {len}], "))
         .collect();
-    let args: String = (0..tables.len())
+    let mut args: String = (0..tables.len())
         .map(|i| format!(", T{i}[0 :+ 1, :]"))
         .collect();
+    if sums {
+        args.push_str(&format!(", S[pm * TM :+ TM, ps * {skb} :+ {skb}]"));
+    }
     let (gk, gb) = (8 * srb, 8 * sb);
     Some(format!(
         "@launch({QGEMM_CTA}, 2)
 @autotune(TM in [{QGEMM_TM}], TN in [{QGEMM_TN}])
 @aligned(M = TM, N = TN, K = {sk}, KB = {skb}, RB = {srb}, NB = {sb}, NP = TN)
-kernel {name}_qgemm_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],
+kernel {name}_qgemm_split(A: tensor<i8>[M, K], AS: tensor<f32>[M, KB],{sums_param}
                   QB: tensor<i8>[N, RB], D: tensor<f16>[N, NB],
                   {params}P: tensor<f32>[M, NP]) {{
   let pm = ctx.block.x
