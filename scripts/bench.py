@@ -757,6 +757,18 @@ def write_csv(path, samples):
 # --------------------------------------------------------------------------- #
 
 
+def json_safe(value):
+    """The value with every NaN as null: a card that reports no power draw
+    reads as NaN, which JSON cannot carry."""
+    if isinstance(value, float) and value != value:
+        return None
+    if isinstance(value, dict):
+        return {k: json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(v) for v in value]
+    return value
+
+
 def parse_args():
     ap = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -1008,7 +1020,7 @@ def main():
         )
         with open(args.json, "w", encoding="utf-8") as f:
             json.dump(
-                {
+                json_safe({
                     "meta": meta,
                     "args": {k: str(v) for k, v in recorded.items()},
                     "backends": backends,
@@ -1016,9 +1028,10 @@ def main():
                     "summary": summary,
                     "health": {str(k): v for k, v in health.items()},
                     "samples": samples,
-                },
+                }),
                 f,
                 indent=2,
+                allow_nan=False,
             )
         print(f"run written to {args.json}")
 
