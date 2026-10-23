@@ -229,6 +229,22 @@ scp -P PORT scripts/vastai/gate.sh scripts/vastai/deepprompt.sh scripts/vastai/b
 ssh -p PORT root@HOST "nohup bash /root/deepprompt.sh REF > /root/deep.out 2>&1 < /dev/null &"
 ```
 
+### The agent replay
+
+`scripts/vastai/agent.sh REF [CTX]` replays a recording of the Benchmarks
+page's agent tasks to both engines on the card: it builds Phobos from `REF`,
+fetches llama.cpp b11681 and Qwen3.6-35B-A3B-UD-Q4_K_M (22 GB), and runs
+`agent_bench.py --replay` on the `*.requests.jsonl` files in `/root/traces`
+at a context of `CTX` tokens, 32768 by default. llama.cpp fits its expert
+split to the card. Rent `--disk 70` and a host with RAM for the model.
+
+```powershell
+ssh -p PORT root@HOST "mkdir -p /root/traces"
+scp -P PORT scripts/vastai/agent.sh scripts/vastai/build.sh root@HOST:/root/
+scp -P PORT RUN/phobos-rep1-*.requests.jsonl root@HOST:/root/traces/
+ssh -p PORT root@HOST "nohup bash /root/agent.sh REF > /root/agent.out 2>&1 < /dev/null &"
+```
+
 ### Profiling without ncu
 
 `ncu` fails on these hosts with `ERR_NVGPUCTRPERM`: the container gets no

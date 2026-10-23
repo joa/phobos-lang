@@ -36,8 +36,8 @@ the kernels as compiled for its chip, untuned.
 ## Measured on each card
 
 Every card ran the same two benchmarks on 2026-10-23, built from dbaa4f7.
-The 3090 ran them earlier that day at aeaef40, which runs the same code on its
-chip. Qwen3.5-4B Q4_K_M ran against llama.cpp b11681 through
+The 3090 ran them later that day at c5f210f, which runs the same engine
+code. Qwen3.5-4B Q4_K_M ran against llama.cpp b11681 through
 `scripts/bench.py`: five rounds, the engines interleaved, three repetitions
 each, the sizes of the [Benchmarks](/docs/reference/benchmarks/) run plus
 prompts of 16384 and 32768 tokens. Then `phobos-kbench` ran twice against
@@ -48,8 +48,7 @@ are the ones [Benchmarks](/docs/reference/benchmarks/) publishes.
 
 A ratio compares two engines on one card in one session. Rates on different
 cards are not comparable to each other: the hosts differ, and so do the power
-limits a host sets. The 3090 ran at 260 W, below the card's stock 350 W; every
-other rented card ran at its stock limit. A rented card was checked for
+limits a host sets, though every rented card here ran at its stock limit. A rented card was checked for
 another tenant before the run (idle power, utilization, and how long the
 driver has spent capping its power or slowing the card for heat), and
 `bench.py` checks it again between rounds. `bench.py` also compares the clock

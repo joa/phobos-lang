@@ -100,8 +100,8 @@ run its MiniCPM-V Q4_K_M pp512 fell to between 131 and 154.
 Qwen3.5-4B-Q4_K_M ran on seven cards on 2026-10-23: the 2080 SUPER above,
 and six cards rented through vast.ai under Linux. Each ran the same `bench.py`
 sizes as the tables above against llama.cpp b11681, five rounds, all of them
-uncontended. Every card ran dbaa4f7 except the 3090, which ran aeaef40 earlier
-that day; the two run the same code on its chip.
+uncontended. Every card ran dbaa4f7 except the 3090, which ran c5f210f later
+that day; the two run the same engine code.
 
 ![Phobos over llama.cpp on each card](results/platforms.svg)
 
@@ -111,7 +111,7 @@ Phobos's rate over llama.cpp's on each card:
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | RTX 2080 SUPER | 250 W | 1.38x | 1.21x | 1.13x | 1.08x | 1.16x | 1.16x |
 | A40 | 300 W | 1.43x | 1.10x | 1.01x | 1.04x | 0.98x | 0.98x |
-| RTX 3090 | 260 W | 1.37x | 1.11x | 1.04x | 1.09x | 1.15x | 1.17x |
+| RTX 3090 | 350 W | 1.30x | 1.07x | 0.99x | 1.00x | 1.06x | 1.06x |
 | RTX 4060 | 115 W | 1.11x | 1.04x | 0.95x | 0.93x | 1.05x | 1.05x |
 | RTX 4090 | 450 W | 1.25x | 1.08x | 0.95x | 1.00x | 1.08x | 1.08x |
 | H100 PCIe | 350 W | 1.28x | 1.08x | 0.93x | 0.88x | 1.18x | 1.18x |
@@ -119,21 +119,23 @@ Phobos's rate over llama.cpp's on each card:
 
 A ratio compares the two engines on one card in one session. The rates
 themselves do not compare across cards, since the hosts differ and so do the
-power limits they set: the rented 3090 ran at 260 W of its stock 350 W, every
-other card at its stock limit. Each card's rates, its kernel benchmark and
+power limits they set, though every rented card here ran at its stock limit. Each card's rates, its kernel benchmark and
 where it ran are on the
 [supported platforms](https://phobos-lang.dev/docs/getting-started/platforms/)
 page, from `results/platforms/`.
 
 A short prompt runs faster on Phobos on every card. At 16k and 32k tokens the
-2080 SUPER, the A40 and the 3090 stay ahead of llama.cpp and the 4090 is
-5% behind at 16k and level at 32k. The 4060, the H100 and the 5090 are 5 to 15% behind there.
+2080 SUPER and the A40 stay ahead of llama.cpp, and the 3090 and the 4090 are
+level at 32k. The 4060, the H100 and the 5090 are 5 to 15% behind there.
 Decode is within 3% of llama.cpp or ahead on every card, at 0.97x to 1.18x.
 
 `bench.py` reports the clock under load against the card's maximum. Two
 rentals were replaced because the driver slowed them for heat: an H100 SXM at
 64% of its maximum clock and a 3090 at 70%. A 4090 held at 65% by heat read
-0.67x at pp32768 in an earlier run, where a healthy one reads 1.00x.
+0.67x at pp32768 in an earlier run, where a healthy one reads 1.00x. A
+power limit moves the ratio too: an earlier 3090 capped at 260 W read 1.09x
+at pp32768 and 1.15x on decode, where this one at its stock 350 W reads 1.00x
+and 1.06x.
 
 ## Mixture of Experts
 
@@ -205,27 +207,54 @@ measures a real workload instead:
    keeps its session between requests and rewinds it to where the next prompt
    differs.
 
-The model is Qwen3.6-35B-A3B. Both engines use the same sampler, a 16k context
-and one slot, and llama.cpp uses the settings above. One recording of each task
-in `bench/`, replayed three rounds each, without thinking:
+The model is Qwen3.6-35B-A3B. Both engines use the same sampler, a 32k
+context and one slot. llama.cpp fits its expert split to the card itself, the
+way `llama-server` does by default, with `-t 8` on the 2080 SUPER. One
+recording of each task in `bench/`, made on 2026-10-23, replayed three rounds
+each, without thinking, at c5f210f:
 
-| task      | requests | engine         | wall    | prompt  | decode   |
-| --------- | -------: | -------------- | ------: | ------: | -------: |
-| `fib`     |       14 | llama.cpp CUDA | 120.4 s | 113 t/s | 30.5 t/s |
-|           |          | Phobos GPU     |  74.9 s | 226 t/s | 42.2 t/s |
-| `law`     |        3 | llama.cpp CUDA |  79.4 s | 162 t/s | 29.9 t/s |
-|           |          | Phobos GPU     |  67.9 s | 222 t/s | 45.7 t/s |
-| `pelican` |        2 | llama.cpp CUDA | 134.2 s | 170 t/s | 29.6 t/s |
-|           |          | Phobos GPU     |  95.9 s | 267 t/s | 48.3 t/s |
+| task      | requests | engine         | wall    | prompt  | decode   | tokens/round |
+| --------- | -------: | -------------- | ------: | ------: | -------: | -----------: |
+| `fib`     |        7 | llama.cpp CUDA |  72.8 s | 179 t/s | 26.5 t/s |          722 |
+|           |          | Phobos GPU     |  81.6 s | 264 t/s | 36.2 t/s |        1,855 |
+| `law`     |        4 | llama.cpp CUDA |  38.1 s | 194 t/s | 27.4 t/s |          225 |
+|           |          | Phobos GPU     |  95.1 s | 165 t/s | 37.6 t/s |        1,260 |
+| `pelican` |        2 | llama.cpp CUDA | 170.1 s | 221 t/s | 24.1 t/s |        3,506 |
+|           |          | Phobos GPU     | 137.6 s | 449 t/s | 41.2 t/s |        4,764 |
 
 The replay caps each answer at its recorded length, but it cannot make an
-engine keep going, and both sample. A round of `fib` has Phobos write 2,200
-tokens to llama.cpp's 2,261, `law` 1,375 to 1,029 and `pelican` 3,501 to
-3,089, so the wall times cover slightly different amounts of work. The rates
-are per token and compare as they are.
+engine keep going, and both sample. llama.cpp ends its answers early here,
+writing 4,453 tokens a round to Phobos's 7,879, so the wall times cover
+different amounts of work. The rates are per token and compare as they are.
 
-The context grows to 5.5k tokens on `fib`, 8.5k on `law` and 6.3k on `pelican`.
-That is why decode is slower here than in the benchmark tables.
+The context grows to 8.2k tokens on `fib`, 11.1k on `law` and 9.8k on
+`pelican`. That is why decode is slower here than in the benchmark tables.
+
+### Across cards
+
+The same recording, replayed once to each engine on five cards, the others
+rented through vast.ai. The rented cards ran dd9deb9, and the 2080 SUPER's row
+is the table above:
+
+| card | memory | llama.cpp's experts | prompt, Phobos | prompt, llama.cpp | decode, Phobos | decode, llama.cpp |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| RTX 2080 SUPER | 8 GB | 34 of 40 layers' experts in host memory | 246 t/s | 194 t/s | 39.3 t/s | 24.6 t/s |
+| RTX 4060 | 8 GB | 33 of 40 layers' experts in host memory | 65 t/s | 83 t/s | 6.1 t/s | 6.1 t/s |
+| RTX 3090 | 24 GB | all on the card | 749 t/s | 2,853 t/s | 108.7 t/s | 140.1 t/s |
+| RTX 4090 | 24 GB | all on the card | 1,529 t/s | 4,607 t/s | 121.2 t/s | 124.5 t/s |
+| A40 | 48 GB | all on the card | 596 t/s | 2,710 t/s | 81.3 t/s | 96.5 t/s |
+
+On the cards too small for the model, llama.cpp keeps most layers' experts in
+host memory and Phobos streams them through its cache. On the 2080 SUPER that
+makes Phobos 1.3x faster on prompts and 1.6x on decode. The rented 4060's host
+ran llama.cpp with 6 threads, and both engines decoded at 6.1 t/s there.
+
+On a card that holds the whole model, both engines keep every expert on it.
+Decode comes within 3% to 22% of llama.cpp, and llama.cpp's prompt processing
+is 3x to 4.5x faster. Before dd9deb9 Phobos held at most 79 experts a block on
+any card, and on the 4090 it decoded at 77.5 t/s.
+
+The rented 3090 ran at its stock 350 W, and the 4090 at 350 W of its 450.
 
 An earlier session replayed an 8-request `fib` recording with thinking:
 
@@ -361,15 +390,16 @@ llama-bench -m models/MiniCPM-V-4_7-35B-A3B-Q8_0.gguf -p 512 -n 128 -d 3072 -t 8
 ```
 
 Record a [pi](https://pi.dev) session of every task, then replay it to both
-engines and plot the result.
+engines and plot the result. A rented card replays the same recording with
+`scripts/vastai/agent.sh`, which `VASTAI.md` describes.
 
 ```bash
-python scripts/agent_bench.py --engines phobos -r 1 --out RUN [--thinking]
-python scripts/agent_bench.py -r 3 [--thinking] --replay RUN/phobos-rep1-*.requests.jsonl \
-  --llama-arg=-ncmoe --llama-arg=31 --llama-arg=-t --llama-arg=8 --out REPLAY
+python scripts/agent_bench.py --engines phobos -r 1 --ctx 32768 --out RUN [--thinking]
+python scripts/agent_bench.py -r 3 --ctx 32768 [--thinking] --replay RUN/phobos-rep1-*.requests.jsonl \
+  --llama-arg=-t --llama-arg=8 --out REPLAY
 cp REPLAY/results.json results/agent.json
 python scripts/plot_agent.py results/agent.json -o results/agent.svg --context \
-  "Qwen3.6-35B-A3B-UD-Q4_K_M on an RTX 2080 SUPER, phobos bbc8898, llama.cpp b11681 -ncmoe 31 -t 8, no thinking"
+  "Qwen3.6-35B-A3B-UD-Q4_K_M on an RTX 2080 SUPER, phobos c5f210f, llama.cpp b11681 fit -t 8, 32k context, no thinking"
 ```
 
 The same replay with 2 GiB of the card taken by another process from the
