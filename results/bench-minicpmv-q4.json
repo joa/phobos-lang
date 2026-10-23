@@ -3,13 +3,15 @@
     "card": "NVIDIA GeForce RTX 2080 SUPER",
     "driver": "617.14",
     "clock_max": "2145",
-    "commit": "bbc8898",
-    "date": "2026-10-16T07:50:57+00:00"
+    "commit": "aeaef40",
+    "date": "2026-10-23T12:01:36+00:00"
   },
   "args": {
     "models": "['MiniCPM-V-4_7-35B-A3B-Q4_K_M']",
     "prompt_tokens": "[128, 512]",
     "gen_tokens": "[128]",
+    "batch_size": "None",
+    "ubatch_size": "None",
     "reps": "1",
     "rounds": "3",
     "llama_bench": "['llama-bench.exe']",
@@ -24,8 +26,8 @@
     "max_idle_power": "120.0",
     "poll": "0.5",
     "force": "False",
-    "csv": "results/bench-minicpmv-q4.csv",
-    "json": "results/bench-minicpmv-q4.json"
+    "csv": "results/local-2080s/full-2026-10-23/bench-minicpmv-q4.csv",
+    "json": "results/local-2080s/full-2026-10-23/bench-minicpmv-q4.json"
   },
   "backends": {
     "phobos": "CUDA",
@@ -36,7 +38,7 @@
     "phobos/MiniCPM-V-4_7-35B-A3B-Q4_K_M": "qwen35moe 34.7B Q4_K"
   },
   "summary": {
-    "median_clock": 1623.3333333333335,
+    "median_clock": 1622.488350419385,
     "uncontended_rounds": [
       1,
       2,
@@ -48,23 +50,23 @@
       3
     ],
     "drift": {
-      "1": -0.01030532179447526,
-      "2": 0.0030255993965222863,
-      "3": -0.00562007108287473
+      "1": -0.022926400332390556,
+      "2": 0.0011448771549974295,
+      "3": 0.01268271831104865
     }
   },
   "health": {
     "1": {
-      "util": 8.5,
-      "power": 20.545
+      "util": 7.0,
+      "power": 20.725
     },
     "2": {
-      "util": 6.0,
-      "power": 20.0
+      "util": 5.0,
+      "power": 20.975
     },
     "3": {
-      "util": 9.0,
-      "power": 20.229999999999997
+      "util": 6.0,
+      "power": 21.700000000000003
     }
   },
   "samples": [
@@ -76,8 +78,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 81.0795,
-      "clock": 1716.6666666666667
+      "rate": 83.2576,
+      "clock": 1740.4166666666667
     },
     {
       "round": 1,
@@ -87,8 +89,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp512",
       "rep": 0,
-      "rate": 283.037,
-      "clock": 1716.6666666666667
+      "rate": 255.742,
+      "clock": 1740.4166666666667
     },
     {
       "round": 1,
@@ -98,8 +100,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 31.0918,
-      "clock": 1716.6666666666667
+      "rate": 32.4449,
+      "clock": 1740.4166666666667
     },
     {
       "round": 1,
@@ -109,8 +111,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 215.12605042016807,
-      "clock": 1528.5
+      "rate": 275.26881720430106,
+      "clock": 1530.5172413793102
     },
     {
       "round": 1,
@@ -120,8 +122,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp512",
       "rep": 0,
-      "rate": 710.124826629681,
-      "clock": 1528.5
+      "rate": 605.2009456264775,
+      "clock": 1530.5172413793102
     },
     {
       "round": 1,
@@ -131,8 +133,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 67.33298264071541,
-      "clock": 1528.5
+      "rate": 62.62230919765166,
+      "clock": 1530.5172413793102
     },
     {
       "round": 2,
@@ -142,8 +144,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 211.5702479338843,
-      "clock": 1530.0
+      "rate": 306.2200956937799,
+      "clock": 1505.1724137931035
     },
     {
       "round": 2,
@@ -153,8 +155,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp512",
       "rep": 0,
-      "rate": 710.124826629681,
-      "clock": 1530.0
+      "rate": 634.448574969021,
+      "clock": 1505.1724137931035
     },
     {
       "round": 2,
@@ -164,8 +166,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 67.08595387840671,
-      "clock": 1530.0
+      "rate": 62.714355707986286,
+      "clock": 1505.1724137931035
     },
     {
       "round": 2,
@@ -175,8 +177,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 82.5786,
-      "clock": 1739.5714285714287
+      "rate": 81.6162,
+      "clock": 1714.4594594594594
     },
     {
       "round": 2,
@@ -186,8 +188,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp512",
       "rep": 0,
-      "rate": 282.009,
-      "clock": 1739.5714285714287
+      "rate": 252.172,
+      "clock": 1714.4594594594594
     },
     {
       "round": 2,
@@ -197,8 +199,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 33.8992,
-      "clock": 1739.5714285714287
+      "rate": 33.4078,
+      "clock": 1714.4594594594594
     },
     {
       "round": 3,
@@ -208,8 +210,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 82.7634,
-      "clock": 1741.7142857142858
+      "rate": 82.3449,
+      "clock": 1731.6666666666667
     },
     {
       "round": 3,
@@ -219,8 +221,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp512",
       "rep": 0,
-      "rate": 281.904,
-      "clock": 1741.7142857142858
+      "rate": 259.662,
+      "clock": 1731.6666666666667
     },
     {
       "round": 3,
@@ -230,8 +232,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 32.7629,
-      "clock": 1741.7142857142858
+      "rate": 32.0913,
+      "clock": 1731.6666666666667
     },
     {
       "round": 3,
@@ -241,8 +243,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp128",
       "rep": 0,
-      "rate": 215.12605042016807,
-      "clock": 1495.6451612903227
+      "rate": 321.608040201005,
+      "clock": 1483.9285714285713
     },
     {
       "round": 3,
@@ -252,8 +254,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "pp512",
       "rep": 0,
-      "rate": 690.0269541778976,
-      "clock": 1495.6451612903227
+      "rate": 637.6089663760896,
+      "clock": 1483.9285714285713
     },
     {
       "round": 3,
@@ -263,8 +265,8 @@
       "model": "MiniCPM-V-4_7-35B-A3B-Q4_K_M",
       "test": "tg128",
       "rep": 0,
-      "rate": 66.59729448491156,
-      "clock": 1495.6451612903227
+      "rate": 63.745019920318725,
+      "clock": 1483.9285714285713
     }
   ]
 }

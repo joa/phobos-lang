@@ -15,39 +15,45 @@ card for contention first.
 
 Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test   | llama.cpp CUDA[^1]  | Phobos GPU          |
-| ------ | ------------------: | ------------------: |
-| pp128  |  7064.41 +/-  47.47 |  9272.97 +/- 244.51 |
-| pp512  | 11727.05 +/-  44.16 | 13188.90 +/-  91.65 |
-| tg32   |   221.97 +/-   0.61 |   343.64 +/-   1.67 |
-| tg128  |   238.48 +/-   0.54 |   343.73 +/-   1.15 |
-| tg512  |   241.68 +/-   0.52 |   343.62 +/-   1.00 |
-| tg1024 |   241.34 +/-   0.53 |   343.28 +/-   0.89 |
-| tg2048 |   239.38 +/-   1.14 |   341.18 +/-   0.89 |
+| test    |  llama.cpp CUDA[^1] |          Phobos GPU |
+| ------- | ------------------: | ------------------: |
+| pp128   |  6994.01 +/-  40.92 | 10843.56 +/- 184.78 |
+| pp512   | 11609.17 +/-  44.84 | 16009.88 +/-  47.28 |
+| pp16384 |  9974.80 +/-   9.70 | 12185.76 +/-   5.36 |
+| pp32768 |  8231.66 +/-  12.07 |  9492.13 +/-   3.73 |
+| tg32    |   221.70 +/-   0.55 |   342.41 +/-   1.14 |
+| tg128   |   237.96 +/-   0.22 |   342.92 +/-   0.18 |
+| tg512   |   241.31 +/-   0.22 |   343.37 +/-   0.30 |
+| tg1024  |   241.07 +/-   0.25 |   343.19 +/-   0.34 |
+| tg2048  |   240.07 +/-   0.27 |   340.83 +/-   0.33 |
 
 MiniCPM5-1B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test   | llama.cpp CUDA[^1]  | Phobos GPU          |
-| ------ | ------------------: | ------------------: |
-| pp128  |  8080.83 +/- 152.45 |  9869.60 +/- 113.65 |
-| pp512  | 15224.11 +/- 134.20 | 12579.49 +/-  39.49 |
-| tg32   |   260.00 +/-   0.50 |   312.11 +/-   0.93 |
-| tg128  |   261.04 +/-   0.69 |   310.34 +/-   0.78 |
-| tg512  |   259.81 +/-   0.44 |   309.22 +/-   0.66 |
-| tg1024 |   257.25 +/-   1.35 |   307.00 +/-   0.71 |
-| tg2048 |   255.75 +/-   0.62 |   302.19 +/-   0.76 |
+| test    |  llama.cpp CUDA[^1] |          Phobos GPU |
+| ------- | ------------------: | ------------------: |
+| pp128   |  8202.58 +/-  36.12 | 13325.79 +/- 228.62 |
+| pp512   | 15288.51 +/-  31.36 | 18196.07 +/- 161.19 |
+| pp16384 |  9296.79 +/-   6.73 |  9090.20 +/-   6.97 |
+| pp32768 |  6290.90 +/-   3.64 |  5959.89 +/-   2.63 |
+| tg32    |   258.91 +/-   0.66 |   311.52 +/-   0.37 |
+| tg128   |   260.77 +/-   0.38 |   309.58 +/-   0.33 |
+| tg512   |   259.47 +/-   0.33 |   308.76 +/-   0.25 |
+| tg1024  |   258.46 +/-   0.34 |   306.23 +/-   0.29 |
+| tg2048  |   255.99 +/-   0.31 |   301.34 +/-   0.34 |
 
 Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test   | llama.cpp CUDA[^1] | Phobos GPU         |
-| ------ | -----------------: | -----------------: |
-| pp128  | 2380.58 +/-   4.04 | 3299.90 +/-  17.01 |
-| pp512  | 3137.20 +/-   0.97 | 3676.09 +/-   3.19 |
-| tg32   |  101.56 +/-   0.05 |  121.87 +/-   0.41 |
-| tg128  |  104.53 +/-   0.05 |  121.54 +/-   0.28 |
-| tg512  |  105.04 +/-   0.10 |  121.60 +/-   0.26 |
-| tg1024 |  104.76 +/-   0.08 |  121.36 +/-   0.31 |
-| tg2048 |  104.33 +/-   0.07 |  120.93 +/-   0.25 |
+| test    | llama.cpp CUDA[^1] |         Phobos GPU |
+| ------- | -----------------: | -----------------: |
+| pp128   | 2387.27 +/-   6.24 | 3282.91 +/-   8.88 |
+| pp512   | 3129.27 +/-   4.32 | 3802.51 +/-  14.58 |
+| pp16384 | 2773.19 +/-   3.05 | 3135.44 +/-   4.31 |
+| pp32768 | 2421.50 +/-   2.11 | 2613.35 +/-   1.87 |
+| tg32    |  101.70 +/-   0.25 |  122.05 +/-   0.35 |
+| tg128   |  104.91 +/-   0.17 |  121.91 +/-   0.43 |
+| tg512   |  105.44 +/-   0.11 |  121.86 +/-   0.30 |
+| tg1024  |  105.28 +/-   0.13 |  121.84 +/-   0.13 |
+| tg2048  |  104.82 +/-   0.12 |  121.31 +/-   0.21 |
 
 GLM-4.6V-Flash-Q4_K_M, text only, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
@@ -66,16 +72,56 @@ Qwen3.8-27B-UD-IQ1_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test  | llama.cpp-prism CUDA[^2] | Phobos GPU       |
-| ----- | -----------------------: | ---------------: |
-| pp128 |         467.43 +/-  2.10 | 677.29 +/-  3.56 |
-| tg128 |          48.44 +/-  0.02 |  45.61 +/-  0.08 |
+| test  | llama.cpp-prism CUDA[^2] |        Phobos GPU |
+| ----- | -----------------------: | ----------------: |
+| pp128 |        468.64 +/-   0.85 | 709.83 +/-   3.46 |
+| tg128 |         48.42 +/-   0.02 |  45.50 +/-   0.06 |
 
 The two 27B models need 6.27 GiB (IQ1_M) and 5.53 GiB (PTQ1_0) for their
 weights, which leaves little of the card's 8 GiB. Their numbers only hold while
-the desktop uses little VRAM: 837 MiB was in use before both runs. If the
-desktop uses much more, the model no longer fits and the driver pages it over
-PCIe. An earlier session measured that at 7 t/s.
+the desktop uses little VRAM. If the desktop uses much more, the model no
+longer fits and the driver pages it over PCIe. An earlier session measured
+that at 7 t/s.
+
+The Bonsai, MiniCPM-V and smaller models' tables are from 2026-10-23, the
+GLM, Qwen3.8 and Qwen3.6 tables from 2026-10-16, when 837 MiB was in use
+before the runs. On 2026-10-23 the desktop held 0.9 to 1.4 GiB, and one engine
+paged on each of those three. Phobos's GLM pp512 fell from 1,764 t/s at
+837 MiB to 845 at 959 MiB and 60 at 1,420 MiB. llama.cpp's Qwen3.8 pp128 fell
+to 2 to 9 t/s, and its Qwen3.6 pp512 swung between 120 and 176 t/s from round
+to round.
+
+## Across Cards
+
+Qwen3.5-4B-Q4_K_M ran on six cards on 2026-10-23, all built from the same
+commit: the 2080 SUPER above, and five cards rented through vast.ai under
+Linux. Each ran the same `bench.py` sizes as the tables above against
+llama.cpp b11681, five rounds, all of them uncontended.
+
+![Phobos over llama.cpp on each card](results/platforms.svg)
+
+Phobos's rate over llama.cpp's on each card:
+
+| card | power limit | pp128 | pp512 | pp16384 | pp32768 | tg128 | tg2048 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| RTX 2080 SUPER | 250 W | 1.38x | 1.22x | 1.13x | 1.08x | 1.16x | 1.16x |
+| A40 | 300 W | 1.44x | 1.09x | 1.01x | 1.04x | 0.97x | 0.97x |
+| RTX 3090 | 260 W | 1.37x | 1.11x | 1.04x | 1.09x | 1.15x | 1.17x |
+| RTX 4060 | 120 W | 1.12x | 1.05x | 0.89x | 0.81x | 1.05x | 1.05x |
+| RTX 4090 | 450 W | 1.18x | 1.03x | 0.84x | 0.67x | 1.09x | 1.09x |
+| RTX 5090 | 575 W | 1.47x | 1.01x | 0.81x | 0.79x | 1.00x | 1.00x |
+
+A ratio compares the two engines on one card in one session. The rates
+themselves do not compare across cards, since the hosts differ and so do the
+power limits they set: the rented 3090 ran at 260 W of its stock 350 W, every
+other card at its stock limit. Each card's rates, its kernel benchmark and
+where it ran are on the
+[supported platforms](https://phobos-lang.dev/docs/getting-started/platforms/)
+page, from `results/platforms/`.
+
+A short prompt runs faster on Phobos on every card. At 16k and 32k tokens the
+Ada and Blackwell cards fall behind llama.cpp, while the Turing and Ampere
+cards stay ahead. Decode is level or ahead everywhere but the A40.
 
 ## Mixture of Experts
 
@@ -90,23 +136,23 @@ Qwen3.6-35B-A3B-UD-Q4_K_M, a mixture of 256 experts whose 19.5 GB do not fit the
 Phobos's pp128 on Qwen3.6 took 208, 203 and 329 t/s in its three rounds. A
 128-token prompt touches few experts, so the rate depends on which ones the
 cache already holds when it starts.
-These rows were measured before `phobos-bench` emptied the expert cache and used a new token sequence for each repetition. Every repetition then reused the same tokens over a cache already holding their experts, which favours Phobos; later runs report the hit rate beside each repetition.
+The Qwen3.6 rows were measured before `phobos-bench` emptied the expert cache and used a new token sequence for each repetition. Every repetition then reused the same tokens over a cache already holding their experts, which favours Phobos; later runs report the hit rate beside each repetition.
 
 MiniCPM-V-4.7-35B-A3B-Q4_K_M, text only, the same architecture, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test  | llama.cpp CUDA[^1], `-ncmoe 30 -t 8` | Phobos GPU       |
-| ----- | -----------------------------------: | ---------------: |
-| pp128 |                      82.14 +/-  0.53 | 213.94 +/- 1.19  |
-| pp512 |                     282.32 +/-  0.36 | 703.43 +/- 6.70  |
-| tg128 |                      32.58 +/-  0.82 |  67.01 +/- 0.22  |
+| test  | llama.cpp CUDA[^1], `-ncmoe 30 -t 8` |        Phobos GPU |
+| ----- | -----------------------------------: | ----------------: |
+| pp128 |                     82.41 +/-   0.47 | 301.03 +/-  13.63 |
+| pp512 |                    255.86 +/-   2.16 | 625.75 +/-  10.32 |
+| tg128 |                     32.65 +/-   0.39 |  63.03 +/-   0.36 |
 
 MiniCPM-V-4.7-35B-A3B-Q8_0, text only, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
-| test  | llama.cpp CUDA[^1], `-ncmoe 36 -t 8` | Phobos GPU       |
-| ----- | -----------------------------------: | ---------------: |
-| pp128 |                      34.96 +/-  0.05 | 212.14 +/- 3.24  |
-| pp512 |                     139.88 +/-  0.63 | 482.48 +/- 9.39  |
-| tg128 |                      19.47 +/-  0.05 |  38.84 +/- 0.50  |
+| test  | llama.cpp CUDA[^1], `-ncmoe 36 -t 8` |        Phobos GPU |
+| ----- | -----------------------------------: | ----------------: |
+| pp128 |                     37.24 +/-   0.15 | 176.28 +/-   8.66 |
+| pp512 |                    139.91 +/-   0.62 | 454.72 +/-   9.60 |
+| tg128 |                     19.18 +/-   0.19 |  33.03 +/-   0.28 |
 
 Both engines keep everything except the experts on the GPU. They differ in
 where the experts go.
@@ -249,7 +295,7 @@ the one it compares against with `--llama-bench`.
 The 0.8B, MiniCPM5-1B and 4B tables come from one run of both engines.
 
 ```bash
-python scripts/bench.py -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 \
+python scripts/bench.py -p 128 512 16384 32768 -n 32 128 512 1024 2048 -r 3 -R 5 \
   --llama-bench ${llama_cpp}/llama-bench.exe --csv results/bench.csv --json results/bench.json
 ```
 
@@ -329,6 +375,13 @@ Producing the SVG for the results.
 python scripts/plot.py results/bench.json results/bench-glm.json results/bench-qwen38.json \
   results/bench-bonsai.json results/bench-qwen36moe.json results/bench-minicpmv-q4.json \
   results/bench-minicpmv-q8.json -o results/inference.svg
+```
+
+Each rented card runs `scripts/vastai/platform.sh`, which `VASTAI.md`
+describes; its files land in `results/platforms/`. The chart across cards:
+
+```bash
+python scripts/plot_platforms.py -o results/platforms.svg
 ```
 
 Manually invoking the engines (not a comparison).

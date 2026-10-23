@@ -2,12 +2,9 @@
   "card": "RTX 4090",
   "chip": "sm_89",
   "memoryGiB": 24,
-  "powerLimitWatts": 350,
-  "host": "vast.ai, Spain",
-  "date": "2026-10-18",
-  "kbenchCommit": "79131b9",
-  "kbenchHost": "vast.ai, Poland",
-  "kbenchPowerLimitWatts": 450,
+  "powerLimitWatts": 450,
+  "host": "vast.ai, Poland",
+  "date": "2026-10-23",
   "bench": "results/platforms/rtx4090/bench.json",
   "kbench": ["results/platforms/rtx4090/kbench-1.csv", "results/platforms/rtx4090/kbench-2.csv"]
 }

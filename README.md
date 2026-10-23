@@ -14,7 +14,7 @@ Phobos is **very** fast for highly quantized models such as Ternary-Bonsai-2-27B
 
 ## Components
 
-- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 86% SGEMM cuBLAS throughput.
+- **[Compiler](#compiler)**: Tile-based kernel language inspired by [Triton](https://triton-lang.org). Currently CUDA-only, 87% SGEMM cuBLAS throughput.
 - **[Inference](#inference)**: OpenAI compatible server for GGUF models. Kernel fusion, memory management; decodes at or above llama.cpp's rate on most models. 
 - **[Clustering](#clustering)**: Distributed tensor algebra.
 
@@ -44,7 +44,7 @@ kernel gemm(A: tensor<f32>[M, K],
 }
 ```
 
-LLVM/MLIR based compiler. SGEMM performance is at 86% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
+LLVM/MLIR based compiler. SGEMM performance is at 87% throughput of cuBLAS `cublasSgemm_v2` on a 2080 SUPER[^1] for `M=N=K=4096` fp32.
 
 See [SPEC](./SPEC.md) for details or check out the [`examples/`](./examples).
 
@@ -381,7 +381,7 @@ to NVPTX, then tiles, tensor cores and autotuning.
 
 Once SGEMM reached 76% of cuBLAS, more GEMM performance was no longer teaching
 me much; it was diminishing returns on what the card's ISA offers. It has since
-reached 86% on the same card, at `M=N=K=4096`. Inference
+reached 87% on the same card, at `M=N=K=4096`. Inference
 came next, to eat my own dog food: a real workload that would show whether the
 compiler holds up outside a benchmark, and where it does not.
 

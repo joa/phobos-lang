@@ -4,8 +4,7 @@
   "memoryGiB": 8,
   "powerLimitWatts": 250,
   "host": "the development workstation, Windows 11",
-  "date": "2026-10-17",
-  "kbenchCommit": "ca08e29",
+  "date": "2026-10-23",
   "bench": "results/bench.json",
   "kbench": ["results/platforms/rtx2080super/kbench-1.csv", "results/platforms/rtx2080super/kbench-2.csv"]
 }

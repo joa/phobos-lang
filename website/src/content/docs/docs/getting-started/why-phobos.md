@@ -13,7 +13,7 @@ down to NVPTX, then tiles, tensor cores and autotuning.
 
 Once SGEMM reached 76% of cuBLAS, more GEMM performance was no longer teaching
 me much; it was diminishing returns on what the card's ISA offers. It has since
-reached 86% on the same card, at `M=N=K=4096`. Inference
+reached 87% on the same card, at `M=N=K=4096`. Inference
 came next, to eat my own dog food: a real workload that would show whether the
 compiler holds up outside a benchmark, and where it does not. Every kernel a
 model runs is compiled from Phobos at runtime, so every gap in the language
