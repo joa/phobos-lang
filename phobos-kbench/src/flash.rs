@@ -176,10 +176,12 @@ pub(crate) fn bench_flash_attention_fp32(
         gflop / phobos_avg.as_secs_f64()
     );
 
+    // f32 in and out, but @tensorcore runs both products on f16 tensor
+    // cores with f32 accumulation, so that is the peak it is held against.
     results.push(
         "flash_fp32",
         "phobos",
-        Precision::F32,
+        Precision::F16TcF32,
         gflop / phobos_avg.as_secs_f64(),
     );
 
