@@ -17,43 +17,43 @@ Qwen3.5-0.8B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test    |  llama.cpp CUDA[^1] |          Phobos GPU |
 | ------- | ------------------: | ------------------: |
-| pp128   |  6994.01 +/-  40.92 | 10843.56 +/- 184.78 |
-| pp512   | 11609.17 +/-  44.84 | 16009.88 +/-  47.28 |
-| pp16384 |  9974.80 +/-   9.70 | 12185.76 +/-   5.36 |
-| pp32768 |  8231.66 +/-  12.07 |  9492.13 +/-   3.73 |
-| tg32    |   221.70 +/-   0.55 |   342.41 +/-   1.14 |
-| tg128   |   237.96 +/-   0.22 |   342.92 +/-   0.18 |
-| tg512   |   241.31 +/-   0.22 |   343.37 +/-   0.30 |
-| tg1024  |   241.07 +/-   0.25 |   343.19 +/-   0.34 |
-| tg2048  |   240.07 +/-   0.27 |   340.83 +/-   0.33 |
+| pp128   |  6991.08 +/-  43.35 | 10334.94 +/- 579.27 |
+| pp512   | 11640.44 +/-  14.96 | 16072.52 +/- 130.00 |
+| pp16384 |  9964.82 +/-  11.53 | 12207.19 +/-  10.70 |
+| pp32768 |  8174.82 +/-   7.77 |  9511.43 +/-   2.80 |
+| tg32    |   222.65 +/-   0.33 |   343.36 +/-   0.83 |
+| tg128   |   238.64 +/-   0.29 |   343.23 +/-   0.54 |
+| tg512   |   241.67 +/-   0.27 |   342.76 +/-   0.23 |
+| tg1024  |   240.16 +/-   1.28 |   343.34 +/-   0.10 |
+| tg2048  |   239.78 +/-   0.57 |   341.01 +/-   0.17 |
 
 MiniCPM5-1B-Q8_0 on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test    |  llama.cpp CUDA[^1] |          Phobos GPU |
 | ------- | ------------------: | ------------------: |
-| pp128   |  8202.58 +/-  36.12 | 13325.79 +/- 228.62 |
-| pp512   | 15288.51 +/-  31.36 | 18196.07 +/- 161.19 |
-| pp16384 |  9296.79 +/-   6.73 |  9090.20 +/-   6.97 |
-| pp32768 |  6290.90 +/-   3.64 |  5959.89 +/-   2.63 |
-| tg32    |   258.91 +/-   0.66 |   311.52 +/-   0.37 |
-| tg128   |   260.77 +/-   0.38 |   309.58 +/-   0.33 |
-| tg512   |   259.47 +/-   0.33 |   308.76 +/-   0.25 |
-| tg1024  |   258.46 +/-   0.34 |   306.23 +/-   0.29 |
-| tg2048  |   255.99 +/-   0.31 |   301.34 +/-   0.34 |
+| pp128   |  8203.17 +/-  61.58 | 13166.33 +/- 287.01 |
+| pp512   | 15340.72 +/-  76.18 | 18264.80 +/- 268.44 |
+| pp16384 |  9266.64 +/-  14.57 |  9052.49 +/-  28.72 |
+| pp32768 |  6273.28 +/-   9.81 |  5949.86 +/-  10.32 |
+| tg32    |   250.26 +/-   8.93 |   309.53 +/-   1.29 |
+| tg128   |   260.15 +/-   0.55 |   309.64 +/-   0.51 |
+| tg512   |   259.05 +/-   0.59 |   308.62 +/-   0.47 |
+| tg1024  |   258.09 +/-   0.60 |   306.09 +/-   0.61 |
+| tg2048  |   255.77 +/-   0.56 |   300.89 +/-   0.83 |
 
 Qwen3.5-4B-Q4_K_M on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
 | test    | llama.cpp CUDA[^1] |         Phobos GPU |
 | ------- | -----------------: | -----------------: |
-| pp128   | 2387.27 +/-   6.24 | 3282.91 +/-   8.88 |
-| pp512   | 3129.27 +/-   4.32 | 3802.51 +/-  14.58 |
-| pp16384 | 2773.19 +/-   3.05 | 3135.44 +/-   4.31 |
-| pp32768 | 2421.50 +/-   2.11 | 2613.35 +/-   1.87 |
-| tg32    |  101.70 +/-   0.25 |  122.05 +/-   0.35 |
-| tg128   |  104.91 +/-   0.17 |  121.91 +/-   0.43 |
-| tg512   |  105.44 +/-   0.11 |  121.86 +/-   0.30 |
-| tg1024  |  105.28 +/-   0.13 |  121.84 +/-   0.13 |
-| tg2048  |  104.82 +/-   0.12 |  121.31 +/-   0.21 |
+| pp128   | 2374.28 +/-   6.15 | 3277.73 +/-  13.66 |
+| pp512   | 3144.23 +/-   5.85 | 3801.21 +/-   7.71 |
+| pp16384 | 2774.98 +/-   5.41 | 3122.89 +/-   8.52 |
+| pp32768 | 2422.30 +/-   3.72 | 2604.49 +/-   5.20 |
+| tg32    |  101.90 +/-   0.22 |  121.90 +/-   0.43 |
+| tg128   |  104.85 +/-   0.19 |  121.78 +/-   0.30 |
+| tg512   |  105.34 +/-   0.19 |  121.54 +/-   0.48 |
+| tg1024  |  105.12 +/-   0.20 |  121.62 +/-   0.33 |
+| tg2048  |  104.63 +/-   0.22 |  121.03 +/-   0.31 |
 
 GLM-4.6V-Flash-Q4_K_M, text only, on an RTX 2080 SUPER, driver 617.14, tokens per second:
 
@@ -74,8 +74,8 @@ Ternary-Bonsai-2-27B-PTQ1_0 on an RTX 2080 SUPER, driver 617.14, tokens per seco
 
 | test  | llama.cpp-prism CUDA[^2] |        Phobos GPU |
 | ----- | -----------------------: | ----------------: |
-| pp128 |        468.64 +/-   0.85 | 709.83 +/-   3.46 |
-| tg128 |         48.42 +/-   0.02 |  45.50 +/-   0.06 |
+| pp128 |        468.46 +/-   1.00 | 697.47 +/-  13.85 |
+| tg128 |         46.61 +/-   1.52 |  45.40 +/-   0.13 |
 
 The two 27B models need 6.27 GiB (IQ1_M) and 5.53 GiB (PTQ1_0) for their
 weights, which leaves little of the card's 8 GiB. Their numbers only hold while
@@ -83,20 +83,25 @@ the desktop uses little VRAM. If the desktop uses much more, the model no
 longer fits and the driver pages it over PCIe. An earlier session measured
 that at 7 t/s.
 
-The Bonsai, MiniCPM-V and smaller models' tables are from 2026-10-23, the
-GLM, Qwen3.8 and Qwen3.6 tables from 2026-10-16, when 837 MiB was in use
-before the runs. On 2026-10-23 the desktop held 0.9 to 1.4 GiB, and one engine
-paged on each of those three. Phobos's GLM pp512 fell from 1,764 t/s at
-837 MiB to 845 at 959 MiB and 60 at 1,420 MiB. llama.cpp's Qwen3.8 pp128 fell
-to 2 to 9 t/s, and its Qwen3.6 pp512 swung between 120 and 176 t/s from round
-to round.
+The smaller models', Bonsai's and the MiniCPM-V Q8_0's tables are from the
+2026-10-23 run at dbaa4f7. The MiniCPM-V Q4_K_M table is from an earlier run
+that day at aeaef40, which runs the same code on this card. The GLM, Qwen3.8
+and Qwen3.6 tables are from 2026-10-16, when 837 MiB was in use before the
+runs.
+
+On 2026-10-23 the desktop held 0.9 to 1.4 GiB, and in both of that day's runs
+one engine paged on each of those three models. Phobos's GLM pp512 fell from
+1,764 t/s at 837 MiB to between 60 and 845. llama.cpp's Qwen3.8 pp128 fell to
+2 to 9 t/s. Its Qwen3.6 pp512 fell to between 70 and 176 t/s, and in the later
+run its MiniCPM-V Q4_K_M pp512 fell to between 131 and 154.
 
 ## Across Cards
 
-Qwen3.5-4B-Q4_K_M ran on six cards on 2026-10-23, all built from the same
-commit: the 2080 SUPER above, and five cards rented through vast.ai under
-Linux. Each ran the same `bench.py` sizes as the tables above against
-llama.cpp b11681, five rounds, all of them uncontended.
+Qwen3.5-4B-Q4_K_M ran on seven cards on 2026-10-23: the 2080 SUPER above,
+and six cards rented through vast.ai under Linux. Each ran the same `bench.py`
+sizes as the tables above against llama.cpp b11681, five rounds, all of them
+uncontended. Every card ran dbaa4f7 except the 3090, which ran aeaef40 earlier
+that day; the two run the same code on its chip.
 
 ![Phobos over llama.cpp on each card](results/platforms.svg)
 
@@ -104,12 +109,13 @@ Phobos's rate over llama.cpp's on each card:
 
 | card | power limit | pp128 | pp512 | pp16384 | pp32768 | tg128 | tg2048 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| RTX 2080 SUPER | 250 W | 1.38x | 1.22x | 1.13x | 1.08x | 1.16x | 1.16x |
-| A40 | 300 W | 1.44x | 1.09x | 1.01x | 1.04x | 0.97x | 0.97x |
+| RTX 2080 SUPER | 250 W | 1.38x | 1.21x | 1.13x | 1.08x | 1.16x | 1.16x |
+| A40 | 300 W | 1.43x | 1.10x | 1.01x | 1.04x | 0.98x | 0.98x |
 | RTX 3090 | 260 W | 1.37x | 1.11x | 1.04x | 1.09x | 1.15x | 1.17x |
-| RTX 4060 | 120 W | 1.12x | 1.05x | 0.89x | 0.81x | 1.05x | 1.05x |
-| RTX 4090 | 450 W | 1.18x | 1.03x | 0.84x | 0.67x | 1.09x | 1.09x |
-| RTX 5090 | 575 W | 1.47x | 1.01x | 0.81x | 0.79x | 1.00x | 1.00x |
+| RTX 4060 | 115 W | 1.11x | 1.04x | 0.95x | 0.93x | 1.05x | 1.05x |
+| RTX 4090 | 450 W | 1.25x | 1.08x | 0.95x | 1.00x | 1.08x | 1.08x |
+| H100 PCIe | 350 W | 1.28x | 1.08x | 0.93x | 0.88x | 1.18x | 1.18x |
+| RTX 5090 | 575 W | 1.52x | 1.01x | 0.85x | 0.90x | 0.98x | 0.97x |
 
 A ratio compares the two engines on one card in one session. The rates
 themselves do not compare across cards, since the hosts differ and so do the
@@ -120,8 +126,14 @@ where it ran are on the
 page, from `results/platforms/`.
 
 A short prompt runs faster on Phobos on every card. At 16k and 32k tokens the
-Ada and Blackwell cards fall behind llama.cpp, while the Turing and Ampere
-cards stay ahead. Decode is level or ahead everywhere but the A40.
+2080 SUPER, the A40 and the 3090 stay ahead of llama.cpp and the 4090 is
+5% behind at 16k and level at 32k. The 4060, the H100 and the 5090 are 5 to 15% behind there.
+Decode is within 3% of llama.cpp or ahead on every card, at 0.97x to 1.18x.
+
+`bench.py` reports the clock under load against the card's maximum. Two
+rentals were replaced because the driver slowed them for heat: an H100 SXM at
+64% of its maximum clock and a 3090 at 70%. A 4090 held at 65% by heat read
+0.67x at pp32768 in an earlier run, where a healthy one reads 1.00x.
 
 ## Mixture of Experts
 
@@ -150,9 +162,9 @@ MiniCPM-V-4.7-35B-A3B-Q8_0, text only, on an RTX 2080 SUPER, driver 617.14, toke
 
 | test  | llama.cpp CUDA[^1], `-ncmoe 36 -t 8` |        Phobos GPU |
 | ----- | -----------------------------------: | ----------------: |
-| pp128 |                     37.24 +/-   0.15 | 176.28 +/-   8.66 |
-| pp512 |                    139.91 +/-   0.62 | 454.72 +/-   9.60 |
-| tg128 |                     19.18 +/-   0.19 |  33.03 +/-   0.28 |
+| pp128 |                     35.35 +/-   1.14 | 192.62 +/-   2.08 |
+| pp512 |                    139.37 +/-   1.17 | 463.03 +/-   4.88 |
+| tg128 |                     19.11 +/-   0.03 |  32.21 +/-   1.61 |
 
 Both engines keep everything except the experts on the GPU. They differ in
 where the experts go.

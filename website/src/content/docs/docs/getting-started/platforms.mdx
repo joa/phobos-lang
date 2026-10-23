@@ -25,16 +25,19 @@ run and benchmarked on more cards, rented through vast.ai under Linux:
 | RTX 3090 | Ampere | `sm_86` | 24 GB |
 | RTX 4060 | Ada | `sm_89` | 8 GB |
 | RTX 4090 | Ada | `sm_89` | 24 GB |
+| H100 PCIe | Hopper | `sm_90` | 80 GB |
 | RTX 5090 | Blackwell | `sm_120` | 32 GB |
 
 The tuning is done on the 2080 SUPER; a default that matters for speed is also
 measured on a 3090 and a 4090 before it ships. The A40 is the data center
-Ampere card the prompt kernels for large models were tuned on.
+Ampere card the prompt kernels for large models were tuned on. The H100 runs
+the kernels as compiled for its chip, untuned.
 
 ## Measured on each card
 
-Every card ran the same two benchmarks, all built from one commit on the same
-day. Qwen3.5-4B Q4_K_M ran against llama.cpp b11681 through
+Every card ran the same two benchmarks on 2026-10-23, built from dbaa4f7.
+The 3090 ran them earlier that day at aeaef40, which runs the same code on its
+chip. Qwen3.5-4B Q4_K_M ran against llama.cpp b11681 through
 `scripts/bench.py`: five rounds, the engines interleaved, three repetitions
 each, the sizes of the [Benchmarks](/docs/reference/benchmarks/) run plus
 prompts of 16384 and 32768 tokens. Then `phobos-kbench` ran twice against
@@ -48,13 +51,17 @@ cards are not comparable to each other: the hosts differ, and so do the power
 limits a host sets. The 3090 ran at 260 W, below the card's stock 350 W; every
 other rented card ran at its stock limit. A rented card was checked for
 another tenant before the run (idle power, utilization, and how long the
-driver has spent capping its power), and `bench.py` checks it again between
-rounds. On the 3090 that check reads the card's own power state: it holds
+driver has spent capping its power or slowing the card for heat), and
+`bench.py` checks it again between rounds. `bench.py` also compares the clock
+under load with the card's maximum and flags a card the driver slowed for
+heat. An H100 SXM ran at 64% of its maximum, slowed for heat in nearly every
+sample, and was replaced by the H100 PCIe here; a 3090 at 70% was dropped the
+same way. On the 3090 that check reads the card's own power state: it holds
 about 150 W for two seconds after a process exits, at 0% utilization, and is
 back at 21 W within ten
 ([trace](https://github.com/joa/phobos-lang/blob/main/results/platforms/rtx3090/power-decay.txt)).
-Its run therefore raised the check's power threshold from 120 W to 200 W; the
-utilization check was unchanged. The 4060 reports no power draw at all, so its
+Its run and the H100's therefore raised the check's power threshold from
+120 W to 200 W; the utilization check was unchanged. The 4060 reports no power draw at all, so its
 check was on utilization alone. Every round on every card came out
 uncontended.
 
@@ -62,9 +69,8 @@ uncontended.
 
 <PlatformBench />
 
-A release also carries compiled kernels for `sm_80` and `sm_90`, the data
-center chips of the Ampere and Hopper generations. They have not been tested
-or tuned on a card. Any other card of compute capability 7.5 or newer runs the
+A release also carries compiled kernels for `sm_80`, the A100's chip. They
+have not been tested or tuned on a card. Any other card of compute capability 7.5 or newer runs the
 PTX for its chip, compiled on first use if the release's cache does not have
 it (see [Kernel cache](/docs/inference/kernel-cache/)).
 
@@ -90,7 +96,8 @@ differences show through:
   next stage in registers instead. See [`@pipeline`](/docs/attributes/pipeline/).
 - **`bf16`** converts natively from `sm_80` on and is emulated on `sm_75`.
 - **Shared memory per block** under [`@dynshared`](/docs/attributes/dynshared/):
-  64 KB on `sm_75`, 163 KB on `sm_80`, 99 KB on `sm_86`, `sm_89` and `sm_120`.
+  64 KB on `sm_75`, 163 KB on `sm_80`, 227 KB on `sm_90`, 99 KB on `sm_86`,
+  `sm_89` and `sm_120`.
 - **Index width.** Some paths, such as tensor-core loads with `ldmatrix` and
   `mma.sync` on `sm_80` and newer, need 64-bit indices, and a module that uses
   them is widened. See
