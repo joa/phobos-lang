@@ -78,6 +78,48 @@ impl DeviceBackend {
     /// otherwise, then the blocked kernel, the two-matmul path,
     /// the decode split, and a row at a time.
     pub(super) fn attention_any(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+        self.attention_from(q, keys, values, spec, out, 0)
+    }
+
+    /// [`Self::attention_any`] for the rows of `q` and `out` from `row` on.
+    fn attention_from(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf, row: usize) -> Result<()> {
+        // A cache that ends off the tile grid, as a kept session's usually
+        // does, would send the whole prompt a row at a time. Flash starts its
+        // tiles at the boundary below instead, the cached positions before
+        // the prompt as padding queries whose outputs it drops.
+        let pad = spec.start_pos % ATTN_TC_TILE;
+        if pad > 0 && self.attn_flash_on && spec.rows + pad >= ATTN_TC_TILE {
+            let padded = Attn {
+                rows: (spec.rows + pad) / ATTN_TC_TILE * ATTN_TC_TILE,
+                start_pos: spec.start_pos - pad,
+                ..spec
+            };
+            if attn_flash_fits(padded, self.flash.form) {
+                self.attention_flash(q, keys, values, padded, out, row, pad)?;
+                let done = padded.rows - pad;
+                let rest = Attn {
+                    rows: spec.rows - done,
+                    start_pos: padded.total(),
+                    ..spec
+                };
+                if rest.rows == 0 {
+                    return Ok(());
+                }
+                return self.attention_blocked(q, keys, values, rest, attention_block_tile(spec.head_dim), out, row + done);
+            }
+        }
+        // Without flash, the rows up to the next tile boundary go alone, and
+        // the rest starts on the grid.
+        let lead = (ATTN_TC_TILE - pad) % ATTN_TC_TILE;
+        if lead > 0 && spec.rows >= lead + ATTN_TC_TILE {
+            self.attention_from(q, keys, values, Attn { rows: lead, ..spec }, out, row)?;
+            let rest = Attn {
+                rows: spec.rows - lead,
+                start_pos: spec.start_pos + lead,
+                ..spec
+            };
+            return self.attention_from(q, keys, values, rest, out, row + lead);
+        }
         let block = attention_block_tile(spec.head_dim);
         // The tensor cores take the whole tiles of the prompt, and the
         // blocked kernel the rows past them, which continue from where the
@@ -90,9 +132,9 @@ impl DeviceBackend {
         let flash = self.attn_flash_on && attn_flash_fits(tiled, self.flash.form);
         if tiled.rows > 0 && (flash || self.attn_tc_on && attn_tc_fits(tiled)) {
             if flash {
-                self.attention_flash(q, keys, values, tiled, out)?;
+                self.attention_flash(q, keys, values, tiled, out, row, 0)?;
             } else {
-                self.attention_tc(q, keys, values, tiled, out)?;
+                self.attention_tc(q, keys, values, tiled, out, row)?;
             }
             let rest = Attn {
                 rows: spec.rows - tiled.rows,
@@ -102,20 +144,20 @@ impl DeviceBackend {
             if rest.rows == 0 {
                 return Ok(());
             }
-            return self.attention_blocked(q, keys, values, rest, block, out, tiled.rows);
+            return self.attention_blocked(q, keys, values, rest, block, out, row + tiled.rows);
         }
         // Next the blocked kernel. Its causal mask needs the query blocks
         // aligned to the tile, so a misaligned start falls through.
         if spec.rows > 1 && spec.start_pos.is_multiple_of(block) {
-            return self.attention_blocked(q, keys, values, spec, block, out, 0);
+            return self.attention_blocked(q, keys, values, spec, block, out, row);
         }
         // Next, the two-matmul path if the shape tiles evenly.
-        if attn_gemm_fits(spec) {
+        if row == 0 && attn_gemm_fits(spec) {
             return self.attention_gemm(q, keys, values, spec, out);
         }
         match spec.rows {
-            1 => self.attention_decode(q, keys, values, spec, out),
-            _ => self.attention_rows(q, keys, values, spec, out),
+            1 if row == 0 => self.attention_decode(q, keys, values, spec, out),
+            _ => self.attention_rows(q, keys, values, spec, out, row),
         }
     }
 
@@ -123,15 +165,34 @@ impl DeviceBackend {
     /// kept in registers. See [`attn_flash_src`]; the caller checks
     /// [`attn_flash_fits`]. A deep prompt splits its keys over
     /// [`flash_splits`] programs a query tile and merges them after.
-    pub(super) fn attention_flash(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+    ///
+    /// The first `pad` of `spec`'s rows are padding: zero queries at cached
+    /// positions, whose outputs are dropped. The rest are rows `row` on of
+    /// `q` and `out`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn attention_flash(
+        &self,
+        q: Buf,
+        keys: HBuf,
+        values: HBuf,
+        spec: Attn,
+        out: Buf,
+        row: usize,
+        pad: usize,
+    ) -> Result<()> {
         let (rows, dim, group) = (spec.rows as i64, spec.head_dim, spec.group());
         let (qw, nk, kw) = ((spec.n_head * dim) as i64, spec.total() as i64, spec.kv_width() as i64);
+        let width = qw as usize;
         let slices = dim / self.flash.form.value_cols(dim);
         let splits = flash_splits(spec, self.flash.form, self.sms);
         // The queries narrow once here rather than at every key step.
-        let narrow = self.alloc_h(spec.rows * qw as usize)?;
+        let narrow = if pad > 0 { self.zeroed_h(spec.rows * width)? } else { self.alloc_h(spec.rows * width)? };
         let q_ptr = self.hptr(narrow, 0)?;
-        self.strided(Strided::Store, (self.ptr(q, 0)?, qw as usize), (q_ptr, qw as usize), spec.rows, qw as usize)?;
+        let real = spec.rows - pad;
+        self.strided(Strided::Store, (self.ptr(q, row * width)?, width), (self.hptr(narrow, pad * width)?, width), real, width)?;
+        // Padded, the kernel writes every row to scratch and the real ones
+        // are copied out after.
+        let (dest, dest_at) = if pad > 0 { (self.alloc(spec.rows * width)?, 0) } else { (out, row * width) };
         let (k, v) = ((self.hptr(keys, 0)?, [nk, kw]), (self.hptr(values, 0)?, [nk, kw]));
         let grid = ((spec.rows / FLASH_TILE) as u32, (slices * splits) as u32, spec.n_head as u32);
         if splits == 1 {
@@ -140,10 +201,10 @@ impl DeviceBackend {
                 (dim, group, 1),
                 "attn_flash",
                 || attn_flash_src(dim, group, self.flash, 1),
-                |module| self.launch(module, "attn_flash", &[(q_ptr, [rows, qw]), k, v, (self.ptr(out, 0)?, [rows, qw])], grid),
+                |module| self.launch(module, "attn_flash", &[(q_ptr, [rows, qw]), k, v, (self.ptr(dest, dest_at)?, [rows, qw])], grid),
             );
             self.release_h(narrow);
-            return result;
+            return result.and_then(|()| self.unpad(dest, out, row, pad, real, width));
         }
         let (split_rows, stats) = (splits as i64 * rows, 2 * spec.n_head as i64);
         let partial = self.alloc(splits * spec.rows * qw as usize)?;
@@ -167,7 +228,7 @@ impl DeviceBackend {
                         self.launch(
                             module,
                             "attn_merge",
-                            &[p, ml, (self.ptr(out, 0)?, [rows, qw])],
+                            &[p, ml, (self.ptr(dest, dest_at)?, [rows, qw])],
                             ((spec.rows / FLASH_MERGE_ROWS) as u32, spec.n_head as u32, 1),
                         )
                     },
@@ -176,13 +237,24 @@ impl DeviceBackend {
         self.release_h(narrow);
         self.release(partial);
         self.release(moments);
+        result.and_then(|()| self.unpad(dest, out, row, pad, real, width))
+    }
+
+    /// Copies a padded flash pass's `real` rows from its scratch to rows
+    /// `row` on of `out`, and frees the scratch. Nothing to do unpadded.
+    fn unpad(&self, scratch: Buf, out: Buf, row: usize, pad: usize, real: usize, width: usize) -> Result<()> {
+        if pad == 0 {
+            return Ok(());
+        }
+        let result = self.strided(Strided::Dense, (self.ptr(scratch, pad * width)?, width), (self.ptr(out, row * width)?, width), real, width);
+        self.release(scratch);
         result
     }
 
     /// Causal attention for a prompt on the tensor cores, a slab of rows and
     /// heads at a time. See [`attn_tc_src`] and [`attn_tc_slab`]; the caller
     /// checks [`attn_tc_fits`].
-    pub(super) fn attention_tc(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf) -> Result<()> {
+    pub(super) fn attention_tc(&self, q: Buf, keys: HBuf, values: HBuf, spec: Attn, out: Buf, first: usize) -> Result<()> {
         let (rows, dim, group) = (spec.rows, spec.head_dim, spec.group());
         let (qw, kw) = (spec.n_head * dim, spec.kv_width() as i64);
         let (slab_rows, slab_heads) = attn_tc_slab(spec);
@@ -204,7 +276,7 @@ impl DeviceBackend {
                         // sees, as the kernels take every call's to.
                         let r = slab_rows.min(rows - row);
                         let nk = spec.start_pos + row + r;
-                        let (at, kv_at) = (row * qw + h * dim, h / group * dim);
+                        let (at, kv_at) = ((first + row) * qw + h * dim, h / group * dim);
                         let (ri, n, sw) = (r as i64, nk as i64, (slab_heads * nk) as i64);
                         let (k, v) = ((self.hptr(keys, kv_at)?, [n, kw]), (self.hptr(values, kv_at)?, [n, kw]));
                         let (s, l) = ((self.ptr(scores, 0)?, [ri, sw]), (self.ptr(sums, 0)?, [ri, slab_heads as i64]));
@@ -657,8 +729,10 @@ impl DeviceBackend {
         values: HBuf,
         spec: Attn,
         out: Buf,
+        row: usize,
     ) -> Result<()> {
         let (r, d) = ((spec.rows * spec.n_head) as i64, spec.head_dim as i64);
+        let at = row * spec.n_head * spec.head_dim;
         let (nk, kw) = (spec.total() as i64, spec.kv_width() as i64);
         self.with_kernel(
             &self.attentions,
@@ -677,10 +751,10 @@ impl DeviceBackend {
                     module,
                     "attention",
                     &[
-                        (self.ptr(q, 0)?, [r, d]),
+                        (self.ptr(q, at)?, [r, d]),
                         (self.hptr(keys, 0)?, [nk, kw]),
                         (self.hptr(values, 0)?, [nk, kw]),
-                        (self.ptr(out, 0)?, [r, d]),
+                        (self.ptr(out, at)?, [r, d]),
                     ],
                     (spec.rows as u32, spec.n_head as u32, 1),
                 )
