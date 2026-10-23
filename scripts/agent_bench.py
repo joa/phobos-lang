@@ -20,7 +20,8 @@ For each engine, one server at a time on the port the agent is configured for:
 Both servers get the same settings where their defaults would differ.
 pi sends no sampling fields, so both get Qwen's recommended sampler for the
 mode. Neither thinks by default; with `--thinking`, pi asks for reasoning and
-llama.cpp is told to reason. The context is pi's, 16k with one slot.
+llama.cpp is told to reason. The context is 16k with one slot, as pi is
+configured for; `--ctx` gives both servers another.
 
 The expert split is left to each engine. llama.cpp fits `-ncmoe` to the card
 itself (`--fit`, on by default), and phobos sizes its expert cache from free
@@ -278,6 +279,7 @@ class Phobos(Engine):
             "--gguf", self.args.model,
             "--listen", f"127.0.0.1:{ENGINE_PORT}",
             "--no-tui",
+            "--ctx", self.args.ctx,
             "-n", MAX_TOKENS,
             "--temp", s["temp"],
             "--top-k", s["top_k"],
@@ -335,7 +337,7 @@ class Llama(Engine):
         if not fit.is_file():
             return None
         printed = subprocess.run(
-            [fit, "-m", self.args.model, "-c", str(CONTEXT), "-np", "1"],
+            [fit, "-m", self.args.model, "-c", str(self.args.ctx), "-np", "1"],
             cwd=ROOT, env=self.env, capture_output=True, text=True,
         ).stdout
         whole = set(re.findall(r"blk\\\.(\d+)\\\.ffn_\(up\|down", printed))
@@ -350,7 +352,7 @@ class Llama(Engine):
             "-m", self.args.model,
             "--port", ENGINE_PORT,
             "--host", "127.0.0.1",
-            "-c", CONTEXT,
+            "-c", self.args.ctx,
             "-np", 1,
             "--reasoning", "on" if self.args.thinking else "off",
             "--temp", s["temp"],
@@ -785,6 +787,7 @@ def parse_args():
     p.add_argument("--engines", default="phobos,llama", help="comma-separated, in order: phobos, llama")
     p.add_argument("-m", "--model", default=MODEL)
     p.add_argument("-r", "--reps", type=int, default=1)
+    p.add_argument("--ctx", type=int, default=CONTEXT, metavar="TOKENS", help=f"context both servers hold (default {CONTEXT}, what pi is configured for)")
     p.add_argument("--children", nargs="*", help="which children of bench/ (default: all)")
     p.add_argument("--replay", nargs="+", metavar="TRACE", help="replay recorded *.requests.jsonl traces instead of running the agent")
     p.add_argument("--timeout", type=float, default=1800, help="seconds one agent task may take")
@@ -813,6 +816,21 @@ def parse_args():
     if args.greedy:
         args.sampler = dict(args.sampler, temp=0.0)
     return args
+
+
+def run_meta(args):
+    """The card, the build and the settings every engine in this run shares."""
+    card, driver = smi("name,driver_version")
+    exe = ROOT / "target" / "release" / ("phobos-cli.exe" if os.name == "nt" else "phobos-cli")
+    version = subprocess.run([exe, "--version"], capture_output=True, text=True).stdout.strip() if exe.is_file() else ""
+    return {
+        "card": card,
+        "driver": driver,
+        "phobos": version,
+        "ctx": args.ctx,
+        "replay": [Path(t).name for t in args.replay or []],
+        "date": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+    }
 
 
 def run_engine(engine, kind, rep, children, pi, out, meta, recorder, squeeze):
@@ -898,7 +916,7 @@ def main():
         if not pi:
             sys.exit("pi is not on PATH")
 
-    out = Path(args.out) if args.out else Path(tempfile.mkdtemp(prefix="phobos-agent-bench-"))
+    out = Path(args.out).resolve() if args.out else Path(tempfile.mkdtemp(prefix="phobos-agent-bench-"))
     out.mkdir(parents=True, exist_ok=True)
     print(f"results in {out}")
     preflight(args)
@@ -909,7 +927,7 @@ def main():
         sys.exit("--squeeze-until has to come after --squeeze-at")
     squeeze = Squeeze(args.squeeze, args.squeeze_at, args.squeeze_until, args.squeeze_touch_ms)
     recorder = None if args.replay else Recorder(squeeze)
-    tasks, meta = [], {}
+    tasks, meta = [], {"run": run_meta(args)}
     for rep in range(1, args.reps + 1):
         # Each engine starts fresh every round. The order reverses on even
         # rounds so neither always goes first.
