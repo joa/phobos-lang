@@ -204,6 +204,28 @@ Each card's files go to `results/platforms/<card>/` beside a `card.json`, with
 150 W for two seconds after a process exits, which `bench.py`'s between-round
 check reads as another tenant; pass `--max-idle-power 200` after `REF` there.
 
+A card can also run slow without a tenant. A rented RTX 4090 ran its whole
+platform run at 65% of its maximum clock, held there by heat. Phobos's 32k
+prompts lost twice as much there as llama.cpp's, so its row read 0.67x where
+a healthy 4090 reads 0.88x. `bench.py` reports the clock under load as a share
+of the card's maximum, with how often the driver slowed the card for heat or
+held it at its power limit, and warns below `--min-clock-share` (0.75). A
+warning means the host, not the card: rent another before publishing.
+
+### Where a deep prompt's time goes
+
+`scripts/vastai/deepprompt.sh REF [SHAPE...]` measures Qwen3.5-4B Q4_K_M at
+pp512 and pp32768 once per flash attention shape (`PHOBOS_ATTN_FLASH_SHAPE`,
+with `default` for the chip's own), then llama.cpp, then one 32k pass of each
+engine under nsys with its kernels summed. It wants `build.sh` beside it and
+the devel image; nsys comes from the image's NVIDIA apt repository. llama.cpp's
+profile includes its warmup pass, a whole prompt, so halve its sums.
+
+```powershell
+scp -P PORT scripts/vastai/gate.sh scripts/vastai/deepprompt.sh scripts/vastai/build.sh root@HOST:/root/
+ssh -p PORT root@HOST "nohup bash /root/deepprompt.sh REF > /root/deep.out 2>&1 < /dev/null &"
+```
+
 ### Profiling without ncu
 
 `ncu` fails on these hosts with `ERR_NVGPUCTRPERM`: the container gets no
