@@ -43,8 +43,10 @@ use handoff::Handoff;
 use mapped::Mapped;
 use host_cache::{AHEAD, HostCache, HostSource, Submit, Written};
 
-/// Upper bound on a slab's size, since the decode matvec indexes in 32 bits.
-const SLAB_LIMIT: usize = 1 << 31;
+/// Upper bound on one block's span of a slab. A kernel takes the slab from the
+/// block's first slot on and indexes it in 32 bits; the slab itself may hold
+/// more.
+const SPAN_LIMIT: usize = 1 << 31;
 
 /// Most rows one `moe` call may carry, and so the widest prompt pass the
 /// runtime's batch tuner tries on a model with experts.
@@ -189,7 +191,6 @@ impl Slab {
         let (n, nb) = (stack.n(), stack.blocks_per_row());
         let rb = nb * stack.unit_bytes();
         let bytes = slots * n * rb;
-        ensure!(bytes < SLAB_LIMIT, "a slab of {slots} slots would be {bytes} bytes, past the 32-bit index");
         // SAFETY: every slot is written before a kernel reads it.
         let bytes = unsafe { DeviceBuffer::<u8>::uninitialized(bytes)? };
         let d = DeviceBuffer::from_slice(&vec![0u16; slots * n * nb])?;
@@ -648,11 +649,14 @@ impl DeviceBackend {
             phobos_base::log::Level::Info,
             format_args!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20),
         );
-        // Each block's spare slot comes out of the budget too.
-        let mut most = (budget / slot_bytes / blocks).saturating_sub(1);
-        for (&(stack, quant), &count) in &counts {
+        // Each block's spare slot comes out of the budget too. A block never
+        // needs more slots than it has experts, which a card that holds the
+        // whole model reaches.
+        let experts_per_block = experts.blocks.iter().map(|b| b.set.count()).max().expect("a block registered");
+        let mut most = (budget / slot_bytes / blocks).saturating_sub(1).min(experts_per_block);
+        for &(stack, quant) in counts.keys() {
             let found = experts.blocks.iter().map(|b| b.set.stack(stack)).find(|s| s.quant() == quant).expect("counted");
-            most = most.min(SLAB_LIMIT / found.grouped_bytes() / count - 1);
+            most = most.min(SPAN_LIMIT / found.grouped_bytes() - 1);
         }
         experts.most_per_block = most;
         let per_block = most.min(experts.per_block_cap.unwrap_or(usize::MAX));
