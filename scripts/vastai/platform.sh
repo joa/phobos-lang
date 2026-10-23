@@ -43,11 +43,11 @@ stage firstload
 for _ in $(seq 120); do w=$(nvidia-smi --query-gpu=power.draw --format=csv,noheader,nounits | cut -d. -f1); [ "$w" -lt 80 ] && break; sleep 1; done
 stage bench
 python3 -u /root/bench.py --phobos-bench "$BIN/phobos-bench" --llama-bench "$W/llama/llama-bench" -m "$M" \
-  -p 128 512 -n 32 128 512 1024 2048 -r 3 -R 5 --csv "$OUT/bench.csv" --json "$OUT/bench.json" "$@" > "$OUT/bench.log" 2>&1 || stage BENCH-FAILED
+  -p 128 512 16384 32768 -n 32 128 512 1024 2048 -r 3 -R 5 --csv "$OUT/bench.csv" --json "$OUT/bench.json" "$@" > "$OUT/bench.log" 2>&1 || stage BENCH-FAILED
 nvidia-smi -q -d PERFORMANCE > "$OUT/perf-after-bench.txt"
 for i in 1 2; do
   stage kbench$i
-  (cd /root/src && "$BIN/phobos-kbench" --csv "$OUT/kbench$i.csv") > "$OUT/kbench$i.log" 2>&1 || stage KBENCH$i-FAILED
+  (cd /root/src && "$BIN/phobos-kbench" --csv "$OUT/kbench$i.csv" --json "$OUT/kbench$i.json") > "$OUT/kbench$i.log" 2>&1 || stage KBENCH$i-FAILED
 done
 nvidia-smi -q -d PERFORMANCE > "$OUT/perf-after-kbench.txt"
 stage DONE
