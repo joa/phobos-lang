@@ -209,8 +209,11 @@ platform run at 65% of its maximum clock, held there by heat. Phobos's 32k
 prompts lost twice as much there as llama.cpp's, so its row read 0.67x where
 a healthy 4090 reads 0.88x. `bench.py` reports the clock under load as a share
 of the card's maximum, with how often the driver slowed the card for heat or
-held it at its power limit, and warns below `--min-clock-share` (0.75). A
-warning means the host, not the card: rent another before publishing.
+held it at its power limit. It warns when the clock is below
+`--min-clock-share` (0.75) and the driver slowed the card for heat in a tenth
+of the samples or more. A warning means the host, not the card: rent another
+before publishing. A low clock alone does not warn, since a memory-bound
+decode leaves it low on a healthy card.
 
 ### Where a deep prompt's time goes
 
