@@ -7,7 +7,7 @@
 // fragments of 8 columns, so the registers it fills are the operands as they
 // stand. Before sm_80, `m8n8k16` takes each 8 x 8 tile and half apart.
 
-use super::qgemm::{CHUNK_BYTES, Lanes, PATCH, QGEMM_KT, QgFormat};
+use super::qgemm::{CHUNK_BYTES, Lanes, PAIR_PRODUCTS, PATCH, QGEMM_KT, QgFormat};
 use super::*;
 
 /// A group's `m16n8k32` operands: the A quad of each 16-row pair, then the
@@ -17,8 +17,10 @@ type Quads<'c> = (Vec<Value<'c, 'c>>, Vec<Value<'c, 'c>>);
 impl<'c> Codegen<'c> {
     /// The warp's patch over one stage: four 32-element groups, each with two
     /// `ldmatrix.x4` per operand, the patch's tensor tiles, and the scale
-    /// epilogue. `sa` is the activation scale stage, and whether each scale
-    /// has the group's activation sum beside it.
+    /// epilogue. `sa` is the activation scale stage and, when it holds the
+    /// (scale, sum) pairs and their products, which half of a 256-element
+    /// block the stage is: then the minimum term is not the epilogue's but
+    /// the tensor op's, once per block on its second half.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn qgemm_contract(
         &mut self,
@@ -27,13 +29,16 @@ impl<'c> Codegen<'c> {
         lanes: &Lanes<'c>,
         a: (&MemVal<'c>, Option<Value<'c, 'c>>),
         w_st: &MemVal<'c>,
-        sa: (&MemVal<'c>, bool),
+        sa: (&MemVal<'c>, Option<Value<'c, 'c>>),
         sw_st: &MemVal<'c>,
         planes: (Option<&MemVal<'c>>, Option<&MemVal<'c>>),
         accs: &[Value<'c, 'c>],
     ) -> Result<Vec<Value<'c, 'c>>> {
-        let (mw_st, as_st) = planes;
-        let (sa_st, pairs) = sa;
+        let (mw_plane, as_st) = planes;
+        let (sa_st, block_half) = sa;
+        let pairs = block_half.is_some();
+        // The minimums the epilogue subtracts itself: none with pairs.
+        let mw_st = if pairs { None } else { mw_plane };
         let (i32_t, f32_t) = (self.i32_t, self.f32_t);
         let acc_t = Type::vector(&[1, 2], i32_t);
         let two_f32 = Type::vector(&[2], f32_t);
@@ -74,6 +79,15 @@ impl<'c> Codegen<'c> {
         };
         let zero = self.const_index(block, 0)?;
 
+        // With pairs, a row's four scales come as one 16-byte load.
+        let four_f32 = Type::vector(&[4], f32_t);
+        let mut row_scales = Vec::with_capacity(PATCH as usize);
+        if pairs {
+            for row in &rows {
+                row_scales.push(self.vec_load_al(block, sa_st.mem, &[*row, zero], four_f32, 16)?);
+            }
+        }
+
         let mut accs = accs.to_vec();
         for s in 0..(QGEMM_KT / Q8_BLOCK) {
             let quads = match k32 {
@@ -90,19 +104,14 @@ impl<'c> Codegen<'c> {
                 }
             }
             let s_idx = self.const_index(block, s)?;
-            // The activation scales, one per row, and with them the row sums
-            // when the stage holds the two as a pair.
+            // The activation scales, one per row.
             let mut sa = Vec::with_capacity(PATCH as usize);
             let mut asum = Vec::with_capacity(PATCH as usize);
-            for row in &rows {
-                if pairs {
-                    let col = self.const_index(block, 2 * s)?;
-                    let pair = self.vec_load_al(block, sa_st.mem, &[*row, col], two_f32, 8)?;
-                    sa.push(self.vec_extract(block, pair, &[0], f32_t)?);
-                    asum.push(self.vec_extract(block, pair, &[1], f32_t)?);
-                } else {
-                    sa.push(self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?);
-                }
+            for (r, row) in rows.iter().enumerate() {
+                sa.push(match pairs {
+                    true => self.vec_extract(block, row_scales[r], &[s], f32_t)?,
+                    false => self.push(block, memref::load(sa_st.mem, &[*row, s_idx], self.loc))?,
+                });
             }
             // The minimum term's operands, if the format has one: column
             // minimums, loaded like the scales, and row sums from their own
@@ -225,7 +234,115 @@ impl<'c> Codegen<'c> {
                 }
             }
         }
+        if let Some(half) = block_half {
+            let Some(mw_st) = mw_plane else {
+                bail!("activation pairs for a format without a minimum");
+            };
+            accs = self.qgemm_min_term(block, lanes, (sa_st, mw_st), half, &rows, &accs)?;
+        }
         Ok(accs)
+    }
+
+    /// The minimum term of a 256-element block, on the stage that is its
+    /// second half: for each 16 x 8 tile of the patch, one f16 `m16n8k8`
+    /// whose A is `f16(sa * asum)` per row and group, whose B is
+    /// `-f16(dmin * m)` per group and column, and whose C is the tile's f32
+    /// accumulators. Its k index `2 in_quad + half` is group `in_quad` of
+    /// block half `half`, which is how the stage writers laid both operands
+    /// out: a row's products as `[half][group pair]` words after its pairs
+    /// (see `PAIR_PRODUCTS`), so a lane joins its group's two halves from
+    /// two words with one byte permute, and the minimums as `[column,
+    /// 2 group + half]` f16, one word a lane.
+    fn qgemm_min_term(
+        &mut self,
+        block: &Block<'c>,
+        lanes: &Lanes<'c>,
+        planes: (&MemVal<'c>, &MemVal<'c>),
+        half: Value<'c, 'c>,
+        rows: &[Value<'c, 'c>],
+        accs: &[Value<'c, 'c>],
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        let (sa_st, mw_st) = planes;
+        let (i32_t, f16_t, f32_t) = (self.i32_t, self.f16_t, self.f32_t);
+        let two_f16 = Type::vector(&[2], f16_t);
+        let one_i32 = Type::vector(&[1], i32_t);
+        let a_t = Type::vector(&[2, 2], f16_t);
+        let b_t = Type::vector(&[1, 2], f16_t);
+        let c_t = Type::vector(&[2, 2], f32_t);
+        let one = self.const_index(block, 1)?;
+        let second = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Eq, half, one, self.loc))?;
+
+        let then = Block::new(&[]);
+        let two = self.const_index(&then, 2)?;
+        // The lane's group is the low f16 of its pair's word for an even
+        // in_quad and the high for an odd: bytes 1, 0 of the first half's
+        // word then 5, 4 of the second's, or 3, 2 and 7, 6.
+        let in_quad = self.numeric_cast(&then, lanes.in_quad, i32_t)?;
+        let one_i = self.const_i32(&then, 1)?;
+        let odd_lane = self.push(&then, arith::andi(in_quad, one_i, self.loc))?;
+        let step = self.const_i32(&then, 0x2222)?;
+        let even_sel = self.const_i32(&then, 0x5410)?;
+        let shift = self.push(&then, arith::muli(odd_lane, step, self.loc))?;
+        let sel = self.push(&then, arith::addi(even_sel, shift, self.loc))?;
+        let pair = self.divui(&then, lanes.in_quad, two)?;
+        let first = self.const_index(&then, PAIR_PRODUCTS)?;
+        let col0 = self.addi(&then, first, pair)?;
+        let col1 = self.addi(&then, col0, two)?;
+        let zero_h = self.zero_scalar(&then, f16_t)?;
+        let mut a_frags = Vec::with_capacity((PATCH / 2) as usize);
+        for pair_rows in rows.chunks_exact(2) {
+            let mut a = self.vec_broadcast(&then, zero_h, a_t)?;
+            for (t, row) in pair_rows.iter().enumerate() {
+                let w0 = self.push(&then, memref::load(sa_st.mem, &[*row, col0], self.loc))?;
+                let w1 = self.push(&then, memref::load(sa_st.mem, &[*row, col1], self.loc))?;
+                let w0 = self.push(&then, arith::bitcast(w0, i32_t, self.loc))?;
+                let w1 = self.push(&then, arith::bitcast(w1, i32_t, self.loc))?;
+                let joined = self.byte_permute(&then, w0, w1, sel)?;
+                let joined = self.vec_broadcast(&then, joined, one_i32)?;
+                let halves = self.vec_bitcast(&then, joined, two_f16)?;
+                a = self.vec_insert(&then, halves, a, &[t as i64])?;
+            }
+            a_frags.push(a);
+        }
+        // B: the lane's column of each tile, both halves of its group.
+        let gcol = self.muli(&then, lanes.in_quad, two)?;
+        let col_base = self.addi(&then, lanes.j0, lanes.quad)?;
+        let mut b_frags = Vec::with_capacity(PATCH as usize);
+        for c in 0..PATCH {
+            let off = self.const_index(&then, c * IMMA_TILE)?;
+            let col = self.addi(&then, col_base, off)?;
+            let v = self.vec_load_al(&then, mw_st.mem, &[col, gcol], two_f16, 4)?;
+            b_frags.push(self.vec_shape_cast(&then, v, b_t)?);
+        }
+        let shape = self.mma_shape(2 * IMMA_TILE, IMMA_TILE, 8)?;
+        let zero_f = self.zero_scalar(&then, f32_t)?;
+        let mut out = accs.to_vec();
+        for (rp, a) in a_frags.iter().enumerate() {
+            for (c, b) in b_frags.iter().enumerate() {
+                let slot = |t: usize, dj: usize| ((2 * rp + t) * PATCH as usize + c) * 2 + dj;
+                let mut cf = self.vec_broadcast(&then, zero_f, c_t)?;
+                for t in 0..2 {
+                    for dj in 0..2 {
+                        cf = self.vec_insert(&then, out[slot(t, dj)], cf, &[t as i64, dj as i64])?;
+                    }
+                }
+                let d = self.mma_sync(&then, *a, *b, cf, shape, c_t)?;
+                for t in 0..2 {
+                    for dj in 0..2 {
+                        out[slot(t, dj)] = self.vec_extract(&then, d, &[t as i64, dj as i64], f32_t)?;
+                    }
+                }
+            }
+        }
+        then.append_operation(scf::r#yield(&out, self.loc));
+        let skip = Block::new(&[]);
+        skip.append_operation(scf::r#yield(accs, self.loc));
+        let types: Vec<Type<'c>> = accs.iter().map(|v| v.r#type()).collect();
+        let (then_region, skip_region) = (Region::new(), Region::new());
+        then_region.append_block(then);
+        skip_region.append_block(skip);
+        let op = block.append_operation(scf::r#if(second, &types, then_region, skip_region, self.loc));
+        (0..accs.len()).map(|i| Ok(detach(op.result(i)?.into()))).collect()
     }
 
     /// Group `s`'s operands for `m16n8k32`: per 16-row pair of the patch,

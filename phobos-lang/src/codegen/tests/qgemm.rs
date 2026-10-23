@@ -97,10 +97,10 @@ fn a_k_quant_with_a_minimum_sums_the_activation_at_stage_time() {
 
 #[test]
 fn a_k_quant_given_its_group_sums_neither_sums_nor_contracts_them() {
-    // With the pairs an operand, the stage holds them as they come, eight
-    // per row plus four of padding, and no plane of sums: Turing stops
-    // summing bytes and shuffling, and from sm_80 the row-sum mma against
-    // ones goes, leaving the patch's eight tiles per group.
+    // With the pairs an operand, the stage holds their scales and the four
+    // product words in a twelve-word row, and no plane of sums: Turing
+    // stops summing bytes and shuffling, and from sm_80 the row-sum mma
+    // against ones goes, leaving the patch's eight wide tiles per group.
     for fmt in ["q4k", "q5k"] {
         let turing = emit_mlir_sync(&qgemm_sums_src(fmt), "sm_75");
         assert!(turing.contains("memref<128x12xf32, 3>"), "{turing}");
@@ -110,14 +110,38 @@ fn a_k_quant_given_its_group_sums_neither_sums_nor_contracts_them() {
         }
         let ampere = emit_mlir_sync(&qgemm_sums_src(fmt), "sm_86");
         let summing = emit_mlir_sync(&qgemm_src(fmt, &[], "256, 2"), "sm_86");
-        let (given, own) = (ampere.matches("nvgpu.mma.sync").count(), summing.matches("nvgpu.mma.sync").count());
-        assert_eq!(given % 8, 0, "{ampere}");
-        assert_eq!(own, given / 8 * 10, "{fmt}: {own} mma with its own sums, {given} given them");
+        let wide = |mlir: &str| mlir.matches("mmaShape = [16, 8, 32]").count();
+        assert_eq!(wide(&ampere), 32, "{fmt}: {ampere}");
+        assert_eq!(wide(&summing), 40, "{fmt}: {summing}");
         assert!(ampere.contains("memref<128x12xf32, 3>"), "{ampere}");
     }
     // A format without a minimum has no use for them.
     let err = emit_err(&qgemm_sums_src("q6k"));
     assert!(err.contains("4 operands"), "{err}");
+}
+
+#[test]
+fn a_k_quant_given_its_pairs_takes_the_minimum_term_through_an_f16_mma() {
+    // Once per 256-element block, on its second stage: eight f16 m16n8k8
+    // over the patch's 16 x 8 tiles, A joined from the product words by a
+    // byte permute, B from the f16 minimum plane of both halves, and the
+    // epilogue down to three ops a group. Without the pairs the minimum
+    // plane is one stage of f32 and the epilogue subtracts the term itself.
+    for chip in ["sm_75", "sm_86"] {
+        let given = emit_mlir_sync(&qgemm_sums_src("q4k"), chip);
+        assert_eq!(given.matches("mmaShape = [16, 8, 8]").count(), 8, "{chip}: {given}");
+        assert_contains(
+            &given,
+            &["vector<2x2xf16>", "vector<1x2xf16>", "memref<64x8xf16, 3>", "scf.if", "nvvm.prmt", "arith.truncf"],
+        );
+        let own = emit_mlir_sync(&qgemm_src("q4k", &[], "256, 2"), chip);
+        assert!(!own.contains("mmaShape = [16, 8, 8]"), "{chip}: {own}");
+        // The scale plane keeps that shape; the minimum plane no longer has it.
+        let f32_planes = |mlir: &str| mlir.matches("memref<4x64xf32, 3>").count();
+        assert!(f32_planes(&given) < f32_planes(&own), "{chip}: {given}");
+        let fmas = |mlir: &str| mlir.matches("math.fma").count();
+        assert!(fmas(&given) < fmas(&own), "{chip}: {} fma given the pairs, {} without", fmas(&given), fmas(&own));
+    }
 }
 
 #[test]
