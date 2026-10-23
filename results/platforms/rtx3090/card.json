@@ -2,8 +2,8 @@
   "card": "RTX 3090",
   "chip": "sm_86",
   "memoryGiB": 24,
-  "powerLimitWatts": 260,
-  "host": "vast.ai, United States",
+  "powerLimitWatts": 350,
+  "host": "vast.ai, Belgium",
   "date": "2026-10-23",
   "bench": "results/platforms/rtx3090/bench.json",
   "kbench": ["results/platforms/rtx3090/kbench-1.csv", "results/platforms/rtx3090/kbench-2.csv"]
