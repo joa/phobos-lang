@@ -4,6 +4,8 @@ use anyhow::{Result, ensure};
 
 use phobos_base::half::{f16_to_f32, f32_to_f16};
 
+use crate::quant::{Quant, q4_k};
+
 use super::{
     Attn, Backend, Buf, DeltaMix, HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, HostQuant, L2_EPS, Packed,
     Plane, Q8_BLOCK, QAct,
@@ -37,6 +39,12 @@ pub struct HostBackend {
     /// See [`HostBackend::round_activations`].
     act_round: std::cell::Cell<usize>,
     act_errors: RefCell<Vec<ActError>>,
+    /// Whether the minimum term's factors round to f16 as well, the sums
+    /// that overflowed f16, and per Q4_K weight its `dmin * m` per run and
+    /// column. See [`HostBackend::round_min_f16`].
+    act_min_f16: std::cell::Cell<bool>,
+    act_overflows: std::cell::Cell<usize>,
+    raw_mins: RefCell<std::collections::HashMap<usize, Vec<f32>>>,
 }
 
 /// The error one raw-weight matmul took from rounding its activation: the
@@ -69,6 +77,46 @@ impl HostBackend {
         self.act_errors.borrow().clone()
     }
 
+    /// With the activation rounded per 32, also computes a Q4_K product's
+    /// minimum term as the staged kernel does when given the activation's
+    /// (scale, sum) pairs: `f16(sa * asum) * f16(-(dmin * m))` per row,
+    /// column and run, in place of the exact `-(sa * asum) * dmin * m`.
+    /// Q4_K is the format the device sends with its pairs. Resets the
+    /// overflow count.
+    pub fn round_min_f16(&self, on: bool) {
+        self.act_min_f16.set(on);
+        self.act_overflows.set(0);
+    }
+
+    /// How many `sa * asum` since [`HostBackend::round_min_f16`] did not fit
+    /// f16, each an infinity in the kernel's output.
+    pub fn act_overflows(&self) -> usize {
+        self.act_overflows.get()
+    }
+
+    /// Swaps the exact minimum term out of `out` and the f16 one in, group
+    /// by group: `pairs` is the rounded activation's (scale, sum) per row
+    /// and group, `mins` the weight's `dmin * m` as `[groups, n]`.
+    fn round_min_term(&self, out: Buf, m: usize, groups: usize, n: usize, pairs: &[(f32, f32)], mins: &[f32]) {
+        let mut overflows = 0;
+        let mut slabs = self.slabs.borrow_mut();
+        let out = &mut slabs[out.0][..m * n];
+        for (row, row_pairs) in out.chunks_exact_mut(n).zip(pairs.chunks_exact(groups)) {
+            for (&(sa, asum), mins) in row_pairs.iter().zip(mins.chunks_exact(n)) {
+                let s = sa * asum;
+                let s16 = f16_to_f32(f32_to_f16(s));
+                if !s16.is_finite() {
+                    overflows += 1;
+                }
+                for (o, &mw) in row.iter_mut().zip(mins) {
+                    let mw16 = f16_to_f32(f32_to_f16(-mw));
+                    *o += s16 * mw16 + s * mw;
+                }
+            }
+        }
+        self.act_overflows.set(self.act_overflows.get() + overflows);
+    }
+
     /// Moves `dst` out of the slab table so it can be written while the other
     /// buffers stay borrowed, then puts it back.
     ///
@@ -84,6 +132,26 @@ impl HostBackend {
     }
 }
 
+/// A Q4_K weight's `dmin * m` per run and column, `[k / 32, n]`, the
+/// product as the staged kernel's decode forms it.
+fn q4k_run_mins(packed: &Packed) -> Vec<f32> {
+    let (spec, k, n) = (packed.spec(), packed.k(), packed.n());
+    let runs = spec.block / spec.scale_run;
+    let mut mins = vec![0.0f32; k / spec.scale_run * n];
+    let row_bytes = k / spec.block * spec.block_bytes;
+    for (j, row) in packed.blocks().chunks_exact(row_bytes).enumerate() {
+        for (b, block) in row.chunks_exact(spec.block_bytes).enumerate() {
+            // `d`, `dmin`, then the twelve scale bytes.
+            let dmin = f16_to_f32(u16::from_le_bytes([block[2], block[3]]));
+            for run in 0..runs {
+                let (_, m) = q4_k::scale_min(run, &block[4..16]);
+                mins[(b * runs + run) * n + j] = dmin * f32::from(m);
+            }
+        }
+    }
+    mins
+}
+
 impl Backend for HostBackend {
     fn matmul_raw(&self, a: Buf, m: usize, k: usize, w: RawBuf, n: usize, out: Buf) -> Result<()> {
         let run = self.act_round.get();
@@ -91,14 +159,20 @@ impl Backend for HostBackend {
             return self.matmul(a, m, k, Buf(w.0), n, out);
         }
         ensure!(k.is_multiple_of(run), "rounding a [{m}, {k}] activation at one scale per {run}");
+        let min_f16 = self.act_min_f16.get();
+        ensure!(!min_f16 || run == Q8_BLOCK, "the f16 minimum term goes with one scale per {Q8_BLOCK}, not {run}");
         // The exact product first, then the rounded activation's over it.
         self.matmul(a, m, k, Buf(w.0), n, out)?;
         let exact: Vec<f32> = self.slabs.borrow()[out.0][..m * n].to_vec();
         let rounded = self.alloc(m * k)?;
+        let mut pairs = Vec::new();
         self.writing(rounded, |slabs, dst| {
             let mut qs = vec![0i8; run];
             for (block, out) in slabs[a.0][..m * k].chunks_exact(run).zip(dst.chunks_exact_mut(run)) {
                 let d = quantize_row(block, &mut qs);
+                if min_f16 {
+                    pairs.push((d, qs.iter().map(|&q| i32::from(q)).sum::<i32>() as f32));
+                }
                 for (o, &q) in out.iter_mut().zip(&qs) {
                     *o = f32::from(q) * d;
                 }
@@ -106,6 +180,9 @@ impl Backend for HostBackend {
         });
         self.matmul(rounded, m, k, Buf(w.0), n, out)?;
         self.release(rounded);
+        if min_f16 && let Some(mins) = self.raw_mins.borrow().get(&w.0) {
+            self.round_min_term(out, m, k / run, n, &pairs, mins);
+        }
         let (mut diff, mut norm) = (0.0f64, 0.0f64);
         for (&y, &x) in self.slabs.borrow()[out.0][..m * n].iter().zip(&exact) {
             diff += f64::from(y - x).powi(2);
@@ -246,6 +323,14 @@ impl Backend for HostBackend {
         let buf = self.upload(&fill()?)?;
         self.constants.borrow_mut().insert(key.to_string(), buf);
         Ok(buf)
+    }
+
+    fn constant_raw(&self, key: &str, packed: &Packed) -> Result<RawBuf> {
+        let buf = self.constant_lazy(key, &|| Ok(packed.dense()))?;
+        if packed.quant() == Quant::Q4_K {
+            self.raw_mins.borrow_mut().entry(buf.0).or_insert_with(|| q4k_run_mins(packed));
+        }
+        Ok(RawBuf(buf.0))
     }
 
     fn constant_quant(&self, key: &str, packed: &Packed) -> Result<QBuf> {

@@ -24,26 +24,39 @@ fn main() -> Result<()> {
         "The quick brown fox jumps over the lazy dog. In 1969, astronauts landed on the Moon, and the world watched. def fib(n): return n if n < 2 else fib(n - 1) + fib(n - 2)".to_string()
     });
     let count: usize = after("-n").map(|n| n.parse()).transpose()?.unwrap_or(24);
-    let runs: Vec<usize> = match after("-r") {
-        Some(list) => list.split(',').map(|r| r.trim().parse()).collect::<Result<_, _>>()?,
-        None => vec![32, 256],
+    // A scheme is the scale's run, with `f` after it for the staged kernel's
+    // f16 minimum term: `32f`.
+    let schemes: Vec<(usize, bool)> = match after("-r") {
+        Some(list) => list
+            .split(',')
+            .map(|r| {
+                let r = r.trim();
+                let f16 = r.ends_with('f');
+                Ok((r.trim_end_matches('f').parse()?, f16))
+            })
+            .collect::<Result<_>>()?,
+        None => vec![(32, false), (256, false)],
     };
+    let name = |&(run, f16): &(usize, bool)| format!("per {run}{}", if f16 { " with the f16 minimum term" } else { "" });
 
     let gguf = Gguf::open(path.as_ref())?;
     let bpe = Bpe::from_vocab(&gguf.vocab()?)?;
     let model = Decoder::load(&gguf)?;
     let mut tokens = bpe.encode(&prompt)?;
     tokens.truncate(count);
-    println!("{} tokens, schemes: exact, {}", tokens.len(), runs.iter().map(|r| format!("per {r}")).collect::<Vec<_>>().join(", "));
+    println!("{} tokens, schemes: exact, {}", tokens.len(), schemes.iter().map(name).collect::<Vec<_>>().join(", "));
 
-    let exact = pass(&model, &tokens, 0)?.0;
-    for &run in &runs {
-        let (probs, errors) = pass(&model, &tokens, run)?;
+    let exact = pass(&model, &tokens, 0, false)?.0;
+    for scheme in &schemes {
+        let (probs, errors, overflows) = pass(&model, &tokens, scheme.0, scheme.1)?;
         let kls: Vec<f64> = exact.iter().zip(&probs).map(|(p, q)| kl(p, q)).collect();
         let agree = exact.iter().zip(&probs).filter(|(p, q)| argmax(p) == argmax(q)).count();
         let mean = kls.iter().sum::<f64>() / kls.len() as f64;
         let worst = kls.iter().cloned().fold(0.0f64, f64::max);
-        println!("\nper {run}: KL from exact, mean {mean:.3e}  worst {worst:.3e}  top-1 agrees {agree}/{}", kls.len());
+        println!("\n{}: KL from exact, mean {mean:.3e}  worst {worst:.3e}  top-1 agrees {agree}/{}", name(scheme), kls.len());
+        if scheme.1 {
+            println!("  activation sums f16 could not hold: {overflows}");
+        }
         // Per projection shape: the K-quant projections tell apart by (k, n).
         let mut by_shape: BTreeMap<(usize, usize), (usize, f64, f64)> = BTreeMap::new();
         for e in &errors {
@@ -60,18 +73,19 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// The prompt a token at a time: each step's next-token probabilities, and
-/// the projection errors the rounding gathered.
-fn pass(model: &Decoder, tokens: &[u32], run: usize) -> Result<(Vec<Vec<f64>>, Vec<ActError>)> {
+/// The prompt a token at a time: each step's next-token probabilities, the
+/// projection errors the rounding gathered, and the sums f16 overflowed.
+fn pass(model: &Decoder, tokens: &[u32], run: usize, min_f16: bool) -> Result<(Vec<Vec<f64>>, Vec<ActError>, usize)> {
     let host = HostBackend::new();
     host.round_activations(run);
+    host.round_min_f16(min_f16);
     let mut state = model.new_state();
     let mut probs = Vec::with_capacity(tokens.len());
     for &t in tokens {
         let logits = model.forward(&mut state, &[t], &host)?;
         probs.push(softmax(&logits));
     }
-    Ok((probs, host.act_errors()))
+    Ok((probs, host.act_errors(), host.act_overflows()))
 }
 
 fn softmax(logits: &[f32]) -> Vec<f64> {
