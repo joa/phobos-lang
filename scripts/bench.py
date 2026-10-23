@@ -640,11 +640,19 @@ def drift(samples, backends, rounds):
     return out
 
 
+# The share of samples the driver slowed the card for heat that makes a low
+# clock the host's fault.
+HEAT_SHARE = 0.1
+
+
 def slow_clock(median, meta, cell_slowdowns, backends, args):
     """The clock under GPU work as a share of the card's maximum, the shares
     of samples the driver slowed it for heat and held it at its power limit,
-    and a warning when the clock share is under --min-clock-share.
+    and a warning when the clock share is under --min-clock-share and the
+    driver slowed the card for heat, or does not say why.
 
+    A memory-bound decode leaves the clock low on a healthy card, and a power
+    limit is the host's setting, named beside the run, so neither warns alone.
     A slow card is not another tenant, so no round is dropped for it, but its
     rates are the host's, not the card's: a rented RTX 4090 held at 65% of its
     maximum by heat read 0.67x on a deep prompt where a healthy one read 0.88x."""
@@ -665,7 +673,7 @@ def slow_clock(median, meta, cell_slowdowns, backends, args):
 
     share, thermal, power_cap = median / clock_max, mean_of(0), mean_of(1)
     found = {"clock_share": share, "thermal_share": thermal, "power_cap_share": power_cap}
-    if share >= args.min_clock_share:
+    if share >= args.min_clock_share or (thermal is not None and thermal < HEAT_SHARE):
         return found, None
     causes = []
     if thermal:
@@ -957,7 +965,8 @@ def parse_args():
         default=0.75,
         metavar="FRACTION",
         help="median SM clock under GPU work, as a share of the card's maximum,"
-        " below which the report flags a slow card (default 0.75)",
+        " below which the report flags a card the driver slowed for heat"
+        " (default 0.75)",
     )
     ap.add_argument("--force", action="store_true", help="measure on a busy card anyway")
     ap.add_argument("--csv", help="write every repetition here")
