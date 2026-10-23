@@ -155,14 +155,18 @@ fn check_matmul_raw(
 ///
 /// Both device kernels quantize the activation to Q8_0, ties to even as
 /// `quantize_row` does, and neither has a float path. So the host is fed that
-/// same quantized activation. Only accumulation order and f16 header
-/// rounding remain, which 1e-3 covers.
+/// same quantized activation. Given the activation's pairs, Q4_K's staged
+/// kernel also rounds the minimum term's two factors to f16, so for the
+/// shapes it takes the host rounds both itself (`set_min_f16`) from the raw
+/// activation. Only accumulation order and f16 header rounding remain,
+/// which 1e-3 covers.
 #[allow(clippy::too_many_arguments)]
 fn check_matmul_kquant(
     host: &dyn Backend,
     gpu: &dyn Backend,
     set_dp4a: &dyn Fn(bool),
     set_qmma: &dyn Fn(bool),
+    set_min_f16: &dyn Fn(bool),
     check_within: &CheckWithin,
     next: &mut dyn FnMut() -> f32,
     quant: Quant,
@@ -195,7 +199,19 @@ fn check_matmul_kquant(
             b.matmul_raw(ab, m, k, wb, n, out)?;
             read_vec(b, out, m * n)
         };
-        let (want, got) = (run(host, &seen)?, run(gpu, &a)?);
+        // Every shape past one row takes the staged kernel; one row is the
+        // matvec, whose minimum term is exact.
+        let min_f16 = quant == Quant::Q4_K && m > 1 && phobos_base::env::flag_on("PHOBOS_QGEMM_SUMS");
+        let want = match min_f16 {
+            true => {
+                set_min_f16(true);
+                let want = run(host, &a);
+                set_min_f16(false);
+                want?
+            }
+            false => run(host, &seen)?,
+        };
+        let got = run(gpu, &a)?;
         check_within(&format!("matmul_raw {name} [{m} x {k} x {n}]"), 1e-3, &want, &got);
     }
     if quant == Quant::PTQ1_0 {
@@ -247,6 +263,7 @@ pub(super) fn check_raw_formats(
     gpu: &dyn Backend,
     set_dp4a: &dyn Fn(bool),
     set_qmma: &dyn Fn(bool),
+    set_min_f16: &dyn Fn(bool),
     check_spread: &CheckSpread,
     check_within: &CheckWithin,
     check_tc: &CheckTc,
@@ -391,7 +408,7 @@ pub(super) fn check_raw_formats(
         (Quant::Q6_K, "Q6_K", 210, 208, None),
         (Quant::PTQ1_0, "PTQ1_0", 56, 26, Some(54)),
     ] {
-        check_matmul_kquant(host, gpu, set_dp4a, set_qmma, check_within, next, quant, name, |n| {
+        check_matmul_kquant(host, gpu, set_dp4a, set_qmma, set_min_f16, check_within, next, quant, name, |n| {
             random_raw_block(n, block_bytes, d_off, dmin_off)
         })?;
     }

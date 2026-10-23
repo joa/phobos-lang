@@ -46,6 +46,12 @@ fn main() -> Result<()> {
     // host cannot judge. See `check_matmul_raw`.
     let set_dp4a = |on: bool| gpu.set_iq_dp4a(on);
     let set_qmma = |on: bool| gpu.set_raw_qmma(on);
+    // The host's model of a paired Q4_K projection: the activation rounded
+    // per 32 and the minimum term's factors rounded to f16, as the kernel's.
+    let set_min_f16 = |on: bool| {
+        host.round_activations(if on { 32 } else { 0 });
+        host.round_min_f16(on);
+    };
 
     /// The largest gap as a fraction of the spread of `want`.
     ///
@@ -453,6 +459,7 @@ fn main() -> Result<()> {
         &gpu,
         &set_dp4a,
         &set_qmma,
+        &set_min_f16,
         &check_spread,
         &check_within,
         &check_tc,
