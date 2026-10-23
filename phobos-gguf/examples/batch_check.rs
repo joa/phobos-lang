@@ -62,12 +62,14 @@ fn main() -> Result<()> {
         // Largest first. 512 is the runtime's batch size, and a lazily sized
         // table grows once per process, on whichever size runs first.
         for batch in [512usize, 100, 64] {
-            failed |= !compare_batches(&model, &gpu, "gpu", &long, batch)?;
+            failed |= !compare_batches(&model, &gpu, "gpu", &long, batch, long.len())?;
         }
         // Deep enough that the last passes split their keys across programs,
-        // as a long prompt's flash attention does past 1024 cached keys.
+        // as a long prompt's flash attention does past 1024 cached keys. The
+        // reference takes 1024 rows a pass, the most a mixture-of-experts
+        // pass takes.
         let deep: Vec<u32> = (0..4096).map(|i| tokens_of(i, model.vocab())).collect();
-        failed |= !compare_batches(&model, &gpu, "gpu", &deep, 512)?;
+        failed |= !compare_batches(&model, &gpu, "gpu", &deep, 512, 1024)?;
     }
 
     if failed {
@@ -86,14 +88,16 @@ fn tokens_of(index: usize, vocab: usize) -> u32 {
     (seed % vocab as u64) as u32
 }
 
-/// One pass over the whole prompt against the same prompt in `batch`-sized
-/// passes, which is what a prompt longer than one pass takes.
+/// The prompt in `reference`-sized passes, one pass where that is the whole
+/// prompt, against the same prompt in `batch`-sized passes, which is what a
+/// prompt longer than one pass takes.
 fn compare_batches(
     model: &Decoder,
     backend: &dyn Backend,
     name: &str,
     tokens: &[u32],
     batch: usize,
+    reference: usize,
 ) -> Result<bool> {
     let split = |batch: usize| -> Result<Vec<f32>> {
         let mut state = model.new_state();
@@ -107,9 +111,10 @@ fn compare_batches(
     // The split run must go first. Lazily grown state, mainly the rotary
     // table, grows during whichever run comes first. A wide pass would grow
     // it once up front and hide a fault the split run hits mid-growth.
-    let label = format!("{} tokens in batches of {batch}", tokens.len());
+    let against = if reference < tokens.len() { format!(" against {reference}") } else { String::new() };
+    let label = format!("{} tokens in batches of {batch}{against}", tokens.len());
     let split_first = split(batch)?;
-    report(name, &label, &split(tokens.len())?, &split_first)
+    report(name, &label, &split(reference)?, &split_first)
 }
 
 /// Returns whether the two orders agreed.
