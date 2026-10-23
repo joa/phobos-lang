@@ -628,6 +628,15 @@ fn main() -> Result<()> {
         // the last slab short, then the 27B's 24 heads split by key group.
         (512, 8192, 16, 4, 256),
         (128, 32768, 24, 4, 256),
+        // Prompts onto a cache that ends off the tile grid, as a kept session
+        // resumes: flash starts at the boundary below, padding the cached
+        // positions before the prompt, and the blocked kernel takes the rest.
+        // One pad, one that fills the tile exactly, a short pad with a ragged
+        // end, and a deep one whose keys split.
+        (100, 1, 8, 4, 256),
+        (63, 1, 16, 4, 256),
+        (200, 37, 16, 4, 256),
+        (512, 4865, 16, 4, 256),
     ] {
         let spec = Attn {
             rows,
@@ -670,10 +679,11 @@ fn main() -> Result<()> {
             b.attention(qb, kb, vb, spec, out)?;
             read_vec(b, out, q.len())
         };
-        // A prompt of at least one tile onto a cache and with a head dimension
-        // that tile by 64 takes the tensor-core path for its whole tiles,
-        // which rounds the queries, keys and probabilities to f16.
-        let tensor_core = rows >= 64 && start_pos.is_multiple_of(64) && head_dim.is_multiple_of(64);
+        // A prompt that reaches a tile boundary of the cache with at least one
+        // tile, and a head dimension that tiles by 64, takes the tensor-core
+        // path for its whole tiles, which rounds the queries, keys and
+        // probabilities to f16.
+        let tensor_core = rows + start_pos % 64 >= 64 && head_dim.is_multiple_of(64);
         check_within(
             &format!("attention [{rows} @ {start_pos} x {n_head}/{n_kv} x {head_dim}]"),
             if tensor_core { 3e-3 } else { 1e-4 },
