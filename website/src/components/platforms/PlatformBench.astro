@@ -5,11 +5,12 @@
 // here compares cards.
 import { formatGflops } from "../../lib/bench/kernels"
 import { commitUrl, formatRate, ratioOf, REPO_URL, shortDate, type Stat } from "../../lib/bench/load"
+import { chartSeries, testOrder } from "../../lib/bench/platformChart"
 import { loadPlatforms, PLATFORM_MODEL, testOf } from "../../lib/bench/platforms"
 
 const platforms = loadPlatforms()
-const headline = ["tg128", "pp128", "pp512"]
-const allTests = ["pp128", "pp512", "tg32", "tg128", "tg512", "tg1024", "tg2048"]
+const headline = ["tg128", "pp128", "pp512", "pp32768"]
+const allTests = testOrder(chartSeries(platforms))
 const kernels = platforms[0].kernels
 
 const rate = (stat: Stat) => `${formatRate(stat.mean)} +/- ${formatRate(stat.stderr)}`

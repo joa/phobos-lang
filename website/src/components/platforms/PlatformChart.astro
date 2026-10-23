@@ -1,0 +1,337 @@
+---
+// One line per tested card: Phobos's rate over llama.cpp's on the platform model, for every prompt and
+// decode size the card ran, prompt sizes first. A ratio is the one quantity that shares an axis across
+// cards and across tests, since prefill and decode rates differ by two orders of magnitude and rates on
+// different rentals are not comparable. The hover readout and the table below the chart carry both rates.
+import { formatRate } from "../../lib/bench/load"
+import { loadPlatforms, PLATFORM_MODEL } from "../../lib/bench/platforms"
+import { chartGeometry, chartSeries, testOrder } from "../../lib/bench/platformChart"
+
+const platforms = loadPlatforms()
+const series = chartSeries(platforms)
+const tests = testOrder(series)
+const geometry = chartGeometry(series, tests)
+const { width, height, plot, x, y, yTicks, groups, labels } = geometry
+
+const readout = tests.map(test => ({
+  test,
+  rows: series.flatMap(line => {
+    const point = line.points.find(entry => entry.test === test)
+    return point
+      ? [
+          {
+            card: line.card,
+            slot: line.slot,
+            ratio: point.ratio.toFixed(2),
+            phobos: formatRate(point.phobos),
+            other: formatRate(point.other),
+          },
+        ]
+      : []
+  }),
+}))
+---
+
+<figure class="platform-chart" aria-labelledby="platform-chart-title" data-readout={JSON.stringify(readout)}>
+  <figcaption>
+    <p class="title" id="platform-chart-title">
+      {PLATFORM_MODEL}, Phobos's rate over llama.cpp's on each card, by prompt and decode size
+    </p>
+    <ul class="legend" aria-label="Cards">
+      {
+        series.map(line => (
+          <li>
+            <span class="key" style={`--line: var(--card-${line.slot})`} aria-hidden="true" />
+            {line.card}
+          </li>
+        ))
+      }
+    </ul>
+  </figcaption>
+  <div class="frame">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-labelledby="platform-chart-title" class="plot">
+      <g class="grid" aria-hidden="true">
+        {
+          yTicks.map(tick => (
+            <>
+              <line x1={plot.left} x2={plot.right} y1={y(tick)} y2={y(tick)} class:list={{ parity: tick === 1 }} />
+              <text x={plot.left - 8} y={y(tick)} dy="0.35em" text-anchor="end">
+                {tick.toFixed(2)}x
+              </text>
+            </>
+          ))
+        }
+        {
+          tests.map(test => (
+            <text x={x(test)} y={plot.bottom + 18} text-anchor="middle">
+              {test}
+            </text>
+          ))
+        }
+        {
+          groups.map(group => (
+            <text x={group.center} y={plot.bottom + 38} text-anchor="middle" class="group">
+              {group.label}
+            </text>
+          ))
+        }
+      </g>
+      {
+        series.map(line => (
+          <g class="series" style={`--line: var(--card-${line.slot})`}>
+            {line.segments.map(segment => (
+              <polyline points={segment.map(point => `${x(point.test)},${y(point.ratio)}`).join(" ")} />
+            ))}
+            {line.points.map(point => (
+              <circle cx={x(point.test)} cy={y(point.ratio)} r="4" />
+            ))}
+          </g>
+        ))
+      }
+      <g class="labels" aria-hidden="true">
+        {
+          labels.map(label => (
+            <text x={label.x} y={label.y} dy="0.35em">
+              {label.card}
+            </text>
+          ))
+        }
+      </g>
+      <line class="crosshair" x1="0" x2="0" y1={plot.top} y2={plot.bottom} aria-hidden="true" />
+      <rect class="hit" x={plot.left} y={plot.top} width={plot.right - plot.left} height={plot.bottom - plot.top} />
+    </svg>
+    <div class="tooltip" role="status" aria-live="polite" hidden></div>
+  </div>
+  <p class="note">
+    Above 1.00x Phobos is faster. Each point is the mean over the card's rounds of each engine's rate; the tables
+    below give both rates with their standard errors. A line breaks between prompt and decode sizes, which are
+    different tests rather than one sweep.
+  </p>
+</figure>
+
+<script>
+  interface Row {
+    card: string
+    slot: number
+    ratio: string
+    phobos: string
+    other: string
+  }
+
+  for (const figure of document.querySelectorAll<HTMLElement>(".platform-chart")) {
+    const readout = JSON.parse(figure.dataset.readout ?? "[]") as { test: string; rows: Row[] }[]
+    const svg = figure.querySelector<SVGSVGElement>("svg.plot")!
+    const hit = figure.querySelector<SVGRectElement>("rect.hit")!
+    const crosshair = figure.querySelector<SVGLineElement>("line.crosshair")!
+    const tooltip = figure.querySelector<HTMLDivElement>(".tooltip")!
+    const positions = [...figure.querySelectorAll<SVGTextElement>(".grid text[text-anchor='middle']:not(.group)")].map(
+      label => Number(label.getAttribute("x"))
+    )
+
+    const show = (event: PointerEvent) => {
+      const box = svg.getBoundingClientRect()
+      const scale = svg.viewBox.baseVal.width / box.width
+      const at = (event.clientX - box.left) * scale
+      let index = 0
+      positions.forEach((position, candidate) => {
+        if (Math.abs(position - at) < Math.abs(positions[index] - at)) index = candidate
+      })
+      const entry = readout[index]
+      crosshair.setAttribute("x1", String(positions[index]))
+      crosshair.setAttribute("x2", String(positions[index]))
+      crosshair.classList.add("is-on")
+
+      tooltip.replaceChildren()
+      const head = document.createElement("p")
+      head.className = "tip-head"
+      head.textContent = entry.test
+      tooltip.append(head)
+      for (const row of [...entry.rows].sort((a, b) => Number(b.ratio) - Number(a.ratio))) {
+        const line = document.createElement("p")
+        line.className = "tip-row"
+        line.style.setProperty("--line", `var(--card-${row.slot})`)
+        const value = document.createElement("strong")
+        value.textContent = `${row.ratio}x`
+        const card = document.createElement("span")
+        card.textContent = ` ${row.card}`
+        const rates = document.createElement("span")
+        rates.className = "tip-rates"
+        rates.textContent = `Phobos ${row.phobos}, llama.cpp ${row.other} t/s`
+        line.append(value, card, rates)
+        tooltip.append(line)
+      }
+      tooltip.hidden = false
+      const frame = figure.querySelector<HTMLElement>(".frame")!.getBoundingClientRect()
+      const left = positions[index] / scale + box.left - frame.left
+      const flip = left > frame.width / 2
+      tooltip.style.left = flip ? "" : `${left + 12}px`
+      tooltip.style.right = flip ? `${frame.width - left + 12}px` : ""
+    }
+    const hide = () => {
+      tooltip.hidden = true
+      crosshair.classList.remove("is-on")
+    }
+    hit.addEventListener("pointermove", show)
+    hit.addEventListener("pointerdown", show)
+    hit.addEventListener("pointerleave", hide)
+  }
+</script>
+
+<style>
+  .platform-chart {
+    /* Validated as an adjacent categorical set: light against #ffffff, dark against --sky-1. Three light
+     * steps sit below 3:1, so every line carries a direct label and the tables repeat every value. */
+    --card-1: light-dark(#2a78d6, #3987e5);
+    --card-2: light-dark(#eb6834, #d95926);
+    --card-3: light-dark(#1baf7a, #199e70);
+    --card-4: light-dark(#eda100, #c98500);
+    --card-5: light-dark(#e87ba4, #d55181);
+    --card-6: light-dark(#008300, #008300);
+    --card-7: light-dark(#6250d6, #9085e9);
+    --card-8: light-dark(#e34948, #e66767);
+    margin: 1.5rem 0;
+  }
+
+  .platform-chart .title {
+    font-weight: 600;
+    margin: 0;
+  }
+
+  .platform-chart .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 1rem;
+    list-style: none;
+    padding: 0;
+    margin: 0.5rem 0 0;
+    font-size: var(--sl-text-sm);
+  }
+
+  .platform-chart .legend li {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+  }
+
+  .platform-chart .key {
+    width: 1.1rem;
+    height: 2px;
+    border-radius: 1px;
+    background: var(--line);
+  }
+
+  .platform-chart .frame {
+    position: relative;
+    overflow-x: auto;
+  }
+
+  .platform-chart svg {
+    display: block;
+    width: 100%;
+    min-width: 34rem;
+    height: auto;
+    font-family: var(--font-sans);
+  }
+
+  .platform-chart .grid line {
+    stroke: var(--sky-line);
+    stroke-width: 1;
+  }
+
+  .platform-chart .grid line.parity {
+    stroke: var(--dust);
+    stroke-dasharray: 4 4;
+  }
+
+  .platform-chart .grid text {
+    fill: var(--dust);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .platform-chart .grid text.group {
+    fill: var(--star);
+    font-size: 12px;
+    font-weight: 600;
+  }
+
+  .platform-chart .series polyline {
+    fill: none;
+    stroke: var(--line);
+    stroke-width: 2;
+    stroke-linejoin: round;
+    stroke-linecap: round;
+  }
+
+  .platform-chart .series circle {
+    fill: var(--line);
+    stroke: var(--sky-1);
+    stroke-width: 2;
+  }
+
+  .platform-chart .labels text {
+    fill: var(--star);
+    font-size: 12px;
+  }
+
+  .platform-chart .crosshair {
+    stroke: var(--dust);
+    stroke-width: 1;
+    opacity: 0;
+  }
+
+  .platform-chart .crosshair.is-on {
+    opacity: 1;
+  }
+
+  .platform-chart .hit {
+    fill: transparent;
+    cursor: crosshair;
+  }
+
+  .platform-chart .tooltip {
+    position: absolute;
+    top: 0.5rem;
+    z-index: 2;
+    padding: 0.5rem 0.75rem;
+    background: var(--sky-2);
+    border: 1px solid var(--sky-line);
+    border-radius: 0.375rem;
+    font-size: var(--sl-text-xs);
+    pointer-events: none;
+    max-width: 22rem;
+  }
+
+  .platform-chart .tooltip[hidden] {
+    display: none;
+  }
+
+  .platform-chart :global(.tip-head) {
+    margin: 0 0 0.25rem;
+    font-weight: 600;
+    color: var(--star);
+  }
+
+  .platform-chart :global(.tip-row) {
+    margin: 0;
+    color: var(--dust);
+    border-left: 2px solid var(--line);
+    padding-left: 0.4rem;
+  }
+
+  .platform-chart :global(.tip-row strong) {
+    color: var(--star);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .platform-chart :global(.tip-rates) {
+    display: block;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .platform-chart .note {
+    color: var(--sl-color-gray-2);
+    font-size: var(--sl-text-xs);
+  }
+</style>
