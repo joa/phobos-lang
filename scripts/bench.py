@@ -77,9 +77,34 @@ def smi(query, mode="gpu"):
     return [[f.strip() for f in l.split(",")] for l in lines]
 
 
-def card_now():
-    """Clock, utilization, power and temperature as numbers, for one sample."""
-    sm, util, power, temp = smi("clocks.sm,utilization.gpu,power.draw,temperature.gpu")
+# Why the driver holds the clock down, under the field names drivers from
+# R550 on take, then the older ones.
+SLOWDOWN_FIELDS = [
+    "clocks_event_reasons.sw_thermal_slowdown,clocks_event_reasons.hw_thermal_slowdown,"
+    "clocks_event_reasons.sw_power_cap",
+    "clocks_throttle_reasons.sw_thermal_slowdown,clocks_throttle_reasons.hw_thermal_slowdown,"
+    "clocks_throttle_reasons.sw_power_cap",
+]
+_slowdown_fields = list(SLOWDOWN_FIELDS)
+
+
+def card_now(reasons=False):
+    """Clock, utilization, power and temperature as numbers, for one sample.
+
+    With `reasons`, also whether the driver is slowing the card for heat or
+    holding it at its power limit, as booleans, in the same query; None
+    where the driver knows neither field name."""
+    base = "clocks.sm,utilization.gpu,power.draw,temperature.gpu"
+    fields = None
+    while reasons and _slowdown_fields:
+        try:
+            fields = smi(f"{base},{_slowdown_fields[0]}")
+            break
+        except subprocess.CalledProcessError:
+            _slowdown_fields.pop(0)
+    if fields is None:
+        fields = smi(base)
+    sm, util, power, temp = fields[:4]
 
     def num(v):
         try:
@@ -87,7 +112,12 @@ def card_now():
         except ValueError:
             return float("nan")
 
-    return {"clock": num(sm), "util": num(util), "power": num(power), "temp": num(temp)}
+    now = {"clock": num(sm), "util": num(util), "power": num(power), "temp": num(temp)}
+    if reasons:
+        flags = [f == "Active" for f in fields[4:]] if len(fields) == 7 else None
+        now["thermal"] = (flags[0] or flags[1]) if flags else None
+        now["power_cap"] = flags[2] if flags else None
+    return now
 
 
 def compute_apps():
@@ -115,7 +145,7 @@ class Monitor:
     def _loop(self):
         while not self._stop.is_set():
             try:
-                self.samples.append(card_now())
+                self.samples.append(card_now(reasons=True))
             except Exception:
                 pass
             self._stop.wait(self.interval_secs)
@@ -134,6 +164,18 @@ class Monitor:
 
     def clocks(self):
         return [s["clock"] for s in self.samples if s["clock"] == s["clock"]]
+
+    def slowdowns(self):
+        """The share of samples the driver slowed the card for heat, and the
+        share it held the card at its power limit; None where it does not say."""
+        known = [s for s in self.samples if s.get("thermal") is not None]
+        if not known:
+            return None, None
+
+        def share(key):
+            return sum(1 for s in known if s[key]) / len(known)
+
+        return share("thermal"), share("power_cap")
 
 
 # --------------------------------------------------------------------------- #
@@ -265,6 +307,7 @@ def invoke(engine, model, args, monitor_interval):
         raise RuntimeError(f"{engine.name} exited {done.returncode}: {' / '.join(tail)}")
     run = engine.parse(done.stdout, done.stderr)
     run.clocks = mon.clocks()
+    run.thermal, run.power_cap = mon.slowdowns()
     return run
 
 
@@ -597,7 +640,47 @@ def drift(samples, backends, rounds):
     return out
 
 
-def report(samples, cell_clocks, health, args, meta, backends, labels, paths, order):
+def slow_clock(median, meta, cell_slowdowns, backends, args):
+    """The clock under GPU work as a share of the card's maximum, the shares
+    of samples the driver slowed it for heat and held it at its power limit,
+    and a warning when the clock share is under --min-clock-share.
+
+    A slow card is not another tenant, so no round is dropped for it, but its
+    rates are the host's, not the card's: a rented RTX 4090 held at 65% of its
+    maximum by heat read 0.67x on a deep prompt where a healthy one read 0.88x."""
+    try:
+        clock_max = float(meta["clock_max"])
+    except (KeyError, ValueError):
+        return {}, None
+    if not median or not clock_max:
+        return {}, None
+
+    def mean_of(index):
+        known = [
+            v[index]
+            for (_, engine, _), v in cell_slowdowns.items()
+            if backends.get(engine) != "CPU" and v[index] is not None
+        ]
+        return statistics.fmean(known) if known else None
+
+    share, thermal, power_cap = median / clock_max, mean_of(0), mean_of(1)
+    found = {"clock_share": share, "thermal_share": thermal, "power_cap_share": power_cap}
+    if share >= args.min_clock_share:
+        return found, None
+    causes = []
+    if thermal:
+        causes.append(f"slowed for heat in {100 * thermal:.0f}% of samples")
+    if power_cap:
+        causes.append(f"held at its power limit in {100 * power_cap:.0f}%")
+    why = "; ".join(causes) if causes else "the driver gave no reason"
+    return found, (
+        f"\nthe card ran at {100 * share:.0f}% of its {clock_max:.0f} MHz maximum ({why})."
+        "\nIts rates are this host's, not the card's, and a deep prompt can lose more"
+        "\nthan the clock does. Compare its ratios only with a run at a similar share."
+    )
+
+
+def report(samples, cell_clocks, cell_slowdowns, health, args, meta, backends, labels, paths, order):
     engines = [e for e in order if any(s["engine"] == e for s in samples)]
     models = list(dict.fromkeys(s["model"] for s in samples))
     tests = list(dict.fromkeys(s["test"] for s in samples))
@@ -725,6 +808,9 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
                 " reached, not the two engines. Read it as a floor, not a speedup."
             )
 
+    slow, warning = slow_clock(median, meta, cell_slowdowns, backends, args)
+    if warning:
+        print(warning)
     if dirty:
         print(
             f"\nsomething else held the card around round(s) {dirty}."
@@ -738,6 +824,8 @@ def report(samples, cell_clocks, health, args, meta, backends, labels, paths, or
         )
     return {
         "median_clock": median,
+        **slow,
+        "slow_clock": warning is not None,
         "uncontended_rounds": clean,
         "rounds": all_rounds,
         "drift": moved,
@@ -863,6 +951,14 @@ def parse_args():
     ap.add_argument(
         "--poll", type=float, default=0.5, help="clock sampling interval, seconds"
     )
+    ap.add_argument(
+        "--min-clock-share",
+        type=float,
+        default=0.75,
+        metavar="FRACTION",
+        help="median SM clock under GPU work, as a share of the card's maximum,"
+        " below which the report flags a slow card (default 0.75)",
+    )
     ap.add_argument("--force", action="store_true", help="measure on a busy card anyway")
     ap.add_argument("--csv", help="write every repetition here")
     ap.add_argument("--json", help="write the run, including the summary, here")
@@ -949,7 +1045,7 @@ def main():
             " Use -p 128 or more to compare."
         )
 
-    samples, cell_clocks, health = [], {}, {}
+    samples, cell_clocks, cell_slowdowns, health = [], {}, {}, {}
     cells = [(e, m) for m in args.models for e in working]
     for rnd in range(1, args.rounds + 1):
         # Reversed on odd rounds, since the first slot of a round is
@@ -966,6 +1062,7 @@ def main():
             # Recorded by name, not path, since the results are published.
             name = Path(model).stem
             cell_clocks[(rnd, engine.name, name)] = clock
+            cell_slowdowns[(rnd, engine.name, name)] = (run.thermal, run.power_cap)
             labels[(engine.name, name)] = run.label
             shown = []
             for test, rates in sorted(run.rates.items()):
@@ -995,6 +1092,7 @@ def main():
     summary = report(
         samples,
         cell_clocks,
+        cell_slowdowns,
         health,
         args,
         meta,
