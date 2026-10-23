@@ -64,6 +64,10 @@ fn main() -> Result<()> {
         for batch in [512usize, 100, 64] {
             failed |= !compare_batches(&model, &gpu, "gpu", &long, batch)?;
         }
+        // Deep enough that the last passes split their keys across programs,
+        // as a long prompt's flash attention does past 1024 cached keys.
+        let deep: Vec<u32> = (0..4096).map(|i| tokens_of(i, model.vocab())).collect();
+        failed |= !compare_batches(&model, &gpu, "gpu", &deep, 512)?;
     }
 
     if failed {

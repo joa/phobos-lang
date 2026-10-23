@@ -26,11 +26,12 @@ impl FlashShape {
     /// divides [`FLASH_TILE`], then `p` to assert the pipeline, such as
     /// `resident16p`.
     pub(crate) fn for_chip(chip: &str) -> Self {
-        // Measured on an sm_86 A40, the resident form in 16-key steps wins,
-        // small enough for two programs a multiprocessor; no other chip has
-        // been measured, and elsewhere the streamed form is the known one.
+        // The resident form in 16-key steps, small enough for two programs a
+        // multiprocessor, wins where it was measured: an sm_86 A40, an sm_89
+        // RTX 4090 and an sm_120 RTX 5090. Elsewhere the streamed form is the
+        // known one.
         let chosen = match chip {
-            "sm_86" => Self { form: FlashForm::Resident, keys: 16, pipeline: false },
+            "sm_86" | "sm_89" | "sm_120" => Self { form: FlashForm::Resident, keys: 16, pipeline: false },
             _ => Self { form: FlashForm::Streamed, keys: FLASH_KEYS, pipeline: false },
         };
         let Ok(spec) = std::env::var("PHOBOS_ATTN_FLASH_SHAPE") else {
@@ -254,6 +255,17 @@ mod tests {
 
     fn spec(rows: usize, start_pos: usize, n_head: usize) -> Attn {
         Attn { rows, start_pos, n_head, n_kv: 4, head_dim: 256 }
+    }
+
+    #[test]
+    fn the_measured_chips_hold_the_query_tile() {
+        if std::env::var_os("PHOBOS_ATTN_FLASH_SHAPE").is_some() {
+            return;
+        }
+        for chip in ["sm_86", "sm_89", "sm_120"] {
+            assert_eq!(FlashShape::for_chip(chip), FlashShape { form: FlashForm::Resident, keys: 16, pipeline: false });
+        }
+        assert_eq!(FlashShape::for_chip("sm_75").form, FlashForm::Streamed);
     }
 
     #[test]
