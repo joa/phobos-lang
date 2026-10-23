@@ -187,7 +187,8 @@ that does not load stops the run within a minute.
 `scripts/vastai/platform.sh REF` produces one card's row of the website's
 supported-platforms page: it builds Phobos and `phobos-kbench` from `REF`,
 runs `bench.py` on Qwen3.5-4B Q4_K_M against llama.cpp b11681 in the
-Benchmarks page's shape, then `phobos-kbench` twice. It needs cuBLAS, so rent
+Benchmarks page's shape, prompts of 16384 and 32768 tokens included, then
+`phobos-kbench` twice, each with its CSV and JSON report. It needs cuBLAS, so rent
 `nvidia/cuda:12.8.1-devel-ubuntu24.04` with `--disk 50`, and run
 `scripts/vastai/gate.sh` first: it prints the idle readings, the driver's
 power-capping counter and the link speed this file says to check.
