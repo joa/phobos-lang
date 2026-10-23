@@ -1,0 +1,10 @@
+{
+  "card": "A40",
+  "chip": "sm_86",
+  "memoryGiB": 48,
+  "powerLimitWatts": 300,
+  "host": "vast.ai, Belgium",
+  "date": "2026-10-23",
+  "bench": "results/platforms/a40/bench.json",
+  "kbench": ["results/platforms/a40/kbench-1.csv", "results/platforms/a40/kbench-2.csv"]
+}
