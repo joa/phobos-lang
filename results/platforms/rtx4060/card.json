@@ -2,8 +2,8 @@
   "card": "RTX 4060",
   "chip": "sm_89",
   "memoryGiB": 8,
-  "powerLimitWatts": 120,
-  "host": "vast.ai, New Zealand",
+  "powerLimitWatts": 115,
+  "host": "vast.ai, Australia",
   "date": "2026-10-23",
   "bench": "results/platforms/rtx4060/bench.json",
   "kbench": ["results/platforms/rtx4060/kbench-1.csv", "results/platforms/rtx4060/kbench-2.csv"]

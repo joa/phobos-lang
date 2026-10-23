@@ -2,11 +2,11 @@
   "environment": {
     "args": [
       "--csv",
-      "results/local-2080s/full-2026-10-23/kbench2.csv",
+      "results/local-2080s/full-2026-10-23c/kbench2.csv",
       "--json",
-      "results/local-2080s/full-2026-10-23/kbench2.json"
+      "results/local-2080s/full-2026-10-23c/kbench2.json"
     ],
-    "commit": "aeaef4039b417490b21989175f0dde484cbcce11",
+    "commit": "dbaa4f7922c00eb63a22feeb2c74ef658176e311",
     "compiled_for": "sm_75",
     "compiler_fingerprint": "f8a79911131d848906a35488ed326eac",
     "cublas": 130501,
@@ -16,20 +16,20 @@
     "gpu_state_at_start": {
       "clocks.max.sm": "2145 MHz",
       "clocks.mem": "7500 MHz",
-      "clocks.sm": "2040 MHz",
-      "memory.used": "1347 MiB",
-      "power.draw": "68.01 W",
+      "clocks.sm": "2055 MHz",
+      "memory.used": "1039 MiB",
+      "power.draw": "67.75 W",
       "power.limit": "250.00 W",
       "pstate": "P2",
-      "temperature.gpu": "34",
-      "utilization.gpu": "18 %"
+      "temperature.gpu": "33",
+      "utilization.gpu": "22 %"
     },
     "llvm": "22.1.7",
     "max_clock_mhz": 1860,
     "os": "windows x86_64",
     "sm": "sm_75",
     "sms": 48,
-    "tracked_changes": true
+    "tracked_changes": false
   },
   "results": [
     {
@@ -940,27 +940,27 @@
         "after_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "7500 MHz",
-          "clocks.sm": "2010 MHz",
-          "memory.used": "1681 MiB",
-          "power.draw": "240.57 W",
+          "clocks.sm": "1995 MHz",
+          "memory.used": "1373 MiB",
+          "power.draw": "239.99 W",
           "power.limit": "250.00 W",
           "pstate": "P2",
-          "temperature.gpu": "39",
+          "temperature.gpu": "38",
           "utilization.gpu": "100 %"
         },
         "before_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "405 MHz",
-          "clocks.sm": "600 MHz",
-          "memory.used": "1681 MiB",
-          "power.draw": "21.38 W",
+          "clocks.sm": "615 MHz",
+          "memory.used": "1373 MiB",
+          "power.draw": "21.34 W",
           "power.limit": "250.00 W",
           "pstate": "P8",
           "temperature.gpu": "29",
-          "utilization.gpu": "21 %"
+          "utilization.gpu": "27 %"
         }
       },
-      "phobos_over_cublas_median": 0.872960688788193,
+      "phobos_over_cublas_median": 0.8730590739758763,
       "shape": {
         "k": 4096,
         "m": 4096,
@@ -974,47 +974,47 @@
       },
       "timing_end_to_end": {
         "cublas": {
-          "mad_ms": 0.0045000000000001705,
-          "max_ms": 13.8528,
-          "median_ms": 12.7263,
-          "min_ms": 12.595699999999999,
+          "mad_ms": 0.1034999999999986,
+          "max_ms": 13.6923,
+          "median_ms": 12.760499999999999,
+          "min_ms": 12.5411,
           "n": 20,
-          "p10_ms": 12.7237,
-          "p90_ms": 13.2629
+          "p10_ms": 12.657,
+          "p90_ms": 13.3015
         },
         "phobos": {
-          "mad_ms": 0.2173999999999996,
-          "max_ms": 15.5819,
-          "median_ms": 14.5708,
-          "min_ms": 13.6364,
+          "mad_ms": 0.14830000000000076,
+          "max_ms": 15.608500000000001,
+          "median_ms": 14.5357,
+          "min_ms": 13.4617,
           "n": 20,
-          "p10_ms": 13.7411,
-          "p90_ms": 15.3313
+          "p10_ms": 13.9707,
+          "p90_ms": 15.0893
         },
         "scope": "host wall clock: restore C + launch + stream synchronize"
       },
       "timing_kernel_only": {
         "cublas": {
-          "mad_ms": 0.04287910461425781,
-          "max_ms": 14.9749755859375,
+          "mad_ms": 0.037247657775878906,
+          "max_ms": 13.559967994689941,
           "median_ms": 12.396544456481934,
-          "min_ms": 12.148384094238281,
+          "min_ms": 12.204416275024414,
           "n": 58,
-          "p10_ms": 12.289024353027344,
-          "p90_ms": 13.204863548278809,
-          "tflops_best": 11.313352657098186,
+          "p10_ms": 12.317952156066895,
+          "p90_ms": 12.73692798614502,
+          "tflops_best": 11.261411473915418,
           "tflops_median": 11.086876181864985
         },
         "phobos": {
-          "mad_ms": 0.030496597290039062,
-          "max_ms": 17.23651123046875,
-          "median_ms": 14.200575828552246,
-          "min_ms": 13.832927703857422,
+          "mad_ms": 0.059967994689941406,
+          "max_ms": 15.487071990966797,
+          "median_ms": 14.198975563049316,
+          "min_ms": 13.979392051696777,
           "n": 58,
-          "p10_ms": 14.133248329162598,
-          "p90_ms": 15.06550407409668,
-          "tflops_best": 9.935637372967262,
-          "tflops_median": 9.678407068230271
+          "p10_ms": 14.125472068786621,
+          "p90_ms": 14.939231872558594,
+          "tflops_best": 9.831540095859753,
+          "tflops_median": 9.679497852624246
         }
       },
       "winner": {
@@ -2302,27 +2302,27 @@
         "after_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "7500 MHz",
-          "clocks.sm": "2025 MHz",
-          "memory.used": "1659 MiB",
-          "power.draw": "240.33 W",
+          "clocks.sm": "2040 MHz",
+          "memory.used": "1351 MiB",
+          "power.draw": "252.62 W",
           "power.limit": "250.00 W",
           "pstate": "P2",
-          "temperature.gpu": "40",
+          "temperature.gpu": "39",
           "utilization.gpu": "100 %"
         },
         "before_final": {
           "clocks.max.sm": "2145 MHz",
-          "clocks.mem": "810 MHz",
-          "clocks.sm": "495 MHz",
-          "memory.used": "1659 MiB",
-          "power.draw": "22.75 W",
+          "clocks.mem": "5000 MHz",
+          "clocks.sm": "1080 MHz",
+          "memory.used": "1351 MiB",
+          "power.draw": "38.74 W",
           "power.limit": "250.00 W",
-          "pstate": "P5",
+          "pstate": "P3",
           "temperature.gpu": "30",
-          "utilization.gpu": "8 %"
+          "utilization.gpu": "7 %"
         }
       },
-      "phobos_over_cublas_median": 0.30713337989262396,
+      "phobos_over_cublas_median": 0.30715035598856893,
       "shape": {
         "k": 4000,
         "m": 4000,
@@ -2336,47 +2336,47 @@
       },
       "timing_end_to_end": {
         "cublas": {
-          "mad_ms": 0.11819999999999808,
-          "max_ms": 13.661200000000001,
-          "median_ms": 12.4396,
-          "min_ms": 11.2757,
+          "mad_ms": 0.032999999999999474,
+          "max_ms": 13.4681,
+          "median_ms": 12.3012,
+          "min_ms": 11.2822,
           "n": 20,
-          "p10_ms": 11.8641,
-          "p90_ms": 12.557799999999999
+          "p10_ms": 11.8717,
+          "p90_ms": 12.6417
         },
         "phobos": {
-          "mad_ms": 0.2516000000000034,
-          "max_ms": 37.6755,
-          "median_ms": 36.1865,
-          "min_ms": 35.9349,
+          "mad_ms": 0.2347999999999999,
+          "max_ms": 37.552,
+          "median_ms": 36.3167,
+          "min_ms": 35.958200000000005,
           "n": 20,
-          "p10_ms": 35.9773,
-          "p90_ms": 37.4193
+          "p10_ms": 36.0515,
+          "p90_ms": 37.08560000000001
         },
         "scope": "host wall clock: restore C + launch + stream synchronize"
       },
       "timing_kernel_only": {
         "cublas": {
-          "mad_ms": 0.042784690856933594,
-          "max_ms": 12.330944061279297,
-          "median_ms": 11.27014446258545,
-          "min_ms": 11.099871635437012,
+          "mad_ms": 0.08591938018798828,
+          "max_ms": 12.327199935913086,
+          "median_ms": 11.220895767211914,
+          "min_ms": 11.026432037353516,
           "n": 62,
-          "p10_ms": 11.142656326293945,
-          "p90_ms": 11.799488067626953,
-          "tflops_best": 11.531664888029178,
-          "tflops_median": 11.357440929433828
+          "p10_ms": 11.118847846984863,
+          "p90_ms": 12.046175956726074,
+          "tflops_best": 11.608469500050683,
+          "tflops_median": 11.40728892376161
         },
         "phobos": {
-          "mad_ms": 0.3895683288574219,
-          "max_ms": 37.86310577392578,
-          "median_ms": 36.69462585449219,
-          "min_ms": 36.06265640258789,
+          "mad_ms": 0.3850555419921875,
+          "max_ms": 38.56694412231445,
+          "median_ms": 36.532257080078125,
+          "min_ms": 35.91449737548828,
           "n": 62,
-          "p10_ms": 36.233089447021484,
-          "p90_ms": 37.5294075012207,
-          "tflops_best": 3.5493780206056753,
-          "tflops_median": 3.488249219587836
+          "p10_ms": 36.14720153808594,
+          "p90_ms": 37.65225601196289,
+          "tflops_best": 3.5640203637476007,
+          "tflops_median": 3.5037528537978377
         }
       },
       "winner": {
@@ -3311,26 +3311,26 @@
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "7500 MHz",
           "clocks.sm": "2040 MHz",
-          "memory.used": "1433 MiB",
-          "power.draw": "111.46 W",
+          "memory.used": "1125 MiB",
+          "power.draw": "160.43 W",
           "power.limit": "250.00 W",
           "pstate": "P2",
-          "temperature.gpu": "35",
-          "utilization.gpu": "47 %"
+          "temperature.gpu": "36",
+          "utilization.gpu": "20 %"
         },
         "before_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "405 MHz",
           "clocks.sm": "375 MHz",
-          "memory.used": "1433 MiB",
-          "power.draw": "20.84 W",
+          "memory.used": "1125 MiB",
+          "power.draw": "21.66 W",
           "power.limit": "250.00 W",
           "pstate": "P8",
-          "temperature.gpu": "30",
-          "utilization.gpu": "21 %"
+          "temperature.gpu": "29",
+          "utilization.gpu": "20 %"
         }
       },
-      "phobos_over_cublas_median": 0.9181722541860393,
+      "phobos_over_cublas_median": 0.9379685445339768,
       "shape": {
         "k": 16384,
         "m": 64,
@@ -3344,47 +3344,47 @@
       },
       "timing_end_to_end": {
         "cublas": {
-          "mad_ms": 0.0010000000000000009,
-          "max_ms": 0.3317,
-          "median_ms": 0.2542,
-          "min_ms": 0.2519,
+          "mad_ms": 0.0005000000000000004,
+          "max_ms": 0.3234,
+          "median_ms": 0.2516,
+          "min_ms": 0.2501,
           "n": 20,
-          "p10_ms": 0.2529,
-          "p90_ms": 0.2623
+          "p10_ms": 0.2505,
+          "p90_ms": 0.25270000000000004
         },
         "phobos": {
-          "mad_ms": 0.0025000000000000577,
-          "max_ms": 0.43629999999999997,
-          "median_ms": 0.2855,
-          "min_ms": 0.2786,
+          "mad_ms": 0.00040000000000001146,
+          "max_ms": 0.3623,
+          "median_ms": 0.2829,
+          "min_ms": 0.2817,
           "n": 20,
-          "p10_ms": 0.2788,
-          "p90_ms": 0.2869
+          "p10_ms": 0.2825,
+          "p90_ms": 0.2841
         },
         "scope": "host wall clock: restore C + launch + stream synchronize"
       },
       "timing_kernel_only": {
         "cublas": {
-          "mad_ms": 0.0036159902811050415,
-          "max_ms": 0.3160000145435333,
-          "median_ms": 0.2520639896392822,
-          "min_ms": 0.23625600337982178,
+          "mad_ms": 0.01840001344680786,
+          "max_ms": 0.521888017654419,
+          "median_ms": 0.26419198513031006,
+          "min_ms": 0.2396160066127777,
           "n": 400,
-          "p10_ms": 0.24780799448490143,
-          "p90_ms": 0.2949120104312897,
-          "tflops_best": 9.0896468969195,
-          "tflops_median": 8.519597150997928
+          "p10_ms": 0.2473279982805252,
+          "p90_ms": 0.2980479896068573,
+          "tflops_best": 8.962187786854987,
+          "tflops_median": 8.128496581532461
         },
         "phobos": {
-          "mad_ms": 0.0023359954357147217,
-          "max_ms": 0.35225600004196167,
-          "median_ms": 0.27452799677848816,
-          "min_ms": 0.2682879865169525,
+          "mad_ms": 0.01075202226638794,
+          "max_ms": 0.33136001229286194,
+          "median_ms": 0.28166401386260986,
+          "min_ms": 0.26848000288009644,
           "n": 400,
-          "p10_ms": 0.2717759907245636,
-          "p90_ms": 0.319487988948822,
-          "tflops_best": 8.004397348832857,
-          "tflops_median": 7.8224577208887265
+          "p10_ms": 0.2712000012397766,
+          "p90_ms": 0.3235839903354645,
+          "tflops_best": 7.998672619796825,
+          "tflops_median": 7.624274107829408
         }
       },
       "winner": {
@@ -4322,26 +4322,26 @@
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "7500 MHz",
           "clocks.sm": "2040 MHz",
-          "memory.used": "1739 MiB",
-          "power.draw": "251.59 W",
+          "memory.used": "1427 MiB",
+          "power.draw": "183.91 W",
           "power.limit": "250.00 W",
           "pstate": "P2",
           "temperature.gpu": "37",
-          "utilization.gpu": "71 %"
+          "utilization.gpu": "77 %"
         },
         "before_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "405 MHz",
-          "clocks.sm": "540 MHz",
-          "memory.used": "1739 MiB",
-          "power.draw": "21.64 W",
+          "clocks.sm": "375 MHz",
+          "memory.used": "1427 MiB",
+          "power.draw": "21.40 W",
           "power.limit": "250.00 W",
           "pstate": "P8",
           "temperature.gpu": "29",
-          "utilization.gpu": "21 %"
+          "utilization.gpu": "26 %"
         }
       },
-      "phobos_over_cublas_median": 0.4972411960085919,
+      "phobos_over_cublas_median": 0.50198677013085,
       "shape": {
         "k": 4096,
         "m": 4096,
@@ -4355,69 +4355,69 @@
       },
       "timing_end_to_end": {
         "cublas": {
-          "mad_ms": 0.007100000000000328,
-          "max_ms": 3.9128000000000003,
-          "median_ms": 3.4406,
-          "min_ms": 3.4049,
+          "mad_ms": 0.0050000000000003375,
+          "max_ms": 4.2296,
+          "median_ms": 3.4343,
+          "min_ms": 3.3963,
           "n": 20,
-          "p10_ms": 3.4129,
-          "p90_ms": 3.4475000000000002
+          "p10_ms": 3.3992,
+          "p90_ms": 3.4393000000000002
         },
         "phobos": {
-          "mad_ms": 0.0062000000000006494,
-          "max_ms": 7.2645,
-          "median_ms": 6.5295,
-          "min_ms": 6.512300000000001,
+          "mad_ms": 0.009299999999999642,
+          "max_ms": 7.3285,
+          "median_ms": 6.4979000000000005,
+          "min_ms": 6.4716000000000005,
           "n": 20,
-          "p10_ms": 6.5181,
-          "p90_ms": 6.814
+          "p10_ms": 6.4875,
+          "p90_ms": 6.6612
         },
         "scope": "host wall clock: restore C + launch + stream synchronize"
       },
       "timing_kernel_only": {
         "convert_ab": {
-          "mad_ms": 0.0009920001029968262,
-          "max_ms": 0.5043519735336304,
-          "median_ms": 0.4784640073776245,
-          "min_ms": 0.477183997631073,
+          "mad_ms": 0.001184016466140747,
+          "max_ms": 0.78438401222229,
+          "median_ms": 0.47753599286079407,
+          "min_ms": 0.4715839922428131,
           "n": 30,
-          "p10_ms": 0.4773760139942169,
-          "p90_ms": 0.48742398619651794,
-          "tflops_best": 288.0208769663284,
-          "tflops_median": 287.2503497708809
+          "p10_ms": 0.47334399819374084,
+          "p90_ms": 0.4853760004043579,
+          "tflops_best": 291.4410915823332,
+          "tflops_median": 287.80857469745666
         },
         "cublas": {
-          "mad_ms": 0.019871950149536133,
-          "max_ms": 3.407871961593628,
-          "median_ms": 3.08569598197937,
-          "min_ms": 3.0451838970184326,
+          "mad_ms": 0.0336000919342041,
+          "max_ms": 4.368415832519531,
+          "median_ms": 3.1047680377960205,
+          "min_ms": 3.0621120929718018,
           "n": 30,
-          "p10_ms": 3.0654399394989014,
-          "p90_ms": 3.113663911819458,
-          "tflops_best": 45.13321957552966,
-          "tflops_median": 44.540665792952666
+          "p10_ms": 3.0711679458618164,
+          "p90_ms": 3.7273600101470947,
+          "tflops_best": 44.88371075227835,
+          "tflops_median": 44.26706014712896
         },
         "cublas_with_convert": {
-          "mad_ms": 0.018912076950073242,
-          "max_ms": 3.5927679538726807,
-          "median_ms": 3.5558080673217773,
-          "min_ms": 3.516671895980835,
+          "mad_ms": 0.01894402503967285,
+          "max_ms": 4.205920219421387,
+          "median_ms": 3.5627520084381104,
+          "min_ms": 3.535167932510376,
           "n": 30,
-          "p10_ms": 3.5246078968048096,
-          "p90_ms": 3.582047939300537,
-          "tflops_best": 39.08210874863744,
-          "tflops_median": 38.65196064294847
+          "p10_ms": 3.5430400371551514,
+          "p90_ms": 4.1848320960998535,
+          "tflops_best": 38.877630736597716,
+          "tflops_median": 38.576626480452795
         },
         "phobos": {
-          "mad_ms": 0.025279998779296875,
-          "max_ms": 7.241727828979492,
-          "median_ms": 6.205632209777832,
-          "min_ms": 6.158976078033447,
+          "mad_ms": 0.02793598175048828,
+          "max_ms": 8.094240188598633,
+          "median_ms": 6.184959888458252,
+          "min_ms": 6.1523518562316895,
           "n": 30,
-          "p10_ms": 6.1748480796813965,
-          "p90_ms": 6.9727678298950195,
-          "tflops_best": 22.315227682437122,
-          "tflops_median": 22.147453929906757
+          "p10_ms": 6.157023906707764,
+          "p90_ms": 7.109663963317871,
+          "tflops_best": 22.3392544320736,
+          "tflops_median": 22.22147854644534
         }
       },
       "winner": {
@@ -5352,26 +5352,26 @@
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "7500 MHz",
           "clocks.sm": "2040 MHz",
-          "memory.used": "1609 MiB",
-          "power.draw": "210.62 W",
+          "memory.used": "1301 MiB",
+          "power.draw": "240.06 W",
           "power.limit": "250.00 W",
           "pstate": "P2",
           "temperature.gpu": "37",
-          "utilization.gpu": "41 %"
+          "utilization.gpu": "83 %"
         },
         "before_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "405 MHz",
-          "clocks.sm": "375 MHz",
-          "memory.used": "1609 MiB",
-          "power.draw": "20.93 W",
+          "clocks.sm": "405 MHz",
+          "memory.used": "1301 MiB",
+          "power.draw": "21.14 W",
           "power.limit": "250.00 W",
           "pstate": "P8",
           "temperature.gpu": "29",
-          "utilization.gpu": "13 %"
+          "utilization.gpu": "31 %"
         }
       },
-      "phobos_over_cublas_median": 0.844703482328735,
+      "phobos_over_cublas_median": 0.8438806326374436,
       "shape": {
         "k": 4096,
         "m": 4096,
@@ -5385,47 +5385,47 @@
       },
       "timing_end_to_end": {
         "cublas": {
-          "mad_ms": 0.0033999999999996255,
-          "max_ms": 3.444,
-          "median_ms": 3.4351,
-          "min_ms": 3.4115,
+          "mad_ms": 0.01100000000000012,
+          "max_ms": 4.2439,
+          "median_ms": 3.4508,
+          "min_ms": 3.4132,
           "n": 20,
-          "p10_ms": 3.415,
-          "p90_ms": 3.4415
+          "p10_ms": 3.4283,
+          "p90_ms": 3.4648
         },
         "phobos": {
-          "mad_ms": 0.006199999999999317,
-          "max_ms": 4.1345,
-          "median_ms": 3.9769999999999994,
-          "min_ms": 3.9696000000000002,
+          "mad_ms": 0.0041999999999999815,
+          "max_ms": 4.9747,
+          "median_ms": 3.9803,
+          "min_ms": 3.965,
           "n": 20,
-          "p10_ms": 3.9707,
-          "p90_ms": 3.995
+          "p10_ms": 3.9717,
+          "p90_ms": 3.9851
         },
         "scope": "host wall clock: restore C + launch + stream synchronize"
       },
       "timing_kernel_only": {
         "cublas": {
-          "mad_ms": 0.0204160213470459,
-          "max_ms": 4.853759765625,
-          "median_ms": 3.1067519187927246,
-          "min_ms": 3.064512014389038,
+          "mad_ms": 0.01462411880493164,
+          "max_ms": 4.30998420715332,
+          "median_ms": 3.1005120277404785,
+          "min_ms": 3.072000026702881,
           "n": 58,
-          "p10_ms": 3.0814719200134277,
-          "p90_ms": 3.8604800701141357,
-          "tflops_best": 44.84856082360661,
-          "tflops_median": 44.23879249599318
+          "p10_ms": 3.081279993057251,
+          "p90_ms": 3.719167947769165,
+          "tflops_best": 44.739242277777784,
+          "tflops_median": 44.327824643905565
         },
         "phobos": {
-          "mad_ms": 0.03452801704406738,
-          "max_ms": 5.144032001495361,
-          "median_ms": 3.67792010307312,
-          "min_ms": 3.613055944442749,
+          "mad_ms": 0.015104055404663086,
+          "max_ms": 5.307136058807373,
+          "median_ms": 3.67411208152771,
+          "min_ms": 3.636320114135742,
           "n": 58,
-          "p10_ms": 3.641184091567993,
-          "p90_ms": 4.501632213592529,
-          "tflops_best": 38.03953096364179,
-          "tflops_median": 37.36866207538375
+          "p10_ms": 3.6476480960845947,
+          "p90_ms": 4.418272018432617,
+          "tflops_best": 37.79616457245421,
+          "tflops_median": 37.40739270394069
         }
       },
       "winner": {
@@ -6360,27 +6360,27 @@
         "after_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "7500 MHz",
-          "clocks.sm": "2025 MHz",
-          "memory.used": "1513 MiB",
-          "power.draw": "126.77 W",
+          "clocks.sm": "1995 MHz",
+          "memory.used": "1209 MiB",
+          "power.draw": "55.24 W",
           "power.limit": "250.00 W",
           "pstate": "P2",
-          "temperature.gpu": "34",
-          "utilization.gpu": "52 %"
+          "temperature.gpu": "33",
+          "utilization.gpu": "70 %"
         },
         "before_final": {
           "clocks.max.sm": "2145 MHz",
           "clocks.mem": "405 MHz",
-          "clocks.sm": "375 MHz",
-          "memory.used": "1513 MiB",
-          "power.draw": "21.10 W",
+          "clocks.sm": "300 MHz",
+          "memory.used": "1205 MiB",
+          "power.draw": "20.71 W",
           "power.limit": "250.00 W",
           "pstate": "P8",
           "temperature.gpu": "29",
           "utilization.gpu": "18 %"
         }
       },
-      "phobos_over_cublas_median": 0.629589125814826,
+      "phobos_over_cublas_median": 0.6041638492717373,
       "shape": {
         "k": 4096,
         "m": 4096,
@@ -6394,47 +6394,47 @@
       },
       "timing_end_to_end": {
         "cublas": {
-          "mad_ms": 0.013800000000000034,
-          "max_ms": 1.9797,
-          "median_ms": 1.9168,
-          "min_ms": 1.903,
+          "mad_ms": 0.011500000000000066,
+          "max_ms": 1.9392,
+          "median_ms": 1.9277,
+          "min_ms": 1.889,
           "n": 20,
-          "p10_ms": 1.9041,
-          "p90_ms": 1.9753
+          "p10_ms": 1.8916,
+          "p90_ms": 1.9346999999999999
         },
         "phobos": {
-          "mad_ms": 0.007700000000000262,
-          "max_ms": 3.9204,
-          "median_ms": 2.8841,
-          "min_ms": 2.8764,
+          "mad_ms": 0.011800000000000033,
+          "max_ms": 3.9405000000000006,
+          "median_ms": 2.8504,
+          "min_ms": 2.8386,
           "n": 20,
-          "p10_ms": 2.8768000000000002,
-          "p90_ms": 2.9625
+          "p10_ms": 2.8408,
+          "p90_ms": 2.9524
         },
         "scope": "host wall clock: restore C + launch + stream synchronize"
       },
       "timing_kernel_only": {
         "cublas": {
-          "mad_ms": 0.1936960220336914,
-          "max_ms": 2.8152639865875244,
-          "median_ms": 1.9892799854278564,
-          "min_ms": 1.726464033126831,
+          "mad_ms": 0.03376007080078125,
+          "max_ms": 2.4019200801849365,
+          "median_ms": 2.0141758918762207,
+          "min_ms": 1.6895999908447266,
           "n": 58,
-          "p10_ms": 1.7387200593948364,
-          "p90_ms": 2.005311965942383,
-          "tflops_best": 79.60719182958115,
-          "tflops_median": 69.08979855967308
+          "p10_ms": 1.7326079607009888,
+          "p90_ms": 2.052639961242676,
+          "tflops_best": 81.34407801652893,
+          "tflops_median": 68.23582489808004
         },
         "phobos": {
-          "mad_ms": 0.03744006156921387,
-          "max_ms": 3.7767679691314697,
-          "median_ms": 3.1596479415893555,
-          "min_ms": 2.8200318813323975,
+          "mad_ms": 0.037600040435791016,
+          "max_ms": 4.688064098358154,
+          "median_ms": 3.3338239192962646,
+          "min_ms": 2.748608112335205,
           "n": 58,
-          "p10_ms": 2.840575933456421,
-          "p90_ms": 3.1825919151306152,
-          "tflops_best": 48.736666553948105,
-          "tflops_median": 43.49818587790699
+          "p10_ms": 2.8137919902801514,
+          "p90_ms": 3.38156795501709,
+          "tflops_best": 50.0031098850365,
+          "tflops_median": 41.22561862865629
         }
       },
       "winner": {

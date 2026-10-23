@@ -1,0 +1,10 @@
+{
+  "card": "H100 PCIe",
+  "chip": "sm_90",
+  "memoryGiB": 80,
+  "powerLimitWatts": 350,
+  "host": "vast.ai, United States",
+  "date": "2026-10-23",
+  "bench": "results/platforms/h100/bench.json",
+  "kbench": ["results/platforms/h100/kbench-1.csv", "results/platforms/h100/kbench-2.csv"]
+}
