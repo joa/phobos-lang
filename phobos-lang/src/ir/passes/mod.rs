@@ -20,11 +20,6 @@ use super::{Ir, OpKind};
 use super::build::{Report, Target, locate};
 use crate::ast::Kernel;
 
-/// Where `@name` is written, or the kernel's name without it.
-fn attr_span(kernel: &Kernel, name: &str) -> crate::diag::Span {
-    kernel.attr(name).map_or(kernel.name_span, |a| a.span)
-}
-
 /// Runs every pass over `ir`, in order. `kernel` only places an error at the
 /// attribute it concerns; no pass reads the source.
 ///
@@ -41,7 +36,7 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
         let owners = owner::Owners::new(ir, blocks, &grid);
         held = scratch::held(ir, &owners, &kernel.named_by("global"));
         scratch::check_shared(ir, &held, &kernel.named_by("shared"))
-            .map_err(|e| locate(&kernel.source, ir, e, attr_span(kernel, "shared")))?;
+            .map_err(|e| locate(&kernel.source, ir, e, kernel.attr_span("shared")))?;
         let placement = gridbar::plan(ir, &owners, &grid, &held);
         for (op, later, earlier) in &placement.before {
             phobos_base::phdebug!(
@@ -79,7 +74,7 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
 
     // The swizzle reads which tiles the tensor-core fragments load, so it
     // runs once those reads are final.
-    let at = kernel.attr("swizzle").map_or(kernel.name_span, |a| a.span);
+    let at = kernel.attr_span("swizzle");
     let mode = kernel
         .swizzle_mode()
         .map_err(|e| locate(&kernel.source, ir, anyhow!(e), at))?;
@@ -89,7 +84,7 @@ pub fn run(ir: &mut Ir, report: &mut Report, target: &Target, kernel: &Kernel) -
 /// `@grid_barriers(n)` against the barriers the kernel has, `written` in the
 /// source and `placed` by the compiler.
 fn check_grid_barriers(ir: &Ir, kernel: &Kernel, written: usize, placed: usize) -> Result<()> {
-    let at = attr_span(kernel, "grid_barriers");
+    let at = kernel.attr_span("grid_barriers");
     match kernel.grid_barriers().map_err(|e| locate(&kernel.source, ir, anyhow!(e), at))? {
         Some(n) if n != written + placed => {
             let e = anyhow!(

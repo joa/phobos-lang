@@ -214,24 +214,23 @@ pub fn build_cautious(
     cautious: bool,
 ) -> Result<(Ir, Report)> {
     let empty = Ir::new(KernelInfo::default(), &[]);
-    let attr_span = |name: &str| kernel.attr(name).map_or(kernel.name_span, |a| a.span);
     let shape_env = kernel.shape_env(&base.shape_overrides);
     let launch = kernel
         .launch_in(&shape_env)
-        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("launch")))?;
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), kernel.attr_span("launch")))?;
     let cta_threads = launch.map_or(crate::ast::DEFAULT_CTA_THREADS, |l| l.max_threads);
 
     let pipeline = kernel
         .pipeline_mode()
-        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("pipeline")))?;
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), kernel.attr_span("pipeline")))?;
     let persistent = kernel
         .persistent()
-        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), attr_span("persistent")))?;
+        .map_err(|e| locate(&kernel.source, &empty, anyhow!(e), kernel.attr_span("persistent")))?;
     let persistent_blocks = match persistent.clone().flatten() {
         Some(Dim::Int(n)) => Some(n),
         Some(Dim::Sym(name)) => Some(shape_env.get(&name).copied().ok_or_else(|| {
             let e = anyhow!("`@persistent({name})`: `{name}` is not an `@autotune` constant");
-            locate(&kernel.source, &empty, e, attr_span("persistent"))
+            locate(&kernel.source, &empty, e, kernel.attr_span("persistent"))
         })?),
         None => None,
     };
@@ -267,7 +266,7 @@ pub fn build_cautious(
         pad_stage: info.pad_stage,
         pipeline: info.pipeline,
         cta_threads,
-        registers: kernel.register_tiles(),
+        registers: kernel.named_by("registers"),
         regs_declared: Vec::new(),
         fusing_regs: false,
         source: kernel.source.clone(),

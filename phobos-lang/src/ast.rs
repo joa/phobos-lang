@@ -287,6 +287,12 @@ impl Kernel {
         self.attrs.iter().find(|a| a.name == name)
     }
 
+    /// Where `@name` is written, or the kernel's name without it: where an
+    /// error about what the attribute asks for is shown.
+    pub fn attr_span(&self, name: &str) -> crate::diag::Span {
+        self.attr(name).map_or(self.name_span, |a| a.span)
+    }
+
     /// The CTA size at the autotune constants' first choices.
     pub fn cta_threads(&self) -> Result<i64, String> {
         self.cta_threads_for(&HashMap::new())
