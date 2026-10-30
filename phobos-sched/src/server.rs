@@ -1,6 +1,5 @@
 use std::collections::{HashMap, HashSet};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
@@ -100,7 +99,6 @@ struct State {
 
 struct Inner {
     state: Mutex<State>,
-    completed: AtomicU64,
     registered: Notify,
     complete: Notify,
 }
@@ -115,7 +113,6 @@ impl Scheduler {
         Scheduler {
             inner: Arc::new(Inner {
                 state: Mutex::new(State::default()),
-                completed: AtomicU64::new(0),
                 registered: Notify::new(),
                 complete: Notify::new(),
             }),
@@ -462,7 +459,6 @@ impl Scheduler {
             a
         });
 
-        self.inner.completed.store(0, Ordering::SeqCst);
         {
             let mut st = self.state();
             st.completed_iids.clear();
@@ -750,9 +746,6 @@ impl SchedulerSvc for Scheduler {
                         inner.registered.notify_waiters();
                     }
                     proto::node_message::Payload::Complete(c) => {
-                        inner
-                            .completed
-                            .fetch_add(c.batch.len() as u64, Ordering::SeqCst);
                         inner
                             .state
                             .lock()

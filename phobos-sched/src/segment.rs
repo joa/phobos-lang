@@ -21,7 +21,6 @@ pub(super) fn segment(
     instrs: Vec<Instr>,
     budget: u64,
     seg_id: &mut u64,
-    ntensors: usize,
 ) -> Result<(Vec<Segment>, Vec<SegMem>, u64)> {
     // tile -> bytes, learned from ALLOC ops (FREE carries no size).
     let mut bytes_of: HashMap<TileId, u64> = HashMap::new();
@@ -39,7 +38,6 @@ pub(super) fn segment(
             );
         }
     }
-    let _ = ntensors; // reserved for future per-tensor budgeting
 
     let mut segs = Vec::new();
     let mut mems = Vec::new();

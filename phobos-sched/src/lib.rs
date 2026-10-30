@@ -19,9 +19,6 @@ use phobos_cluster::tile::{NodeId, ScalarValue, TileId};
 use instantiate::instantiate;
 use lower::lower;
 
-/// Default CTA shape for a leaf launch.
-pub const CTA: (u32, u32, u32) = (phobos_lang::ast::DEFAULT_CTA_THREADS as u32, 1, 1);
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IngestPolicy {
     /// LOAD the supertile directly via its URI.

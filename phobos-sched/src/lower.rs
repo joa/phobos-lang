@@ -294,7 +294,7 @@ pub(super) fn lower(
     let mut peak_resident = 0u64;
 
     for instrs in node_lists {
-        let (segs, mems, node_peak) = segment(instrs, cfg.budget, &mut seg_id, p.tensors.len())?;
+        let (segs, mems, node_peak) = segment(instrs, cfg.budget, &mut seg_id)?;
         peak_resident = peak_resident.max(node_peak);
         node_segments.push(segs);
         segment_mem.push(mems);
