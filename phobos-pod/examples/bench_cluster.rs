@@ -1,39 +1,17 @@
+mod common;
+
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use cust::prelude::*;
 use phobos_base::context::Context;
-use phobos_cluster::proto::{self, TensorInput};
 use phobos_cluster::storage;
-use phobos_cluster::tile::{AccessMode, DataType};
-use phobos_sched::server::{DispatchConfig, Scheduler, make_job};
+use phobos_sched::server::DispatchConfig;
 
-/// The cluster matmul, as in examples/matmul_cluster_fp32.ph.
-///
-/// Each run fills in the `@cluster` lower bound, so `default_supers` picks the
-/// wanted supertile. The `@autotune` defaults (32/32/4) match the leaf the
-/// scheduler compiles.
-fn matmul_src(super_lo: usize) -> String {
-    format!(
-        r#"
-@cluster(TILE_M in [{super_lo}, 16384], TILE_N in [{super_lo}, 16384], TILE_K in [{super_lo}, 16384])
-@autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
-kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {{
-    let pm = ctx.block.x
-    let pn = ctx.block.y
-    var acc: tile<f32>[TILE_M, TILE_N] = 0.0
-    for kt in range(0, K, TILE_K) {{
-        let a = A[pm * TILE_M :+ TILE_M, kt :+ TILE_K]
-        let b = B[kt :+ TILE_K, pn * TILE_N :+ TILE_N]
-        acc += dot(a, b)
-    }}
-    C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
-}}"#
-    )
-}
+use common::{check_matmul, matmul_job, matmul_src, seed_matmul, start_cluster, temp_uris};
 
-/// The same matmul without `@cluster`, for the bare device launch. The tile
-/// dims are pinned through `shape_overrides`.
+/// The matmul of [`matmul_src`] without `@cluster`, for the bare device
+/// launch. The tile dims are pinned through `shape_overrides`.
 const DEVICE_SRC: &str = r#"
 @autotune(TILE_M in [32, 256], TILE_N in [32, 256], TILE_K in [4, 32])
 kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) {
@@ -48,20 +26,6 @@ kernel matmul(A: tensor<f32>[M, K], B: tensor<f32>[K, N], C: tensor<f32>[M, N]) 
     C[pm * TILE_M :+ TILE_M, pn * TILE_N :+ TILE_N] = acc
 }"#;
 
-fn randoms(n: usize, seed: u64) -> Vec<f32> {
-    phobos_base::rng::Lcg::new(seed).unit_f32s(n)
-}
-
-fn tensor(name: &str, n: usize, mode: AccessMode, uri: String) -> TensorInput {
-    TensorInput {
-        name: name.to_string(),
-        data_type: proto::data_type_to_i32(DataType::F32),
-        shape: vec![n as u64, n as u64],
-        mode: proto::am_to_i32(mode),
-        uri,
-    }
-}
-
 /// Mean wall time per call over `iters` runs, after one warmup.
 fn timed(iters: u32, mut f: impl FnMut() -> Result<()>) -> Result<Duration> {
     f()?;
@@ -74,17 +38,7 @@ fn timed(iters: u32, mut f: impl FnMut() -> Result<()>) -> Result<Duration> {
 
 /// Spot-check C = A @ B on a spread of entries against an f64 reference.
 fn verify(c: &[f32], a: &[f32], b: &[f32], n: usize) -> Result<()> {
-    for (r, col) in [(0usize, 0usize), (1, n / 2 + 1), (n - 1, n - 1), (n / 2, 7)] {
-        let want: f64 = (0..n)
-            .map(|k| a[r * n + k] as f64 * b[k * n + col] as f64)
-            .sum();
-        let got = c[r * n + col] as f64;
-        ensure!(
-            (got - want).abs() / want.abs().max(1.0) < 1e-3,
-            "C[{r},{col}] = {got}, CPU says {want}"
-        );
-    }
-    Ok(())
+    check_matmul(c, a, b, n, &[(0, 0), (1, n / 2 + 1), (n - 1, n - 1), (n / 2, 7)])
 }
 
 /// Compile the matmul with the cluster leaf's device tile (32/32/4) and launch
@@ -154,31 +108,9 @@ async fn main() -> Result<()> {
     let stream = Stream::new(StreamFlags::NON_BLOCKING, None)?;
 
     // Scheduler and one node over localhost gRPC, shared across all runs.
-    let sched = Scheduler::new();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let sched_addr = listener.local_addr()?.to_string();
-    let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
-    let server = sched.clone().into_server();
-    tokio::spawn(async move {
-        tonic::transport::Server::builder()
-            .add_service(server)
-            .serve_with_incoming(incoming)
-            .await
-    });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    {
-        let sa = sched_addr.clone();
-        tokio::spawn(async move {
-            if let Err(e) = phobos_pod::serve(0, sa, "127.0.0.1:0".into(), None, arena).await {
-                eprintln!("node 0: {e:#}");
-            }
-        });
-    }
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (sched, _) = start_cluster(1, arena).await?;
 
-    let dir = std::env::temp_dir().join("phobos_bench_cluster");
-    std::fs::create_dir_all(&dir)?;
-    let uri = |f: &str| format!("file://{}", dir.join(f).display());
+    let uri = temp_uris("phobos_bench_cluster")?;
 
     println!("phobos single-GPU cluster benchmark");
     if cfg!(debug_assertions) {
@@ -190,11 +122,7 @@ async fn main() -> Result<()> {
     );
 
     for &n in &sizes {
-        let a = randoms(n * n, 1);
-        let b = randoms(n * n, 2);
-        storage::write_tensor_f32(&uri("A.bin"), &a)?;
-        storage::write_tensor_f32(&uri("B.bin"), &b)?;
-        storage::write_tensor_f32(&uri("C.bin"), &vec![0.0; n * n])?;
+        let (a, b) = seed_matmul(&uri, n)?;
 
         let bare = bare_launch(&stream, n, &a, &b, iters)?;
         println!(
@@ -206,18 +134,8 @@ async fn main() -> Result<()> {
         );
 
         for (label, super_lo) in [("cluster 1x1x1", n), ("cluster 2x2x2", n / 2)] {
-            let source = matmul_src(super_lo);
-            let job = || {
-                make_job(
-                    &source,
-                    &[("M", n as i64), ("N", n as i64), ("K", n as i64)],
-                    vec![
-                        tensor("A", n, AccessMode::Read, uri("A.bin")),
-                        tensor("B", n, AccessMode::Read, uri("B.bin")),
-                        tensor("C", n, AccessMode::Write, uri("C.bin")),
-                    ],
-                )
-            };
+            let source = matmul_src(super_lo, 16384);
+            let job = || matmul_job(&source, n, &uri);
             let cfg = || DispatchConfig {
                 nodes: 1,
                 ..Default::default()
