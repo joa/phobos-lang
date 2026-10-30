@@ -102,13 +102,10 @@ impl DeviceBackend {
             return Ok(());
         }
         let verb = if per_block < experts.per_block { "shrinking" } else { "growing" };
-        phobos_base::log::emit(
-            phobos_base::log::Level::Info,
-            format_args!(
-                "expert cache: {} MiB of the card left free; {verb} from {} to {per_block} slots a block",
-                free >> 20,
-                experts.per_block
-            ),
+        phobos_base::phinfo!(
+            "expert cache: {} MiB of the card left free; {verb} from {} to {per_block} slots a block",
+            free >> 20,
+            experts.per_block
         );
         // Nothing may still read or fill a slot, and the cached pass graphs
         // point into the slabs, so drop them too.

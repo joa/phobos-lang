@@ -560,13 +560,10 @@ impl DeviceBackend {
         let room = free.saturating_sub(resident_bytes).saturating_sub(crate::runtime::RESERVE_BYTES);
         let budget = match self.experts.borrow().limit {
             Some(asked) if asked > room => {
-                phobos_base::log::emit(
-                    phobos_base::log::Level::Info,
-                    format_args!(
-                        "expert cache: {} MiB asked for, {} MiB left after the resident weights and the reserve; taking what is left",
-                        asked >> 20,
-                        room >> 20
-                    ),
+                phobos_base::phinfo!(
+                    "expert cache: {} MiB asked for, {} MiB left after the resident weights and the reserve; taking what is left",
+                    asked >> 20,
+                    room >> 20
                 );
                 room
             }
@@ -645,10 +642,7 @@ impl DeviceBackend {
         let set = &experts.blocks[0].set;
         let held = grouped::scratch_bytes(MAX_ROWS, set.gate.k(), set.gate.n(), budget / slot_bytes / blocks);
         let budget = budget.saturating_sub(held);
-        phobos_base::log::emit(
-            phobos_base::log::Level::Info,
-            format_args!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20),
-        );
+        phobos_base::phinfo!("expert cache: {} MiB held back for a prompt pass's scratch", held >> 20);
         // Each block's spare slot comes out of the budget too. A block never
         // needs more slots than it has experts, which a card that holds the
         // whole model reaches.
@@ -691,15 +685,12 @@ impl DeviceBackend {
         let total: usize = slabs.values().map(|s| s.bytes.len()).sum();
         experts.per_block = per_block;
         experts.slabs = Some(slabs);
-        phobos_base::log::emit(
-            phobos_base::log::Level::Info,
-            format_args!(
-                "expert cache: {} slots of up to {:.2} MiB, {per_block} a block, {:.0} MiB in {} slabs",
-                per_block * blocks,
-                slot_bytes as f64 / (1 << 20) as f64,
-                total as f64 / (1 << 20) as f64,
-                counts.len()
-            ),
+        phobos_base::phinfo!(
+            "expert cache: {} slots of up to {:.2} MiB, {per_block} a block, {:.0} MiB in {} slabs",
+            per_block * blocks,
+            slot_bytes as f64 / (1 << 20) as f64,
+            total as f64 / (1 << 20) as f64,
+            counts.len()
         );
         Ok(())
     }
@@ -746,14 +737,11 @@ fn host_cache(experts: &Experts, per_block: usize) -> Result<HostCache> {
     }
     let total: usize = sets.iter().map(|s| s.count()).sum();
     let host = HostCache::new(sets, slots.max(floor))?;
-    phobos_base::log::emit(
-        phobos_base::log::Level::Info,
-        format_args!(
-            "expert host cache: {} of {total} experts, {} MiB pinned {why}{}",
-            host.slots(),
-            host.bytes() >> 20,
-            if host.complete() { "" } else { "; the rest are read from the file" }
-        ),
+    phobos_base::phinfo!(
+        "expert host cache: {} of {total} experts, {} MiB pinned {why}{}",
+        host.slots(),
+        host.bytes() >> 20,
+        if host.complete() { "" } else { "; the rest are read from the file" }
     );
     Ok(host)
 }

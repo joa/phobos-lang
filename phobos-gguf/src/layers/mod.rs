@@ -28,8 +28,8 @@ const FUSE_ALIGN: usize = 256;
 /// What a model's constants occupy on the backend once all are resident.
 ///
 /// Entries are keyed as the backend caches them, so a tied embedding and LM
-/// head count once. Only uploaded weights belong here. A llama embedding
-/// table is read row by row on the host, so the walk that fills this skips
+/// head count once. Only uploaded weights belong here. Every model reads its
+/// embedding table row by row on the host, so the walks that fill this skip
 /// it.
 #[derive(Default)]
 pub(crate) struct Uploads {
@@ -267,8 +267,8 @@ impl Linear {
 
     /// Whether to fuse these parts with [`Linear::fuse`]. All parts must be
     /// unfolded or read through the same transform. Quantized parts need one
-    /// quant across all of them, a plane format or PTQ1_0 (`Packed::stack`
-    /// is untested on the other raw formats).
+    /// quant across all of them, a plane format or PTQ1_0; [`Linear::stacks`]
+    /// also takes the other raw formats.
     ///
     /// Dense parts fuse only when every part is dense. A quantized projection
     /// fused with an F32 one would upload as f32 at many times its size (a
@@ -542,8 +542,6 @@ impl Linear {
         self.add_into(backend, x, rows, dest)
     }
 
-    /// [`Linear::add_into`] against an already quantized activation. `x` is
-    /// what `act` quantizes, for a weight that must be contracted densely.
     /// Whether projecting `rows` rows reads only a caller's quantized copy,
     /// so the f32 rows passed beside it need not hold anything.
     pub(crate) fn act_suffices(&self, backend: &dyn Backend, rows: usize) -> Result<bool> {
@@ -553,6 +551,8 @@ impl Linear {
         Ok(backend.raw_act_suffices(self.raw(backend)?, rows, self.in_dim, self.out_dim))
     }
 
+    /// [`Linear::add_into`] against an already quantized activation. `x` is
+    /// what `act` quantizes, for a weight that must be contracted densely.
     pub(crate) fn add_into_act(
         &self,
         backend: &dyn Backend,

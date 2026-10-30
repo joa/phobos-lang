@@ -432,11 +432,7 @@ impl Backend for DeviceBackend {
         // Only the single-row kernel accumulates. Other shapes project into
         // a temporary and add it separately.
         if m != 1 || !n.is_multiple_of(Q8_QDOT_TN) {
-            let temp = self.alloc(m * n)?;
-            self.matmul_quant_act(act, m, k, w, n, temp)?;
-            self.add_into(out, temp)?;
-            self.release(temp);
-            return Ok(());
+            return quant_add_unfused(self, act, m, k, w, n, out);
         }
         self.project_q8(act, m, k, w, n, out, true)
     }

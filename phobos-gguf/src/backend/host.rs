@@ -696,33 +696,21 @@ impl Backend for HostBackend {
     }
 }
 
-pub fn sigmoid(x: f32) -> f32 {
+fn sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-pub fn silu(x: f32) -> f32 {
+fn silu(x: f32) -> f32 {
     x * sigmoid(x)
 }
 
 /// `log(1 + e^x)`, guarded so large inputs do not overflow the exponential.
-pub fn softplus(x: f32) -> f32 {
+fn softplus(x: f32) -> f32 {
     if x > 20.0 { x } else { x.exp().ln_1p() }
 }
 
-/// Root-mean-square normalization with a per-channel gain, over each
-/// `width`-element row of `x` in place.
-pub fn rms_norm(x: &mut [f32], width: usize, weight: &[f32], eps: f32) {
-    for row in x.chunks_exact_mut(width) {
-        let mean_square = row.iter().map(|&v| v * v).sum::<f32>() / width as f32;
-        let inv = (mean_square + eps).sqrt().recip();
-        for (v, &w) in row.iter_mut().zip(weight) {
-            *v = *v * inv * w;
-        }
-    }
-}
-
 /// In-place softmax over a slice, shifted by the maximum for stability.
-pub fn softmax(row: &mut [f32]) {
+fn softmax(row: &mut [f32]) {
     let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
     let mut sum = 0.0;
     for v in row.iter_mut() {

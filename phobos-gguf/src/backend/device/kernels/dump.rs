@@ -10,11 +10,8 @@
 use super::*;
 use crate::quant::Quant;
 
-/// One dp4a decode matvec: the source builder, its wide and narrow output
-/// tiles, and the kernel's name.
 /// A source builder taking its tile width.
 type Src = fn(usize) -> String;
-
 
 #[test]
 #[ignore = "writes files; run by hand with PHOBOS_DUMP_DIR set"]

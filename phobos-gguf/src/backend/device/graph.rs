@@ -3,7 +3,7 @@
 
 use super::*;
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct Recorded {
     pub(super) func: cust::sys::CUfunction,
     pub(super) grid: (u32, u32, u32),
@@ -347,16 +347,7 @@ impl DeviceBackend {
             graph,
             exec,
             nodes,
-            recorded: recorded
-                .iter()
-                .map(|r| Recorded {
-                    func: r.func,
-                    grid: r.grid,
-                    shared: r.shared,
-                    threads: r.threads,
-                    slots: r.slots.clone(),
-                })
-                .collect(),
+            recorded: recorded.to_vec(),
         })
     }
 }

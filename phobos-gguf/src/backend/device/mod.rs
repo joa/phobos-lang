@@ -21,6 +21,7 @@ use crate::quant::Quant;
 use super::{
     Attn, AttnPrep, Backend, Buf, DeltaMix, Fused, FusedAttnOut, FusedMlp, FusedMlpRaw, FusedProject,
     HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, Packed, Plane, Q8_BLOCK, QAct, RawAt, QBuf, RawBuf, Rope,
+    quant_add_unfused, rope_gather_unfused,
 };
 
 mod arena;
@@ -126,9 +127,8 @@ type QmmaSplitKey = (usize, usize, usize);
 /// [`kernels::q8_qgemm_split_src`].
 type Q8gemmSplitKey = (usize, usize, usize);
 
-/// Format, `n`, `k`, slice count, and whether the sum adds into its
-/// destination, of a split decode matvec.
-type QdotSplitKey = (Quant, usize, usize, usize, bool);
+/// Format, `n`, `k` and slice count of a split decode matvec.
+type QdotSplitKey = (Quant, usize, usize, usize);
 
 /// Launches a streamed pass records before issuing them; see
 /// [`DeviceBackend::streamed`].
@@ -203,7 +203,7 @@ pub struct DeviceBackend {
     /// width, `k` and split count. Built when the unsplit grid is declined.
     q8_qmma_split: RefCell<HashMap<QmmaSplitKey, (Module, Module)>>,
     /// The K-quant decode matvec split along `k` and its reduce, by format,
-    /// `n`, `k` and slice count; see [`DeviceBackend::project_raw_split`].
+    /// `n`, `k` and slice count; see [`DeviceBackend::project_raw_split_add`].
     qdot_split_mods: RefCell<HashMap<QdotSplitKey, (Module, Module)>>,
     /// Whether a narrow, long K-quant decode matvec splits along `k`. On by
     /// default; `PHOBOS_QDOT_SPLIT=0` keeps one program per tile.
@@ -456,9 +456,8 @@ pub struct DeviceBackend {
     /// anyway, so the arena brings no benefit. `PHOBOS_STATE_ARENA=1` turns
     /// it on.
     state_arena_on: bool,
-    /// Whether the small, hot constants go in the bulk arena instead of
-    /// `hot`. A hot plane in a bulk slab keeps the whole slab resident.
-    /// `PHOBOS_ARENA_CONST=1` turns it on.
+    /// Whether the small, hot constants go in `hot`'s slabs instead of an
+    /// allocation each. `PHOBOS_ARENA_CONST=1` turns it on.
     arena_const: bool,
     /// Whether the bulk weights go in the arena. `PHOBOS_ARENA=0` gives each
     /// tensor its own allocation.
@@ -485,7 +484,7 @@ pub struct DeviceBackend {
     /// `PHOBOS_RAW_QMMA=0` turns it off.
     raw_qmma: Cell<bool>,
     /// Which formats [`raw_qmma`] covers, from `PHOBOS_RAW_QMMA`, which also
-    /// takes a comma-separated list such as `iq1s,iq2xxs`.
+    /// takes a comma-separated list of format names such as `IQ1_S,IQ2_XXS`.
     raw_qmma_formats: Vec<Quant>,
     /// The staged prompt projections. See `qmma_raw.rs`.
     qgemm: qmma_raw::Qgemm,

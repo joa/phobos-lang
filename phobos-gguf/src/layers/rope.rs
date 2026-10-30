@@ -95,7 +95,7 @@ pub(crate) fn check_text_sections(sections: &[i64], rope_dim: usize) -> Result<(
     });
     ensure!(
         unrotated.is_none(),
-        "rope.dimension_sections {sections:?} leaves rotary pair {} to the extra position,          which only multimodal input moves; text-only decoding does not model it",
+        "rope.dimension_sections {sections:?} leaves rotary pair {} to the extra position, which only multimodal input moves; text-only decoding does not model it",
         unrotated.unwrap_or_default()
     );
     Ok(())

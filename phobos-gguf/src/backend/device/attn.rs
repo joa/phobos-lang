@@ -579,18 +579,7 @@ impl DeviceBackend {
         // The fused kernel needs a pitch that is a whole number of heads.
         // Otherwise fall back to a copy and a separate rope.
         if !src.pitch.is_multiple_of(spec.head_dim) {
-            let width = spec.heads * spec.head_dim;
-            self.copy_2d(
-                src,
-                Plane {
-                    buf: dest,
-                    offset: 0,
-                    pitch: width,
-                },
-                rows,
-                width,
-            )?;
-            return self.rope(dest, rows, table, spec);
+            return rope_gather_unfused(self, src, rows, table, spec, dest);
         }
         let stride_heads = src.pitch / spec.head_dim;
         let half = spec.rope_dim / 2;

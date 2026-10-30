@@ -9,10 +9,10 @@ pub enum Decoder {
     Qwen35(Box<qwen35::Model>),
 }
 
-/// The device buffers `forward_to_logits` leaves live. Shared by `llama` and
-/// `qwen35`, since both end a pass the same way: the residual stream, its
-/// normalized copy, the last row split off it, and the logits the LM head
-/// projects that row into.
+/// The device buffers `forward_to_logits` leaves live. Shared by every model,
+/// since each ends a pass the same way: the residual stream, its normalized
+/// copy, the last row split off it, and the logits the LM head projects that
+/// row into.
 pub(crate) struct ForwardBufs {
     pub(crate) x: Buf,
     pub(crate) normed: Buf,
