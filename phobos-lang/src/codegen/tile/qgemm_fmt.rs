@@ -133,42 +133,31 @@ impl QgFormat {
 }
 
 impl<'c> Codegen<'c> {
-    /// A byte of the column's block, zero-extended.
-    pub(super) fn qg_u8(&self, block: &Block<'c>, qb: &MemVal<'c>, lanes: &Lanes<'c>, off: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
-        let byte = self.push(block, memref::load(qb.mem, &[lanes.qb_row, off], self.loc))?;
-        self.extui(block, byte, self.i32_t)
-    }
-
-    /// Two bytes, at an even offset, zero-extended.
-    pub(super) fn qg_u16(&self, block: &Block<'c>, qb: &MemVal<'c>, lanes: &Lanes<'c>, off: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
-        let i16_t: Type<'c> = IntegerType::new(self.ctx, 16).into();
-        let v = self.vec_load_al(block, qb.mem, &[lanes.qb_row, off], Type::vector(&[2], self.i8_t), 2)?;
-        let v = self.vec_bitcast(block, v, Type::vector(&[1], i16_t))?;
-        let v = self.vec_extract(block, v, &[0], i16_t)?;
-        self.extui(block, v, self.i32_t)
-    }
-
-    /// Four bytes at a four-aligned offset, as one word.
-    pub(super) fn qg_u32(&self, block: &Block<'c>, qb: &MemVal<'c>, lanes: &Lanes<'c>, off: Value<'c, 'c>) -> Result<Value<'c, 'c>> {
-        let v = self.vec_load_al(block, qb.mem, &[lanes.qb_row, off], Type::vector(&[4], self.i8_t), 4)?;
-        let v = self.vec_bitcast(block, v, Type::vector(&[1], self.i32_t))?;
-        self.vec_extract(block, v, &[0], self.i32_t)
-    }
-
-    /// Eight bytes at an eight-aligned offset, as two words.
-    pub(super) fn qg_u64(
+    /// `bytes` bytes of row `row` of `mem` from byte `off`, which is aligned
+    /// to `bytes`, as i32 words: four bytes to a word, or one or two
+    /// zero-extended into one. A single byte is a scalar load.
+    pub(super) fn qg_words(
         &self,
         block: &Block<'c>,
-        qb: &MemVal<'c>,
-        lanes: &Lanes<'c>,
+        mem: &MemVal<'c>,
+        row: Value<'c, 'c>,
         off: Value<'c, 'c>,
-    ) -> Result<(Value<'c, 'c>, Value<'c, 'c>)> {
-        let v = self.vec_load_al(block, qb.mem, &[lanes.qb_row, off], Type::vector(&[8], self.i8_t), 8)?;
-        let v = self.vec_bitcast(block, v, Type::vector(&[2], self.i32_t))?;
-        Ok((
-            self.vec_extract(block, v, &[0], self.i32_t)?,
-            self.vec_extract(block, v, &[1], self.i32_t)?,
-        ))
+        bytes: i64,
+    ) -> Result<Vec<Value<'c, 'c>>> {
+        if bytes == 1 {
+            let byte = self.push(block, memref::load(mem.mem, &[row, off], self.loc))?;
+            return Ok(vec![self.extui(block, byte, self.i32_t)?]);
+        }
+        let word_bytes = bytes.min(4);
+        let word_t: Type<'c> = IntegerType::new(self.ctx, 8 * word_bytes as u32).into();
+        let v = self.vec_load_al(block, mem.mem, &[row, off], Type::vector(&[bytes as u64], self.i8_t), bytes)?;
+        let v = self.vec_bitcast(block, v, Type::vector(&[(bytes / word_bytes) as u64], word_t))?;
+        (0..bytes / word_bytes)
+            .map(|i| {
+                let word = self.vec_extract(block, v, &[i], word_t)?;
+                if word_bytes < 4 { self.extui(block, word, self.i32_t) } else { Ok(word) }
+            })
+            .collect()
     }
 
     /// `blk_off + base + ib * stride`, the byte offset of a group's field.
@@ -193,12 +182,7 @@ impl<'c> Codegen<'c> {
         let w = self.const_index(block, width)?;
         let at = self.muli(block, idx, w)?;
         let zero = self.const_index(block, 0)?;
-        let bytes = Type::vector(&[width as u64], self.i8_t);
-        let v = self.vec_load_al(block, tab.mem, &[zero, at], bytes, width)?;
-        let words = self.vec_bitcast(block, v, Type::vector(&[(width / 4) as u64], self.i32_t))?;
-        (0..width / 4)
-            .map(|i| self.vec_extract(block, words, &[i], self.i32_t))
-            .collect()
+        self.qg_words(block, tab, zero, at, width)
     }
 
     /// Byte `l` of a word, zero-extended.
@@ -319,6 +303,7 @@ impl<'c> Codegen<'c> {
         at: &TileAt<'c>,
         regs: &mut Vec<Value<'c, 'c>>,
     ) -> Result<()> {
+        let row = lanes.qb_row;
         match fmt {
             QgFormat::Q4k | QgFormat::Q5k | QgFormat::Q6k => {
                 self.kq_gemm_load(block, fmt, lanes, qb, at, regs)?;
@@ -332,22 +317,22 @@ impl<'c> Codegen<'c> {
                 for half in [0, 16] {
                     let step = self.const_index(block, half)?;
                     let at_qs = self.addi(block, qs, step)?;
-                    regs.extend(self.qg_u128(block, qb, lanes, at_qs)?);
+                    regs.extend(self.qg_words(block, qb, row, at_qs, 16)?);
                 }
                 let sc = self.qg_at(block, at, 0, 2)?;
-                regs.push(self.qg_u16(block, qb, lanes, sc)?);
+                regs.extend(self.qg_words(block, qb, row, sc, 2)?);
             }
             QgFormat::Iq1s => {
                 let qs = self.qg_at(block, at, 0, 4)?;
                 let qh = self.qg_at(block, at, 32, 2)?;
-                regs.push(self.qg_u32(block, qb, lanes, qs)?);
-                regs.push(self.qg_u16(block, qb, lanes, qh)?);
+                regs.extend(self.qg_words(block, qb, row, qs, 4)?);
+                regs.extend(self.qg_words(block, qb, row, qh, 2)?);
             }
             QgFormat::Iq1m => {
                 let qs = self.qg_at(block, at, 0, 4)?;
                 let qh = self.qg_at(block, at, 32, 2)?;
-                regs.push(self.qg_u32(block, qb, lanes, qs)?);
-                regs.push(self.qg_u16(block, qb, lanes, qh)?);
+                regs.extend(self.qg_words(block, qb, row, qs, 4)?);
+                regs.extend(self.qg_words(block, qb, row, qh, 2)?);
                 // Two groups share a scale word, at byte 48 + 2 (ib / 2).
                 let two = self.const_index(block, 2)?;
                 let pair = self.divui(block, at.ib, two)?;
@@ -355,58 +340,52 @@ impl<'c> Codegen<'c> {
                 let base = self.const_index(block, 48)?;
                 let sc = self.addi(block, pair2, base)?;
                 let sc = self.addi(block, at.blk_off, sc)?;
-                regs.push(self.qg_u16(block, qb, lanes, sc)?);
+                regs.extend(self.qg_words(block, qb, row, sc, 2)?);
             }
             QgFormat::Iq2xxs => {
                 let off = self.qg_at(block, at, 0, 8)?;
-                let (lo, hi) = self.qg_u64(block, qb, lanes, off)?;
-                regs.push(lo);
-                regs.push(hi);
+                regs.extend(self.qg_words(block, qb, row, off, 8)?);
             }
             QgFormat::Iq2xs => {
                 let off = self.qg_at(block, at, 0, 8)?;
-                let (lo, hi) = self.qg_u64(block, qb, lanes, off)?;
-                regs.push(lo);
-                regs.push(hi);
+                regs.extend(self.qg_words(block, qb, row, off, 8)?);
                 let sc = self.qg_at(block, at, 64, 1)?;
-                regs.push(self.qg_u8(block, qb, lanes, sc)?);
+                regs.extend(self.qg_words(block, qb, row, sc, 1)?);
             }
             QgFormat::Iq2s => {
                 let qs = self.qg_at(block, at, 0, 4)?;
                 let signs = self.qg_at(block, at, 32, 4)?;
                 let qh = self.qg_at(block, at, 64, 1)?;
                 let sc = self.qg_at(block, at, 72, 1)?;
-                regs.push(self.qg_u32(block, qb, lanes, qs)?);
-                regs.push(self.qg_u32(block, qb, lanes, signs)?);
-                regs.push(self.qg_u8(block, qb, lanes, qh)?);
-                regs.push(self.qg_u8(block, qb, lanes, sc)?);
+                regs.extend(self.qg_words(block, qb, row, qs, 4)?);
+                regs.extend(self.qg_words(block, qb, row, signs, 4)?);
+                regs.extend(self.qg_words(block, qb, row, qh, 1)?);
+                regs.extend(self.qg_words(block, qb, row, sc, 1)?);
             }
             QgFormat::Iq3xxs => {
                 let qs = self.qg_at(block, at, 0, 8)?;
-                let (lo, hi) = self.qg_u64(block, qb, lanes, qs)?;
-                regs.push(lo);
-                regs.push(hi);
+                regs.extend(self.qg_words(block, qb, row, qs, 8)?);
                 let aux = self.qg_at(block, at, 64, 4)?;
-                regs.push(self.qg_u32(block, qb, lanes, aux)?);
+                regs.extend(self.qg_words(block, qb, row, aux, 4)?);
             }
             QgFormat::Iq3s => {
                 // A 108-byte block is only four-aligned, so the eight grid
                 // bytes come as two words.
                 let qs = self.qg_at(block, at, 0, 8)?;
                 let qs_hi = self.qg_at(block, at, 4, 8)?;
-                regs.push(self.qg_u32(block, qb, lanes, qs)?);
-                regs.push(self.qg_u32(block, qb, lanes, qs_hi)?);
+                regs.extend(self.qg_words(block, qb, row, qs, 4)?);
+                regs.extend(self.qg_words(block, qb, row, qs_hi, 4)?);
                 let qh = self.qg_at(block, at, 64, 1)?;
-                regs.push(self.qg_u8(block, qb, lanes, qh)?);
+                regs.extend(self.qg_words(block, qb, row, qh, 1)?);
                 let signs = self.qg_at(block, at, 72, 4)?;
-                regs.push(self.qg_u32(block, qb, lanes, signs)?);
+                regs.extend(self.qg_words(block, qb, row, signs, 4)?);
                 // One scale byte covers two groups, a nibble each.
                 let two = self.const_index(block, 2)?;
                 let pair = self.divui(block, at.ib, two)?;
                 let base = self.const_index(block, 104)?;
                 let sc = self.addi(block, pair, base)?;
                 let sc = self.addi(block, at.blk_off, sc)?;
-                regs.push(self.qg_u8(block, qb, lanes, sc)?);
+                regs.extend(self.qg_words(block, qb, row, sc, 1)?);
                 // The group's parity picks the nibble.
                 let parity = self.remui(block, at.ib, two)?;
                 regs.push(self.numeric_cast(block, parity, self.i32_t)?);
@@ -439,7 +418,7 @@ impl<'c> Codegen<'c> {
         for half in [0, 16] {
             let step = self.const_index(block, half)?;
             let at = self.addi(block, col, step)?;
-            regs.extend(self.qg_u128_at(block, w, lanes.j, at)?);
+            regs.extend(self.qg_words(block, w, lanes.j, at, 16)?);
         }
         Ok(())
     }

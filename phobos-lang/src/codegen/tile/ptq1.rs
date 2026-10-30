@@ -111,12 +111,12 @@ impl<'c> Codegen<'c> {
         for w in 0..3 {
             let off = self.const_index(block, 4 * w)?;
             let off = self.addi(block, base, off)?;
-            regs.push(self.qg_u32(block, qb, lanes, off)?);
+            regs.extend(self.qg_words(block, qb, lanes.qb_row, off, 4)?);
         }
         for field in [PT_TAILS, PT_SCALES] {
             let off = self.const_index(block, field)?;
             let off = self.addi(block, at.blk_off, off)?;
-            regs.push(self.qg_u32(block, qb, lanes, off)?);
+            regs.extend(self.qg_words(block, qb, lanes.qb_row, off, 4)?);
         }
         let half = self.remui(block, at.ib, two)?;
         regs.push(self.numeric_cast(block, q, self.i32_t)?);
