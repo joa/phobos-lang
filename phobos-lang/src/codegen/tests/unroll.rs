@@ -36,6 +36,8 @@ fn unroll_errors_name_the_problem() {
     assert!(err.contains("constant n"), "got: {err}");
     let err = emit_err(&summed("2", "ctx.lane + 1"));
     assert!(err.contains("constant positive step"), "got: {err}");
+    let err = emit_err(&summed("100000000", "32"));
+    assert!(err.contains("from 1 to 64"), "got: {err}");
     let err = crate::parse(&summed("2", "32").replace("for<unroll 2>", "for<twice 2>")).unwrap_err();
     assert!(err.to_string().contains("takes `unroll`"), "got: {err}");
 }

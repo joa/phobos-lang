@@ -325,7 +325,7 @@ impl Build {
         };
         let unroll = match unroll {
             None => 1,
-            Some(e) => self.const_fold(e).filter(|&n| n >= 1)?,
+            Some(e) => self.unroll_factor(e)?,
         };
         let acc_scalar = *acc_scalar;
         if !matches!(acc_scalar, AstScalar::F32 | AstScalar::F16) {

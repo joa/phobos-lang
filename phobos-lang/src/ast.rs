@@ -252,7 +252,7 @@ impl Kernel {
     /// codegen ahead of this one.
     pub fn check_attributes(&self) -> Result<(), crate::diag::Diagnostics> {
         use crate::diag::{Diagnostic, Diagnostics};
-        let list: Vec<Diagnostic> = self
+        let mut list: Vec<Diagnostic> = self
             .attrs
             .iter()
             .filter(|a| !ATTRIBUTES.contains(&a.name.as_str()))
@@ -269,6 +269,17 @@ impl Kernel {
                 }
             })
             .collect();
+        // Any other argument would quietly pick the default path.
+        for a in self.attrs.iter().filter(|a| a.name == "tensorcore") {
+            if !matches!(&a.args[..], [] | [AttrArg::Positional(Literal::Ident(_))] if a.args.iter().all(|arg| {
+                matches!(arg, AttrArg::Positional(Literal::Ident(f)) if f == "wmma" || f == "sync")
+            })) {
+                list.push(
+                    Diagnostic::error("`@tensorcore` takes no argument, `wmma` or `sync`")
+                        .primary(a.span, "not an argument it reads"),
+                );
+            }
+        }
         if list.is_empty() {
             Ok(())
         } else {
@@ -634,13 +645,14 @@ impl Stmt {
                 start,
                 end,
                 step,
+                unroll,
                 body,
                 ..
             } => {
                 var == name
                     || start.uses_name(name)
                     || end.uses_name(name)
-                    || step.as_ref().is_some_and(|e| e.uses_name(name))
+                    || step.iter().chain(unroll).any(|e| e.uses_name(name))
                     || block(body)
             }
             Stmt::While { cond, body, .. } => cond.uses_name(name) || block(body),
@@ -669,13 +681,14 @@ impl Stmt {
                 start,
                 end,
                 step,
+                unroll,
                 body,
                 ..
             } => {
                 start.walk(f);
                 end.walk(f);
-                if let Some(step) = step {
-                    step.walk(f);
+                for e in step.iter().chain(unroll) {
+                    e.walk(f);
                 }
                 for stmt in body {
                     stmt.walk_exprs(f);

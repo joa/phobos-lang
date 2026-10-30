@@ -170,7 +170,9 @@ pub fn compile_source(
 
     if context.print_phases {
         println!("=== AST ===========================");
-        println!("{:?}", kernels.first().unwrap());
+        for kernel in &kernels {
+            println!("{kernel:?}");
+        }
         println!("===================================");
     }
 

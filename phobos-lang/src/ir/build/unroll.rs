@@ -7,7 +7,17 @@ use super::{Binding, Build};
 use crate::ast::{BinOp, Expr, Stmt};
 use crate::ir::{Bounds, ForInfo, OpKind, Type, ValueId};
 
+/// The most copies `for<unroll n>` builds. Past a few the copies cost
+/// registers and instruction cache rather than buy anything, and without a
+/// bound a large n builds until memory runs out.
+pub(crate) const MAX_UNROLL: i64 = 64;
+
 impl Build {
+    /// `n` of `for<unroll n>`, when it is a constant within [`MAX_UNROLL`].
+    pub(crate) fn unroll_factor(&self, unroll: &Expr) -> Option<i64> {
+        self.const_fold(unroll).filter(|n| (1..=MAX_UNROLL).contains(n))
+    }
+
     /// The main loop steps `n * step` from `lo` to the last whole turn, each
     /// copy of the body in its own scope with `i` at `iv + k * step`; the rest
     /// runs one iteration at a time.
@@ -20,8 +30,8 @@ impl Build {
         unroll: &Expr,
         body: &[Stmt],
     ) -> Result<()> {
-        let Some(n) = self.const_fold(unroll).filter(|&n| n >= 1) else {
-            bail!("`for<unroll n>` takes a constant n of at least 1");
+        let Some(n) = self.unroll_factor(unroll) else {
+            bail!("`for<unroll n>` takes a constant n from 1 to {MAX_UNROLL}");
         };
         if n == 1 {
             return self.emit_for(var, start, end, step, body);

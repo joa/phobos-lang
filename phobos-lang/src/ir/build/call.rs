@@ -531,9 +531,10 @@ impl Build {
         let val = self.emit_scalar(v)?;
         let val = match (elem, self.scalar_of(val)) {
             (Scalar::I32, Scalar::I32) | (Scalar::F32, Scalar::F32) => val,
-            (Scalar::I32, Scalar::Index | Scalar::I8 | Scalar::I64) => {
+            (Scalar::I32, Scalar::Index) => {
                 self.value(OpKind::IndexCast(Scalar::I32), &[val], Type::Scalar(Scalar::I32))
             }
+            (Scalar::I32, Scalar::I8 | Scalar::I64) => self.numeric_cast(val, Scalar::I32),
             (Scalar::F32, t) if t.is_numeric() => self.numeric_cast(val, Scalar::F32),
             (_, t) => bail!("`atomic_add` into {} cannot take a {} value", elem.mlir_name(), t.mlir_name()),
         };
@@ -556,9 +557,8 @@ impl Build {
             let s = self.emit_scalar(e)?;
             operands.push(match self.scalar_of(s) {
                 Scalar::I32 => s,
-                Scalar::Index | Scalar::I8 | Scalar::I64 => {
-                    self.value(OpKind::IndexCast(Scalar::I32), &[s], Type::Scalar(Scalar::I32))
-                }
+                Scalar::Index => self.value(OpKind::IndexCast(Scalar::I32), &[s], Type::Scalar(Scalar::I32)),
+                Scalar::I8 | Scalar::I64 => self.numeric_cast(s, Scalar::I32),
                 t => bail!("`atomic_cas` into i32 cannot take a {} value", t.mlir_name()),
             });
         }

@@ -135,6 +135,10 @@ fn grid_barriers_pins_the_count() {
     assert_eq!(passed(&ok).matches("grid_barrier %").count(), 1);
     let err = refused(&MLP.replace("@persistent(BLOCKS)", "@persistent(BLOCKS)\n@grid_barriers(0)"));
     assert!(err.contains("`@grid_barriers(0)`: the kernel has 1, 0 written and 1 placed"), "{err}");
+    // Without a block count nothing is placed, and the written ones count.
+    let bare = "@persistent\n@grid_barriers(2)\nkernel k(A: tensor<f32>[4]) {\n  A[0] = 1.0\n  grid_barrier()\n}";
+    let err = refused(bare);
+    assert!(err.contains("`@grid_barriers(2)`: the kernel has 1, 1 written and 0 placed"), "{err}");
 }
 
 #[test]
