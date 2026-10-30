@@ -169,7 +169,7 @@ first choice until it is tuned.
 
 ## Tests
 
-- `python -m unittest discover -s python/tests`: no GPU. The launch
+- `python -m unittest discover -s python/tests -t python`: no GPU. The launch
   contract against the arguments it binds, the semantics table, the UI
   sources (`tests/ui`, `PHOBOS_BLESS=1` reblesses), the autotuner's host
   side, every example kernel compiled race-free, and every `python` fence of

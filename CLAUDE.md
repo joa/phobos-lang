@@ -66,7 +66,7 @@ helpers rather than a spelling of its own.
   regenerates them in the same change. `-- attributes` refreshes the attribute
   list the docs are checked against
 - `npm run check` in `website/`: the site's tests and type checks, as CI runs them
-- `python -m unittest discover -s python/tests`: the Python front end, the
+- `python -m unittest discover -s python/tests -t python`: the Python front end, the
   launcher and the autotuner's host side, against a release `phobos-compile`,
   and every `python` fence of the website's Python pages compiled, as
   `site -- check` compiles the `phobos` ones. No GPU. `python python/tests/roundtrip.py [DIR...]` prints every `.ph` in

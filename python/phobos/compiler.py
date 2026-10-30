@@ -34,7 +34,7 @@ def compiler():
     root = Path(__file__).resolve().parents[2]
     name = "phobos-compile.exe" if os.name == "nt" else "phobos-compile"
     for exe in (root / name, root / "target" / "release" / name, root / "target" / "debug" / name):
-        if exe.exists():
+        if exe.is_file():
             return str(exe)
     raise CompileError("no phobos-compile: set PHOBOS_COMPILE, put it on the PATH, or `cargo build --release -p phobos-compile`")
 
