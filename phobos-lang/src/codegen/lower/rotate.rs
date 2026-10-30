@@ -15,8 +15,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::Result;
-use melior::dialect::{arith, scf};
-use melior::ir::{Block, BlockLike, Region, RegionLike, Value, operation::OperationLike};
+use melior::dialect::arith;
+use melior::ir::{Block, BlockLike, Value, operation::OperationLike};
 
 use super::Lowered;
 use super::defer::writes_global;
@@ -239,13 +239,8 @@ impl<'c> Codegen<'c> {
         let more = self.push(block, arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, next, hi, self.loc))?;
         for (stage, source) in stages {
             let buf = self.rotating[&stage].buf.clone();
-            let then = Block::new(&[]);
             let r = Rotation { stage, after: op, source, pending: 0 };
-            self.issue_rotation(&then, ir, iv, next, &r, &buf)?;
-            then.append_operation(scf::r#yield(&[], self.loc));
-            let region = Region::new();
-            region.append_block(then);
-            block.append_operation(scf::r#if(more, &[], region, Region::new(), self.loc));
+            self.if_then(block, more, |cg, then| cg.issue_rotation(then, ir, iv, next, &r, &buf))?;
             self.async_create_group(block)?;
         }
         Ok(())

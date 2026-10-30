@@ -131,7 +131,13 @@ impl<'c> Codegen<'c> {
         let (out, step) = if single {
             (after_a, st)
         } else {
-            let out = self.emit_pipeline_half_b(&body_block, &half, next, st, &bufs0, &bufs1, &after_a, &types)?;
+            // Half B, when iteration iv+st exists: compute it from bufs1,
+            // prefetch iv+2*st into bufs0. Otherwise the carried values pass
+            // through.
+            let out = self.guarded_iteration(&body_block, next, hi, &after_a, |cg, half_b, after_a| {
+                let next2 = cg.addi(half_b, next, st)?;
+                cg.emit_pipeline_stage_ir(half_b, &half, next, next2, &bufs1, &bufs0, after_a)
+            })?;
             let two = self.const_index(block, 2)?;
             (out, self.muli(block, st, two)?)
         };
@@ -140,9 +146,6 @@ impl<'c> Codegen<'c> {
         let region = Region::new();
         region.append_block(body_block);
         let mut operands = vec![lo, hi, step];
-        // prefetch iv+2*st into bufs0. Otherwise the carried values pass
-        // through.
-
         operands.extend_from_slice(&inits);
         let loop_op = block.append_operation(
             OperationBuilder::new("scf.for", self.loc)
@@ -232,39 +235,6 @@ impl<'c> Codegen<'c> {
 }
 
 impl<'c> Codegen<'c> {
-    /// Half B, when iteration `next` exists: compute it from `bufs1`,
-    /// prefetch the one after into `bufs0`. Otherwise the carried values
-    /// `after_a` pass through. Returns the carried values after the turn.
-    #[allow(clippy::too_many_arguments)]
-    fn emit_pipeline_half_b(
-        &mut self,
-        body: &Block<'c>,
-        half: &Half<'c, '_>,
-        next: Value<'c, 'c>,
-        st: Value<'c, 'c>,
-        bufs0: &[MemVal<'c>],
-        bufs1: &[MemVal<'c>],
-        after_a: &[Value<'c, 'c>],
-        types: &[Type<'c>],
-    ) -> Result<Vec<Value<'c, 'c>>> {
-        let have_b = self.push(
-            body,
-            arith::cmpi(self.ctx, arith::CmpiPredicate::Slt, next, half.hi, self.loc),
-        )?;
-        let half_b = Block::new(&[]);
-        let next2 = self.addi(&half_b, next, st)?;
-        let after_b = self.emit_pipeline_stage_ir(&half_b, half, next, next2, bufs1, bufs0, after_a)?;
-        half_b.append_operation(scf::r#yield(&after_b, self.loc));
-        let half_b_region = Region::new();
-        half_b_region.append_block(half_b);
-        let skip_b = Block::new(&[]);
-        skip_b.append_operation(scf::r#yield(after_a, self.loc));
-        let skip_b_region = Region::new();
-        skip_b_region.append_block(skip_b);
-        let if_b = body.append_operation(scf::r#if(have_b, types, half_b_region, skip_b_region, self.loc));
-        (0..types.len()).map(|i| Ok(detach(if_b.result(i)?.into()))).collect()
-    }
-
     /// A half's compute: iteration `compute_iv` from the buffers `cur`, with
     /// the carried values `carried`, returning the ones it yields.
     fn emit_pipeline_compute_ir(
