@@ -4,7 +4,6 @@ use anyhow::{Result, bail};
 
 use crate::experts::ExpertSet;
 use crate::quant::{Packed, Quant};
-pub use crate::quant::quantize_row;
 
 mod fusion;
 mod moe;
@@ -411,7 +410,7 @@ pub trait Backend {
 
     /// [`Backend::matmul`] against a quantized weight. The activation is
     /// quantized to Q8_0, so the contraction is all integer. See
-    /// [`quantize_row`].
+    /// [`crate::quant::quantize_row`].
     fn matmul_quant(&self, a: Buf, m: usize, k: usize, w: QBuf, n: usize, out: Buf) -> Result<()> {
         let act = self.quantize_act(a, m, k)?;
         self.matmul_quant_act(act, m, k, w, n, out)

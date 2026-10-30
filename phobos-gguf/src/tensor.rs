@@ -1,7 +1,5 @@
 use anyhow::{Context, Result, bail, ensure};
-
-/// Block scales are stored as halves throughout the GGUF quantizations.
-pub use phobos_base::half::f16_to_f32;
+use phobos_base::half::f16_to_f32;
 
 #[allow(non_camel_case_types)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

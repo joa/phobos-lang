@@ -30,7 +30,6 @@ pub struct Container {
     pub tensors: Vec<TensorInfo>,
     pub index: HashMap<String, usize>,
     pub data_offset_bytes: usize,
-    pub alignment_bytes: u64,
 }
 
 struct Reader<'a> {
@@ -267,6 +266,5 @@ pub fn parse(bytes: &[u8]) -> Result<Container> {
         tensors,
         index,
         data_offset_bytes,
-        alignment_bytes,
     })
 }

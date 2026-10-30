@@ -42,17 +42,11 @@ pub struct Vocab {
     /// Per-token classification, parallel to `tokens`. Empty when the file
     /// omits `tokenizer.ggml.token_type`.
     pub token_types: Vec<TokenType>,
-    /// Scores used by SentencePiece models; empty for BPE.
-    pub scores: Vec<f32>,
     /// BPE merge rules in priority order.
     pub merges: Vec<(String, String)>,
     pub bos: Option<u32>,
     pub eos: Option<u32>,
-    pub pad: Option<u32>,
-    pub unk: Option<u32>,
-    pub sep: Option<u32>,
     pub add_bos: bool,
-    pub add_eos: bool,
     /// The Jinja chat template, when the file ships one.
     pub chat_template: Option<String>,
 }
@@ -80,14 +74,6 @@ impl Vocab {
             None => Vec::new(),
         };
 
-        let scores = match metadata
-            .get("tokenizer.ggml.scores")
-            .and_then(|v| v.as_array())
-        {
-            Some(crate::meta::Array::F32(v)) => v.clone(),
-            _ => Vec::new(),
-        };
-
         let merges = match metadata.get("tokenizer.ggml.merges") {
             Some(_) => metadata
                 .strings("tokenizer.ggml.merges")?
@@ -112,19 +98,11 @@ impl Vocab {
                 .map(str::to_string),
             tokens,
             token_types,
-            scores,
             merges,
             bos: token_id("tokenizer.ggml.bos_token_id"),
             eos: token_id("tokenizer.ggml.eos_token_id"),
-            pad: token_id("tokenizer.ggml.padding_token_id"),
-            unk: token_id("tokenizer.ggml.unknown_token_id"),
-            sep: token_id("tokenizer.ggml.seperator_token_id"),
             add_bos: metadata
                 .get("tokenizer.ggml.add_bos_token")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            add_eos: metadata
-                .get("tokenizer.ggml.add_eos_token")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false),
             chat_template: metadata

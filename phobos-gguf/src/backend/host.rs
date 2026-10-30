@@ -7,8 +7,9 @@ use phobos_base::half::{f16_to_f32, f32_to_f16};
 use super::{
     Attn, Backend, Buf, DeltaMix, HADAMARD_BLOCK, HBuf, HPlane, HeadPerm, HostQuant, L2_EPS, Packed,
     Plane, Q8_BLOCK, QAct,
-    QBuf, Rope, quantize_row,
+    QBuf, Rope,
 };
+use crate::quant::quantize_row;
 
 /// The reference backend, where every buffer is a `Vec<f32>` on the host.
 ///

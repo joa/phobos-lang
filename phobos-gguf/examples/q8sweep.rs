@@ -16,7 +16,7 @@ use cust::memory::{CopyDestination, DeviceBuffer};
 use cust::module::Module;
 use cust::stream::{Stream, StreamFlags};
 
-use phobos_gguf::backend::quantize_row;
+use phobos_gguf::quant::quantize_row;
 use phobos_kernels::abi::{self, KernelArg};
 
 /// The shipped kernel, with the whole contraction in one program.
