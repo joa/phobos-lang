@@ -299,8 +299,8 @@ fn softplus_stays_finite_for_large_inputs() {
 fn moe_matches_a_dense_reference_and_reports_its_routes() {
     use std::sync::Arc;
 
-    use crate::experts::tests::{Q4_K, q4k_stack};
     use crate::experts::ExpertSet;
+    use crate::experts::tests::q4k_stack;
     use crate::quant::{Packed, Quant};
     use crate::tests::Builder;
 
@@ -316,7 +316,7 @@ fn moe_matches_a_dense_reference_and_reports_its_routes() {
         builder.tensor_raw(
             &format!("blk.0.ffn_{name}_exps.weight"),
             &[*k as u64, *n as u64, count as u64],
-            Q4_K,
+            crate::GgmlType::Q4_K,
             bytes,
         );
     }

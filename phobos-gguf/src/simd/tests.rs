@@ -4,7 +4,7 @@ use super::*;
 use crate::Gguf;
 use crate::quant::grouped::{group_rows, grouped_len};
 use crate::quant::{Q8_0_UNIT_BYTES, q8_0_units};
-use crate::tests::{Builder, ggml_code, xorshift};
+use crate::tests::{Builder, ggml_type, xorshift};
 
 /// `n` rows of `k` in `quant`: random bytes, except for small finite
 /// headers. Any other byte pattern is a valid block.
@@ -140,7 +140,7 @@ fn expert_file(count: usize, d: usize, d_ff: usize, gate_up: Quant, down: Quant)
     builder.kv_string("general.architecture", "qwen35moe");
     for (name, n, k, quant, seed) in [("gate", d_ff, d, gate_up, 1), ("up", d_ff, d, gate_up, 2), ("down", d, d_ff, down, 3)] {
         let bytes = blocks(quant, count * n, k, seed);
-        builder.tensor_raw(&format!("blk.0.ffn_{name}_exps.weight"), &[k as u64, n as u64, count as u64], ggml_code(quant), &bytes);
+        builder.tensor_raw(&format!("blk.0.ffn_{name}_exps.weight"), &[k as u64, n as u64, count as u64], ggml_type(quant), &bytes);
     }
     Gguf::from_bytes(builder.build()).unwrap()
 }

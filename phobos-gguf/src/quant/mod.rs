@@ -1,8 +1,6 @@
 use anyhow::{Context, Result, ensure};
 use phobos_base::half::f16_to_f32;
 
-use crate::GgmlType;
-
 mod iq1_m;
 pub(crate) mod iq1_s;
 mod iq2_s;
@@ -518,37 +516,6 @@ fn byte_len(quant: Quant, k: usize, n: usize) -> Result<usize> {
         spec.block
     );
     Ok(k / spec.block * spec.block_bytes * n)
-}
-
-impl GgmlType {
-    /// The compute format for this type code, for the types this crate
-    /// contracts against. Everything else, the scalar types included, is
-    /// `None` and goes down a dense path.
-    pub fn quant(self) -> Option<Quant> {
-        Some(match self {
-            GgmlType::Q4_0 => Quant::Q4_0,
-            GgmlType::Q4_1 => Quant::Q4_1,
-            GgmlType::Q5_0 => Quant::Q5_0,
-            GgmlType::Q5_1 => Quant::Q5_1,
-            GgmlType::Q8_0 => Quant::Q8_0,
-            GgmlType::Q8_1 => Quant::Q8_1,
-            GgmlType::Q4_K => Quant::Q4_K,
-            GgmlType::Q5_K => Quant::Q5_K,
-            GgmlType::Q6_K => Quant::Q6_K,
-            GgmlType::Q2_K => Quant::Q2_K,
-            GgmlType::Q3_K => Quant::Q3_K,
-            GgmlType::IQ1_S => Quant::IQ1_S,
-            GgmlType::IQ1_M => Quant::IQ1_M,
-            GgmlType::IQ2_XXS => Quant::IQ2_XXS,
-            GgmlType::IQ2_XS => Quant::IQ2_XS,
-            GgmlType::IQ2_S => Quant::IQ2_S,
-            GgmlType::IQ3_XXS => Quant::IQ3_XXS,
-            GgmlType::IQ3_S => Quant::IQ3_S,
-            GgmlType::IQ4_XS => Quant::IQ4_XS,
-            GgmlType::PTQ1_0 => Quant::PTQ1_0,
-            _ => return None,
-        })
-    }
 }
 
 pub mod grouped;

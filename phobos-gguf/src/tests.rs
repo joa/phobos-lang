@@ -18,9 +18,9 @@ pub(crate) fn uniform(seed: u64) -> impl FnMut() -> f32 {
     move || (next() >> 40) as f32 / 8388608.0 - 1.0
 }
 
-/// The ggml type code a format is stored under.
-pub(crate) fn ggml_code(quant: Quant) -> u32 {
-    (0..64).find(|&code| GgmlType::from_code(code).ok().and_then(|t| t.quant()) == Some(quant)).expect("a stored format")
+/// The ggml type a format is stored under.
+pub(crate) fn ggml_type(quant: Quant) -> GgmlType {
+    GgmlType::all().find(|t| t.quant() == Some(quant)).expect("a stored format")
 }
 
 /// Minimal GGUF writer, enough to round-trip the reader and to stand in for
@@ -91,15 +91,14 @@ impl Builder {
         self
     }
 
-    /// A tensor of any ggml type from its storage bytes. `code` is the type's
-    /// number in the file format (8 is Q8_0, 12 Q4_K, 13 Q5_K).
-    pub(crate) fn tensor_raw(&mut self, name: &str, dims: &[u64], code: u32, bytes: &[u8]) -> &mut Self {
+    /// A tensor of any ggml type from its storage bytes.
+    pub(crate) fn tensor_raw(&mut self, name: &str, dims: &[u64], ty: GgmlType, bytes: &[u8]) -> &mut Self {
         push_str(&mut self.tensors, name);
         self.tensors.extend((dims.len() as u32).to_le_bytes());
         for d in dims {
             self.tensors.extend(d.to_le_bytes());
         }
-        self.tensors.extend(code.to_le_bytes());
+        self.tensors.extend(ty.code().to_le_bytes());
         self.tensors.extend((self.data.len() as u64).to_le_bytes());
         self.tensor_count += 1;
         self.data.extend(bytes);

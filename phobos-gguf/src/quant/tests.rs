@@ -1,6 +1,7 @@
 use phobos_base::half::f32_to_f16;
 
 use super::*;
+use crate::GgmlType;
 
 /// One block of `quant` built from a byte pattern, for the layout checks that
 /// only care that a field lands where the format says it does.
@@ -37,10 +38,8 @@ fn ggml_type_codes_map_onto_the_registry() {
     // The bridge must agree with the file format's block geometry, or a
     // tensor's byte count and its decoder would disagree. A registry block
     // may span several file blocks (PTQ1_0 pairs its 128s).
-    for code in (0..31u32).chain([143]) {
-        let Ok(ggml) = GgmlType::from_code(code) else {
-            continue;
-        };
+    for ggml in GgmlType::all() {
+        assert_eq!(GgmlType::from_code(ggml.code()).unwrap(), ggml, "{} round-trips its code", ggml.name());
         let Some(quant) = ggml.quant() else { continue };
         let spec = quant.spec();
         let files = spec.block / ggml.block_size();

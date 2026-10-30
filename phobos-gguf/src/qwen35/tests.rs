@@ -4,7 +4,8 @@
 // which does not exist.
 
 use crate::backend::HostBackend;
-use crate::experts::tests::{Q4_K, q4k_stack};
+use crate::experts::tests::q4k_stack;
+use crate::tensor::GgmlType;
 use crate::tests::Builder;
 use crate::{Decoder, Gguf};
 
@@ -99,9 +100,9 @@ fn tiny_moe_file_with(extra: impl FnOnce(&mut Builder)) -> Vec<u8> {
             b.tensor_f32(&format!("{p}.attn_k_norm.weight"), &[HEAD_DIM as u64], &vec![1.0; HEAD_DIM]);
         }
         b.tensor_f32(&format!("{p}.ffn_gate_inp.weight"), &[D as u64, EXPERTS as u64], &rng.weights(D * EXPERTS, 1.0));
-        b.tensor_raw(&format!("{p}.ffn_gate_exps.weight"), &[D as u64, D_EXPERT as u64, EXPERTS as u64], Q4_K, &q4k_stack(EXPERTS, D_EXPERT, D, 100 + block as u64));
-        b.tensor_raw(&format!("{p}.ffn_up_exps.weight"), &[D as u64, D_EXPERT as u64, EXPERTS as u64], Q4_K, &q4k_stack(EXPERTS, D_EXPERT, D, 200 + block as u64));
-        b.tensor_raw(&format!("{p}.ffn_down_exps.weight"), &[D_EXPERT as u64, D as u64, EXPERTS as u64], Q4_K, &q4k_stack(EXPERTS, D, D_EXPERT, 300 + block as u64));
+        b.tensor_raw(&format!("{p}.ffn_gate_exps.weight"), &[D as u64, D_EXPERT as u64, EXPERTS as u64], GgmlType::Q4_K, &q4k_stack(EXPERTS, D_EXPERT, D, 100 + block as u64));
+        b.tensor_raw(&format!("{p}.ffn_up_exps.weight"), &[D as u64, D_EXPERT as u64, EXPERTS as u64], GgmlType::Q4_K, &q4k_stack(EXPERTS, D_EXPERT, D, 200 + block as u64));
+        b.tensor_raw(&format!("{p}.ffn_down_exps.weight"), &[D_EXPERT as u64, D as u64, EXPERTS as u64], GgmlType::Q4_K, &q4k_stack(EXPERTS, D, D_EXPERT, 300 + block as u64));
         b.tensor_f32(&format!("{p}.ffn_gate_inp_shexp.weight"), &[D as u64], &rng.weights(D, scale));
         b.tensor_f32(&format!("{p}.ffn_gate_shexp.weight"), &[D as u64, D_SHARED as u64], &rng.weights(D * D_SHARED, scale));
         b.tensor_f32(&format!("{p}.ffn_up_shexp.weight"), &[D as u64, D_SHARED as u64], &rng.weights(D * D_SHARED, scale));
