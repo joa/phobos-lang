@@ -5,9 +5,11 @@
 #   the chat rendering, the sampler and the source size cap. These link no
 #   LLVM or MLIR, so they build with Rust alone.
 # - compiler: the parser and codegen tests (MLIR verifier, UI goldens, the
-#   race check over every .ph in the tree), the compiled-kernel cache and
-#   manifest (phobos-kernels' `compiler` feature) and the cluster planner. These
-#   link LLVM and MLIR, so they take the toolchain release.yml builds with.
+#   race check over the tree's kernels, the visualizer's exporter), the
+#   compiled-kernel cache and manifest (phobos-kernels' `compiler` feature),
+#   the cluster planner and the Python package against the phobos-compile
+#   they build. These link LLVM and MLIR, so they take the toolchain
+#   release.yml builds with.
 #
 # The compiler job also builds the `cuda` features, phobos-pod and
 # phobos-kbench against a stand-in driver whose every call fails
@@ -110,6 +112,20 @@ jobs:
             -p phobos-lang -p phobos-mlir -p phobos-cluster \
             -p phobos-sched -p phobos-compile -p phobos-cache \
             -p phobos-kernels --features phobos-kernels/compiler 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      # The visualizer's exporter and the site tool, behind phobos-lang's
+      # `trace` feature.
+      - name: Trace
+        shell: bash
+        run: cargo test --locked -p phobos-lang --features trace --lib 2>&1 | tee -a "$RUNNER_TEMP/test.log"
+
+      # The Python front end, launcher and autotuner, against the debug
+      # phobos-compile the tests above built, which the package finds under
+      # target/debug.
+      - name: Python
+        run: |
+          sudo apt-get install -y -q python3-numpy
+          python3 -m unittest discover -s python/tests -t python
 
       - name: Driver stub
         run: |
