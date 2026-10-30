@@ -377,7 +377,7 @@ kernel k(%A.0: tensor<f32>[?, ?], %n.1: index) {
 }
 
 #[test]
-fn tile_types_know_their_bytes() {
+fn a_padded_tile_type_prints_its_stride_and_alignment() {
     let t = TileType {
         elem: Scalar::F16,
         shape: vec![Extent::Fixed(64), Extent::Fixed(64)],
@@ -388,17 +388,8 @@ fn tile_types_know_their_bytes() {
         },
         space: Space::Shared,
     };
-    assert_eq!(t.physical_elems(), Some(64 * 72));
-    assert_eq!(t.bytes(), Some(64 * 72 * 2));
     assert_eq!(
         Type::Tile(t).to_string(),
         "tile<f16>[64, 64]@shared{stride 72, align 8}"
     );
-    let dynamic = TileType {
-        elem: Scalar::F32,
-        shape: vec![Extent::Dyn],
-        layout: Layout::CONTIGUOUS,
-        space: Space::Global,
-    };
-    assert_eq!(dynamic.bytes(), None);
 }

@@ -121,11 +121,6 @@ impl std::fmt::Display for AtOp {
 
 impl std::error::Error for AtOp {}
 
-/// [`AtOp`] as an error.
-pub fn at_op(op: OpId, message: impl Into<String>) -> anyhow::Error {
-    AtOp::new(op, message).into()
-}
-
 /// `e` placed at `span` in `source`: an [`AtOp`] at its op's span, any
 /// other error at `span`. One placed already, a [`Poisoned`] one, and any at
 /// an empty span pass through, so the innermost place wins.

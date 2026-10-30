@@ -178,11 +178,6 @@ impl Kernel {
         env
     }
 
-    /// `@launch` at the autotune constants' first choices.
-    pub fn launch(&self) -> Result<Option<Launch>, String> {
-        self.launch_in(&self.shape_env(&HashMap::new()))
-    }
-
     /// `@launch` with each argument that names an `@autotune` constant taken
     /// from `env`.
     pub fn launch_in(&self, env: &BTreeMap<String, i64>) -> Result<Option<Launch>, String> {

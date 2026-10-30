@@ -94,6 +94,6 @@ fn a_launch_report_counts_lines_of_the_source_it_was_generated_from() {
         (at(phobos, "grid_barrier()"), at(python, "ph.grid_barrier()")),
     ];
     let file = SourceFile::with_origin("k.ph", phobos, Origin { file: SourceFile::new("k.py", python), map, spellings: vec![] });
-    let report = crate::launch_report_source(&Default::default(), &file, "k").unwrap();
+    let report = crate::report::launch_report_source(&Default::default(), &file, "k").unwrap();
     assert_eq!(report.grid_barriers, vec![5]);
 }

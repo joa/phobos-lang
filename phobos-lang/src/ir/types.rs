@@ -214,10 +214,6 @@ impl Layout {
         swizzle: None,
         align_div: 0,
     };
-
-    pub fn is_contiguous(&self) -> bool {
-        self.row_stride.is_none() && self.swizzle.is_none()
-    }
 }
 
 /// A tensor parameter: global memory, identity layout, sliceable.
@@ -252,18 +248,6 @@ impl TileType {
     /// The static shape, when every extent is fixed.
     pub fn static_shape(&self) -> Option<Vec<i64>> {
         self.shape.iter().map(|e| e.fixed()).collect()
-    }
-
-    /// Elements in the buffer backing this tile, padding included.
-    pub fn physical_elems(&self) -> Option<i64> {
-        let shape = self.static_shape()?;
-        let (last, lead) = shape.split_last()?;
-        let last = self.layout.row_stride.unwrap_or(*last);
-        Some(lead.iter().product::<i64>() * last)
-    }
-
-    pub fn bytes(&self) -> Option<i64> {
-        Some(self.physical_elems()? * self.elem.bytes()?)
     }
 }
 
@@ -333,26 +317,6 @@ pub struct MmaAcc {
     pub imma: bool,
 }
 
-impl MmaAcc {
-    /// The side of one fragment tile.
-    pub fn tile(&self) -> i64 {
-        if self.imma { 8 } else { 16 }
-    }
-
-    /// The register-resident tile these fragments hold.
-    pub fn dist(&self) -> DistType {
-        DistType {
-            elem: Scalar::F32,
-            shape: vec![self.m, self.n],
-            layout: RegLayout::MmaAcc {
-                wm: self.wm,
-                wn: self.wn,
-                imma: self.imma,
-            },
-        }
-    }
-}
-
 /// A register matmul's accumulator: an [m, n] tile of `acc` summed over a
 /// k extent of `k` per step, held in registers by whichever path the
 /// target runs it on.
@@ -387,13 +351,6 @@ impl Type {
     pub const INDEX: Type = Type::Scalar(Scalar::Index);
     pub const BOOL: Type = Type::Scalar(Scalar::Bool);
 
-    pub fn scalar(self) -> Option<Scalar> {
-        match self {
-            Type::Scalar(s) => Some(s),
-            _ => None,
-        }
-    }
-
     pub fn as_scalar(&self) -> Option<Scalar> {
         match self {
             Type::Scalar(s) => Some(*s),
@@ -404,13 +361,6 @@ impl Type {
     pub fn as_tile(&self) -> Option<&TileType> {
         match self {
             Type::Tile(t) => Some(t),
-            _ => None,
-        }
-    }
-
-    pub fn as_tensor(&self) -> Option<&TensorType> {
-        match self {
-            Type::Tensor(t) => Some(t),
             _ => None,
         }
     }

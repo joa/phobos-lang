@@ -3,19 +3,19 @@ pub mod codegen;
 pub mod contract;
 pub mod diag;
 pub mod ir;
-pub mod lexer;
+pub(crate) mod lexer;
 pub mod parser;
 pub mod race;
 mod report;
 pub(crate) mod shape;
-pub mod stdlib;
+pub(crate) mod stdlib;
 pub mod stubs;
-pub mod token;
+pub(crate) mod token;
 #[cfg(feature = "trace")]
 pub mod trace;
 
 pub use contract::Contract;
-pub use report::{LaunchReport, ScratchParam, launch_report, launch_report_source};
+pub use report::{LaunchReport, ScratchParam, launch_report};
 
 /// Parses `src`. A failure is a [`diag::Diagnostics`] whose locations are
 /// bare `line:col`; [`parse_source`] names the file.

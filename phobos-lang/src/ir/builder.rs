@@ -7,7 +7,6 @@ pub enum At {
     Start(BlockId),
     Before(OpId),
     After(OpId),
-    Index(BlockId, usize),
 }
 
 /// Appends ops at a moving insertion point. `at` is re-resolved for every
@@ -25,22 +24,6 @@ impl<'a> Builder<'a> {
 
     pub fn at_end(ir: &'a mut Ir, block: BlockId) -> Builder<'a> {
         Builder::new(ir, At::End(block))
-    }
-
-    pub fn set_at(&mut self, at: At) {
-        self.at = at;
-    }
-
-    pub fn at(&self) -> At {
-        self.at
-    }
-
-    /// The block the next op lands in.
-    pub fn block(&self) -> BlockId {
-        match self.at {
-            At::End(b) | At::Start(b) | At::Index(b, _) => b,
-            At::Before(op) | At::After(op) => self.ir.parent_block(op),
-        }
     }
 
     /// Creates an op at the insertion point. A builder positioned `After`

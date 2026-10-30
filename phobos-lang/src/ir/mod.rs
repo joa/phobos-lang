@@ -15,7 +15,7 @@ mod tests;
 
 use std::collections::BTreeMap;
 
-pub use at_op::{AtOp, at_op};
+pub use at_op::AtOp;
 pub use builder::{At, Builder};
 pub use elem::*;
 pub use lanes::{Bytes, ThreadIndex};
@@ -472,10 +472,6 @@ impl Ir {
             At::Start(block) => (block, 0),
             At::Before(op) => (self.parent_block(op), self.position(op)),
             At::After(op) => (self.parent_block(op), self.position(op) + 1),
-            At::Index(block, index) => {
-                assert!(index <= self.ops(block).len(), "index past the end of {block}");
-                (block, index)
-            }
         }
     }
 

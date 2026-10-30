@@ -34,7 +34,7 @@ pub fn launch_report(base: &phobos_base::context::Context, source: &str, name: &
 
 /// [`launch_report`] of `file`, whose grid barriers are on the lines of the
 /// source it was generated from, if it was.
-pub fn launch_report_source(
+pub(crate) fn launch_report_source(
     base: &phobos_base::context::Context,
     file: &std::sync::Arc<crate::diag::SourceFile>,
     name: &str,

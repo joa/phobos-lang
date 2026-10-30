@@ -1,6 +1,6 @@
 use std::fmt;
 
-pub use crate::ast::{AssignOp, BinOp, UnOp};
+pub use crate::ast::{BinOp, UnOp};
 
 use super::elem::{ElemStep, Map, Tree, binop_name};
 use super::lanes::{Bytes, ThreadIndex};

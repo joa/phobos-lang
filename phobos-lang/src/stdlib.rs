@@ -49,19 +49,15 @@ pub(crate) fn prelude(choice: &Stdlib) -> anyhow::Result<Arc<[Function]>> {
 
 /// Every function the shipped library defines, file by file.
 pub fn builtin() -> Vec<Signature> {
-    signatures(&Stdlib::Builtin).expect("the shipped standard library parses")
-}
-
-/// Every function `choice` defines.
-pub fn signatures(choice: &Stdlib) -> anyhow::Result<Vec<Signature>> {
-    Ok(prelude(choice)?
+    prelude(&Stdlib::Builtin)
+        .expect("the shipped standard library parses")
         .iter()
         .map(|f| Signature {
             file: f.file.clone(),
             name: f.name.clone(),
             params: f.params.clone(),
         })
-        .collect())
+        .collect()
 }
 
 /// The functions of `files`, each a library. A name defined twice, in one
