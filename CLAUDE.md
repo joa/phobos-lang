@@ -139,8 +139,8 @@ remembered figure and has to be labelled as such.
   `Backend` trait that owns a target's lowering pipeline and its post-processing
   of the generated text, plus utilities used across the crates
 - **phobos-cluster**: distributed execution codegen and utils
-- **phobos-sched**: global scheduler
-- **phobos-pod**: node runtime
+- **phobos-sched**: global scheduler: the planner's phases (`instantiate.rs`, `lower.rs`, `segment.rs`) and `server.rs`, which dispatches the plan to the pods
+- **phobos-pod**: node runtime: the engine, with its `io`, `launch` and `residency` parts; `examples/common` is the harness the examples share
 - **phobos-kernels**: what both front ends need to reach a GPU: the launch ABI, the compile step, the launcher, the allocation pool and the plain f32 matmul. The `cuda` feature gates everything that talks to the driver, so the ABI and the kernel sources still compile without one; the `compiler` feature, which `cuda` implies and phobos-compile and phobos-cache take alone, is everything short of the driver: lowering, the PTX cache and the manifest
 - **phobos-gguf**: GGUF container, byte-level BPE, the `qwen35`, `llama` and `glm4` forward passes over the shared blocks in `layers/`, `quant/` with one file per quantized format behind a `Quant`/`Spec` registry, and `backend/` with the host and device implementations plus `fuse/`, the pass that lowers a chain of decode stages into one persistent kernel. A format with no kernel dequantizes at upload and takes the dense path, so a new one lands correct before it lands fast. A mixture of experts streams its experts through `experts/`, computing the misses on the host's vector kernels in `simd/`; `tune/` keeps the prompt batch each card measured
 - **phobos-onnx**: ONNX proto -> graph IR -> constant folding and LayerNorm fusion -> the host interpreter, with its matmuls on Phobos kernels on the device (`backend/device.rs`). `lower.rs` and `backend/chain.rs`, a lowering of whole graphs to Phobos kernels, run only from the examples
