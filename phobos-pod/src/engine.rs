@@ -339,7 +339,7 @@ impl Engine {
             None => return Ok(()), // already retired (e.g. requeued spuriously)
         };
 
-        phinfo!("node{}: issue #{iid} {}", self.node_id, op2log(&op));
+        phinfo!("node{}: issue #{iid} {op}", self.node_id);
 
         match op {
             Op::Alloc { tile, shape, .. } => {
@@ -416,45 +416,5 @@ fn human(bytes: usize) -> String {
         format!("{:.1} KiB", bytes as f64 / KIB as f64)
     } else {
         format!("{bytes} B")
-    }
-}
-
-fn op2log(op: &Op) -> String {
-    match op {
-        Op::Alloc { tile, shape, .. } => format!("ALLOC tile={:#x} shape={shape:?}", tile.0),
-        Op::Load { tile, .. } => format!("LOAD tile={:#x}", tile.0),
-        Op::Fetch { tile, from } => format!("FETCH tile={:#x} from=node{from}", tile.0),
-        Op::Compute {
-            kernel,
-            args,
-            scalars,
-            grid,
-            cta,
-        } => format!(
-            "COMPUTE k{kernel} grid={grid:?} cta={cta:?} tiles=[{}]{}",
-            args.iter()
-                .map(|(t, m)| format!("{:#x}:{m:?}", t.0))
-                .collect::<Vec<_>>()
-                .join(" "),
-            if scalars.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    " scalars=[{}]",
-                    scalars
-                        .iter()
-                        .map(|s| format!("@{}={:?}", s.pos, s.value))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                )
-            }
-        ),
-        Op::Store { tile, .. } => format!("STORE tile={:#x}", tile.0),
-        Op::Free {
-            tile,
-            expected_serves,
-        } => {
-            format!("FREE tile={:#x} serves={expected_serves}", tile.0)
-        }
     }
 }

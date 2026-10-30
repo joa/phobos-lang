@@ -671,19 +671,11 @@ impl Default for Scheduler {
 }
 
 fn seg_summary(seg: &Segment) -> String {
-    const NAMES: [&str; 6] = ["ALLOC", "LOAD", "FETCH", "COMPUTE", "STORE", "FREE"];
-    let mut counts = [0u32; 6];
+    let mut counts = [0u32; Op::NAMES.len()];
     for i in &seg.instructions {
-        counts[match i.op {
-            Op::Alloc { .. } => 0,
-            Op::Load { .. } => 1,
-            Op::Fetch { .. } => 2,
-            Op::Compute { .. } => 3,
-            Op::Store { .. } => 4,
-            Op::Free { .. } => 5,
-        }] += 1;
+        counts[i.op.index()] += 1;
     }
-    NAMES
+    Op::NAMES
         .iter()
         .zip(counts)
         .filter(|(_, n)| *n > 0)

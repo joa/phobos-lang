@@ -94,11 +94,11 @@ pub fn plan_dot(program: &ClusterProgram, plan: &Plan) -> String {
 }
 
 fn op_node(op: &Op, program: &ClusterProgram) -> (String, &'static str) {
-    match op {
-        Op::Alloc { tile, .. } => (format!("ALLOC {}", tile_label(program, *tile)), "gray90"),
-        Op::Load { tile, .. } => (format!("LOAD {}", tile_label(program, *tile)), "lightblue"),
+    let (operands, fill) = match op {
+        Op::Alloc { tile, .. } => (tile_label(program, *tile), "gray90"),
+        Op::Load { tile, .. } => (tile_label(program, *tile), "lightblue"),
         Op::Fetch { tile, from } => (
-            format!("FETCH {} <-n{from}", tile_label(program, *tile)),
+            format!("{} <-n{from}", tile_label(program, *tile)),
             "lightcyan",
         ),
         Op::Compute {
@@ -117,14 +117,12 @@ fn op_node(op: &Op, program: &ClusterProgram) -> (String, &'static str) {
             } else {
                 format!(" +{}sc", scalars.len())
             };
-            (format!("COMPUTE k{kernel}{sc}\\n-> {out}"), "palegreen")
+            (format!("k{kernel}{sc}\\n-> {out}"), "palegreen")
         }
-        Op::Store { tile, .. } => (
-            format!("STORE {}", tile_label(program, *tile)),
-            "navajowhite",
-        ),
-        Op::Free { tile, .. } => (format!("FREE {}", tile_label(program, *tile)), "mistyrose"),
-    }
+        Op::Store { tile, .. } => (tile_label(program, *tile), "navajowhite"),
+        Op::Free { tile, .. } => (tile_label(program, *tile), "mistyrose"),
+    };
+    (format!("{} {operands}", op.name()), fill)
 }
 
 fn tile_label(program: &ClusterProgram, tile: TileId) -> String {
