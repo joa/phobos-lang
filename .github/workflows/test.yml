@@ -9,8 +9,10 @@
 #   manifest (phobos-kernels' `compiler` feature) and the cluster planner. These
 #   link LLVM and MLIR, so they take the toolchain release.yml builds with.
 #
-# Left out because they link the CUDA driver at build time or need a card
-# to mean anything: phobos-kbench, phobos-pod, and the `cuda` features.
+# The compiler job also builds the `cuda` features, phobos-pod and
+# phobos-kbench against a stand-in driver whose every call fails
+# (scripts/ci/cuda_stub.py): clippy over every crate and target, and the unit
+# tests, which never reach the driver. What a kernel computes takes a card.
 
 name: test
 
@@ -36,6 +38,7 @@ env:
   # that links it; none keeps the target directory inside the runner's disk.
   CARGO_PROFILE_DEV_DEBUG: "0"
   CARGO_PROFILE_TEST_DEBUG: "0"
+  CUDA_FEATURES: phobos-gguf/cuda,phobos-onnx/cuda,phobos-cli/cuda,phobos-bench/cuda,phobos-kernels/cuda
 
 jobs:
   host:
@@ -107,6 +110,24 @@ jobs:
             -p phobos-lang -p phobos-mlir -p phobos-cluster \
             -p phobos-sched -p phobos-compile -p phobos-cache \
             -p phobos-kernels --features phobos-kernels/compiler 2>&1 | tee "$RUNNER_TEMP/test.log"
+
+      - name: Driver stub
+        run: |
+          python3 scripts/ci/cuda_stub.py "$RUNNER_TEMP/cuda"
+          echo "CUDA_LIBRARY_PATH=$RUNNER_TEMP/cuda" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/cuda/lib64" >> "$GITHUB_ENV"
+
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets --features "$CUDA_FEATURES" -- -D warnings
+
+      # Examples are left to clippy: each links LLVM, and all of them would
+      # not fit the runner's disk.
+      - name: Device tests
+        shell: bash
+        run: |
+          cargo test --locked --lib --bins --tests --features "$CUDA_FEATURES" \
+            -p phobos-gguf -p phobos-onnx -p phobos-kernels -p phobos-cli \
+            -p phobos-bench -p phobos-pod -p phobos-kbench 2>&1 | tee -a "$RUNNER_TEMP/test.log"
 
       - name: Totals
         if: always()

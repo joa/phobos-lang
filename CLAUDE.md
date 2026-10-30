@@ -35,6 +35,10 @@ helpers rather than a spelling of its own.
 - `cargo test`: the whole enchilada
 - `cargo test -p phobos-lang`: parser + codegen tests; codegen tests run the MLIR verifier on emitted modules and grep the printed IR. `tests/ui/*.ph` each fail to compile, and what the compiler prints for them, rustc's layout, uncolored, is the `.stderr` beside them; a change to a message reblesses them with `PHOBOS_BLESS=1` and the diff is reviewed
 - `cargo test -p phobos-gguf -p phobos-onnx -p phobos-inference -p phobos-kernels`: the front ends, the host reference paths, the tokenizers, the chat rendering and the sampler. No GPU, no MLIR toolchain
+- `python scripts/ci/cuda_stub.py DIR`, then `CUDA_LIBRARY_PATH=DIR` and
+  `LD_LIBRARY_PATH=DIR/lib64`: a stand-in driver whose every call fails, so the
+  `cuda` features, phobos-pod and phobos-kbench build, pass clippy and run their
+  unit tests without a card or a CUDA toolkit, as CI does
 - `cargo run -p phobos-lang --example emit [--loc] [file]`: prints the MLIR for a
   source file; fastest way to eyeball codegen output. `--loc` prints each op's
   source location, which emission never changes. `PHOBOS_CHIP` and
