@@ -35,15 +35,6 @@ pub enum BlockKind {
     Recurrent,
 }
 
-impl BlockKind {
-    pub fn label(self) -> &'static str {
-        match self {
-            BlockKind::Attention => "attention",
-            BlockKind::Recurrent => "recurrent",
-        }
-    }
-}
-
 /// The shape of the network, for a caller that displays it.
 #[derive(Clone, Debug)]
 pub struct Architecture {
@@ -105,20 +96,10 @@ pub struct CacheStats {
 }
 
 impl CacheStats {
-    /// Share of kernel lookups that found one ready, or `None` before the
-    /// first lookup.
-    pub fn kernel_hit_rate(&self) -> Option<f64> {
-        rate(self.kernels_reused, self.kernels_compiled)
-    }
-
     /// Share of the experts a decode step wanted that were already on the
     /// device, or `None` for a model that streams none.
     pub fn expert_hit_rate(&self) -> Option<f64> {
         rate(self.expert_hits, self.expert_misses)
-    }
-
-    pub fn buffer_hit_rate(&self) -> Option<f64> {
-        rate(self.buffers_reused, self.buffers_allocated)
     }
 }
 

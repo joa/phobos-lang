@@ -283,7 +283,7 @@ mod tests {
         let mut pending = vec![0xC3];
         assert!(take_complete(&mut pending).is_none());
         pending.push(0xA9);
-        assert_eq!(take_complete(&mut pending).as_deref(), Some("é"));
+        assert_eq!(take_complete(&mut pending).as_deref(), Some("\u{e9}"));
         assert!(pending.is_empty());
     }
 

@@ -183,10 +183,11 @@ fn header(frame: &mut Frame, view: &mut View, area: Rect) {
 
 /// The status line: phase, uptime, and totals.
 fn status(frame: &mut Frame, view: &View, snap: &Snapshot, area: Rect) {
-    let (label, color) = match snap.phase {
-        Phase::Idle => ("IDLE", theme::MUTED),
-        Phase::Prefill => ("PREFILL", theme::BRAND),
-        Phase::Decode => ("DECODE", theme::NEBULA),
+    let label = snap.phase.label();
+    let color = match snap.phase {
+        Phase::Idle => theme::MUTED,
+        Phase::Prefill => theme::BRAND,
+        Phase::Decode => theme::NEBULA,
     };
     // The lamp pulses only while there is work.
     let lamp = if snap.phase == Phase::Idle {
