@@ -10,17 +10,11 @@ use crate::sampling::SampleConfig;
 
 #[derive(Deserialize, Default)]
 pub struct SampleOverrides {
-    #[serde(default)]
     pub temperature: Option<f32>,
-    #[serde(default)]
     pub top_k: Option<usize>,
-    #[serde(default)]
     pub top_p: Option<f32>,
-    #[serde(default)]
     pub min_p: Option<f32>,
-    #[serde(default)]
     pub presence_penalty: Option<f32>,
-    #[serde(default)]
     pub repetition_penalty: Option<f32>,
 }
 
@@ -75,15 +69,11 @@ impl Defaults {
 #[derive(Deserialize)]
 pub struct CompletionRequest {
     pub prompt: String,
-    #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
     pub max_tokens: Option<usize>,
     #[serde(flatten)]
     pub sample: SampleOverrides,
-    #[serde(default)]
     pub seed: Option<u64>,
-    #[serde(default)]
     pub stream: Option<bool>,
 }
 
@@ -125,28 +115,18 @@ impl Usage {
 #[derive(Deserialize)]
 pub struct ChatCompletionRequest {
     pub messages: Vec<ChatMessage>,
-    #[serde(default)]
     pub model: Option<String>,
-    #[serde(default)]
     pub max_tokens: Option<usize>,
-    #[serde(default)]
     pub max_completion_tokens: Option<usize>,
     #[serde(flatten)]
     pub sample: SampleOverrides,
-    #[serde(default)]
     pub seed: Option<u64>,
-    #[serde(default)]
     pub stream: Option<bool>,
-    #[serde(default)]
     pub stream_options: Option<StreamOptions>,
-    #[serde(default)]
     pub tools: Option<Value>,
-    #[serde(default)]
     pub tool_choice: Option<Value>,
     /// The knob vLLM and llama.cpp expose for the template's `enable_thinking`.
-    #[serde(default)]
     pub chat_template_kwargs: Option<Value>,
-    #[serde(default)]
     pub reasoning_effort: Option<String>,
 }
 
