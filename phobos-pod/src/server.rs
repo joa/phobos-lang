@@ -75,8 +75,6 @@ impl TileServer for TileService {
     }
 }
 
-/// Connects this node to a scheduler, registers, and pumps messages until
-/// the scheduler closes the stream at the end of the job.
 /// This node's card as `sm_XY`, which the scheduler compiles its leaves for,
 /// or empty when no driver answers, which it reads as unknown.
 fn local_chip() -> String {
@@ -90,6 +88,8 @@ fn local_chip() -> String {
     capability().map(|cc| format!("sm_{cc}")).unwrap_or_default()
 }
 
+/// Connects this node to a scheduler, registers, and pumps messages until
+/// the scheduler closes the stream at the end of the job.
 pub async fn attach(
     sched_addr: &str,
     node_id: NodeId,
