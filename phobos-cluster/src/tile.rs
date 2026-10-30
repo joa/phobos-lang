@@ -94,25 +94,6 @@ pub enum AccessMode {
     RMW, // reads one SSA version and produces the next
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TileState {
-    Unmaterialized,
-    Loading,
-    Resident,
-    InFlight,
-    Freed,
-}
-
-#[derive(Clone, Debug)]
-pub struct TileMeta {
-    pub id: TileId,
-    pub shape: Vec<u64>,
-    pub data_type: DataType,
-    pub state: TileState,
-    pub location: NodeId,         // valid while Resident / InFlight
-    pub remaining_consumers: u32, // can't free while > 0
-}
-
 #[cfg(test)]
 mod tests {
     use super::TileId;
