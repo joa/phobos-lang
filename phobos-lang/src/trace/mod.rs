@@ -14,11 +14,7 @@ mod tests;
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context as _, Result, anyhow, bail};
-use melior::{
-    dialect::DialectRegistry,
-    ir::{Location, Module, operation::OperationLike},
-    utility::register_all_dialects,
-};
+use melior::ir::{Location, Module, operation::OperationLike};
 use phobos_base::context::{Context, GpuConfig, NvidiaGpuConfig};
 use sha2::{Digest, Sha256};
 
@@ -154,11 +150,7 @@ pub fn trace_source(req: &Request, file: &std::sync::Arc<crate::diag::SourceFile
     };
     base.index_bitwidth = crate::index_bits(&base, &kernels)?;
 
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = melior::Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
+    let context = phobos_mlir::context();
     let module = Module::new(Location::unknown(&context));
 
     let mut out: Option<Result<Trace>> = None;

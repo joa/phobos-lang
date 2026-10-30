@@ -22,12 +22,8 @@ mod tests;
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result};
-use melior::{
-    Context,
-    dialect::DialectRegistry,
-    ir::{BlockLike, Location, Module, RegionLike, operation::OperationLike},
-    utility::register_all_dialects,
-};
+use melior::ir::{BlockLike, Location, Module, RegionLike, operation::OperationLike};
+use phobos_mlir::context;
 
 use exec::{Exec, Inputs, Stop};
 use memory::Level;
@@ -206,15 +202,6 @@ fn reparsable(text: &str) -> String {
         out.push('\n');
     }
     out
-}
-
-fn context() -> Context {
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
-    context
 }
 
 /// Checks every `gpu.func` of every `gpu.module` in `module`.

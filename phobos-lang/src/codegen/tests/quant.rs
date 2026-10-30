@@ -141,11 +141,7 @@ fn qmma_t_keeps_its_accumulators_in_registers() {
 fn qmma_t_needs_whole_tensor_core_tiles() {
     // 8x8 tensor-core outputs need tile dims that are multiples of 8.
     let src = Q8_QMMA.replace("TN in [64]", "TN in [12]");
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
+    let context = phobos_mlir::context();
     let module = Module::new(Location::unknown(&context));
     let kernels = crate::parse(&src).unwrap();
     let base = phobos_base::context::Context::default();
@@ -292,11 +288,7 @@ fn iq1s_qmma_t_needs_whole_tensor_core_tiles() {
     // 8x8 tensor-core outputs need tile dims that are multiples of 8. `k` is
     // dynamic, so the host's `raw_qmma_eligible` promises whole 256-blocks.
     let src = IQ1S_QMMA.replace("TN in [64]", "TN in [12]");
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
+    let context = phobos_mlir::context();
     let module = Module::new(Location::unknown(&context));
     let kernels = crate::parse(&src).unwrap();
     let base = phobos_base::context::Context::default();

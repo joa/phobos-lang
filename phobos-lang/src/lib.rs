@@ -219,15 +219,9 @@ fn emit_unlowered(
     context: &phobos_base::context::Context,
     kernels: &[ast::Kernel],
 ) -> anyhow::Result<codegen::EmitOutput> {
-    use melior::dialect::DialectRegistry;
     use melior::ir::{Location, Module};
-    use melior::utility::register_all_dialects;
 
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let mlir = melior::Context::new();
-    mlir.append_dialect_registry(&registry);
-    mlir.load_all_available_dialects();
+    let mlir = phobos_mlir::context();
     let module = Module::new(Location::unknown(&mlir));
     codegen::emit(context, kernels, &mlir, &module)
 }

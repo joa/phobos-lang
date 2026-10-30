@@ -34,12 +34,7 @@ mod tile;
 mod unroll;
 mod unsigned;
 
-use melior::{
-    Context,
-    dialect::DialectRegistry,
-    ir::{Location, Module, operation::OperationLike},
-    utility::register_all_dialects,
-};
+use melior::ir::{Location, Module, operation::OperationLike};
 
 fn emit_mlir(src: &str) -> String {
     emit_mlir_on(src, "sm_75")
@@ -72,12 +67,7 @@ fn emit_mlir_sync(src: &str, chip: &str) -> String {
 
 fn emit_mlir_base(src: &str, base: &phobos_base::context::Context) -> String {
     dump_source(src);
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
-
+    let context = phobos_mlir::context();
     let module = Module::new(Location::unknown(&context));
     let kernels = crate::parse(src).unwrap();
     super::emit(base, &kernels, &context, &module).unwrap();
@@ -116,11 +106,7 @@ fn assert_contains(mlir: &str, needles: &[&str]) {
 
 fn emit_err(src: &str) -> String {
     dump_source(src);
-    let registry = DialectRegistry::new();
-    register_all_dialects(&registry);
-    let context = Context::new();
-    context.append_dialect_registry(&registry);
-    context.load_all_available_dialects();
+    let context = phobos_mlir::context();
     let module = Module::new(Location::unknown(&context));
     let kernels = crate::parse(src).unwrap();
     super::emit(
